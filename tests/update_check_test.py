@@ -25,6 +25,8 @@ from app.main import app  # noqa: E402
 ok = 0
 total = 0
 PW = "parolabuna1"
+# valoarea LIVRATĂ, prinsă înainte ca vreun test s-o modifice
+DEFAULT_UPDATE_COMMAND = config.UPDATE_COMMAND
 
 
 def check(name, cond, detail=""):
@@ -200,7 +202,11 @@ async def main():
         r = (await c.post("/api/version/refresh")).json()
         check("comanda e configurabilă (instalări în alt director)",
               r.get("update_command") == f"make update TAG={newer}", str(r.get("update_command")))
-        config.UPDATE_COMMAND = "cd /opt/webterm && ./deploy.sh {version}"
+        # restaurăm valoarea REALĂ, capturată la import. Aici era rescrisă cu o copie
+        # scrisă de mână a default-ului: din clipa în care default-ul s-a schimbat, testul
+        # a continuat să repună vechea valoare — deci verificările de mai jos ar fi măsurat
+        # ce scrie testul, nu ce livrează produsul.
+        config.UPDATE_COMMAND = DEFAULT_UPDATE_COMMAND
 
         # „verifică acum": ocoleşte fereastra zilnică — altfel n-ai ce face când chiar aştepţi
         calls.clear()
@@ -213,6 +219,26 @@ async def main():
         await c.post("/api/version/check", json={"enabled": True})
 
     updatecheck.urllib.request.urlopen = orig_urlopen
+
+    # ── comanda pe care o SUGEREAZĂ notificarea ────────────────────────────
+    # Sugera `deploy.sh`, care schimbă doar imaginea. Dar jumătate din sistem rulează pe
+    # HOST — `backup.sh`, `restore.sh`, `rollback.sh`, compose-ul, `upgrade.sh` însuşi — iar
+    # `/opt/webterm` nu e un checkout git, deci ele rămân la ce a pus instalatorul. README-ul
+    # avertizează despre exact asta şi recomandă `upgrade.sh`; notificarea trimitea pe drumul
+    # opus, şi fără backupul pe care `upgrade.sh` îl face înainte. Aici păzim acordul dintre
+    # ce spune produsul şi ce spune documentaţia — singurul loc unde omul citeşte instrucţiunea.
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parent.parent
+    check("comanda de update sugerată foloseşte upgrade.sh, nu deploy.sh",
+          "upgrade.sh" in DEFAULT_UPDATE_COMMAND and "deploy.sh" not in DEFAULT_UPDATE_COMMAND,
+          DEFAULT_UPDATE_COMMAND)
+    check("comanda sugerată ţinteşte o versiune anume (nu un tag mişcător)",
+          "{version}" in DEFAULT_UPDATE_COMMAND, DEFAULT_UPDATE_COMMAND)
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    suggested = DEFAULT_UPDATE_COMMAND.replace(" {version}", "")
+    check("README-ul recomandă exact comanda pe care o afişează UI-ul",
+          suggested in readme, suggested)
+
     print(f"\n{ok}/{total} passed")
     return ok == total
 

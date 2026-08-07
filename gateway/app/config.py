@@ -41,8 +41,16 @@ UPDATE_REPO = _str("WEBTERM_UPDATE_REPO", "sm26449/webterm")
 # `{version}` se înlocuiește cu tag-ul găsit.
 # `or` nu `get(default)`: compose trimite variabila GOALĂ când nu e setată în .env,
 # iar `get` ar întoarce "" și am rămâne fără comandă de afișat.
+#
+# `upgrade.sh`, nu `deploy.sh`. Sugera `deploy.sh`, care schimbă DOAR imaginea — iar
+# jumătate din sistem rulează pe HOST, nu în container: `backup.sh`, `restore.sh`,
+# `rollback.sh`, compose-ul şi `upgrade.sh` însuşi. `/opt/webterm` nu e un checkout git,
+# deci ele rămân îngheţate la ce a pus instalatorul. README-ul spune exact asta şi
+# recomandă `upgrade.sh`; notificarea din UI recomanda contrariul, adică fix drumul
+# despre care documentaţia avertizează. În plus `upgrade.sh` face backup ÎNAINTE de
+# upgrade — omul care urmează sugestia aplicaţiei merita şi plasa aia.
 UPDATE_COMMAND = (os.environ.get("WEBTERM_UPDATE_COMMAND", "").strip()
-                  or "cd /opt/webterm && ./deploy.sh {version}")
+                  or "cd /opt/webterm && sudo ./upgrade.sh {version}")
 
 DATA_DIR = Path(_str("WEBTERM_DATA_DIR", "data")).resolve()
 TRANSCRIPT_DIR = DATA_DIR / "transcripts"
