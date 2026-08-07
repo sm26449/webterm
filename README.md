@@ -313,7 +313,7 @@ with a recorded rollback point: `./deploy.sh v2.0.0` — if the new container do
 not become healthy, the script rolls back automatically; any time afterwards,
 `./rollback.sh` returns you to the previous image with a single command.
 
-**Upgrading: one command.** `cd /opt/webterm && ./upgrade.sh` takes the
+**Upgrading: one command.** `cd /opt/webterm && sudo ./upgrade.sh` takes the
 latest published version; pass a tag to target one. It resolves the version, checks ghcr auth
 and disk space, pulls the image, **takes a backup**, **syncs the files that run on the host**
 (compose, the operator scripts — `backup.sh`, `restore.sh`, `rollback.sh`, `deploy.sh`,
