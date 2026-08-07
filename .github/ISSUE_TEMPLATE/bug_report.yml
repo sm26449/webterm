@@ -1,0 +1,44 @@
+name: Bug report
+description: Report a reproducible problem in WebTerm
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. **Do not report security vulnerabilities here** — see [SECURITY.md](../../SECURITY.md) for private disclosure.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps so someone else can see the same thing.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: WebTerm version
+      description: The gateway version (e.g. 2.0.0).
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: Browser + OS, host OS, connection type (agent / ssh / telnet), deploy method (install.sh / deploy.sh / local build).
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Gateway logs, browser console, or the agent log (Diagnostics panel). Redact any secrets.
+      render: shell
+    validations:
+      required: false

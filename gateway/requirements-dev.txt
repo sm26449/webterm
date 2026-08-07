@@ -1,0 +1,17 @@
+# Dependencies the TEST SUITE needs, on top of gateway/requirements.txt.
+#
+# These used to exist in exactly one place — an inline `pip install` inside the CI
+# workflow — so `make test` from a fresh clone died at the 16th of 40 groups with
+# `ModuleNotFoundError: No module named 'httpx'`, and nothing in the repo said why.
+# Twenty-four test files import httpx; six import websockets.
+#
+#   python3 -m venv .venv
+#   .venv/bin/pip install -r gateway/requirements.txt -r gateway/requirements-dev.txt
+#
+httpx==0.28.1
+websockets==16.1
+# NU adăuga aici pachete care există deja în requirements.txt: pip rezolvă ambele fișiere
+# împreună, iar două pinuri diferite pe acelaşi pachet dau `ResolutionImpossible` şi NIMIC
+# nu se instalează. S-a întâmplat cu `asyncssh` (2.21.2 aici vs 2.24.0 acolo): comanda
+# documentată în CONTRIBUTING şi rulată de CI eşua înainte de primul test.
+# `asyncssh` e dependenţă de RUNTIME şi vine din requirements.txt.

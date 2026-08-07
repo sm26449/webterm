@@ -1,0 +1,15 @@
+# Normalize line endings to LF across platforms
+* text=auto eol=lf
+
+# Shell scripts and the agent must always be LF
+*.sh text eol=lf
+*.py text eol=lf
+
+# Binary assets
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+
+# Keep docs and generated data out of GitHub's language stats
+docs/** linguist-documentation

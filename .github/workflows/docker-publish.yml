@@ -1,0 +1,357 @@
+name: Publish image
+
+# Construiește imaginea și o publică în GitHub Container Registry (ghcr.io).
+# Pachetul moștenește vizibilitatea repo-ului (repo privat → imagine privată).
+# Astfel serverele nu mai fac build local: doar `docker pull` + `up`.
+#
+# Supply-chain: action-urile sunt fixate pe SHA-ul complet al commit-ului (nu pe
+# tag mobil ca @v4), ca un tag rescris de un mentainer compromis să nu poată
+# injecta cod în CI. Comentariul `# vN` = versiunea lizibilă. Bump: rezolvă noul
+# SHA cu `git ls-remote https://github.com/<repo> refs/tags/<tag>^{}`.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Testele Python unitare/hermetice (fără agent, tmux, sshd sau browser real) + testele de
+  # AUTH (stepup in-process ASGI; security pornește un uvicorn efemer local). Rulează RAPID
+  # (no docker build) and blocks publishing the image if it fails (build: needs: unit-tests).
+  # Testele care cer agent/ssh real (ssh, integration_m1/storm/file_transfer) rămân dev-only —
+  # calea live e acoperită de e2e-session.mjs + fs-test.sh + fwd-test.sh.
+  unit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Secret scan (gitleaks — working tree)
+        run: |
+          # blocks a PR that adds a real secret. Test fixtures (dummy passwords/tokens,
+          # RFC vectors) are allowlisted in .gitleaks.toml. The image is pinned by digest.
+          docker run --rm -v "$PWD:/repo" \
+            zricethezav/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
+            detect --source /repo --config /repo/.gitleaks.toml --no-git --no-banner
+      # The README version badge had drifted by 14 patches (v1.0.134 vs 1.0.148):
+      # a stranger opening the repo believes that is the latest version. We guard it
+      # rather than updating it by hand and hoping.
+      - name: Version badge ↔ GATEWAY_VERSION
+        run: |
+          V=$(grep -m1 '^GATEWAY_VERSION' gateway/app/config.py | cut -d'"' -f2)
+          for f in README.md; do
+            grep -q "version-v$V-blue" "$f" || {
+              echo "$f: the badge does not show v$V (run: sed -i 's|version-v[0-9.]*-blue|version-v$V-blue|' $f)"; exit 1; }
+          done
+
+      - name: requirements.txt ↔ requirements.lock in sync (drift = image tested ≠ shipped)
+        run: python3 scripts/check-reqs-lock.py
+      - name: Lint for real bugs (ruff --select F — unused import / undefined name, NOT style)
+        run: |
+          python3 -m pip install --quiet ruff
+          # F codes only (pyflakes): unused import, undefined name, broken f-string —
+          # real bugs, not style preferences. The codebase is already clean on these.
+          ruff check --select F gateway/app agent/ptyd.py
+      # CVEs on the SHIPPED dependencies, on the release path — not only in Monday's cron.
+      # A release cut on Tuesday would otherwise ship the week's CVE, even though a scan "existed".
+      # explicit `|| exit 1`: we want a gate, not a report.
+      # Frontend-ul n-a avut linter, deşi conţinea 17 pragme `eslint-disable react-hooks/*`
+      # — pragme care nu suprimau nimic, fiindcă nu rula nimic. Regula care contează e
+      # `react-hooks`: aplicaţia ţine terminale xterm vii în closure-uri cu listeneri, timere
+      # şi WebSocket-uri, adică exact terenul stale closures. Un incident real (hook mutat
+      # după un return timpuriu → crash post-login, React #310) ar fi fost prins de
+      # `rules-of-hooks`, nu de `tsc`. Erorile blochează; avertismentele rămân vizibile —
+      # aceeaşi filozofie ca `ruff --select F` pe Python.
+      - name: Lint frontend (eslint — react-hooks, bugs not style)
+        run: |
+          cd frontend
+          npm ci --ignore-scripts --no-audit --no-fund
+          npx eslint .
+
+      - name: CVEs in the Python dependencies (pip-audit, blocking)
+        run: |
+          python3 -m pip install --quiet pip-audit
+          # The audit used to run on requirements.txt, where pip resolves TODAY's versions — not
+          # the ones in the image. Measured: 7 of 33 packages differed (starlette, websockets, anyio…),
+          # so a CVE in a SHIPPED version was invisible to the blocking gate.
+          pip-audit --strict --no-deps -r gateway/requirements.lock
+
+      - name: Gateway + test dependencies (the runner already has Python 3.12)
+        # The test-only deps live in requirements-dev.txt, not inline here: when they existed
+        # only in this file, `make test` from a clean clone died on a missing httpx.
+        run: python3 -m pip install --quiet -r gateway/requirements.txt -r gateway/requirements-dev.txt
+      - name: Python tests (unit, hermetic) + security
+        # the list lives in scripts/run-tests.sh, also used by `make test` — otherwise the local
+        # gate silently diverges from CI's (it did: CI 22 files, make test 2)
+        run: scripts/run-tests.sh ci
+
+  build:
+    needs: unit-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      # Update-urile de agent sunt semnate Ed25519, iar agenții refuză semnături
+      # nevalide. Semnătura din repo a rămas odată nesincronizată luni de zile
+      # (0b515ab → v1.0.2) fără să observe nimeni — de aici gardul: build-ul
+      # pică dacă ptyd.py a fost modificat fără re-semnare (scripts/sign-agent.py).
+      # Doar cheia publică (din ptyd.py însuși) e folosită — nimic secret în CI.
+      # `github.repository` e repo-ul DE BAZĂ şi la evenimente `pull_request`, deci un PR
+      # venit dintr-un fork intra pe ramura blocantă şi primea „rulează scripts/sign-agent.py"
+      # — exact ce un contribuitor extern NU poate face: cheia privată e offline. Condiţia
+      # cere acum şi ca PR-ul (dacă e PR) să vină din acelaşi repo.
+      # Fără bump de AGENT_VERSION, gateway-ul nu împinge nimic (versiunile compară egal)
+      # şi flota rulează tăcut codul vechi, în timp ce release-ul pretinde altceva. Poarta de
+      # semnătură NU prinde asta: semnătura e peste sursă, nu peste versiune. Singura
+      # verificare existentă era `AGENT_VERSION >= 20` — un prag, nu un bump.
+      - name: agent/ptyd.py changed ⇒ AGENT_VERSION bumped
+        run: |
+          BASE="${{ github.event.pull_request.base.sha || github.event.before }}"
+          # push iniţial pe un branch nou (before = 000…0) sau base indisponibil: nimic de comparat
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+            echo "no base commit to compare against — skipping"; exit 0
+          fi
+          git fetch --no-tags --depth=2 origin "$BASE" 2>/dev/null || true
+          git cat-file -e "$BASE^{commit}" 2>/dev/null || { echo "base $BASE unavailable — skipping"; exit 0; }
+          git diff --quiet "$BASE" HEAD -- agent/ptyd.py && { echo "agent/ptyd.py unchanged"; exit 0; }
+          ver() { git show "$1:agent/ptyd.py" 2>/dev/null | grep -m1 '^AGENT_VERSION' | tr -dc '0-9'; }
+          OLD=$(ver "$BASE"); NEW=$(ver HEAD)
+          echo "agent/ptyd.py changed: AGENT_VERSION $OLD -> $NEW"
+          [ -n "$NEW" ] || { echo "::error::AGENT_VERSION not found in agent/ptyd.py"; exit 1; }
+          if [ -n "$OLD" ] && [ "$NEW" -le "$OLD" ]; then
+            echo "::error::agent/ptyd.py changed but AGENT_VERSION did not grow ($OLD -> $NEW)."
+            echo "::error::Without a bump the gateway pushes nothing and the fleet silently keeps the old agent."
+            exit 1
+          fi
+
+      - name: Verify the agent signature (official repo — blocking)
+        if: |
+          github.repository == 'sm26449/webterm' &&
+          (github.event_name != 'pull_request' ||
+           github.event.pull_request.head.repo.full_name == github.repository)
+        run: |
+          python3 -m pip install --quiet cryptography
+          python3 - <<'EOF'
+          import base64, os, re
+          from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+          src = open("agent/ptyd.py", "rb").read()
+          m = re.search(rb'UPDATE_PUBKEY = bytes\.fromhex\(\s*["\']([0-9a-f]+)["\']', src)
+          if not m:
+              raise SystemExit("UPDATE_PUBKEY not found in agent/ptyd.py")
+          embedded = m.group(1).decode()
+          # De obicei semnatarul E cheia din fişier. La o ROTAŢIE de cheie diferă intenţionat:
+          # fişierul poartă cheia NOUĂ, iar semnătura e cu cea VECHE — singura pe care agenţii
+          # instalaţi o au. Verificam contra cheii din fişier, deci calea corectă de rotaţie
+          # era respinsă, iar alternativa (reinstalarea fiecărui agent) e mult mai brutală.
+          # Semnatarul e declarat explicit, ca verificarea „nu ai uitat să re-semnezi" să
+          # rămână intactă în ambele cazuri.
+          signer = embedded
+          if os.path.exists("agent/ptyd.py.signer"):
+              signer = open("agent/ptyd.py.signer").read().strip()
+          sig = base64.b64decode(open("agent/ptyd.py.sig").read().strip())
+          try:
+              Ed25519PublicKey.from_public_bytes(bytes.fromhex(signer)).verify(sig, src)
+          except Exception:
+              raise SystemExit(
+                  "agent/ptyd.py.sig does NOT match agent/ptyd.py — "
+                  "run scripts/sign-agent.py and commit the .sig before releasing")
+          if signer != embedded:
+              print("KEY ROLLOVER: the file carries %s…, signed with %s…"
+                    % (embedded[:16], signer[:16]))
+              print("the agents must have %s… embedded — check scripts/check-rollover.py"
+                    % signer[:16])
+          print("agent signature: valid")
+          EOF
+
+      # Un FORK care modifică agentul nu are cum să re-semneze: cheia mentainerului e privată.
+      # Iar el nici nu are nevoie — instanţa lui îşi generează cheie proprie la prima pornire şi
+      # RE-SEMNEAZĂ agentul în memorie la fiecare push (`_agent_update_payload`); semnătura din
+      # repo nu e nici măcar citită acolo. Gardul de mai sus e igienă de RELEASE pentru repo-ul
+      # oficial, deci pică doar acolo. Pe fork-uri avertizează şi merge mai departe — altfel
+      # prima modificare a agentului le-ar bloca build-ul, fără o cale de ieşire.
+      - name: Verify the agent signature (fork — warning only)
+        if: |
+          github.repository != 'sm26449/webterm' ||
+          (github.event_name == 'pull_request' &&
+           github.event.pull_request.head.repo.full_name != github.repository)
+        continue-on-error: true
+        run: |
+          python3 -m pip install --quiet cryptography
+          python3 - <<'EOF' || echo "::warning::agent/ptyd.py.sig does not match. That is fine for a fork: your instance signs its own agents with the key generated at first boot."
+          import base64, os, re
+          from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+          src = open("agent/ptyd.py", "rb").read()
+          m = re.search(rb'UPDATE_PUBKEY = bytes\.fromhex\(\s*["\']([0-9a-f]+)["\']', src)
+          signer = m.group(1).decode() if m else ""
+          if os.path.exists("agent/ptyd.py.signer"):
+              signer = open("agent/ptyd.py.signer").read().strip()
+          sig = base64.b64decode(open("agent/ptyd.py.sig").read().strip())
+          Ed25519PublicKey.from_public_bytes(bytes.fromhex(signer)).verify(sig, src)
+          print("agent signature: valid")
+          EOF
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      # Failsafe (post-mortem v1.0.11, ecran alb livrat în producție): imaginea
+      # NU se publică dacă UI-ul nu pornește. Build local (load, același cache
+      # gha ca push-ul de mai jos, deci aproape gratis), container efemer, apoi
+      # un Chromium headless care așteaptă window.__WT_BOOTED și pică la orice
+      # eroare JS neprinsă (scripts/smoke-boot.mjs).
+      - name: Build a local image for the smoke test
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          load: true
+          tags: webterm-smoke:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Boot smoke test (the UI starts with no JS errors)
+        run: |
+          docker run -d --name smoke -p 8000:8000 \
+            -e WEBTERM_SETUP_TOKEN=ci-e2e-token \
+            -e WEBTERM_PUBLIC_URL=http://127.0.0.1:8000 \
+            -e WEBTERM_AGENT_INSECURE=1 \
+            webterm-smoke:ci
+          st=starting
+          for i in $(seq 1 45); do
+            st=$(docker inspect -f '{{.State.Health.Status}}' smoke)
+            [ "$st" = healthy ] && break
+            sleep 2
+          done
+          if [ "$st" != healthy ]; then
+            echo "containerul nu a devenit healthy (status: $st)"
+            docker logs smoke
+            exit 1
+          fi
+          mkdir -p /tmp/wt-smoke && cd /tmp/wt-smoke
+          npm init -y >/dev/null 2>&1
+          npm install --no-save --no-audit --no-fund playwright@1.61.1 >/dev/null
+          npx playwright install --with-deps chromium
+          # scriptul rulează de LÂNGĂ node_modules: ESM rezolvă importul
+          # 'playwright' relativ la fișier, nu la cwd
+          cp "$GITHUB_WORKSPACE/scripts/smoke-boot.mjs" .
+          node smoke-boot.mjs http://127.0.0.1:8000
+
+      # E2E de sesiune (post-incidentele v1.0.11 și v1.0.15): agent REAL pornit
+      # în container, sesiuni deschise prin UI, output verificat la tastare,
+      # comutare de tab-uri fără panou gol, pauză+resync pe tab-ul din fundal.
+      # Reutilizează Chromium/node_modules din pasul de smoke.
+      - name: E2E sessions (agent real + Playwright)
+        run: |
+          # tmux în containerul de smoke: fără el agentul cade pe backend-ul `pty`, adică
+          # E2E-ul testa ALT backend decât producţia. Diferenţa nu e cosmetică — tmux intră
+          # în ecran alternativ la ataşarea unui client, iar de acolo a venit incidentul din
+          # 2026-08-05 (panou de comenzi gol + istoric gol la orice sesiune cu istoric).
+          # Cu pty, scenariul nici nu putea apărea, deci CI-ul l-a ratat complet.
+          docker exec -u root smoke sh -c \
+            'apt-get update -qq && apt-get install -y -qq --no-install-recommends tmux' >/dev/null
+          docker exec smoke sh -c 'command -v tmux' >/dev/null || { echo "tmux is missing"; exit 1; }
+          cd /tmp/wt-smoke
+          cp "$GITHUB_WORKSPACE/scripts/e2e-session.mjs" .
+          E2E_SETUP_TOKEN=ci-e2e-token node e2e-session.mjs http://127.0.0.1:8000 smoke
+
+      # Accesibilitate (axe-core, WCAG 2.1 AA) pe suprafața reală, cu agent online.
+      # Blocantă: conținutul terminalului NU e în DOM (renderer WebGL), deci cititoarele de
+      # ecran depind de restul interfeței și de modul dedicat — o regresie aici nu se vede
+      # nicăieri altundeva. Scriptul exista din 2025, dar nu rula nicăieri: rămăsese în urma
+      # migrării i18n și murea la primul selector derapat, tăcut.
+      - name: Accessibility (axe-core, blocking on serious violations)
+        run: |
+          cd /tmp/wt-smoke
+          # ATENŢIE la `--no-save`: pachetele instalate aşa nu ajung în package.json, iar un
+          # `npm install` ulterior le consideră „extraneous" şi le CURĂŢĂ. Instalat separat,
+          # axe-core ştergea chiar `playwright`, iar pasul pica cu ERR_MODULE_NOT_FOUND —
+          # descoperit rulând pasul local, nu citindu-l.
+          npm install --no-save --no-audit --no-fund playwright@1.61.1 @axe-core/playwright >/dev/null
+          cp "$GITHUB_WORKSPACE/tests/ui_review.mjs" .
+          BASE=http://127.0.0.1:8000 A11Y_MAX_SERIOUS=0 \
+            A11Y_EMAIL=e2e@example.com A11Y_PASSWORD=parola-e2e-123456 \
+            node ui_review.mjs
+
+      # API-ul de fișiere cap-coadă (agent real): rename, conflict de mtime,
+      # preview view-only, salvare atomică, păstrarea permisiunilor, guard fișiere
+      # speciale, delete recursiv — căi pe care e2e-ul UI nu le acoperă. Refolosește
+      # containerul `smoke` (cont + agent online din pasul e2e).
+      - name: FS API (file operations, real agent)
+        run: |
+          E2E_SETUP_TOKEN=ci-e2e-token bash "$GITHUB_WORKSPACE/scripts/fs-test.sh" http://127.0.0.1:8000 smoke
+
+      # Port forwarding cap-coadă (agent real): handshake de auth (redirect→token→
+      # cookie→proxy), proxy HTTP prin tunel, WebSocket prin tunel, + teste de
+      # securitate (token legat de slug, fără cookie→redirect, oprit→404, anti-SSRF).
+      # Container dedicat cu PUBLIC_URL=http://wt.test → subdomeniile de forward
+      # sunt <slug>.wt.test (simulate prin Host header).
+      - name: Port forwarding (handshake + proxy + WebSocket + securitate)
+        run: |
+          docker run -d --name smoke-fwd -p 8001:8000 \
+            -e WEBTERM_SETUP_TOKEN=ci-e2e-token -e WEBTERM_PUBLIC_URL=http://wt.test \
+            -e WEBTERM_AGENT_INSECURE=1 webterm-smoke:ci
+          st=starting
+          for i in $(seq 1 45); do
+            st=$(docker inspect -f '{{.State.Health.Status}}' smoke-fwd 2>/dev/null)
+            [ "$st" = healthy ] && break; sleep 2
+          done
+          [ "$st" = healthy ] || { docker logs smoke-fwd; exit 1; }
+          bash "$GITHUB_WORKSPACE/scripts/fwd-test.sh" http://127.0.0.1:8001 smoke-fwd wt.test
+
+      # Audit responsive pe device-uri reale (WebKit pentru iOS, Chromium pentru
+      # Android): măsoară overflow orizontal, elemente ieșite din ecran și butoane
+      # acoperite. Un layout stricat pe telefon nu mai ajunge în producție.
+      - name: Mobile audit (iPhone/iPad/Android)
+        run: |
+          cd /tmp/wt-smoke
+          npx playwright install --with-deps webkit
+          cp "$GITHUB_WORKSPACE/scripts/mobile-audit.mjs" .
+          node mobile-audit.mjs http://127.0.0.1:8000 /tmp/wt-shots
+
+      - name: Mobile screenshots on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mobile-screenshots
+          path: /tmp/wt-shots
+          if-no-files-found: ignore
+
+      - name: Container logs when the smoke test fails
+        if: failure()
+        run: docker logs smoke 2>&1 | tail -100 || true
+
+      - name: Log in to ghcr.io
+        if: github.event_name != 'pull_request'   # PR-urile (ex. dependabot) validează build+teste, NU publică
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tags and metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=tag
+            type=sha,format=short
+
+      - name: Build & push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}   # pe PR doar construim (validare), nu publicăm
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

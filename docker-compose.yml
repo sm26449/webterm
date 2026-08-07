@@ -1,0 +1,85 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    # hardening: no privilege escalation; drop all caps except the minimum the
+    # entrypoint needs (chown /data, then gosu-drop to the unprivileged user)
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETUID
+      - SETGID
+    # immutability: the root filesystem is read-only (code cannot be modified at runtime),
+    # everything written goes to the /data volume or to an ephemeral /tmp in RAM.
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    environment:
+      # The SAME set as in `docker-compose.prod.yml`. This file used to list only two, so anyone
+      # who set SMTP, `WEBTERM_IDLE_LOCK_SECS`, `WEBTERM_SETUP_TOKEN` or
+      # `WEBTERM_TRUSTED_PROXY_CIDRS` in `.env`
+      # thought it was configured and silently ran on defaults —
+      # including two documented in the README table. Same class of bug, fixed once before but
+      # ONLY in the production file; `tests/compose_env_test.py` now guards both mechanically.
+      # the app's public domain (used by the browser, by agents and by WebAuthn)
+      WEBTERM_PUBLIC_URL: ${WEBTERM_PUBLIC_URL:-https://term.example.com}
+      # set to 1 only if the gateway has a self-signed certificate
+      WEBTERM_AGENT_INSECURE: ${WEBTERM_AGENT_INSECURE:-}
+      # the per-browser-WS backlog cap before a forced resync
+      WEBTERM_CLIENT_BUFFER: ${WEBTERM_CLIENT_BUFFER:-}
+      WEBTERM_SETUP_TOKEN: ${WEBTERM_SETUP_TOKEN:-}
+      WEBTERM_IMAGE_REF: ${WEBTERM_IMAGE:-ghcr.io/sm26449/webterm:latest}
+      WEBTERM_UPDATE_CHECK: ${WEBTERM_UPDATE_CHECK:-1}
+      WEBTERM_UPDATE_CHECK_TOKEN: ${WEBTERM_UPDATE_CHECK_TOKEN:-}
+      WEBTERM_UPDATE_COMMAND: ${WEBTERM_UPDATE_COMMAND:-}
+      WEBTERM_UPDATE_REPO: ${WEBTERM_UPDATE_REPO:-}
+      WEBTERM_SMTP_HOST: ${WEBTERM_SMTP_HOST:-}
+      WEBTERM_SMTP_PORT: ${WEBTERM_SMTP_PORT:-587}
+      WEBTERM_SMTP_USER: ${WEBTERM_SMTP_USER:-}
+      WEBTERM_SMTP_PASSWORD: ${WEBTERM_SMTP_PASSWORD:-}
+      WEBTERM_SMTP_STARTTLS: ${WEBTERM_SMTP_STARTTLS:-1}
+      WEBTERM_ALERT_FROM: ${WEBTERM_ALERT_FROM:-}
+      WEBTERM_ALERT_TO: ${WEBTERM_ALERT_TO:-}
+      WEBTERM_ALERT_WEBHOOK: ${WEBTERM_ALERT_WEBHOOK:-}
+      WEBTERM_TRUSTED_PROXY_HOPS: ${WEBTERM_TRUSTED_PROXY_HOPS:-1}
+      WEBTERM_TRUSTED_PROXY_CIDRS: ${WEBTERM_TRUSTED_PROXY_CIDRS:-}
+      WEBTERM_TRUST_CF_IP: ${WEBTERM_TRUST_CF_IP:-}
+      WEBTERM_IP_MAX_FAILS: ${WEBTERM_IP_MAX_FAILS:-5}
+      WEBTERM_SESSION_TTL_DAYS: ${WEBTERM_SESSION_TTL_DAYS:-30}
+      WEBTERM_SESSION_IDLE_HOURS: ${WEBTERM_SESSION_IDLE_HOURS:-12}
+      WEBTERM_IDLE_LOCK_SECS: ${WEBTERM_IDLE_LOCK_SECS:-300}
+      WEBTERM_ARCHIVE_DAYS: ${WEBTERM_ARCHIVE_DAYS:-120}
+      WEBTERM_AUDIT_DAYS: ${WEBTERM_AUDIT_DAYS:-120}
+      WEBTERM_TRANSCRIPT_MAX_BYTES: ${WEBTERM_TRANSCRIPT_MAX_BYTES:-}
+      WEBTERM_TRANSCRIPT_KEEP_BYTES: ${WEBTERM_TRANSCRIPT_KEEP_BYTES:-}
+      WEBTERM_FORWARD_DOMAIN: ${FORWARD_DOMAIN:-${WEBTERM_DOMAIN}}
+    volumes:
+      - webterm-data:/data
+    networks: [webterm]
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      WEBTERM_DOMAIN: ${WEBTERM_DOMAIN:-term.example.com}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [webterm]
+
+volumes:
+  webterm-data:
+  caddy-data:
+  caddy-config:
+
+networks:
+  webterm:

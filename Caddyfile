@@ -1,0 +1,17 @@
+{
+	# when reached by IP the browser sends no SNI; serve the site's certificate
+	default_sni {$WEBTERM_DOMAIN}
+}
+
+{$WEBTERM_DOMAIN} {
+	reverse_proxy app:8000
+
+	header {
+		# HSTS is TLS-specific (the rest of the security headers come from the app)
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	}
+	# request body size limit (uploads through the agent have their own path)
+	request_body {
+		max_size 5GB
+	}
+}

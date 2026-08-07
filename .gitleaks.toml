@@ -1,0 +1,22 @@
+# Config gitleaks pentru WebTerm. Extinde regulile default + un allowlist pentru fixtures de
+# TEST (parole/tokenuri dummy din scripturile de CI/e2e și vectorii RFC din teste) — NU secrete reale.
+title = "WebTerm gitleaks"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Fixtures de test — parole/tokenuri dummy + vectori RFC, nu secrete reale"
+regexes = [
+  # parola contului de test folosită de scripturile e2e/CI (fs-test, fwd-test, e2e-session, …)
+  '''parola-e2e-123456''',
+  # tokenuri de setup de test
+  '''ci-e2e-token''',
+  '''test-setup''',
+]
+paths = [
+  # vectorii RFC 6238/8032 (hex) și fixture-urile din suita de teste
+  '''tests/ed25519_kat_test\.py''',
+  '''tests/totp_test\.py''',
+  '''tests/signing_test\.py''',
+]
