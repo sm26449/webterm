@@ -7,7 +7,7 @@
 #   WEBTERM_VOLUME              Docker volume name  (default webterm_webterm-data)
 #   WEBTERM_BACKUP_DIR          where archives go   (default /var/backups/webterm)
 #   WEBTERM_BACKUP_KEEP         how many to keep    (default 14)
-#   WEBTERM_IMAGE               image with python3  (default python:3.12-alpine)
+#   WEBTERM_TOOL_IMAGE          image with python3  (default python:3.12-alpine)
 #   WEBTERM_BACKUP_PASSPHRASE   if set, encrypt the archive (openssl AES-256) — RECOMMENDED:
 #                               the archive contains the vault key (data/secret), which
 #                               decrypts every stored SSH credential. An unencrypted copy
@@ -17,7 +17,17 @@ set -euo pipefail
 VOLUME="${WEBTERM_VOLUME:-webterm_webterm-data}"
 OUT="${WEBTERM_BACKUP_DIR:-/var/backups/webterm}"
 KEEP="${WEBTERM_BACKUP_KEEP:-14}"
-IMAGE="${WEBTERM_IMAGE:-python:3.12-alpine}"
+# `WEBTERM_IMAGE` numea şi imaginea asta, dar în restul proiectului (.env, compose,
+# deploy.sh, upgrade.sh) el înseamnă IMAGINEA GATEWAY-ULUI. Iar `upgrade.sh` sursează
+# `.env` înainte să cheme backupul — deci containerul de backup primea imaginea aplicaţiei
+# în loc de `python:3.12-alpine`, fără ca nimeni s-o fi cerut. Un nume de variabilă cu două
+# înţelesuri în acelaşi proiect e un bug care aşteaptă contextul potrivit; îi dăm un nume
+# propriu. Vezi acelaşi tipar în `restore.sh`, unde greşeala costa mai scump.
+IMAGE="${WEBTERM_TOOL_IMAGE:-python:3.12-alpine}"
+if [ -z "${WEBTERM_TOOL_IMAGE:-}" ] && [ -n "${WEBTERM_IMAGE:-}" ]; then
+  echo "note: WEBTERM_IMAGE is the gateway image and is IGNORED here;" \
+       "use WEBTERM_TOOL_IMAGE to change the python image ($IMAGE)." >&2
+fi
 STAMP="$(date +%Y%m%d-%H%M%S)"
 
 mkdir -p "$OUT"
@@ -27,8 +37,9 @@ chmod 700 "$OUT" 2>/dev/null || true      # arhivele conțin cheia seifului: dir
 # SQLite may touch -shm to coordinate the WAL read; webterm.db itself is only read.
 # `--entrypoint python3`: imaginea aplicaţiei are un entrypoint care face `exec gosu webterm`,
 # adică COBOARĂ privilegiile. Rulat aşa, containerul de backup nu poate scrie în $OUT (root, 700)
-# şi backupul cade cu PermissionError. Se vedea doar când $WEBTERM_IMAGE era setat în mediu —
-# deci nu din timer-ul systemd, ci din upgrade.sh, care sursează .env. Ocolim entrypoint-ul.
+# şi backupul cade cu PermissionError. Rămâne aici şi după redenumirea variabilei de mai sus:
+# cine chiar vrea să folosească imaginea aplicaţiei ca unealtă trebuie să obţină acelaşi
+# rezultat, nu o eroare de permisiuni la 03:30 dimineaţa.
 # Volumul TREBUIE să existe deja. Docker creează tăcut un volum inexistent, iar de acolo
 # totul „reuşeşte": `sqlite3.connect` face un webterm.db gol, `integrity_check` pe el
 # întoarce `ok`, arhiva iese cu exit 0 — şi restaurarea ei raportează succes în timp ce

@@ -46,31 +46,58 @@ FORWARD_TOKEN_TTL = 12 * 3600
 # invalidează oricum (mai sigur decât să persiste).
 _forward_epoch: str = secrets.token_hex(8)
 
+# …dar epoch-ul singur e GLOBAL, iar de la conturile multiple asta însemna că logout-ul lui A
+# rupea tunelurile lui B. Share-urile au primit deja tratamentul ăsta (`_revoke_all_shares`
+# ia un `owner_email`); token-urile de forward au rămas în urmă, în ACELAŞI handler de logout.
+# Semnalat de un audit extern, ca „DoS colateral pe tuneluri".
+#
+# Deci două epoci, ambele în semnătură:
+#   · cea globală — pentru cazurile care CHIAR trebuie să lovească pe toată lumea: rotirea
+#     parolei (compromitere), ştergerea unui forward (slug-ul se reciclează), marcarea unui
+#     host ca „cere 2FA";
+#   · una per cont — bumpată la logout, ca să moară numai biletele emise de acel cont.
+# Ca să ştim a cui e biletul la validare, contul intră în token (`exp.uid.sig`) ŞI în mesajul
+# semnat: un uid schimbat de mână strică semnătura, nu deschide biletul altcuiva.
+_forward_epoch_user: dict[int, str] = {}
 
-def bump_forward_epoch() -> None:
+
+def bump_forward_epoch(user_id: Optional[int] = None) -> None:
+    """Fără argument: invalidează TOATE biletele de forward din instanţă.
+    Cu `user_id`: doar biletele emise de acel cont."""
     global _forward_epoch
-    _forward_epoch = secrets.token_hex(8)
+    if user_id is None:
+        _forward_epoch = secrets.token_hex(8)
+        _forward_epoch_user.clear()
+    else:
+        _forward_epoch_user[user_id] = secrets.token_hex(8)
 
 
-def make_forward_token(slug: str, ttl: int = FORWARD_TOKEN_TTL) -> str:
+def _forward_msg(slug: str, exp: int, uid: int) -> bytes:
+    return b"wtfwd:%s:%d:%d:%s:%s" % (
+        slug.encode(), exp, uid, _forward_epoch.encode(),
+        _forward_epoch_user.get(uid, "").encode())
+
+
+def make_forward_token(slug: str, user_id: int, ttl: int = FORWARD_TOKEN_TTL) -> str:
     exp = int(time.time()) + ttl
-    msg = b"wtfwd:%s:%d:%s" % (slug.encode(), exp, _forward_epoch.encode())
-    sig = hmac.new(_secret_key, msg, hashlib.sha256).hexdigest()
-    return "%d.%s" % (exp, sig)
+    sig = hmac.new(_secret_key, _forward_msg(slug, exp, user_id), hashlib.sha256).hexdigest()
+    return "%d.%d.%s" % (exp, user_id, sig)
 
 
 def verify_forward_token(token: Optional[str], slug: str) -> bool:
-    if not token or "." not in token:
+    if not token:
         return False
-    exp_s, _, sig = token.partition(".")
+    parts = token.split(".")
+    if len(parts) != 3:
+        return False
+    exp_s, uid_s, sig = parts
     try:
-        exp = int(exp_s)
+        exp, uid = int(exp_s), int(uid_s)
     except ValueError:
         return False
     if exp < time.time():
         return False
-    msg = b"wtfwd:%s:%d:%s" % (slug.encode(), exp, _forward_epoch.encode())
-    expected = hmac.new(_secret_key, msg, hashlib.sha256).hexdigest()
+    expected = hmac.new(_secret_key, _forward_msg(slug, exp, uid), hashlib.sha256).hexdigest()
     return hmac.compare_digest(sig, expected)
 
 

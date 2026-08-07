@@ -123,6 +123,34 @@ async def main():
                                  headers={"Authorization": "Bearer wt_inventat"}) as t5:
         check("token inexistent → 401", (await t5.get("/api/status")).status_code == 401)
 
+    # ── ştergerea contului îi ia şi tokenurile ──
+    # Un token nu are nevoie de cont ca să funcţioneze: e o credenţială de sine stătătoare.
+    # Ştergerea contului emitent curăţa sesiuni, passkey-uri şi coduri de recuperare, dar
+    # lăsa tokenul viu până la expirare (până la un an) — deci arăta ca o revocare completă
+    # fără să fie una. Semnalat de un audit extern.
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c3:
+        await c3.post("/api/login", json={"email": "a@b.co", "password": PW})
+        await c3.post("/api/users", json={"email": "pleaca@b.co", "password": PW,
+                                          "current_password": PW})
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c4:
+        await c4.post("/api/login", json={"email": "pleaca@b.co", "password": PW})
+        gone_tok = (await c4.post("/api/tokens", json={
+            "name": "al-contului-care-pleaca", "scopes": ["read"],
+            "current_password": PW})).json()["token"]
+    HG = {"Authorization": "Bearer " + gone_tok}
+    async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=HG) as t6:
+        check("tokenul contului merge cât timp contul există",
+              (await t6.get("/api/status")).status_code == 200)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c5:
+        await c5.post("/api/login", json={"email": "a@b.co", "password": PW})
+        uid = [u for u in (await c5.get("/api/users")).json()
+               if u["email"] == "pleaca@b.co"][0]["id"]
+        r = await c5.post(f"/api/users/{uid}/delete", json={"current_password": PW})
+        check("contul a fost şters", r.status_code == 200, r.text[:120])
+    async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=HG) as t7:
+        check("tokenul lui moare odată cu contul → 401",
+              (await t7.get("/api/status")).status_code == 401)
+
     await db.close()
     print(f"\n{ok}/{total} passed")
     return ok == total

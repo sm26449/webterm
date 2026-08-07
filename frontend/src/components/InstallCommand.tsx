@@ -16,6 +16,13 @@ export default function InstallCommand(props: { command: string; commandDedicate
   const [copied, setCopied] = useState(false)
   const [err, setErr] = useState('')
   const cmd = dedicated && props.commandDedicated ? props.commandDedicated : props.command
+  // `WEBTERM_AGENT_INSECURE=1` face ca ACEST prim fetch să nu verifice certificatul, iar
+  // pinningul (TOFU) începe abia după prima conexiune — deci fereastra în care un MITM poate
+  // livra alt agent, cu altă cheie de update, e chiar comanda de mai sus. Restul produsului o
+  // spune în documentaţie; aici o vede omul care e pe cale s-o lipească într-un shell root.
+  // Detectat din comanda însăşi, nu dintr-un câmp nou de API: serverul o construieşte deja
+  // diferit (`-fsSk` / `--no-check-certificate`) exact în acest caz.
+  const insecure = /(^|\s)curl\s+-\S*k|--no-check-certificate/.test(cmd)
 
   const Tab = (p: { on: boolean; label: string; onClick: () => void }) => (
     <button
@@ -63,6 +70,14 @@ export default function InstallCommand(props: { command: string; commandDedicate
       <p className="mt-2 text-xs text-slate-500">
         {dedicated && props.commandDedicated ? t('addhost.dedicatedHint') : t('addhost.currentHint')}
       </p>
+      {insecure && (
+        // `wt-warn`, nu `text-amber-300`: al doilea e un token pentru fundal ÎNCHIS, iar
+        // modalul urmează tema. Exact clasa de defect pe care o descrie `.wt-accent` în
+        // index.css — text galben-deschis peste alb, sub 2:1, invizibil în tema deschisă.
+        <p className="wt-warn mt-2 rounded-lg bg-amber-500/10 p-2 text-xs ring-1 ring-amber-500/30">
+          {t('addhost.insecureBootstrap')}
+        </p>
+      )}
       {err && <div className="mt-2 text-sm wt-danger">{err}</div>}
     </div>
   )

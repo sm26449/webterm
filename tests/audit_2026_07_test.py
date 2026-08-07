@@ -30,13 +30,32 @@ def check(name, cond):
 
 def test_m3_forward_epoch():
     security.init_crypto(b"x" * 32)
-    tok = security.make_forward_token("myslug")
+    tok = security.make_forward_token("myslug", 1)
     check("M3: token de forward proaspăt e valid", security.verify_forward_token(tok, "myslug"))
     check("M3: token legat de slug (alt slug respins)", not security.verify_forward_token(tok, "altslug"))
-    security.bump_forward_epoch()      # logout / schimbare parolă
+    security.bump_forward_epoch()      # schimbare de parolă / ştergere de forward
     check("M3: după bump de epoch, tokenul vechi e invalid", not security.verify_forward_token(tok, "myslug"))
-    tok2 = security.make_forward_token("myslug")
+    tok2 = security.make_forward_token("myslug", 1)
     check("M3: un token nou (post-bump) e valid", security.verify_forward_token(tok2, "myslug"))
+
+    # Restrângerea per cont: logout-ul contului A nu are voie să rupă tunelurile lui B.
+    # Înainte, `bump_forward_epoch()` era global şi asta se întâmpla în acelaşi handler de
+    # logout care restrângea deja share-urile la owner — o asimetrie imposibil de diagnosticat
+    # din UI („de ce a picat tunelul?").
+    a, b = security.make_forward_token("myslug", 1), security.make_forward_token("myslug", 2)
+    security.bump_forward_epoch(1)     # logout doar pentru contul 1
+    check("M3: logout-ul contului A îi omoară biletele", not security.verify_forward_token(a, "myslug"))
+    check("M3: …şi le lasă pe ale lui B în viaţă", security.verify_forward_token(b, "myslug"))
+    security.bump_forward_epoch()      # global: rotire de parolă
+    check("M3: bump-ul global le omoară pe amândouă", not security.verify_forward_token(b, "myslug"))
+
+    # Uid-ul călătoreşte în token, deci trebuie să fie SEMNAT, nu doar transportat: altfel
+    # rescrii `exp.2.sig` în `exp.1.sig` şi biletul revocat al lui A renaşte sub epoca lui B.
+    c = security.make_forward_token("myslug", 2)
+    exp_s, _, sig = c.split(".")
+    check("M3: uid-ul e în semnătură (nu se poate rescrie)",
+          not security.verify_forward_token("%s.%d.%s" % (exp_s, 1, sig), "myslug"))
+    check("M3: token cu formă greşită e respins", not security.verify_forward_token("123.abc", "myslug"))
 
 
 async def test_l2_idle_expiry():

@@ -270,7 +270,10 @@ async def logout(request: Request, response: Response):
         security.clear_session_cookie(response)
         return {"ok": True}
     security.clear_stepup_for(u["id"])       # H1: nici o fereastră de „sudo" nu supraviețuiește logout-ului
-    security.bump_forward_epoch()            # M3: token-urile de port-forward mor la logout
+    # M3: token-urile de port-forward mor la logout — dar numai ALE LUI. Global, asta însemna
+    # că ieşirea unui cont rupea tunelurile deschise din alt cont, fără nimic în UI care să
+    # explice de ce. Vezi `_revoke_all_shares`, care primise deja aceeaşi restrângere.
+    security.bump_forward_epoch(u["id"])
     # doar share-urile CONTULUI care se deconectează — vezi _revoke_all_shares
     await _revoke_all_shares(u["email"])
     await security.destroy_web_session(tok)
@@ -439,7 +442,20 @@ async def delete_user(uid: int, body: ReauthOnly, user=Depends(security.require_
                 "DELETE FROM seen_logins WHERE user_id=?",
                 "DELETE FROM users WHERE id=?"):
         await db.execute(sql, uid)
+    # …„tot" trebuia să însemne şi asta. Token-urile de automatizare emise de contul şters îi
+    # supravieţuiau până la expirare (până la un an), semnalat de un audit extern. Ele NU cer
+    # cont ca să funcţioneze — sunt credenţiale de sine stătătoare — deci ştergerea contului
+    # arăta ca o revocare completă fără să fie una. Le numărăm ca să apară în jurnal: cine
+    # şterge un cont trebuie să vadă ce automatizări a oprit odată cu el.
+    ntok = (await db.fetchone(
+        "SELECT COUNT(*) AS c FROM api_tokens WHERE created_by=?", row["email"]))["c"]
+    await db.execute("DELETE FROM api_tokens WHERE created_by=?", row["email"])
     security.clear_stepup_for(uid)
+    security.bump_forward_epoch(uid)      # şi biletele lui de port-forward, ca la logout
+    await _revoke_all_shares(row["email"])
+    if ntok:
+        log.warning("account deleted: revoked %d automation token(s) issued by %s",
+                    ntok, row["email"])
     log.warning("account deleted: %s (by %s)", row["email"], user["email"])
     return await list_users(user)
 
@@ -2395,7 +2411,7 @@ async def forward_auth(request: Request, slug: str, next: str = "/"):
             status_code=302)
     if not next.startswith("/"):
         next = "/"
-    token = security.make_forward_token(slug)
+    token = security.make_forward_token(slug, user["id"])
     loc = "%s://%s.%s/__wtfwd/set?t=%s&next=%s" % (_FWD_SCHEME, slug, forward_domain(), token, quote(next, safe=""))
     return RedirectResponse(loc, status_code=302)
 
