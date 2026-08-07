@@ -6,7 +6,7 @@
 #   ./restore.sh <archive.tar.gz|.enc>
 #   WEBTERM_VOLUME              Docker volume name   (default webterm_webterm-data)
 #   WEBTERM_UID                 owner uid:gid inside (default 10001:10001)
-#   WEBTERM_IMAGE               image with python3   (default python:3.12-alpine)
+#   WEBTERM_TOOL_IMAGE          image with python3   (default python:3.12-alpine)
 #   COMPOSE_FILE                compose file to (re)start the app (default docker-compose.yml)
 #   WEBTERM_BACKUP_PASSPHRASE   required if the archive is encrypted (.enc from backup.sh)
 set -euo pipefail
@@ -16,7 +16,17 @@ SRC_NAME="$ARCHIVE"      # numele TASTAT de om; `$ARCHIVE` devine un mktemp dup�
 [ -f "$ARCHIVE" ] || { echo "not found: $ARCHIVE"; exit 1; }
 VOLUME="${WEBTERM_VOLUME:-webterm_webterm-data}"
 OWNER="${WEBTERM_UID:-10001:10001}"
-IMAGE="${WEBTERM_IMAGE:-python:3.12-alpine}"
+# Vezi nota din `backup.sh`: `WEBTERM_IMAGE` înseamnă imaginea GATEWAY-ULUI peste tot
+# altundeva, iar aici însemna „o imagine cu python3". Backupul a păţit-o deja o dată şi s-a
+# reparat local; restaurarea nu avea nici măcar acea plasă, şi pierde mai mult: entrypoint-ul
+# imaginii aplicaţiei coboară la userul `webterm`, extragerea reuşeşte, iar `os.chown` cade cu
+# PermissionError — DUPĂ ce datele vechi au fost deja mutate în `.restore-prev`. Adică exact
+# fereastra în care serviciul rămâne jos şi omul crede că şi-a pierdut datele.
+IMAGE="${WEBTERM_TOOL_IMAGE:-python:3.12-alpine}"
+if [ -z "${WEBTERM_TOOL_IMAGE:-}" ] && [ -n "${WEBTERM_IMAGE:-}" ]; then
+  echo "note: WEBTERM_IMAGE is the gateway image and is IGNORED here;" \
+       "use WEBTERM_TOOL_IMAGE to change the python image ($IMAGE)." >&2
+fi
 
 # Arhivă criptată (.enc): decriptează într-un temp plaintext (openssl + parolă) înainte de restore.
 DECTMP=""
@@ -75,8 +85,9 @@ fi
 # de validare: o arhivă coruptă/parțială distrugea datele fără cale de întoarcere. Acum
 # datele curente se ating DOAR după ce noul DB trece integrity_check, iar starea veche se
 # mută în /data/.restore-prev ca plasă de siguranță. Tot în Python (fără capcane de globbing).
-docker run --rm -i -v "$VOLUME":/data -v "$ADIR":/in:ro -e ABASE="$ABASE" -e OWNER="$OWNER" \
-  "$IMAGE" python3 - <<'PY'
+docker run --rm -i --entrypoint python3 \
+  -v "$VOLUME":/data -v "$ADIR":/in:ro -e ABASE="$ABASE" -e OWNER="$OWNER" \
+  "$IMAGE" - <<'PY'
 import os, sys, shutil, sqlite3, tarfile
 staging, prev = "/data/.restore-staging", "/data/.restore-prev"
 shutil.rmtree(staging, ignore_errors=True); os.makedirs(staging)

@@ -46,13 +46,24 @@ jobs:
       # The README version badge had drifted by 14 patches (v1.0.134 vs 1.0.148):
       # a stranger opening the repo believes that is the latest version. We guard it
       # rather than updating it by hand and hoping.
-      - name: Version badge ↔ GATEWAY_VERSION
+      # The install-time image default was `:latest` — a moving pointer, so a fresh install
+      # ran whatever the registry held that minute and `.prev-image` recorded nothing you
+      # could roll back to. It is pinned now, which only helps if the pin follows the release:
+      # a stale pin ships an old gateway to every new install, silently.
+      - name: Version badge + image pins ↔ GATEWAY_VERSION
         run: |
           V=$(grep -m1 '^GATEWAY_VERSION' gateway/app/config.py | cut -d'"' -f2)
           for f in README.md; do
             grep -q "version-v$V-blue" "$f" || {
               echo "$f: the badge does not show v$V (run: sed -i 's|version-v[0-9.]*-blue|version-v$V-blue|' $f)"; exit 1; }
           done
+          BAD=$(grep -rn 'ghcr\.io/[^ }"]*/webterm:[^ }"]*' \
+                  .env.prod.example docker-compose.yml docker-compose.prod.yml install.sh \
+                | grep -v ":v$V" || true)
+          [ -z "$BAD" ] || {
+            echo "image pin drifted from GATEWAY_VERSION ($V):"; echo "$BAD"
+            echo "fix: sed -i 's|/webterm:[^ }\"]*|/webterm:v$V|g' .env.prod.example docker-compose.yml docker-compose.prod.yml install.sh"
+            exit 1; }
 
       - name: requirements.txt ↔ requirements.lock in sync (drift = image tested ≠ shipped)
         run: python3 scripts/check-reqs-lock.py

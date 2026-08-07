@@ -27,6 +27,12 @@ NET=wtci-net
 BASE1="http://127.0.0.1:$P1"
 OUT=${OUT:-/tmp/wt-ci-shots}
 ONLY="${*:-all}"   # unul sau mai mulţi paşi: `ci-local.sh e2e a11y`
+# `PY`/`RUFF` ca în `run-tests.sh`: pe maşinile unde dependenţele gateway-ului stau într-un
+# venv, `python3` gol nu poate rula nimic — şi rezultatul arăta ca un eşec de test, nu ca un
+# mediu incomplet. `PY=…/.venv/bin/python ./scripts/ci-local.sh unit`.
+PY="${PY:-python3}"
+RUFF="${RUFF:-$(dirname "$PY")/ruff}"
+[ -x "$RUFF" ] || RUFF=ruff
 # paşi: unit sig lint build smoke e2e a11y fs fwd mobile — sau `all`
 
 pass=0; fail=0; skipped=""
@@ -43,8 +49,20 @@ want() { case " $ONLY " in *" all "*|*" $1 "*) return 0 ;; *) return 1 ;; esac; 
 # manifesta ca „nu a devenit healthy" după 90s; `cryptography` lipsă ca „✗ agent signature",
 # care se citeşte drept „semnătura e stricată", nu „îţi lipseşte un pachet".
 if want sig || want smoke || want e2e || want a11y || want fs || want fwd || want mobile; then
-  python3 -c 'import cryptography' 2>/dev/null || {
-    echo "python3 nu are pachetul 'cryptography' — pip install cryptography" >&2; exit 2; }
+  "$PY" -c 'import cryptography' 2>/dev/null || {
+    echo "$PY nu are pachetul 'cryptography' — pip install cryptography" >&2; exit 2; }
+fi
+# Aceeaşi grijă pentru porţile `unit`, adăugate mai târziu şi scăpate de preflight: fără
+# `aiosqlite`/`ruff` ele raportau „✗ suita Python" şi „✗ ruff --select F", care se citesc
+# drept „ai stricat ceva" — deşi mesajul corect era „nu ai cu ce rula". Un raport roşu fals
+# costă la fel de mult ca unul verde fals: prima dată te trimite să cauţi un bug inexistent,
+# a doua oară nu te mai uiţi la el deloc.
+if want unit; then
+  "$PY" -c 'import aiosqlite' 2>/dev/null || {
+    echo "$PY nu are dependenţele gateway-ului (aiosqlite…) — pip install -r gateway/requirements.txt," \
+         "sau rulează cu PY=/cale/către/.venv/bin/python" >&2; exit 2; }
+  command -v "$RUFF" >/dev/null 2>&1 || [ -x "$RUFF" ] || {
+    echo "'$RUFF' lipseşte — pip install ruff (sau RUFF=/cale/către/ruff)" >&2; exit 2; }
 fi
 for prt in $P1 $P2; do
   case " $ONLY " in *" all "*|*" smoke "*|*" e2e "*|*" a11y "*|*" fs "*|*" fwd "*|*" mobile "*)
@@ -88,14 +106,19 @@ if want unit; then
 say "unit-tests gates"
 V=$(grep -m1 '^GATEWAY_VERSION' "$REPO/gateway/app/config.py" | cut -d'"' -f2)
 grep -q "version-v$V-blue" "$REPO/README.md" && ok "badge ↔ GATEWAY_VERSION ($V)" || no "badge (aşteptat v$V)"
-python3 "$REPO/scripts/check-reqs-lock.py" >/dev/null && ok "requirements.txt ↔ .lock" || no "requirements drift"
-(cd "$REPO" && ruff check --select F gateway/app agent/ptyd.py >/dev/null 2>&1) \
+# pinul de imagine de la instalare trebuie să urmeze release-ul; un pin rămas în urmă e mai
+# rău decât `:latest`, fiindcă arată deliberat
+PINS=$(cd "$REPO" && grep -rhn 'ghcr\.io/[^ }"]*/webterm:[^ }"]*' \
+         .env.prod.example docker-compose.yml docker-compose.prod.yml install.sh | grep -cv ":v$V" || true)
+[ "$PINS" = 0 ] && ok "pin de imagine ↔ GATEWAY_VERSION (v$V)" || no "$PINS pin(uri) de imagine != v$V"
+"$PY" "$REPO/scripts/check-reqs-lock.py" >/dev/null && ok "requirements.txt ↔ .lock" || no "requirements drift"
+(cd "$REPO" && $RUFF check --select F gateway/app agent/ptyd.py >/dev/null 2>&1) \
   && ok "ruff --select F" || no "ruff --select F"
 docker run --rm -v "$REPO:/repo" \
   zricethezav/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
   detect --source /repo --config /repo/.gitleaks.toml --no-banner >/dev/null 2>&1 \
   && ok "gitleaks (istoric)" || no "gitleaks"
-(cd "$REPO" && bash scripts/run-tests.sh ci >/dev/null 2>&1) \
+(cd "$REPO" && PY="$PY" bash scripts/run-tests.sh ci >/dev/null 2>&1) \
   && ok "suita Python" || no "suita Python"
 fi
 

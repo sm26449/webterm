@@ -584,6 +584,7 @@ const ro: Lang = {
     'addhost.asCurrent': "utilizatorul curent",
     'addhost.dedicatedHint': "Creează userul „webterm” și instalează agentul sub el: gateway-ul primește drepturile lui webterm pe host, nu root. Cere sudo o dată. `enable-linger` e obligatoriu — fără el serviciul se oprește când userul nu are sesiune de login.",
     'addhost.currentHint': "Agentul primește exact drepturile userului cu care rulezi comanda. Ca root, WebTerm devine root shell pe acest host.",
+    'addhost.insecureBootstrap': "Gateway-ul rulează cu verificarea TLS oprită (WEBTERM_AGENT_INSECURE), deci comanda descarcă agentul fără să verifice certificatul. Pinningul începe abia după prima conexiune: cine poate intercepta exact această descărcare îţi instalează alt agent, cu cheia lui de update, cu drepturile cu care rulezi comanda. Rulează pe o reţea în care ai încredere, sau dă-i întâi gateway-ului un certificat real.",
     'addhost.agentConnected': "✓ Agentul s-a conectat — host online!",
     'addhost.waitingAgent': "Aștept conexiunea agentului…",
     'addhost.closeInstallLater': "Închid, instalez mai târziu",

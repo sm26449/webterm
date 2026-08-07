@@ -68,6 +68,26 @@ def main():
         check("%s pasează tot ce citeşte config.py" % compose, not missing,
               "lipsesc: " + ", ".join(missing))
 
+    # `WEBTERM_IMAGE` înseamnă IMAGINEA GATEWAY-ULUI: aşa e scrisă în `.env`, aşa o rescriu
+    # `deploy.sh` şi `rollback.sh`, aşa o citeşte compose. `backup.sh` şi `restore.sh` o
+    # foloseau însă cu al doilea înţeles — „o imagine care are python3" — iar `upgrade.sh`
+    # sursează `.env` înainte să cheme backupul. Deci containerul de unealtă primea imaginea
+    # aplicaţiei fără ca cineva s-o fi cerut: entrypoint-ul ei coboară la userul `webterm`,
+    # iar scriptul cade cu PermissionError. Backupul şi-a reparat simptomul pe loc; restaurarea
+    # avea acelaşi defect nereparat, şi acolo eşecul vine DUPĂ mutarea datelor vechi.
+    # Un nume, un înţeles — verificat, nu ţinut minte.
+    for script in ("scripts/backup.sh", "scripts/restore.sh"):
+        txt = _read(script)
+        check("%s nu mai citeşte WEBTERM_IMAGE ca imagine de unealtă" % script,
+              # ancorat pe ATRIBUIRE: scripturile îl citesc în continuare, dar numai ca să
+              # spună „e ignorat aici". Un `${WEBTERM_IMAGE:-}` gol în avertisment nu e defectul.
+              not re.search(r'^IMAGE=.*\$\{WEBTERM_IMAGE\b', txt, re.M),
+              "foloseşte WEBTERM_TOOL_IMAGE; WEBTERM_IMAGE e imaginea gateway-ului")
+        # …iar dacă cineva chiar ţinteşte imaginea aplicaţiei, trebuie să meargă, nu să pice
+        # la 03:30 dimineaţa cu o eroare de permisiuni.
+        check("%s ocoleşte entrypoint-ul care coboară privilegiile" % script,
+              "--entrypoint python3" in txt, "adaugă --entrypoint python3 la docker run")
+
     print(f"\n{ok}/{total} teste trecute")
     return ok == total
 

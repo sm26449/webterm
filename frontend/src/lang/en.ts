@@ -584,6 +584,7 @@ const en: Lang = {
     'addhost.asCurrent': "current user",
     'addhost.dedicatedHint': "Creates a \"webterm\" user and installs the agent as it: the gateway gets webterm's rights on the host, not root. Needs sudo once. `enable-linger` is not optional — without it the service stops when the user has no login session.",
     'addhost.currentHint': "The agent gets exactly the rights of the user running the command. As root, WebTerm becomes a root shell on this host.",
+    'addhost.insecureBootstrap': "This gateway runs with TLS verification off (WEBTERM_AGENT_INSECURE), so the command downloads the agent without checking the certificate. Pinning only starts after the first connection: anyone who can intercept this one download installs their own agent, with their own update key, with the rights you run it as. Use a network you trust, or give the gateway a real certificate first.",
     'addhost.agentConnected': "✓ The agent connected — host online!",
     'addhost.waitingAgent': "Waiting for the agent connection…",
     'addhost.closeInstallLater': "Close, install later",
