@@ -1,0 +1,11 @@
+[Unit]
+Description=WebTerm — backup date (SQLite + transcripturi)
+Wants=webterm-backup.timer
+
+[Service]
+Type=oneshot
+# ajustează calea dacă repo-ul nu e în /opt/webterm
+WorkingDirectory=/opt/webterm
+ExecStart=/opt/webterm/scripts/backup.sh
+# opțional: suprascrie prin /etc/default/webterm-backup
+EnvironmentFile=-/etc/default/webterm-backup

@@ -1,0 +1,90 @@
+"""Hardening agent (v20): G3 (run cu output mărginit + kill la runaway), G7 (rotaţie
+log), G1 (watchdog pe liveness). Fără proces gateway; apelăm metodele direct cu un self
+minimal (send_ctrl capturează reply-ul)."""
+import os
+import sys
+import tempfile
+import time
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "agent"))
+import ptyd  # noqa: E402
+
+ok = 0
+total = 0
+
+
+def check(name, cond, detail=""):
+    global ok, total
+    total += 1
+    ok += 1 if cond else 0
+    print(f"  {'PASS' if cond else 'FAIL'} {name}" + ("" if cond else f"  --  {detail}"))
+
+
+class FakeSelf:
+    def __init__(self):
+        self.reply = None
+
+    def send_ctrl(self, obj):
+        self.reply = obj
+
+
+# ================= G3: run cu output mărginit =================
+# comandă NORMALĂ
+fs = FakeSelf()
+ptyd.Agent._run_command(fs, "r1", "echo salut", 10)
+check("G3 comandă normală: exit 0 + output", fs.reply and fs.reply["exit_code"] == 0
+      and "salut" in fs.reply["stdout"], fs.reply)
+
+# comandă RUNAWAY (output infinit) → capată repede, memorie mărginită, NU rulează timeout-ul
+orig_hard = ptyd.RUN_CAPTURE_HARD
+ptyd.RUN_CAPTURE_HARD = 2 * 1024 * 1024      # 2MB pt. test rapid
+fs = FakeSelf()
+t0 = time.time()
+ptyd.Agent._run_command(fs, "r2", "yes ABCDEFGHIJ", 30)   # output infinit
+dt = time.time() - t0
+ptyd.RUN_CAPTURE_HARD = orig_hard
+check("G3 runaway: reply prezent (nu atârnă)", fs.reply is not None)
+check("G3 runaway: stdout mărginit (≤ RUN_OUTPUT_CAP)",
+      fs.reply and len(fs.reply["stdout"].encode()) <= ptyd.RUN_OUTPUT_CAP + 256,
+      len(fs.reply["stdout"]) if fs.reply else None)
+check("G3 runaway: OMORÂT la cap, NU după timeout (dt<10s, timeout era 30s)", dt < 10, "%.1fs" % dt)
+check("G3 runaway: marcat oprit (exit None)", fs.reply and fs.reply["exit_code"] is None)
+
+# comandă care depăşeşte TIMEOUT-ul
+fs = FakeSelf()
+t0 = time.time()
+ptyd.Agent._run_command(fs, "r3", "sleep 5", 1)
+dt = time.time() - t0
+check("G3 timeout: marcat timed_out", fs.reply and fs.reply["timed_out"] is True)
+check("G3 timeout: oprit la ~1s (nu 5s)", dt < 3, "%.1fs" % dt)
+
+# comandă inexistentă → exit non-zero, fără crash
+fs = FakeSelf()
+ptyd.Agent._run_command(fs, "r4", "comanda_inexistenta_xyz", 5)
+check("G3 comandă invalidă: reply ok cu exit != 0",
+      fs.reply and fs.reply["ok"] and fs.reply["exit_code"] not in (0, None), fs.reply)
+
+# ================= G7: rotaţie log =================
+d = tempfile.mkdtemp()
+ptyd.LOG_PATH = os.path.join(d, "ptyd.log")
+ptyd.LOG_MAX = 4096
+with open(ptyd.LOG_PATH, "wb") as f:
+    f.write(b"x" * 8192)          # peste plafon
+ag = FakeSelf()
+ag._last_logcheck = 0.0
+ptyd.Agent._rotate_log(ag)
+check("G7 log peste plafon → trunchiat", os.path.getsize(ptyd.LOG_PATH) < 4096,
+      os.path.getsize(ptyd.LOG_PATH))
+
+# ================= G1: watchdog pe liveness =================
+ptyd.ALIVE_PATH = os.path.join(d, "alive")
+check("G1 fişier lipsă → not hung", ptyd.agent_hung() is False)
+open(ptyd.ALIVE_PATH, "w").write("x")
+check("G1 proaspăt → not hung", ptyd.agent_hung() is False)
+os.utime(ptyd.ALIVE_PATH, (time.time() - (ptyd.AGENT_HUNG_AFTER + 50),) * 2)
+check("G1 stale → hung", ptyd.agent_hung() is True)
+
+check("AGENT_VERSION bumped (>=20)", ptyd.AGENT_VERSION >= 20, ptyd.AGENT_VERSION)
+
+print(f"\n{ok}/{total} PASS")
+sys.exit(0 if ok == total else 1)

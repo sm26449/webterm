@@ -1,0 +1,11 @@
+[Unit]
+Description=WebTerm — verifică expirarea certificatului TLS
+Wants=webterm-cert-check.timer
+
+[Service]
+Type=oneshot
+# ajustează calea dacă instalarea nu e în /opt/webterm
+WorkingDirectory=/opt/webterm
+ExecStart=/opt/webterm/scripts/cert-check.sh
+# WEBTERM_DOMAIN (+ opțional WEBTERM_ALERT_URL, WEBTERM_CERT_MIN_DAYS)
+EnvironmentFile=-/etc/default/webterm-cert-check

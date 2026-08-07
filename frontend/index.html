@@ -1,0 +1,32 @@
+<!doctype html>
+<!-- translate="no" + the google meta: a browser translation would rewrite xterm's
+     DOM and break the terminal, so it is refused outright.
+     lang="en" applies to the first paint only — I18nProvider replaces it with the
+     language actually selected. It must match the fallback catalogue, otherwise a
+     crawler and the first frame disagree with the rest of the app. -->
+<html lang="en" translate="no">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="google" content="notranslate" />
+    <!-- interactive-widget: pe Android, tastatura virtuală redimensionează
+         layout-ul (nu doar visual viewport-ul), deci terminalul + keybar-ul
+         rămân vizibile deasupra ei; iOS e tratat din main.tsx (visualViewport) -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
+    <meta name="theme-color" content="#0b0e14" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <!-- iOS acceptă doar PNG pentru apple-touch-icon; cu SVG, PWA instalată
+         pe iPhone primea o iconiță generică (screenshot) -->
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="mask-icon" href="/favicon.svg" color="#4f46e5" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <title>WebTerm</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <!-- plasa de siguranță se încarcă ÎNAINTEA bundle-ului: dacă aplicația nu
+         pornește (crash JS, bundle corupt), afișează pagina de recuperare în
+         loc de ecran alb; fișier separat pentru că CSP interzice inline -->
+    <script src="/failsafe.js"></script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

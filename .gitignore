@@ -1,0 +1,24 @@
+.venv/
+data/
+__pycache__/
+*.pyc
+node_modules/
+frontend/dist/
+.pytest_cache/
+node_modules
+.env
+.env.*
+!.env*.example
+backups/
+
+# agent update signing key — must never be committed
+*.pem
+webterm-agent-signing-key.pem
+
+# AI assistant artefacts — kept out of the public tree on purpose
+.claude/
+CLAUDE.md
+AGENTS.md
+.cursor/
+.aider*
+docs/AUDIT-*.md

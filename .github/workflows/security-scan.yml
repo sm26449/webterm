@@ -1,0 +1,45 @@
+name: Security scan (weekly)
+
+# CVE scan pe dependențele Python (pip-audit) + imaginea publicată (Trivy). Rulează pe CRON,
+# NU pe push — nu blochează PR-uri/release-uri. Un run roșu în tab-ul Actions = alertă pentru
+# admin (bump deliberat + re-test). Manual: workflow_dispatch.
+on:
+  schedule:
+    - cron: '17 6 * * 1'   # luni, 06:17 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  deps-cve:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: pip-audit pe dependențele Python (versiunile LIVRATE)
+        run: |
+          python3 -m pip install --quiet pip-audit
+          # requirements.txt == requirements.lock (garantat de check-reqs-lock.py în CI-ul de build),
+          # deci auditul pe .txt acoperă exact versiunile din imagine, fără parsarea hash-urilor.
+          pip-audit --strict --no-deps -r gateway/requirements.lock
+
+  image-cve:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log in to ghcr.io
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Trivy pe imaginea publicată (:latest) — HIGH/CRITICAL cu fix
+        run: |
+          # ignore-unfixed: CVE-urile de OS de bază fără patch disponibil nu ne dau semnal acționabil
+          # (le acoperă digest-pin + bump Dependabot); exit-code 1 face jobul roșu doar la ceva reparabil.
+          # Trivy rulează ÎNTR-UN container: `docker login` de mai sus scrie credenţialele pe
+          # RUNNER, unde containerul nu ajunge — deci pasul nu putea descărca imaginea şi
+          # eşua mereu cu „UNAUTHORIZED". Un job săptămânal permanent roşu e indistinct de
+          # „am găsit un CVE", ceea ce garantează că e ignorat. Îi dăm credenţialele direct.
+          docker run --rm \
+            -e TRIVY_USERNAME="${{ github.actor }}" \
+            -e TRIVY_PASSWORD="${{ secrets.GITHUB_TOKEN }}" \
+            aquasec/trivy@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c \
+            image --severity HIGH,CRITICAL --ignore-unfixed --no-progress --exit-code 1 \
+            ghcr.io/sm26449/webterm:latest
