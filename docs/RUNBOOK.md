@@ -202,6 +202,68 @@ credentials** recovered and decryptable.
    explicitly refuses to start with a regenerated key over encrypted data.
    Periodically verify that you have a copy of the backup off the server.
 
+### What the archive does NOT contain
+
+The backup covers the **data volume**. Everything that lives on the *host* is outside
+it — which is fine while the host exists, and a disaster the moment you rebuild it.
+
+| In the archive | Not in the archive |
+|---|---|
+| `webterm.db` — accounts, hosts, sessions, forwards, snippets, audit log | **The archive's own passphrase** (`/etc/default/webterm-backup`) |
+| `secret` — the vault key that decrypts every stored credential | `/opt/webterm/.env` — domain, ACME email, `CF_DNS_API_TOKEN`, `WEBTERM_SETUP_TOKEN`, `FORWARD_DOMAIN`, image pin |
+| `agent-signing.key` / `.pub` — the fleet key | The TLS certificates (a separate `*_traefik-acme` volume) |
+| `transcripts/` — session recordings | The operator scripts in `/opt/webterm` (they come back with the image, via `upgrade.sh`) |
+
+The first row is the one that ends badly. **The passphrase lives on the machine you are
+about to wipe.** Lose it and the encrypted archives are mathematically unrecoverable — no
+support path, no fallback. The certificates are the mildest: ACME re-issues them, but Let's
+Encrypt allows only **5 identical certificates per week**, so repeated rebuild attempts on
+the same domain can lock you out of HTTPS for days.
+
+**Copy off the server, before touching anything:**
+
+```bash
+sudo cp /etc/default/webterm-backup  ~/webterm-recovery/     # THE PASSPHRASE — first
+sudo cp /opt/webterm/.env            ~/webterm-recovery/
+cp /var/backups/webterm/webterm-*.enc ~/webterm-recovery/    # the newest archive
+```
+
+Then move that directory somewhere that is not this server.
+
+### Rebuilding the machine from scratch
+
+Verified path (it is also how a 1.0.x install moves to 2.0.0 — the database schema is
+identical between them, so there is no migration step):
+
+1. **Save the three items above.** Confirm you can read the passphrase file.
+2. Rebuild the VM and reinstall with **the same domain**. Agents store the gateway URL;
+   a new domain means every host has to be re-enrolled by hand.
+3. Let the new install boot **once**. It generates its own signing key, which is correct
+   and harmless — it has no hosts yet, and the restore replaces it.
+4. `sudo WEBTERM_BACKUP_PASSPHRASE=... ./scripts/restore.sh <archive>.enc` — this
+   replaces the whole data volume: database, vault key, fleet key, transcripts.
+5. Restore `/opt/webterm/.env` (or re-enter the values), then `./deploy.sh` to pick it up.
+
+What comes back by itself, and why:
+
+- **The agents reconnect without re-enrolment.** The anti-clone pin is stored per host in
+  the database (`hosts.instance_id`), not derived from the gateway machine — so the same
+  agent on the same host still matches after the rebuild.
+- **The fleet keeps accepting updates**, because `agent-signing.key` travelled in the
+  archive. Without it the new gateway could only relay maintainer-signed agents, and
+  auto-generation deliberately refuses once hosts exist (they hold a different public key
+  and would rightly reject updates signed with a new one).
+- **Certificates re-issue** on first boot, given the domain resolves here and port 80 is
+  reachable (HTTP-01) or the Cloudflare token is present (DNS-01).
+
+Verify the restore before you trust it: log in, open **Settings → Hosts** and confirm an
+SSH credential still decrypts (a host that connects proves the vault key survived), and
+check that an agent host comes back **online** (that proves the token decrypted too).
+
+**The circular dependency.** If the only way you administer the gateway host is through
+WebTerm itself, a rebuild leaves you with no way in. Keep SSH access to that machine,
+independently, and test it before you need it.
+
 ### Backup/restore from the application (v1.0.61+, no shell on the server)
 
 For the "I have no server access, but I have the app" case: **Settings → Backup**.
