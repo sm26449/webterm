@@ -1,0 +1,406 @@
+@import '@xterm/xterm/css/xterm.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ──────────────────────────────────────────────────────────────
+   Teme. Default = Aurora (macOS, deschis): fundal cu gradient de
+   auroră, suprafețe din sticlă mată, tipografie SF, accent Apple.
+   Alternativă = Midnight (întunecat). Terminalul rămâne întunecat
+   în ambele — ca Terminal.app într-o fereastră deschisă.
+   ────────────────────────────────────────────────────────────── */
+:root,
+:root[data-theme='macos'] {
+  --ink-950: 237 240 247;
+  --ink-900: 255 255 255;
+  --ink-800: 238 240 247;
+  --ink-700: 219 224 235;
+  --ink-600: 188 196 212;
+  --tx-100: 17 17 20;      /* cel mai contrastant text (pe fundal deschis) */
+  --tx-200: 27 27 30;
+  --tx-300: 44 46 54;
+  --tx-400: 60 64 76;      /* secundar */
+  --tx-500: 78 82 94;      /* terțiar */
+  --tx-600: 96 100 114;    /* estompat — trece AA pentru text mic */
+  --link: 79 70 229;       /* indigo-600 — AA pentru linkuri pe fundal deschis */
+  --focus: 99 102 241;     /* indigo-500 */
+
+  --glass-bg: rgba(255, 255, 255, 0.72);
+  --glass-hairline: rgba(20, 27, 45, 0.09);
+  --glass-shadow: 0 20px 50px -14px rgba(31, 45, 90, 0.3), 0 5px 16px -8px rgba(31, 45, 90, 0.16);
+  --window-shadow: 0 30px 70px -18px rgba(24, 39, 84, 0.4), 0 8px 24px -12px rgba(24, 39, 84, 0.22), 0 0 0 0.5px rgba(20, 27, 45, 0.12);
+  --app-gradient:
+    radial-gradient(1150px 780px at 87% -14%, rgba(120, 166, 255, 0.5), transparent 56%),
+    radial-gradient(1000px 720px at 4% 114%, rgba(255, 148, 206, 0.34), transparent 55%),
+    radial-gradient(880px 880px at 50% 46%, rgba(178, 148, 255, 0.18), transparent 62%),
+    #edf0f7;
+  --font-ui: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto, sans-serif;
+  --scrollbar: rgba(20, 27, 45, 0.22);
+}
+
+:root[data-theme='dark'] {
+  --ink-950: 11 14 20;
+  --ink-900: 17 21 31;
+  --ink-800: 26 32 48;
+  --ink-700: 37 45 66;
+  --ink-600: 51 64 92;
+  --tx-100: 241 245 249;   /* cel mai contrastant text (pe fundal închis) */
+  --tx-200: 226 232 240;
+  --tx-300: 203 213 225;
+  --tx-400: 156 170 190;   /* puțin mai luminos pentru contrast pe închis */
+  --tx-500: 122 136 158;
+  --tx-600: 96 110 132;
+  --link: 129 140 248;     /* indigo-400 — AA pe fundal închis */
+  --focus: 129 140 248;
+
+  --glass-bg: rgba(21, 27, 41, 0.82);
+  --glass-hairline: rgba(255, 255, 255, 0.06);
+  --glass-shadow: 0 20px 55px -14px rgba(0, 0, 0, 0.65), 0 5px 16px -8px rgba(0, 0, 0, 0.45);
+  --window-shadow: 0 30px 70px -18px rgba(0, 0, 0, 0.7), 0 8px 24px -12px rgba(0, 0, 0, 0.5), 0 0 0 0.5px rgba(255, 255, 255, 0.06);
+  /* graphite coerent: rail-ul e o suprafață discret ridicată peste același
+     fundal întunecat ca workspace-ul (fără cusătură alb/negru); doar un halou
+     rece f. subtil sus-dreapta ca să nu fie plat */
+  --app-gradient:
+    radial-gradient(1200px 820px at 88% -16%, rgba(66, 104, 180, 0.14), transparent 60%),
+    radial-gradient(1000px 760px at 2% 108%, rgba(60, 78, 120, 0.10), transparent 58%),
+    #0c1017;
+  --font-ui: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --scrollbar: rgba(148, 163, 184, 0.3);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  overscroll-behavior: none;
+}
+/* iOS standalone (PWA): conținutul nu intră sub notch/status bar.
+   Marginea de jos e tratată punctual (MobileKeybar, toasts).
+   --app-height e setat din main.tsx când tastatura virtuală e deschisă
+   (visual viewport < fereastră) ca terminalul să rămână deasupra ei. */
+#root {
+  height: var(--app-height, 100%);
+  padding-top: env(safe-area-inset-top);
+}
+
+body {
+  @apply text-slate-200 antialiased;
+  font-family: var(--font-ui);
+  background: var(--app-gradient);
+  background-attachment: fixed;
+}
+
+/* tokens de workspace (dark, independente de temă — cromul din jurul
+   terminalului rămâne închis ca să se armonizeze cu terminalul) */
+:root {
+  --term-bg: #0b0e14;
+  --chrome-bg: #0f1420;
+  --chrome-elev: #161c2b;
+  --chrome-line: rgba(255, 255, 255, 0.07);
+  --chrome-tx: #cdd5e2;
+  --chrome-tx-dim: #828da0;
+}
+
+/* ── Chrome-ul aplicației ─────────────────────────────────────── */
+
+/* Workspace integrat (dark): coloana din dreapta = un singur panou întunecat,
+   full-bleed. Rail-ul lateral rămâne pe tema aleasă → design în două tonuri. */
+.wt-workspace {
+  background: var(--term-bg);
+  /* Culoarea de bază trebuie fixată EXPLICIT aici: `body { color: rgb(var(--tx-200)) }`
+     se calculează o singură dată la nivel de body cu tokenii temei active (pe tema
+     deschisă = text închis) și tot ce e înăuntru MOȘTENEȘTE acea culoare închisă —
+     suprascrierea variabilei de mai jos nu re-rezolvă culoarea deja moștenită. Fără
+     asta, textul din crom (titlul sesiunii, tab-uri) e închis pe fundal închis. */
+  color: rgb(var(--tx-200));
+  /* suprascriem paleta DOAR aici → tot ce e înăuntru (tab-uri, toolbar,
+     terminal, status) devine întunecat, indiferent de tema aleasă */
+  --ink-950: 8 11 18;
+  --ink-900: 15 20 32;
+  --ink-800: 24 30 46;
+  --ink-700: 42 51 71;
+  --ink-600: 60 72 100;
+  --tx-100: 241 245 249;
+  --tx-200: 226 232 240;
+  --tx-300: 203 213 225;
+  --tx-400: 156 170 190;
+  --tx-500: 122 136 158;
+  --tx-600: 128 141 160;
+  --link: 129 140 248;
+  --scrollbar: rgba(148, 163, 184, 0.3);
+}
+.wt-main {
+  padding: 0;
+}
+.wt-window {
+  overflow: hidden;
+  background: var(--term-bg);
+}
+
+/* tab strip */
+.wt-tabstrip {
+  background: var(--chrome-bg);
+  border-bottom: 1px solid var(--chrome-line);
+}
+.wt-tab {
+  color: var(--chrome-tx-dim);
+}
+.wt-tab:hover {
+  background: color-mix(in srgb, var(--chrome-elev) 60%, transparent);
+  color: var(--chrome-tx);
+}
+/* selecția = fundal (ușor ridicat + tentă de host, setată inline); fără „căciuliță" */
+.wt-tab.is-active {
+  color: var(--chrome-tx);
+}
+.wt-tabbtn {
+  color: var(--chrome-tx-dim);
+}
+.wt-tabbtn:hover {
+  background: var(--chrome-elev);
+  color: var(--chrome-tx);
+}
+.wt-tabbtn.is-active {
+  background: var(--chrome-elev);
+  color: var(--chrome-tx);
+}
+
+/* sidebar și panourile plutitoare: sticlă mată */
+.wt-sidebar,
+.glass {
+  background: var(--glass-bg);
+  backdrop-filter: blur(26px) saturate(1.7);
+  -webkit-backdrop-filter: blur(26px) saturate(1.7);
+  border-color: var(--glass-hairline);
+}
+/* modalele (peste scrim întunecat) au nevoie de o suprafață mai opacă
+   pentru lizibilitate — sidebar-ul (peste gradient) rămâne mai translucid */
+.glass {
+  background: color-mix(in srgb, rgb(var(--ink-900)) 82%, var(--glass-bg));
+  box-shadow: var(--glass-shadow);
+}
+/* paleta de comenzi = mereu întunecată (ca terminalul), independent de temă:
+   culorile de identitate ale host-urilor sunt calibrate pe fundal închis și
+   ar cădea sub AA pe sticla deschisă din Aurora */
+.wt-command {
+  --ink-800: 24 30 46;
+  --ink-700: 42 51 71;
+  /* setul COMPLET de tokeni de text în varianta închisă — altfel clase ca
+     text-slate-400 (hint-uri) rămân pe valoarea temei deschise = text închis
+     pe panoul închis */
+  --tx-100: 241 245 249;
+  --tx-200: 226 232 240;
+  --tx-300: 203 213 225;
+  --tx-400: 156 170 190;
+  --tx-500: 122 136 158;
+  --tx-600: 128 141 160;
+  color: rgb(var(--tx-200));
+  /* opac + fără backdrop-filter: un fundal semi-transparent SAU un backdrop-filter
+     face ca verificatorii de contrast (și compunerea reală) să cadă pe primul
+     strămoș opac (body-ul deschis din Aurora) în loc de panoul închis */
+  background: #151b29;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+
+/* ── Login ─────────────────────────────────────────────────────── */
+.login-card {
+  background: var(--glass-bg);
+  backdrop-filter: blur(30px) saturate(1.8);
+  -webkit-backdrop-filter: blur(30px) saturate(1.8);
+  border: 0.5px solid var(--glass-hairline);
+  box-shadow: var(--window-shadow);
+}
+.brand-badge {
+  background: linear-gradient(150deg, #6366f1, #4f46e5 55%, #7c3aed);
+  box-shadow: 0 8px 22px -6px rgba(79, 70, 229, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+
+/* ── Utilitare ─────────────────────────────────────────────────── */
+.xterm .xterm-viewport {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar) transparent;
+}
+.xterm .xterm-viewport::-webkit-scrollbar {
+  width: 8px;
+}
+.xterm .xterm-viewport::-webkit-scrollbar-thumb {
+  background: var(--scrollbar);
+  border-radius: 4px;
+}
+
+@keyframes pulse-dot {
+  50% {
+    opacity: 0.4;
+  }
+}
+.dot-live {
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+/* cursor de terminal care clipește (login) — un singur accent tematic */
+@keyframes wt-blink {
+  50% {
+    opacity: 0;
+  }
+}
+.wt-caret {
+  animation: wt-blink 1.1s step-end infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .dot-live {
+    animation: none;
+  }
+}
+
+input,
+textarea {
+  @apply outline-none;
+}
+
+/* Telefon în peisaj (înălțime mică): cromul (header + tab-uri + status +
+   keybar) mânca ~85% din ecran — rămâneau 8 rânduri de terminal. Compactăm
+   tot ce nu e terminal; keybar-ul rămâne (e singura tastatură de comenzi). */
+@media (max-height: 480px) and (pointer: coarse) {
+  .wt-compact-y {
+    display: none;
+  }
+  .wt-window > header {
+    padding-top: 0.25rem;
+    padding-bottom: 0.25rem;
+  }
+  .wt-tabstrip {
+    padding-top: 0.25rem;
+  }
+  .wt-tab {
+    margin-bottom: 0.25rem;
+  }
+}
+
+/* Drawer-ul de sidebar pe mobil: fundal OPAC. Sticla mată arată bine peste
+   gradientul aplicației, dar peste conținut (dashboard) lasă textul să
+   transpară — pe telefon citeai două ecrane suprapuse. */
+.wt-drawer > * {
+  background: rgb(var(--ink-950));
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+:root[data-theme='macos'] .wt-drawer > * {
+  background: #f4f6fb;
+}
+
+/* conținut doar pentru cititoare de ecran (anunțuri de context) */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ținte tactile: pe ecrane fără mouse, butoanele mici (toolbar, keybar, tab)
+   trebuie să atingă 44px — recomandarea WCAG 2.5.5 / iOS HIG */
+@media (pointer: coarse) {
+  .wt-touch {
+    min-height: 44px;
+    min-width: 44px;
+  }
+}
+
+/* linkuri accent theme-aware (contrast garantat pe ambele fundaluri) */
+.wt-link {
+  color: rgb(var(--link));
+}
+.wt-link:hover {
+  text-decoration: underline;
+}
+
+/* stări semantice theme-aware (trec AA pe ambele fundaluri): ok/warn/danger/info.
+   Vocabular unic pentru online/attached/reconnecting/offline/lost — culoarea e
+   dublată mereu de text/icon, nu e singurul semnal (WCAG 1.4.1). */
+.wt-good {
+  color: #047857;
+}
+:root[data-theme='dark'] .wt-good {
+  color: #34d399;
+}
+.wt-danger {
+  color: #b91c1c;
+}
+:root[data-theme='dark'] .wt-danger {
+  color: #f87171;
+}
+.wt-warn {
+  color: #b45309;
+}
+:root[data-theme='dark'] .wt-warn {
+  color: #fbbf24;
+}
+/* cromul workspace-ului e mereu întunecat → stările semantice folosesc mereu
+   varianta luminoasă, indiferent de tema aleasă (verdele închis cade sub AA aici) */
+.wt-workspace .wt-good {
+  color: #34d399;
+}
+.wt-workspace .wt-danger {
+  color: #f87171;
+}
+.wt-workspace .wt-warn {
+  color: #fbbf24;
+}
+
+/* editorul de fișiere: conținutul e pe fundal de terminal (întunecat fix),
+   deci tokenii de text trebuie să fie mereu varianta deschisă — pe Aurora,
+   fără override, text-slate-200 ar fi text închis pe fundal închis */
+.wt-editor {
+  --tx-100: 241 245 249;
+  --tx-200: 226 232 240;
+  --tx-300: 203 213 225;
+  --tx-400: 156 170 190;
+  --tx-500: 122 136 158;
+  --tx-600: 128 141 160;
+}
+
+/* focus vizibil la navigare cu tastatura (nu și la click cu mouse-ul) */
+:where(button, a, input, textarea, select, [tabindex]):focus-visible {
+  outline: 2px solid rgb(var(--focus));
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* inputurile capătă o bordură subtilă pe tema deschisă (nu se mai pierd) */
+:root[data-theme='macos'] input,
+:root[data-theme='macos'] textarea,
+:root[data-theme='macos'] select {
+  border: 1px solid rgb(var(--ink-700));
+}
+/* excepții: titlul din header și inputuri „ghost" arată ca text, nu ca field */
+:root[data-theme='macos'] input.wt-ghost {
+  border-color: transparent;
+}
+:root[data-theme='macos'] input.wt-ghost:focus {
+  border-color: rgb(var(--ink-700));
+}
+
+/* tooltip global (TooltipLayer) — fade-in scurt la apariție */
+@keyframes wt-tip-in {
+  from { opacity: 0; transform: translateY(2px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.wt-tip {
+  animation: wt-tip-in 90ms ease-out;
+}
+
+/* respectă preferința de mișcare redusă peste tot */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}

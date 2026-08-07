@@ -1,0 +1,13 @@
+[Unit]
+Description=WebTerm — backup zilnic
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+# recuperează backup-ul dacă serverul era oprit la ora programată.
+# ATENŢIE: systemd NU suportă comentarii pe aceeaşi linie — un `Persistent=true  # ...`
+# e respins cu „Failed to parse boolean value, ignoring" şi cade pe false, tăcut.
+Persistent=true
+RandomizedDelaySec=15min
+
+[Install]
+WantedBy=timers.target

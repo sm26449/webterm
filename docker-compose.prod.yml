@@ -1,0 +1,173 @@
+# Producție: imagine ghcr pre-construită + Traefik (SSL Let's Encrypt automat).
+# Un singur secret de configurat — tokenul de setup al aplicației (în .env).
+# Deploy:  ./deploy.sh   (sau: docker compose -f docker-compose.prod.yml up -d)
+#
+# Reutilizează volumul `webterm-data` al stack-ului implicit, deci datele
+# (SQLite + transcripturi + cheie) se păstrează la trecerea de la Caddy la Traefik.
+
+# Rotația logurilor Docker (json-file): fără ea, pe un server de terminal cu viață lungă
+# logurile Traefik/app cresc nemărginit și umplu discul → coruperea WAL-ului SQLite la
+# scriere. Aplicată la toate serviciile prin ancoră YAML.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  # Proxy minimal peste Docker API: expune DOAR citirea containerelor/rețelelor
+  # către Traefik. Traefik (expus pe internet) nu mai atinge direct docker.sock,
+  # deci un eventual compromis nu poate controla Docker-ul gazdei.
+  dockerproxy:
+    image: tecnativa/docker-socket-proxy:0.1.1
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      CONTAINERS: 1        # citirea etichetelor pentru descoperirea rutelor
+      NETWORKS: 1
+      POST: 0              # niciun apel de scriere spre Docker
+      SERVICES: 0
+      TASKS: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [internal]
+
+  traefik:
+    # v3.6+ negociază versiunea de API cu Docker. Versiunile ≤3.5 cer fix API 1.24,
+    # pe care Docker Engine ≥28 o refuză (MinAPIVersion 1.40) — Traefik nu mai vede
+    # niciun container, deci nicio rută (404) și niciun certificat cerut.
+    image: traefik:v3.6
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on: [dockerproxy]
+    environment:
+      # token Cloudflare scoped Zone:DNS:Edit pe zona domeniului
+      CF_DNS_API_TOKEN: ${CF_DNS_API_TOKEN}
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.endpoint=tcp://dockerproxy:2375
+      - --entrypoints.web.address=:80
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --entrypoints.websecure.address=:443
+      # sesiunile de terminal pot fi inactive mult timp — nu tăia WebSocket-ul
+      - --entrypoints.websecure.transport.respondingTimeouts.idleTimeout=3600s
+      # certificat prin DNS-01 (Cloudflare): merge în spatele proxy-ului CF,
+      # prin NAT și fără port 80 expus; suportă și wildcard
+      - --certificatesresolvers.le.acme.email=${LETSENCRYPT_EMAIL}
+      - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.le.acme.dnschallenge=true
+      - --certificatesresolvers.le.acme.dnschallenge.provider=cloudflare
+      - --certificatesresolvers.le.acme.dnschallenge.resolvers=1.1.1.1:53,8.8.8.8:53
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - traefik-acme:/letsencrypt
+    networks: [webterm, internal]
+
+  app:
+    image: ${WEBTERM_IMAGE:-ghcr.io/sm26449/webterm:latest}
+    restart: unless-stopped
+    logging: *default-logging
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETUID
+      - SETGID
+    # rădăcină read-only; scrierile merg în volumul /data sau /tmp efemer (RAM)
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    environment:
+      WEBTERM_PUBLIC_URL: https://${WEBTERM_DOMAIN}
+      # the per-browser-WS backlog cap before a forced resync
+      WEBTERM_CLIENT_BUFFER: ${WEBTERM_CLIENT_BUFFER:-}
+      WEBTERM_SETUP_TOKEN: ${WEBTERM_SETUP_TOKEN:-}
+      # so the app knows, and shows in the UI, which image it is running
+      WEBTERM_IMAGE_REF: ${WEBTERM_IMAGE:-ghcr.io/sm26449/webterm:latest}
+      # the "is there a new version?" check: 0 disables it entirely (overrides the UI switch)
+      WEBTERM_UPDATE_CHECK: ${WEBTERM_UPDATE_CHECK:-1}
+      # optional read-only token, only while the repo is private (empty = works on a public repo)
+      WEBTERM_UPDATE_CHECK_TOKEN: ${WEBTERM_UPDATE_CHECK_TOKEN:-}
+      # the command the UI DISPLAYS when a new version exists (it never runs it)
+      WEBTERM_UPDATE_COMMAND: ${WEBTERM_UPDATE_COMMAND:-}
+      # ── The rest of the variables documented in .env.prod.example ────────────────────
+      # ALL of them used to be missing here: `config.py` read them, `.env.prod.example`
+      # documented them as working, but the container never received them. An admin who set
+      # SMTP or WEBTERM_TRUSTED_PROXY_CIDRS in .env believed something was enabled; in
+      # reality it ran on defaults. Checked on a live instance: 22 of 28 variables were dead.
+      # `env_file: .env` is deliberately NOT used — it would hand CF_DNS_API_TOKEN to the app
+      # too, which today is seen ONLY by Traefik (a separation worth keeping).
+      WEBTERM_UPDATE_REPO: ${WEBTERM_UPDATE_REPO:-}
+      # alerts (SMTP + webhook). They can also be configured from the UI, which stores them in the DB.
+      WEBTERM_SMTP_HOST: ${WEBTERM_SMTP_HOST:-}
+      WEBTERM_SMTP_PORT: ${WEBTERM_SMTP_PORT:-587}
+      WEBTERM_SMTP_USER: ${WEBTERM_SMTP_USER:-}
+      WEBTERM_SMTP_PASSWORD: ${WEBTERM_SMTP_PASSWORD:-}
+      WEBTERM_SMTP_STARTTLS: ${WEBTERM_SMTP_STARTTLS:-1}
+      WEBTERM_ALERT_FROM: ${WEBTERM_ALERT_FROM:-}
+      WEBTERM_ALERT_TO: ${WEBTERM_ALERT_TO:-}
+      WEBTERM_ALERT_WEBHOOK: ${WEBTERM_ALERT_WEBHOOK:-}
+      # security: who may set X-Forwarded-For, and how long sessions last
+      WEBTERM_TRUSTED_PROXY_HOPS: ${WEBTERM_TRUSTED_PROXY_HOPS:-1}
+      WEBTERM_TRUSTED_PROXY_CIDRS: ${WEBTERM_TRUSTED_PROXY_CIDRS:-}
+      WEBTERM_TRUST_CF_IP: ${WEBTERM_TRUST_CF_IP:-}
+      WEBTERM_IP_MAX_FAILS: ${WEBTERM_IP_MAX_FAILS:-5}
+      WEBTERM_SESSION_TTL_DAYS: ${WEBTERM_SESSION_TTL_DAYS:-30}
+      WEBTERM_SESSION_IDLE_HOURS: ${WEBTERM_SESSION_IDLE_HOURS:-12}
+      WEBTERM_IDLE_LOCK_SECS: ${WEBTERM_IDLE_LOCK_SECS:-300}
+      # retention and caps
+      WEBTERM_ARCHIVE_DAYS: ${WEBTERM_ARCHIVE_DAYS:-120}
+      WEBTERM_AUDIT_DAYS: ${WEBTERM_AUDIT_DAYS:-120}
+      WEBTERM_TRANSCRIPT_MAX_BYTES: ${WEBTERM_TRANSCRIPT_MAX_BYTES:-}
+      WEBTERM_TRANSCRIPT_KEEP_BYTES: ${WEBTERM_TRANSCRIPT_KEEP_BYTES:-}
+      # the domain forwards are opened on (defaults to the app's domain);
+      # it can be overridden in Settings, and the infra (Traefik) follows via FORWARD_DOMAIN
+      WEBTERM_FORWARD_DOMAIN: ${FORWARD_DOMAIN:-${WEBTERM_DOMAIN}}
+    volumes:
+      - webterm-data:/data
+    networks: [webterm]
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.webterm.rule=Host(`${WEBTERM_DOMAIN}`)
+      - traefik.http.routers.webterm.entrypoints=websecure
+      - traefik.http.routers.webterm.tls.certresolver=le
+      # certificat wildcard prin DNS-01: acoperă domeniul principal + toate
+      # subdomeniile de forward (*.<domeniu>). Un singur cert, un singur resolver.
+      - traefik.http.routers.webterm.tls.domains[0].main=${WEBTERM_DOMAIN}
+      - traefik.http.routers.webterm.tls.domains[0].sans=*.${WEBTERM_DOMAIN}
+      - traefik.http.services.webterm.loadbalancer.server.port=8000
+      - traefik.http.routers.webterm.middlewares=webterm-hsts@docker
+      - traefik.http.middlewares.webterm-hsts.headers.stsSeconds=31536000
+      - traefik.http.middlewares.webterm-hsts.headers.stsIncludeSubdomains=true
+      # Port forwarding: orice <slug>.<domeniu-forward> ajunge la ACEEAȘI aplicație,
+      # care face handshake-ul de auth (redirect→token→cookie) + proxy prin tunelul
+      # agentului. App-ul re-validează Host-ul față de sufixul exact al domeniului și
+      # de slug-urile declarate (defense-in-depth peste regexul de rutare).
+      # FORWARD_DOMAIN implicit = WEBTERM_DOMAIN (forward-urile pe același domeniu ca
+      # app-ul); setează-l în .env ca să folosești alt domeniu — Traefik îi emite un
+      # cert wildcard propriu prin același resolver DNS-01.
+      - traefik.http.routers.webterm-fwd.rule=HostRegexp(`^[a-z0-9-]+\.${FORWARD_DOMAIN:-${WEBTERM_DOMAIN}}$`)
+      - traefik.http.routers.webterm-fwd.entrypoints=websecure
+      - traefik.http.routers.webterm-fwd.tls.certresolver=le
+      - traefik.http.routers.webterm-fwd.tls.domains[0].main=${FORWARD_DOMAIN:-${WEBTERM_DOMAIN}}
+      - traefik.http.routers.webterm-fwd.tls.domains[0].sans=*.${FORWARD_DOMAIN:-${WEBTERM_DOMAIN}}
+      - traefik.http.routers.webterm-fwd.service=webterm
+      - traefik.http.routers.webterm-fwd.middlewares=webterm-hsts@docker
+
+volumes:
+  webterm-data:
+  traefik-acme:
+
+networks:
+  webterm:
+  # fără acces la exterior: doar Traefik ↔ dockerproxy
+  internal:
+    internal: true

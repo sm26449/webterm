@@ -1,0 +1,12 @@
+.git
+.venv
+data
+# `**/` e obligatoriu: un tipar simplu „node_modules" se potriveşte DOAR la rădăcină, iar
+# frontend/public/node_modules (29MB de sharp, generator de iconiţe) intra în imagine prin
+# `public/` → copiat de Vite în `dist/` → servit PUBLIC de gateway, neautentificat.
+# Prins de auditul intern (2026-08-06): imaginea crescuse de la 305MB la 392MB.
+**/node_modules
+frontend/dist
+tests
+__pycache__
+*.pyc

@@ -1,0 +1,10 @@
+# Pinned to exact, tested versions for reproducible builds (security-critical:
+# cryptography / asyncssh / argon2-cffi / webauthn). Bump deliberately + re-test.
+fastapi==0.139.0
+uvicorn[standard]==0.50.0
+aiosqlite==0.22.1
+argon2-cffi==25.1.0
+webauthn==3.0.0
+cryptography==50.0.0
+asyncssh==2.24.0
+telnetlib3==4.0.5
