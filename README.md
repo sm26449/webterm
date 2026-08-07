@@ -605,8 +605,14 @@ become healthy; `rollback.sh` is the panic button over SSH. Full recovery:
 ## Backup
 
 Everything that matters is in the `webterm-data` volume (`/data`): `webterm.db`,
-`transcripts/`, `secret` — and, outside the volume, `data/agent-signing.key`, the one
-artefact whose loss is irreversible: without it the fleet can never be updated again.
+`transcripts/`, `secret`, and `agent-signing.key` — the last being the one artefact whose
+loss is irreversible: without it the fleet can never be updated again.
+
+What is **not** in the volume, and therefore not in the archive: the archive's own
+passphrase (`/etc/default/webterm-backup`), `/opt/webterm/.env`, and the TLS certificates.
+That matters only when you rebuild the machine — and then it matters a great deal, because
+the passphrase lives on the machine you are about to wipe. The checklist and the full
+rebuild procedure are in [docs/RUNBOOK.md](docs/RUNBOOK.md#what-the-archive-does-not-contain).
 
 `make backup` writes to `./backups`. Set **`WEBTERM_BACKUP_PASSPHRASE`** (in
 `/etc/default/webterm-backup` for the scheduled timer) and it writes an encrypted
