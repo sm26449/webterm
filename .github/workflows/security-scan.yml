@@ -27,10 +27,18 @@ jobs:
   image-cve:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Log in to ghcr.io
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-      - name: Trivy pe imaginea publicată (:latest) — HIGH/CRITICAL cu fix
+      # Scana `:latest` — adică ce produce `main`, nu ce rulează lumea. Cât timp instalarea
+      # implicită era tot `:latest` cele două coincideau; de când e pinată pe versiunea
+      # lansată, un scan pe `:latest` păzeşte o imagine pe care n-o are nimeni, iar imaginea
+      # livrată rămâne neverificată. Ţinta se ia din `GATEWAY_VERSION`, aceeaşi sursă de
+      # adevăr ca badge-ul şi ca pinul de instalare.
+      - name: Trivy pe imaginea LANSATĂ — HIGH/CRITICAL cu fix
         run: |
+          V=$(grep -m1 '^GATEWAY_VERSION' gateway/app/config.py | cut -d'"' -f2)
+          echo "scanez ghcr.io/sm26449/webterm:v$V"
           # ignore-unfixed: CVE-urile de OS de bază fără patch disponibil nu ne dau semnal acționabil
           # (le acoperă digest-pin + bump Dependabot); exit-code 1 face jobul roșu doar la ceva reparabil.
           # Trivy rulează ÎNTR-UN container: `docker login` de mai sus scrie credenţialele pe
@@ -42,4 +50,4 @@ jobs:
             -e TRIVY_PASSWORD="${{ secrets.GITHUB_TOKEN }}" \
             aquasec/trivy@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c \
             image --severity HIGH,CRITICAL --ignore-unfixed --no-progress --exit-code 1 \
-            ghcr.io/sm26449/webterm:latest
+            "ghcr.io/sm26449/webterm:v$V"
