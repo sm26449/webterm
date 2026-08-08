@@ -31,7 +31,7 @@ export default function LoginPage(props: {
       props.onLogin()
     } catch (err) {
       if (err instanceof Error && err.name === 'NotAllowedError') return
-      setError(errText(err, t) || 'passkey indisponibil')
+      setError(errText(err, t) || t('login.passkeyUnavailable'))
     } finally {
       setBusy(false)
     }
@@ -62,7 +62,7 @@ export default function LoginPage(props: {
       }
       props.onLogin()
     } catch (err) {
-      setError(errText(err, t) || 'Network error')
+      setError(errText(err, t) || t('login.networkError'))
     } finally {
       setBusy(false)
     }

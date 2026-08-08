@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { errText, api, Host } from '../lib/api'
 import { useI18n } from '../lib/i18n'
 import { useFocusTrap } from '../lib/useFocusTrap'
+import { fmtTs } from '../lib/tz'
 
 type T = (key: string, vars?: Record<string, string | number>) => string
 
@@ -39,7 +40,7 @@ function ago(sec: number, t: T): string {
 }
 
 function stamp(ts: number): string {
-  try { return new Date(ts * 1000).toLocaleString() } catch { return '' }
+  return fmtTs(ts)
 }
 
 // aspectul fiecărui tip de eveniment din jurnal (label = cheie i18n)

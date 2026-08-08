@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { WatermarkConfig } from '../lib/api'
 import { currentTheme } from '../lib/theme'
+import { fmtTs } from '../lib/tz'
 
 /** ${email} ${host} ${date} ${time} → text; time/date sunt „live" (refresh 60s). */
 function resolveTemplate(tpl: string, vars: { email?: string; host?: string }): string {
@@ -8,7 +9,7 @@ function resolveTemplate(tpl: string, vars: { email?: string; host?: string }): 
   const map: Record<string, string> = {
     email: vars.email ?? '',
     host: vars.host ?? '',
-    date: now.toLocaleDateString(),
+    date: fmtTs(now.getTime() / 1000, 'date'),
     time: now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
   }
   return tpl.replace(/\$\{(email|host|date|time)\}/g, (_, k) => map[k] ?? '')

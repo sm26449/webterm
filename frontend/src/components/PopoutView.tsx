@@ -29,16 +29,17 @@ export default function PopoutView(props: { sid: string }) {
         const h = hosts.find((x) => x.id === s.host_id)
         setSession(s)
         setHost(h)
-        document.title = `${s.title || 'Terminal'}${h ? ' · ' + hostAt(h) : ''} · WebTerm`
+        document.title = `${s.title || t('app.sessionFallback')}${h ? ' · ' + hostAt(h) : ''} · WebTerm`
       } catch {
         /* retry on next tick */
       }
     }
     load()
-    const t = setInterval(() => { if (!document.hidden) load() }, 5000)
+    // `t` umbrea funcţia de traducere din componentă
+    const timer = setInterval(() => { if (!document.hidden) load() }, 5000)
     return () => {
       active = false
-      clearInterval(t)
+      clearInterval(timer)
     }
   }, [props.sid])
 

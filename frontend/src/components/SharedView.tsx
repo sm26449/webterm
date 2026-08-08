@@ -55,7 +55,7 @@ export default function SharedView(props: { token: string }) {
       .then((m) => {
         setTitle(m.title)
         setWatermark(m.watermark ?? null)   // ${email}/${host} deja rezolvate server-side
-        document.title = t('share.docTitle', { title: m.title || 'Terminal' })
+        document.title = t('share.docTitle', { title: m.title || t('app.sessionFallback') })
       })
       .catch(() => setError(t('share.errInvalid')))
   }, [props.token, t])

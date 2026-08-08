@@ -16,9 +16,17 @@ export function detectLang(): string {
     const saved = localStorage.getItem(STORAGE_KEY)
     if (saved && LANGS[saved]) return saved
   } catch { /* localStorage indisponibil */ }
-  const nav = (navigator.language || '').toLowerCase()
-  for (const code of Object.keys(LANGS)) {
-    if (nav === code || nav.startsWith(code + '-')) return code
+  // `navigator.languages`, nu doar `navigator.language`: al doilea e DOAR prima preferinţă,
+  // deci un browser setat `de-DE, ro;q=0.9` — germană preferată, română acceptată — primea
+  // engleză, deşi utilizatorul spusese limpede că înţelege româna. Parcurgem lista în ordinea
+  // preferinţei şi luăm prima limbă pe care o avem.
+  const prefs = (navigator.languages && navigator.languages.length
+    ? navigator.languages
+    : [navigator.language || '']).map((l) => (l || '').toLowerCase())
+  for (const nav of prefs) {
+    for (const code of Object.keys(LANGS)) {
+      if (nav === code || nav.startsWith(code + '-')) return code
+    }
   }
   return FALLBACK_LANG
 }
@@ -30,6 +38,15 @@ interface I18nCtx {
 }
 
 const Ctx = createContext<I18nCtx | null>(null)
+
+/* Traducere in afara React: `duration()` si `humanUptime()` sunt functii de modul,
+   fara acces la hook. Fara asta ramaneau cu abrevieri hardcodate — „z" romanesc
+   scurs in interfata engleza. Citeste aceeasi limba ca `useI18n`, deci nu poate
+   diverge de ea. */
+export function tStatic(key: string): string {
+  const lang = detectLang()
+  return LANGS[lang]?.strings[key] ?? LANGS[FALLBACK_LANG]?.strings[key] ?? key
+}
 
 export function I18nProvider({ children }: { children: ReactNode }) {
   const [lang, setLangState] = useState<string>(detectLang)

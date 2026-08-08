@@ -1,8 +1,11 @@
 import { useEffect, useState } from 'react'
 import { Host, Session } from '../lib/api'
-import { useI18n } from '../lib/i18n'
-import { getTimezone, timeInZone, uiLocale } from '../lib/tz'
+import { tStatic, useI18n } from '../lib/i18n'
+import { fmtTs, getTimezone, timeInZone, uiLocale } from '../lib/tz'
 import { copyText } from '../lib/clipboard'
+
+// abrevierea de zile vine din catalog: era fixa, deci aparea si in interfata engleza
+const DAY = () => tStatic('time.d')
 
 // trebuie să corespundă cu agentul: tmux -L <socket>, sesiune <prefix><sid>
 const TMUX_SOCKET = 'webterm'
@@ -16,7 +19,7 @@ function fmt(epoch: number | null): string {
       hour: '2-digit', minute: '2-digit',
     }).format(new Date(epoch * 1000))
   } catch {
-    return new Date(epoch * 1000).toLocaleString()
+    return fmtTs(epoch)
   }
 }
 
@@ -25,7 +28,7 @@ function duration(from: number, to: number): string {
   if (s < 60) return `${s}s`
   if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`
   if (s < 86400) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`
-  return `${Math.floor(s / 86400)}z ${Math.floor((s % 86400) / 3600)}h`
+  return `${Math.floor(s / 86400)}${DAY()} ${Math.floor((s % 86400) / 3600)}h`
 }
 
 // scurtează calea pentru afișare: ~/… pentru home, altfel …/ultimele/2/segmente

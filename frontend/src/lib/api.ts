@@ -257,10 +257,13 @@ export async function api<T>(path: string, options: RequestInit = {}, _retried =
   return res.json()
 }
 
-export function timeAgo(epoch: number): string {
+// `t` e obligatoriu: abrevierile erau engleză fixă (`now`, `d`) aici şi română fixă (`z`) în
+// trei componente, deci ACELAŞI produs scria „văzut now" pe un dashboard românesc şi „acum 3z"
+// pe unul englezesc. Unităţile stau în catalog, ca restul.
+export function timeAgo(epoch: number, t: (k: string) => string): string {
   const s = Math.max(0, Date.now() / 1000 - epoch)
-  if (s < 60) return 'now'
-  if (s < 3600) return `${Math.floor(s / 60)}m`
-  if (s < 86400) return `${Math.floor(s / 3600)}h`
-  return `${Math.floor(s / 86400)}d`
+  if (s < 60) return t('time.now')
+  if (s < 3600) return `${Math.floor(s / 60)}${t('time.m')}`
+  if (s < 86400) return `${Math.floor(s / 3600)}${t('time.h')}`
+  return `${Math.floor(s / 86400)}${t('time.d')}`
 }

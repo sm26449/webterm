@@ -101,7 +101,7 @@ export default function Dashboard(props: {
                       <span className="block truncate text-xs" style={{ color }}>{h?.name ?? t('dashboard.host')}</span>
                     </span>
                     <span className="shrink-0 text-right text-[11px] text-slate-500">
-                      {timeAgo(s.created)}
+                      {timeAgo(s.created, t)}
                       {s.connected_clients > 0 && (
                         <span className="mt-0.5 flex items-center justify-end gap-1" title={t('dashboard.connectedCount', { count: s.connected_clients })}>
                           <EyeIcon /> {s.connected_clients}
@@ -141,7 +141,7 @@ export default function Dashboard(props: {
                     </span>
                     <span className="shrink-0 text-right text-[11px] text-slate-500">
                       {s.state === 'lost' ? t('dashboard.lost') : t('dashboard.closed')}
-                      <span className="block">{timeAgo(s.closed_at || s.created)}</span>
+                      <span className="block">{timeAgo(s.closed_at || s.created, t)}</span>
                     </span>
                   </button>
                 )
@@ -179,7 +179,7 @@ export default function Dashboard(props: {
                       const health = h.online && m && m.cpu_pct != null
                         ? `CPU ${Math.round(m.cpu_pct)}%${m.load1 != null ? ` · load ${m.load1.toFixed(2)}` : ''}`
                         : !h.online && h.connection_type === 'agent' && h.last_heartbeat != null
-                          ? t('dashboard.seen', { time: timeAgo(h.last_heartbeat) })
+                          ? t('dashboard.seen', { time: timeAgo(h.last_heartbeat, t) })
                           : null
                       const hist = hostHistory(h.id)
                       return (

@@ -339,7 +339,10 @@ In the UI: **+ host** → you get a `curl … | sh` command. Copy/paste → Ente
 server, **as the user you want to work as** (the agent's user = the sessions'
 shell). The script downloads the agent into `~/.webterm/`, starts it and sets up
 automatic restart (systemd `--user` with Restart=always, otherwise cron `@reboot`
-+ watchdog). Requires python3 ≥ 3.6; **`tmux` is what makes sessions persistent** — without it
++ watchdog). It also **appends one line to `~/.bashrc` and `~/.zshrc`** so shell integration
+(OSC 133) works — the commands panel, per-command exit codes and `cd` tracking depend on it.
+Set `WEBTERM_NO_SHELL_INTEGRATION=1` before running the command to skip that; everything else
+works without it. Requires python3 ≥ 3.6; **`tmux` is what makes sessions persistent** — without it
 the agent runs on a plain PTY and sessions die with it.
 On-server diagnostics: `python3 ~/.webterm/ptyd.py info`.
 

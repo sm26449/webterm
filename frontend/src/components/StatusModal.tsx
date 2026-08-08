@@ -1,8 +1,11 @@
 import { ReactNode, useEffect, useRef, useState } from 'react'
 import { api } from '../lib/api'
 import { useFocusTrap } from '../lib/useFocusTrap'
-import { useI18n } from '../lib/i18n'
+import { tStatic, useI18n } from '../lib/i18n'
 import UpdateCommand from './UpdateCommand'
+
+// abrevierea de zile vine din catalog: era fixa, deci aparea si in interfata engleza
+const DAY = () => tStatic('time.d')
 
 interface Status {
   uptime_seconds: number
@@ -47,7 +50,7 @@ function humanUptime(s: number): string {
   const d = Math.floor(s / 86400)
   const h = Math.floor((s % 86400) / 3600)
   const m = Math.floor((s % 3600) / 60)
-  if (d) return `${d}z ${h}h`
+  if (d) return `${d}${DAY()} ${h}h`
   if (h) return `${h}h ${m}m`
   return `${m}m`
 }

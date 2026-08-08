@@ -3,3 +3,8 @@ contact_links:
   - name: 🔒 Security vulnerability
     url: https://github.com/sm26449/webterm/security/advisories/new
     about: Do NOT open a public issue for security problems. Report it privately here (see SECURITY.md).
+  # Fără linia asta, `blank_issues_enabled: false` lăsa un om cu o simplă ÎNTREBARE fără nicio
+  # cale: singurele opţiuni erau „bug" şi „feature", iar contactul unic era securitatea.
+  - name: 💬 Question or help
+    url: https://github.com/sm26449/webterm/discussions
+    about: Not sure it is a bug? Ask here — setup problems, "is this supposed to work like this", ideas.
