@@ -239,6 +239,17 @@ async def main():
     check("README-ul recomandă exact comanda pe care o afişează UI-ul",
           suggested in readme, suggested)
 
+    # Poarta verifica DOAR config.py şi README, deci reparaţia a rămas incompletă exact pe
+    # suprafeţele instalării: ultima linie tipărită de `install.sh` şi exemplul din
+    # `.env.prod.example` recomandau în continuare `deploy.sh` — upgrade fără backup şi fără
+    # sincronizarea scripturilor de pe host. Semnalat de un audit extern.
+    for rel in ("install.sh", ".env.prod.example"):
+        txt = (root / rel).read_text(encoding="utf-8")
+        bad = [ln.strip() for ln in txt.splitlines()
+               if "deploy.sh" in ln and ("to upgrade" in ln.lower()
+                                         or "UPDATE_COMMAND" in ln)]
+        check("%s nu mai recomandă deploy.sh pentru upgrade" % rel, not bad, str(bad[:2]))
+
     print(f"\n{ok}/{total} passed")
     return ok == total
 

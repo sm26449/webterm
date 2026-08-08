@@ -442,7 +442,7 @@ echo "  Setup token:       $SETUP_TOKEN"
 echo "                     (required when creating the first account; stored in $INSTALL_DIR/.env)"
 echo "  Directory:         $INSTALL_DIR   (.env config, chmod 600)"
 echo "  Data:              Docker volume ${PROJECT}_webterm-data (SQLite + transcripts + key)"
-echo "  To upgrade:        cd $INSTALL_DIR && ./deploy.sh"
+echo "  To upgrade:        cd $INSTALL_DIR && sudo ./upgrade.sh"
 echo "  Backup manual:     WEBTERM_VOLUME=${PROJECT}_webterm-data $INSTALL_DIR/scripts/backup.sh"
 echo "  Restore:           $INSTALL_DIR/scripts/restore.sh <archive>"
 echo
