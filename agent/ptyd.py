@@ -41,7 +41,7 @@ import termios
 import threading
 import time
 
-AGENT_VERSION = 38
+AGENT_VERSION = 39
 PROTO = 1
 
 RUN_MAX_TIMEOUT = 300           # plafon timeout pentru op-ul `run` (consola de flotă)
@@ -500,9 +500,17 @@ class Metrics:
 
 
 def log(msg):
-    ts = time.strftime("%Y-%m-%d %H:%M:%S")
-    sys.stderr.write("[%s] %s\n" % (ts, msg))
-    sys.stderr.flush()
+    """Jurnalizare best-effort. Un `write` pe stderr POATE eşua — disc plin (ENOSPC), pipe
+    închis, cotă depăşită — iar excepţia se propaga din orice loc de unde s-a chemat `log`,
+    adică din bucla de evenimente, din reconciliere, din update. Agentul murea din cauza
+    jurnalului, exact în situaţia despre care jurnalul încerca să te anunţe. Nu jurnalizăm
+    eşecul jurnalizării: n-am avea unde."""
+    try:
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        sys.stderr.write("[%s] %s\n" % (ts, msg))
+        sys.stderr.flush()
+    except Exception:      # noqa: BLE001 — logul nu are voie să doboare agentul
+        pass
 
 
 # ---------------------------------------------------------------------------

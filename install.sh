@@ -146,6 +146,15 @@ docker info >/dev/null 2>&1 || { err "The Docker daemon is not running."; exit 1
 # instalare pe jumătate şi un mesaj de la Docker care nu spune ce e de făcut.
 # `install.sh` e calea de PRODUCŢIE, deci aici starea parţială costă cel mai mult.
 # Dacă stiva noastră rulează deja (reinstalare peste ea), ea ţine porturile — nu e o problemă.
+# Necunoscut ≠ liber. Fără ambele unelte, verificarea nu poate spune nimic, iar sub
+# `set -euo pipefail` chiar putea omorî scriptul tăcut. `setup.sh` a primit avertismentul
+# grațios; aici lipsea, deşi asta e calea de PRODUCŢIE.
+if [ "$DO_PORTCHECK" = 1 ] && ! command -v ss >/dev/null 2>&1 \
+   && ! command -v netstat >/dev/null 2>&1; then
+  warn "Neither 'ss' nor 'netstat' is available — I cannot check whether 80/443 are free."
+  warn "If Traefik fails to start with 'port is already allocated', that is why."
+  DO_PORTCHECK=0
+fi
 if [ "$DO_PORTCHECK" = 1 ] && [ -z "$(docker ps -q --filter label=com.docker.compose.project=webterm 2>/dev/null)" ]; then
   BUSY=""
   for p in 80 443; do
