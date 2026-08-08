@@ -202,6 +202,14 @@ if [ "$DO_BACKUP" = 1 ]; then
       echo "  backup done"
     else
       warn "the backup failed"
+      # `-y` înseamnă „nu mă întreba", nu „treci peste o plasă de siguranţă lipsă". `ask`
+      # întorcea 0 sub `-y`, deci un upgrade neasistat continua fără snapshot exact când
+      # backupul e stricat — adică atunci când ai cea mai mare nevoie de el. Cine chiar vrea
+      # asta o spune explicit, cu --no-backup.
+      if [ "$ASSUME_YES" = 1 ]; then
+        die "the backup failed and -y was given — refusing to upgrade without a snapshot.
+Fix the backup, or say so explicitly with --no-backup."
+      fi
       ask "Continue the upgrade WITHOUT a backup?" || die "cancelled — fix the backup first"
     fi
   else
@@ -330,4 +338,15 @@ if [ "${SELF_UPDATE:-0}" = 1 ]; then
   echo "  upgrade.sh updated itself (active from the next run)"
 fi
 
-printf '\n\033[32m✓ Upgrade complet: %s (gateway v%s, agent v%s)\033[0m\n' "$TARGET" "$NEW_VER" "$NEW_AGENT"
+# Bannerul raporta ŢINTA, nu realitatea. `deploy.sh` face `exec ./rollback.sh` când imaginea
+# nouă nu devine healthy, iar un rollback reuşit iese cu 0 — deci upgrade.sh continua şi anunţa
+# verde „Upgrade complet: v2.1.0" pe o instalare care tocmai revenise la v2.0.0. Comparăm cu
+# imaginea care rulează chiar acum, citită mai sus la pasul de verificare.
+if [ "$RUNNING" = "$IMAGE" ]; then
+  printf '\n\033[32m✓ Upgrade complet: %s (gateway v%s, agent v%s)\033[0m\n' "$TARGET" "$NEW_VER" "$NEW_AGENT"
+else
+  printf '\n\033[1;33m! Upgrade NEAPLICAT: rulează %s, nu %s\033[0m\n' "${RUNNING:-?}" "$IMAGE"
+  echo "  Imaginea nouă nu a devenit healthy, iar deploy.sh a făcut rollback automat."
+  echo "  Vezi 'docker logs ${APP_CID:-<container>}' pentru motiv."
+  exit 1
+fi

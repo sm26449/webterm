@@ -147,7 +147,13 @@ SMTP_USER = os.environ.get("WEBTERM_SMTP_USER", "")
 SMTP_PASSWORD = os.environ.get("WEBTERM_SMTP_PASSWORD", "")
 SMTP_STARTTLS = _str("WEBTERM_SMTP_STARTTLS", "1").lower() in ("1", "true", "yes")
 # expeditor și destinatar (adresa de admin care primește alertele)
-ALERT_FROM = os.environ.get("WEBTERM_ALERT_FROM", SMTP_USER)
+# `_str`, nu `get`: compose pasează `${WEBTERM_ALERT_FROM:-}`, deci variabila ajunge
+# PREZENTĂ şi GOALĂ, iar `get(name, default)` cade pe default doar când LIPSEŞTE. Aici
+# default-ul e altă valoare de config (`SMTP_USER`), deci rezultatul era "" — şi
+# `email_alerts_enabled()` devenea False. Operatorul care punea SMTP în `.env` fără
+# `WEBTERM_ALERT_FROM` nu mai primea alertele de lockout şi de login de pe IP nou,
+# fără nicio eroare. Exact capcana pentru care există `_str`.
+ALERT_FROM = _str("WEBTERM_ALERT_FROM", SMTP_USER)
 ALERT_TO = os.environ.get("WEBTERM_ALERT_TO", "")
 # Alerte şi pe webhook (Slack/Discord/Teams/orice endpoint JSON). Independent de SMTP:
 # emailul e bun de arhivă, dar prost pentru reacţie — la un lockout sau la o flotă care

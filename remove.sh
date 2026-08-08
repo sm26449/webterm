@@ -169,7 +169,15 @@ for u in webterm-backup webterm-cert-check; do
   systemctl disable --now "$u.service" >/dev/null 2>&1 || true
   rm -f "/etc/systemd/system/$u.timer" "/etc/systemd/system/$u.service"
 done
-rm -f /etc/default/webterm-backup /etc/default/webterm-cert-check
+# `--keep-backups` păstra arhivele şi ştergea parola care le descifrează — adică exact
+# arhivele orfane despre care avertizează linia de mai sus. Arhivele fără parolă sunt zgomot
+# criptografic: ocupă spaţiu şi nu se pot restaura niciodată.
+if [ "$KEEP_BACKUPS" = 1 ]; then
+  echo "  kept /etc/default/webterm-backup (it holds the passphrase for the archives you kept)"
+else
+  rm -f /etc/default/webterm-backup
+fi
+rm -f /etc/default/webterm-cert-check
 systemctl daemon-reload 2>/dev/null || true
 echo "  timers + units removed"
 

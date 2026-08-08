@@ -1650,7 +1650,16 @@ async def reconcile(conn: AgentConnection, msg: dict) -> None:
                     " WHERE id=?", time.time(), row["id"])
             # 'lost' neraportat: rămâne (reconectabil / reaper)
             continue
-        if not info.get("alive"):
+        # `alive` ABSENT nu înseamnă „a murit". `info["alive"]` ridica KeyError pe un raport
+        # malformat; înlocuirea cu `.get()` a făcut ca lipsa câmpului să dea `None`, adică falsy,
+        # adică exact ramura de închidere: `on_exit` + `reap`, care omoară şi sesiunea tmux REALĂ
+        # de pe host. Un câmp lipsă dintr-un mesaj trunchiat sau dintr-un drift de protocol
+        # devenea o comandă de închidere. Toleranţa mutase problema din „excepţie" în „pierdere
+        # tăcută de date". Absent = nu ştim = nu atingem nimic.
+        alive = info.get("alive")
+        if alive is None:
+            continue
+        if not alive:
             hub = get_or_create_hub(row)
             # drain any output still in the agent ring, then close
             await hub.ensure_attached(conn)
@@ -1687,6 +1696,10 @@ async def reconcile(conn: AgentConnection, msg: dict) -> None:
         # a malicious agent could report a crafted sid; only adopt real ones
         # (uuid4 hex) so it can never become a filesystem path outside the dir
         if not valid_sid(sid):
+            continue
+        # Aceeaşi grijă la adopţie: un raport fără `alive` nu justifică nici adoptarea, nici
+        # un `reap`. Aici `info["alive"]` ridica KeyError şi rupea tot ciclul de reconciliere.
+        if info.get("alive") is None:
             continue
         if not info["alive"]:
             try:

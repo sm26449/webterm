@@ -43,7 +43,16 @@ case "$1" in
   login) exit 0 ;;
   pull)  exit ${PULL_FAILS:-0} ;;
   ps)    case "$*" in *Names*) echo "webterm-app-1" ;; *) echo "ghcr.io/x/webterm:$WANT_TAG" ;; esac; exit 0 ;;
-  inspect) echo healthy; exit 0 ;;
+  # `docker inspect` e chemat de DOUĂ ori cu formate diferite: starea de sănătate şi imaginea
+  # care rulează. Stub-ul răspundea „healthy" la amândouă, deci verificarea „ce rulează de fapt"
+  # primea „healthy" în loc de o referinţă de imagine. Un stub prea gros face testul să treacă
+  # pe un cod greşit şi să pice pe unul corect — al doilea caz s-a întâmplat aici.
+  inspect)
+    case "$*" in
+      *Config.Image*) echo "ghcr.io/x/webterm:$WANT_TAG" ;;
+      *)              echo healthy ;;
+    esac
+    exit 0 ;;
   run)
     # ultimul argument e comanda `sh -c "..."`; distingem după conţinut
     case "$*" in
