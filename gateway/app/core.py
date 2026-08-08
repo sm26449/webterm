@@ -11,6 +11,7 @@ import asyncio
 import base64
 import json
 import logging
+import math
 import os
 import re
 import shlex
@@ -885,6 +886,13 @@ class AgentGone(Exception):
 # pentru mesajul de eroare lizibil (nu e sursa de adevăr)
 MAX_SESSIONS_HINT = 32
 
+# Metricile pe care agentul le trimite şi UI-ul le afişează. Orice altceva se aruncă:
+# dicţionarul ăsta pleacă în fiecare răspuns de host-detail.
+METRIC_KEYS = frozenset((
+    "cpu_pct", "load1", "load5", "load15",
+    "mem_total", "mem_used", "disk_total", "disk_used", "uptime",
+))
+
 
 class SessionLimitReached(Exception):
     """The host hit MAX_SESSIONS — a normal condition, mapped to 409 (not 502)."""
@@ -1513,7 +1521,8 @@ async def maybe_upgrade_agent(conn: AgentConnection) -> None:
             # Refuz explicit al agentului. NU-l înghiţim: fără semnal, flota rămâne pe o
             # versiune veche şi nimeni nu află de ce.
             code = resp.get("code") or resp.get("msg") or "necunoscut"
-            update_blocked[conn.host_id] = str(code)
+            code = _clip(str(code), 200) or "unknown"   # şir de la agent: mărginit ca restul
+            update_blocked[conn.host_id] = code
             await db.execute("UPDATE hosts SET update_blocked=? WHERE id=?",
                              str(code), conn.host_id)
             log.error("host %s: the agent REFUSED the update (%s)", conn.host_id, code)
@@ -1591,11 +1600,18 @@ async def reconcile(conn: AgentConnection, msg: dict) -> None:
         # Mărginit: agentul trimite şase numere, dar un host compromis poate trimite orice, iar
         # dicţionarul ăsta ajunge în FIECARE răspuns de host-detail către browser. Păstrăm doar
         # cheile pe care le înţelegem şi doar dacă sunt numere — restul se aruncă tăcut.
-        raw = msg["metrics"]
-        conn.metrics = {k: v for k, v in raw.items()
-                        if isinstance(k, str) and len(k) <= 32
-                        and isinstance(v, (int, float)) and not isinstance(v, bool)} \
-            if isinstance(raw, dict) else {}
+        # Listă ALBĂ, plafon de număr şi doar valori finite. Varianta dinainte spunea în
+        # comentariu „doar cheile pe care le înţelegem", dar accepta orice cheie ≤32 de
+        # caractere cu valoare numerică: 50 000 de chei treceau, ~819 KB, în fiecare răspuns de
+        # host-detail. Iar `json.loads` acceptă literalul `Infinity` de pe fir, în timp ce
+        # `JSONResponse` refuză să-l serializeze — deci un agent care trimite `inf` transforma
+        # `GET /api/hosts/{id}` în 500 până când se cuminţea. Un host compromis nu trebuie să
+        # poată strica pagina hostului.
+        raw = msg["metrics"] if isinstance(msg.get("metrics"), dict) else {}
+        conn.metrics = {
+            k: v for k, v in list(raw.items())[:64]
+            if k in METRIC_KEYS and isinstance(v, (int, float))
+            and not isinstance(v, bool) and math.isfinite(v)}
         # alerte pe praguri (CPU/RAM/disc) — evaluare la fiecare heartbeat;
         # trimiterea e best-effort și throttled în email_alerts. Pragurile sunt
         # cache-uite, iar numele hostului e memoizat pe conn → zero query-uri DB

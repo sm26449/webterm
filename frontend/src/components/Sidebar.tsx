@@ -20,6 +20,14 @@ const AboutModal = lazy(() => import('./AboutModal'))
 // textul mesajului, care se traduce şi mută condiţia sub picioare.
 const SIGNATURE_BLOCKS = new Set(['signature_missing', 'update_unsigned'])
 
+// Motivul blocării, tradus dacă îl cunoaştem, altfel afişat ca atare. Un cod nou trebuie să
+// fie VIZIBIL, nu ascuns în spatele unei traduceri lipsă.
+function blockReason(t: (k: string) => string, code: string): string {
+  const key = 'sidebar.blockReason.' + code
+  const label = t(key)
+  return label === key ? code : label
+}
+
 const stateDot: Record<Session['state'], string> = {
   creating: 'bg-amber-400',
   live: 'bg-emerald-400 dot-live',
@@ -303,7 +311,11 @@ export default function Sidebar(props: {
                un motiv nou în spatele unei traduceri lipsă. */
             <span
               title={t('sidebar.updateBlockedTitle', {
-                reason: t('sidebar.blockReason.' + host.update_blocked) || host.update_blocked,
+                // `t()` nu întoarce niciodată gol: la cheie lipsă întoarce CHEIA. Deci `||` era
+                // cod mort, iar un cod nou de la agent (`core.py` scrie şi „necunoscut", sau ce
+                // frază trimite el) apărea în tooltip ca `sidebar.blockReason.necunoscut` —
+                // exact inversul a ce promitea comentariul de aici. Comparăm cu cheia.
+                reason: blockReason(t, host.update_blocked),
               }) + (SIGNATURE_BLOCKS.has(host.update_blocked)
                 ? t('sidebar.updateBlockedHint')
                 : t('sidebar.updateBlockedLog'))}
