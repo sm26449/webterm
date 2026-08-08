@@ -46,6 +46,19 @@ chmod 700 "$OUT" 2>/dev/null || true      # arhivele conțin cheia seifului: dir
 # şterge tot, inclusiv cheia care decriptează credenţialele. Un nume greşit de volum (typo,
 # sau o instalare făcută cu `--dir`) e de ajuns. Procedura de verificare din RUNBOOK (timer
 # activ, exit 0, arhive care cresc) nu poate distinge cazul ăsta.
+# Imaginea-unealtă trebuie să fie DISPONIBILĂ. `docker run` o trage la fiecare rulare, iar dacă
+# registry-ul e inaccesibil (host air-gapped, DNS căzut, Docker Hub jos, rate-limit) ieşea
+# eroarea crudă a Docker-ului şi exit 125 — fără nicio menţiune a produsului, fără sugestie, şi
+# în cazul timer-ului nocturn fără ca cineva să afle. Un backup care nu se face tăcut e mai rău
+# decât unul care nu există: crezi că-l ai.
+docker image inspect "$IMAGE" >/dev/null 2>&1 || docker pull -q "$IMAGE" >/dev/null 2>&1 || {
+  echo "REFUSING: cannot get the helper image '$IMAGE' (no registry access?)." >&2
+  echo "         It is only used to run python3 against the data volume. Either pre-pull it" >&2
+  echo "         once while you have network:   docker pull $IMAGE" >&2
+  echo "         or point WEBTERM_TOOL_IMAGE at an image you already have that has python3." >&2
+  exit 1
+}
+
 docker volume inspect "$VOLUME" >/dev/null 2>&1 || {
   echo "REFUSING: volume '$VOLUME' does not exist — refusing to write an empty backup." >&2
   echo "         Check WEBTERM_VOLUME (see /etc/default/webterm-backup); 'docker volume ls' lists them." >&2

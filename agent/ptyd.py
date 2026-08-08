@@ -41,7 +41,7 @@ import termios
 import threading
 import time
 
-AGENT_VERSION = 39
+AGENT_VERSION = 40
 PROTO = 1
 
 RUN_MAX_TIMEOUT = 300           # plafon timeout pentru op-ul `run` (consola de flotă)
@@ -487,10 +487,15 @@ class Metrics:
                 st = os.statvfs(path)
             except OSError:
                 continue
-            if st.f_blocks <= 0 or (st.f_fsid, st.f_blocks) in seen:
+            # `f_blocks > 0` nu garantează `total > 0`: dimensiunea blocului intră şi ea în
+            # produs, iar un `f_frsize` zero (filesystem exotic, mount degradat, FUSE care
+            # raportează prost) dădea ZeroDivisionError chiar în împărţirea de mai jos —
+            # dintr-o funcţie chemată la fiecare heartbeat, negardat. Metrica lipsă e o
+            # neplăcere; agentul căzut e o pană.
+            total = st.f_blocks * st.f_frsize
+            if total <= 0 or (st.f_fsid, st.f_blocks) in seen:
                 continue
             seen.add((st.f_fsid, st.f_blocks))
-            total = st.f_blocks * st.f_frsize
             used = (st.f_blocks - st.f_bavail) * st.f_frsize
             if best is None or used / total > best[1] / best[0]:
                 best = (total, used)

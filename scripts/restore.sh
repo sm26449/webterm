@@ -64,6 +64,19 @@ ADIR="$(cd "$(dirname "$ARCHIVE")" && pwd)"; ABASE="$(basename "$ARCHIVE")"
 # vie rămâne pe volumul ei, cu datele ei. Omul citeşte „restore OK" după un dezastru şi crede
 # că a recuperat. Un nume greşit e cazul obişnuit, nu exotic: numele vine din directorul de
 # instalare, iar procedura din RUNBOOK e copiată literal de pe o maşină pe alta.
+# Imaginea-unealtă trebuie să fie DISPONIBILĂ. `docker run` o trage la fiecare rulare, iar dacă
+# registry-ul e inaccesibil (host air-gapped, DNS căzut, Docker Hub jos, rate-limit) ieşea
+# eroarea crudă a Docker-ului şi exit 125 — fără nicio menţiune a produsului, fără sugestie, şi
+# în cazul timer-ului nocturn fără ca cineva să afle. Un backup care nu se face tăcut e mai rău
+# decât unul care nu există: crezi că-l ai.
+docker image inspect "$IMAGE" >/dev/null 2>&1 || docker pull -q "$IMAGE" >/dev/null 2>&1 || {
+  echo "REFUSING: cannot get the helper image '$IMAGE' (no registry access?)." >&2
+  echo "         It is only used to run python3 against the data volume. Either pre-pull it" >&2
+  echo "         once while you have network:   docker pull $IMAGE" >&2
+  echo "         or point WEBTERM_TOOL_IMAGE at an image you already have that has python3." >&2
+  exit 1
+}
+
 docker volume inspect "$VOLUME" >/dev/null 2>&1 || {
   echo "REFUSING: volume '$VOLUME' does not exist — restoring into it would create an empty" >&2
   echo "          volume that nothing uses, while your app keeps running on another one." >&2

@@ -172,6 +172,14 @@ export default function SessionView(props: {
   // montare, deci nu poate citi prop-ul direct), + dialog de confirmare + mesaj tranzitoriu
   const commandGuardRef = useRef(props.commandGuard)
   useEffect(() => { commandGuardRef.current = props.commandGuard }, [props.commandGuard])
+  // `t` prin ref, ca `commandGuard` de mai sus. Efectul terminalului depinde doar de
+  // `session.id` (are `eslint-disable` pe `exhaustive-deps`, deliberat: re-rularea lui ar
+  // distruge şi ar reconstrui terminalul viu la fiecare schimbare de limbă). Dar `t` intra în
+  // handlerul de taste, care trăieşte cât sesiunea — deci după comutarea limbii mesajul de
+  // guardrail rămânea în limba veche până la remontare. Ref-ul e citit la momentul apelului,
+  // deci mereu proaspăt, fără să atingem ciclul de viaţă al terminalului.
+  const tRef = useRef(t)
+  tRef.current = t
   const [cmdConfirm, setCmdConfirm] = useState<{ cmd: string } | null>(null)
   const [guardMsg, setGuardMsg] = useState<string | null>(null)
   // comenzi (OSC 133) — apar doar cu shell integration activă pe host
@@ -561,7 +569,7 @@ export default function SessionView(props: {
         if (rule && cmd) {
           if (rule.action === 'block') {
             send('\x15')   // Ctrl+U: șterge linia periculoasă din shell
-            setGuardMsg(t('session.blockedByGuardrail', { cmd: cmd.slice(0, 70) }))
+            setGuardMsg(tRef.current('session.blockedByGuardrail', { cmd: cmd.slice(0, 70) }))
             window.setTimeout(() => setGuardMsg((m) => (m && m.includes(cmd.slice(0, 70)) ? null : m)), 4000)
           } else {
             setCmdConfirm({ cmd })   // confirm: dialog (Enter e blocat mai jos)
