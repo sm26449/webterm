@@ -24,6 +24,19 @@ jobs:
           # deci auditul pe .txt acoperă exact versiunile din imagine, fără parsarea hash-urilor.
           pip-audit --strict --no-deps -r gateway/requirements.lock
 
+  npm-cve:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      # `pip-audit` acoperea Python-ul şi Trivy imaginea, dar cele 40+ pachete de frontend nu
+      # treceau prin nicio poartă de CVE — deşi ele ajung în bundle-ul pe care îl execută
+      # BROWSERUL fiecărui utilizator. Rulează pe acelaşi cron săptămânal, cu `--omit=dev`:
+      # o vulnerabilitate într-o unealtă de build nu ajunge la utilizator, iar un job permanent
+      # roşu din cauza lor ar fi ignorat exact ca unul real.
+      - name: npm audit pe dependenţele LIVRATE (fără cele de build)
+        working-directory: frontend
+        run: npm audit --omit=dev --audit-level=high
+
   image-cve:
     runs-on: ubuntu-latest
     steps:

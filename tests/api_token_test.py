@@ -74,11 +74,17 @@ async def main():
         check("read: /api/status", (await t.get("/api/status")).status_code == 200)
         check("read: /api/hosts", (await t.get("/api/hosts")).status_code == 200)
         check("read: /api/sessions", (await t.get("/api/sessions")).status_code == 200)
-        check("read: /api/audit", (await t.get("/api/audit")).status_code == 200)
+        # `/api/audit` a fost mutat pe `require_user`: coloana `detail` conţine textul complet
+        # al comenzilor rulate pe flotă şi interogările de căutare, adică exact conţinutul pe
+        # care toate celelalte citiri îl ţin în afara tokenurilor. Un token ajunge în loguri de
+        # CI şi în `.env`; nu are ce căuta în istoricul operaţional.
+        check("NU poate citi /api/audit (conţine textul comenzilor)",
+              (await t.get("/api/audit")).status_code == 401)
         r = await t.post(f"/api/hosts/{hid}/run", json={"command": "uptime"})
         check("fără scope `run` → 403", r.status_code == 403)
         # tot ce nu e pe lista albă rămâne pe cookie, deci 401 pentru token
         for path, method in (("/api/users", "GET"), ("/api/tokens", "GET"),
+                             ("/api/audit", "GET"),
                              ("/api/backup/status", "GET"), ("/api/settings/smtp", "GET"),
                              ("/api/signing/status", "GET")):
             r = await t.request(method, path)
@@ -97,8 +103,14 @@ async def main():
         r = await t2.post(f"/api/hosts/{hid2fa}/run", json={"command": "uptime"})
         check("host cu 2FA → REFUZAT prin token (step-up cere om + passkey)",
               r.status_code == 403 and "2FA" in r.text, r.text[:60])
-        r = await t2.get("/api/audit?limit=10")
-        actors = {e["actor"] for e in r.json()["entries"]}
+
+    # Auditul se citeşte cu SESIUNE, nu cu tokenul — dar tot trebuie să arate tokenul ca actor
+    # al acţiunilor lui. Verificarea rulase prin token; de când `/api/audit` cere `require_user`
+    # nu mai poate, iar `r.json()["entries"]` pe un 401 ridica un KeyError care lăsa firul
+    # aiosqlite viu şi făcea testul să atârne în loc să pice cu traceback.
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as ca:
+        await ca.post("/api/login", json={"email": "a@b.co", "password": PW})
+        actors = {e["actor"] for e in (await ca.get("/api/audit?limit=20")).json()["entries"]}
         check("auditul arată tokenul ca actor, nu „anonim”",
               any(a.startswith("token:") for a in actors), str(actors))
 
