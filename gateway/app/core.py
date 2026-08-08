@@ -195,6 +195,30 @@ def storage_stats() -> dict:
     return result
 
 
+async def archive_closed_transcripts(now: Optional[float] = None) -> int:
+    """Mută în arhivă transcripturile sesiunilor închise de mai mult de
+    `CLOSED_ARCHIVE_DAYS`. Fără asta, `purge_archive` păzeşte un director în care nimic nu
+    intra de la sine: arhivarea se făcea doar din `DELETE /api/sessions/{sid}`, deci retenţia
+    documentată se aplica exclusiv sesiunilor şterse cu mâna, iar cele închise normal rămâneau
+    pe disc la nesfârşit. Rândul din `sessions` rămâne (istoricul e util); doar octeţii pleacă.
+    """
+    days = config.CLOSED_ARCHIVE_DAYS
+    if days <= 0:
+        return 0
+    cutoff = (now or time.time()) - days * 86400
+    rows = await db.fetchall(
+        "SELECT id FROM sessions WHERE state IN ('closed','lost')"
+        " AND COALESCE(closed_at, created) < ?", cutoff)
+    moved = 0
+    for r in rows:
+        out_path, cast_path = transcript_paths(r["id"])
+        if not out_path.exists() and not cast_path.exists():
+            continue          # deja arhivat la o trecere anterioară
+        await asyncio.to_thread(archive_transcript, r["id"])
+        moved += 1
+    return moved
+
+
 def purge_archive(now: Optional[float] = None) -> int:
     """Șterge definitiv transcripturile arhivate mai vechi de retenție. Rulat
     de janitor. Întoarce câte fișiere a șters."""

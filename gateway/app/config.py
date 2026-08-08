@@ -81,6 +81,12 @@ def _num(name, default, cast=int):
 
 # câte zile păstrăm transcripturile arhivate înainte de ștergerea definitivă
 ARCHIVE_RETENTION_DAYS = _num("WEBTERM_ARCHIVE_DAYS", 120)
+# După câte zile o sesiune ÎNCHISĂ îşi mută transcriptul în arhivă (de unde îl şterge
+# retenţia de mai sus). Arhivarea se făcea DOAR la ştergerea manuală a sesiunii, deci o
+# sesiune pur şi simplu închisă îşi păstra cele două fişiere la nesfârşit — până la 64 MiB
+# fiecare. Singura creştere nemărginită din produs, găsită de un audit extern: 120 de
+# sesiuni închise = 240 de fişiere pe care nimeni nu le mai atingea. 0 dezactivează.
+CLOSED_ARCHIVE_DAYS = _num("WEBTERM_CLOSED_ARCHIVE_DAYS", 30)
 # jurnalul de audit (cine/ce/când/de la ce IP pe fiecare cerere care schimbă ceva).
 # Aceeași fereastră ca arhiva: destul cât să reconstitui un incident, nu la infinit.
 AUDIT_RETENTION_DAYS = _num("WEBTERM_AUDIT_DAYS", 120)
