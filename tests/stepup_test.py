@@ -136,6 +136,34 @@ async def main():
         r = await c.post(f"/api/hosts/{hid2}/sessions", json={})
         check("după toggle 2FA on → conectare blocată fără grant", r.status_code == 403)
 
+        # ── istoricul de comenzi respectă aceeaşi graniţă ca transcriptul şi căutarea ──
+        # `command_history` conţine comenzile EXECUTATE şi cwd-ul. Toate celelalte citiri de
+        # conţinut (`/transcript`, `/preview`, `/search`, `/agent-log`) cer o fereastră de
+        # step-up pe hosturile cu `require_2fa`; asta nu o cerea, deci un cookie furat citea de
+        # pe un host „cere 2FA" exact ce restul refuzau. Filtrarea e TĂCUTĂ, ca la `/api/search`.
+        await db.execute(
+            "INSERT INTO command_history(host_id, host_name, command, source, created)"
+            " VALUES(?,?,?,?,?)", hid2, "critic", "cat /etc/shadow", "session", 1.0)
+        # host CHIAR normal: `hid` şi `hid2` cer amândouă 2FA, deci nu pot proba „se vede"
+        hidn = (await c.post("/api/hosts", json={"name": "fara-2fa"})).json()["id"]
+        await db.execute(
+            "INSERT INTO command_history(host_id, host_name, command, source, created)"
+            " VALUES(?,?,?,?,?)", hidn, "normal", "uptime", "session", 2.0)
+        rows = (await c.get("/api/history")).json()
+        cmds = {r["command"] for r in rows}
+        check("istoricul ASCUNDE comenzile de pe hostul 2FA fără step-up",
+              "cat /etc/shadow" not in cmds)
+        check("…dar arată în continuare hosturile normale", "uptime" in cmds)
+        check("filtrarea e tăcută (200, nu 403 — altfel devine oracol)",
+              (await c.get("/api/history")).status_code == 200)
+
+        # ── jurnalul de audit nu e accesibil cu un token de automatizare ──
+        # `detail` conţine textul complet al comenzilor şi interogările de căutare.
+        import inspect as _i
+        sig = str(_i.signature(api.audit_list))
+        check("/api/audit cere require_user, nu require_scope",
+              "require_user" in sig and "require_scope" not in sig)
+
     await db.close()
     print(f"\n{ok}/{total} passed")
     return ok == total

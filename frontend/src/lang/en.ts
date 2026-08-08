@@ -749,6 +749,8 @@ const en: Lang = {
     'err.auth.wrongPassword': "Wrong password.",
     'login.passkeyUnavailable': "Passkey unavailable on this device or browser.",
     'login.networkError': "Network error — the server did not respond.",
+    'err.settings.webhookScheme': "The webhook must be an http:// or https:// address.",
+    'err.settings.webhookBlocked': "That address is the cloud metadata service, not a chat webhook.",
     'time.now': "now",
     'time.d': "d",
     'time.h': "h",

@@ -637,6 +637,7 @@ class SmtpIn(BaseModel):
     to_addr: str = ""
     starttls: bool = True
     webhook: str = ""           # alerte şi în chat (Slack/Discord/Teams); independent de SMTP
+    current_password: str = ""  # cerut DOAR când se schimbă webhook-ul (destinaţie de exfiltrare)
 
 
 async def _set_setting(key: str, value) -> None:
@@ -789,7 +790,27 @@ async def get_smtp(user=Depends(security.require_user)):
 
 
 @router.post("/api/settings/smtp")
-async def save_smtp(body: SmtpIn, user=Depends(security.require_user)):
+async def save_smtp(body: SmtpIn, request: Request, user=Depends(security.require_user)):
+    # Webhook-ul e un canal prin care gateway-ul TRIMITE date în afară, la o adresă aleasă de
+    # cine configurează. Restul canalelor de exfiltrare (backup, tokenuri, share) cer deja
+    # re-autentificare; ăsta nu cerea, deci un cookie furat putea îndrepta alertele spre orice
+    # gazdă. Şi era acceptat orice şir: `file://…`, `gopher://…`, sau adresa de metadate a
+    # cloudului. Nu blocăm reţelele private — un Mattermost în LAN e o ţintă legitimă pentru un
+    # produs self-hosted — dar blocăm schemele care nu sunt HTTP şi adresa de metadate.
+    wh = body.webhook.strip()
+    if wh:
+        from urllib.parse import urlparse
+        u = urlparse(wh)
+        if u.scheme not in ("http", "https"):
+            raise ApiError(400, "settings.webhookScheme",
+                           "the webhook must be an http:// or https:// URL")
+        if (u.hostname or "").strip("[]") in ("169.254.169.254", "metadata.google.internal",
+                                              "fd00:ec2::254"):
+            raise ApiError(400, "settings.webhookBlocked",
+                           "that address is the cloud metadata service, not a chat webhook")
+    if wh != (await _get_setting("alert_webhook") or ""):
+        await _require_reauth_for_secret(user, body.current_password,
+                                        "changing the alert webhook")
     await _set_setting("smtp_host", body.host.strip())
     await _set_setting("smtp_port", str(body.port))
     await _set_setting("smtp_user", body.user.strip())
@@ -2038,6 +2059,18 @@ async def search_history(q: str = "", host_id: int | None = None, limit: int = 2
     if host_id is not None:
         clauses.append("host_id = ?")
         params.append(host_id)
+    # Hosturile cu `require_2fa` intră doar cu o fereastră de step-up deschisă. Istoricul
+    # conţine comenzile EXECUTATE şi directorul curent — acelaşi fel de conţinut ca transcriptul
+    # şi căutarea globală, care sunt amândouă păzite. Aici lipsea, deci un cookie furat citea de
+    # pe un host marcat „cere 2FA" exact ce restul căilor refuzau. Filtrăm TĂCUT, ca la
+    # `/api/search`: un 403 ar transforma căutarea într-un oracol pentru „există comenzi pe X".
+    gated = {r["id"] for r in await db.fetchall(
+        "SELECT id FROM hosts WHERE require_2fa=1")}
+    blocked = {hid for hid in gated if not security.stepup_window_ok(user["id"], hid)}
+    if blocked:
+        clauses.append("(host_id IS NULL OR host_id NOT IN (%s))"
+                       % ",".join("?" * len(blocked)))
+        params.extend(sorted(blocked))
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     rows = await db.fetchall(
         "SELECT id, host_id, host_name, command, exit_code, cwd, source, created"
@@ -2139,7 +2172,12 @@ async def list_forwards(host_id: int, stepup_grant: str = "", stepup_password: s
 @router.get("/api/audit")
 async def audit_list(limit: int = 200, before: float = 0.0, q: str = "",
                      failed_only: bool = False,
-                     user=Depends(security.require_scope("read"))):
+                     user=Depends(security.require_user)):
+    # `require_user`, nu `require_scope("read")`. Coloana `detail` conţine textul COMPLET al
+    # comenzilor rulate pe flotă, interogările de căutare, emailul şi IP-ul fiecărui operator —
+    # adică exact conţinutul pe care toate celelalte citiri (`/transcript`, `/preview`,
+    # `/search`, `/agent-log`) îl ţin deliberat în afara tokenurilor. Un token de automatizare
+    # ajunge în loguri de CI, în `.env`, în scripturi; nu are ce căuta în istoricul operaţional.
     """Jurnalul de audit: ce s-a schimbat prin UI/API, de către cine și de la ce IP.
     Paginare în trecut cu `before` (ts-ul ultimei linii primite)."""
     return {"entries": await audit.recent(limit, before, q.strip(), failed_only),
