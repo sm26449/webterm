@@ -363,11 +363,16 @@ export default function Sidebar(props: {
         >
           <LogoMark /> WebTerm
         </button>
+        {/* `wt-touch` (44px, activ doar sub `pointer: coarse`) pe navigaţia PRINCIPALĂ.
+            Auditul mobil raportează ţintele mici ca `ux`, nu ca `bug`, deci nu blochează
+            imaginea — dar astea patru sunt butoanele atinse de zeci de ori pe zi, şi erau
+            32×24. Restul listei rămâne raportat şi nereparat în bloc: pe iconiţele dintr-un
+            rând dens de fişiere, 44px ar rupe layout-ul — acolo compromisul e deliberat. */}
         <div className="flex shrink-0 items-center gap-0.5">
           <button
             title={t('nav.addHost')} aria-label={t('nav.addHost')}
             onClick={() => setShowAdd(true)}
-            className="rounded-md px-2 py-1 text-sm text-slate-400 hover:bg-ink-800 hover:text-slate-200"
+            className="wt-touch inline-flex items-center justify-center rounded-md px-2 py-1 text-sm text-slate-400 hover:bg-ink-800 hover:text-slate-200"
           >
             <PlusIcon />
           </button>
@@ -375,7 +380,7 @@ export default function Sidebar(props: {
             title={t('nav.fleetRun')}
             aria-label={t('nav.fleetRunAria')}
             onClick={() => setShowFleetRun(true)}
-            className="rounded-md px-2 py-1 text-sm text-slate-500 hover:bg-ink-800"
+            className="wt-touch inline-flex items-center justify-center rounded-md px-2 py-1 text-sm text-slate-500 hover:bg-ink-800"
           >
             <TerminalPromptIcon />
           </button>
@@ -383,7 +388,7 @@ export default function Sidebar(props: {
             title={t('nav.status')}
             aria-label={t('nav.status')}
             onClick={() => setShowStatus(true)}
-            className="rounded-md px-2 py-1 text-sm text-slate-500 hover:bg-ink-800"
+            className="wt-touch inline-flex items-center justify-center rounded-md px-2 py-1 text-sm text-slate-500 hover:bg-ink-800"
           >
             <ActivityIcon />
           </button>
@@ -394,7 +399,7 @@ export default function Sidebar(props: {
                 : props.backupReady ? t('sidebar.settingsBackupReady') : t('sidebar.settingsPasskeys')}
             onClick={() => setShowSettings(true)}
             aria-label={t('settings.title')}
-            className="relative rounded-md px-2 py-1 text-sm text-slate-500 hover:bg-ink-800"
+            className="wt-touch relative inline-flex items-center justify-center rounded-md px-2 py-1 text-sm text-slate-500 hover:bg-ink-800"
           >
             <GearIcon />
             {(props.backupReady || props.signingMissing || props.signingLocked) && (

@@ -17,6 +17,35 @@ elif command -v docker-compose >/dev/null 2>&1; then COMPOSE="docker-compose"
 else err "Docker Compose is missing."; exit 1; fi
 docker info >/dev/null 2>&1 || { err "Docker is not running, or you lack permission (try sudo, or add yourself to the docker group)."; exit 1; }
 
+# Porturile, ÎNAINTE de a atinge ceva. Fără verificarea asta `up -d` porneşte aplicaţia, apoi
+# Traefik nu poate lega :80, iar `set -e` opreşte scriptul — rezultatul e o instalare pe
+# jumătate: un container sus, altul nu, şi un mesaj de la Docker („Bind for 0.0.0.0:80 failed")
+# care nu spune ce e de făcut. Cazul e cel obişnuit, nu exotic: orice server care are deja un
+# nginx, un panou de administrare sau un reverse proxy. Mai bine refuzăm din prima, spunând cine
+# ţine portul, decât să lăsăm în urmă o stare ambiguă.
+# Excepţie: dacă stiva NOASTRĂ e deja pornită, ea ţine portul — `up -d` e idempotent, mergem înainte.
+port_holder() {      # $1 = port → numele procesului care ascultă, sau gol
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnHp "sport = :$1" 2>/dev/null | sed -n 's/.*users:((\"\([^"]*\)\".*/\1/p' | head -1
+  elif command -v netstat >/dev/null 2>&1; then
+    netstat -ltnp 2>/dev/null | awk -v p=":$1\$" '$4 ~ p {print $7; exit}'
+  fi
+}
+if [ -z "$($COMPOSE ps -q 2>/dev/null)" ]; then
+  BUSY=""
+  for p in 80 443; do
+    h=$(port_holder "$p" || true)
+    [ -n "$h" ] && BUSY="${BUSY}  · port ${p} is held by: ${h}"$'\n'
+  done
+  if [ -n "$BUSY" ]; then
+    err "Ports 80/443 are already in use, so the stack cannot start:"
+    printf '%s' "$BUSY" >&2
+    err "Free them, or run WebTerm behind the proxy you already have (see docs/RUNBOOK.md).
+Nothing was changed — no container was created."
+    exit 1
+  fi
+fi
+
 # 2) Configuration (.env)
 HOST_ARG="${1:-}"
 if [ -f .env ]; then

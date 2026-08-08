@@ -26,6 +26,17 @@ NET=wtci-net
 # 8010→8000 pe host, acel curl bate în gol şi pică exact testele OSC 133.
 BASE1="http://127.0.0.1:$P1"
 OUT=${OUT:-/tmp/wt-ci-shots}
+# Creat AICI, înainte de orice `docker run -v "$OUT:/out"`. Dacă directorul nu există când
+# Docker îl montează, Docker îl creează el — ca root. La a doua rulare, un contribuitor care
+# nu e root nu mai poate şterge nimic din el (`rm: Permission denied` pe agent-token), iar E2E
+# pică la „host online" dintr-un motiv care n-are nicio legătură cu produsul. Semnalat de un
+# audit extern, care a nimerit exact experienţa unui contribuitor nou.
+mkdir -p "$OUT" 2>/dev/null || true
+if [ ! -w "$OUT" ]; then
+  echo "'$OUT' nu e scriptibil de $(id -un) — probabil l-a creat Docker ca root la o rulare anterioară." >&2
+  echo "Curăţă-l:  sudo rm -rf '$OUT'   (sau rulează cu OUT=<alt director>)" >&2
+  exit 2
+fi
 ONLY="${*:-all}"   # unul sau mai mulţi paşi: `ci-local.sh e2e a11y`
 # `PY`/`RUFF` ca în `run-tests.sh`: pe maşinile unde dependenţele gateway-ului stau într-un
 # venv, `python3` gol nu poate rula nimic — şi rezultatul arăta ca un eşec de test, nu ca un
@@ -166,6 +177,21 @@ if want smoke || want e2e || want a11y || want fs || want mobile; then
   boot $C1 $P1 "$BASE1" && ok "smoke container healthy" || { no "smoke container"; exit 1; }
 fi
 
+# `mobile` şi `a11y` se loghează cu un cont care trebuie să EXISTE deja — îl creează `e2e`.
+# Rulate singure pe un container proaspăt, aterizează pe ecranul de setup, iar Playwright
+# aşteaptă în gol butonul „Sign in": 30s × 10 device-uri, apoi un raport cu douăzeci de
+# „bug"-uri care n-au nicio legătură cu produsul. Exact tiparul care a produs deja un
+# „blocant" fals într-un audit extern: unealta a picat, nu aplicaţia, şi n-a spus-o.
+if { want mobile || want a11y; } && ! want e2e; then
+  if docker exec $C1 python3 -c "import json,urllib.request;
+import sys; sys.exit(0 if json.load(urllib.request.urlopen('http://127.0.0.1:8000/api/state'))['setup_required'] else 1)" 2>/dev/null
+  then
+    echo "Containerul e proaspăt: nu există niciun cont, iar '$ONLY' are nevoie să se logheze." >&2
+    echo "Rulează întâi pasul care creează contul:  scripts/ci-local.sh e2e $ONLY   (sau 'all')" >&2
+    exit 2
+  fi
+fi
+
 # ── smoke-boot ──────────────────────────────────────────────────────────────
 if want smoke; then
 say "smoke-boot"
@@ -181,7 +207,7 @@ docker exec $C1 sh -c 'command -v tmux' >/dev/null || { no "tmux în container";
 # Scriptul E2E porneşte agentul cu `docker exec`, dar containerul Playwright n-are CLI-ul
 # docker. Calea prevăzută pentru asta e AGENT_TOKEN_FILE: scriptul scrie tokenul pe disc
 # şi aşteaptă un host online, iar noi pornim agentul din afară.
-rm -f "$OUT/agent-token"; mkdir -p "$OUT"
+rm -f "$OUT/agent-token"      # $OUT există deja, creat la începutul scriptului
 ( for _ in $(seq 1 120); do
     if [ -s "$OUT/agent-token" ]; then
       TOK=$(cat "$OUT/agent-token")
