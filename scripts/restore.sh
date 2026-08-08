@@ -58,6 +58,21 @@ ADIR="$(cd "$(dirname "$ARCHIVE")" && pwd)"; ABASE="$(basename "$ARCHIVE")"
 # Numele pe care îl confirmi trebuie să fie cel pe care l-ai TASTAT. După decriptare
 # `$ARCHIVE` e un mktemp aleatoriu, deci promptul cerea confirmarea pentru
 # „/tmp/tmp.iSVaLjc0Dn.tar.gz" — un nume care nu-i spune omului nimic.
+# Volumul TREBUIE să existe. `backup.sh` are garda asta de mult (refuză să scrie o arhivă
+# goală); restaurarea n-o avea, deşi acolo costul e mai mare: Docker creează tăcut volumul
+# lipsă, restaurarea reuşeşte în el, iese cu 0 şi tipăreşte „restore OK" — în timp ce aplicaţia
+# vie rămâne pe volumul ei, cu datele ei. Omul citeşte „restore OK" după un dezastru şi crede
+# că a recuperat. Un nume greşit e cazul obişnuit, nu exotic: numele vine din directorul de
+# instalare, iar procedura din RUNBOOK e copiată literal de pe o maşină pe alta.
+docker volume inspect "$VOLUME" >/dev/null 2>&1 || {
+  echo "REFUSING: volume '$VOLUME' does not exist — restoring into it would create an empty" >&2
+  echo "          volume that nothing uses, while your app keeps running on another one." >&2
+  echo "          The name comes from the install directory: for /opt/webterm2 it is" >&2
+  echo "          webterm2_webterm-data. List them with 'docker volume ls', then:" >&2
+  echo "            WEBTERM_VOLUME=<name> $0 $SRC_NAME" >&2
+  exit 1
+}
+
 echo "!! This OVERWRITES all data in volume '$VOLUME' with '$SRC_NAME'."
 read -r -p "Continue? [y/N] " ok; [ "$ok" = y ] || { echo "aborted"; exit 1; }
 
