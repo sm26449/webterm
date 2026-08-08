@@ -9,6 +9,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from . import (api, audit, backup, cloudbackup, config, core, db, email_alerts, health,
@@ -70,9 +71,13 @@ async def _janitor() -> None:
     """Șterge periodic transcripturile arhivate mai vechi de retenție."""
     while True:
         try:
+            archived = await core.archive_closed_transcripts()
             removed = await asyncio.to_thread(core.purge_archive)
             await audit.prune()             # aceeași fereastră de retenție ca arhiva
             await _warn_if_signing_locked()
+            if archived:
+                log.info("janitor: archived %d transcripts of sessions closed >%d days ago",
+                         archived, config.CLOSED_ARCHIVE_DAYS)
             if removed:
                 log.info("janitor: deleted %d archived transcripts (>%d days)",
                          removed, config.ARCHIVE_RETENTION_DAYS)
@@ -361,6 +366,15 @@ class ForwardWSMiddleware:
         await self.app(scope, receive, send)
 
 
+# Nimic nu comprima nimic: nici aplicaţia, nici `Caddyfile`, nici Traefik (care are un singur
+# middleware, cel de HSTS). Deci fiecare încărcare la rece căra 904 KB pe sârmă. Măsurat de un
+# audit extern cu throttling de browser: 113 ms fără limitare, dar 4,7 s pe Slow-4G şi **18,6 s**
+# pe Regular-3G până la prima randare — pentru un produs a cărui promisiune de bază e „îl verifici
+# de pe telefon". Compresia dă 3,46× pe calea critică (902 KB → 261 KB).
+# Aici, în aplicaţie, nu în proxy: acoperă TOATE căile de deploy (Caddy, Traefik, direct), nu doar
+# pe cea configurată azi. `minimum_size` sare peste răspunsurile mici, unde antetele costă mai
+# mult decât economisesc.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.add_middleware(ForwardWSMiddleware)
 
 app.include_router(api.router)
