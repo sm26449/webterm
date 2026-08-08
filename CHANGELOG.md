@@ -7,6 +7,76 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [2.0.1] — 2026-08-08 · agent (40)
+
+Everything here came out of nine external audits run against 2.0.0 before it was announced.
+Two findings could only be found by breaking something on purpose, which is why they had
+survived a year of code review.
+
+### Fixed — things that looked like defences and were not
+
+- **The automatic rollback never rolled back.** `deploy.sh` exports `WEBTERM_IMAGE` with the new
+  tag and then `exec`s `rollback.sh`; `exec` inherits the environment, and compose prefers it
+  over `.env`. So the rollback rewrote `.env`, `up -d app` re-resolved to the image it was
+  fleeing, and the container stayed broken — while `.env` and `.prev-image` ended up swapped,
+  pointing the manual rollback at the broken image too. RUNBOOK listed this as a defence layer.
+- **`restore.sh` restored into a volume nothing used and reported success.** Docker silently
+  creates a missing volume; the restore succeeded into it, exit 0, "restore OK", while the live
+  app kept its own empty one. The name comes from the install directory, so it is wrong by
+  default on any machine that is not `/opt/webterm` — which is exactly the rebuild procedure
+  being copied between hosts. `backup.sh` had the guard; `restore.sh` did not.
+- **`GET /api/search` read the contents of every transcript and left no audit trail**, while
+  the same class of read through `/transcript`, `/fs/download` and `/preview` all did. After a
+  stolen cookie, the log answered "nothing".
+- **A missing `alive` field closed live sessions.** One loop tolerated it and read `None` as
+  falsy, i.e. "it died" — `on_exit` plus `reap`, killing the real tmux session on the host.
+- **Uninstalling could delete the user's entire crontab** when `crontab -l` failed for any
+  transient reason, because the empty result was written back.
+- **Security alerts switched themselves off**: compose passes `WEBTERM_ALERT_FROM` present and
+  empty, so it never fell back to `SMTP_USER` and email alerts silently disabled themselves.
+- **Deleting an account left its API tokens alive** for up to a year, because revocation keyed
+  on the email, which `update_account` can change. Tokens and shares now key on the account id.
+
+### Fixed — resource exhaustion and unbounded growth
+
+- A compromised agent could adopt unlimited sessions (3000 rows and 6000 open files from one
+  heartbeat) until the gateway's disk filled — taking the whole fleet with it. Adoption is
+  capped per host and refused visibly.
+- Agent-reported `hostname`, `user`, `update_blocked` and `metrics` are bounded; metrics are a
+  whitelist of finite numbers, because a bare `Infinity` off the wire made the host page 500.
+- Transcripts of closed sessions were never reclaimed: the retention only ever applied to
+  sessions deleted by hand.
+- Ports 80/443 were checked but nothing compressed the frontend: 904 KB on every cold load,
+  18.6 s to first paint on 3G. Gzip in the application covers every deployment path.
+
+### Fixed — installs and upgrades
+
+- Installers refuse to start when the ports they would publish are taken, instead of leaving
+  half a stack behind, and `setup.sh` asks compose which ports those actually are so the
+  documented override recipe works.
+- `.env` is parsed, not executed. Sourcing it as root meant a value with spaces broke the
+  install and a value with `&&` ran commands.
+- A second install can no longer hijack the first one's systemd units, whose names are fixed
+  regardless of `--dir` — including the file holding the passphrase that decrypts its archives.
+- The update notification pointed at `deploy.sh`, which changes the image only; half the system
+  lives on the host and is synced by `upgrade.sh`.
+- Getting the setup token wrong now counts down instead of locking you out without warning.
+
+### Fixed — interface
+
+- Romanian plurals go through `Intl.PluralRules`: "1 parametri" and "20 hosturi" are gone.
+- Dates follow the chosen language and timezone; both settings existed and neither was applied.
+- The file panel got the focus trap the other thirteen modals already had.
+- The install command says it appends a line to `~/.bashrc`, on the screen where you copy it.
+- Login and 2FA errors are translated; a host without tmux says so in words, where you work.
+
+### Changed
+
+- The published image is pinned by version rather than `:latest`, so a fresh install is
+  reproducible and the rollback breadcrumb points at something real.
+- `SECURITY.md` commits to a 7-day acknowledgement and a 30-day assessment, offers an address
+  for people without a GitHub account, and states a safe harbour.
+
 ## [2.0.0] — 2026-08-07 · first public release · agent (37)
 
 WebTerm was developed privately for about a year before this release. This is the first version
