@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { errText, api, ensureStepup, Host } from '../lib/api'
 import { useI18n } from '../lib/i18n'
+import { useFocusTrap } from '../lib/useFocusTrap'
 import { notify } from '../lib/notify'
 import { DownloadIcon, FileIcon, FolderIcon, LinkIcon } from './Icons'
 
@@ -38,6 +39,19 @@ export default function FileBrowser(props: { host: Host; onClose: () => void }) 
   const [editing, setEditing] = useState<{ path: string; name: string; content: string } | null>(null)
   const [saving, setSaving] = useState(false)
   const fileInput = useRef<HTMLInputElement>(null)
+  // Singurul modal din vreo paisprezece care nu avea capcană de focus. Fără ea, `Tab` scurge
+  // focusul în terminalul din spate — adică tastezi într-un shell fără să vezi unde —, iar
+  // `Escape` nu închidea nimic: singura ieşire era clic pe ✕. Nici nu se anunţa ca dialog,
+  // deci un cititor de ecran îl citea ca text oarecare peste pagină.
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const editorRef = useRef<HTMLDivElement>(null)
+  // Două capcane suprapuse: editorul e randat ca FRATE al panoului, nu în interiorul lui.
+  // `Tab` nu se ceartă (handler-ul e pe element, iar editorul e în afara lui), dar `Escape`
+  // e pe document, deci ambele l-ar prinde şi un singur Escape ar închide şi editorul, şi
+  // panoul — pierzându-ţi textul nesalvat. Stratificăm: cât timp editorul e deschis, capcana
+  // exterioară nu face nimic, iar Escape închide doar editorul.
+  useFocusTrap(dialogRef, () => { if (!editing) props.onClose() })
+  useFocusTrap(editorRef, () => setEditing(null))
 
   // Operațiile de fișier folosesc `fetch` brut (stream binar), deci nu trec prin retry-ul de
   // step-up din `api()`. Pe un host cu 2FA a cărui fereastră a expirat, un 403 → ceremonia de
@@ -140,6 +154,10 @@ export default function FileBrowser(props: { host: Host; onClose: () => void }) 
     <>
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={t('browser.title', { name: props.host.name })}
         className="glass flex h-[80vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl"
         onDragOver={(e) => {
           e.preventDefault()
@@ -273,7 +291,13 @@ export default function FileBrowser(props: { host: Host; onClose: () => void }) 
 
       {editing && (
         <div className="wt-editor fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4">
-          <div className="glass flex h-[85vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl">
+          <div
+            ref={editorRef}
+            role="dialog"
+            aria-modal="true"
+            aria-label={editing.name}
+            className="glass flex h-[85vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl"
+          >
             <div className="flex items-center gap-2 border-b border-ink-800 px-4 py-2">
               <span className="truncate font-mono text-xs text-slate-400">{editing.path}</span>
               <div className="ml-auto flex gap-2">

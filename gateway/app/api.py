@@ -3438,11 +3438,10 @@ command -v python3 >/dev/null 2>&1 || {{
   exit 1
 }}
 
-# The agent runs with the rights of whoever installs it — it does not ask for root and does
-# Instalat ca root, WebTerm devine root shell pe host: comod, dar orice compromitere a
-# not escalate. Installed as root, a compromise of the gateway or of your account becomes root
-# here. Prefer a dedicated user
-# (`useradd -m webterm && su - webterm`) cu sudo doar unde chiar ai nevoie.
+# The agent runs with the rights of whoever installs it: it never asks for root and never
+# escalates. Installed as root, WebTerm becomes a root shell on this host — convenient, but a
+# compromise of the gateway or of your account then owns the machine. Prefer a dedicated user
+# (`useradd -m webterm && su - webterm`), with sudo only where you genuinely need it.
 [ "$(id -u)" = 0 ] && echo "WARNING: you are installing the agent as ROOT — it will have root on this host. Prefer a dedicated user."
 command -v tmux >/dev/null 2>&1 || echo "WARNING: tmux is missing — sessions will not survive an agent restart. Install it (apt install tmux / yum install tmux)."
 

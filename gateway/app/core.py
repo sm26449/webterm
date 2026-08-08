@@ -1450,8 +1450,13 @@ async def maybe_upgrade_agent(conn: AgentConnection) -> None:
             log.error("host %s: update available but agent/ptyd.py.sig is missing — "
                       "refusing to push an unsigned update (run scripts/sign-agent.py)",
                       conn.host_id)
+            # Cod stabil, nu propoziţie: agentul trimite deja coduri (`update_unsigned`,
+            # `update_downgrade`, `update_badcode`), dar aici scriam engleză curgătoare, iar
+            # clientul alegea sfatul potrivit cu un regex peste ea. Acelaşi tipar a rupt deja
+            # dezinstalarea şi recuperarea unui host offline: un text care se traduce mută
+            # decizia sub picioarele codului care îl citeşte.
             await db.execute("UPDATE hosts SET update_blocked=? WHERE id=?",
-                             "signature missing from the image", conn.host_id)
+                             "signature_missing", conn.host_id)
             email_alerts.notify_update_refused(
                 conn.host_id, "signature missing",
                 "the image has no agent/ptyd.py.sig — the gateway refuses (correctly) to push "
