@@ -257,7 +257,11 @@ identical between them, so there is no migration step):
    a new domain means every host has to be re-enrolled by hand.
 3. Let the new install boot **once**. It generates its own signing key, which is correct
    and harmless — it has no hosts yet, and the restore replaces it.
-4. `sudo WEBTERM_BACKUP_PASSPHRASE=... ./scripts/restore.sh <archive>.enc` — this
+4. `sudo WEBTERM_BACKUP_PASSPHRASE=... WEBTERM_VOLUME=<name> ./scripts/restore.sh <archive>.enc`
+   — the volume name comes from the install **directory**, so it is `webterm_webterm-data` only
+   for `/opt/webterm`; check with `docker volume ls`. Getting it wrong used to restore into a
+   volume nothing uses while the app kept its own, and still report success; the script refuses
+   now, but you still have to give it the right name. This
    replaces the whole data volume: database, vault key, fleet key, transcripts.
 5. Restore `/opt/webterm/.env` (or re-enter the values), then `./deploy.sh` to pick it up.
 

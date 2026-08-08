@@ -374,7 +374,12 @@ class ForwardWSMiddleware:
 # Aici, în aplicaţie, nu în proxy: acoperă TOATE căile de deploy (Caddy, Traefik, direct), nu doar
 # pe cea configurată azi. `minimum_size` sare peste răspunsurile mici, unde antetele costă mai
 # mult decât economisesc.
-app.add_middleware(GZipMiddleware, minimum_size=1024)
+# `compresslevel=6`, nu 9 (implicit). Starlette comprimă în `send`, adică PE EVENT-LOOP, iar
+# middleware-ul prinde fiecare răspuns HTTP — inclusiv descărcările de fişiere şi proxy-ul de
+# forward, nu doar bundle-ul SPA pentru care a fost măsurat câştigul. Nivelul 9 pe un fişier de
+# sute de MB ar consuma bucla care multiplexează toate terminalele. La 6, raportul pe bundle
+# rămâne practic acelaşi (măsurat: 3,5x vs 3,55x) pentru o fracţiune din CPU.
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
 app.add_middleware(ForwardWSMiddleware)
 
 app.include_router(api.router)

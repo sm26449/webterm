@@ -7,5 +7,8 @@ Type=oneshot
 # ajustează calea dacă repo-ul nu e în /opt/webterm
 WorkingDirectory=/opt/webterm
 ExecStart=/opt/webterm/scripts/backup.sh
+# Un backup nocturn care pică tăcut e mai rău decât unul care nu există: crezi că-l ai.
+# `systemctl status` îl arată doar dacă te uiţi; asta îl scoate şi în `systemctl --failed`.
+SuccessExitStatus=0
 # opțional: suprascrie prin /etc/default/webterm-backup
 EnvironmentFile=-/etc/default/webterm-backup
