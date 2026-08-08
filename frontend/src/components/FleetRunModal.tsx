@@ -162,7 +162,7 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
         {/* ── faza „confirmi" (pas deliberat) ── */}
         {phase === 'confirm' && (
           <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4">
-            <div className="flex items-center gap-2 font-medium text-amber-300">⚠ {t('fleet.youRunOn')} {chosen.length} {chosen.length === 1 ? t('fleet.host') : t('fleet.hosts')}</div>
+            <div className="flex items-center gap-2 font-medium text-amber-300">⚠ {t('fleet.youRunOn')} {t('fleet.hostCount', { count: chosen.length })}</div>
             <div className="rounded-lg bg-ink-800/60 px-3 py-2 font-mono text-sm text-slate-200">$ {command.trim()}</div>
             <div className="flex flex-wrap gap-1.5">
               {chosen.map((h) => <span key={h.id} className="rounded bg-ink-800 px-2 py-0.5 font-mono text-xs text-slate-400 ring-1 ring-ink-700">{h.name}</span>)}
@@ -210,7 +210,7 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
             <>
               <button onClick={run}
                 className="rounded-lg bg-amber-500 px-4 py-1.5 text-sm font-semibold text-ink-950 hover:bg-amber-400">
-                {t('fleet.runOn')} {chosen.length} {chosen.length === 1 ? t('fleet.host') : t('fleet.hosts')}
+                {t('fleet.runOn')} {t('fleet.hostCount', { count: chosen.length })}
               </button>
               <button onClick={() => setPhase('pick')} className="rounded-lg px-3 py-1.5 text-sm text-slate-400 hover:bg-ink-800">{t('fleet.back')}</button>
             </>

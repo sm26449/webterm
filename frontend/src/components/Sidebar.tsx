@@ -274,7 +274,7 @@ export default function Sidebar(props: {
               <span className="truncate text-sm font-medium">{host.name}</span>
               {liveCount > 0 && (
                 <span className="shrink-0 rounded-full bg-emerald-500/15 px-1.5 text-[10px] font-semibold wt-good"
-                  title={`${liveCount} ${liveCount === 1 ? t('sidebar.liveSessionOne') : t('sidebar.liveSessionMany')}`}>
+                  title={t('sidebar.liveSessions', { count: liveCount })}>
                   {liveCount}
                 </span>
               )}
@@ -546,7 +546,7 @@ export default function Sidebar(props: {
                   <span className="truncate text-sm">{h.title || t('sidebar.untitled')}</span>
                   {h.matches > 0 && (
                     <span className="ml-auto shrink-0 text-[10px] text-slate-400">
-                      {h.matches} {h.matches === 1 ? 'potrivire' : 'potriviri'}
+                      {t('sidebar.matchCount', { count: h.matches })}
                     </span>
                   )}
                 </div>

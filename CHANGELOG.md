@@ -45,7 +45,8 @@ version that does exist.
   gateway substitutes its public half into the agent it serves and signs every update with the
   private half. Agents refuse anything that does not verify, refuse older versions, and validate
   that a new release actually starts before replacing themselves.
-- **Credential vault**, encrypted at rest. Backups are always encrypted with a passphrase you
+- **Credential vault**, encrypted at rest. Backups you download, and those written by the
+  installed timer, are encrypted with a passphrase you
   choose, because they contain the vault key.
 - An **audit log** of every action that changes something, and of the reads that take data out —
   file downloads, transcripts, previews.

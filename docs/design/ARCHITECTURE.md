@@ -30,7 +30,8 @@ exception, and there the gateway does connect outward to them.
 
 State that must survive a restart lives in SQLite or on disk. State that must not — step-up
 windows, lockout counters, WebAuthn challenges — lives in memory, which is why a single replica
-is assumed. See `SECURITY.md` for what that implies.
+is assumed. A restart therefore clears them: step-up windows close, lockout counters reset, and
+in-flight WebAuthn ceremonies must be restarted.
 
 ## The agent
 

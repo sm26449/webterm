@@ -281,8 +281,8 @@ sudo ./install.sh --non-interactive \
 **TLS needs no Cloudflare account.** With no token, Let's Encrypt is obtained over
 **HTTP-01**: all it needs is that `term.example.com` resolves to this server and that
 port 80 is reachable from the internet. Add `--cf-token` only if you are behind the
-Cloudflare proxy or behind NAT without port 80 — or if you use **port forwarding** and
-use **port forwarding**: those live on subdomains matched by a pattern, so Traefik cannot
+Cloudflare proxy or behind NAT without port 80 — or if you use **port forwarding**:
+those live on subdomains matched by a pattern, so Traefik cannot
 derive their names and only a wildcard covers them — and only DNS-01 can issue a wildcard.
 On HTTP-01 the application itself gets TLS normally; forwards do not.
 
@@ -308,7 +308,9 @@ the data volume, so moving from a previous Caddy stack keeps SQLite + the
 transcripts. Open `https://your-domain`, enter the setup token (`deploy.sh`
 prints it), create the account + passkey.
 
-Update to the latest published version: `make pull`. Deploy a specific version
+Update with `./upgrade.sh` — it takes a backup, syncs the host-side scripts and hands off to
+`deploy.sh`. (`make pull` exists for a quick image swap, but it bypasses `deploy.sh`, so it
+records no rollback point and runs no health gate.) Deploy a specific version
 with a recorded rollback point: `./deploy.sh v2.0.0` — if the new container does
 not become healthy, the script rolls back automatically; any time afterwards,
 `./rollback.sh` returns you to the previous image with a single command.
@@ -527,7 +529,8 @@ that token, as above.
 ```
 agent/
   ptyd.py                  single-file agent (stdlib, Python 3.6+), Ed25519-signed
-  shell-integration.sh     OSC 133 markers (bash/zsh), installed opt-in on the host
+  shell-integration.sh     OSC 133 markers (bash/zsh), installed with the agent (opt out
+                           with WEBTERM_NO_SHELL_INTEGRATION=1); appends one line to ~/.bashrc
 gateway/app/
   main.py                  FastAPI, security headers, static, periodic reapers
   api.py                   REST + WS agent/browser + installer + idle-lock 2FA

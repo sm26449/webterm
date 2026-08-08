@@ -33,7 +33,9 @@ function ago(sec: number, t: T): string {
   const h = Math.floor(m / 60)
   if (h < 24) return t('diag.agoHoursMinutes', { h, m: m % 60 })
   const d = Math.floor(h / 24)
-  return d === 1 ? t('diag.agoDayOne', { d }) : t('diag.agoDayMany', { d })
+  // Ternar binar: corect in engleza, gresit in romana (20 de zile). `count` intra in
+  // `t()` ca sa aleaga forma prin Intl.PluralRules.
+  return t('diag.agoDay', { d, count: d })
 }
 
 function stamp(ts: number): string {

@@ -34,8 +34,10 @@ Nothing that was running (processes, editors, command queues) has stopped.
 
 ## 3. Rollback to the previous version
 
-Every deploy done with `deploy.sh` records its rollback point in
-`/opt/webterm/.prev-image`. The rollback needs no network, CI, or GitHub —
+A deploy that CHANGES the pinned tag records its rollback point in
+`/opt/webterm/.prev-image` — redeploying the same tag has nothing new to write down, and
+`make pull` does not go through `deploy.sh` at all, so it neither records a return point nor
+runs the health gate. Use `./upgrade.sh vX.Y.Z` or `./deploy.sh vX.Y.Z` when you want both. The rollback needs no network, CI, or GitHub —
 the old image already exists locally:
 
 ```bash
@@ -177,7 +179,8 @@ credentials** recovered and decryptable.
 
 1. **Backup** (crash-consistent, while the application is running):
    `sudo WEBTERM_BACKUP_PASSPHRASE=... WEBTERM_BACKUP_DIR=/var/backups/webterm ./scripts/backup.sh`
-   (or the systemd timer installed by `install.sh`, daily at 03:30).
+   (or the systemd timer installed by `install.sh`, daily at 03:30 plus up to 15 min of
+   jitter — `RandomizedDelaySec`, so a fleet does not hit the same storage at once).
    `WEBTERM_BACKUP_PASSPHRASE` is **mandatory for unattended runs**: without it the
    script deletes the archive it just wrote and exits non-zero, because that archive
    contains the vault key in cleartext and `/var/backups` ends up in rsyncs and
@@ -223,9 +226,11 @@ the same domain can lock you out of HTTPS for days.
 **Copy off the server, before touching anything:**
 
 ```bash
-sudo cp /etc/default/webterm-backup  ~/webterm-recovery/     # THE PASSPHRASE — first
-sudo cp /opt/webterm/.env            ~/webterm-recovery/
-cp /var/backups/webterm/webterm-*.enc ~/webterm-recovery/    # the newest archive
+mkdir -p ~/webterm-recovery
+sudo cp /etc/default/webterm-backup   ~/webterm-recovery/    # THE PASSPHRASE — first
+sudo cp /opt/webterm/.env             ~/webterm-recovery/
+sudo cp /var/backups/webterm/*.enc    ~/webterm-recovery/    # the archives are root-only, 600
+sudo chown -R "$(id -un)" ~/webterm-recovery
 ```
 
 Then move that directory somewhere that is not this server.

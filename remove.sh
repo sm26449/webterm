@@ -110,7 +110,12 @@ if [ -n "$HOSTS" ]; then
   cat <<'MANUAL'
       systemctl --user disable --now webterm-agent.service 2>/dev/null || true
       rm -f ~/.config/systemd/user/webterm-agent.service
-      ( crontab -l 2>/dev/null | grep -v 'webterm/ptyd.py' | grep -v 'webterm-watchdog' ) | crontab - || crontab -r
+      # `if`, nu `||`: dacă `crontab -l` eşuează (fără crontab, cron.deny, spool ilizibil),
+      # varianta veche scria înapoi un crontab GOL sau rula `crontab -r` — adică ştergea TOT
+      # crontab-ul utilizatorului, nu doar liniile WebTerm.
+      if CUR=$(crontab -l 2>/dev/null); then
+        printf '%s\n' "$CUR" | grep -v 'webterm/ptyd.py' | grep -v 'webterm-watchdog' | crontab - || true
+      fi
       pkill -f 'webterm/ptyd.py' || true
       tmux -L webterm kill-server 2>/dev/null || true
       rm -rf ~/.webterm
