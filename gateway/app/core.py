@@ -1679,6 +1679,10 @@ async def reconcile(conn: AgentConnection, msg: dict) -> None:
         "SELECT COUNT(*) AS c FROM sessions WHERE host_id=? AND state IN ('live','creating')",
         conn.host_id))["c"]
     refused = 0
+    # Sid-urile pe care le ştim deja, într-o singură interogare. Înainte era un
+    # `SELECT ... WHERE id=?` per sesiune raportată, adică N round-trip-uri la DB pentru un
+    # agent care raportează N sesiuni — exact pârghia pe care o are un host compromis.
+    known = {r["id"] for r in await db.fetchall("SELECT id FROM sessions")}
     for sid, info in reported.items():
         # a malicious agent could report a crafted sid; only adopt real ones
         # (uuid4 hex) so it can never become a filesystem path outside the dir
@@ -1690,14 +1694,16 @@ async def reconcile(conn: AgentConnection, msg: dict) -> None:
             except (AgentGone, asyncio.TimeoutError):
                 pass
             continue
-        # Plafonul se verifică ÎNAINTEA interogării: altfel un agent care raportează 3000 de
-        # sid-uri ne costă 3000 de round-trip-uri la DB chiar dacă nu adoptăm niciunul.
+        if sid in known:
+            continue  # belongs to another state; leave alone
+        # Plafonul se aplică DOAR sesiunilor cu adevărat noi. Verificarea stătea înaintea celei
+        # de existenţă, ca să nu plătim o interogare pentru fiecare din cele 3000 de sid-uri ale
+        # unui agent ostil — dar aşa o sesiune pe care o ştiam deja se număra drept „refuzată",
+        # iar un host legitim ajuns la plafon ar fi produs alerte false la fiecare heartbeat.
+        # `known` rezolvă ambele: o singură interogare în loc de N, şi ordinea corectă.
         if adopted_room <= 0:
             refused += 1
             continue
-        exists = await db.fetchone("SELECT id FROM sessions WHERE id=?", sid)
-        if exists:
-            continue  # belongs to another state; leave alone
         adopted_room -= 1
         await db.execute(
             "INSERT INTO sessions(id, host_id, title, state, created, rows, cols)"

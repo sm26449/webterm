@@ -182,6 +182,11 @@ CREATE TABLE IF NOT EXISTS api_tokens (
 # additive migrations for DBs created by an older version
 MIGRATIONS = [
     "ALTER TABLE hosts ADD COLUMN folder TEXT DEFAULT ''",
+    # Revocarea era cheiată pe EMAIL, care e mutabil: schimbi emailul, iar ştergerea contului
+    # nu mai prinde nici tokenurile lui, nici share-urile — tokenul trăia până la 365 de zile.
+    # Emailul rămâne, pentru afişare şi pentru rândurile vechi; decizia se ia pe id.
+    "ALTER TABLE api_tokens ADD COLUMN created_by_id INTEGER",
+    "ALTER TABLE sessions ADD COLUMN share_by_id INTEGER",
     "ALTER TABLE sessions ADD COLUMN share_token TEXT",
     "ALTER TABLE sessions ADD COLUMN share_expires REAL",
     "ALTER TABLE sessions ADD COLUMN share_writable INTEGER DEFAULT 0",

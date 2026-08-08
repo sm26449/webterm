@@ -244,7 +244,8 @@ async def _issue_cookie(response: Response, user_id: int, request: Request) -> N
     security.set_session_cookie(response, token)
 
 
-async def _revoke_all_shares(owner_email: str | None = None) -> None:
+async def _revoke_all_shares(owner_email: str | None = None,
+                             owner_id: int | None = None) -> None:
     """Share-urile (PTY live, opţional writable) sunt acces DERIVAT — mor la logout /
     schimbare de parolă, ca token-urile de forward (M3). Altfel un share creat cu un
     cookie furat supravieţuieşte deconectării owner-ului până la expirare (max 24h).
@@ -254,11 +255,14 @@ async def _revoke_all_shares(owner_email: str | None = None) -> None:
     link-urile lui B, într-un mod imposibil de diagnosticat („de ce a murit share-ul de
     incident?"). Semnalat de un audit extern. Fără argument (sau pe share-uri vechi, fără
     `share_by`) rămâne global — la schimbarea parolei după compromitere vrei exact asta."""
-    if owner_email:
-        rows = await db.fetchall(
-            "SELECT id FROM sessions WHERE share_token IS NOT NULL AND share_by=?", owner_email)
-        await db.execute("UPDATE sessions SET share_token=NULL, share_expires=NULL, share_writable=0"
-                         " WHERE share_token IS NOT NULL AND share_by=?", owner_email)
+    if owner_email or owner_id is not None:
+        # id-ul e cheia; emailul rămâne rezervă pentru share-urile create înainte de migrare.
+        # Cheiat DOAR pe email, o schimbare de email scotea share-urile de sub orice revocare.
+        where = " WHERE share_token IS NOT NULL AND (share_by_id=? OR share_by=?)"
+        args = (owner_id, owner_email)
+        rows = await db.fetchall("SELECT id FROM sessions" + where, *args)
+        await db.execute("UPDATE sessions SET share_token=NULL, share_expires=NULL,"
+                         " share_writable=0" + where, *args)
         sids = {r["id"] for r in rows}
     else:
         await db.execute("UPDATE sessions SET share_token=NULL, share_expires=NULL, share_writable=0"
@@ -289,7 +293,7 @@ async def logout(request: Request, response: Response):
     # explice de ce. Vezi `_revoke_all_shares`, care primise deja aceeaşi restrângere.
     security.bump_forward_epoch(u["id"])
     # doar share-urile CONTULUI care se deconectează — vezi _revoke_all_shares
-    await _revoke_all_shares(u["email"])
+    await _revoke_all_shares(u["email"], u["id"])
     await security.destroy_web_session(tok)
     security.clear_session_cookie(response)
     return {"ok": True}
@@ -461,12 +465,17 @@ async def delete_user(uid: int, body: ReauthOnly, user=Depends(security.require_
     # cont ca să funcţioneze — sunt credenţiale de sine stătătoare — deci ştergerea contului
     # arăta ca o revocare completă fără să fie una. Le numărăm ca să apară în jurnal: cine
     # şterge un cont trebuie să vadă ce automatizări a oprit odată cu el.
+    # `created_by_id` ESTE cheia; `created_by` rămâne ca rezervă pentru tokenurile emise
+    # înainte de migrare, care n-au id. Fără id-ul ăsta, o simplă schimbare de email lăsa
+    # tokenul în viaţă după ştergerea contului — până la un an.
     ntok = (await db.fetchone(
-        "SELECT COUNT(*) AS c FROM api_tokens WHERE created_by=?", row["email"]))["c"]
-    await db.execute("DELETE FROM api_tokens WHERE created_by=?", row["email"])
+        "SELECT COUNT(*) AS c FROM api_tokens WHERE created_by_id=? OR created_by=?",
+        uid, row["email"]))["c"]
+    await db.execute("DELETE FROM api_tokens WHERE created_by_id=? OR created_by=?",
+                     uid, row["email"])
     security.clear_stepup_for(uid)
     security.bump_forward_epoch(uid)      # şi biletele lui de port-forward, ca la logout
-    await _revoke_all_shares(row["email"])
+    await _revoke_all_shares(row["email"], uid)
     if ntok:
         log.warning("account deleted: revoked %d automation token(s) issued by %s",
                     ntok, row["email"])
@@ -514,10 +523,10 @@ async def create_token(body: TokenIn, user=Depends(security.require_user)):
     days = min(max(int(body.days), 1), TOKEN_MAX_DAYS)   # expirarea NU e opțională
     raw = security.TOKEN_PREFIX + security.new_token()
     await db.execute(
-        "INSERT INTO api_tokens(name, token_hash, scopes, created, created_by, expires)"
-        " VALUES(?,?,?,?,?,?)",
+        "INSERT INTO api_tokens(name, token_hash, scopes, created, created_by,"
+        " created_by_id, expires) VALUES(?,?,?,?,?,?,?)",
         name, security.sha256_hex(raw), ",".join(scopes), time.time(), user["email"],
-        time.time() + days * 86400)
+        user["id"], time.time() + days * 86400)
     log.info("automation token created: %s (%s, %dd) by %s", name, ",".join(scopes), days,
              user["email"])
     # valoarea în clar se întoarce O SINGURĂ DATĂ; în DB stă doar hash-ul
@@ -3327,9 +3336,11 @@ async def create_share(sid: str, request: Request, body: ShareIn = ShareIn(),
     # token-ul de share e stocat HASH-uit (ca token-urile de sesiune) — o scurgere de backup
     # necriptat nu mai expune URL-uri de terminal live. URL-ul întors conține token-ul în clar.
     await db.execute(
-        "UPDATE sessions SET share_token=?, share_expires=?, share_writable=?, share_by=?"
+        "UPDATE sessions SET share_token=?, share_expires=?, share_writable=?,"
+        " share_by=?, share_by_id=?"
         " WHERE id=?",
-        security.sha256_hex(token), expires, 1 if body.writable else 0, user["email"], sid)
+        security.sha256_hex(token), expires, 1 if body.writable else 0,
+        user["email"], user["id"], sid)
     return {"url": f"{config.PUBLIC_URL}/#/shared/{token}",
             "expires": expires, "writable": bool(body.writable)}
 
