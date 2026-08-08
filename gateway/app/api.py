@@ -223,7 +223,7 @@ async def login(creds: Credentials, request: Request, response: Response):
         await asyncio.to_thread(security.dummy_verify)
     if not ok:
         security.record_login_failure(ip)
-        raise HTTPException(401, "wrong email or password")
+        raise ApiError(401, "auth.badCredentials", "wrong email or password")
     # parola e corectă — dacă 2FA e activ, cere al doilea factor
     if user["totp_enabled"]:
         if not creds.totp_code:
@@ -231,7 +231,7 @@ async def login(creds: Credentials, request: Request, response: Response):
             return {"ok": False, "totp_required": True}
         if not await _verify_second_factor(user, creds.totp_code):
             security.record_login_failure(ip)
-            raise HTTPException(401, "wrong 2FA code")
+            raise ApiError(401, "auth.bad2fa", "wrong 2FA code")
     security.record_login_success(ip)
     await security.note_new_login(user, ip, request.headers.get("user-agent", ""))
     await _issue_cookie(response, user["id"], request)
@@ -332,7 +332,7 @@ async def _verify_reauth_password(user, password: str) -> bool:
 async def update_account(body: AccountUpdate, request: Request, user=Depends(security.require_user)):
     """Change email and/or password. Requires the current password."""
     if not await _verify_reauth_password(user, body.current_password):
-        raise HTTPException(401, "the current password is wrong")
+        raise ApiError(401, "auth.wrongCurrentPassword", "the current password is wrong")
     email = user["email"]
     if body.email and body.email.strip().lower() != email:
         email = body.email.strip().lower()
@@ -417,7 +417,7 @@ async def list_users(user=Depends(security.require_user)):
 @router.post("/api/users")
 async def create_user(body: UserIn, user=Depends(security.require_user)):
     if not await _verify_reauth_password(user, body.current_password):
-        raise HTTPException(401, "wrong password")
+        raise ApiError(401, "auth.wrongPassword", "wrong password")
     email = body.email.strip().lower()
     if "@" not in email or len(email) > 200:
         raise ApiError(400, "account.badEmail", "invalid email")
@@ -438,7 +438,7 @@ async def create_user(body: UserIn, user=Depends(security.require_user)):
 @router.post("/api/users/{uid}/delete")
 async def delete_user(uid: int, body: ReauthOnly, user=Depends(security.require_user)):
     if not await _verify_reauth_password(user, body.current_password):
-        raise HTTPException(401, "wrong password")
+        raise ApiError(401, "auth.wrongPassword", "wrong password")
     if uid == user["id"]:
         # ştergerea propriului cont din propria sesiune = te blochezi la jumătatea operaţiei
         raise HTTPException(400, "you cannot delete your own account; do it from another one")
@@ -504,7 +504,7 @@ async def list_tokens(user=Depends(security.require_user)):
 @router.post("/api/tokens")
 async def create_token(body: TokenIn, user=Depends(security.require_user)):
     if not await _verify_reauth_password(user, body.current_password):
-        raise HTTPException(401, "wrong password")
+        raise ApiError(401, "auth.wrongPassword", "wrong password")
     name = body.name.strip()[:60]
     if not name:
         raise HTTPException(400, "give it a name (so you know what you are revoking)")
@@ -541,7 +541,7 @@ async def totp_setup(body: TotpSetup, user=Depends(security.require_user)):
     # M1: înrolarea unui factor 2FA e schimbare de credențiale — cere re-auth cu parola,
     # ca un cookie furat să nu poată înrola un TOTP atacator + să ia codurile de recuperare.
     if not await _verify_reauth_password(user, body.current_password):
-        raise HTTPException(401, "the current password is wrong")
+        raise ApiError(401, "auth.wrongCurrentPassword", "the current password is wrong")
     if user["totp_enabled"]:
         raise HTTPException(409, "2FA is already on; turn it off first")
     secret = totp.new_secret()
@@ -562,7 +562,7 @@ async def totp_activate(body: TotpActivate, request: Request,
     """Confirmă înrolarea: un cod valid activează 2FA și emite codurile de
     recuperare (afișate O SINGURĂ DATĂ)."""
     if not await _verify_reauth_password(user, body.current_password):   # M1: re-auth şi la activare
-        raise HTTPException(401, "the current password is wrong")
+        raise ApiError(401, "auth.wrongCurrentPassword", "the current password is wrong")
     if user["totp_enabled"]:
         raise ApiError(409, "totp.alreadyOn", "2FA is already enabled")
     if not user["totp_secret_encrypted"]:
@@ -591,7 +591,7 @@ async def totp_disable(body: TotpDisable, request: Request,
     """Dezactivează 2FA. Cere parola curentă (re-auth), ca un cookie furat să nu
     poată slăbi singur contul."""
     if not await _verify_reauth_password(user, body.current_password):
-        raise HTTPException(401, "the current password is wrong")
+        raise ApiError(401, "auth.wrongCurrentPassword", "the current password is wrong")
     await db.execute(
         "UPDATE users SET totp_enabled=0, totp_secret_encrypted=NULL WHERE id=?", user["id"])
     await db.execute("DELETE FROM recovery_codes WHERE user_id=?", user["id"])
@@ -605,7 +605,7 @@ async def totp_regenerate(body: TotpDisable, user=Depends(security.require_user)
     if not user["totp_enabled"]:
         raise ApiError(400, "totp.notOn", "2FA is not enabled")
     if not await _verify_reauth_password(user, body.current_password):
-        raise HTTPException(401, "the current password is wrong")
+        raise ApiError(401, "auth.wrongCurrentPassword", "the current password is wrong")
     codes = _gen_recovery_codes()
     await db.execute("DELETE FROM recovery_codes WHERE user_id=?", user["id"])
     for c in codes:
@@ -1720,7 +1720,7 @@ async def cloud_config(body: CloudConfigIn, user=Depends(security.require_user))
     # Aceeași poartă ca la passkey/2FA: cine are cookie-ul, dar nu parola, nu poate
     # deschide o cale prin care backup-urile (cheia seifului) pleacă spre contul lui.
     if not await _verify_reauth_password(user, body.current_password):
-        raise HTTPException(401, "wrong password")
+        raise ApiError(401, "auth.wrongPassword", "wrong password")
     try:
         await cloudbackup.save_config(body.provider, body.client_id, body.client_secret,
                                       body.passphrase, body.keep, body.include_transcripts)

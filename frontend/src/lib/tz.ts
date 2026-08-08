@@ -22,6 +22,28 @@ export function uiLocale(): string {
   }
 }
 
+/* Un timestamp formatat cu AMBELE alegeri ale utilizatorului: limba interfeţei ŞI fusul orar
+   selectat în Setări. Existau amândouă mecanismele, dar `toLocaleString()` fără argumente le
+   ignora pe amândouă: lua limba BROWSERULUI şi fusul MAŞINII. Un român cu Chrome pe `en-US`
+   vedea interfaţa în română şi jurnalul de audit cu date americane; iar cine îşi punea
+   `Europe/Bucharest` în Setări nu vedea niciun efect acolo unde conta — audit, expirarea
+   tokenurilor, backupuri, diagnostic. Opt locuri foloseau varianta fără argumente; acum trec
+   toate pe aici. `date`/`datetime` acoperă cele două forme folosite în UI. */
+export function fmtTs(epochSeconds: number, style: 'date' | 'datetime' = 'datetime'): string {
+  try {
+    const opts: Intl.DateTimeFormatOptions =
+      style === 'date'
+        ? { timeZone: getTimezone(), year: 'numeric', month: '2-digit', day: '2-digit' }
+        : { timeZone: getTimezone(), year: 'numeric', month: '2-digit', day: '2-digit',
+            hour: '2-digit', minute: '2-digit', second: '2-digit' }
+    return new Intl.DateTimeFormat(uiLocale(), opts).format(new Date(epochSeconds * 1000))
+  } catch {
+    // fus invalid salvat în localStorage, sau Intl fără date pentru locală: mai bine o dată
+    // brută decât un ecran gol
+    return new Date(epochSeconds * 1000).toISOString().slice(0, 19).replace('T', ' ')
+  }
+}
+
 export function browserTimezone(): string {
   try {
     return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'

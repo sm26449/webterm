@@ -87,7 +87,7 @@ export default function HostOverview(props: {
           <span className="block truncate text-sm text-slate-200">{s.title || t('host.sessionFallback')}</span>
           <span className="block truncate text-[11px] text-slate-600">
             {live ? t('host.stateActive') : s.state === 'lost' ? t('host.stateLost') : t('host.stateClosed')}
-            {s.exit_status != null ? ` · exit ${s.exit_status}` : ''} · {timeAgo(s.closed_at || s.created)}
+            {s.exit_status != null ? ` · exit ${s.exit_status}` : ''} · {timeAgo(s.closed_at || s.created, t)}
           </span>
         </span>
         {s.connected_clients > 0 && <span className="shrink-0 text-[11px] text-slate-500">👁 {s.connected_clients}</span>}
@@ -195,7 +195,7 @@ export default function HostOverview(props: {
                 <div className="min-w-[8rem] flex-1">
                   <div className="truncate text-sm font-medium text-slate-200">{sel.title || t('host.sessionFallback')}</div>
                   <div className="truncate text-[11px] text-slate-600">
-                    {selLive ? t('host.previewLive') : t('host.previewHistory')} · {timeAgo(sel.closed_at || sel.created)}
+                    {selLive ? t('host.previewLive') : t('host.previewHistory')} · {timeAgo(sel.closed_at || sel.created, t)}
                   </div>
                 </div>
                 {/* split/popout: doar pe ecrane mari (pe tablete nu încap) */}
@@ -293,7 +293,7 @@ function HostDetail({ host }: { host: Host }) {
           <Section title="Agent">
             <Row k={t('host.version')} v={host.agent_version != null ? `v${host.agent_version}` : t('host.notInstalled')}
               badge={host.update_pending ? t('host.updateAvailable') : undefined} />
-            {host.last_heartbeat != null && <Row k={t('host.lastActivity')} v={timeAgo(host.last_heartbeat)} />}
+            {host.last_heartbeat != null && <Row k={t('host.lastActivity')} v={timeAgo(host.last_heartbeat, t)} />}
           </Section>
         )}
 

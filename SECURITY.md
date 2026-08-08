@@ -8,7 +8,21 @@ Report privately via **GitHub Security Advisories**: the *Security* tab → *Rep
 (or `.../security/advisories/new`). You will get a private channel for discussion and a coordinated fix.
 
 Include, if you can: the affected version, reproduction steps, the impact, and a proof of concept.
-The project is maintained by a single person — a response may take a few days; thank you for your patience.
+
+**No GitHub account?** Email `stefan.maldaianu@gmail.com` with `WebTerm security` in the subject.
+Advisories are preferred — they give us a private thread and a coordinated fix — but not having an
+account should never be the reason a problem goes unreported.
+
+**What to expect.** The project is maintained by one person, in his spare time, so this is a promise
+about honesty rather than speed: an acknowledgement within **7 days**, and an assessment (in scope or
+not, and roughly when) within **30 days**. If you have not heard back in 30 days, assume the message
+was lost and ping again — that is a failure on my side, not impatience on yours. Fixes ship in the
+next release; you decide whether to be credited in the advisory.
+
+**Safe harbour.** Test only against your own installation. Do not access other people's data, do not
+degrade a service someone else depends on, and give me a reasonable window before publishing. Within
+those limits I will not pursue anything against a good-faith report, and I would rather hear about a
+finding that turns out to be nothing than not hear about one that was real.
 
 ## What is in scope
 

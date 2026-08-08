@@ -11,7 +11,7 @@ import {
   customTheme, parseThemeFile, saveCustomTheme, setTermScheme, termTheme,
 } from '../lib/termtheme'
 import { useTheme } from '../lib/theme'
-import { allTimezones, browserTimezone, getTimezone, setTimezone, timeInZone } from '../lib/tz'
+import { allTimezones, browserTimezone, fmtTs, getTimezone, setTimezone, timeInZone } from '../lib/tz'
 import { KeyIcon } from './Icons'
 import { copyText } from '../lib/clipboard'
 
@@ -1557,10 +1557,10 @@ export default function SettingsModal(props: {
               <span className="shrink-0 font-mono text-[11px] text-slate-500">{tk.scopes}</span>
               <span className={`shrink-0 text-[11px] ${tk.expired ? 'wt-danger' : 'text-slate-500'}`}>
                 {tk.expired ? t('settings.tokens.expired')
-                  : t('settings.tokens.expires', { date: new Date(tk.expires * 1000).toLocaleDateString() })}
+                  : t('settings.tokens.expires', { date: fmtTs(tk.expires, 'date') })}
               </span>
               <span className="shrink-0 text-[11px] text-slate-600">
-                {tk.last_used ? t('settings.tokens.lastUsed', { when: new Date(tk.last_used * 1000).toLocaleDateString() })
+                {tk.last_used ? t('settings.tokens.lastUsed', { when: fmtTs(tk.last_used, 'date') })
                   : t('settings.tokens.neverUsed')}
               </span>
               <button onClick={() => revokeToken(tk)} className="shrink-0 text-xs wt-danger hover:underline">
@@ -1694,7 +1694,7 @@ export default function SettingsModal(props: {
               className="rounded-lg bg-ink-800/60 px-3 py-2 text-xs ring-1 ring-ink-700">
               <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
                 <span className="font-mono tabular-nums text-slate-400">
-                  {new Date(e.ts * 1000).toLocaleString()}
+                  {fmtTs(e.ts)}
                 </span>
                 {/* respins ≠ reușit: la audit, eșecurile sunt cele mai interesante */}
                 <span className={`font-mono ${e.status >= 400 ? 'wt-danger' : 'wt-good'}`}>
@@ -1943,11 +1943,11 @@ export default function SettingsModal(props: {
             <span className={cloud.last.ok ? 'text-slate-500' : 'wt-danger'}>
               {cloud.last.ok
                 ? t('settings.cloud.lastOk', {
-                  when: new Date(cloud.last.ts * 1000).toLocaleString(),
+                  when: fmtTs(cloud.last.ts),
                   name: cloud.last.name || '',
                 })
                 : t('settings.cloud.lastFailed', {
-                  when: new Date(cloud.last.ts * 1000).toLocaleString(),
+                  when: fmtTs(cloud.last.ts),
                   error: cloud.last.error || '',
                 })}
             </span>
