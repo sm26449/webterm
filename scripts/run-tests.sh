@@ -18,6 +18,33 @@ cd "$(dirname "$0")/.."
 PY="${PY:-python3}"
 SUITE="${1:-ci}"
 
+# Preflight pe interpretor şi dependenţe. `ci-local.sh` îl are de două runde, cu comentariul
+# care descrie exact defectul — dar el e scriptul din spate, iar CONTRIBUTING trimite AICI
+# (prin `make test`). Fără preflight, un contribuitor fără venv primea 43 de rânduri
+# „timeout: failed to run command", iar unul cu venv incomplet primea 31 de
+# `ModuleNotFoundError` amestecate printre 330 de PASS-uri — în ambele cazuri exit 1 şi
+# niciun indiciu că problema e mediul, nu codul lui. Un raport roşu fals costă la fel de mult
+# ca unul verde fals: prima dată te trimite să cauţi un bug inexistent, a doua oară nu te mai
+# uiţi la el. Semnalat de un audit extern care a parcurs traseul primului contribuitor.
+command -v "$PY" >/dev/null 2>&1 || [ -x "$PY" ] || {
+  echo "Nu găsesc interpretorul '$PY'." >&2
+  echo "  Rulează cu PY=/cale/către/python, sau creează venv-ul:" >&2
+  echo "    python3 -m venv .venv && ./.venv/bin/pip install -r gateway/requirements.txt -r gateway/requirements-dev.txt" >&2
+  exit 2
+}
+MISSING=$("$PY" - <<'PYEOF' 2>/dev/null || echo "?"
+import importlib.util as u
+print(" ".join(m for m in ("aiosqlite", "httpx", "fastapi", "cryptography")
+                if u.find_spec(m) is None))
+PYEOF
+)
+if [ -n "$MISSING" ]; then
+  echo "'$PY' nu are dependenţele gateway-ului: $MISSING" >&2
+  echo "  pip install -r gateway/requirements.txt -r gateway/requirements-dev.txt" >&2
+  echo "  (sau rulează cu PY=/cale/către/.venv/bin/python)" >&2
+  exit 2
+fi
+
 CI_TESTS="agent_hardening agent_reliability agent_tmux_hygiene ed25519_kat
           backup forward_validation idle_lock retention session_reconcile
           telnet telnet_bastion telnet_shim totp transcript_cap stepup signing

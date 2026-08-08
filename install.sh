@@ -26,6 +26,7 @@ INSTALL_DIR=/opt/webterm
 REPO_URL=https://github.com/sm26449/webterm.git
 BRANCH=main
 DOMAIN="" EMAIL="" CF_TOKEN="" GHCR_USER=sm26449 GHCR_TOKEN="" IMAGE=""
+DO_PORTCHECK=1
 DO_UFW=1 DO_BACKUP=1 NONINTERACTIVE=0
 
 usage() {
@@ -45,6 +46,7 @@ Options:
   --branch <name>       branch to clone (default: main)
   --no-ufw              do not touch the firewall
   --no-backup           do not install the daily backup timer
+  --skip-port-check     do not refuse when 80/443 are taken (you front WebTerm yourself)
   --non-interactive     ask nothing (fails if a value is missing)
   -h | --help           this message
 EOF
@@ -65,6 +67,7 @@ while [ $# -gt 0 ]; do
     --branch) BRANCH="$2"; shift 2 ;;
     --no-ufw) DO_UFW=0; shift ;;
     --no-backup) DO_BACKUP=0; shift ;;
+    --skip-port-check) DO_PORTCHECK=0; shift ;;
     --non-interactive) NONINTERACTIVE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) err "Unknown option: $1"; usage; exit 1 ;;
@@ -115,7 +118,7 @@ docker info >/dev/null 2>&1 || { err "The Docker daemon is not running."; exit 1
 # instalare pe jumătate şi un mesaj de la Docker care nu spune ce e de făcut.
 # `install.sh` e calea de PRODUCŢIE, deci aici starea parţială costă cel mai mult.
 # Dacă stiva noastră rulează deja (reinstalare peste ea), ea ţine porturile — nu e o problemă.
-if [ -z "$(docker ps -q --filter label=com.docker.compose.project=webterm 2>/dev/null)" ]; then
+if [ "$DO_PORTCHECK" = 1 ] && [ -z "$(docker ps -q --filter label=com.docker.compose.project=webterm 2>/dev/null)" ]; then
   BUSY=""
   for p in 80 443; do
     if command -v ss >/dev/null 2>&1; then
@@ -128,7 +131,9 @@ if [ -z "$(docker ps -q --filter label=com.docker.compose.project=webterm 2>/dev
   if [ -n "$BUSY" ]; then
     err "Ports 80/443 are already in use — Traefik could not start and the install would stop halfway:"
     printf '%s' "$BUSY" >&2
-    err "Free them, or put WebTerm behind the proxy you already run (docs/RUNBOOK.md).
+    err "Traefik needs :80 for the ACME HTTP-01 challenge and :443 for TLS, so these two are
+not configurable here. Free them, or — if you already run a proxy in front and will forward
+to WebTerm yourself — re-run with --skip-port-check.
 Nothing was changed yet."
     exit 1
   fi

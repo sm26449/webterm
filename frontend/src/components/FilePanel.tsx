@@ -496,7 +496,7 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
         {/* confirmare overwrite (pe coliziuni de fișiere existente) */}
         {overwrite && (
           <div className="border-t border-ink-800 bg-ink-800/80 px-3 py-2 text-[11px]">
-            <p className="mb-1.5 text-slate-300">{overwrite.count === 1 ? t('files.overwriteOne', { count: overwrite.count }) : t('files.overwriteMany', { count: overwrite.count })}</p>
+            <p className="mb-1.5 text-slate-300">{t('files.overwrite', { count: overwrite.count })}</p>
             <div className="flex gap-2">
               <button onClick={() => reallyUpload(overwrite.items)} className="rounded bg-amber-600 px-2 py-0.5 font-medium text-white hover:bg-amber-700">{t('files.overwrite')}</button>
               <button onClick={() => setOverwrite(null)} className="rounded px-2 py-0.5 text-slate-400 hover:bg-ink-700">{t('files.cancel')}</button>

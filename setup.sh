@@ -31,16 +31,27 @@ port_holder() {      # $1 = port → numele procesului care ascultă, sau gol
     netstat -ltnp 2>/dev/null | awk -v p=":$1\$" '$4 ~ p {print $7; exit}'
   fi
 }
+# Porturile pe care le leagă STIVA, nu 80/443 fix. README-ul documentează un
+# `docker-compose.override.yml` cu `ports: !override` pe 8080/8443, exact pentru cazul „am deja
+# ceva pe 80" — iar prima versiune a verificării ăsteia refuza fix rețeta pe care o recomandă
+# documentația, fără portiță. Îl întrebăm pe compose ce va publica de fapt: el a citit deja
+# override-ul, deci e singura sursă de adevăr care nu se poate contrazice cu ea însăși.
+published_ports() {
+  $COMPOSE config 2>/dev/null | sed -n 's/^ *published: *"\{0,1\}\([0-9]\{1,\}\)"\{0,1\} *$/\1/p' | sort -u
+}
 if [ -z "$($COMPOSE ps -q 2>/dev/null)" ]; then
   BUSY=""
-  for p in 80 443; do
+  PORTS="$(published_ports)"
+  [ -n "$PORTS" ] || PORTS="80 443"       # compose prea vechi pentru `config` → cazul implicit
+  for p in $PORTS; do
     h=$(port_holder "$p" || true)
     [ -n "$h" ] && BUSY="${BUSY}  · port ${p} is held by: ${h}"$'\n'
   done
   if [ -n "$BUSY" ]; then
-    err "Ports 80/443 are already in use, so the stack cannot start:"
+    err "The ports this stack would publish are already in use:"
     printf '%s' "$BUSY" >&2
-    err "Free them, or run WebTerm behind the proxy you already have (see docs/RUNBOOK.md).
+    err "Free them, or publish on different ports with a docker-compose.override.yml
+(see the \"Ports 80 and 443 must be free\" section of README.md) and re-run.
 Nothing was changed — no container was created."
     exit 1
   fi

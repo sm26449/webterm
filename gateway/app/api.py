@@ -3509,8 +3509,12 @@ WatchdogSec=45
 WantedBy=default.target
 UNIT
   # clean up the old cron entry so we do not end up with two mechanisms
-  command -v crontab >/dev/null 2>&1 && \
-    ( crontab -l 2>/dev/null | grep -v 'webterm/ptyd.py' | grep -v 'webterm-watchdog' ) | crontab - 2>/dev/null || true
+  # `if`, nu pipe necondiţionat: când `crontab -l` eşuează, pipe-ul e gol şi `crontab -`
+  # scrie înapoi un crontab GOL — adică ştergem tot ce avea omul acolo, ca să curăţăm
+  # două rânduri de-ale noastre. Scriem înapoi doar dacă chiar am putut citi.
+  if command -v crontab >/dev/null 2>&1 && CUR=$(crontab -l 2>/dev/null); then
+    printf '%s\n' "$CUR" | grep -v 'webterm/ptyd.py' | grep -v 'webterm-watchdog' | crontab - 2>/dev/null || true
+  fi
   systemctl --user daemon-reload
   if systemctl --user enable --now webterm-agent.service >/dev/null 2>&1; then
     SUP="systemd"
