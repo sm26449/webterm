@@ -151,6 +151,34 @@ async def main():
         check("tokenul lui moare odată cu contul → 401",
               (await t7.get("/api/status")).status_code == 401)
 
+    # ── şi supravieţuieşte unei SCHIMBĂRI DE EMAIL ──
+    # Revocarea era cheiată pe `created_by` (emailul), iar schimbarea emailului nu-l migra:
+    # creezi token → schimbi emailul → contul e şters → `DELETE ... WHERE created_by=<email nou>`
+    # nu prindea nimic, iar tokenul trăia până la 365 de zile. Cauza era cheia mutabilă, nu
+    # ştergerea. Acum decizia se ia pe `created_by_id`.
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c6:
+        await c6.post("/api/login", json={"email": "a@b.co", "password": PW})
+        await c6.post("/api/users", json={"email": "vechi@b.co", "password": PW,
+                                          "current_password": PW})
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c7:
+        await c7.post("/api/login", json={"email": "vechi@b.co", "password": PW})
+        moved_tok = (await c7.post("/api/tokens", json={
+            "name": "supravietuitor", "scopes": ["read"], "current_password": PW})).json()["token"]
+        r = await c7.post("/api/account", json={"email": "nou@b.co", "current_password": PW})
+        check("emailul contului s-a schimbat", r.status_code == 200, r.text[:120])
+    HM = {"Authorization": "Bearer " + moved_tok}
+    async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=HM) as t8:
+        check("tokenul merge după schimbarea emailului",
+              (await t8.get("/api/status")).status_code == 200)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c8:
+        await c8.post("/api/login", json={"email": "a@b.co", "password": PW})
+        uid2 = [u for u in (await c8.get("/api/users")).json()
+                if u["email"] == "nou@b.co"][0]["id"]
+        await c8.post(f"/api/users/{uid2}/delete", json={"current_password": PW})
+    async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=HM) as t9:
+        check("tokenul moare şi dacă emailul s-a schimbat între timp → 401",
+              (await t9.get("/api/status")).status_code == 401)
+
     await db.close()
     print(f"\n{ok}/{total} passed")
     return ok == total
