@@ -75,6 +75,20 @@ async def test_closed_sessions_get_archived():
           (await db.fetchone("SELECT id FROM sessions WHERE id=?", old_sid)) is not None)
     # a doua trecere nu mai are ce muta — janitorul rulează la fiecare oră
     check("a doua rulare nu mai mişcă nimic", (await core.archive_closed_transcripts(now)) == 0)
+
+    # `lost` NU se arhivează: e starea reconectabilă, pe care reconcilierea o readuce la `live`
+    # când hostul revine. Un host offline peste prag care se întoarce ar fi primit sesiunea
+    # înviată cu scrollback-ul deja mutat în arhivă — exact la revenirea din pană.
+    lost_sid = "d" * 32
+    await db.execute(
+        "INSERT INTO sessions(id, host_id, state, created, closed_at) VALUES(?,?,?,?,?)",
+        lost_sid, 1, "lost", now - 90 * 86400, now - 90 * 86400)
+    for pth in core.transcript_paths(lost_sid):
+        pth.write_bytes(b"y" * 100)
+    check("sesiunea 'lost' (reconectabilă) NU e arhivată",
+          (await core.archive_closed_transcripts(now)) == 0)
+    check("transcriptul ei e intact",
+          all(pth.exists() for pth in core.transcript_paths(lost_sid)))
     await db.close()
 
 

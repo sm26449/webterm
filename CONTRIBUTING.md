@@ -73,6 +73,14 @@ The `.github/workflows/docker-publish.yml` workflow **blocks image publishing** 
    single source of truth for the list, and guards it in both directions) fail.
 3. **Smoke boot** (headless Chromium) — the UI fails to start.
 4. **Session E2E** (REAL agent) / **FS API** / **port forwarding** / **mobile audit** fail.
+5. **Housekeeping gates** that are easy to trip without touching anything you meant to:
+   `gitleaks` over the history, the README version badge and the image pins matching
+   `GATEWAY_VERSION`, `requirements.txt` in sync with `requirements.lock`, `ruff --select F`,
+   `npx eslint .`, and a bumped `AGENT_VERSION` whenever `agent/ptyd.py` changes.
+6. **`pip-audit --strict`** over the shipped dependencies. This one can turn your PR red for
+   something you did not touch: a CVE published in a dependency reddens every open PR until the
+   pin is bumped. If that is what you are looking at, say so in the PR and we will bump it —
+   it is not your bug.
 
 Actions are pinned to their **full SHA** (supply chain). Do not add secrets to the repo — `.env`/`*.pem`/
 `backups/` are in `.gitignore`; never commit keys or tokens.
@@ -94,8 +102,11 @@ covers the source, not the version — so CI has a separate gate for it.
 
 **If you are contributing from a fork, you cannot re-sign, and you are not expected to.** The
 private key is offline. Open the PR with `agent/ptyd.py` and `AGENT_VERSION` changed but the
-signature untouched; the blocking signature check only applies to pushes on this repository, and
-a maintainer re-signs at merge. Do **not** replace `UPDATE_PUBKEY` with your own key in a PR —
+signature untouched; the blocking signature check is skipped for pull requests **from a fork**,
+which is where outside contributions come from, and a maintainer re-signs at merge. Note the
+exact shape: a PR from a branch **inside this repository** still hits the blocking check, so a
+collaborator with push access should work on a fork when touching `ptyd.py`, or expect to
+re-sign before the PR can go green. Do **not** replace `UPDATE_PUBKEY` with your own key in a PR —
 that would be correct for running your own fork, and wrong to merge here.
 
 Deployers can generate or import **their own deployment key** from the UI (Settings → Security)

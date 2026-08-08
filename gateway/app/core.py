@@ -208,7 +208,11 @@ async def archive_closed_transcripts(now: Optional[float] = None) -> int:
         return 0
     cutoff = (now or time.time()) - days * 86400
     rows = await db.fetchall(
-        "SELECT id FROM sessions WHERE state IN ('closed','lost')"
+        # DOAR `closed`. `lost` înseamnă „agentul a dispărut", nu „s-a terminat": reconcilierea
+        # o readuce la `live` când hostul revine (vezi bucla din `reconcile`). Un host offline
+        # peste `CLOSED_ARCHIVE_DAYS` care se întoarce ar fi primit sesiunea înviată cu
+        # transcriptul deja mutat în arhivă — adică scrollback gol, fix la revenirea din pană.
+        "SELECT id FROM sessions WHERE state='closed'"
         " AND COALESCE(closed_at, created) < ?", cutoff)
     moved = 0
     for r in rows:
@@ -1707,7 +1711,13 @@ async def reconcile(conn: AgentConnection, msg: dict) -> None:
     # Sid-urile pe care le ştim deja, într-o singură interogare. Înainte era un
     # `SELECT ... WHERE id=?` per sesiune raportată, adică N round-trip-uri la DB pentru un
     # agent care raportează N sesiuni — exact pârghia pe care o are un host compromis.
-    known = {r["id"] for r in await db.fetchall("SELECT id FROM sessions")}
+    # Doar ale HOSTULUI ăstuia. `SELECT id FROM sessions` încărca fiecare sesiune din instanţă
+    # la fiecare heartbeat al fiecărui host, iar rândurile se păstrează pentru totdeauna
+    # („istoricul e util") — deci setul creştea nemărginit pe viaţa instalării. Reparând N
+    # round-trip-uri, introdusesem un scan complet de tabel. Sid-urile sunt uuid4, deci o
+    # sesiune a altui host n-are cum să se potrivească.
+    known = {r["id"] for r in await db.fetchall(
+        "SELECT id FROM sessions WHERE host_id=?", conn.host_id)}
     for sid, info in reported.items():
         # a malicious agent could report a crafted sid; only adopt real ones
         # (uuid4 hex) so it can never become a filesystem path outside the dir

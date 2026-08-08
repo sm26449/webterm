@@ -343,8 +343,12 @@ if [ "$TODO" = 0 ]; then
 fi
 
 if [ "${SELF_UPDATE:-0}" = 1 ]; then
+  # `.bak` şi pentru el însuşi: linia de mai sus promite „we keep a .bak for every file we
+  # change", iar singurul fişier exceptat era chiar cel care face schimbarea — adică exact cel
+  # de care ai nevoie ca să te întorci dacă noul upgrade.sh e stricat.
+  cp upgrade.sh upgrade.sh.bak 2>/dev/null || true
   mv upgrade.sh.new upgrade.sh && chmod +x upgrade.sh
-  echo "  upgrade.sh updated itself (active from the next run)"
+  echo "  upgrade.sh updated itself (vechiul → upgrade.sh.bak; activ de la următoarea rulare)"
 fi
 
 # Bannerul raporta ŢINTA, nu realitatea. `deploy.sh` face `exec ./rollback.sh` când imaginea
