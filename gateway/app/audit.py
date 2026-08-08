@@ -41,10 +41,23 @@ _AUDITED_READS = (
 _READ_MARKERS = (
     "/transcript", "/preview", "/fs/download", "/agent-log", "/export", "/download",
 )
+# Căi ÎNTREGI care scot conţinut fără să încapă în tiparul prefix+marker de mai sus.
+# `/api/search` citeşte CONŢINUTUL transcripturilor a până la 500 de sesiuni deodată şi
+# întoarce fragmentul din jurul fiecărei potriviri — cea mai puternică citire din tot API-ul,
+# şi singura care nu lăsa nicio urmă. Endpoint-ul îşi recunoştea singur clasa în comentariu
+# („e aceeaşi clasă cu /transcript"), dar poarta se uita la FORMA căii, nu la ce face ruta:
+# `/api/search` n-are prefixul potrivit şi n-are niciun marker, deci trecea neatinsă. La
+# întrebarea pentru care există modulul ăsta — „mi-a fost furat cookie-ul, ce a scos?" —
+# jurnalul răspundea „nimic", deşi un `q=BEGIN OPENSSH PRIVATE KEY` scanează tot istoricul.
+# `tests/audit_reads_test.py` compară lista asta cu rutele care chiar citesc transcripturi,
+# ca următoarea să nu mai scape la fel.
+_AUDITED_PATHS = ("/api/search",)
 
 
 def audited_read(path: str) -> bool:
     """GET care scoate CONŢINUT din sistem (nu doar listează)."""
+    if path in _AUDITED_PATHS:
+        return True
     return (any(path.startswith(p) for p in _AUDITED_READS)
             and any(m in path for m in _READ_MARKERS))
 

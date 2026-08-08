@@ -2729,11 +2729,14 @@ async def update_agent(host_id: int, user=Depends(security.require_user)):
 
 
 @router.get("/api/search")
-async def search(q: str, user=Depends(security.require_user)):
+async def search(q: str, request: Request, user=Depends(security.require_user)):
     """Search hosts, session titles/notes and transcript contents."""
     q = q.strip()
     if len(q) < 2:
         return {"sessions": []}
+    # CE s-a căutat, nu doar că s-a căutat: „a rulat o căutare" nu răspunde la întrebarea
+    # de după un cookie furat, iar interogarea E lucrul care spune ce urmărea atacatorul.
+    audit.detail(request, "search: " + q)
     rows = await db.fetchall("SELECT * FROM sessions ORDER BY created DESC LIMIT 500")
     # Căutarea citeşte CONŢINUTUL transcripturilor, deci e aceeaşi clasă cu /transcript:
     # sesiunile de pe hosturi cu `require_2fa` intră doar dacă ai o fereastră de step-up
