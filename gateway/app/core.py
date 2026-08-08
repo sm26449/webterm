@@ -1554,12 +1554,24 @@ async def force_update_agent(host_id: int) -> dict:
     return {"deferred": deferred, "agent_version": conn.agent_version}
 
 
+def _clip(v, limit: int = 255):
+    """Şir raportat de agent, mărginit. `None` rămâne `None` (COALESCE păstrează valoarea)."""
+    return v[:limit] if isinstance(v, str) else None
+
+
 async def reconcile(conn: AgentConnection, msg: dict) -> None:
     conn.epoch = msg.get("epoch")
     conn.backend = msg.get("backend")
     conn.agent_version = msg.get("agent_version")
     if msg.get("metrics"):
-        conn.metrics = msg["metrics"]
+        # Mărginit: agentul trimite şase numere, dar un host compromis poate trimite orice, iar
+        # dicţionarul ăsta ajunge în FIECARE răspuns de host-detail către browser. Păstrăm doar
+        # cheile pe care le înţelegem şi doar dacă sunt numere — restul se aruncă tăcut.
+        raw = msg["metrics"]
+        conn.metrics = {k: v for k, v in raw.items()
+                        if isinstance(k, str) and len(k) <= 32
+                        and isinstance(v, (int, float)) and not isinstance(v, bool)} \
+            if isinstance(raw, dict) else {}
         # alerte pe praguri (CPU/RAM/disc) — evaluare la fiecare heartbeat;
         # trimiterea e best-effort și throttled în email_alerts. Pragurile sunt
         # cache-uite, iar numele hostului e memoizat pe conn → zero query-uri DB
@@ -1580,7 +1592,9 @@ async def reconcile(conn: AgentConnection, msg: dict) -> None:
         " hostname=COALESCE(?, hostname), agent_user=COALESCE(?, agent_user)"
         " WHERE id=?",
         conn.agent_version, conn.backend, time.time(),
-        msg.get("hostname"), msg.get("user"), conn.host_id)
+        # tăiate: se scriu în `hosts` şi se întorc la fiecare listare; un agent compromis
+        # putea umfla rândul şi fiecare răspuns cu şiruri de orice lungime
+        _clip(msg.get("hostname")), _clip(msg.get("user")), conn.host_id)
 
     reported = {s["sid"]: s for s in msg.get("sessions", [])}
     # includem și 'lost': o sesiune tmux SUPRAVIEȚUIEȘTE restartului de agent, deci
@@ -1629,6 +1643,18 @@ async def reconcile(conn: AgentConnection, msg: dict) -> None:
 
     # sessions living on the agent that the DB does not know (e.g. gateway DB
     # reset, or tmux sessions surviving a host-side mishap): adopt them
+    # Plafon la ADOPŢIE, nu doar la creare. Comentariul de la `MAX_SESSIONS_HINT` spunea că
+    # limita „e impusă de agent, nu e sursa de adevăr" — exact garanţia pe care un agent
+    # COMPROMIS o ignoră. Un singur heartbeat cu 3000 de sid-uri uuid4 valide producea 3000 de
+    # rânduri în DB şi 6000 de fişiere deschise (`.out` + `.cast` se creează în
+    # `SessionHub.__init__`, înainte de orice octet de output), repetabil la fiecare heartbeat
+    # cu sid-uri noi, până se umple discul. Rezultatul nu e „hostul ăla e stricat", ci gateway
+    # jos şi toată flota inaccesibilă — cel mai bun raport efort/pagubă pe care îl are un host
+    # compromis. Reprodus de un audit extern.
+    adopted_room = MAX_SESSIONS_HINT - (await db.fetchone(
+        "SELECT COUNT(*) AS c FROM sessions WHERE host_id=? AND state IN ('live','creating')",
+        conn.host_id))["c"]
+    refused = 0
     for sid, info in reported.items():
         # a malicious agent could report a crafted sid; only adopt real ones
         # (uuid4 hex) so it can never become a filesystem path outside the dir
@@ -1640,9 +1666,15 @@ async def reconcile(conn: AgentConnection, msg: dict) -> None:
             except (AgentGone, asyncio.TimeoutError):
                 pass
             continue
+        # Plafonul se verifică ÎNAINTEA interogării: altfel un agent care raportează 3000 de
+        # sid-uri ne costă 3000 de round-trip-uri la DB chiar dacă nu adoptăm niciunul.
+        if adopted_room <= 0:
+            refused += 1
+            continue
         exists = await db.fetchone("SELECT id FROM sessions WHERE id=?", sid)
         if exists:
             continue  # belongs to another state; leave alone
+        adopted_room -= 1
         await db.execute(
             "INSERT INTO sessions(id, host_id, title, state, created, rows, cols)"
             " VALUES(?,?,?,?,?,?,?)",
@@ -1651,6 +1683,16 @@ async def reconcile(conn: AgentConnection, msg: dict) -> None:
         row = await db.fetchone("SELECT * FROM sessions WHERE id=?", sid)
         hub = get_or_create_hub(row)
         await hub.ensure_attached(conn)
+
+    if refused:
+        # Vizibil, nu tăcut: un agent care raportează mai multe sesiuni decât poate avea ori e
+        # stricat, ori minte. În ambele cazuri operatorul trebuie să afle, iar `agent_events`
+        # e locul unde se uită deja când un host se poartă ciudat.
+        log.warning("host %s reported %d sessions over the cap of %d — refused to adopt them",
+                    conn.host_id, refused, MAX_SESSIONS_HINT)
+        await record_agent_event(conn.host_id, "adoption_refused",
+                                 reason="over session cap",
+                                 detail="%d session(s) beyond %d" % (refused, MAX_SESSIONS_HINT))
 
     if msg.get("event") == "hello":
         await maybe_upgrade_agent(conn)

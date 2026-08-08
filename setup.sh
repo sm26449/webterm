@@ -24,6 +24,13 @@ docker info >/dev/null 2>&1 || { err "Docker is not running, or you lack permiss
 # nginx, un panou de administrare sau un reverse proxy. Mai bine refuzăm din prima, spunând cine
 # ţine portul, decât să lăsăm în urmă o stare ambiguă.
 # Excepţie: dacă stiva NOASTRĂ e deja pornită, ea ţine portul — `up -d` e idempotent, mergem înainte.
+# Fără `ss` ŞI fără `netstat` nu putem şti nimic — iar varianta veche întorcea gol, adică
+# „port liber", şi lăsa exact instalarea pe jumătate pe care verificarea există s-o prevină.
+# Necunoscut ≠ liber: o spunem şi mergem mai departe, ca omul să ştie ce n-am verificat.
+if ! command -v ss >/dev/null 2>&1 && ! command -v netstat >/dev/null 2>&1; then
+  warn "Neither 'ss' nor 'netstat' is available, so I cannot check whether the ports are free."
+  warn "If the stack fails to start with 'port is already allocated', that is why."
+fi
 port_holder() {      # $1 = port → numele procesului care ascultă, sau gol
   if command -v ss >/dev/null 2>&1; then
     ss -ltnHp "sport = :$1" 2>/dev/null | sed -n 's/.*users:((\"\([^"]*\)\".*/\1/p' | head -1
@@ -36,8 +43,20 @@ port_holder() {      # $1 = port → numele procesului care ascultă, sau gol
 # ceva pe 80" — iar prima versiune a verificării ăsteia refuza fix rețeta pe care o recomandă
 # documentația, fără portiță. Îl întrebăm pe compose ce va publica de fapt: el a citit deja
 # override-ul, deci e singura sursă de adevăr care nu se poate contrazice cu ea însăși.
+# `set -e` + `pipefail`: dacă `compose config` eşuează (un override scris de mână cu o
+# indentare greşită — fişierul cu cea mai mare rată de typo din tot traseul), atribuirea de
+# mai jos ar omorî scriptul, iar `2>/dev/null` ar înghiţi motivul: banner, exit 1, zero
+# explicaţii. Prindem eroarea şi o ARĂTĂM, iar fallback-ul de mai jos redevine accesibil.
 published_ports() {
-  $COMPOSE config 2>/dev/null | sed -n 's/^ *published: *"\{0,1\}\([0-9]\{1,\}\)"\{0,1\} *$/\1/p' | sort -u
+  local out rc
+  out=$($COMPOSE config 2>&1); rc=$?
+  if [ $rc -ne 0 ]; then
+    err "docker compose cannot read the configuration here:"
+    printf '%s\n' "$out" | head -5 >&2
+    err "Fix it (most often a typo in docker-compose.override.yml) and run again."
+    exit 1
+  fi
+  printf '%s\n' "$out" | sed -n 's/^ *published: *"\{0,1\}\([0-9]\{1,\}\)"\{0,1\} *$/\1/p' | sort -u
 }
 if [ -z "$($COMPOSE ps -q 2>/dev/null)" ]; then
   BUSY=""
@@ -123,12 +142,20 @@ if [ -n "$TOKEN" ]; then
   say "Open:  $URL"
   say "Setup token (for the first account):"
   printf '\n      \033[1;32m%s\033[0m\n\n' "$TOKEN"
-  say "You can get it again any time with:  make token"
+  # `make` e opţional (README-l listează ca atare) şi lipseşte pe orice Debian/Ubuntu minimal,
+  # deci nu poate fi SINGURA cale de recuperare a tokenului oferită la final.
+  if command -v make >/dev/null 2>&1; then
+    say "You can get it again any time with:  make token"
+  else
+    say "You can get it again any time with:"
+    say "  $COMPOSE logs app | grep -oE 'WEBTERM_SETUP_TOKEN=[A-Za-z0-9_-]+' | tail -1 | cut -d= -f2-"
+  fi
 else
   # A missing token in the logs does NOT prove an account exists: logs rotate and containers get
   # recreated. This used to claim "an account seems to exist already — just log in", which sent
   # people looking for a password that was never set.
   say "Open:  $URL"
-  say "No token found in the logs (rotated? container recreated?). Get it with:  make token"
+  say "No token found in the logs (rotated? container recreated?). Get it with:"
+  say "  $COMPOSE logs app | grep -oE 'WEBTERM_SETUP_TOKEN=[A-Za-z0-9_-]+' | tail -1 | cut -d= -f2-"
 fi
-say "Useful commands:  make help"
+command -v make >/dev/null 2>&1 && say "Useful commands:  make help" || true
