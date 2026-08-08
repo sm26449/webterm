@@ -14,6 +14,12 @@ const FleetRunModal = lazy(() => import('./FleetRunModal'))
 const StatusModal = lazy(() => import('./StatusModal'))
 const AboutModal = lazy(() => import('./AboutModal'))
 
+// Motivele de blocare care se rezolvă REINSTALÂND agentul (cheia publică încorporată nu se
+// potriveşte), faţă de restul, unde sfatul e „uită-te în jurnalul hostului". Codurile vin de la
+// agent (`update_unsigned`) şi de la gateway (`signature_missing`); decizia se ia pe ele, nu pe
+// textul mesajului, care se traduce şi mută condiţia sub picioare.
+const SIGNATURE_BLOCKS = new Set(['signature_missing', 'update_unsigned'])
+
 const stateDot: Record<Session['state'], string> = {
   creating: 'bg-amber-400',
   live: 'bg-emerald-400 dot-live',
@@ -210,8 +216,11 @@ export default function Sidebar(props: {
     setProvisioning(host.name)
     try {
       const r = await api<{ credentials_deleted: boolean }>(`/api/hosts/${host.id}/provision`, { method: 'POST' })
-      alert(`✓ Agent installed on “${host.name}” — the host is now in agent mode.` +
-        (r.credentials_deleted ? '\nThe ephemeral SSH credentials were removed.' : ''))
+      // Cheile `sidebar.provisionOk` / `sidebar.provisionCredsRemoved` existau în ambele
+      // limbi şi nu le folosea nimeni: mesajul era scris de mână, în engleză, lângă un frate
+      // (`provisionFailed`) care trecea corect prin `t()`.
+      alert(t('sidebar.provisionOk', { name: host.name }) +
+        (r.credentials_deleted ? t('sidebar.provisionCredsRemoved') : ''))
       props.onChanged()
     } catch (e) {
       alert(t('sidebar.provisionFailed') + (errText(e, t) || t('sidebar.error')))
@@ -288,20 +297,28 @@ export default function Sidebar(props: {
           {host.online && host.update_blocked && (
             /* update BLOCAT ≠ update disponibil: fără distincţia asta, cardul arăta „↑ vNN"
                la infinit şi omul apăsa degeaba. Roşu + motiv + remediu în tooltip. */
+            /* Motivul e un COD stabil (`update_unsigned`, `signature_missing`…), nu o frază:
+               alegeam sfatul cu un regex englezesc peste text de server — exact clasa care a
+               rupt deja dezinstalarea. Codul necunoscut se afişează ca atare, ca să nu ascundem
+               un motiv nou în spatele unei traduceri lipsă. */
             <span
-              title={`Agentul NU se poate actualiza: ${host.update_blocked}. `
-                + (/signature|unsigned/i.test(host.update_blocked)
-                  ? t('sidebar.updateBlockedHint')
-                  : t('sidebar.updateBlockedLog'))}
+              title={t('sidebar.updateBlockedTitle', {
+                reason: t('sidebar.blockReason.' + host.update_blocked) || host.update_blocked,
+              }) + (SIGNATURE_BLOCKS.has(host.update_blocked)
+                ? t('sidebar.updateBlockedHint')
+                : t('sidebar.updateBlockedLog'))}
               className="wt-danger shrink-0 cursor-help rounded-md bg-rose-900/60 px-1.5 py-0.5 text-xs text-rose-300"
             >
-              ⚠ update blocat
+              {t('sidebar.updateBlockedBadge')}
             </span>
           )}
           {host.online && host.update_pending && !host.update_blocked && (
             <button
               onClick={(e) => { e.stopPropagation(); updateAgent(host) }}
-              title={`Agent v${host.agent_version} → v${host.agent_latest}. Update now.`}
+              /* `?? '?'`: amândouă sunt `number | null`, iar template-ul de dinainte le
+                 transforma tăcut în cuvântul „null" în tooltip. */
+              title={t('sidebar.updateAgentTitle',
+                { from: host.agent_version ?? '?', to: host.agent_latest ?? '?' })}
               className="shrink-0 rounded-md bg-amber-900/60 px-1.5 py-0.5 text-xs text-amber-300 hover:bg-amber-800/60"
             >
               ↑ v{host.agent_latest}
@@ -494,7 +511,7 @@ export default function Sidebar(props: {
                     {folder && (
                       <button
                         onClick={() => renameGroup(folder)}
-                        title="Rename the group"
+                        title={t('sidebar.renameGroupAria', { folder })}
                         aria-label={t('sidebar.renameGroupAria', { folder })}
                         className="shrink-0 rounded p-0.5 opacity-0 hover:text-slate-200 focus-visible:opacity-100 group-hover/folder:opacity-100"
                       >
