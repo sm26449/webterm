@@ -205,6 +205,13 @@ Prerequisites: Docker + Docker Compose, a domain (recommended) or an IP, and `ma
 if you want the shortcuts below (`make token`, `make upgrade` — everything they wrap
 can also be run by hand).
 
+**Architecture.** The published image is `linux/amd64`. On anything else — a Raspberry Pi,
+an ARM VPS, an Apple Silicon machine running Docker natively — use `setup.sh`, which builds
+from source locally (about half a minute) and never touches the registry; the base images are
+multi-arch and nothing in the build is architecture-specific. `install.sh` is the path that
+pulls the prebuilt image, so that one wants amd64. The agent is a single stdlib Python file
+and runs on any architecture either way.
+
 Ports **80** and **443** must be free: `docker-compose.yml` binds them for TLS. If
 something else already holds them, add a `docker-compose.override.yml`. Note the
 `!override` tag: compose **concatenates** port lists, so without it 80 and 443 stay
