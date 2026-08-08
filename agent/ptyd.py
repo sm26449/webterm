@@ -41,7 +41,7 @@ import termios
 import threading
 import time
 
-AGENT_VERSION = 37
+AGENT_VERSION = 38
 PROTO = 1
 
 RUN_MAX_TIMEOUT = 300           # plafon timeout pentru op-ul `run` (consola de flotă)
@@ -75,6 +75,10 @@ HB_ACK_TIMEOUT = 75.0           # fără ack la heartbeat atâta timp → conexi
                                # decât TCP keepalive, care unele NAT-uri îl blochează)
 EXITED_TTL = 24 * 3600
 BACKOFF_MIN, BACKOFF_MAX = 1.0, 60.0
+# Cât trebuie să reziste o conexiune ca s-o considerăm sănătoasă şi să repunem backoff-ul la
+# minim. Peste HEARTBEAT_INTERVAL, ca o legătură tăiată înainte de primul heartbeat să NU
+# treacă drept stabilă.
+STABLE_CONNECTION = 120.0
 SID_LEN = 32
 
 FRAME_CTRL = b"J"
@@ -470,12 +474,28 @@ class Metrics:
                 "MemAvailable", info.get("MemFree", 0))
         except (OSError, KeyError, ValueError, IndexError):
             pass
-        try:
-            st = os.statvfs("/")
-            m["disk_total"] = st.f_blocks * st.f_frsize
-            m["disk_used"] = (st.f_blocks - st.f_bavail) * st.f_frsize
-        except OSError:
-            pass
+        # `/` NU e de ajuns. Agentul îşi ţine logul, configul şi fişierul de liveness în
+        # `~/.webterm`, iar pe orice layout obişnuit (`/home` pe alt LV, `$HOME` pe tmpfs
+        # într-un container) acela e alt filesystem. Măsurat: cu `$HOME` 100% plin, gateway-ul
+        # raporta liniştit 74% şi nicio alertă — exact cazul în care alerta ar fi trebuit să
+        # sune. Raportăm filesystemul cel mai PLIN dintre cele două: întrebarea operatorului e
+        # „mi se umple ceva de care depinde agentul?", nu „cât mai e pe rootfs".
+        best = None
+        seen = set()
+        for path in ("/", WEBTERM_DIR):
+            try:
+                st = os.statvfs(path)
+            except OSError:
+                continue
+            if st.f_blocks <= 0 or (st.f_fsid, st.f_blocks) in seen:
+                continue
+            seen.add((st.f_fsid, st.f_blocks))
+            total = st.f_blocks * st.f_frsize
+            used = (st.f_blocks - st.f_bavail) * st.f_frsize
+            if best is None or used / total > best[1] / best[0]:
+                best = (total, used)
+        if best:
+            m["disk_total"], m["disk_used"] = best
         return m
 
 
@@ -1201,6 +1221,7 @@ class Agent:
 
     def _on_connect_failed(self, err):
         self._connecting = False
+        self._connected_since = 0.0
         self.next_connect = time.time() + self.backoff
         self.backoff = min(self.backoff * 2, BACKOFF_MAX)
         log("connect failed: %s" % err)
@@ -1230,7 +1251,6 @@ class Agent:
         if self._ever_connected:
             self._reconnect_count += 1     # numărăm RE-conectările (nu prima)
         self._ever_connected = True
-        self.backoff = BACKOFF_MIN
         # COADĂ PER-CONEXIUNE: writer-ul citește coada pe care i-o dăm ca argument, nu
         # `self.outbox`. Astfel un writer vechi (dintr-o conexiune anterioară, încă blocat în
         # `get()`) nu mai poate FURA frame-ul `hello` al conexiunii noi — el drenează exclusiv
@@ -1270,6 +1290,15 @@ class Agent:
         if ws:
             ws.close()
         self.outbox.put(None)         # unblock writer
+        # Backoff-ul se resetează după o conexiune care a REZISTAT, nu după una care doar s-a
+        # deschis. Se reseta la fiecare `_on_connected`, deci un middlebox care taie legăturile
+        # inactive sub intervalul de heartbeat producea churn perpetuu la 1 secundă: măsurat cu
+        # un proxy care taie la 12s — reconectare la fiecare ~30s, la infinit, iar hostul rămâne
+        # `online`, deci nimeni nu vede nimic. Acum backoff-ul creşte până la BACKOFF_MAX cât
+        # timp conexiunile mor repede, şi coboară abia când una chiar ţine.
+        if self._connected_since and time.time() - self._connected_since >= STABLE_CONNECTION:
+            self.backoff = BACKOFF_MIN
+        self._connected_since = 0.0
         self.next_connect = time.time() + self.backoff
         self.backoff = min(self.backoff * 2, BACKOFF_MAX)
         log("disconnected; retry in %.0fs" % (self.next_connect - time.time()))
@@ -1866,7 +1895,20 @@ class Agent:
             except OSError:
                 pass
             s.master = None
+        # Eliberează explicit scrollback-ul. `sessions.pop` scotea ultima referinţă la obiect,
+        # dar ring-ul rămânea o listă de sute de obiecte `bytes` până când ajungea gc-ul la ea,
+        # iar alocatorul glibc nu dă înapoi arenele fragmentate de la sine. Măsurat pe agent:
+        # ~22 MB reţinuţi după FIECARE episod de output masiv, pentru un ring de 2 MiB, pe
+        # sesiuni care nu mai există — 25 MB → 143 MB după opt episoade, fără platou.
+        # `malloc_trim` e best-effort şi doar pe glibc; restul e curăţenie care oricum trebuia.
+        s.ring = []
+        s.ring_bytes = 0
         self.sessions.pop(s.sid, None)
+        try:
+            import ctypes
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except Exception:            # noqa: BLE001 — musl, non-Linux, orice: nu e o eroare
+            pass
 
     def _reexec(self):
         log("re-executing new agent version")
@@ -2325,14 +2367,23 @@ class Agent:
             warn.append("unit systemd")
         # 2) cron: scoate DOAR liniile noastre (@reboot + watchdog)
         try:
-            cur = subprocess.run(["crontab", "-l"], timeout=10,
-                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.decode()
-            kept = [ln for ln in cur.splitlines()
-                    if "webterm/ptyd.py" not in ln and "webterm-watchdog" not in ln]
-            body = ("\n".join(kept) + "\n") if any(k.strip() for k in kept) else ""
-            subprocess.run(["crontab", "-"] if body else ["crontab", "-r"],
-                           input=body.encode() if body else None,
-                           timeout=10, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # Codul de ieşire CONTEAZĂ. `crontab -l` poate eşua şi când omul ARE un crontab:
+            # `/etc/cron.deny`, spool ilizibil momentan, un wrapper care scrie pe stderr. Vechea
+            # variantă lua atunci `cur=""` → `kept=[]` → `body=""` → `crontab -r`, adică ştergea
+            # TOT crontab-ul utilizatorului ca să scoată două rânduri de-ale noastre. Dacă nu
+            # putem citi, nu scriem: mai bine rămân două linii moarte decât să pierdem ce n-am
+            # pus noi acolo.
+            r = subprocess.run(["crontab", "-l"], timeout=10,
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            if r.returncode == 0:
+                kept = [ln for ln in r.stdout.decode().splitlines()
+                        if "webterm/ptyd.py" not in ln and "webterm-watchdog" not in ln]
+                body = ("\n".join(kept) + "\n") if any(k.strip() for k in kept) else ""
+                subprocess.run(["crontab", "-"] if body else ["crontab", "-r"],
+                               input=body.encode() if body else None,
+                               timeout=10, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                warn.append("cron (nu am putut citi crontab-ul; liniile WebTerm au rămas)")
         except (OSError, subprocess.SubprocessError):
             pass                                   # crontab poate lipsi — nu e o eroare
         # 3) serverul tmux (decomisionare — doar sesiunile noastre `-L webterm`)
