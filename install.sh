@@ -27,11 +27,20 @@ set -euo pipefail
 load_env() {
   [ -f "$1" ] || return 0
   while IFS= read -r _line || [ -n "$_line" ]; do
-    case "$_line" in ''|'#'*|' '*'#'*) ;; esac
+    _line=${_line#"${_line%%[![:space:]]*}"}          # taie spaţiile din faţă
+    case "$_line" in "export "*) _line=${_line#export } ;; esac
     case "$_line" in ''|'#'*) continue ;; esac
     case "$_line" in *=*) ;; *) continue ;; esac
     _key=${_line%%=*}
-    case "$_key" in ''|*[!A-Za-z0-9_]*) continue ;; esac
+    _key=${_key%"${_key##*[![:space:]]}"}             # şi spaţiile dinaintea lui `=`
+    case "$_key" in
+      ''|*[!A-Za-z0-9_]*)
+        # Nu tăcem. Sursarea accepta linii pe care parserul le sare, iar o variabilă pierdută
+        # tăcut din `/etc/default/webterm-backup` înseamnă parola de backup dispărută — deci
+        # backup picat, iar de la reparaţia cu `-y` asta opreşte upgrade-ul şi dă vina pe altceva.
+        echo "note: ignoring unparsable line in $1: $(printf '%.40s' "$_line")" >&2
+        continue ;;
+    esac
     _val=${_line#*=}
     case "$_val" in
       \"*\") _val=${_val#\"}; _val=${_val%\"} ;;

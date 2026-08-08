@@ -14,6 +14,7 @@ sunt afectate, iar refuzul e VIZIBIL (jurnal de evenimente), nu tăcut — un ho
 mai multe sesiuni decât poate avea ori e stricat, ori minte, şi în ambele cazuri se anunţă.
 """
 import asyncio
+import math
 import os
 import sys
 import tempfile
@@ -131,14 +132,30 @@ async def main():
     await core.reconcile(conn, {
         "event": "heartbeat", "epoch": "e1", "sessions": [],
         "hostname": "H" * 10000, "user": "U" * 10000,
-        "metrics": {"cpu": 5, "evil": "x" * 10000, "nested": {"a": 1}}})
+        "metrics": {"cpu_pct": 5, "evil": "x" * 10000, "nested": {"a": 1}}})
     row = await db.fetchone("SELECT hostname, agent_user FROM hosts WHERE id=?", hid)
     check("hostname raportat de agent e tăiat", len(row["hostname"]) <= 255,
           str(len(row["hostname"])))
     check("user raportat de agent e tăiat", len(row["agent_user"]) <= 255,
           str(len(row["agent_user"])))
-    check("metricile păstrează doar numere (restul aruncat)",
-          conn.metrics == {"cpu": 5}, str(conn.metrics))
+    check("metricile păstrează doar chei cunoscute, numerice",
+          conn.metrics == {"cpu_pct": 5}, str(conn.metrics))
+
+    # Un agent ostil nu poate nici umfla răspunsul, nici sparge serializarea JSON.
+    # `json.loads` acceptă literalul `Infinity` de pe fir, dar `JSONResponse` refuză să-l
+    # serializeze — deci `inf` transforma pagina hostului în 500 până când agentul se cuminţea.
+    await core.reconcile(conn, {
+        "event": "heartbeat", "epoch": "e1", "sessions": [],
+        "metrics": dict({"k%d" % i: i for i in range(50000)},
+                        cpu_pct=float("inf"), load1=float("nan"), mem_used=7)})
+    check("numărul de chei de metrici e plafonat", len(conn.metrics) <= 64, str(len(conn.metrics)))
+    check("cheile inventate sunt aruncate",
+          all(k in core.METRIC_KEYS for k in conn.metrics), str(list(conn.metrics)[:5]))
+    check("inf/nan nu ajung în răspuns (ar da 500 la GET /api/hosts/{id})",
+          all(math.isfinite(v) for v in conn.metrics.values()), str(conn.metrics))
+    import json as _json
+    _json.dumps(conn.metrics, allow_nan=False)      # exact ce face JSONResponse
+    check("metricile chiar se pot serializa ca JSON strict", True)
 
     await db.close()
     print(f"\n{ok}/{total} teste trecute")
