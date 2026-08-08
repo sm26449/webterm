@@ -138,7 +138,17 @@ if [ -n "$CUR_IMAGE" ] && [ "$CUR_IMAGE" != "${WEBTERM_IMAGE:-}" ]; then
 fi
 
 # --- pull + up (replaces an older Caddy stack if present, keeps the data) ---
-$COMPOSE -f "$FILE" pull
+# `pull` eşuat nu e fatal dacă imaginea E DEJA aici: o imagine construită local
+# (`wtd4-broken:local`), o instalare air-gapped sau un registry momentan inaccesibil opreau
+# deploy-ul înainte de orice, inclusiv rollback-ul manual pe o imagine bună deja trasă.
+if ! $COMPOSE -f "$FILE" pull; then
+  if docker image inspect "${WEBTERM_IMAGE:-}" >/dev/null 2>&1; then
+    echo "→ pull failed, but ${WEBTERM_IMAGE} is already present locally — continuing."
+  else
+    echo "✗ pull failed and ${WEBTERM_IMAGE:-the image} is not available locally." >&2
+    exit 1
+  fi
+fi
 $COMPOSE -f "$FILE" up -d --remove-orphans
 
 # --- health guard and automatic rollback ---
@@ -157,6 +167,9 @@ if [ "$st" != healthy ]; then
   docker logs --tail 30 "$APP_ID" 2>/dev/null || true
   if [ -x ./rollback.sh ] && [ -s .prev-image ]; then
     echo "→ Rollback automat la $(cat .prev-image)…"
+    # `exec` moşteneşte mediul, iar noi tocmai am exportat imaginea NOUĂ — care ar fi bătut
+    # `.env`-ul rescris de rollback. Îl scoatem explicit, ca rollback-ul să citească fişierul.
+    unset WEBTERM_IMAGE
     exec ./rollback.sh
   fi
   echo "  (no .prev-image — roll back by hand: point WEBTERM_IMAGE in .env at a good tag and rerun)"

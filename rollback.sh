@@ -36,6 +36,13 @@ fi
 # swap: what is running now becomes the target of the next rollback (roll-forward)
 [ -n "$CUR" ] && printf '%s\n' "$CUR" > "$PREV_FILE"
 
+# `.env` e sursa de adevăr AICI, iar mediul o bate. `deploy.sh` exportă `WEBTERM_IMAGE` cu
+# imaginea NOUĂ şi apoi face `exec ./rollback.sh` — deci variabila exportată supravieţuia, iar
+# compose o prefera fişierului pe care tocmai îl rescrisesem. Rezultat: `up -d app` re-rezolva
+# la imaginea STRICATĂ, containerul nu era recreat („Running", nu „Recreated"), iar rollback-ul
+# automat pe care documentaţia îl listează ca strat de apărare nu făcea nimic. Verificat:
+# `WEBTERM_IMAGE=x docker compose config` întoarce `x`, nu valoarea din `.env`.
+unset WEBTERM_IMAGE
 $COMPOSE -f "$FILE" up -d app
 
 # wait for the healthcheck verdict, so you do not walk away from the keyboard guessing
@@ -46,6 +53,15 @@ for i in $(seq 1 45); do
   [ "$st" = healthy ] && break
   sleep 2
 done
+# Ce RULEAZĂ, nu ce am cerut. Mesajul de succes raporta `$PREV` fără să verifice nimic, deci
+# anunţa „✓ Rollback done — the app is running v2.0.0" pe un container rămas pe imaginea veche.
+RUNNING=$(docker inspect -f '{{.Config.Image}}' "$APP_ID" 2>/dev/null || echo "?")
+if [ "$RUNNING" != "$PREV" ]; then
+  echo "✗ Rollback did NOT take effect: the container is running $RUNNING, not $PREV."
+  echo "  .env now says $PREV. Check for a WEBTERM_IMAGE exported in your shell, then:"
+  echo "    env -u WEBTERM_IMAGE $COMPOSE -f $FILE up -d app"
+  exit 1
+fi
 if [ "$st" = healthy ]; then
   echo "✓ Rollback done — the app is running $PREV (healthy)."
 else
