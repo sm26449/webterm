@@ -109,6 +109,31 @@ docker compose version >/dev/null 2>&1 || { err "The docker compose plugin is mi
 if [ -d /run/systemd/system ]; then systemctl enable --now docker >/dev/null 2>&1 || true; fi
 docker info >/dev/null 2>&1 || { err "The Docker daemon is not running."; exit 1; }
 
+# Porturile 80/443, verificate AICI — înainte să scriem `.env`, să copiem fişiere în
+# $INSTALL_DIR, să atingem ufw sau să instalăm timere systemd. Altfel un port ocupat (nginx,
+# un panou, alt reverse proxy — cazul obişnuit pe un server care nu e gol) lasă în urmă o
+# instalare pe jumătate şi un mesaj de la Docker care nu spune ce e de făcut.
+# `install.sh` e calea de PRODUCŢIE, deci aici starea parţială costă cel mai mult.
+# Dacă stiva noastră rulează deja (reinstalare peste ea), ea ţine porturile — nu e o problemă.
+if [ -z "$(docker ps -q --filter label=com.docker.compose.project=webterm 2>/dev/null)" ]; then
+  BUSY=""
+  for p in 80 443; do
+    if command -v ss >/dev/null 2>&1; then
+      h=$(ss -ltnHp "sport = :$p" 2>/dev/null | sed -n 's/.*users:((\"\([^"]*\)\".*/\1/p' | head -1)
+    else
+      h=$(netstat -ltnp 2>/dev/null | awk -v pat=":$p\$" '$4 ~ pat {print $7; exit}')
+    fi
+    [ -n "${h:-}" ] && BUSY="${BUSY}  · port ${p} is held by: ${h}"$'\n'
+  done
+  if [ -n "$BUSY" ]; then
+    err "Ports 80/443 are already in use — Traefik could not start and the install would stop halfway:"
+    printf '%s' "$BUSY" >&2
+    err "Free them, or put WebTerm behind the proxy you already run (docs/RUNBOOK.md).
+Nothing was changed yet."
+    exit 1
+  fi
+fi
+
 # ── 2) runtime files ──────────────────────────────────────────────────────
 # From the local checkout if the installer runs inside one, otherwise clone.
 SRC="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo /nonexistent)"
