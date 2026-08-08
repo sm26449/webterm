@@ -264,6 +264,17 @@ function HostDetail({ host }: { host: Host }) {
   return (
     <div className="min-h-0 flex-1 overflow-y-auto p-6">
       <div className="max-w-2xl space-y-5">
+        {/* Fără tmux pe host, agentul cade pe un PTY simplu — sesiunile mor odată cu el.
+            Adică exact promisiunea produsului, întoarsă pe dos, fără ca omul să afle.
+            Scriptul de instalare avertizează, dar o singură dată, într-un log care se
+            derulează; aici scria doar `Backend: pty`, un cuvânt care nu spune nimic cuiva
+            care nu ştie ce e tmux. Nu refuzăm instalarea — pe o cutie minimală un terminal
+            efemer e tot util —, dar refuzăm s-o ascundem. */}
+        {host.backend === 'pty' && (
+          <p className="wt-warn rounded-lg bg-amber-500/10 p-3 text-sm ring-1 ring-amber-500/30">
+            {t('host.noTmuxWarning')}
+          </p>
+        )}
         <Section title={t('host.secConnection')}>
           <Row k={t('host.protocol')} v={protoLabel(host)} />
           <Row k={t('host.address')} v={host.hostname ? hostAt(host) : '—'} mono />

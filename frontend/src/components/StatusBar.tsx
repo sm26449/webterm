@@ -85,6 +85,14 @@ export default function StatusBar(props: { session: Session; host?: Host; rtt?: 
           <span className={`h-1.5 w-1.5 rounded-full ${hostDown ? 'bg-amber-500' : live ? 'bg-emerald-500 dot-live' : s.state === 'lost' ? 'bg-rose-500' : 'bg-slate-500'}`} />
           {stateLabel}
         </span>
+        {/* Hostul n-are tmux → sesiunea asta NU supravieţuieşte unei căderi de agent sau
+            de reţea. Bara e locul în care omul se uită cât munceşte, deci e locul unde
+            trebuie spus — nu doar în pagina hostului, pe care o deschizi o dată. */}
+        {host?.backend === 'pty' && (
+          <span className="wt-warn font-medium" title={t('statusbar.noTmuxTitle')}>
+            {t('statusbar.noTmux')}
+          </span>
+        )}
         <span className="tabular-nums">{t('statusbar.startLabel')} {fmt(s.created)}</span>
         {s.closed_at && <span className="tabular-nums">{t('statusbar.finalLabel')} {fmt(s.closed_at)}</span>}
         <span className="tabular-nums">{t('statusbar.duration')} {durText}</span>
