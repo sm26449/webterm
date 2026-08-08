@@ -131,8 +131,22 @@ async def setup(creds: Credentials, request: Request, response: Response):
     if not allowed:
         raise HTTPException(429, f"too many attempts; retry in {retry}s")
     if not _setup_token or not security.tokens_equal(creds.setup_token, _setup_token):
-        security.record_login_failure(ip)
-        raise HTTPException(403, "wrong setup token — check the server logs")
+        locked, fails = security.record_login_failure(ip)
+        # Spune CÂTE mai ai. Fără asta, omul greşeşte tokenul de câteva ori (32 de caractere
+        # copiate dintr-un log, la două minute după clonare), iar a şasea încercare îl blochează
+        # 15 minute — inclusiv cu tokenul CORECT, fiindcă lockout-ul e pe IP, nu pe token. Din
+        # afară arată ca „produsul e stricat". Semnalat de un audit extern pe traseul primei
+        # instalări.
+        left = max(config.IP_MAX_FAILS - fails, 0)
+        if locked or left == 0:
+            raise HTTPException(
+                429, "too many wrong setup tokens — locked out for %d minutes. The token is in "
+                     "the server logs: docker compose logs app | grep WEBTERM_SETUP_TOKEN"
+                     % (security._IP_LOCKOUT // 60))
+        raise HTTPException(
+            403, "wrong setup token (%d attempt%s left before a %d-minute lockout) — it is in "
+                 "the server logs: docker compose logs app | grep WEBTERM_SETUP_TOKEN"
+                 % (left, "" if left == 1 else "s", security._IP_LOCKOUT // 60))
     if len(creds.password) < 8:
         raise HTTPException(400, "the password must be at least 8 characters")
     if "@" not in creds.email or len(creds.email) > 200:

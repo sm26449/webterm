@@ -10,6 +10,31 @@
 # within 120s, ROLLS BACK to it automatically (./rollback.sh also works on its own).
 # Without an argument: the image from .env, or :latest — same guard and rollback.
 set -euo pipefail
+
+# `.env` se CITEŞTE, nu se execută. Era sursat cu `. ./.env` — adică bash îl rula, ca root.
+# Două consecinţe, amândouă reproduse de un audit extern: (1) o valoare cu spaţii, perfect
+# validă pentru compose (`WEBTERM_ALERT_TO=a@x.com, b@x.com`), omoară instalarea cu
+# „command not found" DUPĂ ce s-au copiat fişierele; (2) `WEBTERM_NOTE=x && touch /tmp/pwned`
+# chiar creează fişierul. Cazul nu e teoretic: `.env.prod.example` conţinea el însuşi o valoare
+# cu `&&`, pe care documentaţia te invita s-o decomentezi. Parserul de mai jos ia KEY=VALUE
+# literal, fără expansiune, fără substituţie de comenzi.
+load_env() {
+  [ -f "$1" ] || return 0
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    case "$_line" in ''|'#'*|' '*'#'*) ;; esac
+    case "$_line" in ''|'#'*) continue ;; esac
+    case "$_line" in *=*) ;; *) continue ;; esac
+    _key=${_line%%=*}
+    case "$_key" in ''|*[!A-Za-z0-9_]*) continue ;; esac
+    _val=${_line#*=}
+    case "$_val" in
+      \"*\") _val=${_val#\"}; _val=${_val%\"} ;;
+      \'*\') _val=${_val#\'}; _val=${_val%\'} ;;
+    esac
+    export "$_key=$_val"
+  done < "$1"
+}
+
 cd "$(dirname "$0")"
 
 FILE=docker-compose.prod.yml
@@ -24,7 +49,7 @@ if [ ! -f .env ]; then
   echo "  Fill in WEBTERM_DOMAIN and LETSENCRYPT_EMAIL, then run ./deploy.sh again"
   exit 1
 fi
-set -a; . ./.env; set +a
+load_env ./.env
 : "${WEBTERM_DOMAIN:?set WEBTERM_DOMAIN in .env}"
 : "${LETSENCRYPT_EMAIL:?set LETSENCRYPT_EMAIL in .env}"
 # CF_DNS_API_TOKEN e OPŢIONAL: fără el, Traefik ia certificatul prin HTTP-01, care nu are
@@ -52,7 +77,7 @@ else
   echo "  no CF_DNS_API_TOKEN — using HTTP-01 (needs $WEBTERM_DOMAIN to resolve here and port 80 reachable)"
   echo "  note: port-forward subdomains need a wildcard certificate, which only DNS-01 can issue —"
   echo "        forwards will not get TLS on this path. Add a Cloudflare token if you use them."
-  set -a; . ./.env; set +a
+  load_env ./.env
 fi
 
 # --- setup token (generated once, persisted in .env) ---
