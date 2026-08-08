@@ -17,6 +17,31 @@
 # Idempotent: run again and it keeps .env and your data, updating everything else.
 set -euo pipefail
 
+# `.env` se CITEŞTE, nu se execută. Era sursat cu `. ./.env` — adică bash îl rula, ca root.
+# Două consecinţe, amândouă reproduse de un audit extern: (1) o valoare cu spaţii, perfect
+# validă pentru compose (`WEBTERM_ALERT_TO=a@x.com, b@x.com`), omoară instalarea cu
+# „command not found" DUPĂ ce s-au copiat fişierele; (2) `WEBTERM_NOTE=x && touch /tmp/pwned`
+# chiar creează fişierul. Cazul nu e teoretic: `.env.prod.example` conţinea el însuşi o valoare
+# cu `&&`, pe care documentaţia te invita s-o decomentezi. Parserul de mai jos ia KEY=VALUE
+# literal, fără expansiune, fără substituţie de comenzi.
+load_env() {
+  [ -f "$1" ] || return 0
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    case "$_line" in ''|'#'*|' '*'#'*) ;; esac
+    case "$_line" in ''|'#'*) continue ;; esac
+    case "$_line" in *=*) ;; *) continue ;; esac
+    _key=${_line%%=*}
+    case "$_key" in ''|*[!A-Za-z0-9_]*) continue ;; esac
+    _val=${_line#*=}
+    case "$_val" in
+      \"*\") _val=${_val#\"}; _val=${_val%\"} ;;
+      \'*\') _val=${_val#\'}; _val=${_val%\'} ;;
+    esac
+    export "$_key=$_val"
+  done < "$1"
+}
+
+
 say()  { printf '\033[1;36m%s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m%s\033[0m\n' "$*"; }
 err()  { printf '\033[1;31m%s\033[0m\n' "$*" >&2; }
@@ -27,6 +52,7 @@ REPO_URL=https://github.com/sm26449/webterm.git
 BRANCH=main
 DOMAIN="" EMAIL="" CF_TOKEN="" GHCR_USER=sm26449 GHCR_TOKEN="" IMAGE=""
 DO_PORTCHECK=1
+DO_CERTCHECK=1
 DO_UFW=1 DO_BACKUP=1 NONINTERACTIVE=0
 
 usage() {
@@ -47,6 +73,7 @@ Options:
   --no-ufw              do not touch the firewall
   --no-backup           do not install the daily backup timer
   --skip-port-check     do not refuse when 80/443 are taken (you front WebTerm yourself)
+  --no-cert-check       do not install the daily certificate-expiry timer
   --non-interactive     ask nothing (fails if a value is missing)
   -h | --help           this message
 EOF
@@ -68,6 +95,7 @@ while [ $# -gt 0 ]; do
     --no-ufw) DO_UFW=0; shift ;;
     --no-backup) DO_BACKUP=0; shift ;;
     --skip-port-check) DO_PORTCHECK=0; shift ;;
+    --no-cert-check) DO_CERTCHECK=0; shift ;;
     --non-interactive) NONINTERACTIVE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) err "Unknown option: $1"; usage; exit 1 ;;
@@ -171,7 +199,7 @@ cd "$INSTALL_DIR"
 say "[3/7] Configurare (.env)…"
 if [ -f .env ]; then
   say "  .env exists — keeping your values; filling in only what is missing."
-  set -a; . ./.env; set +a
+  load_env ./.env
   DOMAIN="${DOMAIN:-${WEBTERM_DOMAIN:-}}"
   EMAIL="${EMAIL:-${LETSENCRYPT_EMAIL:-}}"
   CF_TOKEN="${CF_TOKEN:-${CF_DNS_API_TOKEN:-}}"
@@ -327,9 +355,28 @@ say "[6/7] Starting the stack (Traefik + app)…"
 docker compose -f docker-compose.prod.yml pull || warn "  pull failed — using local images if present."
 docker compose -f docker-compose.prod.yml up -d --remove-orphans
 
+# O A DOUA instalare pe aceeaşi maşină nu are voie să deturneze unităţile primei. Numele lor
+# sunt FIXE (`webterm-backup`, `webterm-cert-check`) indiferent de `--dir`, iar
+# `/etc/default/webterm-backup` conţine numele volumului ŞI parola de criptare a arhivelor:
+# o instalare de test ar fi redirectat backupul nocturn al producţiei spre volumul ei şi ar fi
+# suprascris parola, lăsând arhivele vechi indescifrabile. Semnalat de un audit extern.
+# Nu redenumim unităţile (ar rupe upgrade-ul instalărilor existente) — refuzăm coliziunea.
+unit_belongs_elsewhere() {   # $1 = nume unitate → 0 dacă există şi arată spre alt director
+  u="/etc/systemd/system/$1.service"
+  [ -f "$u" ] || return 1
+  grep -q "WorkingDirectory=$INSTALL_DIR\$" "$u" && return 1
+  OTHER=$(grep -m1 '^WorkingDirectory=' "$u" | cut -d= -f2-)
+  return 0
+}
+
 # backup zilnic (systemd timer), cu numele corect de volum pentru acest director
 PROJECT=$(basename "$INSTALL_DIR" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')
-if [ "$DO_BACKUP" = 1 ] && [ -d /run/systemd/system ]; then
+if [ "$DO_BACKUP" = 1 ] && [ -d /run/systemd/system ] \
+   && unit_belongs_elsewhere webterm-backup; then
+  warn "  Skipping the backup timer: webterm-backup.service already belongs to ${OTHER:-another install}."
+  warn "  Unit names are fixed, so installing it here would redirect THAT install's nightly backup"
+  warn "  and overwrite /etc/default/webterm-backup, whose passphrase decrypts its archives."
+elif [ "$DO_BACKUP" = 1 ] && [ -d /run/systemd/system ]; then
   say "  Installing the daily backup (03:30, keeps 14 archives)…"
   sed -e "s|/opt/webterm|$INSTALL_DIR|g" deploy/webterm-backup.service \
     > /etc/systemd/system/webterm-backup.service
@@ -366,7 +413,10 @@ fi
 # Traefik renews the certificate, but that can fail silently (revoked CF token, an orphan
 # TXT record). A daily check turns that into a visible failure (systemctl --failed, the
 # journal) and, if you set WEBTERM_ALERT_URL, into a notification.
-if [ -d /run/systemd/system ]; then
+if [ "$DO_CERTCHECK" = 1 ] && [ -d /run/systemd/system ] \
+   && unit_belongs_elsewhere webterm-cert-check; then
+  warn "  Skipping the certificate check: webterm-cert-check.service already belongs to ${OTHER:-another install}."
+elif [ "$DO_CERTCHECK" = 1 ] && [ -d /run/systemd/system ]; then
   say "  Installing the daily certificate check (07:15, alerts under 15 days)…"
   sed -e "s|/opt/webterm|$INSTALL_DIR|g" deploy/webterm-cert-check.service \
     > /etc/systemd/system/webterm-cert-check.service

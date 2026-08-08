@@ -24,6 +24,31 @@
 #   7. final check         → say what is running now, do not assume
 set -euo pipefail
 
+# `.env` se CITEŞTE, nu se execută. Era sursat cu `. ./.env` — adică bash îl rula, ca root.
+# Două consecinţe, amândouă reproduse de un audit extern: (1) o valoare cu spaţii, perfect
+# validă pentru compose (`WEBTERM_ALERT_TO=a@x.com, b@x.com`), omoară instalarea cu
+# „command not found" DUPĂ ce s-au copiat fişierele; (2) `WEBTERM_NOTE=x && touch /tmp/pwned`
+# chiar creează fişierul. Cazul nu e teoretic: `.env.prod.example` conţinea el însuşi o valoare
+# cu `&&`, pe care documentaţia te invita s-o decomentezi. Parserul de mai jos ia KEY=VALUE
+# literal, fără expansiune, fără substituţie de comenzi.
+load_env() {
+  [ -f "$1" ] || return 0
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    case "$_line" in ''|'#'*|' '*'#'*) ;; esac
+    case "$_line" in ''|'#'*) continue ;; esac
+    case "$_line" in *=*) ;; *) continue ;; esac
+    _key=${_line%%=*}
+    case "$_key" in ''|*[!A-Za-z0-9_]*) continue ;; esac
+    _val=${_line#*=}
+    case "$_val" in
+      \"*\") _val=${_val#\"}; _val=${_val%\"} ;;
+      \'*\') _val=${_val#\'}; _val=${_val%\'} ;;
+    esac
+    export "$_key=$_val"
+  done < "$1"
+}
+
+
 cd "$(dirname "$0")"
 ROOT="$PWD"
 
@@ -52,7 +77,7 @@ ask() {                                    # ask "question" → 0 = yes
 }
 
 [ -f .env ] || die "no .env in $ROOT — run ./deploy.sh first"
-set -a; . ./.env; set +a
+load_env ./.env
 GHCR_USER="${GHCR_USER:-sm26449}"
 REPO="${WEBTERM_UPDATE_REPO:-$GHCR_USER/webterm}"
 IMAGE_BASE="ghcr.io/$GHCR_USER/webterm"
@@ -170,7 +195,7 @@ if [ "$DO_BACKUP" = 1 ]; then
     # unencrypted archives non-interactively"), so the upgrade's safety step did not work
     # precisely on the machines that were configured correctly. One source of truth.
     if [ -r /etc/default/webterm-backup ]; then
-      set -a; . /etc/default/webterm-backup; set +a
+      load_env /etc/default/webterm-backup
       echo "  (backup passphrase loaded from /etc/default/webterm-backup)"
     fi
     if scripts/backup.sh; then
