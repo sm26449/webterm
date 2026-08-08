@@ -227,10 +227,22 @@ def read_tail(sid: str, limit: int = config.BROWSER_TAIL_BYTES) -> bytes:
     # NOT include the most recent unflushed window: replaying it into a small
     # (mobile) terminal collides with the tmux resize redraw and wipes the whole
     # visible history — verified repeatedly, on multi-device is a shipped feature.
-    # The cost is a bounded, self-healing gap on a fresh live subscribe (up to the
-    # 2s/64KiB checkpoint window; the live stream converges the terminal on the
-    # next output). Closing it fully needs client-size negotiation before replay
-    # (a larger protocol change) — tracked as future work.
+    # The cost is a bounded gap on a fresh live subscribe: up to the 2s/64KiB checkpoint
+    # window. Measured, not estimated — an external audit attached and detached six times
+    # against a session printing every 200ms and lost 3–9 markers (0.6–1.8s of output) EVERY
+    # time, reproducibly.
+    #
+    # This used to say "self-healing", which is false and worth being precise about: what
+    # converges is the visible SCREEN, on the next output. Those bytes never reach that
+    # client, and they are absent from its scrollback with nothing to show they were dropped
+    # — while every other discontinuity in this file gets a `GAP_MARKER` (see
+    # `_write_gap_marker`). So the scrollback is quietly incomplete rather than visibly so.
+    # The same "the live stream converges" reasoning was already retracted a few lines below,
+    # for the idle case, and fixed only there.
+    #
+    # Closing it needs client-size negotiation before replay (a larger protocol change) —
+    # tracked as future work. Until then the honest summary is: attaching can silently cost
+    # you up to two seconds of history.
     out_path, _ = transcript_paths(sid)
     try:
         size = out_path.stat().st_size
@@ -373,7 +385,11 @@ class BrowserClient:
         # (posibil declanșat repetat prin pause/resume) să nu blocheze event-loop-ul
         tail = await asyncio.to_thread(read_tail, self.hub.sid)
         await self.send_bytes(tail)
-        self._drain_queue()  # anything pushed meanwhile is inside the tail
+        # Nu „e deja în tail": `read_tail` citeşte doar octeţii FLUSH-uiţi, iar fişierul e în
+        # urmă cu până la 2s/64KiB, deci ce s-a pus în coadă între timp poate să nu fie nici
+        # pe disc, nici trimis. Golim coada ca să nu redăm de două ori ce ERA pe disc; restul
+        # e gaura descrisă la `read_tail`, nu o dublură evitată.
+        self._drain_queue()
         self._sent_since_ping += len(tail)   # tails count toward flow control too
 
     async def _flow_control(self) -> None:

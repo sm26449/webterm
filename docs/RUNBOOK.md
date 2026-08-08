@@ -166,6 +166,18 @@ single-admin model (one client polls, not N).
   ~128 MiB per session in the worst case
   (head-truncated cap). When the session ceiling is reached, the API returns
   **409**, not 502 — a normal condition, not a gateway fault.
+- **Runaway output costs the HOST, not the gateway** (measured on a real agent, 2026-08-08).
+  A single `yes` in one session drives `tmux: server` to ~100% CPU and the agent process to
+  ~70–80%. Because one tmux server serves every session on that host, keystroke latency in
+  *other* sessions there goes from p50 4ms to p50 8ms / **p95 113ms** while it lasts. The
+  gateway itself stays flat (`/healthz` p95 8–13ms, memory unchanged) and the transcript cap
+  holds exactly as documented. Expect "this host feels slow", not "WebTerm is down" — the fix
+  is on the host: find the session and stop the command.
+- **Attaching to a live session can cost up to ~2s of scrollback.** The replay reads only the
+  flushed transcript, deliberately: replaying the unflushed window into a small terminal
+  collides with the tmux redraw and wipes the visible history. Measured at 0.6–1.8s of output
+  missing per attach, with nothing marking the discontinuity. The screen converges on the next
+  output; those bytes never reach that client's scrollback.
 - **What to watch in `/api/status` → "Gateway health"**: `event_loop_lag`
   (green <50ms; red >250ms = event loop blocked by synchronous I/O), `db_ping`
   (green <20ms), process memory. If the lag keeps climbing, the gateway is
