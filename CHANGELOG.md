@@ -7,6 +7,30 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [2.0.3] — 2026-08-09 · agent (40)
+
+### Changed — a new mark, and the terminal gets its space back
+
+- **New mark.** The three lines that joined the prompt to the hosts were the second-heaviest
+  element and were doing the least work; they are now a trail of dots that fades toward the
+  prompt, which gives the mark direction — the signal leaves the prompt and grows toward the
+  machines. Everything on the right lost weight, and the chevron thinned to match: shrinking
+  only one half would have tipped the whole mark. The chevron is now perforated by a grid of
+  squares with the tile gradient showing through, so the prompt is made of cells while the
+  hosts stay solid — a terminal is made of characters, the machines at the far end are real.
+  All icons were regenerated from the one SVG; the maskable one is not that file scaled, since
+  platforms crop it to a circle and it needs its own safe zone.
+- **The sidebar can be hidden**, and the choice is remembered. The way back matters more than
+  the hiding: the ☰ button that was mobile-only now appears on desktop exactly while the
+  sidebar is collapsed. A panel that hides with no visible way to return is a trap, so the E2E
+  asserts both directions.
+- **"New session" moved into the host ⋯ menu**, first item, with a separator before the
+  administrative entries. In the row it only appeared on hover and competed with the host name
+  and the update badge; in the menu it has full text, the first position, and a rule that keeps
+  an absent-minded click off "Uninstall".
+
+Nothing changed on the server or in the agent — this release is the interface and the icons.
+
 ## [2.0.2] — 2026-08-09 · agent (40)
 
 ### Added — you find out when someone attaches to your terminal
@@ -64,6 +88,29 @@ back.
   RUNBOOK §5, which hashed correctly but left the open web sessions and share links alive — you
   could rotate the password and leave the intruder logged in. The new password is prompted for,
   never passed as an argument.
+
+### Fixed — found by a four-way audit run against this release
+
+- **Wrong TOTP codes were not counted** on the passkey gate above. Re-authenticating with the
+  password calls `record_login_success`, which *clears* the failure counter — so someone who
+  already had the password could send (good password + guessed code) forever, each attempt
+  wiping its own trace, and brute-force a six-digit code with no lockout at all. It has its own
+  counter now, which nothing else resets, and deliberately no "a correct code passes anyway
+  during lockout" escape hatch: a guesser needs one lucky hit, so that hatch would delete the
+  defence it belongs to.
+- **The version header was served before login.** `X-Webterm-Version` went out on every
+  `/api/*` response, including the public `/api/login` and `/api/state`, while the comment above
+  it claimed the opposite. It now requires a session cookie.
+- **Passwords had a floor and no ceiling**, so a multi-megabyte body reached argon2 on a path
+  that is free to repeat. Capped at 1024 characters.
+- **Traefik, docker-socket-proxy, caddy and the backup tool image floated on mutable tags**
+  while the Dockerfile declared a digest-pinning policy. The backup image was the worst of them:
+  it runs as root over the data volume with the vault key mounted — the most powerful container
+  in the system — and accepted whatever anyone pushed to `python:3.12-alpine`. All pinned by
+  digest, and Dependabot now watches the compose files too, which is why they had drifted
+  unreviewed.
+- **`packages: write` applied to the whole CI workflow**, so the test job ran with a token that
+  could write to the registry. Scoped to the job that publishes.
 
 ### Fixed — "familiar address" meant "seen once", which defeated itself
 
