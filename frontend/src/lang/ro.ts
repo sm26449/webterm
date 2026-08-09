@@ -630,6 +630,7 @@ const ro: Lang = {
     'status.uptime': "Uptime gateway",
     'status.gatewayVersion': "Versiune gateway",
     'status.updateAvailable': "{version} disponibilă",
+    'status.updateCheckFailed': "n-am putut verifica",
     'status.upToDate': "● la zi",
     'status.image': "Imagine",
     'status.agentRecommended': "Agent recomandat",
