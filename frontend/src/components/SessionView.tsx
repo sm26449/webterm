@@ -21,8 +21,29 @@ import TranscriptPlayer from './TranscriptPlayer'
 import { shortcutFor } from '../lib/shortcuts'
 import StatusBar from './StatusBar'
 import { copyText, readText } from '../lib/clipboard'
+import { notify } from '../lib/notify'
 
 type ConnState = 'connecting' | 'open' | 'reconnecting' | 'ended'
+
+/* User-agent-ul întreg e nefolositor într-un rând de roster: 150 de caractere din care
+   nouă zecimi sunt istorie („Mozilla/5.0", „like Gecko"). Vrem doar cât să deosebeşti
+   telefonul tău de un browser străin, deci platformă + motor. Ordinea contează: Edge şi
+   Chrome se declară amândouă „Chrome", Chrome pe iOS se declară „Safari". */
+export function shortAgent(ua?: string): string {
+  if (!ua) return '?'
+  const os = /iPhone|iPad/.test(ua) ? 'iOS'
+    : /Android/.test(ua) ? 'Android'
+    : /Mac OS X/.test(ua) ? 'macOS'
+    : /Windows/.test(ua) ? 'Windows'
+    : /Linux/.test(ua) ? 'Linux' : ''
+  const br = /Edg\//.test(ua) ? 'Edge'
+    : /OPR\//.test(ua) ? 'Opera'
+    : /Firefox\//.test(ua) ? 'Firefox'
+    : /CriOS\//.test(ua) ? 'Chrome'
+    : /Chrome\//.test(ua) ? 'Chrome'
+    : /Safari\//.test(ua) ? 'Safari' : ''
+  return [br, os].filter(Boolean).join(' · ') || ua.slice(0, 24)
+}
 
 // Prag watchdog client: fără niciun mesaj de la server (nici măcar ping-ul aplicativ de
 // keepalive, ~25s pe idle) în acest interval, tratăm conexiunea ca moartă și reconectăm.
@@ -230,7 +251,10 @@ export default function SessionView(props: {
   const [shareExpiry, setShareExpiry] = useState(1440)       // opțiune: minute
   const [shareIsWritable, setShareIsWritable] = useState(false)  // al link-ului DEJA generat
   // roster (cine e conectat) + kick — pentru owner
-  const [roster, setRoster] = useState<{ id: string; label: string; owner: boolean; writable: boolean }[]>([])
+  const [roster, setRoster] = useState<{
+    id: string; label: string; owner: boolean; writable: boolean
+    ip?: string; agent?: string; known?: boolean; since?: number
+  }[]>([])
   const yourIdRef = useRef<string | null>(null)
   const [showRoster, setShowRoster] = useState(false)
   // cortină peste terminal cât se scrie replay-ul de istoric: conținutul apare
@@ -839,6 +863,19 @@ export default function SessionView(props: {
           yourIdRef.current = msg.your_id ?? null   // ca să ne marcăm în roster
         } else if (msg.type === 'roster') {
           setRoster(Array.isArray(msg.clients) ? msg.clients : [])
+        } else if (msg.type === 'attached') {
+          // Cineva ni s-a alăturat la sesiune. Roster-ul se actualiza tăcut, deci aflai doar
+          // dacă te uitai fix atunci — iar dacă lucrai, nu te uitai. Notificarea de sistem
+          // ajunge şi când tabul e în fundal; `known:false` o ridică la ton de avertisment.
+          const c = msg.client || {}
+          const who = c.label === 'guest' ? tRef.current('session.roleGuest') : tRef.current('session.roleSelf')
+          notify(
+            c.known === false
+              ? tRef.current('session.attachedNew', { title: session.title || session.id.slice(0, 8) })
+              : tRef.current('session.attachedKnown', { who, title: session.title || session.id.slice(0, 8) }),
+            tRef.current('session.attachedBody', { ip: c.ip || '?', agent: shortAgent(c.agent) }),
+            c.known === false ? 'warn' : 'info',
+            'wt-attach-' + session.id)
         } else if (msg.type === 'exit' || msg.type === 'lost') {
           setExited(msg.type === 'exit'
             ? { status: msg.status, reason: 'exited' }
@@ -1262,10 +1299,11 @@ export default function SessionView(props: {
                 {showRoster && (
                   <>
                     <div className="fixed inset-0 z-30" onClick={() => setShowRoster(false)} />
-                    <div className="absolute right-0 top-full z-40 mt-1 w-56 rounded-lg bg-ink-900 p-1.5 text-xs ring-1 ring-ink-700 shadow-xl">
+                    <div className="absolute right-0 top-full z-40 mt-1 w-72 rounded-lg bg-ink-900 p-1.5 text-xs ring-1 ring-ink-700 shadow-xl">
                       <div className="px-2 py-1 text-[11px] uppercase tracking-wide text-slate-500">{t('session.connectedCount', { count: roster.length })}</div>
                       {roster.map((c) => (
-                        <div key={c.id} className="flex items-center gap-2 rounded px-2 py-1 hover:bg-ink-800">
+                        <div key={c.id} className="rounded py-0.5 hover:bg-ink-800">
+                          <div className="flex items-center gap-2 px-2 py-1">
                           <span className="min-w-0 flex-1 truncate text-slate-200">
                             {c.label === 'self' ? t('session.roleSelf')
                               : c.label === 'guest' ? t('session.roleGuest')
@@ -1277,6 +1315,18 @@ export default function SessionView(props: {
                           {!c.owner && (
                             <button onClick={() => kick(c.id)} title={t('session.removeFromSession')}
                               className="shrink-0 rounded px-1 text-rose-400 hover:bg-ink-700">✕</button>
+                          )}
+                          </div>
+                          {/* De unde e ataşat. Fără asta „mai e cineva conectat" nu-ţi spunea
+                              dacă e telefonul tău sau altcineva — deci nu puteai reacţiona. */}
+                          {(c.ip || c.agent) && (
+                            <div className="flex items-center gap-1.5 px-2 pb-1 text-[10px] text-slate-500">
+                              <span className="min-w-0 truncate">{c.ip}{c.agent ? ' · ' + shortAgent(c.agent) : ''}</span>
+                              {c.known === false && (
+                                <span title={t('session.deviceNewTitle')}
+                                  className="shrink-0 rounded bg-amber-500/15 px-1 text-amber-400">{t('session.deviceNew')}</span>
+                              )}
+                            </div>
                           )}
                         </div>
                       ))}

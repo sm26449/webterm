@@ -3839,6 +3839,12 @@ async def shared_ws(ws: WebSocket, token: str):
         client.is_owner = False
         client.writable = writable
         client.label = "guest"          # identificator, nu text: clientul îl traduce
+        client.remote_addr = security.client_ip(ws)
+        client.user_agent = ws.headers.get("user-agent", "")
+        client.attached_at = time.time()
+        # Un invitat nu e niciodată „dispozitivul tău": link-ul a fost dat deliberat, dar
+        # MOMENTUL în care cineva îl foloseşte e exact ce vrei să afli. Deci mereu necunoscut.
+        client.known = False
     await ws.send_text(json.dumps({"type": "init", "state": row["state"],
                                    "title": row["title"], "readonly": not writable,
                                    "writable": writable,
@@ -3869,6 +3875,9 @@ async def shared_ws(ws: WebSocket, token: str):
         if conn:
             await hub.ensure_attached(conn)
         await hub.broadcast_roster()
+        await hub.announce_attach(client)
+        email_alerts.notify_session_attach(
+            row["title"], client.remote_addr, client.user_agent, row["share_by"] or "")
         if start_locked:
             # invitatul NU poate debloca (n-are passkey) — doar aşteaptă re-auth-ul owner-ului.
             # Nu forţăm hub.lock() dintr-un invitat; sweep-ul de idle blochează hub-ul la nivel global.
@@ -3951,6 +3960,12 @@ async def browser_ws(ws: WebSocket, sid: str):
         client.is_owner = True
         client.writable = True
         client.label = "self"           # idem
+        client.remote_addr = security.client_ip(ws)
+        client.user_agent = ws.headers.get("user-agent", "")
+        client.attached_at = time.time()
+        # „Cunoscut" = IP-ul a mai apărut la un login reuşit al ACESTUI cont. Deliberat un
+        # semnal slab: decide doar dacă facem zgomot, niciodată dacă sărim o verificare.
+        client.known = await security.ip_is_known(user["id"], client.remote_addr)
 
     await ws.send_text(json.dumps({
         "type": "init", "state": row["state"], "title": row["title"],
@@ -3988,6 +4003,12 @@ async def browser_ws(ws: WebSocket, sid: str):
         hub.clients.add(client)
         client.sender_task = asyncio.create_task(client.sender())
         await hub.broadcast_roster()             # cine e conectat (owner + invitați)
+        # Cine era deja ataşat AFLĂ că ai venit; dacă locul e nou, pleacă şi un email — ca să
+        # afli şi când nu te uitai. E singurul efect al lui `known`: volum de alertă.
+        await hub.announce_attach(client)
+        if not client.known:
+            email_alerts.notify_session_attach(
+                row["title"], client.remote_addr, client.user_agent, user["email"])
         if start_locked:
             if not hub.locked:
                 await hub.lock()                 # idle → blochează toţi clienţii + broadcast

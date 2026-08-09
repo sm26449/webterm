@@ -192,6 +192,21 @@ def notify_new_login(ip: str, user_agent: str, email: str) -> None:
           f"sessions in settings.")
 
 
+def notify_session_attach(title: str, ip: str, user_agent: str, email: str) -> None:
+    """Cineva s-a ataşat la o sesiune VIE de pe un IP nemaivăzut la un login al contului.
+    Throttled per IP: dacă deschizi cinci taburi de pe acelaşi loc nou, primeşti un mesaj, nu
+    cinci. Ataşările de pe locuri cunoscute nu trimit nimic — altfel alerta devine zgomot şi
+    nimeni n-o mai citeşte, iar atunci n-o mai citeşte nici pe cea care conta."""
+    if not _throttled("attach:" + ip, 900):
+        return
+    _fire("A new device attached to a live session",
+          f"Account: {email}\nSession: {title or '(untitled)'}\n\n"
+          f"IP: {ip}\nBrowser: {user_agent or '?'}\n\n"
+          f"This IP has not been seen on a successful login for this account. If it was not "
+          f"you, open the session and remove that client from the viewer list, then change "
+          f"the password — the browser session behind it stays valid until you do.")
+
+
 def notify_security_change(what: str, ip: str, email: str) -> None:
     """A sensitive account change (password, 2FA, new passkey)."""
     _fire(f"Security change: {what}",

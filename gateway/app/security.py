@@ -334,6 +334,14 @@ async def require_user_ws(websocket: WebSocket):
     return await user_for_token(websocket.cookies.get(COOKIE_NAME))
 
 
+async def ip_is_known(user_id: int, ip: str) -> bool:
+    """A mai fost văzut IP-ul ăsta la un login reuşit al contului? Doar CITEŞTE — spre deosebire
+    de `note_new_login`, care şi înregistrează. Folosit ca să decidem dacă o ataşare la o sesiune
+    e de pe un loc obişnuit sau merită zgomot. IP-ul se compară hash-uit, ca peste tot."""
+    return bool(await db.fetchone(
+        "SELECT 1 FROM seen_logins WHERE user_id=? AND ip_hash=?", user_id, sha256_hex(ip)))
+
+
 async def note_new_login(user, ip: str, user_agent: str) -> None:
     """Alertă (best-effort) dacă e primul login reușit de pe acest IP pentru user."""
     ih = sha256_hex(ip)
