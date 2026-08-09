@@ -65,9 +65,14 @@ services:
       #         fără port 80, ŞI singurul care poate emite un WILDCARD — adică singurul care
       #         acoperă toate subdomeniile de forward cu un singur certificat.
       #
-      # Cu HTTP-01 forward-urile funcţionează la fel, dar fiecare subdomeniu primeşte
-      # certificatul lui, emis la prima accesare (deci prima încărcare e mai lentă, şi fiecare
-      # slug consumă din rata Let's Encrypt).
+      # Pe HTTP-01 aplicaţia are TLS normal, dar FORWARD-URILE NU. Nu e o chestiune de viteză
+      # sau de rată: routerul de forward e prins cu `HostRegexp`, iar ACME din Traefik derivă
+      # numele de domeniu doar din `Host()`/`HostSNI()` — dintr-un regex nu are ce extrage, şi
+      # nu există emitere „on-demand" după SNI. Fără eticheta de wildcard (care cere DNS-01),
+      # routerul rămâne fără certificat şi subdomeniile de forward primesc certul implicit,
+      # autosemnat, al lui Traefik: avertisment în browser, nu „prima încărcare mai lentă".
+      # Comentariul de aici a susţinut varianta blândă până la verificarea în documentaţia
+      # Traefik; `.env.prod.example` spunea de la început ce trebuie.
       - --certificatesresolvers.le.acme.email=${LETSENCRYPT_EMAIL}
       - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
       - --certificatesresolvers.le.acme.httpchallenge=true
