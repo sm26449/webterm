@@ -1,7 +1,7 @@
 /* Captură completă a suprafeței UI + audit de accesibilitate (axe-core).
 
    Rulează DUPĂ `scripts/e2e-session.mjs`, pe acelaşi stack: are nevoie de contul şi de
-   hostul create acolo (aşteaptă butonul „New session", care apare doar dacă există un host).
+   hostul create acolo (aşteaptă butonul „Host actions", care apare doar dacă există un host).
    Cel mai simplu: `scripts/ci-local.sh e2e a11y`.
 
    Cere `@axe-core/playwright` pe lângă `playwright` — vezi scripts/ci-local.sh.
@@ -62,9 +62,12 @@ async function login(page) {
   await page.fill('input[type=email]', EMAIL)
   await page.fill('input[type=password]', PASSWORD)
   await page.click('button:has-text("Sign in")')
-  await page.waitForSelector('button[title="New session"]', { timeout: 8000 })
+  // „Sesiune nouă" s-a mutat în meniul ⋯ al hostului, deci nu mai e un selector vizibil
+  // la încărcare. Semnalul că există un host e chiar butonul de meniu.
+  await page.waitForSelector('button[title="Host actions"]', { timeout: 8000 })
 }
 async function openSession(page) {
+  await page.click('button[title="Host actions"]')
   await page.click('button[title="New session"]')
   await page.waitForSelector('.xterm-screen', { timeout: 10000 })
   await page.waitForTimeout(1500)
@@ -163,6 +166,7 @@ try {
   await m.screenshot({ path: `${OUT}/m-03-drawer.png` })
   // scopat la drawer-ul vizibil — altfel `.last()` prinde un buton din
   // dashboard-ul din spatele scrim-ului, care interceptează click-ul
+  await m.locator('.wt-sidebar button[title="Host actions"] >> visible=true').last().click()
   await m.locator('.wt-sidebar button[title="New session"] >> visible=true').last().click()
   await m.waitForSelector('.xterm-screen')
   await m.waitForTimeout(1500)

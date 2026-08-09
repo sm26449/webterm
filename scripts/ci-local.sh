@@ -227,7 +227,7 @@ fi
 
 # ── accesibilitate ──────────────────────────────────────────────────────────
 # În CI pasul ăsta rulează DUPĂ E2E, pe acelaşi container: E2E a creat contul ŞI un host,
-# iar `ui_review.mjs` are nevoie de amândouă (aşteaptă butonul „New session", care apare
+# iar `ui_review.mjs` are nevoie de amândouă (aşteaptă butonul „Host actions", care apare
 # doar dacă există un host). Deci a11y NU e de sine stătător: rulează-l ca `e2e a11y`.
 # Contul îl creăm şi aici, ca pasul să meargă şi dacă E2E a fost sărit.
 if want a11y; then
