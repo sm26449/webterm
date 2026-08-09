@@ -206,6 +206,15 @@ export const HomeIcon = () => (
   </Icon>
 )
 
+export const CollapseIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+       strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <rect x="1.5" y="2.5" width="13" height="11" rx="2" />
+    <path d="M6 2.5v11" />
+    <path d="M11.5 6.5 9.5 8l2 1.5" />
+  </svg>
+)
+
 export const MoreIcon = () => (
   <Icon>
     <circle cx="5" cy="12" r="1.4" fill="currentColor" stroke="none" />

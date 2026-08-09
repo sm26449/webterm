@@ -37,6 +37,7 @@ const ro: Lang = {
     'about.project': 'Proiect',
 
     // navigație / sidebar
+    'nav.collapseSidebar': 'Ascunde lista de hosturi',
     'nav.addHost': 'Adaugă host',
     'nav.fleetRun': 'Rulează o comandă pe mai multe hosturi',
     'nav.fleetRunAria': "Rulează pe mai multe hosturi",

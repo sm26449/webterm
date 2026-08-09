@@ -37,6 +37,14 @@ const clipboardUntil = async (page, pred, ms = 5000) => {
     await page.waitForTimeout(100)
   }
 }
+/* „Sesiune nouă" a fost mutat din rândul hostului în meniul ⋯ al acestuia, cu un separator
+   după el. Testul nu mai poate da un singur click, deci deschide meniul întâi. Butonul de pe
+   PAGINA hostului (HostOverview) a rămas neschimbat — acela n-are `title`, doar text, şi de
+   aceea auditul mobil nu e afectat. */
+const newSession = async (page) => {
+  await page.click('button[title="Host actions"]')
+  await page.click('button[title="New session"]')
+}
 const fail = (msg) => {
   console.error(`EROARE: ${msg}`)
   process.exit(1)
@@ -143,7 +151,7 @@ try {
   check('host online (agentul s-a conectat)', true)
 
   // sesiunea A
-  await page.click('button[title="New session"]')
+  await newSession(page)
   await page.waitForSelector('.xterm-screen', { timeout: 15000 })
   await page.waitForTimeout(1500)
   const sidA = await page.evaluate(() => location.hash.replace('#/s/', ''))
@@ -173,7 +181,7 @@ try {
 
   // sesiunea B, cu flux continuu (ticker) — testează pauza + resync-ul.
   await goHome()
-  await page.click('button[title="New session"]')
+  await newSession(page)
   await page.waitForTimeout(1500)
   await page.keyboard.type('i=0; while true; do i=$((i+1)); echo TICK_$i; sleep 1; done\n')
   check('sesiunea B: ticker pornit', await waitScreen('TICK_2'))
@@ -346,10 +354,26 @@ try {
   await page.keyboard.press('Escape')
   check('player-ul se închide cu Escape', await hidden(player))
 
+  // ── Plierea sidebarului ──
+  // O funcţie de UI fără test se strică tăcut la prima refactorizare de layout. Ce contează
+  // aici nu e că sidebarul dispare, ci că EXISTĂ cale de întoarcere: ☰ e ascuns pe desktop
+  // exact cât timp sidebarul e vizibil, iar plierea fără buton de redeschidere ar fi o capcană.
+  const sidebar = page.locator('.wt-sidebar').first()
+  const reopen  = page.locator('button[aria-label="Open host list"]:visible').first()
+  check('sidebarul e vizibil implicit', await visible(sidebar))
+  check('☰ e ascuns cât timp sidebarul e vizibil', !(await reopen.isVisible().catch(() => false)))
+  await page.click('button[title="Hide the host list"]')
+  await page.waitForTimeout(400)
+  check('plierea ascunde sidebarul', await hidden(sidebar))
+  check('☰ apare când sidebarul e pliat', await visible(reopen))
+  await reopen.click()
+  await page.waitForTimeout(400)
+  check('☰ readuce sidebarul', await visible(sidebar))
+
   // ── Valul 4: OSC 133 (comenzi ca obiecte) ──
   // sesiune nouă + activarea integrării shell din panoul de comenzi
   await goHome()
-  await page.click('button[title="New session"]')
+  await newSession(page)
   await page.waitForSelector('.xterm-screen', { timeout: 15000 })
   await page.waitForTimeout(1500)
   // stack-ul keep-alive ține montate și tab-urile ascunse → restrângem la panoul
@@ -629,7 +653,7 @@ try {
   const vis = () => page.locator('div:not([aria-hidden="true"]) > .wt-window').last()
   const visPath = () => vis().locator('input[title*="Type a path"]').inputValue()
   await goHome()
-  await page.click('button[title="New session"]')                     // X1 (integrată din ~/.bashrc)
+  await newSession(page)                     // X1 (integrată din ~/.bashrc)
   await page.waitForSelector('.xterm-screen', { timeout: 15000 })
   await page.waitForTimeout(1300)
   const x1hash = await page.evaluate(() => location.hash)
@@ -649,7 +673,7 @@ try {
   }, [host.id, x1sid])
   check('agentul raportează cwd-ul sesiunii pentru deschiderea panoului', cwdApi === '/tmp')
 
-  await page.click('button[title="New session"]')                     // X2
+  await newSession(page)                     // X2
   await page.waitForSelector('.xterm-screen', { timeout: 15000 })
   await page.waitForTimeout(1300)
   await vis().locator('.xterm-screen').click()
