@@ -178,10 +178,12 @@ async def login_verify(body: CredentialBody, request: Request, response: Respons
                      result.new_sign_count, row["id"])
     security.record_login_success(ip)
     user = await db.fetchone("SELECT * FROM users WHERE id=?", row["user_id"])
+    new_device = False
     if user:
-        await security.note_new_login(user, ip, request.headers.get("user-agent", ""))
+        new_device = await security.note_new_login(
+            user, ip, request.headers.get("user-agent", ""))
     token = await security.create_web_session(
-        row["user_id"], request.headers.get("user-agent", ""))
+        row["user_id"], request.headers.get("user-agent", ""), new_device)
     security.set_session_cookie(response, token)
     return {"ok": True}
 

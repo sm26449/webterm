@@ -433,6 +433,14 @@ button that removes them. A client attaching from an address never seen on a suc
 flagged **new device**, its notification is raised to a warning, and an email goes out —
 throttled per address, because an alert that fires constantly is an alert nobody reads.
 
+**Credential changes from an unfamiliar device need the account's inbox.** Changing the password
+or the email from a session opened on an address never seen on a successful login also requires a
+six-digit code mailed to the account address — closing the case where someone who already has your
+password rotates it and locks you out. A code rather than a link: links are clickable by anyone who
+reaches the inbox, and mail scanners open them on their own. It escalates rather than refuses,
+because being blocked from changing a leaked password while travelling is not security. Applies
+only when SMTP is configured; without a mail channel it would be a permanent lockout.
+
 That signal decides **how loud to be, never whether to check**. No device is ever trusted enough
 to skip step-up, the idle lock, or 2FA: an IP and a user-agent both travel with a stolen session
 cookie, so a "trusted device" exemption would be waved through by exactly the attacker it looks

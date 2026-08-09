@@ -229,14 +229,68 @@ def client_ip_ws(ws) -> str:
     return ws.client.host if ws.client else "?"
 
 
-async def create_web_session(user_id: int, user_agent: str = "") -> str:
+async def create_web_session(user_id: int, user_agent: str = "",
+                             device_new: bool = False) -> str:
     token = new_token()
     now = time.time()
     await db.execute(
-        "INSERT INTO web_sessions(token_hash, user_id, created, expires, user_agent, last_seen)"
-        " VALUES(?,?,?,?,?,?)",
-        sha256_hex(token), user_id, now, now + WEB_SESSION_TTL, user_agent[:200], now)
+        "INSERT INTO web_sessions(token_hash, user_id, created, expires, user_agent, last_seen,"
+        " device_new) VALUES(?,?,?,?,?,?,?)",
+        sha256_hex(token), user_id, now, now + WEB_SESSION_TTL, user_agent[:200], now,
+        1 if device_new else 0)
     return token
+
+
+async def session_is_new_device(request: Request) -> bool:
+    """A pornit sesiunea asta de pe un loc nemaivăzut la un login al contului?
+
+    Citim ştampila pusă la login, nu tabela `seen_logins`: login-ul reuşit ÎNREGISTRAEZĂ IP-ul,
+    deci o interogare de aici ar răspunde mereu „cunoscut" şi verificarea ar arăta că
+    funcţionează fără să facă nimic. Verdictul e îngheţat când era încă adevărat."""
+    tok = request.cookies.get(COOKIE_NAME)
+    if not tok:
+        return False
+    row = await db.fetchone(
+        "SELECT device_new FROM web_sessions WHERE token_hash=?", sha256_hex(tok))
+    return bool(row and row["device_new"])
+
+
+# ── Coduri de confirmare pe email (schimbări de credenţiale de pe un loc nou) ─
+# Un cod, nu un link: link-ul e clicabil din inboxul oricui a ajuns la el, iar scanerele de
+# mail îl pot deschide singure — adică pot consuma un token single-use înainte să-l vezi tu.
+# Codul se tastează în pagina în care eşti deja, deci dovedeşte şi accesul la inbox, şi că eşti
+# omul care a pornit acţiunea.
+EMAIL_CODE_TTL = 600.0
+EMAIL_CODE_MAX_ATTEMPTS = 5
+
+
+async def issue_email_challenge(user_id: int, purpose: str) -> str:
+    code = "%06d" % secrets.randbelow(1_000_000)
+    now = time.time()
+    await db.execute(
+        "INSERT INTO email_challenges(user_id, purpose, code_hash, created, expires, attempts)"
+        " VALUES(?,?,?,?,?,0) ON CONFLICT(user_id, purpose) DO UPDATE SET"
+        " code_hash=excluded.code_hash, created=excluded.created, expires=excluded.expires,"
+        " attempts=0",
+        user_id, purpose, sha256_hex(code), now, now + EMAIL_CODE_TTL)
+    return code
+
+
+async def consume_email_challenge(user_id: int, purpose: str, code: str) -> bool:
+    """Single-use, expirat după 10 minute, cel mult 5 încercări. Incrementarea şi citirea sunt
+    o singură instrucţiune: altfel două cereri concurente citeau acelaşi contor şi plafonul
+    devenea decorativ (6 cifre se ghicesc dacă ai voie să încerci de un milion de ori)."""
+    row = await db.execute_returning(
+        "UPDATE email_challenges SET attempts = attempts + 1"
+        " WHERE user_id=? AND purpose=? AND expires > ? AND attempts < ?"
+        " RETURNING code_hash", user_id, purpose, time.time(), EMAIL_CODE_MAX_ATTEMPTS)
+    if not row:
+        return False
+    if not tokens_equal(row["code_hash"], sha256_hex((code or "").strip())):
+        return False
+    await db.execute("DELETE FROM email_challenges WHERE user_id=? AND purpose=?",
+                     user_id, purpose)
+    return True
 
 
 async def user_for_token(token: Optional[str]):
@@ -342,16 +396,22 @@ async def ip_is_known(user_id: int, ip: str) -> bool:
         "SELECT 1 FROM seen_logins WHERE user_id=? AND ip_hash=?", user_id, sha256_hex(ip)))
 
 
-async def note_new_login(user, ip: str, user_agent: str) -> None:
-    """Alertă (best-effort) dacă e primul login reușit de pe acest IP pentru user."""
+async def note_new_login(user, ip: str, user_agent: str) -> bool:
+    """Alertă (best-effort) dacă e primul login reușit de pe acest IP pentru user.
+
+    Întoarce True dacă adresa era necunoscută. Apelantul foloseşte răspunsul ca să ştampileze
+    sesiunea: verdictul trebuie luat AICI, fiindcă exact apelul ăsta înregistrează adresa —
+    orice verificare de după ar găsi-o deja cunoscută."""
     ih = sha256_hex(ip)
     seen = await db.fetchone(
         "SELECT 1 FROM seen_logins WHERE user_id=? AND ip_hash=?", user["id"], ih)
-    if not seen:
-        await db.execute(
-            "INSERT INTO seen_logins(user_id, ip_hash, created) VALUES(?,?,?)",
-            user["id"], ih, time.time())
-        email_alerts.notify_new_login(ip, user_agent, user["email"])
+    if seen:
+        return False
+    await db.execute(
+        "INSERT INTO seen_logins(user_id, ip_hash, created) VALUES(?,?,?)",
+        user["id"], ih, time.time())
+    email_alerts.notify_new_login(ip, user_agent, user["email"])
+    return True
 
 
 async def destroy_web_session(token: Optional[str]) -> None:
