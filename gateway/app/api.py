@@ -147,8 +147,7 @@ async def setup(creds: Credentials, request: Request, response: Response):
             403, "wrong setup token (%d attempt%s left before a %d-minute lockout) — it is in "
                  "the server logs: docker compose logs app | grep WEBTERM_SETUP_TOKEN"
                  % (left, "" if left == 1 else "s", security._IP_LOCKOUT // 60))
-    if len(creds.password) < 8:
-        raise HTTPException(400, "the password must be at least 8 characters")
+    _check_password(creds.password)
     if "@" not in creds.email or len(creds.email) > 200:
         raise ApiError(400, "account.badEmail", "invalid email")
     email = creds.email.strip().lower()
@@ -171,6 +170,20 @@ async def setup(creds: Credentials, request: Request, response: Response):
     return {"ok": True}
 
 
+# Parola avea doar prag INFERIOR. Nimic nu oprea un body de câţiva MB să ajungă la argon2 —
+# şi la fiecare încercare de login, unde e gratuit de repetat. Impactul e mic (intrarea e
+# pre-hashuită, login-ul e plafonat), dar un plafon costă un `if`. Generos intenţionat: nu vrem
+# să tăiem passphrase-uri lungi, doar body-uri care nu sunt parole.
+PASSWORD_MAX = 1024
+
+
+def _check_password(pw: str, what: str = "password") -> None:
+    if len(pw) < 8:
+        raise HTTPException(400, "the %s must be at least 8 characters" % what)
+    if len(pw) > PASSWORD_MAX:
+        raise HTTPException(400, "the %s must be at most %d characters" % (what, PASSWORD_MAX))
+
+
 @router.post("/api/login")
 async def login(creds: Credentials, request: Request, response: Response):
     ip = security.client_ip(request)
@@ -185,7 +198,7 @@ async def login(creds: Credentials, request: Request, response: Response):
                              creds.email.strip().lower())
     # verify (or a dummy verify when the user is absent) so timing can't
     # reveal whether the email exists
-    ok = (user is not None
+    ok = (user is not None and len(creds.password) <= PASSWORD_MAX
           and await asyncio.to_thread(security.verify_password, creds.password, user["password_hash"]))
     if user is None:
         await asyncio.to_thread(security.dummy_verify)
@@ -346,8 +359,7 @@ async def update_account(body: AccountUpdate, request: Request, user=Depends(sec
             raise HTTPException(409, "an account with that email already exists")
     pw_hash = user["password_hash"]
     if body.new_password:
-        if len(body.new_password) < 8:
-            raise HTTPException(400, "the new password must be at least 8 characters")
+        _check_password(body.new_password, "new password")
         pw_hash = await asyncio.to_thread(security.hash_password, body.new_password)
     await db.execute("UPDATE users SET email=?, password_hash=? WHERE id=?",
                      email, pw_hash, user["id"])
@@ -423,8 +435,7 @@ async def create_user(body: UserIn, user=Depends(security.require_user)):
     email = body.email.strip().lower()
     if "@" not in email or len(email) > 200:
         raise ApiError(400, "account.badEmail", "invalid email")
-    if len(body.password) < 8:
-        raise HTTPException(400, "the password must be at least 8 characters")
+    _check_password(body.password)
     if await db.fetchone("SELECT id FROM users WHERE email=?", email):
         raise HTTPException(409, "an account with that email already exists")
     pw = await asyncio.to_thread(security.hash_password, body.password)

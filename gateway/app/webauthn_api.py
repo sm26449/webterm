@@ -132,8 +132,26 @@ async def _second_gate(user, request: Request, body, what: str) -> None:
         if not body.totp_code:
             raise ApiError(403, "passkey.totpRequired",
                            "enter your 2FA code to %s" % what)
+        # Contor SEPARAT, şi asta e miezul: `_verify_reauth` de mai sus apelează
+        # `record_login_success` când parola e corectă, ceea ce ŞTERGE contorul de eşecuri.
+        # Un atacator care deja are parola trimitea la nesfârşit (parolă bună + cod ghicit):
+        # fiecare încercare îşi curăţa singură urma, deci codul din şase cifre se putea ghici
+        # fără niciun lockout, limitat doar de costul argon2. Cheia asta n-o resetează nimeni
+        # altcineva. Semnalat de un audit extern pe 2026-08-09, pe cod scris în aceeaşi zi.
+        key = "passkey2fa:%d" % user["id"]
+        allowed, retry = security.login_allowed(key)
+        if not allowed:
+            raise ApiError(429, "passkey.tooManyTotp",
+                           "too many wrong 2FA codes; retry in %ds" % retry)
         if not await security.verify_second_factor(user, body.totp_code):
+            # FĂRĂ portiţă „codul corect trece oricum în lockout", spre deosebire de calea cu
+            # parola: acolo portiţa există ca atacatorul să nu poată închide contul proprietarului
+            # cu parole greşite. Aici ar anula exact apărarea — ghicitorul are nevoie de o
+            # singură nimereală, iar dacă aceea trece, plafonul n-a existat. Costul asumat: cine
+            # îţi ştie deja parola îţi poate bloca 15 minute administrarea passkey-urilor.
+            security.record_login_failure(key)
             raise ApiError(401, "passkey.badTotp", "wrong or already-used 2FA code")
+        security.record_login_success(key)
         return
     if not await security.session_is_new_device(request):
         return
