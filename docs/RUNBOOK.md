@@ -72,8 +72,22 @@ more white screen).
 
 ## 5. Locked out of your own account
 
-There is **no password-reset email and no recovery CLI** — by design: a self-hosted tool with no
-mail dependency, whose only administrator is you. Recovery means server access, which you have.
+There is **no password-reset email for login** — by design: a self-hosted tool whose only
+administrator is you. Recovery means server access, which you have, and there is a command for it:
+
+```sh
+docker exec -it webterm-app-1 python3 -m app.admin list
+docker exec -it webterm-app-1 python3 -m app.admin passwd you@example.com
+docker exec -it webterm-app-1 python3 -m app.admin disable-2fa you@example.com
+docker exec -it webterm-app-1 python3 -m app.admin logout-all you@example.com
+```
+
+Prefer it over the raw SQL below. It hashes with the application's own argon2 parameters, and it
+also **deletes the open web sessions and share links** — the hand-written `UPDATE` did not, so
+you could rotate the password and leave the intruder logged in. The new password is prompted for,
+never passed on the command line, so it stays out of your shell history.
+
+The SQL remains here for the case where the container will not start.
 
 Work down this list; stop at the first one that applies.
 

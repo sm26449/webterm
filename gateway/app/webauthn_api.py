@@ -19,6 +19,7 @@ from webauthn.helpers.structs import (AuthenticatorSelectionCriteria,
                                       UserVerificationRequirement)
 
 from . import config, db, email_alerts, security
+from .errors import ApiError
 
 router = APIRouter(prefix="/api/webauthn")
 
@@ -73,6 +74,8 @@ class CredentialBody(BaseModel):
     credential: dict
     name: str = ""
     password: str = ""      # M1: re-autentificare la înrolarea unui passkey nou
+    totp_code: str = ""     # al doilea factor, când contul are TOTP activ
+    email_code: str = ""    # alternativa, când n-are TOTP şi vine de pe un dispozitiv nou
 
 
 @router.post("/register/options")
@@ -110,6 +113,46 @@ async def _verify_reauth(user, password: str) -> bool:
     return False
 
 
+async def _second_gate(user, request: Request, body, what: str) -> None:
+    """Al doilea factor peste parolă, pentru operaţiile care schimbă SETUL de passkey-uri.
+
+    Parola singură nu mai ajunge: cine o are (reutilizată, scursă, ghicită) îşi putea înrola
+    propriul passkey — adică îşi făcea o cheie permanentă, rezistentă la phishing, la contul
+    tău — sau ţi-l putea şterge pe al tău. Amândouă sunt schimbări de credenţiale, nu setări.
+
+    Cu TOTP activ cerem codul de pe telefon (sau un cod de recuperare, pe care `verify_second_factor`
+    îl acceptă la fel). Fără TOTP, singurul canal separat rămas e emailul, şi îl cerem doar de pe
+    un dispozitiv nestabilit — de pe maşina ta obişnuită parola rămâne suficientă, ca până acum.
+
+    Nu acceptăm emailul CA ÎNLOCUITOR pentru TOTP: dacă ar merge şi aşa, 2FA-ul ar valora exact
+    cât accesul la inbox, iar telefonul n-ar mai apăra nimic. Pentru telefonul pierdut există
+    codurile de recuperare, iar dacă s-au pierdut şi ele, `python3 -m app.admin` de pe server —
+    o poartă mult mai înaltă decât o cutie poştală."""
+    if user["totp_enabled"]:
+        if not body.totp_code:
+            raise ApiError(403, "passkey.totpRequired",
+                           "enter your 2FA code to %s" % what)
+        if not await security.verify_second_factor(user, body.totp_code):
+            raise ApiError(401, "passkey.badTotp", "wrong or already-used 2FA code")
+        return
+    if not await security.session_is_new_device(request):
+        return
+    if not await email_alerts.smtp_ready():
+        return
+    if not body.email_code:
+        code = await security.issue_email_challenge(user["id"], "passkey")
+        try:
+            await email_alerts.send_account_code(user["email"], code, what)
+        except Exception as e:                       # noqa: BLE001
+            raise ApiError(503, "account.codeSendFailed",
+                           "could not send the confirmation code by email: %s" % e)
+        raise ApiError(403, "account.codeRequired",
+                       "this device is new — enter the code we just emailed to %s"
+                       % user["email"])
+    if not await security.consume_email_challenge(user["id"], "passkey", body.email_code):
+        raise ApiError(401, "account.badCode", "wrong or expired confirmation code")
+
+
 @router.post("/register/verify")
 async def register_verify(body: CredentialBody, request: Request,
                           user=Depends(security.require_user)):
@@ -117,6 +160,7 @@ async def register_verify(body: CredentialBody, request: Request,
     # adăuga un factor persistent. Cerem re-autentificare cu parola contului (plafonată) + notificare.
     if not await _verify_reauth(user, body.password):
         raise HTTPException(401, "re-enter your account password to add a passkey")
+    await _second_gate(user, request, body, "enrol a passkey on your WebTerm account")
     expected = _consume(body.credential)
     try:
         result = verify_registration_response(
@@ -260,6 +304,8 @@ async def list_credentials(user=Depends(security.require_user)):
 
 class CredDelete(BaseModel):
     password: str = ""
+    totp_code: str = ""
+    email_code: str = ""
 
 
 @router.delete("/credentials/{cred_id}")
@@ -269,6 +315,7 @@ async def delete_credential(cred_id: int, body: CredDelete, request: Request,
     # (plafonată, ca un cookie furat să nu aibă un oracle de ghicire ne-throttled).
     if not await _verify_reauth(user, body.password):
         raise HTTPException(401, "wrong account password")
+    await _second_gate(user, request, body, "remove a passkey from your WebTerm account")
     await db.execute("DELETE FROM webauthn_credentials WHERE id=? AND user_id=?",
                      cred_id, user["id"])
     # scoaterea unui factor e o schimbare de credențiale: închide ferestrele de step-up (H1) și anunță

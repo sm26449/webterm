@@ -807,10 +807,10 @@ export default function SettingsModal(props: {
     try {
       const options = await api<any>('/api/webauthn/register/options', { method: 'POST' })
       const credential = await startRegistration({ optionsJSON: options })
-      await api('/api/webauthn/register/verify', {
+      await withSecondFactor((extra) => api('/api/webauthn/register/verify', {
         method: 'POST',
-        body: JSON.stringify({ credential, name: name.trim() || 'passkey', password }),
-      })
+        body: JSON.stringify({ credential, name: name.trim() || 'passkey', password, ...extra }),
+      }))
       load()
     } catch (err) {
       if (err instanceof Error && err.name !== 'NotAllowedError') setSecurityErr(err.message)
@@ -819,15 +819,35 @@ export default function SettingsModal(props: {
     }
   }
 
+  /* Al doilea factor la schimbarea setului de passkey-uri. Îl cerem REACTIV, după refuzul
+     serverului: starea locală „am TOTP activ" poate fi veche (activat în alt tab, dezactivat
+     de pe server), iar serverul e oricum singurul care decide. O singură reîncercare — dacă
+     şi codul e greşit, mesajul serverului e ce trebuie să vadă omul. */
+  async function withSecondFactor<T>(send: (extra: object) => Promise<T>): Promise<T> {
+    try {
+      return await send({})
+    } catch (err) {
+      if (!(err instanceof ApiError)) throw err
+      const key = err.code === 'passkey.totpRequired' ? 'totp_code'
+        : err.code === 'account.codeRequired' ? 'email_code' : ''
+      if (!key) throw err
+      const code = prompt(key === 'totp_code'
+        ? t('settings.passkeyCodePrompt')
+        : errText(err, t))
+      if (code === null) throw err
+      return await send({ [key]: code.trim() })
+    }
+  }
+
   async function remove(id: number) {
     // M1: scoaterea unui factor rezistent la phishing e schimbare de credențiale — cere parola.
     const password = prompt(t('settings.passkeyRemovePrompt'))
     if (password === null) return
     try {
-      await api(`/api/webauthn/credentials/${id}`, {
+      await withSecondFactor((extra) => api(`/api/webauthn/credentials/${id}`, {
         method: 'DELETE',
-        body: JSON.stringify({ password }),
-      })
+        body: JSON.stringify({ password, ...extra }),
+      }))
     } catch (err) {
       setSecurityErr(errText(err, t) || t('settings.deleteFailed'))
     }

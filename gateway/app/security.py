@@ -15,7 +15,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from fastapi import HTTPException, Request, WebSocket
 
-from . import config, db, email_alerts
+from . import config, db, email_alerts, totp
 
 # ── Vault (secrete criptate la repaus: token agent, parole/chei SSH) ──────────
 _fernet: Optional[Fernet] = None
@@ -388,30 +388,83 @@ async def require_user_ws(websocket: WebSocket):
     return await user_for_token(websocket.cookies.get(COOKIE_NAME))
 
 
+# Cât trebuie să dureze ca o adresă să devină „un loc al tău". Prima variantă a fost „a mai
+# fost văzută măcar o dată", şi se ocolea singură: cine avea parola se loghea o dată de la el
+# de-acasă, iar a doua oară adresa lui era deja „cunoscută" — poarta se deschidea atacatorului
+# fiindcă atacase de două ori. Un loc obişnuit are ISTORIC: mai multe login-uri, întinse peste
+# mai mult de o zi. Iar prima vizită de la o adresă nouă trimite deja alerta de login nou, deci
+# fereastra de 24h nu e tăcută — e exact intervalul în care ai ocazia să reacţionezi.
+ESTABLISHED_LOGINS = 3
+ESTABLISHED_AGE = 24 * 3600
+
+
 async def ip_is_known(user_id: int, ip: str) -> bool:
-    """A mai fost văzut IP-ul ăsta la un login reuşit al contului? Doar CITEŞTE — spre deosebire
-    de `note_new_login`, care şi înregistrează. Folosit ca să decidem dacă o ataşare la o sesiune
-    e de pe un loc obişnuit sau merită zgomot. IP-ul se compară hash-uit, ca peste tot."""
-    return bool(await db.fetchone(
-        "SELECT 1 FROM seen_logins WHERE user_id=? AND ip_hash=?", user_id, sha256_hex(ip)))
+    """E adresa asta un loc STABILIT al contului (istoric, nu o singură apariţie)? Doar CITEŞTE
+    — spre deosebire de `note_new_login`, care şi înregistrează. IP-ul se compară hash-uit."""
+    row = await db.fetchone(
+        "SELECT created, logins FROM seen_logins WHERE user_id=? AND ip_hash=?",
+        user_id, sha256_hex(ip))
+    return _established(row)
+
+
+def _established(row) -> bool:
+    return bool(row and row["logins"] >= ESTABLISHED_LOGINS
+                and row["created"] <= time.time() - ESTABLISHED_AGE)
 
 
 async def note_new_login(user, ip: str, user_agent: str) -> bool:
     """Alertă (best-effort) dacă e primul login reușit de pe acest IP pentru user.
 
-    Întoarce True dacă adresa era necunoscută. Apelantul foloseşte răspunsul ca să ştampileze
+    Întoarce True dacă adresa nu e (încă) un loc stabilit al contului — alerta de email pleacă
+    doar la PRIMA apariţie, dar sesiunea rămâne marcată „dispozitiv nou" până când adresa strânge
+    istoric. Apelantul foloseşte răspunsul ca să ştampileze
     sesiunea: verdictul trebuie luat AICI, fiindcă exact apelul ăsta înregistrează adresa —
     orice verificare de după ar găsi-o deja cunoscută."""
     ih = sha256_hex(ip)
-    seen = await db.fetchone(
-        "SELECT 1 FROM seen_logins WHERE user_id=? AND ip_hash=?", user["id"], ih)
-    if seen:
-        return False
+    row = await db.fetchone(
+        "SELECT created, logins FROM seen_logins WHERE user_id=? AND ip_hash=?", user["id"], ih)
+    # Verdictul se ia pe starea de DINAINTE de login-ul curent: altfel fiecare primă vizită
+    # s-ar valida singură.
+    established = _established(row)
     await db.execute(
-        "INSERT INTO seen_logins(user_id, ip_hash, created) VALUES(?,?,?)",
+        "INSERT INTO seen_logins(user_id, ip_hash, created, logins) VALUES(?,?,?,1)"
+        " ON CONFLICT(user_id, ip_hash) DO UPDATE SET logins = logins + 1",
         user["id"], ih, time.time())
-    email_alerts.notify_new_login(ip, user_agent, user["email"])
-    return True
+    if row is None:
+        email_alerts.notify_new_login(ip, user_agent, user["email"])
+    return not established
+
+
+async def verify_second_factor(user, code: str) -> bool:
+    """Al doilea factor pentru un user cu TOTP activ: cod TOTP valid SAU un cod
+    de recuperare nefolosit (care se consumă). Cu rate-limit deja aplicat sus."""
+    secret = decrypt_secret(user["totp_secret_encrypted"])
+    matched = totp.verify_counter(secret, code.strip())
+    if matched is not None:
+        # anti-replay: un cod TOTP valid ~90s; fără asta, un cod observat (shoulder-surf,
+        # phishing) e reutilizabil în fereastră. Respingem reutilizarea aceluiași pas sau
+        # a unuia anterior; la succes reținem counter-ul.
+        # anti-replay ATOMIC: UPDATE condiţional + RETURNING într-o singură instrucţiune
+        # serializată. Read-check-update în paşi separaţi era TOCTOU — două login-uri
+        # concurente cu acelaşi cod citeau ambele counter-ul vechi şi treceau amândouă.
+        # `IS NULL` acoperă prima folosire (counter încă nesetat).
+        claimed = await db.execute_returning(
+            "UPDATE users SET totp_last_counter=? WHERE id=?"
+            " AND (totp_last_counter IS NULL OR totp_last_counter < ?) RETURNING id",
+            matched, user["id"], matched)
+        return claimed is not None
+    # fallback: cod de recuperare (single-use, stocat hash-uit)
+    ch = sha256_hex(code.strip())
+    row = await db.fetchone(
+        "SELECT id FROM recovery_codes WHERE user_id=? AND code_hash=? AND used IS NULL",
+        user["id"], ch)
+    if row:
+        # single-use ATOMIC: două cereri concurente cu acelaşi cod → doar una revendică rândul
+        claimed = await db.execute_returning(
+            "UPDATE recovery_codes SET used=? WHERE id=? AND used IS NULL RETURNING id",
+            time.time(), row["id"])
+        return claimed is not None
+    return False
 
 
 async def destroy_web_session(token: Optional[str]) -> None:

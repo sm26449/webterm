@@ -47,6 +47,33 @@ back.
 - **Only when SMTP is configured.** Without a mail channel, refusing the change would be a
   permanent account lockout rather than a security measure.
 
+### Added — passkey changes need a second factor, and a recovery command
+
+- **Enrolling or removing a passkey now needs more than the password.** It was the hole left by
+  the change above: someone with your password could not rotate it any more, but could still
+  enrol *their own* passkey — a permanent, phishing-resistant key to your account — or delete
+  yours. With TOTP on, the code from the phone is required (a recovery code works too). Without
+  TOTP, the emailed code is required from an unfamiliar device; from your usual machine the
+  password stays sufficient, as before.
+- **Email is not accepted in place of TOTP.** If it were, two-factor would be worth exactly as
+  much as access to the mailbox and the phone would defend nothing. For a lost phone there are
+  the ten recovery codes, and if those are gone too, the server.
+- **`python3 -m app.admin` — recovery over SSH.** `list`, `passwd`, `disable-2fa`, `logout-all`.
+  Every gate the UI gains is another way to lock yourself out; a self-hosted product can afford
+  to be strict in the browser precisely because this exists. It replaces the hand-written SQL in
+  RUNBOOK §5, which hashed correctly but left the open web sessions and share links alive — you
+  could rotate the password and leave the intruder logged in. The new password is prompted for,
+  never passed as an argument.
+
+### Fixed — "familiar address" meant "seen once", which defeated itself
+
+Marking a device familiar the first time its address appeared meant an attacker who knew the
+password logged in once from home and was familiar on the second attempt — the gate opened
+*because* he had attacked twice. Familiar now means an address with history: at least three
+logins, first seen more than 24 hours ago. The first visit from a new address already sends the
+new-login alert, so that window is not silent — it is the interval in which you can react.
+Existing rows are treated as established, so an upgrade does not make every known place strange.
+
 The "new device" verdict is taken at login and frozen on the session (`web_sessions.device_new`).
 It has to be: a successful login *records* the address, so a check made later would always answer
 "familiar" — the gate would look like it worked while doing nothing. `tests/account_confirm_test.py`

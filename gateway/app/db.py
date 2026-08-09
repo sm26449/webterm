@@ -199,6 +199,12 @@ MIGRATIONS = [
     # o verificare făcută mai târziu ar găsi mereu adresa „cunoscută" — verdictul trebuie
     # îngheţat exact în momentul în care era încă adevărat.
     "ALTER TABLE web_sessions ADD COLUMN device_new INTEGER DEFAULT 0",
+    # De câte ori s-a logat contul de la adresa asta. „Văzută o dată" nu e un loc
+    # obişnuit — un atacator care ştie parola şi se loghează de două ori de la el
+    # de-acasă şi-ar declara singur adresa drept cunoscută. DEFAULT 3, ca instalările
+    # existente să nu-şi piardă dintr-odată toate locurile familiare: rândurile care
+    # există deja chiar reprezintă login-uri reale, doar că nu le numărasem.
+    "ALTER TABLE seen_logins ADD COLUMN logins INTEGER NOT NULL DEFAULT 3",
     # Revocarea era cheiată pe EMAIL, care e mutabil: schimbi emailul, iar ştergerea contului
     # nu mai prinde nici tokenurile lui, nici share-urile — tokenul trăia până la 365 de zile.
     # Emailul rămâne, pentru afişare şi pentru rândurile vechi; decizia se ia pe id.
