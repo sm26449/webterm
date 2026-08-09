@@ -23,6 +23,20 @@ const check = (name, cond) => {
   results.push([name, !!cond])
   console.log(`  ${cond ? 'PASS' : 'FAIL'} ${name}`)
 }
+/* Clipboard-ul se scrie ASINCRON faţă de click-ul care declanşează copierea. Aşteptările
+   fixe (300-500 ms) au ţinut până când un runner încărcat a întârziat scrierea: citirea a
+   prins conţinutul ANTERIOR, iar testul a picat pe un cod nemodificat — acelaşi commit a
+   trecut pe run-ul de tag şi a picat pe cel de main. Aşteptăm activ până se potriveşte, cu
+   plafon. Aserţiunea rămâne pe conţinut, deci un regres real tot pică; ce nu mai măsurăm e
+   viteza runnerului. */
+const clipboardUntil = async (page, pred, ms = 5000) => {
+  const t0 = Date.now()
+  for (;;) {
+    const text = await page.evaluate(() => navigator.clipboard.readText())
+    if (pred(text) || Date.now() - t0 > ms) return text
+    await page.waitForTimeout(100)
+  }
+}
 const fail = (msg) => {
   console.error(`EROARE: ${msg}`)
   process.exit(1)
@@ -381,8 +395,7 @@ try {
   const okCmd = cmdPanel.locator('div.group').filter({ hasText: 'echo OSC_OK' }).first()
   await okCmd.hover()
   await okCmd.getByRole('button', { name: 'output', exact: true }).click()
-  await page.waitForTimeout(500)
-  const clip = await page.evaluate(() => navigator.clipboard.readText())
+  const clip = await clipboardUntil(page, (c) => c.includes('OSC_OK'))
   check('clipboardul conține output-ul comenzii', clip.includes('OSC_OK'))
   const clipClean = !/[$#]\s*$/m.test(clip) && !clip.includes('echo OSC_OK')
   // la eşec, tipărim CE a ajuns în clipboard: verificarea a picat de două ori în CI cu
@@ -394,14 +407,12 @@ try {
   // copiază comanda: clipboardul = exact linia de comandă
   await okCmd.hover()
   await okCmd.getByRole('button', { name: 'command', exact: true }).click()
-  await page.waitForTimeout(300)
-  const clipCmd = await page.evaluate(() => navigator.clipboard.readText())
+  const clipCmd = await clipboardUntil(page, (c) => c.trim() === 'echo OSC_OK')
   check('copiază comanda → clipboardul are exact comanda', clipCmd.trim() === 'echo OSC_OK')
   // ca markdown: bloc ```console cu comandă + output
   await okCmd.hover()
   await okCmd.getByRole('button', { name: 'markdown', exact: true }).click()
-  await page.waitForTimeout(300)
-  const clipMd = await page.evaluate(() => navigator.clipboard.readText())
+  const clipMd = await clipboardUntil(page, (c) => c.includes('```console'))
   check('copiază ca markdown → bloc console cu comandă+output',
     clipMd.includes('```console') && clipMd.includes('$ echo OSC_OK') && clipMd.includes('OSC_OK'))
   // rulează din nou: pune comanda la prompt (staged) și se poate re-executa
