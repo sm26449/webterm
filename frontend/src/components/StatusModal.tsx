@@ -150,6 +150,18 @@ export default function StatusModal(props: { onClose: () => void }) {
                     {ver?.enabled && ver.update_available === false && (
                       <span className="text-xs wt-good">{t('status.upToDate')}</span>
                     )}
+                    {/* Când verificarea EŞUEAZĂ, răspunsul n-are `update_available` deloc, deci
+                        niciuna dintre insignele de mai sus nu apare — corect, nu minţim cu „la
+                        zi". Dar tăcerea arată identic cu „am verificat şi n-am găsit nimic nou",
+                        iar cauza (repo privat fără token, GitHub inaccesibil) era adusă în
+                        `error` şi nu afişată nicăieri. Găsit pe o instanţă vie, unde 2.0.3 era
+                        publicat şi UI-ul nu spunea nimic. */}
+                    {ver?.enabled && ver.error && (
+                      <span title={ver.error}
+                        className="cursor-help text-xs text-slate-500 underline decoration-dotted underline-offset-2">
+                        {t('status.updateCheckFailed')}
+                      </span>
+                    )}
                   </dd>
                 </div>
                 {ver?.update_command && (

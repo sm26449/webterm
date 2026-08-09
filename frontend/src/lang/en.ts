@@ -622,6 +622,7 @@ const en: Lang = {
     'status.uptime': "Gateway uptime",
     'status.gatewayVersion': "Gateway version",
     'status.updateAvailable': "{version} available",
+    'status.updateCheckFailed': "could not check",
     'status.upToDate': "● up to date",
     'status.image': "Image",
     'status.agentRecommended': "Recommended agent",
