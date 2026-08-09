@@ -337,6 +337,10 @@ export default function SettingsModal(props: {
   const [curPw, setCurPw] = useState('')
   const [newEmail, setNewEmail] = useState(props.email ?? '')
   const [newPw, setNewPw] = useState('')
+  // Codul de confirmare cerut când sesiunea a pornit de pe un dispozitiv necunoscut. Câmpul
+  // apare doar după ce serverul îl cere — nu vrem un câmp gol şi nelămurit în fluxul normal.
+  const [emailCode, setEmailCode] = useState('')
+  const [codeAsked, setCodeAsked] = useState(false)
   const [accountMsg, setAccountMsg] = useState('')
 
   // 2FA (TOTP)
@@ -762,14 +766,20 @@ export default function SettingsModal(props: {
           current_password: curPw,
           email: newEmail,
           new_password: newPw || undefined,
+          email_code: emailCode || undefined,
         }),
       })
       setAccountMsg(t('settings.accountUpdated'))
       setCurPw('')
       setNewPw('')
+      setEmailCode('')
+      setCodeAsked(false)
       props.onAccountChanged()
       void r
     } catch (err) {
+      // Serverul tocmai a trimis codul pe email — deschidem câmpul şi păstrăm ce a completat
+      // deja, ca „mai introdu şi codul" să nu însemne „ia-o de la capăt".
+      if (err instanceof ApiError && err.code === 'account.codeRequired') setCodeAsked(true)
       setAccountErr(errText(err, t) || t('settings.error'))
     } finally {
       setBusy(false)
@@ -896,6 +906,21 @@ export default function SettingsModal(props: {
             autoComplete="current-password"
             className={field}
           />
+          {codeAsked && (
+            <div className="flex flex-col gap-1">
+              <input
+                type="text"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                value={emailCode}
+                onChange={(e) => setEmailCode(e.target.value)}
+                placeholder={t('settings.emailCodePlaceholder')}
+                aria-label={t('settings.emailCodePlaceholder')}
+                className={field}
+              />
+              <p className="text-xs text-slate-400">{t('settings.emailCodeHint')}</p>
+            </div>
+          )}
           <div className="flex items-center gap-3">
             <button
               disabled={busy || !curPw}

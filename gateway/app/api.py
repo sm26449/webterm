@@ -233,14 +233,15 @@ async def login(creds: Credentials, request: Request, response: Response):
             security.record_login_failure(ip)
             raise ApiError(401, "auth.bad2fa", "wrong 2FA code")
     security.record_login_success(ip)
-    await security.note_new_login(user, ip, request.headers.get("user-agent", ""))
-    await _issue_cookie(response, user["id"], request)
+    new_device = await security.note_new_login(user, ip, request.headers.get("user-agent", ""))
+    await _issue_cookie(response, user["id"], request, new_device)
     return {"ok": True}
 
 
-async def _issue_cookie(response: Response, user_id: int, request: Request) -> None:
+async def _issue_cookie(response: Response, user_id: int, request: Request,
+                        device_new: bool = False) -> None:
     token = await security.create_web_session(
-        user_id, request.headers.get("user-agent", ""))
+        user_id, request.headers.get("user-agent", ""), device_new)
     security.set_session_cookie(response, token)
 
 
@@ -303,6 +304,7 @@ class AccountUpdate(BaseModel):
     current_password: str
     email: str = None
     new_password: str = None
+    email_code: str = ""        # confirmarea cerută când sesiunea vine de pe un dispozitiv nou
 
 
 async def _verify_reauth_password(user, password: str) -> bool:
@@ -334,9 +336,37 @@ async def _verify_reauth_password(user, password: str) -> bool:
 
 @router.post("/api/account")
 async def update_account(body: AccountUpdate, request: Request, user=Depends(security.require_user)):
-    """Change email and/or password. Requires the current password."""
+    """Change email and/or password. Requires the current password — plus, when the session
+    was opened from a device never seen before, a code mailed to the account address."""
     if not await _verify_reauth_password(user, body.current_password):
         raise ApiError(401, "auth.wrongCurrentPassword", "the current password is wrong")
+    # Parola singură nu mai ajunge de pe un loc nou. Atacul pe care îl opreşte: cineva care
+    # ARE deja parola (reutilizată, scursă, ghicită) şi o roteşte ca să te scoată pe tine
+    # afară. Emailul e canalul pe care el nu-l are.
+    #
+    # Escaladăm, NU refuzăm: „de pe un loc necunoscut nu se poate schimba parola" sună bine
+    # până când eşti în tren, tocmai ţi s-a scurs parola, şi tocmai atunci nu ţi se permite
+    # s-o schimbi. Codul îl trece pe cel legitim în treizeci de secunde şi pe atacator deloc.
+    #
+    # Şi schimbarea de EMAIL trece prin aceeaşi poartă, în acelaşi handler: adresa e canalul
+    # de recuperare, deci cine o poate muta neconfirmat şi-l poate muta pe el şi apoi schimbă
+    # parola „confirmat".
+    if (body.new_password or (body.email and body.email.strip().lower() != user["email"])) \
+            and await security.session_is_new_device(request) and await email_alerts.smtp_ready():
+        what = "change your WebTerm password" if body.new_password else "change your WebTerm email"
+        if not body.email_code:
+            code = await security.issue_email_challenge(user["id"], "account")
+            try:
+                await email_alerts.send_account_code(user["email"], code, what)
+            except Exception as e:                        # noqa: BLE001
+                log.warning("confirmation code could not be sent: %s", e)
+                raise ApiError(503, "account.codeSendFailed",
+                               "could not send the confirmation code by email")
+            raise ApiError(403, "account.codeRequired",
+                           "this device is new — enter the code we just emailed to %s"
+                           % user["email"])
+        if not await security.consume_email_challenge(user["id"], "account", body.email_code):
+            raise ApiError(401, "account.badCode", "wrong or expired confirmation code")
     email = user["email"]
     if body.email and body.email.strip().lower() != email:
         email = body.email.strip().lower()

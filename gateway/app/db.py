@@ -24,6 +24,18 @@ CREATE TABLE IF NOT EXISTS web_sessions (
     user_agent TEXT DEFAULT '',
     last_seen REAL
 );
+-- Cod de confirmare trimis pe email, pentru schimbări de credenţiale iniţiate de pe un
+-- dispozitiv necunoscut. Un singur challenge viu per (cont, scop): un al doilea „trimite-mi
+-- codul" îl înlocuieşte pe primul, ca să nu se acumuleze coduri valide în inbox.
+CREATE TABLE IF NOT EXISTS email_challenges (
+    user_id INTEGER NOT NULL,
+    purpose TEXT NOT NULL,
+    code_hash TEXT NOT NULL,
+    created REAL NOT NULL,
+    expires REAL NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (user_id, purpose)
+);
 CREATE TABLE IF NOT EXISTS webauthn_credentials (
     id INTEGER PRIMARY KEY,
     user_id INTEGER NOT NULL,
@@ -182,6 +194,11 @@ CREATE TABLE IF NOT EXISTS api_tokens (
 # additive migrations for DBs created by an older version
 MIGRATIONS = [
     "ALTER TABLE hosts ADD COLUMN folder TEXT DEFAULT ''",
+    # „Sesiunea asta s-a deschis de pe un loc nemaivăzut." Se ştampilează O DATĂ, la login,
+    # şi NU se recalculează după: login-ul reuşit înregistrează IP-ul în `seen_logins`, deci
+    # o verificare făcută mai târziu ar găsi mereu adresa „cunoscută" — verdictul trebuie
+    # îngheţat exact în momentul în care era încă adevărat.
+    "ALTER TABLE web_sessions ADD COLUMN device_new INTEGER DEFAULT 0",
     # Revocarea era cheiată pe EMAIL, care e mutabil: schimbi emailul, iar ştergerea contului
     # nu mai prinde nici tokenurile lui, nici share-urile — tokenul trăia până la 365 de zile.
     # Emailul rămâne, pentru afişare şi pentru rândurile vechi; decizia se ia pe id.

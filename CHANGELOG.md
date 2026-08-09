@@ -27,6 +27,31 @@ back.
   unread too. Guests arriving through a share link always count as unfamiliar: the link was
   given deliberately, but the moment it is *used* is exactly what you want to know.
 
+### Added — a password change from an unfamiliar device needs the account's inbox
+
+- **Confirmation code by email.** Changing the password (or the email address) from a session
+  that was opened on an address never seen on a successful login now also requires a six-digit
+  code mailed to the account address. The attack this closes: someone who already *has* your
+  password — reused, leaked, guessed — rotates it and locks you out of your own account. Email
+  is the channel they do not have.
+- **A code, not a link.** A link is clickable by anyone who reaches the inbox, and mail scanners
+  open links on their own, which would consume a single-use token before you ever saw it. A code
+  typed into the page you are already on proves both inbox access and that you started the change.
+- **It escalates, it does not refuse.** Blocking credential changes outright from an unfamiliar
+  address sounds strict until you are travelling, your password has just leaked, and that is
+  precisely when you are not allowed to change it. The code lets the legitimate user through in
+  thirty seconds and the attacker through never.
+- The code is single-use, valid ten minutes, capped at five attempts, and re-issuing invalidates
+  the previous one. It is sent to the **account's** address, not the instance alert mailbox, and
+  never over the chat webhook — a confirmation code posted to a channel confirms nothing.
+- **Only when SMTP is configured.** Without a mail channel, refusing the change would be a
+  permanent account lockout rather than a security measure.
+
+The "new device" verdict is taken at login and frozen on the session (`web_sessions.device_new`).
+It has to be: a successful login *records* the address, so a check made later would always answer
+"familiar" — the gate would look like it worked while doing nothing. `tests/account_confirm_test.py`
+asserts exactly that, so a future rewrite into a live lookup fails the suite.
+
 Device identity here decides **how loud to be, never whether to check**. Nothing in this release
 lets a recognised device skip step-up, the idle lock, or 2FA. That is deliberate: an IP and a
 user-agent both travel with a stolen session cookie, so a "trusted device" bypass would be

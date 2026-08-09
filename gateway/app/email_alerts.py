@@ -97,6 +97,37 @@ def _send_blocking(cfg: dict, subject: str, body: str) -> None:
         s.send_message(msg)
 
 
+async def smtp_ready() -> bool:
+    """Avem un canal de email funcţional configurat? Poarta de confirmare pe email se aplică
+    doar dacă răspunsul e da — altfel o instalare fără SMTP n-ar mai putea schimba niciodată
+    parola, ceea ce e o blocare permanentă, nu o măsură de securitate."""
+    try:
+        return _configured(await load_config())
+    except Exception:                       # noqa: BLE001 — DB indisponibil ⇒ poarta nu se aplică
+        return False
+
+
+async def send_account_code(to_email: str, code: str, what: str) -> None:
+    """Trimite un cod de confirmare la adresa CONTULUI, sincron, şi ARUNCĂ dacă nu pleacă.
+
+    Deliberat nu trece prin `_fire`: acela e best-effort (înghite erorile — aici ai rămâne să
+    aştepţi la nesfârşit un cod care n-a plecat) şi difuzează şi pe webhook — un cod de
+    confirmare postat într-un canal de chat nu mai confirmă nimic. Şi destinatarul e adresa
+    contului, nu `cfg["to"]`: aceea e cutia de alerte a instanţei, nu a omului care schimbă
+    parola."""
+    cfg = dict(await load_config())
+    if not _configured(cfg):
+        raise RuntimeError("SMTP is not configured")
+    cfg["to"] = to_email
+    await asyncio.to_thread(
+        _send_blocking, cfg, "Confirmation code: %s" % what,
+        "Your confirmation code is:\n\n    %s\n\n"
+        "It is valid for 10 minutes and can be used once.\n\n"
+        "It was requested to %s from a device that has never been seen on a successful login "
+        "to this account. If that was not you, do NOT enter this code — someone knows your "
+        "password. Change it from a device you normally use." % (code, what))
+
+
 def _fire(subject: str, body: str) -> None:
     """Send without blocking the handler; swallow any error (best-effort)."""
     async def _run():
