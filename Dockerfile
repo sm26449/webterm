@@ -2,7 +2,7 @@
 # Imagini de bază pinuite pe DIGEST (nu doar tag mutabil) — consecvent cu SHA-pinning-ul
 # acțiunilor GitHub: un rebuild trage exact același strat de bază. Dependabot (ecosistemul
 # docker) reîmprospătează digest-ul la un tag nou.
-FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS frontend
+FROM node:26-alpine@sha256:aadf416b2cdce311a8811ba3f0608a61b77dbf997500e2eafe781b51f6a0b019 AS frontend
 WORKDIR /build
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci --ignore-scripts
