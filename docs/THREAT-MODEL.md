@@ -178,6 +178,11 @@ the gateway resolve and complete a TLS handshake against `wtcheck.<your forward 
 to tell you whether the wildcard DNS and certificate are actually in place. It goes to your
 own domain, carries nothing, and only happens while you are looking at that panel.
 
+The **installer** (not the gateway) makes one more, once: `GET https://api.ipify.org`, to
+compare the machine's public IP with what your domain resolves to and warn you before you
+discover the mismatch through a failed certificate. It sends nothing about you beyond the
+request itself, it is skipped if it fails, and it never runs again after installation.
+
 With the update check off and that panel closed, the gateway initiates no outbound
 connection you did not configure. The other outbound paths exist only because you set them up: SMTP alerts,
 the alert webhook, cloud backup (Google Drive / Dropbox), and the SSH/telnet hosts you

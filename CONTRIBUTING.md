@@ -115,6 +115,11 @@ locally — see the README's "Security" section.
 
 ## Style & PRs
 
+- **Language.** Commits, CHANGELOG, docs and user-facing strings are in English. Code comments
+  are currently a mix: much of the codebase is commented in Romanian, because that is how it was
+  written. Nobody is going to rewrite those, and you should not either — but **write new comments
+  in English**. Over time the mix resolves itself in the right direction, without a churn commit
+  that would destroy the history behind every explanation.
 - Write code that matches its surroundings (naming, comment density, idiom).
 - Comments explain **why**, not **what** (constraints, pitfalls); they should not narrate the next line.
 - One PR = one coherent change, with tests. Describe the impact and how you tested it.

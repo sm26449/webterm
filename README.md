@@ -292,6 +292,26 @@ make token          # or, without make:
 docker compose logs app | grep -oE 'WEBTERM_SETUP_TOKEN=[A-Za-z0-9_-]+' | tail -1 | cut -d= -f2-
 ```
 
+### Installing without `curl | sudo bash`
+
+The one-liner fetches `install.sh` from `main` — a moving branch — and runs it as root. That
+is convenient, and it is also the most privileged thing you will do with this project, so the
+verifiable path is worth knowing: it is the same script, just one you can read first and pin
+to a release.
+
+```sh
+git clone https://github.com/sm26449/webterm.git
+cd webterm
+git checkout v2.0.2          # a tag cannot move under you; a branch can
+less install.sh              # it is meant to be read
+sudo ./install.sh --domain term.example.com --email you@example.com
+```
+
+Reading it also tells you the one thing that surprises people: the installer contacts
+`api.ipify.org` once, to compare your public IP with what the domain resolves to and warn you
+early if DNS points somewhere else. It is the only third party the installer touches, and the
+check is skipped if the request fails.
+
 ## Deploy from an image (production, no build)
 
 Every push to `main` publishes an image to the GitHub Container Registry
