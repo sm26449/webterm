@@ -7,6 +7,32 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [2.0.2] — 2026-08-09 · agent (40)
+
+### Added — you find out when someone attaches to your terminal
+
+- **Attach notifications.** The viewer count already existed, but it changed *silently*: you
+  learned that a second client was on your session only if you happened to be looking at that
+  corner of the toolbar at that second — and if you were working, you were not looking. Every
+  client already attached now gets an `attached` event, raised to a system notification, so it
+  reaches you with the tab in the background.
+- **Device identity in the viewer list.** The roster carried a count and a role, which cannot
+  tell your own phone apart from a stranger — so there was nothing to act on. It now carries the
+  IP and a short browser label per client, next to the existing kick button.
+- **Unfamiliar devices are flagged and emailed.** A client attaching from an address never seen
+  on a successful login for the account is marked *new device* in the list, its notification is
+  raised to a warning, and an email goes out (throttled to one per address per 15 minutes, so
+  five tabs from one new place send one message). Attaches from familiar addresses stay quiet —
+  an alert that fires constantly is an alert nobody reads, and then the one that mattered is
+  unread too. Guests arriving through a share link always count as unfamiliar: the link was
+  given deliberately, but the moment it is *used* is exactly what you want to know.
+
+Device identity here decides **how loud to be, never whether to check**. Nothing in this release
+lets a recognised device skip step-up, the idle lock, or 2FA. That is deliberate: an IP and a
+user-agent both travel with a stolen session cookie, so a "trusted device" bypass would be
+waved through by precisely the attacker it appears to stop — and it would trade the idle lock's
+5-minute exposure window for permanent access.
+
 ## [2.0.1] — 2026-08-08 · agent (40)
 
 Everything here came out of nine external audits run against 2.0.0 before it was announced.

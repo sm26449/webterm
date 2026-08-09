@@ -329,6 +329,13 @@ class BrowserClient:
         self.is_owner = False
         self.writable = True
         self.remote_addr = ""
+        # De unde şi cu ce s-a ataşat. Roster-ul arăta doar CÂŢI sunt conectaţi, deci vedeai
+        # că mai e cineva, dar nu puteai deosebi telefonul tău de altcineva — iar dacă nu te
+        # uitai exact atunci, nu aflai deloc. `known=False` înseamnă „IP nemaivăzut la un login
+        # al acestui cont", singurul semnal de care avem nevoie ca să facem zgomot.
+        self.user_agent = ""
+        self.known = True
+        self.attached_at = 0.0
         self._sent_since_ping = 0
         self._ping_seq = 0
         self._pong_fut: Optional[asyncio.Future] = None
@@ -771,8 +778,27 @@ class SessionHub:
 
     def roster(self) -> list:
         """Who is attached to the session (for the owner's UI: roster + kick)."""
-        return [{"id": c.id, "label": c.label, "owner": c.is_owner, "writable": c.writable}
+        return [{"id": c.id, "label": c.label, "owner": c.is_owner, "writable": c.writable,
+                 "ip": c.remote_addr, "agent": c.user_agent[:120], "known": c.known,
+                 "since": round(c.attached_at)}
                 for c in self.clients if c.id]
+
+    async def announce_attach(self, joining) -> None:
+        """Spune CELORLALŢI clienţi că altcineva tocmai s-a ataşat. Roster-ul se actualiza
+        tăcut, deci aflai doar dacă priveai în secunda aia. Evenimentul ăsta e ce transformă
+        „se vede în listă" în „ştiu că s-a întâmplat" — iar clientul îl ridică la notificare de
+        sistem când dispozitivul e necunoscut. Nu se trimite celui care tocmai a intrat."""
+        msg = json.dumps({"type": "attached", "client": {
+            "id": joining.id, "label": joining.label, "owner": joining.is_owner,
+            "writable": joining.writable, "ip": joining.remote_addr,
+            "agent": joining.user_agent[:120], "known": joining.known}})
+        for c in list(self.clients):
+            if c is joining:
+                continue
+            try:
+                await c.send_text(msg)
+            except Exception:            # noqa: BLE001 — un client mort nu opreşte anunţul
+                pass
 
     async def broadcast_roster(self) -> None:
         await self.broadcast_json({"type": "roster", "clients": self.roster()})

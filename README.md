@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/sm26449/webterm/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/sm26449/webterm/actions/workflows/docker-publish.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v2.0.1-blue)](https://github.com/sm26449/webterm/tags)
+[![Version](https://img.shields.io/badge/version-v2.0.2-blue)](https://github.com/sm26449/webterm/tags)
 
 **Persistent terminals for your servers, in the browser.**
 
@@ -423,6 +423,20 @@ step-up** — protecting against unattended authenticated sessions
 (Settings → Security): regex rules that require **confirmation** or **block**
 dangerous commands at Enter (e.g. `rm -rf`, `mkfs`) — editable, and enforced on the
 server for `/run` as well, so a fleet command cannot walk around the browser.
+
+**You find out when someone attaches.** A session can be watched by more than one client —
+your own second tab, a phone, a share link. The viewer count told you *how many*, silently, so
+you learned about a second client only if you were looking at that corner of the toolbar at that
+second. Now every client already attached gets a notification (a system one, so it arrives with
+the tab in the background), and the viewer list shows the IP and browser of each, next to the
+button that removes them. A client attaching from an address never seen on a successful login is
+flagged **new device**, its notification is raised to a warning, and an email goes out —
+throttled per address, because an alert that fires constantly is an alert nobody reads.
+
+That signal decides **how loud to be, never whether to check**. No device is ever trusted enough
+to skip step-up, the idle lock, or 2FA: an IP and a user-agent both travel with a stolen session
+cookie, so a "trusted device" exemption would be waved through by exactly the attacker it looks
+like it stops.
 
 **Security model:** whoever gets past login has access to the files and shell of
 the agent's user (like SSH). That's why: run it with a **domain + passkeys** (not
