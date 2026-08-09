@@ -17,9 +17,13 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Least privilege la nivel de workflow: DOAR citire. `packages: write` stă pe jobul care chiar
+# publică (`build`), nu pe cel de teste. Nu era un pwn-request — trigger-ul e `pull_request`,
+# fork-urile primesc token read-only, iar push-ul e gardat — dar un PR de pe un branch din
+# acelaşi repo rula cod de TEST cu un token care putea scrie în registry. Semnalat de un audit
+# extern, 2026-08-09.
 permissions:
   contents: read
-  packages: write
 
 concurrency:
   group: publish-${{ github.ref }}
@@ -65,6 +69,20 @@ jobs:
             echo "fix: sed -i 's|/webterm:[^ }\"]*|/webterm:v$V|g' .env.prod.example docker-compose.yml docker-compose.prod.yml install.sh"
             exit 1; }
 
+      # Numerele din documentaţie derivă exact ca badge-ul de versiune (care rămăsese 14 patch-uri
+      # în urmă): nimeni nu le actualizează pentru că nimic nu le verifică. Un audit extern a
+      # găsit „42 de suite" când erau 46, şi „74 de verificări" când erau 75.
+      - name: Counts in the docs ↔ reality (suites, e2e checks)
+        run: |
+          N=$(awk '/^CI_TESTS="/{f=1} f{print} f&&/"[[:space:]]*$/{exit}' scripts/run-tests.sh \
+              | sed 's/CI_TESTS=//' | tr -d '"' | wc -w)
+          N=$(( N + 1 ))                                  # + CI_LAST (security)
+          grep -q "unit-tests\` job — $N suites" CONTRIBUTING.md || {
+            echo "CONTRIBUTING.md says a different number of suites than run-tests.sh ($N)"; exit 1; }
+          E=$(grep -c '^\s*check(' scripts/e2e-session.mjs)
+          grep -q "e2e-session.mjs\`, $E checks" README.md || {
+            echo "README.md says a different number of e2e checks than the script ($E)"; exit 1; }
+
       - name: requirements.txt ↔ requirements.lock in sync (drift = image tested ≠ shipped)
         run: python3 scripts/check-reqs-lock.py
       - name: Lint for real bugs (ruff --select F — unused import / undefined name, NOT style)
@@ -109,6 +127,9 @@ jobs:
   build:
     needs: unit-tests
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4

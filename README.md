@@ -221,6 +221,27 @@ what it does not cover, is in [Security](#security) and
   (opt-in), `Ctrl+M` to Tab out of the terminal
 - Desktop-grade copy/paste: Ctrl/Cmd+C on a selection copies (no selection = ^C),
   copy-on-select, right-click context menu, focus events (vim `autoread`)
+- **The interface speaks English and Romanian**, picked from the browser and
+  switchable in Settings. A third language is one file: copy `frontend/src/lang/en.ts`,
+  translate the values, register it — the catalogue is checked in CI, so a missing key
+  fails the build rather than showing a raw key to a user
+
+**Operating it**
+- **One-click provisioning**: give WebTerm an existing SSH connection to a host and it
+  installs the agent over it — no copying an install command by hand
+  (host → *Provision*; the same enrolment token, just delivered for you)
+- **Alerts by email *and* webhook** — Slack, Discord, Teams, or any endpoint that
+  accepts JSON (`WEBTERM_ALERT_WEBHOOK`, or Settings → Notifications). The webhook is
+  independent of SMTP: if chat is where you actually look, you never need a mail server
+- **Update notice**: the gateway checks whether a newer release exists and says so in
+  the UI — it never updates itself (`WEBTERM_UPDATE_CHECK=0` turns the check off,
+  `WEBTERM_UPDATE_COMMAND` sets the command it shows you)
+- **Certificate expiry watch**: the installer sets up a `webterm-cert-check` timer that
+  warns before the certificate runs out, so a renewal that quietly stopped working is
+  noticed while there is still time (`WEBTERM_CERT_MIN_DAYS`, default 15)
+- **Clean uninstall**: `./remove.sh` (or `make remove`) takes the gateway back off the
+  machine and asks before anything irreversible — it tells you exactly which volumes
+  hold your data and refuses to guess on your behalf
 
 ## Quick install
 
@@ -305,7 +326,7 @@ sudo ./install.sh
 # or non-interactive (cloud-init, Ansible, etc.):
 sudo ./install.sh --non-interactive \
   --domain term.example.com --email you@example.com \
-  --ghcr-token <github-token>
+  --ghcr-token-file <file-with-the-token>
 ```
 
 **TLS needs no Cloudflare account.** With no token, Let's Encrypt is obtained over
@@ -389,6 +410,11 @@ Everything in `.env` (see `.env.example`):
 | `WEBTERM_AGENT_INSECURE` | `1` only for IP access (self-signed). **Local build only** — `docker-compose.prod.yml` deliberately does not pass it, so an image deploy cannot turn off TLS verification toward the agent (`tests/compose_env_test.py` records the exception). It also leaves the **agent bootstrap unauthenticated**: the install one-liner fetches with `curl -k`, and certificate pinning only begins on the first connection — so whoever can intercept that single download installs their own agent, with their own update key, at the rights you run it as. Enrol over a network you trust, or issue a real certificate first. The UI says so next to the command |
 | `WEBTERM_SETUP_TOKEN` | fixed for the first account; empty = generated + printed in the logs |
 | `WEBTERM_CLIENT_BUFFER` | per-browser backlog before resync (default 1 MiB) |
+| `WEBTERM_ALERT_WEBHOOK` | Slack/Discord/Teams or any JSON endpoint for security alerts. Independent of SMTP — with chat configured you never need a mail server. Also settable in Settings → Notifications |
+| `WEBTERM_UPDATE_CHECK` | `0` disables the "a newer version exists" check entirely (it overrides the UI switch). WebTerm never updates itself; the check only tells you |
+| `WEBTERM_UPDATE_COMMAND` | the upgrade command the UI **displays** when a new version exists. It is never executed |
+| `WEBTERM_CERT_MIN_DAYS` | how many days before expiry the `webterm-cert-check` timer starts warning (default 15) |
+| `WEBTERM_CERT_RESOLVER` | `le` (HTTP-01, needs port 80 reachable) or `ledns` (DNS-01 via Cloudflare). Written by `install.sh`/`deploy.sh` from whether you gave a Cloudflare token — see the note under `CF_DNS_API_TOKEN` |
 
 ## Persistence
 
@@ -647,7 +673,7 @@ administer your servers with. The CI chain, in order:
    ephemeral container, a headless Chromium checks that the UI reaches a working
    screen, with no JS errors. Catches exactly the class of bug that produced the
    white screen in v1.0.11.
-3. **E2E with a REAL agent** (`scripts/e2e-session.mjs`, 74 checks) — starts an
+3. **E2E with a REAL agent** (`scripts/e2e-session.mjs`, 75 checks) — starts an
    agent in a container **with tmux installed, i.e. the backend production uses**,
    opens sessions through the UI, types commands, verifies the output, tab
    switching, pause/re-sync, shortcuts, parametrized snippets, alert thresholds,

@@ -337,8 +337,13 @@ async def security_headers(request: Request, call_next):
     resp.headers.setdefault("Content-Security-Policy", CSP)
     # frontend-ul compară versiunea cu cea văzută la pornire; la deploy nou
     # afișează bannerul „Versiune nouă — Reîncarcă" (vezi lib/api.ts).
-    # Doar pe /api/ — nu dezvăluim versiunea pe paginile publice.
-    if request.url.path.startswith("/api/"):
+    #
+    # „Doar pe /api/" NU însemna „doar pentru cine e autentificat", deşi asta spunea intenţia:
+    # `/api/login` şi `/api/state` sunt publice, deci oricine putea citi versiunea exactă a
+    # gateway-ului fără să aibă cont — adică putea potrivi o instalaţie cu un CVE viitor
+    # înainte să încerce ceva. Cerem cookie-ul de sesiune: bannerul de versiune îl vede oricum
+    # doar cine e logat. Semnalat de un audit extern, 2026-08-09.
+    if request.url.path.startswith("/api/") and request.cookies.get(security.COOKIE_NAME):
         resp.headers.setdefault("X-Webterm-Version", config.GATEWAY_VERSION)
     # asset-urile au nume cu hash → cache lung; restul (index.html, API) revalidate
     # mereu, ca un deploy nou să apară imediat fără hard-refresh

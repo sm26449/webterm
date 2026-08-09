@@ -23,7 +23,10 @@ KEEP="${WEBTERM_BACKUP_KEEP:-14}"
 # în loc de `python:3.12-alpine`, fără ca nimeni s-o fi cerut. Un nume de variabilă cu două
 # înţelesuri în acelaşi proiect e un bug care aşteaptă contextul potrivit; îi dăm un nume
 # propriu. Vezi acelaşi tipar în `restore.sh`, unde greşeala costa mai scump.
-IMAGE="${WEBTERM_TOOL_IMAGE:-python:3.12-alpine}"
+# Pinuit pe digest: imaginea asta rulează ca root peste volumul de date, cu cheia seifului
+# montată — adică e cel mai puternic container din tot sistemul, şi era singurul care
+# accepta orice împingea cineva pe tag-ul `python:3.12-alpine`.
+IMAGE="${WEBTERM_TOOL_IMAGE:-python:3.12-alpine@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df}"
 if [ -z "${WEBTERM_TOOL_IMAGE:-}" ] && [ -n "${WEBTERM_IMAGE:-}" ]; then
   echo "note: WEBTERM_IMAGE is the gateway image and is IGNORED here;" \
        "use WEBTERM_TOOL_IMAGE to change the python image ($IMAGE)." >&2

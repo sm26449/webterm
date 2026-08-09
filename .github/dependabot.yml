@@ -18,6 +18,18 @@ updates:
       npm-minor:
         update-types: ["minor", "patch"]
 
+  # `docker` acoperă DOCKERFILE-ul. Compose-urile au nevoie de ecosistemul lor, altfel
+  # imaginile de acolo (traefik, socket-proxy, caddy) derivă fără ca nimeni să le revizuiască
+  # — exact ce s-a întâmplat: erau pe tag-uri mutabile în timp ce Dockerfile-ul îşi declara
+  # politica de pinning pe digest.
+  - package-ecosystem: "docker-compose"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      compose-minor:
+        update-types: ["minor", "patch"]
+
   - package-ecosystem: "docker"
     directory: "/"
     schedule:

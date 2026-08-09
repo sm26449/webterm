@@ -103,7 +103,7 @@ cannot get you in — login returns `totp_required`. Disable 2FA from the server
 
 ```sh
 docker exec -it webterm-app-1 python3 - <<'EOF'
-import sqlite3, sys; sys.path.insert(0, '/srv/webterm')
+import sqlite3, sys; sys.path.insert(0, '/srv/webterm/gateway')
 db = sqlite3.connect('/data/webterm.db')
 db.execute("UPDATE users SET totp_enabled=0, totp_secret_encrypted=NULL WHERE email=?",
            ('you@example.com',))
@@ -117,7 +117,7 @@ application's own argon2 parameters, so use its code rather than generating one 
 
 ```sh
 docker exec -it webterm-app-1 python3 - <<'EOF'
-import sqlite3, sys; sys.path.insert(0, '/srv/webterm')
+import sqlite3, sys; sys.path.insert(0, '/srv/webterm/gateway')
 from app import security
 db = sqlite3.connect('/data/webterm.db')
 db.execute("UPDATE users SET password_hash=?, totp_enabled=0, totp_secret_encrypted=NULL WHERE email=?",

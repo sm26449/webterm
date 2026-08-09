@@ -64,7 +64,9 @@ services:
     networks: [webterm]
 
   caddy:
-    image: caddy:2-alpine
+    # Pinuit pe digest, ca Dockerfile-ul. Tag-ul rămâne în faţă doar ca etichetă lizibilă:
+    # el se poate muta sub tine, digest-ul nu. Dependabot îl ridică la nevoie.
+    image: caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
     restart: unless-stopped
     ports:
       - "80:80"

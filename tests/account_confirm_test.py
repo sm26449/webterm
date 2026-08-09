@@ -251,7 +251,30 @@ async def main():
     except ApiError as e:
         check("cu TOTP activ, emailul NU înlocuieşte codul de pe telefon",
               e.code == "passkey.totpRequired", e.code)
-    # codul corect trece
+    # ---- codurile TOTP greşite se PLAFONEAZĂ ---------------------------------
+    # Gaura reparată: `_verify_reauth` apelează `record_login_success` când parola e corectă,
+    # ceea ce ştergea contorul. Cine avea deja parola putea trimite (parolă bună + cod ghicit)
+    # la nesfârşit — fiecare încercare îşi curăţa singură urma. Contorul propriu nu se resetează
+    # de nimeni altcineva, deci ghicitul se opreşte.
+    for i in range(20):
+        try:
+            await webauthn_api._second_gate(
+                user, FakeReq(tok_old), Body(totp_code="%06d" % i), "enrol")
+        except ApiError as e:
+            last = e.code
+    check("după destule coduri greşite, poarta se blochează (429)",
+          last == "passkey.tooManyTotp", last)
+    # …şi nici codul CORECT nu trece cât e blocat: o portiţă „corectul trece oricum" ar anula
+    # exact apărarea, fiindcă ghicitorul are nevoie de o singură nimereală
+    try:
+        await webauthn_api._second_gate(
+            user, FakeReq(tok_old), Body(totp_code=totp.generate(secret)), "enrol")
+        check("în lockout, nici codul corect nu trece", False, "a trecut")
+    except ApiError as e:
+        check("în lockout, nici codul corect nu trece", e.code == "passkey.tooManyTotp", e.code)
+
+    # codul corect trece pe un cont care nu e în lockout
+    security.record_login_success("passkey2fa:%d" % uid)
     await webauthn_api._second_gate(
         user, FakeReq(tok_old), Body(totp_code=totp.generate(secret)), "enrol")
     check("cod TOTP corect → trece", True)
