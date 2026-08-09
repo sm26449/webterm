@@ -341,7 +341,7 @@ prints it), create the account + passkey.
 Update with `./upgrade.sh` — it takes a backup, syncs the host-side scripts and hands off to
 `deploy.sh`. (`make pull` exists for a quick image swap, but it bypasses `deploy.sh`, so it
 records no rollback point and runs no health gate.) Deploy a specific version
-with a recorded rollback point: `./deploy.sh v2.0.1` — if the new container does
+with a recorded rollback point: `./deploy.sh v2.0.2` — if the new container does
 not become healthy, the script rolls back automatically; any time afterwards,
 `./rollback.sh` returns you to the previous image with a single command.
 
