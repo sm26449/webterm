@@ -38,6 +38,7 @@ const en: Lang = {
     'about.project': 'Project',
 
     // navigation / sidebar
+    'nav.collapseSidebar': 'Hide the host list',
     'nav.addHost': 'Add host',
     'nav.fleetRun': 'Run a command across multiple hosts',
     'nav.fleetRunAria': "Run across multiple hosts",

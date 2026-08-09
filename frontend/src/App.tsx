@@ -155,6 +155,15 @@ function MainApp() {
   }, [selectedSid, secondSid])
   const [activePane, setActivePane] = useState<'primary' | 'second'>('primary')
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  // Plierea sidebarului e o preferinţă de spaţiu, nu o stare de sesiune: cine lucrează pe
+  // un laptop mic o vrea din prima, la fiecare deschidere. Citită sincron la montare, ca
+  // layout-ul să nu sară după primul render.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+    () => localStorage.getItem('wt-sidebar-collapsed') === '1')
+  const toggleSidebar = () => setSidebarCollapsed((v) => {
+    localStorage.setItem('wt-sidebar-collapsed', v ? '0' : '1')
+    return !v
+  })
   const [openTabs, setOpenTabs] = useState<string[]>(() => {
     try { return JSON.parse(localStorage.getItem('wt_tabs') || '[]') } catch { return [] }
   })
@@ -606,7 +615,8 @@ function MainApp() {
       // FOCUSAT (activePane), nu ambele — altfel un snippet se executa pe ambele hosturi.
       // Fără split, panoul vizibil/selectat.
       actionTarget={second ? ((isSecond && activePane === 'second') || (!isSecond && activePane === 'primary')) : isActive}
-      onMenu={() => setSidebarOpen(true)}
+      onMenu={() => { setSidebarCollapsed(false); localStorage.setItem('wt-sidebar-collapsed', '0'); setSidebarOpen(true) }}
+      sidebarCollapsed={sidebarCollapsed}
       onPopout={() => {
         popout(s.id)
         if (isSecond) setSecondSid(null)
@@ -779,6 +789,8 @@ function MainApp() {
         settingsSignal={settingsSignal}
         statusSignal={statusSignal}
         onClose={() => setSidebarOpen(false)}
+        collapsed={sidebarCollapsed}
+        onToggleCollapse={toggleSidebar}
         onSelectHost={selectHost}
         onSelect={selectSession}
         onNewSession={connectHost}
@@ -853,7 +865,8 @@ function MainApp() {
         )}
         {!primary && (<PaneErrorBoundary>{routeHost ? (
           <HostOverview
-            onMenu={() => setSidebarOpen(true)}
+            onMenu={() => { setSidebarCollapsed(false); localStorage.setItem('wt-sidebar-collapsed', '0'); setSidebarOpen(true) }}
+      sidebarCollapsed={sidebarCollapsed}
             host={routeHost}
             sessions={sessions.filter((s) => s.host_id === routeHost.id)}
             onOpenSession={selectSession}

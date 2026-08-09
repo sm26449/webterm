@@ -84,6 +84,7 @@ export default function SessionView(props: {
       irecuperabilă, fiindcă nu exista nicio cale de deblocare. */
   stepupCredential?: (hostId: number) => Promise<{ stepup_grant?: string; stepup_password?: string } | null>
   onMenu: () => void
+  sidebarCollapsed?: boolean
   onPopout?: () => void
   onSplitClosed?: () => void
   onChanged: () => void
@@ -1196,7 +1197,7 @@ export default function SessionView(props: {
       {/* min-w-0 + gap mai mic pe mobil: fără ele, badge-ul hostului și butoanele
           împing toolbarul în afara ecranului (iPhone SE / Galaxy S9) */}
       <header className="flex min-w-0 items-center gap-1 border-b border-ink-800 bg-ink-900 px-2 py-2 md:gap-2 md:px-3">
-        <button onClick={props.onMenu} aria-label={t('session.openHostList')} className="wt-touch shrink-0 rounded-md px-2 py-1 text-slate-400 hover:bg-ink-800 md:hidden">
+        <button onClick={props.onMenu} aria-label={t('session.openHostList')} className={`wt-touch shrink-0 rounded-md px-2 py-1 text-slate-400 hover:bg-ink-800 ${props.sidebarCollapsed ? '' : 'md:hidden'}`}>
           ☰
         </button>
         {props.host && (

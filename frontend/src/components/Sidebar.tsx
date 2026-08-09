@@ -4,7 +4,7 @@ import { useI18n } from '../lib/i18n'
 import InstallCommand from './InstallCommand'
 import { hostColor, reachState } from '../lib/host'
 import { allSchemes, hostSchemeRaw, setHostScheme } from '../lib/termtheme'
-import { ActivityIcon, CloseIcon, FilesIcon, FolderMoveIcon, GearIcon, KeyIcon, LogoMark, MoreIcon, NoteIcon, PlusIcon, PowerIcon, RefreshIcon, SearchIcon, ServerIcon, TerminalPromptIcon } from './Icons'
+import { ActivityIcon, CloseIcon, CollapseIcon, FilesIcon, FolderMoveIcon, GearIcon, KeyIcon, LogoMark, MoreIcon, NoteIcon, PlusIcon, PowerIcon, RefreshIcon, SearchIcon, ServerIcon, TerminalPromptIcon } from './Icons'
 import { fmt } from '../lib/shortcuts'
 
 // modale rar folosite → chunk-uri separate, în afara bundle-ului inițial
@@ -44,6 +44,8 @@ export default function Sidebar(props: {
   settingsSignal: number
   statusSignal: number
   onClose: () => void
+  collapsed: boolean
+  onToggleCollapse: () => void
   onSelectHost: (id: number) => void
   onSelect: (sid: string, search?: string) => void
   onNewSession: (host: Host) => void
@@ -336,23 +338,14 @@ export default function Sidebar(props: {
               ↑ v{host.agent_latest}
             </button>
           )}
-          <button
-            disabled={!canConnect}
-            onClick={(e) => { e.stopPropagation(); props.onNewSession(host) }}
-            // `aria-label` bate `title`, deci un cititor de ecran auzea „New session, dimmed"
-            // şi nu afla NICIODATĂ de ce e dezactivat. Motivul intră în însuşi numele accesibil.
-            title={host.connection_type !== 'agent' ? t('sidebar.connect')
-                   : host.online ? t('sidebar.newSession') : t('sidebar.hostOffline')}
-            aria-label={host.online || host.connection_type !== 'agent'
-                        ? t('host.newSession')
-                        : `${t('host.newSession')} — ${t('sidebar.hostOffline')}`}
-            className="flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-slate-300 opacity-0 ring-1 ring-ink-700 transition hover:bg-sky-600 hover:text-white hover:ring-transparent focus-visible:opacity-100 group-hover:opacity-100 disabled:cursor-not-allowed disabled:opacity-0"
-          >
-            <PlusIcon /> {t('sidebar.new')}
-          </button>
+          {/* „Sesiune nouă" a plecat de aici în meniul ⋯. Butonul apărea la hover, deci pe
+              rândul îngust concura cu numele hostului şi cu insigna de update; în meniu are
+              text întreg, primul loc şi un separator după el. */}
           <span onClick={(e) => e.stopPropagation()}>
             <HostMenu
               online={host.online}
+              canConnect={canConnect}
+              onNewSession={() => props.onNewSession(host)}
               require2fa={!!host.require_2fa}
               connectionType={host.connection_type}
               hostId={host.id}
@@ -398,6 +391,14 @@ export default function Sidebar(props: {
             32×24. Restul listei rămâne raportat şi nereparat în bloc: pe iconiţele dintr-un
             rând dens de fişiere, 44px ar rupe layout-ul — acolo compromisul e deliberat. */}
         <div className="flex shrink-0 items-center gap-0.5">
+          {/* Doar pe desktop: pe mobil sidebarul e un drawer, care se închide oricum. */}
+          <button
+            title={t('nav.collapseSidebar')} aria-label={t('nav.collapseSidebar')}
+            onClick={props.onToggleCollapse}
+            className="wt-touch hidden items-center justify-center rounded-md px-2 py-1 text-sm text-slate-400 hover:bg-ink-800 hover:text-slate-200 md:inline-flex"
+          >
+            <CollapseIcon />
+          </button>
           <button
             title={t('nav.addHost')} aria-label={t('nav.addHost')}
             onClick={() => setShowAdd(true)}
@@ -600,8 +601,10 @@ export default function Sidebar(props: {
 
   return (
     <>
-      {/* desktop */}
-      <div className="hidden md:block">{body}</div>
+      {/* desktop — ascuns când e pliat; terminalul primeşte cei 18rem înapoi.
+          Redeschiderea se face din butonul ☰ al barei de sus, care pe desktop apare
+          EXACT când sidebarul e pliat (altfel ai plia fereastra fără cale de întoarcere). */}
+      <div className={props.collapsed ? 'hidden' : 'hidden md:block'}>{body}</div>
       {/* mobile drawer */}
       {props.open && (
         <div className="fixed inset-0 z-40 md:hidden">
@@ -682,6 +685,8 @@ function HostMenu(props: {
   require2fa: boolean
   connectionType?: string
   hostId: number
+  canConnect: boolean
+  onNewSession: () => void
   onFiles: () => void
   onSerial: () => void
   onDiagnostic: () => void
@@ -724,6 +729,23 @@ function HostMenu(props: {
         <>
           <div className="fixed inset-0 z-30" onClick={() => setOpen(false)} />
           <div role="menu" className="absolute right-0 z-40 mt-1 w-48 rounded-xl border border-ink-700 bg-ink-900 p-1 shadow-2xl">
+            {/* Acţiunea pentru care deschizi meniul în 90% din cazuri stă prima, iar linia de
+                sub ea o separă de administrare (fişiere, editare, dezinstalare) — ca un click
+                greşit din inerţie să nu nimerească altceva. */}
+            <button
+              role="menuitem"
+              disabled={!props.canConnect}
+              onClick={() => { setOpen(false); props.onNewSession() }}
+              title={props.connectionType !== 'agent' ? t('sidebar.connect')
+                     : props.online ? t('sidebar.newSession') : t('sidebar.hostOffline')}
+              aria-label={props.online || props.connectionType !== 'agent'
+                          ? t('host.newSession')
+                          : `${t('host.newSession')} — ${t('sidebar.hostOffline')}`}
+              className={`${item} font-medium text-slate-100 disabled:cursor-not-allowed disabled:text-slate-500 disabled:hover:bg-transparent`}
+            >
+              <PlusIcon /> {props.connectionType !== 'agent' ? t('sidebar.connect') : t('sidebar.newSession')}
+            </button>
+            <div className="my-1 border-t border-ink-700" role="separator" />
             {props.online && (
               <button role="menuitem" className={`${item} text-slate-200`} onClick={() => { setOpen(false); props.onFiles() }}>
                 <FilesIcon /> {t('sidebar.files')}

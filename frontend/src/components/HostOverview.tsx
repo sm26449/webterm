@@ -20,6 +20,7 @@ export default function HostOverview(props: {
   onPopout: (sid: string) => void
   onDeleteSession: (sid: string) => void
   onMenu: () => void
+  sidebarCollapsed?: boolean
 }) {
   const { t } = useI18n()
   const { host } = props
@@ -101,7 +102,7 @@ export default function HostOverview(props: {
       {/* flex-wrap + min-w pe blocul de titlu: pe mobil acțiunile coboară pe
          rândul doi în loc să strivească numele hostului la o literă */}
       <div className="flex flex-wrap items-start gap-x-4 gap-y-3 border-b border-ink-800 px-4 py-4 sm:px-6">
-        <button onClick={props.onMenu} className="wt-touch grid place-items-center rounded-md px-2 py-1 text-slate-400 hover:bg-ink-800 md:hidden" aria-label={t('host.openHostListAria')}>
+        <button onClick={props.onMenu} className={`wt-touch grid place-items-center rounded-md px-2 py-1 text-slate-400 hover:bg-ink-800 ${props.sidebarCollapsed ? '' : 'md:hidden'}`} aria-label={t('host.openHostListAria')}>
           ☰
         </button>
         <div className="relative shrink-0">
