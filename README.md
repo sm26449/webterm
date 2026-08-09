@@ -85,18 +85,41 @@ decision explained below.
 
 ## Why
 
-Xterm with lots of tabs: unsafe copy/paste, clunky history, tabs that close and
-lose the session. WebTerm fixes that — a single app, sessions in the sidebar,
-that never get lost.
+Put a terminal in a browser and the session ends up living in the thing in the
+middle. Restart it, deploy over it, lose the network for a minute, and the work
+goes with it. That is not a bug in any particular implementation — it is what
+happens when the session belongs to the server you happen to be looking through.
 
-- **The agent calls home** (outbound WSS + token) — you open no ports on servers,
-  it works through NAT; the gateway keeps no SSH passwords/keys.
-- **Sessions live in tmux** on a dedicated socket: they survive an agent crash or
-  upgrade; they are re-adopted by name on restart.
-- **Reliability**: everything is capped (2 MiB ring buffer/session, max 32
-  sessions/host, ack-based flow control at 256 KiB, rotated logs); ~0 CPU idle;
-  the agent restarts itself on kill/reboot (systemd or a cron watchdog).
-- **Hardened for the internet** — see [Security](#security).
+WebTerm puts it somewhere else. The session is a `tmux` session **on your own
+machine**, on its own socket. The gateway is a window onto it, and windows can be
+closed, upgraded and rebuilt without touching what is behind them. Kill the agent
+and the session keeps running. Restart the gateway and it is re-adopted by name.
+Close the laptop and open a phone.
+
+**Two ways to reach a machine, and the difference is the whole product.**
+
+*With the agent* — a single Python file, stdlib only, that dials **out** over
+WebSocket. Nothing listens on your server, so NAT and firewalls are not obstacles
+and there is no port to expose. It authenticates with a token bound to that one
+machine, and the gateway stores no login for it: there is nothing to steal because
+there is nothing to store. Sessions live in tmux and outlive everything above them.
+
+*Direct SSH or telnet* — for a switch, a box you do not own, a machine where you
+cannot install anything. Nothing to deploy on the target. The trade is real and
+worth knowing: that session lives in the gateway's memory, so a gateway restart
+ends it, and any credential you choose to save is kept in the encrypted vault
+rather than not kept at all. You can also tell a host to never store one and ask
+you each time.
+
+So the agent is not overhead you pay to use this. It is the part that makes a
+session something you come back to instead of something you start again.
+
+Around that: everything is bounded (2 MiB of scrollback per session, 32 sessions
+per host, stop-and-wait flow control every 256 KiB, rotated logs, capped
+transcripts), the agent restarts itself after a kill or a reboot, and idle cost is
+close to nothing. It is built to sit on the public internet — what that means, and
+what it does not cover, is in [Security](#security) and
+[docs/THREAT-MODEL.md](docs/THREAT-MODEL.md).
 
 ## Features
 
