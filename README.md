@@ -441,6 +441,17 @@ reaches the inbox, and mail scanners open them on their own. It escalates rather
 because being blocked from changing a leaked password while travelling is not security. Applies
 only when SMTP is configured; without a mail channel it would be a permanent lockout.
 
+**Changing your passkeys needs a second factor too.** With 2FA on, the code from your phone (or
+a recovery code); without it, the emailed code from an unfamiliar device. Otherwise whoever has
+the password could enrol *their own* passkey — a permanent, phishing-resistant key to your
+account. Email is deliberately not accepted in place of the phone: it would make two-factor worth
+exactly as much as access to the mailbox.
+
+**And a way back in, from the server.** `docker exec -it webterm-app-1 python3 -m app.admin`
+(`list`, `passwd`, `disable-2fa`, `logout-all`) recovers the account over SSH. Every gate above
+is another way to lock yourself out; the product can be strict in the browser because this
+exists, and shell on the server is a far higher bar than a mailbox. See RUNBOOK §5.
+
 That signal decides **how loud to be, never whether to check**. No device is ever trusted enough
 to skip step-up, the idle lock, or 2FA: an IP and a user-agent both travel with a stolen session
 cookie, so a "trusted device" exemption would be waved through by exactly the attacker it looks

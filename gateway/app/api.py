@@ -171,38 +171,6 @@ async def setup(creds: Credentials, request: Request, response: Response):
     return {"ok": True}
 
 
-async def _verify_second_factor(user, code: str) -> bool:
-    """Al doilea factor pentru un user cu TOTP activ: cod TOTP valid SAU un cod
-    de recuperare nefolosit (care se consumă). Cu rate-limit deja aplicat sus."""
-    secret = security.decrypt_secret(user["totp_secret_encrypted"])
-    matched = totp.verify_counter(secret, code.strip())
-    if matched is not None:
-        # anti-replay: un cod TOTP valid ~90s; fără asta, un cod observat (shoulder-surf,
-        # phishing) e reutilizabil în fereastră. Respingem reutilizarea aceluiași pas sau
-        # a unuia anterior; la succes reținem counter-ul.
-        # anti-replay ATOMIC: UPDATE condiţional + RETURNING într-o singură instrucţiune
-        # serializată. Read-check-update în paşi separaţi era TOCTOU — două login-uri
-        # concurente cu acelaşi cod citeau ambele counter-ul vechi şi treceau amândouă.
-        # `IS NULL` acoperă prima folosire (counter încă nesetat).
-        claimed = await db.execute_returning(
-            "UPDATE users SET totp_last_counter=? WHERE id=?"
-            " AND (totp_last_counter IS NULL OR totp_last_counter < ?) RETURNING id",
-            matched, user["id"], matched)
-        return claimed is not None
-    # fallback: cod de recuperare (single-use, stocat hash-uit)
-    ch = security.sha256_hex(code.strip())
-    row = await db.fetchone(
-        "SELECT id FROM recovery_codes WHERE user_id=? AND code_hash=? AND used IS NULL",
-        user["id"], ch)
-    if row:
-        # single-use ATOMIC: două cereri concurente cu acelaşi cod → doar una revendică rândul
-        claimed = await db.execute_returning(
-            "UPDATE recovery_codes SET used=? WHERE id=? AND used IS NULL RETURNING id",
-            time.time(), row["id"])
-        return claimed is not None
-    return False
-
-
 @router.post("/api/login")
 async def login(creds: Credentials, request: Request, response: Response):
     ip = security.client_ip(request)
@@ -229,7 +197,7 @@ async def login(creds: Credentials, request: Request, response: Response):
         if not creds.totp_code:
             # nu e un eșec (parola era bună): semnalăm clientului să ceară codul
             return {"ok": False, "totp_required": True}
-        if not await _verify_second_factor(user, creds.totp_code):
+        if not await security.verify_second_factor(user, creds.totp_code):
             security.record_login_failure(ip)
             raise ApiError(401, "auth.bad2fa", "wrong 2FA code")
     security.record_login_success(ip)

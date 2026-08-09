@@ -1,6 +1,6 @@
 """Anunţ de ataşare (2.0.2): când cineva se ataşează la o sesiune vie, ceilalţi clienţi
-conectaţi primesc un eveniment `attached`, iar dispozitivele de pe adrese nemaivăzute la un
-login al contului sunt marcate `known=False` (ce ridică notificarea la avertisment + email).
+conectaţi primesc un eveniment `attached`, iar dispozitivele de pe adrese care nu sunt locuri
+stabilite ale contului sunt marcate `known=False` (ridică notificarea la avertisment + email).
 
 Invariantul care contează, şi motivul pentru care testul îl verifică explicit: identitatea de
 dispozitiv decide DOAR volumul alertei, niciodată dacă se sare peste o verificare. Nu există
@@ -104,7 +104,7 @@ async def main():
 
     # ---- known nu atinge NIMIC din lock/step-up ----
     # Un „dispozitiv cunoscut" trebuie să fie blocat de idle-lock exact ca oricare altul;
-    # altfel semnalul slab (IP văzut o dată) ar deveni ocolire de autentificare.
+    # altfel semnalul slab (istoric de IP) ar deveni ocolire de autentificare.
     hub.lock_idle = 300
     await hub.lock()
     check("known nu atinge lock/step-up: clientul cunoscut e blocat la fel",
@@ -118,8 +118,17 @@ async def main():
     user = await db.fetchone("SELECT * FROM users WHERE email=?", "u@example.com")
     check("ip_is_known: IP nemaivăzut → False",
           await security.ip_is_known(user["id"], "203.0.113.7") is False)
+    # „Cunoscut" nu înseamnă „văzut o dată", ci „loc cu istoric": mai multe login-uri, peste
+    # mai mult de o zi. Un singur login nu-şi poate declara singur adresa drept obişnuită.
     await security.note_new_login(user, "203.0.113.7", "curl/8")
-    check("ip_is_known: după un login reuşit de acolo → True",
+    check("ip_is_known: după UN login de acolo → încă necunoscut",
+          await security.ip_is_known(user["id"], "203.0.113.7") is False)
+    for _ in range(3):
+        await security.note_new_login(user, "203.0.113.7", "curl/8")
+    await db.execute("UPDATE seen_logins SET created=? WHERE user_id=? AND ip_hash=?",
+                     time.time() - security.ESTABLISHED_AGE - 60, user["id"],
+                     security.sha256_hex("203.0.113.7"))
+    check("ip_is_known: cu istoric şi vechime → cunoscut",
           await security.ip_is_known(user["id"], "203.0.113.7") is True)
     check("ip_is_known: alt IP rămâne necunoscut",
           await security.ip_is_known(user["id"], "203.0.113.8") is False)
