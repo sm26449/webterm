@@ -71,6 +71,11 @@ ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 # query-string-ul exact din motivul ăsta, dar uvicorn scria linia întreagă pe stdout, deci
 # secretele ajungeau în `docker logs` şi în orice colector de loguri. Auditul rămâne sursa
 # de adevăr pentru „cine ce a făcut"; access-log-ul doar dubla informaţia, cu secrete.
+# UN SINGUR worker, şi asta e un INVARIANT, nu o alegere de performanţă. Plafoanele de
+# lockout, challenge-urile WebAuthn şi ferestrele de step-up trăiesc în dicţionare per-proces.
+# Cu `--workers N`, lockout-ul devine de N ori mai slab (fiecare proces îşi ţine propriul
+# contor) şi step-up-ul se rupe intermitent, după cum nimereşti procesul. Dacă vrei vreodată
+# mai mulţi workeri, starea aia trebuie mutată întâi într-un depozit partajat.
 CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port 8000 \
      --ws-per-message-deflate false --no-access-log \
      "]
