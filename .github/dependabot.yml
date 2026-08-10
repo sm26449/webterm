@@ -4,6 +4,18 @@ updates:
     directory: "/gateway"
     schedule:
       interval: "weekly"
+    # Salturile de versiune MAJORĂ sunt muncă deliberată (typescript 7, tailwind 4, eslint 10,
+    # python 3.14, websockets 17 — toate rup ceva şi cer testare), nu ceva ce se merge-uiază
+    # dintr-un PR automat. Le oprim aici, nu prin comentarii pe PR: la actualizările de GRUP
+    # comanda `@dependabot ignore this major version` e ambiguă (grupul are mai multe
+    # dependenţe) şi botul n-o aplică.
+    #
+    # Ce NU se pierde: patch-urile şi minorele continuă să vină, adică exact traseul pe care
+    # sosesc reparaţiile de securitate. Ce se pierde: nu mai eşti anunţat singur când apare un
+    # major. De reevaluat la 2.1 — scoţi blocul ăsta, laşi PR-urile să apară, le faci pe rând.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
     open-pull-requests-limit: 5
     groups:
       pip-minor:
@@ -13,6 +25,18 @@ updates:
     directory: "/frontend"
     schedule:
       interval: "weekly"
+    # Salturile de versiune MAJORĂ sunt muncă deliberată (typescript 7, tailwind 4, eslint 10,
+    # python 3.14, websockets 17 — toate rup ceva şi cer testare), nu ceva ce se merge-uiază
+    # dintr-un PR automat. Le oprim aici, nu prin comentarii pe PR: la actualizările de GRUP
+    # comanda `@dependabot ignore this major version` e ambiguă (grupul are mai multe
+    # dependenţe) şi botul n-o aplică.
+    #
+    # Ce NU se pierde: patch-urile şi minorele continuă să vină, adică exact traseul pe care
+    # sosesc reparaţiile de securitate. Ce se pierde: nu mai eşti anunţat singur când apare un
+    # major. De reevaluat la 2.1 — scoţi blocul ăsta, laşi PR-urile să apară, le faci pe rând.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
     open-pull-requests-limit: 5
     groups:
       npm-minor:
@@ -26,6 +50,18 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # Salturile de versiune MAJORĂ sunt muncă deliberată (typescript 7, tailwind 4, eslint 10,
+    # python 3.14, websockets 17 — toate rup ceva şi cer testare), nu ceva ce se merge-uiază
+    # dintr-un PR automat. Le oprim aici, nu prin comentarii pe PR: la actualizările de GRUP
+    # comanda `@dependabot ignore this major version` e ambiguă (grupul are mai multe
+    # dependenţe) şi botul n-o aplică.
+    #
+    # Ce NU se pierde: patch-urile şi minorele continuă să vină, adică exact traseul pe care
+    # sosesc reparaţiile de securitate. Ce se pierde: nu mai eşti anunţat singur când apare un
+    # major. De reevaluat la 2.1 — scoţi blocul ăsta, laşi PR-urile să apară, le faci pe rând.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
     groups:
       compose-minor:
         update-types: ["minor", "patch"]
@@ -34,6 +70,18 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # Salturile de versiune MAJORĂ sunt muncă deliberată (typescript 7, tailwind 4, eslint 10,
+    # python 3.14, websockets 17 — toate rup ceva şi cer testare), nu ceva ce se merge-uiază
+    # dintr-un PR automat. Le oprim aici, nu prin comentarii pe PR: la actualizările de GRUP
+    # comanda `@dependabot ignore this major version` e ambiguă (grupul are mai multe
+    # dependenţe) şi botul n-o aplică.
+    #
+    # Ce NU se pierde: patch-urile şi minorele continuă să vină, adică exact traseul pe care
+    # sosesc reparaţiile de securitate. Ce se pierde: nu mai eşti anunţat singur când apare un
+    # major. De reevaluat la 2.1 — scoţi blocul ăsta, laşi PR-urile să apară, le faci pe rând.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
     groups:
       docker-minor:
         update-types: ["minor", "patch"]
@@ -42,6 +90,18 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # Salturile de versiune MAJORĂ sunt muncă deliberată (typescript 7, tailwind 4, eslint 10,
+    # python 3.14, websockets 17 — toate rup ceva şi cer testare), nu ceva ce se merge-uiază
+    # dintr-un PR automat. Le oprim aici, nu prin comentarii pe PR: la actualizările de GRUP
+    # comanda `@dependabot ignore this major version` e ambiguă (grupul are mai multe
+    # dependenţe) şi botul n-o aplică.
+    #
+    # Ce NU se pierde: patch-urile şi minorele continuă să vină, adică exact traseul pe care
+    # sosesc reparaţiile de securitate. Ce se pierde: nu mai eşti anunţat singur când apare un
+    # major. De reevaluat la 2.1 — scoţi blocul ăsta, laşi PR-urile să apară, le faci pe rând.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
     groups:
       actions-minor:
         update-types: ["minor", "patch"]
