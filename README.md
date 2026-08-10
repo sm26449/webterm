@@ -77,7 +77,9 @@ decision explained below.
 
 **Files + editor** — browse, edit (CodeMirror) and transfer files on the host.
 
-![Files and editor](docs/screenshots/04-editor-dark.png)
+![File browser](docs/screenshots/03-files-dark.png)
+
+![Editor](docs/screenshots/04-editor-dark.png)
 
 **Security** — the fleet signing key, passkeys, 2FA (here on the light theme).
 
@@ -292,12 +294,12 @@ make token          # or, without make:
 docker compose logs app | grep -oE 'WEBTERM_SETUP_TOKEN=[A-Za-z0-9_-]+' | tail -1 | cut -d= -f2-
 ```
 
-### Installing without `curl | sudo bash`
+### Installing verifiably
 
-The one-liner fetches `install.sh` from `main` — a moving branch — and runs it as root. That
-is convenient, and it is also the most privileged thing you will do with this project, so the
-verifiable path is worth knowing: it is the same script, just one you can read first and pin
-to a release.
+`install.sh` supports a `curl … | sudo bash` form (its header shows it, for cloud-init and
+Ansible). It is convenient, and it is also the most privileged thing you will do with this
+project: it fetches from `main` — a branch that can move — and runs as root. The path below is
+the same script, only one you can read first and pin to a release.
 
 ```sh
 git clone https://github.com/sm26449/webterm.git
