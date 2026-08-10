@@ -62,6 +62,11 @@ updates:
     ignore:
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
+      # …şi NICIODATĂ imaginea noastră: pinul e legat de `GATEWAY_VERSION` printr-o poartă
+      # în CI, deci un bump automat ar rupe build-ul. Se schimbă la release, nu de un bot.
+      # (Pica şi cu `private_source_authentication_failure`, fiindcă pachetul ghcr e privat —
+      # dar asta era simptomul, nu problema.)
+      - dependency-name: "ghcr.io/*/webterm"
     groups:
       compose-minor:
         update-types: ["minor", "patch"]
