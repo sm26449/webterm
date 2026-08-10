@@ -241,7 +241,7 @@ jobs:
       # un Chromium headless care așteaptă window.__WT_BOOTED și pică la orice
       # eroare JS neprinsă (scripts/smoke-boot.mjs).
       - name: Build a local image for the smoke test
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           load: true
@@ -379,7 +379,7 @@ jobs:
             type=sha,format=short
 
       - name: Build & push
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           push: ${{ github.event_name != 'pull_request' }}   # pe PR doar construim (validare), nu publicăm
