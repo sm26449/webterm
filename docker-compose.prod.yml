@@ -21,7 +21,7 @@ services:
   dockerproxy:
     # Pinuit pe digest, ca Dockerfile-ul. Tag-ul rămâne în faţă doar ca etichetă lizibilă:
     # el se poate muta sub tine, digest-ul nu. Dependabot îl ridică la nevoie.
-    image: tecnativa/docker-socket-proxy:0.1.1@sha256:6c22b9545adc95258af9deffdde6c0ce0a0a70716771e5a4e02d24d1b6e0dda1
+    image: tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459
     restart: unless-stopped
     logging: *default-logging
     environment:
@@ -40,7 +40,7 @@ services:
     # niciun container, deci nicio rută (404) și niciun certificat cerut.
     # Pinuit pe digest, ca Dockerfile-ul. Tag-ul rămâne în faţă doar ca etichetă lizibilă:
     # el se poate muta sub tine, digest-ul nu. Dependabot îl ridică la nevoie.
-    image: traefik:v3.6@sha256:31267173a15b4944e797a76ffd9c419707c8d8b32fe5b610f80cd0cfa05f372d
+    image: traefik:v3.7@sha256:9c3b91d5fb7770853ca5c1124a23c34bf2d9b47ffaebeab2614cbaf410dcb2ac
     restart: unless-stopped
     logging: *default-logging
     depends_on: [dockerproxy]
