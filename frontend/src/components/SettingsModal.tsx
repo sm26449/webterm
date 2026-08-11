@@ -339,6 +339,12 @@ export default function SettingsModal(props: {
   const [newPw, setNewPw] = useState('')
   // Codul de confirmare cerut când sesiunea a pornit de pe un dispozitiv necunoscut. Câmpul
   // apare doar după ce serverul îl cere — nu vrem un câmp gol şi nelămurit în fluxul normal.
+  // Dispozitivele conectate. Lipsea calea de mijloc între „schimb parola" (omoară tot,
+  // inclusiv sesiunea curentă) şi „intru pe server prin SSH".
+  type WebSess = { id: number; label: string; created: number; last_seen: number
+                   expires: number; new_device: boolean; current: boolean }
+  const [devices, setDevices] = useState<WebSess[] | null>(null)
+  const loadDevices = () => api<WebSess[]>('/api/account/sessions').then(setDevices).catch(() => setDevices([]))
   const [emailCode, setEmailCode] = useState('')
   const [codeAsked, setCodeAsked] = useState(false)
   const [accountMsg, setAccountMsg] = useState('')
@@ -674,6 +680,7 @@ export default function SettingsModal(props: {
     if (cat === 'preferinte' && upd === null) api<UpdateInfo>('/api/version').then(setUpd).catch(() => {})
     if (cat === 'cont' && users.length === 0) loadUsers()
     if (cat === 'securitate' && tokens.length === 0) loadTokens()
+    if (cat === 'securitate' && devices === null) loadDevices()
     if (cat === 'backup') { markBackupSeen(); if (cloud === null) loadCloud() }
     // jurnalul se încarcă LENEȘ (la deschiderea secțiunii): e singura listă din modal care
     // poate avea mii de rânduri, n-are rost s-o cerem la fiecare deschidere de Setări
@@ -1297,8 +1304,62 @@ export default function SettingsModal(props: {
         </div>)}
 
         {cat === 'securitate' && (<div>
+        {/* ── Dispozitive conectate ── */}
+        <h3 className={heading + ' !mt-0'}>{t('settings.devices')}</h3>
+        <p className="mt-1 text-xs text-slate-500">{t('settings.devicesHint')}</p>
+        {devices === null ? (
+          <div className="mt-2 text-xs text-slate-500">{t('settings.loading')}</div>
+        ) : devices.length === 0 ? (
+          <div className="mt-2 text-xs text-slate-500">{t('settings.devicesNone')}</div>
+        ) : (
+          <div className="mt-2 divide-y divide-ink-800 rounded-lg ring-1 ring-ink-700">
+            {devices.map((d) => (
+              <div key={d.id} className="flex items-center gap-3 px-3 py-2 text-sm">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="truncate text-slate-200">{d.label}</span>
+                    {d.current && (
+                      <span className="shrink-0 rounded bg-sky-500/15 px-1.5 text-[10px] text-sky-300">
+                        {t('settings.deviceThis')}
+                      </span>
+                    )}
+                    {d.new_device && !d.current && (
+                      <span title={t('session.deviceNewTitle')}
+                        className="shrink-0 rounded bg-amber-500/15 px-1.5 text-[10px] text-amber-400">
+                        {t('session.deviceNew')}
+                      </span>
+                    )}
+                  </div>
+                  <div className="mt-0.5 text-[11px] text-slate-500">
+                    {t('settings.deviceSeen', { when: fmtTs(d.last_seen || d.created) })}
+                  </div>
+                </div>
+                {!d.current && (
+                  <button
+                    onClick={async () => {
+                      await api(`/api/account/sessions/${d.id}`, { method: 'DELETE' }).catch(() => {})
+                      loadDevices()
+                    }}
+                    className="shrink-0 rounded-md px-2 py-1 text-xs text-rose-400 ring-1 ring-ink-700 hover:bg-ink-800"
+                  >{t('settings.deviceRevoke')}</button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+        {devices && devices.length > 1 && (
+          <button
+            onClick={async () => {
+              if (!confirm(t('settings.devicesRevokeOthersConfirm'))) return
+              await api('/api/account/sessions/revoke-others', { method: 'POST' }).catch(() => {})
+              loadDevices()
+            }}
+            className="mt-2 rounded-lg px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800"
+          >{t('settings.devicesRevokeOthers')}</button>
+        )}
+
         {/* ── Cheie de semnare a flotei ── */}
-        <h3 className={heading + ' !mt-0'}>{t('settings.signingKey')}</h3>
+        <h3 className={heading}>{t('settings.signingKey')}</h3>
         <p className="mt-1 text-xs text-slate-500">
           {t('settings.signHintA')} <span className="text-slate-300">{t('settings.signHintYourKey')}</span>{t('settings.signHintB')} <span className="text-slate-300">{t('settings.signHintBeforeEnroll')}</span>{t('settings.signHintC')}
         </p>

@@ -516,6 +516,80 @@ def _token_row(r) -> dict:
             "expired": r["expires"] < time.time()}
 
 
+# ── Dispozitivele conectate (sesiuni web) ────────────────────────────────────
+# Până acum, dacă bănuiai un cookie furat aveai două opţiuni, amândouă prea mari: schimbi
+# parola (omoară TOATE sesiunile, inclusiv a ta) sau intri prin SSH pe server. Lipsea exact
+# lucrul dintre ele — „vezi ce dispozitive sunt logate şi scoate-l pe ăla".
+#
+# Datele existau deja: `web_sessions` ţine user-agent-ul de la autentificare, iar de la 2.0.2
+# şi `device_new` (adresa era necunoscută atunci — verdict îngheţat, vezi `session_is_new_device`).
+# `rowid` e cheia stabilă a rândului; NU expunem `token_hash`, care e amprenta credenţialei.
+
+def _device_label(ua: str) -> str:
+    """Etichetă scurtă din user-agent. Acelaşi raţionament ca `shortAgent` din frontend: un UA
+    întreg e 150 de caractere din care nouă zecimi sunt istorie. Ordinea contează — Edge şi
+    Chrome se declară amândouă „Chrome", Chrome pe iOS se declară „Safari"."""
+    ua = ua or ""
+    osn = ("iOS" if ("iPhone" in ua or "iPad" in ua) else
+           "Android" if "Android" in ua else
+           "macOS" if "Mac OS X" in ua else
+           "Windows" if "Windows" in ua else
+           "Linux" if "Linux" in ua else "")
+    br = ("Edge" if "Edg/" in ua else
+          "Opera" if "OPR/" in ua else
+          "Firefox" if "Firefox/" in ua else
+          "Chrome" if ("CriOS/" in ua or "Chrome/" in ua) else
+          "Safari" if "Safari/" in ua else "")
+    return " · ".join(x for x in (br, osn) if x) or (ua[:24] or "?")
+
+
+@router.get("/api/account/sessions")
+async def list_web_sessions(request: Request, user=Depends(security.require_user)):
+    cur = security.sha256_hex(request.cookies.get(security.COOKIE_NAME) or "")
+    rows = await db.fetchall(
+        "SELECT rowid AS rid, token_hash, created, last_seen, expires, user_agent, device_new"
+        " FROM web_sessions WHERE user_id=? AND expires > ? ORDER BY last_seen DESC",
+        user["id"], time.time())
+    return [{"id": r["rid"], "label": _device_label(r["user_agent"]),
+             "created": r["created"], "last_seen": r["last_seen"], "expires": r["expires"],
+             "new_device": bool(r["device_new"]),
+             "current": security.tokens_equal(r["token_hash"], cur)} for r in rows]
+
+
+@router.delete("/api/account/sessions/{rid}")
+async def revoke_web_session(rid: int, request: Request,
+                             user=Depends(security.require_user)):
+    """Scoate un dispozitiv. Fără re-autentificare, deliberat: e o acţiune DEFENSIVĂ, iar
+    parola cerută exact când te grăbeşti e frecare pe partea greşită. Cel mai rău lucru pe
+    care îl poate face cineva cu cookie-ul tău e să te deconecteze — te loghezi la loc."""
+    row = await db.fetchone(
+        "SELECT token_hash FROM web_sessions WHERE rowid=? AND user_id=?", rid, user["id"])
+    if not row:
+        raise HTTPException(404, "no such session")
+    await db.execute("DELETE FROM web_sessions WHERE rowid=? AND user_id=?", rid, user["id"])
+    audit.detail(request, "revoked a web session")
+    return {"ok": True}
+
+
+@router.post("/api/account/sessions/revoke-others")
+async def revoke_other_web_sessions(request: Request, user=Depends(security.require_user)):
+    """„Deconectează-mă de peste tot, în afară de aici." Nu atinge parola, spre deosebire de
+    singura cale existentă până acum."""
+    cur = security.sha256_hex(request.cookies.get(security.COOKIE_NAME) or "")
+    n = await db.fetchone(
+        "SELECT COUNT(*) c FROM web_sessions WHERE user_id=? AND token_hash!=?",
+        user["id"], cur)
+    await db.execute("DELETE FROM web_sessions WHERE user_id=? AND token_hash!=?",
+                     user["id"], cur)
+    # Ferestrele de step-up sunt per (cont, host), nu per dispozitiv: dacă scoţi un dispozitiv
+    # suspect, „sudo-ul" lui ar supravieţui pe al tău. Le închidem pe toate — costul e o
+    # re-verificare cu passkey, exact lucrul pe care oricum îl vrei după aşa o acţiune.
+    security.clear_stepup_for(user["id"])
+    security.bump_forward_epoch(user["id"])
+    audit.detail(request, "revoked %d other web sessions" % (n["c"] if n else 0))
+    return {"ok": True, "revoked": n["c"] if n else 0}
+
+
 @router.get("/api/tokens")
 async def list_tokens(user=Depends(security.require_user)):
     rows = await db.fetchall("SELECT * FROM api_tokens ORDER BY created DESC")
