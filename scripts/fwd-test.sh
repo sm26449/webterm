@@ -71,9 +71,22 @@ echo "$SETRESP" | grep -qE '^HTTP/[^ ]+ 302' && [ -n "$FC" ] && ok "3. set-cooki
 # 4. subdomeniu CU cookie → proxy la țintă
 BODY=$(ch "$SLUG.$D" -H "Cookie: $FC" "$B/pagina")
 echo "$BODY" | grep -q 'GRAFANA_OK-/pagina' && ok "4. with cookie → proxied through the tunnel (body + path)" || no "handshake-4" "$BODY"
-# răspunsul de forward NU trebuie să poarte CSP-ul WebTerm (ar rupe UI-ul echipamentului)
+# Răspunsul de forward nu trebuie să poarte CSP-ul APLICAŢIEI (fără unsafe-inline/eval ar rupe
+# UI-uri de echipament — MikroTik Webfig foloseşte inline + eval). Dar `frame-ancestors` nu
+# rupe nimic şi opreşte încadrarea într-un iframe străin, deci ÎL vrem: verificăm precis ce e
+# acolo, nu doar că lipseşte antetul. Invariantul „niciun CSP" era mai uşor de scris şi mai
+# slab: trecea şi dacă nu apăram deloc încadrarea.
 HDRS=$(ch "$SLUG.$D" -D - -o /dev/null -H "Cookie: $FC" "$B/x")
-echo "$HDRS" | grep -qi 'content-security-policy' && no "fwd-csp" "the forward carries WebTerm CSP" || ok "5. the forward is served WITHOUT WebTerm CSP (different origin)"
+CSP=$(echo "$HDRS" | grep -i '^content-security-policy:' | tr -d '\r')
+echo "$CSP" | grep -qiE 'script-src|default-src|unsafe-' \
+  && no "fwd-csp" "the forward carries the APP CSP: $CSP" \
+  || ok "5. the forward does not carry the app CSP (different origin)"
+echo "$CSP" | grep -qi 'frame-ancestors' \
+  && ok "5c. …but it does carry frame-ancestors (not framable by other sites)" \
+  || no "fwd-frame" "forward without frame-ancestors: $CSP"
+echo "$HDRS" | grep -qi '^x-frame-options:' \
+  && ok "5d. X-Frame-Options present too (older browsers)" \
+  || no "fwd-xfo" "no X-Frame-Options on the forward"
 # invers: domeniul principal (app-ul WebTerm) PĂSTREAZĂ CSP-ul (nu am slăbit securitatea)
 MAINHDRS=$(ch "$D" -D - -o /dev/null "$B/")
 echo "$MAINHDRS" | grep -qi 'content-security-policy' && ok "5b. the main app keeps its CSP" || no "main-csp" "the main app was left without CSP"
