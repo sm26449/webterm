@@ -16,7 +16,9 @@ pass=0; fail=0
 ok()  { echo "  PASS $1"; pass=$((pass+1)); }
 no()  { echo "  FAIL $1  --  $2"; fail=$((fail+1)); }
 enc() { python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "$1"; }
-j()   { curl -s -b "$J" "$@"; }
+# Cererile care poartă cookie-ul din jar trebuie să trimită şi Origin: `csrf_guard`
+# cere asta credenţialelor ambientale, exact ca un browser.
+j()   { curl -s -b "$J" -H "Origin: $B" "$@"; }
 
 # --- login (container deja setat de e2e) sau setup complet (container proaspăt) ---
 login_code=$(curl -s -c "$J" -o /dev/null -w '%{http_code}' -X POST "$B/api/login" \
@@ -24,7 +26,7 @@ login_code=$(curl -s -c "$J" -o /dev/null -w '%{http_code}' -X POST "$B/api/logi
 if [ "$login_code" != "200" ]; then
   curl -s -c "$J" -X POST "$B/api/setup" -H 'Content-Type: application/json' \
     -d "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\",\"setup_token\":\"$SETUP_TOKEN\"}" >/dev/null
-  HOST_JSON=$(curl -s -b "$J" -X POST "$B/api/hosts" -H 'Content-Type: application/json' \
+  HOST_JSON=$(curl -s -b "$J" -H "Origin: $B" -X POST "$B/api/hosts" -H 'Content-Type: application/json' \
     -d '{"name":"fs","note":"","connection_type":"agent","require_2fa":false}')
   ENROLL=$(echo "$HOST_JSON" | grep -oE 'install/[A-Za-z0-9_-]+\.sh' | head -1 | sed 's|install/||;s|\.sh||')
   TOKEN=$(curl -s "$B/install/$ENROLL.sh" | grep -oE '^TOKEN="[^"]+"' | sed 's/TOKEN="//;s/"//')

@@ -17,7 +17,9 @@ SC=$(curl -s -D - -o /dev/null -X POST "$B/api/setup" -H 'Content-Type: applicat
   -d '{"email":"e2e@example.com","password":"parola-e2e-123456","setup_token":"ci-e2e-token"}' \
   | grep -i '^set-cookie:' | sed -E 's/set-cookie: ([^;]+).*/\1/i' | tr -d '\r')
 [ -n "$SC" ] && ok "setup + session cookie ($(echo $SC|cut -d= -f1))" || { no "setup" "no cookie"; exit 1; }
-sess(){ curl -s -H "Cookie: $SC" "$@"; }
+# Cererile care poartă cookie trebuie să trimită şi Origin: `csrf_guard` cere asta
+# credenţialelor ambientale, exact ca un browser.
+sess(){ curl -s -H "Cookie: $SC" -H "Origin: $B" "$@"; }
 
 HJSON=$(sess -X POST "$B/api/hosts" -H 'Content-Type: application/json' -d '{"name":"fwd","connection_type":"agent","note":"","require_2fa":false}')
 ENROLL=$(echo "$HJSON" | grep -oE 'install/[A-Za-z0-9_-]+\.sh' | head -1 | sed 's|install/||;s|\.sh||')

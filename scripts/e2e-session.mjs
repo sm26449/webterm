@@ -63,7 +63,7 @@ check('setup cont prin API', true)
 
 const hostRes = await fetch(`${BASE}/api/hosts`, {
   method: 'POST',
-  headers: { 'Content-Type': 'application/json', Cookie: cookie },
+  headers: { 'Content-Type': 'application/json', Cookie: cookie, Origin: BASE },
   body: JSON.stringify({ name: 'ci-local', note: '', connection_type: 'agent', require_2fa: false }),
 })
 if (!hostRes.ok) fail(`crearea hostului a eșuat: ${hostRes.status}`)

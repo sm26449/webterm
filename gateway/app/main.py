@@ -363,10 +363,22 @@ async def csrf_guard(request: Request, call_next):
         forwarded = bool(host and fdom and host != fdom and host.endswith("." + fdom))
         # Subdomeniile de forward nu sunt API-ul nostru: cererile lor merg la echipament.
         if not forwarded and request.url.path.startswith(("/api/", "/__wtfwd/")):
-            # Token-urile de automatizare nu sunt vulnerabile la CSRF (nu se trimit automat
-            # de browser), deci nu le cerem Origin — altfel am rupe orice integrare.
+            # Poarta se aplică DOAR cererilor care poartă o credenţială AMBIENTALĂ — adică
+            # un cookie de sesiune, singurul lucru pe care browserul îl ataşează singur.
+            # Asta e chiar definiţia CSRF-ului: fără cookie nu există autoritate de furat, iar
+            # o cerere care îşi trimite explicit credenţialele (login, setup cu token, Bearer)
+            # n-a fost niciodată în pericol. Fără condiţia asta rupeam provisioning-ul scriptat
+            # şi orice `curl` de bootstrap — inclusiv propriul nostru E2E, care creează contul
+            # cu `fetch` din Node. O apărare care rupe calea de instalare se scoate, nu se
+            # tolerează.
+            #
+            # Rest: un atacator poate încă face un browser NELOGAT să trimită /api/login cu
+            # credenţialele LUI (login CSRF). Pe un produs cu un singur administrator asta
+            # înseamnă „te trezeşti în contul altuia", vizibil imediat şi fără acces la datele
+            # tale — iar preţul blocării ar fi ca niciun script să nu se mai poată autentifica.
             auth = (request.headers.get("authorization") or "").lower()
-            if not auth.startswith("bearer "):
+            has_cookie = bool(request.cookies.get(security.COOKIE_NAME))
+            if has_cookie and not auth.startswith("bearer "):
                 origin = request.headers.get("origin") or request.headers.get("referer") or ""
                 ours = urlparse(config.PUBLIC_URL).netloc.lower()
                 if not origin or urlparse(origin).netloc.lower() != ours:

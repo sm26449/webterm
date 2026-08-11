@@ -117,7 +117,8 @@ async def main():
     FWD_ORIGIN = "https://cam1." + OURS.split(":")[0]
 
     class Req:
-        def __init__(self, method, path, origin=None, host=OURS.split(":")[0], auth=None):
+        def __init__(self, method, path, origin=None, host=OURS.split(":")[0], auth=None,
+                     cookie=True):
             self.method = method
             self.headers = {}
             if origin:
@@ -125,6 +126,8 @@ async def main():
             self.headers["host"] = host
             if auth:
                 self.headers["authorization"] = auth
+            # Poarta se aplică doar cererilor cu credenţială ambientală (cookie de sesiune).
+            self.cookies = {security.COOKIE_NAME: "x"} if cookie else {}
             self.url = type("U", (), {"path": path})()
 
     async def passthru(_):
@@ -149,6 +152,13 @@ async def main():
           await call(Req("POST", "/api/hosts/1/run", auth="Bearer wt_x")) == "OK")
     check("cererile către subdomeniul forwardat trec (nu sunt API-ul nostru)",
           await call(Req("POST", "/login", host="cam1." + OURS.split(":")[0])) == "OK")
+    # Fără cookie nu există autoritate ambientală de furat, deci nu e CSRF — şi asta e ce
+    # ţine în viaţă provisioning-ul scriptat (`curl` către /api/setup, E2E-ul cu fetch din
+    # Node). Poarta prea largă a rupt exact calea de instalare, prinsă în CI.
+    check("fără cookie de sesiune → nu cerem Origin (bootstrap/curl)",
+          await call(Req("POST", "/api/setup", cookie=False)) == "OK")
+    check("…dar CU cookie şi fără Origin → tot refuzat",
+          await call(Req("POST", "/api/setup")) == 403)
 
     # ── F-03: plafonul dur e CHIAR mai larg ─────────────────────────────────
     check("plafonul dur > plafonul moale",
