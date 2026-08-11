@@ -1083,6 +1083,7 @@ const ro: Lang = {
     'settings.passkeys': "Passkeys",
     'settings.passkeysAvailable': "Intră fără parolă cu amprentă / Face ID / cheie hardware. Necesită HTTPS.",
     'settings.passkeysUnavailable': "Indisponibil când accesezi aplicația prin IP — passkey-urile au nevoie de un domeniu (sau localhost).",
+    'settings.singlePasskeyWarning': "Ai un singur passkey, iar cel puţin un host cere 2FA. Dacă pierzi dispozitivul, nu mai ajungi la acele hosturi, iar parola nu e acceptată cât timp există un passkey înrolat — recuperarea trece atunci prin `python3 -m app.admin` pe server. Înrolează un al doilea passkey, de preferat în alt ecosistem.",
     'settings.noPasskeys': "Niciun passkey înregistrat.",
     'settings.addPasskey': "+ Adaugă passkey",
     'settings.passkeyNamePrompt': "Nume pentru acest passkey (ex: laptop, telefon):",

@@ -395,8 +395,19 @@ async def totp_status(user=Depends(security.require_user)):
     remaining = await db.fetchone(
         "SELECT COUNT(*) AS c FROM recovery_codes WHERE user_id=? AND used IS NULL",
         user["id"])
+    # Câte passkey-uri şi câte hosturi cer 2FA. Combinaţia „un singur passkey + hosturi
+    # marcate require_2fa" e singurul mod în care te poţi bloca fără cale de întoarcere din
+    # UI: pierzi dispozitivul, iar step-up-ul refuză parola cât timp mai există un passkey
+    # înrolat. Ieşirea rămâne `python3 -m app.admin` de pe server — dar ăla e un lucru pe
+    # care vrei să-l ştii ÎNAINTE, nu în seara în care ţi-a căzut telefonul în apă.
+    pk = await db.fetchone(
+        "SELECT COUNT(*) AS c FROM webauthn_credentials WHERE user_id=?", user["id"])
+    gated = await db.fetchone("SELECT COUNT(*) AS c FROM hosts WHERE require_2fa=1")
     return {"enabled": bool(user["totp_enabled"]),
-            "recovery_remaining": remaining["c"] if remaining else 0}
+            "recovery_remaining": remaining["c"] if remaining else 0,
+            "passkeys": pk["c"] if pk else 0,
+            "hosts_2fa": gated["c"] if gated else 0,
+            "single_passkey_risk": bool(pk and pk["c"] == 1 and gated and gated["c"] > 0)}
 
 
 class TotpSetup(BaseModel):
@@ -3124,7 +3135,35 @@ async def provision_agent(host_id: int, request: Request, user=Depends(security.
         await db.execute(
             "UPDATE hosts SET credential_encrypted=NULL, credential_policy='stored' WHERE id=?",
             host_id)
+        await _drop_ssh_credential_in_memory(host_id)   # vezi helperul: DB-ul singur nu ajunge
     return {"ok": True, "credentials_deleted": delete_creds}
+
+
+async def _drop_ssh_credential_in_memory(host_id: int) -> bool:
+    """Închide conexiunea SSH vie a hostului, dacă există. Întoarce True dacă a fost una.
+
+    Ştergerea rândului din DB nu e suficientă ca „uită credenţialele" să fie adevărat:
+    `asyncssh` păstrează `password` şi `client_keys` ÎN CLAR în opţiunile conexiunii
+    (`SSHClientConnectionOptions`), iar `SSHClientConnection` le ţine cât trăieşte ea. Deci
+    parola rămânea în memoria gateway-ului până când conexiunea pica singură — uneori ore.
+
+    Nu e o escaladare (ca s-o citeşti îţi trebuie execuţie de cod în proces, iar atunci ai
+    şi cheia seifului), dar butonul promite ceva şi oamenii îl apasă tocmai ca acel ceva să
+    nu mai existe. O promisiune pe jumătate adevărată e mai rea decât una absentă.
+
+    Costul asumat: sesiunile SSH vii de pe hostul ăla se termină. E consecinţa corectă —
+    „uită credenţialele" se apasă când calea SSH nu mai e necesară (agentul a preluat), iar
+    o conexiune care supravieţuieşte ştergerii credenţialei e exact ce voiai să eviţi.
+    Semnalat ca zonă neexaminată de un audit extern; verificat şi confirmat în asyncssh."""
+    src = core.sources.get(host_id)
+    if not isinstance(src, core.SshSource):
+        return False
+    core.sources.pop(host_id, None)
+    try:
+        await src.disconnect()
+    except Exception:                       # noqa: BLE001 — închiderea e best-effort
+        log.warning("closing the ssh connection for host=%s failed", host_id, exc_info=True)
+    return True
 
 
 class ForgetCredsIn(BaseModel):
@@ -3145,7 +3184,8 @@ async def forget_credentials(host_id: int, body: ForgetCredsIn,
         raise ApiError(401, "auth.wrongCurrentPassword",
                        "re-enter your account password to forget the stored credentials")
     await db.execute("UPDATE hosts SET credential_encrypted=NULL WHERE id=?", host_id)
-    return {"ok": True}
+    dropped = await _drop_ssh_credential_in_memory(host_id)
+    return {"ok": True, "connection_closed": dropped}
 
 
 # ── Snippets (comenzi salvate) ───────────────────────────────────────────
@@ -3664,6 +3704,26 @@ mkdir -p "$HOME/.webterm" && chmod 700 "$HOME/.webterm"
 $CURL "$GW/agent/ptyd.py" $FETCH_OUT "$HOME/.webterm/ptyd.py"
 chmod 700 "$HOME/.webterm/ptyd.py"
 
+# Octeţii aduşi trebuie să fie cei pe care gateway-ul i-a măsurat când a generat scriptul.
+# Contează mai ales în modul insecure (`curl -k`), unde pin-ul de certificat se stabileşte
+# abia la prima conectare, deci ACEASTĂ descărcare e neautentificată. Fără verificare,
+# rulăm ce ne-a dat reţeaua.
+AGENT_SHA256="{agent_sha256}"
+if [ -n "$AGENT_SHA256" ]; then
+  GOT=$(sha256sum "$HOME/.webterm/ptyd.py" 2>/dev/null | cut -d" " -f1)
+  [ -n "$GOT" ] || GOT=$(shasum -a 256 "$HOME/.webterm/ptyd.py" 2>/dev/null | cut -d" " -f1)
+  if [ -z "$GOT" ]; then
+    echo "WARNING: no sha256sum/shasum on this host — the agent could not be verified."
+  elif [ "$GOT" != "$AGENT_SHA256" ]; then
+    rm -f "$HOME/.webterm/ptyd.py"
+    echo "ERROR: the downloaded agent does not match the expected checksum." >&2
+    echo "  expected $AGENT_SHA256" >&2
+    echo "  got      $GOT" >&2
+    echo "  Someone may be intercepting this download. Nothing was installed." >&2
+    exit 1
+  fi
+fi
+
 cat > "$HOME/.webterm/agent.json" <<EOF
 {{"url": "$WS_URL", "token": "$TOKEN", "insecure": $INSECURE}}
 EOF
@@ -3797,6 +3857,7 @@ async def install_script(enroll_token: str):
         public_url=config.PUBLIC_URL, ws_url=config.ws_public_url(),
         token=token, insecure="true" if config.AGENT_INSECURE else "false",
         integration_sha256=_shell_integration_digest(),
+        agent_sha256=_agent_digest(),
         ssl_ctx="ssl._create_unverified_context()" if config.AGENT_INSECURE else "None")
 
 
@@ -3810,6 +3871,31 @@ async def agent_source():
         return core.agent_install_source()
     except Exception as e:
         raise HTTPException(500, "agent source signing failed: %s" % e)
+
+
+def _agent_digest() -> str:
+    """sha256 al `ptyd.py` LIVRAT. Scriptul de instalare îl verifică după descărcare.
+
+    F-11 din auditul extern: în modul insecure, primul `curl -k` aduce codul care devine
+    agentul — adică, de regulă, un proces cu drepturile userului care instalează — iar
+    pin-ul de certificat se stabileşte abia DUPĂ. Cine interceptează exact acea descărcare
+    livrează propriul agent. Semnătura Ed25519 nu ajută aici: ea păzeşte canalul de UPDATE,
+    nu prima aducere, iar agentul care ar verifica-o e chiar cel descărcat.
+
+    Digest-ul nu rezolvă complet problema — vine pe aceeaşi conexiune — dar mută atacul de la
+    „interceptez o descărcare" la „interceptez descărcarea ŞI scriptul care o verifică", şi
+    dă operatorului o valoare pe care o poate compara din altă parte.
+    Mecanismul e acelaşi cu cel deja folosit pentru `shell-integration.sh`.
+
+    ATENŢIE la ce se măsoară: `/agent/ptyd.py` NU serveşte fişierul de pe disc. Cu o cheie de
+    flotă — pe care gateway-ul şi-o generează singur la prima pornire, deci cazul OBIŞNUIT —
+    `agent_install_source()` substituie `UPDATE_PUBKEY` cu cheia acelui deployment. Un digest
+    calculat pe fişierul din repo n-ar corespunde niciodată octeţilor livraţi, iar verificarea
+    ar respinge FIECARE instalare. Măsurăm exact ce iese pe endpoint."""
+    try:
+        return hashlib.sha256(core.agent_install_source().encode()).hexdigest()
+    except Exception:                       # noqa: BLE001 — fără digest, scriptul sare verificarea
+        return ""
 
 
 def _shell_integration_digest() -> str:
@@ -4028,6 +4114,15 @@ async def shared_ws(ws: WebSocket, token: str):
             await hub.ensure_attached(conn)
         await hub.broadcast_roster()
         await hub.announce_attach(client)
+        # Un invitat cu drept de scriere putea tasta într-un terminal fără să lase o urmă
+        # ATRIBUIBILĂ: jurnalul arăta „cineva prin share". Nu are cont, deci nu-l putem numi
+        # — dar îi putem da identitatea pe care o are: id-ul clientului (acelaşi din roster,
+        # deci acelaşi pe care apare butonul de kick), adresa şi browserul. Suficient ca
+        # „cine a rulat asta" să aibă un răspuns când share-ul a fost dat la trei oameni.
+        await audit.record(time.time(), "guest:" + client.id, client.remote_addr,
+                           "WS", "/ws/shared", 101,
+                           "share attach sid=%s writable=%s agent=%s"
+                           % (row["id"], writable, client.user_agent[:60]))
         email_alerts.notify_session_attach(
             row["title"], client.remote_addr, client.user_agent, row["share_by"] or "")
         if start_locked:

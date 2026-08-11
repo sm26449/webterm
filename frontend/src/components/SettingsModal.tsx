@@ -359,9 +359,17 @@ export default function SettingsModal(props: {
   const [pendingAction, setPendingAction] = useState<'disable' | 'regen' | null>(null)
   const [actionPw, setActionPw] = useState('')
 
+  // „Un singur passkey + hosturi care cer 2FA" e singura combinaţie din care nu te poţi
+  // întoarce din interfaţă: pierzi dispozitivul, iar step-up-ul refuză parola cât timp mai
+  // există un passkey înrolat. Ieşirea rămâne `app.admin` de pe server — un lucru pe care
+  // vrei să-l afli înainte, nu în seara în care s-a întâmplat.
+  const [lockoutRisk, setLockoutRisk] = useState(false)
   const loadTotp = () =>
-    api<{ enabled: boolean; recovery_remaining: number }>('/api/totp/status')
-      .then((s) => { setTotpEnabled(s.enabled); setRecoveryLeft(s.recovery_remaining) })
+    api<{ enabled: boolean; recovery_remaining: number; single_passkey_risk?: boolean }>('/api/totp/status')
+      .then((s) => {
+        setTotpEnabled(s.enabled); setRecoveryLeft(s.recovery_remaining)
+        setLockoutRisk(!!s.single_passkey_risk)
+      })
       .catch(() => {})
 
   // SMTP (alerte pe email)
@@ -1503,6 +1511,11 @@ export default function SettingsModal(props: {
             </div>
           ))}
           {passkeys.length === 0 && <div className="text-xs text-slate-500">{t('settings.noPasskeys')}</div>}
+          {lockoutRisk && (
+            <div className="rounded-lg bg-amber-500/10 p-2.5 text-xs wt-warn ring-1 ring-amber-500/25">
+              {t('settings.singlePasskeyWarning')}
+            </div>
+          )}
         </div>
         <button
           onClick={addPasskey}

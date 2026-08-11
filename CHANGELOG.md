@@ -7,6 +7,63 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [Unreleased]
+
+### Fixed — "forget the credentials" did not forget all of them
+
+- Deleting the stored SSH credential removed the database row and nothing else, while
+  `asyncssh` keeps `password` and `client_keys` **in clear text** inside the connection's
+  options for as long as that connection lives. So the credential stayed in the gateway's
+  memory, sometimes for hours, after the button that promised to remove it. Not an
+  escalation — reading it needs code execution in the process, and at that point the vault
+  key is there too — but a promise half kept is worse than one not made. Forgetting now also
+  closes the live SSH connection, and so does switching a host to the `ephemeral` policy.
+  The cost is deliberate: live SSH sessions on that host end. That is the right consequence
+  of "forget the credentials", which is pressed once the SSH path is no longer needed.
+
+### Added — the install script verifies the agent it just downloaded
+
+- In insecure mode the first `curl -k` fetches the code that becomes the agent, and the
+  certificate pin is only established afterwards; whoever intercepts that one download
+  installs their own agent. The Ed25519 signature does not help there — it guards the
+  *update* channel, and the agent that would check it is the one being downloaded. The
+  script now compares the bytes against a sha256 the gateway computed, the same mechanism
+  already used for `shell-integration.sh`.
+
+  It does not close the hole, since the digest travels over the same connection, but it
+  moves the attack from "intercept a download" to "intercept the download *and* the script
+  that checks it".
+
+  The first version of this hashed `agent/ptyd.py` on disk — and would have rejected every
+  install. `/agent/ptyd.py` does not serve that file: with a fleet signing key, which the
+  gateway generates by itself on first boot and is therefore the normal case, `UPDATE_PUBKEY`
+  is substituted into the source. The digest now measures what actually leaves the endpoint,
+  and the test generates a fleet key so the two genuinely differ — without that it passed
+  against the broken implementation too.
+
+### Added — the risk you cannot recover from is now stated in the UI
+
+- One passkey plus at least one host marked *require 2FA* is the only combination with no way
+  back through the interface: lose the device and those hosts refuse the password for as long
+  as a passkey is enrolled, leaving `python3 -m app.admin` on the server. Settings → Security
+  now says so while there is still time to enrol a second one.
+
+### Added — a writable share guest leaves an attributable trace
+
+- A guest with write access could type into a terminal and the audit log recorded "someone
+  through a share". They have no account, so they cannot be named — but they can carry the
+  identity they do have: the client id shown in the viewer list (the same one the kick button
+  uses), the address, and the browser. Enough for "who ran this" to have an answer when a
+  link went to three people.
+
+### Added — tests for the strongest factor in the system
+
+- An external audit listed `webauthn_api.py` as unexamined. It was examined and is correct:
+  single-use challenges, RP-ID and origin validated, user verification required on both login
+  and step-up, sign counts propagated. What was missing was a gate keeping it that way, so
+  the properties are now asserted — including against the source, so removing
+  `require_user_verification` fails the suite even on a path nothing else exercises.
+
 ## [2.0.4] — 2026-08-11 · agent (41)
 
 A security release: two external audits, one of them escalating a finding to Critical that

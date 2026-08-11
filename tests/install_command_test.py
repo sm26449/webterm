@@ -103,6 +103,38 @@ async def main():
               r["install_command"] != h["install_command"]
               and r["install_command_dedicated"] != h["install_command_dedicated"])
 
+    # ── digestul agentului în scriptul de instalare (F-11) ──────────────────
+    # Capcana: `/agent/ptyd.py` NU serveşte fişierul din repo. Cu o cheie de flotă — pe care
+    # gateway-ul şi-o generează singur, deci cazul obişnuit — `UPDATE_PUBKEY` e substituit.
+    # Un digest calculat pe fişierul de pe disc ar respinge FIECARE instalare. Testul compară
+    # cu octeţii care ies chiar pe endpoint.
+    import hashlib as _h
+    from app import core as _core
+
+    served = _core.agent_install_source().encode()
+    want = _h.sha256(served).hexdigest()
+    check("digestul din script e al SURSEI SERVITE, nu al fişierului de pe disc",
+          api._agent_digest() == want,
+          "%s != %s" % (api._agent_digest()[:16], want[:16]))
+    on_disk = _h.sha256(config.AGENT_FILE.read_bytes()).hexdigest()
+
+    # Cazul care contează şi care ar fi rupt fiecare instalare: generăm o cheie de flotă,
+    # exact ce face gateway-ul singur la prima pornire. Din acel moment sursa servită diferă
+    # de fişierul din repo (UPDATE_PUBKEY substituit), deci un digest luat de pe disc ar fi
+    # greşit. Fără pasul ăsta, testul ar trece şi cu implementarea greşită.
+    if not _core.signing.pubkey_hex():
+        _core.signing.generate()
+        _core.signing.load()
+    check("cheie de flotă prezentă (ca într-o instalare reală)",
+          bool(_core.signing.pubkey_hex()))
+    served2 = _core.agent_install_source().encode()
+    want2 = _h.sha256(served2).hexdigest()
+    check("sursa servită DIFERĂ de fişierul din repo când există cheie de flotă",
+          want2 != on_disk, "identice — testul nu ar discrimina")
+    check("digestul urmăreşte sursa servită, nu fişierul",
+          api._agent_digest() == want2 and api._agent_digest() != on_disk,
+          "%s vs servit %s vs disc %s" % (api._agent_digest()[:12], want2[:12], on_disk[:12]))
+
     print(f"\n{ok}/{total} passed")
     return ok == total
 

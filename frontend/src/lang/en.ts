@@ -1072,6 +1072,7 @@ const en: Lang = {
     'settings.passkeys': "Passkeys",
     'settings.passkeysAvailable': "Sign in without a password using fingerprint / Face ID / hardware key. Requires HTTPS.",
     'settings.passkeysUnavailable': "Unavailable when accessing the app by IP — passkeys need a domain (or localhost).",
+    'settings.singlePasskeyWarning': "You have one passkey, and at least one host requires 2FA. If you lose that device you cannot reach those hosts, and the password will not be accepted while a passkey is enrolled — recovery then means `python3 -m app.admin` on the server. Enrol a second passkey, ideally on a different ecosystem.",
     'settings.noPasskeys': "No passkeys registered.",
     'settings.addPasskey': "+ Add passkey",
     'settings.passkeyNamePrompt': "Name for this passkey (e.g. laptop, phone):",
