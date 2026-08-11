@@ -14,22 +14,52 @@ Nothing listens on your servers. A small agent dials **out** to the gateway, so 
 NAT or on a mobile connection works exactly like one with a public IP.
 
 ```mermaid
-flowchart LR
-    B["Browser<br/><i>desktop · phone · tablet</i>"]
-    G["Gateway<br/><i>one Docker container</i>"]
-    A1["Agent on host A"]
-    A2["Agent on host B"]
-    S1["tmux sessions"]
-    S2["tmux sessions"]
-    D["Switch / router<br/><i>telnet, serial</i>"]
+flowchart TB
+    subgraph you["You, in a browser"]
+      B["Desktop · phone · tablet<br/><i>same session, several devices at once</i>"]
+      SH["Share link<br/><i>read-only or writable, expires</i>"]
+    end
+
+    G["<b>Gateway</b> — one Docker container<br/><i>passkeys · 2FA · step-up on flagged hosts</i><br/><i>audit log · encrypted backups · alerts</i>"]
+
+    subgraph reach["Three ways to reach a machine"]
+      A["<b>Agent</b><br/><i>one Python file, dials OUT</i><br/><i>nothing to expose, works behind NAT</i>"]
+      SSHH["<b>SSH</b><br/><i>nothing installed on the target</i>"]
+      TEL["<b>Telnet</b><br/><i>switches, PDUs, old gear</i>"]
+    end
+
+    subgraph get["What you can do once you are there"]
+      T["<b>Persistent sessions</b> (tmux)<br/><i>survive the browser, the gateway, the agent</i><br/><i>replay history · search · commands as objects</i>"]
+      FS["<b>Files</b><br/><i>browse · edit · upload/download · git panel</i>"]
+      SER["<b>Serial console</b><br/><i>RS232/RS485/USB on the host</i>"]
+      FWD["<b>Port forwarding</b><br/><i>an internal web UI on its own subdomain</i>"]
+      RUN["<b>Fleet run</b><br/><i>one command → many hosts</i><br/><i>metrics · alerts · diagnostics</i>"]
+    end
 
     B <-->|WebSocket| G
-    G <-.->|"outbound WebSocket<br/>signed updates"| A1
-    G <-.->|outbound| A2
-    A1 --- S1
-    A2 --- S2
-    A2 -.->|TCP tunnel| D
+    SH -.->|watch or type| G
+
+    G <-.->|"outbound WebSocket<br/>signed updates"| A
+    G -->|dials out| SSHH
+    G -->|dials out| TEL
+
+    A --> T
+    A --> FS
+    A --> SER
+    A --> FWD
+    A --> RUN
+    A -.->|"telnet bastion<br/><i>from inside the network</i>"| TEL
+
+    SSHH --> T
+    SSHH --> FS
+    SSHH --> FWD
+    TEL --> T
 ```
+
+The agent is the path worth having: it dials out, so nothing listens on your servers, and
+your sessions live in tmux on the host rather than in the gateway's memory. SSH and telnet
+need nothing installed and are there for machines you do not own — a switch, a customer's
+box — with the trade that those sessions end when the gateway restarts.
 
 > [!WARNING]
 > **Read this before exposing it to a network.** **Anyone who gets past the login gets, on every
