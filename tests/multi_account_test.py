@@ -17,6 +17,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
 import httpx  # noqa: E402
 from app import api, config, db, security  # noqa: E402
+
+# Middleware-ul `csrf_guard` cere `Origin` pe metodele care schimbă ceva şi refuză
+# lipsa lui (ca `_origin_ok` pentru WebSocket). Testele imită un BROWSER, deci trimit
+# antetul; fără el ar testa o cale pe care niciun browser n-o produce.
+_ORIGIN = {"origin": os.environ["WEBTERM_PUBLIC_URL"]}
 from app.main import app  # noqa: E402
 
 ok = 0
@@ -38,7 +43,7 @@ async def main():
     await api.init_setup_token()
 
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://t") as a:
+    async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=_ORIGIN) as a:
         r = await a.post("/api/setup", json={"email": "unu@x.co", "password": PW1,
                                              "setup_token": "test-setup"})
         check("primul cont creat prin setup", r.status_code == 200)
@@ -61,7 +66,7 @@ async def main():
         check("lista marchează contul curent", len(me) == 1 and me[0]["email"] == "unu@x.co")
 
     # ── contul nou e admin deplin: aceleaşi drepturi, fără roluri ──
-    async with httpx.AsyncClient(transport=transport, base_url="http://t") as b:
+    async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=_ORIGIN) as b:
         r = await b.post("/api/login", json={"email": "doi@x.co", "password": PW2})
         check("contul nou se poate autentifica", r.status_code == 200 and r.json().get("ok"))
         r = await b.post("/api/hosts", json={"name": "al-doilea-cont"})
@@ -79,11 +84,11 @@ async def main():
         check("curăţare host", r.status_code in (200, 404))
 
     # ── ştergerea e o REVOCARE: sesiunile contului şters nu mai merg ──
-    async with httpx.AsyncClient(transport=transport, base_url="http://t") as a2:
+    async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=_ORIGIN) as a2:
         r = await a2.post("/api/login", json={"email": "unu@x.co", "password": PW1})
         check("contul şters nu se mai poate autentifica", r.status_code == 401)
 
-    async with httpx.AsyncClient(transport=transport, base_url="http://t") as b2:
+    async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=_ORIGIN) as b2:
         await b2.post("/api/login", json={"email": "doi@x.co", "password": PW2})
         users = (await b2.get("/api/users")).json()
         check("a rămas un singur cont", len(users) == 1)
@@ -101,7 +106,7 @@ async def main():
               len((await b2.get("/api/users")).json()) == 1)
 
         # setup-ul rămâne închis: conturile se adaugă doar DIN interior, autentificat
-        async with httpx.AsyncClient(transport=transport, base_url="http://t") as anon:
+        async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=_ORIGIN) as anon:
             r = await anon.post("/api/setup", json={"email": "hacker@x.co", "password": PW1,
                                                     "setup_token": "test-setup"})
             check("setup-ul rămâne blocat după primul cont", r.status_code == 409)

@@ -52,7 +52,7 @@ CI_TESTS="agent_hardening agent_reliability agent_tmux_hygiene ed25519_kat
           audit_log cloud_backup transcript_text shell_integration tail_altscreen
           guardrail_alerts multi_account api_token update_check install_command upgrade_script
           reauth_secrets host_edit config_env compose_env forward_stepup session_attach_stepup
-          audit_2026_07 i18n_catalog route_auth audit_reads agent_flood attach_alert account_confirm"
+          audit_2026_07 i18n_catalog route_auth audit_reads agent_flood attach_alert account_confirm csrf_ratelimit"
 
 # security_test e ultimul: îşi porneşte singur un uvicorn efemer şi verifică auth obligatoriu
 # pe fs, CSWSH, lockout 429, headere, traversare, gating enroll/share — regresii pe care

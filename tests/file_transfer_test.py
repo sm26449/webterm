@@ -12,11 +12,17 @@ import time
 from pathlib import Path
 
 import httpx
+
+# Middleware-ul `csrf_guard` cere `Origin` pe metodele care schimbă ceva şi refuză
+# lipsa lui (ca `_origin_ok` pentru WebSocket). Testele imită un BROWSER, deci trimit
+# antetul; fără el ar testa o cale pe care niciun browser n-o produce.
+# Originea e a serverului pe care ÎL PORNEŞTE testul (BASE), nu a suitei.
 from tmux_sandbox import agent_env, kill_server
 
 ROOT = Path(__file__).resolve().parent.parent   # rădăcina repo-ului, nu hardcodată
 PORT = 8793
 BASE = f"http://127.0.0.1:{PORT}"
+_ORIGIN = {"origin": BASE}
 WS = BASE.replace("http", "ws")
 P = []
 
@@ -48,7 +54,7 @@ async def main():
     aenv = agent_env(home)          # HOME sandboxat + server tmux propriu (vezi tmux_sandbox)
     agent = None
     try:
-        async with httpx.AsyncClient(base_url=BASE, timeout=30) as h:
+        async with httpx.AsyncClient(base_url=BASE, timeout=30, headers=_ORIGIN) as h:
             await wait(lambda: _up(h))
             r = await h.post("/api/setup", json={"email": "a@b.c", "password": "12345678x", "setup_token": "test-setup"})
             hd = {"Cookie": "wt_session=" + r.cookies["wt_session"]}

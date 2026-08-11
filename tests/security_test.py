@@ -9,12 +9,21 @@ import tempfile
 import time
 
 import httpx
+
+# Middleware-ul `csrf_guard` cere `Origin` pe metodele care schimbă ceva şi refuză
+# lipsa lui (ca `_origin_ok` pentru WebSocket). Testele imită un BROWSER, deci trimit
+# antetul; fără el ar testa o cale pe care niciun browser n-o produce.
+# ATENŢIE: testul ăsta porneşte un uvicorn PROPRIU pe alt port şi îi dă
+# `WEBTERM_PUBLIC_URL=BASE`. Originea trimisă trebuie să fie a ACELUI server, nu a suitei
+# — altfel `csrf_guard` respinge corect, iar testul pică din motive care n-au legătură cu
+# ce verifică. `_ORIGIN` se defineşte mai jos, după BASE.
 import websockets
 
 # rădăcina repo-ului, derivată din locația testului (tests/ e sub root) — nu hardcodată
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PORT = 8796
 BASE = f"http://127.0.0.1:{PORT}"
+_ORIGIN = {"origin": BASE}
 WS = BASE.replace("http", "ws")
 P = []
 
@@ -34,7 +43,7 @@ async def main():
          "--host", "127.0.0.1", "--log-level", "warning"],
         env=env, cwd=f"{ROOT}/gateway")
     try:
-        async with httpx.AsyncClient(base_url=BASE) as h:
+        async with httpx.AsyncClient(base_url=BASE, headers=_ORIGIN) as h:
             for _ in range(60):
                 try:
                     if (await h.get("/api/state")).status_code == 200:

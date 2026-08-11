@@ -18,6 +18,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
 import httpx  # noqa: E402
 from app import api, config, db, security  # noqa: E402
+
+# Middleware-ul `csrf_guard` cere `Origin` pe metodele care schimbă ceva şi refuză
+# lipsa lui (ca `_origin_ok` pentru WebSocket). Testele imită un BROWSER, deci trimit
+# antetul; fără el ar testa o cale pe care niciun browser n-o produce.
+_ORIGIN = {"origin": os.environ["WEBTERM_PUBLIC_URL"]}
 from app.main import app  # noqa: E402
 
 ok = 0
@@ -39,7 +44,7 @@ async def main():
     await api.init_setup_token()
 
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+    async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=_ORIGIN) as c:
         await c.post("/api/setup", json={"email": "a@b.co", "password": PW,
                                          "setup_token": "test-setup"})
         hid = (await c.post("/api/hosts", json={"name": "normal"})).json()["id"]
@@ -108,7 +113,7 @@ async def main():
     # al acţiunilor lui. Verificarea rulase prin token; de când `/api/audit` cere `require_user`
     # nu mai poate, iar `r.json()["entries"]` pe un 401 ridica un KeyError care lăsa firul
     # aiosqlite viu şi făcea testul să atârne în loc să pice cu traceback.
-    async with httpx.AsyncClient(transport=transport, base_url="http://t") as ca:
+    async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=_ORIGIN) as ca:
         await ca.post("/api/login", json={"email": "a@b.co", "password": PW})
         actors = {e["actor"] for e in (await ca.get("/api/audit?limit=20")).json()["entries"]}
         check("auditul arată tokenul ca actor, nu „anonim”",
@@ -120,7 +125,7 @@ async def main():
     async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=H) as t3:
         check("token expirat → 401", (await t3.get("/api/status")).status_code == 401)
 
-    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c2:
+    async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=_ORIGIN) as c2:
         await c2.post("/api/login", json={"email": "a@b.co", "password": PW})
         toks = (await c2.get("/api/tokens")).json()
         check("lista arată tokenurile fără valoarea lor",
@@ -140,11 +145,11 @@ async def main():
     # Ştergerea contului emitent curăţa sesiuni, passkey-uri şi coduri de recuperare, dar
     # lăsa tokenul viu până la expirare (până la un an) — deci arăta ca o revocare completă
     # fără să fie una. Semnalat de un audit extern.
-    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c3:
+    async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=_ORIGIN) as c3:
         await c3.post("/api/login", json={"email": "a@b.co", "password": PW})
         await c3.post("/api/users", json={"email": "pleaca@b.co", "password": PW,
                                           "current_password": PW})
-    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c4:
+    async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=_ORIGIN) as c4:
         await c4.post("/api/login", json={"email": "pleaca@b.co", "password": PW})
         gone_tok = (await c4.post("/api/tokens", json={
             "name": "al-contului-care-pleaca", "scopes": ["read"],
@@ -153,7 +158,7 @@ async def main():
     async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=HG) as t6:
         check("tokenul contului merge cât timp contul există",
               (await t6.get("/api/status")).status_code == 200)
-    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c5:
+    async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=_ORIGIN) as c5:
         await c5.post("/api/login", json={"email": "a@b.co", "password": PW})
         uid = [u for u in (await c5.get("/api/users")).json()
                if u["email"] == "pleaca@b.co"][0]["id"]
@@ -168,11 +173,11 @@ async def main():
     # creezi token → schimbi emailul → contul e şters → `DELETE ... WHERE created_by=<email nou>`
     # nu prindea nimic, iar tokenul trăia până la 365 de zile. Cauza era cheia mutabilă, nu
     # ştergerea. Acum decizia se ia pe `created_by_id`.
-    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c6:
+    async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=_ORIGIN) as c6:
         await c6.post("/api/login", json={"email": "a@b.co", "password": PW})
         await c6.post("/api/users", json={"email": "vechi@b.co", "password": PW,
                                           "current_password": PW})
-    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c7:
+    async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=_ORIGIN) as c7:
         await c7.post("/api/login", json={"email": "vechi@b.co", "password": PW})
         moved_tok = (await c7.post("/api/tokens", json={
             "name": "supravietuitor", "scopes": ["read"], "current_password": PW})).json()["token"]
@@ -182,7 +187,7 @@ async def main():
     async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=HM) as t8:
         check("tokenul merge după schimbarea emailului",
               (await t8.get("/api/status")).status_code == 200)
-    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c8:
+    async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=_ORIGIN) as c8:
         await c8.post("/api/login", json={"email": "a@b.co", "password": PW})
         uid2 = [u for u in (await c8.get("/api/users")).json()
                 if u["email"] == "nou@b.co"][0]["id"]

@@ -1,6 +1,8 @@
 """Passwords, web sessions, host tokens, secret vault, brute-force protection."""
 
+import asyncio
 import base64
+import concurrent.futures
 import hashlib
 import hmac
 import ipaddress
@@ -108,6 +110,29 @@ def encrypt_secret(plaintext: str) -> str:
 
 def decrypt_secret(blob: str) -> str:
     return _fernet.decrypt(blob.encode()).decode()
+
+# F-04: hashing-ul de parole are executor PROPRIU. Pe pool-ul implicit al asyncio
+# (min(32, cpu+4) fire) stă tot I/O-ul off-loadat: `read_tail`, `fsync`-ul de transcript,
+# statistici de stocare, căutarea, backup/VACUUM, KDF-urile de semnare. O rafală de login-uri
+# neautentificate — plafonul se consultă ÎNAINTE de a înregistra eşecul, deci un val
+# concurent trece tot — satura pool-ul şi opreau persistenţa terminalelor vii, la ~64 MiB
+# de RAM tranzitoriu per verificare. Două fire: ghicirea rămâne serializată, iar restul
+# aplicaţiei nu simte nimic.
+_pw_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="wt-pw")
+
+
+async def verify_password_async(password: str, password_hash: str) -> bool:
+    return await asyncio.get_running_loop().run_in_executor(
+        _pw_pool, verify_password, password, password_hash)
+
+
+async def dummy_verify_async() -> None:
+    await asyncio.get_running_loop().run_in_executor(_pw_pool, dummy_verify)
+
+
+async def hash_password_async(password: str) -> str:
+    return await asyncio.get_running_loop().run_in_executor(_pw_pool, hash_password, password)
+
 
 _ph = PasswordHasher()
 # fixed hash used to keep login timing constant when the email doesn't exist
@@ -492,6 +517,13 @@ _FAIL_WINDOW = 900         # 15 min
 _IP_MAX_FAILS = config.IP_MAX_FAILS   # failures per IP in the window before lockout
 _IP_LOCKOUT = 900          # lockout duration once tripped
 _GLOBAL_MAX_FAILS = 100    # total failures across all IPs in the window
+# F-03: plafonul „dur" pentru re-autentificarea pe cont trebuie să fie CHIAR mai larg decât
+# cel moale, altfel n-are rost. Erau amândouă `IP_MAX_FAILS` (5) cu acelaşi lockout, deci
+# zece parole greşite de la un cookie furat blocau 15 minute exact calea prin care
+# proprietarul şi-ar fi schimbat parola — singura care invalidează sesiunea atacatorului.
+# Acum: buget separat, mult mai mare, şi fereastră proprie.
+_HARD_MAX_FAILS = 50
+_HARD_WINDOW = 3600.0
 
 _ip_fails: dict = {}       # ip -> [timestamps]
 _ip_locked: dict = {}      # ip -> unlock_epoch
@@ -518,6 +550,13 @@ def _prune(now: float) -> None:
             _ip_locked.pop(ip, None)
 
 
+def _limits_for(key: str) -> tuple:
+    """(plafon, fereastră) pentru o cheie. Cheile `reauth-hard:` au bugetul lor larg."""
+    if key.startswith("reauth-hard:"):
+        return _HARD_MAX_FAILS, _HARD_WINDOW
+    return _IP_MAX_FAILS, _FAIL_WINDOW
+
+
 def login_allowed(ip: str) -> tuple:
     """Returns (allowed, retry_after_seconds)."""
     now = time.time()
@@ -525,8 +564,19 @@ def login_allowed(ip: str) -> tuple:
     if unlock and unlock > now:
         return False, int(unlock - now)
     _prune(now)
-    if len(_global_fails) >= _GLOBAL_MAX_FAILS:
-        return False, 60           # whole login surface is under attack; cool off
+    if _GLOBAL_MAX_FAILS and len(_global_fails) >= _GLOBAL_MAX_FAILS:
+        # F-02: înainte, asta REFUZA pe toată lumea — inclusiv passkey-urile, inclusiv
+        # proprietarul, fără resetare din UI. 100 de parole greşite de la câteva IP-uri,
+        # reîmprospătate la 15 minute, ţineau administratorul afară la nesfârşit, iar
+        # singura recuperare era repornirea containerului prin SSH: fix lucrul pe care
+        # WebTerm există ca să-l înlocuiască. Un DoS pre-autentificare, ieftin.
+        #
+        # Acum e o frână, nu o poartă: cine vine de la un IP care s-a autentificat cu
+        # succes recent trece nestingherit; restul primesc întârziere, nu refuz. Plafonul
+        # per-IP (5 încercări) rămâne apărarea reală împotriva ghicirii.
+        if ip in _recent_success:
+            return True, 0
+        return True, -1            # -1 = „încetineşte-l", nu „refuză-l"
     return True, 0
 
 
@@ -534,20 +584,44 @@ def record_login_failure(ip: str) -> tuple:
     """Înregistrează un eșec. Returnează (locked_now, fails) — locked_now e True
     doar la tranziția care declanșează lockout-ul, ca apelantul să poată alerta."""
     now = time.time()
-    fails = [t for t in _ip_fails.get(ip, []) if now - t < _FAIL_WINDOW]
+    cap, window = _limits_for(ip)
+    fails = [t for t in _ip_fails.get(ip, []) if now - t < window]
     fails.append(now)
     _ip_fails[ip] = fails
-    _global_fails.append(now)
+    # Numai eşecurile de la IP-uri reale hrănesc backstop-ul global. Cheile interne
+    # (`reauth:`, `reauth-hard:`, `passkey2fa:`) sunt per-cont, deci un atacator cu un
+    # cookie furat nu mai poate umple plafonul global tastând parole greşite.
+    if ":" not in ip:
+        _global_fails.append(now)
     n = len(fails)
-    if n >= _IP_MAX_FAILS:
+    if n >= cap:
         _ip_locked[ip] = now + _IP_LOCKOUT
         _ip_fails[ip] = []
-        email_alerts.notify_lockout(ip, n)
+        if ":" not in ip:
+            email_alerts.notify_lockout(ip, n)
         return True, n
     return False, n
 
 
+_recent_success: dict = {}     # ip -> epoch al ultimei autentificări reuşite
+_GLOBAL_TARPIT = 2.0           # secunde de întârziere când backstop-ul global e activ
+
+
+async def apply_global_tarpit(retry: int) -> None:
+    """`login_allowed` întoarce `retry == -1` când backstop-ul global e activ: nu „refuză",
+    ci „încetineşte". Frâna se aplică AICI, în calea async, ca să nu blocheze event-loop-ul.
+    Un atacator plăteşte 2s per încercare; un om care nimereşte peste o furtună aşteaptă 2s."""
+    if retry == -1:
+        await asyncio.sleep(_GLOBAL_TARPIT)
+
+
 def record_login_success(ip: str) -> None:
+    if ":" not in ip:
+        _recent_success[ip] = time.time()
+        if len(_recent_success) > 512:
+            cut = time.time() - 86400
+            for k in [k for k, t in _recent_success.items() if t < cut]:
+                _recent_success.pop(k, None)
     _ip_fails.pop(ip, None)
     _ip_locked.pop(ip, None)
 

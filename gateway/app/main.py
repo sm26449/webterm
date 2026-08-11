@@ -8,6 +8,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
+from urllib.parse import urlparse
+
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -25,6 +27,20 @@ _JANITOR_INTERVAL = 24 * 3600      # curățare arhivă o dată pe zi
 # Sub pragul ăsta, discul gateway-ului e o problemă operaţională, nu o curiozitate:
 # SQLite şi transcripturile devin nescriibile, iar produsul pare sănătos până la primul login.
 _DISK_WARN_PCT = 10.0
+
+
+async def _warn_if_insecure_forwards() -> None:
+    """F-08: pe http://, `COOKIE_NAME` pierde prefixul `__Host-`, iar un cookie fără el poate
+    fi scris de pe un subdomeniu cu `domain=.exemplu.com`. Cu forward-urile pornite, asta
+    înseamnă că o pagină de echipament poate INJECTA o sesiune în originea aplicaţiei —
+    fixare de sesiune. Nu refuzăm pornirea (o instalare de laborator pe IP e legitimă), dar
+    o spunem tare: tăcerea aici e cea care lasă pe cineva să creadă că e în regulă."""
+    if config.PUBLIC_URL.startswith("http://") and api.forward_domain():
+        log.error(
+            "INSECURE: WEBTERM_PUBLIC_URL is http:// while port-forwarding is configured. "
+            "Without https the session cookie loses its __Host- prefix, so a forwarded page "
+            "on a subdomain can write a cookie into the app origin (session fixation). "
+            "Use https, or disable forwarding.")
 
 
 async def _warn_if_disk_low() -> None:
@@ -75,6 +91,7 @@ async def _janitor() -> None:
             removed = await asyncio.to_thread(core.purge_archive)
             await audit.prune()             # aceeași fereastră de retenție ca arhiva
             await _warn_if_signing_locked()
+            await _warn_if_insecure_forwards()
             if archived:
                 log.info("janitor: archived %d transcripts of sessions closed >%d days ago",
                          archived, config.CLOSED_ARCHIVE_DAYS)
@@ -319,6 +336,47 @@ async def forward_router(request: Request, call_next):
 
 
 @app.middleware("http")
+async def csrf_guard(request: Request, call_next):
+    """Refuză cererile care schimbă ceva şi vin de pe alt origin.
+
+    Până acum singura apărare CSRF pe HTTP era `SameSite=Lax` — iar asta nu apără NIMIC
+    aici, fiindcă produsul îşi serveşte deliberat forward-urile pe SUBDOMENII ale propriului
+    domeniu, iar subdomeniile sunt *same-site*. Deci o pagină de pe `cam1.term.example.com`
+    — un UI de echipament, exact conţinutul pe care restul codului îl tratează ca ostil
+    (`telnet.py` îi taie secvenţele OSC) — putea trimite POST-uri cu cookie-ul de sesiune
+    către `term.example.com`. Fără să citească răspunsul, dar cu efect: dezinstalare de
+    agent, ştergere de host, uitarea credenţialelor SSH, omorârea sesiunilor.
+
+    NU acoperă endpointurile cu body JSON: acelea cer `Content-Type: application/json`, care
+    declanşează un preflight CORS pe care noi nu-l onorăm — verificat pe versiunile livrate
+    (fastapi 0.139.0 / starlette 1.3.1): un body fără antet, sau cu `text/plain`, întoarce
+    422, nu e parsat ca JSON. Un audit extern a susţinut contrariul; testul l-a infirmat.
+    Verificarea de mai jos e oricum generală, ca să nu depindem de comportamentul acela.
+
+    `Origin` lipsă = refuz, nu permisiune. Browserele moderne îl trimit mereu la cererile
+    care schimbă ceva; aceeaşi poziţie o are deja `_origin_ok` pentru WebSocket. Clienţii
+    non-browser (curl, scripturi, CI) nu folosesc cookie-uri, ci `Authorization: Bearer`,
+    deci nu trec pe aici — iar cine trimite şi cookie, şi Bearer, primeşte refuz corect."""
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        host = (request.headers.get("host") or "").split(":")[0].lower()
+        fdom = api.forward_domain()
+        forwarded = bool(host and fdom and host != fdom and host.endswith("." + fdom))
+        # Subdomeniile de forward nu sunt API-ul nostru: cererile lor merg la echipament.
+        if not forwarded and request.url.path.startswith(("/api/", "/__wtfwd/")):
+            # Token-urile de automatizare nu sunt vulnerabile la CSRF (nu se trimit automat
+            # de browser), deci nu le cerem Origin — altfel am rupe orice integrare.
+            auth = (request.headers.get("authorization") or "").lower()
+            if not auth.startswith("bearer "):
+                origin = request.headers.get("origin") or request.headers.get("referer") or ""
+                ours = urlparse(config.PUBLIC_URL).netloc.lower()
+                if not origin or urlparse(origin).netloc.lower() != ours:
+                    log.warning("CSRF refused: %s %s origin=%r",
+                                request.method, request.url.path, origin or None)
+                    return PlainTextResponse("cross-origin request refused", status_code=403)
+    return await call_next(request)
+
+
+@app.middleware("http")
 async def security_headers(request: Request, call_next):
     resp = await call_next(request)
     # Răspunsurile de forward (subdomenii <slug>.<domeniu>) sunt ALT origin / altă
@@ -329,6 +387,12 @@ async def security_headers(request: Request, call_next):
     host = (request.headers.get("host") or "").split(":")[0].lower()
     fdom = api.forward_domain()
     if host and host != fdom and host.endswith("." + fdom):
+        # F-08: CSP-ul nostru rupe UI-uri de echipamente, dar ASTEA trei nu rup nimic —
+        # niciun UI de router nu are nevoie să fie încadrat de alt site sau să scurgă
+        # referrer. Fără ele, o pagină forwardată e „iframe-abilă" de oriunde.
+        resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+        resp.headers.setdefault("Content-Security-Policy", "frame-ancestors 'self'")
+        resp.headers.setdefault("Referrer-Policy", "no-referrer")
         return resp
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
     resp.headers.setdefault("X-Frame-Options", "DENY")

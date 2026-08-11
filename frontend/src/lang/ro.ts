@@ -767,6 +767,7 @@ const ro: Lang = {
     'login.passkeyUnavailable': "Passkey indisponibil pe acest dispozitiv sau browser.",
     'login.networkError': "Eroare de rețea — serverul nu a răspuns.",
     'err.settings.webhookScheme': "Webhook-ul trebuie să fie o adresă http:// sau https://.",
+    'err.settings.smtpBlocked': "Adresa aceea e serviciul de metadate al cloudului, nu un server SMTP.",
     'err.settings.webhookBlocked': "Adresa aceea e serviciul de metadate al cloudului, nu un webhook de chat.",
     'time.now': "acum",
     'time.d': "z",

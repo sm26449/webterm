@@ -111,7 +111,16 @@ See [design/ARCHITECTURE.md](design/ARCHITECTURE.md) for the agent's resilience
    looks: **you already run the project's container image**. If the project is compromised
    you get a malicious *gateway*, which owns the fleet through `run` and sessions — commands
    are not signed and cannot be. So a deployment key does not save you from a compromised
-   project; it only decides who may replace the agent *binary*.
+   project; it only decides who may sign an update pushed through the *update channel*.
+
+   Be precise about what that is worth, because an external audit read the older wording
+   ("who may replace the agent binary") as a stronger promise than the code makes. A
+   compromised gateway can also write `~/.webterm/ptyd.py` directly — through the file
+   manager, through `run`, or by typing into a session — and the next restart executes it,
+   with no signature involved. Guarding the file manager alone would be theatre: the same
+   actor still holds a shell as that user. The signature protects the *channel*, not the
+   file on disk. What it buys is that an update pushed to the **whole fleet at once**
+   cannot be forged — a blast-radius control, not per-host integrity.
 
    Where a deployment key is genuinely needed:
    - **You build or modify the agent yourself.** Change `agent/ptyd.py` and the project's

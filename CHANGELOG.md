@@ -7,6 +7,97 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [Unreleased]
+
+### Fixed — from two external security audits (2026-08-10, 2026-08-11)
+
+Both audits were run against the old private repository, so part of what they reported was
+already fixed here. Everything below was verified against this tree before being changed,
+and the one finding rated Critical did not survive that check.
+
+- **No CSRF defence on HTTP.** The only control was `SameSite=Lax`, which protects nothing
+  here: port-forwards are served on **subdomains of the application's own domain**, and
+  subdomains are same-site. A compromised device UI on `cam1.example.com` — content the rest
+  of the code already treats as hostile, stripping its terminal escapes — could issue
+  credentialed POSTs to the app: agent uninstall, host deletion, session kill, and 21 other
+  bodyless endpoints. A `csrf_guard` middleware now requires a same-origin `Origin` on every
+  unsafe method and refuses a missing one, the position the WebSocket path already took.
+  Bearer-token automation is exempt, since it is not CSRF-able.
+
+  The audit escalated this to Critical, arguing that FastAPI parses a body with no
+  `Content-Type` as JSON, which would put `/api/hosts/{id}/run` — arbitrary commands — in
+  reach of a request that triggers no preflight. It flagged that as unverified. It is not
+  true on the shipped versions: every CORS-simple content type, and no header at all,
+  returns 422. `tests/csrf_ratelimit_test.py` asserts this against a real uvicorn, so a
+  FastAPI bump that changes it fails CI instead of quietly making the claim true.
+
+- **The global brute-force backstop was an unauthenticated kill switch.** 100 failed logins
+  in 15 minutes denied *every* authentication method for *every* IP — passkeys included,
+  owner included — with no reset from the UI, recoverable only by restarting the container
+  over SSH: the thing WebTerm exists to replace. It now degrades instead of denying: a
+  2-second tarpit, with addresses that authenticated successfully recently passing
+  untouched. Per-IP limits, which are the real anti-guessing control, are unchanged. Failures
+  on internal keys (`reauth:`, `passkey2fa:`) no longer feed the global counter at all, so a
+  stolen cookie cannot fill it by typing wrong passwords.
+
+- **The "much wider" hard cap on account re-auth was the same size as the soft one.** Ten
+  wrong passwords from a stolen cookie locked the owner out of `/api/account` for 15 minutes
+  — the only action that invalidates the attacker's session — and repeating it every quarter
+  hour held the door shut indefinitely. The hard cap now has its own budget (50/hour).
+
+- **Password hashing shared asyncio's default thread pool** with transcript `fsync`, tail
+  reads, search, backup and signing KDFs. An unauthenticated burst — the rate limit is
+  consulted before a failure is recorded, so a concurrent wave all passes — could stall live
+  terminal persistence at ~64 MiB per verification. It has a dedicated two-thread executor.
+
+- **`require_2fa` was missing on three host endpoints**: host deletion, the agent connection
+  log, and `forget-credentials`. The last one also had no re-authentication of any kind for
+  an irreversible action, and took no body, which made it an ideal CSRF target; it now takes
+  a body, a step-up and the account password.
+
+- **A 5-minute step-up minted a 12-hour port-forward ticket.** On a 2FA host the ticket is
+  now capped at the step-up window, and `route_forward` re-checks that the window is still
+  open on every request rather than trusting the cookie for the rest of the day.
+
+- **Forward responses carried no framing headers**, so a device UI was iframe-able from
+  anywhere. `X-Frame-Options`, `frame-ancestors 'self'` and `Referrer-Policy` are now sent —
+  none of them break device UIs the way a script CSP would. Booting with `http://` while
+  forwarding is configured now logs an error: without https the session cookie loses its
+  `__Host-` prefix, and a forwarded page can then write a cookie into the app origin.
+
+- **Command-guard regexes ran on the event loop.** Admin-authored patterns are validated only
+  for compiling, so one with catastrophic backtracking plus a matching command blocked
+  everything. They now run in a thread with a 0.25s budget each.
+
+- **The SMTP host had no validation** while the webhook blocked cloud metadata addresses — an
+  asymmetry that is hard to defend when `/api/settings/smtp/test` connects on demand. Same
+  guard on both. Private ranges stay allowed on purpose: a Postfix or Mattermost on the LAN
+  is a legitimate target for a self-hosted product.
+
+- `deploy.sh` printed the setup token on every run, including upgrades where an account
+  already exists and the token is inert (`/api/setup` returns 409). It now asks the running
+  instance whether setup is still open.
+
+### Changed
+
+- **THREAT-MODEL is more precise about what signing buys.** It said a deployment key
+  "decides who may replace the agent *binary*", and an audit read that as a stronger promise
+  than the code makes: a compromised gateway can write `~/.webterm/ptyd.py` directly — via
+  the file manager, via `run`, or by typing into a session — and the next restart executes
+  it, no signature involved. Guarding the file manager alone would be theatre, since the same
+  actor still holds a shell. The signature protects the *channel*, so what it buys is that an
+  update pushed to the whole fleet at once cannot be forged: a blast-radius control, not
+  per-host integrity.
+- `command_history` is documented as client-reported and therefore forgeable; `audit_log`
+  remains the record that is not.
+
+### Known, not fixed
+
+- **The agent pins the leaf certificate, not the SPKI**, with no rotation path: on a
+  deployment where the issuer rotates leaves automatically, every agent stops connecting at
+  once and the gateway cannot push a remedy over the connection they just refused. The fix
+  requires changing `ptyd.py`, an `AGENT_VERSION` bump and re-signing with the offline key.
+
 ## [2.0.3] — 2026-08-09 · agent (40)
 
 ### Changed — a new mark, and the terminal gets its space back

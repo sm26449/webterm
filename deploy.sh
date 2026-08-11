@@ -178,5 +178,11 @@ fi
 
 echo
 echo "✓ WebTerm is running at  https://$WEBTERM_DOMAIN"
-echo "  The first login needs the setup token: ${WEBTERM_SETUP_TOKEN:-<see .env>}"
+# Tokenul de setup se tipăreşte DOAR cât timp mai foloseşte la ceva. Odată creat contul,
+# `/api/setup` întoarce 409 şi tokenul e inert — dar afişat la fiecare upgrade arăta a
+# credenţial viu, invitând pe cineva să-l trateze ca atare (şi să-l copieze pe unde nu
+# trebuie). Întrebăm aplicaţia care tocmai a pornit dacă instalarea mai are nevoie de el.
+if curl -fsS --max-time 5 "https://$WEBTERM_DOMAIN/api/state" 2>/dev/null | grep -q '"setup_required":[[:space:]]*true'; then
+  echo "  The first login needs the setup token: ${WEBTERM_SETUP_TOKEN:-<see .env>}"
+fi
 echo "  The Let's Encrypt certificate is issued automatically on first access (may take ~30s)."

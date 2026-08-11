@@ -757,6 +757,7 @@ const en: Lang = {
     'login.passkeyUnavailable': "Passkey unavailable on this device or browser.",
     'login.networkError': "Network error — the server did not respond.",
     'err.settings.webhookScheme': "The webhook must be an http:// or https:// address.",
+    'err.settings.smtpBlocked': "That address is the cloud metadata service, not an SMTP server.",
     'err.settings.webhookBlocked': "That address is the cloud metadata service, not a chat webhook.",
     'time.now': "now",
     'time.d': "d",

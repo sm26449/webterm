@@ -19,6 +19,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
 import httpx  # noqa: E402
 from app import api, config, db, security  # noqa: E402
+
+# Middleware-ul `csrf_guard` cere `Origin` pe metodele care schimbă ceva şi refuză
+# lipsa lui (ca `_origin_ok` pentru WebSocket). Testele imită un BROWSER, deci trimit
+# antetul; fără el ar testa o cale pe care niciun browser n-o produce.
+_ORIGIN = {"origin": os.environ["WEBTERM_PUBLIC_URL"]}
 from app.main import app  # noqa: E402
 
 ok = 0
@@ -124,7 +129,7 @@ async def main():
           pc.rstrip().endswith(b"_wt_ps1_b"), repr(pc[-40:]))
 
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="https://t") as anon:
+    async with httpx.AsyncClient(transport=transport, base_url="https://t", headers=_ORIGIN) as anon:
         r = await anon.get("/agent/shell-integration.sh")
         check("scriptul e public (host-ul îl ia fără cookie de browser)", r.status_code == 200)
         check("scriptul servit e IDENTIC cu cel de pe disc",
@@ -132,7 +137,7 @@ async def main():
         r = await anon.get("/api/shell-integration/command")
         check("comanda de activare cere autentificare", r.status_code == 401)
 
-    async with httpx.AsyncClient(transport=transport, base_url="https://t") as c:
+    async with httpx.AsyncClient(transport=transport, base_url="https://t", headers=_ORIGIN) as c:
         r = await c.post("/api/setup", json={"email": "a@b.co", "password": "parolabuna1",
                                              "setup_token": "test-setup"})
         check("cont creat", r.status_code == 200)
@@ -148,7 +153,7 @@ async def main():
         cmdline = (await c.post(f"/api/hosts/{hid}/enroll")).json()["install_command"]
         path = re.search(r"/install/([A-Za-z0-9_-]+\.sh)", cmdline).group(0)
 
-    async with httpx.AsyncClient(transport=transport, base_url="https://t") as anon:
+    async with httpx.AsyncClient(transport=transport, base_url="https://t", headers=_ORIGIN) as anon:
         r = await anon.get(path)
         check("installer-ul se serveşte cu tokenul din one-liner", r.status_code == 200)
         inst = r.text

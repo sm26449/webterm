@@ -130,6 +130,7 @@ async def setup(creds: Credentials, request: Request, response: Response):
     allowed, retry = security.login_allowed(ip)
     if not allowed:
         raise HTTPException(429, f"too many attempts; retry in {retry}s")
+    await security.apply_global_tarpit(retry)   # F-02: frână, nu poartă
     if not _setup_token or not security.tokens_equal(creds.setup_token, _setup_token):
         locked, fails = security.record_login_failure(ip)
         # Spune CÂTE mai ai. Fără asta, omul greşeşte tokenul de câteva ori (32 de caractere
@@ -151,7 +152,7 @@ async def setup(creds: Credentials, request: Request, response: Response):
     if "@" not in creds.email or len(creds.email) > 200:
         raise ApiError(400, "account.badEmail", "invalid email")
     email = creds.email.strip().lower()
-    pw_hash = await asyncio.to_thread(security.hash_password, creds.password)
+    pw_hash = await security.hash_password_async(creds.password)
     # Revendicare ATOMICĂ a setup-ului: INSERT condiționat de „niciun user încă", într-o
     # singură instrucțiune SQL (existența + insert sunt atomice în SQLite). Fără asta, două
     # cereri concurente cu același token treceau ambele de verificarea de la linia 107
@@ -194,14 +195,15 @@ async def login(creds: Credentials, request: Request, response: Response):
     if not allowed:
         raise HTTPException(429, f"too many attempts; retry in {retry}s",
                             headers={"Retry-After": str(retry)})
+    await security.apply_global_tarpit(retry)   # F-02: frână, nu poartă
     user = await db.fetchone("SELECT * FROM users WHERE email=?",
                              creds.email.strip().lower())
     # verify (or a dummy verify when the user is absent) so timing can't
     # reveal whether the email exists
     ok = (user is not None and len(creds.password) <= PASSWORD_MAX
-          and await asyncio.to_thread(security.verify_password, creds.password, user["password_hash"]))
+          and await security.verify_password_async(creds.password, user["password_hash"]))
     if user is None:
-        await asyncio.to_thread(security.dummy_verify)
+        await security.dummy_verify_async()
     if not ok:
         security.record_login_failure(ip)
         raise ApiError(401, "auth.badCredentials", "wrong email or password")
@@ -304,7 +306,8 @@ async def _verify_reauth_password(user, password: str) -> bool:
     if not allowed and not security.login_allowed("reauth-hard:%d" % user["id"])[0]:
         raise HTTPException(429, f"too many attempts; retry in {retry}s",
                             headers={"Retry-After": str(retry)})
-    if await asyncio.to_thread(security.verify_password, password, user["password_hash"]):
+    await security.apply_global_tarpit(retry)   # F-02: frână, nu poartă
+    if await security.verify_password_async(password, user["password_hash"]):
         security.record_login_success(key)
         security.record_login_success("reauth-hard:%d" % user["id"])
         return True
@@ -360,7 +363,7 @@ async def update_account(body: AccountUpdate, request: Request, user=Depends(sec
     pw_hash = user["password_hash"]
     if body.new_password:
         _check_password(body.new_password, "new password")
-        pw_hash = await asyncio.to_thread(security.hash_password, body.new_password)
+        pw_hash = await security.hash_password_async(body.new_password)
     await db.execute("UPDATE users SET email=?, password_hash=? WHERE id=?",
                      email, pw_hash, user["id"])
     # dacă s-a schimbat parola, invalidează celelalte sesiuni web (nu pe cea curentă)
@@ -438,7 +441,7 @@ async def create_user(body: UserIn, user=Depends(security.require_user)):
     _check_password(body.password)
     if await db.fetchone("SELECT id FROM users WHERE email=?", email):
         raise HTTPException(409, "an account with that email already exists")
-    pw = await asyncio.to_thread(security.hash_password, body.password)
+    pw = await security.hash_password_async(body.password)
     await db.execute("INSERT INTO users(email, password_hash, created) VALUES(?,?,?)",
                      email, pw, time.time())
     log.info("new account created: %s (by %s)", email, user["email"])
@@ -737,11 +740,16 @@ async def _match_guard_rule(cmd: str) -> dict | None:
     guard = await _load_command_guard()
     if not guard.get("enabled"):
         return None
+    # F-09: regulile sunt scrise de admin, iar `re.search` e sincron. O expresie cu
+    # backtracking catastrofal (validată azi doar că se compilează) plus o comandă potrivită
+    # bloca ÎNTREG event-loop-ul — inclusiv de la un token de automatizare cu scope `run`.
+    # Fir separat + buget de 0.25s per regulă: o regulă patologică se pierde, restul merg.
     for r in guard.get("rules", []):
         try:
-            if re.search(r["pattern"], cmd, re.IGNORECASE):
+            if await asyncio.wait_for(
+                    asyncio.to_thread(re.search, r["pattern"], cmd, re.IGNORECASE), 0.25):
                 return r
-        except re.error:
+        except (re.error, asyncio.TimeoutError):
             continue
     return None
 
@@ -820,7 +828,15 @@ async def save_smtp(body: SmtpIn, request: Request, user=Depends(security.requir
     if wh != (await _get_setting("alert_webhook") or ""):
         await _require_reauth_for_secret(user, body.current_password,
                                         "changing the alert webhook")
-    await _set_setting("smtp_host", body.host.strip())
+    # Aceeaşi poartă ca la webhook, altfel asimetria e greu de apărat: acolo blocăm adresa
+    # de metadate, aici acceptam orice gazdă:port şi `/api/settings/smtp/test` o contacta la
+    # comandă — un scaner de porturi din interiorul reţelei. Reţelele private rămân permise
+    # (un Postfix în LAN e legitim la un produs self-hosted); blocăm doar metadatele cloud.
+    sh = body.host.strip()
+    if sh.strip("[]").lower() in ("169.254.169.254", "metadata.google.internal", "fd00:ec2::254"):
+        raise ApiError(400, "settings.smtpBlocked",
+                       "that address is the cloud metadata service, not an SMTP server")
+    await _set_setting("smtp_host", sh)
     await _set_setting("smtp_port", str(body.port))
     await _set_setting("smtp_user", body.user.strip())
     await _set_setting("smtp_from", body.from_addr.strip())
@@ -925,6 +941,7 @@ async def _connect_direct(row, request, body_credential="", body_passphrase=""):
     if not allowed:
         raise HTTPException(429, f"too many attempts; retry in {retry}s",
                             headers={"Retry-After": str(retry)})
+    await security.apply_global_tarpit(retry)   # F-02: frână, nu poartă
     cred = _resolve_credential(row, body_credential, body_passphrase)
     try:
         await core.dial_ssh(row, cred)
@@ -947,6 +964,7 @@ async def _connect_telnet(row, request, body_credential=""):
     if not allowed:
         raise HTTPException(429, f"too many attempts; retry in {retry}s",
                             headers={"Retry-After": str(retry)})
+    await security.apply_global_tarpit(retry)   # F-02: frână, nu poartă
     password = ""
     if row["credential_policy"] == "ask":
         password = body_credential or ""
@@ -2049,6 +2067,10 @@ class HistoryIn(BaseModel):
 
 @router.post("/api/history")
 async def add_history(body: HistoryIn, user=Depends(security.require_user)):
+    """F-10: rândurile astea sunt RAPORTATE DE CLIENT (OSC 133 din browser), deci pot fi
+    forjate de oricine are un cookie valid. Nu sunt probă şi nu trebuie tratate ca atare —
+    urma reală e `audit_log`, scrisă de middleware, pe care clientul n-o poate atinge.
+    Marcăm sursa explicit ca UI-ul să poată spune diferenţa."""
     hn = ""
     if body.host_id is not None:
         row = await db.fetchone("SELECT name FROM hosts WHERE id=?", body.host_id)
@@ -2197,6 +2219,7 @@ async def audit_list(limit: int = 200, before: float = 0.0, q: str = "",
 async def host_events(host_id: int, user=Depends(security.require_user)):
     """Jurnal de conexiune al agentului (ultimele 7 zile) + starea curentă — pentru panoul
     de diagnostic: cine a conectat/deconectat şi DE CE, când a venit un update etc."""
+    await _require_host_stepup(host_id, user)   # F-05: IP-uri, versiuni, motive de reconectare
     hrow = await db.fetchone(
         "SELECT last_heartbeat, agent_version, connection_type, agent_ip FROM hosts WHERE id=?", host_id)
     if not hrow:
@@ -2405,6 +2428,18 @@ async def serial_open(host_id: int, body: SerialOpenIn, user=Depends(security.re
 
 
 # ── Routing pe subdomeniu + handshake de auth ────────────────────────────────
+async def _forward_stepup_ok(slug: str, request: Request) -> bool:
+    """Pe hosturile marcate `require_2fa`, un tunel deschis se închide când se închide
+    fereastra de step-up. Pentru restul, mereu adevărat (zero cost)."""
+    row = await db.fetchone(
+        "SELECT f.host_id, h.require_2fa FROM forwards f JOIN hosts h ON h.id=f.host_id"
+        " WHERE f.slug=? AND f.enabled=1", slug)
+    if not row or not row["require_2fa"]:
+        return True
+    user = await security.user_for_token(request.cookies.get(security.COOKIE_NAME))
+    return bool(user and security.stepup_window_ok(user["id"], row["host_id"]))
+
+
 async def route_forward(request: Request):
     """Dacă cererea e pentru un subdomeniu de forward, o tratează (auth / redirect /
     proxy) și întoarce un Response; altfel None (merge la rutele normale).
@@ -2430,6 +2465,12 @@ async def route_forward(request: Request):
     if not row:
         return PlainTextResponse("no such forward, or it is disabled", status_code=404)
     # fără cookie valid → trimite la handshake pe domeniul principal (unde e sesiunea)
+    # F-06 partea a doua: biletul e valid criptografic, dar pe un host cu 2FA întrebăm şi
+    # dacă fereastra care l-a autorizat mai e deschisă. Fără asta, un tunel deja deschis
+    # supravieţuia închiderii ferestrei — e o căutare într-un dict, deci practic gratis.
+    if not await _forward_stepup_ok(slug, request):
+        return RedirectResponse("/__wtfwd/auth?slug=%s&next=%s" % (
+            urllib.parse.quote(slug), urllib.parse.quote(str(request.url.path))), 302)
     if not security.verify_forward_token(request.cookies.get(FWD_COOKIE), slug):
         nxt = request.url.path + (("?" + request.url.query) if request.url.query else "")
         loc = "%s/__wtfwd/auth?slug=%s&next=%s" % (config.PUBLIC_URL, slug, quote(nxt, safe=""))
@@ -2481,7 +2522,13 @@ async def forward_auth(request: Request, slug: str, next: str = "/"):
             status_code=302)
     if not next.startswith("/"):
         next = "/"
-    token = security.make_forward_token(slug, user["id"])
+    # F-06: pe un host cu 2FA, biletul NU poate trăi mai mult decât autorizarea care l-a
+    # emis. Înainte, un step-up de 5 minute cumpăra 12 ore de tunel — adică exact factorul
+    # pe care operatorul l-a cerut nu se aplica serviciului forwardat. Browserul reface
+    # handshake-ul singur, deci pentru om e o redirectare, nu o eroare.
+    ttl = (security.STEPUP_WINDOW_MAX if (host and host["require_2fa"])
+           else security.FORWARD_TOKEN_TTL)
+    token = security.make_forward_token(slug, user["id"], ttl)
     loc = "%s://%s.%s/__wtfwd/set?t=%s&next=%s" % (_FWD_SCHEME, slug, forward_domain(), token, quote(next, safe=""))
     return RedirectResponse(loc, status_code=302)
 
@@ -2995,13 +3042,23 @@ async def provision_agent(host_id: int, request: Request, user=Depends(security.
     return {"ok": True, "credentials_deleted": delete_creds}
 
 
-class ForgetCreds(BaseModel):
-    pass
+class ForgetCredsIn(BaseModel):
+    current_password: str = ""
 
 
 @router.post("/api/hosts/{host_id}/forget-credentials")
-async def forget_credentials(host_id: int, user=Depends(security.require_user)):
-    """Delete the stored SSH credentials (once the agent has taken over, or at any time)."""
+async def forget_credentials(host_id: int, body: ForgetCredsIn,
+                             user=Depends(security.require_user)):
+    """Delete the stored SSH credentials (once the agent has taken over, or at any time).
+
+    F-05: ştergerea e IREVERSIBILĂ — dacă hostul nu mai are agent, credenţiala aia era
+    singurul mod de a ajunge la el din WebTerm. Cerea doar un cookie valid, deci era şi
+    ţinta ideală a unui CSRF (endpoint fără body, deci cerere „simplă"). Acum are body,
+    step-up pe hosturile cu 2FA, şi re-autentificare cu parola."""
+    await _require_host_stepup(host_id, user)
+    if not await _verify_reauth_password(user, body.current_password):
+        raise ApiError(401, "auth.wrongCurrentPassword",
+                       "re-enter your account password to forget the stored credentials")
     await db.execute("UPDATE hosts SET credential_encrypted=NULL WHERE id=?", host_id)
     return {"ok": True}
 
@@ -3076,6 +3133,7 @@ async def delete_snippet(sid: int, user=Depends(security.require_user)):
 
 @router.delete("/api/hosts/{host_id}")
 async def delete_host(host_id: int, user=Depends(security.require_user)):
+    await _require_host_stepup(host_id, user)   # F-05: ştergerea unui host cu 2FA e o acţiune de host
     live = await db.fetchone(
         "SELECT id FROM sessions WHERE host_id=? AND state IN ('creating','live')",
         host_id)

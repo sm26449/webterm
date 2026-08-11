@@ -1,6 +1,5 @@
 """Passkey (WebAuthn) registration and login."""
 
-import asyncio
 import base64
 import json
 import time
@@ -106,7 +105,8 @@ async def _verify_reauth(user, password: str) -> bool:
     if not allowed:
         raise HTTPException(429, "too many attempts; retry in %ds" % retry,
                             headers={"Retry-After": str(retry)})
-    if await asyncio.to_thread(security.verify_password, password, user["password_hash"]):
+    await security.apply_global_tarpit(retry)   # F-02: frână, nu poartă
+    if await security.verify_password_async(password, user["password_hash"]):
         security.record_login_success(key)
         return True
     security.record_login_failure(key)
@@ -143,6 +143,7 @@ async def _second_gate(user, request: Request, body, what: str) -> None:
         if not allowed:
             raise ApiError(429, "passkey.tooManyTotp",
                            "too many wrong 2FA codes; retry in %ds" % retry)
+        await security.apply_global_tarpit(retry)   # F-02: frână, nu poartă
         if not await security.verify_second_factor(user, body.totp_code):
             # FĂRĂ portiţă „codul corect trece oricum în lockout", spre deosebire de calea cu
             # parola: acolo portiţa există ca atacatorul să nu poată închide contul proprietarului
@@ -216,6 +217,7 @@ async def login_verify(body: CredentialBody, request: Request, response: Respons
     if not allowed:
         raise HTTPException(429, f"too many attempts; retry in {retry}s",
                             headers={"Retry-After": str(retry)})
+    await security.apply_global_tarpit(retry)   # F-02: frână, nu poartă
     expected = _consume(body.credential)
     cred_id = base64url_to_bytes(body.credential.get("rawId", ""))
     row = await db.fetchone(
@@ -285,6 +287,7 @@ async def stepup_verify(body: StepupVerify, request: Request,
     if not allowed:
         raise HTTPException(429, f"too many attempts; retry in {retry}s",
                             headers={"Retry-After": str(retry)})
+    await security.apply_global_tarpit(retry)   # F-02: frână, nu poartă
     expected = _consume(body.credential)
     cred_id = base64url_to_bytes(body.credential.get("rawId", ""))
     # legat de utilizatorul curent: un passkey al altcuiva nu deblochează nimic

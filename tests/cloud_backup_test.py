@@ -15,6 +15,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
 import httpx  # noqa: E402
 from app import api, backup, cloudbackup, config, db, security  # noqa: E402
+
+# Middleware-ul `csrf_guard` cere `Origin` pe metodele care schimbă ceva şi refuză
+# lipsa lui (ca `_origin_ok` pentru WebSocket). Testele imită un BROWSER, deci trimit
+# antetul; fără el ar testa o cale pe care niciun browser n-o produce.
+_ORIGIN = {"origin": os.environ["WEBTERM_PUBLIC_URL"]}
 from app.main import app  # noqa: E402
 
 ok = 0
@@ -183,14 +188,14 @@ async def main():
 
     # ── API: auth + re-auth cu parola contului ──
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="https://t") as anon:
+    async with httpx.AsyncClient(transport=transport, base_url="https://t", headers=_ORIGIN) as anon:
         for path in ("/api/backup/cloud", "/api/backup/cloud/authorize"):
             r = await anon.get(path)
             check(f"GET {path} fără sesiune → 401", r.status_code == 401)
         r = await anon.post("/api/backup/cloud/config", json={"provider": "fake", "client_id": "x"})
         check("POST config fără sesiune → 401", r.status_code == 401)
 
-    async with httpx.AsyncClient(transport=transport, base_url="https://t") as c:
+    async with httpx.AsyncClient(transport=transport, base_url="https://t", headers=_ORIGIN) as c:
         r = await c.post("/api/setup", json={"email": "a@b.co", "password": PASSWORD,
                                              "setup_token": "test-setup"})
         check("cont creat", r.status_code == 200)

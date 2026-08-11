@@ -16,6 +16,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
 import httpx  # noqa: E402
 from app import api, config, core, db, security  # noqa: E402
+
+# Middleware-ul `csrf_guard` cere `Origin` pe metodele care schimbă ceva şi refuză
+# lipsa lui (ca `_origin_ok` pentru WebSocket). Testele imită un BROWSER, deci trimit
+# antetul; fără el ar testa o cale pe care niciun browser n-o produce.
+_ORIGIN = {"origin": os.environ["WEBTERM_PUBLIC_URL"]}
 from app.main import app  # noqa: E402
 
 ok = 0
@@ -51,7 +56,7 @@ async def main():
     await api.init_setup_token()
 
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as c:
+    async with httpx.AsyncClient(transport=transport, base_url="http://localhost", headers=_ORIGIN) as c:
         await c.post("/api/setup", json={"email": "a@b.co", "password": "parolabuna1",
                                          "setup_token": "test-setup"})
 
