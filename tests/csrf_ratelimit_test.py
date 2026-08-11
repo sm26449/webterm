@@ -155,6 +155,16 @@ async def main():
     # Fără cookie nu există autoritate ambientală de furat, deci nu e CSRF — şi asta e ce
     # ţine în viaţă provisioning-ul scriptat (`curl` către /api/setup, E2E-ul cu fetch din
     # Node). Poarta prea largă a rupt exact calea de instalare, prinsă în CI.
+    # Accesul pe un nume ALTERNATIV (IP în loc de domeniu) trebuie să meargă: browserul
+    # trimite Origin-ul URL-ului încărcat, care e egal cu Host-ul cererii. Fără asta, un
+    # admin care intră pe IP primea 403 la fiecare scriere — prins de fwd-test în CI.
+    alt = Req("POST", "/api/hosts/1/uninstall", "http://127.0.0.1:8000")
+    alt.headers["host"] = "127.0.0.1:8000"
+    check("acces pe un nume alternativ (Origin == Host) → trece", await call(alt) == "OK")
+    hostile = Req("POST", "/api/hosts/1/uninstall", "https://evil.example")
+    hostile.headers["host"] = "127.0.0.1:8000"
+    check("…dar Origin străin pe acelaşi Host → tot refuzat", await call(hostile) == 403)
+
     check("fără cookie de sesiune → nu cerem Origin (bootstrap/curl)",
           await call(Req("POST", "/api/setup", cookie=False)) == "OK")
     check("…dar CU cookie şi fără Origin → tot refuzat",

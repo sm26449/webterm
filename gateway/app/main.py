@@ -380,8 +380,19 @@ async def csrf_guard(request: Request, call_next):
             has_cookie = bool(request.cookies.get(security.COOKIE_NAME))
             if has_cookie and not auth.startswith("bearer "):
                 origin = request.headers.get("origin") or request.headers.get("referer") or ""
-                ours = urlparse(config.PUBLIC_URL).netloc.lower()
-                if not origin or urlparse(origin).netloc.lower() != ours:
+                # Acceptăm originea proprie declarată (PUBLIC_URL) SAU chiar gazda pe care a
+                # venit cererea. A doua nu slăbeşte nimic — un atacator nu poate alege `Host`,
+                # browserul îl completează din URL, deci pagina lui rămâne cu alt `Origin`
+                # decât `Host`-ul nostru. Iar dacă cineva chiar face `Host` să fie domeniul
+                # LUI (rebinding), cookie-ul nostru nu mai pleacă, deci poarta nici nu se
+                # aplică. Fără ramura asta, cine intră pe IP în loc de domeniu — sau pe orice
+                # nume alternativ — primea 403 la fiecare scriere. Prins de `fwd-test`, care
+                # se conectează pe 127.0.0.1 în timp ce PUBLIC_URL e alt hostname.
+                host_hdr = (request.headers.get("host") or "").lower()
+                ours = {urlparse(config.PUBLIC_URL).netloc.lower()}
+                if host_hdr:
+                    ours.add(host_hdr)
+                if not origin or urlparse(origin).netloc.lower() not in ours:
                     log.warning("CSRF refused: %s %s origin=%r",
                                 request.method, request.url.path, origin or None)
                     return PlainTextResponse("cross-origin request refused", status_code=403)
