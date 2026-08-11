@@ -7,7 +7,10 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
-## [Unreleased]
+## [2.0.4] — 2026-08-11 · agent (41)
+
+A security release: two external audits, one of them escalating a finding to Critical that
+did not survive being tested. The agent changes, so it carries a new signature.
 
 ### Fixed — from two external security audits (2026-08-10, 2026-08-11)
 
@@ -30,6 +33,23 @@ and the one finding rated Critical did not survive that check.
   true on the shipped versions: every CORS-simple content type, and no header at all,
   returns 422. `tests/csrf_ratelimit_test.py` asserts this against a real uvicorn, so a
   FastAPI bump that changes it fails CI instead of quietly making the claim true.
+
+  The guard took three rounds to get right, and each wrong version was caught by a test that
+  runs the real path rather than by reading the code. The first demanded `Origin` from every
+  non-Bearer request, including ones with no cookie at all — which broke scripted
+  provisioning and the project's own end-to-end setup. CSRF is about a credential the browser
+  attaches *by itself*, so the gate belongs on requests carrying the session cookie; a
+  request that presents its credentials explicitly was never at risk. The second compared
+  `Origin` only against `WEBTERM_PUBLIC_URL`, so anyone reaching the gateway by IP, or by any
+  name other than the configured one, would have been refused on every write. The request's
+  own `Host` is now accepted too, which weakens nothing: an attacker cannot choose `Host`,
+  and in the one case where they can (DNS rebinding onto our address) our cookie is not sent,
+  so the guard does not apply.
+
+  One residual is stated rather than hidden: a not-logged-in browser can still be made to
+  POST `/api/login` with an attacker's credentials. On a single-administrator product that
+  means landing in someone else's account — immediately visible, with none of your data
+  reachable — and blocking it would mean no script could ever authenticate.
 
 - **The global brute-force backstop was an unauthenticated kill switch.** 100 failed logins
   in 15 minutes denied *every* authentication method for *every* IP — passkeys included,
