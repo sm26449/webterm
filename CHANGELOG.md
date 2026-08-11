@@ -7,7 +7,34 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
-## [Unreleased]
+## [2.0.5] — 2026-08-12 · agent (41)
+
+Gateway and interface only: the agent is unchanged, so nothing in the fleet needs updating.
+
+### Added — you can see which devices are signed in, and remove one
+
+- Settings → Security lists every browser signed in to the account, with a readable device
+  label, when it was last used, which one you are sitting in, and the same *new device* badge
+  the session roster uses. Each can be signed out on its own, or all the others at once.
+  Until now, suspecting a stolen cookie left two options and nothing in between: change the
+  password, which kills every session including yours, or SSH to the server.
+
+  Revoking asks for no password. It is a defensive action, and the worst someone with your
+  cookie can do there is sign you out. "Sign out everywhere else" also closes the step-up
+  windows — those are keyed per account and host rather than per device, so without it the
+  removed device's "sudo" would have survived on yours.
+
+### Changed — the opening diagram shows what the product actually does
+
+- The first diagram is what most visitors read, and often all they read, and it showed a
+  narrower product than this is: no direct SSH, no telnet, no port forwarding, no files, no
+  serial console, no fleet run, no share links. Telnet appeared only as a tunnel through the
+  agent, which suggested the agent is mandatory — the opposite of what the text below it says.
+  Rebuilt as three layers: who connects, the three ways to reach a machine, and what you can
+  do once there. Forwards are drawn leaving the agent and the SSH host rather than the
+  gateway, because drawn from the gateway they would imply it reaches into your network by
+  itself, which is backwards and is the invariant the security model rests on.
+
 
 ### Fixed — "forget the credentials" did not forget all of them
 

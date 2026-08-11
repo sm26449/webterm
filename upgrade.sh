@@ -2,7 +2,7 @@
 # WebTerm — a complete upgrade, in one command.
 #
 #     ./upgrade.sh              → the latest published version
-#     ./upgrade.sh v2.0.4       → a specific version (also to go back down)
+#     ./upgrade.sh v2.0.5       → a specific version (also to go back down)
 #     ./upgrade.sh --no-backup  → sare peste backupul de dinainte (nu recomand)
 #     ./upgrade.sh -y           → no questions (cron, remote runs)
 #     ./upgrade.sh --allow-latest → accept :latest when the version cannot be determined
