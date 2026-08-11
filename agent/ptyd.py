@@ -17,6 +17,7 @@ Config: ~/.webterm/agent.json  {"url": "wss://gw/agent/ws", "token": "..."}
 
 import base64
 import binascii
+import calendar
 import errno
 import fcntl
 import glob
@@ -41,7 +42,12 @@ import termios
 import threading
 import time
 
-AGENT_VERSION = 40
+AGENT_VERSION = 41
+
+# Sub atâtea secunde de valabilitate, un certificat se roteşte prea des ca un pin pe el să
+# însemne altceva decât o cădere programată. 48h: peste ce emite un CA intern (12h la Caddy),
+# mult sub ce emite un CA public (90 de zile la Let's Encrypt).
+CERT_PIN_MIN_LIFETIME = 48 * 3600
 PROTO = 1
 
 RUN_MAX_TIMEOUT = 300           # plafon timeout pentru op-ul `run` (consola de flotă)
@@ -537,7 +543,14 @@ class WSClient:
         # cert pinning: amprenta SHA-256 a certificatului DER al gateway-ului (hex), fixată
         # la înrolare. Dacă e setată, se verifică la fiecare conectare — ÎNAINTE de a trimite
         # tokenul —, apărând de un gateway fals (DNS hijack / MITM) chiar în modul insecure.
-        self.cert_pin = (cert_pin or "").lower() or None
+        # `cert_pin` a fost mereu un singur şir. Acceptăm şi o listă (`cert_pins`), ca o
+        # rotire de certificat să poată fi pregătită ÎNAINTE să fie nevoie de ea — altfel
+        # singura cale de recuperare e SSH pe fiecare host din flotă.
+        pins = cert_pin if isinstance(cert_pin, (list, tuple)) else [cert_pin]
+        self.cert_pins = [str(x).lower() for x in pins if x]
+        self.cert_pin = self.cert_pins[0] if self.cert_pins else None
+        self.peer_spki = None
+        self.peer_der = b""
         self.peer_pin = None            # amprenta observată acum (pt. TOFU la prima conectare)
         self.sock = None
         self._recv_buf = b""
@@ -616,6 +629,61 @@ class WSClient:
         # eroare → reader postează __disconnect__ → reconectare pe backoff.
         _set_keepalive(self.sock)
 
+    @staticmethod
+    def _der_items(buf, off=0, end=None):
+        """Iterează elementele DER de la `off`: (tag, start_conţinut, end_conţinut).
+        Suficient cât să umblăm prin structura unui certificat X.509; nu e un parser
+        general şi nu vrea să fie."""
+        end = len(buf) if end is None else end
+        while off < end:
+            head = off                      # unde începe ELEMENTUL, cu tot cu antet
+            tag = buf[off]
+            off += 1
+            n = buf[off]
+            off += 1
+            if n & 0x80:
+                k = n & 0x7F
+                n = int.from_bytes(buf[off:off + k], "big")
+                off += k
+            # `head` e necesar fiindcă SPKI se hash-uieşte ÎNTREG, cu antet cu tot, iar
+            # antetul are 2 octeţi doar la lungimi mici: un SPKI de RSA-2048 are ~294 de
+            # octeţi, deci antet de 4. Presupunerea „mereu 2" dădea o amprentă care nu
+            # semăna cu a nimănui — prinsă comparând cu `openssl`, nu citind codul.
+            yield tag, off, off + n, head
+            off += n
+
+    @classmethod
+    def _cert_parts(cls, der):
+        """(spki_der, notBefore, notAfter) dintr-un certificat DER, sau (None, None, None).
+
+        X.509: Certificate ::= SEQUENCE { tbsCertificate, sigAlg, sigValue }, iar
+        TBSCertificate ::= SEQUENCE { [0] version, serial, sigAlg, issuer, validity,
+        subject, subjectPublicKeyInfo, ... } — deci SPKI e al 7-lea element când versiunea
+        e prezentă (cazul oricărui cert v3), al 6-lea când nu e."""
+        try:
+            _, cs, ce, _ = next(cls._der_items(der))               # Certificate
+            _, ts, te, _ = next(cls._der_items(der, cs, ce))       # TBSCertificate
+            items = list(cls._der_items(der, ts, te))
+            base = 1 if items and items[0][0] == 0xA0 else 0       # [0] EXPLICIT version
+            val = items[base + 3]                                  # validity
+            spki = items[base + 5]                                 # subjectPublicKeyInfo
+            times = list(cls._der_items(der, val[1], val[2]))
+            def _t(item):
+                raw = der[item[1]:item[2]].decode("ascii")
+                fmt = "%y%m%d%H%M%SZ" if item[0] == 0x17 else "%Y%m%d%H%M%SZ"
+                return calendar.timegm(time.strptime(raw, fmt))
+            return der[spki[3]:spki[2]], _t(times[0]), _t(times[1])
+        except Exception:                                          # noqa: BLE001
+            return None, None, None
+
+    @classmethod
+    def spki_pin(cls, der):
+        """Amprenta CHEII PUBLICE, nu a certificatului întreg. O reînnoire care păstrează
+        cheia (cazul obişnuit la `certbot --reuse-key` şi la multe automatizări) nu mai
+        rupe pin-ul, spre deosebire de amprenta pe DER-ul complet."""
+        spki, _, _ = cls._cert_parts(der)
+        return hashlib.sha256(spki).hexdigest() if spki else None
+
     def _check_cert_pin(self, der):
         """Cert pinning: amprenta SHA-256 a certificatului DER al gateway-ului trebuie să
         corespundă pin-ului fixat la înrolare. Apără de gateway fals (DNS hijack / MITM)
@@ -623,9 +691,24 @@ class WSClient:
         prima conectare (peer_pin expus pentru salvare), enforce după. Fără pin → no-op
         (deployment-urile cu CA public se bazează pe validarea TLS standard, care oricum
         respinge un cert nevalid — pin-ul ar rupe reînnoirea, deci nu-l cerem acolo)."""
-        self.peer_pin = hashlib.sha256(der or b"").hexdigest()
-        if self.cert_pin and not hmac.compare_digest(self.peer_pin, self.cert_pin):
-            raise WSError("cert pin mismatch — unexpected gateway (DNS hijack / MITM?)")
+        self.peer_pin = hashlib.sha256(der or b"").hexdigest()      # amprentă pe certul întreg (moştenit)
+        self.peer_spki = self.spki_pin(der or b"")                  # amprentă pe cheia publică
+        self.peer_der = der or b""
+        if not self.cert_pins:
+            return
+        # Acceptăm oricare dintre pin-urile cunoscute, în ambele forme: cele vechi sunt pe
+        # DER-ul complet, cele noi pe SPKI. Aşa un agent deja înrolat continuă să meargă
+        # fără re-înrolare, iar unul nou primeşte forma care supravieţuieşte reînnoirii.
+        for pin in self.cert_pins:
+            if hmac.compare_digest(self.peer_pin, pin):
+                return
+            if self.peer_spki and hmac.compare_digest(self.peer_spki, pin):
+                return
+        raise WSError(
+            "cert pin mismatch — unexpected gateway (DNS hijack / MITM?). Observed key "
+            "fingerprint: %s. If the gateway's certificate changed legitimately, add it with "
+            "`webterm-agent trust-cert <fingerprint>` or re-enrol the host."
+            % (self.peer_spki or self.peer_pin))
 
     def _read_exact(self, n):
         while len(self._recv_buf) < n:
@@ -1172,6 +1255,22 @@ class Agent:
     def send_data(self, sid, data):
         self.send_frame(FRAME_DATA + sid.encode() + data)
 
+    def _persist_cert_pins(self, pins):
+        """Scrie lista de pin-uri acceptate în agent.json (atomic, 0600)."""
+        try:
+            with open(CONFIG_PATH) as f:
+                data = json.load(f)
+            data["cert_pins"] = list(pins)
+            data.pop("cert_pin", None)          # forma veche, înlocuită de listă
+            tmp = CONFIG_PATH + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(data, f)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, CONFIG_PATH)
+            log("gateway key pinned (TOFU, insecure mode): %s…" % pins[0][:16])
+        except (OSError, ValueError) as e:
+            log("could not pin the certificate in %s: %s" % (CONFIG_PATH, e))
+
     def _persist_cert_pin(self, pin):
         """Fixează amprenta certificatului gateway-ului în agent.json (TOFU, mod insecure).
         Scriere atomică (temp + rename), permisiuni 0600."""
@@ -1200,7 +1299,7 @@ class Agent:
         self._connect_started = time.time()
         cfg = self.config
         ws = WSClient(cfg["url"], cfg["token"], insecure=cfg.get("insecure", False),
-                      cert_pin=cfg.get("cert_pin"))
+                      cert_pin=(cfg.get("cert_pins") or cfg.get("cert_pin")))
         threading.Thread(target=self._connect_worker, args=(ws,), daemon=True).start()
 
     def _connect_worker(self, ws):
@@ -1249,10 +1348,30 @@ class Agent:
                 pass
             return
         cfg = self.config
-        # TOFU (mod insecure, fără pin încă): fixează amprenta certificatului la prima conectare
-        if cfg.get("insecure") and not cfg.get("cert_pin") and ws.peer_pin:
-            cfg["cert_pin"] = ws.peer_pin
-            self._persist_cert_pin(ws.peer_pin)
+        # TOFU (mod insecure, fără pin încă): fixăm amprenta CHEII PUBLICE la prima conectare.
+        #
+        # …dar NU dacă certificatul e de scurtă durată. Măsurat pe imaginea pe care o livrăm:
+        # CA-ul intern al lui Caddy — folosit de instalarea locală pe IP, exact modul în care
+        # pin-ul se activează — emite certificate de 12 ORE. Un pin pe aşa ceva nu apără
+        # nimic: garantează că flota se opreşte până a doua zi, iar remediul ar trebui să
+        # circule chiar pe conexiunea pe care agenţii tocmai au refuzat-o. Recuperarea ar fi
+        # SSH manual pe fiecare host. Semnalat de un audit extern ca risc; măsurătoarea a
+        # arătat că e o certitudine.
+        #
+        # Când cheia e reutilizată la reînnoire, pin-ul pe SPKI supravieţuieşte oricum — de
+        # asta îl preferăm celui pe certificatul întreg.
+        if cfg.get("insecure") and not cfg.get("cert_pin") and not cfg.get("cert_pins"):
+            _, nb, na = ws._cert_parts(ws.peer_der or b"")
+            lifetime = (na - nb) if (nb and na) else None
+            if ws.peer_spki and (lifetime is None or lifetime >= CERT_PIN_MIN_LIFETIME):
+                cfg["cert_pins"] = [ws.peer_spki]
+                self._persist_cert_pins([ws.peer_spki])
+            elif lifetime is not None:
+                log("NOT pinning the gateway certificate: it is valid for only %.1fh, so it "
+                    "rotates faster than the pin could survive. TLS verification is off in "
+                    "insecure mode, so this connection is trust-on-first-use WITHOUT a pin — "
+                    "use a real certificate if you need pinning to mean anything."
+                    % (lifetime / 3600.0))
         self.ws = ws
         self.connected = True
         # health de link: resetăm secvenţa/ack la fiecare conexiune nouă

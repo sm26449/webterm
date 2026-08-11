@@ -91,12 +91,29 @@ and the one finding rated Critical did not survive that check.
 - `command_history` is documented as client-reported and therefore forgeable; `audit_log`
   remains the record that is not.
 
-### Known, not fixed
+### Fixed — certificate pinning, agent 41 (requires re-signing)
 
-- **The agent pins the leaf certificate, not the SPKI**, with no rotation path: on a
-  deployment where the issuer rotates leaves automatically, every agent stops connecting at
-  once and the gateway cannot push a remedy over the connection they just refused. The fix
-  requires changing `ptyd.py`, an `AGENT_VERSION` bump and re-signing with the offline key.
+- **The agent pinned the leaf certificate**, which an audit flagged as an availability risk.
+  Measuring it turned the risk into a certainty: Caddy's internal CA — used by exactly the
+  IP/local install where pinning switches on — issues **12-hour** certificates. So the pin
+  was not protecting that deployment, it was scheduling a fleet-wide outage before the next
+  morning, with the remedy having to travel over the connection the agents had just refused
+  and manual SSH to every host as the only recovery.
+
+  Three changes. The pin is now on the **SubjectPublicKeyInfo**, so a renewal that keeps the
+  key no longer breaks it. `cert_pins` is a **list**, so a rotation can be loaded before it
+  is needed. And a certificate valid for less than 48 hours is **not pinned at all**, with a
+  log line saying so — a pin that guarantees an outage is not a defence, and pretending
+  otherwise is worse than admitting the deployment has no pin.
+
+  Existing agents keep working: a stored full-certificate pin is still accepted, so nothing
+  needs re-enrolling. The mismatch error now prints the observed fingerprint, because the
+  previous message told the operator that something was wrong without telling them what to
+  trust instead.
+
+  `tests/cert_pin_test.py` generates real certificates with openssl and checks our SPKI
+  against openssl's own — which is how a header-length bug in the DER walk was caught, on
+  RSA keys where the length is long-form. RSA and EC both verified.
 
 ## [2.0.3] — 2026-08-09 · agent (40)
 
