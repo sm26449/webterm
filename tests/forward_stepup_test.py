@@ -137,6 +137,37 @@ async def main():
         check("forward oprit → 404, nu redirect de step-up (fără oracol)",
               r.status_code == 404, str(r.status_code))
 
+        # ── `_forward_stepup_ok`: pe baza REALĂ, cu schema reală ─────────────
+        # Funcţia asta e chemată pentru FIECARE cerere prin tunel. Prima versiune interoga
+        # `forwards` în loc de `port_forwards`, deci arunca de fiecare dată: opt teste de
+        # forward au picat în CI, jumătate cu 500. Verificarea de aici e ieftină şi hermetică
+        # — nu are nevoie de container, agent sau tunel — şi ar fi prins-o imediat.
+        await db.execute("UPDATE port_forwards SET enabled=1 WHERE id=?", gated_fid)
+        security._stepup_windows.clear()
+
+        class _Req:
+            def __init__(self, cookie=None):
+                self.cookies = {security.COOKIE_NAME: cookie} if cookie else {}
+
+        sess_token = c.cookies.get(security.COOKIE_NAME)
+        allowed = await api._forward_stepup_ok(plain_slug, _Req())
+        check("host FĂRĂ 2FA: tunelul nu cere fereastră de step-up", allowed is True)
+
+        allowed = await api._forward_stepup_ok(gated_slug, _Req())
+        check("host CU 2FA, fără sesiune: tunelul e refuzat", allowed is False)
+
+        security.open_stepup_window(uid, gated)
+        allowed = await api._forward_stepup_ok(gated_slug, _Req(sess_token))
+        check("host CU 2FA, cu fereastră deschisă: trece", allowed is True, allowed)
+
+        security._stepup_windows.clear()
+        allowed = await api._forward_stepup_ok(gated_slug, _Req(sess_token))
+        check("host CU 2FA, fereastră închisă: tunelul se închide şi el", allowed is False)
+
+        allowed = await api._forward_stepup_ok("slug-inexistent", _Req())
+        check("slug necunoscut: nu aruncă, doar lasă calea normală să dea 404",
+              allowed is True)
+
     print(f"\n{ok}/{total} teste trecute")
     return ok == total
 

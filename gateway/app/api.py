@@ -2430,9 +2430,20 @@ async def serial_open(host_id: int, body: SerialOpenIn, user=Depends(security.re
 # ── Routing pe subdomeniu + handshake de auth ────────────────────────────────
 async def _forward_stepup_ok(slug: str, request: Request) -> bool:
     """Pe hosturile marcate `require_2fa`, un tunel deschis se închide când se închide
-    fereastra de step-up. Pentru restul, mereu adevărat (zero cost)."""
+    fereastra de step-up. Pentru restul, mereu adevărat (zero cost).
+
+    Verificarea stă pe calea prin care trece TOT traficul forwardat, deci o excepţie aici nu
+    e o poartă închisă, ci 500 la fiecare cerere. Prima versiune interoga o tabelă inexistentă
+    (`forwards` în loc de `port_forwards`) şi exact asta s-a întâmplat: opt teste de forward
+    au picat, jumătate cu 500.
+
+    Nu o înfăşurăm într-un `try/except` care întoarce True: pe o verificare de securitate,
+    „n-am putut afla, deci las să treacă" e o apărare de faţadă. Dacă interogarea moare, moare
+    şi căutarea ţintei de imediat după, deci cererea eşuează oricum — vizibil, nu tăcut.
+    `tests/forward_stepup_test.py` execută funcţia pe o bază reală, cu schema reală, ceea ce
+    e singurul lucru care ar fi prins un nume de tabelă greşit."""
     row = await db.fetchone(
-        "SELECT f.host_id, h.require_2fa FROM forwards f JOIN hosts h ON h.id=f.host_id"
+        "SELECT f.host_id, h.require_2fa FROM port_forwards f JOIN hosts h ON h.id=f.host_id"
         " WHERE f.slug=? AND f.enabled=1", slug)
     if not row or not row["require_2fa"]:
         return True

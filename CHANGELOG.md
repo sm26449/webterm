@@ -79,6 +79,14 @@ and the one finding rated Critical did not survive that check.
   now capped at the step-up window, and `route_forward` re-checks that the window is still
   open on every request rather than trusting the cookie for the rest of the day.
 
+  That re-check sits on the path every forwarded request takes, and the first version of it
+  queried a table that does not exist (`forwards` rather than `port_forwards`), so it raised
+  on each call: eight forwarding tests failed, half of them with 500. It is deliberately not
+  wrapped in a `try/except` that returns "allowed" — on a security check, "could not tell, so
+  let it through" is a defence in name only. `tests/forward_stepup_test.py` now exercises the
+  helper against a real database with the real schema, which is what would have caught a
+  wrong table name without needing a container.
+
 - **Forward responses carried no framing headers**, so a device UI was iframe-able from
   anywhere. `X-Frame-Options`, `frame-ancestors 'self'` and `Referrer-Policy` are now sent —
   none of them break device UIs the way a script CSP would. Booting with `http://` while
