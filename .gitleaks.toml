@@ -10,6 +10,8 @@ description = "Fixtures de test — parole/tokenuri dummy + vectori RFC, nu secr
 regexes = [
   # parola contului de test folosită de scripturile e2e/CI (fs-test, fwd-test, e2e-session, …)
   '''parola-e2e-123456''',
+  # parola contului de test din suitele hermetice (web_sessions, agent_uninstall, csrf…)
+  '''parola-de-test-1234''',
   # tokenuri de setup de test
   '''ci-e2e-token''',
   '''test-setup''',
