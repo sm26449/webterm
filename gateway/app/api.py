@@ -3832,6 +3832,21 @@ if "$PY" "$AGENT" status >/dev/null 2>&1; then
   else
     echo " Supervision:   manual (no automatic restart — see the warning above)"
   fi
+  # Userul dedicat NU poate sudo — asta e chiar rostul lui, dar e şi prima surpriză:
+  # instalezi, dai `sudo apt install`, primeşti „Sorry, try again" şi n-ai de unde şti că e
+  # intenţionat. Nu generăm o parolă ca s-o evităm (ar face contul loginabil prin SSH pe orice
+  # instalare, şi tot n-ar da sudo fără o schimbare de grup). Spunem, exact unde te loveşti.
+  if [ "$(id -u)" != 0 ] && ! sudo -n true >/dev/null 2>&1; then
+    echo ""
+    echo " NOTE: this user has no sudo — by design. Sessions open a shell as $(id -un),"
+    echo "       so installing packages or editing root-owned files will fail until you"
+    echo "       grant it. From a ROOT shell on this host:"
+    echo ""
+    echo "         passwd $(id -un) && usermod -aG sudo $(id -un)   # then reopen the tab"
+    echo ""
+    echo "       Narrower options, and what each one costs:"
+    echo "       {public_url_docs}"
+  fi
   echo ""
   echo " Full details any time:  $PY $AGENT info"
   echo " Files uploaded from the UI are saved into the directory currently open"
@@ -3860,6 +3875,7 @@ async def install_script(enroll_token: str):
     return INSTALL_SCRIPT.format(
         public_url=config.PUBLIC_URL, ws_url=config.ws_public_url(),
         token=token, insecure="true" if config.AGENT_INSECURE else "false",
+        public_url_docs="https://github.com/sm26449/webterm#provisioning-a-server",
         integration_sha256=_shell_integration_digest(),
         agent_sha256=_agent_digest(),
         ssl_ctx="ssl._create_unverified_context()" if config.AGENT_INSECURE else "None")

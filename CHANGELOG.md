@@ -39,6 +39,21 @@ back.
   route-authorisation gates rejected it until it was declared with a reason — once for having
   no user dependency, then again for being a public route that writes.
 
+### Added — the installer says the dedicated user has no sudo
+
+- Installing as `webterm` and then hitting *"Sorry, try again"* on the first `sudo apt
+  install` is confusing precisely because it is correct behaviour: the account has no
+  password and no sudo, which is the reason to use it. The installer now says so at the end,
+  where you are about to hit it, with the command to grant sudo and a link to the narrower
+  options. Detected with `sudo -n true`, so root installs stay quiet.
+
+  Generating a password at install time was the obvious alternative and is worse: a password
+  alone grants no sudo, so the group change would be needed anyway; it makes the account
+  loginable over SSH on every install, which `useradd` deliberately does not; and the
+  generated secret has to travel somewhere — the terminal, the scrollback, or the gateway
+  itself during one-click provisioning. The gap was missing information, not a missing
+  password.
+
 ### Added — how to give the dedicated user the rights it needs
 
 - The recommended install creates `webterm` with no password and no sudo, which is the point
