@@ -42,6 +42,9 @@ PUBLIC = {
     "/ws/shared/{token}": "idem, pe WebSocket",
     "/ws/sessions/{sid}": "autentifică în handler cu `require_user_ws` (Depends nu merge pe WS)",
     "/agent/ws": "agentul se autentifică cu tokenul lui de host, în handshake",
+    "/agent/uninstalled": ("agentul anunţă că a fost scos de pe host; se autentifică cu "
+                           "tokenul LUI, nu cu o sesiune de utilizator. Nu şterge nimic — "
+                           "doar marchează, iar ştergerea rămâne o acţiune din UI"),
     "/agent/ptyd.py": "sursa agentului: publică prin construcție, verificată prin semnătură",
     "/agent/shell-integration.sh": "idem; integritatea se verifică prin sha256, nu prin auth",
     "/install/{enroll_token}": "tokenul de enroll E credențialul; expiră în 24h, single-use",
@@ -114,8 +117,13 @@ def main():
     # Ceremonia WebAuthn de LOGIN e POST prin natura ei (trimite provocarea şi asserţiunea),
     # şi trebuie să fie publică — se petrece înainte de a exista o sesiune. E poarta însăşi,
     # ca `/api/login`.
+    # `/agent/uninstalled` scrie, dar scrie PUŢIN şi cu credenţial: tokenul hostului, acelaşi
+    # cu care agentul deschide WS-ul. Singurul efect e un marcaj („agentul a fost scos de pe
+    # host"), niciodată o ştergere — ştergerea rămâne o acţiune autentificată din UI, tocmai
+    # ca cine are shell pe o maşină să nu poată face hostul să dispară din tabloul operatorului.
     WRITE_OK = {"/api/setup", "/api/login", "/api/logout", "/install/{enroll_token}",
-                "/api/webauthn/login/options", "/api/webauthn/login/verify"}
+                "/api/webauthn/login/options", "/api/webauthn/login/verify",
+                "/agent/uninstalled"}
     writers = set()
     for r in routes:
         if r.path not in PUBLIC:

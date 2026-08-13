@@ -303,6 +303,20 @@ export default function Sidebar(props: {
                 ⚠ {t('sidebar.conflictBody')}
               </div>
             )}
+            {/* Agentul a fost scos de pe host cu `ptyd.py uninstall`. Nu ştergem nimic
+                singuri: poate vrei doar să-l reinstalezi, caz în care marcajul dispare de la
+                sine la reconectare. Ştergerea rămâne o apăsare conştientă, aici. */}
+            {host.uninstalled_at && !host.online && (
+              <div className="mt-1 flex items-center gap-2">
+                <span className="truncate text-xs wt-warn" title={t('sidebar.uninstalledTitle')}>
+                  ⚠ {t('sidebar.uninstalledBadge')}
+                </span>
+                <button
+                  onClick={(e) => { e.stopPropagation(); deleteHost(host) }}
+                  className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-rose-400 ring-1 ring-ink-700 hover:bg-ink-800"
+                >{t('sidebar.uninstalledRemove')}</button>
+              </div>
+            )}
           </div>
           {host.online && host.update_blocked && (
             /* update BLOCAT ≠ update disponibil: fără distincţia asta, cardul arăta „↑ vNN"

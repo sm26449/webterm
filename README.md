@@ -449,6 +449,62 @@ works without it. Requires python3 ≥ 3.6; **`tmux` is what makes sessions pers
 the agent runs on a plain PTY and sessions die with it.
 On-server diagnostics: `python3 ~/.webterm/ptyd.py info`.
 
+### The dedicated user cannot `sudo` — decide what it may do
+
+The recommended install runs the agent as a dedicated `webterm` user, created with
+`useradd -m -s /bin/bash webterm`. That user has **no password and no sudo**, which is the
+whole point: whoever gets past the login gets that user's access and nothing more. It also
+means your first `sudo apt install` in a session fails with *"Sorry, try again"* — sudo is
+asking for a password the account does not have.
+
+Grant it deliberately, from a root shell on that host. Three shapes, most restrictive first:
+
+```sh
+# 1. Narrow — only the commands you actually need. Best ratio: a compromised gateway
+#    gets those commands, not the machine.
+sudo tee /etc/sudoers.d/webterm >/dev/null <<'EOF'
+webterm ALL=(root) NOPASSWD: /usr/bin/systemctl restart nginx, /usr/bin/journalctl
+EOF
+sudo chmod 440 /etc/sudoers.d/webterm && sudo visudo -c
+
+# 2. Full sudo, password required — you type it, an attacker with your session cookie
+#    cannot become root without it. Use this if you administer the host from WebTerm.
+sudo passwd webterm
+sudo usermod -aG sudo webterm        # RHEL/Fedora: -aG wheel
+
+# 3. Full sudo, no password — convenient, and gives up most of what the dedicated user
+#    bought you: the agent is root again in practice.
+echo 'webterm ALL=(ALL) NOPASSWD:ALL' | sudo tee /etc/sudoers.d/webterm
+sudo chmod 440 /etc/sudoers.d/webterm
+```
+
+Option 2 is worth understanding rather than copying: the password is typed into a WebTerm
+terminal. It is **not** written to the transcript — input is never recorded, precisely so
+prompts with echo off do not leak — but it is still a password travelling through the
+gateway. If that is the wrong trade for a given host, use option 1.
+
+Serial consoles need one more group, since `/dev/ttyUSB*` is not world-readable:
+
+```sh
+sudo usermod -aG dialout webterm     # some distros: uucp
+```
+
+Group changes apply to **new** sessions; close the tab and open a new one.
+
+### Removing the agent from a host
+
+```sh
+python3 ~/.webterm/ptyd.py uninstall        # asks first; -y to skip
+```
+
+It stops the agent and its supervision, kills the WebTerm tmux server (sessions on that host
+end) and deletes `~/.webterm`. It does **not** remove the host from WebTerm — it tells the
+gateway it is gone, and the host list shows *agent removed on the server* with a button to
+remove it. Two reasons: you may only be reinstalling, in which case the notice clears by
+itself when the agent reconnects; and deleting the host takes its name, forwards and session
+links with it, so that decision stays with someone signed in rather than with whoever has a
+shell on the machine.
+
 ## Configuration
 
 Everything in `.env` (see `.env.example`):

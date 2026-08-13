@@ -42,7 +42,7 @@ import termios
 import threading
 import time
 
-AGENT_VERSION = 41
+AGENT_VERSION = 42
 
 # Sub atâtea secunde de valabilitate, un certificat se roteşte prea des ca un pin pe el să
 # însemne altceva decât o cădere programată. 48h: peste ce emite un CA intern (12h la Caddy),
@@ -338,7 +338,28 @@ TMUX_CLIENT_HEALTHY = 10.0         # un client care a trăit atât = reataşare 
 # set-clipboard + Ms: selectia cu mouse-ul din tmux ajunge in clipboardul
 # browserului prin OSC 52 (xterm.js clipboard addon). prefix None + status off
 # tin tmux invizibil; bindingurile default de mouse raman (sunt exact ce vrem).
+def _login_shell() -> str:
+    """Shell-ul de login al utilizatorului, din passwd — NU din `$SHELL`.
+
+    tmux alege `default-shell` în ordinea: `$SHELL`, apoi `getpwuid`, apoi `/bin/sh`. Iar
+    `$SHELL` e doar ce s-a nimerit în mediul procesului care a pornit SERVERUL tmux. Când
+    agentul e repornit de cron — cazul de după fiecare reboot, fiindcă instalatorul pune
+    `@reboot` plus un watchdog — cron impune `SHELL=/bin/sh`. Rezultatul: serverul tmux
+    porneşte cu default-shell `/bin/sh`, iar fiecare sesiune NOUĂ primeşte dash: prompt gol
+    (`#` pentru root), fără completare la Tab, fără istoric cu săgeţi.
+
+    Se manifestă abia după un reboot, deci la distanţă mare de cauză. Reprodus pe un host
+    real, 2026-08-13. Passwd e sursa de adevăr pentru shell-ul unui utilizator; îl fixăm
+    explicit ca să nu mai depindem de cine a pornit agentul."""
+    try:
+        sh = pwd.getpwuid(os.getuid()).pw_shell
+    except (KeyError, OSError):
+        sh = ""
+    return sh if sh and os.path.isfile(sh) and os.access(sh, os.X_OK) else "/bin/sh"
+
+
 TMUX_EXTRA_OPTIONS = [
+    ("default-shell", _login_shell()),
     ("history-limit", "50000"),
     ("escape-time", "0"),
     ("destroy-unattached", "off"),
@@ -2879,6 +2900,71 @@ File transfer:
         home, user))
 
 
+def _cli_uninstall(assume_yes: bool = False) -> None:
+    """`ptyd.py uninstall` — scoate agentul de pe ACEST host.
+
+    Ce face aici: opreşte daemonul, scoate supravegherea (systemd --user / cron), omoară
+    serverul tmux al WebTerm (deci sesiunile de pe host se termină) şi şterge `~/.webterm`.
+
+    Ce NU face: nu şterge hostul din WebTerm. Îi spune gateway-ului că a plecat, iar acolo
+    apare o confirmare. Motivul e dublu. Unu: poate vrei doar să reinstalezi — atunci
+    marcajul dispare singur când agentul se conectează din nou, fără să apeşi nimic. Doi:
+    ştergerea din interfaţă duce cu ea numele hostului, forward-urile şi legătura sesiunilor,
+    iar dacă ar fi declanşată de aici, oricine are shell pe maşina asta ar putea face hostul
+    să dispară din tabloul operatorului. De pe host poţi scoate agentul — nu te opreşte
+    nimeni; ce rămâne în evidenţă e o decizie autentificată, luată în UI."""
+    print("This removes the WebTerm agent from THIS host:")
+    print("  · stops the agent and its supervision (systemd --user / cron)")
+    print("  · kills the WebTerm tmux server — sessions on this host end")
+    print("  · deletes %s" % WEBTERM_DIR)
+    print("The host stays in WebTerm until you confirm there (or reinstall).")
+    if not assume_yes:
+        try:
+            if input("Continue? [y/N] ").strip().lower() not in ("y", "yes"):
+                print("Nothing was changed.")
+                return
+        except (EOFError, KeyboardInterrupt):
+            print("\nNothing was changed.")
+            return
+
+    # 1) anunţăm gateway-ul CÂT timp mai avem tokenul (ştergem `~/.webterm` la final)
+    notified = _notify_uninstalled()
+    # 2) curăţenia locală: acelaşi cod ca op-ul `uninstall` împins din UI
+    warnings = Agent.__new__(Agent)._uninstall_agent()
+    for w in warnings:
+        print("warning: could not clean up %s" % w)
+    print("Agent removed from this host.")
+    if notified:
+        print("WebTerm was notified — confirm there whether to remove the host,")
+        print("or just reinstall the agent and the notice clears by itself.")
+    else:
+        print("Could not reach WebTerm — the host will show as offline there.")
+
+
+def _notify_uninstalled() -> bool:
+    """Spune gateway-ului că agentul a fost scos, autentificat cu tokenul hostului.
+    Best-effort: dacă gateway-ul e inaccesibil, dezinstalarea locală merge oricum înainte —
+    ar fi absurd să nu poţi scoate agentul de pe maşina ta fiindcă serverul e picat."""
+    import urllib.request                # doar aici: agentul e stdlib-only şi porneşte des
+    try:
+        with open(CONFIG_PATH) as f:
+            cfg = json.load(f)
+        url = cfg.get("url") or ""
+        token = cfg.get("token") or ""
+        if not url or not token:
+            return False
+        base = url.replace("wss://", "https://").replace("ws://", "http://")
+        base = base.split("/agent/ws")[0]
+        req = urllib.request.Request(base + "/agent/uninstalled", data=b"", method="POST",
+                                     headers={"Authorization": "Bearer " + token})
+        ctx = ssl._create_unverified_context() if cfg.get("insecure") else None
+        with urllib.request.urlopen(req, timeout=10, context=ctx) as r:
+            return r.status == 200
+    except Exception as e:                  # noqa: BLE001 — vezi docstring
+        log("could not notify the gateway about the uninstall: %s" % e)
+        return False
+
+
 def main():
     global FOREGROUND
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
@@ -2901,6 +2987,10 @@ def main():
 
     if cmd in ("info", "help"):
         print_info()
+        sys.exit(0)
+
+    if cmd == "uninstall":
+        _cli_uninstall("-y" in sys.argv[1:] or "--yes" in sys.argv[1:])
         sys.exit(0)
 
     if cmd == "stop":

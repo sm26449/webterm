@@ -54,6 +54,7 @@ export interface Host {
   last_heartbeat: number | null
   folder?: string
   conflict?: boolean
+  uninstalled_at?: number | null
   install_command?: string
   install_command_dedicated?: string
   // conectare directă

@@ -199,6 +199,10 @@ MIGRATIONS = [
     # o verificare făcută mai târziu ar găsi mereu adresa „cunoscută" — verdictul trebuie
     # îngheţat exact în momentul în care era încă adevărat.
     "ALTER TABLE web_sessions ADD COLUMN device_new INTEGER DEFAULT 0",
+    # Agentul a fost scos de pe host cu `ptyd.py uninstall`. NU ştergem hostul aici:
+    # asta ar duce decizia distructivă la cine are shell pe maşină, iar hostul ar putea
+    # dispărea din tabloul operatorului fără ca el să afle. Marcăm, şi UI-ul întreabă.
+    "ALTER TABLE hosts ADD COLUMN uninstalled_at REAL",
     # De câte ori s-a logat contul de la adresa asta. „Văzută o dată" nu e un loc
     # obişnuit — un atacator care ştie parola şi se loghează de două ori de la el
     # de-acasă şi-ar declara singur adresa drept cunoscută. DEFAULT 3, ca instalările

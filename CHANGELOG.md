@@ -7,6 +7,45 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [Unreleased]
+
+### Fixed — a reboot left every new session in `sh` (agent 42)
+
+- After a reboot the prompt collapsed to a bare `#`, with no tab completion and no history:
+  the shell was dash, not bash. tmux picks `default-shell` from `$SHELL` first, then the
+  passwd entry, then `/bin/sh` — and `$SHELL` is whatever the process that started the tmux
+  *server* happened to have. The installer supervises the agent with cron `@reboot` plus a
+  watchdog, and cron sets `SHELL=/bin/sh`. So the server came up with dash and every new
+  session inherited it, while sessions created before the reboot were fine. The symptom
+  appears far from the cause, which is why it survived.
+
+  `default-shell` is now taken from the passwd entry, which is the actual source of truth for
+  a user's shell, and it is in the options applied to a running server as well — so an
+  existing host is fixed by updating the agent, without killing its tmux server.
+
+### Added — uninstall from the host, confirm in the interface
+
+- `python3 ~/.webterm/ptyd.py uninstall` removes the agent from the machine it runs on:
+  daemon, supervision, the WebTerm tmux server, and `~/.webterm`. It asks first; `-y` skips.
+
+  It does not remove the host from WebTerm. It reports that it is gone, and the host list
+  shows *agent removed on the server* with a button. From a host you can always remove the
+  agent — nobody stops you, it is your machine — but what stays in WebTerm's records is a
+  decision made while signed in. Otherwise anyone with a shell on that host could make it
+  vanish from the operator's dashboard. And often you are not deleting at all, only
+  reinstalling: the notice then clears by itself when the agent reconnects.
+
+  The endpoint is authenticated with the host token and only ever writes a marker. Both
+  route-authorisation gates rejected it until it was declared with a reason — once for having
+  no user dependency, then again for being a public route that writes.
+
+### Added — how to give the dedicated user the rights it needs
+
+- The recommended install creates `webterm` with no password and no sudo, which is the point
+  — and which makes the first `sudo apt install` fail confusingly. README now documents the
+  three ways to grant it (narrow sudoers entry, full sudo with a password, full passwordless
+  sudo), what each costs, and the `dialout` group needed for serial consoles.
+
 ## [2.0.5] — 2026-08-12 · agent (41)
 
 Gateway and interface only: the agent is unchanged, so nothing in the fleet needs updating.

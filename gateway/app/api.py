@@ -1075,6 +1075,10 @@ def _host_json(row) -> dict:
         "backend": row["backend"], "last_heartbeat": row["last_heartbeat"],
         "folder": (row["folder"] or "") if "folder" in row.keys() else "",
         "conflict": core.host_conflict(row["id"]),
+        # Agentul a fost scos de pe host. Hostul rămâne până când cineva confirmă în UI —
+        # poate nu vrei să-l ştergi, ci doar să-l reinstalezi, caz în care marcajul dispare
+        # singur la reconectare.
+        "uninstalled_at": (row["uninstalled_at"] if "uninstalled_at" in row.keys() else None),
         "metrics": conn.metrics if conn else None,
         "agent_latest": expected,
         # de ce NU se poate actualiza (dacă e cazul) — altfel UI-ul arată „update disponibil"
@@ -3861,6 +3865,34 @@ async def install_script(enroll_token: str):
         ssl_ctx="ssl._create_unverified_context()" if config.AGENT_INSECURE else "None")
 
 
+@router.post("/agent/uninstalled")
+async def agent_uninstalled(request: Request):
+    """Agentul declară că a fost scos de pe host (`ptyd.py uninstall`).
+
+    NU ştergem hostul. Ştergerea duce cu ea numele, forward-urile şi legătura sesiunilor —
+    şi, mai important, ar pune o acţiune distructivă din UI la îndemâna oricui are shell pe
+    maşina aia: hostul ar dispărea din tabloul operatorului fără ca el să decidă. Marcăm
+    hostul, iar interfaţa cere confirmarea. Agentul spune ce s-a întâmplat; ce facem cu
+    evidenţa rămâne o decizie autentificată.
+
+    Dacă agentul e reinstalat, marcajul se şterge singur la următoarea conectare."""
+    auth = request.headers.get("authorization", "")
+    token = auth[7:] if auth.lower().startswith("bearer ") else ""
+    row = await db.fetchone("SELECT id, name FROM hosts WHERE token_hash=?",
+                            security.sha256_hex(token)) if token else None
+    if not row:
+        raise HTTPException(401, "invalid agent token")
+    await db.execute("UPDATE hosts SET uninstalled_at=? WHERE id=?", time.time(), row["id"])
+    await core.record_agent_event(row["id"], "uninstalled",
+                                  detail="removed on the host with `ptyd.py uninstall`")
+    await audit.record(time.time(), "agent:" + row["name"], security.client_ip(request),
+                       "POST", "/agent/uninstalled", 200,
+                       "agent removed itself on the host; awaiting confirmation in the UI")
+    log.warning("agent uninstalled itself on host=%s(%s) — the host is kept until confirmed",
+                row["name"], row["id"])
+    return {"ok": True, "host_kept": True}
+
+
 @router.get("/agent/ptyd.py", response_class=PlainTextResponse)
 async def agent_source():
     if not config.AGENT_FILE.exists():
@@ -3973,6 +4005,10 @@ async def agent_ws(ws: WebSocket):
     if not row:
         await ws.close(code=4401)
         return
+    # Dacă hostul era marcat „dezinstalat" şi agentul se conectează din nou, înseamnă că a
+    # fost reinstalat: marcajul dispare singur, fără ca cineva să apese ceva.
+    if row["uninstalled_at"]:
+        await db.execute("UPDATE hosts SET uninstalled_at=NULL WHERE id=?", row["id"])
     # anti-clone: bind the token to a single machine. Pin the reported instance
     # id on first connect; a different machine on the same token is refused
     # (4409) instead of swapping the source — otherwise a cloned VM image with
