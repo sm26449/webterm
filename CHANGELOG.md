@@ -9,6 +9,22 @@ back.
 
 ## [Unreleased]
 
+### Fixed — terminal font size is now a device preference, and tabs stay in sync
+
+- The A± font size was one value per browser, read by each tab once at mount — and the
+  width-based default (phone 9 / tablet 12 / desktop 14) was written to storage on first
+  visit, freezing it forever. So tabs opened before and after an adjustment disagreed,
+  rotating a phone or resizing a window changed nothing, and the fix was always manual
+  A−/A+ until the rendering looked right again.
+
+  The preference is now kept per device class (phone/tablet/desktop, same breakpoints),
+  A± overrides only the class you are on, and every mounted tab recalibrates when it
+  becomes active, when the viewport crosses a breakpoint, and the moment A± is pressed
+  in any other tab. Only a deliberate A± persists anything — the default stays live.
+  A background tab that realigns announces its size passively, so it cannot steal the
+  PTY size from a device actively using that session. The old single value migrates
+  once, as the override of the class it was calibrated on.
+
 ### Fixed — a reboot left every new session in `sh` (agent 42)
 
 - After a reboot the prompt collapsed to a bare `#`, with no tab completion and no history:

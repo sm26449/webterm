@@ -8,6 +8,7 @@ import { errText, api, CommandGuard, Host, Session, withStepup } from '../lib/ap
 import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
 import { Command, CommandTracker, cmdDuration, matchCommandRule } from '../lib/commands'
 import { clearCwd, parseOsc7, setCwd } from '../lib/cwd'
+import { preferredFont, setPreferredFont } from '../lib/font'
 import { useI18n } from '../lib/i18n'
 import { hostScheme, termTheme } from '../lib/termtheme'
 import CommandsPanel from './CommandsPanel'
@@ -238,13 +239,8 @@ export default function SessionView(props: {
     prevLockedRef.current = locked
   }, [locked])
   const [search, setSearch] = useState('')
-  const [fontSize, setFontSize] = useState(() =>
-    // pe telefoane (îngust) fontul mic încadrează mult mai bine coloanele
-    // terminalului — testat pe device real, 9 e treapta cea mai bună (min = 8).
-    // Tabletele (640–768) rămân la 12, desktop la 14. Se poate ajusta cu A±.
-    Number(localStorage.getItem('wt_font') ??
-      (window.innerWidth < 640 ? 9 : window.innerWidth < 768 ? 12 : 14)),
-  )
+  // per dispozitiv, nu per tab: vezi lib/font.ts pentru clase și migrare
+  const [fontSize, setFontSize] = useState(preferredFont)
   const [copied, setCopied] = useState(false)
   const [shareUrl, setShareUrl] = useState<string | null>(null)
   const [shareOpen, setShareOpen] = useState(false)          // panoul de opțiuni
@@ -423,7 +419,9 @@ export default function SessionView(props: {
     const onSnippets = () => setSnippetsOpen((v) => !v)
     const onFont = (e: Event) => {
       const d = (e as CustomEvent<number>).detail
-      setFontSize((f) => Math.min(24, Math.max(8, f + d)))
+      // trece prin preferință, nu prin state-ul local: se persistă per dispozitiv
+      // și se propagă în toate taburile montate (vezi lib/font.ts)
+      setPreferredFont(preferredFont() + d)
     }
     const onInsert = (e: Event) => {
       send((e as CustomEvent<string>).detail)
@@ -758,17 +756,40 @@ export default function SessionView(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.id])
 
+  // Recalibrare per dispozitiv: fontul preferat se re-evaluează când tabul devine
+  // activ, la rotire/redimensionare (clasa de lățime se poate schimba) și când
+  // A± îl modifică din orice alt panou montat (evenimentul 'wt-font') — toate
+  // taburile browserului ăstuia stau la aceeași valoare, cea potrivită lui.
+  // Persistarea NU se mai face aici: doar setPreferredFont() scrie în storage,
+  // altfel montarea îngheța default-ul de lățime la prima vizită (bug istoric).
+  useEffect(() => {
+    const sync = () => setFontSize(preferredFont())
+    if (props.paneActive !== false) sync()
+    window.addEventListener('wt-font', sync)
+    window.addEventListener('resize', sync)
+    return () => {
+      window.removeEventListener('wt-font', sync)
+      window.removeEventListener('resize', sync)
+    }
+  }, [props.paneActive])
+
+  // paneActive prin ref, ca efectul de font să NU ruleze la schimbarea tabului
+  // (ar recrea rendererul degeaba) — îl citește doar când chiar se schimbă fontul
+  const paneActiveRef = useRef(props.paneActive)
+  paneActiveRef.current = props.paneActive
   useEffect(() => {
     const term = termRef.current
     if (!term) return
     term.options.fontSize = fontSize
     fitRef.current?.fit()
-    sendResize(true)   // A−/A+ e acțiune deliberată a operatorului → reclamă dimensiunea
+    // panoul activ reclamă dimensiunea (A± e acțiune deliberată a operatorului);
+    // un tab de fundal care doar se aliniază la preferință anunță pasiv, ca să
+    // nu smulgă PTY-ul de la dispozitivul care chiar folosește sesiunea aia
+    sendResize(paneActiveRef.current !== false)
     // WebGL rămâne gol la schimbarea fontului (nici clearTextureAtlas nu repară) →
     // recreăm renderer-ul la noua dimensiune. Font change e rar/deliberat, deci
     // costul recreării e acceptabil.
     reloadRendererRef.current?.()
-    localStorage.setItem('wt_font', String(fontSize))
   }, [fontSize, sendResize])
 
   // schema de culori a terminalului se aplică live (fără reload), inclusiv
@@ -1284,8 +1305,8 @@ export default function SessionView(props: {
             <span className="mx-0.5 h-4 w-px bg-ink-700" aria-hidden="true" />
             <ToolButton title={t('session.note')} active={showNote} onClick={() => setShowNote(!showNote)}><NoteIcon /></ToolButton>
             <ToolButton title={t('session.copySelection')} onClick={copySelection}>{copied ? '✓' : <CopyIcon />}</ToolButton>
-            <ToolButton title={t('session.fontSmaller')} onClick={() => setFontSize(Math.max(8, fontSize - 1))}>A−</ToolButton>
-            <ToolButton title={t('session.fontLarger')} onClick={() => setFontSize(Math.min(24, fontSize + 1))}>A+</ToolButton>
+            <ToolButton title={t('session.fontSmaller')} onClick={() => setPreferredFont(fontSize - 1)}>A−</ToolButton>
+            <ToolButton title={t('session.fontLarger')} onClick={() => setPreferredFont(fontSize + 1)}>A+</ToolButton>
             {!props.popout && (
               <ToolButton title={t('session.shareLinkTooltip')} active={!!shareUrl || shareOpen} onClick={share}><LinkIcon /></ToolButton>
             )}
@@ -1380,8 +1401,8 @@ export default function SessionView(props: {
                   </span>
                   <MoreItem onClick={() => { setShowNote(!showNote); setMoreOpen(false) }}><NoteIcon /> {t('session.note')}</MoreItem>
                   <MoreItem onClick={() => { copySelection(); setMoreOpen(false) }}><CopyIcon /> {t('session.copySelection')}</MoreItem>
-                  <MoreItem onClick={() => setFontSize(Math.min(24, fontSize + 1))}>A+ {t('session.fontLarger')}</MoreItem>
-                  <MoreItem onClick={() => setFontSize(Math.max(8, fontSize - 1))}>A− {t('session.fontSmaller')}</MoreItem>
+                  <MoreItem onClick={() => setPreferredFont(fontSize + 1)}>A+ {t('session.fontLarger')}</MoreItem>
+                  <MoreItem onClick={() => setPreferredFont(fontSize - 1)}>A− {t('session.fontSmaller')}</MoreItem>
                   {!props.popout && (
                     <MoreItem onClick={() => { share(); setMoreOpen(false) }}><LinkIcon /> {t('session.shareLink')}</MoreItem>
                   )}
