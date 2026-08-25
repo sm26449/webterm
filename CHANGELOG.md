@@ -7,7 +7,10 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
-## [Unreleased]
+## [2.0.6] — 2026-08-25 · agent (42)
+
+The agent moved to 42, so fleets should update it: the reboot/`sh` fix below only reaches an
+installed host through the agent update (no re-install and no tmux server restart needed).
 
 ### Fixed — terminal font size is now a device preference, and tabs stay in sync
 
