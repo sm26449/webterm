@@ -7,7 +7,9 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
-## [Unreleased]
+## [2.0.7] — 2026-08-26 · agent (42)
+
+Gateway only: the agent is unchanged, nothing in the fleet needs updating.
 
 ### Fixed — returning to a background tab no longer loses the last seconds of output
 
