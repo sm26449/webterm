@@ -69,7 +69,7 @@ and call `os.makedirs(ptyd.WEBTERM_DIR, exist_ok=True)` after import. See `tests
 The `.github/workflows/docker-publish.yml` workflow **blocks image publishing** if:
 
 1. **The agent signature** does not match `agent/ptyd.py` (see below).
-2. **The Python unit tests** (`unit-tests` job — 51 suites; `scripts/run-tests.sh` is the
+2. **The Python unit tests** (`unit-tests` job — 52 suites; `scripts/run-tests.sh` is the
    single source of truth for the list, and guards it in both directions) fail.
 3. **Smoke boot** (headless Chromium) — the UI fails to start.
 4. **Session E2E** (REAL agent) / **FS API** / **port forwarding** / **mobile audit** fail.
