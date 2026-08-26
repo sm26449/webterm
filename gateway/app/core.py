@@ -251,7 +251,8 @@ ALT_SCREEN_RE = re.compile(
 )
 
 
-def read_tail(sid: str, limit: int = config.BROWSER_TAIL_BYTES) -> bytes:
+def read_tail(sid: str, limit: int = config.BROWSER_TAIL_BYTES,
+              end: Optional[int] = None) -> bytes:
     # Reads only the FLUSHED bytes on disk (up to the last checkpoint). We must
     # NOT include the most recent unflushed window: replaying it into a small
     # (mobile) terminal collides with the tmux resize redraw and wipes the whole
@@ -272,13 +273,22 @@ def read_tail(sid: str, limit: int = config.BROWSER_TAIL_BYTES) -> bytes:
     # Closing it needs client-size negotiation before replay (a larger protocol change) —
     # tracked as future work. Until then the honest summary is: attaching can silently cost
     # you up to two seconds of history.
+    #
+    # EXCEPȚIE, închisă: pentru RESUME/UNLOCK (`BrowserClient._resync`) raționamentul de
+    # mai sus nu se aplică — clientul acela avea DEJA dimensiunea sesiunii, deci nu există
+    # coliziune cu vreun redraw de resize. Acolo hub-ul face flush înainte și ne dă `end`
+    # (offsetul de la flush): citim exact până la el, ca un checkpoint concurent (apărut
+    # cât citim pe thread) să nu ne strecoare octeți care sunt deja în coada clientului —
+    # ar ajunge dublați. Fără `end`, comportamentul de attach rămâne neschimbat.
     out_path, _ = transcript_paths(sid)
     try:
         size = out_path.stat().st_size
+        if end is not None:
+            size = min(size, end)
+        start = max(0, size - limit)
         with open(out_path, "rb") as f:
-            if size > limit:
-                f.seek(size - limit)
-            data = f.read()
+            f.seek(start)
+            data = f.read(size - start)
     except OSError:
         return b""
     # Comutările de ecran alternativ se scot ÎNTOTDEAUNA din replay. Motivul e tmux: el
@@ -415,17 +425,33 @@ class BrowserClient:
             await self.ws.send_bytes(b)
 
     async def _resync(self) -> None:
+        # Închide gaura de checkpoint (2s/64KiB) din `read_tail` pentru resume/unlock:
+        # clientul ăsta avea deja dimensiunea sesiunii, deci motivul pentru care fereastra
+        # neflush-uită nu se redă la attach (coliziunea cu redraw-ul de resize al unui client
+        # de altă mărime) nu se aplică aici. Fără flush, un TUI rămânea cu golurile ferestrei
+        # pierdute — chenarul static (prompterul Claude Code) nu se mai redesena singur, iar
+        # simptomul („linii dispărute până la A±/reload") apărea la fiecare revenire pe tab
+        # în timpul unui output intens.
+        #
+        # Ordinea drain → flush → tell e ATOMICĂ (sincronă, același tick de event-loop):
+        # tot ce e ≤ cutoff e pe disc și NU e în coadă; tot ce vine după e în coadă și NU e
+        # în tail. De-aia nu mai golim coada după trimitere — chunk-urile sosite cât citeam
+        # pe thread se trimit la rând, fără gaură și fără dublură.
         self._drain_queue()
+        cutoff = None
+        if not self.hub.closed:
+            try:
+                self.hub._flush()
+                cutoff = self.hub.out_f.tell()
+            except (OSError, ValueError):
+                cutoff = None       # handle închis în cursă cu teardown → attach-behaviour
         await self.send_text(json.dumps({"type": "resync"}))
         # read_tail face I/O blocant (până la 256 KB): pe thread, ca un resync
-        # (posibil declanșat repetat prin pause/resume) să nu blocheze event-loop-ul
-        tail = await asyncio.to_thread(read_tail, self.hub.sid)
+        # (posibil declanșat repetat prin pause/resume) să nu blocheze event-loop-ul.
+        # Mărginit la `cutoff`: un checkpoint concurent (cât citim) poate flush-ui octeți
+        # care sunt DEJA în coada noastră — fără margine ar ajunge și în tail, și din coadă.
+        tail = await asyncio.to_thread(read_tail, self.hub.sid, end=cutoff)
         await self.send_bytes(tail)
-        # Nu „e deja în tail": `read_tail` citeşte doar octeţii FLUSH-uiţi, iar fişierul e în
-        # urmă cu până la 2s/64KiB, deci ce s-a pus în coadă între timp poate să nu fie nici
-        # pe disc, nici trimis. Golim coada ca să nu redăm de două ori ce ERA pe disc; restul
-        # e gaura descrisă la `read_tail`, nu o dublură evitată.
-        self._drain_queue()
         self._sent_since_ping += len(tail)   # tails count toward flow control too
 
     async def _flow_control(self) -> None:

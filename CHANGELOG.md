@@ -7,6 +7,25 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [Unreleased]
+
+### Fixed — returning to a background tab no longer loses the last seconds of output
+
+- Background tabs pause their stream; on return, the gateway replays the transcript tail —
+  but only the bytes already flushed to disk, and the transcript lags by up to 2s/64KiB
+  (the checkpoint window). The loss was known and measured (0.6–1.8s per attach). For a
+  shell the screen converges on the next output, so nobody noticed; a TUI never redraws
+  its static frame, so the border of Claude Code's prompter came back with missing lines
+  and stayed that way until a forced redraw (font A±, or a page reload).
+
+  On resume/unlock the gateway now flushes the transcript before reading the tail. The
+  historical reason for not doing so — replaying the unflushed window collides with the
+  resize redraw when a different-sized device attaches — does not apply here: a resuming
+  client already has the session's size, and fresh attaches keep the old behaviour. The
+  drain→flush→tell sequence is atomic on the event loop and the tail read is bounded to
+  the flush offset, so a checkpoint racing the read can neither drop nor duplicate a
+  chunk: everything below the cutoff comes from the tail, everything above from the queue.
+
 ## [2.0.6] — 2026-08-25 · agent (42)
 
 The agent moved to 42, so fleets should update it: the reboot/`sh` fix below only reaches an
