@@ -452,7 +452,11 @@ class BrowserClient:
         # care sunt DEJA în coada noastră — fără margine ar ajunge și în tail, și din coadă.
         tail = await asyncio.to_thread(read_tail, self.hub.sid, end=cutoff)
         await self.send_bytes(tail)
-        self._sent_since_ping += len(tail)   # tails count toward flow control too
+        self._sent_since_ping += len(tail)
+        # Tail-ul redă ce s-a TRANSMIS, nu ce e PE ECRAN: tmux trimite diff-uri, deci
+        # chenarele statice ale unui TUI pot lipsi din orice fereastră de replay. Cerem
+        # sursei un repaint complet — vine prin flux, după cutoff, și închide golurile.
+        self.hub.request_redraw()   # tails count toward flow control too
 
     async def _flow_control(self) -> None:
         """Stop-and-wait ack every PING_EVERY bytes. If the client stalls
@@ -543,6 +547,7 @@ class SessionHub:
         self._unpersisted = 0
         self._idle_flush: Optional[asyncio.Task] = None
         self._last_resize = (self.rows, self.cols)
+        self._redraw_task: Optional[asyncio.Task] = None
 
         out_path, cast_path = transcript_paths(self.sid)
         is_new = not cast_path.exists()
@@ -921,6 +926,31 @@ class SessionHub:
                 pass
         await self.broadcast_json({"type": "resize", "rows": rows, "cols": cols})
 
+    def request_redraw(self) -> None:
+        """Cere sursei o retransmitere completă a ecranului (tmux `refresh-client`).
+
+        Chemat după un resync de resume: tail-ul reconstruiește ce s-a TRANSMIS, dar tmux
+        transmite doar diff-uri — părțile statice ale unui TUI (chenarul prompterului
+        Claude Code) pot să nu fi fost retransmise de mult, deci lipsesc din orice
+        fereastră de replay. Redraw-ul curge prin fluxul normal (transcript + cozi), adică
+        ajunge DUPĂ tail (post-cutoff) și repară ecranul pentru toți clienții. Debounced:
+        mai multe taburi pot da resume aproape simultan, un singur repaint ajunge.
+        Fire-and-forget: un agent vechi (fără op-ul `redraw`) răspunde cu eroare — ignorată,
+        comportamentul rămâne cel de dinainte."""
+        if self.closed or (self._redraw_task and not self._redraw_task.done()):
+            return
+
+        async def _go():
+            await asyncio.sleep(0.2)
+            source = self._source()
+            if source:
+                try:
+                    await source.redraw(self.sid)
+                except Exception:
+                    pass              # agent vechi / plecat / timeout — nimic de reparat aici
+
+        self._redraw_task = asyncio.create_task(_go())
+
 
 def get_or_create_hub(row) -> SessionHub:
     hub = hubs.get(row["id"])
@@ -978,6 +1008,13 @@ class SessionSource:
 
     async def resize(self, sid: str, rows: int, cols: int) -> None:
         raise NotImplementedError
+
+    async def redraw(self, sid: str) -> None:
+        # Retransmiterea completă a ecranului (tmux `refresh-client`), cerută după un
+        # resume de tab: tmux trimite doar diff-uri, deci un replay din transcript nu
+        # poate reconstrui părțile statice ale unui TUI. Implicit no-op — sursele fără
+        # tmux (ssh/telnet/serial) n-au echivalent fără să schimbe dimensiunea.
+        return None
 
     async def reap(self, sid: str) -> None:
         raise NotImplementedError
@@ -1282,6 +1319,9 @@ class AgentConnection(SessionSource):
 
     async def resize(self, sid, rows, cols) -> None:
         await self.request("resize", sid=sid, rows=rows, cols=cols)
+
+    async def redraw(self, sid) -> None:
+        await self.request("redraw", sid=sid)
 
     async def reap(self, sid) -> None:
         await self.request("reap", sid=sid)

@@ -42,7 +42,7 @@ import termios
 import threading
 import time
 
-AGENT_VERSION = 42
+AGENT_VERSION = 43
 
 # Sub atâtea secunde de valabilitate, un certificat se roteşte prea des ca un pin pe el să
 # însemne altceva decât o cădere programată. 48h: peste ce emite un CA intern (12h la Caddy),
@@ -1641,6 +1641,29 @@ class Agent:
                 if not s:
                     return err("no_session")
                 s.set_winsize(int(msg["rows"]), int(msg["cols"]))
+                ok()
+
+            elif op == "redraw":
+                # Retransmite TOT ecranul (tmux `refresh-client`), nu un diff: gateway-ul
+                # o cere după un resume de tab în browser, unde replay-ul din transcript
+                # nu poate reconstrui părțile statice ale unui TUI (tmux nu le-a mai
+                # retransmis de mult). Echivalentul unui A± fără schimbarea dimensiunii —
+                # exact repararea manuală pe care o făceau operatorii, automatizată.
+                # `-D` garantează un singur client pe sesiune, deci primul tty e AL nostru.
+                s = self.sessions.get(msg["sid"])
+                if not s:
+                    return err("no_session")
+                if s.backend == "tmux" and s.alive:
+                    try:
+                        r = tmux_cmd("list-clients", "-t",
+                                     "=" + TMUX_SESSION_PREFIX + s.sid,
+                                     "-F", "#{client_tty}")
+                        tty = r.stdout.decode().strip().splitlines()[0].strip() \
+                            if r.returncode == 0 and r.stdout.strip() else ""
+                        if tty:
+                            tmux_cmd("refresh-client", "-t", tty)
+                    except (OSError, subprocess.TimeoutExpired, IndexError):
+                        pass          # best-effort: fără repaint, nu o eroare de sesiune
                 ok()
 
             elif op == "kill":

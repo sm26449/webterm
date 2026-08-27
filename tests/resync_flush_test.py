@@ -144,10 +144,39 @@ async def t3_concurrent_checkpoint_no_duplication():
     hub.out_f.close(); hub.cast_f.close()
 
 
+async def t4_resume_requests_full_redraw():
+    # tmux trimite doar DIFF-uri: tail-ul redă ce s-a transmis, nu ce e pe ecran, deci
+    # chenarele statice ale unui TUI (prompterul Claude Code) lipsesc din orice replay
+    # dacă n-au mai fost retransmise de mult. La resume, hub-ul trebuie să ceară sursei
+    # un `refresh-client` — repaint complet, sosit prin flux DUPĂ tail (post-cutoff).
+    sid = "d00d" + "0" * 28
+    hub = make_hub(sid)
+    ws = FakeWs()
+    client = core.BrowserClient(ws, hub)
+    hub.clients.add(client)
+
+    redraws = []
+
+    class FakeSource:
+        async def redraw(self, s):
+            redraws.append(s)
+
+    hub._source = lambda: FakeSource()
+
+    client.pause()
+    client.push(b"x")                   # marchează _missed → resume va face resync
+    client.resume()
+    await run_sender_briefly(client, secs=0.5)   # peste debounce-ul de 0.2s
+
+    check("resume-ul cere sursei un redraw complet", redraws == [sid], str(redraws))
+    hub.out_f.close(); hub.cast_f.close()
+
+
 def main():
     t1_read_tail_end_bound()
     asyncio.run(t2_resume_includes_unflushed())
     asyncio.run(t3_concurrent_checkpoint_no_duplication())
+    asyncio.run(t4_resume_requests_full_redraw())
     ok = sum(1 for _, c in results if c)
     print(f"\n{ok}/{len(results)} passed")
     return ok == len(results)

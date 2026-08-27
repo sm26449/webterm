@@ -7,6 +7,24 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [Unreleased]
+
+### Fixed — returning to a tab asks tmux to repaint the whole screen (agent 43)
+
+- The 2.0.7 fix closed the data loss on resume, and the symptom survived it: TUI frames
+  (the two border lines of Claude Code's prompter) still came back broken. The reason is
+  one level deeper — tmux transmits diffs, only the cells that changed. A transcript
+  replay reconstructs what was *transmitted*, not what is *on screen*: during a long
+  thinking spinner only the spinner's region is retransmitted, so the static border may
+  not appear in any replay window at all. After the resume's reset-and-replay, those
+  lines are simply absent, and nothing ever redraws them — until a font A± forces a
+  resize and tmux repaints everything. That manual repair is now automated: after the
+  resume resync the gateway asks the agent for a `tmux refresh-client` — a full-screen
+  retransmit with no size change, flowing through the normal pipeline (transcript +
+  queues), so it lands after the tail and heals every connected client. Debounced, and
+  a fleet still on agent 42 answers with an error that is deliberately ignored — the
+  behaviour simply stays as it was until the agent updates.
+
 ## [2.0.7] — 2026-08-26 · agent (42)
 
 Gateway only: the agent is unchanged, nothing in the fleet needs updating.
