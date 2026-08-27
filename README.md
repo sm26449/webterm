@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/sm26449/webterm/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/sm26449/webterm/actions/workflows/docker-publish.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v2.0.7-blue)](https://github.com/sm26449/webterm/tags)
+[![Version](https://img.shields.io/badge/version-v2.0.8-blue)](https://github.com/sm26449/webterm/tags)
 
 **Persistent terminals for your servers, in the browser.**
 
@@ -334,7 +334,7 @@ the same script, only one you can read first and pin to a release.
 ```sh
 git clone https://github.com/sm26449/webterm.git
 cd webterm
-git checkout v2.0.7          # a tag cannot move under you; a branch can
+git checkout v2.0.8          # a tag cannot move under you; a branch can
 less install.sh              # it is meant to be read
 sudo ./install.sh --domain term.example.com --email you@example.com
 ```
@@ -414,7 +414,7 @@ prints it), create the account + passkey.
 Update with `./upgrade.sh` — it takes a backup, syncs the host-side scripts and hands off to
 `deploy.sh`. (`make pull` exists for a quick image swap, but it bypasses `deploy.sh`, so it
 records no rollback point and runs no health gate.) Deploy a specific version
-with a recorded rollback point: `./deploy.sh v2.0.7` — if the new container does
+with a recorded rollback point: `./deploy.sh v2.0.8` — if the new container does
 not become healthy, the script rolls back automatically; any time afterwards,
 `./rollback.sh` returns you to the previous image with a single command.
 

@@ -7,7 +7,10 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
-## [Unreleased]
+## [2.0.8] — 2026-08-27 · agent (43)
+
+The agent moved to 43, so fleets should update it: the repaint below is an agent-side
+operation, and a host still on 42 keeps the old behaviour until its agent updates.
 
 ### Fixed — returning to a tab asks tmux to repaint the whole screen (agent 43)
 
