@@ -10,13 +10,14 @@ import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
 import { Command, CommandTracker, cmdDuration, matchCommandRule } from '../lib/commands'
 import { clearCwd, parseOsc7, setCwd } from '../lib/cwd'
 import { FONT_STORAGE_KEY, preferredFont, setPreferredFont } from '../lib/font'
+import { extractUrls } from '../lib/urls'
 import { useI18n } from '../lib/i18n'
 import { hostScheme, termTheme } from '../lib/termtheme'
 import CommandsPanel from './CommandsPanel'
 import FilePanel from './FilePanel'
 import GitPanel from './GitPanel'
 import ForwardsPanel from './ForwardsPanel'
-import { CopyIcon, FilesIcon, ForwardIcon, GitBranchIcon, LinkIcon, MoreIcon, NoteIcon, PasteIcon, PencilIcon, PopoutIcon, SearchIcon, StopIcon, TrashIcon } from './Icons'
+import { CopyIcon, ExternalLinkIcon, FilesIcon, ForwardIcon, GitBranchIcon, LinkIcon, MoreIcon, NoteIcon, PasteIcon, PencilIcon, PopoutIcon, SearchIcon, StopIcon, TrashIcon } from './Icons'
 import MobileKeybar from './MobileKeybar'
 import SnippetsMenu from './SnippetsMenu'
 import TranscriptPlayer from './TranscriptPlayer'
@@ -266,6 +267,13 @@ export default function SessionView(props: {
     return () => clearTimeout(t)
   }, [replaying])
   const [moreOpen, setMoreOpen] = useState(false)
+  // meniul „Linkuri": URL-urile din buffer, extrase la deschidere (nu continuu) — vezi lib/urls
+  const [linksOpen, setLinksOpen] = useState(false)
+  const [links, setLinks] = useState<string[]>([])
+  const openLinks = useCallback(() => {
+    setLinks(extractUrls(termRef.current))
+    setLinksOpen(true)
+  }, [])
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null)
   const longPressRef = useRef<number | null>(null)
   const remoteResizeReloadRef = useRef<number | null>(null)   // debounce pt. recrearea rendererului la resize de la alt client
@@ -1317,6 +1325,7 @@ export default function SessionView(props: {
               zece butoane × 44px (ținte tactile) depășeau lățimea — trec în ⋯. */}
           <div className="hidden items-center gap-0.5 lg:flex">
             <span className="mx-0.5 h-4 w-px bg-ink-700" aria-hidden="true" />
+            <ToolButton title={t('session.linksTooltip')} active={linksOpen} onClick={openLinks}><ExternalLinkIcon /></ToolButton>
             <ToolButton title={t('session.note')} active={showNote} onClick={() => setShowNote(!showNote)}><NoteIcon /></ToolButton>
             <ToolButton title={t('session.copySelection')} onClick={copySelection}>{copied ? '✓' : <CopyIcon />}</ToolButton>
             <ToolButton title={t('session.fontSmaller')} onClick={() => setPreferredFont(fontSize - 1)}>A−</ToolButton>
@@ -1413,6 +1422,7 @@ export default function SessionView(props: {
                       </MoreItem>
                     )}
                   </span>
+                  <MoreItem onClick={() => { openLinks(); setMoreOpen(false) }}><LinkIcon /> {t('session.links')}</MoreItem>
                   <MoreItem onClick={() => { setShowNote(!showNote); setMoreOpen(false) }}><NoteIcon /> {t('session.note')}</MoreItem>
                   <MoreItem onClick={() => { copySelection(); setMoreOpen(false) }}><CopyIcon /> {t('session.copySelection')}</MoreItem>
                   <MoreItem onClick={() => setPreferredFont(fontSize + 1)}>A+ {t('session.fontLarger')}</MoreItem>
@@ -1437,6 +1447,44 @@ export default function SessionView(props: {
           )}
         </div>
       </header>
+
+      {/* Meniul „Linkuri": URL-urile din buffer, clicabile în afara terminalului (merge sub
+          mouse-mode, unde clicul e capturat de aplicaţie, şi pe mobil, unde un URL rupt e greu
+          de nimerit). Deschide într-un tab nou (noopener) sau copiază. */}
+      {linksOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+             onClick={() => setLinksOpen(false)}>
+          <div role="dialog" aria-modal="true" aria-label={t('session.links')}
+               className="glass flex max-h-[80vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl"
+               onClick={(e) => e.stopPropagation()}
+               onKeyDown={(e) => { if (e.key === 'Escape') setLinksOpen(false) }}>
+            <div className="flex items-center justify-between border-b border-ink-800 px-4 py-3">
+              <h2 className="text-sm font-semibold">{t('session.links')}{links.length ? ` (${links.length})` : ''}</h2>
+              <button onClick={() => setLinksOpen(false)} aria-label={t('common.close')}
+                      className="rounded-md px-2 py-1 text-slate-400 hover:bg-ink-800">✕</button>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto p-2">
+              {links.length === 0
+                ? <p className="px-2 py-6 text-center text-sm text-slate-500">{t('session.linksEmpty')}</p>
+                : <ul className="space-y-1">
+                    {links.map((u, i) => (
+                      <li key={i} className="flex items-center gap-1">
+                        <a href={u} target="_blank" rel="noopener noreferrer" title={u}
+                           className="wt-link min-w-0 flex-1 truncate rounded-md px-2 py-1.5 text-sm hover:bg-ink-800">
+                          {u}
+                        </a>
+                        <button title={t('session.copyLink')}
+                                onClick={async () => flashCopied(await copyText(u))}
+                                className="shrink-0 rounded-md px-2 py-1.5 text-slate-400 hover:bg-ink-800">
+                          <CopyIcon />
+                        </button>
+                      </li>
+                    ))}
+                  </ul>}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Panou de opțiuni share (înainte de generare) */}
       {shareOpen && !shareUrl && (
@@ -1730,6 +1778,9 @@ export default function SessionView(props: {
             </MoreItem>
             <MoreItem onClick={() => { setShowSearch(true); setCtxMenu(null) }}>
               <SearchIcon /> {t('session.searchScrollbackMenu')}
+            </MoreItem>
+            <MoreItem onClick={() => { openLinks(); setCtxMenu(null) }}>
+              <LinkIcon /> {t('session.links')}
             </MoreItem>
           </div>
         </>

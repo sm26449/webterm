@@ -9,6 +9,19 @@ back.
 
 ## [Unreleased]
 
+### Added — a Links menu that catches URLs the terminal breaks across lines
+
+- Long URLs — an OAuth login link, for instance — wrap across terminal rows, and the
+  inline click-to-open only works on a single unbroken line and only when the app isn't
+  capturing the mouse (Claude Code's login has mouse tracking on, so clicks go to it, not
+  the link). The result was copy-paste, made worse on mobile where a wrapped link is hard
+  to tap. A new Links button (in the toolbar on desktop, the ⋯ menu and right-click on
+  smaller screens) scans the terminal buffer, rejoins URLs across wrapped rows, and lists
+  them — one tap to open in a new tab (noopener) or copy. It lives outside the terminal, so
+  it works regardless of mouse mode or wrapping. Only http/https are ever offered, never
+  javascript: or other schemes; the extractor is unit-tested and the wrapped-URL case is
+  covered end-to-end in a real browser.
+
 ### Added — read the changelog inside WebTerm
 
 - About → "What's new" now opens this changelog rendered in the app, so you can see what
