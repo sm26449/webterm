@@ -171,6 +171,11 @@ let lastNotifiedVersion: string | null = null
 export function getBootVersion(): string | null {
   return bootVersion
 }
+/** CHANGELOG-ul aplicaţiei (Markdown), servit din imagine — About → „Ce e nou". */
+export async function getChangelog(): Promise<{ text: string; version: string }> {
+  return api('/api/changelog')
+}
+
 function checkGatewayVersion(res: Response) {
   const v = res.headers.get('X-Webterm-Version')
   if (!v) return

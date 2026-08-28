@@ -36,6 +36,11 @@ const en: Lang = {
     'about.license': 'License',
     'about.licenseValue': 'MIT · open source',
     'about.project': 'Project',
+    'about.whatsNew': "What's new",
+    'changelog.title': "What's new",
+    'changelog.aria': 'WebTerm changelog',
+    'changelog.loading': 'Loading the changelog…',
+    'changelog.error': 'The changelog is not available on this gateway.',
 
     // navigation / sidebar
     'nav.collapseSidebar': 'Hide the host list',

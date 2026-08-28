@@ -7,6 +7,17 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [Unreleased]
+
+### Added — read the changelog inside WebTerm
+
+- About → "What's new" now opens this changelog rendered in the app, so you can see what
+  changed without leaving for GitHub. The gateway serves it from the copy baked into the
+  image (so it works on an air-gapped deployment too), authenticated like any product view,
+  and the current running version's section is highlighted. The Markdown is rendered as
+  text nodes, not HTML — no injection surface even though the file is trusted. The changelog
+  is parsed by a small purpose-built reader (no Markdown dependency), unit-tested.
+
 ## [2.0.10] — 2026-08-28 · agent (45)
 
 A deep review of the resync/uninstall changes shipped in 2.0.9 — the reviewer's sharpest

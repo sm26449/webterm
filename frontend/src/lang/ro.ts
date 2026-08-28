@@ -35,6 +35,11 @@ const ro: Lang = {
     'about.license': 'Licență',
     'about.licenseValue': 'MIT · cod deschis',
     'about.project': 'Proiect',
+    'about.whatsNew': 'Ce e nou',
+    'changelog.title': 'Ce e nou',
+    'changelog.aria': 'Jurnal de modificări WebTerm',
+    'changelog.loading': 'Se încarcă jurnalul de modificări…',
+    'changelog.error': 'Jurnalul de modificări nu e disponibil pe acest gateway.',
 
     // navigație / sidebar
     'nav.collapseSidebar': 'Ascunde lista de hosturi',

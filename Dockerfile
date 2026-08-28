@@ -30,6 +30,9 @@ COPY gateway/app ./gateway/app
 # poate fi auditată fără repo: „a cui e semnătura asta?" rămânea fără răspuns pe server.
 COPY agent/ptyd.py agent/ptyd.py.sig agent/ptyd.py.signer agent/shell-integration.sh ./agent/
 COPY --from=frontend /build/dist ./frontend/dist
+# CHANGELOG-ul, servit în UI (/api/changelog → About → „Ce e nou"). E în imagine, deci
+# funcţionează şi într-un deployment fără acces la GitHub.
+COPY CHANGELOG.md ./
 # Trusa de deploy: fişierele care rulează pe HOST, nu în container. Le ducem în imagine
 # ca `upgrade.sh` să le poată sincroniza din artefactul pe care oricum îl tragi şi îl
 # autentifici. Fără asta, /opt/webterm rămâne îngheţat la ce a pus installer-ul: pe

@@ -105,6 +105,12 @@ AGENT_FILE = Path(os.environ.get(
     "WEBTERM_AGENT_FILE",
     Path(__file__).resolve().parent.parent.parent / "agent" / "ptyd.py"))
 
+# CHANGELOG-ul, servit în UI (About → „Ce e nou") ca utilizatorul să vadă noutăţile fără
+# să plece pe GitHub. Cale FIXĂ (fără override de mediu — spre deosebire de AGENT_FILE):
+# fişierul e mereu în imagine, la aceeaşi rădăcină ca agentul (/srv/webterm în imagine,
+# rădăcina repo-ului în dev), deci n-are de ce să fie configurabil. Copiat de Dockerfile.
+CHANGELOG_FILE = Path(__file__).resolve().parent.parent.parent / "CHANGELOG.md"
+
 HEARTBEAT_STALE = 90.0          # seconds without heartbeat -> host offline
 # Sesiunea de browser: TTL absolut + expirare pe inactivitate. Uşa din faţă e un root shell pe
 # toată flota, deci cine vrea o fereastră mai strânsă (device furat, laptop împrumutat) trebuie

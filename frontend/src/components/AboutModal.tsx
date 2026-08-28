@@ -1,8 +1,10 @@
-import { useRef } from 'react'
+import { lazy, Suspense, useRef, useState } from 'react'
 import { getBootVersion } from '../lib/api'
 import { useI18n } from '../lib/i18n'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { LogoMark } from './Icons'
+
+const ChangelogModal = lazy(() => import('./ChangelogModal'))
 
 // „Despre" — ce e aplicația, cine a făcut-o, sub ce licență. Deschis din logo-ul
 // sidebar-ului. Versiunea vine din headerul X-Webterm-Version (fără apel dedicat).
@@ -13,6 +15,7 @@ export default function AboutModal(props: { onClose: () => void }) {
   const dialogRef = useRef<HTMLDivElement>(null)
   useFocusTrap(dialogRef, props.onClose)
   const version = getBootVersion()
+  const [showChangelog, setShowChangelog] = useState(false)
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={props.onClose}>
@@ -29,7 +32,12 @@ export default function AboutModal(props: { onClose: () => void }) {
             <span className="text-sky-400"><LogoMark /></span>
             <div>
               <h2 className="text-lg font-semibold leading-tight">WebTerm</h2>
-              {version && <p className="tabular-nums text-xs text-slate-500">v{version}</p>}
+              <p className="flex items-center gap-2 text-xs text-slate-500">
+                {version && <span className="tabular-nums">v{version}</span>}
+                <button onClick={() => setShowChangelog(true)} className="wt-link hover:underline">
+                  {t('about.whatsNew')}
+                </button>
+              </p>
             </div>
           </div>
           <button onClick={props.onClose} aria-label={t('common.close')} className="rounded-md px-2 py-1 text-slate-400 hover:bg-ink-800">✕</button>
@@ -67,6 +75,11 @@ export default function AboutModal(props: { onClose: () => void }) {
 
         <p className="mt-4 text-center text-[11px] text-slate-400">© 2026 Stefan Maldaianu</p>
       </div>
+      {showChangelog && (
+        <Suspense fallback={null}>
+          <ChangelogModal onClose={() => setShowChangelog(false)} />
+        </Suspense>
+      )}
     </div>
   )
 }

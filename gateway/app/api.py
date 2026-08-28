@@ -1964,6 +1964,19 @@ async def signing_status(user=Depends(security.require_user)):
     return _signing_status()
 
 
+@router.get("/api/changelog")
+async def changelog(user=Depends(security.require_user)):
+    """CHANGELOG-ul aplicaţiei, servit din imagine ca UI-ul să-l poată arăta (About →
+    „Ce e nou") fără ca utilizatorul să plece pe GitHub. Autentificat: e informaţie de
+    produs pentru un operator conectat, nu conţinut public. Textul e Markdown de încredere
+    (fişier din imagine); frontend-ul îl randează ca noduri de text, nu ca HTML."""
+    try:
+        text = await asyncio.to_thread(config.CHANGELOG_FILE.read_text, "utf-8")
+    except OSError:
+        raise HTTPException(404, "changelog is not available on this gateway")
+    return {"text": text, "version": config.GATEWAY_VERSION}
+
+
 @router.post("/api/signing/generate")
 async def signing_generate(body: SigningGenIn, user=Depends(security.require_user)):
     await _require_reauth_for_secret(user, body.current_password, "generating the signing key")
