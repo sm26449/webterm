@@ -5,7 +5,7 @@
 #   - generates the setup token if missing
 #   - logs in to ghcr.io (private image) and pulls the latest image
 #   - starts or updates the stack (Traefik issues the Let's Encrypt certificate)
-# With an argument (./deploy.sh v2.0.9): pins the image in .env, remembers the
+# With an argument (./deploy.sh v2.0.10): pins the image in .env, remembers the
 # previous image in .prev-image and, if the new container does not become healthy
 # within 120s, ROLLS BACK to it automatically (./rollback.sh also works on its own).
 # Without an argument: the image from .env, or :latest — same guard and rollback.

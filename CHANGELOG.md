@@ -7,11 +7,12 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
-## [Unreleased]
+## [2.0.10] — 2026-08-28 · agent (45)
 
 A deep review of the resync/uninstall changes shipped in 2.0.9 — the reviewer's sharpest
 findings were in that release's own fixes, which is exactly what the review was for — plus an
-adversarial security audit of everything since 2.0.5.
+adversarial security audit of everything since 2.0.5. The agent moved to 45 for the token-leak
+and hardening fixes; hosts on 44 keep working until they update.
 
 ### Security — a locked client could pull scrollback through the pong-timeout path (agent unaffected)
 
