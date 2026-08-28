@@ -108,6 +108,12 @@ say "eslint (frontend)"
 docker run --rm -v "$REPO/frontend:/w" -w /w node:20-alpine \
   sh -c 'npm ci --ignore-scripts --no-audit --no-fund >/dev/null 2>&1 && npx eslint .' \
   && ok "eslint" || no "eslint"
+say "vitest (frontend unit)"
+# testele unitare de lib (font.ts, termmodes.ts) — logica pe care tsc/eslint n-o
+# execută, iar e2e-ul de cale fericită n-o atinge; exact zona bug-urilor din 2.0.6–2.0.9
+docker run --rm -v "$REPO/frontend:/w" -w /w node:20-alpine \
+  sh -c 'npm ci --ignore-scripts --no-audit --no-fund >/dev/null 2>&1 && npx vitest run --reporter=dot' \
+  && ok "vitest" || no "vitest"
 fi
 
 # ── porţile din jobul `unit-tests` ──────────────────────────────────────────

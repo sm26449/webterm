@@ -107,6 +107,14 @@ jobs:
           npm ci --ignore-scripts --no-audit --no-fund
           npx eslint .
 
+      # Testele unitare de lib (font.ts, termmodes.ts): logică pe care tsc/eslint n-o
+      # EXECUTĂ, iar e2e-ul de cale fericită n-o atinge — exact zona în care revizia
+      # 2.0.9 a găsit bug-uri reale (A± no-op în Safari privat, popout desincronizat).
+      - name: Frontend unit tests (vitest)
+        run: |
+          cd frontend
+          npx vitest run --reporter=dot
+
       - name: CVEs in the Python dependencies (pip-audit, blocking)
         run: |
           python3 -m pip install --quiet pip-audit
