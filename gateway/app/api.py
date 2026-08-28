@@ -3091,6 +3091,13 @@ async def update_host(host_id: int, host: HostPatch, user=Depends(security.requi
                 await conn.disconnect()
             except Exception:
                 pass
+        # Detaşăm EXPLICIT hub-urile hostului. `sources.pop` de mai sus face ca `was_current`
+        # din `_shutdown` să fie False (sursa nu mai e în dicţionar când agentul cade), deci
+        # `on_detached` NU rulează şi hub-urile rămân `attached=True`. La reconectarea agentului
+        # `ensure_attached` iese imediat (no-op), aşa că noua conexiune nu re-primeşte niciodată
+        # `attach` pentru sesiunile vii → terminalul deschis nu mai poate scrie deşi hostul e
+        # online şi sesiunea „live". (Bug raportat: editarea unui host agent → nu mai poţi tasta.)
+        core.detach_host_hubs(host_id)
     return {"ok": True, "changed": True, "connection_type": new_type,
             "host_key_reset": repinned, "disconnected": dropped}
 

@@ -9,6 +9,19 @@ back.
 
 ## [Unreleased]
 
+### Fixed — editing a host's connection left its open terminals unable to type
+
+- An edit that changes a host's connection (and so drops the live agent to re-point it)
+  disconnected the agent, which reconnected a second later — host back online, session
+  still live — but the terminal you already had open silently stopped accepting input.
+  The cause: the edit path pops the source from the registry *before* disconnecting it,
+  so the agent's own teardown sees it is no longer "current" and skips detaching the
+  hubs. They stayed marked attached, so when the agent reconnected the re-attach was a
+  no-op and the new connection was never told to attach those sessions — keystrokes went
+  nowhere. The edit path now detaches the host's hubs explicitly, so the reconnecting
+  agent re-attaches them and input flows again. Reproduced end-to-end in a real browser
+  (agent restart, host edit) and guarded by a unit test.
+
 ### Added — a Links menu that catches URLs the terminal breaks across lines
 
 - Long URLs — an OAuth login link, for instance — wrap across terminal rows, and the

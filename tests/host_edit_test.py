@@ -149,7 +149,32 @@ async def main():
             "credential_policy": "ask"})
         check("politica `ask` nu cere credenţial stocat", r.status_code == 200, r.text)
 
-        # ── 7. host inexistent ───────────────────────────────────────────────
+        # ── 8. editarea care deconectează agentul DETAŞEAZĂ hub-urile ────────
+        # Bug raportat: editezi un host agent, agentul e deconectat şi reconectat, dar
+        # terminalul deschis nu mai poate scrie. Cauza: `sources.pop` de dinaintea
+        # disconnect-ului face `was_current` False în `_shutdown`, deci `on_detached` nu
+        # rulează şi hub-ul rămâne `attached=True` → `ensure_attached` de la reconectare e
+        # no-op, iar noua conexiune de agent nu re-primeşte niciodată `attach`. Handler-ul
+        # cheamă acum `detach_host_hubs` explicit; verificăm exact asta.
+        from app import core  # noqa: E402
+        class _StubHub:
+            def __init__(self, host_id):
+                self.host_id = host_id
+                self.attached = True
+            def on_detached(self):
+                self.attached = False
+        stub = _StubHub(hid)
+        core.hubs["a" * 32] = stub
+        try:
+            await c.patch(f"/api/hosts/{hid}", json={"note": "doar nota, fără conexiune"})
+            check("editare FĂRĂ câmp de conexiune nu detaşează hub-urile", stub.attached is True)
+            await c.patch(f"/api/hosts/{hid}", json={"hostname": "10.0.0.77"})
+            check("editare care atinge conexiunea DETAŞEAZĂ hub-urile (re-attach la reconectare)",
+                  stub.attached is False)
+        finally:
+            core.hubs.pop("a" * 32, None)
+
+        # ── 9. host inexistent ───────────────────────────────────────────────
         r = await c.patch("/api/hosts/99999", json={"name": "x"})
         check("host inexistent → 404", r.status_code == 404, str(r.status_code))
 

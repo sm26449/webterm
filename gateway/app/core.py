@@ -62,6 +62,19 @@ def source_for(host_id: int) -> Optional["SessionSource"]:
     """The active session source for a host: an AgentConnection (reverse ws) or
     a direct SshSource/TelnetSource. SessionHub talks only through this."""
     return sources.get(host_id)
+
+
+def detach_host_hubs(host_id: int) -> None:
+    """Marchează hub-urile hostului ca NE-ataşate, ca următoarea conexiune de sursă să le
+    RE-ataşeze. Calea normală (agentul cade singur) o face `_shutdown` prin `on_detached`,
+    dar DOAR când sursa era încă cea curentă (`was_current`). Când gateway-ul scoate sursa
+    din dicţionar ÎNAINTE de a o deconecta (editare de host: `sources.pop` apoi `disconnect`),
+    `was_current` e False, `on_detached` nu rulează, iar hub-ul rămâne `attached=True` — deci
+    `ensure_attached` de la reconectare devine no-op şi terminalul nu mai primeşte input.
+    Chemat explicit de acolo ca să închidă exact acea gaură."""
+    for hub in hubs.values():
+        if hub.host_id == host_id:
+            hub.on_detached()
 hubs: Dict[str, "SessionHub"] = {}
 # timestamps of live-connection replacements per host: repeated replacements
 # mean two agents share one token (two machines enrolled on the same host)
