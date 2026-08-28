@@ -358,12 +358,31 @@ def check_metrics(host_id: int, host_name: str, metrics: dict, thresholds: dict)
 _offline_since: dict = {}      # host_id -> epoch al alertei (prezent = l-am anunţat deja)
 
 
-def notify_host_offline(host_id: int, host_name: str, silent_for: float) -> None:
+def notify_host_offline(host_id: int, host_name: str, silent_for: float,
+                        uninstall_reported: bool = False) -> None:
     """Un host care raporta a încetat. O singură alertă per cădere (nu la fiecare tură a
-    reaper-ului); revenirea se anunţă separat, ca să poţi închide incidentul."""
+    reaper-ului); revenirea se anunţă separat, ca să poţi închide incidentul.
+
+    `uninstall_reported`: agentul a POSTat /agent/uninstalled înainte să tacă. NU suprimăm
+    alerta pe baza asta — raportul vine autentificat DOAR cu tokenul hostului, deci oricine
+    are shell pe maşină îl poate trimite şi apoi omorî agentul, cumpărându-şi tăcerea exact
+    când face teardown pe un host compromis (audit de securitate 2026-08). În schimb adaptăm
+    TEXTUL: la un uninstall real diagnosticele obişnuite (tmux ls, ptyd.log) sunt inutile —
+    fişierele sunt şterse — iar acţiunea corectă e alta. Aşa un uninstall legitim nu mai
+    produce un incident cu paşi imposibili, dar căderea nu e NICIODATĂ complet tăcută."""
     if host_id in _offline_since:
         return
     _offline_since[host_id] = time.time()
+    if uninstall_reported:
+        _fire(f"[{host_name}] host offline after an uninstall report",
+              f"The agent on '{host_name}' reported that it was uninstalled, then stopped "
+              f"reporting ({int(silent_for)}s ago).\n\n"
+              f"If you ran `ptyd.py uninstall` here, this is expected: remove the host in "
+              f"WebTerm, or reinstall the agent and this clears itself.\n"
+              f"If you did NOT: the agent was stopped by someone with shell access on the "
+              f"host — the uninstall report is only authenticated by the host token. "
+              f"Investigate the machine; do not assume the removal was intentional.")
+        return
     _fire(f"[{host_name}] host offline",
           f"The agent on '{host_name}' has not reported for {int(silent_for)}s.\n\n"
           f"The tmux sessions on the host keep running — what broke is the link to the "

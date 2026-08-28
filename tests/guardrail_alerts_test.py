@@ -109,6 +109,21 @@ async def main():
         await core.sweep_hosts_offline()
         check("host care n-a raportat NICIODATĂ nu declanşează alertă (nu e o cădere)",
               sent == [], str(sent))
+
+        # ── audit de securitate 2026-08: un marcaj de uninstall NU suprimă alerta ──
+        # (un atacator cu shell l-ar posta şi apoi ar omorî agentul ca să tacă detecţia).
+        # Alerta se declanşează ORICUM; doar textul se adaptează.
+        sent.clear()
+        email_alerts._offline_since.clear()
+        gone = time.time() - config.HEARTBEAT_STALE - 10
+        await db.execute("UPDATE hosts SET last_heartbeat=?, uninstalled_at=? WHERE id=?",
+                         gone, gone, hid)
+        await core.sweep_hosts_offline()
+        check("host tăcut cu marcaj de uninstall: TOT alertează (fără tăcere cumpărabilă)",
+              sum("offline" in s for s in sent) == 1, str(sent))
+        check("…iar textul e cel adaptat pentru uninstall, nu incidentul obişnuit",
+              any("uninstall report" in s for s in sent), str(sent))
+        await db.execute("UPDATE hosts SET uninstalled_at=NULL WHERE id=?", hid)
     finally:
         email_alerts._fire = orig_fire
 

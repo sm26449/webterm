@@ -1975,17 +1975,20 @@ async def _reap_ghost(sid: str, reason: str) -> None:
 
 
 def uninstall_marker_credible(uninstalled_at, last_heartbeat) -> bool:
-    """Un marcaj `uninstalled_at` e CREDIBIL doar dacă heartbeat-urile s-au oprit imediat
-    după el: dezinstalarea reală îşi opreşte daemonul în secunde (agent 44), deci ultimul
-    heartbeat cade cel mult la o bătaie după marcaj. Un marcaj urmat de heartbeat-uri e
-    PLANTAT (oricine cu shell pe host poate citi tokenul şi lovi /agent/uninstalled) — nu
-    primeşte badge-ul „agent removed" (care invită la ştergerea hostului) şi nu amuţeşte
-    alerta de offline. Corelarea se face LA CITIRE, nu prin ştergere pe heartbeat: o primă
-    versiune curăţa marcajul după 5 minute de heartbeat-uri, dar (1) un atacator care omora
-    apoi agentul rămânea cu marcajul „curat" şi alerta amuţită, (2) pe un agent 43 orfan
-    (daemonul supravieţuieşte dezinstalării şi bate mai departe) ştergea marcajul REAL, şi
-    (3) costa un UPDATE pe calea fierbinte a fiecărui heartbeat. Marcajul rămâne scris;
-    doar interpretarea lui depinde de ce s-a întâmplat după."""
+    """Marcajul `uninstalled_at` merită BADGE-ul „agent removed" din UI doar dacă heartbeat-
+    urile s-au oprit imediat după el: dezinstalarea reală îşi opreşte daemonul în secunde
+    (agent 44), deci ultimul heartbeat cade cel mult la o bătaie după marcaj. Un marcaj
+    urmat de heartbeat-uri e PLANTAT (oricine cu shell pe host poate citi tokenul şi lovi
+    /agent/uninstalled cât agentul rulează) → fără badge, ca să nu invite ştergerea unui
+    host viu. Corelarea se face LA CITIRE, nu prin ştergere pe heartbeat.
+
+    ATENŢIE la ce NU face: nu mai poartă nicio decizie de SECURITATE. Suprimarea alertei de
+    offline s-a bazat cândva pe funcţia asta, dar cazul „postează marcajul apoi omoară
+    agentul" produce o stare identică cu un uninstall real (heartbeat-urile îngheaţă la
+    ~uninstalled_at), deci euristica nu-i putea deosebi — un atacator îşi cumpăra tăcerea
+    (audit de securitate 2026-08). Alerta de offline se declanşează acum ÎNTOTDEAUNA; doar
+    textul ei se adaptează. Rămâne strict cosmetic: badge-ul cere oricum o acţiune a
+    operatorului, iar el primeşte în paralel alerta adaptată care-l îndeamnă să verifice."""
     if not uninstalled_at:
         return False
     return not last_heartbeat or last_heartbeat <= uninstalled_at + 90
@@ -2009,18 +2012,14 @@ async def sweep_hosts_offline() -> None:
         hb = row["last_heartbeat"] or 0
         if not hb:
             continue                        # niciodată conectat: nu e o cădere, e o neînrolare
-        if uninstall_marker_credible(row["uninstalled_at"], hb):
-            # dezinstalare DELIBERATĂ, anunţată de agent: tăcerea care urmează nu e un
-            # incident. Fără gardă, fiecare decomisionare producea la ~3 minute un email
-            # „host offline" cu diagnostice imposibile (tmux ls, ptyd.log — şterse de
-            # uninstall). CREDIBIL = heartbeat-urile s-au oprit imediat după marcaj (vezi
-            # uninstall_marker_credible): un marcaj urmat de heartbeat-uri e plantat, iar
-            # pentru el alerta de offline RĂMÂNE activă — un atacator care postează
-            # marcajul şi apoi omoară agentul nu-şi cumpără tăcerea alertelor.
-            continue
         silent = now - hb
         if silent > config.HEARTBEAT_STALE:
-            email_alerts.notify_host_offline(row["id"], row["name"], silent)
+            # Alerta NU se suprimă niciodată pe baza marcajului de uninstall — el vine
+            # autentificat doar cu tokenul hostului, deci un atacator cu shell l-ar posta
+            # şi apoi ar omorî agentul ca să-şi cumpere tăcerea (audit 2026-08). Doar TEXTUL
+            # se adaptează: un uninstall raportat schimbă diagnosticele, nu le taie.
+            email_alerts.notify_host_offline(row["id"], row["name"], silent,
+                                             uninstall_reported=bool(row["uninstalled_at"]))
         else:
             email_alerts.notify_host_online(row["id"], row["name"])
 

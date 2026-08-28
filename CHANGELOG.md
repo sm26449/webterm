@@ -41,12 +41,17 @@ adversarial security audit of everything since 2.0.5.
   when written into the tmux conf. The audit also confirmed clean: the `redraw` op has no
   command injection, and `modeRestoreSeq` emits only hardcoded whitelisted DECSET sequences.
 
-### Known — a host-shell attacker can still silence the offline alert (tracked, needs a UX decision)
+### Security — the offline alert can no longer be silenced by the agent's own report
 
-- Posting `/agent/uninstalled` and then killing the agent produces a state indistinguishable
-  from a real uninstall, suppressing the "host offline" email. Closing it properly needs an
-  operator-confirmed marker (a schema + UI change) rather than trusting the agent's report;
-  deferred so it can be designed rather than bolted on.
+- Posting `/agent/uninstalled` then killing the agent produced a state indistinguishable
+  from a real uninstall, so the "host offline" email was suppressed — an attacker with a
+  host shell could buy silence during a teardown. The alert now ALWAYS fires when a host
+  goes silent; only its wording adapts. A reported uninstall gets a calmer message (the
+  usual `tmux ls` / `ptyd.log` steps are useless — those files are gone — so it points at
+  the right action instead) that also says, plainly, that if you didn't run the uninstall
+  the agent was stopped by someone with shell access and the machine needs investigating.
+  No suppression, no schema change, and a legitimate uninstall still avoids the scary
+  wrong-steps incident. The credibility heuristic now gates only the cosmetic UI badge.
 
 ### Fixed — resync intent is client state, and every path that deserves "full" gets it
 
