@@ -442,6 +442,17 @@ class BrowserClient:
             await self.ws.send_bytes(b)
 
     async def _resync(self, full: bool = False) -> None:
+        # GARDĂ DE SECURITATE, prima: un client BLOCAT (idle-lock 2FA, sau invitat prin
+        # share fără owner prezent) nu are voie la scrollback. Calea WAKE din sender()
+        # verifica deja `paused/locked`, dar `_flow_control` cheamă `_resync` DIRECT pe
+        # calea de recuperare după pong-timeout — un invitat blocat care își cronometrează
+        # pong-ul (îl ține peste PONG_TIMEOUT, apoi răspunde înainte de HARD) ateriza aici
+        # și primea până la 256 KiB din transcript pe socketul blocat. `_resync` e deci
+        # SINGURUL loc corect pentru gardă, nu apelanții. Golim coada și ieșim înainte de
+        # orice read_tail/send. (Audit de securitate 2026-08.)
+        if self.locked or self.hub.locked:
+            self._drain_queue()
+            return
         # DOUĂ feluri de resync, deliberat diferite:
         #
         # `full` (resume/unlock): clientul ăsta avea deja dimensiunea sesiunii, deci putem

@@ -791,8 +791,13 @@ export default function SessionView(props: {
     fitRef.current?.fit()
     // panoul activ reclamă dimensiunea (A± e acțiune deliberată a operatorului);
     // un tab de fundal care doar se aliniază la preferință anunță pasiv, ca să
-    // nu smulgă PTY-ul de la dispozitivul care chiar folosește sesiunea aia
-    sendResize(paneActiveRef.current !== false)
+    // nu smulgă PTY-ul de la dispozitivul care chiar folosește sesiunea aia.
+    // `document.hasFocus()` e obligatoriu: un POPOUT (fereastră separată) care se
+    // aliniază la un font sync venit prin evenimentul `storage` are paneActive=true
+    // (n-are split), deci ar reclama dimensiunea deși e în fundal — smulgând PTY-ul
+    // de la fereastra activă. Cu focus real, un A± deliberat (în orice fereastră
+    // focalizată) tot trece; un sync pasiv într-o fereastră de fundal nu. (Audit 2026-08.)
+    sendResize(paneActiveRef.current !== false && document.hasFocus())
     // WebGL rămâne gol la schimbarea fontului (nici clearTextureAtlas nu repară) →
     // recreăm renderer-ul la noua dimensiune. Font change e rar/deliberat, deci
     // costul recreării e acceptabil.

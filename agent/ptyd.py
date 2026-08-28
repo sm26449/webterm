@@ -42,7 +42,7 @@ import termios
 import threading
 import time
 
-AGENT_VERSION = 44
+AGENT_VERSION = 45
 
 # Sub atâtea secunde de valabilitate, un certificat se roteşte prea des ca un pin pe el să
 # însemne altceva decât o cădere programată. 48h: peste ce emite un CA intern (12h la Caddy),
@@ -86,6 +86,14 @@ BACKOFF_MIN, BACKOFF_MAX = 1.0, 60.0
 # treacă drept stabilă.
 STABLE_CONNECTION = 120.0
 SID_LEN = 32
+_HEX = frozenset("0123456789abcdef")
+
+
+def _is_hex_sid(s):
+    # sid-urile gateway-ului sunt hex (uuid4 fără liniuţe); ţinem numele de sesiune tmux
+    # curat de sintaxa de ţintă tmux (`=:.{}` etc.) fără a depinde de modulul `re`
+    return all(c in _HEX for c in s)
+
 
 FRAME_CTRL = b"J"
 FRAME_DATA = b"D"
@@ -388,10 +396,17 @@ TMUX_EXTRA_OPTIONS = [
     # frontend-ul are un handler OSC52 propriu care accepta orice destinatie
     ("terminal-overrides", ",*:Ms=\\E]52;%p1%s;%p2%s\\007"),
 ]
+# tmux foloseşte quoting stil-shell în conf: o apostrofă în valoare (ex. un shell din
+# passwd cu ' în cale) ar rupe linia. `_login_shell` respinge deja nologin/false, dar
+# escapăm defensiv oricum — ieftin, şi închide orice injectare printr-o valoare cu ' .
+def _tmux_q(v):
+    return "'" + str(v).replace("'", "'\\''") + "'"
+
+
 TMUX_CONF_CONTENT = (
     'set -g default-terminal "xterm-256color"\n'
     "set -g prefix None\n"
-    + "".join("set -g %s '%s'\n" % (k, v) for k, v in TMUX_EXTRA_OPTIONS)
+    + "".join("set -g %s %s\n" % (k, _tmux_q(v)) for k, v in TMUX_EXTRA_OPTIONS)
 )
 
 
@@ -1617,7 +1632,10 @@ class Agent:
                 # protocolul feliază sid pe exact SID_LEN octeți pe sârmă (FRAME_DATA/FWD);
                 # un sid malformat ar rula input-ul/output-ul pe granițe greșite. Adopt-ul
                 # tmux valida deja lungimea (vezi mai jos) — calea `create` nu o făcea.
-                if not isinstance(sid, str) or len(sid) != SID_LEN:
+                # Charset restrâns la hex: sid-ul devine nume de sesiune tmux (prefixat), iar
+                # tmux are sintaxă de ţintă (`=`, `:`, `.`, `{}`) — restrângerea închide orice
+                # cale viitoare în care un nume ar ajunge la o ţintă tmux neescapată. (Audit 2026-08.)
+                if not isinstance(sid, str) or len(sid) != SID_LEN or not _is_hex_sid(sid):
                     return err("bad_sid")
                 if sid in self.sessions:
                     return err("exists")
@@ -3001,7 +3019,7 @@ def _notify_uninstalled() -> bool:
     """Spune gateway-ului că agentul a fost scos, autentificat cu tokenul hostului.
     Best-effort: dacă gateway-ul e inaccesibil, dezinstalarea locală merge oricum înainte —
     ar fi absurd să nu poţi scoate agentul de pe maşina ta fiindcă serverul e picat."""
-    import urllib.request                # doar aici: agentul e stdlib-only şi porneşte des
+    from urllib.parse import urlparse
     try:
         with open(CONFIG_PATH) as f:
             cfg = json.load(f)
@@ -3011,11 +3029,50 @@ def _notify_uninstalled() -> bool:
             return False
         base = url.replace("wss://", "https://").replace("ws://", "http://")
         base = base.split("/agent/ws")[0]
-        req = urllib.request.Request(base + "/agent/uninstalled", data=b"", method="POST",
-                                     headers={"Authorization": "Bearer " + token})
-        ctx = ssl._create_unverified_context() if cfg.get("insecure") else None
-        with urllib.request.urlopen(req, timeout=10, context=ctx) as r:
-            return r.status == 200
+        u = urlparse(base)
+        host = u.hostname or ""
+        port = u.port or (443 if u.scheme == "https" else 80)
+        insecure = bool(cfg.get("insecure"))
+        pins = cfg.get("cert_pins") or cfg.get("cert_pin")
+        pins = pins if isinstance(pins, (list, tuple)) else ([pins] if pins else [])
+        pins = [str(x).lower() for x in pins if x]
+
+        # Pin-ul de cert TREBUIE verificat pe ACELAŞI socket pe care pleacă tokenul —
+        # altfel un MITM trece de o verificare separată şi interceptează POST-ul (TOCTOU).
+        # Vechea variantă folosea `ssl._create_unverified_context()` fără NICIUN pin, deci
+        # scurgea Bearer-ul hostului către orice on-path attacker în modul insecure — exact
+        # apărarea pe care calea WS (`_check_cert_pin`) o face înainte de a trimite tokenul.
+        # (Audit de securitate 2026-08.) Fără pin în modul insecure refuzăm să trimitem:
+        # notify-ul e best-effort, deci un eşec e acceptabil, o scurgere de credential nu.
+        raw = socket.create_connection((host, port), timeout=10)
+        raw.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        if u.scheme == "https":
+            ctx = ssl.create_default_context()
+            if insecure:
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+            sock = ctx.wrap_socket(raw, server_hostname=host)
+            if insecure:
+                der = sock.getpeercert(binary_form=True) or b""
+                peer = hashlib.sha256(der).hexdigest()
+                spki = WSClient.spki_pin(der)
+                if not pins or not any(
+                        hmac.compare_digest(peer, p)
+                        or (spki and hmac.compare_digest(spki, p)) for p in pins):
+                    sock.close()
+                    log("uninstall notify aborted: gateway cert does not match the pin "
+                        "(MITM?) or no pin set — token NOT sent")
+                    return False
+        else:
+            sock = raw
+        prefix = u.path.rstrip("/")
+        req = ("POST %s/agent/uninstalled HTTP/1.1\r\nHost: %s\r\n"
+               "Authorization: Bearer %s\r\nContent-Length: 0\r\n"
+               "Connection: close\r\n\r\n") % (prefix, host, token)
+        sock.sendall(req.encode())
+        line = sock.recv(256).split(b"\r\n", 1)[0]
+        sock.close()
+        return b"200" in line.split()
     except Exception as e:                  # noqa: BLE001 — vezi docstring
         log("could not notify the gateway about the uninstall: %s" % e)
         return False

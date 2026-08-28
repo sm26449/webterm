@@ -10,7 +10,45 @@ back.
 ## [Unreleased]
 
 A deep review of the resync/uninstall changes shipped in 2.0.9 — the reviewer's sharpest
-findings were in that release's own fixes, which is exactly what the review was for.
+findings were in that release's own fixes, which is exactly what the review was for — plus an
+adversarial security audit of everything since 2.0.5.
+
+### Security — a locked client could pull scrollback through the pong-timeout path (agent unaffected)
+
+- The 2FA idle-lock and the ownerless share-viewer lock both withhold scrollback, and the
+  sender's resync path checks for it — but `_flow_control` calls `_resync` directly on
+  pong-timeout recovery, bypassing that check. A locked share guest could time its own pong
+  (hold it past the 20s timeout, answer before the 40s hard cutoff) to land in that path and
+  receive up to 256KiB of transcript the lock exists to withhold. `_resync` now refuses on a
+  locked client itself — the only correct place, since it has more than one caller.
+
+### Security — `ptyd.py uninstall` leaked the host token to a MITM (agent 45)
+
+- Every agent connection pins the gateway certificate (TOFU) before sending the bearer
+  token, so even in insecure mode the token is MITM-protected — except the uninstall
+  notification, which used an unverified TLS context with no pin check at all. An on-path
+  attacker during an uninstall could capture the host's persistent credential (still valid,
+  since uninstall keeps the host on the gateway) and impersonate the agent. The notify now
+  pins the certificate on the same socket it sends the token over, and refuses to send if
+  insecure mode has no pin configured.
+
+### Security — hardening from the audit
+
+- A backgrounded popout doing a `storage`-driven font sync claimed the shared PTY size from
+  the focused device; it now sends a passive resize unless the window actually has focus.
+  Session ids are restricted to hex at the agent's `create` op (they become tmux session
+  names, and tmux target syntax should never appear there), and the passwd shell is escaped
+  when written into the tmux conf. The audit also confirmed clean: the `redraw` op has no
+  command injection, and `modeRestoreSeq` emits only hardcoded whitelisted DECSET sequences.
+
+### Known — a host-shell attacker can still silence the offline alert (tracked, needs a UX decision)
+
+- Posting `/agent/uninstalled` and then killing the agent produces a state indistinguishable
+  from a real uninstall, suppressing the "host offline" email. Closing it properly needs an
+  operator-confirmed marker (a schema + UI change) rather than trusting the agent's report;
+  deferred so it can be designed rather than bolted on.
+
+### Fixed — resync intent is client state, and every path that deserves "full" gets it
 
 ### Fixed — resync intent is client state, and every path that deserves "full" gets it
 

@@ -120,5 +120,15 @@ finally:
     else:
         os.environ["SHELL"] = _orig_env_shell
 
+# ============ Audit de securitate 2026-08: întăriri ============
+# sid non-hex respins la create (numele de sesiune tmux nu poate purta sintaxă de țintă)
+check("sid hex acceptat", ptyd._is_hex_sid("a" * 32) and ptyd._is_hex_sid("0f9e" * 8))
+check("sid cu sintaxă tmux respins", not ptyd._is_hex_sid("=" + "a" * 31))
+check("sid cu majuscule/altele respins", not ptyd._is_hex_sid("A" * 32) and not ptyd._is_hex_sid("g" * 32))
+
+# default-shell cu apostrofă e escapat în conf (nu rupe linia / nu injectează)
+check("_tmux_q escapează apostrofa", ptyd._tmux_q("/bin/o'sh") == "'/bin/o'\\''sh'")
+check("conf-ul folosește quoting-ul", "set -g default-shell '" in ptyd.TMUX_CONF_CONTENT)
+
 print(f"\n{ok}/{total} PASS")
 sys.exit(0 if ok == total else 1)

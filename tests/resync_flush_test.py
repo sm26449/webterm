@@ -318,6 +318,28 @@ async def t8_unlock_pause_resume_keeps_intent():
     hub.out_f.close(); hub.cast_f.close()
 
 
+async def t9_locked_client_gets_no_resync():
+    # Audit de securitate 2026-08: un client BLOCAT (idle-lock 2FA / invitat share fără
+    # owner) putea smulge scrollback prin calea de recuperare pong-timeout, care cheamă
+    # _resync DIRECT (ocolind garda din sender). _resync trebuie să refuze el însuși.
+    sid = "10cced" + "0" * 26
+    hub = make_hub(sid)
+    ws = FakeWs()
+    client = core.BrowserClient(ws, hub)
+    hub.clients.add(client)
+
+    secret = b"parola-din-scrollback\n"
+    hub.out_f.write(secret); hub.out_f.flush()
+    client.lock()                        # sesiune blocată
+    await client._resync(full=True)      # exact ce face _flow_control după pong-timeout
+
+    data = stream_bytes(ws)
+    check("client blocat: _resync NU trimite scrollback", secret not in data, repr(data[:60]))
+    check("client blocat: nici măcar mesajul resync", not any(
+        isinstance(x, dict) and x.get("type") == "resync" for x in ws.sent))
+    hub.out_f.close(); hub.cast_f.close()
+
+
 def main():
     t1_read_tail_end_bound()
     asyncio.run(t2_resume_includes_unflushed())
@@ -327,6 +349,7 @@ def main():
     asyncio.run(t6_cap_rewrite_invalidates_cutoff())
     asyncio.run(t7_overflow_cannot_downgrade_full())
     asyncio.run(t8_unlock_pause_resume_keeps_intent())
+    asyncio.run(t9_locked_client_gets_no_resync())
     ok = sum(1 for _, c in results if c)
     print(f"\n{ok}/{len(results)} passed")
     return ok == len(results)
