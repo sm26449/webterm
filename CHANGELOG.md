@@ -7,7 +7,11 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
-## [Unreleased]
+## [2.0.11] — 2026-08-28 · agent (45)
+
+Gateway and interface only: the agent is unchanged at 45, so nothing in the fleet needs
+updating. A read-it-in-app changelog, a Links menu for URLs the terminal wraps, and the
+rename-breaks-the-terminal fix.
 
 ### Fixed — renaming a host broke the terminal you already had open
 
