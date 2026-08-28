@@ -3022,7 +3022,19 @@ async def update_host(host_id: int, host: HostPatch, user=Depends(security.requi
     if not row:
         raise HTTPException(404)
     given = host.model_dump(exclude_unset=True)
-    touches_conn = any(f in given for f in _CONN_FIELDS)
+    # `touches_conn` = un câmp de conexiune se SCHIMBĂ efectiv, nu doar e prezent în payload.
+    # UI-ul (AddHostModal) trimite MEREU `connection_type`, chiar şi la o redenumire pură, deci
+    # „prezent" însemna că ORICE editare pica pe calea de re-provisioning: agentul deconectat
+    # degeaba (host offline câteva secunde), step-up cerut inutil pe hosturi 2FA, iar terminalul
+    # deschis rămânea fără input. Comparăm cu valoarea curentă; `credential` e write-only, deci
+    # o valoare prezentă = schimbare. (Bug raportat: redenumire → nu mai poţi scrie.)
+    def _conn_changed(f):
+        if f not in given:
+            return False
+        if f == "credential":
+            return bool(given[f])
+        return given[f] != row[f]
+    touches_conn = any(_conn_changed(f) for f in _CONN_FIELDS)
     if touches_conn:
         # Repointarea unui host către altă mașină (sau altă credențială) e echivalentă cu
         # provisioning-ul: cine are doar cookie-ul nu trebuie să poată face asta pe un host 2FA.

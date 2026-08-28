@@ -166,10 +166,18 @@ async def main():
         stub = _StubHub(hid)
         core.hubs["a" * 32] = stub
         try:
-            await c.patch(f"/api/hosts/{hid}", json={"note": "doar nota, fără conexiune"})
-            check("editare FĂRĂ câmp de conexiune nu detaşează hub-urile", stub.attached is True)
+            # cazul UI: AddHostModal trimite MEREU connection_type, chiar la o redenumire pură.
+            # Cu el NESCHIMBAT nu trebuie să se întâmple NIMIC la conexiune — altfel fiecare
+            # redenumire deconecta agentul degeaba şi lăsa terminalul fără input.
+            cur_type = (await get(hid))["connection_type"]
+            r = await c.patch(f"/api/hosts/{hid}",
+                              json={"name": "srv-r2", "connection_type": cur_type})
+            check("redenumire cu connection_type NESCHIMBAT → fără deconectare",
+                  r.json().get("disconnected") is False, r.text)
+            check("…şi hub-urile rămân ataşate (fără bounce inutil)", stub.attached is True)
+            # o SCHIMBARE reală de conexiune tot detaşează, ca noua sursă să re-ataşeze
             await c.patch(f"/api/hosts/{hid}", json={"hostname": "10.0.0.77"})
-            check("editare care atinge conexiunea DETAŞEAZĂ hub-urile (re-attach la reconectare)",
+            check("schimbare reală de conexiune DETAŞEAZĂ hub-urile (re-attach la reconectare)",
                   stub.attached is False)
         finally:
             core.hubs.pop("a" * 32, None)

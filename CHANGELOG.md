@@ -9,18 +9,22 @@ back.
 
 ## [Unreleased]
 
-### Fixed — editing a host's connection left its open terminals unable to type
+### Fixed — renaming a host broke the terminal you already had open
 
-- An edit that changes a host's connection (and so drops the live agent to re-point it)
-  disconnected the agent, which reconnected a second later — host back online, session
-  still live — but the terminal you already had open silently stopped accepting input.
-  The cause: the edit path pops the source from the registry *before* disconnecting it,
-  so the agent's own teardown sees it is no longer "current" and skips detaching the
-  hubs. They stayed marked attached, so when the agent reconnected the re-attach was a
-  no-op and the new connection was never told to attach those sessions — keystrokes went
-  nowhere. The edit path now detaches the host's hubs explicitly, so the reconnecting
-  agent re-attaches them and input flows again. Reproduced end-to-end in a real browser
-  (agent restart, host edit) and guarded by a unit test.
+- Renaming a host (or any edit) bounced the agent offline for a few seconds, and the
+  terminal you already had open came back with a truncated last line, no cursor, and no
+  way to type — while new sessions worked. Two faults compounded. First, the edit form
+  always sends `connection_type` even for a pure rename, and the server treated any
+  connection field *present* as a connection *change* — so every rename re-pointed the
+  host, needlessly disconnecting the agent (and demanding step-up on 2FA hosts). The
+  server now compares against the current values and only re-points when something
+  actually changes, so a rename no longer touches the connection at all. Second, when a
+  real connection change does drop the agent, the edit path pops the source before
+  disconnecting it, so the agent's teardown skipped detaching the hubs — they stayed
+  marked attached, the reconnect's re-attach was a no-op, and the new agent connection
+  was never told to attach those sessions, so keystrokes went nowhere. The edit path now
+  detaches the host's hubs explicitly. Both reproduced end-to-end in a real browser (the
+  symptom needs the tmux backend, where sessions survive the bounce) and guarded by tests.
 
 ### Added — a Links menu that catches URLs the terminal breaks across lines
 
