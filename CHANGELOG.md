@@ -7,6 +7,59 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [Unreleased]
+
+A deep review of the resync/uninstall changes shipped in 2.0.9 — the reviewer's sharpest
+findings were in that release's own fixes, which is exactly what the review was for.
+
+### Fixed — resync intent is client state, and every path that deserves "full" gets it
+
+- The lossy/full split stored the intent as queue sentinels — droppable data: a
+  slow-client overflow could swallow an unlock's pending "full" and downgrade it, and
+  pause's drain could lose it entirely (output missed while locked never arrived until
+  unrelated output pushed it). Intent now lives on the client as a level (none < lossy <
+  full) that drains cannot touch, combined by max, with a single wake sentinel. The
+  pong-timeout recovery was also wrongly demoted to lossy — that client already proved
+  its size, so a 20s wifi blip during heavy TUI output re-broke the prompter frame; it
+  is full again. And `.cast` is flushed (best-effort) at resume again, so the recording
+  no longer lags what the operator just watched.
+
+### Fixed — transcript rewrites are detected by generation, not by size
+
+- The 64MiB cap's head-truncate was detected by "file got shorter", but a cast-triggered
+  cap with a small `.out` rewrites it LONGER (gap marker + full content), and a file can
+  regrow past the old cutoff (ABA) — both slipped through and could duplicate or drop
+  the last pre-cutoff bytes mid-stream. The hub now bumps a generation counter on every
+  rewrite; a resync whose captured generation changed falls back to the historical
+  dedup. The test that was supposed to catch this was itself vacuous (its fixture never
+  reached the stale branch) — rewritten so that deleting the detection fails it.
+
+### Fixed — uninstall markers are judged by what heartbeats did afterwards
+
+- 2.0.9's 300s heartbeat self-clear had it backwards: an attacker who plants the marker
+  and then kills the agent keeps it forever (offline alerts silenced for a compromised
+  host), while an agent-43 orphan that heartbeats through its own genuine uninstall gets
+  its REAL marker erased — recreating the false alert. The marker is now immutable and
+  interpreted at read time: credible only if heartbeats stopped right after it was set.
+  A planted marker neither silences the offline alert nor shows the "agent removed"
+  badge that invites deleting a live host. This also removes the extra per-heartbeat
+  UPDATE from the hot path.
+
+### Changed — vendor code ships in its own cacheable chunks
+
+- The main bundle carried React and xterm alongside the app (833KB, over vite's warning
+  threshold on every build). `manualChunks` now splits them: the app chunk drops to
+  385KB (gzip 237→114KB), and a returning browser re-downloads only WebTerm's own code
+  after an upgrade — the vendors, unchanged for months at a time, stay cached.
+
+### Added — the frontend has unit tests
+
+- vitest (config kept out of the image build, no jsdom — the two globals are stubbed by
+  hand), wired into `ci-local.sh` and the publish workflow. The first 12 tests pin the
+  exact bugs found this cycle: the frozen width-default, A± under blocked localStorage,
+  the legacy-key migration, and the DECSET restore sequences. `modeRestoreSeq` moved to
+  `lib/termmodes.ts` to be testable.
+
 ## [2.0.9] — 2026-08-28 · agent (44)
 
 An adversarial review of everything shipped since 2.0.5, plus one field report. The agent

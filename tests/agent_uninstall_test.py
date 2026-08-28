@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "agent"))
 
 import httpx  # noqa: E402
 
-from app import api, config, db, security  # noqa: E402
+from app import api, config, core, db, security  # noqa: E402
 from app.main import app  # noqa: E402
 
 _ORIGIN = {"origin": os.environ["WEBTERM_PUBLIC_URL"]}
@@ -67,8 +67,8 @@ async def main():
 
         # ── POST repetat = no-op: fără spam în agent_events/audit (audit 2026-08:
         # oricine cu shell pe host poate citi tokenul; fără dedup, o buclă de POST-uri
-        # umplea ambele tabele nelimitat) şi timestamp-ul original rămâne (heartbeat-ul
-        # curăţă marcajele PLANTATE după 5 min — vechimea lor trebuie să fie reală) ──
+        # umplea ambele tabele nelimitat) şi timestamp-ul original rămâne — corelarea
+        # marcaj↔heartbeat (uninstall_marker_credible) depinde de vechimea lui reală ──
         ts1 = row["uninstalled_at"]
         n1 = (await db.fetchone("SELECT COUNT(*) c FROM agent_events WHERE host_id=? "
                                 "AND event='uninstalled'", hid))["c"]
@@ -79,6 +79,22 @@ async def main():
         check("…dar nu mai scrie un al doilea eveniment", n2 == n1, (n1, n2))
         ts2 = (await db.fetchone("SELECT uninstalled_at FROM hosts WHERE id=?", hid))["uninstalled_at"]
         check("…şi păstrează timestamp-ul original", ts2 == ts1, (ts1, ts2))
+
+        # ── credibilitatea marcajului: heartbeat-uri CONTINUATE după marcaj = plantat.
+        # Un marcaj plantat nu ajunge badge în UI (ar invita ştergerea unui host viu) şi
+        # nu amuţeşte alerta de offline; unul real (heartbeat-urile mor în secunde) da. ──
+        await db.execute("UPDATE hosts SET last_heartbeat=? WHERE id=?", ts1 + 600, hid)
+        hosts = (await c.get("/api/hosts")).json()
+        check("marcaj + heartbeat-uri după: NU e expus în UI (plantat)",
+              hosts[0].get("uninstalled_at") is None, hosts[0].get("uninstalled_at"))
+        check("…şi sweep-ul nu-l crede (alerta de offline rămâne activă)",
+              not core.uninstall_marker_credible(ts1, ts1 + 600))
+        await db.execute("UPDATE hosts SET last_heartbeat=? WHERE id=?", ts1 + 30, hid)
+        hosts = (await c.get("/api/hosts")).json()
+        check("marcaj cu heartbeat-uri oprite imediat: expus (dezinstalare reală)",
+              bool(hosts[0].get("uninstalled_at")), hosts[0].get("uninstalled_at"))
+        check("…şi sweep-ul îl crede (fără alertă falsă la decomisionare)",
+              core.uninstall_marker_credible(ts1, ts1 + 30))
 
         # ── un token greşit nu poate marca nimic ────────────────────────────
         hid2 = (await c.post("/api/hosts", json={"name": "h2"})).json()["id"]

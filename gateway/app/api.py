@@ -1077,8 +1077,14 @@ def _host_json(row) -> dict:
         "conflict": core.host_conflict(row["id"]),
         # Agentul a fost scos de pe host. Hostul rămâne până când cineva confirmă în UI —
         # poate nu vrei să-l ştergi, ci doar să-l reinstalezi, caz în care marcajul dispare
-        # singur la reconectare.
-        "uninstalled_at": (row["uninstalled_at"] if "uninstalled_at" in row.keys() else None),
+        # singur la reconectare. Expus DOAR când e credibil (heartbeat-urile s-au oprit
+        # imediat după marcaj): un marcaj plantat de cineva cu shell pe host nu ajunge
+        # badge în UI, deci nu poate invita operatorul să şteargă un host viu.
+        "uninstalled_at": (row["uninstalled_at"]
+                           if "uninstalled_at" in row.keys()
+                           and core.uninstall_marker_credible(row["uninstalled_at"],
+                                                              row["last_heartbeat"])
+                           else None),
         "metrics": conn.metrics if conn else None,
         "agent_latest": expected,
         # de ce NU se poate actualiza (dacă e cazul) — altfel UI-ul arată „update disponibil"

@@ -210,11 +210,13 @@ async def t5_lossy_resync_keeps_old_behaviour():
     hub.out_f.close(); hub.cast_f.close()
 
 
-async def t6_cap_shrink_no_duplication():
-    # _maybe_cap poate RESCRIE fișierul (head-truncate la plafonul de 64MiB) cât citim
-    # tail-ul pe thread: offseturile se mută sub noi și marginea `cutoff` nu mai exclude
-    # nimic. Detectăm (tell() < cutoff) și revenim la dedup-ul istoric: coada se golește,
-    # deci un chunk flush-uit în fișierul rescris NU ajunge și din tail, și din coadă.
+async def t6_cap_rewrite_invalidates_cutoff():
+    # _maybe_cap poate RESCRIE fișierul cât citim tail-ul pe thread: offseturile se mută
+    # sub noi. Detecția e prin CONTORUL de generație (out_gen), nu prin mărime — revizia
+    # a arătat că rescrierea poate LUNGI fișierul (GAP_MARKER + tot conținutul), iar
+    # varianta veche a testului nici măcar nu atingea ramura stale (cutoff-ul ieșea sub
+    # noua mărime → trecea vacuu). Acum: gen bump → drain → chunk-ul din coadă e ARUNCAT,
+    # nu redat — count(late) == 0 pică dacă cineva șterge ramura stale (redevine 1).
     sid = "cabbed" + "0" * 26
     hub = make_hub(sid)
     ws = FakeWs()
@@ -230,11 +232,13 @@ async def t6_cap_shrink_no_duplication():
     real_read_tail = core.read_tail
 
     def capping_read_tail(s, limit=config.BROWSER_TAIL_BYTES, end=None):
-        # simulează cap-ul: fișierul e rescris MAI SCURT, handle nou, apoi sosește un
-        # chunk care e și flush-uit (în fișierul nou), și în coada clientului
+        # simulează exact ce face _maybe_cap: rescrie fișierul (aici mai LUNG — cazul
+        # care păcălea comparația de mărime), redeschide handle-ul, bumpează generația;
+        # apoi sosește un chunk flush-uit în fișierul nou ȘI pus în coada clientului
         hub.out_f.close()
-        out_path.write_bytes(b"[GAP]\n")
+        out_path.write_bytes(b"[GAP-mai-lung-decat-originalul]\n")
         hub.out_f = open(out_path, "ab")
+        hub.out_gen += 1
         hub.out_f.write(late); hub.out_f.flush()
         client.push(late)
         return real_read_tail(s, limit=limit, end=end)
@@ -247,7 +251,70 @@ async def t6_cap_shrink_no_duplication():
         core.read_tail = real_read_tail
 
     data = stream_bytes(ws)
-    check("cap-shrink: chunk-ul nu e DUBLAT", data.count(late) <= 1, repr(data[-80:]))
+    check("cap-rewrite: gen bump → coada drenată, chunk-ul nici dublat, nici redat",
+          data.count(late) == 0, repr(data[-100:]))
+    hub.out_f.close(); hub.cast_f.close()
+
+
+async def t7_overflow_cannot_downgrade_full():
+    # Intenția de resync e stare pe client, nu element de coadă: un overflow de client
+    # lent (cere lossy) sosit DUPĂ un unlock (a cerut full) nu mai degradează full-ul —
+    # nivelurile se combină prin max, iar drain-ul nu le atinge.
+    sid = "f011" + "0" * 28
+    hub = make_hub(sid)
+    ws = FakeWs()
+    client = core.BrowserClient(ws, hub)
+    hub.clients.add(client)
+
+    redraws = []
+
+    class FakeSource:
+        async def redraw(self, s):
+            redraws.append(s)
+
+    hub._source = lambda: FakeSource()
+
+    unflushed = b"scris-cat-era-blocat\n"
+    client.lock()
+    hub.out_f.write(unflushed)          # NEflush-uit — doar un resync FULL îl livrează
+    client.push(unflushed)              # blocat → doar marchează
+    client.unlock()                     # cere FULL
+    client.buffered = config.CLIENT_BUFFER_LIMIT + 1
+    client.push(b"x")                   # overflow → cere LOSSY; nu are voie să degradeze
+    client.buffered = 0
+    await run_sender_briefly(client, secs=0.5)
+
+    data = stream_bytes(ws)
+    check("overflow după unlock: resync-ul rămâne FULL (octeții neflush-uiți vin)",
+          unflushed in data, repr(data[-80:]))
+    check("…și repaint-ul tot se cere", redraws == [sid], str(redraws))
+    hub.out_f.close(); hub.cast_f.close()
+
+
+async def t8_unlock_pause_resume_keeps_intent():
+    # unlock → pause (drain) → resume fără output nou: sentinela din coadă a fost drenată,
+    # dar INTENȚIA supraviețuiește pe client — la resume se retrezește și resync-ul vine.
+    # Cu sentinelele-ca-date (2.0.9), output-ul pierdut cât era blocat nu mai sosea deloc.
+    sid = "0b0e" + "0" * 28
+    hub = make_hub(sid)
+    ws = FakeWs()
+    client = core.BrowserClient(ws, hub)
+    hub.clients.add(client)
+
+    missed = b"pierdut-cat-era-blocat\n"
+    client.lock()
+    hub.out_f.write(missed)
+    client.push(missed)
+    client.unlock()                     # cere FULL (sentinelă în coadă)
+    client.pause()                      # drain: sentinela dispare, intenția rămâne
+    client.resume()                     # fără output nou între timp
+    await run_sender_briefly(client, secs=0.5)
+
+    types = [x.get("type") for x in ws.sent if isinstance(x, dict)]
+    check("intenția supraviețuiește pause-ului: resync-ul tot se face",
+          "resync" in types, str(types))
+    check("…și livrează output-ul pierdut cât era blocat",
+          missed in stream_bytes(ws), repr(stream_bytes(ws)[-80:]))
     hub.out_f.close(); hub.cast_f.close()
 
 
@@ -257,7 +324,9 @@ def main():
     asyncio.run(t3_concurrent_checkpoint_no_duplication())
     asyncio.run(t4_resume_requests_full_redraw())
     asyncio.run(t5_lossy_resync_keeps_old_behaviour())
-    asyncio.run(t6_cap_shrink_no_duplication())
+    asyncio.run(t6_cap_rewrite_invalidates_cutoff())
+    asyncio.run(t7_overflow_cannot_downgrade_full())
+    asyncio.run(t8_unlock_pause_resume_keeps_intent())
     ok = sum(1 for _, c in results if c)
     print(f"\n{ok}/{len(results)} passed")
     return ok == len(results)
