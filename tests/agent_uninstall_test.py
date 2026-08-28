@@ -65,6 +65,21 @@ async def main():
         hosts = (await c.get("/api/hosts")).json()
         check("marcajul ajunge în UI", bool(hosts[0].get("uninstalled_at")), hosts[0].get("uninstalled_at"))
 
+        # ── POST repetat = no-op: fără spam în agent_events/audit (audit 2026-08:
+        # oricine cu shell pe host poate citi tokenul; fără dedup, o buclă de POST-uri
+        # umplea ambele tabele nelimitat) şi timestamp-ul original rămâne (heartbeat-ul
+        # curăţă marcajele PLANTATE după 5 min — vechimea lor trebuie să fie reală) ──
+        ts1 = row["uninstalled_at"]
+        n1 = (await db.fetchone("SELECT COUNT(*) c FROM agent_events WHERE host_id=? "
+                                "AND event='uninstalled'", hid))["c"]
+        r = await c.post("/agent/uninstalled", headers={"Authorization": "Bearer " + tok})
+        check("POST repetat răspunde tot 200", r.status_code == 200, r.status_code)
+        n2 = (await db.fetchone("SELECT COUNT(*) c FROM agent_events WHERE host_id=? "
+                                "AND event='uninstalled'", hid))["c"]
+        check("…dar nu mai scrie un al doilea eveniment", n2 == n1, (n1, n2))
+        ts2 = (await db.fetchone("SELECT uninstalled_at FROM hosts WHERE id=?", hid))["uninstalled_at"]
+        check("…şi păstrează timestamp-ul original", ts2 == ts1, (ts1, ts2))
+
         # ── un token greşit nu poate marca nimic ────────────────────────────
         hid2 = (await c.post("/api/hosts", json={"name": "h2"})).json()["id"]
         r = await c.post("/agent/uninstalled", headers={"Authorization": "Bearer nu-e-bun"})

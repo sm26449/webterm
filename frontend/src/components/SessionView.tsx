@@ -4,11 +4,12 @@ import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { IDisposable, Terminal } from '@xterm/xterm'
+import type { IModes } from '@xterm/xterm'
 import { errText, api, CommandGuard, Host, Session, withStepup } from '../lib/api'
 import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
 import { Command, CommandTracker, cmdDuration, matchCommandRule } from '../lib/commands'
 import { clearCwd, parseOsc7, setCwd } from '../lib/cwd'
-import { preferredFont, setPreferredFont } from '../lib/font'
+import { FONT_STORAGE_KEY, preferredFont, setPreferredFont } from '../lib/font'
 import { useI18n } from '../lib/i18n'
 import { hostScheme, termTheme } from '../lib/termtheme'
 import CommandsPanel from './CommandsPanel'
@@ -58,6 +59,34 @@ const WATCHDOG_MS = 60_000
    deci lipseşte şi pe orice instalare fără TLS — caz documentat şi susţinut de produs.
    Măsurat: pe `http://<ip>:port`, Chromium desktop raportează `undefined`.
    Când nu ştim memoria, ne uităm dacă e un pointer grosier (deget). */
+// Starea DECSET/SM a terminalului, ca secvențe care o refac după un reset().
+// La resume, reset()-ul șterge modurile pe care tmux le crede încă active:
+// mouse-tracking (fără el wheel-ul nu mai ajunge în copy-mode-ul tmux — „nu
+// merge scroll-ul"), bracketed paste, focus events, săgețile în mod aplicație.
+// tmux le retrimite DOAR la attach/resize — verificat empiric: refresh-client
+// redesenează conținutul, nu și modurile; de-aia A± (un resize) „repara" scrollul.
+// Replay-ul nu le conține aproape niciodată (au curs la attach, demult), deci le
+// refacem local, ÎNAINTE de tail — comutările mai noi din tail câștigă oricum.
+function modeRestoreSeq(m: IModes): string {
+  let s = ''
+  if (m.applicationCursorKeysMode) s += '\x1b[?1h'
+  if (m.applicationKeypadMode) s += '\x1b[?66h'
+  if (m.originMode) s += '\x1b[?6h'
+  if (!m.wraparoundMode) s += '\x1b[?7l'          // singurul cu default ON
+  if (m.reverseWraparoundMode) s += '\x1b[?45h'
+  if (m.sendFocusMode) s += '\x1b[?1004h'
+  if (m.bracketedPasteMode) s += '\x1b[?2004h'
+  if (m.insertMode) s += '\x1b[4h'
+  const mouse = { x10: '\x1b[?9h', vt200: '\x1b[?1000h', drag: '\x1b[?1002h', any: '\x1b[?1003h' }[
+    m.mouseTrackingMode as 'x10' | 'vt200' | 'drag' | 'any'] ?? ''
+  if (mouse) {
+    // xterm nu expune encoding-ul de mouse; singurul emitent aici e tmux, care
+    // folosește SGR (?1006) — fără el, coordonatele peste coloana 223 se strică
+    s += mouse + '\x1b[?1006h'
+  }
+  return s
+}
+
 const SCROLLBACK = (() => {
   const mem = (navigator as { deviceMemory?: number }).deviceMemory
   if (mem !== undefined) return mem <= 4 ? 3000 : 10000
@@ -765,11 +794,17 @@ export default function SessionView(props: {
   useEffect(() => {
     const sync = () => setFontSize(preferredFont())
     if (props.paneActive !== false) sync()
+    // 'storage' e canalul ÎNTRE ferestre (popout-uri, alt tab de browser): 'wt-font'
+    // nu trece de fereastra curentă, iar fără sync un A± în popout ar calcula din
+    // state vechi și ar trage preferința comună înapoi (18 → 15, observat în audit)
+    const onStorage = (e: StorageEvent) => { if (e.key === FONT_STORAGE_KEY) sync() }
     window.addEventListener('wt-font', sync)
     window.addEventListener('resize', sync)
+    window.addEventListener('storage', onStorage)
     return () => {
       window.removeEventListener('wt-font', sync)
       window.removeEventListener('resize', sync)
+      window.removeEventListener('storage', onStorage)
     }
   }, [props.paneActive])
 
@@ -956,7 +991,9 @@ export default function SessionView(props: {
         // reset ÎNAINTE de replay: serverul trimite tail-ul complet la FIECARE
         // conectare, deci la o reconectare (rețea căzută, sleep) istoricul s-ar
         // apenda a doua oară peste conținutul existent
+        const modeSeq = modeRestoreSeq(term.modes)   // salvat ÎNAINTE de reset
         term.reset()
+        if (modeSeq) term.write(modeSeq)             // vezi modeRestoreSeq
         // Marcajele OSC 133 din ISTORICUL rejucat NU sunt evenimente live: dacă le lăsăm
         // să treacă, tracker-ul construieşte „comenzi" din rânduri rejucate (prompturi,
         // bucăţi de output) şi le raportează în istoricul global — la fiecare reconectare.

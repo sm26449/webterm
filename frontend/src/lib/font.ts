@@ -31,28 +31,44 @@ function overrides(): Partial<Record<DeviceClass, number>> {
   return {}
 }
 
+// setItem poate ARUNCA (Safari privat pe iOS vechi — QuotaExceededError; site data
+// blocat). Persistența e best-effort: fără ea preferința ține doar cât pagina, dar
+// A± trebuie să MEARGĂ oricum — vechiul cod schimba întâi state-ul și persista la
+// urmă, nu regresăm sub el. Iar migrarea rulează în initializer-ul de useState al
+// SessionView: o excepție acolo dobora view-ul întreg la randare.
+function persist(o: Partial<Record<DeviceClass, number>>): void {
+  try { localStorage.setItem(KEY, JSON.stringify(o)) } catch { /* best-effort */ }
+}
+
 export function preferredFont(): number {
   const cls = deviceClass()
   const o = overrides()
   const saved = o[cls]
   if (typeof saved === 'number' && Number.isFinite(saved)) return clamp(saved)
-  const legacy = localStorage.getItem('wt_font')
-  if (legacy != null) {
-    localStorage.removeItem('wt_font')
-    const n = Number(legacy)
-    if (Number.isFinite(n) && n > 0) {
-      localStorage.setItem(KEY, JSON.stringify({ ...o, [cls]: clamp(n) }))
-      return clamp(n)
+  try {
+    const legacy = localStorage.getItem('wt_font')
+    if (legacy != null) {
+      localStorage.removeItem('wt_font')
+      const n = Number(legacy)
+      if (Number.isFinite(n) && n > 0) {
+        persist({ ...o, [cls]: clamp(n) })
+        return clamp(n)
+      }
     }
-  }
+  } catch { /* storage indisponibil → default-ul de clasă */ }
   return DEFAULTS[cls]
 }
 
 // Setează preferința clasei curente și anunță toate panourile montate —
 // taburile din fundal se aliniază pe loc, nu la următoarea lor montare.
+// Ferestrele SEPARATE (popout-uri) nu primesc evenimente din fereastra asta:
+// pe ele le aliniază evenimentul nativ 'storage' (emis între ferestre la
+// scrierea cheii), pe care SessionView îl ascultă lângă 'wt-font'.
 export function setPreferredFont(n: number): number {
   const v = clamp(n)
-  localStorage.setItem(KEY, JSON.stringify({ ...overrides(), [deviceClass()]: v }))
+  persist({ ...overrides(), [deviceClass()]: v })
   window.dispatchEvent(new Event('wt-font'))
   return v
 }
+
+export const FONT_STORAGE_KEY = KEY

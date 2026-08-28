@@ -7,6 +7,82 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [2.0.9] — 2026-08-28 · agent (44)
+
+An adversarial review of everything shipped since 2.0.5, plus one field report. The agent
+moved to 44 for the uninstall and login-shell fixes; hosts on 43 keep working, they just
+carry those two defects until they update.
+
+### Fixed — switching back to a tab kept the screen but lost the terminal's modes
+
+- Field report after 2.0.8: the prompter frame was healed, but the wheel stopped
+  scrolling until a font A±. The resume replay starts with `term.reset()`, which wipes
+  the DECSET modes tmux believes are still active — mouse tracking above all (with
+  `mouse on`, the wheel *is* tmux copy-mode), but also bracketed paste, focus events and
+  application cursor keys. tmux only retransmits modes on attach and on resize (verified
+  by capturing the client PTY: `refresh-client` repaints content, not modes) — which is
+  precisely why A±, a resize, repaired it. The client now snapshots `term.modes` before
+  the reset and re-asserts them before the tail; newer toggles inside the tail still win.
+
+### Fixed — the repaint now also covers page reloads, and only deliberate resyncs
+
+- A fresh attach (F5, or a second same-size device) replayed diffs with no repaint —
+  the same missing-frame symptom 2.0.8 fixed for tab switches — because an unchanged
+  size never triggers a tmux redraw. The gateway now requests the repaint after fresh
+  attaches too. In the other direction, the flush-and-repaint treatment was running on
+  *every* resync, including slow-client backlog drops and pong-timeout recovery, where
+  the client may be freshly attached at another size (the replay/resize collision
+  `read_tail` documents) and where a chronically slow client would loop full-screen
+  repaints; those paths are back to the historical lossy behaviour, on a separate marker.
+
+### Fixed — two races that could duplicate output on resume
+
+- The resync cutoff is now taken from the `.out` handle alone (a failure flushing the
+  `.cast` file discarded a perfectly valid cutoff), and after the threaded read the
+  gateway detects whether the transcript was head-truncated (the 64MiB cap) or the flush
+  failed outright — in both cases it falls back to the historical drop-the-queue dedup
+  instead of replaying bytes that are also sitting in the queue.
+
+### Fixed — `ptyd.py uninstall` left the daemon running on cron-supervised installs (agent 44)
+
+- `systemctl --user disable --now` is a no-op on the installer's cron fallback, so the
+  daemon survived its own uninstall with token and connection in memory: the host stayed
+  online, the "agent removed" badge (gated on the host being offline) never appeared, and
+  the next reconnect silently erased the uninstall marker — a "live" host with no
+  supervision, no tmux and no `~/.webterm`, that even `ptyd.py stop` could no longer find
+  (the pid file was deleted). Uninstall now stops the running daemon first, gracefully,
+  while the lock file still exists.
+
+### Fixed — a service account's `nologin` no longer becomes tmux's default-shell (agent 44)
+
+- The agent-42 fix took `default-shell` from passwd, the source of truth — but a service
+  account's passwd says `/usr/sbin/nologin`, which exists, is executable, and kills every
+  new session with "This account is currently not available". Unusable passwd shells now
+  fall back to a valid `$SHELL` (how those installs worked before 42), then `/bin/bash`.
+
+### Fixed — decommissioning a host no longer emails a false "host offline" incident
+
+- The offline sweep now skips hosts marked `uninstalled_at`: the silence after a
+  deliberate uninstall is not an incident, and the alert it sent suggested diagnostics
+  the uninstall had just deleted. Reinstalling clears the marker and re-arms the alert.
+
+### Hardened — `/agent/uninstalled` against planted markers and event spam
+
+- Anyone with shell on a host can read the agent token and POST the endpoint without
+  uninstalling anything, leaving a latent "agent removed" badge that surfaces during the
+  next offline window and invites deleting a live host. A marker older than 5 minutes on
+  a host that is still heartbeating is now cleared automatically (a real uninstall stops
+  the daemon within seconds), and repeated POSTs write nothing — no fresh timestamp, no
+  new `agent_events`/audit rows.
+
+### Fixed — font preference now reaches popouts, and survives blocked storage
+
+- The `wt-font` event never crosses windows, so a popout kept a stale size and pressing
+  A± there rewrote the shared preference backwards from stale state; popouts now follow
+  the cross-window `storage` event. And where `localStorage.setItem` throws (Safari
+  private mode), A± was a complete no-op and the legacy-key migration could crash the
+  session view during render — persistence is now best-effort, the font always moves.
+
 ## [2.0.8] — 2026-08-27 · agent (43)
 
 The agent moved to 43, so fleets should update it: the repaint below is an agent-side

@@ -310,7 +310,8 @@ def read_tail(sid: str, limit: int = config.BROWSER_TAIL_BYTES,
 # Browser client (one websocket attached to a hub)
 # ---------------------------------------------------------------------------
 
-_RESYNC = object()
+_RESYNC = object()        # resync „lossy" (client lent / pong-timeout): comportamentul istoric
+_RESYNC_FULL = object()   # resync de resume/unlock: flush + cutoff + repaint (vezi _resync)
 
 
 PING_EVERY = 256 * 1024      # app-level ack interval: uvicorn's ws send has no
@@ -376,7 +377,7 @@ class BrowserClient:
         self.paused = False
         if self._missed_while_paused:
             self._missed_while_paused = False
-            self.queue.put_nowait(_RESYNC)
+            self.queue.put_nowait(_RESYNC_FULL)
 
     def lock(self) -> None:
         self.locked = True
@@ -387,7 +388,7 @@ class BrowserClient:
         if not self.locked:
             return
         self.locked = False
-        self.queue.put_nowait(_RESYNC)  # resync din transcript ce s-a pierdut cât era blocat
+        self.queue.put_nowait(_RESYNC_FULL)  # resync din transcript ce s-a pierdut cât era blocat
 
     def push(self, data: bytes) -> None:
         # `self.hub.locked` = gardă defensivă: un client adăugat în hub.clients în fereastra
@@ -424,27 +425,33 @@ class BrowserClient:
         async with self._send_lock:
             await self.ws.send_bytes(b)
 
-    async def _resync(self) -> None:
-        # Închide gaura de checkpoint (2s/64KiB) din `read_tail` pentru resume/unlock:
-        # clientul ăsta avea deja dimensiunea sesiunii, deci motivul pentru care fereastra
-        # neflush-uită nu se redă la attach (coliziunea cu redraw-ul de resize al unui client
-        # de altă mărime) nu se aplică aici. Fără flush, un TUI rămânea cu golurile ferestrei
-        # pierdute — chenarul static (prompterul Claude Code) nu se mai redesena singur, iar
-        # simptomul („linii dispărute până la A±/reload") apărea la fiecare revenire pe tab
-        # în timpul unui output intens.
+    async def _resync(self, full: bool = False) -> None:
+        # DOUĂ feluri de resync, deliberat diferite:
         #
-        # Ordinea drain → flush → tell e ATOMICĂ (sincronă, același tick de event-loop):
-        # tot ce e ≤ cutoff e pe disc și NU e în coadă; tot ce vine după e în coadă și NU e
-        # în tail. De-aia nu mai golim coada după trimitere — chunk-urile sosite cât citeam
-        # pe thread se trimit la rând, fără gaură și fără dublură.
+        # `full` (resume/unlock): clientul ăsta avea deja dimensiunea sesiunii, deci putem
+        # închide gaura de checkpoint (2s/64KiB) din `read_tail` fără riscul coliziunii cu
+        # redraw-ul de resize al unui client de altă mărime. Fără flush, un TUI rămânea cu
+        # golurile ferestrei pierdute — chenarul static (prompterul Claude Code) nu se mai
+        # redesena singur până la A±/reload. Ordinea drain → flush → tell e ATOMICĂ
+        # (sincronă, același tick): tot ce e ≤ cutoff e pe disc și NU e în coadă; tot ce
+        # vine după e în coadă și NU e în tail — nici gaură, nici dublură, deci nu golim
+        # coada după trimitere. La final cerem sursei un repaint complet.
+        #
+        # lossy (client lent / pong-timeout): comportamentul istoric — fără flush, fără
+        # repaint. Aici clientul POATE fi abia atașat, de altă mărime (exact cazul contra
+        # căruia avertizează comentariul din `read_tail`), iar un client cronic lent ar
+        # declanșa repaint-uri în buclă (fiecare umflă transcriptul și îl împinge înapoi
+        # peste limita de buffer). Gaura de checkpoint rămâne — documentată, mărginită.
         self._drain_queue()
         cutoff = None
-        if not self.hub.closed:
+        if full and not self.hub.closed:
             try:
-                self.hub._flush()
+                # DOAR out_f: `read_tail` citește .out; un eșec pe .cast (hub._flush() le
+                # face pe amândouă) ar arunca un cutoff perfect valid.
+                self.hub.out_f.flush()
                 cutoff = self.hub.out_f.tell()
             except (OSError, ValueError):
-                cutoff = None       # handle închis în cursă cu teardown → attach-behaviour
+                cutoff = None       # ENOSPC / handle închis în cursă cu teardown
         await self.send_text(json.dumps({"type": "resync"}))
         # read_tail face I/O blocant (până la 256 KB): pe thread, ca un resync
         # (posibil declanșat repetat prin pause/resume) să nu blocheze event-loop-ul.
@@ -453,10 +460,24 @@ class BrowserClient:
         tail = await asyncio.to_thread(read_tail, self.hub.sid, end=cutoff)
         await self.send_bytes(tail)
         self._sent_since_ping += len(tail)
-        # Tail-ul redă ce s-a TRANSMIS, nu ce e PE ECRAN: tmux trimite diff-uri, deci
-        # chenarele statice ale unui TUI pot lipsi din orice fereastră de replay. Cerem
-        # sursei un repaint complet — vine prin flux, după cutoff, și închide golurile.
-        self.hub.request_redraw()   # tails count toward flow control too
+        # Garanția „≤ cutoff în tail, > cutoff în coadă" cade în două cazuri:
+        #  · cutoff=None — lossy, sau flush eșuat: citirea a fost nemărginită;
+        #  · _maybe_cap a RESCRIS fișierul cât citeam (plafonul de 64MiB): out_f e un
+        #    handle nou, mai scurt — offseturile s-au mutat sub noi, marginea n-a mărginit.
+        # În ambele, întoarcem dedup-ul istoric: golim coada (ce ERA pe disc nu se redă
+        # de două ori; restul e gaura documentată la read_tail, nu o dublare evitată).
+        stale = cutoff is None
+        if not stale:
+            try:
+                stale = self.hub.out_f.tell() < cutoff
+            except (OSError, ValueError):
+                stale = True
+        if stale:
+            self._drain_queue()
+        if full:
+            # Tail-ul redă ce s-a TRANSMIS, nu ce e PE ECRAN: tmux trimite diff-uri, deci
+            # chenarele statice ale unui TUI pot lipsi din orice fereastră de replay.
+            self.hub.request_redraw()
 
     async def _flow_control(self) -> None:
         """Stop-and-wait ack every PING_EVERY bytes. If the client stalls
@@ -495,8 +516,8 @@ class BrowserClient:
                     # tăcut. Ping-ul reia și detecția de client half-open (via _flow_control).
                     await self._flow_control()
                     continue
-                if item is _RESYNC:
-                    await self._resync()
+                if item is _RESYNC or item is _RESYNC_FULL:
+                    await self._resync(full=item is _RESYNC_FULL)
                 else:
                     chunks = [item]
                     total = len(item)
@@ -504,7 +525,7 @@ class BrowserClient:
                     # coalesce whatever is already queued (≤64 KiB per message)
                     while total < 65536 and not self.queue.empty():
                         nxt = self.queue._queue[0]
-                        if nxt is _RESYNC:
+                        if nxt is _RESYNC or nxt is _RESYNC_FULL:
                             break
                         self.queue.get_nowait()
                         self.buffered -= len(nxt)
@@ -1731,6 +1752,17 @@ async def reconcile(conn: AgentConnection, msg: dict) -> None:
         # tăiate: se scriu în `hosts` şi se întorc la fiecare listare; un agent compromis
         # putea umfla rândul şi fiecare răspuns cu şiruri de orice lungime
         _clip(msg.get("hostname")), _clip(msg.get("user")), conn.host_id)
+    # Marcaj „dezinstalat" cu agentul ÎNCĂ viu şi raportând de peste 5 minute: nu e o
+    # dezinstalare (aia îşi opreşte daemonul în secunde), e un marcaj PLANTAT — oricine cu
+    # shell pe host poate citi tokenul şi lovi /agent/uninstalled fără să dezinstaleze
+    # nimic, lăsând un badge latent „agent removed" care apare la prima fereastră offline
+    # (reboot) şi invită operatorul să şteargă un host viu. Heartbeat-ul continuu e dovada
+    # contrarie, deci marcajul vechi se curăţă singur. Pragul protejează cazul legitim:
+    # notify → SIGTERM vine în secunde, n-apucă 5 minute de heartbeat-uri.
+    await db.execute(
+        "UPDATE hosts SET uninstalled_at=NULL"
+        " WHERE id=? AND uninstalled_at IS NOT NULL AND uninstalled_at < ?",
+        conn.host_id, time.time() - 300)
 
     reported = {s["sid"]: s for s in msg.get("sessions", [])}
     # includem și 'lost': o sesiune tmux SUPRAVIEȚUIEȘTE restartului de agent, deci
@@ -1914,13 +1946,21 @@ async def sweep_hosts_offline() -> None:
     now = time.time()
     try:
         rows = await db.fetchall(
-            "SELECT id, name, last_heartbeat FROM hosts WHERE connection_type='agent'")
+            "SELECT id, name, last_heartbeat, uninstalled_at "
+            "FROM hosts WHERE connection_type='agent'")
     except Exception:                       # noqa: BLE001 — observabilitatea nu rupe reaper-ul
         return
     for row in rows:
         hb = row["last_heartbeat"] or 0
         if not hb:
             continue                        # niciodată conectat: nu e o cădere, e o neînrolare
+        if row["uninstalled_at"]:
+            # dezinstalare DELIBERATĂ, anunţată de agent: tăcerea care urmează nu e un
+            # incident. Fără gardă, fiecare decomisionare producea la ~3 minute un email
+            # „host offline" cu diagnostice imposibile (tmux ls, ptyd.log — şterse de
+            # uninstall), antrenând operatorul să ignore exact alerta care contează.
+            # La reinstalare markerul se şterge la reconectare şi alerta redevine activă.
+            continue
         silent = now - hb
         if silent > config.HEARTBEAT_STALE:
             email_alerts.notify_host_offline(row["id"], row["name"], silent)

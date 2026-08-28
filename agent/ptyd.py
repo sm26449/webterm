@@ -42,7 +42,7 @@ import termios
 import threading
 import time
 
-AGENT_VERSION = 43
+AGENT_VERSION = 44
 
 # Sub atâtea secunde de valabilitate, un certificat se roteşte prea des ca un pin pe el să
 # însemne altceva decât o cădere programată. 48h: peste ce emite un CA intern (12h la Caddy),
@@ -350,12 +350,26 @@ def _login_shell() -> str:
 
     Se manifestă abia după un reboot, deci la distanţă mare de cauză. Reprodus pe un host
     real, 2026-08-13. Passwd e sursa de adevăr pentru shell-ul unui utilizator; îl fixăm
-    explicit ca să nu mai depindem de cine a pornit agentul."""
+    explicit ca să nu mai depindem de cine a pornit agentul.
+
+    EXCEPŢIE (audit 2026-08): un cont de SERVICIU are în passwd `/usr/sbin/nologin` sau
+    `/bin/false` — există, e executabil, trece orice test de fişier, dar orice sesiune
+    nouă ar muri instant cu „This account is currently not available". Instalările astea
+    mergeau înainte tocmai prin `$SHELL`-ul exportat, deci îl păstrăm ca fallback ÎNAINTE
+    de /bin/sh — doar când passwd nu e utilizabil, ca să nu redeschidem bug-ul cu cron."""
+    def usable(sh):
+        return (sh and os.path.basename(sh) not in ("nologin", "false")
+                and os.path.isfile(sh) and os.access(sh, os.X_OK))
     try:
         sh = pwd.getpwuid(os.getuid()).pw_shell
     except (KeyError, OSError):
         sh = ""
-    return sh if sh and os.path.isfile(sh) and os.access(sh, os.X_OK) else "/bin/sh"
+    if usable(sh):
+        return sh
+    env_sh = os.environ.get("SHELL", "")
+    if usable(env_sh):
+        return env_sh
+    return "/bin/bash" if usable("/bin/bash") else "/bin/sh"
 
 
 TMUX_EXTRA_OPTIONS = [
@@ -2952,7 +2966,26 @@ def _cli_uninstall(assume_yes: bool = False) -> None:
 
     # 1) anunţăm gateway-ul CÂT timp mai avem tokenul (ştergem `~/.webterm` la final)
     notified = _notify_uninstalled()
-    # 2) curăţenia locală: acelaşi cod ca op-ul `uninstall` împins din UI
+    # 2) oprim daemonul care RULEAZĂ — cât încă există lock-ul (rmtree-ul de mai jos îl
+    # şterge). Fără pasul ăsta, pe instalările cu cron nimic nu-l atingea (`systemctl
+    # --user disable --now` e no-op acolo): agentul supravieţuia propriei dezinstalări cu
+    # tokenul şi conexiunea în memorie, hostul rămânea online (badge-ul „agent removed" nu
+    # apărea — e gated pe host offline), iar la următoarea reconectare gateway-ul ştergea
+    # singur marcajul. Rezultatul: un host „viu" fără supraveghere, fără tmux şi fără
+    # ~/.webterm, pe care nici `ptyd.py stop` nu-l mai găsea (pid-ul plecase cu rmtree).
+    pid = read_daemon_pid()
+    if pid:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            for _ in range(150):               # ca la `stop`: elegant, până la 15s
+                if read_daemon_pid() is None:
+                    break
+                time.sleep(0.1)
+            else:
+                os.kill(pid, signal.SIGKILL)
+        except OSError:
+            print("warning: could not stop the running daemon (pid %s)" % pid)
+    # 3) curăţenia locală: acelaşi cod ca op-ul `uninstall` împins din UI
     warnings = Agent.__new__(Agent)._uninstall_agent()
     for w in warnings:
         print("warning: could not clean up %s" % w)

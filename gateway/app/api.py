@@ -3894,10 +3894,16 @@ async def agent_uninstalled(request: Request):
     Dacă agentul e reinstalat, marcajul se şterge singur la următoarea conectare."""
     auth = request.headers.get("authorization", "")
     token = auth[7:] if auth.lower().startswith("bearer ") else ""
-    row = await db.fetchone("SELECT id, name FROM hosts WHERE token_hash=?",
+    row = await db.fetchone("SELECT id, name, uninstalled_at FROM hosts WHERE token_hash=?",
                             security.sha256_hex(token)) if token else None
     if not row:
         raise HTTPException(401, "invalid agent token")
+    if row["uninstalled_at"]:
+        # deja marcat: POST-urile repetate (retry-ul agentului, sau spam cu tokenul citit
+        # de pe host) nu mai scriu NIMIC — nici timestamp (păstrat pentru curăţarea pe
+        # heartbeat din core), nici agent_events/audit (altfel un shell pe host umplea
+        # ambele tabele nelimitat, o găleată de scris fără nicio frână).
+        return {"ok": True, "host_kept": True}
     await db.execute("UPDATE hosts SET uninstalled_at=? WHERE id=?", time.time(), row["id"])
     await core.record_agent_event(row["id"], "uninstalled",
                                   detail="removed on the host with `ptyd.py uninstall`")
@@ -4164,6 +4170,10 @@ async def shared_ws(ws: WebSocket, token: str):
         conn = core.sources.get(row["host_id"])
         if conn:
             await hub.ensure_attached(conn)
+        if not start_locked:
+            # tail-ul redă doar diff-urile transmise; părțile statice ale unui TUI pot
+            # lipsi din fereastră → repaint complet, ca la resume (vezi request_redraw)
+            hub.request_redraw()
         await hub.broadcast_roster()
         await hub.announce_attach(client)
         # Un invitat cu drept de scriere putea tasta într-un terminal fără să lase o urmă
@@ -4301,6 +4311,13 @@ async def browser_ws(ws: WebSocket, sid: str):
     if hub:
         hub.clients.add(client)
         client.sender_task = asyncio.create_task(client.sender())
+        if not start_locked:
+            # F5 / al doilea dispozitiv cu aceeași mărime: tail-ul redă doar diff-urile
+            # transmise, deci chenarele statice ale unui TUI pot lipsi, iar resize-ul
+            # dedupat (aceeași dimensiune) nu declanșează niciun repaint tmux. Cerem
+            # explicit unul, ca la resume — altfel simptomul „linii lipsă până la A±"
+            # rămânea exact pe calea cea mai comună: reload-ul de pagină.
+            hub.request_redraw()
         await hub.broadcast_roster()             # cine e conectat (owner + invitați)
         # Cine era deja ataşat AFLĂ că ai venit; dacă locul e nou, pleacă şi un email — ca să
         # afli şi când nu te uitai. E singurul efect al lui `known`: volum de alertă.

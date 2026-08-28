@@ -86,5 +86,39 @@ check("G1 stale → hung", ptyd.agent_hung() is True)
 
 check("AGENT_VERSION bumped (>=20)", ptyd.AGENT_VERSION >= 20, ptyd.AGENT_VERSION)
 
+# ============ _login_shell: nologin/false din passwd NU devin default-shell ============
+# Audit 2026-08: un cont de serviciu are `/usr/sbin/nologin` în passwd — există, e
+# executabil, trece testele de fişier, dar fiecare sesiune nouă ar muri instant.
+# Ordinea corectă: passwd (utilizabil) → $SHELL (utilizabil) → /bin/bash → /bin/sh.
+class _Pw:
+    def __init__(self, sh):
+        self.pw_shell = sh
+
+
+_orig_getpwuid = ptyd.pwd.getpwuid
+_orig_env_shell = os.environ.get("SHELL")
+try:
+    ptyd.pwd.getpwuid = lambda _uid: _Pw("/usr/sbin/nologin")
+    os.environ["SHELL"] = "/bin/bash"
+    check("nologin în passwd + $SHELL valid → $SHELL", ptyd._login_shell() == "/bin/bash",
+          ptyd._login_shell())
+    os.environ["SHELL"] = "/opt/nu-exista"
+    got = ptyd._login_shell()
+    check("nologin + $SHELL invalid → fallback sănătos, nu nologin",
+          got in ("/bin/bash", "/bin/sh"), got)
+    ptyd.pwd.getpwuid = lambda _uid: _Pw("/bin/false")
+    got = ptyd._login_shell()
+    check("/bin/false respins la fel", got != "/bin/false", got)
+    ptyd.pwd.getpwuid = lambda _uid: _Pw("/bin/bash")
+    os.environ["SHELL"] = "/bin/sh"
+    check("passwd utilizabil rămâne sursa de adevăr (nu $SHELL — bug-ul cu cron)",
+          ptyd._login_shell() == "/bin/bash", ptyd._login_shell())
+finally:
+    ptyd.pwd.getpwuid = _orig_getpwuid
+    if _orig_env_shell is None:
+        os.environ.pop("SHELL", None)
+    else:
+        os.environ["SHELL"] = _orig_env_shell
+
 print(f"\n{ok}/{total} PASS")
 sys.exit(0 if ok == total else 1)

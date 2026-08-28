@@ -172,11 +172,92 @@ async def t4_resume_requests_full_redraw():
     hub.out_f.close(); hub.cast_f.close()
 
 
+async def t5_lossy_resync_keeps_old_behaviour():
+    # Resync-ul de CLIENT LENT (backlog depășit) NU e cel de resume: clientul poate fi
+    # abia atașat, de altă mărime — fereastra neflush-uită NU se redă (coliziunea cu
+    # redraw-ul de resize), iar un repaint cerut aici s-ar declanșa în buclă la un client
+    # cronic lent. Verificăm ambele: fără flush (octeții neflush-uiți lipsesc din tail)
+    # și fără redraw.
+    sid = "10552" + "0" * 27
+    hub = make_hub(sid)
+    ws = FakeWs()
+    client = core.BrowserClient(ws, hub)
+    hub.clients.add(client)
+
+    redraws = []
+
+    class FakeSource:
+        async def redraw(self, s):
+            redraws.append(s)
+
+    hub._source = lambda: FakeSource()
+
+    flushed = b"e-pe-disc\n"
+    hub.out_f.write(flushed); hub.out_f.flush()
+    unflushed = b"doar-in-buffer\n"
+    hub.out_f.write(unflushed)                    # NEflush-uit
+    # simulează overflow-ul: push() peste limită → drain + _RESYNC (lossy)
+    client.buffered = config.CLIENT_BUFFER_LIMIT + 1
+    client.push(b"x")
+    client.buffered = 0
+    await run_sender_briefly(client, secs=0.5)
+
+    data = stream_bytes(ws)
+    check("lossy: octeții flush-uiți sunt în tail", flushed in data)
+    check("lossy: fereastra neflush-uită NU se redă (comportamentul istoric)",
+          unflushed not in data, repr(data[-60:]))
+    check("lossy: nu se cere repaint", redraws == [], str(redraws))
+    hub.out_f.close(); hub.cast_f.close()
+
+
+async def t6_cap_shrink_no_duplication():
+    # _maybe_cap poate RESCRIE fișierul (head-truncate la plafonul de 64MiB) cât citim
+    # tail-ul pe thread: offseturile se mută sub noi și marginea `cutoff` nu mai exclude
+    # nimic. Detectăm (tell() < cutoff) și revenim la dedup-ul istoric: coada se golește,
+    # deci un chunk flush-uit în fișierul rescris NU ajunge și din tail, și din coadă.
+    sid = "cabbed" + "0" * 26
+    hub = make_hub(sid)
+    ws = FakeWs()
+    client = core.BrowserClient(ws, hub)
+    hub.clients.add(client)
+
+    out_path, _ = core.transcript_paths(sid)
+    hub.out_f.write(b"istoric-lung\n")
+    client.pause()
+    client.push(b"istoric-lung\n")
+
+    late = b"dupa-cap\n"
+    real_read_tail = core.read_tail
+
+    def capping_read_tail(s, limit=config.BROWSER_TAIL_BYTES, end=None):
+        # simulează cap-ul: fișierul e rescris MAI SCURT, handle nou, apoi sosește un
+        # chunk care e și flush-uit (în fișierul nou), și în coada clientului
+        hub.out_f.close()
+        out_path.write_bytes(b"[GAP]\n")
+        hub.out_f = open(out_path, "ab")
+        hub.out_f.write(late); hub.out_f.flush()
+        client.push(late)
+        return real_read_tail(s, limit=limit, end=end)
+
+    core.read_tail = capping_read_tail
+    try:
+        client.resume()
+        await run_sender_briefly(client, secs=0.5)
+    finally:
+        core.read_tail = real_read_tail
+
+    data = stream_bytes(ws)
+    check("cap-shrink: chunk-ul nu e DUBLAT", data.count(late) <= 1, repr(data[-80:]))
+    hub.out_f.close(); hub.cast_f.close()
+
+
 def main():
     t1_read_tail_end_bound()
     asyncio.run(t2_resume_includes_unflushed())
     asyncio.run(t3_concurrent_checkpoint_no_duplication())
     asyncio.run(t4_resume_requests_full_redraw())
+    asyncio.run(t5_lossy_resync_keeps_old_behaviour())
+    asyncio.run(t6_cap_shrink_no_duplication())
     ok = sum(1 for _, c in results if c)
     print(f"\n{ok}/{len(results)} passed")
     return ok == len(results)
