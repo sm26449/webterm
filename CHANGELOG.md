@@ -7,7 +7,9 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
-## [Unreleased]
+## [2.0.12] — 2026-08-29 · agent (45)
+
+Gateway and interface only: the agent is unchanged at 45, nothing in the fleet needs updating.
 
 ### Fixed — the Links menu now catches URLs that apps wrap themselves (Claude Code login)
 
@@ -111,8 +113,6 @@ and hardening fixes; hosts on 44 keep working until they update.
   the agent was stopped by someone with shell access and the machine needs investigating.
   No suppression, no schema change, and a legitimate uninstall still avoids the scary
   wrong-steps incident. The credibility heuristic now gates only the cosmetic UI badge.
-
-### Fixed — resync intent is client state, and every path that deserves "full" gets it
 
 ### Fixed — resync intent is client state, and every path that deserves "full" gets it
 

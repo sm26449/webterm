@@ -94,7 +94,7 @@ services:
     networks: [webterm, internal]
 
   app:
-    image: ${WEBTERM_IMAGE:-ghcr.io/sm26449/webterm:v2.0.11}
+    image: ${WEBTERM_IMAGE:-ghcr.io/sm26449/webterm:v2.0.12}
     restart: unless-stopped
     logging: *default-logging
     security_opt:
@@ -117,7 +117,7 @@ services:
       WEBTERM_CLIENT_BUFFER: ${WEBTERM_CLIENT_BUFFER:-}
       WEBTERM_SETUP_TOKEN: ${WEBTERM_SETUP_TOKEN:-}
       # so the app knows, and shows in the UI, which image it is running
-      WEBTERM_IMAGE_REF: ${WEBTERM_IMAGE:-ghcr.io/sm26449/webterm:v2.0.11}
+      WEBTERM_IMAGE_REF: ${WEBTERM_IMAGE:-ghcr.io/sm26449/webterm:v2.0.12}
       # the "is there a new version?" check: 0 disables it entirely (overrides the UI switch)
       WEBTERM_UPDATE_CHECK: ${WEBTERM_UPDATE_CHECK:-1}
       # optional read-only token, only while the repo is private (empty = works on a public repo)
