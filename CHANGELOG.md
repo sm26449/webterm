@@ -7,6 +7,19 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [Unreleased]
+
+### Fixed — the Links menu now catches URLs that apps wrap themselves (Claude Code login)
+
+- The Links menu rejoined a URL only when the *terminal* soft-wrapped it (xterm's isWrapped
+  flag). But a TUI like Claude Code's login does its own wrapping — it emits the URL as
+  separate, box-indented lines that xterm never marks as wrapped — so the menu showed only
+  the first fragment (`…mcp_serv`) instead of the whole link. It now also joins a row to the
+  next when the row is full to the edge (an app-side wrap), stripping the continuation's
+  leading indentation so a boxed URL reassembles cleanly. Guarded so a short line ending in
+  a URL isn't glued to the next line. Both the terminal-wrap and the app-wrap cases are
+  verified end-to-end in a real browser and covered by unit tests.
+
 ## [2.0.11] — 2026-08-28 · agent (45)
 
 Gateway and interface only: the agent is unchanged at 45, so nothing in the fleet needs
