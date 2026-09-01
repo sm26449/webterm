@@ -4119,7 +4119,9 @@ async def agent_ws(ws: WebSocket):
             email_alerts.notify_agent_ip_change(row["name"], row["agent_ip"], ip)
         await db.execute("UPDATE hosts SET agent_ip=? WHERE id=?", ip, row["id"])
     await ws.accept()
-    conn = await core.register_agent(ws, row["id"])
+    # `pinned` = fence-ul anti-clonă e activ (instance_id fixat). Un supersede pe un host pinned
+    # e garantat aceeaşi mașină (alta ar fi fost refuzată mai sus) → dual-WAN, nu token partajat.
+    conn = await core.register_agent(ws, row["id"], pinned=bool(row["instance_id"]))
     log.info("agent connected: host=%s(%s)", row["name"], row["id"])
     try:
         await conn.run()

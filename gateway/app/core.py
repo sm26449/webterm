@@ -2081,12 +2081,18 @@ async def sweep_idle_locks() -> None:
             await hub.lock()
 
 
-async def register_agent(ws, host_id: int) -> AgentConnection:
+async def register_agent(ws, host_id: int, pinned: bool = False) -> AgentConnection:
     old = sources.get(host_id)
+    superseded = old is not None
     if old:
         replacements.setdefault(host_id, []).append(time.time())
         old._stop_reason = "superseded"        # jurnal: deconectat fiindcă a reconectat un agent nou
-        if host_conflict(host_id):
+        # Alarma „shared token" e validă DOAR pe hosturi nepinned. Un host pinned are fence-ul
+        # anti-clonă activ: o mașină cu ALT instance-id e refuzată (4409) ÎNAINTE de a ajunge aici,
+        # deci un supersede pe un host pinned e ACEEAŞI mașină care se reconectează — dual-WAN sau
+        # reconectare rapidă — nu două mașini cu acelaşi token. Fără garda asta, un server cu 2 WAN-uri
+        # (redundanţă legitimă) genera alerte false de „conflict".
+        if not pinned and host_conflict(host_id):
             log.warning("host %s: repeated agent replacements — two machines "
                         "are probably enrolled with the same host token", host_id)
             await record_agent_event(host_id, "conflict",
@@ -2094,6 +2100,15 @@ async def register_agent(ws, host_id: int) -> AgentConnection:
         await old.disconnect()
     conn = AgentConnection(ws, host_id)
     sources[host_id] = conn
+    if superseded:
+        # La supersede, `_shutdown` al conexiunii vechi rulează pe un tick ULTERIOR — moment în
+        # care `sources[host_id]` e deja noua conexiune, deci `was_current` iese False şi
+        # `on_detached` NU rulează. Hub-urile rămân `attached=True`, iar reconcile-ul noii
+        # conexiuni face `ensure_attached` = no-op → sesiunile vii nu se re-ataşează niciodată:
+        # agentul e conectat, dar terminalele deschise îngheaţă. Raportat pe un server cu 2 WAN-uri,
+        # unde reconectarea peste celălalt WAN suprascrie conexiunea înainte ca vechea să moară.
+        # Detaşăm explicit, ca reconcile-ul noii conexiuni să le re-ataşeze curat pe noua sursă.
+        detach_host_hubs(host_id)
     return conn
 
 

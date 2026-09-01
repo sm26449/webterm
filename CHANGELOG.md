@@ -7,6 +7,29 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [2.0.13] — 2026-09-02 · agent (45)
+
+Gateway only: the agent is unchanged at 45, nothing in the fleet needs updating.
+
+### Fixed — a dual-WAN host's reconnect froze its open terminals
+
+- On a server with two WANs, the agent re-connects over the second WAN before the first
+  connection is detected as dead, so the gateway *supersedes* the old connection with the
+  new one. The old connection's teardown then runs a tick later — after the registry
+  already points at the new connection — so its `was_current` check is false and it skips
+  detaching the hubs. They stay marked attached, the new connection's re-attach is a no-op,
+  and the live sessions are never handed to the new transport: the agent shows connected
+  but every open terminal is frozen, while new sessions work. `register_agent` now detaches
+  the host's hubs on any supersede, so the reconnecting agent re-attaches them cleanly.
+  Restarting the gateway (this upgrade) also recovers already-frozen sessions — no need to
+  close anything.
+
+- And the "repeated agent replacements — two machines share this token" alert no longer
+  fires for a pinned host: the anti-clone fence already refuses a different machine, so a
+  supersede on a pinned host is the same machine reconnecting (dual-WAN or a fast reconnect),
+  not a shared token. The alert stays for unpinned hosts, where two machines really can
+  alternate. Dual-WAN redundancy is now a supported, quiet setup.
+
 ## [2.0.12] — 2026-08-29 · agent (45)
 
 Gateway and interface only: the agent is unchanged at 45, nothing in the fleet needs updating.
