@@ -827,6 +827,14 @@ function MainApp() {
             onHome={() => navigate(null)}
             onSelect={(sid) => { setPendingSearch(null); navigate(sid) }}
             onClose={closeTab}
+            onReorder={(order) => {
+              // drag & drop = control manual: fixăm ordinea DRAG-uită şi comutăm pe „manual"
+              // (altfel sortarea pe activitate ar re-muta tab-ul imediat). Păstrăm la coadă
+              // eventualele tab-uri deschise a căror sesiune încă nu s-a încărcat (nu-s în
+              // ordinea afişată), ca să nu le pierdem.
+              setTabSort('manual')
+              setOpenTabs((prev) => [...order, ...prev.filter((sid) => !order.includes(sid))])
+            }}
           />
         )}
       <main className="wt-main flex min-h-0 min-w-0 flex-1">

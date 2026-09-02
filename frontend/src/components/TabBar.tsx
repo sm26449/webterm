@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { isSessionLive, Host, Session } from '../lib/api'
 import { hostColor } from '../lib/host'
 import { useI18n } from '../lib/i18n'
@@ -16,8 +17,27 @@ export default function TabBar(props: {
   onHome: () => void
   onSelect: (sid: string) => void
   onClose: (sid: string) => void
+  /** noua ordine a tab-urilor după drag & drop (App o persistă + comută pe „manual") */
+  onReorder: (orderedSids: string[]) => void
 }) {
   const { t } = useI18n()
+  // drag & drop pentru reordonarea manuală: `drag` = tab-ul mutat, `over` = ţinta curentă
+  const [drag, setDrag] = useState<string | null>(null)
+  const [over, setOver] = useState<string | null>(null)
+
+  const drop = () => {
+    if (drag && over && drag !== over) {
+      const order = props.tabs.map((s) => s.id)
+      const from = order.indexOf(drag)
+      const to = order.indexOf(over)
+      if (from >= 0 && to >= 0) {
+        order.splice(to, 0, order.splice(from, 1)[0])
+        props.onReorder(order)
+      }
+    }
+    setDrag(null)
+    setOver(null)
+  }
   return (
     <nav aria-label={t('tabbar.openSessions')} className="wt-tabstrip flex items-stretch gap-0.5 overflow-x-auto px-2 pt-1.5">
       <button
@@ -64,8 +84,16 @@ export default function TabBar(props: {
           return (
             <div
               key={s.id}
+              draggable
+              onDragStart={(e) => { setDrag(s.id); e.dataTransfer.effectAllowed = 'move' }}
+              onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; if (over !== s.id) setOver(s.id) }}
+              onDrop={(e) => { e.preventDefault(); drop() }}
+              onDragEnd={drop}
               style={active ? { background: `color-mix(in srgb, ${color} 18%, var(--chrome-elev))` } : undefined}
-              className={`wt-tab group mb-1.5 flex shrink-0 items-stretch rounded-lg ${active ? 'is-active' : ''}`}
+              className={`wt-tab group mb-1.5 flex shrink-0 items-stretch rounded-lg ${active ? 'is-active' : ''} ${
+                drag === s.id ? 'opacity-40' : ''} ${
+                over === s.id && drag && drag !== s.id ? 'ring-2 ring-sky-400/70' : ''} ${
+                drag ? 'cursor-grabbing' : 'cursor-grab'}`}
             >
               {/* accent vertical = identitatea host-ului (estompat când nu e activ) */}
               <span

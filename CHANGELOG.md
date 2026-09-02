@@ -7,6 +7,18 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [Unreleased]
+
+### Added — drag tabs to reorder them, and the order stays put
+
+- Tabs can now be dragged left/right into the order you want, and it persists across
+  reloads. Dragging also switches the strip to manual ordering, so the activity sort
+  (which reshuffles tabs by last use) stops moving them out from under you — the thing
+  that made a tab hard to find once you'd learned its position. The activity toggle is
+  still there when you want it; a drag just means "I'll place these myself." Verified
+  end-to-end in a real browser. (Reordering is drag-based, so it's a desktop gesture;
+  touch devices keep the manual/activity toggle.)
+
 ## [2.0.13] — 2026-09-02 · agent (45)
 
 Gateway only: the agent is unchanged at 45, nothing in the fleet needs updating.
