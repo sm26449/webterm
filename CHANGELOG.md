@@ -7,7 +7,9 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
-## [Unreleased]
+## [2.0.14] — 2026-09-02 · agent (45)
+
+Gateway and interface only: the agent is unchanged at 45, nothing in the fleet needs updating.
 
 ### Added — drag tabs to reorder them, and the order stays put
 
@@ -18,6 +20,16 @@ back.
   still there when you want it; a drag just means "I'll place these myself." Verified
   end-to-end in a real browser. (Reordering is drag-based, so it's a desktop gesture;
   touch devices keep the manual/activity toggle.)
+
+### Changed — a pinned host's IP change no longer emails, on dual-WAN
+
+- A two-WAN server's agent flaps between the two public IPs, and the gateway used to send
+  a "reconnected from a new IP" email each time (throttled to one an hour, but still noise
+  for a machine that never moved). On a pinned host the anti-clone fence already proved it
+  is the same machine, so an IP change there is just a network path — dual-WAN or DHCP, not
+  a relocation. The email is now suppressed for pinned hosts; the change is still recorded
+  in the agent event log for audit. Unpinned hosts still get the alert. Consistent with the
+  conflict-alert suppression from 2.0.13.
 
 ## [2.0.13] — 2026-09-02 · agent (45)
 

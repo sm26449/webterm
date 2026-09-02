@@ -4116,7 +4116,14 @@ async def agent_ws(ws: WebSocket):
         if row["agent_ip"]:                 # nu la primul connect, doar la o schimbare reală
             await core.record_agent_event(row["id"], "ip_change", reason="ip_nou",
                                           detail="%s → %s" % (row["agent_ip"], ip))
-            email_alerts.notify_agent_ip_change(row["name"], row["agent_ip"], ip)
+            # Email DOAR pe host nepinned. Pe un host PINNED, fence-ul a garantat că e ACEEAŞI
+            # maşină (alta ar fi fost refuzată), deci o schimbare de IP e doar rută de reţea —
+            # dual-WAN, DHCP — nu o relocare. Pe un server cu 2 WAN-uri, IP-ul pâlpâie între
+            # aceleaşi două adrese; fără garda asta primeai un email „IP nou" în fiecare oră,
+            # deşi nu s-a mutat nimic. Evenimentul rămâne în jurnal pentru audit. (Consecvent
+            # cu suprimarea alarmei de conflict pe hosturi pinned.)
+            if not row["instance_id"]:
+                email_alerts.notify_agent_ip_change(row["name"], row["agent_ip"], ip)
         await db.execute("UPDATE hosts SET agent_ip=? WHERE id=?", ip, row["id"])
     await ws.accept()
     # `pinned` = fence-ul anti-clonă e activ (instance_id fixat). Un supersede pe un host pinned
