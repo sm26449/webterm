@@ -7,6 +7,19 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [2.0.16] — 2026-09-03 · agent (47)
+
+### Fixed — a very old tmux rejected the agent's config (`bad key: None`), agent 47
+
+- On an older host the tmux config printed `tmux.conf:2: bad key: None` and other errors:
+  `set -g prefix None`, `mouse on`, `set-clipboard`, and `focus-events` were all introduced
+  in tmux 2.1 (2015), and an older tmux rejects them. tmux carries on past the errors so the
+  session still worked, but with noise and with Ctrl-B still grabbed as the prefix. The agent
+  now detects the tmux version (`tmux -V`) and emits those options only on 2.1+, keeping the
+  universally-valid ones (`default-shell`, `history-limit`, …) everywhere — so the essential
+  behaviour, including the correct login shell, still applies on old tmux, with no errors.
+  Guarded by a test that checks version parsing and the config on both old and modern tmux.
+
 ## [2.0.15] — 2026-09-03 · agent (46)
 
 The agent moved to 46 — reinstall or let it auto-update; older hosts crash-looping on the f_fsid error need a reinstall.

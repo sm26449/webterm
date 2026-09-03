@@ -42,7 +42,7 @@ import termios
 import threading
 import time
 
-AGENT_VERSION = 46
+AGENT_VERSION = 47
 
 # Sub atâtea secunde de valabilitate, un certificat se roteşte prea des ca un pin pe el să
 # însemne altceva decât o cădere programată. 48h: peste ce emite un CA intern (12h la Caddy),
@@ -380,13 +380,55 @@ def _login_shell() -> str:
     return "/bin/bash" if usable("/bin/bash") else "/bin/sh"
 
 
-TMUX_EXTRA_OPTIONS = [
+def _tmux_version():
+    """(major, minor) al tmux-ului instalat, sau None dacă lipseşte / nu-l putem parsa.
+
+    Folosit ca să NU emitem în config opţiuni introduse abia în tmux 2.1 (2015) pe un tmux mai
+    vechi, care le respinge: pe un server vechi (2026-09) config-ul dădea
+    `tmux.conf:2: bad key: None` la `set -g prefix None`, iar `mouse on` / `set-clipboard` /
+    `focus-events` ar fi eşuat la fel. tmux CONTINUĂ peste erori (sesiunea porneşte), dar
+    afişează zgomotul şi lasă prefixul pe Ctrl-B. Gate-ul le păstrează doar unde funcţionează."""
+    if not TMUX_BIN:
+        return None
+    try:
+        out = subprocess.run([TMUX_BIN, "-V"], stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL, timeout=5).stdout.decode("ascii", "replace")
+    except (OSError, subprocess.SubprocessError):
+        return None
+    num = ""                                   # „tmux 3.4" / „tmux 2.1a" / „tmux next-3.5"
+    for ch in out:
+        if ch.isdigit() or ch == ".":
+            num += ch
+        elif num:
+            break
+    parts = num.split(".")
+    if parts and parts[0].isdigit():
+        return (int(parts[0]), int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0)
+    return None
+
+
+_TMUX_VER = _tmux_version()
+# None = tmux absent (backend pty, config nefolosit) sau versiune neparsabilă → tratăm ca modern.
+# Praguri SEPARATE, fiindcă opţiunile au apărut în versiuni diferite:
+#  · 2.1 (2015): mouse-ul unificat (`mouse on`), plus clipboard/focus (de fapt mai vechi).
+#  · `prefix None` (fără prefix, pass-through pentru Ctrl-B): NU e valid pe 2.1 — un server
+#    real cu tmux 2.1 dă `bad key: None`. Numele de tastă „None" e recunoscut abia de la 2.4
+#    (rescrierea parserului de taste). Prag conservator: versiunile 2.1–2.3 rămân cu Ctrl-B
+#    (degradare minoră, ZERO erori) în loc să rişte `bad key`.
+_TMUX_HAS_21 = _TMUX_VER is None or _TMUX_VER >= (2, 1)
+_TMUX_HAS_NONE_KEY = _TMUX_VER is None or _TMUX_VER >= (2, 4)
+
+# Opţiuni valide pe orice tmux rezonabil (shell/istoric/comportament de bază).
+_TMUX_BASE_OPTIONS = [
     ("default-shell", _login_shell()),
     ("history-limit", "50000"),
     ("escape-time", "0"),
     ("destroy-unattached", "off"),
     ("detach-on-destroy", "on"),
     ("status", "off"),
+]
+# Introduse în tmux 2.1: mouse-ul unificat, plus clipboard/focus. Doar pe 2.1+.
+_TMUX_21_OPTIONS = [
     ("mouse", "on"),
     ("set-clipboard", "on"),
     # focus-events: retransmite CSI I/O (focus in/out de la xterm.js) catre
@@ -396,6 +438,9 @@ TMUX_EXTRA_OPTIONS = [
     # frontend-ul are un handler OSC52 propriu care accepta orice destinatie
     ("terminal-overrides", ",*:Ms=\\E]52;%p1%s;%p2%s\\007"),
 ]
+TMUX_EXTRA_OPTIONS = _TMUX_BASE_OPTIONS + (_TMUX_21_OPTIONS if _TMUX_HAS_21 else [])
+
+
 # tmux foloseşte quoting stil-shell în conf: o apostrofă în valoare (ex. un shell din
 # passwd cu ' în cale) ar rupe linia. `_login_shell` respinge deja nologin/false, dar
 # escapăm defensiv oricum — ieftin, şi închide orice injectare printr-o valoare cu ' .
@@ -405,7 +450,7 @@ def _tmux_q(v):
 
 TMUX_CONF_CONTENT = (
     'set -g default-terminal "xterm-256color"\n'
-    "set -g prefix None\n"
+    + ("set -g prefix None\n" if _TMUX_HAS_NONE_KEY else "")
     + "".join("set -g %s %s\n" % (k, _tmux_q(v)) for k, v in TMUX_EXTRA_OPTIONS)
 )
 

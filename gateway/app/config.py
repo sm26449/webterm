@@ -22,7 +22,7 @@ def _str(name, default):
     return (os.environ.get(name) or "").strip() or default
 
 
-GATEWAY_VERSION = "2.0.15"
+GATEWAY_VERSION = "2.0.16"
 
 # Referința imaginii care rulează (setată la deploy prin compose), afișată în UI
 # ca să știi mereu ce versiune e live. Gol în dev (rulare din surse).

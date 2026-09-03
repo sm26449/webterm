@@ -103,6 +103,48 @@ try:
 finally:
     os.statvfs = _real_statvfs
 
+# ============ tmux vechi: opţiunile 2.1+ nu ajung în config ============
+# Bug real (server vechi, 2026-09-03): `set -g prefix None` (şi `mouse`/`set-clipboard`)
+# sunt din tmux 2.1; un tmux mai vechi le respinge → `tmux.conf:2: bad key: None`. Gate pe
+# versiune: pe < 2.1 emitem doar opţiunile de bază, dar PĂSTRĂM `default-shell` (altfel s-ar
+# reîntoarce bug-ul cu shell-ul din cron). Verificăm parsarea versiunii şi conţinutul config-ului.
+
+
+def _conf_for(version_bytes):
+    _orig = ptyd.subprocess.run
+    ptyd.subprocess.run = lambda *a, **k: type("R", (), {"stdout": version_bytes})()
+    try:
+        v = ptyd._tmux_version()
+        has21 = v is None or v >= (2, 1)
+        hasnone = v is None or v >= (2, 4)
+        conf = ('set -g default-terminal "xterm-256color"\n'
+                + ("set -g prefix None\n" if hasnone else "")
+                + "".join("set -g %s %s\n" % (k, ptyd._tmux_q(val))
+                          for k, val in (ptyd._TMUX_BASE_OPTIONS
+                                         + (ptyd._TMUX_21_OPTIONS if has21 else []))))
+        return v, conf
+    finally:
+        ptyd.subprocess.run = _orig
+
+
+check("_tmux_version parsează 'tmux 3.4'", _conf_for(b"tmux 3.4\n")[0] == (3, 4))
+check("_tmux_version parsează 'tmux 2.1a'", _conf_for(b"tmux 2.1a\n")[0] == (2, 1))
+check("_tmux_version parsează 'tmux next-3.5'", _conf_for(b"tmux next-3.5\n")[0] == (3, 5))
+# tmux 2.1 (fix cazul mailer): acceptă `mouse`, dar RESPINGE `prefix None` (bad key)
+_v21, _c21 = _conf_for(b"tmux 2.1\n")
+check("tmux 2.1: config FĂRĂ 'prefix None' (cazul mailer — fără bad key)", "prefix None" not in _c21)
+check("tmux 2.1: config CU 'mouse' (valid pe 2.1)", "mouse" in _c21)
+check("tmux 2.1: config PĂSTREAZĂ 'default-shell'", "default-shell" in _c21)
+# tmux 2.0: nici mouse, nici prefix None
+_v20, _c20 = _conf_for(b"tmux 2.0\n")
+check("tmux 2.0: config FĂRĂ 'prefix None' şi FĂRĂ 'mouse'",
+      "prefix None" not in _c20 and "mouse" not in _c20)
+check("tmux 2.0: config PĂSTREAZĂ 'default-shell' (nu reintroduce bug-ul cron)",
+      "default-shell" in _c20)
+# tmux 2.4+ / modern: config complet
+_v34, _c34 = _conf_for(b"tmux 3.4\n")
+check("tmux 3.4: config CU 'prefix None' şi 'mouse'", "prefix None" in _c34 and "mouse" in _c34)
+
 # ============ _login_shell: nologin/false din passwd NU devin default-shell ============
 # Audit 2026-08: un cont de serviciu are `/usr/sbin/nologin` în passwd — există, e
 # executabil, trece testele de fişier, dar fiecare sesiune nouă ar muri instant.
