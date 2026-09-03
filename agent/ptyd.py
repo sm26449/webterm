@@ -42,7 +42,7 @@ import termios
 import threading
 import time
 
-AGENT_VERSION = 45
+AGENT_VERSION = 46
 
 # Sub atâtea secunde de valabilitate, un certificat se roteşte prea des ca un pin pe el să
 # însemne altceva decât o cădere programată. 48h: peste ce emite un CA intern (12h la Caddy),
@@ -549,9 +549,21 @@ class Metrics:
             # dintr-o funcţie chemată la fiecare heartbeat, negardat. Metrica lipsă e o
             # neplăcere; agentul căzut e o pană.
             total = st.f_blocks * st.f_frsize
-            if total <= 0 or (st.f_fsid, st.f_blocks) in seen:
+            if total <= 0:
                 continue
-            seen.add((st.f_fsid, st.f_blocks))
+            # Dedup DOUĂ căi pe ACELAŞI filesystem prin device-id (`os.stat().st_dev`), NU prin
+            # `f_fsid`: acela lipseşte pe `os.statvfs_result` din Python-uri mai vechi — agentul
+            # crăpa la conectare pe un server vechi cu `AttributeError: ... has no attribute
+            # 'f_fsid'`, deci nu pornea deloc — ŞI e 0 pe multe filesystem-uri Linux, deci nici
+            # n-ar fi deduplicat corect. `st_dev` e mereu disponibil şi identifică unic fs-ul.
+            try:
+                dev = os.stat(path).st_dev
+            except OSError:
+                dev = None
+            if dev is not None and dev in seen:
+                continue
+            if dev is not None:
+                seen.add(dev)
             used = (st.f_blocks - st.f_bavail) * st.f_frsize
             if best is None or used / total > best[1] / best[0]:
                 best = (total, used)

@@ -86,6 +86,23 @@ check("G1 stale → hung", ptyd.agent_hung() is True)
 
 check("AGENT_VERSION bumped (>=20)", ptyd.AGENT_VERSION >= 20, ptyd.AGENT_VERSION)
 
+# ============ metrics.sample(): fără f_fsid, ca pe Python-uri vechi ============
+# Bug real (server vechi, 2026-09-03): samplerul deduplica filesystem-urile prin `st.f_fsid`,
+# dar `os.statvfs_result` din Python-uri mai vechi NU are câmpul → AttributeError la
+# conectare, agentul nu pornea deloc. Acum dedup pe `st_dev`. Simulăm statvfs FĂRĂ f_fsid.
+import collections  # noqa: E402
+_m = ptyd.Metrics().sample()
+check("sample() întoarce metrici de disc", "disk_total" in _m and "disk_used" in _m, str(_m.keys()))
+_Fake = collections.namedtuple(
+    "_Fake", "f_bsize f_frsize f_blocks f_bfree f_bavail f_files f_ffree f_favail f_flag f_namemax")
+_real_statvfs = os.statvfs
+os.statvfs = lambda p: _Fake(*(getattr(_real_statvfs(p), f) for f in _Fake._fields))
+try:
+    _m2 = ptyd.Metrics().sample()
+    check("sample() nu crapă cu statvfs FĂRĂ f_fsid (Python vechi)", "disk_total" in _m2, str(_m2.keys()))
+finally:
+    os.statvfs = _real_statvfs
+
 # ============ _login_shell: nologin/false din passwd NU devin default-shell ============
 # Audit 2026-08: un cont de serviciu are `/usr/sbin/nologin` în passwd — există, e
 # executabil, trece testele de fişier, dar fiecare sesiune nouă ar muri instant.

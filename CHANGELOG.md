@@ -7,6 +7,22 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [2.0.15] — 2026-09-03 · agent (46)
+
+The agent moved to 46 — reinstall or let it auto-update; older hosts crash-looping on the f_fsid error need a reinstall.
+
+### Fixed — the agent crashed on connect on older Python (no `f_fsid`), agent 46
+
+- On an older server the agent died the moment it connected, with
+  `AttributeError: 'os.statvfs_result' object has no attribute 'f_fsid'`, and never
+  started at all. The disk-metrics sampler deduplicated the two filesystems it reports
+  (`/` and `~/.webterm`) by `st.f_fsid` — a field older Python builds don't expose on the
+  statvfs result (and one that is 0 on many Linux filesystems anyway, so it wouldn't have
+  deduplicated correctly). It now keys on `os.stat().st_dev`, which every Python and
+  platform provides and which uniquely identifies a filesystem. Reproduced by sampling
+  through a statvfs result stripped of `f_fsid`, and guarded by a test. Reinstall the agent
+  on any host where it was crash-looping on this.
+
 ## [2.0.14] — 2026-09-02 · agent (45)
 
 Gateway and interface only: the agent is unchanged at 45, nothing in the fleet needs updating.
