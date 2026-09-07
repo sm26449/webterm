@@ -534,6 +534,13 @@ export default function SessionView(props: {
       const semi = data.indexOf(';')
       const payload = semi >= 0 ? data.slice(semi + 1) : data
       if (payload === '?') return true // cererile de citire nu se onorează
+      // ISTORICUL rejucat NU e o acțiune live (la fel ca marcajele OSC 133 de mai sus): la
+      // resync-ul de schimbare de tab, transcriptul poate conține un OSC 52 VECHI (o selecție
+      // anterioară). Rejucat, el ar suprascrie clipboardul cu valoarea veche — exact simptomul
+      // „între taburi rămâne valoarea veche în loc de cea nouă". Iar poarta de input de mai jos
+      // NU-l prinde: schimbarea tabului e ea însăși input proaspăt, deci fereastra de 10s e
+      // deschisă fix când se rejoacă istoricul. Îl ignorăm cât scriem replay-ul.
+      if (replayRef.current) return true
       // Doar ca urmare a unei acțiuni recente a operatorului (selecție cu mouse-ul
       // / tastare). Fără poarta asta, orice output al hostului (`cat` la un fișier
       // ostil, un program compromis) poate suprascrie clipboardul cu, de ex.,

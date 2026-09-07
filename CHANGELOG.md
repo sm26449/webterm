@@ -7,6 +7,23 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [2.0.17] — 2026-09-07 · agent (47)
+
+Gateway and interface only: the agent is unchanged at 47, nothing in the fleet needs updating.
+
+### Fixed — switching tabs could revert the clipboard to an old selection
+
+- Copy something, switch to another session tab, and paste — and you'd sometimes get an
+  earlier value instead of what you just copied. On tab switch the gateway replays the
+  session transcript, and a terminal that had emitted an OSC 52 clipboard write (a tmux
+  mouse selection, `set-clipboard on`) has that sequence in its history. The replay
+  re-ran it, and because switching tabs is itself fresh input, the 10-second anti-hijack
+  window was open exactly then — so the stale selection overwrote the clipboard. The OSC 52
+  handler now ignores sequences that arrive during history replay (the same guard the OSC
+  133 command tracker already uses), so only a live selection writes the clipboard. The
+  anti-hijack window for live output is unchanged. Both directions verified end-to-end in a
+  real browser (without the guard the clipboard reverts; with it, it keeps the new value).
+
 ## [2.0.16] — 2026-09-03 · agent (47)
 
 ### Fixed — a very old tmux rejected the agent's config (`bad key: None`), agent 47
