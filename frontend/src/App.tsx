@@ -17,6 +17,7 @@ import Sidebar from './components/Sidebar'
 import SessionView from './components/SessionView'
 import TabBar from './components/TabBar'
 import Toasts, { ToastItem } from './components/Toasts'
+import CopyToast from './components/CopyToast'
 import { errText, api, AppState, Host, Session, Snippet, setStepupHandler } from './lib/api'
 import { hostAt } from './lib/host'
 import { useI18n } from './lib/i18n'
@@ -964,6 +965,7 @@ function MainApp() {
       {/* anunțuri pentru cititoarele de ecran (schimbare de tab / context) */}
       <div aria-live="polite" className="sr-only">{srAnnounce}</div>
       <Toasts items={toasts} onDismiss={(id) => setToasts((t) => t.filter((x) => x.id !== id))} />
+      <CopyToast />
       {gwFails >= 2 && (
         <div className="fixed left-1/2 top-3 z-50 flex -translate-x-1/2 items-center gap-2 rounded-full border border-rose-500/40 bg-ink-900 px-4 py-1.5 text-sm text-slate-200 shadow-2xl">
           <span className="wt-danger font-medium">

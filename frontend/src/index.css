@@ -419,3 +419,16 @@ textarea {
     transition-duration: 0.001ms !important;
   }
 }
+
+/* Toast de copiere: apariţie/dispariţie lină, subtilă. Reduced-motion → doar opacitate,
+   fără translaţie (regula globală de mai sus scurtează oricum durata). */
+.wt-copytoast-on {
+  opacity: 1;
+  transform: translate(-50%, 0);
+  transition: opacity 120ms ease-out, transform 120ms ease-out;
+}
+.wt-copytoast-off {
+  opacity: 0;
+  transform: translate(-50%, 6px);
+  transition: opacity 260ms ease-in, transform 260ms ease-in;
+}

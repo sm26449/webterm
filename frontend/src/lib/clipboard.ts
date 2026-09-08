@@ -13,10 +13,13 @@
    în toate browserele. De aceea `readText` întoarce null, iar apelantul trebuie să spună
    utilizatorului că poate lipi cu tastatura (Ctrl+V ajunge la xterm oricum). */
 
+import { showCopyToast } from './copytoast'
+
 export async function copyText(text: string): Promise<boolean> {
   try {
     if (navigator.clipboard?.writeText) {
       await navigator.clipboard.writeText(text)
+      showCopyToast()
       return true
     }
   } catch {
@@ -34,6 +37,7 @@ export async function copyText(text: string): Promise<boolean> {
     ta.setSelectionRange(0, text.length)
     const ok = document.execCommand('copy')
     document.body.removeChild(ta)
+    if (ok) showCopyToast()
     return ok
   } catch {
     return false

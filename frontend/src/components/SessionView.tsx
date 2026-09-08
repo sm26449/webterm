@@ -17,13 +17,15 @@ import CommandsPanel from './CommandsPanel'
 import FilePanel from './FilePanel'
 import GitPanel from './GitPanel'
 import ForwardsPanel from './ForwardsPanel'
-import { CopyIcon, ExternalLinkIcon, FilesIcon, ForwardIcon, GitBranchIcon, LinkIcon, MoreIcon, NoteIcon, PasteIcon, PencilIcon, PopoutIcon, SearchIcon, StopIcon, TrashIcon } from './Icons'
+import { ClockIcon, CopyIcon, ExternalLinkIcon, FilesIcon, ForwardIcon, GitBranchIcon, LinkIcon, MoreIcon, NoteIcon, PasteIcon, PencilIcon, PopoutIcon, SearchIcon, StopIcon, TrashIcon } from './Icons'
 import MobileKeybar from './MobileKeybar'
 import SnippetsMenu from './SnippetsMenu'
 import TranscriptPlayer from './TranscriptPlayer'
 import { shortcutFor } from '../lib/shortcuts'
 import StatusBar from './StatusBar'
 import { copyText, readText } from '../lib/clipboard'
+import { copySession, history as clipHistory } from '../lib/cliphistory'
+import PastePicker from './PastePicker'
 import { notify } from '../lib/notify'
 
 type ConnState = 'connecting' | 'open' | 'reconnecting' | 'ended'
@@ -267,6 +269,8 @@ export default function SessionView(props: {
     return () => clearTimeout(t)
   }, [replaying])
   const [moreOpen, setMoreOpen] = useState(false)
+  // paste picker: history-ul de clipboard al ACESTUI terminal (Cmd+Shift+V) — vezi lib/cliphistory
+  const [pasteItems, setPasteItems] = useState<string[] | null>(null)
   // meniul „Linkuri": URL-urile din buffer, extrase la deschidere (nu continuu) — vezi lib/urls
   const [linksOpen, setLinksOpen] = useState(false)
   const [links, setLinks] = useState<string[]>([])
@@ -549,7 +553,7 @@ export default function SessionView(props: {
       if (payload.length > 200000) return true
       try {
         const bytes = Uint8Array.from(atob(payload), (ch) => ch.charCodeAt(0))
-        copyText(new TextDecoder().decode(bytes))
+        copySession(session.id, new TextDecoder().decode(bytes))
       } catch {
         /* base64 invalid: ignoră */
       }
@@ -640,8 +644,14 @@ export default function SessionView(props: {
           term.clearSelection()
           return true
         }
-        copyText(sel).then(flashCopied)
+        copySession(session.id, sel).then(flashCopied)
         term.clearSelection()
+        return false
+      }
+      // Cmd/Ctrl+Shift+V: paste picker din history-ul ACESTUI terminal. Cmd+V simplu rămâne
+      // paste normal (nu-l interceptăm — lipirea a ceva copiat din alt app trebuie să meargă).
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'v' || e.key === 'V')) {
+        openPastePicker()
         return false
       }
       return true
@@ -656,7 +666,7 @@ export default function SessionView(props: {
       if (e.button !== 0) return
       const sel = term.getSelection()
       if (sel) {
-        copyText(sel).then(flashCopied)
+        copySession(session.id, sel).then(flashCopied)
         lastCopiedRef.current = sel
       }
     }
@@ -1105,7 +1115,7 @@ export default function SessionView(props: {
   async function copySelection() {
     const sel = termRef.current?.getSelection()
     if (sel) {
-      if (await copyText(sel)) {
+      if (await copySession(session.id, sel)) {
         setCopied(true)
         setTimeout(() => setCopied(false), 1200)
       }
@@ -1146,7 +1156,7 @@ export default function SessionView(props: {
     if (!text) return
     // plafon de dimensiune, ca la OSC 52: un output uriaș nu trebuie să umple
     // clipboardul cu megaocteți dintr-un singur click
-    if (await copyText(text.slice(0, 200_000))) {
+    if (await copySession(session.id, text.slice(0, 200_000))) {
       setCopied(true)
       setTimeout(() => setCopied(false), 1200)
     }
@@ -1166,7 +1176,7 @@ export default function SessionView(props: {
   }
 
   const copyCommand = async (c: Command) => {
-    flashCopied(await copyText(c.text))
+    flashCopied(await copySession(session.id, c.text))
   }
 
   // „Ca markdown": comandă + output + exit/durată, gata de lipit într-un ticket/chat.
@@ -1176,7 +1186,7 @@ export default function SessionView(props: {
       .filter(Boolean).join(' · ')
     const body = out == null ? t('session.outputUnavailable') : out.slice(0, 200_000).replace(/\n+$/, '')
     const md = '```console\n$ ' + c.text + (meta ? `   # ${meta}` : '') + '\n' + body + '\n```\n'
-    flashCopied(await copyText(md))
+    flashCopied(await copySession(session.id, md))
   }
 
   /** Instalează integrarea shell RULÂND comanda în sesiunea curentă: o vezi
@@ -1209,6 +1219,20 @@ export default function SessionView(props: {
     // bracketed paste (\x1b[200~…) — altfel un paste multi-linie execută
     // fiecare linie imediat în shell și strică indentarea în vim/nano
     if (text) termRef.current?.paste(text)
+    termRef.current?.focus()
+  }
+
+  // paste picker: deschidem cu un SNAPSHOT al history-ului sesiunii (nu live, ca lista să nu
+  // sară sub degete cât alegi). Închiderea = null.
+  function openPastePicker() {
+    setPasteItems(clipHistory(session.id))
+  }
+  function pasteFromHistory(text: string, run: boolean) {
+    setPasteItems(null)
+    // bracketed paste (ca `paste()`): multi-linie rămâne inert. „run" adaugă Enter DUPĂ,
+    // deliberat separat, ca auto-execuţia să fie o alegere, nu implicit.
+    termRef.current?.paste(text)
+    if (run) send('\r')
     termRef.current?.focus()
   }
 
@@ -1327,6 +1351,7 @@ export default function SessionView(props: {
             </span>
           )}
           <ToolButton title={t('session.paste')} onClick={paste}><PasteIcon /></ToolButton>
+          <ToolButton title={t('paste.fromHistoryTitle', { shortcut: shortcutFor('pastePicker') })} active={pasteItems !== null} onClick={openPastePicker}><ClockIcon /></ToolButton>
 
           {/* Secundar: inline doar pe ecrane mari. Pe tablete (iPad Mini/Pro),
               zece butoane × 44px (ținte tactile) depășeau lățimea — trec în ⋯. */}
@@ -1458,6 +1483,14 @@ export default function SessionView(props: {
       {/* Meniul „Linkuri": URL-urile din buffer, clicabile în afara terminalului (merge sub
           mouse-mode, unde clicul e capturat de aplicaţie, şi pe mobil, unde un URL rupt e greu
           de nimerit). Deschide într-un tab nou (noopener) sau copiază. */}
+      {pasteItems !== null && (
+        <PastePicker
+          items={pasteItems}
+          onPaste={(txt) => pasteFromHistory(txt, false)}
+          onPasteRun={(txt) => pasteFromHistory(txt, true)}
+          onClose={() => setPasteItems(null)}
+        />
+      )}
       {linksOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
              onClick={() => setLinksOpen(false)}>
@@ -1481,7 +1514,7 @@ export default function SessionView(props: {
                           {u}
                         </a>
                         <button title={t('session.copyLink')}
-                                onClick={async () => flashCopied(await copyText(u))}
+                                onClick={async () => flashCopied(await copySession(session.id, u))}
                                 className="shrink-0 rounded-md px-2 py-1.5 text-slate-400 hover:bg-ink-800">
                           <CopyIcon />
                         </button>
@@ -1778,6 +1811,11 @@ export default function SessionView(props: {
             {isLive && (
               <MoreItem onClick={() => { paste(); setCtxMenu(null) }}>
                 <PasteIcon /> {t('session.pasteMenu')}
+              </MoreItem>
+            )}
+            {isLive && (
+              <MoreItem onClick={() => { openPastePicker(); setCtxMenu(null) }}>
+                <PasteIcon /> {t('paste.fromHistory')}
               </MoreItem>
             )}
             <MoreItem onClick={() => { termRef.current?.selectAll(); setCtxMenu(null) }}>

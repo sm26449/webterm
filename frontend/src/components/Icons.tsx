@@ -251,6 +251,15 @@ export const LinkIcon = () => (
   </svg>
 )
 
+// history de clipboard (ceas cu săgeată înapoi) — paste picker
+export const ClockIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M3 3v5h5" />
+    <path d="M3.05 13a9 9 0 1 0 2.6-6.4L3 8" />
+    <path d="M12 7v5l3 2" />
+  </svg>
+)
+
 // distinct de LinkIcon (chain, folosit la Share): „deschide linkuri din terminal"
 export const ExternalLinkIcon = () => (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">

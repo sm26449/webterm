@@ -11,7 +11,7 @@
 export type ShortcutId =
   | 'palette' | 'help' | 'search' | 'closeTab' | 'reopenTab'
   | 'nextTab' | 'prevTab' | 'split' | 'popout'
-  | 'fontUp' | 'fontDown' | 'snippets' | 'focusSidebar' | 'home'
+  | 'fontUp' | 'fontDown' | 'snippets' | 'focusSidebar' | 'home' | 'pastePicker'
 
 export interface Shortcut {
   id: ShortcutId
@@ -53,6 +53,10 @@ export const SHORTCUTS: Shortcut[] = [
     match: (e) => (e.code === 'Minus' || e.code === 'NumpadSubtract') && altOnly(e) },
   { id: 'snippets', keys: 'Alt+S', group: 'session',
     match: (e) => e.code === 'KeyS' && altOnly(e) },
+  { id: 'pastePicker', keys: 'Mod+Shift+V', group: 'session',
+    // gestionat direct în handler-ul terminalului (attachCustomKeyEventHandler), aici doar
+    // pentru afişarea în lista de scurtături/ajutor
+    match: (e) => e.code === 'KeyV' && mod(e) && e.shiftKey && noAlt(e) },
   { id: 'focusSidebar', keys: '/', group: 'app',
     match: (e) => e.key === '/' && !mod(e) && !e.altKey },
   { id: 'home', keys: 'Alt+0', group: 'nav',

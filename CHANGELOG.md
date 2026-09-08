@@ -7,6 +7,33 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [2.0.18] — 2026-09-08 · agent (47)
+
+Gateway and interface only: the agent is unchanged at 47, nothing in the fleet needs updating.
+
+### Added — copy feedback and a per-terminal clipboard history with a paste picker
+
+- Every copy now shows a brief "Copied" toast — a single subtle pill, bottom-centre, that
+  fades on its own and never stacks. It fires on all copy paths, including a tmux mouse
+  selection (OSC 52), which previously gave no feedback at all.
+
+- Each terminal keeps its own clipboard history: everything you copied *in that terminal*,
+  newest first, deduplicated, capped. Open the paste picker with Cmd/Ctrl+Shift+V (or the
+  toolbar button / right-click) to browse it — ↑↓ to move, Enter to paste, click to paste.
+  Entry #1 is your last copy and is preselected, so Cmd+Shift+V then Enter re-pastes the
+  last thing. Plain Cmd/Ctrl+V is untouched — it still pastes the real system clipboard, so
+  pasting something copied from another app keeps working.
+
+- Pasting from the picker uses bracketed paste (multi-line stays inert — no accidental
+  execution). "Paste & run" (the ⏎ button, or Shift+Enter) pastes *and* presses Enter — an
+  explicit, clearly-labelled action, opt-in only, because auto-running pasted content is
+  exactly what bracketed paste exists to prevent.
+
+- The history is in-memory only, never written to disk or localStorage: the clipboard
+  routinely holds passwords and tokens, so a persisted history would be a recoverable
+  secret store. It clears on reload — the right trade-off for an infrastructure tool.
+  Verified end-to-end in a real browser.
+
 ## [2.0.17] — 2026-09-07 · agent (47)
 
 Gateway and interface only: the agent is unchanged at 47, nothing in the fleet needs updating.
