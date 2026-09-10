@@ -44,6 +44,8 @@ ONLY="${*:-all}"   # unul sau mai mulţi paşi: `ci-local.sh e2e a11y`
 PY="${PY:-python3}"
 RUFF="${RUFF:-$(dirname "$PY")/ruff}"
 [ -x "$RUFF" ] || RUFF=ruff
+PIPAUDIT="${PIPAUDIT:-$(dirname "$PY")/pip-audit}"
+[ -x "$PIPAUDIT" ] || PIPAUDIT=pip-audit
 # paşi: unit sig lint build smoke e2e a11y fs fwd mobile — sau `all`
 
 pass=0; fail=0; skipped=""
@@ -74,6 +76,13 @@ if want unit; then
          "sau rulează cu PY=/cale/către/.venv/bin/python" >&2; exit 2; }
   command -v "$RUFF" >/dev/null 2>&1 || [ -x "$RUFF" ] || {
     echo "'$RUFF' lipseşte — pip install ruff (sau RUFF=/cale/către/ruff)" >&2; exit 2; }
+  # pip-audit: ca în CI, îl instalăm dacă lipseşte (poartă blocantă, nu poate fi sărită tăcut).
+  if ! command -v "$PIPAUDIT" >/dev/null 2>&1 && [ ! -x "$PIPAUDIT" ]; then
+    "$PY" -m pip install --quiet pip-audit >/dev/null 2>&1
+    PIPAUDIT="$(dirname "$PY")/pip-audit"; [ -x "$PIPAUDIT" ] || PIPAUDIT=pip-audit
+  fi
+  command -v "$PIPAUDIT" >/dev/null 2>&1 || [ -x "$PIPAUDIT" ] || {
+    echo "'$PIPAUDIT' lipseşte şi n-am putut instala pip-audit — pip install pip-audit" >&2; exit 2; }
 fi
 for prt in $P1 $P2; do
   case " $ONLY " in *" all "*|*" smoke "*|*" e2e "*|*" a11y "*|*" fs "*|*" fwd "*|*" mobile "*)
@@ -131,10 +140,25 @@ PINS=$(cd "$REPO" && grep -rhn 'ghcr\.io/[^ }"]*/webterm:[^ }"]*' \
 "$PY" "$REPO/scripts/check-reqs-lock.py" >/dev/null && ok "requirements.txt ↔ .lock" || no "requirements drift"
 (cd "$REPO" && $RUFF check --select F gateway/app agent/ptyd.py >/dev/null 2>&1) \
   && ok "ruff --select F" || no "ruff --select F"
-docker run --rm -v "$REPO:/repo" \
+# gitleaks EXACT ca în CI: `--no-git` pe WORKING-TREE, nu pe istoric. Diferenţa nu e cosmetică —
+# rula pe istoric, deci un fişier NOU (încă untracked) cu un secret trecea local şi pica în CI
+# (păţit la 2.0.19: parola demo dintr-un fişier nou-adăugat). Scanăm exact setul care AJUNGE în
+# commit (tracked + untracked ne-ignorate) într-un temp, ca gitleaks --no-git să nu se apuce şi de
+# frontend/dist, .venv, node_modules (pe care nu le respectă din .gitignore → false pozitive).
+GLK=$(mktemp -d)
+( cd "$REPO" && git ls-files -z --cached --others --exclude-standard | tar --null -T - -cf - ) \
+  | tar -C "$GLK" -xf - 2>/dev/null
+docker run --rm -v "$GLK:/repo" \
   zricethezav/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
-  detect --source /repo --config /repo/.gitleaks.toml --no-banner >/dev/null 2>&1 \
-  && ok "gitleaks (istoric)" || no "gitleaks"
+  detect --source /repo --config /repo/.gitleaks.toml --no-git --no-banner >/dev/null 2>&1 \
+  && ok "gitleaks (working tree, ca CI)" || no "gitleaks — secret în fişierele de comis (rulează manual pentru detaliu)"
+rm -rf "$GLK"
+# pip-audit EXACT ca în CI (poartă blocantă): CVE-uri pe dependenţele LIVRATE (requirements.lock).
+# Lipsea din ci-local → un release trecea local şi cădea în CI pe un CVE nou (păţit la 2.0.19:
+# PyJWT 2.10.1). `--no-deps`: auditează fix versiunile din lock, nu ce s-ar rezolva „proaspăt".
+"$PIPAUDIT" --strict --no-deps -r "$REPO/gateway/requirements.lock" >/dev/null 2>&1 \
+  && ok "pip-audit (CVE dependenţe)" \
+  || no "pip-audit — CVE în requirements.lock ($PIPAUDIT --strict --no-deps -r gateway/requirements.lock)"
 (cd "$REPO" && PY="$PY" bash scripts/run-tests.sh ci >/dev/null 2>&1) \
   && ok "suita Python" || no "suita Python"
 fi
