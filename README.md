@@ -820,6 +820,7 @@ scripts/
   fs-test.sh · fwd-test.sh file operations · port forwarding (CI)
   mobile-audit.mjs         responsive audit on real devices (CI)
   smoke-boot.mjs           boot smoke test (UI starts with no JS errors)
+  sso-login.mjs            SSO login UI contract when OIDC is on (CI)
   sign-agent.py            signs the agent at release (the key stays offline)
 tests/                     unit + integration suite (dev): telnet (shim/bastion),
                           session reconciliation, agent hygiene+hardening, idle-lock,

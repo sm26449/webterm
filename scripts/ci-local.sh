@@ -18,13 +18,14 @@ REPO=${REPO:-$(cd "$(dirname "$0")/.." && pwd)}
 NM=${PW_MODULES:-$REPO/frontend/node_modules}
 PW=mcr.microsoft.com/playwright:v1.61.1-noble
 IMG=${IMG:-webterm-verify:local}
-P1=8000; P2=8001
-C1=wtci-smoke; C2=wtci-fwd
+P1=8000; P2=8001; P3=8002
+C1=wtci-smoke; C2=wtci-fwd; C3=wtci-sso
 NET=wtci-net
 # URL-ul public trebuie să fie valid ŞI din browser, ŞI din interiorul containerului:
 # butonul „Enable shell integration" rulează un curl către el ÎN container. Cu o mapare
 # 8010→8000 pe host, acel curl bate în gol şi pică exact testele OSC 133.
 BASE1="http://127.0.0.1:$P1"
+BASE3="http://127.0.0.1:$P3"
 OUT=${OUT:-/tmp/wt-ci-shots}
 # Creat AICI, înainte de orice `docker run -v "$OUT:/out"`. Dacă directorul nu există când
 # Docker îl montează, Docker îl creează el — ca root. La a doua rulare, un contribuitor care
@@ -46,14 +47,14 @@ RUFF="${RUFF:-$(dirname "$PY")/ruff}"
 [ -x "$RUFF" ] || RUFF=ruff
 PIPAUDIT="${PIPAUDIT:-$(dirname "$PY")/pip-audit}"
 [ -x "$PIPAUDIT" ] || PIPAUDIT=pip-audit
-# paşi: unit sig lint build smoke e2e a11y fs fwd mobile — sau `all`
+# paşi: unit sig lint build smoke e2e a11y fs fwd mobile sso — sau `all`
 
 pass=0; fail=0; skipped=""
 say()  { printf '\n\033[1;36m── %s ──\033[0m\n' "$*"; }
 ok()   { printf '\033[32m  ✓ %s\033[0m\n' "$*"; pass=$((pass+1)); }
 no()   { printf '\033[31m  ✗ %s\033[0m\n' "$*"; fail=$((fail+1)); }
 
-cleanup() { docker rm -f $C1 $C2 >/dev/null 2>&1 || true; docker network rm $NET >/dev/null 2>&1 || true; }
+cleanup() { docker rm -f $C1 $C2 $C3 >/dev/null 2>&1 || true; docker network rm $NET >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
 want() { case " $ONLY " in *" all "*|*" $1 "*) return 0 ;; *) return 1 ;; esac; }
@@ -84,8 +85,8 @@ if want unit; then
   command -v "$PIPAUDIT" >/dev/null 2>&1 || [ -x "$PIPAUDIT" ] || {
     echo "'$PIPAUDIT' lipseşte şi n-am putut instala pip-audit — pip install pip-audit" >&2; exit 2; }
 fi
-for prt in $P1 $P2; do
-  case " $ONLY " in *" all "*|*" smoke "*|*" e2e "*|*" a11y "*|*" fs "*|*" fwd "*|*" mobile "*)
+for prt in $P1 $P2 $P3; do
+  case " $ONLY " in *" all "*|*" smoke "*|*" e2e "*|*" a11y "*|*" fs "*|*" fwd "*|*" mobile "*|*" sso "*)
     if ss -ltn 2>/dev/null | grep -q ":$prt "; then
       echo "portul $prt e ocupat — runner-ul are nevoie de $P1 şi $P2 (vezi nota de sus)" >&2
       exit 2
@@ -291,6 +292,32 @@ say "mobile audit"
 mkdir -p "$OUT"
 pwrun scripts/mobile-audit.mjs -e SCRIPT_ARGS="$BASE1 /out" \
   && ok "mobile audit" || no "mobile audit"
+fi
+
+# ── SSO login (contract de frontend) ────────────────────────────────────────
+# Container PROPRIU, cu SSO activ (issuer dummy — butonul depinde doar de OIDC_ENABLED, nu de un
+# IdP accesibil). Backend-ul login-ului federat e acoperit de tests/oidc_test.py; aici prindem
+# regresiile de UI: butonul apare doar după cont, linkează la /api/oidc/login, break-glass păstrat.
+if want sso; then
+say "SSO login UI"
+docker rm -f $C3 >/dev/null 2>&1 || true
+docker network create $NET >/dev/null 2>&1 || true
+docker run -d --name $C3 --network $NET -p "$P3:8000" \
+  -e WEBTERM_SETUP_TOKEN=ci-e2e-token -e WEBTERM_PUBLIC_URL="$BASE3" -e WEBTERM_AGENT_INSECURE=1 \
+  -e WEBTERM_OIDC_ISSUER=http://dummy-idp.invalid/application/o/webterm/ \
+  -e WEBTERM_OIDC_CLIENT_ID=dummy -e WEBTERM_OIDC_CLIENT_SECRET=dummy \
+  -e WEBTERM_OIDC_PROVIDER_NAME=TestSSO "$IMG" >/dev/null
+_st=starting
+for _ in $(seq 1 45); do
+  _st=$(docker inspect -f '{{.State.Health.Status}}' $C3 2>/dev/null)
+  [ "$_st" = healthy ] && break; sleep 2
+done
+if [ "$_st" = healthy ]; then
+  pwrun scripts/sso-login.mjs -e SCRIPT_ARGS="$BASE3" -e SSO_PROVIDER=TestSSO \
+    && ok "SSO login UI" || no "SSO login UI"
+else
+  no "SSO container nu a devenit healthy ($_st)"; docker logs $C3 2>/dev/null | tail -15
+fi
 fi
 
 printf '\n\033[1m%d trecute, %d eșuate\033[0m\n' "$pass" "$fail"

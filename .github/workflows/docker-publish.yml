@@ -284,6 +284,34 @@ jobs:
           cp "$GITHUB_WORKSPACE/scripts/smoke-boot.mjs" .
           node smoke-boot.mjs http://127.0.0.1:8000
 
+      # Contractul de FRONTEND al SSO/OIDC: backend-ul (schimb de cod, validare id_token,
+      # provizionare, grup) e acoperit hermetic de tests/oidc_test.py; aici prindem regresiile de
+      # UI care chiar au apărut — butonul „Sign in with <provider>" apare DOAR după ce există un
+      # cont (logica setupRequired ascunde metodele federate până e creat adminul break-glass) şi
+      # linkează la /api/oidc/login. Container propriu, cu SSO activ (issuer dummy — butonul
+      # depinde doar de OIDC_ENABLED, nu de un IdP accesibil). Reutilizează Playwright din smoke.
+      - name: SSO login UI (frontend contract when OIDC is on)
+        run: |
+          docker run -d --name sso -p 8002:8000 \
+            -e WEBTERM_SETUP_TOKEN=ci-e2e-token \
+            -e WEBTERM_PUBLIC_URL=http://127.0.0.1:8002 \
+            -e WEBTERM_AGENT_INSECURE=1 \
+            -e WEBTERM_OIDC_ISSUER=http://dummy-idp.invalid/application/o/webterm/ \
+            -e WEBTERM_OIDC_CLIENT_ID=dummy \
+            -e WEBTERM_OIDC_CLIENT_SECRET=dummy \
+            -e WEBTERM_OIDC_PROVIDER_NAME=TestSSO \
+            webterm-smoke:ci
+          st=starting
+          for i in $(seq 1 45); do
+            st=$(docker inspect -f '{{.State.Health.Status}}' sso)
+            [ "$st" = healthy ] && break
+            sleep 2
+          done
+          if [ "$st" != healthy ]; then echo "SSO container status: $st"; docker logs sso; exit 1; fi
+          cd /tmp/wt-smoke
+          cp "$GITHUB_WORKSPACE/scripts/sso-login.mjs" .
+          SSO_PROVIDER=TestSSO node sso-login.mjs http://127.0.0.1:8002
+
       # E2E de sesiune (post-incidentele v1.0.11 și v1.0.15): agent REAL pornit
       # în container, sesiuni deschise prin UI, output verificat la tastare,
       # comutare de tab-uri fără panou gol, pauză+resync pe tab-ul din fundal.
