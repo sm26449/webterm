@@ -3470,6 +3470,11 @@ async def _require_host_stepup(host_id: int, user, grant: str = "", password: st
         "SELECT 1 FROM webauthn_credentials WHERE user_id=? LIMIT 1", user["id"])
     if _webauthn_available() and has_passkey:
         raise ApiError(403, "stepup.passkey", "2FA verification (passkey) required")
+    # User SSO: parola locală e blocată (nu o ştie), deci fallback-ul pe parolă n-are sens.
+    # Step-up = re-auth PROASPĂT la IdP (`/api/oidc/login?intent=stepup&host_id=...`), care
+    # deschide fereastra la callback. Frontend-ul face redirect-ul pe codul ăsta.
+    if user["sso_subject"] and config.OIDC_ENABLED:
+        raise ApiError(403, "host.needs2faSso", "re-authenticate with SSO (2FA)")
     if password and await _verify_reauth_password(user, password):
         security.open_stepup_window(user["id"], host_id)
         return
@@ -4369,6 +4374,13 @@ async def browser_ws(ws: WebSocket, sid: str):
         # Cine era deja ataşat AFLĂ că ai venit; dacă locul e nou, pleacă şi un email — ca să
         # afli şi când nu te uitai. E singurul efect al lui `known`: volum de alertă.
         await hub.announce_attach(client)
+        # Atribuire „cine a ajuns pe ce host": reataşarea pe WS NU trece prin middleware-ul de
+        # audit (nu e o cerere HTTP care schimbă ceva), deci o consemnăm explicit aici. Crearea
+        # unei sesiuni noi e deja auditată (POST /api/hosts/{id}/sessions). Împreună, jurnalul
+        # răspunde la „userul X, pe ce hosturi/sesiuni a fost" — util la debug şi pentru SSO.
+        await audit.record(time.time(), user["email"], client.remote_addr, "WS",
+                           "/ws/sessions/%s" % sid, 200,
+                           "ataşat la sesiune pe host %s" % row["host_id"])
         if not client.known:
             email_alerts.notify_session_attach(
                 row["title"], client.remote_addr, client.user_agent, user["email"])

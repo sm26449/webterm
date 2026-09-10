@@ -17,7 +17,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "gateway"))
 
-from app import api, webauthn_api  # noqa: E402
+from app import api, oidc_api, webauthn_api  # noqa: E402
 
 ok = 0
 total = 0
@@ -51,6 +51,10 @@ PUBLIC = {
     "/__wtfwd/auth": "handshake-ul de forward; validează cookie-ul de sesiune în corp",
     "/api/webauthn/login/options": "ceremonia de login cu passkey — ÎNAINTE de a avea sesiune",
     "/api/webauthn/login/verify": "idem; verifică asserţiunea şi ABIA apoi deschide sesiunea",
+    "/api/oidc/status": "spune doar dacă SSO e activ + numele providerului — ecranul de login depinde de el",
+    "/api/oidc/login": "porneşte flow-ul OIDC — ÎNAINTE de a avea sesiune (redirect la IdP)",
+    "/api/oidc/callback": ("întoarcerea de la IdP: apărată de `state` (anti-CSRF, single-use) "
+                           "şi de validarea `id_token`, nu de o sesiune existentă"),
 }
 
 
@@ -58,7 +62,7 @@ PUBLIC = {
 # doar `api.router` şi rata complet `webauthn_api.router` — adică exact suprafaţa care
 # manevrează passkey-urile şi step-up-ul 2FA, unde costul unei omisiuni e cel mai mare.
 # Un test care acoperă jumătate din suprafaţă e mai rău decât niciunul: dă senzaţia de plasă.
-ROUTERS = {"api": api.router, "webauthn_api": webauthn_api.router}
+ROUTERS = {"api": api.router, "webauthn_api": webauthn_api.router, "oidc_api": oidc_api.router}
 
 
 def main():

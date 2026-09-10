@@ -1,0 +1,105 @@
+# Stack de REFERINŢĂ: Authentik (server+worker+postgres+redis) + WebTerm, într-o singură reţea,
+# pentru evaluare/dev/testarea SSO. NU e topologia de producţie: acolo Authentik e o instanţă
+# CENTRALĂ, partajată de N deployuri WebTerm; fiecare WT primeşte doar variabilele WEBTERM_OIDC_*
+# şi pointează spre ea. Aici le punem împreună ca să poţi porni tot cu o comandă şi să vezi
+# fluxul real cap-coadă. Vezi docs/SSO.md.
+#
+#   cp .env.example .env   # setează parolele
+#   docker compose up -d
+#   # Authentik: http://localhost:9000  (admin: akadmin / <AUTHENTIK_BOOTSTRAP_PASSWORD>)
+#   # WebTerm:   http://localhost:8000
+#
+# Blueprint-ul din ./blueprints preconfigurează aplicaţia OIDC „webterm", grupul `wt-access`
+# şi un user de test, cu client_id/secret cunoscute (vezi blueprints/webterm.yaml) — deci
+# WebTerm porneşte gata legat, fără click-uri manuale în Authentik.
+
+services:
+  postgresql:
+    image: docker.io/library/postgres:16-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - pg:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: authentik
+      POSTGRES_DB: authentik
+      POSTGRES_PASSWORD: ${PG_PASS:?set PG_PASS in .env}
+
+  redis:
+    image: docker.io/library/redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - redis:/data
+
+  authentik-server:
+    image: ghcr.io/goauthentik/server:2026.8.2
+    restart: unless-stopped
+    command: server
+    environment:
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:?set AUTHENTIK_SECRET_KEY in .env}
+      AUTHENTIK_POSTGRESQL__HOST: postgresql
+      AUTHENTIK_POSTGRESQL__USER: authentik
+      AUTHENTIK_POSTGRESQL__NAME: authentik
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${PG_PASS}
+      AUTHENTIK_REDIS__HOST: redis
+      # bootstrap: creează adminul iniţial + un token de API (pentru automatizare), la prima pornire
+      AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD:?set it in .env}
+      AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:-}
+    volumes:
+      - ./blueprints:/blueprints/custom:ro
+    ports:
+      - "9000:9000"
+    depends_on:
+      postgresql: {condition: service_healthy}
+      redis: {condition: service_healthy}
+
+  authentik-worker:
+    image: ghcr.io/goauthentik/server:2026.8.2
+    restart: unless-stopped
+    command: worker
+    environment:
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY}
+      AUTHENTIK_POSTGRESQL__HOST: postgresql
+      AUTHENTIK_POSTGRESQL__USER: authentik
+      AUTHENTIK_POSTGRESQL__NAME: authentik
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${PG_PASS}
+      AUTHENTIK_REDIS__HOST: redis
+    volumes:
+      - ./blueprints:/blueprints/custom:ro
+    depends_on:
+      postgresql: {condition: service_healthy}
+      redis: {condition: service_healthy}
+
+  webterm:
+    image: ${WEBTERM_IMAGE:-ghcr.io/sm26449/webterm:v2.0.19}
+    restart: unless-stopped
+    environment:
+      WEBTERM_PUBLIC_URL: ${WEBTERM_PUBLIC_URL:-http://localhost:8000}
+      WEBTERM_SETUP_TOKEN: ${WEBTERM_SETUP_TOKEN:-changeme-setup}
+      # SSO: pointează spre Authentik-ul din acest stack. client_id/secret vin din blueprint.
+      WEBTERM_OIDC_ISSUER: ${WEBTERM_OIDC_ISSUER:-http://localhost:9000/application/o/webterm/}
+      WEBTERM_OIDC_CLIENT_ID: ${WEBTERM_OIDC_CLIENT_ID:-webterm-client-id}
+      WEBTERM_OIDC_CLIENT_SECRET: ${WEBTERM_OIDC_CLIENT_SECRET:-webterm-client-secret}
+      WEBTERM_OIDC_PROVIDER_NAME: ${WEBTERM_OIDC_PROVIDER_NAME:-Authentik}
+      WEBTERM_OIDC_SCOPES: ${WEBTERM_OIDC_SCOPES:-openid email profile}
+      WEBTERM_OIDC_ALLOWED_GROUPS: ${WEBTERM_OIDC_ALLOWED_GROUPS:-}
+    volumes:
+      - wt-data:/data
+    ports:
+      - "8000:8000"
+    depends_on:
+      - authentik-server
+
+volumes:
+  pg:
+  redis:
+  wt-data:

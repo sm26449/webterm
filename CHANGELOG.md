@@ -7,6 +7,66 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [2.0.19] — 2026-09-10 · agent (47)
+
+Gateway and interface only: the agent is unchanged at 47, nothing in the fleet needs updating.
+
+### Added — optional SSO / OpenID Connect (e.g. Authentik)
+
+- WebTerm can now delegate login to an OIDC identity provider. A **"Sign in with &lt;provider&gt;"**
+  button appears on the login page **only when SSO is configured** (issuer + client id + secret in
+  `.env`); with no config, nothing changes — local email + password, passkeys and TOTP work exactly
+  as before. See [docs/SSO.md](docs/SSO.md).
+
+- The flow is authorization-code + **PKCE (S256)**, with single-use `state` **bound to the
+  initiating browser** by a `__Host-` cookie (anti login-CSRF / session-fixation), `nonce`, and
+  full `id_token` validation (RS256 allowlist — no `alg:none`/confusion, `iss` checked against the
+  configured issuer, `aud`/`exp`/`iat`/`nonce`, JWKS via the provider) using PyJWT. The redirect URI
+  is always derived from `WEBTERM_PUBLIC_URL`, never taken from a request (anti open-redirect).
+
+- **Break-glass stays.** The local admin keeps its password (and passkey) and can always log in —
+  the password form remains on the login page even when SSO is on, so a down IdP never locks you
+  out. On first SSO login a user is provisioned; if its email matches an existing local account,
+  the SSO identity is **linked** to that account (audited) — but only when the IdP asserts a
+  **verified email**, so an unverified address can't be used to claim an existing account (e.g. the
+  admin's); otherwise a new SSO user is created with a locked local password.
+
+- **Access control lives in the IdP.** Each WebTerm instance is one OIDC *application*; bind it to
+  a group (the reference stack ships `wt-access`) so only that group can reach the instance. An
+  optional `WEBTERM_OIDC_ALLOWED_GROUPS` makes WebTerm re-check the group claim on top of the IdP.
+  There is still no in-app RBAC — everyone who gets in is a full admin of that instance; separate
+  trust levels by running separate instances (see [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md)).
+
+- **2FA hosts under SSO** step up by re-authenticating at the IdP (`prompt=login`); the local
+  break-glass admin still steps up with WebTerm's own passkey/password.
+
+- Every login (local and SSO) and each host-session attach is written to the audit log
+  (actor = email, IP, time), so per instance you can see who logged in and which hosts they
+  reached; the IdP's own event log is the cross-instance "who reached which instance" view.
+
+- **Bundle Authentik with one flag.** `install.sh --with-authentik` (or `deploy.sh --with-authentik`)
+  runs Authentik in the same stack behind the same Traefik — via a compose **profile**, so
+  standalone stays the default and nothing Authentik-related exists until you ask for it. It
+  **generates the Authentik secrets unique to that install** (never shared defaults), waits for
+  Authentik, and auto-creates the OIDC application, writing the `WEBTERM_OIDC_*` lines back. Also
+  shipped: a separate `deploy/authentik/docker-compose.prod.yml` for the "one central Authentik, N
+  WebTerms" topology, and `provision.py`/`provision.sh` that work against **any** existing Authentik.
+  Authentik is pinned to a current stable line (`2026.8.x`); the provisioner and blueprint tolerate
+  its cross-version model changes (flow slugs, `grant_types`, redirect-URI shape).
+
+### Changed — login page: passkeys and SSO on one row
+
+- The passkey and SSO buttons now sit **side by side on a single row**, each with an icon
+  (a key, a shield). When only one method is available it takes the full width and shows its full
+  label. The password form is unchanged and still on top.
+
+### Fixed — a stale browser tab no longer breaks after a deploy
+
+- WebTerm keeps your sessions alive across deploys (they live in tmux), so people leave tabs open.
+  A deploy changes the hashed names of lazy-loaded chunks, so an old tab that then opened, say, the
+  file editor hit *"Failed to fetch dynamically imported module"*. The app now catches Vite's
+  `preloadError` and reloads once (throttled) to pick up the fresh assets.
+
 ## [2.0.18] — 2026-09-08 · agent (47)
 
 Gateway and interface only: the agent is unchanged at 47, nothing in the fleet needs updating.

@@ -258,6 +258,18 @@ function MainApp() {
     })
   }, [])
 
+  // Revenire din step-up SSO (redirect la IdP → callback → /?stepup=ok): restaurăm tab-ul de
+  // unde a plecat userul (salvat în sessionStorage înainte de redirect) şi curăţăm query-ul.
+  // Fereastra de step-up e deja deschisă server-side; acţiunea reuşeşte la re-încercare.
+  useEffect(() => {
+    const p = new URLSearchParams(window.location.search)
+    if (p.get('stepup') !== 'ok') return
+    let back = ''
+    try { back = sessionStorage.getItem('wt_stepup_return') || ''; sessionStorage.removeItem('wt_stepup_return') } catch { /* */ }
+    window.history.replaceState(null, '', window.location.pathname + (back || ''))
+    if (back) window.location.hash = back
+  }, [])
+
   const refresh = useCallback(async () => {
     try {
       const [h, s] = await Promise.all([

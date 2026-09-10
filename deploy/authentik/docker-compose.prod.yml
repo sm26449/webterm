@@ -1,0 +1,94 @@
+# Authentik pentru PRODUCŢIE, în spatele Traefik-ului pe care îl porneşte deja stack-ul WebTerm.
+# Spre deosebire de docker-compose.yml de lângă (care e stack de EVALUARE pe localhost, HTTP),
+# aici Authentik stă pe un subdomeniu real, cu TLS terminat de Traefik-ul WebTerm, fără porturi
+# publicate. Un singur Authentik central poate deservi N deployuri WebTerm (vezi docs/SSO.md).
+#
+# Pornire (pe host-ul unde rulează deja WebTerm):
+#   cd deploy/authentik
+#   cp .env.prod.example .env      # completează secretele (openssl rand -base64 48) + AUTHENTIK_DOMAIN
+#   docker compose -f docker-compose.prod.yml up -d
+#   ./provision.sh                 # creează aplicaţia OIDC şi tipăreşte WEBTERM_OIDC_*
+#
+# Reţeaua `web` de mai jos e reţeaua Traefik a stack-ului WebTerm (implicit `webterm_webterm`,
+# adică <proiect>_<reţea>). Dacă ai instalat WebTerm în alt director, numele proiectului diferă —
+# suprascrie cu WEBTERM_TRAEFIK_NETWORK în .env.
+
+x-authentik-env: &authentik-env
+  AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:?set AUTHENTIK_SECRET_KEY in .env}
+  AUTHENTIK_POSTGRESQL__HOST: postgresql
+  AUTHENTIK_POSTGRESQL__USER: authentik
+  AUTHENTIK_POSTGRESQL__NAME: authentik
+  AUTHENTIK_POSTGRESQL__PASSWORD: ${PG_PASS:?set PG_PASS in .env}
+  AUTHENTIK_REDIS__HOST: redis
+
+services:
+  postgresql:
+    image: docker.io/library/postgres:16-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - pg:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: authentik
+      POSTGRES_DB: authentik
+      POSTGRES_PASSWORD: ${PG_PASS:?set PG_PASS in .env}
+    networks: [akinternal]
+
+  redis:
+    image: docker.io/library/redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - redis:/data
+    networks: [akinternal]
+
+  server:
+    image: ghcr.io/goauthentik/server:2026.8.2
+    restart: unless-stopped
+    command: server
+    environment:
+      <<: *authentik-env
+      # adminul iniţial (user: akadmin) + un token de API pentru provisioning, la prima pornire
+      AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD:?set it in .env}
+      AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:-}
+    depends_on:
+      postgresql: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    networks: [akinternal, web]
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=${WEBTERM_TRAEFIK_NETWORK:-webterm_webterm}
+      - traefik.http.routers.authentik.rule=Host(`${AUTHENTIK_DOMAIN:?set AUTHENTIK_DOMAIN in .env}`)
+      - traefik.http.routers.authentik.entrypoints=websecure
+      - traefik.http.routers.authentik.tls=true
+      - traefik.http.routers.authentik.tls.certresolver=${WEBTERM_CERT_RESOLVER:-le}
+      - traefik.http.services.authentik.loadbalancer.server.port=9000
+
+  worker:
+    image: ghcr.io/goauthentik/server:2026.8.2
+    restart: unless-stopped
+    command: worker
+    environment: *authentik-env
+    depends_on:
+      postgresql: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    networks: [akinternal]
+
+networks:
+  akinternal:
+    internal: true
+  web:
+    external: true
+    name: ${WEBTERM_TRAEFIK_NETWORK:-webterm_webterm}
+
+volumes:
+  pg:
+  redis:

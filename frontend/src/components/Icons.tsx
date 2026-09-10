@@ -104,6 +104,13 @@ export const KeyIcon = () => (
   </Icon>
 )
 
+export const ShieldIcon = () => (
+  <Icon>
+    <path d="M12 3 5 6v5c0 4.6 3 7.6 7 9 4-1.4 7-4.4 7-9V6l-7-3Z" />
+    <path d="m9 12 2.2 2.2L15 10" />
+  </Icon>
+)
+
 export const EyeIcon = () => (
   <Icon size={12}>
     <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" />

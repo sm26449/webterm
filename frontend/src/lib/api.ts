@@ -250,6 +250,17 @@ export async function api<T>(path: string, options: RequestInit = {}, _retried =
     // reformulare, şi deja greşit: prindea şi „the host requires 2FA — not reachable with an
     // automation token", care nu e o cerere de step-up. Codul e semnalul corect; regexul
     // rămâne ca rezervă pentru mesajele încă neconvertite.
+    // Step-up SSO: userul e federat (fără passkey/parolă locală) pe un host cu 2FA. Nu există
+    // ceremonie inline — cerem re-auth PROASPĂT la IdP printr-un redirect de pagină întreagă.
+    // Păstrăm tab-ul curent (location.hash) ca să revenim exact acolo după callback.
+    if (res.status === 403 && code === 'host.needs2faSso') {
+      const hostId = hostIdFromPath(path)
+      if (hostId != null) {
+        try { sessionStorage.setItem('wt_stepup_return', window.location.hash) } catch { /* */ }
+        window.location.href = '/api/oidc/login?intent=stepup&host_id=' + hostId
+        return new Promise<T>(() => {})   // pagina navighează; promisiunea nu se mai rezolvă
+      }
+    }
     const isStepup = code ? code.startsWith('stepup.') : /2FA|passkey/i.test(detail)
     if (res.status === 403 && !_retried && stepupHandler
         && !path.endsWith('/stepup') && isStepup) {

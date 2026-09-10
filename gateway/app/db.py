@@ -246,6 +246,14 @@ MIGRATIONS = [
     "ALTER TABLE sessions ADD COLUMN target_host TEXT",
     "ALTER TABLE sessions ADD COLUMN target_port INTEGER",
     "ALTER TABLE web_sessions ADD COLUMN last_seen REAL",   # L2: idle-expiry pe sesiunile web
+    # SSO/OIDC: `sub`-ul stabil al userului la IdP (ex. Authentik). NULL = cont local
+    # (break-glass). Potrivim după `sub` (imutabil), emailul rămâne pentru afişare/audit.
+    "ALTER TABLE users ADD COLUMN sso_subject TEXT",
+    # O identitate IdP (`sub`) = cel mult un cont. Index unic parţial (NULL-urile nu se ciocnesc)
+    # — gard la nivel de DB peste check-then-act din provizionarea SSO, ca două callback-uri
+    # concurente pentru acelaşi `sub` să nu poată dubla contul.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_sso_subject ON users(sso_subject) "
+    "WHERE sso_subject IS NOT NULL",
 ]
 
 # tabele adăugate ulterior (executeScript de mai sus le creează pe DB-uri noi;
