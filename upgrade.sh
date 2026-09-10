@@ -238,7 +238,11 @@ if docker run --rm --entrypoint sh "$IMAGE" -c 'cd /srv/webterm/deploy-kit && ta
    | tar xf - -C "$KIT" 2>/dev/null && [ -f "$KIT/docker-compose.prod.yml" ]; then
   CHANGED=0
   for f in docker-compose.prod.yml deploy.sh rollback.sh remove.sh \
-           scripts/backup.sh scripts/restore.sh scripts/cert-check.sh; do
+           scripts/backup.sh scripts/restore.sh scripts/cert-check.sh \
+           deploy/authentik/docker-compose.prod.yml deploy/authentik/docker-compose.yml \
+           deploy/authentik/.env.prod.example deploy/authentik/.env.example \
+           deploy/authentik/provision.py deploy/authentik/provision.sh \
+           deploy/authentik/blueprints/webterm.yaml; do
     [ -f "$KIT/$f" ] || continue
     if [ -f "$f" ] && cmp -s "$KIT/$f" "$f"; then continue; fi
     mkdir -p "$(dirname "$f")"

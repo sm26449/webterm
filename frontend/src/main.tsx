@@ -13,6 +13,21 @@ import { I18nProvider } from './lib/i18n'
 
 applyTheme(currentTheme())
 
+// După un deploy, hash-urile chunk-urilor lazy se schimbă: un tab lăsat deschis
+// (WebTerm ţine sesiunile în tmux, aşa că oamenii chiar fac asta) încearcă apoi
+// să importe un chunk care nu mai există → „Failed to fetch dynamically imported
+// module". Vite emite `vite:preloadError` în acel caz; reîncărcăm o dată ca să
+// luăm index.html-ul nou (cu hash-urile curente). Throttle prin sessionStorage,
+// ca o eroare reală de reţea să nu ne bage într-o buclă de reload.
+window.addEventListener('vite:preloadError', () => {
+  const now = Date.now()
+  const last = Number(sessionStorage.getItem('wt_chunk_reload') || '0')
+  if (now - last > 10000) {
+    sessionStorage.setItem('wt_chunk_reload', String(now))
+    window.location.reload()
+  }
+})
+
 // iOS Safari nu redimensionează layout-ul când apare tastatura virtuală (doar
 // visual viewport-ul) → terminalul și keybar-ul rămâneau sub tastatură. Când
 // diferența față de fereastră e mare (= tastatură deschisă), limităm înălțimea

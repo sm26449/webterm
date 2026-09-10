@@ -15,7 +15,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from . import (api, audit, backup, cloudbackup, config, core, db, email_alerts, health,
-               security, signing, webauthn_api)
+               oidc_api, security, signing, webauthn_api)
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -41,6 +41,20 @@ async def _warn_if_insecure_forwards() -> None:
             "Without https the session cookie loses its __Host- prefix, so a forwarded page "
             "on a subdomain can write a cookie into the app origin (session fixation). "
             "Use https, or disable forwarding.")
+
+
+async def _warn_if_sso_ungated() -> None:
+    """SSO activ dar fără `WEBTERM_OIDC_ALLOWED_GROUPS`: WebTerm nu re-verifică grupul, deci
+    controlul „cine intră" cade ÎN ÎNTREGIME pe IdP. Dacă acolo aplicaţia nu e legată de un grup
+    (ex. binding-ul `wt-access` pe care-l face provision.py) ŞI IdP-ul permite auto-înregistrare,
+    oricine se poate provisiona ca admin. Nu refuzăm pornirea (gating-ul în IdP e un design
+    valid, cel implicit al nostru), dar o spunem tare."""
+    if config.OIDC_ENABLED and not config.OIDC_ALLOWED_GROUPS:
+        log.warning(
+            "SSO is on but WEBTERM_OIDC_ALLOWED_GROUPS is empty: WebTerm does not re-check the "
+            "group, so access control relies ENTIRELY on your IdP. Make sure the WebTerm "
+            "application is bound to a group there (provision.sh binds `wt-access`), or set "
+            "WEBTERM_OIDC_ALLOWED_GROUPS — otherwise anyone the IdP admits becomes a full admin.")
 
 
 async def _warn_if_disk_low() -> None:
@@ -92,6 +106,7 @@ async def _janitor() -> None:
             await audit.prune()             # aceeași fereastră de retenție ca arhiva
             await _warn_if_signing_locked()
             await _warn_if_insecure_forwards()
+            await _warn_if_sso_ungated()
             if archived:
                 log.info("janitor: archived %d transcripts of sessions closed >%d days ago",
                          archived, config.CLOSED_ARCHIVE_DAYS)
@@ -476,6 +491,7 @@ app.add_middleware(ForwardWSMiddleware)
 
 app.include_router(api.router)
 app.include_router(webauthn_api.router)
+app.include_router(oidc_api.router)
 
 if FRONTEND_DIST.exists():
     app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="assets")

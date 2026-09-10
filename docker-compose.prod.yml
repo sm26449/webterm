@@ -94,7 +94,7 @@ services:
     networks: [webterm, internal]
 
   app:
-    image: ${WEBTERM_IMAGE:-ghcr.io/sm26449/webterm:v2.0.18}
+    image: ${WEBTERM_IMAGE:-ghcr.io/sm26449/webterm:v2.0.19}
     restart: unless-stopped
     logging: *default-logging
     security_opt:
@@ -116,8 +116,15 @@ services:
       # the per-browser-WS backlog cap before a forced resync
       WEBTERM_CLIENT_BUFFER: ${WEBTERM_CLIENT_BUFFER:-}
       WEBTERM_SETUP_TOKEN: ${WEBTERM_SETUP_TOKEN:-}
+      # SSO / OIDC (opţional, ex. Authentik). Gol = SSO oprit, login local ca înainte.
+      WEBTERM_OIDC_ISSUER: ${WEBTERM_OIDC_ISSUER:-}
+      WEBTERM_OIDC_CLIENT_ID: ${WEBTERM_OIDC_CLIENT_ID:-}
+      WEBTERM_OIDC_CLIENT_SECRET: ${WEBTERM_OIDC_CLIENT_SECRET:-}
+      WEBTERM_OIDC_PROVIDER_NAME: ${WEBTERM_OIDC_PROVIDER_NAME:-}
+      WEBTERM_OIDC_SCOPES: ${WEBTERM_OIDC_SCOPES:-}
+      WEBTERM_OIDC_ALLOWED_GROUPS: ${WEBTERM_OIDC_ALLOWED_GROUPS:-}
       # so the app knows, and shows in the UI, which image it is running
-      WEBTERM_IMAGE_REF: ${WEBTERM_IMAGE:-ghcr.io/sm26449/webterm:v2.0.18}
+      WEBTERM_IMAGE_REF: ${WEBTERM_IMAGE:-ghcr.io/sm26449/webterm:v2.0.19}
       # the "is there a new version?" check: 0 disables it entirely (overrides the UI switch)
       WEBTERM_UPDATE_CHECK: ${WEBTERM_UPDATE_CHECK:-1}
       # optional read-only token, only while the repo is private (empty = works on a public repo)
@@ -206,12 +213,105 @@ services:
       - traefik.http.routers.webterm-fwd.service=webterm
       - traefik.http.routers.webterm-fwd.middlewares=webterm-hsts@docker
 
+  # ─── Authentik (SSO) — OPŢIONAL ──────────────────────────────────────────────
+  # Porneşte DOAR cu profilul `authentik` activ: pune `COMPOSE_PROFILES=authentik` în .env
+  # (atunci `docker compose up -d` porneşte tot împreună — la fel install.sh/deploy.sh/upgrade.sh),
+  # sau rulează punctual `docker compose --profile authentik up -d`. Fără profil, WebTerm porneşte
+  # standalone, exact ca înainte, iar aceste servicii nici nu se creează.
+  #
+  # Secretele (AUTHENTIK_SECRET_KEY, PG_PASS, AUTHENTIK_BOOTSTRAP_PASSWORD/TOKEN) NU au valori
+  # implicite reale — le generează install.sh/deploy.sh unic la fiecare deploy şi le scriu în .env.
+  # Un singur Authentik poate deservi N deployuri WebTerm: când rulezi >1 instanţă, activează
+  # profilul DOAR pe cutia care găzduieşte Authentik. Vezi docs/SSO.md.
+  authentik-postgresql:
+    image: docker.io/library/postgres:16-alpine
+    profiles: [authentik]
+    restart: unless-stopped
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    environment:
+      POSTGRES_USER: authentik
+      POSTGRES_DB: authentik
+      POSTGRES_PASSWORD: ${PG_PASS:-}
+    volumes:
+      - authentik-pg:/var/lib/postgresql/data
+    networks: [akinternal]
+
+  authentik-redis:
+    image: docker.io/library/redis:7-alpine
+    profiles: [authentik]
+    restart: unless-stopped
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - authentik-redis:/data
+    networks: [akinternal]
+
+  authentik-server:
+    image: ghcr.io/goauthentik/server:2026.8.2
+    profiles: [authentik]
+    restart: unless-stopped
+    logging: *default-logging
+    command: server
+    environment:
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:-}
+      AUTHENTIK_POSTGRESQL__HOST: authentik-postgresql
+      AUTHENTIK_POSTGRESQL__USER: authentik
+      AUTHENTIK_POSTGRESQL__NAME: authentik
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${PG_PASS:-}
+      AUTHENTIK_REDIS__HOST: authentik-redis
+      AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD:-}
+      AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:-}
+    depends_on:
+      authentik-postgresql: {condition: service_healthy}
+      authentik-redis: {condition: service_healthy}
+    networks: [webterm, akinternal]
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=${WEBTERM_TRAEFIK_NETWORK:-webterm_webterm}
+      - traefik.http.routers.authentik.rule=Host(`${AUTHENTIK_DOMAIN:-auth.example.com}`)
+      - traefik.http.routers.authentik.entrypoints=websecure
+      - traefik.http.routers.authentik.tls=true
+      - traefik.http.routers.authentik.tls.certresolver=${WEBTERM_CERT_RESOLVER:-le}
+      - traefik.http.services.authentik.loadbalancer.server.port=9000
+
+  authentik-worker:
+    image: ghcr.io/goauthentik/server:2026.8.2
+    profiles: [authentik]
+    restart: unless-stopped
+    logging: *default-logging
+    command: worker
+    environment:
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:-}
+      AUTHENTIK_POSTGRESQL__HOST: authentik-postgresql
+      AUTHENTIK_POSTGRESQL__USER: authentik
+      AUTHENTIK_POSTGRESQL__NAME: authentik
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${PG_PASS:-}
+      AUTHENTIK_REDIS__HOST: authentik-redis
+    depends_on:
+      authentik-postgresql: {condition: service_healthy}
+      authentik-redis: {condition: service_healthy}
+    networks: [akinternal]
+
 volumes:
   webterm-data:
   traefik-acme:
+  authentik-pg:
+  authentik-redis:
 
 networks:
   webterm:
   # fără acces la exterior: doar Traefik ↔ dockerproxy
   internal:
+    internal: true
+  # fără acces la exterior: Authentik ↔ Postgres/Redis (doar cu profilul `authentik`)
+  akinternal:
     internal: true

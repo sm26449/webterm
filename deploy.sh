@@ -46,6 +46,18 @@ load_env() {
 
 cd "$(dirname "$0")"
 
+# --with-authentik: porneşte şi Authentik (SSO) în acelaşi stack (profilul compose `authentik`),
+# generând secretele unic la acest deploy. Un tag de versiune (vX.Y.Z) rămâne argument poziţional.
+WITH_AUTHENTIK=""
+VERSION=""
+for _a in "$@"; do
+  case "$_a" in
+    --with-authentik) WITH_AUTHENTIK=1 ;;
+    --*) echo "unknown flag: $_a" >&2; exit 1 ;;
+    *) VERSION="$_a" ;;
+  esac
+done
+
 FILE=docker-compose.prod.yml
 COMPOSE="docker compose"
 docker compose version >/dev/null 2>&1 || COMPOSE="docker-compose"
@@ -101,6 +113,24 @@ if [ -z "${WEBTERM_SETUP_TOKEN:-}" ]; then
   echo "→ Setup token generated and written to .env."
 fi
 
+# --- optional bundled Authentik (SSO) ---
+# --with-authentik (sau COMPOSE_PROFILES=authentik deja în .env) porneşte Authentik în acelaşi
+# stack. Generăm secretele lipsă unic la ACEST deploy — niciodată copiate între instalări.
+gen_secret() { head -c 48 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | cut -c1-50; }
+if [ -n "$WITH_AUTHENTIK" ] || printf '%s' "${COMPOSE_PROFILES:-}" | grep -qw authentik; then
+  set_cert_env COMPOSE_PROFILES "authentik"
+  export COMPOSE_PROFILES="authentik"
+  : "${AUTHENTIK_DOMAIN:?set AUTHENTIK_DOMAIN in .env — the subdomain Authentik answers on (needs its own DNS record)}"
+  for _v in AUTHENTIK_SECRET_KEY PG_PASS AUTHENTIK_BOOTSTRAP_PASSWORD AUTHENTIK_BOOTSTRAP_TOKEN; do
+    eval "_cur=\${$_v:-}"
+    if [ -z "$_cur" ]; then
+      _s=$(gen_secret); set_cert_env "$_v" "$_s"; export "$_v=$_s"
+      echo "→ generated $_v (unique to this deploy)"
+    fi
+  done
+  echo "→ Authentik profile active — it will start with the stack at https://$AUTHENTIK_DOMAIN"
+fi
+
 # --- ghcr.io login (private image) ---
 GHCR_TOKEN="${GHCR_TOKEN:-}"
 if [ -z "$GHCR_TOKEN" ] && [ -n "${GHCR_TOKEN_FILE:-}" ] && [ -f "$GHCR_TOKEN_FILE" ]; then
@@ -117,14 +147,14 @@ fi
 # (a broken deploy once left the UI dead with no way back; since then every
 # deploy writes down its return point before changing anything)
 CUR_IMAGE="${WEBTERM_IMAGE:-}"
-if [ -n "${1:-}" ]; then
+if [ -n "$VERSION" ]; then
   # validate the tag before sed writes it into .env: an argument containing |, &,
   # a newline or other metacharacters would corrupt the substitution or inject lines
-  case "$1" in
+  case "$VERSION" in
     v[0-9]*.[0-9]*.[0-9]* | latest | sha-[0-9a-f]*) ;;
-    *) echo "Invalid tag: $1 (expected vX.Y.Z, latest or sha-...)"; exit 1 ;;
+    *) echo "Invalid tag: $VERSION (expected vX.Y.Z, latest or sha-...)"; exit 1 ;;
   esac
-  NEW_IMAGE="ghcr.io/${GHCR_USER:-sm26449}/webterm:$1"
+  NEW_IMAGE="ghcr.io/${GHCR_USER:-sm26449}/webterm:$VERSION"
   if grep -q '^WEBTERM_IMAGE=' .env; then
     sed -i "s|^WEBTERM_IMAGE=.*|WEBTERM_IMAGE=$NEW_IMAGE|" .env
   else
@@ -174,6 +204,44 @@ if [ "$st" != healthy ]; then
   fi
   echo "  (no .prev-image — roll back by hand: point WEBTERM_IMAGE in .env at a good tag and rerun)"
   exit 1
+fi
+
+# --- auto-provision the OIDC app in the bundled Authentik (idempotent, best-effort) ---
+# Rulează doar cu profilul `authentik` activ şi cât timp SSO nu e încă legat. Nu lasă niciodată
+# un stack stricat: dacă Authentik nu e gata la timp, WebTerm rămâne pornit şi tipărim comanda.
+if { [ -n "$WITH_AUTHENTIK" ] || printf '%s' "${COMPOSE_PROFILES:-}" | grep -qw authentik; } \
+   && [ -z "${WEBTERM_OIDC_ISSUER:-}" ]; then
+  PROV="deploy/authentik/provision.py"
+  echo "→ Waiting for Authentik at https://$AUTHENTIK_DOMAIN (first boot runs migrations, ~1-2 min)…"
+  ak_ready=""
+  for i in $(seq 1 90); do
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+      -H "Authorization: Bearer ${AUTHENTIK_BOOTSTRAP_TOKEN}" \
+      "https://$AUTHENTIK_DOMAIN/api/v3/core/users/me/" 2>/dev/null || echo 000)
+    [ "$code" = 200 ] && { ak_ready=1; break; }
+    sleep 4
+  done
+  if [ -n "$ak_ready" ] && [ -f "$PROV" ] && command -v python3 >/dev/null; then
+    echo "→ Provisioning the WebTerm OIDC application in Authentik…"
+    if OUT=$(AUTHENTIK_DOMAIN="$AUTHENTIK_DOMAIN" WEBTERM_DOMAIN="$WEBTERM_DOMAIN" \
+             WEBTERM_OIDC_PROVIDER_NAME="${WEBTERM_OIDC_PROVIDER_NAME:-Authentik}" \
+             AUTHENTIK_API_TOKEN="$AUTHENTIK_BOOTSTRAP_TOKEN" python3 "$PROV" 2>&1); then
+      printf '%s\n' "$OUT" | grep -E '^WEBTERM_OIDC_(ISSUER|CLIENT_ID|CLIENT_SECRET|PROVIDER_NAME)=' \
+        | while IFS='=' read -r _k _v; do set_cert_env "$_k" "$_v"; done
+      echo "→ SSO linked; reloading the app to pick up the OIDC settings…"
+      load_env ./.env
+      $COMPOSE -f "$FILE" up -d app
+      echo "  Add users to the 'wt-access' group in Authentik to grant them access to this instance."
+    else
+      echo "✗ provisioning failed; WebTerm is up, SSO is off. Details:" >&2
+      printf '  %s\n' "$OUT" | tail -5 >&2
+    fi
+  else
+    echo "  Authentik not reachable yet (or python3/provision.py missing). WebTerm is up; provision later:"
+    echo "    cd $(pwd) && AUTHENTIK_DOMAIN=$AUTHENTIK_DOMAIN WEBTERM_DOMAIN=$WEBTERM_DOMAIN \\"
+    echo "      AUTHENTIK_API_TOKEN=\"\$AUTHENTIK_BOOTSTRAP_TOKEN\" python3 $PROV"
+    echo "    then copy the WEBTERM_OIDC_* lines into .env and run: $COMPOSE -f $FILE up -d app"
+  fi
 fi
 
 echo

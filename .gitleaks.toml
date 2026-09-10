@@ -15,6 +15,11 @@ regexes = [
   # tokenuri de setup de test
   '''ci-e2e-token''',
   '''test-setup''',
+  # fixture-uri SSO/OIDC: parola user-ului de test din blueprint-ul de evaluare (apare şi în
+  # docs/SSO.md şi tests/oidc_test.py) + client_secret-ul DEMO al stack-ului de referinţă. Ambele
+  # sunt valori cunoscute, publice, de laborator — nu secrete reale (provisionarea reală le generează).
+  '''alice-test-pass-1234''',
+  '''webterm-client-secret''',
 ]
 paths = [
   # vectorii RFC 6238/8032 (hex) și fixture-urile din suita de teste

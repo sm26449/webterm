@@ -1,8 +1,8 @@
 import { startAuthentication } from '@simplewebauthn/browser'
-import { FormEvent, useState } from 'react'
+import { FormEvent, useEffect, useState } from 'react'
 import { errText, api, getBootVersion } from '../lib/api'
 import { useI18n } from '../lib/i18n'
-import { KeyIcon } from './Icons'
+import { KeyIcon, ShieldIcon } from './Icons'
 
 export default function LoginPage(props: {
   setupRequired: boolean
@@ -17,6 +17,20 @@ export default function LoginPage(props: {
   const [totpRequired, setTotpRequired] = useState(false)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [sso, setSso] = useState<{ enabled: boolean; provider_name: string } | null>(null)
+
+  // SSO e opţional: aflăm din /api/oidc/status dacă afişăm butonul. Formularul de parolă
+  // rămâne MEREU vizibil (break-glass), chiar când SSO e activ.
+  useEffect(() => {
+    api<{ enabled: boolean; provider_name: string }>('/api/oidc/status')
+      .then(setSso).catch(() => setSso(null))
+    // eroare venită din redirect-ul de callback (?sso_error=...): o arătăm, nu o înghiţim
+    const p = new URLSearchParams(window.location.search)
+    if (p.get('sso_error') || p.get('sso') === 'disabled') {
+      setError(t('login.ssoError'))
+      window.history.replaceState(null, '', window.location.pathname)
+    }
+  }, [t])
 
   async function passkeyLogin() {
     setError('')
@@ -162,23 +176,40 @@ export default function LoginPage(props: {
           </button>
         </form>
 
-        {!props.setupRequired && props.webauthnAvailable && window.PublicKeyCredential && (
-          <>
-            <div className="my-5 flex items-center gap-3 text-[11px] uppercase tracking-widest text-slate-600">
-              <span className="h-px flex-1 bg-ink-700" />
-              {t('login.or')}
-              <span className="h-px flex-1 bg-ink-700" />
-            </div>
-            <button
-              type="button"
-              onClick={passkeyLogin}
-              disabled={busy}
-              className="flex w-full items-center justify-center gap-2 rounded-xl bg-ink-800/60 py-3 text-[14px] font-medium text-slate-300 ring-1 ring-ink-700 transition hover:bg-ink-700/60 disabled:opacity-50"
-            >
-              <KeyIcon /> {busy ? t('login.processing') : t('login.passkey')}
-            </button>
-          </>
-        )}
+        {(() => {
+          if (props.setupRequired) return null
+          const passkeyOn = props.webauthnAvailable && !!window.PublicKeyCredential
+          const ssoOn = !!sso?.enabled
+          if (!passkeyOn && !ssoOn) return null
+          // când ambele metode sunt prezente stau pe UN rând, cu etichete scurte; când e
+          // una singură, butonul ocupă tot rândul şi primeşte eticheta completă.
+          const both = passkeyOn && ssoOn
+          const btn =
+            'flex flex-1 items-center justify-center gap-2 rounded-xl bg-ink-800/60 py-3 ' +
+            'text-[14px] font-medium text-slate-300 ring-1 ring-ink-700 transition ' +
+            'hover:bg-ink-700/60 disabled:opacity-50'
+          return (
+            <>
+              <div className="my-5 flex items-center gap-3 text-[11px] uppercase tracking-widest text-slate-600">
+                <span className="h-px flex-1 bg-ink-700" />
+                {t('login.or')}
+                <span className="h-px flex-1 bg-ink-700" />
+              </div>
+              <div className="flex gap-2">
+                {passkeyOn && (
+                  <button type="button" onClick={passkeyLogin} disabled={busy} className={btn}>
+                    <KeyIcon /> {busy ? t('login.processing') : both ? t('login.passkeyShort') : t('login.passkey')}
+                  </button>
+                )}
+                {ssoOn && (
+                  <a href="/api/oidc/login" className={btn}>
+                    <ShieldIcon /> {both ? sso!.provider_name : t('login.sso', { provider: sso!.provider_name })}
+                  </a>
+                )}
+              </div>
+            </>
+          )
+        })()}
 
         <footer className="mt-7 border-t border-ink-800/70 pt-4 text-center text-[11px] leading-relaxed text-slate-600">
           <span className="font-medium text-slate-500">WebTerm</span>

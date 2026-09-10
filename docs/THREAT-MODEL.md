@@ -36,6 +36,14 @@ decisions follow from this.
 - **Authentication & session**: no bypass; constant-time login (no account
   enumeration); lockout on the real IP; 2FA step-up (passkey) on flagged hosts;
   idle-lock with re-authentication.
+- **SSO / OIDC** (optional, off unless configured): authorization-code + **PKCE
+  (S256)**; `id_token` validated with a **fixed RS256 allowlist** (no `alg:none`, no
+  algorithm confusion), mandatory `aud`/`iss`/`exp`/`iat`, single-use server-side
+  `state`, and `nonce` bound to the token. The redirect URI is derived from
+  `WEBTERM_PUBLIC_URL`, **never** taken from a request (anti open-redirect); the
+  issuer/JWKS come from config. Linking an SSO identity to an existing local account
+  requires the IdP to assert `email_verified` (anti account-takeover). See
+  [SSO.md](SSO.md).
 - **CSWSH / CSRF / XSS**: Origin verified on all browser WebSockets; CSP without
   `unsafe-eval`; `__Host-` cookies.
 - **Injection**: parameterized SQL; `target_host` on an allowlist (anti-ANSI
@@ -169,6 +177,15 @@ See [design/ARCHITECTURE.md](design/ARCHITECTURE.md) for the agent's resilience
 7. **`insecure` mode** (TLS without validation) — an **opt-in** footgun for
    IP/self-signed deployments. Cert pinning makes it usable, but in production
    use a **domain + public CA**.
+8. **With SSO on, the IdP is a trust anchor.** Whoever the IdP lets authenticate
+   *and* places in the instance's group becomes a full admin of that instance —
+   WebTerm delegates *who gets in*, not *what they can do* (limitation 2 still
+   holds: no in-app RBAC). So the IdP's own security is in scope: its MFA, its
+   session/consent settings, and **which users you put in the `wt-access` group**.
+   WebTerm defends its half (token validation, verified-email adoption, group
+   re-check); it cannot vouch for accounts the IdP itself issues. Separate trust
+   levels by running **separate instances**, each gated by its own group, and keep
+   the **break-glass** local admin's password/passkey safe for when the IdP is down.
 
 ## Outbound connections the gateway makes on its own
 

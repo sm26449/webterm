@@ -39,6 +39,10 @@ COPY CHANGELOG.md ./
 # 2026-08-06 am găsit acolo un backup.sh vechi de 76 de linii, care scria arhivele în clar.
 COPY docker-compose.prod.yml deploy.sh rollback.sh upgrade.sh remove.sh .env.prod.example ./deploy-kit/
 COPY scripts/backup.sh scripts/restore.sh scripts/cert-check.sh ./deploy-kit/scripts/
+# Trusa Authentik (SSO opţional): provision.py/sh + compose-ul separat + blueprint, ca
+# `deploy.sh --with-authentik` să poată provisiona OIDC-ul pe host, iar topologia „Authentik
+# central, N WebTerm" să aibă compose-ul separat la îndemână.
+COPY deploy/authentik/ ./deploy-kit/deploy/authentik/
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 

@@ -60,6 +60,7 @@ INSTALL_DIR=/opt/webterm
 REPO_URL=https://github.com/sm26449/webterm.git
 BRANCH=main
 DOMAIN="" EMAIL="" CF_TOKEN="" GHCR_USER=sm26449 GHCR_TOKEN="" IMAGE=""
+WITH_AUTHENTIK="" AUTHENTIK_DOMAIN=""
 DO_PORTCHECK=1
 DO_CERTCHECK=1
 DO_UFW=1 DO_BACKUP=1 NONINTERACTIVE=0
@@ -75,7 +76,9 @@ Options:
   --ghcr-user <user>    ghcr.io user (default: sm26449)
   --ghcr-token <token>  ghcr read:packages token (private image)
   --ghcr-token-file <f> read the ghcr token from a file (preferred over --ghcr-token)
-  --image <ref>         the image (default: ghcr.io/sm26449/webterm:v2.0.18)
+  --with-authentik      also run Authentik (SSO) in this stack; generates its secrets
+  --authentik-domain <fqdn>  subdomain for Authentik (needs its own DNS record)
+  --image <ref>         the image (default: ghcr.io/sm26449/webterm:v2.0.19)
   --dir <path>          installation directory (default: /opt/webterm)
   --repo <url>          repository to take the files from (standalone mode)
   --branch <name>       branch to clone (default: main)
@@ -97,6 +100,8 @@ while [ $# -gt 0 ]; do
     --ghcr-user) GHCR_USER="$2"; shift 2 ;;
     --ghcr-token) GHCR_TOKEN="$2"; shift 2 ;;
     --ghcr-token-file) GHCR_TOKEN="$(cat "$2")"; shift 2 ;;
+    --with-authentik) WITH_AUTHENTIK=1; shift ;;
+    --authentik-domain) AUTHENTIK_DOMAIN="$2"; shift 2 ;;
     --image) IMAGE="$2"; shift 2 ;;
     --dir) INSTALL_DIR="$2"; shift 2 ;;
     --repo) REPO_URL="$2"; shift 2 ;;
@@ -209,6 +214,16 @@ if [ "$FILES_SRC" != "$INSTALL_DIR" ]; then
   install -m 0644 "$FILES_SRC/deploy/webterm-backup.service" "$FILES_SRC/deploy/webterm-backup.timer" \
     "$FILES_SRC/deploy/webterm-cert-check.service" "$FILES_SRC/deploy/webterm-cert-check.timer" \
     "$INSTALL_DIR/deploy/"
+  # Trusa Authentik (SSO opţional) — provision.py/sh, compose-ul separat, blueprint.
+  install -d "$INSTALL_DIR/deploy/authentik/blueprints"
+  install -m 0644 "$FILES_SRC/deploy/authentik/docker-compose.prod.yml" \
+    "$FILES_SRC/deploy/authentik/docker-compose.yml" \
+    "$FILES_SRC/deploy/authentik/.env.prod.example" "$FILES_SRC/deploy/authentik/.env.example" \
+    "$INSTALL_DIR/deploy/authentik/"
+  install -m 0755 "$FILES_SRC/deploy/authentik/provision.py" \
+    "$FILES_SRC/deploy/authentik/provision.sh" "$INSTALL_DIR/deploy/authentik/"
+  install -m 0644 "$FILES_SRC/deploy/authentik/blueprints/webterm.yaml" \
+    "$INSTALL_DIR/deploy/authentik/blueprints/"
 fi
 [ -n "${TMP_CLONE:-}" ] && rm -rf "$TMP_CLONE"
 cd "$INSTALL_DIR"
@@ -249,7 +264,7 @@ case "$DOMAIN" in
   *.*) : ;;
   *) err "Invalid domain: '$DOMAIN' (expected an FQDN, e.g. term.example.com)."; exit 1 ;;
 esac
-IMAGE="${IMAGE:-ghcr.io/sm26449/webterm:v2.0.18}"
+IMAGE="${IMAGE:-ghcr.io/sm26449/webterm:v2.0.19}"
 SETUP_TOKEN="${WEBTERM_SETUP_TOKEN:-}"
 if [ -z "$SETUP_TOKEN" ]; then
   SETUP_TOKEN=$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | cut -c1-32)
@@ -301,6 +316,22 @@ set_env GHCR_USER "$GHCR_USER"
 # The setup token is kept if it already exists: regenerating it on every run would
 # invalidate the instructions you wrote down and confuse you at the first login.
 grep -q '^WEBTERM_SETUP_TOKEN=.' .env 2>/dev/null || set_env WEBTERM_SETUP_TOKEN "$SETUP_TOKEN"
+
+# --with-authentik: rulează Authentik (SSO) în acelaşi stack (profilul compose `authentik`),
+# generând secretele unic la ACEASTĂ instalare — niciodată copiate. Se provisionează după pornire.
+if [ -n "$WITH_AUTHENTIK" ]; then
+  if [ -z "$AUTHENTIK_DOMAIN" ] && [ "$NONINTERACTIVE" != 1 ]; then
+    AUTHENTIK_DOMAIN="$(ask "Authentik subdomain (its own DNS record → this server)" "auth.$DOMAIN")"
+  fi
+  [ -n "$AUTHENTIK_DOMAIN" ] || err "--with-authentik needs --authentik-domain <fqdn>"
+  set_env COMPOSE_PROFILES "authentik"
+  set_env AUTHENTIK_DOMAIN "$AUTHENTIK_DOMAIN"
+  for _v in AUTHENTIK_SECRET_KEY PG_PASS AUTHENTIK_BOOTSTRAP_PASSWORD AUTHENTIK_BOOTSTRAP_TOKEN; do
+    grep -q "^$_v=." .env 2>/dev/null || \
+      set_env "$_v" "$(head -c 48 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | cut -c1-50)"
+  done
+  echo "→ Authentik enabled on https://$AUTHENTIK_DOMAIN (secrets generated for this install)."
+fi
 chmod 600 .env
 umask 022
 
@@ -372,6 +403,37 @@ fi
 say "[6/7] Starting the stack (Traefik + app)…"
 docker compose -f docker-compose.prod.yml pull || warn "  pull failed — using local images if present."
 docker compose -f docker-compose.prod.yml up -d --remove-orphans
+
+# Provisionăm aplicaţia OIDC în Authentik-ul din stack (idempotent, best-effort). Dacă Authentik
+# nu e gata la timp, WebTerm rămâne pornit şi indicăm comanda de reluat — niciun stack stricat.
+if [ -n "$WITH_AUTHENTIK" ] && ! grep -q '^WEBTERM_OIDC_ISSUER=.' .env 2>/dev/null; then
+  AK_TOKEN=$(grep '^AUTHENTIK_BOOTSTRAP_TOKEN=' .env | cut -d= -f2-)
+  say "Waiting for Authentik at https://$AUTHENTIK_DOMAIN (first boot runs migrations, ~1-2 min)…"
+  ak_ready=""
+  for _i in $(seq 1 90); do
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+      -H "Authorization: Bearer $AK_TOKEN" \
+      "https://$AUTHENTIK_DOMAIN/api/v3/core/users/me/" 2>/dev/null || echo 000)
+    [ "$code" = 200 ] && { ak_ready=1; break; }
+    sleep 4
+  done
+  PROV="$INSTALL_DIR/deploy/authentik/provision.py"
+  if [ -n "$ak_ready" ] && [ -f "$PROV" ] && command -v python3 >/dev/null; then
+    say "Provisioning the WebTerm OIDC application in Authentik…"
+    if OUT=$(AUTHENTIK_DOMAIN="$AUTHENTIK_DOMAIN" WEBTERM_DOMAIN="$DOMAIN" \
+             WEBTERM_OIDC_PROVIDER_NAME=Authentik AUTHENTIK_API_TOKEN="$AK_TOKEN" \
+             python3 "$PROV" 2>&1); then
+      printf '%s\n' "$OUT" | grep -E '^WEBTERM_OIDC_(ISSUER|CLIENT_ID|CLIENT_SECRET|PROVIDER_NAME)=' \
+        | while IFS='=' read -r _k _v; do set_env "$_k" "$_v"; done
+      docker compose -f docker-compose.prod.yml up -d app
+      say "SSO linked — add users to the 'wt-access' group in Authentik to grant them access."
+    else
+      warn "provisioning failed; WebTerm is up, SSO is off:"; printf '  %s\n' "$OUT" | tail -5
+    fi
+  else
+    warn "Authentik not ready yet — finish later with: cd $INSTALL_DIR && ./deploy.sh"
+  fi
+fi
 
 # O A DOUA instalare pe aceeaşi maşină nu are voie să deturneze unităţile primei. Numele lor
 # sunt FIXE (`webterm-backup`, `webterm-cert-check`) indiferent de `--dir`, iar

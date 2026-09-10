@@ -8,3 +8,6 @@ webauthn==3.0.0
 cryptography==50.0.0
 asyncssh==2.24.0
 telnetlib3==4.0.5
+# SSO/OIDC: validarea id_token (RS256 via JWKS). PyJWT e standardul de-facto pentru JWT în
+# Python; `[crypto]` trage cryptography (deja pinuit mai sus). Vezi gateway/app/oidc.py.
+PyJWT[crypto]==2.13.0

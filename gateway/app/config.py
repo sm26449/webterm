@@ -22,7 +22,7 @@ def _str(name, default):
     return (os.environ.get(name) or "").strip() or default
 
 
-GATEWAY_VERSION = "2.0.18"
+GATEWAY_VERSION = "2.0.19"
 
 # Referința imaginii care rulează (setată la deploy prin compose), afișată în UI
 # ca să știi mereu ce versiune e live. Gol în dev (rulare din surse).
@@ -100,6 +100,24 @@ AGENT_INSECURE = os.environ.get("WEBTERM_AGENT_INSECURE", "") == "1"
 # Optional fixed setup token; if unset, one is generated on first boot and
 # printed to the logs. Required to create the first account (anti-hijack).
 SETUP_TOKEN = os.environ.get("WEBTERM_SETUP_TOKEN") or None
+
+# --- SSO / OIDC (opţional; ex. Authentik) --------------------------------------------------
+# Login federat: userii vin printr-un IdP (OIDC), provizionaţi la primul login, admin complet
+# pe ACEASTĂ instanţă (WebTerm n-are RBAC intern — vezi THREAT-MODEL). Adminul local rămâne
+# break-glass. „Cine ajunge pe care instanţă" se decide în IdP (aplicaţie + grup) ŞI, ca
+# apărare în adâncime, prin `OIDC_ALLOWED_GROUPS` de mai jos. SSO e activ DOAR dacă issuer +
+# client_id + client_secret sunt toate setate; altfel WebTerm rulează exact ca înainte (local).
+OIDC_ISSUER = _str("WEBTERM_OIDC_ISSUER", "").rstrip("/")
+OIDC_CLIENT_ID = _str("WEBTERM_OIDC_CLIENT_ID", "")
+OIDC_CLIENT_SECRET = os.environ.get("WEBTERM_OIDC_CLIENT_SECRET", "")
+OIDC_PROVIDER_NAME = _str("WEBTERM_OIDC_PROVIDER_NAME", "SSO")
+OIDC_SCOPES = _str("WEBTERM_OIDC_SCOPES", "openid email profile")
+# grupuri cerute (virgulă): dacă e ne-gol, tokenul TREBUIE să conţină cel puţin unul, altfel
+# accesul e refuzat chiar dacă IdP-ul a emis tokenul. Gol = ne bazăm doar pe gating-ul din IdP.
+OIDC_ALLOWED_GROUPS = [g.strip() for g in _str("WEBTERM_OIDC_ALLOWED_GROUPS", "").split(",") if g.strip()]
+OIDC_ENABLED = bool(OIDC_ISSUER and OIDC_CLIENT_ID and OIDC_CLIENT_SECRET)
+# redirect_uri fix, derivat din PUBLIC_URL — niciodată din input de request (anti open-redirect)
+OIDC_REDIRECT_URI = PUBLIC_URL + "/api/oidc/callback"
 
 AGENT_FILE = Path(os.environ.get(
     "WEBTERM_AGENT_FILE",
