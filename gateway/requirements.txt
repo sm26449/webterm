@@ -1,13 +1,13 @@
 # Pinned to exact, tested versions for reproducible builds (security-critical:
 # cryptography / asyncssh / argon2-cffi / webauthn). Bump deliberately + re-test.
-fastapi==0.139.0
-uvicorn[standard]==0.50.0
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
 aiosqlite==0.22.1
 argon2-cffi==25.1.0
 webauthn==3.0.0
-cryptography==50.0.0
+cryptography==50.0.1
 asyncssh==2.24.0
 telnetlib3==4.0.5
 # SSO/OIDC: validarea id_token (RS256 via JWKS). PyJWT e standardul de-facto pentru JWT în
 # Python; `[crypto]` trage cryptography (deja pinuit mai sus). Vezi gateway/app/oidc.py.
-PyJWT[crypto]==2.10.1
+PyJWT[crypto]==2.13.0

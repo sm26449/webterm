@@ -9,7 +9,7 @@
 #   .venv/bin/pip install -r gateway/requirements.txt -r gateway/requirements-dev.txt
 #
 httpx==0.28.1
-websockets==16.1
+websockets==16.1.1
 # NU adăuga aici pachete care există deja în requirements.txt: pip rezolvă ambele fișiere
 # împreună, iar două pinuri diferite pe acelaşi pachet dau `ResolutionImpossible` şi NIMIC
 # nu se instalează. S-a întâmplat cu `asyncssh` (2.21.2 aici vs 2.24.0 acolo): comanda
