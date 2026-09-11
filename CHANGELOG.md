@@ -7,6 +7,64 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [2.1.0] — 2026-09-11 · agent (47)
+
+Gateway and interface only: the agent is unchanged at 47, nothing in the fleet needs updating.
+Features from a product review — each extends a mechanism that already existed rather than adding a
+new subsystem, and each keeps the "single replica, no always-on background state" design.
+
+### Added — fleet-scale onboarding (group enrollment tokens)
+
+- WebTerm called itself a *fleet* manager but hosts were enrolled one at a time. A **group
+  enrollment token** gives you one reusable install one-liner to run on many machines: each run
+  auto-creates a host with its **own** agent token, so every machine stays individually revocable —
+  the per-host trust model is not eroded; the group token only *authorizes* creation. Security-first
+  and opt-in: creating one re-auths **and** passes the second factor (it's a provisioning-class
+  credential); expiry is mandatory; a max-uses cap is enforced **atomically** (TOCTOU-safe — two
+  concurrent installs can't both slip past `max_uses=1`); it's revocable; every auto-enrollment is
+  **audited and alerted**. New hosts inherit the group's folder + require-2FA and get a placeholder
+  name that the agent's hostname replaces on first connect. Manage under Settings → Security.
+
+### Added — security-event alerts (login/credential events → webhook + email)
+
+- The alert path (`_fire` → email **and** webhook) already fired on new-device logins, credential
+  changes, agent relocation, host-offline and more. Three rare-but-critical events were missing and
+  now alert too: a **new account** created (a new equal admin), a **new automation token**, and a
+  **2FA-protected host unlocked** via step-up. Per-command fleet-run was deliberately *not* added —
+  it would be noise and is already in the audit log.
+
+### Added — host tags + tag filtering
+
+- Folders are a single hierarchy; **tags** scale a fleet ("all prod", "all debian"). Set tags when
+  adding/editing a host; the sidebar search matches them and each host shows clickable tag chips
+  that filter the list by that tag.
+
+### Added — SSH key helpers for direct-SSH hosts
+
+- For a direct-SSH host you can now **generate an Ed25519 key pair** from the UI (the private key is
+  stored encrypted in the vault, the public key is shown once to drop into `authorized_keys`) and
+  **show the public key** again later (re-derived from the stored key). No more `ssh-keygen` +
+  copying files by hand.
+
+### Added — saved fleet commands
+
+- Fleet-run can **save a command under a name** and reload it in one click. Stored per-browser
+  (localStorage), deliberately not in the gateway: an in-gateway scheduler would break the
+  no-always-on-state design, so this stays a manual, re-runnable convenience over the existing
+  guardrail-checked `/run` path.
+
+### Added — installable PWA
+
+- The manifest and icons existed; a small, deploy-safe **service worker** now makes WebTerm
+  installable (add to home screen / desktop). It is network-first for navigations and hash-named
+  assets (a deploy never serves a stale page) and **bypasses every live path** (`/api`, WebSockets,
+  `/agent`, forwards, `/install`) so terminals always hit the network.
+
+### Tests
+
+- New Playwright e2e for the group-token and tag UIs, wired into CI; hermetic backend suites for
+  group enrollment, the new security-event alerts, SSH key-gen, and host-tag normalization.
+
 ## [2.0.20] — 2026-09-11 · agent (47)
 
 Gateway and interface only: the agent is unchanged at 47, nothing in the fleet needs updating.

@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/sm26449/webterm/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/sm26449/webterm/actions/workflows/docker-publish.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v2.0.20-blue)](https://github.com/sm26449/webterm/tags)
+[![Version](https://img.shields.io/badge/version-v2.1.0-blue)](https://github.com/sm26449/webterm/tags)
 
 **Persistent terminals for your servers, in the browser.**
 
@@ -226,7 +226,17 @@ what it does not cover, is in [Security](#security) and
   identification** (unplug/replug the adapter). [details](docs/SERIAL-CONSOLE.md)
 - **Run across multiple hosts** (fleet console): one command → N hosts → a grid of
   live results (state, exit code, output per host), with a deliberate confirmation
-  first. "Copy report" as markdown. [details](docs/FLEET.md)
+  first. **Save a command** under a name and re-run it later (kept per-browser).
+  "Copy report" as markdown. [details](docs/FLEET.md)
+- **Fleet-scale onboarding**: a reusable **group enrollment token** — one install
+  one-liner run on many machines, each auto-registering as its own host with its own
+  agent token (individually revocable). Opt-in, expiring, revocable, use-capped, and
+  every auto-enrollment is audited + alerted. [how-to](docs/FLEET.md#fleet-scale-onboarding)
+- **Host tags**: free-form tags on hosts ("prod", "debian") on top of folders; the
+  sidebar search matches them and tag chips filter the list in one click
+- **SSH key helpers** (direct-SSH hosts): generate an Ed25519 key pair from the UI
+  (private key kept in the vault, public key shown to drop into `authorized_keys`), or
+  re-show the public key later — no `ssh-keygen` by hand
 - **Global command history**: search across every command run — on all hosts and
   sessions, from the command palette. Also a light audit log
 - **Agent diagnostics** (host menu, available even offline): live state, last
@@ -264,7 +274,10 @@ what it does not cover, is in [Security](#security) and
   (host → *Provision*; the same enrolment token, just delivered for you)
 - **Alerts by email *and* webhook** — Slack, Discord, Teams, or any endpoint that
   accepts JSON (`WEBTERM_ALERT_WEBHOOK`, or Settings → Notifications). The webhook is
-  independent of SMTP: if chat is where you actually look, you never need a mail server
+  independent of SMTP: if chat is where you actually look, you never need a mail server.
+  Covers resource thresholds **and** security events: login from a new device, a new
+  account or automation token, a credential change, an agent going offline, a
+  2FA-protected host unlocked, an auto-enrollment, a failing off-host backup
 - **Update notice**: the gateway checks whether a newer release exists and says so in
   the UI — it never updates itself (`WEBTERM_UPDATE_CHECK=0` turns the check off,
   `WEBTERM_UPDATE_COMMAND` sets the command it shows you)
@@ -500,7 +513,9 @@ flow on one laptop first (localhost, no domain), use `deploy/authentik/docker-co
 
 In the UI: **+ host** → you get a `curl … | sh` command. Copy/paste → Enter on the
 server, **as the user you want to work as** (the agent's user = the sessions'
-shell). The script downloads the agent into `~/.webterm/`, starts it and sets up
+shell). (Onboarding many machines at once? Use a **group enrollment token** instead —
+one reusable one-liner, each machine self-registers as its own host. See
+[Fleet-scale onboarding](docs/FLEET.md#fleet-scale-onboarding).) The script downloads the agent into `~/.webterm/`, starts it and sets up
 automatic restart (systemd `--user` with Restart=always, otherwise cron `@reboot`
 + watchdog). It also **appends one line to `~/.bashrc` and `~/.zshrc`** so shell integration
 (OSC 133) works — the commands panel, per-command exit codes and `cd` tracking depend on it.
