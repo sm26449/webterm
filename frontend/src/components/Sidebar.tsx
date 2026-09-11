@@ -249,7 +249,7 @@ export default function Sidebar(props: {
   const hostMatches = (h: Host) =>
     (!groupFilter || (h.folder || '') === groupFilter) &&
     (!q || h.name.toLowerCase().includes(q) || (h.hostname ?? '').toLowerCase().includes(q)
-      || (h.tags || []).some((tag) => tag.includes(q)))
+      || (h.tags || []).some((tag) => tag.toLowerCase().includes(q)))
 
   // Sidebar = navigare: card de host → deschide pagina hostului. Sesiunile
   // (active + închise, istoric, atașare) trăiesc în pagina hostului, nu aici.
@@ -570,7 +570,7 @@ export default function Sidebar(props: {
         {historyHits !== null && (
           <div className="border-t border-ink-800 pb-2">
             <div className="px-4 pb-1 pt-3 text-xs font-medium uppercase tracking-wide text-slate-400">
-              In session history
+              {t('sidebar.inSessionHistory')}
             </div>
             {historyHits.length === 0 && (
               <div className="px-4 py-1 text-xs text-slate-400">{t('sidebar.noResults')}</div>
@@ -680,7 +680,7 @@ export default function Sidebar(props: {
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4">
           <div className="glass flex max-w-sm flex-col items-center gap-3 rounded-2xl p-6 text-center">
             <span className="h-8 w-8 animate-spin rounded-full border-2 border-ink-600 border-t-sky-500" />
-            <div className="font-medium">Instalez agentul pe „{provisioning}"</div>
+            <div className="font-medium">{t('sidebar.provisioningTitle', { name: provisioning })}</div>
             <div className="text-sm text-slate-500">
               {t('sidebar.provisioning')}
             </div>
@@ -786,7 +786,7 @@ function HostMenu(props: {
             {(!props.connectionType || props.connectionType === 'agent') && (
               // și când e OFFLINE: exact atunci vrei să vezi DE CE (jurnal de conexiune)
               <button role="menuitem" className={`${item} text-slate-200`} onClick={() => { setOpen(false); props.onDiagnostic() }}>
-                <span className="grid h-4 w-4 place-items-center text-[13px]">🩺</span> Diagnostic
+                <span className="grid h-4 w-4 place-items-center text-[13px]">🩺</span> {t('sidebar.diagnostic')}
               </button>
             )}
             <button role="menuitem" className={`${item} text-slate-200`} onClick={() => { setOpen(false); props.onEdit() }}>
@@ -819,7 +819,7 @@ function HostMenu(props: {
                   onClick={() => { setHostScheme(props.hostId, null); setOpen(false) }}
                   className={`${item} py-1 text-xs ${!hostSchemeRaw(props.hostId) ? 'text-sky-400' : 'text-slate-400'}`}
                 >
-                  same as the global scheme
+                  {t('sidebar.globalScheme')}
                 </button>
                 {allSchemes().map((s) => (
                   <button
@@ -871,7 +871,7 @@ export function CommandModal(props: { cmd: string; cmdDedicated?: string; onClos
         <InstallCommand command={props.cmd} commandDedicated={props.cmdDedicated} />
         <div className="mt-4 text-right">
           <button onClick={props.onClose} className="rounded-lg px-4 py-2 text-sm text-slate-400 hover:bg-ink-800">
-            Close
+            {t('sidebar.close')}
           </button>
         </div>
       </div>

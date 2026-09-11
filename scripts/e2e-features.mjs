@@ -37,21 +37,26 @@ try {
   await page.waitForSelector('button[aria-label="Settings"]', { timeout: 15000 })
   check('login în UI', true)
 
-  // ── Token de înrolare DE GRUP (Settings → Security) ──
+  // ── Token de înrolare DE GRUP: în fluxul de onboarding (+ host → „Many machines") ──
+  await page.getByRole('button', { name: 'Add a host' }).first().click()
+  await page.getByRole('button', { name: 'Many machines', exact: true }).click()
+  await page.getByLabel('Token name').fill('prod-rollout')
+  await page.getByLabel('Current password').fill(PASSWORD)
+  await page.getByRole('button', { name: 'Create group token' }).click()
+  await waitText('/install/group/', 15000)
+  check('token de grup creat din „+ host" → one-liner reutilizabil afişat',
+    /\/install\/group\//.test(await page.locator('body').innerText()))
+  await page.keyboard.press('Escape')
+  await page.waitForTimeout(300)
+
+  // verific că apare şi în gestiunea din Settings → Security
   await page.click('button[aria-label="Settings"]')
   await page.getByRole('button', { name: 'Security', exact: true }).click()
-  const form = page.locator('[data-testid="enroll-group-form"]')
-  await form.locator('[aria-label="Token name"]').fill('prod-rollout')
-  await form.locator('[aria-label="Current password"]').fill(PASSWORD)
-  await form.getByRole('button', { name: 'Create group token' }).click()
-  await waitText('/install/group/', 15000)
-  check('token de grup creat → one-liner reutilizabil afişat',
-    /\/install\/group\//.test(await page.locator('body').innerText()))
-  check('tokenul apare în listă', await page.locator('text=prod-rollout').first().isVisible())
-
-  // închide Settings (focus-trap închide pe Escape)
+  await waitText('prod-rollout', 8000).catch(() => {})
+  check('tokenul apare în lista de management (Settings → Security)',
+    await page.locator('text=prod-rollout').first().isVisible())
   await page.keyboard.press('Escape')
-  await page.waitForSelector('[data-testid="enroll-group-form"]', { state: 'detached', timeout: 5000 }).catch(() => {})
+  await page.waitForTimeout(300)
 
   // ── ETICHETE pe host (Add-host) ──
   await page.getByRole('button', { name: 'Add a host' }).first().click()

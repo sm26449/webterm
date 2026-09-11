@@ -102,6 +102,7 @@ export default function SettingsModal(props: {
   const [tokens, setTokens] = useState<TokenRow[]>([])
   const [newTok, setNewTok] = useState({ name: '', read: true, run: false, days: 90, current_password: '' })
   const [tokPlain, setTokPlain] = useState('')     // valoarea în clar, arătată O SINGURĂ dată
+  const [tokCopied, setTokCopied] = useState(false)
   const [tokErr, setTokErr] = useState('')
   const loadTokens = () => api<TokenRow[]>('/api/tokens').then(setTokens).catch(() => {})
 
@@ -136,27 +137,11 @@ export default function SettingsModal(props: {
   type GroupRow = { id: number; name: string; created: number; expires: number
     max_uses: number; uses: number; folder: string; require_2fa: boolean
     revoked: boolean; expired: boolean }
+  // Crearea token-urilor de grup s-a mutat în fluxul de onboarding (AddHostModal → „Mai multe
+  // maşini"); aici rămâne doar GESTIUNEA credenţialei: listare + revocare.
   const [groups, setGroups] = useState<GroupRow[]>([])
-  const [newGroup, setNewGroup] = useState({ name: '', days: 30, max_uses: 0, folder: '',
-    require_2fa: false, current_password: '' })
-  const [groupCmd, setGroupCmd] = useState('')     // one-liner-ul, arătat O SINGURĂ dată
   const [groupErr, setGroupErr] = useState('')
-  const [groupCopied, setGroupCopied] = useState(false)
   const loadGroups = () => api<GroupRow[]>('/api/enroll-groups').then(setGroups).catch(() => {})
-
-  async function addGroup(e: FormEvent) {
-    e.preventDefault()
-    setGroupErr(''); setGroupCmd(''); setBusy(true)
-    try {
-      const r = await api<{ token: string; install_command: string; groups: GroupRow[] }>(
-        '/api/enroll-groups', { method: 'POST', body: JSON.stringify(newGroup) })
-      setGroups(r.groups); setGroupCmd(r.install_command)
-      setNewGroup({ name: '', days: 30, max_uses: 0, folder: '', require_2fa: false, current_password: '' })
-    } catch (e) {
-      setGroupErr(errText(e, t) || String(e))
-    }
-    setBusy(false)
-  }
 
   async function revokeGroup(g: GroupRow) {
     if (!window.confirm(t('settings.enrollGroups.revokeConfirm', { name: g.name }))) return
@@ -1774,9 +1759,15 @@ export default function SettingsModal(props: {
         <h3 className={heading}>{t('settings.tokens.title')}</h3>
         <p className="mt-1 text-xs text-slate-500">{t('settings.tokens.hint')}</p>
         {tokPlain && (
-          <div className="mt-2 rounded-lg bg-emerald-500/10 p-3 ring-1 ring-emerald-500/30">
+          <div role="status" aria-live="polite" className="mt-2 rounded-lg bg-emerald-500/10 p-3 ring-1 ring-emerald-500/30">
             <p className="text-xs text-emerald-300">{t('settings.tokens.copyNow')}</p>
-            <code className="mt-1 block break-all rounded bg-ink-900 px-2 py-1 font-mono text-xs text-slate-200">{tokPlain}</code>
+            <div className="mt-1 flex items-center gap-2">
+              <code className="min-w-0 flex-1 break-all rounded bg-ink-900 px-2 py-1 font-mono text-xs text-slate-200">{tokPlain}</code>
+              <button type="button" onClick={() => copyText(tokPlain).then((okc) => { if (okc) { setTokCopied(true); setTimeout(() => setTokCopied(false), 1500) } })}
+                className="shrink-0 text-xs wt-link hover:underline">
+                {tokCopied ? t('settings.cloud.copied') : t('settings.cloud.copy')}
+              </button>
+            </div>
           </div>
         )}
         <ul className="mt-2 flex flex-col gap-1">
@@ -1836,18 +1827,13 @@ export default function SettingsModal(props: {
         {/* ── Token-uri de înrolare DE GRUP (onboarding la scară) ── */}
         <h3 className={heading}>{t('settings.enrollGroups.title')}</h3>
         <p className="mt-1 text-xs text-slate-500">{t('settings.enrollGroups.hint')}</p>
-        {groupCmd && (
-          <div className="mt-2 rounded-lg bg-emerald-500/10 p-3 ring-1 ring-emerald-500/30">
-            <p className="text-xs text-emerald-300">{t('settings.enrollGroups.copyNow')}</p>
-            <div className="mt-1 flex items-center gap-2">
-              <code className="min-w-0 flex-1 break-all rounded bg-ink-900 px-2 py-1 font-mono text-xs text-slate-200">{groupCmd}</code>
-              <button type="button" onClick={() => copyText(groupCmd).then((okc) => { if (okc) { setGroupCopied(true); setTimeout(() => setGroupCopied(false), 1500) } })}
-                className="shrink-0 text-xs wt-link hover:underline">
-                {groupCopied ? t('settings.cloud.copied') : t('settings.cloud.copy')}
-              </button>
-            </div>
-          </div>
+        {/* crearea trăieşte în fluxul de onboarding (+ host → „Mai multe maşini"); aici e doar
+            gestiunea credenţialei (listă + revocare), plus un pointer ca s-o găseşti. */}
+        <p className="mt-1 text-xs text-slate-500">{t('settings.enrollGroups.createHint')}</p>
+        {groups.length === 0 && (
+          <p className="mt-2 text-xs text-slate-600">{t('settings.enrollGroups.none')}</p>
         )}
+        {groupErr && <p className="mt-2 text-sm wt-danger">{groupErr}</p>}
         <ul className="mt-2 flex flex-col gap-1">
           {groups.map((g) => (
             <li key={g.id} className="flex items-center gap-2 rounded-lg bg-ink-800/60 px-3 py-2 text-sm ring-1 ring-ink-700">
@@ -1871,43 +1857,6 @@ export default function SettingsModal(props: {
             </li>
           ))}
         </ul>
-        <form onSubmit={addGroup} data-testid="enroll-group-form" className="mt-3 flex flex-col gap-2">
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <input value={newGroup.name} onChange={(e) => setNewGroup({ ...newGroup, name: e.target.value })}
-              placeholder={t('settings.enrollGroups.namePlaceholder')} aria-label={t('settings.enrollGroups.name')} className={field} />
-            <label className="flex items-center gap-2 text-sm text-slate-400">
-              {t('settings.tokens.days')}
-              <input type="number" min={1} max={365} value={newGroup.days}
-                onChange={(e) => setNewGroup({ ...newGroup, days: Number(e.target.value) })}
-                aria-label={t('settings.tokens.days')} className={field + ' w-20'} />
-            </label>
-            <label className="flex items-center gap-2 text-sm text-slate-400">
-              {t('settings.enrollGroups.maxUses')}
-              <input type="number" min={0} max={10000} value={newGroup.max_uses}
-                onChange={(e) => setNewGroup({ ...newGroup, max_uses: Number(e.target.value) })}
-                aria-label={t('settings.enrollGroups.maxUses')} className={field + ' w-20'} />
-            </label>
-          </div>
-          <div className="flex flex-wrap items-center gap-4 text-sm text-slate-400">
-            <input value={newGroup.folder} onChange={(e) => setNewGroup({ ...newGroup, folder: e.target.value })}
-              placeholder={t('settings.enrollGroups.folder')} aria-label={t('settings.enrollGroups.folder')} className={field + ' sm:w-48'} />
-            <label className="flex items-center gap-2">
-              <input type="checkbox" checked={newGroup.require_2fa}
-                onChange={(e) => setNewGroup({ ...newGroup, require_2fa: e.target.checked })} />
-              {t('settings.enrollGroups.require2fa')}
-            </label>
-          </div>
-          <input type="password" value={newGroup.current_password} autoComplete="current-password"
-            onChange={(e) => setNewGroup({ ...newGroup, current_password: e.target.value })}
-            placeholder={t('settings.currentPasswordConfirm')} aria-label={t('settings.currentPassword')} className={field} />
-          <div className="flex items-center gap-3">
-            <button type="submit" disabled={busy || !newGroup.current_password || !newGroup.name}
-              className="rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-50">
-              {t('settings.enrollGroups.create')}
-            </button>
-            {groupErr && <span className="text-sm wt-danger">{groupErr}</span>}
-          </div>
-        </form>
 
         {/* ── Guardrail de comenzi ── */}
         <h3 className={heading}>{t('settings.guardrail')}</h3>

@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from 'react'
 import { matchCommandRule } from '../lib/commands'
-import { errText, api, CommandGuard, Host } from '../lib/api'
+import { errText, api, ensureStepup, CommandGuard, Host } from '../lib/api'
 import { useI18n } from '../lib/i18n'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { copyText } from '../lib/clipboard'
@@ -68,10 +68,21 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
     }
     const confirmed = rule ? window.confirm(t('fleet.guardConfirm', { pattern: rule.pattern })) : false
     if (rule && !confirmed) return
+    // Pre-flight step-up: fiecare host cu require_2fa are nevoie de propria fereastră. Le deblocăm
+    // SERIAL aici (un prompt pe rând) ca dispatch-ul paralel de mai jos să nu declanşeze N ceremonii
+    // passkey simultan — sau, pe SSO, un redirect de pagină întreagă care ar omorî toată rularea.
+    // Un host pentru care userul anulează step-up-ul e marcat „skipped", nu bombardat cu 403-uri.
+    const skipped: Record<number, boolean> = {}
+    for (const h of chosen.filter((x) => x.require_2fa)) {
+      if (!(await ensureStepup(h.id))) skipped[h.id] = true
+    }
+    const dispatch = chosen.filter((h) => !skipped[h.id])
     setPhase('running')
-    setResults(Object.fromEntries(chosen.map((h) => [h.id, { status: 'running' } as RunResult])))
+    setResults(Object.fromEntries(chosen.map((h) => [h.id,
+      skipped[h.id] ? { status: 'error', error: t('fleet.stepupSkipped') } as RunResult
+        : { status: 'running' } as RunResult])))
     // o cerere PER host, în paralel; fiecare rând se completează când răspunde
-    await Promise.all(chosen.map(async (h) => {
+    await Promise.all(dispatch.map(async (h) => {
       try {
         const r = await api<RunResult>(`/api/hosts/${h.id}/run`, {
           method: 'POST', body: JSON.stringify({ command: command.trim(), timeout: 60, confirmed: true }),
@@ -160,7 +171,7 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
                 </div>
                 <div className="flex flex-wrap gap-1.5">
                   {runnable.map((h) => (
-                    <button key={h.id} onClick={() => toggle(h.id)}
+                    <button key={h.id} onClick={() => toggle(h.id)} aria-pressed={selected.has(h.id)}
                       className={`rounded-lg border px-2.5 py-1 font-mono text-[13px] ${
                         selected.has(h.id) ? 'border-sky-500 bg-sky-500/10 wt-accent' : 'border-ink-700 bg-ink-800 text-slate-400 hover:border-ink-600'}`}>
                       {selected.has(h.id) ? '✓ ' : ''}{h.name}

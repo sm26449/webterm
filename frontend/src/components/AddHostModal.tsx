@@ -43,6 +43,29 @@ export default function AddHostModal(props: { onClose: () => void; host?: Host; 
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
+  // Onboarding la scară: „O maşină" (formularul clasic) vs „Mai multe maşini" (token de grup —
+  // un one-liner reutilizabil). Creat AICI, unde userul chiar adaugă hosturi; gestiunea (listă +
+  // revocare) rămâne în Settings → Security. Doar la CREARE (la editare, un host = un host).
+  const [mode, setMode] = useState<'one' | 'many'>('one')
+  const [grp, setGrp] = useState({ name: '', days: 30, max_uses: 0, folder: '', require_2fa: false,
+    current_password: '' })
+  const [grpCmd, setGrpCmd] = useState('')
+
+  async function submitGroup(e: FormEvent) {
+    e.preventDefault()
+    setError(''); setGrpCmd(''); setBusy(true)
+    try {
+      const r = await api<{ install_command: string }>('/api/enroll-groups',
+        { method: 'POST', body: JSON.stringify(grp) })
+      setGrpCmd(r.install_command)
+      props.onSaved?.()      // reîmprospătează lista din Settings dacă e deschisă
+    } catch (err) {
+      setError(errText(err, t) || String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   // host agent: după creare, așteaptă agentul să apară online
   useEffect(() => {
     if (!created || created.connection_type !== 'agent') return
@@ -111,9 +134,92 @@ export default function AddHostModal(props: { onClose: () => void; host?: Host; 
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
       <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={edit ? t('addhost.editTitle') : t('addhost.title')}
         className="glass max-h-[90vh] w-full max-w-xl overflow-y-auto rounded-2xl p-6">
-        {!created ? (
+        {!created && mode === 'many' && !edit ? (
+          <div className="space-y-4">
+            <h2 className="font-semibold">{t('addhost.title')}</h2>
+            {/* comutator O maşină / Mai multe maşini */}
+            <div className="flex gap-1 rounded-xl bg-ink-800 p-1 text-sm">
+              {(['one', 'many'] as const).map((m) => (
+                <button key={m} type="button" onClick={() => setMode(m)}
+                  className={`flex-1 rounded-lg px-3 py-1.5 font-medium transition ${
+                    mode === m ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
+                  {m === 'one' ? t('addhost.modeOne') : t('addhost.modeMany')}
+                </button>
+              ))}
+            </div>
+            {grpCmd ? (
+              <div role="status" aria-live="polite" className="space-y-3">
+                <p className="text-sm text-slate-300">{t('addhost.groupCreated')}</p>
+                <p className="text-xs text-emerald-300">{t('settings.enrollGroups.copyNow')}</p>
+                <InstallCommand command={grpCmd} />
+                <p className="text-xs text-slate-500">{t('addhost.groupManageHint')}</p>
+                <div className="text-right">
+                  <button type="button" onClick={props.onClose}
+                    className="rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-700">
+                    {t('addhost.done')}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <form onSubmit={submitGroup} className="space-y-3">
+                <p className="text-xs text-slate-500">{t('addhost.manyDesc')}</p>
+                <label className="block">
+                  <span className={label}>{t('settings.enrollGroups.name')}</span>
+                  <input autoFocus required placeholder={t('settings.enrollGroups.namePlaceholder')}
+                    value={grp.name} onChange={(e) => setGrp({ ...grp, name: e.target.value })} className={field} />
+                </label>
+                <div className="flex gap-2">
+                  <label className="block flex-1">
+                    <span className={label}>{t('settings.tokens.days')}</span>
+                    <input type="number" min={1} max={365} value={grp.days}
+                      onChange={(e) => setGrp({ ...grp, days: Number(e.target.value) })} className={field} />
+                  </label>
+                  <label className="block flex-1">
+                    <span className={label}>{t('settings.enrollGroups.maxUses')}</span>
+                    <input type="number" min={0} max={10000} value={grp.max_uses}
+                      onChange={(e) => setGrp({ ...grp, max_uses: Number(e.target.value) })} className={field} />
+                  </label>
+                </div>
+                <label className="block">
+                  <span className={label}>{t('settings.enrollGroups.folder')}</span>
+                  <input value={grp.folder} onChange={(e) => setGrp({ ...grp, folder: e.target.value })} className={field} />
+                </label>
+                <label className="flex cursor-pointer items-center gap-2.5 text-sm text-slate-300">
+                  <input type="checkbox" checked={grp.require_2fa}
+                    onChange={(e) => setGrp({ ...grp, require_2fa: e.target.checked })}
+                    className="h-4 w-4 rounded accent-sky-600" />
+                  {t('settings.enrollGroups.require2fa')}
+                </label>
+                <input type="password" value={grp.current_password} autoComplete="current-password"
+                  onChange={(e) => setGrp({ ...grp, current_password: e.target.value })}
+                  placeholder={t('settings.currentPasswordConfirm')} aria-label={t('settings.currentPassword')} className={field} />
+                {error && <div className="text-sm wt-danger">{error}</div>}
+                <div className="flex justify-end gap-2">
+                  <button type="button" onClick={props.onClose} className="rounded-lg px-4 py-2 text-sm text-slate-400 hover:bg-ink-800">
+                    {t('addhost.cancel')}
+                  </button>
+                  <button disabled={busy || !grp.name || !grp.current_password}
+                    className="rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-50">
+                    {t('settings.enrollGroups.create')}
+                  </button>
+                </div>
+              </form>
+            )}
+          </div>
+        ) : !created ? (
           <form onSubmit={submit} className="space-y-4">
             <h2 className="font-semibold">{edit ? t('addhost.editTitle', { name: edit.name }) : t('addhost.title')}</h2>
+            {!edit && (
+              <div className="flex gap-1 rounded-xl bg-ink-800 p-1 text-sm">
+                {(['one', 'many'] as const).map((m) => (
+                  <button key={m} type="button" onClick={() => setMode(m)}
+                    className={`flex-1 rounded-lg px-3 py-1.5 font-medium transition ${
+                      mode === m ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
+                    {m === 'one' ? t('addhost.modeOne') : t('addhost.modeMany')}
+                  </button>
+                ))}
+              </div>
+            )}
             {edit && (
               <p className="text-xs text-slate-500">{t('addhost.editHint')}</p>
             )}
@@ -216,7 +322,12 @@ export default function AddHostModal(props: { onClose: () => void; host?: Host; 
                         <input type="password" placeholder={t('addhost.passphrasePlaceholder')} value={passphrase}
                           onChange={(e) => setPassphrase(e.target.value)} className={field} autoComplete="new-password" />
                       </label>
-                      {/* generarea/afişarea cheii necesită un host existent (are nevoie de host_id) */}
+                      {/* generarea/afişarea cheii necesită un host existent (are nevoie de host_id).
+                          La CREARE nu putem genera încă — spunem clar de ce, ca userul fără cheie
+                          să nu ajungă în fundătură crezând că trebuie să lipească una. */}
+                      {!edit && (
+                        <p className="text-xs text-slate-500">{t('addhost.genKeyAfterSave')}</p>
+                      )}
                       {edit && (
                         <div className="rounded-lg bg-ink-800/60 p-2 ring-1 ring-ink-700">
                           <div className="flex flex-wrap gap-2">
