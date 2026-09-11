@@ -132,6 +132,41 @@ export default function SettingsModal(props: {
     }
   }
 
+  // ── Token-uri de înrolare DE GRUP (onboarding la scară de flotă) ──
+  type GroupRow = { id: number; name: string; created: number; expires: number
+    max_uses: number; uses: number; folder: string; require_2fa: boolean
+    revoked: boolean; expired: boolean }
+  const [groups, setGroups] = useState<GroupRow[]>([])
+  const [newGroup, setNewGroup] = useState({ name: '', days: 30, max_uses: 0, folder: '',
+    require_2fa: false, current_password: '' })
+  const [groupCmd, setGroupCmd] = useState('')     // one-liner-ul, arătat O SINGURĂ dată
+  const [groupErr, setGroupErr] = useState('')
+  const [groupCopied, setGroupCopied] = useState(false)
+  const loadGroups = () => api<GroupRow[]>('/api/enroll-groups').then(setGroups).catch(() => {})
+
+  async function addGroup(e: FormEvent) {
+    e.preventDefault()
+    setGroupErr(''); setGroupCmd(''); setBusy(true)
+    try {
+      const r = await api<{ token: string; install_command: string; groups: GroupRow[] }>(
+        '/api/enroll-groups', { method: 'POST', body: JSON.stringify(newGroup) })
+      setGroups(r.groups); setGroupCmd(r.install_command)
+      setNewGroup({ name: '', days: 30, max_uses: 0, folder: '', require_2fa: false, current_password: '' })
+    } catch (e) {
+      setGroupErr(errText(e, t) || String(e))
+    }
+    setBusy(false)
+  }
+
+  async function revokeGroup(g: GroupRow) {
+    if (!window.confirm(t('settings.enrollGroups.revokeConfirm', { name: g.name }))) return
+    try {
+      setGroups(await api<GroupRow[]>(`/api/enroll-groups/${g.id}/revoke`, { method: 'POST' }))
+    } catch (e) {
+      setGroupErr(errText(e, t) || String(e))
+    }
+  }
+
   // ── Conturi: mai multe, TOATE cu drepturi depline (fără RBAC — vezi API-ul) ──
   type UserRow = { id: number; email: string; created: number; totp: boolean; passkeys: number; is_self: boolean }
   const [users, setUsers] = useState<UserRow[]>([])
@@ -762,6 +797,7 @@ export default function SettingsModal(props: {
     if (cat === 'preferinte' && upd === null) api<UpdateInfo>('/api/version').then(setUpd).catch(() => {})
     if (cat === 'cont' && users.length === 0) loadUsers()
     if (cat === 'securitate' && tokens.length === 0) loadTokens()
+    if (cat === 'securitate' && groups.length === 0) loadGroups()
     if (cat === 'securitate' && devices === null) loadDevices()
     if (cat === 'backup') { markBackupSeen(); if (cloud === null) loadCloud() }
     // jurnalul se încarcă LENEȘ (la deschiderea secțiunii): e singura listă din modal care
@@ -1794,6 +1830,82 @@ export default function SettingsModal(props: {
               {t('settings.tokens.create')}
             </button>
             {tokErr && <span className="text-sm wt-danger">{tokErr}</span>}
+          </div>
+        </form>
+
+        {/* ── Token-uri de înrolare DE GRUP (onboarding la scară) ── */}
+        <h3 className={heading}>{t('settings.enrollGroups.title')}</h3>
+        <p className="mt-1 text-xs text-slate-500">{t('settings.enrollGroups.hint')}</p>
+        {groupCmd && (
+          <div className="mt-2 rounded-lg bg-emerald-500/10 p-3 ring-1 ring-emerald-500/30">
+            <p className="text-xs text-emerald-300">{t('settings.enrollGroups.copyNow')}</p>
+            <div className="mt-1 flex items-center gap-2">
+              <code className="min-w-0 flex-1 break-all rounded bg-ink-900 px-2 py-1 font-mono text-xs text-slate-200">{groupCmd}</code>
+              <button type="button" onClick={() => copyText(groupCmd).then((okc) => { if (okc) { setGroupCopied(true); setTimeout(() => setGroupCopied(false), 1500) } })}
+                className="shrink-0 text-xs wt-link hover:underline">
+                {groupCopied ? t('settings.cloud.copied') : t('settings.cloud.copy')}
+              </button>
+            </div>
+          </div>
+        )}
+        <ul className="mt-2 flex flex-col gap-1">
+          {groups.map((g) => (
+            <li key={g.id} className="flex items-center gap-2 rounded-lg bg-ink-800/60 px-3 py-2 text-sm ring-1 ring-ink-700">
+              <span className="min-w-0 flex-1 truncate text-slate-200">{g.name}
+                {g.folder && <span className="ml-1 text-[11px] text-slate-500">→ {g.folder}</span>}
+                {g.require_2fa ? <span className="ml-1 text-[11px] text-amber-400">2FA</span> : null}
+              </span>
+              <span className="shrink-0 text-[11px] text-slate-500">
+                {t('settings.enrollGroups.uses', { n: g.uses, max: g.max_uses || '∞' })}
+              </span>
+              <span className={`shrink-0 text-[11px] ${g.revoked || g.expired ? 'wt-danger' : 'text-slate-500'}`}>
+                {g.revoked ? t('settings.enrollGroups.revoked')
+                  : g.expired ? t('settings.tokens.expired')
+                    : t('settings.tokens.expires', { date: fmtTs(g.expires, 'date') })}
+              </span>
+              {!g.revoked && (
+                <button onClick={() => revokeGroup(g)} className="shrink-0 text-xs wt-danger hover:underline">
+                  {t('settings.tokens.revoke')}
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+        <form onSubmit={addGroup} className="mt-3 flex flex-col gap-2">
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <input value={newGroup.name} onChange={(e) => setNewGroup({ ...newGroup, name: e.target.value })}
+              placeholder={t('settings.enrollGroups.namePlaceholder')} aria-label={t('settings.enrollGroups.name')} className={field} />
+            <label className="flex items-center gap-2 text-sm text-slate-400">
+              {t('settings.tokens.days')}
+              <input type="number" min={1} max={365} value={newGroup.days}
+                onChange={(e) => setNewGroup({ ...newGroup, days: Number(e.target.value) })}
+                aria-label={t('settings.tokens.days')} className={field + ' w-20'} />
+            </label>
+            <label className="flex items-center gap-2 text-sm text-slate-400">
+              {t('settings.enrollGroups.maxUses')}
+              <input type="number" min={0} max={10000} value={newGroup.max_uses}
+                onChange={(e) => setNewGroup({ ...newGroup, max_uses: Number(e.target.value) })}
+                aria-label={t('settings.enrollGroups.maxUses')} className={field + ' w-20'} />
+            </label>
+          </div>
+          <div className="flex flex-wrap items-center gap-4 text-sm text-slate-400">
+            <input value={newGroup.folder} onChange={(e) => setNewGroup({ ...newGroup, folder: e.target.value })}
+              placeholder={t('settings.enrollGroups.folder')} aria-label={t('settings.enrollGroups.folder')} className={field + ' sm:w-48'} />
+            <label className="flex items-center gap-2">
+              <input type="checkbox" checked={newGroup.require_2fa}
+                onChange={(e) => setNewGroup({ ...newGroup, require_2fa: e.target.checked })} />
+              {t('settings.enrollGroups.require2fa')}
+            </label>
+          </div>
+          <input type="password" value={newGroup.current_password} autoComplete="current-password"
+            onChange={(e) => setNewGroup({ ...newGroup, current_password: e.target.value })}
+            placeholder={t('settings.currentPasswordConfirm')} aria-label={t('settings.currentPassword')} className={field} />
+          <div className="flex items-center gap-3">
+            <button type="submit" disabled={busy || !newGroup.current_password || !newGroup.name}
+              className="rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-50">
+              {t('settings.enrollGroups.create')}
+            </button>
+            {groupErr && <span className="text-sm wt-danger">{groupErr}</span>}
           </div>
         </form>
 
