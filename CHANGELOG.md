@@ -60,9 +60,10 @@ Findings from a full audit pass (security, responsive/design, dead code).
 
 ### Removed — dead code
 
-- Unused functions (`cloudbackup.forget_all`, agent `tmux_has_session`, `cliphistory.clear`), a
-  dead CSS rule (`.wt-caret` + its `@keyframes`), ten unused i18n keys (from both catalogs), and a
-  few unused imports/locals in tests. No behaviour change.
+- Unused functions (`cloudbackup.forget_all`, `cliphistory.clear`), a dead CSS rule (`.wt-caret` +
+  its `@keyframes`), ten unused i18n keys (from both catalogs), and a few unused imports/locals in
+  tests. No behaviour change. (The agent is deliberately left byte-identical — a dead-code cleanup
+  isn't worth a fleet-wide agent update, so it stays at 47.)
 
 ### Hardened — follow-up from a full audit (security / reliability / coverage)
 
