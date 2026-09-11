@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useRef, useState } from 'react'
 import { errText, api, Host } from '../lib/api'
+import { copyText } from '../lib/clipboard'
 import { useI18n } from '../lib/i18n'
 import InstallCommand from './InstallCommand'
 import { useFocusTrap } from '../lib/useFocusTrap'
@@ -30,6 +31,9 @@ export default function AddHostModal(props: { onClose: () => void; host?: Host; 
     (edit?.auth_method as 'password' | 'key') || 'password')
   const [secret, setSecret] = useState('')
   const [passphrase, setPassphrase] = useState('')
+  const [sshPub, setSshPub] = useState('')       // cheia publică generată/derivată, de copiat
+  const [sshBusy, setSshBusy] = useState(false)
+  const [sshCopied, setSshCopied] = useState(false)
   const [policy, setPolicy] = useState<'stored' | 'ask'>(
     (edit?.credential_policy as 'stored' | 'ask') || 'stored')
   const [require2fa, setRequire2fa] = useState(edit?.require_2fa ?? false)
@@ -83,6 +87,23 @@ export default function AddHostModal(props: { onClose: () => void; host?: Host; 
       setError(errText(err, t) || t('addhost.genericError'))
     } finally {
       setBusy(false)
+    }
+  }
+
+  // Helpers de cheie SSH (doar pe hosturi SSH deja create): generează o pereche pe gateway şi
+  // arată PUBLICA de pus în authorized_keys, ori derivă publica din cea stocată.
+  async function sshKeyAction(path: 'generate' | 'public') {
+    if (!edit) return
+    setSshBusy(true); setError('')
+    try {
+      const r = await api<{ public_key: string }>(`/api/hosts/${edit.id}/ssh-key/${path}`,
+        { method: 'POST', body: JSON.stringify({}) })
+      setSshPub(r.public_key)
+      if (path === 'generate') setSecret('')     // privata e acum stocată; golim câmpul
+    } catch (err) {
+      setError(errText(err, t) || String(err))
+    } finally {
+      setSshBusy(false)
     }
   }
 
@@ -195,6 +216,33 @@ export default function AddHostModal(props: { onClose: () => void; host?: Host; 
                         <input type="password" placeholder={t('addhost.passphrasePlaceholder')} value={passphrase}
                           onChange={(e) => setPassphrase(e.target.value)} className={field} autoComplete="new-password" />
                       </label>
+                      {/* generarea/afişarea cheii necesită un host existent (are nevoie de host_id) */}
+                      {edit && (
+                        <div className="rounded-lg bg-ink-800/60 p-2 ring-1 ring-ink-700">
+                          <div className="flex flex-wrap gap-2">
+                            <button type="button" disabled={sshBusy} onClick={() => sshKeyAction('generate')}
+                              className="rounded-lg bg-ink-800 px-2.5 py-1 text-xs text-slate-200 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-40">
+                              {t('addhost.genKey')}
+                            </button>
+                            <button type="button" disabled={sshBusy} onClick={() => sshKeyAction('public')}
+                              className="rounded-lg bg-ink-800 px-2.5 py-1 text-xs text-slate-200 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-40">
+                              {t('addhost.showPubKey')}
+                            </button>
+                          </div>
+                          {sshPub && (
+                            <div className="mt-2">
+                              <p className="text-[11px] text-slate-500">{t('addhost.pubKeyHint')}</p>
+                              <div className="mt-1 flex items-center gap-2">
+                                <code className="min-w-0 flex-1 break-all rounded bg-ink-900 px-2 py-1 font-mono text-[11px] text-slate-200">{sshPub}</code>
+                                <button type="button" onClick={() => copyText(sshPub).then((okc) => { if (okc) { setSshCopied(true); setTimeout(() => setSshCopied(false), 1500) } })}
+                                  className="shrink-0 text-xs wt-link hover:underline">
+                                  {sshCopied ? t('settings.cloud.copied') : t('settings.cloud.copy')}
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   ) : (
                     <label className="block">

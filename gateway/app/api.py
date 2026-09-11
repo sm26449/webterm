@@ -3681,6 +3681,46 @@ async def host_stepup(host_id: int, body: SessionIn, request: Request,
     return {"ok": True, "window": security.STEPUP_WINDOW}
 
 
+@router.post("/api/hosts/{host_id}/ssh-key/generate")
+async def host_generate_ssh_key(host_id: int, body: SessionIn, user=Depends(security.require_user)):
+    """Generează o pereche de chei Ed25519 PENTRU un host SSH: stochează privata ca credenţial
+    (criptată în seif) şi întoarce PUBLICA o singură dată, ca s-o pui în `authorized_keys` pe
+    server. Scuteşte userul de `ssh-keygen` + mutat fişiere. Schimbă credenţialul → clasă de
+    provisioning, deci cere step-up pe hosturile 2FA (ca update_host)."""
+    row = await db.fetchone("SELECT * FROM hosts WHERE id=?", host_id)
+    if not row:
+        raise HTTPException(404)
+    if (row["connection_type"] or "agent") != "ssh":
+        raise ApiError(400, "sshkey.notSsh", "SSH key generation is only for SSH hosts")
+    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
+    import asyncssh
+    k = asyncssh.generate_private_key("ssh-ed25519")
+    await db.execute(
+        "UPDATE hosts SET auth_method='key', credential_policy='stored', credential_encrypted=? WHERE id=?",
+        security.encrypt_secret(k.export_private_key().decode()), host_id)
+    log.info("generated a new SSH key for host #%d (by %s)", host_id, user["email"])
+    return {"public_key": k.export_public_key().decode().strip(), "fingerprint": k.get_fingerprint()}
+
+
+@router.post("/api/hosts/{host_id}/ssh-key/public")
+async def host_ssh_key_public(host_id: int, body: SessionIn, user=Depends(security.require_user)):
+    """Derivă cheia PUBLICĂ din privata stocată (ca s-o re-copiezi în authorized_keys) + arată
+    known_hosts-ul pinuit. POST (nu GET) fiindcă are nevoie de credenţialele de step-up în corp."""
+    row = await db.fetchone("SELECT * FROM hosts WHERE id=?", host_id)
+    if not row:
+        raise HTTPException(404)
+    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
+    if not row["credential_encrypted"] or (row["auth_method"] or "") != "key":
+        raise ApiError(400, "sshkey.none", "this host has no stored SSH key")
+    import asyncssh
+    try:
+        k = asyncssh.import_private_key(security.decrypt_secret(row["credential_encrypted"]))
+    except Exception:                                   # noqa: BLE001
+        raise ApiError(400, "sshkey.badKey", "the stored SSH credential is not a private key (it may be a password)")
+    return {"public_key": k.export_public_key().decode().strip(), "fingerprint": k.get_fingerprint(),
+            "known_hosts": row["known_hosts"] or ""}
+
+
 @router.post("/api/hosts/{host_id}/sessions")
 async def create_session(host_id: int, body: SessionIn, request: Request,
                          user=Depends(security.require_user)):
