@@ -10,6 +10,9 @@
 #
 httpx==0.28.1
 websockets==16.1
+# server FTP-TLS in-process pentru backup_ftps_test (destinaţia FTPS end-to-end peste TLS real).
+# Doar test: la runtime folosim ftplib din stdlib.
+pyftpdlib==2.2.0
 # NU adăuga aici pachete care există deja în requirements.txt: pip rezolvă ambele fișiere
 # împreună, iar două pinuri diferite pe acelaşi pachet dau `ResolutionImpossible` şi NIMIC
 # nu se instalează. S-a întâmplat cu `asyncssh` (2.21.2 aici vs 2.24.0 acolo): comanda
