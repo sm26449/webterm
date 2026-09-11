@@ -7,6 +7,45 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [2.1.1] — 2026-09-11 · agent (47)
+
+Gateway and interface only; agent unchanged at 47. A UX / accessibility pass over the 2.1.0
+features, from a follow-up frontend audit.
+
+### Changed — fleet onboarding is where you add hosts
+
+- Creating a **group enrollment token** moved from Settings → Security (three levels deep, never
+  linked to "+ host") into the Add-host flow: a **"One host / Many machines"** switch, with the
+  reusable install one-liner shown in place. The token **list + revoke** stay in Settings → Security
+  as the credential-management surface (with a pointer and an empty state). Onboarding a fleet is now
+  found where you'd look for it.
+
+### Fixed
+
+- **Hardcoded strings in the sidebar** were showing in English (or, in one case, Romanian) instead
+  of going through the translation layer — including one where the translation key already existed,
+  unused. Now routed through `t()`; a real bug where **tag filtering was case-sensitive**
+  (`Prod` didn't match a search for `prod`) is fixed too.
+- **Fleet-run on 2FA-protected hosts** no longer fires a passkey prompt per host in parallel (or an
+  SSO redirect that abandoned the whole run). The required hosts are unlocked **serially before**
+  the parallel dispatch; a host whose step-up is cancelled is marked skipped.
+- **SSH key generation** is no longer a dead end when adding a new host — a hint explains to save
+  the host first, then generate the key (generation needs the host to exist).
+
+### Accessibility
+
+- One-time secret reveals (group token, personal automation token) now **announce** to screen
+  readers (`role=status`/`aria-live`), and the personal token gained the **copy button** it was
+  missing. The terminal region carries a permanent screen-reader hint (how to enable Accessibility
+  mode, `Ctrl+M` to leave) so a blind user isn't dropped into silence. Fleet host-selection chips
+  got `aria-pressed`; the group-token rows got text alternatives for the folder arrow and 2FA badge.
+
+### Friendly
+
+- Add-host **tag input suggests tags already in use** (stops `web` / `webserver` fragmentation).
+  Saved fleet commands use an inline name field (not a browser prompt), **confirm before
+  overwriting**, and say they're saved in this browser. The group-token list shows an empty state.
+
 ## [2.1.0] — 2026-09-11 · agent (47)
 
 Gateway and interface only: the agent is unchanged at 47, nothing in the fleet needs updating.
