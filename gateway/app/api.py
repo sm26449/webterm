@@ -546,6 +546,29 @@ def _token_row(r) -> dict:
             "expired": r["expires"] < time.time()}
 
 
+# ── Token de înrolare DE GRUP (onboarding la scară de flotă) ─────────────────
+ENROLL_GROUP_MAX_DAYS = 365
+ENROLL_GROUP_MAX_USES = 10000
+
+
+class EnrollGroupIn(BaseModel):
+    name: str
+    days: int = 30
+    max_uses: int = 0              # 0 = nelimitat (dar expirarea e OBLIGATORIE)
+    folder: str = ""              # hosturile noi aterizează aici
+    require_2fa: bool = False     # hosturile noi moştenesc asta
+    current_password: str = ""    # re-auth: un token reutilizabil de creare hosturi = provisioning
+    totp_code: str = ""           # second_gate (ca la crearea de cont)
+    email_code: str = ""
+
+
+def _enroll_group_row(r) -> dict:
+    return {"id": r["id"], "name": r["name"], "created": r["created"], "created_by": r["created_by"],
+            "expires": r["expires"], "max_uses": r["max_uses"], "uses": r["uses"],
+            "folder": r["folder"], "require_2fa": bool(r["require_2fa"]),
+            "revoked": bool(r["revoked"]), "expired": r["expires"] < time.time()}
+
+
 # ── Dispozitivele conectate (sesiuni web) ────────────────────────────────────
 # Până acum, dacă bănuiai un cookie furat aveai două opţiuni, amândouă prea mari: schimbi
 # parola (omoară TOATE sesiunile, inclusiv a ta) sau intri prin SSH pe server. Lipsea exact
@@ -662,6 +685,52 @@ async def revoke_token(tid: int, user=Depends(security.require_user)):
     await db.execute("DELETE FROM api_tokens WHERE id=?", tid)
     log.warning("automation token revoked: %s (by %s)", row["name"], user["email"])
     return await list_tokens(user)
+
+
+@router.get("/api/enroll-groups")
+async def list_enroll_groups(user=Depends(security.require_user)):
+    rows = await db.fetchall("SELECT * FROM enroll_groups ORDER BY created DESC")
+    return [_enroll_group_row(r) for r in rows]
+
+
+@router.post("/api/enroll-groups")
+async def create_enroll_group(body: EnrollGroupIn, request: Request,
+                              user=Depends(security.require_user)):
+    if not await _verify_reauth_password(user, body.current_password):
+        raise ApiError(401, "auth.wrongPassword", "wrong password")
+    # Un token reutilizabil care poate CREA hosturi e clasă de provisioning — ca enroll-ul unui
+    # host cu 2FA. Trece prin acelaşi al doilea factor ca înrolarea unui passkey / crearea unui cont.
+    await webauthn_api.second_gate(user, request, body, "create a group enrollment token")
+    name = body.name.strip()[:60]
+    if not name:
+        raise HTTPException(400, "give it a name (so you know what you are revoking)")
+    days = min(max(int(body.days), 1), ENROLL_GROUP_MAX_DAYS)     # expirarea NU e opțională
+    max_uses = max(0, min(int(body.max_uses), ENROLL_GROUP_MAX_USES))
+    raw = security.new_token()
+    await db.execute(
+        "INSERT INTO enroll_groups(name, token_hash, created, created_by, expires,"
+        " max_uses, folder, require_2fa) VALUES(?,?,?,?,?,?,?,?)",
+        name, security.sha256_hex(raw), time.time(), user["email"], time.time() + days * 86400,
+        max_uses, body.folder.strip(), int(body.require_2fa))
+    log.info("group enroll token created: %s (max_uses=%d, %dd, 2fa=%s) by %s",
+             name, max_uses, days, bool(body.require_2fa), user["email"])
+    # un token de grup = o cheie care poate înmatricula hosturi noi în flotă: eveniment de securitate
+    email_alerts.notify_security_change("a group enrollment token was created (%s)" % name,
+                                        security.client_ip(request), user["email"])
+    # valoarea în clar se întoarce O SINGURĂ DATĂ; în DB stă doar hash-ul
+    return {"token": raw, "install_command": _group_install_command(raw),
+            "groups": await list_enroll_groups(user)}
+
+
+@router.post("/api/enroll-groups/{gid}/revoke")
+async def revoke_enroll_group(gid: int, user=Depends(security.require_user)):
+    row = await db.fetchone("SELECT name FROM enroll_groups WHERE id=?", gid)
+    if not row:
+        raise HTTPException(404)
+    # revocare, nu ştergere: păstrăm evidenţa (cine/când a putut înmatricula) pentru audit
+    await db.execute("UPDATE enroll_groups SET revoked=1 WHERE id=?", gid)
+    log.warning("group enroll token revoked: %s (by %s)", row["name"], user["email"])
+    return await list_enroll_groups(user)
 
 
 @router.post("/api/totp/setup")
@@ -1172,6 +1241,16 @@ def _install_command(enroll_token: str) -> str:
     # care îl aduce nu avea, deci pe o imagine minimală fără curl (debian-slim, alpine)
     # înrolarea murea cu `sh: 1: curl: not found` înainte să apuce să ruleze ceva. Ironia e
     # că exact acel caz e explicat într-un comentariu din scriptul nelivrat.
+    return ("(command -v curl >/dev/null && curl %s %s || wget %s-qO- %s) | sh"
+            % (flags, url, wflags, url))
+
+
+def _group_install_command(group_token: str) -> str:
+    """Acelaşi one-liner ca `_install_command`, dar spre `/install/group/<token>`: îl rulezi pe
+    N maşini, iar gateway-ul auto-creează câte un host (cu token propriu) la fiecare rulare."""
+    flags = "-fsSk" if config.AGENT_INSECURE else "-fsS"
+    wflags = "--no-check-certificate " if config.AGENT_INSECURE else ""
+    url = "%s/install/group/%s.sh" % (config.PUBLIC_URL, group_token)
     return ("(command -v curl >/dev/null && curl %s %s || wget %s-qO- %s) | sh"
             % (flags, url, wflags, url))
 
@@ -3995,6 +4074,18 @@ fi
 """
 
 
+def _install_script_for(token: str) -> str:
+    """Corpul scriptului de instalare pentru un token de agent permanent (comun între enroll-ul
+    per-host şi cel de grup)."""
+    return INSTALL_SCRIPT.format(
+        public_url=config.PUBLIC_URL, ws_url=config.ws_public_url(),
+        token=token, insecure="true" if config.AGENT_INSECURE else "false",
+        public_url_docs="https://github.com/sm26449/webterm#provisioning-a-server",
+        integration_sha256=_shell_integration_digest(),
+        agent_sha256=_agent_digest(),
+        ssl_ctx="ssl._create_unverified_context()" if config.AGENT_INSECURE else "None")
+
+
 @router.get("/install/{enroll_token}", response_class=PlainTextResponse)
 async def install_script(enroll_token: str):
     enroll_token = enroll_token[:-3] if enroll_token.endswith(".sh") else enroll_token
@@ -4007,14 +4098,38 @@ async def install_script(enroll_token: str):
         enroll_token, time.time())
     if not row:
         raise ApiError(404, "enroll.invalid", "invalid or expired enroll token")
-    token = security.decrypt_secret(row["token_encrypted"])
-    return INSTALL_SCRIPT.format(
-        public_url=config.PUBLIC_URL, ws_url=config.ws_public_url(),
-        token=token, insecure="true" if config.AGENT_INSECURE else "false",
-        public_url_docs="https://github.com/sm26449/webterm#provisioning-a-server",
-        integration_sha256=_shell_integration_digest(),
-        agent_sha256=_agent_digest(),
-        ssl_ctx="ssl._create_unverified_context()" if config.AGENT_INSECURE else "None")
+    return _install_script_for(security.decrypt_secret(row["token_encrypted"]))
+
+
+@router.get("/install/group/{group_token}", response_class=PlainTextResponse)
+async def group_install_script(group_token: str, request: Request):
+    """Onboarding la scară: un token de grup rulat pe N maşini. La fiecare rulare AUTO-CREĂM un
+    host nou cu PROPRIUL token permanent (revocabil individual — modelul per-host rămâne intact),
+    apoi livrăm scriptul cu acel token. Tokenul de grup doar autorizează crearea."""
+    group_token = group_token[:-3] if group_token.endswith(".sh") else group_token
+    # atomic, TOCTOU-safe ca la per-host: verificăm valid + incrementăm `uses` într-o SINGURĂ
+    # scriere serializată, ca două instalări concurente să nu poată trece amândouă de un max_uses=1.
+    grp = await db.execute_returning(
+        "UPDATE enroll_groups SET uses = uses + 1 "
+        "WHERE token_hash=? AND revoked=0 AND expires>? AND (max_uses=0 OR uses<max_uses) "
+        "RETURNING *",
+        security.sha256_hex(group_token), time.time())
+    if not grp:
+        raise ApiError(404, "enroll.invalid", "invalid, expired, revoked or exhausted enroll token")
+    # host nou cu token PROPRIU; numele e placeholder până raportează agentul hostname-ul (name_auto)
+    token = security.new_token()
+    host_id = await db.execute(
+        "INSERT INTO hosts(name, note, folder, token_hash, token_encrypted, created,"
+        " connection_type, require_2fa, credential_policy, name_auto)"
+        " VALUES(?,?,?,?,?,?,?,?,?,?)",
+        "(enrolling…)", "", grp["folder"] or "", security.sha256_hex(token),
+        security.encrypt_secret(token), time.time(), "agent", int(grp["require_2fa"]), "stored", 1)
+    log.info("host #%d auto-enrolled via group token '%s' from %s",
+             host_id, grp["name"], security.client_ip(request))
+    await audit.record(time.time(), "group:" + grp["name"], security.client_ip(request), "POST",
+                       "/install/group", 200, "host #%d auto-enrolled (group '%s')" % (host_id, grp["name"]))
+    email_alerts.notify_host_enrolled(grp["name"], security.client_ip(request))
+    return _install_script_for(token)
 
 
 @router.post("/agent/uninstalled")

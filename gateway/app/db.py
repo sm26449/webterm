@@ -189,6 +189,24 @@ CREATE TABLE IF NOT EXISTS api_tokens (
     expires REAL NOT NULL,                 -- expirarea e OBLIGATORIE
     last_used REAL
 );
+-- Token de înrolare DE GRUP: onboarding la scară de flotă. Un singur one-liner rulat pe N
+-- maşini; la fiecare `/install/group/<token>` gateway-ul AUTO-CREEAZĂ un host nou cu PROPRIUL
+-- token permanent (deci fiecare maşină e revocabilă individual — modelul per-host nu se erodează).
+-- Tokenul de grup doar AUTORIZEAZĂ crearea: opt-in, expiră OBLIGATORIU, revocabil, plafon de
+-- utilizări, iar fiecare auto-enroll e auditat + alertat.
+CREATE TABLE IF NOT EXISTS enroll_groups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    token_hash TEXT UNIQUE NOT NULL,       -- sha256 al tokenului (valoarea se arată o singură dată)
+    created REAL NOT NULL,
+    created_by TEXT DEFAULT '',
+    expires REAL NOT NULL,                 -- expirarea e OBLIGATORIE (ca la api_tokens)
+    max_uses INTEGER NOT NULL DEFAULT 0,   -- 0 = nelimitat (dar tot expiră)
+    uses INTEGER NOT NULL DEFAULT 0,
+    folder TEXT DEFAULT '',                -- hosturile noi aterizează aici
+    require_2fa INTEGER NOT NULL DEFAULT 0,-- hosturile noi moştenesc asta
+    revoked INTEGER NOT NULL DEFAULT 0
+);
 """
 
 # additive migrations for DBs created by an older version
@@ -254,6 +272,10 @@ MIGRATIONS = [
     # concurente pentru acelaşi `sub` să nu poată dubla contul.
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_sso_subject ON users(sso_subject) "
     "WHERE sso_subject IS NOT NULL",
+    # Host auto-înrolat printr-un token de grup: numele e un placeholder până când agentul
+    # raportează hostname-ul la prima conectare, moment în care îl adoptăm ŞI stingem flagul
+    # (deci o redenumire ulterioară din UI rămâne). Vezi `/install/group` + reconcile.
+    "ALTER TABLE hosts ADD COLUMN name_auto INTEGER NOT NULL DEFAULT 0",
 ]
 
 # tabele adăugate ulterior (executeScript de mai sus le creează pe DB-uri noi;

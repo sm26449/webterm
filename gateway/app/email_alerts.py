@@ -245,6 +245,21 @@ def notify_security_change(what: str, ip: str, email: str) -> None:
           f"If this was not you, the account is probably compromised.")
 
 
+def notify_host_enrolled(group_name: str, ip: str) -> None:
+    """Un host nou s-a auto-înmatriculat în flotă printr-un token de grup. Înrolarea era un act
+    deliberat, per-host, dintr-un browser autentificat; un token de grup o face din afară, deci
+    fiecare maşină nouă merită o urmă vizibilă. Throttle per grup (10 min): un rollout de zeci de
+    maşini trimite un semnal, nu zeci — dar un enroll IZOLAT, neaşteptat, tot ajunge la tine."""
+    if not _throttled("enroll:" + group_name, 600):
+        return
+    _fire("A host auto-enrolled into the fleet",
+          f"A new host registered itself using the group enrollment token '{group_name}'.\n"
+          f"IP: {ip}\n\n"
+          f"If you are rolling out machines, this is expected (one alert per group per 10 min). "
+          f"If not, revoke the token in Settings → the host got its own agent credential and can "
+          f"reach the gateway until you remove it.")
+
+
 def notify_host_unlocked(host_name: str, ip: str, email: str) -> None:
     """A host marked `require_2fa` was just unlocked (step-up passed) — i.e. a PROTECTED host
     is now being accessed. These are the hosts explicitly flagged as sensitive, so an unlock is

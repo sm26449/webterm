@@ -48,6 +48,8 @@ PUBLIC = {
     "/agent/ptyd.py": "sursa agentului: publică prin construcție, verificată prin semnătură",
     "/agent/shell-integration.sh": "idem; integritatea se verifică prin sha256, nu prin auth",
     "/install/{enroll_token}": "tokenul de enroll E credențialul; expiră în 24h, single-use",
+    "/install/group/{group_token}": ("tokenul de grup E credenţialul; opt-in, expiră, revocabil, "
+                                     "plafon de utilizări, auto-enroll auditat + alertat"),
     "/__wtfwd/auth": "handshake-ul de forward; validează cookie-ul de sesiune în corp",
     "/api/webauthn/login/options": "ceremonia de login cu passkey — ÎNAINTE de a avea sesiune",
     "/api/webauthn/login/verify": "idem; verifică asserţiunea şi ABIA apoi deschide sesiunea",

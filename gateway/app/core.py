@@ -1806,14 +1806,21 @@ async def reconcile(conn: AgentConnection, msg: dict) -> None:
     expected_v = agent_expected()["version"]
     if expected_v and (conn.agent_version or 0) >= expected_v:
         pending_updates.pop(conn.host_id, None)
+    # tăiate: se scriu în `hosts` şi se întorc la fiecare listare; un agent compromis putea
+    # umfla rândul şi fiecare răspuns cu şiruri de orice lungime. `or None`: un hostname gol nu
+    # suprascrie (COALESCE păstrează) şi nu declanşează adopţia de nume de mai jos.
+    hn = _clip(msg.get("hostname")) or None
     await db.execute(
         "UPDATE hosts SET agent_version=?, backend=?, last_heartbeat=?,"
-        " hostname=COALESCE(?, hostname), agent_user=COALESCE(?, agent_user)"
+        " hostname=COALESCE(?, hostname), agent_user=COALESCE(?, agent_user),"
+        # host auto-înrolat printr-un token de grup (name_auto=1): la primul hostname raportat
+        # adoptăm numele ŞI stingem flagul, deci o redenumire ulterioară din UI rămâne.
+        " name = CASE WHEN name_auto=1 AND ? IS NOT NULL THEN ? ELSE name END,"
+        " name_auto = CASE WHEN name_auto=1 AND ? IS NOT NULL THEN 0 ELSE name_auto END"
         " WHERE id=?",
         conn.agent_version, conn.backend, time.time(),
-        # tăiate: se scriu în `hosts` şi se întorc la fiecare listare; un agent compromis
-        # putea umfla rândul şi fiecare răspuns cu şiruri de orice lungime
-        _clip(msg.get("hostname")), _clip(msg.get("user")), conn.host_id)
+        hn, _clip(msg.get("user")),
+        hn, hn, hn, conn.host_id)
 
     reported = {s["sid"]: s for s in msg.get("sessions", [])}
     # includem și 'lost': o sesiune tmux SUPRAVIEȚUIEȘTE restartului de agent, deci
