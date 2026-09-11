@@ -111,6 +111,12 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=64m,mode=1777
+    # Plafoane de resurse — vezi nota din docker-compose.yml. Fără ele, o scurgere în gateway
+    # OOM-killuieşte HOSTUL care rulează şi Traefik (şi eventual Authentik): o problemă în gateway
+    # pica toată uşa din faţă, nu doar terminalul. 1g = spaţiu larg peste baseline, opreşte runaway;
+    # pids_limit taie fork-bomb-ul; CPU rămâne neplafonat (latenţă interactivă).
+    mem_limit: 1g
+    pids_limit: 512
     environment:
       WEBTERM_PUBLIC_URL: https://${WEBTERM_DOMAIN}
       # the per-browser-WS backlog cap before a forced resync

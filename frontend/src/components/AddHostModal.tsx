@@ -134,8 +134,8 @@ export default function AddHostModal(props: { onClose: () => void; host?: Host; 
                       onChange={(e) => setHostname(e.target.value)} className={field} />
                   </label>
                   <label className="block w-24 shrink-0">
-                    <span className={label}>Port</span>
-                    <input type="number" min={1} max={65535} value={port} aria-label="Port"
+                    <span className={label}>{t('addHost.port')}</span>
+                    <input type="number" min={1} max={65535} value={port} aria-label={t('addHost.port')}
                       onChange={(e) => setPort(Number(e.target.value))} className={field} />
                   </label>
                 </div>

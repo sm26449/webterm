@@ -291,7 +291,7 @@ function HostDetail({ host }: { host: Host }) {
         </Section>
 
         {isAgent && (
-          <Section title="Agent">
+          <Section title={t('host.agent')}>
             <Row k={t('host.version')} v={host.agent_version != null ? `v${host.agent_version}` : t('host.notInstalled')}
               badge={host.update_pending ? t('host.updateAvailable') : undefined} />
             {host.last_heartbeat != null && <Row k={t('host.lastActivity')} v={timeAgo(host.last_heartbeat, t)} />}

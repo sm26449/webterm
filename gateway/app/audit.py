@@ -97,8 +97,10 @@ async def record(ts: float, actor_email: str, ip: str, method: str, path: str,
         return
     # Un client ANONIM nu trebuie să poată umfla jurnalul: orice 401/404 pe /api/* scria un rând,
     # iar retenţia e doar temporală. Cererile respinse fără actor sunt zgomot de scanare; cele
-    # cu actor (cookie furat care loveşte un 403) rămân, fiindcă alea chiar spun ceva.
-    if not actor_email and status in (401, 403, 404, 405):
+    # cu actor (cookie furat care loveşte un 403) rămân, fiindcă alea chiar spun ceva. 429 intră
+    # în set ca să picăm inundarea anonimă prin rate-limit (ex. /api/login în lockout) — altfel un
+    # IP putea scrie rânduri la nesfârşit şi roti afară intrările reale de incident.
+    if not actor_email and status in (401, 403, 404, 405, 429):
         return
     try:
         await db.execute(

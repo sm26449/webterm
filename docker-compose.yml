@@ -1,7 +1,17 @@
+# Rotația logurilor Docker (json-file): fără ea, pe un server de terminal cu viață lungă logurile
+# cresc nemărginit şi umplu discul → coruperea WAL-ului SQLite la scriere. Fişierul de prod avea
+# deja asta; calea default (Caddy) o rata — exact failure-mode-ul contra căruia era armat prod-ul.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   app:
     build: .
     restart: unless-stopped
+    logging: *default-logging
     # hardening: no privilege escalation; drop all caps except the minimum the
     # entrypoint needs (chown /data, then gosu-drop to the unprivileged user)
     security_opt:
@@ -19,6 +29,15 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=64m,mode=1777
+    # Plafoane de resurse: fără ele, o scurgere de memorie sau output patologic creşte RSS-ul
+    # nemărginit şi OOM-killer-ul loveşte HOSTUL (care rulează şi reverse-proxy-ul, eventual
+    # Authentik) — o scurgere în gateway pica toată uşa din faţă. Baseline-ul e de ordinul zecilor
+    # de MiB (RUNBOOK: „+30 MiB la 30 de sesiuni"), deci 1g e spaţiu larg dar opreşte runaway-ul;
+    # `restart: unless-stopped` + healthcheck readuc containerul, nu destabilizează hostul. CPU-ul
+    # rămâne neplafonat intenţionat (gateway-ul multiplexează toate terminalele — un cap dur ar
+    # introduce latenţă interactivă). `pids_limit` taie un fork-bomb dintr-un proces scăpat.
+    mem_limit: 1g
+    pids_limit: 512
     environment:
       # The SAME set as in `docker-compose.prod.yml`. This file used to list only two, so anyone
       # who set SMTP, `WEBTERM_IDLE_LOCK_SECS`, `WEBTERM_SETUP_TOKEN` or
@@ -75,6 +94,7 @@ services:
     # el se poate muta sub tine, digest-ul nu. Dependabot îl ridică la nevoie.
     image: caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
     restart: unless-stopped
+    logging: *default-logging
     ports:
       - "80:80"
       - "443:443"

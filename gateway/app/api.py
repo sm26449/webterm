@@ -189,13 +189,18 @@ def _check_password(pw: str, what: str = "password") -> None:
 @router.post("/api/login")
 async def login(creds: Credentials, request: Request, response: Response):
     ip = security.client_ip(request)
+    allowed, retry = security.login_allowed(ip)
+    if not allowed:
+        # Lockout: NU marcăm actorul şi NU scriem rând de audit (429 fără actor e picat în
+        # audit.record). Altfel un neautentificat putea, cu `email` arbitrar, (a) injecta atribuire
+        # falsă şi (b) inunda jurnalul până roteşte afară intrările reale de incident — exact
+        # invariantul pe care auditul trebuie să-l apere. Emailul încercat se marchează DOAR după
+        # ce trecem de lockout, deci doar pentru un număr mărginit de încercări reale per IP.
+        raise HTTPException(429, f"too many attempts; retry in {retry}s",
+                            headers={"Retry-After": str(retry)})
     # auditul se scrie din middleware, DUPĂ răspuns — un login eșuat n-are cookie, deci
     # marcăm aici emailul încercat (altfel jurnalul ar arăta doar „cineva, de la IP-ul X")
     audit.actor(request, creds.email.strip().lower())
-    allowed, retry = security.login_allowed(ip)
-    if not allowed:
-        raise HTTPException(429, f"too many attempts; retry in {retry}s",
-                            headers={"Retry-After": str(retry)})
     await security.apply_global_tarpit(retry)   # F-02: frână, nu poartă
     user = await db.fetchone("SELECT * FROM users WHERE email=?",
                              creds.email.strip().lower())

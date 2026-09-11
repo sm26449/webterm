@@ -111,6 +111,24 @@ def main():
     missing = sorted(used - have)
     check("fiecare t('cheie') folosită există în catalog", not missing, str(missing[:8]))
 
+    # `aria-label=` / `title=` LITERALE scapă de verificarea de mai sus (nu sunt `t(...)`), deci
+    # ajungeau în engleză la userii RO şi la cititoarele de ecran — un audit a găsit trei aşa.
+    # Le cerem prin `t(...)`. (placeholder= NU e prins: acolo sunt des valori-exemplu — `~/uploads`,
+    # `/dev/ttyUSB0`, `127.0.0.1` — care corect NU se traduc.)
+    lit_re = re.compile(r'\b(aria-label|title)="[^"{]')
+    literals = []
+    for base, _, files in os.walk(SRC):
+        if os.path.join("src", "lang") in base:
+            continue
+        for fn in files:
+            if not fn.endswith(".tsx"):
+                continue
+            with open(os.path.join(base, fn), encoding="utf-8") as f:
+                for i, line in enumerate(f, 1):
+                    if lit_re.search(line):
+                        literals.append(f"{fn}:{i}")
+    check("fără aria-label/title literale (trec prin t())", not literals, str(literals[:8]))
+
     # Codurile de eroare trimise de server trebuie să existe în catalog. Fără garda asta,
     # `errText` cade tăcut pe mesajul englezesc şi nimeni nu observă că traducerea lipseşte —
     # exact tiparul „poartă care raportează verde fără să verifice".

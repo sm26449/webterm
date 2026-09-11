@@ -22,7 +22,11 @@ OWNER="${WEBTERM_UID:-10001:10001}"
 # imaginii aplicaţiei coboară la userul `webterm`, extragerea reuşeşte, iar `os.chown` cade cu
 # PermissionError — DUPĂ ce datele vechi au fost deja mutate în `.restore-prev`. Adică exact
 # fereastra în care serviciul rămâne jos şi omul crede că şi-a pierdut datele.
-IMAGE="${WEBTERM_TOOL_IMAGE:-python:3.12-alpine}"
+# Pinuit pe DIGEST, ca în backup.sh: restore rulează această imagine ca root peste volumul de
+# date, ŞTERGÂND şi rescriind DB-ul + cheia seifului — adică exact „containerul cel mai puternic".
+# Un tag flotant (`python:3.12-alpine`) însemna că cine poate muta tag-ul alege ce cod rescrie
+# seiful. Acelaşi digest ca backup.sh.
+IMAGE="${WEBTERM_TOOL_IMAGE:-python:3.12-alpine@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df}"
 if [ -z "${WEBTERM_TOOL_IMAGE:-}" ] && [ -n "${WEBTERM_IMAGE:-}" ]; then
   echo "note: WEBTERM_IMAGE is the gateway image and is IGNORED here;" \
        "use WEBTERM_TOOL_IMAGE to change the python image ($IMAGE)." >&2

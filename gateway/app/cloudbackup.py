@@ -25,7 +25,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from . import backup, backup_dest, config, db, security
+from . import backup, backup_dest, config, db, email_alerts, security
 
 log = logging.getLogger("webterm")
 
@@ -42,6 +42,8 @@ K_FOLDER = "cloud_folder"                      # id (Drive) / cale (Dropbox)
 K_KEEP = "cloud_keep"                          # câte arhive păstrăm la distanță
 K_ACCOUNT = "cloud_account"                    # afișat în UI (email / nume cont)
 K_LAST = "cloud_last"                          # JSON: {ts, ok, name, error}
+K_LAST_OK = "cloud_last_ok"                     # ts al ultimului upload off-host REUŞIT (vârsta copiei)
+K_UPLOAD_FAILS = "cloud_upload_fails"           # eşecuri consecutive pe calea PROGRAMATĂ (pt. alertă)
 K_INCLUDE_TX = "cloud_include_tx"
 # destinaţii DIRECTE (sftp/ftps): host/port/user/cale + credenţiale criptate + ancoră de încredere
 K_HOST = "cloud_host"
@@ -341,6 +343,7 @@ async def status() -> dict:
         "keep": c["keep"],
         "include_transcripts": c["include_transcripts"],
         "last": last,
+        "last_ok": float(await _get(K_LAST_OK, "0") or 0),   # ts ultimul upload reuşit (vârsta copiei)
         "redirect_uri": redirect_uri(),
         "providers": provider_catalog(),
         # destinaţii directe — pentru prefill în UI (NICIODATĂ secretele: cheia SSH / parola)
@@ -512,8 +515,12 @@ async def upload_backup(data: bytes | None = None, name: str = "") -> str:
             await _set(K_FOLDER, folder)
         await _to_thread(p.upload, token, folder, name, data)
         await _prune_remote(p, token, folder, c["keep"])
-    await _set(K_LAST, json.dumps({"ts": time.time(), "ok": True, "name": name,
+    now = time.time()
+    await _set(K_LAST, json.dumps({"ts": now, "ok": True, "name": name,
                                    "size": len(data), "error": ""}))
+    # orice succes (manual SAU programat) resetează contorul de eşecuri şi marchează vârsta copiei
+    await _set(K_LAST_OK, str(now))
+    await _set(K_UPLOAD_FAILS, "0")
     return name
 
 
@@ -558,3 +565,15 @@ async def upload_scheduled(local_name: str) -> None:
         log.warning("cloud upload failed: %s", e)
         await _set(K_LAST, json.dumps({"ts": time.time(), "ok": False, "name": local_name,
                                        "error": str(e)[:300]}))
+        # Eşecul pe calea PROGRAMATĂ era COMPLET tăcut (doar K_LAST pt. UI): OAuth expirat sau
+        # passphrase greşit → operatorul crede că are copii off-host pe care nu le are. Alertăm
+        # după 2 eşecuri consecutive (un blip de reţea nu deranjează), throttle-uit în email_alerts.
+        try:
+            fails = int(await _get(K_UPLOAD_FAILS, "0") or 0) + 1
+            await _set(K_UPLOAD_FAILS, str(fails))
+            if fails >= 2:
+                last_ok = await _get(K_LAST_OK)
+                email_alerts.notify_backup_failed(c["provider"], fails,
+                                                  float(last_ok) if last_ok else 0.0, str(e)[:300])
+        except Exception:                   # noqa: BLE001 — alerta nu rupe programarea
+            log.exception("backup-failure alert could not be sent")

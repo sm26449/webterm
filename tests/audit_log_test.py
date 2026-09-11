@@ -130,6 +130,37 @@ async def main():
         check("cereri anonime respinse NU umplu jurnalul",
               len(await entries(limit=1000)) == n)
 
+        # ── lockout-ul de login NU poate fi folosit ca să roteşti jurnalul (audit fix) ──
+        # Un neautentificat bătea /api/login cu `email` arbitrar: fiecare cerere scria un rând
+        # (actor = emailul LUI), inclusiv 429-urile de lockout — deci injecta atribuire falsă ŞI
+        # umfla jurnalul până rotea afară intrările reale. Acum: emailul se marchează DOAR după ce
+        # trecem de lockout (deci 429 n-are actor), iar 429 fără actor e picat în audit.record.
+        # clientul atacatorului e NEAUTENTICAT (fără cookie) — ca în scenariul real; un client
+        # autentificat ar lăsa middleware-ul să cadă pe actorul din cookie şi n-ar testa nimic.
+        EVIL = "attacker-injected@evil.test"
+        evil = httpx.AsyncClient(transport=transport, base_url="http://t", timeout=30, headers=_ORIGIN)
+        logins = [e for e in await entries(limit=2000) if e["path"] == "/api/login"]
+        n_login = len(logins)
+        got_429 = False
+        for _ in range(12):
+            r = await evil.post("/api/login", json={"email": EVIL, "password": "x"})
+            if r.status_code == 429:
+                got_429 = True
+                break
+        check("login repetat duce la lockout (429)", got_429)
+        n_after_lock = len([e for e in await entries(limit=2000) if e["path"] == "/api/login"])
+        # mai batem de câteva ori ÎN lockout: niciun rând nou nu trebuie scris
+        for _ in range(6):
+            await evil.post("/api/login", json={"email": EVIL, "password": "x"})
+        await evil.aclose()
+        logins2 = [e for e in await entries(limit=2000) if e["path"] == "/api/login"]
+        check("429-urile de lockout NU scriu rânduri (fără rotire a jurnalului)",
+              len(logins2) == n_after_lock)
+        check("emailul atacatorului NU e injectat pe 429",
+              not any(e["actor"] == EVIL and e["status"] == 429 for e in logins2))
+        check("atribuirea pe 401 (înainte de lockout) s-a păstrat",
+              n_after_lock > n_login)
+
         # ── endpointul de citire cere autentificare ──
         r = await c.get("/api/audit?limit=5")
         check("GET /api/audit autentificat → 200", r.status_code == 200 and r.json()["entries"])

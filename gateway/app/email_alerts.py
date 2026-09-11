@@ -442,3 +442,26 @@ def notify_update_refused(host_id: int, code: str, hint: str) -> None:
           f"Host #{host_id} refused the agent update.\n\nReason: {code}\n{hint}\n\n"
           f"Until this is fixed the host stays on the old agent version — including without the "
           f"security fixes shipped since.")
+
+
+def notify_backup_failed(provider: str, fails: int, last_ok_ts: float, error: str) -> None:
+    """The SCHEDULED off-host backup upload keeps failing.
+
+    A backup that only lives on the machine you are backing up doesn't survive losing that
+    machine. The scheduled off-host copy was the safety net — and its failure was COMPLETELY
+    silent (only a field for the UI nobody watches): an expired OAuth refresh or a wrong
+    passphrase means the operator believes they have off-host copies they don't. Once every 12h,
+    so a persistent failure stays signal rather than nightly noise."""
+    if not _throttled("backup_failed", 12 * 3600):
+        return
+    if last_ok_ts:
+        age_days = (time.time() - last_ok_ts) / 86400
+        age = "The last SUCCESSFUL off-host backup was %.1f days ago." % age_days
+    else:
+        age = "There has NEVER been a successful off-host backup on this destination."
+    _fire("Off-host backup is FAILING (%s)" % provider,
+          f"The scheduled backup upload to '{provider}' has failed {fails} time(s) in a row.\n\n"
+          f"{age}\n\nLast error: {error}\n\n"
+          f"Common causes: expired OAuth authorisation (reconnect in Settings → Backup), a wrong "
+          f"encryption passphrase, or the SFTP/FTPS server being unreachable or its host key "
+          f"having changed. Until fixed, you have no fresh off-host copy of the vault.")

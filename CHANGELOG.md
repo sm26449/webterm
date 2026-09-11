@@ -64,6 +64,38 @@ Findings from a full audit pass (security, responsive/design, dead code).
   dead CSS rule (`.wt-caret` + its `@keyframes`), ten unused i18n keys (from both catalogs), and a
   few unused imports/locals in tests. No behaviour change.
 
+### Hardened — follow-up from a full audit (security / reliability / coverage)
+
+- **The audit log can no longer be poisoned or rotated through `/api/login`.** The attempted email
+  was marked as the audit *actor* before the lockout check, so an unauthenticated client could
+  (a) inject arbitrary attribution and (b) flood the log — every request, including the `429`
+  lockout responses, wrote a row — until genuine incident entries rotated out of the retained
+  window. The email is now recorded only *after* passing the lockout gate (so a `429` carries no
+  actor), and actor-less `429`s are dropped as scan noise like `401/403/404/405`. A real failed
+  login still records the attempted email. Regression test added.
+- **Container memory and PID limits** (`mem_limit: 1g`, `pids_limit: 512`) on the gateway in both
+  compose files. Without them a leak or runaway output grew RSS unbounded and the kernel OOM-killer
+  fired against the *host* — which also runs the reverse proxy (and optionally Authentik), so one
+  leak could take the whole front door down. CPU is left uncapped on purpose (the gateway
+  multiplexes every terminal; a hard cap would add interactive latency).
+- **A failing off-host backup now alerts** instead of failing silently. The scheduled upload only
+  recorded a field for the UI; an expired OAuth token or wrong passphrase meant you believed you
+  had off-host copies you didn't. After two consecutive failures it emails/webhooks (throttled
+  12h), and `/api/backup/cloud` now reports the age of the last successful off-host copy.
+- **Log rotation on the default (Caddy) compose stack** — the prod stack already capped
+  `json-file` logs (10m×5); the default path didn't, so a long-lived install could fill the disk
+  with container logs and corrupt the SQLite WAL. Same cap now on both.
+- **`restore.sh` pins its tool image by digest**, like `backup.sh`. Restore runs that image as
+  root over the data volume, wiping and rewriting the DB and the vault key — the most destructive
+  operation — so a floating tag was exactly the wrong place to trust whatever someone pushed.
+- **Three hardcoded UI strings** (`aria-label`/`title` on the toast dismiss, the Add-host port
+  field, the Agent section) now go through `t()` — they were English for Romanian users and screen
+  readers. The i18n catalog test now also fails on literal `aria-label=`/`title=` so this class of
+  miss regresses loudly.
+- **Serial console gained tests.** The agent's `_configure_serial` (termios: baud / data bits /
+  parity / stop bits / raw) and the raw byte bridge were shipping with zero automated coverage;
+  `tests/serial_test.py` exercises them against a PTY.
+
 ## [2.0.19] — 2026-09-10 · agent (47)
 
 Gateway and interface only: the agent is unchanged at 47, nothing in the fleet needs updating.
