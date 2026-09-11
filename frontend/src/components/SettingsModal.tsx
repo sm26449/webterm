@@ -2266,7 +2266,7 @@ export default function SettingsModal(props: {
         {/* pasul 2 (server propriu): SFTP/FTPS scris din UI. Arhiva pleacă DEJA criptată; aici
             configurăm doar unde şi cum ne conectăm, cu credenţialele criptate în seif. */}
         {isDirect && (
-        <form onSubmit={saveDirect} className="mt-3 flex flex-col gap-2">
+        <form onSubmit={saveDirect} data-testid="direct-backup-form" className="mt-3 flex flex-col gap-2">
           <p className="text-xs text-slate-500">
             {directForm.kind === 'sftp' ? t('settings.direct.sftpHint') : t('settings.direct.ftpsHint')}
           </p>
