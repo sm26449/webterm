@@ -239,15 +239,6 @@ body {
 .dot-live {
   animation: pulse-dot 2s ease-in-out infinite;
 }
-/* cursor de terminal care clipește (login) — un singur accent tematic */
-@keyframes wt-blink {
-  50% {
-    opacity: 0;
-  }
-}
-.wt-caret {
-  animation: wt-blink 1.1s step-end infinite;
-}
 @media (prefers-reduced-motion: reduce) {
   .dot-live {
     animation: none;

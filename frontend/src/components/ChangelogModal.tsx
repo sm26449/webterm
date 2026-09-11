@@ -67,7 +67,7 @@ export default function ChangelogModal(props: { onClose: () => void }) {
       >
         <div className="flex items-center justify-between border-b border-ink-800 px-5 py-3.5">
           <h2 className="text-base font-semibold">{t('changelog.title')}</h2>
-          <button onClick={props.onClose} aria-label={t('common.close')} className="rounded-md px-2 py-1 text-slate-400 hover:bg-ink-800">✕</button>
+          <button onClick={props.onClose} aria-label={t('common.close')} className="wt-touch grid place-items-center rounded-md px-2 py-1 text-slate-400 hover:bg-ink-800">✕</button>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
           {error

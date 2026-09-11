@@ -340,12 +340,6 @@ async def disconnect() -> None:
     await _set(K_FOLDER, "")
 
 
-async def forget_all() -> None:
-    for k in (K_PROVIDER, K_CLIENT_ID, K_CLIENT_SECRET, K_REFRESH, K_PASSPHRASE,
-              K_FOLDER, K_ACCOUNT, K_LAST):
-        await _set(k, "")
-
-
 # ── flux OAuth ─────────────────────────────────────────────────────────────────
 
 _states: dict = {}          # state -> (user_id, expiră_la)

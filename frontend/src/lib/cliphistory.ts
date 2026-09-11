@@ -28,10 +28,6 @@ export function history(sid: string): string[] {
   return [...(store.get(sid) ?? [])]
 }
 
-export function clear(sid: string): void {
-  store.delete(sid)
-}
-
 /** Copiază ŞI înregistrează în history-ul sesiunii. `copyText` face copierea + toast-ul global;
    noi adăugăm doar înregistrarea per-sesiune, la succes. */
 export async function copySession(sid: string, text: string): Promise<boolean> {

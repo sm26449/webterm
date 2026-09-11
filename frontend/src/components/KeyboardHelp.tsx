@@ -48,7 +48,7 @@ export default function KeyboardHelp(props: { onClose: () => void }) {
       >
         <div className="flex items-center justify-between">
           <h2 className="text-lg font-semibold">{t('shortcuts.heading')}</h2>
-          <button onClick={props.onClose} aria-label={t('common.close')} className="rounded-md px-2 py-1 text-slate-400 hover:bg-ink-800">
+          <button onClick={props.onClose} aria-label={t('common.close')} className="wt-touch grid place-items-center rounded-md px-2 py-1 text-slate-400 hover:bg-ink-800">
             ✕
           </button>
         </div>

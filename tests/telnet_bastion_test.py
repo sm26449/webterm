@@ -246,7 +246,7 @@ async def main():
     # ---- test 3: plafon separat ----
     core.MAX_TELNET_SESSIONS = 2      # coborâm pentru test
     # avem deja 1 activă (tsid); mai deschidem 1 → ok, a 3-a → limită
-    r2 = await core.create_telnet_session(fwd, "s2", 24, 80)
+    await core.create_telnet_session(fwd, "s2", 24, 80)
     hit_limit = False
     try:
         await core.create_telnet_session(fwd, "s3", 24, 80)

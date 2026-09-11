@@ -213,18 +213,18 @@ async def main():
 
     # fără TOTP, de pe un dispozitiv STABILIT → nimic în plus (parola rămâne suficientă)
     email_alerts.smtp_ready = lambda: asyncio.sleep(0, result=True)
-    await webauthn_api._second_gate(user, FakeReq(tok_old), Body(), "enrol")
+    await webauthn_api.second_gate(user, FakeReq(tok_old), Body(), "enrol")
     check("fără TOTP, dispozitiv stabilit → parola rămâne suficientă", True)
 
     # fără TOTP, de pe un dispozitiv nou → cod pe email
     mails.clear()
     try:
-        await webauthn_api._second_gate(user, FakeReq(tok_new), Body(), "enrol")
+        await webauthn_api.second_gate(user, FakeReq(tok_new), Body(), "enrol")
         check("fără TOTP, dispozitiv nou → cere cod pe email", False, "a trecut")
     except ApiError as e:
         check("fără TOTP, dispozitiv nou → cere cod pe email",
               e.code == "account.codeRequired", e.code)
-    await webauthn_api._second_gate(user, FakeReq(tok_new), Body(email_code=mails[0][1]), "enrol")
+    await webauthn_api.second_gate(user, FakeReq(tok_new), Body(email_code=mails[0][1]), "enrol")
     check("codul emis pentru passkey deschide poarta", True)
 
     # cu TOTP activ → codul de pe telefon, indiferent de dispozitiv
@@ -233,20 +233,20 @@ async def main():
                      security.encrypt_secret(secret), uid)
     user = await db.fetchone("SELECT * FROM users WHERE id=?", uid)
     try:
-        await webauthn_api._second_gate(user, FakeReq(tok_old), Body(), "enrol")
+        await webauthn_api.second_gate(user, FakeReq(tok_old), Body(), "enrol")
         check("cu TOTP → cere codul chiar şi de pe dispozitivul obişnuit", False, "a trecut")
     except ApiError as e:
         check("cu TOTP → cere codul chiar şi de pe dispozitivul obişnuit",
               e.code == "passkey.totpRequired", e.code)
     try:
-        await webauthn_api._second_gate(user, FakeReq(tok_old), Body(totp_code="000000"), "enrol")
+        await webauthn_api.second_gate(user, FakeReq(tok_old), Body(totp_code="000000"), "enrol")
         check("cod TOTP greşit → refuzat", False, "a trecut")
     except ApiError as e:
         check("cod TOTP greşit → refuzat", e.code == "passkey.badTotp", e.code)
     # emailul NU e o alternativă la TOTP: altfel 2FA ar valora cât accesul la inbox
     code = await security.issue_email_challenge(uid, "passkey")
     try:
-        await webauthn_api._second_gate(user, FakeReq(tok_new), Body(email_code=code), "enrol")
+        await webauthn_api.second_gate(user, FakeReq(tok_new), Body(email_code=code), "enrol")
         check("cu TOTP activ, emailul NU înlocuieşte codul de pe telefon", False, "a trecut")
     except ApiError as e:
         check("cu TOTP activ, emailul NU înlocuieşte codul de pe telefon",
@@ -258,7 +258,7 @@ async def main():
     # de nimeni altcineva, deci ghicitul se opreşte.
     for i in range(20):
         try:
-            await webauthn_api._second_gate(
+            await webauthn_api.second_gate(
                 user, FakeReq(tok_old), Body(totp_code="%06d" % i), "enrol")
         except ApiError as e:
             last = e.code
@@ -267,7 +267,7 @@ async def main():
     # …şi nici codul CORECT nu trece cât e blocat: o portiţă „corectul trece oricum" ar anula
     # exact apărarea, fiindcă ghicitorul are nevoie de o singură nimereală
     try:
-        await webauthn_api._second_gate(
+        await webauthn_api.second_gate(
             user, FakeReq(tok_old), Body(totp_code=totp.generate(secret)), "enrol")
         check("în lockout, nici codul corect nu trece", False, "a trecut")
     except ApiError as e:
@@ -275,7 +275,7 @@ async def main():
 
     # codul corect trece pe un cont care nu e în lockout
     security.record_login_success("passkey2fa:%d" % uid)
-    await webauthn_api._second_gate(
+    await webauthn_api.second_gate(
         user, FakeReq(tok_old), Body(totp_code=totp.generate(secret)), "enrol")
     check("cod TOTP corect → trece", True)
 

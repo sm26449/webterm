@@ -7,6 +7,38 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [2.0.20] — 2026-09-11 · agent (47)
+
+Gateway and interface only: the agent is unchanged at 47, nothing in the fleet needs updating.
+Findings from a full audit pass (security, responsive/design, dead code).
+
+### Security — two defense-in-depth gaps closed
+
+- **Creating a second account and disabling TOTP now pass the same second factor as enrolling a
+  passkey.** Both were gated by the account password alone; the rest of the credential-changing
+  surface (password/email change, passkey enrol/remove) already requires — on a device the session
+  has never been seen on, with SMTP configured — a code mailed to the account, or a TOTP/recovery
+  code when 2FA is on. So an attacker with a stolen cookie + the known password, from a new device,
+  could mint a second admin that survives the victim's "rotate the password" recovery, or strip
+  TOTP with the password only. `create_user` and `totp_disable` now go through that same gate
+  (`second_gate`).
+- **Login timing no longer leaks whether an email exists via an oversized password.** The
+  constant-time equaliser (a dummy verify) ran only when the account was missing; a password over
+  the length cap short-circuited before the hash for an *existing* account (fast) while a
+  non-existent one still hashed (slow). The dummy verify now runs whenever the real one is skipped.
+
+### Changed — touch targets on modal close buttons
+
+- The ✕ close buttons in the About, Changelog and Keyboard-shortcuts dialogs now meet the 44px
+  touch-target minimum on touch devices (they carry `wt-touch`, like the rest of the mobile
+  controls). Desktop is unchanged (the rule is `@media (pointer: coarse)`).
+
+### Removed — dead code
+
+- Unused functions (`cloudbackup.forget_all`, agent `tmux_has_session`, `cliphistory.clear`), a
+  dead CSS rule (`.wt-caret` + its `@keyframes`), ten unused i18n keys (from both catalogs), and a
+  few unused imports/locals in tests. No behaviour change.
+
 ## [2.0.19] — 2026-09-10 · agent (47)
 
 Gateway and interface only: the agent is unchanged at 47, nothing in the fleet needs updating.

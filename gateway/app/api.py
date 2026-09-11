@@ -27,6 +27,7 @@ from typing import Optional
 from urllib.parse import quote, urlparse
 
 from .errors import ApiError
+from . import webauthn_api
 from . import (audit, backup, cloudbackup, config, core, db, email_alerts, health, security,
                signing, totp, updatecheck)
 
@@ -198,11 +199,13 @@ async def login(creds: Credentials, request: Request, response: Response):
     await security.apply_global_tarpit(retry)   # F-02: frână, nu poartă
     user = await db.fetchone("SELECT * FROM users WHERE email=?",
                              creds.email.strip().lower())
-    # verify (or a dummy verify when the user is absent) so timing can't
-    # reveal whether the email exists
-    ok = (user is not None and len(creds.password) <= PASSWORD_MAX
-          and await security.verify_password_async(creds.password, user["password_hash"]))
-    if user is None:
+    # verify (or a dummy verify when the real one is skipped) so timing can't reveal whether the
+    # email exists. ATENŢIE: verify-ul real e sărit ŞI când userul lipseşte, ŞI când parola trece
+    # de PASSWORD_MAX (scurtcircuit înainte de argon2). Dacă dummy-ul rula doar pe `user is None`,
+    # o parolă >MAX diferenţia un cont existent (rapid) de unul inexistent (lent) — enumerare.
+    did_verify = user is not None and len(creds.password) <= PASSWORD_MAX
+    ok = did_verify and await security.verify_password_async(creds.password, user["password_hash"])
+    if not did_verify:
         await security.dummy_verify_async()
     if not ok:
         security.record_login_failure(ip)
@@ -425,6 +428,8 @@ class UserIn(BaseModel):
     email: str
     password: str
     current_password: str = ""     # re-auth: un cont nou = încă o cheie la regat
+    totp_code: str = ""            # al doilea factor (second_gate): TOTP/recovery dacă 2FA e activ
+    email_code: str = ""           # …sau codul pe email, de pe un dispozitiv nou fără 2FA
 
 
 class ReauthOnly(BaseModel):
@@ -443,9 +448,14 @@ async def list_users(user=Depends(security.require_user)):
 
 
 @router.post("/api/users")
-async def create_user(body: UserIn, user=Depends(security.require_user)):
+async def create_user(body: UserIn, request: Request, user=Depends(security.require_user)):
     if not await _verify_reauth_password(user, body.current_password):
         raise ApiError(401, "auth.wrongPassword", "wrong password")
+    # Un cont admin nou e o schimbare de credenţiale — o cheie permanentă în plus la regat, la
+    # fel ca înrolarea unui passkey. Deci trece prin acelaşi al doilea factor (second_gate): un
+    # cookie furat + parola ştiută nu mai pot, de pe un dispozitiv nou, să-şi lase un admin care
+    # supravieţuieşte rotaţiei parolei (recuperarea documentată).
+    await webauthn_api.second_gate(user, request, body, "create a new WebTerm account")
     email = body.email.strip().lower()
     if "@" not in email or len(email) > 200:
         raise ApiError(400, "account.badEmail", "invalid email")
@@ -689,15 +699,19 @@ async def totp_activate(body: TotpActivate, request: Request,
 
 class TotpDisable(BaseModel):
     current_password: str
+    totp_code: str = ""            # second_gate: dovada că deţii factorul pe care-l dezactivezi
+    email_code: str = ""
 
 
 @router.post("/api/totp/disable")
 async def totp_disable(body: TotpDisable, request: Request,
                        user=Depends(security.require_user)):
-    """Dezactivează 2FA. Cere parola curentă (re-auth), ca un cookie furat să nu
-    poată slăbi singur contul."""
+    """Dezactivează 2FA. Cere parola curentă (re-auth) PLUS dovada că deţii factorul pe care-l
+    scoţi: cu 2FA activ, second_gate cere codul TOTP/recovery — un cookie furat + parola ştiută
+    nu mai pot slăbi singure contul dezactivând al doilea factor."""
     if not await _verify_reauth_password(user, body.current_password):
         raise ApiError(401, "auth.wrongCurrentPassword", "the current password is wrong")
+    await webauthn_api.second_gate(user, request, body, "disable two-factor authentication")
     await db.execute(
         "UPDATE users SET totp_enabled=0, totp_secret_encrypted=NULL WHERE id=?", user["id"])
     await db.execute("DELETE FROM recovery_codes WHERE user_id=?", user["id"])

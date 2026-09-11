@@ -128,7 +128,7 @@ async def main():
         check("pe IP, WebAuthn e raportat ca indisponibil", _api._webauthn_available() is False)
 
     # ── schimbarea setului de passkey-uri cere al doilea factor ─────────────
-    src_gate = inspect.getsource(webauthn_api._second_gate)
+    src_gate = inspect.getsource(webauthn_api.second_gate)
     check("poarta de al doilea factor foloseşte un contor propriu, neresetabil din afară",
           "passkey2fa:" in src_gate)
     check("…şi NU acceptă emailul în locul TOTP când TOTP e activ",

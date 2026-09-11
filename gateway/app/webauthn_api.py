@@ -113,7 +113,7 @@ async def _verify_reauth(user, password: str) -> bool:
     return False
 
 
-async def _second_gate(user, request: Request, body, what: str) -> None:
+async def second_gate(user, request: Request, body, what: str) -> None:
     """Al doilea factor peste parolă, pentru operaţiile care schimbă SETUL de passkey-uri.
 
     Parola singură nu mai ajunge: cine o are (reutilizată, scursă, ghicită) îşi putea înrola
@@ -179,7 +179,7 @@ async def register_verify(body: CredentialBody, request: Request,
     # adăuga un factor persistent. Cerem re-autentificare cu parola contului (plafonată) + notificare.
     if not await _verify_reauth(user, body.password):
         raise HTTPException(401, "re-enter your account password to add a passkey")
-    await _second_gate(user, request, body, "enrol a passkey on your WebTerm account")
+    await second_gate(user, request, body, "enrol a passkey on your WebTerm account")
     expected = _consume(body.credential)
     try:
         result = verify_registration_response(
@@ -336,7 +336,7 @@ async def delete_credential(cred_id: int, body: CredDelete, request: Request,
     # (plafonată, ca un cookie furat să nu aibă un oracle de ghicire ne-throttled).
     if not await _verify_reauth(user, body.password):
         raise HTTPException(401, "wrong account password")
-    await _second_gate(user, request, body, "remove a passkey from your WebTerm account")
+    await second_gate(user, request, body, "remove a passkey from your WebTerm account")
     await db.execute("DELETE FROM webauthn_credentials WHERE id=? AND user_id=?",
                      cred_id, user["id"])
     # scoaterea unui factor e o schimbare de credențiale: închide ferestrele de step-up (H1) și anunță

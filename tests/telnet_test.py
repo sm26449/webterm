@@ -80,7 +80,6 @@ async def main():
     check("prompt-ul serverului e în transcript", b"Welcome" in out)
 
     # parola NU apare în transcript (a fost tastată, dar serverul nu o afișează)
-    cast = core.transcript_paths(sid)[1].read_bytes()
     # (input-ul e în .cast ca eveniment „i"; verificăm doar că .out nu are parola în clar de la server)
     check("parola nu e ecoată de server în .out", PASS.encode() not in out)
 

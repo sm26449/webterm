@@ -2,7 +2,6 @@
 apelează /provision — gateway-ul se conectează prin SSH, rulează installer-ul,
 AȘTEAPTĂ ca agentul să sune acasă (test), apoi trece host-ul în mod agent și
 șterge credențialele. Contra sshd-ului local, user de test efemer."""
-import json
 import os
 import subprocess
 import sys

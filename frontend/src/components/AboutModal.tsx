@@ -40,7 +40,7 @@ export default function AboutModal(props: { onClose: () => void }) {
               </p>
             </div>
           </div>
-          <button onClick={props.onClose} aria-label={t('common.close')} className="rounded-md px-2 py-1 text-slate-400 hover:bg-ink-800">✕</button>
+          <button onClick={props.onClose} aria-label={t('common.close')} className="wt-touch grid place-items-center rounded-md px-2 py-1 text-slate-400 hover:bg-ink-800">✕</button>
         </div>
 
         <p className="mt-4 text-sm leading-relaxed text-slate-300">

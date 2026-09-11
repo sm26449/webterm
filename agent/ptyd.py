@@ -498,10 +498,6 @@ def tmux_session_state(sid):
     return "unknown"        # „server exited unexpectedly", „lost server", erori de socket
 
 
-def tmux_has_session(sid):
-    return tmux_session_state(sid) == "alive"
-
-
 def tmux_server_wedged():
     """True dacă serverul tmux e VIU dar nu răspunde clienţilor: o comandă de control
     întoarce „server exited unexpectedly" / „lost server" (serverul acceptă socketul şi-l

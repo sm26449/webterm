@@ -78,7 +78,7 @@ Options:
   --ghcr-token-file <f> read the ghcr token from a file (preferred over --ghcr-token)
   --with-authentik      also run Authentik (SSO) in this stack; generates its secrets
   --authentik-domain <fqdn>  subdomain for Authentik (needs its own DNS record)
-  --image <ref>         the image (default: ghcr.io/sm26449/webterm:v2.0.19)
+  --image <ref>         the image (default: ghcr.io/sm26449/webterm:v2.0.20)
   --dir <path>          installation directory (default: /opt/webterm)
   --repo <url>          repository to take the files from (standalone mode)
   --branch <name>       branch to clone (default: main)
@@ -264,7 +264,7 @@ case "$DOMAIN" in
   *.*) : ;;
   *) err "Invalid domain: '$DOMAIN' (expected an FQDN, e.g. term.example.com)."; exit 1 ;;
 esac
-IMAGE="${IMAGE:-ghcr.io/sm26449/webterm:v2.0.19}"
+IMAGE="${IMAGE:-ghcr.io/sm26449/webterm:v2.0.20}"
 SETUP_TOKEN="${WEBTERM_SETUP_TOKEN:-}"
 if [ -z "$SETUP_TOKEN" ]; then
   SETUP_TOKEN=$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | cut -c1-32)

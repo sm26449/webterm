@@ -62,6 +62,32 @@ async def main():
         r = await a.post("/api/users", json={"email": "DOI@x.co", "password": PW2,
                                              "current_password": PW1})
         check("email duplicat (case-insensitive) respins", r.status_code == 409)
+
+        # M1 (audit 2026-09): un cont admin nou e o schimbare de credenţiale, deci trece prin
+        # acelaşi al doilea factor ca înrolarea de passkey (second_gate). De pe un dispozitiv nou
+        # cu SMTP configurat, parola singură nu ajunge — se cere codul pe email. Fără el, un cookie
+        # furat + parola ştiută ar lăsa un al doilea admin ce supravieţuieşte rotaţiei parolei.
+        import app.email_alerts as _ea
+
+        async def _yes(*a, **k):
+            return True
+        _snd, _smtp, _send = security.session_is_new_device, _ea.smtp_ready, _ea.send_account_code
+        security.session_is_new_device = _yes
+        _ea.smtp_ready = _yes
+        _ea.send_account_code = _yes   # nu trimitem un email real în test; gate-ul cere codul (403)
+        try:
+            r = await a.post("/api/users", json={"email": "trei@x.co", "password": PW2,
+                                                 "current_password": PW1})
+            check("create_user pe dispozitiv nou (SMTP) cere al doilea factor, nu doar parola (403)",
+                  r.status_code == 403, str(r.status_code))
+            r = await a.post("/api/totp/disable", json={"current_password": PW1})
+            check("totp_disable trece şi el prin al doilea factor (403 fără cod)",
+                  r.status_code == 403, str(r.status_code))
+        finally:
+            security.session_is_new_device = _snd
+            _ea.smtp_ready = _smtp
+            _ea.send_account_code = _send
+
         me = [u for u in (await a.get("/api/users")).json() if u["is_self"]]
         check("lista marchează contul curent", len(me) == 1 and me[0]["email"] == "unu@x.co")
 
