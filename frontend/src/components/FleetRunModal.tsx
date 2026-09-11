@@ -28,6 +28,24 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
   const [phase, setPhase] = useState<'pick' | 'confirm' | 'running'>('pick')
   const [selected, setSelected] = useState<Set<number>>(() => new Set(runnable.map((h) => h.id)))
   const [command, setCommand] = useState('')
+  // Comenzi fleet SALVATE, în localStorage (per-browser): declanşare manuală, zero stare în
+  // gateway — aliniat cu „fără background always-on". Un cron în gateway ar fi fost scope creep.
+  const SAVED_KEY = 'wt-fleet-saved'
+  type SavedCmd = { name: string; command: string }
+  const [saved, setSaved] = useState<SavedCmd[]>(() => {
+    try { return JSON.parse(localStorage.getItem(SAVED_KEY) || '[]') } catch { return [] }
+  })
+  const persistSaved = (next: SavedCmd[]) => {
+    setSaved(next)
+    try { localStorage.setItem(SAVED_KEY, JSON.stringify(next.slice(0, 50))) } catch { /* quota/private */ }
+  }
+  const saveCurrent = () => {
+    const cmd = command.trim()
+    if (!cmd) return
+    const name = (window.prompt(t('fleet.saveName')) || '').trim().slice(0, 60)
+    if (!name) return
+    persistSaved([...saved.filter((s) => s.name !== name), { name, command: cmd }])
+  }
   const [results, setResults] = useState<Record<number, RunResult>>({})
   const [expanded, setExpanded] = useState<number | null>(null)
   const [copied, setCopied] = useState(false)
@@ -149,7 +167,25 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
                     </button>
                   ))}
                 </div>
-                <label className="mt-1 text-xs font-semibold uppercase tracking-wide text-slate-400">{t('fleet.command')}</label>
+                <div className="mt-1 flex items-center gap-2">
+                  <label className="text-xs font-semibold uppercase tracking-wide text-slate-400">{t('fleet.command')}</label>
+                  <button type="button" onClick={saveCurrent} disabled={!command.trim()}
+                    className="ml-auto text-[11px] wt-link hover:underline disabled:opacity-40">
+                    {t('fleet.saveCurrent')}
+                  </button>
+                </div>
+                {saved.length > 0 && (
+                  <div className="flex flex-wrap gap-1">
+                    {saved.map((s) => (
+                      <span key={s.name} className="inline-flex items-center gap-1 rounded bg-ink-800 px-1.5 py-0.5 text-[11px] text-slate-300 ring-1 ring-ink-700">
+                        <button type="button" onClick={() => setCommand(s.command)} title={s.command}
+                          className="hover:text-white">{s.name}</button>
+                        <button type="button" onClick={() => persistSaved(saved.filter((x) => x.name !== s.name))}
+                          aria-label={t('fleet.removeSaved', { name: s.name })} className="text-slate-500 hover:wt-danger">×</button>
+                      </span>
+                    ))}
+                  </div>
+                )}
                 <textarea value={command} onChange={(e) => setCommand(e.target.value)} rows={3} autoFocus spellCheck={false}
                   placeholder={t('fleet.commandPlaceholder')} aria-label={t('fleet.command')}
                   className="rounded-lg bg-ink-800 px-3 py-2 font-mono text-sm text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500" />
