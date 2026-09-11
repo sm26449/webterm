@@ -53,6 +53,7 @@ export interface Host {
   backend: string | null
   last_heartbeat: number | null
   folder?: string
+  tags?: string[]
   conflict?: boolean
   uninstalled_at?: number | null
   install_command?: string

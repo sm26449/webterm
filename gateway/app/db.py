@@ -276,6 +276,9 @@ MIGRATIONS = [
     # raportează hostname-ul la prima conectare, moment în care îl adoptăm ŞI stingem flagul
     # (deci o redenumire ulterioară din UI rămâne). Vezi `/install/group` + reconcile.
     "ALTER TABLE hosts ADD COLUMN name_auto INTEGER NOT NULL DEFAULT 0",
+    # Etichete libere pe host (listă separată prin virgulă, normalizată lowercase): filtrare la
+    # scară de flotă („all prod", „all debian") mai flexibilă decât folderul (o singură ierarhie).
+    "ALTER TABLE hosts ADD COLUMN tags TEXT DEFAULT ''",
 ]
 
 # tabele adăugate ulterior (executeScript de mai sus le creează pe DB-uri noi;

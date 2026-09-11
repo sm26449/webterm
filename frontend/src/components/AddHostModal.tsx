@@ -21,6 +21,7 @@ export default function AddHostModal(props: { onClose: () => void; host?: Host; 
   const [connType, setConnType] = useState<ConnType>((edit?.connection_type as ConnType) || 'agent')
   const [name, setName] = useState(edit?.name ?? '')
   const [note, setNote] = useState(edit?.note ?? '')
+  const [tags, setTags] = useState((edit?.tags ?? []).join(', '))
   // câmpuri SSH
   const [hostname, setHostname] = useState(edit?.hostname ?? '')
   const [port, setPort] = useState(edit?.ssh_port ?? 22)
@@ -51,7 +52,7 @@ export default function AddHostModal(props: { onClose: () => void; host?: Host; 
   async function submit(e: FormEvent) {
     e.preventDefault()
     setError('')
-    const body: Record<string, unknown> = { name, note, connection_type: connType }
+    const body: Record<string, unknown> = { name, note, tags, connection_type: connType }
     if (!edit) body.require_2fa = require2fa      // la editare, 2FA are endpoint propriu (cere step-up)
     if (connType !== 'agent') {
       Object.assign(body, {
@@ -224,6 +225,12 @@ export default function AddHostModal(props: { onClose: () => void; host?: Host; 
               <span className={label}>{t('addhost.note')}</span>
               <input placeholder={t('addhost.notePlaceholder')} value={note}
                 onChange={(e) => setNote(e.target.value)} className={field} />
+            </label>
+
+            <label className="block">
+              <span className={label}>{t('addhost.tags')}</span>
+              <input placeholder={t('addhost.tagsPlaceholder')} value={tags}
+                onChange={(e) => setTags(e.target.value)} className={field} />
             </label>
 
             {error && <div className="text-sm wt-danger">{error}</div>}

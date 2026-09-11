@@ -1085,6 +1085,21 @@ class HostIn(BaseModel):
     passphrase: str = ""                 # write-only: passphrase-ul cheii
     require_2fa: bool = False
     credential_policy: str = "stored"    # stored | ask | ephemeral
+    tags: str = ""                       # etichete libere, virgulă/spaţiu separat (normalizate)
+
+
+def _norm_tags(s: str) -> str:
+    """Normalizează etichetele: lowercase, fără spaţii/duplicate, plafon de număr şi lungime
+    (un host compromis... nu, hosturile nu-şi setează tag-urile — dar UI-ul poate trimite orice)."""
+    seen, out = set(), []
+    for tag in (s or "").replace(",", " ").split():
+        tag = tag.strip().lower()[:32]
+        if tag and tag not in seen:
+            seen.add(tag)
+            out.append(tag)
+        if len(out) >= 20:
+            break
+    return ",".join(out)
 
 
 def _credential_blob(h: "HostIn"):
@@ -1171,6 +1186,8 @@ def _host_json(row) -> dict:
         "agent_user": row["agent_user"], "agent_version": row["agent_version"],
         "backend": row["backend"], "last_heartbeat": row["last_heartbeat"],
         "folder": (row["folder"] or "") if "folder" in row.keys() else "",
+        "tags": [t for t in ((row["tags"] or "").split(",")
+                             if "tags" in row.keys() and row["tags"] else [])],
         "conflict": core.host_conflict(row["id"]),
         # Agentul a fost scos de pe host. Hostul rămâne până când cineva confirmă în UI —
         # poate nu vrei să-l ştergi, ci doar să-l reinstalezi, caz în care marcajul dispare
@@ -1354,14 +1371,14 @@ async def create_host(host: HostIn, user=Depends(security.require_user)):
         # câmpuri de conexiune şi le ignora.
         "INSERT INTO hosts(name, note, folder, token_hash, token_encrypted, enroll_token,"
         " enroll_expires, created, connection_type, hostname, ssh_username, ssh_port,"
-        " auth_method, credential_encrypted, require_2fa, credential_policy)"
-        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " auth_method, credential_encrypted, require_2fa, credential_policy, tags)"
+        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         host.name.strip(), host.note, host.folder.strip(), security.sha256_hex(token),
         security.encrypt_secret(token), enroll,
         time.time() + 24 * 3600, time.time(),
         ctype, host.hostname.strip() or None, host.ssh_username.strip() or None,
         host.ssh_port, host.auth_method, _credential_blob(host),
-        int(host.require_2fa), host.credential_policy)
+        int(host.require_2fa), host.credential_policy, _norm_tags(host.tags))
     row = await db.fetchone("SELECT * FROM hosts WHERE id=?", host_id)
     return dict(_host_json(row), install_command=_install_command(enroll),
                 install_command_dedicated=_install_command_dedicated(enroll),
@@ -3171,6 +3188,7 @@ class HostPatch(BaseModel):
     credential: Optional[str] = None      # write-only; netrimis = păstrează ce e stocat
     passphrase: Optional[str] = None
     credential_policy: Optional[str] = None
+    tags: Optional[str] = None
     stepup_grant: str = ""
     stepup_password: str = ""
 
@@ -3236,6 +3254,8 @@ async def update_host(host_id: int, host: HostPatch, user=Depends(security.requi
             vals.append(v.strip() if isinstance(v, str) else v)
     if "ssh_port" in given:
         sets.append("ssh_port=?"); vals.append(given["ssh_port"])
+    if "tags" in given:
+        sets.append("tags=?"); vals.append(_norm_tags(given["tags"]))
     if "connection_type" in given:
         sets.append("connection_type=?"); vals.append(new_type)
     if given.get("credential"):

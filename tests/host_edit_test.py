@@ -64,8 +64,11 @@ async def main():
 
         # ── host agent, cu notă şi folder ────────────────────────────────────
         r = await c.post("/api/hosts", json={"name": "srv", "note": "nota-mea",
-                                             "folder": "productie"})
+                                             "folder": "productie", "tags": "Prod, Debian PROD"})
         hid = r.json()["id"]
+        h = await get(hid)
+        # etichetele se normalizează (lowercase, fără duplicate/spaţii) şi se întorc ca listă
+        check("tag-urile normalizate + listă", h["tags"] == ["prod", "debian"], repr(h["tags"]))
 
         # ── 1. PATCH parţial: nu şterge ce nu i-ai dat ───────────────────────
         r = await c.patch(f"/api/hosts/{hid}", json={"name": "srv-redenumit"})
@@ -75,6 +78,13 @@ async def main():
         check("nota NU s-a şters (defectul vechi)", h["note"] == "nota-mea", repr(h["note"]))
         check("folderul NU s-a şters (defectul vechi)", h["folder"] == "productie",
               repr(h["folder"]))
+
+        # PATCH pe tags: se schimbă independent, rămân normalizate
+        r = await c.patch(f"/api/hosts/{hid}", json={"tags": "web,web,STAGING"})
+        check("PATCH tags → 200", r.status_code == 200, r.text)
+        h = await get(hid)
+        check("tag-urile s-au înlocuit + normalizat", h["tags"] == ["web", "staging"], repr(h["tags"]))
+        check("nota NU s-a şters la PATCH de tags", h["note"] == "nota-mea", repr(h["note"]))
 
         # PATCH gol: nimic de făcut, dar nici eroare — clientul află că n-a schimbat nimic
         r = await c.patch(f"/api/hosts/{hid}", json={})

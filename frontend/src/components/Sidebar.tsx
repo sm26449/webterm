@@ -248,7 +248,8 @@ export default function Sidebar(props: {
   const q = query.trim().toLowerCase()
   const hostMatches = (h: Host) =>
     (!groupFilter || (h.folder || '') === groupFilter) &&
-    (!q || h.name.toLowerCase().includes(q) || (h.hostname ?? '').toLowerCase().includes(q))
+    (!q || h.name.toLowerCase().includes(q) || (h.hostname ?? '').toLowerCase().includes(q)
+      || (h.tags || []).some((tag) => tag.includes(q)))
 
   // Sidebar = navigare: card de host → deschide pagina hostului. Sesiunile
   // (active + închise, istoric, atașare) trăiesc în pagina hostului, nu aici.
@@ -295,6 +296,18 @@ export default function Sidebar(props: {
                 {host.connection_type && host.connection_type !== 'agent' && (
                   <span className="font-semibold text-slate-400"> · {host.connection_type.toUpperCase()}</span>
                 )}
+              </div>
+            )}
+            {host.tags && host.tags.length > 0 && (
+              <div className="mt-0.5 flex flex-wrap gap-1">
+                {host.tags.map((tag) => (
+                  <button key={tag} type="button"
+                    onClick={(e) => { e.stopPropagation(); setQuery(tag) }}
+                    title={t('sidebar.filterByTag', { tag })}
+                    className="rounded bg-ink-700/60 px-1.5 text-[10px] text-slate-400 hover:bg-ink-700 hover:text-slate-200">
+                    {tag}
+                  </button>
+                ))}
               </div>
             )}
             {host.conflict && (
