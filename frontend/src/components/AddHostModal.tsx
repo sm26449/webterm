@@ -14,7 +14,7 @@ const label = 'mb-1 block text-xs font-medium text-slate-400'
 // `host` prezent = mod EDITARE. Acelaşi formular: un host se editează cu exact câmpurile cu
 // care a fost creat, iar comutarea agent↔SSH e doar o schimbare de tip — util fix atunci când
 // agentul nu mai răspunde şi vrei să intri pe SSH ca să-l repari.
-export default function AddHostModal(props: { onClose: () => void; host?: Host; onSaved?: () => void }) {
+export default function AddHostModal(props: { onClose: () => void; host?: Host; onSaved?: () => void; tagSuggestions?: string[] }) {
   const { t } = useI18n()
   const edit = props.host
   const dialogRef = useRef<HTMLDivElement>(null)
@@ -388,8 +388,13 @@ export default function AddHostModal(props: { onClose: () => void; host?: Host; 
 
             <label className="block">
               <span className={label}>{t('addhost.tags')}</span>
-              <input placeholder={t('addhost.tagsPlaceholder')} value={tags}
+              <input placeholder={t('addhost.tagsPlaceholder')} value={tags} list="wt-tag-suggestions"
                 onChange={(e) => setTags(e.target.value)} className={field} />
+              {(props.tagSuggestions ?? []).length > 0 && (
+                <datalist id="wt-tag-suggestions">
+                  {(props.tagSuggestions ?? []).map((tg) => <option key={tg} value={tg} />)}
+                </datalist>
+              )}
             </label>
 
             {error && <div className="text-sm wt-danger">{error}</div>}

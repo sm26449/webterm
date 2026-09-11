@@ -1679,7 +1679,11 @@ export default function SessionView(props: {
           if (longPressRef.current) { clearTimeout(longPressRef.current); longPressRef.current = null }
         }}
       >
-        <div ref={containerRef} className="h-full w-full" />
+        {/* Hint sr-only PERMANENT: un user nevăzător care intră în terminal cu modul screen-reader
+            OPRIT primea tăcere totală şi niciun indiciu că modul există. Îl anunţăm aici — vizibil
+            doar pentru cititoarele de ecran — cum îl activează + cum iese (Ctrl+M). Vezi audit A4. */}
+        <span className="sr-only">{t('session.srHint')}</span>
+        <div ref={containerRef} role="application" aria-label={t('session.terminalAria')} className="h-full w-full" />
 
         {/* Guardrail: comandă blocată (mesaj tranzitoriu) */}
         {guardMsg && (

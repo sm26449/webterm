@@ -39,12 +39,17 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
     setSaved(next)
     try { localStorage.setItem(SAVED_KEY, JSON.stringify(next.slice(0, 50))) } catch { /* quota/private */ }
   }
+  const [saveName, setSaveName] = useState('')
   const saveCurrent = () => {
     const cmd = command.trim()
-    if (!cmd) return
-    const name = (window.prompt(t('fleet.saveName')) || '').trim().slice(0, 60)
-    if (!name) return
+    const name = saveName.trim().slice(0, 60)
+    if (!cmd || !name) return
+    // suprascriere NU tăcută: dacă numele există deja, cerem confirmare (înainte se înlocuia
+    // fără avertisment — puteai pierde o comandă salvată dintr-o coincidenţă de nume).
+    if (saved.some((s) => s.name === name)
+        && !window.confirm(t('fleet.overwriteConfirm', { name }))) return
     persistSaved([...saved.filter((s) => s.name !== name), { name, command: cmd }])
+    setSaveName('')
   }
   const [results, setResults] = useState<Record<number, RunResult>>({})
   const [expanded, setExpanded] = useState<number | null>(null)
@@ -180,13 +185,17 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
                 </div>
                 <div className="mt-1 flex items-center gap-2">
                   <label className="text-xs font-semibold uppercase tracking-wide text-slate-400">{t('fleet.command')}</label>
-                  <button type="button" onClick={saveCurrent} disabled={!command.trim()}
-                    className="ml-auto text-[11px] wt-link hover:underline disabled:opacity-40">
+                  <input value={saveName} onChange={(e) => setSaveName(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); saveCurrent() } }}
+                    placeholder={t('fleet.saveNamePlaceholder')} aria-label={t('fleet.saveName')}
+                    className="ml-auto w-40 rounded bg-ink-800 px-2 py-0.5 text-[11px] text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500" />
+                  <button type="button" onClick={saveCurrent} disabled={!command.trim() || !saveName.trim()}
+                    className="text-[11px] wt-link hover:underline disabled:opacity-40">
                     {t('fleet.saveCurrent')}
                   </button>
                 </div>
                 {saved.length > 0 && (
-                  <div className="flex flex-wrap gap-1">
+                  <div className="flex flex-wrap items-center gap-1">
                     {saved.map((s) => (
                       <span key={s.name} className="inline-flex items-center gap-1 rounded bg-ink-800 px-1.5 py-0.5 text-[11px] text-slate-300 ring-1 ring-ink-700">
                         <button type="button" onClick={() => setCommand(s.command)} title={s.command}
@@ -195,6 +204,7 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
                           aria-label={t('fleet.removeSaved', { name: s.name })} className="text-slate-500 hover:wt-danger">×</button>
                       </span>
                     ))}
+                    <span className="ml-1 text-[10px] text-slate-600">{t('fleet.savedHere')}</span>
                   </div>
                 )}
                 <textarea value={command} onChange={(e) => setCommand(e.target.value)} rows={3} autoFocus spellCheck={false}

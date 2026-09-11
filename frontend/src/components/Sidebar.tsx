@@ -244,6 +244,8 @@ export default function Sidebar(props: {
 
   // grupurile existente (foldere) pentru filtrare rapidă
   const groups = [...new Set(props.hosts.map((h) => h.folder || '').filter(Boolean))].sort()
+  // etichetele deja folosite → sugestii în Add-host (evită fragmentarea taxonomiei: web/webserver)
+  const allTags = [...new Set(props.hosts.flatMap((h) => h.tags || []))].sort()
 
   const q = query.trim().toLowerCase()
   const hostMatches = (h: Host) =>
@@ -646,6 +648,7 @@ export default function Sidebar(props: {
       <Suspense fallback={null}>
         {showAdd && (
           <AddHostModal
+            tagSuggestions={allTags}
             onClose={() => {
               setShowAdd(false)
               props.onChanged()
@@ -655,6 +658,7 @@ export default function Sidebar(props: {
         {editHost && (
           <AddHostModal
             host={editHost}
+            tagSuggestions={allTags}
             onSaved={props.onChanged}
             onClose={() => setEditHost(null)}
           />

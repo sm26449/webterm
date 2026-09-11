@@ -1838,8 +1838,12 @@ export default function SettingsModal(props: {
           {groups.map((g) => (
             <li key={g.id} className="flex items-center gap-2 rounded-lg bg-ink-800/60 px-3 py-2 text-sm ring-1 ring-ink-700">
               <span className="min-w-0 flex-1 truncate text-slate-200">{g.name}
-                {g.folder && <span className="ml-1 text-[11px] text-slate-500">→ {g.folder}</span>}
-                {g.require_2fa ? <span className="ml-1 text-[11px] text-amber-400">2FA</span> : null}
+                {g.folder && <span className="ml-1 text-[11px] text-slate-500"><span aria-hidden="true">→ </span>{g.folder}</span>}
+                {g.require_2fa ? (
+                  <span className="ml-1 text-[11px] text-amber-400" title={t('settings.enrollGroups.require2fa')}>
+                    2FA<span className="sr-only"> — {t('settings.enrollGroups.require2fa')}</span>
+                  </span>
+                ) : null}
               </span>
               <span className="shrink-0 text-[11px] text-slate-500">
                 {t('settings.enrollGroups.uses', { n: g.uses, max: g.max_uses || '∞' })}
