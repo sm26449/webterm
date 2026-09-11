@@ -174,6 +174,10 @@ export default function SettingsModal(props: {
     account: string; keep: number; include_transcripts: boolean
     last: { ts?: number; ok?: boolean; name?: string; size?: number; error?: string }
     redirect_uri: string; providers: CloudProvider[]
+    direct: {
+      host: string; port: number; user: string; path: string
+      has_key: boolean; has_password: boolean; hostkey: string; has_ca: boolean
+    }
   }
   const [cloud, setCloud] = useState<CloudStatus | null>(null)
   type UpdateInfo = {
@@ -197,6 +201,18 @@ export default function SettingsModal(props: {
   const [cloudBusy, setCloudBusy] = useState(false)
   const [cloudHelp, setCloudHelp] = useState(false)
   const [copied, setCopied] = useState(false)
+  // ── Destinaţie DIRECTĂ (SFTP/FTPS), scrisă din UI — vezi backup_dest.py ──
+  // Secretele (cheie SSH / parolă / passphrase) se golesc din formular după salvare: serverul nu
+  // le mai întoarce. Pentru SFTP, host-key-ul serverului se PINUIEŞTE prin probe (TOFU) înainte
+  // de salvare — o cheie schimbată ulterior duce la refuz (anti-MITM).
+  const [directForm, setDirectForm] = useState({
+    kind: 'sftp', host: '', port: 22, user: '', path: '.',
+    auth: 'key' as 'key' | 'password', ssh_key: '', password: '',
+    hostkey: '', ca: '', passphrase: '', keep: 14, include_transcripts: false,
+    current_password: '',
+  })
+  const [probeInfo, setProbeInfo] = useState<{ fingerprint: string; type: string; hostkey: string } | null>(null)
+  const isDirect = cloudForm.provider === 'sftp' || cloudForm.provider === 'ftps'
 
   const loadCloud = () =>
     api<CloudStatus>('/api/backup/cloud').then((s) => {
@@ -205,7 +221,65 @@ export default function SettingsModal(props: {
         ...f, provider: s.provider || f.provider, keep: s.keep || f.keep,
         include_transcripts: s.include_transcripts,
       }))
+      // prefill destinaţie directă din stare (fără secrete: doar host/port/user/cale + host-key/CA
+      // deja pinuite şi flagurile has_key/has_password care spun ce metodă de auth e configurată)
+      if (s.direct && (s.provider === 'sftp' || s.provider === 'ftps')) {
+        setDirectForm((f) => ({
+          ...f, kind: s.provider, host: s.direct.host || f.host,
+          port: s.direct.port || f.port, user: s.direct.user || f.user,
+          path: s.direct.path || f.path, hostkey: s.direct.hostkey || f.hostkey,
+          auth: s.direct.has_password ? 'password' : 'key',
+          keep: s.keep || f.keep, include_transcripts: s.include_transcripts,
+        }))
+      }
     }).catch(() => {})
+
+  // SFTP TOFU: testează conexiunea şi întoarce amprenta host-key-ului de confirmat vizual.
+  async function probeHost() {
+    setCloudErr(''); setCloudMsg(''); setCloudBusy(true)
+    try {
+      const info = await api<{ fingerprint: string; type: string; hostkey: string }>(
+        '/api/backup/cloud/probe',
+        { method: 'POST', body: JSON.stringify({
+          host: directForm.host, port: directForm.port, user: directForm.user,
+          ssh_key: directForm.auth === 'key' ? directForm.ssh_key : '',
+          password: directForm.auth === 'password' ? directForm.password : '',
+          current_password: directForm.current_password,
+        }) })
+      setProbeInfo(info)
+      setDirectForm((f) => ({ ...f, hostkey: info.hostkey }))
+      setCloudMsg(t('settings.direct.probeOk'))
+    } catch (e) {
+      setCloudErr(errText(e, t) || String(e))
+    }
+    setCloudBusy(false)
+  }
+
+  async function saveDirect(e: FormEvent) {
+    e.preventDefault()
+    setCloudErr(''); setCloudMsg(''); setCloudBusy(true)
+    try {
+      const s = await api<CloudStatus>('/api/backup/cloud/direct',
+        { method: 'POST', body: JSON.stringify({
+          kind: directForm.kind, host: directForm.host, port: directForm.port,
+          user: directForm.user, path: directForm.path,
+          ssh_key: directForm.auth === 'key' ? directForm.ssh_key : '',
+          password: directForm.auth === 'password' ? directForm.password : '',
+          hostkey: directForm.hostkey, ca: directForm.ca,
+          passphrase: directForm.passphrase, keep: directForm.keep,
+          include_transcripts: directForm.include_transcripts,
+          current_password: directForm.current_password,
+        }) })
+      setCloud(s)
+      // secretele nu se mai întorc de la server: le golim din formular după salvare
+      setDirectForm((f) => ({ ...f, ssh_key: '', password: '', passphrase: '', current_password: '' }))
+      setProbeInfo(null)
+      setCloudMsg(t('settings.cloud.saved'))
+    } catch (e) {
+      setCloudErr(errText(e, t) || String(e))
+    }
+    setCloudBusy(false)
+  }
 
   async function saveCloud(e: FormEvent) {
     e.preventDefault()
@@ -2073,9 +2147,9 @@ export default function SettingsModal(props: {
           ) : null}
         </div>
 
-        {/* pasul 1: ce trebuie creat la provider — instrucțiunile stau lângă câmpuri,
-            nu în documentație, ca să nu ceară alt tab */}
-        <div className="mt-3 flex gap-2">
+        {/* pasul 1: alegerea destinaţiei — OAuth (Drive/Dropbox) sau server propriu (SFTP/FTPS).
+            instrucțiunile stau lângă câmpuri, nu în documentație, ca să nu ceară alt tab */}
+        <div className="mt-3 flex flex-wrap gap-2">
           {(cloud?.providers ?? []).map((p) => (
             <button key={p.id} type="button"
               onClick={() => setCloudForm((f) => ({ ...f, provider: p.id }))}
@@ -2083,13 +2157,22 @@ export default function SettingsModal(props: {
                 cloudForm.provider === p.id ? 'bg-sky-600 text-white' : 'bg-ink-800 text-slate-300 hover:bg-ink-700'}`}
             >{p.label}</button>
           ))}
-          <button type="button" onClick={() => setCloudHelp(!cloudHelp)}
-            className="text-xs wt-link hover:underline">
-            {cloudHelp ? t('settings.cloud.hideSteps') : t('settings.cloud.showSteps')}
-          </button>
+          {[{ id: 'sftp', label: 'SFTP' }, { id: 'ftps', label: 'FTPS' }].map((p) => (
+            <button key={p.id} type="button"
+              onClick={() => { setCloudForm((f) => ({ ...f, provider: p.id })); setDirectForm((f) => ({ ...f, kind: p.id, port: p.id === 'sftp' ? 22 : 21 })) }}
+              className={`wt-touch rounded-lg px-3 py-1.5 text-sm ${
+                cloudForm.provider === p.id ? 'bg-sky-600 text-white' : 'bg-ink-800 text-slate-300 hover:bg-ink-700'}`}
+            >{p.label}</button>
+          ))}
+          {!isDirect && (
+            <button type="button" onClick={() => setCloudHelp(!cloudHelp)}
+              className="text-xs wt-link hover:underline">
+              {cloudHelp ? t('settings.cloud.hideSteps') : t('settings.cloud.showSteps')}
+            </button>
+          )}
         </div>
 
-        {cloudHelp && (() => {
+        {!isDirect && cloudHelp && (() => {
           const p = (cloud?.providers ?? []).find((x) => x.id === cloudForm.provider)
           return (
             <ol className="mt-2 flex list-decimal flex-col gap-1 rounded-lg bg-ink-800/60 p-3 pl-7 text-xs text-slate-400 ring-1 ring-ink-700">
@@ -2117,7 +2200,8 @@ export default function SettingsModal(props: {
           )
         })()}
 
-        {/* pasul 2: credențialele aplicației + parola de criptare */}
+        {/* pasul 2 (OAuth): credențialele aplicației + parola de criptare */}
+        {!isDirect && (
         <form onSubmit={saveCloud} className="mt-3 flex flex-col gap-2">
           <input value={cloudForm.client_id} spellCheck={false} autoComplete="off"
             onChange={(e) => setCloudForm((f) => ({ ...f, client_id: e.target.value }))}
@@ -2177,6 +2261,131 @@ export default function SettingsModal(props: {
           {cloudMsg && <span className="text-sm wt-good">{cloudMsg}</span>}
           {cloudErr && <span className="text-sm wt-danger">{cloudErr}</span>}
         </form>
+        )}
+
+        {/* pasul 2 (server propriu): SFTP/FTPS scris din UI. Arhiva pleacă DEJA criptată; aici
+            configurăm doar unde şi cum ne conectăm, cu credenţialele criptate în seif. */}
+        {isDirect && (
+        <form onSubmit={saveDirect} className="mt-3 flex flex-col gap-2">
+          <p className="text-xs text-slate-500">
+            {directForm.kind === 'sftp' ? t('settings.direct.sftpHint') : t('settings.direct.ftpsHint')}
+          </p>
+          <div className="flex gap-2">
+            <input value={directForm.host} spellCheck={false} autoComplete="off"
+              onChange={(e) => setDirectForm((f) => ({ ...f, host: e.target.value }))}
+              placeholder={t('settings.direct.host')} aria-label={t('settings.direct.host')}
+              className={field + ' flex-1'} />
+            <input type="number" min={1} max={65535} value={directForm.port}
+              onChange={(e) => setDirectForm((f) => ({ ...f, port: Number(e.target.value) }))}
+              placeholder={t('settings.direct.port')} aria-label={t('settings.direct.port')}
+              className={field + ' w-24'} />
+          </div>
+          <input value={directForm.user} spellCheck={false} autoComplete="off"
+            onChange={(e) => setDirectForm((f) => ({ ...f, user: e.target.value }))}
+            placeholder={t('settings.direct.user')} aria-label={t('settings.direct.user')} className={field} />
+          <input value={directForm.path} spellCheck={false} autoComplete="off"
+            onChange={(e) => setDirectForm((f) => ({ ...f, path: e.target.value }))}
+            placeholder={t('settings.direct.path')} aria-label={t('settings.direct.path')} className={field} />
+
+          {/* metoda de auth: cheie SSH (doar SFTP) sau parolă */}
+          {directForm.kind === 'sftp' && (
+            <div className="flex gap-2">
+              {(['key', 'password'] as const).map((m) => (
+                <button key={m} type="button"
+                  onClick={() => setDirectForm((f) => ({ ...f, auth: m }))}
+                  className={`wt-touch rounded-lg px-3 py-1.5 text-sm ${
+                    directForm.auth === m ? 'bg-sky-600 text-white' : 'bg-ink-800 text-slate-300 hover:bg-ink-700'}`}
+                >{m === 'key' ? t('settings.direct.authKey') : t('settings.direct.authPassword')}</button>
+              ))}
+            </div>
+          )}
+          {directForm.kind === 'sftp' && directForm.auth === 'key' ? (
+            <textarea value={directForm.ssh_key} spellCheck={false} autoComplete="off" rows={4}
+              onChange={(e) => setDirectForm((f) => ({ ...f, ssh_key: e.target.value }))}
+              placeholder={cloud?.direct?.has_key ? t('settings.direct.sshKeyKeep') : t('settings.direct.sshKey')}
+              aria-label={t('settings.direct.sshKey')} className={field + ' font-mono text-xs'} />
+          ) : (
+            <input type="password" value={directForm.password} autoComplete="new-password"
+              onChange={(e) => setDirectForm((f) => ({ ...f, password: e.target.value }))}
+              placeholder={cloud?.direct?.has_password ? t('settings.direct.passwordKeep') : t('settings.direct.password')}
+              aria-label={t('settings.direct.password')} className={field} />
+          )}
+
+          {/* SFTP: pinuirea host-key-ului (TOFU). Fără amprentă confirmată nu se poate salva. */}
+          {directForm.kind === 'sftp' && (
+            <div className="rounded-lg bg-ink-800/60 p-3 ring-1 ring-ink-700">
+              <div className="flex flex-wrap items-center gap-2">
+                <button type="button" onClick={probeHost} disabled={cloudBusy || !directForm.host || !directForm.user}
+                  className="rounded-lg bg-ink-800 px-3 py-1.5 text-sm text-slate-200 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-40">
+                  {t('settings.direct.probe')}
+                </button>
+                {directForm.hostkey
+                  ? <span className="text-xs wt-good">{t('settings.direct.hostkeyPinned')}</span>
+                  : <span className="text-xs text-amber-400">{t('settings.direct.hostkeyNeeded')}</span>}
+              </div>
+              {probeInfo && (
+                <p className="mt-2 break-all text-xs text-slate-400">
+                  {t('settings.direct.confirmFingerprint')}
+                  <span className="mt-1 block font-mono text-slate-200">{probeInfo.fingerprint}</span>
+                </p>
+              )}
+            </div>
+          )}
+          {/* FTPS: CA/cert PEM opţional pentru servere self-signed (public, nu e secret) */}
+          {directForm.kind === 'ftps' && (
+            <textarea value={directForm.ca} spellCheck={false} autoComplete="off" rows={3}
+              onChange={(e) => setDirectForm((f) => ({ ...f, ca: e.target.value }))}
+              placeholder={cloud?.direct?.has_ca ? t('settings.direct.caKeep') : t('settings.direct.ca')}
+              aria-label={t('settings.direct.ca')} className={field + ' font-mono text-xs'} />
+          )}
+
+          <input type="password" value={directForm.passphrase} autoComplete="new-password"
+            onChange={(e) => setDirectForm((f) => ({ ...f, passphrase: e.target.value }))}
+            placeholder={t('settings.cloud.passphrase')} aria-label={t('settings.cloud.passphrase')} className={field} />
+          <p className="text-xs text-slate-500">{t('settings.cloud.passphraseHint')}</p>
+          <div className="flex flex-wrap items-center gap-3">
+            <label className="flex items-center gap-2 text-sm text-slate-400">
+              {t('settings.cloud.keep')}
+              <input type="number" min={1} max={365} value={directForm.keep}
+                onChange={(e) => setDirectForm((f) => ({ ...f, keep: Number(e.target.value) }))}
+                aria-label={t('settings.cloud.keep')} className={field + ' w-20'} />
+            </label>
+            <label className="flex items-center gap-2 text-sm text-slate-400">
+              <input type="checkbox" checked={directForm.include_transcripts}
+                onChange={(e) => setDirectForm((f) => ({ ...f, include_transcripts: e.target.checked }))}
+                className="h-4 w-4 rounded accent-sky-600" />
+              {t('settings.backup.includeTranscripts')}
+            </label>
+          </div>
+          {/* re-auth: configurarea deschide un canal permanent prin care pleacă backup-uri */}
+          <input type="password" value={directForm.current_password} autoComplete="current-password"
+            onChange={(e) => setDirectForm((f) => ({ ...f, current_password: e.target.value }))}
+            placeholder={t('settings.cloud.accountPassword')} aria-label={t('settings.cloud.accountPassword')} className={field} />
+          <div className="flex flex-wrap items-center gap-2">
+            <button type="submit" disabled={cloudBusy || (directForm.kind === 'sftp' && !directForm.hostkey)}
+              className="rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-50">
+              {t('settings.cloud.save')}
+            </button>
+            <button type="button" disabled={!cloud?.connected || cloudBusy}
+              onClick={() => cloudAction('upload', t('settings.cloud.uploaded'))}
+              className="rounded-lg bg-ink-800 px-3 py-1.5 text-sm text-slate-200 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-40">
+              {t('settings.cloud.uploadNow')}
+            </button>
+            {cloud?.connected && isDirect && (
+              <button type="button" disabled={cloudBusy}
+                onClick={() => cloudAction('disconnect', t('settings.direct.removed'))}
+                className="text-xs wt-danger hover:underline">
+                {t('settings.direct.remove')}
+              </button>
+            )}
+            <button type="button" onClick={loadCloud} className="text-xs wt-link hover:underline">
+              {t('settings.cloud.refresh')}
+            </button>
+          </div>
+          {cloudMsg && <span className="text-sm wt-good">{cloudMsg}</span>}
+          {cloudErr && <span className="text-sm wt-danger">{cloudErr}</span>}
+        </form>
+        )}
 
         {/* ── Restore ── */}
         <h3 className={heading}>{t('settings.backup.restoreTitle')}</h3>

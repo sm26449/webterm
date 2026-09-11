@@ -1876,6 +1876,31 @@ class CloudConfigIn(BaseModel):
     current_password: str = ""     # re-auth: configurarea creează un canal permanent de ieșire
 
 
+class DirectConfigIn(BaseModel):
+    kind: str                      # "sftp" | "ftps"
+    host: str
+    port: int = 0
+    user: str
+    path: str = ""
+    ssh_key: str = ""              # gol la re-salvare = păstrează secretul existent
+    password: str = ""
+    hostkey: str = ""              # cheia de host confirmată (din /probe) — obligatorie prima dată la sftp
+    ca: str = ""                   # opţional: CA/cert PEM pentru FTPS self-signed
+    passphrase: str = ""
+    keep: int = cloudbackup.DEFAULT_KEEP
+    include_transcripts: bool = False
+    current_password: str = ""     # re-auth: la fel ca la cloud — un canal permanent de ieşire
+
+
+class ProbeIn(BaseModel):
+    host: str
+    port: int = 0
+    user: str
+    ssh_key: str = ""
+    password: str = ""
+    current_password: str = ""
+
+
 @router.get("/api/backup/cloud")
 async def cloud_status(user=Depends(security.require_user)):
     return await cloudbackup.status()
@@ -1892,6 +1917,38 @@ async def cloud_config(body: CloudConfigIn, user=Depends(security.require_user))
                                       body.passphrase, body.keep, body.include_transcripts)
     except cloudbackup.CloudError as e:
         raise HTTPException(400, str(e))
+    return await cloudbackup.status()
+
+
+@router.post("/api/backup/cloud/probe")
+async def cloud_probe(body: ProbeIn, request: Request, user=Depends(security.require_user)):
+    """SFTP TOFU: testează conexiunea + întoarce amprenta host-key-ului de confirmat. Re-auth ca la
+    config: cine are doar cookie-ul nu poate sonda servere arbitrare cu credenţiale scrise aici."""
+    if not await _verify_reauth_password(user, body.current_password):
+        raise ApiError(401, "auth.wrongPassword", "wrong password")
+    try:
+        return await cloudbackup.probe(body.host, body.port, body.user, body.ssh_key, body.password)
+    except cloudbackup.CloudError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.post("/api/backup/cloud/direct")
+async def cloud_config_direct(body: DirectConfigIn, request: Request,
+                              user=Depends(security.require_user)):
+    """Configurează o destinaţie DIRECTĂ (SFTP/FTPS). Aceeaşi poartă de re-auth ca la cloud: un
+    cookie furat nu trebuie să poată deschide o cale prin care backup-urile (cheia seifului) pleacă
+    spre serverul atacatorului. Auditat."""
+    if not await _verify_reauth_password(user, body.current_password):
+        raise ApiError(401, "auth.wrongPassword", "wrong password")
+    try:
+        await cloudbackup.save_config_direct(
+            body.kind, body.host, body.port, body.user, body.path, body.ssh_key, body.password,
+            body.hostkey, body.ca, body.passphrase, body.keep, body.include_transcripts)
+    except cloudbackup.CloudError as e:
+        raise HTTPException(400, str(e))
+    await audit.record(time.time(), user["email"], security.client_ip(request), "POST",
+                       "/api/backup/cloud/direct", 200,
+                       "destinaţie backup %s setată: %s@%s" % (body.kind, body.user, body.host))
     return await cloudbackup.status()
 
 

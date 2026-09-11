@@ -25,7 +25,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from . import backup, config, db, security
+from . import backup, backup_dest, config, db, security
 
 log = logging.getLogger("webterm")
 
@@ -33,7 +33,7 @@ _TIMEOUT = 30
 _UA = "WebTerm/%s" % config.GATEWAY_VERSION
 
 # chei în app_settings (valorile sensibile sunt criptate cu cheia seifului)
-K_PROVIDER = "cloud_provider"          # "" | "gdrive" | "dropbox"
+K_PROVIDER = "cloud_provider"          # "" | "gdrive" | "dropbox" | "sftp" | "ftps"
 K_CLIENT_ID = "cloud_client_id"
 K_CLIENT_SECRET = "cloud_client_secret"        # criptat
 K_REFRESH = "cloud_refresh_token"              # criptat
@@ -43,6 +43,15 @@ K_KEEP = "cloud_keep"                          # câte arhive păstrăm la dista
 K_ACCOUNT = "cloud_account"                    # afișat în UI (email / nume cont)
 K_LAST = "cloud_last"                          # JSON: {ts, ok, name, error}
 K_INCLUDE_TX = "cloud_include_tx"
+# destinaţii DIRECTE (sftp/ftps): host/port/user/cale + credenţiale criptate + ancoră de încredere
+K_HOST = "cloud_host"
+K_PORT = "cloud_port"
+K_USER = "cloud_user"
+K_PATH = "cloud_path"                           # calea pe serverul remote
+K_SSH_KEY = "cloud_ssh_key"                    # criptat (SFTP, auth pe cheie)
+K_PASSWORD = "cloud_password"                  # criptat (SFTP parolă / FTPS parolă)
+K_HOSTKEY = "cloud_hostkey"                     # cheia de host SSH PINUITĂ (publică, TOFU)
+K_CA = "cloud_ca"                               # CA/cert PEM pinuit pentru FTPS self-signed (public)
 
 DEFAULT_KEEP = 14
 FOLDER_NAME = "WebTerm Backups"
@@ -288,7 +297,27 @@ async def get_config() -> dict:
         "keep": int(await _get(K_KEEP, str(DEFAULT_KEEP)) or DEFAULT_KEEP),
         "account": await _get(K_ACCOUNT),
         "include_transcripts": (await _get(K_INCLUDE_TX, "0")) == "1",
+        # destinaţii directe (sftp/ftps)
+        "host": await _get(K_HOST),
+        "port": int(await _get(K_PORT, "0") or 0),
+        "user": await _get(K_USER),
+        "path": await _get(K_PATH),
+        "ssh_key": await _get_secret(K_SSH_KEY),
+        "password": await _get_secret(K_PASSWORD),
+        "hostkey": await _get(K_HOSTKEY),
+        "ca": await _get(K_CA),
     }
+
+
+def _is_direct(provider: str) -> bool:
+    return provider in ("sftp", "ftps")
+
+
+async def _direct_cfg(c: dict) -> dict:
+    """Config gata de folosit de backup_dest (secretele deja decriptate din seif)."""
+    return {"host": c["host"], "port": c["port"] or (22 if c["provider"] == "sftp" else 21),
+            "user": c["user"], "path": c["path"], "ssh_key": c["ssh_key"],
+            "password": c["password"], "hostkey": c["hostkey"], "ca": c["ca"]}
 
 
 async def status() -> dict:
@@ -298,17 +327,26 @@ async def status() -> dict:
         last = json.loads(await _get(K_LAST, "") or "{}")
     except ValueError:
         last = {}
+    direct = _is_direct(c["provider"])
+    has_cred = bool(c["ssh_key"] or c["password"])
     return {
         "provider": c["provider"],
-        "configured": bool(c["provider"] and c["client_id"] and c["client_secret"]),
-        "connected": bool(c["refresh"]),
+        # OAuth: configurat = client id/secret; direct: host/user + o credenţială + host-key (sftp)
+        "configured": (bool(c["host"] and c["user"] and has_cred
+                            and (c["provider"] == "ftps" or c["hostkey"]))
+                       if direct else bool(c["provider"] and c["client_id"] and c["client_secret"])),
+        "connected": (bool(c["host"] and has_cred) if direct else bool(c["refresh"])),
         "has_passphrase": bool(c["passphrase"]),
-        "account": c["account"],
+        "account": (("%s@%s" % (c["user"], c["host"])) if direct else c["account"]),
         "keep": c["keep"],
         "include_transcripts": c["include_transcripts"],
         "last": last,
         "redirect_uri": redirect_uri(),
         "providers": provider_catalog(),
+        # destinaţii directe — pentru prefill în UI (NICIODATĂ secretele: cheia SSH / parola)
+        "direct": {"host": c["host"], "port": c["port"], "user": c["user"], "path": c["path"],
+                   "has_key": bool(c["ssh_key"]), "has_password": bool(c["password"]),
+                   "hostkey": c["hostkey"], "has_ca": bool(c["ca"])},
     }
 
 
@@ -333,8 +371,55 @@ async def save_config(provider: str, client_id: str, client_secret: str,
     await _set(K_INCLUDE_TX, "1" if include_transcripts else "0")
 
 
+async def save_config_direct(kind: str, host: str, port: int, user: str, path: str,
+                             ssh_key: str, password: str, hostkey: str, ca: str,
+                             passphrase: str, keep: int, include_transcripts: bool) -> None:
+    """Salvează o destinaţie DIRECTĂ (sftp/ftps). Secretele (cheie SSH / parolă) se criptează cu
+    seiful; host-key-ul pinuit şi CA-ul sunt publice. Câmpurile de secret goale = păstrează ce e."""
+    if kind not in ("sftp", "ftps"):
+        raise CloudError("destinaţie necunoscută")
+    if len(passphrase) < 8:
+        raise CloudError("the encryption passphrase must be at least 8 characters")
+    if not host.strip() or not user.strip():
+        raise CloudError("host and user are required")
+    if kind == "sftp" and not hostkey.strip():
+        prev = await _get(K_HOSTKEY)
+        if not prev:
+            raise CloudError("confirm the server host key first (probe)")
+    await _set(K_PROVIDER, kind)
+    await _set(K_HOST, host.strip())
+    await _set(K_PORT, int(port) if port else 0)
+    await _set(K_USER, user.strip())
+    await _set(K_PATH, path.strip())
+    if ssh_key:                            # gol = păstrează secretul existent
+        await _set(K_SSH_KEY, security.encrypt_secret(ssh_key))
+    if password:
+        await _set(K_PASSWORD, security.encrypt_secret(password))
+    if hostkey.strip():
+        await _set(K_HOSTKEY, hostkey.strip())
+    await _set(K_CA, ca.strip())
+    await _set(K_PASSPHRASE, security.encrypt_secret(passphrase))
+    await _set(K_KEEP, max(1, min(365, int(keep))))
+    await _set(K_INCLUDE_TX, "1" if include_transcripts else "0")
+    # o destinaţie directă nu foloseşte tokenul OAuth — îl golim ca statusul să fie coerent
+    await _set(K_REFRESH, "")
+
+
+async def probe(host: str, port: int, user: str, ssh_key: str = "", password: str = "") -> dict:
+    """TOFU pentru SFTP: testează conexiunea + întoarce host-key-ul + amprenta de confirmat."""
+    try:
+        return await backup_dest.probe_hostkey(host, int(port or 22), user, ssh_key, password)
+    except backup_dest.DestError as e:
+        raise CloudError(str(e))
+
+
 async def disconnect() -> None:
-    """Uită autorizarea (tokenul), păstrează client id/secret ca să te poți reconecta."""
+    """OAuth: uită autorizarea (tokenul), păstrează client id/secret ca să te poți reconecta.
+    Direct (sftp/ftps): nu există „token” de uitat — şterge toată destinaţia, inclusiv credenţialele
+    (cheie SSH / parolă) şi ancora de încredere (host-key / CA), şi resetează providerul."""
+    if _is_direct(await _get(K_PROVIDER)):
+        for k in (K_PROVIDER, K_HOST, K_PORT, K_USER, K_PATH, K_SSH_KEY, K_PASSWORD, K_HOSTKEY, K_CA):
+            await _set(k, "")
     await _set(K_REFRESH, "")
     await _set(K_ACCOUNT, "")
     await _set(K_FOLDER, "")
@@ -401,25 +486,46 @@ async def upload_backup(data: bytes | None = None, name: str = "") -> str:
     import asyncio
 
     c = await get_config()
-    if not c["provider"] or not c["refresh"]:
-        raise CloudError("you are not connected to a cloud provider")
+    direct = _is_direct(c["provider"])
+    connected = (c["host"] and (c["ssh_key"] or c["password"])) if direct else c["refresh"]
+    if not c["provider"] or not connected:
+        raise CloudError("you are not connected to a backup destination")
     if not c["passphrase"]:
         # invariantul: arhiva conține cheia seifului; necriptată la un terț = joc încheiat
         raise CloudError("the encryption passphrase is missing — unencrypted archives are not uploaded")
-    p = PROVIDERS[c["provider"]]
     if data is None:
         snap = await asyncio.to_thread(backup.make_snapshot, c["include_transcripts"])
         name = "webterm-%s.wtbk" % time.strftime("%Y%m%d-%H%M%S", time.gmtime())
         data = await asyncio.to_thread(backup.encrypt, snap, c["passphrase"])
-    token = await _access_token(c)
-    folder = await _to_thread(p.ensure_folder, token, c["folder"])
-    if folder != c["folder"]:
-        await _set(K_FOLDER, folder)
-    await _to_thread(p.upload, token, folder, name, data)
-    await _prune_remote(p, token, folder, c["keep"])
+    if direct:
+        cfg = await _direct_cfg(c)
+        try:
+            await backup_dest.upload(c["provider"], cfg, name, data)
+            await _prune_remote_direct(c["provider"], cfg, c["keep"])
+        except backup_dest.DestError as e:
+            raise CloudError(str(e))
+    else:
+        p = PROVIDERS[c["provider"]]
+        token = await _access_token(c)
+        folder = await _to_thread(p.ensure_folder, token, c["folder"])
+        if folder != c["folder"]:
+            await _set(K_FOLDER, folder)
+        await _to_thread(p.upload, token, folder, name, data)
+        await _prune_remote(p, token, folder, c["keep"])
     await _set(K_LAST, json.dumps({"ts": time.time(), "ok": True, "name": name,
                                    "size": len(data), "error": ""}))
     return name
+
+
+async def _prune_remote_direct(kind: str, cfg: dict, keep: int) -> None:
+    """Retenţie la distanţă pe sftp/ftps: păstrăm cele mai recente `keep` arhive `webterm-*.wtbk`."""
+    try:
+        files = [f for f in await backup_dest.list_backups(kind, cfg)
+                 if f["name"].startswith("webterm-") and f["name"].endswith(".wtbk")]
+        for f in files[keep:]:
+            await backup_dest.delete(kind, cfg, f["name"])
+    except backup_dest.DestError as e:
+        log.warning("remote retention (direct) failed: %s", e)   # backup-ul urcat rămâne valid
 
 
 async def _prune_remote(p: Provider, token: str, folder: str, keep: int) -> None:
@@ -438,7 +544,8 @@ async def upload_scheduled(local_name: str) -> None:
     """Chemat după backup-ul programat: urcă ACEA arhivă, criptată. Eșecul se
     înregistrează pentru UI, dar nu rupe programarea locală."""
     c = await get_config()
-    if not c["provider"] or not c["refresh"]:
+    connected = (c["host"] and (c["ssh_key"] or c["password"])) if _is_direct(c["provider"]) else c["refresh"]
+    if not c["provider"] or not connected:
         return
     import asyncio
     try:
