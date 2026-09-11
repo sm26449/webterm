@@ -18,8 +18,8 @@ REPO=${REPO:-$(cd "$(dirname "$0")/.." && pwd)}
 NM=${PW_MODULES:-$REPO/frontend/node_modules}
 PW=mcr.microsoft.com/playwright:v1.61.1-noble
 IMG=${IMG:-webterm-verify:local}
-P1=8000; P2=8001; P3=8002; P4=8003; P5=8004
-C1=wtci-smoke; C2=wtci-fwd; C3=wtci-sso; C4=wtci-bkapp; C5=wtci-rsapp
+P1=8000; P2=8001; P3=8002; P4=8003; P5=8004; P6=8005
+C1=wtci-smoke; C2=wtci-fwd; C3=wtci-sso; C4=wtci-bkapp; C5=wtci-rsapp; C6=wtci-feat
 SF=wtci-sftp; FT=wtci-ftps            # servere-fixture SFTP/FTPS pentru pasul `backup`
 NET=wtci-net
 # URL-ul public trebuie să fie valid ŞI din browser, ŞI din interiorul containerului:
@@ -56,7 +56,7 @@ ok()   { printf '\033[32m  ✓ %s\033[0m\n' "$*"; pass=$((pass+1)); }
 no()   { printf '\033[31m  ✗ %s\033[0m\n' "$*"; fail=$((fail+1)); }
 
 cleanup() {
-  docker rm -f $C1 $C2 $C3 $C4 $C5 $SF $FT >/dev/null 2>&1 || true
+  docker rm -f $C1 $C2 $C3 $C4 $C5 $C6 $SF $FT >/dev/null 2>&1 || true
   rm -rf "$OUT/ftps-certs" 2>/dev/null || true
   docker network rm $NET >/dev/null 2>&1 || true
 }
@@ -90,8 +90,8 @@ if want unit; then
   command -v "$PIPAUDIT" >/dev/null 2>&1 || [ -x "$PIPAUDIT" ] || {
     echo "'$PIPAUDIT' lipseşte şi n-am putut instala pip-audit — pip install pip-audit" >&2; exit 2; }
 fi
-for prt in $P1 $P2 $P3 $P4 $P5; do
-  case " $ONLY " in *" all "*|*" smoke "*|*" e2e "*|*" a11y "*|*" fs "*|*" fwd "*|*" mobile "*|*" sso "*|*" backup "*)
+for prt in $P1 $P2 $P3 $P4 $P5 $P6; do
+  case " $ONLY " in *" all "*|*" smoke "*|*" e2e "*|*" a11y "*|*" fs "*|*" fwd "*|*" mobile "*|*" sso "*|*" backup "*|*" features "*)
     if ss -ltn 2>/dev/null | grep -q ":$prt "; then
       echo "portul $prt e ocupat — runner-ul are nevoie de $P1 şi $P2 (vezi nota de sus)" >&2
       exit 2
@@ -383,6 +383,26 @@ if [ "$_bkok" = 1 ]; then
 fi
 # $C5 are `--restart`: îl oprim explicit ca trap-ul de cleanup (docker rm -f) să nu-l vadă revenind
 docker update --restart=no $C5 >/dev/null 2>&1 || true
+fi
+
+# ── UI-ul funcţiilor 2.1.0 (token grup + etichete) ──────────────────────────
+# Fluxuri de frontend pe care tsc/eslint/vitest nu le EXECUTĂ: crearea unui token de înrolare de
+# grup (Settings → Security, cu re-auth) şi etichetele pe host (Add-host → salvate → chip în
+# sidebar). Fără fixture-uri (niciun agent): doar app-ul, publicat pe host pentru Playwright.
+if want features; then
+say "Feature UI (group tokens + host tags)"
+docker rm -f $C6 >/dev/null 2>&1 || true
+docker run -d --name $C6 -p "$P6:8000" \
+  -e WEBTERM_SETUP_TOKEN=e2e-features-token -e WEBTERM_PUBLIC_URL="http://127.0.0.1:$P6" \
+  -e WEBTERM_UPDATE_CHECK=0 "$IMG" >/dev/null
+_st=starting
+for _ in $(seq 1 45); do _st=$(docker inspect -f '{{.State.Health.Status}}' $C6 2>/dev/null); [ "$_st" = healthy ] && break; sleep 2; done
+if [ "$_st" = healthy ]; then
+  pwrun scripts/e2e-features.mjs -e SCRIPT_ARGS="http://127.0.0.1:$P6" -e E2E_SETUP_TOKEN=e2e-features-token \
+    && ok "Feature UI (group tokens + tags)" || no "Feature UI (group tokens + tags)"
+else
+  no "feature container nu a devenit healthy ($_st)"; docker logs $C6 2>/dev/null | tail -15
+fi
 fi
 
 printf '\n\033[1m%d trecute, %d eșuate\033[0m\n' "$pass" "$fail"

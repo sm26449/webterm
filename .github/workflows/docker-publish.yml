@@ -356,6 +356,21 @@ jobs:
             E2E_SETUP_TOKEN=ci-e2e-token node e2e-backup.mjs http://127.0.0.1:8003
           E2E_SETUP_TOKEN=e2e-restore-token node e2e-restore.mjs http://127.0.0.1:8004
 
+      # UI-ul funcţiilor 2.1.0: token de înrolare de grup (Settings → Security) + etichete pe host
+      # (Add-host → sidebar). Fluxuri de frontend pe care tsc/eslint/vitest nu le execută. Fără
+      # fixture-uri (niciun agent) — doar app-ul. Reutilizează Playwright din smoke.
+      - name: Feature UI (group tokens + host tags) (Playwright)
+        run: |
+          docker run -d --name featapp -p 8005:8000 \
+            -e WEBTERM_SETUP_TOKEN=e2e-features-token -e WEBTERM_PUBLIC_URL=http://127.0.0.1:8005 \
+            -e WEBTERM_UPDATE_CHECK=0 webterm-smoke:ci
+          st=starting
+          for i in $(seq 1 45); do st=$(docker inspect -f '{{.State.Health.Status}}' featapp 2>/dev/null); [ "$st" = healthy ] && break; sleep 2; done
+          [ "$st" = healthy ] || { echo "featapp status: $st"; docker logs featapp; exit 1; }
+          cd /tmp/wt-smoke
+          cp "$GITHUB_WORKSPACE/scripts/e2e-features.mjs" .
+          E2E_SETUP_TOKEN=e2e-features-token node e2e-features.mjs http://127.0.0.1:8005
+
       # E2E de sesiune (post-incidentele v1.0.11 și v1.0.15): agent REAL pornit
       # în container, sesiuni deschise prin UI, output verificat la tastare,
       # comutare de tab-uri fără panou gol, pauză+resync pe tab-ul din fundal.

@@ -1871,7 +1871,7 @@ export default function SettingsModal(props: {
             </li>
           ))}
         </ul>
-        <form onSubmit={addGroup} className="mt-3 flex flex-col gap-2">
+        <form onSubmit={addGroup} data-testid="enroll-group-form" className="mt-3 flex flex-col gap-2">
           <div className="flex flex-col gap-2 sm:flex-row">
             <input value={newGroup.name} onChange={(e) => setNewGroup({ ...newGroup, name: e.target.value })}
               placeholder={t('settings.enrollGroups.namePlaceholder')} aria-label={t('settings.enrollGroups.name')} className={field} />
