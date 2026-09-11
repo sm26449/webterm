@@ -39,6 +39,19 @@ Findings from a full audit pass (security, responsive/design, dead code).
   archive is encrypted**. Applies to both the WebTerm backup (`scripts/backup.sh`) and the Authentik
   backup (`deploy/authentik/backup.sh`).
 
+### Added — configure an SFTP/FTPS backup destination from the UI (no env, no OAuth)
+
+- **Settings → Backup** now offers **SFTP** and **FTPS** next to Google Drive and Dropbox: point the
+  (already-encrypted) backup at your own server straight from the browser, no env var and no OAuth
+  app to register. The gateway runs in a hardened container with no `rsync`/`ssh`/`curl` binary, so
+  this is done in-process — `asyncssh` for SFTP (same SSH transport and security as rsync-over-SSH)
+  and `ftplib.FTP_TLS` for FTPS. **Security first:** the SSH host key is **pinned on first use** — a
+  probe shows you the `SHA256:` fingerprint to confirm and saving is blocked until you do, so a key
+  that later changes is refused (anti-MITM); FTPS always verifies the server certificate (system CAs
+  or an optional pinned CA/cert PEM for self-signed) and encrypts both channels. Credentials (SSH
+  key / password) are encrypted at rest in the vault and never returned to the UI; both endpoints
+  re-auth on the account password and are audited, and removing a destination wipes its credentials.
+
 ### Changed — touch targets on modal close buttons
 
 - The ✕ close buttons in the About, Changelog and Keyboard-shortcuts dialogs now meet the 44px
