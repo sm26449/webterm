@@ -81,3 +81,12 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     </ErrorBoundary>
   </React.StrictMode>,
 )
+
+// PWA: înregistrăm service worker-ul (public/sw.js) DOAR în producţie — în dev, Vite serveşte
+// modulele live şi un SW ar cache-ui şi ar încurca hot-reload-ul. SW-ul e network-first, deci nu
+// face aplicaţia „offline-first"; doar o face instalabilă şi supravieţuieşte o cădere de reţea.
+if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => { /* best-effort */ })
+  })
+}
