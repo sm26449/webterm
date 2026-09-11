@@ -12,6 +12,10 @@
 #                               the archive contains the vault key (data/secret), which
 #                               decrypts every stored SSH credential. An unencrypted copy
 #                               that leaves the host (rsync/cloud sync) exposes them all.
+#   Off-host copy (encrypted archive only; each destination is independent, use any/all):
+#     WEBTERM_BACKUP_RSYNC=user@host:/path/   rsync-over-SSH (key auth); + _RSYNC_KEEP_DAYS=N
+#     WEBTERM_BACKUP_FTPS=ftp://host/path/    FTP over TLS (curl --ssl-reqd); + _FTPS_USER/_FTPS_PASSWORD
+#     WEBTERM_BACKUP_REMOTE=remote:path       any rclone backend (S3, B2, GDrive…); + _REMOTE_KEEP_DAYS=N
 set -euo pipefail
 
 VOLUME="${WEBTERM_VOLUME:-webterm_webterm-data}"
@@ -156,6 +160,50 @@ if [ -n "${WEBTERM_BACKUP_REMOTE:-}" ]; then
     if [ -n "${WEBTERM_BACKUP_REMOTE_KEEP_DAYS:-}" ]; then
       rclone delete "$WEBTERM_BACKUP_REMOTE" --min-age "${WEBTERM_BACKUP_REMOTE_KEEP_DAYS}d" \
         --include "webterm-*.tar.gz.enc"
+    fi
+  fi
+fi
+
+# Copie off-host prin rsync-over-SSH — universală, criptată în tranzit, auth pe cheie, fără rclone
+# şi fără `rclone config`. „Toată lumea are rsync + ssh." NU urcăm niciodată necriptat.
+#   WEBTERM_BACKUP_RSYNC=user@host:/cale/backups/   (pune-ţi cheia SSH în ~/.ssh; auth pe cheie)
+#   WEBTERM_BACKUP_RSYNC_KEEP_DAYS=30               (opţional: şterge pe remote mai vechi de-atât)
+if [ -n "${WEBTERM_BACKUP_RSYNC:-}" ]; then
+  if [ "${ARCHIVE##*.}" != "enc" ]; then
+    echo "REFUSING the rsync off-host copy: the archive is UNENCRYPTED (it holds the vault key)." >&2
+    echo "                  Set WEBTERM_BACKUP_PASSPHRASE and run it again." >&2
+    exit 1
+  elif ! command -v rsync >/dev/null 2>&1; then
+    echo "WARNING: WEBTERM_BACKUP_RSYNC is set but rsync is missing — the archive stays local only."
+  else
+    # BatchMode: fără prompt de parolă (doar cheie); accept-new: TOFU, dar respinge o cheie SCHIMBATĂ.
+    rsync -a -e "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new" "$ARCHIVE" "$WEBTERM_BACKUP_RSYNC"
+    echo "backup rsync'd: ${WEBTERM_BACKUP_RSYNC%/}/$(basename "$ARCHIVE")"
+    if [ -n "${WEBTERM_BACKUP_RSYNC_KEEP_DAYS:-}" ]; then
+      _rh=${WEBTERM_BACKUP_RSYNC%%:*}; _rp=${WEBTERM_BACKUP_RSYNC#*:}
+      ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$_rh" \
+        "find '$_rp' -name 'webterm-*.tar.gz.enc' -mtime +${WEBTERM_BACKUP_RSYNC_KEEP_DAYS} -delete" 2>/dev/null || true
+    fi
+  fi
+fi
+
+# Copie off-host prin FTPS (FTP peste TLS) — pentru NAS/hosting fără SSH. `--ssl-reqd` IMPUNE TLS:
+# refuză conexiunea dacă serverul nu oferă TLS, ca parola FTP să nu plece niciodată în clar (FTP
+# simplu ar scurge-o, iar cine o are îţi poate şterge/înlocui depozitul de backup).
+#   WEBTERM_BACKUP_FTPS=ftp://nas.local/backups/    WEBTERM_BACKUP_FTPS_USER=u  WEBTERM_BACKUP_FTPS_PASSWORD=p
+if [ -n "${WEBTERM_BACKUP_FTPS:-}" ]; then
+  if [ "${ARCHIVE##*.}" != "enc" ]; then
+    echo "REFUSING the FTPS off-host copy: the archive is UNENCRYPTED (it holds the vault key)." >&2
+    exit 1
+  elif ! command -v curl >/dev/null 2>&1; then
+    echo "WARNING: WEBTERM_BACKUP_FTPS is set but curl is missing — the archive stays local only."
+  else
+    _furl="${WEBTERM_BACKUP_FTPS%/}/$(basename "$ARCHIVE")"
+    if curl -fsS --ssl-reqd --ftp-create-dirs -T "$ARCHIVE" "$_furl" \
+         ${WEBTERM_BACKUP_FTPS_USER:+--user "$WEBTERM_BACKUP_FTPS_USER:${WEBTERM_BACKUP_FTPS_PASSWORD:-}"}; then
+      echo "backup uploaded (FTPS): $_furl"
+    else
+      echo "WARNING: FTPS upload failed (server without TLS, or wrong credentials/path)." >&2
     fi
   fi
 fi

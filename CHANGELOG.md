@@ -27,6 +27,18 @@ Findings from a full audit pass (security, responsive/design, dead code).
   the length cap short-circuited before the hash for an *existing* account (fast) while a
   non-existent one still hashed (slow). The dummy verify now runs whenever the real one is skipped.
 
+### Added — off-host backup copy over rsync or FTPS (no rclone needed)
+
+- The backup scripts can now push the (already-encrypted) archive off the host over **native
+  rsync-over-SSH** (`WEBTERM_BACKUP_RSYNC=user@host:/path/`, key auth, `+_RSYNC_KEEP_DAYS`) or
+  **FTPS** (`WEBTERM_BACKUP_FTPS=ftp://host/path/` with `curl --ssl-reqd`, which refuses a server
+  that won't do TLS so the FTP password never crosses the wire in clear). Both sit alongside the
+  existing rclone remote (S3/B2/Drive/…) — pick any or all. A backup that only lives on the machine
+  you are backing up doesn't survive losing that machine; these give an off-host copy with tools
+  everyone already has, no `rclone config`. Same guards as before: the copy is **refused unless the
+  archive is encrypted**. Applies to both the WebTerm backup (`scripts/backup.sh`) and the Authentik
+  backup (`deploy/authentik/backup.sh`).
+
 ### Changed — touch targets on modal close buttons
 
 - The ✕ close buttons in the About, Changelog and Keyboard-shortcuts dialogs now meet the 44px

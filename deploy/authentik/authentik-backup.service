@@ -1,0 +1,12 @@
+[Unit]
+Description=Authentik — backup date (Postgres + .env, criptat; opţional off-host rsync/FTPS)
+Wants=authentik-backup.timer
+
+[Service]
+Type=oneshot
+# ajustează calea dacă Authentik nu e în /opt/authentik
+WorkingDirectory=/opt/authentik
+ExecStart=/opt/authentik/backup.sh
+SuccessExitStatus=0
+# passphrase + destinaţii off-host (AUTHENTIK_BACKUP_*): vezi /etc/default/authentik-backup
+EnvironmentFile=-/etc/default/authentik-backup

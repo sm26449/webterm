@@ -157,6 +157,27 @@ installed elsewhere, set `WEBTERM_TRAEFIK_NETWORK` in `.env` (find it with
 **One Authentik, many WebTerms.** For the Nth instance, repeat only steps 3–4 from that instance's
 directory (a second application, its own redirect URI, its own group) against the same Authentik.
 
+### Back up Authentik
+
+Authentik holds your users, their passkeys, the OIDC config and the signing key — a dependency
+worth backing up. `deploy/authentik/backup.sh` dumps Postgres + `.env` (needed to decrypt the DB's
+encrypted fields on restore) into an **openssl-AES-256 archive** (refuses to run without
+`AUTHENTIK_BACKUP_PASSPHRASE`), keeps the newest 14, and can push the encrypted copy **off-host**
+over rsync-over-SSH (`AUTHENTIK_BACKUP_RSYNC=user@host:/path/`) or FTPS
+(`AUTHENTIK_BACKUP_FTPS=ftp://host/path/`). Install it as a daily systemd timer:
+
+```
+sudo install -m0755 deploy/authentik/backup.sh /opt/authentik/backup.sh
+sudo cp deploy/authentik/authentik-backup.{service,timer} /etc/systemd/system/
+echo "AUTHENTIK_BACKUP_PASSPHRASE=$(openssl rand -base64 30 | tr -dc A-Za-z0-9)" | sudo tee /etc/default/authentik-backup >/dev/null
+sudo chmod 600 /etc/default/authentik-backup   # add AUTHENTIK_BACKUP_RSYNC=… here for off-host
+sudo systemctl daemon-reload && sudo systemctl enable --now authentik-backup.timer
+```
+
+Restore: `openssl enc -d …` → `tar xzf` → `docker compose exec -T postgresql psql -U authentik -d
+authentik < authentik.sql` on a stack started with the **same** `AUTHENTIK_SECRET_KEY` (from the
+backed-up `.env`).
+
 ### Already running Authentik? Point WebTerm at it
 
 Don't bundle a second one. `provision.py` works against **any** Authentik — give it the domain, the

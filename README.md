@@ -668,8 +668,14 @@ protections.
 one button (OAuth) and scheduled backups leave automatically into your account,
 **encrypted with your passphrase** — the provider gets a file it cannot read; with no
 passphrase configured we refuse to upload. Least privilege: `drive.file` (only files the
-app itself creates) or a Dropbox *App folder* app. Separate remote retention. The ops
-alternative is still `scripts/backup.sh` with `WEBTERM_BACKUP_REMOTE` (rclone).
+app itself creates) or a Dropbox *App folder* app. Separate remote retention.
+
+If cloud OAuth is more than you want, `scripts/backup.sh` copies the encrypted archive off-host
+with tools you already have — no `rclone config`: **rsync-over-SSH** (`WEBTERM_BACKUP_RSYNC=user@host:/path/`,
+key auth) or **FTPS** (`WEBTERM_BACKUP_FTPS=ftp://host/path/`, `curl --ssl-reqd` — TLS enforced so
+the password never crosses in clear; plain FTP is refused). `WEBTERM_BACKUP_REMOTE` (any rclone
+backend: S3/B2/…) still works too. Every path refuses to upload an unencrypted archive. The same
+`AUTHENTIK_BACKUP_RSYNC`/`_FTPS` options exist for the Authentik backup (`deploy/authentik/backup.sh`).
 
 **Accounts (Settings → Account).** You can create more than one account, so each person
 signs in with their own password, passkeys and 2FA, and the audit log records *who*. There
