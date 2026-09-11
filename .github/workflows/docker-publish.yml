@@ -312,6 +312,50 @@ jobs:
           cp "$GITHUB_WORKSPACE/scripts/sso-login.mjs" .
           SSO_PROVIDER=TestSSO node sso-login.mjs http://127.0.0.1:8002
 
+      # Backup off-host (SFTP/FTPS) scris din UI + round-trip backup→restore. Backend-ul (SFTP prin
+      # asyncssh, FTPS prin ftplib+TLS, config criptată, retenţie) e acoperit hermetic de
+      # backup_dest_test / backup_ftps_test / cloud_direct_test; AICI prindem regresiile de WIRING de
+      # UI (formularul, probe→amprentă→save, upload) pe care tsc/eslint/vitest nu le execută, plus
+      # restore-ul care ÎNLOCUIEŞTE DB-ul şi reporneşte procesul. Fixture-uri REALE pe o reţea docker:
+      # un server SFTP (atmoz/sftp) şi unul FTP-TLS (pyftpdlib + cert self-signed). App-ul e pe aceeaşi
+      # reţea (le vede pe nume), publicat pe host pentru Playwright. Reutilizează Playwright din smoke.
+      - name: Backup UI (SFTP/FTPS) + restore round-trip (Playwright)
+        run: |
+          docker network create wtbk-net
+          # fixture SFTP: user backup / parolă backup-pass-eval / dir backups
+          docker run -d --name sftp-eval --network wtbk-net \
+            atmoz/sftp:alpine backup:backup-pass-eval:::backups
+          # fixture FTPS: cert self-signed (SAN ftps-eval) + pyftpdlib
+          mkdir -p /tmp/ftps-certs
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout /tmp/ftps-certs/key.pem \
+            -out /tmp/ftps-certs/cert.pem -days 2 -subj "/CN=ftps-eval" \
+            -addext "subjectAltName=DNS:ftps-eval,DNS:localhost,IP:127.0.0.1"
+          chmod 644 /tmp/ftps-certs/*.pem
+          docker run -d --name ftps-eval --network wtbk-net \
+            -v "$GITHUB_WORKSPACE/scripts/ftps-fixture.py:/srv/ftps.py:ro" \
+            -v /tmp/ftps-certs:/certs:ro \
+            python:3.12-alpine sh -c "pip install --quiet pyftpdlib==2.2.0 pyopenssl && python /srv/ftps.py"
+          # app pentru BACKUP: pe reţeaua fixture-urilor, publicat pe host
+          docker run -d --name bkapp --network wtbk-net -p 8003:8000 \
+            -e WEBTERM_SETUP_TOKEN=ci-e2e-token -e WEBTERM_PUBLIC_URL=http://127.0.0.1:8003 \
+            -e WEBTERM_UPDATE_CHECK=0 webterm-smoke:ci
+          # app pentru RESTORE: `--restart` ca să revină după os._exit al restore-ului
+          docker run -d --name rsapp --restart unless-stopped -p 8004:8000 \
+            -e WEBTERM_SETUP_TOKEN=e2e-restore-token -e WEBTERM_PUBLIC_URL=http://127.0.0.1:8004 \
+            -e WEBTERM_UPDATE_CHECK=0 webterm-smoke:ci
+          for c in bkapp rsapp; do
+            st=starting
+            for i in $(seq 1 45); do st=$(docker inspect -f '{{.State.Health.Status}}' $c 2>/dev/null); [ "$st" = healthy ] && break; sleep 2; done
+            [ "$st" = healthy ] || { echo "$c status: $st"; docker logs $c; exit 1; }
+          done
+          # FTPS instalează pyftpdlib la pornire — aşteaptă până ascultă pe 21
+          for i in $(seq 1 30); do docker exec ftps-eval python -c "import socket;socket.create_connection(('127.0.0.1',21),1).close()" 2>/dev/null && break; sleep 2; done
+          cd /tmp/wt-smoke
+          cp "$GITHUB_WORKSPACE/scripts/e2e-backup.mjs" "$GITHUB_WORKSPACE/scripts/e2e-restore.mjs" .
+          CA_PEM="$(cat /tmp/ftps-certs/cert.pem)" SFTP_HOST=sftp-eval FTPS_HOST=ftps-eval \
+            E2E_SETUP_TOKEN=ci-e2e-token node e2e-backup.mjs http://127.0.0.1:8003
+          E2E_SETUP_TOKEN=e2e-restore-token node e2e-restore.mjs http://127.0.0.1:8004
+
       # E2E de sesiune (post-incidentele v1.0.11 și v1.0.15): agent REAL pornit
       # în container, sesiuni deschise prin UI, output verificat la tastare,
       # comutare de tab-uri fără panou gol, pauză+resync pe tab-ul din fundal.

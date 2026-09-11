@@ -15,6 +15,9 @@ import { chromium } from 'playwright'
 const BASE = process.argv[2] ?? 'http://127.0.0.1:8791'
 const SETUP_TOKEN = process.env.E2E_SETUP_TOKEN ?? 'e2e-backup-token'
 const CA_PEM = process.env.CA_PEM ?? ''
+// numele serverelor-fixture pe reţeaua docker (CI le poate redenumi prin env)
+const SFTP_HOST = process.env.SFTP_HOST ?? 'sftp-eval'
+const FTPS_HOST = process.env.FTPS_HOST ?? 'ftps-eval'
 const EMAIL = 'e2e-backup@example.com'
 const PASSWORD = 'parola-e2e-backup-123456'
 const PASSPHRASE = 'passphrase-eval-arhiva-123'
@@ -62,7 +65,7 @@ try {
 
   // ── SFTP: probe (TOFU) → confirmă amprenta → save → upload ──
   await page.getByRole('button', { name: 'SFTP', exact: true }).click()
-  await fLabel('Host (e.g. backup.example.com)').fill('sftp-eval')
+  await fLabel('Host (e.g. backup.example.com)').fill(SFTP_HOST)
   await fLabel('Username').fill('backup')
   await fLabel('Remote path (e.g. /backups/webterm)').fill('backups')
   // metoda de auth: Parolă (cheia SSH ar cere o cheie de pus; parola e mai simplă pentru test)
@@ -84,8 +87,8 @@ try {
   await saveBtn.click()
   await waitText('Configuration saved\\.')
   check('SFTP: configurare salvată', true)
-  await waitText('Connected:\\s*backup@sftp-eval', 10000)
-  check('SFTP: status „Connected: backup@sftp-eval"', true)
+  await waitText(`Connected:\\s*backup@${SFTP_HOST}`, 10000)
+  check(`SFTP: status „Connected: backup@${SFTP_HOST}"`, true)
 
   await fBtn('Upload now').click()
   await waitText('Backup uploaded', 30000)
@@ -93,7 +96,7 @@ try {
 
   // ── FTPS: completează + CA self-signed → save → upload ──
   await page.getByRole('button', { name: 'FTPS', exact: true }).click()
-  await fLabel('Host (e.g. backup.example.com)').fill('ftps-eval')
+  await fLabel('Host (e.g. backup.example.com)').fill(FTPS_HOST)
   await fLabel('Username').fill('backup')
   await fLabel('Remote path (e.g. /backups/webterm)').fill('backups')
   await fLabel('Password').fill('backup-pass-eval')
@@ -103,8 +106,8 @@ try {
   await fBtn('Save configuration').click()
   await waitText('Configuration saved\\.')
   check('FTPS: configurare salvată', true)
-  await waitText('Connected:\\s*backup@ftps-eval', 10000)
-  check('FTPS: status „Connected: backup@ftps-eval"', true)
+  await waitText(`Connected:\\s*backup@${FTPS_HOST}`, 10000)
+  check(`FTPS: status „Connected: backup@${FTPS_HOST}"`, true)
 
   await fBtn('Upload now').click()
   await waitText('Backup uploaded', 30000)

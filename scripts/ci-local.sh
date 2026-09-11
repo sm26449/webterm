@@ -18,8 +18,9 @@ REPO=${REPO:-$(cd "$(dirname "$0")/.." && pwd)}
 NM=${PW_MODULES:-$REPO/frontend/node_modules}
 PW=mcr.microsoft.com/playwright:v1.61.1-noble
 IMG=${IMG:-webterm-verify:local}
-P1=8000; P2=8001; P3=8002
-C1=wtci-smoke; C2=wtci-fwd; C3=wtci-sso
+P1=8000; P2=8001; P3=8002; P4=8003; P5=8004
+C1=wtci-smoke; C2=wtci-fwd; C3=wtci-sso; C4=wtci-bkapp; C5=wtci-rsapp
+SF=wtci-sftp; FT=wtci-ftps            # servere-fixture SFTP/FTPS pentru pasul `backup`
 NET=wtci-net
 # URL-ul public trebuie să fie valid ŞI din browser, ŞI din interiorul containerului:
 # butonul „Enable shell integration" rulează un curl către el ÎN container. Cu o mapare
@@ -54,7 +55,11 @@ say()  { printf '\n\033[1;36m── %s ──\033[0m\n' "$*"; }
 ok()   { printf '\033[32m  ✓ %s\033[0m\n' "$*"; pass=$((pass+1)); }
 no()   { printf '\033[31m  ✗ %s\033[0m\n' "$*"; fail=$((fail+1)); }
 
-cleanup() { docker rm -f $C1 $C2 $C3 >/dev/null 2>&1 || true; docker network rm $NET >/dev/null 2>&1 || true; }
+cleanup() {
+  docker rm -f $C1 $C2 $C3 $C4 $C5 $SF $FT >/dev/null 2>&1 || true
+  rm -rf "$OUT/ftps-certs" 2>/dev/null || true
+  docker network rm $NET >/dev/null 2>&1 || true
+}
 trap cleanup EXIT
 
 want() { case " $ONLY " in *" all "*|*" $1 "*) return 0 ;; *) return 1 ;; esac; }
@@ -85,8 +90,8 @@ if want unit; then
   command -v "$PIPAUDIT" >/dev/null 2>&1 || [ -x "$PIPAUDIT" ] || {
     echo "'$PIPAUDIT' lipseşte şi n-am putut instala pip-audit — pip install pip-audit" >&2; exit 2; }
 fi
-for prt in $P1 $P2 $P3; do
-  case " $ONLY " in *" all "*|*" smoke "*|*" e2e "*|*" a11y "*|*" fs "*|*" fwd "*|*" mobile "*|*" sso "*)
+for prt in $P1 $P2 $P3 $P4 $P5; do
+  case " $ONLY " in *" all "*|*" smoke "*|*" e2e "*|*" a11y "*|*" fs "*|*" fwd "*|*" mobile "*|*" sso "*|*" backup "*)
     if ss -ltn 2>/dev/null | grep -q ":$prt "; then
       echo "portul $prt e ocupat — runner-ul are nevoie de $P1 şi $P2 (vezi nota de sus)" >&2
       exit 2
@@ -318,6 +323,66 @@ if [ "$_st" = healthy ]; then
 else
   no "SSO container nu a devenit healthy ($_st)"; docker logs $C3 2>/dev/null | tail -15
 fi
+fi
+
+# ── Backup off-host (SFTP/FTPS) + restore round-trip ────────────────────────
+# Fixture-uri REALE pe reţeaua CI: un server SFTP (atmoz/sftp) şi unul FTP-TLS (pyftpdlib +
+# cert self-signed). App-ul e pe aceeaşi reţea (le vede pe nume), publicat pe host pentru
+# Playwright. e2e-backup conduce UI-ul (probe/amprentă/save/upload) contra celor două servere;
+# e2e-restore face round-trip-ul backup→restore pe un container cu `--restart` (restore = os._exit
+# + repornire, aplicată la boot). Backend-ul e acoperit hermetic de backup_dest_test/backup_ftps_test/
+# cloud_direct_test; aici prindem regresiile de WIRING de UI pe care tsc/eslint/vitest nu le execută.
+if want backup; then
+say "Backup UI (SFTP/FTPS) + restore round-trip"
+docker network create $NET >/dev/null 2>&1 || true
+# fixture SFTP: user backup / parolă backup-pass-eval / dir backups
+docker rm -f $SF >/dev/null 2>&1 || true
+docker run -d --name $SF --network $NET --network-alias sftp-eval \
+  atmoz/sftp:alpine backup:backup-pass-eval:::backups >/dev/null
+# fixture FTPS: cert self-signed (SAN sftp/ftps + localhost) + pyftpdlib
+docker rm -f $FT >/dev/null 2>&1 || true
+rm -rf "$OUT/ftps-certs"; mkdir -p "$OUT/ftps-certs"
+openssl req -x509 -newkey rsa:2048 -nodes -keyout "$OUT/ftps-certs/key.pem" \
+  -out "$OUT/ftps-certs/cert.pem" -days 2 -subj "/CN=ftps-eval" \
+  -addext "subjectAltName=DNS:ftps-eval,DNS:localhost,IP:127.0.0.1" >/dev/null 2>&1
+chmod 644 "$OUT/ftps-certs"/*.pem
+docker run -d --name $FT --network $NET --network-alias ftps-eval \
+  -v "$REPO/scripts/ftps-fixture.py:/srv/ftps.py:ro" -v "$OUT/ftps-certs:/certs:ro" \
+  python:3.12-alpine sh -c "pip install --quiet pyftpdlib==2.2.0 pyopenssl && python /srv/ftps.py" >/dev/null
+
+# app pentru BACKUP: pe reţeaua fixture-urilor, publicat pe host
+docker rm -f $C4 >/dev/null 2>&1 || true
+docker run -d --name $C4 --network $NET -p "$P4:8000" \
+  -e WEBTERM_SETUP_TOKEN=ci-e2e-token -e WEBTERM_PUBLIC_URL="http://127.0.0.1:$P4" \
+  -e WEBTERM_UPDATE_CHECK=0 "$IMG" >/dev/null
+# app pentru RESTORE: `--restart` ca să revină după os._exit al restore-ului
+docker rm -f $C5 >/dev/null 2>&1 || true
+docker run -d --name $C5 --restart unless-stopped -p "$P5:8000" \
+  -e WEBTERM_SETUP_TOKEN=e2e-restore-token -e WEBTERM_PUBLIC_URL="http://127.0.0.1:$P5" \
+  -e WEBTERM_UPDATE_CHECK=0 "$IMG" >/dev/null
+
+_bkok=1
+for c in $C4 $C5; do
+  _st=starting
+  for _ in $(seq 1 45); do _st=$(docker inspect -f '{{.State.Health.Status}}' $c 2>/dev/null); [ "$_st" = healthy ] && break; sleep 2; done
+  [ "$_st" = healthy ] || { no "container $c healthy ($_st)"; docker logs $c 2>/dev/null | tail -12; _bkok=0; }
+done
+# FTPS instalează pyftpdlib la pornire — aşteaptă până ascultă pe 21
+for _ in $(seq 1 30); do
+  docker exec $FT python -c "import socket;socket.create_connection(('127.0.0.1',21),1).close()" 2>/dev/null && break
+  sleep 2
+done
+
+if [ "$_bkok" = 1 ]; then
+  CA_PEM="$(cat "$OUT/ftps-certs/cert.pem")"
+  pwrun scripts/e2e-backup.mjs -e SCRIPT_ARGS="http://127.0.0.1:$P4" -e E2E_SETUP_TOKEN=ci-e2e-token \
+    -e CA_PEM="$CA_PEM" -e SFTP_HOST=sftp-eval -e FTPS_HOST=ftps-eval \
+    && ok "Backup UI SFTP/FTPS" || no "Backup UI SFTP/FTPS"
+  pwrun scripts/e2e-restore.mjs -e SCRIPT_ARGS="http://127.0.0.1:$P5" -e E2E_SETUP_TOKEN=e2e-restore-token \
+    && ok "Backup→restore round-trip" || no "Backup→restore round-trip"
+fi
+# $C5 are `--restart`: îl oprim explicit ca trap-ul de cleanup (docker rm -f) să nu-l vadă revenind
+docker update --restart=no $C5 >/dev/null 2>&1 || true
 fi
 
 printf '\n\033[1m%d trecute, %d eșuate\033[0m\n' "$pass" "$fail"
