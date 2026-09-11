@@ -471,6 +471,10 @@ async def create_user(body: UserIn, request: Request, user=Depends(security.requ
     await db.execute("INSERT INTO users(email, password_hash, created) VALUES(?,?,?)",
                      email, pw, time.time())
     log.info("new account created: %s (by %s)", email, user["email"])
+    # un cont nou = un admin egal în plus (nu există roluri): cel mai valoros eveniment de
+    # securitate. Ajunge pe email ŞI webhook (via _fire), ca oricare schimbare de credenţiale.
+    email_alerts.notify_security_change("a new WebTerm account was created (%s)" % email,
+                                        security.client_ip(request), user["email"])
     return await list_users(user)
 
 
@@ -623,7 +627,7 @@ async def list_tokens(user=Depends(security.require_user)):
 
 
 @router.post("/api/tokens")
-async def create_token(body: TokenIn, user=Depends(security.require_user)):
+async def create_token(body: TokenIn, request: Request, user=Depends(security.require_user)):
     if not await _verify_reauth_password(user, body.current_password):
         raise ApiError(401, "auth.wrongPassword", "wrong password")
     name = body.name.strip()[:60]
@@ -641,6 +645,11 @@ async def create_token(body: TokenIn, user=Depends(security.require_user)):
         user["id"], time.time() + days * 86400)
     log.info("automation token created: %s (%s, %dd) by %s", name, ",".join(scopes), days,
              user["email"])
+    # un token nou = o credenţială de automatizare care poate citi/rula fără browser: notificăm
+    # (email + webhook), la fel ca un passkey nou sau un cont nou.
+    email_alerts.notify_security_change(
+        "an automation token was created (%s, scopes: %s)" % (name, ",".join(scopes)),
+        security.client_ip(request), user["email"])
     # valoarea în clar se întoarce O SINGURĂ DATĂ; în DB stă doar hash-ul
     return {"token": raw, "tokens": await list_tokens(user)}
 
@@ -3558,10 +3567,18 @@ async def _require_host_stepup(host_id: int, user, grant: str = "", password: st
 
 
 @router.post("/api/hosts/{host_id}/stepup")
-async def host_stepup(host_id: int, body: SessionIn, user=Depends(security.require_user)):
+async def host_stepup(host_id: int, body: SessionIn, request: Request,
+                      user=Depends(security.require_user)):
     """Deschide fereastra de step-up pe un host cu 2FA (din passkey grant sau parolă), ca
     frontend-ul să deblocheze file-browser-ul / fleet-run înainte de acțiuni. Idempotent."""
+    was_open = security.stepup_window_ok(user["id"], host_id)
     await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
+    # deblocare PROASPĂTĂ (nu re-apel idempotent cât fereastra e deschisă) a unui host marcat 2FA
+    # = un host protejat tocmai a fost accesat: notificăm (email + webhook), throttle-uit per host.
+    if not was_open:
+        row = await db.fetchone("SELECT name, require_2fa FROM hosts WHERE id=?", host_id)
+        if row and row["require_2fa"]:
+            email_alerts.notify_host_unlocked(row["name"], security.client_ip(request), user["email"])
     return {"ok": True, "window": security.STEPUP_WINDOW}
 
 

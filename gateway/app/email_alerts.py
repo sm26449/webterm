@@ -239,10 +239,24 @@ def notify_session_attach(title: str, ip: str, user_agent: str, email: str) -> N
 
 
 def notify_security_change(what: str, ip: str, email: str) -> None:
-    """A sensitive account change (password, 2FA, new passkey)."""
+    """A sensitive account change (password, 2FA, new passkey, new account, new API token)."""
     _fire(f"Security change: {what}",
           f"On account {email}: {what}.\nIP: {ip}\n\n"
           f"If this was not you, the account is probably compromised.")
+
+
+def notify_host_unlocked(host_name: str, ip: str, email: str) -> None:
+    """A host marked `require_2fa` was just unlocked (step-up passed) — i.e. a PROTECTED host
+    is now being accessed. These are the hosts explicitly flagged as sensitive, so an unlock is
+    exactly the event worth surfacing. Throttled per host+IP (15 min): the step-up window is
+    minutes long, so a legitimate session re-unlocking now and then must not become noise."""
+    if not _throttled("unlock:%s:%s" % (host_name, ip), 900):
+        return
+    _fire("A 2FA-protected host was unlocked",
+          f"Account: {email}\nHost: {host_name}\nIP: {ip}\n\n"
+          f"Step-up (passkey or account password) passed, so this host — which you marked as "
+          f"requiring 2FA — is now accessible for a short window. If this was not you, change "
+          f"your password and review the active sessions in settings.")
 
 
 # ---------------------------------------------------------------------------
