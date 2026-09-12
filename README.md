@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Version](https://img.shields.io/badge/version-v2.2.0-blue)](https://github.com/sm26449/webterm/tags)
 
-**Persistent terminals for your servers, in the browser.**
+**Persistent terminals for your whole infrastructure, in the browser.**
 
 Open a shell on any of your machines from a browser — including a phone — and come back to it
 hours later with the process still running and the scrollback intact. Close the tab, restart the
