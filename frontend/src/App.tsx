@@ -4,6 +4,7 @@ import CommandPalette from './components/CommandPalette'
 import CredentialModal, { CredField } from './components/CredentialModal'
 import SerialModal, { SerialParams } from './components/SerialModal'
 import DiagnosticModal from './components/DiagnosticModal'
+import ConfirmModal from './components/ConfirmModal'
 import Watermark from './components/Watermark'
 import Dashboard from './components/Dashboard'
 import HostOverview from './components/HostOverview'
@@ -206,6 +207,7 @@ function MainApp() {
   }, [sessions, selectedSid, secondSid, openTabs])
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [showHistory, setShowHistory] = useState(false)
+  const [showLogoutConfirm, setShowLogoutConfirm] = useState(false)
   const [helpOpen, setHelpOpen] = useState(false)
   // snippets în paletă: încărcate o dată la deschiderea ei (nu la fiecare poll)
   const [snippets, setSnippets] = useState<Snippet[]>([])
@@ -818,10 +820,7 @@ function MainApp() {
         backupReady={appState.backup_ready}
         signingMissing={appState.signing_missing}
         signingLocked={appState.signing_locked}
-        onLogout={async () => {
-          await api('/api/logout', { method: 'POST' })
-          setAppState({ ...appState, authenticated: false })
-        }}
+        onLogout={() => setShowLogoutConfirm(true)}
       />
       <div className="wt-workspace flex min-w-0 flex-1 flex-col">
         {openTabs.length > 0 && (
@@ -955,6 +954,19 @@ function MainApp() {
         <Suspense fallback={null}>
           <HistoryModal hosts={hosts} onClose={() => setShowHistory(false)} />
         </Suspense>
+      )}
+      {showLogoutConfirm && (
+        <ConfirmModal
+          title={t('logout.confirmTitle')}
+          message={t('logout.confirmBody')}
+          confirmLabel={t('logout.confirm')}
+          onCancel={() => setShowLogoutConfirm(false)}
+          onConfirm={async () => {
+            setShowLogoutConfirm(false)
+            await api('/api/logout', { method: 'POST' })
+            setAppState({ ...appState, authenticated: false })
+          }}
+        />
       )}
       {snipParams && (
         <SnippetParams

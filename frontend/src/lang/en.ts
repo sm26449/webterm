@@ -64,6 +64,12 @@ const en: Lang = {
     'common.close': 'Close',
     'common.save': 'Save',
     'common.cancel': 'Cancel',
+    'common.confirm': 'Confirm',
+
+    // logout confirmation
+    'logout.confirmTitle': 'Sign out?',
+    'logout.confirmBody': "You'll need to sign in again to get back in. Your terminal sessions keep running and reattach on next login.",
+    'logout.confirm': 'Sign out',
 
     'app.hostOffline': "Host offline",
     'app.hostOfflineBody': "\"{name}\" is not responding. The agent restarts automatically; the tmux sessions are intact.",

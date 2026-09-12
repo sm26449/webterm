@@ -63,6 +63,12 @@ const ro: Lang = {
     'common.close': 'Închide',
     'common.save': 'Salvează',
     'common.cancel': 'Renunță',
+    'common.confirm': 'Confirmă',
+
+    // confirmare logout
+    'logout.confirmTitle': 'Ieși din cont?',
+    'logout.confirmBody': 'Va trebui să te autentifici din nou ca să revii. Sesiunile de terminal rămân pornite și se reatașează la următorul login.',
+    'logout.confirm': 'Ieși din cont',
 
     'app.hostOffline': "Host offline",
     'app.hostOfflineBody': "„{name}\" nu mai răspunde. Agentul se repornește automat; sesiunile tmux sunt intacte.",
