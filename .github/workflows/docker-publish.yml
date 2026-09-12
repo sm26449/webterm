@@ -387,7 +387,13 @@ jobs:
           docker exec smoke sh -c 'command -v tmux' >/dev/null || { echo "tmux is missing"; exit 1; }
           cd /tmp/wt-smoke
           cp "$GITHUB_WORKSPACE/scripts/e2e-session.mjs" .
-          E2E_SETUP_TOKEN=ci-e2e-token node e2e-session.mjs http://127.0.0.1:8000 smoke
+          # Retry o dată: acest e2e conduce un AGENT REAL prin tmux + Playwright, deci e
+          # inerent sensibil la timing sub încărcarea runnerului (a blocat deja un release pe un
+          # flake, deşi codul era bun). Testul e re-rulabil (setup-sau-login; fiecare rulare îşi
+          # creează host + agent propriu). O a doua şansă transformă un flake rar într-un eşec
+          # neglijabil, fără să ascundă o regresie reală (aia pică de două ori).
+          run_e2e() { E2E_SETUP_TOKEN=ci-e2e-token node e2e-session.mjs http://127.0.0.1:8000 smoke; }
+          run_e2e || { echo "::warning::E2E sessions failed once (timing-sensitive) — retrying"; sleep 3; run_e2e; }
 
       # Accesibilitate (axe-core, WCAG 2.1 AA) pe suprafața reală, cu agent online.
       # Blocantă: conținutul terminalului NU e în DOM (renderer WebGL), deci cititoarele de

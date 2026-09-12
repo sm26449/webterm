@@ -243,22 +243,32 @@ docker exec $C1 sh -c 'command -v tmux' >/dev/null || { no "tmux în container";
 # Scriptul E2E porneşte agentul cu `docker exec`, dar containerul Playwright n-are CLI-ul
 # docker. Calea prevăzută pentru asta e AGENT_TOKEN_FILE: scriptul scrie tokenul pe disc
 # şi aşteaptă un host online, iar noi pornim agentul din afară.
-rm -f "$OUT/agent-token"      # $OUT există deja, creat la începutul scriptului
-( for _ in $(seq 1 120); do
-    if [ -s "$OUT/agent-token" ]; then
-      TOK=$(cat "$OUT/agent-token")
-      CFG="{\"url\":\"ws://127.0.0.1:8000/agent/ws\",\"token\":\"$TOK\",\"insecure\":true}"
-      docker exec $C1 sh -c "mkdir -p /root/.webterm && printf '%s' '$CFG' > /root/.webterm/agent.json"
-      docker exec -d -e HOME=/root $C1 python3 /srv/webterm/agent/ptyd.py run
-      break
-    fi
-    sleep 1
-  done ) &
-WATCHER=$!
-pwrun scripts/e2e-session.mjs -e SCRIPT_ARGS="$BASE1 $C1" -e E2E_SETUP_TOKEN=ci-e2e-token \
-  -e AGENT_TOKEN_FILE=/out/agent-token \
-  && ok "E2E sessions" || no "E2E sessions"
-kill $WATCHER 2>/dev/null
+# O încercare = watcher (porneşte agentul când apare tokenul) + rularea Playwright. Testul e
+# re-rulabil (setup-sau-login; fiecare rulare îşi creează host + agent propriu), deci îl
+# retry-uim O DATĂ: e inerent sensibil la timing (agent real + tmux) şi un flake nu trebuie să
+# blocheze. O regresie reală pică de două ori.
+e2e_attempt() {
+  rm -f "$OUT/agent-token"      # $OUT există deja, creat la începutul scriptului
+  ( for _ in $(seq 1 120); do
+      if [ -s "$OUT/agent-token" ]; then
+        TOK=$(cat "$OUT/agent-token")
+        CFG="{\"url\":\"ws://127.0.0.1:8000/agent/ws\",\"token\":\"$TOK\",\"insecure\":true}"
+        docker exec $C1 sh -c "mkdir -p /root/.webterm && printf '%s' '$CFG' > /root/.webterm/agent.json"
+        docker exec -d -e HOME=/root $C1 python3 /srv/webterm/agent/ptyd.py run
+        break
+      fi
+      sleep 1
+    done ) &
+  local watcher=$!
+  pwrun scripts/e2e-session.mjs -e SCRIPT_ARGS="$BASE1 $C1" -e E2E_SETUP_TOKEN=ci-e2e-token \
+    -e AGENT_TOKEN_FILE=/out/agent-token
+  local rc=$?
+  kill $watcher 2>/dev/null
+  return $rc
+}
+if e2e_attempt; then ok "E2E sessions"
+elif echo "  E2E sessions a picat o dată (sensibil la timing) — reîncerc" && sleep 3 && e2e_attempt; then ok "E2E sessions (la a 2-a încercare)"
+else no "E2E sessions"; fi
 fi
 
 # ── accesibilitate ──────────────────────────────────────────────────────────

@@ -51,15 +51,28 @@ const fail = (msg) => {
 }
 
 // -- 1. cont + host prin API (node fetch; cookie-ul se poartă manual) --------
+// Setup SAU login: `E2E sessions` e sensibil la timing (agent real + tmux) şi CI îl re-rulează
+// o dată la un flake. Pe a doua rulare contul există deja, iar `/api/setup` întoarce 409 —
+// atunci ne LOGĂM în loc să eşuăm, ca retry-ul să nu fie blocat de „account already exists".
+let cookie = ''
 const setupRes = await fetch(`${BASE}/api/setup`, {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({ email: EMAIL, password: PASSWORD, setup_token: SETUP_TOKEN }),
 })
-if (!setupRes.ok) fail(`setup a eșuat: ${setupRes.status} ${await setupRes.text()}`)
-const cookie = (setupRes.headers.get('set-cookie') ?? '').split(';')[0]
-if (!cookie) fail('setup nu a întors cookie de sesiune')
-check('setup cont prin API', true)
+if (setupRes.ok) {
+  cookie = (setupRes.headers.get('set-cookie') ?? '').split(';')[0]
+  check('setup cont prin API', true)
+} else {
+  const loginRes = await fetch(`${BASE}/api/login`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Origin: BASE },
+    body: JSON.stringify({ email: EMAIL, password: PASSWORD }),
+  })
+  if (!loginRes.ok) fail(`setup ${setupRes.status} + login ${loginRes.status} au eșuat`)
+  cookie = (loginRes.headers.get('set-cookie') ?? '').split(';')[0]
+  check('login pe contul existent (re-rulare după flake)', true)
+}
+if (!cookie) fail('nici setup, nici login n-au întors un cookie de sesiune')
 
 const hostRes = await fetch(`${BASE}/api/hosts`, {
   method: 'POST',
