@@ -197,7 +197,7 @@ what it does not cover, is in [Security](#security) and
 
 **Fleet**
 - Per-host metrics (CPU, RAM, disk, load) with a **trend sparkline**
-- **Threshold alerts** (CPU/RAM/disk) over email, with hysteresis and throttling
+- **Threshold alerts** (CPU/RAM/disk) over email and/or webhook, with hysteresis and throttling
 - **In-session file manager** (toolbar button): a side panel that **follows the
   terminal's `cd`** (OSC 7), dense listing with sort/filter/keyboard navigation,
   mkdir/rename/delete, drag&drop upload (including **folders**) with progress +
@@ -253,7 +253,9 @@ what it does not cover, is in [Security](#security) and
   with a pre-restore snapshot as a safety net
 
 **Appearance & accessibility**
-- UI themes: Aurora (light), Midnight (dark), Auto (follows the system); PWA on mobile
+- UI themes: Aurora (light), Midnight (dark), Auto (follows the system); **installable PWA**
+  (add to home screen on mobile, install on desktop) with a network-first service worker that
+  bypasses every live path, so terminals always reach the network and a deploy never serves stale
 - **Custom terminal themes**: scheme editor with live preview, **iTerm2/VS Code
   import**, per-host scheme ("production is reddish")
 - **Watermark** optional (Settings → Appearance): a tiled overlay (email/host/time)
@@ -513,9 +515,9 @@ flow on one laptop first (localhost, no domain), use `deploy/authentik/docker-co
 
 In the UI: **+ host** → you get a `curl … | sh` command. Copy/paste → Enter on the
 server, **as the user you want to work as** (the agent's user = the sessions'
-shell). (Onboarding many machines at once? Use a **group enrollment token** instead —
-one reusable one-liner, each machine self-registers as its own host. See
-[Fleet-scale onboarding](docs/FLEET.md#fleet-scale-onboarding).) The script downloads the agent into `~/.webterm/`, starts it and sets up
+shell). (Onboarding many machines at once? Use a **group enrollment token** instead — create one
+from **+ host → "Many machines"**: a single reusable one-liner, each machine self-registers as its
+own host. See [Fleet-scale onboarding](docs/FLEET.md#fleet-scale-onboarding).) The script downloads the agent into `~/.webterm/`, starts it and sets up
 automatic restart (systemd `--user` with Restart=always, otherwise cron `@reboot`
 + watchdog). It also **appends one line to `~/.bashrc` and `~/.zshrc`** so shell integration
 (OSC 133) works — the commands panel, per-command exit codes and `cd` tracking depend on it.
@@ -668,6 +670,12 @@ exactly as much as access to the mailbox.
 is another way to lock yourself out; the product can be strict in the browser because this
 exists, and shell on the server is a far higher bar than a mailbox. See RUNBOOK §5.
 
+**Signed-in devices (Settings → Security).** The account lists every browser currently signed
+in — device label, when it was last seen, which one is *this* device, and a badge on any
+unfamiliar new device. Sign out one device, or **sign out everywhere else** in one click (which
+also closes any open step-up windows). It's the in-UI answer to a suspected stolen cookie, short
+of rotating the password — and, unlike `logout-all`, it doesn't need shell on the server.
+
 That signal decides **how loud to be, never whether to check**. No device is ever trusted enough
 to skip step-up, the idle lock, or 2FA: an IP and a user-agent both travel with a stolen session
 cookie, so a "trusted device" exemption would be waved through by exactly the attacker it looks
@@ -683,7 +691,11 @@ protections.
 one button (OAuth) and scheduled backups leave automatically into your account,
 **encrypted with your passphrase** — the provider gets a file it cannot read; with no
 passphrase configured we refuse to upload. Least privilege: `drive.file` (only files the
-app itself creates) or a Dropbox *App folder* app. Separate remote retention.
+app itself creates) or a Dropbox *App folder* app. Separate remote retention. You can also
+point backups at **your own SFTP or FTPS server** from the same screen — for SFTP the host
+key is **pinned on first use** (confirm the `SHA256:` fingerprint before Save unlocks; a
+later key change is refused), FTPS verifies the server certificate — with credentials stored
+encrypted and the archive leaving already encrypted. See `docs/RUNBOOK.md` for the details.
 
 If cloud OAuth is more than you want, `scripts/backup.sh` copies the encrypted archive off-host
 with tools you already have — no `rclone config`: **rsync-over-SSH** (`WEBTERM_BACKUP_RSYNC=user@host:/path/`,

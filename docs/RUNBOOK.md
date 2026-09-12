@@ -315,3 +315,21 @@ For the "I have no server access, but I have the app" case: **Settings → Backu
   A **pre-restore** snapshot of the current state is saved automatically to
   `data/backups/` as a safety net.
 - CLI equivalent: same result as `scripts/restore.sh`, but triggered from the UI.
+
+**Off-host destinations from the UI.** Settings → Backup can push a copy of the same
+encrypted `.wtbk` off the box, configured entirely from the interface — no env vars, no
+shell:
+
+- **Google Drive / Dropbox** via OAuth (paste your app's client id/secret; the archive
+  passphrase is stored encrypted so scheduled uploads can run unattended).
+- **Your own SFTP or FTPS server.** For SFTP the server's **host key is pinned on first
+  use (TOFU)**: *Probe* shows the `SHA256:` fingerprint and **Save stays disabled until you
+  confirm it**; if the host key later changes, the upload is **refused** (anti-MITM). For
+  FTPS the server certificate is verified against the system CAs, or against a CA/cert PEM
+  you paste for self-signed servers. Either way the archive leaves **already encrypted** —
+  the destination only ever sees ciphertext.
+- Credentials (OAuth secret, SSH key, SFTP/FTPS password, archive passphrase) are stored
+  **encrypted in the vault and never returned to the UI** — the form clears them after
+  save. Configuring a destination **re-authenticates** (it opens a standing channel that
+  exfiltrates data) and is written to the audit log; removing it wipes the stored secrets.
+  A failing scheduled off-host backup raises a security alert (email + webhook).

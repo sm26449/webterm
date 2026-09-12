@@ -51,11 +51,14 @@ an automation token for scheduled runs).
 Adding hosts one at a time is fine for a handful; for a real fleet, use a **group
 enrollment token**.
 
-1. **Settings → Security → Fleet enrollment.** Give the token a name, an expiry, an
-   optional **max-uses** cap (0 = unlimited), an optional **folder** the new hosts land
-   in, and whether new hosts should **require 2FA**. Creating it re-authenticates and
-   asks for your second factor — a reusable token that can register hosts is a
-   provisioning-class credential.
+1. **+ host → "Many machines".** Group-token creation lives in the Add-host flow, behind
+   the **"One host / Many machines"** switch — where you'd look to add hosts, not three
+   levels deep in settings. Give the token a name, an expiry, an optional **max-uses** cap
+   (0 = unlimited), an optional **folder** the new hosts land in, and whether new hosts
+   should **require 2FA**. Creating it re-authenticates and asks for your second factor — a
+   reusable token that can register hosts is a provisioning-class credential. (The tokens
+   you've created are **listed and revoked** under **Settings → Security**, which is the
+   credential-management surface — not where you create them.)
 2. You get **one install one-liner**, shown once. Run it on every machine (config
    management, a `for` loop over SSH, a golden image's first-boot script, …).
 3. Each run **auto-creates a new host** with its **own** agent token and dials back in.
