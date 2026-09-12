@@ -16,6 +16,7 @@ import { copyText } from '../lib/clipboard'
 import { field, heading } from './settings/ui'
 import AuditTab from './settings/AuditTab'
 import PreferencesTab from './settings/PreferencesTab'
+import AccountTab from './settings/AccountTab'
 
 interface Passkey {
   id: number
@@ -33,7 +34,6 @@ export default function SettingsModal(props: {
   const [passkeys, setPasskeys] = useState<Passkey[]>([])
   // erori per secțiune, afișate lângă butonul care le-a produs — modalul e lung
   // și scrollabil, o singură eroare la fund ar fi de multe ori în afara ecranului
-  const [accountErr, setAccountErr] = useState('')
   const [securityErr, setSecurityErr] = useState('')
   const [smtpErr, setSmtpErr] = useState('')
   const [busy, setBusy] = useState(false)
@@ -153,40 +153,7 @@ export default function SettingsModal(props: {
     }
   }
 
-  // ── Conturi: mai multe, TOATE cu drepturi depline (fără RBAC — vezi API-ul) ──
-  type UserRow = { id: number; email: string; created: number; totp: boolean; passkeys: number; is_self: boolean }
-  const [users, setUsers] = useState<UserRow[]>([])
-  const [newUser, setNewUser] = useState({ email: '', password: '', current_password: '' })
-  const [usersMsg, setUsersMsg] = useState('')
-  const [usersErr, setUsersErr] = useState('')
-  const loadUsers = () => api<UserRow[]>('/api/users').then(setUsers).catch(() => {})
-
-  async function addUser(e: FormEvent) {
-    e.preventDefault()
-    setUsersErr(''); setUsersMsg(''); setBusy(true)
-    try {
-      setUsers(await api<UserRow[]>('/api/users', { method: 'POST', body: JSON.stringify(newUser) }))
-      setNewUser({ email: '', password: '', current_password: '' })
-      setUsersMsg(t('settings.users.added'))
-    } catch (e) {
-      setUsersErr(errText(e, t) || String(e))
-    }
-    setBusy(false)
-  }
-
-  async function removeUser(u: UserRow) {
-    // ştergerea unui cont taie şi sesiunile lui: e o revocare, nu o ascundere
-    const pw = window.prompt(t('settings.users.deleteConfirm', { email: u.email }))
-    if (!pw) return
-    setUsersErr(''); setUsersMsg('')
-    try {
-      setUsers(await api<UserRow[]>(`/api/users/${u.id}/delete`,
-        { method: 'POST', body: JSON.stringify({ current_password: pw }) }))
-      setUsersMsg(t('settings.users.deleted'))
-    } catch (e) {
-      setUsersErr(errText(e, t) || String(e))
-    }
-  }
+  // Conturile + schimbarea de cont au fost extrase în ./settings/AccountTab.
 
   // ── Backup off-host în cloud (Google Drive / Dropbox), conectat prin OAuth din UI ──
   type CloudProvider = { id: string; label: string; console_url: string; app_type: string }
@@ -392,21 +359,12 @@ export default function SettingsModal(props: {
   const dialogRef = useRef<HTMLDivElement>(null)
   useFocusTrap(dialogRef, props.onClose)
 
-  // cont
-  const [curPw, setCurPw] = useState('')
-  const [newEmail, setNewEmail] = useState(props.email ?? '')
-  const [newPw, setNewPw] = useState('')
-  // Codul de confirmare cerut când sesiunea a pornit de pe un dispozitiv necunoscut. Câmpul
-  // apare doar după ce serverul îl cere — nu vrem un câmp gol şi nelămurit în fluxul normal.
   // Dispozitivele conectate. Lipsea calea de mijloc între „schimb parola" (omoară tot,
   // inclusiv sesiunea curentă) şi „intru pe server prin SSH".
   type WebSess = { id: number; label: string; created: number; last_seen: number
                    expires: number; new_device: boolean; current: boolean }
   const [devices, setDevices] = useState<WebSess[] | null>(null)
   const loadDevices = () => api<WebSess[]>('/api/account/sessions').then(setDevices).catch(() => setDevices([]))
-  const [emailCode, setEmailCode] = useState('')
-  const [codeAsked, setCodeAsked] = useState(false)
-  const [accountMsg, setAccountMsg] = useState('')
 
   // 2FA (TOTP)
   const [totpEnabled, setTotpEnabled] = useState(false)
@@ -737,7 +695,6 @@ export default function SettingsModal(props: {
   // vizitarea secțiunii Backup „vede" notificarea (punctul de pe rotița Setări) → o
   // stinge, nu doar la descărcare (altfel rămânea aprinsă dacă ștergeai fără să descarci)
   useEffect(() => {
-    if (cat === 'cont' && users.length === 0) loadUsers()
     if (cat === 'securitate' && tokens.length === 0) loadTokens()
     if (cat === 'securitate' && groups.length === 0) loadGroups()
     if (cat === 'securitate' && devices === null) loadDevices()
@@ -820,37 +777,6 @@ export default function SettingsModal(props: {
     return qr.createDataURL(5, 12)
   }
 
-  async function saveAccount(e: FormEvent) {
-    e.preventDefault()
-    setAccountErr('')
-    setAccountMsg('')
-    setBusy(true)
-    try {
-      const r = await api<{ email: string }>('/api/account', {
-        method: 'POST',
-        body: JSON.stringify({
-          current_password: curPw,
-          email: newEmail,
-          new_password: newPw || undefined,
-          email_code: emailCode || undefined,
-        }),
-      })
-      setAccountMsg(t('settings.accountUpdated'))
-      setCurPw('')
-      setNewPw('')
-      setEmailCode('')
-      setCodeAsked(false)
-      props.onAccountChanged()
-      void r
-    } catch (err) {
-      // Serverul tocmai a trimis codul pe email — deschidem câmpul şi păstrăm ce a completat
-      // deja, ca „mai introdu şi codul" să nu însemne „ia-o de la capăt".
-      if (err instanceof ApiError && err.code === 'account.codeRequired') setCodeAsked(true)
-      setAccountErr(errText(err, t) || t('settings.error'))
-    } finally {
-      setBusy(false)
-    }
-  }
 
 
   async function addPasskey() {
@@ -953,105 +879,7 @@ export default function SettingsModal(props: {
                 secţiunile cu liste (audit, backup, conturi) folosesc toată lăţimea */}
             <div className={cat === 'audit' || cat === 'backup' ? '' : 'max-w-3xl'}>
 
-        {cat === 'cont' && (<div>
-        {/* ── Cont ── */}
-        <h3 className={heading + ' !mt-0'}>{t('settings.account')}</h3>
-        <form onSubmit={saveAccount} className="mt-2 flex flex-col gap-2">
-          <input
-            type="email"
-            value={newEmail}
-            onChange={(e) => setNewEmail(e.target.value)}
-            placeholder={t('settings.email')}
-            aria-label={t('settings.email')}
-            autoComplete="username"
-            className={field}
-          />
-          <input
-            type="password"
-            value={newPw}
-            onChange={(e) => setNewPw(e.target.value)}
-            placeholder={t('settings.newPasswordPlaceholder')}
-            aria-label={t('settings.newPassword')}
-            autoComplete="new-password"
-            className={field}
-          />
-          <input
-            type="password"
-            required
-            value={curPw}
-            onChange={(e) => setCurPw(e.target.value)}
-            placeholder={t('settings.currentPasswordConfirm')}
-            aria-label={t('settings.currentPassword')}
-            autoComplete="current-password"
-            className={field}
-          />
-          {codeAsked && (
-            <div className="flex flex-col gap-1">
-              <input
-                type="text"
-                inputMode="numeric"
-                autoComplete="one-time-code"
-                value={emailCode}
-                onChange={(e) => setEmailCode(e.target.value)}
-                placeholder={t('settings.emailCodePlaceholder')}
-                aria-label={t('settings.emailCodePlaceholder')}
-                className={field}
-              />
-              <p className="text-xs text-slate-400">{t('settings.emailCodeHint')}</p>
-            </div>
-          )}
-          <div className="flex items-center gap-3">
-            <button
-              disabled={busy || !curPw}
-              className="rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-50"
-            >
-              {t('settings.saveAccount')}
-            </button>
-            {accountMsg && <span className="text-sm wt-good">{accountMsg}</span>}
-            {accountErr && <span className="text-sm wt-danger">{accountErr}</span>}
-          </div>
-        </form>
-
-        {/* ── Conturi (toate cu drepturi depline) ── */}
-        <h3 className={heading}>{t('settings.users.title')}</h3>
-        <p className="mt-1 text-xs text-slate-500">{t('settings.users.hint')}</p>
-        <ul className="mt-2 flex flex-col gap-1">
-          {users.map((u) => (
-            <li key={u.id} className="flex items-center gap-2 rounded-lg bg-ink-800/60 px-3 py-2 text-sm ring-1 ring-ink-700">
-              <span className="min-w-0 flex-1 truncate text-slate-200">{u.email}</span>
-              {u.is_self && <span className="shrink-0 rounded bg-sky-600/20 px-1.5 py-0.5 text-[11px] wt-accent">{t('settings.users.you')}</span>}
-              {u.totp && <span className="shrink-0 text-[11px] text-slate-500">2FA</span>}
-              {u.passkeys > 0 && <span className="shrink-0 text-[11px] text-slate-500">{t('settings.users.passkeys', { n: u.passkeys })}</span>}
-              {!u.is_self && users.length > 1 && (
-                <button onClick={() => removeUser(u)} className="shrink-0 text-xs wt-danger hover:underline">
-                  {t('settings.delete')}
-                </button>
-              )}
-            </li>
-          ))}
-        </ul>
-        <form onSubmit={addUser} className="mt-3 flex flex-col gap-2">
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <input type="email" value={newUser.email} autoComplete="off"
-              onChange={(e) => setNewUser({ ...newUser, email: e.target.value })}
-              placeholder={t('settings.users.emailPlaceholder')} aria-label={t('settings.email')} className={field} />
-            <input type="password" value={newUser.password} autoComplete="new-password"
-              onChange={(e) => setNewUser({ ...newUser, password: e.target.value })}
-              placeholder={t('settings.users.passwordPlaceholder')} aria-label={t('settings.newPassword')} className={field} />
-          </div>
-          <input type="password" value={newUser.current_password} autoComplete="current-password"
-            onChange={(e) => setNewUser({ ...newUser, current_password: e.target.value })}
-            placeholder={t('settings.currentPasswordConfirm')} aria-label={t('settings.currentPassword')} className={field} />
-          <div className="flex items-center gap-3">
-            <button type="submit" disabled={busy || !newUser.current_password}
-              className="rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-50">
-              {t('settings.users.add')}
-            </button>
-            {usersMsg && <span className="text-sm wt-good">{usersMsg}</span>}
-            {usersErr && <span className="text-sm wt-danger">{usersErr}</span>}
-          </div>
-        </form>
-        </div>)}
+        {cat === 'cont' && <AccountTab email={props.email} onAccountChanged={props.onAccountChanged} />}
 
         {cat === 'preferinte' && <PreferencesTab />}
 
