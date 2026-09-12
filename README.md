@@ -239,10 +239,13 @@ what it does not cover, is in [Security](#security) and
   re-show the public key later — no `ssh-keygen` by hand
 - **Global command history**: search across every command run — on all hosts and
   sessions, from the command palette. Also a light audit log
-- **Agent diagnostics** (host menu, available even offline): live state, last
-  heartbeat, version, **agent↔gateway RTT**, uptime/reconnects, an **event
-  timeline** (connect/disconnect + reason) and the **agent log** — debugging
-  without SSH
+- **Host diagnostics** (host menu, available even offline): a tabbed panel with a full
+  **host snapshot** — OS/kernel/uptime, CPU model/cores/load, memory + swap, **every
+  filesystem**, and **each network interface** (IPv4/IPv6, MAC, MTU) with the **routing
+  table**. The agent pushes it on connect and hourly, and you can **Refresh** on demand; the
+  last snapshot is **persisted**, so a host's IPs, routes and disks stay visible **when it's
+  down** (labelled "as of …"). Plus live link health (**agent↔gateway RTT**, uptime/reconnects),
+  an **event timeline** (connect/disconnect + reason) and the **agent log** — debugging without SSH
 - Time zone synced across sessions; the server clock in the status bar
 
 **Data & backup** — [details](docs/RUNBOOK.md)
