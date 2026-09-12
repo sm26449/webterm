@@ -7,6 +7,27 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [2.1.2] — 2026-09-12 · agent (47)
+
+Gateway and interface only; agent unchanged at 47. No user-facing behaviour change — an internal
+refactor of the Settings modal plus a CI robustness fix, released so the cleaner codebase ships.
+
+### Changed — Settings modal broken up
+
+- `SettingsModal.tsx` had grown into a ~2489-line god-component holding ~80 pieces of state across
+  every tab. It's now a **94-line shell** (header + category rail + tab dispatch) with each section
+  extracted into its own `frontend/src/components/settings/*Tab.tsx` — **AuditTab, PreferencesTab,
+  AccountTab, AppearanceTab, NotificationsTab, BackupTab, SecurityTab**. Each tab owns its state and
+  loads on mount, so a section's data is fetched when you open it, not eagerly on every modal open.
+  Shared class strings and the `downloadBlob` helper live in `settings/ui.ts`. Pure refactor:
+  verified per tab with tsc + eslint + i18n parity, and end-to-end (backup round-trip, features,
+  accessibility, mobile) with no behaviour change.
+
+### Fixed
+
+- The **E2E-sessions** CI step is now retry-safe (idempotent setup-or-login), so a timing flake in
+  that one test can no longer block a release the way it did for 2.1.1.
+
 ## [2.1.1] — 2026-09-11 · agent (47)
 
 Gateway and interface only; agent unchanged at 47. A UX / accessibility pass over the 2.1.0
