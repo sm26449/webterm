@@ -16,7 +16,7 @@ jobs:
   deps-cve:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: pip-audit pe dependențele Python (versiunile LIVRATE)
         run: |
           python3 -m pip install --quiet pip-audit
@@ -27,7 +27,7 @@ jobs:
   npm-cve:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # `pip-audit` acoperea Python-ul şi Trivy imaginea, dar cele 40+ pachete de frontend nu
       # treceau prin nicio poartă de CVE — deşi ele ajung în bundle-ul pe care îl execută
       # BROWSERUL fiecărui utilizator. Rulează pe acelaşi cron săptămânal, cu `--omit=dev`:
@@ -40,7 +40,7 @@ jobs:
   image-cve:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Log in to ghcr.io
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       # Scana `:latest` — adică ce produce `main`, nu ce rulează lumea. Cât timp instalarea
