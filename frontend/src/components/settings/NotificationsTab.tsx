@@ -90,7 +90,6 @@ export default function NotificationsTab() {
     } finally { setFwdBusy(false) }
   }
 
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { loadSmtp(); loadThresholds(); loadFwd() }, [])
 
   return (
