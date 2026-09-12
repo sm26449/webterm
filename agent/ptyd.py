@@ -42,7 +42,7 @@ import termios
 import threading
 import time
 
-AGENT_VERSION = 47
+AGENT_VERSION = 48
 
 # Sub atâtea secunde de valabilitate, un certificat se roteşte prea des ca un pin pe el să
 # însemne altceva decât o cădere programată. 48h: peste ce emite un CA intern (12h la Caddy),
@@ -76,6 +76,7 @@ PENDING_INPUT_MAX = 1 * 1024 * 1024   # input în așteptare per sesiune (paste-
 FWD_WBUF_MAX = 8 * 1024 * 1024        # octeți în așteptare către ținta unui forward
 READ_CHUNK = 65536
 HEARTBEAT_INTERVAL = 30.0
+DIAG_INTERVAL = 3600.0          # snapshot complet (reţea/rute/mounturi/sistem): push orar + la connect
 HB_ACK_TIMEOUT = 75.0           # fără ack la heartbeat atâta timp → conexiunea nu mai ajunge la
                                # gateway (half-open); forţăm reconnect (detecţie mai rapidă/fiabilă
                                # decât TCP keepalive, care unele NAT-uri îl blochează)
@@ -629,6 +630,175 @@ def log(msg):
         sys.stderr.flush()
     except Exception:      # noqa: BLE001 — logul nu are voie să doboare agentul
         pass
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics snapshot (sistem / CPU / memorie / storage per-fs / reţea + rute)
+# ---------------------------------------------------------------------------
+# Spre deosebire de `Metrics` (uşor, pe fiecare heartbeat), snapshot-ul e „greu" şi rar:
+# pushat la conectare + o dată pe oră, şi on-demand la Refresh. Best-effort TOTAL — niciun câmp
+# nu are voie să arunce; ce nu se poate citi lipseşte pur şi simplu. Adresele IP + rutele vin din
+# `ip` (iproute2, ~universal pe Linux); dacă lipseşte, interfeţele rămân (din /sys) fără IP-uri.
+# De rulat pe un THREAD worker (apelează subprocess) — niciodată pe event-loop.
+
+def _diag_read(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def _diag_run(argv, timeout=2):
+    # py3.6: fără `capture_output` (3.7+) — stdout=PIPE explicit.
+    try:
+        out = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                             timeout=timeout)
+        return out.stdout.decode("utf-8", "replace") if out.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+# pseudo-filesystem-uri de sărit (nu sunt „storage" pentru operator)
+_DIAG_SKIP_FS = frozenset((
+    "proc", "sysfs", "devtmpfs", "devpts", "tmpfs", "cgroup", "cgroup2", "overlay", "mqueue",
+    "debugfs", "tracefs", "securityfs", "pstore", "bpf", "configfs", "fusectl", "autofs",
+    "hugetlbfs", "binfmt_misc", "squashfs", "ramfs", "nsfs"))
+
+
+def _diag_system():
+    s = {}
+    try:
+        u = os.uname()
+        s["hostname"], s["kernel"], s["arch"] = u.nodename, u.release, u.machine
+    except OSError:
+        pass
+    for line in _diag_read("/etc/os-release").splitlines():
+        if line.startswith("PRETTY_NAME="):
+            s["os"] = line.split("=", 1)[1].strip().strip('"')
+            break
+    up = _diag_read("/proc/uptime").split()
+    if up:
+        try:
+            s["uptime_sec"] = int(float(up[0]))
+            s["boot_time"] = int(time.time() - float(up[0]))
+        except ValueError:
+            pass
+    return s
+
+
+def _diag_cpu():
+    c, model, cores = {}, "", 0
+    for line in _diag_read("/proc/cpuinfo").splitlines():
+        if line.startswith("model name") and not model:
+            model = line.split(":", 1)[1].strip()
+        if line.startswith("processor"):
+            cores += 1
+    if model:
+        c["model"] = model
+    if cores:
+        c["cores"] = cores
+    try:
+        c["load1"], c["load5"], c["load15"] = (round(x, 2) for x in os.getloadavg())
+    except OSError:
+        pass
+    return c
+
+
+def _diag_mem():
+    info, m = {}, {}
+    for line in _diag_read("/proc/meminfo").splitlines():
+        k, _, rest = line.partition(":")
+        try:
+            info[k] = int(rest.split()[0]) * 1024
+        except (IndexError, ValueError):
+            pass
+    if "MemTotal" in info:
+        m["total"] = info["MemTotal"]
+        m["available"] = info.get("MemAvailable", info.get("MemFree", 0))
+        m["used"] = info["MemTotal"] - m["available"]
+    if "SwapTotal" in info:
+        m["swap_total"] = info["SwapTotal"]
+        m["swap_used"] = info["SwapTotal"] - info.get("SwapFree", 0)
+    return m
+
+
+def _diag_storage():
+    out, seen = [], set()
+    for line in _diag_read("/proc/mounts").splitlines():
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        mount, fstype = parts[1], parts[2]
+        if fstype in _DIAG_SKIP_FS or mount.startswith(("/proc", "/sys", "/dev", "/run")):
+            continue
+        try:
+            st = os.statvfs(mount)
+            dev = os.stat(mount).st_dev
+        except OSError:
+            continue
+        if dev in seen:
+            continue
+        total = st.f_blocks * st.f_frsize
+        if total <= 0:
+            continue
+        seen.add(dev)
+        out.append({"mount": mount, "fstype": fstype, "total": total,
+                    "used": (st.f_blocks - st.f_bavail) * st.f_frsize,
+                    "avail": st.f_bavail * st.f_frsize})
+    return out
+
+
+def _diag_net():
+    ifaces, by_name = [], {}
+    try:
+        names = sorted(os.listdir("/sys/class/net"))
+    except OSError:
+        names = []
+    for n in names:
+        d = "/sys/class/net/" + n
+        it = {"name": n, "state": _diag_read(d + "/operstate") or "unknown",
+              "mac": _diag_read(d + "/address"), "ipv4": [], "ipv6": []}
+        try:
+            it["mtu"] = int(_diag_read(d + "/mtu") or 0)
+        except ValueError:
+            pass
+        try:
+            it["rx_bytes"] = int(_diag_read(d + "/statistics/rx_bytes") or 0)
+            it["tx_bytes"] = int(_diag_read(d + "/statistics/tx_bytes") or 0)
+        except ValueError:
+            pass
+        by_name[n] = it
+        ifaces.append(it)
+    # IP-uri per interfaţă: `ip -o addr` (o linie per adresă, stabil). Fără `ip`, rămân goale.
+    for line in _diag_run(["ip", "-o", "addr", "show"]).splitlines():
+        f = line.split()
+        if len(f) >= 4 and f[2] in ("inet", "inet6") and f[1] in by_name:
+            by_name[f[1]]["ipv4" if f[2] == "inet" else "ipv6"].append(f[3])
+    routes = []
+    for fam, flag in (("inet", []), ("inet6", ["-6"])):
+        for line in _diag_run(["ip"] + flag + ["route", "show"]).splitlines():
+            f = line.split()
+            if not f:
+                continue
+            r = {"family": fam, "dest": f[0]}
+            for i, tok in enumerate(f):
+                if tok in ("via", "dev", "metric") and i + 1 < len(f):
+                    r[{"via": "gateway", "dev": "iface", "metric": "metric"}[tok]] = f[i + 1]
+            routes.append(r)
+    return {"interfaces": ifaces, "routes": routes}
+
+
+def collect_diagnostics():
+    """Snapshot complet, best-effort. Nu aruncă niciodată — pe un câmp căzut întoarce ce are."""
+    snap = {"collected_at": int(time.time())}
+    for key, fn in (("system", _diag_system), ("cpu", _diag_cpu), ("memory", _diag_mem),
+                    ("storage", _diag_storage), ("network", _diag_net)):
+        try:
+            snap[key] = fn()
+        except Exception:      # noqa: BLE001 — diagnosticul nu are voie să doboare agentul
+            pass
+    return snap
 
 
 # ---------------------------------------------------------------------------
@@ -1293,6 +1463,7 @@ class Agent:
         self.backoff = BACKOFF_MIN
         self.next_connect = 0.0
         self.next_heartbeat = 0.0
+        self.next_diag = 0.0          # 0 = „pushează snapshot-ul la prima ocazie" (connect)
         # Health de link (Faza 3 observabilitate): heartbeat-ack + RTT + flapping.
         self._hb_seq = 0              # secvenţă de heartbeat (pt. ack + RTT)
         self._hb_sent_at = {}         # seq -> timp trimitere (pt. RTT; curăţat la ack)
@@ -1512,6 +1683,7 @@ class Agent:
             "sessions": [s.meta() for s in self.sessions.values()],
         })
         self.next_heartbeat = time.time() + HEARTBEAT_INTERVAL
+        self.next_diag = 0.0          # anunţă ce are host-ul imediat după (re)conectare
         log("connected to %s" % cfg["url"])
 
     def _disconnect(self):
@@ -1663,6 +1835,19 @@ class Agent:
             self._run_command(rid, cmd, cmd_timeout)
         finally:
             self._run_sem.release()
+
+    def _push_diag(self, rid=None):
+        """Colectează snapshot-ul (pe acest thread worker — poate apela `ip`) şi-l trimite:
+        ca RĂSPUNS on-demand dacă avem `rid`, altfel ca eveniment de push (connect/orar)."""
+        try:
+            snap = collect_diagnostics()
+        except Exception:      # noqa: BLE001 — best-effort; un snapshot ratat nu doboară nimic
+            snap = {"collected_at": int(time.time())}
+        if rid is not None:
+            self.send_ctrl({"ok": True, "id": rid, "diag": snap})
+        else:
+            self.send_ctrl({"event": "diagnostics", "agent_version": AGENT_VERSION,
+                            "epoch": self.epoch, "diag": snap})
 
     def handle_ctrl(self, msg):
         op = msg.get("op")
@@ -2014,6 +2199,11 @@ class Agent:
                     ok(ports=serial_ports())
                 except OSError as e:
                     err("serial_error", str(e))
+
+            elif op == "diagnostics":
+                # Refresh on-demand din panoul Diagnostic. Colectăm pe un worker (apelează `ip`)
+                # ca să nu blocăm thread-ul de reader; worker-ul trimite reply-ul cu acelaşi id.
+                threading.Thread(target=self._push_diag, args=(rid,), daemon=True).start()
 
             elif op == "get_log":
                 # tail-ul logului agentului (ptyd.log) pentru panoul de Diagnostic — debug fără SSH.
@@ -2513,6 +2703,12 @@ class Agent:
                             "metrics": self.metrics.sample(),
                             "sessions": [s.meta() for s in self.sessions.values()]})
             self.next_heartbeat = now + HEARTBEAT_INTERVAL
+        # Snapshot complet: la connect (next_diag=0) şi apoi orar. Colectat pe un THREAD worker
+        # — apelează `ip` (subprocess) şi statvfs, n-are voie să blocheze event-loop-ul. Setăm
+        # next_diag ÎNAINTE de spawn, ca un tick reintrat să nu pornească un al doilea thread.
+        if self.connected and now >= self.next_diag:
+            self.next_diag = now + DIAG_INTERVAL
+            threading.Thread(target=self._push_diag, daemon=True).start()
         # Reapează DOAR pid-urile de sesiune. Un waitpid(-1) global fura copilul lui
         # subprocess.run din op-ul `run` (rulează pe un thread worker) → subprocess
         # primea ECHILD, iar CPython raporta silent exit code 0 (comenzi eșuate

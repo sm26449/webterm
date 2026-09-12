@@ -279,6 +279,11 @@ MIGRATIONS = [
     # Etichete libere pe host (listă separată prin virgulă, normalizată lowercase): filtrare la
     # scară de flotă („all prod", „all debian") mai flexibilă decât folderul (o singură ierarhie).
     "ALTER TABLE hosts ADD COLUMN tags TEXT DEFAULT ''",
+    # Ultimul snapshot de diagnostic (JSON: sistem/cpu/mem/storage/reţea+rute), pushat de agent la
+    # conectare + orar, plus on-demand. Persistat ca să rămână VIZIBIL când hostul e down (vezi ce
+    # IP-uri/rute avea), cu `diagnostics_at` = momentul colectării pentru eticheta „acum X".
+    "ALTER TABLE hosts ADD COLUMN diagnostics TEXT",
+    "ALTER TABLE hosts ADD COLUMN diagnostics_at REAL",
 ]
 
 # tabele adăugate ulterior (executeScript de mai sus le creează pe DB-uri noi;

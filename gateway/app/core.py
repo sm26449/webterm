@@ -1301,6 +1301,7 @@ class AgentConnection(SessionSource):
         self._stop_reason = ""        # motivul deconectării (jurnal): heartbeat_stale/superseded/…
         self._connect_logged = False  # jurnal: scriem evenimentul `connect` o dată, la primul hello
         self.link = {}                # health de link raportat de agent: uptime/reconnects/rtt_ms
+        self.diagnostics = None        # ultimul snapshot (sistem/cpu/mem/storage/reţea) pushat de agent
         # Serializează scrierile pe ws-ul agentului: send_ctrl (request-uri fs/resize/run),
         # send_data (input din fiecare browser_ws) și send_fwd (proxy forward, bucăţi de 1 MB)
         # rulează din coroutine concurente. Fără lock, două send_bytes se întreţes pe fir →
@@ -1365,6 +1366,23 @@ class AgentConnection(SessionSource):
         if not resp.get("ok"):
             raise ForwardError(resp.get("msg") or resp.get("code") or "get_log failed")
         return resp.get("log", "")
+
+    async def _store_diagnostics(self, diag) -> None:
+        """Cache live + persist ultimul snapshot (folosit şi din push, şi din refresh on-demand)."""
+        if not isinstance(diag, dict) or not diag:
+            return
+        self.diagnostics = diag
+        await db.execute("UPDATE hosts SET diagnostics=?, diagnostics_at=? WHERE id=?",
+                         json.dumps(diag), diag.get("collected_at") or time.time(), self.host_id)
+
+    async def get_diagnostics(self) -> dict:
+        """Snapshot proaspăt, on-demand (butonul Refresh). Îl şi persistăm, ca ultimul cunoscut."""
+        resp = await self.request("diagnostics", timeout=15)
+        if not resp.get("ok"):
+            raise ForwardError(resp.get("msg") or resp.get("code") or "diagnostics failed")
+        diag = resp.get("diag") or {}
+        await self._store_diagnostics(diag)
+        return diag
 
     async def open_serial(self, device: str, baud: int, bits: int, parity: str,
                           stop: int, flow: str) -> ForwardStream:
@@ -1572,6 +1590,10 @@ class AgentConnection(SessionSource):
                 v = msg.get("agent_version")
                 await record_agent_event(self.host_id, "connect", detail=("v%s" % v) if v else "")
             self.schedule_reconcile(msg)
+        elif event == "diagnostics":
+            # snapshot complet pushat de agent (la connect + orar) → persistăm ultimul cunoscut,
+            # ca să rămână vizibil şi când hostul e down
+            await self._store_diagnostics(msg.get("diag"))
         elif event == "exit":
             hub = hubs.get(msg.get("sid", ""))
             if hub and hub.host_id == self.host_id:   # doar sesiunile host-ului său

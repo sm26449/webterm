@@ -2510,13 +2510,21 @@ async def host_events(host_id: int, user=Depends(security.require_user)):
     de diagnostic: cine a conectat/deconectat şi DE CE, când a venit un update etc."""
     await _require_host_stepup(host_id, user)   # F-05: IP-uri, versiuni, motive de reconectare
     hrow = await db.fetchone(
-        "SELECT last_heartbeat, agent_version, connection_type, agent_ip FROM hosts WHERE id=?", host_id)
+        "SELECT last_heartbeat, agent_version, connection_type, agent_ip, diagnostics,"
+        " diagnostics_at FROM hosts WHERE id=?", host_id)
     if not hrow:
         raise HTTPException(404)
     rows = await db.fetchall(
         "SELECT ts, event, reason, detail FROM agent_events WHERE host_id=?"
         " ORDER BY ts DESC LIMIT 200", host_id)
     conn = core.sources.get(host_id)
+    # ultimul snapshot persistat: vizibil ŞI când hostul e down (ce IP-uri/rute/discuri avea)
+    diag = None
+    if hrow["diagnostics"]:
+        try:
+            diag = json.loads(hrow["diagnostics"])
+        except (ValueError, TypeError):
+            diag = None
     return {
         "online": conn is not None,
         "last_heartbeat": hrow["last_heartbeat"],
@@ -2526,6 +2534,9 @@ async def host_events(host_id: int, user=Depends(security.require_user)):
         # health de link raportat de agent (uptime/reconnects/rtt_ms) — Faza 3
         "link": (conn.link if isinstance(conn, core.AgentConnection) else {}),
         "events": [dict(r) for r in rows],
+        # snapshot complet (ultimul cunoscut) + momentul colectării pentru eticheta „acum X"
+        "diagnostics": diag,
+        "diagnostics_at": hrow["diagnostics_at"],
     }
 
 
@@ -2542,6 +2553,23 @@ async def agent_log(host_id: int, user=Depends(security.require_user)):
         raise ApiError(409, "host.offline", "the host is offline, or has no agent connected")
     try:
         return {"log": await conn.get_agent_log()}
+    except core.ForwardError as e:
+        raise HTTPException(502, str(e))
+    except (core.AgentGone, TimeoutError):
+        raise HTTPException(409, "host offline")
+
+
+@router.post("/api/hosts/{host_id}/diagnostics/refresh")
+async def diagnostics_refresh(host_id: int, user=Depends(security.require_user)):
+    """Snapshot proaspăt cerut acum de la agent (butonul Refresh). Doar când hostul e online;
+    altfel UI-ul arată ultimul snapshot persistat din `/events`. Aceeaşi poartă de step-up ca
+    restul citirilor de host (scoate IP-uri, rute, mounturi)."""
+    await _require_host_stepup(host_id, user)
+    conn = core.sources.get(host_id)
+    if not isinstance(conn, core.AgentConnection):
+        raise ApiError(409, "host.offline", "the host is offline, or has no agent connected")
+    try:
+        return {"diagnostics": await conn.get_diagnostics()}
     except core.ForwardError as e:
         raise HTTPException(502, str(e))
     except (core.AgentGone, TimeoutError):
