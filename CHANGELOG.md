@@ -7,6 +7,28 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [2.2.0] — 2026-09-12 · agent (48)
+
+First release that carries an **agent update** (47 → 48): installed agents update themselves to
+it automatically, so the new diagnostics snapshot lights up fleet-wide after the gateway upgrade.
+
+### Added — host diagnostics you can read from the UI
+
+- The **Diagnostics panel** went from "connection state + event log" to a full, tabbed host view:
+  **Overview** (system: OS/kernel/uptime/arch; CPU model/cores/load; memory + swap with usage
+  bars), **Storage** (every filesystem, not just the fullest, with usage), **Network** (each
+  interface with its IPv4/IPv6, MAC, MTU and traffic, plus the **routing table**), and **Logs**
+  (the 7-day connection log and the agent log tail, now full-width).
+- The agent collects this snapshot from `/proc`, `/sys` and `ip` — pure stdlib, best-effort per
+  field, on a worker thread so it never blocks the event loop. It's **pushed on (re)connect and
+  hourly**, and on-demand via a **Refresh** button. The gateway **persists the last snapshot**, so
+  a host's IPs, routes and disks stay visible **even when it's offline** — labelled "as of …".
+
+### Added — confirm before signing out
+
+- **Sign out** now asks for confirmation (a small dialog). On a terminal app an accidental logout
+  means re-authenticating; the prompt notes that tmux sessions keep running and reattach next login.
+
 ## [2.1.2] — 2026-09-12 · agent (47)
 
 Gateway and interface only; agent unchanged at 47. No user-facing behaviour change — an internal
