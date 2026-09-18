@@ -92,7 +92,7 @@ services:
   caddy:
     # Pinuit pe digest, ca Dockerfile-ul. Tag-ul rămâne în faţă doar ca etichetă lizibilă:
     # el se poate muta sub tine, digest-ul nu. Dependabot îl ridică la nevoie.
-    image: caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+    image: caddy:2-alpine@sha256:de23def33b17fb5d1290b0f6c2add1d70780e52341896c00a4c8a2a2fe9d355e
     restart: unless-stopped
     logging: *default-logging
     ports:
