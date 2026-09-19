@@ -14,6 +14,7 @@ import { extractUrls } from '../lib/urls'
 import { useI18n } from '../lib/i18n'
 import { hostScheme, termTheme } from '../lib/termtheme'
 import CommandsPanel from './CommandsPanel'
+import HostLoadRing from './HostLoadRing'
 import FilePanel from './FilePanel'
 import GitPanel from './GitPanel'
 import ForwardsPanel from './ForwardsPanel'
@@ -1309,6 +1310,9 @@ export default function SessionView(props: {
           )}
         </span>
         <div className="ml-auto flex shrink-0 items-center gap-0.5">
+          {/* Încărcarea host-ului activ, dintr-o privire (CPU + memorie). Din metricile pe care
+              app-ul le ia oricum la poll — vezi HostLoadRing. Stă între nume şi butoane. */}
+          {props.host && <HostLoadRing host={props.host} />}
           {/* Pe mobil ține DOAR esențialul în bară (căutare + paste); restul
               intră în meniul ⋯. Pe iPhone SE, cinci butoane + badge + titlu
               împingeau toolbarul afară din ecran. */}

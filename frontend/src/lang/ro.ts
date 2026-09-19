@@ -417,6 +417,12 @@ const ro: Lang = {
     'diag.routeDest': "Destinație",
     'diag.routeGateway': "Gateway",
     'diag.routeIface': "Interfață",
+    // indicator de încărcare din toolbar (dual-arc)
+    'loadring.aria': "Încărcare host — CPU {cpu}%, memorie {mem}%",
+    'loadring.cpu': "CPU",
+    'loadring.memory': "Memorie",
+    'loadring.load': "Load",
+    'loadring.swapHint': "Swap & altele în Diagnostic",
     'diag.state': "stare",
     'diag.stateOnline': "● online",
     'diag.stateOffline': "○ offline",
