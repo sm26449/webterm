@@ -7,6 +7,18 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [2.2.1] — 2026-09-19 · agent (48)
+
+Gateway and interface only; agent unchanged at 48.
+
+### Added — host load at a glance in the toolbar
+
+- The session toolbar now carries a small **dual-arc ring** between the session name and the search
+  button: outer arc **CPU**, inner arc **memory**, colored by pressure (green under 70%, amber under
+  90%, red above). It reads the metrics already in the 5-second poll — no new requests, no agent
+  change — moves only on update (and respects reduced-motion), and shows only for online agent hosts.
+  Hover it for exact CPU / memory / load, with a pointer to Diagnostics for swap and the rest.
+
 ## [2.2.0] — 2026-09-12 · agent (48)
 
 First release that carries an **agent update** (47 → 48): installed agents update themselves to
