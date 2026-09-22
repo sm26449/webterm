@@ -3064,7 +3064,8 @@ async def dial_telnet(host_row, credential: dict) -> TelnetSource:
 # File transfer (bridged through the agent's fs_* ops)
 # ---------------------------------------------------------------------------
 
-FS_CHUNK = 256 * 1024
+FS_CHUNK = 1024 * 1024   # bloc pe hopul gateway→agent: 1 MiB (mai puţine round-trip-uri la upload;
+#                          base64-ul rămâne, dar mesajul rezultat ~1.33 MiB e mult sub WS_MSG_MAX)
 
 
 def _agent_or_raise(host_id: int) -> "AgentConnection":
@@ -3079,6 +3080,15 @@ async def fs_list(host_id: int, path: str) -> dict:
     if not resp.get("ok"):
         raise FileError(resp.get("msg", "eroare"))
     return resp
+
+
+async def fs_crc32(host_id: int, path: str) -> int:
+    """CRC-32 al unui fişier de pe host (verificare de integritate la commit-ul unui upload).
+    Agentul îl citeşte în streaming; timeout generos (fişier mare = citire lungă pe disc)."""
+    resp = await _agent_or_raise(host_id).request("fs_crc32", path=path, timeout=600)
+    if not resp.get("ok"):
+        raise FileError(resp.get("msg", "eroare"))
+    return int(resp.get("crc32", 0)) & 0xffffffff
 
 
 async def fs_read_all(host_id: int, path: str):
@@ -3240,13 +3250,24 @@ async def fs_upload_chunk(host_id: int, path: str, upload_id: str, offset: int, 
     return offset + written
 
 
-async def fs_upload_commit(host_id: int, path: str, upload_id: str, if_mtime=None) -> int:
-    """Commit atomic: rename temp → ţintă (acelaşi mecanism ca fs_write_stream)."""
+async def fs_upload_commit(host_id: int, path: str, upload_id: str, if_mtime=None, crc32=None) -> int:
+    """Commit atomic: rename temp → ţintă (acelaşi mecanism ca fs_write_stream). Dacă clientul dă un
+    `crc32`, verificăm integritatea temp-ului ÎNAINTE de rename — un fişier corupt nu ajunge niciodată
+    la ţintă (îl ştergem şi eşuăm)."""
     conn = _agent_or_raise(host_id)
     tmp = _upload_tmp(path, upload_id)
     total = _upload_offset.get((host_id, upload_id))
     if total is None:
         total = await _upload_landed(host_id, path, upload_id)
+    if crc32 is not None:
+        got = await fs_crc32(host_id, tmp)
+        if got != (int(crc32) & 0xffffffff):
+            try:
+                await conn.request("fs_delete", path=tmp, timeout=15)
+            except Exception:
+                pass
+            _upload_offset.pop((host_id, upload_id), None)
+            raise FileError("integrity check failed: CRC mismatch (got %d, expected %d)" % (got, crc32))
     resp = await conn.request("fs_rename", path=tmp, to=path,
                               overwrite=True, if_mtime=if_mtime, timeout=60)
     if not resp.get("ok"):

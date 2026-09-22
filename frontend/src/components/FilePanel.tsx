@@ -61,6 +61,24 @@ const UP_CHUNK = 8 * 1024 * 1024
 class ResyncSignal { constructor(readonly offset: number) {} }
 const UID_RE = /^[0-9a-f]{16,64}$/
 
+// CRC-32 (IEEE), incremental — IDENTIC cu `zlib.crc32(bytes, prev)` din agent (poly reflectat
+// 0xEDB88320, init/xor 0xFFFFFFFF). Verificare de integritate la commit: prinde coruperea
+// accidentală (disc, trunchiere, offset). `prev` începe de la 0.
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256)
+  for (let n = 0; n < 256; n++) {
+    let c = n
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1)
+    t[n] = c >>> 0
+  }
+  return t
+})()
+function crc32(prev: number, bytes: Uint8Array): number {
+  let c = (prev ^ 0xFFFFFFFF) >>> 0
+  for (let i = 0; i < bytes.length; i++) c = (CRC_TABLE[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8)) >>> 0
+  return (c ^ 0xFFFFFFFF) >>> 0
+}
+
 // Traversează un FileSystemEntry (dintr-un drop) și adună fișierele cu calea lor
 // relativă — așa merge drag&drop pe FOLDERE, nu doar pe fișiere izolate.
 async function readEntry(entry: any, prefix: string, out: UpItem[]): Promise<void> {
@@ -95,7 +113,7 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [uploads, setUploads] = useState<Record<string, { pct: number; state: 'up' | 'done' | 'err' }>>({})
-  const uploadCtl = useRef<Record<string, { ctrl: AbortController; cancelled: boolean; dest: string; uid: string; lsKey: string }>>({})
+  const uploadCtl = useRef<Record<string, { xhr: XMLHttpRequest | null; cancelled: boolean; dest: string; uid: string; lsKey: string }>>({})
   const [overwrite, setOverwrite] = useState<{ items: UpItem[]; count: number } | null>(null)
   const [drag, setDrag] = useState(false)
   const [editing, setEditing] = useState<{ path: string; name: string } | null>(null)
@@ -224,57 +242,83 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
     return { uid, lsKey }
   }
 
-  // Un fișier, resumabil: taie în felii de 8 MB și le trimite pe rând cu offset. La cădere de rețea
-  // reia de la octetul aterizat (întreabă /status), cu retry+backoff; 409 = re-sincronizare offset.
+  // Un fișier, resumabil + verificat: taie în felii, trimite cu offset (XHR → progres byte-level),
+  // calculează CRC-32 în timp ce citește, iar commit-ul verifică integritatea pe host. La cădere reia
+  // de la octetul aterizat (retry+backoff; 409 = re-sincronizare). CRC-ul se verifică DOAR la un
+  // upload dintr-o singură sesiune (offset 0): la reluare, prefixul a fost urcat înainte și nu-l mai
+  // putem re-hash-ui — atunci ne bazăm pe guard-ul de offset + rename-ul atomic + TLS.
   async function uploadOne(dest: string, key: string, file: File): Promise<void> {
     const hid = props.host.id
     const { uid, lsKey } = uploadIdFor(dest, file)
     const q = `path=${encodeURIComponent(dest)}&upload_id=${uid}`
-    const ctl = { ctrl: new AbortController(), cancelled: false, dest, uid, lsKey }
+    const ctl = { xhr: null as XMLHttpRequest | null, cancelled: false, dest, uid, lsKey }
     uploadCtl.current[key] = ctl
-    const setPct = (off: number) =>
-      setUploads((u) => ({ ...u, [key]: { pct: file.size ? Math.round((off / file.size) * 100) : 100, state: 'up' } }))
+    const setPct = (bytes: number) =>
+      setUploads((u) => ({ ...u, [key]: { pct: file.size ? Math.round((bytes / file.size) * 100) : 100, state: 'up' } }))
 
-    // de unde reluăm (+ step-up o singură dată aici, dacă hostul cere 2FA)
     let offset = 0
     try {
       const st = await withStepup(hid, () => api<{ offset: number }>(`/api/hosts/${hid}/fs/upload/status?${q}`))
       offset = Math.min(st.offset || 0, file.size)
     } catch { offset = 0 }
+    let doCrc = offset === 0
+    let crc = 0
 
-    const sendChunk = async (off: number, blob: Blob): Promise<void> => {
-      const res = await fetch(`/api/hosts/${hid}/fs/upload?${q}&offset=${off}`,
-        { method: 'POST', body: blob, credentials: 'same-origin', signal: ctl.ctrl.signal })
-      if (res.status === 409) {   // offset desincronizat → aflăm adevărul și reluăm bucla de acolo
-        const st = await api<{ offset: number }>(`/api/hosts/${hid}/fs/upload/status?${q}`)
-        throw new ResyncSignal(Math.min(st.offset || 0, file.size))
-      }
-      if (!res.ok) throw new Error(String(res.status))
-    }
+    // XHR (nu fetch) ca să avem progres pe octeți în timpul feliei + cancel
+    const sendChunk = (off: number, body: ArrayBuffer): Promise<void> =>
+      new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest()
+        ctl.xhr = xhr
+        xhr.open('POST', `/api/hosts/${hid}/fs/upload?${q}&offset=${off}`)
+        xhr.upload.onprogress = (ev) => { if (ev.lengthComputable) setPct(off + ev.loaded) }
+        xhr.onload = async () => {
+          ctl.xhr = null
+          if (xhr.status >= 200 && xhr.status < 300) { resolve(); return }
+          if (xhr.status === 409) {   // offset desincronizat → aflăm adevărul și reluăm de acolo
+            try {
+              const st = await api<{ offset: number }>(`/api/hosts/${hid}/fs/upload/status?${q}`)
+              reject(new ResyncSignal(Math.min(st.offset || 0, file.size)))
+            } catch (e) { reject(e) }
+            return
+          }
+          reject(new Error(String(xhr.status)))
+        }
+        xhr.onerror = () => { ctl.xhr = null; reject(new Error('network')) }
+        xhr.ontimeout = () => { ctl.xhr = null; reject(new Error('timeout')) }
+        xhr.onabort = () => { ctl.xhr = null; reject(new Error('abort')) }
+        xhr.send(body)
+      })
 
     try {
       setPct(offset)
+      let pos = offset, resyncs = 0
       do {   // do/while: acoperă și fișierul de 0 octeți (o felie goală la offset 0)
         if (ctl.cancelled) return
-        const end = Math.min(offset + UP_CHUNK, file.size)
-        const blob = file.slice(offset, end)
+        const end = Math.min(pos + UP_CHUNK, file.size)
+        const buf = await file.slice(pos, end).arrayBuffer()
+        if (doCrc) crc = crc32(crc, new Uint8Array(buf))
         let resynced = false, tries = 0
         for (;;) {
-          try { await sendChunk(offset, blob); break }
+          try { await sendChunk(pos, buf); break }
           catch (e) {
             if (ctl.cancelled) return
-            if (e instanceof ResyncSignal) { offset = e.offset; resynced = true; break }
+            if (e instanceof ResyncSignal) {
+              if (e.offset < pos) doCrc = false   // am sărit înapoi → CRC-ul incremental nu mai e valid
+              if (++resyncs > 20) throw new Error('resync')
+              pos = e.offset; resynced = true; break
+            }
             if (++tries > 5) throw e
             await new Promise((r) => setTimeout(r, Math.min(8000, 1000 * 2 ** (tries - 1))))
           }
         }
-        if (resynced) { setPct(offset); continue }   // re-feliezi de la offset-ul real
-        offset = end
-        setPct(offset)
-      } while (offset < file.size)
+        if (resynced) { setPct(pos); continue }
+        pos = end
+        setPct(pos)
+      } while (pos < file.size)
 
       if (ctl.cancelled) return
-      await withStepup(hid, () => api(`/api/hosts/${hid}/fs/upload/commit?${q}`, { method: 'POST' }))
+      const crcQ = doCrc ? `&crc32=${crc >>> 0}` : ''
+      await withStepup(hid, () => api(`/api/hosts/${hid}/fs/upload/commit?${q}${crcQ}`, { method: 'POST' }))
       try { localStorage.removeItem(lsKey) } catch { /* */ }
       setUploads((u) => ({ ...u, [key]: { pct: 100, state: 'done' } }))
     } catch (e) {
@@ -287,12 +331,12 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
     }
   }
 
-  // anulare: oprește feliile în zbor și șterge temp-ul de pe host (nu mai e resumabil)
+  // anulare: oprește chunk-ul în zbor și șterge temp-ul de pe host (nu mai e resumabil)
   function cancelUpload(key: string) {
     const c = uploadCtl.current[key]
     if (!c) return
     c.cancelled = true
-    c.ctrl.abort()
+    c.xhr?.abort()
     fetch(`/api/hosts/${props.host.id}/fs/upload?path=${encodeURIComponent(c.dest)}&upload_id=${c.uid}`,
       { method: 'DELETE', credentials: 'same-origin' }).catch(() => {})
     try { localStorage.removeItem(c.lsKey) } catch { /* */ }
@@ -583,14 +627,24 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
         {Object.keys(uploads).length > 0 && (
           <div className="max-h-28 overflow-y-auto border-t border-ink-800 px-3 py-1 text-[10px]">
             {Object.entries(uploads).map(([name, u]) => (
-              <div key={name} className="flex items-center gap-2 py-0.5">
-                <span className="truncate text-slate-400" title={name}>{name}</span>
-                <span className={`ml-auto tabular-nums ${u.state === 'done' ? 'wt-good' : u.state === 'err' ? 'wt-danger' : 'wt-link'}`}>
-                  {u.state === 'up' ? `${u.pct}%` : u.state === 'done' ? '✓' : '✗'}
-                </span>
-                {u.state === 'up' && (
-                  <button onClick={() => cancelUpload(name)} className="shrink-0 rounded px-1 text-slate-500 hover:text-rose-300" title={t('files.cancelUpload')}>✕</button>
-                )}
+              <div key={name} className="py-1">
+                <div className="flex items-center gap-2">
+                  <span className="truncate text-slate-400" title={name}>{name}</span>
+                  <span className={`ml-auto tabular-nums ${u.state === 'done' ? 'wt-good' : u.state === 'err' ? 'wt-danger' : 'wt-link'}`}>
+                    {u.state === 'up' ? `${u.pct}%` : u.state === 'done' ? '✓' : '✗'}
+                  </span>
+                  {u.state === 'up' && (
+                    <button onClick={() => cancelUpload(name)} className="shrink-0 rounded px-0.5 text-slate-500 hover:text-rose-300" title={t('files.cancelUpload')}>✕</button>
+                  )}
+                </div>
+                {/* bară de progres: se umple pe octeți (XHR onprogress), colorată după stare */}
+                <div className="mt-0.5 h-1 w-full overflow-hidden rounded-full bg-ink-800">
+                  <div
+                    className={`h-full rounded-full transition-[width] duration-200 ease-out motion-reduce:transition-none ${
+                      u.state === 'err' ? 'bg-rose-500' : u.state === 'done' ? 'bg-emerald-500' : 'bg-sky-500'}`}
+                    style={{ width: `${u.state === 'err' ? 100 : u.pct}%` }}
+                  />
+                </div>
               </div>
             ))}
           </div>

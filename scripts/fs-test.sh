@@ -89,11 +89,21 @@ R=$(j -o /dev/null -w '%{http_code}' -X POST "$UP&offset=999" --data-binary @/tm
 # al doilea chunk la offset-ul corect = reluare
 R=$(j -X POST "$UP&offset=$L1" --data-binary @/tmp/wtc2)
 echo "$R" | grep -q '"offset":' && ok "resumable: second chunk appended" || no "resumable chunk2" "$R"
-# commit atomic → temp devine fişierul final
-R=$(j -X POST "$FS/upload/commit?path=$(enc '~/wtfstest/big.bin')&upload_id=$UPID")
-echo "$R" | grep -q '"ok":true' && ok "resumable: commit renames into place" || no "resumable commit" "$R"
+# commit cu CRC-32 corect → integritate OK, rename atomic
+CRC=$(python3 -c "import zlib;print(zlib.crc32(b'PART-ONE-part-two-END'))")
+R=$(j -X POST "$FS/upload/commit?path=$(enc '~/wtfstest/big.bin')&upload_id=$UPID&crc32=$CRC")
+echo "$R" | grep -q '"ok":true' && ok "resumable: commit with matching CRC succeeds" || no "resumable commit crc" "$R"
 R=$(j "$FS/download?path=$(enc '~/wtfstest/big.bin')")
 [ "$R" = "PART-ONE-part-two-END" ] && ok "resumable: content = chunk1+chunk2, in order" || no "resumable content" "got: $R"
+
+# CRC greşit → integritate eşuează, fişierul corupt NU ajunge la ţintă (temp şters)
+UPID2=cafe00011234abcd
+UP2="$FS/upload?path=$(enc '~/wtfstest/bad.bin')&upload_id=$UPID2"
+j -X POST "$UP2&offset=0" --data-binary @/tmp/wtc1 >/dev/null
+R=$(j -o /dev/null -w '%{http_code}' -X POST "$FS/upload/commit?path=$(enc '~/wtfstest/bad.bin')&upload_id=$UPID2&crc32=1")
+[ "$R" = "400" ] && ok "resumable: wrong CRC rejected at commit" || no "resumable crc reject" "cod $R"
+R=$(j -o /dev/null -w '%{http_code}' "$FS/download?path=$(enc '~/wtfstest/bad.bin')")
+[ "$R" != "200" ] && ok "resumable: corrupt file never reached the target" || no "resumable crc leak" "file exists"
 R=$(j "$FS?path=~/wtfstest")
 echo "$R" | grep -q 'wtpart' && no "temp cleaned up" "a .wtpart was left behind" || ok "the .wtpart temp file is cleaned up after commit"
 

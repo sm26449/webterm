@@ -22,6 +22,7 @@ import errno
 import fcntl
 import glob
 import hashlib
+import zlib
 import hmac
 import json
 import os
@@ -42,7 +43,7 @@ import termios
 import threading
 import time
 
-AGENT_VERSION = 48
+AGENT_VERSION = 49
 
 # Sub atâtea secunde de valabilitate, un certificat se roteşte prea des ca un pin pe el să
 # însemne altceva decât o cădere programată. 48h: peste ce emite un CA intern (12h la Caddy),
@@ -2204,6 +2205,24 @@ class Agent:
                 # Refresh on-demand din panoul Diagnostic. Colectăm pe un worker (apelează `ip`)
                 # ca să nu blocăm thread-ul de reader; worker-ul trimite reply-ul cu acelaşi id.
                 threading.Thread(target=self._push_diag, args=(rid,), daemon=True).start()
+
+            elif op == "fs_crc32":
+                # checksum de integritate la commit-ul unui upload resumabil. CRC-32 IEEE streaming
+                # (ieftin) peste fişierul de pe disc; prinde coruperea ACCIDENTALĂ (erori de disc,
+                # trunchiere, bug de offset). `zlib.crc32` == implementarea din browser → comparabil
+                # cap-coadă. Manipularea rău-voitoare o acoperă deja TLS.
+                fpath = os.path.abspath(os.path.expanduser(msg["path"]))
+                try:
+                    crc = 0
+                    with open(fpath, "rb", buffering=0) as f:
+                        while True:
+                            b = f.read(1 << 20)
+                            if not b:
+                                break
+                            crc = zlib.crc32(b, crc)
+                    ok(crc32=crc & 0xffffffff)
+                except OSError as e:
+                    err("fs_error", "%s: %s" % (fpath, e.strerror or e))
 
             elif op == "get_log":
                 # tail-ul logului agentului (ptyd.log) pentru panoul de Diagnostic — debug fără SSH.

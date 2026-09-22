@@ -1498,13 +1498,15 @@ async def fs_upload_status(host_id: int, path: str, upload_id: str,
 
 @router.post("/api/hosts/{host_id}/fs/upload/commit")
 async def fs_upload_commit(host_id: int, request: Request, path: str, upload_id: str,
-                           if_mtime: int | None = None,
+                           if_mtime: int | None = None, crc32: int | None = None,
                            user=Depends(security.require_user)):
-    """Finalizează un upload resumabil: rename atomic temp → ţintă."""
+    """Finalizează un upload resumabil: rename atomic temp → ţintă. `crc32` (opţional): verificare
+    de integritate — dacă nu se potriveşte, temp-ul e şters şi commit-ul eşuează (fişier corupt
+    nu ajunge la ţintă)."""
     audit.detail(request, path)
     await _require_host_stepup(host_id, user)
     try:
-        written = await core.fs_upload_commit(host_id, path, upload_id, if_mtime=if_mtime)
+        written = await core.fs_upload_commit(host_id, path, upload_id, if_mtime=if_mtime, crc32=crc32)
     except core.AgentGone:
         raise ApiError(409, "host.offline", "the host is offline")
     except core.FileConflict as e:
