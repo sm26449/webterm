@@ -7,6 +7,26 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [2.3.0] — 2026-09-22 · agent (49)
+
+Carries an agent update (48 → 49, fleet-wide auto-update): a new `fs_crc32` op for upload integrity.
+
+### Added — big-file uploads that survive a dropped connection
+
+- Drag & drop used to be one HTTP request per file: a drop at 90% of a large upload restarted from
+  zero, so you reached for scp/rsync. Now the browser **slices the file** (`File.slice`, no RAM) and
+  sends each part with an offset under a stable `upload_id`; the gateway appends to a persistent
+  `.wtpart` temp and commits with the same **atomic rename**. On any failure — wifi blip, laptop
+  sleep, even a **gateway restart** — the client asks how much landed and **resumes from that byte**,
+  with per-chunk retry/backoff; a desynced or duplicate chunk gets a 409 and re-syncs instead of
+  corrupting. The `upload_id` is kept so re-selecting the same file after a reload resumes it; cancel
+  aborts and deletes the temp; abandoned temps are cleaned up after 24h.
+- **Integrity check**: the browser computes a **CRC-32** while it reads, and on commit the agent
+  CRC-32s the file **before** the atomic rename — a corrupted upload (disk error, truncation) never
+  reaches the target. **A real progress bar** replaces the bare percentage (byte-level, colored by
+  state). This replaces scp/rsync for reliably pushing a big file or folder; rsync stays better for
+  *incremental* sync (only changed blocks) and directory mirroring.
+
 ## [2.2.1] — 2026-09-19 · agent (48)
 
 Gateway and interface only; agent unchanged at 48.
