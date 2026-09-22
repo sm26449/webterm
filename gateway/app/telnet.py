@@ -252,11 +252,20 @@ _BEL = 0x07
 _RBRACKET = 0x5d         # ']'
 _BACKSLASH = 0x5c        # '\' (a doua jumătate a ST: ESC '\')
 _SEMI = 0x3b             # ';'
+# Forma C1 (8-bit) a OSC/ST: xterm interpretează U+009D (OSC) şi U+009C (ST) exact ca ESC ] / ESC \.
+# Pe un flux UTF-8 ele apar ca 0xC2 0x9D / 0xC2 0x9C. Un device ostil poate introduce OSC 52/133 aşa,
+# ocolind un filtru care caută doar ESC ']'. 0xC2 e lead-ul UTF-8 pentru U+0080–U+00BF (secvenţă de
+# EXACT 2 octeţi), deci `0xC2 <b2>` e mereu un caracter complet — sigur de detectat şi normalizat.
+_C2 = 0xc2               # lead UTF-8 pentru C1
+_C1_OSC = 0x9d           # a doua jumătate a U+009D (OSC)
+_C1_ST = 0x9c            # a doua jumătate a U+009C (ST)
 
 _F_NORMAL = 0
 _F_ESC = 1               # am văzut ESC, aștept ']' (OSC) sau alt escape
 _F_OSC = 2               # în corpul OSC (buffer în _buf), aștept terminator BEL / ST
 _F_OSC_ESC = 3           # în OSC, am văzut ESC (posibil ST = ESC '\')
+_F_C1 = 4                # am văzut 0xC2 (normal), aştept a doua jumătate (posibil OSC C1)
+_F_OSC_C1 = 5            # în OSC, am văzut 0xC2, aştept a doua jumătate (posibil ST C1)
 
 
 class OscFilter:
@@ -275,6 +284,8 @@ class OscFilter:
             if st == _F_NORMAL:
                 if b == _ESC:
                     self._st = _F_ESC
+                elif b == _C2:                   # posibil introducer C1 (0xC2 0x9D = OSC)
+                    self._st = _F_C1
                 else:
                     out.append(b)
             elif st == _F_ESC:
@@ -293,6 +304,8 @@ class OscFilter:
                     self._st = _F_NORMAL
                 elif b == _ESC:                  # posibil ST (ESC '\')
                     self._st = _F_OSC_ESC
+                elif b == _C2:                   # posibil ST în forma C1 (0xC2 0x9C)
+                    self._st = _F_OSC_C1
                 else:
                     self._buf.append(b)
                     if len(self._buf) > _OSC_MAX:  # OSC abuziv fără terminator → drop
@@ -309,6 +322,30 @@ class OscFilter:
                         self._st = _F_ESC
                     else:
                         out.append(b)
+            elif st == _F_C1:
+                if b == _C1_OSC:                 # 0xC2 0x9D = OSC (C1) → tratat ca ESC ] (normalizat)
+                    self._buf = bytearray((_ESC, _RBRACKET))
+                    self._st = _F_OSC
+                else:                            # nu era C1-OSC: 0xC2 + b = caracter UTF-8 legit
+                    out.append(_C2)
+                    if b == _C2:                 # alt 0xC2 → rămânem în aşteptarea perechii
+                        self._st = _F_C1
+                    elif b == _ESC:              # 0xC2 apoi ESC: 0xC2 emis, ESC începe un escape
+                        self._st = _F_ESC
+                    else:
+                        out.append(b)
+                        self._st = _F_NORMAL
+            elif st == _F_OSC_C1:
+                if b == _C1_ST:                  # 0xC2 0x9C = ST (C1) → terminator
+                    self._emit_osc(out, b"\xc2\x9c")
+                    self._st = _F_NORMAL
+                else:                            # nu era ST: 0xC2 + b fac parte din corpul OSC
+                    self._buf.append(_C2)
+                    self._buf.append(b)
+                    self._st = _F_OSC
+                    if len(self._buf) > _OSC_MAX:
+                        self._buf = bytearray()
+                        self._st = _F_NORMAL
         return bytes(out)
 
     def _emit_osc(self, out: bytearray, terminator: bytes) -> None:

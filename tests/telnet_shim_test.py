@@ -205,6 +205,33 @@ f = osc()
 t2 = b"\x1b]2;win\x1b\\"
 check("OSC 2 (titlu, ST) pass-through", f.filter(t2) == t2)
 
+# ── Forma C1 (8-bit): xterm interpretează U+009D (0xC2 0x9D pe UTF-8) ca OSC. Un device ostil
+#    poate introduce OSC 52/133 aşa, ocolind un filtru care caută doar ESC ']'. Trebuie tratat la fel.
+f = osc()
+check("OSC 52 forma C1 (0xC2 0x9D) eliminat",
+      f.filter(b"a\xc2\x9d52;c;aGVsbG8=\x07b") == b"ab")
+f = osc()
+check("OSC 133 forma C1 eliminat", f.filter(b"x\xc2\x9d133;A\x07y") == b"xy")
+# fragmentat între recv-uri: 0xC2 la finalul unui chunk, 0x9D la începutul următorului
+f = osc()
+part1 = f.filter(b"a\xc2")
+part2 = f.filter(b"\x9d52;c;X\x07b")
+check("OSC 52 C1 fragmentat între chunk-uri eliminat", part1 + part2 == b"ab")
+# terminator ST în forma C1 (0xC2 0x9C)
+f = osc()
+check("OSC 133 terminat cu ST forma C1 (0xC2 0x9C) eliminat",
+      f.filter(b"x\x1b]133;D\xc2\x9cy") == b"xy")
+# caracter UTF-8 LEGIT 0xC2 0xA0 (nbsp) NU e confundat cu C1 → trece neatins
+f = osc()
+check("caracter UTF-8 legit 0xC2 0xA0 (nbsp) neatins", f.filter(b"a\xc2\xa0b") == b"a\xc2\xa0b")
+# OSC 0 (titlu) introdus C1 → nu e ţintă → re-emis, normalizat la 7-bit ESC ]
+f = osc()
+check("OSC 0 forma C1 (titlu) pass-through, normalizat la 7-bit",
+      f.filter(b"\xc2\x9d0;t\x07x") == b"\x1b]0;t\x07x")
+# 0xC2 danglant la final: ţinut stateful, fără crash
+f = osc()
+check("0xC2 danglant la final ţinut (stateful)", f.filter(b"hi\xc2") == b"hi")
+
 # CSI/SGR (culori) neatins
 f = osc()
 sgr = b"\x1b[31mRED\x1b[0m"
