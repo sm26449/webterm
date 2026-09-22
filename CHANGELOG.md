@@ -7,6 +7,27 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [2.3.1] — 2026-09-22 · agent (49)
+
+Security hardening from an external adversarial audit. Gateway/interface only; agent unchanged at 49.
+
+### Security
+
+- **2FA can no longer be weakened with only the password.** Regenerating recovery codes and minting
+  an automation token now require the second factor, not just the password — new recovery codes are
+  themselves a valid second factor, and a `run`-scoped token is a persistent shell credential. (This
+  also fixed a latent gap where disabling 2FA already required the factor but the UI never prompted
+  for it.)
+- **A writable share guest can no longer hold a session open past the owner's 2FA idle-lock.** Only
+  an authenticated owner's input now counts as operator activity; a guest's keystrokes refresh only
+  their own timer, so on a `require_2fa` host the session still locks when the owner steps away.
+- **Distributed IPv6 login guessing no longer bypasses the global backstop** (the real-IP vs
+  internal-key check was fooled by the `:` in IPv6 addresses).
+- **The untrusted-device OSC filter now also catches the 8-bit C1 form** of OSC 52/133 (`0xC2 0x9D` /
+  `0xC2 0x9C`), and the serial device path is normalized before the `/dev/` check.
+- **Resumable uploads**: a per-upload lock serializes concurrent chunks (a same-offset race could
+  duplicate bytes), the in-memory maps are bounded, and the abandoned-temp cleanup is strict.
+
 ## [2.3.0] — 2026-09-22 · agent (49)
 
 Carries an agent update (48 → 49, fleet-wide auto-update): a new `fs_crc32` op for upload integrity.
