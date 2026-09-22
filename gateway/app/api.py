@@ -2782,8 +2782,11 @@ async def serial_open(host_id: int, body: SerialOpenIn, user=Depends(security.re
     if not row:
         raise HTTPException(404)
     await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
-    device = (body.device or "").strip()
-    if not device.startswith("/dev/") or "\x00" in device:
+    # normpath colapsează `..` ÎNAINTE de verificare: `/dev/../etc/shadow` → `/etc/shadow` → refuzat.
+    # Nu e o gaură (agentul respinge oricum ne-tty-urile prin `os.isatty`, iar /dev/* e deja permis),
+    # dar închide explicit intenţia „doar sub /dev/" în planul de control, semnalat de audit.
+    device = os.path.normpath((body.device or "").strip())
+    if "\x00" in device or not device.startswith("/dev/") or device == "/dev":
         raise ApiError(400, "serial.badDevice", "invalid serial device (/dev/* only)")
     if body.parity not in ("none", "even", "odd") or body.flow not in ("none", "rtscts", "xonxoff"):
         raise ApiError(400, "serial.badParity", "invalid parity/flow")
