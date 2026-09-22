@@ -580,6 +580,20 @@ def login_allowed(ip: str) -> tuple:
     return True, 0
 
 
+def _is_real_ip(key: str) -> bool:
+    """True dacă `key` e o adresă IP reală (IPv4 SAU IPv6), nu o cheie internă per-cont
+    (`reauth:123`, `passkey2fa:123`, …). Doar IP-urile reale hrănesc backstop-ul GLOBAL — un
+    cookie furat, care umple contoarele interne, nu trebuie să poată bloca login-ul tuturor.
+    Foloseam `":" not in key`, dar IPv6-ul conţine `:`, deci un atacator distribuit pe IPv6
+    ocolea complet backstop-ul global (şi alerta de lockout). `ipaddress` decide corect şi e
+    robust: o cheie internă nouă n-o mai poate strica silenţios."""
+    try:
+        ipaddress.ip_address(key)
+        return True
+    except ValueError:
+        return False
+
+
 def record_login_failure(ip: str) -> tuple:
     """Înregistrează un eșec. Returnează (locked_now, fails) — locked_now e True
     doar la tranziția care declanșează lockout-ul, ca apelantul să poată alerta."""
@@ -591,13 +605,13 @@ def record_login_failure(ip: str) -> tuple:
     # Numai eşecurile de la IP-uri reale hrănesc backstop-ul global. Cheile interne
     # (`reauth:`, `reauth-hard:`, `passkey2fa:`) sunt per-cont, deci un atacator cu un
     # cookie furat nu mai poate umple plafonul global tastând parole greşite.
-    if ":" not in ip:
+    if _is_real_ip(ip):
         _global_fails.append(now)
     n = len(fails)
     if n >= cap:
         _ip_locked[ip] = now + _IP_LOCKOUT
         _ip_fails[ip] = []
-        if ":" not in ip:
+        if _is_real_ip(ip):
             email_alerts.notify_lockout(ip, n)
         return True, n
     return False, n
@@ -616,7 +630,7 @@ async def apply_global_tarpit(retry: int) -> None:
 
 
 def record_login_success(ip: str) -> None:
-    if ":" not in ip:
+    if _is_real_ip(ip):
         _recent_success[ip] = time.time()
         if len(_recent_success) > 512:
             cut = time.time() - 86400

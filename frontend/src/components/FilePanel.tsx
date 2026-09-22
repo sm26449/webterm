@@ -236,7 +236,8 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
     let uid = ''
     try { uid = localStorage.getItem(lsKey) || '' } catch { /* localStorage indisponibil */ }
     if (!UID_RE.test(uid)) {
-      uid = (crypto.randomUUID?.() || `${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`).replace(/-/g, '').slice(0, 32)
+      // exact 32 hex lowercase — formatul pe care GC-ul de pe server îl recunoaşte strict
+      uid = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('')
       try { localStorage.setItem(lsKey, uid) } catch { /* */ }
     }
     return { uid, lsKey }

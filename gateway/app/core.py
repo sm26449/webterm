@@ -3172,7 +3172,30 @@ async def fs_write_stream(host_id: int, path: str, source, if_mtime=None) -> int
 # atomic. Agentul e neatins: scrie deja pe offset (O_APPEND) şi listează cu mărimi.
 _UPLOAD_UID = re.compile(r"^[0-9a-f]{16,64}$")     # id hex, lungime mărginită (anti path-trick)
 _UPLOAD_STALE = 24 * 3600                          # temp-uri abandonate mai vechi → GC oportunist
+_UPLOAD_TRACK_MAX = 4096                           # plafon pe dict-urile in-memory (anti creştere nemărginită)
 _upload_offset: dict = {}                          # (host_id, upload_id) -> octeţi scrişi (fast-path)
+_upload_locks: dict = {}                           # (host_id, upload_id) -> asyncio.Lock (serializează chunk-urile)
+
+
+def _upload_lock(key) -> asyncio.Lock:
+    lock = _upload_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        # plafon: peste prag nu mai memorăm lock-uri noi (fluxul rămâne corect — două chunk-uri
+        # care ar fi rasat aici sunt oricum prinse de verificarea de offset + statul pe host)
+        if len(_upload_locks) < _UPLOAD_TRACK_MAX:
+            _upload_locks[key] = lock
+    return lock
+
+
+def _remember_offset(key, val: int) -> None:
+    if key in _upload_offset or len(_upload_offset) < _UPLOAD_TRACK_MAX:
+        _upload_offset[key] = val
+
+
+def _upload_forget(key) -> None:
+    _upload_offset.pop(key, None)
+    _upload_locks.pop(key, None)
 
 
 def _upload_tmp(path: str, upload_id: str) -> str:
@@ -3196,7 +3219,9 @@ async def _upload_landed(host_id: int, path: str, upload_id: str) -> int:
 
 
 async def _upload_gc(host_id: int, path: str, keep: str) -> None:
-    """Mătură temp-uri de upload abandonate (.wtpart.<hex>) mai vechi de _UPLOAD_STALE."""
+    """Mătură temp-uri de upload abandonate mai vechi de _UPLOAD_STALE. Tiparul e STRICT — exact
+    `.wtpart.` + 32 hex (formatul pe care-l produce clientul, crypto.randomUUID) — ca să nu poată
+    prinde din greşeală un fişier al utilizatorului care s-ar termina întâmplător cu `.wtpart.<hex>`."""
     try:
         conn = _agent_or_raise(host_id)
         parent = path.rsplit("/", 1)[0] or "/"
@@ -3205,8 +3230,8 @@ async def _upload_gc(host_id: int, path: str, keep: str) -> None:
         now = time.time()
         for e in resp.get("entries", []):
             name = e.get("name", "")
-            if (name != keep_name and re.search(r"\.wtpart\.[0-9a-f]{16,64}$", name)
-                    and now - int(e.get("mtime", now)) > _UPLOAD_STALE):
+            if (name != keep_name and re.search(r"\.wtpart\.[0-9a-f]{32}$", name)
+                    and not e.get("dir") and now - int(e.get("mtime", now)) > _UPLOAD_STALE):
                 try:
                     await conn.request("fs_delete", path=parent.rstrip("/") + "/" + name, timeout=10)
                 except Exception:
@@ -3218,7 +3243,7 @@ async def _upload_gc(host_id: int, path: str, keep: str) -> None:
 async def fs_upload_status(host_id: int, path: str, upload_id: str) -> int:
     """Câţi octeţi au aterizat pentru acest upload — de unde reia clientul."""
     n = await _upload_landed(host_id, path, upload_id)
-    _upload_offset[(host_id, upload_id)] = n
+    _remember_offset((host_id, upload_id), n)
     await _upload_gc(host_id, path, keep=upload_id)
     return n
 
@@ -3226,28 +3251,31 @@ async def fs_upload_status(host_id: int, path: str, upload_id: str) -> int:
 async def fs_upload_chunk(host_id: int, path: str, upload_id: str, offset: int, source) -> int:
     """Adaugă o felie la temp, EXACT de la `offset`. Verifică offset-ul (fast-path din cache, altfel
     stat pe host) — un chunk dezordonat sau duplicat (retry după ce a aterisat deja) e refuzat cu
-    conflict, nu corupe fişierul. Întoarce noul total."""
+    conflict, nu corupe fişierul. Un lock per upload_id serializează chunk-uri CONCURENTE pe acelaşi
+    upload: fără el, două cereri la acelaşi offset citeau cache-ul înainte ca vreuna să scrie, treceau
+    amândouă verificarea şi se dublau în temp. Întoarce noul total."""
     conn = _agent_or_raise(host_id)
     tmp = _upload_tmp(path, upload_id)
     key = (host_id, upload_id)
-    cur = _upload_offset.get(key)
-    if cur is None or cur != offset:
-        cur = await _upload_landed(host_id, path, upload_id)
-    if cur != offset:
-        raise FileConflict("offset %d != %d" % (offset, cur))
-    written = 0
-    buf = b""
-    async for part in source:
-        buf += part
-        while len(buf) >= FS_CHUNK:
-            block, buf = buf[:FS_CHUNK], buf[FS_CHUNK:]
-            await _fs_write_block(conn, tmp, offset + written, block)
-            written += len(block)
-    if buf or (offset == 0 and written == 0):   # scrie măcar o dată (creează temp gol la offset 0)
-        await _fs_write_block(conn, tmp, offset + written, buf)
-        written += len(buf)
-    _upload_offset[key] = offset + written
-    return offset + written
+    async with _upload_lock(key):
+        cur = _upload_offset.get(key)
+        if cur is None or cur != offset:
+            cur = await _upload_landed(host_id, path, upload_id)
+        if cur != offset:
+            raise FileConflict("offset %d != %d" % (offset, cur))
+        written = 0
+        buf = b""
+        async for part in source:
+            buf += part
+            while len(buf) >= FS_CHUNK:
+                block, buf = buf[:FS_CHUNK], buf[FS_CHUNK:]
+                await _fs_write_block(conn, tmp, offset + written, block)
+                written += len(block)
+        if buf or (offset == 0 and written == 0):   # scrie măcar o dată (creează temp gol la offset 0)
+            await _fs_write_block(conn, tmp, offset + written, buf)
+            written += len(buf)
+        _remember_offset(key, offset + written)
+        return offset + written
 
 
 async def fs_upload_commit(host_id: int, path: str, upload_id: str, if_mtime=None, crc32=None) -> int:
@@ -3266,7 +3294,7 @@ async def fs_upload_commit(host_id: int, path: str, upload_id: str, if_mtime=Non
                 await conn.request("fs_delete", path=tmp, timeout=15)
             except Exception:
                 pass
-            _upload_offset.pop((host_id, upload_id), None)
+            _upload_forget((host_id, upload_id))
             raise FileError("integrity check failed: CRC mismatch (got %d, expected %d)" % (got, crc32))
     resp = await conn.request("fs_rename", path=tmp, to=path,
                               overwrite=True, if_mtime=if_mtime, timeout=60)
@@ -3274,13 +3302,13 @@ async def fs_upload_commit(host_id: int, path: str, upload_id: str, if_mtime=Non
         if resp.get("code") == "conflict":
             raise FileConflict(resp.get("msg", "the file changed"))
         raise FileError(resp.get("msg", "eroare"))
-    _upload_offset.pop((host_id, upload_id), None)
+    _upload_forget((host_id, upload_id))
     return int(total or 0)
 
 
 async def fs_upload_abort(host_id: int, path: str, upload_id: str) -> None:
     """Anulare: şterge temp-ul, best-effort."""
-    _upload_offset.pop((host_id, upload_id), None)
+    _upload_forget((host_id, upload_id))
     try:
         await _agent_or_raise(host_id).request("fs_delete", path=_upload_tmp(path, upload_id), timeout=15)
     except Exception:

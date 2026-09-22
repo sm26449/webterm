@@ -538,6 +538,8 @@ class TokenIn(BaseModel):
     scopes: list[str] = ["read"]
     days: int = 90
     current_password: str = ""
+    totp_code: str = ""            # al doilea factor (second_gate): un token e o credenţială persistentă
+    email_code: str = ""
 
 
 def _token_row(r) -> dict:
@@ -653,6 +655,10 @@ async def list_tokens(user=Depends(security.require_user)):
 async def create_token(body: TokenIn, request: Request, user=Depends(security.require_user)):
     if not await _verify_reauth_password(user, body.current_password):
         raise ApiError(401, "auth.wrongPassword", "wrong password")
+    # Un token de automatizare e o credenţială persistentă (scope `run` = shell pe flotă) — la fel
+    # ca înrolarea unui passkey. Trece prin acelaşi al doilea factor: cine ştie doar parola nu-şi
+    # poate lăsa singur o cheie de durată pe cont.
+    await webauthn_api.second_gate(user, request, body, "create an automation token")
     name = body.name.strip()[:60]
     if not name:
         raise HTTPException(400, "give it a name (so you know what you are revoking)")
@@ -803,12 +809,16 @@ async def totp_disable(body: TotpDisable, request: Request,
 
 
 @router.post("/api/totp/recovery-codes")
-async def totp_regenerate(body: TotpDisable, user=Depends(security.require_user)):
-    """Regenerate the recovery codes (invalidates the old set). Requires the password."""
+async def totp_regenerate(body: TotpDisable, request: Request, user=Depends(security.require_user)):
+    """Regenerate the recovery codes (invalidates the old set). Cere parola PLUS al doilea factor:
+    codurile de recuperare noi sunt ele însele un al doilea factor valid, iar cine le are poate
+    trece `second_gate` (deci dezactiva 2FA). Fără gate-ul ăsta, cine ştie doar parola şi-ar emite
+    coduri proaspete → ar ocoli 2FA — exact ce factorul al doilea trebuie să oprească."""
     if not user["totp_enabled"]:
         raise ApiError(400, "totp.notOn", "2FA is not enabled")
     if not await _verify_reauth_password(user, body.current_password):
         raise ApiError(401, "auth.wrongCurrentPassword", "the current password is wrong")
+    await webauthn_api.second_gate(user, request, body, "regenerate recovery codes")
     codes = _gen_recovery_codes()
     await db.execute("DELETE FROM recovery_codes WHERE user_id=?", user["id"])
     for c in codes:

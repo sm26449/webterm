@@ -56,11 +56,13 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
     setTokErr(''); setTokPlain(''); setBusy(true)
     try {
       const scopes = [newTok.read && 'read', newTok.run && 'run'].filter(Boolean) as string[]
-      const r = await api<{ token: string; tokens: TokenRow[] }>('/api/tokens', {
+      // second_gate: un token e o credenţială persistentă → dacă serverul cere al doilea factor,
+      // withSecondFactor cere codul şi reîncearcă (ca la înrolarea unui passkey).
+      const r = await withSecondFactor((extra) => api<{ token: string; tokens: TokenRow[] }>('/api/tokens', {
         method: 'POST',
         body: JSON.stringify({ name: newTok.name, scopes, days: newTok.days,
-                               current_password: newTok.current_password }),
-      })
+                               current_password: newTok.current_password, ...extra }),
+      }))
       setTokens(r.tokens); setTokPlain(r.token)
       setNewTok({ name: '', read: true, run: false, days: 90, current_password: '' })
     } catch (e) {
@@ -266,17 +268,19 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
     setSecurityErr('')
     setBusy(true)
     try {
+      // Ambele cer al doilea factor (second_gate): dezactivarea 2FA şi regenerarea codurilor de
+      // recuperare (codurile noi SUNT un al doilea factor). withSecondFactor cere codul şi reîncearcă.
       if (pendingAction === 'disable') {
-        await api('/api/totp/disable', {
+        await withSecondFactor((extra) => api('/api/totp/disable', {
           method: 'POST',
-          body: JSON.stringify({ current_password: actionPw }),
-        })
+          body: JSON.stringify({ current_password: actionPw, ...extra }),
+        }))
         setRecoveryCodes(null)
       } else if (pendingAction === 'regen') {
-        const r = await api<{ recovery_codes: string[] }>('/api/totp/recovery-codes', {
+        const r = await withSecondFactor((extra) => api<{ recovery_codes: string[] }>('/api/totp/recovery-codes', {
           method: 'POST',
-          body: JSON.stringify({ current_password: actionPw }),
-        })
+          body: JSON.stringify({ current_password: actionPw, ...extra }),
+        }))
         setRecoveryCodes(r.recovery_codes)
       }
       setPendingAction(null)
