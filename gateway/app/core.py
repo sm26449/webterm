@@ -974,7 +974,12 @@ class SessionHub:
             return
         now = time.time()
         client.last_interaction = now
-        self.last_interaction = now    # activitate de operator la nivel de sesiune (idle-lock)
+        # DOAR input-ul OWNER-ului (client autentificat) contează ca „activitate de operator" pentru
+        # idle-lock. Altfel un invitat writable ţinea sesiunea deblocată tastând — iar pe un host cu
+        # require_2fa asta ocolea poarta de 2FA a owner-ului după ce el pleca (sesiunea nu se mai
+        # idle-loca niciodată). Invitatul îşi împrospătează doar propriul last_interaction.
+        if client.is_owner:
+            self.last_interaction = now
         source = self._source()
         # NU înregistrăm input-ul în transcript (.cast). Player-ul redă DOAR output-ul
         # ("o"), iar input-ul echoed apare oricum acolo — dar la un prompt de parolă
