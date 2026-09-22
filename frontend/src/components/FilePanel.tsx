@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { errText, api, Host } from '../lib/api'
+import { errText, api, withStepup, Host } from '../lib/api'
 import { getCwd } from '../lib/cwd'
 import { useI18n } from '../lib/i18n'
 import { notify } from '../lib/notify'
@@ -55,6 +55,12 @@ function join(dir: string, name: string): string {
 // „sub/dir/fisier.txt”; pentru fișiere simple, doar numele)
 interface UpItem { file: File; rel: string }
 
+// Upload resumabil: felie de 8 MB. Serverul verifică offset-ul; dacă e desincronizat (retry care a
+// aterizat deja, două tab-uri) răspunde 409, iar clientul reia bucla de la offset-ul real.
+const UP_CHUNK = 8 * 1024 * 1024
+class ResyncSignal { constructor(readonly offset: number) {} }
+const UID_RE = /^[0-9a-f]{16,64}$/
+
 // Traversează un FileSystemEntry (dintr-un drop) și adună fișierele cu calea lor
 // relativă — așa merge drag&drop pe FOLDERE, nu doar pe fișiere izolate.
 async function readEntry(entry: any, prefix: string, out: UpItem[]): Promise<void> {
@@ -89,7 +95,7 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [uploads, setUploads] = useState<Record<string, { pct: number; state: 'up' | 'done' | 'err' }>>({})
-  const xhrs = useRef<Record<string, XMLHttpRequest>>({})
+  const uploadCtl = useRef<Record<string, { ctrl: AbortController; cancelled: boolean; dest: string; uid: string; lsKey: string }>>({})
   const [overwrite, setOverwrite] = useState<{ items: UpItem[]; count: number } | null>(null)
   const [drag, setDrag] = useState(false)
   const [editing, setEditing] = useState<{ path: string; name: string } | null>(null)
@@ -203,25 +209,95 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
     setEditing({ path: join(listing!.path, e.name), name: e.name })
   }
 
-  // un fișier prin XHR (fetch nu dă progres de upload) → procent + cancel
-  function uploadOne(dest: string, key: string, file: Blob): Promise<void> {
-    return new Promise((resolve) => {
-      const xhr = new XMLHttpRequest()
-      xhrs.current[key] = xhr
-      xhr.open('POST', `/api/hosts/${props.host.id}/fs/upload?path=${encodeURIComponent(dest)}`)
-      xhr.upload.onprogress = (ev) => {
-        if (ev.lengthComputable) setUploads((u) => ({ ...u, [key]: { pct: Math.round((ev.loaded / ev.total) * 100), state: 'up' } }))
+  // upload_id STABIL per (host, cale, fișier): persistat în localStorage, ca un reload de pagină
+  // să poată relua același upload (browserul nu re-citește fișierul singur — re-selectezi același
+  // fișier și reia de unde a rămas, exact ca protocolul tus).
+  const upLsKey = (dest: string, file: File) => `wt_up_${props.host.id}_${dest}_${file.size}_${file.lastModified}`
+  function uploadIdFor(dest: string, file: File): { uid: string; lsKey: string } {
+    const lsKey = upLsKey(dest, file)
+    let uid = ''
+    try { uid = localStorage.getItem(lsKey) || '' } catch { /* localStorage indisponibil */ }
+    if (!UID_RE.test(uid)) {
+      uid = (crypto.randomUUID?.() || `${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`).replace(/-/g, '').slice(0, 32)
+      try { localStorage.setItem(lsKey, uid) } catch { /* */ }
+    }
+    return { uid, lsKey }
+  }
+
+  // Un fișier, resumabil: taie în felii de 8 MB și le trimite pe rând cu offset. La cădere de rețea
+  // reia de la octetul aterizat (întreabă /status), cu retry+backoff; 409 = re-sincronizare offset.
+  async function uploadOne(dest: string, key: string, file: File): Promise<void> {
+    const hid = props.host.id
+    const { uid, lsKey } = uploadIdFor(dest, file)
+    const q = `path=${encodeURIComponent(dest)}&upload_id=${uid}`
+    const ctl = { ctrl: new AbortController(), cancelled: false, dest, uid, lsKey }
+    uploadCtl.current[key] = ctl
+    const setPct = (off: number) =>
+      setUploads((u) => ({ ...u, [key]: { pct: file.size ? Math.round((off / file.size) * 100) : 100, state: 'up' } }))
+
+    // de unde reluăm (+ step-up o singură dată aici, dacă hostul cere 2FA)
+    let offset = 0
+    try {
+      const st = await withStepup(hid, () => api<{ offset: number }>(`/api/hosts/${hid}/fs/upload/status?${q}`))
+      offset = Math.min(st.offset || 0, file.size)
+    } catch { offset = 0 }
+
+    const sendChunk = async (off: number, blob: Blob): Promise<void> => {
+      const res = await fetch(`/api/hosts/${hid}/fs/upload?${q}&offset=${off}`,
+        { method: 'POST', body: blob, credentials: 'same-origin', signal: ctl.ctrl.signal })
+      if (res.status === 409) {   // offset desincronizat → aflăm adevărul și reluăm bucla de acolo
+        const st = await api<{ offset: number }>(`/api/hosts/${hid}/fs/upload/status?${q}`)
+        throw new ResyncSignal(Math.min(st.offset || 0, file.size))
       }
-      xhr.onload = () => {
-        const good = xhr.status >= 200 && xhr.status < 300
-        setUploads((u) => ({ ...u, [key]: { pct: 100, state: good ? 'done' : 'err' } }))
-        if (!good) notify(t('files.uploadFailed'), `${key}: ${xhr.status}`, 'warn')
-        delete xhrs.current[key]; resolve()
+      if (!res.ok) throw new Error(String(res.status))
+    }
+
+    try {
+      setPct(offset)
+      do {   // do/while: acoperă și fișierul de 0 octeți (o felie goală la offset 0)
+        if (ctl.cancelled) return
+        const end = Math.min(offset + UP_CHUNK, file.size)
+        const blob = file.slice(offset, end)
+        let resynced = false, tries = 0
+        for (;;) {
+          try { await sendChunk(offset, blob); break }
+          catch (e) {
+            if (ctl.cancelled) return
+            if (e instanceof ResyncSignal) { offset = e.offset; resynced = true; break }
+            if (++tries > 5) throw e
+            await new Promise((r) => setTimeout(r, Math.min(8000, 1000 * 2 ** (tries - 1))))
+          }
+        }
+        if (resynced) { setPct(offset); continue }   // re-feliezi de la offset-ul real
+        offset = end
+        setPct(offset)
+      } while (offset < file.size)
+
+      if (ctl.cancelled) return
+      await withStepup(hid, () => api(`/api/hosts/${hid}/fs/upload/commit?${q}`, { method: 'POST' }))
+      try { localStorage.removeItem(lsKey) } catch { /* */ }
+      setUploads((u) => ({ ...u, [key]: { pct: 100, state: 'done' } }))
+    } catch (e) {
+      if (!ctl.cancelled) {   // temp-ul RĂMÂNE pe host → re-tragi același fișier și reia de unde a rămas
+        setUploads((u) => ({ ...u, [key]: { pct: u[key]?.pct ?? 0, state: 'err' } }))
+        notify(t('files.uploadFailed'), `${key}: ${errText(e, t) || (e instanceof Error ? e.message : '')}`, 'warn')
       }
-      xhr.onerror = () => { setUploads((u) => ({ ...u, [key]: { pct: 0, state: 'err' } })); delete xhrs.current[key]; resolve() }
-      xhr.onabort = () => { setUploads((u) => { const c = { ...u }; delete c[key]; return c }); delete xhrs.current[key]; resolve() }
-      xhr.send(file)
-    })
+    } finally {
+      delete uploadCtl.current[key]
+    }
+  }
+
+  // anulare: oprește feliile în zbor și șterge temp-ul de pe host (nu mai e resumabil)
+  function cancelUpload(key: string) {
+    const c = uploadCtl.current[key]
+    if (!c) return
+    c.cancelled = true
+    c.ctrl.abort()
+    fetch(`/api/hosts/${props.host.id}/fs/upload?path=${encodeURIComponent(c.dest)}&upload_id=${c.uid}`,
+      { method: 'DELETE', credentials: 'same-origin' }).catch(() => {})
+    try { localStorage.removeItem(c.lsKey) } catch { /* */ }
+    setUploads((u) => { const n = { ...u }; delete n[key]; return n })
+    delete uploadCtl.current[key]
   }
 
   // punct de intrare: cere confirmare dacă suprascrie fișiere top-level existente
@@ -513,7 +589,7 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
                   {u.state === 'up' ? `${u.pct}%` : u.state === 'done' ? '✓' : '✗'}
                 </span>
                 {u.state === 'up' && (
-                  <button onClick={() => xhrs.current[name]?.abort()} className="shrink-0 rounded px-1 text-slate-500 hover:text-rose-300" title={t('files.cancelUpload')}>✕</button>
+                  <button onClick={() => cancelUpload(name)} className="shrink-0 rounded px-1 text-slate-500 hover:text-rose-300" title={t('files.cancelUpload')}>✕</button>
                 )}
               </div>
             ))}

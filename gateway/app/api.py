@@ -1457,18 +1457,54 @@ async def fs_download(host_id: int, path: str, user=Depends(security.require_use
 
 @router.post("/api/hosts/{host_id}/fs/upload")
 async def fs_upload(host_id: int, request: Request, path: str,
-                    if_mtime: int | None = None,
-                    user=Depends(security.require_user)):
-    """Body is the raw file; `path` is the destination on the host.
-    `if_mtime` (opțional): salvare cu verificare de conflict — refuză (409) dacă
-    fișierul s-a schimbat de când l-ai deschis în editor."""
+                    if_mtime: int | None = None, upload_id: str | None = None,
+                    offset: int = 0, user=Depends(security.require_user)):
+    """Body is the raw file (or, cu `upload_id`, o FELIE care începe la `offset`).
+    Fără `upload_id`: one-shot — stream + commit atomic (ca înainte). Cu `upload_id`: append
+    la temp-ul resumabil, fără commit (vezi /commit). `if_mtime` (opțional): salvare cu
+    verificare de conflict — refuză (409) dacă ținta s-a schimbat de când ai deschis-o."""
     audit.detail(request, path)
     await _require_host_stepup(host_id, user)   # H1
     async def source():
         async for chunk in request.stream():
             yield chunk
     try:
+        if upload_id:
+            total = await core.fs_upload_chunk(host_id, path, upload_id, offset, source())
+            return {"ok": True, "offset": total}
         written = await core.fs_write_stream(host_id, path, source(), if_mtime=if_mtime)
+        return {"ok": True, "written": written, "path": path}
+    except core.AgentGone:
+        raise ApiError(409, "host.offline", "the host is offline")
+    except core.FileConflict as e:
+        raise HTTPException(409, str(e))
+    except (core.FileError, TimeoutError) as e:
+        raise HTTPException(400, str(e))
+
+
+@router.get("/api/hosts/{host_id}/fs/upload/status")
+async def fs_upload_status(host_id: int, path: str, upload_id: str,
+                           user=Depends(security.require_user)):
+    """Câţi octeţi au aterizat deja pentru `upload_id` — clientul reia de acolo."""
+    await _require_host_stepup(host_id, user)
+    try:
+        n = await core.fs_upload_status(host_id, path, upload_id)
+    except core.AgentGone:
+        raise ApiError(409, "host.offline", "the host is offline")
+    except (core.FileError, TimeoutError) as e:
+        raise HTTPException(400, str(e))
+    return {"offset": n}
+
+
+@router.post("/api/hosts/{host_id}/fs/upload/commit")
+async def fs_upload_commit(host_id: int, request: Request, path: str, upload_id: str,
+                           if_mtime: int | None = None,
+                           user=Depends(security.require_user)):
+    """Finalizează un upload resumabil: rename atomic temp → ţintă."""
+    audit.detail(request, path)
+    await _require_host_stepup(host_id, user)
+    try:
+        written = await core.fs_upload_commit(host_id, path, upload_id, if_mtime=if_mtime)
     except core.AgentGone:
         raise ApiError(409, "host.offline", "the host is offline")
     except core.FileConflict as e:
@@ -1476,6 +1512,15 @@ async def fs_upload(host_id: int, request: Request, path: str,
     except (core.FileError, TimeoutError) as e:
         raise HTTPException(400, str(e))
     return {"ok": True, "written": written, "path": path}
+
+
+@router.delete("/api/hosts/{host_id}/fs/upload")
+async def fs_upload_abort(host_id: int, path: str, upload_id: str,
+                          user=Depends(security.require_user)):
+    """Anulează un upload resumabil şi şterge temp-ul de pe host."""
+    await _require_host_stepup(host_id, user)
+    await core.fs_upload_abort(host_id, path, upload_id)
+    return {"ok": True}
 
 
 # praguri editor: sub LIMIT încarci tot (editabil); peste, doar primii HEAD

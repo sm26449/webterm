@@ -72,6 +72,28 @@ printf 'continut-nou-v2-mai-lung' > /tmp/wtfile2.txt
 j -X POST "$FS/upload?path=$(enc '~/wtfstest/f.txt')" --data-binary @/tmp/wtfile2.txt >/dev/null
 R=$(j "$FS/download?path=$(enc '~/wtfstest/f.txt')")
 [ "$R" = "continut-nou-v2-mai-lung" ] && ok "atomic save overwrites completely" || no "atomic save" "got: $R"
+
+# --- upload resumabil pe chunk-uri (resume din offset + guard anti-corupere) ---
+UPID=deadbeefcafe0001
+printf 'PART-ONE-' > /tmp/wtc1; printf 'part-two-END' > /tmp/wtc2
+L1=$(wc -c < /tmp/wtc1 | tr -d ' ')
+UP="$FS/upload?path=$(enc '~/wtfstest/big.bin')&upload_id=$UPID"
+R=$(j -X POST "$UP&offset=0" --data-binary @/tmp/wtc1)
+echo "$R" | grep -q "\"offset\":$L1" && ok "resumable: first chunk landed" || no "resumable chunk1" "$R"
+# /status = punctul de resume (sursa de adevăr: statul pe host)
+R=$(j "$FS/upload/status?path=$(enc '~/wtfstest/big.bin')&upload_id=$UPID")
+echo "$R" | grep -q "\"offset\":$L1" && ok "resumable: status returns the resume offset" || no "resumable status" "$R"
+# offset greşit → 409, temp-ul NU e corupt (guard)
+R=$(j -o /dev/null -w '%{http_code}' -X POST "$UP&offset=999" --data-binary @/tmp/wtc2)
+[ "$R" = "409" ] && ok "resumable: wrong offset refused (409)" || no "resumable offset guard" "cod $R"
+# al doilea chunk la offset-ul corect = reluare
+R=$(j -X POST "$UP&offset=$L1" --data-binary @/tmp/wtc2)
+echo "$R" | grep -q '"offset":' && ok "resumable: second chunk appended" || no "resumable chunk2" "$R"
+# commit atomic → temp devine fişierul final
+R=$(j -X POST "$FS/upload/commit?path=$(enc '~/wtfstest/big.bin')&upload_id=$UPID")
+echo "$R" | grep -q '"ok":true' && ok "resumable: commit renames into place" || no "resumable commit" "$R"
+R=$(j "$FS/download?path=$(enc '~/wtfstest/big.bin')")
+[ "$R" = "PART-ONE-part-two-END" ] && ok "resumable: content = chunk1+chunk2, in order" || no "resumable content" "got: $R"
 R=$(j "$FS?path=~/wtfstest")
 echo "$R" | grep -q 'wtpart' && no "temp cleaned up" "a .wtpart was left behind" || ok "the .wtpart temp file is cleaned up after commit"
 

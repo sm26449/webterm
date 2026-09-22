@@ -3154,6 +3154,118 @@ async def fs_write_stream(host_id: int, path: str, source, if_mtime=None) -> int
         raise
 
 
+# ── Upload resumabil pe chunk-uri ────────────────────────────────────────────
+# Spre deosebire de fs_write_stream (o singură cerere = tot fişierul), aici clientul taie fişierul
+# în felii şi le trimite pe rând cu un `upload_id` STABIL. Temp-ul `.wtpart.<id>` persistă între
+# cereri, deci o cădere de reţea — sau un restart de gateway — NU reia de la zero: clientul întreabă
+# cât a aterizat (fs_list pe host = sursa de adevăr) şi continuă de acolo. Commit-ul e acelaşi rename
+# atomic. Agentul e neatins: scrie deja pe offset (O_APPEND) şi listează cu mărimi.
+_UPLOAD_UID = re.compile(r"^[0-9a-f]{16,64}$")     # id hex, lungime mărginită (anti path-trick)
+_UPLOAD_STALE = 24 * 3600                          # temp-uri abandonate mai vechi → GC oportunist
+_upload_offset: dict = {}                          # (host_id, upload_id) -> octeţi scrişi (fast-path)
+
+
+def _upload_tmp(path: str, upload_id: str) -> str:
+    if not _UPLOAD_UID.match(upload_id or ""):
+        raise FileError("upload_id invalid")
+    return "%s.wtpart.%s" % (path, upload_id)
+
+
+async def _upload_landed(host_id: int, path: str, upload_id: str) -> int:
+    """Câţi octeţi are temp-ul pe host (sursa de adevăr). 0 dacă nu există."""
+    conn = _agent_or_raise(host_id)
+    want = _upload_tmp(path, upload_id).rsplit("/", 1)[-1]
+    parent = path.rsplit("/", 1)[0] or "/"
+    resp = await conn.request("fs_list", path=parent, timeout=30)
+    if not resp.get("ok"):
+        raise FileError(resp.get("msg", "eroare"))
+    for e in resp.get("entries", []):
+        if e.get("name") == want:
+            return int(e.get("size", 0))
+    return 0
+
+
+async def _upload_gc(host_id: int, path: str, keep: str) -> None:
+    """Mătură temp-uri de upload abandonate (.wtpart.<hex>) mai vechi de _UPLOAD_STALE."""
+    try:
+        conn = _agent_or_raise(host_id)
+        parent = path.rsplit("/", 1)[0] or "/"
+        keep_name = _upload_tmp(path, keep).rsplit("/", 1)[-1]
+        resp = await conn.request("fs_list", path=parent, timeout=30)
+        now = time.time()
+        for e in resp.get("entries", []):
+            name = e.get("name", "")
+            if (name != keep_name and re.search(r"\.wtpart\.[0-9a-f]{16,64}$", name)
+                    and now - int(e.get("mtime", now)) > _UPLOAD_STALE):
+                try:
+                    await conn.request("fs_delete", path=parent.rstrip("/") + "/" + name, timeout=10)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+async def fs_upload_status(host_id: int, path: str, upload_id: str) -> int:
+    """Câţi octeţi au aterizat pentru acest upload — de unde reia clientul."""
+    n = await _upload_landed(host_id, path, upload_id)
+    _upload_offset[(host_id, upload_id)] = n
+    await _upload_gc(host_id, path, keep=upload_id)
+    return n
+
+
+async def fs_upload_chunk(host_id: int, path: str, upload_id: str, offset: int, source) -> int:
+    """Adaugă o felie la temp, EXACT de la `offset`. Verifică offset-ul (fast-path din cache, altfel
+    stat pe host) — un chunk dezordonat sau duplicat (retry după ce a aterisat deja) e refuzat cu
+    conflict, nu corupe fişierul. Întoarce noul total."""
+    conn = _agent_or_raise(host_id)
+    tmp = _upload_tmp(path, upload_id)
+    key = (host_id, upload_id)
+    cur = _upload_offset.get(key)
+    if cur is None or cur != offset:
+        cur = await _upload_landed(host_id, path, upload_id)
+    if cur != offset:
+        raise FileConflict("offset %d != %d" % (offset, cur))
+    written = 0
+    buf = b""
+    async for part in source:
+        buf += part
+        while len(buf) >= FS_CHUNK:
+            block, buf = buf[:FS_CHUNK], buf[FS_CHUNK:]
+            await _fs_write_block(conn, tmp, offset + written, block)
+            written += len(block)
+    if buf or (offset == 0 and written == 0):   # scrie măcar o dată (creează temp gol la offset 0)
+        await _fs_write_block(conn, tmp, offset + written, buf)
+        written += len(buf)
+    _upload_offset[key] = offset + written
+    return offset + written
+
+
+async def fs_upload_commit(host_id: int, path: str, upload_id: str, if_mtime=None) -> int:
+    """Commit atomic: rename temp → ţintă (acelaşi mecanism ca fs_write_stream)."""
+    conn = _agent_or_raise(host_id)
+    tmp = _upload_tmp(path, upload_id)
+    total = _upload_offset.get((host_id, upload_id))
+    if total is None:
+        total = await _upload_landed(host_id, path, upload_id)
+    resp = await conn.request("fs_rename", path=tmp, to=path,
+                              overwrite=True, if_mtime=if_mtime, timeout=60)
+    if not resp.get("ok"):
+        if resp.get("code") == "conflict":
+            raise FileConflict(resp.get("msg", "the file changed"))
+        raise FileError(resp.get("msg", "eroare"))
+    _upload_offset.pop((host_id, upload_id), None)
+    return int(total or 0)
+
+
+async def fs_upload_abort(host_id: int, path: str, upload_id: str) -> None:
+    """Anulare: şterge temp-ul, best-effort."""
+    _upload_offset.pop((host_id, upload_id), None)
+    try:
+        await _agent_or_raise(host_id).request("fs_delete", path=_upload_tmp(path, upload_id), timeout=15)
+    except Exception:
+        pass
+
+
 async def fs_delete(host_id: int, path: str, recursive: bool = False) -> None:
     resp = await _agent_or_raise(host_id).request(
         "fs_delete", path=path, recursive=recursive)
