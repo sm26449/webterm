@@ -1,7 +1,7 @@
 import { startRegistration } from '@simplewebauthn/browser'
 import qrcode from 'qrcode-generator'
 import { FormEvent, useEffect, useRef, useState } from 'react'
-import { errText, api, ApiError, CommandGuard } from '../../lib/api'
+import { errText, api, CommandGuard, withSecondFactor as withSecondFactorT } from '../../lib/api'
 import { useI18n } from '../../lib/i18n'
 import { fmtTs } from '../../lib/tz'
 import { KeyIcon } from '../Icons'
@@ -327,25 +327,9 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
     }
   }
 
-  /* Al doilea factor la schimbarea setului de passkey-uri. Îl cerem REACTIV, după refuzul
-     serverului: starea locală „am TOTP activ" poate fi veche (activat în alt tab, dezactivat
-     de pe server), iar serverul e oricum singurul care decide. O singură reîncercare — dacă
-     şi codul e greşit, mesajul serverului e ce trebuie să vadă omul. */
-  async function withSecondFactor<T>(send: (extra: object) => Promise<T>): Promise<T> {
-    try {
-      return await send({})
-    } catch (err) {
-      if (!(err instanceof ApiError)) throw err
-      const key = err.code === 'passkey.totpRequired' ? 'totp_code'
-        : err.code === 'account.codeRequired' ? 'email_code' : ''
-      if (!key) throw err
-      const code = prompt(key === 'totp_code'
-        ? t('settings.passkeyCodePrompt')
-        : errText(err, t))
-      if (code === null) throw err
-      return await send({ [key]: code.trim() })
-    }
-  }
+  // Al doilea factor reactiv — logica a fost extrasă în lib/api.ts când auditul intern a
+  // extins second_gate şi la operaţiile de cont (AccountTab o foloseşte şi el acum).
+  const withSecondFactor = <T,>(send: (extra: object) => Promise<T>) => withSecondFactorT(t, send)
 
   async function remove(id: number) {
     // M1: scoaterea unui factor rezistent la phishing e schimbare de credențiale — cere parola.

@@ -296,6 +296,7 @@ class AccountUpdate(BaseModel):
     email: str = None
     new_password: str = None
     email_code: str = ""        # confirmarea cerută când sesiunea vine de pe un dispozitiv nou
+    totp_code: str = ""         # al doilea factor (webauthn_api.second_gate) cu TOTP activ
 
 
 async def _verify_reauth_password(user, password: str) -> bool:
@@ -332,33 +333,20 @@ async def update_account(body: AccountUpdate, request: Request, user=Depends(sec
     was opened from a device never seen before, a code mailed to the account address."""
     if not await _verify_reauth_password(user, body.current_password):
         raise ApiError(401, "auth.wrongCurrentPassword", "the current password is wrong")
-    # Parola singură nu mai ajunge de pe un loc nou. Atacul pe care îl opreşte: cineva care
-    # ARE deja parola (reutilizată, scursă, ghicită) şi o roteşte ca să te scoată pe tine
-    # afară. Emailul e canalul pe care el nu-l are.
+    # Parola singură nu mai ajunge. Atacul pe care îl opreşte: cineva care ARE deja parola
+    # (reutilizată, scursă, ghicită) şi o roteşte ca să te scoată pe tine afară — sau mută
+    # emailul (canalul de recuperare) şi apoi schimbă parola „confirmat".
     #
-    # Escaladăm, NU refuzăm: „de pe un loc necunoscut nu se poate schimba parola" sună bine
-    # până când eşti în tren, tocmai ţi s-a scurs parola, şi tocmai atunci nu ţi se permite
-    # s-o schimbi. Codul îl trece pe cel legitim în treizeci de secunde şi pe atacator deloc.
-    #
-    # Şi schimbarea de EMAIL trece prin aceeaşi poartă, în acelaşi handler: adresa e canalul
-    # de recuperare, deci cine o poate muta neconfirmat şi-l poate muta pe el şi apoi schimbă
-    # parola „confirmat".
-    if (body.new_password or (body.email and body.email.strip().lower() != user["email"])) \
-            and await security.session_is_new_device(request) and await email_alerts.smtp_ready():
+    # Auditul intern (2026-09-23) a unificat poarta cu `second_gate`, aceeaşi de la passkey-uri,
+    # tokenuri şi coduri de recuperare — politica devine uniformă: tot ce atinge materialul de
+    # autentificare cere al doilea factor. Cu TOTP activ: codul de pe telefon (contor de lockout
+    # separat, care nu se resetează la parola corectă). Fără TOTP rămâne exact comportamentul
+    # vechi: cod pe email, DOAR de pe un dispozitiv nestabilit — escaladăm, nu refuzăm („de pe
+    # un loc necunoscut nu se poate schimba parola" sună bine până eşti în tren cu parola
+    # tocmai scursă; codul îl trece pe cel legitim în 30 de secunde şi pe atacator deloc).
+    if body.new_password or (body.email and body.email.strip().lower() != user["email"]):
         what = "change your WebTerm password" if body.new_password else "change your WebTerm email"
-        if not body.email_code:
-            code = await security.issue_email_challenge(user["id"], "account")
-            try:
-                await email_alerts.send_account_code(user["email"], code, what)
-            except Exception as e:                        # noqa: BLE001
-                log.warning("confirmation code could not be sent: %s", e)
-                raise ApiError(503, "account.codeSendFailed",
-                               "could not send the confirmation code by email")
-            raise ApiError(403, "account.codeRequired",
-                           "this device is new — enter the code we just emailed to %s"
-                           % user["email"])
-        if not await security.consume_email_challenge(user["id"], "account", body.email_code):
-            raise ApiError(401, "account.badCode", "wrong or expired confirmation code")
+        await webauthn_api.second_gate(user, request, body, what)
     email = user["email"]
     if body.email and body.email.strip().lower() != email:
         email = body.email.strip().lower()
@@ -439,6 +427,8 @@ class UserIn(BaseModel):
 
 class ReauthOnly(BaseModel):
     current_password: str = ""
+    totp_code: str = ""         # al doilea factor (second_gate) — folosit la ştergerea de cont
+    email_code: str = ""
 
 
 @router.get("/api/users")
@@ -482,9 +472,14 @@ async def create_user(body: UserIn, request: Request, user=Depends(security.requ
 # clienţi (httpx nici nu-l oferă). Alternativa — parola în query string — ar fi ajuns în
 # jurnalul de audit şi în logurile proxy-ului.
 @router.post("/api/users/{uid}/delete")
-async def delete_user(uid: int, body: ReauthOnly, user=Depends(security.require_user)):
+async def delete_user(uid: int, body: ReauthOnly, request: Request,
+                      user=Depends(security.require_user)):
     if not await _verify_reauth_password(user, body.current_password):
         raise ApiError(401, "auth.wrongPassword", "wrong password")
+    # Auditul intern (2026-09-23): crearea de cont era gardată cu second_gate, ştergerea NU —
+    # or ştergerea unui co-admin îi revocă passkey-urile, sesiunile şi codurile de recuperare,
+    # o schimbare de credenţiale mai grea decât crearea. Aceeaşi poartă, politică uniformă.
+    await webauthn_api.second_gate(user, request, body, "delete a WebTerm account")
     if uid == user["id"]:
         # ştergerea propriului cont din propria sesiune = te blochezi la jumătatea operaţiei
         raise HTTPException(400, "you cannot delete your own account; do it from another one")

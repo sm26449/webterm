@@ -160,6 +160,30 @@ export function errText(e: unknown, t: (k: string, v?: Record<string, string | n
   return e.message
 }
 
+/* Al doilea factor la operaţiile care schimbă materialul de autentificare (passkey-uri,
+   tokenuri, coduri de recuperare, parolă/email de cont, ştergere de cont). Îl cerem REACTIV,
+   după refuzul serverului: starea locală „am TOTP activ" poate fi veche (activat în alt tab,
+   dezactivat de pe server), iar serverul e oricum singurul care decide. O singură reîncercare —
+   dacă şi codul e greşit, mesajul serverului e ce trebuie să vadă omul.
+   (Extras din SecurityTab când auditul intern a extins second_gate şi la operaţiile de cont.) */
+export async function withSecondFactor<T>(t: (k: string, v?: Record<string, string | number>) => string,
+                                          send: (extra: object) => Promise<T>,
+                                          opts?: { totpOnly?: boolean }): Promise<T> {
+  try {
+    return await send({})
+  } catch (err) {
+    if (!(err instanceof ApiError)) throw err
+    // totpOnly: apelantul are propriul flux pentru codul de email (câmp inline în formular,
+    // ca la schimbarea contului) — interceptăm doar TOTP-ul şi lăsăm restul să treacă la el
+    const key = err.code === 'passkey.totpRequired' ? 'totp_code'
+      : (err.code === 'account.codeRequired' && !opts?.totpOnly) ? 'email_code' : ''
+    if (!key) throw err
+    const code = prompt(key === 'totp_code' ? t('settings.passkeyCodePrompt') : errText(err, t))
+    if (code === null) throw err
+    return await send({ [key]: code.trim() })
+  }
+}
+
 // Versiunea gateway-ului văzută la primul răspuns API. Când headerul se
 // schimbă (s-a făcut deploy cât aplicația era deschisă), anunțăm o singură
 // dată — App afișează bannerul „Versiune nouă — Reîncarcă". Fereastra PWA

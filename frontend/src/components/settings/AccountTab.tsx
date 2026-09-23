@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useState } from 'react'
-import { api, ApiError, errText } from '../../lib/api'
+import { api, ApiError, errText, withSecondFactor as withSecondFactorT } from '../../lib/api'
 import { useI18n } from '../../lib/i18n'
 import { field, heading } from './ui'
 
@@ -26,19 +26,27 @@ export default function AccountTab(props: { email?: string | null; onAccountChan
 
   useEffect(() => { loadUsers() }, [])   // încarcă lista la deschiderea tab-ului
 
+  // second_gate acoperă acum şi operaţiile de cont (audit intern 2026-09-23): cu TOTP activ,
+  // serverul cere codul — withSecondFactor îl cere reactiv şi reîncearcă o dată.
+  const withSecondFactor = <T,>(send: (extra: object) => Promise<T>, opts?: { totpOnly?: boolean }) =>
+    withSecondFactorT(t, send, opts)
+
   async function saveAccount(e: FormEvent) {
     e.preventDefault()
     setAccountErr(''); setAccountMsg(''); setBusy(true)
     try {
-      await api('/api/account', {
+      // totpOnly: fluxul de email-code pe dispozitiv nou are câmpul lui INLINE în formular
+      // (codeAsked) — mai bun decât un prompt(); interceptăm doar TOTP-ul
+      await withSecondFactor((extra) => api('/api/account', {
         method: 'POST',
         body: JSON.stringify({
           current_password: curPw,
           email: newEmail,
           new_password: newPw || undefined,
           email_code: emailCode || undefined,
+          ...extra,
         }),
-      })
+      }), { totpOnly: true })
       setAccountMsg(t('settings.accountUpdated'))
       setCurPw(''); setNewPw(''); setEmailCode(''); setCodeAsked(false)
       props.onAccountChanged()
@@ -56,7 +64,10 @@ export default function AccountTab(props: { email?: string | null; onAccountChan
     e.preventDefault()
     setUsersErr(''); setUsersMsg(''); setBusy(true)
     try {
-      setUsers(await api<UserRow[]>('/api/users', { method: 'POST', body: JSON.stringify(newUser) }))
+      // crearea de cont e gardată cu second_gate din 2.3.1, dar tab-ul ăsta nu primise
+      // prompt-ul: un admin cu TOTP vedea doar eroarea seacă „enter your 2FA code"
+      setUsers(await withSecondFactor((extra) => api<UserRow[]>('/api/users',
+        { method: 'POST', body: JSON.stringify({ ...newUser, ...extra }) })))
       setNewUser({ email: '', password: '', current_password: '' })
       setUsersMsg(t('settings.users.added'))
     } catch (e) {
@@ -71,8 +82,8 @@ export default function AccountTab(props: { email?: string | null; onAccountChan
     if (!pw) return
     setUsersErr(''); setUsersMsg('')
     try {
-      setUsers(await api<UserRow[]>(`/api/users/${u.id}/delete`,
-        { method: 'POST', body: JSON.stringify({ current_password: pw }) }))
+      setUsers(await withSecondFactor((extra) => api<UserRow[]>(`/api/users/${u.id}/delete`,
+        { method: 'POST', body: JSON.stringify({ current_password: pw, ...extra }) })))
       setUsersMsg(t('settings.users.deleted'))
     } catch (e) {
       setUsersErr(errText(e, t) || String(e))
