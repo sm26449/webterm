@@ -196,13 +196,18 @@ what it does not cover, is in [Security](#security) and
   the final command before execution
 
 **Fleet**
-- Per-host metrics (CPU, RAM, disk, load) with a **trend sparkline**
+- Per-host metrics (CPU, RAM, disk, load) with a **trend sparkline**, plus a subtle
+  **dual-arc load ring** in the session toolbar (CPU + memory of the active host at
+  a glance, exact numbers in its tooltip)
 - **Threshold alerts** (CPU/RAM/disk) over email and/or webhook, with hysteresis and throttling
 - **In-session file manager** (toolbar button): a side panel that **follows the
   terminal's `cd`** (OSC 7), dense listing with sort/filter/keyboard navigation,
-  mkdir/rename/delete, drag&drop upload (including **folders**) with progress +
-  cancel, a **CodeMirror** editor with highlighting, large files opened view-only
-  (partial-read), atomic save with conflict detection
+  mkdir/rename/delete, drag&drop upload (including **folders**) with a real progress
+  bar + cancel — **resumable**: a dropped connection (or a closed laptop) keeps the
+  bytes already uploaded, re-dropping the same file continues where it left off, and
+  a **CRC-32 integrity check** guards the commit; a **CodeMirror** editor with
+  highlighting, large files opened view-only (partial-read), atomic save with
+  conflict detection
 - **Git panel** (toolbar button): for the repo in the session's current directory
   (follows `cd` via OSC 7) — status, **colored diff**, stage/unstage and
   **commit**, without opening GitHub. Focused scope: merge/rebase/push/branch stay
