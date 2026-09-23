@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useEffect, useRef, useState, PointerEvent as ReactPointerEvent } from 'react'
 import { errText, isSessionLive, api, ApiError, getBootVersion, Host, SearchHit, Session, timeAgo } from '../lib/api'
 import { fmtTs } from '../lib/tz'
 import { useI18n } from '../lib/i18n'
@@ -441,8 +441,33 @@ export default function Sidebar(props: {
   const version = getBootVersion()
   const hostsOnline = props.hosts.filter((h) => h.online).length
 
+  // Lăţimea sidebar-ului (doar desktop), trasă de mânerul din dreapta şi persistată:
+  // mai lat = note/taguri/hostname-uri fără truncare; mai îngust = mai mult terminal.
+  // Drawer-ul mobil rămâne fix (w-72) — acolo lăţimea o dă degetul, nu preferinţa.
+  const SB_MIN = 220, SB_MAX = 560, SB_DEF = 288
+  const [sbWidth, setSbWidth] = useState(() => {
+    try {
+      const v = Number(localStorage.getItem('wt_sidebar_w'))
+      return v >= SB_MIN && v <= SB_MAX ? v : SB_DEF
+    } catch { return SB_DEF }
+  })
+  const clampSb = (w: number) => Math.min(SB_MAX, Math.max(SB_MIN, w))
+  const saveSbWidth = (w: number) => { try { localStorage.setItem('wt_sidebar_w', String(w)) } catch { /* */ } }
+  const dragSb = (e: ReactPointerEvent) => {
+    e.preventDefault()
+    // sidebar-ul e lipit de marginea stângă → clientX E lăţimea; fără măsurători de rect
+    const move = (ev: PointerEvent) => setSbWidth(clampSb(ev.clientX))
+    const up = (ev: PointerEvent) => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      saveSbWidth(clampSb(ev.clientX))
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+  }
+
   const body = (
-    <div className="wt-sidebar flex h-full w-72 flex-col border-r border-ink-800 bg-ink-900">
+    <div className="wt-sidebar flex h-full w-full flex-col border-r border-ink-800 bg-ink-900">
       {/* overflow-hidden + min-w-0: garantează că butoanele de header NU ies din
           lățimea sidebar-ului peste conținutul principal (altfel un buton acoperă
           „Acasă" din TabBar pe desktop) */}
@@ -684,17 +709,38 @@ export default function Sidebar(props: {
 
   return (
     <>
-      {/* desktop — ascuns când e pliat; terminalul primeşte cei 18rem înapoi.
+      {/* desktop — ascuns când e pliat; terminalul primeşte lăţimea înapoi.
           Redeschiderea se face din butonul ☰ al barei de sus, care pe desktop apare
           EXACT când sidebarul e pliat (altfel ai plia fereastra fără cale de întoarcere). */}
-      <div className={props.collapsed ? 'hidden' : 'hidden md:block'}>{body}</div>
-      {/* mobile drawer */}
+      <div className={props.collapsed ? 'hidden' : 'relative hidden shrink-0 md:block'}
+        style={{ width: sbWidth }}>
+        {body}
+        {/* mâner de redimensionare: tras cu mouse-ul, săgeţi de la tastatură (splitter
+            focusabil — tiparul ARIA de „window splitter"), dublu-click = lăţimea implicită */}
+        <div
+          role="separator" aria-orientation="vertical" tabIndex={0}
+          aria-label={t('sidebar.resizeAria')}
+          aria-valuenow={sbWidth} aria-valuemin={SB_MIN} aria-valuemax={SB_MAX}
+          title={t('sidebar.resizeAria')}
+          onPointerDown={dragSb}
+          onDoubleClick={() => { setSbWidth(SB_DEF); saveSbWidth(SB_DEF) }}
+          onKeyDown={(e) => {
+            const d = e.key === 'ArrowLeft' ? -16 : e.key === 'ArrowRight' ? 16 : 0
+            if (!d) return
+            e.preventDefault()
+            const w = clampSb(sbWidth + d)
+            setSbWidth(w); saveSbWidth(w)
+          }}
+          className="absolute inset-y-0 -right-1 z-10 w-2 cursor-col-resize rounded hover:bg-sky-500/30 focus:outline-none focus-visible:bg-sky-500/50"
+        />
+      </div>
+      {/* mobile drawer — lăţime fixă (body-ul e w-full, lăţimea o dă wrapperul) */}
       {props.open && (
         <div className="fixed inset-0 z-40 md:hidden">
           <div className="absolute inset-0 bg-black/70" onClick={props.onClose} />
           {/* wt-drawer: fundal OPAC pe mobil. Sticla translucidă (--glass-bg) lăsa
               dashboard-ul să se vadă prin drawer — exact „suprapunerea" raportată */}
-          <div className="wt-drawer absolute inset-y-0 left-0 shadow-2xl">{body}</div>
+          <div className="wt-drawer absolute inset-y-0 left-0 w-72 shadow-2xl">{body}</div>
         </div>
       )}
       {/* modalele se randează o singură dată, nu în fiecare copie a sidebarului;
