@@ -172,6 +172,17 @@ export const ForwardIcon = () => (
   </Icon>
 )
 
+// balena Docker, stilizată: rânduri de containere + „valul" de deasupra
+export const DockerIcon = () => (
+  <Icon>
+    <rect x="3" y="11" width="3" height="3" />
+    <rect x="7" y="11" width="3" height="3" />
+    <rect x="11" y="11" width="3" height="3" />
+    <rect x="11" y="7" width="3" height="3" />
+    <path d="M2 14c1.5 1 4 1.5 7 1.5 5 0 8-2.2 8.5-4.5.8.6 1.4 1.6 1.5 3 1-.3 1.7-.3 2 0" />
+  </Icon>
+)
+
 export const GitBranchIcon = () => (
   <Icon>
     <line x1="6" y1="3" x2="6" y2="15" />

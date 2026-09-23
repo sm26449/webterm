@@ -18,7 +18,8 @@ import HostLoadRing from './HostLoadRing'
 import FilePanel from './FilePanel'
 import GitPanel from './GitPanel'
 import ForwardsPanel from './ForwardsPanel'
-import { ClockIcon, CopyIcon, ExternalLinkIcon, FilesIcon, ForwardIcon, GitBranchIcon, LinkIcon, MoreIcon, NoteIcon, PasteIcon, PencilIcon, PopoutIcon, SearchIcon, StopIcon, TrashIcon } from './Icons'
+import DockerPanel from './DockerPanel'
+import { ClockIcon, CopyIcon, DockerIcon, ExternalLinkIcon, FilesIcon, ForwardIcon, GitBranchIcon, LinkIcon, MoreIcon, NoteIcon, PasteIcon, PencilIcon, PopoutIcon, SearchIcon, StopIcon, TrashIcon } from './Icons'
 import MobileKeybar from './MobileKeybar'
 import SnippetsMenu from './SnippetsMenu'
 import TranscriptPlayer from './TranscriptPlayer'
@@ -98,8 +99,15 @@ export default function SessionView(props: {
   /** deschide o sesiune existentă (după sid) — folosit de panoul de forward-uri
       pentru a lansa o sesiune telnet-bastion într-un tab de terminal */
   onOpenSession?: (sid: string) => void
+  /** deschide un shell într-un container Docker (docker exec într-un tab nou) */
+  onOpenContainerShell?: (host: Host, container: string) => void
   /** guardrail de comenzi (verificat la Enter, via OSC 133) */
   commandGuard?: CommandGuard | null
+  /** broadcast (grid): înregistrează funcţia de trimitere a acestui panou sus, ca App să poată
+      difuza tastele către toate panourile; raportează tastele locale; afişează indicatorul */
+  registerSend?: (sid: string, fn: ((d: string | Uint8Array) => void) | null) => void
+  onUserData?: (sid: string, d: string) => void
+  broadcasting?: boolean
 }) {
   const { session } = props
   const { t } = useI18n()
@@ -220,10 +228,20 @@ export default function SessionView(props: {
   const [showFiles, setShowFiles] = useState(false)
   const [showForwards, setShowForwards] = useState(false)
   const [showGit, setShowGit] = useState(false)
-  const toggleFiles = () => setShowFiles((v) => { if (!v) { setShowCommands(false); setShowForwards(false); setShowGit(false) } return !v })
-  const toggleCommands = () => setShowCommands((v) => { if (!v) { setShowFiles(false); setShowForwards(false); setShowGit(false) } return !v })
-  const toggleForwards = () => setShowForwards((v) => { if (!v) { setShowFiles(false); setShowCommands(false); setShowGit(false) } return !v })
-  const toggleGit = () => setShowGit((v) => { if (!v) { setShowFiles(false); setShowCommands(false); setShowForwards(false) } return !v })
+  const [showDocker, setShowDocker] = useState(false)
+  // un singur panou din dreapta o dată: la deschiderea unuia, le închid pe celelalte
+  const closeOthers = (keep: 'files' | 'cmd' | 'fwd' | 'git' | 'docker') => {
+    if (keep !== 'files') setShowFiles(false)
+    if (keep !== 'cmd') setShowCommands(false)
+    if (keep !== 'fwd') setShowForwards(false)
+    if (keep !== 'git') setShowGit(false)
+    if (keep !== 'docker') setShowDocker(false)
+  }
+  const toggleFiles = () => setShowFiles((v) => { if (!v) closeOthers('files'); return !v })
+  const toggleCommands = () => setShowCommands((v) => { if (!v) closeOthers('cmd'); return !v })
+  const toggleForwards = () => setShowForwards((v) => { if (!v) closeOthers('fwd'); return !v })
+  const toggleGit = () => setShowGit((v) => { if (!v) closeOthers('git'); return !v })
+  const toggleDocker = () => setShowDocker((v) => { if (!v) closeOthers('docker'); return !v })
   const [activeCmd, setActiveCmd] = useState<number | null>(null)
   const activeCmdRef = useRef<number | null>(null)   // citit de stepCommand (handler-ul de taste e capturat la montare)
   // cwd raportat de shell prin OSC 7 (apare doar cu shell integration activă)
@@ -368,6 +386,16 @@ export default function SessionView(props: {
       ws.send(typeof data === 'string' ? new TextEncoder().encode(data) : data)
     }
   }, [])
+
+  // broadcast: înregistrează `send`-ul acestui panou în harta din App (sid → send), ca tastele
+  // dintr-un panou să poată fi difuzate în toate. `send` e stabil (useCallback []), deci se
+  // înregistrează o dată şi se curăţă la demontare.
+  const registerSend = props.registerSend
+  const bcastSid = session.id
+  useEffect(() => {
+    registerSend?.(bcastSid, send)
+    return () => registerSend?.(bcastSid, null)
+  }, [registerSend, bcastSid, send])
 
   // `active` = acest client tocmai a devenit dispozitivul folosit (focus/click/tastare).
   // Serverul onorează un resize activ chiar dacă n-am mai interacționat de mult; fără
@@ -572,6 +600,9 @@ export default function SessionView(props: {
     const onData = term.onData((d) => {
       lastInputRef.current = Date.now()
       send(d)
+      // broadcast: App difuzează aceleaşi taste către CELELALTE panouri din grilă (originea a
+      // trimis deja local, mai sus). Fără broadcast activ, App ignoră.
+      props.onUserData?.(session.id, d)
     })
     const onBinary = term.onBinary((d) => {
       const bytes = new Uint8Array(d.length)
@@ -1265,7 +1296,15 @@ export default function SessionView(props: {
   const reach = props.host ? reachState(props.host) : 'offline'
 
   return (
-    <div ref={rootRef} className={`wt-window flex h-full flex-col ${props.activeInSplit ? 'ring-2 ring-inset ring-sky-500/70' : ''}`}>
+    <div ref={rootRef} className={`wt-window flex h-full flex-col ${
+      props.broadcasting ? 'ring-2 ring-inset ring-amber-500' : props.activeInSplit ? 'ring-2 ring-inset ring-sky-500/70' : ''}`}>
+      {/* broadcast activ: bandă de avertizare vizibilă în FIECARE panou al grilei — tastezi în
+          toate host-urile deodată, deci ambiguitatea „unde scriu" trebuie să fie zero */}
+      {props.broadcasting && (
+        <div className="shrink-0 bg-amber-500/90 px-2 py-0.5 text-center text-[11px] font-semibold text-ink-950">
+          ⌨ {t('grid.broadcastOn')}
+        </div>
+      )}
       {/* bandă de identitate = culoarea host-ului (o vezi și în tab) */}
       <div className="h-[3px] shrink-0" style={{ background: hostAccent }} aria-hidden="true" />
       {/* header (titlebar în tema macOS) */}
@@ -1345,6 +1384,15 @@ export default function SessionView(props: {
               <ForwardIcon />
             </ToolButton>
           </span>
+          {/* docker: containere/imagini/volume/reţele + shell în container. Doar host-uri de
+              agent (docker CLI e local pe host; SSH/telnet n-au op-ul `run`). */}
+          {(!props.host?.connection_type || props.host.connection_type === 'agent') && (
+            <span className="hidden sm:contents">
+              <ToolButton title={t('session.dockerTooltip')} active={showDocker} onClick={toggleDocker}>
+                <DockerIcon />
+              </ToolButton>
+            </span>
+          )}
           {isLive && (
             <span className="hidden sm:contents">
               <SnippetsMenu
@@ -1794,6 +1842,10 @@ export default function SessionView(props: {
       {showForwards && props.host && (
         <ForwardsPanel host={props.host} onClose={() => setShowForwards(false)} overlay={narrowPane}
           onOpenSession={(sid) => { setShowForwards(false); props.onOpenSession?.(sid) }} />
+      )}
+      {showDocker && props.host && (
+        <DockerPanel host={props.host} onClose={() => setShowDocker(false)} overlay={narrowPane}
+          onOpenContainerShell={(c) => { setShowDocker(false); props.onOpenContainerShell?.(props.host!, c) }} />
       )}
       </div>
 

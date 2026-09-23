@@ -158,6 +158,26 @@ function MainApp() {
     if (selectedSid && selectedSid === secondSid) setSecondSid(null)
   }, [selectedSid, secondSid])
   const [activePane, setActivePane] = useState<'primary' | 'second'>('primary')
+
+  // ── Grilă multi-terminal + input difuz (broadcast) ──────────────────────────
+  // gridSids = sesiunile arătate simultan (2–4, grilă 2×2). Când e activă, ia locul
+  // layout-ului primar/split, iar tastele dintr-un panou se pot difuza în TOATE.
+  const [gridSids, setGridSids] = useState<string[]>([])
+  const [broadcast, setBroadcast] = useState(false)
+  // send-ul fiecărui panou montat, indexat pe sid — SessionView îl înregistrează singur
+  const sendMap = useRef(new Map<string, (d: string | Uint8Array) => void>())
+  const broadcastRef = useRef(false)
+  useEffect(() => { broadcastRef.current = broadcast }, [broadcast])
+  const registerSend = useCallback((sid: string, fn: ((d: string | Uint8Array) => void) | null) => {
+    if (fn) sendMap.current.set(sid, fn)
+    else sendMap.current.delete(sid)
+  }, [])
+  // o tastă dintr-un panou → difuzată către CELELALTE (originea a trimis deja local)
+  const handleUserData = useCallback((sid: string, d: string) => {
+    if (!broadcastRef.current) return
+    sendMap.current.forEach((fn, osid) => { if (osid !== sid) fn(d) })
+  }, [])
+
   const [sidebarOpen, setSidebarOpen] = useState(false)
   // Plierea sidebarului e o preferinţă de spaţiu, nu o stare de sesiune: cine lucrează pe
   // un laptop mic o vrea din prima, la fiecare deschidere. Citită sincron la montare, ca
@@ -316,6 +336,11 @@ function MainApp() {
       })
       // split-ul restaurat poate referi o sesiune dispărută între timp
       setSecondSid((prev) => (prev && !s.some((x) => x.id === prev) ? null : prev))
+      // grila: scoate panourile ale căror sesiuni au dispărut (închise/moarte)
+      setGridSids((prev) => {
+        const valid = prev.filter((sid) => s.some((x) => x.id === sid))
+        return valid.length === prev.length ? prev : valid
+      })
       setGwFails(0)
     } catch {
       setGwFails((n) => n + 1)
@@ -617,6 +642,10 @@ function MainApp() {
 
   const primary = sessions.find((s) => s.id === selectedSid) ?? null
   const second = secondSid ? (sessions.find((s) => s.id === secondSid) ?? null) : null
+  // panourile grilei = sid-urile încă existente, în ordine; grila e activă cu ≥2. Sesiunile
+  // dispărute între timp se filtrează (nu curăţăm gridSids aici — vezi reconcilierea din refresh)
+  const gridPanes = gridSids.map((sid) => sessions.find((s) => s.id === sid)).filter(Boolean) as Session[]
+  const gridActive = gridPanes.length >= 2
   // AICI era o gardă care făcea `setSecondSid(null)` când sesiunea secundară nu se găsea
   // în `sessions`. Rula în corpul randării, iar la prima randare după un reload `sessions`
   // e încă `[]` — deci ştergea splitul restaurat din localStorage ÎNAINTE ca datele să
@@ -627,20 +656,25 @@ function MainApp() {
     window.open(popoutUrl(sid), `wt_${sid}`, 'width=960,height=640')
   }
 
-  const renderPane = (s: Session, isSecond: boolean, isActive: boolean) => (
+  const renderPane = (s: Session, isSecond: boolean, isActive: boolean, grid?: boolean) => (
     <SessionView
       key={s.id}
       session={s}
       stepupCredential={stepupCredential}
       host={hosts.find((h) => h.id === s.host_id)}
       commandGuard={appState.command_guard}
+      // grilă: toate panourile stream-uiesc simultan, îşi înregistrează send-ul pentru broadcast
+      // şi arată banda de avertizare când broadcast-ul e pornit
+      registerSend={grid ? registerSend : undefined}
+      onUserData={grid ? handleUserData : undefined}
+      broadcasting={grid ? broadcast : undefined}
       // căutarea din rezultate globale merge DOAR la panoul activ — panourile
       // ținute în cache nu trebuie să (re)pornească o căutare veche când redevin
       // vizibile (prop-ul lor rămâne 0 cât sunt inactive)
       initialSearch={isSecond || !isActive ? null : (pendingSearch?.term ?? null)}
       searchNonce={isSecond || !isActive ? 0 : (pendingSearch?.n ?? 0)}
       paneActive={isActive}
-      streamActive={isSecond || isActive}
+      streamActive={grid || isSecond || isActive}
       activeInSplit={!!second && ((isSecond && activePane === 'second') || (!isSecond && activePane === 'primary'))}
       // ținta acțiunilor de sesiune (snippet/insert/font/search): în split e panoul
       // FOCUSAT (activePane), nu ambele — altfel un snippet se executa pe ambele hosturi.
@@ -655,6 +689,7 @@ function MainApp() {
       onSplitClosed={isSecond ? () => setSecondSid(null) : undefined}
       onChanged={refresh}
       onOpenSession={async (sid) => { await refresh(); selectSession(sid) }}
+      onOpenContainerShell={openContainerShell}
       onDeleted={() => {
         if (isSecond) setSecondSid(null)
         else closeTab(s.id)
@@ -801,6 +836,27 @@ function MainApp() {
     }
   }
 
+  // deschide un shell ÎNTR-un container Docker de pe host (sesiune cu docker_container →
+  // gateway-ul o transformă în `docker exec`). Acelaşi 2FA step-up ca o sesiune normală.
+  async function openContainerShell(host: Host, container: string) {
+    const body: Record<string, unknown> = { title: '', tz: getTimezone(), docker_container: container }
+    if (host.require_2fa) {
+      const cred = await stepupCredential(host.id)
+      if (!cred) return
+      Object.assign(body, cred)
+    }
+    try {
+      const r = await api<{ id: string }>(`/api/hosts/${host.id}/sessions`, {
+        method: 'POST', body: JSON.stringify(body),
+      })
+      await refresh()
+      openTab(r.id)
+      navigate(r.id)
+    } catch (e) {
+      notify(t('app.cannotStartSession'), errText(e, t) || t('app.error'), 'warn')
+    }
+  }
+
   async function deleteSession(sid: string) {
     await api(`/api/sessions/${sid}`, { method: 'DELETE' }).catch(() => {})
     closeTab(sid)
@@ -865,7 +921,46 @@ function MainApp() {
             }}
           />
         )}
+        {/* bara grilei: apare când ai ≥2 tab-uri (poţi intra în grilă) sau grila e deja activă.
+            „Grilă" ia primele ≤4 tab-uri într-un 2×2; „Broadcast" difuzează tastele în toate. */}
+        {(openTabs.length >= 2 || gridActive) && (
+          <div className="flex shrink-0 items-center gap-2 border-b border-ink-800 bg-ink-900/60 px-3 py-1 text-xs">
+            {!gridActive ? (
+              <button onClick={() => { setGridSids(openTabs.slice(0, 4)); setBroadcast(false) }}
+                className="rounded px-2 py-0.5 font-medium text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800">
+                {t('grid.enter')}
+              </button>
+            ) : (
+              <>
+                <span className="font-medium text-slate-400">{t('grid.label', { n: gridPanes.length })}</span>
+                <button onClick={() => setBroadcast((b) => !b)}
+                  className={`rounded px-2 py-0.5 font-semibold ring-1 ${broadcast
+                    ? 'bg-amber-500 text-ink-950 ring-amber-500'
+                    : 'text-slate-300 ring-ink-700 hover:bg-ink-800'}`}>
+                  ⌨ {broadcast ? t('grid.broadcastOnBtn') : t('grid.broadcastOff')}
+                </button>
+                <button onClick={() => { setGridSids([]); setBroadcast(false) }}
+                  className="ml-auto rounded px-2 py-0.5 text-slate-400 ring-1 ring-ink-700 hover:bg-ink-800">
+                  {t('grid.exit')}
+                </button>
+              </>
+            )}
+          </div>
+        )}
       <main className="wt-main flex min-h-0 min-w-0 flex-1">
+        {/* GRILĂ multi-terminal: ia locul stack-ului keep-alive şi al split-ului (altfel o
+            sesiune s-ar monta de două ori → două WS pe acelaşi PTY, războiul de detach tmux).
+            2 panouri = o linie; 3–4 = 2×2. Fiecare panou e o sesiune completă, vie. */}
+        {gridActive ? (
+          <div className={`grid min-h-0 min-w-0 flex-1 gap-px bg-ink-800 ${
+            gridPanes.length === 2 ? 'grid-cols-2 grid-rows-1' : 'grid-cols-2 grid-rows-2'}`}>
+            {gridPanes.map((s) => (
+              <div key={s.id} className="relative min-h-0 min-w-0 overflow-hidden bg-ink-900">
+                <PaneErrorBoundary>{renderPane(s, false, s.id === selectedSid, true)}</PaneErrorBoundary>
+              </div>
+            ))}
+          </div>
+        ) : (<>
         {/* stack-ul keep-alive: toate tab-urile recente stau montate, suprapuse;
             doar cel activ e vizibil. `visibility` (nu display:none) ca hidden-ele
             să-și păstreze dimensiunile corecte prin ResizeObserver. Când nu e
@@ -899,7 +994,8 @@ function MainApp() {
             </div>
           </>
         )}
-        {!primary && (<PaneErrorBoundary>{routeHost ? (
+        </>)}
+        {!gridActive && !primary && (<PaneErrorBoundary>{routeHost ? (
           <HostOverview
             onMenu={() => { setSidebarCollapsed(false); localStorage.setItem('wt-sidebar-collapsed', '0'); setSidebarOpen(true) }}
       sidebarCollapsed={sidebarCollapsed}
