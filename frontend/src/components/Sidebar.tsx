@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react'
-import { errText, isSessionLive, api, ApiError, getBootVersion, Host, SearchHit, Session } from '../lib/api'
+import { errText, isSessionLive, api, ApiError, getBootVersion, Host, SearchHit, Session, timeAgo } from '../lib/api'
+import { fmtTs } from '../lib/tz'
 import { useI18n } from '../lib/i18n'
 import InstallCommand from './InstallCommand'
 import { hostColor, reachState } from '../lib/host'
@@ -199,6 +200,19 @@ export default function Sidebar(props: {
     props.onChanged()
   }
 
+  // Notă pe host, la îndemână când e down: „de ce l-am oprit" se uită în două săptămâni —
+  // aici rămâne scris exact în locul în care te uiţi când îl cauţi. Acelaşi PATCH ca la
+  // mutarea în folder (nota e câmp obişnuit de host, doar că acum e vizibilă în sidebar).
+  async function editNote(host: Host) {
+    const note = prompt(t('sidebar.promptNote', { name: host.name }), host.note ?? '')
+    if (note === null) return
+    await api(`/api/hosts/${host.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name: host.name, note: note.trim(), folder: host.folder ?? '' }),
+    }).catch((e) => alert(errText(e, t) || t('sidebar.error')))
+    props.onChanged()
+  }
+
   // redenumește un grup întreg = mută toate host-urile din folder în noul nume
   async function renameGroup(folder: string) {
     const next = prompt(t('sidebar.promptRenameGroup', { folder }), folder)
@@ -310,6 +324,25 @@ export default function Sidebar(props: {
                     {tag}
                   </button>
                 ))}
+              </div>
+            )}
+            {/* host de agent căzut: de cât timp (heartbeat-ul din urmă) + nota — ca peste două
+                săptămâni să ştii DE CE e jos („l-am oprit eu", „aşteaptă piese"), fără arheologie */}
+            {reach === 'offline' && (
+              <div className="mt-0.5 flex min-w-0 items-center gap-1 text-xs text-slate-500">
+                <span className="shrink-0"
+                  title={host.last_heartbeat ? fmtTs(host.last_heartbeat) : undefined}>
+                  {host.last_heartbeat
+                    ? t('sidebar.downFor', { ago: timeAgo(host.last_heartbeat, t) })
+                    : t('sidebar.downNoHeartbeat')}
+                </span>
+                {host.note && <span className="truncate italic" title={host.note}>· {host.note}</span>}
+                <button
+                  onClick={(e) => { e.stopPropagation(); editNote(host) }}
+                  title={t('sidebar.noteAria', { name: host.name })}
+                  aria-label={t('sidebar.noteAria', { name: host.name })}
+                  className="shrink-0 rounded p-0.5 opacity-0 hover:text-slate-200 focus-visible:opacity-100 group-hover:opacity-100"
+                ><NoteIcon /></button>
               </div>
             )}
             {host.conflict && (
@@ -533,7 +566,12 @@ export default function Sidebar(props: {
             a === '' ? 1 : b === '' ? -1 : a.localeCompare(b))
           const hasNamed = folders.some((f) => f !== '')
           return folders.map((folder) => {
-            const inFolder = visible.filter((h) => (h.folder || '') === folder)
+            // host-urile căzute stau la FUNDUL grupului: sus rămâne „ce pot folosi acum",
+            // iar un host oprit intenţionat nu se mai amestecă printre cele vii. Partiţie
+            // stabilă — ordinea existentă se păstrează în interiorul fiecărei jumătăţi.
+            const inAll = visible.filter((h) => (h.folder || '') === folder)
+            const inFolder = [...inAll.filter((h) => reachState(h) !== 'offline'),
+                              ...inAll.filter((h) => reachState(h) === 'offline')]
             const collapsed = collapsedFolders[folder]
             // arată un antet și pentru hosturile fără folder, DAR doar când există
             // și grupuri cu nume (pe o listă complet plată n-are rost o etichetă)
