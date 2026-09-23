@@ -241,6 +241,17 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
     a.click()
   }
 
+  // director (sau fişier) → tar.gz făcut pe host şi streamat; răspunsul începe abia după ce
+  // tar-ul termină (plafon 5 min pe host), deci browserul „aşteaptă" o vreme la foldere mari —
+  // e în regulă, download managerul preia de acolo
+  function downloadArchive(e: Entry) {
+    const url = `/api/hosts/${props.host.id}/fs/archive?path=${encodeURIComponent(join(listing!.path, e.name))}`
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${e.name}.tgz`
+    a.click()
+  }
+
   // FileEditor încarcă singur conținutul (preview cu partial-read) și decide
   // editabil / view-only / binar — aici doar deschidem modalul.
   function edit(e: Entry) {
@@ -634,6 +645,11 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
                 )}
                 {!e.dir && (
                   <button onClick={() => download(e)} className="rounded px-1 text-slate-500 hover:bg-ink-700 hover:text-slate-200" title={t('files.download')}><DownloadIcon /></button>
+                )}
+                {/* directoarele nu au download simplu — dar au arhivă (tar.gz pe host) */}
+                {e.dir && (
+                  <button onClick={() => downloadArchive(e)} className="rounded px-1 text-slate-500 hover:bg-ink-700 hover:text-slate-200"
+                    title={t('files.downloadArchive')} aria-label={t('files.downloadArchiveAria', { name: e.name })}><DownloadIcon /></button>
                 )}
                 <button onClick={() => setRenaming(e.name)} className="rounded px-1 text-slate-500 hover:bg-ink-700 hover:text-slate-200" title={t('files.rename')} aria-label={t('files.renameAria', { name: e.name })}><PencilIcon /></button>
                 <button onClick={() => setConfirmDel(e)} className="rounded px-1 text-slate-500 hover:bg-ink-700 hover:text-rose-300" title={t('files.delete')}><TrashIcon /></button>

@@ -1414,10 +1414,12 @@ class AgentConnection(SessionSource):
             self._pending.pop(rid, None)
 
     # -- SessionSource interface (delegates to the agent's control channel) ----
-    async def create(self, sid, rows, cols, term, tz=None) -> dict:
+    async def create(self, sid, rows, cols, term, tz=None, cmd=None) -> dict:
         fields = dict(sid=sid, rows=rows, cols=cols, term=term)
         if tz:
             fields["tz"] = tz
+        if cmd:                       # „shell în container" etc. — agentul rulează cmd în tmux
+            fields["cmd"] = cmd
         return await self.request("create", **fields)
 
     async def attach(self, sid, from_offset) -> dict:
@@ -2266,7 +2268,7 @@ def search_transcripts(rows, query: str):
 
 
 async def create_session(host_id: int, title: str, rows: int = 24, cols: int = 80,
-                         tz: Optional[str] = None) -> dict:
+                         tz: Optional[str] = None, cmd: Optional[str] = None) -> dict:
     source = source_for(host_id)
     if source is None:
         raise AgentGone("host offline")
@@ -2276,7 +2278,10 @@ async def create_session(host_id: int, title: str, rows: int = 24, cols: int = 8
         " VALUES(?,?,?,?,?,?,?,?)",
         sid, host_id, title, "creating", time.time(), rows, cols, source.epoch)
     try:
-        resp = await source.create(sid, rows, cols, "xterm-256color", tz)
+        # `cmd` (opţional): sesiunea rulează comanda asta în loc de shell-ul de login — folosit
+        # pentru „shell în container" (docker exec). Agentul o rulează ÎN tmux, deci persistă şi
+        # se re-ataşează la deconectare, ca orice sesiune. Doar calea de agent îl onorează.
+        resp = await source.create(sid, rows, cols, "xterm-256color", tz, cmd)
     except Exception:
         # agentul a căzut / timeout FIX în timpul create → rândul rămânea 'creating'
         # pentru totdeauna (delete-ul îl refuză cu 409, reconcile/reaper îl sar). Curăță.
@@ -2357,7 +2362,7 @@ class ForwardTelnetSource(SessionSource):
         self.redact_input = False
         self._pw_tail = b""      # coada recentă de output, pt. prompt tăiat între recv-uri
 
-    async def create(self, sid, rows, cols, term, tz=None) -> dict:
+    async def create(self, sid, rows, cols, term, tz=None, cmd=None) -> dict:  # cmd: doar agentul îl foloseşte
         try:
             self._fs = await self._agent.open_forward(self._thost, self._tport)
         except ForwardError as e:
@@ -2496,7 +2501,7 @@ class ForwardSerialSource(SessionSource):
         self.redact_input = False
         self._pw_tail = b""
 
-    async def create(self, sid, rows, cols, term, tz=None) -> dict:
+    async def create(self, sid, rows, cols, term, tz=None, cmd=None) -> dict:  # cmd: doar agentul îl foloseşte
         p = self._params
         try:
             self._fs = await self._agent.open_serial(
@@ -2777,7 +2782,7 @@ class SshSource(SessionSource):
         self._forwards: Set["SshForwardStream"] = set()   # forward-uri active (țin conexiunea vie)
         self._idle_task: Optional[asyncio.Task] = None
 
-    async def create(self, sid, rows, cols, term, tz=None) -> dict:
+    async def create(self, sid, rows, cols, term, tz=None, cmd=None) -> dict:  # cmd: doar agentul îl foloseşte
         tmux = "wt-" + sid[:16]
         # tmux dacă există (persistență la re-conectare), altfel shell de login
         cmd = ("command -v tmux >/dev/null && exec tmux new -A -s %s "
@@ -2972,7 +2977,7 @@ class TelnetSource(SessionSource):
         # (nu mai înregistrăm evenimente „i" deloc — vezi handle_input).
         self._osc = telnet.OscFilter()
 
-    async def create(self, sid, rows, cols, term, tz=None) -> dict:
+    async def create(self, sid, rows, cols, term, tz=None, cmd=None) -> dict:  # cmd: doar agentul îl foloseşte
         # telnet direct = O conexiune per host, O sesiune (share acelaşi StreamReader). O a doua
         # sesiune ar porni un al doilea _pump pe acelaşi reader → citiri concurente, o coroutină
         # eşuează şi ar închide conexiunea comună + prima sesiune. Refuzăm a doua.
@@ -3110,6 +3115,58 @@ async def fs_read_all(host_id: int, path: str):
         offset += len(chunk)
         if resp.get("eof") or not chunk:
             break
+
+
+async def fs_archive_prepare(host_id: int, path: str) -> str:
+    """Împachetează un fişier/DIRECTOR de pe host într-un tar.gz temporar şi întoarce calea
+    lui. FĂRĂ schimbare de agent (rămâne v49): tar-ul rulează prin op-ul `run` existent, iar
+    octeţii curg apoi prin fs_read (fs_read_all), ca orice download. Apelantul şterge temp-ul
+    (fs_archive_cleanup) când a terminat de streamat — sau la eroare.
+
+    Temp-ul stă LÂNGĂ ţintă (acelaşi filesystem — spaţiu predictibil; /tmp e deseori tmpfs
+    în RAM şi un director mare l-ar umple). `tar -C părinte -- nume` pune în arhivă un singur
+    nivel de vârf cu numele ţintei, deci dezarhivarea produce exact folderul aşteptat.
+    Plafonul e RUN_MAX_TIMEOUT al agentului (5 min) — un director uriaş pică cu mesaj clar,
+    nu atârnă."""
+    conn = _agent_or_raise(host_id)
+    target = path.rstrip("/")
+    if not target or target in ("/", "~"):
+        raise FileError("refusing to archive the filesystem root")
+    parent = target.rsplit("/", 1)[0] or "/"
+    name = target.rsplit("/", 1)[-1]
+    tmp = "%s/.wtarch.%s.tgz" % (parent.rstrip("/"), uuid.uuid4().hex[:16])
+
+    # Panoul trimite şi căi cu `~` (listarea implicită) — op-urile fs ale agentului îl
+    # expandează, dar SHELL-ul nu expandează un `~` pus între ghilimele de shlex.quote
+    # (`tar -C '~/x'` = director literal „~"). În comandă îl traducem în "$HOME"; către
+    # fs_read/fs_delete (tmp) merge forma cu `~`, pe care agentul o expandează singur.
+    def shq(p: str) -> str:
+        if p == "~":
+            return '"$HOME"'
+        if p.startswith("~/"):
+            return '"$HOME"/' + shlex.quote(p[2:])
+        return shlex.quote(p)
+
+    cmd = "tar -C %s -czf %s -- %s" % (shq(parent), shq(tmp), shlex.quote(name))
+    resp = await conn.run_command(cmd, cmd_timeout=280)
+    if not resp.get("ok"):
+        raise FileError(resp.get("msg") or "archive failed")
+    if resp.get("timed_out"):
+        await fs_archive_cleanup(host_id, tmp)
+        raise FileError("archiving timed out (5 min cap) — the folder may be too large")
+    if resp.get("exit_code") != 0:
+        await fs_archive_cleanup(host_id, tmp)
+        detail = (resp.get("stderr") or "").strip()[:300]
+        raise FileError("tar failed" + (": " + detail if detail else ""))
+    return tmp
+
+
+async def fs_archive_cleanup(host_id: int, tmp: str) -> None:
+    """Şterge temp-ul de arhivă, best-effort (numele e al nostru, .wtarch.<hex>.tgz)."""
+    try:
+        await _agent_or_raise(host_id).request("fs_delete", path=tmp, timeout=15)
+    except Exception:
+        pass
 
 
 async def fs_read_head(host_id: int, path: str, max_bytes: int):

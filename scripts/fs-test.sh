@@ -147,6 +147,17 @@ echo "$R" | grep -q '"ok":true' && ok "overwrite anyway (no if_mtime) succeeds" 
 R=$(j -o /dev/null -w '%{http_code}' "$FS/download?path=$(enc '/dev/zero')")
 [ "$R" = "400" ] && ok "download of /dev/zero refused (special-file guard)" || no "special guard" "cod $R"
 
+# --- arhivă: director → tar.gz făcut pe host (op `run`, agent NEatins), streamat, temp şters ---
+docker exec "$CT" sh -c 'mkdir -p "/root/wtfstest/arc dir/sub" && printf unu > "/root/wtfstest/arc dir/a.txt" && printf doi > "/root/wtfstest/arc dir/sub/b.txt"'
+j -o /tmp/arc.tgz "$FS/archive?path=$(enc '~/wtfstest/arc dir')"
+if tar -tzf /tmp/arc.tgz 2>/dev/null | grep -q 'arc dir/sub/b.txt'; then
+  ok "archive: folder (cu spaţiu în nume) descărcat ca tgz, cu conţinut"
+else no "archive contents" "$(tar -tzf /tmp/arc.tgz 2>&1 | head -2)"; fi
+R=$(docker exec "$CT" sh -c 'ls /root/wtfstest/.wtarch.* 2>/dev/null | wc -l')
+[ "$R" = "0" ] && ok "archive: temp-ul de pe host şters după streaming" || no "archive temp" "$R rămase"
+R=$(j -o /dev/null -w '%{http_code}' "$FS/archive?path=$(enc '/')")
+[ "$R" = "400" ] && ok "archive pe / refuzat" || no "archive root guard" "cod $R"
+
 # --- delete fișier / dir (recursiv) ---
 R=$(j -X POST "$FS/delete" -H 'Content-Type: application/json' -d '{"path":"~/wtfstest/renamed.txt"}')
 echo "$R" | grep -q '"ok":true' && ok "delete a file" || no "delete file" "$R"

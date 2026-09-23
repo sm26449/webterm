@@ -1474,6 +1474,44 @@ async def fs_download(host_id: int, path: str, user=Depends(security.require_use
         headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
+@router.get("/api/hosts/{host_id}/fs/archive")
+async def fs_archive(host_id: int, path: str, user=Depends(security.require_user)):
+    """Descarcă un fişier sau un DIRECTOR ca tar.gz. Arhiva se face pe host (tar prin op-ul
+    `run` — agentul rămâne neschimbat), curge prin acelaşi streaming ca /fs/download, iar
+    temp-ul de pe host se şterge când transferul se termină (sau pică)."""
+    await _require_host_stepup(host_id, user)
+    from fastapi.responses import StreamingResponse
+    name = os.path.basename(path.rstrip("/")) or "archive"
+    name = name.replace('"', "").replace("\r", "").replace("\n", "").replace("\\", "") + ".tgz"
+    try:
+        tmp = await core.fs_archive_prepare(host_id, path)
+        # primul chunk ÎNAINTE de StreamingResponse: erorile devin status HTTP, nu stream rupt
+        agen = core.fs_read_all(host_id, tmp)
+        try:
+            first = await agen.__anext__()
+        except StopAsyncIteration:
+            first = b""
+    except core.AgentGone:
+        raise ApiError(409, "host.offline", "the host is offline")
+    except TimeoutError:
+        raise HTTPException(504, "the host is not responding")
+    except core.FileError as e:
+        raise HTTPException(400, str(e))
+
+    async def body():
+        try:
+            yield first
+            async for chunk in agen:
+                yield chunk
+        finally:
+            # şi la succes, şi la client care închide mid-stream: temp-ul nu rămâne pe host
+            await core.fs_archive_cleanup(host_id, tmp)
+
+    return StreamingResponse(
+        body(), media_type="application/gzip",
+        headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
 @router.post("/api/hosts/{host_id}/fs/upload")
 async def fs_upload(host_id: int, request: Request, path: str,
                     if_mtime: int | None = None, upload_id: str | None = None,
@@ -2389,6 +2427,101 @@ async def host_git(host_id: int, body: GitIn, user=Depends(security.require_user
         raise HTTPException(502, resp.get("msg") or "run failed")
     return {"exit_code": resp.get("exit_code"), "stdout": resp.get("stdout", ""),
             "stderr": resp.get("stderr", "")}
+
+
+# ── Docker: containere / volume / reţele, prin op-ul `run` (agent NEatins) ───
+# Acelaşi tipar ca panoul de git: CLI-ul docker rulează prin `run_command`, argv
+# shell-quotat server-side, ZERO op-uri noi în agent (deci fără re-semnare). Doar
+# citire + acţiuni de lifecycle (start/stop/restart) + logs; shell-ul în container
+# se face prin crearea unei sesiuni cu `docker exec` (vezi SessionIn.docker_container).
+_DOCKER_KINDS = {
+    # kind → (subcomanda de listare, format Go template pe linie = un JSON per rând)
+    "containers": ["ps", "-a", "--no-trunc", "--format", "{{json .}}"],
+    "images":     ["images", "--format", "{{json .}}"],
+    "volumes":    ["volume", "ls", "--format", "{{json .}}"],
+    "networks":   ["network", "ls", "--no-trunc", "--format", "{{json .}}"],
+}
+_DOCKER_ACTIONS = {"start", "stop", "restart"}     # lifecycle; NU rm/prune din UI (distructiv)
+_DOCKER_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")   # id sau nume de container
+
+
+async def _docker_run(host_id: int, argv: list[str], timeout: int = 20) -> dict:
+    """Rulează `docker <argv>` pe host prin op-ul `run`. Întoarce răspunsul brut al agentului."""
+    cmd = " ".join(shlex.quote(p) for p in (["docker"] + argv))
+    conn = core.source_for(host_id)
+    if not isinstance(conn, core.AgentConnection):
+        raise HTTPException(409, "host offline or has no agent")
+    try:
+        resp = await conn.run_command(cmd, timeout)
+    except (core.AgentGone, TimeoutError, asyncio.TimeoutError):
+        raise HTTPException(504, "the host did not answer in time")
+    if not resp.get("ok"):
+        raise HTTPException(502, resp.get("msg") or "run failed")
+    return resp
+
+
+@router.get("/api/hosts/{host_id}/docker")
+async def docker_list(host_id: int, kind: str, user=Depends(security.require_user)):
+    """Listează containere/imagini/volume/reţele. Fiecare rând e un JSON (format Go template),
+    parsat aici într-o listă de obiecte — frontend-ul primeşte date, nu text de ecran."""
+    argv = _DOCKER_KINDS.get(kind)
+    if not argv:
+        raise HTTPException(400, "unknown docker kind")
+    resp = await _docker_run(host_id, argv)
+    ec, out, err = resp.get("exit_code"), resp.get("stdout", ""), (resp.get("stderr") or "")
+    if ec != 0:
+        # docker lipseşte / demonul e oprit / userul agentului nu e în grupul docker: mesaj clar,
+        # nu o listă goală tăcută (frontend-ul deosebeşte „nu e docker aici" de „zero containere")
+        low = err.lower()
+        if "command not found" in low or "not found" in low and "docker" in low:
+            raise ApiError(400, "docker.absent", "docker is not installed on this host")
+        if "permission denied" in low or "/var/run/docker.sock" in low:
+            raise ApiError(400, "docker.denied",
+                           "the agent's user cannot reach the docker daemon (add it to the docker group)")
+        raise HTTPException(400, err.strip()[:300] or "docker failed")
+    rows = []
+    for line in out.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            pass
+    return {"kind": kind, "rows": rows}
+
+
+class DockerAction(BaseModel):
+    container: str
+    action: str
+    stepup_grant: str = ""
+    stepup_password: str = ""
+
+
+@router.post("/api/hosts/{host_id}/docker/action")
+async def docker_action(host_id: int, body: DockerAction, request: Request,
+                        user=Depends(security.require_user)):
+    """start/stop/restart pe un container. Acţiune pe host → aceeaşi poartă de step-up ca /run."""
+    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
+    if body.action not in _DOCKER_ACTIONS:
+        raise HTTPException(400, "unknown docker action")
+    if not _DOCKER_ID.match(body.container or ""):
+        raise HTTPException(400, "invalid container id")
+    audit.detail(request, "docker %s %s" % (body.action, body.container))
+    resp = await _docker_run(host_id, [body.action, body.container], timeout=30)
+    if resp.get("exit_code") != 0:
+        raise HTTPException(400, (resp.get("stderr") or "docker failed").strip()[:300])
+    return {"ok": True}
+
+
+@router.get("/api/hosts/{host_id}/docker/logs")
+async def docker_logs(host_id: int, container: str, user=Depends(security.require_user)):
+    """Ultimele ~500 de linii de log ale unui container (snapshot, nu flux live)."""
+    if not _DOCKER_ID.match(container or ""):
+        raise HTTPException(400, "invalid container id")
+    resp = await _docker_run(host_id, ["logs", "--tail", "500", "--timestamps", container], timeout=20)
+    # docker logs scrie şi pe stderr (log-urile aplicaţiei) — le concatenăm în ordinea uzuală
+    return {"logs": (resp.get("stdout", "") + resp.get("stderr", ""))[:200000]}
 
 
 # ── Istoric global de comenzi (căutabil, audit-lite) ─────────────────────────
@@ -3663,6 +3796,7 @@ class SessionIn(BaseModel):
     passphrase: str = ""
     stepup_grant: str = ""   # 2FA: grant din ceremonia passkey
     stepup_password: str = ""  # 2FA fallback (deploy IP-only, fără passkey)
+    docker_container: str = ""  # dacă e setat: sesiunea e un shell ÎN acest container (docker exec)
 
 
 class SessionPatch(BaseModel):
@@ -3843,8 +3977,21 @@ async def create_session(host_id: int, body: SessionIn, request: Request,
             if m:
                 top = max(top, int(m.group(1)))
         title = f"Session {top + 1}"
+    cmd = None
+    if body.docker_container:
+        # shell ÎN container: sesiunea rulează `docker exec` în loc de shell-ul de login.
+        # Doar host-uri de agent (docker e local pe host). Încercăm bash, cădem pe sh — imaginile
+        # minime (alpine) n-au bash. Id-ul de container e validat strict (fără injecţie).
+        if ctype != "agent":
+            raise HTTPException(400, "container shells are only available on agent hosts")
+        if not _DOCKER_ID.match(body.docker_container):
+            raise HTTPException(400, "invalid container id")
+        c = shlex.quote(body.docker_container)
+        cmd = "docker exec -it %s sh -c 'exec bash || exec sh'" % c
+        if not title.strip() or title.startswith("Session "):
+            title = "docker: " + body.docker_container[:24]
     try:
-        result = await core.create_session(host_id, title, body.rows, body.cols, body.tz)
+        result = await core.create_session(host_id, title, body.rows, body.cols, body.tz, cmd)
     except core.AgentGone:
         raise ApiError(409, "host.offline", "the host is offline (the agent is not connected)")
     except core.SessionLimitReached:

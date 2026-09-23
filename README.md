@@ -899,7 +899,7 @@ administer your servers with. The CI chain, in order:
    history replay** (no duplicate entries, no prompts captured as commands, new
    commands still recorded). Running this on the `pty` fallback would test a
    different backend than production — that gap hid a whole class of bugs.
-4. **FS API** (`scripts/fs-test.sh`, 24) — end-to-end file operations with a real agent.
+4. **FS API** (`scripts/fs-test.sh`, 35) — end-to-end file operations with a real agent.
 5. **Port forwarding** (`scripts/fwd-test.sh`) — auth handshake, HTTP +
    WebSocket proxy + **https targets**, **configurable domain**, **SSH hosts**
    (real sshd), and security tests (slug-bound token, anti-SSRF, the 2FA gate,
