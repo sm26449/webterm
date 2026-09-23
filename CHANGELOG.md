@@ -7,6 +7,32 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [2.3.3] — 2026-09-23 · agent (49)
+
+Sidebar ergonomics for powered-off hosts, plus the fixes from a UI/accessibility audit of the
+recent surfaces. Gateway untouched beyond version; agent unchanged.
+
+### Added
+
+- **Offline hosts sink to the bottom of their sidebar group**, with how long they have been down
+  (last heartbeat; hover for the exact date) and a **note** — "why is it down" survives the two
+  weeks it takes to forget. The ✎ button edits it in place; the note also shows on the Dashboard's
+  offline cards. A collapsed group's count turns into `alive/total` so hidden down hosts stay
+  visible.
+
+### Fixed
+
+- **Account passwords are no longer typed into `window.prompt()` in cleartext.** Every re-auth
+  flow (SMTP settings, user delete, backup and signing-key downloads, TOTP enrolment, passkey
+  add/remove) now uses a proper masked modal with focus-trap and Escape; short-lived TOTP/email
+  codes deliberately stay visible while typing.
+- **Hosts can be selected from the sidebar by keyboard** — the host name is a real button now
+  (rows were click-only divs; the ⌘K palette was the only keyboard path).
+- The ✎ note/rename buttons were invisible on touch devices (hover-only reveal); the settings-gear
+  status dot carried a hard-coded, language-mixed aria-label (dropped — the parent button's
+  translated title carries the state); threshold-save errors rendered two sections away from the
+  button that caused them.
+
 ## [2.3.2] — 2026-09-23 · agent (49)
 
 A seven-day retrospective inspection: three adversarial reviews (upload protocol, the 2.3.1
