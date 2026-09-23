@@ -178,6 +178,20 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAgent])
 
+  // Un drop RATAT (lângă panou, peste terminal) navighează altfel pagina la fişierul local:
+  // browserul îl deschide şi SPA-ul moare cu tot cu sesiunile deschise. Panoul invită la
+  // drag&drop, deci cât e montat neutralizăm dragover/drop la nivel de fereastră — zona
+  // proprie de drop nu e afectată (handler-ele ei rulează înaintea celui de pe window).
+  useEffect(() => {
+    const block = (e: DragEvent) => e.preventDefault()
+    window.addEventListener('dragover', block)
+    window.addEventListener('drop', block)
+    return () => {
+      window.removeEventListener('dragover', block)
+      window.removeEventListener('drop', block)
+    }
+  }, [])
+
   // follow: la fiecare `cd` din terminal (OSC 7), sari acolo
   useEffect(() => {
     if (!isAgent) return
@@ -275,9 +289,14 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
         xhr.onload = async () => {
           ctl.xhr = null
           if (xhr.status >= 200 && xhr.status < 300) { resolve(); return }
-          if (xhr.status === 409) {   // offset desincronizat → aflăm adevărul și reluăm de acolo
+          // 409: offset desincronizat. 403: fereastra de step-up a expirat în mijlocul unui
+          // upload lung (multi-GB pe host cu require_2fa) — fără asta, chunk-urile picau 5
+          // retry-uri şi eroarea finală era un opac „403", fără re-prompt. Sonda de status prin
+          // withStepup redeschide prompt-ul de passkey, apoi reluăm de la offset-ul real.
+          if (xhr.status === 409 || xhr.status === 403) {
             try {
-              const st = await api<{ offset: number }>(`/api/hosts/${hid}/fs/upload/status?${q}`)
+              const st = await withStepup(hid, () =>
+                api<{ offset: number }>(`/api/hosts/${hid}/fs/upload/status?${q}`))
               reject(new ResyncSignal(Math.min(st.offset || 0, file.size)))
             } catch (e) { reject(e) }
             return
@@ -287,6 +306,9 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
         xhr.onerror = () => { ctl.xhr = null; reject(new Error('network')) }
         xhr.ontimeout = () => { ctl.xhr = null; reject(new Error('timeout')) }
         xhr.onabort = () => { ctl.xhr = null; reject(new Error('abort')) }
+        // fără timeout explicit, `ontimeout` era cod mort (default 0 = niciodată): o conexiune
+        // TCP atârnată (switch care nu trimite RST) îngheţa upload-ul la nesfârşit, fără retry
+        xhr.timeout = 300_000
         xhr.send(body)
       })
 
@@ -297,23 +319,28 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
         if (ctl.cancelled) return
         const end = Math.min(pos + UP_CHUNK, file.size)
         const buf = await file.slice(pos, end).arrayBuffer()
-        if (doCrc) crc = crc32(crc, new Uint8Array(buf))
-        let resynced = false, tries = 0
+        let landed = false, tries = 0
         for (;;) {
-          try { await sendChunk(pos, buf); break }
+          try { await sendChunk(pos, buf); landed = true; break }
           catch (e) {
             if (ctl.cancelled) return
             if (e instanceof ResyncSignal) {
-              if (e.offset < pos) doCrc = false   // am sărit înapoi → CRC-ul incremental nu mai e valid
               if (++resyncs > 20) throw new Error('resync')
-              pos = e.offset; resynced = true; break
-            }
+              if (e.offset === end) { landed = true; break }  // felia a aterizat, doar răspunsul s-a pierdut
+              if (e.offset !== pos) { doCrc = false; pos = e.offset }  // aterizare parţială / alt scriitor:
+              break            // CRC-ul incremental nu mai poate fi corect. e.offset === pos = nimic
+            }                  // aterizat → refacem aceeaşi felie, cu CRC-ul încă valid.
             if (++tries > 5) throw e
             await new Promise((r) => setTimeout(r, Math.min(8000, 1000 * 2 ** (tries - 1))))
           }
         }
-        if (resynced) { setPct(pos); continue }
-        pos = end
+        if (landed) {
+          // CRC-ul se acumulează DOAR după ce felia a aterizat confirmat. Acumulat la citire (cum
+          // era), orice felie re-trimisă după un resync se număra de DOUĂ ori: commit-ul pica fals
+          // la integritate şi ştergea temp-ul bun — tot progresul pierdut pe o legătură instabilă.
+          if (doCrc) crc = crc32(crc, new Uint8Array(buf))
+          pos = end
+        }
         setPct(pos)
       } while (pos < file.size)
 
@@ -347,7 +374,12 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
 
   // punct de intrare: cere confirmare dacă suprascrie fișiere top-level existente
   function startUpload(items: UpItem[]) {
-    if (!listing || !items.length) return
+    if (!listing) return
+    // re-drop-ul unui fişier DEJA în zbor pornea un al doilea uploadOne pe acelaşi upload_id:
+    // cele două bucle îşi suprascriau reciproc uploadCtl (cancel-ul rămânea mort) şi îşi
+    // furau offset-ul prin resync-uri 409 — îl ignorăm, transferul existent continuă singur
+    items = items.filter((it) => !uploadCtl.current[it.rel])
+    if (!items.length) return
     const existing = new Set(listing.entries.map((e) => e.name))
     const collides = items.filter((it) => !it.rel.includes('/') && existing.has(it.rel))
     if (collides.length) setOverwrite({ items, count: collides.length })
