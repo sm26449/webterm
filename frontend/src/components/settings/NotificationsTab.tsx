@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { api, errText } from '../../lib/api'
+import { api, ApiError, errText } from '../../lib/api'
 import { useI18n } from '../../lib/i18n'
 import { field, heading } from './ui'
 
@@ -44,10 +44,24 @@ export default function NotificationsTab() {
         from_addr: c.from_addr || '', to_addr: c.to_addr || '', starttls: c.starttls, webhook: c.webhook || '' })
       setSmtpHasPw(c.has_password)
     }).catch(() => {})
+  // Orice schimbare SMTP/webhook cere parola contului (vezi save_smtp în gateway — SMTP-ul
+  // poartă codurile de email, deci e destinaţie de exfiltrare). Încercăm întâi fără: o salvare
+  // fără schimbări trece tăcut; la 401 cerem parola şi repetăm o dată.
+  async function postSmtp() {
+    try {
+      await api('/api/settings/smtp', { method: 'POST', body: JSON.stringify(smtp) })
+    } catch (err) {
+      if (!(err instanceof ApiError) || err.status !== 401) throw err
+      const acct = prompt(t('settings.reauthPrompt'))
+      if (acct === null) throw err          // anulat: eroarea originală rămâne vizibilă
+      await api('/api/settings/smtp', { method: 'POST',
+        body: JSON.stringify({ ...smtp, current_password: acct }) })
+    }
+  }
   async function saveSmtp() {
     setSmtpMsg(''); setSmtpErr(''); setBusy(true)
     try {
-      await api('/api/settings/smtp', { method: 'POST', body: JSON.stringify(smtp) })
+      await postSmtp()
       setSmtp((s) => ({ ...s, password: '' }))
       await loadSmtp()
       setSmtpMsg(t('settings.smtp.saved'))
@@ -60,7 +74,7 @@ export default function NotificationsTab() {
     try {
       // salvează ÎNTÂI ce e în formular: altfel testul rulează pe configurația veche şi fluxul
       // natural „completez → testez" testează altceva
-      await api('/api/settings/smtp', { method: 'POST', body: JSON.stringify(smtp) })
+      await postSmtp()
       setSmtp((s) => ({ ...s, password: '' }))
       await loadSmtp()
       await api('/api/settings/smtp/test', { method: 'POST' })

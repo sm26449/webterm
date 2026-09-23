@@ -841,7 +841,7 @@ class SmtpIn(BaseModel):
     to_addr: str = ""
     starttls: bool = True
     webhook: str = ""           # alerte şi în chat (Slack/Discord/Teams); independent de SMTP
-    current_password: str = ""  # cerut DOAR când se schimbă webhook-ul (destinaţie de exfiltrare)
+    current_password: str = ""  # cerut la ORICE schimbare (SMTP-ul poartă codurile de email)
 
 
 async def _set_setting(key: str, value) -> None:
@@ -1017,9 +1017,6 @@ async def save_smtp(body: SmtpIn, request: Request, user=Depends(security.requir
                                               "fd00:ec2::254"):
             raise ApiError(400, "settings.webhookBlocked",
                            "that address is the cloud metadata service, not a chat webhook")
-    if wh != (await _get_setting("alert_webhook") or ""):
-        await _require_reauth_for_secret(user, body.current_password,
-                                        "changing the alert webhook")
     # Aceeaşi poartă ca la webhook, altfel asimetria e greu de apărat: acolo blocăm adresa
     # de metadate, aici acceptam orice gazdă:port şi `/api/settings/smtp/test` o contacta la
     # comandă — un scaner de porturi din interiorul reţelei. Reţelele private rămân permise
@@ -1028,6 +1025,23 @@ async def save_smtp(body: SmtpIn, request: Request, user=Depends(security.requir
     if sh.strip("[]").lower() in ("169.254.169.254", "metadata.google.internal", "fd00:ec2::254"):
         raise ApiError(400, "settings.smtpBlocked",
                        "that address is the cloud metadata service, not an SMTP server")
+    # Auditul intern (2026-09-23): DOAR webhook-ul cerea re-autentificare — dar serverul SMTP e
+    # el însuşi o destinaţie de exfiltrare: pe el circulă codurile de email (al doilea factor de
+    # rezervă pentru conturile fără TOTP), iar gateway-ul se autentifică la el cu parola SMTP
+    # stocată. Un cookie furat putea repointa `smtp_host` la un releu ostil şi primea şi
+    # credenţialul, şi toate codurile viitoare. Orice schimbare de câmp cere parola contului;
+    # o salvare fără schimbări rămâne tăcută (formularul retrimite mereu tot).
+    new_vals = {"smtp_host": sh, "smtp_port": str(body.port), "smtp_user": body.user.strip(),
+                "smtp_from": body.from_addr.strip(), "smtp_to": body.to_addr.strip(),
+                "smtp_starttls": "1" if body.starttls else "0", "alert_webhook": wh}
+    changed = bool(body.password)          # parolă SMTP nouă = schimbare (nu o putem compara)
+    for k, v in new_vals.items():
+        if ((await _get_setting(k)) or "") != v:
+            changed = True
+            break
+    if changed:
+        await _require_reauth_for_secret(user, body.current_password,
+                                        "changing the alert/SMTP settings")
     await _set_setting("smtp_host", sh)
     await _set_setting("smtp_port", str(body.port))
     await _set_setting("smtp_user", body.user.strip())
