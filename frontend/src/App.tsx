@@ -20,7 +20,7 @@ import TabBar from './components/TabBar'
 import Toasts, { ToastItem } from './components/Toasts'
 import CopyToast from './components/CopyToast'
 import { errText, api, AppState, Host, Session, Snippet, setStepupHandler } from './lib/api'
-import { hostAt } from './lib/host'
+import { hostAt, hostColor } from './lib/host'
 import { useI18n } from './lib/i18n'
 import { ensureNotificationPermission, notify, registerToast } from './lib/notify'
 import { registerSecretPrompt, SecretAsk } from './lib/secretPrompt'
@@ -164,6 +164,18 @@ function MainApp() {
   // layout-ului primar/split, iar tastele dintr-un panou se pot difuza în TOATE.
   const [gridSids, setGridSids] = useState<string[]>([])
   const [broadcast, setBroadcast] = useState(false)
+  const GRID_MAX = 4
+  // selectorul de panouri: bifezi CARE sesiuni intră în grilă (2–GRID_MAX). Deschis din butonul
+  // „Grilă" şi din „Editează" cât grila e activă. Selecţia temporară trăieşte aici până la confirm.
+  const [gridPicker, setGridPicker] = useState(false)
+  const [pickerSel, setPickerSel] = useState<string[]>([])
+  const openGridPicker = () => {
+    setPickerSel(gridSids.length >= 2 ? gridSids : openTabs.slice(0, GRID_MAX))
+    setGridPicker(true)
+  }
+  const togglePick = (sid: string) => setPickerSel((prev) =>
+    prev.includes(sid) ? prev.filter((s) => s !== sid)
+      : prev.length >= GRID_MAX ? prev : [...prev, sid])
   // send-ul fiecărui panou montat, indexat pe sid — SessionView îl înregistrează singur
   const sendMap = useRef(new Map<string, (d: string | Uint8Array) => void>())
   const broadcastRef = useRef(false)
@@ -926,13 +938,17 @@ function MainApp() {
         {(openTabs.length >= 2 || gridActive) && (
           <div className="flex shrink-0 items-center gap-2 border-b border-ink-800 bg-ink-900/60 px-3 py-1 text-xs">
             {!gridActive ? (
-              <button onClick={() => { setGridSids(openTabs.slice(0, 4)); setBroadcast(false) }}
+              <button onClick={openGridPicker}
                 className="rounded px-2 py-0.5 font-medium text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800">
                 {t('grid.enter')}
               </button>
             ) : (
               <>
                 <span className="font-medium text-slate-400">{t('grid.label', { n: gridPanes.length })}</span>
+                <button onClick={openGridPicker}
+                  className="rounded px-2 py-0.5 text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800">
+                  {t('grid.edit')}
+                </button>
                 <button onClick={() => setBroadcast((b) => !b)}
                   className={`rounded px-2 py-0.5 font-semibold ring-1 ${broadcast
                     ? 'bg-amber-500 text-ink-950 ring-amber-500'
@@ -1104,6 +1120,52 @@ function MainApp() {
           onSubmit={(v) => { secretReq.resolve(v); setSecretReq(null) }}
           onCancel={() => { secretReq.resolve(null); setSecretReq(null) }}
         />
+      )}
+      {/* selector de panouri pentru grilă: bifezi care sesiuni deschise intră (2–4) */}
+      {gridPicker && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={() => setGridPicker(false)}>
+          <div className="glass flex max-h-[80vh] w-full max-w-md flex-col rounded-2xl" onClick={(e) => e.stopPropagation()}>
+            <header className="border-b border-ink-800 px-4 py-3">
+              <h2 className="text-base font-semibold">{t('grid.pickTitle')}</h2>
+              <p className="mt-0.5 text-xs text-slate-400">{t('grid.pickHint', { max: GRID_MAX })}</p>
+            </header>
+            <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
+              {openTabs.map((sid) => {
+                const s = sessions.find((x) => x.id === sid)
+                if (!s) return null
+                const h = hosts.find((x) => x.id === s.host_id)
+                const checked = pickerSel.includes(sid)
+                const atCap = !checked && pickerSel.length >= GRID_MAX
+                return (
+                  <label key={sid}
+                    className={`flex items-center gap-2.5 rounded-lg px-2.5 py-2 ${atCap ? 'opacity-40' : 'cursor-pointer hover:bg-ink-800/60'}`}>
+                    <input type="checkbox" checked={checked} disabled={atCap} onChange={() => togglePick(sid)}
+                      className="h-4 w-4 shrink-0 accent-sky-500" />
+                    <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: h ? hostColor(h) : '#64748b' }} />
+                    <span className="min-w-0 flex-1 truncate text-sm text-slate-200">{s.title}</span>
+                    <span className="shrink-0 truncate font-mono text-[11px] text-slate-500">{h?.name}</span>
+                  </label>
+                )
+              })}
+            </div>
+            <footer className="flex items-center gap-2 border-t border-ink-800 px-4 py-3">
+              <span className="text-xs text-slate-500">{t('grid.pickCount', { n: pickerSel.length, max: GRID_MAX })}</span>
+              <button onClick={() => setGridPicker(false)}
+                className="ml-auto rounded-lg px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800">
+                {t('common.cancel')}
+              </button>
+              <button disabled={pickerSel.length < 2}
+                onClick={() => {
+                  // păstrează ordinea din tab-uri, pentru un layout previzibil
+                  setGridSids(openTabs.filter((sid) => pickerSel.includes(sid)))
+                  setGridPicker(false)
+                }}
+                className="rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-40">
+                {t('grid.pickConfirm')}
+              </button>
+            </footer>
+          </div>
+        </div>
       )}
       {/* anunțuri pentru cititoarele de ecran (schimbare de tab / context) */}
       <div aria-live="polite" className="sr-only">{srAnnounce}</div>
