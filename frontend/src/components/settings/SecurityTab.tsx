@@ -7,6 +7,7 @@ import { fmtTs } from '../../lib/tz'
 import { KeyIcon } from '../Icons'
 import { copyText } from '../../lib/clipboard'
 import { downloadBlob, field, heading } from './ui'
+import { askSecret } from '../../lib/secretPrompt'
 
 interface Passkey {
   id: number
@@ -197,12 +198,12 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
   }
   async function downloadSigningKey() {
     setSignErr(''); setSignMsg('')
-    const pass = prompt(t('settings.sign.backupPassPrompt'))
+    const pass = await askSecret(t('settings.sign.backupPassPrompt'))
     if (pass === null) return
     if (pass.length < 8) { setSignErr(t('settings.passMin8')); return }
     setSignBusy(true)
     try {
-      const acct = prompt(t('settings.reauthPrompt'))
+      const acct = await askSecret(t('settings.reauthPrompt'))
       if (acct === null) { setSignBusy(false); return }
       await downloadBlob('/api/signing/backup', { passphrase: pass, current_password: acct },
         'webterm-signing-key.wtbk')
@@ -230,7 +231,7 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
     setRecoveryCodes(null)
     // M1: înrolarea 2FA e schimbare de credențiale — cere parola (ca un cookie furat să nu
     // poată înrola un TOTP atacator). O ținem pentru pasul de activare din acelaşi flux.
-    const password = prompt(t('settings.totp.enrollPrompt'))
+    const password = await askSecret(t('settings.totp.enrollPrompt'))
     if (password === null) return
     try {
       const r = await api<{ secret: string; otpauth_uri: string }>('/api/totp/setup', {
@@ -309,7 +310,7 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
     if (name === null) return
     // M1: înrolarea unui passkey e o schimbare de credențiale — cerem parola contului
     // ca un cookie furat să nu poată adăuga un factor persistent pe ascuns.
-    const password = prompt(t('settings.passkeyAddPrompt'))
+    const password = await askSecret(t('settings.passkeyAddPrompt'))
     if (password === null) return
     setBusy(true)
     try {
@@ -333,7 +334,7 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
 
   async function remove(id: number) {
     // M1: scoaterea unui factor rezistent la phishing e schimbare de credențiale — cere parola.
-    const password = prompt(t('settings.passkeyRemovePrompt'))
+    const password = await askSecret(t('settings.passkeyRemovePrompt'))
     if (password === null) return
     try {
       await withSecondFactor((extra) => api(`/api/webauthn/credentials/${id}`, {

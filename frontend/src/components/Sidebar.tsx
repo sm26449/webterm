@@ -298,7 +298,15 @@ export default function Sidebar(props: {
           </div>
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-1.5">
-              <span className="truncate text-sm font-medium">{host.name}</span>
+              {/* acţiunea principală stă pe NUMELE hostului, buton adevărat: rândul întreg
+                  rămâne doar ţintă de mouse. `role="button"` pe div ar imbrica controalele
+                  din rând (⋯, taguri, ✎) — exact violarea pe care poarta axe o prinde.
+                  Acelaşi tipar ca pe cardurile din Dashboard. */}
+              <button type="button"
+                onClick={(e) => { e.stopPropagation(); props.onSelectHost(host.id) }}
+                className="min-w-0 truncate rounded text-left text-sm font-medium focus:outline-none focus-visible:ring-1 focus-visible:ring-sky-500">
+                {host.name}
+              </button>
               {liveCount > 0 && (
                 <span className="shrink-0 rounded-full bg-emerald-500/15 px-1.5 text-[10px] font-semibold wt-good"
                   title={t('sidebar.liveSessions', { count: liveCount })}>
@@ -341,7 +349,7 @@ export default function Sidebar(props: {
                   onClick={(e) => { e.stopPropagation(); editNote(host) }}
                   title={t('sidebar.noteAria', { name: host.name })}
                   aria-label={t('sidebar.noteAria', { name: host.name })}
-                  className="shrink-0 rounded p-0.5 opacity-0 hover:text-slate-200 focus-visible:opacity-100 group-hover:opacity-100"
+                  className="shrink-0 rounded p-0.5 opacity-0 hover:text-slate-200 focus-visible:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100"
                 ><NoteIcon /></button>
               </div>
             )}
@@ -495,8 +503,10 @@ export default function Sidebar(props: {
           >
             <GearIcon />
             {(props.backupReady || props.signingMissing || props.signingLocked) && (
-              <span aria-label={props.signingLocked ? 'signing key locked — agents cannot update'
-                : props.signingMissing ? 'signing key missing' : 'backup gata'}
+              // decorativ: starea e deja în title-ul TRADUS al butonului părinte; aria-label pe
+              // un span non-interactiv e oricum ignorat de cititoare (şi era hard-codat, cu
+              // engleza şi româna amestecate — scăpa testului i18n, care prinde doar literali)
+              <span aria-hidden="true"
                 className={`absolute right-1 top-1 h-2 w-2 rounded-full ring-2 ring-ink-900 ${
                   props.signingLocked ? 'bg-rose-500' : props.signingMissing ? 'bg-amber-400' : 'bg-sky-400'}`} />
             )}
@@ -572,6 +582,7 @@ export default function Sidebar(props: {
             const inAll = visible.filter((h) => (h.folder || '') === folder)
             const inFolder = [...inAll.filter((h) => reachState(h) !== 'offline'),
                               ...inAll.filter((h) => reachState(h) === 'offline')]
+            const nDown = inFolder.filter((h) => reachState(h) === 'offline').length
             const collapsed = collapsedFolders[folder]
             // arată un antet și pentru hosturile fără folder, DAR doar când există
             // și grupuri cu nume (pe o listă complet plată n-are rost o etichetă)
@@ -593,12 +604,17 @@ export default function Sidebar(props: {
                         onClick={() => renameGroup(folder)}
                         title={t('sidebar.renameGroupAria', { folder })}
                         aria-label={t('sidebar.renameGroupAria', { folder })}
-                        className="shrink-0 rounded p-0.5 opacity-0 hover:text-slate-200 focus-visible:opacity-100 group-hover/folder:opacity-100"
+                        className="shrink-0 rounded p-0.5 opacity-0 hover:text-slate-200 focus-visible:opacity-100 group-hover/folder:opacity-100 [@media(hover:none)]:opacity-100"
                       >
                         <NoteIcon />
                       </button>
                     )}
-                    <span className="shrink-0 text-slate-400">{inFolder.length}</span>
+                    {/* cu host-uri căzute în grup, contorul devine „vii/total" — altfel un grup
+                        PLIAT ascundea complet că are ceva jos */}
+                    <span className="shrink-0 text-slate-400"
+                      title={nDown > 0 ? t('sidebar.groupDownCount', { down: nDown }) : undefined}>
+                      {nDown > 0 ? `${inFolder.length - nDown}/${inFolder.length}` : inFolder.length}
+                    </span>
                   </div>
                 )}
                 {!collapsed && inFolder.map(renderHost)}

@@ -179,6 +179,7 @@ const en: Lang = {
     'sidebar.filterByTag': "Filter by tag: {tag}",
     'sidebar.promptFolder': "Folder (leave empty for “no folder”):",
     'sidebar.downFor': "offline for {ago}",
+    'sidebar.groupDownCount': "{down} host(s) down in this group",
     'sidebar.downNoHeartbeat': "offline",
     'sidebar.promptNote': "Note for {name} (why is it down, what happened?):",
     'sidebar.noteAria': "Add or edit the note for {name}",

@@ -23,6 +23,8 @@ import { errText, api, AppState, Host, Session, Snippet, setStepupHandler } from
 import { hostAt } from './lib/host'
 import { useI18n } from './lib/i18n'
 import { ensureNotificationPermission, notify, registerToast } from './lib/notify'
+import { registerSecretPrompt, SecretAsk } from './lib/secretPrompt'
+import SecretPromptModal from './components/SecretPromptModal'
 import { markBooted } from './lib/failsafe'
 import { useMetricsTick } from './lib/metrics'
 import { matchShortcut, ShortcutId } from './lib/shortcuts'
@@ -258,6 +260,20 @@ function MainApp() {
       setToasts((t) => [...t, { id, message, kind }])
       setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 6000)
     })
+  }, [])
+
+  // gazda pentru askSecret(): acelaşi tipar imperativ ca credReq (promise + modal).
+  // O cerere nouă peste una deschisă o anulează pe cea veche (resolve null) — fluxurile
+  // sunt secvenţiale, dar un promise agăţat pentru totdeauna ar bloca apelantul.
+  const [secretReq, setSecretReq] = useState<{ ask: SecretAsk; resolve: (v: string | null) => void } | null>(null)
+  useEffect(() => {
+    registerSecretPrompt((ask) => new Promise((resolve) => {
+      setSecretReq((prev) => {
+        prev?.resolve(null)
+        return { ask, resolve }
+      })
+    }))
+    return () => registerSecretPrompt(null)
   }, [])
 
   // Revenire din step-up SSO (redirect la IdP → callback → /?stepup=ok): restaurăm tab-ul de
@@ -984,6 +1000,13 @@ function MainApp() {
           submitLabel={credReq.submitLabel}
           onSubmit={(v) => { credReq.resolve(v); setCredReq(null) }}
           onCancel={() => { credReq.resolve(null); setCredReq(null) }}
+        />
+      )}
+      {secretReq && (
+        <SecretPromptModal
+          ask={secretReq.ask}
+          onSubmit={(v) => { secretReq.resolve(v); setSecretReq(null) }}
+          onCancel={() => { secretReq.resolve(null); setSecretReq(null) }}
         />
       )}
       {/* anunțuri pentru cititoarele de ecran (schimbare de tab / context) */}

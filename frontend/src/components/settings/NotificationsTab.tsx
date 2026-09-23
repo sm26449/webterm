@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api, ApiError, errText } from '../../lib/api'
+import { askSecret } from '../../lib/secretPrompt'
 import { useI18n } from '../../lib/i18n'
 import { field, heading } from './ui'
 
@@ -17,15 +18,18 @@ export default function NotificationsTab() {
   // praguri de alertă pe resurse
   const [thresholds, setThresholds] = useState({ cpu: 90, mem: 90, disk: 90 })
   const [alertMsg, setAlertMsg] = useState('')
+  const [alertErr, setAlertErr] = useState('')
   const loadThresholds = () =>
     api<{ cpu: number; mem: number; disk: number }>('/api/settings/alerts').then(setThresholds).catch(() => {})
   async function saveThresholds() {
-    setAlertMsg(''); setSmtpErr(''); setBusy(true)
+    // eroarea lângă butonul ei: setSmtpErr o afişa cu DOUĂ secţiuni mai sus, lângă butoanele
+    // SMTP — apăsai „salvează praguri" şi eroarea apărea în altă parte (sau în afara ecranului)
+    setAlertMsg(''); setAlertErr(''); setBusy(true)
     try {
       await api('/api/settings/alerts', { method: 'POST', body: JSON.stringify(thresholds) })
       setAlertMsg(t('settings.thresholdsSaved'))
     } catch (err) {
-      setSmtpErr(errText(err, t) || t('settings.error'))
+      setAlertErr(errText(err, t) || t('settings.error'))
     } finally { setBusy(false) }
   }
 
@@ -52,7 +56,7 @@ export default function NotificationsTab() {
       await api('/api/settings/smtp', { method: 'POST', body: JSON.stringify(smtp) })
     } catch (err) {
       if (!(err instanceof ApiError) || err.status !== 401) throw err
-      const acct = prompt(t('settings.reauthPrompt'))
+      const acct = await askSecret(t('settings.reauthPrompt'))
       if (acct === null) throw err          // anulat: eroarea originală rămâne vizibilă
       await api('/api/settings/smtp', { method: 'POST',
         body: JSON.stringify({ ...smtp, current_password: acct }) })
@@ -218,6 +222,7 @@ export default function NotificationsTab() {
           {t('settings.alerts.saveThresholds')}
         </button>
         {alertMsg && <span className="text-sm wt-good">{alertMsg}</span>}
+        {alertErr && <span className="text-sm wt-danger">{alertErr}</span>}
       </div>
     </div>
   )

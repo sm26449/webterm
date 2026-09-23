@@ -181,6 +181,7 @@ const ro: Lang = {
     'sidebar.filterByTag': "Filtrează după etichetă: {tag}",
     'sidebar.promptFolder': "Folder (lasă gol pentru „fără folder”):",
     'sidebar.downFor': "offline de {ago}",
+    'sidebar.groupDownCount': "{down} host(uri) căzute în acest grup",
     'sidebar.downNoHeartbeat': "offline",
     'sidebar.promptNote': "Notă pentru {name} (de ce e jos, ce s-a întâmplat?):",
     'sidebar.noteAria': "Adaugă sau editează nota pentru {name}",

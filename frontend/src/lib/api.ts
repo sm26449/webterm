@@ -1,3 +1,5 @@
+import { askSecret } from './secretPrompt'
+
 export interface WatermarkConfig {
   enabled: boolean
   content: string      // template cu ${email} ${host} ${date} ${time}
@@ -178,7 +180,9 @@ export async function withSecondFactor<T>(t: (k: string, v?: Record<string, stri
     const key = err.code === 'passkey.totpRequired' ? 'totp_code'
       : (err.code === 'account.codeRequired' && !opts?.totpOnly) ? 'email_code' : ''
     if (!key) throw err
-    const code = prompt(key === 'totp_code' ? t('settings.passkeyCodePrompt') : errText(err, t))
+    // nemascat: codurile trăiesc 30s şi să vezi ce tastezi ajută — parolele folosesc masca
+    const code = await askSecret(key === 'totp_code' ? t('settings.passkeyCodePrompt') : errText(err, t),
+                                 { masked: false })
     if (code === null) throw err
     return await send({ [key]: code.trim() })
   }

@@ -4,6 +4,7 @@ import { useI18n } from '../../lib/i18n'
 import { fmtTs } from '../../lib/tz'
 import { copyText } from '../../lib/clipboard'
 import { downloadBlob, field, heading } from './ui'
+import { askSecret } from '../../lib/secretPrompt'
 
 // Backup & restore: arhivă criptată descărcabilă, backup automat programat, copii stocate pe
 // server, copie off-host (OAuth Google Drive/Dropbox sau SFTP/FTPS direct) şi restore din .wtbk.
@@ -207,12 +208,12 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
 
   async function downloadStored(name: string) {
     setBkMsg(''); setBkErr('')
-    const pass = prompt(t('settings.backup.encPassPrompt'))
+    const pass = await askSecret(t('settings.backup.encPassPrompt'))
     if (pass === null) return
     if (pass.length < 8) { setBkErr(t('settings.passMin8')); return }
     setBkBusy(true)
     try {
-      const acct = prompt(t('settings.reauthPrompt'))
+      const acct = await askSecret(t('settings.reauthPrompt'))
       if (acct === null) { setBkBusy(false); return }
       await downloadBlob(`/api/backup/stored/${encodeURIComponent(name)}/download`,
         { passphrase: pass, current_password: acct }, name + '.wtbk')

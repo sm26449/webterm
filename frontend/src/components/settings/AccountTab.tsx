@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useState } from 'react'
 import { api, ApiError, errText, withSecondFactor as withSecondFactorT } from '../../lib/api'
+import { askSecret } from '../../lib/secretPrompt'
 import { useI18n } from '../../lib/i18n'
 import { field, heading } from './ui'
 
@@ -77,8 +78,9 @@ export default function AccountTab(props: { email?: string | null; onAccountChan
   }
 
   async function removeUser(u: UserRow) {
-    // ştergerea unui cont taie şi sesiunile lui: e o revocare, nu o ascundere
-    const pw = window.prompt(t('settings.users.deleteConfirm', { email: u.email }))
+    // ştergerea unui cont taie şi sesiunile lui: e o revocare, nu o ascundere.
+    // askSecret, nu window.prompt: aici se tastează parola TA — mascată, ca peste tot.
+    const pw = await askSecret(t('settings.users.deleteConfirm', { email: u.email }))
     if (!pw) return
     setUsersErr(''); setUsersMsg('')
     try {

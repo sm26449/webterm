@@ -212,7 +212,13 @@ export default function Dashboard(props: {
                             <span className="block truncate font-mono text-[11px] text-slate-500">{protoLabel(h)} · {hostAt(h)}</span>
                             {health && (
                               <span className="flex items-center gap-1.5">
-                                <span className="min-w-0 flex-1 truncate font-mono text-[11px] tabular-nums text-slate-500">{health}</span>
+                                <span className="min-w-0 flex-1 truncate font-mono text-[11px] tabular-nums text-slate-500">
+                                  {health}
+                                  {/* nota apare şi aici, nu doar în sidebar: „de ce e jos" trebuie
+                                      să te găsească pe orice ecran te uiţi după host */}
+                                  {!h.online && h.connection_type === 'agent' && h.note
+                                    ? <span className="italic" title={h.note}> · {h.note}</span> : null}
+                                </span>
                                 {/* tendința, nu doar cifra: „CPU 43%" nu-ți spune
                                     dacă urcă spre 100 sau tocmai a coborât de acolo */}
                                 {hist && hist.cpu.length > 1 && (
