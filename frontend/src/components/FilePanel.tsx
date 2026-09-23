@@ -1,8 +1,9 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { errText, api, withStepup, Host } from '../lib/api'
 import { getCwd } from '../lib/cwd'
 import { useI18n } from '../lib/i18n'
 import { notify } from '../lib/notify'
+import { uploadStore, uploadKey, uploadRel, uploadHost, UploadState, UploadCtl } from '../lib/uploadStore'
 import { uiLocale } from '../lib/tz'
 import {
   DownloadIcon, FileIcon, FolderIcon, LinkIcon, PencilIcon,
@@ -112,8 +113,14 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
   const [path, setPath] = useState('~')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
-  const [uploads, setUploads] = useState<Record<string, { pct: number; state: 'up' | 'done' | 'err' }>>({})
-  const uploadCtl = useRef<Record<string, { xhr: XMLHttpRequest | null; cancelled: boolean; dest: string; uid: string; lsKey: string }>>({})
+  // starea upload-urilor stă în uploadStore (nivel de modul), NU în componentă: transferul
+  // supravieţuieşte închiderii panoului, iar redeschiderea îl arată în mers, cu cancel funcţional
+  const uploadsAll = useSyncExternalStore(uploadStore.subscribe, uploadStore.snapshot)
+  const uploads = useMemo(() => {
+    const out: Record<string, UploadState> = {}
+    uploadsAll.forEach((v, k) => { if (uploadHost(k) === props.host.id) out[uploadRel(k)] = v })
+    return out
+  }, [uploadsAll, props.host.id])
   const [overwrite, setOverwrite] = useState<{ items: UpItem[]; count: number } | null>(null)
   const [drag, setDrag] = useState(false)
   const [editing, setEditing] = useState<{ path: string; name: string } | null>(null)
@@ -266,10 +273,14 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
     const hid = props.host.id
     const { uid, lsKey } = uploadIdFor(dest, file)
     const q = `path=${encodeURIComponent(dest)}&upload_id=${uid}`
-    const ctl = { xhr: null as XMLHttpRequest | null, cancelled: false, dest, uid, lsKey }
-    uploadCtl.current[key] = ctl
-    const setPct = (bytes: number) =>
-      setUploads((u) => ({ ...u, [key]: { pct: file.size ? Math.round((bytes / file.size) * 100) : 100, state: 'up' } }))
+    const sKey = uploadKey(hid, key)
+    const ctl: UploadCtl = { xhr: null, cancelled: false, dest, uid, lsKey }
+    uploadStore.setCtl(sKey, ctl)
+    let lastPct = 0
+    const setPct = (bytes: number) => {
+      lastPct = file.size ? Math.round((bytes / file.size) * 100) : 100
+      uploadStore.set(sKey, { pct: lastPct, state: 'up' })
+    }
 
     let offset = 0
     try {
@@ -348,37 +359,44 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
       const crcQ = doCrc ? `&crc32=${crc >>> 0}` : ''
       await withStepup(hid, () => api(`/api/hosts/${hid}/fs/upload/commit?${q}${crcQ}`, { method: 'POST' }))
       try { localStorage.removeItem(lsKey) } catch { /* */ }
-      setUploads((u) => ({ ...u, [key]: { pct: 100, state: 'done' } }))
+      uploadStore.set(sKey, { pct: 100, state: 'done' })
+      // rândul „✓" dispare singur după un timp — store-ul e global acum, altfel s-ar aduna la infinit
+      setTimeout(() => {
+        if (uploadStore.snapshot().get(sKey)?.state === 'done') uploadStore.remove(sKey)
+      }, 20_000)
     } catch (e) {
       if (!ctl.cancelled) {   // temp-ul RĂMÂNE pe host → re-tragi același fișier și reia de unde a rămas
-        setUploads((u) => ({ ...u, [key]: { pct: u[key]?.pct ?? 0, state: 'err' } }))
+        uploadStore.set(sKey, { pct: lastPct, state: 'err' })
         notify(t('files.uploadFailed'), `${key}: ${errText(e, t) || (e instanceof Error ? e.message : '')}`, 'warn')
       }
     } finally {
-      delete uploadCtl.current[key]
+      uploadStore.delCtl(sKey)
     }
   }
 
-  // anulare: oprește chunk-ul în zbor și șterge temp-ul de pe host (nu mai e resumabil)
+  // anulare: oprește chunk-ul în zbor și șterge temp-ul de pe host (nu mai e resumabil).
+  // Pe un rând terminat (✓/✗) nu mai există ctl — doar curăţă rândul din listă.
   function cancelUpload(key: string) {
-    const c = uploadCtl.current[key]
-    if (!c) return
-    c.cancelled = true
-    c.xhr?.abort()
-    fetch(`/api/hosts/${props.host.id}/fs/upload?path=${encodeURIComponent(c.dest)}&upload_id=${c.uid}`,
-      { method: 'DELETE', credentials: 'same-origin' }).catch(() => {})
-    try { localStorage.removeItem(c.lsKey) } catch { /* */ }
-    setUploads((u) => { const n = { ...u }; delete n[key]; return n })
-    delete uploadCtl.current[key]
+    const sKey = uploadKey(props.host.id, key)
+    const c = uploadStore.ctl(sKey)
+    if (c) {
+      c.cancelled = true
+      c.xhr?.abort()
+      fetch(`/api/hosts/${props.host.id}/fs/upload?path=${encodeURIComponent(c.dest)}&upload_id=${c.uid}`,
+        { method: 'DELETE', credentials: 'same-origin' }).catch(() => {})
+      try { localStorage.removeItem(c.lsKey) } catch { /* */ }
+      uploadStore.delCtl(sKey)
+    }
+    uploadStore.remove(sKey)
   }
 
   // punct de intrare: cere confirmare dacă suprascrie fișiere top-level existente
   function startUpload(items: UpItem[]) {
     if (!listing) return
     // re-drop-ul unui fişier DEJA în zbor pornea un al doilea uploadOne pe acelaşi upload_id:
-    // cele două bucle îşi suprascriau reciproc uploadCtl (cancel-ul rămânea mort) şi îşi
+    // cele două bucle îşi suprascriau reciproc ctl-ul (cancel-ul rămânea mort) şi îşi
     // furau offset-ul prin resync-uri 409 — îl ignorăm, transferul existent continuă singur
-    items = items.filter((it) => !uploadCtl.current[it.rel])
+    items = items.filter((it) => !uploadStore.ctl(uploadKey(props.host.id, it.rel)))
     if (!items.length) return
     const existing = new Set(listing.entries.map((e) => e.name))
     const collides = items.filter((it) => !it.rel.includes('/') && existing.has(it.rel))
@@ -400,7 +418,7 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
       try { await api(`/api/hosts/${props.host.id}/fs/mkdir`, { method: 'POST', body: JSON.stringify({ path: join(listing.path, d), parents: true }) }) } catch { /* există deja */ }
     }
     for (const it of items) {
-      setUploads((u) => ({ ...u, [it.rel]: { pct: 0, state: 'up' } }))
+      uploadStore.set(uploadKey(props.host.id, it.rel), { pct: 0, state: 'up' })
       await uploadOne(join(listing.path, it.rel), it.rel, it.file)
     }
     setBusy(false)
@@ -666,9 +684,10 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
                   <span className={`ml-auto tabular-nums ${u.state === 'done' ? 'wt-good' : u.state === 'err' ? 'wt-danger' : 'wt-link'}`}>
                     {u.state === 'up' ? `${u.pct}%` : u.state === 'done' ? '✓' : '✗'}
                   </span>
-                  {u.state === 'up' && (
-                    <button onClick={() => cancelUpload(name)} className="shrink-0 rounded px-0.5 text-slate-500 hover:text-rose-300" title={t('files.cancelUpload')}>✕</button>
-                  )}
+                  {/* pe „up" anulează transferul; pe ✓/✗ doar curăţă rândul (lista persistă
+                      în store-ul global acum, altfel erorile ar rămâne blocate pe ecran) */}
+                  <button onClick={() => cancelUpload(name)} className="shrink-0 rounded px-0.5 text-slate-500 hover:text-rose-300"
+                    title={u.state === 'up' ? t('files.cancelUpload') : t('files.dismissUpload')}>✕</button>
                 </div>
                 {/* bară de progres: se umple pe octeți (XHR onprogress), colorată după stare */}
                 <div className="mt-0.5 h-1 w-full overflow-hidden rounded-full bg-ink-800">

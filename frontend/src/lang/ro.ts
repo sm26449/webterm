@@ -471,6 +471,7 @@ const ro: Lang = {
     'files.overwrite.other': "{count} de fișiere există deja aici. Suprascrii?",
     'files.overwrite': "Suprascrie",
     'files.cancelUpload': "Anulează",
+    'files.dismissUpload': "Șterge din listă",
     'files.loadingEditor': "Se încarcă editorul…",
     'files.dlBigConfirm': "{name} are {size}. Îl descarci?",
     'files.uploadFailed': "Upload eșuat",

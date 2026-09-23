@@ -463,6 +463,7 @@ const en: Lang = {
     'files.overwrite.other': "{count} files already exist here. Overwrite?",
     'files.overwrite': "Overwrite",
     'files.cancelUpload': "Cancel",
+    'files.dismissUpload': "Clear from list",
     'files.loadingEditor': "Loading editor…",
     'files.dlBigConfirm': "{name} is {size}. Download it?",
     'files.uploadFailed': "Upload failed",
