@@ -116,6 +116,16 @@ class FakeAgent(core.AgentConnection):
         reader, writer = await asyncio.open_connection(host, port)
         return FakeForwardStream(reader, writer)
 
+    # reap/kill se fac prin AgentConnection.request (control frame către agentul real).
+    # Aici nu există agent real — doar tunelul telnet local — deci sunt no-op. (Altfel
+    # request→self._req_id ar da AttributeError, iar on_exit ar sări teardown-ul: cursă
+    # care flake-uia testul, expusă de schimbarea de timing din filtrul OSC C1.)
+    async def reap(self, sid) -> None:
+        pass
+
+    async def kill(self, sid) -> None:
+        pass
+
 
 class FakeHub:
     def __init__(self):
@@ -198,6 +208,7 @@ async def main():
     class _Client:
         def __init__(self):
             self.last_interaction = 0.0
+            self.is_owner = True        # operatorul autentificat tastând la prompt (vezi handle_input)
     cli = _Client()
     hub2 = core.hubs[tsid]
     src2 = core.session_sources[tsid]
