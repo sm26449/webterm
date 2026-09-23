@@ -232,6 +232,32 @@ check("OSC 0 forma C1 (titlu) pass-through, normalizat la 7-bit",
 f = osc()
 check("0xC2 danglant la final ţinut (stateful)", f.filter(b"hi\xc2") == b"hi")
 
+# ── Desync ESC + C1 (auditul intern 2026-09-23): un C1 e tranziţie „anywhere" în parserul VT,
+#    deci ESC urmat de 0xC2 0x9D porneşte un OSC — dar ramura pass-through „alt escape" emitea
+#    ESC+0xC2 brut şi 0x9D scăpa neatins. La fel după un OSC benign terminat cu ESC. Ambele
+#    scurgeau OSC 52 (clipboard) verbatim, confirmate cu PoC pe filtrul de dinainte de fix.
+f = osc()
+check("ESC + OSC 52 forma C1 eliminat (desync pe ramura de escape)",
+      f.filter(b"\x1b\xc2\x9d52;c;U0VDUkVU\x07text") == b"text")
+f = osc()
+out = f.filter(b"\x1b]0;title\x1b\xc2\x9d52;c;X\x07after")
+check("OSC benign + ESC + OSC 52 C1: benign emis, 52 eliminat",
+      b"52;c;" not in out and b"\x1b]0;title" in out and out.endswith(b"after"), out)
+# fragmentat byte-cu-byte peste ambele găuri
+f = osc()
+acc = bytearray()
+for byte in b"\x1b\xc2\x9d52;c;X\x07t":
+    acc += f.filter(bytes((byte,)))
+check("ESC + OSC 52 C1 fragmentat byte-cu-byte tot eliminat", bytes(acc) == b"t", bytes(acc))
+# ESC + caracter UTF-8 legit după: pass-through fidel (ESC, 0xC2, 0xA0)
+f = osc()
+check("ESC + 0xC2 0xA0 (nbsp) legit trece fidel",
+      f.filter(b"\x1b\xc2\xa0x") == b"\x1b\xc2\xa0x")
+# lanţ 0xC2 0xC2 0x9D după ESC: perechea a doua e C1-OSC → eliminat
+f = osc()
+check("ESC + 0xC2 0xC2 0x9D: OSC 52 tot eliminat",
+      b"52;c;" not in f.filter(b"\x1b\xc2\xc2\x9d52;c;X\x07t"))
+
 # CSI/SGR (culori) neatins
 f = osc()
 sgr = b"\x1b[31mRED\x1b[0m"

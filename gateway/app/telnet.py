@@ -266,6 +266,9 @@ _F_OSC = 2               # în corpul OSC (buffer în _buf), aștept terminator 
 _F_OSC_ESC = 3           # în OSC, am văzut ESC (posibil ST = ESC '\')
 _F_C1 = 4                # am văzut 0xC2 (normal), aştept a doua jumătate (posibil OSC C1)
 _F_OSC_C1 = 5            # în OSC, am văzut 0xC2, aştept a doua jumătate (posibil ST C1)
+_F_ESC_C1 = 6            # ESC „atârnat" + 0xC2: un C1 preemptează escape-ul (VT500: C1 e
+                         # tranziţie „anywhere"), deci ESC 0xC2 0x9D pornea un OSC pe care
+                         # filtrul îl scăpa neatins (ramura pass-through emitea ESC+0xC2 brut)
 
 
 class OscFilter:
@@ -294,6 +297,8 @@ class OscFilter:
                     self._st = _F_OSC
                 elif b == _ESC:                  # ESC ESC → rămânem în ESC
                     out.append(_ESC)
+                elif b == _C2:                   # posibil C1 după ESC — NU pass-through:
+                    self._st = _F_ESC_C1         # 0xC2 0x9D ar porni un OSC peste escape
                 else:                            # alt escape (CSI etc.) — pass-through
                     out.append(_ESC)
                     out.append(b)
@@ -320,6 +325,8 @@ class OscFilter:
                     self._st = _F_NORMAL
                     if b == _ESC:
                         self._st = _F_ESC
+                    elif b == _C2:               # posibil C1 imediat după — aceeaşi gaură ca
+                        self._st = _F_C1         # la _F_ESC: nu emitem 0xC2 brut, îl pândim
                     else:
                         out.append(b)
             elif st == _F_C1:
@@ -345,6 +352,20 @@ class OscFilter:
                     self._st = _F_OSC
                     if len(self._buf) > _OSC_MAX:
                         self._buf = bytearray()
+                        self._st = _F_NORMAL
+            elif st == _F_ESC_C1:
+                if b == _C1_OSC:                 # ESC + 0xC2 0x9D: C1-OSC preemptează escape-ul
+                    self._buf = bytearray((_ESC, _RBRACKET))   # (ESC-ul atârnat se aruncă,
+                    self._st = _F_OSC                          # exact ce face şi terminalul)
+                else:                            # nu era C1-OSC: pass-through fidel ESC, 0xC2, b
+                    out.append(_ESC)
+                    out.append(_C2)
+                    if b == _C2:                 # alt 0xC2 → pândim perechea următoare
+                        self._st = _F_C1
+                    elif b == _ESC:
+                        self._st = _F_ESC
+                    else:
+                        out.append(b)
                         self._st = _F_NORMAL
         return bytes(out)
 
