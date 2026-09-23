@@ -7,6 +7,55 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [2.3.2] — 2026-09-23 · agent (49)
+
+A seven-day retrospective inspection: three adversarial reviews (upload protocol, the 2.3.1
+security fixes themselves, frontend) plus a cross-cutting sweep. Every critical finding was
+re-verified against code or a live PoC before fixing. Gateway/interface only; agent unchanged.
+
+### Security
+
+- **The OSC filter closes two ESC+C1 desync bypasses.** A C1 control is an "anywhere" transition
+  in the VT parser, so `ESC` followed by `0xC2 0x9D` still starts an OSC — but the filter's
+  pass-through branch emitted the bytes raw, and an OSC 52 (clipboard exfiltration) sailed through
+  verbatim; same after a benign OSC terminated by a dangling ESC. Both confirmed with PoCs at
+  every fragmentation boundary; one new state covers both, with five regression tests.
+- **Any SMTP settings change now requires the account password.** Only the webhook re-authed;
+  `smtp_host` did not — yet email confirmation codes (the fallback second factor) transit that
+  server and the gateway AUTHs to it with the stored credential. A stolen cookie could repoint it
+  and receive both. The notifications form also gains the previously-missing password prompt.
+- **Uniform second-factor policy on account credential ops.** Rotating the account password,
+  moving the recovery email, and deleting a co-admin now go through the same `second_gate` as
+  passkeys/tokens/recovery codes (TOTP when enabled; the email-code-on-new-device escalation is
+  unified instead of duplicated). The account tab also gains the 2FA prompt for user creation,
+  gated in 2.3.1 but never wired into this form.
+
+### Fixed
+
+- **Resumable uploads: the silent-corruption and false-CRC-failure paths are closed.** A chunk
+  dying after writing part of its blocks left the offset cache stale; the client's retry then
+  passed the fast-path and the agent's blind `O_APPEND` glued the whole chunk after the partial —
+  duplicated bytes mid-file, committed without error when CRC was off. And the client folded CRC
+  at read time, so any re-sent slice counted twice: commit failed a *false* integrity check and
+  deleted the good temp. The cache now invalidates on any chunk exception, and CRC accumulates
+  only after a slice has confirmably landed. Also: commit/abort run under the per-upload lock,
+  the tracking dicts evict instead of freezing at their cap, GC matches the full id range the
+  API accepts, the chunk XHR gets a real timeout (a hung TCP connection froze the upload forever),
+  and a mid-upload step-up expiry re-prompts instead of dying as an opaque 403.
+- **Uploads survive closing the file panel — visible and cancellable.** The transfer always kept
+  running, but invisibly: reopening showed an empty list and re-dropping the same file started a
+  second writer on the same upload id. Upload state now lives in a module-level store; reopening
+  shows the moving progress bar, cancel works, finished rows clean up.
+- **A drop that misses the file panel no longer navigates the page away** (the browser opened the
+  local file over the SPA, killing every open session view).
+- **The toolbar load ring has a real accessible name** and its tooltip — the only place with the
+  exact numbers — is reachable by keyboard, not just hover.
+
+### Docs
+
+- README documents resumable uploads with CRC-32 integrity (the 2.3.0 headline was missing) and
+  the toolbar load ring.
+
 ## [2.3.1] — 2026-09-22 · agent (49)
 
 Security hardening from an external adversarial audit. Gateway/interface only; agent unchanged at 49.
