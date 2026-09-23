@@ -33,6 +33,9 @@ from . import (audit, backup, cloudbackup, config, core, db, email_alerts, healt
 
 log = logging.getLogger("webterm")
 router = APIRouter()
+# task-uri de fundal fire-and-forget (ex. curăţenie după un răspuns anulat) — ţinem referinţe
+# ca event loop-ul să nu le colecteze înainte să ruleze
+_bg_tasks: set = set()
 
 _START_TIME = time.time()      # pentru uptime în /api/status
 
@@ -1504,8 +1507,14 @@ async def fs_archive(host_id: int, path: str, user=Depends(security.require_user
             async for chunk in agen:
                 yield chunk
         finally:
-            # şi la succes, şi la client care închide mid-stream: temp-ul nu rămâne pe host
-            await core.fs_archive_cleanup(host_id, tmp)
+            # şi la succes, şi la client care închide mid-stream: temp-ul nu rămâne pe host.
+            # Task DETAŞAT: dacă clientul abandonează, Starlette anulează corpul cu CancelledError
+            # chiar la `yield`, iar un `await` aici ar fi anulat înainte să apuce să trimită
+            # fs_delete → temp orfan (nu există GC pentru .wtarch). Aşa ştergerea rulează pe buclă
+            # independent de anularea răspunsului. Ţinem o referinţă ca task-ul să nu fie colectat.
+            task = asyncio.ensure_future(core.fs_archive_cleanup(host_id, tmp))
+            _bg_tasks.add(task)
+            task.add_done_callback(_bg_tasks.discard)
 
     return StreamingResponse(
         body(), media_type="application/gzip",
@@ -2464,6 +2473,7 @@ async def _docker_run(host_id: int, argv: list[str], timeout: int = 20) -> dict:
 async def docker_list(host_id: int, kind: str, user=Depends(security.require_user)):
     """Listează containere/imagini/volume/reţele. Fiecare rând e un JSON (format Go template),
     parsat aici într-o listă de obiecte — frontend-ul primeşte date, nu text de ecran."""
+    await _require_host_stepup(host_id, user)   # citeşte date de pe host → aceeaşi poartă ca fs_list
     argv = _DOCKER_KINDS.get(kind)
     if not argv:
         raise HTTPException(400, "unknown docker kind")
@@ -2473,7 +2483,7 @@ async def docker_list(host_id: int, kind: str, user=Depends(security.require_use
         # docker lipseşte / demonul e oprit / userul agentului nu e în grupul docker: mesaj clar,
         # nu o listă goală tăcută (frontend-ul deosebeşte „nu e docker aici" de „zero containere")
         low = err.lower()
-        if "command not found" in low or "not found" in low and "docker" in low:
+        if "command not found" in low or ("not found" in low and "docker" in low):
             raise ApiError(400, "docker.absent", "docker is not installed on this host")
         if "permission denied" in low or "/var/run/docker.sock" in low:
             raise ApiError(400, "docker.denied",
@@ -2517,6 +2527,9 @@ async def docker_action(host_id: int, body: DockerAction, request: Request,
 @router.get("/api/hosts/{host_id}/docker/logs")
 async def docker_logs(host_id: int, container: str, user=Depends(security.require_user)):
     """Ultimele ~500 de linii de log ale unui container (snapshot, nu flux live)."""
+    # log-urile unui container sunt un loc clasic de secrete/tokenuri → step-up pe host 2FA,
+    # ca la orice citire de date de pe host (fs_read/fs_preview)
+    await _require_host_stepup(host_id, user)
     if not _DOCKER_ID.match(container or ""):
         raise HTTPException(400, "invalid container id")
     resp = await _docker_run(host_id, ["logs", "--tail", "500", "--timestamps", container], timeout=20)
@@ -3980,14 +3993,17 @@ async def create_session(host_id: int, body: SessionIn, request: Request,
     cmd = None
     if body.docker_container:
         # shell ÎN container: sesiunea rulează `docker exec` în loc de shell-ul de login.
-        # Doar host-uri de agent (docker e local pe host). Încercăm bash, cădem pe sh — imaginile
-        # minime (alpine) n-au bash. Id-ul de container e validat strict (fără injecţie).
+        # Doar host-uri de agent (docker e local pe host). Id-ul de container e validat strict.
         if ctype != "agent":
             raise HTTPException(400, "container shells are only available on agent hosts")
         if not _DOCKER_ID.match(body.docker_container):
             raise HTTPException(400, "invalid container id")
         c = shlex.quote(body.docker_container)
-        cmd = "docker exec -it %s sh -c 'exec bash || exec sh'" % c
+        # bash dacă există, altfel sh. NU `exec bash || exec sh`: într-un shell NEinteractiv
+        # `exec <lipsă>` iese cu 127 ÎNAINTE de `||`, deci pe imaginile fără bash (alpine/busybox)
+        # sesiunea murea instant cu „bash: not found". `command -v` testează întâi, fără să iasă.
+        inner = "command -v bash >/dev/null 2>&1 && exec bash || exec sh"
+        cmd = "docker exec -it %s sh -c %s" % (c, shlex.quote(inner))
         if not title.strip() or title.startswith("Session "):
             title = "docker: " + body.docker_container[:24]
     try:

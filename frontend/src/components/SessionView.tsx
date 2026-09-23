@@ -106,7 +106,7 @@ export default function SessionView(props: {
   /** broadcast (grid): înregistrează funcţia de trimitere a acestui panou sus, ca App să poată
       difuza tastele către toate panourile; raportează tastele locale; afişează indicatorul */
   registerSend?: (sid: string, fn: ((d: string | Uint8Array) => void) | null) => void
-  onUserData?: (sid: string, d: string) => void
+  onUserData?: (sid: string, d: string | Uint8Array) => void
   broadcasting?: boolean
 }) {
   const { session } = props
@@ -608,6 +608,7 @@ export default function SessionView(props: {
       const bytes = new Uint8Array(d.length)
       for (let i = 0; i < d.length; i++) bytes[i] = d.charCodeAt(i) & 0xff
       send(bytes)
+      props.onUserData?.(session.id, bytes)   // difuzează şi input-ul binar (mouse-report etc.)
     })
     // mouse-selection copy (tmux → OSC 52) is a pointer gesture; count it too
     const markInput = () => {

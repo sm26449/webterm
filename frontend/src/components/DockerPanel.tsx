@@ -62,8 +62,9 @@ export default function DockerPanel(props: {
     }
   }
 
-  // câmpuri utile după kind (docker `{{json .}}` are chei cu majusculă)
-  const isRunning = (r: Row) => (r.State || '').toLowerCase() === 'running' || /^up/i.test(r.Status || '')
+  // câmpuri utile după kind (docker `{{json .}}` are chei cu majusculă). `State` e sursa de
+  // adevăr când există (paused/restarting NU sunt „running"); cădem pe `Status` doar dacă lipseşte
+  const isRunning = (r: Row) => r.State ? r.State.toLowerCase() === 'running' : /^up/i.test(r.Status || '')
 
   const header = (
     <header className="flex items-center gap-2 border-b border-ink-800 px-3 py-2">
@@ -112,19 +113,19 @@ export default function DockerPanel(props: {
               <div className="mt-0.5 truncate pl-4 font-mono text-[11px] text-slate-500" title={r.Image}>{r.Image}</div>
               <div className="mt-1 flex flex-wrap gap-1 pl-4">
                 {running && props.onOpenContainerShell && (
-                  <button onClick={() => props.onOpenContainerShell!(r.Names || id)}
+                  <button onClick={() => props.onOpenContainerShell!(id)}
                     className="inline-flex items-center gap-1 rounded bg-sky-600/15 px-1.5 py-0.5 text-[11px] wt-accent hover:bg-sky-600/25">
                     <TerminalPromptIcon /> {t('docker.shell')}
                   </button>
                 )}
                 {running
-                  ? <button disabled={!!busy} onClick={() => action(r.Names || id, 'stop')}
+                  ? <button disabled={!!busy} onClick={() => action(id, 'stop')}
                       className="rounded px-1.5 py-0.5 text-[11px] text-slate-400 ring-1 ring-ink-700 hover:bg-ink-800 disabled:opacity-40">{t('docker.stop')}</button>
-                  : <button disabled={!!busy} onClick={() => action(r.Names || id, 'start')}
+                  : <button disabled={!!busy} onClick={() => action(id, 'start')}
                       className="rounded px-1.5 py-0.5 text-[11px] wt-good ring-1 ring-ink-700 hover:bg-ink-800 disabled:opacity-40">{t('docker.start')}</button>}
-                {running && <button disabled={!!busy} onClick={() => action(r.Names || id, 'restart')}
+                {running && <button disabled={!!busy} onClick={() => action(id, 'restart')}
                   className="rounded px-1.5 py-0.5 text-[11px] text-slate-400 ring-1 ring-ink-700 hover:bg-ink-800 disabled:opacity-40">{t('docker.restart')}</button>}
-                <button onClick={() => showLogs(r.Names || id)}
+                <button onClick={() => showLogs(id)}
                   className="rounded px-1.5 py-0.5 text-[11px] text-slate-400 ring-1 ring-ink-700 hover:bg-ink-800">{t('docker.logs')}</button>
               </div>
             </div>

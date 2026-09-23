@@ -185,7 +185,7 @@ function MainApp() {
     else sendMap.current.delete(sid)
   }, [])
   // o tastă dintr-un panou → difuzată către CELELALTE (originea a trimis deja local)
-  const handleUserData = useCallback((sid: string, d: string) => {
+  const handleUserData = useCallback((sid: string, d: string | Uint8Array) => {
     if (!broadcastRef.current) return
     sendMap.current.forEach((fn, osid) => { if (osid !== sid) fn(d) })
   }, [])
@@ -971,7 +971,10 @@ function MainApp() {
           <div className={`grid min-h-0 min-w-0 flex-1 gap-px bg-ink-800 ${
             gridPanes.length === 2 ? 'grid-cols-2 grid-rows-1' : 'grid-cols-2 grid-rows-2'}`}>
             {gridPanes.map((s) => (
-              <div key={s.id} className="relative min-h-0 min-w-0 overflow-hidden bg-ink-900">
+              // click pe un panou îl face „activ" (ţinta acţiunilor de sesiune: snippet/font/
+              // căutare); tastarea/broadcast-ul merg oricum per-panou, asta doar retarghetează
+              <div key={s.id} className="relative min-h-0 min-w-0 overflow-hidden bg-ink-900"
+                onMouseDownCapture={() => { if (s.id !== selectedSid) navigate(s.id) }}>
                 <PaneErrorBoundary>{renderPane(s, false, s.id === selectedSid, true)}</PaneErrorBoundary>
               </div>
             ))}
