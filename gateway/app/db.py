@@ -284,6 +284,10 @@ MIGRATIONS = [
     # IP-uri/rute avea), cu `diagnostics_at` = momentul colectării pentru eticheta „acum X".
     "ALTER TABLE hosts ADD COLUMN diagnostics TEXT",
     "ALTER TABLE hosts ADD COLUMN diagnostics_at REAL",
+    # Parolă temporară OPŢIONALĂ pe link-ul de înrolare: hash-ul (argon2) al unei parole cerute la
+    # instalare, pe lângă token-ul din URL. Livrată pe alt canal → un URL scurs singur nu ajunge.
+    # NULL = fără parolă (comportamentul clasic). Se stinge odată cu token-ul, la revendicare.
+    "ALTER TABLE hosts ADD COLUMN enroll_pass_hash TEXT",
 ]
 
 # tabele adăugate ulterior (executeScript de mai sus le creează pe DB-uri noi;

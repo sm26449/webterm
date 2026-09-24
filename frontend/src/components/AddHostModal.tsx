@@ -37,6 +37,9 @@ export default function AddHostModal(props: { onClose: () => void; host?: Host; 
   const [policy, setPolicy] = useState<'stored' | 'ask'>(
     (edit?.credential_policy as 'stored' | 'ask') || 'stored')
   const [require2fa, setRequire2fa] = useState(edit?.require_2fa ?? false)
+  // înrolare (doar agent, la creare): cât e valid link-ul + o parolă temporară opţională
+  const [enrollTtl, setEnrollTtl] = useState(3600)
+  const [enrollPass, setEnrollPass] = useState('')
 
   const [created, setCreated] = useState<Host | null>(null)
   const [online, setOnline] = useState(false)
@@ -81,6 +84,10 @@ export default function AddHostModal(props: { onClose: () => void; host?: Host; 
     setError('')
     const body: Record<string, unknown> = { name, note, tags, connection_type: connType }
     if (!edit) body.require_2fa = require2fa      // la editare, 2FA are endpoint propriu (cere step-up)
+    if (connType === 'agent' && !edit) {
+      body.enroll_ttl = enrollTtl
+      if (enrollPass.trim()) body.enroll_password = enrollPass.trim()
+    }
     if (connType !== 'agent') {
       Object.assign(body, {
         hostname,
@@ -378,6 +385,30 @@ export default function AddHostModal(props: { onClose: () => void; host?: Host; 
                   className="h-4 w-4 rounded accent-sky-600" />
                 {t('addhost.require2fa')}
               </label>
+            )}
+
+            {/* Înrolare (doar agent, la creare): cât e valid link-ul + o parolă temporară
+                opţională. Parola merge ca header la instalare (nu în URL), deci un URL scurs
+                într-un log nu ajunge — dă-o pe alt canal decât one-liner-ul. */}
+            {connType === 'agent' && !edit && (
+              <div className="flex flex-col gap-2 rounded-lg border border-ink-800 p-3">
+                <label className="block">
+                  <span className={label}>{t('addhost.enrollTtl')}</span>
+                  <select value={enrollTtl} onChange={(e) => setEnrollTtl(Number(e.target.value))} className={field}>
+                    <option value={900}>{t('addhost.ttl15m')}</option>
+                    <option value={3600}>{t('addhost.ttl1h')}</option>
+                    <option value={86400}>{t('addhost.ttl24h')}</option>
+                    <option value={604800}>{t('addhost.ttl7d')}</option>
+                  </select>
+                </label>
+                <label className="block">
+                  <span className={label}>{t('addhost.enrollPass')}</span>
+                  <input type="text" autoComplete="off" value={enrollPass}
+                    onChange={(e) => setEnrollPass(e.target.value)}
+                    placeholder={t('addhost.enrollPassPlaceholder')} className={field} />
+                  <span className="mt-1 block text-xs text-slate-500">{t('addhost.enrollPassHint')}</span>
+                </label>
+              </div>
             )}
 
             <label className="block">

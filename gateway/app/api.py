@@ -1108,6 +1108,9 @@ class HostIn(BaseModel):
     require_2fa: bool = False
     credential_policy: str = "stored"    # stored | ask | ephemeral
     tags: str = ""                       # etichete libere, virgulă/spaţiu separat (normalizate)
+    # Înrolare (doar agent): cât e valid link-ul + o parolă temporară OPŢIONALĂ cerută la instalare
+    enroll_ttl: int = 3600               # secunde; implicit 1h (plafonat 5min..30 zile)
+    enroll_password: str = ""            # write-only; gol = fără parolă
 
 
 def _norm_tags(s: str) -> str:
@@ -1271,17 +1274,23 @@ async def _require_reauth_for_secret(user, password: str, what: str) -> None:
         raise HTTPException(401, "wrong account password — required for %s" % what)
 
 
-def _install_command(enroll_token: str) -> str:
+def _install_command(enroll_token: str, password: str = "") -> str:
     # self-signed gateway: the one-liner itself must skip cert verification
     flags = "-fsSk" if config.AGENT_INSECURE else "-fsS"
     wflags = "--no-check-certificate " if config.AGENT_INSECURE else ""
     url = "%s/install/%s.sh" % (config.PUBLIC_URL, enroll_token)
+    # Parola temporară călătoreşte ca HEADER, nu în URL: un proxy/access-log înregistrează
+    # metoda+URL-ul, nu anteturile, deci un URL scurs acolo NU conţine parola. Ambele mijloace
+    # de aducere (curl/wget) o trimit. Parola conţine doar caractere din alfabetul nostru
+    # (generată/validată), fără ghilimele — dar o punem între ghilimele oricum.
+    ch = ' -H "X-Enroll-Pass: %s"' % password if password else ""
+    wh = ' --header="X-Enroll-Pass: %s"' % password if password else ""
     # Fallback pe wget: scriptul PE CARE îl aducem are deja fallback curl→wget, dar comanda
     # care îl aduce nu avea, deci pe o imagine minimală fără curl (debian-slim, alpine)
     # înrolarea murea cu `sh: 1: curl: not found` înainte să apuce să ruleze ceva. Ironia e
     # că exact acel caz e explicat într-un comentariu din scriptul nelivrat.
-    return ("(command -v curl >/dev/null && curl %s %s || wget %s-qO- %s) | sh"
-            % (flags, url, wflags, url))
+    return ("(command -v curl >/dev/null && curl %s%s %s || wget %s%s-qO- %s) | sh"
+            % (flags, ch, url, wflags, wh, url))
 
 
 def _group_install_command(group_token: str) -> str:
@@ -1294,7 +1303,7 @@ def _group_install_command(group_token: str) -> str:
             % (flags, url, wflags, url))
 
 
-def _install_command_dedicated(enroll_token: str) -> str:
+def _install_command_dedicated(enroll_token: str, password: str = "") -> str:
     """Aceeaşi instalare, dar sub un user dedicat, fără drepturi.
 
     Rulat ca root, agentul înseamnă root shell pe host: cine compromite gateway-ul sau contul
@@ -1303,7 +1312,7 @@ def _install_command_dedicated(enroll_token: str) -> str:
     `loginctl enable-linger` NU e opţional aici: fără el, `systemd --user` opreşte serviciul
     când userul n-are sesiune de login şi nu-l porneşte la boot — agentul ar părea că moare
     singur. `useradd` e tolerat dacă userul există deja (|| true), ca să poţi relua comanda."""
-    inner = _install_command(enroll_token)
+    inner = _install_command(enroll_token, password)
     return ("sudo useradd -m -s /bin/bash %s 2>/dev/null || true; "
             "sudo loginctl enable-linger %s; "
             "sudo -iu %s sh -c '%s'" % (AGENT_USER, AGENT_USER, AGENT_USER, inner))
@@ -1387,40 +1396,54 @@ async def create_host(host: HostIn, user=Depends(security.require_user)):
         raise ApiError(400, "ssh.userRequired", "an SSH username is required")
     token = security.new_token()
     enroll = security.new_token()[:32]
+    ttl = max(300, min(30 * 86400, int(host.enroll_ttl or 3600)))   # 5 min .. 30 zile, implicit 1h
+    pw = host.enroll_password.strip()
+    pass_hash = await security.hash_password_async(pw) if pw else None
     host_id = await db.execute(
         # `folder` lipsea din INSERT deşi `HostIn` îl acceptă: hostul creat direct într-un grup
         # ieşea mereu în afara lui, fără nicio eroare. Aceeaşi clasă cu PATCH-ul care accepta
         # câmpuri de conexiune şi le ignora.
         "INSERT INTO hosts(name, note, folder, token_hash, token_encrypted, enroll_token,"
-        " enroll_expires, created, connection_type, hostname, ssh_username, ssh_port,"
-        " auth_method, credential_encrypted, require_2fa, credential_policy, tags)"
-        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " enroll_expires, enroll_pass_hash, created, connection_type, hostname, ssh_username,"
+        " ssh_port, auth_method, credential_encrypted, require_2fa, credential_policy, tags)"
+        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         host.name.strip(), host.note, host.folder.strip(), security.sha256_hex(token),
         security.encrypt_secret(token), enroll,
-        time.time() + 24 * 3600, time.time(),
+        time.time() + ttl, pass_hash, time.time(),
         ctype, host.hostname.strip() or None, host.ssh_username.strip() or None,
         host.ssh_port, host.auth_method, _credential_blob(host),
         int(host.require_2fa), host.credential_policy, _norm_tags(host.tags))
     row = await db.fetchone("SELECT * FROM hosts WHERE id=?", host_id)
-    return dict(_host_json(row), install_command=_install_command(enroll),
-                install_command_dedicated=_install_command_dedicated(enroll),
+    return dict(_host_json(row), install_command=_install_command(enroll, pw),
+                install_command_dedicated=_install_command_dedicated(enroll, pw),
                 enroll_expires=row["enroll_expires"])
 
 
+class EnrollRenew(BaseModel):
+    enroll_ttl: int = 3600           # secunde; implicit 1h (plafonat 5min..30 zile)
+    enroll_password: str = ""        # write-only; gol = fără parolă
+
+
 @router.post("/api/hosts/{host_id}/enroll")
-async def renew_enroll(host_id: int, user=Depends(security.require_user)):
-    """New install one-liner for an existing host (reinstall / new enroll)."""
+async def renew_enroll(host_id: int, user=Depends(security.require_user),
+                       body: EnrollRenew = EnrollRenew()):
+    """New install one-liner for an existing host (reinstall / new enroll). Body optional:
+    fără el → 1h, fără parolă (retrocompatibil cu clienţii care nu trimit nimic)."""
     await _require_host_stepup(host_id, user)   # H1: enroll nou = clasă de provisioning
     row = await db.fetchone("SELECT * FROM hosts WHERE id=?", host_id)
     if not row:
         raise HTTPException(404)
     enroll = security.new_token()[:32]
+    ttl = max(300, min(30 * 86400, int(body.enroll_ttl or 3600)))
+    pw = body.enroll_password.strip()
+    pass_hash = await security.hash_password_async(pw) if pw else None
+    exp = time.time() + ttl
     await db.execute(
-        "UPDATE hosts SET enroll_token=?, enroll_expires=?, instance_id=NULL WHERE id=?",
-        enroll, time.time() + 24 * 3600, host_id)
-    return {"install_command": _install_command(enroll),
-            "install_command_dedicated": _install_command_dedicated(enroll),
-            "enroll_expires": time.time() + 24 * 3600}
+        "UPDATE hosts SET enroll_token=?, enroll_expires=?, enroll_pass_hash=?, instance_id=NULL"
+        " WHERE id=?", enroll, exp, pass_hash, host_id)
+    return {"install_command": _install_command(enroll, pw),
+            "install_command_dedicated": _install_command_dedicated(enroll, pw),
+            "enroll_expires": exp}
 
 
 @router.get("/api/hosts/{host_id}/fs")
@@ -4411,13 +4434,32 @@ def _install_script_for(token: str) -> str:
 
 
 @router.get("/install/{enroll_token}", response_class=PlainTextResponse)
-async def install_script(enroll_token: str):
+async def install_script(enroll_token: str, request: Request):
     enroll_token = enroll_token[:-3] if enroll_token.endswith(".sh") else enroll_token
-    # single-use, atomically: claim + invalidate the token in ONE serialized
-    # write so two concurrent requests can't both be handed the permanent host
-    # token (TOCTOU). Only the winner gets the row back.
+    # Dacă hostul are o parolă de înrolare, o verificăm ÎNAINTE de revendicare (parola vine din
+    # header, nu din URL — vezi _install_command). Verificarea e SEPARATĂ de claim-ul single-use:
+    # o parolă greşită NU consumă tokenul (altfel o singură greşeală ar omorî înrolarea), dar e
+    # plafonată per-host, ca tokenul din URL să nu poată fi folosit ca oracol de brute-force pe parolă.
+    probe = await db.fetchone(
+        "SELECT * FROM hosts WHERE enroll_token=? AND enroll_expires>?", enroll_token, time.time())
+    if not probe:
+        raise ApiError(404, "enroll.invalid", "invalid or expired enroll token")
+    if probe["enroll_pass_hash"]:
+        key = "enroll:%d" % probe["id"]
+        allowed, retry = security.login_allowed(key)
+        if not allowed:
+            raise ApiError(429, "enroll.tooMany", "too many wrong enroll passwords; retry in %ds" % retry)
+        supplied = request.headers.get("x-enroll-pass", "")
+        if not supplied or not await security.verify_password_async(supplied, probe["enroll_pass_hash"]):
+            security.record_login_failure(key)
+            raise ApiError(403, "enroll.badPass",
+                           "this enrollment link needs its password (X-Enroll-Pass header)")
+        security.record_login_success(key)
+    # single-use, atomically: claim + invalidate the token in ONE serialized write so two
+    # concurrent requests can't both be handed the permanent host token (TOCTOU). Only the winner
+    # gets the row back. (Password already verified above; a race loser just gets 404.)
     row = await db.execute_returning(
-        "UPDATE hosts SET enroll_token=NULL, enroll_expires=0 "
+        "UPDATE hosts SET enroll_token=NULL, enroll_expires=0, enroll_pass_hash=NULL "
         "WHERE enroll_token=? AND enroll_expires>? RETURNING *",
         enroll_token, time.time())
     if not row:

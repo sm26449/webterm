@@ -56,6 +56,15 @@ async def main():
     check("foloseşte URL-ul public configurat", config.PUBLIC_URL in plain)
     check("fără -k pe gateway cu CA publică", " -fsS " in plain and "-fsSk" not in plain)
 
+    # ── parola de înrolare călătoreşte ca HEADER, nu în URL (un URL scurs în log nu o conţine) ──
+    with_pw = api._install_command("TOK123", "s3cret")
+    check("parola merge ca header pe curl", '-H "X-Enroll-Pass: s3cret"' in with_pw, with_pw)
+    check("parola merge ca header şi pe wget", '--header="X-Enroll-Pass: s3cret"' in with_pw, with_pw)
+    check("parola NU apare în URL (doar în header)",
+          "X-Enroll-Pass: s3cret" in with_pw and "s3cret" not in with_pw.replace('X-Enroll-Pass: s3cret', ''),
+          with_pw)
+    check("fără parolă → niciun header (comportament clasic)", "X-Enroll-Pass" not in plain)
+
     # ── varianta cu user dedicat ──
     check("creează userul dedicat", f"useradd -m -s /bin/bash {api.AGENT_USER}" in ded)
     check("useradd tolerează userul existent (comanda se poate relua)", "|| true" in ded)
@@ -102,6 +111,43 @@ async def main():
         check("re-enroll schimbă tokenul în AMBELE variante",
               r["install_command"] != h["install_command"]
               and r["install_command_dedicated"] != h["install_command_dedicated"])
+
+        # ── TTL configurabil + parolă opţională pe link ──────────────────────
+        import re as _re
+
+        def _tok(cmd):     # extrage tokenul din .../install/<TOKEN>.sh
+            return _re.search(r"/install/([A-Za-z0-9_-]+)\.sh", cmd).group(1)
+
+        # TTL: link valid 15 min → enroll_expires ≈ acum + 900s
+        import time as _t
+        hh = (await c.post("/api/hosts", json={"name": "ttl", "enroll_ttl": 900})).json()
+        check("TTL configurabil respectat (≈15 min)",
+              880 < hh["enroll_expires"] - _t.time() < 920, str(hh.get("enroll_expires")))
+
+        # Parola: host cu parolă de instalare → GET-ul cere headerul corect
+        hp = (await c.post("/api/hosts", json={"name": "cuparola",
+                                               "enroll_password": "instalare123"})).json()
+        check("comanda de instalare conţine headerul de parolă",
+              'X-Enroll-Pass: instalare123' in hp["install_command"])
+        tok = _tok(hp["install_command"])
+        # fără header → 403 (URL-ul singur nu ajunge)
+        r1 = await c.get(f"/install/{tok}.sh")
+        check("install fără parolă → 403", r1.status_code == 403, str(r1.status_code))
+        # parolă greşită → 403, dar NU consumă tokenul
+        r2 = await c.get(f"/install/{tok}.sh", headers={"X-Enroll-Pass": "gresit"})
+        check("install cu parolă greşită → 403", r2.status_code == 403, str(r2.status_code))
+        # parola corectă → 200 + scriptul; tokenul se consumă (single-use)
+        r3 = await c.get(f"/install/{tok}.sh", headers={"X-Enroll-Pass": "instalare123"})
+        check("install cu parola corectă → 200 + script",
+              r3.status_code == 200 and "ptyd" in r3.text.lower(), str(r3.status_code))
+        r4 = await c.get(f"/install/{tok}.sh", headers={"X-Enroll-Pass": "instalare123"})
+        check("tokenul e single-use (a 2-a oară → 404)", r4.status_code == 404, str(r4.status_code))
+
+        # host FĂRĂ parolă → GET-ul merge fără header (regresie: fluxul clasic)
+        hn = (await c.post("/api/hosts", json={"name": "faraparola"})).json()
+        tokn = _tok(hn["install_command"])
+        rn = await c.get(f"/install/{tokn}.sh")
+        check("host fără parolă → install merge fără header", rn.status_code == 200, str(rn.status_code))
 
     # ── digestul agentului în scriptul de instalare (F-11) ──────────────────
     # Capcana: `/agent/ptyd.py` NU serveşte fişierul din repo. Cu o cheie de flotă — pe care
