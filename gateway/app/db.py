@@ -290,6 +290,9 @@ MIGRATIONS = [
     "ALTER TABLE hosts ADD COLUMN enroll_pass_hash TEXT",
     # Aceeaşi parolă opţională, dar pe token-ul de GRUP (reutilizabil): cerută la fiecare instalare.
     "ALTER TABLE enroll_groups ADD COLUMN pass_hash TEXT",
+    # Un forward promovat la „app" (bookmark): tip aplicaţie (proxmox/portainer/custom) pentru icon
+    # + agregare pe dashboard. Gol = forward obişnuit. Un bookmark E un forward + puţină metadată.
+    "ALTER TABLE port_forwards ADD COLUMN app_type TEXT DEFAULT ''",
 ]
 
 # tabele adăugate ulterior (executeScript de mai sus le creează pe DB-uri noi;

@@ -1,15 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Host, Session, Snippet } from '../lib/api'
+import { api, AppLink, Host, Session, Snippet } from '../lib/api'
 import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
 import { applyTheme, currentTheme } from '../lib/theme'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { useI18n } from '../lib/i18n'
-import { FilesIcon, PlusIcon, ServerIcon, TerminalPromptIcon } from './Icons'
+import { ExternalLinkIcon, FilesIcon, PlusIcon, ServerIcon, TerminalPromptIcon } from './Icons'
 import { snippetParams } from './SnippetParams'
 
 type Item = {
   key: string
-  kind: 'session' | 'host' | 'action' | 'snippet'
+  kind: 'session' | 'host' | 'action' | 'snippet' | 'app'
   label: string
   sub: string
   color: string
@@ -62,14 +62,21 @@ export default function CommandPalette(props: {
   const dialogRef = useRef<HTMLDivElement>(null)
   useFocusTrap(dialogRef, props.onClose)
 
+  // apps (forward-uri promovate) — deschidere după nume din paletă. Le luăm la fiecare deschidere
+  // ca lista să fie proaspătă (o promovare/creare recentă apare imediat).
+  const [apps, setApps] = useState<AppLink[]>([])
   useEffect(() => {
     if (props.open) {
       setQuery('')
       setSel(0)
+      api<AppLink[]>('/api/apps').then(setApps).catch(() => {})
       // focus după montare
       setTimeout(() => inputRef.current?.focus(), 0)
     }
   }, [props.open])
+  const APP_COLOR: Record<string, string> = {
+    proxmox: '#ec8b3c', portainer: '#57a8e6', grafana: '#f59e0b', custom: '#34d399',
+  }
 
   const items = useMemo<Item[]>(() => {
     const byId = new Map(props.hosts.map((h) => [h.id, h]))
@@ -117,6 +124,18 @@ export default function CommandPalette(props: {
         icon: <FilesIcon />, run: () => props.onFiles(h),
       })
     }
+    // apps (Proxmox/Portainer/…): deschide subdomeniul într-un tab nou, după nume
+    for (const a of apps) {
+      if (!a.enabled) continue
+      out.push({
+        key: `app:${a.id}`, kind: 'app', label: a.label,
+        sub: `${t('palette.appSub')} · ${a.host_name}`, color: APP_COLOR[a.app_type] || '#34d399',
+        hint: t('palette.appHint'),
+        text: `${a.label} ${a.app_type} ${a.host_name} app open`.toLowerCase(),
+        icon: <ExternalLinkIcon />,
+        run: () => window.open(a.url, '_blank', 'noopener,noreferrer'),
+      })
+    }
     // snippets: rulează în sesiunea activă (Warp le numește „workflows")
     if (props.hasActiveSession && props.onRunSnippet) {
       for (const s of props.snippets ?? []) {
@@ -158,7 +177,7 @@ export default function CommandPalette(props: {
       run: props.onOpenHistory,
     })
     return out
-  }, [t, props.hosts, props.sessions, props.openTabs, props.snippets, props.hasActiveSession]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [t, props.hosts, props.sessions, props.openTabs, props.snippets, props.hasActiveSession, apps]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const results = useMemo(() => {
     const q = query.trim().toLowerCase()

@@ -26,6 +26,7 @@ export default function ForwardsPanel(props: {
   const [fPort, setFPort] = useState('')
   const [fScheme, setFScheme] = useState<'http' | 'https' | 'telnet'>('http')
   const [fDesc, setFDesc] = useState('')
+  const [fApp, setFApp] = useState('')     // tip aplicaţie (wizard): '' = forward simplu
   const [busy, setBusy] = useState(false)
   const [opening, setOpening] = useState<number | null>(null)
   const asideCls = 'fixed inset-y-0 right-0 z-40 flex w-[90vw] max-w-sm flex-col border-l border-ink-800 bg-ink-900 shadow-2xl'
@@ -56,15 +57,30 @@ export default function ForwardsPanel(props: {
   useEffect(() => { load() }, [load])
 
   function resetForm() {
-    setFLabel(''); setFPort(''); setFDesc(''); setFHost('127.0.0.1'); setFScheme('http')
+    setFLabel(''); setFPort(''); setFDesc(''); setFHost('127.0.0.1'); setFScheme('http'); setFApp('')
   }
   function openAdd() {
     setEditing(null); resetForm(); setAdding(true); setError('')
+  }
+  // wizard: presetează formularul pentru o aplicaţie cunoscută (port + scheme + nume + tip)
+  const APP_PRESETS: Record<string, { port: string; scheme: 'https' | 'http'; label: string }> = {
+    proxmox:   { port: '8006', scheme: 'https', label: 'Proxmox' },
+    portainer: { port: '9443', scheme: 'https', label: 'Portainer' },
+    grafana:   { port: '3000', scheme: 'http',  label: 'Grafana' },
+  }
+  function presetApp(type: string) {
+    setEditing(null); resetForm(); setError('')
+    const p = APP_PRESETS[type]
+    if (p) { setFPort(p.port); setFScheme(p.scheme); setFLabel(`${p.label} — ${props.host.name}`) }
+    setFApp(type)
+    setFHost('127.0.0.1')
+    setAdding(true)
   }
   function openEdit(f: PortForward) {
     setAdding(false); setEditing(f); setError('')
     setFLabel(f.label); setFHost(f.target_host); setFPort(String(f.target_port))
     setFScheme(f.scheme === 'https' || f.scheme === 'telnet' ? f.scheme : 'http'); setFDesc(f.description || '')
+    setFApp(f.app_type || '')
   }
   function closeForm() {
     setAdding(false); setEditing(null); resetForm(); setError('')
@@ -80,7 +96,7 @@ export default function ForwardsPanel(props: {
     try {
       const payload = {
         label: fLabel.trim(), target_host: fHost.trim() || '127.0.0.1',
-        target_port: port, scheme: fScheme, description: fDesc.trim(),
+        target_port: port, scheme: fScheme, description: fDesc.trim(), app_type: fApp,
       }
       if (editing) {
         // rutele /api/forwards/{id} n-au host_id în URL, deci reîncercarea automată de la
@@ -131,6 +147,19 @@ export default function ForwardsPanel(props: {
     } catch (e) { setError(errText(e, t) || t('forwards.error.generic')) }
   }
 
+  // promovează / retrage statutul de „app" (bookmark) al unui forward existent — un forward
+  // simplu devine dală pe dashboard, sau invers. Doar metadată (app_type), nimic de re-ţintit.
+  async function togglePromote(f: PortForward) {
+    try {
+      await withStepup(f.host_id, () => api(`/api/forwards/${f.id}`,
+        { method: 'PATCH', body: JSON.stringify({ app_type: f.app_type ? '' : 'custom' }) }))
+      load()
+    } catch (e) { setError(errText(e, t) || t('forwards.error.generic')) }
+  }
+  const APP_COLOR: Record<string, string> = {
+    proxmox: '#ec8b3c', portainer: '#57a8e6', grafana: '#f59e0b', custom: '#34d399',
+  }
+
   function copyLink(f: PortForward) {
     copyText(f.url).then((ok) => {
       if (!ok) return
@@ -178,6 +207,25 @@ export default function ForwardsPanel(props: {
           <button onClick={load} title={t('forwards.refresh')} className="wt-touch ml-auto rounded px-1.5 text-slate-400 hover:bg-ink-800"><RefreshIcon /></button>
         </div>
 
+        {/* wizard: apps cunoscute cu un click — presetează portul/scheme şi le marchează ca „app"
+            (dală pe dashboard). Intern e tot un forward. */}
+        {isAgent && (
+          <div className="flex flex-wrap items-center gap-1.5 border-b border-ink-800 px-3 py-2">
+            <span className="mr-1 text-[11px] uppercase tracking-wide text-slate-500">{t('forwards.addApp')}</span>
+            <button onClick={() => presetApp('proxmox')}
+              className="rounded px-2 py-0.5 text-[11px] font-medium ring-1 ring-ink-700 hover:bg-ink-800"
+              style={{ color: '#ec8b3c' }}>Proxmox</button>
+            <button onClick={() => presetApp('portainer')}
+              className="rounded px-2 py-0.5 text-[11px] font-medium ring-1 ring-ink-700 hover:bg-ink-800"
+              style={{ color: '#57a8e6' }}>Portainer</button>
+            <button onClick={() => presetApp('grafana')}
+              className="rounded px-2 py-0.5 text-[11px] font-medium ring-1 ring-ink-700 hover:bg-ink-800"
+              style={{ color: '#f59e0b' }}>Grafana</button>
+            <button onClick={() => presetApp('custom')}
+              className="rounded px-2 py-0.5 text-[11px] font-medium text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800">{t('forwards.appCustom')}</button>
+          </div>
+        )}
+
         {(adding || editing) && (
           <div className="flex flex-col gap-2 border-b border-ink-800 bg-ink-800/40 px-3 py-3 text-[12px]">
             <input autoFocus value={fLabel} onChange={(e) => setFLabel(e.target.value)} placeholder={t('forwards.namePlaceholder')}
@@ -211,6 +259,16 @@ export default function ForwardsPanel(props: {
             </div>
             <input value={fDesc} onChange={(e) => setFDesc(e.target.value)} placeholder={t('forwards.descPlaceholder')}
               className="rounded bg-ink-800 px-2 py-1 text-slate-300 ring-1 ring-ink-700 focus:ring-sky-500" />
+            {/* indiciu SSO onest: outcome-ul „un singur login" vine din config-ul APP-ului,
+                nu din WebTerm. Doar arătăm ce/unde, fără să pretindem că provisionăm noi ceva. */}
+            {(fApp === 'proxmox' || fApp === 'portainer' || fApp === 'grafana') && (
+              <div className="rounded border border-ink-700 bg-ink-900/60 px-2.5 py-2 text-[11px] leading-snug text-slate-400">
+                <span className="font-semibold text-slate-300">{t('forwards.ssoTitle')}</span> {t('forwards.ssoHint')}
+                {fApp === 'proxmox' && <span className="mt-1 block wt-good">{t('forwards.ssoProxmox')}</span>}
+                {fApp === 'portainer' && <span className="mt-1 block wt-warn">{t('forwards.ssoPortainer')}</span>}
+                {fApp === 'grafana' && <span className="mt-1 block wt-good">{t('forwards.ssoGrafana')}</span>}
+              </div>
+            )}
             <div className="flex gap-2">
               <button onClick={submitForward} disabled={busy} className="rounded-lg bg-sky-600 px-3 py-1 font-medium text-white hover:bg-sky-700 disabled:opacity-50">
                 {busy ? t('forwards.saving') : editing ? t('forwards.save') : t('forwards.addShort')}
@@ -246,7 +304,14 @@ export default function ForwardsPanel(props: {
                 className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${isTelnet ? (probes[f.id] === 'up' ? 'bg-emerald-500' : probes[f.id] === 'down' ? 'bg-rose-500' : 'bg-slate-600') : dotColor(f)}`}
                 aria-label={dotTitle(f)} />
               <div className="min-w-0 flex-1">
-                <div className="truncate text-[13.5px] font-semibold text-slate-200">{f.label}</div>
+                <div className="flex items-center gap-1.5">
+                  <span className="truncate text-[13.5px] font-semibold text-slate-200">{f.label}</span>
+                  {f.app_type && (
+                    <span className="shrink-0 rounded px-1.5 text-[9.5px] font-bold uppercase tracking-wide"
+                      style={{ color: APP_COLOR[f.app_type] || '#34d399', background: `${APP_COLOR[f.app_type] || '#34d399'}1f` }}
+                      title={t('forwards.isApp')}>{t('forwards.appBadge')}</span>
+                  )}
+                </div>
                 {isTelnet
                   ? <div className="truncate text-[11.5px] text-slate-500">{t('forwards.telnetSubtitle')}</div>
                   : <div className="truncate font-mono text-[11.5px] wt-link" title={f.url}>{urlHost(f)}</div>}
@@ -271,6 +336,13 @@ export default function ForwardsPanel(props: {
                   </button>
                   {f.enabled && <button onClick={() => toggle(f)} title={t('forwards.stop')} className="rounded px-1 text-slate-500 hover:bg-ink-700 hover:text-amber-300 text-[11px]">⏸</button>}
                 </>)}
+                {!isTelnet && (
+                  <button onClick={() => togglePromote(f)}
+                    title={f.app_type ? t('forwards.demoteApp') : t('forwards.promoteApp')}
+                    className={`rounded px-1 hover:bg-ink-700 ${f.app_type ? 'text-amber-300' : 'text-slate-500 hover:text-amber-300'}`}>
+                    {f.app_type ? '★' : '☆'}
+                  </button>
+                )}
                 <button onClick={() => openEdit(f)} title={t('forwards.edit')} className="rounded px-1 text-slate-500 hover:bg-ink-700 hover:text-slate-200"><PencilIcon /></button>
                 <button onClick={() => setConfirmDel(f)} title={t('forwards.delete')} className="rounded px-1 text-slate-500 hover:bg-ink-700 hover:text-rose-300"><TrashIcon /></button>
               </div>

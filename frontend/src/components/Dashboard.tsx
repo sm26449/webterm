@@ -1,10 +1,19 @@
-import { isSessionLive, Host, Session, timeAgo } from '../lib/api'
+import { useEffect, useState } from 'react'
+import { isSessionLive, api, AppLink, Host, Session, timeAgo } from '../lib/api'
 import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
 import { useI18n } from '../lib/i18n'
 import { hostHistory } from '../lib/metrics'
 import { EyeIcon, PlusIcon, ServerIcon, TerminalPromptIcon } from './Icons'
 import Sparkline from './Sparkline'
 import { fmt } from '../lib/shortcuts'
+
+// culoare + glif per tip de app (dalele din strip + butoanele de pe host)
+const APP_COLOR: Record<string, string> = {
+  proxmox: '#ec8b3c', portainer: '#57a8e6', grafana: '#f59e0b', custom: '#34d399',
+}
+const APP_GLYPH: Record<string, string> = {
+  proxmox: 'PVE', portainer: 'PTN', grafana: 'GRA', custom: '◆',
+}
 
 /** Canvasul „acasă": în loc de vid, arată ce contează pentru un operator de
    flotă — sesiunile active de reluat + starea echipamentelor. */
@@ -20,6 +29,9 @@ export default function Dashboard(props: {
 }) {
   const { t } = useI18n()
   const byId = new Map(props.hosts.map((h) => [h.id, h]))
+  // apps (forward-uri promovate) agregate din toată flota — strip-ul „one pane of glass"
+  const [apps, setApps] = useState<AppLink[]>([])
+  useEffect(() => { api<AppLink[]>('/api/apps').then(setApps).catch(() => {}) }, [])
   const active = props.sessions
     .filter((s) => isSessionLive(s, props.hosts))
     .sort((a, b) => (b.created) - (a.created))
@@ -71,6 +83,33 @@ export default function Dashboard(props: {
             {t('dashboard.jumpTo')} <kbd className="hidden rounded bg-white/10 px-1.5 text-xs text-slate-200 sm:inline">{fmt('Mod+K')}</kbd>
           </button>
         </div>
+
+        {/* Apps: forward-urile promovate, un click din „acasă" — nu mai ieşi din WebTerm */}
+        {apps.length > 0 && (
+          <section className="mt-7">
+            <h2 className="mb-2.5 text-xs font-semibold uppercase tracking-wide text-slate-500">{t('dashboard.apps')}</h2>
+            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+              {apps.map((a) => {
+                const color = APP_COLOR[a.app_type] || '#34d399'
+                const glyph = APP_GLYPH[a.app_type] || '◆'
+                return (
+                  <a key={a.id} href={a.enabled ? a.url : undefined} target="_blank" rel="noopener noreferrer"
+                    title={a.enabled ? a.url : t('dashboard.appDisabled')}
+                    className={`group flex items-center gap-3 rounded-xl border border-ink-700 bg-ink-800/50 px-3 py-2.5 ${
+                      a.enabled ? 'hover:border-ink-500 hover:bg-ink-800' : 'cursor-not-allowed opacity-50'}`}>
+                    <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg font-mono text-sm font-bold"
+                      style={{ background: `${color}22`, color }}>{glyph}</span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm font-medium text-slate-200">{a.label}</span>
+                      <span className="block truncate text-[11px] text-slate-500">{a.host_name}{a.enabled ? '' : ` · ${t('dashboard.appOff')}`}</span>
+                    </span>
+                    <span className="shrink-0 text-slate-600 group-hover:text-slate-400">↗</span>
+                  </a>
+                )
+              })}
+            </div>
+          </section>
+        )}
 
         {/* sesiuni active de reluat */}
         <section className="mt-7">

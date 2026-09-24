@@ -2656,6 +2656,9 @@ async def clear_history(user=Depends(security.require_user)):
     return {"ok": True}
 
 
+_APP_TYPES = ("", "proxmox", "portainer", "grafana", "custom")
+
+
 class ForwardIn(BaseModel):
     label: str
     target_host: str = "127.0.0.1"
@@ -2663,6 +2666,7 @@ class ForwardIn(BaseModel):
     scheme: str = "http"
     description: str = ""
     enabled: bool = False
+    app_type: str = ""                 # non-gol → apare ca „app" (bookmark) cu icon + pe dashboard
     stepup_grant: str = ""
     stepup_password: str = ""
 
@@ -2674,6 +2678,7 @@ class ForwardPatch(BaseModel):
     scheme: str | None = None
     description: str | None = None
     enabled: bool | None = None
+    app_type: str | None = None        # setează/promovează sau scoate (→ "") statutul de app
     stepup_grant: str = ""
     stepup_password: str = ""
 
@@ -2724,6 +2729,7 @@ def _forward_json(row) -> dict:
         "target_port": row["target_port"], "scheme": row["scheme"],
         "description": row["description"] or "", "enabled": bool(row["enabled"]),
         "created": row["created"],
+        "app_type": (row["app_type"] if "app_type" in row.keys() else "") or "",
         # subdomeniul pe care se accesează (izolare de origin)
         "url": "%s://%s.%s" % (_FWD_SCHEME, row["slug"], forward_domain()),
     }
@@ -2739,6 +2745,23 @@ async def list_forwards(host_id: int, stepup_grant: str = "", stepup_password: s
     rows = await db.fetchall(
         "SELECT * FROM port_forwards WHERE host_id=? ORDER BY created", host_id)
     return [_forward_json(r) for r in rows]
+
+
+@router.get("/api/apps")
+async def list_apps(user=Depends(security.require_user)):
+    """Toate forward-urile promovate la „app" (bookmark), agregate din toată flota, pentru strip-ul
+    de pe dashboard. NU expune `target_host:port` (motivul step-up-ului pe listarea per-host) — doar
+    ce e nevoie ca să afişezi şi deschizi o dală: nume, subdomeniu, tip, host, activ. Deci nu cere
+    step-up: nu scurge ce port intern e deschis."""
+    rows = await db.fetchall(
+        "SELECT f.id, f.label, f.slug, f.scheme, f.enabled, f.app_type, f.host_id, h.name AS host_name"
+        " FROM port_forwards f JOIN hosts h ON h.id=f.host_id"
+        " WHERE f.app_type IS NOT NULL AND f.app_type<>'' ORDER BY h.name, f.label")
+    return [{
+        "id": r["id"], "label": r["label"], "app_type": r["app_type"],
+        "host_id": r["host_id"], "host_name": r["host_name"], "enabled": bool(r["enabled"]),
+        "url": "%s://%s.%s" % (_FWD_SCHEME, r["slug"], forward_domain()),
+    } for r in rows]
 
 
 @router.get("/api/audit")
@@ -2839,6 +2862,7 @@ async def create_forward(host_id: int, body: ForwardIn,
     # care apără ACCESUL: fără el, gardul de aici ar opri doar crearea de forward-uri noi.
     await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
     _validate_forward(body.target_host, body.target_port, body.scheme)
+    app_type = body.app_type if body.app_type in _APP_TYPES else ""
     label = body.label.strip()[:60] or "forward"
     # _unique_slug + INSERT NU e atomic: două creări concurente (double-click / două tab-uri)
     # pot alege același slug și apoi ciocni pe constrângerea UNIQUE → 500. Reîncercăm: la tura
@@ -2849,9 +2873,9 @@ async def create_forward(host_id: int, body: ForwardIn,
         try:
             await db.execute(
                 "INSERT INTO port_forwards(host_id, label, slug, target_host, target_port,"
-                " scheme, description, enabled, created) VALUES(?,?,?,?,?,?,?,?,?)",
+                " scheme, description, enabled, created, app_type) VALUES(?,?,?,?,?,?,?,?,?,?)",
                 host_id, label, slug, body.target_host, int(body.target_port),
-                body.scheme, (body.description or "")[:500], int(body.enabled), time.time())
+                body.scheme, (body.description or "")[:500], int(body.enabled), time.time(), app_type)
             break
         except sqlite3.IntegrityError:
             slug = None
@@ -2876,10 +2900,12 @@ async def update_forward(fid: int, body: ForwardPatch,
     label = (body.label.strip()[:60] or row["label"]) if body.label is not None else row["label"]
     desc = (body.description or "")[:500] if body.description is not None else row["description"]
     enabled = int(body.enabled) if body.enabled is not None else row["enabled"]
+    cur_app = (row["app_type"] if "app_type" in row.keys() else "") or ""
+    app_type = (body.app_type if body.app_type in _APP_TYPES else cur_app) if body.app_type is not None else cur_app
     await db.execute(
         "UPDATE port_forwards SET label=?, target_host=?, target_port=?, scheme=?,"
-        " description=?, enabled=? WHERE id=?",
-        label, host, int(port), scheme, desc, enabled, fid)
+        " description=?, enabled=?, app_type=? WHERE id=?",
+        label, host, int(port), scheme, desc, enabled, app_type, fid)
     return _forward_json(await db.fetchone("SELECT * FROM port_forwards WHERE id=?", fid))
 
 

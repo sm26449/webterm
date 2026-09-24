@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { isSessionLive, api, Host, Session, timeAgo } from '../lib/api'
+import { isSessionLive, api, AppLink, Host, Session, timeAgo } from '../lib/api'
 import { hostAt, protoLabel } from '../lib/host'
 import { useI18n } from '../lib/i18n'
 import { hostHistory } from '../lib/metrics'
@@ -10,6 +10,10 @@ import TranscriptPlayer from './TranscriptPlayer'
 
 /** Pagina unui host: navigare de sesiuni (stânga) + previzualizare (dreapta).
    Click pe o sesiune = preview; „Deschide" (sau dublu-click) = terminal. */
+const HOST_APP_COLOR: Record<string, string> = {
+  proxmox: '#ec8b3c', portainer: '#57a8e6', grafana: '#f59e0b', custom: '#34d399',
+}
+
 export default function HostOverview(props: {
   host: Host
   sessions: Session[]
@@ -261,6 +265,13 @@ function HostDetail({ host }: { host: Host }) {
   const credPolicy = host.credential_policy === 'ask' ? t('host.credAsk')
     : host.credential_policy === 'ephemeral' ? t('host.credEphemeral')
     : host.has_credentials ? t('host.credStored') : t('host.credNone')
+  // apps (forward-uri promovate) ale ACESTUI host — butoane contextuale în panoul de detalii
+  const [hostApps, setHostApps] = useState<AppLink[]>([])
+  useEffect(() => {
+    api<AppLink[]>('/api/apps')
+      .then((all) => setHostApps(all.filter((a) => a.host_id === host.id)))
+      .catch(() => setHostApps([]))
+  }, [host.id])
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto p-6">
@@ -275,6 +286,24 @@ function HostDetail({ host }: { host: Host }) {
           <p className="wt-warn rounded-lg bg-amber-500/10 p-3 text-sm ring-1 ring-amber-500/30">
             {t('host.noTmuxWarning')}
           </p>
+        )}
+        {hostApps.length > 0 && (
+          <Section title={t('dashboard.apps')}>
+            <div className="flex flex-wrap gap-2">
+              {hostApps.map((a) => {
+                const color = HOST_APP_COLOR[a.app_type] || '#34d399'
+                return (
+                  <a key={a.id} href={a.enabled ? a.url : undefined} target="_blank" rel="noopener noreferrer"
+                    title={a.enabled ? a.url : t('dashboard.appDisabled')}
+                    className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12px] font-medium ring-1 ring-ink-700 ${
+                      a.enabled ? 'hover:bg-ink-800' : 'cursor-not-allowed opacity-50'}`}
+                    style={{ color }}>
+                    {a.label} <span className="text-slate-600">↗</span>
+                  </a>
+                )
+              })}
+            </div>
+          </Section>
         )}
         <Section title={t('host.secConnection')}>
           <Row k={t('host.protocol')} v={protoLabel(host)} />

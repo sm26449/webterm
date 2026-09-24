@@ -84,6 +84,18 @@ export interface PortForward {
   enabled: boolean
   created: number
   url: string
+  app_type?: string          // '' | proxmox | portainer | grafana | custom — bookmark/app
+}
+
+// forward promovat la „app", agregat pe dashboard (fără target_host:port)
+export interface AppLink {
+  id: number
+  label: string
+  app_type: string
+  host_id: number
+  host_name: string
+  enabled: boolean
+  url: string
 }
 
 export interface Snippet {
