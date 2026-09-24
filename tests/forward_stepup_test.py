@@ -168,6 +168,36 @@ async def main():
         check("slug necunoscut: nu aruncă, doar lasă calea normală să dea 404",
               allowed is True)
 
+        # ── apps: un forward promovat la „bookmark" (app_type) apare în /api/apps ─────────
+        security._stepup_windows.clear()
+        r = await c.post(f"/api/hosts/{plain}/forwards",
+                         json={"label": "Proxmox — srv", "target_host": "127.0.0.1",
+                               "target_port": 8006, "scheme": "https", "enabled": True,
+                               "app_type": "proxmox"})
+        check("creare forward-app (app_type) → 200", r.status_code == 200, r.text)
+        app_fid = r.json()["id"]
+        check("forward-ul întoarce app_type", r.json().get("app_type") == "proxmox", r.text)
+        apps = (await c.get("/api/apps")).json()
+        check("/api/apps listează app-ul", any(a["id"] == app_fid for a in apps), str(apps))
+        one = [a for a in apps if a["id"] == app_fid][0]
+        check("/api/apps dă url+host, NU target:port", "url" in one and "host_name" in one
+              and "target_port" not in one and "target_host" not in one, str(one))
+        r = await c.post(f"/api/hosts/{plain}/forwards",
+                         json={"label": "x", "target_port": 80, "app_type": "evil"})
+        check("app_type necunoscut cade pe '' (nu app)", r.json().get("app_type") == "", r.text)
+        # promote/demote un forward simplu
+        r = await c.post(f"/api/hosts/{plain}/forwards",
+                         json={"label": "simplu", "target_port": 3000, "scheme": "http", "enabled": True})
+        simple_fid = r.json()["id"]
+        check("forward simplu NU e în /api/apps",
+              not any(a["id"] == simple_fid for a in (await c.get("/api/apps")).json()))
+        await c.patch(f"/api/forwards/{simple_fid}", json={"app_type": "custom"})
+        check("după promote apare în /api/apps",
+              any(a["id"] == simple_fid for a in (await c.get("/api/apps")).json()))
+        await c.patch(f"/api/forwards/{simple_fid}", json={"app_type": ""})
+        check("după demote dispare din /api/apps",
+              not any(a["id"] == simple_fid for a in (await c.get("/api/apps")).json()))
+
     print(f"\n{ok}/{total} teste trecute")
     return ok == total
 

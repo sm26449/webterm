@@ -2604,7 +2604,6 @@ async def wake_host(host_id: int, request: Request, user=Depends(security.requir
     gateway-ul nu poate ajunge direct — cere unui agent ONLINE din ACELAŞI LAN să-l trimită. MAC-ul
     şi subnetul ţintei vin din ultimul diagnostic; peer-ul se alege după IP-urile LAN din
     diagnosticul lui (NU după `agent_ip`, care e IP-ul public văzut prin NAT)."""
-    import ipaddress
     row = await db.fetchone("SELECT * FROM hosts WHERE id=?", host_id)
     if not row:
         raise HTTPException(404)

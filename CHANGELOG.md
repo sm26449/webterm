@@ -7,6 +7,37 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [2.5.0] — 2026-09-24 · agent (50)
+
+Reach the tools behind the bastion without leaving it, and wake the machines that are off.
+**This release updates the agent (49 → 50)** — hosts update on reconnect (deferred while a host has
+open sessions).
+
+### Added
+
+- **App bookmarks for Proxmox / Portainer / Grafana / anything web.** A wizard ("Add app") turns a
+  service on a host into a named tile — internally just a `https` port-forward on its own subdomain,
+  behind your passkeys, so there's nothing new to secure. Apps show on an **Apps** strip on the
+  dashboard, as buttons on the host page, and open by name from ⌘K; any existing forward can be
+  promoted (☆). A bookmark is a forward + a little metadata (`app_type`); `/api/apps` aggregates
+  them across the fleet without exposing the internal `host:port`. An honest SSO hint (no helper):
+  point the app's OIDC at the same Authentik WebTerm uses and it's one login — WebTerm holds no app
+  credentials and provisions nothing.
+- **Wake-on-LAN.** A **Wake** button on an offline agent host: a neighbouring online agent on the
+  same LAN sends the magic packet, so a powered-off machine comes back without a trip to it. The
+  MAC comes from the host's last diagnostics; the neighbour is matched by the peers' own LAN IPs
+  (not the NAT'd source IP). New agent op; needs `iproute2` on the host and an online peer on the
+  same LAN.
+
+### Fixed (agent hardening, v50)
+
+- **Resumable upload: the agent verifies `st_size == offset` before an O_APPEND write** — a mismatch
+  (stale gateway cache, partial-chunk retry) is refused as a conflict so the client resyncs, closing
+  the blind-append duplication path at its source (the gateway side was fixed in 2.3.x).
+- **`fs_stat` — an O(1) size probe.** Resume/GC used a directory listing capped at `FS_MAX_LIST`, so
+  a resume silently restarted from 0 in a folder with more than ~2000 entries; it now stats the temp
+  directly (falling back to the listing on pre-v50 agents while the fleet updates).
+
 ## [2.4.1] — 2026-09-24 · agent (49)
 
 Enrollment hardening and disk hygiene. Gateway/tooling only; agent unchanged.

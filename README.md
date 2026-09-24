@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/sm26449/webterm/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/sm26449/webterm/actions/workflows/docker-publish.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v2.4.1-blue)](https://github.com/sm26449/webterm/tags)
+[![Version](https://img.shields.io/badge/version-v2.5.0-blue)](https://github.com/sm26449/webterm/tags)
 
 **Persistent terminals for your whole infrastructure, in the browser.**
 
@@ -247,6 +247,13 @@ what it does not cover, is in [Security](#security) and
   one-liner run on many machines, each auto-registering as its own host with its own
   agent token (individually revocable). Opt-in, expiring, revocable, use-capped, and
   every auto-enrollment is audited + alerted. [how-to](docs/FLEET.md#fleet-scale-onboarding)
+- **App bookmarks** (Proxmox / Portainer / Grafana / anything web): a wizard turns
+  "add my Proxmox" into a named tile — internally a `https` port-forward on its own
+  subdomain, behind your auth. They show on an **Apps** strip on the dashboard, as
+  buttons on the host, and open by name from ⌘K; any forward can be promoted to one.
+  Point the app's OIDC at the same Authentik and it's single sign-on
+- **Wake-on-LAN**: a **Wake** button on an offline agent host — a neighbouring agent on
+  the same LAN sends the magic packet (MAC read from the host's last diagnostics)
 - **Host tags**: free-form tags on hosts ("prod", "debian") on top of folders; the
   sidebar search matches them and tag chips filter the list in one click
 - **SSH key helpers** (direct-SSH hosts): generate an Ed25519 key pair from the UI

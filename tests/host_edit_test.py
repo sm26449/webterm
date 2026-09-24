@@ -196,6 +196,49 @@ async def main():
         r = await c.patch("/api/hosts/99999", json={"name": "x"})
         check("host inexistent → 404", r.status_code == 404, str(r.status_code))
 
+        # ── 10. Wake-on-LAN: construcţia magic packet-ului + căile de eroare ──
+        # send_magic_packet e din AGENT (stdlib), dar îl testăm aici ca unit hermetic.
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location("ptyd_wol",
+                os.path.join(os.path.dirname(__file__), "..", "agent", "ptyd.py"))
+        # ptyd.py rulează cod la import? nu — doar definiţii + `if __name__`. Îl încărcăm.
+        try:
+            _ptyd = _ilu.module_from_spec(_spec); _spec.loader.exec_module(_ptyd)
+            import socket as _sock, threading as _thr, time as _tm
+            got = {}
+            def _listen():
+                r = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
+                r.setsockopt(_sock.SOL_SOCKET, _sock.SO_REUSEADDR, 1)
+                r.bind(("127.0.0.1", 19999)); r.settimeout(3)
+                try: got["d"], _ = r.recvfrom(200)
+                except _sock.timeout: pass
+                r.close()
+            th = _thr.Thread(target=_listen); th.start(); _tm.sleep(0.2)
+            norm = _ptyd.send_magic_packet("aa-bb-cc-dd-ee-ff", "127.0.0.1", 19999)
+            th.join()
+            pkt = got.get("d", b"")
+            check("magic packet: 102 octeţi, 6×0xFF + MAC×16",
+                  len(pkt) == 102 and pkt[:6] == b"\xff" * 6 and pkt[6:] == bytes.fromhex("aabbccddeeff") * 16,
+                  pkt.hex()[:40])
+            check("MAC normalizat (separatori indiferenţi)", norm == "AA:BB:CC:DD:EE:FF", norm)
+            bad = False
+            try: _ptyd.send_magic_packet("nu-e-mac")
+            except ValueError: bad = True
+            check("MAC invalid → ValueError", bad)
+        except Exception as e:                       # noqa: BLE001
+            check("send_magic_packet importabil din agent", False, str(e))
+
+        # căile de eroare ale endpoint-ului wake (fără agent real → nu poate trezi)
+        wh = (await c.post("/api/hosts", json={"name": "wake-host"})).json()["id"]
+        r = await c.post(f"/api/hosts/{wh}/wake")
+        check("wake fără diagnostic (niciun MAC) → 400 wake.noMac",
+              r.status_code == 400 and r.headers.get("X-WebTerm-Error") == "wake.noMac", r.text)
+        ssh = (await c.post("/api/hosts", json={"name": "ssh-host", "connection_type": "ssh",
+               "hostname": "1.2.3.4", "ssh_username": "u"})).json()["id"]
+        r = await c.post(f"/api/hosts/{ssh}/wake")
+        check("wake pe host non-agent → 400 wake.notAgent",
+              r.status_code == 400 and r.headers.get("X-WebTerm-Error") == "wake.notAgent", r.text)
+
     print(f"\n{ok}/{total} teste trecute")
     return ok == total
 
