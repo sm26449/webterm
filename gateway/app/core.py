@@ -1437,6 +1437,10 @@ class AgentConnection(SessionSource):
     async def kill(self, sid) -> None:
         await self.request("kill", sid=sid)
 
+    async def wake(self, mac: str, broadcast: str = "255.255.255.255", port: int = 9) -> dict:
+        """Cere ACESTUI agent (vecin în LAN cu ţinta) să trimită un magic packet WoL."""
+        return await self.request("wake", mac=mac, broadcast=broadcast, port=port, timeout=15)
+
     async def run_command(self, command: str, cmd_timeout: int = 60) -> dict:
         """Rulare non-interactivă a unei comenzi pe host (consola de flotă).
         Așteaptă puțin peste timeout-ul comenzii, ca reply-ul agentului (inclusiv
@@ -3277,9 +3281,19 @@ def _upload_tmp(path: str, upload_id: str) -> str:
 
 
 async def _upload_landed(host_id: int, path: str, upload_id: str) -> int:
-    """Câţi octeţi are temp-ul pe host (sursa de adevăr). 0 dacă nu există."""
+    """Câţi octeţi are temp-ul pe host (sursa de adevăr). 0 dacă nu există.
+
+    Agent v50+: `fs_stat` — O(1), corect şi într-un director cu >FS_MAX_LIST intrări (unde `fs_list`
+    trunchia şi resume-ul reluă din greşeală de la 0). Agent mai vechi: cădem pe `fs_list` (acelaşi
+    comportament ca înainte) cât flota încă se actualizează."""
     conn = _agent_or_raise(host_id)
-    want = _upload_tmp(path, upload_id).rsplit("/", 1)[-1]
+    tmp = _upload_tmp(path, upload_id)
+    if (conn.agent_version or 0) >= 50:
+        resp = await conn.request("fs_stat", path=tmp, timeout=30)
+        if not resp.get("ok"):
+            raise FileError(resp.get("msg", "eroare"))
+        return int(resp.get("size", 0)) if resp.get("exists") else 0
+    want = tmp.rsplit("/", 1)[-1]
     parent = path.rsplit("/", 1)[0] or "/"
     resp = await conn.request("fs_list", path=parent, timeout=30)
     if not resp.get("ok"):
@@ -3443,6 +3457,10 @@ async def _fs_write_block(conn, path, offset, block) -> None:
         "fs_write", path=path, offset=offset,
         data_b64=base64.b64encode(block).decode(), timeout=60)
     if not resp.get("ok"):
+        # agent v50: refuză un append la offset ≠ dimensiunea reală (anti-dublare orbă). Îl mapăm
+        # la un CONFLICT ca fs_upload_chunk să invalideze cache-ul, iar clientul să re-sincronizeze.
+        if resp.get("code") == "offset_conflict":
+            raise FileConflict(resp.get("msg", "offset conflict"))
         raise FileError(resp.get("msg", "eroare"))
 
 

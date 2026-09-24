@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useRef, useState, PointerEvent as ReactPointerEvent } from 'react'
-import { errText, isSessionLive, api, ApiError, getBootVersion, Host, SearchHit, Session, timeAgo } from '../lib/api'
+import { errText, isSessionLive, api, ApiError, getBootVersion, Host, SearchHit, Session, timeAgo, withStepup } from '../lib/api'
+import { notify } from '../lib/notify'
 import { fmtTs } from '../lib/tz'
 import { useI18n } from '../lib/i18n'
 import InstallCommand from './InstallCommand'
@@ -203,6 +204,18 @@ export default function Sidebar(props: {
   // Notă pe host, la îndemână când e down: „de ce l-am oprit" se uită în două săptămâni —
   // aici rămâne scris exact în locul în care te uiţi când îl cauţi. Acelaşi PATCH ca la
   // mutarea în folder (nota e câmp obişnuit de host, doar că acum e vizibilă în sidebar).
+  // Wake-on-LAN: gateway-ul cere unui agent vecin să trimită magic packet-ul. Feedback pe toast.
+  const [waking, setWaking] = useState<number | null>(null)
+  async function wakeHost(host: Host) {
+    setWaking(host.id)
+    try {
+      const r = await withStepup(host.id, () => api<{ via: string }>(`/api/hosts/${host.id}/wake`, { method: 'POST' }))
+      notify(t('sidebar.wakeSent', { host: host.name }), t('sidebar.wakeVia', { peer: r.via }), 'info')
+    } catch (e) {
+      notify(t('sidebar.wakeFailed', { host: host.name }), errText(e, t) || '', 'warn')
+    } finally { setWaking(null) }
+  }
+
   async function editNote(host: Host) {
     const note = prompt(t('sidebar.promptNote', { name: host.name }), host.note ?? '')
     if (note === null) return
@@ -351,6 +364,16 @@ export default function Sidebar(props: {
                   aria-label={t('sidebar.noteAria', { name: host.name })}
                   className="shrink-0 rounded p-0.5 opacity-0 hover:text-slate-200 focus-visible:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100"
                 ><NoteIcon /></button>
+                {/* Wake-on-LAN: cere unui agent vecin din acelaşi LAN să trimită magic packet-ul.
+                    Doar host-uri de agent (WoL n-are sens pe SSH/telnet). */}
+                {(!host.connection_type || host.connection_type === 'agent') && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); wakeHost(host) }}
+                    disabled={waking === host.id}
+                    title={t('sidebar.wakeTitle')} aria-label={t('sidebar.wakeAria', { name: host.name })}
+                    className="shrink-0 rounded p-0.5 hover:text-emerald-300 disabled:opacity-40 focus-visible:opacity-100"
+                  >{waking === host.id ? '…' : '⏻'}</button>
+                )}
               </div>
             )}
             {host.conflict && (

@@ -43,7 +43,7 @@ import termios
 import threading
 import time
 
-AGENT_VERSION = 49
+AGENT_VERSION = 50
 
 # Sub atâtea secunde de valabilitate, un certificat se roteşte prea des ca un pin pe el să
 # însemne altceva decât o cădere programată. 48h: peste ce emite un CA intern (12h la Caddy),
@@ -1354,6 +1354,26 @@ def _serial_busy_map():
     return busy
 
 
+def send_magic_packet(mac, broadcast="255.255.255.255", port=9):
+    """Trimite un magic packet Wake-on-LAN către `mac` pe adresa de broadcast dată.
+
+    Magic packet = 6 octeţi 0xFF + MAC-ul repetat de 16 ori (102 octeţi), pe UDP broadcast.
+    Nimic privilegiat: un socket UDP obişnuit cu SO_BROADCAST. `mac` acceptă separatori `:` `-`
+    sau fără. Întoarce forma normalizată a MAC-ului la succes."""
+    raw = "".join(c for c in mac if c in "0123456789abcdefABCDEF")
+    if len(raw) != 12:
+        raise ValueError("invalid MAC (need 12 hex digits)")
+    mac_bytes = bytes.fromhex(raw)
+    packet = b"\xff" * 6 + mac_bytes * 16
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        s.sendto(packet, (broadcast, int(port)))
+    finally:
+        s.close()
+    return ":".join(raw[i:i + 2].upper() for i in range(0, 12, 2))
+
+
 def serial_ports():
     """Enumeră porturile seriale reale (ttyUSB/ttyACM/ttyAMA + ttyS* cu hardware) cu
     metadate bogate: nume stabile (by-id), cale fizică USB (by-path), VID:PID, serial USB,
@@ -2047,11 +2067,23 @@ class Agent:
                 try:
                     if off == 0:
                         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+                        with os.fdopen(fd, "ab") as f:
+                            f.write(data)
+                        ok(path=path, written=len(data))
                     else:
+                        # Apărare în adâncime (agent v50): O_APPEND scrie mereu la coadă, orb la
+                        # `offset`. Dacă offset-ul cerut NU e dimensiunea curentă (cache vechi pe
+                        # gateway, retry după un chunk parţial), un append orb ar dubla octeţi în
+                        # mijloc. Verificăm ÎNAINTE de scriere; la nepotrivire refuzăm cu conflict.
                         fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW)
-                    with os.fdopen(fd, "ab") as f:
-                        f.write(data)
-                    ok(path=path, written=len(data))
+                        with os.fdopen(fd, "ab") as f:
+                            cur = os.fstat(f.fileno()).st_size
+                            if cur == off:
+                                f.write(data)
+                        if cur == off:
+                            ok(path=path, written=len(data))
+                        else:
+                            err("offset_conflict", "size %d != offset %d" % (cur, off))
                 except OSError as e:
                     err("fs_error", "%s: %s" % (path, e.strerror or e))
 
@@ -2201,10 +2233,36 @@ class Agent:
                 except OSError as e:
                     err("serial_error", str(e))
 
+            elif op == "wake":
+                # Wake-on-LAN: trimite un magic packet către un MAC din LAN-ul ACESTUI host (agentul
+                # e „vecinul" care poate ajunge la o maşină oprită prin broadcast L2). Gateway-ul îl
+                # cheamă pe un agent din aceeaşi reţea cu ţinta. Doar UDP broadcast, nimic privilegiat.
+                mac = (msg.get("mac") or "").strip()
+                bcast = (msg.get("broadcast") or "255.255.255.255").strip()
+                port = int(msg.get("port") or 9)
+                try:
+                    ok(sent=send_magic_packet(mac, bcast, port))
+                except (ValueError, OSError) as e:
+                    err("wake_error", str(e))
+
             elif op == "diagnostics":
                 # Refresh on-demand din panoul Diagnostic. Colectăm pe un worker (apelează `ip`)
                 # ca să nu blocăm thread-ul de reader; worker-ul trimite reply-ul cu acelaşi id.
                 threading.Thread(target=self._push_diag, args=(rid,), daemon=True).start()
+
+            elif op == "fs_stat":
+                # O(1): mărimea + tipul unui fişier, fără a lista tot directorul (fs_list e plafonat
+                # la FS_MAX_LIST, deci resume-ul unui upload într-un director uriaş rata temp-ul şi
+                # reluă de la 0). `exists=False` dacă lipseşte — nu e eroare.
+                p = os.path.abspath(os.path.expanduser(msg.get("path") or ""))
+                try:
+                    st = os.lstat(p)
+                    ok(exists=True, size=st.st_size, dir=os.path.isdir(p),
+                       link=os.path.islink(p), mtime=int(st.st_mtime))
+                except FileNotFoundError:
+                    ok(exists=False, size=0)
+                except OSError as e:
+                    err("fs_error", "%s: %s" % (p, e.strerror or e))
 
             elif op == "fs_crc32":
                 # checksum de integritate la commit-ul unui upload resumabil. CRC-32 IEEE streaming

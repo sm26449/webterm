@@ -2577,6 +2577,76 @@ async def docker_logs(host_id: int, container: str, user=Depends(security.requir
     return {"logs": (resp.get("stdout", "") + resp.get("stderr", ""))[:200000]}
 
 
+# ── Wake-on-LAN: un agent VECIN trezeşte o maşină oprită din acelaşi LAN ──────
+def _host_ipv4_ifaces(diag_json):
+    """Interfeţele IPv4 non-loopback dintr-un snapshot de diagnostic: [(mac, ip_interface)]."""
+    import ipaddress
+    out = []
+    try:
+        ifaces = (json.loads(diag_json).get("network") or {}).get("interfaces") or []
+    except (TypeError, ValueError):
+        return out
+    for f in ifaces:
+        mac = (f.get("mac") or "").strip()
+        if f.get("name") == "lo" or not mac or mac == "00:00:00:00:00:00":
+            continue
+        for c in f.get("ipv4") or []:
+            try:
+                out.append((mac, ipaddress.ip_interface(c)))
+            except ValueError:
+                pass
+    return out
+
+
+@router.post("/api/hosts/{host_id}/wake")
+async def wake_host(host_id: int, request: Request, user=Depends(security.require_user)):
+    """Trimite un magic packet Wake-on-LAN către un host de agent OPRIT. WoL e broadcast L2, deci
+    gateway-ul nu poate ajunge direct — cere unui agent ONLINE din ACELAŞI LAN să-l trimită. MAC-ul
+    şi subnetul ţintei vin din ultimul diagnostic; peer-ul se alege după IP-urile LAN din
+    diagnosticul lui (NU după `agent_ip`, care e IP-ul public văzut prin NAT)."""
+    import ipaddress
+    row = await db.fetchone("SELECT * FROM hosts WHERE id=?", host_id)
+    if not row:
+        raise HTTPException(404)
+    if (row["connection_type"] or "agent") != "agent":
+        raise ApiError(400, "wake.notAgent", "Wake-on-LAN is only for agent hosts")
+    await _require_host_stepup(host_id, user)   # acţiune de host
+    # MAC + subnet al ţintei: preferă interfaţa cu IP-ul pe care gateway-ul l-a văzut ultima dată
+    target = None
+    for mac, ipi in _host_ipv4_ifaces(row["diagnostics"] if "diagnostics" in row.keys() else None):
+        if row["agent_ip"] and str(ipi.ip) == row["agent_ip"]:
+            target = (mac, ipi); break
+        target = target or (mac, ipi)
+    if not target:
+        raise ApiError(400, "wake.noMac",
+                       "no MAC/IPv4 known — the host must report diagnostics at least once while online")
+    mac, ipi = target
+    subnet = ipi.network
+    bcast = str(subnet.broadcast_address)
+    # peer: un agent ONLINE, alt host, cu o interfaţă LAN în acelaşi subnet
+    peer_conn = peer_name = None
+    for h in await db.fetchall("SELECT id, name, diagnostics FROM hosts WHERE connection_type='agent'"):
+        if h["id"] == host_id:
+            continue
+        conn = core.source_for(h["id"])
+        if not isinstance(conn, core.AgentConnection):      # online = are sursă
+            continue
+        if any(pipi.ip in subnet for _, pipi in _host_ipv4_ifaces(h["diagnostics"])):
+            peer_conn, peer_name = conn, h["name"]; break
+    if not peer_conn:
+        raise ApiError(400, "wake.noPeer",
+                       "no online agent on the same LAN to send the packet (Wake-on-LAN needs a neighbour)")
+    audit.detail(request, "wake %s via %s" % (mac, peer_name))
+    try:
+        resp = await peer_conn.wake(mac, broadcast=bcast)
+    except (core.AgentGone, TimeoutError, asyncio.TimeoutError):
+        raise HTTPException(504, "the neighbour agent did not answer in time")
+    if not resp.get("ok"):
+        # agent < v50 nu cunoaşte op-ul `wake`
+        raise HTTPException(502, resp.get("msg") or "wake failed (the neighbour agent may be older than v50)")
+    return {"ok": True, "via": peer_name, "mac": resp.get("sent", mac)}
+
+
 # ── Istoric global de comenzi (căutabil, audit-lite) ─────────────────────────
 # Comenzile interactive sunt raportate de client (din marcajele OSC 133); cele de
 # flotă se scriu automat mai sus. Un singur cont → istoricul e ca `~/.bash_history`,
