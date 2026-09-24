@@ -560,6 +560,7 @@ class EnrollGroupIn(BaseModel):
     current_password: str = ""    # re-auth: un token reutilizabil de creare hosturi = provisioning
     totp_code: str = ""           # second_gate (ca la crearea de cont)
     email_code: str = ""
+    enroll_password: str = ""     # parolă opţională cerută la fiecare instalare (header, nu URL)
 
 
 def _enroll_group_row(r) -> dict:
@@ -711,18 +712,20 @@ async def create_enroll_group(body: EnrollGroupIn, request: Request,
     days = min(max(int(body.days), 1), ENROLL_GROUP_MAX_DAYS)     # expirarea NU e opțională
     max_uses = max(0, min(int(body.max_uses), ENROLL_GROUP_MAX_USES))
     raw = security.new_token()
+    pw = body.enroll_password.strip()
+    pass_hash = await security.hash_password_async(pw) if pw else None
     await db.execute(
         "INSERT INTO enroll_groups(name, token_hash, created, created_by, expires,"
-        " max_uses, folder, require_2fa) VALUES(?,?,?,?,?,?,?,?)",
+        " max_uses, folder, require_2fa, pass_hash) VALUES(?,?,?,?,?,?,?,?,?)",
         name, security.sha256_hex(raw), time.time(), user["email"], time.time() + days * 86400,
-        max_uses, body.folder.strip(), int(body.require_2fa))
-    log.info("group enroll token created: %s (max_uses=%d, %dd, 2fa=%s) by %s",
-             name, max_uses, days, bool(body.require_2fa), user["email"])
+        max_uses, body.folder.strip(), int(body.require_2fa), pass_hash)
+    log.info("group enroll token created: %s (max_uses=%d, %dd, 2fa=%s, pass=%s) by %s",
+             name, max_uses, days, bool(body.require_2fa), bool(pw), user["email"])
     # un token de grup = o cheie care poate înmatricula hosturi noi în flotă: eveniment de securitate
     email_alerts.notify_security_change("a group enrollment token was created (%s)" % name,
                                         security.client_ip(request), user["email"])
     # valoarea în clar se întoarce O SINGURĂ DATĂ; în DB stă doar hash-ul
-    return {"token": raw, "install_command": _group_install_command(raw),
+    return {"token": raw, "install_command": _group_install_command(raw, pw),
             "groups": await list_enroll_groups(user)}
 
 
@@ -1226,6 +1229,14 @@ def _host_json(row) -> dict:
                            else None),
         "metrics": conn.metrics if conn else None,
         "agent_latest": expected,
+        # Link de instalare încă VALABIL şi NEFOLOSIT (agentul nu s-a conectat niciodată): un
+        # semnal ca să observi un link uitat/scurs. Se stinge singur la prima conectare a
+        # agentului (enroll_token → NULL la revendicare) sau la expirare.
+        "enroll_pending": is_agent and row["agent_version"] is None
+            and ("enroll_token" in row.keys() and bool(row["enroll_token"]))
+            and (row["enroll_expires"] or 0) > time.time(),
+        "enroll_protected": is_agent and "enroll_pass_hash" in row.keys()
+            and bool(row["enroll_pass_hash"]),
         # de ce NU se poate actualiza (dacă e cazul) — altfel UI-ul arată „update disponibil"
         # la infinit, fără motiv şi fără remediu
         "update_blocked": (row["update_blocked"] if "update_blocked" in row.keys() else None),
@@ -1293,14 +1304,16 @@ def _install_command(enroll_token: str, password: str = "") -> str:
             % (flags, ch, url, wflags, wh, url))
 
 
-def _group_install_command(group_token: str) -> str:
+def _group_install_command(group_token: str, password: str = "") -> str:
     """Acelaşi one-liner ca `_install_command`, dar spre `/install/group/<token>`: îl rulezi pe
     N maşini, iar gateway-ul auto-creează câte un host (cu token propriu) la fiecare rulare."""
     flags = "-fsSk" if config.AGENT_INSECURE else "-fsS"
     wflags = "--no-check-certificate " if config.AGENT_INSECURE else ""
     url = "%s/install/group/%s.sh" % (config.PUBLIC_URL, group_token)
-    return ("(command -v curl >/dev/null && curl %s %s || wget %s-qO- %s) | sh"
-            % (flags, url, wflags, url))
+    ch = ' -H "X-Enroll-Pass: %s"' % password if password else ""
+    wh = ' --header="X-Enroll-Pass: %s"' % password if password else ""
+    return ("(command -v curl >/dev/null && curl %s%s %s || wget %s%s-qO- %s) | sh"
+            % (flags, ch, url, wflags, wh, url))
 
 
 def _install_command_dedicated(enroll_token: str, password: str = "") -> str:
@@ -4473,13 +4486,31 @@ async def group_install_script(group_token: str, request: Request):
     host nou cu PROPRIUL token permanent (revocabil individual — modelul per-host rămâne intact),
     apoi livrăm scriptul cu acel token. Tokenul de grup doar autorizează crearea."""
     group_token = group_token[:-3] if group_token.endswith(".sh") else group_token
+    th = security.sha256_hex(group_token)
+    # Dacă grupul are parolă, o verificăm ÎNAINTE de a consuma o utilizare (o greşeală n-ar trebui
+    # să ardă un `uses`), plafonat per-grup ca tokenul din URL să nu fie oracol de brute-force.
+    probe = await db.fetchone(
+        "SELECT id, pass_hash FROM enroll_groups WHERE token_hash=? AND revoked=0 AND expires>?"
+        " AND (max_uses=0 OR uses<max_uses)", th, time.time())
+    if not probe:
+        raise ApiError(404, "enroll.invalid", "invalid, expired, revoked or exhausted enroll token")
+    if probe["pass_hash"]:
+        key = "genroll:%d" % probe["id"]
+        allowed, retry = security.login_allowed(key)
+        if not allowed:
+            raise ApiError(429, "enroll.tooMany", "too many wrong enroll passwords; retry in %ds" % retry)
+        supplied = request.headers.get("x-enroll-pass", "")
+        if not supplied or not await security.verify_password_async(supplied, probe["pass_hash"]):
+            security.record_login_failure(key)
+            raise ApiError(403, "enroll.badPass",
+                           "this enrollment link needs its password (X-Enroll-Pass header)")
+        security.record_login_success(key)
     # atomic, TOCTOU-safe ca la per-host: verificăm valid + incrementăm `uses` într-o SINGURĂ
     # scriere serializată, ca două instalări concurente să nu poată trece amândouă de un max_uses=1.
     grp = await db.execute_returning(
         "UPDATE enroll_groups SET uses = uses + 1 "
         "WHERE token_hash=? AND revoked=0 AND expires>? AND (max_uses=0 OR uses<max_uses) "
-        "RETURNING *",
-        security.sha256_hex(group_token), time.time())
+        "RETURNING *", th, time.time())
     if not grp:
         raise ApiError(404, "enroll.invalid", "invalid, expired, revoked or exhausted enroll token")
     # host nou cu token PROPRIU; numele e placeholder până raportează agentul hostname-ul (name_auto)

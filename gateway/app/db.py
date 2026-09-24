@@ -288,6 +288,8 @@ MIGRATIONS = [
     # instalare, pe lângă token-ul din URL. Livrată pe alt canal → un URL scurs singur nu ajunge.
     # NULL = fără parolă (comportamentul clasic). Se stinge odată cu token-ul, la revendicare.
     "ALTER TABLE hosts ADD COLUMN enroll_pass_hash TEXT",
+    # Aceeaşi parolă opţională, dar pe token-ul de GRUP (reutilizabil): cerută la fiecare instalare.
+    "ALTER TABLE enroll_groups ADD COLUMN pass_hash TEXT",
 ]
 
 # tabele adăugate ulterior (executeScript de mai sus le creează pe DB-uri noi;

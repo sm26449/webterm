@@ -57,6 +57,8 @@ export interface Host {
   folder?: string
   tags?: string[]
   conflict?: boolean
+  enroll_pending?: boolean       // link de instalare valabil + nefolosit (agentul nu s-a conectat)
+  enroll_protected?: boolean     // link-ul are parolă
   uninstalled_at?: number | null
   install_command?: string
   install_command_dedicated?: string

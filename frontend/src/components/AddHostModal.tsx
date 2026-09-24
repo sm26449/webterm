@@ -51,7 +51,7 @@ export default function AddHostModal(props: { onClose: () => void; host?: Host; 
   // revocare) rămâne în Settings → Security. Doar la CREARE (la editare, un host = un host).
   const [mode, setMode] = useState<'one' | 'many'>('one')
   const [grp, setGrp] = useState({ name: '', days: 30, max_uses: 0, folder: '', require_2fa: false,
-    current_password: '' })
+    current_password: '', enroll_password: '' })
   const [grpCmd, setGrpCmd] = useState('')
 
   async function submitGroup(e: FormEvent) {
@@ -196,6 +196,13 @@ export default function AddHostModal(props: { onClose: () => void; host?: Host; 
                     onChange={(e) => setGrp({ ...grp, require_2fa: e.target.checked })}
                     className="h-4 w-4 rounded accent-sky-600" />
                   {t('settings.enrollGroups.require2fa')}
+                </label>
+                <label className="block">
+                  <span className={label}>{t('addhost.enrollPass')}</span>
+                  <input type="text" autoComplete="off" value={grp.enroll_password}
+                    onChange={(e) => setGrp({ ...grp, enroll_password: e.target.value })}
+                    placeholder={t('addhost.enrollPassPlaceholder')} className={field} />
+                  <span className="mt-1 block text-xs text-slate-500">{t('addhost.enrollPassHint')}</span>
                 </label>
                 <input type="password" value={grp.current_password} autoComplete="current-password"
                   onChange={(e) => setGrp({ ...grp, current_password: e.target.value })}

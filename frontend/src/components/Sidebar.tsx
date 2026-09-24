@@ -359,6 +359,12 @@ export default function Sidebar(props: {
                 ⚠ {t('sidebar.conflictBody')}
               </div>
             )}
+            {/* link de instalare încă valabil şi nefolosit: ca să observi unul uitat/scurs */}
+            {host.enroll_pending && (
+              <div className="truncate text-xs wt-warn" title={t('sidebar.enrollPendingTitle')}>
+                🔗 {host.enroll_protected ? t('sidebar.enrollPendingProtected') : t('sidebar.enrollPending')}
+              </div>
+            )}
             {/* Agentul a fost scos de pe host cu `ptyd.py uninstall`. Nu ştergem nimic
                 singuri: poate vrei doar să-l reinstalezi, caz în care marcajul dispare de la
                 sine la reconectare. Ştergerea rămâne o apăsare conştientă, aici. */}

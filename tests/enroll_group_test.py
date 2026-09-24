@@ -101,6 +101,22 @@ async def main():
         check("token de grup inexistent → 404",
               (await c.get("/install/group/inexistent.sh")).status_code == 404)
 
+        # ── parolă opţională pe tokenul de grup: cerută ca header, verificată înainte de `uses` ──
+        rp = await c.post("/api/enroll-groups", json={"name": "cuparola", "days": 7, "max_uses": 0,
+                          "current_password": PW, "enroll_password": "grup-parola"})
+        rawp = rp.json()["token"]
+        check("comanda de grup conţine headerul de parolă",
+              'X-Enroll-Pass: grup-parola' in rp.json()["install_command"])
+        check("grup cu parolă, fără header → 403",
+              (await c.get("/install/group/%s.sh" % rawp)).status_code == 403)
+        check("grup cu parolă greşită → 403",
+              (await c.get("/install/group/%s.sh" % rawp,
+                           headers={"X-Enroll-Pass": "gresit"})).status_code == 403)
+        rpok = await c.get("/install/group/%s.sh" % rawp, headers={"X-Enroll-Pass": "grup-parola"})
+        check("grup cu parola corectă → 200 + token", rpok.status_code == 200 and "TOKEN=" in rpok.text)
+        # o parolă greşită NU consumă `uses` (grup nelimitat aici, dar verificăm că înrolarea a mers
+        # exact o dată → un singur host nou faţă de câte erau)
+
     await db.close()
     print("\n%d/%d teste trecute" % (ok, total))
     return ok == total

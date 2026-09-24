@@ -278,6 +278,34 @@ echo "  image: ${RUNNING:-?}"
 echo "  state: $STATE"
 [ "$STATE" = healthy ] || warn "the container is NOT healthy — see 'docker logs ${APP_CID:-<container>}' and ./rollback.sh"
 
+# ── 7b. prune old images: keep the last N versions for rollback, drop the rest ────────────────
+# Fiecare upgrade lăsa imaginea veche pe disc (~300MB fiecare) → zeci de GB în timp. Păstrăm
+# ultimele KEEP versiuni (semver desc) ca să poţi face rollback manual la oricare, PLUS — mereu,
+# chiar dacă ies din top KEEP — imaginea care RULEAZĂ acum şi ţinta din .prev-image (ce foloseşte
+# rollback.sh). Ştergem doar restul. `docker image rm` refuză o imagine folosită de un container,
+# deci e sigur; ignorăm acele refuzuri.
+KEEP="${WEBTERM_KEEP_IMAGES:-7}"
+REPO_IMG="ghcr.io/sm26449/webterm"
+say "Pruning old images (keeping the last $KEEP)"
+{
+  running=$(docker inspect "${APP_CID:-nimic}" --format '{{.Config.Image}}' 2>/dev/null || true)
+  prev=$([ -f .prev-image ] && cat .prev-image || true)
+  # tag-urile vX.Y.Z, sortate semantic descrescător; primele KEEP se păstrează
+  keep_tags=$(docker images "$REPO_IMG" --format '{{.Tag}}' \
+    | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -t. -k1.2,1n -k2,2n -k3,3n | tail -n "$KEEP")
+  removed=0
+  for tag in $(docker images "$REPO_IMG" --format '{{.Tag}}' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$'); do
+    ref="$REPO_IMG:$tag"
+    printf '%s\n' "$keep_tags" | grep -qx "$tag" && continue     # în top KEEP
+    [ "$ref" = "$running" ] && continue                          # rulează acum
+    [ "$ref" = "$prev" ] && continue                             # ţinta de rollback
+    if docker image rm "$ref" >/dev/null 2>&1; then
+      echo "  removed $tag"; removed=$((removed + 1))
+    fi
+  done
+  [ "$removed" = 0 ] && echo "  nothing to prune (≤ $KEEP versions on disk)"
+} || warn "image prune skipped (non-fatal)"
+
 if [ -f /etc/default/webterm-backup ] && grep -q '^WEBTERM_BACKUP_PASSPHRASE=.' /etc/default/webterm-backup; then
   echo "  backup: encrypted (passphrase in /etc/default/webterm-backup)"
 else
