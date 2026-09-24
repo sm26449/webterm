@@ -133,6 +133,8 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
   const [sel, setSel] = useState(0)                 // index selectat (tastatură)
   const [renaming, setRenaming] = useState<string | null>(null)
   const [newFolder, setNewFolder] = useState<string | null>(null)
+  const [newFile, setNewFile] = useState<string | null>(null)
+  const [newFileErr, setNewFileErr] = useState('')
   const [confirmDel, setConfirmDel] = useState<Entry | null>(null)
   const fileInput = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
@@ -450,6 +452,30 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
     } catch (e) { setError(errText(e, t) || t('files.genericErr')) }
   }
 
+  // fişier nou: îl creăm pe host printr-un upload one-shot — corp gol ("empty") sau conţinutul din
+  // clipboard ("clipboard") — apoi deschidem editorul pe el (acolo mai editezi şi salvezi). Refoloseşte
+  // editorul + salvarea atomică existente. Citirea clipboard-ului cere HTTPS + gest de utilizator (clickul
+  // pe buton) — dacă browserul o refuză (ex. Firefox), lăsăm modalul deschis cu "empty" ca alternativă.
+  async function doNewFile(name: string, mode: 'empty' | 'clipboard') {
+    const n = name.trim()
+    if (!n || !listing) return
+    if (listing.entries.some((e) => e.name === n)) { setNewFileErr(t('files.newFileExists')); return }
+    let body = new Uint8Array(0)
+    if (mode === 'clipboard') {
+      try {
+        body = new TextEncoder().encode(await navigator.clipboard.readText())
+      } catch { setNewFileErr(t('files.clipboardDenied')); return }
+    }
+    setNewFile(null); setNewFileErr('')
+    const path = join(listing.path, n)
+    try {
+      await api(`/api/hosts/${props.host.id}/fs/upload?path=${encodeURIComponent(path)}`,
+        { method: 'POST', body })
+      await load(listing.path)
+      setEditing({ path, name: n })                     // deschide editorul pe fişierul nou
+    } catch (e) { setError(errText(e, t) || t('files.genericErr')) }
+  }
+
   async function doRename(e: Entry, name: string) {
     const n = name.trim()
     setRenaming(null)
@@ -474,7 +500,7 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
   }
 
   function onKeyDown(ev: React.KeyboardEvent) {
-    if (editing || renaming || newFolder) return
+    if (editing || renaming || newFolder !== null || newFile !== null) return
     if (ev.key === 'ArrowDown') { ev.preventDefault(); setSel((s) => Math.min(view.length - 1, s + 1)) }
     else if (ev.key === 'ArrowUp') { ev.preventDefault(); setSel((s) => Math.max(0, s - 1)) }
     else if (ev.key === 'Enter') {
@@ -567,6 +593,7 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
             title={t('files.pathHint')}
           />
           <button onClick={() => load(listing?.path ?? path)} className="wt-touch shrink-0 rounded px-1.5 text-slate-400 hover:bg-ink-800" title={t('files.reload')}><RefreshIcon /></button>
+          <button onClick={() => { setNewFileErr(''); setNewFile('') }} disabled={!listing} className="wt-touch shrink-0 rounded px-1.5 font-mono text-[13px] text-slate-400 hover:bg-ink-800 disabled:opacity-40" title={t('files.newFile')}>+📄</button>
           <button onClick={() => setNewFolder('')} className="wt-touch shrink-0 rounded px-1.5 text-slate-400 hover:bg-ink-800" title={t('files.newDir')}><PlusIcon /></button>
           <button onClick={() => fileInput.current?.click()} disabled={busy || !listing} className="wt-touch shrink-0 rounded px-1.5 text-sky-400 hover:bg-ink-800 disabled:opacity-40" title={t('files.uploadHere')}>↑</button>
           <input ref={fileInput} type="file" multiple className="hidden" onChange={(e) => { if (e.target.files) pickFiles(e.target.files); e.target.value = '' }} />
@@ -612,6 +639,28 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
                 onKeyDown={(e) => { if (e.key === 'Enter') doMkdir(newFolder); if (e.key === 'Escape') setNewFolder(null) }}
                 onBlur={() => doMkdir(newFolder)} placeholder={t('files.newDirPh')}
                 className="min-w-0 flex-1 rounded bg-ink-800 px-1.5 py-0.5 font-mono text-[11px] text-slate-200 ring-1 ring-sky-500" />
+            </div>
+          )}
+          {newFile !== null && (
+            <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/60 p-4"
+              onClick={() => setNewFile(null)}>
+              <div className="w-full max-w-xs rounded-lg bg-ink-900 p-3 shadow-xl ring-1 ring-ink-700"
+                onClick={(e) => e.stopPropagation()}>
+                <div className="mb-2 flex items-center gap-2 text-[12px] text-slate-300">
+                  <span className="text-[14px]">📄</span>{t('files.newFile')}
+                </div>
+                <input autoFocus value={newFile}
+                  onChange={(e) => { setNewFile(e.target.value); if (newFileErr) setNewFileErr('') }}
+                  onKeyDown={(e) => { if (e.key === 'Enter') doNewFile(newFile, 'empty'); if (e.key === 'Escape') setNewFile(null) }}
+                  placeholder={t('files.newFilePh')}
+                  className="w-full rounded bg-ink-800 px-2 py-1 font-mono text-[12px] text-slate-200 outline-none ring-1 ring-sky-500" />
+                {newFileErr && <div className="mt-1.5 text-[11px] wt-danger">{newFileErr}</div>}
+                <div className="mt-2.5 flex justify-end gap-2 text-[12px]">
+                  <button onClick={() => setNewFile(null)} className="rounded px-2 py-1 text-slate-400 hover:bg-ink-800">{t('files.cancel')}</button>
+                  <button onClick={() => doNewFile(newFile, 'clipboard')} disabled={!newFile.trim()} className="rounded px-2 py-1 text-slate-200 ring-1 ring-ink-600 hover:bg-ink-800 disabled:opacity-40">{t('files.newFromClip')}</button>
+                  <button onClick={() => doNewFile(newFile, 'empty')} disabled={!newFile.trim()} className="rounded bg-sky-600 px-2 py-1 font-medium text-white hover:bg-sky-700 disabled:opacity-40">{t('files.newEmpty')}</button>
+                </div>
+              </div>
             </div>
           )}
           {view.map((e, i) => (
