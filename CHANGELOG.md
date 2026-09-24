@@ -7,6 +7,38 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [2.4.0] — 2026-09-24 · agent (49)
+
+A feature release built entirely on the existing agent — **no fleet update** (agent stays at 49).
+Docker/tar run through the agent's existing `run` op; container shells reuse the session `cmd` the
+agent already supported. Every item was reviewed by adversarial audits and proven end-to-end before
+shipping.
+
+### Added
+
+- **Docker panel** (toolbar button, agent hosts). Tabs for **containers / images / volumes /
+  networks**, listed by running the host's `docker` CLI through the agent (no new agent op, no extra
+  daemon exposure). **Start / stop / restart** a container, view its **logs**, and open a **shell
+  inside a running container** in its own terminal tab — `docker exec` with bash and an `sh` fallback
+  so it works on minimal images (alpine/busybox) too. The container shell lives in tmux, so it
+  survives a reconnect like any session. Reads and actions take the same 2FA step-up as any host
+  action; logs (a classic secret store) are gated too.
+- **Multi-terminal grid + input broadcast.** Pick 2–4 open sessions into a **2×2 grid**, all live at
+  once; toggle **broadcast** to type into every pane simultaneously, with an amber band on each pane
+  so there's no doubt where the keys land. A picker chooses exactly which terminals go in the grid.
+- **Download a folder (or file) as a `.tgz` archive** from the file panel — tarred on the host and
+  streamed down, with the host-side temp cleaned up even if the download is aborted.
+- **Resizable sidebar** — drag the edge (or arrow keys on the handle, double-click to reset) to
+  trade list detail for terminal width; persisted per browser.
+- **Offline hosts** sink to the bottom of their sidebar group with **how long they've been down** and
+  an editable **note** ("why is it down"), shown on the Dashboard too; a collapsed group's count
+  turns into `alive/total`.
+
+### Changed
+
+- Account-secret prompts (SMTP/backup/signing/passkey/user-delete re-auth) now use a **masked modal**
+  instead of `window.prompt`, which showed the password in cleartext.
+
 ## [2.3.3] — 2026-09-23 · agent (49)
 
 Sidebar ergonomics for powered-off hosts, plus the fixes from a UI/accessibility audit of the

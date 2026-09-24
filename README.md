@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/sm26449/webterm/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/sm26449/webterm/actions/workflows/docker-publish.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v2.3.3-blue)](https://github.com/sm26449/webterm/tags)
+[![Version](https://img.shields.io/badge/version-v2.4.0-blue)](https://github.com/sm26449/webterm/tags)
 
 **Persistent terminals for your whole infrastructure, in the browser.**
 
@@ -205,13 +205,19 @@ what it does not cover, is in [Security](#security) and
   mkdir/rename/delete, drag&drop upload (including **folders**) with a real progress
   bar + cancel — **resumable**: a dropped connection (or a closed laptop) keeps the
   bytes already uploaded, re-dropping the same file continues where it left off, and
-  a **CRC-32 integrity check** guards the commit; a **CodeMirror** editor with
+  a **CRC-32 integrity check** guards the commit; **download a folder (or file) as a
+  `.tgz` archive** (tarred on the host, streamed down); a **CodeMirror** editor with
   highlighting, large files opened view-only (partial-read), atomic save with
   conflict detection
 - **Git panel** (toolbar button): for the repo in the session's current directory
   (follows `cd` via OSC 7) — status, **colored diff**, stage/unstage and
   **commit**, without opening GitHub. Focused scope: merge/rebase/push/branch stay
   in the CLI
+- **Docker panel** (toolbar button, agent hosts): tabs for **containers / images /
+  volumes / networks**, **start/stop/restart** a container, view **logs**, and open a
+  **shell inside a container** in its own terminal tab (`docker exec`, bash with an
+  sh fallback for minimal images). Runs the host's `docker` CLI through the agent — no
+  extra daemon exposure; the same 2FA step-up as any host action
 - **Port forwarding** (toolbar button): expose web services from the host through
   the browser, protected by your own auth — Docker containers, monitoring, admin
   panels bound to localhost. Reverse-proxy **HTTP + HTTPS + WebSocket** (no
@@ -233,6 +239,10 @@ what it does not cover, is in [Security](#security) and
   live results (state, exit code, output per host), with a deliberate confirmation
   first. **Save a command** under a name and re-run it later (kept per-browser).
   "Copy report" as markdown. [details](docs/FLEET.md)
+- **Multi-terminal grid + broadcast**: pick 2–4 open sessions into a **2×2 grid**, all
+  live at once, and toggle **broadcast** to type into every one simultaneously (an amber
+  band marks each pane so there's no doubt where the keys go) — interactive fleet ops,
+  not just one-shot commands
 - **Fleet-scale onboarding**: a reusable **group enrollment token** — one install
   one-liner run on many machines, each auto-registering as its own host with its own
   agent token (individually revocable). Opt-in, expiring, revocable, use-capped, and
@@ -269,6 +279,8 @@ what it does not cover, is in [Security](#security) and
 - **Watermark** optional (Settings → Appearance): a tiled overlay (email/host/time)
   over the workspace **and** over shared sessions (applied server-side) — deters
   leaks / gives traceability
+- **Resizable sidebar**: drag its edge (or arrow keys on the handle; double-click to
+  reset) to trade list detail for terminal width — persisted per browser
 - Guaranteed minimum contrast (WCAG AA) in the terminal, screen-reader mode
   (opt-in), `Ctrl+M` to Tab out of the terminal
 - Desktop-grade copy/paste: Ctrl/Cmd+C on a selection copies (no selection = ^C),
