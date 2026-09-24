@@ -303,7 +303,9 @@ say "Pruning old images (keeping the last $KEEP)"
       echo "  removed $tag"; removed=$((removed + 1))
     fi
   done
-  [ "$removed" = 0 ] && echo "  nothing to prune (≤ $KEEP versions on disk)"
+  # `if`, nu `[ ... ] && echo`: pe calea „s-a şters ceva", un `[ x = 0 ]` fals lăsa blocul cu
+  # exit 1 → declanşa fals `|| warn "skipped"` DEŞI curăţenia reuşise. `if` iese mereu 0.
+  if [ "$removed" = 0 ]; then echo "  nothing to prune (≤ $KEEP versions on disk)"; fi
 } || warn "image prune skipped (non-fatal)"
 
 if [ -f /etc/default/webterm-backup ] && grep -q '^WEBTERM_BACKUP_PASSPHRASE=.' /etc/default/webterm-backup; then
