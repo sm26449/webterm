@@ -7,6 +7,38 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [2.4.1] — 2026-09-24 · agent (49)
+
+Enrollment hardening and disk hygiene. Gateway/tooling only; agent unchanged.
+
+### Added
+
+- **A configurable validity window and an optional password on install links.** When you add a
+  host (or a group enrollment token), you now choose how long the link is valid (15 min / 1 h /
+  24 h / 7 d; default 1 h, was a fixed 24 h) and may set a temporary **install password**. The
+  password is required at install time and travels as an HTTP header (`X-Enroll-Pass`), never in
+  the URL — so a link captured in a proxy/access log can't be used on its own. It's checked before
+  the single-use token is claimed (a wrong guess doesn't burn the link) and rate-limited per host/
+  group so the URL can't be used as a brute-force oracle. Deliver it out-of-band for real
+  defence-in-depth.
+- **Unused install links are visible.** A host whose install link is still valid and unclaimed
+  shows an "install link active (unused)" badge in the sidebar (flagging whether it's
+  password-protected), so a forgotten or leaked link gets noticed; it clears when the agent first
+  connects or the link expires.
+
+### Changed
+
+- **`upgrade.sh` now prunes old images**, keeping the last 7 versions (override with
+  `WEBTERM_KEEP_IMAGES`) for manual rollback, plus always the running image and the rollback
+  target. Every upgrade used to leave the old ~300 MB image on disk forever.
+
+### Notes
+
+- **Rolling the gateway back while agents are ahead is safe by design.** A rolled-back gateway
+  never downgrades an agent (it only pushes when the host's version is *older*, and the agent
+  refuses downgrades regardless), and agent wire changes are additive, so an older gateway talking
+  to a newer agent stays compatible — you simply lose newer features until you roll forward.
+
 ## [2.4.0] — 2026-09-24 · agent (49)
 
 A feature release built entirely on the existing agent — **no fleet update** (agent stays at 49).
