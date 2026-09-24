@@ -7,6 +7,23 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [2.5.1] — 2026-09-24 · agent (50)
+
+A small file-manager convenience and a cosmetic fix. **No agent change** (still 50) — hosts need no update.
+
+### Added
+
+- **Create a file, not just a folder.** The file manager's new **+📄** opens a small dialog: name the
+  file, then either create it **Empty** or **From clipboard** — the latter reads your clipboard and
+  writes it straight into the new file, so pasting a config or key is one step instead of upload-a-file.
+  Either way the editor opens on it (atomic save, mtime-conflict detection). Clipboard reading needs
+  HTTPS and a click; if the browser refuses, the dialog stays open with **Empty** as a fallback.
+
+### Fixed
+
+- **`upgrade.sh` no longer warns after a clean prune.** A trailing test left a non-zero exit that
+  tripped the warning path, printing a spurious "prune skipped" even when old images were removed fine.
+
 ## [2.5.0] — 2026-09-24 · agent (50)
 
 Reach the tools behind the bastion without leaving it, and wake the machines that are off.

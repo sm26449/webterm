@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/sm26449/webterm/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/sm26449/webterm/actions/workflows/docker-publish.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v2.5.0-blue)](https://github.com/sm26449/webterm/tags)
+[![Version](https://img.shields.io/badge/version-v2.5.1-blue)](https://github.com/sm26449/webterm/tags)
 
 **Persistent terminals for your whole infrastructure, in the browser.**
 
