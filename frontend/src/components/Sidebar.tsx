@@ -453,15 +453,21 @@ export default function Sidebar(props: {
   })
   const clampSb = (w: number) => Math.min(SB_MAX, Math.max(SB_MIN, w))
   const saveSbWidth = (w: number) => { try { localStorage.setItem('wt_sidebar_w', String(w)) } catch { /* */ } }
+  // curăţenia unui drag în curs, ţinută într-un ref: dacă Sidebar se demontează la jumătatea
+  // unui drag, un useEffect scoate listenerii de pe window (altfel ar rămâne agăţaţi)
+  const dragCleanup = useRef<(() => void) | null>(null)
+  useEffect(() => () => dragCleanup.current?.(), [])
   const dragSb = (e: ReactPointerEvent) => {
     e.preventDefault()
     // sidebar-ul e lipit de marginea stângă → clientX E lăţimea; fără măsurători de rect
     const move = (ev: PointerEvent) => setSbWidth(clampSb(ev.clientX))
-    const up = (ev: PointerEvent) => {
+    const detach = () => {
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', up)
-      saveSbWidth(clampSb(ev.clientX))
+      dragCleanup.current = null
     }
+    const up = (ev: PointerEvent) => { detach(); saveSbWidth(clampSb(ev.clientX)) }
+    dragCleanup.current = detach
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', up)
   }

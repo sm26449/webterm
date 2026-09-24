@@ -1486,6 +1486,7 @@ async def fs_archive(host_id: int, path: str, user=Depends(security.require_user
     from fastapi.responses import StreamingResponse
     name = os.path.basename(path.rstrip("/")) or "archive"
     name = name.replace('"', "").replace("\r", "").replace("\n", "").replace("\\", "") + ".tgz"
+    tmp = None
     try:
         tmp = await core.fs_archive_prepare(host_id, path)
         # primul chunk ÎNAINTE de StreamingResponse: erorile devin status HTTP, nu stream rupt
@@ -1495,11 +1496,14 @@ async def fs_archive(host_id: int, path: str, user=Depends(security.require_user
         except StopAsyncIteration:
             first = b""
     except core.AgentGone:
-        raise ApiError(409, "host.offline", "the host is offline")
-    except TimeoutError:
-        raise HTTPException(504, "the host is not responding")
-    except core.FileError as e:
-        raise HTTPException(400, str(e))
+        raise ApiError(409, "host.offline", "the host is offline")   # agent plecat: temp inaccesibil oricum
+    except (TimeoutError, core.FileError) as e:
+        # arhiva s-a creat pe host dar citirea primului chunk a eşuat (host lent / eroare de citire),
+        # iar `body()` nu se mai execută niciodată → temp-ul ar rămâne orfan (n-are GC). Curăţăm aici.
+        if tmp:
+            task = asyncio.ensure_future(core.fs_archive_cleanup(host_id, tmp))
+            _bg_tasks.add(task); task.add_done_callback(_bg_tasks.discard)
+        raise HTTPException(504 if isinstance(e, TimeoutError) else 400, str(e))
 
     async def body():
         try:

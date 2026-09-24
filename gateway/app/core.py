@@ -1085,7 +1085,7 @@ class SessionSource:
     metrics: Optional[dict] = None
 
     async def create(self, sid: str, rows: int, cols: int, term: str,
-                     tz: Optional[str] = None) -> dict:
+                     tz: Optional[str] = None, cmd: Optional[str] = None) -> dict:
         raise NotImplementedError
 
     async def attach(self, sid: str, from_offset) -> dict:
