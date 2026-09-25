@@ -9,7 +9,7 @@
 #   .venv/bin/pip install -r gateway/requirements.txt -r gateway/requirements-dev.txt
 #
 httpx==0.28.1
-websockets==16.1
+websockets==16.1.1
 # server FTP-TLS in-process pentru backup_ftps_test (destinaţia FTPS end-to-end peste TLS real).
 # Doar test: la runtime folosim ftplib din stdlib.
 pyftpdlib==2.2.0
