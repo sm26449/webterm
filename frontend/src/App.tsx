@@ -176,6 +176,31 @@ function MainApp() {
   const togglePick = (sid: string) => setPickerSel((prev) =>
     prev.includes(sid) ? prev.filter((s) => s !== sid)
       : prev.length >= GRID_MAX ? prev : [...prev, sid])
+  // split de 2 panouri: divider DRAGGABLE (un split adevărat nu e 50/50 bătut în cuie — ţii
+  // logurile late şi shell-ul îngust). Acelaşi tipar ca sidebar-ul: drag + săgeţi + dublu-click
+  // reset, procent persistat per browser. La 3–4 panouri rămâne grila 2×2 (egală).
+  const SPLIT_MIN = 20, SPLIT_MAX = 80, SPLIT_DEF = 50
+  const [splitPct, setSplitPct] = useState(() => {
+    try {
+      const v = Number(localStorage.getItem('wt_split_pct'))
+      return v >= SPLIT_MIN && v <= SPLIT_MAX ? v : SPLIT_DEF
+    } catch { return SPLIT_DEF }
+  })
+  const splitRef = useRef<HTMLDivElement>(null)
+  const clampSplit = (v: number) => Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, v))
+  const saveSplitPct = (v: number) => { try { localStorage.setItem('wt_split_pct', String(v)) } catch { /* */ } }
+  const dragSplit = (e: React.PointerEvent) => {
+    e.preventDefault()
+    const el = splitRef.current
+    if (!el) return
+    const rect = el.getBoundingClientRect()
+    const pctAt = (x: number) => clampSplit(((x - rect.left) / rect.width) * 100)
+    const move = (ev: PointerEvent) => setSplitPct(pctAt(ev.clientX))
+    const up = (ev: PointerEvent) => { detach(); const v = pctAt(ev.clientX); setSplitPct(v); saveSplitPct(v) }
+    const detach = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up) }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+  }
   // send-ul fiecărui panou montat, indexat pe sid — SessionView îl înregistrează singur
   const sendMap = useRef(new Map<string, (d: string | Uint8Array) => void>())
   const broadcastRef = useRef(false)
@@ -931,45 +956,52 @@ function MainApp() {
               setTabSort('manual')
               setOpenTabs((prev) => [...order, ...prev.filter((sid) => !order.includes(sid))])
             }}
+            /* split view: intrarea + controalele stau în bara de taburi (fosta bandă dedicată
+               mânca o linie de ecran ori de câte ori aveai ≥2 taburi, chiar nefolosită) */
+            split={{
+              active: gridActive,
+              broadcast,
+              onOpen: openGridPicker,
+              onBroadcast: () => setBroadcast((b) => !b),
+              onExit: () => { setGridSids([]); setBroadcast(false) },
+            }}
           />
-        )}
-        {/* bara grilei: apare când ai ≥2 tab-uri (poţi intra în grilă) sau grila e deja activă.
-            „Grilă" ia primele ≤4 tab-uri într-un 2×2; „Broadcast" difuzează tastele în toate. */}
-        {(openTabs.length >= 2 || gridActive) && (
-          <div className="flex shrink-0 items-center gap-2 border-b border-ink-800 bg-ink-900/60 px-3 py-1 text-xs">
-            {!gridActive ? (
-              <button onClick={openGridPicker}
-                className="rounded px-2 py-0.5 font-medium text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800">
-                {t('grid.enter')}
-              </button>
-            ) : (
-              <>
-                <span className="font-medium text-slate-400">{t('grid.label', { n: gridPanes.length })}</span>
-                <button onClick={openGridPicker}
-                  className="rounded px-2 py-0.5 text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800">
-                  {t('grid.edit')}
-                </button>
-                <button onClick={() => setBroadcast((b) => !b)}
-                  className={`rounded px-2 py-0.5 font-semibold ring-1 ${broadcast
-                    ? 'bg-amber-500 text-ink-950 ring-amber-500'
-                    : 'text-slate-300 ring-ink-700 hover:bg-ink-800'}`}>
-                  ⌨ {broadcast ? t('grid.broadcastOnBtn') : t('grid.broadcastOff')}
-                </button>
-                <button onClick={() => { setGridSids([]); setBroadcast(false) }}
-                  className="ml-auto rounded px-2 py-0.5 text-slate-400 ring-1 ring-ink-700 hover:bg-ink-800">
-                  {t('grid.exit')}
-                </button>
-              </>
-            )}
-          </div>
         )}
       <main className="wt-main flex min-h-0 min-w-0 flex-1">
         {/* GRILĂ multi-terminal: ia locul stack-ului keep-alive şi al split-ului (altfel o
             sesiune s-ar monta de două ori → două WS pe acelaşi PTY, războiul de detach tmux).
             2 panouri = o linie; 3–4 = 2×2. Fiecare panou e o sesiune completă, vie. */}
-        {gridActive ? (
-          <div className={`grid min-h-0 min-w-0 flex-1 gap-px bg-ink-800 ${
-            gridPanes.length === 2 ? 'grid-cols-2 grid-rows-1' : 'grid-cols-2 grid-rows-2'}`}>
+        {gridActive && gridPanes.length === 2 ? (
+          /* SPLIT de 2: două panouri vii cu divider draggable între ele. Click pe un panou îl
+             face „activ" (ţinta acţiunilor de sesiune); broadcast-ul merge oricum per-panou. */
+          <div ref={splitRef} className="flex min-h-0 min-w-0 flex-1 bg-ink-800">
+            <div className="relative min-h-0 min-w-0 overflow-hidden bg-ink-900"
+              style={{ width: `${splitPct}%` }}
+              onMouseDownCapture={() => { if (gridPanes[0].id !== selectedSid) navigate(gridPanes[0].id) }}>
+              <PaneErrorBoundary>{renderPane(gridPanes[0], false, gridPanes[0].id === selectedSid, true)}</PaneErrorBoundary>
+            </div>
+            <div
+              role="separator" aria-orientation="vertical" tabIndex={0}
+              aria-label={t('split.dividerAria')}
+              aria-valuenow={Math.round(splitPct)} aria-valuemin={SPLIT_MIN} aria-valuemax={SPLIT_MAX}
+              onPointerDown={dragSplit}
+              onDoubleClick={() => { setSplitPct(SPLIT_DEF); saveSplitPct(SPLIT_DEF) }}
+              onKeyDown={(e) => {
+                const d = e.key === 'ArrowLeft' ? -2 : e.key === 'ArrowRight' ? 2 : 0
+                if (!d) return
+                e.preventDefault()
+                const v = clampSplit(splitPct + d)
+                setSplitPct(v); saveSplitPct(v)
+              }}
+              className="w-1 shrink-0 cursor-col-resize bg-ink-800 outline-none transition-colors hover:bg-sky-600 focus-visible:bg-sky-500"
+            />
+            <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden bg-ink-900"
+              onMouseDownCapture={() => { if (gridPanes[1].id !== selectedSid) navigate(gridPanes[1].id) }}>
+              <PaneErrorBoundary>{renderPane(gridPanes[1], false, gridPanes[1].id === selectedSid, true)}</PaneErrorBoundary>
+            </div>
+          </div>
+        ) : gridActive ? (
+          <div className="grid min-h-0 min-w-0 flex-1 grid-cols-2 grid-rows-2 gap-px bg-ink-800">
             {gridPanes.map((s) => (
               // click pe un panou îl face „activ" (ţinta acţiunilor de sesiune: snippet/font/
               // căutare); tastarea/broadcast-ul merg oricum per-panou, asta doar retarghetează

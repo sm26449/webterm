@@ -19,6 +19,15 @@ export default function TabBar(props: {
   onClose: (sid: string) => void
   /** noua ordine a tab-urilor după drag & drop (App o persistă + comută pe „manual") */
   onReorder: (orderedSids: string[]) => void
+  /** split view: intrarea şi controalele stau AICI, lângă taburi (unealta de taburi la taburi),
+      nu într-o bandă permanentă care mânca o linie de ecran chiar şi nefolosită */
+  split?: {
+    active: boolean
+    broadcast: boolean
+    onOpen: () => void
+    onBroadcast: () => void
+    onExit: () => void
+  }
 }) {
   const { t } = useI18n()
   // drag & drop pentru reordonarea manuală: `drag` = tab-ul mutat, `over` = ţinta curentă
@@ -139,6 +148,44 @@ export default function TabBar(props: {
           )
         })}
       </div>
+      {/* split view: buton de intrare (≥2 taburi) sau, când e activ, controalele compacte.
+          `ml-auto` le ancorează la dreapta; iconul ▯▯ e desenat inline (nu avem icon dedicat). */}
+      {props.split && (props.split.active || props.tabs.length >= 2) && (
+        <div className="ml-auto flex shrink-0 items-center gap-0.5 pl-1">
+          <button
+            onClick={props.split.onOpen}
+            title={props.split.active ? t('grid.edit') : t('grid.enter')}
+            aria-label={props.split.active ? t('grid.edit') : t('grid.enter')}
+            aria-pressed={props.split.active}
+            className={`wt-touch wt-tabbtn mb-1.5 flex shrink-0 items-center justify-center rounded-lg px-2 py-1.5 ${
+              props.split.active ? 'is-active' : 'text-slate-500'}`}
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+              strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
+              <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" />
+              <path d="M8 2.5v11" />
+            </svg>
+          </button>
+          {props.split.active && (
+            <>
+              <button
+                onClick={props.split.onBroadcast}
+                title={props.split.broadcast ? t('grid.broadcastOnBtn') : t('grid.broadcastOff')}
+                aria-label={props.split.broadcast ? t('grid.broadcastOnBtn') : t('grid.broadcastOff')}
+                aria-pressed={props.split.broadcast}
+                className={`wt-touch wt-tabbtn mb-1.5 flex shrink-0 items-center justify-center rounded-lg px-2 py-1.5 text-[12px] font-semibold ${
+                  props.split.broadcast ? 'bg-amber-500 !text-ink-950' : 'text-slate-500'}`}
+              >⌨</button>
+              <button
+                onClick={props.split.onExit}
+                title={t('grid.exit')}
+                aria-label={t('grid.exit')}
+                className="wt-touch wt-tabbtn mb-1.5 flex shrink-0 items-center justify-center rounded-lg px-2 py-1.5 text-slate-500"
+              ><CloseIcon size={13} /></button>
+            </>
+          )}
+        </div>
+      )}
     </nav>
   )
 }

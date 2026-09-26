@@ -7,6 +7,58 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [2.5.2] — 2026-09-26 · agent (50)
+
+Quality-of-life around alerts, the file manager and multi-terminal, plus the fixes from a
+five-reviewer audit of everything shipped in the last week. **No agent change** (still 50).
+
+### Added
+
+- **Mute offline alerts per host.** A bell on the offline host's sidebar row: mute a machine you
+  stopped on purpose and it emails nothing while it is down; unmuting re-arms the alert (a host
+  still down alerts once again — you asked to know). The sent-once dedup now **persists in the DB**,
+  so a gateway restart no longer re-sends an email for every host that was already down — that was
+  where the "one more offline email after every deploy" came from. On a 2FA host, muting requires
+  **step-up**: silencing monitoring is exactly what a stolen cookie would want to buy.
+- **Copy name / path in the file manager.** Double-click a file name copies the name,
+  triple-click copies the full path — through the standard copy toast, with the non-HTTPS fallback.
+- **Split view instead of the grid strip.** The entry moved where it belongs: a button **in the tab
+  bar** (the permanent bar above the workspace is gone — it cost a line of screen even unused).
+  Two sessions now make a real **resizable split** (drag the divider; arrow keys; double-click
+  resets; persisted), 3–4 keep the 2×2 grid. Broadcast and exit sit next to the button while active.
+- **Unicode 11 widths** (Settings → Terminal, off by default): emoji and wide CJK take the right
+  number of cells so TUI boxes stay aligned. Lazy-loaded only when enabled. (Font ligatures were
+  investigated and dropped: the xterm addon needs Node/Electron APIs — it cannot run in a browser.)
+
+### Fixed
+
+- **Wake-on-LAN on hosts with Docker.** Virtual interfaces (`docker0`, `br-*`, `veth*`, VPNs) no
+  longer qualify as wake target or relay peer: the bridge sorts before `eth0` in diagnostics, so
+  the old code could pick the bridge MAC and "find" a peer on another physical LAN via 172.17/16 —
+  a silent false success. /31–/32 interfaces (no real broadcast) are excluded, peers still on
+  agent v49 are skipped during a rollout, and the "neighbour too old" error now says so.
+- **The install password is validated** to a shell-safe alphabet (letters/digits/`._-`, max 64) at
+  all three intake points — it gets interpolated into the copied one-liner, where a quote or
+  `$(…)` would break or alter the very command you paste on the host.
+- **Unknown `app_type` is a 400 now**, not a silent coercion that made a promote "succeed" while
+  the tile never appeared.
+- **Alert sweep is storm-proof.** The offline alert used to be sent before the dedup flag was
+  persisted, with the DB write unguarded — a full disk (reads work, writes fail) would have meant
+  one email per host per sweep. A RAM backstop plus per-host error isolation closes it.
+- **New-file dialog hardened**: the name must be a bare filename (`/` and `..` rejected), and the
+  duplicate check re-lists the directory just before creating — a file made in the terminal after
+  the last listing can no longer be silently truncated. Dialogs are mutually exclusive and
+  keyboard navigation pauses under the delete confirmation.
+- Small Track A polish: switching hosts quickly can't show the previous host's app buttons; the
+  ⌘K selection no longer shifts when apps load; un-starring then re-starring a forward keeps its
+  app type (Proxmox stays orange).
+
+### Docs / tests
+
+- README caught up on: install-link TTL + password (2.4.1), file create/copy, the offline host row.
+- New tests: WoL virtual-interface and /32 paths, mute step-up asymmetry, hermetic agent
+  `fs_stat` + `fs_write` offset-conflict; the alerts test moved to the persisted-dedup model.
+
 ## [2.5.1] — 2026-09-24 · agent (50)
 
 A small file-manager convenience and a cosmetic fix. **No agent change** (still 50) — hosts need no update.
