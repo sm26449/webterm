@@ -43,7 +43,7 @@ import termios
 import threading
 import time
 
-AGENT_VERSION = 50
+AGENT_VERSION = 51
 
 # Sub atâtea secunde de valabilitate, un certificat se roteşte prea des ca un pin pe el să
 # însemne altceva decât o cădere programată. 48h: peste ce emite un CA intern (12h la Caddy),
@@ -428,6 +428,11 @@ _TMUX_BASE_OPTIONS = [
     ("destroy-unattached", "off"),
     ("detach-on-destroy", "on"),
     ("status", "off"),
+    # word-separators: default-ul tmux include `/` `.` `-` `_`, deci cu `mouse on` un dublu-click
+    # pe o cale la prompt selecta UN segment, nu calea — în timp ce în aplicaţiile care preiau
+    # mouse-ul (vim, Claude Code) selecţia o face xterm.js, care ia calea întreagă. Oglindim
+    # separatorii xterm.js ca dublu-click-ul să se poarte la fel oriunde. (Din tmux 1.6.)
+    ("word-separators", " ()[]{},\"'`"),
 ]
 # Introduse în tmux 2.1: mouse-ul unificat, plus clipboard/focus. Doar pe 2.1+.
 _TMUX_21_OPTIONS = [
@@ -759,7 +764,11 @@ def _diag_net():
     for n in names:
         d = "/sys/class/net/" + n
         it = {"name": n, "state": _diag_read(d + "/operstate") or "unknown",
-              "mac": _diag_read(d + "/address"), "ipv4": [], "ipv6": []}
+              "mac": _diag_read(d + "/address"), "ipv4": [], "ipv6": [],
+              # NIC real (are hardware în spate: /device există şi pt. USB/virtio) vs. virtual
+              # (bridge/veth/wg — fără). Gateway-ul filtrează cu asta candidaţii Wake-on-LAN în
+              # loc să ghicească după prefixul numelui; v50 nu raporta flagul → fallback pe nume.
+              "physical": os.path.exists(d + "/device")}
         try:
             it["mtu"] = int(_diag_read(d + "/mtu") or 0)
         except ValueError:
@@ -790,11 +799,49 @@ def _diag_net():
     return {"interfaces": ifaces, "routes": routes}
 
 
+# Update-uri de OS în aşteptare — verificate RAR (managerul de pachete costă secunde; diagnosticele
+# curg des) şi ţinute în cache în proces. DOAR citire/simulare, niciodată instalare: instalarea e
+# treaba operatorului, într-un terminal (UI-ul deschide unul cu comanda potrivită). 0 = dezactivat.
+UPDATES_CHECK_SECS = int(os.environ.get("WEBTERM_UPDATES_CHECK_SECS", "21600") or 0)
+_updates_cache = {"at": 0.0, "data": None}
+
+
+def _diag_updates():
+    if UPDATES_CHECK_SECS <= 0:
+        return None
+    now = time.time()
+    if _updates_cache["at"] and now - _updates_cache["at"] < UPDATES_CHECK_SECS:
+        return _updates_cache["data"]
+    _updates_cache["at"] = now          # şi la eşec: nu re-încercăm la fiecare push, ci peste 6h
+    data = None
+    if shutil.which("apt-get"):
+        # simulare fără lock şi fără root; "Inst pkg (ver repo)" per pachet; repo-urile de
+        # securitate Debian/Ubuntu au "-security" în nume → count-ul de securitate separat
+        out = _diag_run(["apt-get", "-s", "-o", "Debug::NoLocking=1", "upgrade"], timeout=30)
+        if out:
+            inst = [ln for ln in out.splitlines() if ln.startswith("Inst ")]
+            data = {"manager": "apt", "count": len(inst),
+                    "security": sum(1 for ln in inst if "-security" in ln),
+                    "checked": int(now)}
+    elif shutil.which("dnf"):
+        # --cacheonly: fără reţea (metadata poate fi uşor veche — acceptabil pentru un badge).
+        # check-update iese cu 100 când există update-uri; _diag_run întoarce "" pe non-zero,
+        # aşa că rulăm prin sh şi normalizăm exit-ul. Linii de pachet: "nume.arch  ver  repo".
+        out = _diag_run(["sh", "-c", "dnf -q --cacheonly check-update 2>/dev/null; true"],
+                        timeout=30)
+        if out:
+            pkgs = [ln for ln in out.splitlines()
+                    if ln and not ln[0].isspace() and len(ln.split()) == 3]
+            data = {"manager": "dnf", "count": len(pkgs), "security": None, "checked": int(now)}
+    _updates_cache["data"] = data
+    return data
+
+
 def collect_diagnostics():
     """Snapshot complet, best-effort. Nu aruncă niciodată — pe un câmp căzut întoarce ce are."""
     snap = {"collected_at": int(time.time())}
     for key, fn in (("system", _diag_system), ("cpu", _diag_cpu), ("memory", _diag_mem),
-                    ("storage", _diag_storage), ("network", _diag_net)):
+                    ("storage", _diag_storage), ("network", _diag_net), ("updates", _diag_updates)):
         try:
             snap[key] = fn()
         except Exception:      # noqa: BLE001 — diagnosticul nu are voie să doboare agentul
@@ -1363,6 +1410,17 @@ def send_magic_packet(mac, broadcast="255.255.255.255", port=9):
     raw = "".join(c for c in mac if c in "0123456789abcdefABCDEF")
     if len(raw) != 12:
         raise ValueError("invalid MAC (need 12 hex digits)")
+    # broadcast trebuie să fie un LITERAL IPv4: un hostname ar face aici un getaddrinfo blocant —
+    # iar handler-ul de control rulează pe thread-ul reader, deci un resolver lent ar îngheţa
+    # toate sesiunile. Portul în afara 0..65535 dădea OverflowError (nescăpat de except-ul de
+    # ValueError/OSError). Ambele devin ValueError → err("wake_error"), nu "internal". (v51)
+    try:
+        socket.inet_aton(broadcast)
+    except (OSError, TypeError):
+        raise ValueError("broadcast must be an IPv4 literal")
+    port = int(port)
+    if not 0 <= port <= 65535:
+        raise ValueError("invalid port")
     mac_bytes = bytes.fromhex(raw)
     packet = b"\xff" * 6 + mac_bytes * 16
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -2237,12 +2295,13 @@ class Agent:
                 # Wake-on-LAN: trimite un magic packet către un MAC din LAN-ul ACESTUI host (agentul
                 # e „vecinul" care poate ajunge la o maşină oprită prin broadcast L2). Gateway-ul îl
                 # cheamă pe un agent din aceeaşi reţea cu ţinta. Doar UDP broadcast, nimic privilegiat.
-                mac = (msg.get("mac") or "").strip()
-                bcast = (msg.get("broadcast") or "255.255.255.255").strip()
-                port = int(msg.get("port") or 9)
+                # tot parsingul stă în try: un port ne-numeric e tot o eroare de wake
+                # (wake_error, cu mesaj), nu un bad_request generic (v51)
                 try:
-                    ok(sent=send_magic_packet(mac, bcast, port))
-                except (ValueError, OSError) as e:
+                    ok(sent=send_magic_packet((msg.get("mac") or "").strip(),
+                                              (msg.get("broadcast") or "255.255.255.255").strip(),
+                                              msg.get("port") or 9))
+                except (ValueError, TypeError, OSError) as e:
                     err("wake_error", str(e))
 
             elif op == "diagnostics":
@@ -2257,8 +2316,11 @@ class Agent:
                 p = os.path.abspath(os.path.expanduser(msg.get("path") or ""))
                 try:
                     st = os.lstat(p)
-                    ok(exists=True, size=st.st_size, dir=os.path.isdir(p),
-                       link=os.path.islink(p), mtime=int(st.st_mtime))
+                    # dir/link din CHIAR lstat-ul de mai sus: isdir()/islink() ar fi re-stat-uri
+                    # separate (micro-TOCTOU) şi isdir URMEAZĂ symlink-ul — un link către un
+                    # director ieşea dir=True aici dar dir=False în fs_list (v51: consistent).
+                    ok(exists=True, size=st.st_size, dir=stat.S_ISDIR(st.st_mode),
+                       link=stat.S_ISLNK(st.st_mode), mtime=int(st.st_mtime))
                 except FileNotFoundError:
                     ok(exists=False, size=0)
                 except OSError as e:

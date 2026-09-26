@@ -2617,6 +2617,10 @@ def _host_ipv4_ifaces(diag_json):
         # cu Docker `br-…`/`docker0` vin ÎNAINTEA lui `eth0` — fără filtru, ţinta „preferată" era
         # MAC-ul bridge-ului (WoL inutil), iar subnetul 172.17/16 „găsea" drept peer ORICE alt
         # host cu Docker, chiar de pe alt LAN fizic → fals succes silenţios (audit 2026-09).
+        # Agenţii v51+ raportează `physical` (are /sys/class/net/<n>/device) — sursa de adevăr;
+        # prefixele de nume rămân fallback-ul pentru diagnosticele v50, care n-au flagul.
+        if f.get("physical") is False:
+            continue
         if name.startswith(_VIRTUAL_IF_PREFIXES):
             continue
         for c in f.get("ipv4") or []:

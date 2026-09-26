@@ -225,6 +225,15 @@ async def main():
             try: _ptyd.send_magic_packet("nu-e-mac")
             except ValueError: bad = True
             check("MAC invalid → ValueError", bad)
+            # v51: broadcast trebuie literal IPv4 (un hostname ar bloca reader-ul pe DNS),
+            # portul în 0..65535 (peste dădea OverflowError, nescăpat de except)
+            for b_args, name in ((("aa:bb:cc:dd:ee:ff", "gazda.exemplu", 9), "broadcast ne-literal"),
+                                 (("aa:bb:cc:dd:ee:ff", "127.0.0.1", 99999), "port > 65535"),
+                                 (("aa:bb:cc:dd:ee:ff", "127.0.0.1", "abc"), "port ne-numeric")):
+                bad = False
+                try: _ptyd.send_magic_packet(*b_args)
+                except ValueError: bad = True
+                check("wake: %s → ValueError (v51)" % name, bad)
         except Exception as e:                       # noqa: BLE001
             check("send_magic_packet importabil din agent", False, str(e))
 
@@ -263,6 +272,14 @@ async def main():
         ]), wh)
         r = await c.post(f"/api/hosts/{wh}/wake")
         check("wake cu /32 (fără broadcast real) → 400 wake.noMac, nu unicast inutil raportat ca succes",
+              r.status_code == 400 and r.headers.get("X-WebTerm-Error") == "wake.noMac", r.text)
+        # v51: flagul `physical` din diagnostics e sursa de adevăr — un bridge cu nume atipic
+        # ("mynet0", pe care filtrul de prefixe nu-l prinde) e exclus prin physical=False
+        await db.execute("UPDATE hosts SET diagnostics=? WHERE id=?", _diag([
+            {"name": "mynet0", "mac": "02:42:ac:12:00:01", "ipv4": ["10.99.0.1/24"], "physical": False},
+        ]), wh)
+        r = await c.post(f"/api/hosts/{wh}/wake")
+        check("wake: interfaţă cu physical=False → exclusă chiar cu nume atipic (v51)",
               r.status_code == 400 and r.headers.get("X-WebTerm-Error") == "wake.noMac", r.text)
 
         # ── 10c. alertele offline pe un host 2FA: OPRIREA cere step-up, REPORNIREA nu ──
@@ -306,6 +323,14 @@ async def main():
             _ptyd.Agent.handle_ctrl(snk, {"op": "fs_stat", "path": td, "id": 3})
             st = snk.r[-1]
             check("fs_stat: director → dir=True", st.get("ok") and st.get("dir") is True, str(st))
+            # v51: dir/link vin din lstat — un symlink către un director e link=True, dir=False
+            # (consistent cu fs_list, care nu urmează symlink-uri)
+            lnk = os.path.join(td, "l")
+            os.symlink(td, lnk)
+            _ptyd.Agent.handle_ctrl(snk, {"op": "fs_stat", "path": lnk, "id": 31})
+            st = snk.r[-1]
+            check("fs_stat: symlink către dir → link=True, dir=False (semantica lstat, v51)",
+                  st.get("ok") and st.get("link") is True and st.get("dir") is False, str(st))
             _ptyd.Agent.handle_ctrl(snk, {"op": "fs_write", "path": fp, "id": 4,
                                           "data_b64": _b64.b64encode(b"XY").decode(), "offset": 3})
             st = snk.r[-1]
