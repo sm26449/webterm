@@ -19,7 +19,8 @@ import FilePanel from './FilePanel'
 import GitPanel from './GitPanel'
 import ForwardsPanel from './ForwardsPanel'
 import DockerPanel from './DockerPanel'
-import { ClockIcon, CopyIcon, DockerIcon, ExternalLinkIcon, FilesIcon, ForwardIcon, GitBranchIcon, LinkIcon, MoreIcon, NoteIcon, PasteIcon, PencilIcon, PopoutIcon, SearchIcon, StopIcon, TrashIcon } from './Icons'
+import ServicesPanel from './ServicesPanel'
+import { ClockIcon, CopyIcon, DockerIcon, ExternalLinkIcon, FilesIcon, ForwardIcon, GitBranchIcon, LinkIcon, MoreIcon, NoteIcon, PasteIcon, PencilIcon, PopoutIcon, SearchIcon, ServicesIcon, StopIcon, TrashIcon } from './Icons'
 import MobileKeybar from './MobileKeybar'
 import SnippetsMenu from './SnippetsMenu'
 import TranscriptPlayer from './TranscriptPlayer'
@@ -229,19 +230,22 @@ export default function SessionView(props: {
   const [showForwards, setShowForwards] = useState(false)
   const [showGit, setShowGit] = useState(false)
   const [showDocker, setShowDocker] = useState(false)
+  const [showServices, setShowServices] = useState(false)
   // un singur panou din dreapta o dată: la deschiderea unuia, le închid pe celelalte
-  const closeOthers = (keep: 'files' | 'cmd' | 'fwd' | 'git' | 'docker') => {
+  const closeOthers = (keep: 'files' | 'cmd' | 'fwd' | 'git' | 'docker' | 'services') => {
     if (keep !== 'files') setShowFiles(false)
     if (keep !== 'cmd') setShowCommands(false)
     if (keep !== 'fwd') setShowForwards(false)
     if (keep !== 'git') setShowGit(false)
     if (keep !== 'docker') setShowDocker(false)
+    if (keep !== 'services') setShowServices(false)
   }
   const toggleFiles = () => setShowFiles((v) => { if (!v) closeOthers('files'); return !v })
   const toggleCommands = () => setShowCommands((v) => { if (!v) closeOthers('cmd'); return !v })
   const toggleForwards = () => setShowForwards((v) => { if (!v) closeOthers('fwd'); return !v })
   const toggleGit = () => setShowGit((v) => { if (!v) closeOthers('git'); return !v })
   const toggleDocker = () => setShowDocker((v) => { if (!v) closeOthers('docker'); return !v })
+  const toggleServices = () => setShowServices((v) => { if (!v) closeOthers('services'); return !v })
   const [activeCmd, setActiveCmd] = useState<number | null>(null)
   const activeCmdRef = useRef<number | null>(null)   // citit de stepCommand (handler-ul de taste e capturat la montare)
   // cwd raportat de shell prin OSC 7 (apare doar cu shell integration activă)
@@ -1403,6 +1407,15 @@ export default function SessionView(props: {
               </ToolButton>
             </span>
           )}
+          {/* servicii systemd: listă + start/stop/restart. Doar host-uri de agent (systemctl e
+              local pe host, prin op-ul `run` — ca Docker). */}
+          {(!props.host?.connection_type || props.host.connection_type === 'agent') && (
+            <span className="hidden sm:contents">
+              <ToolButton title={t('session.servicesTooltip')} active={showServices} onClick={toggleServices}>
+                <ServicesIcon />
+              </ToolButton>
+            </span>
+          )}
           {isLive && (
             <span className="hidden sm:contents">
               <SnippetsMenu
@@ -1856,6 +1869,9 @@ export default function SessionView(props: {
       {showDocker && props.host && (
         <DockerPanel host={props.host} onClose={() => setShowDocker(false)} overlay={narrowPane}
           onOpenContainerShell={(c) => { setShowDocker(false); props.onOpenContainerShell?.(props.host!, c) }} />
+      )}
+      {showServices && props.host && (
+        <ServicesPanel host={props.host} onClose={() => setShowServices(false)} overlay={narrowPane} />
       )}
       </div>
 

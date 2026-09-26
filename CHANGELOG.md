@@ -7,6 +7,39 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [2.6.0] — 2026-09-26 · agent (51)
+
+Machine management from the same pane: OS updates, systemd services, listening ports — plus the
+split view gets a proper home. **This release updates the agent (50 → 51)** — hosts update on
+reconnect (deferred while a host has open sessions).
+
+### Added
+
+- **Pending OS updates, surfaced.** The agent counts pending updates (apt / dnf, checked every 6h,
+  read-only) and reports them in diagnostics. A host with updates shows a **badge in the sidebar**
+  (red when any are security) — you see it without opening the host. Click it to review the count,
+  then **Upgrade in a terminal**: WebTerm opens a session running the upgrade command for the
+  detected manager. It never installs for you — it's glue to the terminal, not a package-manager UI.
+  Off with `WEBTERM_UPDATES_CHECK_SECS=0`.
+- **systemd services panel** (toolbar, agent hosts): list units with live state, filter, and
+  **start / stop / restart** — through the agent's `run` op, step-up-gated on 2FA hosts. Runs as the
+  agent's user, so system units need the right privileges (surfaced, not silently swallowed).
+- **Listening ports in Diagnostics.** A new **Ports** tab runs `ss -tulnp` on demand: protocol,
+  port, address and the owning process (process names need root).
+- **Path-friendly selection at the shell prompt.** tmux `word-separators` now mirror the browser
+  terminal's, so with mouse mode on a double-click on `/etc/nginx/nginx.conf` at the prompt selects
+  the whole path — matching how it already behaved inside vim / Claude Code.
+
+### Fixed / hardened (agent v51)
+
+- **Wake-on-LAN uses a reliable interface signal.** The agent reports a `physical` flag per NIC
+  (has `/sys/class/net/<n>/device`); the gateway filters wake candidates on that instead of guessing
+  from the interface name (the name-prefix rule stays as the v50 fallback).
+- `fs_stat` derives dir/link from the same `lstat` (no re-stat, no symlink-follow) — a symlink to a
+  directory now reports `link=true, dir=false`, consistent with `fs_list`.
+- `send_magic_packet` validates the broadcast address (an IPv4 literal — a hostname would block the
+  reader thread on DNS) and the port range; a bad port is a clean `wake_error`, not `internal`.
+
 ## [2.5.2] — 2026-09-26 · agent (50)
 
 Quality-of-life around alerts, the file manager and multi-terminal, plus the fixes from a

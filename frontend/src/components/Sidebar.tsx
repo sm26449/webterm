@@ -54,6 +54,7 @@ export default function Sidebar(props: {
   onFiles: (host: Host) => void
   onSerial: (host: Host) => void
   onDiagnostic: (host: Host) => void
+  onUpgrade: (host: Host) => void
   onOpenPalette: () => void
   onChanged: () => void
   onLogout: () => void
@@ -206,6 +207,7 @@ export default function Sidebar(props: {
   // mutarea în folder (nota e câmp obişnuit de host, doar că acum e vizibilă în sidebar).
   // Wake-on-LAN: gateway-ul cere unui agent vecin să trimită magic packet-ul. Feedback pe toast.
   const [waking, setWaking] = useState<number | null>(null)
+  const [updFor, setUpdFor] = useState<Host | null>(null)   // hostul cu modalul de update-uri deschis
   async function wakeHost(host: Host) {
     setWaking(host.id)
     try {
@@ -336,6 +338,21 @@ export default function Sidebar(props: {
                   title={t('sidebar.liveSessions', { count: liveCount })}>
                   {liveCount}
                 </span>
+              )}
+              {/* update-uri OS în aşteptare (din diagnosticele agentului v51+): atenţionare vizibilă
+                  în listă, fără să deschizi hostul. Roşcat dacă are update-uri de SECURITATE. */}
+              {host.updates && host.updates.count > 0 && (
+                <button type="button"
+                  onClick={(e) => { e.stopPropagation(); setUpdFor(host) }}
+                  title={host.updates.security
+                    ? t('updates.badgeSecTitle', { count: host.updates.count, sec: host.updates.security })
+                    : t('updates.badgeTitle', { count: host.updates.count })}
+                  aria-label={t('updates.badgeTitle', { count: host.updates.count })}
+                  className={`shrink-0 rounded-full px-1.5 text-[10px] font-semibold ${host.updates.security
+                    ? 'bg-rose-500/15 text-rose-300 hover:bg-rose-500/25'
+                    : 'bg-amber-500/15 text-amber-300 hover:bg-amber-500/25'}`}>
+                  ⬆ {host.updates.count}
+                </button>
               )}
             </div>
             {host.hostname && (
@@ -847,6 +864,33 @@ export default function Sidebar(props: {
             <div className="font-medium">{t('sidebar.provisioningTitle', { name: provisioning })}</div>
             <div className="text-sm text-slate-500">
               {t('sidebar.provisioning')}
+            </div>
+          </div>
+        </div>
+      )}
+      {/* modal update-uri: ce e disponibil + „fă upgrade într-un terminal". Nu instalăm din UI —
+          deschidem o sesiune cu comanda interactivă (glue, nu un package-manager reimplementat). */}
+      {updFor && updFor.updates && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4"
+          onClick={() => setUpdFor(null)}>
+          <div className="glass w-full max-w-sm rounded-2xl p-5" onClick={(e) => e.stopPropagation()}>
+            <h2 className="text-base font-semibold">{t('updates.title', { name: updFor.name })}</h2>
+            <p className="mt-2 text-sm text-slate-300">
+              {t('updates.available', { count: updFor.updates.count, mgr: updFor.updates.manager || '?' })}
+            </p>
+            {!!updFor.updates.security && (
+              <p className="mt-1 text-sm font-medium text-rose-300">
+                {t('updates.securityLine', { sec: updFor.updates.security })}
+              </p>
+            )}
+            <p className="mt-2 text-xs text-slate-500">{t('updates.hint')}</p>
+            <div className="mt-4 flex justify-end gap-2 text-sm">
+              <button onClick={() => setUpdFor(null)}
+                className="rounded px-3 py-1.5 text-slate-400 hover:bg-ink-800">{t('common.cancel')}</button>
+              <button onClick={() => { const h = updFor; setUpdFor(null); props.onUpgrade(h) }}
+                className="rounded bg-sky-600 px-3 py-1.5 font-medium text-white hover:bg-sky-700">
+                {t('updates.openTerminal')}
+              </button>
             </div>
           </div>
         </div>

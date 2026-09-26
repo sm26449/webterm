@@ -894,6 +894,27 @@ function MainApp() {
     }
   }
 
+  // „Upgrade într-un terminal": sesiune care rulează comanda interactivă de upgrade OS
+  // (gateway-ul o alege după managerul detectat). Acelaşi flux/2FA ca shell-ul de container.
+  async function openUpgradeSession(host: Host) {
+    const body: Record<string, unknown> = { title: '', tz: getTimezone(), os_upgrade: true }
+    if (host.require_2fa) {
+      const cred = await stepupCredential(host.id)
+      if (!cred) return
+      Object.assign(body, cred)
+    }
+    try {
+      const r = await api<{ id: string }>(`/api/hosts/${host.id}/sessions`, {
+        method: 'POST', body: JSON.stringify(body),
+      })
+      await refresh()
+      openTab(r.id)
+      navigate(r.id)
+    } catch (e) {
+      notify(t('app.cannotStartSession'), errText(e, t) || t('app.error'), 'warn')
+    }
+  }
+
   async function deleteSession(sid: string) {
     await api(`/api/sessions/${sid}`, { method: 'DELETE' }).catch(() => {})
     closeTab(sid)
@@ -921,6 +942,7 @@ function MainApp() {
         onFiles={setFilesHost}
         onSerial={setSerialHost}
         onDiagnostic={setDiagHost}
+        onUpgrade={openUpgradeSession}
         onOpenPalette={() => setPaletteOpen(true)}
         onChanged={refresh}
         onAccountChanged={() => api<AppState>('/api/state').then(setAppState)}

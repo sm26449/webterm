@@ -183,6 +183,14 @@ export const DockerIcon = () => (
   </Icon>
 )
 
+// servicii systemd: un cog (roată dinţată)
+export const ServicesIcon = () => (
+  <Icon>
+    <circle cx="10" cy="10" r="2.6" />
+    <path d="M10 2.2v2.2M10 15.6v2.2M2.2 10h2.2M15.6 10h2.2M4.5 4.5l1.6 1.6M13.9 13.9l1.6 1.6M15.5 4.5l-1.6 1.6M6.1 13.9l-1.6 1.6" />
+  </Icon>
+)
+
 export const GitBranchIcon = () => (
   <Icon>
     <line x1="6" y1="3" x2="6" y2="15" />

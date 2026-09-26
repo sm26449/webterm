@@ -82,7 +82,8 @@ const REASON: Record<string, { text: string; danger?: boolean }> = {
   closed: { text: 'diag.reasonClosed' },
 }
 
-type Tab = 'overview' | 'storage' | 'network' | 'logs'
+type Tab = 'overview' | 'storage' | 'network' | 'ports' | 'logs'
+type Port = { proto: string; addr: string; port: string; process: string }
 
 // bară de utilizare (disc / memorie): verde < 75%, chihlimbar < 90%, roşu peste
 function UsageBar({ used, total }: { used: number; total: number }) {
@@ -118,6 +119,18 @@ export default function DiagnosticModal(props: { host: Host; onClose: () => void
   const [log, setLog] = useState<string | null>(null)
   const [logBusy, setLogBusy] = useState(false)
   const [logErr, setLogErr] = useState('')
+  // porturile în ascultare se cer LA CERERE (ss pe host prin `run`), nu vin în snapshot
+  const [ports, setPorts] = useState<Port[] | null>(null)
+  const [portsBusy, setPortsBusy] = useState(false)
+  const [portsErr, setPortsErr] = useState('')
+
+  const loadPorts = () => {
+    setPortsBusy(true); setPortsErr('')
+    api<{ rows: Port[] }>(`/api/hosts/${props.host.id}/ports`)
+      .then((r) => setPorts(r.rows))
+      .catch((e) => { setPortsErr(errText(e, t) || t('diag.portsFailed')); setPorts([]) })
+      .finally(() => setPortsBusy(false))
+  }
 
   const loadLog = () => {
     setLogBusy(true); setLogErr('')
@@ -154,8 +167,13 @@ export default function DiagnosticModal(props: { host: Host; onClose: () => void
     { id: 'overview', label: t('diag.tab.overview') },
     { id: 'storage', label: t('diag.tab.storage') },
     { id: 'network', label: t('diag.tab.network') },
+    { id: 'ports', label: t('diag.tab.ports') },
     { id: 'logs', label: t('diag.tab.logs') },
   ]
+  // la prima intrare pe tab-ul Porturi, cere lista (doar host online, ca logs)
+  useEffect(() => {
+    if (tab === 'ports' && ports === null && !portsBusy) loadPorts()
+  }, [tab])   // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
@@ -356,6 +374,48 @@ export default function DiagnosticModal(props: { host: Host; onClose: () => void
                     </div>
                   </div>
                 ) : null}
+              </div>
+            )}
+
+            {/* ── PORTURI ── (ss -tulnp pe host, la cerere; numele procesului cere de obicei root) */}
+            {tab === 'ports' && (
+              <div>
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="text-xs text-slate-500">{t('diag.portsHint')}</span>
+                  <button onClick={loadPorts} disabled={portsBusy}
+                    className="text-xs wt-link hover:underline disabled:opacity-50">
+                    {portsBusy ? t('diag.loading') : t('diag.refresh')}
+                  </button>
+                </div>
+                {portsErr && <div className="mb-2 text-xs wt-danger">{portsErr}</div>}
+                {ports === null ? (
+                  <div className="py-6 text-center text-xs text-slate-500">{t('diag.loading')}</div>
+                ) : ports.length === 0 ? (
+                  <div className="py-6 text-center text-xs text-slate-500">{t('diag.portsEmpty')}</div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs">
+                      <thead className="text-slate-500">
+                        <tr>
+                          <th className="py-1 pr-3 font-medium">{t('diag.portsProto')}</th>
+                          <th className="py-1 pr-3 font-medium">{t('diag.portsPort')}</th>
+                          <th className="py-1 pr-3 font-medium">{t('diag.portsAddr')}</th>
+                          <th className="py-1 font-medium">{t('diag.portsProcess')}</th>
+                        </tr>
+                      </thead>
+                      <tbody className="font-mono tabular-nums text-slate-300">
+                        {ports.map((p, i) => (
+                          <tr key={i} className="border-t border-ink-800/60">
+                            <td className="py-1 pr-3 uppercase text-slate-500">{p.proto}</td>
+                            <td className="py-1 pr-3 font-semibold text-slate-200">{p.port}</td>
+                            <td className="py-1 pr-3 text-slate-400">{p.addr}</td>
+                            <td className="py-1 text-slate-400">{p.process || '—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
             )}
 

@@ -1219,6 +1219,21 @@ async def _connect_telnet(row, request, body_credential=""):
     security.record_login_success(ip)
 
 
+def _host_updates(row) -> dict | None:
+    """Rezumatul update-urilor OS din ultimul diagnostic (agent v51+): {count, security, manager}.
+    Pentru badge-ul din sidebar — număr, fără lista pachetelor (aia se cere la deschiderea panoului).
+    None dacă agentul nu raportează încă (v50) sau verificarea e dezactivată pe host."""
+    if "diagnostics" not in row.keys() or not row["diagnostics"]:
+        return None
+    try:
+        u = (json.loads(row["diagnostics"]) or {}).get("updates")
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(u, dict) or not isinstance(u.get("count"), int):
+        return None
+    return {"count": u["count"], "security": u.get("security"), "manager": u.get("manager")}
+
+
 def _host_json(row) -> dict:
     conn = core.sources.get(row["id"])
     ctype = row["connection_type"] or "agent"
@@ -1233,6 +1248,7 @@ def _host_json(row) -> dict:
         "folder": (row["folder"] or "") if "folder" in row.keys() else "",
         "tags": [t for t in ((row["tags"] or "").split(",")
                              if "tags" in row.keys() and row["tags"] else [])],
+        "updates": _host_updates(row),
         "conflict": core.host_conflict(row["id"]),
         # Agentul a fost scos de pe host. Hostul rămâne până când cineva confirmă în UI —
         # poate nu vrei să-l ştergi, ci doar să-l reinstalezi, caz în care marcajul dispare
@@ -2592,6 +2608,102 @@ async def docker_logs(host_id: int, container: str, user=Depends(security.requir
     resp = await _docker_run(host_id, ["logs", "--tail", "500", "--timestamps", container], timeout=20)
     # docker logs scrie şi pe stderr (log-urile aplicaţiei) — le concatenăm în ordinea uzuală
     return {"logs": (resp.get("stdout", "") + resp.get("stderr", ""))[:200000]}
+
+
+# ── systemd services + listening ports: acelaşi model ca Docker (prin op-ul `run`, ZERO op nou
+#    în agent → fără re-semnare). Doar host-uri de agent (systemctl/ss sunt locale pe host). ──
+async def _host_run(host_id: int, cmd: str, timeout: int = 20) -> dict:
+    conn = core.source_for(host_id)
+    if not isinstance(conn, core.AgentConnection):
+        raise HTTPException(409, "host offline or has no agent")
+    try:
+        resp = await conn.run_command(cmd, timeout)
+    except (core.AgentGone, TimeoutError, asyncio.TimeoutError):
+        raise HTTPException(504, "the host did not answer in time")
+    if not resp.get("ok"):
+        raise HTTPException(502, resp.get("msg") or "run failed")
+    return resp
+
+
+_SERVICE_ACTIONS = {"start", "stop", "restart"}     # lifecycle; NU enable/disable/mask din UI
+# unitate systemd: nume + tip, fără spaţii/shell (`nginx.service`, `user@1000.service`, `sshd`)
+_UNIT_RE = re.compile(r"^[A-Za-z0-9@._\\:-]{1,128}$")
+
+
+@router.get("/api/hosts/{host_id}/services")
+async def services_list(host_id: int, user=Depends(security.require_user)):
+    """Unităţile systemd de tip service (nume, load/active/sub, descriere). Citire de stare de
+    host → aceeaşi poartă de step-up ca docker_list / fs_list."""
+    await _require_host_stepup(host_id, user)
+    # --plain fără legendă/paginare: coloane fixe UNIT LOAD ACTIVE SUB DESCRIPTION.
+    # `--all` include şi serviciile oprite (altfel n-ai ce porni din UI).
+    resp = await _host_run(host_id,
+        "systemctl list-units --type=service --all --no-legend --no-pager --plain 2>/dev/null || true")
+    out, err = resp.get("stdout", ""), (resp.get("stderr") or "")
+    rows = []
+    for line in out.splitlines():
+        # marcajul de stare din prima coloană (●/×) apare doar cu --legend; --plain îl omite,
+        # dar tăiem defensiv orice non-alfanumeric de la început
+        line = line.lstrip("●×* \t")
+        f = line.split(None, 4)
+        if len(f) >= 4 and f[0].endswith(".service"):
+            rows.append({"unit": f[0], "load": f[1], "active": f[2], "sub": f[3],
+                         "desc": f[4] if len(f) == 5 else ""})
+    if not rows and not out.strip():
+        low = err.lower()
+        if "not found" in low or "command not found" in low:
+            raise ApiError(400, "services.absent", "systemctl is not available on this host")
+    return {"rows": rows}
+
+
+class ServiceAction(BaseModel):
+    unit: str
+    action: str
+    stepup_grant: str = ""
+    stepup_password: str = ""
+
+
+@router.post("/api/hosts/{host_id}/services/action")
+async def service_action(host_id: int, body: ServiceAction, request: Request,
+                         user=Depends(security.require_user)):
+    """start/stop/restart pe o unitate. Acţiune pe host → step-up ca /run şi docker_action.
+    Rulează ca userul agentului: fără root/policykit, stop/start pe unităţi de sistem eşuează
+    cu „access denied" — surfaced ca atare, nu tăcut."""
+    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
+    if body.action not in _SERVICE_ACTIONS:
+        raise HTTPException(400, "unknown service action")
+    if not _UNIT_RE.match(body.unit or ""):
+        raise HTTPException(400, "invalid unit name")
+    audit.detail(request, "service %s %s" % (body.action, body.unit))
+    resp = await _host_run(host_id,
+        "systemctl %s %s" % (shlex.quote(body.action), shlex.quote(body.unit)), timeout=30)
+    if resp.get("exit_code") != 0:
+        raise HTTPException(400, (resp.get("stderr") or "systemctl failed").strip()[:300])
+    return {"ok": True}
+
+
+@router.get("/api/hosts/{host_id}/ports")
+async def listening_ports(host_id: int, user=Depends(security.require_user)):
+    """Socket-urile în ASCULTARE (`ss -tulnH`), parsate. Citire de stare de host → step-up.
+    Numele procesului cere de obicei root; fără el coloana `users` lipseşte, restul rămâne util."""
+    await _require_host_stepup(host_id, user)
+    resp = await _host_run(host_id, "ss -tulnpH 2>/dev/null || ss -tulnH")
+    rows = []
+    for line in resp.get("stdout", "").splitlines():
+        f = line.split()
+        if len(f) < 5:
+            continue
+        # Netid State Recv-Q Send-Q Local:Port Peer:Port [Process]
+        local = f[4]
+        addr, _, port = local.rpartition(":")
+        proc = ""
+        m = re.search(r'\("([^"]+)",pid=(\d+)', line)
+        if m:
+            proc = "%s (%s)" % (m.group(1), m.group(2))
+        rows.append({"proto": f[0], "addr": addr or "*", "port": port, "process": proc})
+    # ordonate numeric după port, stabil
+    rows.sort(key=lambda r: (int(r["port"]) if r["port"].isdigit() else 1 << 20, r["proto"]))
+    return {"rows": rows}
 
 
 # ── Wake-on-LAN: un agent VECIN trezeşte o maşină oprită din acelaşi LAN ──────
@@ -4010,6 +4122,7 @@ class SessionIn(BaseModel):
     stepup_grant: str = ""   # 2FA: grant din ceremonia passkey
     stepup_password: str = ""  # 2FA fallback (deploy IP-only, fără passkey)
     docker_container: str = ""  # dacă e setat: sesiunea e un shell ÎN acest container (docker exec)
+    os_upgrade: bool = False    # dacă e True: sesiunea rulează comanda INTERACTIVĂ de upgrade OS
 
 
 class SessionPatch(BaseModel):
@@ -4206,6 +4319,21 @@ async def create_session(host_id: int, body: SessionIn, request: Request,
         cmd = "docker exec -it %s sh -c %s" % (c, shlex.quote(inner))
         if not title.strip() or title.startswith("Session "):
             title = "docker: " + body.docker_container[:24]
+    elif body.os_upgrade:
+        # „Upgrade într-un terminal": deschidem o sesiune care rulează comanda INTERACTIVĂ de
+        # upgrade pentru managerul detectat (din diagnostics). NU input arbitrar — o hartă fixă,
+        # ca la docker_container. Rulează ca userul agentului; dacă nu e root, managerul cere
+        # singur parola/sudo (treaba operatorului). Glue, nu un package-manager reimplementat.
+        if ctype != "agent":
+            raise HTTPException(400, "OS upgrade is only available on agent hosts")
+        upd = _host_updates(row)
+        mgr = (upd or {}).get("manager")
+        cmd = {"apt": "sudo apt update && sudo apt upgrade",
+               "dnf": "sudo dnf upgrade"}.get(mgr)
+        if not cmd:
+            raise ApiError(400, "updates.noManager", "no known OS package manager on this host")
+        if not title.strip() or title.startswith("Session "):
+            title = "OS upgrade (%s)" % mgr
     try:
         result = await core.create_session(host_id, title, body.rows, body.cols, body.tz, cmd)
     except core.AgentGone:
