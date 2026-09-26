@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { errText, api, Host, PortForward, withStepup } from '../lib/api'
 import { useI18n } from '../lib/i18n'
 import { LinkIcon, PencilIcon, PlusIcon, RefreshIcon, TrashIcon } from './Icons'
@@ -149,10 +149,15 @@ export default function ForwardsPanel(props: {
 
   // promovează / retrage statutul de „app" (bookmark) al unui forward existent — un forward
   // simplu devine dală pe dashboard, sau invers. Doar metadată (app_type), nimic de re-ţintit.
+  // la demote ţinem minte tipul (proxmox/portainer/…): un ★ scos din greşeală şi repus
+  // nu retrogradează tile-ul la „custom" (culoare/glif pierdute). Doar în sesiunea curentă.
+  const demotedType = useRef<Record<number, string>>({})
   async function togglePromote(f: PortForward) {
     try {
+      if (f.app_type) demotedType.current[f.id] = f.app_type
+      const next = f.app_type ? '' : demotedType.current[f.id] || 'custom'
       await withStepup(f.host_id, () => api(`/api/forwards/${f.id}`,
-        { method: 'PATCH', body: JSON.stringify({ app_type: f.app_type ? '' : 'custom' }) }))
+        { method: 'PATCH', body: JSON.stringify({ app_type: next }) }))
       load()
     } catch (e) { setError(errText(e, t) || t('forwards.error.generic')) }
   }

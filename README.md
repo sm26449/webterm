@@ -202,7 +202,10 @@ what it does not cover, is in [Security](#security) and
 - **Threshold alerts** (CPU/RAM/disk) over email and/or webhook, with hysteresis and throttling
 - **In-session file manager** (toolbar button): a side panel that **follows the
   terminal's `cd`** (OSC 7), dense listing with sort/filter/keyboard navigation,
-  mkdir/rename/delete, drag&drop upload (including **folders**) with a real progress
+  mkdir/rename/delete, **create a file in place** (empty, or filled straight **from
+  your clipboard** — paste a config without making a local file first), double-click
+  a file name to copy it, triple-click to copy its full path,
+  drag&drop upload (including **folders**) with a real progress
   bar + cancel — **resumable**: a dropped connection (or a closed laptop) keeps the
   bytes already uploaded, re-dropping the same file continues where it left off, and
   a **CRC-32 integrity check** guards the commit; **download a folder (or file) as a
@@ -288,6 +291,9 @@ what it does not cover, is in [Security](#security) and
   leaks / gives traceability
 - **Resizable sidebar**: drag its edge (or arrow keys on the handle; double-click to
   reset) to trade list detail for terminal width — persisted per browser
+- **Offline hosts sink** to the bottom of their sidebar group, showing **how long
+  they've been down** plus an editable **note** ("stopped it myself, waiting for
+  parts") and a per-host **mute for offline alerts** — right where you look for them
 - Guaranteed minimum contrast (WCAG AA) in the terminal, screen-reader mode
   (opt-in), `Ctrl+M` to Tab out of the terminal
 - Desktop-grade copy/paste: Ctrl/Cmd+C on a selection copies (no selection = ^C),
@@ -552,6 +558,14 @@ Set `WEBTERM_NO_SHELL_INTEGRATION=1` before running the command to skip that; ev
 works without it. Requires python3 ≥ 3.6; **`tmux` is what makes sessions persistent** — without it
 the agent runs on a plain PTY and sessions die with it.
 On-server diagnostics: `python3 ~/.webterm/ptyd.py info`.
+
+The install link itself is hardened: it is **single-use**, expires after a
+**configurable TTL** (default 1 hour, 5 min–30 days — set it when creating the
+host, renewable from the host card), and can additionally require an **install
+password** (letters/digits/`._-`), sent as a header by the one-liner — never in
+the URL — hashed at rest and rate-limited against guessing. Both options exist
+for group enrollment tokens too. A link that was created but **never used** shows
+a badge on the host card, so a forgotten (or leaked) one-liner gets noticed.
 
 ### The dedicated user cannot `sudo` — decide what it may do
 

@@ -268,9 +268,13 @@ function HostDetail({ host }: { host: Host }) {
   // apps (forward-uri promovate) ale ACESTUI host — butoane contextuale în panoul de detalii
   const [hostApps, setHostApps] = useState<AppLink[]>([])
   useEffect(() => {
+    // guard de răspuns întârziat: la schimbarea rapidă de host, fetch-ul lent al hostului
+    // VECHI poate ateriza după al celui nou şi i-ar afişa aplicaţiile pe hostul greşit
+    let gone = false
     api<AppLink[]>('/api/apps')
-      .then((all) => setHostApps(all.filter((a) => a.host_id === host.id)))
-      .catch(() => setHostApps([]))
+      .then((all) => { if (!gone) setHostApps(all.filter((a) => a.host_id === host.id)) })
+      .catch(() => { if (!gone) setHostApps([]) })
+    return () => { gone = true }
   }, [host.id])
 
   return (

@@ -698,6 +698,22 @@ async def list_enroll_groups(user=Depends(security.require_user)):
     return [_enroll_group_row(r) for r in rows]
 
 
+# Parola de instalare ajunge INTERPOLATĂ în one-liner-ul copiat de admin (curl -H 'X-Enroll-Pass: …',
+# iar la userul dedicat şi într-un `sh -c '…'`): un apostrof sau `$(…)` ar rupe/altera exact comanda
+# pe care o lipeşti pe host. Alfabet strict + plafon de lungime (argon2 pe input nelimitat = CPU
+# gratuit pentru oricine loveşte endpointul). Face adevărat comentariul „generată/validată" de la
+# emitere, care până acum promitea o validare inexistentă (audit 2026-09).
+_ENROLL_PASS_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
+
+
+def _clean_enroll_pass(raw: str) -> str:
+    p = (raw or "").strip()
+    if p and not _ENROLL_PASS_RE.fullmatch(p):
+        raise ApiError(400, "enroll.badPassChars",
+                       "install password: letters, digits, . _ - only, max 64 characters")
+    return p
+
+
 @router.post("/api/enroll-groups")
 async def create_enroll_group(body: EnrollGroupIn, request: Request,
                               user=Depends(security.require_user)):
@@ -712,7 +728,7 @@ async def create_enroll_group(body: EnrollGroupIn, request: Request,
     days = min(max(int(body.days), 1), ENROLL_GROUP_MAX_DAYS)     # expirarea NU e opțională
     max_uses = max(0, min(int(body.max_uses), ENROLL_GROUP_MAX_USES))
     raw = security.new_token()
-    pw = body.enroll_password.strip()
+    pw = _clean_enroll_pass(body.enroll_password)
     pass_hash = await security.hash_password_async(pw) if pw else None
     await db.execute(
         "INSERT INTO enroll_groups(name, token_hash, created, created_by, expires,"
@@ -1210,6 +1226,7 @@ def _host_json(row) -> dict:
     expected = core.agent_expected()["version"]
     return {
         "id": row["id"], "name": row["name"], "note": row["note"],
+        "alerts_muted": bool(row["alerts_muted"]) if "alerts_muted" in row.keys() else False,
         "online": conn is not None, "hostname": row["hostname"],
         "agent_user": row["agent_user"], "agent_version": row["agent_version"],
         "backend": row["backend"], "last_heartbeat": row["last_heartbeat"],
@@ -1410,7 +1427,7 @@ async def create_host(host: HostIn, user=Depends(security.require_user)):
     token = security.new_token()
     enroll = security.new_token()[:32]
     ttl = max(300, min(30 * 86400, int(host.enroll_ttl or 3600)))   # 5 min .. 30 zile, implicit 1h
-    pw = host.enroll_password.strip()
+    pw = _clean_enroll_pass(host.enroll_password)
     pass_hash = await security.hash_password_async(pw) if pw else None
     host_id = await db.execute(
         # `folder` lipsea din INSERT deşi `HostIn` îl acceptă: hostul creat direct într-un grup
@@ -1448,7 +1465,7 @@ async def renew_enroll(host_id: int, user=Depends(security.require_user),
         raise HTTPException(404)
     enroll = security.new_token()[:32]
     ttl = max(300, min(30 * 86400, int(body.enroll_ttl or 3600)))
-    pw = body.enroll_password.strip()
+    pw = _clean_enroll_pass(body.enroll_password)
     pass_hash = await security.hash_password_async(pw) if pw else None
     exp = time.time() + ttl
     await db.execute(
@@ -2578,6 +2595,12 @@ async def docker_logs(host_id: int, container: str, user=Depends(security.requir
 
 
 # ── Wake-on-LAN: un agent VECIN trezeşte o maşină oprită din acelaşi LAN ──────
+# Prefixe de interfeţe virtuale (bridge-uri, veth-uri, VPN-uri): n-au NIC fizic în spate, deci
+# MAC-ul lor nu poate fi trezit şi subnetul lor (ex. 172.17/16 al Docker-ului) nu e un LAN real.
+_VIRTUAL_IF_PREFIXES = ("docker", "br-", "virbr", "veth", "vnet", "tap", "tun",
+                        "wg", "tailscale", "zt", "lxcbr", "lxdbr", "cni", "flannel", "cilium")
+
+
 def _host_ipv4_ifaces(diag_json):
     """Interfeţele IPv4 non-loopback dintr-un snapshot de diagnostic: [(mac, ip_interface)]."""
     import ipaddress
@@ -2587,14 +2610,25 @@ def _host_ipv4_ifaces(diag_json):
     except (TypeError, ValueError):
         return out
     for f in ifaces:
-        mac = (f.get("mac") or "").strip()
-        if f.get("name") == "lo" or not mac or mac == "00:00:00:00:00:00":
+        name, mac = (f.get("name") or ""), (f.get("mac") or "").strip()
+        if name == "lo" or not mac or mac == "00:00:00:00:00:00":
+            continue
+        # interfeţele VIRTUALE ies: diagnosticele listează /sys/class/net sortat, deci pe un host
+        # cu Docker `br-…`/`docker0` vin ÎNAINTEA lui `eth0` — fără filtru, ţinta „preferată" era
+        # MAC-ul bridge-ului (WoL inutil), iar subnetul 172.17/16 „găsea" drept peer ORICE alt
+        # host cu Docker, chiar de pe alt LAN fizic → fals succes silenţios (audit 2026-09).
+        if name.startswith(_VIRTUAL_IF_PREFIXES):
             continue
         for c in f.get("ipv4") or []:
             try:
-                out.append((mac, ipaddress.ip_interface(c)))
+                ipi = ipaddress.ip_interface(c)
             except ValueError:
-                pass
+                continue
+            # /31 şi /32 n-au adresă de broadcast reală: „broadcastul" ar fi chiar IP-ul maşinii
+            # oprite — un unicast garantat pierdut, raportat ca succes. Nu candidează.
+            if ipi.network.prefixlen >= 31:
+                continue
+            out.append((mac, ipi))
     return out
 
 
@@ -2630,6 +2664,9 @@ async def wake_host(host_id: int, request: Request, user=Depends(security.requir
         conn = core.source_for(h["id"])
         if not isinstance(conn, core.AgentConnection):      # online = are sursă
             continue
+        if (conn.agent_version or 0) < 50:
+            continue        # `wake` există abia din v50 — un vecin v49 ar da bad_op degeaba,
+        #                     deşi poate există un v50 două rânduri mai jos (fereastra de rollout)
         if any(pipi.ip in subnet for _, pipi in _host_ipv4_ifaces(h["diagnostics"])):
             peer_conn, peer_name = conn, h["name"]; break
     if not peer_conn:
@@ -2641,8 +2678,11 @@ async def wake_host(host_id: int, request: Request, user=Depends(security.requir
     except (core.AgentGone, TimeoutError, asyncio.TimeoutError):
         raise HTTPException(504, "the neighbour agent did not answer in time")
     if not resp.get("ok"):
-        # agent < v50 nu cunoaşte op-ul `wake`
-        raise HTTPException(502, resp.get("msg") or "wake failed (the neighbour agent may be older than v50)")
+        # agent < v50 răspunde err("bad_op", "wake") — msg-ul e literalul "wake", inutil ca text;
+        # traducem noi. (Aproape de neatins acum, că selecţia filtrează v49 — dar corect oricum.)
+        if resp.get("code") == "bad_op":
+            raise HTTPException(502, "wake failed: the neighbour agent is older than v50")
+        raise HTTPException(502, resp.get("msg") or "wake failed")
     return {"ok": True, "via": peer_name, "mac": resp.get("sent", mac)}
 
 
@@ -2931,7 +2971,11 @@ async def create_forward(host_id: int, body: ForwardIn,
     # care apără ACCESUL: fără el, gardul de aici ar opri doar crearea de forward-uri noi.
     await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
     _validate_forward(body.target_host, body.target_port, body.scheme)
-    app_type = body.app_type if body.app_type in _APP_TYPES else ""
+    # invalid = 400, nu coerţie tăcută: "Portainer " (majusculă/spaţiu) „reuşea" dar tile-ul
+    # nu apărea nicăieri — clientul afla abia căutându-l pe dashboard (audit 2026-09)
+    if body.app_type not in _APP_TYPES:
+        raise ApiError(400, "forward.badAppType", "unknown app type")
+    app_type = body.app_type
     label = body.label.strip()[:60] or "forward"
     # _unique_slug + INSERT NU e atomic: două creări concurente (double-click / două tab-uri)
     # pot alege același slug și apoi ciocni pe constrângerea UNIQUE → 500. Reîncercăm: la tura
@@ -2970,7 +3014,9 @@ async def update_forward(fid: int, body: ForwardPatch,
     desc = (body.description or "")[:500] if body.description is not None else row["description"]
     enabled = int(body.enabled) if body.enabled is not None else row["enabled"]
     cur_app = (row["app_type"] if "app_type" in row.keys() else "") or ""
-    app_type = (body.app_type if body.app_type in _APP_TYPES else cur_app) if body.app_type is not None else cur_app
+    if body.app_type is not None and body.app_type not in _APP_TYPES:
+        raise ApiError(400, "forward.badAppType", "unknown app type")   # nu păstra tăcut vechiul
+    app_type = body.app_type if body.app_type is not None else cur_app
     await db.execute(
         "UPDATE port_forwards SET label=?, target_host=?, target_port=?, scheme=?,"
         " description=?, enabled=?, app_type=? WHERE id=?",
@@ -3567,6 +3613,7 @@ class HostPatch(BaseModel):
     passphrase: Optional[str] = None
     credential_policy: Optional[str] = None
     tags: Optional[str] = None
+    alerts_muted: Optional[bool] = None   # opreşte alertele de host-offline pentru acest host
     stepup_grant: str = ""
     stepup_password: str = ""
 
@@ -3598,6 +3645,12 @@ async def update_host(host_id: int, host: HostPatch, user=Depends(security.requi
     if touches_conn:
         # Repointarea unui host către altă mașină (sau altă credențială) e echivalentă cu
         # provisioning-ul: cine are doar cookie-ul nu trebuie să poată face asta pe un host 2FA.
+        await _require_host_stepup(host_id, user, host.stepup_grant, host.stepup_password)
+    elif given.get("alerts_muted") and row["require_2fa"]:
+        # A REDUCE monitorizarea unui host 2FA cere step-up: sweep-ul refuză explicit ca marcajul
+        # neautentificat de uninstall să cumpere tăcere (core.py, audit 2026-08) — un cookie furat
+        # n-are voie s-o cumpere nici pe calea asta. RE-activarea alertelor rămâne liberă (întăreşte
+        # monitorizarea), simetric cu politica din `set_require_2fa`.
         await _require_host_stepup(host_id, user, host.stepup_grant, host.stepup_password)
 
     old_type = row["connection_type"] or "agent"
@@ -3634,6 +3687,14 @@ async def update_host(host_id: int, host: HostPatch, user=Depends(security.requi
         sets.append("ssh_port=?"); vals.append(given["ssh_port"])
     if "tags" in given:
         sets.append("tags=?"); vals.append(_norm_tags(given["tags"]))
+    if "alerts_muted" in given:
+        # la re-activarea alertelor curăţăm şi dedup-ul (DB + backstop-ul RAM): un host încă
+        # offline va re-declanşa o alertă la următorul sweep (vrei să ştii că e tot jos),
+        # nu să rămână tăcut din inerţie.
+        sets.append("alerts_muted=?"); vals.append(1 if given["alerts_muted"] else 0)
+        if not given["alerts_muted"]:
+            sets.append("offline_notified=?"); vals.append(0)
+            core.rearm_offline_alert(host_id)
     if "connection_type" in given:
         sets.append("connection_type=?"); vals.append(new_type)
     if given.get("credential"):

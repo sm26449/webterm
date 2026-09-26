@@ -2047,6 +2047,17 @@ def uninstall_marker_credible(uninstalled_at, last_heartbeat) -> bool:
     return not last_heartbeat or last_heartbeat <= uninstalled_at + 90
 
 
+# Backstop RAM pentru dedup-ul alertelor de offline (vezi comentariul din sweep). API-ul îl
+# goleşte la re-activarea alertelor pe un host, ca re-armarea din DB să nu fie anulată de RAM.
+_offline_alerted_ram: set = set()
+
+
+def rearm_offline_alert(host_id: int) -> None:
+    """La unmute: uită şi dedup-ul din RAM, nu doar `offline_notified` din DB — altfel un host
+    încă offline n-ar re-alerta (backstop-ul l-ar bloca) deşi utilizatorul tocmai a cerut-o."""
+    _offline_alerted_ram.discard(host_id)
+
+
 async def sweep_hosts_offline() -> None:
     """Alertează când un host care raporta a tăcut, şi când revine. Rulat din reaper.
 
@@ -2057,24 +2068,42 @@ async def sweep_hosts_offline() -> None:
     now = time.time()
     try:
         rows = await db.fetchall(
-            "SELECT id, name, last_heartbeat, uninstalled_at "
+            "SELECT id, name, last_heartbeat, uninstalled_at, alerts_muted, offline_notified "
             "FROM hosts WHERE connection_type='agent'")
     except Exception:                       # noqa: BLE001 — observabilitatea nu rupe reaper-ul
         return
     for row in rows:
-        hb = row["last_heartbeat"] or 0
-        if not hb:
-            continue                        # niciodată conectat: nu e o cădere, e o neînrolare
-        silent = now - hb
-        if silent > config.HEARTBEAT_STALE:
-            # Alerta NU se suprimă niciodată pe baza marcajului de uninstall — el vine
-            # autentificat doar cu tokenul hostului, deci un atacator cu shell l-ar posta
-            # şi apoi ar omorî agentul ca să-şi cumpere tăcerea (audit 2026-08). Doar TEXTUL
-            # se adaptează: un uninstall raportat schimbă diagnosticele, nu le taie.
-            email_alerts.notify_host_offline(row["id"], row["name"], silent,
-                                             uninstall_reported=bool(row["uninstalled_at"]))
-        else:
-            email_alerts.notify_host_online(row["id"], row["name"])
+        try:
+            hb = row["last_heartbeat"] or 0
+            if not hb:
+                continue                    # niciodată conectat: nu e o cădere, e o neînrolare
+            silent = now - hb
+            muted = bool(row["alerts_muted"])
+            # `offline_notified` = am TRIMIS deja alerta de cădere (deci datorăm una de revenire).
+            # Persistat în DB (o repornire de gateway nu re-trimite pentru hosturi tăcute), cu un
+            # backstop în RAM: dacă UPDATE-ul de mai jos pică (disc plin, DB blocată — exact regimul
+            # în care scrierile eşuează dar citirile merg), setul din RAM previne furtuna de câte o
+            # alertă pe host la FIECARE tură de reaper cât ţine avaria (audit 2026-09).
+            notified = bool(row["offline_notified"]) or row["id"] in _offline_alerted_ram
+            if silent > config.HEARTBEAT_STALE:
+                if notified or muted:
+                    continue                # deja anunţat, sau alertele sunt oprite pe acest host
+                # Alerta NU se suprimă niciodată pe baza marcajului de uninstall — el vine
+                # autentificat doar cu tokenul hostului, deci un atacator cu shell l-ar posta
+                # şi apoi ar omorî agentul ca să-şi cumpere tăcerea (audit 2026-08). Doar TEXTUL
+                # se adaptează: un uninstall raportat schimbă diagnosticele, nu le taie.
+                _offline_alerted_ram.add(row["id"])     # ÎNAINTE de trimitere: dedup şi la crash
+                email_alerts.notify_host_offline(row["id"], row["name"], silent,
+                                                 uninstall_reported=bool(row["uninstalled_at"]))
+                await db.execute("UPDATE hosts SET offline_notified=1 WHERE id=?", row["id"])
+            elif notified:
+                # a revenit şi chiar trimisesem alerta de cădere → închide incidentul o dată
+                if not muted:
+                    email_alerts.notify_host_online(row["id"], row["name"])
+                _offline_alerted_ram.discard(row["id"])
+                await db.execute("UPDATE hosts SET offline_notified=0 WHERE id=?", row["id"])
+        except Exception:                   # noqa: BLE001 — un host cu probleme nu-i blochează pe ceilalţi
+            continue
 
 
 async def sweep_stale_sessions() -> None:

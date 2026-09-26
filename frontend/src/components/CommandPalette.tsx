@@ -65,11 +65,19 @@ export default function CommandPalette(props: {
   // apps (forward-uri promovate) — deschidere după nume din paletă. Le luăm la fiecare deschidere
   // ca lista să fie proaspătă (o promovare/creare recentă apare imediat).
   const [apps, setApps] = useState<AppLink[]>([])
+  const appsRef = useRef<AppLink[]>([])
   useEffect(() => {
     if (props.open) {
       setQuery('')
       setSel(0)
-      api<AppLink[]>('/api/apps').then(setApps).catch(() => {})
+      // apps-urile sosesc async şi se inserează DEASUPRA listei: dacă utilizatorul a apucat
+      // să coboare cu săgeţile, selecţia ar aluneca pe alt rând exact înainte de Enter —
+      // resetăm selecţia doar dacă lista chiar s-a schimbat, ca să nu-i mutăm cursorul degeaba
+      api<AppLink[]>('/api/apps').then((a) => {
+        if (JSON.stringify(appsRef.current) !== JSON.stringify(a)) setSel(0)
+        appsRef.current = a
+        setApps(a)
+      }).catch(() => {})
       // focus după montare
       setTimeout(() => inputRef.current?.focus(), 0)
     }

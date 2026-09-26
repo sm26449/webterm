@@ -1,5 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { errText, api, withStepup, Host } from '../lib/api'
+import { copyText, readText } from '../lib/clipboard'
 import { getCwd } from '../lib/cwd'
 import { useI18n } from '../lib/i18n'
 import { notify } from '../lib/notify'
@@ -459,21 +460,38 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
   async function doNewFile(name: string, mode: 'empty' | 'clipboard') {
     const n = name.trim()
     if (!n || !listing) return
-    if (listing.entries.some((e) => e.name === n)) { setNewFileErr(t('files.newFileExists')); return }
+    // doar un NUME, nu o cale: cu `/` fişierul ar ateriza în alt director decât cel afişat
+    // (join-ul concatenează, verificarea de duplicat nu l-ar vedea) — derutant, nu-l permitem
+    if (/[/\\]/.test(n) || n === '.' || n === '..') { setNewFileErr(t('files.badName')); return }
     let body = new Uint8Array(0)
     if (mode === 'clipboard') {
-      try {
-        body = new TextEncoder().encode(await navigator.clipboard.readText())
-      } catch { setNewFileErr(t('files.clipboardDenied')); return }
+      const txt = await readText()                      // null = refuzat/indisponibil (ex. Firefox, HTTP)
+      if (txt === null) { setNewFileErr(t('files.clipboardDenied')); return }
+      body = new TextEncoder().encode(txt)
     }
+    // upload-ul suprascrie necondiţionat, iar listing-ul poate fi vechi (un `vim n.txt` în terminal
+    // după ultima listare) — re-listăm chiar înainte de creare, ca duplicatul să fie văzut ACUM,
+    // nu la ultimul load. Fereastra de cursă rămâne teoretic, dar nu mai e „de la ultima navigare".
+    const dir = listing.path
+    try {
+      const fresh = await api<Listing>(`/api/hosts/${props.host.id}/fs?path=${encodeURIComponent(dir)}`)
+      if (fresh.entries.some((e) => e.name === n)) { setNewFileErr(t('files.newFileExists')); return }
+    } catch (e) { setNewFileErr(errText(e, t) || t('files.genericErr')); return }
     setNewFile(null); setNewFileErr('')
-    const path = join(listing.path, n)
+    const path = join(dir, n)
     try {
       await api(`/api/hosts/${props.host.id}/fs/upload?path=${encodeURIComponent(path)}`,
         { method: 'POST', body })
-      await load(listing.path)
+      await load(dir)
       setEditing({ path, name: n })                     // deschide editorul pe fişierul nou
     } catch (e) { setError(errText(e, t) || t('files.genericErr')) }
+  }
+
+  // dublu-click pe un fişier copiază numele, triplu-click copiază calea completă (ca-n terminal:
+  // cuvânt vs. linie). Prin `copyText` (nu navigator.clipboard direct): are rezerva execCommand
+  // pentru instalările fără TLS şi toast-ul standard de „copiat" — acelaşi feedback ca peste tot.
+  async function copyToClip(text: string) {
+    if (!(await copyText(text))) setError(t('files.copyFailed'))
   }
 
   async function doRename(e: Entry, name: string) {
@@ -500,7 +518,7 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
   }
 
   function onKeyDown(ev: React.KeyboardEvent) {
-    if (editing || renaming || newFolder !== null || newFile !== null) return
+    if (editing || renaming || newFolder !== null || newFile !== null || confirmDel) return
     if (ev.key === 'ArrowDown') { ev.preventDefault(); setSel((s) => Math.min(view.length - 1, s + 1)) }
     else if (ev.key === 'ArrowUp') { ev.preventDefault(); setSel((s) => Math.max(0, s - 1)) }
     else if (ev.key === 'Enter') {
@@ -593,8 +611,10 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
             title={t('files.pathHint')}
           />
           <button onClick={() => load(listing?.path ?? path)} className="wt-touch shrink-0 rounded px-1.5 text-slate-400 hover:bg-ink-800" title={t('files.reload')}><RefreshIcon /></button>
-          <button onClick={() => { setNewFileErr(''); setNewFile('') }} disabled={!listing} className="wt-touch shrink-0 rounded px-1.5 font-mono text-[13px] text-slate-400 hover:bg-ink-800 disabled:opacity-40" title={t('files.newFile')}>+📄</button>
-          <button onClick={() => setNewFolder('')} className="wt-touch shrink-0 rounded px-1.5 text-slate-400 hover:bg-ink-800" title={t('files.newDir')}><PlusIcon /></button>
+          {/* deschiderea unuia închide restul: toolbar-ul rămâne interactiv deasupra modalului,
+              iar un input montat SUB overlay i-ar fura focusul (tastezi într-un câmp invizibil) */}
+          <button onClick={() => { setNewFileErr(''); setNewFolder(null); setRenaming(null); setConfirmDel(null); setNewFile('') }} disabled={!listing} className="wt-touch shrink-0 rounded px-1.5 font-mono text-[13px] text-slate-400 hover:bg-ink-800 disabled:opacity-40" title={t('files.newFile')} aria-label={t('files.newFile')}>+📄</button>
+          <button onClick={() => { setNewFile(null); setNewFileErr(''); setNewFolder('') }} className="wt-touch shrink-0 rounded px-1.5 text-slate-400 hover:bg-ink-800" title={t('files.newDir')}><PlusIcon /></button>
           <button onClick={() => fileInput.current?.click()} disabled={busy || !listing} className="wt-touch shrink-0 rounded px-1.5 text-sky-400 hover:bg-ink-800 disabled:opacity-40" title={t('files.uploadHere')}>↑</button>
           <input ref={fileInput} type="file" multiple className="hidden" onChange={(e) => { if (e.target.files) pickFiles(e.target.files); e.target.value = '' }} />
         </div>
@@ -676,10 +696,13 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
                   onBlur={(ev) => doRename(e, ev.target.value)}
                   className="min-w-0 flex-1 rounded bg-ink-800 px-1 py-0.5 font-mono text-[11px] text-slate-100 ring-1 ring-sky-500" />
               ) : (
-                <button onDoubleClick={() => e.dir && navigate(join(listing!.path, e.name))}
-                  onClick={() => e.dir && navigate(join(listing!.path, e.name))}
-                  className={`min-w-0 flex-1 truncate text-left font-mono ${e.dir ? 'wt-link' : 'text-slate-200'}`}
-                  title={e.name}>{e.name}{e.dir ? '/' : ''}</button>
+                <button onClick={(ev) => {
+                    if (e.dir) { navigate(join(listing!.path, e.name)); return }
+                    if (ev.detail >= 3) copyToClip(join(listing!.path, e.name))
+                    else if (ev.detail === 2) copyToClip(e.name)
+                  }}
+                  className={`min-w-0 flex-1 truncate text-left font-mono ${e.dir ? 'wt-link' : 'text-slate-200'} ${e.dir ? '' : 'select-none'}`}
+                  title={e.dir ? e.name : t('files.copyHint', { name: e.name })}>{e.name}{e.dir ? '/' : ''}</button>
               )}
               {/* meta pe UN rând: mode · dim · data (ascunse când apar acțiunile) */}
               <span className="shrink-0 items-center gap-2 font-mono text-[10px] tabular-nums text-slate-600 hidden sm:flex group-hover:sm:hidden">

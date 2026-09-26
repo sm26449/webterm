@@ -384,13 +384,12 @@ def check_metrics(host_id: int, host_name: str, metrics: dict, thresholds: dict)
 # Aveam alerte pentru lockout, relocare de agent, IP schimbat, login nou şi praguri de
 # resurse — dar NU pentru „agentul nu mai raportează", adică exact evenimentul pe care
 # îl vrei primul într-o flotă. Semnalat de auditul extern, 2026-08-06.
-_offline_since: dict = {}      # host_id -> epoch al alertei (prezent = l-am anunţat deja)
-
-
 def notify_host_offline(host_id: int, host_name: str, silent_for: float,
                         uninstall_reported: bool = False) -> None:
-    """Un host care raporta a încetat. O singură alertă per cădere (nu la fiecare tură a
-    reaper-ului); revenirea se anunţă separat, ca să poţi închide incidentul.
+    """Trimite alerta „un host care raporta a încetat". Dedup-ul (o singură alertă per cădere)
+    şi respectarea toggle-ului per-host `alerts_muted` se fac în `core.sweep_hosts_offline`, pe
+    starea PERSISTATĂ `hosts.offline_notified` — înainte trăia doar în RAM, deci o repornire de
+    gateway re-trimitea pentru fiecare host încă tăcut. Aici doar compunem şi trimitem emailul.
 
     `uninstall_reported`: agentul a POSTat /agent/uninstalled înainte să tacă. NU suprimăm
     alerta pe baza asta — raportul vine autentificat DOAR cu tokenul hostului, deci oricine
@@ -399,9 +398,6 @@ def notify_host_offline(host_id: int, host_name: str, silent_for: float,
     TEXTUL: la un uninstall real diagnosticele obişnuite (tmux ls, ptyd.log) sunt inutile —
     fişierele sunt şterse — iar acţiunea corectă e alta. Aşa un uninstall legitim nu mai
     produce un incident cu paşi imposibili, dar căderea nu e NICIODATĂ complet tăcută."""
-    if host_id in _offline_since:
-        return
-    _offline_since[host_id] = time.time()
     if uninstall_reported:
         _fire(f"[{host_name}] host offline after an uninstall report",
               f"The agent on '{host_name}' reported that it was uninstalled, then stopped "
@@ -420,9 +416,8 @@ def notify_host_offline(host_id: int, host_name: str, silent_for: float,
 
 
 def notify_host_online(host_id: int, host_name: str) -> None:
-    """The counterpart of the one above: without it, a down alert stays open forever."""
-    if _offline_since.pop(host_id, None) is None:
-        return                                  # n-a fost anunţat ca offline → nimic de închis
+    """Perechea celei de sus: fără ea, o alertă de cădere rămâne deschisă la nesfârşit. Chemată
+    de sweep DOAR când chiar trimisesem o alertă de offline (hosts.offline_notified=1)."""
     _fire(f"[{host_name}] host back online",
           f"The agent on '{host_name}' is reporting again.")
 

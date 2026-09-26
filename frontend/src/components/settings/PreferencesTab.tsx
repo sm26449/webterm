@@ -18,6 +18,7 @@ export default function PreferencesTab() {
   const [tz, setTz] = useState(getTimezone())
   const [clock, setClock] = useState(timeInZone(getTimezone()))
   const [srMode, setSrMode] = useState(() => localStorage.getItem('wt_sr') === '1')
+  const [unicode11, setUnicode11] = useState(() => localStorage.getItem('wt_unicode11') === '1')
   const [upd, setUpd] = useState<UpdateInfo | null>(null)
   const [updBusy, setUpdBusy] = useState(false)
 
@@ -76,6 +77,25 @@ export default function PreferencesTab() {
           </span>
         </span>
       </label>
+
+      {/* ── Terminal ── */}
+      <h3 className={heading}>{t('settings.terminal')}</h3>
+      <label className="mt-2 flex cursor-pointer items-start gap-2.5 text-sm text-slate-300">
+        <input
+          type="checkbox"
+          checked={unicode11}
+          onChange={(e) => {
+            setUnicode11(e.target.checked)
+            localStorage.setItem('wt_unicode11', e.target.checked ? '1' : '0')
+          }}
+          className="mt-0.5 h-4 w-4 rounded accent-sky-600"
+        />
+        <span>
+          {t('settings.unicode11')}
+          <span className="mt-0.5 block text-xs text-slate-500">{t('settings.unicode11Hint')}</span>
+        </span>
+      </label>
+      <p className="mt-2 text-xs text-slate-500">{t('settings.termReloadHint')}</p>
 
       {/* ── Verificare de versiune ── */}
       <h3 className={heading}>{t('settings.update.title')}</h3>

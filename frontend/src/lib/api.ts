@@ -44,6 +44,7 @@ export interface Host {
   id: number
   name: string
   note: string
+  alerts_muted?: boolean
   online: boolean
   hostname: string | null
   agent_user: string | null

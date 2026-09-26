@@ -239,6 +239,88 @@ async def main():
         check("wake pe host non-agent → 400 wake.notAgent",
               r.status_code == 400 and r.headers.get("X-WebTerm-Error") == "wake.notAgent", r.text)
 
+        # ── 10b. wake: interfeţele VIRTUALE nu candidează (audit 2026-09) ──
+        # Pe un host cu Docker, diagnosticele listează `docker0`/`br-…` înaintea lui `eth0`
+        # (sortare /sys/class/net); fără filtru, MAC-ul bridge-ului devenea ţinta „preferată"
+        # şi subnetul 172.17/16 găsea drept peer orice alt host cu Docker → fals succes.
+        import json as _json
+        _diag = lambda ifaces: _json.dumps({"network": {"interfaces": ifaces}})  # noqa: E731
+        await db.execute("UPDATE hosts SET diagnostics=? WHERE id=?", _diag([
+            {"name": "docker0", "mac": "02:42:ac:11:00:01", "ipv4": ["172.17.0.1/16"]},
+        ]), wh)
+        r = await c.post(f"/api/hosts/{wh}/wake")
+        check("wake cu DOAR interfeţe virtuale → 400 wake.noMac (bridge-ul nu candidează)",
+              r.status_code == 400 and r.headers.get("X-WebTerm-Error") == "wake.noMac", r.text)
+        await db.execute("UPDATE hosts SET diagnostics=? WHERE id=?", _diag([
+            {"name": "docker0", "mac": "02:42:ac:11:00:01", "ipv4": ["172.17.0.1/16"]},
+            {"name": "eth0", "mac": "aa:bb:cc:dd:ee:ff", "ipv4": ["192.168.77.10/24"]},
+        ]), wh)
+        r = await c.post(f"/api/hosts/{wh}/wake")
+        check("wake cu docker0 + eth0 → trece de noMac (eth0 rămâne candidat), pică la noPeer",
+              r.status_code == 400 and r.headers.get("X-WebTerm-Error") == "wake.noPeer", r.text)
+        await db.execute("UPDATE hosts SET diagnostics=? WHERE id=?", _diag([
+            {"name": "eth0", "mac": "aa:bb:cc:dd:ee:ff", "ipv4": ["10.0.0.5/32"]},
+        ]), wh)
+        r = await c.post(f"/api/hosts/{wh}/wake")
+        check("wake cu /32 (fără broadcast real) → 400 wake.noMac, nu unicast inutil raportat ca succes",
+              r.status_code == 400 and r.headers.get("X-WebTerm-Error") == "wake.noMac", r.text)
+
+        # ── 10c. alertele offline pe un host 2FA: OPRIREA cere step-up, REPORNIREA nu ──
+        # Sweep-ul refuză ca marcajul neautentificat de uninstall să cumpere tăcere; un cookie
+        # furat nu are voie s-o cumpere nici pe calea asta (audit 2026-09).
+        uid = (await db.fetchone("SELECT id FROM users WHERE email='a@b.co'"))["id"]
+        g2 = (await c.post("/api/hosts", json={"name": "muted-2fa"})).json()["id"]
+        await db.execute("UPDATE hosts SET require_2fa=1 WHERE id=?", g2)
+        security._stepup_windows.clear()
+        r = await c.patch(f"/api/hosts/{g2}", json={"alerts_muted": True})
+        check("mute alerte pe host 2FA fără step-up → 403", r.status_code == 403, r.text)
+        security.open_stepup_window(uid, g2)
+        r = await c.patch(f"/api/hosts/{g2}", json={"alerts_muted": True})
+        check("mute alerte pe host 2FA cu fereastră de step-up → ok", r.status_code == 200, r.text)
+        security._stepup_windows.clear()
+        r = await c.patch(f"/api/hosts/{g2}", json={"alerts_muted": False})
+        check("UNmute nu cere step-up (întăreşte monitorizarea)", r.status_code == 200, r.text)
+        row = await db.fetchone("SELECT alerts_muted, offline_notified FROM hosts WHERE id=?", g2)
+        check("unmute → alerts_muted=0 şi dedup-ul re-armat (offline_notified=0)",
+              row["alerts_muted"] == 0 and row["offline_notified"] == 0, str(dict(row)))
+
+        # ── 10d. agent v50 hermetic: fs_stat + guard-ul offset la fs_write ──
+        # handle_ctrl foloseşte doar `self.send_ctrl` pe aceste ramuri → self fals cu colector.
+        class _CtrlSink:
+            def __init__(self): self.r = []
+            def send_ctrl(self, m): self.r.append(m)
+        import base64 as _b64
+        snk = _CtrlSink()
+        with tempfile.TemporaryDirectory() as td:
+            fp = os.path.join(td, "f.bin")
+            with open(fp, "wb") as f:
+                f.write(b"hello")
+            _ptyd.Agent.handle_ctrl(snk, {"op": "fs_stat", "path": fp, "id": 1})
+            st = snk.r[-1]
+            check("fs_stat: fişier real → exists + size corect",
+                  st.get("ok") and st.get("exists") and st.get("size") == 5, str(st))
+            _ptyd.Agent.handle_ctrl(snk, {"op": "fs_stat", "path": fp + ".nu", "id": 2})
+            st = snk.r[-1]
+            check("fs_stat: fişier lipsă → ok cu exists=False (resume de la 0, nu eroare)",
+                  st.get("ok") and st.get("exists") is False and st.get("size") == 0, str(st))
+            _ptyd.Agent.handle_ctrl(snk, {"op": "fs_stat", "path": td, "id": 3})
+            st = snk.r[-1]
+            check("fs_stat: director → dir=True", st.get("ok") and st.get("dir") is True, str(st))
+            _ptyd.Agent.handle_ctrl(snk, {"op": "fs_write", "path": fp, "id": 4,
+                                          "data_b64": _b64.b64encode(b"XY").decode(), "offset": 3})
+            st = snk.r[-1]
+            check("fs_write: offset ≠ mărimea curentă → offset_conflict (fără append orb)",
+                  not st.get("ok") and st.get("code") == "offset_conflict", str(st))
+            with open(fp, "rb") as f:
+                check("…şi fişierul a rămas neatins", f.read() == b"hello")
+            _ptyd.Agent.handle_ctrl(snk, {"op": "fs_write", "path": fp, "id": 5,
+                                          "data_b64": _b64.b64encode(b"XY").decode(), "offset": 5})
+            st = snk.r[-1]
+            with open(fp, "rb") as f:
+                data = f.read()
+            check("fs_write: offset = mărimea curentă → append reuşit",
+                  st.get("ok") and data == b"helloXY", "%s %r" % (st, data))
+
     print(f"\n{ok}/{total} teste trecute")
     return ok == total
 

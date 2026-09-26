@@ -293,6 +293,11 @@ MIGRATIONS = [
     # Un forward promovat la „app" (bookmark): tip aplicaţie (proxmox/portainer/custom) pentru icon
     # + agregare pe dashboard. Gol = forward obişnuit. Un bookmark E un forward + puţină metadată.
     "ALTER TABLE port_forwards ADD COLUMN app_type TEXT DEFAULT ''",
+    # Alerte de host offline: `alerts_muted` le opreşte per-host (ex. o maşină oprită
+    # intenţionat); `offline_notified` persistă dedup-ul „am trimis deja alerta de cădere"
+    # (înainte trăia doar în RAM → o repornire de gateway re-trimitea pentru fiecare host tăcut).
+    "ALTER TABLE hosts ADD COLUMN alerts_muted INTEGER DEFAULT 0",
+    "ALTER TABLE hosts ADD COLUMN offline_notified INTEGER DEFAULT 0",
 ]
 
 # tabele adăugate ulterior (executeScript de mai sus le creează pe DB-uri noi;

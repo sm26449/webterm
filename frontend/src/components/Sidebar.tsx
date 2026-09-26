@@ -216,6 +216,17 @@ export default function Sidebar(props: {
     } finally { setWaking(null) }
   }
 
+  // Opreşte/porneşte alertele de host-offline pe acest host. Util pentru o maşină oprită
+  // intenţionat (nu vrei un email la fiecare sweep). La re-activare gateway-ul curăţă şi
+  // dedup-ul, deci un host încă jos re-declanşează o alertă (vrei să ştii). Pe hosturi 2FA,
+  // OPRIREA alertelor cere step-up (slăbeşte monitorizarea) — de aici withStepup.
+  async function muteHost(host: Host, muted: boolean) {
+    await withStepup(host.id, () => api(`/api/hosts/${host.id}`, {
+      method: 'PATCH', body: JSON.stringify({ alerts_muted: muted }),
+    })).catch((e) => alert(errText(e, t) || t('sidebar.error')))
+    props.onChanged()
+  }
+
   async function editNote(host: Host) {
     const note = prompt(t('sidebar.promptNote', { name: host.name }), host.note ?? '')
     if (note === null) return
@@ -364,6 +375,20 @@ export default function Sidebar(props: {
                   aria-label={t('sidebar.noteAria', { name: host.name })}
                   className="shrink-0 rounded p-0.5 opacity-0 hover:text-slate-200 focus-visible:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100"
                 ><NoteIcon /></button>
+                {/* Alerte offline on/off: mut = clopoţel tăiat, vizibil şi fără hover (ca să ştii
+                    că e tăcut); pornit = doar la hover. Doar host-uri de agent (doar ele alertează). */}
+                {(!host.connection_type || host.connection_type === 'agent') && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); muteHost(host, !host.alerts_muted) }}
+                    title={host.alerts_muted ? t('sidebar.alertsMutedTitle') : t('sidebar.alertsOnTitle')}
+                    aria-label={host.alerts_muted
+                      ? t('sidebar.alertsUnmuteAria', { name: host.name })
+                      : t('sidebar.alertsMuteAria', { name: host.name })}
+                    className={`shrink-0 rounded p-0.5 focus-visible:opacity-100 ${host.alerts_muted
+                      ? 'text-amber-500/80 opacity-100 hover:text-amber-300'
+                      : 'opacity-0 hover:text-slate-200 group-hover:opacity-100 [@media(hover:none)]:opacity-100'}`}
+                  >{host.alerts_muted ? '🔕' : '🔔'}</button>
+                )}
                 {/* Wake-on-LAN: cere unui agent vecin din acelaşi LAN să trimită magic packet-ul.
                     Doar host-uri de agent (WoL n-are sens pe SSH/telnet). */}
                 {(!host.connection_type || host.connection_type === 'agent') && (

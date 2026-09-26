@@ -182,9 +182,12 @@ async def main():
         one = [a for a in apps if a["id"] == app_fid][0]
         check("/api/apps dă url+host, NU target:port", "url" in one and "host_name" in one
               and "target_port" not in one and "target_host" not in one, str(one))
+        # audit 2026-09: coerţia tăcută ("Portainer " → '' dar 200) ascundea greşeala —
+        # clientul afla abia căutând tile-ul pe dashboard. Acum invalid = 400 explicit.
         r = await c.post(f"/api/hosts/{plain}/forwards",
                          json={"label": "x", "target_port": 80, "app_type": "evil"})
-        check("app_type necunoscut cade pe '' (nu app)", r.json().get("app_type") == "", r.text)
+        check("app_type necunoscut → 400 forward.badAppType (nu coerţie tăcută)",
+              r.status_code == 400 and r.headers.get("X-WebTerm-Error") == "forward.badAppType", r.text)
         # promote/demote un forward simplu
         r = await c.post(f"/api/hosts/{plain}/forwards",
                          json={"label": "simplu", "target_port": 3000, "scheme": "http", "enabled": True})

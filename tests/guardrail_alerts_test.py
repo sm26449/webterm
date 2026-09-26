@@ -92,18 +92,29 @@ async def main():
     sent = []
     orig_fire = email_alerts._fire
     email_alerts._fire = lambda subject, body: sent.append(subject)
-    email_alerts._offline_since.clear()
+    # dedup-ul trăieşte acum în DB (hosts.offline_notified), nu în RAM: îl resetăm între cazuri
+    await db.execute("UPDATE hosts SET offline_notified=0, alerts_muted=0 WHERE id=?", hid)
     try:
         await db.execute("UPDATE hosts SET last_heartbeat=? WHERE id=?",
                          time.time() - config.HEARTBEAT_STALE - 10, hid)
         await core.sweep_hosts_offline()
-        await core.sweep_hosts_offline()          # a doua tură: nu re-alertează
+        await core.sweep_hosts_offline()          # a doua tură: nu re-alertează (offline_notified persistat)
         check("host tăcut → o singură alertă", sum("offline" in s for s in sent) == 1, str(sent))
         await db.execute("UPDATE hosts SET last_heartbeat=? WHERE id=?", time.time(), hid)
         await core.sweep_hosts_offline()
         await core.sweep_hosts_offline()
         check("host revenit → o singură alertă de revenire",
               sum("back online" in s for s in sent) == 1, str(sent))
+
+        # ── toggle per-host: alertele oprite (alerts_muted) tac complet ──
+        sent.clear()
+        await db.execute("UPDATE hosts SET last_heartbeat=?, alerts_muted=1, offline_notified=0 WHERE id=?",
+                         time.time() - config.HEARTBEAT_STALE - 10, hid)
+        await core.sweep_hosts_offline()
+        await core.sweep_hosts_offline()
+        check("host offline cu alertele oprite → nicio alertă", sent == [], str(sent))
+        await db.execute("UPDATE hosts SET alerts_muted=0, offline_notified=0 WHERE id=?", hid)
+
         sent.clear()
         await db.execute("UPDATE hosts SET last_heartbeat=0 WHERE id=?", hid)
         await core.sweep_hosts_offline()
@@ -114,7 +125,7 @@ async def main():
         # (un atacator cu shell l-ar posta şi apoi ar omorî agentul ca să tacă detecţia).
         # Alerta se declanşează ORICUM; doar textul se adaptează.
         sent.clear()
-        email_alerts._offline_since.clear()
+        await db.execute("UPDATE hosts SET offline_notified=0, alerts_muted=0 WHERE id=?", hid)
         gone = time.time() - config.HEARTBEAT_STALE - 10
         await db.execute("UPDATE hosts SET last_heartbeat=?, uninstalled_at=? WHERE id=?",
                          gone, gone, hid)

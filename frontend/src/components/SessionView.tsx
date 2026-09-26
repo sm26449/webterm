@@ -780,6 +780,15 @@ export default function SessionView(props: {
         const { ImageAddon } = await import('@xterm/addon-image')
         if (termRef.current === term) term.loadAddon(new ImageAddon())
       } catch { /* fără imagini */ }
+      // opt-in din Setări, lazy (chunk separat, încărcat DOAR când e activat); se aplică la
+      // (re)deschiderea terminalului, ca modul screen-reader. (Ligaturile NU sunt aici: addon-ul
+      // xterm cere API-uri Node/Electron — font-finder pe `fs` — deci nu merge în browser pur.)
+      if (localStorage.getItem('wt_unicode11') === '1') {
+        try {
+          const { Unicode11Addon } = await import('@xterm/addon-unicode11')
+          if (termRef.current === term) { term.loadAddon(new Unicode11Addon()); term.unicode.activeVersion = '11' }
+        } catch { /* lăţimi Unicode implicite */ }
+      }
       if (termRef.current === term) connect()
     })()
     term.focus()
