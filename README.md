@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/sm26449/webterm/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/sm26449/webterm/actions/workflows/docker-publish.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v2.6.4-blue)](https://github.com/sm26449/webterm/tags)
+[![Version](https://img.shields.io/badge/version-v2.7.0-blue)](https://github.com/sm26449/webterm/tags)
 
 **Persistent terminals for your whole infrastructure, in the browser.**
 
@@ -85,7 +85,9 @@ SSH client dropped, or of not being able to check on something from your phone.
 WebTerm gives every host a list of named sessions with notes and the full history of what came
 back (what you type is never recorded). It records each session to disk so you can replay it, search across all of them,
 browse and edit files, expose a service from a host on its own subdomain, and reach a switch on a
-host's private network without hopping through a shell first.
+host's private network without hopping through a shell first. From the same pane you also open a
+**database console** (psql/mysql/mongosh/…), see **pending OS updates** and upgrade in a terminal,
+and **start/stop systemd services** — the day-to-day machine management, not just a raw shell.
 
 It is built for **one trusted administrator**. There are no roles, and that is a deliberate
 decision explained below.
@@ -221,6 +223,23 @@ what it does not cover, is in [Security](#security) and
   **shell inside a container** in its own terminal tab (`docker exec`, bash with an
   sh fallback for minimal images). Runs the host's `docker` CLI through the agent — no
   extra daemon exposure; the same 2FA step-up as any host action
+- **Database connections** (Toolbox → *Connections*, toolbar + host page, agent hosts):
+  saved launchers for **PostgreSQL / MySQL·MariaDB / MongoDB / ClickHouse / Redis**. One
+  click opens a session with the right client (`psql` / `mysql` / `mongosh` /
+  `clickhouse-client` / `redis-cli`) already pointed at host, port, user and database — no
+  connection strings to remember. Two credential policies: **Ask** (the client prompts;
+  WebTerm stores nothing) or **Stored** — the password is kept in the same encrypted vault
+  as SSH credentials and the agent types it **once** into the client's password prompt on
+  the PTY; it never appears in argv, `ps`, the environment, a file, or the transcript. On a
+  2FA host, both **launching** and **creating/editing** a connection cost a step-up factor —
+  a saved connection is a credentialed hole into the host. [details](docs/DATABASE-TOOLBOX.md)
+- **Command library & history** (Toolbox → *Library* / *History*): a built-in **library** of
+  command recipes (git, docker, systemd, system, db) with `{placeholder}`s — click to copy,
+  paste into any terminal, and it works from the host page with no session open; plus the
+  host's own **command history** (from OSC 133), searchable, click to copy
+- **systemd services** (toolbar button, agent hosts): list units with live state, filter,
+  and **start / stop / restart** — through the agent, step-up-gated on 2FA hosts. Runs as
+  the agent's user, so system units need the right privileges (surfaced, not silently swallowed)
 - **Port forwarding** (toolbar button): expose web services from the host through
   the browser, protected by your own auth — Docker containers, monitoring, admin
   panels bound to localhost. Reverse-proxy **HTTP + HTTPS + WebSocket** (no
@@ -254,7 +273,9 @@ what it does not cover, is in [Security](#security) and
   "add my Proxmox" into a named tile — internally a `https` port-forward on its own
   subdomain, behind your auth. They show on an **Apps** strip on the dashboard, as
   buttons on the host, and open by name from ⌘K; any forward can be promoted to one.
-  Point the app's OIDC at the same Authentik and it's single sign-on
+  **Ready-made presets** for the common database & observability consoles — Adminer,
+  pgAdmin, phpMyAdmin, Mongo Express, Kibana, ClickHouse — so a bookmark gets the right
+  label, colour and glyph. Point the app's OIDC at the same Authentik and it's single sign-on
 - **Wake-on-LAN**: a **Wake** button on an offline agent host — a neighbouring agent on
   the same LAN sends the magic packet (MAC read from the host's last diagnostics)
 - **Host tags**: free-form tags on hosts ("prod", "debian") on top of folders; the
@@ -264,13 +285,21 @@ what it does not cover, is in [Security](#security) and
   re-show the public key later — no `ssh-keygen` by hand
 - **Global command history**: search across every command run — on all hosts and
   sessions, from the command palette. Also a light audit log
+- **Pending OS updates, at a glance**: the agent counts pending packages (apt / dnf / zypper /
+  pacman / apk, checked every few hours, read-only) and a host with updates shows a **badge in
+  the sidebar** — red when any are security — so you see it **without opening the host**. Click
+  it to review the count, then **Upgrade in a terminal**: WebTerm opens a session running the
+  right upgrade command for the detected manager. It never installs on its own — it's glue to
+  the terminal, not a package-manager UI (`WEBTERM_UPDATES_CHECK_SECS=0` turns it off)
 - **Host diagnostics** (host menu, available even offline): a tabbed panel with a full
   **host snapshot** — OS/kernel/uptime, CPU model/cores/load, memory + swap, **every
   filesystem**, and **each network interface** (IPv4/IPv6, MAC, MTU) with the **routing
-  table**. The agent pushes it on connect and hourly, and you can **Refresh** on demand; the
-  last snapshot is **persisted**, so a host's IPs, routes and disks stay visible **when it's
-  down** (labelled "as of …"). Plus live link health (**agent↔gateway RTT**, uptime/reconnects),
-  an **event timeline** (connect/disconnect + reason) and the **agent log** — debugging without SSH
+  table**; a **Ports** tab runs `ss -tulnp` on demand (protocol, port, address and the owning
+  process). The agent pushes the snapshot on connect and hourly, and you can **Refresh** on
+  demand; the last snapshot is **persisted**, so a host's IPs, routes and disks stay visible
+  **when it's down** (labelled "as of …"). Plus live link health (**agent↔gateway RTT**,
+  uptime/reconnects), an **event timeline** (connect/disconnect + reason) and the **agent
+  log** — debugging without SSH
 - Time zone synced across sessions; the server clock in the status bar
 
 **Data & backup** — [details](docs/RUNBOOK.md)
@@ -566,12 +595,13 @@ than failing:
 
 | Feature | Needs | Elsewhere |
 |---|---|---|
-| Pending-updates badge + "upgrade in a terminal" | `apt-get` or `dnf` | other package managers (pacman/zypper/apk/…) → no badge, feature hidden |
+| Pending-updates badge + "upgrade in a terminal" | `apt-get`, `dnf`, `zypper`, `checkupdates` (pacman) or `apk` | none of these → no badge, feature hidden |
+| Database connections (Toolbox) | the DB client on the host (`psql` / `mysql` / `mongosh` / `clickhouse-client` / `redis-cli`) | client missing → a clear "not installed" message |
 | Services panel | `systemctl` (systemd) | non-systemd → "systemctl not available" |
 | Listening ports (Diagnostics) | `ss` (iproute2) | absent → empty list |
 | Metrics / network diagnostics | `/proc`, `/sys`, `ip` | partial on non-Linux |
 
-So the full feature set is **Debian/Ubuntu or Fedora/RHEL with systemd**; on Arch, Alpine, a BSD or
+So the full feature set is a **systemd distro** (Debian/Ubuntu, Fedora/RHEL, openSUSE, Arch) — pending-updates detection also covers Alpine (`apk`); on a non-systemd system, a BSD or
 a minimal container the terminal and files still work and the rest simply doesn't appear — nothing
 crashes. Windows hosts are not supported (use SSH to a Linux jump host instead). The "upgrade in a
 terminal" action runs as the agent's user: as root it upgrades directly, otherwise it uses

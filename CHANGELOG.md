@@ -7,6 +7,44 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [2.7.0] — 2026-09-27 · agent (53)
+
+**Toolbox** — a per-host side panel for the day-to-day work that isn't "open a shell and remember
+the flags." Three tabs, reached from a host's page or from inside a session. **This release updates
+the agent (52→53)** for stored-credential injection; older agents keep working (they just ignore the
+new field and fall back to `ask`).
+
+### Added
+
+- **Connections** — saved database launchers. One click opens a session that runs the right client
+  on the host (`psql`/`mysql`/`mongosh`/`clickhouse-client`/`redis-cli`) with host, port, user and db
+  pre-filled — no memorizing connection strings. Two credential policies:
+  - **Ask** (default): the client prompts for the password; WebTerm stores nothing.
+  - **Stored**: the password is encrypted in the vault (same Fernet vault as SSH creds) and the agent
+    types it once into the client's password prompt on the PTY. It never appears in argv, the process
+    list, the environment, a file, or the transcript. Redis has no password prompt, so it stays on
+    *ask*. On a 2FA host, both launching a connection **and** creating/editing/deleting one cost a
+    step-up factor — a connection is a credentialed hole into the host, so a stolen cookie can't
+    re-target a stored connection to harvest its password.
+- **Library** — built-in command recipes (git, docker, systemd, system, db) with `{placeholder}`s.
+  Click to copy; paste into any terminal. Works from the host page too, without an open session.
+- **History** — the host's own command history (from OSC 133 shell integration), searchable, click to
+  copy. 2FA-gated like the rest of the history API.
+- **Apps presets** for the database & observability web consoles (Adminer, pgAdmin, phpMyAdmin,
+  Mongo Express, Kibana, ClickHouse) so a forward to one gets the right label, colour and glyph.
+
+### Fixed
+
+- Deleting or uninstalling a host now removes its saved connections too — the `ON DELETE CASCADE`
+  is inert without `PRAGMA foreign_keys`, and host ids get reused, so an orphaned row could otherwise
+  surface a stored credential on a different host.
+- The agent type-guards the injected credential field, so a malformed control frame can't crash the
+  reader loop.
+
+Verified: full Playwright UI suite (e2e-session 79/79, axe 0 serious, FS API 35, features 8), gateway
+suites (connection CRUD step-up + host-delete cleanup + validation, agent injection + type-guard),
+i18n en/ro parity.
+
 ## [2.6.4] — 2026-09-27 · agent (52)
 
 Dependency maintenance. **No agent change** (still 52). The dependabot group updates were applied

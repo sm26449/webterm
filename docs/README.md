@@ -9,6 +9,7 @@ holds the user-facing guides and the internal architecture notes.
 - [SHORTCUTS](SHORTCUTS.md) — keyboard shortcuts
 - [SHELL-INTEGRATION](SHELL-INTEGRATION.md) — OSC 133 "commands as objects" setup
 - [PORT-FORWARDING](PORT-FORWARDING.md) — exposing host services through the browser
+- [DATABASE-TOOLBOX](DATABASE-TOOLBOX.md) — database connection launchers, stored-credential model, command library & history
 - [FLEET](FLEET.md) — running a command across multiple hosts
 - [SERIAL-CONSOLE](SERIAL-CONSOLE.md) — serial devices (RS232/RS485/USB) through the agent
 - [THREAT-MODEL](THREAT-MODEL.md) — what the security model defends, and what it does not
