@@ -1047,6 +1047,7 @@ const en: Lang = {
     'services.stop': "Stop",
     'services.restart': "Restart",
     'err.services.absent': "systemctl is not available on this host.",
+    'err.ports.absent': "ss (iproute2) is not available on this host.",
     'err.updates.noManager': "No supported package manager (apt/dnf) detected on this host.",
     'grid.enter': "Split view",
     'grid.edit': "Edit split view panes",

@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/sm26449/webterm/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/sm26449/webterm/actions/workflows/docker-publish.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v2.6.0-blue)](https://github.com/sm26449/webterm/tags)
+[![Version](https://img.shields.io/badge/version-v2.6.1-blue)](https://github.com/sm26449/webterm/tags)
 
 **Persistent terminals for your whole infrastructure, in the browser.**
 
@@ -558,6 +558,25 @@ Set `WEBTERM_NO_SHELL_INTEGRATION=1` before running the command to skip that; ev
 works without it. Requires python3 ≥ 3.6; **`tmux` is what makes sessions persistent** — without it
 the agent runs on a plain PTY and sessions die with it.
 On-server diagnostics: `python3 ~/.webterm/ptyd.py info`.
+
+**Agent OS support.** The agent is Linux-first: the core (sessions, files, port-forwards, serial)
+runs on any Linux with **python3 ≥ 3.6** and **tmux** — the installer checks for python3 and stops
+with a clear message if it is missing. Everything else **degrades cleanly** by capability rather
+than failing:
+
+| Feature | Needs | Elsewhere |
+|---|---|---|
+| Pending-updates badge + "upgrade in a terminal" | `apt-get` or `dnf` | other package managers (pacman/zypper/apk/…) → no badge, feature hidden |
+| Services panel | `systemctl` (systemd) | non-systemd → "systemctl not available" |
+| Listening ports (Diagnostics) | `ss` (iproute2) | absent → empty list |
+| Metrics / network diagnostics | `/proc`, `/sys`, `ip` | partial on non-Linux |
+
+So the full feature set is **Debian/Ubuntu or Fedora/RHEL with systemd**; on Arch, Alpine, a BSD or
+a minimal container the terminal and files still work and the rest simply doesn't appear — nothing
+crashes. Windows hosts are not supported (use SSH to a Linux jump host instead). The "upgrade in a
+terminal" action runs as the agent's user: as root it upgrades directly, otherwise it uses
+passwordless sudo if available, and if neither applies it prints the exact command to run yourself
+(the default dedicated `webterm` user has no sudo).
 
 The install link itself is hardened: it is **single-use**, expires after a
 **configurable TTL** (default 1 hour, 5 min–30 days — set it when creating the

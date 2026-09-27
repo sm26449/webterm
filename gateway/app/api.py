@@ -1226,10 +1226,14 @@ def _host_updates(row) -> dict | None:
     if "diagnostics" not in row.keys() or not row["diagnostics"]:
         return None
     try:
-        u = (json.loads(row["diagnostics"]) or {}).get("updates")
+        d = json.loads(row["diagnostics"])
     except (TypeError, ValueError):
         return None
-    if not isinstance(u, dict) or not isinstance(u.get("count"), int):
+    # un agent compromis/buggy poate stoca un JSON top-level NON-obiect (`[1,2]`, `42`, `"x"`):
+    # `.get` pe el ar arunca AttributeError, iar _host_updates e chemat pentru FIECARE host din
+    # listare → un singur host otrăvit dădea 500 pe toată lista. Verificăm tipul înainte de .get.
+    u = d.get("updates") if isinstance(d, dict) else None
+    if not isinstance(u, dict) or not isinstance(u.get("count"), int) or isinstance(u.get("count"), bool):
         return None
     return {"count": u["count"], "security": u.get("security"), "manager": u.get("manager")}
 
@@ -2636,10 +2640,18 @@ async def services_list(host_id: int, user=Depends(security.require_user)):
     host → aceeaşi poartă de step-up ca docker_list / fs_list."""
     await _require_host_stepup(host_id, user)
     # --plain fără legendă/paginare: coloane fixe UNIT LOAD ACTIVE SUB DESCRIPTION.
-    # `--all` include şi serviciile oprite (altfel n-ai ce porni din UI).
+    # `--all` include şi serviciile oprite (altfel n-ai ce porni din UI). NU redirectăm stderr şi
+    # NU forţăm exit 0: altfel „systemctl: not found" ajungea în /dev/null şi ramura de absenţă era
+    # cod mort — un host fără systemd întorcea o listă goală tăcută, nedistinctă de „zero servicii"
+    # (audit 2026-09). Deosebim după exit_code + stderr, exact ca docker_list.
     resp = await _host_run(host_id,
-        "systemctl list-units --type=service --all --no-legend --no-pager --plain 2>/dev/null || true")
-    out, err = resp.get("stdout", ""), (resp.get("stderr") or "")
+        "systemctl list-units --type=service --all --no-legend --no-pager --plain")
+    ec, out, err = resp.get("exit_code"), resp.get("stdout", ""), (resp.get("stderr") or "")
+    if ec != 0 and not out.strip():
+        low = err.lower()
+        if "not found" in low or "command not found" in low or "no such file" in low:
+            raise ApiError(400, "services.absent", "systemctl is not available on this host")
+        raise HTTPException(400, err.strip()[:300] or "systemctl failed")
     rows = []
     for line in out.splitlines():
         # marcajul de stare din prima coloană (●/×) apare doar cu --legend; --plain îl omite,
@@ -2649,10 +2661,6 @@ async def services_list(host_id: int, user=Depends(security.require_user)):
         if len(f) >= 4 and f[0].endswith(".service"):
             rows.append({"unit": f[0], "load": f[1], "active": f[2], "sub": f[3],
                          "desc": f[4] if len(f) == 5 else ""})
-    if not rows and not out.strip():
-        low = err.lower()
-        if "not found" in low or "command not found" in low:
-            raise ApiError(400, "services.absent", "systemctl is not available on this host")
     return {"rows": rows}
 
 
@@ -2687,9 +2695,17 @@ async def listening_ports(host_id: int, user=Depends(security.require_user)):
     """Socket-urile în ASCULTARE (`ss -tulnH`), parsate. Citire de stare de host → step-up.
     Numele procesului cere de obicei root; fără el coloana `users` lipseşte, restul rămâne util."""
     await _require_host_stepup(host_id, user)
-    resp = await _host_run(host_id, "ss -tulnpH 2>/dev/null || ss -tulnH")
+    # `ss -tulnpH`: -p adaugă procesul (cere de obicei root). Dacă `ss` lipseşte, spunem asta —
+    # nu întoarcem o listă goală tăcută (ca la services). Prima încercare cu -p pe stderr propriu;
+    # fallback fără -p dacă -p n-a mers, dar tot verificăm că `ss` există.
+    resp = await _host_run(host_id,
+        "if command -v ss >/dev/null 2>&1; then ss -tulnpH 2>/dev/null || ss -tulnH; "
+        "else echo __NO_SS__; fi")
+    out = resp.get("stdout", "")
+    if out.strip() == "__NO_SS__":
+        raise ApiError(400, "ports.absent", "ss (iproute2) is not available on this host")
     rows = []
-    for line in resp.get("stdout", "").splitlines():
+    for line in out.splitlines():
         f = line.split()
         if len(f) < 5:
             continue
@@ -2718,9 +2734,12 @@ def _host_ipv4_ifaces(diag_json):
     import ipaddress
     out = []
     try:
-        ifaces = (json.loads(diag_json).get("network") or {}).get("interfaces") or []
+        d = json.loads(diag_json)
     except (TypeError, ValueError):
         return out
+    # acelaşi guard ca _host_updates: un diagnostics top-level non-obiect ar arunca AttributeError
+    net = d.get("network") if isinstance(d, dict) else None
+    ifaces = (net.get("interfaces") if isinstance(net, dict) else None) or []
     for f in ifaces:
         name, mac = (f.get("name") or ""), (f.get("mac") or "").strip()
         if name == "lo" or not mac or mac == "00:00:00:00:00:00":
@@ -4322,16 +4341,28 @@ async def create_session(host_id: int, body: SessionIn, request: Request,
     elif body.os_upgrade:
         # „Upgrade într-un terminal": deschidem o sesiune care rulează comanda INTERACTIVĂ de
         # upgrade pentru managerul detectat (din diagnostics). NU input arbitrar — o hartă fixă,
-        # ca la docker_container. Rulează ca userul agentului; dacă nu e root, managerul cere
-        # singur parola/sudo (treaba operatorului). Glue, nu un package-manager reimplementat.
+        # ca la docker_container. Glue, nu un package-manager reimplementat.
         if ctype != "agent":
             raise HTTPException(400, "OS upgrade is only available on agent hosts")
-        upd = _host_updates(row)
-        mgr = (upd or {}).get("manager")
-        cmd = {"apt": "sudo apt update && sudo apt upgrade",
-               "dnf": "sudo dnf upgrade"}.get(mgr)
-        if not cmd:
+        mgr = (_host_updates(row) or {}).get("manager")
+        base = {"apt": "apt-get update && apt-get upgrade", "dnf": "dnf upgrade"}.get(mgr)
+        if not base:
             raise ApiError(400, "updates.noManager", "no known OS package manager on this host")
+        # CONŞTIENT DE PRIVILEGII: instalarea implicită rulează ca userul dedicat `webterm`, FĂRĂ
+        # sudo — un `sudo` fix îl bloca la un prompt de parolă imposibil (raportat 2026-09). Deci:
+        # root → direct; sudo passwordless → sudo; altfel → mesaj clar cu comanda exactă (userul
+        # cu sudo-parolă o poate lipi şi tasta parola), NICIODATĂ un prompt agăţat. Apoi lăsăm un
+        # shell deschis ca terminalul să rămână util după upgrade/mesaj.
+        # hint-ul PRINTAT foloseşte tot `sudo sh -c '<base>'`: un `sudo %s` naiv ar da
+        # `sudo apt-get update && apt-get upgrade` → sudo prinde doar `update`, iar `upgrade`
+        # rulează neprivilegiat şi pică (audit 2026-09). Deci compunerea întreagă sub un singur sudo.
+        qbase = shlex.quote(base)
+        sh = ('if [ "$(id -u)" = 0 ]; then %s; '
+              'elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then sudo sh -c %s; '
+              'else printf "\\n[WebTerm] OS upgrade needs root. This agent runs as %%s, without '
+              'passwordless sudo.\\nRun it as root, or:\\n  sudo sh -c %s\\n\\n" "$(whoami)"; fi; '
+              'exec "${SHELL:-/bin/sh}"') % (base, qbase, qbase)
+        cmd = "sh -c %s" % shlex.quote(sh)
         if not title.strip() or title.startswith("Session "):
             title = "OS upgrade (%s)" % mgr
     try:

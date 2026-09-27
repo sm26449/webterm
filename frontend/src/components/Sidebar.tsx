@@ -347,7 +347,9 @@ export default function Sidebar(props: {
                   title={host.updates.security
                     ? t('updates.badgeSecTitle', { count: host.updates.count, sec: host.updates.security })
                     : t('updates.badgeTitle', { count: host.updates.count })}
-                  aria-label={t('updates.badgeTitle', { count: host.updates.count })}
+                  aria-label={host.updates.security
+                    ? t('updates.badgeSecTitle', { count: host.updates.count, sec: host.updates.security })
+                    : t('updates.badgeTitle', { count: host.updates.count })}
                   className={`shrink-0 rounded-full px-1.5 text-[10px] font-semibold ${host.updates.security
                     ? 'bg-rose-500/15 text-rose-300 hover:bg-rose-500/25'
                     : 'bg-amber-500/15 text-amber-300 hover:bg-amber-500/25'}`}>

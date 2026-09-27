@@ -1108,7 +1108,7 @@ function MainApp() {
         />
       )}
       {diagHost && (
-        <DiagnosticModal host={diagHost} onClose={() => setDiagHost(null)} />
+        <DiagnosticModal key={diagHost.id} host={diagHost} onClose={() => setDiagHost(null)} />
       )}
       {paletteOpen && (
         <CommandPalette

@@ -346,6 +346,30 @@ async def main():
             check("fs_write: offset = mărimea curentă → append reuşit",
                   st.get("ok") and data == b"helloXY", "%s %r" % (st, data))
 
+        # ── 10e. parsarea diagnostics: JSON non-obiect NU trebuie să arunce (2.6.1) ──
+        # _host_updates / _host_ipv4_ifaces sunt chemate pentru FIECARE host din listare; un
+        # agent compromis care stochează un JSON top-level truthy non-dict (`[1,2]`, `42`, `"x"`)
+        # dădea AttributeError → 500 pe toată lista. Ambele trebuie să întoarcă None/[] liniştit.
+        def _row(diag):   # imită un sqlite3.Row: .keys() + indexare
+            return {"diagnostics": diag}
+        for junk in ("[1,2]", "42", "true", '"x"', "[]", "0", "null", "not json", ""):
+            try:
+                r1 = api._host_updates(_row(junk))
+                r2 = api._host_ipv4_ifaces(junk)
+                check("diagnostics junk %r → fără excepţie (updates=None, ifaces=[])" % junk,
+                      r1 is None and r2 == [], "%r / %r" % (r1, r2))
+            except Exception as e:   # noqa: BLE001
+                check("diagnostics junk %r → fără excepţie" % junk, False, "%s: %s" % (type(e).__name__, e))
+        good = '{"updates":{"count":3,"security":1,"manager":"apt"},"network":{"interfaces":[{"name":"eth0","mac":"aa:bb:cc:dd:ee:ff","ipv4":["192.168.1.5/24"],"physical":true}]}}'
+        u = api._host_updates(_row(good))
+        check("_host_updates valid → {count,security,manager}",
+              u == {"count": 3, "security": 1, "manager": "apt"}, str(u))
+        check("_host_updates count=bool respins (True nu e count valid)",
+              api._host_updates(_row('{"updates":{"count":true}}')) is None)
+        ifs = api._host_ipv4_ifaces(good)
+        check("_host_ipv4_ifaces: interfaţă fizică validă → un candidat",
+              len(ifs) == 1 and ifs[0][0] == "aa:bb:cc:dd:ee:ff", str(ifs))
+
     print(f"\n{ok}/{total} teste trecute")
     return ok == total
 

@@ -1058,6 +1058,7 @@ const ro: Lang = {
     'services.stop': "Oprește",
     'services.restart': "Restart",
     'err.services.absent': "systemctl nu e disponibil pe acest host.",
+    'err.ports.absent': "ss (iproute2) nu e disponibil pe acest host.",
     'err.updates.noManager': "Niciun manager de pachete suportat (apt/dnf) detectat pe acest host.",
     'grid.enter': "Split view",
     'grid.edit': "Editează panourile din split view",

@@ -7,6 +7,34 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [2.6.1] — 2026-09-27 · agent (51)
+
+Fixes from a five-reviewer audit of the 2.6.0 machine-management features. **No agent change**
+(still 51) — gateway + UI only, no host update.
+
+### Fixed
+
+- **"Upgrade in a terminal" no longer hangs on hosts without sudo.** It is now privilege-aware:
+  as root it upgrades directly; with passwordless sudo it uses `sudo sh -c`; otherwise it prints
+  the exact command (correctly quoted as one `sudo sh -c '…'`, so the whole `apt-get update &&
+  upgrade` runs as root) and drops you into a shell — no unanswerable password prompt. Fixes the
+  default dedicated `webterm` user (which has no sudo). README documents which OS/managers the
+  agent's features support.
+- **A poisoned host can't take down the fleet list.** `_host_updates` and the Wake-on-LAN
+  interface parser now type-check the diagnostics JSON before reading it — a compromised or buggy
+  agent storing a non-object top-level value (`[1,2]`, `42`, `"x"`) used to raise on every host in
+  the listing and 500 the shared `/api/hosts` view.
+- **Services / ports panels tell you when the tool is missing.** `systemctl list-units` no longer
+  hides its stderr, so a host without systemd returns a clear "systemctl not available" instead of
+  a silent empty list; the ports tab does the same for a missing `ss`.
+- Updates badge announces the security-update count to screen readers (not just sighted users), and
+  the Diagnostics modal resets its Ports tab per host.
+
+### Tests
+
+- `_host_updates` / `_host_ipv4_ifaces` now covered for malformed diagnostics JSON (the 500 path),
+  valid parse, and the `count`-as-bool rejection.
+
 ## [2.6.0] — 2026-09-26 · agent (51)
 
 Machine management from the same pane: OS updates, systemd services, listening ports — plus the
