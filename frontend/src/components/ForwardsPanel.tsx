@@ -67,7 +67,20 @@ export default function ForwardsPanel(props: {
     proxmox:   { port: '8006', scheme: 'https', label: 'Proxmox' },
     portainer: { port: '9443', scheme: 'https', label: 'Portainer' },
     grafana:   { port: '3000', scheme: 'http',  label: 'Grafana' },
+    // console web de baze de date (porturi implicite tipice — editabile în formular)
+    adminer:        { port: '8080', scheme: 'http', label: 'Adminer' },
+    pgadmin:        { port: '5050', scheme: 'http', label: 'pgAdmin' },
+    phpmyadmin:     { port: '8080', scheme: 'http', label: 'phpMyAdmin' },
+    'mongo-express':{ port: '8081', scheme: 'http', label: 'Mongo Express' },
+    kibana:         { port: '5601', scheme: 'http', label: 'Kibana' },
+    clickhouse:     { port: '8123', scheme: 'http', label: 'ClickHouse' },
   }
+  // preseturile de DB, într-o listă (butoane generate) ca să nu aglomerăm markup-ul
+  const DB_APPS: { type: string; color: string }[] = [
+    { type: 'adminer', color: '#7dd3fc' }, { type: 'pgadmin', color: '#4f83cc' },
+    { type: 'phpmyadmin', color: '#e0a83c' }, { type: 'mongo-express', color: '#4bd494' },
+    { type: 'kibana', color: '#f04e98' }, { type: 'clickhouse', color: '#f0cf5a' },
+  ]
   function presetApp(type: string) {
     setEditing(null); resetForm(); setError('')
     const p = APP_PRESETS[type]
@@ -163,6 +176,8 @@ export default function ForwardsPanel(props: {
   }
   const APP_COLOR: Record<string, string> = {
     proxmox: '#ec8b3c', portainer: '#57a8e6', grafana: '#f59e0b', custom: '#34d399',
+    adminer: '#7dd3fc', pgadmin: '#4f83cc', phpmyadmin: '#e0a83c',
+    'mongo-express': '#4bd494', kibana: '#f04e98', clickhouse: '#f0cf5a',
   }
 
   function copyLink(f: PortForward) {
@@ -226,6 +241,11 @@ export default function ForwardsPanel(props: {
             <button onClick={() => presetApp('grafana')}
               className="rounded px-2 py-0.5 text-[11px] font-medium ring-1 ring-ink-700 hover:bg-ink-800"
               style={{ color: '#f59e0b' }}>Grafana</button>
+            {DB_APPS.map((a) => (
+              <button key={a.type} onClick={() => presetApp(a.type)}
+                className="rounded px-2 py-0.5 text-[11px] font-medium ring-1 ring-ink-700 hover:bg-ink-800"
+                style={{ color: a.color }}>{APP_PRESETS[a.type].label}</button>
+            ))}
             <button onClick={() => presetApp('custom')}
               className="rounded px-2 py-0.5 text-[11px] font-medium text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800">{t('forwards.appCustom')}</button>
           </div>

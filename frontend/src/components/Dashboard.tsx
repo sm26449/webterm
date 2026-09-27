@@ -10,9 +10,13 @@ import { fmt } from '../lib/shortcuts'
 // culoare + glif per tip de app (dalele din strip + butoanele de pe host)
 const APP_COLOR: Record<string, string> = {
   proxmox: '#ec8b3c', portainer: '#57a8e6', grafana: '#f59e0b', custom: '#34d399',
+  adminer: '#7dd3fc', pgadmin: '#4f83cc', phpmyadmin: '#e0a83c',
+  'mongo-express': '#4bd494', kibana: '#f04e98', clickhouse: '#f0cf5a',
 }
 const APP_GLYPH: Record<string, string> = {
   proxmox: 'PVE', portainer: 'PTN', grafana: 'GRA', custom: '◆',
+  adminer: 'ADM', pgadmin: 'PGA', phpmyadmin: 'PMA',
+  'mongo-express': 'MEX', kibana: 'KIB', clickhouse: 'CH',
 }
 
 /** Canvasul „acasă": în loc de vid, arată ce contează pentru un operator de

@@ -84,6 +84,8 @@ export default function CommandPalette(props: {
   }, [props.open])
   const APP_COLOR: Record<string, string> = {
     proxmox: '#ec8b3c', portainer: '#57a8e6', grafana: '#f59e0b', custom: '#34d399',
+    adminer: '#7dd3fc', pgadmin: '#4f83cc', phpmyadmin: '#e0a83c',
+    'mongo-express': '#4bd494', kibana: '#f04e98', clickhouse: '#f0cf5a',
   }
 
   const items = useMemo<Item[]>(() => {

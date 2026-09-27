@@ -3012,7 +3012,9 @@ async def clear_history(user=Depends(security.require_user)):
     return {"ok": True}
 
 
-_APP_TYPES = ("", "proxmox", "portainer", "grafana", "custom")
+_APP_TYPES = ("", "proxmox", "portainer", "grafana", "custom",
+              # console web de DB/observability (preseturi) — tot un port_forward, doar metadate
+              "adminer", "pgadmin", "phpmyadmin", "mongo-express", "kibana", "clickhouse")
 
 
 class ForwardIn(BaseModel):
