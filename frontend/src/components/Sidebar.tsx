@@ -351,7 +351,7 @@ export default function Sidebar(props: {
                     ? t('updates.badgeSecTitle', { count: host.updates.count, sec: host.updates.security })
                     : t('updates.badgeTitle', { count: host.updates.count })}
                   className={`shrink-0 rounded-full px-1.5 text-[10px] font-semibold tabular-nums ${host.updates.security
-                    ? 'bg-rose-500 text-white hover:bg-rose-400'
+                    ? 'bg-rose-700 text-white hover:bg-rose-600'
                     : 'bg-amber-500 text-ink-950 hover:bg-amber-400'}`}>
                   ⬆ {host.updates.count}
                 </button>
