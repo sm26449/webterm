@@ -40,6 +40,18 @@ export interface HostMetrics {
   disk_used?: number
 }
 
+export interface Connection {
+  id: number
+  host_id: number
+  label: string
+  engine: 'postgres' | 'mysql' | 'mongodb' | 'clickhouse' | 'redis'
+  target_host: string
+  target_port: number | null
+  username: string
+  dbname: string
+  cred_policy: 'ask' | 'stored' | 'ephemeral'
+}
+
 export interface Host {
   id: number
   name: string

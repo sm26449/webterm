@@ -183,6 +183,13 @@ export const DockerIcon = () => (
   </Icon>
 )
 
+// toolbox: conexiuni DB — o cheie fixă
+export const ToolboxIcon = () => (
+  <Icon>
+    <path d="M14.7 6.3a3.5 3.5 0 0 1-4.6 4.6l-5 5a1.6 1.6 0 0 1-2.3-2.3l5-5a3.5 3.5 0 0 1 4.6-4.6L10 6l1.4 1.4 3.3-1.1z" />
+  </Icon>
+)
+
 // servicii systemd: un cog (roată dinţată)
 export const ServicesIcon = () => (
   <Icon>

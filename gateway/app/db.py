@@ -207,6 +207,26 @@ CREATE TABLE IF NOT EXISTS enroll_groups (
     require_2fa INTEGER NOT NULL DEFAULT 0,-- hosturile noi moştenesc asta
     revoked INTEGER NOT NULL DEFAULT 0
 );
+
+-- Lansatoare de conexiuni DB: o conexiune salvată → o sesiune care rulează CLI-ul potrivit
+-- (psql/mysql/mongosh/clickhouse-client/redis-cli) pe HOSTUL agentului, cu ţinta pre-completată.
+-- Lansator, nu client. `cred_policy`='ask' (implicit, clientul cere parola — zero secrete stocate)
+-- | 'stored' (parolă în vault criptat, injectată prin env la copil — slice 2) | 'ephemeral'.
+CREATE TABLE IF NOT EXISTS connections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    host_id INTEGER NOT NULL,               -- hostul de agent care rulează clientul
+    label TEXT NOT NULL,
+    engine TEXT NOT NULL,                    -- postgres|mysql|mongodb|clickhouse|redis
+    target_host TEXT DEFAULT '',             -- gol => localhost pe hostul agentului
+    target_port INTEGER,
+    username TEXT DEFAULT '',
+    dbname TEXT DEFAULT '',
+    extra_args TEXT DEFAULT '',              -- flaguri opţionale (validate server-side)
+    cred_policy TEXT DEFAULT 'ask',          -- ask | stored | ephemeral
+    credential_encrypted TEXT,               -- doar pentru 'stored' (vault, slice 2)
+    created REAL NOT NULL,
+    FOREIGN KEY(host_id) REFERENCES hosts(id) ON DELETE CASCADE
+);
 """
 
 # additive migrations for DBs created by an older version

@@ -4,6 +4,7 @@ import CommandPalette from './components/CommandPalette'
 import CredentialModal, { CredField } from './components/CredentialModal'
 import SerialModal, { SerialParams } from './components/SerialModal'
 import DiagnosticModal from './components/DiagnosticModal'
+import ToolboxPanel from './components/ToolboxPanel'
 import ConfirmModal from './components/ConfirmModal'
 import Watermark from './components/Watermark'
 import Dashboard from './components/Dashboard'
@@ -134,6 +135,7 @@ function MainApp() {
   const [route, navigate, navigateHost] = useRoute()
   const selectedSid = route.primary
   const [filesHost, setFilesHost] = useState<Host | null>(null)
+  const [toolboxHost, setToolboxHost] = useState<Host | null>(null)   // panoul Connections, la nivel de host
   const [serialHost, setSerialHost] = useState<Host | null>(null)
   const [diagHost, setDiagHost] = useState<Host | null>(null)
   // layout-ul de split se restaurează la reload (înainte murea la orice F5);
@@ -749,6 +751,7 @@ function MainApp() {
       onChanged={refresh}
       onOpenSession={async (sid) => { await refresh(); selectSession(sid) }}
       onOpenContainerShell={openContainerShell}
+      onOpenConnection={openConnection}
       onDeleted={() => {
         if (isSecond) setSecondSid(null)
         else closeTab(s.id)
@@ -899,6 +902,27 @@ function MainApp() {
   // gateway-ul o transformă în `docker exec`). Acelaşi 2FA step-up ca o sesiune normală.
   async function openContainerShell(host: Host, container: string) {
     const body: Record<string, unknown> = { title: '', tz: getTimezone(), docker_container: container }
+    if (host.require_2fa) {
+      const cred = await stepupCredential(host.id)
+      if (!cred) return
+      Object.assign(body, cred)
+    }
+    try {
+      const r = await api<{ id: string }>(`/api/hosts/${host.id}/sessions`, {
+        method: 'POST', body: JSON.stringify(body),
+      })
+      await refresh()
+      openTab(r.id)
+      navigate(r.id)
+    } catch (e) {
+      notify(t('app.cannotStartSession'), errText(e, t) || t('app.error'), 'warn')
+    }
+  }
+
+  // Lansator de conexiune DB: sesiune care rulează CLI-ul salvat (psql/mysql/…) pe host.
+  // Acelaşi flux/2FA ca shell-ul de container. Politica `ask` → clientul cere parola singur.
+  async function openConnection(host: Host, connId: number) {
+    const body: Record<string, unknown> = { title: '', tz: getTimezone(), connection_id: connId }
     if (host.require_2fa) {
       const cred = await stepupCredential(host.id)
       if (!cred) return
@@ -1096,6 +1120,7 @@ function MainApp() {
         </>)}
         {!gridActive && !primary && (<PaneErrorBoundary>{routeHost ? (
           <HostOverview
+            onToolbox={setToolboxHost}
             onMenu={() => { setSidebarCollapsed(false); localStorage.setItem('wt-sidebar-collapsed', '0'); setSidebarOpen(true) }}
       sidebarCollapsed={sidebarCollapsed}
             host={routeHost}
@@ -1125,6 +1150,10 @@ function MainApp() {
         <Suspense fallback={null}>
           <FileBrowser host={filesHost} onClose={() => setFilesHost(null)} />
         </Suspense>
+      )}
+      {toolboxHost && (
+        <ToolboxPanel host={toolboxHost} overlay onClose={() => setToolboxHost(null)}
+          onOpen={(h, cid) => { setToolboxHost(null); openConnection(h, cid) }} />
       )}
       {serialHost && (
         <SerialModal

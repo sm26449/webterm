@@ -3,7 +3,7 @@ import { isSessionLive, api, AppLink, Host, Session, timeAgo } from '../lib/api'
 import { hostAt, protoLabel } from '../lib/host'
 import { useI18n } from '../lib/i18n'
 import { hostHistory } from '../lib/metrics'
-import { DownloadIcon, FilesIcon, PlusIcon, PopoutIcon, ServerIcon, SplitIcon, TrashIcon } from './Icons'
+import { DownloadIcon, FilesIcon, PlusIcon, PopoutIcon, ServerIcon, SplitIcon, ToolboxIcon, TrashIcon } from './Icons'
 import SessionPreview from './SessionPreview'
 import Sparkline from './Sparkline'
 import TranscriptPlayer from './TranscriptPlayer'
@@ -20,6 +20,7 @@ export default function HostOverview(props: {
   onOpenSession: (sid: string) => void
   onNewSession: (host: Host) => void
   onFiles: (host: Host) => void
+  onToolbox: (host: Host) => void
   onSplit: (sid: string) => void
   onPopout: (sid: string) => void
   onDeleteSession: (sid: string) => void
@@ -147,6 +148,12 @@ export default function HostOverview(props: {
             <button onClick={() => props.onFiles(host)}
               className="wt-touch flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800">
               <FilesIcon /> {t('host.files')}
+            </button>
+          )}
+          {host.online && host.connection_type === 'agent' && (
+            <button onClick={() => props.onToolbox(host)}
+              className="wt-touch flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800">
+              <ToolboxIcon /> {t('host.databases')}
             </button>
           )}
           <button disabled={!canConnect} onClick={() => props.onNewSession(host)}

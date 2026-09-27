@@ -2722,6 +2722,118 @@ async def listening_ports(host_id: int, user=Depends(security.require_user)):
     return {"rows": rows}
 
 
+# ── Database connection launchers ────────────────────────────────────────────
+# O conexiune salvată → o sesiune care rulează CLI-ul potrivit pe hostul agentului, cu ţinta
+# pre-completată. Lansator, nu client. Slice 1: politica `ask` — clientul îşi cere singur parola,
+# deci WebTerm nu atinge niciun secret (cel mai sigur). Comanda e construită dintr-o hartă FIXĂ
+# pe engine, cu shlex.quote pe fiecare câmp — niciun input liber ajunge la shell.
+_CONN_ENGINES = {
+    "postgres":   {"bin": "psql", "port": 5432, "label": "PostgreSQL"},
+    "mysql":      {"bin": "mysql", "port": 3306, "label": "MySQL / MariaDB"},
+    "mongodb":    {"bin": "mongosh", "port": 27017, "label": "MongoDB"},
+    "clickhouse": {"bin": "clickhouse-client", "port": 9000, "label": "ClickHouse"},
+    "redis":      {"bin": "redis-cli", "port": 6379, "label": "Redis"},
+}
+# câmpurile stocate sunt admin-only, dar validăm oricum: fără spaţii/metacaractere de shell
+_CONN_FIELD = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,127})?$")
+
+
+def _connection_json(r) -> dict:
+    return {"id": r["id"], "host_id": r["host_id"], "label": r["label"], "engine": r["engine"],
+            "target_host": r["target_host"] or "", "target_port": r["target_port"],
+            "username": r["username"] or "", "dbname": r["dbname"] or "",
+            "cred_policy": r["cred_policy"] or "ask"}   # credential_encrypted NU se expune
+
+
+def _connection_command(row) -> str:
+    """Comanda `ask` (fără parolă) pentru engine-ul dat. Preflight: dacă lipseşte clientul, mesaj
+    clar + shell, nu o sesiune care moare instant."""
+    eng = _CONN_ENGINES[row["engine"]]
+    h = row["target_host"] or "127.0.0.1"
+    p = int(row["target_port"] or eng["port"])
+    u, db, q = row["username"] or "", row["dbname"] or "", shlex.quote
+    if row["engine"] == "postgres":
+        parts = ["psql", "-h", q(h), "-p", str(p)] + (["-U", q(u)] if u else []) + (["-d", q(db)] if db else [])
+    elif row["engine"] == "mysql":
+        parts = ["mysql", "-h", q(h), "-P", str(p)] + (["-u", q(u), "-p"] if u else []) + ([q(db)] if db else [])
+    elif row["engine"] == "mongodb":
+        parts = ["mongosh", q("mongodb://%s:%d/%s" % (h, p, db))] + (["--username", q(u)] if u else [])
+    elif row["engine"] == "clickhouse":
+        parts = ["clickhouse-client", "--host", q(h), "--port", str(p), "--ask-password"] \
+            + (["--user", q(u)] if u else []) + (["--database", q(db)] if db else [])
+    else:  # redis
+        parts = ["redis-cli", "-h", q(h), "-p", str(p)] + (["-n", q(db)] if db and db.isdigit() else [])
+    inner = " ".join(parts)
+    return ('command -v %s >/dev/null 2>&1 || { printf "\\n[WebTerm] %s is not installed on this host.\\n\\n"; '
+            'exec "${SHELL:-/bin/sh}"; }; exec %s') % (q(eng["bin"]), eng["bin"], inner)
+
+
+class ConnectionIn(BaseModel):
+    label: str
+    engine: str
+    target_host: str = ""
+    target_port: Optional[int] = None
+    username: str = ""
+    dbname: str = ""
+    cred_policy: str = "ask"
+
+
+def _validate_connection(body: ConnectionIn) -> None:
+    if body.engine not in _CONN_ENGINES:
+        raise ApiError(400, "connection.badEngine", "unknown database engine")
+    if not (body.label or "").strip():
+        raise ApiError(400, "connection.noLabel", "give the connection a name")
+    for val in (body.target_host, body.username, body.dbname):
+        if val and not _CONN_FIELD.match(val):
+            raise ApiError(400, "connection.badField", "host/user/db: letters, digits and . _ - only")
+    if body.target_port is not None and not (0 < int(body.target_port) <= 65535):
+        raise ApiError(400, "connection.badPort", "invalid port")
+    if body.cred_policy not in ("ask", "stored", "ephemeral"):
+        raise ApiError(400, "connection.badPolicy", "unknown credential policy")
+    if body.cred_policy == "stored":
+        # slice 1 nu stochează încă secrete (mecanismul sigur de env pe agent = slice 2/v53)
+        raise ApiError(400, "connection.storedSoon", "stored credentials arrive in a later release; use 'ask' for now")
+
+
+@router.get("/api/hosts/{host_id}/connections")
+async def list_connections(host_id: int, user=Depends(security.require_user)):
+    rows = await db.fetchall("SELECT * FROM connections WHERE host_id=? ORDER BY label", host_id)
+    return {"connections": [_connection_json(r) for r in rows]}
+
+
+@router.post("/api/hosts/{host_id}/connections")
+async def create_connection(host_id: int, body: ConnectionIn, user=Depends(security.require_user)):
+    if not await db.fetchone("SELECT id FROM hosts WHERE id=?", host_id):
+        raise HTTPException(404)
+    _validate_connection(body)
+    cid = await db.execute(
+        "INSERT INTO connections(host_id, label, engine, target_host, target_port, username,"
+        " dbname, cred_policy, created) VALUES(?,?,?,?,?,?,?,?,?)",
+        host_id, body.label.strip()[:80], body.engine, body.target_host.strip(), body.target_port,
+        body.username.strip(), body.dbname.strip(), body.cred_policy, time.time())
+    return _connection_json(await db.fetchone("SELECT * FROM connections WHERE id=?", cid))
+
+
+@router.patch("/api/hosts/{host_id}/connections/{conn_id}")
+async def update_connection(host_id: int, conn_id: int, body: ConnectionIn,
+                            user=Depends(security.require_user)):
+    if not await db.fetchone("SELECT id FROM connections WHERE id=? AND host_id=?", conn_id, host_id):
+        raise HTTPException(404)
+    _validate_connection(body)
+    await db.execute(
+        "UPDATE connections SET label=?, engine=?, target_host=?, target_port=?, username=?,"
+        " dbname=?, cred_policy=? WHERE id=? AND host_id=?",
+        body.label.strip()[:80], body.engine, body.target_host.strip(), body.target_port,
+        body.username.strip(), body.dbname.strip(), body.cred_policy, conn_id, host_id)
+    return _connection_json(await db.fetchone("SELECT * FROM connections WHERE id=?", conn_id))
+
+
+@router.delete("/api/hosts/{host_id}/connections/{conn_id}")
+async def delete_connection(host_id: int, conn_id: int, user=Depends(security.require_user)):
+    await db.execute("DELETE FROM connections WHERE id=? AND host_id=?", conn_id, host_id)
+    return {"ok": True}
+
+
 # ── Wake-on-LAN: un agent VECIN trezeşte o maşină oprită din acelaşi LAN ──────
 # Prefixe de interfeţe virtuale (bridge-uri, veth-uri, VPN-uri): n-au NIC fizic în spate, deci
 # MAC-ul lor nu poate fi trezit şi subnetul lor (ex. 172.17/16 al Docker-ului) nu e un LAN real.
@@ -4142,6 +4254,7 @@ class SessionIn(BaseModel):
     stepup_password: str = ""  # 2FA fallback (deploy IP-only, fără passkey)
     docker_container: str = ""  # dacă e setat: sesiunea e un shell ÎN acest container (docker exec)
     os_upgrade: bool = False    # dacă e True: sesiunea rulează comanda INTERACTIVĂ de upgrade OS
+    connection_id: int = 0      # dacă e setat: sesiunea rulează CLI-ul DB al conexiunii salvate
 
 
 class SessionPatch(BaseModel):
@@ -4382,6 +4495,19 @@ async def create_session(host_id: int, body: SessionIn, request: Request,
         cmd = "sh -c %s" % shlex.quote(sh)
         if not title.strip() or title.startswith("Session "):
             title = "OS upgrade (%s)" % mgr
+    elif body.connection_id:
+        # Lansator de conexiune DB: sesiunea rulează CLI-ul salvat (psql/mysql/…) cu ţinta
+        # pre-completată. Doar host-uri de agent. Politica `ask` → clientul cere parola singur
+        # (fără secrete la noi). Step-up-ul pentru sesiuni pe host 2FA se aplică deja mai sus.
+        if ctype != "agent":
+            raise HTTPException(400, "database connections are only available on agent hosts")
+        conn = await db.fetchone("SELECT * FROM connections WHERE id=? AND host_id=?",
+                                 body.connection_id, host_id)
+        if not conn:
+            raise HTTPException(404, "connection not found")
+        cmd = _connection_command(conn)
+        if not title.strip() or title.startswith("Session "):
+            title = "%s: %s" % (conn["engine"], conn["label"][:32])
     try:
         result = await core.create_session(host_id, title, body.rows, body.cols, body.tz, cmd)
     except core.AgentGone:

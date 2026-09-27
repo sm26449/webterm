@@ -20,7 +20,8 @@ import GitPanel from './GitPanel'
 import ForwardsPanel from './ForwardsPanel'
 import DockerPanel from './DockerPanel'
 import ServicesPanel from './ServicesPanel'
-import { ClockIcon, CopyIcon, DockerIcon, ExternalLinkIcon, FilesIcon, ForwardIcon, GitBranchIcon, LinkIcon, MoreIcon, NoteIcon, PasteIcon, PencilIcon, PopoutIcon, SearchIcon, ServicesIcon, StopIcon, TrashIcon } from './Icons'
+import ToolboxPanel from './ToolboxPanel'
+import { ClockIcon, CopyIcon, DockerIcon, ExternalLinkIcon, FilesIcon, ForwardIcon, GitBranchIcon, LinkIcon, MoreIcon, NoteIcon, PasteIcon, PencilIcon, PopoutIcon, SearchIcon, ServicesIcon, StopIcon, ToolboxIcon, TrashIcon } from './Icons'
 import MobileKeybar from './MobileKeybar'
 import SnippetsMenu from './SnippetsMenu'
 import TranscriptPlayer from './TranscriptPlayer'
@@ -102,6 +103,8 @@ export default function SessionView(props: {
   onOpenSession?: (sid: string) => void
   /** deschide un shell într-un container Docker (docker exec într-un tab nou) */
   onOpenContainerShell?: (host: Host, container: string) => void
+  /** deschide o sesiune care rulează CLI-ul unei conexiuni DB salvate */
+  onOpenConnection?: (host: Host, connId: number) => void
   /** guardrail de comenzi (verificat la Enter, via OSC 133) */
   commandGuard?: CommandGuard | null
   /** broadcast (grid): înregistrează funcţia de trimitere a acestui panou sus, ca App să poată
@@ -231,14 +234,16 @@ export default function SessionView(props: {
   const [showGit, setShowGit] = useState(false)
   const [showDocker, setShowDocker] = useState(false)
   const [showServices, setShowServices] = useState(false)
+  const [showToolbox, setShowToolbox] = useState(false)
   // un singur panou din dreapta o dată: la deschiderea unuia, le închid pe celelalte
-  const closeOthers = (keep: 'files' | 'cmd' | 'fwd' | 'git' | 'docker' | 'services') => {
+  const closeOthers = (keep: 'files' | 'cmd' | 'fwd' | 'git' | 'docker' | 'services' | 'toolbox') => {
     if (keep !== 'files') setShowFiles(false)
     if (keep !== 'cmd') setShowCommands(false)
     if (keep !== 'fwd') setShowForwards(false)
     if (keep !== 'git') setShowGit(false)
     if (keep !== 'docker') setShowDocker(false)
     if (keep !== 'services') setShowServices(false)
+    if (keep !== 'toolbox') setShowToolbox(false)
   }
   const toggleFiles = () => setShowFiles((v) => { if (!v) closeOthers('files'); return !v })
   const toggleCommands = () => setShowCommands((v) => { if (!v) closeOthers('cmd'); return !v })
@@ -246,6 +251,7 @@ export default function SessionView(props: {
   const toggleGit = () => setShowGit((v) => { if (!v) closeOthers('git'); return !v })
   const toggleDocker = () => setShowDocker((v) => { if (!v) closeOthers('docker'); return !v })
   const toggleServices = () => setShowServices((v) => { if (!v) closeOthers('services'); return !v })
+  const toggleToolbox = () => setShowToolbox((v) => { if (!v) closeOthers('toolbox'); return !v })
   const [activeCmd, setActiveCmd] = useState<number | null>(null)
   const activeCmdRef = useRef<number | null>(null)   // citit de stepCommand (handler-ul de taste e capturat la montare)
   // cwd raportat de shell prin OSC 7 (apare doar cu shell integration activă)
@@ -1416,6 +1422,14 @@ export default function SessionView(props: {
               </ToolButton>
             </span>
           )}
+          {/* Toolbox: lansatoare de conexiuni DB. Doar host-uri de agent (CLI-ul rulează pe host). */}
+          {(!props.host?.connection_type || props.host.connection_type === 'agent') && (
+            <span className="hidden sm:contents">
+              <ToolButton title={t('session.toolboxTooltip')} active={showToolbox} onClick={toggleToolbox}>
+                <ToolboxIcon />
+              </ToolButton>
+            </span>
+          )}
           {isLive && (
             <span className="hidden sm:contents">
               <SnippetsMenu
@@ -1872,6 +1886,10 @@ export default function SessionView(props: {
       )}
       {showServices && props.host && (
         <ServicesPanel host={props.host} onClose={() => setShowServices(false)} overlay={narrowPane} />
+      )}
+      {showToolbox && props.host && (
+        <ToolboxPanel host={props.host} onClose={() => setShowToolbox(false)} overlay={narrowPane}
+          onOpen={(h, cid) => { setShowToolbox(false); props.onOpenConnection?.(h, cid) }} />
       )}
       </div>
 
