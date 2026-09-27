@@ -201,6 +201,82 @@ async def main():
         check("după demote dispare din /api/apps",
               not any(a["id"] == simple_fid for a in (await c.get("/api/apps")).json()))
 
+        # ── 6. conexiunile DB (Toolbox): acelaşi gard ca forward-urile ───────────
+        # O conexiune `stored` ţine o parolă DB criptată. Un cookie furat care re-ţinteşte
+        # target_host către serverul atacatorului ar exfiltra parola în clar la lansare (agentul
+        # o tastează în promptul „Password:" al clientului) → CRUD-ul trebuie să coste un factor
+        # pe host 2FA, exact ca /forwards. audit v53.
+        CONN = {"label": "pg-prod", "engine": "postgres", "target_host": "10.0.0.5",
+                "target_port": 5432, "username": "app", "dbname": "shop", "cred_policy": "stored",
+                "credential": "s3cret"}
+        security._stepup_windows.clear()
+        r = await c.post(f"/api/hosts/{plain}/connections", json=CONN)
+        check("conexiune pe host fără 2FA: creare permisă", r.status_code == 200, r.text)
+        plain_cid = r.json()["id"]
+        # secretul NU se expune înapoi în JSON
+        check("_connection_json nu întoarce credential_encrypted",
+              "credential_encrypted" not in r.json() and "credential" not in r.json(), r.text)
+
+        r = await c.post(f"/api/hosts/{gated}/connections", json=CONN)
+        check("conexiune pe host 2FA, fără step-up: creare REFUZATĂ", r.status_code == 403, str(r.status_code))
+        cnt = await db.fetchone("SELECT count(*) n FROM connections WHERE host_id=?", gated)
+        check("refuzul nu lasă credenţialul în urmă", cnt["n"] == 0, str(cnt["n"]))
+
+        security.open_stepup_window(uid, gated)
+        r = await c.post(f"/api/hosts/{gated}/connections", json=CONN)
+        check("conexiune pe host 2FA, în fereastră: creare permisă", r.status_code == 200, r.text)
+        gated_cid = r.json()["id"]
+
+        # re-ţintirea (vectorul de exfiltrare) e la fel de puternic gardată
+        security._stepup_windows.clear()
+        r = await c.patch(f"/api/hosts/{gated}/connections/{gated_cid}",
+                          json=dict(CONN, target_host="evil.attacker.example", credential=""))
+        check("re-ţintire fără step-up: REFUZATĂ", r.status_code == 403, str(r.status_code))
+        row = await db.fetchone("SELECT target_host FROM connections WHERE id=?", gated_cid)
+        check("ţinta a rămas neschimbată", row["target_host"] == "10.0.0.5", str(row["target_host"]))
+        r = await c.request("DELETE", f"/api/hosts/{gated}/connections/{gated_cid}")
+        check("ştergere fără step-up: REFUZATĂ", r.status_code == 403, str(r.status_code))
+        r = await c.request("DELETE", f"/api/hosts/{plain}/connections/{plain_cid}")
+        check("conexiune pe host fără 2FA: ştergerea merge ca înainte", r.status_code == 200, r.text)
+
+        # ── 7. ştergerea hostului duce şi conexiunile (fără orfani cu secrete) ────
+        # PRAGMA foreign_keys nu e setat → CASCADE inactiv; ştergem explicit. Cu id-urile
+        # reutilizate, altfel un host nou ar moşteni parola stocată a celui vechi. audit v53.
+        security.open_stepup_window(uid, gated)
+        await c.post(f"/api/hosts/{gated}/connections", json=CONN)
+        n = (await db.fetchone("SELECT count(*) n FROM connections WHERE host_id=?", gated))["n"]
+        check("host 2FA are conexiuni stocate", n >= 1, str(n))
+        security.open_stepup_window(uid, gated)
+        r = await c.request("DELETE", f"/api/hosts/{gated}")
+        check("ştergerea hostului → 200", r.status_code == 200, r.text)
+        n = (await db.fetchone("SELECT count(*) n FROM connections WHERE host_id=?", gated))["n"]
+        check("conexiunile hostului şterse (fără orfani)", n == 0, str(n))
+
+        # ── funcţii pure: comanda per-politică şi validarea ──────────────────────
+        stored_cmd = api._connection_command({"engine": "postgres", "target_host": "h", "target_port": 5432,
+                                              "username": "u", "dbname": "d", "cred_policy": "stored"})
+        check("`stored`: fără fallback la shell (client lipsă → sesiunea se încheie)",
+              "${SHELL" not in stored_cmd and "exit 0" in stored_cmd, stored_cmd)
+        ask_cmd = api._connection_command({"engine": "postgres", "target_host": "h", "target_port": 5432,
+                                          "username": "u", "dbname": "d", "cred_policy": "ask"})
+        check("`ask`: păstrează shell-ul (util ca să instalezi clientul)", "${SHELL" in ask_cmd, ask_cmd)
+
+        def _bad(policy, **kw):
+            body = api.ConnectionIn(label="x", engine=kw.get("engine", "postgres"),
+                                    target_host=kw.get("target_host", "h"),
+                                    target_port=kw.get("target_port", 5432),
+                                    cred_policy=policy)
+            try:
+                api._validate_connection(body); return None
+            except api.ApiError as e:
+                return e.code
+        check("redis + stored respins (fără prompt de parolă)",
+              _bad("stored", engine="redis") == "connection.noStoredRedis")
+        check("engine necunoscut respins", _bad("ask", engine="nu-exista") == "connection.badEngine")
+        check("host cu metacaractere respins", _bad("ask", target_host="h;rm -rf") == "connection.badField")
+        check("port invalid respins", _bad("ask", target_port=99999) == "connection.badPort")
+        check("politică necunoscută respinsă", _bad("nope") == "connection.badPolicy")
+
     print(f"\n{ok}/{total} teste trecute")
     return ok == total
 

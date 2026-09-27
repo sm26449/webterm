@@ -2764,6 +2764,13 @@ def _connection_command(row) -> str:
     else:  # redis
         parts = ["redis-cli", "-h", q(h), "-p", str(p)] + (["-n", q(db)] if db and db.isdigit() else [])
     inner = " ".join(parts)
+    # Pt. `stored`: dacă clientul lipseşte NU cădem într-un shell interactiv — agentul are `pw` armat
+    # 15s, iar un shell în care userul tastează poate produce output cu "password:" (ex. `sudo`) →
+    # injecţie greşită, posibil în transcript. Fără client => mesaj + sesiunea se încheie (pw nu se
+    # injectează niciodată într-un shell). Pt. `ask` (fără parolă) păstrăm shell-ul, util ca să instaleze clientul. (audit v53)
+    if (row["cred_policy"] or "ask") == "stored":
+        return ('command -v %s >/dev/null 2>&1 || { printf "\\n[WebTerm] %s is not installed on this host.\\n\\n"; '
+                'exit 0; }; exec %s') % (q(eng["bin"]), eng["bin"], inner)
     return ('command -v %s >/dev/null 2>&1 || { printf "\\n[WebTerm] %s is not installed on this host.\\n\\n"; '
             'exec "${SHELL:-/bin/sh}"; }; exec %s') % (q(eng["bin"]), eng["bin"], inner)
 
@@ -2776,6 +2783,9 @@ class ConnectionIn(BaseModel):
     username: str = ""
     dbname: str = ""
     cred_policy: str = "ask"
+    credential: str = ""      # write-only; doar pt. `stored`. Gol la editare = păstrează ce e stocat.
+    stepup_grant: str = ""    # 2FA: orice mutaţie pe host require_2fa cere step-up (H1) — vezi audit v53
+    stepup_password: str = ""
 
 
 def _validate_connection(body: ConnectionIn) -> None:
@@ -2788,11 +2798,11 @@ def _validate_connection(body: ConnectionIn) -> None:
             raise ApiError(400, "connection.badField", "host/user/db: letters, digits and . _ - only")
     if body.target_port is not None and not (0 < int(body.target_port) <= 65535):
         raise ApiError(400, "connection.badPort", "invalid port")
-    if body.cred_policy not in ("ask", "stored", "ephemeral"):
+    if body.cred_policy not in ("ask", "stored"):
         raise ApiError(400, "connection.badPolicy", "unknown credential policy")
-    if body.cred_policy == "stored":
-        # slice 1 nu stochează încă secrete (mecanismul sigur de env pe agent = slice 2/v53)
-        raise ApiError(400, "connection.storedSoon", "stored credentials arrive in a later release; use 'ask' for now")
+    if body.cred_policy == "stored" and body.engine == "redis":
+        # redis-cli n-are prompt de parolă → injecţia în PTY n-are unde să intre. Rămâne pe `ask`.
+        raise ApiError(400, "connection.noStoredRedis", "redis has no password prompt — use 'ask'")
 
 
 @router.get("/api/hosts/{host_id}/connections")
@@ -2805,12 +2815,17 @@ async def list_connections(host_id: int, user=Depends(security.require_user)):
 async def create_connection(host_id: int, body: ConnectionIn, user=Depends(security.require_user)):
     if not await db.fetchone("SELECT id FROM hosts WHERE id=?", host_id):
         raise HTTPException(404)
+    # H1: o conexiune `stored` ţine o parolă DB care poate fi exfiltrată redirectând target_host →
+    # pe host-uri 2FA orice mutaţie CRUD trebuie să coste un factor (ca /forwards, /run). audit v53.
+    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
     _validate_connection(body)
+    # `stored` → parola criptată în vault (acelaşi mecanism ca la SSH). `ask` → nimic stocat.
+    blob = security.encrypt_secret(body.credential) if (body.cred_policy == "stored" and body.credential) else None
     cid = await db.execute(
         "INSERT INTO connections(host_id, label, engine, target_host, target_port, username,"
-        " dbname, cred_policy, created) VALUES(?,?,?,?,?,?,?,?,?)",
+        " dbname, cred_policy, credential_encrypted, created) VALUES(?,?,?,?,?,?,?,?,?,?)",
         host_id, body.label.strip()[:80], body.engine, body.target_host.strip(), body.target_port,
-        body.username.strip(), body.dbname.strip(), body.cred_policy, time.time())
+        body.username.strip(), body.dbname.strip(), body.cred_policy, blob, time.time())
     return _connection_json(await db.fetchone("SELECT * FROM connections WHERE id=?", cid))
 
 
@@ -2819,17 +2834,27 @@ async def update_connection(host_id: int, conn_id: int, body: ConnectionIn,
                             user=Depends(security.require_user)):
     if not await db.fetchone("SELECT id FROM connections WHERE id=? AND host_id=?", conn_id, host_id):
         raise HTTPException(404)
+    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)   # H1 (audit v53)
     _validate_connection(body)
     await db.execute(
         "UPDATE connections SET label=?, engine=?, target_host=?, target_port=?, username=?,"
         " dbname=?, cred_policy=? WHERE id=? AND host_id=?",
         body.label.strip()[:80], body.engine, body.target_host.strip(), body.target_port,
         body.username.strip(), body.dbname.strip(), body.cred_policy, conn_id, host_id)
+    # parola: gol la editare = păstrează ce e stocat; setată = re-criptează; trecerea la `ask`
+    # şterge secretul stocat (nu ţinem o parolă pentru o conexiune care nu o mai foloseşte).
+    if body.cred_policy != "stored":
+        await db.execute("UPDATE connections SET credential_encrypted=NULL WHERE id=?", conn_id)
+    elif body.credential:
+        await db.execute("UPDATE connections SET credential_encrypted=? WHERE id=?",
+                         security.encrypt_secret(body.credential), conn_id)
     return _connection_json(await db.fetchone("SELECT * FROM connections WHERE id=?", conn_id))
 
 
 @router.delete("/api/hosts/{host_id}/connections/{conn_id}")
-async def delete_connection(host_id: int, conn_id: int, user=Depends(security.require_user)):
+async def delete_connection(host_id: int, conn_id: int, stepup_grant: str = "",
+                            stepup_password: str = "", user=Depends(security.require_user)):
+    await _require_host_stepup(host_id, user, stepup_grant, stepup_password)   # H1 (audit v53)
     await db.execute("DELETE FROM connections WHERE id=? AND host_id=?", conn_id, host_id)
     return {"ok": True}
 
@@ -4187,6 +4212,11 @@ async def delete_host(host_id: int, user=Depends(security.require_user)):
             await conn.disconnect()
         except Exception:
             pass
+    # Conexiunile (unele `stored`, cu parolă DB criptată) NU cad automat: PRAGMA foreign_keys nu e
+    # setat, deci FOREIGN KEY ... ON DELETE CASCADE e inactiv. Le ştergem explicit — altfel, cum
+    # id-urile de host se reutilizează (INTEGER PRIMARY KEY fără AUTOINCREMENT), un host nou ar
+    # moşteni credenţiale stocate ale celui vechi. audit v53.
+    await db.execute("DELETE FROM connections WHERE host_id=?", host_id)
     await db.execute("DELETE FROM hosts WHERE id=?", host_id)
     return {"ok": True}
 
@@ -4233,6 +4263,7 @@ async def uninstall_host(host_id: int, force: bool = False,
             await c.disconnect()
         except Exception:
             pass
+    await db.execute("DELETE FROM connections WHERE host_id=?", host_id)   # audit v53: vezi delete_host
     await db.execute("DELETE FROM hosts WHERE id=?", host_id)
     return {"ok": True, "uninstalled": uninstalled, "warnings": warnings}
 
@@ -4438,6 +4469,7 @@ async def create_session(host_id: int, body: SessionIn, request: Request,
                 top = max(top, int(m.group(1)))
         title = f"Session {top + 1}"
     cmd = None
+    db_pw = None   # parola unei conexiuni `stored` — injectată de agent în PTY la prompt (v53)
     if body.docker_container:
         # shell ÎN container: sesiunea rulează `docker exec` în loc de shell-ul de login.
         # Doar host-uri de agent (docker e local pe host). Id-ul de container e validat strict.
@@ -4508,10 +4540,15 @@ async def create_session(host_id: int, body: SessionIn, request: Request,
         if not conn:
             raise HTTPException(404, "connection not found")
         cmd = _connection_command(conn)
+        # `stored`: decriptăm parola din vault şi o dăm agentului (canal WS criptat); el o injectează
+        # în stdin-ul PTY la promptul „password" — nu atinge argv/env/ps/transcript. Citirea
+        # secretului pe un host 2FA e deja păzită de step-up-ul de sesiune (verificat mai sus).
+        if (conn["cred_policy"] or "ask") == "stored" and conn["credential_encrypted"]:
+            db_pw = security.decrypt_secret(conn["credential_encrypted"])
         if not title.strip() or title.startswith("Session "):
             title = "%s: %s" % (conn["engine"], conn["label"][:32])
     try:
-        result = await core.create_session(host_id, title, body.rows, body.cols, body.tz, cmd)
+        result = await core.create_session(host_id, title, body.rows, body.cols, body.tz, cmd, db_pw)
     except core.AgentGone:
         raise ApiError(409, "host.offline", "the host is offline (the agent is not connected)")
     except core.SessionLimitReached:

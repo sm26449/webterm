@@ -242,6 +242,38 @@ async def main():
             _ptyd.Agent.handle_ctrl(snkw, {"op": "wake", "mac": 123, "id": 77})
             check("wake cu mac=număr → wake_error (nu internal), v52",
                   snkw.r[-1].get("code") == "wake_error", str(snkw.r[-1]))
+            # v53: injecţia parolei `stored` în PTY — o singură dată la promptul „password",
+            # cu deadline; NU orbeşte, NU re-injectează, se şterge după (nu în argv/transcript).
+            import time as _time
+            sess = _ptyd.Session("cnxhex01", 24, 80, "xterm", pw="s3cret")
+            check("Session.pw → bytes + deadline setat", sess.pw == b"s3cret" and sess.pw_deadline > 0)
+            # guard de TIP (audit v53): un gateway buggy care trimite un non-str/bytes NU trebuie să
+            # armeze pw → altfel `pw + b"\n"` ar arunca TypeError şi ar crăpa bucla reader pe flotă.
+            check("pw int → None (fără deadline), nu crash",
+                  _ptyd.Session("t", 24, 80, "xterm", pw=12345).pw is None
+                  and _ptyd.Session("t", 24, 80, "xterm", pw=12345).pw_deadline == 0)
+            check("pw None → None (fără injecţie armată)", _ptyd.Session("t", 24, 80, "xterm").pw is None)
+            check("pw bytes → păstrat ca bytes", _ptyd.Session("t", 24, 80, "xterm", pw=b"raw").pw == b"raw")
+
+            class _InjSink:
+                def __init__(self): self.calls = []
+                def write_input(self, sid, data): self.calls.append((sid, data))
+            inj = _InjSink()
+            _ptyd.Agent._maybe_inject_pw(inj, sess, b"psql (16)\nType help.\n")
+            check("fără prompt → NU injectează", inj.calls == [] and sess.pw == b"s3cret")
+            # cuvântul „password" FĂRĂ formă de prompt (banner/MOTD) → NU injectează (anti-leak)
+            _ptyd.Agent._maybe_inject_pw(inj, sess, b"note: change your password soon\n")
+            check("cuvant 'password' fara colon (banner) -> NU injecteaza", inj.calls == [] and sess.pw == b"s3cret")
+            _ptyd.Agent._maybe_inject_pw(inj, sess, b"Password: ")
+            check("la prompt real → injectează pw+\\n O DATĂ şi uită parola",
+                  inj.calls == [("cnxhex01", b"s3cret\n")] and sess.pw is None)
+            _ptyd.Agent._maybe_inject_pw(inj, sess, b"Password: ")
+            check("nu re-injectează după ce parola e consumată", len(inj.calls) == 1)
+            sess2 = _ptyd.Session("cnxhex02", 24, 80, "xterm", pw="x")
+            sess2.pw_deadline = _time.time() - 1
+            inj2 = _InjSink(); _ptyd.Agent._maybe_inject_pw(inj2, sess2, b"Password: ")
+            check("deadline expirat → renunţă, nu scrie parola orbeşte",
+                  inj2.calls == [] and sess2.pw is None)
         except Exception as e:                       # noqa: BLE001
             check("send_magic_packet importabil din agent", False, str(e))
 

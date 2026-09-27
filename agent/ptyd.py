@@ -43,7 +43,7 @@ import termios
 import threading
 import time
 
-AGENT_VERSION = 52
+AGENT_VERSION = 53
 
 # Sub atâtea secunde de valabilitate, un certificat se roteşte prea des ca un pin pe el să
 # însemne altceva decât o cădere programată. 48h: peste ce emite un CA intern (12h la Caddy),
@@ -1153,7 +1153,7 @@ class WSClient:
 # ---------------------------------------------------------------------------
 
 class Session:
-    def __init__(self, sid, rows, cols, term, cmd=None, backend="pty", tz=None):
+    def __init__(self, sid, rows, cols, term, cmd=None, backend="pty", tz=None, pw=None):
         self.sid = sid
         self.rows = rows
         self.cols = cols
@@ -1161,6 +1161,20 @@ class Session:
         self.cmd = cmd
         self.backend = backend        # "tmux" or "pty"
         self.tz = tz                  # TZ pentru shell (ex. "Europe/Bucharest")
+        # `pw` (v53): parola unei conexiuni DB `stored`. O injectăm O SINGURĂ dată în stdin-ul
+        # PTY când clientul afişează promptul „password" (echo-off → NU ajunge în transcript),
+        # apoi o ştergem. Nu atinge argv/env/ps/fişiere. Deadline scurt: dacă promptul nu apare,
+        # renunţăm (nu scriem parola orbeşte). `pw` e bytes.
+        # guard de TIP: doar str/bytes devin parolă. Un gateway buggy/ostil care trimite un NUMĂR
+        # (sau alt tip) nu trebuie să ajungă la `pw + b"\n"` → TypeError → crash-ul buclei reader pe
+        # toată flota. Orice altceva = None (ignorat), apărare în adâncime pt. cod semnat (audit v53).
+        if isinstance(pw, str):
+            self.pw = pw.encode()
+        elif isinstance(pw, (bytes, bytearray)):
+            self.pw = bytes(pw)
+        else:
+            self.pw = None
+        self.pw_deadline = (time.time() + 15) if self.pw else 0
         self.created = time.time()
         self.last_output = self.created
         self.exited_at = None
@@ -2000,7 +2014,7 @@ class Agent:
                     return err("limit")
                 s = Session(sid, int(msg.get("rows", 24)), int(msg.get("cols", 80)),
                             msg.get("term", "xterm-256color"), msg.get("cmd"),
-                            backend=self.backend, tz=msg.get("tz"))
+                            backend=self.backend, tz=msg.get("tz"), pw=msg.get("pw"))
                 self.sessions[sid] = s
                 self.sel.register(s.master, selectors.EVENT_READ, ("pty", sid))
                 ok(pid=s.pid, stream_offset=0, backend=s.backend)
@@ -2566,10 +2580,30 @@ class Agent:
                 return
         if data:
             s.append_output(data)
+            if s.pw:
+                self._maybe_inject_pw(s, data)
             if s.attached and self.connected:
                 self.send_data(sid, data)
         else:
             self._session_exited(s)
+
+    def _maybe_inject_pw(self, s, data):
+        """Conexiune DB `stored`: injectăm parola O SINGURĂ dată când clientul cere-o („password"
+        în output), apoi o uităm. Promptul e echo-off, deci parola NU apare în output/transcript.
+        Dacă promptul nu apare în fereastra de deadline, renunţăm — nu scriem parola orbeşte."""
+        if not s.pw:
+            return
+        if time.time() > s.pw_deadline:
+            s.pw = None
+            return
+        # Match STRICT pe FORMA de prompt, nu pe orice „password": un banner/MOTD/rezultat care
+        # conţine cuvântul ar declanşa altfel injecţia în locul greşit (parola tastată într-un shell
+        # activ → echo/execuţie → leak). Prompturile reale au „password:" sau „password for …:"
+        # (psql „Password: ", mysql/mongosh „Enter password: ", clickhouse „Password for default:").
+        low = data.lower()
+        if b"password:" in low or b"password for" in low:
+            self.write_input(s.sid, s.pw + b"\n")
+            s.pw = None
 
     def _session_exited(self, s):
         try:

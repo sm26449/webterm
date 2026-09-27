@@ -1152,7 +1152,7 @@ function MainApp() {
         </Suspense>
       )}
       {toolboxHost && (
-        <ToolboxPanel host={toolboxHost} overlay onClose={() => setToolboxHost(null)}
+        <ToolboxPanel key={toolboxHost.id} host={toolboxHost} overlay onClose={() => setToolboxHost(null)}
           onOpen={(h, cid) => { setToolboxHost(null); openConnection(h, cid) }} />
       )}
       {serialHost && (

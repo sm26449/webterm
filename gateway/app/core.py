@@ -1414,12 +1414,14 @@ class AgentConnection(SessionSource):
             self._pending.pop(rid, None)
 
     # -- SessionSource interface (delegates to the agent's control channel) ----
-    async def create(self, sid, rows, cols, term, tz=None, cmd=None) -> dict:
+    async def create(self, sid, rows, cols, term, tz=None, cmd=None, pw=None) -> dict:
         fields = dict(sid=sid, rows=rows, cols=cols, term=term)
         if tz:
             fields["tz"] = tz
         if cmd:                       # „shell în container" etc. — agentul rulează cmd în tmux
             fields["cmd"] = cmd
+        if pw:                        # conexiune DB `stored`: agentul o injectează în PTY la prompt
+            fields["pw"] = pw         # (canal WS criptat; nu ajunge în argv/env/ps/transcript)
         return await self.request("create", **fields)
 
     async def attach(self, sid, from_offset) -> dict:
@@ -2301,7 +2303,8 @@ def search_transcripts(rows, query: str):
 
 
 async def create_session(host_id: int, title: str, rows: int = 24, cols: int = 80,
-                         tz: Optional[str] = None, cmd: Optional[str] = None) -> dict:
+                         tz: Optional[str] = None, cmd: Optional[str] = None,
+                         pw: Optional[str] = None) -> dict:
     source = source_for(host_id)
     if source is None:
         raise AgentGone("host offline")
@@ -2314,7 +2317,7 @@ async def create_session(host_id: int, title: str, rows: int = 24, cols: int = 8
         # `cmd` (opţional): sesiunea rulează comanda asta în loc de shell-ul de login — folosit
         # pentru „shell în container" (docker exec). Agentul o rulează ÎN tmux, deci persistă şi
         # se re-ataşează la deconectare, ca orice sesiune. Doar calea de agent îl onorează.
-        resp = await source.create(sid, rows, cols, "xterm-256color", tz, cmd)
+        resp = await source.create(sid, rows, cols, "xterm-256color", tz, cmd, pw)
     except Exception:
         # agentul a căzut / timeout FIX în timpul create → rândul rămânea 'creating'
         # pentru totdeauna (delete-ul îl refuză cu 409, reconcile/reaper îl sar). Curăță.
@@ -2395,7 +2398,7 @@ class ForwardTelnetSource(SessionSource):
         self.redact_input = False
         self._pw_tail = b""      # coada recentă de output, pt. prompt tăiat între recv-uri
 
-    async def create(self, sid, rows, cols, term, tz=None, cmd=None) -> dict:  # cmd: doar agentul îl foloseşte
+    async def create(self, sid, rows, cols, term, tz=None, cmd=None, pw=None) -> dict:  # cmd/pw: doar agentul le foloseşte
         try:
             self._fs = await self._agent.open_forward(self._thost, self._tport)
         except ForwardError as e:
@@ -2534,7 +2537,7 @@ class ForwardSerialSource(SessionSource):
         self.redact_input = False
         self._pw_tail = b""
 
-    async def create(self, sid, rows, cols, term, tz=None, cmd=None) -> dict:  # cmd: doar agentul îl foloseşte
+    async def create(self, sid, rows, cols, term, tz=None, cmd=None, pw=None) -> dict:  # cmd/pw: doar agentul le foloseşte
         p = self._params
         try:
             self._fs = await self._agent.open_serial(
@@ -2815,7 +2818,7 @@ class SshSource(SessionSource):
         self._forwards: Set["SshForwardStream"] = set()   # forward-uri active (țin conexiunea vie)
         self._idle_task: Optional[asyncio.Task] = None
 
-    async def create(self, sid, rows, cols, term, tz=None, cmd=None) -> dict:  # cmd: doar agentul îl foloseşte
+    async def create(self, sid, rows, cols, term, tz=None, cmd=None, pw=None) -> dict:  # cmd/pw: doar agentul le foloseşte
         tmux = "wt-" + sid[:16]
         # tmux dacă există (persistență la re-conectare), altfel shell de login
         cmd = ("command -v tmux >/dev/null && exec tmux new -A -s %s "
@@ -3010,7 +3013,7 @@ class TelnetSource(SessionSource):
         # (nu mai înregistrăm evenimente „i" deloc — vezi handle_input).
         self._osc = telnet.OscFilter()
 
-    async def create(self, sid, rows, cols, term, tz=None, cmd=None) -> dict:  # cmd: doar agentul îl foloseşte
+    async def create(self, sid, rows, cols, term, tz=None, cmd=None, pw=None) -> dict:  # cmd/pw: doar agentul le foloseşte
         # telnet direct = O conexiune per host, O sesiune (share acelaşi StreamReader). O a doua
         # sesiune ar porni un al doilea _pump pe acelaşi reader → citiri concurente, o coroutină
         # eşuează şi ar închide conexiunea comună + prima sesiune. Refuzăm a doua.

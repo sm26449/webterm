@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { errText, api, ApiError, Connection, Host } from '../lib/api'
+import { errText, api, ApiError, Connection, Host, withStepup } from '../lib/api'
 import { copyText } from '../lib/clipboard'
 import { useI18n } from '../lib/i18n'
 import { TerminalPromptIcon, PlusIcon, TrashIcon, PencilIcon, CopyIcon } from './Icons'
@@ -39,10 +39,10 @@ const LIBRARY: { cat: string; items: { label: string; cmd: string }[] }[] = [
 ]
 type Hist = { id: number; command: string; cwd: string; exit_code: number | null; created: number }
 
-// Toolbox: lansatoare de conexiuni DB. O conexiune salvată → un click deschide o sesiune care
-// rulează CLI-ul potrivit pe host (psql/mysql/mongosh/clickhouse-client/redis-cli), cu ţinta
-// pre-completată. Slice 1: politica `ask` (clientul cere parola — zero secrete stocate).
-// (Tab-urile Library/History vin în felii ulterioare.)
+// Toolbox: 3 tab-uri. Connections = lansatoare de conexiuni DB (un click → o sesiune care rulează
+// CLI-ul potrivit pe host: psql/mysql/mongosh/clickhouse-client/redis-cli, cu ţinta pre-completată;
+// politica `ask` = clientul cere parola, `stored` = parola criptată în vault, injectată o dată în
+// promptul PTY de agent). Library = reţete built-in (Copy). History = comenzile hostului (OSC 133, Copy).
 const ENGINES: { id: Connection['engine']; label: string; color: string; port: number }[] = [
   { id: 'postgres', label: 'PostgreSQL', color: '#6bb2f0', port: 5432 },
   { id: 'mysql', label: 'MySQL / MariaDB', color: '#e0b063', port: 3306 },
@@ -53,7 +53,7 @@ const ENGINES: { id: Connection['engine']; label: string; color: string; port: n
 const engOf = (e: string) => ENGINES.find((x) => x.id === e)
 
 type Draft = { id?: number; label: string; engine: Connection['engine']; target_host: string
-  target_port: string; username: string; dbname: string; cred_policy: 'ask' }
+  target_port: string; username: string; dbname: string; cred_policy: 'ask' | 'stored'; credential: string }
 
 export default function ToolboxPanel(props: {
   host: Host; onClose: () => void; overlay?: boolean
@@ -95,23 +95,29 @@ export default function ToolboxPanel(props: {
   async function save(d: Draft) {
     const body = { label: d.label, engine: d.engine, target_host: d.target_host,
       target_port: d.target_port ? Number(d.target_port) : null,
-      username: d.username, dbname: d.dbname, cred_policy: 'ask' }
+      username: d.username, dbname: d.dbname,
+      cred_policy: d.engine === 'redis' ? 'ask' : d.cred_policy,
+      // redis n-are `stored` (fără prompt) → nu trimite parola chiar dacă draftul o poartă dintr-un engine anterior
+      credential: (d.engine !== 'redis' && d.cred_policy === 'stored') ? d.credential : '' }
     try {
-      await api(`/api/hosts/${props.host.id}/connections${d.id ? '/' + d.id : ''}`,
-        { method: d.id ? 'PATCH' : 'POST', body: JSON.stringify(body) })
+      // pe host-uri 2FA orice mutaţie CRUD cere step-up (backend H1); withStepup rulează ceremonia şi
+      // reîncearcă. Pe host-uri fără 2FA e transparent (fn() reuşeşte din prima).
+      await withStepup(props.host.id, () => api(`/api/hosts/${props.host.id}/connections${d.id ? '/' + d.id : ''}`,
+        { method: d.id ? 'PATCH' : 'POST', body: JSON.stringify(body) }))
       setEdit(null); await load()
     } catch (e) { setError(errText(e, t) || (e instanceof ApiError ? e.message : t('toolbox.error'))) }
   }
   async function del(c: Connection) {
     if (!confirm(t('toolbox.confirmDelete', { label: c.label }))) return
-    try { await api(`/api/hosts/${props.host.id}/connections/${c.id}`, { method: 'DELETE' }); await load() }
+    try { await withStepup(props.host.id, () => api(`/api/hosts/${props.host.id}/connections/${c.id}`, { method: 'DELETE' })); await load() }
     catch (e) { setError(errText(e, t) || t('toolbox.error')) }
   }
   const blank = (): Draft => ({ label: '', engine: 'postgres', target_host: '', target_port: '',
-    username: '', dbname: '', cred_policy: 'ask' })
+    username: '', dbname: '', cred_policy: 'ask', credential: '' })
   const toDraft = (c: Connection): Draft => ({ id: c.id, label: c.label, engine: c.engine,
     target_host: c.target_host, target_port: c.target_port ? String(c.target_port) : '',
-    username: c.username, dbname: c.dbname, cred_policy: 'ask' })
+    username: c.username, dbname: c.dbname,
+    cred_policy: c.cred_policy === 'stored' ? 'stored' : 'ask', credential: '' })
 
   return (
     <>
@@ -162,7 +168,7 @@ export default function ToolboxPanel(props: {
                   <div className="truncate font-mono text-[11px] text-slate-500">
                     {c.username ? c.username + '@' : ''}{c.target_host || 'localhost'}
                     {c.target_port ? ':' + c.target_port : ''}{c.dbname ? '/' + c.dbname : ''}
-                    <span className="ml-1 text-slate-600">· {t('toolbox.ask')}</span>
+                    <span className="ml-1 text-slate-600">· {c.cred_policy === 'stored' ? t('toolbox.stored') : t('toolbox.ask')}</span>
                   </div>
                 </button>
                 <div className="flex shrink-0 items-center gap-0.5 opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100">
@@ -254,7 +260,29 @@ export default function ToolboxPanel(props: {
                   <input value={edit.dbname} onChange={(ev) => setEdit({ ...edit, dbname: ev.target.value })}
                     className="w-full rounded bg-ink-800 px-2 py-1 font-mono text-[12px] text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" /></label>
               </div>
-              <p className="text-[11px] text-slate-500">{t('toolbox.askHint')}</p>
+              {edit.engine !== 'redis' && (
+                <label className="block">
+                  <span className="mb-0.5 block text-xs text-slate-400">{t('toolbox.fAuth')}</span>
+                  <select value={edit.cred_policy}
+                    onChange={(ev) => setEdit({ ...edit, cred_policy: ev.target.value as 'ask' | 'stored' })}
+                    className="w-full rounded bg-ink-800 px-2 py-1 text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500">
+                    <option value="ask">{t('toolbox.authAsk')}</option>
+                    <option value="stored">{t('toolbox.authStored')}</option>
+                  </select>
+                </label>
+              )}
+              {edit.engine !== 'redis' && edit.cred_policy === 'stored' && (
+                <label className="block">
+                  <span className="mb-0.5 block text-xs text-slate-400">{t('toolbox.fPassword')}</span>
+                  <input type="password" value={edit.credential} autoComplete="new-password"
+                    onChange={(ev) => setEdit({ ...edit, credential: ev.target.value })}
+                    placeholder={edit.id ? t('toolbox.pwKeep') : ''}
+                    className="w-full rounded bg-ink-800 px-2 py-1 font-mono text-[12px] text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" />
+                </label>
+              )}
+              <p className="text-[11px] text-slate-500">
+                {edit.engine !== 'redis' && edit.cred_policy === 'stored' ? t('toolbox.storedHint') : t('toolbox.askHint')}
+              </p>
             </div>
             <div className="mt-4 flex justify-end gap-2 text-sm">
               <button onClick={() => setEdit(null)} className="rounded px-3 py-1.5 text-slate-400 hover:bg-ink-800">{t('common.cancel')}</button>
