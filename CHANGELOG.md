@@ -7,6 +7,20 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [2.6.3] — 2026-09-27 · agent (52)
+
+Polish on the OS-updates feature. **No agent change** (still 52) — gateway + UI only.
+
+### Changed
+
+- **The updates badge is readable now.** It was a translucent 15%-opacity fill with pale text and
+  almost no contrast; it's now a solid amber pill (dark text) — red with white text when there are
+  security updates — matching the broadcast button's weight.
+- **"Upgrade in a terminal" on a host without sudo now shows what to do next.** Instead of a dead-end
+  "needs root" line, it lists the options and leaves the choice to you: run it yourself as root, or
+  grant the agent user passwordless sudo (with the exact `sudoers.d` command to copy) so the button
+  works next time. It runs nothing on its own and drops you into a shell.
+
 ## [2.6.2] — 2026-09-27 · agent (52)
 
 Follow-ups to the machine-management features, from continued testing. **This release updates the

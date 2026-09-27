@@ -4361,12 +4361,24 @@ async def create_session(host_id: int, body: SessionIn, request: Request,
         # hint-ul PRINTAT foloseşte tot `sudo sh -c '<base>'`: un `sudo %s` naiv ar da
         # `sudo apt-get update && apt-get upgrade` → sudo prinde doar `update`, iar `upgrade`
         # rulează neprivilegiat şi pică (audit 2026-09). Deci compunerea întreagă sub un singur sudo.
+        # Ramura de ghidare (nici root, nici sudo passwordless) NU rulează nimic — arată OPŢIUNILE
+        # şi lasă alegerea utilizatorului (raportat 2026-09): (a) rulează chiar el ca root, sau
+        # (b) acordă userului agentului sudo (comandă gata de copiat) ca butonul să meargă data
+        # viitoare. `echo`-uri, nu printf — evită dublul nivel de `%`. `exec $SHELL` doar aici.
         qbase = shlex.quote(base)
+        guide = (
+            'u=$(whoami); echo; '
+            'echo "[WebTerm] OS upgrade needs root. This agent runs as $u, without passwordless sudo."; '
+            'echo; echo "Your options — your call:"; '
+            'echo "  1) Run it now as root yourself:"; '
+            'echo "       sudo sh -c ' + qbase.replace('"', '\\"') + '"; '
+            'echo "  2) Or let this button work next time — grant the agent user sudo (as root):"; '
+            'echo "       echo \\"$u ALL=(ALL) NOPASSWD:ALL\\" | sudo tee /etc/sudoers.d/$u"; '
+            'echo "     (tighten it to just your package manager if you prefer)"; echo; '
+            'exec "${SHELL:-/bin/sh}"')
         sh = ('if [ "$(id -u)" = 0 ]; then %s; '
               'elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then sudo sh -c %s; '
-              'else printf "\\n[WebTerm] OS upgrade needs root. This agent runs as %%s, without '
-              'passwordless sudo.\\nRun it as root, or:\\n  sudo sh -c %s\\n\\n" "$(whoami)"; '
-              'exec "${SHELL:-/bin/sh}"; fi') % (base, qbase, qbase)
+              'else %s; fi') % (base, qbase, guide)
         cmd = "sh -c %s" % shlex.quote(sh)
         if not title.strip() or title.startswith("Session "):
             title = "OS upgrade (%s)" % mgr
