@@ -37,6 +37,10 @@ updates:
     ignore:
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
+      # @xterm/addon-* minorele vizează xterm 6.x şi RUP terminalul pe @xterm/xterm 5.5
+      # (TypeError _isDisposed, renderer WebGL mort — prins de e2e, 2026-09-27). Le blocăm
+      # de tot până facem upgrade-ul DELIBERAT la xterm 6, atunci scoatem linia asta.
+      - dependency-name: "@xterm/addon-*"
     open-pull-requests-limit: 5
     groups:
       npm-minor:
