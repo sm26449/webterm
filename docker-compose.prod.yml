@@ -40,7 +40,7 @@ services:
     # niciun container, deci nicio rută (404) și niciun certificat cerut.
     # Pinuit pe digest, ca Dockerfile-ul. Tag-ul rămâne în faţă doar ca etichetă lizibilă:
     # el se poate muta sub tine, digest-ul nu. Dependabot îl ridică la nevoie.
-    image: traefik:v3.7@sha256:9c3b91d5fb7770853ca5c1124a23c34bf2d9b47ffaebeab2614cbaf410dcb2ac
+    image: traefik:v3.7@sha256:24841fe2de7304c149343d877d2923b4c8800a38ba015dea9174c23b20e344a0
     restart: unless-stopped
     logging: *default-logging
     depends_on: [dockerproxy]
