@@ -39,7 +39,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Secret scan (gitleaks — working tree)
         run: |
           # blocks a PR that adds a real secret. Test fixtures (dummy passwords/tokens,
@@ -140,7 +140,7 @@ jobs:
       packages: write
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       # Update-urile de agent sunt semnate Ed25519, iar agenții refuză semnături
       # nevalide. Semnătura din repo a rămas odată nesincronizată luni de zile
@@ -249,7 +249,7 @@ jobs:
       # un Chromium headless care așteaptă window.__WT_BOOTED și pică la orice
       # eroare JS neprinsă (scripts/smoke-boot.mjs).
       - name: Build a local image for the smoke test
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           load: true
@@ -480,7 +480,7 @@ jobs:
             type=sha,format=short
 
       - name: Build & push
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           push: ${{ github.event_name != 'pull_request' }}   # pe PR doar construim (validare), nu publicăm
