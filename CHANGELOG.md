@@ -7,6 +7,25 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [2.6.4] — 2026-09-27 · agent (52)
+
+Dependency maintenance. **No agent change** (still 52). The dependabot group updates were applied
+onto current main and each verified, rather than merging the diverged auto-PRs.
+
+### Changed
+
+- **Frontend deps** bumped: CodeMirror 6.x, `@fontsource/jetbrains-mono`, `qrcode-generator`,
+  autoprefixer, postcss, typescript-eslint, eslint tooling. The `@xterm/addon-*` minor bumps were
+  **held back** — they target xterm 6.x and break the terminal on our xterm 5.5 (caught by e2e); they
+  wait for a deliberate xterm 6 upgrade.
+- **Gateway deps** bumped: FastAPI 0.139→0.141.1, uvicorn 0.50→0.52.4, cryptography 50.0.0→50.0.1;
+  `requirements.lock` regenerated with hashes (pip-audit clean, lock in sync).
+- **CI actions** (checkout, docker build-push) and the bundled **Authentik** image pin (2026.8.3)
+  bumped.
+
+Verified: full Playwright UI suite (e2e-session 79/79, axe 0 serious, FS API 35, features 8) and the
+gateway test suites pass on the new versions.
+
 ## [2.6.3] — 2026-09-27 · agent (52)
 
 Polish on the OS-updates feature. **No agent change** (still 52) — gateway + UI only.
