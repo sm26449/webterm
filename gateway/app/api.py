@@ -4351,8 +4351,13 @@ async def create_session(host_id: int, body: SessionIn, request: Request,
         # CONŞTIENT DE PRIVILEGII: instalarea implicită rulează ca userul dedicat `webterm`, FĂRĂ
         # sudo — un `sudo` fix îl bloca la un prompt de parolă imposibil (raportat 2026-09). Deci:
         # root → direct; sudo passwordless → sudo; altfel → mesaj clar cu comanda exactă (userul
-        # cu sudo-parolă o poate lipi şi tasta parola), NICIODATĂ un prompt agăţat. Apoi lăsăm un
-        # shell deschis ca terminalul să rămână util după upgrade/mesaj.
+        # cu sudo-parolă o poate lipi şi tasta parola), NICIODATĂ un prompt agăţat.
+        #
+        # `exec $SHELL` DOAR în ramura de ghidare — acolo ai nevoie de un shell ca să acţionezi.
+        # După un upgrade REUŞIT (root/sudo) sesiunea se ÎNCHEIE: terminalul e task-scoped, iar pe
+        # un host unde agentul e root un `exec $SHELL` lăsa un shell ROOT persistent după task
+        # (raportat 2026-09). Scrollback-ul rămâne vizibil oricum; pentru un shell obişnuit deschizi
+        # o sesiune normală.
         # hint-ul PRINTAT foloseşte tot `sudo sh -c '<base>'`: un `sudo %s` naiv ar da
         # `sudo apt-get update && apt-get upgrade` → sudo prinde doar `update`, iar `upgrade`
         # rulează neprivilegiat şi pică (audit 2026-09). Deci compunerea întreagă sub un singur sudo.
@@ -4360,8 +4365,8 @@ async def create_session(host_id: int, body: SessionIn, request: Request,
         sh = ('if [ "$(id -u)" = 0 ]; then %s; '
               'elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then sudo sh -c %s; '
               'else printf "\\n[WebTerm] OS upgrade needs root. This agent runs as %%s, without '
-              'passwordless sudo.\\nRun it as root, or:\\n  sudo sh -c %s\\n\\n" "$(whoami)"; fi; '
-              'exec "${SHELL:-/bin/sh}"') % (base, qbase, qbase)
+              'passwordless sudo.\\nRun it as root, or:\\n  sudo sh -c %s\\n\\n" "$(whoami)"; '
+              'exec "${SHELL:-/bin/sh}"; fi') % (base, qbase, qbase)
         cmd = "sh -c %s" % shlex.quote(sh)
         if not title.strip() or title.startswith("Session "):
             title = "OS upgrade (%s)" % mgr

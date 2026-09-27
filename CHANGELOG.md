@@ -7,6 +7,32 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [2.6.2] — 2026-09-27 · agent (52)
+
+Follow-ups to the machine-management features, from continued testing. **This release updates the
+agent (51 → 52)** — hosts update on reconnect (deferred while a host has open sessions).
+
+### Fixed
+
+- **The updates badge clears after you upgrade.** The agent's update count was cached for 6h, so the
+  sidebar badge lingered even once the host was up to date. An on-demand diagnostics refresh now
+  forces a fresh check (bypassing the cache), and finishing an "upgrade in a terminal" session
+  triggers that refresh automatically — the badge clears on its own.
+- **"Upgrade in a terminal" no longer leaves a lingering root shell.** After the upgrade (or the
+  guidance message on a host without sudo) the session ends instead of `exec`-ing a fresh login
+  shell — which, on a root agent, was an extra persistent root prompt. The scrollback stays
+  readable; open a normal session if you want a shell.
+- **dnf hosts can report "up to date".** The dnf update check now distinguishes 0 pending from a
+  failed check via the command's exit code (100 = updates, 0 = current), instead of showing nothing.
+- A non-numeric `WEBTERM_UPDATES_CHECK_SECS` no longer crashes the agent at startup (falls back to
+  the 6h default), and a Wake-on-LAN request with a numeric (not string) MAC/broadcast is reported
+  as a clean `wake_error` rather than an internal error.
+
+### Added
+
+- **Pending-updates badge on Arch, openSUSE and Alpine too** — the agent now also counts updates via
+  `checkupdates` (pacman), `zypper` and `apk`, not just apt/dnf.
+
 ## [2.6.1] — 2026-09-27 · agent (51)
 
 Fixes from a five-reviewer audit of the 2.6.0 machine-management features. **No agent change**

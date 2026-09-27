@@ -234,6 +234,14 @@ async def main():
                 try: _ptyd.send_magic_packet(*b_args)
                 except ValueError: bad = True
                 check("wake: %s → ValueError (v51)" % name, bad)
+            # v52: mac/broadcast trimise ca NUMĂR JSON → wake_error, nu „internal" (str() înainte de strip)
+            class _Sink:
+                def __init__(self): self.r = []
+                def send_ctrl(self, m): self.r.append(m)
+            snkw = _Sink()
+            _ptyd.Agent.handle_ctrl(snkw, {"op": "wake", "mac": 123, "id": 77})
+            check("wake cu mac=număr → wake_error (nu internal), v52",
+                  snkw.r[-1].get("code") == "wake_error", str(snkw.r[-1]))
         except Exception as e:                       # noqa: BLE001
             check("send_magic_packet importabil din agent", False, str(e))
 

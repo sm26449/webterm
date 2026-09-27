@@ -310,6 +310,10 @@ function MainApp() {
   // 5s poll returns identical data, so the whole fleet doesn't re-render idle.
   const lastHostsRef = useRef('')
   const lastSessionsRef = useRef('')
+  // sesiuni de „upgrade OS" urmărite: sid → {host, dacă a apucat să fie live}. Când una se
+  // încheie, cerem un refresh de diagnostics (forţează re-check-ul de update-uri pe agent v52)
+  // ca badge-ul din sidebar să dispară singur după upgrade.
+  const upgradeWatch = useRef<Map<string, { hostId: number; seen: boolean }>>(new Map())
 
   useEffect(() => {
     registerToast((message, kind) => {
@@ -458,6 +462,24 @@ function MainApp() {
       clearInterval(timer)
     }
   }, [appState?.authenticated, refresh])
+
+  // auto-clear al badge-ului de update-uri: când o sesiune de upgrade urmărită se încheie
+  // (state 'closed'/'lost'), cerem un refresh de diagnostics — pe agent v52 asta re-verifică
+  // update-urile ocolind cache-ul, deci numărul scade la 0 şi badge-ul dispare. `seen` evită
+  // cursa la creare (nu declanşăm înainte s-o fi văzut live măcar o dată).
+  useEffect(() => {
+    if (upgradeWatch.current.size === 0) return
+    for (const [sid, w] of [...upgradeWatch.current]) {
+      const s = sessions.find((x) => x.id === sid)
+      if (s && (s.state === 'live' || s.state === 'creating')) { w.seen = true; continue }
+      if (w.seen) {
+        upgradeWatch.current.delete(sid)
+        // step-up-ul deschis la lansarea upgrade-ului acoperă şi refresh-ul (fereastra de 5 min);
+        // dacă a expirat, 403-ul e prins şi tăcut — utilizatorul poate face Refresh manual
+        api(`/api/hosts/${w.hostId}/diagnostics/refresh`, { method: 'POST' }).then(refresh).catch(() => {})
+      }
+    }
+  }, [sessions, refresh])
 
   // acțiunile scurtăturilor, într-un singur loc (registrul le mapează pe taste).
   // Cele „de sesiune" trimit un eveniment pe care panoul ACTIV îl ascultă —
@@ -907,6 +929,10 @@ function MainApp() {
       const r = await api<{ id: string }>(`/api/hosts/${host.id}/sessions`, {
         method: 'POST', body: JSON.stringify(body),
       })
+      // urmărim sesiunea: când se încheie (upgrade-ul s-a terminat), cerem un refresh de
+      // diagnostics — care forţează re-verificarea update-urilor (agent v52) → badge-ul dispare
+      // singur, fără să aştepţi cache-ul de 6h. `seen` = a apucat să fie live (evită cursa la creare).
+      upgradeWatch.current.set(r.id, { hostId: host.id, seen: false })
       await refresh()
       openTab(r.id)
       navigate(r.id)

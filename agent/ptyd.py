@@ -43,7 +43,7 @@ import termios
 import threading
 import time
 
-AGENT_VERSION = 51
+AGENT_VERSION = 52
 
 # Sub atâtea secunde de valabilitate, un certificat se roteşte prea des ca un pin pe el să
 # însemne altceva decât o cădere programată. 48h: peste ce emite un CA intern (12h la Caddy),
@@ -802,17 +802,29 @@ def _diag_net():
 # Update-uri de OS în aşteptare — verificate RAR (managerul de pachete costă secunde; diagnosticele
 # curg des) şi ţinute în cache în proces. DOAR citire/simulare, niciodată instalare: instalarea e
 # treaba operatorului, într-un terminal (UI-ul deschide unul cu comanda potrivită). 0 = dezactivat.
-UPDATES_CHECK_SECS = int(os.environ.get("WEBTERM_UPDATES_CHECK_SECS", "21600") or 0)
+def _updates_check_secs():
+    # env greşit (ne-numeric) NU trebuie să dărâme agentul la import — mai devreme un `int()`
+    # neprotejat crăpa procesul înainte de orice handler (crash-loop). Fallback la default.
+    try:
+        return int(os.environ.get("WEBTERM_UPDATES_CHECK_SECS", "21600") or 0)
+    except (TypeError, ValueError):
+        return 21600
+
+
+UPDATES_CHECK_SECS = _updates_check_secs()
 _updates_cache = {"at": 0.0, "data": None}
 
 
-def _diag_updates():
+def _diag_updates(force=False):
+    """Update-uri OS în aşteptare, cache-uite în proces. `force=True` (refresh on-demand din UI,
+    sau după un „upgrade în terminal") OCOLEŞTE cache-ul, ca badge-ul să dispară imediat după ce
+    ai făcut upgrade — altfel rămânea numărul vechi până la 6h (raportat 2026-09)."""
     if UPDATES_CHECK_SECS <= 0:
         return None
     now = time.time()
-    if _updates_cache["at"] and now - _updates_cache["at"] < UPDATES_CHECK_SECS:
+    if not force and _updates_cache["at"] and now - _updates_cache["at"] < UPDATES_CHECK_SECS:
         return _updates_cache["data"]
-    _updates_cache["at"] = now          # şi la eşec: nu re-încercăm la fiecare push, ci peste 6h
+    _updates_cache["at"] = now          # şi la eşec: nu re-încercăm la fiecare push, ci peste TTL
     data = None
     if shutil.which("apt-get"):
         # simulare fără lock şi fără root; "Inst pkg (ver repo)" per pachet; repo-urile de
@@ -821,27 +833,49 @@ def _diag_updates():
         if out:
             inst = [ln for ln in out.splitlines() if ln.startswith("Inst ")]
             data = {"manager": "apt", "count": len(inst),
-                    "security": sum(1 for ln in inst if "-security" in ln),
-                    "checked": int(now)}
+                    "security": sum(1 for ln in inst if "-security" in ln), "checked": int(now)}
     elif shutil.which("dnf"):
-        # --cacheonly: fără reţea (metadata poate fi uşor veche — acceptabil pentru un badge).
-        # check-update iese cu 100 când există update-uri; _diag_run întoarce "" pe non-zero,
-        # aşa că rulăm prin sh şi normalizăm exit-ul. Linii de pachet: "nume.arch  ver  repo".
-        out = _diag_run(["sh", "-c", "dnf -q --cacheonly check-update 2>/dev/null; true"],
+        # check-update iese cu 100 când există update-uri, 0 când e la zi → distingem prin exit-ul
+        # explicit (`echo RC=$?`), altfel „0 update-uri" era indistinct de „check eşuat" (audit).
+        out = _diag_run(["sh", "-c", "dnf -q --cacheonly check-update 2>/dev/null; echo RC=$?"],
                         timeout=30)
-        if out:
+        rc = None
+        for ln in out.splitlines():
+            if ln.startswith("RC="):
+                try: rc = int(ln[3:])
+                except ValueError: pass
+        if rc in (0, 100):      # a rulat (0=la zi, 100=există update-uri); orice altceva = eşec → None
             pkgs = [ln for ln in out.splitlines()
-                    if ln and not ln[0].isspace() and len(ln.split()) == 3]
+                    if ln and not ln[0].isspace() and not ln.startswith("RC=") and len(ln.split()) == 3]
             data = {"manager": "dnf", "count": len(pkgs), "security": None, "checked": int(now)}
+    elif shutil.which("zypper"):
+        # `zypper -x lu` = XML; numărăm elementele <package> fără a depinde de un parser XML
+        out = _diag_run(["zypper", "--non-interactive", "-x", "list-updates"], timeout=30)
+        if out and "<stream>" in out:
+            data = {"manager": "zypper", "count": out.count("<package "),
+                    "security": None, "checked": int(now)}
+    elif shutil.which("checkupdates"):      # Arch: pacman-contrib, sigur (nu atinge baza de date)
+        out = _diag_run(["checkupdates"], timeout=30)
+        # checkupdates iese cu 2 şi stdout gol când e la zi → _diag_run dă "" (tratat drept 0)
+        data = {"manager": "pacman", "count": len([l for l in out.splitlines() if l.strip()]),
+                "security": None, "checked": int(now)}
+    elif shutil.which("apk"):
+        out = _diag_run(["apk", "version", "-l", "<"], timeout=30)
+        # prima linie e un antet („Installed:…"); pachetele urmează
+        lines = [l for l in out.splitlines() if l.strip()]
+        data = {"manager": "apk", "count": max(0, len(lines) - 1) if lines else 0,
+                "security": None, "checked": int(now)}
     _updates_cache["data"] = data
     return data
 
 
-def collect_diagnostics():
-    """Snapshot complet, best-effort. Nu aruncă niciodată — pe un câmp căzut întoarce ce are."""
+def collect_diagnostics(force_updates=False):
+    """Snapshot complet, best-effort. Nu aruncă niciodată — pe un câmp căzut întoarce ce are.
+    `force_updates` propagă la _diag_updates (refresh on-demand ocoleşte cache-ul de update-uri)."""
     snap = {"collected_at": int(time.time())}
     for key, fn in (("system", _diag_system), ("cpu", _diag_cpu), ("memory", _diag_mem),
-                    ("storage", _diag_storage), ("network", _diag_net), ("updates", _diag_updates)):
+                    ("storage", _diag_storage), ("network", _diag_net),
+                    ("updates", lambda: _diag_updates(force=force_updates))):
         try:
             snap[key] = fn()
         except Exception:      # noqa: BLE001 — diagnosticul nu are voie să doboare agentul
@@ -1917,9 +1951,11 @@ class Agent:
 
     def _push_diag(self, rid=None):
         """Colectează snapshot-ul (pe acest thread worker — poate apela `ip`) şi-l trimite:
-        ca RĂSPUNS on-demand dacă avem `rid`, altfel ca eveniment de push (connect/orar)."""
+        ca RĂSPUNS on-demand dacă avem `rid`, altfel ca eveniment de push (connect/orar).
+        On-demand (rid prezent = butonul Refresh sau auto-clear după upgrade) forţează
+        re-verificarea update-urilor, ocolind cache-ul de 6h; push-ul orar foloseşte cache-ul."""
         try:
-            snap = collect_diagnostics()
+            snap = collect_diagnostics(force_updates=rid is not None)
         except Exception:      # noqa: BLE001 — best-effort; un snapshot ratat nu doboară nimic
             snap = {"collected_at": int(time.time())}
         if rid is not None:
@@ -2298,8 +2334,11 @@ class Agent:
                 # tot parsingul stă în try: un port ne-numeric e tot o eroare de wake
                 # (wake_error, cu mesaj), nu un bad_request generic (v51)
                 try:
-                    ok(sent=send_magic_packet((msg.get("mac") or "").strip(),
-                                              (msg.get("broadcast") or "255.255.255.255").strip(),
+                    # str(...) înainte de strip: dacă gateway-ul trimite mac/broadcast ca NUMĂR
+                    # JSON, `.strip()` ar arunca AttributeError (etichetat „internal"); acum e
+                    # tot wake_error (v52)
+                    ok(sent=send_magic_packet(str(msg.get("mac") or "").strip(),
+                                              str(msg.get("broadcast") or "255.255.255.255").strip(),
                                               msg.get("port") or 9))
                 except (ValueError, TypeError, OSError) as e:
                     err("wake_error", str(e))
