@@ -1,7 +1,43 @@
 import { useCallback, useEffect, useState } from 'react'
 import { errText, api, ApiError, Connection, Host } from '../lib/api'
+import { copyText } from '../lib/clipboard'
 import { useI18n } from '../lib/i18n'
-import { RefreshIcon, TerminalPromptIcon, PlusIcon, TrashIcon, PencilIcon } from './Icons'
+import { TerminalPromptIcon, PlusIcon, TrashIcon, PencilIcon, CopyIcon } from './Icons'
+
+// Bibliotecă de reţete built-in (client-side): comenzi comune pe categorii, cu {placeholder}-e.
+// Acţiunea e Copy (universal — merge şi din pagina hostului, şi din sesiune); lipeşti în terminal.
+const LIBRARY: { cat: string; items: { label: string; cmd: string }[] }[] = [
+  { cat: 'git', items: [
+    { label: 'status', cmd: 'git status' },
+    { label: 'log grafic', cmd: 'git log --oneline --graph --decorate -20' },
+    { label: 'pull --rebase', cmd: 'git pull --rebase' },
+    { label: 'branch nou', cmd: 'git checkout -b {branch}' },
+    { label: 'stash', cmd: 'git stash' },
+  ] },
+  { cat: 'docker', items: [
+    { label: 'ps', cmd: 'docker ps -a' },
+    { label: 'logs -f', cmd: 'docker logs -f {container}' },
+    { label: 'shell în container', cmd: 'docker exec -it {container} sh' },
+    { label: 'compose up', cmd: 'docker compose up -d' },
+    { label: 'prune', cmd: 'docker system prune -f' },
+  ] },
+  { cat: 'systemd', items: [
+    { label: 'status', cmd: 'systemctl status {service}' },
+    { label: 'restart', cmd: 'systemctl restart {service}' },
+    { label: 'jurnal live', cmd: 'journalctl -u {service} -f' },
+  ] },
+  { cat: 'system', items: [
+    { label: 'disc', cmd: 'df -h' },
+    { label: 'mărimi dir', cmd: 'du -sh * | sort -h' },
+    { label: 'memorie', cmd: 'free -h' },
+    { label: 'porturi', cmd: 'ss -tulnp' },
+  ] },
+  { cat: 'db', items: [
+    { label: 'pg_dump', cmd: 'pg_dump -U {user} {db} > {db}.sql' },
+    { label: 'mysqldump', cmd: 'mysqldump -u {user} -p {db} > {db}.sql' },
+  ] },
+]
+type Hist = { id: number; command: string; cwd: string; exit_code: number | null; created: number }
 
 // Toolbox: lansatoare de conexiuni DB. O conexiune salvată → un click deschide o sesiune care
 // rulează CLI-ul potrivit pe host (psql/mysql/mongosh/clickhouse-client/redis-cli), cu ţinta
@@ -28,6 +64,18 @@ export default function ToolboxPanel(props: {
   const [rows, setRows] = useState<Connection[] | null>(null)
   const [error, setError] = useState('')
   const [edit, setEdit] = useState<Draft | null>(null)   // modalul de creare/editare
+  const [tab, setTab] = useState<'connections' | 'library' | 'history'>('connections')
+  const [q, setQ] = useState('')                          // filtru pt. Library/History
+  const [hist, setHist] = useState<Hist[] | null>(null)   // istoricul de comenzi al hostului
+  const copy = (cmd: string) => { copyText(cmd) }         // copyText afişează toast-ul standard
+
+  const loadHist = useCallback(async () => {
+    try {
+      const r = await api<Hist[]>(`/api/history?host_id=${props.host.id}&limit=200`)
+      setHist(r)
+    } catch { setHist([]) }
+  }, [props.host.id])
+  useEffect(() => { if (tab === 'history' && hist === null) loadHist() }, [tab, hist, loadHist])
 
   const asideCls = 'fixed inset-y-0 right-0 z-40 flex w-[90vw] max-w-md flex-col border-l border-ink-800 bg-ink-900 shadow-2xl'
     + (props.overlay ? '' : ' sm:static sm:z-auto sm:w-96 sm:max-w-none sm:shrink-0 sm:shadow-none')
@@ -69,19 +117,33 @@ export default function ToolboxPanel(props: {
     <>
       <div className={scrimCls} onClick={props.onClose} aria-hidden="true" />
       <aside className={asideCls} aria-label={t('toolbox.title')}>
-        <div className="flex items-center gap-2 border-b border-ink-800 px-3 py-2">
-          <span className="text-sm font-semibold text-slate-200">{t('toolbox.title')}</span>
-          <span className="rounded bg-ink-800 px-1.5 py-0.5 text-[10px] font-medium text-slate-400">{t('toolbox.connections')}</span>
-          <button onClick={load} className="wt-touch ml-auto shrink-0 rounded px-1.5 text-slate-400 hover:bg-ink-800"
-            title={t('toolbox.reload')}><RefreshIcon /></button>
-          <button onClick={() => setEdit(blank())} className="wt-touch shrink-0 rounded px-1.5 text-sky-400 hover:bg-ink-800"
-            title={t('toolbox.new')} aria-label={t('toolbox.new')}><PlusIcon /></button>
+        <div className="flex items-center gap-1 border-b border-ink-800 px-2 py-1.5">
+          {(['connections', 'library', 'history'] as const).map((tb) => (
+            <button key={tb} onClick={() => setTab(tb)}
+              aria-pressed={tab === tb}
+              className={`rounded px-2 py-1 text-[12px] font-medium ${tab === tb
+                ? 'bg-ink-800 text-slate-100' : 'text-slate-400 hover:bg-ink-800/60'}`}>
+              {t('toolbox.tab.' + tb)}
+            </button>
+          ))}
+          {tab === 'connections' && (
+            <button onClick={() => setEdit(blank())} className="wt-touch ml-auto shrink-0 rounded px-1.5 text-sky-400 hover:bg-ink-800"
+              title={t('toolbox.new')} aria-label={t('toolbox.new')}><PlusIcon /></button>
+          )}
           <button onClick={props.onClose} aria-label={t('common.close')}
-            className="wt-touch shrink-0 rounded px-2 py-1 text-slate-400 hover:bg-ink-800">✕</button>
+            className={`wt-touch shrink-0 rounded px-2 py-1 text-slate-400 hover:bg-ink-800${tab === 'connections' ? '' : ' ml-auto'}`}>✕</button>
         </div>
+        {(tab === 'library' || tab === 'history') && (
+          <div className="border-b border-ink-800 px-3 py-1.5">
+            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder={t('toolbox.filterPh')}
+              className="w-full rounded bg-ink-800/60 px-2 py-1 text-xs text-slate-300 ring-1 ring-ink-700 focus:ring-sky-500" />
+          </div>
+        )}
         {error && <div className="border-b border-ink-800 bg-ink-800 px-3 py-1.5 text-[11px] wt-danger">{error}</div>}
         <div className="min-h-0 flex-1 overflow-y-auto">
-          {rows === null ? (
+
+          {/* ── CONNECTIONS ── */}
+          {tab === 'connections' && (rows === null ? (
             <div className="p-4 text-center text-xs text-slate-500">{t('toolbox.loading')}</div>
           ) : rows.length === 0 ? (
             <div className="p-6 text-center text-xs text-slate-500">
@@ -114,7 +176,47 @@ export default function ToolboxPanel(props: {
                   title={t('toolbox.open')} aria-label={t('toolbox.open')}><TerminalPromptIcon /></button>
               </div>
             )
+          }))}
+
+          {/* ── LIBRARY (reţete built-in, Copy) ── */}
+          {tab === 'library' && LIBRARY.map((grp) => {
+            const items = grp.items.filter((it) => !q ||
+              it.cmd.toLowerCase().includes(q.toLowerCase()) || it.label.toLowerCase().includes(q.toLowerCase()) ||
+              grp.cat.includes(q.toLowerCase()))
+            if (!items.length) return null
+            return (
+              <div key={grp.cat}>
+                <div className="sticky top-0 bg-ink-900/95 px-3 py-1 font-mono text-[10px] uppercase tracking-wide text-slate-500">{grp.cat}</div>
+                {items.map((it) => (
+                  <button key={it.cmd} onClick={() => copy(it.cmd)}
+                    className="group flex w-full items-center gap-2 border-b border-ink-800/60 px-3 py-1.5 text-left hover:bg-ink-800/50"
+                    title={t('toolbox.copy')}>
+                    <span className="w-28 shrink-0 truncate text-[12px] text-slate-300">{it.label}</span>
+                    <code className="min-w-0 flex-1 truncate font-mono text-[11px] text-slate-500">{it.cmd}</code>
+                    <span className="shrink-0 text-slate-600 group-hover:text-sky-400"><CopyIcon /></span>
+                  </button>
+                ))}
+              </div>
+            )
           })}
+
+          {/* ── HISTORY (comenzile hostului, din OSC 133; Copy) ── */}
+          {tab === 'history' && (hist === null ? (
+            <div className="p-4 text-center text-xs text-slate-500">{t('toolbox.loading')}</div>
+          ) : (() => {
+            const items = hist.filter((h) => !q || h.command.toLowerCase().includes(q.toLowerCase()))
+            if (!items.length) return <div className="p-6 text-center text-xs text-slate-500">{t('toolbox.histEmpty')}</div>
+            return items.map((h) => (
+              <button key={h.id} onClick={() => copy(h.command)}
+                className="group flex w-full items-start gap-2 border-b border-ink-800/60 px-3 py-1.5 text-left hover:bg-ink-800/50"
+                title={t('toolbox.copy')}>
+                <span className={`mt-0.5 h-1.5 w-1.5 shrink-0 rounded-full ${h.exit_code === 0 ? 'bg-emerald-500' : h.exit_code == null ? 'bg-slate-600' : 'bg-rose-500'}`}
+                  title={h.exit_code == null ? '' : 'exit ' + h.exit_code} aria-hidden="true" />
+                <code className="min-w-0 flex-1 break-all font-mono text-[11.5px] text-slate-300">{h.command}</code>
+                <span className="shrink-0 text-slate-600 group-hover:text-sky-400"><CopyIcon /></span>
+              </button>
+            ))
+          })())}
         </div>
       </aside>
 
