@@ -423,18 +423,27 @@ export default function SessionView(props: {
   // La activare (active=true) retrimitem dimensiunea CHIAR dacă nu s-a schimbat local:
   // PTY-ul poate fi la dimensiunea altui client care ne-a micșorat, iar noi (acum
   // dispozitivul activ) trebuie să ne-o reclamăm — altfel rămânem mici până la A−/A+.
-  const refit = useCallback((active = false) => {
+  // fit() DEFENSIV — guard unic pentru TOATE apelurile. Pe un terminal demontat/în teardown (ex.
+  // tranziţia split↔tab, unde un panou se demontează cât un reattach/replay async încă apelează
+  // fit), FitAddon citeşte `_renderService.dimensions` şi aruncă `undefined (reading 'dimensions')`.
+  // isConnected prinde demontarea; try/catch prinde rendererul nepregătit. Următorul fit real corectează.
+  const safeFit = useCallback((): boolean => {
     const term = termRef.current
     const fit = fitRef.current
-    if (!term || !fit) return
+    if (!term || !fit || !term.element?.isConnected) return false
+    try { fit.fit(); return true } catch { return false }
+  }, [])
+  const refit = useCallback((active = false) => {
+    const term = termRef.current
+    if (!term) return
     const before = term.rows * 100000 + term.cols
-    fit.fit()
+    if (!safeFit()) return
     if (active || term.rows * 100000 + term.cols !== before) sendResize(active)
     // forțează un repaint chiar dacă dimensiunea n-a schimbat: după un upgrade de
     // agent (reconectare în masă), tab-urile din fundal pot rămâne cu un render
     // „stricat" deși dimensiunea e corectă — fit()-ul singur (no-op) nu-l curăță.
     // refresh redesenează bufferul curent, exact ce făcea A−/A+ prin schimbarea fontului.
-    term.refresh(0, term.rows - 1)
+    try { term.refresh(0, term.rows - 1) } catch { /* teardown */ }
   }, [sendResize])
 
   // Auto-recuperare a desincronizării de dimensiune xterm↔container: la revenirea
@@ -627,7 +636,7 @@ export default function SessionView(props: {
       // alt client (ex. telefonul) ne-a micșorat. Fără asta, dacă fereastra n-a
       // pierdut focus-ul în browser nu se declanșează niciun re-fit și rămâi mic
       // până la A−/A+. `fit` e idempotent, iar serverul deduplică dacă e deja corectă.
-      fitRef.current?.fit()
+      safeFit()
       sendResize(true)
     }
     containerRef.current!.addEventListener('pointerdown', markInput)
@@ -751,7 +760,7 @@ export default function SessionView(props: {
     containerRef.current!.addEventListener('touchcancel', onTouchEnd, { passive: true })
 
     const observer = new ResizeObserver(() => {
-      fit.fit()
+      if (!safeFit()) return   // demontare/teardown (split→tab): sări, următorul fit corectează
       sendResize()
     })
     observer.observe(containerRef.current!)
@@ -806,6 +815,11 @@ export default function SessionView(props: {
     const container = containerRef.current
     return () => {
       observer.disconnect()
+      // dispune rendererul WebGL/Canvas ÎNAINTE de term.dispose(): altfel bucla lui de randare
+      // (requestAnimationFrame) mai poate trage un cadru pe terminalul demontat (split→tab), iar
+      // `_renderService` deja nul → „undefined (reading 'dimensions')". Oprim bucla întâi.
+      try { rendererRef.current?.dispose() } catch { /* deja dispus */ }
+      rendererRef.current = undefined
       container?.removeEventListener('pointerdown', markInput)
       container?.removeEventListener('pointerup', copyOnSelect)
       container?.removeEventListener('touchstart', onTouchStart)
@@ -865,7 +879,7 @@ export default function SessionView(props: {
     const term = termRef.current
     if (!term) return
     term.options.fontSize = fontSize
-    fitRef.current?.fit()
+    safeFit()
     // panoul activ reclamă dimensiunea (A± e acțiune deliberată a operatorului);
     // un tab de fundal care doar se aliniază la preferință anunță pasiv, ca să
     // nu smulgă PTY-ul de la dispozitivul care chiar folosește sesiunea aia.
@@ -1041,7 +1055,7 @@ export default function SessionView(props: {
         // layout — istoricul s-ar randa la alte dimensiuni decât cele finale
         // (linii trunchiate / aliniament stricat până la un nou click pe tab).
         // Tail-ul vine la ≥1 RTT după montare, când layout-ul e deja așezat.
-        fitRef.current?.fit()
+        safeFit()
         // reset ÎNAINTE de replay: serverul trimite tail-ul complet la FIECARE
         // conectare, deci la o reconectare (rețea căzută, sleep) istoricul s-ar
         // apenda a doua oară peste conținutul existent
@@ -1061,7 +1075,7 @@ export default function SessionView(props: {
           // reconciliere post-replay: dacă dimensiunile s-au schimbat cât timp
           // scriam (redimensionare de fereastră, sidebar închis), aliniem
           // xterm-ul și anunțăm serverul (tmux redesenează la SIGWINCH)
-          fitRef.current?.fit()
+          safeFit()
           sendResize()
           setReplaying(false)
           // căutarea pornită dintr-un rezultat global rulează abia acum, pe

@@ -999,8 +999,10 @@ function MainApp() {
             hosts={hosts}
             sort={tabSort}
             onToggleSort={() => setTabSort((s) => (s === 'activity' ? 'manual' : 'activity'))}
-            onHome={() => navigate(null)}
-            onSelect={(sid) => { setPendingSearch(null); navigate(sid) }}
+            // click pe Home sau pe un tab de sesiune IESE din split-view-ul activ (chip-ul rămâne
+            // în bară → revii oricând). Altfel takeover-ul split-ului ignora navigarea pe taburi.
+            onHome={() => { setActiveSplitId(null); navigate(null) }}
+            onSelect={(sid) => { setPendingSearch(null); setActiveSplitId(null); navigate(sid) }}
             onClose={closeTab}
             onReorder={(order) => {
               // drag & drop = control manual: fixăm ordinea DRAG-uită şi comutăm pe „manual"

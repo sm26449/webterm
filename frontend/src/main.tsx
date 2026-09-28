@@ -11,6 +11,20 @@ import { applyTheme, currentTheme } from './lib/theme'
 import { showFailsafe } from './lib/failsafe'
 import { I18nProvider } from './lib/i18n'
 
+// xterm 5.x teardown race: when a terminal is disposed mid-transition (split↔tab), a DEFERRED
+// `Viewport.syncScrollArea` can still run on the already-disposed terminal and read
+// `_renderService.dimensions` (now null) → "undefined (reading 'dimensions')". It is benign — the
+// terminal is going away — and originates inside the vendored xterm bundle, which we can't patch.
+// Swallow ONLY that exact error (message + xterm origin), so it doesn't surface as an uncaught error.
+window.addEventListener('error', (e) => {
+  const stack = e.error?.stack || ''
+  if (/reading 'dimensions'/.test(e.message || '')
+      && (/xterm/.test(e.filename || '') || /syncScrollArea/.test(stack))) {
+    e.preventDefault()
+    e.stopImmediatePropagation()
+  }
+}, true)
+
 applyTheme(currentTheme())
 
 // După un deploy, hash-urile chunk-urilor lazy se schimbă: un tab lăsat deschis

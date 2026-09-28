@@ -722,6 +722,18 @@ try {
   check('split: chip-ul denumit apare în bara de taburi',
     (await page.locator('button:has-text("e2e-split")').count()) >= 1)
 
+  // navigare liberă: click pe un tab de sesiune IESE din split, dar chip-ul RĂMÂNE (revii oricând)
+  await page.locator('button[data-tab]').first().evaluate((el) => el.click())
+  await page.waitForTimeout(600)
+  check('split: click pe un tab de sesiune iese din split (divider dispare)',
+    (await page.locator('[aria-label^="Resize the split"]').count()) === 0)
+  check('split: chip-ul rămâne în bară după ce ieşi (revii oricând)',
+    (await page.locator('button:has-text("e2e-split")').count()) >= 1)
+  await page.locator('button:has-text("e2e-split")').first().click()
+  await page.waitForTimeout(800)
+  check('split: revin la split din chip (divider reapare)',
+    (await page.locator('[aria-label^="Resize the split"]').count()) >= 1)
+
   // reload → definiţia vine din server (cross-device), selecţia activă din localStorage
   await page.reload()
   await page.waitForTimeout(2000)
