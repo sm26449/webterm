@@ -1144,6 +1144,7 @@ const en: Lang = {
     'session.paste': "Paste",
     'session.note': "Note",
     'session.links': "Links",
+    'session.addSplit': "Add to split view…",
     'session.linksTooltip': "Links on screen — open or copy, even wrapped ones",
     'session.linksEmpty': "No links on screen. Open this after a command prints a URL — even one wrapped across lines.",
     'session.copyLink': "Copy link",

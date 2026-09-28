@@ -95,3 +95,16 @@ All `Depends(security.require_user)`, no step-up:
 `secondSid`, `splitPct`, `splitRatio`. `activeSplitId != null` is the old
 `gridActive`. Rendering reuses the existing 2-pane (draggable divider) and 3–4-pane
 (2×2) renderers, with `ratio`/`broadcast` read from the active split-view.
+
+## Entry points & visuals
+
+Three ways to create one: the **"+ Split view"** button in the tab bar (accent-coloured,
+labelled on first use), **right-click a terminal → Add to split view**, and **Alt+D** (quick
+2-pane). Every pane in a split carries a border so the boundary is visible; the focused pane gets
+an **accent** border (amber when broadcast is on), and the 2-pane divider has a grip. Clicking a
+session tab (or Home) leaves the active split — its chip stays in the bar, so you return anytime.
+
+One xterm 5.x caveat lives in `main.tsx`: disposing a terminal during the split↔tab transition can
+let a deferred `Viewport.syncScrollArea` fire on the torn-down terminal (`reading 'dimensions'`). A
+`safeFit()` guard, disposing the renderer before `term.dispose()`, and a tightly-scoped `error`
+handler that swallows only that exact benign error keep it from surfacing.

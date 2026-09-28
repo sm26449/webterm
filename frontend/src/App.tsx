@@ -705,9 +705,13 @@ function MainApp() {
       searchNonce={!isActive ? 0 : (pendingSearch?.n ?? 0)}
       paneActive={isActive}
       streamActive={grid || isActive}
-      // în split, panoul selectat poartă inelul albastru; ţinta acţiunilor de sesiune e tot el
+      // delimitare: orice panou de split are border; cel selectat = accent (activeInSplit)
+      inSplit={!!grid}
       activeInSplit={grid ? isActive : false}
       actionTarget={isActive}
+      // right-click „Add to split view" (alternativă la butonul din bară) → deschide wizard-ul.
+      // Doar pe taburi normale (nu din interiorul unui split) şi doar dacă ai ≥2 taburi de combinat.
+      onSplitView={!grid && openTabs.length >= 2 ? openWizardCreate : undefined}
       onMenu={() => { setSidebarCollapsed(false); localStorage.setItem('wt-sidebar-collapsed', '0'); setSidebarOpen(true) }}
       sidebarCollapsed={sidebarCollapsed}
       onPopout={() => popout(s.id)}
@@ -1053,8 +1057,15 @@ function MainApp() {
                 e.preventDefault()
                 patchSplit(activeSplit.id, { ratio: Math.min(0.85, Math.max(0.15, splitRatio + d)) })
               }}
-              className="w-1 shrink-0 cursor-col-resize bg-ink-800 outline-none transition-colors hover:bg-sky-600 focus-visible:bg-sky-500"
-            />
+              className="group/divider relative w-1.5 shrink-0 cursor-col-resize bg-ink-600 outline-none transition-colors hover:bg-sky-500 focus-visible:bg-sky-500"
+            >
+              {/* grip: 3 puncte centrate — semnalează că e trăgabil (înainte era o linie de 1px abia vizibilă) */}
+              <span className="pointer-events-none absolute left-1/2 top-1/2 flex -translate-x-1/2 -translate-y-1/2 flex-col gap-[3px] opacity-50 transition-opacity group-hover/divider:opacity-90">
+                <span className="h-[3px] w-[3px] rounded-full bg-slate-300" />
+                <span className="h-[3px] w-[3px] rounded-full bg-slate-300" />
+                <span className="h-[3px] w-[3px] rounded-full bg-slate-300" />
+              </span>
+            </div>
             <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden bg-ink-900"
               onMouseDownCapture={() => { if (splitPanes[1].id !== selectedSid) navigate(splitPanes[1].id) }}>
               <PaneErrorBoundary>{renderPane(splitPanes[1], splitPanes[1].id === selectedSid, true)}</PaneErrorBoundary>

@@ -185,8 +185,10 @@ export default function TabBar(props: {
           })}
           {props.tabs.length >= 2 && (
             <button onClick={sp.onCreate} title={t('split.create')} aria-label={t('split.create')}
-              className="wt-touch wt-tabbtn mb-1.5 flex shrink-0 items-center justify-center rounded-lg px-2 py-1.5 text-slate-500">
+              className="wt-touch wt-tabbtn mb-1.5 flex shrink-0 items-center gap-1 rounded-lg px-2 py-1.5 text-sky-400 hover:bg-ink-800">
               <PlusIcon />
+              {/* etichetă la prima folosire (fără split-uri încă) — altfel „+" gol nu se citea ca „split" */}
+              {sp.views.length === 0 && <span className="text-[11px] font-medium">{t('split.title')}</span>}
             </button>
           )}
           {sp.activeId != null && (

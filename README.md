@@ -262,15 +262,17 @@ what it does not cover, is in [Security](#security) and
   live results (state, exit code, output per host), with a deliberate confirmation
   first. **Save a command** under a name and re-run it later (kept per-browser).
   "Copy report" as markdown. [details](docs/FLEET.md)
-- **Split views — named, saved, several of them**: a "+ Split view" button turns 2–4 open
-  sessions into a layout you **name** (2 = a resizable split with a draggable divider, 3–4 = a
-  **2×2 grid**, all live at once). Each split view rides in the tab bar as its own **chip**
-  next to the session tabs — click to switch between layouts and single sessions like tabs. A
-  session can appear in a tab **and** in split views at once; only the view you're on is live
-  (so a session never fights itself for size). Definitions are **saved server-side** (they
-  follow you across devices) and the active one is restored on reload. Toggle **broadcast** to
-  type into every pane of a split simultaneously (an amber band marks each pane) — interactive
-  fleet ops, not just one-shot commands. [details](docs/design/SPLIT-VIEWS.md)
+- **Split views — named, saved, several of them**: a "+ Split view" button (or **right-click a
+  terminal → Add to split view**) turns 2–4 open sessions into a layout you **name** (2 = a
+  resizable split with a draggable divider + grip, 3–4 = a **2×2 grid**, all live at once). Each
+  pane is bordered — the focused one gets an accent border so it's clear where your keys go — and
+  each split view rides in the tab bar as its own **chip** next to the session tabs: click to
+  switch between layouts and single sessions like tabs (clicking a tab leaves the split, its chip
+  stays so you return anytime). A session can appear in a tab **and** in split views at once; only
+  the view you're on is live (so a session never fights itself for size). Definitions are **saved
+  server-side** (they follow you across devices) and the active one is restored on reload. Toggle
+  **broadcast** to type into every pane simultaneously (an amber band marks each pane) —
+  interactive fleet ops, not just one-shot commands. [details](docs/design/SPLIT-VIEWS.md)
 - **Fleet-scale onboarding**: a reusable **group enrollment token** — one install
   one-liner run on many machines, each auto-registering as its own host with its own
   agent token (individually revocable). Opt-in, expiring, revocable, use-capped, and

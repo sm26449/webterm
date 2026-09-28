@@ -81,7 +81,9 @@ export default function SessionView(props: {
   initialSearch?: string | null
   searchNonce?: number
   popout?: boolean
-  activeInSplit?: boolean
+  inSplit?: boolean               // e într-un split (orice panou) → border de delimitare
+  activeInSplit?: boolean         // e panoul ACTIV din split → border-accent
+  onSplitView?: () => void        // right-click „Add to split view" (deschide wizard-ul)
   paneActive?: boolean
   actionTarget?: boolean          // ținta acțiunilor de sesiune (în split = panoul focusat)
   /** false = tab montat dar invizibil: serverul pune fluxul pe pauză
@@ -1331,7 +1333,12 @@ export default function SessionView(props: {
 
   return (
     <div ref={rootRef} className={`wt-window flex h-full flex-col ${
-      props.broadcasting ? 'ring-2 ring-inset ring-amber-500' : props.activeInSplit ? 'ring-2 ring-inset ring-sky-500/70' : ''}`}>
+      // delimitarea panourilor de split: broadcast = ambră; panoul ACTIV = accent albastru clar;
+      // orice alt panou de split = border subtil (înainte inactivele n-aveau niciun contur → graniţă invizibilă)
+      props.broadcasting ? 'ring-2 ring-inset ring-amber-500'
+        : props.activeInSplit ? 'ring-2 ring-inset ring-sky-500'
+        : props.inSplit ? 'ring-1 ring-inset ring-ink-600'
+        : ''}`}>
       {/* broadcast activ: bandă de avertizare vizibilă în FIECARE panou al grilei — tastezi în
           toate host-urile deodată, deci ambiguitatea „unde scriu" trebuie să fie zero */}
       {props.broadcasting && (
@@ -1945,6 +1952,14 @@ export default function SessionView(props: {
             <MoreItem onClick={() => { openLinks(); setCtxMenu(null) }}>
               <LinkIcon /> {t('session.links')}
             </MoreItem>
+            {props.onSplitView && (
+              <MoreItem onClick={() => { props.onSplitView!(); setCtxMenu(null) }}>
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+                  strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
+                  <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" /><path d="M8 2.5v11" />
+                </svg> {t('session.addSplit')}
+              </MoreItem>
+            )}
           </div>
         </>
       )}
