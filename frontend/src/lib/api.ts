@@ -52,6 +52,18 @@ export interface Connection {
   cred_policy: 'ask' | 'stored' | 'ephemeral'
 }
 
+// Un split-view: layout denumit de 2-4 sesiuni (distincte), per user, sincronizat server-side.
+// Definiţiile stau în DB; selecţia activă (care view e deschis) rămâne per-browser. Vezi
+// docs/design/SPLIT-VIEWS.md.
+export interface SplitView {
+  id: number
+  name: string
+  panes: string[]       // 2-4 sid-uri distincte
+  ratio: number         // divider pt. 2 panouri, fracţie 0.15..0.85
+  broadcast: boolean
+  position: number
+}
+
 export interface Host {
   id: number
   name: string

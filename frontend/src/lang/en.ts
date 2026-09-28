@@ -1104,6 +1104,8 @@ const en: Lang = {
     'grid.pickCount': "{n} of {max} selected",
     'grid.pickConfirm': "Show side by side",
     'split.dividerAria': "Resize the split (arrow keys; double-click resets)",
+    'split.title': "Split view",
+    'split.defaultName': "Split {n}",
     'grid.broadcastOff': "Broadcast off",
     'grid.broadcastOnBtn': "Broadcast ON",
     'grid.broadcastOn': "Broadcast — keystrokes go to every terminal",

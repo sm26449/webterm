@@ -1115,6 +1115,8 @@ const ro: Lang = {
     'grid.pickCount': "{n} din {max} selectate",
     'grid.pickConfirm': "Arată alături",
     'split.dividerAria': "Redimensionează split-ul (săgeți; dublu-click resetează)",
+    'split.title': "Split view",
+    'split.defaultName': "Split {n}",
     'grid.broadcastOff': "Broadcast oprit",
     'grid.broadcastOnBtn': "Broadcast PORNIT",
     'grid.broadcastOn': "Broadcast — tastele merg în toate terminalele",
