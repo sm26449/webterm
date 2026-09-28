@@ -7,12 +7,24 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
-## [2.7.0] — 2026-09-27 · agent (53)
+## [2.7.0] — 2026-09-28 · agent (53)
+
+Two headline features: the **Toolbox** (databases, command library, history) and **named split
+views**. **This release updates the agent (52→53)** for stored-credential injection; older agents
+keep working (they just ignore the new field and fall back to `ask`).
 
 **Toolbox** — a per-host side panel for the day-to-day work that isn't "open a shell and remember
-the flags." Three tabs, reached from a host's page or from inside a session. **This release updates
-the agent (52→53)** for stored-credential injection; older agents keep working (they just ignore the
-new field and fall back to `ask`).
+the flags." Three tabs, reached from a host's page or from inside a session.
+
+**Split views** — turn 2–4 open sessions into a **named**, saved layout (2 = a resizable split with
+a draggable divider, 3–4 = a 2×2 grid). Each split view rides in the tab bar as its own chip beside
+the session tabs; click to switch between layouts and single sessions like tabs (leaving a split
+keeps its chip, so you return anytime). Panes are bordered — the focused one gets an accent border —
+and **broadcast** types into every pane at once. Create one from the **"+ Split view"** button,
+**right-click → Add to split view**, or **Alt+D**. Definitions are saved **server-side** (they
+follow you across devices); the same session may appear in a tab and in split views, but only the
+view you're on is live, so a session never fights itself for size. Details:
+[docs/design/SPLIT-VIEWS.md](docs/design/SPLIT-VIEWS.md).
 
 ### Added
 
