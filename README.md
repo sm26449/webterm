@@ -165,7 +165,8 @@ what it does not cover, is in [Security](#security) and
   switching is just a visibility change. The stream flows **only** on visible
   panes; background tabs are paused at the gateway and re-sync on return if they
   missed anything
-- Split view, popout into its own window, layout restored on reload
+- Named **split views** (2–4 sessions, saved server-side — see Fleet), popout into
+  its own window, layout restored on reload
 - **History replay**: closed sessions can be replayed in the UI (play/pause,
   seek, 1×/2×/4×), not just downloaded (`.cast`)
 - **History as text**: a **Text** tab next to the player renders the transcript with
@@ -261,10 +262,15 @@ what it does not cover, is in [Security](#security) and
   live results (state, exit code, output per host), with a deliberate confirmation
   first. **Save a command** under a name and re-run it later (kept per-browser).
   "Copy report" as markdown. [details](docs/FLEET.md)
-- **Multi-terminal grid + broadcast**: pick 2–4 open sessions into a **2×2 grid**, all
-  live at once, and toggle **broadcast** to type into every one simultaneously (an amber
-  band marks each pane so there's no doubt where the keys go) — interactive fleet ops,
-  not just one-shot commands
+- **Split views — named, saved, several of them**: a "+ Split view" button turns 2–4 open
+  sessions into a layout you **name** (2 = a resizable split with a draggable divider, 3–4 = a
+  **2×2 grid**, all live at once). Each split view rides in the tab bar as its own **chip**
+  next to the session tabs — click to switch between layouts and single sessions like tabs. A
+  session can appear in a tab **and** in split views at once; only the view you're on is live
+  (so a session never fights itself for size). Definitions are **saved server-side** (they
+  follow you across devices) and the active one is restored on reload. Toggle **broadcast** to
+  type into every pane of a split simultaneously (an amber band marks each pane) — interactive
+  fleet ops, not just one-shot commands. [details](docs/design/SPLIT-VIEWS.md)
 - **Fleet-scale onboarding**: a reusable **group enrollment token** — one install
   one-liner run on many machines, each auto-registering as its own host with its own
   agent token (individually revocable). Opt-in, expiring, revocable, use-capped, and
@@ -972,7 +978,7 @@ administer your servers with. The CI chain, in order:
    ephemeral container, a headless Chromium checks that the UI reaches a working
    screen, with no JS errors. Catches exactly the class of bug that produced the
    white screen in v1.0.11.
-3. **E2E with a REAL agent** (`scripts/e2e-session.mjs`, 81 checks) — starts an
+3. **E2E with a REAL agent** (`scripts/e2e-session.mjs`, 86 checks) — starts an
    agent in a container **with tmux installed, i.e. the backend production uses**,
    opens sessions through the UI, types commands, verifies the output, tab
    switching, pause/re-sync, shortcuts, parametrized snippets, alert thresholds,

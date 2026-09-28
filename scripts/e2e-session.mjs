@@ -702,6 +702,39 @@ try {
   check('izolare: X1 rămâne /tmp după ce X2 a făcut cd (fără cross-talk între sesiuni)',
     (await visPath()) === '/tmp')
 
+  // ── Split-views: layout denumit, comutare, persistenţă la reload, ştergere ──
+  // La punctul ăsta sunt ≥2 taburi (X1, X2 + sesiunile anterioare), deci „+ Split view" apare.
+  page.on('dialog', (d) => d.accept())        // confirmarea de ştergere (window.confirm)
+  await page.locator('button[aria-label="New split view"]').click()
+  await page.waitForSelector('input[placeholder="e.g. prod-debug"]', { timeout: 5000 })
+  check('split: wizard-ul se deschide cu câmp de nume',
+    (await page.locator('input[placeholder="e.g. prod-debug"]').count()) === 1)
+  await page.locator('input[placeholder="e.g. prod-debug"]').fill('e2e-split')
+  // deterministic: wizard-ul pre-bifează primele taburi (pot fi 3–4 → grilă). Debifăm tot şi
+  // alegem EXACT 2 sesiuni → un split cu divider, ca să testăm calea de 2 panouri.
+  const boxes = page.locator('input[type="checkbox"]:visible')
+  for (let i = (await boxes.count()) - 1; i >= 0; i--) { if (await boxes.nth(i).isChecked()) await boxes.nth(i).click() }
+  await boxes.nth(0).click(); await boxes.nth(1).click()
+  await page.locator('button:has-text("Show side by side")').click()
+  await page.waitForTimeout(1200)
+  check('split: se randează split-ul de 2 panouri (divider prezent)',
+    (await page.locator('[aria-label^="Resize the split"]').count()) >= 1)
+  check('split: chip-ul denumit apare în bara de taburi',
+    (await page.locator('button:has-text("e2e-split")').count()) >= 1)
+
+  // reload → definiţia vine din server (cross-device), selecţia activă din localStorage
+  await page.reload()
+  await page.waitForTimeout(2000)
+  check('split: persistă la reload (definiţie server-side + selecţie locală)',
+    (await page.locator('button:has-text("e2e-split")').count()) >= 1
+    && (await page.locator('[aria-label^="Resize the split"]').count()) >= 1)
+
+  // ştergere din chip → dispare
+  await page.locator('div.wt-tab:has-text("e2e-split") button[aria-label="Delete split view"]').click()
+  await page.waitForTimeout(800)
+  check('split: ştergerea scoate chip-ul',
+    (await page.locator('button:has-text("e2e-split")').count()) === 0)
+
   check('fără erori JS în pagină', pageErrors.length === 0)
   if (pageErrors.length) console.error('pageerrors:', pageErrors)
 } finally {

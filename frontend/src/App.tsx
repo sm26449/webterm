@@ -154,14 +154,19 @@ function MainApp() {
     } catch { /* */ }
   }, [activeSplitId])
   const GRID_MAX = 4
-  // pickerul de sesiuni (refolosit din fosta grilă): bifezi 2–GRID_MAX sesiuni. Numele îl adaugă
-  // wizard-ul din felia următoare; deocamdată auto-denumim la creare.
-  const [gridPicker, setGridPicker] = useState(false)
-  const [pickerSel, setPickerSel] = useState<string[]>([])
-  const togglePick = (sid: string) => setPickerSel((prev) =>
-    prev.includes(sid) ? prev.filter((s) => s !== sid)
-      : prev.length >= GRID_MAX ? prev : [...prev, sid])
+  // wizard-ul „+ Split view": creare (fără id) sau editare (cu id) — nume + sesiunile bifate (2–4)
+  type SplitWizard = { id?: number; name: string; sel: string[] }
+  const [wizard, setWizard] = useState<SplitWizard | null>(null)
+  const toggleWizardPick = (sid: string) => setWizard((w) => (w ? {
+    ...w,
+    sel: w.sel.includes(sid) ? w.sel.filter((s) => s !== sid)
+      : w.sel.length >= GRID_MAX ? w.sel : [...w.sel, sid],
+  } : w))
   const splitRef = useRef<HTMLDivElement>(null)
+  // migrare unică: fostul split (wt_layout) + procentul de grilă (wt_split_pct) nu mai sunt citite
+  useEffect(() => {
+    try { localStorage.removeItem('wt_layout'); localStorage.removeItem('wt_split_pct') } catch { /* */ }
+  }, [])
 
   // derivate din view-ul activ (folosite de keep-alive, broadcast, randare)
   const activeSplit = activeSplitId ? (splitViews.find((v) => v.id === activeSplitId) ?? null) : null
@@ -749,13 +754,13 @@ function MainApp() {
     try { await api(`/api/split-views/${id}`, { method: 'PATCH', body: JSON.stringify(changes) }) }
     catch { refresh() }   // dezacord cu serverul → resincronizează
   }
-  const createSplit = async (panes: string[]) => {
+  const createSplit = async (panes: string[], name?: string) => {
     const uniq = [...new Set(panes)].slice(0, GRID_MAX)   // distincte, ordine păstrată
     if (uniq.length < 2) return
     try {
       const sv = await api<SplitView>('/api/split-views', {
         method: 'POST',
-        body: JSON.stringify({ name: t('split.defaultName', { n: splitViews.length + 1 }),
+        body: JSON.stringify({ name: (name || '').trim() || t('split.defaultName', { n: splitViews.length + 1 }),
                                panes: uniq, ratio: 0.5, broadcast: false }),
       })
       setSplitViews((prev) => [...prev, sv])
@@ -769,17 +774,25 @@ function MainApp() {
     if (!other) { navigate(sid); return }   // nimic cu care să facem split
     createSplit([other, sid])
   }
-  // pickerul de sesiuni (refolosit din fosta grilă): creează un split-view nou sau editează cel activ
-  const openGridPicker = () => {
-    setPickerSel(activeSplit ? activeSplit.panes : openTabs.slice(0, GRID_MAX))
-    setGridPicker(true)
-  }
-  const confirmPicker = async () => {
-    const panes = openTabs.filter((sid) => pickerSel.includes(sid))   // păstrează ordinea din taburi
-    setGridPicker(false)
+  // wizard: creare (nume implicit + primele taburi) sau editare (nume + panouri existente)
+  const openWizardCreate = () => setWizard({ name: t('split.defaultName', { n: splitViews.length + 1 }), sel: openTabs.slice(0, GRID_MAX) })
+  const openWizardEdit = (v: SplitView) => setWizard({ id: v.id, name: v.name, sel: v.panes })
+  const saveWizard = async () => {
+    if (!wizard) return
+    const panes = openTabs.filter((sid) => wizard.sel.includes(sid))   // păstrează ordinea din taburi
     if (panes.length < 2) return
-    if (activeSplit) await patchSplit(activeSplit.id, { panes })
-    else await createSplit(panes)
+    const name = wizard.name.trim() || t('split.defaultName', { n: splitViews.length + 1 })
+    const id = wizard.id
+    setWizard(null)
+    if (id) await patchSplit(id, { name, panes })
+    else await createSplit(panes, name)
+  }
+  const deleteSplit = async (id: number) => {
+    const v = splitViews.find((x) => x.id === id)
+    if (!confirm(t('split.confirmDelete', { name: v?.name || '' }))) return
+    setSplitViews((prev) => prev.filter((x) => x.id !== id))
+    if (activeSplitId === id) setActiveSplitId(null)
+    try { await api(`/api/split-views/${id}`, { method: 'DELETE' }) } catch { refresh() }
   }
   // divider draggable (2 panouri): actualizare optimistă locală în timpul drag-ului, PATCH la release
   const dragSplit = (e: React.PointerEvent) => {
@@ -1000,9 +1013,13 @@ function MainApp() {
             /* split view: intrarea + controalele stau în bara de taburi (fosta bandă dedicată
                mânca o linie de ecran ori de câte ori aveai ≥2 taburi, chiar nefolosită) */
             split={{
-              active: splitActive,
+              views: splitViews.map((v) => ({ id: v.id, name: v.name })),
+              activeId: activeSplitId,
               broadcast,
-              onOpen: openGridPicker,
+              onSelect: (id) => setActiveSplitId(id),
+              onCreate: openWizardCreate,
+              onEdit: (id) => { const v = splitViews.find((x) => x.id === id); if (v) openWizardEdit(v) },
+              onDelete: deleteSplit,
               onBroadcast: () => { if (activeSplit) patchSplit(activeSplit.id, { broadcast: !broadcast }) },
               // „exit" doar DEZACTIVEAZĂ view-ul (rămâne salvat în DB); nu-l şterge
               onExit: () => setActiveSplitId(null),
@@ -1185,25 +1202,34 @@ function MainApp() {
           onCancel={() => { secretReq.resolve(null); setSecretReq(null) }}
         />
       )}
-      {/* selector de panouri pentru grilă: bifezi care sesiuni deschise intră (2–4) */}
-      {gridPicker && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={() => setGridPicker(false)}>
+      {/* wizard „+ Split view": nume + bifezi ce sesiuni deschise intră (2–4) */}
+      {wizard && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={() => setWizard(null)}>
           <div className="glass flex max-h-[80vh] w-full max-w-md flex-col rounded-2xl" onClick={(e) => e.stopPropagation()}>
             <header className="border-b border-ink-800 px-4 py-3">
-              <h2 className="text-base font-semibold">{t('grid.pickTitle')}</h2>
+              <h2 className="text-base font-semibold">{wizard.id ? t('split.editTitle') : t('split.wizardTitle')}</h2>
               <p className="mt-0.5 text-xs text-slate-400">{t('grid.pickHint', { max: GRID_MAX })}</p>
             </header>
+            <div className="border-b border-ink-800 px-4 py-3">
+              <label className="block">
+                <span className="mb-0.5 block text-xs text-slate-400">{t('split.nameLabel')}</span>
+                <input autoFocus value={wizard.name} onChange={(e) => setWizard((w) => (w ? { ...w, name: e.target.value.slice(0, 80) } : w))}
+                  onKeyDown={(e) => { if (e.key === 'Enter' && wizard.sel.length >= 2) saveWizard() }}
+                  placeholder={t('split.namePlaceholder')}
+                  className="w-full rounded bg-ink-800 px-2 py-1 text-sm text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" />
+              </label>
+            </div>
             <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
               {openTabs.map((sid) => {
                 const s = sessions.find((x) => x.id === sid)
                 if (!s) return null
                 const h = hosts.find((x) => x.id === s.host_id)
-                const checked = pickerSel.includes(sid)
-                const atCap = !checked && pickerSel.length >= GRID_MAX
+                const checked = wizard.sel.includes(sid)
+                const atCap = !checked && wizard.sel.length >= GRID_MAX
                 return (
                   <label key={sid}
                     className={`flex items-center gap-2.5 rounded-lg px-2.5 py-2 ${atCap ? 'opacity-40' : 'cursor-pointer hover:bg-ink-800/60'}`}>
-                    <input type="checkbox" checked={checked} disabled={atCap} onChange={() => togglePick(sid)}
+                    <input type="checkbox" checked={checked} disabled={atCap} onChange={() => toggleWizardPick(sid)}
                       className="h-4 w-4 shrink-0 accent-sky-500" />
                     <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: h ? hostColor(h) : '#64748b' }} />
                     <span className="min-w-0 flex-1 truncate text-sm text-slate-200">{s.title}</span>
@@ -1213,14 +1239,14 @@ function MainApp() {
               })}
             </div>
             <footer className="flex items-center gap-2 border-t border-ink-800 px-4 py-3">
-              <span className="text-xs text-slate-500">{t('grid.pickCount', { n: pickerSel.length, max: GRID_MAX })}</span>
-              <button onClick={() => setGridPicker(false)}
+              <span className="text-xs text-slate-500">{t('grid.pickCount', { n: wizard.sel.length, max: GRID_MAX })}</span>
+              <button onClick={() => setWizard(null)}
                 className="ml-auto rounded-lg px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800">
                 {t('common.cancel')}
               </button>
-              <button disabled={pickerSel.length < 2} onClick={confirmPicker}
+              <button disabled={wizard.sel.length < 2} onClick={saveWizard}
                 className="rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-40">
-                {t('grid.pickConfirm')}
+                {wizard.id ? t('common.save') : t('grid.pickConfirm')}
               </button>
             </footer>
           </div>
