@@ -2859,6 +2859,122 @@ async def delete_connection(host_id: int, conn_id: int, stepup_grant: str = "",
     return {"ok": True}
 
 
+# ── Split-views: layout-uri denumite de 2-4 sesiuni, per user, sincronizate ──────
+# Un split-view NU ţine niciun secret — e metadată de layout care REFERĂ sesiuni
+# gated independent la attach. Deci CRUD = doar require_user, FĂRĂ step-up (spre
+# deosebire de conexiunile `stored`). Vezi docs/design/SPLIT-VIEWS.md.
+SPLIT_RATIO_MIN, SPLIT_RATIO_MAX = 0.15, 0.85
+
+
+def _split_ratio(v) -> float:
+    try:
+        return max(SPLIT_RATIO_MIN, min(SPLIT_RATIO_MAX, float(v)))
+    except (TypeError, ValueError):
+        return 0.5
+
+
+def _split_view_json(row, panes=None):
+    try:
+        p = panes if panes is not None else json.loads(row["panes"] or "[]")
+    except (TypeError, ValueError):
+        p = []
+    return {"id": row["id"], "name": row["name"] or "", "panes": p,
+            "ratio": row["ratio"] if row["ratio"] is not None else 0.5,
+            "broadcast": bool(row["broadcast"]), "position": row["position"] or 0}
+
+
+async def _validate_split_panes(panes) -> list:
+    """2-4 sid-uri DISTINCTE, fiecare o sesiune existentă. Aceeaşi sesiune de două ori =
+    doi clienţi tmux la două dimensiuni (război de resize) → respins, ca invariantul primary≠second."""
+    if not isinstance(panes, list) or not (2 <= len(panes) <= 4):
+        raise ApiError(400, "splitview.badCount", "a split view needs 2 to 4 sessions")
+    if any(not isinstance(s, str) for s in panes):
+        raise ApiError(400, "splitview.badPane", "invalid session id")
+    if len(set(panes)) != len(panes):
+        raise ApiError(400, "splitview.dupPane", "the same session cannot appear twice")
+    for sid in panes:
+        if not await db.fetchone("SELECT id FROM sessions WHERE id=?", sid):
+            raise ApiError(400, "splitview.badPane", "unknown session in split view")
+    return panes
+
+
+class SplitViewIn(BaseModel):
+    # câmpuri opţionale: POST cere name+panes; PATCH actualizează doar ce trimiţi
+    name: Optional[str] = None
+    panes: Optional[list[str]] = None
+    ratio: Optional[float] = None
+    broadcast: Optional[bool] = None
+    position: Optional[int] = None
+
+
+@router.get("/api/split-views")
+async def list_split_views(user=Depends(security.require_user)):
+    rows = await db.fetchall(
+        "SELECT * FROM split_views WHERE user_id=? ORDER BY position, id", user["id"])
+    live = {r["id"] for r in await db.fetchall("SELECT id FROM sessions")}
+    out = []
+    for r in rows:
+        try:
+            panes = [s for s in json.loads(r["panes"] or "[]") if s in live]
+        except (TypeError, ValueError):
+            panes = []
+        if len(panes) < 2:
+            # o sesiune s-a închis şi au rămas <2 panouri → layout-ul nu mai are sens
+            await db.execute("DELETE FROM split_views WHERE id=?", r["id"])
+            continue
+        if len(panes) != len(json.loads(r["panes"] or "[]")):
+            await db.execute("UPDATE split_views SET panes=? WHERE id=?", json.dumps(panes), r["id"])
+        out.append(_split_view_json(r, panes))
+    return {"split_views": out}
+
+
+@router.post("/api/split-views")
+async def create_split_view(body: SplitViewIn, user=Depends(security.require_user)):
+    name = (body.name or "").strip()[:80]
+    if not name:
+        raise ApiError(400, "splitview.noName", "a split view needs a name")
+    panes = await _validate_split_panes(body.panes or [])
+    now = time.time()
+    sid = await db.execute(
+        "INSERT INTO split_views(user_id, name, panes, ratio, broadcast, position, created, updated)"
+        " VALUES(?,?,?,?,?,?,?,?)",
+        user["id"], name, json.dumps(panes), _split_ratio(body.ratio if body.ratio is not None else 0.5),
+        1 if body.broadcast else 0, int(body.position or 0), now, now)
+    return _split_view_json(await db.fetchone("SELECT * FROM split_views WHERE id=?", sid))
+
+
+@router.patch("/api/split-views/{sv_id}")
+async def update_split_view(sv_id: int, body: SplitViewIn, user=Depends(security.require_user)):
+    row = await db.fetchone("SELECT * FROM split_views WHERE id=? AND user_id=?", sv_id, user["id"])
+    if not row:
+        raise HTTPException(404)
+    sets, vals = [], []
+    if body.name is not None:
+        name = body.name.strip()[:80]
+        if not name:
+            raise ApiError(400, "splitview.noName", "a split view needs a name")
+        sets.append("name=?"); vals.append(name)
+    if body.panes is not None:
+        panes = await _validate_split_panes(body.panes)
+        sets.append("panes=?"); vals.append(json.dumps(panes))
+    if body.ratio is not None:
+        sets.append("ratio=?"); vals.append(_split_ratio(body.ratio))
+    if body.broadcast is not None:
+        sets.append("broadcast=?"); vals.append(1 if body.broadcast else 0)
+    if body.position is not None:
+        sets.append("position=?"); vals.append(int(body.position))
+    if sets:
+        sets.append("updated=?"); vals.append(time.time())
+        await db.execute("UPDATE split_views SET %s WHERE id=?" % ", ".join(sets), *vals, sv_id)
+    return _split_view_json(await db.fetchone("SELECT * FROM split_views WHERE id=?", sv_id))
+
+
+@router.delete("/api/split-views/{sv_id}")
+async def delete_split_view(sv_id: int, user=Depends(security.require_user)):
+    await db.execute("DELETE FROM split_views WHERE id=? AND user_id=?", sv_id, user["id"])
+    return {"ok": True}
+
+
 # ── Wake-on-LAN: un agent VECIN trezeşte o maşină oprită din acelaşi LAN ──────
 # Prefixe de interfeţe virtuale (bridge-uri, veth-uri, VPN-uri): n-au NIC fizic în spate, deci
 # MAC-ul lor nu poate fi trezit şi subnetul lor (ex. 172.17/16 al Docker-ului) nu e un LAN real.

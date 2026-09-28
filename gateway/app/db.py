@@ -227,6 +227,19 @@ CREATE TABLE IF NOT EXISTS connections (
     created REAL NOT NULL,
     FOREIGN KEY(host_id) REFERENCES hosts(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS split_views (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,                -- proprietarul layout-ului (izolare multi-account)
+    name TEXT NOT NULL,
+    panes TEXT NOT NULL DEFAULT '[]',        -- JSON: 2-4 sid-uri DISTINCTE (sessions.id e TEXT)
+    ratio REAL DEFAULT 0.5,                  -- divider pt. 2 panouri (0.15..0.85)
+    broadcast INTEGER DEFAULT 0,             -- tastare difuzată în toate panourile
+    position INTEGER DEFAULT 0,              -- ordinea în bara de taburi
+    created REAL NOT NULL,
+    updated REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_split_views_user ON split_views(user_id, position);
 """
 
 # additive migrations for DBs created by an older version

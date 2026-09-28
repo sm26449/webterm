@@ -21,6 +21,7 @@ Why the system is shaped the way it is. Written for someone about to change it.
 - [ARCHITECTURE](design/ARCHITECTURE.md) — the three parts, the trust boundaries, why there are no roles
 - [SIGNED-UPDATES](design/SIGNED-UPDATES.md) — how agent updates are signed, and how to rotate the key without touching a host
 - [SESSION-LIFECYCLE](design/SESSION-LIFECYCLE.md) — session states, reconciliation, transcripts, and why the screen is not the source of truth
+- [SPLIT-VIEWS](design/SPLIT-VIEWS.md) — named multi-pane layouts, the "only the active view is mounted" invariant, and why the same session can appear in many places safely
 - [TELNET-BASTION](design/TELNET-BASTION.md) — reaching network equipment through a host
 - [FUTURE-DIRECTIONS](design/FUTURE-DIRECTIONS.md) — sketches that are deliberately not built
 
