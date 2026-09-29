@@ -81,8 +81,9 @@ export default function ToolboxPanel(props: {
   const [dkFailed, setDkFailed] = useState(false)         // fetch eşuat ≠ „nicio cheie"
   const [dkHosts, setDkHosts] = useState<Host[]>([])      // ţinte posibile (hosturi de agent)
   const [dkBusy, setDkBusy] = useState('')
-  const [deployTo, setDeployTo] = useState('')
+  const [deployTo, setDeployTo] = useState<Set<number>>(new Set())   // multi-ţintă
   const [fromIp, setFromIp] = useState('')
+  const [testResult, setTestResult] = useState<{ ok: boolean; detail: string; dest: string } | null>(null)
 
   const loadDk = useCallback(async () => {
     try {
@@ -114,15 +115,29 @@ export default function ToolboxPanel(props: {
   }
   const dkGenerate = () => dkRun('generate', (confirmed) =>
     api(`/api/hosts/${props.host.id}/deploy-key/generate`, { method: 'POST', body: JSON.stringify({ confirmed }) }))
+  // deploy multi-ţintă: UN factor pe sursă (ruta = sursa), rezultat per ţintă
   const dkDeploy = () => dkRun('deploy', (confirmed) =>
-    api(`/api/hosts/${deployTo}/deploy-key/deploy`, { method: 'POST',
-      body: JSON.stringify({ key_host_id: props.host.id, from_ip: fromIp.trim(), confirmed }) }))
+    api(`/api/hosts/${props.host.id}/deploy-key/deploy-batch`, { method: 'POST',
+      body: JSON.stringify({ target_host_ids: [...deployTo], from_ip: fromIp.trim(), confirmed }) })
+      .then(() => setDeployTo(new Set())))
   const dkVerify = (d: DeployKeyDeployment) => dkRun('verify' + d.id, () =>
     api(`/api/hosts/${d.target_host_id}/deploy-key/verify`, { method: 'POST', body: JSON.stringify({ key_host_id: props.host.id }) }))
   const dkRevoke = (d: DeployKeyDeployment) => {
     if (!confirm(t('toolbox.ssh.confirmRevoke', { target: d.target_name }))) return
     dkRun('revoke' + d.id, () =>
       api(`/api/hosts/${d.target_host_id}/deploy-key/revoke`, { method: 'POST', body: JSON.stringify({ key_host_id: props.host.id }) }))
+  }
+  const dkTest = (d: DeployKeyDeployment) => dkRun('test' + d.id, async () => {
+    setTestResult(null)
+    const r = await api<{ ok: boolean; detail: string; dest: string }>(
+      `/api/hosts/${props.host.id}/deploy-key/test`, { method: 'POST', body: JSON.stringify({ target_host_id: d.target_host_id }) })
+    setTestResult(r)
+  })
+  const dkSshConfig = (d: DeployKeyDeployment) => dkRun('cfg' + d.id, () =>
+    api(`/api/hosts/${props.host.id}/deploy-key/ssh-config`, { method: 'POST', body: JSON.stringify({ target_host_id: d.target_host_id }) }))
+  const dkRotate = () => {
+    if (!confirm(t('toolbox.ssh.confirmRotate'))) return
+    dkRun('rotate', () => api(`/api/hosts/${props.host.id}/deploy-key/rotate`, { method: 'POST', body: JSON.stringify({}) }))
   }
   const dkDelete = () => {
     if (!confirm(t('toolbox.ssh.confirmDeleteKey'))) return
@@ -277,6 +292,9 @@ export default function ToolboxPanel(props: {
                       <button onClick={() => copy(dk.key!.public_key)}
                         className="shrink-0 rounded p-1 text-slate-500 hover:bg-ink-700 hover:text-sky-400"
                         title={t('toolbox.ssh.copyPub')} aria-label={t('toolbox.ssh.copyPub')}><CopyIcon /></button>
+                      <button onClick={dkRotate} disabled={dkBusy !== ''}
+                        className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-slate-400 hover:bg-ink-700 hover:text-amber-300"
+                        title={t('toolbox.ssh.rotateHint')}>{dkBusy === 'rotate' ? t('toolbox.ssh.rotating') : t('toolbox.ssh.rotate')}</button>
                       <button onClick={dkDelete} disabled={dkBusy !== ''}
                         className="shrink-0 rounded p-1 text-slate-500 hover:bg-ink-700 hover:text-rose-300"
                         title={t('toolbox.ssh.deleteKey')} aria-label={t('toolbox.ssh.deleteKey')}><TrashIcon /></button>
@@ -287,22 +305,25 @@ export default function ToolboxPanel(props: {
                   <div className="rounded border border-ink-800 p-2">
                     <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-slate-500">{t('toolbox.ssh.deployTo')}</div>
                     <div className="flex flex-col gap-1.5">
-                      <select value={deployTo} onChange={(ev) => setDeployTo(ev.target.value)}
-                        className="w-full rounded bg-ink-800 px-2 py-1 text-[12px] text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500"
-                        aria-label={t('toolbox.ssh.deployTo')}>
-                        <option value="">—</option>
-                        {dkHosts.map((h) => (
-                          <option key={h.id} value={h.id} disabled={!h.online}>
-                            {h.name}{h.agent_user ? ` (${h.agent_user})` : ''}{h.online ? '' : ' · offline'}
-                          </option>
+                      <div className="max-h-36 overflow-y-auto rounded ring-1 ring-ink-700">
+                        {dkHosts.length === 0 ? (
+                          <div className="px-2 py-1.5 text-[11px] text-slate-500">{t('toolbox.ssh.noTargets')}</div>
+                        ) : dkHosts.map((h) => (
+                          <label key={h.id} className={`flex items-center gap-2 px-2 py-1 text-[12px] ${h.online ? 'text-slate-200 hover:bg-ink-800/60' : 'text-slate-600'}`}>
+                            <input type="checkbox" disabled={!h.online} checked={deployTo.has(h.id)}
+                              onChange={(ev) => setDeployTo((s) => { const n = new Set(s); if (ev.target.checked) n.add(h.id); else n.delete(h.id); return n })} />
+                            <span className="min-w-0 flex-1 truncate">{h.name}{h.agent_user ? ` (${h.agent_user})` : ''}</span>
+                            {!h.online && <span className="shrink-0 text-[10px]">{t('toolbox.ssh.offline')}</span>}
+                          </label>
                         ))}
-                      </select>
+                      </div>
                       <input value={fromIp} onChange={(ev) => setFromIp(ev.target.value)}
                         placeholder={t('toolbox.ssh.fromIpPh')} aria-label={t('toolbox.ssh.fromIp')}
                         className="w-full rounded bg-ink-800 px-2 py-1 font-mono text-[11px] text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" />
-                      <button onClick={dkDeploy} disabled={!deployTo || dkBusy !== ''}
+                      <button onClick={dkDeploy} disabled={deployTo.size === 0 || dkBusy !== ''}
                         className="rounded bg-sky-600 px-3 py-1.5 text-[12px] font-medium text-white hover:bg-sky-700 disabled:opacity-40">
-                        {dkBusy === 'deploy' ? t('toolbox.ssh.deploying') : t('toolbox.ssh.deploy')}
+                        {dkBusy === 'deploy' ? t('toolbox.ssh.deploying')
+                          : deployTo.size > 1 ? t('toolbox.ssh.deployN', { n: deployTo.size }) : t('toolbox.ssh.deploy')}
                       </button>
                     </div>
                     <p className="mt-1 text-[10.5px] leading-snug text-slate-500">{t('toolbox.ssh.fromIpHint')}</p>
@@ -326,11 +347,17 @@ export default function ToolboxPanel(props: {
                         <button onClick={() => copy(`ssh ${d.target_user || 'user'}@${d.target_hostname || d.target_name}`)}
                           className="shrink-0 rounded p-1 text-slate-500 hover:bg-ink-700 hover:text-sky-400"
                           title={t('toolbox.ssh.copySsh')} aria-label={t('toolbox.ssh.copySsh')}><CopyIcon /></button>
-                        {d.status !== 'revoked' && (
+                        {d.status !== 'revoked' && d.target_name && (
                           <>
+                            <button onClick={() => dkTest(d)} disabled={dkBusy !== ''}
+                              className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-slate-400 hover:bg-ink-700 hover:text-emerald-300"
+                              title={t('toolbox.ssh.testHint')}>{dkBusy === 'test' + d.id ? '…' : t('toolbox.ssh.test')}</button>
                             <button onClick={() => dkVerify(d)} disabled={dkBusy !== ''}
                               className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-slate-400 hover:bg-ink-700 hover:text-slate-200"
                               title={t('toolbox.ssh.verify')}>{t('toolbox.ssh.verify')}</button>
+                            <button onClick={() => dkSshConfig(d)} disabled={dkBusy !== ''}
+                              className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-slate-400 hover:bg-ink-700 hover:text-sky-300"
+                              title={t('toolbox.ssh.aliasHint')}>{dkBusy === 'cfg' + d.id ? '…' : t('toolbox.ssh.alias')}</button>
                             <button onClick={() => dkRevoke(d)} disabled={dkBusy !== ''}
                               className="shrink-0 rounded p-1 text-slate-500 hover:bg-ink-700 hover:text-rose-300"
                               title={t('toolbox.ssh.revoke')} aria-label={t('toolbox.ssh.revoke')}><TrashIcon /></button>
@@ -338,6 +365,13 @@ export default function ToolboxPanel(props: {
                         )}
                       </div>
                     ))}
+                    {testResult && (
+                      <div className={`mt-1.5 rounded px-2 py-1.5 text-[11px] leading-snug ${testResult.ok ? 'bg-emerald-500/10 text-emerald-300' : 'bg-rose-500/10 text-rose-300'}`}>
+                        <span className="font-medium">{testResult.ok ? t('toolbox.ssh.testOk') : t('toolbox.ssh.testFail')}</span>
+                        {' '}<span className="font-mono">{testResult.dest}</span>
+                        {testResult.detail ? <div className="mt-0.5 whitespace-pre-wrap break-all font-mono text-[10px] text-slate-400">{testResult.detail}</div> : null}
+                      </div>
+                    )}
                     {dk.deployments.some((d) => d.status !== 'revoked') && (
                       <p className="mt-1.5 text-[10.5px] leading-snug text-slate-500">
                         {t('toolbox.ssh.sudoersHint')}{' '}

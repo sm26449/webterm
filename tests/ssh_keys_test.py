@@ -109,7 +109,8 @@ async def main():
     await db.connect()
     await api.init_setup_token()
 
-    homes = {n: tempfile.mkdtemp(prefix="wtssh-" + n) for n in ("src", "tgt", "evil", "third")}
+    homes = {n: tempfile.mkdtemp(prefix="wtssh-" + n)
+             for n in ("src", "tgt", "evil", "third", "bsrc", "b1", "b2")}
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://t", timeout=30,
                                  headers=_ORIGIN) as c:
@@ -117,7 +118,7 @@ async def main():
                                          "setup_token": "test-setup"})
         uid = (await db.fetchone("SELECT id FROM users WHERE email=?", "a@b.co"))["id"]
         ids = {}
-        for n in ("src", "tgt", "evil", "third"):
+        for n in ("src", "tgt", "evil", "third", "bsrc", "b1", "b2"):
             ids[n] = (await c.post("/api/hosts", json={"name": n})).json()["id"]
             core.sources[ids[n]] = FakeAgent(ids[n], homes[n])
         rd = await c.post("/api/hosts", json={"name": "direct", "connection_type": "ssh",
@@ -310,6 +311,56 @@ async def main():
               r.text)
         r = await c.get(f"/api/hosts/{ids['src']}/deploy-key")
         check("după delete → key null", r.json()["key"] is None, r.text)
+
+        # ══ Feature-urile noi (audit v54+): hosturi PROPRII (bsrc → b1,b2), stare curată ══
+        seed_key(homes["bsrc"], FIXED_PUB)
+        r = await c.post(f"/api/hosts/{ids['bsrc']}/deploy-key/generate", json={})
+        bpub = r.json()["public_key"]
+        await db.execute("UPDATE hosts SET hostname='10.0.0.11' WHERE id=?", ids["b1"])
+        await db.execute("UPDATE hosts SET hostname='10.0.0.12', agent_user='deploy' WHERE id=?", ids["b2"])
+
+        # deploy-batch: UN factor pe sursă → deploy la mai multe ţinte, rezultat per ţintă
+        security.clear_stepup_for(uid)
+        r = await c.post(f"/api/hosts/{ids['bsrc']}/deploy-key/deploy-batch",
+                         json={"target_host_ids": [ids["b1"], ids["b2"]], "stepup_password": PW})
+        res = {x["target_host_id"]: x for x in r.json()["results"]}
+        check("batch: ambele ţinte OK cu un singur factor",
+              r.status_code == 200 and res[ids["b1"]]["ok"] and res[ids["b2"]]["ok"], r.text)
+        check("batch: cheia e pe ambele ţinte",
+              bpub in ak_lines(homes["b1"]) and bpub in ak_lines(homes["b2"]), "")
+        security.clear_stepup_for(uid)
+        r = await c.post(f"/api/hosts/{ids['bsrc']}/deploy-key/deploy-batch",
+                         json={"target_host_ids": [ids["b1"]]})
+        check("batch fără factor → 403", r.status_code == 403, r.text)
+
+        # test connection: rulează `ssh` pe sursă (în CI nu ajunge la ţintă → rc≠0, dar recipe-ul
+        # rulează şi rc-ul e RAPORTAT, nu o tăcere); dest se compune din user@hostname
+        r = await c.post(f"/api/hosts/{ids['bsrc']}/deploy-key/test",
+                         json={"target_host_id": ids["b2"], "stepup_password": PW})
+        check("test connection: răspuns cu rc + dest deploy@10.0.0.12, fără să atârne",
+              r.status_code == 200 and "rc" in r.json() and r.json()["dest"] == "deploy@10.0.0.12", r.text)
+
+        # ssh-config: scrie bloc marcat pe sursă, idempotent
+        r = await c.post(f"/api/hosts/{ids['bsrc']}/deploy-key/ssh-config",
+                         json={"target_host_id": ids["b1"], "stepup_password": PW})
+        check("ssh-config: bloc scris + alias întors", r.status_code == 200 and r.json().get("alias"), r.text)
+        cfg = os.path.join(homes["bsrc"], ".ssh", "config")
+        n1 = open(cfg).read().count("IdentityFile ~/.ssh/webterm_ed25519")
+        await c.post(f"/api/hosts/{ids['bsrc']}/deploy-key/ssh-config",
+                     json={"target_host_id": ids["b1"], "stepup_password": PW})
+        n2 = open(cfg).read().count("IdentityFile ~/.ssh/webterm_ed25519")
+        check("ssh-config idempotent: re-scriere nu dublează blocul", n1 == 1 and n2 == 1, f"{n1},{n2}")
+
+        # rotate (doar cu ssh-keygen): cheie nouă pe sursă + redeploy pe toate ţintele + scoate vechea
+        if shutil.which("ssh-keygen"):
+            security.clear_stepup_for(uid)
+            r = await c.post(f"/api/hosts/{ids['bsrc']}/deploy-key/rotate", json={"stepup_password": PW})
+            newpub = r.json().get("public_key", "")
+            check("rotate: pub nou (diferit de vechi)",
+                  r.status_code == 200 and newpub and newpub != bpub, r.text)
+            lines = ak_lines(homes["b1"])
+            check("rotate: ţinta are NOUA cheie, nu pe cea veche",
+                  newpub in lines and bpub not in lines, str(lines))
 
         # ── ţintă ŞTEARSĂ din flotă: evidenţa NU dispare (cheia e încă pe maşină), dar nici
         #    nu blochează pentru totdeauna ştergerea cheii de pe sursă ─────────
