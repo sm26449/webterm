@@ -44,7 +44,7 @@ export interface Connection {
   id: number
   host_id: number
   label: string
-  engine: 'postgres' | 'mysql' | 'mongodb' | 'clickhouse' | 'redis'
+  engine: 'postgres' | 'mysql' | 'mongodb' | 'clickhouse' | 'redis' | 'influxdb' | 'influxdb2'
   target_host: string
   target_port: number | null
   username: string

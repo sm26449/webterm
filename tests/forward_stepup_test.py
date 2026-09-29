@@ -272,6 +272,18 @@ async def main():
                 return e.code
         check("redis + stored respins (fără prompt de parolă)",
               _bad("stored", engine="redis") == "connection.noStoredRedis")
+        check("influxdb2 + stored respins (token fără prompt)",
+              _bad("stored", engine="influxdb2") == "connection.noStoredInflux2")
+        check("influxdb 1.x + stored acceptat (are prompt „password:”)",
+              _bad("stored", engine="influxdb") is None)
+        ix = api._connection_command({"engine": "influxdb", "target_host": "h", "target_port": 8086,
+                                      "username": "u", "dbname": "d", "cred_policy": "stored"})
+        check("influx 1.x: `-password ''` explicit (prompt, nu parolă în argv)",
+              "-password ''" in ix and "-username u" in ix and "-database d" in ix, ix)
+        ix2 = api._connection_command({"engine": "influxdb2", "target_host": "h", "target_port": 8086,
+                                       "username": "", "dbname": "", "cred_policy": "ask"})
+        check("influx 2.x: `v1 shell` pe config-ul local al hostului, fără secrete",
+              "v1 shell" in ix2 and "http://h:8086" in ix2 and "-password" not in ix2, ix2)
         check("engine necunoscut respins", _bad("ask", engine="nu-exista") == "connection.badEngine")
         check("host cu metacaractere respins", _bad("ask", target_host="h;rm -rf") == "connection.badField")
         check("port invalid respins", _bad("ask", target_port=99999) == "connection.badPort")

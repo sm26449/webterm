@@ -2733,6 +2733,13 @@ _CONN_ENGINES = {
     "mongodb":    {"bin": "mongosh", "port": 27017, "label": "MongoDB"},
     "clickhouse": {"bin": "clickhouse-client", "port": 9000, "label": "ClickHouse"},
     "redis":      {"bin": "redis-cli", "port": 6379, "label": "Redis"},
+    # InfluxDB vine în două lumi incompatibile: 1.x = user/parolă cu prompt „password:" (intră
+    # perfect pe ask/stored — injecţia agentului matchuieşte exact promptul ăsta), 2.x/3.x =
+    # token FĂRĂ prompt, deci un token „stored" ar trebui să treacă prin argv/env → vizibil în
+    # ps/transcript, exact ce interzice modelul. Pentru 2.x lansăm `influx v1 shell` pe config-ul
+    # LOCAL al hostului (`influx config`) — WebTerm nu stochează şi nu atinge token-ul.
+    "influxdb":   {"bin": "influx", "port": 8086, "label": "InfluxDB 1.x"},
+    "influxdb2":  {"bin": "influx", "port": 8086, "label": "InfluxDB 2.x"},
 }
 # câmpurile stocate sunt admin-only, dar validăm oricum: fără spaţii/metacaractere de shell
 _CONN_FIELD = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,127})?$")
@@ -2761,6 +2768,15 @@ def _connection_command(row) -> str:
     elif row["engine"] == "clickhouse":
         parts = ["clickhouse-client", "--host", q(h), "--port", str(p), "--ask-password"] \
             + (["--user", q(u)] if u else []) + (["--database", q(db)] if db else [])
+    elif row["engine"] == "influxdb":
+        # `-password ''` (explicit gol) = CLI-ul 1.x CERE parola la prompt („password:") în loc
+        # s-o ia din argv — fix forma pe care o injectează agentul la `stored`.
+        parts = ["influx", "-host", q(h), "-port", str(p)] \
+            + (["-username", q(u), "-password", "''"] if u else []) \
+            + (["-database", q(db)] if db else [])
+    elif row["engine"] == "influxdb2":
+        # shell interactiv 1.x-compatibil peste v2, autentificat din config-ul LOCAL al hostului
+        parts = ["influx", "v1", "shell", "--host", q("http://%s:%d" % (h, p))]
     else:  # redis
         parts = ["redis-cli", "-h", q(h), "-p", str(p)] + (["-n", q(db)] if db and db.isdigit() else [])
     inner = " ".join(parts)
@@ -2803,6 +2819,10 @@ def _validate_connection(body: ConnectionIn) -> None:
     if body.cred_policy == "stored" and body.engine == "redis":
         # redis-cli n-are prompt de parolă → injecţia în PTY n-are unde să intre. Rămâne pe `ask`.
         raise ApiError(400, "connection.noStoredRedis", "redis has no password prompt — use 'ask'")
+    if body.cred_policy == "stored" and body.engine == "influxdb2":
+        # 2.x/3.x = token fără prompt; token-ul stă în `influx config` pe host, nu în WebTerm
+        raise ApiError(400, "connection.noStoredInflux2",
+                       "InfluxDB 2.x uses a token (no prompt) — configure `influx config` on the host and use 'ask'")
 
 
 @router.get("/api/hosts/{host_id}/connections")
