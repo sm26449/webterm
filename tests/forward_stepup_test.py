@@ -265,6 +265,7 @@ async def main():
             body = api.ConnectionIn(label="x", engine=kw.get("engine", "postgres"),
                                     target_host=kw.get("target_host", "h"),
                                     target_port=kw.get("target_port", 5432),
+                                    username=kw.get("username", ""),
                                     cred_policy=policy)
             try:
                 api._validate_connection(body); return None
@@ -272,8 +273,10 @@ async def main():
                 return e.code
         check("redis + stored respins (fără prompt de parolă)",
               _bad("stored", engine="redis") == "connection.noStoredRedis")
-        check("influxdb 1.x + stored acceptat (are prompt „password:”)",
-              _bad("stored", engine="influxdb") is None)
+        check("influxdb 1.x + stored FĂRĂ user respins (parola s-ar arma degeaba)",
+              _bad("stored", engine="influxdb") == "connection.influxNeedsUser")
+        check("influxdb 1.x + stored CU user acceptat (are prompt „password:”)",
+              _bad("stored", engine="influxdb", username="admin") is None)
         check("influxdb 2.x + stored acceptat (wrapper-ul emite prompt propriu)",
               _bad("stored", engine="influxdb2") is None)
         ix = api._connection_command({"engine": "influxdb", "target_host": "h", "target_port": 8086,

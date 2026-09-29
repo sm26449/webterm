@@ -2828,6 +2828,12 @@ def _validate_connection(body: ConnectionIn) -> None:
     if body.cred_policy == "stored" and body.engine == "redis":
         # redis-cli n-are prompt de parolă → injecţia în PTY n-are unde să intre. Rămâne pe `ask`.
         raise ApiError(400, "connection.noStoredRedis", "redis has no password prompt — use 'ask'")
+    if body.cred_policy == "stored" and body.engine == "influxdb" and not (body.username or "").strip():
+        # influx 1.x emite promptul „password:" DOAR când dai `-username` (vezi _connection_command).
+        # Fără user, parola din vault s-ar arma dar n-ar avea unde să intre — exact capcana tăcută
+        # pentru care redis+stored e refuzat. Cere user, ca secretul stocat chiar să fie folosit. (audit v54)
+        raise ApiError(400, "connection.influxNeedsUser",
+                       "InfluxDB 1.x needs a username for a stored password")
 
 
 @router.get("/api/hosts/{host_id}/connections")
@@ -4498,16 +4504,21 @@ async def _require_host_stepup(host_id: int, user, grant: str = "", password: st
     # browser crăpa cu AttributeError → 500. Prins de `stepup_test` în CI, nu în producţie.
     if isinstance(user, dict) and user.get("is_token"):
         raise ApiError(403, "host.needs2faNoToken", "the host requires 2FA — not reachable with an automation token")
-    if security.stepup_window_ok(user["id"], host_id):
-        return
-    # Ramura de passkey se alegea după URL-ul public (`_webauthn_available` verifică doar că
-    # rp_id e un domeniu, nu un IP) — NU după faptul că userul chiar are un passkey înrolat.
-    # Cine marca un host „cere 2FA" fără să aibă passkey rămânea blocat afară definitiv: orice
-    # acţiune dădea 403, parola contului era refuzată, iar DEZACTIVAREA 2FA trece prin acelaşi
-    # gard, deci nici înapoi nu se putea. Verificăm existenţa unei credenţiale.
-    # Un grant passkey VALID e acceptat întotdeauna — e cel mai tare factor pe care îl avem.
+    # Un grant passkey VALID e acceptat întotdeauna — e cel mai tare factor pe care îl avem —
+    # şi se verifică ÎNAINTEA ferestrei deschise: prezentarea unui factor proaspăt trebuie să
+    # REÎMPROSPĂTEZE `opened_at`, nu să fie scurtcircuitată de o fereastră veche încă validă.
+    # Fără asta, un gate de „factor proaspăt" (deploy de cheie, _require_fresh_factor) intra în
+    # DEADLOCK: /stepup nu reînnoia niciodată opened_at cât fereastra era deschisă, deci
+    # freshness-ul nu putea fi atins prin ceremonia normală din client. (audit v54)
     if grant and security.consume_stepup_grant(grant, user["id"], host_id):
         security.open_stepup_window(user["id"], host_id)
+        return
+    # Când se prezintă un factor (grant/parolă), fereastra veche NU mai scurtcircuitează:
+    # lăsăm scara de mai jos să ruleze, ca factorul să reîmprospăteze `opened_at`. Fără asta,
+    # un gate de „factor proaspăt" (deploy de cheie) rămânea în deadlock — /stepup returna pe
+    # fereastra deschisă fără s-o reînnoiască. Parola NU sare peste passkey: ordinea de mai jos
+    # (passkey → sso → parolă) rămâne, deci un user cu passkey tot passkey trebuie să dea. (audit v54)
+    if not (grant or password) and security.stepup_window_ok(user["id"], host_id):
         return
     # Cerem passkey doar dacă omul CHIAR are unul. Ramura se alegea după URL-ul public
     # (`_webauthn_available` verifică doar că rp_id e un domeniu, nu un IP), nu după credenţialele
@@ -4546,7 +4557,11 @@ async def host_stepup(host_id: int, body: SessionIn, request: Request,
         if body.stepup_grant and security.consume_stepup_grant(
                 body.stepup_grant, user["id"], host_id):
             security.open_stepup_window(user["id"], host_id)
-        elif body.stepup_password and await _verify_reauth_password(user, body.stepup_password):
+        elif body.stepup_password:
+            # o parolă GREŞITĂ e o eroare, nu un 200 tăcut: altfel clientul crede că step-up-ul
+            # a reuşit, iar deploy-ul următor eşuează inexplicabil. (audit v54)
+            if not await _verify_reauth_password(user, body.stepup_password):
+                raise ApiError(401, "auth.wrongCurrentPassword", "wrong account password")
             security.open_stepup_window(user["id"], host_id)
     # deblocare PROASPĂTĂ (nu re-apel idempotent cât fereastra e deschisă) a unui host marcat 2FA
     # = un host protejat tocmai a fost accesat: notificăm (email + webhook), throttle-uit per host.
@@ -4689,17 +4704,22 @@ async def deploy_key_get(host_id: int, user=Depends(security.require_user)):
     plus cheile ALTOR hosturi deployate AICI (inbound — vizibilitate pe graful de acces,
     inclusiv pentru garda anti-pivot din UI)."""
     await _dk_agent_host(host_id)
+    # graful de acces SSH al hostului (fingerprints, ce ţinte poate atinge, ce chei intră aici)
+    # e topologie sensibilă → pe host 2FA, aceeaşi poartă de step-up ca services/docker-logs/fs
+    await _require_host_stepup(host_id, user)
     key = await db.fetchone("SELECT * FROM ssh_keys WHERE host_id=?", host_id)
     deps = []
     if key:
+        # LEFT JOIN, nu JOIN: un host ŞTERS din flotă nu face să dispară şi evidenţa — cheia e
+        # ÎNCĂ autorizată pe maşina aia, iar rândul rămas e singura urmă că uşa există (M-6).
         deps = await db.fetchall(
             "SELECT d.*, h.name AS target_name, h.hostname AS target_hostname, h.agent_user"
             " FROM ssh_key_deployments d"
-            " JOIN hosts h ON h.id=d.target_host_id WHERE d.key_id=? ORDER BY h.name", key["id"])
+            " LEFT JOIN hosts h ON h.id=d.target_host_id WHERE d.key_id=? ORDER BY h.name", key["id"])
     inbound = await db.fetchall(
         "SELECT d.*, k.host_id AS source_host_id, h.name AS source_name,"
         " k.fingerprint AS fp FROM ssh_key_deployments d"
-        " JOIN ssh_keys k ON k.id=d.key_id JOIN hosts h ON h.id=k.host_id"
+        " JOIN ssh_keys k ON k.id=d.key_id LEFT JOIN hosts h ON h.id=k.host_id"
         " WHERE d.target_host_id=? AND d.revoked_at IS NULL ORDER BY h.name", host_id)
     return {
         "key": {"id": key["id"], "public_key": key["public_key"], "fingerprint": key["fingerprint"],
@@ -4754,9 +4774,14 @@ async def deploy_key_generate(host_id: int, body: DeployKeyIn, request: Request,
         raise ApiError(502, "sshkey.keygenFailed", "could not read the public key back")
     pub = base64.b64decode(r.get("data_b64") or "").decode("utf-8", "replace").strip()
     _blob, fp = _dk_validate(pub)         # H-1: validare strictă la CITIRE
-    await db.execute(
-        "INSERT INTO ssh_keys(host_id, public_key, fingerprint, comment, created, created_by)"
-        " VALUES(?,?,?,?,?,?)", host_id, pub, fp, "webterm-deploy", time.time(), user["email"])
+    try:
+        await db.execute(
+            "INSERT INTO ssh_keys(host_id, public_key, fingerprint, comment, created, created_by)"
+            " VALUES(?,?,?,?,?,?)", host_id, pub, fp, "webterm-deploy", time.time(), user["email"])
+    except sqlite3.IntegrityError:
+        # două generate concurente: check-then-insert nu e atomic, UNIQUE(host_id) e gardul real
+        # — al doilea primeşte acelaşi răspuns ca la re-apel, nu un 500
+        raise ApiError(409, "sshkey.exists", "this host already has a deploy key")
     audit.detail(request, "deploy-key generated on %s (%s)" % (host["name"], fp))
     log.info("deploy key generated on host #%d (%s) by %s", host_id, fp, user["email"])
     return {"public_key": pub, "fingerprint": fp}
@@ -4774,7 +4799,9 @@ async def deploy_key_deploy(host_id: int, body: DeployKeyIn, request: Request,
         raise ApiError(400, "sshkey.selfDeploy", "a host does not deploy its own key to itself")
     audit.detail(request, "deploy-key %s: %s -> %s" % (key["fingerprint"],
                  source["name"] if source else "?", target["name"]))
-    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
+    # UN SINGUR gate: „factor proaspăt" e strict mai tare decât step-up-ul obişnuit (îl
+    # subsumează pe hosturi 2FA şi se aplică şi pe cele fără), deci apelul dublu era redundant
+    # şi cupla două gărzi printr-un efect secundar de consum de grant. (audit v54)
     await _require_fresh_factor(host_id, user, body.stepup_grant, body.stepup_password)   # H-3
     # Garda anti-pivot: ţinta are propria cheie activă → deploy-ul creează un lanţ de acces.
     own = await db.fetchone(
@@ -4842,20 +4869,31 @@ async def deploy_key_revoke(host_id: int, body: DeployKeyIn, request: Request,
     await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
     blob, _fp = _dk_validate(key["public_key"])
     qb = shlex.quote(blob)
-    # grep -v iese cu 1 când rezultatul e GOL (ştergi ultima cheie) — e succes, nu eroare.
-    # mktemp în ~/.ssh sub umask 077 + chmod explicit înainte de mv (mv păstrează perms).
+    # `grep -cF` iese cu: 0=găsit, 1=negăsit (fişier lizibil, cheia nu e), 2=EROARE (nu poate
+    # citi — fişier al altui user, mode 000). NU confundăm 2 cu „negăsit": altfel marcam
+    # „revoked" în evidenţă deşi cheia rămâne VIE pe ţintă (revoke fals-pozitiv). Deci: 2 →
+    # WT_ERROR (nu atingem nimic, nu marcăm), 1 → WT_NONE, 0 → rescriem. grep -v iese cu 1
+    # când rezultatul e gol (ştergem ultima cheie) — e succes. mktemp în ~/.ssh + chmod înainte
+    # de mv. (audit v54)
     cmd = ("umask 077; f=\"$HOME/.ssh/authorized_keys\"; "
            "[ -f \"$f\" ] || { echo WT_NONE; exit 0; }; "
-           "n=$(command grep -cF %(b)s \"$f\"); [ \"$n\" -gt 0 ] || { echo WT_NONE; exit 0; }; "
-           "t=$(mktemp \"$HOME/.ssh/.ak.XXXXXX\") || exit 1; "
+           "n=$(command grep -cF %(b)s \"$f\" 2>/dev/null); grc=$?; "
+           "[ \"$grc\" -ge 2 ] && { echo WT_ERROR; exit 3; }; "
+           "[ \"$grc\" -eq 1 ] && { echo WT_NONE; exit 0; }; "
+           "t=$(mktemp \"$HOME/.ssh/.ak.XXXXXX\") || { echo WT_ERROR; exit 1; }; "
            "command grep -vF %(b)s \"$f\" > \"$t\"; rc=$?; "
-           "[ \"$rc\" -le 1 ] || { rm -f \"$t\"; exit \"$rc\"; }; "
-           "chmod 600 \"$t\" && mv \"$t\" \"$f\" && echo \"WT_REMOVED:$n\"" % {"b": qb})
+           "[ \"$rc\" -le 1 ] || { rm -f \"$t\"; echo WT_ERROR; exit \"$rc\"; }; "
+           "chmod 600 \"$t\" && mv \"$t\" \"$f\" && echo \"WT_REMOVED:$n\" || { echo WT_ERROR; exit 1; }"
+           % {"b": qb})
     resp = await _host_run(host_id, cmd, timeout=20)
     out = resp.get("stdout") or ""
+    # marcăm revoked DOAR când chiar am scos linia (WT_REMOVED) sau am CONFIRMAT că nu era
+    # (WT_NONE, fişier lizibil). WT_ERROR / marker lipsă → NU atingem evidenţa: cheia poate fi
+    # încă vie, iar un „revoked" fals ar ascunde o uşă deschisă.
     if resp.get("exit_code") != 0 or ("WT_REMOVED" not in out and "WT_NONE" not in out):
         raise ApiError(502, "sshkey.revokeFailed",
-                       ("revoke failed: " + (resp.get("stderr") or ""))[:300])
+                       ("revoke failed (the key may still be live on the target): "
+                        + (resp.get("stderr") or ""))[:300])
     await db.execute(
         "UPDATE ssh_key_deployments SET status='revoked', revoked_at=? WHERE key_id=? AND target_host_id=?",
         time.time(), key["id"], host_id)
@@ -4900,9 +4938,12 @@ async def deploy_key_delete(host_id: int, request: Request, stepup_grant: str = 
     host = await _dk_agent_host(host_id)
     key = await _dk_key_row(host_id)
     await _require_host_stepup(host_id, user, stepup_grant, stepup_password)
+    # doar deploy-urile pe ţinte care ÎNCĂ există blochează ştergerea: o ţintă scoasă din flotă
+    # nu mai e revocabilă de aici oricum (rândul orfan a stat vizibil în UI drept avertisment),
+    # altfel cheia devenea de neşters pentru totdeauna
     active = await db.fetchone(
-        "SELECT 1 FROM ssh_key_deployments WHERE key_id=? AND revoked_at IS NULL"
-        " AND status != 'missing' LIMIT 1", key["id"])
+        "SELECT 1 FROM ssh_key_deployments d JOIN hosts h ON h.id=d.target_host_id"
+        " WHERE d.key_id=? AND d.revoked_at IS NULL AND d.status != 'missing' LIMIT 1", key["id"])
     if active:
         raise ApiError(409, "sshkey.hasDeployments", "revoke the key from all targets first")
     resp = await _host_run(host_id, "rm -f %s %s.pub" % (_DK_PATH, _DK_PATH), timeout=20)

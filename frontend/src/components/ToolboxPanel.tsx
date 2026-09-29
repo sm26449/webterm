@@ -78,6 +78,7 @@ export default function ToolboxPanel(props: {
   // ── SSH keys (chei de deploy host→host): privata trăieşte pe hostul sursă; aici doar
   //    materialul public + graful sursă→ţintă, cu revoke per-muchie. Vezi audit v54 (H-1..H-4).
   const [dk, setDk] = useState<DeployKeyInfo | null>(null)
+  const [dkFailed, setDkFailed] = useState(false)         // fetch eşuat ≠ „nicio cheie"
   const [dkHosts, setDkHosts] = useState<Host[]>([])      // ţinte posibile (hosturi de agent)
   const [dkBusy, setDkBusy] = useState('')
   const [deployTo, setDeployTo] = useState('')
@@ -89,9 +90,13 @@ export default function ToolboxPanel(props: {
         api<DeployKeyInfo>(`/api/hosts/${props.host.id}/deploy-key`),
         api<Host[]>('/api/hosts'),
       ])
-      setDk(info)
+      setDk(info); setDkFailed(false)
       setDkHosts(hosts.filter((h) => (h.connection_type ?? 'agent') === 'agent' && h.id !== props.host.id))
-    } catch (e) { setError(errText(e, t)); setDk({ key: null, deployments: [], inbound: [] }) }
+    } catch (e) {
+      // fetch eşuat NU e „nicio cheie": nu falsifica starea goală (ar oferi Generate peste o
+      // cheie care poate există) — arată eroarea + Reîncearcă, păstrând orice dk anterior
+      setError(errText(e, t)); setDkFailed(true)
+    }
   }, [props.host.id, t])
   useEffect(() => { if (tab === 'sshkeys' && dk === null) loadDk() }, [tab, dk, loadDk])
 
@@ -244,7 +249,12 @@ export default function ToolboxPanel(props: {
 
           {/* ── SSH KEYS (chei de deploy host→host) ── */}
           {tab === 'sshkeys' && (dk === null ? (
-            <div className="p-4 text-center text-xs text-slate-500">{t('toolbox.loading')}</div>
+            dkFailed ? (
+              <div className="p-6 text-center text-xs text-slate-500">
+                {t('toolbox.error')}<br />
+                <button onClick={loadDk} className="mt-2 wt-link">{t('toolbox.reload')}</button>
+              </div>
+            ) : <div className="p-4 text-center text-xs text-slate-500">{t('toolbox.loading')}</div>
           ) : (
             <div className="space-y-3 p-3 text-[12px]">
               <p className="rounded bg-amber-500/10 px-2 py-1.5 text-[11px] leading-snug text-amber-300/90">
@@ -307,7 +317,7 @@ export default function ToolboxPanel(props: {
                         <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${DK_STATUS[d.status]}`}
                           title={t('toolbox.ssh.status.' + d.status)} aria-hidden="true" />
                         <div className="min-w-0 flex-1">
-                          <div className="truncate text-[12px] text-slate-200">{d.target_name}</div>
+                          <div className="truncate text-[12px] text-slate-200">{d.target_name || t('toolbox.ssh.deletedHost')}</div>
                           <div className="truncate font-mono text-[10.5px] text-slate-500">
                             {d.target_user || '?'}@{d.target_hostname || d.target_name}
                             {d.options ? ' · ' + d.options : ''} · {t('toolbox.ssh.status.' + d.status)}

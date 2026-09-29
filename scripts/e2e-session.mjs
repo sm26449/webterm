@@ -747,6 +747,55 @@ try {
   check('split: ştergerea scoate chip-ul',
     (await page.locator('button:has-text("e2e-split")').count()) === 0)
 
+  // ── Toolbox → SSH keys (chei de deploy host→host) + engine-urile InfluxDB ──
+  // Pagina hostului → Toolbox. Containerul de CI N-ARE ssh-keygen, deci întâi verificăm
+  // exact ce vede un user pe un host minimal: eroarea CLARĂ, nu o tăcere. Apoi pre-creăm
+  // perechea prin op-ul `run` (fix calea de „adopţie" a fişierelor existente) şi verificăm
+  // calea fericită: fingerprint SHA256 calculat de gateway, delete cu confirmare.
+  const hostsNow = await (await fetch(`${BASE}/api/hosts`, { headers: { Cookie: cookie } })).json()
+  const ciHost = hostsNow.find((h) => h.name === 'ci-local')
+  // în starea de aici există o sesiune activă → deschidem Toolbox din bara sesiunii (butonul de
+  // pe pagina hostului apare doar când nicio sesiune nu e selectată)
+  await page.locator('button[title="Toolbox — database connections"]').last().click()
+  const tbx = page.locator('aside[aria-label="Toolbox"]').last()
+  await tbx.locator('button:has-text("SSH keys")').click()
+  await page.waitForTimeout(600)
+  check('sshkeys: tab-ul se deschide cu avertismentul de securitate (H-4)',
+    await visible(tbx.locator('text=passphrase-less')))
+  await tbx.locator('button:has-text("Generate key on this host")').click()
+  await page.waitForTimeout(2500)
+  check('sshkeys: host fără ssh-keygen → eroare explicită (openssh-client)',
+    await visible(tbx.locator('text=openssh-client')))
+  const seed = 'mkdir -p ~/.ssh && printf \'%s\\n\' \'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDPZm4qhqNbyCLZbB9jTZ8oS7Ku+m+9lSpM9C7EOMi3O webterm-deploy\' > ~/.ssh/webterm_ed25519.pub && touch ~/.ssh/webterm_ed25519 && chmod 600 ~/.ssh/webterm_ed25519'
+  const seedRes = await (await fetch(`${BASE}/api/hosts/${ciHost.id}/run`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({ command: seed, timeout: 30 }),
+  })).json()
+  if (seedRes.exit_code !== 0) console.error('seed a eșuat:', seedRes)
+  await tbx.locator('button:has-text("Generate key on this host")').click()
+  await page.waitForTimeout(2500)
+  check('sshkeys: generate adoptă perechea existentă → fingerprint SHA256 + „nedeployată"',
+    await visible(tbx.locator('text=SHA256:')) && await visible(tbx.locator('text=Not deployed anywhere yet')))
+  page.once('dialog', (d) => d.accept())
+  await tbx.locator('button[title="Delete the key (files + record)"]').click()
+  await page.waitForTimeout(2000)
+  check('sshkeys: delete (cu confirmare) → înapoi la starea de generate',
+    await visible(tbx.locator('button:has-text("Generate key on this host")')))
+  // formularul de conexiune InfluxDB 2.x: token ≠ parolă → Org în loc de user, fără câmp de
+  // bază, iar hint-ul explică injecţia prin env (niciodată argv/transcript)
+  await tbx.locator('button:has-text("Connections")').click()
+  await tbx.locator('button[aria-label="New connection"]').click()
+  const connDlg = page.locator('.glass').last()
+  await connDlg.locator('select').first().selectOption('influxdb2')
+  await page.waitForTimeout(300)
+  check('influx2: formularul arată Org, fără câmp de bază de date',
+    await visible(connDlg.locator('text=Org (optional)'))
+    && (await connDlg.locator('span:has-text("Database")').count()) === 0)
+  check('influx2: hint-ul explică token-ul (env, nu argv)',
+    await visible(connDlg.locator('text=API token')))
+  await connDlg.locator('button:has-text("Cancel")').click()
+  await tbx.locator('button[aria-label="Close"]').click().catch(() => {})
+
   check('fără erori JS în pagină', pageErrors.length === 0)
   if (pageErrors.length) console.error('pageerrors:', pageErrors)
 } finally {

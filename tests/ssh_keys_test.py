@@ -115,6 +115,7 @@ async def main():
                                  headers=_ORIGIN) as c:
         await c.post("/api/setup", json={"email": "a@b.co", "password": PW,
                                          "setup_token": "test-setup"})
+        uid = (await db.fetchone("SELECT id FROM users WHERE email=?", "a@b.co"))["id"]
         ids = {}
         for n in ("src", "tgt", "evil", "third"):
             ids[n] = (await c.post("/api/hosts", json={"name": n})).json()["id"]
@@ -248,6 +249,58 @@ async def main():
         check("inbound pe ţintă arată cheia sursei",
               len(inb) == 1 and inb[0]["source_host_id"] == ids["src"], r.text)
 
+        # ── ţintă cu require_2fa: AMBELE gărzi (step-up H1 + factor proaspăt H-3) pe o parolă ──
+        await db.execute("UPDATE hosts SET require_2fa=1 WHERE id=?", ids["third"])
+        os.makedirs(os.path.join(homes["third"], ".ssh"), mode=0o700, exist_ok=True)
+        for f in ("webterm_ed25519", "webterm_ed25519.pub"):
+            p3 = os.path.join(homes["third"], ".ssh", f)
+            if os.path.exists(p3):
+                os.unlink(p3)
+        r = await c.post(f"/api/hosts/{ids['third']}/deploy-key/deploy", json=dep)
+        check("ţintă 2FA fără factor → 403 (step-up)", r.status_code == 403, r.text)
+        r = await c.post(f"/api/hosts/{ids['third']}/deploy-key/deploy",
+                         json=dep | {"stepup_password": PW})
+        check("ţintă 2FA cu parolă → 200 (trece şi H1 şi H-3)",
+              r.status_code == 200 and src_pub in ak_lines(homes["third"]), r.text)
+        await c.post(f"/api/hosts/{ids['third']}/deploy-key/revoke", json=dep)
+        await db.execute("UPDATE hosts SET require_2fa=0 WHERE id=?", ids["third"])
+
+        # GET pe host 2FA cere step-up (topologia SSH e sensibilă — audit v54 #6)
+        await db.execute("UPDATE hosts SET require_2fa=1 WHERE id=?", ids["third"])
+        security.clear_stepup_for(uid)
+        r = await c.get(f"/api/hosts/{ids['third']}/deploy-key")
+        check("GET deploy-key pe host 2FA fără step-up → 403", r.status_code == 403, r.text)
+
+        # DEADLOCK regression (audit v54 #1): fereastră VECHE dar validă pe host 2FA. Un factor
+        # proaspăt prin /stepup trebuie să reîmprospăteze opened_at, altfel _require_fresh_factor
+        # rămâne pe veci nesatisfăcut şi deploy-ul intră în buclă de 403.
+        import time as _t
+        security._stepup_windows[(uid, ids["third"])] = (_t.time() - 400, _t.time() + 300)
+        check("fereastra veche NU e „proaspătă” (>120s)",
+              not security.stepup_window_fresh(uid, ids["third"]))
+        r = await c.post(f"/api/hosts/{ids['third']}/stepup", json={"stepup_password": PW})
+        check("/stepup cu parolă pe fereastră veche → 200 (reînnoieşte opened_at)",
+              r.status_code == 200, r.text)
+        check("după /stepup fereastra E proaspătă",
+              security.stepup_window_fresh(uid, ids["third"]))
+        r = await c.post(f"/api/hosts/{ids['third']}/deploy-key/deploy", json=dep)
+        check("deploy fără creds în corp, pe fereastra proaspătă → 200 (fără deadlock)",
+              r.status_code == 200, r.text)
+        await c.post(f"/api/hosts/{ids['third']}/deploy-key/revoke",
+                     json=dep | {"stepup_password": PW})
+        # /stepup cu parolă GREŞITĂ pe host non-2FA → 401, nu 200 tăcut (audit v54 #2)
+        await db.execute("UPDATE hosts SET require_2fa=0 WHERE id=?", ids["third"])
+        r = await c.post(f"/api/hosts/{ids['third']}/stepup", json={"stepup_password": "gresita"})
+        check("/stepup parolă greşită pe host non-2FA → 401 (nu 200 tăcut)",
+              r.status_code == 401, r.text)
+
+        # ── agent offline: deploy → 409, nimic scris, nimic în evidenţă ──────
+        saved = core.sources.pop(ids["third"])
+        r = await c.post(f"/api/hosts/{ids['third']}/deploy-key/deploy",
+                         json=dep | {"stepup_password": PW})
+        check("agent offline la deploy → 409", r.status_code == 409, r.text)
+        core.sources[ids["third"]] = saved
+
         # curăţenie: revoke + delete pe src → fişierele dispar de pe host
         await c.post(f"/api/hosts/{ids['tgt']}/deploy-key/revoke", json=dep)
         r = await c.delete(f"/api/hosts/{ids['src']}/deploy-key")
@@ -257,6 +310,23 @@ async def main():
               r.text)
         r = await c.get(f"/api/hosts/{ids['src']}/deploy-key")
         check("după delete → key null", r.json()["key"] is None, r.text)
+
+        # ── ţintă ŞTEARSĂ din flotă: evidenţa NU dispare (cheia e încă pe maşină), dar nici
+        #    nu blochează pentru totdeauna ştergerea cheii de pe sursă ─────────
+        seed_key(homes["src"], FIXED_PUB)
+        r = await c.post(f"/api/hosts/{ids['src']}/deploy-key/generate", json={})
+        check("re-generate pe src (adopţie) → 200", r.status_code == 200, r.text)
+        r = await c.post(f"/api/hosts/{ids['evil']}/deploy-key/deploy",
+                         json=dep | {"stepup_password": PW})
+        check("deploy pe ţinta ce va fi ştearsă → 200", r.status_code == 200, r.text)
+        await c.delete(f"/api/hosts/{ids['evil']}")
+        r = await c.get(f"/api/hosts/{ids['src']}/deploy-key")
+        dl = r.json()["deployments"]
+        check("ţintă ştearsă → rândul rămâne vizibil, fără nume (orfan marcat)",
+              len(dl) == 1 and dl[0]["target_name"] in ("", None), r.text)
+        r = await c.delete(f"/api/hosts/{ids['src']}/deploy-key")
+        check("orfanul nu blochează ştergerea cheii de pe sursă",
+              r.status_code == 200, r.text)
 
     await db.close()
     for h in homes.values():
