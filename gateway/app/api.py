@@ -4510,12 +4510,23 @@ async def host_stepup(host_id: int, body: SessionIn, request: Request,
     frontend-ul să deblocheze file-browser-ul / fleet-run înainte de acțiuni. Idempotent."""
     was_open = security.stepup_window_ok(user["id"], host_id)
     await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
+    row = await db.fetchone("SELECT name, require_2fa FROM hosts WHERE id=?", host_id)
+    # Pe un host FĂRĂ 2FA gard-ul de mai sus e no-op şi nu deschide nicio fereastră — dar
+    # gate-ul de „factor proaspăt" (deploy-key, H-3) consultă fereastra şi pe astfel de
+    # hosturi. Dacă clientul chiar a prezentat un factor valid, îl onorăm şi aici, ca
+    # ceremonia din client (403 stepup.* → passkey/parolă → retry) să funcţioneze identic
+    # indiferent de flag-ul 2FA al ţintei. Fereastra asta nu deblochează nimic în plus:
+    # _require_host_stepup nici n-o consultă pe hosturi non-2FA.
+    if row and not row["require_2fa"]:
+        if body.stepup_grant and security.consume_stepup_grant(
+                body.stepup_grant, user["id"], host_id):
+            security.open_stepup_window(user["id"], host_id)
+        elif body.stepup_password and await _verify_reauth_password(user, body.stepup_password):
+            security.open_stepup_window(user["id"], host_id)
     # deblocare PROASPĂTĂ (nu re-apel idempotent cât fereastra e deschisă) a unui host marcat 2FA
     # = un host protejat tocmai a fost accesat: notificăm (email + webhook), throttle-uit per host.
-    if not was_open:
-        row = await db.fetchone("SELECT name, require_2fa FROM hosts WHERE id=?", host_id)
-        if row and row["require_2fa"]:
-            email_alerts.notify_host_unlocked(row["name"], security.client_ip(request), user["email"])
+    if not was_open and row and row["require_2fa"]:
+        email_alerts.notify_host_unlocked(row["name"], security.client_ip(request), user["email"])
     return {"ok": True, "window": security.STEPUP_WINDOW}
 
 
@@ -4557,6 +4568,326 @@ async def host_ssh_key_public(host_id: int, body: SessionIn, user=Depends(securi
         raise ApiError(400, "sshkey.badKey", "the stored SSH credential is not a private key (it may be a password)")
     return {"public_key": k.export_public_key().decode().strip(), "fingerprint": k.get_fingerprint(),
             "known_hosts": row["known_hosts"] or ""}
+
+
+# ── Chei de deploy host→host (Toolbox → SSH keys) ────────────────────────────
+# Scop: un host de dev face `ssh` pe hosturi de prod fără agenţi AI acolo. PRIVATA se naşte
+# şi RĂMÂNE pe hostul sursă (~/.ssh/webterm_ed25519); gateway-ul ţine DOAR publica + graful
+# de deploy. Totul prin op-ul `run` + `fs_read` existente — agentul NU e atins (zero bump de
+# flotă). Modelul de securitate: privatele există DOAR pe surse (produl poartă doar material
+# public → un prod compromis nu poate sări mai departe), iar deploy-ul = acordare de acces
+# DURABIL, deci cere un factor PROASPĂT indiferent de flag-ul 2FA al hostului (H-3): paguba
+# unui cookie furat ar supravieţui revocării cookie-ului şi chiar opririi WebTerm.
+_DK_PATH = '"$HOME/.ssh/webterm_ed25519"'          # constante server-side, fără input de user
+_DK_PUB = "~/.ssh/webterm_ed25519.pub"             # pt. fs_read (agentul expandează ~)
+# publica întoarsă de host e input NESIGUR (hostul sursă e fix maşina cu agenţi AI): o
+# „cheie" cu \n ar strecura linii suplimentare în authorized_keys pe TOATE ţintele, iar
+# shlex.quote protejează shell-ul, nu formatul fişierului. O linie, charset închis, comentariu
+# restrâns — şi blob-ul se re-verifică prin decode (tipul din interior trebuie să coincidă).
+_DK_PUBKEY_RE = re.compile(r"^ssh-ed25519 ([A-Za-z0-9+/]{60,120}={0,3})( [A-Za-z0-9@._-]{1,64})?$")
+_DK_FROM_RE = re.compile(r"^[0-9A-Fa-f:.,/]{1,128}$")   # from="…" — doar IP-uri/CIDR, fără ghilimele
+
+
+def _dk_validate(pub: str) -> tuple[str, str]:
+    """Validează linia publică şi întoarce (blob_b64, fingerprint SHA256:…). Fingerprint-ul se
+    calculează AICI, din blob (nu parsat din stdout-ul lui `ssh-keygen -lf` — shell-ul de login
+    poate murdări stdout-ul cu zgomot de profil)."""
+    m = _DK_PUBKEY_RE.match((pub or "").strip())
+    if not m:
+        raise ApiError(400, "sshkey.badPublic", "the public key returned by the host is not a clean ssh-ed25519 line")
+    blob = m.group(1)
+    try:
+        raw = base64.b64decode(blob, validate=True)
+    except Exception:
+        raise ApiError(400, "sshkey.badPublic", "the public key blob is not valid base64")
+    # interiorul blob-ului îşi declară tipul (string length-prefixed) — trebuie să coincidă
+    if not raw.startswith(b"\x00\x00\x00\x0bssh-ed25519"):
+        raise ApiError(400, "sshkey.badPublic", "the key blob does not declare ssh-ed25519")
+    fp = base64.b64encode(hashlib.sha256(raw).digest()).decode().rstrip("=")
+    return blob, "SHA256:" + fp
+
+
+async def _require_fresh_factor(host_id: int, user, grant: str = "", password: str = "") -> None:
+    """Gate-ul „acordare de acces durabil" (H-3): spre deosebire de _require_host_stepup, se
+    aplică şi pe hosturi FĂRĂ require_2fa şi NU se mulţumeşte cu o fereastră de step-up veche —
+    factorul trebuie prezentat ACUM (grant nou, parolă în corp, sau fereastră deschisă ≤120s,
+    cum lasă ceremonia de step-up / callback-ul OIDC intent=stepup)."""
+    if isinstance(user, dict) and user.get("is_token"):
+        raise ApiError(403, "host.needs2faNoToken", "deploy keys are not reachable with an automation token")
+    if grant and security.consume_stepup_grant(grant, user["id"], host_id):
+        security.open_stepup_window(user["id"], host_id)
+        return
+    if security.stepup_window_fresh(user["id"], host_id):
+        return
+    # aceleaşi ramuri de UX ca _require_host_stepup: passkey dacă omul chiar are unul,
+    # re-auth la IdP pentru conturile SSO (parola locală e blocată), altfel parola contului.
+    has_passkey = await db.fetchone(
+        "SELECT 1 FROM webauthn_credentials WHERE user_id=? LIMIT 1", user["id"])
+    if _webauthn_available() and has_passkey:
+        raise ApiError(403, "stepup.passkey", "granting SSH access requires a fresh passkey check")
+    if user["sso_subject"] and config.OIDC_ENABLED:
+        raise ApiError(403, "host.needs2faSso", "re-authenticate with SSO to grant SSH access")
+    if password and await _verify_reauth_password(user, password):
+        security.open_stepup_window(user["id"], host_id)
+        return
+    raise ApiError(403, "stepup.password", "re-enter your account password to grant SSH access")
+
+
+async def _dk_key_row(source_host_id: int):
+    row = await db.fetchone("SELECT * FROM ssh_keys WHERE host_id=?", source_host_id)
+    if not row:
+        raise ApiError(404, "sshkey.noKey", "this host has no deploy key yet")
+    return row
+
+
+async def _dk_agent_host(host_id: int):
+    row = await db.fetchone("SELECT * FROM hosts WHERE id=?", host_id)
+    if not row:
+        raise HTTPException(404)
+    if (row["connection_type"] or "agent") != "agent":
+        raise ApiError(400, "sshkey.notAgent", "deploy keys work on agent hosts only")
+    return row
+
+
+def _dk_dep_json(d) -> dict:
+    return {"id": d["id"], "key_id": d["key_id"], "target_host_id": d["target_host_id"],
+            "target_name": d["target_name"] if "target_name" in d.keys() else "",
+            "target_hostname": d["target_hostname"] if "target_hostname" in d.keys() else "",
+            "target_user": d["agent_user"] if "agent_user" in d.keys() else "",
+            "options": d["options"] or "", "status": d["status"],
+            "deployed_at": d["deployed_at"], "revoked_at": d["revoked_at"]}
+
+
+@router.get("/api/hosts/{host_id}/deploy-key")
+async def deploy_key_get(host_id: int, user=Depends(security.require_user)):
+    """Starea cheii de deploy a hostului: cheia (doar material public), unde e deployată,
+    plus cheile ALTOR hosturi deployate AICI (inbound — vizibilitate pe graful de acces,
+    inclusiv pentru garda anti-pivot din UI)."""
+    await _dk_agent_host(host_id)
+    key = await db.fetchone("SELECT * FROM ssh_keys WHERE host_id=?", host_id)
+    deps = []
+    if key:
+        deps = await db.fetchall(
+            "SELECT d.*, h.name AS target_name, h.hostname AS target_hostname, h.agent_user"
+            " FROM ssh_key_deployments d"
+            " JOIN hosts h ON h.id=d.target_host_id WHERE d.key_id=? ORDER BY h.name", key["id"])
+    inbound = await db.fetchall(
+        "SELECT d.*, k.host_id AS source_host_id, h.name AS source_name,"
+        " k.fingerprint AS fp FROM ssh_key_deployments d"
+        " JOIN ssh_keys k ON k.id=d.key_id JOIN hosts h ON h.id=k.host_id"
+        " WHERE d.target_host_id=? AND d.revoked_at IS NULL ORDER BY h.name", host_id)
+    return {
+        "key": {"id": key["id"], "public_key": key["public_key"], "fingerprint": key["fingerprint"],
+                "created": key["created"]} if key else None,
+        "deployments": [_dk_dep_json(d) for d in deps],
+        "inbound": [{"source_host_id": d["source_host_id"], "source_name": d["source_name"],
+                     "fingerprint": d["fp"], "status": d["status"]} for d in inbound],
+    }
+
+
+class DeployKeyIn(BaseModel):
+    key_host_id: int = 0        # sursa cheii (pt. deploy/revoke/verify pe ruta ţintei)
+    from_ip: str = ""           # opţional: restricţie from="…" pe linia deployată
+    confirmed: bool = False     # garda anti-pivot cere un DA explicit
+    stepup_grant: str = ""
+    stepup_password: str = ""
+
+
+@router.post("/api/hosts/{host_id}/deploy-key/generate")
+async def deploy_key_generate(host_id: int, body: DeployKeyIn, request: Request,
+                              user=Depends(security.require_user)):
+    """Generează perechea pe HOSTUL sursă (ssh-keygen local, prin `run`); privata nu apare în
+    nicio comandă, stdout sau log — citim doar .pub, prin fs_read, şi îl validăm strict."""
+    host = await _dk_agent_host(host_id)
+    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
+    if await db.fetchone("SELECT id FROM ssh_keys WHERE host_id=?", host_id):
+        raise ApiError(409, "sshkey.exists", "this host already has a deploy key")
+    # Garda anti-pivot: dacă hostul e deja ŢINTA unei chei active, a genera o cheie pe el
+    # creează un lanţ (compromiterea sursei lui sare două hopuri). Cere confirmare explicită.
+    pivot = await db.fetchone(
+        "SELECT 1 FROM ssh_key_deployments WHERE target_host_id=? AND revoked_at IS NULL LIMIT 1",
+        host_id)
+    if pivot and not body.confirmed:
+        raise ApiError(409, "sshkey.pivot", "this host is already a deploy TARGET — generating a key here creates an access chain")
+    # `command ssh-keygen`: shell de login (bash -lc) = aliasurile userului se aplică; le ocolim.
+    # Dacă fişierul există deja pe disc (DB pierdut / instalare veche), îl ADOPTĂM (idempotent).
+    cmd = ("umask 077; mkdir -p \"$HOME/.ssh\" || exit 1; "
+           "[ -e %s ] || command ssh-keygen -q -t ed25519 -N '' -C webterm-deploy -f %s || exit 1"
+           % (_DK_PATH, _DK_PATH))
+    resp = await _host_run(host_id, cmd, timeout=30)
+    if resp.get("exit_code") != 0:
+        raise ApiError(502, "sshkey.keygenFailed",
+                       ("ssh-keygen failed: " + (resp.get("stderr") or ""))[:300])
+    conn = core.source_for(host_id)
+    if not isinstance(conn, core.AgentConnection):
+        raise HTTPException(409, "host offline or has no agent")
+    try:
+        r = await conn.request("fs_read", path=_DK_PUB, offset=0, timeout=20)
+    except (core.AgentGone, TimeoutError, asyncio.TimeoutError):
+        raise HTTPException(504, "the host did not answer in time")
+    if not r.get("ok"):
+        raise ApiError(502, "sshkey.keygenFailed", "could not read the public key back")
+    pub = base64.b64decode(r.get("data_b64") or "").decode("utf-8", "replace").strip()
+    _blob, fp = _dk_validate(pub)         # H-1: validare strictă la CITIRE
+    await db.execute(
+        "INSERT INTO ssh_keys(host_id, public_key, fingerprint, comment, created, created_by)"
+        " VALUES(?,?,?,?,?,?)", host_id, pub, fp, "webterm-deploy", time.time(), user["email"])
+    audit.detail(request, "deploy-key generated on %s (%s)" % (host["name"], fp))
+    log.info("deploy key generated on host #%d (%s) by %s", host_id, fp, user["email"])
+    return {"public_key": pub, "fingerprint": fp}
+
+
+@router.post("/api/hosts/{host_id}/deploy-key/deploy")
+async def deploy_key_deploy(host_id: int, body: DeployKeyIn, request: Request,
+                            user=Depends(security.require_user)):
+    """Scrie publica cheii `key_host_id` în authorized_keys pe HOSTUL ŢINTĂ (ruta = ţinta, ca
+    step-up-ul, redirect-ul SSO şi retry-ul din client să se lege natural de ea). Idempotent."""
+    target = await _dk_agent_host(host_id)
+    key = await _dk_key_row(body.key_host_id)
+    source = await db.fetchone("SELECT * FROM hosts WHERE id=?", key["host_id"])
+    if key["host_id"] == host_id:
+        raise ApiError(400, "sshkey.selfDeploy", "a host does not deploy its own key to itself")
+    audit.detail(request, "deploy-key %s: %s -> %s" % (key["fingerprint"],
+                 source["name"] if source else "?", target["name"]))
+    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
+    await _require_fresh_factor(host_id, user, body.stepup_grant, body.stepup_password)   # H-3
+    # Garda anti-pivot: ţinta are propria cheie activă → deploy-ul creează un lanţ de acces.
+    own = await db.fetchone(
+        "SELECT k.id FROM ssh_keys k JOIN ssh_key_deployments d ON d.key_id=k.id"
+        " WHERE k.host_id=? AND d.revoked_at IS NULL LIMIT 1", host_id)
+    if own and not body.confirmed:
+        raise ApiError(409, "sshkey.pivot", "the target has its own active deploy key — this creates an access chain")
+    options = ""
+    if body.from_ip.strip():
+        ip = body.from_ip.strip()
+        if not _DK_FROM_RE.match(ip):
+            raise ApiError(400, "sshkey.badFrom", "from= accepts IPs/CIDRs only (digits, hex, : . , /)")
+        options = 'from="%s"' % ip
+    line = (options + " " if options else "") + key["public_key"]
+    blob, _fp = _dk_validate(key["public_key"])     # H-1: re-validare la DEPLOY, din DB
+    q, qb = shlex.quote(line), shlex.quote(blob)
+    # umask+chmod ÎNAINTE de append (fără fereastră world-readable); `touch` întâi, ca
+    # grep pe fişier lipsă (exit 2) să nu fie confundat cu „linia lipseşte" (exit 1).
+    # Idempotent şi peste SCHIMBĂRI DE OPŢIUNI: dacă blob-ul e deja acolo pe o linie diferită
+    # (re-deploy cu alt from=), liniile vechi cu acelaşi blob se scot întâi — altfel append-ul
+    # ar acumula o linie per variantă de opţiuni. grep -v iese cu 1 pe rezultat gol = succes.
+    cmd = ("umask 077; mkdir -p \"$HOME/.ssh\" && chmod 700 \"$HOME/.ssh\" || exit 1; "
+           "ak=\"$HOME/.ssh/authorized_keys\"; touch \"$ak\" && chmod 600 \"$ak\" || exit 1; "
+           "if ! command grep -qxF %(l)s \"$ak\"; then "
+           "if command grep -qF %(b)s \"$ak\"; then "
+           "t=$(mktemp \"$HOME/.ssh/.ak.XXXXXX\") || exit 1; "
+           "command grep -vF %(b)s \"$ak\" > \"$t\"; rc=$?; "
+           "[ \"$rc\" -le 1 ] || { rm -f \"$t\"; exit \"$rc\"; }; "
+           "chmod 600 \"$t\" && mv \"$t\" \"$ak\" || exit 1; fi; "
+           "command printf '%%s\\n' %(l)s >> \"$ak\" || exit 1; fi; "
+           "command grep -qxF %(l)s \"$ak\"" % {"l": q, "b": qb})
+    resp = await _host_run(host_id, cmd, timeout=20)
+    if resp.get("exit_code") != 0:
+        raise ApiError(502, "sshkey.deployFailed",
+                       ("deploy failed: " + (resp.get("stderr") or ""))[:300])
+    now = time.time()
+    existing = await db.fetchone(
+        "SELECT id FROM ssh_key_deployments WHERE key_id=? AND target_host_id=?",
+        key["id"], host_id)
+    if existing:
+        await db.execute(
+            "UPDATE ssh_key_deployments SET options=?, line=?, status='deployed',"
+            " deployed_at=?, deployed_by=?, revoked_at=NULL WHERE id=?",
+            options, line, now, user["email"], existing["id"])
+    else:
+        await db.execute(
+            "INSERT INTO ssh_key_deployments(key_id, target_host_id, options, line, status,"
+            " deployed_at, deployed_by) VALUES(?,?,?,?,'deployed',?,?)",
+            key["id"], host_id, options, line, now, user["email"])
+    email_alerts.notify_ssh_key_action("DEPLOYED", source["name"] if source else "?",
+                                       target["name"], key["fingerprint"],
+                                       security.client_ip(request), user["email"])
+    return {"ok": True, "line": line, "target_user": target["agent_user"] or ""}
+
+
+@router.post("/api/hosts/{host_id}/deploy-key/revoke")
+async def deploy_key_revoke(host_id: int, body: DeployKeyIn, request: Request,
+                            user=Depends(security.require_user)):
+    """Scoate cheia de pe ŢINTĂ. Potrivim pe BLOB (nu pe linia întreagă): o linie editată
+    manual (opţiuni adăugate pe ţintă) tot dispare — altfel revoke-ul „reuşea" degeaba."""
+    target = await _dk_agent_host(host_id)
+    key = await _dk_key_row(body.key_host_id)
+    source = await db.fetchone("SELECT * FROM hosts WHERE id=?", key["host_id"])
+    audit.detail(request, "deploy-key revoke %s from %s" % (key["fingerprint"], target["name"]))
+    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
+    blob, _fp = _dk_validate(key["public_key"])
+    qb = shlex.quote(blob)
+    # grep -v iese cu 1 când rezultatul e GOL (ştergi ultima cheie) — e succes, nu eroare.
+    # mktemp în ~/.ssh sub umask 077 + chmod explicit înainte de mv (mv păstrează perms).
+    cmd = ("umask 077; f=\"$HOME/.ssh/authorized_keys\"; "
+           "[ -f \"$f\" ] || { echo WT_NONE; exit 0; }; "
+           "n=$(command grep -cF %(b)s \"$f\"); [ \"$n\" -gt 0 ] || { echo WT_NONE; exit 0; }; "
+           "t=$(mktemp \"$HOME/.ssh/.ak.XXXXXX\") || exit 1; "
+           "command grep -vF %(b)s \"$f\" > \"$t\"; rc=$?; "
+           "[ \"$rc\" -le 1 ] || { rm -f \"$t\"; exit \"$rc\"; }; "
+           "chmod 600 \"$t\" && mv \"$t\" \"$f\" && echo \"WT_REMOVED:$n\"" % {"b": qb})
+    resp = await _host_run(host_id, cmd, timeout=20)
+    out = resp.get("stdout") or ""
+    if resp.get("exit_code") != 0 or ("WT_REMOVED" not in out and "WT_NONE" not in out):
+        raise ApiError(502, "sshkey.revokeFailed",
+                       ("revoke failed: " + (resp.get("stderr") or ""))[:300])
+    await db.execute(
+        "UPDATE ssh_key_deployments SET status='revoked', revoked_at=? WHERE key_id=? AND target_host_id=?",
+        time.time(), key["id"], host_id)
+    email_alerts.notify_ssh_key_action("REVOKED", source["name"] if source else "?",
+                                       target["name"], key["fingerprint"],
+                                       security.client_ip(request), user["email"])
+    return {"ok": True, "removed": "WT_REMOVED" in out}
+
+
+@router.post("/api/hosts/{host_id}/deploy-key/verify")
+async def deploy_key_verify(host_id: int, body: DeployKeyIn,
+                            user=Depends(security.require_user)):
+    """Reconciliere: linia deployată mai e pe ţintă aşa cum am scris-o? `deployed` = identică,
+    `edited` = blob-ul e acolo dar linia diferă (opţiuni schimbate manual), `missing` = deloc."""
+    await _dk_agent_host(host_id)
+    key = await _dk_key_row(body.key_host_id)
+    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
+    dep = await db.fetchone(
+        "SELECT * FROM ssh_key_deployments WHERE key_id=? AND target_host_id=?",
+        key["id"], host_id)
+    if not dep:
+        raise HTTPException(404)
+    blob, _fp = _dk_validate(key["public_key"])
+    cmd = ("f=\"$HOME/.ssh/authorized_keys\"; [ -f \"$f\" ] || { echo WT_MISSING; exit 0; }; "
+           "if command grep -qxF %s \"$f\"; then echo WT_OK; "
+           "elif command grep -qF %s \"$f\"; then echo WT_EDITED; else echo WT_MISSING; fi"
+           % (shlex.quote(dep["line"]), shlex.quote(blob)))
+    resp = await _host_run(host_id, cmd, timeout=20)
+    out = resp.get("stdout") or ""
+    status = ("deployed" if "WT_OK" in out else
+              "edited" if "WT_EDITED" in out else "missing")
+    if dep["revoked_at"] is None:
+        await db.execute("UPDATE ssh_key_deployments SET status=? WHERE id=?", status, dep["id"])
+    return {"status": status}
+
+
+@router.delete("/api/hosts/{host_id}/deploy-key")
+async def deploy_key_delete(host_id: int, request: Request, stepup_grant: str = "",
+                            stepup_password: str = "", user=Depends(security.require_user)):
+    """Şterge cheia de pe hostul SURSĂ (fişiere + evidenţă). Refuză cât timp există deploy-uri
+    active: altfel rămân uşi deschise pe ţinte fără nicio urmă în inventar — revocă-le întâi."""
+    host = await _dk_agent_host(host_id)
+    key = await _dk_key_row(host_id)
+    await _require_host_stepup(host_id, user, stepup_grant, stepup_password)
+    active = await db.fetchone(
+        "SELECT 1 FROM ssh_key_deployments WHERE key_id=? AND revoked_at IS NULL"
+        " AND status != 'missing' LIMIT 1", key["id"])
+    if active:
+        raise ApiError(409, "sshkey.hasDeployments", "revoke the key from all targets first")
+    resp = await _host_run(host_id, "rm -f %s %s.pub" % (_DK_PATH, _DK_PATH), timeout=20)
+    if resp.get("exit_code") != 0:
+        raise ApiError(502, "sshkey.deleteFailed",
+                       ("could not remove the key files: " + (resp.get("stderr") or ""))[:300])
+    await db.execute("DELETE FROM ssh_key_deployments WHERE key_id=?", key["id"])
+    await db.execute("DELETE FROM ssh_keys WHERE id=?", key["id"])
+    audit.detail(request, "deploy-key deleted on %s (%s)" % (host["name"], key["fingerprint"]))
+    return {"ok": True}
 
 
 @router.post("/api/hosts/{host_id}/sessions")

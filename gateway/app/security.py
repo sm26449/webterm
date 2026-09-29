@@ -698,6 +698,20 @@ def stepup_window_ok(user_id: int, host_id: int) -> bool:
     return True
 
 
+def stepup_window_fresh(user_id: int, host_id: int, max_age: float = 120.0) -> bool:
+    """Fereastra e deschisă ŞI a fost deschisă ACUM (≤ max_age s)? Pentru acţiunile din clasa
+    „acordare de acces durabil" (deploy de cheie SSH): fereastra glisantă de 5-60 min e prea
+    largă — un cookie furat care o găseşte deschisă ar planta o uşă permanentă. Aici cerem ca
+    factorul (passkey/parolă/re-auth IdP) să fi fost prezentat chiar acum, ca la `sudo -k`.
+    NU prelungeşte fereastra (spre deosebire de stepup_window_ok)."""
+    rec = _stepup_windows.get((user_id, host_id))
+    if rec is None:
+        return False
+    opened_at, exp = rec
+    now = time.time()
+    return exp >= now and now - opened_at <= max_age
+
+
 def clear_stepup_for(user_id: int) -> None:
     """Închide ferestrele de step-up + grant-urile în așteptare ale userului. Chemat la
     logout / schimbare de parolă / schimbare de passkey — un cookie furat nu mai păstrează

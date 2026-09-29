@@ -98,6 +98,26 @@ export interface Host {
   has_credentials?: boolean
 }
 
+// Chei de deploy host→host (Toolbox → SSH keys): DOAR material public + graful de deploy;
+// privata trăieşte pe hostul sursă şi nu tranzitează niciodată gateway-ul.
+export interface DeployKeyDeployment {
+  id: number
+  key_id: number
+  target_host_id: number
+  target_name: string
+  target_hostname: string
+  target_user: string
+  options: string
+  status: 'deployed' | 'edited' | 'missing' | 'revoked'
+  deployed_at: number
+  revoked_at: number | null
+}
+export interface DeployKeyInfo {
+  key: { id: number; public_key: string; fingerprint: string; created: number } | null
+  deployments: DeployKeyDeployment[]
+  inbound: { source_host_id: number; source_name: string; fingerprint: string; status: string }[]
+}
+
 export interface PortForward {
   id: number
   host_id: number

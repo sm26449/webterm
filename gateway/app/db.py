@@ -240,6 +240,37 @@ CREATE TABLE IF NOT EXISTS split_views (
     updated REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_split_views_user ON split_views(user_id, position);
+
+-- Chei de deploy host→host (Toolbox → SSH keys): PRIVATA se naşte şi RĂMÂNE pe hostul
+-- sursă (~/.ssh/webterm_ed25519, generată de agent prin op-ul `run`); aici ţinem DOAR
+-- materialul public + graful de unde-e-deployată, ca accesul să fie inventariat şi
+-- revocabil per-muchie. O cheie per host sursă (UNIQUE) — fără fişiere derivate din label.
+CREATE TABLE IF NOT EXISTS ssh_keys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    host_id INTEGER NOT NULL UNIQUE,        -- hostul SURSĂ (unde stă privata)
+    public_key TEXT NOT NULL,               -- linia publică validată strict (o singură linie)
+    fingerprint TEXT NOT NULL,              -- SHA256:… calculat în gateway din blob
+    comment TEXT DEFAULT '',
+    created REAL NOT NULL,
+    created_by TEXT DEFAULT ''
+);
+
+-- O muchie sursă→ţintă: linia EXACT aşa cum a fost scrisă în authorized_keys (cu opţiunile
+-- ei), ca UI-ul să poată arăta diff-ul; revocarea potriveşte pe BLOB (câmpul 2), nu pe linie,
+-- ca o editare manuală a opţiunilor pe ţintă să nu lase cheia validă dar „revocată".
+CREATE TABLE IF NOT EXISTS ssh_key_deployments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key_id INTEGER NOT NULL,
+    target_host_id INTEGER NOT NULL,
+    options TEXT DEFAULT '',                -- '' | 'from="…"' (validat strict server-side)
+    line TEXT NOT NULL,                     -- linia scrisă (options + public_key)
+    status TEXT DEFAULT 'deployed',         -- deployed | edited | missing | revoked
+    deployed_at REAL NOT NULL,
+    deployed_by TEXT DEFAULT '',
+    revoked_at REAL,
+    UNIQUE(key_id, target_host_id)
+);
+CREATE INDEX IF NOT EXISTS idx_sshdep_target ON ssh_key_deployments(target_host_id);
 """
 
 # additive migrations for DBs created by an older version

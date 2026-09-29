@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { errText, api, ApiError, Connection, Host, withStepup } from '../lib/api'
+import { errText, api, ApiError, Connection, DeployKeyDeployment, DeployKeyInfo, Host, withStepup } from '../lib/api'
 import { copyText } from '../lib/clipboard'
 import { useI18n } from '../lib/i18n'
 import { TerminalPromptIcon, PlusIcon, TrashIcon, PencilIcon, CopyIcon } from './Icons'
@@ -64,10 +64,62 @@ export default function ToolboxPanel(props: {
   const [rows, setRows] = useState<Connection[] | null>(null)
   const [error, setError] = useState('')
   const [edit, setEdit] = useState<Draft | null>(null)   // modalul de creare/editare
-  const [tab, setTab] = useState<'connections' | 'library' | 'history'>('connections')
+  const [tab, setTab] = useState<'connections' | 'sshkeys' | 'library' | 'history'>('connections')
   const [q, setQ] = useState('')                          // filtru pt. Library/History
   const [hist, setHist] = useState<Hist[] | null>(null)   // istoricul de comenzi al hostului
   const copy = (cmd: string) => { copyText(cmd) }         // copyText afişează toast-ul standard
+
+  // ── SSH keys (chei de deploy host→host): privata trăieşte pe hostul sursă; aici doar
+  //    materialul public + graful sursă→ţintă, cu revoke per-muchie. Vezi audit v54 (H-1..H-4).
+  const [dk, setDk] = useState<DeployKeyInfo | null>(null)
+  const [dkHosts, setDkHosts] = useState<Host[]>([])      // ţinte posibile (hosturi de agent)
+  const [dkBusy, setDkBusy] = useState('')
+  const [deployTo, setDeployTo] = useState('')
+  const [fromIp, setFromIp] = useState('')
+
+  const loadDk = useCallback(async () => {
+    try {
+      const [info, hosts] = await Promise.all([
+        api<DeployKeyInfo>(`/api/hosts/${props.host.id}/deploy-key`),
+        api<Host[]>('/api/hosts'),
+      ])
+      setDk(info)
+      setDkHosts(hosts.filter((h) => (h.connection_type ?? 'agent') === 'agent' && h.id !== props.host.id))
+    } catch (e) { setError(errText(e, t)); setDk({ key: null, deployments: [], inbound: [] }) }
+  }, [props.host.id, t])
+  useEffect(() => { if (tab === 'sshkeys' && dk === null) loadDk() }, [tab, dk, loadDk])
+
+  // garda anti-pivot (409 sshkey.pivot) cere un DA explicit → confirm() + retry cu confirmed
+  async function dkRun(busy: string, fn: (confirmed: boolean) => Promise<unknown>) {
+    setDkBusy(busy); setError('')
+    try { await fn(false) } catch (e) {
+      if (e instanceof ApiError && e.code === 'sshkey.pivot') {
+        if (confirm(t('toolbox.ssh.pivotConfirm'))) {
+          try { await fn(true) } catch (e2) { setError(errText(e2, t)) }
+        }
+      } else { setError(errText(e, t)) }
+    }
+    setDkBusy(''); await loadDk()
+  }
+  const dkGenerate = () => dkRun('generate', (confirmed) =>
+    api(`/api/hosts/${props.host.id}/deploy-key/generate`, { method: 'POST', body: JSON.stringify({ confirmed }) }))
+  const dkDeploy = () => dkRun('deploy', (confirmed) =>
+    api(`/api/hosts/${deployTo}/deploy-key/deploy`, { method: 'POST',
+      body: JSON.stringify({ key_host_id: props.host.id, from_ip: fromIp.trim(), confirmed }) }))
+  const dkVerify = (d: DeployKeyDeployment) => dkRun('verify' + d.id, () =>
+    api(`/api/hosts/${d.target_host_id}/deploy-key/verify`, { method: 'POST', body: JSON.stringify({ key_host_id: props.host.id }) }))
+  const dkRevoke = (d: DeployKeyDeployment) => {
+    if (!confirm(t('toolbox.ssh.confirmRevoke', { target: d.target_name }))) return
+    dkRun('revoke' + d.id, () =>
+      api(`/api/hosts/${d.target_host_id}/deploy-key/revoke`, { method: 'POST', body: JSON.stringify({ key_host_id: props.host.id }) }))
+  }
+  const dkDelete = () => {
+    if (!confirm(t('toolbox.ssh.confirmDeleteKey'))) return
+    dkRun('delete', () => api(`/api/hosts/${props.host.id}/deploy-key`, { method: 'DELETE' }))
+  }
+  const DK_STATUS: Record<DeployKeyDeployment['status'], string> = {
+    deployed: 'bg-emerald-500', edited: 'bg-amber-400', missing: 'bg-rose-500', revoked: 'bg-slate-600',
+  }
 
   const loadHist = useCallback(async () => {
     try {
@@ -124,7 +176,7 @@ export default function ToolboxPanel(props: {
       <div className={scrimCls} onClick={props.onClose} aria-hidden="true" />
       <aside className={asideCls} aria-label={t('toolbox.title')}>
         <div className="flex items-center gap-1 border-b border-ink-800 px-2 py-1.5">
-          {(['connections', 'library', 'history'] as const).map((tb) => (
+          {(['connections', 'sshkeys', 'library', 'history'] as const).map((tb) => (
             <button key={tb} onClick={() => setTab(tb)}
               aria-pressed={tab === tb}
               className={`rounded px-2 py-1 text-[12px] font-medium ${tab === tb
@@ -183,6 +235,119 @@ export default function ToolboxPanel(props: {
               </div>
             )
           }))}
+
+          {/* ── SSH KEYS (chei de deploy host→host) ── */}
+          {tab === 'sshkeys' && (dk === null ? (
+            <div className="p-4 text-center text-xs text-slate-500">{t('toolbox.loading')}</div>
+          ) : (
+            <div className="space-y-3 p-3 text-[12px]">
+              <p className="rounded bg-amber-500/10 px-2 py-1.5 text-[11px] leading-snug text-amber-300/90">
+                {t('toolbox.ssh.warn')}
+              </p>
+              {!dk.key ? (
+                <div className="text-center">
+                  <p className="mb-2 text-[11.5px] leading-snug text-slate-400">{t('toolbox.ssh.none')}</p>
+                  <button onClick={dkGenerate} disabled={dkBusy !== ''}
+                    className="rounded bg-sky-600 px-3 py-1.5 text-[12px] font-medium text-white hover:bg-sky-700 disabled:opacity-40">
+                    {dkBusy === 'generate' ? t('toolbox.ssh.generating') : t('toolbox.ssh.generate')}
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <div className="rounded border border-ink-800 bg-ink-800/40 p-2">
+                    <div className="flex items-center gap-2">
+                      <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-slate-300"
+                        title={dk.key.fingerprint}>{dk.key.fingerprint}</span>
+                      <button onClick={() => copy(dk.key!.public_key)}
+                        className="shrink-0 rounded p-1 text-slate-500 hover:bg-ink-700 hover:text-sky-400"
+                        title={t('toolbox.ssh.copyPub')} aria-label={t('toolbox.ssh.copyPub')}><CopyIcon /></button>
+                      <button onClick={dkDelete} disabled={dkBusy !== ''}
+                        className="shrink-0 rounded p-1 text-slate-500 hover:bg-ink-700 hover:text-rose-300"
+                        title={t('toolbox.ssh.deleteKey')} aria-label={t('toolbox.ssh.deleteKey')}><TrashIcon /></button>
+                    </div>
+                    <div className="mt-0.5 font-mono text-[10px] text-slate-500">~/.ssh/webterm_ed25519</div>
+                  </div>
+
+                  <div className="rounded border border-ink-800 p-2">
+                    <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-slate-500">{t('toolbox.ssh.deployTo')}</div>
+                    <div className="flex flex-col gap-1.5">
+                      <select value={deployTo} onChange={(ev) => setDeployTo(ev.target.value)}
+                        className="w-full rounded bg-ink-800 px-2 py-1 text-[12px] text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500"
+                        aria-label={t('toolbox.ssh.deployTo')}>
+                        <option value="">—</option>
+                        {dkHosts.map((h) => (
+                          <option key={h.id} value={h.id} disabled={!h.online}>
+                            {h.name}{h.agent_user ? ` (${h.agent_user})` : ''}{h.online ? '' : ' · offline'}
+                          </option>
+                        ))}
+                      </select>
+                      <input value={fromIp} onChange={(ev) => setFromIp(ev.target.value)}
+                        placeholder={t('toolbox.ssh.fromIpPh')} aria-label={t('toolbox.ssh.fromIp')}
+                        className="w-full rounded bg-ink-800 px-2 py-1 font-mono text-[11px] text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" />
+                      <button onClick={dkDeploy} disabled={!deployTo || dkBusy !== ''}
+                        className="rounded bg-sky-600 px-3 py-1.5 text-[12px] font-medium text-white hover:bg-sky-700 disabled:opacity-40">
+                        {dkBusy === 'deploy' ? t('toolbox.ssh.deploying') : t('toolbox.ssh.deploy')}
+                      </button>
+                    </div>
+                    <p className="mt-1 text-[10.5px] leading-snug text-slate-500">{t('toolbox.ssh.fromIpHint')}</p>
+                  </div>
+
+                  <div>
+                    <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-slate-500">{t('toolbox.ssh.deployments')}</div>
+                    {dk.deployments.length === 0 ? (
+                      <p className="text-[11px] text-slate-500">{t('toolbox.ssh.noDeployments')}</p>
+                    ) : dk.deployments.map((d) => (
+                      <div key={d.id} className="group flex items-center gap-2 border-b border-ink-800/60 py-1.5">
+                        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${DK_STATUS[d.status]}`}
+                          title={t('toolbox.ssh.status.' + d.status)} aria-hidden="true" />
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-[12px] text-slate-200">{d.target_name}</div>
+                          <div className="truncate font-mono text-[10.5px] text-slate-500">
+                            {d.target_user || '?'}@{d.target_hostname || d.target_name}
+                            {d.options ? ' · ' + d.options : ''} · {t('toolbox.ssh.status.' + d.status)}
+                          </div>
+                        </div>
+                        <button onClick={() => copy(`ssh ${d.target_user || 'user'}@${d.target_hostname || d.target_name}`)}
+                          className="shrink-0 rounded p-1 text-slate-500 hover:bg-ink-700 hover:text-sky-400"
+                          title={t('toolbox.ssh.copySsh')} aria-label={t('toolbox.ssh.copySsh')}><CopyIcon /></button>
+                        {d.status !== 'revoked' && (
+                          <>
+                            <button onClick={() => dkVerify(d)} disabled={dkBusy !== ''}
+                              className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-slate-400 hover:bg-ink-700 hover:text-slate-200"
+                              title={t('toolbox.ssh.verify')}>{t('toolbox.ssh.verify')}</button>
+                            <button onClick={() => dkRevoke(d)} disabled={dkBusy !== ''}
+                              className="shrink-0 rounded p-1 text-slate-500 hover:bg-ink-700 hover:text-rose-300"
+                              title={t('toolbox.ssh.revoke')} aria-label={t('toolbox.ssh.revoke')}><TrashIcon /></button>
+                          </>
+                        )}
+                      </div>
+                    ))}
+                    {dk.deployments.some((d) => d.status !== 'revoked') && (
+                      <p className="mt-1.5 text-[10.5px] leading-snug text-slate-500">
+                        {t('toolbox.ssh.sudoersHint')}{' '}
+                        <button className="wt-link" onClick={() => {
+                          const u = dk.deployments.find((d) => d.status !== 'revoked')?.target_user || 'webterm'
+                          copy(`echo '${u} ALL=(root) NOPASSWD: /usr/bin/docker, /usr/bin/systemctl' | sudo tee /etc/sudoers.d/${u}-deploy && sudo chmod 440 /etc/sudoers.d/${u}-deploy`)
+                        }}>{t('toolbox.ssh.sudoersCopy')}</button>
+                      </p>
+                    )}
+                  </div>
+                </>
+              )}
+
+              {dk.inbound.length > 0 && (
+                <div>
+                  <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-slate-500">{t('toolbox.ssh.inbound')}</div>
+                  {dk.inbound.map((k, i) => (
+                    <div key={i} className="border-b border-ink-800/60 py-1.5">
+                      <div className="text-[12px] text-slate-200">{k.source_name}</div>
+                      <div className="truncate font-mono text-[10.5px] text-slate-500" title={k.fingerprint}>{k.fingerprint}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
 
           {/* ── LIBRARY (reţete built-in, Copy) ── */}
           {tab === 'library' && LIBRARY.map((grp) => {

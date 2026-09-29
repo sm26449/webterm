@@ -245,6 +245,19 @@ def notify_security_change(what: str, ip: str, email: str) -> None:
           f"If this was not you, the account is probably compromised.")
 
 
+def notify_ssh_key_action(action: str, source: str, target: str, fingerprint: str,
+                          ip: str, email: str) -> None:
+    """O cheie de deploy a fost pusă/scoasă din authorized_keys pe o ţintă — adică s-a acordat
+    sau retras acces SSH DURABIL, care supravieţuieşte revocării cookie-urilor şi chiar opririi
+    WebTerm. Fiecare muchie nouă trebuie să fie un eveniment văzut, nu o descoperire la audit.
+    Fără throttle: deploy-urile sunt rare şi deliberate; fiecare merită propria urmă."""
+    _fire(f"SSH deploy key {action}: {source} → {target}",
+          f"On account {email}: the deploy key of host '{source}' ({fingerprint}) was "
+          f"{action} on host '{target}'.\nIP: {ip}\n\n"
+          f"If this was not you, revoke the key from Toolbox → SSH keys on '{source}' "
+          f"and check ~/.ssh/authorized_keys on '{target}'.")
+
+
 def notify_host_enrolled(group_name: str, ip: str) -> None:
     """Un host nou s-a auto-înmatriculat în flotă printr-un token de grup. Înrolarea era un act
     deliberat, per-host, dintr-un browser autentificat; un token de grup o face din afară, deci

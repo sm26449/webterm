@@ -7,6 +7,27 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [Unreleased]
+
+### Added
+- **Toolbox → SSH keys: host-to-host deploy keys.** A dev host can now `ssh` into other
+  fleet hosts (deploy/test on prod) without running AI agents there. The private key is
+  **generated on the source host and never leaves it** (`~/.ssh/webterm_ed25519`, via the
+  existing `run`/`fs_read` agent ops — the agent itself is untouched, no fleet update);
+  WebTerm stores only the public key + fingerprint and the **deployment graph** (which
+  targets carry it), so access is inventoried and revocable per edge. Deploying appends the
+  key idempotently to the target agent user's `~/.ssh/authorized_keys` (perms 700/600,
+  one line per key even across option changes); revoking matches the key **blob**, so a
+  manually edited line still gets removed and foreign keys are preserved. Guardrails:
+  the public key read back from the host is strictly validated (a compromised source can't
+  smuggle extra `authorized_keys` lines onto targets); deploying demands a **fresh**
+  2FA/password check even on hosts without `require_2fa` (granting durable SSH access must
+  cost a factor — a stolen cookie alone can't plant a key) and sends an email alert; an
+  **anti-pivot guard** warns before creating access chains (a host that is both source and
+  target); optional `from="IP"` restriction per deployment; automation tokens can't reach
+  any of it. Verify reconciles reality (`deployed` / `edited on target` / `missing`), and
+  deleting a key refuses while active deployments exist.
+
 ## [2.7.0] — 2026-09-28 · agent (53)
 
 Two headline features: the **Toolbox** (databases, command library, history) and **named split
