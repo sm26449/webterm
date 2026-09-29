@@ -272,18 +272,25 @@ async def main():
                 return e.code
         check("redis + stored respins (fără prompt de parolă)",
               _bad("stored", engine="redis") == "connection.noStoredRedis")
-        check("influxdb2 + stored respins (token fără prompt)",
-              _bad("stored", engine="influxdb2") == "connection.noStoredInflux2")
         check("influxdb 1.x + stored acceptat (are prompt „password:”)",
               _bad("stored", engine="influxdb") is None)
+        check("influxdb 2.x + stored acceptat (wrapper-ul emite prompt propriu)",
+              _bad("stored", engine="influxdb2") is None)
         ix = api._connection_command({"engine": "influxdb", "target_host": "h", "target_port": 8086,
                                       "username": "u", "dbname": "d", "cred_policy": "stored"})
         check("influx 1.x: `-password ''` explicit (prompt, nu parolă în argv)",
               "-password ''" in ix and "-username u" in ix and "-database d" in ix, ix)
         ix2 = api._connection_command({"engine": "influxdb2", "target_host": "h", "target_port": 8086,
-                                       "username": "", "dbname": "", "cred_policy": "ask"})
-        check("influx 2.x: `v1 shell` pe config-ul local al hostului, fără secrete",
-              "v1 shell" in ix2 and "http://h:8086" in ix2 and "-password" not in ix2, ix2)
+                                       "username": "myorg", "dbname": "", "cred_policy": "stored"})
+        # promptul wrapper-ului trebuie să conţină EXACT substringul „password:" (tiparul injecţiei
+        # din agent), token-ul se citeşte cu echo OFF şi ajunge la influx DOAR prin env — niciodată
+        # în argv; gol → env nesetat → fallback pe `influx config`-ul hostului
+        check("influx 2.x: prompt injectabil + token doar prin env, cu org",
+              "password: " in ix2 and "stty -echo" in ix2 and "INFLUX_TOKEN" in ix2
+              and "v1 shell" in ix2 and "--org myorg" in ix2 and "--token" not in ix2, ix2)
+        ix2n = api._connection_command({"engine": "influxdb2", "target_host": "h", "target_port": 8086,
+                                        "username": "", "dbname": "", "cred_policy": "ask"})
+        check("influx 2.x fără org: flagul --org lipseşte", "--org" not in ix2n, ix2n)
         check("engine necunoscut respins", _bad("ask", engine="nu-exista") == "connection.badEngine")
         check("host cu metacaractere respins", _bad("ask", target_host="h;rm -rf") == "connection.badField")
         check("port invalid respins", _bad("ask", target_port=99999) == "connection.badPort")

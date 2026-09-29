@@ -2775,8 +2775,17 @@ def _connection_command(row) -> str:
             + (["-username", q(u), "-password", "''"] if u else []) \
             + (["-database", q(db)] if db else [])
     elif row["engine"] == "influxdb2":
-        # shell interactiv 1.x-compatibil peste v2, autentificat din config-ul LOCAL al hostului
-        parts = ["influx", "v1", "shell", "--host", q("http://%s:%d" % (h, p))]
+        # 2.x n-are prompt propriu de token → îl emitem NOI: wrapper-ul afişează un prompt care
+        # conţine „password:" (fix tiparul pe care îl injectează agentul la `stored`), citeşte
+        # token-ul cu echo OFF (nu ajunge în transcript) şi îl dă lui influx DOAR prin env-ul
+        # procesului (owner-only în /proc — nu în argv/ps, nu pe disc). `ask` = acelaşi prompt,
+        # doar că tastează omul. Token gol → env rămâne nesetat → influx cade pe `influx config`-ul
+        # local al hostului (fallback-ul vechi). `username` = org-ul (opţional).
+        script = ("printf 'InfluxDB token password: '; stty -echo; IFS= read -r WT_T; stty echo; "
+                  "printf '\\n'; [ -n \"$WT_T\" ] && export INFLUX_TOKEN=\"$WT_T\"; "
+                  "exec influx v1 shell --host %s%s"
+                  % (q("http://%s:%d" % (h, p)), (" --org %s" % q(u)) if u else ""))
+        parts = ["sh", "-c", q(script)]
     else:  # redis
         parts = ["redis-cli", "-h", q(h), "-p", str(p)] + (["-n", q(db)] if db and db.isdigit() else [])
     inner = " ".join(parts)
@@ -2819,10 +2828,6 @@ def _validate_connection(body: ConnectionIn) -> None:
     if body.cred_policy == "stored" and body.engine == "redis":
         # redis-cli n-are prompt de parolă → injecţia în PTY n-are unde să intre. Rămâne pe `ask`.
         raise ApiError(400, "connection.noStoredRedis", "redis has no password prompt — use 'ask'")
-    if body.cred_policy == "stored" and body.engine == "influxdb2":
-        # 2.x/3.x = token fără prompt; token-ul stă în `influx config` pe host, nu în WebTerm
-        raise ApiError(400, "connection.noStoredInflux2",
-                       "InfluxDB 2.x uses a token (no prompt) — configure `influx config` on the host and use 'ask'")
 
 
 @router.get("/api/hosts/{host_id}/connections")

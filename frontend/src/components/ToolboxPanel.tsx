@@ -53,9 +53,10 @@ const ENGINES: { id: Connection['engine']; label: string; color: string; port: n
   { id: 'influxdb2', label: 'InfluxDB 2.x', color: '#9d8cf0', port: 8086 },
 ]
 const engOf = (e: string) => ENGINES.find((x) => x.id === e)
-// engine-uri FĂRĂ prompt de parolă (redis; influx 2.x = token în `influx config` pe host):
-// injecţia `stored` n-are unde să intre → rămân pe `ask`, iar formularul ascunde selectorul.
-const noStored = (e: string) => e === 'redis' || e === 'influxdb2'
+// engine-uri FĂRĂ prompt de parolă: injecţia `stored` n-are unde să intre → rămân pe `ask`,
+// iar formularul ascunde selectorul. (influx 2.x NU mai e aici: lansatorul lui emite propriul
+// prompt de token, deci ask/stored merg ca la orice parolă — token-ul nu trece prin argv/ps.)
+const noStored = (e: string) => e === 'redis'
 
 type Draft = { id?: number; label: string; engine: Connection['engine']; target_host: string
   target_port: string; username: string; dbname: string; cred_policy: 'ask' | 'stored'; credential: string }
@@ -422,18 +423,19 @@ export default function ToolboxPanel(props: {
                   <input value={edit.target_port} inputMode="numeric" onChange={(ev) => setEdit({ ...edit, target_port: ev.target.value.replace(/\D/g, '') })}
                     placeholder={String(engOf(edit.engine)?.port || '')} className="w-full rounded bg-ink-800 px-2 py-1 font-mono text-[12px] text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" /></label>
               </div>
-              {/* influxdb2 n-are user/parolă/bază: auth = token din `influx config`-ul hostului,
-                  deci câmpurile ar fi ignorate — le ascundem ca formularul să spună adevărul */}
-              {edit.engine !== 'influxdb2' && (
-                <div className="flex gap-2">
-                  <label className="block flex-1"><span className="mb-0.5 block text-xs text-slate-400">{t('toolbox.fUser')}</span>
-                    <input value={edit.username} onChange={(ev) => setEdit({ ...edit, username: ev.target.value })}
-                      className="w-full rounded bg-ink-800 px-2 py-1 font-mono text-[12px] text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" /></label>
+              {/* influxdb2: user → Org (2.x nu are useri aici, are organizaţii), fără câmp de bază
+                  (o alegi cu `use` în shell); secretul e un TOKEN, nu o parolă — etichetăm ca atare */}
+              <div className="flex gap-2">
+                <label className="block flex-1"><span className="mb-0.5 block text-xs text-slate-400">
+                  {t(edit.engine === 'influxdb2' ? 'toolbox.fOrg' : 'toolbox.fUser')}</span>
+                  <input value={edit.username} onChange={(ev) => setEdit({ ...edit, username: ev.target.value })}
+                    className="w-full rounded bg-ink-800 px-2 py-1 font-mono text-[12px] text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" /></label>
+                {edit.engine !== 'influxdb2' && (
                   <label className="block flex-1"><span className="mb-0.5 block text-xs text-slate-400">{t('toolbox.fDb')}</span>
                     <input value={edit.dbname} onChange={(ev) => setEdit({ ...edit, dbname: ev.target.value })}
                       className="w-full rounded bg-ink-800 px-2 py-1 font-mono text-[12px] text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" /></label>
-                </div>
-              )}
+                )}
+              </div>
               {!noStored(edit.engine) && (
                 <label className="block">
                   <span className="mb-0.5 block text-xs text-slate-400">{t('toolbox.fAuth')}</span>
@@ -447,7 +449,8 @@ export default function ToolboxPanel(props: {
               )}
               {!noStored(edit.engine) && edit.cred_policy === 'stored' && (
                 <label className="block">
-                  <span className="mb-0.5 block text-xs text-slate-400">{t('toolbox.fPassword')}</span>
+                  <span className="mb-0.5 block text-xs text-slate-400">
+                    {t(edit.engine === 'influxdb2' ? 'toolbox.fToken' : 'toolbox.fPassword')}</span>
                   <input type="password" value={edit.credential} autoComplete="new-password"
                     onChange={(ev) => setEdit({ ...edit, credential: ev.target.value })}
                     placeholder={edit.id ? t('toolbox.pwKeep') : ''}
