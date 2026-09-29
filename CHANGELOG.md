@@ -26,7 +26,17 @@ back.
   **anti-pivot guard** warns before creating access chains (a host that is both source and
   target); optional `from="IP"` restriction per deployment; automation tokens can't reach
   any of it. Verify reconciles reality (`deployed` / `edited on target` / `missing`), and
-  deleting a key refuses while active deployments exist.
+  deleting a key refuses while active deployments exist. **Multi-target deploy** (one
+  fresh-factor check authorizes the key to N hosts, per-target results), **Test connection**
+  (ssh from the source to a target with the deploy key — BatchMode, accept-new TOFU — reports
+  reachability without touching the target), an idempotent **~/.ssh/config alias** on the
+  source so `ssh <name>` works without `-i`, and a guided **Rotate** (fresh keypair →
+  redeploy to every target → drop the old key, no window without access).
+- **Connections: InfluxDB 1.x and 2.x.** 1.x uses the ask/stored password model (the client's
+  `password:` prompt). 2.x authenticates with an API token: a launcher emits its own hidden
+  prompt and passes the token to `influx v1 shell` only through the process environment —
+  never the command line or the transcript — so the token can be stored in the vault like any
+  password, or left to the host's own `influx config`.
 
 ## [2.7.0] — 2026-09-28 · agent (53)
 

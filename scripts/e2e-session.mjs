@@ -768,7 +768,7 @@ try {
     await visible(tbx.locator('text=openssh-client')))
   const seed = 'mkdir -p ~/.ssh && printf \'%s\\n\' \'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDPZm4qhqNbyCLZbB9jTZ8oS7Ku+m+9lSpM9C7EOMi3O webterm-deploy\' > ~/.ssh/webterm_ed25519.pub && touch ~/.ssh/webterm_ed25519 && chmod 600 ~/.ssh/webterm_ed25519'
   const seedRes = await (await fetch(`${BASE}/api/hosts/${ciHost.id}/run`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie, Origin: BASE },
     body: JSON.stringify({ command: seed, timeout: 30 }),
   })).json()
   if (seedRes.exit_code !== 0) console.error('seed a eșuat:', seedRes)
@@ -776,7 +776,7 @@ try {
   await page.waitForTimeout(2500)
   check('sshkeys: generate adoptă perechea existentă → fingerprint SHA256 + „nedeployată"',
     await visible(tbx.locator('text=SHA256:')) && await visible(tbx.locator('text=Not deployed anywhere yet')))
-  page.once('dialog', (d) => d.accept())
+  // dialogurile confirm() sunt deja auto-acceptate de handler-ul persistent de mai sus
   await tbx.locator('button[title="Delete the key (files + record)"]').click()
   await page.waitForTimeout(2000)
   check('sshkeys: delete (cu confirmare) → înapoi la starea de generate',
