@@ -1074,7 +1074,7 @@ const en: Lang = {
     'toolbox.fUser': "User",
     'toolbox.fDb': "Database",
     'toolbox.askHint': "The client asks for the password when it opens — WebTerm stores nothing. For prompt-free connect, choose “Stored password”.",
-    'toolbox.influx2Hint': "InfluxDB 2.x authenticates with a token from the host's own `influx config` (run it once on the host) — WebTerm stores nothing and opens `influx v1 shell`. User/database fields are ignored.",
+    'toolbox.influx2Hint': "InfluxDB 2.x has no user/password — it authenticates with a token that stays on the host. One-time setup there: influx config create --config-name local --host-url http://localhost:8086 --org <org> --token <token>. WebTerm stores nothing and just opens `influx v1 shell` over that config.",
     'toolbox.tab.sshkeys': "SSH keys",
     'toolbox.ssh.warn': "A passphrase-less deploy key gives EVERY process on this host (including AI agents) SSH access to its targets. Keep private keys only on source hosts — never deploy toward this host if it holds a key.",
     'toolbox.ssh.none': "No deploy key on this host yet. Generate one to let this host ssh into other hosts of the fleet — the private key is created on the host and never leaves it.",

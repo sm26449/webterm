@@ -1085,7 +1085,7 @@ const ro: Lang = {
     'toolbox.fUser': "Utilizator",
     'toolbox.fDb': "Bază de date",
     'toolbox.askHint': "Clientul cere parola la deschidere — WebTerm nu stochează nimic. Pentru conectare fără prompt, alege „Parolă stocată”.",
-    'toolbox.influx2Hint': "InfluxDB 2.x se autentifică cu token din `influx config`-ul propriu al hostului (rulează-l o dată pe host) — WebTerm nu stochează nimic şi deschide `influx v1 shell`. Câmpurile user/bază sunt ignorate.",
+    'toolbox.influx2Hint': "InfluxDB 2.x nu are user/parolă — se autentifică cu un token care RĂMÂNE pe host. Setup o singură dată, pe host: influx config create --config-name local --host-url http://localhost:8086 --org <org> --token <token>. WebTerm nu stochează nimic şi doar deschide `influx v1 shell` peste config-ul ăla.",
     'toolbox.tab.sshkeys': "Chei SSH",
     'toolbox.ssh.warn': "O cheie de deploy fără passphrase dă ORICĂRUI proces de pe hostul ăsta (inclusiv agenţilor AI) acces SSH la ţintele ei. Ţine cheile private doar pe hosturi-sursă — nu face deploy CĂTRE un host care are propria cheie.",
     'toolbox.ssh.none': "Hostul ăsta nu are încă o cheie de deploy. Generează una ca hostul să poată face ssh către alte hosturi din flotă — cheia privată se creează pe host şi nu-l părăseşte niciodată.",

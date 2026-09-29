@@ -422,14 +422,18 @@ export default function ToolboxPanel(props: {
                   <input value={edit.target_port} inputMode="numeric" onChange={(ev) => setEdit({ ...edit, target_port: ev.target.value.replace(/\D/g, '') })}
                     placeholder={String(engOf(edit.engine)?.port || '')} className="w-full rounded bg-ink-800 px-2 py-1 font-mono text-[12px] text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" /></label>
               </div>
-              <div className="flex gap-2">
-                <label className="block flex-1"><span className="mb-0.5 block text-xs text-slate-400">{t('toolbox.fUser')}</span>
-                  <input value={edit.username} onChange={(ev) => setEdit({ ...edit, username: ev.target.value })}
-                    className="w-full rounded bg-ink-800 px-2 py-1 font-mono text-[12px] text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" /></label>
-                <label className="block flex-1"><span className="mb-0.5 block text-xs text-slate-400">{t('toolbox.fDb')}</span>
-                  <input value={edit.dbname} onChange={(ev) => setEdit({ ...edit, dbname: ev.target.value })}
-                    className="w-full rounded bg-ink-800 px-2 py-1 font-mono text-[12px] text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" /></label>
-              </div>
+              {/* influxdb2 n-are user/parolă/bază: auth = token din `influx config`-ul hostului,
+                  deci câmpurile ar fi ignorate — le ascundem ca formularul să spună adevărul */}
+              {edit.engine !== 'influxdb2' && (
+                <div className="flex gap-2">
+                  <label className="block flex-1"><span className="mb-0.5 block text-xs text-slate-400">{t('toolbox.fUser')}</span>
+                    <input value={edit.username} onChange={(ev) => setEdit({ ...edit, username: ev.target.value })}
+                      className="w-full rounded bg-ink-800 px-2 py-1 font-mono text-[12px] text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" /></label>
+                  <label className="block flex-1"><span className="mb-0.5 block text-xs text-slate-400">{t('toolbox.fDb')}</span>
+                    <input value={edit.dbname} onChange={(ev) => setEdit({ ...edit, dbname: ev.target.value })}
+                      className="w-full rounded bg-ink-800 px-2 py-1 font-mono text-[12px] text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" /></label>
+                </div>
+              )}
               {!noStored(edit.engine) && (
                 <label className="block">
                   <span className="mb-0.5 block text-xs text-slate-400">{t('toolbox.fAuth')}</span>
