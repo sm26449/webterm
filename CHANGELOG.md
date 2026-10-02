@@ -12,14 +12,18 @@ back.
 ### Added
 - **The host page is now a dashboard hub with a left section rail.** A vertical nav (icons +
   labels) on the left — Overview · Sessions · Files · Forwards · Services · Docker · Databases —
-  replaces the scattered narrow drawers; on mobile it becomes a horizontal scroll row. **Overview
-  is a real dashboard**: active sessions render as **live thumbnail cards** (each a read-only,
-  auto-refreshing `SessionPreview` — click to open, hover for split/pop-out), above host
-  connection/security/agent/resources/apps laid out as a responsive card grid. Sessions keeps the
-  master-detail list + live preview + replay; Files/Forwards/Services/Docker/Databases render the
-  existing panels **full-width inline** (new `embed` mode — no drawer, no scrim). Agent-only
-  sections show only when the agent is online; ssh/telnet/jump hosts get Overview + Sessions.
-  Serial and Diagnostics stay as header actions. Each panel is lazy-loaded (Files pulls Monaco).
+  replaces the scattered narrow drawers; on mobile it becomes a horizontal scroll row.
+  **Overview is a real dashboard**: a status hero band (big Online/Offline/On-demand with a
+  host-colour glow, the address, and fact chips — agent version · backend · OS-updates · tags);
+  a row of **metric tiles with ring gauges** (CPU · Memory · Disk, %% threshold-coloured, with
+  trend sparklines) plus a Load tile, auto-fitting to fill the width; **live session thumbnails**
+  (read-only auto-refreshing `SessionPreview`, click to open, hover for split/pop-out, with a
+  "no output yet" placeholder when empty); and host connection/security/agent/apps/note as a
+  balanced two-column card grid with coloured icon chips. Sessions keeps the master-detail list +
+  live preview + replay; Files/Forwards/Services/Docker/Databases render the existing panels
+  **full-width inline** (new `embed` mode — no drawer, no scrim). Agent-only sections show only
+  when the agent is online; ssh/telnet/jump hosts get Overview + Sessions. Serial and Diagnostics
+  stay as header actions. Each panel is lazy-loaded (Files pulls Monaco).
 - **Jump targets are saved as children of their agent, added from its ⋯ menu.** "Add SSH / Telnet
   jump…" on an agent host opens Add-host already scoped to that agent: pick the protocol (SSH or
   Telnet), the LAN target, and save. The saved target appears **nested under the agent** in the
