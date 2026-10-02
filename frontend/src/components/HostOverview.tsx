@@ -261,6 +261,27 @@ export default function HostOverview(props: {
                   </div>
                 </section>
               )}
+
+              {/* stare goală: fără sesiuni active, nu lăsăm un ecran pustiu — un îndemn clar */}
+              {active.length === 0 && (
+                <div className="flex flex-col items-center gap-3 rounded-2xl border border-dashed border-ink-700 px-6 py-10 text-center">
+                  <span className="grid h-11 w-11 place-items-center rounded-xl bg-ink-800 text-slate-500 [&>svg]:h-5 [&>svg]:w-5"><TerminalPromptIcon /></span>
+                  <p className="text-sm text-slate-500">{t('host.noActiveSessions')}</p>
+                  <div className="flex items-center gap-2">
+                    <button disabled={!canConnect} onClick={() => props.onNewSession(host)}
+                      className="rounded-lg bg-sky-600 px-3.5 py-2 text-sm font-medium text-white hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-40">
+                      <span className="inline-flex items-center gap-1.5"><PlusIcon /> {t('host.newSession')}</span>
+                    </button>
+                    {closed.length > 0 && (
+                      <button onClick={() => setTab('sessions')}
+                        className="rounded-lg px-3 py-2 text-sm text-slate-400 ring-1 ring-ink-700 hover:bg-ink-800">
+                        {t('host.closed')} · {closed.length}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+
               <HostDetail host={host} />
             </div>
           </div>
@@ -371,9 +392,57 @@ export default function HostOverview(props: {
   )
 }
 
-/** Card-thumbnail pentru o sesiune activă: un preview LIVE read-only (xterm auto-fit) +
-    titlu + acţiuni la hover (split/popout). Click pe card = deschide terminalul. Dă paginii
-    Overview un aer de dashboard, nu o listă de butoane. */
+/** Preview-text al unei sesiuni pentru thumbnail: ia coada transcriptului, curăţă secvenţele
+    ANSI/OSC + octeţii de control şi arată ultimele linii VIZIBILE ca text mono. Fiabil la orice
+    dimensiune (spre deosebire de un xterm minuscul, care rămânea negru); gol → placeholder. */
+function ThumbPreview({ sid, live }: { sid: string; live: boolean }) {
+  const { t } = useI18n()
+  const [text, setText] = useState<string | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    const load = async () => {
+      try {
+        const r = await fetch(`/api/sessions/${sid}/preview`, { credentials: 'same-origin' })
+        if (!r.ok || cancelled) return
+        const s = new TextDecoder().decode(new Uint8Array(await r.arrayBuffer()))
+        const clean = s
+          .replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, '')    // OSC (BEL/ST)
+          .replace(/\x1b[PX^_][\s\S]*?\x1b\\/g, '')          // DCS/PM/APC/SOS
+          .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')           // CSI (inclusiv privat: ? > < =)
+          .replace(/\x1b[()*+][\x20-\x7e]/g, '')             // charset
+          .replace(/\x1b[=>Fclmno|}~]/g, '')                 // misc escape simplu
+          .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '')          // alte caractere de control
+        if (cancelled) return
+        // ecranul unui shell e mai ales gol (promptul într-un colţ al unui grid de 24 rânduri);
+        // păstrăm DOAR liniile cu text vizibil, compact şi sus-aliniat — altfel promptul ateriza
+        // după ~13 rânduri goale şi thumbnail-ul părea negru.
+        const lines = clean.split('\n').map((l) => l.replace(/\s+$/, '')).filter((l) => l !== '')
+        setText(lines.slice(-14).join('\n'))
+      } catch { /* ignoră */ }
+    }
+    load()
+    const timer = live ? setInterval(() => { if (!document.hidden) load() }, 3000) : undefined
+    return () => { cancelled = true; if (timer) clearInterval(timer) }
+  }, [sid, live])
+
+  if (!text || !text.trim()) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-1.5 text-slate-600">
+        <svg viewBox="0 0 24 24" className="h-6 w-6" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+          <rect x="3" y="4" width="18" height="16" rx="2" />
+          <path d="M7 9l3 3-3 3M13 15h4" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+        <span className="text-[11px]">{t('host.previewEmpty')}</span>
+      </div>
+    )
+  }
+  return (
+    <pre className="h-full w-full overflow-hidden whitespace-pre px-2.5 py-2 font-mono text-[9px] leading-[1.4] text-slate-400">{text}</pre>
+  )
+}
+
+/** Card-thumbnail pentru o sesiune activă: snapshot text al transcriptului + titlu + acţiuni la
+    hover (split/popout). Click pe card = deschide terminalul. Dă paginii Overview aer de dashboard. */
 function SessionThumb(props: {
   session: Session
   onOpen: () => void
@@ -386,9 +455,9 @@ function SessionThumb(props: {
     <div className="group relative overflow-hidden rounded-xl bg-ink-900 ring-1 ring-ink-700 transition hover:ring-sky-500/60">
       <button onClick={props.onOpen} className="block w-full text-left"
         title={t('host.openTerminal')} aria-label={`${s.title || t('host.sessionFallback')} — ${t('host.openTerminal')}`}>
-        {/* fereastra de preview: raport ~16:10, fundal de terminal; SessionPreview se auto-fit-ează */}
+        {/* fereastra de preview: snapshot text al transcriptului (fiabil la orice dimensiune) */}
         <div className="relative h-[132px] w-full overflow-hidden bg-[#0b0e14]">
-          <SessionPreview key={s.id} sid={s.id} live />
+          <ThumbPreview sid={s.id} live />
           {/* overlay „deschide" la hover */}
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/0 opacity-0 transition group-hover:bg-black/30 group-hover:opacity-100">
             <span className="rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-medium text-white shadow-lg">{t('host.openTerminal')}</span>
@@ -462,7 +531,7 @@ function StatusBand({ host }: { host: Host }) {
   const color = hostColor(host)
   const isAgent = (host.connection_type ?? 'agent') === 'agent'
   const label = reach === 'online' ? t('host.statusOnline')
-    : reach === 'ondemand' ? t('host.connectOnDemand') : t('host.statusOffline')
+    : reach === 'ondemand' ? t('host.statusOndemand') : t('host.statusOffline')
   const dot = reach === 'online' ? 'bg-emerald-400' : reach === 'ondemand' ? 'bg-sky-500' : 'bg-slate-500'
   const tone = reach === 'online' ? 'wt-good' : reach === 'ondemand' ? 'text-sky-400' : 'text-slate-400'
   // sub-linia: adresa, iar pe un agent căzut „de cât timp" (context de incident la o privire)

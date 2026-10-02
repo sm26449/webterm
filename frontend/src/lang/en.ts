@@ -650,6 +650,7 @@ const en: Lang = {
     'host.tools': "Tools",
     'host.statusOnline': "Online",
     'host.statusOffline': "Offline",
+    'host.statusOndemand': "On-demand",
     'host.lastSeen': "Last seen {ago}",
     'host.previewEmpty': "No output yet",
     'host.tabOverview': "Overview",

@@ -658,6 +658,7 @@ const ro: Lang = {
     'host.tools': "Unelte",
     'host.statusOnline': "Online",
     'host.statusOffline': "Offline",
+    'host.statusOndemand': "La cerere",
     'host.lastSeen': "Văzut ultima dată {ago}",
     'host.previewEmpty': "Încă fără output",
     'host.tabOverview': "Prezentare",

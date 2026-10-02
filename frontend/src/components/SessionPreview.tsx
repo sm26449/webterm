@@ -41,8 +41,17 @@ export default function SessionPreview(props: { sid: string; live: boolean }) {
         const buf = new Uint8Array(await r.arrayBuffer())
         if (cancelled) return
         term.reset()
-        term.write(buf)
-        setEmpty(buf.length === 0)
+        // write e asincron; în callback citim BUFFERUL randat — „gol" = nicio linie cu text
+        // vizibil (un shell proaspăt trimite octeţi de control, dar 0 glife → tot „gol").
+        term.write(buf, () => {
+          if (cancelled) return
+          const b = term.buffer.active
+          let hasText = false
+          for (let i = 0; i < b.length && !hasText; i++) {
+            if ((b.getLine(i)?.translateToString(true) ?? '').trim()) hasText = true
+          }
+          setEmpty(!hasText)
+        })
       } catch {
         /* ignoră */
       }
