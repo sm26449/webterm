@@ -9,13 +9,15 @@ export default function Sparkline(props: {
   width?: number
   height?: number
   label: string
+  /** întinde-te pe toată lăţimea containerului (tile de metrică), păstrând coordonatele logice */
+  fluid?: boolean
 }) {
   const { t } = useI18n()
   const w = props.width ?? 56
   const h = props.height ?? 16
   const vals = props.values.slice(-60)
   if (vals.length < 2) {
-    return <span className="inline-block" style={{ width: w, height: h }} aria-hidden="true" />
+    return <span className={props.fluid ? 'block w-full' : 'inline-block'} style={{ height: h, width: props.fluid ? undefined : w }} aria-hidden="true" />
   }
 
   const last = vals[vals.length - 1]
@@ -27,12 +29,13 @@ export default function Sparkline(props: {
 
   return (
     <svg
-      width={w}
+      width={props.fluid ? '100%' : w}
       height={h}
       viewBox={`0 0 ${w} ${h}`}
+      preserveAspectRatio={props.fluid ? 'none' : undefined}
       role="img"
       aria-label={t('sparkline.ariaLabel', { label: props.label, value: Math.round(last) })}
-      className="shrink-0 overflow-visible"
+      className={props.fluid ? 'block w-full overflow-visible' : 'shrink-0 overflow-visible'}
     >
       <path d={area} fill={color} opacity={0.14} />
       <path d={line} fill="none" stroke={color} strokeWidth={1.25} strokeLinejoin="round" strokeLinecap="round" />

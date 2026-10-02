@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import { isSessionLive, api, AppLink, Host, Session, timeAgo } from '../lib/api'
-import { hostAt, hostColor, protoLabel } from '../lib/host'
+import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
 import { useI18n } from '../lib/i18n'
 import { hostHistory } from '../lib/metrics'
 import { DockerIcon, DownloadIcon, FilesIcon, ForwardIcon, LinkIcon, NoteIcon, PlusIcon, PopoutIcon, RefreshIcon, ServerIcon, ServicesIcon, ShieldIcon, SplitIcon, TerminalPromptIcon, ToolboxIcon, TrashIcon } from './Icons'
@@ -218,6 +218,9 @@ export default function HostOverview(props: {
         {tab === 'overview' && (
           <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
             <div className="mx-auto max-w-6xl space-y-6">
+              {/* banda de status — identitate + fapte-cheie, accent = culoarea hostului. Umple
+                  partea de sus şi pe hosturile fără metrici (nu mai rămâne spaţiu mort). */}
+              <StatusBand host={host} />
               {host.backend === 'pty' && (
                 <p className="wt-warn rounded-xl bg-amber-500/10 p-3 text-sm ring-1 ring-amber-500/30">
                   {t('host.noTmuxWarning')}
@@ -369,7 +372,7 @@ function SessionThumb(props: {
       <button onClick={props.onOpen} className="block w-full text-left"
         title={t('host.openTerminal')} aria-label={`${s.title || t('host.sessionFallback')} — ${t('host.openTerminal')}`}>
         {/* fereastra de preview: raport ~16:10, fundal de terminal; SessionPreview se auto-fit-ează */}
-        <div className="relative h-[150px] w-full overflow-hidden bg-[#0b0e14]">
+        <div className="relative h-[132px] w-full overflow-hidden bg-[#0b0e14]">
           <SessionPreview key={s.id} sid={s.id} live />
           {/* overlay „deschide" la hover */}
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/0 opacity-0 transition group-hover:bg-black/30 group-hover:opacity-100">
@@ -422,16 +425,64 @@ function StatTile(props: { label: string; pct?: number; big?: string; sub?: stri
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">{props.label}</div>
-          {props.big != null && <div className="mt-1.5 font-mono text-2xl font-semibold tabular-nums text-slate-100">{props.big}</div>}
-          {props.sub && <div className="mt-1 truncate font-mono text-xs text-slate-500 tabular-nums">{props.sub}</div>}
+          {props.big != null && <div className="mt-2 font-mono text-3xl font-semibold leading-none tabular-nums text-slate-100">{props.big}</div>}
+          {props.sub && <div className="mt-1.5 truncate font-mono text-xs text-slate-500 tabular-nums">{props.sub}</div>}
         </div>
-        {props.pct != null && <Gauge pct={props.pct} color={color} />}
+        {props.pct != null && <Gauge pct={props.pct} color={color} size={64} />}
       </div>
       {props.spark && props.spark.length > 1 && (
-        <div className="mt-3 overflow-hidden">
-          <Sparkline values={props.spark} width={200} height={26} label={props.sparkLabel ?? props.label} />
+        <div className="mt-3">
+          <Sparkline fluid values={props.spark} height={28} label={props.sparkLabel ?? props.label} />
         </div>
       )}
+    </div>
+  )
+}
+
+/** Banda de status — hero-ul paginii: stare mare + fapte-cheie, cu accentul culorii hostului.
+    Prezentă mereu, deci pagina are identitate şi când hostul n-are metrici/sesiuni. */
+function StatusBand({ host }: { host: Host }) {
+  const { t } = useI18n()
+  const reach = reachState(host)
+  const color = hostColor(host)
+  const isAgent = (host.connection_type ?? 'agent') === 'agent'
+  const label = reach === 'online' ? t('host.statusOnline')
+    : reach === 'ondemand' ? t('host.connectOnDemand') : t('host.statusOffline')
+  const dot = reach === 'online' ? 'bg-emerald-400' : reach === 'ondemand' ? 'bg-sky-500' : 'bg-slate-500'
+  const tone = reach === 'online' ? 'wt-good' : reach === 'ondemand' ? 'text-sky-400' : 'text-slate-400'
+  // sub-linia: adresa, iar pe un agent căzut „de cât timp" (context de incident la o privire)
+  const sub = reach === 'offline' && host.last_heartbeat
+    ? t('host.lastSeen', { ago: timeAgo(host.last_heartbeat, t) })
+    : host.hostname ? hostAt(host) : protoLabel(host)
+  const chips: { label: string; tone?: 'warn' | 'danger' }[] = []
+  if (isAgent && host.agent_version != null) chips.push({ label: `agent v${host.agent_version}` })
+  if (host.backend) chips.push({ label: host.backend })
+  if (host.updates && host.updates.count > 0)
+    chips.push({ label: `⬆ ${host.updates.count}`, tone: host.updates.security ? 'danger' : 'warn' })
+  for (const tag of (host.tags || []).slice(0, 5)) chips.push({ label: tag })
+  return (
+    <div className="relative overflow-hidden rounded-2xl border border-ink-700/70 bg-ink-800/40 p-5">
+      {/* glow discret în culoarea hostului — identitate fără zgomot */}
+      <div className="pointer-events-none absolute -right-20 -top-24 h-56 w-56 rounded-full opacity-[0.08] blur-3xl" style={{ background: color }} aria-hidden="true" />
+      <div className="relative flex flex-wrap items-center gap-x-6 gap-y-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${dot} ${reach === 'online' ? 'dot-live' : ''}`} />
+            <span className={`text-xl font-semibold ${tone}`}>{label}</span>
+          </div>
+          <div className="mt-1 truncate font-mono text-sm text-slate-500">{sub}</div>
+        </div>
+        {chips.length > 0 && (
+          <div className="ml-auto flex flex-wrap items-center gap-2">
+            {chips.map((c, i) => (
+              <span key={i} className={`rounded-lg px-2.5 py-1 text-xs font-medium ring-1 ${
+                c.tone === 'danger' ? 'bg-rose-500/10 wt-danger ring-rose-500/30'
+                : c.tone === 'warn' ? 'bg-amber-500/10 wt-warn ring-amber-500/30'
+                : 'bg-ink-900/50 text-slate-400 ring-ink-700'}`}>{c.label}</span>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -441,13 +492,19 @@ function StatTiles({ host }: { host: Host }) {
   const { t } = useI18n()
   const m = host.metrics
   const hist = hostHistory(host.id)
-  if (!host.online || !m || m.cpu_pct == null) return null
+  // NU condiţiona pe cpu_pct: primul sample de CPU vine mai târziu (nevoie de 2 citiri), iar
+  // mem/disk/load sunt deja acolo — altfel tot rândul dispărea până „se încălzea" CPU-ul.
+  if (!host.online || !m) return null
   const gib = (n?: number) => (n != null ? (n / 1024 ** 3).toFixed(1) : null)
   const memPct = m.mem_total && m.mem_used != null ? (m.mem_used / m.mem_total) * 100 : null
   const diskPct = m.disk_total && m.disk_used != null ? (m.disk_used / m.disk_total) * 100 : null
+  if (m.cpu_pct == null && memPct == null && diskPct == null && m.load1 == null) return null
   return (
-    <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-      <StatTile label="CPU" pct={m.cpu_pct} spark={hist?.cpu} sparkLabel={t('host.cpuChartLabel', { name: host.name })} />
+    // auto-fit: 2-4 tile-uri umplu lăţimea egal (CPU vine mai târziu → fără celulă goală)
+    <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))' }}>
+      {m.cpu_pct != null && (
+        <StatTile label="CPU" pct={m.cpu_pct} spark={hist?.cpu} sparkLabel={t('host.cpuChartLabel', { name: host.name })} />
+      )}
       {memPct != null && (
         <StatTile label={t('host.memory')} pct={memPct} sub={`${gib(m.mem_used)} / ${gib(m.mem_total)} GiB`}
           spark={hist?.mem} sparkLabel={t('host.memChartLabel', { name: host.name })} />
@@ -496,7 +553,7 @@ function HostDetail({ host }: { host: Host }) {
   }, [host.id])
 
   return (
-    <div className="grid grid-cols-1 items-start gap-4 md:grid-cols-2 xl:grid-cols-3">
+    <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-2">
       <Card title={t('host.secConnection')} icon={<ServerIcon />} accent={hostColor(host)}>
         <Row k={t('host.protocol')} v={protoLabel(host)} />
         <Row k={t('host.address')} v={host.hostname ? hostAt(host) : '—'} mono />
@@ -520,7 +577,7 @@ function HostDetail({ host }: { host: Host }) {
       )}
 
       {hostApps.length > 0 && (
-        <Card title={t('dashboard.apps')} icon={<LinkIcon />} accent="#34d399" className="md:col-span-2 xl:col-span-3">
+        <Card title={t('dashboard.apps')} icon={<LinkIcon />} accent="#34d399" className="lg:col-span-2">
           <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
             {hostApps.map((a) => {
               const color = HOST_APP_COLOR[a.app_type] || '#34d399'
@@ -544,7 +601,7 @@ function HostDetail({ host }: { host: Host }) {
       )}
 
       {host.note && (
-        <Card title={t('host.secNote')} icon={<NoteIcon />} className="md:col-span-2 xl:col-span-3">
+        <Card title={t('host.secNote')} icon={<NoteIcon />} className="lg:col-span-2">
           <p className="text-sm text-slate-400">{host.note}</p>
         </Card>
       )}
