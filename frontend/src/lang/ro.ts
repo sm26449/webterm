@@ -653,6 +653,7 @@ const ro: Lang = {
     'host.files': "Fișiere",
     'host.databases': "Baze de date",
     'host.newSession': "Sesiune nouă",
+    'host.sections': "Secţiuni host",
     'host.tabOverview': "Prezentare",
     'host.tabSessions': "Sesiuni",
     'host.tabFiles': "Fişiere",

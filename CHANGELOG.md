@@ -10,14 +10,16 @@ back.
 ## [Unreleased]
 
 ### Added
-- **The host page is now a tabbed hub.** Below the header sits a tab bar — Overview · Sessions ·
-  Files · Forwards · Services · Docker · Databases — so everything a host offers lives in one place
-  instead of scattered narrow drawers. Overview shows connection/security/agent/resources/apps at a
-  glance plus a quick-launch strip of active sessions; Sessions keeps the master-detail list +
-  live preview + replay; Files/Forwards/Services/Docker/Databases render the existing panels
-  **full-width inline** (new `embed` mode — no drawer, no scrim). Agent-only tabs appear only when
-  the agent is online; ssh/telnet/jump hosts get Overview + Sessions. Serial and Diagnostics stay
-  as header actions. Each panel is lazy-loaded (Files pulls Monaco) so nothing bloats the page.
+- **The host page is now a dashboard hub with a left section rail.** A vertical nav (icons +
+  labels) on the left — Overview · Sessions · Files · Forwards · Services · Docker · Databases —
+  replaces the scattered narrow drawers; on mobile it becomes a horizontal scroll row. **Overview
+  is a real dashboard**: active sessions render as **live thumbnail cards** (each a read-only,
+  auto-refreshing `SessionPreview` — click to open, hover for split/pop-out), above host
+  connection/security/agent/resources/apps laid out as a responsive card grid. Sessions keeps the
+  master-detail list + live preview + replay; Files/Forwards/Services/Docker/Databases render the
+  existing panels **full-width inline** (new `embed` mode — no drawer, no scrim). Agent-only
+  sections show only when the agent is online; ssh/telnet/jump hosts get Overview + Sessions.
+  Serial and Diagnostics stay as header actions. Each panel is lazy-loaded (Files pulls Monaco).
 - **Jump targets are saved as children of their agent, added from its ⋯ menu.** "Add SSH / Telnet
   jump…" on an agent host opens Add-host already scoped to that agent: pick the protocol (SSH or
   Telnet), the LAN target, and save. The saved target appears **nested under the agent** in the

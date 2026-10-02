@@ -3,7 +3,7 @@ import { isSessionLive, api, AppLink, Host, Session, timeAgo } from '../lib/api'
 import { hostAt, protoLabel } from '../lib/host'
 import { useI18n } from '../lib/i18n'
 import { hostHistory } from '../lib/metrics'
-import { DownloadIcon, PlusIcon, PopoutIcon, ServerIcon, SplitIcon, TrashIcon } from './Icons'
+import { DockerIcon, DownloadIcon, FilesIcon, ForwardIcon, PlusIcon, PopoutIcon, ServerIcon, ServicesIcon, SplitIcon, TerminalPromptIcon, ToolboxIcon, TrashIcon } from './Icons'
 import SessionPreview from './SessionPreview'
 import Sparkline from './Sparkline'
 import TranscriptPlayer from './TranscriptPlayer'
@@ -115,14 +115,14 @@ export default function HostOverview(props: {
     )
   }
 
-  const tabs: { id: HubTab; label: string; show: boolean }[] = [
-    { id: 'overview', label: t('host.tabOverview'), show: true },
-    { id: 'sessions', label: t('host.tabSessions'), show: true },
-    { id: 'files', label: t('host.tabFiles'), show: agentReady },
-    { id: 'forwards', label: t('host.tabForwards'), show: agentReady },
-    { id: 'services', label: t('host.tabServices'), show: agentReady },
-    { id: 'docker', label: t('host.tabDocker'), show: agentReady },
-    { id: 'databases', label: t('host.tabDatabases'), show: agentReady },
+  const tabs: { id: HubTab; label: string; show: boolean; icon: React.ReactNode }[] = [
+    { id: 'overview', label: t('host.tabOverview'), show: true, icon: <ServerIcon /> },
+    { id: 'sessions', label: t('host.tabSessions'), show: true, icon: <TerminalPromptIcon /> },
+    { id: 'files', label: t('host.tabFiles'), show: agentReady, icon: <FilesIcon /> },
+    { id: 'forwards', label: t('host.tabForwards'), show: agentReady, icon: <ForwardIcon /> },
+    { id: 'services', label: t('host.tabServices'), show: agentReady, icon: <ServicesIcon /> },
+    { id: 'docker', label: t('host.tabDocker'), show: agentReady, icon: <DockerIcon /> },
+    { id: 'databases', label: t('host.tabDatabases'), show: agentReady, icon: <ToolboxIcon /> },
   ]
   // dacă tab-ul curent devine indisponibil (agentul a căzut), cădem înapoi pe Overview
   const visibleTabs = tabs.filter((x) => x.show)
@@ -193,42 +193,46 @@ export default function HostOverview(props: {
           </button>
         </div>
 
-        {/* ── bara de tab-uri ── */}
-        <div className="-mb-3 flex w-full gap-1 overflow-x-auto pt-1">
+      </div>
+
+      {/* ── corp: nav vertical (stânga pe desktop, rând derulabil pe mobil) + conţinut ── */}
+      <div className="flex min-h-0 flex-1 flex-col md:flex-row">
+        <nav aria-label={t('host.sections')}
+          className="flex shrink-0 gap-1 overflow-x-auto border-b border-ink-800 p-2 md:w-52 md:flex-col md:overflow-x-visible md:overflow-y-auto md:border-b-0 md:border-r">
           {visibleTabs.map((x) => (
-            <button key={x.id} onClick={() => setTab(x.id)}
-              className={`shrink-0 rounded-t-lg px-3 py-1.5 text-sm font-medium transition ${
-                tab === x.id ? 'bg-ink-800 text-slate-100 ring-1 ring-ink-700 ring-b-0'
+            <button key={x.id} onClick={() => setTab(x.id)} aria-current={tab === x.id ? 'page' : undefined}
+              className={`flex shrink-0 items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition md:w-full ${
+                tab === x.id ? 'bg-ink-800 text-slate-100 ring-1 ring-ink-700'
                              : 'text-slate-400 hover:bg-ink-800/50 hover:text-slate-200'}`}>
+              <span className="grid h-4 w-4 shrink-0 place-items-center opacity-80">{x.icon}</span>
               {x.label}
               {x.id === 'sessions' && active.length > 0 && (
-                <span className="ml-1.5 rounded-full bg-emerald-500/15 px-1.5 text-[10px] font-semibold wt-good">{active.length}</span>
+                <span className="ml-auto rounded-full bg-emerald-500/15 px-1.5 text-[10px] font-semibold wt-good">{active.length}</span>
               )}
             </button>
           ))}
-        </div>
-      </div>
+        </nav>
 
-      {/* ── conţinutul tab-ului ── */}
-      <div className="flex min-h-0 flex-1 flex-col">
+        {/* ── conţinutul secţiunii ── */}
+        <div className="flex min-h-0 flex-1 flex-col">
         {tab === 'overview' && (
-          <div className="min-h-0 flex-1 overflow-y-auto">
+          <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
             {active.length > 0 && (
-              <div className="border-b border-ink-800 px-4 py-3 sm:px-6">
-                <div className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+              <section className="mb-6">
+                <div className="mb-3 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                   {t('host.active')} <span className="text-slate-600">· {active.length}</span>
                   <button onClick={() => setTab('sessions')} className="ml-auto text-[11px] normal-case text-sky-400 hover:underline">{t('host.allSessions')} →</button>
                 </div>
-                <div className="flex flex-wrap gap-2">
-                  {active.slice(0, 6).map((s) => (
-                    <button key={s.id} onClick={() => props.onOpenSession(s.id)}
-                      className="flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm text-slate-200 ring-1 ring-ink-700 hover:bg-ink-800">
-                      <span className="h-2 w-2 rounded-full bg-emerald-400 dot-live" />
-                      <span className="max-w-[12rem] truncate">{s.title || t('host.sessionFallback')}</span>
-                    </button>
+                {/* thumbnail-uri LIVE: fiecare card e un preview read-only al sesiunii, auto-fit */}
+                <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(230px, 1fr))' }}>
+                  {active.map((s) => (
+                    <SessionThumb key={s.id} session={s}
+                      onOpen={() => props.onOpenSession(s.id)}
+                      onSplit={() => props.onSplit(s.id)}
+                      onPopout={() => props.onPopout(s.id)} />
                   ))}
                 </div>
-              </div>
+              </section>
             )}
             <HostDetail host={host} />
           </div>
@@ -329,11 +333,52 @@ export default function HostOverview(props: {
             <ToolboxPanel embed host={host} onClose={() => setTab('overview')} onOpen={(h, cid) => props.onConnectionOpen(h, cid)} />
           </Suspense>
         )}
+        </div>
       </div>
 
       {playing && (
         <TranscriptPlayer sid={playing.id} title={playing.title} onClose={() => setPlaying(null)} />
       )}
+    </div>
+  )
+}
+
+/** Card-thumbnail pentru o sesiune activă: un preview LIVE read-only (xterm auto-fit) +
+    titlu + acţiuni la hover (split/popout). Click pe card = deschide terminalul. Dă paginii
+    Overview un aer de dashboard, nu o listă de butoane. */
+function SessionThumb(props: {
+  session: Session
+  onOpen: () => void
+  onSplit: () => void
+  onPopout: () => void
+}) {
+  const { t } = useI18n()
+  const s = props.session
+  return (
+    <div className="group relative overflow-hidden rounded-xl bg-ink-900 ring-1 ring-ink-700 transition hover:ring-sky-500/60">
+      <button onClick={props.onOpen} className="block w-full text-left"
+        title={t('host.openTerminal')} aria-label={`${s.title || t('host.sessionFallback')} — ${t('host.openTerminal')}`}>
+        {/* fereastra de preview: raport ~16:10, fundal de terminal; SessionPreview se auto-fit-ează */}
+        <div className="relative h-[150px] w-full overflow-hidden bg-[#0b0e14]">
+          <SessionPreview key={s.id} sid={s.id} live />
+          {/* overlay „deschide" la hover */}
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/0 opacity-0 transition group-hover:bg-black/30 group-hover:opacity-100">
+            <span className="rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-medium text-white shadow-lg">{t('host.openTerminal')}</span>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 px-3 py-2">
+          <span className="h-2 w-2 shrink-0 rounded-full bg-emerald-400 dot-live" />
+          <span className="min-w-0 flex-1 truncate text-sm text-slate-200">{s.title || t('host.sessionFallback')}</span>
+          {s.connected_clients > 0 && <span className="shrink-0 text-[11px] text-slate-500">👁 {s.connected_clients}</span>}
+        </div>
+      </button>
+      {/* acţiuni rapide — apar la hover, pe ecrane mari (split/popout cer spaţiu) */}
+      <div className="absolute right-1.5 top-1.5 hidden gap-1 opacity-0 transition group-hover:opacity-100 lg:flex">
+        <button onClick={props.onSplit} title={t('host.splitTitle')} aria-label={t('host.splitTitle')}
+          className="grid h-7 w-7 place-items-center rounded-md bg-ink-900/80 text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800 hover:text-white"><SplitIcon /></button>
+        <button onClick={props.onPopout} title={t('host.popoutTitle')} aria-label={t('host.popoutTitle')}
+          className="grid h-7 w-7 place-items-center rounded-md bg-ink-900/80 text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800 hover:text-white"><PopoutIcon /></button>
+      </div>
     </div>
   )
 }
@@ -364,8 +409,7 @@ function HostDetail({ host }: { host: Host }) {
   }, [host.id])
 
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto p-6">
-      <div className="max-w-2xl space-y-5">
+    <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-2">
         {/* Fără tmux pe host, agentul cade pe un PTY simplu — sesiunile mor odată cu el.
             Adică exact promisiunea produsului, întoarsă pe dos, fără ca omul să afle.
             Scriptul de instalare avertizează, dar o singură dată, într-un log care se
@@ -373,12 +417,12 @@ function HostDetail({ host }: { host: Host }) {
             care nu ştie ce e tmux. Nu refuzăm instalarea — pe o cutie minimală un terminal
             efemer e tot util —, dar refuzăm s-o ascundem. */}
         {host.backend === 'pty' && (
-          <p className="wt-warn rounded-lg bg-amber-500/10 p-3 text-sm ring-1 ring-amber-500/30">
+          <p className="wt-warn rounded-lg bg-amber-500/10 p-3 text-sm ring-1 ring-amber-500/30 lg:col-span-2">
             {t('host.noTmuxWarning')}
           </p>
         )}
         {hostApps.length > 0 && (
-          <Section title={t('dashboard.apps')}>
+          <div className="lg:col-span-2"><Section title={t('dashboard.apps')}>
             <div className="flex flex-wrap gap-2">
               {hostApps.map((a) => {
                 const color = HOST_APP_COLOR[a.app_type] || '#34d399'
@@ -393,7 +437,7 @@ function HostDetail({ host }: { host: Host }) {
                 )
               })}
             </div>
-          </Section>
+          </Section></div>
         )}
         <Section title={t('host.secConnection')}>
           <Row k={t('host.protocol')} v={protoLabel(host)} />
@@ -434,11 +478,10 @@ function HostDetail({ host }: { host: Host }) {
         )}
 
         {host.note && (
-          <Section title={t('host.secNote')}>
+          <div className="lg:col-span-2"><Section title={t('host.secNote')}>
             <p className="px-3 py-2 text-sm text-slate-400">{host.note}</p>
-          </Section>
+          </Section></div>
         )}
-      </div>
     </div>
   )
 }

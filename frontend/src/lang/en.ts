@@ -645,6 +645,7 @@ const en: Lang = {
     'host.files': "Files",
     'host.databases': "Databases",
     'host.newSession': "New session",
+    'host.sections': "Host sections",
     'host.tabOverview': "Overview",
     'host.tabSessions': "Sessions",
     'host.tabFiles': "Files",
