@@ -646,6 +646,8 @@ const en: Lang = {
     'host.databases': "Databases",
     'host.newSession': "New session",
     'host.sections': "Host sections",
+    'host.editHost': "Edit host",
+    'host.tools': "Tools",
     'host.statusOnline': "Online",
     'host.statusOffline': "Offline",
     'host.lastSeen': "Last seen {ago}",

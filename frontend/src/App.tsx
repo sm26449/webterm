@@ -69,6 +69,7 @@ function useRoute(): [Route, (sid: string | null) => void, (id: number) => void]
 
 const FileBrowser = lazy(() => import('./components/FileBrowser'))
 const HistoryModal = lazy(() => import('./components/HistoryModal'))
+const AddHostModal = lazy(() => import('./components/AddHostModal'))
 
 export function popoutUrl(sid: string): string {
   return `${window.location.origin}${window.location.pathname}#/popout/${sid}`
@@ -138,6 +139,7 @@ function MainApp() {
   const [toolboxHost, setToolboxHost] = useState<Host | null>(null)   // panoul Connections, la nivel de host
   const [serialHost, setSerialHost] = useState<Host | null>(null)
   const [diagHost, setDiagHost] = useState<Host | null>(null)
+  const [editHostApp, setEditHostApp] = useState<Host | null>(null)   // editare host din pagina hostului
   // ── Split-views: layout-uri denumite de 2-4 sesiuni ──────────────────────────
   // Definiţiile stau server-side (sincronizate între dispozitive, încărcate în refresh);
   // selecţia ACTIVĂ (care view e deschis) e per-browser. Doar view-ul activ e montat, deci
@@ -1142,6 +1144,7 @@ function MainApp() {
             onContainerShell={openContainerShell}
             onSerial={setSerialHost}
             onDiagnostic={setDiagHost}
+            onEdit={setEditHostApp}
           />
         ) : (
           <Dashboard
@@ -1175,6 +1178,12 @@ function MainApp() {
       )}
       {diagHost && (
         <DiagnosticModal key={diagHost.id} host={diagHost} onClose={() => setDiagHost(null)} />
+      )}
+      {editHostApp && (
+        <Suspense fallback={null}>
+          <AddHostModal host={editHostApp} tagSuggestions={[...new Set(hosts.flatMap((h) => h.tags || []))].sort()}
+            onSaved={refresh} onClose={() => setEditHostApp(null)} />
+        </Suspense>
       )}
       {paletteOpen && (
         <CommandPalette

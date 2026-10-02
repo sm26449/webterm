@@ -3,7 +3,7 @@ import { isSessionLive, api, AppLink, Host, Session, timeAgo } from '../lib/api'
 import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
 import { useI18n } from '../lib/i18n'
 import { hostHistory } from '../lib/metrics'
-import { DockerIcon, DownloadIcon, FilesIcon, ForwardIcon, LinkIcon, NoteIcon, PlusIcon, PopoutIcon, RefreshIcon, ServerIcon, ServicesIcon, ShieldIcon, SplitIcon, TerminalPromptIcon, ToolboxIcon, TrashIcon } from './Icons'
+import { DockerIcon, DownloadIcon, FilesIcon, ForwardIcon, LinkIcon, NoteIcon, PencilIcon, PlusIcon, PopoutIcon, RefreshIcon, ServerIcon, ServicesIcon, ShieldIcon, SplitIcon, TerminalPromptIcon, ToolboxIcon, TrashIcon } from './Icons'
 import SessionPreview from './SessionPreview'
 import Sparkline from './Sparkline'
 import TranscriptPlayer from './TranscriptPlayer'
@@ -40,6 +40,7 @@ export default function HostOverview(props: {
   onContainerShell: (host: Host, containerId: string) => void
   onSerial: (host: Host) => void
   onDiagnostic: (host: Host) => void
+  onEdit: (host: Host) => void
 }) {
   const { t } = useI18n()
   const { host } = props
@@ -174,19 +175,11 @@ export default function HostOverview(props: {
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          {/* Serial + Diagnostic rămân acţiuni (deschid o sesiune / un modal), nu tab-uri */}
-          {agentReady && (
-            <button onClick={() => props.onSerial(host)} title={t('host.serialConsole')}
-              className="wt-touch flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800">
-              🔌 <span className="hidden sm:inline">{t('host.serialConsole')}</span>
-            </button>
-          )}
-          {isAgent && (
-            <button onClick={() => props.onDiagnostic(host)} title={t('host.diagnostic')}
-              className="wt-touch flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800">
-              🩺 <span className="hidden sm:inline">{t('host.diagnostic')}</span>
-            </button>
-          )}
+          {/* Edit host — pe bară, lângă New session (Serial/Diagnostic au trecut în nav → Tools) */}
+          <button onClick={() => props.onEdit(host)} title={t('host.editHost')}
+            className="wt-touch flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800">
+            <PencilIcon /> <span className="hidden sm:inline">{t('host.editHost')}</span>
+          </button>
           <button disabled={!canConnect} onClick={() => props.onNewSession(host)}
             className="wt-touch flex items-center gap-1.5 rounded-lg bg-sky-600 px-3.5 py-2 text-sm font-medium text-white hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-40">
             <PlusIcon /> {t('host.newSession')}
@@ -211,6 +204,28 @@ export default function HostOverview(props: {
               )}
             </button>
           ))}
+
+          {/* Tools: acţiuni (deschid o sesiune/un modal), NU tab-uri — Serial + Diagnostic */}
+          {(agentReady || isAgent) && (
+            <>
+              <div className="mx-2 my-1 hidden self-stretch border-t border-ink-800 md:block" aria-hidden="true" />
+              <div className="hidden px-3 pb-0.5 pt-1 text-[10px] font-semibold uppercase tracking-wider text-slate-600 md:block">{t('host.tools')}</div>
+              {agentReady && (
+                <button onClick={() => props.onSerial(host)}
+                  className="flex shrink-0 items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium text-slate-400 transition hover:bg-ink-800/50 hover:text-slate-200 md:w-full">
+                  <span className="grid h-4 w-4 shrink-0 place-items-center text-[13px] opacity-80">🔌</span>
+                  {t('host.serialConsole')}
+                </button>
+              )}
+              {isAgent && (
+                <button onClick={() => props.onDiagnostic(host)}
+                  className="flex shrink-0 items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium text-slate-400 transition hover:bg-ink-800/50 hover:text-slate-200 md:w-full">
+                  <span className="grid h-4 w-4 shrink-0 place-items-center text-[13px] opacity-80">🩺</span>
+                  {t('host.diagnostic')}
+                </button>
+              )}
+            </>
+          )}
         </nav>
 
         {/* ── conţinutul secţiunii ── */}
@@ -454,9 +469,10 @@ function StatusBand({ host }: { host: Host }) {
   const sub = reach === 'offline' && host.last_heartbeat
     ? t('host.lastSeen', { ago: timeAgo(host.last_heartbeat, t) })
     : host.hostname ? hostAt(host) : protoLabel(host)
+  // chip-urile sunt rezumatul de sus; detaliul (versiune agent, 2FA, auth) stă în carduri,
+  // ca să nu dublăm. Aici doar semnale „la o privire": backend, update-uri OS, etichete.
   const chips: { label: string; tone?: 'warn' | 'danger' }[] = []
-  if (isAgent && host.agent_version != null) chips.push({ label: `agent v${host.agent_version}` })
-  if (host.backend) chips.push({ label: host.backend })
+  if (isAgent && host.backend) chips.push({ label: host.backend })
   if (host.updates && host.updates.count > 0)
     chips.push({ label: `⬆ ${host.updates.count}`, tone: host.updates.security ? 'danger' : 'warn' })
   for (const tag of (host.tags || []).slice(0, 5)) chips.push({ label: tag })
@@ -554,14 +570,14 @@ function HostDetail({ host }: { host: Host }) {
 
   return (
     <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-2">
-      <Card title={t('host.secConnection')} icon={<ServerIcon />} accent={hostColor(host)}>
-        <Row k={t('host.protocol')} v={protoLabel(host)} />
-        <Row k={t('host.address')} v={host.hostname ? hostAt(host) : '—'} mono />
-        {!isAgent && <Row k={t('host.authentication')} v={host.auth_method === 'key' ? t('host.sshKey') : host.auth_method === 'password' ? t('host.passwordLabel') : '—'} />}
-        {host.backend && <Row k="Backend" v={host.backend} mono />}
-        <Row k={t('host.status')} v={host.online ? 'online' : isAgent ? 'offline' : t('host.connectOnDemand')}
-          tone={host.online ? 'good' : undefined} />
-      </Card>
+      {/* Connection: doar pe hosturi NON-agent (protocol/auth/via nu-s în bandă). Pe agent,
+          protocolul/adresa/backend-ul sunt deja în banda de status → n-are rost un card redundant. */}
+      {!isAgent && (
+        <Card title={t('host.secConnection')} icon={<ServerIcon />} accent={hostColor(host)}>
+          <Row k={t('host.protocol')} v={protoLabel(host)} />
+          <Row k={t('host.authentication')} v={host.auth_method === 'key' ? t('host.sshKey') : host.auth_method === 'password' ? t('host.passwordLabel') : '—'} />
+        </Card>
+      )}
 
       <Card title={t('host.secSecurity')} icon={<ShieldIcon />} accent="#38bdf8">
         <Row k={t('host.twoFaOnConnect')} v={host.require_2fa ? t('host.yesPasskey') : t('host.no')} tone={host.require_2fa ? 'good' : undefined} />

@@ -654,6 +654,8 @@ const ro: Lang = {
     'host.databases': "Baze de date",
     'host.newSession': "Sesiune nouă",
     'host.sections': "Secţiuni host",
+    'host.editHost': "Editează host",
+    'host.tools': "Unelte",
     'host.statusOnline': "Online",
     'host.statusOffline': "Offline",
     'host.lastSeen': "Văzut ultima dată {ago}",

@@ -117,8 +117,17 @@ try {
   check('hub: tab Sessions arată „fără sesiuni"', (await page.locator('text=No sessions yet').count()) >= 1)
   await tabBtn('Overview').first().click()
   await page.waitForTimeout(400)
-  check('hub: tab Overview arată detaliile hostului (Connection)',
-    (await page.locator('text=Connection').count()) >= 1)
+  // Overview pe un agent (offline): cardul Security apare mereu; Connection e doar pe non-agent
+  check('hub: tab Overview arată cardul Security', (await page.locator('text=Security').count()) >= 1)
+  // Tools în nav (Diagnostics pentru host de agent) + Edit host pe bară
+  check('nav: secţiunea Tools cu Diagnostics', (await page.locator('nav button:has-text("Diagnostics")').count()) >= 1)
+  check('bară: buton „Edit host"', (await page.locator('button:has-text("Edit host")').count()) >= 1)
+  await page.locator('button:has-text("Edit host")').first().click()
+  await page.waitForTimeout(500)
+  check('Edit host deschide modalul de editare',
+    (await page.locator('text=/Edit host alpha-agent/i').count()) >= 1)
+  await page.keyboard.press('Escape')
+  await page.waitForTimeout(300)
   // captură pentru verificare vizuală a layout-ului (nav stânga + carduri)
   try { await page.screenshot({ path: '/out/host-overview.png', fullPage: false }) } catch { /* best-effort */ }
 
