@@ -3212,8 +3212,13 @@ async def dial_ssh_jump(host_row, credential: dict) -> SshJumpSource:
             except Exception:       # noqa: BLE001 — alerta nu rupe calea
                 pass
             raise HostKeyMismatch(str(e))
-        except Exception:
+        except Exception as e:
             _teardown(); await fs.close()
+            # un rând în logul gateway-ului cu ţinta + cauza: altfel ssh-jump eşua „mut" (asyncssh
+            # loghează la INFO, fără host/port), iar utilizatorul rămânea fără niciun indiciu.
+            log.warning("ssh-jump dial failed: %s -> %s:%s via host %s: %s: %s",
+                        host_row["name"], host_row["hostname"], host_row["ssh_port"] or 22,
+                        host_row["via_host_id"], type(e).__name__, e)
             raise
         if not stored:
             keyline = conn.get_server_host_key().export_public_key().decode().strip()

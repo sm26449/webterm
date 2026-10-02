@@ -64,7 +64,7 @@ type Draft = { id?: number; label: string; engine: Connection['engine']; target_
   target_port: string; username: string; dbname: string; cred_policy: 'ask' | 'stored'; credential: string }
 
 export default function ToolboxPanel(props: {
-  host: Host; onClose: () => void; overlay?: boolean
+  host: Host; onClose: () => void; overlay?: boolean; embed?: boolean
   /** deschide o sesiune care rulează CLI-ul conexiunii */
   onOpen: (host: Host, connId: number) => void
 }) {
@@ -186,9 +186,11 @@ export default function ToolboxPanel(props: {
   const fmtTs = (epoch: number) => new Date(epoch * 1000).toLocaleString(undefined,
     { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 
-  const asideCls = 'fixed inset-y-0 right-0 z-40 flex w-[90vw] max-w-md flex-col border-l border-ink-800 bg-ink-900 shadow-2xl'
+  const asideCls = props.embed
+    ? 'flex h-full w-full min-h-0 flex-col bg-ink-900'
+    : 'fixed inset-y-0 right-0 z-40 flex w-[90vw] max-w-md flex-col border-l border-ink-800 bg-ink-900 shadow-2xl'
     + (props.overlay ? '' : ' sm:static sm:z-auto sm:w-96 sm:max-w-none sm:shrink-0 sm:shadow-none')
-  const scrimCls = 'fixed inset-0 z-30 bg-black/60' + (props.overlay ? '' : ' sm:hidden')
+  const scrimCls = props.embed ? 'hidden' : 'fixed inset-0 z-30 bg-black/60' + (props.overlay ? '' : ' sm:hidden')
 
   const load = useCallback(async () => {
     setError('')
@@ -249,8 +251,10 @@ export default function ToolboxPanel(props: {
             <button onClick={() => setSnipEdit({ title: '', body: '' })} className="wt-touch ml-auto shrink-0 rounded px-1.5 text-sky-400 hover:bg-ink-800"
               title={t('toolbox.lib.add')} aria-label={t('toolbox.lib.add')}><PlusIcon /></button>
           )}
-          <button onClick={props.onClose} aria-label={t('common.close')}
-            className={`wt-touch shrink-0 rounded px-2 py-1 text-slate-400 hover:bg-ink-800${(tab === 'connections' || tab === 'library') ? '' : ' ml-auto'}`}>✕</button>
+          {!props.embed && (
+            <button onClick={props.onClose} aria-label={t('common.close')}
+              className={`wt-touch shrink-0 rounded px-2 py-1 text-slate-400 hover:bg-ink-800${(tab === 'connections' || tab === 'library') ? '' : ' ml-auto'}`}>✕</button>
+          )}
         </div>
         {(tab === 'library' || tab === 'history') && (
           <div className="border-b border-ink-800 px-3 py-1.5">

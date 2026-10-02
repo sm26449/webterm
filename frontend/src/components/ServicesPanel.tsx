@@ -11,7 +11,7 @@ type Svc = { unit: string; load: string; active: string; sub: string; desc: stri
 type Action = 'start' | 'stop' | 'restart'
 
 export default function ServicesPanel(props: {
-  host: Host; onClose: () => void; overlay?: boolean
+  host: Host; onClose: () => void; overlay?: boolean; embed?: boolean
   /** deschide o sesiune care urmăreşte `journalctl -u <unit> -f` */
   onJournal?: (unit: string) => void
 }) {
@@ -22,9 +22,11 @@ export default function ServicesPanel(props: {
   const [filter, setFilter] = useState('')
   const [failedOnly, setFailedOnly] = useState(false)   // triaj „ce e stricat pe hostul ăsta"
 
-  const asideCls = 'fixed inset-y-0 right-0 z-40 flex w-[90vw] max-w-md flex-col border-l border-ink-800 bg-ink-900 shadow-2xl'
+  const asideCls = props.embed
+    ? 'flex h-full w-full min-h-0 flex-col bg-ink-900'
+    : 'fixed inset-y-0 right-0 z-40 flex w-[90vw] max-w-md flex-col border-l border-ink-800 bg-ink-900 shadow-2xl'
     + (props.overlay ? '' : ' sm:static sm:z-auto sm:w-96 sm:max-w-none sm:shrink-0 sm:shadow-none')
-  const scrimCls = 'fixed inset-0 z-30 bg-black/60' + (props.overlay ? '' : ' sm:hidden')
+  const scrimCls = props.embed ? 'hidden' : 'fixed inset-0 z-30 bg-black/60' + (props.overlay ? '' : ' sm:hidden')
 
   const load = useCallback(async () => {
     setError(''); setRows(null)
@@ -62,8 +64,10 @@ export default function ServicesPanel(props: {
           <span className="text-sm font-semibold text-slate-200">{t('services.title')}</span>
           <button onClick={load} className="wt-touch ml-auto shrink-0 rounded px-1.5 text-slate-400 hover:bg-ink-800"
             title={t('services.reload')}><RefreshIcon /></button>
-          <button onClick={props.onClose} aria-label={t('common.close')}
-            className="wt-touch shrink-0 rounded px-2 py-1 text-slate-400 hover:bg-ink-800">✕</button>
+          {!props.embed && (
+            <button onClick={props.onClose} aria-label={t('common.close')}
+              className="wt-touch shrink-0 rounded px-2 py-1 text-slate-400 hover:bg-ink-800">✕</button>
+          )}
         </div>
         <div className="flex items-center gap-2 border-b border-ink-800 px-3 py-1.5">
           <input value={filter} onChange={(e) => setFilter(e.target.value)}

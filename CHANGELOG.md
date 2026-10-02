@@ -10,6 +10,14 @@ back.
 ## [Unreleased]
 
 ### Added
+- **The host page is now a tabbed hub.** Below the header sits a tab bar — Overview · Sessions ·
+  Files · Forwards · Services · Docker · Databases — so everything a host offers lives in one place
+  instead of scattered narrow drawers. Overview shows connection/security/agent/resources/apps at a
+  glance plus a quick-launch strip of active sessions; Sessions keeps the master-detail list +
+  live preview + replay; Files/Forwards/Services/Docker/Databases render the existing panels
+  **full-width inline** (new `embed` mode — no drawer, no scrim). Agent-only tabs appear only when
+  the agent is online; ssh/telnet/jump hosts get Overview + Sessions. Serial and Diagnostics stay
+  as header actions. Each panel is lazy-loaded (Files pulls Monaco) so nothing bloats the page.
 - **Jump targets are saved as children of their agent, added from its ⋯ menu.** "Add SSH / Telnet
   jump…" on an agent host opens Add-host already scoped to that agent: pick the protocol (SSH or
   Telnet), the LAN target, and save. The saved target appears **nested under the agent** in the
@@ -23,6 +31,15 @@ back.
   without leaving a saved host behind.
 
 ### Changed
+- **Connection failures now say what went wrong, in an in-page error toast.** A failed connect
+  used to surface as an empty "cannot connect over SSH:" (a bare `TimeoutError` has no message) or a
+  missable OS notification. The gateway now maps each failure to a specific reason — *no SSH greeting
+  from host:port (wrong port / not an SSH server / filtered)*, *the target rejected the credentials
+  (wrong password, or it wants a key)*, *the agent could not reach host:port* — and the UI shows it
+  as a red, dismissible, longer-lived toast (`role="alert"`, 12s) **in the page**, not an OS popup.
+  ssh-jump dial failures are also logged at WARNING with target:port + cause (previously only
+  asyncssh INFO, with no host/port — invisible). This surfaced from a real "wrong SSH port" case
+  that was impossible to diagnose from the UI.
 - **Clicking a host in the sidebar now exits an active split-view.** Navigating to a host page used
   to be swallowed while a split-view was active (the split kept render precedence), so the click
   appeared dead until you first clicked a session tab. `selectHost` now leaves the split like

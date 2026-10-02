@@ -14,7 +14,7 @@ import { chromium } from 'playwright'
 const BASE = process.argv[2] ?? 'http://127.0.0.1:8099'
 const SETUP_TOKEN = process.env.E2E_SETUP_TOKEN ?? 'jump-e2e-token'
 const EMAIL = 'jump@example.com'
-const PASSWORD = 'parola-jump-123456'
+const PASSWORD = 'parola-e2e-jump-123456'   // familia fixture din .gitleaks.toml (nu secret real)
 
 let okN = 0, total = 0
 const check = (name, cond) => { total++; if (cond) okN++; console.log(`  ${cond ? 'PASS' : 'FAIL'} ${name}`) }
@@ -100,6 +100,38 @@ try {
   check(`ţinta e INDENTATĂ sub agent (${xt} > ${xa})`, xt > xa)
   check('agenţii au rămas nealiniaţi/indentaţi corect (depth 0 neschimbat)',
     (await leftOf('alpha-agent')) === xa && (await leftOf('beta-agent')) === xb)
+
+  // ── hub-ul paginii de host: bara de tab-uri + comutare ──
+  // agentul e OFFLINE (host creat prin API, fără agent real), deci tab-urile prin-agent
+  // (Files/Forwards/…) sunt ascunse; rămân Overview + Sessions. Validează că shell-ul se
+  // randează şi comută fără să crape.
+  await page.locator('.wt-sidebar button:has-text("alpha-agent")').first().click()
+  await page.waitForTimeout(800)
+  const tabBtn = (name) => page.locator(`button:has-text("${name}")`)
+  check('hub: tab „Overview" prezent', (await tabBtn('Overview').count()) >= 1)
+  check('hub: tab „Sessions" prezent', (await tabBtn('Sessions').count()) >= 1)
+  check('hub: tab-uri prin-agent ascunse cât agentul e offline',
+    (await tabBtn('Files').count()) === 0 && (await tabBtn('Docker').count()) === 0)
+  await tabBtn('Sessions').first().click()
+  await page.waitForTimeout(400)
+  check('hub: tab Sessions arată „fără sesiuni"', (await page.locator('text=No sessions yet').count()) >= 1)
+  await tabBtn('Overview').first().click()
+  await page.waitForTimeout(400)
+  check('hub: tab Overview arată detaliile hostului (Connection)',
+    (await page.locator('text=Connection').count()) >= 1)
+
+  // ── toast de EROARE la conectare eşuată ──
+  // ţinta telnet-jump „switch-core" merge prin alpha-agent, care e OFFLINE (fără agent real),
+  // deci „New session" eşuează → trebuie să apară un toast de eroare ÎN PAGINĂ cu motivul
+  // (nu o notificare de OS tăcută). Validează fix-ul cerut: „să ştim că sunt probleme şi ce anume".
+  await page.locator('.wt-sidebar button:has-text("switch-core")').first().click()
+  await page.waitForTimeout(600)
+  await page.locator('button:has-text("New session")').first().click()
+  await page.waitForTimeout(1500)
+  const toast = page.locator('[role="alert"]')
+  check('conectare eşuată → toast de eroare în pagină', (await toast.count()) >= 1)
+  check('toast-ul spune CE anume (host offline / unreachable)',
+    /offline|unreachable|reach|connect/i.test((await toast.first().innerText().catch(() => '')) || ''))
 
   check('fără erori JS în pagină', errs.length === 0)
 } finally {

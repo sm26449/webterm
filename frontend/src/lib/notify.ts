@@ -1,9 +1,11 @@
 /* Notificări: preferăm Notification API a browserului (funcționează și când
    tabul e în fundal); dacă e refuzată, cădem pe un toast în pagină. */
 
-let toastHost: ((msg: string, kind: 'info' | 'warn') => void) | null = null
+export type ToastKind = 'info' | 'warn' | 'error'
 
-export function registerToast(fn: (msg: string, kind: 'info' | 'warn') => void) {
+let toastHost: ((msg: string, kind: ToastKind) => void) | null = null
+
+export function registerToast(fn: (msg: string, kind: ToastKind) => void) {
   toastHost = fn
 }
 
@@ -30,4 +32,11 @@ export function notify(title: string, body: string, kind: 'info' | 'warn' = 'inf
     }
   }
   toastHost?.(`${title} — ${body}`, kind)
+}
+
+/** Eroare acţionabilă (ex. „nu m-am putut conecta: port greşit"): MEREU un toast ÎN PAGINĂ,
+    nu o notificare de OS. Omul tocmai a apăsat ceva şi se uită la ecran — vrea motivul acolo,
+    vizibil şi persistent, nu într-un pop-up de sistem pe care-l poate rata. */
+export function notifyError(title: string, body: string) {
+  toastHost?.(`${title} — ${body}`, 'error')
 }

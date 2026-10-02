@@ -1,12 +1,22 @@
-import { useEffect, useMemo, useState } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import { isSessionLive, api, AppLink, Host, Session, timeAgo } from '../lib/api'
 import { hostAt, protoLabel } from '../lib/host'
 import { useI18n } from '../lib/i18n'
 import { hostHistory } from '../lib/metrics'
-import { DownloadIcon, FilesIcon, PlusIcon, PopoutIcon, ServerIcon, SplitIcon, ToolboxIcon, TrashIcon } from './Icons'
+import { DownloadIcon, PlusIcon, PopoutIcon, ServerIcon, SplitIcon, TrashIcon } from './Icons'
 import SessionPreview from './SessionPreview'
 import Sparkline from './Sparkline'
 import TranscriptPlayer from './TranscriptPlayer'
+
+// Panourile hub-ului se încarcă DOAR când deschizi tab-ul lor (FilePanel aduce Monaco — mare),
+// nu în bundle-ul paginii de host. `embed` le randează full-width, fără drawer/scrim/close.
+const FilePanel = lazy(() => import('./FilePanel'))
+const ForwardsPanel = lazy(() => import('./ForwardsPanel'))
+const ServicesPanel = lazy(() => import('./ServicesPanel'))
+const DockerPanel = lazy(() => import('./DockerPanel'))
+const ToolboxPanel = lazy(() => import('./ToolboxPanel'))
+
+type HubTab = 'overview' | 'sessions' | 'files' | 'forwards' | 'services' | 'docker' | 'databases'
 
 /** Pagina unui host: navigare de sesiuni (stânga) + previzualizare (dreapta).
    Click pe o sesiune = preview; „Deschide" (sau dublu-click) = terminal. */
@@ -19,18 +29,26 @@ export default function HostOverview(props: {
   sessions: Session[]
   onOpenSession: (sid: string) => void
   onNewSession: (host: Host) => void
-  onFiles: (host: Host) => void
-  onToolbox: (host: Host) => void
   onSplit: (sid: string) => void
   onPopout: (sid: string) => void
   onDeleteSession: (sid: string) => void
   onMenu: () => void
   sidebarCollapsed?: boolean
+  // acţiuni de host care deschid o sesiune de terminal (prin App)
+  onConnectionOpen: (host: Host, connId: number) => void
+  onJournal: (host: Host, unit: string) => void
+  onContainerShell: (host: Host, containerId: string) => void
+  onSerial: (host: Host) => void
+  onDiagnostic: (host: Host) => void
 }) {
   const { t } = useI18n()
   const { host } = props
   const canConnect = host.connection_type !== 'agent' || host.online
+  const isAgent = (host.connection_type ?? 'agent') === 'agent'
+  const agentReady = isAgent && !!host.online      // tab-urile prin agent cer agentul online
   const m = host.metrics
+  const [tab, setTab] = useState<HubTab>('overview')
+  useEffect(() => { setTab('overview') }, [host.id])
 
   // complete per-host history (not limited by the global recent-closed window),
   // fetched on host change + refreshed, merged with the fresh 5s global poll
@@ -60,10 +78,6 @@ export default function HostOverview(props: {
 
   const [selected, setSelected] = useState<string | null>(null)
   const [playing, setPlaying] = useState<Session | null>(null)
-  // panoul din dreapta arată fie preview-ul sesiunii selectate, fie detaliile
-  // hostului (implicit când nu există nicio sesiune → nu mai e un ecran gol)
-  const [viewDetail, setViewDetail] = useState(false)
-  useEffect(() => { setViewDetail(false) }, [host.id])
   // preselectează prima sesiune activă (sau prima închisă) când se schimbă hostul
   useEffect(() => {
     setSelected((cur) => {
@@ -81,7 +95,7 @@ export default function HostOverview(props: {
     return (
       <button
         key={s.id}
-        onClick={() => { setSelected(s.id); setViewDetail(false) }}
+        onClick={() => setSelected(s.id)}
         onDoubleClick={() => props.onOpenSession(s.id)}
         className={`flex w-full items-center gap-2.5 px-3 py-2 text-left ${
           selected === s.id ? 'bg-ink-800' : 'hover:bg-ink-800/50'
@@ -101,12 +115,30 @@ export default function HostOverview(props: {
     )
   }
 
+  const tabs: { id: HubTab; label: string; show: boolean }[] = [
+    { id: 'overview', label: t('host.tabOverview'), show: true },
+    { id: 'sessions', label: t('host.tabSessions'), show: true },
+    { id: 'files', label: t('host.tabFiles'), show: agentReady },
+    { id: 'forwards', label: t('host.tabForwards'), show: agentReady },
+    { id: 'services', label: t('host.tabServices'), show: agentReady },
+    { id: 'docker', label: t('host.tabDocker'), show: agentReady },
+    { id: 'databases', label: t('host.tabDatabases'), show: agentReady },
+  ]
+  // dacă tab-ul curent devine indisponibil (agentul a căzut), cădem înapoi pe Overview
+  const visibleTabs = tabs.filter((x) => x.show)
+  useEffect(() => {
+    if (!visibleTabs.some((x) => x.id === tab)) setTab('overview')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentReady])
+
+  const paneFallback = (
+    <div className="flex h-full items-center justify-center text-sm text-slate-500">{t('host.loadingPanel')}</div>
+  )
+
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col">
       {/* ── header ── */}
-      {/* flex-wrap + min-w pe blocul de titlu: pe mobil acțiunile coboară pe
-         rândul doi în loc să strivească numele hostului la o literă */}
-      <div className="flex flex-wrap items-start gap-x-4 gap-y-3 border-b border-ink-800 px-4 py-4 sm:px-6">
+      <div className="flex flex-wrap items-start gap-x-4 gap-y-3 border-b border-ink-800 px-4 pt-4 pb-3 sm:px-6">
         <button onClick={props.onMenu} className={`wt-touch grid place-items-center rounded-md px-2 py-1 text-slate-400 hover:bg-ink-800 ${props.sidebarCollapsed ? '' : 'md:hidden'}`} aria-label={t('host.openHostListAria')}>
           ☰
         </button>
@@ -133,8 +165,6 @@ export default function HostOverview(props: {
               {host.online ? 'online' : (host.connection_type === 'agent' ? 'offline' : t('host.connectOnDemand'))}
             </span>
             {host.online && m && (
-              /* metricele ies din ecran pe telefon (rândul e deja lung cu
-                 user@host + starea) — le arătăm de la sm în sus */
               <span className="ml-2 hidden font-mono text-slate-600 tabular-nums sm:inline">
                 {m.cpu_pct != null && `CPU ${Math.round(m.cpu_pct)}%`}
                 {m.mem_total ? ` · MEM ${Math.round(((m.mem_used ?? 0) / m.mem_total) * 100)}%` : ''}
@@ -144,16 +174,17 @@ export default function HostOverview(props: {
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          {host.online && host.connection_type === 'agent' && (
-            <button onClick={() => props.onFiles(host)}
+          {/* Serial + Diagnostic rămân acţiuni (deschid o sesiune / un modal), nu tab-uri */}
+          {agentReady && (
+            <button onClick={() => props.onSerial(host)} title={t('host.serialConsole')}
               className="wt-touch flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800">
-              <FilesIcon /> {t('host.files')}
+              🔌 <span className="hidden sm:inline">{t('host.serialConsole')}</span>
             </button>
           )}
-          {host.online && host.connection_type === 'agent' && (
-            <button onClick={() => props.onToolbox(host)}
+          {isAgent && (
+            <button onClick={() => props.onDiagnostic(host)} title={t('host.diagnostic')}
               className="wt-touch flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800">
-              <ToolboxIcon /> {t('host.databases')}
+              🩺 <span className="hidden sm:inline">{t('host.diagnostic')}</span>
             </button>
           )}
           <button disabled={!canConnect} onClick={() => props.onNewSession(host)}
@@ -161,99 +192,147 @@ export default function HostOverview(props: {
             <PlusIcon /> {t('host.newSession')}
           </button>
         </div>
+
+        {/* ── bara de tab-uri ── */}
+        <div className="-mb-3 flex w-full gap-1 overflow-x-auto pt-1">
+          {visibleTabs.map((x) => (
+            <button key={x.id} onClick={() => setTab(x.id)}
+              className={`shrink-0 rounded-t-lg px-3 py-1.5 text-sm font-medium transition ${
+                tab === x.id ? 'bg-ink-800 text-slate-100 ring-1 ring-ink-700 ring-b-0'
+                             : 'text-slate-400 hover:bg-ink-800/50 hover:text-slate-200'}`}>
+              {x.label}
+              {x.id === 'sessions' && active.length > 0 && (
+                <span className="ml-1.5 rounded-full bg-emerald-500/15 px-1.5 text-[10px] font-semibold wt-good">{active.length}</span>
+              )}
+            </button>
+          ))}
+        </div>
       </div>
 
-      {/* ── master (listă) + detail (preview) ──
-         pe mobil: stivuit pe o coloană (lista sus, mărginită, preview dedesubt) —
-         două coloane pe 390px striveau preview-ul la ~90px */}
-      <div className="flex min-h-0 flex-1 flex-col md:flex-row">
-        <div className="max-h-[38%] w-full shrink-0 overflow-y-auto border-b border-ink-800 md:max-h-none md:w-[320px] md:border-b-0 md:border-r">
-          <button
-            onClick={() => { setViewDetail(true); setSelected(null) }}
-            className={`flex w-full items-center gap-2.5 px-3 py-2 text-left ${
-              viewDetail || !sel ? 'bg-ink-800' : 'hover:bg-ink-800/50'}`}
-          >
-            <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-ink-700 text-slate-400"><ServerIcon /></span>
-            <span className="min-w-0 flex-1">
-              <span className="block truncate text-sm text-slate-200">{t('host.details')}</span>
-              <span className="block truncate text-[11px] text-slate-600">{t('host.detailsSub')}</span>
-            </span>
-          </button>
-          <div className="px-3 pb-1 pt-3 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-            {t('host.active')} {active.length > 0 && <span className="text-slate-600">· {active.length}</span>}
-          </div>
-          {active.length === 0
-            ? <p className="px-3 pb-2 text-xs text-slate-600">{t('host.noActiveSessions')}</p>
-            : active.map(row)}
-          {closed.length > 0 && (
-            <>
-              <div className="px-3 pb-1 pt-4 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                {t('host.closed')} <span className="text-slate-600">· {closed.length}</span>
-              </div>
-              {closed.map(row)}
-            </>
-          )}
-        </div>
-
-        {/* preview sesiune SAU detalii host */}
-        <div className="flex min-w-0 flex-1 flex-col">
-          {sel && !viewDetail ? (
-            <>
-              {/* flex-wrap: pe iPad Mini, butoanele cu ținte tactile de 44px +
-                  „Deschide" depășeau lățimea → coboară pe rândul doi, nu ies din ecran */}
-              <div className="flex flex-wrap items-center gap-2 border-b border-ink-800 px-4 py-2.5">
-                <span className={`h-2 w-2 shrink-0 rounded-full ${
-                  selLive ? 'bg-emerald-400 dot-live' : sel.state === 'lost' ? 'bg-rose-500' : 'bg-slate-600'}`} />
-                <div className="min-w-[8rem] flex-1">
-                  <div className="truncate text-sm font-medium text-slate-200">{sel.title || t('host.sessionFallback')}</div>
-                  <div className="truncate text-[11px] text-slate-600">
-                    {selLive ? t('host.previewLive') : t('host.previewHistory')} · {timeAgo(sel.closed_at || sel.created, t)}
-                  </div>
+      {/* ── conţinutul tab-ului ── */}
+      <div className="flex min-h-0 flex-1 flex-col">
+        {tab === 'overview' && (
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            {active.length > 0 && (
+              <div className="border-b border-ink-800 px-4 py-3 sm:px-6">
+                <div className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                  {t('host.active')} <span className="text-slate-600">· {active.length}</span>
+                  <button onClick={() => setTab('sessions')} className="ml-auto text-[11px] normal-case text-sky-400 hover:underline">{t('host.allSessions')} →</button>
                 </div>
-                {/* split/popout: doar pe ecrane mari (pe tablete nu încap) */}
-                <button onClick={() => props.onSplit(sel.id)} title={t('host.splitTitle')}
-                  className="hidden shrink-0 rounded p-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-200 lg:block"><SplitIcon /></button>
-                <button onClick={() => props.onPopout(sel.id)} title={t('host.popoutTitle')}
-                  className="hidden shrink-0 rounded p-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-200 lg:block"><PopoutIcon /></button>
-                {/* redare: sesiunea închisă se poate REVEDEA, nu doar descărca */}
-                {!selLive && (
-                  <button onClick={() => setPlaying(sel)} title={t('host.playTitle')}
-                    aria-label={t('host.playTitle')}
-                    className="wt-touch grid place-items-center rounded p-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-200">▶</button>
-                )}
-                <a href={`/api/sessions/${sel.id}/transcript?format=cast`} download title={t('host.downloadTitle')}
-                  className="wt-touch grid place-items-center rounded p-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-200"><DownloadIcon /></a>
-                {!selLive && (
-                  <button onClick={() => {
-                      // Ştergerea e IREVERSIBILĂ (sesiune + transcript). Aceeaşi acţiune din
-                      // interiorul sesiunii cerea confirmare; aici, un click greşit între ▶ şi ⬇
-                      // ştergea istoricul fără să întrebe. Prins de auditul intern.
-                      if (!confirm(t('session.confirmDelete'))) return
-                      setDeletedIds((prev) => new Set(prev).add(sel.id))   // remove immediately (și față de poll-ul global)
-                      props.onDeleteSession(sel.id); setSelected(null)
-                    }} title={t('host.deleteTitle')}
-                    className="wt-touch grid place-items-center rounded p-1.5 text-slate-500 hover:bg-ink-800 hover:text-rose-400"><TrashIcon /></button>
-                )}
-                <button onClick={() => props.onOpenSession(sel.id)}
-                  className="wt-touch ml-1 rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-700">
-                  {selLive ? t('host.openTerminal') : t('host.viewHistory')}
-                </button>
+                <div className="flex flex-wrap gap-2">
+                  {active.slice(0, 6).map((s) => (
+                    <button key={s.id} onClick={() => props.onOpenSession(s.id)}
+                      className="flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm text-slate-200 ring-1 ring-ink-700 hover:bg-ink-800">
+                      <span className="h-2 w-2 rounded-full bg-emerald-400 dot-live" />
+                      <span className="max-w-[12rem] truncate">{s.title || t('host.sessionFallback')}</span>
+                    </button>
+                  ))}
+                </div>
               </div>
-              <div className="min-h-0 flex-1 bg-[#0b0e14] p-2">
-                <SessionPreview key={sel.id} sid={sel.id} live={selLive} />
-              </div>
-            </>
-          ) : (
+            )}
             <HostDetail host={host} />
-          )}
-        </div>
+          </div>
+        )}
+
+        {tab === 'sessions' && (
+          <div className="flex min-h-0 flex-1 flex-col md:flex-row">
+            <div className="max-h-[38%] w-full shrink-0 overflow-y-auto border-b border-ink-800 md:max-h-none md:w-[320px] md:border-b-0 md:border-r">
+              <div className="px-3 pb-1 pt-3 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                {t('host.active')} {active.length > 0 && <span className="text-slate-600">· {active.length}</span>}
+              </div>
+              {active.length === 0
+                ? <p className="px-3 pb-2 text-xs text-slate-600">{t('host.noActiveSessions')}</p>
+                : active.map(row)}
+              {closed.length > 0 && (
+                <>
+                  <div className="px-3 pb-1 pt-4 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    {t('host.closed')} <span className="text-slate-600">· {closed.length}</span>
+                  </div>
+                  {closed.map(row)}
+                </>
+              )}
+            </div>
+            <div className="flex min-w-0 flex-1 flex-col">
+              {sel ? (
+                <>
+                  <div className="flex flex-wrap items-center gap-2 border-b border-ink-800 px-4 py-2.5">
+                    <span className={`h-2 w-2 shrink-0 rounded-full ${
+                      selLive ? 'bg-emerald-400 dot-live' : sel.state === 'lost' ? 'bg-rose-500' : 'bg-slate-600'}`} />
+                    <div className="min-w-[8rem] flex-1">
+                      <div className="truncate text-sm font-medium text-slate-200">{sel.title || t('host.sessionFallback')}</div>
+                      <div className="truncate text-[11px] text-slate-600">
+                        {selLive ? t('host.previewLive') : t('host.previewHistory')} · {timeAgo(sel.closed_at || sel.created, t)}
+                      </div>
+                    </div>
+                    <button onClick={() => props.onSplit(sel.id)} title={t('host.splitTitle')}
+                      className="hidden shrink-0 rounded p-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-200 lg:block"><SplitIcon /></button>
+                    <button onClick={() => props.onPopout(sel.id)} title={t('host.popoutTitle')}
+                      className="hidden shrink-0 rounded p-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-200 lg:block"><PopoutIcon /></button>
+                    {!selLive && (
+                      <button onClick={() => setPlaying(sel)} title={t('host.playTitle')} aria-label={t('host.playTitle')}
+                        className="wt-touch grid place-items-center rounded p-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-200">▶</button>
+                    )}
+                    <a href={`/api/sessions/${sel.id}/transcript?format=cast`} download title={t('host.downloadTitle')}
+                      className="wt-touch grid place-items-center rounded p-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-200"><DownloadIcon /></a>
+                    {!selLive && (
+                      <button onClick={() => {
+                          if (!confirm(t('session.confirmDelete'))) return
+                          setDeletedIds((prev) => new Set(prev).add(sel.id))
+                          props.onDeleteSession(sel.id); setSelected(null)
+                        }} title={t('host.deleteTitle')}
+                        className="wt-touch grid place-items-center rounded p-1.5 text-slate-500 hover:bg-ink-800 hover:text-rose-400"><TrashIcon /></button>
+                    )}
+                    <button onClick={() => props.onOpenSession(sel.id)}
+                      className="wt-touch ml-1 rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-700">
+                      {selLive ? t('host.openTerminal') : t('host.viewHistory')}
+                    </button>
+                  </div>
+                  <div className="min-h-0 flex-1 bg-[#0b0e14] p-2">
+                    <SessionPreview key={sel.id} sid={sel.id} live={selLive} />
+                  </div>
+                </>
+              ) : (
+                <div className="flex h-full flex-col items-center justify-center gap-3 text-sm text-slate-500">
+                  <p>{t('host.noSessionsYet')}</p>
+                  <button disabled={!canConnect} onClick={() => props.onNewSession(host)}
+                    className="rounded-lg bg-sky-600 px-3.5 py-2 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-40">
+                    <span className="inline-flex items-center gap-1.5"><PlusIcon /> {t('host.newSession')}</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {tab === 'files' && (
+          <Suspense fallback={paneFallback}>
+            <FilePanel embed host={host} sessionId="" onClose={() => setTab('overview')} />
+          </Suspense>
+        )}
+        {tab === 'forwards' && (
+          <Suspense fallback={paneFallback}>
+            <ForwardsPanel embed host={host} onClose={() => setTab('overview')} onOpenSession={props.onOpenSession} />
+          </Suspense>
+        )}
+        {tab === 'services' && (
+          <Suspense fallback={paneFallback}>
+            <ServicesPanel embed host={host} onClose={() => setTab('overview')} onJournal={(unit) => props.onJournal(host, unit)} />
+          </Suspense>
+        )}
+        {tab === 'docker' && (
+          <Suspense fallback={paneFallback}>
+            <DockerPanel embed host={host} onClose={() => setTab('overview')} onOpenContainerShell={(cid) => props.onContainerShell(host, cid)} />
+          </Suspense>
+        )}
+        {tab === 'databases' && (
+          <Suspense fallback={paneFallback}>
+            <ToolboxPanel embed host={host} onClose={() => setTab('overview')} onOpen={(h, cid) => props.onConnectionOpen(h, cid)} />
+          </Suspense>
+        )}
       </div>
+
       {playing && (
-        <TranscriptPlayer
-          sid={playing.id}
-          title={playing.title}
-          onClose={() => setPlaying(null)}
-        />
+        <TranscriptPlayer sid={playing.id} title={playing.title} onClose={() => setPlaying(null)} />
       )}
     </div>
   )

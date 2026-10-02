@@ -23,7 +23,7 @@ import CopyToast from './components/CopyToast'
 import { errText, api, AppState, Host, Session, Snippet, SplitView, setStepupHandler } from './lib/api'
 import { hostAt, hostColor } from './lib/host'
 import { useI18n } from './lib/i18n'
-import { ensureNotificationPermission, notify, registerToast } from './lib/notify'
+import { ensureNotificationPermission, notify, notifyError, registerToast } from './lib/notify'
 import { registerSecretPrompt, SecretAsk } from './lib/secretPrompt'
 import SecretPromptModal from './components/SecretPromptModal'
 import { markBooted } from './lib/failsafe'
@@ -297,7 +297,8 @@ function MainApp() {
     registerToast((message, kind) => {
       const id = `${Date.now()}-${Math.random()}`
       setToasts((t) => [...t, { id, message, kind }])
-      setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 6000)
+      // erorile stau mai mult (12s) — ai nevoie de timp să citeşti motivul; info/warn 6s
+      setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), kind === 'error' ? 12000 : 6000)
     })
   }, [])
 
@@ -862,7 +863,7 @@ function MainApp() {
       navigate(r.id)
       setSidebarOpen(false)
     } catch (e) {
-      notify(t('app.cannotStartSession'), errText(e, t) || t('app.error'), 'warn')
+      notifyError(t('app.cannotStartSession'), errText(e, t) || t('app.error'))
     }
   }
 
@@ -884,7 +885,7 @@ function MainApp() {
       setSidebarOpen(false)
       return true
     } catch (e) {
-      notify(t('app.cannotOpenSerial'), errText(e, t) || t('app.error'), 'warn')
+      notifyError(t('app.cannotOpenSerial'), errText(e, t) || t('app.error'))
       return false
     }
   }
@@ -906,7 +907,7 @@ function MainApp() {
       openTab(r.id)
       navigate(r.id)
     } catch (e) {
-      notify(t('app.cannotStartSession'), errText(e, t) || t('app.error'), 'warn')
+      notifyError(t('app.cannotStartSession'), errText(e, t) || t('app.error'))
     }
   }
 
@@ -927,7 +928,7 @@ function MainApp() {
       openTab(r.id)
       navigate(r.id)
     } catch (e) {
-      notify(t('app.cannotStartSession'), errText(e, t) || t('app.error'), 'warn')
+      notifyError(t('app.cannotStartSession'), errText(e, t) || t('app.error'))
     }
   }
 
@@ -947,7 +948,7 @@ function MainApp() {
       openTab(r.id)
       navigate(r.id)
     } catch (e) {
-      notify(t('app.cannotStartSession'), errText(e, t) || t('app.error'), 'warn')
+      notifyError(t('app.cannotStartSession'), errText(e, t) || t('app.error'))
     }
   }
 
@@ -972,7 +973,7 @@ function MainApp() {
       openTab(r.id)
       navigate(r.id)
     } catch (e) {
-      notify(t('app.cannotStartSession'), errText(e, t) || t('app.error'), 'warn')
+      notifyError(t('app.cannotStartSession'), errText(e, t) || t('app.error'))
     }
   }
 
@@ -1127,17 +1128,20 @@ function MainApp() {
         )}
         {!splitActive && !primary && (<PaneErrorBoundary>{routeHost ? (
           <HostOverview
-            onToolbox={setToolboxHost}
             onMenu={() => { setSidebarCollapsed(false); localStorage.setItem('wt-sidebar-collapsed', '0'); setSidebarOpen(true) }}
-      sidebarCollapsed={sidebarCollapsed}
+            sidebarCollapsed={sidebarCollapsed}
             host={routeHost}
             sessions={sessions.filter((s) => s.host_id === routeHost.id)}
             onOpenSession={selectSession}
             onNewSession={connectHost}
-            onFiles={setFilesHost}
             onSplit={splitSession}
             onPopout={popout}
             onDeleteSession={deleteSession}
+            onConnectionOpen={openConnection}
+            onJournal={openJournal}
+            onContainerShell={openContainerShell}
+            onSerial={setSerialHost}
+            onDiagnostic={setDiagHost}
           />
         ) : (
           <Dashboard

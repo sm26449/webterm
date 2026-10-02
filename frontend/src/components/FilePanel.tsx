@@ -101,15 +101,17 @@ async function readEntry(entry: any, prefix: string, out: UpItem[]): Promise<voi
   }
 }
 
-export default function FilePanel(props: { host: Host; sessionId: string; onClose: () => void; overlay?: boolean }) {
+export default function FilePanel(props: { host: Host; sessionId: string; onClose: () => void; overlay?: boolean; embed?: boolean }) {
   const { t } = useI18n()
   const isAgent = !props.host.connection_type || props.host.connection_type === 'agent'
-  // pe pane-uri înguste (split pe iPad) panoul e DRAWER peste terminal, nu coloană
-  // statică — altfel o coloană de 320px într-un pane de 240px strivește terminalul
-  // la ~0px. Decizia vine pe lățimea REALĂ a pane-ului (nu pe viewport).
-  const asideCls = 'fixed inset-y-0 right-0 z-40 flex w-[90vw] max-w-sm flex-col border-l border-ink-800 bg-ink-900 shadow-2xl'
+  // `embed`: panoul umple un tab din pagina hostului (full-width, fără drawer/scrim/close).
+  // Altfel: pe pane-uri înguste (split pe iPad) e DRAWER peste terminal, nu coloană statică —
+  // o coloană de 320px într-un pane de 240px strivește terminalul la ~0px.
+  const asideCls = props.embed
+    ? 'flex h-full w-full min-h-0 flex-col bg-ink-900'
+    : 'fixed inset-y-0 right-0 z-40 flex w-[90vw] max-w-sm flex-col border-l border-ink-800 bg-ink-900 shadow-2xl'
     + (props.overlay ? '' : ' sm:static sm:z-auto sm:w-80 sm:max-w-none sm:shrink-0 sm:shadow-none')
-  const scrimCls = 'fixed inset-0 z-30 bg-black/60' + (props.overlay ? '' : ' sm:hidden')
+  const scrimCls = props.embed ? 'hidden' : 'fixed inset-0 z-30 bg-black/60' + (props.overlay ? '' : ' sm:hidden')
   const [listing, setListing] = useState<Listing | null>(null)
   const [path, setPath] = useState('~')
   const [error, setError] = useState('')
@@ -538,7 +540,7 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
     el?.scrollIntoView({ block: 'nearest' })
   }, [sel])
 
-  const header = (
+  const header = props.embed ? null : (
     <header className="flex items-center gap-2 border-b border-ink-800 px-3 py-2">
       <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">{t('files.title')}</span>
       <button
@@ -627,9 +629,12 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
             placeholder={t('files.filterPh')}
             className="min-w-0 flex-1 rounded bg-ink-800/60 px-2 py-0.5 text-slate-300 ring-1 ring-ink-700 focus:ring-sky-500"
           />
-          <button onClick={follow ? () => setFollow(false) : enableFollow}
-            className={`shrink-0 rounded px-1.5 py-0.5 ${follow ? 'wt-good ring-1 ring-emerald-600/40' : 'text-slate-500 hover:bg-ink-800'}`}
-            title={t('files.followCwd')}>⇄ cwd</button>
+          {/* „follow cwd" are sens doar legat de o sesiune; în embed (tab-ul hostului) nu avem una */}
+          {!props.embed && (
+            <button onClick={follow ? () => setFollow(false) : enableFollow}
+              className={`shrink-0 rounded px-1.5 py-0.5 ${follow ? 'wt-good ring-1 ring-emerald-600/40' : 'text-slate-500 hover:bg-ink-800'}`}
+              title={t('files.followCwd')}>⇄ cwd</button>
+          )}
           <button onClick={() => setShowHidden((v) => !v)}
             className={`shrink-0 rounded px-1.5 py-0.5 ${showHidden ? 'wt-link' : 'text-slate-500 hover:bg-ink-800'}`}
             title={t('files.showHidden')}>.*</button>

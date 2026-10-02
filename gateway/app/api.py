@@ -1196,14 +1196,27 @@ async def _connect_direct(row, request, body_credential="", body_passphrase=""):
         else:
             await core.dial_ssh(row, cred)
     except core.ForwardError as e:
-        raise HTTPException(502, "jump host unreachable: %s" % e)
+        # agentul nu poate deschide TCP spre ţintă (refuzat / fără rută / gazdă greşită)
+        raise ApiError(502, "sshjump.unreachable",
+                       "the agent could not reach %s:%s — %s"
+                       % (row["hostname"], row["ssh_port"] or 22, e))
     except core.HostKeyMismatch:
         raise HTTPException(409, "the host key fingerprint changed — possible MITM; connection refused")
     except asyncssh.PermissionDenied:
         security.record_login_failure(ip)
-        raise HTTPException(401, "SSH authentication failed")
-    except (asyncssh.Error, OSError, asyncio.TimeoutError) as e:
-        raise HTTPException(502, f"cannot connect over SSH: {e}")
+        # ţinta a răspuns, dar a RESPINS credenţialele (user/parolă greşite ori metodă nepotrivită)
+        raise ApiError(401, "ssh.authFailed",
+                       "%s@%s rejected the credentials — wrong password, or the server wants a key"
+                       % (row["ssh_username"] or "", row["hostname"]))
+    except asyncio.TimeoutError:
+        # TCP s-a conectat, dar NICIUN banner SSH în SSH_CONNECT_TIMEOUT: aproape sigur
+        # portul e greşit / nu e un server SSH acolo / e filtrat. `str(TimeoutError)` e gol,
+        # deci construim noi un mesaj cu sens (altfel UI-ul arăta „cannot connect: ").
+        raise ApiError(504, "ssh.noBanner",
+                       "no SSH greeting from %s:%s within %ds — wrong port, not an SSH server, "
+                       "or filtered" % (row["hostname"], row["ssh_port"] or 22, core.SSH_CONNECT_TIMEOUT))
+    except (asyncssh.Error, OSError) as e:
+        raise HTTPException(502, f"cannot connect over SSH: {e or type(e).__name__}")
     security.record_login_success(ip)
 
 

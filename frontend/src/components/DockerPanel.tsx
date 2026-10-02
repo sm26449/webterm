@@ -11,7 +11,7 @@ type Kind = 'containers' | 'images' | 'volumes' | 'networks'
 const KINDS: Kind[] = ['containers', 'images', 'volumes', 'networks']
 
 export default function DockerPanel(props: {
-  host: Host; onClose: () => void; overlay?: boolean
+  host: Host; onClose: () => void; overlay?: boolean; embed?: boolean
   /** deschide un tab de terminal cu un shell în containerul dat (docker exec) */
   onOpenContainerShell?: (containerId: string) => void
 }) {
@@ -23,9 +23,11 @@ export default function DockerPanel(props: {
   const [logsFor, setLogsFor] = useState<string | null>(null)
   const [logs, setLogs] = useState('')
 
-  const asideCls = 'fixed inset-y-0 right-0 z-40 flex w-[90vw] max-w-md flex-col border-l border-ink-800 bg-ink-900 shadow-2xl'
+  const asideCls = props.embed
+    ? 'flex h-full w-full min-h-0 flex-col bg-ink-900'
+    : 'fixed inset-y-0 right-0 z-40 flex w-[90vw] max-w-md flex-col border-l border-ink-800 bg-ink-900 shadow-2xl'
     + (props.overlay ? '' : ' sm:static sm:z-auto sm:w-96 sm:max-w-none sm:shrink-0 sm:shadow-none')
-  const scrimCls = 'fixed inset-0 z-30 bg-black/60' + (props.overlay ? '' : ' sm:hidden')
+  const scrimCls = props.embed ? 'hidden' : 'fixed inset-0 z-30 bg-black/60' + (props.overlay ? '' : ' sm:hidden')
 
   const load = useCallback(async (k: Kind) => {
     setError(''); setRows(null)
@@ -71,8 +73,10 @@ export default function DockerPanel(props: {
       <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">{t('docker.title')}</span>
       <button onClick={() => load(kind)} title={t('docker.refresh')} aria-label={t('docker.refresh')}
         className="ml-auto rounded px-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-300"><RefreshIcon /></button>
-      <button onClick={props.onClose} aria-label={t('docker.closeAria')}
-        className="wt-touch rounded px-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-300">✕</button>
+      {!props.embed && (
+        <button onClick={props.onClose} aria-label={t('docker.closeAria')}
+          className="wt-touch rounded px-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-300">✕</button>
+      )}
     </header>
   )
 

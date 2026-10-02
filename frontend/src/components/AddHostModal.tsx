@@ -129,6 +129,7 @@ export default function AddHostModal(props: {
       } else {
         const h = await api<Host>('/api/hosts', { method: 'POST', body: JSON.stringify(body) })
         if (once) { props.onConnect?.(h); props.onClose() }   // efemer → conectează acum, fără ecranul post-creare
+        else if (pj) { props.onSaved?.(); props.onClose() }   // ţintă jump salvată → închide; apare cuibărită sub agent
         else setCreated(h)
       }
     } catch (err) {
