@@ -1,13 +1,26 @@
 import { useEffect, useRef, useState } from 'react'
-import { EditorState, Extension } from '@codemirror/state'
-import { EditorView, keymap } from '@codemirror/view'
-import { indentWithTab } from '@codemirror/commands'
-import { StreamLanguage } from '@codemirror/language'
-import { oneDark } from '@codemirror/theme-one-dark'
-import { basicSetup } from 'codemirror'
+import * as monaco from 'monaco-editor'
+import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker'
+import jsonWorker from 'monaco-editor/esm/vs/language/json/json.worker?worker'
+import cssWorker from 'monaco-editor/esm/vs/language/css/css.worker?worker'
+import htmlWorker from 'monaco-editor/esm/vs/language/html/html.worker?worker'
+import tsWorker from 'monaco-editor/esm/vs/language/typescript/ts.worker?worker'
 import { errText, api, ensureStepup } from '../lib/api'
 import { useI18n } from '../lib/i18n'
 import { useFocusTrap } from '../lib/useFocusTrap'
+
+// Workerele Monaco, bundle-uite LOCAL de Vite (`?worker`) — fără CDN, fără phone-home, ca
+// restul gateway-ului. Întregul modul e lazy-loaded din FilePanel, deci Monaco (~mare) + workerele
+// se descarcă DOAR când deschizi editorul, nu în bundle-ul principal.
+;(self as unknown as { MonacoEnvironment: monaco.Environment }).MonacoEnvironment = {
+  getWorker(_id, label) {
+    if (label === 'json') return new jsonWorker()
+    if (label === 'css' || label === 'scss' || label === 'less') return new cssWorker()
+    if (label === 'html' || label === 'handlebars' || label === 'razor') return new htmlWorker()
+    if (label === 'typescript' || label === 'javascript') return new tsWorker()
+    return new editorWorker()
+  },
+}
 
 interface Preview {
   path: string
@@ -19,59 +32,38 @@ interface Preview {
   text: string
 }
 
-// fiecare gramatică e un import DINAMIC (chunk separat): deschizi un .json și se
-// încarcă doar gramatica json, nu toate. Nucleul editorului rămâne mic.
-async function legacy(mod: Promise<Record<string, unknown>>, key: string): Promise<Extension> {
-  return StreamLanguage.define((await mod)[key] as Parameters<typeof StreamLanguage.define>[0])
-}
-
-function loaderFor(name: string, firstLine: string): (() => Promise<Extension>) | null {
+// extensie → id de limbaj Monaco (built-in). Monaco aduce gramaticile cu el; cele necunoscute
+// (toml→ini, nginx→plaintext) cad pe cel mai apropiat, niciodată eroare.
+function monacoLang(name: string, firstLine: string): string {
   const n = name.toLowerCase()
+  if (n === 'dockerfile') return 'dockerfile'
+  if (n.includes('nginx')) return 'ini'
   const ext = n.includes('.') ? n.split('.').pop()! : ''
-  if (n === 'dockerfile') return () => legacy(import('@codemirror/legacy-modes/mode/dockerfile'), 'dockerFile')
-  if (n.includes('nginx')) return () => legacy(import('@codemirror/legacy-modes/mode/nginx'), 'nginx')
-  switch (ext) {
-    case 'js': case 'jsx': case 'mjs': case 'cjs':
-      return () => import('@codemirror/lang-javascript').then((m) => m.javascript({ jsx: ext.endsWith('x') }))
-    case 'ts': case 'tsx':
-      return () => import('@codemirror/lang-javascript').then((m) => m.javascript({ typescript: true, jsx: ext.endsWith('x') }))
-    case 'json': case 'json5': case 'webmanifest':
-      return () => import('@codemirror/lang-json').then((m) => m.json())
-    case 'py': case 'pyw':
-      return () => import('@codemirror/lang-python').then((m) => m.python())
-    case 'md': case 'markdown':
-      return () => import('@codemirror/lang-markdown').then((m) => m.markdown())
-    case 'html': case 'htm':
-      return () => import('@codemirror/lang-html').then((m) => m.html())
-    case 'css': case 'scss': case 'less':
-      return () => import('@codemirror/lang-css').then((m) => m.css())
-    case 'xml': case 'svg': case 'xsl': case 'plist':
-      return () => import('@codemirror/lang-xml').then((m) => m.xml())
-    case 'yaml': case 'yml':
-      return () => import('@codemirror/lang-yaml').then((m) => m.yaml())
-    case 'sql':
-      return () => import('@codemirror/lang-sql').then((m) => m.sql())
-    case 'c': case 'h': case 'cpp': case 'cc': case 'cxx': case 'hpp':
-      return () => import('@codemirror/lang-cpp').then((m) => m.cpp())
-    case 'rs':
-      return () => import('@codemirror/lang-rust').then((m) => m.rust())
-    case 'php':
-      return () => import('@codemirror/lang-php').then((m) => m.php())
-    case 'sh': case 'bash': case 'zsh': case 'ksh':
-      return () => legacy(import('@codemirror/legacy-modes/mode/shell'), 'shell')
-    case 'toml':
-      return () => legacy(import('@codemirror/legacy-modes/mode/toml'), 'toml')
-    case 'conf': case 'cfg': case 'ini': case 'properties': case 'env':
-      return () => legacy(import('@codemirror/legacy-modes/mode/properties'), 'properties')
+  const map: Record<string, string> = {
+    js: 'javascript', jsx: 'javascript', mjs: 'javascript', cjs: 'javascript',
+    ts: 'typescript', tsx: 'typescript',
+    json: 'json', json5: 'json', webmanifest: 'json',
+    py: 'python', pyw: 'python',
+    md: 'markdown', markdown: 'markdown',
+    html: 'html', htm: 'html',
+    css: 'css', scss: 'scss', less: 'less',
+    xml: 'xml', svg: 'xml', xsl: 'xml', plist: 'xml',
+    yaml: 'yaml', yml: 'yaml',
+    sql: 'sql',
+    c: 'cpp', h: 'cpp', cpp: 'cpp', cc: 'cpp', cxx: 'cpp', hpp: 'cpp',
+    rs: 'rust', php: 'php', go: 'go', rb: 'ruby', java: 'java',
+    sh: 'shell', bash: 'shell', zsh: 'shell', ksh: 'shell',
+    toml: 'ini', conf: 'ini', cfg: 'ini', ini: 'ini', properties: 'ini', env: 'ini',
+    dockerfile: 'dockerfile',
   }
-  if (/^#!.*\b(sh|bash|zsh)\b/.test(firstLine))
-    return () => legacy(import('@codemirror/legacy-modes/mode/shell'), 'shell')
-  return null
+  if (map[ext]) return map[ext]
+  if (/^#!.*\b(sh|bash|zsh)\b/.test(firstLine)) return 'shell'
+  return 'plaintext'
 }
 
-/** Editor de fișiere cu CodeMirror 6: highlight după tip (gramatici lazy),
-    fișiere mari doar în citire (primii 256KB), salvare atomică cu verificare de
-    conflict (mtime). Lazy-loaded din FilePanel → nu intră în bundle-ul principal. */
+/** Editor de fișiere cu Monaco (motorul VS Code): highlight după tip, temă vs-dark, fișiere mari
+    doar în citire (primii 256KB), salvare atomică cu verificare de conflict (mtime). Lazy-loaded
+    din FilePanel → nici Monaco, nici workerele nu intră în bundle-ul principal. */
 export default function FileEditor(props: {
   hostId: number
   path: string
@@ -83,7 +75,7 @@ export default function FileEditor(props: {
   const host = useRef<HTMLDivElement>(null)
   const dialogRef = useRef<HTMLDivElement>(null)
   useFocusTrap(dialogRef, props.onClose)   // Tab trap + Escape + restaurare focus
-  const view = useRef<EditorView>()
+  const editor = useRef<monaco.editor.IStandaloneCodeEditor>()
   const [pv, setPv] = useState<Preview | null>(null)
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
@@ -99,32 +91,32 @@ export default function FileEditor(props: {
 
   useEffect(() => {
     if (!pv || pv.binary || !host.current) return
-    let v: EditorView | undefined
-    let alive = true
-    ;(async () => {
-      const firstLine = pv.text.slice(0, (pv.text.indexOf('\n') + 1) || 200)
-      const loader = loaderFor(props.name, firstLine)
-      const lang = loader ? await loader().catch(() => null) : null
-      if (!alive || !host.current) return
-      const exts: Extension[] = [
-        basicSetup, oneDark, keymap.of([indentWithTab]),
-        EditorView.theme({ '&': { height: '100%' }, '.cm-scroller': { fontFamily: 'JetBrains Mono, monospace' } }),
-      ]
-      if (lang) exts.push(lang)
-      if (!pv.editable) exts.push(EditorState.readOnly.of(true), EditorView.editable.of(false))
-      v = new EditorView({ state: EditorState.create({ doc: pv.text, extensions: exts }), parent: host.current })
-      view.current = v
-    })()
-    return () => { alive = false; v?.destroy(); view.current = undefined }
+    const firstLine = pv.text.slice(0, (pv.text.indexOf('\n') + 1) || 200)
+    const ed = monaco.editor.create(host.current, {
+      value: pv.text,
+      language: monacoLang(props.name, firstLine),
+      theme: 'vs-dark',               // aspectul autentic VS Code
+      readOnly: !pv.editable,
+      automaticLayout: true,          // se redimensionează cu dialogul
+      minimap: { enabled: true },
+      fontFamily: 'JetBrains Mono, monospace',
+      fontSize: 13,
+      scrollBeyondLastLine: false,
+      renderWhitespace: 'selection',
+      tabSize: 2,
+    })
+    editor.current = ed
+    // Ctrl/Cmd+S din interiorul editorului (Monaco prinde tastatura când are focus)
+    ed.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => saveRef.current(false))
+    return () => { ed.getModel()?.dispose(); ed.dispose(); editor.current = undefined }
   }, [pv, props.name])
 
   async function save(force = false) {
-    if (!pv || !view.current || pv.binary || !pv.editable) return
+    if (!pv || !editor.current || pv.binary || !pv.editable) return
     setSaving(true)
     setError('')
-    const body = new TextEncoder().encode(view.current.state.doc.toString())
-    // if_mtime = protecție contra suprascrierii unei modificări concurente;
-    // la „suprascrie oricum" o omitem
+    const body = new TextEncoder().encode(editor.current.getValue())
+    // if_mtime = protecție contra suprascrierii unei modificări concurente; la „suprascrie oricum" o omitem
     const q = force ? '' : `&if_mtime=${pv.mtime}`
     try {
       const url = `/api/hosts/${props.hostId}/fs/upload?path=${encodeURIComponent(props.path)}${q}`
@@ -142,9 +134,8 @@ export default function FileEditor(props: {
     }
   }
 
-  // Ctrl/Cmd+S salvează (Tab e prins de CodeMirror pentru indentare, deci fără
-  // asta un utilizator pe tastatură nu poate ajunge la butonul Salvează). save()
-  // e no-op pe fișiere view-only/binare, deci apelul e sigur oricând.
+  // Ctrl/Cmd+S global (când focusul NU e în editor — ex. pe butoane). save() e no-op pe
+  // fișiere view-only/binare, deci apelul e sigur oricând.
   const saveRef = useRef(save)
   saveRef.current = save
   useEffect(() => {

@@ -7,6 +7,16 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [Unreleased]
+
+### Changed
+- **File editor is now Monaco (the VS Code editor).** Browsing a host's files and opening one gives
+  the authentic VS Code editing surface — syntax highlighting, minimap, multi-cursor, the `vs-dark`
+  theme — reading and writing through the agent exactly as before (partial-read for big files,
+  atomic save with mtime conflict check, step-up retry on 2FA hosts). Monaco and its workers are
+  **bundled locally** (no CDN, no phone-home) and **lazy-loaded** — they download only when you open
+  a file, never in the main bundle. Replaces the CodeMirror editor (18 deps dropped). Agent untouched.
+
 ## [3.0.0] — 2026-10-02 · agent (53)
 
 A security- and bastion-focused major. WebTerm becomes a **complete jump host** (SSH to LAN gear

@@ -107,7 +107,7 @@ decision explained below.
 
 ![Live terminal](docs/screenshots/02-terminal-dark.png)
 
-**Files + editor** — browse, edit (CodeMirror) and transfer files on the host.
+**Files + editor** — browse, edit (Monaco — the VS Code editor) and transfer files on the host.
 
 ![File browser](docs/screenshots/03-files-dark.png)
 
@@ -212,7 +212,7 @@ what it does not cover, is in [Security](#security) and
   bar + cancel — **resumable**: a dropped connection (or a closed laptop) keeps the
   bytes already uploaded, re-dropping the same file continues where it left off, and
   a **CRC-32 integrity check** guards the commit; **download a folder (or file) as a
-  `.tgz` archive** (tarred on the host, streamed down); a **CodeMirror** editor with
+  `.tgz` archive** (tarred on the host, streamed down); a **Monaco** (VS Code) editor with
   highlighting, large files opened view-only (partial-read), atomic save with
   conflict detection
 - **Git panel** (toolbar button): for the repo in the session's current directory
