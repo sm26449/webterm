@@ -2635,17 +2635,19 @@ _UNIT_RE = re.compile(r"^[A-Za-z0-9@._\\:-]{1,128}$")
 
 
 @router.get("/api/hosts/{host_id}/services")
-async def services_list(host_id: int, user=Depends(security.require_user)):
+async def services_list(host_id: int, failed: bool = False, user=Depends(security.require_user)):
     """Unităţile systemd de tip service (nume, load/active/sub, descriere). Citire de stare de
-    host → aceeaşi poartă de step-up ca docker_list / fs_list."""
+    host → aceeaşi poartă de step-up ca docker_list / fs_list. `failed=1` → doar unităţile căzute
+    (triajul „ce e stricat pe hostul ăsta"), cu `--state=failed` în loc de `--all`."""
     await _require_host_stepup(host_id, user)
     # --plain fără legendă/paginare: coloane fixe UNIT LOAD ACTIVE SUB DESCRIPTION.
     # `--all` include şi serviciile oprite (altfel n-ai ce porni din UI). NU redirectăm stderr şi
     # NU forţăm exit 0: altfel „systemctl: not found" ajungea în /dev/null şi ramura de absenţă era
     # cod mort — un host fără systemd întorcea o listă goală tăcută, nedistinctă de „zero servicii"
     # (audit 2026-09). Deosebim după exit_code + stderr, exact ca docker_list.
+    state = "--state=failed" if failed else "--all"
     resp = await _host_run(host_id,
-        "systemctl list-units --type=service --all --no-legend --no-pager --plain")
+        "systemctl list-units --type=service %s --no-legend --no-pager --plain" % state)
     ec, out, err = resp.get("exit_code"), resp.get("stdout", ""), (resp.get("stderr") or "")
     if ec != 0 and not out.strip():
         low = err.lower()
@@ -4435,6 +4437,7 @@ class SessionIn(BaseModel):
     docker_container: str = ""  # dacă e setat: sesiunea e un shell ÎN acest container (docker exec)
     os_upgrade: bool = False    # dacă e True: sesiunea rulează comanda INTERACTIVĂ de upgrade OS
     connection_id: int = 0      # dacă e setat: sesiunea rulează CLI-ul DB al conexiunii salvate
+    journal_unit: str = ""      # dacă e setat: sesiunea urmăreşte `journalctl -u <unit> -f`
 
 
 class SessionPatch(BaseModel):
@@ -5262,6 +5265,18 @@ async def create_session(host_id: int, body: SessionIn, request: Request,
         cmd = "sh -c %s" % shlex.quote(sh)
         if not title.strip() or title.startswith("Session "):
             title = "OS upgrade (%s)" % mgr
+    elif body.journal_unit:
+        # „Logs" dintr-o unitate systemd: o sesiune care urmăreşte `journalctl -u <unit> -f`,
+        # exact tiparul docker-logs/os_upgrade (glue peste journalctl, nu un UI de loguri fals).
+        # Fără root journalctl arată doar ce poate — acceptabil, e un terminal, userul vede.
+        if ctype != "agent":
+            raise HTTPException(400, "journal follow is only available on agent hosts")
+        if not _UNIT_RE.match(body.journal_unit):
+            raise HTTPException(400, "invalid unit name")
+        u = shlex.quote(body.journal_unit)
+        cmd = "journalctl -u %s -n 200 -f --no-pager" % u
+        if not title.strip() or title.startswith("Session "):
+            title = "journal: " + body.journal_unit[:28]
     elif body.connection_id:
         # Lansator de conexiune DB: sesiunea rulează CLI-ul salvat (psql/mysql/…) cu ţinta
         # pre-completată. Doar host-uri de agent. Politica `ask` → clientul cere parola singur

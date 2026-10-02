@@ -21,6 +21,10 @@ back.
   characters) and escaped for the authorized_keys quoting.
 - **Toolbox History shows each command's date/time**; **Library lets you add your own commands**
   (backed by the existing snippets — one list, also reachable from the command palette).
+- **Services panel: "why is this box sad" triage.** A **Failed** toggle lists only failed units
+  (`systemctl --state=failed`), and a per-service **Logs** button opens a session following
+  `journalctl -u <unit> -f` — the same move as Docker logs, live in a real terminal. New library
+  recipes for fleet `systemctl --failed` and `list-timers`. All via the `run` op; agent untouched.
 - **Toolbox → SSH keys: host-to-host deploy keys.** A dev host can now `ssh` into other
   fleet hosts (deploy/test on prod) without running AI agents there. The private key is
   **generated on the source host and never leaves it** (`~/.ssh/webterm_ed25519`, via the

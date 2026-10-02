@@ -10,12 +10,17 @@ import { RefreshIcon } from './Icons'
 type Svc = { unit: string; load: string; active: string; sub: string; desc: string }
 type Action = 'start' | 'stop' | 'restart'
 
-export default function ServicesPanel(props: { host: Host; onClose: () => void; overlay?: boolean }) {
+export default function ServicesPanel(props: {
+  host: Host; onClose: () => void; overlay?: boolean
+  /** deschide o sesiune care urmăreşte `journalctl -u <unit> -f` */
+  onJournal?: (unit: string) => void
+}) {
   const { t } = useI18n()
   const [rows, setRows] = useState<Svc[] | null>(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState('')          // unitatea pe care rulează o acţiune
   const [filter, setFilter] = useState('')
+  const [failedOnly, setFailedOnly] = useState(false)   // triaj „ce e stricat pe hostul ăsta"
 
   const asideCls = 'fixed inset-y-0 right-0 z-40 flex w-[90vw] max-w-md flex-col border-l border-ink-800 bg-ink-900 shadow-2xl'
     + (props.overlay ? '' : ' sm:static sm:z-auto sm:w-96 sm:max-w-none sm:shrink-0 sm:shadow-none')
@@ -24,13 +29,13 @@ export default function ServicesPanel(props: { host: Host; onClose: () => void; 
   const load = useCallback(async () => {
     setError(''); setRows(null)
     try {
-      const r = await api<{ rows: Svc[] }>(`/api/hosts/${props.host.id}/services`)
+      const r = await api<{ rows: Svc[] }>(`/api/hosts/${props.host.id}/services${failedOnly ? '?failed=1' : ''}`)
       setRows(r.rows)
     } catch (e) {
       setError(errText(e, t) || (e instanceof ApiError ? e.message : t('services.error')))
       setRows([])
     }
-  }, [props.host.id, t])
+  }, [props.host.id, failedOnly, t])
 
   useEffect(() => { load() }, [load])
 
@@ -60,10 +65,14 @@ export default function ServicesPanel(props: { host: Host; onClose: () => void; 
           <button onClick={props.onClose} aria-label={t('common.close')}
             className="wt-touch shrink-0 rounded px-2 py-1 text-slate-400 hover:bg-ink-800">✕</button>
         </div>
-        <div className="border-b border-ink-800 px-3 py-1.5">
+        <div className="flex items-center gap-2 border-b border-ink-800 px-3 py-1.5">
           <input value={filter} onChange={(e) => setFilter(e.target.value)}
             placeholder={t('services.filterPh')}
-            className="w-full rounded bg-ink-800/60 px-2 py-1 text-xs text-slate-300 ring-1 ring-ink-700 focus:ring-sky-500" />
+            className="min-w-0 flex-1 rounded bg-ink-800/60 px-2 py-1 text-xs text-slate-300 ring-1 ring-ink-700 focus:ring-sky-500" />
+          <button onClick={() => setFailedOnly((v) => !v)} aria-pressed={failedOnly}
+            className={`shrink-0 rounded px-2 py-1 text-[11px] font-medium ${failedOnly
+              ? 'bg-rose-500/20 text-rose-300' : 'text-slate-400 hover:bg-ink-800'}`}
+            title={t('services.failedOnly')}>{t('services.failed')}</button>
         </div>
         {error && <div className="border-b border-ink-800 bg-ink-800 px-3 py-1.5 text-[11px] wt-danger">{error}</div>}
         <div className="min-h-0 flex-1 overflow-y-auto">
@@ -82,6 +91,13 @@ export default function ServicesPanel(props: { host: Host; onClose: () => void; 
                 {s.desc && <div className="truncate text-[11px] text-slate-500" title={s.desc}>{s.desc}</div>}
               </div>
               <div className="flex shrink-0 items-center gap-0.5 opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100">
+                {props.onJournal && (
+                  <button onClick={() => props.onJournal!(s.unit)}
+                    title={t('services.logs')} aria-label={t('services.logs') + ' ' + s.unit}
+                    className="rounded px-1.5 py-0.5 text-[11px] text-slate-400 hover:bg-ink-700 hover:text-sky-300">
+                    {t('services.logs')}
+                  </button>
+                )}
                 {(['start', 'stop', 'restart'] as Action[]).map((a) => (
                   <button key={a} onClick={() => act(s.unit, a)} disabled={busy === s.unit}
                     title={t('services.' + a)} aria-label={t('services.' + a) + ' ' + s.unit}

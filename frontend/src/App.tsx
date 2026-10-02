@@ -718,6 +718,7 @@ function MainApp() {
       onChanged={refresh}
       onOpenSession={async (sid) => { await refresh(); selectSession(sid) }}
       onOpenContainerShell={openContainerShell}
+      onJournal={openJournal}
       onOpenConnection={openConnection}
       onDeleted={() => { closeTab(s.id); refresh() }}
     />
@@ -909,6 +910,26 @@ function MainApp() {
   // Acelaşi flux/2FA ca shell-ul de container. Politica `ask` → clientul cere parola singur.
   async function openConnection(host: Host, connId: number) {
     const body: Record<string, unknown> = { title: '', tz: getTimezone(), connection_id: connId }
+    if (host.require_2fa) {
+      const cred = await stepupCredential(host.id)
+      if (!cred) return
+      Object.assign(body, cred)
+    }
+    try {
+      const r = await api<{ id: string }>(`/api/hosts/${host.id}/sessions`, {
+        method: 'POST', body: JSON.stringify(body),
+      })
+      await refresh()
+      openTab(r.id)
+      navigate(r.id)
+    } catch (e) {
+      notify(t('app.cannotStartSession'), errText(e, t) || t('app.error'), 'warn')
+    }
+  }
+
+  // „Logs": sesiune care urmăreşte `journalctl -u <unit> -f` pe host. Acelaşi flux/2FA.
+  async function openJournal(host: Host, unit: string) {
+    const body: Record<string, unknown> = { title: '', tz: getTimezone(), journal_unit: unit }
     if (host.require_2fa) {
       const cred = await stepupCredential(host.id)
       if (!cred) return

@@ -105,6 +105,7 @@ export default function SessionView(props: {
   onOpenSession?: (sid: string) => void
   /** deschide un shell într-un container Docker (docker exec într-un tab nou) */
   onOpenContainerShell?: (host: Host, container: string) => void
+  onJournal?: (host: Host, unit: string) => void
   /** deschide o sesiune care rulează CLI-ul unei conexiuni DB salvate */
   onOpenConnection?: (host: Host, connId: number) => void
   /** guardrail de comenzi (verificat la Enter, via OSC 133) */
@@ -1906,7 +1907,8 @@ export default function SessionView(props: {
           onOpenContainerShell={(c) => { setShowDocker(false); props.onOpenContainerShell?.(props.host!, c) }} />
       )}
       {showServices && props.host && (
-        <ServicesPanel host={props.host} onClose={() => setShowServices(false)} overlay={narrowPane} />
+        <ServicesPanel host={props.host} onClose={() => setShowServices(false)} overlay={narrowPane}
+          onJournal={(u) => { setShowServices(false); props.onJournal?.(props.host!, u) }} />
       )}
       {showToolbox && props.host && (
         <ToolboxPanel host={props.host} onClose={() => setShowToolbox(false)} overlay={narrowPane}

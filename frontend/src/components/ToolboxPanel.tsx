@@ -25,6 +25,8 @@ const LIBRARY: { cat: string; items: { label: string; cmd: string }[] }[] = [
     { label: 'status', cmd: 'systemctl status {service}' },
     { label: 'restart', cmd: 'systemctl restart {service}' },
     { label: 'jurnal live', cmd: 'journalctl -u {service} -f' },
+    { label: 'failed units', cmd: 'systemctl --failed --no-legend --no-pager' },
+    { label: 'timers', cmd: 'systemctl list-timers --all --no-pager' },
   ] },
   { cat: 'system', items: [
     { label: 'disc', cmd: 'df -h' },
