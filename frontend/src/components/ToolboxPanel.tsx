@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { errText, api, ApiError, Connection, DeployKeyDeployment, DeployKeyInfo, Host, withStepup } from '../lib/api'
+import { errText, api, ApiError, Connection, DeployKeyDeployment, DeployKeyInfo, Host, Snippet, withStepup } from '../lib/api'
 import { copyText } from '../lib/clipboard'
 import { useI18n } from '../lib/i18n'
 import { TerminalPromptIcon, PlusIcon, TrashIcon, PencilIcon, CopyIcon } from './Icons'
@@ -155,6 +155,30 @@ export default function ToolboxPanel(props: {
   }, [props.host.id])
   useEffect(() => { if (tab === 'history' && hist === null) loadHist() }, [tab, hist, loadHist])
 
+  // Comenzi proprii în Library: NU un store nou — refolosim snippet-urile existente
+  // (/api/snippets, aceleaşi pe care le vezi în palette/sidebar). „Adaugă" = creează un snippet.
+  const [snips, setSnips] = useState<Snippet[] | null>(null)
+  const [snipEdit, setSnipEdit] = useState<{ id?: number; title: string; body: string } | null>(null)
+  const loadSnips = useCallback(async () => {
+    try { setSnips(await api<Snippet[]>('/api/snippets')) } catch { setSnips([]) }
+  }, [])
+  useEffect(() => { if (tab === 'library' && snips === null) loadSnips() }, [tab, snips, loadSnips])
+  async function saveSnip(d: { id?: number; title: string; body: string }) {
+    try {
+      await api(`/api/snippets${d.id ? '/' + d.id : ''}`, { method: d.id ? 'PATCH' : 'POST',
+        body: JSON.stringify({ title: d.title, body: d.body }) })
+      setSnipEdit(null); await loadSnips()
+    } catch (e) { setError(errText(e, t)) }
+  }
+  async function delSnip(s: Snippet) {
+    if (!confirm(t('toolbox.lib.confirmDelete', { title: s.title }))) return
+    try { await api(`/api/snippets/${s.id}`, { method: 'DELETE' }); await loadSnips() }
+    catch (e) { setError(errText(e, t)) }
+  }
+  // data+ora comenzii din history (created e epoch în secunde)
+  const fmtTs = (epoch: number) => new Date(epoch * 1000).toLocaleString(undefined,
+    { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+
   const asideCls = 'fixed inset-y-0 right-0 z-40 flex w-[90vw] max-w-md flex-col border-l border-ink-800 bg-ink-900 shadow-2xl'
     + (props.overlay ? '' : ' sm:static sm:z-auto sm:w-96 sm:max-w-none sm:shrink-0 sm:shadow-none')
   const scrimCls = 'fixed inset-0 z-30 bg-black/60' + (props.overlay ? '' : ' sm:hidden')
@@ -214,8 +238,12 @@ export default function ToolboxPanel(props: {
             <button onClick={() => setEdit(blank())} className="wt-touch ml-auto shrink-0 rounded px-1.5 text-sky-400 hover:bg-ink-800"
               title={t('toolbox.new')} aria-label={t('toolbox.new')}><PlusIcon /></button>
           )}
+          {tab === 'library' && (
+            <button onClick={() => setSnipEdit({ title: '', body: '' })} className="wt-touch ml-auto shrink-0 rounded px-1.5 text-sky-400 hover:bg-ink-800"
+              title={t('toolbox.lib.add')} aria-label={t('toolbox.lib.add')}><PlusIcon /></button>
+          )}
           <button onClick={props.onClose} aria-label={t('common.close')}
-            className={`wt-touch shrink-0 rounded px-2 py-1 text-slate-400 hover:bg-ink-800${tab === 'connections' ? '' : ' ml-auto'}`}>✕</button>
+            className={`wt-touch shrink-0 rounded px-2 py-1 text-slate-400 hover:bg-ink-800${(tab === 'connections' || tab === 'library') ? '' : ' ml-auto'}`}>✕</button>
         </div>
         {(tab === 'library' || tab === 'history') && (
           <div className="border-b border-ink-800 px-3 py-1.5">
@@ -400,7 +428,33 @@ export default function ToolboxPanel(props: {
           ))}
 
           {/* ── LIBRARY (reţete built-in, Copy) ── */}
-          {tab === 'library' && LIBRARY.map((grp) => {
+          {tab === 'library' && (<>
+            {/* comenzile TALE (snippets), cu add/edit/delete — un store, nu două */}
+            {(() => {
+              const mine = (snips || []).filter((s) => !q ||
+                s.body.toLowerCase().includes(q.toLowerCase()) || s.title.toLowerCase().includes(q.toLowerCase()))
+              if (!mine.length) return null
+              return (
+                <div>
+                  <div className="sticky top-0 bg-ink-900/95 px-3 py-1 font-mono text-[10px] uppercase tracking-wide text-slate-500">{t('toolbox.lib.yours')}</div>
+                  {mine.map((s) => (
+                    <div key={s.id} className="group flex items-center gap-2 border-b border-ink-800/60 px-3 py-1.5 hover:bg-ink-800/50">
+                      <button onClick={() => copy(s.body)} className="flex min-w-0 flex-1 items-center gap-2 text-left" title={t('toolbox.copy')}>
+                        <span className="w-28 shrink-0 truncate text-[12px] text-slate-300">{s.title}</span>
+                        <code className="min-w-0 flex-1 truncate font-mono text-[11px] text-slate-500">{s.body}</code>
+                      </button>
+                      <button onClick={() => setSnipEdit({ id: s.id, title: s.title, body: s.body })}
+                        className="shrink-0 rounded p-1 text-slate-500 opacity-0 group-hover:opacity-100 hover:bg-ink-700 hover:text-slate-200 [@media(hover:none)]:opacity-100"
+                        title={t('toolbox.edit')} aria-label={t('toolbox.edit')}><PencilIcon /></button>
+                      <button onClick={() => delSnip(s)}
+                        className="shrink-0 rounded p-1 text-slate-500 opacity-0 group-hover:opacity-100 hover:bg-ink-700 hover:text-rose-300 [@media(hover:none)]:opacity-100"
+                        title={t('toolbox.delete')} aria-label={t('toolbox.delete')}><TrashIcon /></button>
+                    </div>
+                  ))}
+                </div>
+              )
+            })()}
+            {LIBRARY.map((grp) => {
             const items = grp.items.filter((it) => !q ||
               it.cmd.toLowerCase().includes(q.toLowerCase()) || it.label.toLowerCase().includes(q.toLowerCase()) ||
               grp.cat.includes(q.toLowerCase()))
@@ -420,6 +474,7 @@ export default function ToolboxPanel(props: {
               </div>
             )
           })}
+          </>)}
 
           {/* ── HISTORY (comenzile hostului, din OSC 133; Copy) ── */}
           {tab === 'history' && (hist === null ? (
@@ -433,13 +488,43 @@ export default function ToolboxPanel(props: {
                 title={t('toolbox.copy')}>
                 <span className={`mt-0.5 h-1.5 w-1.5 shrink-0 rounded-full ${h.exit_code === 0 ? 'bg-emerald-500' : h.exit_code == null ? 'bg-slate-600' : 'bg-rose-500'}`}
                   title={h.exit_code == null ? '' : 'exit ' + h.exit_code} aria-hidden="true" />
-                <code className="min-w-0 flex-1 break-all font-mono text-[11.5px] text-slate-300">{h.command}</code>
-                <span className="shrink-0 text-slate-600 group-hover:text-sky-400"><CopyIcon /></span>
+                <span className="min-w-0 flex-1">
+                  <code className="block break-all font-mono text-[11.5px] text-slate-300">{h.command}</code>
+                  <span className="font-mono text-[10px] text-slate-500" title={new Date(h.created * 1000).toLocaleString()}>{fmtTs(h.created)}</span>
+                </span>
+                <span className="mt-0.5 shrink-0 text-slate-600 group-hover:text-sky-400"><CopyIcon /></span>
               </button>
             ))
           })())}
         </div>
       </aside>
+
+      {snipEdit && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4" onClick={() => setSnipEdit(null)}>
+          <div className="glass w-full max-w-sm rounded-2xl p-5" onClick={(ev) => ev.stopPropagation()}>
+            <h2 className="mb-1 text-base font-semibold">{snipEdit.id ? t('toolbox.lib.editTitle') : t('toolbox.lib.newTitle')}</h2>
+            <p className="mb-3 text-[11px] leading-snug text-slate-500">{t('toolbox.lib.hint')}</p>
+            <div className="space-y-2 text-sm">
+              <label className="block">
+                <span className="mb-0.5 block text-xs text-slate-400">{t('toolbox.lib.fTitle')}</span>
+                <input autoFocus value={snipEdit.title} onChange={(ev) => setSnipEdit({ ...snipEdit, title: ev.target.value })}
+                  placeholder="restart nginx" className="w-full rounded bg-ink-800 px-2 py-1 text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" />
+              </label>
+              <label className="block">
+                <span className="mb-0.5 block text-xs text-slate-400">{t('toolbox.lib.fBody')}</span>
+                <textarea value={snipEdit.body} onChange={(ev) => setSnipEdit({ ...snipEdit, body: ev.target.value })}
+                  rows={3} placeholder="sudo systemctl restart {{service}}"
+                  className="w-full rounded bg-ink-800 px-2 py-1 font-mono text-[12px] text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" />
+              </label>
+            </div>
+            <div className="mt-4 flex justify-end gap-2 text-sm">
+              <button onClick={() => setSnipEdit(null)} className="rounded px-3 py-1.5 text-slate-400 hover:bg-ink-800">{t('common.cancel')}</button>
+              <button onClick={() => saveSnip(snipEdit)} disabled={!snipEdit.title.trim() || !snipEdit.body.trim()}
+                className="rounded bg-sky-600 px-3 py-1.5 font-medium text-white hover:bg-sky-700 disabled:opacity-40">{t('common.save')}</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {edit && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4" onClick={() => setEdit(null)}>
