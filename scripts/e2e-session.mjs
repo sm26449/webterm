@@ -736,6 +736,24 @@ try {
   check('split: revin la split din chip (divider reapare)',
     (await page.locator('[aria-label^="Resize the split"]').count()) >= 1)
 
+  // REGRESIE: în split activ, click pe un host din sidebar trebuie să IASĂ din split şi să
+  // arate pagina hostului. Înainte `splitActive` avea prioritate de render peste pagina
+  // hostului, iar click-ul pe host părea mort până dădeai întâi click pe un tab (care
+  // dezactiva split-ul). `selectHost` dezactivează acum split-ul, ca `selectSession`.
+  await page.locator('.wt-sidebar button:has-text("ci-local")').first().click()
+  await page.waitForTimeout(600)
+  check('split: click pe un host din sidebar iese din split (divider dispare)',
+    (await page.locator('[aria-label^="Resize the split"]').count()) === 0)
+  // revin pe o SESIUNE (nu pe pagina hostului) înainte de a reintra în split: paşii de după
+  // (reload, apoi Toolbox din bara sesiunii) cer o sesiune selectată, nu ruta /h/<id>.
+  await page.locator('button[data-tab]').first().evaluate((el) => el.click())
+  await page.waitForTimeout(400)
+  // revin la split din chip → readuce selecţia în localStorage pentru testul de reload de mai jos
+  await page.locator('button:has-text("e2e-split")').first().click()
+  await page.waitForTimeout(800)
+  check('split: revin iar la split din chip după navigarea pe host',
+    (await page.locator('[aria-label^="Resize the split"]').count()) >= 1)
+
   // reload → definiţia vine din server (cross-device), selecţia activă din localStorage
   await page.reload()
   await page.waitForTimeout(2000)

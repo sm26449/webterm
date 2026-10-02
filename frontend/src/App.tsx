@@ -749,6 +749,10 @@ function MainApp() {
   }
 
   const selectHost = (id: number) => {
+    // navigarea la pagina unui host IESE din split-view-ul activ (chip-ul rămâne în bară →
+    // revii oricând). Altfel `splitActive` are prioritate de render peste pagina hostului, iar
+    // click-ul pe host părea mort până dădeai întâi click pe un tab (care dezactiva split-ul).
+    setActiveSplitId(null)
     navigateHost(id)
     setSidebarOpen(false)
   }
