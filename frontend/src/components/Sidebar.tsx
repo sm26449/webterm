@@ -742,7 +742,9 @@ export default function Sidebar(props: {
                     </span>
                   </div>
                 )}
-                {!collapsed && inFolder.map(renderHost)}
+                {/* NU `inFolder.map(renderHost)`: `.map` ar pasa indexul drept `depth`, indentând
+                    fiecare host progresiv (bug „decalat"). Apel explicit, depth 0 la rădăcină. */}
+                {!collapsed && inFolder.map((h) => renderHost(h))}
               </div>
             )
           })
