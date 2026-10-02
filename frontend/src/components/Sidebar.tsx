@@ -292,7 +292,9 @@ export default function Sidebar(props: {
   // tunelează. În sidebar le cuibărim SUB acel agent (nu în lista plată de foldere), ca să
   // se vadă dintr-o privire „de cine atârnă". `isNested` le exclude din bucla de foldere.
   const isNested = (h: Host) => h.via_host_id != null
-  const childrenOf = (id: number) => props.hosts.filter((h) => h.via_host_id === id)
+  // ţintele EFEMERE („conectează o dată", fără salvare) nu apar nicăieri în sidebar — nici în
+  // arbore, nici cuibărite sub agent; trăiesc doar cât sesiunea, apoi reaper-ul le şterge.
+  const childrenOf = (id: number) => props.hosts.filter((h) => h.via_host_id === id && !h.ephemeral)
 
   const q = query.trim().toLowerCase()
   // potrivirea pe text (nume/hostname/tag) — folosită și pentru ţintele cuibărite, care
@@ -692,7 +694,7 @@ export default function Sidebar(props: {
         {(() => {
           // ţintele cuibărite (via_host_id) NU intră în bucla de foldere: le randează
           // recursiv renderHost sub agentul-părinte. Altfel ar apărea de două ori.
-          const visible = props.hosts.filter((h) => hostMatches(h) && !isNested(h))
+          const visible = props.hosts.filter((h) => hostMatches(h) && !isNested(h) && !h.ephemeral)
           // grupurile cu nume întâi (alfabetic), hosturile fără folder la FINAL —
           // altfel plutesc deasupra grupurilor etichetate și par un bug de randare
           const folders = [...new Set(visible.map((h) => h.folder || ''))].sort((a, b) =>
@@ -866,6 +868,7 @@ export default function Sidebar(props: {
             tagSuggestions={allTags}
             presetJump={{ viaHostId: jumpVia.id, viaName: jumpVia.name }}
             onSaved={props.onChanged}
+            onConnect={(h) => { props.onChanged(); props.onNewSession(h) }}
             onClose={() => { setJumpVia(null); props.onChanged() }}
           />
         )}

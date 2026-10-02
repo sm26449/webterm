@@ -5,7 +5,7 @@ import { useI18n } from '../lib/i18n'
 import InstallCommand from './InstallCommand'
 import { useFocusTrap } from '../lib/useFocusTrap'
 
-type ConnType = 'agent' | 'ssh' | 'ssh-jump' | 'telnet'
+type ConnType = 'agent' | 'ssh' | 'ssh-jump' | 'telnet' | 'telnet-jump'
 
 const field =
   'w-full rounded-lg bg-ink-800 px-4 py-2.5 placeholder-slate-500 ring-1 ring-ink-700 focus:ring-sky-600'
@@ -18,6 +18,8 @@ export default function AddHostModal(props: {
   onClose: () => void; host?: Host; onSaved?: () => void; tagSuggestions?: string[]
   /** adăugare SSH-jump deja scopată pe un agent (din meniul ⋯ al hostului): tip fixat, via blocat */
   presetJump?: { viaHostId: number; viaName: string }
+  /** „Conectează o dată": deschide o sesiune pe ţinta efemeră tocmai creată, fără s-o salvezi în sidebar */
+  onConnect?: (host: Host) => void
 }) {
   const { t } = useI18n()
   const edit = props.host
@@ -91,10 +93,11 @@ export default function AddHostModal(props: {
     return () => clearInterval(t)
   }, [created])
 
-  async function submit(e: FormEvent) {
+  async function submit(e: FormEvent, once = false) {
     e.preventDefault()
     setError('')
     const body: Record<string, unknown> = { name, note, tags, connection_type: connType }
+    if (once) body.ephemeral = true               // „conectează o dată": ţintă efemeră, nesalvată
     if (!edit) body.require_2fa = require2fa      // la editare, 2FA are endpoint propriu (cere step-up)
     if (connType === 'agent' && !edit) {
       body.enroll_ttl = enrollTtl
@@ -108,7 +111,7 @@ export default function AddHostModal(props: {
         auth_method: authMethod,
         credential_policy: policy,
       })
-      if (connType === 'ssh-jump') body.via_host_id = viaHost
+      if (connType === 'ssh-jump' || connType === 'telnet-jump') body.via_host_id = viaHost
       // La EDITARE, un câmp gol de parolă înseamnă „las-o pe cea salvată", nu „şterge-o":
       // altfel simpla redenumire a hostului i-ar fi golit credenţialele.
       if (policy === 'ask') {
@@ -124,7 +127,9 @@ export default function AddHostModal(props: {
         props.onSaved?.()
         props.onClose()
       } else {
-        setCreated(await api<Host>('/api/hosts', { method: 'POST', body: JSON.stringify(body) }))
+        const h = await api<Host>('/api/hosts', { method: 'POST', body: JSON.stringify(body) })
+        if (once) { props.onConnect?.(h); props.onClose() }   // efemer → conectează acum, fără ecranul post-creare
+        else setCreated(h)
       }
     } catch (err) {
       setError(errText(err, t) || t('addhost.genericError'))
@@ -268,9 +273,25 @@ export default function AddHostModal(props: {
               ))}
             </div>
             )}
+            {/* preset din meniul ⋯ al unui agent: alegi doar PROTOCOLUL spre ţintă (SSH ori
+                Telnet), amândouă tunelate prin acelaşi agent. Portul implicit urmează alegerea. */}
+            {pj && (
+              <div className="flex gap-1 rounded-xl bg-ink-800 p-1 text-sm">
+                {([['ssh-jump', 'SSH-jump'], ['telnet-jump', 'Telnet-jump']] as [ConnType, string][]).map(([ct, lbl]) => (
+                  <button key={ct} type="button"
+                    onClick={() => { setConnType(ct); setPort(ct === 'telnet-jump' ? 23 : 22) }}
+                    className={`flex-1 rounded-lg px-2 py-1.5 text-[13px] font-medium transition ${
+                      connType === ct ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
+                    {lbl}
+                  </button>
+                ))}
+              </div>
+            )}
             <p className="text-xs text-slate-500">
               {pj
-                ? t('addhost.sshJumpVia', { name: pj.viaName })
+                ? (connType === 'telnet-jump'
+                    ? t('addhost.telnetJumpVia', { name: pj.viaName })
+                    : t('addhost.sshJumpVia', { name: pj.viaName }))
                 : connType === 'agent'
                 ? t('addhost.agentDesc')
                 : connType === 'ssh'
@@ -288,7 +309,7 @@ export default function AddHostModal(props: {
 
             {connType !== 'agent' && (
               <div className="space-y-3 rounded-xl border border-ink-700 p-3">
-                {connType === 'ssh-jump' && (
+                {(connType === 'ssh-jump' || connType === 'telnet-jump') && (
                   <label className="block">
                     <span className={label}>{t('addhost.jumpVia')}</span>
                     <select required value={viaHost || ''} disabled={!!pj} onChange={(e) => setViaHost(Number(e.target.value))}
@@ -302,7 +323,7 @@ export default function AddHostModal(props: {
                 )}
                 <div className="flex gap-2">
                   <label className="block min-w-0 flex-1">
-                    <span className={label}>{connType === 'ssh-jump' ? t('addhost.jumpTarget') : 'Hostname / IP'}</span>
+                    <span className={label}>{(connType === 'ssh-jump' || connType === 'telnet-jump') ? t('addhost.jumpTarget') : 'Hostname / IP'}</span>
                     <input required placeholder={t('addhost.hostnamePlaceholder')} value={hostname}
                       onChange={(e) => setHostname(e.target.value)} className={field} />
                   </label>
@@ -312,6 +333,9 @@ export default function AddHostModal(props: {
                       onChange={(e) => setPort(Number(e.target.value))} className={field} />
                   </label>
                 </div>
+                {/* telnet-jump: login INTERACTIV peste tunel (ca bastionul telnet/serial) — fără
+                    user/parolă stocate. Deci câmpul de user şi politica de credenţiale lipsesc. */}
+                {connType !== 'telnet-jump' && (
                 <label className="block">
                   <span className={label}>{t('addhost.user')}{(connType === 'ssh' || connType === 'ssh-jump') ? '' : t('addhost.optionalSuffix')}</span>
                   <input required={connType === 'ssh' || connType === 'ssh-jump'}
@@ -319,6 +343,7 @@ export default function AddHostModal(props: {
                     value={username}
                     onChange={(e) => setUsername(e.target.value)} className={field} />
                 </label>
+                )}
 
                 {connType === 'ssh' && (
                   <div>
@@ -337,6 +362,7 @@ export default function AddHostModal(props: {
                   </div>
                 )}
 
+                {connType !== 'telnet-jump' && (<>
                 {/* politica de stocare a credențialelor */}
                 <div>
                   <span className={label}>{t('addhost.credentials')}</span>
@@ -411,6 +437,7 @@ export default function AddHostModal(props: {
                 {policy === 'ask' && (
                   <p className="text-xs text-slate-500">{t('addhost.askNote')}</p>
                 )}
+                </>)}
               </div>
             )}
 
@@ -467,14 +494,24 @@ export default function AddHostModal(props: {
             </label>
 
             {error && <div className="text-sm wt-danger">{error}</div>}
-            <div className="flex justify-end gap-2">
+            <div className="flex flex-wrap justify-end gap-2">
               <button type="button" onClick={props.onClose} className="rounded-lg px-4 py-2 text-sm text-slate-400 hover:bg-ink-800">
                 {t('addhost.cancel')}
               </button>
+              {/* preset jump: pe lângă „Salvează" (ţintă cuibărită sub agent), oferă „Conectează o
+                  dată" — deschide sesiunea pe o ţintă EFEMERĂ, fără s-o lase în sidebar. */}
+              {pj && props.onConnect && (
+                <button type="button" disabled={busy || !name.trim() || !hostname.trim() || !viaHost}
+                  onClick={(e) => submit(e as unknown as FormEvent, true)}
+                  className="rounded-lg px-4 py-2 text-sm font-medium text-slate-200 ring-1 ring-ink-600 hover:bg-ink-800 disabled:opacity-50">
+                  {t('addhost.connectOnce')}
+                </button>
+              )}
               <button disabled={busy} className="rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-50">
                 {busy ? (edit ? t('addhost.saving') : t('addhost.adding'))
                   : edit ? t('addhost.save')
-                  : connType === 'agent' ? t('addhost.continue') : t('addhost.add')}
+                  : connType === 'agent' ? t('addhost.continue')
+                  : pj ? t('addhost.saveTarget') : t('addhost.add')}
               </button>
             </div>
           </form>

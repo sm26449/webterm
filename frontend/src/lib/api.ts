@@ -89,8 +89,9 @@ export interface Host {
   install_command?: string
   install_command_dedicated?: string
   // conectare directă
-  connection_type?: 'agent' | 'ssh' | 'ssh-jump' | 'telnet'
+  connection_type?: 'agent' | 'ssh' | 'ssh-jump' | 'telnet' | 'telnet-jump'
   via_host_id?: number | null
+  ephemeral?: boolean
   ssh_username?: string | null
   ssh_port?: number | null
   auth_method?: 'password' | 'key' | null

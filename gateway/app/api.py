@@ -1128,6 +1128,9 @@ class HostIn(BaseModel):
     require_2fa: bool = False
     credential_policy: str = "stored"    # stored | ask | ephemeral
     tags: str = ""                       # etichete libere, virgulă/spaţiu separat (normalizate)
+    # „Conectează o dată" (fără salvare): creează o ţintă ssh-jump/telnet-jump EFEMERĂ, doar
+    # ca să deschizi o sesiune acum. Ascunsă din sidebar; reaper-ul o şterge când moare sesiunea.
+    ephemeral: bool = False
     # Înrolare (doar agent): cât e valid link-ul + o parolă temporară OPŢIONALĂ cerută la instalare
     enroll_ttl: int = 3600               # secunde; implicit 1h (plafonat 5min..30 zile)
     enroll_password: str = ""            # write-only; gol = fără parolă
@@ -1291,6 +1294,7 @@ def _host_json(row) -> dict:
         # conectare directă (niciun secret nu iese de aici)
         "connection_type": ctype,
         "via_host_id": row["via_host_id"] if "via_host_id" in row.keys() else None,
+        "ephemeral": bool(row["ephemeral"]) if "ephemeral" in row.keys() else False,
         "ssh_username": row["ssh_username"],
         "ssh_port": row["ssh_port"],
         "auth_method": row["auth_method"],
@@ -1448,12 +1452,13 @@ async def list_hosts(user=Depends(security.require_scope("read"))):
 
 @router.post("/api/hosts")
 async def create_host(host: HostIn, user=Depends(security.require_user)):
-    ctype = host.connection_type if host.connection_type in ("agent", "ssh", "ssh-jump", "telnet") else "agent"
-    if ctype in ("ssh", "ssh-jump", "telnet") and not host.hostname.strip():
+    ctype = host.connection_type if host.connection_type in (
+        "agent", "ssh", "ssh-jump", "telnet", "telnet-jump") else "agent"
+    if ctype in ("ssh", "ssh-jump", "telnet", "telnet-jump") and not host.hostname.strip():
         raise ApiError(400, "host.hostnameRequired", "hostname required for a direct connection")
     if ctype in ("ssh", "ssh-jump") and not host.ssh_username.strip():
         raise ApiError(400, "ssh.userRequired", "an SSH username is required")
-    if ctype == "ssh-jump":
+    if ctype in ("ssh-jump", "telnet-jump"):
         via = await db.fetchone("SELECT connection_type FROM hosts WHERE id=?", host.via_host_id)
         if not via or (via["connection_type"] or "agent") != "agent":
             raise ApiError(400, "sshjump.needsAgent", "pick an agent host to reach the target through")
@@ -1468,15 +1473,17 @@ async def create_host(host: HostIn, user=Depends(security.require_user)):
         # câmpuri de conexiune şi le ignora.
         "INSERT INTO hosts(name, note, folder, token_hash, token_encrypted, enroll_token,"
         " enroll_expires, enroll_pass_hash, created, connection_type, hostname, ssh_username,"
-        " ssh_port, auth_method, credential_encrypted, require_2fa, credential_policy, tags, via_host_id)"
-        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " ssh_port, auth_method, credential_encrypted, require_2fa, credential_policy, tags,"
+        " via_host_id, ephemeral)"
+        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         host.name.strip(), host.note, host.folder.strip(), security.sha256_hex(token),
         security.encrypt_secret(token), enroll,
         time.time() + ttl, pass_hash, time.time(),
         ctype, host.hostname.strip() or None, host.ssh_username.strip() or None,
         host.ssh_port, host.auth_method, _credential_blob(host),
         int(host.require_2fa), host.credential_policy, _norm_tags(host.tags),
-        host.via_host_id if ctype == "ssh-jump" else None)
+        host.via_host_id if ctype in ("ssh-jump", "telnet-jump") else None,
+        1 if (host.ephemeral and ctype in ("ssh-jump", "telnet-jump")) else 0)
     row = await db.fetchone("SELECT * FROM hosts WHERE id=?", host_id)
     return dict(_host_json(row), install_command=_install_command(enroll, pw),
                 install_command_dedicated=_install_command_dedicated(enroll, pw),
@@ -4129,7 +4136,7 @@ async def update_host(host_id: int, host: HostPatch, user=Depends(security.requi
 
     old_type = row["connection_type"] or "agent"
     new_type = given.get("connection_type", old_type)
-    if new_type not in ("agent", "ssh", "ssh-jump", "telnet"):
+    if new_type not in ("agent", "ssh", "ssh-jump", "telnet", "telnet-jump"):
         raise ApiError(400, "host.badType", "unknown connection type")
     eff = lambda f, col=None: (given[f] if f in given else row[col or f])   # noqa: E731
     hostname = (eff("hostname") or "").strip()
@@ -4137,7 +4144,7 @@ async def update_host(host_id: int, host: HostPatch, user=Depends(security.requi
     policy = eff("credential_policy") or "stored"
     auth_method = eff("auth_method") or "password"
 
-    if new_type in ("ssh", "ssh-jump", "telnet") and not hostname:
+    if new_type in ("ssh", "ssh-jump", "telnet", "telnet-jump") and not hostname:
         raise ApiError(400, "host.hostnameRequired", "hostname required for a direct connection")
     if new_type in ("ssh", "ssh-jump") and not ssh_username:
         raise ApiError(400, "ssh.userRequired", "an SSH username is required")
@@ -5244,6 +5251,8 @@ async def create_session(host_id: int, body: SessionIn, request: Request,
         await _connect_direct(row, request, body.credential, body.passphrase)
     elif ctype == "telnet":
         await _connect_telnet(row, request, body.credential)
+    # telnet-jump: nicio pre-conectare per-host — sesiunea (ForwardTelnetSource) deschide
+    # singură tunelul prin agentul `via_host_id` în create_telnet_jump_session (mai jos).
     title = body.title.strip()
     if not title:
         # unique default title per host: "Session N". The timestamp this replaced
@@ -5348,7 +5357,11 @@ async def create_session(host_id: int, body: SessionIn, request: Request,
         if not title.strip() or title.startswith("Session "):
             title = "%s: %s" % (conn["engine"], conn["label"][:32])
     try:
-        result = await core.create_session(host_id, title, body.rows, body.cols, body.tz, cmd, db_pw)
+        if ctype == "telnet-jump":
+            # telnet-bastion spre o ţintă salvată din LAN-ul agentului `via_host_id`
+            result = await core.create_telnet_jump_session(row, title, body.rows, body.cols, body.tz)
+        else:
+            result = await core.create_session(host_id, title, body.rows, body.cols, body.tz, cmd, db_pw)
     except core.AgentGone:
         raise ApiError(409, "host.offline", "the host is offline (the agent is not connected)")
     except core.SessionLimitReached:

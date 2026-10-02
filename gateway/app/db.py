@@ -366,6 +366,10 @@ MIGRATIONS = [
     # TCP trece prin tunelul agentului `via_host_id` (open_forward), nu printr-un socket direct.
     # Gateway-ul rulează clientul asyncssh peste tunel → DEŢINE pinning-ul de host-key (anti-MITM).
     "ALTER TABLE hosts ADD COLUMN via_host_id INTEGER",
+    # Host EFEMER (conectare „o singură dată", fără salvare): o ţintă ssh-jump/telnet-jump
+    # creată doar ca să deschizi o sesiune acum. Ascuns din sidebar; un reaper îl şterge
+    # când nu mai are sesiuni vii (vezi core.sweep_ephemeral_hosts).
+    "ALTER TABLE hosts ADD COLUMN ephemeral INTEGER DEFAULT 0",
 ]
 
 # tabele adăugate ulterior (executeScript de mai sus le creează pe DB-uri noi;

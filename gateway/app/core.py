@@ -2005,8 +2005,11 @@ async def reconcile_telnet_on_start() -> None:
     reconcile() le readuce 'live' când agentul reconectează. Fără asta, sesiunile directe
     rămâneau 'live' fantomă la infinit (sweep-ul periodic nu le reapează — corect, sunt
     re-dial-abile —, dar la startup sursa lor sigur a dispărut)."""
+    # ssh-jump/telnet-jump intră la fel: sursele lor (SshJumpSource / ForwardTelnetSource) trăiesc
+    # doar în RAM-ul gateway-ului. telnet-jump e prins oricum de kind='telnet', dar îl listăm
+    # explicit pentru claritate; ssh-jump LIPSEA — sesiunile lui rămâneau fantomă 'live' la restart.
     q = ("state IN ('live','creating') AND (kind='telnet' OR host_id IN"
-         " (SELECT id FROM hosts WHERE connection_type IN ('ssh','telnet')))")
+         " (SELECT id FROM hosts WHERE connection_type IN ('ssh','telnet','ssh-jump','telnet-jump')))")
     ghosts = await db.fetchall("SELECT id FROM sessions WHERE " + q)
     if not ghosts:
         return
@@ -2141,6 +2144,37 @@ async def sweep_stale_sessions() -> None:
             hb = row["last_heartbeat"] or 0
             if now - hb > SESSION_STALE_AFTER:
                 await _reap_ghost(sid, "host-offline")
+
+
+EPHEMERAL_GRACE = 120   # sec: răgaz între crearea unei ţinte efemere şi reaping (create→connect)
+
+
+async def sweep_ephemeral_hosts() -> None:
+    """Reaper pentru ţintele EFEMERE („conectează o dată", fără salvare): şterge host-urile
+    `ephemeral=1` care nu mai au nicio sesiune vie (live/creating) şi au trecut de răgazul de
+    pornire. Rulat periodic din main._session_reaper, alături de sweep_stale_sessions (care
+    tocmai a marcat 'lost' sesiunile moarte — deci aici nu mai sunt 'live')."""
+    now = time.time()
+    rows = await db.fetchall(
+        "SELECT id, created FROM hosts WHERE ephemeral=1")
+    for row in rows:
+        hid = row["id"]
+        if now - (row["created"] or 0) < EPHEMERAL_GRACE:
+            continue                                  # încă în fereastra create→connect
+        live = await db.fetchone(
+            "SELECT 1 FROM sessions WHERE host_id=? AND state IN ('live','creating') LIMIT 1", hid)
+        if live:
+            continue                                  # sesiune activă → o păstrăm
+        # fără sesiuni vii: rupem orice sursă persistentă (ssh-jump) şi ştergem host + istoricul lui
+        src = sources.pop(hid, None)
+        if src is not None:
+            try:
+                await src.disconnect()
+            except Exception:       # noqa: BLE001
+                pass
+        await db.execute("DELETE FROM sessions WHERE host_id=?", hid)
+        await db.execute("DELETE FROM hosts WHERE id=?", hid)
+        log.info("reaped ephemeral host %s (no live sessions)", hid)
 
 
 async def sweep_idle_locks() -> None:
@@ -2711,6 +2745,60 @@ async def create_telnet_session(forward_row, title: str, rows: int = 24,
     return {"id": sid}
 
 
+async def _telnet_agent_for(host_id: int):
+    """Agentul prin al cărui tunel merge o sesiune telnet-bastion pentru `host_id`:
+      - telnet direct-prin-forward (create_telnet_session): host_id E agentul;
+      - telnet-jump salvat: host_id e ţinta, agentul e `via_host_id`.
+    Întoarce AgentConnection sau None."""
+    direct = source_for(host_id)
+    if isinstance(direct, AgentConnection):
+        return direct
+    # host-ul nu e el însuşi un agent → poate fi un telnet-jump salvat: urmăm via_host_id
+    hrow = await db.fetchone("SELECT connection_type, via_host_id FROM hosts WHERE id=?", host_id)
+    if hrow and (hrow["connection_type"] or "") == "telnet-jump" and hrow["via_host_id"]:
+        via = source_for(hrow["via_host_id"])
+        if isinstance(via, AgentConnection):
+            return via
+    return None
+
+
+async def create_telnet_jump_session(host_row, title: str, rows: int = 24,
+                                     cols: int = 80, tz: Optional[str] = None) -> dict:
+    """Ca `create_telnet_session`, dar ţinta vine dintr-un HOST salvat (connection_type
+    'telnet-jump') cuibărit sub agentul `via_host_id`: deschide un ForwardStream prin acel
+    agent la hostname:port şi vorbeşte telnet peste el (acelaşi ForwardTelnetSource). Sesiunea
+    aparţine host-ului telnet-jump (host_id = id-ul lui), nu agentului — ca sesiunile ssh-jump.
+    Ridică AgentGone (agentul offline), SessionLimitReached (plafon), RuntimeError (ţinta refuză)."""
+    agent = source_for(host_row["via_host_id"])
+    if not isinstance(agent, AgentConnection):
+        raise AgentGone("the jump host's agent is offline")
+    active = sum(1 for s in session_sources.values()
+                 if isinstance(s, ForwardTelnetSource))
+    if active >= MAX_TELNET_SESSIONS:
+        raise SessionLimitReached("telnet session limit")
+    thost, tport = host_row["hostname"], host_row["ssh_port"] or 23
+    sid = new_sid()
+    src = ForwardTelnetSource(sid, host_row["id"], agent, thost, tport, rows, cols)
+    session_sources[sid] = src
+    await db.execute(
+        "INSERT INTO sessions(id, host_id, title, state, created, rows, cols,"
+        " agent_epoch, kind, target_host, target_port) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        sid, host_row["id"], title, "creating", time.time(), rows, cols, src.epoch, "telnet",
+        thost, int(tport))
+    # hub ÎNAINTE de pump (primul output „login:" soseşte instant) — ca în create_telnet_session
+    row = await db.fetchone("SELECT * FROM sessions WHERE id=?", sid)
+    hub = get_or_create_hub(row)
+    resp = await src.create(sid, rows, cols, "xterm-256color", tz)
+    if not resp.get("ok"):
+        hub.teardown()
+        session_sources.pop(sid, None)
+        await db.execute("DELETE FROM sessions WHERE id=?", sid)
+        raise RuntimeError(resp.get("msg") or resp.get("code") or "telnet connect failed")
+    await db.execute("UPDATE sessions SET state='live' WHERE id=?", sid)
+    await hub.ensure_attached(src)
+    return {"id": sid}
+
+
 async def reconnect_telnet_session(sid: str) -> dict:
     """Reconectează o sesiune telnet-bastion căzută (agentul a picat → `lost`, sau
     device-ul a închis → `exited`): deschide un telnet NOU spre aceeași țintă, pe
@@ -2727,7 +2815,7 @@ async def reconnect_telnet_session(sid: str) -> dict:
     if not thost or not tport:
         raise RuntimeError("unknown target for reconnection")
     host_id = row["host_id"]
-    agent = source_for(host_id)
+    agent = await _telnet_agent_for(host_id)   # direct-forward (host=agent) ori telnet-jump (via)
     if not isinstance(agent, AgentConnection):
         raise AgentGone("host offline")
     active = sum(1 for s in session_sources.values()

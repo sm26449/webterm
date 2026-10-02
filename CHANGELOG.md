@@ -9,7 +9,24 @@ back.
 
 ## [Unreleased]
 
+### Added
+- **Jump targets are saved as children of their agent, added from its ⋯ menu.** "Add SSH / Telnet
+  jump…" on an agent host opens Add-host already scoped to that agent: pick the protocol (SSH or
+  Telnet), the LAN target, and save. The saved target appears **nested under the agent** in the
+  sidebar (`via_host_id` tree), so you can see at a glance what hangs off which host, and one click
+  opens its page. Telnet-jump reuses the proven telnet-bastion (gateway speaks telnet over the
+  agent's raw-TCP forward — same `ForwardTelnetSource` as forward-telnet; interactive login, no
+  stored creds), with the session owned by the telnet-jump host. Agent untouched.
+- **Connect once (no save).** The jump form also offers a one-time connection: it creates an
+  **ephemeral** target (hidden from the sidebar), opens the session immediately, and a reaper
+  deletes it once it has no live sessions — for the quick "just get me onto that switch" case
+  without leaving a saved host behind.
+
 ### Changed
+- **Clicking a host in the sidebar now exits an active split-view.** Navigating to a host page used
+  to be swallowed while a split-view was active (the split kept render precedence), so the click
+  appeared dead until you first clicked a session tab. `selectHost` now leaves the split like
+  Home/tab navigation does — the split chip stays in the bar, so you return with one click.
 - **File editor is now Monaco (the VS Code editor).** Browsing a host's files and opening one gives
   the authentic VS Code editing surface — syntax highlighting, minimap, multi-cursor, the `vs-dark`
   theme — reading and writing through the agent exactly as before (partial-read for big files,
