@@ -10,6 +10,15 @@ back.
 ## [Unreleased]
 
 ### Added
+- **SSH-jump: a first-class bastion to LAN gear, with no agent on the target.** A new host type
+  `ssh-jump` reaches a device on an agent host's LAN over SSH, tunneled through that agent's
+  existing raw-TCP forward — the **gateway runs the asyncssh client and owns the host-key pin**,
+  so a man-in-the-middle (even a hostile agent relaying the tunnel) is rejected before auth, and
+  a changed host key raises a loud alarm and refuses the session. Reuses the direct-SSH machinery
+  (creds in the vault, `known_hosts` pinning, `ask`/`stored` policy); the agent is **untouched**.
+  The SSH session's own crypto runs end-to-end gateway→target, so the plaintext LAN tunnel carries
+  only ciphertext. Pick "SSH-jump" in Add host, choose the agent to reach through, and the target's
+  LAN address. (The same host-key-change alarm now also covers plain direct-SSH hosts.)
 - **Deploy-key security policy (Settings → Security, optional, off by default).** Two toggles that
   harden host→host deploy keys. **Require 2FA on source hosts:** a host holding a deploy key can
   reach its targets — the crown jewel — so when on, you can't generate a key on a host until it has

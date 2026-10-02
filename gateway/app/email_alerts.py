@@ -245,6 +245,18 @@ def notify_security_change(what: str, ip: str, email: str) -> None:
           f"If this was not you, the account is probably compromised.")
 
 
+def notify_host_key_changed(host_name: str, detail: str) -> None:
+    """Host-key-ul unei ţinte SSH (direct sau jump) NU se potriveşte cu cel pinat — ori s-a
+    re-provizionat legitim, ori e un MITM activ. Conexiunea a fost REFUZATĂ. Semnal puternic,
+    throttle per host (15 min) ca un atacator care reîncearcă să nu inunde."""
+    if not _throttled("hostkey:" + host_name, 900):
+        return
+    _fire("SSH host key changed — connection refused",
+          f"The pinned SSH host key for '{host_name}' did not match on connect — the connection "
+          f"was REFUSED.\n{detail}\n\nIf you did not re-provision this host, this is a possible "
+          f"man-in-the-middle. Verify out-of-band before clearing the pinned key.")
+
+
 def notify_ssh_key_action(action: str, source: str, target: str, fingerprint: str,
                           ip: str, email: str) -> None:
     """O cheie de deploy a fost pusă/scoasă din authorized_keys pe o ţintă — adică s-a acordat

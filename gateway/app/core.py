@@ -15,6 +15,7 @@ import math
 import os
 import re
 import shlex
+import socket
 import ssl
 import time
 import uuid
@@ -2977,6 +2978,10 @@ async def dial_ssh(host_row, credential: dict) -> SshSource:
         try:
             conn = await asyncssh.connect(**kwargs)
         except asyncssh.HostKeyNotVerifiable as e:
+            try:
+                email_alerts.notify_host_key_changed(host_row["name"], str(e)[:200])
+            except Exception:       # noqa: BLE001 — alerta nu rupe calea
+                pass
             raise HostKeyMismatch(str(e))
 
         if not stored:
@@ -2985,6 +2990,147 @@ async def dial_ssh(host_row, credential: dict) -> SshSource:
                              keyline, host_row["id"])
 
         src = SshSource(host_row["id"], conn)
+        sources[host_row["id"]] = src
+        return src
+
+
+class SshJumpSource(SshSource):
+    """SSH-jump (bastion): acelaşi SshSource (PTY/tmux/forward), dar transportul TCP trece prin
+    tunelul agentului `via_host_id`, nu printr-un socket direct. Gateway-ul rulează clientul
+    asyncssh peste tunel, deci DEŢINE verificarea host-key (anti-MITM). Închiderea dărâmă şi
+    puntea (ForwardStream + socketpair + pompa)."""
+
+    def __init__(self, host_id, conn, fs, sock, pump):
+        super().__init__(host_id, conn)
+        self._jump_fs = fs
+        self._jump_sock = sock
+        self._jump_pump = pump
+
+    async def disconnect(self) -> None:
+        if self._jump_pump:
+            self._jump_pump.cancel()
+        try:
+            self._conn.close()
+        except Exception:
+            pass
+        try:
+            self._jump_sock.close()
+        except Exception:
+            pass
+        try:
+            await self._jump_fs.close()
+        except Exception:
+            pass
+
+
+async def _inet_socketpair() -> "tuple[socket.socket, socket.socket]":
+    """Pereche de socket-uri AF_INET conectate pe loopback (nu AF_UNIX): asyncssh citeşte
+    `getpeername()` şi despachetează (host, port), ceea ce un socketpair AF_UNIX nu oferă.
+    Întoarce (ssh_sock pt. asyncssh, bridge_sock pt. pompa spre tunelul agentului)."""
+    loop = asyncio.get_running_loop()
+    lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    lsock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    lsock.bind(("127.0.0.1", 0))
+    lsock.listen(1)
+    lsock.setblocking(False)
+    ssh_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    ssh_sock.setblocking(False)
+    connect = asyncio.ensure_future(loop.sock_connect(ssh_sock, lsock.getsockname()))
+    try:
+        bridge_sock, _ = await loop.sock_accept(lsock)
+        await connect
+    finally:
+        lsock.close()
+    bridge_sock.setblocking(False)
+    return ssh_sock, bridge_sock
+
+
+async def _ssh_jump_pump(fs: "ForwardStream", sock: socket.socket) -> None:
+    """Pompă bidirecţională între socketul local al lui asyncssh şi ForwardStream-ul agentului.
+    asyncssh scrie/citeşte protocol SSH pe sockB; aici mutăm octeţii pe/de pe tunel."""
+    loop = asyncio.get_running_loop()
+
+    async def to_target():
+        while True:
+            try:
+                data = await loop.sock_recv(sock, 65536)
+            except (OSError, asyncio.CancelledError):
+                break
+            if not data:
+                break
+            try:
+                await fs.write(data)
+            except Exception:       # noqa: BLE001 — tunel căzut
+                break
+
+    async def from_target():
+        while True:
+            data = await fs.read()
+            if data is None:
+                break
+            try:
+                await loop.sock_sendall(sock, data)
+            except (OSError, asyncio.CancelledError):
+                break
+
+    try:
+        await asyncio.gather(to_target(), from_target())
+    except asyncio.CancelledError:
+        pass
+
+
+async def dial_ssh_jump(host_row, credential: dict) -> SshJumpSource:
+    """Ca `dial_ssh`, dar peste tunelul agentului `via_host_id`: deschide un ForwardStream la
+    hostname:ssh_port văzut de agent, bridge-uieşte la un socketpair, şi rulează asyncssh pe el.
+    Host-key pinning IDENTIC cu dial_ssh — verificat ÎNAINTE de auth, deci parola nu ajunge la
+    un MITM, iar pinul e deţinut şi verificat de gateway."""
+    async with _dial_lock(host_row["id"]):
+        existing = sources.get(host_row["id"])
+        if isinstance(existing, SshJumpSource):
+            return existing
+        via = sources.get(host_row["via_host_id"])
+        if not isinstance(via, AgentConnection):
+            raise ForwardError("the jump host's agent is offline")
+        fs = await via.open_forward(host_row["hostname"], host_row["ssh_port"] or 22)
+        ssh_sock, bridge_sock = await _inet_socketpair()
+        pump = asyncio.create_task(_ssh_jump_pump(fs, bridge_sock))
+        stored = host_row["known_hosts"]
+        kwargs = dict(sock=ssh_sock, username=host_row["ssh_username"],
+                      connect_timeout=SSH_CONNECT_TIMEOUT,
+                      keepalive_interval=30, keepalive_count_max=4)
+        if stored:
+            pub = asyncssh.import_public_key(stored)
+            kwargs["known_hosts"] = lambda _h, _a, _p: ([pub], [], [])
+        else:
+            kwargs["known_hosts"] = None            # TOFU: prima conectare pinează
+        if host_row["auth_method"] == "key":
+            pk = asyncssh.import_private_key(credential["key"], credential.get("passphrase") or None)
+            kwargs["client_keys"] = [pk]
+        else:
+            kwargs["password"] = credential.get("password", "")
+        def _teardown():
+            pump.cancel()
+            for s in (ssh_sock, bridge_sock):
+                try:
+                    s.close()
+                except Exception:   # noqa: BLE001
+                    pass
+        try:
+            conn = await asyncssh.connect(**kwargs)
+        except asyncssh.HostKeyNotVerifiable as e:
+            _teardown(); await fs.close()
+            try:
+                email_alerts.notify_host_key_changed(host_row["name"], str(e)[:200])
+            except Exception:       # noqa: BLE001 — alerta nu rupe calea
+                pass
+            raise HostKeyMismatch(str(e))
+        except Exception:
+            _teardown(); await fs.close()
+            raise
+        if not stored:
+            keyline = conn.get_server_host_key().export_public_key().decode().strip()
+            await db.execute("UPDATE hosts SET known_hosts=? WHERE id=?", keyline, host_row["id"])
+        src = SshJumpSource(host_row["id"], conn, fs, bridge_sock, pump)
         sources[host_row["id"]] = src
         return src
 

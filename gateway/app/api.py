@@ -1117,10 +1117,11 @@ class HostIn(BaseModel):
     note: str = ""
     folder: str = ""
     # conectare directă (agent = comportamentul clasic, fără câmpurile de mai jos)
-    connection_type: str = "agent"       # agent | ssh | telnet
+    connection_type: str = "agent"       # agent | ssh | ssh-jump | telnet
     hostname: str = ""
     ssh_username: str = ""
     ssh_port: int = 22
+    via_host_id: int = 0                 # ssh-jump: hostul-agent prin al cărui tunel ajungem
     auth_method: str = "password"        # password | key
     credential: str = ""                 # write-only: parola sau cheia privată
     passphrase: str = ""                 # write-only: passphrase-ul cheii
@@ -1174,7 +1175,8 @@ def _resolve_credential(row, body_credential="", body_passphrase=""):
 
 
 async def _connect_direct(row, request, body_credential="", body_passphrase=""):
-    """Ensure a connected SSH source for the host (dial + pin the host key). Rate-limited."""
+    """Ensure a connected SSH source for the host (dial + pin the host key). Rate-limited.
+    `ssh-jump` dials over the agent tunnel (dial_ssh_jump); plain `ssh` dials a direct socket."""
     if isinstance(core.sources.get(row["id"]), core.SshSource):
         return
     ip = security.client_ip(request)
@@ -1184,8 +1186,14 @@ async def _connect_direct(row, request, body_credential="", body_passphrase=""):
                             headers={"Retry-After": str(retry)})
     await security.apply_global_tarpit(retry)   # F-02: frână, nu poartă
     cred = _resolve_credential(row, body_credential, body_passphrase)
+    jump = (row["connection_type"] or "") == "ssh-jump"
     try:
-        await core.dial_ssh(row, cred)
+        if jump:
+            await core.dial_ssh_jump(row, cred)
+        else:
+            await core.dial_ssh(row, cred)
+    except core.ForwardError as e:
+        raise HTTPException(502, "jump host unreachable: %s" % e)
     except core.HostKeyMismatch:
         raise HTTPException(409, "the host key fingerprint changed — possible MITM; connection refused")
     except asyncssh.PermissionDenied:
@@ -1282,6 +1290,7 @@ def _host_json(row) -> dict:
                 and (conn.agent_version or 0) < expected)),
         # conectare directă (niciun secret nu iese de aici)
         "connection_type": ctype,
+        "via_host_id": row["via_host_id"] if "via_host_id" in row.keys() else None,
         "ssh_username": row["ssh_username"],
         "ssh_port": row["ssh_port"],
         "auth_method": row["auth_method"],
@@ -1439,11 +1448,15 @@ async def list_hosts(user=Depends(security.require_scope("read"))):
 
 @router.post("/api/hosts")
 async def create_host(host: HostIn, user=Depends(security.require_user)):
-    ctype = host.connection_type if host.connection_type in ("agent", "ssh", "telnet") else "agent"
-    if ctype in ("ssh", "telnet") and not host.hostname.strip():
+    ctype = host.connection_type if host.connection_type in ("agent", "ssh", "ssh-jump", "telnet") else "agent"
+    if ctype in ("ssh", "ssh-jump", "telnet") and not host.hostname.strip():
         raise ApiError(400, "host.hostnameRequired", "hostname required for a direct connection")
-    if ctype == "ssh" and not host.ssh_username.strip():
+    if ctype in ("ssh", "ssh-jump") and not host.ssh_username.strip():
         raise ApiError(400, "ssh.userRequired", "an SSH username is required")
+    if ctype == "ssh-jump":
+        via = await db.fetchone("SELECT connection_type FROM hosts WHERE id=?", host.via_host_id)
+        if not via or (via["connection_type"] or "agent") != "agent":
+            raise ApiError(400, "sshjump.needsAgent", "pick an agent host to reach the target through")
     token = security.new_token()
     enroll = security.new_token()[:32]
     ttl = max(300, min(30 * 86400, int(host.enroll_ttl or 3600)))   # 5 min .. 30 zile, implicit 1h
@@ -1455,14 +1468,15 @@ async def create_host(host: HostIn, user=Depends(security.require_user)):
         # câmpuri de conexiune şi le ignora.
         "INSERT INTO hosts(name, note, folder, token_hash, token_encrypted, enroll_token,"
         " enroll_expires, enroll_pass_hash, created, connection_type, hostname, ssh_username,"
-        " ssh_port, auth_method, credential_encrypted, require_2fa, credential_policy, tags)"
-        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " ssh_port, auth_method, credential_encrypted, require_2fa, credential_policy, tags, via_host_id)"
+        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         host.name.strip(), host.note, host.folder.strip(), security.sha256_hex(token),
         security.encrypt_secret(token), enroll,
         time.time() + ttl, pass_hash, time.time(),
         ctype, host.hostname.strip() or None, host.ssh_username.strip() or None,
         host.ssh_port, host.auth_method, _credential_blob(host),
-        int(host.require_2fa), host.credential_policy, _norm_tags(host.tags))
+        int(host.require_2fa), host.credential_policy, _norm_tags(host.tags),
+        host.via_host_id if ctype == "ssh-jump" else None)
     row = await db.fetchone("SELECT * FROM hosts WHERE id=?", host_id)
     return dict(_host_json(row), install_command=_install_command(enroll, pw),
                 install_command_dedicated=_install_command_dedicated(enroll, pw),
@@ -4071,6 +4085,7 @@ class HostPatch(BaseModel):
     credential: Optional[str] = None      # write-only; netrimis = păstrează ce e stocat
     passphrase: Optional[str] = None
     credential_policy: Optional[str] = None
+    via_host_id: Optional[int] = None     # ssh-jump: hostul-agent prin care tunelăm
     tags: Optional[str] = None
     alerts_muted: Optional[bool] = None   # opreşte alertele de host-offline pentru acest host
     stepup_grant: str = ""
@@ -4079,7 +4094,7 @@ class HostPatch(BaseModel):
 
 # câmpurile care schimbă UNDE și CU CE ne conectăm — aceeași clasă cu provisioning-ul
 _CONN_FIELDS = ("connection_type", "hostname", "ssh_username", "ssh_port",
-                "auth_method", "credential", "credential_policy")
+                "auth_method", "credential", "credential_policy", "via_host_id")
 
 
 @router.patch("/api/hosts/{host_id}")
@@ -4114,7 +4129,7 @@ async def update_host(host_id: int, host: HostPatch, user=Depends(security.requi
 
     old_type = row["connection_type"] or "agent"
     new_type = given.get("connection_type", old_type)
-    if new_type not in ("agent", "ssh", "telnet"):
+    if new_type not in ("agent", "ssh", "ssh-jump", "telnet"):
         raise ApiError(400, "host.badType", "unknown connection type")
     eff = lambda f, col=None: (given[f] if f in given else row[col or f])   # noqa: E731
     hostname = (eff("hostname") or "").strip()
@@ -4122,9 +4137,9 @@ async def update_host(host_id: int, host: HostPatch, user=Depends(security.requi
     policy = eff("credential_policy") or "stored"
     auth_method = eff("auth_method") or "password"
 
-    if new_type in ("ssh", "telnet") and not hostname:
+    if new_type in ("ssh", "ssh-jump", "telnet") and not hostname:
         raise ApiError(400, "host.hostnameRequired", "hostname required for a direct connection")
-    if new_type == "ssh" and not ssh_username:
+    if new_type in ("ssh", "ssh-jump") and not ssh_username:
         raise ApiError(400, "ssh.userRequired", "an SSH username is required")
     # Întoarcerea la SSH după ce agentul a preluat: detaliile de conexiune supraviețuiesc
     # provisioning-ului, dar credențialul e ȘTERS dacă politica era `ephemeral`. Fără el nu
@@ -4137,7 +4152,8 @@ async def update_host(host_id: int, host: HostPatch, user=Depends(security.requi
     sets, vals = [], []
     for col, key in (("name", "name"), ("note", "note"), ("folder", "folder"),
                      ("hostname", "hostname"), ("ssh_username", "ssh_username"),
-                     ("auth_method", "auth_method"), ("credential_policy", "credential_policy")):
+                     ("auth_method", "auth_method"), ("credential_policy", "credential_policy"),
+                     ("via_host_id", "via_host_id")):
         if key in given:
             v = given[key]
             sets.append(f"{col}=?")
@@ -5224,7 +5240,7 @@ async def create_session(host_id: int, body: SessionIn, request: Request,
     # 2FA step-up (server-side; bifa din client nu e de încredere) — deschide/consultă fereastra
     await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
     ctype = row["connection_type"] or "agent"
-    if ctype == "ssh":
+    if ctype in ("ssh", "ssh-jump"):
         await _connect_direct(row, request, body.credential, body.passphrase)
     elif ctype == "telnet":
         await _connect_telnet(row, request, body.credential)

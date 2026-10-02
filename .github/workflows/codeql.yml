@@ -1,0 +1,43 @@
+name: CodeQL (code scanning)
+
+# Analiză statică de securitate pe COD (nu pe dependenţe — alea le acoperă dependabot.yml +
+# security-scan.yml). Găseşte injecţii, path traversal, deserializări nesigure etc. în Python
+# (gateway + agent) şi TS/JS (frontend). Rezultatele apar în tab-ul Security → Code scanning.
+# Rulează pe push/PR în main + un scan săptămânal (prinde reguli noi pe cod neschimbat).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '41 5 * * 1'   # luni, 05:41 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze ${{ matrix.language }}
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write   # publică rezultatele în tab-ul Security
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python, javascript-typescript]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # Limbaje interpretate → fără build; CodeQL extrage direct. Acţiunile oficiale CodeQL
+      # sunt pe tag major (@v3), ca în ghidul GitHub; dependabot (github-actions) le urmăreşte.
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-and-quality
+      - name: Analyze
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"

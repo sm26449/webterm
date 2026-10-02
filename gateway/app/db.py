@@ -362,6 +362,10 @@ MIGRATIONS = [
     # (înainte trăia doar în RAM → o repornire de gateway re-trimitea pentru fiecare host tăcut).
     "ALTER TABLE hosts ADD COLUMN alerts_muted INTEGER DEFAULT 0",
     "ALTER TABLE hosts ADD COLUMN offline_notified INTEGER DEFAULT 0",
+    # SSH-jump (bastion de prim rang): un host de tip `ssh-jump` e un host SSH-direct al cărui
+    # TCP trece prin tunelul agentului `via_host_id` (open_forward), nu printr-un socket direct.
+    # Gateway-ul rulează clientul asyncssh peste tunel → DEŢINE pinning-ul de host-key (anti-MITM).
+    "ALTER TABLE hosts ADD COLUMN via_host_id INTEGER",
 ]
 
 # tabele adăugate ulterior (executeScript de mai sus le creează pe DB-uri noi;

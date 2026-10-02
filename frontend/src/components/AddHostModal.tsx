@@ -5,7 +5,7 @@ import { useI18n } from '../lib/i18n'
 import InstallCommand from './InstallCommand'
 import { useFocusTrap } from '../lib/useFocusTrap'
 
-type ConnType = 'agent' | 'ssh' | 'telnet'
+type ConnType = 'agent' | 'ssh' | 'ssh-jump' | 'telnet'
 
 const field =
   'w-full rounded-lg bg-ink-800 px-4 py-2.5 placeholder-slate-500 ring-1 ring-ink-700 focus:ring-sky-600'
@@ -37,6 +37,13 @@ export default function AddHostModal(props: { onClose: () => void; host?: Host; 
   const [policy, setPolicy] = useState<'stored' | 'ask'>(
     (edit?.credential_policy as 'stored' | 'ask') || 'stored')
   const [require2fa, setRequire2fa] = useState(edit?.require_2fa ?? false)
+  // ssh-jump: hostul-agent prin al cărui tunel ajungem la ţintă (lista de agenţi din flotă)
+  const [viaHost, setViaHost] = useState<number>(edit?.via_host_id ?? 0)
+  const [agentHosts, setAgentHosts] = useState<Host[]>([])
+  useEffect(() => {
+    api<Host[]>('/api/hosts').then((hs) =>
+      setAgentHosts(hs.filter((h) => (h.connection_type ?? 'agent') === 'agent'))).catch(() => {})
+  }, [])
   // înrolare (doar agent, la creare): cât e valid link-ul + o parolă temporară opţională
   const [enrollTtl, setEnrollTtl] = useState(3600)
   const [enrollPass, setEnrollPass] = useState('')
@@ -96,6 +103,7 @@ export default function AddHostModal(props: { onClose: () => void; host?: Host; 
         auth_method: authMethod,
         credential_policy: policy,
       })
+      if (connType === 'ssh-jump') body.via_host_id = viaHost
       // La EDITARE, un câmp gol de parolă înseamnă „las-o pe cea salvată", nu „şterge-o":
       // altfel simpla redenumire a hostului i-ar fi golit credenţialele.
       if (policy === 'ask') {
@@ -240,12 +248,12 @@ export default function AddHostModal(props: { onClose: () => void; host?: Host; 
 
             {/* tip conexiune */}
             <div className="flex gap-1 rounded-xl bg-ink-800 p-1 text-sm">
-              {([['agent', 'Agent'], ['ssh', 'SSH'], ['telnet', 'Telnet']] as [ConnType, string][]).map(([t, label]) => (
+              {([['agent', 'Agent'], ['ssh', 'SSH'], ['ssh-jump', 'SSH-jump'], ['telnet', 'Telnet']] as [ConnType, string][]).map(([t, label]) => (
                 <button
                   key={t}
                   type="button"
                   onClick={() => { setConnType(t); setPort(t === 'telnet' ? 23 : 22) }}
-                  className={`flex-1 rounded-lg px-3 py-1.5 font-medium transition ${
+                  className={`flex-1 rounded-lg px-2 py-1.5 text-[13px] font-medium transition ${
                     connType === t ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-slate-200'
                   }`}
                 >
@@ -258,6 +266,8 @@ export default function AddHostModal(props: { onClose: () => void; host?: Host; 
                 ? t('addhost.agentDesc')
                 : connType === 'ssh'
                 ? t('addhost.sshDesc')
+                : connType === 'ssh-jump'
+                ? t('addhost.sshJumpDesc')
                 : t('addhost.telnetDesc')}
             </p>
 
@@ -269,9 +279,20 @@ export default function AddHostModal(props: { onClose: () => void; host?: Host; 
 
             {connType !== 'agent' && (
               <div className="space-y-3 rounded-xl border border-ink-700 p-3">
+                {connType === 'ssh-jump' && (
+                  <label className="block">
+                    <span className={label}>{t('addhost.jumpVia')}</span>
+                    <select required value={viaHost || ''} onChange={(e) => setViaHost(Number(e.target.value))}
+                      className={field}>
+                      <option value="">{t('addhost.jumpViaPick')}</option>
+                      {agentHosts.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}
+                    </select>
+                    <span className="mt-0.5 block text-[11px] text-slate-500">{t('addhost.jumpViaHint')}</span>
+                  </label>
+                )}
                 <div className="flex gap-2">
                   <label className="block min-w-0 flex-1">
-                    <span className={label}>Hostname / IP</span>
+                    <span className={label}>{connType === 'ssh-jump' ? t('addhost.jumpTarget') : 'Hostname / IP'}</span>
                     <input required placeholder={t('addhost.hostnamePlaceholder')} value={hostname}
                       onChange={(e) => setHostname(e.target.value)} className={field} />
                   </label>
@@ -282,9 +303,9 @@ export default function AddHostModal(props: { onClose: () => void; host?: Host; 
                   </label>
                 </div>
                 <label className="block">
-                  <span className={label}>{t('addhost.user')}{connType === 'ssh' ? '' : t('addhost.optionalSuffix')}</span>
-                  <input required={connType === 'ssh'}
-                    placeholder={connType === 'ssh' ? t('addhost.userPlaceholderSsh') : t('addhost.userPlaceholderOther')}
+                  <span className={label}>{t('addhost.user')}{(connType === 'ssh' || connType === 'ssh-jump') ? '' : t('addhost.optionalSuffix')}</span>
+                  <input required={connType === 'ssh' || connType === 'ssh-jump'}
+                    placeholder={(connType === 'ssh' || connType === 'ssh-jump') ? t('addhost.userPlaceholderSsh') : t('addhost.userPlaceholderOther')}
                     value={username}
                     onChange={(e) => setUsername(e.target.value)} className={field} />
                 </label>
