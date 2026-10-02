@@ -7,7 +7,14 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
-## [Unreleased]
+## [3.0.0] — 2026-10-02 · agent (53)
+
+A security- and bastion-focused major. WebTerm becomes a **complete jump host** (SSH to LAN gear
+through an agent, host-key pinned by the gateway) and hardens the host→host deploy keys shipped in
+2.7.x with an optional policy. Plus day-to-day glue: service-log triage, on-demand diagnostics,
+Toolbox polish — all through the existing agent `run` op, so **the agent is unchanged (still 53)**
+and no fleet re-sign is needed. pyjwt bumped to 2.15.0 (CVE). Static code scanning (CodeQL) added
+alongside the existing Dependabot + Trivy/pip-audit.
 
 ### Added
 - **SSH-jump: a first-class bastion to LAN gear, with no agent on the target.** A new host type
