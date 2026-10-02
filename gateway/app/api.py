@@ -2724,6 +2724,42 @@ async def listening_ports(host_id: int, user=Depends(security.require_user)):
     return {"rows": rows}
 
 
+# Probe de diagnostic ON-DEMAND (nu în snapshot-ul orar al agentului, deci fără atingere de agent):
+# parsăm utilitarele standard şi întoarcem text ETICHETAT pe secţiuni. Read-only, degradează
+# curat fără root (smartctl/nft cer de obicei root → afişăm „needs root", nu listă goală tăcută).
+_DIAG_PROBES = {
+    "storage": (
+        "echo '### lsblk'; command -v lsblk >/dev/null 2>&1 && "
+        "lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT 2>/dev/null || echo '(lsblk unavailable)'; "
+        "echo; echo '### SMART health'; if command -v smartctl >/dev/null 2>&1; then "
+        "for d in $(lsblk -dno NAME,TYPE 2>/dev/null | awk '$2==\"disk\"{print $1}'); do "
+        "echo \"/dev/$d:\"; smartctl -H \"/dev/$d\" 2>&1 | "
+        "grep -iE 'overall-health|SMART Health|result' || echo '  (no SMART data / needs root)'; "
+        "done; else echo '(smartctl not installed)'; fi; "
+        "echo; echo '### ZFS'; command -v zpool >/dev/null 2>&1 && zpool status 2>&1 || echo '(no zpool)'"),
+    "net": (
+        "echo '### neighbors (ARP/ND)'; command -v ip >/dev/null 2>&1 && ip neigh 2>/dev/null || "
+        "arp -an 2>/dev/null || echo '(no ip/arp)'; "
+        "echo; echo '### firewall'; if command -v nft >/dev/null 2>&1; then "
+        "nft list ruleset 2>&1 | head -n 300; "
+        "elif command -v iptables-save >/dev/null 2>&1; then iptables-save 2>&1 | head -n 300; "
+        "else echo '(no nft / iptables — or needs root)'; fi"),
+}
+
+
+@router.get("/api/hosts/{host_id}/diag-probe")
+async def diag_probe(host_id: int, kind: str = "storage", user=Depends(security.require_user)):
+    """Probe on-demand (storage: lsblk/SMART/zpool · net: neighbors/firewall). Citire de stare de
+    host → step-up ca ports/services. Text brut etichetat pe secţiuni — nu reinterpretăm modelul
+    uneltei (glue), doar îl arătăm cohesiv."""
+    await _require_host_stepup(host_id, user)
+    recipe = _DIAG_PROBES.get(kind)
+    if not recipe:
+        raise HTTPException(400, "unknown probe")
+    resp = await _host_run(host_id, recipe, timeout=25)
+    return {"text": (resp.get("stdout", "") or "")[:60000]}
+
+
 # ── Database connection launchers ────────────────────────────────────────────
 # O conexiune salvată → o sesiune care rulează CLI-ul potrivit pe hostul agentului, cu ţinta
 # pre-completată. Lansator, nu client. Slice 1: politica `ask` — clientul îşi cere singur parola,

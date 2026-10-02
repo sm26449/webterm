@@ -132,6 +132,17 @@ export default function DiagnosticModal(props: { host: Host; onClose: () => void
       .finally(() => setPortsBusy(false))
   }
 
+  // probe on-demand (storage: lsblk/SMART/zpool · net: neighbors/firewall) — text brut, nu snapshot
+  const [probe, setProbe] = useState<Record<string, string>>({})
+  const [probeBusy, setProbeBusy] = useState('')
+  const loadProbe = (kind: 'storage' | 'net') => {
+    setProbeBusy(kind)
+    api<{ text: string }>(`/api/hosts/${props.host.id}/diag-probe?kind=${kind}`)
+      .then((r) => setProbe((p) => ({ ...p, [kind]: r.text || t('diag.probeEmpty') })))
+      .catch((e) => setProbe((p) => ({ ...p, [kind]: errText(e, t) || t('diag.probeFailed') })))
+      .finally(() => setProbeBusy(''))
+  }
+
   const loadLog = () => {
     setLogBusy(true); setLogErr('')
     api<{ log: string }>(`/api/hosts/${props.host.id}/agent-log`)
@@ -139,6 +150,23 @@ export default function DiagnosticModal(props: { host: Host; onClose: () => void
       .catch((e) => setLogErr(errText(e, t) || t('diag.logLoadFailed')))
       .finally(() => setLogBusy(false))
   }
+
+  const probeBlock = (kind: 'storage' | 'net') => (
+    <div className="mt-3 border-t border-ink-800 pt-3">
+      <div className="mb-1 flex items-center justify-between gap-2">
+        <span className="text-xs font-medium text-slate-400">
+          {t(kind === 'storage' ? 'diag.probe.storage' : 'diag.probe.net')}</span>
+        <button onClick={() => loadProbe(kind)} disabled={probeBusy === kind || !diag?.online}
+          className="shrink-0 rounded px-2 py-0.5 text-[11px] text-slate-400 hover:bg-ink-800 disabled:opacity-40">
+          {probeBusy === kind ? t('diag.probe.loading') : probe[kind] ? t('diag.probe.refresh') : t('diag.probe.load')}
+        </button>
+      </div>
+      {probe[kind] && (
+        <pre className="max-h-72 overflow-auto rounded-lg bg-ink-900 p-2 font-mono text-[11px] leading-relaxed text-slate-300 ring-1 ring-ink-700">{probe[kind]}</pre>
+      )}
+      {!probe[kind] && <p className="text-[11px] text-slate-600">{t('diag.probe.hint')}</p>}
+    </div>
+  )
 
   const load = () => {
     setLoading(true); setErr('')
@@ -298,8 +326,8 @@ export default function DiagnosticModal(props: { host: Host; onClose: () => void
             )}
 
             {/* ── STORAGE ── */}
-            {tab === 'storage' && (
-              snap?.storage?.length ? (
+            {tab === 'storage' && (<>
+              {snap?.storage?.length ? (
                 <div className="space-y-2">
                   {snap.storage.map((fs) => (
                     <div key={fs.mount} className="rounded-lg bg-ink-800 px-3 py-2">
@@ -316,8 +344,9 @@ export default function DiagnosticModal(props: { host: Host; onClose: () => void
                 </div>
               ) : (
                 <div className="rounded-lg bg-ink-800 px-3 py-2 text-xs text-slate-500">{t('diag.noSnapshot')}</div>
-              )
-            )}
+              )}
+              {probeBlock('storage')}
+            </>)}
 
             {/* ── NETWORK ── */}
             {tab === 'network' && (
@@ -374,6 +403,7 @@ export default function DiagnosticModal(props: { host: Host; onClose: () => void
                     </div>
                   </div>
                 ) : null}
+                {probeBlock('net')}
               </div>
             )}
 

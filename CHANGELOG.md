@@ -25,6 +25,10 @@ back.
   (`systemctl --state=failed`), and a per-service **Logs** button opens a session following
   `journalctl -u <unit> -f` — the same move as Docker logs, live in a real terminal. New library
   recipes for fleet `systemctl --failed` and `list-timers`. All via the `run` op; agent untouched.
+- **Diagnostics: on-demand deep probes.** The Storage tab gains **disk health** (lsblk · SMART ·
+  ZFS) and the Network tab gains **neighbors & firewall** (`ip neigh` · `nft`/`iptables`), loaded
+  on demand and shown as labeled read-only text. Degrades cleanly without root (shows "needs root",
+  never a silent empty list). Via the `run` op; agent untouched.
 - **Toolbox → SSH keys: host-to-host deploy keys.** A dev host can now `ssh` into other
   fleet hosts (deploy/test on prod) without running AI agents there. The private key is
   **generated on the source host and never leaves it** (`~/.ssh/webterm_ed25519`, via the
