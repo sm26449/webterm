@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState, PointerEvent as ReactPointerEvent } from 'react'
+import { Fragment, lazy, Suspense, useEffect, useRef, useState, PointerEvent as ReactPointerEvent } from 'react'
 import { errText, isSessionLive, api, ApiError, getBootVersion, Host, SearchHit, Session, timeAgo, withStepup } from '../lib/api'
 import { notify } from '../lib/notify'
 import { fmtTs } from '../lib/tz'
@@ -68,6 +68,7 @@ export default function Sidebar(props: {
   const { t } = useI18n()
   const [showAdd, setShowAdd] = useState(false)
   const [editHost, setEditHost] = useState<Host | null>(null)
+  const [jumpVia, setJumpVia] = useState<Host | null>(null)   // agentul-gazdă pentru care adăugăm o ţintă SSH-jump
   const [showSettings, setShowSettings] = useState(false)
   const [showFleetRun, setShowFleetRun] = useState(false)
   const [showStatus, setShowStatus] = useState(false)
@@ -287,23 +288,36 @@ export default function Sidebar(props: {
   // etichetele deja folosite → sugestii în Add-host (evită fragmentarea taxonomiei: web/webserver)
   const allTags = [...new Set(props.hosts.flatMap((h) => h.tags || []))].sort()
 
+  // Ţintele SSH-jump/telnet-prin-agent se salvează cu `via_host_id` = agentul prin care se
+  // tunelează. În sidebar le cuibărim SUB acel agent (nu în lista plată de foldere), ca să
+  // se vadă dintr-o privire „de cine atârnă". `isNested` le exclude din bucla de foldere.
+  const isNested = (h: Host) => h.via_host_id != null
+  const childrenOf = (id: number) => props.hosts.filter((h) => h.via_host_id === id)
+
   const q = query.trim().toLowerCase()
+  // potrivirea pe text (nume/hostname/tag) — folosită și pentru ţintele cuibărite, care
+  // atârnă de părinte, nu de un folder, deci NU trec prin filtrul de grup
+  const textMatches = (h: Host) =>
+    !q || h.name.toLowerCase().includes(q) || (h.hostname ?? '').toLowerCase().includes(q)
+      || (h.tags || []).some((tag) => tag.toLowerCase().includes(q))
   const hostMatches = (h: Host) =>
-    (!groupFilter || (h.folder || '') === groupFilter) &&
-    (!q || h.name.toLowerCase().includes(q) || (h.hostname ?? '').toLowerCase().includes(q)
-      || (h.tags || []).some((tag) => tag.toLowerCase().includes(q)))
+    (!groupFilter || (h.folder || '') === groupFilter) && textMatches(h)
 
   // Sidebar = navigare: card de host → deschide pagina hostului. Sesiunile
   // (active + închise, istoric, atașare) trăiesc în pagina hostului, nu aici.
-  const renderHost = (host: Host) => {
+  const renderHost = (host: Host, depth = 0) => {
     const liveCount = props.sessions.filter(
       (s) => s.host_id === host.id && isSessionLive(s, props.hosts)).length
     const selected = props.selectedHost === host.id
     const canConnect = host.connection_type !== 'agent' || host.online
     const color = hostColor(host)
     const reach = reachState(host)
+    // ţintele cuibărite sub acest host (SSH-jump / telnet-prin-agent), filtrate ca lista principală
+    const kids = depth < 4 ? childrenOf(host.id).filter(textMatches) : []
     return (
-      <div key={host.id} className="px-2 py-0.5">
+      <Fragment key={host.id}>
+      <div className="px-2 py-0.5"
+        style={depth ? { paddingLeft: depth * 18 + 8 } : undefined}>
         <div
           onClick={() => props.onSelectHost(host.id)}
           style={selected ? { boxShadow: `inset 2px 0 0 ${color}` } : undefined}
@@ -494,6 +508,7 @@ export default function Sidebar(props: {
               hostId={host.id}
               onFiles={() => props.onFiles(host)}
               onSerial={() => props.onSerial(host)}
+              onAddJump={() => setJumpVia(host)}
               onDiagnostic={() => props.onDiagnostic(host)}
               onFolder={() => moveToFolder(host)}
               onEdit={() => setEditHost(host)}
@@ -506,6 +521,8 @@ export default function Sidebar(props: {
           </span>
         </div>
       </div>
+      {kids.map((c) => renderHost(c, depth + 1))}
+      </Fragment>
     )
   }
 
@@ -673,7 +690,9 @@ export default function Sidebar(props: {
           </div>
         )}
         {(() => {
-          const visible = props.hosts.filter(hostMatches)
+          // ţintele cuibărite (via_host_id) NU intră în bucla de foldere: le randează
+          // recursiv renderHost sub agentul-părinte. Altfel ar apărea de două ori.
+          const visible = props.hosts.filter((h) => hostMatches(h) && !isNested(h))
           // grupurile cu nume întâi (alfabetic), hosturile fără folder la FINAL —
           // altfel plutesc deasupra grupurilor etichetate și par un bug de randare
           const folders = [...new Set(visible.map((h) => h.folder || ''))].sort((a, b) =>
@@ -842,6 +861,14 @@ export default function Sidebar(props: {
             onClose={() => setEditHost(null)}
           />
         )}
+        {jumpVia && (
+          <AddHostModal
+            tagSuggestions={allTags}
+            presetJump={{ viaHostId: jumpVia.id, viaName: jumpVia.name }}
+            onSaved={props.onChanged}
+            onClose={() => { setJumpVia(null); props.onChanged() }}
+          />
+        )}
         {showSettings && (
           <SettingsModal
             email={props.email}
@@ -926,6 +953,7 @@ function HostMenu(props: {
   onNewSession: () => void
   onFiles: () => void
   onSerial: () => void
+  onAddJump: () => void
   onDiagnostic: () => void
   onFolder: () => void
   onEdit: () => void
@@ -991,6 +1019,13 @@ function HostMenu(props: {
             {props.online && (!props.connectionType || props.connectionType === 'agent') && (
               <button role="menuitem" className={`${item} text-slate-200`} onClick={() => { setOpen(false); props.onSerial() }}>
                 <span className="grid h-4 w-4 place-items-center text-[13px]">🔌</span> {t('sidebar.serialConsole')}
+              </button>
+            )}
+            {(!props.connectionType || props.connectionType === 'agent') && (
+              // SSH-jump: adaugă o ţintă din LAN-ul acestui agent, tunelată prin el. Ţinta
+              // salvată apare cuibărită sub host, în sidebar.
+              <button role="menuitem" className={`${item} text-slate-200`} onClick={() => { setOpen(false); props.onAddJump() }}>
+                <span className="grid h-4 w-4 place-items-center text-[13px]">↳</span> {t('sidebar.addSshJump')}
               </button>
             )}
             {(!props.connectionType || props.connectionType === 'agent') && (

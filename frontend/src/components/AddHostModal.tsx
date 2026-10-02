@@ -14,12 +14,17 @@ const label = 'mb-1 block text-xs font-medium text-slate-400'
 // `host` prezent = mod EDITARE. Acelaşi formular: un host se editează cu exact câmpurile cu
 // care a fost creat, iar comutarea agent↔SSH e doar o schimbare de tip — util fix atunci când
 // agentul nu mai răspunde şi vrei să intri pe SSH ca să-l repari.
-export default function AddHostModal(props: { onClose: () => void; host?: Host; onSaved?: () => void; tagSuggestions?: string[] }) {
+export default function AddHostModal(props: {
+  onClose: () => void; host?: Host; onSaved?: () => void; tagSuggestions?: string[]
+  /** adăugare SSH-jump deja scopată pe un agent (din meniul ⋯ al hostului): tip fixat, via blocat */
+  presetJump?: { viaHostId: number; viaName: string }
+}) {
   const { t } = useI18n()
   const edit = props.host
+  const pj = props.presetJump
   const dialogRef = useRef<HTMLDivElement>(null)
   useFocusTrap(dialogRef, props.onClose)
-  const [connType, setConnType] = useState<ConnType>((edit?.connection_type as ConnType) || 'agent')
+  const [connType, setConnType] = useState<ConnType>((edit?.connection_type as ConnType) || (pj ? 'ssh-jump' : 'agent'))
   const [name, setName] = useState(edit?.name ?? '')
   const [note, setNote] = useState(edit?.note ?? '')
   const [tags, setTags] = useState((edit?.tags ?? []).join(', '))
@@ -38,7 +43,7 @@ export default function AddHostModal(props: { onClose: () => void; host?: Host; 
     (edit?.credential_policy as 'stored' | 'ask') || 'stored')
   const [require2fa, setRequire2fa] = useState(edit?.require_2fa ?? false)
   // ssh-jump: hostul-agent prin al cărui tunel ajungem la ţintă (lista de agenţi din flotă)
-  const [viaHost, setViaHost] = useState<number>(edit?.via_host_id ?? 0)
+  const [viaHost, setViaHost] = useState<number>(edit?.via_host_id ?? pj?.viaHostId ?? 0)
   const [agentHosts, setAgentHosts] = useState<Host[]>([])
   useEffect(() => {
     api<Host[]>('/api/hosts').then((hs) =>
@@ -231,7 +236,7 @@ export default function AddHostModal(props: { onClose: () => void; host?: Host; 
         ) : !created ? (
           <form onSubmit={submit} className="space-y-4">
             <h2 className="font-semibold">{edit ? t('addhost.editTitle', { name: edit.name }) : t('addhost.title')}</h2>
-            {!edit && (
+            {!edit && !pj && (
               <div className="flex gap-1 rounded-xl bg-ink-800 p-1 text-sm">
                 {(['one', 'many'] as const).map((m) => (
                   <button key={m} type="button" onClick={() => setMode(m)}
@@ -246,7 +251,8 @@ export default function AddHostModal(props: { onClose: () => void; host?: Host; 
               <p className="text-xs text-slate-500">{t('addhost.editHint')}</p>
             )}
 
-            {/* tip conexiune */}
+            {/* tip conexiune — ascuns când adăugarea e deja scopată ca SSH-jump pe un agent */}
+            {!pj && (
             <div className="flex gap-1 rounded-xl bg-ink-800 p-1 text-sm">
               {([['agent', 'Agent'], ['ssh', 'SSH'], ['ssh-jump', 'SSH-jump'], ['telnet', 'Telnet']] as [ConnType, string][]).map(([t, label]) => (
                 <button
@@ -261,8 +267,11 @@ export default function AddHostModal(props: { onClose: () => void; host?: Host; 
                 </button>
               ))}
             </div>
+            )}
             <p className="text-xs text-slate-500">
-              {connType === 'agent'
+              {pj
+                ? t('addhost.sshJumpVia', { name: pj.viaName })
+                : connType === 'agent'
                 ? t('addhost.agentDesc')
                 : connType === 'ssh'
                 ? t('addhost.sshDesc')
@@ -282,9 +291,10 @@ export default function AddHostModal(props: { onClose: () => void; host?: Host; 
                 {connType === 'ssh-jump' && (
                   <label className="block">
                     <span className={label}>{t('addhost.jumpVia')}</span>
-                    <select required value={viaHost || ''} onChange={(e) => setViaHost(Number(e.target.value))}
-                      className={field}>
+                    <select required value={viaHost || ''} disabled={!!pj} onChange={(e) => setViaHost(Number(e.target.value))}
+                      className={`${field} disabled:opacity-60`}>
                       <option value="">{t('addhost.jumpViaPick')}</option>
+                      {pj && !agentHosts.some((h) => h.id === pj.viaHostId) && <option value={pj.viaHostId}>{pj.viaName}</option>}
                       {agentHosts.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}
                     </select>
                     <span className="mt-0.5 block text-[11px] text-slate-500">{t('addhost.jumpViaHint')}</span>
