@@ -27,6 +27,9 @@ export default function AddHostModal(props: {
   const dialogRef = useRef<HTMLDivElement>(null)
   useFocusTrap(dialogRef, props.onClose)
   const [connType, setConnType] = useState<ConnType>((edit?.connection_type as ConnType) || (pj ? 'ssh-jump' : 'agent'))
+  // un host „jump" (ssh-jump/telnet-jump) e definit de agentul `via` — la editare arătăm doar
+  // comutatorul de PROTOCOL (SSH↔Telnet), nu selectorul generic (a-l muta pe „agent" l-ar rupe).
+  const isJump = connType === 'ssh-jump' || connType === 'telnet-jump'
   const [name, setName] = useState(edit?.name ?? '')
   const [note, setNote] = useState(edit?.note ?? '')
   const [tags, setTags] = useState((edit?.tags ?? []).join(', '))
@@ -257,26 +260,12 @@ export default function AddHostModal(props: {
               <p className="text-xs text-slate-500">{t('addhost.editHint')}</p>
             )}
 
-            {/* tip conexiune — ascuns când adăugarea e deja scopată ca SSH-jump pe un agent */}
-            {!pj && (
-            <div className="flex gap-1 rounded-xl bg-ink-800 p-1 text-sm">
-              {([['agent', 'Agent'], ['ssh', 'SSH'], ['ssh-jump', 'SSH-jump'], ['telnet', 'Telnet']] as [ConnType, string][]).map(([t, label]) => (
-                <button
-                  key={t}
-                  type="button"
-                  onClick={() => { setConnType(t); setPort(t === 'telnet' ? 23 : 22) }}
-                  className={`flex-1 rounded-lg px-2 py-1.5 text-[13px] font-medium transition ${
-                    connType === t ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-            )}
-            {/* preset din meniul ⋯ al unui agent: alegi doar PROTOCOLUL spre ţintă (SSH ori
-                Telnet), amândouă tunelate prin acelaşi agent. Portul implicit urmează alegerea. */}
-            {pj && (
+            {/* Selectorul de tip. Trei cazuri:
+                - host JUMP (preset din meniul agentului, SAU editarea unui ssh-jump/telnet-jump):
+                  doar PROTOCOLUL spre ţintă [SSH-jump][Telnet-jump] — via/target rămân;
+                - non-jump (creare sau editare agent/ssh/telnet): selectorul generic [Agent][SSH][Telnet].
+                Jump-urile se CREEAZĂ din meniul ⋯ al agentului (de-aia lipsesc din selectorul generic). */}
+            {(pj || isJump) ? (
               <div className="flex gap-1 rounded-xl bg-ink-800 p-1 text-sm">
                 {([['ssh-jump', 'SSH-jump'], ['telnet-jump', 'Telnet-jump']] as [ConnType, string][]).map(([ct, lbl]) => (
                   <button key={ct} type="button"
@@ -284,6 +273,17 @@ export default function AddHostModal(props: {
                     className={`flex-1 rounded-lg px-2 py-1.5 text-[13px] font-medium transition ${
                       connType === ct ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
                     {lbl}
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="flex gap-1 rounded-xl bg-ink-800 p-1 text-sm">
+                {([['agent', 'Agent'], ['ssh', 'SSH'], ['telnet', 'Telnet']] as [ConnType, string][]).map(([ct, label]) => (
+                  <button key={ct} type="button"
+                    onClick={() => { setConnType(ct); setPort(ct === 'telnet' ? 23 : 22) }}
+                    className={`flex-1 rounded-lg px-2 py-1.5 text-[13px] font-medium transition ${
+                      connType === ct ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
+                    {label}
                   </button>
                 ))}
               </div>
@@ -299,6 +299,8 @@ export default function AddHostModal(props: {
                 ? t('addhost.sshDesc')
                 : connType === 'ssh-jump'
                 ? t('addhost.sshJumpDesc')
+                : connType === 'telnet-jump'
+                ? t('addhost.telnetJumpDesc')
                 : t('addhost.telnetDesc')}
             </p>
 

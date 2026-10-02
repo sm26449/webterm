@@ -4161,6 +4161,12 @@ async def update_host(host_id: int, host: HostPatch, user=Depends(security.requi
         raise ApiError(400, "host.hostnameRequired", "hostname required for a direct connection")
     if new_type in ("ssh", "ssh-jump") and not ssh_username:
         raise ApiError(400, "ssh.userRequired", "an SSH username is required")
+    # la editarea unui jump, agentul `via` trebuie să rămână un host de tip agent (ca la creare)
+    if new_type in ("ssh-jump", "telnet-jump"):
+        via_id = eff("via_host_id")
+        via = await db.fetchone("SELECT connection_type FROM hosts WHERE id=?", via_id) if via_id else None
+        if not via or (via["connection_type"] or "agent") != "agent":
+            raise ApiError(400, "sshjump.needsAgent", "pick an agent host to reach the target through")
     # Întoarcerea la SSH după ce agentul a preluat: detaliile de conexiune supraviețuiesc
     # provisioning-ului, dar credențialul e ȘTERS dacă politica era `ephemeral`. Fără el nu
     # ne putem conecta, deci cerem unul acum, în loc să eșuăm abia la prima conectare.

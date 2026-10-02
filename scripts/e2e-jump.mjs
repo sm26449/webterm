@@ -137,6 +137,17 @@ try {
   // (nu o notificare de OS tăcută). Validează fix-ul cerut: „să ştim că sunt probleme şi ce anume".
   await page.locator('.wt-sidebar button:has-text("switch-core")').first().click()
   await page.waitForTimeout(600)
+  // editarea unui host JUMP arată comutatorul de protocol [SSH-jump][Telnet-jump] (nu selectorul
+  // generic Agent/SSH), cu Telnet-jump activ — şi câmpul „via". Fără selectorul generic.
+  await page.locator('button:has-text("Edit host")').first().click()
+  await page.waitForTimeout(500)
+  check('edit jump: toggle SSH-jump prezent', (await page.locator('button:has-text("SSH-jump")').count()) >= 1)
+  check('edit jump: toggle Telnet-jump prezent', (await page.locator('button:has-text("Telnet-jump")').count()) >= 1)
+  check('edit jump: fără tab-ul generic „Agent"',
+    (await page.locator('.glass button:has-text("Agent")').count()) === 0)
+  check('edit jump: câmpul „Reach via" prezent', (await page.locator('text=/Reach via/i').count()) >= 1)
+  await page.keyboard.press('Escape')
+  await page.waitForTimeout(300)
   await page.locator('button:has-text("New session")').first().click()
   await page.waitForTimeout(1500)
   const toast = page.locator('[role="alert"]')

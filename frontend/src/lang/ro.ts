@@ -734,6 +734,7 @@ const ro: Lang = {
     'addhost.jumpViaHint': "Agentul al cărui LAN ajunge la ţintă. Sesiunea SSH e tunelată prin el.",
     'addhost.jumpTarget': "Ţintă (adresa din LAN văzută de agent)",
     'addhost.telnetDesc': "Telnet e plaintext (fără criptare) — folosește-l doar pe rețea de încredere / echipamente legacy.",
+    'addhost.telnetJumpDesc': "Telnet către un dispozitiv din LAN-ul unui host-agent, tunelat prin acel agent. Plaintext — login interactiv, fără credenţiale stocate.",
     'addhost.name': "Nume",
     'addhost.namePlaceholder': "ex: vps-hetzner, homelab",
     'addhost.hostnamePlaceholder': "ex: 192.168.1.10 sau server.exemplu.ro",

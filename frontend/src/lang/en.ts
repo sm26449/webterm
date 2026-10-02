@@ -726,6 +726,7 @@ const en: Lang = {
     'addhost.jumpViaHint': "The agent whose LAN can reach the target. The SSH session is tunneled through it.",
     'addhost.jumpTarget': "Target (LAN address seen by the agent)",
     'addhost.telnetDesc': "Telnet is plaintext (no encryption) — use it only on a trusted network / legacy equipment.",
+    'addhost.telnetJumpDesc': "Telnet to a device on an agent host's LAN, tunneled through that agent. Plaintext — interactive login, no stored credentials.",
     'addhost.name': "Name",
     'addhost.namePlaceholder': "e.g.: vps-hetzner, homelab",
     'addhost.hostnamePlaceholder': "e.g.: 192.168.1.10 or server.example.com",
