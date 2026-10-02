@@ -1,9 +1,9 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import { isSessionLive, api, AppLink, Host, Session, timeAgo } from '../lib/api'
-import { hostAt, protoLabel } from '../lib/host'
+import { hostAt, hostColor, protoLabel } from '../lib/host'
 import { useI18n } from '../lib/i18n'
 import { hostHistory } from '../lib/metrics'
-import { DockerIcon, DownloadIcon, FilesIcon, ForwardIcon, PlusIcon, PopoutIcon, ServerIcon, ServicesIcon, SplitIcon, TerminalPromptIcon, ToolboxIcon, TrashIcon } from './Icons'
+import { DockerIcon, DownloadIcon, FilesIcon, ForwardIcon, LinkIcon, NoteIcon, PlusIcon, PopoutIcon, RefreshIcon, ServerIcon, ServicesIcon, ShieldIcon, SplitIcon, TerminalPromptIcon, ToolboxIcon, TrashIcon } from './Icons'
 import SessionPreview from './SessionPreview'
 import Sparkline from './Sparkline'
 import TranscriptPlayer from './TranscriptPlayer'
@@ -217,24 +217,34 @@ export default function HostOverview(props: {
         <div className="flex min-h-0 flex-1 flex-col">
         {tab === 'overview' && (
           <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
-            {active.length > 0 && (
-              <section className="mb-6">
-                <div className="mb-3 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                  {t('host.active')} <span className="text-slate-600">· {active.length}</span>
-                  <button onClick={() => setTab('sessions')} className="ml-auto text-[11px] normal-case text-sky-400 hover:underline">{t('host.allSessions')} →</button>
-                </div>
-                {/* thumbnail-uri LIVE: fiecare card e un preview read-only al sesiunii, auto-fit */}
-                <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(230px, 1fr))' }}>
-                  {active.map((s) => (
-                    <SessionThumb key={s.id} session={s}
-                      onOpen={() => props.onOpenSession(s.id)}
-                      onSplit={() => props.onSplit(s.id)}
-                      onPopout={() => props.onPopout(s.id)} />
-                  ))}
-                </div>
-              </section>
-            )}
-            <HostDetail host={host} />
+            <div className="mx-auto max-w-6xl space-y-6">
+              {host.backend === 'pty' && (
+                <p className="wt-warn rounded-xl bg-amber-500/10 p-3 text-sm ring-1 ring-amber-500/30">
+                  {t('host.noTmuxWarning')}
+                </p>
+              )}
+              {/* rândul de metrici — inima dashboard-ului (doar agent online cu metrici) */}
+              <StatTiles host={host} />
+
+              {active.length > 0 && (
+                <section>
+                  <div className="mb-3 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                    {t('host.active')} <span className="text-slate-600">· {active.length}</span>
+                    <button onClick={() => setTab('sessions')} className="ml-auto text-[11px] normal-case text-sky-400 hover:underline">{t('host.allSessions')} →</button>
+                  </div>
+                  {/* thumbnail-uri LIVE: fiecare card e un preview read-only al sesiunii, auto-fit */}
+                  <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))' }}>
+                    {active.map((s) => (
+                      <SessionThumb key={s.id} session={s}
+                        onOpen={() => props.onOpenSession(s.id)}
+                        onSplit={() => props.onSplit(s.id)}
+                        onPopout={() => props.onPopout(s.id)} />
+                    ))}
+                  </div>
+                </section>
+              )}
+              <HostDetail host={host} />
+            </div>
           </div>
         )}
 
@@ -383,24 +393,101 @@ function SessionThumb(props: {
   )
 }
 
-/** Panoul de detalii host: transformă ecranul gol într-unul util —
-   conexiune, securitate, agent și resurse, la o privire. */
-function HostDetail({ host }: { host: Host }) {
+/** Prag de culoare pentru metrici: verde <70% · chihlimbar <90% · roşu peste. */
+function pctColor(p: number): string {
+  return p < 70 ? '#10b981' : p < 90 ? '#f59e0b' : '#f43f5e'
+}
+
+/** Inel de progres cu procentul în centru — gauge-ul de dashboard. */
+function Gauge({ pct, color, size = 60 }: { pct: number; color: string; size?: number }) {
+  const v = Math.max(0, Math.min(100, Math.round(pct)))
+  return (
+    <div className="relative shrink-0" style={{ width: size, height: size }}>
+      <svg viewBox="0 0 40 40" className="h-full w-full -rotate-90" aria-hidden="true">
+        <circle cx="20" cy="20" r="16" fill="none" strokeWidth="3.5" className="stroke-ink-700" />
+        <circle cx="20" cy="20" r="16" fill="none" strokeWidth="3.5" strokeLinecap="round"
+          pathLength={100} strokeDasharray="100" strokeDashoffset={100 - v} style={{ stroke: color }}
+          className="transition-[stroke-dashoffset,stroke] duration-500 ease-out motion-reduce:transition-none" />
+      </svg>
+      <span className="absolute inset-0 grid place-items-center font-mono text-sm font-semibold tabular-nums" style={{ color }}>{v}%</span>
+    </div>
+  )
+}
+
+/** Un tile de metrică: etichetă + gauge (ori cifră mare) + sub-text + sparkline opţional. */
+function StatTile(props: { label: string; pct?: number; big?: string; sub?: string; spark?: number[]; sparkLabel?: string }) {
+  const color = props.pct != null ? pctColor(props.pct) : '#94a3b8'
+  return (
+    <div className="rounded-2xl border border-ink-700/70 bg-ink-800/40 p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">{props.label}</div>
+          {props.big != null && <div className="mt-1.5 font-mono text-2xl font-semibold tabular-nums text-slate-100">{props.big}</div>}
+          {props.sub && <div className="mt-1 truncate font-mono text-xs text-slate-500 tabular-nums">{props.sub}</div>}
+        </div>
+        {props.pct != null && <Gauge pct={props.pct} color={color} />}
+      </div>
+      {props.spark && props.spark.length > 1 && (
+        <div className="mt-3 overflow-hidden">
+          <Sparkline values={props.spark} width={200} height={26} label={props.sparkLabel ?? props.label} />
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Rândul de tile-uri metrice — inima dashboard-ului. Doar host de agent online cu metrici. */
+function StatTiles({ host }: { host: Host }) {
   const { t } = useI18n()
   const m = host.metrics
   const hist = hostHistory(host.id)
+  if (!host.online || !m || m.cpu_pct == null) return null
+  const gib = (n?: number) => (n != null ? (n / 1024 ** 3).toFixed(1) : null)
+  const memPct = m.mem_total && m.mem_used != null ? (m.mem_used / m.mem_total) * 100 : null
+  const diskPct = m.disk_total && m.disk_used != null ? (m.disk_used / m.disk_total) * 100 : null
+  return (
+    <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <StatTile label="CPU" pct={m.cpu_pct} spark={hist?.cpu} sparkLabel={t('host.cpuChartLabel', { name: host.name })} />
+      {memPct != null && (
+        <StatTile label={t('host.memory')} pct={memPct} sub={`${gib(m.mem_used)} / ${gib(m.mem_total)} GiB`}
+          spark={hist?.mem} sparkLabel={t('host.memChartLabel', { name: host.name })} />
+      )}
+      {diskPct != null && (
+        <StatTile label={t('host.disk')} pct={diskPct} sub={`${gib(m.disk_used)} / ${gib(m.disk_total)} GiB`} />
+      )}
+      {m.load1 != null && (
+        <StatTile label="Load" big={m.load1.toFixed(2)} sub={`5m ${(m.load5 ?? 0).toFixed(2)} · 15m ${(m.load15 ?? 0).toFixed(2)}`} />
+      )}
+    </div>
+  )
+}
+
+/** Card de informaţii cu icon-chip colorat + eyebrow. */
+function Card(props: { title: string; icon?: React.ReactNode; accent?: string; className?: string; children: React.ReactNode }) {
+  const accent = props.accent ?? '#64748b'
+  return (
+    <div className={`rounded-2xl border border-ink-700/70 bg-ink-800/40 p-4 ${props.className ?? ''}`}>
+      <div className="mb-2.5 flex items-center gap-2.5">
+        {props.icon && (
+          <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg [&>svg]:h-4 [&>svg]:w-4"
+            style={{ background: `${accent}1a`, color: accent }}>{props.icon}</span>
+        )}
+        <h3 className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">{props.title}</h3>
+      </div>
+      <dl>{props.children}</dl>
+    </div>
+  )
+}
+
+/** Cardurile de info ale hostului: conexiune, securitate, agent, apps, notă. */
+function HostDetail({ host }: { host: Host }) {
+  const { t } = useI18n()
   const isAgent = (host.connection_type ?? 'agent') === 'agent'
-  const pct = (used?: number, total?: number) =>
-    total && used != null ? `${Math.round((used / total) * 100)}%` : null
-  const gib = (n?: number) => (n != null ? `${(n / 1024 ** 3).toFixed(1)} GiB` : null)
   const credPolicy = host.credential_policy === 'ask' ? t('host.credAsk')
     : host.credential_policy === 'ephemeral' ? t('host.credEphemeral')
     : host.has_credentials ? t('host.credStored') : t('host.credNone')
-  // apps (forward-uri promovate) ale ACESTUI host — butoane contextuale în panoul de detalii
   const [hostApps, setHostApps] = useState<AppLink[]>([])
   useEffect(() => {
-    // guard de răspuns întârziat: la schimbarea rapidă de host, fetch-ul lent al hostului
-    // VECHI poate ateriza după al celui nou şi i-ar afişa aplicaţiile pe hostul greşit
     let gone = false
     api<AppLink[]>('/api/apps')
       .then((all) => { if (!gone) setHostApps(all.filter((a) => a.host_id === host.id)) })
@@ -409,110 +496,65 @@ function HostDetail({ host }: { host: Host }) {
   }, [host.id])
 
   return (
-    <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-2">
-        {/* Fără tmux pe host, agentul cade pe un PTY simplu — sesiunile mor odată cu el.
-            Adică exact promisiunea produsului, întoarsă pe dos, fără ca omul să afle.
-            Scriptul de instalare avertizează, dar o singură dată, într-un log care se
-            derulează; aici scria doar `Backend: pty`, un cuvânt care nu spune nimic cuiva
-            care nu ştie ce e tmux. Nu refuzăm instalarea — pe o cutie minimală un terminal
-            efemer e tot util —, dar refuzăm s-o ascundem. */}
-        {host.backend === 'pty' && (
-          <p className="wt-warn rounded-lg bg-amber-500/10 p-3 text-sm ring-1 ring-amber-500/30 lg:col-span-2">
-            {t('host.noTmuxWarning')}
-          </p>
-        )}
-        {hostApps.length > 0 && (
-          <div className="lg:col-span-2"><Section title={t('dashboard.apps')}>
-            <div className="flex flex-wrap gap-2">
-              {hostApps.map((a) => {
-                const color = HOST_APP_COLOR[a.app_type] || '#34d399'
-                return (
-                  <a key={a.id} href={a.enabled ? a.url : undefined} target="_blank" rel="noopener noreferrer"
-                    title={a.enabled ? a.url : t('dashboard.appDisabled')}
-                    className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12px] font-medium ring-1 ring-ink-700 ${
-                      a.enabled ? 'hover:bg-ink-800' : 'cursor-not-allowed opacity-50'}`}
-                    style={{ color }}>
-                    {a.label} <span className="text-slate-600">↗</span>
-                  </a>
-                )
-              })}
-            </div>
-          </Section></div>
-        )}
-        <Section title={t('host.secConnection')}>
-          <Row k={t('host.protocol')} v={protoLabel(host)} />
-          <Row k={t('host.address')} v={host.hostname ? hostAt(host) : '—'} mono />
-          {!isAgent && <Row k={t('host.authentication')} v={host.auth_method === 'key' ? t('host.sshKey') : host.auth_method === 'password' ? t('host.passwordLabel') : '—'} />}
-          {host.backend && <Row k="Backend" v={host.backend} mono />}
-          <Row k={t('host.status')} v={host.online ? 'online' : isAgent ? 'offline' : t('host.connectOnDemand')}
-            tone={host.online ? 'good' : undefined} />
-        </Section>
+    <div className="grid grid-cols-1 items-start gap-4 md:grid-cols-2 xl:grid-cols-3">
+      <Card title={t('host.secConnection')} icon={<ServerIcon />} accent={hostColor(host)}>
+        <Row k={t('host.protocol')} v={protoLabel(host)} />
+        <Row k={t('host.address')} v={host.hostname ? hostAt(host) : '—'} mono />
+        {!isAgent && <Row k={t('host.authentication')} v={host.auth_method === 'key' ? t('host.sshKey') : host.auth_method === 'password' ? t('host.passwordLabel') : '—'} />}
+        {host.backend && <Row k="Backend" v={host.backend} mono />}
+        <Row k={t('host.status')} v={host.online ? 'online' : isAgent ? 'offline' : t('host.connectOnDemand')}
+          tone={host.online ? 'good' : undefined} />
+      </Card>
 
-        <Section title={t('host.secSecurity')}>
-          <Row k={t('host.twoFaOnConnect')} v={host.require_2fa ? t('host.yesPasskey') : t('host.no')} tone={host.require_2fa ? 'good' : undefined} />
-          <Row k={t('host.credentials')} v={credPolicy} />
-        </Section>
+      <Card title={t('host.secSecurity')} icon={<ShieldIcon />} accent="#38bdf8">
+        <Row k={t('host.twoFaOnConnect')} v={host.require_2fa ? t('host.yesPasskey') : t('host.no')} tone={host.require_2fa ? 'good' : undefined} />
+        <Row k={t('host.credentials')} v={credPolicy} />
+      </Card>
 
-        {isAgent && (
-          <Section title={t('host.agent')}>
-            <Row k={t('host.version')} v={host.agent_version != null ? `v${host.agent_version}` : t('host.notInstalled')}
-              badge={host.update_pending ? t('host.updateAvailable') : undefined} />
-            {host.last_heartbeat != null && <Row k={t('host.lastActivity')} v={timeAgo(host.last_heartbeat, t)} />}
-          </Section>
-        )}
+      {isAgent && (
+        <Card title={t('host.agent')} icon={<RefreshIcon />} accent="#a78bfa">
+          <Row k={t('host.version')} v={host.agent_version != null ? `v${host.agent_version}` : t('host.notInstalled')}
+            badge={host.update_pending ? t('host.updateAvailable') : undefined} />
+          {host.last_heartbeat != null && <Row k={t('host.lastActivity')} v={timeAgo(host.last_heartbeat, t)} />}
+        </Card>
+      )}
 
-        {host.online && m && (
-          <Section title={t('host.secResources')}>
-            {/* graficele arată ultimele ~5 minute (poll-ul de 5s); se golesc la
-                reload — sunt context la incident, nu monitorizare persistentă */}
-            {m.cpu_pct != null && (
-              <RowChart k="CPU" v={`${Math.round(m.cpu_pct)}%`} values={hist?.cpu} label={t('host.cpuChartLabel', { name: host.name })} />
-            )}
-            {pct(m.mem_used, m.mem_total) && (
-              <RowChart k={t('host.memory')} v={t('host.ofTotal', { pct: pct(m.mem_used, m.mem_total)!, total: gib(m.mem_total)! })}
-                values={hist?.mem} label={t('host.memChartLabel', { name: host.name })} />
-            )}
-            {pct(m.disk_used, m.disk_total) && <Row k={t('host.disk')} v={t('host.ofTotal', { pct: pct(m.disk_used, m.disk_total)!, total: gib(m.disk_total)! })} mono />}
-            {m.load1 != null && <Row k="Load (1·5·15)" v={`${m.load1.toFixed(2)} · ${(m.load5 ?? 0).toFixed(2)} · ${(m.load15 ?? 0).toFixed(2)}`} mono />}
-          </Section>
-        )}
+      {hostApps.length > 0 && (
+        <Card title={t('dashboard.apps')} icon={<LinkIcon />} accent="#34d399" className="md:col-span-2 xl:col-span-3">
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            {hostApps.map((a) => {
+              const color = HOST_APP_COLOR[a.app_type] || '#34d399'
+              return (
+                <a key={a.id} href={a.enabled ? a.url : undefined} target="_blank" rel="noopener noreferrer"
+                  title={a.enabled ? a.url : t('dashboard.appDisabled')}
+                  className={`group flex items-center gap-3 rounded-xl border border-ink-700 bg-ink-900/40 px-3 py-2.5 ${
+                    a.enabled ? 'hover:border-ink-500 hover:bg-ink-800' : 'cursor-not-allowed opacity-50'}`}>
+                  <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg font-mono text-sm font-bold"
+                    style={{ background: `${color}22`, color }}>{a.label.slice(0, 1).toUpperCase()}</span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-medium text-slate-200">{a.label}</span>
+                    <span className="block truncate font-mono text-[11px] text-slate-500">{a.url.replace(/^https?:\/\//, '')}</span>
+                  </span>
+                  {a.enabled && <span className="shrink-0 text-slate-600 group-hover:text-slate-400">↗</span>}
+                </a>
+              )
+            })}
+          </div>
+        </Card>
+      )}
 
-        {host.note && (
-          <div className="lg:col-span-2"><Section title={t('host.secNote')}>
-            <p className="px-3 py-2 text-sm text-slate-400">{host.note}</p>
-          </Section></div>
-        )}
-    </div>
-  )
-}
-
-function Section(props: { title: string; children: React.ReactNode }) {
-  return (
-    <div>
-      <h3 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">{props.title}</h3>
-      <dl className="divide-y divide-ink-800 rounded-xl ring-1 ring-ink-800">{props.children}</dl>
-    </div>
-  )
-}
-
-/** Rând de metrică cu tendință: cifra curentă + sparkline pe ultimele 5 minute. */
-function RowChart(props: { k: string; v: string; values?: number[]; label: string }) {
-  return (
-    <div className="flex items-center justify-between gap-3 px-3 py-2">
-      <dt className="shrink-0 text-sm text-slate-500">{props.k}</dt>
-      <dd className="flex min-w-0 items-center gap-2.5">
-        {props.values && props.values.length > 1 && (
-          <Sparkline values={props.values} width={72} height={18} label={props.label} />
-        )}
-        <span className="truncate text-right font-mono text-sm text-slate-200">{props.v}</span>
-      </dd>
+      {host.note && (
+        <Card title={t('host.secNote')} icon={<NoteIcon />} className="md:col-span-2 xl:col-span-3">
+          <p className="text-sm text-slate-400">{host.note}</p>
+        </Card>
+      )}
     </div>
   )
 }
 
 function Row(props: { k: string; v: string; mono?: boolean; tone?: 'good'; badge?: string }) {
   return (
-    <div className="flex items-center justify-between gap-3 px-3 py-2">
+    <div className="flex items-center justify-between gap-3 border-b border-ink-800/60 py-2 last:border-0">
       <dt className="shrink-0 text-sm text-slate-500">{props.k}</dt>
       <dd className={`min-w-0 truncate text-right text-sm ${props.tone === 'good' ? 'wt-good' : 'text-slate-200'} ${props.mono ? 'font-mono' : ''}`}>
         {props.v}

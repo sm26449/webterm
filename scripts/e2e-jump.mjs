@@ -119,6 +119,8 @@ try {
   await page.waitForTimeout(400)
   check('hub: tab Overview arată detaliile hostului (Connection)',
     (await page.locator('text=Connection').count()) >= 1)
+  // captură pentru verificare vizuală a layout-ului (nav stânga + carduri)
+  try { await page.screenshot({ path: '/out/host-overview.png', fullPage: false }) } catch { /* best-effort */ }
 
   // ── toast de EROARE la conectare eşuată ──
   // ţinta telnet-jump „switch-core" merge prin alpha-agent, care e OFFLINE (fără agent real),
