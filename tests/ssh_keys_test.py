@@ -110,7 +110,7 @@ async def main():
     await api.init_setup_token()
 
     homes = {n: tempfile.mkdtemp(prefix="wtssh-" + n)
-             for n in ("src", "tgt", "evil", "third", "bsrc", "b1", "b2")}
+             for n in ("src", "tgt", "evil", "third", "bsrc", "b1", "b2", "psrc", "ptgt")}
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://t", timeout=30,
                                  headers=_ORIGIN) as c:
@@ -118,7 +118,7 @@ async def main():
                                          "setup_token": "test-setup"})
         uid = (await db.fetchone("SELECT id FROM users WHERE email=?", "a@b.co"))["id"]
         ids = {}
-        for n in ("src", "tgt", "evil", "third", "bsrc", "b1", "b2"):
+        for n in ("src", "tgt", "evil", "third", "bsrc", "b1", "b2", "psrc", "ptgt"):
             ids[n] = (await c.post("/api/hosts", json={"name": n})).json()["id"]
             core.sources[ids[n]] = FakeAgent(ids[n], homes[n])
         rd = await c.post("/api/hosts", json={"name": "direct", "connection_type": "ssh",
@@ -361,6 +361,57 @@ async def main():
             lines = ak_lines(homes["b1"])
             check("rotate: ţinta are NOUA cheie, nu pe cea veche",
                   newpub in lines and bpub not in lines, str(lines))
+
+        # ══ Politica cheilor de deploy (Slice 1): restrict,command= + 2FA pe surse ══
+        # setarea face roundtrip
+        r = await c.post("/api/settings/deploy-key-policy",
+                         json={"require_2fa_source": True, "require_restrict": True})
+        check("policy POST → 200 cu valorile setate",
+              r.status_code == 200 and r.json()["require_2fa_source"] and r.json()["require_restrict"], r.text)
+        r = await c.get("/api/settings/deploy-key-policy")
+        check("policy GET → aceleaşi valori", r.json() == {"require_2fa_source": True, "require_restrict": True}, r.text)
+
+        # require_2fa_source: generate pe un host FĂRĂ 2FA e refuzat
+        seed_key(homes["psrc"], FIXED_PUB)
+        r = await c.post(f"/api/hosts/{ids['psrc']}/deploy-key/generate", json={})
+        check("politica 2FA-surse: generate pe host fără 2FA → 400 needs2faSource",
+              r.status_code == 400 and hdr(r) == "sshkey.needs2faSource", r.text)
+        await db.execute("UPDATE hosts SET require_2fa=1 WHERE id=?", ids["psrc"])
+        security.clear_stepup_for(uid)
+        r = await c.post(f"/api/hosts/{ids['psrc']}/deploy-key/generate",
+                         json={"stepup_password": PW})
+        check("cu 2FA activat pe sursă → generate 200", r.status_code == 200, r.text)
+        psrc_pub = r.json()["public_key"]
+
+        # require_restrict: deploy fără restricţie e refuzat; cu restrict/command trece şi compune linia
+        security.clear_stepup_for(uid)
+        r = await c.post(f"/api/hosts/{ids['psrc']}/deploy-key/deploy-batch",
+                         json={"target_host_ids": [ids["ptgt"]], "stepup_password": PW})
+        res = r.json()["results"][0]
+        check("politica require_restrict: deploy fără restricţie → respins per-ţintă",
+              res["ok"] is False and res.get("code") == "sshkey.restrictRequired", r.text)
+        r = await c.post(f"/api/hosts/{ids['psrc']}/deploy-key/deploy-batch",
+                         json={"target_host_ids": [ids["ptgt"]], "restrict": True,
+                               "command": 'rrsync -ro ~/data', "stepup_password": PW})
+        check("cu restrict+command → deploy OK", r.json()["results"][0]["ok"], r.text)
+        line = [ln for ln in ak_lines(homes["ptgt"]) if psrc_pub in ln][0]
+        check("linia conţine restrict + command= + cheia",
+              line.startswith('restrict,command="rrsync -ro ~/data" ') and line.endswith(psrc_pub), line)
+
+        # comandă cu newline (injecţie H-1) → respinsă
+        r = await c.post(f"/api/hosts/{ids['psrc']}/deploy-key/deploy-batch",
+                         json={"target_host_ids": [ids["ptgt"]], "restrict": True,
+                               "command": "ls\nevil", "stepup_password": PW})
+        check("command cu newline → respins (badCommand)",
+              r.json()["results"][0].get("code") == "sshkey.badCommand", r.text)
+
+        # politica dezactivată → deploy nerestricţionat merge iar
+        await c.post("/api/settings/deploy-key-policy",
+                     json={"require_2fa_source": False, "require_restrict": False})
+        security.clear_stepup_for(uid)
+        r = await c.post(f"/api/hosts/{ids['psrc']}/deploy-key/deploy-batch",
+                         json={"target_host_ids": [ids["ptgt"]], "stepup_password": PW})
+        check("politica oprită → deploy nerestricţionat OK din nou", r.json()["results"][0]["ok"], r.text)
 
         # ── ţintă ŞTEARSĂ din flotă: evidenţa NU dispare (cheia e încă pe maşină), dar nici
         #    nu blochează pentru totdeauna ştergerea cheii de pe sursă ─────────

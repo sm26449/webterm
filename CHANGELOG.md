@@ -10,6 +10,17 @@ back.
 ## [Unreleased]
 
 ### Added
+- **Deploy-key security policy (Settings → Security, optional, off by default).** Two toggles that
+  harden host→host deploy keys. **Require 2FA on source hosts:** a host holding a deploy key can
+  reach its targets — the crown jewel — so when on, you can't generate a key on a host until it has
+  2FA enabled. **Require restricted keys:** refuse full-shell deploy keys; each must carry a
+  restriction. The deploy flow gains a restriction selector — *full shell*, *locked down*
+  (`restrict`: no pty/forwarding/agent/X11), or *run only one command* (`restrict,command="…"`) —
+  so a stolen key can do only its one job. `from="IP"` still composes alongside. Rotate preserves
+  each edge's existing options. The forced command is validated (one printable line, no control
+  characters) and escaped for the authorized_keys quoting.
+- **Toolbox History shows each command's date/time**; **Library lets you add your own commands**
+  (backed by the existing snippets — one list, also reachable from the command palette).
 - **Toolbox → SSH keys: host-to-host deploy keys.** A dev host can now `ssh` into other
   fleet hosts (deploy/test on prod) without running AI agents there. The private key is
   **generated on the source host and never leaves it** (`~/.ssh/webterm_ed25519`, via the

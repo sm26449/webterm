@@ -4735,9 +4735,53 @@ class DeployKeyIn(BaseModel):
     target_host_id: int = 0     # ţinta unică (test / ssh-config, pe ruta sursei)
     target_host_ids: list[int] = []   # deploy multi-ţintă (pe ruta sursei) — un singur factor
     from_ip: str = ""           # opţional: restricţie from="…" pe linia deployată
+    restrict: bool = False      # opţional: `restrict` (no-pty/-forwarding/-agent/-X11) pe linie
+    command: str = ""           # opţional: forced command=`…` (cheie care face DOAR o treabă)
     confirmed: bool = False     # garda anti-pivot cere un DA explicit
     stepup_grant: str = ""
     stepup_password: str = ""
+
+
+# command= poate conţine spaţii/flaguri, dar NU newline (ar rupe linia din authorized_keys —
+# aceeaşi clasă H-1) şi nici caractere de control. Interiorul se escapează pentru ghilimelele
+# din `command="…"` (doar \ şi " contează acolo).
+_DK_CMD_RE = re.compile(r"^[\x20-\x7e]{1,300}$")
+
+
+def _dk_cmd_quote(cmd: str) -> str:
+    return cmd.replace("\\", "\\\\").replace('"', '\\"')
+
+
+async def _dk_policy() -> dict:
+    """Politica de securitate a cheilor de deploy (opţională, din Settings → Security).
+    `require_2fa_source`: nu generezi o cheie pe un host-sursă fără require_2fa (sursele =
+    bijuteriile coroanei; un dev compromis poate sări pe ţinte). `require_restrict`: nu
+    deployezi o cheie de shell complet — trebuie `restrict` şi/sau un `command=` forţat."""
+    raw = await _get_setting("deploykey_policy")
+    cfg = {"require_2fa_source": False, "require_restrict": False}
+    if raw:
+        try:
+            cfg.update({k: bool(v) for k, v in json.loads(raw).items() if k in cfg})
+        except (ValueError, TypeError, AttributeError):
+            pass
+    return cfg
+
+
+class DeployKeyPolicyIn(BaseModel):
+    require_2fa_source: bool = False
+    require_restrict: bool = False
+
+
+@router.get("/api/settings/deploy-key-policy")
+async def get_deploy_key_policy(user=Depends(security.require_user)):
+    return await _dk_policy()
+
+
+@router.post("/api/settings/deploy-key-policy")
+async def set_deploy_key_policy(body: DeployKeyPolicyIn, user=Depends(security.require_user)):
+    cfg = {"require_2fa_source": body.require_2fa_source, "require_restrict": body.require_restrict}
+    await _set_setting("deploykey_policy", json.dumps(cfg))
+    return cfg
 
 
 def _dk_deploy_recipe(line: str, blob: str) -> str:
@@ -4772,30 +4816,55 @@ def _dk_revoke_recipe(blob: str) -> str:
             % {"b": qb})
 
 
-def _dk_options(from_ip: str) -> str:
+def _dk_options(from_ip: str, restrict: bool = False, command: str = "") -> str:
+    """Opţiunile de început de linie din authorized_keys (listă separată prin virgulă):
+    `restrict,command="…",from="…"`. `restrict` e default-deny (no-pty/-forwarding/-agent/-X11),
+    superior enumerării manuale; `command=` forţează exact o comandă (cheie care face O treabă)."""
+    opts = []
+    if restrict:
+        opts.append("restrict")
+    cmd = (command or "").strip()
+    if cmd:
+        if not _DK_CMD_RE.match(cmd):
+            raise ApiError(400, "sshkey.badCommand", "command: one printable line, no control characters")
+        opts.append('command="%s"' % _dk_cmd_quote(cmd))
     ip = (from_ip or "").strip()
-    if not ip:
-        return ""
-    if not _DK_FROM_RE.match(ip):
-        raise ApiError(400, "sshkey.badFrom", "from= accepts IPs/CIDRs only (digits, hex, : . , /)")
-    return 'from="%s"' % ip
+    if ip:
+        if not _DK_FROM_RE.match(ip):
+            raise ApiError(400, "sshkey.badFrom", "from= accepts IPs/CIDRs only (digits, hex, : . , /)")
+        opts.append('from="%s"' % ip)
+    return ",".join(opts)
+
+
+async def _dk_require_restrict() -> bool:
+    return bool((await _dk_policy()).get("require_restrict"))
 
 
 async def _dk_deploy_one(key, target_id: int, from_ip: str, confirmed: bool,
-                         user, request) -> dict:
+                         user, request, restrict: bool = False, command: str = "",
+                         raw_options=None) -> dict:
     """Mecanica unui singur deploy sursă→ţintă (fără gate-ul de factor — apelantul îl face O
-    dată). Ridică ApiError la eşec, ca batch-ul să prindă per-ţintă. Idempotent."""
+    dată). Ridică ApiError la eşec, ca batch-ul să prindă per-ţintă. Idempotent.
+    `raw_options` (rotire): foloseşte opţiunile stocate ale muchiei verbatim şi sare peste
+    politica require_restrict — e un re-deploy al unei muchii deja aprobate, nu una nouă."""
     target = await _dk_agent_host(target_id)
     source = await db.fetchone("SELECT * FROM hosts WHERE id=?", key["host_id"])
     if key["host_id"] == target_id:
         raise ApiError(400, "sshkey.selfDeploy", "a host does not deploy its own key to itself")
+    if raw_options is None:
+        # politica „numai chei restricţionate": refuză un deploy de shell complet dacă e cerut
+        if await _dk_require_restrict() and not (restrict or (command or "").strip()):
+            raise ApiError(400, "sshkey.restrictRequired",
+                           "policy requires a restriction (restrict and/or a forced command) on deploy keys")
+        options = _dk_options(from_ip, restrict, command)
+    else:
+        options = raw_options or ""
     # anti-pivot: ţinta e ea însăşi o sursă cu deploy-uri active → lanţ de acces
     own = await db.fetchone(
         "SELECT k.id FROM ssh_keys k JOIN ssh_key_deployments d ON d.key_id=k.id"
         " WHERE k.host_id=? AND d.revoked_at IS NULL LIMIT 1", target_id)
     if own and not confirmed:
         raise ApiError(409, "sshkey.pivot", "the target has its own active deploy key — this creates an access chain")
-    options = _dk_options(from_ip)
     line = (options + " " if options else "") + key["public_key"]
     blob, _fp = _dk_validate(key["public_key"])     # H-1: re-validare la DEPLOY, din DB
     resp = await _host_run(target_id, _dk_deploy_recipe(line, blob), timeout=20)
@@ -4830,6 +4899,12 @@ async def deploy_key_generate(host_id: int, body: DeployKeyIn, request: Request,
     """Generează perechea pe HOSTUL sursă (ssh-keygen local, prin `run`); privata nu apare în
     nicio comandă, stdout sau log — citim doar .pub, prin fs_read, şi îl validăm strict."""
     host = await _dk_agent_host(host_id)
+    # Politica „2FA pe surse" (opţională): o cheie de deploy face hostul o SURSĂ — bijuteria
+    # coroanei, de pe care un atacator poate sări pe ţinte. Dacă politica e activă, refuzăm
+    # să generăm pe un host fără require_2fa (mesaj acţionabil — nu flip-uim tăcut flag-ul).
+    if (await _dk_policy())["require_2fa_source"] and not (host["require_2fa"] or 0):
+        raise ApiError(400, "sshkey.needs2faSource",
+                       "policy requires 2FA on deploy-key sources — enable 2FA on this host first")
     await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
     if await db.fetchone("SELECT id FROM ssh_keys WHERE host_id=?", host_id):
         raise ApiError(409, "sshkey.exists", "this host already has a deploy key")
@@ -4882,7 +4957,8 @@ async def deploy_key_deploy(host_id: int, body: DeployKeyIn, request: Request,
     if key["host_id"] == host_id:      # validare de formă înaintea cererii de factor
         raise ApiError(400, "sshkey.selfDeploy", "a host does not deploy its own key to itself")
     await _require_fresh_factor(host_id, user, body.stepup_grant, body.stepup_password)   # H-3
-    return await _dk_deploy_one(key, host_id, body.from_ip, body.confirmed, user, request)
+    return await _dk_deploy_one(key, host_id, body.from_ip, body.confirmed, user, request,
+                                body.restrict, body.command)
 
 
 @router.post("/api/hosts/{host_id}/deploy-key/deploy-batch")
@@ -4896,7 +4972,8 @@ async def deploy_key_deploy_batch(host_id: int, body: DeployKeyIn, request: Requ
     results = []
     for tid in body.target_host_ids[:64]:
         try:
-            await _dk_deploy_one(key, tid, body.from_ip, body.confirmed, user, request)
+            await _dk_deploy_one(key, tid, body.from_ip, body.confirmed, user, request,
+                                 body.restrict, body.command)
             results.append({"target_host_id": tid, "ok": True})
         except ApiError as e:
             results.append({"target_host_id": tid, "ok": False, "code": e.code, "error": e.detail})
@@ -5083,13 +5160,14 @@ async def deploy_key_rotate(host_id: int, body: DeployKeyIn, request: Request,
                      newpub, newfp, time.time(), key["id"])
     key = await db.fetchone("SELECT * FROM ssh_keys WHERE id=?", key["id"])
     deps = await db.fetchall(
-        "SELECT d.target_host_id FROM ssh_key_deployments d JOIN hosts h ON h.id=d.target_host_id"
+        "SELECT d.target_host_id, d.options FROM ssh_key_deployments d JOIN hosts h ON h.id=d.target_host_id"
         " WHERE d.key_id=? AND d.revoked_at IS NULL AND d.status != 'missing'", key["id"])
     results = []
     for d in deps:
         tid = d["target_host_id"]
         try:
-            await _dk_deploy_one(key, tid, "", True, user, request)   # noua cheie (confirmed: lanţul e deja acceptat)
+            # păstrează opţiunile existente ale muchiei (restrict/command/from) la rotire
+            await _dk_deploy_one(key, tid, "", True, user, request, raw_options=d["options"])
             await _host_run(tid, _dk_revoke_recipe(old_blob), timeout=20)   # scoate blob-ul vechi
             results.append({"target_host_id": tid, "ok": True})
         except ApiError as e:

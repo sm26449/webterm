@@ -83,6 +83,9 @@ export default function ToolboxPanel(props: {
   const [dkBusy, setDkBusy] = useState('')
   const [deployTo, setDeployTo] = useState<Set<number>>(new Set())   // multi-ţintă
   const [fromIp, setFromIp] = useState('')
+  // restricţia cheii deployate: shell complet | restrict (no-pty/-forwarding) | restrict+command forţat
+  const [restrictMode, setRestrictMode] = useState<'none' | 'restrict' | 'command'>('none')
+  const [restrictCmd, setRestrictCmd] = useState('')
   const [testResult, setTestResult] = useState<{ ok: boolean; detail: string; dest: string } | null>(null)
 
   const loadDk = useCallback(async () => {
@@ -118,7 +121,9 @@ export default function ToolboxPanel(props: {
   // deploy multi-ţintă: UN factor pe sursă (ruta = sursa), rezultat per ţintă
   const dkDeploy = () => dkRun('deploy', (confirmed) =>
     api(`/api/hosts/${props.host.id}/deploy-key/deploy-batch`, { method: 'POST',
-      body: JSON.stringify({ target_host_ids: [...deployTo], from_ip: fromIp.trim(), confirmed }) })
+      body: JSON.stringify({ target_host_ids: [...deployTo], from_ip: fromIp.trim(), confirmed,
+        restrict: restrictMode !== 'none',
+        command: restrictMode === 'command' ? restrictCmd.trim() : '' }) })
       .then(() => setDeployTo(new Set())))
   const dkVerify = (d: DeployKeyDeployment) => dkRun('verify' + d.id, () =>
     api(`/api/hosts/${d.target_host_id}/deploy-key/verify`, { method: 'POST', body: JSON.stringify({ key_host_id: props.host.id }) }))
@@ -348,7 +353,19 @@ export default function ToolboxPanel(props: {
                       <input value={fromIp} onChange={(ev) => setFromIp(ev.target.value)}
                         placeholder={t('toolbox.ssh.fromIpPh')} aria-label={t('toolbox.ssh.fromIp')}
                         className="w-full rounded bg-ink-800 px-2 py-1 font-mono text-[11px] text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" />
-                      <button onClick={dkDeploy} disabled={deployTo.size === 0 || dkBusy !== ''}
+                      <select value={restrictMode} onChange={(ev) => setRestrictMode(ev.target.value as 'none' | 'restrict' | 'command')}
+                        aria-label={t('toolbox.ssh.restrict')}
+                        className="w-full rounded bg-ink-800 px-2 py-1 text-[12px] text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500">
+                        <option value="none">{t('toolbox.ssh.restrictNone')}</option>
+                        <option value="restrict">{t('toolbox.ssh.restrictLock')}</option>
+                        <option value="command">{t('toolbox.ssh.restrictCmd')}</option>
+                      </select>
+                      {restrictMode === 'command' && (
+                        <input value={restrictCmd} onChange={(ev) => setRestrictCmd(ev.target.value)}
+                          placeholder={t('toolbox.ssh.restrictCmdPh')} aria-label={t('toolbox.ssh.restrictCmd')}
+                          className="w-full rounded bg-ink-800 px-2 py-1 font-mono text-[11px] text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" />
+                      )}
+                      <button onClick={dkDeploy} disabled={deployTo.size === 0 || dkBusy !== '' || (restrictMode === 'command' && !restrictCmd.trim())}
                         className="rounded bg-sky-600 px-3 py-1.5 text-[12px] font-medium text-white hover:bg-sky-700 disabled:opacity-40">
                         {dkBusy === 'deploy' ? t('toolbox.ssh.deploying')
                           : deployTo.size > 1 ? t('toolbox.ssh.deployN', { n: deployTo.size }) : t('toolbox.ssh.deploy')}

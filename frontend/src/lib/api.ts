@@ -112,6 +112,11 @@ export interface DeployKeyDeployment {
   deployed_at: number
   revoked_at: number | null
 }
+export interface DeployKeyPolicy {
+  require_2fa_source: boolean
+  require_restrict: boolean
+}
+
 export interface DeployKeyInfo {
   key: { id: number; public_key: string; fingerprint: string; created: number } | null
   deployments: DeployKeyDeployment[]

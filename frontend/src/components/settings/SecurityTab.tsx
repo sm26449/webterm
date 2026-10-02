@@ -1,7 +1,7 @@
 import { startRegistration } from '@simplewebauthn/browser'
 import qrcode from 'qrcode-generator'
 import { FormEvent, useEffect, useRef, useState } from 'react'
-import { errText, api, CommandGuard, withSecondFactor as withSecondFactorT } from '../../lib/api'
+import { errText, api, CommandGuard, DeployKeyPolicy, withSecondFactor as withSecondFactorT } from '../../lib/api'
 import { useI18n } from '../../lib/i18n'
 import { fmtTs } from '../../lib/tz'
 import { KeyIcon } from '../Icons'
@@ -40,6 +40,17 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
     } catch (e) {
       setGuardMsg(errText(e, t) || t('settings.saveError'))
     }
+  }
+
+  // ── Politica cheilor de deploy (opţională): 2FA pe surse + numai chei restricţionate ──
+  const [dkPolicy, setDkPolicy] = useState<DeployKeyPolicy>({ require_2fa_source: false, require_restrict: false })
+  const [dkPolicyMsg, setDkPolicyMsg] = useState('')
+  const saveDkPolicy = async (next: DeployKeyPolicy) => {
+    setDkPolicy(next)
+    try {
+      await api<DeployKeyPolicy>('/api/settings/deploy-key-policy', { method: 'POST', body: JSON.stringify(next) })
+      setDkPolicyMsg(t('settings.saved')); setTimeout(() => setDkPolicyMsg(''), 1500)
+    } catch (e) { setDkPolicyMsg(errText(e, t) || t('settings.saveError')) }
   }
 
   // ── Token-uri de automatizare (cron/CI/monitorizare) ──
@@ -223,6 +234,7 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
     loadGroups()
     loadDevices()
     api<CommandGuard>('/api/settings/command-guard').then(setGuard).catch(() => {})
+    api<DeployKeyPolicy>('/api/settings/deploy-key-policy').then(setDkPolicy).catch(() => {})
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -805,6 +817,22 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
       </ul>
 
       {/* ── Guardrail de comenzi ── */}
+      <h3 className={heading}>{t('settings.dkpolicy.title')}</h3>
+      <p className="mt-1 text-xs text-slate-500">{t('settings.dkpolicy.hint')}</p>
+      <label className="mt-2 flex cursor-pointer items-start gap-2.5 text-sm text-slate-300">
+        <input type="checkbox" checked={dkPolicy.require_2fa_source} className="mt-0.5 h-4 w-4 rounded accent-sky-600"
+          onChange={(e) => saveDkPolicy({ ...dkPolicy, require_2fa_source: e.target.checked })} />
+        <span>{t('settings.dkpolicy.require2fa')}
+          <span className="mt-0.5 block text-xs text-slate-500">{t('settings.dkpolicy.require2faHint')}</span></span>
+      </label>
+      <label className="mt-2 flex cursor-pointer items-start gap-2.5 text-sm text-slate-300">
+        <input type="checkbox" checked={dkPolicy.require_restrict} className="mt-0.5 h-4 w-4 rounded accent-sky-600"
+          onChange={(e) => saveDkPolicy({ ...dkPolicy, require_restrict: e.target.checked })} />
+        <span>{t('settings.dkpolicy.requireRestrict')}
+          <span className="mt-0.5 block text-xs text-slate-500">{t('settings.dkpolicy.requireRestrictHint')}</span></span>
+      </label>
+      {dkPolicyMsg && <div className="mt-1 text-xs text-slate-500">{dkPolicyMsg}</div>}
+
       <h3 className={heading}>{t('settings.guardrail')}</h3>
       <label className="mt-2 flex cursor-pointer items-start gap-2.5 text-sm text-slate-300">
         <input
