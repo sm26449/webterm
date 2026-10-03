@@ -49,8 +49,10 @@ def _fetch_latest_tag() -> str:
     }
     if config.UPDATE_CHECK_TOKEN:          # doar pentru repo privat
         headers["Authorization"] = f"Bearer {config.UPDATE_CHECK_TOKEN}"
-    req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=10) as r:
+    if not url.lower().startswith("https://"):   # doar HTTPS spre API-ul de release (anti-SSRF)
+        raise ValueError("update-check URL must be https")
+    req = urllib.request.Request(url, headers=headers)  # noqa: S310 — schemă validată mai sus
+    with urllib.request.urlopen(req, timeout=10) as r:  # noqa: S310
         tags = json.load(r)
     versions = [(_parse(t.get("name", "")), t.get("name")) for t in tags]
     versions = sorted((v for v in versions if v[0]), reverse=True)

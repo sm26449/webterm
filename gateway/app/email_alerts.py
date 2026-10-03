@@ -37,9 +37,13 @@ def _post_webhook(url: str, subject: str, body: str) -> None:
         "content": "**[WebTerm] %s**\n%s" % (subject, body),  # Discord
         "subject": subject, "body": body,                    # consumatori proprii
     }).encode()
-    req = urllib.request.Request(url, data=payload, method="POST", headers={
+    # doar http(s): fără asta, un webhook configurat greşit cu `file://`/`gopher://` ar lăsa
+    # urllib să citească fişiere locale / să vorbească alte protocoale (clasa SSRF din audit).
+    if not url.lower().startswith(("https://", "http://")):
+        raise ValueError("webhook URL must be http(s)")
+    req = urllib.request.Request(url, data=payload, method="POST", headers={  # noqa: S310 — schemă validată mai sus
         "Content-Type": "application/json", "User-Agent": "WebTerm"})
-    with urllib.request.urlopen(req, timeout=10) as r:
+    with urllib.request.urlopen(req, timeout=10) as r:  # noqa: S310
         r.read(2048)
 
 

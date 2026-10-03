@@ -79,39 +79,50 @@ export default function ServicesPanel(props: {
             title={t('services.failedOnly')}>{t('services.failed')}</button>
         </div>
         {error && <div className="border-b border-ink-800 bg-ink-800 px-3 py-1.5 text-[11px] wt-danger">{error}</div>}
-        <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="min-h-0 flex-1 overflow-y-auto p-3">
           {rows === null ? (
             <div className="p-4 text-center text-xs text-slate-500">{t('services.loading')}</div>
           ) : view.length === 0 ? (
             <div className="p-4 text-center text-xs text-slate-500">{t('services.empty')}</div>
-          ) : view.map((s) => (
-            <div key={s.unit} className="group flex items-center gap-2 border-b border-ink-800/60 px-3 py-1.5">
-              <span className={`h-2 w-2 shrink-0 rounded-full ${dot(s)}`}
-                title={`${s.active} · ${s.sub}`} aria-hidden="true" />
-              <div className="min-w-0 flex-1">
-                <div className="truncate font-mono text-[12px] text-slate-200" title={s.unit}>
-                  {s.unit.replace(/\.service$/, '')}
-                </div>
-                {s.desc && <div className="truncate text-[11px] text-slate-500" title={s.desc}>{s.desc}</div>}
-              </div>
-              <div className="flex shrink-0 items-center gap-0.5 opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100">
-                {props.onJournal && (
-                  <button onClick={() => props.onJournal!(s.unit)}
-                    title={t('services.logs')} aria-label={t('services.logs') + ' ' + s.unit}
-                    className="rounded px-1.5 py-0.5 text-[11px] text-slate-400 hover:bg-ink-700 hover:text-sky-300">
-                    {t('services.logs')}
-                  </button>
-                )}
-                {(['start', 'stop', 'restart'] as Action[]).map((a) => (
-                  <button key={a} onClick={() => act(s.unit, a)} disabled={busy === s.unit}
-                    title={t('services.' + a)} aria-label={t('services.' + a) + ' ' + s.unit}
-                    className="rounded px-1.5 py-0.5 text-[11px] text-slate-400 hover:bg-ink-700 hover:text-slate-100 disabled:opacity-40">
-                    {a === 'start' ? '▶' : a === 'stop' ? '■' : '↻'}
-                  </button>
-                ))}
-              </div>
+          ) : (
+            <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))' }}>
+              {view.map((s) => {
+                const tone = s.active === 'active' ? 'wt-good' : s.active === 'failed' ? 'wt-danger' : 'text-slate-500'
+                return (
+                  <div key={s.unit} className="flex flex-col gap-2 rounded-xl border border-ink-700/70 bg-ink-800/40 p-3">
+                    <div className="flex items-start gap-2">
+                      <span className={`mt-1 h-2 w-2 shrink-0 rounded-full ${dot(s)}`} aria-hidden="true" />
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate font-mono text-[12px] font-medium text-slate-200" title={s.unit}>
+                          {s.unit.replace(/\.service$/, '')}
+                        </div>
+                        <div className={`text-[11px] ${tone}`}>{s.active}{s.sub && s.sub !== s.active ? ` · ${s.sub}` : ''}</div>
+                      </div>
+                    </div>
+                    {s.desc && <div className="line-clamp-2 text-[11px] text-slate-500" title={s.desc}>{s.desc}</div>}
+                    <div className="mt-auto flex flex-wrap items-center gap-1 border-t border-ink-800/60 pt-2">
+                      {props.onJournal && (
+                        <button onClick={() => props.onJournal!(s.unit)}
+                          title={t('services.logs')} aria-label={t('services.logs') + ' ' + s.unit}
+                          className="rounded px-1.5 py-0.5 text-[11px] text-slate-400 hover:bg-ink-700 hover:text-sky-300">
+                          {t('services.logs')}
+                        </button>
+                      )}
+                      <span className="ml-auto flex items-center gap-0.5">
+                        {(['start', 'stop', 'restart'] as Action[]).map((a) => (
+                          <button key={a} onClick={() => act(s.unit, a)} disabled={busy === s.unit}
+                            title={t('services.' + a)} aria-label={t('services.' + a) + ' ' + s.unit}
+                            className="grid h-6 w-6 place-items-center rounded text-[11px] text-slate-400 hover:bg-ink-700 hover:text-slate-100 disabled:opacity-40">
+                            {a === 'start' ? '▶' : a === 'stop' ? '■' : '↻'}
+                          </button>
+                        ))}
+                      </span>
+                    </div>
+                  </div>
+                )
+              })}
             </div>
-          ))}
+          )}
         </div>
       </aside>
     </>

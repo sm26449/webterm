@@ -21,7 +21,11 @@ back.
   "no output yet" placeholder when empty); and host connection/security/agent/apps/note as a
   balanced two-column card grid with coloured icon chips. Sessions keeps the master-detail list +
   live preview + replay; Files/Forwards/Services/Docker/Databases render the existing panels
-  **full-width inline** (new `embed` mode — no drawer, no scrim). Agent-only sections show only
+  **full-width inline** (new `embed` mode — no drawer, no scrim), and Forwards/Services/Docker/
+  Databases now lay their entries out as a **responsive card grid** (status dot or engine chip,
+  labels, actions in a footer) instead of long single-column lists — uniform with the rest of the
+  dashboard, one column in the narrow session drawer and multi-column inline. Agent-only sections
+  show only
   when the agent is online; ssh/telnet/jump hosts get Overview + Sessions. Serial and Diagnostics
   stay as header actions. Each panel is lazy-loaded (Files pulls Monaco).
 - **Jump targets are saved as children of their agent, added from its ⋯ menu.** "Add SSH / Telnet

@@ -265,7 +265,7 @@ export default function ToolboxPanel(props: {
         {error && <div className="border-b border-ink-800 bg-ink-800 px-3 py-1.5 text-[11px] wt-danger">{error}</div>}
         <div className="min-h-0 flex-1 overflow-y-auto">
 
-          {/* ── CONNECTIONS ── */}
+          {/* ── CONNECTIONS (Databases) — grilă de carduri ── */}
           {tab === 'connections' && (rows === null ? (
             <div className="p-4 text-center text-xs text-slate-500">{t('toolbox.loading')}</div>
           ) : rows.length === 0 ? (
@@ -273,33 +273,45 @@ export default function ToolboxPanel(props: {
               {t('toolbox.empty')}<br />
               <button onClick={() => setEdit(blank())} className="mt-2 wt-link">{t('toolbox.newFirst')}</button>
             </div>
-          ) : rows.map((c) => {
-            const e = engOf(c.engine)
-            return (
-              <div key={c.id} className="group flex items-center gap-2 border-b border-ink-800/60 px-3 py-2">
-                <span className="h-2.5 w-2.5 shrink-0 rounded-sm" style={{ background: e?.color || '#64748b' }}
-                  title={e?.label} aria-hidden="true" />
-                <button onClick={() => props.onOpen(props.host, c.id)}
-                  className="min-w-0 flex-1 text-left" title={t('toolbox.open')}>
-                  <div className="truncate text-[13px] font-medium text-slate-200">{c.label}</div>
-                  <div className="truncate font-mono text-[11px] text-slate-500">
-                    {c.username ? c.username + '@' : ''}{c.target_host || 'localhost'}
-                    {c.target_port ? ':' + c.target_port : ''}{c.dbname ? '/' + c.dbname : ''}
-                    <span className="ml-1 text-slate-600">· {c.cred_policy === 'stored' ? t('toolbox.stored') : t('toolbox.ask')}</span>
+          ) : (
+            <div className="grid gap-3 p-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))' }}>
+              {rows.map((c) => {
+                const e = engOf(c.engine)
+                const color = e?.color || '#64748b'
+                return (
+                  <div key={c.id} className="flex flex-col gap-2 rounded-xl border border-ink-700/70 bg-ink-800/40 p-3">
+                    <div className="flex items-start gap-2.5">
+                      <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg font-mono text-[11px] font-bold"
+                        style={{ background: `${color}22`, color }} title={e?.label} aria-hidden="true">
+                        {(e?.label || c.engine).slice(0, 2).toLowerCase()}
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-[13px] font-medium text-slate-200">{c.label}</div>
+                        <div className="truncate font-mono text-[11px] text-slate-500">
+                          {c.username ? c.username + '@' : ''}{c.target_host || 'localhost'}
+                          {c.target_port ? ':' + c.target_port : ''}{c.dbname ? '/' + c.dbname : ''}
+                        </div>
+                        <div className="text-[10px] uppercase tracking-wide text-slate-600">
+                          {e?.label || c.engine} · {c.cred_policy === 'stored' ? t('toolbox.stored') : t('toolbox.ask')}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="mt-auto flex items-center gap-1 border-t border-ink-800/60 pt-2">
+                      <button onClick={() => props.onOpen(props.host, c.id)}
+                        className="inline-flex items-center gap-1 rounded bg-sky-600/15 px-2 py-0.5 text-[11px] font-medium wt-accent hover:bg-sky-600/25"
+                        title={t('toolbox.open')}><TerminalPromptIcon /> {t('toolbox.open')}</button>
+                      <span className="ml-auto flex items-center gap-0.5">
+                        <button onClick={() => setEdit(toDraft(c))} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-slate-200"
+                          title={t('toolbox.edit')} aria-label={t('toolbox.edit')}><PencilIcon /></button>
+                        <button onClick={() => del(c)} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-rose-300"
+                          title={t('toolbox.delete')} aria-label={t('toolbox.delete')}><TrashIcon /></button>
+                      </span>
+                    </div>
                   </div>
-                </button>
-                <div className="flex shrink-0 items-center gap-0.5 opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100">
-                  <button onClick={() => setEdit(toDraft(c))} className="rounded p-1 text-slate-500 hover:bg-ink-700 hover:text-slate-200"
-                    title={t('toolbox.edit')} aria-label={t('toolbox.edit')}><PencilIcon /></button>
-                  <button onClick={() => del(c)} className="rounded p-1 text-slate-500 hover:bg-ink-700 hover:text-rose-300"
-                    title={t('toolbox.delete')} aria-label={t('toolbox.delete')}><TrashIcon /></button>
-                </div>
-                <button onClick={() => props.onOpen(props.host, c.id)}
-                  className="shrink-0 rounded px-1.5 py-0.5 text-sky-400 hover:bg-ink-800"
-                  title={t('toolbox.open')} aria-label={t('toolbox.open')}><TerminalPromptIcon /></button>
-              </div>
-            )
-          }))}
+                )
+              })}
+            </div>
+          ))}
 
           {/* ── SSH KEYS (chei de deploy host→host) ── */}
           {tab === 'sshkeys' && (dk === null ? (

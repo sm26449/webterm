@@ -95,60 +95,65 @@ export default function DockerPanel(props: {
     <>
       {header}
       {tabs}
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        {error && <div className="px-3 py-2 text-xs wt-warn">{error}</div>}
+      <div className="min-h-0 flex-1 overflow-y-auto p-3">
+        {error && <div className="mb-2 rounded-lg bg-ink-800 px-3 py-2 text-xs wt-warn">{error}</div>}
         {rows === null && <div className="px-3 py-6 text-center text-xs text-slate-500">{t('docker.loading')}</div>}
         {rows && rows.length === 0 && !error && (
           <div className="px-3 py-6 text-center text-xs text-slate-500">{t(`docker.empty.${kind}`)}</div>
         )}
 
-        {/* CONTAINERE: nume, imagine, stare + acţiuni (shell/start/stop/restart/logs) */}
-        {kind === 'containers' && rows?.map((r) => {
-          const id = r.ID || r.Names || ''
-          const running = isRunning(r)
-          return (
-            <div key={id} className="border-b border-ink-800/60 px-3 py-2">
-              <div className="flex items-center gap-2">
-                <span className={`h-2 w-2 shrink-0 rounded-full ${running ? 'bg-emerald-500' : 'bg-slate-600'}`}
-                  title={r.Status || r.State} />
-                <span className="min-w-0 flex-1 truncate text-sm text-slate-200" title={r.Names}>{r.Names || id.slice(0, 12)}</span>
-                {busy === id && <span className="shrink-0 text-[10px] text-slate-500">…</span>}
-              </div>
-              <div className="mt-0.5 truncate pl-4 font-mono text-[11px] text-slate-500" title={r.Image}>{r.Image}</div>
-              <div className="mt-1 flex flex-wrap gap-1 pl-4">
-                {running && props.onOpenContainerShell && (
-                  <button onClick={() => props.onOpenContainerShell!(id)}
-                    className="inline-flex items-center gap-1 rounded bg-sky-600/15 px-1.5 py-0.5 text-[11px] wt-accent hover:bg-sky-600/25">
-                    <TerminalPromptIcon /> {t('docker.shell')}
-                  </button>
-                )}
-                {running
-                  ? <button disabled={!!busy} onClick={() => action(id, 'stop')}
-                      className="rounded px-1.5 py-0.5 text-[11px] text-slate-400 ring-1 ring-ink-700 hover:bg-ink-800 disabled:opacity-40">{t('docker.stop')}</button>
-                  : <button disabled={!!busy} onClick={() => action(id, 'start')}
-                      className="rounded px-1.5 py-0.5 text-[11px] wt-good ring-1 ring-ink-700 hover:bg-ink-800 disabled:opacity-40">{t('docker.start')}</button>}
-                {running && <button disabled={!!busy} onClick={() => action(id, 'restart')}
-                  className="rounded px-1.5 py-0.5 text-[11px] text-slate-400 ring-1 ring-ink-700 hover:bg-ink-800 disabled:opacity-40">{t('docker.restart')}</button>}
-                <button onClick={() => showLogs(id)}
-                  className="rounded px-1.5 py-0.5 text-[11px] text-slate-400 ring-1 ring-ink-700 hover:bg-ink-800">{t('docker.logs')}</button>
-              </div>
-            </div>
-          )
-        })}
+        {rows && rows.length > 0 && (
+          <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))' }}>
+            {/* CONTAINERE: card cu stare, imagine + acţiuni (shell/start/stop/restart/logs) */}
+            {kind === 'containers' && rows.map((r) => {
+              const id = r.ID || r.Names || ''
+              const running = isRunning(r)
+              return (
+                <div key={id} className="flex flex-col gap-2 rounded-xl border border-ink-700/70 bg-ink-800/40 p-3">
+                  <div className="flex items-start gap-2">
+                    <span className={`mt-1 h-2 w-2 shrink-0 rounded-full ${running ? 'bg-emerald-500' : 'bg-slate-600'}`} title={r.Status || r.State} />
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-sm font-medium text-slate-200" title={r.Names}>{r.Names || id.slice(0, 12)}</div>
+                      <div className="truncate font-mono text-[11px] text-slate-500" title={r.Image}>{r.Image}</div>
+                    </div>
+                    {busy === id && <span className="shrink-0 text-[10px] text-slate-500">…</span>}
+                  </div>
+                  <div className="mt-auto flex flex-wrap items-center gap-1 border-t border-ink-800/60 pt-2">
+                    {running && props.onOpenContainerShell && (
+                      <button onClick={() => props.onOpenContainerShell!(id)}
+                        className="inline-flex items-center gap-1 rounded bg-sky-600/15 px-1.5 py-0.5 text-[11px] wt-accent hover:bg-sky-600/25">
+                        <TerminalPromptIcon /> {t('docker.shell')}
+                      </button>
+                    )}
+                    {running
+                      ? <button disabled={!!busy} onClick={() => action(id, 'stop')}
+                          className="rounded px-1.5 py-0.5 text-[11px] text-slate-400 ring-1 ring-ink-700 hover:bg-ink-800 disabled:opacity-40">{t('docker.stop')}</button>
+                      : <button disabled={!!busy} onClick={() => action(id, 'start')}
+                          className="rounded px-1.5 py-0.5 text-[11px] wt-good ring-1 ring-ink-700 hover:bg-ink-800 disabled:opacity-40">{t('docker.start')}</button>}
+                    {running && <button disabled={!!busy} onClick={() => action(id, 'restart')}
+                      className="rounded px-1.5 py-0.5 text-[11px] text-slate-400 ring-1 ring-ink-700 hover:bg-ink-800 disabled:opacity-40">{t('docker.restart')}</button>}
+                    <button onClick={() => showLogs(id)}
+                      className="ml-auto rounded px-1.5 py-0.5 text-[11px] text-slate-400 ring-1 ring-ink-700 hover:bg-ink-800">{t('docker.logs')}</button>
+                  </div>
+                </div>
+              )
+            })}
 
-        {/* IMAGINI / VOLUME / REŢELE: doar citire, două linii per rând */}
-        {kind !== 'containers' && rows?.map((r, i) => (
-          <div key={i} className="border-b border-ink-800/60 px-3 py-2">
-            <div className="truncate text-sm text-slate-200">
-              {kind === 'images' ? `${r.Repository}:${r.Tag}` : (r.Name || r.Driver)}
-            </div>
-            <div className="mt-0.5 truncate font-mono text-[11px] text-slate-500">
-              {kind === 'images' ? `${r.ID?.slice(0, 12)} · ${r.Size}`
-                : kind === 'volumes' ? `${r.Driver} · ${r.Mountpoint || ''}`
-                : `${r.Driver} · ${r.Scope}`}
-            </div>
+            {/* IMAGINI / VOLUME / REŢELE: carduri read-only, două linii */}
+            {kind !== 'containers' && rows.map((r, i) => (
+              <div key={i} className="rounded-xl border border-ink-700/70 bg-ink-800/40 p-3">
+                <div className="truncate text-sm text-slate-200">
+                  {kind === 'images' ? `${r.Repository}:${r.Tag}` : (r.Name || r.Driver)}
+                </div>
+                <div className="mt-0.5 truncate font-mono text-[11px] text-slate-500">
+                  {kind === 'images' ? `${r.ID?.slice(0, 12)} · ${r.Size}`
+                    : kind === 'volumes' ? `${r.Driver} · ${r.Mountpoint || ''}`
+                    : `${r.Driver} · ${r.Scope}`}
+                </div>
+              </div>
+            ))}
           </div>
-        ))}
+        )}
       </div>
     </>
   )

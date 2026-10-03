@@ -44,9 +44,13 @@ _ALGS = ["RS256"]
 
 
 def _http_json(url: str, data: Optional[bytes] = None, headers: Optional[dict] = None) -> dict:
-    req = urllib.request.Request(url, data=data, headers=headers or {},
+    # doar http(s): blochează file://, gopher:// etc. (clasa SSRF din audit). http e permis fiindcă
+    # testele şi IdP-urile interne pot rula pe http://localhost; producţia foloseşte https.
+    if not url.lower().startswith(("https://", "http://")):
+        raise ValueError("OIDC endpoint URL must be http(s)")
+    req = urllib.request.Request(url, data=data, headers=headers or {},  # noqa: S310 — issuer din config, schemă validată
                                  method="POST" if data is not None else "GET")
-    with urllib.request.urlopen(req, timeout=10) as r:      # noqa: S310 — issuer din config, TLS
+    with urllib.request.urlopen(req, timeout=10) as r:      # noqa: S310
         return json.loads(r.read().decode("utf-8"))
 
 

@@ -316,36 +316,47 @@ export default function ForwardsPanel(props: {
           </div>
         )}
 
-        <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="min-h-0 flex-1 overflow-y-auto p-3">
           {forwards && forwards.length === 0 && !adding && !editing && (
             <div className="flex flex-col items-center gap-2 px-4 py-8 text-center text-[12px] text-slate-500">
               <p>{t('forwards.empty')}</p>
               <button onClick={openAdd} className="rounded-lg bg-sky-600 px-3 py-1.5 text-white hover:bg-sky-700">{t('forwards.addFirst')}</button>
             </div>
           )}
-          {forwards?.map((f) => {
+          {forwards && forwards.length > 0 && (
+          <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))' }}>
+          {forwards.map((f) => {
             const isTelnet = f.scheme === 'telnet'
             return (
-            <div key={f.id} className="group flex items-start gap-2.5 border-b border-ink-800/60 px-3 py-2.5">
-              <button onClick={() => (isTelnet || f.enabled) && probe(f)} title={isTelnet ? t('forwards.checkAccess') : dotTitle(f)}
-                className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${isTelnet ? (probes[f.id] === 'up' ? 'bg-emerald-500' : probes[f.id] === 'down' ? 'bg-rose-500' : 'bg-slate-600') : dotColor(f)}`}
-                aria-label={dotTitle(f)} />
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-1.5">
-                  <span className="truncate text-[13.5px] font-semibold text-slate-200">{f.label}</span>
-                  {f.app_type && (
-                    <span className="shrink-0 rounded px-1.5 text-[9.5px] font-bold uppercase tracking-wide"
-                      style={{ color: APP_COLOR[f.app_type] || '#34d399', background: `${APP_COLOR[f.app_type] || '#34d399'}1f` }}
-                      title={t('forwards.isApp')}>{t('forwards.appBadge')}</span>
-                  )}
+            <div key={f.id} className="flex flex-col gap-2 rounded-xl border border-ink-700/70 bg-ink-800/40 p-3">
+              <div className="flex items-start gap-2.5">
+                <button onClick={() => (isTelnet || f.enabled) && probe(f)} title={isTelnet ? t('forwards.checkAccess') : dotTitle(f)}
+                  className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${isTelnet ? (probes[f.id] === 'up' ? 'bg-emerald-500' : probes[f.id] === 'down' ? 'bg-rose-500' : 'bg-slate-600') : dotColor(f)}`}
+                  aria-label={dotTitle(f)} />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5">
+                    <span className="truncate text-[13.5px] font-semibold text-slate-200">{f.label}</span>
+                    {f.app_type && (
+                      <span className="shrink-0 rounded px-1.5 text-[9.5px] font-bold uppercase tracking-wide"
+                        style={{ color: APP_COLOR[f.app_type] || '#34d399', background: `${APP_COLOR[f.app_type] || '#34d399'}1f` }}
+                        title={t('forwards.isApp')}>{t('forwards.appBadge')}</span>
+                    )}
+                  </div>
+                  {isTelnet
+                    ? <div className="truncate text-[11.5px] text-slate-500">{t('forwards.telnetSubtitle')}</div>
+                    : <div className="truncate font-mono text-[11.5px] wt-link" title={f.url}>{urlHost(f)}</div>}
+                  <div className="truncate font-mono text-[11px] text-slate-500">→ {f.target_host}:{f.target_port} · {f.scheme}</div>
+                  {f.description && <div className="mt-0.5 line-clamp-2 text-[11.5px] text-slate-500">{f.description}</div>}
                 </div>
-                {isTelnet
-                  ? <div className="truncate text-[11.5px] text-slate-500">{t('forwards.telnetSubtitle')}</div>
-                  : <div className="truncate font-mono text-[11.5px] wt-link" title={f.url}>{urlHost(f)}</div>}
-                <div className="truncate font-mono text-[11px] text-slate-500">→ {f.target_host}:{f.target_port} · {f.scheme}</div>
-                {f.description && <div className="mt-0.5 truncate text-[11.5px] text-slate-500">{f.description}</div>}
+                {!isTelnet && (
+                  <button onClick={() => togglePromote(f)}
+                    title={f.app_type ? t('forwards.demoteApp') : t('forwards.promoteApp')}
+                    className={`shrink-0 rounded px-1 hover:bg-ink-700 ${f.app_type ? 'text-amber-300' : 'text-slate-500 hover:text-amber-300'}`}>
+                    {f.app_type ? '★' : '☆'}
+                  </button>
+                )}
               </div>
-              <div className="flex shrink-0 items-center gap-0.5">
+              <div className="mt-auto flex flex-wrap items-center gap-1 border-t border-ink-800/60 pt-2">
                 {isTelnet ? (
                   <button onClick={() => openTelnet(f)} disabled={opening === f.id} title={t('forwards.openInTerminal')}
                     className="rounded px-1.5 py-0.5 text-[11px] font-medium wt-link hover:bg-ink-800 disabled:opacity-50">
@@ -358,24 +369,21 @@ export default function ForwardsPanel(props: {
                   ) : (
                     <button onClick={() => toggle(f)} title={t('forwards.startTitle')} className="rounded px-1.5 py-0.5 text-[11px] text-slate-400 hover:bg-ink-800">{t('forwards.start')}</button>
                   )}
-                  <button onClick={() => copyLink(f)} title={t('forwards.copyLink')} className="rounded px-1 text-slate-500 hover:bg-ink-700 hover:text-slate-200">
+                  <button onClick={() => copyLink(f)} title={t('forwards.copyLink')} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-slate-200">
                     {copied === f.id ? <span className="text-[11px] wt-good">✓</span> : <LinkIcon />}
                   </button>
-                  {f.enabled && <button onClick={() => toggle(f)} title={t('forwards.stop')} className="rounded px-1 text-slate-500 hover:bg-ink-700 hover:text-amber-300 text-[11px]">⏸</button>}
+                  {f.enabled && <button onClick={() => toggle(f)} title={t('forwards.stop')} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-amber-300 text-[11px]">⏸</button>}
                 </>)}
-                {!isTelnet && (
-                  <button onClick={() => togglePromote(f)}
-                    title={f.app_type ? t('forwards.demoteApp') : t('forwards.promoteApp')}
-                    className={`rounded px-1 hover:bg-ink-700 ${f.app_type ? 'text-amber-300' : 'text-slate-500 hover:text-amber-300'}`}>
-                    {f.app_type ? '★' : '☆'}
-                  </button>
-                )}
-                <button onClick={() => openEdit(f)} title={t('forwards.edit')} className="rounded px-1 text-slate-500 hover:bg-ink-700 hover:text-slate-200"><PencilIcon /></button>
-                <button onClick={() => setConfirmDel(f)} title={t('forwards.delete')} className="rounded px-1 text-slate-500 hover:bg-ink-700 hover:text-rose-300"><TrashIcon /></button>
+                <span className="ml-auto flex items-center gap-0.5">
+                  <button onClick={() => openEdit(f)} title={t('forwards.edit')} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-slate-200"><PencilIcon /></button>
+                  <button onClick={() => setConfirmDel(f)} title={t('forwards.delete')} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-rose-300"><TrashIcon /></button>
+                </span>
               </div>
             </div>
             )
           })}
+          </div>
+          )}
         </div>
 
         {confirmDel && (

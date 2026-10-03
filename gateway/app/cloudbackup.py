@@ -69,9 +69,11 @@ def _request(method: str, url: str, *, headers=None, data=None, form=None, timeo
         data = urllib.parse.urlencode(form).encode()
         h["Content-Type"] = "application/x-www-form-urlencoded"
     h.update(headers or {})
-    req = urllib.request.Request(url, data=data, headers=h, method=method)
+    if not url.lower().startswith(("https://", "http://")):   # anti-SSRF: fără file://, gopher://…
+        raise ValueError("backup endpoint URL must be http(s)")
+    req = urllib.request.Request(url, data=data, headers=h, method=method)  # noqa: S310 — schemă validată mai sus
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310
             return r.status, dict(r.headers), r.read()
     except urllib.error.HTTPError as e:
         body = e.read()[:800].decode("utf-8", "replace")

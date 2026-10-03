@@ -36,7 +36,11 @@ jobs:
         uses: github/codeql-action/init@v3
         with:
           languages: ${{ matrix.language }}
-          queries: security-and-quality
+          # `security-extended`, nu `security-and-quality`: vrem o POARTĂ de securitate cu recall
+          # mare, nu sutele de note de stil/mentenanţă (variabile nefolosite, complexitate…) pe care
+          # le adaugă suita „-and-quality" — acelea îngropau alertele care chiar contează. Calitatea
+          # e deja acoperită de ruff (Python) + eslint/tsc (frontend).
+          queries: security-extended
       - name: Analyze
         uses: github/codeql-action/analyze@v3
         with:
