@@ -2565,14 +2565,28 @@ _DOCKER_ACTIONS = {"start", "stop", "restart"}     # lifecycle; NU rm/prune din 
 _DOCKER_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")   # id sau nume de container
 
 
+def _docker_denied(err: str) -> bool:
+    """stderr-ul lui docker când userul agentului nu poate atinge socketul (nu e în grupul docker)."""
+    low = (err or "").lower()
+    return "permission denied" in low or "/var/run/docker.sock" in low
+
+
 async def _docker_run(host_id: int, argv: list[str], timeout: int = 20) -> dict:
-    """Rulează `docker <argv>` pe host prin op-ul `run`. Întoarce răspunsul brut al agentului."""
-    cmd = " ".join(shlex.quote(p) for p in (["docker"] + argv))
+    """Rulează `docker <argv>` pe host prin op-ul `run`. Dacă userul agentului nu e în grupul
+    docker (permission denied pe socket), reîncearcă O DATĂ cu `sudo -n` — ca la os_upgrade: pe
+    hosturile unde agentul are sudo passwordless merge transparent; altfel `sudo -n` pică rapid
+    şi păstrăm răspunsul original (mesajul „adaugă-l în grupul docker"). Întoarce răspunsul brut."""
     conn = core.source_for(host_id)
     if not isinstance(conn, core.AgentConnection):
         raise HTTPException(409, "host offline or has no agent")
+    cmd = " ".join(shlex.quote(p) for p in (["docker"] + argv))
     try:
         resp = await conn.run_command(cmd, timeout)
+        if resp.get("ok") and resp.get("exit_code") not in (0, None) and _docker_denied(resp.get("stderr") or ""):
+            # `sudo -n`: NU agăţăm niciodată la un prompt de parolă — iese cu eroare dacă nu e passwordless
+            alt = await conn.run_command("sudo -n " + cmd, timeout)
+            if alt.get("ok") and alt.get("exit_code") == 0:
+                return alt
     except (core.AgentGone, TimeoutError, asyncio.TimeoutError):
         raise HTTPException(504, "the host did not answer in time")
     if not resp.get("ok"):
@@ -2596,9 +2610,12 @@ async def docker_list(host_id: int, kind: str, user=Depends(security.require_use
         low = err.lower()
         if "command not found" in low or ("not found" in low and "docker" in low):
             raise ApiError(400, "docker.absent", "docker is not installed on this host")
-        if "permission denied" in low or "/var/run/docker.sock" in low:
+        if _docker_denied(err):
+            # am încercat deja `sudo -n` în _docker_run şi tot a picat → ghidăm userul să dea acces
             raise ApiError(400, "docker.denied",
-                           "the agent's user cannot reach the docker daemon (add it to the docker group)")
+                           "the agent's user isn't in the docker group (and has no passwordless "
+                           "sudo). On the host, as root: usermod -aG docker <agent-user>, then "
+                           "restart the agent.")
         raise HTTPException(400, err.strip()[:300] or "docker failed")
     rows = []
     for line in out.splitlines():

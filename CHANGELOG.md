@@ -41,6 +41,12 @@ back.
   without leaving a saved host behind.
 
 ### Changed
+- **Docker panel: auto-sudo fallback + an actionable fix when the agent lacks access.** When the
+  agent's user isn't in the `docker` group, docker commands used to just fail with "cannot reach
+  the daemon". The gateway now transparently retries once with `sudo -n` (passwordless sudo, like
+  the OS-upgrade button) — so on hosts where the agent can sudo, Docker just works. If that also
+  fails, the panel shows a clear remediation card instead of a dead error: the exact command to
+  grant access (`sudo usermod -aG docker <agent-user>`, copyable) and a note to restart the agent.
 - **Connection failures now say what went wrong, in an in-page error toast.** A failed connect
   used to surface as an empty "cannot connect over SSH:" (a bare `TimeoutError` has no message) or a
   missable OS notification. The gateway now maps each failure to a specific reason — *no SSH greeting

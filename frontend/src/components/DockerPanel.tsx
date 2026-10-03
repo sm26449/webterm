@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { errText, api, ApiError, Host, withStepup } from '../lib/api'
 import { useI18n } from '../lib/i18n'
+import { copyText } from '../lib/clipboard'
 import { RefreshIcon, TerminalPromptIcon } from './Icons'
 
 // Panou Docker: containere / imagini / volume / reţele ale host-ului, plus start/stop/restart
@@ -19,6 +20,8 @@ export default function DockerPanel(props: {
   const [kind, setKind] = useState<Kind>('containers')
   const [rows, setRows] = useState<Row[] | null>(null)
   const [error, setError] = useState('')
+  const [denied, setDenied] = useState(false)   // userul agentului nu e în grupul docker → card de remediere
+  const [copied, setCopied] = useState(false)
   const [busy, setBusy] = useState('')          // id-ul containerului pe care rulează o acţiune
   const [logsFor, setLogsFor] = useState<string | null>(null)
   const [logs, setLogs] = useState('')
@@ -30,16 +33,19 @@ export default function DockerPanel(props: {
   const scrimCls = props.embed ? 'hidden' : 'fixed inset-0 z-30 bg-black/60' + (props.overlay ? '' : ' sm:hidden')
 
   const load = useCallback(async (k: Kind) => {
-    setError(''); setRows(null)
+    setError(''); setDenied(false); setRows(null)
     try {
       const r = await api<{ rows: Row[] }>(`/api/hosts/${props.host.id}/docker?kind=${k}`)
       setRows(r.rows)
     } catch (e) {
-      // docker.absent / docker.denied vin cu mesaj tradus prin errText; altele generice
-      setError(errText(e, t) || (e instanceof ApiError ? e.message : t('docker.error')))
+      // docker.denied → card de remediere dedicat (comanda de fix); restul → mesaj simplu
+      if (e instanceof ApiError && e.code === 'docker.denied') setDenied(true)
+      else setError(errText(e, t) || (e instanceof ApiError ? e.message : t('docker.error')))
       setRows([])
     }
   }, [props.host.id, t])
+
+  const fixCmd = `sudo usermod -aG docker ${props.host.agent_user || '$(whoami)'}`
 
   useEffect(() => { load(kind) }, [kind, load])
 
@@ -97,8 +103,29 @@ export default function DockerPanel(props: {
       {tabs}
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
         {error && <div className="mb-2 rounded-lg bg-ink-800 px-3 py-2 text-xs wt-warn">{error}</div>}
-        {rows === null && <div className="px-3 py-6 text-center text-xs text-slate-500">{t('docker.loading')}</div>}
-        {rows && rows.length === 0 && !error && (
+
+        {/* userul agentului nu e în grupul docker → remediere clară, nu un mesaj mort.
+            (gateway-ul a încercat deja `sudo -n` transparent; dacă vezi asta, nu e nici în grup
+            nici cu sudo passwordless, deci o reparăm pe host.) */}
+        {denied && (
+          <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-4">
+            <div className="mb-1 text-sm font-semibold wt-warn">{t('docker.denied.title')}</div>
+            <p className="mb-3 text-[12px] leading-relaxed text-slate-400">{t('docker.denied.body')}</p>
+            <div className="flex items-center gap-2 rounded-lg bg-ink-900/70 px-3 py-2 ring-1 ring-ink-700">
+              <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap font-mono text-[11.5px] text-slate-200">{fixCmd}</code>
+              <button onClick={() => copyText(fixCmd).then((ok) => { if (ok) { setCopied(true); setTimeout(() => setCopied(false), 1500) } })}
+                className="shrink-0 rounded px-2 py-0.5 text-[11px] wt-link hover:bg-ink-800">
+                {copied ? t('docker.denied.copied') : t('docker.denied.copy')}
+              </button>
+            </div>
+            <p className="mt-2 text-[11px] text-slate-500">{t('docker.denied.after')}</p>
+            <button onClick={() => load(kind)} className="mt-3 rounded-lg px-3 py-1.5 text-[12px] text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800">
+              {t('docker.denied.retry')}
+            </button>
+          </div>
+        )}
+        {rows === null && !denied && <div className="px-3 py-6 text-center text-xs text-slate-500">{t('docker.loading')}</div>}
+        {rows && rows.length === 0 && !error && !denied && (
           <div className="px-3 py-6 text-center text-xs text-slate-500">{t(`docker.empty.${kind}`)}</div>
         )}
 
