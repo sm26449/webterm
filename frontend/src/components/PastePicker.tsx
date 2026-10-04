@@ -67,7 +67,7 @@ export default function PastePicker(props: {
                     <button
                       onClick={() => props.onPasteRun(item)}
                       title={t('paste.pasteRunTitle')}
-                      className="wt-touch mr-1 shrink-0 rounded-md px-2 py-1.5 text-[11px] font-medium text-amber-300/90 hover:bg-ink-700"
+                      className="wt-touch mr-1 shrink-0 rounded-md px-2 py-1.5 text-[11px] font-medium wt-warn hover:bg-ink-700"
                     >
                       ⏎ {t('paste.run')}
                     </button>

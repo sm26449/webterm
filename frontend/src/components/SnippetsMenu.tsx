@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { errText, api, Snippet } from '../lib/api'
+import { useConfirm } from '../lib/confirm'
 import { useI18n } from '../lib/i18n'
 import SnippetParams, { snippetParams } from './SnippetParams'
 
@@ -12,6 +13,7 @@ export default function SnippetsMenu(props: {
   onOpenChange?: (open: boolean) => void
 }) {
   const { t } = useI18n()
+  const { confirm } = useConfirm()
   const [openState, setOpenState] = useState(false)
   const open = props.open ?? openState
   const setOpen = (v: boolean | ((p: boolean) => boolean)) => {
@@ -45,7 +47,11 @@ export default function SnippetsMenu(props: {
   }, [open])
   useEffect(() => {
     const onDoc = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpenRef.current(false)
+      const target = e.target as Node
+      // dialogul de confirmare e montat în afara meniului (provider global): un click pe
+      // „Şterge" din el NU e „click-away" — altfel meniul se închidea sub dialog
+      if (target instanceof Element && target.closest('[role="dialog"],[role="alertdialog"]')) return
+      if (ref.current && !ref.current.contains(target)) setOpenRef.current(false)
     }
     document.addEventListener('mousedown', onDoc)
     return () => document.removeEventListener('mousedown', onDoc)
@@ -74,7 +80,7 @@ export default function SnippetsMenu(props: {
     // Un clic pe „✕" ştergea definitiv, fără confirmare, fără undo, fără toast — singura
     // acţiune ireversibilă din produs fără nicio plasă. Restul confirmă lucruri mult mai
     // puţin costisitoare.
-    if (!confirm(t('snippets.confirmDelete', { title }))) return
+    if (!(await confirm({ title: t('snippets.deleteTitle', { title }), message: t('snippets.confirmDelete', { title }), danger: true }))) return
     try {
       await api(`/api/snippets/${id}`, { method: 'DELETE' })
     } catch (e) {
@@ -152,7 +158,7 @@ export default function SnippetsMenu(props: {
               </div>
               <button
                 onClick={() => setManaging(true)}
-                className="mt-1 w-full rounded-lg px-2 py-1 text-left text-xs text-sky-400 hover:bg-ink-800"
+                className="mt-1 w-full rounded-lg px-2 py-1 text-left text-xs wt-link hover:bg-ink-800"
               >
                 {t('snippets.manage')}
               </button>
@@ -190,10 +196,11 @@ export default function SnippetsMenu(props: {
                     >
                       {s.title}
                     </button>
+                    {/* ţintă de 24px (era textul „✕" gol, ~10px) şi culoare semantică, nu rose-500/80 */}
                     <button onClick={() => remove(s.id, s.title)}
                       title={t('snippets.deleteTitle', { title: s.title })}
                       aria-label={t('snippets.deleteTitle', { title: s.title })}
-                      className="text-xs text-rose-500/80 hover:text-rose-400">
+                      className="grid h-6 w-6 shrink-0 place-items-center rounded text-xs wt-danger hover:bg-ink-700">
                       ✕
                     </button>
                   </div>

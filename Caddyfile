@@ -3,6 +3,15 @@
 	default_sni {$WEBTERM_DOMAIN}
 }
 
+# Only the application's own domain is served here. Port-forward subdomains
+# (`<slug>.<domain>`) are NOT routed on this path, on purpose: they need a WILDCARD
+# certificate, which only a DNS-01 challenge can issue, and the stock `caddy:2-alpine`
+# image ships no DNS provider module (and Caddy's on-demand TLS would need an `ask`
+# endpoint to avoid issuing certificates for arbitrary names). The UI still shows the
+# forward button; on this stack it will not get a certificate. Forwards are supported
+# on the Traefik stack (`docker-compose.prod.yml` + a Cloudflare token) — see
+# docs/PORT-FORWARDING.md "Deploy". If you must stay on Caddy, build an image with
+# `caddy-dns/cloudflare` and add a `*.{$WEBTERM_DOMAIN}` block with `tls { dns … }`.
 {$WEBTERM_DOMAIN} {
 	reverse_proxy app:8000
 

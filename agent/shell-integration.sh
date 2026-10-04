@@ -44,6 +44,9 @@ if [ -n "$BASH_VERSION" ]; then
     _wt_osc "D;$e"
     _wt_osc "A"
     _wt_cwd
+    # ultima intrare din history LA PROMPT: _wt_cmdline o compară cu ce vede după Enter,
+    # ca să ştie dacă bash a înregistrat comanda curentă sau nu (vezi acolo)
+    _wt_hist_prev=$(HISTTIMEFORMAT='' history 1)
     return $e
   }
   case "$PROMPT_COMMAND" in
@@ -56,9 +59,23 @@ if [ -n "$BASH_VERSION" ]; then
   # separat cu poziţionări absolute). Clientul citea atunci de la începutul rândului, adică
   # promptul + comanda („root@host:~# ls" în loc de „ls") — vizibil în istoric şi în
   # „copiază comanda". Cu E, textul nu mai depinde de ce era pe ecran.
+  #
+  # `history 1` e ULTIMA intrare, nu neapărat comanda curentă: cu HISTCONTROL=ignorespace
+  # (în `ignoreboth`, implicit pe Ubuntu) o comandă cu spaţiu în faţă — tipic una cu o parolă —
+  # sau una prinsă de HISTIGNORE NU e adăugată, deci `history 1` e comanda PRECEDENTĂ. Emiteam
+  # atunci E cu textul comenzii anterioare, iar UI-ul îi ataşa exit code-ul, durata şi output-ul
+  # comenzii curente şi o trimitea aşa în istoricul gateway-ului (audit 2026-10). Nu putem afla
+  # din shell ce s-a tastat când history n-a avansat (PS0 nu vede linia; $BASH_COMMAND e încă
+  # comanda anterioară), deci NU afirmăm nimic: fără E, clientul cade pe ce e pe ecran între B şi
+  # Enter — ce chiar s-a tastat, nu o atribuire falsă. Compararea e pe NUMĂR + TEXT: cu
+  # `erasedups`, o repetare şterge intrarea veche şi re-numerotează, deci doar numărul ar minţi.
+  # Preţul: o comandă REPETATĂ identic sub `ignoredups` nu mai primeşte E (history nu avansează
+  # nici atunci) şi cade tot pe textul de pe ecran — corect, doar că sub tmux poate include
+  # promptul. Preferăm un text citit de pe ecran unuia greşit cu certitudine.
   _wt_cmdline() {
     local c
     c=$(HISTTIMEFORMAT='' history 1) || return 0
+    [ "$c" = "${_wt_hist_prev-}" ] && return 0   # history n-a avansat: comanda NU e în el
     c="${c#"${c%%[![:space:]]*}"}"     # spaţiile din faţă
     c="${c#*[0-9] }"                   # numărul din history
     c="${c#"${c%%[![:space:]]*}"}"

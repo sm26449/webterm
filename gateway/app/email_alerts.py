@@ -24,6 +24,47 @@ _last_sent: dict = {}
 _KEYS = ("smtp_host", "smtp_port", "smtp_user", "smtp_password_enc",
          "smtp_from", "smtp_to", "smtp_starttls", "alert_webhook")
 
+# Starea ultimei livrări, PERSISTATĂ (app_settings) ca UI-ul să poată răspunde la „au plecat
+# alertele?". Până acum un SMTP care picase de luni de zile era invizibil: `_fire` înghiţea
+# eroarea în log şi atât (audit UX §7). JSON: {ts, subject[, error]}.
+K_EMAIL_LAST_SENT = "alert_email_last_sent"
+K_EMAIL_LAST_FAILED = "alert_email_last_failed"
+K_WEBHOOK_LAST_SENT = "alert_webhook_last_sent"
+K_WEBHOOK_LAST_FAILED = "alert_webhook_last_failed"
+_STATUS_KEYS = (K_EMAIL_LAST_SENT, K_EMAIL_LAST_FAILED, K_WEBHOOK_LAST_SENT, K_WEBHOOK_LAST_FAILED)
+
+
+async def _record(key: str, subject: str, error: str = "") -> None:
+    """Scrie starea livrării; best-effort (fără DB la startup/shutdown → nimic)."""
+    import json as _json
+    if not db.connected():
+        return
+    payload = {"ts": time.time(), "subject": subject[:120]}
+    if error:
+        payload["error"] = error[:300]
+    try:
+        await db.execute("INSERT INTO app_settings(key, value) VALUES(?,?) "
+                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                         key, _json.dumps(payload))
+    except Exception as e:                  # noqa: BLE001 — statusul nu rupe alerta
+        log.debug("alert status not recorded (%s): %s", key, e)
+
+
+async def alert_status() -> dict:
+    """Ultimul email / webhook trimis şi ultimul eşuat, pentru tab-ul Notificări."""
+    import json as _json
+    out = {k: None for k in _STATUS_KEYS}
+    if not db.connected():
+        return out
+    rows = await db.fetchall("SELECT key, value FROM app_settings WHERE key IN (%s)"
+                             % ",".join("?" * len(_STATUS_KEYS)), *_STATUS_KEYS)
+    for r in rows:
+        try:
+            out[r["key"]] = _json.loads(r["value"]) if r["value"] else None
+        except ValueError:
+            out[r["key"]] = None
+    return out
+
 
 def _post_webhook(url: str, subject: str, body: str) -> None:
     """Aceleaşi alerte, pe un webhook (Slack / Discord / Teams / orice endpoint).
@@ -140,15 +181,19 @@ def _fire(subject: str, body: str) -> None:
             cfg = await load_config()
             if _configured(cfg):
                 await asyncio.to_thread(_send_blocking, cfg, subject, body)
+                await _record(K_EMAIL_LAST_SENT, subject)
         except Exception as e:
             log.warning("email alert failed (%s): %s", subject, e)
+            await _record(K_EMAIL_LAST_FAILED, subject, str(e))
         # webhook-ul e independent de SMTP: cine are doar chat nu trebuie să ţină un SMTP
         try:
             url = (cfg or {}).get("webhook") or ""
             if url:
                 await asyncio.to_thread(_post_webhook, url, subject, body)
+                await _record(K_WEBHOOK_LAST_SENT, subject)
         except Exception as e:
             log.warning("webhook alert failed (%s): %s", subject, e)
+            await _record(K_WEBHOOK_LAST_FAILED, subject, str(e))
 
     try:
         asyncio.get_running_loop().create_task(_run())
@@ -162,10 +207,16 @@ async def send_test() -> None:
     cfg = await load_config()
     if not _configured(cfg):
         raise RuntimeError("SMTP is not configured (missing host or destination address)")
-    await asyncio.to_thread(
-        _send_blocking, cfg, "Test de configurare",
-        "This is a test email from WebTerm. If it arrives, security alerts "
-        "are working.")
+    subject = "Test de configurare"
+    try:
+        await asyncio.to_thread(
+            _send_blocking, cfg, subject,
+            "This is a test email from WebTerm. If it arrives, security alerts "
+            "are working.")
+    except Exception as e:
+        await _record(K_EMAIL_LAST_FAILED, subject, str(e))
+        raise
+    await _record(K_EMAIL_LAST_SENT, subject)
 
 
 _EVICT_AFTER = 3600.0        # > orice min_interval folosit; peste atât intrarea nu mai throttle-uiește
@@ -518,3 +569,24 @@ def notify_backup_failed(provider: str, fails: int, last_ok_ts: float, error: st
           f"Common causes: expired OAuth authorisation (reconnect in Settings → Backup), a wrong "
           f"encryption passphrase, or the SFTP/FTPS server being unreachable or its host key "
           f"having changed. Until fixed, you have no fresh off-host copy of the vault.")
+
+
+def notify_local_backup_failed(error: str, last_ok_ts: float) -> None:
+    """Backup-ul programat LOCAL (snapshot-ul de pe server) a eşuat.
+
+    Perechea lui `notify_backup_failed` (copia off-host): acela pleca doar dacă snapshot-ul
+    local reuşea şi uploadul pica. Dacă pica chiar snapshot-ul (disc plin, DB blocat) nu pleca
+    NIMIC — nici upload, nici alertă — iar lista de backup-uri se golea tăcut prin retenţie
+    (audit G-13/G-15 + UX §7.f1). O dată la 12h, ca o cauză persistentă să rămână semnal."""
+    if not _throttled("backup_local_failed", 12 * 3600):
+        return
+    if last_ok_ts:
+        age = "The last SUCCESSFUL scheduled backup was %.1f days ago." % ((time.time() - last_ok_ts) / 86400)
+    else:
+        age = "There has NEVER been a successful scheduled backup on this gateway."
+    _fire("Scheduled backup is FAILING",
+          f"The scheduled backup on the WebTerm gateway failed.\n\n{age}\n\nLast error: {error}\n\n"
+          f"Common causes: the gateway disk is full, the database is locked by another process, or "
+          f"the data volume is read-only. Until fixed, the local snapshots age out under retention "
+          f"and there is no fresh copy of the vault — download a backup manually from Settings → "
+          f"Backup if you cannot fix it right away.")

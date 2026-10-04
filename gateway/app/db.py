@@ -370,12 +370,25 @@ MIGRATIONS = [
     # creată doar ca să deschizi o sesiune acum. Ascuns din sidebar; un reaper îl şterge
     # când nu mai are sesiuni vii (vezi core.sweep_ephemeral_hosts).
     "ALTER TABLE hosts ADD COLUMN ephemeral INTEGER DEFAULT 0",
+    # Rezumatul {count, security, manager} al update-urilor OS, extras din diagnostic LA PRIMIRE
+    # (core.updates_summary): listarea hosturilor îl citeşte direct, în loc să parseze tot blobul
+    # de diagnostic per host la fiecare poll (audit 2026-10-04, S-03). '' = snapshot fără
+    # update-uri raportate; NULL = rând de dinaintea coloanei (fallback pe blob, mărginit).
+    "ALTER TABLE hosts ADD COLUMN updates_summary TEXT",
+    # alarma de host-key schimbat (SSH direct / jump): JSON {old_fp, new_fp, new_key, changed_at}.
+    # Persistă până la „accept" (re-pin după verificare out-of-band) sau până la resetarea
+    # pinului (PATCH cu hostname/port nou). Cât e setată, conectarea e REFUZATĂ fără dial.
+    "ALTER TABLE hosts ADD COLUMN hostkey_alarm TEXT",
 ]
 
 # tabele adăugate ulterior (executeScript de mai sus le creează pe DB-uri noi;
 # pentru DB-uri vechi, CREATE TABLE IF NOT EXISTS e idempotent la fiecare boot)
 
 _conn: aiosqlite.Connection = None
+
+
+class MigrationError(RuntimeError):
+    """O migrație a eșuat cu altceva decât „duplicate column" — boot-ul se refuză (G-16)."""
 
 
 def connected() -> bool:
@@ -390,15 +403,31 @@ async def connect() -> None:
     config.ensure_dirs()
     _conn = await aiosqlite.connect(config.DB_PATH)
     _conn.row_factory = aiosqlite.Row
+    # busy_timeout ÎNAINTE de migrații: `python3 -m app.admin` (care face și el db.connect())
+    # sau un backup în curs țin un lock scurt; fără timeout, un ALTER TABLE pica instant cu
+    # „database is locked" — iar cu fail-fast-ul de mai jos asta ar fi oprit boot-ul degeaba.
+    await _conn.execute("PRAGMA busy_timeout=5000")
     await _conn.executescript(SCHEMA)
     for stmt in MIGRATIONS:
         try:
             await _conn.execute(stmt)
         except Exception as e:
             # migrațiile aditive re-rulate lovesc „duplicate column" — normal, îl ignorăm.
-            # ORICE altă eroare (schema drift real, DB corupt) NU trebuie înghițită tăcut.
-            if "duplicate column" not in str(e).lower():
-                log.warning("migration failed (%s): %s", stmt.split("ADD COLUMN")[-1].strip()[:40], e)
+            # ORICE altă eroare (FS read-only, DB corupt, schema drift real) OPREȘTE boot-ul:
+            # înainte era doar un WARNING și gateway-ul pornea cu o coloană lipsă → fiecare
+            # cerere care o atingea dădea 500 „la întâmplare", fără niciun semnal clar la
+            # pornire (audit gateway-logic G-16). Siguranța datelor bate disponibilitatea:
+            # un boot refuzat cu mesaj explicit se repară în minute; o schemă parțială în
+            # producție se descoperă din loguri de 500 după ore.
+            if "duplicate column" in str(e).lower():
+                continue
+            log.error("MIGRATION FAILED — refusing to start with a partial schema.\n"
+                      "  statement: %s\n  error: %s: %s\n"
+                      "  Fix the cause (disk full / read-only data dir / corrupt DB → restore a "
+                      "backup) and restart.", stmt, type(e).__name__, e)
+            await _conn.close()
+            _conn = None
+            raise MigrationError("%s: %s (statement: %s)" % (type(e).__name__, e, stmt)) from e
     # index pt. lookup-ul pe share_token (endpoint PUBLIC /ws/shared/{token} + shared_meta):
     # coloana vine dintr-o migrație, deci indexul se creează DUPĂ. Fără el, fiecare cerere
     # (inclusiv cu token invalid) scanează toată tabela sessions (~120z istoric) — amplificare
@@ -410,9 +439,8 @@ async def connect() -> None:
     # synchronous=NORMAL: sub WAL, durabil la crash de proces (doar un crash de OS/kernel
     # în fereastra dintre commit și checkpoint poate pierde ultima tranzacție — acceptabil
     # pt. state-ul ăsta). Elimină un fsync per commit pe calea caldă (heartbeat, checkpoint,
-    # istoric) → câștig mare de I/O pe HDD/SD. busy_timeout: nu eșua instant pe lock.
+    # istoric) → câștig mare de I/O pe HDD/SD. (busy_timeout e setat mai sus, înainte de migrații.)
     await _conn.execute("PRAGMA synchronous=NORMAL")
-    await _conn.execute("PRAGMA busy_timeout=5000")
     # curăță sesiunile web expirate (altfel tabelul crește la nesfârșit)
     await _conn.execute("DELETE FROM web_sessions WHERE expires < ?", (now(),))
     await _conn.commit()

@@ -1,5 +1,5 @@
 import { startAuthentication } from '@simplewebauthn/browser'
-import { FormEvent, useEffect, useState } from 'react'
+import { FormEvent, useEffect, useRef, useState } from 'react'
 import { errText, api, getBootVersion } from '../lib/api'
 import { useI18n } from '../lib/i18n'
 import { KeyIcon, ShieldIcon } from './Icons'
@@ -18,6 +18,14 @@ export default function LoginPage(props: {
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [sso, setSso] = useState<{ enabled: boolean; provider_name: string } | null>(null)
+  // La eşec, focusul merge pe PRIMUL câmp marcat invalid (WCAG 3.3.1): fără asta un utilizator
+  // de cititor de ecran apasă Enter cu parola greşită şi rămâne pe buton, fără să audă nimic.
+  const emailRef = useRef<HTMLInputElement>(null)
+  const totpRef = useRef<HTMLInputElement>(null)
+  function fail(msg: string) {
+    setError(msg)
+    ;(totpRequired ? totpRef : emailRef).current?.focus()
+  }
 
   // SSO e opţional: aflăm din /api/oidc/status dacă afişăm butonul. Formularul de parolă
   // rămâne MEREU vizibil (break-glass), chiar când SSO e activ.
@@ -45,7 +53,7 @@ export default function LoginPage(props: {
       props.onLogin()
     } catch (err) {
       if (err instanceof Error && err.name === 'NotAllowedError') return
-      setError(errText(err, t) || t('login.passkeyUnavailable'))
+      setError(errText(err, t) || t('login.passkeyUnavailable'))   // nu e un câmp invalid: fără mutare de focus
     } finally {
       setBusy(false)
     }
@@ -76,7 +84,7 @@ export default function LoginPage(props: {
       }
       props.onLogin()
     } catch (err) {
-      setError(errText(err, t) || t('login.networkError'))
+      fail(errText(err, t) || t('login.networkError'))
     } finally {
       setBusy(false)
     }
@@ -84,7 +92,10 @@ export default function LoginPage(props: {
 
   const inputClass =
     'w-full rounded-xl bg-ink-800/70 px-4 py-3 text-base text-slate-200 placeholder-slate-500 ' +
-    'ring-1 ring-ink-700 transition focus:ring-2 focus:ring-sky-500'
+    'ring-1 ring-[rgb(var(--field-border))] transition focus:ring-2 focus:ring-sky-500'
+  // eroarea e una singură şi generică (serverul nu spune CARE câmp e greşit — deliberat, la
+  // login), deci o legăm de toate câmpurile completate: oricare ar fi focalizat, e citită
+  const invalid = error ? { 'aria-invalid': true as const, 'aria-describedby': 'login-error' } : {}
 
   const version = getBootVersion()
 
@@ -110,11 +121,13 @@ export default function LoginPage(props: {
 
         <form onSubmit={submit} className="mt-7 flex flex-col gap-3">
           <input
+            ref={emailRef}
             type="email"
             required
             placeholder={t('login.email')}
             aria-label={t('login.email')}
             autoComplete="username"
+            {...invalid}
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             className={inputClass}
@@ -125,6 +138,7 @@ export default function LoginPage(props: {
             aria-label={t('login.password')}
             placeholder={props.setupRequired ? t('login.passwordNew') : t('login.password')}
             autoComplete={props.setupRequired ? 'new-password' : 'current-password'}
+            {...invalid}
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             className={inputClass}
@@ -135,6 +149,7 @@ export default function LoginPage(props: {
                 required
                 placeholder={t('login.setupToken')}
                 aria-label={t('login.setupToken')}
+                {...invalid}
                 value={setupToken}
                 onChange={(e) => setSetupToken(e.target.value)}
                 className={inputClass}
@@ -145,15 +160,21 @@ export default function LoginPage(props: {
               </p>
             </div>
           )}
+          {/* anunţul pasului 2: câmpul TOTP apare şi primeşte focus, dar fără o regiune live
+              cititorul de ecran nu află DE CE a sărit focusul. Montată permanent (goală). */}
+          <p role="status" className="sr-only">{totpRequired ? t('login.totpStep') : ''}</p>
           {totpRequired && (
             <div>
               <input
+                ref={totpRef}
                 required
                 autoFocus
                 inputMode="numeric"
+                pattern="[0-9]*"
                 autoComplete="one-time-code"
                 placeholder={t('login.totp')}
                 aria-label={t('login.totp')}
+                {...invalid}
                 value={totpCode}
                 onChange={(e) => setTotpCode(e.target.value)}
                 className={inputClass}
@@ -163,11 +184,15 @@ export default function LoginPage(props: {
               </p>
             </div>
           )}
-          {error && (
-            <div className="wt-danger rounded-lg bg-rose-500/10 px-3 py-2 text-[13px] ring-1 ring-rose-500/20">
-              {error}
-            </div>
-          )}
+          {/* `role="alert"` montat PERMANENT: o regiune live care apare odată cu textul nu e anunţată
+              de toate cititoarele; goală nu ocupă loc (fără padding când nu e eroare) */}
+          <div
+            id="login-error"
+            role="alert"
+            className={error ? 'wt-danger rounded-lg bg-rose-500/10 px-3 py-2 text-[13px] ring-1 ring-rose-500/20' : 'sr-only'}
+          >
+            {error}
+          </div>
           <button
             disabled={busy}
             className="mt-1 rounded-xl bg-sky-600 py-3 text-[15px] font-medium text-white shadow-sm transition hover:bg-sky-700 active:scale-[0.99] disabled:opacity-50"
@@ -215,10 +240,10 @@ export default function LoginPage(props: {
           <span className="font-medium text-slate-500">WebTerm</span>
           {version && <span className="tabular-nums"> · v{version}</span>} · {t('login.footer.tagline')}
           <br />
-          <a href="https://github.com/sm26449/webterm" target="_blank" rel="noopener noreferrer" className="hover:text-slate-400 hover:underline">
+          <a href="https://github.com/sm26449/webterm" target="_blank" rel="noopener noreferrer" className="inline-block py-1.5 hover:text-slate-400 hover:underline">
             {t('login.footer.license')}
           </a>
-          <span> · © 2026 Stefan Maldaianu</span>
+          <span> · © {new Date().getFullYear()} Stefan Maldaianu</span>
         </footer>
       </div>
     </div>

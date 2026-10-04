@@ -133,8 +133,17 @@ def main():
     # `errText` cade tăcut pe mesajul englezesc şi nimeni nu observă că traducerea lipseşte —
     # exact tiparul „poartă care raportează verde fără să verifice".
     import re as _re
-    api_src = open(os.path.join(ROOT, "gateway", "app", "api.py"), encoding="utf-8").read()
-    codes = set(_re.findall(r'ApiError\(\s*\d{3}\s*,\s*"([a-zA-Z0-9_.]+)"', api_src))
+    codes = set()
+    # api.py + modulele cu rute proprii (passkey-uri) + gărzile de auth din security.py: toate
+    # ridică ApiError-uri pe care le vede UI-ul. Codurile din tabelele/clasificatoarele de erori
+    # (`code = "files.x"`, `("needle", "files.y")`) nu apar în `ApiError(...)` literal — le prindem
+    # separat, altfel exact codurile cele mai frecvente (erorile de fişiere) ar scăpa de gardă.
+    for fn in ("api.py", "webauthn_api.py", "security.py"):
+        src = open(os.path.join(ROOT, "gateway", "app", fn), encoding="utf-8").read()
+        codes |= set(_re.findall(r'ApiError\(\s*\d{3}\s*,\s*"([a-zA-Z0-9_.]+)"', src))
+        codes |= set(_re.findall(r'\bcode = "([a-zA-Z0-9_]+\.[a-zA-Z0-9_]+)"', src))
+        codes |= set(_re.findall(r'\("[^"]+", "([a-z]+\.[a-zA-Z0-9_]+)"\),', src))
+        codes |= set(_re.findall(r'_runtime_api_error\(\w+, "([a-z]+\.[a-zA-Z0-9_]+)"', src))
     check("serverul chiar trimite coduri (testul nu e gol)", len(codes) > 5, str(len(codes)))
     for lang, cat in (("en", en), ("ro", ro)):
         missing = sorted(c for c in codes if ("err." + c) not in cat)

@@ -345,7 +345,7 @@ def _fake_session(agent, sid="a" * 32):
     pid = un pid care nu e copilul nostru (waitpid dă ECHILD → tratat)."""
     s = object.__new__(ptyd.Session)
     s.sid, s.backend, s.alive, s.kill_requested = sid, "tmux", True, False
-    s.respawns, s.last_respawn, s.client_started, s.retry_at = 0, 0.0, time.time(), 0.0
+    s.respawns, s.client_started, s.retry_at = 0, time.time(), 0.0
     s.pending_input, s.ring, s.ring_bytes, s.stream_offset = b"", [], 0, 0
     s.exited_at = s.exit_status = s.exit_signal = None
     s.rows, s.cols, s.attached = 24, 80, False

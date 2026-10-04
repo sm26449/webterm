@@ -92,7 +92,7 @@ async def healthz():
     try:
         await db.fetchone("SELECT 1")
     except Exception:
-        raise HTTPException(503, "db indisponibil")
+        raise ApiError(503, "gateway.dbUnavailable", "database unavailable")
     return {"ok": True}
 
 
@@ -104,10 +104,18 @@ async def app_state(request: Request):
     backup_ready = False
     signing_missing = False
     signing_locked = False
+    hostkey_changed = []
     if user is not None:
-        last = float(await _get_setting("backup_last", "0") or 0)
-        seen = float(await _get_setting("backup_seen", "0") or 0)
-        backup_ready = last > seen
+        # alarme de host-key NEREZOLVATE (SSH direct/jump): UI-ul le arată persistent, nu ca
+        # toast de 12 s. Un SELECT pe o coloană aproape mereu NULL — ieftin.
+        for h in await db.fetchall(
+                "SELECT id, name, hostkey_alarm FROM hosts WHERE hostkey_alarm IS NOT NULL"):
+            a = _hostkey_alarm(h)
+            if a:
+                hostkey_changed.append({"host_id": h["id"], "host_name": h["name"], **a})
+        # punctul de pe rotiţă: backup nou de descărcat SAU un eşec de backup programat
+        # nevăzut încă (înainte eşecul era complet tăcut în UI — audit UX §7.f1)
+        backup_ready = await _backup_needs_attention()
         # nudge pentru cheia de semnare a flotei: lipsă → recomandă generarea înainte de
         # a înrola agenți; criptată & blocată → agenții nu se pot actualiza până la deblocare
         signing_missing = not signing.key_exists()
@@ -122,18 +130,27 @@ async def app_state(request: Request):
             # overlay-ul de identitate; clientul rezolvă ${email}/${host}/${time}
             "watermark": (await _load_watermark()) if user is not None else None,
             # guardrail de comenzi (verificat client-side la Enter, via OSC 133)
-            "command_guard": (await _load_command_guard()) if user is not None else None}
+            "command_guard": (await _load_command_guard()) if user is not None else None,
+            # Idle-lock-ul e PER SESIUNE DE TERMINAL pe hosturile cu require_2fa (core.sweep_idle_locks),
+            # nu per sesiune web: cronometrul îl resetează DOAR input-ul în terminal (şi mesajul WS
+            # `touch`), nu orice cerere HTTP autentificată. Aici dăm pragul configurat (0 = oprit),
+            # ca UI-ul să poată avertiza înainte; momentul exact al blocării vine per sesiune, în
+            # mesajul `init` al WS-ului (`lock_idle`, `lock_at`) — de aceea `idle_lock_at` e null aici.
+            "idle_lock_seconds": int(config.IDLE_LOCK_SECS or 0) if user is not None else 0,
+            "idle_lock_at": None,
+            # eveniment de stare `hostkey_changed`: lista alarmelor nerezolvate (vezi _host_json)
+            "hostkey_changed": hostkey_changed}
 
 
 @router.post("/api/setup")
 async def setup(creds: Credentials, request: Request, response: Response):
     global _setup_token
     if await db.fetchone("SELECT id FROM users LIMIT 1"):
-        raise HTTPException(409, "already configured")
+        raise ApiError(409, "setup.alreadyConfigured", "already configured")
     ip = security.client_ip(request)
     allowed, retry = security.login_allowed(ip)
     if not allowed:
-        raise HTTPException(429, f"too many attempts; retry in {retry}s")
+        raise _rate_limited(retry)
     await security.apply_global_tarpit(retry)   # F-02: frână, nu poartă
     if not _setup_token or not security.tokens_equal(creds.setup_token, _setup_token):
         locked, fails = security.record_login_failure(ip)
@@ -143,19 +160,23 @@ async def setup(creds: Credentials, request: Request, response: Response):
         # afară arată ca „produsul e stricat". Semnalat de un audit extern pe traseul primei
         # instalări.
         left = max(config.IP_MAX_FAILS - fails, 0)
+        minutes = security._IP_LOCKOUT // 60
         if locked or left == 0:
-            raise HTTPException(
-                429, "too many wrong setup tokens — locked out for %d minutes. The token is in "
-                     "the server logs: docker compose logs app | grep WEBTERM_SETUP_TOKEN"
-                     % (security._IP_LOCKOUT // 60))
-        raise HTTPException(
-            403, "wrong setup token (%d attempt%s left before a %d-minute lockout) — it is in "
-                 "the server logs: docker compose logs app | grep WEBTERM_SETUP_TOKEN"
-                 % (left, "" if left == 1 else "s", security._IP_LOCKOUT // 60))
+            raise ApiError(
+                429, "setup.lockedOut",
+                "too many wrong setup tokens — locked out for %d minutes. The token is in "
+                "the server logs: docker compose logs app | grep WEBTERM_SETUP_TOKEN" % minutes,
+                vars={"minutes": minutes})
+        raise ApiError(
+            403, "setup.wrongToken",
+            "wrong setup token (%d attempt%s left before a %d-minute lockout) — it is in "
+            "the server logs: docker compose logs app | grep WEBTERM_SETUP_TOKEN"
+            % (left, "" if left == 1 else "s", minutes),
+            vars={"left": left, "minutes": minutes})
     _check_password(creds.password)
-    if "@" not in creds.email or len(creds.email) > 200:
-        raise ApiError(400, "account.badEmail", "invalid email")
     email = creds.email.strip().lower()
+    if not security.valid_email(email):      # aceeaşi regulă ca la PATCH /account şi create_user
+        raise ApiError(400, "account.badEmail", "invalid email")
     pw_hash = await security.hash_password_async(creds.password)
     # Revendicare ATOMICĂ a setup-ului: INSERT condiționat de „niciun user încă", într-o
     # singură instrucțiune SQL (existența + insert sunt atomice în SQLite). Fără asta, două
@@ -168,7 +189,7 @@ async def setup(creds: Credentials, request: Request, response: Response):
         email, pw_hash, time.time())
     row = await db.fetchone("SELECT id, email FROM users LIMIT 1")
     if not row or row["email"] != email:
-        raise HTTPException(409, "already configured")   # altă cerere a câștigat cursa
+        raise ApiError(409, "setup.alreadyConfigured", "already configured")   # altă cerere a câștigat cursa
     _setup_token = None              # single-use; setup is now closed
     security.record_login_success(ip)
     await _issue_cookie(response, row["id"], request)
@@ -184,9 +205,145 @@ PASSWORD_MAX = 1024
 
 def _check_password(pw: str, what: str = "password") -> None:
     if len(pw) < 8:
-        raise HTTPException(400, "the %s must be at least 8 characters" % what)
+        raise ApiError(400, "account.passwordTooShort",
+                       "the %s must be at least 8 characters" % what, vars={"min": 8})
     if len(pw) > PASSWORD_MAX:
-        raise HTTPException(400, "the %s must be at most %d characters" % (what, PASSWORD_MAX))
+        raise ApiError(400, "account.passwordTooLong",
+                       "the %s must be at most %d characters" % (what, PASSWORD_MAX),
+                       vars={"max": PASSWORD_MAX})
+
+
+def _rate_limited(retry: int) -> ApiError:
+    """429 uniform pentru lockout-ul per IP (login/setup/reauth/conectare directă)."""
+    return ApiError(429, "auth.rateLimited", f"too many attempts; retry in {retry}s",
+                    headers={"Retry-After": str(retry)}, vars={"retry": int(retry)})
+
+
+# Erorile de fişiere vin de la agent ca text de `strerror` („/etc/shadow: Permission denied").
+# Le dăm un COD după substring — UI-ul traduce şi poate oferi un remediu („rulează ca alt
+# user", „eliberează spaţiu"); mesajul brut (cu calea) rămâne în `detail`. (audit UX §4.3/§8.F3)
+_FILE_ERROR_CODES = (
+    ("permission denied", "files.permissionDenied"),
+    ("operation not permitted", "files.permissionDenied"),
+    ("read-only file system", "files.readOnly"),
+    ("no such file", "files.notFound"),
+    ("not found", "files.notFound"),
+    ("no space left", "files.noSpace"),
+    ("disk quota", "files.noSpace"),
+    ("is a directory", "files.isDirectory"),
+    ("not a directory", "files.notDirectory"),
+    ("file exists", "files.exists"),
+    ("already exists", "files.exists"),
+    ("too large", "files.tooLarge"),
+    ("too big", "files.tooLarge"),
+    ("crc mismatch", "files.crcMismatch"),
+    ("integrity check", "files.crcMismatch"),
+    ("upload_id", "files.badUpload"),
+    ("timed out", "files.timeout"),
+    ("filesystem root", "files.rootRefused"),
+    ("archiv", "files.archiveFailed"),
+    ("tar failed", "files.archiveFailed"),
+)
+
+
+def _file_api_error(e: Exception, status: int = 400) -> ApiError:
+    """FileError/FileConflict/TimeoutError de la operaţiile fs → ApiError cu cod stabil.
+    Statusul HTTP rămâne cel al rutei (400, sau 504 unde era deja)."""
+    if isinstance(e, core.FileConflict):
+        return ApiError(409, "files.conflict", str(e) or "the file changed on the host")
+    if isinstance(e, (TimeoutError, asyncio.TimeoutError)):
+        return ApiError(status, "files.timeout", "the host did not answer in time")
+    msg = str(e) or "file operation failed"
+    low = msg.lower()
+    for needle, code in _FILE_ERROR_CODES:
+        if needle in low:
+            return ApiError(status, code, msg)
+    return ApiError(status, "files.failed", msg)
+
+
+def _runtime_api_error(e: Exception, default_code: str, status: int = 502) -> ApiError:
+    """RuntimeError-urile din core (update de agent, telnet/serial/sesiune) poartă mesaje
+    englezeşti cu instrucţiuni de meniu („unlock it from Settings → Security") — le dăm cod,
+    textul rămâne în `detail` şi în log."""
+    msg = str(e) or type(e).__name__
+    low = msg.lower()
+    if "signing key" in low and "locked" in low:
+        code = "signing.locked"
+    elif ".sig missing" in low:
+        code = "signing.sigMissing"
+    elif "refused the update" in low:
+        code = "update.refused"
+    elif "agent refused" in low:
+        code = "agent.refused"
+    elif "source missing" in low or "no parsable" in low:
+        code = "agent.sourceMissing"
+    elif isinstance(e, (TimeoutError, asyncio.TimeoutError)):
+        code = "host.noAnswer"
+    else:
+        code = default_code
+    log.info("%s: %s", code, msg)
+    return ApiError(status, code, msg)
+
+
+def _backup_value_error(e: Exception) -> ApiError:
+    """ValueError din backup.py (parolă greşită / fişier corupt / arhivă-bombă / fără cheia
+    seifului) → cod. Pe aceeaşi rută un singur status (400), deci codul e singura distincţie."""
+    msg = str(e) or "invalid backup"
+    low = msg.lower()
+    if "passphrase" in low and "wrong" in low:
+        code = "backup.badPassphrase"
+    elif "too large" in low or "bomb" in low:
+        code = "backup.tooLarge"
+    elif "vault key" in low:
+        code = "backup.noVaultKey"
+    else:
+        code = "backup.badFile"
+    return ApiError(400, code, msg)
+
+
+def _signing_value_error(e: Exception) -> ApiError:
+    msg = str(e) or "invalid key"
+    low = msg.lower()
+    if "already exists" in low:
+        return ApiError(409, "signing.exists", msg)
+    if "not ed25519" in low:
+        return ApiError(400, "signing.notEd25519", msg)
+    return ApiError(400, "signing.badKey", msg)
+
+
+def _cloud_api_error(e: Exception) -> ApiError:
+    """CloudError (provider/reţea/validare) → cod; detaliul providerului rămâne în `detail`."""
+    msg = str(e) or "cloud backup failed"
+    low = msg.lower()
+    if "passphrase" in low:
+        code = "backup.passphraseTooShort"
+    elif "host key" in low:
+        code = "cloud.hostKeyRequired"
+    elif "host and user" in low:
+        code = "cloud.hostUserRequired"
+    elif "refresh token" in low:
+        code = "cloud.noRefreshToken"
+    elif low.startswith("network"):
+        code = "cloud.network"
+    elif "necunoscut" in low or "unknown provider" in low:
+        code = "cloud.badProvider"
+    else:
+        code = "cloud.failed"
+    return ApiError(400, code, msg)
+
+
+def _hostkey_alarm(row):
+    """Alarma de host-key schimbat de pe rândul hostului → dict pentru UI (fără cheia brută),
+    sau None. `hostkey_alarm` vine dintr-o migraţie, deci verificăm prezenţa coloanei."""
+    raw = row["hostkey_alarm"] if "hostkey_alarm" in row.keys() else None
+    if not raw:
+        return None
+    try:
+        a = json.loads(raw)
+    except ValueError:
+        return None
+    return {"old_fp": a.get("old_fp") or "", "new_fp": a.get("new_fp") or "",
+            "changed_at": a.get("changed_at")}
 
 
 @router.post("/api/login")
@@ -199,8 +356,7 @@ async def login(creds: Credentials, request: Request, response: Response):
         # falsă şi (b) inunda jurnalul până roteşte afară intrările reale de incident — exact
         # invariantul pe care auditul trebuie să-l apere. Emailul încercat se marchează DOAR după
         # ce trecem de lockout, deci doar pentru un număr mărginit de încercări reale per IP.
-        raise HTTPException(429, f"too many attempts; retry in {retry}s",
-                            headers={"Retry-After": str(retry)})
+        raise _rate_limited(retry)
     # auditul se scrie din middleware, DUPĂ răspuns — un login eșuat n-are cookie, deci
     # marcăm aici emailul încercat (altfel jurnalul ar arăta doar „cineva, de la IP-ul X")
     audit.actor(request, creds.email.strip().lower())
@@ -316,8 +472,7 @@ async def _verify_reauth_password(user, password: str) -> bool:
     # plafon separat, mult mai larg, ca gard anti-CPU.
     allowed, retry = security.login_allowed(key)
     if not allowed and not security.login_allowed("reauth-hard:%d" % user["id"])[0]:
-        raise HTTPException(429, f"too many attempts; retry in {retry}s",
-                            headers={"Retry-After": str(retry)})
+        raise _rate_limited(retry)
     await security.apply_global_tarpit(retry)   # F-02: frână, nu poartă
     if await security.verify_password_async(password, user["password_hash"]):
         security.record_login_success(key)
@@ -336,6 +491,12 @@ async def update_account(body: AccountUpdate, request: Request, user=Depends(sec
     was opened from a device never seen before, a code mailed to the account address."""
     if not await _verify_reauth_password(user, body.current_password):
         raise ApiError(401, "auth.wrongCurrentPassword", "the current password is wrong")
+    # G-34: adresa devine canalul de login ŞI de recuperare — `{"email":"foo"}` trecea, iar
+    # codurile pe email nu mai ajungeau nicăieri. Verificăm forma ÎNAINTE de al doilea factor,
+    # ca să nu trimitem un cod de confirmare pentru o schimbare pe care oricum o refuzăm.
+    if body.email and body.email.strip().lower() != user["email"] \
+            and not security.valid_email(body.email.strip().lower()):
+        raise ApiError(400, "account.badEmail", "invalid email")
     # Parola singură nu mai ajunge. Atacul pe care îl opreşte: cineva care ARE deja parola
     # (reutilizată, scursă, ghicită) şi o roteşte ca să te scoată pe tine afară — sau mută
     # emailul (canalul de recuperare) şi apoi schimbă parola „confirmat".
@@ -358,7 +519,7 @@ async def update_account(body: AccountUpdate, request: Request, user=Depends(sec
         # utilizatorul poate repara singur, dacă i se spune ce e.
         if await db.fetchone("SELECT 1 FROM users WHERE lower(email)=? AND id<>?",
                              email, user["id"]):
-            raise HTTPException(409, "an account with that email already exists")
+            raise ApiError(409, "account.emailTaken", "an account with that email already exists")
     pw_hash = user["password_hash"]
     if body.new_password:
         _check_password(body.new_password, "new password")
@@ -455,11 +616,11 @@ async def create_user(body: UserIn, request: Request, user=Depends(security.requ
     # supravieţuieşte rotaţiei parolei (recuperarea documentată).
     await webauthn_api.second_gate(user, request, body, "create a new WebTerm account")
     email = body.email.strip().lower()
-    if "@" not in email or len(email) > 200:
+    if not security.valid_email(email):
         raise ApiError(400, "account.badEmail", "invalid email")
     _check_password(body.password)
     if await db.fetchone("SELECT id FROM users WHERE email=?", email):
-        raise HTTPException(409, "an account with that email already exists")
+        raise ApiError(409, "account.emailTaken", "an account with that email already exists")
     pw = await security.hash_password_async(body.password)
     await db.execute("INSERT INTO users(email, password_hash, created) VALUES(?,?,?)",
                      email, pw, time.time())
@@ -485,13 +646,13 @@ async def delete_user(uid: int, body: ReauthOnly, request: Request,
     await webauthn_api.second_gate(user, request, body, "delete a WebTerm account")
     if uid == user["id"]:
         # ştergerea propriului cont din propria sesiune = te blochezi la jumătatea operaţiei
-        raise HTTPException(400, "you cannot delete your own account; do it from another one")
+        raise ApiError(400, "account.deleteSelf", "you cannot delete your own account; do it from another one")
     row = await db.fetchone("SELECT email FROM users WHERE id=?", uid)
     if not row:
-        raise HTTPException(404)
+        raise ApiError(404, "user.missing", "no such account")
     n = (await db.fetchone("SELECT COUNT(*) AS c FROM users"))["c"]
     if n <= 1:
-        raise HTTPException(400, "you cannot delete the last account")
+        raise ApiError(400, "account.deleteLast", "you cannot delete the last account")
     # tot ce ţinea de el moare odată cu el: sesiuni web, passkey-uri, coduri de recuperare,
     # IP-uri cunoscute. Altfel un cookie al contului şters ar rămâne valid.
     for sql in ("DELETE FROM web_sessions WHERE user_id=?",
@@ -619,7 +780,7 @@ async def revoke_web_session(rid: int, request: Request,
     row = await db.fetchone(
         "SELECT token_hash FROM web_sessions WHERE rowid=? AND user_id=?", rid, user["id"])
     if not row:
-        raise HTTPException(404, "no such session")
+        raise ApiError(404, "websession.missing", "no such session")
     await db.execute("DELETE FROM web_sessions WHERE rowid=? AND user_id=?", rid, user["id"])
     audit.detail(request, "revoked a web session")
     return {"ok": True}
@@ -660,10 +821,10 @@ async def create_token(body: TokenIn, request: Request, user=Depends(security.re
     await webauthn_api.second_gate(user, request, body, "create an automation token")
     name = body.name.strip()[:60]
     if not name:
-        raise HTTPException(400, "give it a name (so you know what you are revoking)")
+        raise ApiError(400, "token.nameRequired", "give it a name (so you know what you are revoking)")
     scopes = [s for s in body.scopes if s in TOKEN_SCOPES]
     if not scopes:
-        raise HTTPException(400, "pick at least one scope (read / run)")
+        raise ApiError(400, "token.scopeRequired", "pick at least one scope (read / run)")
     days = min(max(int(body.days), 1), TOKEN_MAX_DAYS)   # expirarea NU e opțională
     raw = security.TOKEN_PREFIX + security.new_token()
     await db.execute(
@@ -686,7 +847,7 @@ async def create_token(body: TokenIn, request: Request, user=Depends(security.re
 async def revoke_token(tid: int, user=Depends(security.require_user)):
     row = await db.fetchone("SELECT name FROM api_tokens WHERE id=?", tid)
     if not row:
-        raise HTTPException(404)
+        raise ApiError(404, "token.missing", "no such token")
     await db.execute("DELETE FROM api_tokens WHERE id=?", tid)
     log.warning("automation token revoked: %s (by %s)", row["name"], user["email"])
     return await list_tokens(user)
@@ -724,7 +885,7 @@ async def create_enroll_group(body: EnrollGroupIn, request: Request,
     await webauthn_api.second_gate(user, request, body, "create a group enrollment token")
     name = body.name.strip()[:60]
     if not name:
-        raise HTTPException(400, "give it a name (so you know what you are revoking)")
+        raise ApiError(400, "token.nameRequired", "give it a name (so you know what you are revoking)")
     days = min(max(int(body.days), 1), ENROLL_GROUP_MAX_DAYS)     # expirarea NU e opțională
     max_uses = max(0, min(int(body.max_uses), ENROLL_GROUP_MAX_USES))
     raw = security.new_token()
@@ -749,7 +910,7 @@ async def create_enroll_group(body: EnrollGroupIn, request: Request,
 async def revoke_enroll_group(gid: int, user=Depends(security.require_user)):
     row = await db.fetchone("SELECT name FROM enroll_groups WHERE id=?", gid)
     if not row:
-        raise HTTPException(404)
+        raise ApiError(404, "enrollgroup.missing", "no such enrollment group")
     # revocare, nu ştergere: păstrăm evidenţa (cine/când a putut înmatricula) pentru audit
     await db.execute("UPDATE enroll_groups SET revoked=1 WHERE id=?", gid)
     log.warning("group enroll token revoked: %s (by %s)", row["name"], user["email"])
@@ -765,7 +926,7 @@ async def totp_setup(body: TotpSetup, user=Depends(security.require_user)):
     if not await _verify_reauth_password(user, body.current_password):
         raise ApiError(401, "auth.wrongCurrentPassword", "the current password is wrong")
     if user["totp_enabled"]:
-        raise HTTPException(409, "2FA is already on; turn it off first")
+        raise ApiError(409, "totp.alreadyOn", "2FA is already on; turn it off first")
     secret = totp.new_secret()
     await db.execute("UPDATE users SET totp_secret_encrypted=?, totp_enabled=0 WHERE id=?",
                      security.encrypt_secret(secret), user["id"])
@@ -788,10 +949,10 @@ async def totp_activate(body: TotpActivate, request: Request,
     if user["totp_enabled"]:
         raise ApiError(409, "totp.alreadyOn", "2FA is already enabled")
     if not user["totp_secret_encrypted"]:
-        raise HTTPException(400, "run /api/totp/setup first")
+        raise ApiError(400, "totp.setupFirst", "run /api/totp/setup first")
     secret = security.decrypt_secret(user["totp_secret_encrypted"])
     if not totp.verify(secret, body.code.strip()):
-        raise HTTPException(400, "wrong code — check your phone clock")
+        raise ApiError(400, "totp.badCode", "wrong code — check your phone clock")
     codes = _gen_recovery_codes()
     await db.execute("UPDATE users SET totp_enabled=1 WHERE id=?", user["id"])
     await db.execute("DELETE FROM recovery_codes WHERE user_id=?", user["id"])
@@ -943,24 +1104,58 @@ async def _load_command_guard() -> dict:
     return {"enabled": bool(cfg.get("enabled", True)), "rules": rules[:100]}
 
 
+# Bugetul per regulă (secunde). Un regex sănătos pe o linie de comandă termină în microsecunde;
+# ce depăşeşte asta e backtracking catastrofal, nu „o comandă lungă".
+GUARD_RE_BUDGET = security.REGEX_BUDGET
+# Corpus de fuzz la SALVARE: şiruri lungi şi uniforme pe clasele pe care le folosesc regulile
+# reale (litere, cifre, spaţii, separatori de shell), cu un caracter final care STRICĂ
+# potrivirea — exact forma care face `(a+)+$` sau `(\w+\s?)+$` să exploreze 2^n căi. 40 de
+# caractere: pentru o regulă patologică bugetul expiră cu siguranţă, pentru una polinomială
+# (`.*.*=`) tot sub o milisecundă.
+_GUARD_FUZZ = [c * 40 + "!" for c in "a A x 0 - / . _ \\ :".split(" ")] + [
+    " " * 40 + "!", "\t" * 40 + "!", "ab" * 20 + "!", "word " * 8 + "!", "a b " * 10 + "!",
+    "rm -rf /" + "a" * 40, "sudo " * 8 + "!", "/dev/sd" + "a" * 40, "x=" * 20 + "!"]
+
+
+async def _guard_rule_over_budget(pattern: str, where: str) -> None:
+    """O regulă a depăşit bugetul: worker-ul a fost omorât şi regula NU se aplică pe comanda
+    asta. Lăsăm urmă (log + jurnal de audit, cu regula numită) — altfel plasa de siguranţă
+    s-ar rări în tăcere, iar adminul n-ar afla decât când o comandă „interzisă" trece."""
+    log.warning("command guard: rule %r exceeded the %.2fs budget (%s) — skipped",
+                pattern[:120], GUARD_RE_BUDGET, where)
+    await audit.record(time.time(), "system:guardrail", "-", "GUARD", "/api/settings/command-guard",
+                       408, "regulă de guardrail peste buget (%.2fs), sărită la %s: %s"
+                       % (GUARD_RE_BUDGET, where, pattern[:200]))
+
+
 async def _match_guard_rule(cmd: str) -> dict | None:
     """Prima regulă activă care se potriveşte pe comandă, sau None. Regex invalid = ignorat
     (aceeaşi toleranţă ca în client: serverul validează la salvare, dar nu ne oprim aici)."""
     guard = await _load_command_guard()
     if not guard.get("enabled"):
         return None
-    # F-09: regulile sunt scrise de admin, iar `re.search` e sincron. O expresie cu
-    # backtracking catastrofal (validată azi doar că se compilează) plus o comandă potrivită
-    # bloca ÎNTREG event-loop-ul — inclusiv de la un token de automatizare cu scope `run`.
-    # Fir separat + buget de 0.25s per regulă: o regulă patologică se pierde, restul merg.
-    for r in guard.get("rules", []):
-        try:
-            if await asyncio.wait_for(
-                    asyncio.to_thread(re.search, r["pattern"], cmd, re.IGNORECASE), 0.25):
+    # F-09: regulile sunt scrise de admin, iar `re.search` e sincron şi neîntreruptibil. Prima
+    # mitigare (`wait_for` peste `to_thread`, buget 0,25 s) nu limita nimic: `wait_for` aşteaptă
+    # firul, deci cererea `/run` atârna cât regex-ul (măsurat de auditul din 2026-10-04: 12,9 s
+    # pentru `^(a+)+$` pe 28 de caractere) şi fiecare apel ocupa un thread din pool-ul implicit.
+    # Acum potrivirea rulează într-un proces separat care e OMORÂT la depăşire — CPU-ul chiar
+    # se eliberează, iar regula patologică e sărită cu urmă în audit (vezi
+    # `security.regex_search_budget`). Regulile sănătoase se comportă identic.
+    try:
+        for r in guard.get("rules", []):
+            try:
+                hit = await security.regex_search_budget(r["pattern"], [cmd], re.IGNORECASE,
+                                                         GUARD_RE_BUDGET)
+            except re.error:
+                continue
+            if hit is None:
+                await _guard_rule_over_budget(r["pattern"], "run")
+                continue
+            if hit:
                 return r
-        except (re.error, asyncio.TimeoutError):
-            continue
-    return None
+        return None
+    finally:
+        security.regex_worker_release()
 
 
 @router.get("/api/settings/command-guard")
@@ -970,17 +1165,29 @@ async def get_command_guard(user=Depends(security.require_user)):
 
 @router.post("/api/settings/command-guard")
 async def save_command_guard(body: CommandGuardIn, user=Depends(security.require_user)):
-    import re as _re
     rules = []
-    for r in body.rules[:100]:
-        pat = (r.pattern or "").strip()[:300]
-        if not pat:
-            continue
-        try:
-            _re.compile(pat)   # respinge regex invalid ca să nu strice clientul
-        except _re.error:
-            raise HTTPException(400, f"invalid regex: {pat}")
-        rules.append({"pattern": pat, "action": "block" if r.action == "block" else "confirm"})
+    try:
+        for r in body.rules[:100]:
+            pat = (r.pattern or "").strip()[:300]
+            if not pat:
+                continue
+            try:
+                re.compile(pat)   # respinge regex invalid ca să nu strice clientul
+            except re.error:
+                raise ApiError(400, "guard.badRegex", f"invalid regex: {pat}", vars={"pattern": pat})
+            # F-09, a doua barieră: o regulă cu backtracking catastrofal e refuzată LA SALVARE,
+            # rulată pe corpusul de fuzz cu acelaşi buget ca la `/run`. Aşa adminul află pe loc
+            # că regula lui e inutilizabilă, în loc s-o vadă sărită în audit la prima comandă.
+            if await security.regex_search_budget(pat, _GUARD_FUZZ, re.IGNORECASE,
+                                                  GUARD_RE_BUDGET) is None:
+                await _guard_rule_over_budget(pat, "save")
+                raise ApiError(
+                    400, "guard.regexTooSlow",
+                    f"regex too slow (catastrophic backtracking) — rule rejected: {pat}",
+                    vars={"pattern": pat})
+            rules.append({"pattern": pat, "action": "block" if r.action == "block" else "confirm"})
+    finally:
+        security.regex_worker_release()
     cfg = {"enabled": bool(body.enabled), "rules": rules}
     await _set_setting("command_guard", json.dumps(cfg))
     return cfg
@@ -1012,7 +1219,9 @@ async def get_smtp(user=Depends(security.require_user)):
     return {"host": cfg["host"], "port": cfg["port"], "user": cfg["user"],
             "from_addr": cfg["from"], "to_addr": cfg["to"], "webhook": cfg["webhook"],
             "starttls": cfg["starttls"], "has_password": bool(cfg["password"]),
-            "configured": bool(cfg["host"] and cfg["to"] and cfg["from"])}
+            "configured": bool(cfg["host"] and cfg["to"] and cfg["from"]),
+            # ultimul email/webhook trimis + ultimul eşuat — „au plecat alertele?" (UX §7)
+            "status": await email_alerts.alert_status()}
 
 
 @router.post("/api/settings/smtp")
@@ -1078,7 +1287,8 @@ async def test_smtp(user=Depends(security.require_user)):
     try:
         await email_alerts.send_test()
     except Exception as e:
-        raise HTTPException(400, f"sending failed: {e}")
+        log.warning("SMTP test failed: %s: %s", type(e).__name__, e)
+        raise ApiError(400, "settings.smtpSendFailed", f"sending failed: {e}")
     return {"ok": True}
 
 
@@ -1102,7 +1312,7 @@ async def get_alert_thresholds(user=Depends(security.require_user)):
 async def save_alert_thresholds(body: ThresholdsIn, user=Depends(security.require_user)):
     for key, value in (("cpu", body.cpu), ("mem", body.mem), ("disk", body.disk)):
         if not 0 <= value <= 100:
-            raise HTTPException(400, "thresholds must be between 0 and 100")
+            raise ApiError(400, "settings.badThreshold", "thresholds must be between 0 and 100")
         await _set_setting(f"alert_{key}", str(value))
     email_alerts.invalidate_thresholds()   # cache-ul de la check_metrics
     return {"ok": True}
@@ -1120,7 +1330,11 @@ class HostIn(BaseModel):
     connection_type: str = "agent"       # agent | ssh | ssh-jump | telnet
     hostname: str = ""
     ssh_username: str = ""
-    ssh_port: int = 22
+    # None = „portul implicit al protocolului" (22 ssh, 23 telnet), hotărât server-side în
+    # create_host. Era `int = 22` necondiţionat, iar `host_row["ssh_port"] or 23` din core nu se
+    # declanşa niciodată → telnet/telnet-jump create prin API sunau la 22. UI-ul trimite mereu
+    # portul explicit (AddHostModal pune 23 la telnet), deci contractul lui nu se schimbă.
+    ssh_port: Optional[int] = None
     via_host_id: int = 0                 # ssh-jump: hostul-agent prin al cărui tunel ajungem
     auth_method: str = "password"        # password | key
     credential: str = ""                 # write-only: parola sau cheia privată
@@ -1168,12 +1382,12 @@ def _resolve_credential(row, body_credential="", body_passphrase=""):
     decriptate din seif. Returnează dict {password} sau {key, passphrase?}."""
     if row["credential_policy"] == "ask":
         if not body_credential:
-            raise HTTPException(400, "credentials required (policy: ask every time)")
+            raise ApiError(400, "host.credentialsRequired", "credentials required (policy: ask every time)")
         if row["auth_method"] == "key":
             return {"key": body_credential, "passphrase": body_passphrase or None}
         return {"password": body_credential}
     if not row["credential_encrypted"]:
-        raise HTTPException(400, "no stored credentials for this host")
+        raise ApiError(400, "host.noStoredCredentials", "no stored credentials for this host")
     return json.loads(security.decrypt_secret(row["credential_encrypted"]))
 
 
@@ -1185,9 +1399,19 @@ async def _connect_direct(row, request, body_credential="", body_passphrase=""):
     ip = security.client_ip(request)
     allowed, retry = security.login_allowed(ip)
     if not allowed:
-        raise HTTPException(429, f"too many attempts; retry in {retry}s",
-                            headers={"Retry-After": str(retry)})
+        raise _rate_limited(retry)
     await security.apply_global_tarpit(retry)   # F-02: frână, nu poartă
+    # Alarmă de host-key NEREZOLVATĂ → refuz FĂRĂ dial. Fail-closed era deja (dial-ul pica la
+    # fiecare încercare), dar redialul (a) retrimitea cererea spre o ţintă suspectă la fiecare
+    # click şi (b) făcea starea invizibilă între două toast-uri. Acum hostul stă blocat, cu
+    # amprentele la vedere, până când omul le verifică out-of-band şi apasă „accept" (sau
+    # resetează pinul mutând hostul). (audit UX §6.e1/§6.e2)
+    alarm = _hostkey_alarm(row)
+    if alarm:
+        raise ApiError(409, "ssh.hostKeyChanged",
+                       "the host key fingerprint changed (%s → %s) — possible MITM; connection "
+                       "refused until the new key is reviewed" % (alarm["old_fp"] or "?", alarm["new_fp"] or "?"),
+                       vars={"old_fp": alarm["old_fp"], "new_fp": alarm["new_fp"]})
     cred = _resolve_credential(row, body_credential, body_passphrase)
     jump = (row["connection_type"] or "") == "ssh-jump"
     try:
@@ -1200,8 +1424,11 @@ async def _connect_direct(row, request, body_credential="", body_passphrase=""):
         raise ApiError(502, "sshjump.unreachable",
                        "the agent could not reach %s:%s — %s"
                        % (row["hostname"], row["ssh_port"] or 22, e))
-    except core.HostKeyMismatch:
-        raise HTTPException(409, "the host key fingerprint changed — possible MITM; connection refused")
+    except core.HostKeyMismatch as e:
+        raise ApiError(409, "ssh.hostKeyChanged",
+                       "the host key fingerprint changed (%s → %s) — possible MITM; connection refused"
+                       % (e.old_fp or "?", e.new_fp or "?"),
+                       vars={"old_fp": e.old_fp, "new_fp": e.new_fp})
     except asyncssh.PermissionDenied:
         security.record_login_failure(ip)
         # ţinta a răspuns, dar a RESPINS credenţialele (user/parolă greşite ori metodă nepotrivită)
@@ -1216,7 +1443,7 @@ async def _connect_direct(row, request, body_credential="", body_passphrase=""):
                        "no SSH greeting from %s:%s within %ds — wrong port, not an SSH server, "
                        "or filtered" % (row["hostname"], row["ssh_port"] or 22, core.SSH_CONNECT_TIMEOUT))
     except (asyncssh.Error, OSError) as e:
-        raise HTTPException(502, f"cannot connect over SSH: {e or type(e).__name__}")
+        raise ApiError(502, "ssh.connectFailed", f"cannot connect over SSH: {e or type(e).__name__}")
     security.record_login_success(ip)
 
 
@@ -1227,8 +1454,7 @@ async def _connect_telnet(row, request, body_credential=""):
     ip = security.client_ip(request)
     allowed, retry = security.login_allowed(ip)
     if not allowed:
-        raise HTTPException(429, f"too many attempts; retry in {retry}s",
-                            headers={"Retry-After": str(retry)})
+        raise _rate_limited(retry)
     await security.apply_global_tarpit(retry)   # F-02: frână, nu poartă
     password = ""
     if row["credential_policy"] == "ask":
@@ -1239,27 +1465,60 @@ async def _connect_telnet(row, request, body_credential=""):
     try:
         await core.dial_telnet(row, creds)
     except (OSError, asyncio.TimeoutError, ConnectionRefusedError) as e:
-        raise HTTPException(502, f"cannot connect over Telnet: {e}")
+        raise ApiError(502, "telnet.connectFailed", f"cannot connect over Telnet: {e or type(e).__name__}")
     security.record_login_success(ip)
 
 
 def _host_updates(row) -> dict | None:
-    """Rezumatul update-urilor OS din ultimul diagnostic (agent v51+): {count, security, manager}.
-    Pentru badge-ul din sidebar — număr, fără lista pachetelor (aia se cere la deschiderea panoului).
-    None dacă agentul nu raportează încă (v50) sau verificarea e dezactivată pe host."""
-    if "diagnostics" not in row.keys() or not row["diagnostics"]:
+    """Rezumatul update-urilor OS (agent v51+): {count, security, manager}, pentru badge-ul din
+    sidebar — număr, fără lista pachetelor (aia se cere la deschiderea panoului).
+    Citit din coloana `updates_summary`, scrisă la primirea diagnosticului (core.updates_summary):
+    listarea hosturilor e poll la 5 s per client şi parsa tot blobul de diagnostic pentru FIECARE
+    host — un agent compromis cu un snapshot mare scumpea fiecare poll (audit 2026-10-04, S-03).
+    None dacă agentul nu raportează încă (v50) sau verificarea e dezactivată pe host.
+    Fallback: rând de dinaintea coloanei (NULL) → parsăm blobul vechi, dar DOAR sub plafon."""
+    keys = row.keys()
+    if "updates_summary" in keys and row["updates_summary"] is not None:
+        if not row["updates_summary"]:
+            return None
+        try:
+            u = json.loads(row["updates_summary"])
+        except (TypeError, ValueError):
+            return None
+        return u if isinstance(u, dict) and isinstance(u.get("count"), int) else None
+    if "diagnostics" not in keys or not row["diagnostics"]:
         return None
+    if len(row["diagnostics"]) > core.DIAG_MAX_BYTES:
+        return None        # blob moştenit peste plafon: nu-l re-parsăm la fiecare poll
     try:
         d = json.loads(row["diagnostics"])
     except (TypeError, ValueError):
         return None
-    # un agent compromis/buggy poate stoca un JSON top-level NON-obiect (`[1,2]`, `42`, `"x"`):
-    # `.get` pe el ar arunca AttributeError, iar _host_updates e chemat pentru FIECARE host din
-    # listare → un singur host otrăvit dădea 500 pe toată lista. Verificăm tipul înainte de .get.
-    u = d.get("updates") if isinstance(d, dict) else None
-    if not isinstance(u, dict) or not isinstance(u.get("count"), int) or isinstance(u.get("count"), bool):
-        return None
-    return {"count": u["count"], "security": u.get("security"), "manager": u.get("manager")}
+    # un agent compromis/buggy poate fi stocat un JSON top-level NON-obiect (`[1,2]`, `42`):
+    # core.updates_summary verifică tipul înainte de .get — altfel un singur host otrăvit dădea
+    # 500 pe toată lista.
+    return core.updates_summary(d)
+
+
+_JUMP_TYPES = ("ssh-jump", "telnet-jump")
+
+
+def _host_online(row) -> bool:
+    """Hostul e „online" = i se poate deschide o sesiune ACUM. Pentru agent/ssh/telnet direct
+    înseamnă o sursă proprie în `core.sources`. Pentru familia jump (ssh-jump, telnet-jump)
+    sesiunile se deschid prin tunelul AGENTULUI `via_host_id` (core.create_telnet_jump_session /
+    dial_ssh_jump), iar telnet-jump nu înregistrează NIMIC sub propriul id (sursa e per-sesiune,
+    în `session_sources`) → `online` era permanent False, deci `isSessionLive` din client
+    ascundea/înnegrea sesiunile lui LIVE în toată aplicaţia (Sessions, tab-uri, Dashboard).
+    Regula corectă: jump = agentul părinte conectat (sau sursa proprie, pentru ssh-jump activ).
+    Primeşte orice rând cu `id`, `connection_type`, `via_host_id` (nu doar `SELECT *`)."""
+    if row["id"] in core.sources:
+        return True
+    ctype = (row["connection_type"] if "connection_type" in row.keys() else None) or "agent"
+    via = row["via_host_id"] if "via_host_id" in row.keys() else None
+    if ctype in _JUMP_TYPES and via:
+        return isinstance(core.sources.get(via), core.AgentConnection)
+    return False
 
 
 def _host_json(row) -> dict:
@@ -1270,7 +1529,7 @@ def _host_json(row) -> dict:
     return {
         "id": row["id"], "name": row["name"], "note": row["note"],
         "alerts_muted": bool(row["alerts_muted"]) if "alerts_muted" in row.keys() else False,
-        "online": conn is not None, "hostname": row["hostname"],
+        "online": _host_online(row), "hostname": row["hostname"],
         "agent_user": row["agent_user"], "agent_version": row["agent_version"],
         "backend": row["backend"], "last_heartbeat": row["last_heartbeat"],
         "folder": (row["folder"] or "") if "folder" in row.keys() else "",
@@ -1314,6 +1573,9 @@ def _host_json(row) -> dict:
         "require_2fa": bool(row["require_2fa"]),
         "credential_policy": row["credential_policy"],
         "has_credentials": bool(row["credential_encrypted"]),
+        # alarmă de host-key schimbat (SSH direct/jump), persistentă până la accept/re-pin;
+        # cât e setată, conectarea e refuzată (ssh.hostKeyChanged) fără dial
+        "hostkey_alarm": _hostkey_alarm(row),
     }
 
 
@@ -1345,7 +1607,7 @@ async def _require_reauth_for_secret(user, password: str, what: str) -> None:
     Semnalat de auditul extern (2026-08-06). Restul API-ului cerea deja re-auth pentru lucruri
     mai mici (creare de cont, token de automatizare) — incoerenţa era chiar pe operaţiile grele."""
     if not await _verify_reauth_password(user, password):
-        raise HTTPException(401, "wrong account password — required for %s" % what)
+        raise ApiError(401, "auth.wrongPassword", "wrong account password — required for %s" % what)
 
 
 def _install_command(enroll_token: str, password: str = "") -> str:
@@ -1398,8 +1660,8 @@ def _install_command_dedicated(enroll_token: str, password: str = "") -> str:
 async def status(user=Depends(security.require_scope("read"))):
     """Rezumat operațional: hosturi online, sesiuni, disc (transcripturi +
     arhivă), uptime și versiuni. Alimentează panoul de status."""
-    hosts = await db.fetchall("SELECT id FROM hosts")
-    online = sum(1 for h in hosts if h["id"] in core.sources)
+    hosts = await db.fetchall("SELECT id, connection_type, via_host_id FROM hosts")
+    online = sum(1 for h in hosts if _host_online(h))   # jump = agentul părinte (vezi _host_online)
     rows = await db.fetchall("SELECT state, COUNT(*) AS c FROM sessions GROUP BY state")
     by_state = {r["state"]: r["c"] for r in rows}
     return {
@@ -1453,7 +1715,7 @@ async def version_refresh(user=Depends(security.require_user)):
     versiune n-are rost să aștepți fereastra."""
     enabled = await _update_check_enabled()
     if not enabled:
-        raise HTTPException(400, "the version check is turned off")
+        raise ApiError(400, "updates.checkOff", "the version check is turned off")
     return _with_command(await updatecheck.check(force=True, enabled=True))
 
 
@@ -1465,8 +1727,11 @@ async def list_hosts(user=Depends(security.require_scope("read"))):
 
 @router.post("/api/hosts")
 async def create_host(host: HostIn, user=Depends(security.require_user)):
-    ctype = host.connection_type if host.connection_type in (
-        "agent", "ssh", "ssh-jump", "telnet", "telnet-jump") else "agent"
+    ctype = host.connection_type or "agent"
+    # Un tip necunoscut („SSH", typo de script) era coerce TĂCUT la agent: 200 cu un host agent
+    # şi credenţialul aruncat de _credential_blob. PATCH-ul dădea deja 400 — acum şi POST-ul.
+    if ctype not in ("agent", "ssh", "ssh-jump", "telnet", "telnet-jump"):
+        raise ApiError(400, "host.badType", "unknown connection type")
     if ctype in ("ssh", "ssh-jump", "telnet", "telnet-jump") and not host.hostname.strip():
         raise ApiError(400, "host.hostnameRequired", "hostname required for a direct connection")
     if ctype in ("ssh", "ssh-jump") and not host.ssh_username.strip():
@@ -1493,7 +1758,8 @@ async def create_host(host: HostIn, user=Depends(security.require_user)):
         security.encrypt_secret(token), enroll,
         time.time() + ttl, pass_hash, time.time(),
         ctype, host.hostname.strip() or None, host.ssh_username.strip() or None,
-        host.ssh_port, host.auth_method, _credential_blob(host),
+        host.ssh_port or (23 if ctype in ("telnet", "telnet-jump") else 22),
+        host.auth_method, _credential_blob(host),
         int(host.require_2fa), host.credential_policy, _norm_tags(host.tags),
         host.via_host_id if ctype in ("ssh-jump", "telnet-jump") else None,
         1 if (host.ephemeral and ctype in ("ssh-jump", "telnet-jump")) else 0)
@@ -1516,7 +1782,7 @@ async def renew_enroll(host_id: int, user=Depends(security.require_user),
     await _require_host_stepup(host_id, user)   # H1: enroll nou = clasă de provisioning
     row = await db.fetchone("SELECT * FROM hosts WHERE id=?", host_id)
     if not row:
-        raise HTTPException(404)
+        raise ApiError(404, "host.missing", "no such host")
     enroll = security.new_token()[:32]
     ttl = max(300, min(30 * 86400, int(body.enroll_ttl or 3600)))
     pw = _clean_enroll_pass(body.enroll_password)
@@ -1538,7 +1804,7 @@ async def fs_list(host_id: int, path: str = "~", user=Depends(security.require_u
     except core.AgentGone:
         raise ApiError(409, "host.offline", "the host is offline")
     except (core.FileError, TimeoutError) as e:
-        raise HTTPException(400, str(e))
+        raise _file_api_error(e)
 
 
 @router.get("/api/hosts/{host_id}/fs/cwd")
@@ -1550,7 +1816,7 @@ async def fs_cwd(host_id: int, sid: str, user=Depends(security.require_user)):
     except core.AgentGone:
         raise ApiError(409, "host.offline", "the host is offline")
     except (core.FileError, TimeoutError) as e:
-        raise HTTPException(400, str(e))
+        raise _file_api_error(e)
 
 
 @router.get("/api/hosts/{host_id}/fs/download")
@@ -1570,9 +1836,9 @@ async def fs_download(host_id: int, path: str, user=Depends(security.require_use
     except core.AgentGone:
         raise ApiError(409, "host.offline", "the host is offline")
     except TimeoutError:
-        raise HTTPException(504, "the host is not responding")
+        raise ApiError(504, "files.timeout", "the host is not responding")
     except core.FileError as e:
-        raise HTTPException(400, str(e))
+        raise _file_api_error(e)
 
     async def body():
         yield first
@@ -1610,7 +1876,7 @@ async def fs_archive(host_id: int, path: str, user=Depends(security.require_user
         if tmp:
             task = asyncio.ensure_future(core.fs_archive_cleanup(host_id, tmp))
             _bg_tasks.add(task); task.add_done_callback(_bg_tasks.discard)
-        raise HTTPException(504 if isinstance(e, TimeoutError) else 400, str(e))
+        raise _file_api_error(e, 504 if isinstance(e, TimeoutError) else 400)
 
     async def body():
         try:
@@ -1654,9 +1920,9 @@ async def fs_upload(host_id: int, request: Request, path: str,
     except core.AgentGone:
         raise ApiError(409, "host.offline", "the host is offline")
     except core.FileConflict as e:
-        raise HTTPException(409, str(e))
+        raise _file_api_error(e)
     except (core.FileError, TimeoutError) as e:
-        raise HTTPException(400, str(e))
+        raise _file_api_error(e)
 
 
 @router.get("/api/hosts/{host_id}/fs/upload/status")
@@ -1669,7 +1935,7 @@ async def fs_upload_status(host_id: int, path: str, upload_id: str,
     except core.AgentGone:
         raise ApiError(409, "host.offline", "the host is offline")
     except (core.FileError, TimeoutError) as e:
-        raise HTTPException(400, str(e))
+        raise _file_api_error(e)
     return {"offset": n}
 
 
@@ -1687,9 +1953,9 @@ async def fs_upload_commit(host_id: int, request: Request, path: str, upload_id:
     except core.AgentGone:
         raise ApiError(409, "host.offline", "the host is offline")
     except core.FileConflict as e:
-        raise HTTPException(409, str(e))
+        raise _file_api_error(e)
     except (core.FileError, TimeoutError) as e:
-        raise HTTPException(400, str(e))
+        raise _file_api_error(e)
     return {"ok": True, "written": written, "path": path}
 
 
@@ -1720,7 +1986,7 @@ async def fs_preview(host_id: int, path: str, user=Depends(security.require_user
     except core.AgentGone:
         raise ApiError(409, "host.offline", "the host is offline")
     except (core.FileError, TimeoutError) as e:
-        raise HTTPException(400, str(e))
+        raise _file_api_error(e)
     editable = size <= _EDIT_FULL_LIMIT
     shown = data if editable else data[:_PREVIEW_HEAD]
     binary = b"\x00" in shown
@@ -1736,9 +2002,11 @@ async def fs_preview(host_id: int, path: str, user=Depends(security.require_user
 
 
 # ── Port forwarding ──────────────────────────────────────────────────────────
-# antete hop-by-hop: nu se propagă printr-un proxy (RFC 7230 §6.1)
+# antete hop-by-hop: nu se propagă printr-un proxy (RFC 7230 §6.1). Antetul se numeşte
+# `Trailer` (RFC 7230 §4.4); „trailers" e doar o VALOARE posibilă a lui `TE` — cu forma greşită
+# în set, un `Trailer:` din browser ajungea la ţintă (audit 2026-10-04; `_WS_SKIP` îl avea bine).
 _HOP_BY_HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
-               "te", "trailers", "transfer-encoding", "upgrade", "proxy-connection"}
+               "te", "trailer", "transfer-encoding", "upgrade", "proxy-connection"}
 FWD_MAX_BODY = 100 * 1024 * 1024      # plafon corp cerere prin proxy-ul de forward (anti-OOM)
 FWD_RESP_TIMEOUT = 120                # așteptare răspuns de la țintă: generos pt. long-poll
 # Plafon AGREGAT peste toate upload-urile forward simultane: plafonul per-request (100 MB) nu
@@ -1804,14 +2072,14 @@ async def proxy_forward_http(request: Request, host_id: int, thost: str,
     from fastapi.responses import StreamingResponse
     # anti request-smuggling: path-ul ajunge într-o cerere HTTP raw
     if "\r" in target_path or "\n" in target_path:
-        raise HTTPException(400, "invalid path")
+        raise ApiError(400, "forward.badPath", "invalid path")
     conn = await _ensure_forward_source(host_id)
     if conn is None:
-        raise HTTPException(409, "the host is offline (or an SSH host that needs an open session)")
+        raise ApiError(409, "forward.hostOffline", "the host is offline (or an SSH host that needs an open session)")
     try:
         fs = await _open_target(conn, thost, tport, scheme)
     except core.ForwardError:
-        raise HTTPException(502, "the forwarded service is not responding")
+        raise ApiError(502, "forward.proxyError", "the forwarded service is not responding")
     except (core.AgentGone, TimeoutError):
         raise ApiError(409, "host.offline", "the host is offline")
     try:
@@ -1829,7 +2097,7 @@ async def proxy_forward_http(request: Request, host_id: int, thost: str,
                     raise ApiError(413, "forward.bodyTooLarge", "body too large for a forward")
                 if _fwd_inflight > FWD_INFLIGHT_MAX:
                     await fs.close()
-                    raise HTTPException(503, "too many large uploads through forwards at once; retry")
+                    raise ApiError(503, "forward.busy", "too many large uploads through forwards at once; retry")
             lines = ["%s %s HTTP/1.0" % (request.method, target_path)]
             for k, v in request.headers.items():
                 kl = k.lower()
@@ -1861,7 +2129,7 @@ async def proxy_forward_http(request: Request, host_id: int, thost: str,
             buf += chunk
             if len(buf) > 256 * 1024:          # antet absurd de mare → renunțăm
                 await fs.close()
-                raise HTTPException(502, "invalid response from the service")
+                raise ApiError(502, "forward.badResponse", "invalid response from the service")
         head, _, rest = buf.partition(b"\r\n\r\n")
         hlines = head.split(b"\r\n")
         parts = hlines[0].split(b" ", 2) if hlines and hlines[0] else []
@@ -1944,7 +2212,7 @@ async def forward_probe(fid: int, stepup_grant: str = "", stepup_password: str =
     await _require_host_stepup(row["host_id"], user, stepup_grant, stepup_password)
     conn = await _ensure_forward_source(row["host_id"])
     if conn is None:
-        raise HTTPException(409, "the host is offline (or an SSH host that needs an open session)")
+        raise ApiError(409, "forward.hostOffline", "the host is offline (or an SSH host that needs an open session)")
     try:
         fs = await _open_target(conn, row["target_host"], row["target_port"], row["scheme"])
     except core.ForwardError as e:
@@ -2052,7 +2320,7 @@ async def save_forward_settings(body: ForwardDomainIn,
                                 user=Depends(security.require_user)):
     d = body.domain.strip().lower().rstrip(".")
     if not _valid_domain(d):
-        raise HTTPException(400, "invalid domain (e.g. apps.example.com)")
+        raise ApiError(400, "settings.badForwardDomain", "invalid domain (e.g. apps.example.com)")
     # Un domeniu de forward care e PĂRINTE al domeniului aplicaţiei o înghite: `route_forward`
     # decide „e subdomeniu de forward" prin `host.endswith("." + forward_domain())` şi nu
     # compară niciodată cu domeniul app-ului. Aplicaţia la `wt.exemplu.com` + forward pe
@@ -2065,9 +2333,10 @@ async def save_forward_settings(body: ForwardDomainIn,
     # → gazda app-ului devine „slug-ul wt" şi tot UI-ul/API-ul răspunde 404.
     app_host = (urlparse(config.PUBLIC_URL).hostname or "").lower()
     if app_host and app_host != d and app_host.endswith("." + d):
-        raise HTTPException(400,
-                            "the app domain (%s) would become a forward subdomain — "
-                            "pick a domain that does NOT contain it (e.g. apps.%s)" % (app_host, d))
+        raise ApiError(400, "settings.forwardDomainContainsApp",
+                       "the app domain (%s) would become a forward subdomain — "
+                       "pick a domain that does NOT contain it (e.g. apps.%s)" % (app_host, d),
+                       vars={"app_host": app_host, "domain": d})
     await _set_setting("forward_domain", d)
     await load_forward_domain()
     return await _forward_settings_json()
@@ -2097,12 +2366,90 @@ def _backup_filename() -> str:
     return "webterm-backup-%s.wtbk" % time.strftime("%Y%m%d-%H%M%S")
 
 
+# ── backup programat: scadenţă, rulare, stare persistată ────────────────────────
+# Chei în app_settings (fără schimbare de schemă):
+#   backup_last        ts al ultimului backup programat REUŞIT (scadenţa se calculează faţă de el)
+#   backup_last_run    JSON {ts, ok, name, error}: ultima ÎNCERCARE, reuşită sau nu
+#   backup_last_error  JSON {ts, error, stage}: ultimul eşec; GOLIT la următorul succes complet
+#   backup_seen        ts până la care userul a „văzut" starea (stinge punctul de pe rotiţă)
+_backup_lock = asyncio.Lock()           # niciodată două backup-uri simultan (tick + catch-up)
+
+
+async def _get_json_setting(key: str) -> dict:
+    try:
+        return json.loads(await _get_setting(key, "") or "") or {}
+    except ValueError:
+        return {}
+
+
+async def _backup_needs_attention() -> bool:
+    last = float(await _get_setting("backup_last", "0") or 0)
+    err_ts = float((await _get_json_setting("backup_last_error")).get("ts") or 0)
+    seen = float(await _get_setting("backup_seen", "0") or 0)
+    return max(last, err_ts) > seen
+
+
+async def scheduled_backup_tick(now: float | None = None, force: bool = False) -> dict:
+    """Un „tick" al scheduler-ului: dacă backup-ul programat e scadent, îl face ACUM.
+
+    Scadenţa = faţă de ultimul backup REUŞIT (`backup.is_due`), nu faţă de boot — deci o
+    rulare pierdută (gateway oprit / crash-loop / health-gate la deploy) se recuperează la
+    primul tick după pornire (audit G-13). Eşecul se PERSISTĂ în `backup_last_error`, ridică
+    punctul de notificare şi trimite alerta pe email/webhook (dacă sunt configurate); succesul
+    complet (local + off-host, dacă există) îl goleşte. Întoarce un dict de diagnostic
+    (`skipped` / `ok` / `error`) — util testelor şi logului."""
+    now = time.time() if now is None else now
+    sched = await _get_setting("backup_schedule", "off")
+    if sched not in ("daily", "weekly") and not force:
+        return {"skipped": "off"}
+    last_ok = float(await _get_setting("backup_last", "0") or 0)
+    if not force and not backup.is_due(sched, last_ok, now):
+        return {"skipped": "not_due", "next_due": backup.next_due(sched, last_ok, now)}
+    if _backup_lock.locked():
+        return {"skipped": "running"}       # un alt tick (sau un catch-up) e deja în lucru
+    async with _backup_lock:
+        inc = (await _get_setting("backup_include_tx", "0")) == "1"
+        try:
+            name = await asyncio.to_thread(backup.run_scheduled_backup, inc)
+        except Exception as e:              # noqa: BLE001 — orice eşec trebuie VĂZUT, nu doar logat
+            err = str(e)[:300] or e.__class__.__name__
+            log.exception("the scheduled backup failed")
+            await _set_setting("backup_last_run", json.dumps(
+                {"ts": now, "ok": False, "name": "", "error": err}))
+            await _set_setting("backup_last_error", json.dumps(
+                {"ts": now, "error": err, "stage": "snapshot"}))
+            try:
+                email_alerts.notify_local_backup_failed(err, last_ok)
+            except Exception:               # noqa: BLE001 — alerta nu rupe programarea
+                log.exception("backup-failure alert could not be sent")
+            return {"error": err}
+        await _set_setting("backup_last", str(now))
+        await _set_setting("backup_last_run", json.dumps(
+            {"ts": now, "ok": True, "name": name, "error": ""}))
+        log.info("scheduled backup (%s) written: %s", sched, name)
+        # copie off-host, dacă e configurat un cloud: criptată cu parola userului; eşecul
+        # NU invalidează backup-ul local, dar apare ca eroare (cu destinaţia) şi în secţiunea
+        # de backup, nu doar în cea de cloud (audit G-14 / UX §7.f2)
+        cloud_err = await cloudbackup.upload_scheduled(name)
+        if cloud_err:
+            await _set_setting("backup_last_error", json.dumps(
+                {"ts": time.time(), "error": cloud_err, "stage": "cloud"}))
+            return {"ok": True, "name": name, "error": cloud_err}
+        await _set_setting("backup_last_error", "")
+        return {"ok": True, "name": name}
+
+
 @router.get("/api/backup/status")
 async def backup_status(user=Depends(security.require_user)):
+    sched = await _get_setting("backup_schedule", "off")
+    last = float(await _get_setting("backup_last", "0") or 0)
     return {
-        "schedule": await _get_setting("backup_schedule", "off"),
+        "schedule": sched,
         "include_transcripts": (await _get_setting("backup_include_tx", "0")) == "1",
-        "last_scheduled": float(await _get_setting("backup_last", "0") or 0),
+        "last_scheduled": last,
+        "last_run": (await _get_json_setting("backup_last_run")) or None,
+        "last_error": (await _get_json_setting("backup_last_error")) or None,
+        "next_due": backup.next_due(sched, last),
         "backups": backup.list_backups(),
         "retention_days": backup.RETENTION_DAYS,
     }
@@ -2112,11 +2459,12 @@ async def backup_status(user=Depends(security.require_user)):
 async def backup_download(body: BackupIn, user=Depends(security.require_user)):
     await _require_reauth_for_secret(user, body.current_password, "downloading the backup")
     if len(body.passphrase) < 8:
-        raise HTTPException(400, "the encryption passphrase must be at least 8 characters")
+        raise ApiError(400, "backup.passphraseTooShort", "the encryption passphrase must be at least 8 characters")
     try:
         blob = await asyncio.to_thread(backup.make_encrypted, body.passphrase, body.include_transcripts)
     except Exception as e:
-        raise HTTPException(500, "backup failed: %s" % e)
+        log.exception("backup failed")
+        raise ApiError(500, "backup.failed", "backup failed: %s" % e)
     return Response(content=blob, media_type="application/octet-stream",
                     headers={"Content-Disposition": 'attachment; filename="%s"' % _backup_filename()})
 
@@ -2125,13 +2473,13 @@ async def backup_download(body: BackupIn, user=Depends(security.require_user)):
 async def backup_download_stored(name: str, body: RestoreIn, user=Depends(security.require_user)):
     await _require_reauth_for_secret(user, body.current_password, "downloading the backup")
     if len(body.passphrase) < 8:
-        raise HTTPException(400, "the encryption passphrase must be at least 8 characters")
+        raise ApiError(400, "backup.passphraseTooShort", "the encryption passphrase must be at least 8 characters")
     try:
         blob = await asyncio.to_thread(backup.encrypt_stored, name, body.passphrase)
     except FileNotFoundError:
         raise ApiError(404, "backup.missing", "no such backup")
     except ValueError as e:
-        raise HTTPException(400, str(e))
+        raise _backup_value_error(e)
     return Response(content=blob, media_type="application/octet-stream",
                     headers={"Content-Disposition": 'attachment; filename="%s"' % _backup_filename()})
 
@@ -2143,22 +2491,23 @@ async def backup_restore(request: Request, user=Depends(security.require_user)):
     # care reverse-proxy-ul nu-l loghează.
     passphrase = urllib.parse.unquote(request.headers.get("X-Restore-Pass", ""))
     if not passphrase:
-        raise HTTPException(400, "the backup passphrase is missing")
+        raise ApiError(400, "backup.passphraseMissing", "the backup passphrase is missing")
     # restore = ÎNLOCUIREA bazei de date, deci şi a conturilor: cu un cookie furat, cineva
     # ar putea încărca o arhivă a lui şi ar prelua instanţa. Aceeaşi clasă cu descărcarea.
     await _require_reauth_for_secret(
         user, urllib.parse.unquote(request.headers.get("X-Reauth-Pass", "")), "restore")
     data = await request.body()
     if len(data) > 512 * 1024 * 1024:
-        raise HTTPException(413, "file too large")
+        raise ApiError(413, "backup.tooLarge", "file too large")
     if not data:
-        raise HTTPException(400, "empty file")
+        raise ApiError(400, "backup.emptyFile", "empty file")
     try:
         info = await asyncio.to_thread(backup.stage_restore, data, passphrase)
     except ValueError as e:
-        raise HTTPException(400, str(e))       # parolă greșită / fișier corupt / DB invalid
+        raise _backup_value_error(e)           # parolă greșită / fișier corupt / DB invalid
     except Exception as e:
-        raise HTTPException(500, "restore failed: %s" % e)
+        log.exception("restore failed")
+        raise ApiError(500, "backup.restoreFailed", "restore failed: %s" % e)
     # aplicarea reală se face la boot (apply_pending_restore) după restart. Repornim
     # procesul după ce răspunsul pleacă — containerul (restart: unless-stopped) revine.
     async def _restart_soon():
@@ -2172,7 +2521,7 @@ async def backup_restore(request: Request, user=Depends(security.require_user)):
 @router.post("/api/backup/schedule")
 async def backup_schedule(body: BackupScheduleIn, user=Depends(security.require_user)):
     if body.schedule not in ("off", "daily", "weekly"):
-        raise HTTPException(400, "invalid schedule (off/daily/weekly)")
+        raise ApiError(400, "backup.badSchedule", "invalid schedule (off/daily/weekly)")
     await _set_setting("backup_schedule", body.schedule)
     await _set_setting("backup_include_tx", "1" if body.include_transcripts else "0")
     return await backup_status(user)
@@ -2186,13 +2535,16 @@ async def backup_delete_stored(name: str, user=Depends(security.require_user)):
     try:
         p.unlink()
     except FileNotFoundError:
-        raise HTTPException(404)
+        raise ApiError(404, "backup.missing", "no such backup")
     return {"ok": True}
 
 
 @router.post("/api/backup/seen")
 async def backup_seen(user=Depends(security.require_user)):
-    await _set_setting("backup_seen", await _get_setting("backup_last", "0") or "0")
+    # „văzut" acoperă şi ultimul eşec, nu doar ultimul succes (tab-ul Backup arată ambele)
+    last = float(await _get_setting("backup_last", "0") or 0)
+    err_ts = float((await _get_json_setting("backup_last_error")).get("ts") or 0)
+    await _set_setting("backup_seen", str(max(last, err_ts)))
     return {"ok": True}
 
 
@@ -2250,7 +2602,7 @@ async def cloud_config(body: CloudConfigIn, user=Depends(security.require_user))
         await cloudbackup.save_config(body.provider, body.client_id, body.client_secret,
                                       body.passphrase, body.keep, body.include_transcripts)
     except cloudbackup.CloudError as e:
-        raise HTTPException(400, str(e))
+        raise _cloud_api_error(e)
     return await cloudbackup.status()
 
 
@@ -2263,7 +2615,7 @@ async def cloud_probe(body: ProbeIn, request: Request, user=Depends(security.req
     try:
         return await cloudbackup.probe(body.host, body.port, body.user, body.ssh_key, body.password)
     except cloudbackup.CloudError as e:
-        raise HTTPException(400, str(e))
+        raise _cloud_api_error(e)
 
 
 @router.post("/api/backup/cloud/direct")
@@ -2279,7 +2631,7 @@ async def cloud_config_direct(body: DirectConfigIn, request: Request,
             body.kind, body.host, body.port, body.user, body.path, body.ssh_key, body.password,
             body.hostkey, body.ca, body.passphrase, body.keep, body.include_transcripts)
     except cloudbackup.CloudError as e:
-        raise HTTPException(400, str(e))
+        raise _cloud_api_error(e)
     await audit.record(time.time(), user["email"], security.client_ip(request), "POST",
                        "/api/backup/cloud/direct", 200,
                        "destinaţie backup %s setată: %s@%s" % (body.kind, body.user, body.host))
@@ -2291,7 +2643,7 @@ async def cloud_authorize(user=Depends(security.require_user)):
     try:
         return {"url": await cloudbackup.authorize_url(user["id"])}
     except cloudbackup.CloudError as e:
-        raise HTTPException(400, str(e))
+        raise _cloud_api_error(e)
 
 
 @router.get("/api/backup/cloud/callback")
@@ -2324,7 +2676,7 @@ async def cloud_upload_now(user=Depends(security.require_user)):
     try:
         name = await cloudbackup.upload_backup()
     except cloudbackup.CloudError as e:
-        raise HTTPException(400, str(e))
+        raise _cloud_api_error(e)
     return {"ok": True, "name": name, "status": await cloudbackup.status()}
 
 
@@ -2378,7 +2730,7 @@ async def changelog(user=Depends(security.require_user)):
     try:
         text = await asyncio.to_thread(config.CHANGELOG_FILE.read_text, "utf-8")
     except OSError:
-        raise HTTPException(404, "changelog is not available on this gateway")
+        raise ApiError(404, "changelog.unavailable", "changelog is not available on this gateway")
     return {"text": text, "version": config.GATEWAY_VERSION}
 
 
@@ -2388,11 +2740,12 @@ async def signing_generate(body: SigningGenIn, user=Depends(security.require_use
     if signing.key_exists():
         raise ApiError(409, "signing.exists", "a fleet signing key already exists")
     if body.passphrase and len(body.passphrase) < 8:
-        raise HTTPException(400, "the key passphrase must be at least 8 characters")
+        raise ApiError(400, "signing.passphraseTooShort", "the key passphrase must be at least 8 characters")
     try:
         await asyncio.to_thread(signing.generate, body.passphrase or None)
     except Exception as e:
-        raise HTTPException(500, "generation failed: %s" % e)
+        log.exception("signing key generation failed")
+        raise ApiError(500, "signing.generateFailed", "generation failed: %s" % e)
     return _signing_status()
 
 
@@ -2402,14 +2755,15 @@ async def signing_import(body: SigningImportIn, user=Depends(security.require_us
     if signing.key_exists():
         raise ApiError(409, "signing.exists", "a fleet signing key already exists")
     if body.store_passphrase and len(body.store_passphrase) < 8:
-        raise HTTPException(400, "the storage passphrase must be at least 8 characters")
+        raise ApiError(400, "signing.passphraseTooShort", "the storage passphrase must be at least 8 characters")
     try:
         await asyncio.to_thread(signing.import_key, body.pem.encode(),
                                 body.load_passphrase or None, body.store_passphrase or None)
     except ValueError as e:
-        raise HTTPException(400, str(e))
+        raise _signing_value_error(e)
     except Exception as e:
-        raise HTTPException(500, "import failed: %s" % e)
+        log.exception("signing key import failed")
+        raise ApiError(500, "signing.importFailed", "import failed: %s" % e)
     return _signing_status()
 
 
@@ -2425,7 +2779,7 @@ async def signing_unlock(body: SigningPassIn, user=Depends(security.require_user
     await _require_reauth_for_secret(user, body.current_password, "unlocking the signing key")
     okk = await asyncio.to_thread(signing.load, body.passphrase or None)
     if not okk:
-        raise HTTPException(403, "wrong password")
+        raise ApiError(403, "auth.wrongPassword", "wrong password")
     return _signing_status()
 
 
@@ -2446,11 +2800,12 @@ async def signing_backup(body: SigningPassIn, user=Depends(security.require_user
     if not signing.key_exists():
         raise ApiError(404, "signing.missing", "no signing key")
     if len(body.passphrase) < 8:
-        raise HTTPException(400, "the encryption passphrase must be at least 8 characters")
+        raise ApiError(400, "backup.passphraseTooShort", "the encryption passphrase must be at least 8 characters")
     try:
         blob = await asyncio.to_thread(backup.encrypt, signing.key_bytes(), body.passphrase)
     except Exception as e:
-        raise HTTPException(500, "backup failed: %s" % e)
+        log.exception("backup failed")
+        raise ApiError(500, "backup.failed", "backup failed: %s" % e)
     return Response(content=blob, media_type="application/octet-stream",
                     headers={"Content-Disposition": 'attachment; filename="webterm-signing-key.wtbk"'})
 
@@ -2473,9 +2828,9 @@ async def host_run(host_id: int, body: RunIn, request: Request,
     await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)   # H1
     cmd = body.command.strip()
     if not cmd:
-        raise HTTPException(400, "empty command")
+        raise ApiError(400, "run.empty", "empty command")
     if len(cmd) > 8000:
-        raise HTTPException(400, "command too long")
+        raise ApiError(400, "run.tooLong", "command too long")
     # Guardrail-ul de comenzi era verificat DOAR client-side, la Enter în browser. Pe tastarea
     # directă în PTY aşa şi rămâne (nu inspectăm fluxul de taste), dar `/run` e un punct de
     # strangulare curat: cine ocoleşte UI-ul ocolea şi regula. Semnalat de auditul extern
@@ -2483,20 +2838,21 @@ async def host_run(host_id: int, body: RunIn, request: Request,
     # nu poate deschide un dialog, dar poate pretinde că cineva a răspuns la el.
     rule = await _match_guard_rule(cmd)
     if rule and rule["action"] == "block":
-        raise HTTPException(403, "command blocked by a guardrail: /%s/" % rule["pattern"])
+        raise ApiError(403, "run.guardBlocked", "command blocked by a guardrail: /%s/" % rule["pattern"],
+                       vars={"pattern": rule["pattern"]})
     if rule and not body.confirmed:
-        raise HTTPException(409, "command flagged for confirmation by a guardrail: /%s/"
-                                 % rule["pattern"])
+        raise ApiError(409, "run.guardConfirm", "command flagged for confirmation by a guardrail: /%s/"
+                       % rule["pattern"], vars={"pattern": rule["pattern"]})
     cmd_timeout = min(max(int(body.timeout), 1), 300)
     conn = core.source_for(host_id)
     if not isinstance(conn, core.AgentConnection):
-        raise HTTPException(409, "host offline or has no agent")
+        raise ApiError(409, "host.offline", "host offline or has no agent")
     try:
         resp = await conn.run_command(cmd, cmd_timeout)
     except (core.AgentGone, TimeoutError, asyncio.TimeoutError):
-        raise HTTPException(504, "the host did not answer in time")
+        raise ApiError(504, "host.noAnswer", "the host did not answer in time")
     if not resp.get("ok"):
-        raise HTTPException(502, resp.get("msg") or "run failed")
+        raise ApiError(502, "run.failed", resp.get("msg") or "run failed")
     hrow = await db.fetchone("SELECT name FROM hosts WHERE id=?", host_id)
     await _record_history(host_id, hrow["name"] if hrow else "", cmd,
                           resp.get("exit_code"), "", "fleet")
@@ -2525,7 +2881,7 @@ class GitIn(BaseModel):
 async def host_git(host_id: int, body: GitIn, user=Depends(security.require_user)):
     await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)   # H1
     if not body.args or body.args[0] not in _GIT_SUBCMDS:
-        raise HTTPException(400, "git subcommand not allowed")
+        raise ApiError(400, "git.badSubcommand", "git subcommand not allowed")
     cwd = (body.cwd or "").strip()
     if not cwd.startswith("/"):
         raise ApiError(400, "git.cwdAbsolute", "cwd must be an absolute path")
@@ -2535,16 +2891,16 @@ async def host_git(host_id: int, body: GitIn, user=Depends(security.require_user
     # spații, ghilimele sau `;` nu poate rupe comanda sau injecta alta.
     cmd = " ".join(shlex.quote(p) for p in (["git", "-C", cwd] + list(body.args)))
     if len(cmd) > 8000:
-        raise HTTPException(400, "command too long")
+        raise ApiError(400, "run.tooLong", "command too long")
     conn = core.source_for(host_id)
     if not isinstance(conn, core.AgentConnection):
-        raise HTTPException(409, "host offline or has no agent")
+        raise ApiError(409, "host.offline", "host offline or has no agent")
     try:
         resp = await conn.run_command(cmd, 30)
     except (core.AgentGone, TimeoutError, asyncio.TimeoutError):
-        raise HTTPException(504, "the host did not answer in time")
+        raise ApiError(504, "host.noAnswer", "the host did not answer in time")
     if not resp.get("ok"):
-        raise HTTPException(502, resp.get("msg") or "run failed")
+        raise ApiError(502, "run.failed", resp.get("msg") or "run failed")
     return {"exit_code": resp.get("exit_code"), "stdout": resp.get("stdout", ""),
             "stderr": resp.get("stderr", "")}
 
@@ -2578,7 +2934,7 @@ async def _docker_run(host_id: int, argv: list[str], timeout: int = 20) -> dict:
     şi păstrăm răspunsul original (mesajul „adaugă-l în grupul docker"). Întoarce răspunsul brut."""
     conn = core.source_for(host_id)
     if not isinstance(conn, core.AgentConnection):
-        raise HTTPException(409, "host offline or has no agent")
+        raise ApiError(409, "host.offline", "host offline or has no agent")
     cmd = " ".join(shlex.quote(p) for p in (["docker"] + argv))
     try:
         resp = await conn.run_command(cmd, timeout)
@@ -2588,9 +2944,9 @@ async def _docker_run(host_id: int, argv: list[str], timeout: int = 20) -> dict:
             if alt.get("ok") and alt.get("exit_code") == 0:
                 return alt
     except (core.AgentGone, TimeoutError, asyncio.TimeoutError):
-        raise HTTPException(504, "the host did not answer in time")
+        raise ApiError(504, "host.noAnswer", "the host did not answer in time")
     if not resp.get("ok"):
-        raise HTTPException(502, resp.get("msg") or "run failed")
+        raise ApiError(502, "run.failed", resp.get("msg") or "run failed")
     return resp
 
 
@@ -2601,7 +2957,7 @@ async def docker_list(host_id: int, kind: str, user=Depends(security.require_use
     await _require_host_stepup(host_id, user)   # citeşte date de pe host → aceeaşi poartă ca fs_list
     argv = _DOCKER_KINDS.get(kind)
     if not argv:
-        raise HTTPException(400, "unknown docker kind")
+        raise ApiError(400, "docker.badKind", "unknown docker kind")
     resp = await _docker_run(host_id, argv)
     ec, out, err = resp.get("exit_code"), resp.get("stdout", ""), (resp.get("stderr") or "")
     if ec != 0:
@@ -2612,11 +2968,17 @@ async def docker_list(host_id: int, kind: str, user=Depends(security.require_use
             raise ApiError(400, "docker.absent", "docker is not installed on this host")
         if _docker_denied(err):
             # am încercat deja `sudo -n` în _docker_run şi tot a picat → ghidăm userul să dea acces
+            # Onest (audit 2026-10-04, LOW #8): accesul la socketul docker ESTE root pe host, deci
+            # orice remediu renunţă la bariera userului dedicat din THREAT-MODEL. O spunem, nu o
+            # ascundem după comandă; regula sudoers îngustă e preferată (explicită, jurnalizată,
+            # merge imediat prin fallback-ul `sudo -n` de mai sus, fără restart de agent).
             raise ApiError(400, "docker.denied",
-                           "the agent's user isn't in the docker group (and has no passwordless "
-                           "sudo). On the host, as root: usermod -aG docker <agent-user>, then "
-                           "restart the agent.")
-        raise HTTPException(400, err.strip()[:300] or "docker failed")
+                           "the agent's user isn't in the docker group and has no passwordless sudo. "
+                           "Either fix makes that user root-equivalent on the host (docker access is "
+                           "root) and gives up the dedicated-user barrier from the threat model — "
+                           "grant it deliberately, as root: a sudoers rule limited to docker "
+                           "(preferred), or usermod -aG docker <agent-user> and restart the agent.")
+        raise ApiError(400, "docker.failed", err.strip()[:300] or "docker failed")
     rows = []
     for line in out.splitlines():
         line = line.strip()
@@ -2642,13 +3004,13 @@ async def docker_action(host_id: int, body: DockerAction, request: Request,
     """start/stop/restart pe un container. Acţiune pe host → aceeaşi poartă de step-up ca /run."""
     await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
     if body.action not in _DOCKER_ACTIONS:
-        raise HTTPException(400, "unknown docker action")
+        raise ApiError(400, "docker.badAction", "unknown docker action")
     if not _DOCKER_ID.match(body.container or ""):
-        raise HTTPException(400, "invalid container id")
+        raise ApiError(400, "docker.badContainer", "invalid container id")
     audit.detail(request, "docker %s %s" % (body.action, body.container))
     resp = await _docker_run(host_id, [body.action, body.container], timeout=30)
     if resp.get("exit_code") != 0:
-        raise HTTPException(400, (resp.get("stderr") or "docker failed").strip()[:300])
+        raise ApiError(400, "docker.failed", (resp.get("stderr") or "docker failed").strip()[:300])
     return {"ok": True}
 
 
@@ -2659,7 +3021,7 @@ async def docker_logs(host_id: int, container: str, user=Depends(security.requir
     # ca la orice citire de date de pe host (fs_read/fs_preview)
     await _require_host_stepup(host_id, user)
     if not _DOCKER_ID.match(container or ""):
-        raise HTTPException(400, "invalid container id")
+        raise ApiError(400, "docker.badContainer", "invalid container id")
     resp = await _docker_run(host_id, ["logs", "--tail", "500", "--timestamps", container], timeout=20)
     # docker logs scrie şi pe stderr (log-urile aplicaţiei) — le concatenăm în ordinea uzuală
     return {"logs": (resp.get("stdout", "") + resp.get("stderr", ""))[:200000]}
@@ -2670,13 +3032,13 @@ async def docker_logs(host_id: int, container: str, user=Depends(security.requir
 async def _host_run(host_id: int, cmd: str, timeout: int = 20) -> dict:
     conn = core.source_for(host_id)
     if not isinstance(conn, core.AgentConnection):
-        raise HTTPException(409, "host offline or has no agent")
+        raise ApiError(409, "host.offline", "host offline or has no agent")
     try:
         resp = await conn.run_command(cmd, timeout)
     except (core.AgentGone, TimeoutError, asyncio.TimeoutError):
-        raise HTTPException(504, "the host did not answer in time")
+        raise ApiError(504, "host.noAnswer", "the host did not answer in time")
     if not resp.get("ok"):
-        raise HTTPException(502, resp.get("msg") or "run failed")
+        raise ApiError(502, "run.failed", resp.get("msg") or "run failed")
     return resp
 
 
@@ -2704,7 +3066,7 @@ async def services_list(host_id: int, failed: bool = False, user=Depends(securit
         low = err.lower()
         if "not found" in low or "command not found" in low or "no such file" in low:
             raise ApiError(400, "services.absent", "systemctl is not available on this host")
-        raise HTTPException(400, err.strip()[:300] or "systemctl failed")
+        raise ApiError(400, "services.failed", err.strip()[:300] or "systemctl failed")
     rows = []
     for line in out.splitlines():
         # marcajul de stare din prima coloană (●/×) apare doar cu --legend; --plain îl omite,
@@ -2732,14 +3094,14 @@ async def service_action(host_id: int, body: ServiceAction, request: Request,
     cu „access denied" — surfaced ca atare, nu tăcut."""
     await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
     if body.action not in _SERVICE_ACTIONS:
-        raise HTTPException(400, "unknown service action")
+        raise ApiError(400, "services.badAction", "unknown service action")
     if not _UNIT_RE.match(body.unit or ""):
-        raise HTTPException(400, "invalid unit name")
+        raise ApiError(400, "services.badUnit", "invalid unit name")
     audit.detail(request, "service %s %s" % (body.action, body.unit))
     resp = await _host_run(host_id,
         "systemctl %s %s" % (shlex.quote(body.action), shlex.quote(body.unit)), timeout=30)
     if resp.get("exit_code") != 0:
-        raise HTTPException(400, (resp.get("stderr") or "systemctl failed").strip()[:300])
+        raise ApiError(400, "services.failed", (resp.get("stderr") or "systemctl failed").strip()[:300])
     return {"ok": True}
 
 
@@ -2806,7 +3168,7 @@ async def diag_probe(host_id: int, kind: str = "storage", user=Depends(security.
     await _require_host_stepup(host_id, user)
     recipe = _DIAG_PROBES.get(kind)
     if not recipe:
-        raise HTTPException(400, "unknown probe")
+        raise ApiError(400, "diag.badProbe", "unknown probe")
     resp = await _host_run(host_id, recipe, timeout=25)
     return {"text": (resp.get("stdout", "") or "")[:60000]}
 
@@ -2926,7 +3288,12 @@ def _validate_connection(body: ConnectionIn) -> None:
 
 
 @router.get("/api/hosts/{host_id}/connections")
-async def list_connections(host_id: int, user=Depends(security.require_user)):
+async def list_connections(host_id: int, stepup_grant: str = "", stepup_password: str = "",
+                           user=Depends(security.require_user)):
+    # Aceeaşi poartă ca `list_forwards`: lista arată `target_host:target_port`, user, dbname şi
+    # motor pentru fiecare bază de pe host — harta internă a datelor. Create/patch/delete pe
+    # aceeaşi resursă cereau step-up; citirea o dădea gratis unui cookie furat (audit 2026-10-04).
+    await _require_host_stepup(host_id, user, stepup_grant, stepup_password)
     rows = await db.fetchall("SELECT * FROM connections WHERE host_id=? ORDER BY label", host_id)
     return {"connections": [_connection_json(r) for r in rows]}
 
@@ -2934,7 +3301,7 @@ async def list_connections(host_id: int, user=Depends(security.require_user)):
 @router.post("/api/hosts/{host_id}/connections")
 async def create_connection(host_id: int, body: ConnectionIn, user=Depends(security.require_user)):
     if not await db.fetchone("SELECT id FROM hosts WHERE id=?", host_id):
-        raise HTTPException(404)
+        raise ApiError(404, "host.missing", "no such host")
     # H1: o conexiune `stored` ţine o parolă DB care poate fi exfiltrată redirectând target_host →
     # pe host-uri 2FA orice mutaţie CRUD trebuie să coste un factor (ca /forwards, /run). audit v53.
     await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
@@ -2953,7 +3320,7 @@ async def create_connection(host_id: int, body: ConnectionIn, user=Depends(secur
 async def update_connection(host_id: int, conn_id: int, body: ConnectionIn,
                             user=Depends(security.require_user)):
     if not await db.fetchone("SELECT id FROM connections WHERE id=? AND host_id=?", conn_id, host_id):
-        raise HTTPException(404)
+        raise ApiError(404, "connection.missing", "no such connection")
     await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)   # H1 (audit v53)
     _validate_connection(body)
     await db.execute(
@@ -3067,7 +3434,7 @@ async def create_split_view(body: SplitViewIn, user=Depends(security.require_use
 async def update_split_view(sv_id: int, body: SplitViewIn, user=Depends(security.require_user)):
     row = await db.fetchone("SELECT * FROM split_views WHERE id=? AND user_id=?", sv_id, user["id"])
     if not row:
-        raise HTTPException(404)
+        raise ApiError(404, "splitview.missing", "no such split view")
     sets, vals = [], []
     if body.name is not None:
         name = body.name.strip()[:80]
@@ -3148,7 +3515,7 @@ async def wake_host(host_id: int, request: Request, user=Depends(security.requir
     diagnosticul lui (NU după `agent_ip`, care e IP-ul public văzut prin NAT)."""
     row = await db.fetchone("SELECT * FROM hosts WHERE id=?", host_id)
     if not row:
-        raise HTTPException(404)
+        raise ApiError(404, "host.missing", "no such host")
     if (row["connection_type"] or "agent") != "agent":
         raise ApiError(400, "wake.notAgent", "Wake-on-LAN is only for agent hosts")
     await _require_host_stepup(host_id, user)   # acţiune de host
@@ -3184,13 +3551,13 @@ async def wake_host(host_id: int, request: Request, user=Depends(security.requir
     try:
         resp = await peer_conn.wake(mac, broadcast=bcast)
     except (core.AgentGone, TimeoutError, asyncio.TimeoutError):
-        raise HTTPException(504, "the neighbour agent did not answer in time")
+        raise ApiError(504, "wake.noAnswer", "the neighbour agent did not answer in time")
     if not resp.get("ok"):
         # agent < v50 răspunde err("bad_op", "wake") — msg-ul e literalul "wake", inutil ca text;
         # traducem noi. (Aproape de neatins acum, că selecţia filtrează v49 — dar corect oricum.)
         if resp.get("code") == "bad_op":
-            raise HTTPException(502, "wake failed: the neighbour agent is older than v50")
-        raise HTTPException(502, resp.get("msg") or "wake failed")
+            raise ApiError(502, "wake.oldPeer", "wake failed: the neighbour agent is older than v50")
+        raise ApiError(502, "wake.failed", resp.get("msg") or "wake failed")
     return {"ok": True, "via": peer_name, "mac": resp.get("sent", mac)}
 
 
@@ -3398,16 +3765,71 @@ async def audit_list(limit: int = 200, before: float = 0.0, q: str = "",
             "retention_days": config.AUDIT_RETENTION_DAYS}
 
 
+class HostKeyAcceptIn(BaseModel):
+    stepup_grant: str = ""
+    stepup_password: str = ""
+
+
+@router.get("/api/hosts/{host_id}/hostkey")
+async def host_hostkey(host_id: int, user=Depends(security.require_user)):
+    """Starea pinului de host-key al unui host SSH (direct/jump): amprenta curentă (cea pinată,
+    sau cea OFERITĂ dacă e o alarmă activă), cea anterioară şi momentul schimbării — ca omul să
+    poată compara cu `ssh-keygen -lf /etc/ssh/ssh_host_*_key.pub` pe server, out-of-band."""
+    row = await db.fetchone("SELECT id, known_hosts, hostkey_alarm FROM hosts WHERE id=?", host_id)
+    if not row:
+        raise ApiError(404, "host.missing", "no such host")
+    alarm = _hostkey_alarm(row)
+    pinned_fp = core.hostkey_fingerprint(row["known_hosts"] or "")
+    if alarm:
+        return {"fingerprint": alarm["new_fp"], "previous": alarm["old_fp"] or pinned_fp,
+                "changed_at": alarm["changed_at"], "pinned": bool(row["known_hosts"]), "alarm": True}
+    return {"fingerprint": pinned_fp, "previous": None, "changed_at": None,
+            "pinned": bool(row["known_hosts"]), "alarm": False}
+
+
+@router.post("/api/hosts/{host_id}/hostkey/accept")
+async def host_hostkey_accept(host_id: int, body: HostKeyAcceptIn, request: Request,
+                              user=Depends(security.require_user)):
+    """Re-pinează cheia NOUĂ după verificare out-of-band şi stinge alarma. Singura cale de
+    re-pin din UI — înainte trucul era „schimb portul şi-l pun la loc" (audit UX §6.e2).
+    Pe hosturile 2FA cere step-up (e echivalentul lui „ştergi known_hosts"); e auditat şi
+    alertat ca schimbare de securitate, fiindcă un accept greşit legitimează un MITM."""
+    row = await db.fetchone("SELECT id, name, known_hosts, hostkey_alarm FROM hosts WHERE id=?", host_id)
+    if not row:
+        raise ApiError(404, "host.missing", "no such host")
+    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
+    try:
+        alarm = json.loads(row["hostkey_alarm"] or "null")
+    except ValueError:
+        alarm = None
+    if not alarm:
+        raise ApiError(409, "ssh.noHostKeyAlarm", "no host-key change is pending for this host")
+    new_key = alarm.get("new_key") or ""
+    old_fp, new_fp = alarm.get("old_fp") or "?", alarm.get("new_fp") or "?"
+    if new_key:
+        await db.execute("UPDATE hosts SET known_hosts=?, hostkey_alarm=NULL WHERE id=?", new_key, host_id)
+    else:
+        # cheia oferită n-a putut fi capturată (asyncssh vechi?) → resetăm pinul: TOFU la următorul dial
+        await db.execute("UPDATE hosts SET known_hosts=NULL, hostkey_alarm=NULL WHERE id=?", host_id)
+    audit.detail(request, "host-key accepted: %s → %s" % (old_fp, new_fp))
+    await core.record_agent_event(host_id, "hostkey_accepted", reason="hostkey_accepted",
+                                  detail="%s → %s by %s" % (old_fp, new_fp, user["email"]))
+    email_alerts.notify_security_change(
+        "SSH host key re-pinned for host '%s' (%s → %s)" % (row["name"], old_fp, new_fp),
+        security.client_ip(request), user["email"])
+    return {"ok": True, "fingerprint": new_fp if new_key else None, "pinned": bool(new_key)}
+
+
 @router.get("/api/hosts/{host_id}/events")
 async def host_events(host_id: int, user=Depends(security.require_user)):
     """Jurnal de conexiune al agentului (ultimele 7 zile) + starea curentă — pentru panoul
     de diagnostic: cine a conectat/deconectat şi DE CE, când a venit un update etc."""
     await _require_host_stepup(host_id, user)   # F-05: IP-uri, versiuni, motive de reconectare
     hrow = await db.fetchone(
-        "SELECT last_heartbeat, agent_version, connection_type, agent_ip, diagnostics,"
-        " diagnostics_at FROM hosts WHERE id=?", host_id)
+        "SELECT id, last_heartbeat, agent_version, connection_type, via_host_id, agent_ip,"
+        " diagnostics, diagnostics_at FROM hosts WHERE id=?", host_id)
     if not hrow:
-        raise HTTPException(404)
+        raise ApiError(404, "host.missing", "no such host")
     rows = await db.fetchall(
         "SELECT ts, event, reason, detail FROM agent_events WHERE host_id=?"
         " ORDER BY ts DESC LIMIT 200", host_id)
@@ -3420,7 +3842,7 @@ async def host_events(host_id: int, user=Depends(security.require_user)):
         except (ValueError, TypeError):
             diag = None
     return {
-        "online": conn is not None,
+        "online": _host_online(hrow),
         "last_heartbeat": hrow["last_heartbeat"],
         "agent_version": hrow["agent_version"],
         "connection_type": hrow["connection_type"],
@@ -3448,9 +3870,9 @@ async def agent_log(host_id: int, user=Depends(security.require_user)):
     try:
         return {"log": await conn.get_agent_log()}
     except core.ForwardError as e:
-        raise HTTPException(502, str(e))
+        raise ApiError(502, "agent.requestFailed", str(e) or "the agent could not answer")
     except (core.AgentGone, TimeoutError):
-        raise HTTPException(409, "host offline")
+        raise ApiError(409, "host.offline", "host offline")
 
 
 @router.post("/api/hosts/{host_id}/diagnostics/refresh")
@@ -3465,9 +3887,9 @@ async def diagnostics_refresh(host_id: int, user=Depends(security.require_user))
     try:
         return {"diagnostics": await conn.get_diagnostics()}
     except core.ForwardError as e:
-        raise HTTPException(502, str(e))
+        raise ApiError(502, "agent.requestFailed", str(e) or "the agent could not answer")
     except (core.AgentGone, TimeoutError):
-        raise HTTPException(409, "host offline")
+        raise ApiError(409, "host.offline", "host offline")
 
 
 @router.post("/api/hosts/{host_id}/forwards")
@@ -3503,7 +3925,7 @@ async def create_forward(host_id: int, body: ForwardIn,
         except sqlite3.IntegrityError:
             slug = None
     if slug is None:
-        raise HTTPException(409, "slug taken, retry")
+        raise ApiError(409, "forward.slugTaken", "slug taken, retry")
     row = await db.fetchone("SELECT * FROM port_forwards WHERE slug=?", slug)
     return _forward_json(row)
 
@@ -3586,7 +4008,7 @@ async def open_forward_telnet(fid: int, body: TelnetOpenIn,
     except core.SessionLimitReached:
         raise ApiError(409, "telnet.limit", "the telnet session limit was reached — close one first")
     except RuntimeError as e:
-        raise HTTPException(502, str(e))
+        raise _runtime_api_error(e, "session.createFailed")
 
 
 # ── Console seriale (RS232/RS485/USB) prin agent ─────────────────────────────
@@ -3610,7 +4032,7 @@ async def serial_discover(host_id: int, user=Depends(security.require_user)):
     """List the real serial ports on the host (discovery, read-only)."""
     row = await db.fetchone("SELECT id FROM hosts WHERE id=?", host_id)
     if not row:
-        raise HTTPException(404)
+        raise ApiError(404, "host.missing", "no such host")
     # H1: e pasul dinaintea deschiderii unei console seriale, pe care `serial/open` o
     # păzeşte deja — iar lista în sine spune ce echipamente sunt legate la host.
     await _require_host_stepup(host_id, user)
@@ -3626,7 +4048,7 @@ async def serial_open(host_id: int, body: SerialOpenIn, user=Depends(security.re
     step-up ca sesiunile normale."""
     row = await db.fetchone("SELECT id FROM hosts WHERE id=?", host_id)
     if not row:
-        raise HTTPException(404)
+        raise ApiError(404, "host.missing", "no such host")
     await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
     # normpath colapsează `..` ÎNAINTE de verificare: `/dev/../etc/shadow` → `/etc/shadow` → refuzat.
     # Nu e o gaură (agentul respinge oricum ne-tty-urile prin `os.isatty`, iar /dev/* e deja permis),
@@ -3647,7 +4069,7 @@ async def serial_open(host_id: int, body: SerialOpenIn, user=Depends(security.re
     except core.SessionLimitReached:
         raise ApiError(409, "serial.limit", "the serial session limit was reached — close one first")
     except RuntimeError as e:
-        raise HTTPException(502, str(e))
+        raise _runtime_api_error(e, "session.createFailed")
 
 
 # ── Routing pe subdomeniu + handshake de auth ────────────────────────────────
@@ -3664,14 +4086,39 @@ async def _forward_stepup_ok(slug: str, request: Request) -> bool:
     „n-am putut afla, deci las să treacă" e o apărare de faţadă. Dacă interogarea moare, moare
     şi căutarea ţintei de imediat după, deci cererea eşuează oricum — vizibil, nu tăcut.
     `tests/forward_stepup_test.py` execută funcţia pe o bază reală, cu schema reală, ceea ce
-    e singurul lucru care ar fi prins un nume de tabelă greşit."""
+    e singurul lucru care ar fi prins un nume de tabelă greşit.
+
+    Identitatea vine din BILETUL de forward, nu din cookie-ul de sesiune: sesiunea e `__Host-`
+    (host-only pe domeniul principal) şi nu ajunge niciodată pe `slug.<domeniu>`. Versiunea
+    care o citea de aici întorcea mereu False pe hosturile 2FA → redirect relativ → acelaşi
+    subdomeniu → aceeaşi funcţie → ERR_TOO_MANY_REDIRECTS (audit 2026-10-04): feature mort,
+    nedetectat fiindcă testul simula un cookie pe care browserul nu-l trimite."""
+    return await _forward_window_ok(slug, request.cookies.get(FWD_COOKIE))
+
+
+async def _forward_window_ok(slug: str, ticket: str | None) -> bool:
+    """Sursa unică de adevăr pentru HTTP ŞI WebSocket: pe un host 2FA, biletul e valid
+    criptografic ŞI fereastra de step-up a contului care l-a emis mai e deschisă. `uid`-ul e
+    crezut doar după verificarea semnăturii (`forward_token_uid`). Pe hosturi fără 2FA → True,
+    fără să atingă biletul (acela e verificat separat, pe ambele căi)."""
     row = await db.fetchone(
         "SELECT f.host_id, h.require_2fa FROM port_forwards f JOIN hosts h ON h.id=f.host_id"
         " WHERE f.slug=? AND f.enabled=1", slug)
     if not row or not row["require_2fa"]:
         return True
-    user = await security.user_for_token(request.cookies.get(security.COOKIE_NAME))
-    return bool(user and security.stepup_window_ok(user["id"], row["host_id"]))
+    uid = security.forward_token_uid(ticket, slug)
+    return uid is not None and security.stepup_window_ok(uid, row["host_id"])
+
+
+def _safe_next(nxt: str | None) -> str:
+    """`next` e doar o CALE pe subdomeniul de forward: refuză URL-uri absolute, `//evil`
+    (schema-relativ → alt host), `/\\evil` (browserele îl normalizează la `//`), control
+    chars şi orice duce înapoi în namespace-ul handshake-ului (`/__wtfwd/*` ca `next` ar
+    reface bucla de redirect pe care tocmai am închis-o). Altfel → rădăcina."""
+    if (not nxt or not nxt.startswith("/") or nxt.startswith(("//", "/\\", "/__wtfwd/"))
+            or any(ch in nxt for ch in "\r\n\0")):
+        return "/"
+    return nxt
 
 
 async def route_forward(request: Request):
@@ -3702,11 +4149,15 @@ async def route_forward(request: Request):
     # F-06 partea a doua: biletul e valid criptografic, dar pe un host cu 2FA întrebăm şi
     # dacă fereastra care l-a autorizat mai e deschisă. Fără asta, un tunel deja deschis
     # supravieţuia închiderii ferestrei — e o căutare într-un dict, deci practic gratis.
-    if not await _forward_stepup_ok(slug, request):
-        return RedirectResponse("/__wtfwd/auth?slug=%s&next=%s" % (
-            urllib.parse.quote(slug), urllib.parse.quote(str(request.url.path))), 302)
-    if not security.verify_forward_token(request.cookies.get(FWD_COOKIE), slug):
-        nxt = request.url.path + (("?" + request.url.query) if request.url.query else "")
+    # Ambele redirecturi sunt ABSOLUTE, către domeniul principal: acolo e sesiunea şi acolo
+    # `forward_auth` fie re-emite biletul (fereastră deschisă), fie trimite omul în SPA să
+    # redeschidă fereastra. Un redirect relativ rămânea pe subdomeniu → buclă infinită.
+    # Ordinea: biletul întâi — fără bilet nu ştim al cui e tunelul, deci nu are rost să
+    # întrebăm de vreo fereastră.
+    ticket = request.cookies.get(FWD_COOKIE)
+    if (not security.verify_forward_token(ticket, slug)
+            or not await _forward_window_ok(slug, ticket)):
+        nxt = _safe_next(request.url.path + (("?" + request.url.query) if request.url.query else ""))
         loc = "%s/__wtfwd/auth?slug=%s&next=%s" % (config.PUBLIC_URL, slug, quote(nxt, safe=""))
         return RedirectResponse(loc, status_code=302)
     # autorizat → proxy către ținta STOCATĂ (anti-SSRF: nu din URL)
@@ -3717,9 +4168,7 @@ async def route_forward(request: Request):
 
 async def _forward_set_cookie(request: Request, slug: str):
     token = request.query_params.get("t", "")
-    nxt = request.query_params.get("next", "/")
-    if not nxt.startswith("/"):                 # anti open-redirect: doar căi relative
-        nxt = "/"
+    nxt = _safe_next(request.query_params.get("next", "/"))   # anti open-redirect: doar căi relative
     if not security.verify_forward_token(token, slug):
         return PlainTextResponse("invalid or expired token", status_code=403)
     resp = RedirectResponse("%s://%s.%s%s" % (_FWD_SCHEME, slug, forward_domain(), nxt), status_code=302)
@@ -3746,6 +4195,7 @@ async def forward_auth(request: Request, slug: str, next: str = "/"):
     # step-up deja deschisă din aplicaţie şi, dacă lipseşte, trimitem omul exact acolo unde o
     # poate deschide — un 403 sec l-ar lăsa fără nicio indicaţie ce să facă.
     host = await db.fetchone("SELECT require_2fa FROM hosts WHERE id=?", row["host_id"])
+    next = _safe_next(next)                     # anti open-redirect, ÎNAINTE de orice redirect
     if host and host["require_2fa"] and not security.stepup_window_ok(user["id"], row["host_id"]):
         # Parametrii merg în QUERY, nu după hash: ruta SPA e `^#/h/(\d+)$`, ancorată la final,
         # deci `#/h/5?stepup=...` n-ar mai fi recunoscută şi omul ar ateriza pe dashboard.
@@ -3754,8 +4204,6 @@ async def forward_auth(request: Request, slug: str, next: str = "/"):
             "%s/?stepup=forward&slug=%s&next=%s#/h/%d"
             % (config.PUBLIC_URL, quote(slug, safe=""), quote(next, safe=""), row["host_id"]),
             status_code=302)
-    if not next.startswith("/"):
-        next = "/"
     # F-06: pe un host cu 2FA, biletul NU poate trăi mai mult decât autorizarea care l-a
     # emis. Înainte, un step-up de 5 minute cumpăra 12 ore de tunel — adică exact factorul
     # pe care operatorul l-a cerut nu se aplica serviciului forwardat. Browserul reface
@@ -3857,6 +4305,15 @@ async def handle_forward_ws(scope, receive, send):
             or not security.verify_forward_token(cookies.get(FWD_COOKIE), slug)):
         await send({"type": "websocket.close", "code": 1008})
         return
+    # Aceeaşi poartă ca pe HTTP (`route_forward`): pe un host 2FA, biletul singur nu ajunge —
+    # fereastra de step-up a contului din bilet trebuie să fie deschisă. Fără asta, politica
+    # „tunelul trăieşte cât fereastra" era adevărată pe HTTP şi falsă exact pe canalul
+    # interactiv (consolă web, noVNC, code-server). WS nu poate fi redirecţionat la handshake,
+    # deci închidem cu 1008 (Policy Violation) — acelaşi cod ca refuzul de bilet/Origin de mai
+    # sus; pagina forwardată reîncarcă, HTTP-ul o trimite la step-up.
+    if not await _forward_window_ok(slug, cookies.get(FWD_COOKIE)):
+        await send({"type": "websocket.close", "code": 1008})
+        return
     row = await db.fetchone("SELECT * FROM port_forwards WHERE slug=? AND enabled=1", slug)
     conn = await _ensure_forward_source(row["host_id"]) if row else None
     if not row or conn is None:
@@ -3924,10 +4381,20 @@ async def handle_forward_ws(scope, receive, send):
             # M3: token-urile de forward mor la logout / schimbare de parolă (epoch bump).
             # Verificarea de la connect e o singură dată; re-verificăm periodic ca un tunel
             # ACTIV să se închidă când owner-ul face logout — la fel ca browser_ws/shared_ws.
+            # Şi fereastra de step-up: biletul pe host 2FA trăieşte STEPUP_WINDOW_MAX (1 h), dar
+            # fereastra se închide la 5 min de inactivitate sau la `clear_stepup_for` (logout din
+            # alt tab, schimbare passkey). Doar pe bilet, un WS deja deschis rămânea viu până la
+            # 55 de minute după ce politica spunea „închis". 1008, ca la handshake.
             try:
                 while not closed.is_set():
                     await asyncio.sleep(WS_REVALIDATE_SECS)
-                    if not security.verify_forward_token(cookies.get(FWD_COOKIE), slug):
+                    ticket = cookies.get(FWD_COOKIE)
+                    if (not security.verify_forward_token(ticket, slug)
+                            or not await _forward_window_ok(slug, ticket)):
+                        try:
+                            await send({"type": "websocket.close", "code": 1008})
+                        except Exception:
+                            pass
                         break
             finally:
                 closed.set()
@@ -4028,7 +4495,7 @@ async def fs_mkdir(host_id: int, body: FsPath, user=Depends(security.require_use
     except core.AgentGone:
         raise ApiError(409, "host.offline", "the host is offline")
     except (core.FileError, TimeoutError) as e:
-        raise HTTPException(400, str(e))
+        raise _file_api_error(e)
     return {"ok": True}
 
 
@@ -4040,7 +4507,7 @@ async def fs_rename(host_id: int, body: FsRename, user=Depends(security.require_
     except core.AgentGone:
         raise ApiError(409, "host.offline", "the host is offline")
     except (core.FileError, TimeoutError) as e:
-        raise HTTPException(400, str(e))
+        raise _file_api_error(e)
     return {"ok": True}
 
 
@@ -4056,7 +4523,7 @@ async def fs_delete(host_id: int, body: FsDelete, request: Request,
     except core.AgentGone:
         raise ApiError(409, "host.offline", "the host is offline")
     except (core.FileError, TimeoutError) as e:
-        raise HTTPException(400, str(e))
+        raise _file_api_error(e)
     return {"ok": True}
 
 
@@ -4069,11 +4536,11 @@ async def update_agent(host_id: int, user=Depends(security.require_user)):
     except core.AgentGone:
         raise ApiError(409, "host.offline", "the host is offline")
     except (RuntimeError, TimeoutError) as e:
-        raise HTTPException(502, str(e))
+        raise _runtime_api_error(e, "update.failed")
     if result["deferred"]:
         # agent vechi (pre-v4) care nu onorează forțarea cât are sesiuni live
-        raise HTTPException(
-            409,
+        raise ApiError(
+            409, "update.deferred",
             "The agent is an old version and will update once you close "
             "the live sessions on this host (the new file is already staged).")
     return {"ok": True}
@@ -4138,7 +4605,7 @@ _CONN_FIELDS = ("connection_type", "hostname", "ssh_username", "ssh_port",
 async def update_host(host_id: int, host: HostPatch, user=Depends(security.require_user)):
     row = await db.fetchone("SELECT * FROM hosts WHERE id=?", host_id)
     if not row:
-        raise HTTPException(404)
+        raise ApiError(404, "host.missing", "no such host")
     given = host.model_dump(exclude_unset=True)
     # `touches_conn` = un câmp de conexiune se SCHIMBĂ efectiv, nu doar e prezent în payload.
     # UI-ul (AddHostModal) trimite MEREU `connection_type`, chiar şi la o redenumire pură, deci
@@ -4179,28 +4646,55 @@ async def update_host(host_id: int, host: HostPatch, user=Depends(security.requi
     if new_type in ("ssh", "ssh-jump") and not ssh_username:
         raise ApiError(400, "ssh.userRequired", "an SSH username is required")
     # la editarea unui jump, agentul `via` trebuie să rămână un host de tip agent (ca la creare)
-    if new_type in ("ssh-jump", "telnet-jump"):
+    if new_type in _JUMP_TYPES:
         via_id = eff("via_host_id")
-        via = await db.fetchone("SELECT connection_type FROM hosts WHERE id=?", via_id) if via_id else None
+        # Self-via: un host AGENT retipizat la jump cu `via_host_id=<propriul id>` trecea regula
+        # „via e agent" (rândul lui încă zice agent), apoi `touches_conn` îi scotea propria sursă
+        # → „agent offline" la orice conectare, fără remediu în UI. La fel un ciclu A→B→A, posibil
+        # doar pe DB-uri în care `via_host_id` a rămas agăţat pe un rând retipizat la agent
+        # (defectul de mai jos) — urcăm lanţul cu o buclă mărginită, nu avem încredere în date.
+        if via_id == host_id:
+            raise ApiError(400, "sshjump.viaLoop", "a jump host cannot route through itself")
+        via = (await db.fetchone("SELECT connection_type, via_host_id FROM hosts WHERE id=?", via_id)
+               if via_id else None)
         if not via or (via["connection_type"] or "agent") != "agent":
             raise ApiError(400, "sshjump.needsAgent", "pick an agent host to reach the target through")
+        cur, hops = via["via_host_id"], 0
+        while cur and hops < 16:
+            if cur == host_id:
+                raise ApiError(400, "sshjump.viaLoop", "the jump chain would loop back to this host")
+            nxt = await db.fetchone("SELECT via_host_id FROM hosts WHERE id=?", cur)
+            cur, hops = (nxt["via_host_id"] if nxt else None), hops + 1
+    # Un agent prin care trec ţinte jump SALVATE nu-şi poate schimba tipul: copiii ar rămâne cu
+    # `via` spre un non-agent (conectare imposibilă) şi ar dispărea din sidebar, care îi randează
+    # doar sub părinte. Acelaşi refuz ca la ştergere — operatorul re-leagă sau şterge copiii întâi.
+    if old_type == "agent" and new_type != "agent":
+        await _refuse_if_jump_children(host_id)
     # Întoarcerea la SSH după ce agentul a preluat: detaliile de conexiune supraviețuiesc
     # provisioning-ului, dar credențialul e ȘTERS dacă politica era `ephemeral`. Fără el nu
     # ne putem conecta, deci cerem unul acum, în loc să eșuăm abia la prima conectare.
     if (new_type == "ssh" and policy == "stored"
             and not given.get("credential") and not row["credential_encrypted"]):
-        raise HTTPException(400, "the host no longer has stored SSH credentials "
-                                 "(removed when the agent was installed) — enter the password or key")
+        raise ApiError(400, "host.noStoredCredentials",
+                       "the host no longer has stored SSH credentials "
+                       "(removed when the agent was installed) — enter the password or key")
 
     sets, vals = [], []
     for col, key in (("name", "name"), ("note", "note"), ("folder", "folder"),
                      ("hostname", "hostname"), ("ssh_username", "ssh_username"),
-                     ("auth_method", "auth_method"), ("credential_policy", "credential_policy"),
-                     ("via_host_id", "via_host_id")):
+                     ("auth_method", "auth_method"), ("credential_policy", "credential_policy")):
         if key in given:
             v = given[key]
             sets.append(f"{col}=?")
             vals.append(v.strip() if isinstance(v, str) else v)
+    # `via_host_id` are sens DOAR în familia jump. Când hostul iese din ea (ssh-jump → ssh/agent)
+    # îl golim explicit: altfel clientul îl considera în continuare cuibărit (`isNested`), iar un
+    # fost jump devenit agent, cu `via` agăţat, era singura cale spre un ciclu de via-uri.
+    if new_type in _JUMP_TYPES:
+        if "via_host_id" in given:
+            sets.append("via_host_id=?"); vals.append(given["via_host_id"])
+    elif row["via_host_id"] is not None or "via_host_id" in given:
+        sets.append("via_host_id=NULL")
     if "ssh_port" in given:
         sets.append("ssh_port=?"); vals.append(given["ssh_port"])
     if "tags" in given:
@@ -4228,6 +4722,7 @@ async def update_host(host_id: int, host: HostPatch, user=Depends(security.requi
                 or ("ssh_port" in given and given["ssh_port"] != row["ssh_port"]))
     if repinned:
         sets.append("known_hosts=NULL")
+        sets.append("hostkey_alarm=NULL")      # pin nou = alarma veche nu mai are obiect
     if not sets:
         return {"ok": True, "changed": False}
     vals.append(host_id)
@@ -4285,14 +4780,14 @@ async def provision_agent(host_id: int, request: Request, user=Depends(security.
     await _require_host_stepup(host_id, user)   # H1
     row = await db.fetchone("SELECT * FROM hosts WHERE id=?", host_id)
     if not row:
-        raise HTTPException(404)
+        raise ApiError(404, "host.missing", "no such host")
     if (row["connection_type"] or "agent") != "ssh":
         raise ApiError(400, "provision.sshOnly", "provisioning is only available for SSH hosts")
     # 1) conexiune SSH (creds stocate; rate-limited; pin host-key)
     await _connect_direct(row, request)
     src = core.sources.get(host_id)
     if not isinstance(src, core.SshSource):
-        raise HTTPException(502, "the SSH connection is not available")
+        raise ApiError(502, "provision.noSsh", "the SSH connection is not available")
     # 2) enroll token proaspăt + rulează installer-ul prin canalul SSH
     enroll = security.new_token()[:32]
     await db.execute("UPDATE hosts SET enroll_token=?, enroll_expires=?, instance_id=NULL WHERE id=?",
@@ -4300,7 +4795,8 @@ async def provision_agent(host_id: int, request: Request, user=Depends(security.
     try:
         result = await asyncio.wait_for(src._conn.run(_install_command(enroll), check=False), 150)
     except Exception as e:
-        raise HTTPException(502, f"install over SSH failed: {e}")
+        log.warning("install over SSH failed on host %s: %s: %s", host_id, type(e).__name__, e)
+        raise ApiError(502, "provision.installFailed", f"install over SSH failed: {e}")
     out = ((result.stdout or "") + (result.stderr or ""))[-1200:]
     # 3) TEST: așteaptă agentul să sune acasă (dovada că merge)
     connected = False
@@ -4310,7 +4806,8 @@ async def provision_agent(host_id: int, request: Request, user=Depends(security.
             connected = True
             break
     if not connected:
-        raise HTTPException(504, "the installed agent did not connect in time.\n\n" + out)
+        raise ApiError(504, "provision.agentNotConnected",
+                       "the installed agent did not connect in time.\n\n" + out)
     # 4) succes: mod agent + ștergere credențiale după politică
     delete_creds = row["credential_policy"] == "ephemeral"
     await db.execute("UPDATE hosts SET connection_type='agent' WHERE id=?", host_id)
@@ -4415,7 +4912,7 @@ async def list_snippets(user=Depends(security.require_user)):
 @router.post("/api/snippets")
 async def create_snippet(s: SnippetIn, user=Depends(security.require_user)):
     if not s.title.strip() or not s.body:
-        raise HTTPException(400, "title and body required")
+        raise ApiError(400, "snippet.required", "title and body required")
     # idempotent: același titlu+conținut nu creează un duplicat
     dup = await db.fetchone("SELECT id FROM snippets WHERE title=? AND body=?",
                             s.title.strip(), s.body)
@@ -4439,6 +4936,19 @@ async def delete_snippet(sid: int, user=Depends(security.require_user)):
     return {"ok": True}
 
 
+async def _refuse_if_jump_children(host_id: int) -> None:
+    """409 dacă sub host stau ţinte jump PERSISTENTE (`via_host_id`). Verificat ÎNAINTE de orice
+    efect ireversibil (deconectarea sursei, `uninstall` cerut agentului) — `core.purge_host` ar
+    refuza şi el, dar prea târziu. Copiii efemeri nu blochează: pleacă odată cu părintele."""
+    kids = await db.fetchall(
+        "SELECT id, name FROM hosts WHERE via_host_id=? AND id!=? AND ephemeral=0 ORDER BY name",
+        host_id, host_id)
+    if kids:
+        raise ApiError(409, "host.hasJumpChildren",
+                       "saved jump targets are routed through this host (%s); re-route or delete "
+                       "them first" % ", ".join(k["name"] for k in kids[:5]))
+
+
 @router.delete("/api/hosts/{host_id}")
 async def delete_host(host_id: int, user=Depends(security.require_user)):
     await _require_host_stepup(host_id, user)   # F-05: ştergerea unui host cu 2FA e o acţiune de host
@@ -4446,7 +4956,8 @@ async def delete_host(host_id: int, user=Depends(security.require_user)):
         "SELECT id FROM sessions WHERE host_id=? AND state IN ('creating','live')",
         host_id)
     if live:
-        raise HTTPException(409, "the host has live sessions; close them first")
+        raise ApiError(409, "host.hasLiveSessions", "the host has live sessions; close them first")
+    await _refuse_if_jump_children(host_id)
     conn = core.sources.pop(host_id, None)
     if conn:
         try:
@@ -4456,13 +4967,24 @@ async def delete_host(host_id: int, user=Depends(security.require_user)):
             await conn.disconnect()
         except Exception:
             pass
-    # Conexiunile (unele `stored`, cu parolă DB criptată) NU cad automat: PRAGMA foreign_keys nu e
-    # setat, deci FOREIGN KEY ... ON DELETE CASCADE e inactiv. Le ştergem explicit — altfel, cum
-    # id-urile de host se reutilizează (INTEGER PRIMARY KEY fără AUTOINCREMENT), un host nou ar
-    # moşteni credenţiale stocate ale celui vechi. audit v53.
-    await db.execute("DELETE FROM connections WHERE host_id=?", host_id)
-    await db.execute("DELETE FROM hosts WHERE id=?", host_id)
+    # Nimic nu cade automat: PRAGMA foreign_keys nu e setat, deci FOREIGN KEY ... ON DELETE CASCADE
+    # e inactiv, iar id-urile de host se reutilizează (INTEGER PRIMARY KEY fără AUTOINCREMENT).
+    # Aici se ştergeau doar `connections` (audit v53) — hostul următor cu acelaşi id moştenea
+    # forward-urile, sesiunile, cheia de deploy şi evenimentele celui vechi (G-12). `purge_host`
+    # curăţă TOT ce referenţiază hostul (transcripturile se arhivează, nu rămân orfane); cu
+    # curăţarea completă, reutilizarea id-ului e inofensivă — nu rescriem tabelul la AUTOINCREMENT.
+    await _purge_host_rows(host_id)
     return {"ok": True}
+
+
+async def _purge_host_rows(host_id: int) -> None:
+    """`core.purge_host` tradus în răspuns HTTP: copiii jump persistenţi → 409 cu cod stabil."""
+    try:
+        await core.purge_host(host_id)
+    except core.HostHasDependents as e:
+        raise ApiError(409, "host.hasJumpChildren",
+                       "saved jump targets are routed through this host (ids %s); re-route or "
+                       "delete them first" % ", ".join(str(c) for c in e.children[:5]))
 
 
 @router.post("/api/hosts/{host_id}/uninstall")
@@ -4475,11 +4997,12 @@ async def uninstall_host(host_id: int, force: bool = False,
     await _require_host_stepup(host_id, user)   # H1
     row = await db.fetchone("SELECT * FROM hosts WHERE id=?", host_id)
     if not row:
-        raise HTTPException(404)
+        raise ApiError(404, "host.missing", "no such host")
     live = await db.fetchone(
         "SELECT id FROM sessions WHERE host_id=? AND state IN ('creating','live')", host_id)
     if live:
-        raise HTTPException(409, "the host has live sessions; close them first")
+        raise ApiError(409, "host.hasLiveSessions", "the host has live sessions; close them first")
+    await _refuse_if_jump_children(host_id)     # înainte să-i cerem agentului să se dezinstaleze
 
     ctype = row["connection_type"] or "agent"
     uninstalled = False
@@ -4493,13 +5016,15 @@ async def uninstall_host(host_id: int, force: bool = False,
                 warnings = resp.get("warnings", []) or []
             except (core.AgentGone, asyncio.TimeoutError):
                 if not force:
-                    raise HTTPException(409, "the agent did not answer; retry while it is online, "
-                                             "or pass force=1 to drop it from WebTerm only "
-                                             "(the files stay on the server, to be cleaned up by hand)")
+                    raise ApiError(409, "host.uninstallNoAnswer",
+                                   "the agent did not answer; retry while it is online, "
+                                   "or pass force=1 to drop it from WebTerm only "
+                                   "(the files stay on the server, to be cleaned up by hand)")
         elif not force:
-            raise HTTPException(409, "the agent is offline; it cannot be uninstalled remotely "
-                                     "right now. Bring it online and retry, or pass force=1 to "
-                                     "drop it from WebTerm only.")
+            raise ApiError(409, "host.uninstallOffline",
+                           "the agent is offline; it cannot be uninstalled remotely "
+                           "right now. Bring it online and retry, or pass force=1 to "
+                           "drop it from WebTerm only.")
 
     c = core.sources.pop(host_id, None)
     if c and not uninstalled:
@@ -4507,8 +5032,7 @@ async def uninstall_host(host_id: int, force: bool = False,
             await c.disconnect()
         except Exception:
             pass
-    await db.execute("DELETE FROM connections WHERE host_id=?", host_id)   # audit v53: vezi delete_host
-    await db.execute("DELETE FROM hosts WHERE id=?", host_id)
+    await _purge_host_rows(host_id)     # curăţare completă, vezi delete_host (G-12)
     return {"ok": True, "uninstalled": uninstalled, "warnings": warnings}
 
 
@@ -4676,7 +5200,7 @@ async def host_generate_ssh_key(host_id: int, body: SessionIn, user=Depends(secu
     provisioning, deci cere step-up pe hosturile 2FA (ca update_host)."""
     row = await db.fetchone("SELECT * FROM hosts WHERE id=?", host_id)
     if not row:
-        raise HTTPException(404)
+        raise ApiError(404, "host.missing", "no such host")
     if (row["connection_type"] or "agent") != "ssh":
         raise ApiError(400, "sshkey.notSsh", "SSH key generation is only for SSH hosts")
     await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
@@ -4695,7 +5219,7 @@ async def host_ssh_key_public(host_id: int, body: SessionIn, user=Depends(securi
     known_hosts-ul pinuit. POST (nu GET) fiindcă are nevoie de credenţialele de step-up în corp."""
     row = await db.fetchone("SELECT * FROM hosts WHERE id=?", host_id)
     if not row:
-        raise HTTPException(404)
+        raise ApiError(404, "host.missing", "no such host")
     await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
     if not row["credential_encrypted"] or (row["auth_method"] or "") != "key":
         raise ApiError(400, "sshkey.none", "this host has no stored SSH key")
@@ -5231,47 +5755,89 @@ async def deploy_key_ssh_config(host_id: int, body: DeployKeyIn, request: Reques
 @router.post("/api/hosts/{host_id}/deploy-key/rotate")
 async def deploy_key_rotate(host_id: int, body: DeployKeyIn, request: Request,
                             user=Depends(security.require_user)):
-    """Rotire ghidată: generează o pereche NOUĂ pe sursă (peste cea veche), o redeployează pe
-    toate ţintele active, apoi scoate blob-ul VECHI de pe fiecare. Un singur factor proaspăt.
-    Fără fereastră fără acces: ţinta poartă simultan noua cheie înainte să dispară vechea."""
+    """Rotire ghidată, în ordinea care NU lasă sursa fără acces (audit 2026-10-04, §5):
+      1. perechea NOUĂ se generează ALĂTURI de cea veche (`webterm_ed25519.new`), nu peste ea;
+      2. noua cheie publică se deployează pe fiecare ţintă activă (cu opţiunile stocate ale muchiei)
+         — o ţintă offline/eşuată NU opreşte bucla: e marcată `missing` şi raportată;
+      3. abia apoi sursa trece pe noua cheie (mv atomic) şi evidenţa primeşte noul fingerprint;
+      4. la final scoatem blob-ul VECHI de pe ţintele unde noua cheie a aterizat.
+    Înainte, evidenţa şi cheia privată se schimbau ÎNAINTE de redeploy, iar prima ţintă offline
+    (HTTPException 409, neprinsă) întrerupea bucla: restul ţintelor rămâneau cu cheia veche,
+    în timp ce sursa n-o mai avea — acces pierdut, UI verde. Un singur factor proaspăt."""
     host = await _dk_agent_host(host_id)
     key = await _dk_key_row(host_id)
     await _require_fresh_factor(host_id, user, body.stepup_grant, body.stepup_password)
     old_blob, _ = _dk_validate(key["public_key"])
     old_fp = key["fingerprint"]
-    # keygen NOU în loc (rm întâi — ssh-keygen refuză să suprascrie fără prompt)
+    new_path = _DK_PATH[:-1] + '.new"'          # "$HOME/.ssh/webterm_ed25519.new" (ghilimelele rămân)
+    # keygen ALĂTURI (rm întâi doar temporarele — ssh-keygen refuză să suprascrie fără prompt)
     resp = await _host_run(host_id,
                            "umask 077; rm -f %s %s.pub && command ssh-keygen -q -t ed25519 -N '' "
-                           "-C webterm-deploy -f %s" % (_DK_PATH, _DK_PATH, _DK_PATH), timeout=30)
+                           "-C webterm-deploy -f %s" % (new_path, new_path, new_path), timeout=30)
     if resp.get("exit_code") != 0:
         raise ApiError(502, "sshkey.keygenFailed",
                        ("ssh-keygen failed: " + (resp.get("stderr") or ""))[:300])
     conn = core.source_for(host_id)
     if not isinstance(conn, core.AgentConnection):
         raise HTTPException(409, "host offline or has no agent")
-    r = await conn.request("fs_read", path=_DK_PUB, offset=0, timeout=20)
+    r = await conn.request("fs_read", path=_DK_PUB[:-4] + ".new.pub", offset=0, timeout=20)
     if not r.get("ok"):
         raise ApiError(502, "sshkey.keygenFailed", "could not read the new public key back")
     newpub = base64.b64decode(r.get("data_b64") or "").decode("utf-8", "replace").strip()
     _nb, newfp = _dk_validate(newpub)
-    await db.execute("UPDATE ssh_keys SET public_key=?, fingerprint=?, created=? WHERE id=?",
-                     newpub, newfp, time.time(), key["id"])
-    key = await db.fetchone("SELECT * FROM ssh_keys WHERE id=?", key["id"])
+    # cheia „nouă" ca dict, NU în DB încă: _dk_deploy_one compune linia din key["public_key"]
+    newkey = dict(key)
+    newkey["public_key"], newkey["fingerprint"] = newpub, newfp
     deps = await db.fetchall(
-        "SELECT d.target_host_id, d.options FROM ssh_key_deployments d JOIN hosts h ON h.id=d.target_host_id"
+        "SELECT d.target_host_id, d.options, h.name AS target_name FROM ssh_key_deployments d"
+        " JOIN hosts h ON h.id=d.target_host_id"
         " WHERE d.key_id=? AND d.revoked_at IS NULL AND d.status != 'missing'", key["id"])
-    results = []
+    results, landed = [], []
     for d in deps:
         tid = d["target_host_id"]
+        entry = {"target_host_id": tid, "target_name": d["target_name"]}
         try:
             # păstrează opţiunile existente ale muchiei (restrict/command/from) la rotire
-            await _dk_deploy_one(key, tid, "", True, user, request, raw_options=d["options"])
-            await _host_run(tid, _dk_revoke_recipe(old_blob), timeout=20)   # scoate blob-ul vechi
-            results.append({"target_host_id": tid, "ok": True})
+            await _dk_deploy_one(newkey, tid, "", True, user, request, raw_options=d["options"])
+            landed.append(tid)
+            results.append(entry | {"ok": True})
         except ApiError as e:
-            results.append({"target_host_id": tid, "ok": False, "code": e.code, "error": e.detail})
-    audit.detail(request, "deploy-key rotated on %s (%s → %s)" % (host["name"], old_fp, newfp))
-    return {"fingerprint": newfp, "public_key": newpub, "results": results}
+            results.append(entry | {"ok": False, "code": e.code, "error": e.detail})
+        except HTTPException as e:
+            # ţintă offline (409) / fără răspuns (504): NU oprim bucla, nu minţim evidenţa.
+            results.append(entry | {"ok": False, "code": "sshkey.targetOffline", "error": str(e.detail)})
+        if not results[-1]["ok"]:
+            # ţinta rămâne cu linia VECHE (pe care sursa n-o va mai putea folosi) → `missing`,
+            # ca Verify/Deploy să o arate drept „de redeployat", nu drept `deployed`
+            await db.execute(
+                "UPDATE ssh_key_deployments SET status='missing' WHERE key_id=? AND target_host_id=?",
+                key["id"], tid)
+    # abia ACUM sursa trece pe noua cheie: mv atomic, pub-ul după privată. Dacă pică, vechea
+    # pereche e intactă pe sursă şi ţintele poartă AMBELE linii — nimic pierdut, raportăm.
+    resp = await _host_run(host_id, "umask 077; mv -f %s %s && mv -f %s.pub %s.pub"
+                           % (new_path, _DK_PATH, new_path, _DK_PATH), timeout=20)
+    if resp.get("exit_code") != 0:
+        raise ApiError(502, "sshkey.rotateSwapFailed",
+                       ("could not install the new key on the source (targets now hold both keys): "
+                        + (resp.get("stderr") or ""))[:300])
+    await db.execute("UPDATE ssh_keys SET public_key=?, fingerprint=?, created=? WHERE id=?",
+                     newpub, newfp, time.time(), key["id"])
+    # scoate blob-ul vechi DOAR de unde a aterizat cel nou; un eşec aici nu e pierdere de acces
+    for entry in results:
+        if not entry["ok"]:
+            continue
+        try:
+            await _host_run(entry["target_host_id"], _dk_revoke_recipe(old_blob), timeout=20)
+            entry["old_removed"] = True
+        except HTTPException as e:
+            entry["old_removed"] = False
+            entry["error"] = "old key still authorized: " + str(e.detail)
+    left_old = [{"target_host_id": e["target_host_id"], "target_name": e["target_name"]}
+                for e in results if not e["ok"]]
+    audit.detail(request, "deploy-key rotated on %s (%s → %s; %d/%d targets)"
+                 % (host["name"], old_fp, newfp, len(landed), len(results)))
+    return {"fingerprint": newfp, "public_key": newpub, "results": results,
+            "left_with_old_key": left_old}
 
 
 @router.post("/api/hosts/{host_id}/sessions")
@@ -5279,7 +5845,7 @@ async def create_session(host_id: int, body: SessionIn, request: Request,
                          user=Depends(security.require_user)):
     row = await db.fetchone("SELECT * FROM hosts WHERE id=?", host_id)
     if not row:
-        raise HTTPException(404)
+        raise ApiError(404, "host.missing", "no such host")
     # 2FA step-up (server-side; bifa din client nu e de încredere) — deschide/consultă fereastra
     await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
     ctype = row["connection_type"] or "agent"
@@ -5307,9 +5873,9 @@ async def create_session(host_id: int, body: SessionIn, request: Request,
         # shell ÎN container: sesiunea rulează `docker exec` în loc de shell-ul de login.
         # Doar host-uri de agent (docker e local pe host). Id-ul de container e validat strict.
         if ctype != "agent":
-            raise HTTPException(400, "container shells are only available on agent hosts")
+            raise ApiError(400, "session.containerAgentOnly", "container shells are only available on agent hosts")
         if not _DOCKER_ID.match(body.docker_container):
-            raise HTTPException(400, "invalid container id")
+            raise ApiError(400, "docker.badContainer", "invalid container id")
         c = shlex.quote(body.docker_container)
         # bash dacă există, altfel sh. NU `exec bash || exec sh`: într-un shell NEinteractiv
         # `exec <lipsă>` iese cu 127 ÎNAINTE de `||`, deci pe imaginile fără bash (alpine/busybox)
@@ -5323,7 +5889,7 @@ async def create_session(host_id: int, body: SessionIn, request: Request,
         # upgrade pentru managerul detectat (din diagnostics). NU input arbitrar — o hartă fixă,
         # ca la docker_container. Glue, nu un package-manager reimplementat.
         if ctype != "agent":
-            raise HTTPException(400, "OS upgrade is only available on agent hosts")
+            raise ApiError(400, "session.upgradeAgentOnly", "OS upgrade is only available on agent hosts")
         mgr = (_host_updates(row) or {}).get("manager")
         base = {"apt": "apt-get update && apt-get upgrade", "dnf": "dnf upgrade"}.get(mgr)
         if not base:
@@ -5346,15 +5912,21 @@ async def create_session(host_id: int, body: SessionIn, request: Request,
         # (b) acordă userului agentului sudo (comandă gata de copiat) ca butonul să meargă data
         # viitoare. `echo`-uri, nu printf — evită dublul nivel de `%`. `exec $SHELL` doar aici.
         qbase = shlex.quote(base)
+        # binarul pe care îl acordăm în sudoers: EXACT cel pe care îl rulează `base`, nu `ALL`.
+        # `NOPASSWD:ALL` pentru userul agentului e echivalent cu root pe host — anulează tăcut
+        # tocmai bariera „agent neprivilegiat" din THREAT-MODEL (semnalat de auditul din 2026-10).
+        mgr_bin = {"apt": "apt-get", "dnf": "dnf"}.get(mgr, "apt-get")
         guide = (
             'u=$(whoami); echo; '
             'echo "[WebTerm] OS upgrade needs root. This agent runs as $u, without passwordless sudo."; '
             'echo; echo "Your options — your call:"; '
             'echo "  1) Run it now as root yourself:"; '
             'echo "       sudo sh -c ' + qbase.replace('"', '\\"') + '"; '
-            'echo "  2) Or let this button work next time — grant the agent user sudo (as root):"; '
-            'echo "       echo \\"$u ALL=(ALL) NOPASSWD:ALL\\" | sudo tee /etc/sudoers.d/$u"; '
-            'echo "     (tighten it to just your package manager if you prefer)"; echo; '
+            'echo "  2) Or let this button work next time — allow the agent user to run ONLY the"; '
+            'echo "     package manager as root (sudoers, as root):"; '
+            'echo "       echo \\"$u ALL=(root) NOPASSWD: $(command -v ' + mgr_bin + ')\\" | sudo tee /etc/sudoers.d/$u"; '
+            'echo "     Do NOT use NOPASSWD:ALL — that makes the agent user root-equivalent and"; '
+            'echo "     removes the protection of running the agent unprivileged."; echo; '
             'exec "${SHELL:-/bin/sh}"')
         sh = ('if [ "$(id -u)" = 0 ]; then %s; '
               'elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then sudo sh -c %s; '
@@ -5367,9 +5939,9 @@ async def create_session(host_id: int, body: SessionIn, request: Request,
         # exact tiparul docker-logs/os_upgrade (glue peste journalctl, nu un UI de loguri fals).
         # Fără root journalctl arată doar ce poate — acceptabil, e un terminal, userul vede.
         if ctype != "agent":
-            raise HTTPException(400, "journal follow is only available on agent hosts")
+            raise ApiError(400, "session.journalAgentOnly", "journal follow is only available on agent hosts")
         if not _UNIT_RE.match(body.journal_unit):
-            raise HTTPException(400, "invalid unit name")
+            raise ApiError(400, "services.badUnit", "invalid unit name")
         u = shlex.quote(body.journal_unit)
         cmd = "journalctl -u %s -n 200 -f --no-pager" % u
         if not title.strip() or title.startswith("Session "):
@@ -5379,11 +5951,11 @@ async def create_session(host_id: int, body: SessionIn, request: Request,
         # pre-completată. Doar host-uri de agent. Politica `ask` → clientul cere parola singur
         # (fără secrete la noi). Step-up-ul pentru sesiuni pe host 2FA se aplică deja mai sus.
         if ctype != "agent":
-            raise HTTPException(400, "database connections are only available on agent hosts")
+            raise ApiError(400, "session.dbAgentOnly", "database connections are only available on agent hosts")
         conn = await db.fetchone("SELECT * FROM connections WHERE id=? AND host_id=?",
                                  body.connection_id, host_id)
         if not conn:
-            raise HTTPException(404, "connection not found")
+            raise ApiError(404, "connection.missing", "connection not found")
         cmd = _connection_command(conn)
         # `stored`: decriptăm parola din vault şi o dăm agentului (canal WS criptat); el o injectează
         # în stdin-ul PTY la promptul „password" — nu atinge argv/env/ps/transcript. Citirea
@@ -5401,9 +5973,11 @@ async def create_session(host_id: int, body: SessionIn, request: Request,
     except core.AgentGone:
         raise ApiError(409, "host.offline", "the host is offline (the agent is not connected)")
     except core.SessionLimitReached:
-        raise HTTPException(409, f"the host reached its limit of {core.MAX_SESSIONS_HINT} sessions — close one first")
+        raise ApiError(409, "session.limit",
+                       f"the host reached its limit of {core.MAX_SESSIONS_HINT} sessions — close one first",
+                       vars={"limit": core.MAX_SESSIONS_HINT})
     except RuntimeError as e:
-        raise HTTPException(502, str(e))
+        raise _runtime_api_error(e, "session.createFailed")
     return result
 
 
@@ -5412,7 +5986,7 @@ async def update_session(sid: str, patch: SessionPatch,
                          user=Depends(security.require_user)):
     row = await db.fetchone("SELECT * FROM sessions WHERE id=?", sid)
     if not row:
-        raise HTTPException(404)
+        raise ApiError(404, "session.missing", "no such session")
     title = patch.title if patch.title is not None else row["title"]
     note = patch.note if patch.note is not None else row["note"]
     await db.execute("UPDATE sessions SET title=?, note=? WHERE id=?",
@@ -5431,13 +6005,13 @@ async def reconnect_session(sid: str, user=Depends(security.require_user)):
     try:
         return await core.reconnect_telnet_session(sid)
     except KeyError:
-        raise HTTPException(404, "no such session, or not a telnet bastion")
+        raise ApiError(404, "session.notTelnet", "no such session, or not a telnet bastion")
     except core.AgentGone:
         raise ApiError(409, "host.offline", "the host is offline (the agent is not connected)")
     except core.SessionLimitReached:
         raise ApiError(409, "telnet.limit", "the telnet session limit was reached — close one first")
     except RuntimeError as e:
-        raise HTTPException(502, str(e))
+        raise _runtime_api_error(e, "session.createFailed")
 
 
 @router.post("/api/sessions/{sid}/kill")
@@ -5448,9 +6022,9 @@ async def kill_session(sid: str, user=Depends(security.require_user)):
     try:
         await core.kill_session(sid)
     except KeyError:
-        raise HTTPException(404)
+        raise ApiError(404, "session.missing", "no such live session")
     except core.AgentGone:
-        raise HTTPException(409, "the host is offline; the session cannot be closed right now")
+        raise ApiError(409, "session.hostOfflineKill", "the host is offline; the session cannot be closed right now")
     return {"ok": True}
 
 
@@ -5458,9 +6032,9 @@ async def kill_session(sid: str, user=Depends(security.require_user)):
 async def delete_session(sid: str, user=Depends(security.require_user)):
     row = await db.fetchone("SELECT * FROM sessions WHERE id=?", sid)
     if not row:
-        raise HTTPException(404)
+        raise ApiError(404, "session.missing", "no such session")
     if row["state"] in ("creating", "live"):
-        raise HTTPException(409, "the session is live; close it first")
+        raise ApiError(409, "session.live", "the session is live; close it first")
     await db.execute("DELETE FROM sessions WHERE id=?", sid)
     # nu ștergem transcriptul pe loc: îl arhivăm (recuperabil ~120 zile), apoi
     # janitor-ul îl curăță definitiv după retenție
@@ -5483,7 +6057,7 @@ async def create_share(sid: str, request: Request, body: ShareIn = ShareIn(),
     audit.detail(request, "writable" if body.writable else "read-only")
     row = await db.fetchone("SELECT id, host_id FROM sessions WHERE id=?", sid)
     if not row:
-        raise HTTPException(404)
+        raise ApiError(404, "session.missing", "no such session")
     # H1: un share (mai ales writable) e o cale de acces DURABILĂ, cookie-free, către terminalul
     # unui host — pe un host cu require_2fa e o acțiune sensibilă ca `run`/`kill`, deci cere step-up.
     # (Fără asta, un share writable ținea sesiunea trează — inputul invitatului resetează idle-lock-ul
@@ -5553,12 +6127,12 @@ async def get_transcript(sid: str, format: str = "out", tail: bool = False,
     `tail=true` (doar pentru txt) întoarce doar coada — vizualizarea din UI nu trage
     zeci de MB ca să arate ce s-a întâmplat ultima dată."""
     if not core.valid_sid(sid):
-        raise HTTPException(404)
+        raise ApiError(404, "session.missing", "no such session")
     await _require_session_host_stepup(sid, user)
     out_path, cast_path = core.transcript_paths(sid)
     if format == "txt":
         if not out_path.exists():
-            raise HTTPException(404)
+            raise ApiError(404, "transcript.missing", "no transcript for this session")
         text = await asyncio.to_thread(core.transcript_text, sid,
                                        TEXT_VIEW_TAIL if tail else 0)
         return Response(content=text, media_type="text/plain; charset=utf-8",
@@ -5566,7 +6140,7 @@ async def get_transcript(sid: str, format: str = "out", tail: bool = False,
                         {"Content-Disposition": 'attachment; filename="%s.txt"' % sid[:8]})
     path = cast_path if format == "cast" else out_path
     if not path.exists():
-        raise HTTPException(404)
+        raise ApiError(404, "transcript.missing", "no transcript for this session")
     return FileResponse(path, filename="%s.%s" % (sid[:8], format),
                         media_type="application/octet-stream")
 
@@ -5576,7 +6150,7 @@ async def session_preview(sid: str, user=Depends(security.require_user)):
     """Coada recentă a transcriptului (pentru previzualizare read-only în UI),
     fără secvențele de alt-screen care ar goli ecranul."""
     if not await db.fetchone("SELECT id FROM sessions WHERE id=?", sid):
-        raise HTTPException(404)
+        raise ApiError(404, "session.missing", "no such session")
     await _require_session_host_stepup(sid, user)
     data = await asyncio.to_thread(core.read_tail, sid, limit=32 * 1024)
     return Response(content=data, media_type="application/octet-stream")
@@ -5586,6 +6160,13 @@ async def session_preview(sid: str, user=Depends(security.require_user)):
 # Agent install (public: token-in-URL bootstrap)
 # ---------------------------------------------------------------------------
 
+# Unit-ul systemd din script are `KillMode=process` (audit 2026-10-04, HIGH #2): serverul tmux
+# e pornit de un copil al agentului, deci moşteneşte cgroup-ul unităţii, iar implicitul
+# `control-group` îl omora la ORICE stop/restart/watchdog — adică exact invariantul
+# „sesiunile supravieţuiesc agentului" din docs/design/ARCHITECTURE.md ţinea doar pe cron.
+# Scriptul rescrie unit-ul necondiţionat la fiecare rulare, deci un re-run al instalării
+# vindecă şi hosturile vechi (agentul îşi repară singur unit-ul la pornire, separat).
+# Fără `TimeoutStopSec`: cu `process` systemd aşteaptă doar PID-ul principal, nu tmux-ul.
 INSTALL_SCRIPT = r"""#!/bin/sh
 # WebTerm agent installer - generated for one host, expires 24h after issuing.
 set -eu
@@ -5704,6 +6285,12 @@ Type=simple
 ExecStart=$PY $AGENT run
 Restart=always
 RestartSec=3
+# KillMode=process: the tmux server that HOLDS the sessions is started by a child of the agent,
+# so it lives in this unit's cgroup. The default (control-group) would kill it on every
+# stop/restart/watchdog kill of the agent — i.e. every session on the host would die on an
+# agent crash or a `systemctl --user restart`. With `process` systemd stops only the agent;
+# tmux keeps running and the restarted agent re-adopts the sessions.
+KillMode=process
 # Watchdog: if the agent's event loop blocks and stops sending WATCHDOG=1 within this
 # interval, systemd kills and restarts it (complementary to the G1 liveness check over
 # cron, which does not run under systemd). The agent pings at about half the interval.
@@ -6022,7 +6609,17 @@ async def agent_ws(ws: WebSocket):
     token = auth[7:] if auth.lower().startswith("bearer ") else ""
     row = await db.fetchone("SELECT * FROM hosts WHERE token_hash=?",
                             security.sha256_hex(token)) if token else None
+    ip = security.client_ip_ws(ws)
     if not row:
+        # Un `close()` înainte de `accept()` iese la agent ca „HTTP 403" — identic cu refuzul de
+        # instanţă — iar aici nu rămânea NIMIC: nici log, nici eveniment. Omul vedea „Waiting for
+        # the agent connection…" la nesfârşit (audit UX §1.2). Un token necunoscut n-are host, dar
+        # omul care aşteaptă e pe un host care nu s-a conectat niciodată: acolo scriem evenimentul.
+        if core.handshake_log_allowed("ip:" + ip):
+            log.warning("agent handshake refused: unknown token from %s "
+                        "(reinstall the agent with a fresh install link)", ip)
+        for h in await core.hosts_awaiting_first_agent():
+            await core.record_handshake_refusal(h["id"], "handshake_bad_token", ip)
         await ws.close(code=4401)
         return
     # Dacă hostul era marcat „dezinstalat" şi agentul se conectează din nou, înseamnă că a
@@ -6041,13 +6638,16 @@ async def agent_ws(ws: WebSocket):
     instance = ws.headers.get("x-webterm-instance", "")
     pinned = row["instance_id"]
     if pinned and instance != pinned:
-        log.warning("host %s(%s): refusing agent — instance %s (pinned %s). "
+        log.warning("host %s(%s): refusing agent from %s — instance %s (pinned %s). "
                     "Cloned image, shared token, or dropped fence header?",
-                    row["name"], row["id"],
+                    row["name"], row["id"], ip,
                     (instance or "<none>")[:8], pinned[:8])
         await core.record_agent_event(row["id"], "disconnect", reason="instance_refused",
                                       detail="instance %s does not match the pinned one (cloned image / shared token?)"
                                              % (instance or "<none>")[:8])
+        await core.record_handshake_refusal(row["id"], "handshake_instance_conflict", ip,
+                                            detail="instance %s ≠ pinned %s"
+                                                   % ((instance or "<none>")[:8], pinned[:8]))
         email_alerts.notify_agent_relocation(row["name"], (instance or "<none>")[:8])
         await ws.close(code=4409)
         return
@@ -6066,12 +6666,13 @@ async def agent_ws(ws: WebSocket):
                         instance[:8], won["instance_id"][:8])
             await core.record_agent_event(row["id"], "disconnect", reason="instance_refused",
                                           detail="pinning race: another instance won")
+            await core.record_handshake_refusal(row["id"], "handshake_instance_conflict", ip,
+                                                detail="pinning race: another instance won")
             email_alerts.notify_agent_relocation(row["name"], instance[:8])
             await ws.close(code=4409)
             return
     # observabilitate IP: unde e văzut agentul (IP sursă prin proxy). IP-urile se schimbă legitim
     # (DHCP/reboot/NAT) → informativ, NU enforcement; jurnalizăm + alertăm DOAR la schimbare.
-    ip = security.client_ip_ws(ws)
     if ip and ip != "?" and ip != row["agent_ip"]:
         if row["agent_ip"]:                 # nu la primul connect, doar la o schimbare reală
             await core.record_agent_event(row["id"], "ip_change", reason="ip_nou",
@@ -6283,12 +6884,20 @@ async def browser_ws(ws: WebSocket, sid: str):
         # semnal slab: decide doar dacă facem zgomot, niciodată dacă sărim o verificare.
         client.known = await security.ip_is_known(user["id"], client.remote_addr)
 
+    # host_online pe aceeaşi regulă ca `_host_json` (jump = agentul părinte), nu `in sources`:
+    # o sesiune telnet-jump e pe un host fără sursă proprie şi apărea „host offline" deşi era vie
+    hrow = await db.fetchone("SELECT id, connection_type, via_host_id FROM hosts WHERE id=?",
+                             row["host_id"])
     await ws.send_text(json.dumps({
         "type": "init", "state": row["state"], "title": row["title"],
         "rows": row["rows"], "cols": row["cols"],
         "exit_status": row["exit_status"], "close_reason": row["close_reason"],
-        "host_online": row["host_id"] in core.sources,
+        "host_online": bool(hrow) and _host_online(hrow),
         "your_id": client.id if client else None,
+        # idle-lock (host 2FA): pragul şi momentul estimat al blocării, ca UI-ul să poată
+        # avertiza („se blochează în 60 s") în loc să blocheze din senin (audit UX §6.c1)
+        "lock_idle": hub.lock_idle if hub else 0,
+        "lock_at": (hub.last_interaction + hub.lock_idle) if hub and hub.lock_idle else None,
     }))
     # ATAŞAREA la o sesiune de pe un host cu 2FA cere step-up — fail-closed.
     # Aici era gaura prin care un cookie furat ajungea la un shell root: `browser_ws` cerea doar
@@ -6425,6 +7034,15 @@ async def browser_ws(ws: WebSocket, sid: str):
                 elif ctl.get("type") == "resume":
                     # tab redevenit vizibil: resync complet din transcript
                     client.resume()
+                elif ctl.get("type") == "touch":
+                    # prezenţă FĂRĂ taste (scroll, selecţie, mouse): amână idle-lock-ul exact
+                    # ca o tastă — acelaşi client, acelaşi canal, aceeaşi încredere. Pe WS, nu
+                    # pe HTTP: un POST la 30 s ar umple jurnalul de audit cu zgomot. Un hub
+                    # deja blocat NU se deblochează aşa (doar step-up-ul o face).
+                    hub.touch(client)
+                    await client.send_text(json.dumps({
+                        "type": "lock_at",
+                        "lock_at": (hub.last_interaction + hub.lock_idle) if hub.lock_idle else None}))
                 elif ctl.get("type") == "rtt":
                     # echo pentru măsurarea RTT în UI. Coerce n la întreg: fără
                     # asta, un client putea trimite un payload arbitrar (string

@@ -11,6 +11,9 @@ import { useI18n } from '../lib/i18n'
 const EXTRA: Record<string, { labelKey: string; keys: string }[]> = {
   nav: [
     { labelKey: 'shortcuts.jumpToTab', keys: 'Alt+1…9' },
+    // reordonarea taburilor din tastatură (TabBar): merge doar cu focusul PE tab, deci nu e
+    // o scurtătură globală de registru — dar trebuie să fie descoperibilă aici
+    { labelKey: 'tabbar.reorderKeys', keys: 'Alt+Shift+←/→' },
     { labelKey: 'shortcuts.stepCommand', keys: 'Alt+↑/↓' },
   ],
   // `Ctrl+M` e SINGURA ieşire din capcana de focus a terminalului: acolo Tab aparţine

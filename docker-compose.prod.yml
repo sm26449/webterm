@@ -1,6 +1,16 @@
 # Producție: imagine ghcr pre-construită + Traefik (SSL Let's Encrypt automat).
-# Un singur secret de configurat — tokenul de setup al aplicației (în .env).
-# Deploy:  ./deploy.sh   (sau: docker compose -f docker-compose.prod.yml up -d)
+# Deploy:  ./deploy.sh   (`docker compose up -d` direct merge DOAR după ce deploy.sh a rulat
+#          măcar o dată: el creează `secrets/` — vezi blocul `secrets:` de la final).
+#
+# Secretele (token de setup, secret OIDC, parolă SMTP, token Cloudflare, cheile Authentik) NU
+# mai stau în mediul containerelor, ci în fişiere sub `./secrets/` (dir 0700, root), montate
+# read-only la /run/secrets. Motivul: `dockerproxy` de mai jos trebuie să lase Traefik să
+# citească containerele (`CONTAINERS=1` — fără asta nu există descoperire de rute), iar
+# `GET /containers/<id>/json` întoarce `Config.Env`. Deci un Traefik compromis citea TOATE
+# secretele stack-ului fără să atingă nici volumul, nici DB-ul (auditul de deploy, M1). Cu
+# fişiere, în `Config.Env` apare doar calea. `deploy.sh`/`install.sh` scriu fişierele şi mută
+# valorile vechi din `.env` acolo; variabilele `${X:-}` rămân ca fallback pentru un `.env` scris
+# de mână — gol = „nesetat", şi atunci se citeşte fişierul.
 #
 # Reutilizează volumul `webterm-data` al stack-ului implicit, deci datele
 # (SQLite + transcripturi + cheie) se păstrează la trecerea de la Caddy la Traefik.
@@ -17,15 +27,32 @@ x-logging: &default-logging
 services:
   # Proxy minimal peste Docker API: expune DOAR citirea containerelor/rețelelor
   # către Traefik. Traefik (expus pe internet) nu mai atinge direct docker.sock,
-  # deci un eventual compromis nu poate controla Docker-ul gazdei.
+  # deci un eventual compromis nu poate controla Docker-ul gazdei (POST=0).
+  # `CONTAINERS=1` e minimul providerului docker din Traefik şi NU poate fi redus: el citeşte
+  # etichetele din `/containers/json` + `/containers/<id>/json`. Acelaşi răspuns conţine
+  # `Config.Env`, de aceea secretele s-au mutat în fişiere (vezi antet): ce rămâne citibil prin
+  # proxy sunt căile `/run/secrets/*`, nu valorile.
   dockerproxy:
     # Pinuit pe digest, ca Dockerfile-ul. Tag-ul rămâne în faţă doar ca etichetă lizibilă:
     # el se poate muta sub tine, digest-ul nu. Dependabot îl ridică la nevoie.
     image: tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459
     restart: unless-stopped
     logging: *default-logging
+    # Întărit ca `app`: fără cap_drop, un RCE aici ar fi avut TOATE capabilităţile unui root
+    # de container — pe procesul care ţine socketul Docker al hostului. Verificat pe v0.5.0:
+    # porneşte şi serveşte GET/refuză POST cu ZERO capabilităţi şi rădăcină read-only; scrie
+    # doar haproxy.cfg generat în /tmp şi pidfile-ul în /run (tmpfs; docker.sock rămâne montat
+    # sub /run — Docker montează tmpfs-ul înaintea bind-ului mai adânc).
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs:
+      - /tmp:size=4m
+      - /run:size=4m
+    mem_limit: 128m
+    pids_limit: 64
     environment:
-      CONTAINERS: 1        # citirea etichetelor pentru descoperirea rutelor
+      CONTAINERS: 1        # citirea etichetelor pentru descoperirea rutelor (minimul necesar)
       NETWORKS: 1
       POST: 0              # niciun apel de scriere spre Docker
       SERVICES: 0
@@ -44,9 +71,25 @@ services:
     restart: unless-stopped
     logging: *default-logging
     depends_on: [dockerproxy]
+    # Traefik e procesul EXPUS pe internet şi până acum singurul neîntărit (auditul de deploy,
+    # M2): rula cu toate capabilităţile, rădăcină scriibilă, fără plafon de memorie. Scrie un
+    # singur loc — /letsencrypt (volum); restul e read-only. NET_BIND_SERVICE pentru :80/:443.
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    mem_limit: 512m
+    pids_limit: 256
     environment:
-      # token Cloudflare scoped Zone:DNS:Edit pe zona domeniului
-      CF_DNS_API_TOKEN: ${CF_DNS_API_TOKEN}
+      # token Cloudflare scoped Zone:DNS:Edit pe zona domeniului. Lego (biblioteca ACME din
+      # Traefik) citeşte `CF_DNS_API_TOKEN_FILE` când `CF_DNS_API_TOKEN` e GOL — deci valoarea
+      # stă în secrets/cf_dns_api_token, nu în Config.Env. `${CF_DNS_API_TOKEN:-}` rămâne doar
+      # ca fallback pentru un .env scris de mână (deploy.sh îl mută în fişier şi îl goleşte).
+      CF_DNS_API_TOKEN: ${CF_DNS_API_TOKEN:-}
+      CF_DNS_API_TOKEN_FILE: /run/secrets/cf_dns_api_token
+    secrets: [cf_dns_api_token]
     command:
       - --providers.docker=true
       - --providers.docker.exposedbydefault=false
@@ -94,7 +137,7 @@ services:
     networks: [webterm, internal]
 
   app:
-    image: ${WEBTERM_IMAGE:-ghcr.io/sm26449/webterm:v3.0.0}
+    image: ${WEBTERM_IMAGE:-ghcr.io/sm26449/webterm:v3.1.0}
     restart: unless-stopped
     logging: *default-logging
     security_opt:
@@ -121,16 +164,22 @@ services:
       WEBTERM_PUBLIC_URL: https://${WEBTERM_DOMAIN}
       # the per-browser-WS backlog cap before a forced resync
       WEBTERM_CLIENT_BUFFER: ${WEBTERM_CLIENT_BUFFER:-}
+      # Secretele: valoarea din .env (fallback, gol = nesetat) SAU fişierul montat de `secrets:`.
+      # `config.py` preferă variabila ne-goală, altfel citeşte `*_FILE` — vezi `_secret()`.
       WEBTERM_SETUP_TOKEN: ${WEBTERM_SETUP_TOKEN:-}
+      WEBTERM_SETUP_TOKEN_FILE: /run/secrets/webterm_setup_token
       # SSO / OIDC (opţional, ex. Authentik). Gol = SSO oprit, login local ca înainte.
       WEBTERM_OIDC_ISSUER: ${WEBTERM_OIDC_ISSUER:-}
       WEBTERM_OIDC_CLIENT_ID: ${WEBTERM_OIDC_CLIENT_ID:-}
       WEBTERM_OIDC_CLIENT_SECRET: ${WEBTERM_OIDC_CLIENT_SECRET:-}
+      WEBTERM_OIDC_CLIENT_SECRET_FILE: /run/secrets/webterm_oidc_client_secret
       WEBTERM_OIDC_PROVIDER_NAME: ${WEBTERM_OIDC_PROVIDER_NAME:-}
       WEBTERM_OIDC_SCOPES: ${WEBTERM_OIDC_SCOPES:-}
       WEBTERM_OIDC_ALLOWED_GROUPS: ${WEBTERM_OIDC_ALLOWED_GROUPS:-}
-      # so the app knows, and shows in the UI, which image it is running
-      WEBTERM_IMAGE_REF: ${WEBTERM_IMAGE:-ghcr.io/sm26449/webterm:v3.0.0}
+      # so the app knows, and shows in the UI, which image it is running. `WEBTERM_IMAGE` e
+      # pinuit pe DIGEST de upgrade.sh (imuabil); eticheta lizibilă (vX.Y.Z) stă în
+      # WEBTERM_IMAGE_TAG şi e cea afişată, când există.
+      WEBTERM_IMAGE_REF: ${WEBTERM_IMAGE_TAG:-${WEBTERM_IMAGE:-ghcr.io/sm26449/webterm:v3.1.0}}
       # the "is there a new version?" check: 0 disables it entirely (overrides the UI switch)
       WEBTERM_UPDATE_CHECK: ${WEBTERM_UPDATE_CHECK:-1}
       # optional read-only token, only while the repo is private (empty = works on a public repo)
@@ -150,6 +199,7 @@ services:
       WEBTERM_SMTP_PORT: ${WEBTERM_SMTP_PORT:-587}
       WEBTERM_SMTP_USER: ${WEBTERM_SMTP_USER:-}
       WEBTERM_SMTP_PASSWORD: ${WEBTERM_SMTP_PASSWORD:-}
+      WEBTERM_SMTP_PASSWORD_FILE: /run/secrets/webterm_smtp_password
       WEBTERM_SMTP_STARTTLS: ${WEBTERM_SMTP_STARTTLS:-1}
       WEBTERM_ALERT_FROM: ${WEBTERM_ALERT_FROM:-}
       WEBTERM_ALERT_TO: ${WEBTERM_ALERT_TO:-}
@@ -171,6 +221,14 @@ services:
       # the domain forwards are opened on (defaults to the app's domain);
       # it can be overridden in Settings, and the infra (Traefik) follows via FORWARD_DOMAIN
       WEBTERM_FORWARD_DOMAIN: ${FORWARD_DOMAIN:-${WEBTERM_DOMAIN}}
+    # Fişierele din ./secrets/ montate la /run/secrets/<nume> (bind read-only; compose ignoră
+    # uid/mode la secretele din fişier — verificat pe Compose v5 — deci drepturile de pe host
+    # contează: fişier 0644 într-un director 0700, ca userul `webterm` (10001) să-l poată citi
+    # iar un user ne-root de pe host să nu poată).
+    secrets:
+      - webterm_setup_token
+      - webterm_oidc_client_secret
+      - webterm_smtp_password
     volumes:
       - webterm-data:/data
     networks: [webterm]
@@ -229,11 +287,24 @@ services:
   # implicite reale — le generează install.sh/deploy.sh unic la fiecare deploy şi le scriu în .env.
   # Un singur Authentik poate deservi N deployuri WebTerm: când rulezi >1 instanţă, activează
   # profilul DOAR pe cutia care găzduieşte Authentik. Vezi docs/SSO.md.
+  # Imaginile terţe de aici sunt pe TAG de minor (nu `latest`, nu doar major), dar NU pe
+  # digest: Dependabot ridică digestul la fiecare rebuild al imaginii oficiale (patch-uri de
+  # securitate ale bazei fără schimbare de tag), adică un PR pe săptămână de zgomot; pentru
+  # Postgres/Redis/Authentik versiunea de minor e contractul care contează la upgrade.
   authentik-postgresql:
-    image: docker.io/library/postgres:16-alpine
+    image: docker.io/library/postgres:16.15-alpine
     profiles: [authentik]
     restart: unless-stopped
     logging: *default-logging
+    # Entrypoint-ul oficial porneşte ca root, face chown pe PGDATA şi coboară la `postgres`
+    # (gosu) → CHOWN/FOWNER/DAC_OVERRIDE/SETUID/SETGID. Fără `read_only`: initdb/pg scriu în
+    # /var/run/postgresql, /tmp şi PGDATA, iar imaginea nu documentează lista completă —
+    # preferăm să nu ghicim pe baza de date a IdP-ului.
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    mem_limit: 512m
+    pids_limit: 512
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
       interval: 10s
@@ -242,16 +313,30 @@ services:
     environment:
       POSTGRES_USER: authentik
       POSTGRES_DB: authentik
-      POSTGRES_PASSWORD: ${PG_PASS:-}
+      # DOAR fişier, fără fallback pe `PG_PASS`: entrypoint-ul Postgres REFUZĂ pornirea când
+      # `POSTGRES_PASSWORD` şi `POSTGRES_PASSWORD_FILE` sunt amândouă setate. Parola e citită
+      # oricum doar la initdb (prima pornire); deploy.sh mută valoarea din .env în fişier.
+      POSTGRES_PASSWORD_FILE: /run/secrets/pg_pass
+    secrets: [pg_pass]
     volumes:
       - authentik-pg:/var/lib/postgresql/data
     networks: [akinternal]
 
   authentik-redis:
-    image: docker.io/library/redis:7-alpine
+    image: docker.io/library/redis:7.4.11-alpine
     profiles: [authentik]
     restart: unless-stopped
     logging: *default-logging
+    # Entrypoint-ul coboară la userul `redis` (su-exec) după un chown pe /data → CHOWN/SETUID/
+    # SETGID/DAC_OVERRIDE. Scrie doar în /data (volum), deci rădăcina poate fi read-only.
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, SETGID, SETUID]
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    mem_limit: 256m
+    pids_limit: 128
     healthcheck:
       test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
       interval: 10s
@@ -261,21 +346,33 @@ services:
       - authentik-redis:/data
     networks: [akinternal]
 
+  # Authentik: imaginea rulează deja ca user 1000 (fără escaladare), deci cap_drop ALL fără
+  # cap_add. Fără `read_only`: serverul scrie în /media, /templates, /tmp şi în cache-ul de
+  # blueprint-uri, iar lista nu e documentată — nu ghicim pe IdP. Plafoanele de memorie sunt
+  # peste recomandarea upstream (~1 GB pentru server + worker la o instalare mică).
+  # Secretele vin ca `file://<cale>` — sintaxa pe care Authentik o acceptă pentru ORICE variabilă
+  # de configurare (valoarea se citeşte din fişier la pornire). `${X:-file://…}`: dacă .env încă
+  # are valoarea (instalare veche, deploy.sh nerulat), ea câştigă; altfel fişierul.
   authentik-server:
     image: ghcr.io/goauthentik/server:2026.8.3
     profiles: [authentik]
     restart: unless-stopped
     logging: *default-logging
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    mem_limit: 1536m
+    pids_limit: 512
     command: server
     environment:
-      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:-}
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:-file:///run/secrets/authentik_secret_key}
       AUTHENTIK_POSTGRESQL__HOST: authentik-postgresql
       AUTHENTIK_POSTGRESQL__USER: authentik
       AUTHENTIK_POSTGRESQL__NAME: authentik
-      AUTHENTIK_POSTGRESQL__PASSWORD: ${PG_PASS:-}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${PG_PASS:-file:///run/secrets/pg_pass}
       AUTHENTIK_REDIS__HOST: authentik-redis
-      AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD:-}
-      AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:-}
+      AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD:-file:///run/secrets/authentik_bootstrap_password}
+      AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:-file:///run/secrets/authentik_bootstrap_token}
+    secrets: [authentik_secret_key, pg_pass, authentik_bootstrap_password, authentik_bootstrap_token]
     depends_on:
       authentik-postgresql: {condition: service_healthy}
       authentik-redis: {condition: service_healthy}
@@ -294,14 +391,19 @@ services:
     profiles: [authentik]
     restart: unless-stopped
     logging: *default-logging
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    mem_limit: 1g
+    pids_limit: 512
     command: worker
     environment:
-      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:-}
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:-file:///run/secrets/authentik_secret_key}
       AUTHENTIK_POSTGRESQL__HOST: authentik-postgresql
       AUTHENTIK_POSTGRESQL__USER: authentik
       AUTHENTIK_POSTGRESQL__NAME: authentik
-      AUTHENTIK_POSTGRESQL__PASSWORD: ${PG_PASS:-}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${PG_PASS:-file:///run/secrets/pg_pass}
       AUTHENTIK_REDIS__HOST: authentik-redis
+    secrets: [authentik_secret_key, pg_pass]
     depends_on:
       authentik-postgresql: {condition: service_healthy}
       authentik-redis: {condition: service_healthy}
@@ -312,6 +414,30 @@ volumes:
   traefik-acme:
   authentik-pg:
   authentik-redis:
+
+# Fişierele din ./secrets/ (create de deploy.sh/install.sh: director 0700 root, fişiere 0644 —
+# vezi nota de la `app`). TOATE trebuie să existe, chiar goale: compose face bind-mount şi
+# Docker refuză un container al cărui fişier-sursă lipseşte („bind source path does not
+# exist"). Gol = „nesetat" pentru app (config.py) şi pentru lego; pentru Authentik/Postgres un
+# fişier gol e echivalent cu secretul lipsă de dinainte (profilul nu porneşte oricum fără ele).
+# Secretele NU sunt în .env ca să nu ajungă în `Config.Env`, citibil prin dockerproxy (M1).
+secrets:
+  webterm_setup_token:
+    file: ./secrets/webterm_setup_token
+  webterm_oidc_client_secret:
+    file: ./secrets/webterm_oidc_client_secret
+  webterm_smtp_password:
+    file: ./secrets/webterm_smtp_password
+  cf_dns_api_token:
+    file: ./secrets/cf_dns_api_token
+  authentik_secret_key:
+    file: ./secrets/authentik_secret_key
+  pg_pass:
+    file: ./secrets/pg_pass
+  authentik_bootstrap_password:
+    file: ./secrets/authentik_bootstrap_password
+  authentik_bootstrap_token:
+    file: ./secrets/authentik_bootstrap_token
 
 networks:
   webterm:

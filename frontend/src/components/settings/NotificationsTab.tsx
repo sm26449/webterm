@@ -2,13 +2,22 @@ import { useEffect, useState } from 'react'
 import { api, ApiError, errText } from '../../lib/api'
 import { askSecret } from '../../lib/secretPrompt'
 import { useI18n } from '../../lib/i18n'
-import { field, heading } from './ui'
+import { btn, field, heading } from './ui'
+import { fmtTs } from '../../lib/tz'
 
 // Notificări: domeniul de port-forwarding, alerte pe email (SMTP) + webhook, praguri de resurse.
 // Extras din SettingsModal ca tab de sine stătător (îşi ţine starea, se încarcă la montare).
 type FwdCfg = {
   domain: string; app_domain: string; is_custom: boolean
   server_ip: string; dns_ip: string; dns_ok: boolean; cert_ok: boolean
+}
+
+// Ultima livrare reuşită / eşuată pe fiecare canal, persistată de gateway (email_alerts._record).
+// Fără ea, un SMTP care picase de luni de zile era invizibil: eroarea mergea doar în log.
+type Delivery = { ts: number; subject: string; error?: string } | null
+type AlertStatus = {
+  alert_email_last_sent: Delivery; alert_email_last_failed: Delivery
+  alert_webhook_last_sent: Delivery; alert_webhook_last_failed: Delivery
 }
 
 export default function NotificationsTab() {
@@ -41,12 +50,14 @@ export default function NotificationsTab() {
   const [smtpMsg, setSmtpMsg] = useState('')
   const [smtpErr, setSmtpErr] = useState('')
   const [smtpTesting, setSmtpTesting] = useState(false)
+  const [alertStatus, setAlertStatus] = useState<AlertStatus | null>(null)
   const loadSmtp = () =>
     api<{ host?: string; port?: number; user?: string; from_addr?: string; to_addr?: string
-          starttls: boolean; webhook?: string; has_password: boolean }>('/api/settings/smtp').then((c) => {
+          starttls: boolean; webhook?: string; has_password: boolean; status?: AlertStatus }>('/api/settings/smtp').then((c) => {
       setSmtp({ host: c.host || '', port: c.port || 587, user: c.user || '', password: '',
         from_addr: c.from_addr || '', to_addr: c.to_addr || '', starttls: c.starttls, webhook: c.webhook || '' })
       setSmtpHasPw(c.has_password)
+      setAlertStatus(c.status ?? null)
     }).catch(() => {})
   // Orice schimbare SMTP/webhook cere parola contului (vezi save_smtp în gateway — SMTP-ul
   // poartă codurile de email, deci e destinaţie de exfiltrare). Încercăm întâi fără: o salvare
@@ -121,28 +132,28 @@ export default function NotificationsTab() {
         <div className="flex gap-2">
           <input value={fwdDomain} onChange={(e) => setFwdDomain(e.target.value)}
             placeholder={t('settings.forward.inputPlaceholder')} aria-label={t('settings.forward.ariaLabel')} spellCheck={false}
+            aria-invalid={fwdErr ? true : undefined} aria-describedby={fwdErr ? 'fwd-error' : undefined}
             className={`${field} font-mono`} />
-          <button disabled={fwdBusy} onClick={saveFwd}
-            className="shrink-0 rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-50">
+          <button disabled={fwdBusy} onClick={saveFwd} className={`${btn.primary} shrink-0`}>
             {t('settings.save')}
           </button>
-          <button disabled={fwdBusy} onClick={() => { setFwdMsg(''); setFwdErr(''); loadFwd() }}
-            className="shrink-0 rounded-lg bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-50">
+          <button disabled={fwdBusy} onClick={() => { setFwdMsg(''); setFwdErr(''); loadFwd() }} className={`${btn.secondary} shrink-0`}>
             {t('settings.recheck')}
           </button>
         </div>
-        {fwdMsg && <span className="text-sm wt-good">{fwdMsg}</span>}
-        {fwdErr && <span className="text-sm wt-danger">{fwdErr}</span>}
+        {/* regiuni live montate permanent: confirmarea e `status`, eroarea `alert` (WCAG 4.1.3) */}
+        <span role="status" className={fwdMsg ? 'text-sm wt-good' : 'sr-only'}>{fwdMsg}</span>
+        <span id="fwd-error" role="alert" className={fwdErr ? 'text-sm wt-danger' : 'sr-only'}>{fwdErr}</span>
         {fwd && (
           <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
             <span className="flex items-center gap-1.5">
-              <span className={`h-2 w-2 rounded-full ${fwd.dns_ok ? 'bg-emerald-500' : 'bg-rose-500'}`} />
+              <span aria-hidden="true" className={`h-2 w-2 rounded-full ${fwd.dns_ok ? 'bg-emerald-500' : 'bg-rose-500'}`} />
               {t('settings.forward.dnsWildcard')} {fwd.dns_ok
                 ? <span className="font-mono text-slate-400">*.{fwd.domain} → {fwd.dns_ip}</span>
                 : <span className="text-slate-500">{t('settings.forward.notResolving')}</span>}
             </span>
             <span className="flex items-center gap-1.5">
-              <span className={`h-2 w-2 rounded-full ${fwd.cert_ok ? 'bg-emerald-500' : 'bg-amber-500'}`} />
+              <span aria-hidden="true" className={`h-2 w-2 rounded-full ${fwd.cert_ok ? 'bg-emerald-500' : 'bg-amber-500'}`} />
               {t('settings.forward.certificate')} {fwd.cert_ok ? <span className="text-slate-400">{t('settings.forward.certActive')}</span> : <span className="text-slate-500">{t('settings.forward.certPending')}</span>}
             </span>
           </div>
@@ -165,7 +176,8 @@ export default function NotificationsTab() {
       <div className="mt-2 flex flex-col gap-2">
         <div className="flex gap-2">
           <input value={smtp.host} onChange={(e) => setSmtp({ ...smtp, host: e.target.value })}
-            placeholder={t('settings.smtp.hostPlaceholder')} aria-label={t('settings.smtp.host')} className={field} />
+            placeholder={t('settings.smtp.hostPlaceholder')} aria-label={t('settings.smtp.host')}
+            aria-invalid={smtpErr ? true : undefined} aria-describedby={smtpErr ? 'smtp-error' : undefined} className={field} />
           <input type="number" value={smtp.port} onChange={(e) => setSmtp({ ...smtp, port: +e.target.value })}
             placeholder={t('settings.smtp.portPlaceholder')} aria-label={t('settings.smtp.port')} className={`${field} w-24`} />
         </div>
@@ -190,17 +202,40 @@ export default function NotificationsTab() {
           spellCheck={false} className={field} />
         <p className="text-xs text-slate-500">{t('settings.smtp.webhookHint')}</p>
         <div className="flex items-center gap-2">
-          <button disabled={busy} onClick={saveSmtp}
-            className="rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-50">
+          <button disabled={busy} onClick={saveSmtp} className={btn.primary}>
             {t('settings.save')}
           </button>
-          <button disabled={smtpTesting} onClick={testSmtp}
-            className="rounded-lg bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-50">
+          <button disabled={smtpTesting} onClick={testSmtp} className={btn.secondary}>
             {smtpTesting ? t('settings.smtp.sending') : t('settings.smtp.sendTest')}
           </button>
-          {smtpMsg && <span className="text-sm wt-good">{smtpMsg}</span>}
-          {smtpErr && <span className="text-sm wt-danger">{smtpErr}</span>}
+          <span role="status" className={smtpMsg ? 'text-sm wt-good' : 'sr-only'}>{smtpMsg}</span>
+          <span id="smtp-error" role="alert" className={smtpErr ? 'text-sm wt-danger' : 'sr-only'}>{smtpErr}</span>
         </div>
+        {/* „au plecat alertele?" — ultimul email/webhook trimis şi ultimul eşuat; un eşec mai
+            recent decât ultimul succes e roşu, altfel e doar istoric */}
+        {alertStatus && (
+          <div className="flex flex-col gap-0.5 text-xs" data-testid="alert-delivery-status">
+            {([['email', alertStatus.alert_email_last_sent, alertStatus.alert_email_last_failed],
+               ['webhook', alertStatus.alert_webhook_last_sent, alertStatus.alert_webhook_last_failed]] as const)
+              .map(([ch, sent, failed]) => {
+                if (!sent && !failed) {
+                  return ch === 'email'
+                    ? <span key={ch} className="text-slate-500">{t('settings.smtp.neverSent')}</span>
+                    : null
+                }
+                const failedRecent = !!failed && (!sent || failed.ts > sent.ts)
+                return (
+                  <span key={ch} className={failedRecent ? 'wt-danger break-words' : 'text-slate-500'}>
+                    {sent && t(ch === 'email' ? 'settings.smtp.lastSent' : 'settings.smtp.webhookLastSent',
+                      { when: fmtTs(sent.ts), subject: sent.subject })}
+                    {sent && failed ? ' · ' : ''}
+                    {failed && t(ch === 'email' ? 'settings.smtp.lastFailed' : 'settings.smtp.webhookLastFailed',
+                      { when: fmtTs(failed.ts), error: failed.error || '' })}
+                  </span>
+                )
+              })}
+          </div>
+        )}
       </div>
 
       {/* ── Alerte pe resurse ── */}
@@ -217,12 +252,11 @@ export default function NotificationsTab() {
             <span className="text-slate-500">%</span>
           </label>
         ))}
-        <button disabled={busy} onClick={saveThresholds}
-          className="rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-50">
+        <button disabled={busy} onClick={saveThresholds} className={btn.primary}>
           {t('settings.alerts.saveThresholds')}
         </button>
-        {alertMsg && <span className="text-sm wt-good">{alertMsg}</span>}
-        {alertErr && <span className="text-sm wt-danger">{alertErr}</span>}
+        <span role="status" className={alertMsg ? 'text-sm wt-good' : 'sr-only'}>{alertMsg}</span>
+        <span role="alert" className={alertErr ? 'text-sm wt-danger' : 'sr-only'}>{alertErr}</span>
       </div>
     </div>
   )

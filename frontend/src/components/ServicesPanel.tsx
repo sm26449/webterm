@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { errText, api, ApiError, Host, withStepup } from '../lib/api'
+import { useConfirm } from '../lib/confirm'
 import { useI18n } from '../lib/i18n'
+import { useDrawer } from '../lib/useDrawer'
 import { RefreshIcon } from './Icons'
 
 // Panou Servicii systemd: listă (nume/stare/descriere) + start/stop/restart. TOTUL prin op-ul
@@ -16,6 +18,9 @@ export default function ServicesPanel(props: {
   onJournal?: (unit: string) => void
 }) {
   const { t } = useI18n()
+  const { confirm } = useConfirm()
+  const asideRef = useRef<HTMLElement>(null)
+  const drawer = useDrawer(asideRef, props.onClose, !props.embed)
   const [rows, setRows] = useState<Svc[] | null>(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState('')          // unitatea pe care rulează o acţiune
@@ -24,7 +29,7 @@ export default function ServicesPanel(props: {
 
   const asideCls = props.embed
     ? 'flex h-full w-full min-h-0 flex-col bg-ink-900'
-    : 'fixed inset-y-0 right-0 z-40 flex w-[90vw] max-w-md flex-col border-l border-ink-800 bg-ink-900 shadow-2xl'
+    : 'fixed inset-y-0 right-0 z-40 flex w-[90vw] max-w-md flex-col border-l border-ink-800 bg-ink-900 shadow-2xl outline-none'
     + (props.overlay ? '' : ' sm:static sm:z-auto sm:w-96 sm:max-w-none sm:shrink-0 sm:shadow-none')
   const scrimCls = props.embed ? 'hidden' : 'fixed inset-0 z-30 bg-black/60' + (props.overlay ? '' : ' sm:hidden')
 
@@ -42,6 +47,13 @@ export default function ServicesPanel(props: {
   useEffect(() => { load() }, [load])
 
   async function act(unit: string, action: Action) {
+    // stop/restart taie un serviciu VIU pe host (sshd, nginx, baza de date) dintr-un singur
+    // click pe o ţintă de 24px — confirmăm, numind unitatea (audit 2026-10-04 §5). Start nu.
+    if (action !== 'start' && !(await confirm({
+      title: `${t('services.' + action)} ${unit}`,
+      message: t(action === 'stop' ? 'services.confirmStop' : 'services.confirmRestart', { unit }),
+      confirmLabel: t('services.' + action), danger: true,
+    }))) return
     setBusy(unit); setError('')
     try {
       await withStepup(props.host.id, () => api(`/api/hosts/${props.host.id}/services/action`,
@@ -59,11 +71,12 @@ export default function ServicesPanel(props: {
   return (
     <>
       <div className={scrimCls} onClick={props.onClose} aria-hidden="true" />
-      <aside className={asideCls} aria-label={t('services.title')}>
+      {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Escape pe regiunea drawer-ului (vezi useDrawer): intenţionat pe <aside>, nu pe document */}
+      <aside ref={asideRef} className={asideCls} aria-label={t('services.title')} onKeyDown={drawer.onKeyDown}>
         <div className="flex items-center gap-2 border-b border-ink-800 px-3 py-2">
           <span className="text-sm font-semibold text-slate-200">{t('services.title')}</span>
           <button onClick={load} className="wt-touch ml-auto shrink-0 rounded px-1.5 text-slate-400 hover:bg-ink-800"
-            title={t('services.reload')}><RefreshIcon /></button>
+            title={t('services.reload')} aria-label={t('services.reload')}><RefreshIcon /></button>
           {!props.embed && (
             <button onClick={props.onClose} aria-label={t('common.close')}
               className="wt-touch shrink-0 rounded px-2 py-1 text-slate-400 hover:bg-ink-800">✕</button>
@@ -75,7 +88,7 @@ export default function ServicesPanel(props: {
             className="min-w-0 flex-1 rounded bg-ink-800/60 px-2 py-1 text-xs text-slate-300 ring-1 ring-ink-700 focus:ring-sky-500" />
           <button onClick={() => setFailedOnly((v) => !v)} aria-pressed={failedOnly}
             className={`shrink-0 rounded px-2 py-1 text-[11px] font-medium ${failedOnly
-              ? 'bg-rose-500/20 text-rose-300' : 'text-slate-400 hover:bg-ink-800'}`}
+              ? 'bg-rose-500/20 wt-danger' : 'text-slate-400 hover:bg-ink-800'}`}
             title={t('services.failedOnly')}>{t('services.failed')}</button>
         </div>
         {error && <div className="border-b border-ink-800 bg-ink-800 px-3 py-1.5 text-[11px] wt-danger">{error}</div>}

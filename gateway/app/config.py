@@ -22,7 +22,32 @@ def _str(name, default):
     return (os.environ.get(name) or "").strip() or default
 
 
-GATEWAY_VERSION = "3.0.0"
+def _secret(name, default=""):
+    """Secret din mediu SAU din fişier (`<NAME>_FILE`), în ordinea asta.
+
+    Motivul e M1 din auditul de deploy (2026-10-04): Traefik vorbeşte cu Docker printr-un
+    docker-socket-proxy cu `CONTAINERS=1`, iar `GET /containers/<id>/json` întoarce `Config.Env`
+    al ORICĂRUI container — adică tokenul de setup, secretul OIDC şi parola SMTP, citibile de
+    procesul expus pe internet. Un fişier montat (`secrets:` din compose, bind read-only sub
+    /run/secrets) nu apare în `Config.Env`; apare doar calea lui.
+    Reguli: valoarea din mediu, dacă e NE-goală, câştigă (instalările existente ţin secretul în
+    `.env` şi nu trebuie să se rupă); altfel, dacă `<NAME>_FILE` e setat şi fişierul există, luăm
+    conţinutul lui fără spaţii/newline de la capete; un fişier lipsă sau gol înseamnă „nesetat",
+    nu eroare — `deploy.sh` creează fişierele goale pentru secretele nefolosite, ca `secrets:`
+    să nu refuze pornirea containerului."""
+    val = (os.environ.get(name) or "").strip()
+    if val:
+        return val
+    path = (os.environ.get(name + "_FILE") or "").strip()
+    if path:
+        try:
+            return Path(path).read_text(encoding="utf-8").strip() or default
+        except OSError as e:
+            log.warning("%s_FILE=%r cannot be read (%s) — treating as unset", name, path, e)
+    return default
+
+
+GATEWAY_VERSION = "3.1.0"
 
 # Referința imaginii care rulează (setată la deploy prin compose), afișată în UI
 # ca să știi mereu ce versiune e live. Gol în dev (rulare din surse).
@@ -33,7 +58,7 @@ IMAGE_REF = os.environ.get("WEBTERM_IMAGE_REF", "")
 # privat cere un token read-only (opțional, scope minim: metadata read).
 # WEBTERM_UPDATE_CHECK=0 o oprește complet (există și comutator în Setări).
 UPDATE_CHECK = _str("WEBTERM_UPDATE_CHECK", "1") != "0"
-UPDATE_CHECK_TOKEN = os.environ.get("WEBTERM_UPDATE_CHECK_TOKEN", "")
+UPDATE_CHECK_TOKEN = _secret("WEBTERM_UPDATE_CHECK_TOKEN")
 UPDATE_REPO = _str("WEBTERM_UPDATE_REPO", "sm26449/webterm")
 # Ce trebuie rulat ca să iei versiunea nouă. UI-ul o AFIȘEAZĂ, nu o execută: un buton
 # care repornește aplicația din interiorul ei ar cere gateway-ului drept de creare de
@@ -99,7 +124,8 @@ AGENT_INSECURE = os.environ.get("WEBTERM_AGENT_INSECURE", "") == "1"
 
 # Optional fixed setup token; if unset, one is generated on first boot and
 # printed to the logs. Required to create the first account (anti-hijack).
-SETUP_TOKEN = os.environ.get("WEBTERM_SETUP_TOKEN") or None
+# `_secret`: acceptă şi WEBTERM_SETUP_TOKEN_FILE (docker secret), ca tokenul să nu stea în Config.Env.
+SETUP_TOKEN = _secret("WEBTERM_SETUP_TOKEN") or None
 
 # --- SSO / OIDC (opţional; ex. Authentik) --------------------------------------------------
 # Login federat: userii vin printr-un IdP (OIDC), provizionaţi la primul login, admin complet
@@ -109,7 +135,7 @@ SETUP_TOKEN = os.environ.get("WEBTERM_SETUP_TOKEN") or None
 # client_id + client_secret sunt toate setate; altfel WebTerm rulează exact ca înainte (local).
 OIDC_ISSUER = _str("WEBTERM_OIDC_ISSUER", "").rstrip("/")
 OIDC_CLIENT_ID = _str("WEBTERM_OIDC_CLIENT_ID", "")
-OIDC_CLIENT_SECRET = os.environ.get("WEBTERM_OIDC_CLIENT_SECRET", "")
+OIDC_CLIENT_SECRET = _secret("WEBTERM_OIDC_CLIENT_SECRET")
 OIDC_PROVIDER_NAME = _str("WEBTERM_OIDC_PROVIDER_NAME", "SSO")
 OIDC_SCOPES = _str("WEBTERM_OIDC_SCOPES", "openid email profile")
 # grupuri cerute (virgulă): dacă e ne-gol, tokenul TREBUIE să conţină cel puţin unul, altfel
@@ -168,7 +194,7 @@ IP_MAX_FAILS = max(1, _num("WEBTERM_IP_MAX_FAILS", 5))
 SMTP_HOST = os.environ.get("WEBTERM_SMTP_HOST", "")
 SMTP_PORT = _num("WEBTERM_SMTP_PORT", 587)
 SMTP_USER = os.environ.get("WEBTERM_SMTP_USER", "")
-SMTP_PASSWORD = os.environ.get("WEBTERM_SMTP_PASSWORD", "")
+SMTP_PASSWORD = _secret("WEBTERM_SMTP_PASSWORD")
 SMTP_STARTTLS = _str("WEBTERM_SMTP_STARTTLS", "1").lower() in ("1", "true", "yes")
 # expeditor și destinatar (adresa de admin care primește alertele)
 # `_str`, nu `get`: compose pasează `${WEBTERM_ALERT_FROM:-}`, deci variabila ajunge
@@ -182,7 +208,8 @@ ALERT_TO = os.environ.get("WEBTERM_ALERT_TO", "")
 # Alerte şi pe webhook (Slack/Discord/Teams/orice endpoint JSON). Independent de SMTP:
 # emailul e bun de arhivă, dar prost pentru reacţie — la un lockout sau la o flotă care
 # cade vrei un ping în chat, nu un mail citit peste trei ore.
-ALERT_WEBHOOK = os.environ.get("WEBTERM_ALERT_WEBHOOK", "")
+# URL-ul de webhook E un secret (Slack/Discord îl tratează ca token) → acceptă şi `_FILE`.
+ALERT_WEBHOOK = _secret("WEBTERM_ALERT_WEBHOOK")
 
 
 def email_alerts_enabled() -> bool:

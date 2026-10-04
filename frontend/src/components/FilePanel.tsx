@@ -1,9 +1,11 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { errText, api, withStepup, Host } from '../lib/api'
 import { copyText, readText } from '../lib/clipboard'
+import { useConfirm } from '../lib/confirm'
 import { getCwd } from '../lib/cwd'
 import { useI18n } from '../lib/i18n'
 import { notify } from '../lib/notify'
+import { useDrawer } from '../lib/useDrawer'
 import { uploadStore, uploadKey, uploadRel, uploadHost, UploadState, UploadCtl } from '../lib/uploadStore'
 import { uiLocale } from '../lib/tz'
 import {
@@ -103,13 +105,16 @@ async function readEntry(entry: any, prefix: string, out: UpItem[]): Promise<voi
 
 export default function FilePanel(props: { host: Host; sessionId: string; onClose: () => void; overlay?: boolean; embed?: boolean }) {
   const { t } = useI18n()
+  const { confirm } = useConfirm()
   const isAgent = !props.host.connection_type || props.host.connection_type === 'agent'
+  const asideRef = useRef<HTMLElement>(null)
+  const drawer = useDrawer(asideRef, props.onClose, !props.embed)
   // `embed`: panoul umple un tab din pagina hostului (full-width, fără drawer/scrim/close).
   // Altfel: pe pane-uri înguste (split pe iPad) e DRAWER peste terminal, nu coloană statică —
   // o coloană de 320px într-un pane de 240px strivește terminalul la ~0px.
   const asideCls = props.embed
     ? 'flex h-full w-full min-h-0 flex-col bg-ink-900'
-    : 'fixed inset-y-0 right-0 z-40 flex w-[90vw] max-w-sm flex-col border-l border-ink-800 bg-ink-900 shadow-2xl'
+    : 'fixed inset-y-0 right-0 z-40 flex w-[90vw] max-w-sm flex-col border-l border-ink-800 bg-ink-900 shadow-2xl outline-none'
     + (props.overlay ? '' : ' sm:static sm:z-auto sm:w-80 sm:max-w-none sm:shrink-0 sm:shadow-none')
   const scrimCls = props.embed ? 'hidden' : 'fixed inset-0 z-30 bg-black/60' + (props.overlay ? '' : ' sm:hidden')
   const [listing, setListing] = useState<Listing | null>(null)
@@ -236,9 +241,13 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
     return es
   }, [listing, filter, showHidden, sort])
 
-  function download(e: Entry) {
-    // avertisment peste 100MB: descărcarea stream-uiește tot fișierul în browser
-    if (e.size > 100 * 1024 * 1024 && !window.confirm(t('files.dlBigConfirm', { name: e.name, size: fmtSize(e.size) }))) return
+  async function download(e: Entry) {
+    // avertisment peste 100MB: descărcarea stream-uiește tot fișierul în browser (dialog propriu,
+    // nu window.confirm — acela bloca pagina şi tace după „nu mai arăta")
+    if (e.size > 100 * 1024 * 1024 && !(await confirm({
+      title: t('files.download'), message: t('files.dlBigConfirm', { name: e.name, size: fmtSize(e.size) }),
+      confirmLabel: t('files.download'),
+    }))) return
     const url = `/api/hosts/${props.host.id}/fs/download?path=${encodeURIComponent(join(listing!.path, e.name))}`
     const a = document.createElement('a')
     a.href = url
@@ -292,9 +301,16 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
     const sKey = uploadKey(hid, key)
     const ctl: UploadCtl = { xhr: null, cancelled: false, dest, uid, lsKey }
     uploadStore.setCtl(sKey, ctl)
-    let lastPct = 0
-    const setPct = (bytes: number) => {
+    // Progresul e stare GLOBALĂ (uploadStore) şi re-randează tot panoul la fiecare scriere; XHR
+    // `onprogress` bate de zeci de ori pe secundă pe o legătură rapidă → furtună de randări
+    // (audit frontend F-05). Publicăm cel mult ~10/s şi doar când procentul s-a schimbat;
+    // graniţele de felie şi finalul trec mereu (`force`), ca bara să nu rămână în urmă.
+    let lastPct = 0, shownPct = -1, shownAt = 0
+    const setPct = (bytes: number, force = false) => {
       lastPct = file.size ? Math.round((bytes / file.size) * 100) : 100
+      const now = Date.now()
+      if (!force && (lastPct === shownPct || now - shownAt < 100)) return
+      shownPct = lastPct; shownAt = now
       uploadStore.set(sKey, { pct: lastPct, state: 'up' })
     }
 
@@ -340,7 +356,7 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
       })
 
     try {
-      setPct(offset)
+      setPct(offset, true)
       let pos = offset, resyncs = 0
       do {   // do/while: acoperă și fișierul de 0 octeți (o felie goală la offset 0)
         if (ctl.cancelled) return
@@ -368,7 +384,7 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
           if (doCrc) crc = crc32(crc, new Uint8Array(buf))
           pos = end
         }
-        setPct(pos)
+        setPct(pos, true)
       } while (pos < file.size)
 
       if (ctl.cancelled) return
@@ -520,6 +536,8 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
   }
 
   function onKeyDown(ev: React.KeyboardEvent) {
+    // Escape cu confirmarea de ştergere deschisă = anulează confirmarea, nu închide panoul
+    if (ev.key === 'Escape' && confirmDel) { ev.preventDefault(); ev.stopPropagation(); setConfirmDel(null); return }
     if (editing || renaming || newFolder !== null || newFile !== null || confirmDel) return
     if (ev.key === 'ArrowDown') { ev.preventDefault(); setSel((s) => Math.min(view.length - 1, s + 1)) }
     else if (ev.key === 'ArrowUp') { ev.preventDefault(); setSel((s) => Math.max(0, s - 1)) }
@@ -555,7 +573,8 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
     return (
       <>
         <div className={scrimCls} onClick={props.onClose} aria-hidden="true" />
-        <aside aria-label={t('files.sessionAria')} className={asideCls}>
+        {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Escape pe regiunea drawer-ului (vezi useDrawer): intenţionat pe <aside>, nu pe document */}
+        <aside ref={asideRef} aria-label={t('files.sessionAria')} className={asideCls} onKeyDown={drawer.onKeyDown}>
           {header}
           <div className="flex flex-1 flex-col items-center justify-center gap-3 p-4 text-center">
             <p className="text-xs leading-relaxed text-slate-500">
@@ -570,9 +589,12 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
   return (
     <>
       <div className={scrimCls} onClick={props.onClose} aria-hidden="true" />
+      {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Escape pe regiunea drawer-ului (vezi useDrawer) */}
       <aside
+        ref={asideRef}
         aria-label={t('files.sessionAria')}
         className={asideCls}
+        onKeyDown={drawer.onKeyDown}
         onDragOver={(e) => { e.preventDefault(); setDrag(true) }}
         onDragLeave={() => setDrag(false)}
         onDrop={async (e) => {
@@ -603,21 +625,22 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
         {/* bara de cale + acțiuni pe director */}
         <div className="flex items-center gap-1 border-b border-ink-800 px-2 py-1.5">
           <button onClick={() => listing && navigate(listing.parent)} disabled={!listing || listing.path === '/'}
-            className="wt-touch shrink-0 rounded px-1.5 text-slate-400 hover:bg-ink-800 disabled:opacity-30" title={t('files.upLevel')}>↰</button>
+            className="wt-touch shrink-0 rounded px-1.5 text-slate-400 hover:bg-ink-800 disabled:opacity-30" title={t('files.upLevel')} aria-label={t('files.upLevel')}>↰</button>
           <input
             value={path}
+            aria-label={t('files.pathAria')}
             onChange={(e) => setPath(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && navigate(path)}
             spellCheck={false}
             className="min-w-0 flex-1 rounded bg-ink-800 px-2 py-1 font-mono text-[11px] text-slate-300 ring-1 ring-ink-700 focus:ring-sky-500"
             title={t('files.pathHint')}
           />
-          <button onClick={() => load(listing?.path ?? path)} className="wt-touch shrink-0 rounded px-1.5 text-slate-400 hover:bg-ink-800" title={t('files.reload')}><RefreshIcon /></button>
+          <button onClick={() => load(listing?.path ?? path)} className="wt-touch shrink-0 rounded px-1.5 text-slate-400 hover:bg-ink-800" title={t('files.reload')} aria-label={t('files.reload')}><RefreshIcon /></button>
           {/* deschiderea unuia închide restul: toolbar-ul rămâne interactiv deasupra modalului,
               iar un input montat SUB overlay i-ar fura focusul (tastezi într-un câmp invizibil) */}
           <button onClick={() => { setNewFileErr(''); setNewFolder(null); setRenaming(null); setConfirmDel(null); setNewFile('') }} disabled={!listing} className="wt-touch shrink-0 rounded px-1.5 font-mono text-[13px] text-slate-400 hover:bg-ink-800 disabled:opacity-40" title={t('files.newFile')} aria-label={t('files.newFile')}>+📄</button>
-          <button onClick={() => { setNewFile(null); setNewFileErr(''); setNewFolder('') }} className="wt-touch shrink-0 rounded px-1.5 text-slate-400 hover:bg-ink-800" title={t('files.newDir')}><PlusIcon /></button>
-          <button onClick={() => fileInput.current?.click()} disabled={busy || !listing} className="wt-touch shrink-0 rounded px-1.5 text-sky-400 hover:bg-ink-800 disabled:opacity-40" title={t('files.uploadHere')}>↑</button>
+          <button onClick={() => { setNewFile(null); setNewFileErr(''); setNewFolder('') }} className="wt-touch shrink-0 rounded px-1.5 text-slate-400 hover:bg-ink-800" title={t('files.newDir')} aria-label={t('files.newDir')}><PlusIcon /></button>
+          <button onClick={() => fileInput.current?.click()} disabled={busy || !listing} className="wt-touch shrink-0 rounded px-1.5 wt-link hover:bg-ink-800 disabled:opacity-40" title={t('files.uploadHere')} aria-label={t('files.uploadHere')}>↑</button>
           <input ref={fileInput} type="file" multiple className="hidden" onChange={(e) => { if (e.target.files) pickFiles(e.target.files); e.target.value = '' }} />
         </div>
 
@@ -625,24 +648,27 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
         <div className="flex items-center gap-1 border-b border-ink-800 px-2 py-1 text-[11px]">
           <input
             value={filter}
+            aria-label={t('files.filterAria')}
             onChange={(e) => { setFilter(e.target.value); setSel(0) }}
             placeholder={t('files.filterPh')}
             className="min-w-0 flex-1 rounded bg-ink-800/60 px-2 py-0.5 text-slate-300 ring-1 ring-ink-700 focus:ring-sky-500"
           />
           {/* „follow cwd" are sens doar legat de o sesiune; în embed (tab-ul hostului) nu avem una */}
           {!props.embed && (
-            <button onClick={follow ? () => setFollow(false) : enableFollow}
+            <button onClick={follow ? () => setFollow(false) : enableFollow} aria-pressed={follow}
               className={`shrink-0 rounded px-1.5 py-0.5 ${follow ? 'wt-good ring-1 ring-emerald-600/40' : 'text-slate-500 hover:bg-ink-800'}`}
-              title={t('files.followCwd')}>⇄ cwd</button>
+              title={t('files.followCwd')} aria-label={t('files.followCwd')}>⇄ cwd</button>
           )}
-          <button onClick={() => setShowHidden((v) => !v)}
+          <button onClick={() => setShowHidden((v) => !v)} aria-pressed={showHidden}
             className={`shrink-0 rounded px-1.5 py-0.5 ${showHidden ? 'wt-link' : 'text-slate-500 hover:bg-ink-800'}`}
-            title={t('files.showHidden')}>.*</button>
+            title={t('files.showHidden')} aria-label={t('files.showHidden')}>.*</button>
         </div>
-        <div className="flex items-center gap-2 border-b border-ink-800 px-3 py-0.5 text-[10px] uppercase tracking-wide text-slate-600">
+        {/* sortare: ţinte de ≥24px (erau text de 10px fără padding) + direcţia anunţată, nu doar ▲/▼ */}
+        <div className="flex items-center gap-1 border-b border-ink-800 px-2 text-[10px] uppercase tracking-wide text-slate-600">
           {(['name', 'size', 'mtime'] as SortKey[]).map((k) => (
             <button key={k} onClick={() => setSort((s) => ({ key: k, asc: s.key === k ? !s.asc : true }))}
-              className={`hover:text-slate-400 ${sort.key === k ? 'text-slate-400' : ''}`}>
+              aria-pressed={sort.key === k}
+              className={`min-h-[24px] rounded px-1.5 py-1 hover:text-slate-400 ${sort.key === k ? 'text-slate-400' : ''}`}>
               {k === 'name' ? t('files.sortName') : k === 'size' ? t('files.sortSize') : t('files.sortDate')}{sort.key === k ? (sort.asc ? ' ▲' : ' ▼') : ''}
             </button>
           ))}
@@ -660,8 +686,8 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
           {newFolder !== null && (
             <div className="flex items-center gap-2 border-b border-ink-800/60 px-3 py-1">
               <FolderIcon />
-              <input autoFocus value={newFolder} onChange={(e) => setNewFolder(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter') doMkdir(newFolder); if (e.key === 'Escape') setNewFolder(null) }}
+              <input autoFocus value={newFolder} onChange={(e) => setNewFolder(e.target.value)} aria-label={t('files.newDir')}
+                onKeyDown={(e) => { if (e.key === 'Enter') doMkdir(newFolder); if (e.key === 'Escape') { e.stopPropagation(); setNewFolder(null) } }}
                 onBlur={() => doMkdir(newFolder)} placeholder={t('files.newDirPh')}
                 className="min-w-0 flex-1 rounded bg-ink-800 px-1.5 py-0.5 font-mono text-[11px] text-slate-200 ring-1 ring-sky-500" />
             </div>
@@ -670,13 +696,14 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
             <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/60 p-4"
               onClick={() => setNewFile(null)}>
               <div className="w-full max-w-xs rounded-lg bg-ink-900 p-3 shadow-xl ring-1 ring-ink-700"
+                role="dialog" aria-labelledby="wt-files-newfile-title"
                 onClick={(e) => e.stopPropagation()}>
-                <div className="mb-2 flex items-center gap-2 text-[12px] text-slate-300">
-                  <span className="text-[14px]">📄</span>{t('files.newFile')}
+                <div id="wt-files-newfile-title" className="mb-2 flex items-center gap-2 text-[12px] text-slate-300">
+                  <span className="text-[14px]" aria-hidden="true">📄</span>{t('files.newFile')}
                 </div>
-                <input autoFocus value={newFile}
+                <input autoFocus value={newFile} aria-label={t('files.newFilePh')}
                   onChange={(e) => { setNewFile(e.target.value); if (newFileErr) setNewFileErr('') }}
-                  onKeyDown={(e) => { if (e.key === 'Enter') doNewFile(newFile, 'empty'); if (e.key === 'Escape') setNewFile(null) }}
+                  onKeyDown={(e) => { if (e.key === 'Enter') doNewFile(newFile, 'empty'); if (e.key === 'Escape') { e.stopPropagation(); setNewFile(null) } }}
                   placeholder={t('files.newFilePh')}
                   className="w-full rounded bg-ink-800 px-2 py-1 font-mono text-[12px] text-slate-200 outline-none ring-1 ring-sky-500" />
                 {newFileErr && <div className="mt-1.5 text-[11px] wt-danger">{newFileErr}</div>}
@@ -696,8 +723,8 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
                 {e.dir ? <FolderIcon /> : e.link ? <LinkIcon /> : <FileIcon />}
               </span>
               {renaming === e.name ? (
-                <input autoFocus defaultValue={e.name}
-                  onKeyDown={(ev) => { if (ev.key === 'Enter') doRename(e, (ev.target as HTMLInputElement).value); if (ev.key === 'Escape') setRenaming(null) }}
+                <input autoFocus defaultValue={e.name} aria-label={t('files.renameAria', { name: e.name })}
+                  onKeyDown={(ev) => { if (ev.key === 'Enter') doRename(e, (ev.target as HTMLInputElement).value); if (ev.key === 'Escape') { ev.stopPropagation(); setRenaming(null) } }}
                   onBlur={(ev) => doRename(e, ev.target.value)}
                   className="min-w-0 flex-1 rounded bg-ink-800 px-1 py-0.5 font-mono text-[11px] text-slate-100 ring-1 ring-sky-500" />
               ) : (
@@ -710,26 +737,28 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
                   title={e.dir ? e.name : t('files.copyHint', { name: e.name })}>{e.name}{e.dir ? '/' : ''}</button>
               )}
               {/* meta pe UN rând: mode · dim · data (ascunse când apar acțiunile) */}
-              <span className="shrink-0 items-center gap-2 font-mono text-[10px] tabular-nums text-slate-600 hidden sm:flex group-hover:sm:hidden">
+              <span className="shrink-0 items-center gap-2 font-mono text-[10px] tabular-nums text-slate-600 hidden sm:flex group-hover:sm:hidden group-focus-within:sm:hidden">
                 <span>{fmtMode(e.mode)}</span>
                 {!e.dir && <span className="w-10 text-right text-slate-500">{fmtSize(e.size)}</span>}
                 <span className="w-12 text-right">{fmtMtime(e.mtime)}</span>
               </span>
-              {/* acțiuni la hover (desktop) / mereu (touch) */}
-              <div className="hidden shrink-0 items-center gap-0.5 group-hover:flex [@media(hover:none)]:flex">
+              {/* acțiuni la hover (mouse), la focus în rând (tastatură — `hidden` le scotea din
+                  fluxul de Tab, deci de la tastatură NU puteai şterge/redenumi) / mereu (touch).
+                  Ţinte de 24px, fiecare cu etichetă care numeşte intrarea. */}
+              <div className="hidden shrink-0 items-center gap-0.5 group-hover:flex group-focus-within:flex [@media(hover:none)]:flex">
                 {!e.dir && (
-                  <button onClick={() => edit(e)} className="rounded px-1 text-slate-500 hover:bg-ink-700 hover:text-slate-200" title={t('files.edit')}><PencilIcon /></button>
+                  <button onClick={() => edit(e)} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-slate-200" title={t('files.edit')} aria-label={`${t('files.edit')} ${e.name}`}><PencilIcon /></button>
                 )}
                 {!e.dir && (
-                  <button onClick={() => download(e)} className="rounded px-1 text-slate-500 hover:bg-ink-700 hover:text-slate-200" title={t('files.download')}><DownloadIcon /></button>
+                  <button onClick={() => download(e)} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-slate-200" title={t('files.download')} aria-label={`${t('files.download')} ${e.name}`}><DownloadIcon /></button>
                 )}
                 {/* directoarele nu au download simplu — dar au arhivă (tar.gz pe host) */}
                 {e.dir && (
-                  <button onClick={() => downloadArchive(e)} className="rounded px-1 text-slate-500 hover:bg-ink-700 hover:text-slate-200"
+                  <button onClick={() => downloadArchive(e)} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-slate-200"
                     title={t('files.downloadArchive')} aria-label={t('files.downloadArchiveAria', { name: e.name })}><DownloadIcon /></button>
                 )}
-                <button onClick={() => setRenaming(e.name)} className="rounded px-1 text-slate-500 hover:bg-ink-700 hover:text-slate-200" title={t('files.rename')} aria-label={t('files.renameAria', { name: e.name })}><PencilIcon /></button>
-                <button onClick={() => setConfirmDel(e)} className="rounded px-1 text-slate-500 hover:bg-ink-700 hover:text-rose-300" title={t('files.delete')}><TrashIcon /></button>
+                <button onClick={() => setRenaming(e.name)} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-slate-200" title={t('files.rename')} aria-label={t('files.renameAria', { name: e.name })}><PencilIcon /></button>
+                <button onClick={() => setConfirmDel(e)} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-rose-300" title={t('files.delete')} aria-label={`${t('files.delete')} ${e.name}`}><TrashIcon /></button>
               </div>
             </div>
           ))}
@@ -779,8 +808,9 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
                   </span>
                   {/* pe „up" anulează transferul; pe ✓/✗ doar curăţă rândul (lista persistă
                       în store-ul global acum, altfel erorile ar rămâne blocate pe ecran) */}
-                  <button onClick={() => cancelUpload(name)} className="shrink-0 rounded px-0.5 text-slate-500 hover:text-rose-300"
-                    title={u.state === 'up' ? t('files.cancelUpload') : t('files.dismissUpload')}>✕</button>
+                  <button onClick={() => cancelUpload(name)} className="grid h-6 w-6 shrink-0 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-rose-300"
+                    title={u.state === 'up' ? t('files.cancelUpload') : t('files.dismissUpload')}
+                    aria-label={`${u.state === 'up' ? t('files.cancelUpload') : t('files.dismissUpload')} ${name}`}>✕</button>
                 </div>
                 {/* bară de progres: se umple pe octeți (XHR onprogress), colorată după stare */}
                 <div className="mt-0.5 h-1 w-full overflow-hidden rounded-full bg-ink-800">

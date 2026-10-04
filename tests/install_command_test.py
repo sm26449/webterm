@@ -149,6 +149,20 @@ async def main():
         rn = await c.get(f"/install/{tokn}.sh")
         check("host fără parolă → install merge fără header", rn.status_code == 200, str(rn.status_code))
 
+        # ── unit-ul systemd generat (audit 2026-10-04, HIGH #2) ──────────────────
+        # Serverul tmux e pornit de un copil al agentului → trăieşte în cgroup-ul unităţii. Fără
+        # KillMode=process, orice restart/crash/watchdog al agentului omora TOATE sesiunile —
+        # exact invariantul pe care tmux-ul îl garantează (docs/design/ARCHITECTURE.md).
+        script = rn.text
+        svc = script[script.index("[Service]"):script.index("[Install]")]
+        check("unit-ul systemd are KillMode=process (tmux supravieţuieşte agentului)",
+              "\nKillMode=process\n" in svc, svc)
+        check("KillMode e în [Service], lângă Restart (nu într-un comentariu)",
+              "Restart=always" in svc and svc.index("Restart=always") < svc.index("KillMode=process"))
+        check("instalarea rescrie unit-ul necondiţionat (re-run vindecă hosturile vechi)",
+              'cat > "$HOME/.config/systemd/user/webterm-agent.service"' in script
+              and script.index('webterm-agent.service" <<UNIT') < script.index("daemon-reload"))
+
     # ── digestul agentului în scriptul de instalare (F-11) ──────────────────
     # Capcana: `/agent/ptyd.py` NU serveşte fişierul din repo. Cu o cheie de flotă — pe care
     # gateway-ul şi-o generează singur, deci cazul obişnuit — `UPDATE_PUBKEY` e substituit.

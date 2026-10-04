@@ -82,10 +82,12 @@ export default function StatusBar(props: { session: Session; host?: Host; rtt?: 
     s.state === 'lost' ? 'wt-danger' : 'text-slate-500'
 
   return (
-    <div className="wt-compact-y border-t border-ink-800 bg-ink-900 text-[11px] text-slate-400">
+    <div className="wt-statusbar wt-compact-y border-t border-ink-800 bg-ink-900 text-[11px] text-slate-400">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-3 py-1.5">
         <span className={`inline-flex items-center gap-1.5 font-medium ${stateColor}`}>
-          <span className={`h-1.5 w-1.5 rounded-full ${hostDown ? 'bg-amber-500' : live ? 'bg-emerald-500 dot-live' : s.state === 'lost' ? 'bg-rose-500' : 'bg-slate-500'}`} />
+          {/* punctul e decorativ (eticheta text e chiar lângă); „pierdută"/„host offline" au şi formă
+              diferită (pătrat), nu doar altă culoare */}
+          <span aria-hidden="true" className={`h-1.5 w-1.5 ${hostDown || s.state === 'lost' ? 'rounded-sm' : 'rounded-full'} ${hostDown ? 'bg-amber-500' : live ? 'bg-emerald-500 dot-live' : s.state === 'lost' ? 'bg-rose-500' : 'bg-slate-500'}`} />
           {stateLabel}
         </span>
         {/* Hostul n-are tmux → sesiunea asta NU supravieţuieşte unei căderi de agent sau
@@ -114,12 +116,12 @@ export default function StatusBar(props: { session: Session; host?: Host; rtt?: 
         )}
         {/* ceasul serverului, în fusul sesiunii — răspunde la „cât e ceasul
             acolo?" fără să tastezi `date` în mijlocul unei comenzi */}
-        {live && <span className="tabular-nums" title={t('statusbar.clockTitle', { tz: getTimezone() })}>🕒 {clock}</span>}
+        {live && <span className="tabular-nums" title={t('statusbar.clockTitle', { tz: getTimezone() })}><span aria-hidden="true">🕒 </span>{clock}</span>}
         {/* cwd raportat de shell prin OSC 7 — apare doar cu shell integration
             activă; panoul de fișiere urmărește aceeași cale */}
         {live && props.cwd && (
           <span className="min-w-0 max-w-[16rem] truncate font-mono wt-link" title={props.cwd}>
-            📁 {shortPath(props.cwd)}
+            <span aria-hidden="true">📁 </span>{shortPath(props.cwd)}
           </span>
         )}
         {props.rtt != null && (
@@ -128,13 +130,14 @@ export default function StatusBar(props: { session: Session; host?: Host; rtt?: 
             className={`tabular-nums ${props.rtt < 120 ? 'wt-good' : props.rtt < 350 ? 'wt-warn' : 'wt-danger'}`}
             title={t('statusbar.rttTitle')}
           >
-            ⇅ {props.rtt} ms
+            <span aria-hidden="true">⇅ </span>{props.rtt} ms
           </span>
         )}
         {attachOneLiner && (
           <button
             onClick={() => setShowAttach((v) => !v)}
-            className="wt-link ml-auto rounded px-1.5 py-0.5 hover:bg-ink-800"
+            // py-1 (nu 0.5): ţintă de ≥24 px la 11 px text, fără să crească bara (audit 6.x)
+            className="wt-link ml-auto rounded px-1.5 py-1 hover:bg-ink-800"
             title={t('statusbar.attachTitle')}
           >
             {/* „⌘" sugera tasta Cmd — eticheta spune acum ce face de fapt */}
@@ -149,7 +152,7 @@ export default function StatusBar(props: { session: Session; host?: Host; rtt?: 
             {t('statusbar.attachIntro')}
           </p>
           <div className="flex items-stretch gap-2">
-            <code className="flex-1 overflow-x-auto whitespace-nowrap rounded-md bg-black/40 px-2 py-1.5 font-mono text-[11px] text-emerald-400">
+            <code className="wt-good flex-1 overflow-x-auto whitespace-nowrap rounded-md bg-black/40 px-2 py-1.5 font-mono text-[11px]">
               {attachOneLiner}
             </code>
             <button
@@ -163,7 +166,7 @@ export default function StatusBar(props: { session: Session; host?: Host; rtt?: 
                   /* origine http / permisiune refuzată: selectează manual */
                 }
               }}
-              className="shrink-0 rounded-md bg-sky-600 px-2 text-xs font-medium text-white hover:bg-sky-700"
+              className="shrink-0 rounded-md bg-sky-600 px-2 py-1 text-xs font-medium text-white hover:bg-sky-700"
             >
               {copied ? '✓' : t('statusbar.copy')}
             </button>

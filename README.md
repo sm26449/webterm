@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/sm26449/webterm/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/sm26449/webterm/actions/workflows/docker-publish.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v3.0.0-blue)](https://github.com/sm26449/webterm/tags)
+[![Version](https://img.shields.io/badge/version-v3.1.0-blue)](https://github.com/sm26449/webterm/tags)
 
 **Persistent terminals for your whole infrastructure, in the browser.**
 
@@ -97,7 +97,9 @@ decision explained below.
 > Fictional data (a demo fleet, not real hosts). Generated reproducibly with
 > [`scripts/screenshots/run.sh`](scripts/screenshots/run.sh). Dark theme below; a
 > light theme also exists (light chrome, the workspace stays dark like a real
-> terminal).
+> terminal). **Captured on v2.0.0** and not yet regenerated for 3.x: the editor shown
+> is the earlier CodeMirror one (the editor is Monaco since 3.x), the dashboard predates
+> the host-page hub, and the Security tab predates the deploy-key policy.
 
 **Fleet dashboard** — hosts, online status, metrics, folders.
 
@@ -107,7 +109,8 @@ decision explained below.
 
 ![Live terminal](docs/screenshots/02-terminal-dark.png)
 
-**Files + editor** — browse, edit (Monaco — the VS Code editor) and transfer files on the host.
+**Files + editor** — browse, edit and transfer files on the host (editor shown: CodeMirror, v2.0.0;
+Monaco — the VS Code editor — since 3.x).
 
 ![File browser](docs/screenshots/03-files-dark.png)
 
@@ -419,7 +422,7 @@ the same script, only one you can read first and pin to a release.
 ```sh
 git clone https://github.com/sm26449/webterm.git
 cd webterm
-git checkout v2.0.19          # a tag cannot move under you; a branch can
+git checkout v3.1.0           # the release tag (see the version badge); a tag cannot move under you, a branch can
 less install.sh              # it is meant to be read
 sudo ./install.sh --domain term.example.com --email you@example.com
 ```
@@ -433,19 +436,21 @@ check is skipped if the request fails.
 
 Every push to `main` publishes an image to the GitHub Container Registry
 (`ghcr.io/sm26449/webterm`). On the server you build nothing: pull the image
-and start, with **Traefik** issuing the Let's Encrypt certificate via **DNS-01
-Cloudflare** (works behind the Cloudflare proxy, through NAT, with no port 80
-exposed; supports wildcard).
+and start, with **Traefik** issuing the Let's Encrypt certificate. By default that is
+**HTTP-01** — no DNS provider involved; the domain must resolve to this server and
+port 80 must be reachable. Give it a Cloudflare token and it switches to **DNS-01**
+(`install.sh` and `deploy.sh` both write `WEBTERM_CERT_RESOLVER` from whether the token
+is present): that works behind the Cloudflare proxy or through NAT with no port 80
+exposed, and it is the only way to get the **wildcard** that port-forward subdomains need.
 
-**Two tokens** for the common case: Cloudflare (DNS) and the app setup token
-(auto-generated). Pulling the public image needs no authentication; a GitHub
-`read:packages` token is only needed if you **fork and keep your own image
-private**.
+**One token** for the common case: the app setup token (auto-generated). The Cloudflare
+token is optional (see above). Pulling the public image needs no authentication; a GitHub
+`read:packages` token is only needed if you **fork and keep your own image private**.
 
-> **Not on Cloudflare?** This image deploy issues the certificate via DNS-01
-> Cloudflare. If your DNS isn't on Cloudflare, use the [Quick install](#quick-install)
-> path instead — Caddy gets a Let's Encrypt certificate via HTTP-01, no Cloudflare
-> needed (just point a public DNS record at the server and keep ports 80/443 reachable).
+> **Not on Cloudflare?** You do not need it. Leave `CF_DNS_API_TOKEN` empty and Traefik
+> uses HTTP-01. The only thing you give up is TLS on port-forward subdomains (they need a
+> wildcard, and only DNS-01 can issue one); the application itself gets its certificate
+> normally.
 
 ### Clean server? One command: `install.sh`
 
@@ -494,12 +499,17 @@ cp .env.prod.example .env
 the image and starts the stack (Traefik + docker-socket-proxy + app). It reuses
 the data volume, so moving from a previous Caddy stack keeps SQLite + the
 transcripts. Open `https://your-domain`, enter the setup token (`deploy.sh`
-prints it), create the account + passkey.
+prints it), create the account + passkey. Secrets (setup token, Cloudflare token, OIDC
+client secret, SMTP password, Authentik keys) live as files in `/opt/webterm/secrets/`
+(0700) mounted at `/run/secrets`, not in `.env`: Traefik reads container metadata through
+docker-socket-proxy and that metadata includes every container's environment. `deploy.sh`
+moves any value it still finds in `.env` into its file.
 
 Update with `./upgrade.sh` — it takes a backup, syncs the host-side scripts and hands off to
 `deploy.sh`. (`make pull` exists for a quick image swap, but it bypasses `deploy.sh`, so it
 records no rollback point and runs no health gate.) Deploy a specific version
-with a recorded rollback point: `./deploy.sh v2.0.18` — if the new container does
+with a recorded rollback point: `./deploy.sh v3.1.0` (or a digest:
+`./deploy.sh ghcr.io/sm26449/webterm@sha256:…`) — if the new container does
 not become healthy, the script rolls back automatically; any time afterwards,
 `./rollback.sh` returns you to the previous image with a single command.
 
@@ -508,8 +518,17 @@ latest published version; pass a tag to target one. It resolves the version, che
 and disk space, pulls the image, **takes a backup**, **syncs the files that run on the host**
 (compose, the operator scripts — `backup.sh`, `restore.sh`, `rollback.sh`, `deploy.sh`,
 `remove.sh`, `cert-check.sh` — and `upgrade.sh` itself; `/opt/webterm` is not a git checkout, so
-otherwise they stay frozen at whatever the installer put there), then hands off to `deploy.sh`
-for the pinned deploy with automatic rollback. The full
+otherwise they stay frozen at whatever the installer put there). When `deploy/` holds a newer
+`webterm-backup`/`webterm-cert-check` unit than the one installed for this directory in
+`/etc/systemd/system`, it re-installs that too (`daemon-reload`, timer re-enabled) — the units
+were previously written once by the installer and never touched again. Then it hands off to `deploy.sh`
+for the pinned deploy with automatic rollback. The pin is the image **digest**, not the tag:
+`upgrade.sh` resolves `vX.Y.Z` to `ghcr.io/…/webterm@sha256:…` once, after the pull, and
+everything downstream — the kit it extracts, `.env`, `.prev-image`, the rollback — uses that
+(tags can be re-pointed; digests cannot). Published images are signed with keyless cosign and
+carry provenance + SBOM; with `cosign` installed and `WEBTERM_COSIGN_IDENTITY` set in `.env`,
+`upgrade.sh` verifies the signature before running anything from the image, and otherwise
+prints that it skipped it (see [docs/RUNBOOK.md](docs/RUNBOOK.md), "Verifying an image"). The full
 recovery procedure (including when the UI is completely unreachable):
 [docs/RUNBOOK.md](docs/RUNBOOK.md).
 
@@ -517,7 +536,7 @@ recovery procedure (including when the UI is completely unreachable):
 
 | Token | Where | Scope | Role |
 |---|---|---|---|
-| Cloudflare | `CF_DNS_API_TOKEN` in `.env` | Zone : DNS : Edit (your zone) | the TLS certificate via DNS-01 |
+| Cloudflare (optional) | `CF_DNS_API_TOKEN` in `.env` | Zone : DNS : Edit (your zone) | the TLS certificate via DNS-01 (wildcard for forwards); empty → HTTP-01 |
 | GitHub *(optional)* | file in `GHCR_TOKEN_FILE` | `read:packages` | only to pull a **private/forked** image |
 | Setup | generated by `deploy.sh` in `.env` | — | the gate for creating the first account |
 
@@ -948,6 +967,7 @@ frontend/src/
                            termtheme (schemes + iTerm/VSCode import), metrics
 scripts/
   e2e-session.mjs          E2E with a REAL agent (runs in CI)
+  e2e-jump.mjs             jump-host UI: nesting, form, host hub (CI, no agent)
   fs-test.sh · fwd-test.sh file operations · port forwarding (CI)
   mobile-audit.mjs         responsive audit on real devices (CI)
   smoke-boot.mjs           boot smoke test (UI starts with no JS errors)
@@ -958,6 +978,7 @@ tests/                     unit + integration suite (dev): telnet (shim/bastion)
                           security, ssh, transcript, provisioning…
 docs/                      RUNBOOK · SHORTCUTS · SHELL-INTEGRATION ·
                           PORT-FORWARDING · FLEET · SERIAL-CONSOLE ·
+                          SSH-KEYS · SSH-JUMP · DATABASE-TOOLBOX · SSO ·
                           THREAT-MODEL
   design/                  architecture notes: ARCHITECTURE · SIGNED-UPDATES ·
                           SESSION-LIFECYCLE · TELNET-BASTION ·

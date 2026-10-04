@@ -171,6 +171,38 @@ async def main():
         check("semnătură cu cheie străină → OidcError", _raises(lambda: oidc.complete(s6, "c")))
         oidc._http_json = _orig
 
+        # ---- 7b. step-up: max_age=0 în cerere, auth_time verificat la întoarcere ----
+        # (audit 2026-10-04: înainte se trimitea doar `prompt=login` şi nu se verifica nimic)
+        us = oidc.begin(intent="stepup", host_id=7)
+        qs = dict(x.split("=", 1) for x in us.split("?", 1)[1].split("&"))
+        check("step-up: authorize cere prompt=login ŞI max_age=0",
+              qs.get("prompt") == "login" and qs.get("max_age") == "0", str(qs))
+        check("login obişnuit NU cere max_age", "max_age" not in oidc.begin(intent="login"))
+        ss = _state(us)
+        _MOCK["next_claims"] = base_claims(issuer, nonce=oidc._TXN[ss]["nonce"],
+                                           auth_time=int(oidc._TXN[ss]["ts"]) - 600)
+        check("step-up cu auth_time MAI VECHI decât cererea → OidcError (sesiune IdP refolosită)",
+              _raises(lambda: oidc.complete(ss, "c")))
+        us2 = oidc.begin(intent="stepup", host_id=7); ss2 = _state(us2)
+        _MOCK["next_claims"] = base_claims(issuer, nonce=oidc._TXN[ss2]["nonce"],
+                                           auth_time=int(time.time()))
+        info = oidc.complete(ss2, "c")
+        check("step-up cu auth_time proaspăt → acceptat, intent/host păstrate",
+              info["intent"] == "stepup" and info["host_id"] == 7, str(info))
+        us3 = oidc.begin(intent="stepup", host_id=7); ss3 = _state(us3)
+        _MOCK["next_claims"] = base_claims(issuer, nonce=oidc._TXN[ss3]["nonce"])   # fără auth_time
+        check("step-up FĂRĂ auth_time → acceptat (compromis documentat: prompt=login singur)",
+              oidc.complete(ss3, "c")["intent"] == "stepup")
+        us4 = oidc.begin(intent="stepup", host_id=7); ss4 = _state(us4)
+        _MOCK["next_claims"] = base_claims(issuer, nonce=oidc._TXN[ss4]["nonce"], auth_time="acum")
+        check("step-up cu auth_time ne-numeric → OidcError", _raises(lambda: oidc.complete(ss4, "c")))
+        # un LOGIN cu auth_time vechi rămâne valid: verificarea e doar pe step-up
+        ul = oidc.begin(intent="login"); sl = _state(ul)
+        _MOCK["next_claims"] = base_claims(issuer, nonce=oidc._TXN[sl]["nonce"],
+                                           auth_time=int(time.time()) - 86400)
+        check("login cu auth_time vechi → acceptat (sesiunea IdP e treaba IdP-ului)",
+              oidc.complete(sl, "c")["intent"] == "login")
+
         # ---- 8. provizionare cont prin callback (end-to-end pe endpoint) ----
         import httpx
         from app.main import app

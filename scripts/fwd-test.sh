@@ -248,6 +248,24 @@ case "$LOC" in
   *stepup=forward*) ok "SEC: forward access on a 2FA host requires step-up (no token)" ;;
   *) no "fwd-2fa-access" "$LOC" ;;
 esac
+# ...şi DUPĂ step-up tunelul chiar se deschide (audit 2026-10-04): cookie-ul de sesiune e `__Host-`,
+# deci pe subdomeniu ajunge DOAR biletul; verificarea ferestrei citea sesiunea → mereu „închis" →
+# redirect relativ → buclă infinită. Testul de mai sus nu o prindea: se oprea la primul 302.
+# Contul e2e n-are passkey, deci parola deschide fereastra (din curl nu putem face ceremonia).
+sess -o /dev/null -X POST "$B/api/hosts/$SSH2/stepup" -H 'Content-Type: application/json' \
+  -d '{"stepup_password":"parola-e2e-123456"}'
+LOC2F=$(curl -s -H "Cookie: $SC" -H "Host: $D" -D - -o /dev/null "$B/__wtfwd/auth?slug=$SF2SLUG&next=/" | grep -i '^location:' | tr -d '\r' | sed 's/location: //i')
+echo "$LOC2F" | grep -qE "$SF2SLUG\.$D/__wtfwd/set\?t=[0-9]+\." && ok "2FA host, window open: auth issues the ticket" || no "fwd-2fa-ticket" "$LOC2F"
+TK2F=$(echo "$LOC2F" | sed -E 's/.*[?&]t=([^&]+).*/\1/')
+FC2F=$(ch "$SF2SLUG.$D" -D - -o /dev/null "$B/__wtfwd/set?t=$TK2F&next=/" | grep -i '^set-cookie:' | sed -E 's/set-cookie: ([^;]+).*/\1/i' | tr -d '\r')
+# host SSH cu 2FA şi fără sesiune deschisă → proxy-ul răspunde 409 („needs an open session");
+# cu o ţintă vie ar fi 200/502. Invariantul testat e „NU 302": biletul + fereastra deschid tunelul.
+CODE=$(ch "$SF2SLUG.$D" -o /dev/null -w '%{http_code}' -H "Cookie: $FC2F" "$B/")
+case "$CODE" in
+  302) no "fwd-2fa-loop" "still redirected after step-up (cod $CODE) — redirect loop" ;;
+  200|409|502) ok "2FA host, ticket + open window on the subdomain: proxied, not redirected ($CODE)" ;;
+  *) no "fwd-2fa-open" "cod $CODE" ;;
+esac
 
 echo
 echo "RESULT: $pass passed, $fail failed"

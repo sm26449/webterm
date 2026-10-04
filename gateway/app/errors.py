@@ -18,13 +18,27 @@ regex pe mesaj (`/2FA|passkey|parola contului/i`) — fragil la orice reformular
 greşit: prindea şi „the host requires 2FA — not reachable with an automation token", care NU
 e o cerere de step-up.
 """
+import json
+
 from fastapi import HTTPException
 
 
 class ApiError(HTTPException):
-    """HTTPException + un cod stabil, expus ca `X-WebTerm-Error` şi în corpul JSON."""
+    """HTTPException + un cod stabil, expus ca `X-WebTerm-Error` şi în corpul JSON.
 
-    def __init__(self, status_code: int, code: str, detail: str, headers=None):
-        super().__init__(status_code=status_code, detail=detail,
-                         headers={**(headers or {}), "X-WebTerm-Error": code})
+    `vars` (opţional) = valorile pe care le purta mesajul englezesc (host, port, limită, secunde
+    de aşteptare). Clientul le interpolează în cheia tradusă (`{retry}`, `{limit}`…) — altfel
+    traducerea ar fi ori vagă („prea multe încercări"), ori ar pierde exact informaţia utilă.
+    Merg în antetul `X-WebTerm-Error-Vars` (JSON) şi în corp, nu în `detail`, ca `detail` să
+    rămână şirul englezesc pe care îl văd curl/scripturile."""
+
+    def __init__(self, status_code: int, code: str, detail: str, headers=None, vars=None):
+        hdrs = {**(headers or {}), "X-WebTerm-Error": code}
+        if vars:
+            # doar scalare, serializate compact şi ASCII-safe (antetele HTTP nu sunt UTF-8)
+            hdrs["X-WebTerm-Error-Vars"] = json.dumps(
+                {k: v for k, v in vars.items() if isinstance(v, (str, int, float, bool))},
+                ensure_ascii=True, separators=(",", ":"))
+        super().__init__(status_code=status_code, detail=detail, headers=hdrs)
         self.code = code
+        self.vars = dict(vars or {})

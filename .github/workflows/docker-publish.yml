@@ -138,6 +138,10 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # DOAR pentru semnătura cosign keyless de la finalul jobului: tokenul OIDC al rulării
+      # devine certificatul Fulcio cu identitatea acestui workflow (nicio cheie de păstrat).
+      # Rămâne pe jobul care publică, nu la nivel de workflow — ca `packages: write`.
+      id-token: write
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -371,6 +375,23 @@ jobs:
           cp "$GITHUB_WORKSPACE/scripts/e2e-features.mjs" .
           E2E_SETUP_TOKEN=e2e-features-token node e2e-features.mjs http://127.0.0.1:8005
 
+      # UI-ul ţintelor jump (SSH-jump / Telnet-jump): meniul ⋯ al agentului → „Add SSH / Telnet
+      # jump…", formularul (toggle protocol, via fix, Connect once / Save target), cuibărirea sub
+      # agent în sidebar (regresia „decalat"), hub-ul paginii de host şi toast-ul de eroare la un
+      # connect eşuat. Fără agent real: host-urile de agent se creează prin API (unul OFFLINE e de
+      # ajuns). Instanţă proprie — scriptul îşi creează contul prin /api/setup.
+      - name: Jump-host UI (nesting, form, host hub) (Playwright)
+        run: |
+          docker run -d --name jumpapp -p 8006:8000 \
+            -e WEBTERM_SETUP_TOKEN=jump-e2e-token -e WEBTERM_PUBLIC_URL=http://127.0.0.1:8006 \
+            -e WEBTERM_UPDATE_CHECK=0 webterm-smoke:ci
+          st=starting
+          for i in $(seq 1 45); do st=$(docker inspect -f '{{.State.Health.Status}}' jumpapp 2>/dev/null); [ "$st" = healthy ] && break; sleep 2; done
+          [ "$st" = healthy ] || { echo "jumpapp status: $st"; docker logs jumpapp; exit 1; }
+          cd /tmp/wt-smoke
+          cp "$GITHUB_WORKSPACE/scripts/e2e-jump.mjs" .
+          E2E_SETUP_TOKEN=jump-e2e-token node e2e-jump.mjs http://127.0.0.1:8006
+
       # E2E de sesiune (post-incidentele v1.0.11 și v1.0.15): agent REAL pornit
       # în container, sesiuni deschise prin UI, output verificat la tastare,
       # comutare de tab-uri fără panou gol, pauză+resync pe tab-ul din fundal.
@@ -480,6 +501,7 @@ jobs:
             type=sha,format=short
 
       - name: Build & push
+        id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -488,3 +510,32 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # Supply chain (auditul de deploy, H1): atestare SLSA de provenienţă (mode=max =
+          # inclusiv sursa şi parametrii build-ului; nu există build-args secrete aici) + SBOM
+          # (SPDX) ataşate indexului imaginii. Se citesc cu
+          #   docker buildx imagetools inspect ghcr.io/<owner>/webterm@sha256:… --format '{{json .Provenance}}'
+          provenance: mode=max
+          sbom: true
+
+      # Semnătură keyless (Sigstore): semnăm DIGESTUL publicat, nu tag-urile — un tag se poate
+      # re-pointa (s-a şi întâmplat în proiect), digestul nu. Certificatul Fulcio poartă
+      # identitatea acestui workflow + ref-ul (ex. refs/tags/v3.0.1), iar `upgrade.sh` o poate
+      # cere cu `cosign verify --certificate-identity-regexp … --certificate-oidc-issuer
+      # https://token.actions.githubusercontent.com` (docs/RUNBOOK.md, „Verifying an image").
+      # Pe PR nu se publică nimic, deci nici nu e ce semna.
+      - name: Install cosign
+        if: github.event_name != 'pull_request'
+        uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
+      - name: Sign the published digest (cosign keyless)
+        if: github.event_name != 'pull_request'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -eu
+          [ -n "$DIGEST" ] || { echo "no digest from the build step — nothing was pushed?"; exit 1; }
+          # repo-ul (lowercase, aşa cum l-a scris metadata-action) din primul tag; semnăm o
+          # singură dată pe digest, iar toate tag-urile care arată spre el sunt acoperite
+          REPO=$(printf '%s\n' "$TAGS" | head -1 | sed 's/:[^:/]*$//')
+          cosign sign --yes "${REPO}@${DIGEST}"
+          echo "signed ${REPO}@${DIGEST}"

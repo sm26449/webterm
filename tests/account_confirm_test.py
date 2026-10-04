@@ -185,6 +185,25 @@ async def main():
           security.verify_password("a-treia-parola", row["password_hash"]))
     check("dispozitiv cunoscut → n-am trimis niciun email în plus", len(mails) == 1, mails)
 
+    # G-34 (audit 2026-10-04): o adresă malformată devenea canalul de login/recuperare.
+    # Refuz 400 `account.badEmail` ÎNAINTE de al doilea factor (niciun cod trimis degeaba).
+    fresh = await db.fetchone("SELECT * FROM users WHERE id=?", uid)   # hash-ul CURENT
+    for bad in ("foo", "a@b", "a b@c.d", "a@@b.c", "a@.b.c", "a@b..c", "@b.c", "a@b.c.",
+                "a\x00@b.c", "x" * 250 + "@b.c"):
+        try:
+            await api.update_account(
+                api.AccountUpdate(current_password="a-treia-parola", email=bad),
+                FakeReq(tok_old), fresh)
+            check("email malformat %r → refuzat" % bad[:20], False, "a trecut")
+        except ApiError as e:
+            check("email malformat %r → refuzat" % bad[:20], e.code == "account.badEmail", e.code)
+    check("adresa contului NU s-a schimbat după refuzuri",
+          (await db.fetchone("SELECT email FROM users WHERE id=?", uid))["email"] == "u@example.com")
+    check("…şi n-a plecat niciun cod pentru ele", len(mails) == 1, mails)
+    check("adresele normale trec de verificare",
+          all(security.valid_email(a) for a in ("ok@example.com", "first.last+tag@sub.example.co.uk",
+                                                "o'hara@example.org")))
+
     # fără SMTP poarta NU se aplică: altfel o instalare fără email nu şi-ar mai putea
     # schimba niciodată parola — blocare permanentă, nu securitate
     email_alerts.smtp_ready = lambda: asyncio.sleep(0, result=False)

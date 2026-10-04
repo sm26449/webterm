@@ -182,7 +182,7 @@ export default function SharedView(props: { token: string }) {
       <div className="wt-window flex h-full flex-col">
         <header className="flex items-center gap-2 border-b border-ink-800 bg-ink-900 px-4 py-2">
           <span className="text-sm font-medium">{title || t('share.titleFallback')}</span>
-          <span className={`rounded px-2 py-0.5 text-[11px] ${writable ? 'bg-emerald-500/15 text-emerald-300' : 'bg-ink-800 text-slate-400'}`}>
+          <span className={`rounded px-2 py-0.5 text-[11px] ${writable ? 'wt-good bg-emerald-500/15' : 'bg-ink-800 text-slate-400'}`}>
             {writable ? t('share.canWrite') : t('share.readOnly')}
           </span>
           {/* zoom invitat: reglaj peste fit (fontul se adaptează, grila rămâne a owner-ului) */}

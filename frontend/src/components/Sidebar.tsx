@@ -1,8 +1,11 @@
 import { Fragment, lazy, Suspense, useEffect, useRef, useState, PointerEvent as ReactPointerEvent } from 'react'
+import { lsGet } from '../lib/storage'
 import { errText, isSessionLive, api, ApiError, getBootVersion, Host, SearchHit, Session, timeAgo, withStepup } from '../lib/api'
-import { notify } from '../lib/notify'
+import { notify, notifyError } from '../lib/notify'
 import { fmtTs } from '../lib/tz'
 import { useI18n } from '../lib/i18n'
+import { useConfirm } from '../lib/confirm'
+import { useFocusTrap } from '../lib/useFocusTrap'
 import InstallCommand from './InstallCommand'
 import { hostColor, reachState } from '../lib/host'
 import { allSchemes, hostSchemeRaw, setHostScheme } from '../lib/termtheme'
@@ -66,6 +69,9 @@ export default function Sidebar(props: {
   signingLocked?: boolean
 }) {
   const { t } = useI18n()
+  // confirm()/prompt()/alert() native → dialoguri proprii + toast-uri (vezi lib/confirm.tsx: de ce)
+  const { confirm, promptText } = useConfirm()
+  const fail = (e: unknown) => notifyError(t('sidebar.actionFailed'), errText(e, t) || t('sidebar.error'))
   const [showAdd, setShowAdd] = useState(false)
   const [editHost, setEditHost] = useState<Host | null>(null)
   const [jumpVia, setJumpVia] = useState<Host | null>(null)   // agentul-gazdă pentru care adăugăm o ţintă SSH-jump
@@ -121,19 +127,25 @@ export default function Sidebar(props: {
     return () => window.removeEventListener('wt-focus-search', onFocusSearch)
   }, [])
 
-  // căutare în istoric (server-side), debounced
+  // căutare în istoric (server-side), debounced. Numărul de secvenţă + AbortController: un
+  // răspuns LENT la „pro" nu are voie să suprascrie rezultatele deja afişate pentru „prod" —
+  // debounce-ul anulează doar timer-ul, nu şi cererea deja plecată (audit F-05).
+  const searchSeq = useRef(0)
   useEffect(() => {
     const q = query.trim()
     if (q.length < 2) {
+      searchSeq.current++
       setHistoryHits(null)
       return
     }
+    const ctl = new AbortController()
     const t = setTimeout(() => {
-      api<{ sessions: SearchHit[] }>(`/api/search?q=${encodeURIComponent(q)}`)
-        .then((r) => setHistoryHits(r.sessions))
-        .catch(() => setHistoryHits([]))
+      const seq = ++searchSeq.current
+      api<{ sessions: SearchHit[] }>(`/api/search?q=${encodeURIComponent(q)}`, { signal: ctl.signal })
+        .then((r) => { if (seq === searchSeq.current) setHistoryHits(r.sessions) })
+        .catch(() => { if (seq === searchSeq.current && !ctl.signal.aborted) setHistoryHits([]) })
     }, 350)
-    return () => clearTimeout(t)
+    return () => { clearTimeout(t); ctl.abort() }
   }, [query])
 
   async function reinstall(host: Host) {
@@ -148,21 +160,27 @@ export default function Sidebar(props: {
     const q = agent
       ? t('sidebar.confirmRemoveAgent', { name: host.name })
       : t('sidebar.confirmDeleteHost', { name: host.name })
-    if (!confirm(q)) return
+    if (!(await confirm({
+      title: agent ? t('sidebar.removeFromWebTerm') : t('sidebar.deleteHost'),
+      message: q, danger: true, confirmLabel: agent ? t('sidebar.dlgRemove') : t('sidebar.dlgDelete'),
+    }))) return
     try {
       await api(`/api/hosts/${host.id}`, { method: 'DELETE' })
       props.onChanged()
     } catch (e) {
-      alert(errText(e, t) || t('sidebar.error'))
+      fail(e)
     }
   }
 
   async function uninstallHost(host: Host) {
-    if (!confirm(t('sidebar.confirmUninstall', { name: host.name }))) return
+    if (!(await confirm({
+      title: t('sidebar.uninstallAgent'), message: t('sidebar.confirmUninstall', { name: host.name }),
+      danger: true, confirmLabel: t('sidebar.dlgUninstall'),
+    }))) return
     try {
       const r = await api<{ uninstalled: boolean; warnings: string[] }>(
         `/api/hosts/${host.id}/uninstall`, { method: 'POST' })
-      if (r.warnings?.length) alert(t('sidebar.uninstalledWithWarnings') + r.warnings.join(', '))
+      if (r.warnings?.length) notify(t('sidebar.uninstalledOk'), t('sidebar.uninstalledWithWarnings') + r.warnings.join(', '), 'warn')
       props.onChanged()
     } catch (e) {
       const m = errText(e, t) || t('sidebar.error')
@@ -172,34 +190,43 @@ export default function Sidebar(props: {
       // în engleză. În ziua în care se localizează, un host offline devenea imposibil de scos
       // din UI — exact ruda defectului „frază tradusă, comparaţia nu".
       const canForce = e instanceof ApiError && e.status === 409
-      if (canForce && confirm(`${m}\n\n${t('sidebar.confirmRemoveOnly')}`)) {
+      if (canForce && (await confirm({
+        title: t('sidebar.removeFromWebTerm'), message: `${m}\n\n${t('sidebar.confirmRemoveOnly')}`,
+        danger: true, confirmLabel: t('sidebar.dlgRemove'),
+      }))) {
         try {
           await api(`/api/hosts/${host.id}/uninstall?force=1`, { method: 'POST' })
           props.onChanged()
-        } catch (e2) { alert(errText(e2, t) || t('sidebar.error')) }
+        } catch (e2) { fail(e2) }
       } else if (!canForce) {
-        alert(m)
+        notifyError(t('sidebar.actionFailed'), m)
       }
     }
   }
 
   async function updateAgent(host: Host) {
-    if (!confirm(t('sidebar.confirmUpdateAgent', { name: host.name }))) return
+    if (!(await confirm({
+      title: t('sidebar.updateAgentDlgTitle'), message: t('sidebar.confirmUpdateAgent', { name: host.name }),
+      confirmLabel: t('sidebar.dlgUpdate'),
+    }))) return
     try {
       await api(`/api/hosts/${host.id}/update`, { method: 'POST' })
       props.onChanged()
     } catch (e) {
-      alert(errText(e, t) || t('sidebar.error'))
+      fail(e)
     }
   }
 
   async function moveToFolder(host: Host) {
-    const folder = prompt(t('sidebar.promptFolder'), host.folder ?? '')
+    const folder = await promptText({
+      title: t('sidebar.moveToGroup'), message: t('sidebar.promptFolder'),
+      label: t('sidebar.folderLabel'), defaultValue: host.folder ?? '',
+    })
     if (folder === null) return
     await api(`/api/hosts/${host.id}`, {
       method: 'PATCH',
       body: JSON.stringify({ name: host.name, note: host.note, folder: folder.trim() }),
-    }).catch((e) => alert(errText(e, t) || t('sidebar.error')))
+    }).catch(fail)
     props.onChanged()
   }
 
@@ -226,23 +253,29 @@ export default function Sidebar(props: {
   async function muteHost(host: Host, muted: boolean) {
     await withStepup(host.id, () => api(`/api/hosts/${host.id}`, {
       method: 'PATCH', body: JSON.stringify({ alerts_muted: muted }),
-    })).catch((e) => alert(errText(e, t) || t('sidebar.error')))
+    })).catch(fail)
     props.onChanged()
   }
 
   async function editNote(host: Host) {
-    const note = prompt(t('sidebar.promptNote', { name: host.name }), host.note ?? '')
+    const note = await promptText({
+      title: t('sidebar.noteDlgTitle', { name: host.name }), message: t('sidebar.promptNote', { name: host.name }),
+      label: t('sidebar.noteLabel'), defaultValue: host.note ?? '',
+    })
     if (note === null) return
     await api(`/api/hosts/${host.id}`, {
       method: 'PATCH',
       body: JSON.stringify({ name: host.name, note: note.trim(), folder: host.folder ?? '' }),
-    }).catch((e) => alert(errText(e, t) || t('sidebar.error')))
+    }).catch(fail)
     props.onChanged()
   }
 
   // redenumește un grup întreg = mută toate host-urile din folder în noul nume
   async function renameGroup(folder: string) {
-    const next = prompt(t('sidebar.promptRenameGroup', { folder }), folder)
+    const next = await promptText({
+      title: t('sidebar.renameGroupDlgTitle'), message: t('sidebar.promptRenameGroup', { folder }),
+      label: t('sidebar.groupNameLabel'), defaultValue: folder,
+    })
     if (next === null) return
     const name = next.trim()
     if (name === folder) return
@@ -258,23 +291,24 @@ export default function Sidebar(props: {
     await api(`/api/hosts/${host.id}/require-2fa`, {
       method: 'POST',
       body: JSON.stringify({ enabled: !host.require_2fa }),
-    }).catch((e) => alert(errText(e, t) || t('sidebar.error')))
+    }).catch(fail)
     props.onChanged()
   }
 
   async function provision(host: Host) {
-    if (!confirm(t('sidebar.confirmProvision', { name: host.name }))) return
+    if (!(await confirm({
+      title: t('sidebar.installAgentSsh'), message: t('sidebar.confirmProvision', { name: host.name }),
+      confirmLabel: t('sidebar.dlgInstall'),
+    }))) return
     setProvisioning(host.name)
     try {
       const r = await api<{ credentials_deleted: boolean }>(`/api/hosts/${host.id}/provision`, { method: 'POST' })
-      // Cheile `sidebar.provisionOk` / `sidebar.provisionCredsRemoved` existau în ambele
-      // limbi şi nu le folosea nimeni: mesajul era scris de mână, în engleză, lângă un frate
-      // (`provisionFailed`) care trecea corect prin `t()`.
-      alert(t('sidebar.provisionOk', { name: host.name }) +
-        (r.credentials_deleted ? t('sidebar.provisionCredsRemoved') : ''))
+      // Rezultatul e un toast (nu alert): omul vede oricum hostul trecând online în listă.
+      notify(t('sidebar.provisionDoneTitle', { name: host.name }),
+        t('sidebar.provisionDoneBody') + (r.credentials_deleted ? ' ' + t('sidebar.provisionCredsRemoved').trim() : ''), 'info')
       props.onChanged()
     } catch (e) {
-      alert(t('sidebar.provisionFailed') + (errText(e, t) || t('sidebar.error')))
+      notifyError(t('sidebar.provisionFailed').replace(/:\s*$/, ''), errText(e, t) || t('sidebar.error'))
     } finally {
       setProvisioning(null)
     }
@@ -291,7 +325,11 @@ export default function Sidebar(props: {
   // Ţintele SSH-jump/telnet-prin-agent se salvează cu `via_host_id` = agentul prin care se
   // tunelează. În sidebar le cuibărim SUB acel agent (nu în lista plată de foldere), ca să
   // se vadă dintr-o privire „de cine atârnă". `isNested` le exclude din bucla de foldere.
-  const isNested = (h: Host) => h.via_host_id != null
+  // ...dar doar dacă părintele chiar există în listă: un rând cu `via_host_id` către un host
+  // şters (DB-uri de dinainte de curăţarea în cascadă din delete_host) ar dispărea altfel din
+  // sidebar pentru totdeauna — nici în folder, nici sub un părinte — şi n-ar mai putea fi şters.
+  const parentIds = new Set(props.hosts.map((h) => h.id))
+  const isNested = (h: Host) => h.via_host_id != null && parentIds.has(h.via_host_id)
   // ţintele EFEMERE („conectează o dată", fără salvare) nu apar nicăieri în sidebar — nici în
   // arbore, nici cuibărite sub agent; trăiesc doar cât sesiunea, apoi reaper-ul le şterge.
   const childrenOf = (id: number) => props.hosts.filter((h) => h.via_host_id === id && !h.ephemeral)
@@ -302,8 +340,12 @@ export default function Sidebar(props: {
   const textMatches = (h: Host) =>
     !q || h.name.toLowerCase().includes(q) || (h.hostname ?? '').toLowerCase().includes(q)
       || (h.tags || []).some((tag) => tag.toLowerCase().includes(q))
+  // o ţintă cuibărită care se potriveşte îşi „trage" părintele în listă chiar dacă el nu se
+  // potriveşte — altfel „db-01" (jump prin „bastion") era de negăsit din căutare
+  const subtreeMatches = (h: Host, depth = 0): boolean =>
+    depth < 4 && childrenOf(h.id).some((c) => textMatches(c) || subtreeMatches(c, depth + 1))
   const hostMatches = (h: Host) =>
-    (!groupFilter || (h.folder || '') === groupFilter) && textMatches(h)
+    (!groupFilter || (h.folder || '') === groupFilter) && (textMatches(h) || subtreeMatches(h))
 
   // Sidebar = navigare: card de host → deschide pagina hostului. Sesiunile
   // (active + închise, istoric, atașare) trăiesc în pagina hostului, nu aici.
@@ -315,7 +357,9 @@ export default function Sidebar(props: {
     const color = hostColor(host)
     const reach = reachState(host)
     // ţintele cuibărite sub acest host (SSH-jump / telnet-prin-agent), filtrate ca lista principală
-    const kids = depth < 4 ? childrenOf(host.id).filter(textMatches) : []
+    const kids = depth < 4 ? childrenOf(host.id).filter((c) => textMatches(c) || subtreeMatches(c, depth + 1)) : []
+    // părinte afişat DOAR fiindcă un copil se potriveşte: estompat, ca să se vadă cine e rezultatul
+    const viaChild = !!q && !textMatches(host)
     return (
       <Fragment key={host.id}>
       <div className="px-2 py-0.5"
@@ -325,17 +369,20 @@ export default function Sidebar(props: {
           style={selected ? { boxShadow: `inset 2px 0 0 ${color}` } : undefined}
           className={`group flex cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-2 ${
             selected ? 'bg-ink-800 ring-1 ring-ink-700' : 'hover:bg-ink-800/60'
-          }`}
+          } ${viaChild ? 'opacity-60' : ''}`}
         >
           <div className="relative shrink-0">
             <div className="grid h-8 w-8 place-items-center rounded-lg" style={{ background: `${color}22`, color }}>
               <ServerIcon />
             </div>
+            {/* starea NU e doar culoare (WCAG 1.4.1): on-demand = inel gol, online = plin,
+                offline = gri; textul pentru cititoare stă în span-ul sr-only de lângă nume */}
             <span
+              aria-hidden="true"
               className={`absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full ring-2 ring-ink-900 ${
-                reach === 'online' ? 'bg-emerald-400' : reach === 'ondemand' ? 'bg-sky-500' : 'bg-slate-500'
+                reach === 'online' ? 'bg-emerald-400' : reach === 'ondemand' ? 'border-2 border-sky-500 bg-ink-900' : 'bg-slate-500'
               }`}
-              title={reach === 'online' ? 'online' : reach === 'ondemand' ? t('dashboard.onDemandConnect') : 'offline'}
+              title={reach === 'online' ? t('sidebar.stateOnline') : reach === 'ondemand' ? t('dashboard.onDemandConnect') : t('sidebar.stateOffline')}
             />
           </div>
           <div className="min-w-0 flex-1">
@@ -346,8 +393,11 @@ export default function Sidebar(props: {
                   Acelaşi tipar ca pe cardurile din Dashboard. */}
               <button type="button"
                 onClick={(e) => { e.stopPropagation(); props.onSelectHost(host.id) }}
-                className="min-w-0 truncate rounded text-left text-sm font-medium focus:outline-none focus-visible:ring-1 focus-visible:ring-sky-500">
+                className="min-h-6 min-w-0 truncate rounded text-left text-sm font-medium focus:outline-none focus-visible:ring-1 focus-visible:ring-sky-500">
                 {host.name}
+                <span className="sr-only">
+                  {' — '}{reach === 'online' ? t('sidebar.stateOnline') : reach === 'ondemand' ? t('dashboard.onDemandConnect') : t('sidebar.stateOffline')}
+                </span>
               </button>
               {liveCount > 0 && (
                 <span className="shrink-0 rounded-full bg-emerald-500/15 px-1.5 text-[10px] font-semibold wt-good"
@@ -366,7 +416,7 @@ export default function Sidebar(props: {
                   aria-label={host.updates.security
                     ? t('updates.badgeSecTitle', { count: host.updates.count, sec: host.updates.security })
                     : t('updates.badgeTitle', { count: host.updates.count })}
-                  className={`shrink-0 rounded-full px-1.5 text-[10px] font-semibold tabular-nums ${host.updates.security
+                  className={`relative inline-flex min-h-6 shrink-0 items-center rounded-full px-1.5 text-[11px] font-semibold tabular-nums before:absolute before:-inset-1.5 before:content-[''] ${host.updates.security
                     ? 'bg-rose-700 text-white hover:bg-rose-600'
                     : 'bg-amber-500 text-ink-950 hover:bg-amber-400'}`}>
                   ⬆ {host.updates.count}
@@ -387,7 +437,7 @@ export default function Sidebar(props: {
                   <button key={tag} type="button"
                     onClick={(e) => { e.stopPropagation(); setQuery(tag) }}
                     title={t('sidebar.filterByTag', { tag })}
-                    className="rounded bg-ink-700/60 px-1.5 text-[10px] text-slate-400 hover:bg-ink-700 hover:text-slate-200">
+                    className="relative inline-flex min-h-6 items-center rounded bg-ink-700/60 px-1.5 text-[11px] text-slate-400 hover:bg-ink-700 hover:text-slate-200">
                     {tag}
                   </button>
                 ))}
@@ -408,7 +458,7 @@ export default function Sidebar(props: {
                   onClick={(e) => { e.stopPropagation(); editNote(host) }}
                   title={t('sidebar.noteAria', { name: host.name })}
                   aria-label={t('sidebar.noteAria', { name: host.name })}
-                  className="shrink-0 rounded p-0.5 opacity-0 hover:text-slate-200 focus-visible:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100"
+                  className="grid min-h-6 min-w-6 place-items-center shrink-0 rounded p-1 opacity-0 hover:text-slate-200 focus-visible:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100"
                 ><NoteIcon /></button>
                 {/* Alerte offline on/off: mut = clopoţel tăiat, vizibil şi fără hover (ca să ştii
                     că e tăcut); pornit = doar la hover. Doar host-uri de agent (doar ele alertează). */}
@@ -419,8 +469,8 @@ export default function Sidebar(props: {
                     aria-label={host.alerts_muted
                       ? t('sidebar.alertsUnmuteAria', { name: host.name })
                       : t('sidebar.alertsMuteAria', { name: host.name })}
-                    className={`shrink-0 rounded p-0.5 focus-visible:opacity-100 ${host.alerts_muted
-                      ? 'text-amber-500/80 opacity-100 hover:text-amber-300'
+                    className={`grid min-h-6 min-w-6 shrink-0 place-items-center rounded p-1 focus-visible:opacity-100 ${host.alerts_muted
+                      ? 'wt-warn opacity-100 hover:opacity-80'
                       : 'opacity-0 hover:text-slate-200 group-hover:opacity-100 [@media(hover:none)]:opacity-100'}`}
                   >{host.alerts_muted ? '🔕' : '🔔'}</button>
                 )}
@@ -431,7 +481,7 @@ export default function Sidebar(props: {
                     onClick={(e) => { e.stopPropagation(); wakeHost(host) }}
                     disabled={waking === host.id}
                     title={t('sidebar.wakeTitle')} aria-label={t('sidebar.wakeAria', { name: host.name })}
-                    className="shrink-0 rounded p-0.5 hover:text-emerald-300 disabled:opacity-40 focus-visible:opacity-100"
+                    className="grid min-h-6 min-w-6 shrink-0 place-items-center rounded p-1 hover:text-slate-200 disabled:opacity-40 focus-visible:opacity-100"
                   >{waking === host.id ? '…' : '⏻'}</button>
                 )}
               </div>
@@ -458,7 +508,7 @@ export default function Sidebar(props: {
                 </span>
                 <button
                   onClick={(e) => { e.stopPropagation(); deleteHost(host) }}
-                  className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-rose-400 ring-1 ring-ink-700 hover:bg-ink-800"
+                  className="wt-danger shrink-0 rounded px-1.5 py-1 text-[11px] ring-1 ring-ink-700 hover:bg-ink-800"
                 >{t('sidebar.uninstalledRemove')}</button>
               </div>
             )}
@@ -480,7 +530,7 @@ export default function Sidebar(props: {
               }) + (SIGNATURE_BLOCKS.has(host.update_blocked)
                 ? t('sidebar.updateBlockedHint')
                 : t('sidebar.updateBlockedLog'))}
-              className="wt-danger shrink-0 cursor-help rounded-md bg-rose-900/60 px-1.5 py-0.5 text-xs text-rose-300"
+              className="wt-danger shrink-0 cursor-help rounded-md bg-rose-900/60 px-1.5 py-0.5 text-xs"
             >
               {t('sidebar.updateBlockedBadge')}
             </span>
@@ -492,7 +542,7 @@ export default function Sidebar(props: {
                  transforma tăcut în cuvântul „null" în tooltip. */
               title={t('sidebar.updateAgentTitle',
                 { from: host.agent_version ?? '?', to: host.agent_latest ?? '?' })}
-              className="shrink-0 rounded-md bg-amber-900/60 px-1.5 py-0.5 text-xs text-amber-300 hover:bg-amber-800/60"
+              className="wt-warn shrink-0 rounded-md bg-amber-900/60 px-1.5 py-1 text-xs hover:bg-amber-800/60"
             >
               ↑ v{host.agent_latest}
             </button>
@@ -539,7 +589,7 @@ export default function Sidebar(props: {
   const SB_MIN = 220, SB_MAX = 560, SB_DEF = 288
   const [sbWidth, setSbWidth] = useState(() => {
     try {
-      const v = Number(localStorage.getItem('wt_sidebar_w'))
+      const v = Number(lsGet('wt_sidebar_w'))
       return v >= SB_MIN && v <= SB_MAX ? v : SB_DEF
     } catch { return SB_DEF }
   })
@@ -574,7 +624,7 @@ export default function Sidebar(props: {
           onClick={() => setShowAbout(true)}
           title={t('nav.about')}
           aria-label={t('nav.about')}
-          className="flex min-w-0 items-center gap-2 truncate rounded-md font-semibold tracking-tight hover:text-sky-300"
+          className="flex min-w-0 items-center gap-2 truncate rounded-md py-1 font-semibold tracking-tight hover:underline"
         >
           <LogoMark /> WebTerm
         </button>
@@ -636,8 +686,9 @@ export default function Sidebar(props: {
           </button>
           <button
             title={t('sidebar.signOut')}
+            aria-label={t('sidebar.signOut')}
             onClick={props.onLogout}
-            className="rounded-md px-2 py-1 text-sm text-slate-500 hover:bg-ink-800"
+            className="wt-touch inline-flex items-center justify-center rounded-md px-2 py-1 text-sm text-slate-500 hover:bg-ink-800"
           >
             <PowerIcon />
           </button>
@@ -659,9 +710,11 @@ export default function Sidebar(props: {
         {query ? (
           <button
             onClick={() => setQuery('')}
-            className="absolute right-5 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300"
+            aria-label={t('sidebar.clearSearch')}
+            title={t('sidebar.clearSearch')}
+            className="absolute right-4 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded text-slate-500 hover:text-slate-300"
           >
-            ✕
+            <CloseIcon size={13} />
           </button>
         ) : (
           /* badge-ul de scurtătură: doar unde EXISTĂ tastatură */
@@ -669,7 +722,7 @@ export default function Sidebar(props: {
             onClick={props.onOpenPalette}
             title={t('sidebar.paletteTitle', { key: fmt('Mod+K') })}
             aria-label={t('sidebar.openPalette')}
-            className="absolute right-4 top-1/2 hidden -translate-y-1/2 rounded bg-white/5 px-1.5 py-0.5 text-[11px] text-slate-400 hover:bg-white/10 hover:text-slate-200 [@media(hover:hover)]:block"
+            className="absolute right-3 top-1/2 hidden min-h-6 -translate-y-1/2 items-center rounded bg-white/5 px-1.5 text-[11px] text-slate-400 hover:bg-white/10 hover:text-slate-200 [@media(hover:hover)]:inline-flex"
           >
             {fmt('Mod+K')}
           </button>
@@ -729,7 +782,7 @@ export default function Sidebar(props: {
                         onClick={() => renameGroup(folder)}
                         title={t('sidebar.renameGroupAria', { folder })}
                         aria-label={t('sidebar.renameGroupAria', { folder })}
-                        className="shrink-0 rounded p-0.5 opacity-0 hover:text-slate-200 focus-visible:opacity-100 group-hover/folder:opacity-100 [@media(hover:none)]:opacity-100"
+                        className="shrink-0 rounded p-1 opacity-0 hover:text-slate-200 focus-visible:opacity-100 group-hover/folder:opacity-100 [@media(hover:none)]:opacity-100"
                       >
                         <NoteIcon />
                       </button>
@@ -765,7 +818,10 @@ export default function Sidebar(props: {
                 className="block w-full px-4 py-1.5 text-left hover:bg-ink-800"
               >
                 <div className="flex items-center gap-2">
-                  <span className={`h-2 w-2 shrink-0 rounded-full ${stateDot[h.state]}`} />
+                  <span aria-hidden="true" className={`h-2 w-2 shrink-0 rounded-full ${stateDot[h.state]}`} />
+                  <span className="sr-only">
+                    {h.state === 'lost' ? t('host.stateLost') : h.state === 'closed' ? t('host.stateClosed') : t('host.stateActive')}
+                  </span>
                   <span className="truncate text-sm">{h.title || t('sidebar.untitled')}</span>
                   {h.matches > 0 && (
                     <span className="ml-auto shrink-0 text-[10px] text-slate-400">
@@ -800,7 +856,7 @@ export default function Sidebar(props: {
           {hostsOnline}/{props.hosts.length} {t('nav.statusBarHosts')}
         </span>
         {newVersion && (
-          <span className="wt-warn ml-auto shrink-0 rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-300 ring-1 ring-amber-500/25">
+          <span className="wt-warn ml-auto shrink-0 rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium ring-1 ring-amber-500/25">
             {newVersion}
           </span>
         )}
@@ -905,31 +961,45 @@ export default function Sidebar(props: {
       {/* modal update-uri: ce e disponibil + „fă upgrade într-un terminal". Nu instalăm din UI —
           deschidem o sesiune cu comanda interactivă (glue, nu un package-manager reimplementat). */}
       {updFor && updFor.updates && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4"
-          onClick={() => setUpdFor(null)}>
-          <div className="glass w-full max-w-sm rounded-2xl p-5" onClick={(e) => e.stopPropagation()}>
-            <h2 className="text-base font-semibold">{t('updates.title', { name: updFor.name })}</h2>
-            <p className="mt-2 text-sm text-slate-300">
-              {t('updates.available', { count: updFor.updates.count, mgr: updFor.updates.manager || '?' })}
-            </p>
-            {!!updFor.updates.security && (
-              <p className="mt-1 text-sm font-medium text-rose-300">
-                {t('updates.securityLine', { sec: updFor.updates.security })}
-              </p>
-            )}
-            <p className="mt-2 text-xs text-slate-500">{t('updates.hint')}</p>
-            <div className="mt-4 flex justify-end gap-2 text-sm">
-              <button onClick={() => setUpdFor(null)}
-                className="rounded px-3 py-1.5 text-slate-400 hover:bg-ink-800">{t('common.cancel')}</button>
-              <button onClick={() => { const h = updFor; setUpdFor(null); props.onUpgrade(h) }}
-                className="rounded bg-sky-600 px-3 py-1.5 font-medium text-white hover:bg-sky-700">
-                {t('updates.openTerminal')}
-              </button>
-            </div>
-          </div>
-        </div>
+        <UpdatesDialog host={updFor} onClose={() => setUpdFor(null)}
+          onUpgrade={() => { const h = updFor; setUpdFor(null); props.onUpgrade(h) }} />
       )}
     </>
+  )
+}
+
+/** Modalul de update-uri OS. Componentă separată ca să poată avea focus-trap (hook-urile nu pot
+    sta într-un JSX condiţional): Tab rămâne înăuntru, Escape închide, focusul se întoarce pe badge. */
+function UpdatesDialog(props: { host: Host; onClose: () => void; onUpgrade: () => void }) {
+  const { t } = useI18n()
+  const ref = useRef<HTMLDivElement>(null)
+  useFocusTrap(ref, props.onClose)
+  const u = props.host.updates!
+  return (
+    <div role="presentation" className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4"
+      onClick={(e) => { if (e.target === e.currentTarget) props.onClose() }}>
+      <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="wt-upd-title"
+        className="glass w-full max-w-sm rounded-2xl p-5">
+        <h2 id="wt-upd-title" className="text-base font-semibold">{t('updates.title', { name: props.host.name })}</h2>
+        <p className="mt-2 text-sm text-slate-300">
+          {t('updates.available', { count: u.count, mgr: u.manager || '?' })}
+        </p>
+        {!!u.security && (
+          <p className="wt-danger mt-1 text-sm font-medium">
+            {t('updates.securityLine', { sec: u.security })}
+          </p>
+        )}
+        <p className="mt-2 text-xs text-slate-500">{t('updates.hint')}</p>
+        <div className="mt-4 flex justify-end gap-2 text-sm">
+          <button onClick={props.onClose}
+            className="rounded px-3 py-1.5 text-slate-400 hover:bg-ink-800">{t('common.cancel')}</button>
+          <button onClick={props.onUpgrade}
+            className="rounded bg-sky-600 px-3 py-1.5 font-medium text-white hover:bg-sky-700">
+            {t('updates.openTerminal')}
+          </button>
+        </div>
+      </div>
+    </div>
   )
 }
 
@@ -938,7 +1008,7 @@ function GroupChip(props: { label: string; active: boolean; onClick: () => void 
     <button
       onClick={props.onClick}
       aria-pressed={props.active}
-      className={`rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 transition ${
+      className={`rounded-full px-2.5 py-1 text-xs font-medium ring-1 transition ${
         props.active
           ? 'bg-sky-600 text-white ring-sky-600'
           : 'bg-ink-800 text-slate-400 ring-ink-700 hover:text-slate-200'
@@ -986,9 +1056,16 @@ function HostMenu(props: {
     return () => window.removeEventListener('keydown', onKey)
   }, [open, schemeOpen])
   const item = 'flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm hover:bg-ink-800'
+  // La alegerea unei acţiuni meniul se închide şi item-ul dispare din DOM; dacă acţiunea deschide
+  // un dialog (confirmare de ştergere), focus-trap-ul lui ar memora un element deja demontat
+  // şi la Escape focusul ar cădea pe <body>. APG: închiderea unui meniu întoarce focusul pe
+  // butonul lui — aşa dialogul porneşte de pe ⋯, un element stabil, şi tot acolo revine.
+  const btnRef = useRef<HTMLButtonElement>(null)
+  const act = (fn: () => void) => () => { setOpen(false); btnRef.current?.focus(); fn() }
   return (
     <div className="relative shrink-0">
       <button
+        ref={btnRef}
         title={t('sidebar.hostActions')} aria-label={t('sidebar.hostActions')} aria-haspopup="menu" aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
         className="wt-touch grid place-items-center rounded-md p-1 text-slate-500 hover:bg-ink-700 hover:text-slate-200"
@@ -1005,7 +1082,7 @@ function HostMenu(props: {
             <button
               role="menuitem"
               disabled={!props.canConnect}
-              onClick={() => { setOpen(false); props.onNewSession() }}
+              onClick={act(props.onNewSession)}
               title={props.connectionType !== 'agent' ? t('sidebar.connect')
                      : props.online ? t('sidebar.newSession') : t('sidebar.hostOffline')}
               aria-label={props.online || props.connectionType !== 'agent'
@@ -1017,44 +1094,44 @@ function HostMenu(props: {
             </button>
             <div className="my-1 border-t border-ink-700" role="separator" />
             {props.online && (
-              <button role="menuitem" className={`${item} text-slate-200`} onClick={() => { setOpen(false); props.onFiles() }}>
+              <button role="menuitem" className={`${item} text-slate-200`} onClick={act(props.onFiles)}>
                 <FilesIcon /> {t('sidebar.files')}
               </button>
             )}
             {props.online && (!props.connectionType || props.connectionType === 'agent') && (
-              <button role="menuitem" className={`${item} text-slate-200`} onClick={() => { setOpen(false); props.onSerial() }}>
+              <button role="menuitem" className={`${item} text-slate-200`} onClick={act(props.onSerial)}>
                 <span className="grid h-4 w-4 place-items-center text-[13px]">🔌</span> {t('sidebar.serialConsole')}
               </button>
             )}
             {(!props.connectionType || props.connectionType === 'agent') && (
               // SSH-jump: adaugă o ţintă din LAN-ul acestui agent, tunelată prin el. Ţinta
               // salvată apare cuibărită sub host, în sidebar.
-              <button role="menuitem" className={`${item} text-slate-200`} onClick={() => { setOpen(false); props.onAddJump() }}>
+              <button role="menuitem" className={`${item} text-slate-200`} onClick={act(props.onAddJump)}>
                 <span className="grid h-4 w-4 place-items-center text-[13px]">↳</span> {t('sidebar.addSshJump')}
               </button>
             )}
             {(!props.connectionType || props.connectionType === 'agent') && (
               // și când e OFFLINE: exact atunci vrei să vezi DE CE (jurnal de conexiune)
-              <button role="menuitem" className={`${item} text-slate-200`} onClick={() => { setOpen(false); props.onDiagnostic() }}>
+              <button role="menuitem" className={`${item} text-slate-200`} onClick={act(props.onDiagnostic)}>
                 <span className="grid h-4 w-4 place-items-center text-[13px]">🩺</span> {t('sidebar.diagnostic')}
               </button>
             )}
-            <button role="menuitem" className={`${item} text-slate-200`} onClick={() => { setOpen(false); props.onEdit() }}>
+            <button role="menuitem" className={`${item} text-slate-200`} onClick={act(props.onEdit)}>
               <span className="grid h-4 w-4 place-items-center text-[13px]">✎</span> {t('sidebar.editHost')}
             </button>
-            <button role="menuitem" className={`${item} text-slate-200`} onClick={() => { setOpen(false); props.onFolder() }}>
+            <button role="menuitem" className={`${item} text-slate-200`} onClick={act(props.onFolder)}>
               <FolderMoveIcon /> {t('sidebar.moveToGroup')}
             </button>
             {props.connectionType === 'ssh' ? (
-              <button role="menuitem" className={`${item} text-slate-200`} onClick={() => { setOpen(false); props.onProvision() }}>
+              <button role="menuitem" className={`${item} text-slate-200`} onClick={act(props.onProvision)}>
                 <RefreshIcon /> {t('sidebar.installAgentSsh')}
               </button>
             ) : (
-              <button role="menuitem" className={`${item} text-slate-200`} onClick={() => { setOpen(false); props.onReinstall() }}>
+              <button role="menuitem" className={`${item} text-slate-200`} onClick={act(props.onReinstall)}>
                 <RefreshIcon /> {t('sidebar.reinstallAgent')}
               </button>
             )}
-            <button role="menuitem" className={`${item} text-slate-200`} onClick={() => { setOpen(false); props.onToggle2fa() }}>
+            <button role="menuitem" className={`${item} text-slate-200`} onClick={act(props.onToggle2fa)}>
               <KeyIcon /> {props.require2fa ? t('sidebar.require2faOn') : t('sidebar.require2faOff')}
             </button>
             {/* schemă de culori proprie hostului: „producția e roșiatică" —
@@ -1067,7 +1144,7 @@ function HostMenu(props: {
                 <button
                   role="menuitem"
                   onClick={() => { setHostScheme(props.hostId, null); setOpen(false) }}
-                  className={`${item} py-1 text-xs ${!hostSchemeRaw(props.hostId) ? 'text-sky-400' : 'text-slate-400'}`}
+                  className={`${item} py-1 text-xs ${!hostSchemeRaw(props.hostId) ? 'wt-accent' : 'text-slate-400'}`}
                 >
                   {t('sidebar.globalScheme')}
                 </button>
@@ -1076,7 +1153,7 @@ function HostMenu(props: {
                     key={s.id}
                     role="menuitem"
                     onClick={() => { setHostScheme(props.hostId, s.id); setOpen(false) }}
-                    className={`${item} py-1 text-xs ${hostSchemeRaw(props.hostId) === s.id ? 'text-sky-400' : 'text-slate-400'}`}
+                    className={`${item} py-1 text-xs ${hostSchemeRaw(props.hostId) === s.id ? 'wt-accent' : 'text-slate-400'}`}
                   >
                     <span className="flex gap-0.5" aria-hidden="true">
                       {[s.theme.red, s.theme.green, s.theme.blue].map((c, i) => (
@@ -1092,14 +1169,14 @@ function HostMenu(props: {
             {(!props.connectionType || props.connectionType === 'agent') && (
               <button role="menuitem" className={`${item} wt-danger hover:underline`}
                 title={t('sidebar.uninstallTitle')}
-                onClick={() => { setOpen(false); props.onUninstall() }}>
+                onClick={act(props.onUninstall)}>
                 <CloseIcon size={16} /> {t('sidebar.uninstallAgent')}
               </button>
             )}
             <button role="menuitem" className={`${item} wt-danger hover:underline`}
               title={(!props.connectionType || props.connectionType === 'agent')
                 ? t('sidebar.removeOnlyTitle') : undefined}
-              onClick={() => { setOpen(false); props.onDelete() }}>
+              onClick={act(props.onDelete)}>
               <CloseIcon size={16} /> {(!props.connectionType || props.connectionType === 'agent') ? t('sidebar.removeFromWebTerm') : t('sidebar.deleteHost')}
             </button>
           </div>
@@ -1111,10 +1188,16 @@ function HostMenu(props: {
 
 export function CommandModal(props: { cmd: string; cmdDedicated?: string; onClose: () => void }) {
   const { t } = useI18n()
+  // Era singurul dialog fără Escape/backdrop/focus-trap: ieşirea era DOAR butonul „Close",
+  // iar Tab circula prin pagina de sub scrim.
+  const ref = useRef<HTMLDivElement>(null)
+  useFocusTrap(ref, props.onClose)
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <div className="glass w-full max-w-xl rounded-2xl p-6">
-        <h2 className="font-semibold">{t('sidebar.installAgentTitle')}</h2>
+    <div role="presentation" className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      onClick={(e) => { if (e.target === e.currentTarget) props.onClose() }}>
+      <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="wt-cmdmodal-title"
+        className="glass w-full max-w-xl rounded-2xl p-6">
+        <h2 id="wt-cmdmodal-title" className="font-semibold">{t('sidebar.installAgentTitle')}</h2>
         <p className="mt-1 text-sm text-slate-500">
           {t('sidebar.reinstallHint')}
         </p>

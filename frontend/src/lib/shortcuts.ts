@@ -35,10 +35,15 @@ export const SHORTCUTS: Shortcut[] = [
     match: (e) => e.key === '?' && !mod(e) && !e.altKey },
   { id: 'search', keys: 'Mod+Shift+F', group: 'session',
     match: (e) => e.code === 'KeyF' && mod(e) && e.shiftKey && noAlt(e) },
-  { id: 'closeTab', keys: 'Mod+Shift+W', group: 'nav',
-    match: (e) => e.code === 'KeyW' && mod(e) && e.shiftKey && noAlt(e) },
-  { id: 'reopenTab', keys: 'Mod+Shift+T', group: 'nav',
-    match: (e) => e.code === 'KeyT' && mod(e) && e.shiftKey && noAlt(e) },
+  // Alt+W / Alt+T, NU Mod+Shift+W / Mod+Shift+T: pe Chromium acelea sunt rezervate
+  // (închid FEREASTRA browserului / redeschid ultimul tab de browser) și `preventDefault`
+  // nu are efect — „închide tabul WebTerm" închidea PWA-ul cu toate taburile. Familia Alt
+  // e deja convenția (Alt+D/P/S); handlerul global le opreşte în capture, deci nu ajung
+  // în shell ca M-w / M-t (transpose-words).
+  { id: 'closeTab', keys: 'Alt+W', group: 'nav',
+    match: (e) => e.code === 'KeyW' && altOnly(e) && !e.shiftKey },
+  { id: 'reopenTab', keys: 'Alt+T', group: 'nav',
+    match: (e) => e.code === 'KeyT' && altOnly(e) && !e.shiftKey },
   { id: 'nextTab', keys: 'Alt+→', group: 'nav',
     match: (e) => e.code === 'ArrowRight' && altOnly(e) },
   { id: 'prevTab', keys: 'Alt+←', group: 'nav',

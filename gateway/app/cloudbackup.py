@@ -18,6 +18,7 @@ Fără dependințe noi: HTTP prin `urllib` (ca `updatecheck.py`), apelat din `as
 — providerul e la capătul internetului, nu vrem să blocăm event-loop-ul.
 """
 
+import asyncio
 import json
 import logging
 import time
@@ -30,6 +31,10 @@ from . import backup, backup_dest, config, db, email_alerts, security
 log = logging.getLogger("webterm")
 
 _TIMEOUT = 30
+# Plafon pe TOT upload-ul (snapshot criptat → provider → retenţie). backup_dest are timeout-uri
+# per operaţie; aici e plasa de siguranţă pentru providerii OAuth (urllib pe thread) şi pentru
+# orice caz neprevăzut: task-ul de backup programat NU trebuie să rămână blocat (audit G-14).
+UPLOAD_TOTAL_TIMEOUT = 1800
 _UA = "WebTerm/%s" % config.GATEWAY_VERSION
 
 # chei în app_settings (valorile sensibile sunt criptate cu cheia seifului)
@@ -474,7 +479,6 @@ async def finish_authorization(user_id: int, code: str, state: str) -> str:
 
 
 async def _to_thread(fn, *a):
-    import asyncio
     return await asyncio.to_thread(fn, *a)
 
 
@@ -488,8 +492,6 @@ async def _access_token(c: dict) -> str:
 async def upload_backup(data: bytes | None = None, name: str = "") -> str:
     """Criptează (dacă nu e deja) și urcă o arhivă, apoi aplică retenția la distanță.
     `data` gol = facem un snapshot nou. Întoarce numele urcat."""
-    import asyncio
-
     c = await get_config()
     direct = _is_direct(c["provider"])
     connected = (c["host"] and (c["ssh_key"] or c["password"])) if direct else c["refresh"]
@@ -502,21 +504,26 @@ async def upload_backup(data: bytes | None = None, name: str = "") -> str:
         snap = await asyncio.to_thread(backup.make_snapshot, c["include_transcripts"])
         name = "webterm-%s.wtbk" % time.strftime("%Y%m%d-%H%M%S", time.gmtime())
         data = await asyncio.to_thread(backup.encrypt, snap, c["passphrase"])
-    if direct:
-        cfg = await _direct_cfg(c)
-        try:
-            await backup_dest.upload(c["provider"], cfg, name, data)
-            await _prune_remote_direct(c["provider"], cfg, c["keep"])
-        except backup_dest.DestError as e:
-            raise CloudError(str(e))
-    else:
-        p = PROVIDERS[c["provider"]]
-        token = await _access_token(c)
-        folder = await _to_thread(p.ensure_folder, token, c["folder"])
-        if folder != c["folder"]:
-            await _set(K_FOLDER, folder)
-        await _to_thread(p.upload, token, folder, name, data)
-        await _prune_remote(p, token, folder, c["keep"])
+    async def _do_upload():
+        if direct:
+            cfg = await _direct_cfg(c)
+            try:
+                await backup_dest.upload(c["provider"], cfg, name, data)
+                await _prune_remote_direct(c["provider"], cfg, c["keep"])
+            except backup_dest.DestError as e:
+                raise CloudError(str(e))
+        else:
+            p = PROVIDERS[c["provider"]]
+            token = await _access_token(c)
+            folder = await _to_thread(p.ensure_folder, token, c["folder"])
+            if folder != c["folder"]:
+                await _set(K_FOLDER, folder)
+            await _to_thread(p.upload, token, folder, name, data)
+            await _prune_remote(p, token, folder, c["keep"])
+    try:
+        await asyncio.wait_for(_do_upload(), timeout=UPLOAD_TOTAL_TIMEOUT)
+    except asyncio.TimeoutError:
+        raise CloudError("upload to %s did not finish in %d s" % (c["provider"], UPLOAD_TOTAL_TIMEOUT))
     now = time.time()
     await _set(K_LAST, json.dumps({"ts": now, "ok": True, "name": name,
                                    "size": len(data), "error": ""}))
@@ -549,20 +556,23 @@ async def _prune_remote(p: Provider, token: str, folder: str, keep: int) -> None
         log.warning("remote retention failed: %s", e)   # backup-ul urcat rămâne valid
 
 
-async def upload_scheduled(local_name: str) -> None:
+async def upload_scheduled(local_name: str) -> str:
     """Chemat după backup-ul programat: urcă ACEA arhivă, criptată. Eșecul se
-    înregistrează pentru UI, dar nu rupe programarea locală."""
+    înregistrează pentru UI, dar nu rupe programarea locală. Întoarce "" la succes / fără
+    destinaţie, sau mesajul de eroare prefixat cu destinaţia — apelantul (scheduler-ul) îl
+    persistă în `backup_last_error`, ca eşecul să fie vizibil şi în secţiunea de backup, nu
+    doar în cea de cloud."""
     c = await get_config()
     connected = (c["host"] and (c["ssh_key"] or c["password"])) if _is_direct(c["provider"]) else c["refresh"]
     if not c["provider"] or not connected:
-        return
-    import asyncio
+        return ""
     try:
         if not c["passphrase"]:
             raise CloudError("the encryption passphrase is missing")
         blob = await asyncio.to_thread(backup.encrypt_stored, local_name, c["passphrase"])
         await upload_backup(blob, local_name.replace(".wtsnap", ".wtbk"))
         log.info("backup uploaded to %s: %s", c["provider"], local_name)
+        return ""
     except Exception as e:                  # noqa: BLE001 — orice eșec e informativ, nu fatal
         log.warning("cloud upload failed: %s", e)
         await _set(K_LAST, json.dumps({"ts": time.time(), "ok": False, "name": local_name,
@@ -579,3 +589,4 @@ async def upload_scheduled(local_name: str) -> None:
                                                   float(last_ok) if last_ok else 0.0, str(e)[:300])
         except Exception:                   # noqa: BLE001 — alerta nu rupe programarea
             log.exception("backup-failure alert could not be sent")
+        return "%s: %s" % (c["provider"], str(e)[:300])

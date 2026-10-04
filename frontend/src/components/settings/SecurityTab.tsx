@@ -3,6 +3,7 @@ import qrcode from 'qrcode-generator'
 import { FormEvent, useEffect, useRef, useState } from 'react'
 import { errText, api, CommandGuard, DeployKeyPolicy, withSecondFactor as withSecondFactorT } from '../../lib/api'
 import { useI18n } from '../../lib/i18n'
+import { useConfirm } from '../../lib/confirm'
 import { fmtTs } from '../../lib/tz'
 import { KeyIcon } from '../Icons'
 import { copyText } from '../../lib/clipboard'
@@ -20,6 +21,8 @@ interface Passkey {
 // ca tab de sine stătător — îşi ţine starea şi încarcă tot la montare (= la deschiderea secţiunii).
 export default function SecurityTab(props: { webauthnAvailable: boolean; onAccountChanged: () => void }) {
   const { t } = useI18n()
+  // confirm()/prompt() native → dialoguri proprii (vezi lib/confirm.tsx: de ce)
+  const { confirm, promptText } = useConfirm()
   const [passkeys, setPasskeys] = useState<Passkey[]>([])
   // erori per secțiune, afișate lângă butonul care le-a produs — modalul e lung
   // și scrollabil, o singură eroare la fund ar fi de multe ori în afara ecranului
@@ -84,7 +87,10 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
   }
 
   async function revokeToken(tk: TokenRow) {
-    if (!window.confirm(t('settings.tokens.revokeConfirm', { name: tk.name }))) return
+    if (!(await confirm({
+      title: t('security.revokeTokenTitle'), message: t('settings.tokens.revokeConfirm', { name: tk.name }),
+      danger: true, confirmLabel: t('security.revoke'),
+    }))) return
     try {
       setTokens(await api<TokenRow[]>(`/api/tokens/${tk.id}/revoke`, { method: 'POST' }))
     } catch (e) {
@@ -103,7 +109,10 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
   const loadGroups = () => api<GroupRow[]>('/api/enroll-groups').then(setGroups).catch(() => {})
 
   async function revokeGroup(g: GroupRow) {
-    if (!window.confirm(t('settings.enrollGroups.revokeConfirm', { name: g.name }))) return
+    if (!(await confirm({
+      title: t('security.revokeGroupTitle'), message: t('settings.enrollGroups.revokeConfirm', { name: g.name }),
+      danger: true, confirmLabel: t('security.revoke'),
+    }))) return
     try {
       setGroups(await api<GroupRow[]>(`/api/enroll-groups/${g.id}/revoke`, { method: 'POST' }))
     } catch (e) {
@@ -166,7 +175,10 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
     setSignErr(''); setSignMsg('')
     if (!signPem.trim()) { setSignErr(t('settings.sign.chooseKeyFile')); return }
     if (signImpStorePass && signImpStorePass.length < 8) { setSignErr(t('settings.sign.storePassMin8')); return }
-    if (!confirm(t('settings.sign.importConfirm'))) return
+    if (!(await confirm({
+      title: t('security.importKeyTitle'), message: t('settings.sign.importConfirm'),
+      confirmLabel: t('security.import'),
+    }))) return
     setSignBusy(true)
     try {
       const s = await api<SignStatus>('/api/signing/import', {
@@ -184,7 +196,10 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
     setSignErr(''); setSignMsg('')
     if (signPass && signPass.length < 8) { setSignErr(t('settings.sign.keyPassMin8')); return }
     if (signPass !== signPass2) { setSignErr(t('settings.passMismatch')); return }
-    if (!confirm(t('settings.sign.genConfirm'))) return
+    if (!(await confirm({
+      title: t('security.genKeyTitle'), message: t('settings.sign.genConfirm'),
+      confirmLabel: t('security.generate'),
+    }))) return
     setSignBusy(true)
     try {
       const s = await api<SignStatus>('/api/signing/generate',
@@ -318,7 +333,10 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
     // numele se cere ÎNAINTE de ceremonia WebAuthn: după ce credentialul e
     // creat, Cancel la prompt nu mai poate anula nimic — ajungea înregistrat
     // cu numele generic „passkey"
-    const name = prompt(t('settings.passkeyNamePrompt'))
+    const name = await promptText({
+      title: t('security.passkeyNameTitle'), message: t('settings.passkeyNamePrompt'),
+      label: t('security.passkeyNameLabel'),
+    })
     if (name === null) return
     // M1: înrolarea unui passkey e o schimbare de credențiale — cerem parola contului
     // ca un cookie furat să nu poată adăuga un factor persistent pe ascuns.
@@ -376,13 +394,13 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
                 <div className="flex items-center gap-2">
                   <span className="truncate text-slate-200">{d.label}</span>
                   {d.current && (
-                    <span className="shrink-0 rounded bg-sky-500/15 px-1.5 text-[10px] text-sky-300">
+                    <span className="wt-accent shrink-0 rounded bg-sky-500/15 px-1.5 text-[10px]">
                       {t('settings.deviceThis')}
                     </span>
                   )}
                   {d.new_device && !d.current && (
                     <span title={t('session.deviceNewTitle')}
-                      className="shrink-0 rounded bg-amber-500/15 px-1.5 text-[10px] text-amber-400">
+                      className="wt-warn shrink-0 rounded bg-amber-500/15 px-1.5 text-[10px]">
                       {t('session.deviceNew')}
                     </span>
                   )}
@@ -397,7 +415,7 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
                     await api(`/api/account/sessions/${d.id}`, { method: 'DELETE' }).catch(() => {})
                     loadDevices()
                   }}
-                  className="shrink-0 rounded-md px-2 py-1 text-xs text-rose-400 ring-1 ring-ink-700 hover:bg-ink-800"
+                  className="wt-danger shrink-0 rounded-md px-2 py-1 text-xs ring-1 ring-ink-700 hover:bg-ink-800"
                 >{t('settings.deviceRevoke')}</button>
               )}
             </div>
@@ -407,7 +425,10 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
       {devices && devices.length > 1 && (
         <button
           onClick={async () => {
-            if (!confirm(t('settings.devicesRevokeOthersConfirm'))) return
+            if (!(await confirm({
+              title: t('security.signOutOthersTitle'), message: t('settings.devicesRevokeOthersConfirm'),
+              danger: true, confirmLabel: t('security.signOut'),
+            }))) return
             await api('/api/account/sessions/revoke-others', { method: 'POST' }).catch(() => {})
             loadDevices()
           }}
@@ -714,7 +735,7 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
       <p className="mt-1 text-xs text-slate-500">{t('settings.tokens.hint')}</p>
       {tokPlain && (
         <div role="status" aria-live="polite" className="mt-2 rounded-lg bg-emerald-500/10 p-3 ring-1 ring-emerald-500/30">
-          <p className="text-xs text-emerald-300">{t('settings.tokens.copyNow')}</p>
+          <p className="wt-good text-xs">{t('settings.tokens.copyNow')}</p>
           <div className="mt-1 flex items-center gap-2">
             <code className="min-w-0 flex-1 break-all rounded bg-ink-900 px-2 py-1 font-mono text-xs text-slate-200">{tokPlain}</code>
             <button type="button" onClick={() => copyText(tokPlain).then((okc) => { if (okc) { setTokCopied(true); setTimeout(() => setTokCopied(false), 1500) } })}
@@ -794,7 +815,7 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
             <span className="min-w-0 flex-1 truncate text-slate-200">{g.name}
               {g.folder && <span className="ml-1 text-[11px] text-slate-500"><span aria-hidden="true">→ </span>{g.folder}</span>}
               {g.require_2fa ? (
-                <span className="ml-1 text-[11px] text-amber-400" title={t('settings.enrollGroups.require2fa')}>
+                <span className="wt-warn ml-1 text-[11px]" title={t('settings.enrollGroups.require2fa')}>
                   2FA<span className="sr-only"> — {t('settings.enrollGroups.require2fa')}</span>
                 </span>
               ) : null}

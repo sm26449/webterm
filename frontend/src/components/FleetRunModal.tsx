@@ -1,8 +1,10 @@
 import { useMemo, useRef, useState } from 'react'
 import { matchCommandRule } from '../lib/commands'
-import { errText, api, ensureStepup, CommandGuard, Host } from '../lib/api'
+import { errText, api, ensureStepup, isEphemeralHost, CommandGuard, Host } from '../lib/api'
 import { useI18n } from '../lib/i18n'
 import { useFocusTrap } from '../lib/useFocusTrap'
+import { useConfirm } from '../lib/confirm'
+import { notifyError } from '../lib/notify'
 import { copyText } from '../lib/clipboard'
 
 type RunResult = {
@@ -20,9 +22,13 @@ type RunResult = {
     citești grila care se umple live pe măsură ce fiecare host răspunde. */
 export default function FleetRunModal(props: { hosts: Host[]; onClose: () => void }) {
   const { t } = useI18n()
+  // confirm()/alert() native → dialoguri proprii (coadă în ConfirmProvider: se deschid PESTE
+  // acest modal, iar focusul se întoarce aici la închidere)
+  const { confirm } = useConfirm()
   // doar hosturi cu agent online pot rula (op-ul `run` merge doar prin agent)
   const runnable = useMemo(
-    () => props.hosts.filter((h) => (!h.connection_type || h.connection_type === 'agent') && h.online),
+    // doar agenţi online, FĂRĂ ţintele efemere (oricum nu sunt agenţi, dar predicatul e explicit)
+    () => props.hosts.filter((h) => (!h.connection_type || h.connection_type === 'agent') && h.online && !isEphemeralHost(h)),
     [props.hosts],
   )
   const [phase, setPhase] = useState<'pick' | 'confirm' | 'running'>('pick')
@@ -40,14 +46,17 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
     try { localStorage.setItem(SAVED_KEY, JSON.stringify(next.slice(0, 50))) } catch { /* quota/private */ }
   }
   const [saveName, setSaveName] = useState('')
-  const saveCurrent = () => {
+  const saveCurrent = async () => {
     const cmd = command.trim()
     const name = saveName.trim().slice(0, 60)
     if (!cmd || !name) return
     // suprascriere NU tăcută: dacă numele există deja, cerem confirmare (înainte se înlocuia
     // fără avertisment — puteai pierde o comandă salvată dintr-o coincidenţă de nume).
     if (saved.some((s) => s.name === name)
-        && !window.confirm(t('fleet.overwriteConfirm', { name }))) return
+        && !(await confirm({
+          title: t('fleet.overwriteTitle'), message: t('fleet.overwriteConfirm', { name }),
+          danger: true, confirmLabel: t('fleet.replace'),
+        }))) return
     persistSaved([...saved.filter((s) => s.name !== name), { name, command: cmd }])
     setSaveName('')
   }
@@ -68,10 +77,13 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
     const guard = await api<CommandGuard>('/api/settings/command-guard').catch(() => null)
     const rule = matchCommandRule(command.trim(), guard)
     if (rule?.action === 'block') {
-      alert(t('fleet.guardBlocked', { pattern: rule.pattern }))
+      notifyError(t('fleet.guardBlockedTitle'), t('fleet.guardBlocked', { pattern: rule.pattern }))
       return
     }
-    const confirmed = rule ? window.confirm(t('fleet.guardConfirm', { pattern: rule.pattern })) : false
+    const confirmed = rule ? await confirm({
+      title: t('fleet.guardConfirmTitle'), message: t('fleet.guardConfirm', { pattern: rule.pattern }),
+      danger: true, confirmLabel: t('fleet.runOnAll'),
+    }) : false
     if (rule && !confirmed) return
     // Pre-flight step-up: fiecare host cu require_2fa are nevoie de propria fereastră. Le deblocăm
     // SERIAL aici (un prompt pe rând) ca dispatch-ul paralel de mai jos să nu declanşeze N ceremonii
@@ -129,11 +141,12 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
   }
 
   const rowState = (r?: RunResult) => {
-    if (!r || r.status === 'running') return { dot: 'bg-sky-500 dot-live', badge: t('fleet.running'), cls: 'text-sky-400' }
-    if (r.status === 'error') return { dot: 'bg-rose-500', badge: r.error || t('fleet.error'), cls: 'text-rose-400' }
-    if (r.timed_out) return { dot: 'bg-rose-500', badge: `timeout · ${r.duration}s`, cls: 'text-rose-400' }
+    // culorile prin clasele semantice theme-aware (tokenii sky/rose/emerald-400 cădeau sub AA pe Aurora)
+    if (!r || r.status === 'running') return { dot: 'bg-sky-500 dot-live', badge: t('fleet.running'), cls: 'wt-accent' }
+    if (r.status === 'error') return { dot: 'bg-rose-500', badge: r.error || t('fleet.error'), cls: 'wt-danger' }
+    if (r.timed_out) return { dot: 'bg-rose-500', badge: `timeout · ${r.duration}s`, cls: 'wt-danger' }
     const ok = r.exit_code === 0
-    return { dot: ok ? 'bg-emerald-500' : 'bg-rose-500', badge: `exit ${r.exit_code} · ${r.duration}s`, cls: ok ? 'text-emerald-400' : 'text-rose-400' }
+    return { dot: ok ? 'bg-emerald-500' : 'bg-rose-500', badge: `exit ${r.exit_code} · ${r.duration}s`, cls: ok ? 'wt-good' : 'wt-danger' }
   }
   const oneLine = (r?: RunResult) => {
     if (!r || r.status === 'running') return t('fleet.connecting')
@@ -151,13 +164,13 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
           {phase === 'running' && (
             <span className="font-mono text-xs text-slate-500">
               <b className="text-slate-300">{summary.total}</b> {t('fleet.hosts')} ·
-              <span className="text-emerald-400"> ✓{summary.ok}</span>
-              <span className="text-rose-400"> ✕{summary.fail}</span>
-              {summary.running > 0 && <span className="text-sky-400"> ●{summary.running}</span>}
+              <span className="wt-good"> ✓{summary.ok}</span>
+              <span className="wt-danger"> ✕{summary.fail}</span>
+              {summary.running > 0 && <span className="wt-accent"> ●{summary.running}</span>}
             </span>
           )}
           <button onClick={props.onClose} aria-label={t('fleet.close')}
-            className="ml-auto rounded px-2 text-slate-500 hover:bg-ink-800 hover:text-slate-300">✕</button>
+            className="ml-auto rounded px-2 py-1 text-slate-500 hover:bg-ink-800 hover:text-slate-300">✕</button>
         </header>
 
         {/* ── faza „alegi" ── */}
@@ -219,7 +232,7 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
         {/* ── faza „confirmi" (pas deliberat) ── */}
         {phase === 'confirm' && (
           <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4">
-            <div className="flex items-center gap-2 font-medium text-amber-300">⚠ {t('fleet.youRunOn')} {t('fleet.hostCount', { count: chosen.length })}</div>
+            <div className="wt-warn flex items-center gap-2 font-medium">⚠ {t('fleet.youRunOn')} {t('fleet.hostCount', { count: chosen.length })}</div>
             <div className="rounded-lg bg-ink-800/60 px-3 py-2 font-mono text-sm text-slate-200">$ {command.trim()}</div>
             <div className="flex flex-wrap gap-1.5">
               {chosen.map((h) => <span key={h.id} className="rounded bg-ink-800 px-2 py-0.5 font-mono text-xs text-slate-400 ring-1 ring-ink-700">{h.name}</span>)}
@@ -238,10 +251,10 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
                 <div key={h.id} className="border-b border-ink-800/60">
                   <button onClick={() => setExpanded(isOpen ? null : h.id)}
                     className="flex w-full items-center gap-2.5 px-4 py-2.5 text-left hover:bg-ink-800/40">
-                    <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${st.dot}`} />
+                    <span aria-hidden="true" className={`h-2.5 w-2.5 shrink-0 rounded-full ${st.dot}`} />
                     <span className="min-w-0 flex-1">
                       <span className="block font-mono text-[13.5px] font-semibold text-slate-200">{h.name}</span>
-                      <span className={`block truncate font-mono text-[11.5px] ${r?.status === 'error' || (r?.status === 'done' && r?.exit_code !== 0) ? 'text-rose-400/80' : 'text-slate-500'}`}>{oneLine(r)}</span>
+                      <span className={`block truncate font-mono text-[11.5px] ${r?.status === 'error' || (r?.status === 'done' && r?.exit_code !== 0) ? 'wt-danger opacity-80' : 'text-slate-500'}`}>{oneLine(r)}</span>
                     </span>
                     <span className={`shrink-0 rounded-full border border-ink-700 px-2 py-0.5 font-mono text-[11px] ${st.cls}`}>{st.badge}</span>
                   </button>

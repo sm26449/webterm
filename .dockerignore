@@ -10,3 +10,21 @@ frontend/dist
 tests
 __pycache__
 *.pyc
+# Secrete şi chei: NICIODATĂ în contextul de build. Dockerfile-ul copiază directoare întregi
+# (`frontend/`, `deploy/authentik/`), iar `deploy/authentik/.env` e exact fişierul pe care
+# provision.sh îl cere şi .gitignore îl ascunde — adică există pe discul cui a provisionat local
+# şi ar fi ajuns în imagine la un `setup.sh`/`make build` (auditul de deploy, M3). Exemplele
+# (`.env.prod.example`, `deploy/authentik/.env*.example`) sunt NECESARE în deploy-kit → negate.
+**/.env
+**/.env.*
+!**/.env*.example
+*.pem
+*.key
+secrets
+backups
+# nu intră în imagine, doar îngraşă contextul (docs/ nu e copiat de niciun COPY)
+docs
+.github
+.playwright*
+playwright-report
+test-results

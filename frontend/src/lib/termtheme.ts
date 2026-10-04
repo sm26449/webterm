@@ -1,4 +1,5 @@
 import type { ITheme } from '@xterm/xterm'
+import { lsGet, lsRemove, lsSet } from './storage'
 
 /** Terminal color schemes. The 16 ANSI colors are what an operator actually sees
    99% of the time (errors, `git diff`, `ls`, vim, prompts) — xterm's built-in
@@ -71,7 +72,7 @@ export const CUSTOM_SCHEME_NAME = 'custom'
 
 export function customTheme(): ITheme | null {
   try {
-    const raw = localStorage.getItem(CUSTOM_KEY)
+    const raw = lsGet(CUSTOM_KEY)
     if (!raw) return null
     const t = JSON.parse(raw) as ITheme
     return t && typeof t === 'object' && t.background ? t : null
@@ -81,13 +82,13 @@ export function customTheme(): ITheme | null {
 }
 
 export function saveCustomTheme(theme: ITheme): void {
-  localStorage.setItem(CUSTOM_KEY, JSON.stringify(theme))
+  lsSet(CUSTOM_KEY, JSON.stringify(theme))
   // cursorAccent lipsă ar lăsa cursorul invizibil pe fundaluri deschise
   window.dispatchEvent(new Event('wt-termscheme'))
 }
 
 export function clearCustomTheme(): void {
-  localStorage.removeItem(CUSTOM_KEY)
+  lsRemove(CUSTOM_KEY)
   window.dispatchEvent(new Event('wt-termscheme'))
 }
 
@@ -100,12 +101,12 @@ export function allSchemes(): { id: string; name: string; theme: ITheme }[] {
 }
 
 export function currentTermScheme(): string {
-  const v = localStorage.getItem('wt_term_scheme')
-  return allSchemes().some((s) => s.id === v) ? v! : DEFAULT
+  const v = lsGet('wt_term_scheme')
+  return v && allSchemes().some((s) => s.id === v) ? v : DEFAULT
 }
 
 export function setTermScheme(id: string): void {
-  localStorage.setItem('wt_term_scheme', id)
+  lsSet('wt_term_scheme', id)
   window.dispatchEvent(new Event('wt-termscheme'))
 }
 
@@ -117,7 +118,7 @@ export function termTheme(id: string = currentTermScheme()): ITheme {
 export function hostScheme(hostId: number | undefined): string {
   if (hostId == null) return currentTermScheme()
   try {
-    const map = JSON.parse(localStorage.getItem('wt_host_schemes') || '{}')
+    const map = JSON.parse(lsGet('wt_host_schemes') || '{}')
     const id = map[String(hostId)]
     return id && allSchemes().some((s) => s.id === id) ? id : currentTermScheme()
   } catch {
@@ -128,7 +129,7 @@ export function hostScheme(hostId: number | undefined): string {
 /** Schema setată EXPLICIT pe host (null = urmează globala) — pentru UI-ul de selecție. */
 export function hostSchemeRaw(hostId: number): string | null {
   try {
-    const map = JSON.parse(localStorage.getItem('wt_host_schemes') || '{}')
+    const map = JSON.parse(lsGet('wt_host_schemes') || '{}')
     return map[String(hostId)] ?? null
   } catch {
     return null
@@ -137,10 +138,10 @@ export function hostSchemeRaw(hostId: number): string | null {
 
 export function setHostScheme(hostId: number, id: string | null): void {
   let map: Record<string, string> = {}
-  try { map = JSON.parse(localStorage.getItem('wt_host_schemes') || '{}') } catch { /* reset */ }
+  try { map = JSON.parse(lsGet('wt_host_schemes') || '{}') } catch { /* reset */ }
   if (id) map[String(hostId)] = id
   else delete map[String(hostId)]
-  localStorage.setItem('wt_host_schemes', JSON.stringify(map))
+  lsSet('wt_host_schemes', JSON.stringify(map))
   window.dispatchEvent(new Event('wt-termscheme'))
 }
 

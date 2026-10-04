@@ -8,7 +8,6 @@ toate marcajele OSC 133 erau aruncate: panoul ⌘ rămânea pe „activează int
 istoricul global gol — deşi shell-ul emitea corect (verificat în transcript).
 """
 import os
-import re
 import sys
 import tempfile
 
@@ -20,7 +19,9 @@ from app import config, core  # noqa: E402
 
 ok = 0
 total = 0
-ALT = re.compile(rb"\x1b\[\?(?:1049|1047|47)([hl])")
+# Expresia REALĂ din producţie, nu o copie: copia de aici rămăsese fără `1048` (G-42, audit
+# 2026-10-04), deci o regresie pe exact acel cod ar fi trecut verde.
+ALT = core.ALT_SCREEN_RE
 
 
 def check(name, cond, detail=""):
@@ -38,8 +39,9 @@ def write(sid, payload):
 
 
 def ends_in_alt(data):
-    m = ALT.findall(data)
-    return bool(m) and m[-1] == b"h"
+    # ultima comutare de ecran (`ESC[?1049h` / `…l`); clear-urile din aceeaşi expresie nu contează
+    m = [x for x in ALT.findall(data) if x.startswith(b"\x1b[?")]
+    return bool(m) and m[-1].endswith(b"h")
 
 
 def main():
@@ -72,6 +74,16 @@ def main():
     write(sid, b"x" * 20000 + b"\nultima linie\n")
     tail = core.read_tail(sid, limit=4096)
     check("coada tăiată fără alt-screen păstrează sfârşitul", tail.endswith(b"ultima linie\n"))
+
+    # 5. `1048` (salvare/restaurare cursor pe alt-screen, folosită de unele TUI-uri) e în
+    #    expresia reală — copia veche a testului n-o avea, deci asta e verificarea de non-regresie
+    for seq in (b"\x1b[?1048h", b"\x1b[?1048l", b"\x1b[?1049h", b"\x1b[?47l", b"\x1b[3J", b"\x1bc"):
+        check("ALT_SCREEN_RE acoperă %r" % seq, ALT.search(seq) is not None)
+    sid = "e" * 32
+    write(sid, b"\x1b[?1048h" + b"prompt$ ok\n")
+    tail = core.read_tail(sid, limit=1024 * 1024)
+    check("`1048h` e scos din coadă, conţinutul rămâne",
+          b"\x1b[?1048" not in tail and b"prompt$ ok" in tail)
 
     print(f"\n{ok}/{total} passed")
     return ok == total

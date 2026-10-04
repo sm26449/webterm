@@ -7,7 +7,7 @@ import {
   allSchemes, clearCustomTheme, COLOR_KEYS, currentTermScheme,
   customTheme, parseThemeFile, saveCustomTheme, setTermScheme, termTheme,
 } from '../../lib/termtheme'
-import { heading } from './ui'
+import { btn, heading } from './ui'
 
 // Aspect: limbă, temă (light/dark/auto), schema de culori a terminalului (+ editor live şi import
 // iTerm2/VS Code) şi watermark-ul de identitate. Extras din SettingsModal ca tab de sine stătător.
@@ -25,6 +25,7 @@ export default function AppearanceTab(props: { onAccountChanged: () => void }) {
     enabled: false, content: '${email} · ${time}', opacity: 0.08, angle: -30, fontSize: 13,
   })
   const [wmMsg, setWmMsg] = useState('')
+  const [wmErr, setWmErr] = useState(false)   // acelaşi text, dar rol diferit: `alert` la eşec
   useEffect(() => {
     api<WatermarkConfig>('/api/settings/watermark').then(setWm).catch(() => {})
   }, [])
@@ -33,11 +34,11 @@ export default function AppearanceTab(props: { onAccountChanged: () => void }) {
       const saved = await api<WatermarkConfig>('/api/settings/watermark',
         { method: 'POST', body: JSON.stringify(wm) })
       setWm(saved)
-      setWmMsg(t('settings.saved'))
+      setWmErr(false); setWmMsg(t('settings.saved'))
       props.onAccountChanged()   // refetch /api/state → overlay-ul live se actualizează
       setTimeout(() => setWmMsg(''), 1500)
     } catch {
-      setWmMsg(t('settings.saveError'))
+      setWmErr(true); setWmMsg(t('settings.saveError'))
     }
   }
 
@@ -73,10 +74,10 @@ export default function AppearanceTab(props: { onAccountChanged: () => void }) {
       <h3 className={heading + ' !mt-0'}>{t('settings.language')}</h3>
       <div className="mt-2 flex flex-wrap gap-2">
         {LANG_ORDER.map((code) => (
-          <button key={code} onClick={() => setLang(code)}
+          <button key={code} onClick={() => setLang(code)} aria-pressed={lang === code}
             className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm ring-1 transition ${
               lang === code
-                ? 'bg-sky-600/20 wt-accent ring-sky-500/40'
+                ? 'wt-chip-accent ring-sky-500/40'
                 : 'bg-ink-800 text-slate-300 ring-ink-700 hover:bg-ink-700'}`}>
             <span className="text-base leading-none">{LANGS[code].meta.flag}</span> {LANGS[code].meta.name}
           </button>
@@ -88,7 +89,7 @@ export default function AppearanceTab(props: { onAccountChanged: () => void }) {
       <h3 className={heading}>{t('settings.theme')}</h3>
       <div className="mt-2 flex gap-2">
         {([['macos', 'Aurora'], ['dark', 'Midnight'], ['auto', t('settings.themeAuto')]] as const).map(([value, label]) => (
-          <button key={value} onClick={() => setTheme(value)}
+          <button key={value} onClick={() => setTheme(value)} aria-pressed={themePrefValue === value}
             className={`rounded-lg px-3 py-1.5 text-sm ring-1 ${
               themePrefValue === value
                 ? 'bg-sky-600 text-white ring-sky-600'
@@ -102,7 +103,7 @@ export default function AppearanceTab(props: { onAccountChanged: () => void }) {
       <h3 className={heading}>{t('settings.termColors')}</h3>
       <div className="mt-2 flex flex-wrap gap-2">
         {allSchemes().map((s) => (
-          <button key={s.id} onClick={() => { setTermScheme(s.id); setScheme(s.id) }}
+          <button key={s.id} onClick={() => { setTermScheme(s.id); setScheme(s.id) }} aria-pressed={scheme === s.id}
             className={`flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm ring-1 ${
               scheme === s.id
                 ? 'bg-sky-600 text-white ring-sky-600'
@@ -140,7 +141,7 @@ export default function AppearanceTab(props: { onAccountChanged: () => void }) {
       <p className="mt-1 text-xs text-slate-500">
         {t('settings.importThemeHintA')}<code className="font-mono">.itermcolors</code>{t('settings.importThemeHintB')} <span className="font-mono">iTerm2-Color-Schemes</span> {t('settings.importThemeHintC')}
       </p>
-      {importErr && <div className="mt-1 text-sm wt-danger">{importErr}</div>}
+      <div role="alert" className={importErr ? 'mt-1 text-sm wt-danger' : 'sr-only'}>{importErr}</div>
 
       {editing && (
         <div className="mt-3 rounded-xl border border-ink-700 p-3">
@@ -209,11 +210,12 @@ export default function AppearanceTab(props: { onAccountChanged: () => void }) {
         </div>
       )}
       <div className="mt-3 flex items-center gap-3">
-        <button onClick={saveWatermark}
-          className="rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-500">
+        <button onClick={saveWatermark} className={btn.primary}>
           {t('settings.saveWatermark')}
         </button>
-        {wmMsg && <span className="text-xs text-slate-400">{wmMsg}</span>}
+        {/* două regiuni, nu una cu rol variabil: schimbarea rolului pe acelaşi nod nu e anunţată */}
+        <span role="status" className={wmMsg && !wmErr ? 'text-xs wt-good' : 'sr-only'}>{wmErr ? '' : wmMsg}</span>
+        <span role="alert" className={wmMsg && wmErr ? 'text-xs wt-danger' : 'sr-only'}>{wmErr ? wmMsg : ''}</span>
       </div>
     </div>
   )

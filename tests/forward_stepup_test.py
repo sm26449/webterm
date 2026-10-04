@@ -142,31 +142,124 @@ async def main():
         # `forwards` în loc de `port_forwards`, deci arunca de fiecare dată: opt teste de
         # forward au picat în CI, jumătate cu 500. Verificarea de aici e ieftină şi hermetică
         # — nu are nevoie de container, agent sau tunel — şi ar fi prins-o imediat.
+        #
+        # CONTRACTUL REAL (audit 2026-10-04): cererea soseşte pe `slug.<domeniu>` purtând DOAR
+        # biletul de forward (`__Host-wt_fwd`). Cookie-ul de sesiune e `__Host-`, host-only pe
+        # domeniul principal, şi NU ajunge niciodată pe subdomeniu. Versiunea veche a testului
+        # simula un `_Req` cu cookie-ul de sesiune — adică un cookie pe care niciun browser nu-l
+        # trimite — şi masca o buclă infinită de redirect pe orice forward de pe host 2FA.
         await db.execute("UPDATE port_forwards SET enabled=1 WHERE id=?", gated_fid)
         security._stepup_windows.clear()
 
         class _Req:
-            def __init__(self, cookie=None):
-                self.cookies = {security.COOKIE_NAME: cookie} if cookie else {}
+            def __init__(self, ticket=None):
+                self.cookies = {api.FWD_COOKIE: ticket} if ticket else {}
 
-        sess_token = c.cookies.get(security.COOKIE_NAME)
+        ticket = security.make_forward_token(gated_slug, uid, security.STEPUP_WINDOW_MAX)
         allowed = await api._forward_stepup_ok(plain_slug, _Req())
         check("host FĂRĂ 2FA: tunelul nu cere fereastră de step-up", allowed is True)
 
         allowed = await api._forward_stepup_ok(gated_slug, _Req())
-        check("host CU 2FA, fără sesiune: tunelul e refuzat", allowed is False)
+        check("host CU 2FA, fără bilet: tunelul e refuzat", allowed is False)
 
         security.open_stepup_window(uid, gated)
-        allowed = await api._forward_stepup_ok(gated_slug, _Req(sess_token))
-        check("host CU 2FA, cu fereastră deschisă: trece", allowed is True, allowed)
+        allowed = await api._forward_stepup_ok(gated_slug, _Req(ticket))
+        check("host CU 2FA, bilet + fereastră deschisă, FĂRĂ cookie de sesiune: trece",
+              allowed is True, allowed)
+
+        # uid-ul din bilet e crezut doar după semnătură: un uid rescris nu împrumută fereastra
+        exp_s, _uid_s, sig = ticket.split(".")
+        forged = "%s.%d.%s" % (exp_s, uid + 7, sig)
+        security.open_stepup_window(uid + 7, gated)
+        allowed = await api._forward_stepup_ok(gated_slug, _Req(forged))
+        check("bilet cu uid rescris (semnătură ruptă): refuzat chiar cu fereastra acelui uid deschisă",
+              allowed is False)
+        security._stepup_windows.pop((uid + 7, gated), None)
 
         security._stepup_windows.clear()
-        allowed = await api._forward_stepup_ok(gated_slug, _Req(sess_token))
+        allowed = await api._forward_stepup_ok(gated_slug, _Req(ticket))
         check("host CU 2FA, fereastră închisă: tunelul se închide şi el", allowed is False)
 
         allowed = await api._forward_stepup_ok("slug-inexistent", _Req())
         check("slug necunoscut: nu aruncă, doar lasă calea normală să dea 404",
               allowed is True)
+
+        # ── cap-coadă pe SUBDOMENIU: client fără jar de cookie-uri (= browserul pe slug.<dom>) ──
+        fwd_host = f"{gated_slug}.{api.forward_domain()}"
+        async with httpx.AsyncClient(transport=transport, base_url="http://t", timeout=30,
+                                     follow_redirects=False) as sub:
+            H = {"host": fwd_host, "cookie": f"{api.FWD_COOKIE}={ticket}"}
+            security.open_stepup_window(uid, gated)
+            r = await sub.get("/grafana?x=1", headers=H)
+            # hostul e un agent offline → proxy-ul dă 409; esenţialul e că NU e redirect
+            check("subdomeniu, bilet + fereastră deschisă: intră în proxy (nu redirect, nu 500)",
+                  r.status_code not in (302, 500), f"{r.status_code} {r.headers.get('location')}")
+
+            security._stepup_windows.clear()
+            r = await sub.get("/grafana?x=1", headers=H)
+            loc = r.headers.get("location", "")
+            check("subdomeniu, fereastră închisă: 302", r.status_code == 302, str(r.status_code))
+            check("redirect ABSOLUT către domeniul principal (altfel buclă pe subdomeniu)",
+                  loc.startswith(config.PUBLIC_URL + "/__wtfwd/auth?slug=" + gated_slug), loc)
+            check("`next` păstrează calea + query", "next=%2Fgrafana%3Fx%3D1" in loc, loc)
+
+            r = await sub.get("/grafana", headers={"host": fwd_host})
+            loc = r.headers.get("location", "")
+            check("subdomeniu fără bilet: acelaşi redirect absolut",
+                  r.status_code == 302 and loc.startswith(config.PUBLIC_URL + "/__wtfwd/auth?"), loc)
+
+            # anti open-redirect: `next` schema-relativ (`//evil`) e aruncat, nu transmis mai departe
+            r = await sub.get("http://t//evil.example/x", headers=H)
+            loc = r.headers.get("location", "")
+            check("`next=//evil` pe subdomeniu → aruncat (next=%2F)",
+                  r.status_code == 302 and "next=%2F&" in loc + "&" and "evil" not in loc, loc)
+            # ...şi la /__wtfwd/set (ultimul hop, cel care chiar redirecţionează pe `next`)
+            r = await sub.get(f"/__wtfwd/set?t={ticket}&next=//evil.example/x", headers={"host": fwd_host})
+            loc = r.headers.get("location", "")
+            check("/__wtfwd/set cu next=//evil → rădăcina subdomeniului",
+                  r.status_code == 302 and loc == f"http://{fwd_host}/", loc)
+
+        # pe domeniul principal: `next` absolut e aruncat şi când fereastra e deschisă (biletul se
+        # emite cu next=/), şi când e închisă (ocolul prin SPA nu cară URL-ul străin)
+        security.open_stepup_window(uid, gated)
+        r = await c.get(f"/__wtfwd/auth?slug={gated_slug}&next=https://evil.example/")
+        loc = r.headers.get("location", "")
+        check("forward_auth: next absolut → next=%2F la emitere",
+              "__wtfwd/set?t=" in loc and loc.endswith("&next=%2F"), loc)
+        security._stepup_windows.clear()
+        r = await c.get(f"/__wtfwd/auth?slug={gated_slug}&next=//evil.example/")
+        loc = r.headers.get("location", "")
+        check("forward_auth: next=//evil → aruncat şi pe ocolul de step-up",
+              "stepup=forward" in loc and "next=%2F#" in loc and "evil" not in loc, loc)
+
+        # ── WebSocket: aceeaşi poartă, ÎNAINTE de accept ─────────────────────────
+        # Un WS deschis pe host 2FA nu consulta fereastra deloc (doar biletul, valabil 1 h):
+        # exact canalul interactiv (consolă web, noVNC) supravieţuia politicii.
+        async def _ws(ticket_val):
+            sent = []
+            scope = {"type": "websocket", "path": "/ws", "query_string": b"",
+                     "headers": [(b"host", fwd_host.encode()),
+                                 (b"origin", f"http://{fwd_host}".encode()),
+                                 (b"cookie", f"{api.FWD_COOKIE}={ticket_val}".encode())]}
+
+            async def receive():
+                return {"type": "websocket.connect"}
+
+            async def send(m):
+                sent.append(m)
+            await api.handle_forward_ws(scope, receive, send)
+            return sent
+
+        security._stepup_windows.clear()
+        sent = await _ws(ticket)
+        check("WS pe host 2FA, fereastră închisă: refuzat cu 1008 înainte de accept",
+              sent and sent[0].get("type") == "websocket.close" and sent[0].get("code") == 1008
+              and not any(m.get("type") == "websocket.accept" for m in sent), str(sent))
+        security.open_stepup_window(uid, gated)
+        sent = await _ws(ticket)
+        # trece de poartă; agentul e offline → 1011 (nu 1008): dovada că refuzul de mai sus era fereastra
+        check("WS pe host 2FA, fereastră deschisă: trece de poartă (1011 = host offline, nu 1008)",
+              sent and sent[0].get("code") == 1011, str(sent))
 
         # ── apps: un forward promovat la „bookmark" (app_type) apare în /api/apps ─────────
         security._stepup_windows.clear()

@@ -398,9 +398,15 @@ try {
   // Butonul cere confirmare: tastează o comandă într-un shell VIU, iar dacă terminalul nu
   // e la un prompt (editor, prompt de parolă) textul devine altceva. Playwright respinge
   // dialogurile implicit, deci le acceptăm explicit — ca un om care citeşte şi apasă OK.
-  page.once('dialog', (d) => d.accept())
+  // De la 3.1.0 confirmarea e un ConfirmModal în aplicaţie (`role="alertdialog"`), nu
+  // `window.confirm` — apăsăm butonul de confirmare (ultimul; Anulează stă primul).
   await cmdPanel.locator('button:has-text("Enable shell integration")').click()
+  await page.locator('[role="alertdialog"]').last().locator('button').last().click({ timeout: 5000 })
   await page.waitForTimeout(3000)   // curl + source
+  // tastele de mai jos trebuie să ajungă în SHELL: dăm click în terminal ca un om, nu ne bazăm
+  // pe unde a lăsat focusul dialogul de confirmare (focus-trap-ul îl întoarce pe deschizător)
+  await activePane.locator('.xterm-screen').click()
+  await page.waitForTimeout(200)
 
   // două comenzi: una reușită, una eșuată → trebuie marcate cu exit code
   await page.keyboard.type('echo OSC_OK\n')
@@ -706,7 +712,15 @@ try {
 
   // ── Split-views: layout denumit, comutare, persistenţă la reload, ştergere ──
   // La punctul ăsta sunt ≥2 taburi (X1, X2 + sesiunile anterioare), deci „+ Split view" apare.
-  page.on('dialog', (d) => d.accept())        // confirmarea de ştergere (window.confirm)
+  // Confirmările App/Sidebar/SessionView NU mai sunt window.confirm (dialog propriu, role=alertdialog);
+  // handlerul nativ rămâne doar pentru panourile încă neconvertite (ex. Toolbox → SSH keys, mai jos).
+  page.on('dialog', (d) => d.accept())
+  const confirmInApp = async () => {
+    const dlg = page.locator('[role="alertdialog"]').last()
+    await dlg.waitFor({ timeout: 5000 })
+    // butonul de confirmare e ULTIMUL din dialog (Anulează stă primul, focusat la `danger`)
+    await dlg.locator('button').last().click()
+  }
   await page.locator('button[aria-label="New split view"]').click()
   await page.waitForSelector('input[placeholder="e.g. prod-debug"]', { timeout: 5000 })
   check('split: wizard-ul se deschide cu câmp de nume',
@@ -763,6 +777,7 @@ try {
 
   // ştergere din chip → dispare
   await page.locator('div.wt-tab:has-text("e2e-split") button[aria-label="Delete split view"]').click()
+  await confirmInApp()                       // ConfirmModal (danger) în locul window.confirm
   await page.waitForTimeout(800)
   check('split: ştergerea scoate chip-ul',
     (await page.locator('button:has-text("e2e-split")').count()) === 0)
@@ -796,8 +811,10 @@ try {
   await page.waitForTimeout(2500)
   check('sshkeys: generate adoptă perechea existentă → fingerprint SHA256 + „nedeployată"',
     await visible(tbx.locator('text=SHA256:')) && await visible(tbx.locator('text=Not deployed anywhere yet')))
-  // dialogurile confirm() sunt deja auto-acceptate de handler-ul persistent de mai sus
+  // ştergerea cere ConfirmModal-ul propriu (nu mai e window.confirm, deci handler-ul de
+  // `dialog` nu-l vede): apăsăm „Delete" în alertdialog, ca un om
   await tbx.locator('button[title="Delete the key (files + record)"]').click()
+  await page.locator('[role=alertdialog] button:has-text("Delete")').click()
   await page.waitForTimeout(2000)
   check('sshkeys: delete (cu confirmare) → înapoi la starea de generate',
     await visible(tbx.locator('button:has-text("Generate key on this host")')))

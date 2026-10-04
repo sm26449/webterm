@@ -88,6 +88,78 @@ def main():
         check("%s ocoleşte entrypoint-ul care coboară privilegiile" % script,
               "--entrypoint python3" in txt, "adaugă --entrypoint python3 la docker run")
 
+    # ── secretele: fişiere montate, nu valori în mediu (auditul de deploy, M1) ───────────
+    # Traefik citeşte `Config.Env` al oricărui container prin dockerproxy (CONTAINERS=1 e
+    # minimul providerului). Deci în compose-ul de producţie fiecare secret al aplicaţiei are
+    # un `_FILE` care arată spre /run/secrets/<nume>, serviciul declară secretul, iar blocul
+    # `secrets:` îl leagă de ./secrets/<nume>. Verificăm FIRUL întreg, nu doar o parte.
+    prod = _read("docker-compose.prod.yml")
+    SECRETS = {
+        "WEBTERM_SETUP_TOKEN": "webterm_setup_token",
+        "WEBTERM_OIDC_CLIENT_SECRET": "webterm_oidc_client_secret",
+        "WEBTERM_SMTP_PASSWORD": "webterm_smtp_password",
+    }
+    top = re.search(r"^secrets:\n((?:  .*\n?)+)", prod, re.M)
+    check("docker-compose.prod.yml are blocul `secrets:` de nivel superior", bool(top))
+    top_txt = top.group(1) if top else ""
+    for var, name in SECRETS.items():
+        check(f"{var}_FILE arată spre /run/secrets/{name}",
+              re.search(rf"^\s+{var}_FILE:\s*/run/secrets/{name}\s*$", prod, re.M) is not None)
+        check(f"secretul {name} e legat de ./secrets/{name}",
+              re.search(rf"^  {name}:\n    file: \./secrets/{name}\s*$", top_txt, re.M) is not None,
+              top_txt[:200])
+        check(f"serviciul app declară secretul {name}",
+              re.search(rf"^      - {name}\s*$", prod, re.M) is not None)
+        # fallback-ul din mediu rămâne (instalări cu .env scris de mână), dar GOL implicit
+        check(f"{var} rămâne pasat ca ${{{var}:-}} (fallback, gol = nesetat)",
+              re.search(rf"^\s+{var}:\s*\$\{{{var}:-\}}\s*$", prod, re.M) is not None)
+    # Traefik: lego citeşte CF_DNS_API_TOKEN_FILE când CF_DNS_API_TOKEN e gol
+    check("Traefik primeşte CF_DNS_API_TOKEN_FILE şi secretul cf_dns_api_token",
+          re.search(r"^\s+CF_DNS_API_TOKEN_FILE:\s*/run/secrets/cf_dns_api_token\s*$", prod, re.M) is not None
+          and re.search(r"^  cf_dns_api_token:\n    file: \./secrets/cf_dns_api_token", top_txt, re.M) is not None)
+    check("CF_DNS_API_TOKEN nu mai e obligatoriu în mediu (${CF_DNS_API_TOKEN:-})",
+          re.search(r"^\s+CF_DNS_API_TOKEN:\s*\$\{CF_DNS_API_TOKEN:-\}\s*$", prod, re.M) is not None)
+    # Postgres: _FILE şi POSTGRES_PASSWORD sunt EXCLUSIVE în entrypoint-ul oficial → doar fişier
+    check("Postgres primeşte DOAR POSTGRES_PASSWORD_FILE (entrypoint-ul refuză ambele)",
+          "POSTGRES_PASSWORD_FILE: /run/secrets/pg_pass" in prod
+          and re.search(r"^\s+POSTGRES_PASSWORD:", prod, re.M) is None)
+    # Authentik: `file://` e sintaxa lui pentru orice variabilă; fallback pe valoarea din .env
+    for var, name in (("AUTHENTIK_SECRET_KEY", "authentik_secret_key"), ("PG_PASS", "pg_pass"),
+                      ("AUTHENTIK_BOOTSTRAP_PASSWORD", "authentik_bootstrap_password"),
+                      ("AUTHENTIK_BOOTSTRAP_TOKEN", "authentik_bootstrap_token")):
+        check(f"Authentik citeşte {name} ca file:// cu fallback pe ${{{var}}}",
+              f"${{{var}:-file:///run/secrets/{name}}}" in prod, name)
+    # nicio VALOARE de secret nu mai e pasată singură (fără _FILE lângă) în compose-ul de prod
+    bare = [v for v in SECRETS if re.search(rf"^\s+{v}:\s*\$\{{{v}\}}\s*$", prod, re.M)]
+    check("niciun secret pasat ca ${VAR} obligatoriu (ar forţa valoarea în .env)", not bare, str(bare))
+
+    # ── întărirea tuturor serviciilor (auditul de deploy, M2) ─────────────────────────────
+    # Doar `app` era întărit; Traefik (procesul expus pe internet), dockerproxy, Caddy,
+    # Postgres, Redis şi Authentik rulau cu toate capabilităţile şi fără plafon de memorie.
+    def service_block(txt, name):
+        m = re.search(rf"^  {re.escape(name)}:\n((?:    .*\n|\n)+)", txt, re.M)
+        return m.group(1) if m else ""
+    for compose, services in (("docker-compose.prod.yml", ["dockerproxy", "traefik", "app", "authentik-postgresql",
+                                                           "authentik-redis", "authentik-server", "authentik-worker"]),
+                              ("docker-compose.yml", ["app", "caddy"])):
+        txt = _read(compose)
+        for svc in services:
+            blk = service_block(txt, svc)
+            check(f"{compose}:{svc} există", bool(blk))
+            check(f"{compose}:{svc} cap_drop ALL + no-new-privileges + mem_limit + pids_limit + logging",
+                  "cap_drop" in blk and "ALL" in blk and "no-new-privileges:true" in blk
+                  and "mem_limit:" in blk and "pids_limit:" in blk and "logging: *default-logging" in blk,
+                  blk[:300])
+    prodtxt = _read("docker-compose.prod.yml")
+    for svc in ("dockerproxy", "traefik", "authentik-redis"):
+        check(f"{svc} rulează cu rădăcina read-only", "read_only: true" in service_block(prodtxt, svc))
+    check("caddy rulează cu rădăcina read-only", "read_only: true" in service_block(_read("docker-compose.yml"), "caddy"))
+    # imagini terţe pe tag de MINOR (nu `latest`, nu doar major): contractul de upgrade
+    for img in ("postgres:16.15-alpine", "redis:7.4.11-alpine", "goauthentik/server:2026.8.3"):
+        check(f"imaginea {img} e pinuită pe versiune de minor", img in prodtxt)
+    check("nicio imagine pe :latest în compose-urile de producţie/dev",
+          ":latest" not in prodtxt and ":latest" not in _read("docker-compose.yml"))
+
     print(f"\n{ok}/{total} teste trecute")
     return ok == total
 

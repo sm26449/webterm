@@ -36,6 +36,39 @@ _SALT = 16
 _NONCE = 12
 _SCRYPT_N = 2 ** 15         # ~30ms derivare; anti brute-force pe fișierul descărcat
 RETENTION_DAYS = 7
+# Sufixul fişierului temporar al unui snapshot în curs de scriere. Stă în ACELAŞI director ca
+# ţinta (os.replace e atomic doar pe acelaşi filesystem) şi nu se potriveşte cu `*.wtsnap`, deci
+# list_backups / encrypt_stored / prune nu-l văd niciodată ca arhivă validă (audit G-15).
+TMP_SUFFIX = ".tmp"
+STALE_TMP_SECS = 3600          # un .tmp mai vechi de atât e rest de la un crash → îl curăţăm
+
+# Perioadele programării (secunde). „Scadent" se calculează faţă de ultimul backup REUŞIT,
+# nu faţă de boot — altfel un gateway care reporneşte mai des decât tick-ul nu face niciodată
+# backup (audit G-13).
+SCHEDULE_PERIODS = {"daily": 86400, "weekly": 7 * 86400}
+CLOCK_SKEW_SECS = 60           # last > now + atât = ceasul a sărit înapoi → tratăm ca scadent
+
+
+def next_due(schedule: str, last_ok: float, now: float | None = None):
+    """Momentul următorului backup programat, sau None dacă programarea e oprită.
+    `last_ok` = ts-ul ultimului backup REUŞIT (0 = niciodată → scadent acum)."""
+    period = SCHEDULE_PERIODS.get(schedule)
+    if not period:
+        return None
+    now = time.time() if now is None else now
+    if last_ok <= 0 or last_ok > now + CLOCK_SKEW_SECS:
+        return now
+    return last_ok + period
+
+
+def is_due(schedule: str, last_ok: float, now: float | None = None) -> bool:
+    """Catch-up: dacă ultimul backup reuşit e mai vechi decât perioada (sau n-a existat), e
+    scadent ACUM — indiferent de câte reporniri au fost între timp."""
+    nd = next_due(schedule, last_ok, now)
+    if nd is None:
+        return False
+    now = time.time() if now is None else now
+    return nd <= now
 
 
 def _secret_path():
@@ -128,27 +161,59 @@ def make_encrypted(passphrase: str, include_transcripts: bool = False) -> bytes:
 
 
 # ------------------------------------------------------- backup-uri programate
+_fsync = os.fsync            # alias ca testele să poată injecta un eşec la mijlocul scrierii
+
+
+def _atomic_write(path, data: bytes, mode: int = 0o600) -> None:
+    """Scrie `data` în `path` TOT-SAU-NIMIC: temp în acelaşi director → fsync → os.replace.
+    `path.write_bytes` lăsa, la disc plin / crash la mijloc, un `.wtsnap` trunchiat pe care
+    list_backups îl arăta şi encrypt_stored îl livra userului ca backup valid (audit G-15).
+    Temp-ul nu se potriveşte cu `*.wtsnap`, deci nu e vizibil nicăieri până la replace."""
+    path = str(path)
+    tmp = path + TMP_SUFFIX
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+        try:
+            os.write(fd, data)
+            _fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def run_scheduled_backup(include_transcripts: bool = False) -> str:
     """Creează un snapshot NECRIPTAT în data/backups/ (serverul are oricum cheia) +
     aplică retenția. Întoarce numele fișierului. SINCRON (to_thread)."""
     snap = make_snapshot(include_transcripts)
     name = "webterm-%s.wtsnap" % time.strftime("%Y%m%d-%H%M%S", time.gmtime())
-    path = _backup_dir() / name
-    path.write_bytes(snap)
-    path.chmod(0o600)
+    _atomic_write(_backup_dir() / name, snap)
     prune_backups()
     log.info("scheduled backup created: %s (%d KB)", name, len(snap) // 1024)
     return name
 
 
 def prune_backups(days: int = RETENTION_DAYS) -> int:
-    cutoff = time.time() - days * 86400
+    now = time.time()
+    cutoff = now - days * 86400
     n = 0
     for f in _backup_dir().glob("*.wtsnap"):
         try:
             if f.stat().st_mtime < cutoff:
                 f.unlink()
                 n += 1
+        except OSError:
+            pass
+    # resturi `.tmp` de la un crash în timpul scrierii: nu sunt arhive, doar ocupă disc
+    for f in _backup_dir().glob("*.wtsnap" + TMP_SUFFIX):
+        try:
+            if f.stat().st_mtime < now - STALE_TMP_SECS:
+                f.unlink()
         except OSError:
             pass
     return n
@@ -279,10 +344,9 @@ def apply_pending_restore() -> bool:
         if config.DB_PATH.exists():
             cur = make_snapshot(include_transcripts=False)
             keep = _backup_dir() / ("pre-restore-%d.wtsnap.keep" % int(time.time()))
-            keep.write_bytes(cur)
             # conţine `data/secret` NECRIPTAT — sub umask 022 ieşea 0644, adică lizibil de
-            # orice user de pe maşină. `run_scheduled_backup` face chmod 600; aici lipsea.
-            keep.chmod(0o600)
+            # orice user de pe maşină; _atomic_write deschide cu 0600 şi scrie tot-sau-nimic.
+            _atomic_write(keep, cur)
     except Exception as e:                        # noqa: BLE001
         log.warning("the pre-restore snapshot failed (continuing): %s", e)
 

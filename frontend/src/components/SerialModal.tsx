@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { errText, api, Host } from '../lib/api'
 import { useI18n } from '../lib/i18n'
 import { useFocusTrap } from '../lib/useFocusTrap'
+import { btn } from './settings/ui'
 
 interface SerialPort {
   device: string
@@ -115,7 +116,7 @@ export default function SerialModal(props: {
   }
 
   const sel = 'rounded-lg border border-ink-700 bg-ink-900 px-2 py-1.5 text-sm text-slate-200'
-  const chip = 'rounded px-1.5 py-0.5 text-[10px] font-medium'
+  const chip = 'rounded px-1.5 py-0.5 text-[11px] font-medium'   // minim 11 px (audit tipografie)
 
   const foundLabel = (d: string) => {
     const p = (ports ?? []).find((x) => x.device === d)
@@ -152,19 +153,20 @@ export default function SerialModal(props: {
 
             {/* banner mod identificare */}
             {identifying && !found && (
-              <div className="mb-2 rounded-lg bg-amber-900/40 px-3 py-2 text-xs text-amber-200 ring-1 ring-amber-700/50">
-                🔍 <b>{t('serial.identifyModeTitle')}</b> {t('serial.identifyModeBody')}
+              <div role="status" className="wt-warn mb-2 rounded-lg bg-amber-500/10 px-3 py-2 text-xs ring-1 ring-amber-500/30">
+                <span aria-hidden="true">🔍</span> <b>{t('serial.identifyModeTitle')}</b> {t('serial.identifyModeBody')}
               </div>
             )}
             {found?.phase === 'removed' && (
-              <div className="mb-2 rounded-lg bg-orange-900/40 px-3 py-2 text-xs text-orange-200 ring-1 ring-orange-700/50">
-                ➖ <b className="font-mono">{found.device}</b> {t('serial.wasRemovedPre')} <b>{t('serial.removed')}</b> {t('serial.wasRemovedPost')}
+              <div role="status" className="wt-warn mb-2 rounded-lg bg-amber-500/10 px-3 py-2 text-xs ring-1 ring-amber-500/30">
+                <span aria-hidden="true">➖</span> <b className="font-mono">{found.device}</b> {t('serial.wasRemovedPre')} <b>{t('serial.removed')}</b> {t('serial.wasRemovedPost')}
               </div>
             )}
             {found?.phase === 'back' && (
-              <div className="mb-2 flex items-center justify-between rounded-lg bg-emerald-900/40 px-3 py-2 text-xs text-emerald-200 ring-1 ring-emerald-700/50">
-                <span>✓ <b className="font-mono">{foundLabel(found.device)}</b> {t('serial.cameBack')} <b>{t('serial.selected')}</b>.</span>
-                <button onClick={() => setFound(null)} className="text-emerald-300 hover:text-white">×</button>
+              <div role="status" className="wt-good mb-2 flex items-center justify-between rounded-lg bg-emerald-500/10 px-3 py-2 text-xs ring-1 ring-emerald-500/30">
+                <span><span aria-hidden="true">✓</span> <b className="font-mono">{foundLabel(found.device)}</b> {t('serial.cameBack')} <b>{t('serial.selected')}</b>.</span>
+                <button type="button" onClick={() => setFound(null)} aria-label={t('serial.dismissFound')}
+                  className="grid h-6 w-6 place-items-center rounded hover:bg-ink-700"><span aria-hidden="true">×</span></button>
               </div>
             )}
 
@@ -185,8 +187,8 @@ export default function SerialModal(props: {
                       <span className="min-w-0 flex-1">
                         <span className="flex items-center gap-1.5">
                           <span className="truncate font-mono text-slate-200">{p.device}</span>
-                          {appeared.has(p.device) && <span className={`${chip} bg-emerald-800/60 text-emerald-300`}>{t('serial.new')}</span>}
-                          {p.busy && <span className={`${chip} bg-rose-900/60 text-rose-300`} title={t('serial.heldOpenBy', { who: p.busy })}>{t('serial.inUse', { who: p.busy })}</span>}
+                          {appeared.has(p.device) && <span className={`${chip} wt-good bg-emerald-500/15`}>{t('serial.new')}</span>}
+                          {p.busy && <span className={`${chip} wt-danger bg-rose-500/15`} title={t('serial.heldOpenBy', { who: p.busy })}>{t('serial.inUse', { who: p.busy })}</span>}
                         </span>
                         {p.desc && p.desc !== p.device &&
                           <span className="block truncate text-[11px] text-slate-400">{p.desc}</span>}
@@ -195,7 +197,7 @@ export default function SerialModal(props: {
                           {p.driver && <span className={`${chip} bg-ink-700 text-slate-300`}>{p.driver}</span>}
                           {p.vid && p.pid && <span className={`${chip} bg-ink-700 font-mono text-slate-400`}>{p.vid}:{p.pid}</span>}
                           {p.uart && <span className={`${chip} bg-ink-700 text-slate-300`}>UART {p.uart}</span>}
-                          {p.serial && <span className={`${chip} bg-indigo-900/50 font-mono text-indigo-300`} title={t('serial.usbUniqueSerial')}>SN {p.serial}</span>}
+                          {p.serial && <span className={`${chip} wt-accent bg-sky-500/15 font-mono`} title={t('serial.usbUniqueSerial')}>SN {p.serial}</span>}
                           {p.by_path && <span className={`${chip} bg-ink-700 text-slate-400`} title={p.by_path}>🔌 {t('serial.physicalPort')}</span>}
                         </span>
                       </span>
@@ -215,7 +217,8 @@ export default function SerialModal(props: {
             <label className="min-w-0 flex-1">
               <span className="mb-1 block text-xs font-medium text-slate-400">{t('serial.deviceManual')}</span>
               <input value={device} spellCheck={false} onChange={(e) => setDevice(e.target.value)}
-                placeholder="/dev/ttyUSB0"
+                placeholder="/dev/ttyUSB0" aria-required="true"
+                aria-invalid={err ? true : undefined} aria-describedby={err ? 'serial-error' : undefined}
                 className="w-full rounded-lg border border-ink-700 bg-ink-900 px-2.5 py-1.5 font-mono text-sm text-slate-200 focus:border-sky-500 focus:outline-none" />
             </label>
             <label className="shrink-0">
@@ -227,7 +230,7 @@ export default function SerialModal(props: {
           </div>
 
           {/* avansat: biți/paritate/stop/flow */}
-          <button onClick={() => setAdvanced((v) => !v)} className="text-xs text-slate-400 hover:text-slate-200">
+          <button type="button" onClick={() => setAdvanced((v) => !v)} aria-expanded={advanced} className="text-xs text-slate-400 hover:text-slate-200">
             {advanced ? '▾' : '▸'} {t('serial.advanced')}
           </button>
           {advanced && (
@@ -255,13 +258,12 @@ export default function SerialModal(props: {
             </div>
           )}
 
-          {err && <div className="text-xs wt-danger">{err}</div>}
+          <div id="serial-error" role="alert" className={err ? 'text-xs wt-danger' : 'sr-only'}>{err}</div>
         </div>
 
         <div className="mt-5 flex justify-end gap-2">
-          <button onClick={props.onClose} className="rounded-lg px-4 py-2 text-sm text-slate-400 hover:bg-ink-800">{t('serial.cancel')}</button>
-          <button onClick={open} disabled={busy || !device.trim()}
-            className="rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-50">
+          <button type="button" onClick={props.onClose} className={`${btn.ghost} px-4 py-2`}>{t('serial.cancel')}</button>
+          <button type="button" onClick={open} disabled={busy || !device.trim()} className={`${btn.primary} px-4 py-2`}>
             {busy ? t('serial.opening') : t('serial.open')}
           </button>
         </div>

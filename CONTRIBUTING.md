@@ -44,6 +44,19 @@ scripts/ci-local.sh            # all of them, ~10 min
 scripts/ci-local.sh e2e a11y   # or a subset, in CI order
 ```
 
+The accessibility gate (`tests/ui_review.mjs`, step `a11y`) runs axe-core with the
+`wcag2a/2aa/21a/21aa/22aa` + `best-practice` tags over ~60 scans (every surface in both
+themes: dashboard, session, host page with all its tabs, Toolbox, Settings × 7, Add host × 3,
+FleetRun, `?`, command palette, ConfirmModal, error toast, mobile; Monaco only with
+`WT_AGENT=1`). It fails on any serious/critical violation (`A11Y_MAX_SERIOUS=0`), on **any**
+`target-size` or `color-contrast` hit regardless of impact, on a skipped/errored scan or a
+scan count below the expected total, and on a failed keyboard check (Tab order, Escape +
+focus restore, ConfirmModal trap, palette arrows+Enter). Moderate/minor counts are printed
+as a trend only. `scripts/mobile-audit.mjs` additionally blocks on interaction targets
+smaller than 24 px and on horizontal overflow at 320 px (reflow). Statically,
+`eslint-plugin-jsx-a11y` (recommended) runs in `npx eslint .`: rules that were clean when
+introduced are errors; the five with pre-existing hits are warnings until the sweep.
+
 Add new suites to `scripts/run-tests.sh` (the list lives there, once — it used to be
 duplicated in the Makefile and in CI, and drifted).
 
@@ -69,10 +82,15 @@ and call `os.makedirs(ptyd.WEBTERM_DIR, exist_ok=True)` after import. See `tests
 The `.github/workflows/docker-publish.yml` workflow **blocks image publishing** if:
 
 1. **The agent signature** does not match `agent/ptyd.py` (see below).
-2. **The Python unit tests** (`unit-tests` job — 66 suites; `scripts/run-tests.sh` is the
+2. **The Python unit tests** (`unit-tests` job — 75 suites; `scripts/run-tests.sh` is the
    single source of truth for the list, and guards it in both directions) fail.
 3. **Smoke boot** (headless Chromium) — the UI fails to start.
-4. **Session E2E** (REAL agent) / **FS API** / **port forwarding** / **mobile audit** fail.
+4. **Session E2E** (REAL agent) / **FS API** / **port forwarding** / **mobile audit** fail, or one
+   of the Playwright UI contracts that need no agent: **SSO login**, **backup/restore round-trip**,
+   **feature UI** (group tokens + tags) and the **jump-host UI** (`scripts/e2e-jump.mjs`: the agent's
+   ⋯ → "Add SSH / Telnet jump…", the form, nesting under the agent, the host-page hub, the connect
+   error toast; agent hosts are created through the API, so it runs on a fresh instance with no
+   fixtures — locally `scripts/ci-local.sh build jump`).
 5. **Housekeeping gates** that are easy to trip without touching anything you meant to:
    `gitleaks` over the history, the README version badge and the image pins matching
    `GATEWAY_VERSION`, `requirements.txt` in sync with `requirements.lock`, `ruff --select F`,

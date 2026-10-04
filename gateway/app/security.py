@@ -6,7 +6,10 @@ import concurrent.futures
 import hashlib
 import hmac
 import ipaddress
+import json
+import re
 import secrets
+import sys
 import time
 from typing import Optional
 
@@ -15,7 +18,8 @@ from argon2.exceptions import VerifyMismatchError
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from fastapi import HTTPException, Request, WebSocket
+from .errors import ApiError
+from fastapi import Request, WebSocket
 
 from . import config, db, email_alerts, totp
 
@@ -86,21 +90,30 @@ def make_forward_token(slug: str, user_id: int, ttl: int = FORWARD_TOKEN_TTL) ->
     return "%d.%d.%s" % (exp, user_id, sig)
 
 
-def verify_forward_token(token: Optional[str], slug: str) -> bool:
+def forward_token_uid(token: Optional[str], slug: str) -> Optional[int]:
+    """Contul care a emis biletul `exp.uid.sig`, sau None dacă biletul lipseşte, e expirat ori
+    nu e semnat pentru acest slug. `uid` e crezut DOAR după ce semnătura a trecut: el intră în
+    mesajul HMAC, deci un uid rescris de mână strică semnătura, nu împrumută fereastra de
+    step-up a altui cont. Pe subdomeniul de forward e singura identitate pe care o avem —
+    cookie-ul de sesiune e `__Host-`, host-only, şi nu ajunge niciodată acolo."""
     if not token:
-        return False
+        return None
     parts = token.split(".")
     if len(parts) != 3:
-        return False
+        return None
     exp_s, uid_s, sig = parts
     try:
         exp, uid = int(exp_s), int(uid_s)
     except ValueError:
-        return False
+        return None
     if exp < time.time():
-        return False
+        return None
     expected = hmac.new(_secret_key, _forward_msg(slug, exp, uid), hashlib.sha256).hexdigest()
-    return hmac.compare_digest(sig, expected)
+    return uid if hmac.compare_digest(sig, expected) else None
+
+
+def verify_forward_token(token: Optional[str], slug: str) -> bool:
+    return forward_token_uid(token, slug) is not None
 
 
 def encrypt_secret(plaintext: str) -> str:
@@ -361,7 +374,7 @@ async def session_valid(token: Optional[str]) -> bool:
 async def require_user(request: Request):
     user = await user_for_token(request.cookies.get(COOKIE_NAME))
     if not user:
-        raise HTTPException(status_code=401, detail="not authenticated")
+        raise ApiError(401, "auth.required", "not authenticated")
     return user
 
 
@@ -402,7 +415,8 @@ def require_scope(scope: str):
         tok = await api_token_principal(request)
         if tok is not None:
             if scope not in token_scopes(tok):
-                raise HTTPException(403, "the token does not have the '%s' scope" % scope)
+                raise ApiError(403, "token.missingScope", "the token does not have the '%s' scope" % scope,
+                               vars={"scope": scope})
             # forma minimă de „principal", ca endpoint-urile să nu ştie diferenţa
             return {"id": None, "email": "token:" + tok["name"], "is_token": True}
         return await require_user(request)
@@ -720,3 +734,124 @@ def clear_stepup_for(user_id: int) -> None:
         _stepup_windows.pop(k, None)
     for t in [t for t, v in _stepup_grants.items() if v[0] == user_id]:
         _stepup_grants.pop(t, None)
+
+
+# ── Regex cu buget REAL de timp (F-09, audit 2026-10-04) ──────────────────────────────────
+# Regulile de guardrail sunt regex-uri scrise de admin şi rulate pe fiecare `/run`. O expresie
+# cu backtracking catastrofal (`^(a+)+$`) pe o comandă potrivită ţine CPU-ul minute întregi, iar
+# `re.search` nu poate fi întrerupt din Python: nici `wait_for` peste `to_thread` nu ajută —
+# cererea tot aşteaptă până termină regex-ul (măsurat: 12,9 s pentru un „buget" de 0,25 s) şi
+# ocupă un thread din pool-ul implicit. Singurul buget care chiar limitează e un PROCES separat
+# pe care îl omorâm la depăşire. Nu folosim `ProcessPoolExecutor`: cu `spawn` copilul re-importă
+# `__main__` şi toată aplicaţia (≈1 s, iar scripturile de test fără gardă `__main__` crapă —
+# verificat), iar `fork` dintr-un server cu thread-uri e exact ce CPython descurajează. Un
+# interpret minimal (`-I -S`, doar stdlib) pornit la prima nevoie, ţinut viu şi refăcut când
+# moare, costă ~20 ms o dată şi sub 1 ms pe potrivire.
+REGEX_BUDGET = 0.25          # secunde per potrivire: un regex sănătos termină în microsecunde
+_RE_WORKER_SRC = r"""
+import json, re, sys
+for line in sys.stdin:
+    try:
+        q = json.loads(line)
+        rx = re.compile(q["p"], q["f"])
+        out = {"r": any(rx.search(t) is not None for t in q["t"])}
+    except re.error as e:
+        out = {"e": str(e)}
+    sys.stdout.write(json.dumps(out) + "\n")
+    sys.stdout.flush()
+"""
+_re_worker = None            # asyncio.subprocess.Process, legat de loop-ul curent
+_re_worker_lock = None       # asyncio.Lock — serializează accesul la unicul worker
+_re_worker_loop = None       # loop-ul pentru care sunt valide cele două de mai sus
+
+
+def _re_worker_kill() -> None:
+    global _re_worker
+    p, _re_worker = _re_worker, None
+    if p is None:
+        return
+    if p.returncode is None:
+        try:
+            p.kill()
+        except ProcessLookupError:
+            pass
+        asyncio.ensure_future(p.wait())        # secerăm zombie-ul, fără să aşteptăm aici
+    tr = getattr(p, "_transport", None)
+    if tr is not None:                         # închis explicit cât loop-ul trăieşte: altfel GC-ul
+        tr.close()                             # îl închide după `loop.close()` → traceback la ieşire
+
+
+def regex_worker_release() -> None:
+    """Apelat de fiecare consumator la final (`finally`): worker-ul trăieşte cât o cerere (toate
+    regulile unui `/run` trec prin acelaşi proces, ~0,1 ms per potrivire), nu între cereri —
+    aşa nu avem un copil de ţinut în viaţă peste shutdown şi nici de reparat după un restart de
+    loop; repornirea costă ~30 ms la următoarea cerere, un preţ mic pentru `/run`."""
+    _re_worker_kill()
+
+
+async def _re_worker_get():
+    """Worker-ul viu sau unul nou (încălzit în afara bugetului: pornirea interpretului nu
+    trebuie să conteze ca „regex lent")."""
+    global _re_worker
+    if _re_worker is None or _re_worker.returncode is not None:
+        _re_worker = await asyncio.create_subprocess_exec(
+            sys.executable, "-I", "-S", "-c", _RE_WORKER_SRC,
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL)
+        _re_worker.stdin.write(b'{"p":"a","t":["a"],"f":0}\n')
+        await _re_worker.stdin.drain()
+        await asyncio.wait_for(_re_worker.stdout.readline(), 10)
+    return _re_worker
+
+
+async def regex_search_budget(pattern: str, texts, flags: int = 0,
+                              budget: float = REGEX_BUDGET):
+    """`any(re.search(pattern, t, flags) for t in texts)` rulat în worker-ul separat.
+    Întoarce True/False, sau None dacă bugetul a fost depăşit — caz în care worker-ul a fost
+    OMORÂT (CPU-ul chiar se eliberează) şi va fi refăcut la următorul apel. Ridică `re.error`
+    pentru un pattern invalid, ca `re.search`."""
+    global _re_worker_lock, _re_worker_loop
+    loop = asyncio.get_running_loop()
+    if _re_worker_loop is not loop:            # alt loop (teste, restart): starea veche e moartă
+        _re_worker_kill()
+        _re_worker_lock, _re_worker_loop = asyncio.Lock(), loop
+    line = (json.dumps({"p": pattern, "t": list(texts), "f": int(flags)}) + "\n").encode("utf-8")
+    async with _re_worker_lock:
+        for _attempt in range(2):              # a doua tură: worker-ul murise între timp (OOM-kill etc.)
+            p = await _re_worker_get()
+            try:
+                p.stdin.write(line)
+                await p.stdin.drain()
+                raw = await asyncio.wait_for(p.stdout.readline(), budget)
+            except asyncio.TimeoutError:
+                _re_worker_kill()
+                return None
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                _re_worker_kill()
+                continue
+            if not raw:                        # EOF = worker mort fără răspuns
+                _re_worker_kill()
+                continue
+            out = json.loads(raw)
+            if "e" in out:
+                raise re.error(out["e"])
+            return bool(out["r"])
+    return None
+
+
+def valid_email(addr: str) -> bool:
+    """Forma minimă a unei adrese pe care chiar putem trimite ceva (G-34): exact un `@`, parte
+    locală şi domeniu nevide, domeniul cu cel puţin un punct şi fără puncte la capete/dublate,
+    fără spaţii sau caractere de control, ≤ 254 (RFC 5321) / local ≤ 64. NU e RFC 5322 complet
+    — adresa e canalul de login şi de recuperare, deci refuzăm doar ce sigur nu e o adresă
+    (`foo`, `a@b`, `a b@c.d`), nu adresele reale neobişnuite."""
+    if not addr or len(addr) > 254 or addr.count("@") != 1:
+        return False
+    if any(ord(c) <= 32 or ord(c) == 127 for c in addr):
+        return False
+    local, _, domain = addr.partition("@")
+    if not local or len(local) > 64 or not domain:
+        return False
+    if "." not in domain or domain.startswith(".") or domain.endswith(".") or ".." in domain:
+        return False
+    return True

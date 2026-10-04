@@ -59,7 +59,7 @@ services:
       WEBTERM_OIDC_PROVIDER_NAME: ${WEBTERM_OIDC_PROVIDER_NAME:-}
       WEBTERM_OIDC_SCOPES: ${WEBTERM_OIDC_SCOPES:-}
       WEBTERM_OIDC_ALLOWED_GROUPS: ${WEBTERM_OIDC_ALLOWED_GROUPS:-}
-      WEBTERM_IMAGE_REF: ${WEBTERM_IMAGE:-ghcr.io/sm26449/webterm:v3.0.0}
+      WEBTERM_IMAGE_REF: ${WEBTERM_IMAGE:-ghcr.io/sm26449/webterm:v3.1.0}
       WEBTERM_UPDATE_CHECK: ${WEBTERM_UPDATE_CHECK:-1}
       WEBTERM_UPDATE_CHECK_TOKEN: ${WEBTERM_UPDATE_CHECK_TOKEN:-}
       WEBTERM_UPDATE_COMMAND: ${WEBTERM_UPDATE_COMMAND:-}
@@ -95,6 +95,18 @@ services:
     image: caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
     restart: unless-stopped
     logging: *default-logging
+    # Acelaşi tratament ca `app` (auditul de deploy, M2): Caddy e procesul expus pe internet.
+    # Scrie doar în /data (certificate) şi /config (autosave) — amândouă volume — deci
+    # rădăcina poate fi read-only; NET_BIND_SERVICE pentru :80/:443; /tmp pentru
+    # fişierele temporare ale lui `request_body`.
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    mem_limit: 512m
+    pids_limit: 256
     ports:
       - "80:80"
       - "443:443"

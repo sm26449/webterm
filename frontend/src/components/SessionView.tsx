@@ -30,7 +30,9 @@ import StatusBar from './StatusBar'
 import { copyText, readText } from '../lib/clipboard'
 import { copySession, history as clipHistory } from '../lib/cliphistory'
 import PastePicker from './PastePicker'
-import { notify } from '../lib/notify'
+import { notify, notifyError } from '../lib/notify'
+import { useConfirm } from '../lib/confirm'
+import { useFocusTrap } from '../lib/useFocusTrap'
 
 type ConnState = 'connecting' | 'open' | 'reconnecting' | 'ended'
 
@@ -156,6 +158,19 @@ export default function SessionView(props: {
   // ONE-SHOT (fără buclă infinită de reconnect+replay dacă serverul închide socketul)
   const exitedRef = useRef(false)
   const muteRef = useRef(false)
+  // Input cât socketul NU e deschis: PAUZĂ explicită, nu buffer. Serverul rejoacă la fiecare
+  // (re)conectare doar OUTPUT-ul (tail-ul tmux), niciodată input-ul, şi nu confirmă octeţii
+  // primiţi — deci un buffer trimis „orb" la onopen ar ateriza într-un shell a cărui stare
+  // s-a schimbat între timp (comanda anterioară s-a terminat, un TUI s-a deschis), iar
+  // utilizatorul care n-a văzut nimic întâmplându-se a retastat deja comanda → dublu `rm`.
+  // Numărăm tastele pierdute şi le anunţăm la reconectare; cortina de mai jos face pauza vizibilă.
+  const droppedRef = useRef(0)
+  const everOpenRef = useRef(false)          // prima conectare e „connecting", nu „reconnecting"
+  const flashTimerRef = useRef<ReturnType<typeof setTimeout> | 0>(0)
+  const [inputFlash, setInputFlash] = useState(false)
+  const [inputNotice, setInputNotice] = useState<string | null>(null)
+  // închidere cu cod terminal de la gateway (4401 auth / 4403 interzis): fără buclă de retry
+  const [wsDenied, setWsDenied] = useState<'auth' | 'forbidden' | null>(null)
   const replayRef = useRef(false)   // scriem istoric, nu activitate live (vezi OSC 133)
   const streamDecoderRef = useRef(new TextDecoder('utf-8'))   // pt. captura output-ului
   // termen de căutare care așteaptă finalizarea replay-ului de istoric
@@ -225,6 +240,13 @@ export default function SessionView(props: {
   tRef.current = t
   const [cmdConfirm, setCmdConfirm] = useState<{ cmd: string } | null>(null)
   const [guardMsg, setGuardMsg] = useState<string | null>(null)
+  // confirm()/alert() native → dialoguri proprii + toast-uri (vezi lib/confirm.tsx: de ce)
+  const { confirm } = useConfirm()
+  // Dialogul de guardrail: focusul intră pe „Anulează" când apare (altfel rămânea în textarea
+  // xterm, unde Enter/Escape se duceau în SHELL — adică exact comanda pe care o verificam).
+  // La închidere handlerele redau focusul terminalului.
+  const cmdCancelBtnRef = useRef<HTMLButtonElement>(null)
+  useEffect(() => { if (cmdConfirm) cmdCancelBtnRef.current?.focus() }, [cmdConfirm])
   // comenzi (OSC 133) — apar doar cu shell integration activă pe host
   const trackerRef = useRef<CommandTracker>()
   const cwdRef = useRef<string | null>(null)   // cwd curent, pt. raportarea în istoric (fără stale closure)
@@ -372,7 +394,7 @@ export default function SessionView(props: {
       setShareIsWritable(r.writable)
       setShareOpen(false)
     } catch (e) {
-      alert(errText(e, t) || t('session.shareLinkFailed'))
+      notifyError(t('session.shareLink'), errText(e, t) || t('session.shareLinkFailed'))
     }
   }
 
@@ -380,7 +402,10 @@ export default function SessionView(props: {
     // Un clic omora instantaneu linkul, fără drum înapoi: cine îl are deschis vede pagina
     // de 403, iar linkul nu se poate reactiva — se generează altul. Era singura acţiune
     // distructivă din produs fără confirmare, deşi restul cer chiar şi pentru mai puţin.
-    if (!confirm(t('session.confirmRevokeShare'))) return
+    if (!(await confirm({
+      title: t('session.revokeShareTitle'), message: t('session.confirmRevokeShare'),
+      danger: true, confirmLabel: t('session.revoke'),
+    }))) return
     await api(`/api/sessions/${session.id}/share`, { method: 'DELETE' }).catch(() => {})
     setShareUrl(null)
     setShareIsWritable(false)
@@ -392,13 +417,49 @@ export default function SessionView(props: {
     if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'kick', id }))
   }
 
+  // „Sunt încă aici" din bannerul de pre-idle-lock (App): `hub.last_interaction` pe server se
+  // împrospătează doar din INPUT-ul owner-ului sau din mesajul de control `{"type":"touch"}`
+  // (api.py browser_ws → hub.touch) — prezenţă fără taste, pe acelaşi canal şi cu aceeaşi
+  // încredere ca o tastă; un GET HTTP nu-l atinge. Un hub deja blocat nu se deblochează aşa.
+  useEffect(() => {
+    const onPing = () => {
+      const ws = wsRef.current
+      if (!isLive || locked || ws?.readyState !== WebSocket.OPEN) return
+      ws.send(JSON.stringify({ type: 'touch' }))
+    }
+    window.addEventListener('wt-idle-ping', onPing)
+    return () => window.removeEventListener('wt-idle-ping', onPing)
+  }, [isLive, locked])
+
   const send = useCallback((data: string | Uint8Array) => {
     if (muteRef.current) return
     const ws = wsRef.current
     if (ws?.readyState === WebSocket.OPEN) {
       ws.send(typeof data === 'string' ? new TextEncoder().encode(data) : data)
+      return
     }
+    // socket închis/în reconectare: tasta NU pleacă (vezi droppedRef). O numărăm şi facem
+    // cortina să „clipească" — feedback imediat că n-a ajuns nicăieri, nu tăcere.
+    if (exitedRef.current) return
+    droppedRef.current += 1
+    setInputFlash(true)
+    clearTimeout(flashTimerRef.current)
+    flashTimerRef.current = setTimeout(() => setInputFlash(false), 250)
   }, [])
+
+  // Guardrail, Escape = anulează (şterge linia), prins la nivel de document în CAPTURE: nu ajunge
+  // nici la xterm, nici la scurtăturile globale. Enter nu poate scăpa — focusul e pe buton (vezi
+  // cmdCancelBtnRef), nu în textarea. Stă DUPĂ `send` (const → TDZ în lista de dependenţe).
+  useEffect(() => {
+    if (!cmdConfirm) return
+    const onEsc = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      e.preventDefault(); e.stopPropagation()
+      send('\x15'); setCmdConfirm(null); termRef.current?.focus()
+    }
+    document.addEventListener('keydown', onEsc, true)
+    return () => document.removeEventListener('keydown', onEsc, true)
+  }, [cmdConfirm, send])
 
   // broadcast: înregistrează `send`-ul acestui panou în harta din App (sid → send), ca tastele
   // dintr-un panou să poată fi difuzate în toate. `send` e stabil (useCallback []), deci se
@@ -950,6 +1011,7 @@ export default function SessionView(props: {
     ws.binaryType = 'arraybuffer'
     wsRef.current = ws
     setConn('connecting')
+    setWsDenied(null)
 
     // resetat la FIECARE mesaj (date sau ping); dacă expiră, socketul e half-open → close
     const petWatchdog = () => {
@@ -961,9 +1023,18 @@ export default function SessionView(props: {
 
     ws.onopen = () => {
       retryRef.current.delay = 1000
+      everOpenRef.current = true
       petWatchdog()
       expectTailRef.current = true
       setReplaying(true)
+      // tastele apăsate cât eram deconectaţi n-au plecat (vezi droppedRef): spune-i cât şi că
+      // trebuie retastate — altfel „am scris comanda şi n-a făcut nimic" rămâne un mister
+      if (droppedRef.current > 0) {
+        const n = droppedRef.current
+        droppedRef.current = 0
+        setInputNotice(tRef.current('session.inputDropped', { count: n }))
+        window.setTimeout(() => setInputNotice(null), 8000)
+      }
       // sesiune moartă: NU trece pe 'open' (rămâne 'ended') — altfel gardul din onclose
       // se anulează și fetch-ul one-shot de istoric devine o buclă infinită de reconnect
       if (!exitedRef.current) setConn('open')
@@ -1099,13 +1170,38 @@ export default function SessionView(props: {
         term.write(bytes)
       }
     }
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
       wsRef.current = null
       clearTimeout(watchdogRef.current)
       if (!termRef.current) return // component unmounted
       // sesiune moartă: fetch-ul de istoric e one-shot — nu reprograma reconnect (gardă
       // directă pe exitedRef, robustă chiar dacă starea conn a fost cumva alterată)
       if (exitedRef.current) return
+      // Codurile TERMINALE ale gateway-ului (api.py browser_ws). Atenţie: un close() ÎNAINTE
+      // de accept() ajunge la browser ca handshake 403 = cod 1006, deci 4401/4403/4404 se văd
+      // doar când vin DUPĂ accept — 4401 de la revalidarea periodică (cookie expirat/logout),
+      // 4403 la revocare, 4404 când sesiunea a dispărut. Fără asta reconectam la nesfârşit,
+      // iar la 4401 aplicaţia se înlocuia tăcut cu pagina de login la următorul poll.
+      // 4408 (kick / pong timeout) şi orice altceva (1006, proxy, sleep) păstrează backoff-ul.
+      if (ev.code === 4401) {
+        setWsDenied('auth')
+        setConn('ended')
+        window.dispatchEvent(new Event('wt-unauth'))   // App arată motivul + „Sign in again"
+        return
+      }
+      if (ev.code === 4403) {
+        setWsDenied('forbidden')
+        setConn('ended')
+        return
+      }
+      if (ev.code === 4404) {
+        // sesiunea nu mai există pe gateway: UI-ul existent de „lost", fără retry
+        setExited({ status: null, reason: 'session_gone' })
+        setConn('ended')
+        exitedRef.current = true
+        props.onChanged()
+        return
+      }
       setConn((prev) => {
         if (prev === 'ended') return prev
         // backoff exponențial + jitter: la eșec persistent (ex. host offline)
@@ -1219,7 +1315,7 @@ export default function SessionView(props: {
     // rândurile au ieșit din scrollback). Mai bine spunem asta decât să punem
     // în clipboard o felie greșită — care, lipită într-un shell, s-ar EXECUTA.
     if (text == null) {
-      alert(t('session.cannotExtractOutput'))
+      notify(t('session.commandOutputTitle'), t('session.cannotExtractOutput'), 'warn')
       return
     }
     if (!text) return
@@ -1267,11 +1363,14 @@ export default function SessionView(props: {
       // un prompt — `sudo`, `mysql -p`, `ssh-add`, vim — payload-ul devine altceva: testat,
       // la un `read -s -p "Password:"` ajunge valoarea parolei. Restul produsului cere
       // confirmare pentru lucruri mult mai puţin periculoase; ăsta nu cerea nimic.
-      if (!confirm(t('session.confirmShellIntegration'))) return
+      if (!(await confirm({
+        title: t('session.shellIntegrationTitle'), message: t('session.confirmShellIntegration'),
+        confirmLabel: t('session.typeAndRun'),
+      }))) return
       send(r.command + '\n')
       termRef.current?.focus()
     } catch {
-      alert(t('session.cannotGetSetupCommand'))
+      notifyError(t('session.shellIntegrationTitle'), t('session.cannotGetSetupCommand'))
     }
   }
 
@@ -1281,7 +1380,7 @@ export default function SessionView(props: {
     // `navigator.clipboard` lipseşte pe origini nesecurizate. Spunem asta în loc să
     // pară că butonul nu face nimic — Ctrl+V direct în terminal merge oricum.
     if (text === null) {
-      alert(t('session.clipboardBlocked'))
+      notifyError(t('session.clipboardTitle'), t('session.clipboardBlocked'))
       return
     }
     // prin xterm.paste(), nu send() direct: doar așa textul e împachetat în
@@ -1306,28 +1405,42 @@ export default function SessionView(props: {
   }
 
   async function killSession() {
-    if (!confirm(t('session.confirmKill'))) return
+    if (!(await confirm({
+      title: t('session.killTitle'), message: t('session.confirmKill'),
+      danger: true, confirmLabel: t('session.stop'),
+    }))) return
     // host cu 2FA → 403 de step-up: withStepup rulează ceremonia passkey și reîncearcă o dată
     await withStepup(session.host_id, () =>
-      api(`/api/sessions/${session.id}/kill`, { method: 'POST' })).catch((e) => alert(e.message))
+      api(`/api/sessions/${session.id}/kill`, { method: 'POST' }))
+      .catch((e) => notifyError(t('session.killFailed'), errText(e, t)))
   }
 
   async function deleteSession() {
-    if (!confirm(t('session.confirmDelete'))) return
+    if (!(await confirm({
+      title: t('host.deleteTitle'), message: t('session.confirmDelete'),
+      danger: true, confirmLabel: t('session.delete'),
+    }))) return
     try {
       await api(`/api/sessions/${session.id}`, { method: 'DELETE' })
       props.onDeleted()
     } catch (e) {
-      alert(errText(e, t) || t('session.deleteFailed'))
+      notifyError(t('host.deleteTitle'), errText(e, t) || t('session.deleteFailed'))
     }
   }
 
   // „reconectare…" DOAR pentru sesiuni vii — la o sesiune terminată bucla de
   // reconectare (care aduce istoricul) nu trebuie să pară o problemă de conexiune
+  // prima conectare (socketul n-a fost NICIODATĂ deschis) e „connecting", neutră — nu o
+  // problemă de conexiune; „reconnecting" apare doar după ce am avut o conexiune şi am pierdut-o
   const connBadge =
     isLive && (conn === 'reconnecting' || conn === 'connecting')
-      ? { text: t('session.reconnecting'), cls: 'bg-amber-900/70 text-amber-200' }
+      ? everOpenRef.current || conn === 'reconnecting'
+        ? { text: t('session.reconnecting'), cls: 'bg-amber-900/70 text-amber-200' }
+        : { text: t('session.connecting'), cls: 'bg-ink-800 text-slate-300' }
       : null
+  // cortina de pauză a tastaturii: sesiune vie, socket închis, cortina de replay trasă NU e
+  // (aceea acoperă deja prima încărcare) şi nu e o închidere terminală (bara ei e mai jos)
+  const inputPaused = isLive && conn !== 'open' && !replaying && !wsDenied
 
   const hostAccent = props.host ? hostColor(props.host) : '#64748b'
   const reach = props.host ? reachState(props.host) : 'offline'
@@ -1359,11 +1472,17 @@ export default function SessionView(props: {
         {props.host && (
           <span className="flex min-w-0 shrink items-center gap-1.5 rounded-md px-1.5 py-1"
             style={{ background: `${hostAccent}1f` }}
-            title={`${props.host.name} · ${protoLabel(props.host)} · ${reach === 'online' ? 'online' : reach === 'ondemand' ? t('session.onDemand') : 'offline'}`}>
-            <span className={`h-2 w-2 shrink-0 rounded-full ${reach === 'online' ? 'dot-live' : ''}`}
-              style={{ background: reach === 'offline' ? '#64748b' : hostAccent }} />
+            title={`${props.host.name} · ${protoLabel(props.host)} · ${reach === 'online' ? t('host.statusOnline') : reach === 'ondemand' ? t('session.onDemand') : t('host.statusOffline')}`}>
+            {/* starea nu e doar culoare: online = punct plin (pulsează), on-demand = inel gol,
+                offline = gri; textul complet e în span-ul sr-only (title-ul nu e citit de SR) */}
+            <span aria-hidden="true"
+              className={`h-2 w-2 shrink-0 rounded-full ${reach === 'online' ? 'dot-live' : reach === 'ondemand' ? 'border-2' : ''}`}
+              style={reach === 'offline' ? { background: '#64748b' } : reach === 'ondemand' ? { borderColor: hostAccent } : { background: hostAccent }} />
             <span className="max-w-[120px] truncate font-mono text-xs font-medium md:max-w-[220px]" style={{ color: hostAccent }}>
               {hostAt(props.host)}
+            </span>
+            <span className="sr-only">
+              {' — '}{reach === 'online' ? t('host.statusOnline') : reach === 'ondemand' ? t('session.onDemand') : t('host.statusOffline')}
             </span>
           </span>
         )}
@@ -1499,10 +1618,10 @@ export default function SessionView(props: {
                           </span>
                           {c.owner
                             ? <span className="shrink-0 text-[10px] text-slate-500">owner</span>
-                            : <span className={`shrink-0 text-[10px] ${c.writable ? 'text-amber-400' : 'text-slate-500'}`}>{c.writable ? t('session.canWrite') : t('session.canView')}</span>}
+                            : <span className={`shrink-0 text-[10px] ${c.writable ? 'wt-warn' : 'text-slate-500'}`}>{c.writable ? t('session.canWrite') : t('session.canView')}</span>}
                           {!c.owner && (
-                            <button onClick={() => kick(c.id)} title={t('session.removeFromSession')}
-                              className="shrink-0 rounded px-1 text-rose-400 hover:bg-ink-700">✕</button>
+                            <button onClick={() => kick(c.id)} title={t('session.removeFromSession')} aria-label={t('session.removeFromSession')}
+                              className="wt-danger grid h-6 w-6 shrink-0 place-items-center rounded hover:bg-ink-700">✕</button>
                           )}
                           </div>
                           {/* De unde e ataşat. Fără asta „mai e cineva conectat" nu-ţi spunea
@@ -1512,7 +1631,7 @@ export default function SessionView(props: {
                               <span className="min-w-0 truncate">{c.ip}{c.agent ? ' · ' + shortAgent(c.agent) : ''}</span>
                               {c.known === false && (
                                 <span title={t('session.deviceNewTitle')}
-                                  className="shrink-0 rounded bg-amber-500/15 px-1 text-amber-400">{t('session.deviceNew')}</span>
+                                  className="wt-warn shrink-0 rounded bg-amber-500/15 px-1">{t('session.deviceNew')}</span>
                               )}
                             </div>
                           )}
@@ -1603,38 +1722,8 @@ export default function SessionView(props: {
         />
       )}
       {linksOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
-             onClick={() => setLinksOpen(false)}>
-          <div role="dialog" aria-modal="true" aria-label={t('session.links')}
-               className="glass flex max-h-[80vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl"
-               onClick={(e) => e.stopPropagation()}
-               onKeyDown={(e) => { if (e.key === 'Escape') setLinksOpen(false) }}>
-            <div className="flex items-center justify-between border-b border-ink-800 px-4 py-3">
-              <h2 className="text-sm font-semibold">{t('session.links')}{links.length ? ` (${links.length})` : ''}</h2>
-              <button onClick={() => setLinksOpen(false)} aria-label={t('common.close')}
-                      className="rounded-md px-2 py-1 text-slate-400 hover:bg-ink-800">✕</button>
-            </div>
-            <div className="min-h-0 flex-1 overflow-y-auto p-2">
-              {links.length === 0
-                ? <p className="px-2 py-6 text-center text-sm text-slate-500">{t('session.linksEmpty')}</p>
-                : <ul className="space-y-1">
-                    {links.map((u, i) => (
-                      <li key={i} className="flex items-center gap-1">
-                        <a href={u} target="_blank" rel="noopener noreferrer" title={u}
-                           className="wt-link min-w-0 flex-1 truncate rounded-md px-2 py-1.5 text-sm hover:bg-ink-800">
-                          {u}
-                        </a>
-                        <button title={t('session.copyLink')}
-                                onClick={async () => flashCopied(await copySession(session.id, u))}
-                                className="shrink-0 rounded-md px-2 py-1.5 text-slate-400 hover:bg-ink-800">
-                          <CopyIcon />
-                        </button>
-                      </li>
-                    ))}
-                  </ul>}
-            </div>
-          </div>
-        </div>
+        <LinksDialog links={links} onClose={() => setLinksOpen(false)}
+          onCopy={async (u) => flashCopied(await copySession(session.id, u))} />
       )}
 
       {/* Panou de opțiuni share (înainte de generare) */}
@@ -1643,7 +1732,7 @@ export default function SessionView(props: {
           <label className="flex cursor-pointer items-center gap-1.5 text-xs text-slate-300">
             <input type="checkbox" checked={shareWritable} onChange={(e) => setShareWritable(e.target.checked)} className="h-3.5 w-3.5 rounded accent-sky-600" />
             {t('session.allowWrite')}
-            {shareWritable && <span className="text-amber-400" title={t('session.writableWarning')}>⚠</span>}
+            {shareWritable && <span className="wt-warn" title={t('session.writableWarning')} aria-label={t('session.writableWarning')} role="img">⚠</span>}
           </label>
           <label className="flex items-center gap-1.5 text-xs text-slate-400">
             {t('session.expiresIn')}
@@ -1667,10 +1756,10 @@ export default function SessionView(props: {
       {/* Link generat */}
       {shareUrl && (
         <div className="flex items-center gap-2 border-b border-ink-800 bg-ink-900/70 px-3 py-2 text-sm">
-          <span className={`shrink-0 rounded px-1.5 py-0.5 text-[11px] ${shareIsWritable ? 'bg-amber-500/15 text-amber-300' : 'bg-ink-800 text-slate-400'}`}>
+          <span className={`shrink-0 rounded px-1.5 py-0.5 text-[11px] ${shareIsWritable ? 'wt-warn bg-amber-500/15' : 'bg-ink-800 text-slate-400'}`}>
             {shareIsWritable ? t('session.shareWritable') : t('session.shareReadOnly')}
           </span>
-          <code className="min-w-0 flex-1 truncate rounded bg-black/40 px-2 py-1 font-mono text-xs text-emerald-400">{shareUrl}</code>
+          <code className="wt-good min-w-0 flex-1 truncate rounded bg-black/40 px-2 py-1 font-mono text-xs">{shareUrl}</code>
           <button
             onClick={() => { copyText(shareUrl).then((ok) => { if (!ok) return
               setCopied(true); setTimeout(() => setCopied(false), 1200) }) }}
@@ -1678,7 +1767,7 @@ export default function SessionView(props: {
           >
             {copied ? '✓' : t('session.copy')}
           </button>
-          <button onClick={revokeShare} className="shrink-0 rounded px-2 py-1 text-xs text-rose-400 hover:bg-ink-800">
+          <button onClick={revokeShare} className="wt-danger shrink-0 rounded px-2 py-1 text-xs hover:bg-ink-800">
             {t('session.revoke')}
           </button>
         </div>
@@ -1716,6 +1805,28 @@ export default function SessionView(props: {
         </div>
       )}
 
+      {/* închidere terminală de la gateway (4401/4403): motivul real + acţiunea, în loc de
+          „reconnecting…" la nesfârşit sau de o pagină de login apărută fără explicaţie */}
+      {wsDenied && (
+        <div role="alert"
+          className="flex flex-wrap items-center gap-2 border-b border-rose-500/30 bg-rose-950/40 px-4 py-2 text-sm">
+          {wsDenied === 'auth' ? (
+            <>
+              <span className="font-medium text-rose-200">{t('session.authExpired')}</span>
+              <span className="text-slate-300">{t('session.authExpiredBody')}</span>
+              <button
+                onClick={() => window.dispatchEvent(new Event('wt-unauth'))}
+                className="ml-auto rounded bg-sky-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-sky-700"
+              >
+                {t('session.signInAgain')}
+              </button>
+            </>
+          ) : (
+            <span className="text-rose-200">{t('session.wsForbidden')}</span>
+          )}
+        </div>
+      )}
+
       {exited && (
         <div role="status" aria-live="polite"
           className="flex items-center gap-2 border-b border-ink-800 bg-ink-900/80 px-4 py-2 text-sm">
@@ -1724,8 +1835,8 @@ export default function SessionView(props: {
               {t('session.sessionClosed')}{exited.status !== null ? ` (exit ${exited.status})` : ''}{t('session.historyBelow')}
             </span>
           ) : (
-            <span className="text-rose-300">
-              {t('session.sessionLost')} ({exited.reason === 'gone_from_agent' ? t('session.serverRestarted') : exited.reason}){t('session.historyBelow')}
+            <span className="wt-danger">
+              {t('session.sessionLost')} ({exited.reason === 'gone_from_agent' ? t('session.serverRestarted') : exited.reason === 'session_gone' ? t('session.wsGone') : exited.reason}){t('session.historyBelow')}
             </span>
           )}
           {session.kind === 'telnet' && (
@@ -1798,29 +1909,33 @@ export default function SessionView(props: {
 
         {/* Guardrail: comandă blocată (mesaj tranzitoriu) */}
         {guardMsg && (
-          <div className="pointer-events-none absolute bottom-3 left-1/2 z-30 -translate-x-1/2 rounded-lg bg-ink-900/95 px-3 py-1.5 text-xs text-rose-300 ring-1 ring-rose-500/30 shadow-lg">
+          <div role="status" aria-live="assertive"
+            className="wt-danger pointer-events-none absolute bottom-3 left-1/2 z-30 -translate-x-1/2 rounded-lg bg-ink-900/95 px-3 py-1.5 text-xs ring-1 ring-rose-500/30 shadow-lg">
             🛡 {guardMsg}
           </div>
         )}
 
         {/* Guardrail: confirmare comandă periculoasă */}
         {cmdConfirm && (
-          <div role="alertdialog" aria-modal="true" aria-label={t('session.confirmCommand')}
+          <div role="alertdialog" aria-modal="true" aria-labelledby="wt-guard-title" aria-describedby="wt-guard-desc"
             className="absolute inset-0 z-30 grid place-items-center bg-ink-950/80 p-6 backdrop-blur-sm">
             <div className="w-full max-w-md rounded-xl bg-ink-900 p-4 ring-1 ring-ink-700 shadow-2xl">
-              <div className="flex items-center gap-2 text-sm font-semibold text-amber-300">🛡 {t('session.dangerousCommand')}</div>
+              <div id="wt-guard-title" className="wt-warn flex items-center gap-2 text-sm font-semibold">🛡 {t('session.dangerousCommand')}</div>
               <div className="mt-2 rounded-lg bg-ink-950 px-3 py-2 font-mono text-[13px] text-slate-200 break-all ring-1 ring-ink-800">
                 {cmdConfirm.cmd}
               </div>
-              <div className="mt-2 text-xs text-slate-400">{t('session.sureToRun')}</div>
+              <div id="wt-guard-desc" className="mt-2 text-xs text-slate-400">{t('session.sureToRun')}</div>
               <div className="mt-4 flex justify-end gap-2">
+                {/* focusul iniţial pe Anulează: acţiunea sigură e implicitul într-un dialog
+                    de comandă periculoasă (acelaşi tipar ca ConfirmModal cu `danger`) */}
                 <button
+                  ref={cmdCancelBtnRef}
                   onClick={() => { send('\x15'); setCmdConfirm(null); termRef.current?.focus() }}
                   className="rounded-lg bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700"
                 >{t('session.cancelClear')}</button>
                 <button
                   onClick={() => { send('\r'); setCmdConfirm(null); termRef.current?.focus() }}
-                  className="rounded-lg bg-rose-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-rose-500"
+                  className="rounded-lg bg-rose-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-rose-700"
                 >{t('session.run')}</button>
               </div>
             </div>
@@ -1847,7 +1962,7 @@ export default function SessionView(props: {
           </div>
         )}
         {tabFocusMode && (
-          <div className="pointer-events-none absolute right-3 top-3 z-10 rounded-full bg-black/75 px-3 py-1 text-xs text-sky-300">
+          <div className="wt-accent pointer-events-none absolute right-3 top-3 z-10 rounded-full bg-black/75 px-3 py-1 text-xs">
             {t('session.tabFocusHint')}
           </div>
         )}
@@ -1869,11 +1984,38 @@ export default function SessionView(props: {
             </span>
           </div>
         )}
+        {/* cortina de PAUZĂ a tastaturii (socket închis, sesiune vie): terminalul rămâne
+            lizibil/selectabil (pointer-events-none), dar e vizibil îngheţat; la fiecare tastă
+            pierdută chip-ul clipeşte (vezi `send`). Fără asta prompt + cursor arătau normal şi
+            `rm -rf build && make` + Enter dispăreau în tăcere până la 80 s. */}
+        {inputPaused && (
+          <div
+            role="status"
+            aria-live="assertive"
+            className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-black/40"
+          >
+            <span className={`flex items-center gap-2 rounded-lg bg-ink-900/95 px-3 py-2 text-xs text-amber-200 shadow-lg ring-1 transition-shadow ${
+              inputFlash ? 'ring-2 ring-amber-400 shadow-amber-400/40' : 'ring-amber-500/30'}`}>
+              <span
+                className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-amber-500/30 border-t-amber-400"
+                aria-hidden="true"
+              />
+              {everOpenRef.current ? t('session.reconnecting') : t('session.connecting')} · {t('session.inputPaused')}
+            </span>
+          </div>
+        )}
+        {/* după reconectare: câte taste s-au pierdut cât eram deconectaţi */}
+        {inputNotice && (
+          <div role="status" aria-live="polite"
+            className="pointer-events-none absolute bottom-3 left-1/2 z-30 -translate-x-1/2 rounded-lg bg-ink-900/95 px-3 py-1.5 text-xs text-amber-200 ring-1 ring-amber-500/30 shadow-lg">
+            ⌨ {inputNotice}
+          </div>
+        )}
         {/* feedback de copiere vizibil peste terminal — pe mobil butonul „✓"
             din toolbar e ascuns, deci fără asta copierea pare că nu face nimic */}
         {copied && (
           <div role="status" aria-live="polite"
-            className="pointer-events-none absolute bottom-3 left-1/2 z-10 -translate-x-1/2 rounded-full bg-black/75 px-3 py-1 text-xs text-emerald-300">
+            className="wt-good pointer-events-none absolute bottom-3 left-1/2 z-10 -translate-x-1/2 rounded-full bg-black/75 px-3 py-1 text-xs">
             {t('session.copied')} ✓
           </div>
         )}
@@ -1972,6 +2114,47 @@ export default function SessionView(props: {
   )
 }
 
+/** Lista de URL-uri din scrollback. Componentă separată pentru focus-trap: înainte, Escape
+    mergea doar dacă focusul ajunsese în dialog — dar focusul rămânea în xterm, unde Escape se
+    ducea în shell, iar Tab circula prin pagina de sub scrim. */
+function LinksDialog(props: { links: string[]; onClose: () => void; onCopy: (u: string) => void }) {
+  const { t } = useI18n()
+  const ref = useRef<HTMLDivElement>(null)
+  useFocusTrap(ref, props.onClose)
+  return (
+    <div role="presentation" className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+         onClick={(e) => { if (e.target === e.currentTarget) props.onClose() }}>
+      <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="wt-links-title"
+           className="glass flex max-h-[80vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl">
+        <div className="flex items-center justify-between border-b border-ink-800 px-4 py-3">
+          <h2 id="wt-links-title" className="text-sm font-semibold">{t('session.links')}{props.links.length ? ` (${props.links.length})` : ''}</h2>
+          <button onClick={props.onClose} aria-label={t('common.close')}
+                  className="rounded-md px-2 py-1 text-slate-400 hover:bg-ink-800">✕</button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-2">
+          {props.links.length === 0
+            ? <p className="px-2 py-6 text-center text-sm text-slate-500">{t('session.linksEmpty')}</p>
+            : <ul className="space-y-1">
+                {props.links.map((u, i) => (
+                  <li key={i} className="flex items-center gap-1">
+                    <a href={u} target="_blank" rel="noopener noreferrer" title={u}
+                       className="wt-link min-w-0 flex-1 truncate rounded-md px-2 py-1.5 text-sm hover:bg-ink-800">
+                      {u}
+                    </a>
+                    <button title={t('session.copyLink')} aria-label={t('session.copyLink')}
+                            onClick={() => props.onCopy(u)}
+                            className="shrink-0 rounded-md px-2 py-1.5 text-slate-400 hover:bg-ink-800">
+                      <CopyIcon />
+                    </button>
+                  </li>
+                ))}
+              </ul>}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function ToolButton(props: {
   title: string
   active?: boolean
@@ -1985,7 +2168,7 @@ function ToolButton(props: {
       onMouseDown={(e) => e.preventDefault()} // păstrează focusul (și selecția) în terminal
       onClick={props.onClick}
       className={`wt-touch grid place-items-center rounded-md px-1.5 py-1 text-sm hover:bg-ink-700 hover:text-slate-200 ${
-        props.active ? 'bg-ink-700 text-sky-400' : 'text-slate-400'
+        props.active ? 'wt-accent bg-ink-700' : 'text-slate-400'
       }`}
     >
       {props.children}

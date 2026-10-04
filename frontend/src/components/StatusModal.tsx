@@ -208,7 +208,7 @@ export default function StatusModal(props: { onClose: () => void }) {
 }
 
 function Stat(props: { label: string; value: number | string; good?: boolean; bad?: boolean; muted?: boolean }) {
-  const tone = props.bad ? 'wt-danger' : props.good ? 'wt-good' : props.muted ? 'text-slate-300' : 'text-sky-400'
+  const tone = props.bad ? 'wt-danger' : props.good ? 'wt-good' : props.muted ? 'text-slate-300' : 'wt-info'
   return (
     <div className="rounded-xl bg-ink-800/60 px-3 py-2.5 ring-1 ring-ink-700">
       <div className={`text-2xl font-semibold tabular-nums ${tone}`}>{props.value}</div>

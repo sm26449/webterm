@@ -108,6 +108,44 @@ def main():
     cfg = load({"WEBTERM_AGENT_INSECURE": ""})
     check("AGENT_INSECURE gol → False", cfg.AGENT_INSECURE is False, cfg.AGENT_INSECURE)
 
+    # ── 6. secretele vin şi din fişier (`<VAR>_FILE`), cu mediul NE-gol câştigător ──────
+    # M1 din auditul de deploy: Traefik citeşte `Config.Env` al tuturor containerelor prin
+    # dockerproxy, deci secretele se mută în fişiere montate (/run/secrets). Regula din
+    # `_secret()`: variabila ne-goală câştigă (instalările vechi), altfel fişierul; un fişier
+    # gol/lipsă = nesetat, nu crash — deploy.sh creează fişiere goale pentru ce nu e folosit.
+    sd = tempfile.mkdtemp()
+    def sfile(name, content):
+        path = os.path.join(sd, name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        return path
+    tok = sfile("setup", "din-fisier\n")
+    cfg = load({"WEBTERM_SETUP_TOKEN": "", "WEBTERM_SETUP_TOKEN_FILE": tok})
+    check("SETUP_TOKEN gol + _FILE → valoarea din fişier, fără newline",
+          cfg.SETUP_TOKEN == "din-fisier", cfg.SETUP_TOKEN)
+    cfg = load({"WEBTERM_SETUP_TOKEN": "din-mediu", "WEBTERM_SETUP_TOKEN_FILE": tok})
+    check("mediul NE-gol bate fişierul (instalările vechi nu se rup)",
+          cfg.SETUP_TOKEN == "din-mediu", cfg.SETUP_TOKEN)
+    cfg = load({"WEBTERM_SETUP_TOKEN": "", "WEBTERM_SETUP_TOKEN_FILE": sfile("empty", "")})
+    check("fişier GOL → nesetat (None), ca înainte când variabila era goală",
+          cfg.SETUP_TOKEN is None, cfg.SETUP_TOKEN)
+    cfg = load({"WEBTERM_SETUP_TOKEN": "", "WEBTERM_SETUP_TOKEN_FILE": os.path.join(sd, "nu-exista")})
+    check("fişier LIPSĂ → nesetat, nu excepţie la import", cfg.SETUP_TOKEN is None, cfg.SETUP_TOKEN)
+    sec = sfile("oidc", "  s3cr&t|x\\y \n")
+    cfg = load({"WEBTERM_OIDC_ISSUER": "https://idp", "WEBTERM_OIDC_CLIENT_ID": "cid",
+                "WEBTERM_OIDC_CLIENT_SECRET": "", "WEBTERM_OIDC_CLIENT_SECRET_FILE": sec})
+    check("OIDC_CLIENT_SECRET din fişier, cu caracterele speciale intacte",
+          cfg.OIDC_CLIENT_SECRET == "s3cr&t|x\\y", cfg.OIDC_CLIENT_SECRET)
+    check("SSO devine activ cu secretul venit din fişier", cfg.OIDC_ENABLED is True, cfg.OIDC_ENABLED)
+    cfg = load({"WEBTERM_SMTP_PASSWORD_FILE": sfile("smtp", "p@ss")})
+    check("SMTP_PASSWORD din fişier când variabila lipseşte cu totul",
+          cfg.SMTP_PASSWORD == "p@ss", cfg.SMTP_PASSWORD)
+    cfg = load({"WEBTERM_UPDATE_CHECK_TOKEN_FILE": sfile("ghp", "ghp_x\n"),
+                "WEBTERM_ALERT_WEBHOOK_FILE": sfile("hook", "https://hooks.example/T/B/x\n")})
+    check("UPDATE_CHECK_TOKEN şi ALERT_WEBHOOK acceptă _FILE",
+          cfg.UPDATE_CHECK_TOKEN == "ghp_x" and cfg.ALERT_WEBHOOK == "https://hooks.example/T/B/x",
+          (cfg.UPDATE_CHECK_TOKEN, cfg.ALERT_WEBHOOK))
+
     print(f"\n{ok}/{total} teste trecute")
     return ok == total
 

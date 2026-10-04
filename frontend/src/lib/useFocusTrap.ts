@@ -41,6 +41,13 @@ export function useFocusTrap(ref: RefObject<HTMLElement>, onClose: () => void): 
     }
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Tab') return
+      // Un widget din dialog care şi-a consumat deja Tab-ul (Monaco îl foloseşte la indentare şi
+      // face preventDefault) nu trebuie „completat" cu un salt al focusului pe primul buton.
+      // Acelaşi lucru la cerere explicită: un subarbore marcat `data-focus-trap-passthrough`
+      // îşi gestionează singur Tab-ul. Restul dialogurilor păstrează wrap-around-ul clasic.
+      if (e.defaultPrevented) return
+      const active = document.activeElement
+      if (active instanceof Element && active.closest('[data-focus-trap-passthrough]')) return
       const f = focusables()
       if (f.length === 0) { e.preventDefault(); return }
       const firstEl = f[0]

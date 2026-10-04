@@ -33,14 +33,18 @@ export default function ConfirmModal(props: {
         <h2 className="text-lg font-semibold leading-tight">{props.title}</h2>
         <p className="mt-3 text-sm leading-relaxed text-slate-300">{props.message}</p>
         <div className="mt-6 flex justify-end gap-2">
+          {/* Focusul iniţial: pe Anulează când acţiunea e distructivă — un Enter reflex (sau
+              Enter-ul care tocmai a trimis formularul de dinainte) nu trebuie să şteargă ceva;
+              pe Confirmă în rest (logout, deconectare), unde reflexul e exact ce vrea userul. */}
           <button
+            autoFocus={!!props.danger}
             onClick={props.onCancel}
             className="rounded-lg px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800"
           >
             {props.cancelLabel ?? t('common.cancel')}
           </button>
           <button
-            autoFocus
+            autoFocus={!props.danger}
             onClick={props.onConfirm}
             className={`rounded-lg px-3 py-1.5 text-sm font-medium text-white ${confirmBtn}`}
           >

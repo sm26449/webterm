@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { api, AppLink, Host, Session, Snippet } from '../lib/api'
+import { api, isEphemeralHost, AppLink, Host, Session, Snippet } from '../lib/api'
 import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
 import { applyTheme, currentTheme } from '../lib/theme'
 import { useFocusTrap } from '../lib/useFocusTrap'
@@ -111,8 +111,10 @@ export default function CommandPalette(props: {
         run: () => props.onOpenSession(s.id),
       })
     }
-    // host-uri: Enter = sesiune nouă (conectare rapidă)
-    for (const h of props.hosts) {
+    // host-uri: Enter = sesiune nouă (conectare rapidă). Ţintele efemere („conectează o
+    // dată") nu sunt host-uri salvate — sesiunea lor live e deja listată mai sus.
+    const saved = props.hosts.filter((h) => !isEphemeralHost(h))
+    for (const h of saved) {
       out.push({
         key: `h:${h.id}`,
         kind: 'host',
@@ -125,7 +127,7 @@ export default function CommandPalette(props: {
       })
     }
     // acțiuni-verb: paleta e hub de comenzi, nu doar switcher (audit iulie 2026)
-    for (const h of props.hosts) {
+    for (const h of saved) {
       if (!h.online || (h.connection_type ?? 'agent') !== 'agent') continue
       out.push({
         key: `a:files:${h.id}`, kind: 'action', label: t('palette.filesLabel', { name: h.name }),

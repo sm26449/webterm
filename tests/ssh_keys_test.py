@@ -351,16 +351,60 @@ async def main():
         n2 = open(cfg).read().count("IdentityFile ~/.ssh/webterm_ed25519")
         check("ssh-config idempotent: re-scriere nu dublează blocul", n1 == 1 and n2 == 1, f"{n1},{n2}")
 
-        # rotate (doar cu ssh-keygen): cheie nouă pe sursă + redeploy pe toate ţintele + scoate vechea
+        # rotate (doar cu ssh-keygen): cheie nouă pe sursă + redeploy pe toate ţintele + scoate vechea.
+        # Ordinea contează (audit 2026-10-04 §5): redeploy ÎNTÂI, sursa trece pe cheia nouă DUPĂ;
+        # o ţintă offline nu opreşte bucla şi rămâne marcată `missing`, nu `deployed`.
         if shutil.which("ssh-keygen"):
+            # a treia ţintă (third), apoi o scoatem offline pe durata rotirii
+            security.clear_stepup_for(uid)
+            r = await c.post(f"/api/hosts/{ids['bsrc']}/deploy-key/deploy-batch",
+                             json={"target_host_ids": [ids["third"]], "confirmed": True,
+                                   "stepup_password": PW})
+            check("rotate/setup: a treia ţintă deployată", r.json()["results"][0]["ok"], r.text)
+            saved3 = core.sources.pop(ids["third"])
             security.clear_stepup_for(uid)
             r = await c.post(f"/api/hosts/{ids['bsrc']}/deploy-key/rotate", json={"stepup_password": PW})
-            newpub = r.json().get("public_key", "")
-            check("rotate: pub nou (diferit de vechi)",
+            core.sources[ids["third"]] = saved3
+            body = r.json()
+            newpub = body.get("public_key", "")
+            check("rotate: 200 + pub nou (diferit de vechi), cu o ţintă offline",
                   r.status_code == 200 and newpub and newpub != bpub, r.text)
-            lines = ak_lines(homes["b1"])
-            check("rotate: ţinta are NOUA cheie, nu pe cea veche",
-                  newpub in lines and bpub not in lines, str(lines))
+            res = {x["target_host_id"]: x for x in body.get("results", [])}
+            check("rotate: results per ţintă (3 intrări: 2 ok, offline-ul cu eroare)",
+                  len(res) == 3 and res[ids["b1"]]["ok"] and res[ids["b2"]]["ok"]
+                  and res[ids["third"]]["ok"] is False
+                  # offline-ul vine ca `host.offline` (ApiError din _host_run) sau, pe calea HTTPException,
+                  # ca `sshkey.targetOffline` — ambele înseamnă „nu s-a scris nimic acolo"
+                  and res[ids["third"]].get("code") in ("host.offline", "sshkey.targetOffline"), r.text)
+            check("rotate: left_with_old_key numeşte ţinta offline",
+                  [x["target_host_id"] for x in body.get("left_with_old_key", [])] == [ids["third"]], r.text)
+            for n in ("b1", "b2"):
+                lines = ak_lines(homes[n])
+                check(f"rotate: {n} are NOUA cheie, nu pe cea veche",
+                      newpub in lines and bpub not in lines, str(lines))
+            check("rotate: ţinta offline păstrează linia VECHE (nimic scris pe ea)",
+                  bpub in ak_lines(homes["third"]) and newpub not in ak_lines(homes["third"]), "")
+            dep3 = await db.fetchone(
+                "SELECT status FROM ssh_key_deployments d JOIN ssh_keys k ON k.id=d.key_id"
+                " WHERE k.host_id=? AND d.target_host_id=?", ids["bsrc"], ids["third"])
+            check("rotate: muchia offline e `missing`, nu `deployed`", dep3["status"] == "missing", str(dict(dep3)))
+            with open(os.path.join(homes["bsrc"], ".ssh", "webterm_ed25519.pub")) as f:
+                check("rotate: sursa are noua cheie publică instalată (mv după redeploy)",
+                      f.read().strip() == newpub, "")
+            check("rotate: fără temporare .new rămase pe sursă",
+                  not os.path.exists(os.path.join(homes["bsrc"], ".ssh", "webterm_ed25519.new")), "")
+            r = await c.get(f"/api/hosts/{ids['bsrc']}/deploy-key")
+            check("rotate: fingerprint-ul din evidenţă e cel NOU", r.json()["key"]["fingerprint"] == body["fingerprint"], r.text)
+            # redeploy pe ţinta revenită online → muchia redevine `deployed`, cu noua cheie
+            security.clear_stepup_for(uid)
+            r = await c.post(f"/api/hosts/{ids['bsrc']}/deploy-key/deploy-batch",
+                             json={"target_host_ids": [ids["third"]], "confirmed": True,
+                                   "stepup_password": PW})
+            check("rotate/retry: redeploy pe ţinta revenită → ok + noua cheie pe ea",
+                  r.json()["results"][0]["ok"] and newpub in ak_lines(homes["third"]), r.text)
+            # curăţenie: third nu mai e ţintă (politica de mai jos nu trebuie să vadă muchia)
+            await c.post(f"/api/hosts/{ids['third']}/deploy-key/revoke",
+                         json={"key_host_id": ids["bsrc"], "stepup_password": PW})
 
         # ══ Politica cheilor de deploy (Slice 1): restrict,command= + 2FA pe surse ══
         # setarea face roundtrip

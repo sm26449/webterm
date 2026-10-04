@@ -47,9 +47,15 @@ case "$1" in
   # care rulează. Stub-ul răspundea „healthy" la amândouă, deci verificarea „ce rulează de fapt"
   # primea „healthy" în loc de o referinţă de imagine. Un stub prea gros face testul să treacă
   # pe un cod greşit şi să pice pe unul corect — al doilea caz s-a întâmplat aici.
-  inspect)
+  inspect|image)
+    # `docker image inspect` (digestul după pull, ID-ul pentru prune) şi `docker inspect`
+    # (sănătate, imaginea care rulează). Imaginea care rulează e cea PINUITĂ pe digest — aşa
+    # o scrie compose în Config.Image când .env are `repo@sha256:…`.
+    [ "$1" = image ] && [ "$2" = rm ] && exit 0
     case "$*" in
-      *Config.Image*) echo "ghcr.io/x/webterm:$WANT_TAG" ;;
+      *RepoDigests*)  [ -n "${NO_DIGEST:-}" ] || echo "ghcr.io/x/webterm@sha256:$WANT_DIGEST"; exit 0 ;;
+      *Config.Image*) echo "ghcr.io/x/webterm@sha256:$WANT_DIGEST" ;;
+      *"{{.Image}}"*|*"{{.Id}}"*) echo "sha256:imgid-$WANT_TAG" ;;
       *)              echo healthy ;;
     esac
     exit 0 ;;
@@ -81,6 +87,9 @@ exit 0
 
 CURL_SHIM = r'''#!/bin/sh
 echo "curl $*" >> "$CALLS"
+# ce vine pe stdin (`-K -`) e config-ul curl cu header-ul de autorizare — îl păstrăm separat,
+# ca testul să poată dovedi că tokenul a venit PE ACOLO, nu în argv
+[ -t 0 ] || cat >> "${CURL_STDIN:-/dev/null}"
 [ -n "${TAGS_FAIL:-}" ] && exit 1
 # ordinea din API e deliberat amestecată: scriptul trebuie să aleagă cel mai MARE tag
 cat <<'JSON'
@@ -89,7 +98,11 @@ JSON
 '''
 
 
-def sandbox(tmp, with_token=False):
+DIGEST = "a" * 64          # digestul pe care „registry-ul" îl raportează pentru tag-ul tras
+PINNED = f"ghcr.io/x/webterm@sha256:{DIGEST}"
+
+
+def sandbox(tmp, with_token=False, with_cosign=False, env_extra=""):
     """Un /opt/webterm de jucărie + shim-uri pe PATH."""
     d = pathlib.Path(tmp)
     (d / "scripts").mkdir(parents=True, exist_ok=True)
@@ -98,7 +111,7 @@ def sandbox(tmp, with_token=False):
 
     shutil.copy(ROOT / "upgrade.sh", d / "upgrade.sh")
     os.chmod(d / "upgrade.sh", 0o755)
-    env_txt = "WEBTERM_DOMAIN=x\nWEBTERM_IMAGE=ghcr.io/x/webterm:v1.0.1\nGHCR_USER=x\n"
+    env_txt = "WEBTERM_DOMAIN=x\nWEBTERM_IMAGE=ghcr.io/x/webterm:v1.0.1\nGHCR_USER=x\n" + env_extra
     if with_token:
         env_txt += "GHCR_TOKEN=secret\n"
     (d / ".env").write_text(env_txt)
@@ -123,9 +136,20 @@ def sandbox(tmp, with_token=False):
     # `FAKE_UID` alege ce răspunde: 0 pentru testele care verifică altceva, non-zero pentru
     # testul care verifică garda de root însăşi.
     ID_SHIM = '#!/bin/sh\n[ "$1" = "-u" ] && { echo "${FAKE_UID:-0}"; exit 0; }\nexec /usr/bin/id "$@"\n'
-    for name, body in (("docker", DOCKER_SHIM), ("curl", CURL_SHIM), ("id", ID_SHIM)):
+    # `systemctl` stubuit: pasul de sincronizare a unităţilor trebuie să-l CHEME (daemon-reload +
+    # enable --now pe timer), dar niciodată pe cel real — testul rulează şi ca root, pe host.
+    SYSTEMCTL_SHIM = '#!/bin/sh\necho "systemctl $*" >> "$CALLS"\nexit 0\n'
+    # `cosign` stubuit, pus pe PATH DOAR în testele care îl cer (`with_cosign`): calea
+    # „verificare sărită" trebuie testată fără cosign, iar maşina de test poate să-l aibă.
+    COSIGN_SHIM = '#!/bin/sh\necho "cosign $*" >> "$CALLS"\nexit ${COSIGN_FAILS:-0}\n'
+    for name, body in (("docker", DOCKER_SHIM), ("curl", CURL_SHIM), ("id", ID_SHIM),
+                       ("systemctl", SYSTEMCTL_SHIM)):
         p = d / "bin" / name
         p.write_text(body)
+        os.chmod(p, 0o755)
+    if with_cosign:
+        p = d / "bin" / "cosign"
+        p.write_text(COSIGN_SHIM)
         os.chmod(p, 0o755)
     return d
 
@@ -133,10 +157,15 @@ def sandbox(tmp, with_token=False):
 def run(d, args=(), **extra):
     calls = d / "calls.log"
     calls.write_text("")
+    # /etc/systemd/system de jucărie: implicit gol, deci pasul de unităţi nu are ce atinge — şi,
+    # mai important, scriptul nu se uită NICIODATĂ la /etc/systemd real al maşinii de test.
+    (d / "etc-systemd").mkdir(exist_ok=True)
     env = dict(os.environ, PATH=f"{d/'bin'}:{os.environ['PATH']}", CALLS=str(calls),
-               ARGV_LOG=str(d / "argv.log"), KITSRC=str(d / "kit"),
-               WANT_TAG="v1.0.30", **extra)
+               ARGV_LOG=str(d / "argv.log"), KITSRC=str(d / "kit"), WANT_DIGEST=DIGEST,
+               CURL_STDIN=str(d / "curl-stdin.log"),
+               WANT_TAG="v1.0.30", WEBTERM_SYSTEMD_DIR=str(d / "etc-systemd"), **extra)
     (d / "argv.log").write_bytes(b"")
+    (d / "curl-stdin.log").write_text("")
     r = subprocess.run(["bash", str(d / "upgrade.sh"), *args], cwd=str(d), env=env,
                        capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
     return r, calls.read_text()
@@ -166,8 +195,17 @@ def main():
         out = r.stdout + r.stderr
         check("rulează până la capăt", r.returncode == 0, out[-400:])
         check("alege cel mai MARE tag, nu primul din API", "v1.0.30" in out, out[:300])
-        check("deploy.sh e chemat cu versiunea rezolvată",
-              "deploy.sh v1.0.30" in calls, calls)
+        # H1 din auditul de deploy: tag-ul e rezolvat la DIGEST o singură dată, după pull, iar
+        # deploy.sh primeşte referinţa pe digest (+ tag-ul doar ca etichetă) — un tag se poate
+        # re-pointa în registry între „am verificat" şi „am instalat"; digestul nu.
+        check("deploy.sh e chemat cu DIGESTUL rezolvat, tag-ul doar ca etichetă",
+              f"deploy.sh {PINNED} --tag v1.0.30" in calls, calls)
+        check("digestul e tipărit, ca să-l poţi compara cu registry-ul",
+              f"v1.0.30 = sha256:{DIGEST}" in out, out[:800])
+        check("fără cosign/identitate spune EXPLICIT că verificarea semnăturii a fost sărită",
+              "signature verification SKIPPED" in out, out[:900])
+        check("digestul se rezolvă ÎNAINTE de orice `docker run` din imagine",
+              calls.index("docker image inspect") < calls.index("docker run"), calls)
         check("backupul se face ÎNAINTE de deploy",
               calls.index("backup.sh") < calls.index("deploy.sh"), calls)
         check("pull-ul se face înainte de backup (artefactul e local întâi)",
@@ -241,10 +279,65 @@ def main():
         check("refuzul dă cele trei ieşiri", "--allow-latest" in outl and "GHCR_TOKEN" in outl, outl[-500:])
         dl2 = sandbox(tempfile.mkdtemp(dir=tmp))
         rl2, callsl2 = run(dl2, ["-y", "--allow-latest"], TAGS_FAIL="1")
-        check("--allow-latest acceptă explicit tag-ul mişcător",
-              "deploy.sh latest" in callsl2, callsl2)
+        check("--allow-latest acceptă explicit tag-ul mişcător (dar tot îl pinuieşte pe digest)",
+              f"deploy.sh {PINNED} --tag latest" in callsl2, callsl2)
         check("--allow-latest avertizează despre rollback-ul manual",
               "MOVING" in (rl2.stdout + rl2.stderr), (rl2.stdout + rl2.stderr)[-300:])
+
+        # ── unităţile systemd se sincronizează din deploy/ (M5 din auditul de deploy) ──
+        # Pe prod, timerele erau cele din iulie: `Persistent=true  # comentariu` pe aceeaşi
+        # linie, pe care systemd o REFUZĂ („Failed to parse boolean value, ignoring") — deci
+        # Persistent cădea tăcut pe false. Repo-ul era reparat; nimic nu ducea fix-ul pe host.
+        du = sandbox(tempfile.mkdtemp(dir=tmp))
+        etc = du / "etc-systemd"
+        etc.mkdir(exist_ok=True)
+        (du / "deploy").mkdir()
+        for u in ("webterm-backup", "webterm-cert-check"):
+            for ext in ("service", "timer"):
+                shutil.copy(ROOT / "deploy" / f"{u}.{ext}", du / "deploy" / f"{u}.{ext}")
+        # instalat ca de install.sh: .service randat pe directorul ĂSTA, timerul vechi (buggy)
+        svc_src = (ROOT / "deploy" / "webterm-backup.service").read_text()
+        (etc / "webterm-backup.service").write_text(svc_src.replace("/opt/webterm", str(du)))
+        (etc / "webterm-backup.timer").write_text(
+            "[Unit]\nDescription=old\n\n[Timer]\nOnCalendar=*-*-* 03:30:00\n"
+            "Persistent=true          # comentariu inline — systemd îl respinge\n"
+            "RandomizedDelaySec=15min\n\n[Install]\nWantedBy=timers.target\n")
+        # a DOUA unitate aparţine altei instalări (alt WorkingDirectory) → nu se atinge
+        (etc / "webterm-cert-check.service").write_text(
+            svc_src.replace("webterm-backup", "webterm-cert-check")
+                   .replace("/opt/webterm", "/opt/alta-instalare"))
+        (etc / "webterm-cert-check.timer").write_text("[Timer]\nOnCalendar=daily\n")
+        ru, callsu = run(du, ["-y"])
+        outu = ru.stdout + ru.stderr
+        check("sincronizarea unităţilor nu strică upgrade-ul", ru.returncode == 0, outu[-400:])
+        new_timer = (etc / "webterm-backup.timer").read_text()
+        check("timerul vechi (Persistent cu comentariu inline) e înlocuit cu cel din deploy/",
+              new_timer == (ROOT / "deploy" / "webterm-backup.timer").read_text(), new_timer)
+        check("niciun `Persistent=true  # …` nu mai rămâne în unitatea instalată",
+              not any(l.startswith("Persistent=") and "#" in l for l in new_timer.splitlines()))
+        check("versiunea veche a timerului rămâne ca .bak", (etc / "webterm-backup.timer.bak").exists())
+        check(".service e randat pe directorul instalării, nu pe /opt/webterm",
+              f"WorkingDirectory={du}" in (etc / "webterm-backup.service").read_text()
+              and "/opt/webterm" not in (etc / "webterm-backup.service").read_text())
+        check("după copiere se face daemon-reload", "systemctl daemon-reload" in callsu, callsu)
+        check("timerul schimbat e re-activat (enable --now)",
+              "systemctl enable --now webterm-backup.timer" in callsu, callsu)
+        check("unitatea ALTEI instalări nu e atinsă",
+              (etc / "webterm-cert-check.timer").read_text() == "[Timer]\nOnCalendar=daily\n"
+              and "cert-check" not in callsu, callsu)
+        check("sincronizarea unităţilor vine ÎNAINTE de deploy.sh",
+              "actualizat: " + str(etc / "webterm-backup.timer") in outu
+              and outu.index("webterm-backup.timer") < outu.index("Applying"), outu[-900:])
+        # idempotent: a doua rulare nu mai copiază nimic şi nu mai cheamă systemctl
+        # (prima rulare s-a auto-înlocuit cu „upgrade nou" din kit — punem scriptul real la loc)
+        shutil.copy(ROOT / "upgrade.sh", du / "upgrade.sh")
+        ru2, callsu2 = run(du, ["-y"])
+        check("a doua rulare: unităţile sunt deja la zi (idempotent)",
+              "systemd units already up to date" in (ru2.stdout + ru2.stderr)
+              and "systemctl" not in callsu2, callsu2)
+        # fără unităţi instalate (ex. --no-backup la instalare) → nu instalăm nimic nou
+        check("fără unităţi instalate nu se creează niciuna (rularea de bază)",
+              not list((d / "etc-systemd").iterdir()) and "systemctl" not in calls)
 
         # ── backupul primeşte parola din /etc/default/webterm-backup ──────────
         check("upgrade.sh încarcă parola de backup din fişierul systemd",
@@ -256,11 +349,50 @@ def main():
         r2, calls2 = run(d2, ["-y"])
         check("cu GHCR_TOKEN în .env se face login (capcana sudo → alt HOME)",
               "docker login ghcr.io" in calls2, calls2)
+        # L2 din auditul de deploy: tokenul nu are voie în argv (vizibil în `ps`); vine pe stdin
+        check("GHCR_TOKEN NU apare în argv-ul lui curl", "secret" not in calls2, calls2)
+        check("GHCR_TOKEN ajunge la curl prin stdin (-K -)",
+              "Bearer secret" in (d2 / "curl-stdin.log").read_text() and "curl -K -" in calls2,
+              (d2 / "curl-stdin.log").read_text())
+
+        # ── cosign: instalat + identitate configurată → verifică digestul ÎNAINTE de deploy ──
+        dc = sandbox(tempfile.mkdtemp(dir=tmp), with_cosign=True,
+                     env_extra="WEBTERM_COSIGN_IDENTITY=^https://github.com/x/webterm/.github/workflows/docker-publish.yml@refs/tags/v\n")
+        rc, callsc = run(dc, ["-y"])
+        outc = rc.stdout + rc.stderr
+        check("cosign verify e chemat pe referinţa pe DIGEST, cu identitate şi issuer",
+              f"cosign verify --certificate-identity-regexp ^https://github.com/x/webterm/.github/workflows/docker-publish.yml@refs/tags/v --certificate-oidc-issuer https://token.actions.githubusercontent.com {PINNED}" in callsc,
+              callsc)
+        check("semnătura verificată e raportată", "cosign: signature verified" in outc, outc[:900])
+        check("verificarea cosign vine înaintea oricărui `docker run` din imagine şi a deploy-ului",
+              callsc.index("cosign verify") < callsc.index("docker run")
+              and callsc.index("cosign verify") < callsc.index("deploy.sh"), callsc)
+        check("cu cosign pe PATH dar FĂRĂ identitate → tot SKIPPED, cu motivul",
+              "WEBTERM_COSIGN_IDENTITY not set" in (run(sandbox(tempfile.mkdtemp(dir=tmp), with_cosign=True), ["-y"])[0].stdout))
+        dcf = sandbox(tempfile.mkdtemp(dir=tmp), with_cosign=True,
+                      env_extra="WEBTERM_COSIGN_IDENTITY=^https://github.com/x/\n")
+        rcf, callscf = run(dcf, ["-y"], COSIGN_FAILS="1")
+        check("semnătură INVALIDĂ → se opreşte, fără backup, fără sync, fără deploy",
+              rcf.returncode != 0 and "NO valid signature" in (rcf.stdout + rcf.stderr)
+              and "deploy.sh" not in callscf and "backup.sh" not in callscf, callscf)
+
+        # ── digest nerezolvabil → refuz (tag-ul e un pointer mutabil), decât dacă e cerut explicit ──
+        dnd = sandbox(tempfile.mkdtemp(dir=tmp))
+        rnd, callsnd = run(dnd, ["-y"], NO_DIGEST="1")
+        check("fără digest → REFUZ explicit, nimic instalat",
+              rnd.returncode != 0 and "refusing to deploy a mutable tag" in (rnd.stdout + rnd.stderr)
+              and "deploy.sh" not in callsnd, callsnd)
+        dnd2 = sandbox(tempfile.mkdtemp(dir=tmp))
+        rnd2, callsnd2 = run(dnd2, ["-y", "--allow-unpinned"], NO_DIGEST="1")
+        check("--allow-unpinned acceptă tag-ul, cu avertisment",
+              "deploy.sh ghcr.io/x/webterm:v1.0.30 --tag v1.0.30" in callsnd2
+              and "moving pointer" in (rnd2.stdout + rnd2.stderr), callsnd2)
 
         # ── versiune explicită ──
         d3 = sandbox(tempfile.mkdtemp(dir=tmp))
         r3, calls3 = run(d3, ["v1.0.7", "-y"])
-        check("versiunea dată explicit e respectată", "deploy.sh v1.0.7" in calls3, calls3)
+        check("versiunea dată explicit e respectată (pinuită tot pe digest)",
+              f"deploy.sh {PINNED} --tag v1.0.7" in calls3, calls3)
         check("cu versiune explicită nu mai întrebăm GitHub", "curl" not in calls3, calls3)
 
         # ── --no-backup ──

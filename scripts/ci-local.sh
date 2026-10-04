@@ -18,8 +18,8 @@ REPO=${REPO:-$(cd "$(dirname "$0")/.." && pwd)}
 NM=${PW_MODULES:-$REPO/frontend/node_modules}
 PW=mcr.microsoft.com/playwright:v1.61.1-noble
 IMG=${IMG:-webterm-verify:local}
-P1=8000; P2=8001; P3=8002; P4=8003; P5=8004; P6=8005
-C1=wtci-smoke; C2=wtci-fwd; C3=wtci-sso; C4=wtci-bkapp; C5=wtci-rsapp; C6=wtci-feat
+P1=8000; P2=8001; P3=8002; P4=8003; P5=8004; P6=8005; P7=8006
+C1=wtci-smoke; C2=wtci-fwd; C3=wtci-sso; C4=wtci-bkapp; C5=wtci-rsapp; C6=wtci-feat; C7=wtci-jump
 SF=wtci-sftp; FT=wtci-ftps            # servere-fixture SFTP/FTPS pentru pasul `backup`
 NET=wtci-net
 # URL-ul public trebuie să fie valid ŞI din browser, ŞI din interiorul containerului:
@@ -48,7 +48,7 @@ RUFF="${RUFF:-$(dirname "$PY")/ruff}"
 [ -x "$RUFF" ] || RUFF=ruff
 PIPAUDIT="${PIPAUDIT:-$(dirname "$PY")/pip-audit}"
 [ -x "$PIPAUDIT" ] || PIPAUDIT=pip-audit
-# paşi: unit sig lint build smoke e2e a11y fs fwd mobile sso — sau `all`
+# paşi: unit sig lint build smoke e2e a11y fs fwd mobile sso backup features jump — sau `all`
 
 pass=0; fail=0; skipped=""
 say()  { printf '\n\033[1;36m── %s ──\033[0m\n' "$*"; }
@@ -56,7 +56,7 @@ ok()   { printf '\033[32m  ✓ %s\033[0m\n' "$*"; pass=$((pass+1)); }
 no()   { printf '\033[31m  ✗ %s\033[0m\n' "$*"; fail=$((fail+1)); }
 
 cleanup() {
-  docker rm -f $C1 $C2 $C3 $C4 $C5 $C6 $SF $FT >/dev/null 2>&1 || true
+  docker rm -f $C1 $C2 $C3 $C4 $C5 $C6 $C7 $SF $FT >/dev/null 2>&1 || true
   rm -rf "$OUT/ftps-certs" 2>/dev/null || true
   docker network rm $NET >/dev/null 2>&1 || true
 }
@@ -90,8 +90,8 @@ if want unit; then
   command -v "$PIPAUDIT" >/dev/null 2>&1 || [ -x "$PIPAUDIT" ] || {
     echo "'$PIPAUDIT' lipseşte şi n-am putut instala pip-audit — pip install pip-audit" >&2; exit 2; }
 fi
-for prt in $P1 $P2 $P3 $P4 $P5 $P6; do
-  case " $ONLY " in *" all "*|*" smoke "*|*" e2e "*|*" a11y "*|*" fs "*|*" fwd "*|*" mobile "*|*" sso "*|*" backup "*|*" features "*)
+for prt in $P1 $P2 $P3 $P4 $P5 $P6 $P7; do
+  case " $ONLY " in *" all "*|*" smoke "*|*" e2e "*|*" a11y "*|*" fs "*|*" fwd "*|*" mobile "*|*" sso "*|*" backup "*|*" features "*|*" jump "*)
     if ss -ltn 2>/dev/null | grep -q ":$prt "; then
       echo "portul $prt e ocupat — runner-ul are nevoie de $P1 şi $P2 (vezi nota de sus)" >&2
       exit 2
@@ -281,8 +281,10 @@ say "accessibility (axe-core)"
 curl -fsS -X POST "$BASE1/api/setup" -H 'Content-Type: application/json' \
   -d '{"email":"e2e@example.com","password":"parola-e2e-123456","setup_token":"ci-e2e-token"}' \
   >/dev/null 2>&1 && echo "  (cont creat pentru a11y)" || echo "  (contul exista deja)"
+# WT_AGENT=1: containerul de smoke are agentul online, deci scanăm şi editorul Monaco
+# (ui_review.mjs îl sare VIZIBIL fără variabilă — în CI-ul GitHub încă nu e setată).
 pwrun tests/ui_review.mjs -e SCRIPT_ARGS="" -e BASE="$BASE1" -e A11Y_MAX_SERIOUS=0 \
-  -e A11Y_EMAIL=e2e@example.com -e A11Y_PASSWORD=parola-e2e-123456 \
+  -e A11Y_EMAIL=e2e@example.com -e A11Y_PASSWORD=parola-e2e-123456 -e WT_AGENT=1 \
   && ok "accessibility" || no "accessibility"
 fi
 
@@ -412,6 +414,29 @@ if [ "$_st" = healthy ]; then
     && ok "Feature UI (group tokens + tags)" || no "Feature UI (group tokens + tags)"
 else
   no "feature container nu a devenit healthy ($_st)"; docker logs $C6 2>/dev/null | tail -15
+fi
+fi
+
+# ── UI-ul ţintelor jump (SSH-jump / Telnet-jump) ────────────────────────────
+# `e2e-jump.mjs` era scris, dar nu-l rula nimeni — singura acoperire de UI a cuibăririi sub agent
+# (regresia „decalat"), a meniului ⋯ → „Add SSH / Telnet jump…", a formularului (toggle protocol,
+# via fix, Connect once / Save target), a hub-ului paginii de host şi a toast-ului de eroare la
+# connect eşuat. Fără agent real: host-urile de agent se creează prin API, iar un agent OFFLINE e
+# de ajuns (meniul apare oricum, iar conectarea EŞUATĂ e chiar ce verifică toast-ul). Instanţă
+# proprie: scriptul îşi face contul prin /api/setup, deci nu poate împărţi containerul cu `features`.
+if want jump; then
+say "Jump-host UI (nesting + form + host hub)"
+docker rm -f "$C7" >/dev/null 2>&1 || true
+docker run -d --name "$C7" -p "$P7:8000" \
+  -e WEBTERM_SETUP_TOKEN=jump-e2e-token -e WEBTERM_PUBLIC_URL="http://127.0.0.1:$P7" \
+  -e WEBTERM_UPDATE_CHECK=0 "$IMG" >/dev/null
+_st=starting
+for _ in $(seq 1 45); do _st=$(docker inspect -f '{{.State.Health.Status}}' "$C7" 2>/dev/null); [ "$_st" = healthy ] && break; sleep 2; done
+if [ "$_st" = healthy ]; then
+  pwrun scripts/e2e-jump.mjs -e SCRIPT_ARGS="http://127.0.0.1:$P7" -e E2E_SETUP_TOKEN=jump-e2e-token \
+    && ok "Jump-host UI" || no "Jump-host UI"
+else
+  no "jump container nu a devenit healthy ($_st)"; docker logs "$C7" 2>/dev/null | tail -15
 fi
 fi
 

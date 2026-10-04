@@ -12,7 +12,32 @@
 import js from '@eslint/js'
 import globals from 'globals'
 import reactHooks from 'eslint-plugin-react-hooks'
+import jsxA11y from 'eslint-plugin-jsx-a11y'
 import tseslint from 'typescript-eslint'
+
+// Accesibilitate statică (auditul 2026-10-04, §8.6): `jsx-a11y/recommended` în întregime.
+// Regulile care aveau 0 încălcări la introducere sunt ERORI — ele păzesc ce e deja curat
+// (alt-text, aria-*, role-*, label-has-associated-control, anchor-is-valid, tabindex-no-positive…).
+// Cele de mai jos aveau încălcări în componente pe care nu le putem repara dintr-un singur
+// commit; rămân AVERTISMENTE (CI rulează `eslint .` fără --max-warnings, deci nu blochează)
+// până la curăţarea lor, apoi se scot din listă şi devin erori. Numărul = încălcări la 2026-10-04.
+const A11Y_WARN_FOR_NOW = [
+  'jsx-a11y/click-events-have-key-events',            // 45 — div/span cu onClick fără onKeyDown
+  'jsx-a11y/no-static-element-interactions',          // 35 — acelaşi tipar, fără role
+  'jsx-a11y/no-noninteractive-element-interactions',  // 14 — li/tr/p cu handler-e
+  'jsx-a11y/no-noninteractive-tabindex',              //  4 — App.tsx, FilePanel, HostLoadRing, Sidebar
+]
+// `no-autofocus` e OPRITĂ, nu doar coborâtă la warn: toate cele ~22 de utilizări sunt în dialoguri
+// modale cu focus-trap (ConfirmModal, prompt, formulare), unde mutarea focusului în dialog la
+// deschidere e exact ce cere APG „dialog (modal)"; regula ţinteşte autofocus-ul pe pagini întregi.
+const A11Y_OFF = ['jsx-a11y/no-autofocus']
+const a11yRules = Object.fromEntries(
+  Object.entries(jsxA11y.flatConfigs.recommended.rules).map(([id, v]) => {
+    if (A11Y_OFF.includes(id)) return [id, 'off']
+    if (!A11Y_WARN_FOR_NOW.includes(id)) return [id, v]            // 'error' (sau 'off') ca în recommended
+    return [id, Array.isArray(v) ? ['warn', ...v.slice(1)] : 'warn'] // păstrăm opţiunile regulii
+  }),
+)
 
 export default tseslint.config(
   { ignores: ['dist', 'node_modules', 'eslint.config.js'] },
@@ -23,9 +48,10 @@ export default tseslint.config(
       ecmaVersion: 2022,
       globals: globals.browser,
     },
-    plugins: { 'react-hooks': reactHooks },
+    plugins: { 'react-hooks': reactHooks, 'jsx-a11y': jsxA11y },
     rules: {
       ...reactHooks.configs.recommended.rules,
+      ...a11yRules,
 
       // `any` e folosit deliberat la marginile netipate (addon-uri xterm, API-uri de
       // browser în curs de standardizare). Îl semnalăm ca avertisment, nu ca eroare.

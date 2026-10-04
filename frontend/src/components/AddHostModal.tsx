@@ -2,14 +2,21 @@ import { FormEvent, useEffect, useRef, useState } from 'react'
 import { errText, api, Host } from '../lib/api'
 import { copyText } from '../lib/clipboard'
 import { useI18n } from '../lib/i18n'
-import InstallCommand from './InstallCommand'
+import InstallCommand, { AGENT_PYTHON_MIN } from './InstallCommand'
 import { useFocusTrap } from '../lib/useFocusTrap'
+import { btn } from './settings/ui'
+import { fmtTs } from '../lib/tz'
 
 type ConnType = 'agent' | 'ssh' | 'ssh-jump' | 'telnet' | 'telnet-jump'
 
 const field =
-  'w-full rounded-lg bg-ink-800 px-4 py-2.5 placeholder-slate-500 ring-1 ring-ink-700 focus:ring-sky-600'
+  'w-full rounded-lg bg-ink-800 px-4 py-2.5 placeholder-slate-500 ring-1 ring-[rgb(var(--field-border))] focus:ring-sky-600'
 const label = 'mb-1 block text-xs font-medium text-slate-400'
+
+// După cât timp fără agent arătăm panoul de depanare. 45 s = instalarea (descărcare + pip-free
+// start) durează de regulă sub 20 s; dacă a trecut dublul, ceva e blocat, nu lent.
+const STUCK_AFTER_MS = 45_000
+type AgentEvent = { ts: number; event: string; reason: string; detail: string }
 
 // `host` prezent = mod EDITARE. Acelaşi formular: un host se editează cu exact câmpurile cu
 // care a fost creat, iar comutarea agent↔SSH e doar o schimbare de tip — util fix atunci când
@@ -62,6 +69,11 @@ export default function AddHostModal(props: {
   const [online, setOnline] = useState(false)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  // La eşec, focusul merge pe primul câmp al formularului, marcat `aria-invalid` + legat de
+  // mesaj (WCAG 3.3.1): serverul întoarce o singură eroare, nu una per câmp.
+  const firstFieldRef = useRef<HTMLInputElement>(null)
+  const invalid = error ? { 'aria-invalid': true as const, 'aria-describedby': 'addhost-error' } : {}
+  function fail(msg: string) { setError(msg); firstFieldRef.current?.focus() }
 
   // Onboarding la scară: „O maşină" (formularul clasic) vs „Mai multe maşini" (token de grup —
   // un one-liner reutilizabil). Creat AICI, unde userul chiar adaugă hosturi; gestiunea (listă +
@@ -80,21 +92,54 @@ export default function AddHostModal(props: {
       setGrpCmd(r.install_command)
       props.onSaved?.()      // reîmprospătează lista din Settings dacă e deschisă
     } catch (err) {
-      setError(errText(err, t) || String(err))
+      fail(errText(err, t) || String(err))
     } finally {
       setBusy(false)
     }
   }
 
-  // host agent: după creare, așteaptă agentul să apară online
+  // host agent: după creare, așteaptă agentul să apară online. Se opreşte când a venit —
+  // altfel bătea /api/hosts la 2 s până închideai modalul (auditul frontend, B15).
   useEffect(() => {
-    if (!created || created.connection_type !== 'agent') return
+    if (!created || created.connection_type !== 'agent' || online) return
     const t = setInterval(async () => {
       const hosts = await api<Host[]>('/api/hosts').catch(() => [])
       if (hosts.find((h) => h.id === created.id)?.online) setOnline(true)
     }, 2000)
     return () => clearInterval(t)
-  }, [created])
+  }, [created, online])
+
+  // „Aştept conexiunea agentului…" la nesfârşit era, după auditul de fluxuri (1.1), cea mai
+  // frecventă fundătură a primei rulări: punctul galben arăta la fel după 10 s şi după 10 min.
+  // După STUCK_AFTER_MS deschidem un panou de depanare (lista de cauze obişnuite) şi citim
+  // jurnalul agentului de la gateway — acolo apar încercările REFUZATE (token greşit, conflict
+  // de instanţă, pin TLS), pe care hostul „offline" nu le arăta nicăieri.
+  const [stuck, setStuck] = useState(false)
+  const [events, setEvents] = useState<AgentEvent[] | null>(null)
+  useEffect(() => {
+    if (!created || created.connection_type !== 'agent' || online) return
+    const tm = setTimeout(() => setStuck(true), STUCK_AFTER_MS)
+    return () => clearTimeout(tm)
+  }, [created, online])
+  useEffect(() => {
+    if (!stuck || !created || online) return
+    let alive = true
+    const load = () =>
+      api<{ events: AgentEvent[] }>(`/api/hosts/${created.id}/events`)
+        .then((r) => { if (alive) setEvents(r.events.slice(0, 6)) })
+        // 403 (step-up pe host cu 2FA) sau reţea: panoul rămâne util şi fără jurnal
+        .catch(() => { if (alive) setEvents((e) => e ?? []) })
+    load()
+    const iv = setInterval(load, 10_000)
+    return () => { alive = false; clearInterval(iv) }
+  }, [stuck, created, online])
+  // motivul refuzului, tradus când îl cunoaştem; altfel codul brut (mai bine decât nimic)
+  function eventLabel(e: AgentEvent): string {
+    const key = `addhost.ev.${e.reason || e.event}`
+    const s = t(key)
+    if (s !== key) return s
+    return e.reason ? `${e.event} · ${e.reason}` : e.event
+  }
 
   async function submit(e: FormEvent, once = false) {
     e.preventDefault()
@@ -136,7 +181,7 @@ export default function AddHostModal(props: {
         else setCreated(h)
       }
     } catch (err) {
-      setError(errText(err, t) || t('addhost.genericError'))
+      fail(errText(err, t) || t('addhost.genericError'))
     } finally {
       setBusy(false)
     }
@@ -169,7 +214,7 @@ export default function AddHostModal(props: {
             {/* comutator O maşină / Mai multe maşini */}
             <div className="flex gap-1 rounded-xl bg-ink-800 p-1 text-sm">
               {(['one', 'many'] as const).map((m) => (
-                <button key={m} type="button" onClick={() => setMode(m)}
+                <button key={m} type="button" onClick={() => setMode(m)} aria-pressed={mode === m}
                   className={`flex-1 rounded-lg px-3 py-1.5 font-medium transition ${
                     mode === m ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
                   {m === 'one' ? t('addhost.modeOne') : t('addhost.modeMany')}
@@ -179,12 +224,11 @@ export default function AddHostModal(props: {
             {grpCmd ? (
               <div role="status" aria-live="polite" className="space-y-3">
                 <p className="text-sm text-slate-300">{t('addhost.groupCreated')}</p>
-                <p className="text-xs text-emerald-300">{t('settings.enrollGroups.copyNow')}</p>
+                <p className="text-xs wt-good">{t('settings.enrollGroups.copyNow')}</p>
                 <InstallCommand command={grpCmd} />
                 <p className="text-xs text-slate-500">{t('addhost.groupManageHint')}</p>
                 <div className="text-right">
-                  <button type="button" onClick={props.onClose}
-                    className="rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-700">
+                  <button type="button" onClick={props.onClose} className={`${btn.primary} px-4 py-2`}>
                     {t('addhost.done')}
                   </button>
                 </div>
@@ -194,8 +238,8 @@ export default function AddHostModal(props: {
                 <p className="text-xs text-slate-500">{t('addhost.manyDesc')}</p>
                 <label className="block">
                   <span className={label}>{t('settings.enrollGroups.name')}</span>
-                  <input autoFocus required placeholder={t('settings.enrollGroups.namePlaceholder')}
-                    value={grp.name} onChange={(e) => setGrp({ ...grp, name: e.target.value })} className={field} />
+                  <input ref={firstFieldRef} autoFocus required placeholder={t('settings.enrollGroups.namePlaceholder')}
+                    {...invalid} value={grp.name} onChange={(e) => setGrp({ ...grp, name: e.target.value })} className={field} />
                 </label>
                 <div className="flex gap-2">
                   <label className="block flex-1">
@@ -229,13 +273,12 @@ export default function AddHostModal(props: {
                 <input type="password" value={grp.current_password} autoComplete="current-password"
                   onChange={(e) => setGrp({ ...grp, current_password: e.target.value })}
                   placeholder={t('settings.currentPasswordConfirm')} aria-label={t('settings.currentPassword')} className={field} />
-                {error && <div className="text-sm wt-danger">{error}</div>}
+                <div id="addhost-error" role="alert" className={error ? 'text-sm wt-danger' : 'sr-only'}>{error}</div>
                 <div className="flex justify-end gap-2">
-                  <button type="button" onClick={props.onClose} className="rounded-lg px-4 py-2 text-sm text-slate-400 hover:bg-ink-800">
+                  <button type="button" onClick={props.onClose} className={`${btn.ghost} px-4 py-2`}>
                     {t('addhost.cancel')}
                   </button>
-                  <button disabled={busy || !grp.name || !grp.current_password}
-                    className="rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-50">
+                  <button disabled={busy || !grp.name || !grp.current_password} className={`${btn.primary} px-4 py-2`}>
                     {t('settings.enrollGroups.create')}
                   </button>
                 </div>
@@ -248,7 +291,7 @@ export default function AddHostModal(props: {
             {!edit && !pj && (
               <div className="flex gap-1 rounded-xl bg-ink-800 p-1 text-sm">
                 {(['one', 'many'] as const).map((m) => (
-                  <button key={m} type="button" onClick={() => setMode(m)}
+                  <button key={m} type="button" onClick={() => setMode(m)} aria-pressed={mode === m}
                     className={`flex-1 rounded-lg px-3 py-1.5 font-medium transition ${
                       mode === m ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
                     {m === 'one' ? t('addhost.modeOne') : t('addhost.modeMany')}
@@ -268,7 +311,7 @@ export default function AddHostModal(props: {
             {(pj || isJump) ? (
               <div className="flex gap-1 rounded-xl bg-ink-800 p-1 text-sm">
                 {([['ssh-jump', 'SSH-jump'], ['telnet-jump', 'Telnet-jump']] as [ConnType, string][]).map(([ct, lbl]) => (
-                  <button key={ct} type="button"
+                  <button key={ct} type="button" aria-pressed={connType === ct}
                     onClick={() => { setConnType(ct); setPort(ct === 'telnet-jump' ? 23 : 22) }}
                     className={`flex-1 rounded-lg px-2 py-1.5 text-[13px] font-medium transition ${
                       connType === ct ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
@@ -279,7 +322,7 @@ export default function AddHostModal(props: {
             ) : (
               <div className="flex gap-1 rounded-xl bg-ink-800 p-1 text-sm">
                 {([['agent', 'Agent'], ['ssh', 'SSH'], ['telnet', 'Telnet']] as [ConnType, string][]).map(([ct, label]) => (
-                  <button key={ct} type="button"
+                  <button key={ct} type="button" aria-pressed={connType === ct}
                     onClick={() => { setConnType(ct); setPort(ct === 'telnet' ? 23 : 22) }}
                     className={`flex-1 rounded-lg px-2 py-1.5 text-[13px] font-medium transition ${
                       connType === ct ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
@@ -306,8 +349,8 @@ export default function AddHostModal(props: {
 
             <label className="block">
               <span className={label}>{t('addhost.name')}</span>
-              <input autoFocus required placeholder={t('addhost.namePlaceholder')}
-                value={name} onChange={(e) => setName(e.target.value)} className={field} />
+              <input ref={firstFieldRef} autoFocus required placeholder={t('addhost.namePlaceholder')}
+                {...invalid} value={name} onChange={(e) => setName(e.target.value)} className={field} />
             </label>
 
             {connType !== 'agent' && (
@@ -496,9 +539,9 @@ export default function AddHostModal(props: {
               )}
             </label>
 
-            {error && <div className="text-sm wt-danger">{error}</div>}
+            <div id="addhost-error" role="alert" className={error ? 'text-sm wt-danger' : 'sr-only'}>{error}</div>
             <div className="flex flex-wrap justify-end gap-2">
-              <button type="button" onClick={props.onClose} className="rounded-lg px-4 py-2 text-sm text-slate-400 hover:bg-ink-800">
+              <button type="button" onClick={props.onClose} className={`${btn.ghost} px-4 py-2`}>
                 {t('addhost.cancel')}
               </button>
               {/* preset jump: pe lângă „Salvează" (ţintă cuibărită sub agent), oferă „Conectează o
@@ -510,7 +553,7 @@ export default function AddHostModal(props: {
                   {t('addhost.connectOnce')}
                 </button>
               )}
-              <button disabled={busy} className="rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-50">
+              <button disabled={busy} className={`${btn.primary} px-4 py-2`}>
                 {busy ? (edit ? t('addhost.saving') : t('addhost.adding'))
                   : edit ? t('addhost.save')
                   : connType === 'agent' ? t('addhost.continue')
@@ -526,7 +569,7 @@ export default function AddHostModal(props: {
               {created.connection_type === 'ssh' ? t('addhost.sshInstallLater') : ''}
             </p>
             <div className="mt-4 flex justify-end">
-              <button onClick={props.onClose} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500">
+              <button onClick={props.onClose} className={`${btn.primary} px-4 py-2`}>
                 {t('addhost.done')}
               </button>
             </div>
@@ -537,27 +580,59 @@ export default function AddHostModal(props: {
             <p className="mt-1 text-sm text-slate-500">
               {t('addhost.installDesc')}
             </p>
-            <InstallCommand command={created.install_command!}
+            {/* `?? ''`, nu `!`: un răspuns fără comandă afişa literal „undefined" (audit B27) */}
+            <InstallCommand command={created.install_command ?? ''}
                             commandDedicated={created.install_command_dedicated} />
-            {error && <div className="mt-2 text-sm wt-danger">{error}</div>}
+            <div role="alert" className={error ? 'mt-2 text-sm wt-danger' : 'sr-only'}>{error}</div>
             <div className="mt-4 flex items-center justify-between">
-              <div className="text-sm">
+              {/* `role="status"`: „agentul s-a conectat" e anunţat, nu doar colorat în verde */}
+              <div className="text-sm" role="status">
                 {online ? (
                   <span className="wt-good">{t('addhost.agentConnected')}</span>
                 ) : (
                   <span className="text-slate-500">
-                    <span className="mr-1 inline-block h-2 w-2 animate-pulse rounded-full bg-amber-500" />
+                    <span aria-hidden="true" className="mr-1 inline-block h-2 w-2 animate-pulse rounded-full bg-amber-500" />
                     {t('addhost.waitingAgent')}
                   </span>
                 )}
               </div>
-              <button onClick={props.onClose}
-                className={`rounded-lg px-4 py-2 text-sm font-medium ${
-                  online ? 'bg-emerald-600 text-white hover:bg-emerald-500' : 'text-slate-400 hover:bg-ink-800'
-                }`}>
+              <button onClick={props.onClose} className={`${online ? btn.primary : btn.ghost} px-4 py-2`}>
                 {online ? t('addhost.done') : t('addhost.closeInstallLater')}
               </button>
             </div>
+            {stuck && !online && (
+              <section className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs" aria-labelledby="addhost-stuck-title">
+                <h3 id="addhost-stuck-title" className="wt-warn text-sm font-semibold">{t('addhost.stuckTitle')}</h3>
+                <p className="mt-1 text-slate-400">{t('addhost.stuckIntro')}</p>
+                <ol className="mt-2 list-decimal space-y-1 pl-4 text-slate-300">
+                  <li>{t('addhost.stuckFirewall', { gateway: window.location.host })}</li>
+                  <li>{t('addhost.stuckToken')}</li>
+                  <li>{t('addhost.stuckPython', { min: AGENT_PYTHON_MIN })}</li>
+                  <li>{t('addhost.stuckTime')}</li>
+                  <li>
+                    {t('addhost.stuckLog')}{' '}
+                    <code className="select-all rounded bg-ink-900 px-1 font-mono text-[11px] text-slate-200">journalctl --user -u webterm-agent -n 50</code>{' '}
+                    · <code className="select-all rounded bg-ink-900 px-1 font-mono text-[11px] text-slate-200">tail -n 30 ~/.webterm/ptyd.log</code>
+                  </li>
+                </ol>
+                {/* ce a văzut gateway-ul: încercări refuzate = cauza, nu simptomul */}
+                <h4 className="mt-3 font-semibold text-slate-300">{t('addhost.stuckEvents')}</h4>
+                {events && events.length > 0 ? (
+                  <ul className="mt-1 space-y-0.5">
+                    {events.map((e, i) => (
+                      <li key={i} className="flex gap-2">
+                        <span className="shrink-0 font-mono tabular-nums text-slate-500">{fmtTs(e.ts)}</span>
+                        <span className={/bad_token|conflict|pin_mismatch|refused/.test(e.reason) ? 'wt-danger' : 'text-slate-300'}>
+                          {eventLabel(e)}{e.detail ? ` — ${e.detail}` : ''}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="mt-1 text-slate-500">{events === null ? t('addhost.stuckLoading') : t('addhost.stuckNoEvents')}</p>
+                )}
+              </section>
+            )}
           </div>
         )}
       </div>

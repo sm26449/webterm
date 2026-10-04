@@ -5,7 +5,7 @@ import json
 import time
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel
 from webauthn import (generate_authentication_options,
                       generate_registration_options, options_to_json,
@@ -60,12 +60,12 @@ def _consume(credential: dict) -> bytes:
         client_data = json.loads(base64url_to_bytes(credential["response"]["clientDataJSON"]))
         challenge_b64 = client_data["challenge"]
     except (KeyError, ValueError):
-        raise HTTPException(400, "malformed credential")
+        raise ApiError(400, "passkey.malformed", "malformed credential")
     expiry = _challenges.pop(challenge_b64, None)
     if expiry is None:
         expiry = _challenges_anon.pop(challenge_b64, None)
     if not expiry or expiry < time.time():
-        raise HTTPException(400, "unknown or expired challenge; try again")
+        raise ApiError(400, "passkey.challengeExpired", "unknown or expired challenge; try again")
     return base64url_to_bytes(challenge_b64)
 
 
@@ -103,8 +103,8 @@ async def _verify_reauth(user, password: str) -> bool:
     key = "reauth:%d" % user["id"]
     allowed, retry = security.login_allowed(key)
     if not allowed:
-        raise HTTPException(429, "too many attempts; retry in %ds" % retry,
-                            headers={"Retry-After": str(retry)})
+        raise ApiError(429, "auth.rateLimited", f"too many attempts; retry in {retry}s",
+                       headers={"Retry-After": str(retry)}, vars={"retry": int(retry)})
     await security.apply_global_tarpit(retry)   # F-02: frână, nu poartă
     if await security.verify_password_async(password, user["password_hash"]):
         security.record_login_success(key)
@@ -178,7 +178,7 @@ async def register_verify(body: CredentialBody, request: Request,
     # M1: înrolarea unui passkey e o schimbare de credențiale — un cookie furat NU trebuie să poată
     # adăuga un factor persistent. Cerem re-autentificare cu parola contului (plafonată) + notificare.
     if not await _verify_reauth(user, body.password):
-        raise HTTPException(401, "re-enter your account password to add a passkey")
+        raise ApiError(401, "passkey.passwordRequired", "re-enter your account password to add a passkey")
     await second_gate(user, request, body, "enrol a passkey on your WebTerm account")
     expected = _consume(body.credential)
     try:
@@ -189,7 +189,7 @@ async def register_verify(body: CredentialBody, request: Request,
             expected_origin=config.PUBLIC_URL,
         )
     except Exception as e:
-        raise HTTPException(400, "verification failed: %s" % e)
+        raise ApiError(400, "passkey.verifyFailed", "verification failed: %s" % e)
     await db.execute(
         "INSERT INTO webauthn_credentials(user_id, credential_id, public_key,"
         " sign_count, name, created) VALUES(?,?,?,?,?,?)",
@@ -215,8 +215,8 @@ async def login_verify(body: CredentialBody, request: Request, response: Respons
     ip = security.client_ip(request)
     allowed, retry = security.login_allowed(ip)
     if not allowed:
-        raise HTTPException(429, f"too many attempts; retry in {retry}s",
-                            headers={"Retry-After": str(retry)})
+        raise ApiError(429, "auth.rateLimited", f"too many attempts; retry in {retry}s",
+                       headers={"Retry-After": str(retry)}, vars={"retry": int(retry)})
     await security.apply_global_tarpit(retry)   # F-02: frână, nu poartă
     expected = _consume(body.credential)
     cred_id = base64url_to_bytes(body.credential.get("rawId", ""))
@@ -224,7 +224,7 @@ async def login_verify(body: CredentialBody, request: Request, response: Respons
         "SELECT * FROM webauthn_credentials WHERE credential_id=?", cred_id)
     if not row:
         security.record_login_failure(ip)
-        raise HTTPException(401, "unknown passkey")
+        raise ApiError(401, "passkey.unknown", "unknown passkey")
     try:
         result = verify_authentication_response(
             credential=body.credential,
@@ -237,7 +237,7 @@ async def login_verify(body: CredentialBody, request: Request, response: Respons
         )
     except Exception as e:
         security.record_login_failure(ip)
-        raise HTTPException(401, "authentication failed: %s" % e)
+        raise ApiError(401, "passkey.authFailed", "authentication failed: %s" % e)
     await db.execute("UPDATE webauthn_credentials SET sign_count=? WHERE id=?",
                      result.new_sign_count, row["id"])
     security.record_login_success(ip)
@@ -285,8 +285,8 @@ async def stepup_verify(body: StepupVerify, request: Request,
     ip = security.client_ip(request)
     allowed, retry = security.login_allowed(ip)
     if not allowed:
-        raise HTTPException(429, f"too many attempts; retry in {retry}s",
-                            headers={"Retry-After": str(retry)})
+        raise ApiError(429, "auth.rateLimited", f"too many attempts; retry in {retry}s",
+                       headers={"Retry-After": str(retry)}, vars={"retry": int(retry)})
     await security.apply_global_tarpit(retry)   # F-02: frână, nu poartă
     expected = _consume(body.credential)
     cred_id = base64url_to_bytes(body.credential.get("rawId", ""))
@@ -296,7 +296,7 @@ async def stepup_verify(body: StepupVerify, request: Request,
         cred_id, user["id"])
     if not row:
         security.record_login_failure(ip)
-        raise HTTPException(401, "unknown passkey")
+        raise ApiError(401, "passkey.unknown", "unknown passkey")
     try:
         result = verify_authentication_response(
             credential=body.credential,
@@ -309,7 +309,7 @@ async def stepup_verify(body: StepupVerify, request: Request,
         )
     except Exception as e:
         security.record_login_failure(ip)
-        raise HTTPException(401, "2FA verification failed: %s" % e)
+        raise ApiError(401, "passkey.authFailed", "2FA verification failed: %s" % e)
     await db.execute("UPDATE webauthn_credentials SET sign_count=? WHERE id=?",
                      result.new_sign_count, row["id"])
     security.record_login_success(ip)
@@ -335,7 +335,7 @@ async def delete_credential(cred_id: int, body: CredDelete, request: Request,
     # M1: scoaterea unui factor rezistent la phishing e schimbare de credențiale — cere parola
     # (plafonată, ca un cookie furat să nu aibă un oracle de ghicire ne-throttled).
     if not await _verify_reauth(user, body.password):
-        raise HTTPException(401, "wrong account password")
+        raise ApiError(401, "auth.wrongPassword", "wrong account password")
     await second_gate(user, request, body, "remove a passkey from your WebTerm account")
     await db.execute("DELETE FROM webauthn_credentials WHERE id=? AND user_id=?",
                      cred_id, user["id"])

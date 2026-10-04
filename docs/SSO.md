@@ -87,8 +87,12 @@ locked local password, so they can only ever sign in through the IdP.
 
 For a host marked `require_2fa`, sensitive actions need a fresh second factor. An SSO user has
 no local passkey/password, so step-up is a **fresh re-authentication at the IdP** (WebTerm
-redirects with `prompt=login`; the IdP re-checks its own MFA — which can be a passkey there).
-On return you land back in the app and repeat the action. The **local break-glass admin** still
+redirects with `prompt=login` and `max_age=0`; the IdP re-checks its own MFA — which can be a
+passkey there). On return WebTerm checks the `auth_time` claim of the new id_token: an
+authentication older than the step-up request is refused. If the IdP does not emit `auth_time`
+at all, the step-up is still accepted on `prompt=login` alone and the gateway logs one warning —
+configure the IdP to include the claim for a verifiable step-up. Then you land back in the app
+and repeat the action. The **local break-glass admin** still
 uses WebTerm's own passkey/password step-up.
 
 ## Logging & audit

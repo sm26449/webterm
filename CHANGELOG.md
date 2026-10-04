@@ -9,6 +9,12 @@ back.
 
 ## [Unreleased]
 
+## [3.1.0] — 2026-10-04 · agent (54)
+
+**The audit release.** A full nine-section internal audit (2026-10-04) and its first three
+remediation phases shipped together: data-integrity and editor fixes (P0), the bundled agent 54
+(P1), supply-chain and backup hardening (P2), and the UX + accessibility sweep (P3).
+
 ### Added
 - **The host page is now a dashboard hub with a left section rail.** A vertical nav (icons +
   labels) on the left — Overview · Sessions · Files · Forwards · Services · Docker · Databases —
@@ -27,7 +33,7 @@ back.
   dashboard, one column in the narrow session drawer and multi-column inline. Agent-only sections
   show only
   when the agent is online; ssh/telnet/jump hosts get Overview + Sessions. Serial and Diagnostics
-  stay as header actions. Each panel is lazy-loaded (Files pulls Monaco).
+  live in a **Tools** group at the bottom of the rail. Each panel is lazy-loaded (Files pulls Monaco).
 - **Jump targets are saved as children of their agent, added from its ⋯ menu.** "Add SSH / Telnet
   jump…" on an agent host opens Add-host already scoped to that agent: pick the protocol (SSH or
   Telnet), the LAN target, and save. The saved target appears **nested under the agent** in the
@@ -62,10 +68,281 @@ back.
   Home/tab navigation does — the split chip stays in the bar, so you return with one click.
 - **File editor is now Monaco (the VS Code editor).** Browsing a host's files and opening one gives
   the authentic VS Code editing surface — syntax highlighting, minimap, multi-cursor, the `vs-dark`
-  theme — reading and writing through the agent exactly as before (partial-read for big files,
+  theme following the app theme — reading and writing through the agent exactly as before (partial-read for big files,
   atomic save with mtime conflict check, step-up retry on 2FA hosts). Monaco and its workers are
   **bundled locally** (no CDN, no phone-home) and **lazy-loaded** — they download only when you open
-  a file, never in the main bundle. Replaces the CodeMirror editor (18 deps dropped). Agent untouched.
+  a file, never in the main bundle. Replaces the CodeMirror editor (19 deps dropped). Agent untouched.
+
+### Changed — agent (54), one bundled rollout
+*(2026-10-04 internal audit; everything below rides a single fleet update)*
+- **Big uploads froze the agent and then killed it.** The CRC-32 commit check of a resumable upload
+  read the whole file synchronously on the event loop — the gateway waited up to 600 s, but
+  `WatchdogSec=45` (and the cron liveness check at 120 s) killed the agent first. CRC now runs in a
+  small bounded worker pool (2 workers, queue of 64, `busy` beyond that) so the loop keeps pinging
+  the watchdog; file reads refuse anything that is not a regular file (FIFO/device) via
+  fstat-after-open, closing the stat→open race on `fs_read` too.
+- **A restart of the agent killed every tmux session.** The systemd unit the installer writes had no
+  `KillMode=process`, so the tmux server lived in the service cgroup and any crash / watchdog kill /
+  `systemctl restart` took all sessions with it — the opposite of what ARCHITECTURE.md promises.
+  The installer template now sets `KillMode=process`, and the agent **self-heals existing units**
+  at startup and before a self-update re-exec (only the unit whose `ExecStart` points at itself;
+  user or system scope; `daemon-reload` best effort).
+- **A root agent could kill the `webterm` user's tmux server** on the same host: the tmux cleanup
+  (uninstall, "wedged" recovery) matched only the `-L webterm` socket. It now also requires the
+  agent's own UID.
+- **Hostname forwards blocked the loop on DNS.** `fwd_open` (also behind SSH-jump / telnet-jump) did
+  a synchronous `getaddrinfo`; a slow resolver stalled every session on the host. Literal addresses
+  connect immediately (IPv4 or IPv6); hostnames resolve in a thread with a 10 s budget (`resolve`
+  error on timeout) and count toward the forward cap while pending.
+- **Anti-rollback parser was fail-open.** `AGENT_VERSION = 53  # note` (or any unparsable line)
+  yielded `None` and the update went through. Both sides now use one strict regex
+  (`^AGENT_VERSION\s*=\s*(\d+)\s*(#.*)?$`); the agent refuses with `update_badversion`, and the
+  gateway refuses to push a file it cannot version (`gateway_badversion`, blocked once + event).
+- **Service accounts with `nologin` got dead panels.** `spawn_client` with a command and the `run`
+  op used `$SHELL` as-is, so docker/journal/DB/`run` failed on hosts where the agent user has
+  `/usr/sbin/nologin`. One resolver (`_login_shell`) now serves tmux, pty commands and `run`, falls
+  back to bash/sh, and is resolved before `fork()`.
+- **Serial console accepted any tty** (`/dev/pts/N`, `/dev/tty1`, `/dev/console`). Now an allowlist
+  (`ttyUSB/ttyACM/ttyS/ttyAMA/ttyXRUSB`, `serial/by-id`, `serial/by-path` resolved to one of those)
+  plus a character-device check on the open fd.
+- **Diagnostics: one in flight per agent**, `force` at most every 30 s (busy callers get the last
+  snapshot marked `stale`), instead of a thread per request. Gateway side caps the stored blob at
+  256 KiB (strings cut at 4 KiB; oversized → `diagnostics_oversized` event, last good kept) and reads
+  the OS-updates summary from its own column instead of parsing the whole JSON per host per poll.
+- **Refusal hints from the agent are no longer trusted text**: codes map through an allowlist, free
+  text is stripped of control/CSI sequences and clipped before it reaches the UI or an e-mail.
+- **Docker "no access" card tells the truth**: adding the agent user to `docker` (or `NOPASSWD:ALL`)
+  is root-equivalent and removes the unprivileged-agent barrier from the threat model; the card now
+  leads with a sudoers rule limited to the docker binary (works at once via the `sudo -n` fallback),
+  and the OS-upgrade guide offers `NOPASSWD: <package manager>` instead of `ALL`.
+- Shell integration: under `HISTCONTROL=ignorespace` the hook reported the previous command as the
+  current one; it now emits no command line when history did not record one (the client falls back
+  to screen text).
+- Dead code removed from the agent (`_persist_cert_pin`, `tmux_has_session`, `_sys_read`,
+  `Session.last_respawn`, `Serial.opened_at`); legacy `cert_pin` reading kept for fleet compat.
+  New `agent_v54` (119 checks) and `diagnostics_cap` (21) suites.
+
+### Changed — UX & accessibility sweep (audit P3)
+- **No more browser `confirm()` / `prompt()` / `alert()`.** 55 native dialogs (Sidebar 19,
+  SessionView 10, Toolbox 7, Security 6, Fleet-run 3, …) are now in-app dialogs through one
+  `useConfirm()` provider: themed, translated, focus-trapped, Escape/backdrop cancel, and —
+  for destructive actions — **initial focus on Cancel** so a reflex Enter cannot delete anything.
+  Native dialogs also froze every live terminal and were silently suppressed by Chromium once
+  "don't show again" was ticked (the action then became impossible). Stop/restart of a service or
+  container and deleting a split now ask first and name the object.
+- **Every dialog and drawer is keyboard-complete.** The 7 dialogs without a focus trap (split
+  wizard, host-key card, updates and command dialogs in the sidebar, Docker logs, snippet and
+  connection forms, links dialog) got `role="dialog"`, `aria-modal`, labelled titles, Tab trapping,
+  Escape and focus return; the 6 side drawers (Files, Forwards, Services, Docker, Toolbox, Git,
+  Commands) move focus in on open, back on close, and close on Escape. The command-guard
+  `alertdialog` now takes focus (Enter/Escape no longer leak into the shell). Tabs are a real
+  `tablist` with roving tabindex; **`Alt+Shift+←/→` reorders the focused tab** — the keyboard
+  alternative to drag that WCAG 2.5.7 requires.
+- **Screen readers hear what sighted users see.** Toasts are `role="alert"`/`"status"` elements
+  whose accessible name is the message (the ✕ used to replace it), announced from live regions
+  mounted at start; hovering or focusing the stack pauses dismissal. Every form error is a
+  `role="alert"` with `aria-invalid` + `aria-describedby` on the field and focus moved to the
+  first invalid one (login, add host, editor, serial, notifications, appearance, backup).
+  Login has `autocomplete` for username / current-password / one-time-code. Colour-only status
+  dots (sidebar, tabs, host badge, Docker, Forwards probes) now carry text or a shape difference
+  plus a screen-reader label.
+- **Contrast fixed on the light theme.** 47 token pairs failed 4.5:1 because dark-only Tailwind
+  colours (`text-sky/emerald/amber/rose-300|400`) were used unconditionally; they are replaced by
+  the theme-aware `.wt-good/.wt-danger/.wt-warn/.wt-accent/.wt-link/.wt-info/.wt-muted` classes,
+  whose values were re-measured (all ≥ 4.5:1 on both themes, field borders ≥ 3:1); the dashboard
+  canvas honours the light theme instead of forcing Aurora. Button styles come from
+  `settings/ui.ts` tokens (primary/secondary/danger/ghost). No text below 11 px. Hover-only row
+  actions (files, host cards, commands) are visible on keyboard focus too; all icon-only buttons
+  have names; small targets (10 px probe dot, sort buttons, tag chips, status-bar attach) are now
+  ≥ 24 px hit areas. Romanian catalog: 100 cedilla characters (ş/ţ) replaced with the correct
+  comma-below forms (ș/ț); untranslated leftovers translated.
+- **Idle-lock warning (WCAG 2.2.1).** 60 s before the 2FA idle lock a `role="alert"` banner
+  counts down with an "I'm still here" button; it hides on any activity.
+- **Host-key change is a card, not a toast.** When a jump/SSH host presents a different key, a
+  persistent `alertdialog` shows host, pinned vs received fingerprint (copyable), what it can mean,
+  and two actions: *Keep blocking* (default) or *I reinstalled this host — trust the new key*
+  (step-up gated, re-pins, audited, e-mailed).
+- **First run explains itself.** After 45 s of "waiting for the agent" the Add-host dialog shows a
+  troubleshooting checklist (outbound 443, whole token, Python minimum, time sync, the
+  `journalctl` command) and the host's last agent events — the gateway now records distinct
+  handshake rejections (`bad token`, `instance conflict`, `pin mismatch`). The update check shows
+  "could not check" with a retry instead of a stale "up to date".
+- **SSH keys: results you can see, rotation you can trust.** Multi-target deploy and rotate show a
+  per-target result panel (ok / translated error, stays until dismissed, *Retry the failed
+  targets*). Rotate now deploys the new key to every target **before** swapping the source key;
+  an offline target no longer aborts the loop — it is marked `missing`, keeps the old line, and
+  the response lists what was left with the old key.
+- **Errors are translated, not Python.** 183 `HTTPException("english prose")` became coded
+  `ApiError`s (`host.*`, `session.*`, `files.*`, `backup.*`, `account.*`, `auth.*`, `sshkey.*`,
+  `services.*`, `docker.*`, `run.*`, `token.*`, …) with 128 new catalog entries in both languages;
+  `str(e)` pass-throughs go through classifiers (`files.permissionDenied / notFound / noSpace /
+  crcMismatch / conflict / timeout`, `signing.locked`, `update.refused`, …) and the raw text stays
+  in the log. Errors can carry variables (`X-WebTerm-Error-Vars` + `vars` in the body) for the next
+  step. Handshake rejections from agents are recorded as `agent_events`
+  (`handshake_bad_token`, `handshake_instance_conflict`, rate-limited) and logged with the IP.
+  Startup now **refuses to boot on a failed migration** (other than "duplicate column") instead
+  of logging and running on a partial schema. New suites: `api_errors`, `hostkey_alarm`,
+  `handshake_events`, `migration_failfast`.
+- Debounced searches (sidebar, history, audit) ignore stale responses; nested jump targets are
+  found when only the child matches (parent shown dimmed); legacy orphans render at top level;
+  upload progress re-renders at most 10×/s; every `localStorage` access goes through a guarded
+  helper (a `SecurityError` no longer sends the app to the failsafe page).
+- **CI accessibility gate rebuilt**: `eslint-plugin-jsx-a11y` (27 rules at error, 4 at warn,
+  `no-autofocus` off for modal dialogs), axe with `wcag22aa` + `best-practice`, **any**
+  `target-size`/`color-contrast` violation blocks, 15 → 62 scanned surfaces (host hub tabs,
+  panels, Toolbox, every Settings tab, Add-host forms, Fleet-run, `?`, palette, ConfirmModal,
+  error toast, Monaco with an agent) on both themes, 12 keyboard checks (Tab order, Escape +
+  focus return, ConfirmModal cycle, palette, tab reorder), mobile audit blocks on < 24 px targets
+  and checks 320 px reflow.
+
+### Changed — deployment & supply chain (audit P2)
+- **`upgrade.sh` deploys by digest, not by mutable tag.** It used to pull `ghcr.io/…:vX.Y.Z` and
+  then run **root-owned host scripts extracted from that image** — a re-pointed tag or a compromised
+  registry meant root on the gateway host. The tag is now resolved to its digest once after the
+  pull; version check, signature check, deploy-kit extraction and the deploy itself all use
+  `repo@sha256:…`; `.env` records `WEBTERM_IMAGE=<repo@digest>` plus `WEBTERM_IMAGE_TAG` for the
+  label; `rollback.sh` returns to the previous *digest*. **cosign** verification runs when `cosign`
+  is installed and `WEBTERM_COSIGN_IDENTITY` is set (issuer defaults to GitHub) and fails closed;
+  otherwise one explicit `SKIPPED (<reason>)` line — never silent. CI now publishes **provenance
+  (`mode=max`) + SBOM** and signs the pushed digest keyless (`cosign-installer` pinned by SHA,
+  `id-token: write` only on that job); the verify command is in RUNBOOK. `--allow-unpinned` is the
+  escape hatch. New `deploy_script` suite (53 checks) actually executes deploy/rollback/remove with
+  a stubbed `docker`.
+- **Secrets leave the container environment.** `dockerproxy` with `CONTAINERS=1` let the exposed
+  Traefik read `Config.Env` of every container — Cloudflare token, OIDC client secret, SMTP
+  password, setup token. The gateway now reads `*_FILE` variants (`WEBTERM_SETUP_TOKEN_FILE`,
+  `WEBTERM_OIDC_CLIENT_SECRET_FILE`, `WEBTERM_SMTP_PASSWORD_FILE`, …; the plain variable still wins
+  when set), `docker-compose.prod.yml` wires them as file-based `secrets:` from `./secrets/`,
+  Traefik gets `CF_DNS_API_TOKEN_FILE`, Postgres `POSTGRES_PASSWORD_FILE`. `install.sh`/`deploy.sh`
+  write the files (0700 dir) and **migrate an existing `.env`** on the next run (values blanked in
+  `.env` after the files exist). Secrets no longer appear on any command line (`curl -K -` via
+  stdin; in-process `.env` rewrite instead of `sed` — which also fixes `&|\` corruption in
+  `set_cert_env`).
+- **Compose hardening** for every service, not only `app`: `cap_drop: [ALL]` + the minimal
+  `cap_add`, `no-new-privileges`, memory/pids limits, json-file log rotation; `read_only` + `tmpfs`
+  for dockerproxy, Traefik, Redis (Postgres/Authentik left writable — their writable paths are not
+  documented); `postgres:16.15-alpine`, `redis:7.4.11-alpine` pinned to exact minors. Dev Caddy
+  hardened the same way. `.dockerignore` now excludes `.env*`, `*.pem`, `*.key`, `secrets/`,
+  `.venv/`, `node_modules/`, `tests/` (the image was verified to still build and to carry none of
+  them). `remove.sh` removes only this project's image repo and skips images still in use.
+
+### Changed — backups & alerts (audit P2)
+- **Scheduled backups could silently never run.** The scheduler checked "is it due?" only one hour
+  after boot and against the schedule alone, so a gateway restarting more often than hourly made
+  zero backups and raised zero alerts. Due is now computed against the **last successful** backup
+  (never ran → due now), the first tick runs 60 s after boot (catch-up), an `asyncio.Lock` prevents
+  overlapping runs, and a failure persists `backup_last_error` (stage: local/cloud, destination
+  name), lights the existing attention flag and e-mails (12 h throttle).
+- **Archives written atomically** (`.tmp` → fsync → `os.replace`, 0600) — a crash mid-write no
+  longer leaves a truncated `.wtsnap` that the UI offered for download; stale `.tmp` files are
+  pruned. **Off-host uploads have timeouts** (connect / per-operation / close) and go to
+  `name.part` then rename, so a half-open SFTP/FTPS server can no longer hang the backup task
+  forever and a partial upload is never listed as a valid archive.
+- **Settings → Backup shows the truth**: last run (ok/failed, time), the last error in red until
+  the next success, next due / overdue, the off-host destination line with its last good copy, and
+  a preview (name, size, file date) before a restore. **Settings → Notifications** shows e-mail and
+  webhook *last sent / last failed*.
+
+### Changed — gateway security (audit P2, LOW findings closed)
+- **Guard-rule regex budget that actually works.** The 0.25 s "budget" per command-guard rule was
+  a `wait_for` around a thread, which cannot be interrupted: a pathological rule (`^(a+)+$`) held
+  `/run` for 12.9 s and ate a pool thread per call. Matching now runs in a dedicated minimal worker
+  process killed on timeout (measured 0.31 s end to end), the rule is logged + audited as over
+  budget, and **saving** a pathological rule is rejected with 400 after a short fuzz.
+- `X-Webterm-Version` is emitted only for a **valid** session, not for any cookie-shaped value;
+  `GET /api/hosts/{id}/connections` is behind the same step-up as forwards on 2FA hosts (the
+  Toolbox and Forwards panels now open the passkey prompt instead of showing a bare 403);
+  SSO step-up sends `max_age=0` and refuses a stale `auth_time` (absent `auth_time` is accepted
+  with one warning — documented in SSO.md); `Trailer` is now really stripped from proxied forward
+  requests (`_HOP_BY_HOP` said `trailers`; new `forward_proxy_headers` suite); e-mail addresses are
+  validated with one rule at setup, create-user and PATCH /account (`account.badEmail`);
+  `tail_altscreen_test` asserts on the real `core.ALT_SCREEN_RE` instead of a stale copy that lacked
+  `1048`.
+
+### Fixed
+*(from the 2026-10-04 internal audit; everything below is gateway/frontend only,
+agent untouched)*
+- **Deleting a host left everything that referenced it behind — and the next host inherited it.**
+  `hosts.id` is reused by SQLite (no AUTOINCREMENT) and `ON DELETE CASCADE` never ran (foreign keys
+  are off), yet delete/uninstall/the ephemeral reaper removed only `connections` + `hosts`. A fresh
+  host — the normal case for connect-once targets — appeared with the old host's **active forwards**,
+  session history, agent events and update flags, and saved jump targets under a deleted agent
+  vanished from the sidebar (rendered only beneath their parent) while staying in the DB, undeletable.
+  One `core.purge_host()` now backs all three paths: sessions (transcripts **archived**, not
+  orphaned — the reaper used to skip this), forwards (ticket epoch bumped), agent events,
+  connections, RAM state; command history keeps its global rows but drops the id link. Deleting an
+  agent with **persistent** jump children is refused with 409 `host.hasJumpChildren`; ephemeral
+  children go with the parent. SSH deploy-key evidence is **detached, not deleted** (M-6: the key is
+  still on the machine): rows move to the negated id, so they stay visible as orphans but can't attach
+  to a reborn host. The sidebar also shows legacy orphans (parent missing) at top level so they can be
+  deleted. New `host_delete` suite (56 checks).
+- **Telnet-jump hosts always read `online: false`**, so their live sessions showed in neither the
+  active nor the closed list on the host page. `online` for ssh-jump/telnet-jump now follows the
+  parent agent's connection, everywhere the flag is emitted (host JSON, status counts, events, ws init).
+- **Host edits could brick a host or break the jump family.** `via_host_id` pointing at the host
+  itself, or a cycle (A via B via A), is refused with 400 `sshjump.viaLoop` (bounded chain walk);
+  retyping an agent that still has saved jump children is refused; leaving the jump family clears
+  `via_host_id`; `POST /api/hosts` rejects an unknown `connection_type` with 400 instead of silently
+  coercing it to `agent`; telnet hosts created through the API default to port 23 (the `or 23` could
+  never fire because 22 was always written).
+- **An agent's whole connection died on a persist error or an odd control frame.** A disk-full or
+  "database is locked" on one session's output tore down all sessions and forwards of that host,
+  the agent reconnected in seconds, hit the same write and the fleet flapped; `on_output` failures
+  now drop the frame and log once per 30 s. Control frames that are valid JSON but not an object
+  (`42`, `[]`), or carry wrong types, raised `TypeError`/`KeyError` past the `ValueError`-only guard
+  with the same effect — all caught now. `_shutdown()` also cancelled an in-flight `on_exit` when
+  an agent with a deferred update re-exec'd right after the last session exited, leaving the session
+  `live` in the DB and later "lost" with a Reconnect button for a shell that ended normally;
+  exit handling now survives the connection.
+- **HTTP forwards on 2FA hosts were an infinite redirect loop (feature dead, fail-closed).** The
+  step-up check on the forward subdomain read the main-domain session cookie, which — `__Host-`,
+  host-only — never arrives there, then redirected *relatively* to itself; the test faked the cookie.
+  The window is now checked against the **user id signed into the forward ticket**, the redirect is
+  absolute to the public URL, and `next` is validated (relative path only, never `//`, never
+  `/__wtfwd/*`). The **WebSocket** path now enforces the same window at handshake and in the 60 s
+  revalidation (close 1008) — previously an open WS to a 2FA host survived up to 55 min after the
+  window closed. `fwd-test.sh` gained the end-to-end subdomain GET.
+- **The Monaco editor discarded unsaved edits** on Escape, scrim click, Close or page reload — no
+  dirty tracking at all — and **Ctrl+S saved twice** (window capture listener + Monaco command).
+  Edits are tracked against the saved version (undo back to clean counts as clean); closing while
+  dirty asks via ConfirmModal, `beforeunload` guards reloads, an unsaved dot shows in the title, Save
+  is disabled when clean; Ctrl+S inside the editor is Monaco's alone. Tab inside Monaco indents
+  instead of jumping to the Save button (the focus trap now respects `defaultPrevented`). The theme
+  follows the app theme (`vs` on light) and switches live. The legacy file browser (Sidebar ⋯ →
+  Files) saved **without the mtime check** and silently overwrote concurrent edits; it now sends
+  `if_mtime` and shows the same conflict banner as the file panel.
+- **Reconnects were blind, and terminal close codes were ignored.** Keystrokes typed while a session
+  was "reconnecting…" (watchdog 60 s, backoff up to 20 s after laptop sleep) vanished silently; the
+  terminal now shows an explicit *input paused* curtain that flashes on each dropped key and reports
+  the count after reconnect (no blind replay: the gateway replays output only, and a buffered
+  `rm` landing in a changed shell is worse than retyping). Gateway close codes 4401 (session
+  expired) / 4403 (forbidden) / 4404 (session gone) used to feed the retry loop forever, and an
+  expired login swapped the whole app for the login page without a word; they now stop retrying
+  and say why, with a *Sign in again* action and a banner above the login form explaining the
+  expiry. First connection is labelled *Connecting*, not *Reconnecting*.
+- **`Ctrl+Shift+W` / `Ctrl+Shift+T` are reserved by Chromium** (close window / reopen browser tab)
+  and could never reach the app. Close tab is now `Alt+W`, reopen `Alt+T`; `shortcut.pastePicker`
+  was missing from both catalogs (raw key in the `?` cheatsheet); SHORTCUTS.md now matches
+  `lib/shortcuts.ts` exactly (adds `Mod+Shift+V`, `Mod+S` in the editor, `Mod+Enter` in Git).
+- **Ephemeral (connect-once) targets leaked into Dashboard, the command palette and Fleet-run**
+  with counts — only the sidebar filtered them. One `isEphemeralHost()` predicate now serves all.
+- **`install.sh --with-authentik` produced an empty Authentik domain.** The interactive path called
+  `ask` with its arguments inverted (`"invalid variable name"`), `err` didn't exit, and the profile
+  was written active with `AUTHENTIK_DOMAIN=""`. `ask` gained an optional default (Enter accepts
+  `auth.<domain>`) and an empty value now aborts.
+- **Scheduled backup/cert-check timers on existing installs had `Persistent=` silently off.** The
+  installed units carried `Persistent=true  # comment` on one line; systemd rejects inline comments
+  ("Failed to parse boolean value, ignoring") so a missed run was never caught up. The repo units
+  were already fixed, but nothing ever re-synced them: `upgrade.sh` now ships the units in the
+  deploy kit (Dockerfile) and re-renders them into `/etc/systemd/system` (only units it installed,
+  `.bak` kept, `daemon-reload` + re-enable), with 12 new checks in the upgrade suite.
+- **Docs that contradicted the code.** SECURITY.md claimed scheduled backups are unencrypted (they
+  refuse to run unencrypted; the installer generates the passphrase); README said `git checkout
+  v2.0.19` and that image deploys require Cloudflare DNS-01 (HTTP-01 is the default); README
+  screenshots are labelled as v2.0.0/CodeMirror until regenerated; PORT-FORWARDING.md called
+  SSH-jump "deferred". New **docs/SSH-KEYS.md** and **docs/SSH-JUMP.md** document the 3.0.0 headline
+  features (previously undocumented). `scripts/e2e-jump.mjs` — written for 3.0.0 but run nowhere — is
+  now a CI step (own container, `jump` in `ci-local.sh`); `unit-tests` gate is 67 suites.
 
 ## [3.0.0] — 2026-10-02 · agent (53)
 

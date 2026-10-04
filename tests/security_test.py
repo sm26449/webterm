@@ -174,6 +174,14 @@ async def main():
             r = await h.get("/api/state")
             authed = r.status_code == 200 and bool(r.json().get("authenticated"))
             ok("sesiune autentificată (din setup)", authed)
+            # ── X-Webterm-Version doar pe o sesiune care VALIDEAZĂ (audit 2026-10-04) ──
+            ok("X-Webterm-Version prezent pe sesiune validă", bool(r.headers.get("x-webterm-version")))
+            async with httpx.AsyncClient(base_url=BASE) as anon:      # fără jar de cookie-uri
+                r = await anon.get("/api/state")
+                ok("X-Webterm-Version absent fără cookie", "x-webterm-version" not in r.headers)
+                r = await anon.get("/api/state", headers={"Cookie": "wt_session=bogus-token"})
+                ok("X-Webterm-Version absent cu un cookie INVENTAT (nu doar prezent)",
+                   r.status_code == 200 and "x-webterm-version" not in r.headers)
             r = await h.post("/api/totp/setup", json={})
             ok("TOTP setup autentificat, fără parolă → 401", r.status_code == 401)
             r = await h.post("/api/totp/activate", json={"code": "000000"})

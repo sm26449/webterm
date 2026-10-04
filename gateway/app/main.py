@@ -10,11 +10,12 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from urllib.parse import urlparse
 
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from . import (api, audit, backup, cloudbackup, config, core, db, email_alerts, health,
+from .errors import ApiError
+from . import (api, audit, backup, config, core, db, email_alerts, health,
                oidc_api, security, signing, webauthn_api)
 
 logging.basicConfig(level=logging.INFO,
@@ -173,32 +174,26 @@ CSP = (
 
 
 _BACKUP_TICK = 3600.0          # verificăm o dată pe oră dacă e timpul de un backup programat
+_BACKUP_BOOT_DELAY = 60.0      # prima verificare la scurt timp DUPĂ boot, nu după un tick întreg
 
 
 async def _scheduled_backup() -> None:
     """Backup automat (off/daily/weekly), scris necriptat în data/backups/ (serverul are
-    oricum cheia). Retenție 7 zile. La final ridică flagul de notificare (backup_last) ca
-    UI-ul să ofere userului descărcarea (criptată cu parola lui)."""
+    oricum cheia). Retenție 7 zile. Logica (scadenţă faţă de ultimul backup REUŞIT, gardă de
+    suprapunere, `backup_last_error`, alertă) stă în `api.scheduled_backup_tick`.
+
+    De ce prima verificare e la 60 s şi nu la 1 h: cu `sleep(TICK)` la ÎNCEPUTUL buclei, un
+    gateway care reporneşte mai des decât o oră (crash-loop, health-gate la deploy, upgrade-uri
+    dese) nu ajungea NICIODATĂ la verificare → zero backup-uri şi zero alerte (audit G-13).
+    Scadenţa e calculată faţă de ultimul succes, deci o rulare pierdută se recuperează la
+    primul tick (catch-up), nu la următoarea oră fixă."""
+    await asyncio.sleep(_BACKUP_BOOT_DELAY)
     while True:
-        await asyncio.sleep(_BACKUP_TICK)
         try:
-            sched = await api._get_setting("backup_schedule", "off")
-            if sched not in ("daily", "weekly"):
-                continue
-            last = float(await api._get_setting("backup_last", "0") or 0)
-            period = 86400 if sched == "daily" else 7 * 86400
-            now = time.time()
-            if now - last < period:
-                continue
-            inc = (await api._get_setting("backup_include_tx", "0")) == "1"
-            name = await asyncio.to_thread(backup.run_scheduled_backup, inc)
-            await api._set_setting("backup_last", str(now))
-            log.info("scheduled backup (%s) written: %s", sched, name)
-            # copie off-host, dacă e configurat un cloud: criptată cu parola userului,
-            # eșecul se raportează în UI dar nu invalidează backup-ul local
-            await cloudbackup.upload_scheduled(name)
+            await api.scheduled_backup_tick()
         except Exception:
-            log.exception("the scheduled backup failed")
+            log.exception("the scheduled backup tick failed")
+        await asyncio.sleep(_BACKUP_TICK)
 
 
 @asynccontextmanager
@@ -292,6 +287,17 @@ async def lifespan(app: FastAPI):
 # într-un router al nostru. Le stingem: schema se generează oricând local, din cod.
 app = FastAPI(title="WebTerm", lifespan=lifespan,
               docs_url=None, redoc_url=None, openapi_url=None)
+
+
+@app.exception_handler(ApiError)
+async def _api_error_handler(request: Request, exc: ApiError):
+    # Handlerul implicit al FastAPI scrie doar `{"detail": ...}` — codul ajungea DOAR în antet.
+    # curl/scripturile/tokenurile de automatizare nu citesc antete, deci pentru ele codul stabil
+    # nu exista. Îl punem şi în corp (+ `vars`), cu antetele neschimbate; `detail` rămâne acelaşi.
+    body = {"detail": exc.detail, "code": exc.code}
+    if exc.vars:
+        body["vars"] = exc.vars
+    return JSONResponse(body, status_code=exc.status_code, headers=exc.headers)
 
 
 _AUDIT_METHODS = ("POST", "PUT", "PATCH", "DELETE")
@@ -446,8 +452,19 @@ async def security_headers(request: Request, call_next):
     # gateway-ului fără să aibă cont — adică putea potrivi o instalaţie cu un CVE viitor
     # înainte să încerce ceva. Cerem cookie-ul de sesiune: bannerul de versiune îl vede oricum
     # doar cine e logat. Semnalat de un audit extern, 2026-08-09.
-    if request.url.path.startswith("/api/") and request.cookies.get(security.COOKIE_NAME):
-        resp.headers.setdefault("X-Webterm-Version", config.GATEWAY_VERSION)
+    #
+    # „Cerem cookie-ul" însemna PREZENŢA lui, nu validitatea: `Cookie: __Host-wt_session=x`
+    # inventat de oricine primea versiunea exactă (audit 2026-10-04). Acum sesiunea trebuie să
+    # VALIDEZE — `session_valid` e calea ieftină (un SELECT, fără slide de `last_seen`, acelaşi
+    # test ca revalidarea WS-urilor). Orice eroare (DB încă neconectat la boot) = neautentificat.
+    if request.url.path.startswith("/api/"):
+        tok = request.cookies.get(security.COOKIE_NAME)
+        try:
+            authed = bool(tok) and await security.session_valid(tok)
+        except Exception:                      # noqa: BLE001 — antetul e opţional, răspunsul nu
+            authed = False
+        if authed:
+            resp.headers.setdefault("X-Webterm-Version", config.GATEWAY_VERSION)
     # asset-urile au nume cu hash → cache lung; restul (index.html, API) revalidate
     # mereu, ca un deploy nou să apară imediat fără hard-refresh
     if request.url.path.startswith("/assets/"):

@@ -10,6 +10,10 @@ import { copyText } from '../lib/clipboard'
 
     `enable-linger` face parte din comandă, nu din documentație: fără el `systemd --user`
     oprește serviciul când userul n-are sesiune de login, iar agentul pare că moare singur. */
+/** Versiunea minimă de Python cerută de agent (ptyd.py: „Python 3.6+ stdlib-only"). Exportată
+    ca panoul de depanare din AddHostModal să nu repete cifra de capul lui. */
+export const AGENT_PYTHON_MIN = '3.6'
+
 export default function InstallCommand(props: { command: string; commandDedicated?: string }) {
   const { t } = useI18n()
   const [dedicated, setDedicated] = useState(true)
@@ -28,6 +32,7 @@ export default function InstallCommand(props: { command: string; commandDedicate
     <button
       type="button"
       onClick={p.onClick}
+      aria-pressed={p.on}
       className={`rounded-md px-2.5 py-1 text-xs font-medium transition ${
         p.on ? 'bg-ink-700 text-slate-100' : 'text-slate-400 hover:text-slate-200'}`}
     >
@@ -66,6 +71,7 @@ export default function InstallCommand(props: { command: string; commandDedicate
         >
           {copied ? '✓' : t('addhost.copy')}
         </button>
+        <span role="status" className="sr-only">{copied ? t('settings.update.copied') : ''}</span>
       </div>
       <p className="mt-2 text-xs text-slate-500">
         {dedicated && props.commandDedicated ? t('addhost.dedicatedHint') : t('addhost.currentHint')}
@@ -78,7 +84,7 @@ export default function InstallCommand(props: { command: string; commandDedicate
           {t('addhost.insecureBootstrap')}
         </p>
       )}
-      {err && <div className="mt-2 text-sm wt-danger">{err}</div>}
+      <div role="alert" className={err ? 'mt-2 text-sm wt-danger' : 'sr-only'}>{err}</div>
     </div>
   )
 }

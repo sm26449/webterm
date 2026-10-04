@@ -43,6 +43,12 @@ COPY scripts/backup.sh scripts/restore.sh scripts/cert-check.sh ./deploy-kit/scr
 # `deploy.sh --with-authentik` să poată provisiona OIDC-ul pe host, iar topologia „Authentik
 # central, N WebTerm" să aibă compose-ul separat la îndemână.
 COPY deploy/authentik/ ./deploy-kit/deploy/authentik/
+# Unit-urile systemd (backup + cert-check): fără ele în trusă, pasul 5b din upgrade.sh n-are
+# de unde să le sincronizeze, iar pe prod au rămas din iulie cu `Persistent=true  # …` pe aceeaşi
+# linie — systemd îl respinge („Failed to parse boolean value, ignoring”) şi timerul nu mai
+# recuperează rulările pierdute cât hostul a fost oprit.
+COPY deploy/webterm-backup.service deploy/webterm-backup.timer \
+     deploy/webterm-cert-check.service deploy/webterm-cert-check.timer ./deploy-kit/deploy/
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 

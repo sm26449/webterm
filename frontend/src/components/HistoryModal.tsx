@@ -26,18 +26,24 @@ export default function HistoryModal(props: { hosts: Host[]; onClose: () => void
   const [confirmClear, setConfirmClear] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
   const dialogRef = useRef<HTMLDivElement>(null)
+  const seq = useRef(0)
   useFocusTrap(dialogRef, props.onClose)
 
   useEffect(() => { setTimeout(() => inputRef.current?.focus(), 0) }, [])
 
-  // debounce pe căutare + filtru
+  // debounce pe căutare + filtru. Generaţie monotonă (F-05): debounce-ul limitează PORNIREA
+  // cererilor, nu ordinea sosirii — o căutare lentă pe „a" putea ateriza după cea rapidă pe
+  // „apt" şi suprascria lista cu rezultate pentru alt text. Doar răspunsul CEL MAI RECENT contează.
   useEffect(() => {
     const t = setTimeout(() => {
+      const my = ++seq.current
       const p = new URLSearchParams()
       if (q.trim()) p.set('q', q.trim())
       if (hostId != null) p.set('host_id', String(hostId))
       p.set('limit', '300')
-      api<HistItem[]>(`/api/history?${p.toString()}`).then(setItems).catch(() => setItems([]))
+      api<HistItem[]>(`/api/history?${p.toString()}`)
+        .then((r) => { if (my === seq.current) setItems(r) })
+        .catch(() => { if (my === seq.current) setItems([]) })
     }, 200)
     return () => clearTimeout(t)
   }, [q, hostId])
@@ -92,19 +98,19 @@ export default function HistoryModal(props: { hosts: Host[]; onClose: () => void
               const failed = it.exit_code != null && it.exit_code !== 0
               return (
                 <div key={it.id} className="group flex items-start gap-2.5 border-b border-ink-800/60 px-3 py-2 hover:bg-ink-800/40">
-                  <span className={`mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full ${it.exit_code == null ? 'bg-slate-600' : failed ? 'bg-rose-500' : 'bg-emerald-500'}`} />
+                  <span className={`mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full ${it.exit_code == null ? 'bg-slate-600' : failed ? 'bg-rose-500' : 'bg-emerald-500'}`} aria-hidden="true" />
                   <div className="min-w-0 flex-1">
                     <div className="truncate font-mono text-[13px] text-slate-200">{it.command}</div>
                     <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10.5px] text-slate-500">
                       {it.host_name && <span className="wt-link">{it.host_name}</span>}
-                      {it.source === 'fleet' && <span className="rounded bg-ink-800 px-1 text-sky-400">{t('history.fleet')}</span>}
+                      {it.source === 'fleet' && <span className="rounded bg-ink-800 px-1 wt-accent">{t('history.fleet')}</span>}
                       {it.exit_code != null && <span className={failed ? 'wt-danger' : ''}>exit {it.exit_code}</span>}
                       {it.cwd && <span className="truncate font-mono">{it.cwd}</span>}
                       <span className="tabular-nums">{rel(it.created)}</span>
                     </div>
                   </div>
                   <button onClick={() => copy(it)} title={t('history.copyTitle')}
-                    className="shrink-0 rounded px-1.5 py-0.5 text-[11px] wt-link opacity-0 hover:bg-ink-700 group-hover:opacity-100">
+                    className="shrink-0 rounded px-1.5 py-0.5 text-[11px] wt-link opacity-0 hover:bg-ink-700 group-hover:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100">
                     {copied === it.id ? '✓' : t('history.copy')}
                   </button>
                 </div>

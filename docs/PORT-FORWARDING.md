@@ -84,8 +84,10 @@ access surface is the terminal on the main origin. Details and threat model:
   the same tab. (Device state isn't resurrected — telnet is stateful on the socket;
   you land at a fresh login.)
 
-SSH-via-agent to devices remains deferred (as "SSH host via jump", not as a
-forward).
+SSH to devices through an agent shipped in 3.0.0 — as the **SSH-jump** host type, not as a
+forward (the gateway runs the SSH client over the agent's raw-TCP tunnel and pins the host
+key). Telnet to a device is also available as a saved **Telnet-jump** host nested under its
+agent, on the same bastion as the forward above. Both: [SSH-JUMP.md](SSH-JUMP.md).
 
 ## Security (priority #1)
 

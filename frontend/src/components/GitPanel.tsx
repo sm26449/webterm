@@ -3,6 +3,7 @@ import { errText, api, Host } from '../lib/api'
 import { getCwd } from '../lib/cwd'
 import { useI18n } from '../lib/i18n'
 import { notify } from '../lib/notify'
+import { useDrawer } from '../lib/useDrawer'
 import { RefreshIcon } from './Icons'
 
 // Panou git în limbajul panoului de fișiere: status/diff/stage/commit pentru
@@ -84,9 +85,11 @@ function DiffView({ text }: { text: string }) {
 export default function GitPanel(props: { host: Host; sessionId: string; onClose: () => void; overlay?: boolean }) {
   const { t } = useI18n()
   const isAgent = !props.host.connection_type || props.host.connection_type === 'agent'
-  const asideCls = 'fixed inset-y-0 right-0 z-40 flex w-[90vw] max-w-sm flex-col border-l border-ink-800 bg-ink-900 shadow-2xl'
+  const asideCls = 'fixed inset-y-0 right-0 z-40 flex w-[90vw] max-w-sm flex-col border-l border-ink-800 bg-ink-900 shadow-2xl outline-none'
     + (props.overlay ? '' : ' sm:static sm:z-auto sm:w-80 sm:max-w-none sm:shrink-0 sm:shadow-none')
   const scrimCls = 'fixed inset-0 z-30 bg-black/60' + (props.overlay ? '' : ' sm:hidden')
+  const asideRef = useRef<HTMLElement>(null)
+  const drawer = useDrawer(asideRef, props.onClose)
 
   const [cwd, setCwdState] = useState('')
   const [repo, setRepo] = useState<RepoInfo | null>(null)
@@ -217,7 +220,7 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
       <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">{t('git.title')}</span>
       <button onClick={refresh} disabled={!cwd || busy}
         className="wt-touch ml-auto rounded px-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-300 disabled:opacity-30"
-        title={t('git.reloadStatus')}><RefreshIcon /></button>
+        title={t('git.reloadStatus')} aria-label={t('git.reloadStatus')}><RefreshIcon /></button>
       <button onClick={props.onClose} aria-label={t('git.closeAria')}
         className="wt-touch rounded px-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-300">✕</button>
     </header>
@@ -227,7 +230,8 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
     return (
       <>
         <div className={scrimCls} onClick={props.onClose} aria-hidden="true" />
-        <aside aria-label={t('git.panelAria')} className={asideCls}>
+        {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Escape pe regiunea drawer-ului (vezi useDrawer): intenţionat pe <aside>, nu pe document */}
+        <aside ref={asideRef} aria-label={t('git.panelAria')} className={asideCls} onKeyDown={drawer.onKeyDown}>
           {header}
           <div className="flex flex-1 flex-col items-center justify-center gap-3 p-4 text-center">
             <p className="text-xs leading-relaxed text-slate-500">
@@ -252,14 +256,15 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
           className="min-w-0 flex-1 truncate text-left font-mono text-slate-200" title={f.path}>
           {f.path}
         </button>
+        {/* ţinte de 24px + etichetă care numeşte fişierul: „+"/„−" singure nu spun nimic cititorului */}
         {group === 'staged' ? (
           <button onClick={() => unstage(f)} disabled={busy}
-            className="shrink-0 rounded px-1.5 text-slate-500 hover:bg-ink-700 hover:text-amber-300 disabled:opacity-40"
-            title={t('git.unstage')}>−</button>
+            className="grid h-6 w-6 shrink-0 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-amber-300 disabled:opacity-40"
+            title={t('git.unstage')} aria-label={`${t('git.unstage')} ${f.path}`}>−</button>
         ) : (
           <button onClick={() => stage(f)} disabled={busy}
-            className="shrink-0 rounded px-1.5 text-slate-500 hover:bg-ink-700 hover:text-emerald-300 disabled:opacity-40"
-            title={t('git.stage')}>+</button>
+            className="grid h-6 w-6 shrink-0 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-emerald-300 disabled:opacity-40"
+            title={t('git.stage')} aria-label={`${t('git.stage')} ${f.path}`}>+</button>
         )}
       </div>
     )
@@ -274,7 +279,8 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
   return (
     <>
       <div className={scrimCls} onClick={props.onClose} aria-hidden="true" />
-      <aside aria-label={t('git.panelAria')} className={asideCls}>
+      {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Escape pe regiunea drawer-ului (vezi useDrawer): intenţionat pe <aside>, nu pe document */}
+      <aside ref={asideRef} aria-label={t('git.panelAria')} className={asideCls} onKeyDown={drawer.onKeyDown}>
         {header}
 
         {/* bara de branch */}
@@ -316,7 +322,7 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
                 <div className="flex items-center gap-2 border-b border-ink-800 px-3 py-1 text-[10px] text-slate-500">
                   <span className="truncate font-mono" title={sel.path}>{sel.path}</span>
                   <span className="ml-auto shrink-0">{sel.staged ? t('git.diffStaged') : t('git.diffWorktree')}</span>
-                  <button onClick={() => { setSel(null); setDiff('') }} className="shrink-0 rounded px-1 hover:bg-ink-800 hover:text-slate-300" title={t('git.closeDiff')}>✕</button>
+                  <button onClick={() => { setSel(null); setDiff('') }} className="grid h-6 w-6 shrink-0 place-items-center rounded hover:bg-ink-800 hover:text-slate-300" title={t('git.closeDiff')} aria-label={t('git.closeDiff')}>✕</button>
                 </div>
                 <DiffView text={diff} />
               </div>

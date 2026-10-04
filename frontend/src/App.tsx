@@ -1,5 +1,5 @@
 import { startAuthentication } from '@simplewebauthn/browser'
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, ReactNode, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import CommandPalette from './components/CommandPalette'
 import CredentialModal, { CredField } from './components/CredentialModal'
 import SerialModal, { SerialParams } from './components/SerialModal'
@@ -20,16 +20,72 @@ import SessionView from './components/SessionView'
 import TabBar from './components/TabBar'
 import Toasts, { ToastItem } from './components/Toasts'
 import CopyToast from './components/CopyToast'
-import { errText, api, AppState, Host, Session, Snippet, SplitView, setStepupHandler } from './lib/api'
+import { errText, api, ApiError, AppState, Host, isSessionLive, Session, Snippet, SplitView, setStepupHandler, withStepup } from './lib/api'
 import { hostAt, hostColor } from './lib/host'
 import { useI18n } from './lib/i18n'
+import { useConfirm } from './lib/confirm'
+import { useFocusTrap } from './lib/useFocusTrap'
+import { copyText } from './lib/clipboard'
+import { CopyIcon, ShieldIcon } from './components/Icons'
 import { ensureNotificationPermission, notify, notifyError, registerToast } from './lib/notify'
 import { registerSecretPrompt, SecretAsk } from './lib/secretPrompt'
 import SecretPromptModal from './components/SecretPromptModal'
 import { markBooted } from './lib/failsafe'
 import { useMetricsTick } from './lib/metrics'
 import { matchShortcut, ShortcutId } from './lib/shortcuts'
-import { getTimezone } from './lib/tz'
+import { fmtTs, getTimezone } from './lib/tz'
+
+/* localStorage „sigur": Safari cu „Block all cookies" / iframe sandbox aruncă SecurityError chiar la
+   getItem (= cădere înainte de primul render), iar QuotaExceededError într-un useEffect ajungea în
+   ErrorBoundary → ecranul de failsafe la FIECARE schimbare de tab (audit frontend B4). Aceeaşi gardă
+   ca în lib/font.ts, ţinută local — lib/ nu e în perimetrul acestui sweep. */
+const lsGet = (k: string): string | null => { try { return localStorage.getItem(k) } catch { return null } }
+const lsSet = (k: string, v: string): void => { try { localStorage.setItem(k, v) } catch { /* quota / privat */ } }
+
+/** Container de dialog cu focus-trap (Tab ciclic, Escape, focus restaurat pe declanşator) + semantica
+    ARIA. Hook-urile nu pot sta într-un JSX condiţional, deci dialogurile inline din App (wizard-ul de
+    split, alarma de host-key) trec prin componenta asta în loc să-şi care fiecare propriul ref. */
+function TrapDialog(props: {
+  onClose: () => void
+  labelledBy: string
+  describedBy?: string
+  alert?: boolean          // role=alertdialog (cere o decizie), altfel dialog
+  className: string
+  children: ReactNode
+}) {
+  const ref = useRef<HTMLDivElement>(null)
+  useFocusTrap(ref, props.onClose)
+  return (
+    <div ref={ref} role={props.alert ? 'alertdialog' : 'dialog'} aria-modal="true"
+      aria-labelledby={props.labelledBy} aria-describedby={props.describedBy}
+      className={props.className}>
+      {props.children}
+    </div>
+  )
+}
+
+/** Alarma de host-key: ce ştim despre schimbare (vezi `startFailed` + evenimentul `wt-hostkey-changed`). */
+type HostKeyAlarm = { hostId: number; name: string; old_fp?: string; new_fp?: string; changed_at?: number | string }
+
+/** Un rând de amprentă (monospace, trunchiat cu title complet) + buton de copiere. */
+function FingerprintRow(props: { label: string; value?: string; copyLabel: string }) {
+  return (
+    <div className="flex items-center gap-2">
+      <dt className="w-32 shrink-0 text-slate-500">{props.label}</dt>
+      <dd className="min-w-0 flex-1">
+        <code className="block truncate rounded bg-black/40 px-2 py-1 font-mono text-slate-200" title={props.value}>
+          {props.value || '—'}
+        </code>
+      </dd>
+      {props.value && (
+        <button type="button" onClick={() => { copyText(props.value!) }} aria-label={props.copyLabel} title={props.copyLabel}
+          className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-slate-400 hover:bg-ink-800 hover:text-slate-200">
+          <CopyIcon />
+        </button>
+      )}
+    </div>
+  )
+}
 
 interface Route {
   primary: string | null      // sesiune deschisă (terminal)
@@ -131,6 +187,8 @@ export default function App() {
 function MainApp() {
   const { t } = useI18n()
   const [appState, setAppState] = useState<AppState | null>(null)
+  // confirm() nativ → dialog propriu (vezi lib/confirm.tsx: de ce); umbreşte deliberat window.confirm
+  const { confirm } = useConfirm()
   const [hosts, setHosts] = useState<Host[]>([])
   const [sessions, setSessions] = useState<Session[]>([])
   const [route, navigate, navigateHost] = useRoute()
@@ -199,9 +257,9 @@ function MainApp() {
   // un laptop mic o vrea din prima, la fiecare deschidere. Citită sincron la montare, ca
   // layout-ul să nu sară după primul render.
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
-    () => localStorage.getItem('wt-sidebar-collapsed') === '1')
+    () => lsGet('wt-sidebar-collapsed') === '1')
   const toggleSidebar = () => setSidebarCollapsed((v) => {
-    localStorage.setItem('wt-sidebar-collapsed', v ? '0' : '1')
+    lsSet('wt-sidebar-collapsed', v ? '0' : '1')
     return !v
   })
   const [openTabs, setOpenTabs] = useState<string[]>(() => {
@@ -210,7 +268,7 @@ function MainApp() {
   // Ordonarea taburilor DESCHISE: 'manual' (ordinea de deschidere, stabilă) sau 'activity'
   // (după ultima folosire — daily-driver-ele sus). Opt-in; NU atinge arborele de hosturi.
   const [tabSort, setTabSort] = useState<'manual' | 'activity'>(() =>
-    localStorage.getItem('wt_tabsort') === 'activity' ? 'activity' : 'manual')
+    lsGet('wt_tabsort') === 'activity' ? 'activity' : 'manual')
   const [tabUsed, setTabUsed] = useState<Record<string, number>>(() => {
     try { return JSON.parse(localStorage.getItem('wt_tabused') || '{}') } catch { return {} }
   })
@@ -274,6 +332,20 @@ function MainApp() {
     new Promise<Record<string, string> | null>((resolve) => setCredReq({ ...spec, resolve }))
   const [pendingSearch, setPendingSearch] = useState<{ term: string; n: number } | null>(null)
   const [toasts, setToasts] = useState<ToastItem[]>([])
+  // autentificarea a expirat ÎN TIMPUL lucrului (401 generic în api(), WS închis cu 4401 în
+  // SessionView): până acum pagina de login apărea tăcut la următorul poll. Semnalul vine prin
+  // `wt-unauth`; aici doar re-verificăm starea şi explicăm tranziţia deasupra formularului.
+  const [authExpired, setAuthExpired] = useState(false)
+  const wasAuthedRef = useRef(false)
+  useEffect(() => {
+    const onUnauth = () => {
+      if (!wasAuthedRef.current) return     // 401 pe pagina de login nu e o „expirare"
+      setAuthExpired(true)
+      api<AppState>('/api/state').then(setAppState).catch(() => {})
+    }
+    window.addEventListener('wt-unauth', onUnauth)
+    return () => window.removeEventListener('wt-unauth', onUnauth)
+  }, [])
   // deploy nou detectat din headerul X-Webterm-Version (vezi lib/api.ts)
   const [newVersion, setNewVersion] = useState<string | null>(null)
   useEffect(() => {
@@ -295,14 +367,31 @@ function MainApp() {
   // ca badge-ul din sidebar să dispară singur după upgrade.
   const upgradeWatch = useRef<Map<string, { hostId: number; seen: boolean }>>(new Map())
 
+  // Cât mouse-ul sau focusul e pe stiva de toast-uri, nu ştergem nimic (WCAG 2.2.1: conţinutul
+  // cronometrat trebuie să poată fi oprit): expirările se adună în `toastPending` şi se aplică
+  // când userul pleacă de pe stivă. Fără asta, un mesaj de eroare dispărea exact când dădeai
+  // să-l selectezi ca să-l copiezi.
+  const toastHeld = useRef(false)
+  const toastPending = useRef<Set<string>>(new Set())
+  const expireToast = useCallback((id: string) => {
+    if (toastHeld.current) { toastPending.current.add(id); return }
+    setToasts((t) => t.filter((x) => x.id !== id))
+  }, [])
+  const onToastHold = useCallback((held: boolean) => {
+    toastHeld.current = held
+    if (!held && toastPending.current.size) {
+      const gone = toastPending.current; toastPending.current = new Set()
+      setToasts((t) => t.filter((x) => !gone.has(x.id)))
+    }
+  }, [])
   useEffect(() => {
     registerToast((message, kind) => {
       const id = `${Date.now()}-${Math.random()}`
       setToasts((t) => [...t, { id, message, kind }])
       // erorile stau mai mult (12s) — ai nevoie de timp să citeşti motivul; info/warn 6s
-      setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), kind === 'error' ? 12000 : 6000)
+      setTimeout(() => expireToast(id), kind === 'error' ? 12000 : 6000)
     })
-  }, [])
+  }, [expireToast])
 
   // gazda pentru askSecret(): acelaşi tipar imperativ ca credReq (promise + modal).
   // O cerere nouă peste una deschisă o anulează pe cea veche (resolve null) — fluxurile
@@ -366,7 +455,7 @@ function MainApp() {
     } catch {
       setGwFails((n) => n + 1)
       const st = await api<AppState>('/api/state').catch(() => null)
-      if (st && !st.authenticated) setAppState(st)
+      if (st && !st.authenticated) { setAuthExpired(true); setAppState(st) }   // eram autentificaţi
     }
   }, [t])
 
@@ -375,10 +464,10 @@ function MainApp() {
   }, [])
 
   useEffect(() => {
-    localStorage.setItem('wt_tabs', JSON.stringify(openTabs))
+    lsSet('wt_tabs', JSON.stringify(openTabs))
   }, [openTabs])
 
-  useEffect(() => { localStorage.setItem('wt_tabsort', tabSort) }, [tabSort])
+  useEffect(() => { lsSet('wt_tabsort', tabSort) }, [tabSort])
 
   // „ultima folosire" per tab: marcat când tab-ul devine activ (nu la output de fundal —
   // un host care scuipă loguri n-are voie să sară în față). Alimentează sortarea 'activity'.
@@ -390,6 +479,98 @@ function MainApp() {
       return next
     })
   }, [selectedSid])
+
+  // ── Avertizare ÎNAINTE de idle-lock (WCAG 2.2.1 „timing adjustable") ───────────────────
+  // Serverul blochează terminalele hosturilor cu 2FA după `idle_lock_seconds` fără INPUT şi nu
+  // trimite niciun preaviz: blocarea venea din senin, în mijlocul unei comenzi (audit 6.c1).
+  // Ţinem local ceasul activităţii (taste/pointer, throttled) şi cu 60 s înainte arătăm un
+  // banner non-modal cu numărătoare inversă + „Sunt încă aici", care împrospătează şi ceasul
+  // serverului (SessionView ascultă `wt-idle-ping`). Doar cât există un tab deschis cu o
+  // sesiune vie pe un host cu 2FA — altfel n-are de ce să apară.
+  const idleSecs = (appState as (AppState & { idle_lock_seconds?: number }) | null)?.idle_lock_seconds ?? 0
+  const lastActRef = useRef(Date.now())
+  const [idleWarn, setIdleWarn] = useState<number | null>(null)
+  const idleWarnRef = useRef<number | null>(null)
+  idleWarnRef.current = idleWarn
+  const [idleDismissed, setIdleDismissed] = useState(false)   // ✕ pe banner: tăcere până la următorul ciclu
+  const stillHere = useCallback(() => {
+    lastActRef.current = Date.now()
+    setIdleWarn(null)
+    window.dispatchEvent(new Event('wt-idle-ping'))
+    api('/api/state').catch(() => {})      // ieftin; ţine şi cookie-ul de sesiune „cald"
+  }, [])
+  useEffect(() => {
+    let lastSeen = 0
+    const onAct = () => {
+      const now = Date.now()
+      if (now - lastSeen < 1000) return     // throttle: evenimentele de pointer vin în rafală
+      lastSeen = now
+      lastActRef.current = now
+      // cât bannerul e vizibil, orice activitate contează şi pe server: pointerul singur nu
+      // ajunge în PTY, deci fără ping serverul ar bloca oricum
+      if (idleWarnRef.current != null) stillHere()
+    }
+    window.addEventListener('keydown', onAct, true)
+    window.addEventListener('pointerdown', onAct, true)
+    return () => {
+      window.removeEventListener('keydown', onAct, true)
+      window.removeEventListener('pointerdown', onAct, true)
+    }
+  }, [stillHere])
+  const idleApplies = idleSecs > 0 && openTabs.some((sid) => {
+    const s = sessions.find((x) => x.id === sid)
+    const h = s && hosts.find((x) => x.id === s.host_id)
+    return !!s && !!h?.require_2fa && isSessionLive(s, hosts)
+  })
+  useEffect(() => {
+    if (!idleApplies) { setIdleWarn(null); return }
+    const tick = () => {
+      const remaining = Math.ceil(idleSecs - (Date.now() - lastActRef.current) / 1000)
+      if (remaining <= 60 && remaining > 0) setIdleWarn(remaining)
+      else { setIdleWarn(null); if (remaining > 60) setIdleDismissed(false) }
+    }
+    tick()
+    const iv = setInterval(tick, 1000)
+    return () => clearInterval(iv)
+  }, [idleApplies, idleSecs])
+
+  // ── Alarma de host-key schimbat (SSH direct / jump) ───────────────────────────────────
+  // Card persistent (`alertdialog`) cu amprenta fixată vs. cea primită, explicaţie şi două
+  // acţiuni — în locul toast-ului de 12 s cu text brut, fără amprente şi fără cale de re-pin
+  // (audit 6.e1/6.e2). Contract: evenimentul `hostkey_changed` {host_id, host_name, old_fp,
+  // new_fp, changed_at} (livrat aici ca CustomEvent `wt-hostkey-changed` de cine primeşte
+  // fluxul de stare), GET /api/hosts/{id}/hostkey → {fingerprint, previous, changed_at, pinned},
+  // POST /api/hosts/{id}/hostkey/accept (gardat de step-up). Fără `new_fp` cădem pe toast-ul vechi.
+  const [hostKeyAlarm, setHostKeyAlarm] = useState<HostKeyAlarm | null>(null)
+  // Sursa evenimentului: gateway-ul nu are un bus WS către UI, ci pune alarma pe rândul
+  // hostului (`hostkey_alarm`, vine cu poll-ul de /api/hosts la 5 s) şi în /api/state. Aici o
+  // transformăm în `wt-hostkey-changed` o singură dată per (host, changed_at), ca să nu
+  // redeschidem cardul la fiecare poll cât timp userul încă citeşte.
+  const seenHostKeyRef = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    for (const h of hosts) {
+      const a = h.hostkey_alarm
+      if (!a?.new_fp) continue
+      const key = `${h.id}:${a.changed_at ?? ''}:${a.new_fp}`
+      if (seenHostKeyRef.current.has(key)) continue
+      seenHostKeyRef.current.add(key)
+      window.dispatchEvent(new CustomEvent('wt-hostkey-changed', {
+        detail: { host_id: h.id, host_name: h.name, old_fp: a.old_fp, new_fp: a.new_fp, changed_at: a.changed_at },
+      }))
+    }
+  }, [hosts])
+  const [hostKeyBusy, setHostKeyBusy] = useState(false)
+  useEffect(() => {
+    const onEv = (e: Event) => {
+      const d = (e as CustomEvent<{ host_id: number; host_name?: string; old_fp?: string; new_fp?: string; changed_at?: number | string }>).detail
+      if (!d) return
+      const name = hosts.find((h) => h.id === d.host_id)?.name ?? d.host_name ?? `#${d.host_id}`
+      if (d.new_fp) setHostKeyAlarm({ hostId: d.host_id, name, old_fp: d.old_fp, new_fp: d.new_fp, changed_at: d.changed_at })
+      else notifyError(t('app.cannotStartSession'), t('hostkey.title', { name }))
+    }
+    window.addEventListener('wt-hostkey-changed', onEv)
+    return () => window.removeEventListener('wt-hostkey-changed', onEv)
+  }, [hosts, t])
 
   // deep-link (#/s/<sid> deschis dintr-un URL / PWA proaspăt): sesiunea primară
   // primește tab — altfel ar fi „orfană": fără reprezentare în TabBar, fără
@@ -503,6 +684,9 @@ function MainApp() {
         return
       }
       if (!id) return
+      // Alt+Shift+←/→ = reordonarea tabului FOCALIZAT (TabBar). Matcher-ul de next/prevTab nu
+      // se uită la Shift, deci aici l-am „fura" înainte să ajungă la tab — îl lăsăm să treacă.
+      if ((id === 'nextTab' || id === 'prevTab') && e.shiftKey) return
       // scurtăturile „simple" (?, /) nu se declanșează cât scrii într-un câmp
       // sau în terminal — acolo caracterul aparține conținutului
       if ((id === 'help' || id === 'focusSidebar') && (inField || inTerminal)) return
@@ -668,14 +852,23 @@ function MainApp() {
   if (!appState) {
     return <div className="flex h-full items-center justify-center text-slate-500">{t('app.loading')}</div>
   }
+  wasAuthedRef.current = appState.authenticated
   if (!appState.authenticated) {
     return (
       <>
         <BootReady />
+        {authExpired && (
+          /* motivul pentru care a apărut login-ul: expirare, nu eroare — terminalele trăiesc */
+          <div role="alert"
+            className="fixed left-1/2 top-3 z-50 flex max-w-[92vw] -translate-x-1/2 items-center gap-2 rounded-full border border-amber-500/40 bg-ink-900 px-4 py-1.5 text-sm text-slate-200 shadow-2xl">
+            <span className="wt-warn font-medium">{t('session.authExpired')}.</span>
+            <span className="text-slate-400">{t('session.authExpiredBody')}</span>
+          </div>
+        )}
         <LoginPage
           setupRequired={appState.setup_required}
           webauthnAvailable={appState.webauthn_available}
-          onLogin={() => api<AppState>('/api/state').then(setAppState)}
+          onLogin={() => { setAuthExpired(false); api<AppState>('/api/state').then(setAppState) }}
         />
       </>
     )
@@ -715,7 +908,7 @@ function MainApp() {
       // right-click „Add to split view" (alternativă la butonul din bară) → deschide wizard-ul.
       // Doar pe taburi normale (nu din interiorul unui split) şi doar dacă ai ≥2 taburi de combinat.
       onSplitView={!grid && openTabs.length >= 2 ? openWizardCreate : undefined}
-      onMenu={() => { setSidebarCollapsed(false); localStorage.setItem('wt-sidebar-collapsed', '0'); setSidebarOpen(true) }}
+      onMenu={() => { setSidebarCollapsed(false); lsSet('wt-sidebar-collapsed', '0'); setSidebarOpen(true) }}
       sidebarCollapsed={sidebarCollapsed}
       onPopout={() => popout(s.id)}
       onChanged={refresh}
@@ -801,7 +994,10 @@ function MainApp() {
   }
   const deleteSplit = async (id: number) => {
     const v = splitViews.find((x) => x.id === id)
-    if (!confirm(t('split.confirmDelete', { name: v?.name || '' }))) return
+    if (!(await confirm({
+      title: t('split.delete'), message: t('split.confirmDelete', { name: v?.name || '' }),
+      danger: true, confirmLabel: t('split.delete'),
+    }))) return
     setSplitViews((prev) => prev.filter((x) => x.id !== id))
     if (activeSplitId === id) setActiveSplitId(null)
     try { await api(`/api/split-views/${id}`, { method: 'DELETE' }) } catch { refresh() }
@@ -830,6 +1026,43 @@ function MainApp() {
     ? hosts.find((h) => h.id === activeSession.host_id) ?? null
     : routeHost
   const activeHostLabel = activeHost ? hostAt(activeHost) : ''
+
+  // Eşec la pornirea unei sesiuni. Cazul special: 409 de host-key schimbat (SSH direct/jump).
+  // Codul `ssh.hostKeyChanged` e contractul; regexul rămâne rezervă pentru 409-ul încă necodat
+  // (api.py ridică azi HTTPException fără cod). Detaliile vin de la GET /api/hosts/{id}/hostkey;
+  // dacă ruta nu există încă (gateway vechi) sau nu are amprenta nouă, rămâne toast-ul vechi.
+  async function startFailed(host: Host, e: unknown) {
+    const hostKey = e instanceof ApiError && e.status === 409
+      && (e.code === 'ssh.hostKeyChanged' || /host key fingerprint changed/i.test(e.message))
+    if (hostKey) {
+      const info = await api<{ fingerprint?: string; previous?: string; changed_at?: number | string }>(
+        `/api/hosts/${host.id}/hostkey`).catch(() => null)
+      if (info?.fingerprint) {
+        setHostKeyAlarm({ hostId: host.id, name: host.name, old_fp: info.previous, new_fp: info.fingerprint, changed_at: info.changed_at })
+        return
+      }
+    }
+    notifyError(t('app.cannotStartSession'), errText(e, t) || t('app.error'))
+  }
+  // „Am reinstalat hostul": re-pin după verificare out-of-band. Step-up (hostul e, prin definiţie,
+  // unul la care tocmai am refuzat conexiunea) — withStepup rulează ceremonia şi reîncearcă o dată.
+  async function acceptHostKey() {
+    const a = hostKeyAlarm
+    if (!a) return
+    setHostKeyBusy(true)
+    try {
+      await withStepup(a.hostId, () => api(`/api/hosts/${a.hostId}/hostkey/accept`, {
+        method: 'POST', body: JSON.stringify({ fingerprint: a.new_fp }),
+      }))
+      setHostKeyAlarm(null)
+      notify(t('hostkey.accepted', { name: a.name }), t('hostkey.acceptedBody'), 'info')
+      refresh()
+    } catch (e) {
+      notifyError(t('hostkey.acceptFailed'), errText(e, t) || t('app.error'))
+    } finally {
+      setHostKeyBusy(false)
+    }
+  }
 
   // deschide o sesiune nouă — gestionează 2FA step-up + credențiale „ask”
   async function connectHost(host: Host) {
@@ -865,7 +1098,7 @@ function MainApp() {
       navigate(r.id)
       setSidebarOpen(false)
     } catch (e) {
-      notifyError(t('app.cannotStartSession'), errText(e, t) || t('app.error'))
+      startFailed(host, e)
     }
   }
 
@@ -909,7 +1142,7 @@ function MainApp() {
       openTab(r.id)
       navigate(r.id)
     } catch (e) {
-      notifyError(t('app.cannotStartSession'), errText(e, t) || t('app.error'))
+      startFailed(host, e)
     }
   }
 
@@ -930,7 +1163,7 @@ function MainApp() {
       openTab(r.id)
       navigate(r.id)
     } catch (e) {
-      notifyError(t('app.cannotStartSession'), errText(e, t) || t('app.error'))
+      startFailed(host, e)
     }
   }
 
@@ -950,7 +1183,7 @@ function MainApp() {
       openTab(r.id)
       navigate(r.id)
     } catch (e) {
-      notifyError(t('app.cannotStartSession'), errText(e, t) || t('app.error'))
+      startFailed(host, e)
     }
   }
 
@@ -975,7 +1208,7 @@ function MainApp() {
       openTab(r.id)
       navigate(r.id)
     } catch (e) {
-      notifyError(t('app.cannotStartSession'), errText(e, t) || t('app.error'))
+      startFailed(host, e)
     }
   }
 
@@ -1130,7 +1363,7 @@ function MainApp() {
         )}
         {!splitActive && !primary && (<PaneErrorBoundary>{routeHost ? (
           <HostOverview
-            onMenu={() => { setSidebarCollapsed(false); localStorage.setItem('wt-sidebar-collapsed', '0'); setSidebarOpen(true) }}
+            onMenu={() => { setSidebarCollapsed(false); lsSet('wt-sidebar-collapsed', '0'); setSidebarOpen(true) }}
             sidebarCollapsed={sidebarCollapsed}
             host={routeHost}
             sessions={sessions.filter((s) => s.host_id === routeHost.id)}
@@ -1255,10 +1488,14 @@ function MainApp() {
       )}
       {/* wizard „+ Split view": nume + bifezi ce sesiuni deschise intră (2–4) */}
       {wizard && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={() => setWizard(null)}>
-          <div className="glass flex max-h-[80vh] w-full max-w-md flex-col rounded-2xl" onClick={(e) => e.stopPropagation()}>
+        // scrim-ul închide doar la click PE el (nu pe dialog): fără stopPropagation pe dialog, deci
+        // fără handler de click pe un element cu rol non-interactiv (jsx-a11y)
+        <div role="presentation" className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          onClick={(e) => { if (e.target === e.currentTarget) setWizard(null) }}>
+          <TrapDialog onClose={() => setWizard(null)} labelledBy="wt-split-wizard-title"
+            className="glass flex max-h-[80vh] w-full max-w-md flex-col rounded-2xl">
             <header className="border-b border-ink-800 px-4 py-3">
-              <h2 className="text-base font-semibold">{wizard.id ? t('split.editTitle') : t('split.wizardTitle')}</h2>
+              <h2 id="wt-split-wizard-title" className="text-base font-semibold">{wizard.id ? t('split.editTitle') : t('split.wizardTitle')}</h2>
               <p className="mt-0.5 text-xs text-slate-400">{t('grid.pickHint', { max: GRID_MAX })}</p>
             </header>
             <div className="border-b border-ink-800 px-4 py-3">
@@ -1300,12 +1537,65 @@ function MainApp() {
                 {wizard.id ? t('common.save') : t('grid.pickConfirm')}
               </button>
             </footer>
-          </div>
+          </TrapDialog>
+        </div>
+      )}
+      {/* alarma de host-key schimbat: persistentă până la o decizie; „Keep blocking" e primul
+          focusabil (= implicitul), acceptarea e butonul de pericol */}
+      {hostKeyAlarm && (
+        <div role="presentation" className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4"
+          onClick={(e) => { if (e.target === e.currentTarget) setHostKeyAlarm(null) }}>
+          <TrapDialog alert onClose={() => setHostKeyAlarm(null)} labelledBy="wt-hostkey-title" describedBy="wt-hostkey-desc"
+            className="glass w-full max-w-lg rounded-2xl p-6">
+            <h2 id="wt-hostkey-title" className="wt-danger flex items-center gap-2 text-lg font-semibold leading-tight">
+              <ShieldIcon /> {t('hostkey.title', { name: hostKeyAlarm.name })}
+            </h2>
+            <p id="wt-hostkey-desc" className="mt-2 text-sm leading-relaxed text-slate-300">{t('hostkey.intro')}</p>
+            <dl className="mt-3 space-y-2 text-xs">
+              <FingerprintRow label={t('hostkey.pinned')} value={hostKeyAlarm.old_fp} copyLabel={t('hostkey.copy')} />
+              <FingerprintRow label={t('hostkey.received')} value={hostKeyAlarm.new_fp} copyLabel={t('hostkey.copy')} />
+            </dl>
+            {hostKeyAlarm.changed_at != null && (
+              <p className="mt-2 text-xs text-slate-500">
+                {t('hostkey.changedAt', { when: typeof hostKeyAlarm.changed_at === 'number' ? fmtTs(hostKeyAlarm.changed_at) : String(hostKeyAlarm.changed_at) })}
+              </p>
+            )}
+            <p className="mt-3 text-sm leading-relaxed text-slate-300">{t('hostkey.meaning')}</p>
+            <div className="mt-5 flex flex-wrap justify-end gap-2">
+              <button onClick={() => setHostKeyAlarm(null)}
+                className="rounded-lg px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800">
+                {t('hostkey.keepBlocking')}
+              </button>
+              <button onClick={acceptHostKey} disabled={hostKeyBusy}
+                className="rounded-lg bg-rose-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-rose-700 disabled:opacity-50">
+                {t('hostkey.accept')}
+              </button>
+            </div>
+          </TrapDialog>
         </div>
       )}
       {/* anunțuri pentru cititoarele de ecran (schimbare de tab / context) */}
       <div aria-live="polite" className="sr-only">{srAnnounce}</div>
-      <Toasts items={toasts} onDismiss={(id) => setToasts((t) => t.filter((x) => x.id !== id))} />
+      <Toasts items={toasts} onDismiss={(id) => setToasts((t) => t.filter((x) => x.id !== id))} onHoldChange={onToastHold} />
+      {/* pre-idle-lock: non-modal, nu fură focusul; anunţul live e textul STABIL (titlul), nu
+          numărătoarea — altfel cititorul de ecran ar repeta cifra la fiecare secundă */}
+      {idleWarn != null && !idleDismissed && (
+        <div className="fixed left-1/2 top-3 z-50 flex max-w-md -translate-x-1/2 items-center gap-3 rounded-xl border border-amber-500/40 bg-ink-900 px-4 py-2 text-sm text-slate-200 shadow-2xl">
+          <span role="alert" className="sr-only">{t('idle.warnTitle')}</span>
+          <div className="min-w-0" aria-hidden="true">
+            <div className="wt-warn font-medium">{t('idle.warnTitle')}</div>
+            <div className="text-xs text-slate-400">{t('idle.warnBody', { s: idleWarn })}</div>
+          </div>
+          <button onClick={stillHere}
+            className="shrink-0 rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-700">
+            {t('idle.stillHere')}
+          </button>
+          <button onClick={() => setIdleDismissed(true)} aria-label={t('app.close')}
+            className="shrink-0 rounded-md px-2 py-1 text-slate-500 hover:bg-ink-800 hover:text-slate-300">
+            ✕
+          </button>
+        </div>
+      )}
       <CopyToast />
       {gwFails >= 2 && (
         <div className="fixed left-1/2 top-3 z-50 flex -translate-x-1/2 items-center gap-2 rounded-full border border-rose-500/40 bg-ink-900 px-4 py-1.5 text-sm text-slate-200 shadow-2xl">

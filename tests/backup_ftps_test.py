@@ -96,10 +96,16 @@ def main():
             check("conţinutul urcat e intact",
                   os.path.exists(landed) and open(landed, "rb").read() == b"ciphertext-here")
 
-            # 2. list → conţine arhiva
+            check("STOR în .part + RNTO: niciun .part rămas",
+                  not [n for n in os.listdir(root) if n.endswith(".part")], str(os.listdir(root)))
+
+            # 2. list → conţine arhiva, dar NU un upload parţial (.part)
+            open(os.path.join(root, "webterm-20260102-000000.wtbk.part"), "wb").write(b"partial")
             files = await backup_dest.ftps_list(cfg)
             check("list FTPS arată arhiva",
                   any(f["name"] == "webterm-20260101-000000.wtbk" for f in files), str(files))
+            check("list FTPS ignoră .part", not any(f["name"].endswith(".part") for f in files), str(files))
+            os.unlink(os.path.join(root, "webterm-20260102-000000.wtbk.part"))
 
             # 3. delete → dispare
             await backup_dest.ftps_delete(cfg, "webterm-20260101-000000.wtbk")

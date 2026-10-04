@@ -29,6 +29,7 @@ import os
 import pty
 import pwd
 import queue
+import re
 import select
 import selectors
 import shutil
@@ -43,7 +44,7 @@ import termios
 import threading
 import time
 
-AGENT_VERSION = 53
+AGENT_VERSION = 54
 
 # Sub atâtea secunde de valabilitate, un certificat se roteşte prea des ca un pin pe el să
 # însemne altceva decât o cădere programată. 48h: peste ce emite un CA intern (12h la Caddy),
@@ -105,6 +106,15 @@ FRAME_FWD = b"F"                       # port-forward: FRAME_FWD + stream_id(32)
 
 MAX_FORWARDS = 64                     # conexiuni de forward concurente per agent
 MAX_SERIALS = 16                      # console seriale concurente per agent
+FWD_RESOLVE_TIMEOUT = 10.0            # DNS pentru ţinta unui forward (pe thread): peste atât
+                                      # răspundem `resolve` şi ignorăm rezultatul târziu
+CRC_WORKERS = 2                       # thread-uri de fs_crc32 concurente (H-07): CRC-ul e legat
+                                      # de DISC, nu de CPU — mai multe nu merg mai repede, doar
+                                      # se calcă pe picioare; cererile în plus aşteaptă la coadă
+CRC_QUEUE_MAX = 64                    # cereri de CRC în aşteptare peste care refuzăm (busy)
+DIAG_FORCE_MIN_INTERVAL = 30.0        # `force` (ocolirea cache-ului de update-uri OS) cel mult
+                                      # o dată la atâtea secunde — Refresh ţinut apăsat nu mai
+                                      # porneşte N `apt-get -s upgrade` în paralel
 FWD_CONNECT_TIMEOUT = 10.0            # connect() non-blocant: dacă ținta nu răspunde
                                       # (IP:port filtrat / SYN black-hole) în atâtea
                                       # secunde, abandonăm — altfel socketul rămâne
@@ -306,21 +316,27 @@ def ed25519_verify(pubkey, sig, msg):
         return False
 
 
+# Linia de versiune, aşa cum o caută şi gateway-ul (core.py, `agent_expected`): ancorată la început
+# de rând (`AGENT_VERSION_OLD = 1` nu trece), cu sau fără comentariu pe aceeaşi linie. ACELAŞI
+# regex pe ambele părţi — altfel cele două parsere divergeau tăcut (audit 2026-10: agentul
+# întorcea None pe `AGENT_VERSION = 53  # bumped`, iar None însemna „sari peste anti-rollback").
+_VERSION_LINE = re.compile(rb"^AGENT_VERSION\s*=\s*(\d+)\s*(?:#.*)?$", re.M)
+
+
 def _content_version(src):
-    """Extrage AGENT_VERSION din sursa unui update (pt. anti-rollback). None dacă
-    lipsește (nu blocăm atunci — semnătura rămâne gardul principal)."""
-    for line in src.split(b"\n")[:200]:
-        s = line.strip()
-        if not s.startswith(b"AGENT_VERSION"):
-            continue
-        rest = s[len(b"AGENT_VERSION"):].lstrip()
-        if not rest.startswith(b"="):    # ancorat: EXACT `AGENT_VERSION =`, nu AGENT_VERSION_OLD etc.
-            continue
-        try:
-            return int(rest[1:].strip())
-        except (ValueError, IndexError):
-            return None
-    return None
+    """Extrage AGENT_VERSION din sursa unui update (pt. anti-rollback), căutând în primele 200
+    de linii. None dacă nu se poate parsa — iar None e acum FAIL-CLOSED în op-ul `update`:
+    un release a cărui versiune nu se citeşte NU se instalează. Înainte, None însemna „nu
+    blocăm", deci o schimbare cosmetică a liniei într-un release viitor ar fi dezactivat
+    anti-rollback-ul pentru acel release în ziua în care devenea „vechi" — fără niciun semnal."""
+    head = b"\n".join(src.split(b"\n")[:200])
+    m = _VERSION_LINE.search(head)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except ValueError:
+        return None
 
 
 # tmux integration: sessions live inside a dedicated tmux server (-L webterm)
@@ -366,7 +382,14 @@ def _login_shell() -> str:
     `/bin/false` — există, e executabil, trece orice test de fişier, dar orice sesiune
     nouă ar muri instant cu „This account is currently not available". Instalările astea
     mergeau înainte tocmai prin `$SHELL`-ul exportat, deci îl păstrăm ca fallback ÎNAINTE
-    de /bin/sh — doar când passwd nu e utilizabil, ca să nu redeschidem bug-ul cu cron."""
+    de /bin/sh — doar când passwd nu e utilizabil, ca să nu redeschidem bug-ul cu cron.
+
+    v54: e UNICUL resolver de shell din agent — `default-shell` în tmux.conf, `create` cu
+    `cmd` (docker exec, journalctl -f, lansatoarele DB), shell-ul fallback pe pty şi op-ul
+    `run`. Până la v53 doar tmux.conf îl folosea; celelalte luau passwd/`$SHELL` BRUT, deci
+    pe un cont de serviciu sesiunile simple mergeau, dar TOATE panourile pe bază de `run`
+    (Docker, Services, Ports, OS updates) rulau `nologin -lc …` şi picau cu „This account
+    is currently not available" (audit 2026-10)."""
     def usable(sh):
         return (sh and os.path.basename(sh) not in ("nologin", "false")
                 and os.path.isfile(sh) and os.access(sh, os.X_OK))
@@ -505,10 +528,6 @@ def tmux_session_state(sid):
     return "unknown"        # „server exited unexpectedly", „lost server", erori de socket
 
 
-def tmux_has_session(sid):
-    return tmux_session_state(sid) == "alive"
-
-
 def tmux_server_wedged():
     """True dacă serverul tmux e VIU dar nu răspunde clienţilor: o comandă de control
     întoarce „server exited unexpectedly" / „lost server" (serverul acceptă socketul şi-l
@@ -537,6 +556,56 @@ def tmux_cmdline_matches(parts, socket):
     except ValueError:
         return False
     return i + 1 < len(parts) and parts[i + 1] == socket.encode()
+
+
+def _proc_uid(proc_dir):
+    """UID-ul REAL al procesului din `/proc/<pid>` (linia `Uid:` din status; fallback pe
+    st_uid-ul directorului). None dacă nu se poate afla — şi atunci NU omorâm: un proces pe
+    care nu-l putem atribui nu e „al nostru"."""
+    try:
+        with open(os.path.join(proc_dir, "status"), "rb") as f:
+            for line in f:
+                if line.startswith(b"Uid:"):
+                    return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        return os.stat(proc_dir).st_uid
+    except OSError:
+        return None
+
+
+def tmux_procs_to_kill(socket, uid, proc_root="/proc", skip_pid=None):
+    """PID-urile proceselor `tmux -L <socket>` ALE UTILIZATORULUI `uid` (server + clienţi).
+
+    Filtrul pe UID e esenţial (audit 2026-10, H-09): socketul tmux e per-UID
+    (`/tmp/tmux-<uid>/webterm`), deci două instalări WebTerm pe acelaşi host (root + userul
+    dedicat `webterm`) au servere DIFERITE cu acelaşi `-L webterm` în cmdline. Fără filtru,
+    un agent ROOT care îşi recupera serverul înţepenit — sau un „Uninstall" pe hostul root în
+    timpul migrării spre userul dedicat — dădea SIGKILL şi serverului celuilalt user, adică
+    tuturor sesiunilor lui. Agentul neprivilegiat primea EPERM (inofensiv); cel root nu.
+    `proc_root` e parametru ca filtrul să fie testabil pe un /proc fals."""
+    out = []
+    try:
+        pids = [p for p in os.listdir(proc_root) if p.isdigit()]
+    except OSError:
+        return out
+    for pid in pids:
+        d = os.path.join(proc_root, pid)
+        try:
+            with open(os.path.join(d, "cmdline"), "rb") as f:
+                parts = f.read().split(b"\0")
+        except OSError:
+            continue
+        if not tmux_cmdline_matches(parts, socket):
+            continue
+        p = int(pid)
+        if p == skip_pid:
+            continue
+        if _proc_uid(d) != uid:
+            continue
+        out.append(p)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1184,7 +1253,6 @@ class Session:
         self.attached = False
         self.kill_requested = False
         self.respawns = 0
-        self.last_respawn = 0.0
         self.client_started = 0.0     # când a pornit clientul tmux curent (vezi TMUX_CLIENT_HEALTHY)
         self.retry_at = 0.0           # >0 = fără client ataşat, reîncercăm la momentul ăsta
         self.pending_input = b""
@@ -1196,12 +1264,14 @@ class Session:
     def spawn_client(self):
         """Start the pty child: either `tmux new-session -A` (survives agent
         death, re-adopted by name) or a direct login shell as fallback."""
+        # Shell-ul se rezolvă ÎNAINTE de fork: `_login_shell` face lookup în passwd (NSS) şi
+        # stat-uri, iar într-un proces cu thread-uri (reader/writer/run) un lookup NSS după fork
+        # poate bloca pe un lock glibc moştenit mort. Şi e acelaşi resolver ca pentru tmux.conf
+        # şi `run` (v54): un cont cu `nologin` în passwd primeşte un shell utilizabil şi aici,
+        # nu `nologin -lc <cmd>` (vezi docstring-ul `_login_shell`).
+        shell = _login_shell()
         pid, master = pty.fork()
         if pid == 0:                  # child
-            try:
-                shell = pwd.getpwuid(os.getuid()).pw_shell or "/bin/sh"
-            except KeyError:
-                shell = "/bin/sh"
             env = dict(os.environ)
             env["TERM"] = self.term
             env["COLORTERM"] = "truecolor"
@@ -1355,13 +1425,12 @@ class Serial:
     """O consolă serială (RS232/RS485/USB) deschisă pe host: un fd `/dev/tty*`
     configurat cu termios, multiplexat în `selectors` exact ca un PTY. Bridge de
     octeți bruți către gateway prin FRAME_FWD (același transport ca forward-urile)."""
-    __slots__ = ("stream_id", "fd", "wbuf", "opened_at")
+    __slots__ = ("stream_id", "fd", "wbuf")
 
     def __init__(self, stream_id, fd):
         self.stream_id = stream_id
         self.fd = fd
         self.wbuf = b""
-        self.opened_at = time.time()
 
 
 _TIOCGSERIAL = 0x541E
@@ -1391,14 +1460,6 @@ def _serial_uart_type(dev):
             pass
 
 
-def _sys_read(path):
-    try:
-        with open(path) as fh:
-            return fh.read().strip()
-    except OSError:
-        return ""
-
-
 def _serial_meta(name):
     """Metadate bogate pentru un port serial, din /sys (stdlib, fără pyudev): driver +,
     dacă e USB, VID:PID / producător / produs / serial — urcând din interfaţa tty până la
@@ -1412,11 +1473,11 @@ def _serial_meta(name):
     d = os.path.realpath(base + "/device")
     for _ in range(6):
         if os.path.exists(os.path.join(d, "idVendor")):
-            m["vid"] = _sys_read(os.path.join(d, "idVendor"))
-            m["pid"] = _sys_read(os.path.join(d, "idProduct"))
-            m["vendor"] = _sys_read(os.path.join(d, "manufacturer"))
-            m["product"] = _sys_read(os.path.join(d, "product"))
-            m["serial"] = _sys_read(os.path.join(d, "serial"))
+            m["vid"] = _diag_read(os.path.join(d, "idVendor"))
+            m["pid"] = _diag_read(os.path.join(d, "idProduct"))
+            m["vendor"] = _diag_read(os.path.join(d, "manufacturer"))
+            m["product"] = _diag_read(os.path.join(d, "product"))
+            m["serial"] = _diag_read(os.path.join(d, "serial"))
             break
         parent = os.path.dirname(d)
         if parent == d:
@@ -1445,7 +1506,7 @@ def _serial_busy_map():
             except OSError:
                 continue
             if tgt.startswith("/dev/tty") and tgt not in busy:
-                busy[tgt] = "%s[%s]" % (_sys_read("/proc/%s/comm" % pid) or "?", pid)
+                busy[tgt] = "%s[%s]" % (_diag_read("/proc/%s/comm" % pid) or "?", pid)
     return busy
 
 
@@ -1562,6 +1623,242 @@ def _configure_serial(fd, baud, bits, parity, stop, flow):
     termios.tcsetattr(fd, termios.TCSANOW, a)
 
 
+# ---------------------------------------------------------------------------
+# Citire de fişiere: tipul se verifică pe FD, nu pe nume (audit 2026-10)
+# ---------------------------------------------------------------------------
+
+def _open_regular(path):
+    """Deschide `path` pentru citire DOAR dacă e un fişier obişnuit — verificat cu `fstat` pe
+    fd-ul deschis, nu cu `stat` pe nume. Între un `stat` şi `open` un proces local poate
+    înlocui ţinta (symlink → FIFO fără scriitor): `open(O_RDONLY)` pe FIFO BLOCHEAZĂ până
+    apare un scriitor — pe thread-ul buclei, adică toate sesiunile îngheaţă şi watchdog-ul
+    omoară agentul. `O_NONBLOCK` face ca open-ul pe FIFO să se întoarcă imediat, iar `fstat`
+    îl respinge; pe un fişier obişnuit flagul nu are efect, îl scoatem după verificare.
+    Symlink-urile se urmează ca până acum (editorul deschide `~/bin/x → /opt/…`), dar numai
+    dacă ţinta e un fişier obişnuit. Întoarce (fd, stat); ridică OSError (EINVAL la tip greşit)."""
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY | getattr(os, "O_CLOEXEC", 0))
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise OSError(errno.EINVAL, "not a regular file (directory/device/socket/FIFO)")
+        fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, fl & ~os.O_NONBLOCK)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd, st
+
+
+def _fs_read_chunk(path, offset):
+    """Un chunk de FS_CHUNK octeţi de la `offset`, ca dict de răspuns pentru `fs_read`."""
+    fd, st = _open_regular(path)
+    with os.fdopen(fd, "rb") as f:
+        f.seek(offset)
+        chunk = f.read(FS_CHUNK)
+    return {"path": path, "offset": offset, "size": st.st_size, "mtime": int(st.st_mtime),
+            "eof": offset + len(chunk) >= st.st_size,
+            "data_b64": base64.b64encode(chunk).decode()}
+
+
+def _fs_crc32(path):
+    """CRC-32 IEEE streaming peste tot fişierul (== `zlib.crc32`, == implementarea din browser).
+    De rulat pe un THREAD worker: e legat de disc (un temp de 20 GB abia scris = ~100 s)."""
+    fd, _ = _open_regular(path)
+    crc = 0
+    with os.fdopen(fd, "rb", buffering=0) as f:
+        while True:
+            b = f.read(1 << 20)
+            if not b:
+                break
+            crc = zlib.crc32(b, crc)
+    return crc & 0xffffffff
+
+
+# ---------------------------------------------------------------------------
+# Serial: allowlist de device-uri (audit 2026-10)
+# ---------------------------------------------------------------------------
+# `serial_open` accepta ORICE tty din /dev — şi `/dev/pts/N` al altei sesiuni, şi `/dev/tty1`
+# sau `/dev/console` (ca root): le rescria termios-ul în raw şi le citea octeţii în paralel cu
+# procesul legitim. Un device tastat greşit strica consola fizică a hostului până la reset.
+# Acceptăm doar ce poate fi un port serial: numele de driver cunoscute, link-urile stabile din
+# /dev/serial/by-id|by-path (rezolvate), şi orice ţintă a unui asemenea link (driver exotic —
+# ttyXRUSB/ttyMXUSB — pe care `serial_ports()` îl listează tot prin by-id, deci UI-ul îl oferă).
+# Ţinta reală trebuie să arate ca `/dev/tty<litere><cifre>` — exclude `/dev/tty`, `/dev/tty1`,
+# `/dev/pts/0`, `/dev/console` — iar după open cerem şi dispozitiv-caracter (fstat) şi isatty.
+_SERIAL_DIRECT = re.compile(r"^/dev/(ttyUSB|ttyACM|ttyS|ttyAMA|ttyXRUSB)[0-9]+$")
+_SERIAL_BYLINK = re.compile(r"^/dev/serial/by-(id|path)/[^/]+$")
+_SERIAL_TARGET = re.compile(r"^/dev/tty[A-Za-z]+[0-9]+$")
+
+
+def _serial_link_targets():
+    """Ţintele reale ale link-urilor din /dev/serial/by-id şi by-path (set de căi)."""
+    out = set()
+    for pat in ("/dev/serial/by-id/*", "/dev/serial/by-path/*"):
+        for link in glob.glob(pat):
+            try:
+                out.add(os.path.realpath(link))
+            except OSError:
+                pass
+    return out
+
+
+def serial_device_allowed(device, link_targets=None):
+    """Calea NORMALIZATĂ a device-ului dacă e un port serial acceptabil, altfel None.
+    `link_targets` e injectabil pentru teste (altfel se citeşte /dev/serial)."""
+    if not isinstance(device, str) or "\x00" in device or not device.startswith("/dev/"):
+        return None
+    dev = os.path.normpath(device)
+    if not dev.startswith("/dev/"):
+        return None
+    if _SERIAL_BYLINK.match(dev):
+        pass                                       # link stabil: validăm ţinta mai jos
+    elif not _SERIAL_DIRECT.match(dev):
+        targets = _serial_link_targets() if link_targets is None else link_targets
+        if dev not in targets:
+            return None
+    try:
+        real = os.path.realpath(dev)
+    except OSError:
+        return None
+    if not _SERIAL_TARGET.match(real):
+        return None
+    return dev
+
+
+# ---------------------------------------------------------------------------
+# Forward: literal de adresă (fără DNS pe loop)
+# ---------------------------------------------------------------------------
+
+def _literal_addr(host, port):
+    """(family, sockaddr) dacă `host` e un literal IPv4/IPv6; None dacă e un hostname.
+    AI_NUMERICHOST garantează că NU se face nicio interogare DNS aici (apel pe loop)."""
+    try:
+        infos = socket.getaddrinfo(host, port, socket.AF_UNSPEC, socket.SOCK_STREAM, 0,
+                                   socket.AI_NUMERICHOST)
+    except (OSError, UnicodeError, ValueError):
+        return None
+    return (infos[0][0], infos[0][4]) if infos else None
+
+
+def _pick_addr(infos):
+    """Alege adresa de conectat dintr-un rezultat getaddrinfo: IPv4 înaintea IPv6. Ţintele de
+    forward sunt aproape toate pe LAN-uri v4; fără Happy Eyeballs, un AAAA pe un host fără rută
+    v6 ar da ENETUNREACH deşi A-ul ar fi mers. Întoarce (family, sockaddr) sau None."""
+    infos = sorted(infos, key=lambda i: i[0] != socket.AF_INET)
+    return (infos[0][0], infos[0][4]) if infos else None
+
+
+# ---------------------------------------------------------------------------
+# systemd: KillMode=process pe unit-ul instalatorului (audit 2026-10, H-08)
+# ---------------------------------------------------------------------------
+# Serverul `tmux -L webterm` e pornit de un copil al agentului, deci trăieşte în cgroup-ul
+# unităţii `webterm-agent.service`. Cu KillMode implicit (control-group), la ORICE tranziţie de
+# stop — `systemctl --user restart`, crash + Restart=always, omorâre de watchdog (WatchdogSec=45)
+# — systemd omoară tot cgroup-ul, inclusiv serverul tmux: TOATE sesiunile hostului mor, cu
+# procesele utilizatorului din ele. Exact invariantul pe care docs/design/ARCHITECTURE.md:49
+# îl promite („a session survives the agent restarting") şi exact scenariul pentru care tmux a
+# fost introdus. Invariantul ţinea doar pe cron (serverul e reparentat la init) şi la update prin
+# execv (acelaşi PID, fără stop). Instalatorul nou scrie KillMode=process; pentru hosturile deja
+# instalate agentul îşi repară singur unit-ul la pornire (şi înainte de re-exec), DOAR dacă e al
+# instalatorului (ExecStart arată spre acest ptyd.py) şi DOAR dacă nu are deja un KillMode.
+_UNIT_NAME = "webterm-agent.service"
+_KILLMODE_BLOCK = (
+    "# WebTerm agent: the tmux server that holds every session is started by the agent and so\n"
+    "# lives in this unit's cgroup. With the default KillMode (control-group) any stop, restart\n"
+    "# or watchdog kill of the agent would also kill tmux -- and every session with it.\n"
+    "KillMode=process\n")
+
+
+def _systemd_unit_candidates():
+    """(cale_unit, e_user_scope) în ordinea în care le încercăm."""
+    return [(os.path.join(os.path.expanduser("~"), ".config/systemd/user", _UNIT_NAME), True),
+            (os.path.join("/etc/systemd/system", _UNIT_NAME), False)]
+
+
+def patch_unit_killmode(unit_path, self_path):
+    """Adaugă `KillMode=process` sub `[Service]` în unit-ul de la `unit_path`, dacă e al nostru.
+    Întoarce: None = lipseşte sau NU e unit-ul instalatorului pentru acest agent (ExecStart nu
+    arată spre `self_path`) → neatins; "ok" = are deja un KillMode (orice valoare — o alegere
+    explicită a operatorului nu se suprascrie); "patched" = rescris (atomic, mod păstrat)."""
+    try:
+        with open(unit_path, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return None
+    lines = text.split("\n")
+    mine = False
+    for ln in lines:
+        s = ln.strip()
+        if s.startswith("ExecStart="):
+            try:
+                real = os.path.realpath(self_path)
+            except OSError:
+                real = self_path
+            if self_path in s or real in s:
+                mine = True
+    if not mine:
+        return None
+    section = None
+    for ln in lines:
+        s = ln.strip()
+        if s.startswith("[") and s.endswith("]"):
+            section = s
+        elif section == "[Service]" and s.startswith("KillMode="):
+            return "ok"
+    out = []
+    inserted = False
+    for ln in lines:
+        out.append(ln)
+        if not inserted and ln.strip() == "[Service]":
+            out.append(_KILLMODE_BLOCK.rstrip("\n"))
+            inserted = True
+    if not inserted:
+        return None                 # fără secţiune [Service]: nu e un unit pe care-l înţelegem
+    tmp = unit_path + ".tmp"
+    try:
+        mode = stat.S_IMODE(os.stat(unit_path).st_mode)
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write("\n".join(out))
+        os.chmod(tmp, mode)
+        os.replace(tmp, unit_path)
+    except OSError as e:
+        log("could not patch %s with KillMode=process: %s" % (unit_path, e))
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return None
+    return "patched"
+
+
+def ensure_systemd_killmode():
+    """Self-heal (H-08): dacă rulăm sub systemd şi unit-ul instalatorului n-are KillMode, îl
+    reparăm + `daemon-reload` (best-effort; NU restart — schimbarea se aplică la următorul stop,
+    care fără ea ar fi omorât sesiunile). Detectăm systemd prin `INVOCATION_ID` (systemd ≥232
+    îl setează oricărui serviciu) sau `NOTIFY_SOCKET` (setat când unit-ul are WatchdogSec, cum
+    are al nostru); pornit de mână sau din cron, nu atingem nimic. Nu are voie să arunce."""
+    if not (os.environ.get("INVOCATION_ID") or os.environ.get("NOTIFY_SOCKET")):
+        return None
+    try:
+        for unit, user_scope in _systemd_unit_candidates():
+            r = patch_unit_killmode(unit, SELF_PATH)
+            if r is None:
+                continue
+            if r == "patched":
+                log("systemd unit %s: added KillMode=process so the tmux server (and every "
+                    "session) survives agent restarts; reloading units" % unit)
+                try:
+                    subprocess.run(["systemctl"] + (["--user"] if user_scope else [])
+                                   + ["daemon-reload"], timeout=15,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except (OSError, subprocess.SubprocessError) as e:
+                    log("systemctl daemon-reload failed (unit is patched on disk): %s" % e)
+            return r
+    except Exception as e:          # noqa: BLE001 — self-heal-ul nu are voie să oprească pornirea
+        log("KillMode self-heal skipped: %r" % e)
+    return None
+
+
 class Agent:
     def __init__(self, config):
         self.config = config
@@ -1569,6 +1866,18 @@ class Agent:
         self.forwards = {}            # stream_id -> Forward (port forwarding)
         self.serials = {}             # stream_id -> Serial (console seriale)
         self._run_sem = threading.Semaphore(MAX_RUNS)   # cap pe rulările `run` concurente
+        # fs_crc32 (H-07): coadă + cel mult CRC_WORKERS thread-uri; `_crc_workers` şi coada se
+        # citesc/scriu DOAR sub `_crc_lock`, ca un worker care se retrage să nu lase o cerere
+        # abia pusă fără nimeni care s-o ia
+        self._crc_q = queue.Queue()
+        self._crc_lock = threading.Lock()
+        self._crc_workers = 0
+        # fwd_open cu hostname: DNS pe thread; stream -> (rid, deadline) cât aşteptăm rezultatul
+        self._fwd_resolving = {}
+        # diagnostics: o singură colectare în zbor per agent + ultimul snapshot (servit la busy)
+        self._diag_inflight = threading.Lock()
+        self._diag_last = None
+        self._last_diag_force = 0.0
         # epoch identifies this agent process' stream-offset space: after an
         # agent restart offsets reset, so the gateway must not reuse old ones
         self.epoch = binascii.hexlify(os.urandom(8)).decode()
@@ -1673,22 +1982,6 @@ class Agent:
             os.chmod(tmp, 0o600)
             os.replace(tmp, CONFIG_PATH)
             log("gateway key pinned (TOFU, insecure mode): %s…" % pins[0][:16])
-        except (OSError, ValueError) as e:
-            log("could not pin the certificate in %s: %s" % (CONFIG_PATH, e))
-
-    def _persist_cert_pin(self, pin):
-        """Fixează amprenta certificatului gateway-ului în agent.json (TOFU, mod insecure).
-        Scriere atomică (temp + rename), permisiuni 0600."""
-        try:
-            with open(CONFIG_PATH) as f:
-                data = json.load(f)
-            data["cert_pin"] = pin
-            tmp = CONFIG_PATH + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump(data, f)
-            os.chmod(tmp, 0o600)
-            os.replace(tmp, CONFIG_PATH)
-            log("cert pin fixat (TOFU, mod insecure): %s…" % pin[:16])
         except (OSError, ValueError) as e:
             log("could not pin the certificate in %s: %s" % (CONFIG_PATH, e))
 
@@ -1824,6 +2117,7 @@ class Agent:
             self._fwd_teardown(stream, notify=False)
         for stream in list(self.serials):
             self._serial_teardown(stream, notify=False)
+        self._fwd_resolving.clear()   # rezultatele DNS târzii nu mai au cui răspunde
         ws, self.ws = self.ws, None
         if ws:
             ws.close()
@@ -1884,7 +2178,10 @@ class Agent:
         guralivă — `yes`, `cat /dev/zero`), omorâm procesul. Fără asta,
         subprocess.run(PIPE) materializa TOT output-ul în memorie → OOM."""
         start = time.time()
-        shell = os.environ.get("SHELL") or "/bin/bash"
+        # NU `$SHELL` brut: sub systemd `$SHELL` e cel din passwd (pe un cont de serviciu =
+        # nologin → toate panourile pe `run` picau), sub cron e `/bin/sh` (dash, alt PATH decât
+        # sesiunile). `_login_shell` dă acelaşi shell ca sesiunile interactive (v54).
+        shell = _login_shell()
         try:
             p = subprocess.Popen(
                 [shell, "-lc", cmd], stdin=subprocess.DEVNULL,
@@ -1963,20 +2260,132 @@ class Agent:
         finally:
             self._run_sem.release()
 
-    def _push_diag(self, rid=None):
+    def _start_diag(self, rid=None):
+        """Porneşte o colectare de diagnostic pe un worker — CEL MULT UNA în zbor (audit 2026-10):
+        `run` are semafor tocmai ca sute de cereri să nu pornească sute de procese; `diagnostics`
+        n-avea, iar fiecare Refresh = un thread + `apt-get -s upgrade` (secunde de CPU/I/O).
+        Dacă una e deja în curs: on-demand primeşte ultimul snapshot (marcat `stale`) sau `busy`
+        dacă nu există încă unul; push-ul periodic pur şi simplu sare (vine următorul).
+        `force` (ocolirea cache-ului de update-uri OS) rămâne pentru on-demand — badge-ul trebuie
+        să dispară imediat după un upgrade — dar cel mult o dată la DIAG_FORCE_MIN_INTERVAL."""
+        if not self._diag_inflight.acquire(False):
+            if rid is not None:
+                if self._diag_last is not None:
+                    self.send_ctrl({"ok": True, "id": rid, "diag": self._diag_last, "stale": True})
+                else:
+                    self.send_ctrl({"ok": False, "id": rid, "code": "busy",
+                                    "msg": "diagnostics collection already in progress"})
+            return
+        now = time.time()
+        force = rid is not None and now - self._last_diag_force >= DIAG_FORCE_MIN_INTERVAL
+        if force:
+            self._last_diag_force = now
+        threading.Thread(target=self._push_diag, args=(rid, force), daemon=True).start()
+
+    def _push_diag(self, rid=None, force=False):
         """Colectează snapshot-ul (pe acest thread worker — poate apela `ip`) şi-l trimite:
         ca RĂSPUNS on-demand dacă avem `rid`, altfel ca eveniment de push (connect/orar).
-        On-demand (rid prezent = butonul Refresh sau auto-clear după upgrade) forţează
-        re-verificarea update-urilor, ocolind cache-ul de 6h; push-ul orar foloseşte cache-ul."""
+        De pornit DOAR prin `_start_diag` (deţine `_diag_inflight`; îl eliberăm aici)."""
         try:
-            snap = collect_diagnostics(force_updates=rid is not None)
-        except Exception:      # noqa: BLE001 — best-effort; un snapshot ratat nu doboară nimic
-            snap = {"collected_at": int(time.time())}
-        if rid is not None:
-            self.send_ctrl({"ok": True, "id": rid, "diag": snap})
-        else:
-            self.send_ctrl({"event": "diagnostics", "agent_version": AGENT_VERSION,
-                            "epoch": self.epoch, "diag": snap})
+            try:
+                snap = collect_diagnostics(force_updates=force)
+            except Exception:      # noqa: BLE001 — best-effort; un snapshot ratat nu doboară nimic
+                snap = {"collected_at": int(time.time())}
+            self._diag_last = snap
+            if rid is not None:
+                self.send_ctrl({"ok": True, "id": rid, "diag": snap})
+            else:
+                self.send_ctrl({"event": "diagnostics", "agent_version": AGENT_VERSION,
+                                "epoch": self.epoch, "diag": snap})
+        finally:
+            self._diag_inflight.release()
+
+    # -- fs_crc32 pe worker (H-07) --------------------------------------------
+
+    def _crc_enqueue(self, rid, fpath):
+        """Pune CRC-ul la coadă şi porneşte un worker dacă sunt mai puţini de CRC_WORKERS.
+        False dacă coada e plină (apelantul răspunde `busy`)."""
+        with self._crc_lock:
+            if self._crc_q.qsize() >= CRC_QUEUE_MAX:
+                return False
+            self._crc_q.put((rid, fpath))
+            if self._crc_workers < CRC_WORKERS:
+                self._crc_workers += 1
+                threading.Thread(target=self._crc_worker, daemon=True).start()
+        return True
+
+    def _crc_worker(self):
+        while True:
+            with self._crc_lock:
+                if self._crc_q.empty():
+                    self._crc_workers -= 1     # retragere SUB lock: nicio cerere nu rămâne orfană
+                    return
+                rid, fpath = self._crc_q.get_nowait()
+            try:
+                crc = _fs_crc32(fpath)
+            except OSError as e:
+                self.send_ctrl({"ok": False, "id": rid, "code": "fs_error",
+                                "msg": "%s: %s" % (fpath, e.strerror or e)})
+                continue
+            except Exception as e:             # noqa: BLE001 — worker-ul nu moare cu cererea în el
+                self.send_ctrl({"ok": False, "id": rid, "code": "internal", "msg": str(e)})
+                continue
+            self.send_ctrl({"ok": True, "id": rid, "crc32": crc})
+
+    # -- fwd_open: rezolvare + connect --------------------------------------------
+
+    def _fwd_connect(self, rid, stream, family, sockaddr):
+        """connect() non-blocant către o adresă DEJA rezolvată; finalizarea se detectează pe
+        EVENT_WRITE în bucla principală. Răspunde la cererea `rid` (ok / connect)."""
+        try:
+            sock = socket.socket(family, socket.SOCK_STREAM)
+            sock.setblocking(False)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            _set_keepalive(sock)   # detectează peer mort half-open (ex. Cisco
+                                   # exec-timeout fără FIN) în ~120s → EOF → sesiune
+                                   # telnet marcată 'lost', nu fantomă 'live'
+            e = sock.connect_ex(sockaddr)
+            if e not in (0, errno.EINPROGRESS, errno.EWOULDBLOCK):
+                sock.close()
+                self.send_ctrl({"ok": False, "id": rid, "code": "connect", "msg": os.strerror(e)})
+                return
+        except OSError as ex:
+            self.send_ctrl({"ok": False, "id": rid, "code": "connect", "msg": str(ex)})
+            return
+        fwd = Forward(stream, sock)
+        self.forwards[stream] = fwd
+        # EVENT_WRITE: aflăm când s-a finalizat connect-ul non-blocant
+        self.sel.register(sock, selectors.EVENT_WRITE, ("fwd", stream))
+        self.send_ctrl({"ok": True, "id": rid})
+
+    def _fwd_resolve_worker(self, stream, host, port):
+        """DNS pe thread (H-10): `getaddrinfo` sincron pe loop îngheţa toate sesiunile 10-30 s la
+        fiecare tunel către un nume lent/nerezolvabil (şi două la rând = watchdog kill). Rezultatul
+        se întoarce pe loop prin inbox; loop-ul decide dacă mai e aşteptat (vezi _on_fwd_resolved)."""
+        try:
+            infos = socket.getaddrinfo(host, port, socket.AF_UNSPEC, socket.SOCK_STREAM)
+            self.inbox.put(("__fwd_resolved__", stream, _pick_addr(infos), None))
+        except Exception as e:          # noqa: BLE001 — orice eşec trebuie să ajungă la loop
+            self.inbox.put(("__fwd_resolved__", stream, None, str(e)))
+        self._wake()
+
+    def _on_fwd_resolved(self, stream, addr, error):
+        """Pe thread-ul loop-ului: rezultatul DNS pentru un fwd_open în aşteptare."""
+        pend = self._fwd_resolving.pop(stream, None)
+        if pend is None:
+            return                      # expirat (_tick), închis (fwd_close) sau deconectat
+        rid = pend[0]
+        if addr is None:
+            self.send_ctrl({"ok": False, "id": rid, "code": "resolve",
+                            "msg": error or "no address for host"})
+            return
+        if stream in self.forwards:
+            self.send_ctrl({"ok": False, "id": rid, "code": "exists", "msg": ""})
+            return
+        if len(self.forwards) >= MAX_FORWARDS:
+            self.send_ctrl({"ok": False, "id": rid, "code": "limit", "msg": ""})
+            return
+        self._fwd_connect(rid, stream, addr[0], addr[1])
 
     def handle_ctrl(self, msg):
         op = msg.get("op")
@@ -2148,20 +2557,10 @@ class Agent:
             elif op == "fs_read":
                 path = os.path.abspath(os.path.expanduser(msg["path"]))
                 offset = int(msg.get("offset", 0))
+                # doar fişiere obişnuite, verificate pe FD-ul deschis (nu `stat` pe nume, apoi
+                # `open` — TOCTOU): un FIFO ar bloca loop-ul, /dev/zero ar curge la infinit
                 try:
-                    st = os.stat(path)
-                    # doar fișiere obișnuite: un FIFO/dispozitiv (/dev/zero) ar
-                    # stream-ui la infinit, un socket/director n-are conținut de citit
-                    if not stat.S_ISREG(st.st_mode):
-                        err("fs_error", "not a regular file (directory/device/socket)")
-                    else:
-                        with open(path, "rb") as f:
-                            f.seek(offset)
-                            chunk = f.read(FS_CHUNK)
-                        ok(path=path, offset=offset, size=st.st_size,
-                           mtime=int(st.st_mtime),
-                           eof=offset + len(chunk) >= st.st_size,
-                           data_b64=base64.b64encode(chunk).decode())
+                    ok(**_fs_read_chunk(path, offset))
                 except OSError as e:
                     err("fs_error", "%s: %s" % (path, e.strerror or e))
 
@@ -2299,39 +2698,34 @@ class Agent:
                 ok(cwd=cwd or os.path.expanduser("~"))
 
             elif op == "fwd_open":
-                # deschide un tunel TCP către un serviciu local pe host (port
-                # forwarding). connect() non-blocant; finalizarea se detectează pe
-                # EVENT_WRITE în bucla principală. stream = id-ul canalului (de la gateway).
+                # deschide un tunel TCP către un serviciu văzut de host (port forwarding,
+                # telnet-jump, ssh-jump). stream = id-ul canalului (de la gateway).
+                # Literal IPv4/IPv6 → connect imediat (familia după literal, nu AF_INET fix).
+                # Hostname → DNS pe un THREAD (H-10), răspunsul vine din _on_fwd_resolved;
+                # slotul se rezervă de pe acum (contează la MAX_FORWARDS) şi expiră în _tick.
                 stream = msg.get("stream")
                 host = msg.get("host") or "127.0.0.1"
                 port = int(msg.get("port") or 0)
-                if not stream or stream in self.forwards:
+                if not stream or stream in self.forwards or stream in self._fwd_resolving:
                     return err("exists")
-                if len(self.forwards) >= MAX_FORWARDS:
+                if len(self.forwards) + len(self._fwd_resolving) >= MAX_FORWARDS:
                     return err("limit")
-                try:
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    sock.setblocking(False)
-                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                    _set_keepalive(sock)   # detectează peer mort half-open (ex. Cisco
-                                           # exec-timeout fără FIN) în ~120s → EOF → sesiune
-                                           # telnet marcată 'lost', nu fantomă 'live'
-                    e = sock.connect_ex((host, port))
-                    if e not in (0, errno.EINPROGRESS, errno.EWOULDBLOCK):
-                        sock.close()
-                        return err("connect", os.strerror(e))
-                except OSError as ex:
-                    return err("connect", str(ex))
-                fwd = Forward(stream, sock)
-                self.forwards[stream] = fwd
-                # EVENT_WRITE: aflăm când s-a finalizat connect-ul non-blocant
-                self.sel.register(sock, selectors.EVENT_WRITE, ("fwd", stream))
-                ok()
+                if not isinstance(host, str) or "\x00" in host or not 0 < port <= 65535:
+                    return err("bad_request", "invalid host/port")
+                addr = _literal_addr(host, port)
+                if addr is not None:
+                    self._fwd_connect(rid, stream, addr[0], addr[1])
+                else:
+                    self._fwd_resolving[stream] = (rid, time.time() + FWD_RESOLVE_TIMEOUT)
+                    threading.Thread(target=self._fwd_resolve_worker,
+                                     args=(stream, host, port), daemon=True).start()
+                    # NU răspundem aici — loop-ul răspunde când vine rezultatul DNS
 
             elif op == "fwd_close":
                 # reutilizat și pt. serial: ForwardStream.close() trimite fwd_close
                 self._fwd_teardown(msg.get("stream"), notify=False)
                 self._serial_teardown(msg.get("stream"), notify=False)
+                self._fwd_resolving.pop(msg.get("stream"), None)   # DNS încă în curs → abandonat
                 ok()
 
             elif op == "serial_list":
@@ -2359,8 +2753,9 @@ class Agent:
 
             elif op == "diagnostics":
                 # Refresh on-demand din panoul Diagnostic. Colectăm pe un worker (apelează `ip`)
-                # ca să nu blocăm thread-ul de reader; worker-ul trimite reply-ul cu acelaşi id.
-                threading.Thread(target=self._push_diag, args=(rid,), daemon=True).start()
+                # ca să nu blocăm loop-ul; worker-ul trimite reply-ul cu acelaşi id. Cel mult o
+                # colectare în zbor + `force` rărit (vezi _start_diag).
+                self._start_diag(rid)
 
             elif op == "fs_stat":
                 # O(1): mărimea + tipul unui fişier, fără a lista tot directorul (fs_list e plafonat
@@ -2384,18 +2779,14 @@ class Agent:
                 # (ieftin) peste fişierul de pe disc; prinde coruperea ACCIDENTALĂ (erori de disc,
                 # trunchiere, bug de offset). `zlib.crc32` == implementarea din browser → comparabil
                 # cap-coadă. Manipularea rău-voitoare o acoperă deja TLS.
+                # H-07: pe un WORKER, nu pe loop — citirea e legată de disc (20 GB abia scrişi
+                # = ~100 s), timp în care loop-ul nu mai servea PTY-urile şi nu mai pinga
+                # watchdog-ul (WatchdogSec=45) → systemd omora agentul (şi, fără KillMode=process,
+                # serverul tmux cu el), iar commit-ul upload-ului eşua oricum. Tipul fişierului se
+                # verifică pe fd (FIFO/device refuzate). Worker-ul trimite reply-ul cu acelaşi id.
                 fpath = os.path.abspath(os.path.expanduser(msg["path"]))
-                try:
-                    crc = 0
-                    with open(fpath, "rb", buffering=0) as f:
-                        while True:
-                            b = f.read(1 << 20)
-                            if not b:
-                                break
-                            crc = zlib.crc32(b, crc)
-                    ok(crc32=crc & 0xffffffff)
-                except OSError as e:
-                    err("fs_error", "%s: %s" % (fpath, e.strerror or e))
+                if not self._crc_enqueue(rid, fpath):
+                    err("busy", "too many checksum requests queued on this host")
 
             elif op == "get_log":
                 # tail-ul logului agentului (ptyd.log) pentru panoul de Diagnostic — debug fără SSH.
@@ -2416,15 +2807,18 @@ class Agent:
                     return err("exists")
                 if len(self.serials) >= MAX_SERIALS:
                     return err("limit")
-                # anti-traversal: doar dispozitive din /dev, fără NUL
-                if not device.startswith("/dev/") or "\x00" in device:
-                    return err("bad_device", "dispozitiv invalid")
+                # allowlist de porturi seriale (vezi serial_device_allowed): NU orice tty din
+                # /dev — `/dev/pts/N`, `/dev/tty1`, `/dev/console` sunt terminale, nu porturi
+                device = serial_device_allowed(device)
+                if not device:
+                    return err("bad_device", "not a serial port device")
                 try:
                     fd = os.open(device, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
                 except OSError as e:
                     return err("open", os.strerror(e.errno) if e.errno else str(e))
                 try:
-                    if not os.isatty(fd):
+                    # verificat pe FD-ul deschis: dispozitiv-caracter ŞI tty (nu pe nume)
+                    if not stat.S_ISCHR(os.fstat(fd).st_mode) or not os.isatty(fd):
                         os.close(fd)
                         return err("not_serial", "not a serial device (tty)")
                     _configure_serial(fd, msg.get("baud", 115200), msg.get("bits", 8),
@@ -2449,16 +2843,22 @@ class Agent:
                 sig = base64.b64decode(msg.get("sig_b64", "") or "")
                 # refuse unsigned / tampered updates — the whole point is that a
                 # rogue gateway or MITM can't install code on the host
+                new_ver = _content_version(content)
                 if not ed25519_verify(UPDATE_PUBKEY, sig, content):
                     err("update_unsigned", "update signature invalid — refused")
-                elif _content_version(content) is not None and _content_version(content) < AGENT_VERSION:
+                elif new_ver is None:
+                    # FAIL-CLOSED (v54): fără versiune citibilă nu putem verifica anti-rollback-ul,
+                    # deci nu instalăm. Până la v53 `None` sărea verificarea — o linie de versiune
+                    # cu un comentariu într-un release viitor ar fi dezactivat tăcut protecţia.
+                    err("update_badversion",
+                        "AGENT_VERSION not found in the new source — refused (anti-rollback)")
+                elif new_ver < AGENT_VERSION:
                     # anti-rollback: refuză o versiune mai veche, chiar valid-semnată.
                     # Un gateway compromis (exact adversarul pe care semnătura îl
                     # blochează) ar putea re-trimite o versiune veche ca să reintroducă
                     # o vulnerabilitate reparată ulterior (downgrade-replay).
                     err("update_downgrade",
-                        "versiune %d < %d — refuzat (anti-rollback)"
-                        % (_content_version(content), AGENT_VERSION))
+                        "versiune %d < %d — refuzat (anti-rollback)" % (new_ver, AGENT_VERSION))
                 elif not _new_agent_starts(content):
                     # Un `ptyd.py` care nu se compilează se scria peste agent, care făcea execv
                     # şi murea — iar supravegherea (systemd Restart=always / watchdog cron la
@@ -2559,6 +2959,7 @@ class Agent:
 
     def _reexec(self):
         log("re-executing new agent version")
+        ensure_systemd_killmode()     # H-08: unit-ul reparat înainte ca noul cod să preia
         # lasă răspunsul (ok) să ajungă la gateway înainte de a închide conexiunea
         deadline = time.time() + 1.0
         while not self.outbox.empty() and time.time() < deadline:
@@ -2642,7 +3043,6 @@ class Agent:
                     self._kill_wedged_tmux_server()
                 now = time.time()
                 s.respawns += 1
-                s.last_respawn = now
                 idx = min(max(s.respawns - TMUX_REATTACH_FAST, 1),
                           len(TMUX_REATTACH_BACKOFF)) - 1
                 s.retry_at = now + TMUX_REATTACH_BACKOFF[idx]
@@ -2656,7 +3056,6 @@ class Agent:
                 # numărătoarea, ca un incident de acum să nu moştenească backoff-ul de ieri
                 lived = now - s.client_started
                 s.respawns = 1 if lived >= TMUX_CLIENT_HEALTHY else s.respawns + 1
-                s.last_respawn = now
                 if s.respawns <= TMUX_REATTACH_FAST:
                     log("session %s: tmux client died, reattaching" % s.sid)
                     s.spawn_client()
@@ -2920,7 +3319,15 @@ class Agent:
         # next_diag ÎNAINTE de spawn, ca un tick reintrat să nu pornească un al doilea thread.
         if self.connected and now >= self.next_diag:
             self.next_diag = now + DIAG_INTERVAL
-            threading.Thread(target=self._push_diag, daemon=True).start()
+            self._start_diag()
+        # fwd_open cu hostname: o rezolvare care n-a răspuns în FWD_RESOLVE_TIMEOUT e abandonată
+        # (thread-ul rămâne blocat în getaddrinfo până la timeout-ul resolver-ului, rezultatul
+        # lui târziu e ignorat în _on_fwd_resolved) — gateway-ul primeşte un răspuns clar
+        for stream, (rid, deadline) in list(self._fwd_resolving.items()):
+            if now > deadline:
+                self._fwd_resolving.pop(stream, None)
+                log("forward %s: DNS resolution timed out after %.0fs" % (stream, FWD_RESOLVE_TIMEOUT))
+                self.send_ctrl({"ok": False, "id": rid, "code": "resolve", "msg": "DNS timeout"})
         # Reapează DOAR pid-urile de sesiune. Un waitpid(-1) global fura copilul lui
         # subprocess.run din op-ul `run` (rulează pe un thread worker) → subprocess
         # primea ECHILD, iar CPython raporta silent exit code 0 (comenzi eșuate
@@ -2994,25 +3401,11 @@ class Agent:
                 % (TMUX_SOCKET, killed))
 
     def _kill_tmux_procs(self):
-        """SIGKILL toate procesele `tmux -L <socket>` (server + clienţi), scanând
-        /proc (fără dependenţă de lsof). Nu se atinge de sine."""
-        me = os.getpid()
+        """SIGKILL toate procesele `tmux -L <socket>` ALE ACESTUI UID (server + clienţi),
+        scanând /proc (fără dependenţă de lsof). Nu se atinge de sine şi nici de serverele
+        altor utilizatori cu acelaşi nume de socket (H-09, vezi tmux_procs_to_kill)."""
         killed = 0
-        try:
-            pids = [p for p in os.listdir("/proc") if p.isdigit()]
-        except OSError:
-            return 0
-        for pid in pids:
-            try:
-                with open("/proc/%s/cmdline" % pid, "rb") as f:
-                    parts = f.read().split(b"\0")
-            except OSError:
-                continue
-            if not tmux_cmdline_matches(parts, TMUX_SOCKET):
-                continue
-            p = int(pid)
-            if p == me:
-                continue
+        for p in tmux_procs_to_kill(TMUX_SOCKET, os.getuid(), skip_pid=os.getpid()):
             try:
                 os.kill(p, signal.SIGKILL)
                 killed += 1
@@ -3127,6 +3520,7 @@ class Agent:
         signal.signal(signal.SIGTERM, self._request_stop)
         signal.signal(signal.SIGINT, self._request_stop)
         _sd_notify("READY=1")         # systemd (Type=notify): pornire confirmată; no-op altfel
+        ensure_systemd_killmode()     # H-08: sesiunile trebuie să supravieţuiască opririi agentului
         self._adopt_tmux_sessions()
         while not self.stop_requested:
             now = time.time()
@@ -3237,6 +3631,9 @@ class Agent:
                     if item[2] is self.ws:       # ignore markers from a stale connection
                         log("connection lost: %s" % item[1])
                         self._disconnect()
+                    continue
+                if tag == "__fwd_resolved__":    # DNS pentru un fwd_open, venit de pe worker
+                    self._on_fwd_resolved(item[1], item[2], item[3])
                     continue
             if not item:
                 continue

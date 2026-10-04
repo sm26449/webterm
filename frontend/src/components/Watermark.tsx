@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { WatermarkConfig } from '../lib/api'
 import { currentTheme } from '../lib/theme'
-import { fmtTs } from '../lib/tz'
+import { fmtTs, fmtTime } from '../lib/tz'
 
 /** ${email} ${host} ${date} ${time} → text; time/date sunt „live" (refresh 60s). */
 function resolveTemplate(tpl: string, vars: { email?: string; host?: string }): string {
@@ -10,7 +10,9 @@ function resolveTemplate(tpl: string, vars: { email?: string; host?: string }): 
     email: vars.email ?? '',
     host: vars.host ?? '',
     date: fmtTs(now.getTime() / 1000, 'date'),
-    time: now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    // şi ora trece prin tz.ts: watermark-ul e probă de audit, deci ora trebuie să fie cea a
+    // fusului ales în Setări, nu a maşinii (ocolea contractul din lib/tz.ts — audit B21)
+    time: fmtTime(now.getTime() / 1000),
   }
   return tpl.replace(/\$\{(email|host|date|time)\}/g, (_, k) => map[k] ?? '')
 }

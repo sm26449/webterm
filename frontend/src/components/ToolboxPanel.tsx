@@ -1,7 +1,10 @@
-import { useCallback, useEffect, useState } from 'react'
+import { ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import { errText, api, ApiError, Connection, DeployKeyDeployment, DeployKeyInfo, Host, Snippet, withStepup } from '../lib/api'
 import { copyText } from '../lib/clipboard'
+import { useConfirm } from '../lib/confirm'
 import { useI18n } from '../lib/i18n'
+import { useDrawer } from '../lib/useDrawer'
+import { useFocusTrap } from '../lib/useFocusTrap'
 import { TerminalPromptIcon, PlusIcon, TrashIcon, PencilIcon, CopyIcon } from './Icons'
 
 // Bibliotecă de reţete built-in (client-side): comenzi comune pe categorii, cu {placeholder}-e.
@@ -62,6 +65,24 @@ const noStored = (e: string) => e === 'redis'
 
 type Draft = { id?: number; label: string; engine: Connection['engine']; target_host: string
   target_port: string; username: string; dbname: string; cred_policy: 'ask' | 'stored'; credential: string }
+// rezultat per ţintă al deploy-batch / rotate (serverul le întoarce de la început — UI-ul le arunca)
+type DkResult = { target_host_id: number; target_name?: string; ok: boolean; code?: string; error?: string; old_removed?: boolean }
+type DkLeft = { target_host_id: number; target_name: string }
+
+// Formularele de conexiune / snippet ca dialoguri REALE: focus-trap, Escape, rol + titlu legat.
+// Erau div-uri peste panou — Tab ieşea în pagina de sub ele, Escape nu le închidea (audit a11y).
+function TrapDialog(props: { onClose: () => void; labelledBy: string; children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null)
+  useFocusTrap(ref, props.onClose)
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4" onClick={props.onClose}>
+      <div ref={ref} role="dialog" aria-modal="true" aria-labelledby={props.labelledBy}
+        className="glass w-full max-w-sm rounded-2xl p-5" onClick={(ev) => ev.stopPropagation()}>
+        {props.children}
+      </div>
+    </div>
+  )
+}
 
 export default function ToolboxPanel(props: {
   host: Host; onClose: () => void; overlay?: boolean; embed?: boolean
@@ -69,6 +90,9 @@ export default function ToolboxPanel(props: {
   onOpen: (host: Host, connId: number) => void
 }) {
   const { t } = useI18n()
+  const { confirm } = useConfirm()
+  const asideRef = useRef<HTMLElement>(null)
+  const drawer = useDrawer(asideRef, props.onClose, !props.embed)
   const [rows, setRows] = useState<Connection[] | null>(null)
   const [error, setError] = useState('')
   const [edit, setEdit] = useState<Draft | null>(null)   // modalul de creare/editare
@@ -89,6 +113,9 @@ export default function ToolboxPanel(props: {
   const [restrictMode, setRestrictMode] = useState<'none' | 'restrict' | 'command'>('none')
   const [restrictCmd, setRestrictCmd] = useState('')
   const [testResult, setTestResult] = useState<{ ok: boolean; detail: string; dest: string } | null>(null)
+  // rezultatele ultimului deploy/rotate, per ţintă — rămân pe ecran până le închizi (eşecurile
+  // nu mai dispar în tăcere sub un `loadDk()` verde); „retry failed" reia DOAR ţintele picate
+  const [dkResults, setDkResults] = useState<{ kind: 'deploy' | 'rotate'; items: DkResult[]; leftOld: DkLeft[] } | null>(null)
 
   const loadDk = useCallback(async () => {
     try {
@@ -106,12 +133,13 @@ export default function ToolboxPanel(props: {
   }, [props.host.id, t])
   useEffect(() => { if (tab === 'sshkeys' && dk === null) loadDk() }, [tab, dk, loadDk])
 
-  // garda anti-pivot (409 sshkey.pivot) cere un DA explicit → confirm() + retry cu confirmed
+  // garda anti-pivot (409 sshkey.pivot) cere un DA explicit → dialog propriu + retry cu confirmed
+  const pivotOk = () => confirm({ title: t('toolbox.ssh.pivotTitle'), message: t('toolbox.ssh.pivotConfirm'), danger: true })
   async function dkRun(busy: string, fn: (confirmed: boolean) => Promise<unknown>) {
     setDkBusy(busy); setError('')
     try { await fn(false) } catch (e) {
       if (e instanceof ApiError && e.code === 'sshkey.pivot') {
-        if (confirm(t('toolbox.ssh.pivotConfirm'))) {
+        if (await pivotOk()) {
           try { await fn(true) } catch (e2) { setError(errText(e2, t)) }
         }
       } else { setError(errText(e, t)) }
@@ -120,17 +148,38 @@ export default function ToolboxPanel(props: {
   }
   const dkGenerate = () => dkRun('generate', (confirmed) =>
     api(`/api/hosts/${props.host.id}/deploy-key/generate`, { method: 'POST', body: JSON.stringify({ confirmed }) }))
-  // deploy multi-ţintă: UN factor pe sursă (ruta = sursa), rezultat per ţintă
-  const dkDeploy = () => dkRun('deploy', (confirmed) =>
-    api(`/api/hosts/${props.host.id}/deploy-key/deploy-batch`, { method: 'POST',
-      body: JSON.stringify({ target_host_ids: [...deployTo], from_ip: fromIp.trim(), confirmed,
-        restrict: restrictMode !== 'none',
-        command: restrictMode === 'command' ? restrictCmd.trim() : '' }) })
-      .then(() => setDeployTo(new Set())))
+  // deploy multi-ţintă: UN factor pe sursă (ruta = sursa), rezultat per ţintă. Batch-ul NU aruncă
+  // la o ţintă picată — pivot-ul (409) vine tot ca rezultat per ţintă, deci îl confirmăm aici
+  // şi reluăm doar ţintele în cauză, cu `confirmed`.
+  const deployBody = (ids: number[], confirmed: boolean) => JSON.stringify({
+    target_host_ids: ids, from_ip: fromIp.trim(), confirmed,
+    restrict: restrictMode !== 'none', command: restrictMode === 'command' ? restrictCmd.trim() : '' })
+  const dkDeployTo = (ids: number[]) => dkRun('deploy', async () => {
+    const url = `/api/hosts/${props.host.id}/deploy-key/deploy-batch`
+    let items = (await api<{ results: DkResult[] }>(url, { method: 'POST', body: deployBody(ids, false) })).results
+    const pivots = items.filter((x) => !x.ok && x.code === 'sshkey.pivot').map((x) => x.target_host_id)
+    if (pivots.length && await pivotOk()) {
+      const again = (await api<{ results: DkResult[] }>(url, { method: 'POST', body: deployBody(pivots, true) })).results
+      const byId = new Map(again.map((x) => [x.target_host_id, x]))
+      items = items.map((x) => byId.get(x.target_host_id) ?? x)
+    }
+    setDkResults({ kind: 'deploy', items, leftOld: [] })
+    setDeployTo(new Set())
+  })
+  const dkDeploy = () => dkDeployTo([...deployTo])
+  const dkName = (id: number, fallback?: string) => fallback
+    || dkHosts.find((h) => h.id === id)?.name
+    || dk?.deployments.find((d) => d.target_host_id === id)?.target_name || `#${id}`
+  // codul de eroare tradus (err.sshkey.*), altfel textul serverului
+  const dkErr = (r: DkResult) => {
+    if (r.code) { const k = 'err.' + r.code; const s = t(k); if (s !== k) return s }
+    return r.error || t('toolbox.error')
+  }
   const dkVerify = (d: DeployKeyDeployment) => dkRun('verify' + d.id, () =>
     api(`/api/hosts/${d.target_host_id}/deploy-key/verify`, { method: 'POST', body: JSON.stringify({ key_host_id: props.host.id }) }))
-  const dkRevoke = (d: DeployKeyDeployment) => {
-    if (!confirm(t('toolbox.ssh.confirmRevoke', { target: d.target_name }))) return
+  const dkRevoke = async (d: DeployKeyDeployment) => {
+    if (!(await confirm({ title: `${t('toolbox.ssh.revoke')} — ${d.target_name}`,
+      message: t('toolbox.ssh.confirmRevoke', { target: d.target_name }), confirmLabel: t('toolbox.ssh.revoke'), danger: true }))) return
     dkRun('revoke' + d.id, () =>
       api(`/api/hosts/${d.target_host_id}/deploy-key/revoke`, { method: 'POST', body: JSON.stringify({ key_host_id: props.host.id }) }))
   }
@@ -142,12 +191,20 @@ export default function ToolboxPanel(props: {
   })
   const dkSshConfig = (d: DeployKeyDeployment) => dkRun('cfg' + d.id, () =>
     api(`/api/hosts/${props.host.id}/deploy-key/ssh-config`, { method: 'POST', body: JSON.stringify({ target_host_id: d.target_host_id }) }))
-  const dkRotate = () => {
-    if (!confirm(t('toolbox.ssh.confirmRotate'))) return
-    dkRun('rotate', () => api(`/api/hosts/${props.host.id}/deploy-key/rotate`, { method: 'POST', body: JSON.stringify({}) }))
+  // rotire: serverul redeployează ÎNTÂI pe fiecare ţintă şi abia apoi schimbă cheia sursei; ce a
+  // rămas pe cheia veche (ţinte offline) vine în `left_with_old_key` — îl arătăm, nu-l pierdem
+  const dkRotate = async () => {
+    if (!(await confirm({ title: t('toolbox.ssh.rotate'), message: t('toolbox.ssh.confirmRotate'),
+      confirmLabel: t('toolbox.ssh.rotate'), danger: true }))) return
+    dkRun('rotate', async () => {
+      const r = await api<{ results: DkResult[]; left_with_old_key?: DkLeft[] }>(
+        `/api/hosts/${props.host.id}/deploy-key/rotate`, { method: 'POST', body: JSON.stringify({}) })
+      setDkResults({ kind: 'rotate', items: r.results ?? [], leftOld: r.left_with_old_key ?? [] })
+    })
   }
-  const dkDelete = () => {
-    if (!confirm(t('toolbox.ssh.confirmDeleteKey'))) return
+  const dkDelete = async () => {
+    if (!(await confirm({ title: t('toolbox.ssh.deleteKey'), message: t('toolbox.ssh.confirmDeleteKey'),
+      confirmLabel: t('toolbox.delete'), danger: true }))) return
     dkRun('delete', () => api(`/api/hosts/${props.host.id}/deploy-key`, { method: 'DELETE' }))
   }
   const DK_STATUS: Record<DeployKeyDeployment['status'], string> = {
@@ -178,7 +235,8 @@ export default function ToolboxPanel(props: {
     } catch (e) { setError(errText(e, t)) }
   }
   async function delSnip(s: Snippet) {
-    if (!confirm(t('toolbox.lib.confirmDelete', { title: s.title }))) return
+    if (!(await confirm({ title: `${t('toolbox.delete')} — ${s.title}`, message: t('toolbox.lib.confirmDelete', { title: s.title }),
+      confirmLabel: t('toolbox.delete'), danger: true }))) return
     try { await api(`/api/snippets/${s.id}`, { method: 'DELETE' }); await loadSnips() }
     catch (e) { setError(errText(e, t)) }
   }
@@ -188,14 +246,17 @@ export default function ToolboxPanel(props: {
 
   const asideCls = props.embed
     ? 'flex h-full w-full min-h-0 flex-col bg-ink-900'
-    : 'fixed inset-y-0 right-0 z-40 flex w-[90vw] max-w-md flex-col border-l border-ink-800 bg-ink-900 shadow-2xl'
+    : 'fixed inset-y-0 right-0 z-40 flex w-[90vw] max-w-md flex-col border-l border-ink-800 bg-ink-900 shadow-2xl outline-none'
     + (props.overlay ? '' : ' sm:static sm:z-auto sm:w-96 sm:max-w-none sm:shrink-0 sm:shadow-none')
   const scrimCls = props.embed ? 'hidden' : 'fixed inset-0 z-30 bg-black/60' + (props.overlay ? '' : ' sm:hidden')
 
   const load = useCallback(async () => {
     setError('')
     try {
-      const r = await api<{ connections: Connection[] }>(`/api/hosts/${props.host.id}/connections`)
+      // pe host 2FA lista e gardată de step-up (topologie sensibilă: ţinte/useri/DB) — fără
+      // `withStepup` panoul arăta doar un 403 sec, fără să deschidă fereastra de passkey
+      const r = await withStepup(props.host.id, () =>
+        api<{ connections: Connection[] }>(`/api/hosts/${props.host.id}/connections`))
       setRows(r.connections)
     } catch (e) {
       setError(errText(e, t) || (e instanceof ApiError ? e.message : t('toolbox.error'))); setRows([])
@@ -219,7 +280,8 @@ export default function ToolboxPanel(props: {
     } catch (e) { setError(errText(e, t) || (e instanceof ApiError ? e.message : t('toolbox.error'))) }
   }
   async function del(c: Connection) {
-    if (!confirm(t('toolbox.confirmDelete', { label: c.label }))) return
+    if (!(await confirm({ title: `${t('toolbox.delete')} — ${c.label}`, message: t('toolbox.confirmDelete', { label: c.label }),
+      confirmLabel: t('toolbox.delete'), danger: true }))) return
     try { await withStepup(props.host.id, () => api(`/api/hosts/${props.host.id}/connections/${c.id}`, { method: 'DELETE' })); await load() }
     catch (e) { setError(errText(e, t) || t('toolbox.error')) }
   }
@@ -233,7 +295,8 @@ export default function ToolboxPanel(props: {
   return (
     <>
       <div className={scrimCls} onClick={props.onClose} aria-hidden="true" />
-      <aside className={asideCls} aria-label={t('toolbox.title')}>
+      {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Escape pe regiunea drawer-ului (vezi useDrawer): intenţionat pe <aside>, nu pe document */}
+      <aside ref={asideRef} className={asideCls} aria-label={t('toolbox.title')} onKeyDown={drawer.onKeyDown}>
         <div className="flex items-center gap-1 border-b border-ink-800 px-2 py-1.5">
           {(['connections', 'sshkeys', 'library', 'history'] as const).map((tb) => (
             <button key={tb} onClick={() => setTab(tb)}
@@ -244,11 +307,11 @@ export default function ToolboxPanel(props: {
             </button>
           ))}
           {tab === 'connections' && (
-            <button onClick={() => setEdit(blank())} className="wt-touch ml-auto shrink-0 rounded px-1.5 text-sky-400 hover:bg-ink-800"
+            <button onClick={() => setEdit(blank())} className="wt-touch ml-auto shrink-0 rounded px-1.5 wt-link hover:bg-ink-800"
               title={t('toolbox.new')} aria-label={t('toolbox.new')}><PlusIcon /></button>
           )}
           {tab === 'library' && (
-            <button onClick={() => setSnipEdit({ title: '', body: '' })} className="wt-touch ml-auto shrink-0 rounded px-1.5 text-sky-400 hover:bg-ink-800"
+            <button onClick={() => setSnipEdit({ title: '', body: '' })} className="wt-touch ml-auto shrink-0 rounded px-1.5 wt-link hover:bg-ink-800"
               title={t('toolbox.lib.add')} aria-label={t('toolbox.lib.add')}><PlusIcon /></button>
           )}
           {!props.embed && (
@@ -258,7 +321,7 @@ export default function ToolboxPanel(props: {
         </div>
         {(tab === 'library' || tab === 'history') && (
           <div className="border-b border-ink-800 px-3 py-1.5">
-            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder={t('toolbox.filterPh')}
+            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder={t('toolbox.filterPh')} aria-label={t('toolbox.filterPh')}
               className="w-full rounded bg-ink-800/60 px-2 py-1 text-xs text-slate-300 ring-1 ring-ink-700 focus:ring-sky-500" />
           </div>
         )}
@@ -302,9 +365,9 @@ export default function ToolboxPanel(props: {
                         title={t('toolbox.open')}><TerminalPromptIcon /> {t('toolbox.open')}</button>
                       <span className="ml-auto flex items-center gap-0.5">
                         <button onClick={() => setEdit(toDraft(c))} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-slate-200"
-                          title={t('toolbox.edit')} aria-label={t('toolbox.edit')}><PencilIcon /></button>
+                          title={t('toolbox.edit')} aria-label={`${t('toolbox.edit')} ${c.label}`}><PencilIcon /></button>
                         <button onClick={() => del(c)} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-rose-300"
-                          title={t('toolbox.delete')} aria-label={t('toolbox.delete')}><TrashIcon /></button>
+                          title={t('toolbox.delete')} aria-label={`${t('toolbox.delete')} ${c.label}`}><TrashIcon /></button>
                       </span>
                     </div>
                   </div>
@@ -323,7 +386,7 @@ export default function ToolboxPanel(props: {
             ) : <div className="p-4 text-center text-xs text-slate-500">{t('toolbox.loading')}</div>
           ) : (
             <div className="space-y-3 p-3 text-[12px]">
-              <p className="rounded bg-amber-500/10 px-2 py-1.5 text-[11px] leading-snug text-amber-300/90">
+              <p className="rounded bg-amber-500/10 px-2 py-1.5 text-[11px] leading-snug wt-warn">
                 {t('toolbox.ssh.warn')}
               </p>
               {!dk.key ? (
@@ -392,6 +455,50 @@ export default function ToolboxPanel(props: {
                     <p className="mt-1 text-[10.5px] leading-snug text-slate-500">{t('toolbox.ssh.fromIpHint')}</p>
                   </div>
 
+                  {/* rezultate per ţintă (deploy / rotate): rămân până le închizi; eşecurile cu codul
+                      tradus + „reîncearcă ţintele picate" (pentru rotire: cu opţiunile din formular) */}
+                  {dkResults && (dkResults.items.length > 0 || dkResults.leftOld.length > 0) && (() => {
+                    const failed = dkResults.items.filter((r) => !r.ok).map((r) => r.target_host_id)
+                    return (
+                      <div role="status" className="rounded border border-ink-700 bg-ink-800/40 p-2">
+                        <div className="mb-1 flex items-center gap-2">
+                          <span className="text-[11px] font-medium uppercase tracking-wide text-slate-500">
+                            {t(dkResults.kind === 'rotate' ? 'toolbox.ssh.rotateResults' : 'toolbox.ssh.deployResults')}
+                          </span>
+                          <button onClick={() => setDkResults(null)} aria-label={t('toolbox.ssh.resultsDismiss')} title={t('toolbox.ssh.resultsDismiss')}
+                            className="ml-auto grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-slate-200">✕</button>
+                        </div>
+                        <ul className="space-y-0.5 text-[11px]">
+                          {dkResults.items.map((r) => (
+                            <li key={r.target_host_id} className="flex items-start gap-1.5">
+                              <span className={`shrink-0 font-bold ${r.ok ? 'wt-good' : 'wt-danger'}`} aria-hidden="true">{r.ok ? '✓' : '✗'}</span>
+                              <span className="min-w-0 flex-1 break-words">
+                                <span className="text-slate-200">{dkName(r.target_host_id, r.target_name)}</span>
+                                {' — '}
+                                <span className={r.ok ? 'wt-good' : 'wt-danger'}>{r.ok ? t('toolbox.ssh.resultOk') : dkErr(r)}</span>
+                                {r.ok && r.old_removed === false && <span className="wt-warn"> · {t('toolbox.ssh.oldNotRemoved')}</span>}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                        {dkResults.leftOld.length > 0 && (
+                          <p className="mt-1.5 text-[11px] leading-snug wt-warn">
+                            {t('toolbox.ssh.leftOld', { targets: dkResults.leftOld.map((x) => x.target_name || dkName(x.target_host_id)).join(', ') })}
+                          </p>
+                        )}
+                        {failed.length > 0 && (
+                          <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                            <button onClick={() => dkDeployTo(failed)} disabled={dkBusy !== ''}
+                              className="rounded px-2 py-1 text-[11px] font-medium text-slate-200 ring-1 ring-ink-600 hover:bg-ink-700 disabled:opacity-40">
+                              {t('toolbox.ssh.retryFailed')}
+                            </button>
+                            {dkResults.kind === 'rotate' && <span className="text-[10.5px] text-slate-500">{t('toolbox.ssh.retryUsesForm')}</span>}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })()}
+
                   <div>
                     <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-slate-500">{t('toolbox.ssh.deployments')}</div>
                     {dk.deployments.length === 0 ? (
@@ -429,7 +536,7 @@ export default function ToolboxPanel(props: {
                       </div>
                     ))}
                     {testResult && (
-                      <div className={`mt-1.5 rounded px-2 py-1.5 text-[11px] leading-snug ${testResult.ok ? 'bg-emerald-500/10 text-emerald-300' : 'bg-rose-500/10 text-rose-300'}`}>
+                      <div role="status" className={`mt-1.5 rounded px-2 py-1.5 text-[11px] leading-snug ${testResult.ok ? 'bg-emerald-500/10 wt-good' : 'bg-rose-500/10 wt-danger'}`}>
                         <span className="font-medium">{testResult.ok ? t('toolbox.ssh.testOk') : t('toolbox.ssh.testFail')}</span>
                         {' '}<span className="font-mono">{testResult.dest}</span>
                         {testResult.detail ? <div className="mt-0.5 whitespace-pre-wrap break-all font-mono text-[10px] text-slate-400">{testResult.detail}</div> : null}
@@ -478,12 +585,13 @@ export default function ToolboxPanel(props: {
                         <span className="w-28 shrink-0 truncate text-[12px] text-slate-300">{s.title}</span>
                         <code className="min-w-0 flex-1 truncate font-mono text-[11px] text-slate-500">{s.body}</code>
                       </button>
+                      {/* vizibile şi la focus din tastatură, nu doar la hover (altfel Tab trecea prin butoane invizibile) */}
                       <button onClick={() => setSnipEdit({ id: s.id, title: s.title, body: s.body })}
-                        className="shrink-0 rounded p-1 text-slate-500 opacity-0 group-hover:opacity-100 hover:bg-ink-700 hover:text-slate-200 [@media(hover:none)]:opacity-100"
-                        title={t('toolbox.edit')} aria-label={t('toolbox.edit')}><PencilIcon /></button>
+                        className="shrink-0 rounded p-1 text-slate-500 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 hover:bg-ink-700 hover:text-slate-200 [@media(hover:none)]:opacity-100"
+                        title={t('toolbox.edit')} aria-label={`${t('toolbox.edit')} ${s.title}`}><PencilIcon /></button>
                       <button onClick={() => delSnip(s)}
-                        className="shrink-0 rounded p-1 text-slate-500 opacity-0 group-hover:opacity-100 hover:bg-ink-700 hover:text-rose-300 [@media(hover:none)]:opacity-100"
-                        title={t('toolbox.delete')} aria-label={t('toolbox.delete')}><TrashIcon /></button>
+                        className="shrink-0 rounded p-1 text-slate-500 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 hover:bg-ink-700 hover:text-rose-300 [@media(hover:none)]:opacity-100"
+                        title={t('toolbox.delete')} aria-label={`${t('toolbox.delete')} ${s.title}`}><TrashIcon /></button>
                     </div>
                   ))}
                 </div>
@@ -535,9 +643,8 @@ export default function ToolboxPanel(props: {
       </aside>
 
       {snipEdit && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4" onClick={() => setSnipEdit(null)}>
-          <div className="glass w-full max-w-sm rounded-2xl p-5" onClick={(ev) => ev.stopPropagation()}>
-            <h2 className="mb-1 text-base font-semibold">{snipEdit.id ? t('toolbox.lib.editTitle') : t('toolbox.lib.newTitle')}</h2>
+        <TrapDialog onClose={() => setSnipEdit(null)} labelledBy="wt-toolbox-snip-title">
+            <h2 id="wt-toolbox-snip-title" className="mb-1 text-base font-semibold">{snipEdit.id ? t('toolbox.lib.editTitle') : t('toolbox.lib.newTitle')}</h2>
             <p className="mb-3 text-[11px] leading-snug text-slate-500">{t('toolbox.lib.hint')}</p>
             <div className="space-y-2 text-sm">
               <label className="block">
@@ -557,14 +664,12 @@ export default function ToolboxPanel(props: {
               <button onClick={() => saveSnip(snipEdit)} disabled={!snipEdit.title.trim() || !snipEdit.body.trim()}
                 className="rounded bg-sky-600 px-3 py-1.5 font-medium text-white hover:bg-sky-700 disabled:opacity-40">{t('common.save')}</button>
             </div>
-          </div>
-        </div>
+        </TrapDialog>
       )}
 
       {edit && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4" onClick={() => setEdit(null)}>
-          <div className="glass w-full max-w-sm rounded-2xl p-5" onClick={(ev) => ev.stopPropagation()}>
-            <h2 className="mb-3 text-base font-semibold">{edit.id ? t('toolbox.editTitle') : t('toolbox.newTitle')}</h2>
+        <TrapDialog onClose={() => setEdit(null)} labelledBy="wt-toolbox-conn-title">
+            <h2 id="wt-toolbox-conn-title" className="mb-3 text-base font-semibold">{edit.id ? t('toolbox.editTitle') : t('toolbox.newTitle')}</h2>
             <div className="space-y-2 text-sm">
               <label className="block">
                 <span className="mb-0.5 block text-xs text-slate-400">{t('toolbox.fLabel')}</span>
@@ -631,8 +736,7 @@ export default function ToolboxPanel(props: {
               <button onClick={() => save(edit)} disabled={!edit.label.trim()}
                 className="rounded bg-sky-600 px-3 py-1.5 font-medium text-white hover:bg-sky-700 disabled:opacity-40">{t('common.save')}</button>
             </div>
-          </div>
-        </div>
+        </TrapDialog>
       )}
     </>
   )

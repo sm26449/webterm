@@ -14,7 +14,7 @@ os.environ["WEBTERM_PUBLIC_URL"] = "https://wt.example.com"
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
 import httpx  # noqa: E402
-from app import api, backup, cloudbackup, config, db, security  # noqa: E402
+from app import api, backup, cloudbackup, config, db, email_alerts, security  # noqa: E402
 
 # Middleware-ul `csrf_guard` cere `Origin` pe metodele care schimbă ceva şi refuză
 # lipsa lui (ca `_origin_ok` pentru WebSocket). Testele imită un BROWSER, deci trimit
@@ -181,6 +181,89 @@ async def main():
     check("fișierele străine din dosar rămân neatinse",
           any(f["name"] == "poze-vacanta.zip" for f in fake.files))
 
+    # ── scheduler (G-13 / G-14 / UX §7.f1): scadenţă faţă de ultimul SUCCES (catch-up),
+    #    eroare persistată + alertă la eşec, gardă de suprapunere ──
+    T0 = 1_800_000_000.0
+    r = await api.scheduled_backup_tick(now=T0)
+    check("schedule off → tick sărit", r.get("skipped") == "off")
+    await api._set_setting("backup_schedule", "daily")
+    await api._set_setting("backup_last", "0")
+    r = await api.scheduled_backup_tick(now=T0)
+    check("daily fără backup anterior → rulează la PRIMUL tick (nu după 1h de la boot)",
+          r.get("ok") is True)
+    check("backup_last = ts-ul succesului", float(await api._get_setting("backup_last")) == T0)
+    check("backup_last_error gol după succes", not (await api._get_setting("backup_last_error")))
+    check("arhiva programată a plecat şi off-host",
+          any(f["name"] == r["name"].replace(".wtsnap", ".wtbk") for f in fake.files))
+    r = await api.scheduled_backup_tick(now=T0 + 3600)
+    check("1h mai târziu → nu e scadent", r.get("skipped") == "not_due")
+    r = await api.scheduled_backup_tick(now=T0 + 86400 + 5)
+    check("24h+ mai târziu (după oricâte reporniri) → rulează (catch-up)", r.get("ok") is True)
+    T_OK = T0 + 86400 + 5
+
+    # eşec la snapshot → eroare persistată, backup_last NEschimbat, punct de notificare, alertă
+    T1 = T_OK + 86400 + 10
+    orig_run = backup.run_scheduled_backup
+    alerts = []
+    orig_alert = email_alerts.notify_local_backup_failed
+    email_alerts.notify_local_backup_failed = lambda err, last: alerts.append((err, last))
+
+    def _enospc(inc=False):
+        raise OSError(28, "No space left on device")
+    backup.run_scheduled_backup = _enospc
+    try:
+        r = await api.scheduled_backup_tick(now=T1)
+    finally:
+        backup.run_scheduled_backup = orig_run
+        email_alerts.notify_local_backup_failed = orig_alert
+    err = json.loads(await api._get_setting("backup_last_error") or "{}")
+    check("eşec → backup_last_error cu mesaj + ts",
+          "No space" in err.get("error", "") and err.get("ts") == T1)
+    check("eşec → backup_last rămâne la ultimul SUCCES",
+          float(await api._get_setting("backup_last")) == T_OK)
+    run = json.loads(await api._get_setting("backup_last_run") or "{}")
+    check("backup_last_run reflectă încercarea eşuată", run.get("ok") is False)
+    check("alerta „backup local eşuat” a fost emisă cu mesajul şi ultimul succes",
+          len(alerts) == 1 and "No space" in alerts[0][0] and alerts[0][1] == T_OK)
+    await api._set_setting("backup_seen", str(T_OK))
+    check("punctul de notificare se aprinde şi la eşec, nu doar la succes",
+          await api._backup_needs_attention())
+    r = await api.scheduled_backup_tick(now=T1 + 60)
+    check("după eşec reîncercarea e scadentă imediat şi reuşeşte", r.get("ok") is True)
+    check("succesul GOLEŞTE backup_last_error", not (await api._get_setting("backup_last_error")))
+
+    # eşec DOAR off-host → backup-ul local e bun, dar eroarea (cu destinaţia) apare în backup
+    orig_up = fake.upload
+
+    def _quota(*a):
+        raise cloudbackup.CloudError("507 quota exceeded")
+    fake.upload = _quota
+    try:
+        r = await api.scheduled_backup_tick(now=T1 + 86400 + 120)
+    finally:
+        fake.upload = orig_up
+    err = json.loads(await api._get_setting("backup_last_error") or "{}")
+    check("eşec cloud → local ok, backup_last_error = destinaţie + mesaj (stage=cloud)",
+          r.get("ok") is True and err.get("stage") == "cloud" and err.get("error", "").startswith("fake:"))
+
+    # gardă de suprapunere: două tick-uri simultane → un singur backup
+    calls = []
+
+    def _slow(inc=False):
+        calls.append(1)
+        time.sleep(0.3)
+        return orig_run(inc)
+    backup.run_scheduled_backup = _slow
+    try:
+        r1, r2 = await asyncio.gather(api.scheduled_backup_tick(force=True),
+                                      api.scheduled_backup_tick(force=True))
+    finally:
+        backup.run_scheduled_backup = orig_run
+    check("gardă: din două tick-uri simultane rulează UNUL, celălalt e sărit (`running`)",
+          sum(1 for x in (r1, r2) if x.get("ok")) == 1
+          and any(x.get("skipped") == "running" for x in (r1, r2)) and len(calls) == 1)
+    await api._set_setting("backup_schedule", "off")
+
     # ── schimbarea providerului invalidează autorizarea (token pentru alt cont) ──
     await cloudbackup.save_config("fake", "alt-client", "", BK_PASS, 3, False)
     st = await cloudbackup.status()
@@ -211,6 +294,10 @@ async def main():
         r = await c.get("/api/backup/cloud")
         check("statusul listează providerii pentru UI",
               any(p["id"] == "gdrive" for p in r.json()["providers"]))
+        r = await c.get("/api/backup/status")
+        check("/api/backup/status expune last_run / last_error / next_due pentru UI",
+              r.status_code == 200 and {"last_run", "last_error", "next_due"} <= set(r.json())
+              and r.json()["last_run"]["ok"] is True)
         r = await c.post("/api/backup/cloud/disconnect")
         check("disconnect păstrează configurarea, taie tokenul",
               r.json()["configured"] and not r.json()["connected"])

@@ -6,6 +6,7 @@
 #     ./upgrade.sh --no-backup  → sare peste backupul de dinainte (nu recomand)
 #     ./upgrade.sh -y           → no questions (cron, remote runs)
 #     ./upgrade.sh --allow-latest → accept :latest when the version cannot be determined
+#     ./upgrade.sh --allow-unpinned → deploy the tag itself if its digest cannot be resolved
 #
 # Why this exists when deploy.sh already does: `deploy.sh` updates the IMAGE. But half the
 # system runs on the HOST, not in the container — backup.sh, restore.sh, the compose file, the
@@ -18,10 +19,19 @@
 #   1. resolve the version → know what you are installing before touching anything
 #   2. preflight           → fail early and without side effects (auth, disk, files)
 #   3. pull                → the artefact is local before anything changes
+#   3b. pin + verify       → tag → DIGEST (immutable), optional cosign check; from here on
+#                            every step uses the digest, never the tag again
 #   4. backup              → the safety net comes BEFORE the change, not after
 #   5. sync the host       → from the image you already verified
 #   6. deploy.sh           → pin + health check + rollback automat (le are deja)
 #   7. final check         → say what is running now, do not assume
+#
+# Why a digest (auditul de deploy, H1): the host-side kit (deploy.sh, backup.sh, rollback.sh,
+# upgrade.sh itself) is copied OUT of the image and runs as root. A tag like `v3.0.1` is a
+# moving pointer in the registry — this project has re-pointed tags before — so "the image I
+# pulled" and "the image I will run / roll back to" could be different bytes. The digest is
+# the content hash of the manifest: `.env` and `.prev-image` record THAT, and a rollback brings
+# back exactly what ran. cosign (if installed and configured) additionally answers WHO built it.
 set -euo pipefail
 
 # `.env` se CITEŞTE, nu se execută. Era sursat cu `. ./.env` — adică bash îl rula, ca root.
@@ -65,12 +75,14 @@ TARGET=""
 DO_BACKUP=1
 ASSUME_YES=0
 ALLOW_LATEST=0
+ALLOW_UNPINNED=0
 for arg in "$@"; do
   case "$arg" in
     --no-backup) DO_BACKUP=0 ;;
     --allow-latest) ALLOW_LATEST=1 ;;
+    --allow-unpinned) ALLOW_UNPINNED=1 ;;
     -y|--yes)    ASSUME_YES=1 ;;
-    -h|--help)   sed -n '2,10p' "$0"; exit 0 ;;
+    -h|--help)   sed -n '2,11p' "$0"; exit 0 ;;
     v[0-9]*.[0-9]*.[0-9]*) TARGET="$arg" ;;
     *) echo "Unknown argument: $arg (expected vX.Y.Z, --no-backup, -y)" >&2; exit 2 ;;
   esac
@@ -83,6 +95,13 @@ ask() {                                    # ask "question" → 0 = yes
   [ "$ASSUME_YES" = 1 ] && return 0
   [ -t 0 ] || return 1                     # non-interactive without -y: the safe answer is NO
   printf '  %s [y/N] ' "$1"; read -r a; case "$a" in [yYdD]*) return 0 ;; *) return 1 ;; esac
+}
+# curl with a bearer token WITHOUT the token in argv: `-H "Authorization: Bearer $T"` is
+# visible in `ps`/`/proc/<pid>/cmdline` to every local user for the duration of the call.
+# `-K -` reads the option from stdin, which nobody else can see.
+curl_bearer() {   # curl_bearer TOKEN [curl args…]
+  local t="$1"; shift
+  printf 'header = "Authorization: Bearer %s"\n' "$t" | curl -K - "$@"
 }
 
 [ -f .env ] || die "no .env in $ROOT — run ./deploy.sh first"
@@ -97,12 +116,13 @@ if [ -z "$TARGET" ]; then
   # The latest semver tag on GitHub. Public repo → works with nothing; private repo → with the
   # token from .env. If we cannot find out, we do NOT guess: `latest` is a moving pointer and
   # we would no longer know what to roll back to, so we ask for confirmation.
-  # no array: on bash < 4.4, "${A[@]}" on an empty array trips `set -u`
   AUTH_HDR="Accept: application/vnd.github+json"
-  TOKEN_HDR="X-Ignorat: 1"
-  [ -n "${GHCR_TOKEN:-}" ] && TOKEN_HDR="Authorization: Bearer $GHCR_TOKEN"
-  TAGS=$(curl -fsS -H "$TOKEN_HDR" -H "$AUTH_HDR" \
-         "https://api.github.com/repos/$REPO/tags?per_page=100" 2>/dev/null || true)
+  TAGS_URL="https://api.github.com/repos/$REPO/tags?per_page=100"
+  if [ -n "${GHCR_TOKEN:-}" ]; then
+    TAGS=$(curl_bearer "$GHCR_TOKEN" -fsS -H "$AUTH_HDR" "$TAGS_URL" 2>/dev/null || true)
+  else
+    TAGS=$(curl -fsS -H "$AUTH_HDR" "$TAGS_URL" 2>/dev/null || true)
+  fi
   TARGET=$(printf '%s' "$TAGS" | grep -o '"name": *"v[0-9][0-9.]*"' \
            | sed 's/.*"v/v/; s/"$//' \
            | sort -t. -k1.2,1n -k2,2n -k3,3n | tail -1 || true)
@@ -126,9 +146,8 @@ if [ -z "$TARGET" ]; then
 fi
 IMAGE="$IMAGE_BASE:$TARGET"
 CURRENT="${WEBTERM_IMAGE:-<nesetat>}"
-echo "  now:   $CURRENT"
-echo "  target: $IMAGE"
-[ "$CURRENT" = "$IMAGE" ] && warn "already the installed version — continuing (useful for re-syncing the host files)"
+echo "  now:   $CURRENT${WEBTERM_IMAGE_TAG:+ ($WEBTERM_IMAGE_TAG)}"
+echo "  target: $IMAGE (digest resolved after pull)"
 
 # ── 2. preflight: fail early, without side effects ───────────────────────────
 say "Preflight checks"
@@ -163,6 +182,54 @@ if ! docker pull -q "$IMAGE" >/dev/null; then
   echo "  or put GHCR_TOKEN=<PAT> in $ROOT/.env (deploy.sh reads it too)." >&2
   die "pull failed"
 fi
+
+# ── 3b. pin the tag to its digest, then (optionally) verify who signed it ────
+# `RepoDigests` after a registry pull is the digest of the manifest index the registry served
+# for the tag — the same value `docker buildx imagetools inspect` prints (checked on v3.0.0).
+# Resolved ONCE, here; everything below (version read, kit extraction, deploy.sh, the final
+# "what is running" comparison, `.env`, `.prev-image`) uses the digest reference.
+say "Pinning $TARGET to its digest"
+DIGEST=$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$IMAGE" 2>/dev/null \
+         | awk -v b="$IMAGE_BASE@" 'index($0, b) == 1 { print substr($0, length(b) + 1); exit }' || true)
+case "$DIGEST" in
+  sha256:????????????????????????????????????????????????????????????????) ;;
+  *) DIGEST="" ;;
+esac
+if [ -n "$DIGEST" ]; then
+  PINNED="$IMAGE_BASE@$DIGEST"
+  echo "  $TARGET = $DIGEST"
+else
+  # A registry pull always records a digest; an empty one means something unusual (a daemon
+  # that strips RepoDigests, a mirror answering oddly). Deploying the tag would silently bring
+  # back the mutable-pointer problem, so it needs to be asked for by name.
+  [ "$ALLOW_UNPINNED" = 1 ] || die "could not resolve $IMAGE to a digest — refusing to deploy a mutable tag.
+  Inspect: docker image inspect --format '{{.RepoDigests}}' $IMAGE
+  Or, if you accept it: ./upgrade.sh $TARGET --allow-unpinned"
+  warn "--allow-unpinned: deploying the TAG $IMAGE; .env/.prev-image will hold a moving pointer"
+  PINNED="$IMAGE"
+fi
+# cosign (keyless, Sigstore): the CI signs the digest it pushed with the identity of the
+# workflow that built it. Opt-in: `cosign` on PATH + WEBTERM_COSIGN_IDENTITY in .env (a regexp
+# over the certificate identity, e.g. ^https://github.com/<owner>/webterm/.github/workflows/
+# docker-publish.yml@refs/tags/v). Without both we say so, in one line, every time — a check
+# that silently does not run is worse than none, because you believe it ran.
+if command -v cosign >/dev/null 2>&1 && [ -n "${WEBTERM_COSIGN_IDENTITY:-}" ]; then
+  COSIGN_ISSUER="${WEBTERM_COSIGN_ISSUER:-https://token.actions.githubusercontent.com}"
+  if cosign verify --certificate-identity-regexp "$WEBTERM_COSIGN_IDENTITY" \
+       --certificate-oidc-issuer "$COSIGN_ISSUER" "$PINNED" >/dev/null 2>&1; then
+    echo "  cosign: signature verified (identity ~ $WEBTERM_COSIGN_IDENTITY, issuer $COSIGN_ISSUER)"
+  else
+    die "cosign: NO valid signature for $PINNED (identity ~ $WEBTERM_COSIGN_IDENTITY, issuer $COSIGN_ISSUER). Not deploying."
+  fi
+else
+  if command -v cosign >/dev/null 2>&1; then REASON="WEBTERM_COSIGN_IDENTITY not set in .env"; else REASON="cosign is not installed"; fi
+  warn "signature verification SKIPPED ($REASON) — the digest pin keeps these exact bytes, but says nothing about who built them"
+fi
+IMAGE="$PINNED"
+if [ "$CURRENT" = "$IMAGE" ]; then
+  warn "already the installed digest — continuing (useful for re-syncing the host files)"
+fi
+
 NEW_VER=$(docker run --rm --entrypoint sh "$IMAGE" -c \
           "grep -m1 '^GATEWAY_VERSION' /srv/webterm/gateway/app/config.py | cut -d'\"' -f2" 2>/dev/null || echo "?")
 NEW_AGENT=$(docker run --rm --entrypoint sh "$IMAGE" -c \
@@ -242,7 +309,9 @@ if docker run --rm --entrypoint sh "$IMAGE" -c 'cd /srv/webterm/deploy-kit && ta
            deploy/authentik/docker-compose.prod.yml deploy/authentik/docker-compose.yml \
            deploy/authentik/.env.prod.example deploy/authentik/.env.example \
            deploy/authentik/provision.py deploy/authentik/provision.sh \
-           deploy/authentik/blueprints/webterm.yaml; do
+           deploy/authentik/blueprints/webterm.yaml \
+           deploy/webterm-backup.service deploy/webterm-backup.timer \
+           deploy/webterm-cert-check.service deploy/webterm-cert-check.timer; do
     [ -f "$KIT/$f" ] || continue
     if [ -f "$f" ] && cmp -s "$KIT/$f" "$f"; then continue; fi
     mkdir -p "$(dirname "$f")"
@@ -263,9 +332,63 @@ else
   warn "the image has no deploy kit (version < 2.0.0) — host files left as they are"
 fi
 
+# ── 5b. unităţile systemd (backup + cert-check) ──────────────────────────────
+# `install.sh` le copiază în /etc/systemd/system o singură dată şi nimic nu le mai atingea: pe
+# prod am găsit timere din iulie cu `Persistent=true  # comentariu` pe aceeaşi linie — systemd
+# NU acceptă asta („Failed to parse boolean value, ignoring"), deci Persistent cădea tăcut pe
+# false şi backupul ratat la un server oprit nu se mai recupera. Repo-ul era reparat de luni de
+# zile; fix-ul n-a ajuns pe host pentru că nu exista mecanism. Sincronizăm din `deploy/` (adus
+# mai sus din imagine, când kitul le conţine) DOAR unităţile deja instalate şi al căror
+# .service arată spre ACEST director: nu instalăm nimic nou (--no-backup / --no-cert-check
+# rămân respectate) şi nu atingem unităţile altei instalări de pe aceeaşi maşină.
+# `.service` se randează ca în install.sh (/opt/webterm → $ROOT); `.timer` e copiat ca atare.
+SYSTEMD_DIR="${WEBTERM_SYSTEMD_DIR:-/etc/systemd/system}"
+UNITS_CHANGED=""
+UNITS_SEEN=0
+for unit in webterm-backup webterm-cert-check; do
+  svc="$SYSTEMD_DIR/$unit.service"
+  [ -f "$svc" ] || continue
+  grep -q "^WorkingDirectory=$ROOT\$" "$svc" || continue       # altă instalare → nu e a noastră
+  UNITS_SEEN=$((UNITS_SEEN + 1))
+  for ext in service timer; do
+    src="deploy/$unit.$ext"; dst="$SYSTEMD_DIR/$unit.$ext"
+    [ -f "$src" ] && [ -f "$dst" ] || continue
+    want="$KIT/.unit-$unit.$ext"
+    if [ "$ext" = service ]; then sed -e "s|/opt/webterm|$ROOT|g" "$src" > "$want"; else cp "$src" "$want"; fi
+    cmp -s "$want" "$dst" && continue
+    if [ ! -w "$SYSTEMD_DIR" ]; then
+      warn "$dst differs from $src but $SYSTEMD_DIR is not writable — run with sudo to sync it"
+      continue
+    fi
+    cp -p "$dst" "$dst.bak"
+    cp "$want" "$dst"
+    echo "  actualizat: $dst (vechiul → .bak)"
+    UNITS_CHANGED="$UNITS_CHANGED $unit.$ext"
+  done
+done
+if [ -n "$UNITS_CHANGED" ]; then
+  if command -v systemctl >/dev/null 2>&1; then
+    # daemon-reload ca systemd să citească fişierele noi; `enable --now` e idempotent şi
+    # reporneşte timerul cu noul OnCalendar/Persistent (un timer deja activ nu reciteşte singur).
+    systemctl daemon-reload || warn "systemctl daemon-reload failed — run it by hand"
+    for u in $UNITS_CHANGED; do
+      case "$u" in
+        *.timer) systemctl enable --now "$u" >/dev/null 2>&1 || warn "could not re-enable $u" ;;
+      esac
+    done
+    echo "  systemd units reloaded:$UNITS_CHANGED"
+  else
+    warn "units updated but systemctl is missing — reload them by hand"
+  fi
+elif [ "$UNITS_SEEN" != 0 ]; then
+  echo "  systemd units already up to date"
+fi
+
 # ── 6. deploy propriu-zis: pin + health check + rollback automat ─────────────
-say "Applying $TARGET"
-./deploy.sh "$TARGET"
+# The DIGEST reference goes to deploy.sh (it lands in .env as WEBTERM_IMAGE and, on the next
+# upgrade, in .prev-image); the tag rides along only as the UI label (WEBTERM_IMAGE_TAG).
+say "Applying $TARGET ($IMAGE)"
+./deploy.sh "$IMAGE" --tag "$TARGET"
 
 # ── 7. final check: what is running NOW ──────────────────────────────────────
 say "Verify"
@@ -285,11 +408,16 @@ echo "  state: $STATE"
 # rollback.sh). Ştergem doar restul. `docker image rm` refuză o imagine folosită de un container,
 # deci e sigur; ignorăm acele refuzuri.
 KEEP="${WEBTERM_KEEP_IMAGES:-7}"
-REPO_IMG="ghcr.io/sm26449/webterm"
+REPO_IMG="$IMAGE_BASE"
 say "Pruning old images (keeping the last $KEEP)"
 {
-  running=$(docker inspect "${APP_CID:-nimic}" --format '{{.Config.Image}}' 2>/dev/null || true)
-  prev=$([ -f .prev-image ] && cat .prev-image || true)
+  # Comparăm pe ID de imagine, nu pe şir: containerul rulează acum pe `repo@sha256:…`, iar
+  # `.prev-image` ţine tot un digest, deci o comparaţie cu `repo:vX.Y.Z` nu s-ar potrivi
+  # niciodată şi am fi şters chiar tag-ul imaginii care rulează / ţinta de rollback.
+  running_id=$(docker inspect "${APP_CID:-nimic}" --format '{{.Image}}' 2>/dev/null || true)
+  prev=$([ -f .prev-image ] && head -1 .prev-image || true)
+  prev_id=$([ -n "$prev" ] && docker image inspect --format '{{.Id}}' "$prev" 2>/dev/null || true)
+  pinned_id=$(docker image inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null || true)
   # tag-urile vX.Y.Z, sortate semantic descrescător; primele KEEP se păstrează
   keep_tags=$(docker images "$REPO_IMG" --format '{{.Tag}}' \
     | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -t. -k1.2,1n -k2,2n -k3,3n | tail -n "$KEEP")
@@ -297,9 +425,15 @@ say "Pruning old images (keeping the last $KEEP)"
   for tag in $(docker images "$REPO_IMG" --format '{{.Tag}}' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$'); do
     ref="$REPO_IMG:$tag"
     printf '%s\n' "$keep_tags" | grep -qx "$tag" && continue     # în top KEEP
-    [ "$ref" = "$running" ] && continue                          # rulează acum
-    [ "$ref" = "$prev" ] && continue                             # ţinta de rollback
-    if docker image rm "$ref" >/dev/null 2>&1; then
+    id=$(docker image inspect --format '{{.Id}}' "$ref" 2>/dev/null || true)
+    [ -n "$id" ] && [ "$id" = "$running_id" ] && continue        # rulează acum
+    [ -n "$id" ] && [ "$id" = "$prev_id" ] && continue           # ţinta de rollback
+    [ -n "$id" ] && [ "$id" = "$pinned_id" ] && continue         # ce tocmai am instalat
+    # şi referinţele pe digest ale aceleiaşi imagini, altfel `rm` doar de-tag-uieşte şi
+    # straturile rămân pe disc sub `repo@sha256:…`
+    drefs=$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$ref" 2>/dev/null || true)
+    # shellcheck disable=SC2086  # drefs e o listă de referinţe separate prin spaţiu/newline
+    if docker image rm "$ref" $drefs >/dev/null 2>&1; then
       echo "  removed $tag"; removed=$((removed + 1))
     fi
   done
@@ -391,6 +525,7 @@ fi
 # imaginea care rulează chiar acum, citită mai sus la pasul de verificare.
 if [ "$RUNNING" = "$IMAGE" ]; then
   printf '\n\033[32m✓ Upgrade complet: %s (gateway v%s, agent v%s)\033[0m\n' "$TARGET" "$NEW_VER" "$NEW_AGENT"
+  echo "  pinned: $IMAGE"
 else
   printf '\n\033[1;33m! Upgrade NEAPLICAT: rulează %s, nu %s\033[0m\n' "${RUNNING:-?}" "$IMAGE"
   echo "  Imaginea nouă nu a devenit healthy, iar deploy.sh a făcut rollback automat."

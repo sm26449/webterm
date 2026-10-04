@@ -37,6 +37,46 @@ export default function TabBar(props: {
   // drag & drop pentru reordonarea manuală: `drag` = tab-ul mutat, `over` = ţinta curentă
   const [drag, setDrag] = useState<string | null>(null)
   const [over, setOver] = useState<string | null>(null)
+  // anunţ pentru cititoare după o mutare din tastatură (regiune live, sr-only)
+  const [announce, setAnnounce] = useState('')
+
+  // Reordonare FĂRĂ mouse (WCAG 2.1.1 — drag & drop n-are echivalent de tastatură):
+  // Alt+Shift+←/→ mută tabul focalizat cu o poziţie. Alt+←/→ simplu rămâne „tabul
+  // următor/anterior" (handlerul global din App îl lasă să treacă atunci când e Shift).
+  // Săgeţile simple mută doar FOCUSUL între taburi (roving tabindex), Home/End la capete.
+  const tabButtons = (el: HTMLElement) =>
+    Array.from(el.closest('[role="toolbar"]')?.querySelectorAll<HTMLButtonElement>('button[data-tab]') ?? [])
+  const moveTab = (sid: string, dir: -1 | 1) => {
+    const order = props.tabs.map((s) => s.id)
+    const from = order.indexOf(sid)
+    const to = from + dir
+    if (from < 0 || to < 0 || to >= order.length) return
+    order.splice(to, 0, order.splice(from, 1)[0])
+    props.onReorder(order)
+    setAnnounce(t('tabbar.moved', { n: to + 1, total: order.length }))
+    // după re-randare tabul e alt nod în DOM — îl re-focalizăm după id, nu după referinţă
+    requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(`button[data-tab="${sid}"]`)?.focus())
+  }
+  const onTabKey = (e: React.KeyboardEvent<HTMLButtonElement>, sid: string) => {
+    const horiz = e.key === 'ArrowLeft' ? -1 : e.key === 'ArrowRight' ? 1 : 0
+    if (horiz && e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey) {
+      e.preventDefault(); e.stopPropagation()
+      moveTab(sid, horiz)
+      return
+    }
+    if (e.altKey || e.ctrlKey || e.metaKey) return
+    const btns = tabButtons(e.currentTarget)
+    const i = btns.indexOf(e.currentTarget)
+    let next = -1
+    if (horiz) next = (i + horiz + btns.length) % btns.length
+    else if (e.key === 'Home') next = 0
+    else if (e.key === 'End') next = btns.length - 1
+    if (next < 0 || !btns[next]) return
+    e.preventDefault()
+    btns[next].focus()
+  }
+  // roving tabindex: un singur tab e în ordinea de Tab — cel activ, sau primul când eşti pe Acasă
+  const focusIdx = Math.max(0, props.tabs.findIndex((s) => s.id === props.activeSid))
 
   const drop = () => {
     if (drag && over && drag !== over) {
@@ -83,8 +123,15 @@ export default function TabBar(props: {
         </button>
       )}
       <span className="mx-1 my-2 w-px shrink-0 bg-white/10" aria-hidden="true" />
-      <div role="group" aria-label={t('tabbar.openSessions')} className="flex items-stretch gap-0.5">
-        {props.tabs.map((s) => {
+      {/* instrucţiunea de reordonare, o singură dată, referită de fiecare tab prin aria-describedby */}
+      <span id="wt-tab-reorder-hint" className="sr-only">{t('tabbar.reorderHint')}</span>
+      <span aria-live="polite" className="sr-only">{announce}</span>
+      {/* `toolbar`, nu `tablist`: ARIA cere ca un tablist să conţină DOAR `tab`-uri, iar aici fiecare
+          tab vine cu butonul lui de închidere ca frate (axe: aria-required-children, critic, pe
+          fiecare pagină). Toolbar-ul acceptă orice controale, păstrează navigarea cu săgeţi
+          (roving tabindex) şi `aria-current="page"` spune care tab e activ. */}
+      <div role="toolbar" aria-label={t('tabbar.sessionTabs')} aria-orientation="horizontal" className="flex items-stretch gap-0.5">
+        {props.tabs.map((s, idx) => {
           const active = s.id === props.activeSid
           const hasActivity = !active && props.activity.has(s.id)
           const live = isSessionLive(s, props.hosts)
@@ -117,16 +164,28 @@ export default function TabBar(props: {
               <button
                 data-tab={s.id}
                 aria-current={active ? 'page' : undefined}
+                aria-roledescription={t('tabbar.tabRole')}
+                aria-describedby="wt-tab-reorder-hint"
+                tabIndex={idx === focusIdx ? 0 : -1}
+                onKeyDown={(e) => onTabKey(e, s.id)}
                 onClick={() => props.onSelect(s.id)}
                 title={`${s.title || t('tabbar.session')}${host ? ` · ${host.name}` : ''}${hasActivity ? ` · ${t('tabbar.newOutput')}` : ''}${failed ? ` · exit ${s.exit_status}` : ''}`}
                 className="flex min-w-0 flex-col justify-center py-1 pl-2 pr-1 text-left"
               >
                 <span className="flex items-center gap-1.5 text-sm leading-tight">
+                  {/* starea nu e doar culoare: vie = punct rotund (culoarea hostului), închisă = gri,
+                      pierdută/exit≠0 = PĂTRAT roşu; textul pentru cititoare e în span-ul sr-only */}
                   <span
-                    className={`h-1.5 w-1.5 shrink-0 rounded-full ${stateDot}`}
+                    aria-hidden="true"
+                    className={`h-1.5 w-1.5 shrink-0 ${(s.state === 'lost' || failed) ? 'rounded-sm' : 'rounded-full'} ${stateDot}`}
                     title={failed ? t('tabbar.closedWithExit', { code: s.exit_status ?? '' }) : undefined}
                     style={live ? { background: color } : (s.state === 'lost' || failed) ? undefined : { background: '#475569' }}
                   />
+                  <span className="sr-only">
+                    {failed ? t('tabbar.closedWithExit', { code: s.exit_status ?? '' })
+                      : s.state === 'lost' ? t('host.stateLost')
+                      : live ? t('host.stateActive') : t('host.stateClosed')}{' — '}
+                  </span>
                   <span className="max-w-[148px] truncate">{s.title || t('tabbar.session')}</span>
                   {/* output sosit cât tab-ul era în fundal (ambră ≠ culorile de host) */}
                   {hasActivity && (
@@ -144,7 +203,7 @@ export default function TabBar(props: {
                 onClick={() => props.onClose(s.id)}
                 title={t('tabbar.closeTabTitle')}
                 aria-label={t('tabbar.closeTab')}
-                className="wt-touch wt-tabbtn mr-1 mt-0.5 grid shrink-0 place-items-center self-start rounded p-1 opacity-0 focus-visible:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100"
+                className="wt-touch wt-tabbtn mr-1 mt-0.5 grid shrink-0 place-items-center self-start rounded p-1.5 opacity-0 focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100"
               >
                 <CloseIcon size={13} />
               </button>
@@ -173,11 +232,11 @@ export default function TabBar(props: {
                   <span className="max-w-[120px] truncate">{v.name}</span>
                 </button>
                 <button onClick={() => sp.onEdit(v.id)} title={t('split.edit')} aria-label={t('split.edit')}
-                  className="wt-tabbtn mt-0.5 grid shrink-0 place-items-center self-start rounded p-1 opacity-0 focus-visible:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100">
+                  className="wt-tabbtn mt-0.5 grid shrink-0 place-items-center self-start rounded p-1.5 opacity-0 focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100">
                   <PencilIcon size={12} />
                 </button>
                 <button onClick={() => sp.onDelete(v.id)} title={t('split.delete')} aria-label={t('split.delete')}
-                  className="wt-tabbtn mr-1 mt-0.5 grid shrink-0 place-items-center self-start rounded p-1 opacity-0 hover:text-rose-300 focus-visible:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100">
+                  className="wt-tabbtn mr-1 mt-0.5 grid shrink-0 place-items-center self-start rounded p-1.5 opacity-0 hover:text-rose-300 focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100">
                   <CloseIcon size={12} />
                 </button>
               </div>
@@ -185,7 +244,7 @@ export default function TabBar(props: {
           })}
           {props.tabs.length >= 2 && (
             <button onClick={sp.onCreate} title={t('split.create')} aria-label={t('split.create')}
-              className="wt-touch wt-tabbtn mb-1.5 flex shrink-0 items-center gap-1 rounded-lg px-2 py-1.5 text-sky-400 hover:bg-ink-800">
+              className="wt-accent wt-touch wt-tabbtn mb-1.5 flex shrink-0 items-center gap-1 rounded-lg px-2 py-1.5 hover:bg-ink-800">
               <PlusIcon />
               {/* etichetă la prima folosire (fără split-uri încă) — altfel „+" gol nu se citea ca „split" */}
               {sp.views.length === 0 && <span className="text-[11px] font-medium">{t('split.title')}</span>}

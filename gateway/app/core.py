@@ -112,6 +112,52 @@ async def record_agent_event(host_id: int, event: str, reason: str = "", detail:
         pass
 
 
+# (host_id, reason) → ultimul moment scris. Un agent cu token greşit reîncearcă la câteva
+# secunde (backoff), un clonat la fel: fără plafon, jurnalul hostului s-ar umple cu acelaşi
+# rând şi ar îngropa evenimentele reale. Un rând pe minut per motiv e destul ca UI-ul să
+# spună „o conexiune cu token invalid de la 10.0.0.5 acum 2 min".
+_handshake_last: dict = {}
+HANDSHAKE_EVENT_INTERVAL = 60
+
+
+async def record_handshake_refusal(host_id: int, reason: str, ip: str, detail: str = "") -> bool:
+    """Jurnalizează un handshake de agent REFUZAT (`handshake_bad_token`,
+    `handshake_instance_conflict`…) ca eveniment de host, plafonat la unul/minut/motiv/host.
+    Întoarce True dacă a scris. Motivul e un cod stabil (UI-ul îl traduce), IP-ul merge în
+    `detail` — asta e informaţia care lipsea la „Waiting for the agent connection…" (§1.2)."""
+    now = time.time()
+    key = (host_id, reason)
+    if now - _handshake_last.get(key, 0) < HANDSHAKE_EVENT_INTERVAL:
+        return False
+    _handshake_last[key] = now
+    await record_agent_event(host_id, "handshake_refused", reason=reason,
+                             detail=("from %s" % ip if ip else "") + ((" — " + detail) if detail else ""))
+    return True
+
+
+def handshake_log_allowed(key: str) -> bool:
+    """Acelaşi plafon (1/min) pentru LOG-ul de handshake refuzat per IP: un agent cu token
+    greşit reîncearcă în buclă şi ar scrie acelaşi WARNING de sute de ori pe oră."""
+    now = time.time()
+    k = (key, "log")
+    if now - _handshake_last.get(k, 0) < HANDSHAKE_EVENT_INTERVAL:
+        return False
+    _handshake_last[k] = now
+    return True
+
+
+async def hosts_awaiting_first_agent() -> list:
+    """Hosturile de tip agent care nu s-au conectat NICIODATĂ (link de instalare folosit greşit,
+    token vechi copiat…): un token necunoscut nu are host, dar omul care aşteaptă e pe unul
+    dintre acestea — acolo are sens să apară „încercare refuzată de la IP-ul X"."""
+    try:
+        return await db.fetchall(
+            "SELECT id, name FROM hosts WHERE (connection_type IS NULL OR connection_type='agent')"
+            " AND agent_version IS NULL AND uninstalled_at IS NULL ORDER BY created DESC LIMIT 5")
+    except Exception:                     # noqa: BLE001
+        return []
+
+
 async def prune_agent_events() -> None:
     """Retenţie 7 zile pe jurnalul de conexiune (rulat periodic din reaper)."""
     try:
@@ -996,6 +1042,17 @@ class SessionHub:
             except Exception:
                 pass
 
+    def touch(self, client) -> None:
+        """Prezenţă fără taste (scroll/selecţie/mouse, trimisă de UI ca `{"type":"touch"}`):
+        amână idle-lock-ul cu aceleaşi reguli ca input-ul — un hub blocat NU se atinge (doar
+        step-up-ul deblochează), iar un invitat îşi împrospătează doar propriul cronometru."""
+        if self.closed or self.locked or getattr(client, "locked", False):
+            return
+        now = time.time()
+        client.last_interaction = now
+        if client.is_owner:
+            self.last_interaction = now
+
     async def resize(self, rows: int, cols: int) -> None:
         if self.closed:
             return
@@ -1299,6 +1356,9 @@ class AgentConnection(SessionSource):
         self._pending: Dict[int, asyncio.Future] = {}
         self.forwards: Dict[str, ForwardStream] = {}   # stream_id -> tunel activ
         self._tasks: Set[asyncio.Task] = set()
+        # task-uri care NU se anulează la _shutdown (on_exit): vezi `_spawn(survives_shutdown=True)`
+        self._exit_tasks: Set[asyncio.Task] = set()
+        self._output_err_at = 0.0     # ultimul log de eroare la on_output (rate-limit per conexiune)
         self.connected_at = time.time()
         # reconcile serializat + coalescat per conexiune (vezi schedule_reconcile)
         self._reconcile_latest: Optional[dict] = None
@@ -1308,6 +1368,7 @@ class AgentConnection(SessionSource):
         self._connect_logged = False  # jurnal: scriem evenimentul `connect` o dată, la primul hello
         self.link = {}                # health de link raportat de agent: uptime/reconnects/rtt_ms
         self.diagnostics = None        # ultimul snapshot (sistem/cpu/mem/storage/reţea) pushat de agent
+        self._diag_refused_at = 0.0    # ultimul refuz de snapshot peste plafon (log/eveniment o dată pe oră)
         # Serializează scrierile pe ws-ul agentului: send_ctrl (request-uri fs/resize/run),
         # send_data (input din fiecare browser_ws) și send_fwd (proxy forward, bucăţi de 1 MB)
         # rulează din coroutine concurente. Fără lock, două send_bytes se întreţes pe fir →
@@ -1374,12 +1435,33 @@ class AgentConnection(SessionSource):
         return resp.get("log", "")
 
     async def _store_diagnostics(self, diag) -> None:
-        """Cache live + persist ultimul snapshot (folosit şi din push, şi din refresh on-demand)."""
+        """Cache live + persist ultimul snapshot (folosit şi din push, şi din refresh on-demand).
+        MĂRGINIT (audit 2026-10-04, S-03): `metrics` şi `hostname` erau deja plafonate, dar
+        diagnosticele intrau în DB aşa cum veneau — un agent compromis putea trimite 15 MB la
+        fiecare heartbeat, rescrişi în WAL la 30 s şi re-parsaţi de `GET /api/hosts` la fiecare
+        poll al fiecărui client. Regula e ca la restul datelor de la agent: şirurile individuale
+        se taie (un singur câmp uriaş nu poate umfla snapshot-ul), iar un snapshot care tot
+        depăşeşte plafonul se REFUZĂ vizibil (log + eveniment), păstrând ultimul bun."""
         if not isinstance(diag, dict) or not diag:
             return
+        diag = bound_diagnostics(diag)
+        blob = json.dumps(diag)
+        if len(blob) > DIAG_MAX_BYTES:
+            now = time.time()
+            if now - self._diag_refused_at > 3600:   # o dată pe oră, nu la fiecare heartbeat
+                self._diag_refused_at = now
+                log.warning("host %s: diagnostics snapshot of %d bytes exceeds the %d-byte cap — refused",
+                            self.host_id, len(blob), DIAG_MAX_BYTES)
+                await record_agent_event(self.host_id, "diagnostics_oversized",
+                                         reason="%d bytes > %d" % (len(blob), DIAG_MAX_BYTES),
+                                         detail="snapshot refused; the last good one is kept")
+            return
         self.diagnostics = diag
-        await db.execute("UPDATE hosts SET diagnostics=?, diagnostics_at=? WHERE id=?",
-                         json.dumps(diag), diag.get("collected_at") or time.time(), self.host_id)
+        summary = updates_summary(diag)
+        await db.execute(
+            "UPDATE hosts SET diagnostics=?, diagnostics_at=?, updates_summary=? WHERE id=?",
+            blob, diag.get("collected_at") or time.time(),
+            json.dumps(summary) if summary else "", self.host_id)
 
     async def get_diagnostics(self) -> dict:
         """Snapshot proaspăt, on-demand (butonul Refresh). Îl şi persistăm, ca ultimul cunoscut."""
@@ -1487,7 +1569,20 @@ class AgentConnection(SessionSource):
                     # izolare între hosturi: un agent poate scrie DOAR în sesiunile
                     # host-ului său, chiar dacă ar afla un sid al altui host.
                     if hub and hub.host_id == self.host_id:
-                        await hub.on_output(body[SID_LEN:])
+                        # O eroare la persistarea output-ului (ENOSPC pe transcripturi, SQLite
+                        # „database is locked" după busy_timeout) urca din run() → _shutdown():
+                        # TOATE sesiunile + forward-urile hostului cădeau, agentul reconecta în
+                        # secunde, lovea aceeaşi scriere şi flota „pâlpâia". Pierdem frame-ul
+                        # (hub-ul îşi pune marcaj de gap la resync), păstrăm conexiunea. Log
+                        # rate-limitat per conexiune: un disc plin ar scrie altfel o linie per frame.
+                        try:
+                            await hub.on_output(body[SID_LEN:])
+                        except Exception:       # noqa: BLE001
+                            now = time.time()
+                            if now - self._output_err_at > 30:
+                                self._output_err_at = now
+                                log.exception("host %s: output of session %s dropped (persist failed)",
+                                              self.host_id, sid)
                 elif ftype == FRAME_FWD:
                     stream = body[:SID_LEN].decode(errors="replace")
                     fs = self.forwards.get(stream)
@@ -1496,9 +1591,17 @@ class AgentConnection(SessionSource):
                 elif ftype == FRAME_CTRL:
                     # un frame de control corupt de la agent NU trebuie să doboare toată
                     # conexiunea (toate sesiunile + forward-urile hostului) — log + skip.
+                    # „Corupt" înseamnă mai mult decât JSON invalid: un JSON valid care nu e
+                    # obiect (`42`, `[]`) dădea TypeError la `"id" in msg`; `{"id":[1]}` →
+                    # TypeError (unhashable) în `_pending.get`; `{"event":"exit","sid":[..]}` →
+                    # TypeError în `hubs.get`; un câmp lipsă → KeyError. Niciuna nu e ValueError,
+                    # deci scăpau la run() → _shutdown(). Verificăm tipul şi prindem şi restul.
                     try:
-                        await self._on_ctrl(json.loads(body.decode()))
-                    except (ValueError, UnicodeDecodeError) as e:
+                        msg = json.loads(body.decode())
+                        if not isinstance(msg, dict):
+                            raise ValueError("control frame is not a JSON object")
+                        await self._on_ctrl(msg)
+                    except (ValueError, TypeError, KeyError, AttributeError) as e:
                         log.warning("host %s: invalid control frame ignored: %s", self.host_id, e)
         finally:
             self._shutdown()
@@ -1518,6 +1621,12 @@ class AgentConnection(SessionSource):
             fs.tunnel_lost = True                  # cădere de agent, nu de țintă → reconectabil
             fs._eof()
         self.forwards.clear()
+        # Anulăm doar task-urile legate de conexiune (reconcile). `on_exit` NU: agentul care
+        # are un update amânat trimite `exit` pentru ultima sesiune şi se re-exec-uieşte în
+        # câteva ms, deci frame-ul de close ajunge aici cât `on_exit` e încă la primul await
+        # (checkpoint → fsync). Anulat acolo, DB-ul rămânea `live`, hub-ul în `hubs`, iar la
+        # reconectare reconcile nu mai găsea sid-ul → „lost" + Reconnect pentru un shell care
+        # a ieşit normal. `on_exit` atinge doar DB/transcript şi tolerează deja AgentGone la reap.
         for task in self._tasks:
             task.cancel()
         if was_current:
@@ -1525,10 +1634,13 @@ class AgentConnection(SessionSource):
                 if hub.host_id == self.host_id:
                     hub.on_detached()
 
-    def _spawn(self, coro) -> None:
+    def _spawn(self, coro, *, survives_shutdown: bool = False) -> None:
+        """Task legat de conexiune. `survives_shutdown=True` îl pune într-un set pe care
+        `_shutdown` NU-l anulează (păstrăm referinţa ca să nu fie colectat la jumătate)."""
+        bucket = self._exit_tasks if survives_shutdown else self._tasks
         task = asyncio.create_task(coro)
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        bucket.add(task)
+        task.add_done_callback(bucket.discard)
 
     def schedule_reconcile(self, msg: dict) -> None:
         """Serializează + coalescează reconcile pe conexiune. reconcile() e declanșat
@@ -1611,7 +1723,8 @@ class AgentConnection(SessionSource):
         elif event == "exit":
             hub = hubs.get(msg.get("sid", ""))
             if hub and hub.host_id == self.host_id:   # doar sesiunile host-ului său
-                self._spawn(hub.on_exit(msg.get("status"), msg.get("signal")))
+                self._spawn(hub.on_exit(msg.get("status"), msg.get("signal")),
+                            survives_shutdown=True)   # vezi _shutdown: nu moare cu conexiunea
         elif event == "replay_end":
             hub = hubs.get(msg.get("sid", ""))
             if hub and hub.host_id == self.host_id:
@@ -1624,6 +1737,20 @@ class AgentConnection(SessionSource):
 
 _agent_cache = {"source": None, "version": None, "mtime": None}
 
+# Aceeaşi expresie ca `_content_version` din agent/ptyd.py (anti-rollback). Cele două trebuie să
+# fie IDENTICE: gateway-ul decide „e mai nou, îl împing", agentul decide „e mai vechi, îl refuz"
+# — dacă parsează diferit, unul împinge ce celălalt nu poate verifica (audit 2026-10-04, LOW #5:
+# `AGENT_VERSION = 53  # bumped` dădea None pe un regex şi 53 pe celălalt). Strict: doar forma
+# `AGENT_VERSION = <int>` la început de linie (spaţii opţionale, comentariu opţional); orice
+# altceva = None, iar None înseamnă REFUZ (fail-closed), nu „necunoscut, mergem mai departe".
+AGENT_VERSION_RE = re.compile(r"^AGENT_VERSION\s*=\s*(\d+)\s*(#.*)?$", re.M)
+
+
+def agent_source_version(source) -> Optional[int]:
+    """Versiunea declarată într-o sursă de agent, sau None dacă linia nu are forma strictă."""
+    m = AGENT_VERSION_RE.search(source if isinstance(source, str) else "")
+    return int(m.group(1)) if m else None
+
 
 def agent_expected() -> dict:
     """Agent source + version shipped with this gateway (cached by mtime)."""
@@ -1631,13 +1758,12 @@ def agent_expected() -> dict:
         mtime = config.AGENT_FILE.stat().st_mtime
         if _agent_cache["mtime"] != mtime:
             source = config.AGENT_FILE.read_text()
-            match = re.search(r"^AGENT_VERSION = (\d+)", source, re.M)
             try:
                 sig = Path(str(config.AGENT_FILE) + ".sig").read_text().strip()
             except OSError:
                 sig = None
             _agent_cache.update(source=source, mtime=mtime, sig=sig,
-                                version=int(match.group(1)) if match else None)
+                                version=agent_source_version(source))
     except OSError:
         pass
     return _agent_cache
@@ -1683,19 +1809,62 @@ def _agent_update_payload(expected: dict):
     return base64.b64encode(src_bytes).decode(), expected["sig"]
 
 
+# Listă ALBĂ de coduri de refuz: cele emise de agent/ptyd.py la `update` plus cele ale
+# gateway-ului. Un agent compromis alege liber `code`/`msg`, iar înainte hint-ul se alegea prin
+# substring („downgrade" oriunde în text) — un cod inventat punea în UI şi în email „gateway-ul
+# serveşte o versiune MAI VECHE", adică îl învăţa pe operator să NU facă upgrade (audit
+# 2026-10-04). Cod necunoscut → hint generic; textul brut ajunge mai departe doar prin _agent_text.
+_REFUSAL_HINTS = {
+    "update_unsigned": ("the agent has a different public key embedded (it was enrolled before the "
+                        "deployment key was generated) — reinstall the agent on that host"),
+    "update_downgrade": "the gateway is serving an OLDER version than the one on the host (anti-rollback)",
+    "update_badcode": ("the new agent failed its self-test on the host (syntax/probe) — "
+                       "see ~/.webterm/ptyd.log"),
+    "update_badversion": ("the agent could not parse `AGENT_VERSION = <n>` in the new file and refused "
+                          "it (anti-rollback needs it) — the gateway's agent/ptyd.py is malformed"),
+    "signature_missing": ("the image has no agent/ptyd.py.sig — use an official image or sign it with "
+                          "scripts/sign-agent.py"),
+    "gateway_badversion": ("agent/ptyd.py on the gateway has no parsable `AGENT_VERSION = <n>` line — "
+                           "no update is pushed until it is fixed"),
+}
+_ANSI_CSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")   # secvenţe CSI întregi (culoare, clear…)
+_CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")              # ce rămâne: C0/C1, CR/LF, ESC orfan
+
+
+def _agent_text(v, limit: int = 200) -> str:
+    """Text venit de la agent spre UI/email/jurnal: fără secvenţe ANSI şi fără caractere de
+    control (o culoare sau un CR într-un log/mail ascunde ce urmează), mărginit. Întâi CSI-urile
+    întregi — scoţând doar ESC-ul ar rămâne `[2J` lipit de cod. Gol dacă nu e şir."""
+    if not isinstance(v, str):
+        return ""
+    return _CTRL_RE.sub("", _ANSI_CSI_RE.sub("", v))[:limit].strip()
+
+
 def _refusal_hint(code: str) -> str:
-    """Traduce codul de refuz în ce trebuie să facă omul — un cod fără remediu e zgomot."""
-    if "unsigned" in code or "signature" in code:
-        return ("the agent has a different public key embedded (it was enrolled before the "
-                "deployment key was generated) — reinstall the agent on that host")
-    if "downgrade" in code:
-        return "the gateway is serving an OLDER version than the one on the host (anti-rollback)"
-    return "see ~/.webterm/ptyd.log on the host"
+    """Traduce codul de refuz în ce trebuie să facă omul — un cod fără remediu e zgomot.
+    Doar coduri din lista albă; orice altceva primeşte sfatul generic."""
+    return _REFUSAL_HINTS.get(code, "see ~/.webterm/ptyd.log on the host")
 
 
 async def maybe_upgrade_agent(conn: AgentConnection) -> None:
     expected = agent_expected()
-    if not expected["version"] or conn.agent_version is None:
+    if conn.agent_version is None:
+        return
+    if expected["version"] is None:
+        # Sursa există, dar `AGENT_VERSION` nu se parsează cu regexul strict (partajat cu agentul).
+        # Nu împingem: agentul ar refuza oricum (fail-closed, `update_badversion`), iar fără
+        # versiune nici noi nu ştim dacă e upgrade sau downgrade. Înainte se întorcea tăcut
+        # („unknown") şi flota rămânea pe vechi fără nicio urmă. Marcăm hostul ca la
+        # `signature_missing` — vizibil în UI şi în jurnal, O DATĂ, nu la fiecare hello.
+        if expected.get("source") and update_blocked.get(conn.host_id) != "gateway_badversion":
+            update_blocked[conn.host_id] = "gateway_badversion"
+            await db.execute("UPDATE hosts SET update_blocked=? WHERE id=?",
+                             "gateway_badversion", conn.host_id)
+            log.error("host %s: agent/ptyd.py on the gateway has no parsable `AGENT_VERSION = <n>` "
+                      "line — refusing to push an update whose version cannot be checked",
+                      conn.host_id)
+            await record_agent_event(conn.host_id, "update_refused", reason="gateway_badversion",
+                                     detail=_refusal_hint("gateway_badversion"))
         return
     if conn.agent_version >= expected["version"]:
         # agentul e la zi → orice motiv de blocare vechi e caduc; altfel rămâne lipicios în DB
@@ -1735,15 +1904,14 @@ async def maybe_upgrade_agent(conn: AgentConnection) -> None:
         if not resp.get("ok") and not resp.get("deferred"):
             # Refuz explicit al agentului. NU-l înghiţim: fără semnal, flota rămâne pe o
             # versiune veche şi nimeni nu află de ce.
-            code = resp.get("code") or resp.get("msg") or "necunoscut"
-            code = _clip(str(code), 200) or "unknown"   # şir de la agent: mărginit ca restul
+            # şir de la agent: fără caractere de control, mărginit (codul scurt, mesajul ≤200)
+            code = _agent_text(resp.get("code"), 64) or _agent_text(resp.get("msg")) or "unknown"
+            hint = _refusal_hint(code)
             update_blocked[conn.host_id] = code
-            await db.execute("UPDATE hosts SET update_blocked=? WHERE id=?",
-                             str(code), conn.host_id)
+            await db.execute("UPDATE hosts SET update_blocked=? WHERE id=?", code, conn.host_id)
             log.error("host %s: the agent REFUSED the update (%s)", conn.host_id, code)
-            await record_agent_event(conn.host_id, "update_refused", reason=str(code),
-                                     detail=_refusal_hint(str(code)))
-            email_alerts.notify_update_refused(conn.host_id, code, _refusal_hint(str(code)))
+            await record_agent_event(conn.host_id, "update_refused", reason=code, detail=hint)
+            email_alerts.notify_update_refused(conn.host_id, code, hint)
             return
         # NECONDIŢIONAT, nu gardat de dict-ul din memorie: orice upgrade reporneşte
         # gateway-ul, deci dict-ul e garantat gol exact când fix-ul ajunge la agent. Gardat,
@@ -1770,6 +1938,10 @@ async def force_update_agent(host_id: int) -> dict:
     expected = agent_expected()
     if not expected["source"]:
         raise RuntimeError("agent source missing on gateway")
+    if expected["version"] is None:
+        # acelaşi fail-closed ca în maybe_upgrade_agent: fără versiune nu împingem nimic
+        raise RuntimeError("agent/ptyd.py on the gateway has no parsable `AGENT_VERSION = <n>` line — "
+                           "refusing to push an update whose version cannot be checked (anti-rollback)")
     # H2: aceeași cale ca auto-update-ul — substituie UPDATE_PUBKEY + re-semnează cu cheia
     # de deployment. Vechiul cod trimitea sursa+semnătura mentainerului, pe care un agent cu
     # cheie proprie o RESPINGE, iar gateway-ul raporta fals succes (fals-asigurare că un fix
@@ -1788,7 +1960,7 @@ async def force_update_agent(host_id: int) -> dict:
         # butonul din UI — arunca doar codul brut şi nu marca hostul. Efectul: „update_unsigned"
         # fără nicio indicaţie ce să faci, iar lista de hosturi rămânea curată, deci problema
         # devenea invizibilă imediat ce închideai dialogul. Ambele căi trebuie să lase aceeaşi urmă.
-        code = str(resp.get("code") or resp.get("msg") or "necunoscut")
+        code = _agent_text(resp.get("code"), 64) or _agent_text(resp.get("msg")) or "unknown"
         hint = _refusal_hint(code)
         update_blocked[host_id] = code
         await db.execute("UPDATE hosts SET update_blocked=? WHERE id=?", code, host_id)
@@ -1805,6 +1977,42 @@ async def force_update_agent(host_id: int) -> dict:
 def _clip(v, limit: int = 255):
     """Şir raportat de agent, mărginit. `None` rămâne `None` (COALESCE păstrează valoarea)."""
     return v[:limit] if isinstance(v, str) else None
+
+
+DIAG_MAX_BYTES = 256 * 1024   # plafon pe snapshot-ul de diagnostic serializat (S-03)
+DIAG_STR_MAX = 4096           # plafon pe un singur şir din snapshot (un câmp uriaş nu-l poate umfla)
+DIAG_MAX_DEPTH = 8            # imbricare: un JSON adânc artificial e tot un vector de DoS la parsare
+_DIAG_TRUNC = "…[truncated]"
+
+
+def bound_diagnostics(v, depth: int = 0):
+    """Taie şirurile peste DIAG_STR_MAX (cu marcaj vizibil) şi imbricarea peste DIAG_MAX_DEPTH,
+    recursiv, fără să schimbe forma: panoul de Diagnostic citeşte aceleaşi chei. Cheile
+    dicţionarelor sunt şi ele şiruri de la agent → tăiate la fel."""
+    if isinstance(v, str):
+        return v if len(v) <= DIAG_STR_MAX else v[:DIAG_STR_MAX] + _DIAG_TRUNC
+    if depth >= DIAG_MAX_DEPTH:
+        return _DIAG_TRUNC
+    if isinstance(v, dict):
+        return {(bound_diagnostics(k, depth + 1) if isinstance(k, str) else k):
+                bound_diagnostics(x, depth + 1) for k, x in v.items()}
+    if isinstance(v, list):
+        return [bound_diagnostics(x, depth + 1) for x in v]
+    return v
+
+
+def updates_summary(diag) -> Optional[dict]:
+    """{count, security, manager} din `diag["updates"]` (agent v51+), validat: `count` int, nu
+    bool (un top-level non-obiect dădea 500 pe toată lista). Calculat O DATĂ la primire şi
+    stocat în `hosts.updates_summary`, ca listarea hosturilor (poll la 5 s, per client) să nu
+    mai parseze întreg blobul de diagnostic pentru fiecare host."""
+    u = diag.get("updates") if isinstance(diag, dict) else None
+    if not isinstance(u, dict) or not isinstance(u.get("count"), int) or isinstance(u.get("count"), bool):
+        return None
+    sec = u.get("security")
+    return {"count": u["count"],
+            "security": sec if isinstance(sec, int) and not isinstance(sec, bool) else None,
+            "manager": _clip(u.get("manager"), 32)}
 
 
 async def reconcile(conn: AgentConnection, msg: dict) -> None:
@@ -2149,6 +2357,102 @@ async def sweep_stale_sessions() -> None:
 EPHEMERAL_GRACE = 120   # sec: răgaz între crearea unei ţinte efemere şi reaping (create→connect)
 
 
+class HostHasDependents(Exception):
+    """Hostul are ţinte jump PERSISTENTE cuibărite sub el (`via_host_id`); nu-l ştergem,
+    altfel copiii rămân cu un `via` spre un rând inexistent (sau, după reutilizarea id-ului,
+    spre un host străin) şi dispar din sidebar, care îi randează doar sub părinte."""
+
+    def __init__(self, host_id: int, children: list):
+        super().__init__("host %s has %d persistent jump children" % (host_id, len(children)))
+        self.host_id = host_id
+        self.children = children
+
+
+_PURGE_MAX_DEPTH = 8    # adâncimea de cuibărire efemeră tolerată (în practică 1)
+
+
+async def purge_host(host_id: int, *, _depth: int = 0) -> None:
+    """Şterge un host şi TOT ce îl referenţiază — singura cale de ştergere (delete, uninstall,
+    reaper-ul efemer trec toate pe aici).
+
+    `hosts.id` e INTEGER PRIMARY KEY fără AUTOINCREMENT, deci id-ul celui mai nou host şters se
+    REUTILIZEAZĂ la următorul INSERT (cazul normal al ţintelor „conectează o dată"), iar
+    `PRAGMA foreign_keys` e oprit, deci niciun ON DELETE CASCADE nu rulează. Până aici se
+    ştergeau doar `connections` + `hosts`: hostul nou moştenea forward-urile (servite prin
+    agentul LUI către porturi de pe altă maşină), istoricul de sesiuni, cheia de deploy
+    („acest host are deja o cheie") şi evenimentele celui vechi. Cu curăţarea completă,
+    reutilizarea id-ului e inofensivă — n-are rost o migrare la AUTOINCREMENT.
+
+    Nu deconectează sursa hostului (apelanţii o fac, cu nuanţele lor — uninstall aşteaptă
+    confirmarea agentului) şi presupune că nu mai există sesiuni vii (apelanţii refuză cu 409)."""
+    from . import security          # lazy: security nu importă core, dar păstrăm ordinea de import
+    if _depth > _PURGE_MAX_DEPTH:
+        raise RuntimeError("jump nesting too deep while purging host %s" % host_id)
+    # Copiii jump: cei EFEMERI merg cu părintele (nu-i poate folosi nimeni fără el);
+    # cei persistenţi blochează ştergerea — decizia e a operatorului, nu a noastră.
+    children = await db.fetchall(
+        "SELECT id, ephemeral FROM hosts WHERE via_host_id=? AND id!=?", host_id, host_id)
+    persistent = [c["id"] for c in children if not c["ephemeral"]]
+    if persistent:
+        raise HostHasDependents(host_id, persistent)
+    for c in children:
+        await purge_host(c["id"], _depth=_depth + 1)
+
+    # sesiuni: hub-urile rămase (nu ar trebui să fie — doar closed/lost) se demontează, iar
+    # transcripturile se ARHIVEAZĂ ca pe calea normală de ştergere (delete_session), nu se lasă
+    # orfane pe disc: nicio măturare nu caută fişiere fără rând în DB, deci ar fi rămas pe veci.
+    srows = await db.fetchall("SELECT id FROM sessions WHERE host_id=?", host_id)
+    for srow in srows:
+        sid = srow["id"]
+        hub = hubs.get(sid)
+        if hub is not None:
+            hub.teardown()
+        session_sources.pop(sid, None)
+        try:
+            archive_transcript(sid)
+        except ValueError:          # sid invalid în DB (nu se poate forma o cale) — nimic de mutat
+            pass
+    await db.execute("DELETE FROM sessions WHERE host_id=?", host_id)
+
+    # forward-uri: tunelurile vii cad odată cu sursa (apelantul o deconectează); biletele sunt
+    # semnate pe slug, iar slug-ul se poate recicla → bumpăm epoca, exact ca la delete_forward.
+    if await db.fetchone("SELECT 1 FROM port_forwards WHERE host_id=? LIMIT 1", host_id):
+        await db.execute("DELETE FROM port_forwards WHERE host_id=?", host_id)
+        security.bump_forward_epoch()
+
+    # cheile de deploy: NU le ştergem, le DETAŞĂM. Evidenţa trebuie să supravieţuiască hostului
+    # (M-6): cheia sursei e încă autorizată pe ţintele ei, iar cheile altora sunt încă în
+    # authorized_keys pe maşina ştearsă — rândurile rămase sunt singura urmă că uşile există
+    # (listarea face LEFT JOIN pe hosts şi arată „orfan", fără nume). Dar id-ul se reutilizează,
+    # deci un rând lăsat pe `host_id`/`target_host_id` pozitiv s-ar lipi de următorul host cu
+    # acelaşi id („are deja cheie de deploy", „cheie deployată" pe o maşină care n-a văzut-o).
+    # Negăm id-ul: unicitatea (host_id UNIQUE, UNIQUE(key_id,target_host_id)) se păstrează,
+    # JOIN-urile pe hosts nu-l mai găsesc (orfan), iar un host nou cu id pozitiv nu-l atinge.
+    # O urmă mai veche pentru acelaşi id negativ (ştergere repetată) e înlocuită de cea nouă.
+    await db.execute("DELETE FROM ssh_key_deployments WHERE target_host_id=?", -host_id)
+    await db.execute("UPDATE ssh_key_deployments SET target_host_id=? WHERE target_host_id=?",
+                     -host_id, host_id)
+    old_key = await db.fetchone("SELECT id FROM ssh_keys WHERE host_id=?", -host_id)
+    if old_key:
+        await db.execute("DELETE FROM ssh_key_deployments WHERE key_id=?", old_key["id"])
+        await db.execute("DELETE FROM ssh_keys WHERE id=?", old_key["id"])
+    await db.execute("UPDATE ssh_keys SET host_id=? WHERE host_id=?", -host_id, host_id)
+
+    await db.execute("DELETE FROM agent_events WHERE host_id=?", host_id)
+    await db.execute("DELETE FROM connections WHERE host_id=?", host_id)
+    # istoricul de comenzi e un jurnal GLOBAL (audit-lite) cu `host_name` propriu: îl păstrăm,
+    # dar rupem legătura pe id ca filtrul „pe host" să nu-l atribuie următorului host cu acelaşi id
+    await db.execute("UPDATE command_history SET host_id=NULL WHERE host_id=?", host_id)
+    await db.execute("DELETE FROM hosts WHERE id=?", host_id)
+
+    # starea din RAM cheiată pe host_id — ar fi moştenită de hostul următor cu acelaşi id
+    pending_updates.pop(host_id, None)
+    update_blocked.pop(host_id, None)
+    replacements.pop(host_id, None)
+    _dial_locks.pop(host_id, None)
+    _offline_alerted_ram.discard(host_id)
+
+
 async def sweep_ephemeral_hosts() -> None:
     """Reaper pentru ţintele EFEMERE („conectează o dată", fără salvare): şterge host-urile
     `ephemeral=1` care nu mai au nicio sesiune vie (live/creating) şi au trecut de răgazul de
@@ -2172,8 +2476,13 @@ async def sweep_ephemeral_hosts() -> None:
                 await src.disconnect()
             except Exception:       # noqa: BLE001
                 pass
-        await db.execute("DELETE FROM sessions WHERE host_id=?", hid)
-        await db.execute("DELETE FROM hosts WHERE id=?", hid)
+        # aceeaşi curăţare completă ca la ştergerea manuală: înainte, `DELETE FROM sessions`
+        # direct lăsa transcripturile fiecărui „conectează o dată" orfane pe disc, pentru totdeauna
+        try:
+            await purge_host(hid)
+        except HostHasDependents:
+            log.warning("ephemeral host %s has persistent jump children; left in place", hid)
+            continue
         log.info("reaped ephemeral host %s (no live sessions)", hid)
 
 
@@ -2852,7 +3161,88 @@ SSH_FWD_IDLE = 300         # conexiune SSH ridicată DOAR pentru forward: teardo
 
 
 class HostKeyMismatch(Exception):
-    """Amprenta host key-ului diferă de cea pinată — posibil MITM."""
+    """Amprenta host key-ului diferă de cea pinată — posibil MITM. Poartă AMBELE amprente
+    (SHA256:…), ca UI-ul să poată arăta „era X, acum e Y" — un toast fără amprente nu permite
+    nicio verificare out-of-band, deci nicio decizie informată (audit UX §6.e1)."""
+
+    def __init__(self, detail: str, old_fp: str = "", new_fp: str = ""):
+        super().__init__(detail)
+        self.old_fp = old_fp
+        self.new_fp = new_fp
+
+
+def hostkey_fingerprint(keyline: str) -> str:
+    """`SHA256:…` pentru o linie de cheie publică OpenSSH; "" dacă nu se poate decoda."""
+    try:
+        return asyncssh.import_public_key(keyline).get_fingerprint()
+    except Exception:       # noqa: BLE001 — pin corupt/ilizibil → fără amprentă, nu crash
+        return ""
+
+
+class _PinnedHostKeyClient(asyncssh.SSHClient):
+    """asyncssh consultă `validate_host_public_key` DOAR când cheia oferită NU e în lista
+    de încredere — adică exact în cazul de mismatch. O folosim ca să CAPTURĂM cheia oferită
+    (altfel `HostKeyNotVerifiable` spune doar „not trusted", fără cheia nouă), apoi refuzăm.
+    Conexiunea rămâne refuzată ÎNAINTE de autentificare: parola nu ajunge la un eventual MITM."""
+
+    _holder: dict = None     # setat de fabrica din `_hostkey_kwargs` (asyncssh instanţiază clientul)
+
+    def validate_host_public_key(self, host, addr, port, key):
+        if self._holder is not None:
+            self._holder["key"] = key
+        return False
+
+
+def _hostkey_kwargs(host_row) -> tuple:
+    """(kwargs de pinning pentru asyncssh.connect, holder) — comun dial_ssh / dial_ssh_jump."""
+    holder = {"key": None}
+    stored = host_row["known_hosts"]
+    kwargs = {}
+    if stored:
+        # cheie pinată → asyncssh verifică ÎNAINTE de auth (parola nu ajunge la un MITM)
+        pub = asyncssh.import_public_key(stored)
+        kwargs["known_hosts"] = lambda _h, _a, _p: ([pub], [], [])
+
+        def _factory():
+            c = _PinnedHostKeyClient()
+            c._holder = holder
+            return c
+        kwargs["client_factory"] = _factory
+    else:
+        kwargs["known_hosts"] = None            # TOFU: prima conectare pinează
+    return kwargs, holder
+
+
+async def _hostkey_mismatch(host_row, holder, err) -> "HostKeyMismatch":
+    """Mismatch de host-key: persistă alarma pe host (UI-ul o arată până la „accept"), scrie în
+    jurnalul hostului, alertează — şi întoarce excepţia de ridicat. Conexiunile ulterioare sunt
+    refuzate din `_connect_direct` fără dial, pe baza alarmei: nu redialăm o ţintă suspectă
+    la fiecare click şi nu lăsăm starea să dispară odată cu toast-ul."""
+    old_fp = hostkey_fingerprint(host_row["known_hosts"] or "")
+    key = holder.get("key")
+    new_fp, new_key = "", ""
+    if key is not None:
+        try:
+            new_fp = key.get_fingerprint()
+            new_key = key.export_public_key().decode().strip()
+        except Exception:   # noqa: BLE001
+            pass
+    alarm = {"old_fp": old_fp, "new_fp": new_fp, "new_key": new_key, "changed_at": time.time()}
+    try:
+        await db.execute("UPDATE hosts SET hostkey_alarm=? WHERE id=?",
+                         json.dumps(alarm), host_row["id"])
+    except Exception:       # noqa: BLE001 — alarma nu rupe refuzul (care e fail-closed oricum)
+        log.exception("could not persist the host-key alarm for host %s", host_row["id"])
+    await record_agent_event(host_row["id"], "hostkey_changed", reason="hostkey_changed",
+                             detail="%s → %s" % (old_fp or "?", new_fp or "?"))
+    log.warning("host %s(%s): SSH host key CHANGED (%s → %s) — connection refused",
+                host_row["name"], host_row["id"], old_fp or "?", new_fp or "?")
+    try:
+        email_alerts.notify_host_key_changed(
+            host_row["name"], "pinned: %s\noffered: %s\n%s" % (old_fp or "?", new_fp or "?", str(err)[:200]))
+    except Exception:       # noqa: BLE001 — alerta nu rupe calea
+        pass
+    return HostKeyMismatch(str(err), old_fp, new_fp)
 
 
 class SshForwardStream:
@@ -3049,12 +3439,8 @@ async def dial_ssh(host_row, credential: dict) -> SshSource:
         kwargs = dict(host=host, port=port, username=host_row["ssh_username"],
                       connect_timeout=SSH_CONNECT_TIMEOUT,
                       keepalive_interval=30, keepalive_count_max=4)
-        if stored:
-            # cheie pinată → asyncssh verifică ÎNAINTE de auth (parola nu ajunge la un MITM)
-            pub = asyncssh.import_public_key(stored)
-            kwargs["known_hosts"] = lambda _h, _a, _p: ([pub], [], [])
-        else:
-            kwargs["known_hosts"] = None            # TOFU: prima conectare pinează
+        pin_kwargs, holder = _hostkey_kwargs(host_row)
+        kwargs.update(pin_kwargs)
 
         if host_row["auth_method"] == "key":
             pk = asyncssh.import_private_key(credential["key"],
@@ -3066,11 +3452,7 @@ async def dial_ssh(host_row, credential: dict) -> SshSource:
         try:
             conn = await asyncssh.connect(**kwargs)
         except asyncssh.HostKeyNotVerifiable as e:
-            try:
-                email_alerts.notify_host_key_changed(host_row["name"], str(e)[:200])
-            except Exception:       # noqa: BLE001 — alerta nu rupe calea
-                pass
-            raise HostKeyMismatch(str(e))
+            raise await _hostkey_mismatch(host_row, holder, e)
 
         if not stored:
             keyline = conn.get_server_host_key().export_public_key().decode().strip()
@@ -3186,11 +3568,8 @@ async def dial_ssh_jump(host_row, credential: dict) -> SshJumpSource:
         kwargs = dict(sock=ssh_sock, username=host_row["ssh_username"],
                       connect_timeout=SSH_CONNECT_TIMEOUT,
                       keepalive_interval=30, keepalive_count_max=4)
-        if stored:
-            pub = asyncssh.import_public_key(stored)
-            kwargs["known_hosts"] = lambda _h, _a, _p: ([pub], [], [])
-        else:
-            kwargs["known_hosts"] = None            # TOFU: prima conectare pinează
+        pin_kwargs, holder = _hostkey_kwargs(host_row)
+        kwargs.update(pin_kwargs)
         if host_row["auth_method"] == "key":
             pk = asyncssh.import_private_key(credential["key"], credential.get("passphrase") or None)
             kwargs["client_keys"] = [pk]
@@ -3207,11 +3586,7 @@ async def dial_ssh_jump(host_row, credential: dict) -> SshJumpSource:
             conn = await asyncssh.connect(**kwargs)
         except asyncssh.HostKeyNotVerifiable as e:
             _teardown(); await fs.close()
-            try:
-                email_alerts.notify_host_key_changed(host_row["name"], str(e)[:200])
-            except Exception:       # noqa: BLE001 — alerta nu rupe calea
-                pass
-            raise HostKeyMismatch(str(e))
+            raise await _hostkey_mismatch(host_row, holder, e)
         except Exception as e:
             _teardown(); await fs.close()
             # un rând în logul gateway-ului cu ţinta + cauza: altfel ssh-jump eşua „mut" (asyncssh

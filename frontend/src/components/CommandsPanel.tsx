@@ -1,5 +1,7 @@
+import { useRef } from 'react'
 import { Command, cmdDuration } from '../lib/commands'
 import { useI18n } from '../lib/i18n'
+import { useDrawer } from '../lib/useDrawer'
 
 /** Lista comenzilor din sesiune (blocks): sari la oricare, vezi care a eșuat,
     copiază exact output-ul ei. Apare doar când shell integration e activă. */
@@ -16,16 +18,19 @@ export default function CommandsPanel(props: {
   overlay?: boolean
 }) {
   const { t } = useI18n()
+  const asideRef = useRef<HTMLElement>(null)
+  const drawer = useDrawer(asideRef, props.onClose)
   // pe pane-uri înguste (telefon, sau split pe iPad) panoul e DRAWER peste
   // terminal (cu scrim); pe pane-uri late revine coloana laterală clasică.
   // Decizia pe lățimea REALĂ a pane-ului, nu pe viewport.
   const scrimCls = 'fixed inset-0 z-30 bg-black/60' + (props.overlay ? '' : ' sm:hidden')
-  const asideCls = 'fixed inset-y-0 right-0 z-40 flex w-[85vw] max-w-xs flex-col border-l border-ink-800 bg-ink-900 shadow-2xl'
+  const asideCls = 'fixed inset-y-0 right-0 z-40 flex w-[85vw] max-w-xs flex-col border-l border-ink-800 bg-ink-900 shadow-2xl outline-none'
     + (props.overlay ? '' : ' sm:static sm:z-auto sm:w-64 sm:max-w-none sm:shrink-0 sm:shadow-none')
   return (
     <>
     <div className={scrimCls} onClick={props.onClose} aria-hidden="true" />
-    <aside aria-label={t('cmds.sessionCommands')} className={asideCls}>
+    {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Escape pe regiunea drawer-ului (vezi useDrawer): intenţionat pe <aside>, nu pe document */}
+    <aside ref={asideRef} aria-label={t('cmds.sessionCommands')} className={asideCls} onKeyDown={drawer.onKeyDown}>
       <header className="flex items-center gap-2 border-b border-ink-800 px-3 py-2">
         <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">{t('cmds.commands')}</span>
         <span className="rounded bg-ink-800 px-1.5 text-[11px] text-slate-500">{props.commands.length}</span>
@@ -74,23 +79,24 @@ export default function CommandsPanel(props: {
                     {c.endedAt && <span>{cmdDuration(c)}</span>}
                   </div>
                 </button>
-                {/* acțiuni pe bloc, apar pe hover — simple și fără ambiguitate */}
-                <div className="mt-1 hidden flex-wrap items-center gap-x-2 gap-y-1 pl-3 text-[10px] group-hover:flex">
+                {/* acțiuni pe bloc: la hover (mouse), la focus în rând (tastatură — altfel erau
+                    în DOM dar invizibile, Tab „sărea" prin butoane nevăzute) şi mereu pe touch */}
+                <div className="mt-1 hidden flex-wrap items-center gap-x-2 gap-y-1 pl-3 text-[10px] group-hover:flex group-focus-within:flex [@media(hover:none)]:flex">
                   <button
                     onClick={() => props.onRerun(c)}
                     title={t('cmds.rerunTitle')}
-                    className="rounded px-1 py-0.5 font-medium text-sky-400 hover:bg-ink-700"
+                    className="min-h-6 rounded px-1 py-0.5 font-medium wt-link hover:bg-ink-700"
                   >
                     {t('cmds.rerun')}
                   </button>
                   <span className="flex items-center gap-1.5 text-slate-500">
                     <span>{t('cmds.copy')}</span>
                     <button onClick={() => props.onCopyCommand(c)} title={t('cmds.copyCommandTitle')}
-                      className="wt-link hover:underline">{t('cmds.commandWord')}</button>
+                      className="min-h-6 py-1 wt-link hover:underline">{t('cmds.commandWord')}</button>
                     <button onClick={() => props.onCopyOutput(c)} title={t('cmds.copyOutputTitle')}
-                      className="wt-link hover:underline">{t('cmds.outputWord')}</button>
+                      className="min-h-6 py-1 wt-link hover:underline">{t('cmds.outputWord')}</button>
                     <button onClick={() => props.onCopyMarkdown(c)} title={t('cmds.copyMarkdownTitle')}
-                      className="wt-link hover:underline">{t('cmds.markdownWord')}</button>
+                      className="min-h-6 py-1 wt-link hover:underline">{t('cmds.markdownWord')}</button>
                   </span>
                 </div>
               </div>

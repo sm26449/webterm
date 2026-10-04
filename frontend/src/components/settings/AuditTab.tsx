@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from '../../lib/api'
 import { useI18n } from '../../lib/i18n'
 import { fmtTs } from '../../lib/tz'
@@ -21,10 +21,15 @@ export default function AuditTab() {
   const [auditBusy, setAuditBusy] = useState(false)
   const [auditEnd, setAuditEnd] = useState(false)   // ultima pagină primită era incompletă
   const [auditDays, setAuditDays] = useState(0)
+  const seq = useRef(0)
 
   // `reset` = filtre noi (pornim de la cel mai recent); altfel paginăm în trecut de la ts-ul
   // ultimei linii — offset-ul ar sări rânduri când apar acţiuni noi între cereri.
+  // Generaţie monotonă (F-05): Enter în căutare + click pe Filtrează + „mai multe" pot porni
+  // cereri suprapuse; răspunsul unei cereri VECHI (filtru anterior) nu mai are voie să
+  // suprascrie lista sau să dubleze pagina. Adăugarea foloseşte starea curentă, nu closure-ul.
   async function loadAudit(reset: boolean) {
+    const my = ++seq.current
     setAuditBusy(true)
     try {
       const last = audit && audit.length ? audit[audit.length - 1] : null
@@ -34,11 +39,12 @@ export default function AuditTab() {
       if (auditQ.trim()) qs.set('q', auditQ.trim())
       if (auditFailed) qs.set('failed_only', 'true')
       const r = await api<{ entries: AuditEntry[]; retention_days: number }>(`/api/audit?${qs}`)
+      if (my !== seq.current) return          // a pornit o cerere mai nouă între timp
       setAuditDays(r.retention_days)
       setAuditEnd(r.entries.length < AUDIT_PAGE)
-      setAudit(reset ? r.entries : [...(audit ?? []), ...r.entries])
+      setAudit((cur) => (reset ? r.entries : [...(cur ?? []), ...r.entries]))
     } catch { /* jurnalul e informativ — o eroare nu blochează Setările */ }
-    setAuditBusy(false)
+    if (my === seq.current) setAuditBusy(false)
   }
 
   // eslint-disable-next-line react-hooks/exhaustive-deps

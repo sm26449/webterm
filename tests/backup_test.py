@@ -158,6 +158,59 @@ def main():
     finally:
         backup.RESTORE_MAX_UNCOMPRESSED = _orig_cap
 
+    # ── G-13: scadenţa se calculează faţă de ultimul backup REUŞIT (catch-up la boot) ──
+    now = 1_700_000_000.0
+    check("niciodată rulat → scadent acum", backup.is_due("daily", 0, now))
+    check("daily, 23h de la ultimul succes → nu e scadent",
+          not backup.is_due("daily", now - 23 * 3600, now))
+    check("daily, 25h → scadent (catch-up, indiferent de câte reporniri au fost)",
+          backup.is_due("daily", now - 25 * 3600, now))
+    check("weekly, 6 zile → nu", not backup.is_due("weekly", now - 6 * 86400, now))
+    check("weekly, 8 zile → da", backup.is_due("weekly", now - 8 * 86400, now))
+    check("ceas sărit înapoi (last > now) → scadent", backup.is_due("daily", now + 3600, now))
+    check("off → niciodată scadent, next_due None",
+          not backup.is_due("off", 0, now) and backup.next_due("off", 0, now) is None)
+    check("next_due = ultimul succes + perioada",
+          backup.next_due("daily", now - 100, now) == now - 100 + 86400)
+
+    # ── G-15: scriere atomică — un eşec la mijloc nu lasă un .wtsnap trunchiat vizibil ──
+    before = {b["name"] for b in backup.list_backups()}
+    orig_fsync = backup._fsync
+
+    def _enospc(fd):
+        raise OSError(28, "No space left on device")
+    backup._fsync = _enospc
+    try:
+        try:
+            backup.run_scheduled_backup()
+            check("eşec la scriere → excepţia se propagă", False)
+        except OSError:
+            check("eşec la scriere → excepţia se propagă", True)
+    finally:
+        backup._fsync = orig_fsync
+    after = {b["name"] for b in backup.list_backups()}
+    check("niciun .wtsnap nou vizibil după un eşec la mijlocul scrierii", after == before,
+          str(after - before))
+    check("niciun .tmp rezidual după eşec",
+          not list((config.DATA_DIR / "backups").glob("*" + backup.TMP_SUFFIX)))
+    # un .tmp rămas de la un crash: invizibil în listă, nedescărcabil, curăţat la prune
+    stray = config.DATA_DIR / "backups" / ("webterm-stray.wtsnap" + backup.TMP_SUFFIX)
+    stray.write_bytes(b"partial")
+    check("list_backups ignoră .tmp",
+          not any(b["name"].endswith(backup.TMP_SUFFIX) for b in backup.list_backups()))
+    try:
+        backup.encrypt_stored(stray.name, "x" * 8)
+        check("encrypt_stored refuză un .tmp", False)
+    except ValueError:
+        check("encrypt_stored refuză un .tmp", True)
+    os.utime(stray, (time.time() - 7200, time.time() - 7200))
+    backup.prune_backups()
+    check("prune curăţă .tmp-urile vechi (rest de crash)", not stray.exists())
+    # scrierea reuşită e completă şi 0600
+    good = config.DATA_DIR / "backups" / backup.run_scheduled_backup()
+    check("snapshot complet după scriere atomică", good.stat().st_size > 0 and
+          (good.stat().st_mode & 0o777) == 0o600)
+
     print(f"\n{ok}/{total} teste trecute")
     sys.exit(0 if ok == total else 1)
 

@@ -36,8 +36,10 @@ export default function FileBrowser(props: { host: Host; onClose: () => void }) 
   const [busy, setBusy] = useState(false)
   const [uploads, setUploads] = useState<Record<string, 'up' | 'done' | 'err'>>({})
   const [drag, setDrag] = useState(false)
-  const [editing, setEditing] = useState<{ path: string; name: string; content: string } | null>(null)
+  // mtime = cel din listare la deschidere; pleacă drept `if_mtime` la salvare (vezi saveEdit)
+  const [editing, setEditing] = useState<{ path: string; name: string; content: string; mtime: number } | null>(null)
   const [saving, setSaving] = useState(false)
+  const [conflict, setConflict] = useState(false)
   const fileInput = useRef<HTMLInputElement>(null)
   // Singurul modal din vreo paisprezece care nu avea capcană de focus. Fără ea, `Tab` scurge
   // focusul în terminalul din spate — adică tastezi într-un shell fără să vezi unde —, iar
@@ -108,18 +110,26 @@ export default function FileBrowser(props: { host: Host; onClose: () => void }) 
       return
     }
     setError('')
-    setEditing({ path, name: entry.name, content: new TextDecoder().decode(buf) })
+    setConflict(false)
+    setEditing({ path, name: entry.name, content: new TextDecoder().decode(buf), mtime: entry.mtime })
   }
 
-  async function saveEdit() {
+  // Aceeaşi protecţie ca în FilePanel/FileEditor: `if_mtime` = mtime-ul fişierului când l-am
+  // deschis; agentul refuză cu 409 dacă între timp s-a schimbat (editat din terminal, alt tab),
+  // iar utilizatorul alege explicit „suprascrie oricum" (force → fără if_mtime). Înainte,
+  // calea asta veche suprascria tăcut modificările concurente.
+  async function saveEdit(force = false) {
     if (!editing) return
     setSaving(true)
     try {
-      const res = await fetchWithStepup(`/api/hosts/${props.host.id}/fs/upload?path=${encodeURIComponent(editing.path)}`, {
+      const q = force ? '' : `&if_mtime=${editing.mtime}`
+      const res = await fetchWithStepup(`/api/hosts/${props.host.id}/fs/upload?path=${encodeURIComponent(editing.path)}${q}`, {
         method: 'POST',
         body: new TextEncoder().encode(editing.content),
       })
+      if (res.status === 409) { setConflict(true); return }
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail ?? t('browser.saveFailed'))
+      setConflict(false)
       setEditing(null)
       load(listing!.path)
     } catch (e) {
@@ -191,6 +201,7 @@ export default function FileBrowser(props: { host: Host; onClose: () => void }) 
           </button>
           <input
             value={path}
+            aria-label={t('files.pathAria')}
             onChange={(e) => setPath(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && load(path)}
             spellCheck={false}
@@ -302,17 +313,25 @@ export default function FileBrowser(props: { host: Host; onClose: () => void }) 
               <span className="truncate font-mono text-xs text-slate-400">{editing.path}</span>
               <div className="ml-auto flex gap-2">
                 <button
-                  onClick={saveEdit}
+                  onClick={() => saveEdit(false)}
                   disabled={saving}
                   className="rounded-lg bg-sky-600 px-3 py-1 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-50"
                 >
                   {saving ? t('browser.saving') : t('browser.save')}
                 </button>
-                <button onClick={() => setEditing(null)} className="rounded-lg px-3 py-1 text-sm text-slate-400 hover:bg-ink-800">
+                <button onClick={() => { setConflict(false); setEditing(null) }} className="rounded-lg px-3 py-1 text-sm text-slate-400 hover:bg-ink-800">
                   {t('browser.cancel')}
                 </button>
               </div>
             </div>
+            {/* 409 de la agent: fişierul s-a schimbat de când l-am deschis — aceeaşi bară ca în FileEditor */}
+            {conflict && (
+              <div className="flex items-center gap-3 border-b border-ink-800 bg-amber-950/40 px-4 py-2 text-xs">
+                <span className="wt-warn">{t('files.conflictMsg')}</span>
+                <button onClick={() => { setConflict(false); saveEdit(true) }} className="rounded bg-amber-600 px-2 py-0.5 font-medium text-white hover:bg-amber-700">{t('files.overwriteAnyway')}</button>
+                <button onClick={() => setConflict(false)} className="text-slate-400 hover:underline">{t('files.cancel')}</button>
+              </div>
+            )}
             <textarea
               autoFocus
               value={editing.content}

@@ -10,6 +10,7 @@ import './index.css'
 import { applyTheme, currentTheme } from './lib/theme'
 import { showFailsafe } from './lib/failsafe'
 import { I18nProvider } from './lib/i18n'
+import { ConfirmProvider } from './lib/confirm'
 
 // xterm 5.x teardown race: when a terminal is disposed mid-transition (split↔tab), a DEFERRED
 // `Viewport.syncScrollArea` can still run on the already-disposed terminal and read
@@ -89,8 +90,10 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <ErrorBoundary>
       <I18nProvider>
-        <App />
-        <TooltipLayer />
+        <ConfirmProvider>
+          <App />
+          <TooltipLayer />
+        </ConfirmProvider>
       </I18nProvider>
     </ErrorBoundary>
   </React.StrictMode>,

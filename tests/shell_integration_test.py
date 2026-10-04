@@ -113,6 +113,20 @@ async def main():
           n["A"] >= 5 and n["D"] >= 5, str(n))
     n = markers(base + ". %s\n" % src_path)
     check("re-sursare: fără marcaje duble", n["B"] <= n["A"], str(n))
+    # audit 2026-10: cu HISTCONTROL=ignorespace (în `ignoreboth`, implicit pe Ubuntu) o comandă cu
+    # spaţiu în faţă NU intră în history, iar `history 1` e comanda PRECEDENTĂ → E purta textul
+    # comenzii anterioare cu exit code-ul/durata celei curente. Acum: fără E când history n-a
+    # avansat (clientul cade pe textul de pe ecran), niciodată textul altei comenzi.
+    out = run_bash(base + "unset HISTFILE\nHISTCONTROL=ignorespace\n",
+                   cmds=("echo one", " echo hidden", "echo three"))
+    es = re.findall(rb"\]133;E;([^\x07\x1b]*)", out)
+    check("ignorespace: comanda ascunsă nu primeşte E cu textul comenzii precedente",
+          es.count(b"echo one") == 1 and b"echo three" in es and b"echo hidden" not in es, str(es))
+    check("ignorespace: comenzile înregistrate primesc E ca înainte",
+          es[:2] == [b"echo one", b"echo three"], str(es))   # urmează `exit`, înregistrat şi el
+    cs = re.findall(rb"\]133;([C])", out)
+    check("ignorespace: C se emite şi pentru comanda ascunsă (blocul există, textul vine de pe ecran)",
+          len(cs) >= 3, str(len(cs)))
     # regresie proprie (v1.0.126→130): ca să ne re-aşezăm la finalul lui PROMPT_COMMAND
     # tăiam şirul pe „;" şi-l reasamblam — dar „;" apare des ÎNTRE GHILIMELE (titlul de
     # terminal). Codul utilizatorului ajungea rescris: `]0;%s` devenea `]0; %s`.

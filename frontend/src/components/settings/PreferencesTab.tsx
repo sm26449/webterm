@@ -3,6 +3,7 @@ import { api } from '../../lib/api'
 import { useI18n } from '../../lib/i18n'
 import { allTimezones, browserTimezone, getTimezone, setTimezone, timeInZone } from '../../lib/tz'
 import UpdateCommand from '../UpdateCommand'
+import { lsGet, lsSet } from '../../lib/storage'
 import { field, heading } from './ui'
 
 // Preferinţe: fus orar, accesibilitate (mod screen-reader), verificarea de versiune. Extras din
@@ -17,8 +18,8 @@ export default function PreferencesTab() {
   const { t } = useI18n()
   const [tz, setTz] = useState(getTimezone())
   const [clock, setClock] = useState(timeInZone(getTimezone()))
-  const [srMode, setSrMode] = useState(() => localStorage.getItem('wt_sr') === '1')
-  const [unicode11, setUnicode11] = useState(() => localStorage.getItem('wt_unicode11') === '1')
+  const [srMode, setSrMode] = useState(() => lsGet('wt_sr') === '1')
+  const [unicode11, setUnicode11] = useState(() => lsGet('wt_unicode11') === '1')
   const [upd, setUpd] = useState<UpdateInfo | null>(null)
   const [updBusy, setUpdBusy] = useState(false)
 
@@ -66,7 +67,7 @@ export default function PreferencesTab() {
           checked={srMode}
           onChange={(e) => {
             setSrMode(e.target.checked)
-            localStorage.setItem('wt_sr', e.target.checked ? '1' : '0')
+            lsSet('wt_sr', e.target.checked ? '1' : '0')
           }}
           className="mt-0.5 h-4 w-4 rounded accent-sky-600"
         />
@@ -86,7 +87,7 @@ export default function PreferencesTab() {
           checked={unicode11}
           onChange={(e) => {
             setUnicode11(e.target.checked)
-            localStorage.setItem('wt_unicode11', e.target.checked ? '1' : '0')
+            lsSet('wt_unicode11', e.target.checked ? '1' : '0')
           }}
           className="mt-0.5 h-4 w-4 rounded accent-sky-600"
         />
@@ -140,7 +141,11 @@ export default function PreferencesTab() {
           onClick={async () => {
             setUpdBusy(true)
             try { setUpd(await api<UpdateInfo>('/api/version/refresh', { method: 'POST' })) }
-            catch { /* mesajul de eroare vine din câmpul `error` al răspunsului următor */ }
+            catch (e) {
+              // cererea însăşi a picat (reţea, 5xx): fără asta rămânea afişată starea VECHE
+              // („la zi" de acum o săptămână) — exact ce nu vrem de la un check de update
+              setUpd((u) => (u ? { ...u, error: e instanceof Error ? e.message : String(e) } : u))
+            }
             finally { setUpdBusy(false) }
           }}
           disabled={updBusy}
@@ -152,7 +157,9 @@ export default function PreferencesTab() {
       {upd?.update_command && (
         <div className="mt-3">
           <p className="text-xs text-slate-500">{t('settings.update.howTo')}</p>
-          <UpdateCommand command={upd.update_command} />
+          <UpdateCommand command={upd.update_command}
+            status={{ error: upd.error, checking: updBusy,
+                      onRetry: () => { setUpdBusy(true); api<UpdateInfo>('/api/version/refresh', { method: 'POST' }).then(setUpd).catch(() => {}).finally(() => setUpdBusy(false)) } }} />
         </div>
       )}
     </div>

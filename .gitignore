@@ -22,3 +22,4 @@ AGENTS.md
 .cursor/
 .aider*
 docs/AUDIT-*.md
+docs/audit-*/

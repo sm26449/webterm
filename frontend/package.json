@@ -1,7 +1,7 @@
 {
   "name": "webterm-frontend",
   "private": true,
-  "version": "3.0.0",
+  "version": "3.1.0",
   "license": "MIT",
   "type": "module",
   "scripts": {
@@ -35,6 +35,7 @@
     "@vitejs/plugin-react": "^4.3.1",
     "autoprefixer": "^10.6.1",
     "eslint": "^9.39.5",
+    "eslint-plugin-jsx-a11y": "^6.10.2",
     "eslint-plugin-react-hooks": "^5.2.0",
     "eslint-plugin-react-refresh": "^0.5.7",
     "globals": "^17.12.0",

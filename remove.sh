@@ -134,7 +134,7 @@ VOLS=$(docker volume ls -q --filter "label=com.docker.compose.project=$PROJECT" 
 echo "  containers:  $($COMPOSE -f "$FILE" ps --services 2>/dev/null | tr '\n' ' ')"
 echo "  volumes:     ${VOLS:-<none>}   ← THE DATA (DB, vault key, transcripts)"
 echo "  systemd:     webterm-backup.{service,timer}, webterm-cert-check.{service,timer}"
-echo "  files:       $ROOT/{.env,docker-compose.prod.yml,*.sh,scripts/}"
+echo "  files:       $ROOT/{.env,secrets/,docker-compose.prod.yml,*.sh,scripts/}"
 if [ "$KEEP_BACKUPS" = 1 ]; then
   echo "  backups:     KEPT (/var/backups/webterm)"
 else
@@ -182,9 +182,31 @@ systemctl daemon-reload 2>/dev/null || true
 echo "  timers + units removed"
 
 say "Removing the images"
-docker images --format '{{.Repository}}:{{.Tag}}' | grep -E "^ghcr\.io/[^/]+/webterm:" \
-  | xargs -r docker rmi -f >/dev/null 2>&1 || true
-echo "  webterm images removed"
+# DOAR imaginile acestei instalări. Varianta veche făcea `docker rmi -f` pe ORICE
+# `ghcr.io/*/webterm:*` — pe o maşină cu două instalări (cazul pentru care există filtrele pe
+# proiect de mai sus) a doua rămânea cu imaginea de-tag-uită: containerul ei mergea, dar
+# `.prev-image`/rollback-ul ei nu mai găseau nimic (auditul de deploy, L3). Imaginile n-au
+# etichetă de proiect compose, deci filtrul e: repo-ul din WEBTERM_IMAGE (.env) + ţinta din
+# .prev-image, FĂRĂ `-f` şi sărind peste orice imagine pe care încă o foloseşte un container —
+# ale noastre au dispărut la `down`, deci ce a rămas e al altcuiva.
+IMG_ENV=$(grep -m1 '^WEBTERM_IMAGE=' .env 2>/dev/null | cut -d= -f2- || true)
+IMG_REPO=${IMG_ENV%%@*}; IMG_REPO=${IMG_REPO%:*}
+[ -n "$IMG_REPO" ] || IMG_REPO="ghcr.io/$(grep -m1 '^GHCR_USER=' .env 2>/dev/null | cut -d= -f2- || echo sm26449)/webterm"
+IN_USE=$(docker ps -aq 2>/dev/null | xargs -r docker inspect --format '{{.Image}}' 2>/dev/null || true)
+{
+  docker images "$IMG_REPO" --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -v '<none>'
+  docker images "$IMG_REPO" --digests --format '{{.Repository}}@{{.Digest}}' 2>/dev/null | grep -v '<none>'
+  [ -s .prev-image ] && head -1 .prev-image
+  [ -n "$IMG_ENV" ] && printf '%s\n' "$IMG_ENV"
+} | sort -u | while IFS= read -r ref; do
+  [ -n "$ref" ] || continue
+  id=$(docker image inspect --format '{{.Id}}' "$ref" 2>/dev/null) || continue
+  if printf '%s\n' "$IN_USE" | grep -qx "$id"; then
+    echo "  kept $ref (still used by a container of another install)"; continue
+  fi
+  docker rmi "$ref" >/dev/null 2>&1 && echo "  removed $ref"
+done
+echo "  images of $IMG_REPO removed (others untouched)"
 
 if [ "$KEEP_BACKUPS" != 1 ]; then
   say "Removing the archives"
@@ -193,7 +215,8 @@ if [ "$KEEP_BACKUPS" != 1 ]; then
 fi
 
 say "Removing the installation files"
-# .env holds the Cloudflare token and the setup token → we delete it rather than leave it behind
+# .env şi secrets/ ţin tokenul Cloudflare, tokenul de setup şi cheile Authentik → le ştergem,
+# nu le lăsăm în urmă (secrets/ e sub $ROOT, deci cade odată cu el)
 cd /
 rm -rf "$ROOT"
 echo "  $ROOT removed"

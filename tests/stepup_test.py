@@ -91,6 +91,11 @@ async def main():
         check("fs FĂRĂ step-up → 403 (H1)", r.status_code == 403)
         r = await c.post(f"/api/hosts/{hid}/run", json={"command": "id"})
         check("run FĂRĂ step-up → 403 (H1)", r.status_code == 403)
+        # audit 2026-10-04: lista de conexiuni DB (target_host:port, user, dbname) e aceeaşi clasă
+        # de informaţie ca lista de forward-uri — citirea cere step-up, ca restul operaţiilor
+        r = await c.get(f"/api/hosts/{hid}/connections")
+        check("connections FĂRĂ step-up → 403 (cod stepup.*, ca UI-ul să ştie ce ceremonie să facă)",
+              r.status_code == 403 and r.headers.get("x-webterm-error", "").startswith("stepup."))
 
         grant = security.issue_stepup_grant(uid, hid)
         r = await c.post(f"/api/hosts/{hid}/sessions", json={"stepup_grant": grant})
@@ -101,6 +106,9 @@ async def main():
         # ulterioare trec fără un grant nou, cât timp fereastra e validă.
         r = await c.get(f"/api/hosts/{hid}/fs?path=~")
         check("în fereastra de step-up → fs fără grant nou (nu 403)", r.status_code != 403)
+        r = await c.get(f"/api/hosts/{hid}/connections")
+        check("în fereastra de step-up → connections 200", r.status_code == 200
+              and r.json() == {"connections": []})
         r = await c.post(f"/api/hosts/{hid}/sessions", json={})
         check("în fereastra de step-up → sesiune fără grant nou (nu 403)", r.status_code != 403)
 

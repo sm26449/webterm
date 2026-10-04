@@ -34,8 +34,8 @@ Nothing that was running (processes, editors, command queues) has stopped.
 
 ## 3. Rollback to the previous version
 
-A deploy that CHANGES the pinned tag records its rollback point in
-`/opt/webterm/.prev-image` — redeploying the same tag has nothing new to write down, and
+A deploy that CHANGES the pinned image records its rollback point in
+`/opt/webterm/.prev-image` — redeploying the same image has nothing new to write down, and
 `make pull` does not go through `deploy.sh` at all, so it neither records a return point nor
 runs the health gate. Use `./upgrade.sh vX.Y.Z` or `./deploy.sh vX.Y.Z` when you want both. The rollback needs no network, CI, or GitHub —
 the old image already exists locally:
@@ -48,13 +48,62 @@ The script switches the `WEBTERM_IMAGE` pin in `.env`, restarts the container,
 and waits for the healthcheck verdict. It is reversible: a second
 `./rollback.sh` brings you back (a swap).
 
+**What the pin is.** `upgrade.sh` resolves the tag you asked for to the image's **digest**
+once, right after the pull, and from then on uses only that:
+`WEBTERM_IMAGE=ghcr.io/sm26449/webterm@sha256:…` in `.env`, the host-side kit
+(`deploy.sh`, `backup.sh`, `rollback.sh`, …) extracted from that digest, and the previous
+digest in `.prev-image`. The tag it came from is kept as a label in `WEBTERM_IMAGE_TAG`
+(what the UI shows) and `.prev-image-tag`. A tag is a moving pointer — this project has
+re-pointed release tags after a red CI — so a rollback to a *tag* could pull different bytes
+than the ones that were running; a rollback to a digest cannot. `deploy.sh` accepts
+`ghcr.io/…/webterm@sha256:…`, `sha256:…` or a tag (`vX.Y.Z`) as its argument.
+
 Manual rollback (if `.prev-image` is missing):
 
 ```bash
-docker images | grep webterm          # what tags exist locally
-sudo sed -i 's|^WEBTERM_IMAGE=.*|WEBTERM_IMAGE=ghcr.io/sm26449/webterm:vX.Y.Z|' /opt/webterm/.env
-cd /opt/webterm && sudo docker compose -f docker-compose.prod.yml up -d app
+docker images --digests | grep webterm   # what tags/digests exist locally
+# prefer the digest of the image you know was good:
+sudo ./deploy.sh ghcr.io/sm26449/webterm@sha256:<digest> --tag vX.Y.Z
+# (a tag works too: sudo ./deploy.sh vX.Y.Z — but it is whatever the registry serves NOW)
 ```
+
+### Verifying an image (digest + signature)
+
+Every image published by CI carries a SLSA provenance attestation, an SBOM and a **keyless
+cosign signature** over its digest (identity = the publishing workflow, issuer = GitHub
+Actions). To check one by hand:
+
+```bash
+# the digest a tag points at right now (compare with WEBTERM_IMAGE in .env)
+docker buildx imagetools inspect ghcr.io/sm26449/webterm:vX.Y.Z --format '{{.Manifest.Digest}}'
+# who signed it (needs cosign on the host)
+cosign verify \
+  --certificate-identity-regexp '^https://github.com/sm26449/webterm/.github/workflows/docker-publish.yml@refs/tags/v' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/sm26449/webterm@sha256:<digest>
+# provenance / SBOM
+docker buildx imagetools inspect ghcr.io/sm26449/webterm@sha256:<digest> --format '{{json .Provenance}}'
+docker buildx imagetools inspect ghcr.io/sm26449/webterm@sha256:<digest> --format '{{json .SBOM}}'
+```
+
+`upgrade.sh` runs the same `cosign verify` **before** it executes anything from the image, but
+only when `cosign` is installed **and** `WEBTERM_COSIGN_IDENTITY` is set in `.env` (the
+regexp above; `WEBTERM_COSIGN_ISSUER` defaults to GitHub's). Otherwise it prints one line —
+`signature verification SKIPPED (…)` — on every run; it never skips silently. Images published
+before the signing step existed will fail verification, so turn it on after the first signed
+release. Fork? Point the identity at your own workflow.
+
+### Secrets live in `/opt/webterm/secrets/`, not in `.env`
+
+Setup token, OIDC client secret, SMTP password, Cloudflare token and the Authentik keys are
+files (`secrets/<name>`, directory 0700) mounted read-only at `/run/secrets` — the compose
+file lists them. `deploy.sh` creates the directory, moves any such value it still finds in
+`.env` into its file and blanks the `.env` line; the first `upgrade.sh` after this change
+does that for you and says so. Why: Traefik discovers routes through docker-socket-proxy
+(`CONTAINERS=1`), and that API returns every container's environment — a value in `.env` is
+one `GET` away from the one process exposed to the internet; a file is not. Running
+`docker compose up` by hand before `deploy.sh` has ever run fails with "bind source path does
+not exist": run `./deploy.sh` once (or `mkdir -m 700 secrets && touch secrets/{…}`).
 
 ## 4. Quick diagnostics
 
@@ -159,8 +208,10 @@ Two things worth knowing before you need them:
 
 ## Deploy rules (so you never reach steps 1–4)
 
-1. Deploy with an explicit version: `cd /opt/webterm && sudo ./deploy.sh v2.0.0`
-   (reproducible pin + rollback point recorded automatically).
+1. Deploy with `cd /opt/webterm && sudo ./upgrade.sh vX.Y.Z` — it pins the **digest** the tag
+   resolves to, verifies the signature when configured, syncs the host-side kit from that
+   same digest and records the rollback point automatically. `deploy.sh` alone takes a tag or
+   a digest, but syncs nothing on the host.
 2. Do not deploy from inside a WebTerm session without a backup SSH connection
    open in another terminal, at least for frontend/gateway changes.
 3. Wait for CI to go green before deploying — since v1.0.14 "green" also

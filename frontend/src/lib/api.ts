@@ -27,6 +27,21 @@ export interface AppState {
   signing_locked?: boolean
   watermark?: WatermarkConfig | null
   command_guard?: CommandGuard | null
+  /** Pragul de idle-lock (secunde) pe hosturile cu 2FA; 0 = oprit. Cronometrul e PER sesiune
+      de terminal (îl resetează input-ul şi mesajul WS `touch`), nu per sesiune web — de aceea
+      `idle_lock_at` e null aici; momentul exact vine în `init`/`lock_at` pe WS-ul sesiunii. */
+  idle_lock_seconds?: number
+  idle_lock_at?: number | null
+  /** Alarme de host-key schimbat nerezolvate (SSH direct/jump) — persistente până la accept. */
+  hostkey_changed?: HostKeyAlarm[]
+}
+
+export interface HostKeyAlarm {
+  host_id: number
+  host_name: string
+  old_fp: string
+  new_fp: string
+  changed_at: number | null
 }
 
 export interface HostMetrics {
@@ -65,6 +80,8 @@ export interface SplitView {
 }
 
 export interface Host {
+  /** alarmă de host-key schimbat nerezolvată (SSH direct/jump); null când totul e în regulă */
+  hostkey_alarm?: { old_fp?: string; new_fp?: string; changed_at?: number } | null
   id: number
   name: string
   note: string
@@ -182,6 +199,13 @@ export function isSessionLive(s: Session, hosts?: Host[]): boolean {
   const h = hosts.find((x) => x.id === s.host_id)
   return h ? h.online !== false : alive
 }
+
+/* Ţintele EFEMERE („conectează o dată", fără salvare) trăiesc în `hosts` doar cât sesiunea
+   lor, apoi reaper-ul le şterge. Sidebar-ul le ascundea, dar Dashboard-ul, paleta şi
+   Fleet-run iterau `props.hosts` nefiltrat — deci un host „nesalvat" apărea în trei locuri,
+   cu contor cu tot. Un singur predicat, ca al patrulea consumator să nu reintroducă defectul.
+   Lista COMPLETĂ rămâne necesară pentru `host_id → Host` al sesiunilor (tab, titlu, culoare). */
+export const isEphemeralHost = (h: Host): boolean => !!h.ephemeral
 
 export interface Session {
   id: string
@@ -356,6 +380,14 @@ export async function api<T>(path: string, options: RequestInit = {}, _retried =
         window.location.href = '/api/oidc/login?intent=stepup&host_id=' + hostId
         return new Promise<T>(() => {})   // pagina navighează; promisiunea nu se mai rezolvă
       }
+    }
+    // 401 FĂRĂ cod = poarta generică `require_user` („not authenticated"): cookie-ul de
+    // sesiune a expirat / a fost revocat. Până acum nu-l trata nimeni: aplicaţia afla abia
+    // la următorul poll şi se înlocuia tăcut cu pagina de login. Semnalăm explicit; App
+    // arată motivul. 401-urile CU cod (`auth.wrongPassword` la schimbarea parolei etc.) nu
+    // sunt expirări şi rămân ale apelantului; la fel rutele de autentificare în sine.
+    if (res.status === 401 && !code && !/^\/api\/(login|setup|state|oidc)/.test(path)) {
+      window.dispatchEvent(new Event('wt-unauth'))
     }
     const isStepup = code ? code.startsWith('stepup.') : /2FA|passkey/i.test(detail)
     if (res.status === 403 && !_retried && stepupHandler

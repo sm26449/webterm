@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { lsGet, lsSet } from './storage'
 
 export type Theme = 'dark' | 'macos'
 /** ce a ales utilizatorul: o temă fixă sau „auto" (după setarea sistemului) */
@@ -8,7 +9,7 @@ const systemTheme = (): Theme =>
   window.matchMedia?.('(prefers-color-scheme: light)').matches ? 'macos' : 'dark'
 
 export function themePref(): ThemePref {
-  const v = localStorage.getItem('wt_theme')
+  const v = lsGet('wt_theme')
   return v === 'macos' || v === 'dark' || v === 'auto' ? v : 'dark'
 }
 
@@ -21,7 +22,7 @@ export function currentTheme(): Theme {
 
 /** Aplică preferința (fixă sau „auto") și o persistă. */
 export function applyTheme(pref: ThemePref): void {
-  localStorage.setItem('wt_theme', pref)
+  lsSet('wt_theme', pref)
   paintTheme(pref === 'auto' ? systemTheme() : pref)
   window.dispatchEvent(new Event('wt-theme'))
 }

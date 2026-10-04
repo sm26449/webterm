@@ -66,6 +66,27 @@ async def main():
     check("regex invalid e sărit, nu opreşte evaluarea",
           (await api._match_guard_rule("mkfs.ext4 /dev/sda"))["action"] == "block")
 
+    # ── F-09: bugetul de timp per regulă chiar limitează ──
+    # Cazul auditului (2026-10-04): `^(a+)+$` pe "a"*28+"!" (backtracking catastrofal).
+    # Măsurat în .venv (Python 3.12.3), aceeaşi maşină:
+    #   ÎNAINTE — `wait_for(to_thread(re.search…), 0.25)`: revenea după 12,92 s (firul nu poate
+    #             fi întrerupt; `wait_for` îl aşteaptă), cu un thread din pool-ul implicit ocupat;
+    #   DUPĂ    — worker separat omorât la buget: 0,31 s cap-coadă (0,25 buget + ~30 ms pornirea
+    #             worker-ului nou pentru regula următoare + rândul de audit); la salvare 0,29 s.
+    await db.execute("UPDATE app_settings SET value=? WHERE key='command_guard'",
+                     json.dumps({"enabled": True, "rules": [
+                         {"pattern": r"^(a+)+$", "action": "block"},
+                         {"pattern": r"a+!$", "action": "confirm"}]}))
+    t0 = time.monotonic()
+    hit = await api._match_guard_rule("a" * 28 + "!")
+    dt = time.monotonic() - t0
+    check("regulă patologică: revine în buget (%.2fs < 1.5s), nu după ~13 s" % dt, dt < 1.5)
+    check("…regula patologică e SĂRITĂ, iar următoarea se potriveşte (worker refăcut)",
+          hit is not None and hit["action"] == "confirm", str(hit))
+    row = await db.fetchone("SELECT count(*) n FROM audit_log WHERE actor='system:guardrail'")
+    check("…şi lasă urmă în jurnalul de audit, cu regula numită", row["n"] >= 1)
+    check("worker-ul nu rămâne viu între cereri", security._re_worker is None)
+
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=_ORIGIN) as c:
         await c.post("/api/setup", json={"email": "a@b.co", "password": "parolabuna1",
@@ -87,6 +108,21 @@ async def main():
         r = await c.post(f"/api/hosts/{hid}/run", json={"command": "uptime"})
         check("/run: comandă inofensivă neatinsă de guardrail",
               "guardrail" not in r.text, r.text[:80])
+
+        # F-09, bariera de la SALVARE: regula patologică e refuzată cu 400 (fuzz cu acelaşi buget);
+        # regulile implicite şi una polinomială (`.*.*=`) trec — bugetul nu respinge regex-uri reale.
+        t0 = time.monotonic()
+        r = await c.post("/api/settings/command-guard", json={"enabled": True, "rules": [
+            {"pattern": r"^(a+)+$", "action": "block"}]})
+        check("save: regulă cu backtracking catastrofal → 400 (%.2fs)" % (time.monotonic() - t0),
+              r.status_code == 400 and "too slow" in r.text, f"{r.status_code} {r.text[:80]}")
+        r = await c.post("/api/settings/command-guard", json={
+            "enabled": True, "rules": api.COMMAND_GUARD_DEFAULT["rules"]
+            + [{"pattern": r".*.*=.*", "action": "confirm"}]})
+        check("save: regulile implicite + una polinomială trec (200)", r.status_code == 200, r.text[:80])
+        r = await c.post("/api/settings/command-guard", json={"enabled": True, "rules": [
+            {"pattern": "[nevalid(", "action": "block"}]})
+        check("save: regex invalid → tot 400", r.status_code == 400)
 
     # ── alerte: host căzut / revenit, o singură dată per tranziţie ──
     sent = []
@@ -155,6 +191,35 @@ async def main():
               posted.get("subject") == "Test", str(posted))
     finally:
         email_alerts._post_webhook = orig_post
+
+    # ── starea livrării (UX §7): ultimul email trimis / eşuat e PERSISTAT, nu doar logat ──
+    for k, v in (("smtp_host", "smtp.example.com"), ("smtp_to", "ops@example.com"),
+                 ("smtp_from", "wt@example.com")):
+        await db.execute("INSERT INTO app_settings(key, value) VALUES(?, ?) "
+                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value", k, v)
+    orig_send = email_alerts._send_blocking
+
+    def _refused(cfg, subject, body):
+        raise ConnectionRefusedError("connection refused")
+    email_alerts._send_blocking = _refused
+    try:
+        email_alerts._fire("Alertă care pică", "corp")
+        await asyncio.sleep(0.1)
+        st = await email_alerts.alert_status()
+        f = st["alert_email_last_failed"]
+        check("email eşuat → alert_email_last_sent gol, last_failed cu subiect + eroare",
+              st["alert_email_last_sent"] is None and f and f["subject"] == "Alertă care pică"
+              and "refused" in f["error"], str(st))
+        email_alerts._send_blocking = lambda cfg, subject, body: None
+        email_alerts._fire("Alertă care merge", "corp")
+        await asyncio.sleep(0.1)
+        st = await email_alerts.alert_status()
+        s_ = st["alert_email_last_sent"]
+        check("email trimis → alert_email_last_sent cu subiect + ts, eşecul vechi rămâne istoric",
+              s_ and s_["subject"] == "Alertă care merge" and s_["ts"] > f["ts"]
+              and st["alert_email_last_failed"]["ts"] == f["ts"], str(st))
+    finally:
+        email_alerts._send_blocking = orig_send
 
     await db.close()
     print(f"\n{ok}/{total} passed")

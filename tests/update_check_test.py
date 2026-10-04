@@ -255,6 +255,93 @@ async def main():
                                          or "UPDATE_COMMAND" in ln)]
         check("%s nu mai recomandă deploy.sh pentru upgrade" % rel, not bad, str(bad[:2]))
 
+    # ── paritate anti-rollback gateway ↔ agent (audit 2026-10-04, LOW #5) ──────────
+    # Acelaşi regex strict ca `_content_version` din agent: ce nu se parsează = REFUZ, nu „unknown".
+    from app import core as _core
+    cases = {"AGENT_VERSION = 53\n": 53, "AGENT_VERSION=53\n": 53,
+             "AGENT_VERSION = 53  # bumped\n": 53, "x = 1\nAGENT_VERSION = 54\n": 54,
+             "AGENT_VERSION: int = 53\n": None, 'AGENT_VERSION = int("53")\n': None,
+             "  AGENT_VERSION = 53\n": None, "AGENT_VERSION = 53 x\n": None, "": None, None: None}
+    for src, want in cases.items():
+        got = _core.agent_source_version(src)
+        check("agent_source_version(%r) == %r" % (src, want), got == want, str(got))
+    real = _core.agent_source_version(config.AGENT_FILE.read_text())
+    check("ptyd.py din repo se parsează cu regexul strict", isinstance(real, int) and real > 0, str(real))
+    check("regexul e exact cel al agentului",
+          _core.AGENT_VERSION_RE.pattern == r"^AGENT_VERSION\s*=\s*(\d+)\s*(#.*)?$")
+
+    class _Fake(_core.AgentConnection):
+        """Agent fals: înregistrează op-urile cerute, răspunde după scenariu."""
+        def __init__(self, host_id, ver, reply=None):
+            self.host_id = host_id
+            self.agent_version = ver
+            self.calls = []
+            self.reply = reply or {"ok": True}
+
+        async def request(self, op, **kw):
+            self.calls.append(op)
+            return self.reply
+
+    hid = await db.execute(
+        "INSERT INTO hosts(name, token_hash, token_encrypted, created) VALUES(?,?,?,?)",
+        "parity", "th-parity", "te", 0.0)
+    saved = dict(_core.agent_expected())
+    try:
+        # sursă prezentă, versiune neparsabilă → nu împingem, marcăm o singură dată
+        _core._agent_cache.update(version=None, source="AGENT_VERSION: int = 1\n")
+        fk = _Fake(hid, 1)
+        await _core.maybe_upgrade_agent(fk)
+        await _core.maybe_upgrade_agent(fk)
+        check("versiune neparsabilă pe gateway → NU se împinge update", "update" not in fk.calls, str(fk.calls))
+        row = await db.fetchone("SELECT update_blocked FROM hosts WHERE id=?", hid)
+        check("hostul e marcat gateway_badversion (vizibil în UI)",
+              row["update_blocked"] == "gateway_badversion", str(row["update_blocked"]))
+        evs = await db.fetchall("SELECT reason, detail FROM agent_events WHERE host_id=? AND event='update_refused'", hid)
+        check("un singur eveniment update_refused/gateway_badversion (nu la fiecare hello)",
+              len(evs) == 1 and evs[0]["reason"] == "gateway_badversion" and "AGENT_VERSION" in evs[0]["detail"],
+              str([tuple(e) for e in evs]))
+        # butonul manual refuză la fel, cu motiv explicit
+        _core.sources[hid] = fk
+        try:
+            await _core.force_update_agent(hid)
+            forced = "no error"
+        except RuntimeError as e:
+            forced = str(e)
+        finally:
+            _core.sources.pop(hid, None)
+        check("force_update_agent refuză cu motiv explicit", "AGENT_VERSION" in forced, forced)
+        check("nici forţat nu s-a trimis `update`", "update" not in fk.calls, str(fk.calls))
+
+        # reparaţie: versiunea se parsează, agentul e la zi → marcajul cade
+        _core._agent_cache.update(saved)
+        fk.agent_version = saved["version"]
+        await _core.maybe_upgrade_agent(fk)
+        row = await db.fetchone("SELECT update_blocked FROM hosts WHERE id=?", hid)
+        check("după reparaţie marcajul dispare", row["update_blocked"] is None, str(row["update_blocked"]))
+
+        # cod de refuz INVENTAT de agent (cu ANSI): hint generic, text igienizat în jurnal
+        fk2 = _Fake(hid, 1, reply={"ok": False, "code": "downgrade\x1b[2J\r\n"})
+        await _core.maybe_upgrade_agent(fk2)
+        ev = await db.fetchone(
+            "SELECT reason, detail FROM agent_events WHERE host_id=? AND event='update_refused' ORDER BY id DESC", hid)
+        check("codul inventat ajunge în jurnal igienizat (fără ESC/CR)",
+              ev is not None and ev["reason"] == "downgrade", str(tuple(ev) if ev else None))
+        check("codul inventat NU primeşte hint-ul de anti-rollback (listă albă)",
+              ev is not None and "OLDER" not in ev["detail"], str(ev["detail"] if ev else None))
+        await _core.maybe_upgrade_agent(_Fake(hid, saved["version"]))   # curăţă marcajul
+    finally:
+        _core._agent_cache.update(saved)
+        _core.update_blocked.pop(hid, None)
+        await db.execute("DELETE FROM hosts WHERE id=?", hid)
+
+    check("update_downgrade → hint de anti-rollback", "anti-rollback" in _core._refusal_hint("update_downgrade"))
+    check("update_unsigned → hint de reinstalare", "reinstall" in _core._refusal_hint("update_unsigned"))
+    check("cod necunoscut → hint generic", _core._refusal_hint("signature") == _core._refusal_hint("zzz"))
+    txt = _core._agent_text("abc\x1b[31m\r\n" + "x" * 500)
+    check("_agent_text scoate controalele şi taie la 200",
+          "\x1b" not in txt and "\r" not in txt and len(txt) <= 200 and txt.startswith("abcx"), repr(txt[:20]))
+    check("_agent_text pe non-şir → gol", _core._agent_text(None) == "" and _core._agent_text(5) == "")
+
     print(f"\n{ok}/{total} passed")
     return ok == total
 

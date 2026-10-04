@@ -3,6 +3,7 @@
    fără a modifica configurarea serverului. */
 
 import { detectLang } from './i18n'
+import { lsGet, lsSet } from './storage'
 
 /* Locale for date/time formatting. It used to be hardcoded to 'ro-RO' in three places,
    which meant an English UI still printed "07 aug." — the language switch moved the
@@ -53,11 +54,22 @@ export function browserTimezone(): string {
 }
 
 export function getTimezone(): string {
-  return localStorage.getItem('wt_tz') || browserTimezone()
+  return lsGet('wt_tz') || browserTimezone()
 }
 
 export function setTimezone(tz: string): void {
-  localStorage.setItem('wt_tz', tz)
+  lsSet('wt_tz', tz)
+}
+
+/* Doar ora (HH:MM), în limba UI şi fusul ales — pentru watermark şi alte locuri unde data e
+   deja cunoscută. Acelaşi fallback ca `fmtTs`: mai bine o oră brută decât un ecran gol. */
+export function fmtTime(epochSeconds: number): string {
+  try {
+    return new Intl.DateTimeFormat(uiLocale(), { timeZone: getTimezone(), hour: '2-digit', minute: '2-digit' })
+      .format(new Date(epochSeconds * 1000))
+  } catch {
+    return new Date(epochSeconds * 1000).toISOString().slice(11, 16)
+  }
 }
 
 export function allTimezones(): string[] {

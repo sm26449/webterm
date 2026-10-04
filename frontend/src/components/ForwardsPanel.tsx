@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { errText, api, Host, PortForward, withStepup } from '../lib/api'
 import { useI18n } from '../lib/i18n'
+import { useDrawer } from '../lib/useDrawer'
 import { LinkIcon, PencilIcon, PlusIcon, RefreshIcon, TrashIcon } from './Icons'
 import { copyText } from '../lib/clipboard'
 
@@ -29,9 +30,11 @@ export default function ForwardsPanel(props: {
   const [fApp, setFApp] = useState('')     // tip aplicaţie (wizard): '' = forward simplu
   const [busy, setBusy] = useState(false)
   const [opening, setOpening] = useState<number | null>(null)
+  const asideRef = useRef<HTMLElement>(null)
+  const drawer = useDrawer(asideRef, props.onClose, !props.embed)
   const asideCls = props.embed
     ? 'flex h-full w-full min-h-0 flex-col bg-ink-900'
-    : 'fixed inset-y-0 right-0 z-40 flex w-[90vw] max-w-sm flex-col border-l border-ink-800 bg-ink-900 shadow-2xl'
+    : 'fixed inset-y-0 right-0 z-40 flex w-[90vw] max-w-sm flex-col border-l border-ink-800 bg-ink-900 shadow-2xl outline-none'
     + (props.overlay ? '' : ' sm:static sm:z-auto sm:w-80 sm:max-w-none sm:shrink-0 sm:shadow-none')
   const scrimCls = props.embed ? 'hidden' : 'fixed inset-0 z-30 bg-black/60' + (props.overlay ? '' : ' sm:hidden')
 
@@ -48,7 +51,10 @@ export default function ForwardsPanel(props: {
   const load = useCallback(async () => {
     setError('')
     try {
-      const list = await api<PortForward[]>(`/api/hosts/${props.host.id}/forwards`)
+      // listarea e gardată de step-up pe host 2FA (F-06): fără `withStepup` panoul rămânea
+      // pe un 403 sec în loc să ceară passkey-ul
+      const list = await withStepup(props.host.id, () =>
+        api<PortForward[]>(`/api/hosts/${props.host.id}/forwards`))
       setForwards(list)
       list.filter((f) => f.enabled).forEach(probe)
     } catch (e) {
@@ -197,15 +203,25 @@ export default function ForwardsPanel(props: {
     </header>
   )
 
+  // starea sondei: bulină + TEXT cu aceeaşi semantică (wt-good/-danger/-warn) lângă ţintă —
+  // culoarea singură nu ajunge la daltonişti şi nici la cititorul de ecran (WCAG 1.4.1)
+  const probeOf = (f: PortForward): ProbeState | 'off' => {
+    if (f.scheme === 'telnet') return probes[f.id] ?? 'off'
+    if (!f.enabled) return 'off'
+    return probes[f.id] ?? 'checking'
+  }
   const dotColor = (f: PortForward): string => {
-    if (!f.enabled) return 'bg-slate-600'
-    const s = probes[f.id]
-    return s === 'up' ? 'bg-emerald-500' : s === 'down' ? 'bg-rose-500' : 'bg-amber-500'
+    const s = probeOf(f)
+    return s === 'up' ? 'bg-emerald-500' : s === 'down' ? 'bg-rose-500' : s === 'checking' ? 'bg-amber-500' : 'bg-slate-600'
+  }
+  const probeTone = (f: PortForward): string => {
+    const s = probeOf(f)
+    return s === 'up' ? 'wt-good' : s === 'down' ? 'wt-danger' : s === 'checking' ? 'wt-warn' : 'text-slate-500'
   }
   const dotTitle = (f: PortForward): string => {
-    if (!f.enabled) return t('forwards.probe.off')
-    const s = probes[f.id]
-    return s === 'up' ? t('forwards.probe.up') : s === 'down' ? t('forwards.probe.down') : t('forwards.probe.checking')
+    const s = probeOf(f)
+    return s === 'up' ? t('forwards.probe.up') : s === 'down' ? t('forwards.probe.down')
+      : s === 'checking' ? t('forwards.probe.checking') : t('forwards.probe.off')
   }
 
   // adresa publică e <slug>.<domeniu>; slug-ul se derivă din nume ca pe server
@@ -218,15 +234,16 @@ export default function ForwardsPanel(props: {
   return (
     <>
       <div className={scrimCls} onClick={props.onClose} aria-hidden="true" />
-      <aside aria-label={t('forwards.panelAria')} className={asideCls}>
+      {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Escape pe regiunea drawer-ului (vezi useDrawer): intenţionat pe <aside>, nu pe document */}
+      <aside ref={asideRef} aria-label={t('forwards.panelAria')} className={asideCls} onKeyDown={drawer.onKeyDown}>
         {header}
 
         <div className="flex items-center gap-2 border-b border-ink-800 px-3 py-1.5">
-          <button onClick={() => (adding ? closeForm() : openAdd())}
-            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[12px] font-medium text-sky-400 hover:bg-ink-800">
+          <button onClick={() => (adding ? closeForm() : openAdd())} aria-expanded={adding}
+            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[12px] font-medium wt-link hover:bg-ink-800">
             <PlusIcon /> {t('forwards.add')}
           </button>
-          <button onClick={load} title={t('forwards.refresh')} className="wt-touch ml-auto rounded px-1.5 text-slate-400 hover:bg-ink-800"><RefreshIcon /></button>
+          <button onClick={load} title={t('forwards.refresh')} aria-label={t('forwards.refresh')} className="wt-touch ml-auto rounded px-1.5 text-slate-400 hover:bg-ink-800"><RefreshIcon /></button>
         </div>
 
         {/* wizard: apps cunoscute cu un click — presetează portul/scheme şi le marchează ca „app"
@@ -254,7 +271,10 @@ export default function ForwardsPanel(props: {
         )}
 
         {(adding || editing) && (
-          <div className="flex flex-col gap-2 border-b border-ink-800 bg-ink-800/40 px-3 py-3 text-[12px]">
+          // Escape în formular închide FORMULARUL, nu tot panoul (nu urcă la drawer)
+          // eslint-disable-next-line jsx-a11y/no-static-element-interactions -- doar Escape, pe containerul câmpurilor
+          <div className="flex flex-col gap-2 border-b border-ink-800 bg-ink-800/40 px-3 py-3 text-[12px]"
+            onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); closeForm() } }}>
             <input autoFocus value={fLabel} onChange={(e) => setFLabel(e.target.value)} placeholder={t('forwards.namePlaceholder')}
               className="rounded bg-ink-800 px-2 py-1 text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500" />
             {fScheme === 'telnet' ? (
@@ -330,9 +350,12 @@ export default function ForwardsPanel(props: {
             return (
             <div key={f.id} className="flex flex-col gap-2 rounded-xl border border-ink-700/70 bg-ink-800/40 p-3">
               <div className="flex items-start gap-2.5">
+                {/* butonul de re-sondare: ţintă de 24px în jurul bulinei de 10px (era 10×10) */}
                 <button onClick={() => (isTelnet || f.enabled) && probe(f)} title={isTelnet ? t('forwards.checkAccess') : dotTitle(f)}
-                  className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${isTelnet ? (probes[f.id] === 'up' ? 'bg-emerald-500' : probes[f.id] === 'down' ? 'bg-rose-500' : 'bg-slate-600') : dotColor(f)}`}
-                  aria-label={dotTitle(f)} />
+                  className="-m-1.5 grid h-6 w-6 shrink-0 place-items-center rounded-full hover:bg-ink-700"
+                  aria-label={`${t('forwards.checkAccess')} — ${dotTitle(f)}`}>
+                  <span className={`h-2.5 w-2.5 rounded-full ${dotColor(f)}`} aria-hidden="true" />
+                </button>
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-1.5">
                     <span className="truncate text-[13.5px] font-semibold text-slate-200">{f.label}</span>
@@ -345,13 +368,16 @@ export default function ForwardsPanel(props: {
                   {isTelnet
                     ? <div className="truncate text-[11.5px] text-slate-500">{t('forwards.telnetSubtitle')}</div>
                     : <div className="truncate font-mono text-[11.5px] wt-link" title={f.url}>{urlHost(f)}</div>}
-                  <div className="truncate font-mono text-[11px] text-slate-500">→ {f.target_host}:{f.target_port} · {f.scheme}</div>
+                  <div className="truncate font-mono text-[11px] text-slate-500">
+                    → {f.target_host}:{f.target_port} · {f.scheme} · <span className={probeTone(f)}>{dotTitle(f)}</span>
+                  </div>
                   {f.description && <div className="mt-0.5 line-clamp-2 text-[11.5px] text-slate-500">{f.description}</div>}
                 </div>
                 {!isTelnet && (
-                  <button onClick={() => togglePromote(f)}
+                  <button onClick={() => togglePromote(f)} aria-pressed={!!f.app_type}
                     title={f.app_type ? t('forwards.demoteApp') : t('forwards.promoteApp')}
-                    className={`shrink-0 rounded px-1 hover:bg-ink-700 ${f.app_type ? 'text-amber-300' : 'text-slate-500 hover:text-amber-300'}`}>
+                    aria-label={f.app_type ? t('forwards.demoteApp') : t('forwards.promoteApp')}
+                    className={`grid h-6 w-6 shrink-0 place-items-center rounded hover:bg-ink-700 ${f.app_type ? 'wt-warn' : 'text-slate-500 hover:text-amber-300'}`}>
                     {f.app_type ? '★' : '☆'}
                   </button>
                 )}
@@ -369,14 +395,14 @@ export default function ForwardsPanel(props: {
                   ) : (
                     <button onClick={() => toggle(f)} title={t('forwards.startTitle')} className="rounded px-1.5 py-0.5 text-[11px] text-slate-400 hover:bg-ink-800">{t('forwards.start')}</button>
                   )}
-                  <button onClick={() => copyLink(f)} title={t('forwards.copyLink')} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-slate-200">
+                  <button onClick={() => copyLink(f)} title={t('forwards.copyLink')} aria-label={`${t('forwards.copyLink')} ${f.label}`} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-slate-200">
                     {copied === f.id ? <span className="text-[11px] wt-good">✓</span> : <LinkIcon />}
                   </button>
-                  {f.enabled && <button onClick={() => toggle(f)} title={t('forwards.stop')} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-amber-300 text-[11px]">⏸</button>}
+                  {f.enabled && <button onClick={() => toggle(f)} title={t('forwards.stop')} aria-label={`${t('forwards.stop')} ${f.label}`} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-amber-300 text-[11px]">⏸</button>}
                 </>)}
                 <span className="ml-auto flex items-center gap-0.5">
-                  <button onClick={() => openEdit(f)} title={t('forwards.edit')} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-slate-200"><PencilIcon /></button>
-                  <button onClick={() => setConfirmDel(f)} title={t('forwards.delete')} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-rose-300"><TrashIcon /></button>
+                  <button onClick={() => openEdit(f)} title={t('forwards.edit')} aria-label={`${t('forwards.edit')} ${f.label}`} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-slate-200"><PencilIcon /></button>
+                  <button onClick={() => setConfirmDel(f)} title={t('forwards.delete')} aria-label={`${t('forwards.delete')} ${f.label}`} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-rose-300"><TrashIcon /></button>
                 </span>
               </div>
             </div>

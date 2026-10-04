@@ -18,6 +18,7 @@ cu cache). Validarea criptografică o face PyJWT + cryptography (deja dependenţ
 import base64
 import hashlib
 import json
+import logging
 import os
 import time
 import urllib.request
@@ -28,6 +29,8 @@ import jwt
 from jwt import PyJWKClient
 
 from . import config
+
+log = logging.getLogger("webterm")
 
 # tranzacţii OIDC în zbor (state → context), server-side, cu TTL. Ca grant-urile de step-up:
 # gateway-ul e o singură instanţă, deci un dict e de-ajuns; se pierde la restart (fereastră
@@ -113,11 +116,43 @@ def begin(intent: str = "login", host_id: Optional[int] = None) -> str:
     }
     if intent == "stepup":
         params["prompt"] = "login"     # step-up = re-auth proaspăt la IdP
+        # OIDC Core §3.1.2.1: cu `max_age` IdP-ul TREBUIE să re-autentifice dacă sesiunea lui e
+        # mai veche de atât şi să întoarcă `auth_time` în id_token — adică ne dă şi ce verificăm
+        # în `complete()`. `prompt=login` singur e o rugăminte fără dovadă (audit 2026-10-04).
+        params["max_age"] = "0"
     return discovery()["authorization_endpoint"] + "?" + urlencode(params)
 
 
 class OidcError(Exception):
     pass
+
+
+_AUTH_TIME_LEEWAY = 30          # acelaşi ceas-leeway ca la exp/iat
+_auth_time_missing_logged = False
+
+
+def _check_stepup_auth_time(auth_time, requested_at: float) -> None:
+    """Step-up = al doilea factor pe un host marcat 2FA, deci id_token-ul trebuie să ateste o
+    autentificare FĂCUTĂ DUPĂ ce am cerut-o, nu o sesiune IdP veche refolosită. Cu `max_age`
+    în cerere, `auth_time` e obligatoriu după spec — îl comparăm cu momentul `begin()`.
+
+    Compromis asumat când `auth_time` LIPSEŞTE: acceptăm (cu un WARNING, o singură dată).
+    Alternativa — refuz — ar închide step-up-ul pentru toţi userii SSO ai unui IdP care nu emite
+    claim-ul (configurare de scope/claim), fără ca adminul să afle de ce; `prompt=login` rămâne
+    onorat de IdP-urile standard (Authentik îl respectă), iar logul spune exact ce lipseşte.
+    Când claim-ul EXISTĂ, e verificat strict: un step-up „gratis" pe o sesiune veche e refuzat."""
+    global _auth_time_missing_logged
+    if auth_time is None:
+        if not _auth_time_missing_logged:
+            _auth_time_missing_logged = True
+            log.warning("SSO step-up: the IdP did not return `auth_time` although max_age=0 was "
+                        "requested — accepting on `prompt=login` alone; configure the IdP to emit "
+                        "auth_time for a verifiable step-up")
+        return
+    if isinstance(auth_time, bool) or not isinstance(auth_time, (int, float)):
+        raise OidcError("auth_time is not a number")
+    if auth_time < requested_at - _AUTH_TIME_LEEWAY:
+        raise OidcError("stale authentication: auth_time predates the step-up request")
 
 
 def _claims_groups(claims: dict) -> list:
@@ -170,6 +205,8 @@ def complete(state: str, code: str) -> dict:
 
     if claims.get("nonce") != txn["nonce"]:
         raise OidcError("nonce mismatch")
+    if txn["intent"] == "stepup":
+        _check_stepup_auth_time(claims.get("auth_time"), txn["ts"])
 
     groups = _claims_groups(claims)
     if config.OIDC_ALLOWED_GROUPS and not (set(groups) & set(config.OIDC_ALLOWED_GROUPS)):

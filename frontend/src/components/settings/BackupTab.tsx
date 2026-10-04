@@ -3,7 +3,8 @@ import { api, ApiError, errText } from '../../lib/api'
 import { useI18n } from '../../lib/i18n'
 import { fmtTs } from '../../lib/tz'
 import { copyText } from '../../lib/clipboard'
-import { downloadBlob, field, heading } from './ui'
+import { btn, downloadBlob, field, heading } from './ui'
+import { useConfirm } from '../../lib/confirm'
 import { askSecret } from '../../lib/secretPrompt'
 
 // Backup & restore: arhivă criptată descărcabilă, backup automat programat, copii stocate pe
@@ -11,6 +12,7 @@ import { askSecret } from '../../lib/secretPrompt'
 // Extras din SettingsModal ca tab de sine stătător (îşi ţine starea, se încarcă la montare).
 export default function BackupTab(props: { onAccountChanged: () => void }) {
   const { t } = useI18n()
+  const { confirm } = useConfirm()   // nu `window.confirm`: vezi lib/confirm.tsx (temă, focus-trap, nu blochează pagina)
 
   // ── Backup off-host în cloud (Google Drive / Dropbox), conectat prin OAuth din UI ──
   type CloudProvider = { id: string; label: string; console_url: string; app_type: string }
@@ -18,6 +20,7 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
     provider: string; configured: boolean; connected: boolean; has_passphrase: boolean
     account: string; keep: number; include_transcripts: boolean
     last: { ts?: number; ok?: boolean; name?: string; size?: number; error?: string }
+    last_ok: number                       // ts al ultimei copii off-host REUŞITE (0 = niciodată)
     redirect_uri: string; providers: CloudProvider[]
     direct: {
       host: string; port: number; user: string; path: string
@@ -173,6 +176,12 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
     schedule: 'off' | 'daily' | 'weekly'
     include_transcripts: boolean
     last_scheduled: number
+    // starea scheduler-ului, persistată de gateway: ultima ÎNCERCARE (reuşită sau nu), ultimul
+    // eşec (golit la următorul succes complet) şi următoarea scadenţă — înainte un backup
+    // programat care pica zile la rând era complet invizibil aici (audit UX §7.f1)
+    last_run: { ts: number; ok: boolean; name: string; error: string } | null
+    last_error: { ts: number; error: string; stage?: 'snapshot' | 'cloud' } | null
+    next_due: number | null
     backups: StoredBackup[]
     retention_days: number
   }
@@ -225,7 +234,11 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
   }
 
   async function deleteStored(name: string) {
-    if (!confirm(t('settings.backup.deleteConfirm', { name }))) return
+    if (!(await confirm({
+      title: t('settings.backup.deleteTitle'),
+      message: t('settings.backup.deleteConfirm', { name }),
+      confirmLabel: t('settings.backup.deleteAction'), danger: true,
+    }))) return
     setBkErr('')
     try {
       await api(`/api/backup/stored/${encodeURIComponent(name)}`, { method: 'DELETE' })
@@ -264,7 +277,13 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
     setBkErr(''); setBkMsg('')
     if (!restoreFile) { setBkErr(t('settings.backup.chooseFile')); return }
     if (restorePass.length < 8) { setBkErr(t('settings.backup.enterRestorePass')); return }
-    if (!confirm(t('settings.backup.restoreConfirm'))) return
+    // ce anume restaurezi, în textul de confirmare: numele, mărimea şi data fişierului (din
+    // obiectul File — arhiva e criptată, deci fără parolă nu putem citi mai mult de atât)
+    if (!(await confirm({
+      title: t('settings.backup.restoreTitle'),
+      message: restorePreview(restoreFile) + '\n\n' + t('settings.backup.restoreConfirm'),
+      confirmLabel: t('settings.backup.restoreAndRestart'), danger: true,
+    }))) return
     setBkBusy(true)
     try {
       const res = await fetch('/api/backup/restore', {
@@ -288,6 +307,10 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
       setBkErr(errText(e, t) || t('settings.backup.restoreFailed'))
     } finally { setBkBusy(false) }
   }
+
+  const restorePreview = (f: File) => t('settings.backup.restorePreview', {
+    name: f.name, size: (f.size / 1024).toFixed(0), when: fmtTs(Math.floor(f.lastModified / 1000)),
+  })
 
   // vizitarea secţiunii Backup „vede" notificarea (punctul de pe rotiţa Setări) → o stinge la
   // montarea tab-ului, nu doar la descărcare (altfel rămânea aprinsă dacă ştergeai fără să descarci)
@@ -321,11 +344,11 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
         </label>
         <div className="flex items-center gap-2">
           <button disabled={bkBusy} onClick={downloadBackupNow}
-            className="rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-50">
+            className={btn.primary}>
             {bkBusy ? t('settings.backup.preparing') : t('settings.downloadEncryptedBackup')}
           </button>
-          {bkMsg && <span className="text-sm wt-good">{bkMsg}</span>}
-          {bkErr && <span className="text-sm wt-danger">{bkErr}</span>}
+          <span role="status" className={bkMsg ? 'text-sm wt-good' : 'sr-only'}>{bkMsg}</span>
+          <span role="alert" className={bkErr ? 'text-sm wt-danger' : 'sr-only'}>{bkErr}</span>
         </div>
       </div>
 
@@ -354,6 +377,40 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
         </label>
       )}
 
+      {/* starea scheduler-ului: ultima rulare, eroarea persistentă (roşu), scadenţa, copia off-host */}
+      {bkStatus && (bkStatus.schedule !== 'off' || bkStatus.last_run || bkStatus.last_error) && (
+        <div className="mt-3 flex flex-col gap-1 rounded-lg bg-ink-800/60 px-3 py-2 text-xs ring-1 ring-ink-700" data-testid="backup-sched-status">
+          {bkStatus.last_run ? (
+            <span className={bkStatus.last_run.ok ? 'text-slate-400' : 'wt-danger'}>
+              {bkStatus.last_run.ok
+                ? t('settings.backup.lastRunOk', { when: fmtTs(bkStatus.last_run.ts), name: bkStatus.last_run.name })
+                : t('settings.backup.lastRunFailed', { when: fmtTs(bkStatus.last_run.ts) })}
+            </span>
+          ) : (
+            <span className="text-slate-500">{t('settings.backup.neverRan')}</span>
+          )}
+          {bkStatus.last_error && (
+            <span className="wt-danger break-words" role="alert">
+              {t('settings.backup.lastError', { when: fmtTs(bkStatus.last_error.ts), error: bkStatus.last_error.error })}
+            </span>
+          )}
+          {bkStatus.schedule !== 'off' && bkStatus.next_due != null && (
+            <span className="text-slate-500">
+              {bkStatus.next_due <= Date.now() / 1000
+                ? t('settings.backup.dueNow')
+                : t('settings.backup.nextDue', { when: fmtTs(bkStatus.next_due) })}
+            </span>
+          )}
+          <span className={cloud?.connected && !cloud.last_ok ? 'wt-warn' : 'text-slate-500'}>
+            {cloud?.connected
+              ? t('settings.backup.cloudLine', { dest: cloud.account || cloud.provider }) + ' · ' + (cloud.last_ok
+                ? t('settings.backup.cloudLastGood', { when: fmtTs(cloud.last_ok) })
+                : t('settings.backup.cloudNever'))
+              : t('settings.backup.cloudNone')}
+          </span>
+        </div>
+      )}
+
       {/* backup-uri stocate pe server */}
       {bkStatus && bkStatus.backups.length > 0 && (
         <div className="mt-3 space-y-1">
@@ -378,8 +435,8 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
       {/* stare curentă: prima linie pe care o citește omul când deschide secțiunea */}
       <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
         <span className={`rounded-full px-2 py-0.5 ring-1 ${
-          cloud?.connected ? 'bg-emerald-500/10 text-emerald-300 ring-emerald-500/30'
-            : cloud?.configured ? 'bg-amber-500/10 text-amber-300 ring-amber-500/30'
+          cloud?.connected ? 'wt-good bg-emerald-500/10 ring-emerald-500/30'
+            : cloud?.configured ? 'wt-warn bg-amber-500/10 ring-amber-500/30'
               : 'bg-ink-800 text-slate-400 ring-ink-700'}`}>
           {cloud?.connected ? t('settings.cloud.connectedAs', { account: cloud.account || '—' })
             : cloud?.configured ? t('settings.cloud.notConnected')
@@ -511,8 +568,8 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
             {t('settings.cloud.refresh')}
           </button>
         </div>
-        {cloudMsg && <span className="text-sm wt-good">{cloudMsg}</span>}
-        {cloudErr && <span className="text-sm wt-danger">{cloudErr}</span>}
+        <span role="status" className={cloudMsg ? 'text-sm wt-good' : 'sr-only'}>{cloudMsg}</span>
+        <span role="alert" className={cloudErr ? 'text-sm wt-danger' : 'sr-only'}>{cloudErr}</span>
       </form>
       )}
 
@@ -574,7 +631,7 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
               </button>
               {directForm.hostkey
                 ? <span className="text-xs wt-good">{t('settings.direct.hostkeyPinned')}</span>
-                : <span className="text-xs text-amber-400">{t('settings.direct.hostkeyNeeded')}</span>}
+                : <span className="text-xs wt-warn">{t('settings.direct.hostkeyNeeded')}</span>}
             </div>
             {probeInfo && (
               <p className="mt-2 break-all text-xs text-slate-400">
@@ -635,8 +692,8 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
             {t('settings.cloud.refresh')}
           </button>
         </div>
-        {cloudMsg && <span className="text-sm wt-good">{cloudMsg}</span>}
-        {cloudErr && <span className="text-sm wt-danger">{cloudErr}</span>}
+        <span role="status" className={cloudMsg ? 'text-sm wt-good' : 'sr-only'}>{cloudMsg}</span>
+        <span role="alert" className={cloudErr ? 'text-sm wt-danger' : 'sr-only'}>{cloudErr}</span>
       </form>
       )}
 
@@ -644,24 +701,27 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
       <h3 className={heading}>{t('settings.backup.restoreTitle')}</h3>
       <p className="mt-1 text-xs text-slate-500">
         {t('settings.backup.restoreHintA')} <span className="font-mono">.wtbk</span> {t('settings.backup.restoreHintB')}
-        <span className="text-amber-400"> {t('settings.backup.restoreRestarts')}</span> {t('settings.backup.restoreHintC')}
+        <span className="wt-warn"> {t('settings.backup.restoreRestarts')}</span> {t('settings.backup.restoreHintC')}
       </p>
       <div className="mt-2 flex flex-col gap-2">
         <div className="flex items-center gap-2">
           <button onClick={() => restoreRef.current?.click()}
-            className="rounded-lg bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700">
+            className={btn.secondary}>
             {t('settings.chooseFile')}
           </button>
           <span className="min-w-0 truncate text-xs text-slate-400">{restoreFile ? restoreFile.name : t('settings.noFileChosen')}</span>
           <input ref={restoreRef} type="file" accept=".wtbk,application/octet-stream" className="hidden"
             onChange={(e) => setRestoreFile(e.target.files?.[0] ?? null)} />
         </div>
+        {restoreFile && (
+          <p className="text-xs text-slate-400">{restorePreview(restoreFile)}</p>
+        )}
         <input type="password" value={restorePass} onChange={(e) => setRestorePass(e.target.value)}
           placeholder={t('settings.backup.restorePassPlaceholder')} aria-label={t('settings.backup.restorePass')}
           autoComplete="off" className={field} />
         <div>
           <button disabled={bkBusy || !restoreFile} onClick={doRestore}
-            className="rounded-lg bg-rose-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-rose-700 disabled:opacity-50">
+            className={btn.danger}>
             {bkBusy ? t('settings.backup.validating') : t('settings.backup.restoreAndRestart')}
           </button>
         </div>

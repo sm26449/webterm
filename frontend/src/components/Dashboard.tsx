@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { isSessionLive, api, AppLink, Host, Session, timeAgo } from '../lib/api'
+import { isEphemeralHost, isSessionLive, api, AppLink, Host, Session, timeAgo } from '../lib/api'
 import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
 import { useI18n } from '../lib/i18n'
 import { hostHistory } from '../lib/metrics'
@@ -43,14 +43,17 @@ export default function Dashboard(props: {
     .filter((s) => s.state === 'closed' || s.state === 'lost')
     .sort((a, b) => (b.closed_at || b.created) - (a.closed_at || a.created))
     .slice(0, 4)
-  const online = props.hosts.filter((h) => h.online).length
-  const folders = [...new Set(props.hosts.map((h) => h.folder || ''))].sort((a, b) =>
+  // contoarele şi grila de echipamente: FĂRĂ ţintele efemere („conectează o dată") —
+  // `byId`/sesiunile rămân pe lista completă, ca tab-ul lor live să-şi păstreze hostul
+  const hosts = props.hosts.filter((h) => !isEphemeralHost(h))
+  const online = hosts.filter((h) => h.online).length
+  const folders = [...new Set(hosts.map((h) => h.folder || ''))].sort((a, b) =>
     a === '' ? 1 : b === '' ? -1 : a.localeCompare(b))
 
-  if (props.hosts.length === 0) {
+  if (hosts.length === 0) {
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-4 p-8 text-center">
-        <div className="grid h-14 w-14 place-items-center rounded-2xl bg-sky-500/15 text-sky-400"><ServerIcon /></div>
+      <div className="wt-canvas flex h-full flex-col items-center justify-center gap-4 p-8 text-center">
+        <div className="wt-accent grid h-14 w-14 place-items-center rounded-2xl bg-sky-500/15"><ServerIcon /></div>
         <div>
           <h1 className="text-lg font-semibold text-slate-100">{t('dashboard.noHostsYet')}</h1>
           <p className="mt-1 max-w-sm text-sm text-slate-500">{t('dashboard.addFirstHost')}</p>
@@ -63,7 +66,8 @@ export default function Dashboard(props: {
   }
 
   return (
-    <div data-testid="dashboard" className="h-full overflow-y-auto">
+    // `wt-canvas`: dashboard-ul urmează tema aleasă (index.css) — e „acasă", nu terminal
+    <div data-testid="dashboard" className="wt-canvas h-full overflow-y-auto">
       <div className="mx-auto max-w-7xl px-4 py-6 sm:px-8 sm:py-8">
         <button
           onClick={props.onOpenSidebar}
@@ -76,7 +80,7 @@ export default function Dashboard(props: {
           <div>
             <h1 className="text-xl font-semibold text-slate-100">{t('dashboard.title')}</h1>
             <p className="mt-1 text-sm text-slate-500">
-              {t('dashboard.hostCount', { count: props.hosts.length })} · <span className="text-emerald-400">{online} {t('dashboard.online')}</span>
+              {t('dashboard.hostCount', { count: hosts.length })} · <span className="wt-good">{online} {t('dashboard.online')}</span>
               {' · '}{t('dashboard.activeSessionCount', { count: active.length })}
             </p>
           </div>
@@ -84,7 +88,7 @@ export default function Dashboard(props: {
             onClick={props.onOpenPalette}
             className="wt-touch flex items-center gap-2 rounded-lg bg-ink-800 px-3 py-2 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700"
           >
-            {t('dashboard.jumpTo')} <kbd className="hidden rounded bg-white/10 px-1.5 text-xs text-slate-200 sm:inline">{fmt('Mod+K')}</kbd>
+            {t('dashboard.jumpTo')} <kbd className="hidden rounded bg-ink-700 px-1.5 text-xs text-slate-200 sm:inline">{fmt('Mod+K')}</kbd>
           </button>
         </div>
 
@@ -122,7 +126,7 @@ export default function Dashboard(props: {
             <p className="rounded-xl border border-dashed border-ink-700 px-4 py-6 text-center text-sm text-slate-500">
               {/* pe touch nu există ⌘K — instrucțiunea ar fi o glumă proastă */}
               {t('dashboard.noActiveSession')}
-              <span className="hidden sm:inline"> {t('dashboard.orWith')} <kbd className="rounded bg-white/10 px-1 text-slate-300">{fmt('Mod+K')}</kbd></span>.
+              <span className="hidden sm:inline"> {t('dashboard.orWith')} <kbd className="rounded bg-ink-700 px-1 text-slate-300">{fmt('Mod+K')}</kbd></span>.
             </p>
           ) : (
             <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
@@ -156,7 +160,7 @@ export default function Dashboard(props: {
               })}
             </div>
           )}
-          {active.length > 12 && <p className="mt-2 text-xs text-slate-600">{t('dashboard.moreActiveSessions', { key: fmt('Mod+K'), count: active.length - 12 })}</p>}
+          {active.length > 12 && <p className="wt-muted mt-2 text-xs">{t('dashboard.moreActiveSessions', { key: fmt('Mod+K'), count: active.length - 12 })}</p>}
         </section>
 
         {/* închise recent — istoricul persistent e feature-ul central; fără
@@ -199,18 +203,18 @@ export default function Dashboard(props: {
             <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">{t('dashboard.fleet')}</h2>
             {/* legendă stări — culoarea punctului e dublată de text (WCAG 1.4.1) */}
             <div className="flex items-center gap-3 text-[11px] text-slate-500">
-              <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-emerald-400" /> {t('dashboard.online')}</span>
-              <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-sky-500" /> {t('dashboard.onDemand')}</span>
-              <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-slate-600" /> {t('dashboard.offline')}</span>
+              <span className="flex items-center gap-1"><span aria-hidden="true" className="h-2 w-2 rounded-full bg-emerald-400 ring-1 ring-emerald-700/50" /> {t('dashboard.online')}</span>
+              <span className="flex items-center gap-1"><span aria-hidden="true" className="h-2 w-2 rounded-full bg-sky-500" /> {t('dashboard.onDemand')}</span>
+              <span className="flex items-center gap-1"><span aria-hidden="true" className="h-2 w-2 rounded-full bg-slate-600" /> {t('dashboard.offline')}</span>
             </div>
           </div>
           <div className="space-y-4">
             {folders.map((folder) => {
-              const inF = props.hosts.filter((h) => (h.folder || '') === folder)
+              const inF = hosts.filter((h) => (h.folder || '') === folder)
               if (inF.length === 0) return null
               return (
                 <div key={folder || '__root__'}>
-                  {folder && <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-slate-600">{folder}</div>}
+                  {folder && <div className="wt-muted mb-1.5 text-[11px] font-medium uppercase tracking-wide">{folder}</div>}
                   <div className="grid gap-1.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
                     {inF.map((h) => {
                       const color = hostColor(h)
@@ -248,7 +252,7 @@ export default function Dashboard(props: {
                               type="button"
                               onClick={(e) => { e.stopPropagation(); props.onSelectHost(h.id) }}
                               aria-label={t('dashboard.openHost', { name: h.name })}
-                              className="block w-full truncate text-left text-sm text-slate-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 rounded-sm"
+                              className="block min-h-6 w-full truncate text-left text-sm text-slate-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 rounded-sm"
                             >
                               {h.name}
                             </button>
@@ -270,9 +274,15 @@ export default function Dashboard(props: {
                               </span>
                             )}
                           </span>
-                          {liveCount > 0 && <span className="shrink-0 rounded-full bg-emerald-500/15 px-1.5 text-[11px] font-semibold text-emerald-400">{liveCount}</span>}
-                          <span className={`h-2 w-2 shrink-0 rounded-full ${reach === 'online' ? 'bg-emerald-400 dot-live' : reach === 'ondemand' ? 'bg-sky-500' : 'bg-slate-600'}`}
+                          {liveCount > 0 && (
+                            <span className="wt-good shrink-0 rounded-full bg-emerald-500/15 px-1.5 text-[11px] font-semibold"
+                              aria-label={t('dashboard.connectedCount', { count: liveCount })}>{liveCount}</span>
+                          )}
+                          {/* starea NU doar prin culoare (WCAG 1.4.1): `title` pe un span nu ajunge la cititorul de
+                              ecran, deci textul stării e dublat `sr-only` lângă punct */}
+                          <span aria-hidden="true" className={`h-2 w-2 shrink-0 rounded-full ${reach === 'online' ? 'bg-emerald-400 ring-1 ring-emerald-700/50 dot-live' : reach === 'ondemand' ? 'bg-sky-500' : 'bg-slate-600'}`}
                             title={reach === 'online' ? t('dashboard.online') : reach === 'ondemand' ? t('dashboard.onDemandConnect') : t('dashboard.offline')} />
+                          <span className="sr-only">{reach === 'online' ? t('dashboard.online') : reach === 'ondemand' ? t('dashboard.onDemand') : t('dashboard.offline')}</span>
                           {/* pe touch NU există hover: butonul „+" era invizibil,
                               deci nu puteai porni o sesiune de pe card */}
                           <button

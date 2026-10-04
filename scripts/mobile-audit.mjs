@@ -1,7 +1,8 @@
 /* Audit responsive pe o matrice de device-uri reale (Playwright device presets).
    Nu ghicim din CSS — MĂSURĂM în browser: overflow orizontal, elemente care ies
-   din ecran, suprapuneri peste zone interactive, ținte tactile sub 44px,
-   dimensiunea utilă a terminalului. Plus screenshots pentru inspecție vizuală.
+   din ecran, suprapuneri peste zone interactive, ținte tactile sub 44px (sub 24px =
+   WCAG 2.2 target-size, BLOCANT), reflow la 320 px (WCAG 1.4.10), dimensiunea utilă a
+   terminalului. Plus screenshots pentru inspecție vizuală.
 
      node mobile-audit.mjs http://127.0.0.1:8000 /out/dir
 
@@ -37,6 +38,11 @@ const MATRIX = [
   { name: 'galaxy-s9', device: devices['Galaxy S9+'], engine: 'chromium' },
   { name: 'pixel-7', device: devices['Pixel 7'], engine: 'chromium' },
   { name: 'galaxy-tab-s4', device: devices['Galaxy Tab S4'], engine: 'chromium' },
+  // WCAG 1.4.10 Reflow: la 320 px CSS conţinutul trebuie să încapă fără scroll orizontal.
+  // Nu e un device real din presetări — e lăţimea de referinţă a criteriului (echivalentul
+  // unui desktop la zoom 400%). Trece prin acelaşi flux, deci `overflowX` → `bug` blochează.
+  { name: 'reflow-320', engine: 'chromium',
+    device: { ...devices['iPhone SE'], viewport: { width: 320, height: 568 }, deviceScaleFactor: 2 } },
 ]
 
 const problems = []
@@ -57,7 +63,8 @@ const MEASURE = () => {
     bodyScrollW: document.body.scrollWidth,
     overflowX: document.documentElement.scrollWidth > window.innerWidth + 1,
     offscreen: [],
-    smallTargets: [],
+    smallTargets: [],   // 24–44 px: `ux`
+    tinyTargets: [],    // < 24 px: `a11y`, blocant
     covered: [],
     term: null,
   }
@@ -92,12 +99,19 @@ const MEASURE = () => {
     }
   }
 
-  // ținte tactile sub 44px (doar cele vizibile, interactive)
-  for (const el of document.querySelectorAll('button, a[href], input[type=checkbox], [role=button]')) {
+  // Ţinte de interacţiune (doar cele vizibile): sub 24 px = WCAG 2.2 2.5.8 Target Size (Minimum),
+  // raportate ca `a11y` şi BLOCANTE; 24–44 px = sub recomandarea tactilă (44 px), raportate ca
+  // `ux`. Pragul vechi (40 px, totul `ux`, neblocant) lăsa butoanele de 10 px să treacă (auditul 6.1).
+  for (const el of document.querySelectorAll('button, a[href], input:not([type=hidden]), select, textarea, [role=button], [role=link], [role=checkbox], [role=switch], [role=tab], [role=menuitem]')) {
     const r = el.getBoundingClientRect()
     if (r.width === 0 || r.height === 0) continue
     if (r.top > vh || r.bottom < 0) continue
-    if ((r.width < 40 || r.height < 40) && out.smallTargets.length < 15) {
+    const s = getComputedStyle(el)
+    if (s.visibility === 'hidden' || s.opacity === '0') continue
+    const min = Math.min(r.width, r.height)
+    if (min < 24 && out.tinyTargets.length < 20) {
+      out.tinyTargets.push({ el: label(el), w: Math.round(r.width), h: Math.round(r.height) })
+    } else if (min < 44 && out.smallTargets.length < 15) {
       out.smallTargets.push({ el: label(el), w: Math.round(r.width), h: Math.round(r.height) })
     }
   }
@@ -165,6 +179,7 @@ async function auditDevice(cfg) {
     for (const c of m.covered) note(cfg.name, screen, 'bug', `buton acoperit: ${c.el} ← ${c.acoperit_de}`)
     // fără plafoane tăcute: spunem când o verificare a fost sărită, nu o trecem drept „ok"
     if (m.modalOpen) note(cfg.name, screen, 'info', 'modal deschis → verificarea „buton acoperit" sărită')
+    for (const t of m.tinyTargets) note(cfg.name, screen, 'a11y', `țintă sub 24 px (WCAG 2.5.8): ${t.el} (${t.w}×${t.h})`)
     for (const t of m.smallTargets) note(cfg.name, screen, 'ux', `țintă tactilă mică: ${t.el} (${t.w}×${t.h})`)
     return m
   }
@@ -291,7 +306,8 @@ for (const cfg of MATRIX.filter((c) => !ONLY.length || ONLY.includes(c.name))) {
   process.stdout.write(`▸ ${cfg.name} (${cfg.engine}) … `)
   await auditDevice(cfg)
   const n = problems.filter((p) => p.dev === cfg.name && p.severity === 'bug').length
-  console.log(n ? `${n} probleme` : 'ok')
+  const a = problems.filter((p) => p.dev === cfg.name && p.severity === 'a11y').length
+  console.log(n || a ? `${n} probleme, ${a} ținte < 24 px` : 'ok')
 }
 
 writeFileSync(`${OUT}/raport.json`, JSON.stringify(problems, null, 2))
@@ -299,13 +315,18 @@ writeFileSync(`${OUT}/raport.json`, JSON.stringify(problems, null, 2))
 console.log('\n=== PROBLEME (bug) ===')
 const bugs = problems.filter((p) => p.severity === 'bug')
 for (const p of bugs) console.log(`  [${p.dev}/${p.screen}] ${p.msg}`)
-console.log(`\n=== ȚINTE TACTILE MICI: ${problems.filter((p) => p.severity === 'ux').length} ===`)
+const tiny = problems.filter((p) => p.severity === 'a11y')
+console.log(`\n=== ȚINTE SUB 24 PX (a11y, blocant): ${tiny.length} ===`)
+const byTiny = {}
+for (const p of tiny) byTiny[p.msg] = (byTiny[p.msg] ?? 0) + 1
+for (const [k, v] of Object.entries(byTiny).slice(0, 20)) console.log(`  ${v}× ${k}`)
+console.log(`\n=== ȚINTE TACTILE MICI (24–44 px, ux): ${problems.filter((p) => p.severity === 'ux').length} ===`)
 const byTarget = {}
 for (const p of problems.filter((p) => p.severity === 'ux')) byTarget[p.msg] = (byTarget[p.msg] ?? 0) + 1
 for (const [k, v] of Object.entries(byTarget).slice(0, 12)) console.log(`  ${v}× ${k}`)
 console.log(`\n=== INFO ===`)
 for (const p of problems.filter((p) => p.severity === 'info')) console.log(`  [${p.dev}] ${p.msg}`)
-console.log(`\ntotal bug: ${bugs.length} · screenshots în ${OUT}`)
+console.log(`\ntotal bug: ${bugs.length} · ținte < 24 px: ${tiny.length} · screenshots în ${OUT}`)
 
-// CI: orice problemă de layout oprește publicarea imaginii
-process.exit(bugs.length ? 1 : 0)
+// CI: orice problemă de layout SAU orice ţintă sub 24 px opreşte publicarea imaginii
+process.exit(bugs.length || tiny.length ? 1 : 0)

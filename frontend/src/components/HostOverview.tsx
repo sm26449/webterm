@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import { isSessionLive, api, AppLink, Host, Session, timeAgo } from '../lib/api'
 import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
 import { useI18n } from '../lib/i18n'
+import { useConfirm } from '../lib/confirm'
 import { hostHistory } from '../lib/metrics'
 import { DockerIcon, DownloadIcon, FilesIcon, ForwardIcon, LinkIcon, NoteIcon, PencilIcon, PlusIcon, PopoutIcon, RefreshIcon, ServerIcon, ServicesIcon, ShieldIcon, SplitIcon, TerminalPromptIcon, ToolboxIcon, TrashIcon } from './Icons'
 import SessionPreview from './SessionPreview'
@@ -43,6 +44,8 @@ export default function HostOverview(props: {
   onEdit: (host: Host) => void
 }) {
   const { t } = useI18n()
+  // confirm() nativ → dialog propriu (vezi lib/confirm.tsx: de ce)
+  const { confirm } = useConfirm()
   const { host } = props
   const canConnect = host.connection_type !== 'agent' || host.online
   const isAgent = (host.connection_type ?? 'agent') === 'agent'
@@ -102,7 +105,7 @@ export default function HostOverview(props: {
           selected === s.id ? 'bg-ink-800' : 'hover:bg-ink-800/50'
         }`}
       >
-        <span className={`h-2 w-2 shrink-0 rounded-full ${
+        <span aria-hidden="true" className={`h-2 w-2 shrink-0 ${s.state === 'lost' ? 'rounded-sm' : 'rounded-full'} ${
           live ? 'bg-emerald-400 dot-live' : s.state === 'lost' ? 'bg-rose-500' : 'bg-slate-600'}`} />
         <span className="min-w-0 flex-1">
           <span className="block truncate text-sm text-slate-200">{s.title || t('host.sessionFallback')}</span>
@@ -154,7 +157,7 @@ export default function HostOverview(props: {
           <div className="flex items-center gap-2">
             <h1 className="truncate text-lg font-semibold text-slate-100">{host.name}</h1>
             {host.connection_type && host.connection_type !== 'agent' && (
-              <span className="rounded bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-sky-400">
+              <span className="wt-accent rounded bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide">
                 {host.connection_type}
               </span>
             )}
@@ -248,7 +251,7 @@ export default function HostOverview(props: {
                 <section>
                   <div className="mb-3 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
                     {t('host.active')} <span className="text-slate-600">· {active.length}</span>
-                    <button onClick={() => setTab('sessions')} className="ml-auto text-[11px] normal-case text-sky-400 hover:underline">{t('host.allSessions')} →</button>
+                    <button onClick={() => setTab('sessions')} className="wt-link ml-auto rounded px-1 py-1 text-[11px] normal-case">{t('host.allSessions')} →</button>
                   </div>
                   {/* thumbnail-uri LIVE: fiecare card e un preview read-only al sesiunii, auto-fit */}
                   <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))' }}>
@@ -317,9 +320,9 @@ export default function HostOverview(props: {
                         {selLive ? t('host.previewLive') : t('host.previewHistory')} · {timeAgo(sel.closed_at || sel.created, t)}
                       </div>
                     </div>
-                    <button onClick={() => props.onSplit(sel.id)} title={t('host.splitTitle')}
+                    <button onClick={() => props.onSplit(sel.id)} title={t('host.splitTitle')} aria-label={t('host.splitTitle')}
                       className="hidden shrink-0 rounded p-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-200 lg:block"><SplitIcon /></button>
-                    <button onClick={() => props.onPopout(sel.id)} title={t('host.popoutTitle')}
+                    <button onClick={() => props.onPopout(sel.id)} title={t('host.popoutTitle')} aria-label={t('host.popoutTitle')}
                       className="hidden shrink-0 rounded p-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-200 lg:block"><PopoutIcon /></button>
                     {!selLive && (
                       <button onClick={() => setPlaying(sel)} title={t('host.playTitle')} aria-label={t('host.playTitle')}
@@ -328,11 +331,14 @@ export default function HostOverview(props: {
                     <a href={`/api/sessions/${sel.id}/transcript?format=cast`} download title={t('host.downloadTitle')}
                       className="wt-touch grid place-items-center rounded p-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-200"><DownloadIcon /></a>
                     {!selLive && (
-                      <button onClick={() => {
-                          if (!confirm(t('session.confirmDelete'))) return
+                      <button onClick={async () => {
+                          if (!(await confirm({
+                            title: t('host.deleteTitle'), message: t('session.confirmDelete'),
+                            danger: true, confirmLabel: t('session.delete'),
+                          }))) return
                           setDeletedIds((prev) => new Set(prev).add(sel.id))
                           props.onDeleteSession(sel.id); setSelected(null)
-                        }} title={t('host.deleteTitle')}
+                        }} title={t('host.deleteTitle')} aria-label={t('host.deleteTitle')}
                         className="wt-touch grid place-items-center rounded p-1.5 text-slate-500 hover:bg-ink-800 hover:text-rose-400"><TrashIcon /></button>
                     )}
                     <button onClick={() => props.onOpenSession(sel.id)}
@@ -469,8 +475,9 @@ function SessionThumb(props: {
           {s.connected_clients > 0 && <span className="shrink-0 text-[11px] text-slate-500">👁 {s.connected_clients}</span>}
         </div>
       </button>
-      {/* acţiuni rapide — apar la hover, pe ecrane mari (split/popout cer spaţiu) */}
-      <div className="absolute right-1.5 top-1.5 hidden gap-1 opacity-0 transition group-hover:opacity-100 lg:flex">
+      {/* acţiuni rapide — apar la hover ŞI când focusul e înăuntru (altfel erau focusabile dar
+          invizibile: focusul „dispărea" pe card), pe ecrane mari (split/popout cer spaţiu) */}
+      <div className="absolute right-1.5 top-1.5 hidden gap-1 opacity-0 transition focus-within:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 lg:flex">
         <button onClick={props.onSplit} title={t('host.splitTitle')} aria-label={t('host.splitTitle')}
           className="grid h-7 w-7 place-items-center rounded-md bg-ink-900/80 text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800 hover:text-white"><SplitIcon /></button>
         <button onClick={props.onPopout} title={t('host.popoutTitle')} aria-label={t('host.popoutTitle')}
@@ -533,7 +540,7 @@ function StatusBand({ host }: { host: Host }) {
   const label = reach === 'online' ? t('host.statusOnline')
     : reach === 'ondemand' ? t('host.statusOndemand') : t('host.statusOffline')
   const dot = reach === 'online' ? 'bg-emerald-400' : reach === 'ondemand' ? 'bg-sky-500' : 'bg-slate-500'
-  const tone = reach === 'online' ? 'wt-good' : reach === 'ondemand' ? 'text-sky-400' : 'text-slate-400'
+  const tone = reach === 'online' ? 'wt-good' : reach === 'ondemand' ? 'wt-accent' : 'text-slate-400'
   // sub-linia: adresa, iar pe un agent căzut „de cât timp" (context de incident la o privire)
   const sub = reach === 'offline' && host.last_heartbeat
     ? t('host.lastSeen', { ago: timeAgo(host.last_heartbeat, t) })
@@ -701,7 +708,7 @@ function Row(props: { k: string; v: string; mono?: boolean; tone?: 'good'; badge
       <dd className={`min-w-0 truncate text-right text-sm ${props.tone === 'good' ? 'wt-good' : 'text-slate-200'} ${props.mono ? 'font-mono' : ''}`}>
         {props.v}
         {props.badge && (
-          <span className="ml-2 rounded bg-amber-500/15 px-1.5 py-0.5 align-middle text-[10px] font-semibold uppercase tracking-wide text-amber-400">{props.badge}</span>
+          <span className="wt-warn ml-2 rounded bg-amber-500/15 px-1.5 py-0.5 align-middle text-[10px] font-semibold uppercase tracking-wide">{props.badge}</span>
         )}
       </dd>
     </div>

@@ -6,6 +6,9 @@ import { CopyIcon } from './Icons'
 // Feedback discret „Copiat", separat de Toasts.tsx (alerte importante, stivuite, 6s). Un
 // SINGUR pill care se resetează la fiecare copiere şi se stinge singur repede — copierea e
 // frecventă (mai ales selecţia din tmux), deci nu trebuie să se acumuleze şi nici să distragă.
+// Regiunea `role="status"` e montată PERMANENT (goală): o regiune live creată odată cu mesajul
+// nu e anunţată de cititoarele de ecran; textul rămâne în DOM şi după ce pill-ul se stinge
+// vizual, ca anunţul să nu fie tăiat la 1,1 s.
 export default function CopyToast() {
   const { t } = useI18n()
   const [state, setState] = useState<{ label: string; on: boolean }>({ label: '', on: false })
@@ -25,7 +28,7 @@ export default function CopyToast() {
         state.on ? 'wt-copytoast-on' : 'wt-copytoast-off'}`}
     >
       <span className="flex items-center gap-1.5 rounded-full border border-ink-600 bg-ink-800/95 px-3 py-1.5 text-xs font-medium text-slate-200 shadow-lg backdrop-blur">
-        <CopyIcon /> {state.on ? state.label : ''}
+        <CopyIcon /> {state.label}
       </span>
     </div>
   )
