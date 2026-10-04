@@ -55,6 +55,32 @@ describe('citare shell pentru calea inserată', () => {
   it('calea goală se citează (nu dispare)', () => {
     expect(shellQuote('')).toBe("''")
   })
+  // Calea e TASTATĂ brut în terminal (send(), nu bracketed-paste): orice metacaracter de shell
+  // dintr-un nume de fişier ostil (paste/drop) TREBUIE neutralizat prin citare. Caracterele de
+  // injectare nu sunt în allowlist, deci rezultatul e mereu între apostrofuri (inerte în sh/bash/zsh).
+  it('metacaracterele de injectare dintr-un nume ostil sunt mereu citate', () => {
+    for (const evil of [
+      '/root/.webterm/inbox/x;rm -rf ~',
+      '/root/.webterm/inbox/x$(id)',
+      '/root/.webterm/inbox/x`id`',
+      '/root/.webterm/inbox/a&&b',
+      '/root/.webterm/inbox/a|b',
+      '/root/.webterm/inbox/a>b',
+      '/root/.webterm/inbox/x\ninjected',
+      '/root/.webterm/inbox/{a,b}',
+      '/root/.webterm/inbox/x*',
+    ]) {
+      const q = shellQuote(evil)
+      expect(q.startsWith("'") && q.endsWith("'")).toBe(true)
+    }
+  })
+  // Căile inserate pornesc MEREU cu `/` (home absolut/cwd) sau cu `~/` (home propriu, expansiune
+  // dorită): un nume controlat de atacator apare doar DUPĂ un `/`, deci nu poate fi un `-flag`
+  // de început şi nici un `~user` de început. Fixăm invariantul.
+  it('un nume controlat nu devine flag sau ~user (apare doar după un /)', () => {
+    expect(shellQuote('/root/.webterm/inbox/-rf')).toBe('/root/.webterm/inbox/-rf')  // `-` nu e la început de cuvânt
+    expect(shellQuote('/root/.webterm/inbox/~root')).toBe('/root/.webterm/inbox/~root')  // `~` nu e la început de cuvânt
+  })
 })
 
 describe('retenţia inbox-ului', () => {

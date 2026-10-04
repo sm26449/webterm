@@ -9,6 +9,27 @@ back.
 
 ## [Unreleased]
 
+### Security
+- **Authorized white-box pentest of the gateway trust boundary** (login, fake-agent/token forgery,
+  forward tickets, CSWSH/CSRF, SQLi, OIDC, scope escalation), run with live PoCs against a
+  disposable mirror of the production image. **Every barrier held** — no auth bypass, no forgery,
+  no injection. Captured as hermetic regression tests: `pentest_forward_token_test.py` (HMAC
+  ticket forgery/replay/epoch), `pentest_xff_lockout_test.py` (X-Forwarded-For trust / lockout),
+  `pentest_oidc_alg_test.py` (RS256-only allowlist + step-up auth_time freshness).
+- **Upload `upload_id` validated at the API boundary** on all four `/fs/upload*` endpoints (one
+  shared `^[0-9a-f]{16,64}$`), before it is ever logged — closes log-line forgery by an
+  authenticated account via a crafted `upload_id` (file writes were already blocked by the same
+  regex deeper in). One-shot upload temp names widened to 16 hex so the stale-temp GC reclaims
+  them (was a slow disk leak). The file-transfer surface (inbox, paste-to-terminal path insertion,
+  fs API) was reviewed end to end: path traversal and shell-metacharacter injection into the
+  inserted path do not occur (paths are absolute, the quoting allowlist forces single-quoting on
+  every shell metacharacter).
+- Deployment note: the per-IP lockout can only be bypassed by X-Forwarded-For spoofing when the
+  app container is reachable directly; in the standard deploy it sits behind the reverse proxy and
+  its port is not host-published, so this does not apply. Set `WEBTERM_TRUSTED_PROXY_CIDRS` to pin
+  it explicitly if you expose the container differently.
+
+
 ## [3.1.2] — 2026-10-04 · agent (54)
 
 ### Added

@@ -1906,6 +1906,16 @@ async def fs_archive(host_id: int, path: str, user=Depends(security.require_user
 _chunk_log_at: dict[str, float] = {}
 
 
+def _check_upload_id(upload_id: str) -> None:
+    """Validăm `upload_id` la GRANIŢA API — înainte de orice folosire. `core._upload_tmp` îl
+    re-validează (apărare în adâncime), dar id-ul brut ajungea întâi în `_log_chunk_start`
+    (`log.info(... upload_id=%s ...)`): un id cu `\\n`/`\\r` putea forja linii de log, iar unul
+    arbitrar de lung umfla cheia din `_chunk_log_at`. Refuzăm devreme, cu ACELAŞI tipar strict
+    (`core._UPLOAD_UID`) ca în core — o singură sursă de adevăr, fără regex-uri divergente."""
+    if not core._UPLOAD_UID.match(upload_id or ""):
+        raise ApiError(400, "files.badUpload", "invalid upload_id")
+
+
 def _log_chunk_start(host_id: int, upload_id: str, offset: int) -> None:
     now = time.monotonic()
     if now - _chunk_log_at.get(upload_id, 0.0) < 10:
@@ -1929,6 +1939,7 @@ async def fs_upload(host_id: int, request: Request, path: str,
     audit.detail(request, path)
     await _require_host_stepup(host_id, user)   # H1
     if upload_id:
+        _check_upload_id(upload_id)              # validează ÎNAINTE de log (anti log-injection) + core
         _log_chunk_start(host_id, upload_id, offset)
     async def source():
         async for chunk in request.stream():
@@ -1952,6 +1963,7 @@ async def fs_upload_status(host_id: int, path: str, upload_id: str,
                            user=Depends(security.require_user)):
     """Câţi octeţi au aterizat deja pentru `upload_id` — clientul reia de acolo."""
     await _require_host_stepup(host_id, user)
+    _check_upload_id(upload_id)
     try:
         n = await core.fs_upload_status(host_id, path, upload_id)
     except core.AgentGone:
@@ -1970,6 +1982,7 @@ async def fs_upload_commit(host_id: int, request: Request, path: str, upload_id:
     nu ajunge la ţintă)."""
     audit.detail(request, path)
     await _require_host_stepup(host_id, user)
+    _check_upload_id(upload_id)
     try:
         written = await core.fs_upload_commit(host_id, path, upload_id, if_mtime=if_mtime, crc32=crc32)
     except core.AgentGone:
@@ -1986,6 +1999,7 @@ async def fs_upload_abort(host_id: int, path: str, upload_id: str,
                           user=Depends(security.require_user)):
     """Anulează un upload resumabil şi şterge temp-ul de pe host."""
     await _require_host_stepup(host_id, user)
+    _check_upload_id(upload_id)
     await core.fs_upload_abort(host_id, path, upload_id)
     return {"ok": True}
 

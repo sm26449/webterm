@@ -167,6 +167,39 @@ async def main():
             r = await h.post("/api/sessions/" + "0" * 32 + "/share")
             ok("creating a share needs auth", r.status_code in (401, 403, 404))
 
+            # ── upload_id validat STRICT la graniţa API (3.1.x transfers) ──
+            # `upload_id` ajunge în `<path>.wtpart.<upload_id>` ŞI, brut, în `log.info(... upload_id=%s)`
+            # ÎNAINTE de validare. Un id cu `/`/`..` ar fi un path-trick, unul cu `\n` ar forja linii
+            # de log. Tiparul e `[0-9a-f]{16,64}` (lowercase); orice altceva → 400 files.badUpload,
+            # refuzat ÎNAINTE de a atinge agentul (deci testabil fără agent — hostul e offline aici).
+            from urllib.parse import quote
+            hid = (await h.post("/api/hosts", json={"name": "sec-up"})).json()["id"]
+            for bad in ["../../../tmp/pwned", "..%2f..%2fx", "ABCDEF0123456789",   # uppercase: regex e lowercase
+                        "deadbeef", "z123456789abcdef", "deadbeefcafe0001\ninjected",
+                        "deadbeef;cafe0001"]:
+                r = await h.post(f"/api/hosts/{hid}/fs/upload?path=~/x&upload_id={quote(bad)}&offset=0",
+                                 content=b"data")
+                ok(f"bad upload_id rejected at boundary (400 files.badUpload): {bad!r}",
+                   r.status_code == 400 and r.json().get("code") == "files.badUpload",
+                   f"{r.status_code}:{r.text[:80]}")
+            # un upload_id VALID trece de validare şi abia APOI dă de agentul offline → 409 (nu 400):
+            # dovedeşte că cele de mai sus pică la validare, nu dintr-un alt motiv
+            r = await h.post(f"/api/hosts/{hid}/fs/upload?path=~/x&upload_id=deadbeefcafe0001&offset=0",
+                             content=b"data")
+            ok("valid upload_id passes validation (offline agent → not 400)",
+               r.status_code != 400, f"{r.status_code}:{r.text[:80]}")
+            # status/commit/abort au aceeaşi gardă la graniţă
+            for ep in ["fs/upload/status", "fs/upload/commit", "fs/upload"]:
+                if ep == "fs/upload":
+                    r = await h.request("DELETE", f"/api/hosts/{hid}/{ep}?path=~/x&upload_id=../bad")
+                elif "status" in ep:
+                    r = await h.get(f"/api/hosts/{hid}/{ep}?path=~/x&upload_id=../bad")
+                else:
+                    r = await h.post(f"/api/hosts/{hid}/{ep}?path=~/x&upload_id=../bad")
+                ok(f"{ep}: bad upload_id rejected (400)",
+                   r.status_code == 400 and r.json().get("code") == "files.badUpload",
+                   f"{r.status_code}:{r.text[:80]}")
+
             # ── M1: schimbările de credențiale cer RE-AUTH cu parola (nu doar cookie) ──
             # `h` e deja autentificat din setup-ul de mai sus (a@b.com). Aceste endpoint-uri
             # au require_user (îl avem) DAR şi parola — un cookie furat nu trebuie să înroleze

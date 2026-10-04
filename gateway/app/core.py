@@ -3846,7 +3846,9 @@ async def fs_write_stream(host_id: int, path: str, source, if_mtime=None) -> int
     # sufix aleator: două upload-uri simultane pe aceeași cale nu se mai calcă pe
     # același temp (conținut amestecat), iar numele nu mai e predictibil (un
     # proces local nu poate pre-crea un symlink cu numele temp-ului)
-    tmp = "%s.wtpart.%s" % (path, uuid.uuid4().hex[:12])
+    # 16 hex (nu 12): intră în tiparul `_upload_gc` (`[0-9a-f]{16,64}`), deci un temp orfan lăsat
+    # de un one-shot întrerupt de o cădere de gateway e măturat oportunist, nu rămâne pe veci.
+    tmp = "%s.wtpart.%s" % (path, uuid.uuid4().hex[:16])
     offset = 0
     buf = b""
     try:

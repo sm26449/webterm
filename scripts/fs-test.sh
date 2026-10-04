@@ -107,6 +107,18 @@ R=$(j -o /dev/null -w '%{http_code}' "$FS/download?path=$(enc '~/wtfstest/bad.bi
 R=$(j "$FS?path=~/wtfstest")
 echo "$R" | grep -q 'wtpart' && no "temp cleaned up" "a .wtpart was left behind" || ok "the .wtpart temp file is cleaned up after commit"
 
+# --- upload_id e validat STRICT la graniţă (anti path-trick + anti log-injection) ---
+# upload_id intră în `<path>.wtpart.<upload_id>` şi (brut) în logul gateway-ului. Tiparul e
+# `[0-9a-f]{16,64}`; orice altceva → 400 files.badUpload, fără scriere, fără temp orfan.
+for BAD in '../../../tmp/pwned' '..%2f..%2fx' 'ABCDEF0123456789' 'deadbeef' 'z123456789abcdef' 'deadbeefcafe0001%0ainjected'; do
+  R=$(j -o /dev/null -w '%{http_code}' -X POST "$FS/upload?path=$(enc '~/wtfstest/trav.bin')&upload_id=$BAD&offset=0" --data-binary @/tmp/wtc1)
+  [ "$R" = "400" ] && ok "bad upload_id rejected (400): $BAD" || no "bad upload_id $BAD" "cod $R"
+done
+# traversal n-a aterizat NICĂIERI (nici în /tmp, nici în parintele lui wtfstest)
+docker exec "$CT" sh -c 'ls /tmp/pwned.wtpart.* /root/tmp/pwned.wtpart.* 2>/dev/null' | grep -q . \
+  && no "upload_id traversal contained" "a temp escaped the target dir" \
+  || ok "rejected upload_id wrote no file outside the target"
+
 # --- permisiunile se PĂSTREAZĂ la salvare (regresie de securitate: cheie SSH) ---
 docker exec "$CT" sh -c 'printf cheie > /root/wtfstest/key && chmod 600 /root/wtfstest/key'
 printf 'cheie-editata' > /tmp/key2
