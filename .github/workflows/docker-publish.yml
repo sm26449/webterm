@@ -429,10 +429,19 @@ jobs:
           # axe-core ştergea chiar `playwright`, iar pasul pica cu ERR_MODULE_NOT_FOUND —
           # descoperit rulând pasul local, nu citindu-l.
           npm install --no-save --no-audit --no-fund playwright@1.61.1 @axe-core/playwright >/dev/null
-          cp "$GITHUB_WORKSPACE/tests/ui_review.mjs" .
-          BASE=http://127.0.0.1:8000 A11Y_MAX_SERIOUS=0 \
-            A11Y_EMAIL=e2e@example.com A11Y_PASSWORD=parola-e2e-123456 \
-            node ui_review.mjs
+          # Rulează în IMAGINEA oficială Playwright (aceeaşi pe care o foloseşte scripts/ci-local.sh
+          # prin `pwrun`), nu direct pe runner: poarta măsoară mărimi de ţinte (target-size) şi
+          # contrast, iar ambele depind de fonturile şi de browserul instalate. Pe runner (fonturi
+          # Ubuntu + browser descărcat) pasul a picat la 3.1.0 cu acelaşi commit care trecea local
+          # în container — o diferenţă de MEDIU, nu de produs. Aceeaşi imagine ⇒ acelaşi verdict.
+          mkdir -p /tmp/wt-shots
+          docker run --rm --network host \
+            -v "$GITHUB_WORKSPACE:/repo:ro" -v /tmp/wt-smoke/node_modules:/node_modules:ro \
+            -v /tmp/wt-shots:/out -w / \
+            -e BASE=http://127.0.0.1:8000 -e A11Y_MAX_SERIOUS=0 \
+            -e A11Y_EMAIL=e2e@example.com -e A11Y_PASSWORD=parola-e2e-123456 \
+            mcr.microsoft.com/playwright:v1.61.1-noble \
+            sh -c 'cp /repo/tests/ui_review.mjs / && node /ui_review.mjs'
 
       # API-ul de fișiere cap-coadă (agent real): rename, conflict de mtime,
       # preview view-only, salvare atomică, păstrarea permisiunilor, guard fișiere
@@ -465,10 +474,14 @@ jobs:
       # acoperite. Un layout stricat pe telefon nu mai ajunge în producție.
       - name: Mobile audit (iPhone/iPad/Android)
         run: |
-          cd /tmp/wt-smoke
-          npx playwright install --with-deps webkit
-          cp "$GITHUB_WORKSPACE/scripts/mobile-audit.mjs" .
-          node mobile-audit.mjs http://127.0.0.1:8000 /tmp/wt-shots
+          # În imaginea Playwright (webkit inclus, aceleaşi fonturi ca local) — vezi nota de la
+          # pasul de accesibilitate: ţintele tactile se măsoară în pixeli de font.
+          mkdir -p /tmp/wt-shots
+          docker run --rm --network host \
+            -v "$GITHUB_WORKSPACE:/repo:ro" -v /tmp/wt-smoke/node_modules:/node_modules:ro \
+            -v /tmp/wt-shots:/out -w / \
+            mcr.microsoft.com/playwright:v1.61.1-noble \
+            sh -c 'cp /repo/scripts/mobile-audit.mjs / && node /mobile-audit.mjs http://127.0.0.1:8000 /out'
 
       - name: Mobile screenshots on failure
         if: failure()
