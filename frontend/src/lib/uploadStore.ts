@@ -30,6 +30,12 @@ export interface UploadJob {
   error?: string          // text deja tradus, pentru `err`
   /** încercarea curentă pe felia curentă (1 = prima); se resetează la fiecare felie */
   attempts: number
+  /** drop pe terminal / paste: după commit calea se tastează în terminalul `sid` */
+  then?: 'insert-path'
+  sid?: string
+  /** rezultatul inserării (doar pentru `then`): false = tab-ul de origine nu mai era deschis,
+      rândul oferă „Copy path" în loc şi nu expiră singur */
+  inserted?: boolean
 }
 
 /** Stări în care transferul chiar se mişcă (sau încearcă) — ţin `beforeunload` şi apar în sumar. */

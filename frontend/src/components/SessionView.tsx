@@ -33,6 +33,10 @@ import PastePicker from './PastePicker'
 import { notify, notifyError } from '../lib/notify'
 import { useConfirm } from '../lib/confirm'
 import { useFocusTrap } from '../lib/useFocusTrap'
+import { startUpload } from '../lib/uploads'
+import { uploadStore } from '../lib/uploadStore'
+import { ensureInbox, inboxName, isGenericName, pasteDest, pruneInbox, registerInsertTarget, resolveHome } from '../lib/transfers'
+import { UploadIcon } from './Icons'
 
 type ConnState = 'connecting' | 'open' | 'reconnecting' | 'ended'
 
@@ -281,6 +285,50 @@ export default function SessionView(props: {
   const activeCmdRef = useRef<number | null>(null)   // citit de stepCommand (handler-ul de taste e capturat la montare)
   // cwd raportat de shell prin OSC 7 (apare doar cu shell integration activă)
   const [cwd, setCwdState] = useState<string | null>(null)
+
+  // -- transferuri din terminal: drop pe terminal / paste de fişiere ----------------------
+  // Hostul trebuie să aibă agent (fs API); pe SSH direct / telnet nu interceptăm nimic.
+  const canTransfer = !!props.host && (!props.host.connection_type || props.host.connection_type === 'agent')
+  const [dropHover, setDropHover] = useState(false)
+  const dragDepth = useRef(0)      // dragenter/dragleave vin şi de la copii — numărăm, nu comutăm
+  const hasFiles = (dt: DataTransfer | null) => !!dt && Array.from(dt.types).includes('Files')
+  /** directorul ţintă al unui drop/paste „în sesiune": cwd-ul din OSC 7 când îl ştim, altfel
+      home-ul hostului (rezolvat absolut, ca inserarea să dea o cale pe care o înţelege orice CLI) */
+  const sessionDir = useCallback(async (): Promise<string> =>
+    cwdRef.current ?? await resolveHome(props.host!.id), [props.host])
+  const uploadFiles = useCallback((dir: string, files: { file: File; name: string }[], onDone?: (name: string) => void) => {
+    const host = props.host!
+    for (const { file, name } of files) {
+      void startUpload({ hostId: host.id, hostName: host.name, dest: `${dir.replace(/\/$/, '')}/${name}`, file,
+                         then: 'insert-path', sid: session.id })
+        .then((id) => { if (onDone && uploadStore.get(id)?.state === 'done') onDone(name) })
+    }
+  }, [props.host, session.id])
+  const onTermDrop = async (files: File[]) => {
+    try {
+      const dir = await sessionDir()
+      uploadFiles(dir, files.map((f) => ({ file: f, name: f.name })))
+    } catch (e) { notifyError(t('transfers.uploadFailedTitle'), errText(e, t) || t('files.genericErr')) }
+  }
+  // Paste de imagine/fişier: un CLI cu AI rulat aici NU vede clipboardul browserului — îi dăm
+  // fişierul pe host (inbox-ul `~/.webterm/inbox`, sau cwd-ul, după preferinţă) şi calea la
+  // prompt. Numele: timestamp + extensie din MIME; fişierele cu nume îl păstrează, prefixat.
+  const pasteFiles = async (files: File[]) => {
+    const host = props.host!
+    try {
+      const toInbox = pasteDest() === 'inbox'
+      const dir = toInbox ? await ensureInbox(host.id) : await sessionDir()
+      const when = new Date()
+      let generic = 0
+      const items = files.map((f) => ({ file: f, name: inboxName(f, when, isGenericName(f.name) ? ++generic : 1) }))
+      // retenţia inbox-ului rulează după un upload reuşit, niciodată peste fişierul tocmai urcat
+      uploadFiles(dir, items, toInbox ? (name) => { void pruneInbox(host.id, dir, name) } : undefined)
+    } catch (e) { notifyError(t('transfers.uploadFailedTitle'), errText(e, t) || t('files.genericErr')) }
+  }
+  const pasteFilesRef = useRef(pasteFiles)
+  pasteFilesRef.current = pasteFiles
+  const canTransferRef = useRef(canTransfer)
+  canTransferRef.current = canTransfer
   // tab focus mode (Ctrl+M): Tab iese din terminal în loc să ajungă în shell
   const [tabFocusMode, setTabFocusMode] = useState(false)
   const tabFocusRef = useRef(false)
@@ -679,6 +727,27 @@ export default function SessionView(props: {
     // handle pt. E2E/debug: cu renderer WebGL/Canvas conținutul nu mai e în DOM ca
     // text, deci testele (și tu, la debug) îl citesc din buffer prin instanța asta
     ;((window as unknown as { __wtTerms?: Map<string, Terminal> }).__wtTerms ??= new Map()).set(session.id, term)
+    // ţintă pentru „insert path" (motorul de upload tastează calea aici după commit)
+    registerInsertTarget(session.id, (text) => { send(text); term.focus() })
+    // Paste cu FIŞIERE (captură, înaintea handler-ului xterm de pe textarea): preluăm doar când
+    // clipboardul aduce fişiere/imagini; textul simplu nu trece pe aici — xterm îl lipeşte ca
+    // până acum (bracketed paste). Pe hosturi fără agent nu interceptăm nimic.
+    const onPasteFiles = (e: ClipboardEvent) => {
+      if (!canTransferRef.current) return
+      const cd = e.clipboardData
+      if (!cd) return
+      const files = Array.from(cd.files)
+      if (!files.length) {
+        for (const it of Array.from(cd.items)) {
+          if (it.kind === 'file') { const f = it.getAsFile(); if (f) files.push(f) }
+        }
+      }
+      if (!files.length) return
+      e.preventDefault()
+      e.stopPropagation()
+      void pasteFilesRef.current(files)
+    }
+    containerRef.current!.addEventListener('paste', onPasteFiles, true)
 
     const onData = term.onData((d) => {
       lastInputRef.current = Date.now()
@@ -885,6 +954,8 @@ export default function SessionView(props: {
       try { rendererRef.current?.dispose() } catch { /* deja dispus */ }
       rendererRef.current = undefined
       container?.removeEventListener('pointerdown', markInput)
+      container?.removeEventListener('paste', onPasteFiles, true)
+      registerInsertTarget(session.id, null)
       container?.removeEventListener('pointerup', copyOnSelect)
       container?.removeEventListener('touchstart', onTouchStart)
       container?.removeEventListener('touchmove', onTouchMove)
@@ -1875,6 +1946,33 @@ export default function SessionView(props: {
       <div
         className="relative min-h-0 min-w-0 flex-1 p-1.5"
         style={{ background: termBg }}
+        // Drop de fişiere pe terminal → upload în directorul sesiunii + calea tastată la prompt.
+        // Fără asta browserul NAVIGA la fişierul local şi omora SPA-ul (vezi FilePanel). Drag-ul
+        // de text nu e atins (nu avea nicio tratare şi n-are nici acum).
+        onDragEnter={(e) => {
+          if (!canTransfer || !hasFiles(e.dataTransfer)) return
+          e.preventDefault()
+          dragDepth.current += 1
+          setDropHover(true)
+        }}
+        onDragOver={(e) => {
+          if (!canTransfer || !hasFiles(e.dataTransfer)) return
+          e.preventDefault()
+          e.dataTransfer.dropEffect = 'copy'
+        }}
+        onDragLeave={(e) => {
+          if (!canTransfer || !hasFiles(e.dataTransfer)) return
+          dragDepth.current = Math.max(0, dragDepth.current - 1)
+          if (dragDepth.current === 0) setDropHover(false)
+        }}
+        onDrop={(e) => {
+          if (!canTransfer || !hasFiles(e.dataTransfer)) return
+          e.preventDefault()
+          dragDepth.current = 0
+          setDropHover(false)
+          const files = Array.from(e.dataTransfer.files)
+          if (files.length) void onTermDrop(files)
+        }}
         onPointerDownCapture={(e) => { if (e.button === 2) e.stopPropagation() }}
         onMouseDownCapture={(e) => { if (e.button === 2) e.stopPropagation() }}
         onContextMenu={(e) => {
@@ -1906,6 +2004,32 @@ export default function SessionView(props: {
             doar pentru cititoarele de ecran — cum îl activează + cum iese (Ctrl+M). Vezi audit A4. */}
         <span className="sr-only">{t('session.srHint')}</span>
         <div ref={containerRef} role="application" aria-label={t('session.terminalAria')} className="h-full w-full" />
+
+        {/* Drop pe terminal: spune UNDE aterizează fişierul (cwd din OSC 7 sau home) înainte să
+            dai drumul. Butonul e o ţintă de drop alternativă: lăsat pe el, deschide panoul de
+            fişiere, de unde alegi directorul şi re-tragi. */}
+        {dropHover && (
+          <div role="status"
+            className="pointer-events-none absolute inset-1.5 z-30 flex flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-sky-400/70 bg-ink-950/85 p-4 text-center backdrop-blur-sm">
+            <span aria-hidden="true" className="wt-info"><UploadIcon size={22} /></span>
+            <div className="max-w-full truncate font-mono text-sm text-slate-100" title={cwd ?? '~'}>
+              {t('transfers.dropTo', { dir: cwd ?? '~' })}
+            </div>
+            <div className="text-xs text-slate-400">{cwd ? t('transfers.dropCwdNote') : t('transfers.dropHomeNote')}</div>
+            <button type="button"
+              className="pointer-events-auto mt-1 rounded-md bg-ink-800 px-3 py-1.5 text-xs text-slate-200 ring-1 ring-ink-600 hover:bg-ink-700"
+              title={t('transfers.chooseFolderHint')}
+              onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = 'none' }}
+              onDrop={(e) => {
+                e.preventDefault(); e.stopPropagation()
+                dragDepth.current = 0; setDropHover(false)
+                if (!showFiles) toggleFiles()
+              }}
+              onClick={() => { setDropHover(false); if (!showFiles) toggleFiles() }}>
+              {t('transfers.chooseFolder')}
+            </button>
+          </div>
+        )}
 
         {/* Guardrail: comandă blocată (mesaj tranzitoriu) */}
         {guardMsg && (

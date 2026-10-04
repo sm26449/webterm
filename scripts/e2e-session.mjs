@@ -589,14 +589,35 @@ try {
   await activePane.locator('.xterm-screen').click()
   await page.keyboard.type('cat /tmp/wt_edit.txt\n')
   check('overwrite confirmat scrie noul conținut pe host', await waitScreen('continut-suprascris-faza4'))
-  // bara globală de transferuri (JobsBar): upload-ul apare, ajunge la 100 % / „Done", iar
-  // Dismiss scoate rândul — şi bara dispare când nu mai e nimic de arătat
-  const jobsBar = page.locator('section[aria-label="Transfers"]')
-  const jobsText = (await visible(jobsBar)) ? ((await jobsBar.textContent()) ?? '') : ''
-  check('bara de transferuri arată upload-ul terminat (100 % / Done)',
-    jobsText.includes('wt_edit.txt') && jobsText.includes('Done'))
-  await jobsBar.locator('button[aria-label^="Dismiss"]').first().click().catch(() => {})
-  check('Dismiss scoate rândul şi bara dispare', await hidden(jobsBar))
+  // Transferuri: progresul normal stă în CHIP-ul din bara de stare (banda JobsBar apare doar
+  // pentru stalled/err/orphan). Chip-ul arată upload-ul terminat, click deschide popover-ul cu
+  // acelaşi rând (Done + Copy path), Dismiss scoate rândul — popover-ul şi chip-ul dispar.
+  const chip = page.locator('[data-testid="wt-transfers-chip"]').last()
+  check('chip-ul de transferuri din bara de stare arată upload-ul terminat',
+    (await visible(chip)) && ((await chip.textContent()) ?? '').includes('wt_edit.txt'))
+  check('banda de transferuri NU apare pentru un upload sănătos',
+    (await page.locator('section[aria-label="Transfers"]').count()) === 0)
+  await chip.click()
+  const pop = page.locator('[role=dialog][aria-label="Transfers"]')
+  const popText = (await visible(pop)) ? ((await pop.textContent()) ?? '') : ''
+  check('popover-ul se deschide cu rândul (Done + Copy path)',
+    popText.includes('wt_edit.txt') && popText.includes('Done') && (await pop.locator('button[aria-label^="Copy path"]').count()) >= 1)
+  await pop.locator('button[aria-label^="Dismiss"]').first().click().catch(() => {})
+  check('Dismiss scoate rândul; popover-ul şi chip-ul dispar', (await hidden(pop)) && (await hidden(chip)))
+
+  // Paste de IMAGINE în terminal → fişierul e scris în inbox-ul hostului (~/.webterm/inbox/
+  // <timestamp>.png) şi calea lui, citată la nevoie, e tastată la prompt (fără Enter). Tastăm
+  // `wc -c ` înainte, ca Enter-ul de după să dovedească şi că fişierul chiar există pe host.
+  await activePane.locator('.xterm-screen').click()
+  await page.keyboard.type('wc -c ')
+  await activePane.locator('.xterm-helper-textarea').evaluate((ta) => {
+    const dt = new DataTransfer()
+    dt.items.add(new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], 'image.png', { type: 'image/png' }))
+    ta.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }))
+  })
+  check('paste de imagine: calea din inbox e tastată la prompt', await waitScreen('/.webterm/inbox/', 15000))
+  await page.keyboard.type('&& echo PASTE_OK\n')
+  check('fişierul lipit există pe host (4 octeţi)', await waitScreen('PASTE_OK', 8000))
 
   // ── Test #2: nume cu spații/paranteze/diacritice (encoding pe tot lanțul) ──
   const SPECIAL = 'raport ședință (2).txt'

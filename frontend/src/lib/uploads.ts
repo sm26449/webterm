@@ -18,6 +18,7 @@
 import { api, ApiError, errText, withStepup } from './api'
 import { tStatic } from './i18n'
 import { lsGet, lsRemove, lsSet } from './storage'
+import { insertPathInto } from './transfers'
 import { UploadJob, isActive, uploadStore } from './uploadStore'
 
 // ── parametri ─────────────────────────────────────────────────────────────────────────────
@@ -193,6 +194,10 @@ interface Ctl {
   authLost: boolean            // ultima eroare a fost 401: nu se reia automat
   size: number
   lastModified: number
+  /** ce se întâmplă după commit (drop pe terminal / paste): calea se tastează în terminalul
+      `sid`, dacă acel tab mai e deschis — vezi lib/transfers.ts */
+  then?: 'insert-path'
+  sid?: string
 }
 const ctls = new Map<string, Ctl>()
 
@@ -218,7 +223,7 @@ function publish(c: Ctl, p: Partial<UploadJob>) {
   if (cur) { uploadStore.patch(c.id, p); return }
   uploadStore.set({
     id: c.id, hostId: c.hostId, hostName: c.hostName, dest: c.dest, name: c.name, size: c.size,
-    pos: 0, pct: 0, bytesPerSec: 0, etaSec: null, state: 'running', attempts: 1, ...p,
+    pos: 0, pct: 0, bytesPerSec: 0, etaSec: null, state: 'running', attempts: 1, then: c.then, sid: c.sid, ...p,
   })
 }
 
@@ -386,11 +391,17 @@ async function runLoop(c: Ctl): Promise<void> {
     const crcQ = doCrc ? `&crc32=${crc >>> 0}` : ''
     await withStepup(hid, () => api(`/api/hosts/${hid}/fs/upload/commit?${q}${crcQ}`, { method: 'POST' }))
     lsRemove(c.lsKey)
-    publish(c, { pos: file.size, pct: 100, bytesPerSec: 0, etaSec: 0, state: 'done' })
+    // `insert-path`: tastăm calea în terminalul de origine ACUM, din motor (componenta poate fi
+    // demontată). Dacă tab-ul nu mai există, rândul rămâne cu „Copy path" până la dismiss —
+    // omul a cerut calea, nu trebuie s-o piardă fiindcă a schimbat tab-ul 20 s.
+    const inserted = c.then === 'insert-path' ? insertPathInto(c.sid, c.dest) : undefined
+    publish(c, { pos: file.size, pct: 100, bytesPerSec: 0, etaSec: 0, state: 'done', inserted })
     ctls.delete(c.id)        // eliberăm File-ul; rândul rămâne în store până la dismiss/expirare
-    window.setTimeout(() => {
-      if (uploadStore.get(c.id)?.state === 'done') uploadStore.remove(c.id)
-    }, DONE_LINGER_MS)
+    if (inserted !== false) {
+      window.setTimeout(() => {
+        if (uploadStore.get(c.id)?.state === 'done') uploadStore.remove(c.id)
+      }, DONE_LINGER_MS)
+    }
   } catch (e) {
     if (c.cancelled) return
     // temp-ul RĂMÂNE pe host, File-ul rămâne în controler → Retry reia de la offset-ul real
@@ -403,33 +414,42 @@ async function runLoop(c: Ctl): Promise<void> {
 }
 
 // ── API public ────────────────────────────────────────────────────────────────────────────
-export interface StartUploadOpts { hostId: number; hostName: string; dest: string; name?: string; file: File }
+export interface StartUploadOpts {
+  hostId: number; hostName: string; dest: string; name?: string; file: File
+  /** după commit: tastează calea în terminalul `sid` (drop pe terminal / paste de imagine) */
+  then?: 'insert-path'
+  sid?: string
+}
 
 /** Un upload (cu `name` = eticheta relativă din drop). Dacă ACELAŞI fişier spre aceeaşi ţintă e
     deja în mers, nu porneşte un al doilea scriitor (cele două bucle şi-ar suprascrie reciproc
     controlerul şi şi-ar fura offset-ul prin resync-uri 409); dacă era `err`/`orphan`, re-drop-ul
-    ESTE reluarea. Promisiunea se rezolvă la finalul primei treceri (done/err/cancelled). */
-export async function startUpload(o: StartUploadOpts): Promise<void> {
+    ESTE reluarea. Promisiunea se rezolvă la finalul primei treceri (done/err/cancelled) cu
+    id-ul job-ului, ca apelantul să poată citi starea finală din store (ex. retenţia inbox-ului
+    rulează doar după un `done`). */
+export async function startUpload(o: StartUploadOpts): Promise<string> {
   ensureGlobalListeners()
   const lsKey = upLsKey(o.hostId, o.dest, o.file.size, o.file.lastModified)
   const meta = parseUploadMeta(lsGet(lsKey), lsKey)
   const id = meta?.uid ?? newUid()
   let c = ctls.get(id)
-  if (c && c.running) return
+  if (c && c.running) return id
   if (!c) {
     c = { id, hostId: o.hostId, hostName: o.hostName, dest: o.dest, name: o.name ?? o.file.name, lsKey,
           file: o.file, xhr: null, cancelled: false, running: false, abortReason: null, authLost: false,
-          size: o.file.size, lastModified: o.file.lastModified }
+          size: o.file.size, lastModified: o.file.lastModified, then: o.then, sid: o.sid }
     ctls.set(id, c)
   } else {
     c.file = o.file                                // orfan sau err: acum avem din nou octeţii
     c.hostName = o.hostName || c.hostName
     if (o.name) c.name = o.name
+    if (o.then) { c.then = o.then; c.sid = o.sid }
   }
   // rândul „orphan" (dacă exista) devine rândul viu al aceluiaşi job — acelaşi id, deci acelaşi rând
   uploadStore.remove(id)
   writeMeta(c, meta?.pos ?? 0)
   await runLoop(c)
+  return id
 }
 
 /** Reintră în buclă de la offset-ul real (`status`) pentru un job `err`; pentru `stalled` taie

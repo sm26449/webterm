@@ -108,6 +108,8 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
     [uploadsAll, props.host.id])
   const [overwrite, setOverwrite] = useState<{ items: UpItem[]; count: number } | null>(null)
   const [drag, setDrag] = useState(false)
+  // drop ţintit pe un RÂND de director: fişierele intră acolo, nu în directorul afişat
+  const [dropRow, setDropRow] = useState<string | null>(null)
   const [editing, setEditing] = useState<{ path: string; name: string } | null>(null)
   // urmărește cwd-ul din terminal (OSC 7). Navigarea manuală îl oprește, ca să
   // poți explora în altă parte fără să fii „tras” înapoi la fiecare comandă.
@@ -276,23 +278,43 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
     if (live) cancelUpload(id); else dismissUpload(id)
   }
 
-  // punct de intrare: cere confirmare dacă suprascrie fișiere top-level existente
-  function startUpload(items: UpItem[]) {
+  // fişierele dintr-un drop (foldere incluse). webkitGetAsEntry TREBUIE apelat sincron —
+  // `items` se golesc după handler — de aceea întâi culegem intrările, apoi le parcurgem.
+  async function collectDrop(e: React.DragEvent): Promise<UpItem[]> {
+    const entries = Array.from(e.dataTransfer.items || [])
+      .map((it) => (it.webkitGetAsEntry ? it.webkitGetAsEntry() : null))
+      .filter(Boolean)
+    const out: UpItem[] = []
+    if (entries.length) {
+      for (const en of entries) await readEntry(en, '', out)
+    } else {
+      for (const f of Array.from(e.dataTransfer.files)) out.push({ file: f, rel: f.name })
+    }
+    return out
+  }
+
+  // punct de intrare: cere confirmare dacă suprascrie fișiere top-level existente. `baseDir`
+  // (drop pe un rând de director) ţinteşte un subdirector pe care nu l-am listat — acolo nu
+  // putem vedea coliziunile, deci urcăm direct (motorul suprascrie atomic la commit).
+  function startUpload(items: UpItem[], baseDir?: string) {
     if (!listing) return
+    const base = baseDir ?? listing.path
     // re-drop-ul unui fişier DEJA în zbor pornea un al doilea uploadOne pe acelaşi upload_id:
     // cele două bucle îşi suprascriau reciproc ctl-ul (cancel-ul rămânea mort) şi îşi
     // furau offset-ul prin resync-uri 409 — îl ignorăm, transferul existent continuă singur
-    items = items.filter((it) => !isUploadBusy(props.host.id, join(listing.path, it.rel)))
+    items = items.filter((it) => !isUploadBusy(props.host.id, join(base, it.rel)))
     if (!items.length) return
+    if (base !== listing.path) { void reallyUpload(items, base); return }
     const existing = new Set(listing.entries.map((e) => e.name))
     const collides = items.filter((it) => !it.rel.includes('/') && existing.has(it.rel))
     if (collides.length) setOverwrite({ items, count: collides.length })
     else reallyUpload(items)
   }
 
-  async function reallyUpload(items: UpItem[]) {
+  async function reallyUpload(items: UpItem[], baseDir?: string) {
     setOverwrite(null)
     if (!listing) return
+    const base = baseDir ?? listing.path
     setBusy(true)
     // creează întâi subdirectoarele (upload de folder), idempotent
     const dirs = new Set<string>()
@@ -301,9 +323,9 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
       if (slash > 0) dirs.add(it.rel.slice(0, slash))
     }
     for (const d of [...dirs].sort()) {
-      try { await api(`/api/hosts/${props.host.id}/fs/mkdir`, { method: 'POST', body: JSON.stringify({ path: join(listing.path, d), parents: true }) }) } catch { /* există deja */ }
+      try { await api(`/api/hosts/${props.host.id}/fs/mkdir`, { method: 'POST', body: JSON.stringify({ path: join(base, d), parents: true }) }) } catch { /* există deja */ }
     }
-    for (const it of items) await uploadOne(join(listing.path, it.rel), it.rel, it.file)
+    for (const it of items) await uploadOne(join(base, it.rel), it.rel, it.file)
     setBusy(false)
     load(listing.path)
   }
@@ -447,21 +469,11 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
         className={asideCls}
         onKeyDown={drawer.onKeyDown}
         onDragOver={(e) => { e.preventDefault(); setDrag(true) }}
-        onDragLeave={() => setDrag(false)}
+        onDragLeave={() => { setDrag(false); setDropRow(null) }}
         onDrop={async (e) => {
-          e.preventDefault(); setDrag(false)
+          e.preventDefault(); setDrag(false); setDropRow(null)
           if (!listing) return
-          // webkitGetAsEntry TREBUIE apelat sincron (items se golesc după handler)
-          const entries = Array.from(e.dataTransfer.items || [])
-            .map((it) => (it.webkitGetAsEntry ? it.webkitGetAsEntry() : null))
-            .filter(Boolean)
-          const out: UpItem[] = []
-          if (entries.length) {
-            for (const en of entries) await readEntry(en, '', out)
-          } else {
-            for (const f of Array.from(e.dataTransfer.files)) out.push({ file: f, rel: f.name })
-          }
-          startUpload(out)
+          startUpload(await collectDrop(e))
         }}
       >
         {header}
@@ -529,9 +541,16 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
 
         <div ref={listRef} tabIndex={0} onKeyDown={onKeyDown}
           className={`relative min-h-0 flex-1 overflow-y-auto outline-none ${drag ? 'ring-2 ring-inset ring-sky-500' : ''}`}>
-          {drag && (
+          {/* peste un rând de director nu întunecăm lista (inelul rândului trebuie să se vadă);
+              spunem jos, într-o linie, unde va ateriza */}
+          {drag && !dropRow && (
             <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-black/60 text-xs text-sky-200">
               {t('files.dropHere')}
+            </div>
+          )}
+          {drag && dropRow && (
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 bg-ink-900/95 px-3 py-1 text-center font-mono text-[11px] text-sky-200">
+              {t('transfers.dropIntoFolder', { name: dropRow })}
             </div>
           )}
           {newFolder !== null && (
@@ -568,11 +587,22 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
           )}
           {view.map((e, i) => (
             <div key={e.name} data-idx={i}
-              className={`group flex items-center gap-2 px-3 py-1 text-[12px] ${i === sel ? 'bg-ink-800' : 'hover:bg-ink-800/60'}`}
-              onClick={() => setSel(i)}>
+              className={`group flex items-center gap-2 px-3 py-1 text-[12px] ${i === sel ? 'bg-ink-800' : 'hover:bg-ink-800/60'} ${dropRow === e.name ? 'bg-sky-500/10 ring-2 ring-inset ring-sky-400' : ''}`}
+              onClick={() => setSel(i)}
+              // drop pe un rând de DIRECTOR → upload în el (nu în directorul afişat). stopPropagation:
+              // altfel handler-ul <aside> ar urca aceleaşi fişiere încă o dată în directorul curent.
+              // `aria-dropeffect` e deprecat — indiciul pentru cititoare e un text ascuns vizual.
+              onDragOver={e.dir ? (ev) => { ev.preventDefault(); ev.stopPropagation(); setDrag(true); setDropRow(e.name) } : undefined}
+              onDragLeave={e.dir ? () => setDropRow((r) => (r === e.name ? null : r)) : undefined}
+              onDrop={e.dir ? async (ev) => {
+                ev.preventDefault(); ev.stopPropagation(); setDrag(false); setDropRow(null)
+                if (!listing) return
+                startUpload(await collectDrop(ev), join(listing.path, e.name))
+              } : undefined}>
               <span className={`shrink-0 ${e.dir ? 'wt-link' : e.link ? 'text-slate-400' : 'text-slate-500'}`}>
                 {e.dir ? <FolderIcon /> : e.link ? <LinkIcon /> : <FileIcon />}
               </span>
+              {e.dir && <span className="sr-only">{t('transfers.dropFolderHint')}</span>}
               {renaming === e.name ? (
                 <input autoFocus defaultValue={e.name} aria-label={t('files.renameAria', { name: e.name })}
                   onKeyDown={(ev) => { if (ev.key === 'Enter') doRename(e, (ev.target as HTMLInputElement).value); if (ev.key === 'Escape') { ev.stopPropagation(); setRenaming(null) } }}
@@ -616,6 +646,8 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
           {listing && view.length === 0 && (
             <div className="px-3 py-6 text-center text-[11px] text-slate-500">
               {filter ? t('files.emptyFilter') : t('files.emptyDir')}
+              {/* indiciu de upload DOAR în starea goală — nu o zonă punctată permanentă */}
+              {!filter && <div className="wt-muted mt-1 text-[10px]">{t('transfers.emptyHint')}</div>}
             </div>
           )}
           {listing?.truncated && (

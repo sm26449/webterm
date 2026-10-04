@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { TransfersChip } from './StatusBar'
 import { isSessionLive, Host, Session } from '../lib/api'
 import { hostColor } from '../lib/host'
 import { useI18n } from '../lib/i18n'
@@ -211,12 +212,18 @@ export default function TabBar(props: {
           )
         })}
       </div>
+      {/* transferuri: chip global (progres/stare + popover cu acţiuni), ancorat la dreapta; cu
+          sesiunea activă ca ţintă pentru „inserează calea". Vezi TransfersChip. */}
+      <div className="ml-auto flex shrink-0 items-center pl-1">
+        <TransfersChip session={props.tabs.find((s) => s.id === props.activeSid)}
+          hostName={props.hosts.find((h) => h.id === props.tabs.find((s) => s.id === props.activeSid)?.host_id)?.name} />
+      </div>
       {/* split-views: chip-uri denumite (comută între layout-uri ca între taburi) + „+" (creare) şi,
-          când unul e activ, broadcast + ieşire. `ml-auto` le ancorează la dreapta. */}
+          când unul e activ, broadcast + ieşire. */}
       {props.split && (props.split.views.length > 0 || props.tabs.length >= 2) && (() => {
         const sp = props.split
         return (
-        <div className="ml-auto flex shrink-0 items-center gap-0.5 pl-1">
+        <div className="flex shrink-0 items-center gap-0.5 pl-1">
           {sp.views.map((v) => {
             const active = v.id === sp.activeId
             return (

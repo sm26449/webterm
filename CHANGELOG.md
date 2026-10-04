@@ -9,6 +9,27 @@ back.
 
 ## [Unreleased]
 
+## [3.1.2] — 2026-10-04 · agent (54)
+
+### Added
+- **Transfers phase 1: drop on the terminal, paste → inbox, transfers chip in the tab strip.** The reason is
+  screenshots into AI CLIs over a web terminal: Claude Code or aider run *on the host* and cannot
+  read the browser's clipboard, so "paste the screenshot" had no path to them. Now a paste with
+  an image/file in the clipboard uploads it to `~/.webterm/inbox/<YYYY-MM-DD_HH-mm-ss>[-n].<ext>`
+  (named files keep their name, timestamp-prefixed) and types the path at the prompt — quoted
+  only when it contains spaces/special characters, followed by a space, no Enter. Text pastes are
+  untouched. Dropping files on a terminal uploads them to the session's current directory (OSC 7;
+  the home directory when the shell has not reported one — the overlay says which) and inserts the
+  path the same way; **Choose another folder…** hands over to the Files panel, where dropping on a
+  **folder row** now uploads into that folder. Progress moved out of the always-on strip into a
+  **transfers chip in the tab strip** (`↑ file 63% · 24 MB/s · 9m`, or `↑ N transfers · 63%`) whose popover lists
+  every job with the existing actions plus **Copy path** / **Insert path**; the strip above the
+  workspace now appears only for jobs that need a decision (stalled, failed, incomplete) and goes
+  away once resolved. `done`/`failed` raise a browser notification when the tab is hidden.
+  Settings → Preferences: *Pasted files go to* (inbox / session directory) and *Inbox retention*
+  (7 days, 0 = keep), enforced client-side after each inbox upload (≤ 50 deletions per run, best
+  effort). No gateway/agent change — the existing fs API suffices. [docs/TRANSFERS.md](docs/TRANSFERS.md).
+
 ## [3.1.1] — 2026-10-04 · agent (54)
 
 ### Added

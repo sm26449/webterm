@@ -4,6 +4,7 @@ import { useI18n } from '../../lib/i18n'
 import { allTimezones, browserTimezone, getTimezone, setTimezone, timeInZone } from '../../lib/tz'
 import UpdateCommand from '../UpdateCommand'
 import { lsGet, lsSet } from '../../lib/storage'
+import { INBOX_REL, PasteDest, inboxDays, pasteDest, setInboxDays, setPasteDest } from '../../lib/transfers'
 import { field, heading } from './ui'
 
 // Preferinţe: fus orar, accesibilitate (mod screen-reader), verificarea de versiune. Extras din
@@ -22,6 +23,9 @@ export default function PreferencesTab() {
   const [unicode11, setUnicode11] = useState(() => lsGet('wt_unicode11') === '1')
   const [upd, setUpd] = useState<UpdateInfo | null>(null)
   const [updBusy, setUpdBusy] = useState(false)
+  // transferuri: unde ajung fişierele lipite în terminal + retenţia inbox-ului (lib/transfers.ts)
+  const [dest, setDest] = useState<PasteDest>(pasteDest)
+  const [days, setDays] = useState<string>(() => String(inboxDays()))
 
   useEffect(() => {
     const iv = setInterval(() => setClock(timeInZone(tz)), 1000)
@@ -97,6 +101,25 @@ export default function PreferencesTab() {
         </span>
       </label>
       <p className="mt-2 text-xs text-slate-500">{t('settings.termReloadHint')}</p>
+
+      {/* ── Transferuri ── */}
+      <h3 className={heading}>{t('transfers.settingsTitle')}</h3>
+      <p className="mt-1 text-xs text-slate-500">{t('transfers.pasteDestHint')}</p>
+      <label className="mt-2 block text-sm text-slate-300">
+        <span className="mb-1 block text-xs text-slate-400">{t('transfers.pasteDest')}</span>
+        <select value={dest} onChange={(e) => { const d = e.target.value === 'cwd' ? 'cwd' : 'inbox'; setDest(d); setPasteDest(d) }} className={field}>
+          <option value="inbox">{t('transfers.pasteDestInbox', { dir: `~/${INBOX_REL}` })}</option>
+          <option value="cwd">{t('transfers.pasteDestCwd')}</option>
+        </select>
+      </label>
+      <label className="mt-2 block text-sm text-slate-300">
+        <span className="mb-1 block text-xs text-slate-400">{t('transfers.inboxDays')}</span>
+        <input type="number" min={0} max={3650} step={1} value={days}
+          onChange={(e) => { setDays(e.target.value); const n = Number(e.target.value); if (Number.isFinite(n)) setInboxDays(n) }}
+          onBlur={() => setDays(String(inboxDays()))}
+          className={field + ' max-w-[8rem]'} />
+        <span className="mt-0.5 block text-xs text-slate-500">{t('transfers.inboxDaysHint')}</span>
+      </label>
 
       {/* ── Verificare de versiune ── */}
       <h3 className={heading}>{t('settings.update.title')}</h3>
