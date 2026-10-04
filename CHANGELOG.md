@@ -9,6 +9,8 @@ back.
 
 ## [Unreleased]
 
+## [3.1.1] — 2026-10-04 · agent (54)
+
 ### Added
 - **Transfers bar + upload watchdog.** A 17 GB drag-and-drop upload to an agent host ran at
   ~24 MB/s for 1578 chunks and then simply stopped: the browser stopped sending (uplink hiccup /
