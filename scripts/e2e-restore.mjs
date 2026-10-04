@@ -74,7 +74,11 @@ try {
   await page.setInputFiles('input[type=file]', '/tmp/restore-backup.wtbk')
   await page.locator('[aria-label="Backup passphrase"]').fill(BK_PASS)
   await page.getByPlaceholder('your account password').fill(PASSWORD)
-  await page.getByRole('button', { name: 'Restore and restart' }).click()
+  await page.getByRole('button', { name: 'Restore and restart' }).first().click()
+  // De la 3.1.0 confirmarea „RESTORE replaces ALL current data…" e un ConfirmModal în aplicaţie
+  // (role=alertdialog, butonul de confirmare ultimul; Anulează e primul şi focusat la `danger`),
+  // nu `window.confirm` — handlerul `dialog` de mai sus rămâne doar ca plasă pentru alte prompturi.
+  await page.locator('[role="alertdialog"]').last().locator('button').last().click({ timeout: 10000 })
   await page.waitForSelector('text=Backup validated', { timeout: 20000 })
   check('UI restore: „Backup validated" (repornire iniţiată)', true)
 } finally {
