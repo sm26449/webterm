@@ -9,6 +9,26 @@ back.
 
 ## [Unreleased]
 
+### Added
+- **Transfers bar + upload watchdog.** A 17 GB drag-and-drop upload to an agent host ran at
+  ~24 MB/s for 1578 chunks and then simply stopped: the browser stopped sending (uplink hiccup /
+  sleep) while gateway and agent were healthy. Nothing said so — the XHR had a 300 s timeout and
+  five retries with 1–8 s backoff, so a hung connection sat silently for many minutes, and the
+  only feedback was a row inside the Files panel (closable) plus a 6 s toast. The upload engine
+  now lives outside any component (`lib/uploads.ts`, same protocol: 8 MiB chunks, step-up-aware
+  status/commit, 409/403 resync, CRC-32 rules) and reports into a global **Transfers bar** under
+  the top chrome, visible on every screen. A byte-level watchdog marks a chunk **Stalled** after
+  20 s without progress and aborts + resends it after 60 s; each chunk gets up to 8 attempts with
+  exponential backoff capped at 15 s; on exhaustion the row shows the translated reason and a
+  **Retry** that re-enters the loop from the offset the host confirms (the `File` stays in
+  memory). Uploads also resume by themselves on `online` / tab-visible, and a 401 pauses the job
+  with "sign in again". The `wt_up_*` localStorage entries now carry JSON metadata (old plain
+  upload-id values still work), so after a reload unfinished uploads appear as **Incomplete**
+  rows with **Open folder** / **Discard** (deletes the `.wtpart` on the host); dropping the same
+  file resumes it. State changes are announced once through a polite live region (no toast
+  spam), `beforeunload` guards active transfers, and the gateway logs a rate-limited INFO line
+  when a chunk *starts* so a stall mid-body leaves a trace.
+
 ## [3.1.0] — 2026-10-04 · agent (54)
 
 **The audit release.** A full nine-section internal audit (2026-10-04) and its first three

@@ -589,6 +589,14 @@ try {
   await activePane.locator('.xterm-screen').click()
   await page.keyboard.type('cat /tmp/wt_edit.txt\n')
   check('overwrite confirmat scrie noul conținut pe host', await waitScreen('continut-suprascris-faza4'))
+  // bara globală de transferuri (JobsBar): upload-ul apare, ajunge la 100 % / „Done", iar
+  // Dismiss scoate rândul — şi bara dispare când nu mai e nimic de arătat
+  const jobsBar = page.locator('section[aria-label="Transfers"]')
+  const jobsText = (await visible(jobsBar)) ? ((await jobsBar.textContent()) ?? '') : ''
+  check('bara de transferuri arată upload-ul terminat (100 % / Done)',
+    jobsText.includes('wt_edit.txt') && jobsText.includes('Done'))
+  await jobsBar.locator('button[aria-label^="Dismiss"]').first().click().catch(() => {})
+  check('Dismiss scoate rândul şi bara dispare', await hidden(jobsBar))
 
   // ── Test #2: nume cu spații/paranteze/diacritice (encoding pe tot lanțul) ──
   const SPECIAL = 'raport ședință (2).txt'

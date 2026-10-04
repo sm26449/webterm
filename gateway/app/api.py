@@ -1898,6 +1898,26 @@ async def fs_archive(host_id: int, path: str, user=Depends(security.require_user
         headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
+# Rândul de audit se scrie la FINALUL feliei. O felie care se opreşte la mijlocul corpului (clientul
+# a încetat să trimită — incidentul cu upload-ul de 17 GB oprit la felia 1579) nu lăsa deci NICIO
+# urmă pe gateway: din log, serverul părea să nu fi primit nimic. O linie INFO la START, limitată
+# la una la 10 s per upload (nu per felie: la 24 MB/s sunt 3 felii/s), spune cel puţin până unde
+# a ajuns clientul şi când a amuţit.
+_chunk_log_at: dict[str, float] = {}
+
+
+def _log_chunk_start(host_id: int, upload_id: str, offset: int) -> None:
+    now = time.monotonic()
+    if now - _chunk_log_at.get(upload_id, 0.0) < 10:
+        return
+    if len(_chunk_log_at) > 1000:            # upload-uri vechi: nu ţinem dict-ul la infinit
+        for k, at in list(_chunk_log_at.items()):
+            if now - at > 3600:
+                _chunk_log_at.pop(k, None)
+    _chunk_log_at[upload_id] = now
+    log.info("fs upload chunk start host=%s upload_id=%s offset=%s", host_id, upload_id, offset)
+
+
 @router.post("/api/hosts/{host_id}/fs/upload")
 async def fs_upload(host_id: int, request: Request, path: str,
                     if_mtime: int | None = None, upload_id: str | None = None,
@@ -1908,6 +1928,8 @@ async def fs_upload(host_id: int, request: Request, path: str,
     verificare de conflict — refuză (409) dacă ținta s-a schimbat de când ai deschis-o."""
     audit.detail(request, path)
     await _require_host_stepup(host_id, user)   # H1
+    if upload_id:
+        _log_chunk_start(host_id, upload_id, offset)
     async def source():
         async for chunk in request.stream():
             yield chunk

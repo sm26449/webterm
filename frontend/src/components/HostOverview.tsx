@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import { isSessionLive, api, AppLink, Host, Session, timeAgo } from '../lib/api'
 import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
 import { useI18n } from '../lib/i18n'
+import { peekFilesDir } from '../lib/uploads'
 import { useConfirm } from '../lib/confirm'
 import { hostHistory } from '../lib/metrics'
 import { DockerIcon, DownloadIcon, FilesIcon, ForwardIcon, LinkIcon, NoteIcon, PencilIcon, PlusIcon, PopoutIcon, RefreshIcon, ServerIcon, ServicesIcon, ShieldIcon, SplitIcon, TerminalPromptIcon, ToolboxIcon, TrashIcon } from './Icons'
@@ -52,7 +53,16 @@ export default function HostOverview(props: {
   const agentReady = isAgent && !!host.online      // tab-urile prin agent cer agentul online
   const m = host.metrics
   const [tab, setTab] = useState<HubTab>('overview')
-  useEffect(() => { setTab('overview') }, [host.id])
+  // bara de transferuri poate cere „deschide Files în directorul X" (upload orfan): atunci
+  // pornim direct pe tab-ul Files; FilePanel consumă directorul (lib/uploads.ts)
+  useEffect(() => { setTab(peekFilesDir(host.id) ? 'files' : 'overview') }, [host.id])
+  useEffect(() => {
+    const onOpen = (e: Event) => {
+      if ((e as CustomEvent<{ hostId: number }>).detail.hostId === host.id) setTab('files')
+    }
+    window.addEventListener('wt-open-files', onOpen)
+    return () => window.removeEventListener('wt-open-files', onOpen)
+  }, [host.id])
 
   // complete per-host history (not limited by the global recent-closed window),
   // fetched on host change + refreshed, merged with the fresh 5s global poll

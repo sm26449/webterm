@@ -125,6 +125,22 @@ export const DownloadIcon = () => (
   </Icon>
 )
 
+export const UploadIcon = ({ size = 14 }: { size?: number }) => (
+  <Icon size={size}>
+    <path d="M12 15V3m0 0 4 4m-4-4-4 4" />
+    <path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
+  </Icon>
+)
+
+/** chevron de pliere/depliere; `open` îl roteşte în jos */
+export const ChevronIcon = ({ open = false, size = 14 }: { open?: boolean; size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+       strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"
+       style={{ transform: open ? 'rotate(90deg)' : undefined, transition: 'transform 150ms' }}>
+    <path d="m9 6 6 6-6 6" />
+  </svg>
+)
+
 export const FolderIcon = () => (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" aria-hidden="true">
     <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />

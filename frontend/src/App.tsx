@@ -18,6 +18,7 @@ import SharedView from './components/SharedView'
 import Sidebar from './components/Sidebar'
 import SessionView from './components/SessionView'
 import TabBar from './components/TabBar'
+import JobsBar from './components/JobsBar'
 import Toasts, { ToastItem } from './components/Toasts'
 import CopyToast from './components/CopyToast'
 import { errText, api, ApiError, AppState, Host, isSessionLive, Session, Snippet, SplitView, setStepupHandler, withStepup } from './lib/api'
@@ -28,6 +29,7 @@ import { useFocusTrap } from './lib/useFocusTrap'
 import { copyText } from './lib/clipboard'
 import { CopyIcon, ShieldIcon } from './components/Icons'
 import { ensureNotificationPermission, notify, notifyError, registerToast } from './lib/notify'
+import { restoreOrphans } from './lib/uploads'
 import { registerSecretPrompt, SecretAsk } from './lib/secretPrompt'
 import SecretPromptModal from './components/SecretPromptModal'
 import { markBooted } from './lib/failsafe'
@@ -806,6 +808,11 @@ function MainApp() {
   // 403 pe orice acțiune de host (run/fs/update/provision/uninstall), deschide fereastra pe
   // server prin /stepup și reîncearcă cererea. Fără asta, doar crearea sesiunii cerea 2FA.
   // NB: HOOK — tot înainte de orice `return` timpuriu.
+  // upload-uri rămase neterminate într-o sesiune anterioară (chei `wt_up_*`): le arătăm în bara
+  // de transferuri ca „orfane" imediat ce suntem autentificaţi (Discard are nevoie de API)
+  useEffect(() => {
+    if (appState?.authenticated) restoreOrphans()
+  }, [appState?.authenticated])
   useEffect(() => {
     setStepupHandler(async (hostId) => {
       const cred = await stepupCredential(hostId)
@@ -1293,6 +1300,9 @@ function MainApp() {
             }}
           />
         )}
+      {/* transferuri în mers / picate / orfane — pe ORICE ecran (acasă, host, sesiune), nu doar în
+          panoul de fişiere care le-a pornit; se ascunde singură când nu e nimic */}
+      <JobsBar hosts={hosts} />
       <main className="wt-main flex min-h-0 min-w-0 flex-1">
         {/* GRILĂ multi-terminal: ia locul stack-ului keep-alive şi al split-ului (altfel o
             sesiune s-ar monta de două ori → două WS pe acelaşi PTY, războiul de detach tmux).

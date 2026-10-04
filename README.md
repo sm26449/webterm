@@ -214,10 +214,24 @@ what it does not cover, is in [Security](#security) and
   drag&drop upload (including **folders**) with a real progress
   bar + cancel — **resumable**: a dropped connection (or a closed laptop) keeps the
   bytes already uploaded, re-dropping the same file continues where it left off, and
-  a **CRC-32 integrity check** guards the commit; **download a folder (or file) as a
+  a **CRC-32 integrity check** guards the commit; every upload also shows up in the
+  **Transfers bar** (see below); **download a folder (or file) as a
   `.tgz` archive** (tarred on the host, streamed down); a **Monaco** (VS Code) editor with
   highlighting, large files opened view-only (partial-read), atomic save with
   conflict detection
+- **Transfers bar** (under the top chrome, on every screen — home, host page, any tab): one
+  compact row per upload with `host · file`, a thin progress bar, `% · MB/s · ETA`, and
+  **Cancel**; collapsible to a one-line summary. Born from a real incident (a 17 GB drop that
+  silently stopped at chunk 1579 while gateway and agent were healthy): a byte-level
+  **watchdog** marks the row **Stalled** after 20 s without progress, aborts and re-sends the
+  chunk after 60 s, retries each chunk up to 8 times with capped backoff, and resumes by itself
+  when the browser comes back online or the tab becomes visible again. When retries run out the
+  row turns red with the reason and a **Retry** button (the file stays in memory, so it
+  continues from the offset the host confirms — including after a passkey step-up or a new
+  sign-in). After a page reload, unfinished uploads are listed as **Incomplete**: drag the same
+  file into the same folder to resume, **Open folder** jumps there, **Discard** deletes the
+  temporary part on the host. Closing the tab while something is uploading asks for
+  confirmation.
 - **Git panel** (toolbar button): for the repo in the session's current directory
   (follows `cd` via OSC 7) — status, **colored diff**, stage/unstage and
   **commit**, without opening GitHub. Focused scope: merge/rebase/push/branch stay
@@ -1001,7 +1015,7 @@ administer your servers with. The CI chain, in order:
    ephemeral container, a headless Chromium checks that the UI reaches a working
    screen, with no JS errors. Catches exactly the class of bug that produced the
    white screen in v1.0.11.
-3. **E2E with a REAL agent** (`scripts/e2e-session.mjs`, 97 checks) — starts an
+3. **E2E with a REAL agent** (`scripts/e2e-session.mjs`, 99 checks) — starts an
    agent in a container **with tmux installed, i.e. the backend production uses**,
    opens sessions through the UI, types commands, verifies the output, tab
    switching, pause/re-sync, shortcuts, parametrized snippets, alert thresholds,

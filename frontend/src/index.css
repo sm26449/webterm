@@ -144,6 +144,14 @@ body {
   background: var(--term-bg);
 }
 
+/* bara de transferuri (JobsBar): sub cromul de sus, deasupra workspace-ului — aceeaşi
+   suprafaţă ca tab strip-ul, ca să citească drept „crom", nu drept conţinut */
+.wt-jobsbar {
+  background: var(--chrome-bg);
+  border-bottom: 1px solid var(--chrome-line);
+  color: var(--chrome-tx);
+}
+
 /* tab strip */
 .wt-tabstrip {
   background: var(--chrome-bg);

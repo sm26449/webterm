@@ -1,12 +1,12 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
-import { errText, api, withStepup, Host } from '../lib/api'
+import { errText, api, Host } from '../lib/api'
 import { copyText, readText } from '../lib/clipboard'
 import { useConfirm } from '../lib/confirm'
 import { getCwd } from '../lib/cwd'
 import { useI18n } from '../lib/i18n'
-import { notify } from '../lib/notify'
 import { useDrawer } from '../lib/useDrawer'
-import { uploadStore, uploadKey, uploadRel, uploadHost, UploadState, UploadCtl } from '../lib/uploadStore'
+import { cancelUpload, dismissUpload, isUploadBusy, startUpload as engineStart, takeFilesDir } from '../lib/uploads'
+import { isActive, uploadStore } from '../lib/uploadStore'
 import { uiLocale } from '../lib/tz'
 import {
   DownloadIcon, FileIcon, FolderIcon, LinkIcon, PencilIcon,
@@ -59,30 +59,8 @@ function join(dir: string, name: string): string {
 // „sub/dir/fisier.txt”; pentru fișiere simple, doar numele)
 interface UpItem { file: File; rel: string }
 
-// Upload resumabil: felie de 8 MB. Serverul verifică offset-ul; dacă e desincronizat (retry care a
-// aterizat deja, două tab-uri) răspunde 409, iar clientul reia bucla de la offset-ul real.
-const UP_CHUNK = 8 * 1024 * 1024
-class ResyncSignal { constructor(readonly offset: number) {} }
-const UID_RE = /^[0-9a-f]{16,64}$/
-
-// CRC-32 (IEEE), incremental — IDENTIC cu `zlib.crc32(bytes, prev)` din agent (poly reflectat
-// 0xEDB88320, init/xor 0xFFFFFFFF). Verificare de integritate la commit: prinde coruperea
-// accidentală (disc, trunchiere, offset). `prev` începe de la 0.
-const CRC_TABLE = (() => {
-  const t = new Uint32Array(256)
-  for (let n = 0; n < 256; n++) {
-    let c = n
-    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1)
-    t[n] = c >>> 0
-  }
-  return t
-})()
-function crc32(prev: number, bytes: Uint8Array): number {
-  let c = (prev ^ 0xFFFFFFFF) >>> 0
-  for (let i = 0; i < bytes.length; i++) c = (CRC_TABLE[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8)) >>> 0
-  return (c ^ 0xFFFFFFFF) >>> 0
-}
-
+// Motorul de upload (felii, resync, CRC, watchdog, reluare) stă în lib/uploads.ts — aici doar
+// alegem ce şi unde urcăm şi arătăm rândurile acestui host din uploadStore.
 // Traversează un FileSystemEntry (dintr-un drop) și adună fișierele cu calea lor
 // relativă — așa merge drag&drop pe FOLDERE, nu doar pe fișiere izolate.
 async function readEntry(entry: any, prefix: string, out: UpItem[]): Promise<void> {
@@ -124,11 +102,10 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
   // starea upload-urilor stă în uploadStore (nivel de modul), NU în componentă: transferul
   // supravieţuieşte închiderii panoului, iar redeschiderea îl arată în mers, cu cancel funcţional
   const uploadsAll = useSyncExternalStore(uploadStore.subscribe, uploadStore.snapshot)
-  const uploads = useMemo(() => {
-    const out: Record<string, UploadState> = {}
-    uploadsAll.forEach((v, k) => { if (uploadHost(k) === props.host.id) out[uploadRel(k)] = v })
-    return out
-  }, [uploadsAll, props.host.id])
+  // doar job-urile acestui host; orfanii (după reload, fără File) trăiesc numai în bara globală
+  const uploads = useMemo(
+    () => [...uploadsAll.values()].filter((j) => j.hostId === props.host.id && j.state !== 'orphan'),
+    [uploadsAll, props.host.id])
   const [overwrite, setOverwrite] = useState<{ items: UpItem[]; count: number } | null>(null)
   const [drag, setDrag] = useState(false)
   const [editing, setEditing] = useState<{ path: string; name: string } | null>(null)
@@ -188,12 +165,26 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
       .catch(() => load('~'))
   }, [props.host.id, props.sessionId, load])
 
-  // pornire: deschide în directorul curent al terminalului
+  // pornire: deschide în directorul curent al terminalului — sau în directorul cerut de bara de
+  // transferuri („deschide aici" pe un upload orfan), care are prioritate şi opreşte follow-ul
   useEffect(() => {
     if (!isAgent) return
-    loadSessionCwd()
+    const wanted = takeFilesDir(props.host.id)
+    if (wanted) { setFollow(false); load(wanted) } else loadSessionCwd()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAgent])
+  // acelaşi buton apăsat cât panoul e DEJA deschis pe host: navigăm direct
+  useEffect(() => {
+    const onOpen = (e: Event) => {
+      const d = (e as CustomEvent<{ hostId: number; dir: string }>).detail
+      if (d.hostId !== props.host.id) return
+      takeFilesDir(props.host.id)
+      setFollow(false)
+      load(d.dir)
+    }
+    window.addEventListener('wt-open-files', onOpen)
+    return () => window.removeEventListener('wt-open-files', onOpen)
+  }, [props.host.id, load])
 
   // Un drop RATAT (lângă panou, peste terminal) navighează altfel pagina la fişierul local:
   // browserul îl deschide şi SPA-ul moare cu tot cu sesiunile deschise. Panoul invită la
@@ -273,153 +264,16 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
     setEditing({ path: join(listing!.path, e.name), name: e.name })
   }
 
-  // upload_id STABIL per (host, cale, fișier): persistat în localStorage, ca un reload de pagină
-  // să poată relua același upload (browserul nu re-citește fișierul singur — re-selectezi același
-  // fișier și reia de unde a rămas, exact ca protocolul tus).
-  const upLsKey = (dest: string, file: File) => `wt_up_${props.host.id}_${dest}_${file.size}_${file.lastModified}`
-  function uploadIdFor(dest: string, file: File): { uid: string; lsKey: string } {
-    const lsKey = upLsKey(dest, file)
-    let uid = ''
-    try { uid = localStorage.getItem(lsKey) || '' } catch { /* localStorage indisponibil */ }
-    if (!UID_RE.test(uid)) {
-      // exact 32 hex lowercase — formatul pe care GC-ul de pe server îl recunoaşte strict
-      uid = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('')
-      try { localStorage.setItem(lsKey, uid) } catch { /* */ }
-    }
-    return { uid, lsKey }
-  }
+  // Un fişier → motorul din lib/uploads.ts (acelaşi protocol ca înainte, acum cu watchdog,
+  // reluare şi persistenţă). Promisiunea se rezolvă la finalul primei treceri; un Retry
+  // ulterior (din bara globală) nu mai trece pe aici.
+  const uploadOne = (dest: string, rel: string, file: File) =>
+    engineStart({ hostId: props.host.id, hostName: props.host.name, dest, name: rel, file })
 
-  // Un fișier, resumabil + verificat: taie în felii, trimite cu offset (XHR → progres byte-level),
-  // calculează CRC-32 în timp ce citește, iar commit-ul verifică integritatea pe host. La cădere reia
-  // de la octetul aterizat (retry+backoff; 409 = re-sincronizare). CRC-ul se verifică DOAR la un
-  // upload dintr-o singură sesiune (offset 0): la reluare, prefixul a fost urcat înainte și nu-l mai
-  // putem re-hash-ui — atunci ne bazăm pe guard-ul de offset + rename-ul atomic + TLS.
-  async function uploadOne(dest: string, key: string, file: File): Promise<void> {
-    const hid = props.host.id
-    const { uid, lsKey } = uploadIdFor(dest, file)
-    const q = `path=${encodeURIComponent(dest)}&upload_id=${uid}`
-    const sKey = uploadKey(hid, key)
-    const ctl: UploadCtl = { xhr: null, cancelled: false, dest, uid, lsKey }
-    uploadStore.setCtl(sKey, ctl)
-    // Progresul e stare GLOBALĂ (uploadStore) şi re-randează tot panoul la fiecare scriere; XHR
-    // `onprogress` bate de zeci de ori pe secundă pe o legătură rapidă → furtună de randări
-    // (audit frontend F-05). Publicăm cel mult ~10/s şi doar când procentul s-a schimbat;
-    // graniţele de felie şi finalul trec mereu (`force`), ca bara să nu rămână în urmă.
-    let lastPct = 0, shownPct = -1, shownAt = 0
-    const setPct = (bytes: number, force = false) => {
-      lastPct = file.size ? Math.round((bytes / file.size) * 100) : 100
-      const now = Date.now()
-      if (!force && (lastPct === shownPct || now - shownAt < 100)) return
-      shownPct = lastPct; shownAt = now
-      uploadStore.set(sKey, { pct: lastPct, state: 'up' })
-    }
-
-    let offset = 0
-    try {
-      const st = await withStepup(hid, () => api<{ offset: number }>(`/api/hosts/${hid}/fs/upload/status?${q}`))
-      offset = Math.min(st.offset || 0, file.size)
-    } catch { offset = 0 }
-    let doCrc = offset === 0
-    let crc = 0
-
-    // XHR (nu fetch) ca să avem progres pe octeți în timpul feliei + cancel
-    const sendChunk = (off: number, body: ArrayBuffer): Promise<void> =>
-      new Promise((resolve, reject) => {
-        const xhr = new XMLHttpRequest()
-        ctl.xhr = xhr
-        xhr.open('POST', `/api/hosts/${hid}/fs/upload?${q}&offset=${off}`)
-        xhr.upload.onprogress = (ev) => { if (ev.lengthComputable) setPct(off + ev.loaded) }
-        xhr.onload = async () => {
-          ctl.xhr = null
-          if (xhr.status >= 200 && xhr.status < 300) { resolve(); return }
-          // 409: offset desincronizat. 403: fereastra de step-up a expirat în mijlocul unui
-          // upload lung (multi-GB pe host cu require_2fa) — fără asta, chunk-urile picau 5
-          // retry-uri şi eroarea finală era un opac „403", fără re-prompt. Sonda de status prin
-          // withStepup redeschide prompt-ul de passkey, apoi reluăm de la offset-ul real.
-          if (xhr.status === 409 || xhr.status === 403) {
-            try {
-              const st = await withStepup(hid, () =>
-                api<{ offset: number }>(`/api/hosts/${hid}/fs/upload/status?${q}`))
-              reject(new ResyncSignal(Math.min(st.offset || 0, file.size)))
-            } catch (e) { reject(e) }
-            return
-          }
-          reject(new Error(String(xhr.status)))
-        }
-        xhr.onerror = () => { ctl.xhr = null; reject(new Error('network')) }
-        xhr.ontimeout = () => { ctl.xhr = null; reject(new Error('timeout')) }
-        xhr.onabort = () => { ctl.xhr = null; reject(new Error('abort')) }
-        // fără timeout explicit, `ontimeout` era cod mort (default 0 = niciodată): o conexiune
-        // TCP atârnată (switch care nu trimite RST) îngheţa upload-ul la nesfârşit, fără retry
-        xhr.timeout = 300_000
-        xhr.send(body)
-      })
-
-    try {
-      setPct(offset, true)
-      let pos = offset, resyncs = 0
-      do {   // do/while: acoperă și fișierul de 0 octeți (o felie goală la offset 0)
-        if (ctl.cancelled) return
-        const end = Math.min(pos + UP_CHUNK, file.size)
-        const buf = await file.slice(pos, end).arrayBuffer()
-        let landed = false, tries = 0
-        for (;;) {
-          try { await sendChunk(pos, buf); landed = true; break }
-          catch (e) {
-            if (ctl.cancelled) return
-            if (e instanceof ResyncSignal) {
-              if (++resyncs > 20) throw new Error('resync')
-              if (e.offset === end) { landed = true; break }  // felia a aterizat, doar răspunsul s-a pierdut
-              if (e.offset !== pos) { doCrc = false; pos = e.offset }  // aterizare parţială / alt scriitor:
-              break            // CRC-ul incremental nu mai poate fi corect. e.offset === pos = nimic
-            }                  // aterizat → refacem aceeaşi felie, cu CRC-ul încă valid.
-            if (++tries > 5) throw e
-            await new Promise((r) => setTimeout(r, Math.min(8000, 1000 * 2 ** (tries - 1))))
-          }
-        }
-        if (landed) {
-          // CRC-ul se acumulează DOAR după ce felia a aterizat confirmat. Acumulat la citire (cum
-          // era), orice felie re-trimisă după un resync se număra de DOUĂ ori: commit-ul pica fals
-          // la integritate şi ştergea temp-ul bun — tot progresul pierdut pe o legătură instabilă.
-          if (doCrc) crc = crc32(crc, new Uint8Array(buf))
-          pos = end
-        }
-        setPct(pos, true)
-      } while (pos < file.size)
-
-      if (ctl.cancelled) return
-      const crcQ = doCrc ? `&crc32=${crc >>> 0}` : ''
-      await withStepup(hid, () => api(`/api/hosts/${hid}/fs/upload/commit?${q}${crcQ}`, { method: 'POST' }))
-      try { localStorage.removeItem(lsKey) } catch { /* */ }
-      uploadStore.set(sKey, { pct: 100, state: 'done' })
-      // rândul „✓" dispare singur după un timp — store-ul e global acum, altfel s-ar aduna la infinit
-      setTimeout(() => {
-        if (uploadStore.snapshot().get(sKey)?.state === 'done') uploadStore.remove(sKey)
-      }, 20_000)
-    } catch (e) {
-      if (!ctl.cancelled) {   // temp-ul RĂMÂNE pe host → re-tragi același fișier și reia de unde a rămas
-        uploadStore.set(sKey, { pct: lastPct, state: 'err' })
-        notify(t('files.uploadFailed'), `${key}: ${errText(e, t) || (e instanceof Error ? e.message : '')}`, 'warn')
-      }
-    } finally {
-      uploadStore.delCtl(sKey)
-    }
-  }
-
-  // anulare: oprește chunk-ul în zbor și șterge temp-ul de pe host (nu mai e resumabil).
-  // Pe un rând terminat (✓/✗) nu mai există ctl — doar curăţă rândul din listă.
-  function cancelUpload(key: string) {
-    const sKey = uploadKey(props.host.id, key)
-    const c = uploadStore.ctl(sKey)
-    if (c) {
-      c.cancelled = true
-      c.xhr?.abort()
-      fetch(`/api/hosts/${props.host.id}/fs/upload?path=${encodeURIComponent(c.dest)}&upload_id=${c.uid}`,
-        { method: 'DELETE', credentials: 'same-origin' }).catch(() => {})
-      try { localStorage.removeItem(c.lsKey) } catch { /* */ }
-      uploadStore.delCtl(sKey)
-    }
-    uploadStore.remove(sKey)
+  // ✕ pe rând: cât transferul e viu îl anulează (temp-ul de pe host dispare, nu mai e resumabil);
+  // pe ✓/✗ doar curăţă rândul din listă (store-ul e global, altfel erorile ar rămâne pe ecran)
+  function cancelOrDismiss(id: string, live: boolean) {
+    if (live) cancelUpload(id); else dismissUpload(id)
   }
 
   // punct de intrare: cere confirmare dacă suprascrie fișiere top-level existente
@@ -428,7 +282,7 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
     // re-drop-ul unui fişier DEJA în zbor pornea un al doilea uploadOne pe acelaşi upload_id:
     // cele două bucle îşi suprascriau reciproc ctl-ul (cancel-ul rămânea mort) şi îşi
     // furau offset-ul prin resync-uri 409 — îl ignorăm, transferul existent continuă singur
-    items = items.filter((it) => !uploadStore.ctl(uploadKey(props.host.id, it.rel)))
+    items = items.filter((it) => !isUploadBusy(props.host.id, join(listing.path, it.rel)))
     if (!items.length) return
     const existing = new Set(listing.entries.map((e) => e.name))
     const collides = items.filter((it) => !it.rel.includes('/') && existing.has(it.rel))
@@ -449,10 +303,7 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
     for (const d of [...dirs].sort()) {
       try { await api(`/api/hosts/${props.host.id}/fs/mkdir`, { method: 'POST', body: JSON.stringify({ path: join(listing.path, d), parents: true }) }) } catch { /* există deja */ }
     }
-    for (const it of items) {
-      uploadStore.set(uploadKey(props.host.id, it.rel), { pct: 0, state: 'up' })
-      await uploadOne(join(listing.path, it.rel), it.rel, it.file)
-    }
+    for (const it of items) await uploadOne(join(listing.path, it.rel), it.rel, it.file)
     setBusy(false)
     load(listing.path)
   }
@@ -797,31 +648,37 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
           </div>
         )}
 
-        {Object.keys(uploads).length > 0 && (
+        {uploads.length > 0 && (
           <div className="max-h-28 overflow-y-auto border-t border-ink-800 px-3 py-1 text-[10px]">
-            {Object.entries(uploads).map(([name, u]) => (
-              <div key={name} className="py-1">
-                <div className="flex items-center gap-2">
-                  <span className="truncate text-slate-400" title={name}>{name}</span>
-                  <span className={`ml-auto tabular-nums ${u.state === 'done' ? 'wt-good' : u.state === 'err' ? 'wt-danger' : 'wt-link'}`}>
-                    {u.state === 'up' ? `${u.pct}%` : u.state === 'done' ? '✓' : '✗'}
-                  </span>
-                  {/* pe „up" anulează transferul; pe ✓/✗ doar curăţă rândul (lista persistă
-                      în store-ul global acum, altfel erorile ar rămâne blocate pe ecran) */}
-                  <button onClick={() => cancelUpload(name)} className="grid h-6 w-6 shrink-0 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-rose-300"
-                    title={u.state === 'up' ? t('files.cancelUpload') : t('files.dismissUpload')}
-                    aria-label={`${u.state === 'up' ? t('files.cancelUpload') : t('files.dismissUpload')} ${name}`}>✕</button>
+            {uploads.map((u) => {
+              const live = isActive(u)
+              const label = live ? t('files.cancelUpload') : t('files.dismissUpload')
+              return (
+                <div key={u.id} className="py-1">
+                  <div className="flex items-center gap-2">
+                    <span className="truncate text-slate-400" title={u.dest}>{u.name}</span>
+                    <span className={`ml-auto tabular-nums ${u.state === 'done' ? 'wt-good' : u.state === 'err' ? 'wt-danger'
+                      : u.state === 'stalled' || u.state === 'retrying' ? 'wt-warn' : 'wt-link'}`}>
+                      {u.state === 'done' ? '✓' : u.state === 'err' ? '✗'
+                        : u.state === 'stalled' ? t('jobs.stateStalled')
+                        : u.state === 'retrying' ? t('jobs.stateRetrying', { n: u.attempts, max: 8 })
+                        : `${u.pct}%`}
+                    </span>
+                    <button onClick={() => cancelOrDismiss(u.id, live)} className="grid h-6 w-6 shrink-0 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-rose-300"
+                      title={label} aria-label={`${label} ${u.name}`}>✕</button>
+                  </div>
+                  {/* bară de progres: se umple pe octeți (XHR onprogress), colorată după stare */}
+                  <div className="mt-0.5 h-1 w-full overflow-hidden rounded-full bg-ink-800">
+                    <div
+                      className={`h-full rounded-full transition-[width] duration-200 ease-out motion-reduce:transition-none ${
+                        u.state === 'err' ? 'bg-rose-500' : u.state === 'done' ? 'bg-emerald-500'
+                        : u.state === 'stalled' || u.state === 'retrying' ? 'bg-amber-500' : 'bg-sky-500'}`}
+                      style={{ width: `${u.state === 'err' ? 100 : u.pct}%` }}
+                    />
+                  </div>
                 </div>
-                {/* bară de progres: se umple pe octeți (XHR onprogress), colorată după stare */}
-                <div className="mt-0.5 h-1 w-full overflow-hidden rounded-full bg-ink-800">
-                  <div
-                    className={`h-full rounded-full transition-[width] duration-200 ease-out motion-reduce:transition-none ${
-                      u.state === 'err' ? 'bg-rose-500' : u.state === 'done' ? 'bg-emerald-500' : 'bg-sky-500'}`}
-                    style={{ width: `${u.state === 'err' ? 100 : u.pct}%` }}
-                  />
-                </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
         )}
       </aside>
