@@ -23,15 +23,72 @@ gateway or agent change was needed; a host that already runs the agent has all o
   notification.
 - **Files panel**: the per-host rows it always had.
 
-## Resume semantics (unchanged)
+## Pipelining, adaptive chunks, pause/resume (phase 2)
 
-Uploads go in 8 MiB chunks with an explicit offset; the host appends to `<dest>.wtpart.<id>` and
-the commit renames atomically (with a CRC-32 check when the whole file went through one
-session). A byte-level watchdog marks a chunk **Stalled** after 20 s without progress and
+**Pipelined upload.** The browser sends up to **3 chunks concurrently** (`UP_WINDOW`) over HTTP, so
+the bodies travel up the browser→gateway link in parallel and hide its round-trip time on
+high-latency connections — the win grows with latency (roughly one stall per 3 chunks instead of one
+per chunk). The catch: the agent's `fs_write` is a **strict append at the current size** (any other
+offset is rejected `offset_conflict`), so the gateway may not write chunks out of order. It keeps a
+small **reorder window** per upload (`gateway/app/core._UploadWindow`): a chunk that arrives ahead of
+its turn has its bytes held in a **bounded buffer** and the request waits; the chunk that fills the
+gap writes everything contiguously, in order, and wakes the waiters. Because the agent still sees a
+pure append-only sequence, its incremental CRC-32 stays correct. The buffer is capped at
+`UPLOAD_WINDOW_MAX` (= `WINDOW_K` × the client's max chunk = **48 MiB per upload**); only *out-of-order*
+chunks occupy it (an in-order one is written immediately), so a sequential upload never touches it.
+Past the cap the gateway answers **429** and the client eases off and retries that chunk — backpressure,
+not an error. A duplicate of an already-landed chunk (a lost ack) is idempotent (returns the current
+offset, nothing re-written).
+
+**Adaptive chunk size.** The client starts at **8 MiB** and adjusts each chunk between **2 and 16 MiB**
+(`nextChunkSize`): bigger when a chunk finished quickly on a fast, stable link (fewer round-trips),
+smaller when it ran long or hit a stall/retry (cheaper retries). The gateway re-splits every chunk
+into 1 MiB blocks toward the agent, so the HTTP chunk size is **not** bounded by the 16 MiB agent
+frame — only by the reorder-window memory above.
+
+**Pause / Resume.** Each running transfer has a **Pause** button (in the chip popover and the strip);
+pausing stops sending, aborts the in-flight chunks, and keeps the `File` + offset in memory and the
+`.wtpart` temp on the host. **Resume** re-enters from the real offset via `fs_upload/status`. A reload
+while paused loses the `File` (as always) — the row comes back **Incomplete**; re-drop the same file
+to continue.
+
+## Resume semantics
+
+Uploads go in adaptive 2–16 MiB chunks (8 MiB to start) with an explicit offset; the host appends to
+`<dest>.wtpart.<id>` and the commit renames atomically with a CRC-32 integrity check. On the gateway→agent hop a block
+travels as a raw binary frame (`FRAME_FSWRITE`), not base64 inside JSON — base64 cost +33% bytes
+and encode/decode CPU on both ends. The host (agent v55+) accumulates the CRC-32 as it appends
+each block, so the commit verifies integrity without re-reading the whole file (a multi-GB re-read
+used to stall the host for minutes), and a **resumed** upload gets the CRC of the bytes already on
+disk from `fs_upload/status` and keeps verifying from the real offset (older agents fall back to
+checking only when the whole file went through one session, and to the base64 op + full-file
+re-read at commit — the gateway speaks both protocols during a fleet rollout).
+A byte-level watchdog marks a chunk **Stalled** after 20 s without progress and
 aborts + resends after 60 s; each chunk gets up to 8 attempts with capped backoff; the job
 resumes by itself on `online` / tab visible. After a page reload, unfinished uploads are listed
 as **Incomplete** — drop the same file into the same folder to continue from the confirmed
 offset; **Discard** deletes the partial on the host.
+
+## Downloads (host → browser)
+
+The **Download** button on a file row now goes through the **same engine** as uploads, so a download
+is a job too: it shows a `↓` row in the chip/strip with progress, speed and ETA, and can be retried
+or paused. The gateway serves `GET /fs/download` with **HTTP Range** support (206) over the existing
+`fs_read` (which already reads from any offset) — **no agent change**. The browser fetches from the
+current offset, with the same byte-level watchdog (Stalled → abort → retry with backoff); on a blip it
+resumes from the bytes already written **within the session**.
+
+Where the file lands:
+
+- with the **File System Access API** (Chrome/Edge): you pick the destination once and the bytes
+  **stream to disk** — fine for multi-GB files, and in-session resume continues the open stream;
+- otherwise the bytes are collected into a **Blob** and saved at the end. That holds the whole file in
+  memory, so a file larger than **1 GiB** needs a browser with the File System Access API — otherwise
+  the download is refused with a clear message.
+
+**Not yet:** resume **across a page reload** (we don't persist the file handle) and resumable
+**directory** archives (`.tgz` is still a plain streamed link). Downloads rely on TLS for integrity;
+there is no end-to-end CRC check like uploads have.
 
 ## Drop on the terminal → upload to the session directory
 

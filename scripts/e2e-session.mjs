@@ -605,6 +605,75 @@ try {
   await pop.locator('button[aria-label^="Dismiss"]').first().click().catch(() => {})
   check('Dismiss scoate rândul; popover-ul şi chip-ul dispar', (await hidden(pop)) && (await hidden(chip)))
 
+  // ── Transfers phase 2: DOWNLOAD prin acelaşi motor (job ↓ în chip, progres, Done) ──
+  // Download-ul unui fişier trece acum prin motorul de transfer, nu printr-un `<a download>` oarbă:
+  // apare un job ↓ în chip şi se termină singur. Fişier mic → fallback Blob (fără dialog de salvare,
+  // deci capturabil în headless). `wt_edit.txt` tocmai a fost scris, deci există în listare.
+  const dlPromise = page.waitForEvent('download', { timeout: 15000 }).catch(() => null)
+  const dlRow = filePanel.locator('div.group').filter({ hasText: 'wt_edit.txt' }).first()
+  await dlRow.hover()
+  await dlRow.locator('button[aria-label^="Download"]').first().click()
+  const dchip = page.locator('[data-testid="wt-transfers-chip"]').last()
+  check('download: apare un job de transfer în chip', (await visible(dchip, 8000)))
+  const dl = await dlPromise
+  check('download: fişierul chiar se descarcă (Blob, eveniment de download)', dl != null)
+  // se termină: fişier mic → aproape instant, dar rândul „Done" rămâne 20 s (linger) → vizibil
+  let dlDone = false
+  for (let i = 0; i < 40 && !dlDone; i++) {
+    if (((await dchip.textContent().catch(() => '')) ?? '').includes('Done')) dlDone = true
+    else await page.waitForTimeout(250)
+  }
+  check('download: jobul se termină (Done)', dlDone)
+
+  // ── Transfers phase 2: PAUSE apoi RESUME un upload (continuă de la offset-ul real) ──
+  // Întârziem fiecare felie cu route() ca upload-ul să fie GARANTAT încă în curs când îl punem pe
+  // pauză (localhost + agent în container e altfel prea rapid). Pauza/reluarea le dăm prin hook-ul de
+  // test `window.__wtTransfers` (ca `window.__wtTerms` pentru terminale): clic-ul pe butonul din chip
+  // e nesigur cât chip-ul se re-randează (Playwright îl vede „instabil"), dar UI-ul tot reflectă starea
+  // — pe care o verificăm în textul chip-ului. La pauză XHR-urile în zbor sunt anulate → route.continue
+  // poate pica, de aceea try/catch.
+  const UP_RE = /\/fs\/upload\?/
+  await page.route(UP_RE, async (route) => {
+    await new Promise((r) => setTimeout(r, 8000))
+    try { await route.continue() } catch { /* felia a fost anulată de pauză */ }
+  })
+  const PBYTES = 24 * 1024 * 1024
+  await filePanel.locator('input[type=file]').setInputFiles({
+    name: 'wt_pause.bin', mimeType: 'application/octet-stream', buffer: Buffer.alloc(PBYTES, 7),
+  })
+  const pchip = page.locator('[data-testid="wt-transfers-chip"]').last()
+  check('pause: upload-ul porneşte şi apare în chip', await visible(pchip, 8000))
+  // Pollăm după jobul de UPLOAD activ: el apare în store abia după cererea `status` din motor (o
+  // scurtă cursă faţă de apariţia chip-ului, care poate arăta întâi jobul de download „done" ce
+  // lâncezeşte 20 s). Filtrăm pe `!j.dir` (upload) + stare activă.
+  let jobId = null
+  for (let i = 0; i < 40 && !jobId; i++) {
+    jobId = await page.evaluate(() => {
+      const snap = window.__wtTransfers?.store?.snapshot?.()
+      if (!snap) return null
+      for (const j of snap.values()) if (!j.dir && (j.state === 'running' || j.state === 'stalled' || j.state === 'retrying')) return j.id
+      return null
+    })
+    if (!jobId) await page.waitForTimeout(200)
+  }
+  check('pause: upload activ găsit în store', !!jobId)
+  await page.evaluate((id) => window.__wtTransfers.pauseUpload(id), jobId)
+  // Verificăm starea în store (sursa pe care o citeşte UI-ul). NU textul chip-ului: cât jobul de
+  // download „done" mai lâncezeşte (20 s), chip-ul arată sumarul „2 transfers", nu starea per-job.
+  let sawPaused = false
+  for (let i = 0; i < 40 && !sawPaused; i++) {
+    const st = await page.evaluate((id) => window.__wtTransfers?.store?.get?.(id)?.state, jobId)
+    if (st === 'paused') sawPaused = true
+    else await page.waitForTimeout(200)
+  }
+  check('pause: transferul intră în pauză', sawPaused)
+  await page.unroute(UP_RE)                      // reluarea de acum înainte curge normal (rapid)
+  await page.evaluate((id) => window.__wtTransfers.resumeUpload(id), jobId)
+  // se termină după reluare — verificăm pe HOST că fişierul are toţi octeţii (reluat corect, nu corupt)
+  await activePane.locator('.xterm-screen').click()
+  await page.keyboard.type(`for i in $(seq 1 60); do [ -f /tmp/wt_pause.bin ] && [ $(wc -c < /tmp/wt_pause.bin) = ${PBYTES} ] && { echo PAUSE_RESUME_OK; break; }; sleep 1; done\n`)
+  check('resume: upload-ul se termină complet pe host (reluat de la offset)', await waitScreen('PAUSE_RESUME_OK', 40000))
+
   // Paste de IMAGINE în terminal → fişierul e scris în inbox-ul hostului (~/.webterm/inbox/
   // <timestamp>.png) şi calea lui, citată la nevoie, e tastată la prompt (fără Enter). Tastăm
   // `wc -c ` înainte, ca Enter-ul de după să dovedească şi că fişierul chiar există pe host.

@@ -11,12 +11,18 @@
 // închis. De aceea un job are stări VIZIBILE (`stalled`, `retrying`, `orphan`), viteză şi ETA,
 // nu doar un procent.
 
-export type JobState = 'running' | 'stalled' | 'retrying' | 'err' | 'done' | 'cancelled' | 'orphan'
+export type JobState = 'running' | 'stalled' | 'retrying' | 'paused' | 'err' | 'done' | 'cancelled' | 'orphan'
+
+/** Sensul transferului. `up` = browser→host (upload, implicit — compatibil cu toate rândurile
+    existente). `down` = host→browser (download prin acelaşi motor: progres, retry, pauză). */
+export type JobDir = 'up' | 'down'
 
 export interface UploadJob {
   /** = upload_id (32 hex): stabil per (host, cale, mărime, mtime) → un re-drop al aceluiaşi
       fişier regăseşte ACELAŞI job, inclusiv unul rămas „orfan" după un reload. */
   id: string
+  /** sensul: upload (implicit, absent pe rândurile vechi) sau download */
+  dir?: JobDir
   hostId: number
   hostName: string
   dest: string            // calea absolută a ţintei pe host
@@ -38,9 +44,11 @@ export interface UploadJob {
   inserted?: boolean
 }
 
-/** Stări în care transferul chiar se mişcă (sau încearcă) — ţin `beforeunload` şi apar în sumar. */
+/** Stări în care transferul chiar se mişcă (sau încearcă) — ţin `beforeunload` şi apar în sumar.
+    `paused` NU e activă (nimic nu curge) — un reload o pierde (upload → orfan, ca înainte). */
 export const ACTIVE_STATES: ReadonlySet<JobState> = new Set(['running', 'stalled', 'retrying'])
 export const isActive = (j: UploadJob) => ACTIVE_STATES.has(j.state)
+export const isDownload = (j: UploadJob) => j.dir === 'down'
 
 const state = new Map<string, UploadJob>()
 const subs = new Set<() => void>()

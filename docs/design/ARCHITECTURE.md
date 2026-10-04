@@ -46,6 +46,14 @@ Two properties follow from that shape:
 - **The agent is replaceable but not silently.** Updates are Ed25519-signed and verified against a
   public key baked into the running agent. See [SIGNED-UPDATES.md](SIGNED-UPDATES.md).
 
+The single WebSocket multiplexes typed frames keyed by a one-byte tag: JSON control (`J`, the
+request/response and event channel), raw terminal I/O (`D`), port-forward/serial byte streams
+(`F`), and — from agent protocol v55 — binary file-upload blocks (`W`, `rid + offset + path +
+raw bytes`), which replaced base64-in-JSON to drop 33% wire overhead and let the host checksum
+uploads incrementally instead of re-reading the whole file at commit. The gateway, always upgraded
+before the agents it manages, speaks the older base64 upload path too so a mixed fleet keeps
+working during a rollout.
+
 ## tmux, and why sessions survive
 
 The agent does not own your shell — tmux does. A session is a tmux session on the host; the agent

@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/sm26449/webterm/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/sm26449/webterm/actions/workflows/docker-publish.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v3.1.2-blue)](https://github.com/sm26449/webterm/tags)
+[![Version](https://img.shields.io/badge/version-v3.2.0-blue)](https://github.com/sm26449/webterm/tags)
 
 **Persistent terminals for your whole infrastructure, in the browser.**
 
@@ -442,7 +442,7 @@ the same script, only one you can read first and pin to a release.
 ```sh
 git clone https://github.com/sm26449/webterm.git
 cd webterm
-git checkout v3.1.2           # the release tag (see the version badge); a tag cannot move under you, a branch can
+git checkout v3.2.0           # the release tag (see the version badge); a tag cannot move under you, a branch can
 less install.sh              # it is meant to be read
 sudo ./install.sh --domain term.example.com --email you@example.com
 ```
@@ -528,7 +528,7 @@ moves any value it still finds in `.env` into its file.
 Update with `./upgrade.sh` — it takes a backup, syncs the host-side scripts and hands off to
 `deploy.sh`. (`make pull` exists for a quick image swap, but it bypasses `deploy.sh`, so it
 records no rollback point and runs no health gate.) Deploy a specific version
-with a recorded rollback point: `./deploy.sh v3.1.2` (or a digest:
+with a recorded rollback point: `./deploy.sh v3.2.0` (or a digest:
 `./deploy.sh ghcr.io/sm26449/webterm@sha256:…`) — if the new container does
 not become healthy, the script rolls back automatically; any time afterwards,
 `./rollback.sh` returns you to the previous image with a single command.
@@ -1021,7 +1021,7 @@ administer your servers with. The CI chain, in order:
    ephemeral container, a headless Chromium checks that the UI reaches a working
    screen, with no JS errors. Catches exactly the class of bug that produced the
    white screen in v1.0.11.
-3. **E2E with a REAL agent** (`scripts/e2e-session.mjs`, 103 checks) — starts an
+3. **E2E with a REAL agent** (`scripts/e2e-session.mjs`, 110 checks) — starts an
    agent in a container **with tmux installed, i.e. the backend production uses**,
    opens sessions through the UI, types commands, verifies the output, tab
    switching, pause/re-sync, shortcuts, parametrized snippets, alert thresholds,

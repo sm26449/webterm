@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
-  BACKOFF_CAP_MS, backoffMs, crc32, dirName, etaSec, fmtBytes, fmtEta, parseUpLsKey, parseUploadMeta,
-  resolveResync, speedTracker, upLsKey,
+  BACKOFF_CAP_MS, backoffMs, crc32, dirName, etaSec, fmtBytes, fmtEta, nextChunkSize, parseUpLsKey,
+  parseUploadMeta, resolveResync, speedTracker, UP_CHUNK, UP_CHUNK_MAX, UP_CHUNK_MIN, upLsKey,
 } from './uploads'
 
 const UID = 'a'.repeat(32)
@@ -93,6 +93,33 @@ describe('formatare', () => {
     expect(dirName('/srv/x/y.iso')).toBe('/srv/x')
     expect(dirName('/y.iso')).toBe('/')
     expect(dirName('y.iso')).toBe('.')
+  })
+})
+
+describe('felie adaptivă (nextChunkSize)', () => {
+  const MB = 1024 * 1024
+  it('legătură rapidă (felie sub ţinta joasă) → creşte, plafonat la MAX', () => {
+    expect(nextChunkSize(UP_CHUNK, 1000, false)).toBe(UP_CHUNK * 2)      // 8→16 MiB
+    expect(nextChunkSize(UP_CHUNK_MAX, 1000, false)).toBe(UP_CHUNK_MAX)  // deja la plafon
+  })
+  it('legătură lentă (felie peste ţinta înaltă) → scade, podea la MIN', () => {
+    expect(nextChunkSize(16 * MB, 20000, false)).toBe(8 * MB)
+    expect(nextChunkSize(UP_CHUNK_MIN, 20000, false)).toBe(UP_CHUNK_MIN) // deja la podea
+  })
+  it('instabil (stall/retry) → scade indiferent de durată', () => {
+    expect(nextChunkSize(16 * MB, 500, true)).toBe(8 * MB)
+  })
+  it('în fereastra ţintă → neschimbat', () => {
+    expect(nextChunkSize(UP_CHUNK, 5000, false)).toBe(UP_CHUNK)
+  })
+  it('rămâne mereu între MIN şi MAX', () => {
+    for (const ms of [0, 100, 5000, 99999]) {
+      for (const u of [false, true]) {
+        const n = nextChunkSize(UP_CHUNK, ms, u)
+        expect(n).toBeGreaterThanOrEqual(UP_CHUNK_MIN)
+        expect(n).toBeLessThanOrEqual(UP_CHUNK_MAX)
+      }
+    }
   })
 })
 

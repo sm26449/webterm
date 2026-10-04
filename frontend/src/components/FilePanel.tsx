@@ -1,11 +1,11 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { errText, api, Host } from '../lib/api'
 import { copyText, readText } from '../lib/clipboard'
-import { useConfirm } from '../lib/confirm'
 import { getCwd } from '../lib/cwd'
 import { useI18n } from '../lib/i18n'
 import { useDrawer } from '../lib/useDrawer'
 import { cancelUpload, dismissUpload, isUploadBusy, startUpload as engineStart, takeFilesDir } from '../lib/uploads'
+import { startDownload } from '../lib/downloads'
 import { isActive, uploadStore } from '../lib/uploadStore'
 import { uiLocale } from '../lib/tz'
 import {
@@ -83,7 +83,6 @@ async function readEntry(entry: any, prefix: string, out: UpItem[]): Promise<voi
 
 export default function FilePanel(props: { host: Host; sessionId: string; onClose: () => void; overlay?: boolean; embed?: boolean }) {
   const { t } = useI18n()
-  const { confirm } = useConfirm()
   const isAgent = !props.host.connection_type || props.host.connection_type === 'agent'
   const asideRef = useRef<HTMLElement>(null)
   const drawer = useDrawer(asideRef, props.onClose, !props.embed)
@@ -235,17 +234,17 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
   }, [listing, filter, showHidden, sort])
 
   async function download(e: Entry) {
-    // avertisment peste 100MB: descărcarea stream-uiește tot fișierul în browser (dialog propriu,
-    // nu window.confirm — acela bloca pagina şi tace după „nu mai arăta")
-    if (e.size > 100 * 1024 * 1024 && !(await confirm({
-      title: t('files.download'), message: t('files.dlBigConfirm', { name: e.name, size: fmtSize(e.size) }),
-      confirmLabel: t('files.download'),
-    }))) return
-    const url = `/api/hosts/${props.host.id}/fs/download?path=${encodeURIComponent(join(listing!.path, e.name))}`
-    const a = document.createElement('a')
-    a.href = url
-    a.download = e.name
-    a.click()
+    // Prin MOTORUL de transfer (phase 2): progres, retry, pauză şi reluare, vizibile în chip/bară —
+    // nu mai e un `<a download>` oarbă care, pe un fişier de 40 GB picat la 90%, reîncepe de la zero.
+    // `startDownload` cheamă selectorul de fişier (File System Access) ÎNTÂI, cât încă avem gestul
+    // click-ului; fişierele mari curg pe disc, cele mici cad pe Blob. Fişier prea mare fără FS
+    // Access → eroare clară (o prindem aici).
+    try {
+      await startDownload({ hostId: props.host.id, hostName: props.host.name,
+                            path: join(listing!.path, e.name), name: e.name, size: e.size })
+    } catch (err) {
+      setError(errText(err, t) || t('files.genericErr'))
+    }
   }
 
   // director (sau fişier) → tar.gz făcut pe host şi streamat; răspunsul începe abia după ce

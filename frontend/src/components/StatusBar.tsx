@@ -4,8 +4,8 @@ import { tStatic, useI18n } from '../lib/i18n'
 import { fmtTs, getTimezone, timeInZone, uiLocale } from '../lib/tz'
 import { copyText } from '../lib/clipboard'
 import { fmtEta, fmtRate } from '../lib/uploads'
-import { UploadJob, isActive, uploadStore } from '../lib/uploadStore'
-import { UploadIcon } from './Icons'
+import { UploadJob, isActive, isDownload, uploadStore } from '../lib/uploadStore'
+import { DownloadIcon, UploadIcon } from './Icons'
 import TransfersPopover from './TransfersPopover'
 
 // abrevierea de zile vine din catalog: era fixa, deci aparea si in interfata engleza
@@ -73,6 +73,7 @@ export function TransfersChip(props: { session?: Session; hostName?: string }) {
       case 'running': return `${j.pct}% · ${fmtRate(j.bytesPerSec)} · ${fmtEta(j.etaSec, t)}`
       case 'stalled': return `${j.pct}% · ${t('transfers.shortStalled')}`
       case 'retrying': return `${j.pct}% · ${t('transfers.shortRetrying')}`
+      case 'paused': return `${j.pct}% · ${t('jobs.statePaused')}`
       case 'done': return `100% · ${t('jobs.stateDone')}`
       case 'err': return t('transfers.shortFailed')
       case 'cancelled': return t('jobs.stateCancelled')
@@ -92,7 +93,9 @@ export function TransfersChip(props: { session?: Session; hostName?: string }) {
         title={t('transfers.chipTitle')}
         data-testid="wt-transfers-chip"
         className={`wt-transfers-chip ${tone} ${worried ? 'wt-chip-pulse' : ''} inline-flex h-6 max-w-[22rem] items-center gap-1.5 rounded-full px-2 font-mono text-[11px] tabular-nums hover:bg-ink-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400`}>
-        <span aria-hidden="true" className="shrink-0"><UploadIcon size={12} /></span>
+        <span aria-hidden="true" className="shrink-0">
+          {jobs.length === 1 && isDownload(jobs[0]) ? <DownloadIcon /> : <UploadIcon size={12} />}
+        </span>
         <span className="truncate">{label}</span>
       </button>
       {open && (

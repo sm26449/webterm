@@ -9,6 +9,53 @@ back.
 
 ## [Unreleased]
 
+## [3.2.0] — 2026-10-05 · agent (55)
+
+### Changed — agent (55), one bundled rollout
+- **Transfers phase 2 (protocol): upload chunks travel as raw binary frames, and the host checksums
+  the upload incrementally.** Two costs are removed from every upload, bundled into one agent bump
+  because touching `agent/ptyd.py` forces a fleet-wide update.
+  - **No more base64 on the gateway→agent hop.** A file block used to be base64-encoded into a JSON
+    `fs_write` control message — +33% bytes on the wire and encode/decode CPU on *both* ends (the
+    optimization deliberately deferred back in 2.3.0). It now rides a dedicated binary frame
+    `FRAME_FSWRITE` (`W`): `rid(8) + offset(8) + path_len(2) + path + raw block`, big-endian, the
+    `rid` reusing the normal request/response correlation so the agent still replies with an
+    ordinary `{id, ok, written, offset, crc32}` control frame. The same per-write offset-conflict
+    guard (append only at the expected size) and `O_NOFOLLOW` guarantees as the old op.
+  - **Incremental CRC-32 instead of a full re-read at commit.** The agent now accumulates the
+    `.wtpart` CRC (zlib, the same polynomial as the browser and as `fs_crc32`) as it appends each
+    block and returns the running value; `fs_upload/status` returns the CRC of the bytes already on
+    disk, so a *resumed* upload keeps accumulating from the real offset (previously the client gave
+    up integrity verification after a resume). Commit then compares the client CRC to the agent's
+    running CRC **without re-reading the file** — the old `fs_crc32` full re-read of a multi-GB temp
+    was a multi-minute stall that blocked the PTY loop. The resume seed is computed on the CRC
+    worker, never on the event loop.
+  - **Backward-compatible during rollout.** The gateway is always upgraded before the agents it
+    pushes to, so a v55 gateway speaks *both* protocols: base64 `fs_write` + `fs_crc32`-at-commit to
+    a v54 agent, binary frames + incremental CRC to a v55 agent (branched on `agent_version`). A v55
+    agent still honors an old-style base64 `fs_write` too, so nothing breaks mid-fleet.
+
+### Added — Transfers phase 2 (gateway + frontend only, no agent change)
+- **Pipelined (windowed) uploads.** The browser now sends up to 3 chunks concurrently over HTTP to
+  hide round-trip time on high-latency links. Because the agent's `fs_write` is a strict append at the
+  current size, the gateway keeps a per-upload **reorder window** (`_UploadWindow`): an out-of-order
+  chunk is held in a bounded buffer (≤ `WINDOW_K × max chunk` = 48 MiB/upload) and its request waits;
+  the chunk that fills the gap writes everything contiguously, in order, so the agent still sees a pure
+  append and its incremental CRC stays correct. Over the cap → **429** (backpressure, the client eases
+  off); a duplicate of a landed chunk is idempotent. Hermetic coverage in `upload_window_test.py`.
+- **Adaptive chunk size.** Uploads start at 8 MiB and adapt between 2–16 MiB from the measured
+  throughput/stability of recent chunks (bigger on fast links, smaller on unstable ones). The gateway
+  re-splits each chunk into 1 MiB blocks toward the agent, so the HTTP chunk size is not bounded by the
+  16 MiB frame cap. Pure, unit-tested (`nextChunkSize`).
+- **Pause / Resume per transfer.** A Pause button stops sending and keeps the `File` + offset in
+  memory and the `.wtpart` on the host; Resume re-enters from the real offset via `fs_upload/status`.
+- **Downloads through the transfer engine.** `GET /fs/download` now supports HTTP **Range** (206) over
+  the existing `fs_read` (no agent change), and host→browser downloads run through the same engine as
+  uploads: a `↓` job in the chip/strip with progress, speed, ETA, stall watchdog, retry and in-session
+  resume. Large files stream to disk via the File System Access API when available; otherwise a Blob,
+  with files over 1 GiB requiring a capable browser. **Deferred:** download resume across a page
+  reload, and resumable directory archives.
+
 ### Security
 - **Authorized white-box pentest of the gateway trust boundary** (login, fake-agent/token forgery,
   forward tickets, CSWSH/CSRF, SQLi, OIDC, scope escalation), run with live PoCs against a

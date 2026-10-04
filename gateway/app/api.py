@@ -1819,17 +1819,64 @@ async def fs_cwd(host_id: int, sid: str, user=Depends(security.require_user)):
         raise _file_api_error(e)
 
 
+def _parse_range(header: str, size: int):
+    """Un singur interval `bytes=start-end` / `bytes=start-` / `bytes=-suffix` → (start, end_inclusive)
+    sau None dacă lipseşte / e nevalid / nesatisfăcut (apelantul întoarce 200 întreg, resp. 416).
+    Mai multe intervale nu se suportă (download-ul resumabil cere mereu unul singur)."""
+    if not header or not header.strip().lower().startswith("bytes="):
+        return None
+    spec = header.split("=", 1)[1].strip()
+    if "," in spec:
+        return None
+    lo, _, hi = spec.partition("-")
+    try:
+        if lo == "":                       # suffix: ultimii N octeţi
+            n = int(hi)
+            if n <= 0:
+                return None
+            return (max(0, size - n), size - 1)
+        start = int(lo)
+        end = int(hi) if hi != "" else size - 1
+    except ValueError:
+        return None
+    if start < 0 or start >= size or end < start:
+        return "unsatisfiable"
+    return (start, min(end, size - 1))
+
+
 @router.get("/api/hosts/{host_id}/fs/download")
-async def fs_download(host_id: int, path: str, user=Depends(security.require_user)):
+async def fs_download(host_id: int, request: Request, path: str, user=Depends(security.require_user)):
+    """Streamează un fişier de pe host. Suportă `Range: bytes=start-[end]` (HTTP 206) ca motorul de
+    transfer din browser (phase 2) să descarce în felii, cu progres, retry şi reluare de la offset.
+    Fără Range (sau pe agenţi fără fs_stat) → 200 întreg, exact ca înainte. Nu schimbă agentul:
+    fs_read citeşte deja de la orice offset."""
     await _require_host_stepup(host_id, user)   # H1
     from fastapi.responses import StreamingResponse
     name = os.path.basename(path.rstrip("/")) or "download"
     # un nume de fișier ostil (ghilimele/newline) ar sparge headerul
     # Content-Disposition → curățăm caracterele periculoase
     name = name.replace('"', "").replace("\r", "").replace("\n", "").replace("\\", "")
+
+    # Dimensiunea (dacă o putem afla ieftin) deschide Range + Content-Length. Best-effort: dacă
+    # fs_stat nu există / eşuează, cădem pe streamingul de dintotdeauna, fără Range.
+    size = None
+    try:
+        size = await core.fs_size(host_id, path)
+    except core.AgentGone:
+        raise ApiError(409, "host.offline", "the host is offline")
+    except (core.FileError, TimeoutError):
+        size = None
+
+    rng = _parse_range(request.headers.get("range", ""), size) if size is not None else None
+    if rng == "unsatisfiable":
+        raise ApiError(416, "files.rangeNotSatisfiable", "requested range not satisfiable")
+
+    start, end = (rng if isinstance(rng, tuple) else (0, (size - 1) if size else 0))
+    limit = (end - start + 1) if isinstance(rng, tuple) else None
+
     try:
         # probe first chunk so errors surface as HTTP status, not mid-stream
-        agen = core.fs_read_all(host_id, path)
+        agen = core.fs_read_all(host_id, path, start=start, limit=limit)
         first = await agen.__anext__()
     except StopAsyncIteration:
         first = b""
@@ -1845,9 +1892,20 @@ async def fs_download(host_id: int, path: str, user=Depends(security.require_use
         async for chunk in agen:
             yield chunk
 
+    headers = {"Content-Disposition": f'attachment; filename="{name}"'}
+    if size is not None:
+        headers["Accept-Ranges"] = "bytes"          # anunţă clientului că poate cere felii
+    if isinstance(rng, tuple):
+        headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+        headers["Content-Length"] = str(limit)
+        status = 206
+    else:
+        if size is not None:
+            headers["Content-Length"] = str(size)
+        status = 200
+
     return StreamingResponse(
-        body(), media_type="application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{name}"'})
+        body(), status_code=status, media_type="application/octet-stream", headers=headers)
 
 
 @router.get("/api/hosts/{host_id}/fs/archive")
@@ -1952,6 +2010,10 @@ async def fs_upload(host_id: int, request: Request, path: str,
         return {"ok": True, "written": written, "path": path}
     except core.AgentGone:
         raise ApiError(409, "host.offline", "the host is offline")
+    except core.UploadBusy as e:
+        # Fereastra de reordonare e plină (upload pipelined: prea multe felii înaintea rândului lor).
+        # 429 = backpressure, NU eroare: clientul dă un backoff scurt şi reîncearcă ACEEAŞI felie.
+        raise ApiError(429, "files.uploadBusy", str(e))
     except core.FileConflict as e:
         raise _file_api_error(e)
     except (core.FileError, TimeoutError) as e:
@@ -1961,16 +2023,18 @@ async def fs_upload(host_id: int, request: Request, path: str,
 @router.get("/api/hosts/{host_id}/fs/upload/status")
 async def fs_upload_status(host_id: int, path: str, upload_id: str,
                            user=Depends(security.require_user)):
-    """Câţi octeţi au aterizat deja pentru `upload_id` — clientul reia de acolo."""
+    """Câţi octeţi au aterizat deja pentru `upload_id` — clientul reia de acolo. Cu agent v55
+    răspunsul include şi `crc32` (CRC-ul octeţilor deja pe disc), ca clientul să continue
+    verificarea de integritate şi după un resume, nu doar pe upload-urile din offset 0."""
     await _require_host_stepup(host_id, user)
     _check_upload_id(upload_id)
     try:
-        n = await core.fs_upload_status(host_id, path, upload_id)
+        st = await core.fs_upload_status(host_id, path, upload_id)
     except core.AgentGone:
         raise ApiError(409, "host.offline", "the host is offline")
     except (core.FileError, TimeoutError) as e:
         raise _file_api_error(e)
-    return {"offset": n}
+    return st
 
 
 @router.post("/api/hosts/{host_id}/fs/upload/commit")

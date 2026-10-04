@@ -83,7 +83,9 @@ def by_id(ag, rid):
 tmp = tempfile.mkdtemp(prefix="v54-")
 
 # ───────────────────────── versiune ─────────────────────────
-check("AGENT_VERSION == 54", ptyd.AGENT_VERSION == 54, ptyd.AGENT_VERSION)
+# Remedierile de mai jos au fost livrate în v54 şi rămân în picioare la fiecare bump ulterior;
+# pin pe „cel puţin 54", ca testul să nu se spargă la fiecare creştere de AGENT_VERSION.
+check("AGENT_VERSION >= 54", ptyd.AGENT_VERSION >= 54, ptyd.AGENT_VERSION)
 
 # ───────────────────────── 7. parserul anti-rollback ─────────────────────────
 cv = ptyd._content_version

@@ -17,6 +17,7 @@ import re
 import shlex
 import socket
 import ssl
+import struct
 import time
 import uuid
 from pathlib import Path
@@ -32,7 +33,14 @@ log = logging.getLogger("webterm")
 FRAME_CTRL = b"J"
 FRAME_DATA = b"D"
 FRAME_FWD = b"F"                       # port-forward: FRAME_FWD + stream_id(32) + bytes
+FRAME_FSWRITE = b"W"                   # upload chunk BINAR (protocol agent v55): bloc de fişier ca
+                                      # octeţi bruţi, nu base64 în JSON. Layout big-endian (vezi şi
+                                      # agent/ptyd.py): FRAME_FSWRITE(1) + rid(8) + offset(8) +
+                                      # path_len(2) + path + bloc. rid = acelaşi spaţiu ca `request()`,
+                                      # deci răspunsul vine ca un FRAME_CTRL `{id: rid, ...}` normal.
+FSWRITE_HDR = struct.Struct(">QQH")   # rid, offset, path_len
 SID_LEN = 32
+AGENT_PROTO_BIN_FSWRITE = 55          # prima versiune de agent care vorbeşte FRAME_FSWRITE + CRC incremental
 
 GAP_MARKER = b"\r\n\x1b[7m[webterm: unele date au fost pierdute aici]\x1b[0m\r\n"
 
@@ -1407,6 +1415,26 @@ class AgentConnection(SessionSource):
                     await self.ws.send_bytes(prefix + data[i:i + self.FWD_SEND_CHUNK])
         except Exception:
             raise AgentGone()
+
+    async def fs_write_bin(self, path: str, offset: int, block: bytes, timeout: float = 60.0) -> dict:
+        """Trimite un bloc de upload ca FRAME_FSWRITE (octeţi bruţi, fără base64) şi aşteaptă reply-ul
+        agentului, corelat prin rid (acelaşi mecanism ca `request`). Numai spre agenţi v55+.
+        Un bloc e FS_CHUNK (1 MiB) « plafonul de frame al agentului (16 MiB), deci nu fragmentăm."""
+        self._req_id += 1
+        rid = self._req_id
+        fut = asyncio.get_running_loop().create_future()
+        self._pending[rid] = fut
+        pb = path.encode("utf-8")
+        frame = FRAME_FSWRITE + FSWRITE_HDR.pack(rid, offset, len(pb)) + pb + block
+        try:
+            async with self._send_lock:
+                try:
+                    await self.ws.send_bytes(frame)
+                except Exception:
+                    raise AgentGone()
+            return await asyncio.wait_for(fut, timeout)
+        finally:
+            self._pending.pop(rid, None)
 
     async def open_forward(self, host: str, port: int) -> ForwardStream:
         """Deschide un tunel TCP către host:port văzut de agent (ex. 127.0.0.1:3000
@@ -3742,29 +3770,94 @@ async def fs_list(host_id: int, path: str) -> dict:
     return resp
 
 
-async def fs_crc32(host_id: int, path: str) -> int:
+async def fs_crc32(host_id: int, path: str, seed: bool = False) -> int:
     """CRC-32 al unui fişier de pe host (verificare de integritate la commit-ul unui upload).
-    Agentul îl citeşte în streaming; timeout generos (fişier mare = citire lungă pe disc)."""
-    resp = await _agent_or_raise(host_id).request("fs_crc32", path=path, timeout=600)
+    Agentul îl citeşte în streaming; timeout generos (fişier mare = citire lungă pe disc).
+    `seed` (agent v55): cere agentului să memoreze şi (dimensiune, crc) în starea lui de upload,
+    ca FRAME_FSWRITE-urile de după un resume să continue CRC-ul incremental fără re-citire."""
+    resp = await _agent_or_raise(host_id).request("fs_crc32", path=path, seed=seed, timeout=600)
     if not resp.get("ok"):
         raise FileError(resp.get("msg", "eroare"))
     return int(resp.get("crc32", 0)) & 0xffffffff
 
 
-async def fs_read_all(host_id: int, path: str):
-    """Async generator yielding a remote file's bytes, chunk by chunk."""
+# ── CRC-32 incremental pe hopul gateway→agent (protocol agent v55) ────────────
+# Agentul (v55) acumulează CRC-ul temp-ului `.wtpart` pe măsură ce lipeşte fiecare FRAME_FSWRITE şi
+# întoarce CRC-ul curent în reply. Memorăm ultimul CRC per upload AICI, ca la commit să-l comparăm cu
+# CRC-ul clientului FĂRĂ a re-citi tot fişierul (fs_crc32 pe un temp de 17 GB = minute de stall, exact
+# ce voiam să scoatem). Dacă agentul întoarce crc32=None (resume la rece, înainte de seed) uităm
+# intrarea → commit-ul cade pe re-citirea completă (corect, doar lent — caz rar).
+_upload_crc: dict = {}                             # (host_id, upload_id) -> crc32 curent (int) sau absent
+
+
+def _remember_crc(key, crc) -> None:
+    if crc is None:
+        _upload_crc.pop(key, None)
+        return
+    if key not in _upload_crc and len(_upload_crc) >= _UPLOAD_TRACK_MAX:
+        _upload_crc.pop(next(iter(_upload_crc)), None)
+    _upload_crc[key] = int(crc) & 0xffffffff
+
+
+async def _write_block(conn, path, offset, block, key=None):
+    """Scrie un bloc la `offset`. Agent v55: FRAME_FSWRITE binar (fără base64) + CRC incremental,
+    iar CRC-ul curent (dacă e cunoscut) se memorează la `key`. Agent mai vechi: op-ul `fs_write`
+    base64 de dintotdeauna. Întoarce CRC-ul curran sau None. Gateway-ul (întotdeauna actualizat
+    ÎNAINTEA agenţilor pe care-i împinge) trebuie să vorbească AMBELE protocoale în timpul rollout-ului."""
+    if (conn.agent_version or 0) >= AGENT_PROTO_BIN_FSWRITE:
+        resp = await conn.fs_write_bin(path, offset, block)
+        if not resp.get("ok"):
+            if resp.get("code") == "offset_conflict":
+                raise FileConflict(resp.get("msg", "offset conflict"))
+            raise FileError(resp.get("msg", "eroare"))
+        crc = resp.get("crc32")
+        if key is not None:
+            _remember_crc(key, crc)
+        return crc
+    await _fs_write_block(conn, path, offset, block)
+    if key is not None:
+        _remember_crc(key, None)          # agent vechi: fără CRC incremental → commit re-citeşte
+    return None
+
+
+async def fs_read_all(host_id: int, path: str, start: int = 0, limit: Optional[int] = None):
+    """Async generator yielding a remote file's bytes, chunk by chunk, from `start` (default 0).
+    `limit` (opţional): opreşte-te după atâţia octeţi — pentru un Range `bytes=start-end` de download
+    resumabil (phase 2). Agentul `fs_read` citeşte deja de la orice offset, deci NU se schimbă."""
     conn = _agent_or_raise(host_id)
-    offset = 0
+    offset = start
+    remaining = limit
     while True:
         resp = await conn.request("fs_read", path=path, offset=offset, timeout=60)
         if not resp.get("ok"):
             raise FileError(resp.get("msg", "eroare"))
         chunk = base64.b64decode(resp["data_b64"])
+        if chunk and remaining is not None:
+            if len(chunk) > remaining:
+                chunk = chunk[:remaining]
+            remaining -= len(chunk)
         if chunk:
             yield chunk
         offset += len(chunk)
-        if resp.get("eof") or not chunk:
+        if resp.get("eof") or not chunk or (remaining is not None and remaining <= 0):
             break
+
+
+async def fs_size(host_id: int, path: str) -> Optional[int]:
+    """Dimensiunea unui fişier de pe host, O(1) (agent v50+ `fs_stat`). Pentru download-ul resumabil
+    cu Range: clientul are nevoie de total ca să ceară felii şi să arate progresul. Întoarce None pe
+    agenţi mai vechi (fără fs_stat) → endpoint-ul cade pe streaming fără Range (ca înainte)."""
+    conn = _agent_or_raise(host_id)
+    if (conn.agent_version or 0) < 50:
+        return None
+    resp = await conn.request("fs_stat", path=path, timeout=30)
+    if not resp.get("ok"):
+        raise FileError(resp.get("msg", "eroare"))
+    if not resp.get("exists"):
+        raise FileError("not found")
+    if resp.get("dir"):
+        raise FileError("is a directory")
+    return int(resp.get("size", 0))
 
 
 async def fs_archive_prepare(host_id: int, path: str) -> str:
@@ -3856,10 +3949,10 @@ async def fs_write_stream(host_id: int, path: str, source, if_mtime=None) -> int
             buf += part
             while len(buf) >= FS_CHUNK:
                 block, buf = buf[:FS_CHUNK], buf[FS_CHUNK:]
-                await _fs_write_block(conn, tmp, offset, block)
+                await _write_block(conn, tmp, offset, block)   # v55: binar; altfel base64
                 offset += len(block)
         if buf or offset == 0:      # write at least once (creates empty files too)
-            await _fs_write_block(conn, tmp, offset, buf)
+            await _write_block(conn, tmp, offset, buf)
             offset += len(buf)
         # commit atomic: temp → final (os.replace pe agent)
         resp = await conn.request("fs_rename", path=tmp, to=path,
@@ -3889,6 +3982,56 @@ _UPLOAD_STALE = 24 * 3600                          # temp-uri abandonate mai vec
 _UPLOAD_TRACK_MAX = 4096                           # plafon pe dict-urile in-memory (anti creştere nemărginită)
 _upload_offset: dict = {}                          # (host_id, upload_id) -> octeţi scrişi (fast-path)
 _upload_locks: dict = {}                           # (host_id, upload_id) -> asyncio.Lock (serializează chunk-urile)
+
+# ── Fereastră de reordonare pentru upload PIPELINED (transfers phase 2) ───────
+# Clientul poate trimite până la WINDOW_K felii CONCURENT peste HTTP, ca să ascundă RTT-ul pe
+# legături cu latenţă mare: corpurile urcă în paralel browser→gateway. DAR agentul scrie STRICT
+# la offset == dimensiunea curentă a temp-ului (fs_write respinge orice altceva cu offset_conflict),
+# deci gateway-ul TREBUIE să aplice feliile la agent în ordinea offset-ului. O felie sosită înaintea
+# rândului ei (gap încă neumplut) îşi ţine octeţii într-un buffer MĂRGINIT per upload şi aşteaptă;
+# felia care umple gap-ul le scrie pe toate, contiguu, în ordine — deci CRC-ul incremental de pe
+# agent rămâne corect (octeţii ajung la agent tot în ordine). Peste plafon → 429 (backpressure):
+# clientul încetineşte, nu umflăm memoria gateway-ului.
+#
+# Memoria ţinută per upload e plafonată la UPLOAD_WINDOW_MAX octeţi (= WINDOW_K × felia maximă a
+# clientului, 16 MiB → 48 MiB). Doar feliile DEZORDONATE (offset > curent) ocupă bufferul; una la
+# rând (offset == curent) se scrie imediat şi nu-l atinge, deci un upload SECVENŢIAL (fallback,
+# client vechi) nu consumă nimic din el. Corpul fiecărei cereri e citit în memorie înainte de a
+# prelua lock-ul (acolo se petrece urcarea paralelă); vârful tranzitoriu real e deci
+# ~UPLOAD_WINDOW_MAX + concurenţă × felie — mărginit, documentat.
+WINDOW_K = 3                                        # felii concurente aşteptate de la client
+UPLOAD_WINDOW_MAX = WINDOW_K * 16 * 1024 * 1024     # octeţi ţinuţi în reordonare, per upload (48 MiB)
+WINDOW_WAIT = 300.0                                 # cât aşteaptă o felie dezordonată să i se umple gap-ul
+
+
+class _UploadWindow:
+    """Starea de reordonare a unui singur upload. `cond` e UN SINGUR obiect per upload (altfel
+    notify_all n-ar trezi waiterii altei cereri) şi împarte lock-ul cu `_upload_lock(key)`, ca
+    felia (prin cond) şi commit/abort/status (prin lock) să se excludă reciproc pe acelaşi upload."""
+    __slots__ = ("cond", "offset", "pending", "buffered")
+
+    def __init__(self, key):
+        self.cond = asyncio.Condition(_upload_lock(key))
+        self.offset = None                     # offset-ul aterizat (None = încă neconstatat de pe host)
+        self.pending = {}                      # offset -> octeţii feliei dezordonate care aşteaptă
+        self.buffered = 0                      # suma octeţilor din pending (plafon UPLOAD_WINDOW_MAX)
+
+
+_upload_windows: dict = {}                          # (host_id, upload_id) -> _UploadWindow
+
+
+def _upload_window(key) -> "_UploadWindow":
+    win = _upload_windows.get(key)
+    if win is None:
+        # acelaşi plafon-cu-evicţie ca restul dict-urilor: scoatem o fereastră INACTIVĂ (fără felii
+        # în aşteptare — upload terminat/abandonat), niciodată una care încă ţine octeţi.
+        if len(_upload_windows) >= _UPLOAD_TRACK_MAX:
+            for k, w in list(_upload_windows.items()):
+                if not w.pending:
+                    del _upload_windows[k]
+                    break
+        win = _upload_windows[key] = _UploadWindow(key)
+    return win
 
 
 def _upload_lock(key) -> asyncio.Lock:
@@ -3920,6 +4063,8 @@ def _upload_forget(key) -> None:
     dict cât încă e ţinut, un aşteptător pe lock-ul vechi şi o cerere nouă (cu lock proaspăt)
     ar rula în paralel pe acelaşi upload."""
     _upload_offset.pop(key, None)
+    _upload_crc.pop(key, None)
+    _upload_windows.pop(key, None)     # starea de reordonare dispare odată cu upload-ul (commit/abort)
 
 
 def _upload_tmp(path: str, upload_id: str) -> str:
@@ -3976,52 +4121,120 @@ async def _upload_gc(host_id: int, path: str, keep: str) -> None:
         pass
 
 
-async def fs_upload_status(host_id: int, path: str, upload_id: str) -> int:
-    """Câţi octeţi au aterizat pentru acest upload — de unde reia clientul."""
+async def fs_upload_status(host_id: int, path: str, upload_id: str) -> dict:
+    """Câţi octeţi au aterizat pentru acest upload — de unde reia clientul. Agent v55: întoarce şi
+    `crc32`, CRC-ul octeţilor DEJA pe disc, ca la un resume clientul să continue acumularea CRC-ului
+    din offset-ul real (pe v54 clientul renunţa la verificare după un resume). CRC-ul se calculează pe
+    un worker (fs_crc32 seed=True), care seed-uieşte şi starea agentului pentru FRAME_FSWRITE-urile de
+    după; îl memorăm şi noi, ca `_upload_crc`, pentru compararea la commit fără re-citire."""
+    conn = _agent_or_raise(host_id)
+    key = (host_id, upload_id)
     n = await _upload_landed(host_id, path, upload_id)
-    _remember_offset((host_id, upload_id), n)
+    _remember_offset(key, n)
+    # Resincronizăm şi fereastra de reordonare la adevărul de pe host: status e chemat la
+    # resume/resync, când clientul a oprit trimiterea (nicio felie în zbor), deci e sigur să
+    # re-ancorăm offset-ul (o felie dezordonată parcată şi-a atins oricum WINDOW_WAIT şi a căzut).
+    _upload_window(key).offset = n
+    out = {"offset": n}
+    if n > 0 and (conn.agent_version or 0) >= AGENT_PROTO_BIN_FSWRITE:
+        tmp = _upload_tmp(path, upload_id)
+        crc = await fs_crc32(host_id, tmp, seed=True)
+        _remember_crc(key, crc)
+        out["crc32"] = crc
     await _upload_gc(host_id, path, keep=upload_id)
-    return n
+    return out
+
+
+async def _drain_window(conn, tmp, key, win) -> None:
+    """Scrie la agent, STRICT în ordinea offset-ului, toate feliile pending CONTIGUE începând de la
+    `win.offset`; avansează `win.offset` şi trezeşte waiterii la final. Chemat ţinând `win.cond`.
+    Un bloc se re-taie în sub-blocuri de FS_CHUNK (1 MiB) exact ca înainte — agentul vede aceeaşi
+    secvenţă de fs_write ca la un upload secvenţial, deci CRC-ul lui incremental rămâne corect."""
+    while win.offset in win.pending:
+        blk = win.pending.pop(win.offset)
+        win.buffered -= len(blk)
+        base = win.offset
+        if not blk:
+            await _write_block(conn, tmp, base, b"", key=key)   # felie goală: creează temp-ul gol
+        else:
+            i = 0
+            while i < len(blk):
+                sub = blk[i:i + FS_CHUNK]
+                await _write_block(conn, tmp, base + i, sub, key=key)
+                i += len(sub)
+        win.offset = base + len(blk)
+        _remember_offset(key, win.offset)
+    win.cond.notify_all()
 
 
 async def fs_upload_chunk(host_id: int, path: str, upload_id: str, offset: int, source) -> int:
-    """Adaugă o felie la temp, EXACT de la `offset`. Verifică offset-ul (fast-path din cache, altfel
-    stat pe host) — un chunk dezordonat sau duplicat (retry după ce a aterisat deja) e refuzat cu
-    conflict, nu corupe fişierul. Un lock per upload_id serializează chunk-uri CONCURENTE pe acelaşi
-    upload: fără el, două cereri la acelaşi offset citeau cache-ul înainte ca vreuna să scrie, treceau
-    amândouă verificarea şi se dublau în temp. Întoarce noul total."""
+    """Adaugă o felie la temp. Clientul poate trimite până la WINDOW_K felii CONCURENT (pipelining);
+    gateway-ul le aplică la agent STRICT în ordinea offset-ului (vezi _UploadWindow). O felie sosită
+    înaintea rândului ei îşi ţine octeţii într-un buffer mărginit şi aşteaptă să i se umple gap-ul;
+    felia care umple gap-ul le scrie contiguu. Un retry al unei felii deja aterizate e idempotent
+    (întoarce offset-ul curent), unul suprapus parţial dă conflict, iar peste plafon → 429 (busy).
+    Întoarce offset-ul aterizat (≥ sfârşitul feliei acesteia la succes)."""
     conn = _agent_or_raise(host_id)
     tmp = _upload_tmp(path, upload_id)
     key = (host_id, upload_id)
-    async with _upload_lock(key):
-        cur = _upload_offset.get(key)
-        if cur is None or cur != offset:
-            cur = await _upload_landed(host_id, path, upload_id)
-        if cur != offset:
-            raise FileConflict("offset %d != %d" % (offset, cur))
+    # Citim TOT corpul feliei în memorie ÎNAINTE de a prelua lock-ul. Aici se petrece urcarea
+    # browser→gateway — în afara secţiunii critice, K felii urcă în paralel (ascund RTT-ul), iar
+    # serializarea de mai jos atinge doar aplicarea la agent (rapidă, blocuri de 1 MiB).
+    block = b"".join([part async for part in source])
+    win = _upload_window(key)
+    end = offset + len(block)
+    async with win.cond:
+        if win.offset is None:
+            win.offset = await _upload_landed(host_id, path, upload_id)
+            _remember_offset(key, win.offset)
+        cur = win.offset
+        # Felie GOALĂ la offset 0: creează temp-ul gol (fişier de 0 octeţi). Altă felie goală = no-op.
+        if len(block) == 0:
+            if offset == 0 and cur == 0 and 0 not in win.pending:
+                win.pending[0] = b""
+                await _drain_window(conn, tmp, key, win)
+            return win.offset
+        if end <= cur:
+            return win.offset                  # felie DEJA aterizată integral (retry după ack pierdut)
+        if offset < cur:
+            raise FileConflict("offset %d < %d (suprapunere parţială)" % (offset, cur))
+        if offset in win.pending:
+            return win.offset                  # dublură în zbor (aceeaşi felie, două cereri): no-op
+        # offset >= cur. Doar feliile DEZORDONATE (offset > cur) ocupă bufferul mărginit.
+        if offset > cur and win.buffered + len(block) > UPLOAD_WINDOW_MAX:
+            raise UploadBusy("reorder window full (%d + %d > %d)"
+                             % (win.buffered, len(block), UPLOAD_WINDOW_MAX))
+        win.pending[offset] = block
+        win.buffered += len(block)
         try:
-            written = 0
-            buf = b""
-            async for part in source:
-                buf += part
-                while len(buf) >= FS_CHUNK:
-                    block, buf = buf[:FS_CHUNK], buf[FS_CHUNK:]
-                    await _fs_write_block(conn, tmp, offset + written, block)
-                    written += len(block)
-            if buf or (offset == 0 and written == 0):   # scrie măcar o dată (creează temp gol la offset 0)
-                await _fs_write_block(conn, tmp, offset + written, buf)
-                written += len(buf)
-        except BaseException:
-            # Auditul intern (2026-09-23): un chunk care moare DUPĂ ce a scris o parte din blocuri
-            # lăsa cache-ul pe offset-ul vechi; retry-ul clientului la acelaşi offset trecea de
-            # fast-path fără stat, iar agentul (O_APPEND, nu verifică offset-ul) lipea chunk-ul
-            # întreg DUPĂ partea deja scrisă → octeţi duplicaţi în mijlocul fişierului. Cu CRC-ul
-            # dezactivat (upload reluat după reload) fişierul corupt se comitea fără nicio eroare.
-            # Invalidăm cache-ul: următoarea cerere face stat pe host şi vede adevărul.
-            _upload_offset.pop(key, None)
+            await _drain_window(conn, tmp, key, win)
+            # Aşteptăm ca felia noastră să fie scrisă (gap-ul dinaintea ei umplut de altă cerere).
+            # `wait_for` eliberează lock-ul cât aşteaptă → felia care umple gap-ul poate rula.
+            try:
+                await asyncio.wait_for(
+                    win.cond.wait_for(lambda: offset not in win.pending),
+                    timeout=WINDOW_WAIT)
+            except asyncio.TimeoutError:
+                if win.pending.pop(offset, None) is not None:
+                    win.buffered -= len(block)
+                raise FileConflict("reorder window timeout before offset %d" % offset)
+        except (FileConflict, UploadBusy):
             raise
-        _remember_offset(key, offset + written)
-        return offset + written
+        except BaseException:
+            # Scrierea la agent a căzut (offset_conflict real, agent plecat): invalidăm starea ferestrei
+            # şi cache-urile, ca următoarea cerere să re-constate adevărul de pe host (vezi auditul
+            # 2026-09-23 — un chunk care moare după blocuri parţiale ducea la octeţi duplicaţi).
+            win.pending.pop(offset, None)
+            win.offset = None
+            _upload_offset.pop(key, None)
+            _upload_crc.pop(key, None)
+            win.cond.notify_all()
+            raise
+        # Felia noastră a ieşit din pending: fie a fost scrisă (win.offset ≥ end), fie o eroare a
+        # golit-o (win.offset resetat). Confirmăm că octeţii chiar au aterizat.
+        if win.offset is None or win.offset < end:
+            raise FileConflict("chunk at %d was not applied" % offset)
+        return win.offset
 
 
 async def fs_upload_commit(host_id: int, path: str, upload_id: str, if_mtime=None, crc32=None) -> int:
@@ -4039,7 +4252,15 @@ async def fs_upload_commit(host_id: int, path: str, upload_id: str, if_mtime=Non
         if total is None:
             total = await _upload_landed(host_id, path, upload_id)
         if crc32 is not None:
-            got = await fs_crc32(host_id, tmp)
+            # Agent v55: CRC-ul curent e deja acumulat incremental (din reply-urile FRAME_FSWRITE,
+            # memorat în `_upload_crc`) → comparăm pe loc, FĂRĂ a re-citi fişierul (un temp de 17 GB
+            # însemna minute de stall pe fs_crc32). Dacă nu-l avem cache-uit (resume la rece fără seed,
+            # restart de gateway la mijloc) cădem pe re-citirea completă — corect, doar lent şi rar.
+            cached = _upload_crc.get(key)
+            if cached is not None and (conn.agent_version or 0) >= AGENT_PROTO_BIN_FSWRITE:
+                got = cached
+            else:
+                got = await fs_crc32(host_id, tmp)
             if got != (int(crc32) & 0xffffffff):
                 try:
                     await conn.request("fs_delete", path=tmp, timeout=15)
@@ -4118,4 +4339,11 @@ class FileError(Exception):
 
 class FileConflict(FileError):
     """Ținta s-a schimbat între citire și salvare — nu suprascriem orbește."""
+    pass
+
+
+class UploadBusy(FileError):
+    """Fereastra de reordonare a unui upload pipelined e plină (clientul a trimis prea multe felii
+    înaintea rândului lor). Mapat la 429 în API: clientul dă backoff şi reîncearcă felia — nu e
+    eroare, e backpressure. Definit lângă FileError fiindcă moşteneşte din ea (evaluat la import)."""
     pass

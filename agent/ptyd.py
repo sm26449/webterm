@@ -44,7 +44,7 @@ import termios
 import threading
 import time
 
-AGENT_VERSION = 54
+AGENT_VERSION = 55
 
 # Sub atâtea secunde de valabilitate, un certificat se roteşte prea des ca un pin pe el să
 # însemne altceva decât o cădere programată. 48h: peste ce emite un CA intern (12h la Caddy),
@@ -67,6 +67,8 @@ AGENT_HUNG_AFTER = 120.0        # G1: agent care nu şi-a atins fişierul de liv
 
 FS_CHUNK = 256 * 1024            # bytes per file-read reply
 FS_MAX_LIST = 2000              # entries returned by fs_list
+UPLOAD_CRC_MAX = 256            # căi de upload cu CRC incremental ţinut în RAM (anti creştere
+                               # nemărginită): evicţie FIFO a celei mai vechi peste prag
 
 MAX_SESSIONS = 32
 CONNECT_STUCK_SECS = 120      # o conectare mai lungă de-atât e blocată: o reluăm
@@ -103,6 +105,19 @@ FRAME_DATA = b"D"
 FRAME_FWD = b"F"                       # port-forward: FRAME_FWD + stream_id(32) + bytes
                                        # (reutilizat și pentru consolele SERIALE — tot
                                        #  un stream de octeți brut, keyed pe stream_id)
+FRAME_FSWRITE = b"W"                    # upload chunk BINAR (agent v55): un bloc de fişier călătoreşte
+                                       # ca octeţi BRUŢI, nu base64 în JSON. base64 = +33% octeţi pe
+                                       # sârmă + CPU de encode/decode pe ambele capete (optimizarea
+                                       # amânată din 2.3.0). Layout, big-endian:
+                                       #   FRAME_FSWRITE(1) + rid(8) + offset(8) + path_len(2) + path + bloc
+                                       # rid = id-ul de cerere al gateway-ului (acelaşi spaţiu ca
+                                       # `request()`): agentul răspunde cu un FRAME_CTRL `{id: rid, ...}`,
+                                       # deci reuseşte exact maşinăria de corelare cerere→răspuns.
+                                       # path e inline (nu un „handle" deschis în prealabil): calea
+                                       # temp-ului `.wtpart` e stabilă între chunk-uri, iar un handle
+                                       # in-memory n-ar supravieţui unui restart de agent în mijlocul
+                                       # unui upload resumabil — temp-ul de pe disc da.
+FSWRITE_HDR = struct.Struct(">QQH")    # rid, offset, path_len
 
 MAX_FORWARDS = 64                     # conexiuni de forward concurente per agent
 MAX_SERIALS = 16                      # console seriale concurente per agent
@@ -1872,6 +1887,13 @@ class Agent:
         self._crc_q = queue.Queue()
         self._crc_lock = threading.Lock()
         self._crc_workers = 0
+        # CRC-32 incremental per temp de upload (agent v55): path -> (offset_după, crc) acumulat pe
+        # măsură ce lipim blocuri cu FRAME_FSWRITE. La commit, gateway-ul compară CRC-ul clientului
+        # cu ăsta — FĂRĂ a re-citi tot fişierul (fs_crc32 pe un temp de 17 GB = minute de stall).
+        # Seed-ul la offset 0 e 0; la resume (offset>0 fără intrare) seed-ul vine de pe WORKER prin
+        # fs_crc32(seed=True), NU din citirea prefixului pe loop (ar bloca PTY-urile + watchdog, H-07).
+        self._upload_crc = {}
+        self._upload_crc_lock = threading.Lock()
         # fwd_open cu hostname: DNS pe thread; stream -> (rid, deadline) cât aşteptăm rezultatul
         self._fwd_resolving = {}
         # diagnostics: o singură colectare în zbor per agent + ultimul snapshot (servit la busy)
@@ -2302,13 +2324,15 @@ class Agent:
 
     # -- fs_crc32 pe worker (H-07) --------------------------------------------
 
-    def _crc_enqueue(self, rid, fpath):
+    def _crc_enqueue(self, rid, fpath, seed=False):
         """Pune CRC-ul la coadă şi porneşte un worker dacă sunt mai puţini de CRC_WORKERS.
-        False dacă coada e plină (apelantul răspunde `busy`)."""
+        False dacă coada e plină (apelantul răspunde `busy`). `seed` (agent v55): pe lângă reply,
+        workerul seed-uieşte `_upload_crc[path]` cu (dimensiune, crc) ca FRAME_FSWRITE-urile de după
+        un resume să continue acumularea pe loop fără a re-citi prefixul acolo."""
         with self._crc_lock:
             if self._crc_q.qsize() >= CRC_QUEUE_MAX:
                 return False
-            self._crc_q.put((rid, fpath))
+            self._crc_q.put((rid, fpath, seed))
             if self._crc_workers < CRC_WORKERS:
                 self._crc_workers += 1
                 threading.Thread(target=self._crc_worker, daemon=True).start()
@@ -2320,9 +2344,18 @@ class Agent:
                 if self._crc_q.empty():
                     self._crc_workers -= 1     # retragere SUB lock: nicio cerere nu rămâne orfană
                     return
-                rid, fpath = self._crc_q.get_nowait()
+                rid, fpath, seed = self._crc_q.get_nowait()
             try:
-                crc = _fs_crc32(fpath)
+                fd, st = _open_regular(fpath)
+                crc = 0
+                with os.fdopen(fd, "rb", buffering=0) as f:
+                    while True:
+                        b = f.read(1 << 20)
+                        if not b:
+                            break
+                        crc = zlib.crc32(b, crc)
+                crc &= 0xffffffff
+                size = st.st_size
             except OSError as e:
                 self.send_ctrl({"ok": False, "id": rid, "code": "fs_error",
                                 "msg": "%s: %s" % (fpath, e.strerror or e)})
@@ -2330,7 +2363,76 @@ class Agent:
             except Exception as e:             # noqa: BLE001 — worker-ul nu moare cu cererea în el
                 self.send_ctrl({"ok": False, "id": rid, "code": "internal", "msg": str(e)})
                 continue
-            self.send_ctrl({"ok": True, "id": rid, "crc32": crc})
+            if seed:
+                self._upload_crc_set(fpath, size, crc)
+            # `size` e nou în reply (agent v55): pe v54 câmpul era absent — inofensiv.
+            self.send_ctrl({"ok": True, "id": rid, "crc32": crc, "size": size})
+
+    # -- FRAME_FSWRITE: upload chunk binar + CRC incremental (agent v55) -------
+
+    def _upload_crc_set(self, path, offset, crc):
+        """Memorează (offset, crc) pentru un temp de upload, cu evicţie FIFO peste prag."""
+        with self._upload_crc_lock:
+            if path not in self._upload_crc and len(self._upload_crc) >= UPLOAD_CRC_MAX:
+                self._upload_crc.pop(next(iter(self._upload_crc)), None)
+            self._upload_crc[path] = (offset, crc & 0xffffffff)
+
+    def _handle_fs_write_bin(self, body):
+        """Scrie un bloc BRUT din FRAME_FSWRITE la `offset` în `path`, cu ACELEAŞI garanţii ca
+        op-ul `fs_write` base64 (O_NOFOLLOW, fişier obişnuit, append verificat la offset) PLUS
+        CRC-32 incremental. Răspunde FRAME_CTRL `{id, ok, written, offset, crc32}`.
+        `crc32` lipseşte (None) dacă CRC-ul curent nu e cunoscut ieftin (resume la rece, fără seed)
+        — gateway-ul ştie atunci să nu se bazeze pe calea rapidă la commit."""
+        try:
+            rid, off, plen = FSWRITE_HDR.unpack_from(body, 0)
+            path = body[FSWRITE_HDR.size:FSWRITE_HDR.size + plen].decode("utf-8")
+            data = body[FSWRITE_HDR.size + plen:]
+        except (struct.error, UnicodeDecodeError):
+            # fără un rid de încredere nu putem răspunde corelat; gateway-ul expiră cererea
+            log("FRAME_FSWRITE malformat ignorat")
+            return
+        path = os.path.abspath(os.path.expanduser(path))
+
+        def reply(**kw):
+            r = {"ok": True, "id": rid}
+            r.update(kw)
+            self.send_ctrl(r)
+
+        try:
+            if off == 0:
+                # O_NOFOLLOW: nu scriem prin symlink (acelaşi motiv ca `fs_write` base64).
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+                with os.fdopen(fd, "ab") as f:
+                    f.write(data)
+                crc = zlib.crc32(data) & 0xffffffff
+                self._upload_crc_set(path, len(data), crc)
+                reply(path=path, written=len(data), offset=len(data), crc32=crc)
+            else:
+                # Acelaşi anti-dublare-orbă ca v50: verificăm că offset-ul cerut e chiar dimensiunea
+                # curentă ÎNAINTE de scriere; la nepotrivire refuzăm cu conflict (nu lipim în mijloc).
+                fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW)
+                with os.fdopen(fd, "ab") as f:
+                    cur = os.fstat(f.fileno()).st_size
+                    if cur == off:
+                        f.write(data)
+                if cur != off:
+                    self.send_ctrl({"ok": False, "id": rid, "code": "offset_conflict",
+                                    "msg": "size %d != offset %d" % (cur, off)})
+                    return
+                with self._upload_crc_lock:
+                    prev = self._upload_crc.get(path)
+                if prev and prev[0] == off:
+                    crc = zlib.crc32(data, prev[1]) & 0xffffffff
+                    self._upload_crc_set(path, off + len(data), crc)
+                    reply(path=path, written=len(data), offset=off + len(data), crc32=crc)
+                else:
+                    # resume la rece: n-avem baza CRC-ului şi NU citim prefixul aici (ar bloca loop-ul).
+                    # Scriem corect, dar semnalăm că CRC-ul curent e necunoscut (crc32=None). Seed-ul
+                    # vine separat de pe worker (fs_crc32 seed=True) la sonda de status a clientului.
+                    reply(path=path, written=len(data), offset=off + len(data), crc32=None)
+        except OSError as e:
+            self.send_ctrl({"ok": False, "id": rid, "code": "fs_error",
+                            "msg": "%s: %s" % (path, e.strerror or e)})
 
     # -- fwd_open: rezolvare + connect --------------------------------------------
 
@@ -2784,8 +2886,10 @@ class Agent:
                 # watchdog-ul (WatchdogSec=45) → systemd omora agentul (şi, fără KillMode=process,
                 # serverul tmux cu el), iar commit-ul upload-ului eşua oricum. Tipul fişierului se
                 # verifică pe fd (FIFO/device refuzate). Worker-ul trimite reply-ul cu acelaşi id.
+                # `seed` (agent v55): la reluarea unui upload, workerul memorează şi (dimensiune, crc)
+                # în `_upload_crc`, ca FRAME_FSWRITE-urile de după resume să continue CRC-ul pe loop.
                 fpath = os.path.abspath(os.path.expanduser(msg["path"]))
-                if not self._crc_enqueue(rid, fpath):
+                if not self._crc_enqueue(rid, fpath, seed=bool(msg.get("seed"))):
                     err("busy", "too many checksum requests queued on this host")
 
             elif op == "get_log":
@@ -3652,6 +3756,8 @@ class Agent:
                     self.serial_write(stream, body[SID_LEN:])
                 else:
                     self.fwd_write(stream, body[SID_LEN:])
+            elif ftype == FRAME_FSWRITE:            # upload chunk binar (agent v55)
+                self._handle_fs_write_bin(body)
 
 
 # ---------------------------------------------------------------------------
