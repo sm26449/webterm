@@ -24,6 +24,8 @@ regexes = [
 ]
 paths = [
   # vectorii RFC 6238/8032 (hex) și fixture-urile din suita de teste
+  # fixture-uri de setup-token (valori dummy clar false, nu secrete reale) — vezi sec_setup_token_test
+  '''tests/sec_setup_token_test\.py''',
   '''tests/ed25519_kat_test\.py''',
   '''tests/totp_test\.py''',
   '''tests/signing_test\.py''',
