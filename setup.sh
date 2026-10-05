@@ -131,13 +131,12 @@ done
 say ""
 say "── Done ──"
 URL=$(grep -E '^WEBTERM_PUBLIC_URL=' .env | cut -d= -f2-)
-# This used to grep the human-readable sentence and strip spaces — but `tr -d ' '` does not remove
-# Docker's container prefix, so the token printed as `app-1|xCXv…`. You copied it, got a 403, tried
-# a few more times, and after the fifth you had locked yourself out of your own install for 15
-# minutes (per-IP lockout), two minutes after cloning. We grep the STABLE marker
-# `WEBTERM_SETUP_TOKEN=…`, which is in the log for exactly this purpose, and take only the value:
-# it works with or without a log prefix.
-TOKEN=$($COMPOSE logs app 2>/dev/null | grep -oE 'WEBTERM_SETUP_TOKEN=[A-Za-z0-9_-]+' | tail -1 | cut -d= -f2- || true)
+# The generated setup token is NO LONGER printed to the app log — `docker compose logs app` was
+# readable by anyone (log collectors, non-admin operators) before first setup, so whoever read it
+# could create the admin account. The gateway now writes a generated token to an owner-only (0600)
+# file at /data/setup-token inside the container; we read it from there. `exec -T app cat` works
+# for both bind-mount and named-volume data dirs.
+TOKEN=$($COMPOSE exec -T app cat /data/setup-token 2>/dev/null || true)
 if [ -n "$TOKEN" ]; then
   say "Open:  $URL"
   say "Setup token (for the first account):"
@@ -148,14 +147,14 @@ if [ -n "$TOKEN" ]; then
     say "You can get it again any time with:  make token"
   else
     say "You can get it again any time with:"
-    say "  $COMPOSE logs app | grep -oE 'WEBTERM_SETUP_TOKEN=[A-Za-z0-9_-]+' | tail -1 | cut -d= -f2-"
+    say "  $COMPOSE exec -T app cat /data/setup-token"
   fi
 else
-  # A missing token in the logs does NOT prove an account exists: logs rotate and containers get
-  # recreated. This used to claim "an account seems to exist already — just log in", which sent
-  # people looking for a password that was never set.
+  # A missing token file does NOT prove an account exists: the file is deleted once setup closes,
+  # but it is also absent if the container was just recreated. This used to claim "an account seems
+  # to exist already — just log in", which sent people looking for a password that was never set.
   say "Open:  $URL"
-  say "No token found in the logs (rotated? container recreated?). Get it with:"
-  say "  $COMPOSE logs app | grep -oE 'WEBTERM_SETUP_TOKEN=[A-Za-z0-9_-]+' | tail -1 | cut -d= -f2-"
+  say "No setup token found (already set up? container recreated?). Get it with:"
+  say "  $COMPOSE exec -T app cat /data/setup-token"
 fi
 command -v make >/dev/null 2>&1 && say "Useful commands:  make help" || true

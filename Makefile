@@ -27,16 +27,17 @@ logs-app: ## Live logs, gateway only
 	$(COMPOSE) logs -f app
 
 token: ## Show the setup token (if no account yet)
-	@# .env first (production install writes it there), then the log marker.
-	@# The old version grepped a Romanian log sentence — it broke the moment the
-	@# message was reworded, and would break again on translation.
-	@# `A || B` where A is a pipeline: the status is the LAST command's, and `cut` always
-	@# succeeds — so grep finding nothing still "passed" and BOTH fallbacks were dead code.
-	@# On the quick-install path .env holds an empty value, so this printed nothing at all,
-	@# with exit 0: the second documented way to recover the token never worked.
+	@# .env first (production install writes it there when the operator pins a token), then the
+	@# owner-only file the gateway writes when it GENERATES one.
+	@# We no longer grep the app log: the token used to be printed there in full, so anyone who
+	@# could read `docker compose logs app` before first setup (log collectors, non-admin
+	@# operators) could create the admin account. The gateway now keeps a generated token in a
+	@# 0600 file at /data/setup-token inside the container; `exec -T app cat` reads it for both
+	@# bind-mount and named-volume data dirs, with a local data/setup-token fallback for dev.
+	@# Quiet + exit 0 when there's no token (e.g. setup already done — the file is deleted).
 	@sed -n 's/^WEBTERM_SETUP_TOKEN=\(..*\)/\1/p' .env 2>/dev/null; \
-	 $(COMPOSE) logs app 2>/dev/null | grep -oE 'WEBTERM_SETUP_TOKEN=[A-Za-z0-9_-]+' \
-		| tail -1 | cut -d= -f2-
+	 $(COMPOSE) exec -T app cat /data/setup-token 2>/dev/null || \
+	 cat data/setup-token 2>/dev/null || true
 
 ps: ## Container status
 	$(COMPOSE) ps

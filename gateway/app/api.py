@@ -55,20 +55,73 @@ class Credentials(BaseModel):
 # fresh public deploy. Set at boot (env WEBTERM_SETUP_TOKEN, else generated).
 _setup_token: str = None
 
+# Fişierul numai-owner (0600) în care punem tokenul GENERAT, ca `make token`/setup.sh să-l
+# recupereze. DE CE un fişier şi nu logul: până la 3.2.0 tokenul întreg se scria în logul
+# aplicaţiei (marker-ul `WEBTERM_SETUP_TOKEN=<value>`). Înainte de primul setup, oricine poate
+# citi `docker compose logs app` — colectoare de loguri, operatori fără drepturi de admin —
+# obţinea tokenul şi putea crea contul de admin. Logul nu e un loc pentru un secret viu, aşa
+# că tokenul generat ajunge într-un fişier 0600 în directorul de date, nu în istoria logului.
+_SETUP_TOKEN_FILE = config.DATA_DIR / "setup-token"
+
+
+def _write_setup_token_file(token: str) -> None:
+    """Scrie tokenul de setup într-un fişier numai-owner (0600), best-effort.
+
+    DE CE `os.open(..., 0o600)` şi nu write + chmod: creând fişierul cu drepturi largi şi
+    strângându-le abia după, ar exista o fereastră în care alt user de pe host îl poate citi.
+    Dacă scrierea eşuează (FS read-only etc.) nu crăpăm: tokenul rămâne în memorie, deci
+    setup-ul din UI merge — doar recuperarea prin `make token` nu mai are de unde citi."""
+    try:
+        config.ensure_dirs()
+        fd = os.open(_SETUP_TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, token.encode())
+        finally:
+            os.close(fd)
+        os.chmod(_SETUP_TOKEN_FILE, 0o600)   # fişier preexistent cu alt mod → strânge-l oricum
+    except OSError as e:
+        log.warning("could not persist the setup token to %s (%s)", _SETUP_TOKEN_FILE, e)
+
+
+def _clear_setup_token_file() -> None:
+    """Şterge fişierul 0600 (best-effort) când setup-ul s-a închis, ca secretul să nu zăbovească
+    pe disc după ce nu mai e folositor."""
+    try:
+        os.unlink(_SETUP_TOKEN_FILE)
+    except OSError:
+        pass        # deja absent sau FS read-only — nimic de făcut
+
 
 async def init_setup_token() -> None:
     global _setup_token
     if await db.fetchone("SELECT id FROM users LIMIT 1"):
         _setup_token = None          # already configured; setup is closed
+        _clear_setup_token_file()    # curăţă un eventual fişier rămas de la o pornire anterioară
         return
+    provided = bool(config.SETUP_TOKEN)
     _setup_token = config.SETUP_TOKEN or security.new_token()
-    # `WEBTERM_SETUP_TOKEN=<value>` is a STABLE marker, read by `make token` and by the
-    # install scripts. The prose above it is for humans and may be reworded; the marker may not.
+    if provided:
+        # Tokenul vine din mediu (WEBTERM_SETUP_TOKEN) — calea de install/ci-local. Operatorul ÎL
+        # ARE deja, deci nu-l scriem în fişier şi mai ales nu-l logăm: ar fi scurgerea gratuită a
+        # unui secret deja cunoscut. Ştergem şi un fişier generat anterior, ca să nu rămână unul
+        # vechi lângă tokenul configurat.
+        _clear_setup_token_file()
+        log.warning(
+            "WebTerm: no account yet. Setup is open using the configured WEBTERM_SETUP_TOKEN "
+            "(not logged — you already have it). Create the account and setup closes itself.")
+        return
+    # Token GENERAT de noi: trebuie recuperabil, dar NU prin log. Îl punem în fişierul 0600 şi
+    # logăm DOAR un prefix scurt (verificare „la ochi") plus cum se ia valoarea întreagă. Marker-ul
+    # vechi `WEBTERM_SETUP_TOKEN=<value>` rămâne, dar MASCAT: orice unealtă care încă îl caută
+    # vede o valoare evident redactată, nu secretul real.
+    _write_setup_token_file(_setup_token)
     log.warning(
-        "\n%s\n  WebTerm: no account yet. Setup token (required for the first "
-        "sign-in):\n\n      %s\n\n  WEBTERM_SETUP_TOKEN=%s\n\n"
-        "  You can find it again in this log. Create the account and setup closes itself.\n%s",
-        "=" * 64, _setup_token, _setup_token, "=" * 64)
+        "\n%s\n  WebTerm: no account yet. A setup token was generated (prefix %s…).\n"
+        "  Get the full token with:  make token\n"
+        "  or read the owner-only file:  %s\n\n"
+        "  WEBTERM_SETUP_TOKEN=<redacted — run `make token`>\n\n"
+        "  Create the account and setup closes itself.\n%s",
+        "=" * 64, _setup_token[:6], _SETUP_TOKEN_FILE, "=" * 64)
 
 
 def _webauthn_available() -> bool:
@@ -164,13 +217,13 @@ async def setup(creds: Credentials, request: Request, response: Response):
         if locked or left == 0:
             raise ApiError(
                 429, "setup.lockedOut",
-                "too many wrong setup tokens — locked out for %d minutes. The token is in "
-                "the server logs: docker compose logs app | grep WEBTERM_SETUP_TOKEN" % minutes,
+                "too many wrong setup tokens — locked out for %d minutes. "
+                "Recover the token with: make token" % minutes,
                 vars={"minutes": minutes})
         raise ApiError(
             403, "setup.wrongToken",
-            "wrong setup token (%d attempt%s left before a %d-minute lockout) — it is in "
-            "the server logs: docker compose logs app | grep WEBTERM_SETUP_TOKEN"
+            "wrong setup token (%d attempt%s left before a %d-minute lockout) — "
+            "recover it with: make token"
             % (left, "" if left == 1 else "s", minutes),
             vars={"left": left, "minutes": minutes})
     _check_password(creds.password)
@@ -191,6 +244,9 @@ async def setup(creds: Credentials, request: Request, response: Response):
     if not row or row["email"] != email:
         raise ApiError(409, "setup.alreadyConfigured", "already configured")   # altă cerere a câștigat cursa
     _setup_token = None              # single-use; setup is now closed
+    # Contul e creat → fişierul 0600 nu mai are rost. Îl ştergem (best-effort) ca tokenul de setup
+    # să nu zăbovească pe disc după ce şi-a făcut treaba.
+    _clear_setup_token_file()
     security.record_login_success(ip)
     await _issue_cookie(response, row["id"], request)
     return {"ok": True}

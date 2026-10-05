@@ -30,6 +30,12 @@ regression test. Gateway/frontend only; the agent-side items ride the next agent
   let an idle background tab hold step-up open to the absolute cap and let merely listing history
   slide the window on every 2FA host. A read-only `stepup_window_is_open` now backs every passive
   check; the WebSocket **unlock** requires a fresh factor, not a kept-alive window.
+- **The generated setup token was printed in full to the application log**, where
+  `docker compose logs` (often readable by non-admin operators) exposed it before first setup —
+  whoever read it could create the admin account. The generated token is now written to a 0600
+  file in the data dir and only a 6-char prefix is logged; recover it with `make token`. When the
+  token is supplied via `WEBTERM_SETUP_TOKEN` (install/CI) nothing is logged. The file is deleted
+  once setup completes.
 - **`delete_session` and `revoke_share` lacked step-up on 2FA hosts** (unlike `kill_session`) —
   destroying transcripts or cutting a share on a protected host needed no second factor. Both now
   require it.
