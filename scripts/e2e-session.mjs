@@ -223,6 +223,18 @@ try {
     loc.waitFor({ state: 'visible', timeout: ms }).then(() => true).catch(() => false)
   const hidden = (loc, ms = 5000) =>
     loc.waitFor({ state: 'hidden', timeout: ms }).then(() => true).catch(() => false)
+  // Polling mărginit pe o valoare citită din pagină: un singur read putea rula ÎNAINTE ca React să
+  // re-randeze panoul sau ca listarea FS / cwd-ul (OSC 7) să se propage — cursa clasică de pe un
+  // loopback rapid (+ runner încărcat). Re-citim până se potriveşte, cu plafon; aserţiunea de după
+  // rămâne pe valoare, deci un regres real tot pică — ce nu mai măsurăm e viteza de randare.
+  const pollValue = async (read, pred, ms = 10000) => {
+    const t0 = Date.now()
+    for (;;) {
+      const v = await read()
+      if (pred(v) || Date.now() - t0 > ms) return v
+      await page.waitForTimeout(200)
+    }
+  }
 
   // Ctrl/Cmd+Shift+F deschide căutarea în scrollback
   const searchBox = page.locator('input[placeholder="Search…"]')
@@ -643,8 +655,13 @@ try {
   // — pe care o verificăm în store. La pauză XHR-urile în zbor sunt anulate → route.continue
   // poate pica, de aceea try/catch.
   const UP_RE = /\/fs\/upload\?/
+  // Ţinem fiecare felie în zbor 30 s (nu 8): felia TREBUIE să fie încă reţinută când o punem pe
+  // pauză. Cu 8 s, pe un runner încărcat, `visible(pwidget)` (până la 8 s) + poll-ul după jobul
+  // activ (până la 8 s) puteau ele singure consuma fereastra → felia se elibera, iar cele 24 MB
+  // aterizau INSTANT pe loopback → job `done` înainte de pauză → `paused` niciodată observat.
+  // Nu încetineşte testul: anulăm (pauză) + `unroute` înainte ca reţinerea să conteze.
   await page.route(UP_RE, async (route) => {
-    await new Promise((r) => setTimeout(r, 8000))
+    await new Promise((r) => setTimeout(r, 30000))
     try { await route.continue() } catch { /* felia a fost anulată de pauză */ }
   })
   const PBYTES = 24 * 1024 * 1024
@@ -705,8 +722,10 @@ try {
   await page.waitForTimeout(700)
   await filePanel.locator('button[title="Reload"]').click()
   await filePanel.locator('input[placeholder="filter…"]').fill('raport')
-  await page.waitForTimeout(500)
-  check('fișier cu spații/diacritice apare în listă', ((await filePanel.textContent()) ?? '').includes(SPECIAL))
+  // Pollăm: după Reload listarea FS se întoarce ASINCRON, iar panoul se re-randează după ea —
+  // un singur read (chiar şi după 500 ms) prindea lista încă ne-împrospătată pe un runner lent.
+  const spText = await pollValue(() => filePanel.textContent().then((t) => t ?? ''), (t) => t.includes(SPECIAL))
+  check('fișier cu spații/diacritice apare în listă', spText.includes(SPECIAL))
   const spRow = filePanel.locator('div.group').filter({ hasText: SPECIAL }).first()
   await spRow.hover()
   await spRow.locator('button[title="Edit"]').click()
@@ -790,16 +809,21 @@ try {
   await page.keyboard.type('cd /tmp\n')
   await page.waitForTimeout(800)
   await vis().locator('button[title^="Files"]').click()
-  await page.waitForTimeout(800)
-  check('X1: panoul urmărește cwd-ul lui (/tmp)', (await visPath()) === '/tmp')
+  // Pollăm calea: panoul o prinde dintr-un OSC 7 care se propagă ASINCRON după `cd` — un read fix
+  // (800 ms) o rata pe un runner lent. Aserţiunea rămâne pe egalitate exactă, deci un cross-talk real pică.
+  check('X1: panoul urmărește cwd-ul lui (/tmp)', (await pollValue(visPath, (v) => v === '/tmp')) === '/tmp')
   // agentul raportează cwd-ul sesiunii direct (fără shell integration) — calea
   // /proc pe backend pty; pane_current_path pe tmux. Așa panoul se deschide unde
   // ești, nu în ~, chiar dacă integrarea shell nu e activă pe host.
   const x1sid = (await page.evaluate(() => location.hash)).replace('#/s/', '')
-  const cwdApi = await page.evaluate(async ([hid, sid]) => {
-    const r = await fetch(`/api/hosts/${hid}/fs/cwd?sid=${sid}`, { credentials: 'same-origin' })
-    return r.ok ? (await r.json()).cwd : `ERR ${r.status}`
-  }, [host.id, x1sid])
+  // Pollăm API-ul: agentul raportează cwd-ul din /proc (pty) / pane_current_path (tmux), care se
+  // actualizează ASINCRON după `cd /tmp` — un singur fetch îl prindea încă pe cel vechi pe loopback-ul rapid.
+  const cwdApi = await pollValue(
+    () => page.evaluate(async ([hid, sid]) => {
+      const r = await fetch(`/api/hosts/${hid}/fs/cwd?sid=${sid}`, { credentials: 'same-origin' })
+      return r.ok ? (await r.json()).cwd : `ERR ${r.status}`
+    }, [host.id, x1sid]),
+    (v) => v === '/tmp')
   check('agentul raportează cwd-ul sesiunii pentru deschiderea panoului', cwdApi === '/tmp')
 
   await newSession(page)                     // X2
@@ -809,14 +833,15 @@ try {
   await page.keyboard.type('cd /var\n')
   await page.waitForTimeout(800)
   await vis().locator('button[title^="Files"]').click()
-  await page.waitForTimeout(800)
-  check('X2: panoul urmărește cwd-ul lui (/var)', (await visPath()) === '/var')
+  check('X2: panoul urmărește cwd-ul lui (/var)', (await pollValue(visPath, (v) => v === '/var')) === '/var')
 
   // înapoi la X1 — panoul lui trebuie să fie ÎNCĂ /tmp (n-a reacționat la cwd-ul lui X2)
   await page.evaluate((h) => { location.hash = h }, x1hash)
   await page.waitForTimeout(1000)
+  // Pollăm pe /tmp: dacă panoul lui X1 ar fi reacţionat (greşit) la cd-ul lui X2, poll-ul expiră pe
+  // /var şi check-ul tot pică — deci robusteţea NU slăbeşte acoperirea izolării.
   check('izolare: X1 rămâne /tmp după ce X2 a făcut cd (fără cross-talk între sesiuni)',
-    (await visPath()) === '/tmp')
+    (await pollValue(visPath, (v) => v === '/tmp')) === '/tmp')
 
   // ── Split-views: layout denumit, comutare, persistenţă la reload, ştergere ──
   // La punctul ăsta sunt ≥2 taburi (X1, X2 + sesiunile anterioare), deci „+ Split view" apare.
