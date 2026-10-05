@@ -9,6 +9,14 @@ back.
 
 ## [Unreleased]
 
+### Security
+- **Browsing a forward or running a search no longer extends a step-up window.** Two passive reads
+  (`forward_auth` and transcript search) still used the sliding `stepup_window_ok`, so keeping a
+  forward tab open or repeatedly searching silently kept "sudo" alive on 2FA hosts up to the
+  absolute cap. Both now use the read-only `stepup_window_is_open` (completes the fix from the
+  2026-10-04 review).
+
+
 ## [3.3.0] — 2026-10-05 · agent (56)
 
 ### Changed — agent (56)

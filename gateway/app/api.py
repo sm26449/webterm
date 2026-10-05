@@ -4420,7 +4420,9 @@ async def forward_auth(request: Request, slug: str, next: str = "/"):
     # poate deschide — un 403 sec l-ar lăsa fără nicio indicaţie ce să facă.
     host = await db.fetchone("SELECT require_2fa FROM hosts WHERE id=?", row["host_id"])
     next = _safe_next(next)                     # anti open-redirect, ÎNAINTE de orice redirect
-    if host and host["require_2fa"] and not security.stepup_window_ok(user["id"], row["host_id"]):
+    # read-only: o navigare pe forward NU trebuie să prelungească fereastra de step-up (ţinerea
+    # unui tab de forward deschis gliseaza altfel „sudo-ul" la nesfârşit — vezi auditul 2026-10)
+    if host and host["require_2fa"] and not security.stepup_window_is_open(user["id"], row["host_id"]):
         # Parametrii merg în QUERY, nu după hash: ruta SPA e `^#/h/(\d+)$`, ancorată la final,
         # deci `#/h/5?stepup=...` n-ar mai fi recunoscută şi omul ar ateriza pe dashboard.
         # `next` călătoreşte prin ocol ca să revii pe pagina cerută, nu pe rădăcina forward-ului.
@@ -4787,7 +4789,8 @@ async def search(q: str, request: Request, user=Depends(security.require_user)):
     gated = {r["id"] for r in await db.fetchall(
         "SELECT id FROM hosts WHERE require_2fa=1")}
     if gated:
-        allowed = {hid for hid in gated if security.stepup_window_ok(user["id"], hid)}
+        # read-only: o căutare nu trebuie să prelungească fereastra de step-up pe hosturile potrivite
+        allowed = {hid for hid in gated if security.stepup_window_is_open(user["id"], hid)}
         rows = [r for r in rows if r["host_id"] not in gated or r["host_id"] in allowed]
     loop = asyncio.get_running_loop()
     results = await loop.run_in_executor(None, core.search_transcripts, rows, q)
