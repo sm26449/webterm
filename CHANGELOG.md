@@ -9,6 +9,16 @@ back.
 
 ## [Unreleased]
 
+## [3.3.1] — 2026-10-05 · agent (56)
+
+### Changed
+- **Pasting a screenshot into the terminal now explains itself.** It showed only a path in the
+  prompt; now a paste/drop of image(s)/file(s) raises an immediate toast ("Uploading the screenshot
+  to the inbox…") and, on completion, one that states the result ("Saved to ~/.webterm/inbox; its
+  path was added to the prompt — press Enter to send it"), with a session-directory variant, a
+  dedicated error toast, and a one-time first-use hint. This is how a screenshot reaches a CLI like
+  Claude Code over a web terminal.
+
 ### Security
 - **Browsing a forward or running a search no longer extends a step-up window.** Two passive reads
   (`forward_auth` and transcript search) still used the sliding `stepup_window_ok`, so keeping a
