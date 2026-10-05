@@ -9,6 +9,16 @@ back.
 
 ## [Unreleased]
 
+### Changed
+- **Transfers are now one floating, collapsible widget in the bottom-right corner** instead of a
+  chip in the tab strip (which crowded or overlapped the tabs) plus a separate top strip. It is its
+  own layer (below dialogs, above content), collapses to a compact pill and expands to a card that
+  lists every transfer with name, size, progress, rate, ETA and actions (retry / pause / resume /
+  cancel / copy or insert path). It auto-expands once when a transfer needs attention
+  (stalled / failed / incomplete), remembers whether you minimised it, and on mobile sits above the
+  key bar. Fixes the earlier chip whose pop-over could render off-screen.
+
+
 ### Security
 *(hardening from four independent security reviews of our own gateway — our mirror pentest plus
 three external second opinions; every real finding verified in code before fixing, each with a

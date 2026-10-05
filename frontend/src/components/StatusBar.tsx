@@ -1,12 +1,8 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { useEffect, useState } from 'react'
 import { Host, Session } from '../lib/api'
 import { tStatic, useI18n } from '../lib/i18n'
 import { fmtTs, getTimezone, timeInZone, uiLocale } from '../lib/tz'
 import { copyText } from '../lib/clipboard'
-import { fmtEta, fmtRate } from '../lib/uploads'
-import { UploadJob, isActive, isDownload, uploadStore } from '../lib/uploadStore'
-import { DownloadIcon, UploadIcon } from './Icons'
-import TransfersPopover from './TransfersPopover'
 
 // abrevierea de zile vine din catalog: era fixa, deci aparea si in interfata engleza
 const DAY = () => tStatic('time.d')
@@ -43,67 +39,6 @@ function shortPath(p: string): string {
   const parts = s.split('/').filter(Boolean)
   if (parts.length > 3) return (s.startsWith('~') ? '~/…/' : '…/') + parts.slice(-2).join('/')
   return s
-}
-
-/* Chip-ul de transferuri: progresul normal al upload-urilor (running/done) stă AICI, la capătul
-   din dreapta al barei de stare, nu într-o bandă permanentă deasupra workspace-ului — banda
-   (JobsBar) apare doar când ceva cere o decizie. Un job: `↑ nume 63% · 24 MB/s · 9m`; mai multe:
-   `↑ N transferuri · 63%`. Click/Enter deschide popover-ul cu lista completă. Pulsează discret
-   DOAR pe stalled/retrying (respectă prefers-reduced-motion) — mişcarea e semnal, nu decor. */
-/** Chip-ul de transferuri: GLOBAL (randat în bara de taburi, vizibilă pe orice pagină), nu în bara de
-    stare a sesiunii — un upload pornit dintr-o sesiune trebuie să se vadă şi de pe Dashboard sau de pe
-    pagina hostului, altfel „a dispărut" exact când schimbi contextul. `session` = sesiunea activă,
-    dacă există, pentru „inserează calea". */
-export function TransfersChip(props: { session?: Session; hostName?: string }) {
-  const { t } = useI18n()
-  const snap = useSyncExternalStore(uploadStore.subscribe, uploadStore.snapshot)
-  const jobs = useMemo(() => [...snap.values()], [snap])
-  const [open, setOpen] = useState(false)
-  const btnRef = useRef<HTMLButtonElement>(null)
-  if (jobs.length === 0) return null
-
-  const live = jobs.filter(isActive)
-  const totalSize = live.reduce((a, j) => a + j.size, 0)
-  const totalPos = live.reduce((a, j) => a + j.pos, 0)
-  const overallPct = totalSize ? Math.round((totalPos / totalSize) * 100) : null
-  const worried = jobs.some((j) => j.state === 'stalled' || j.state === 'retrying')
-  const failed = jobs.some((j) => j.state === 'err')
-  const short = (j: UploadJob): string => {
-    switch (j.state) {
-      case 'running': return `${j.pct}% · ${fmtRate(j.bytesPerSec)} · ${fmtEta(j.etaSec, t)}`
-      case 'stalled': return `${j.pct}% · ${t('transfers.shortStalled')}`
-      case 'retrying': return `${j.pct}% · ${t('transfers.shortRetrying')}`
-      case 'paused': return `${j.pct}% · ${t('jobs.statePaused')}`
-      case 'done': return `100% · ${t('jobs.stateDone')}`
-      case 'err': return t('transfers.shortFailed')
-      case 'cancelled': return t('jobs.stateCancelled')
-      case 'orphan': return `${j.pct}% · ${t('transfers.shortOrphan')}`
-    }
-  }
-  const label = jobs.length === 1
-    ? `${jobs[0].name} ${short(jobs[0])}`
-    : `${t('transfers.chipMany', { count: jobs.length })}${overallPct != null ? ` · ${overallPct}%` : ''}`
-  const tone = failed ? 'wt-danger' : worried ? 'wt-warn' : 'wt-info'
-  const hostName = (j: UploadJob) => j.hostName || (j.hostId === props.session?.host_id ? props.hostName : '') || `#${j.hostId}`
-  return (
-    <>
-      <button ref={btnRef} type="button" onClick={() => setOpen((v) => !v)}
-        // numele accesibil CONŢINE textul vizibil (WCAG 2.5.3 label-in-name) + ce deschide
-        aria-expanded={open} aria-haspopup="dialog" aria-label={`${t('jobs.title')}: ${label} — ${t('transfers.chipAria')}`}
-        title={t('transfers.chipTitle')}
-        data-testid="wt-transfers-chip"
-        className={`wt-transfers-chip ${tone} ${worried ? 'wt-chip-pulse' : ''} inline-flex h-6 max-w-[22rem] items-center gap-1.5 rounded-full px-2 font-mono text-[11px] tabular-nums hover:bg-ink-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400`}>
-        <span aria-hidden="true" className="shrink-0">
-          {jobs.length === 1 && isDownload(jobs[0]) ? <DownloadIcon /> : <UploadIcon size={12} />}
-        </span>
-        <span className="truncate">{label}</span>
-      </button>
-      {open && (
-        <TransfersPopover anchor={btnRef.current} jobs={jobs} hostName={hostName}
-          insertSid={props.session?.id} insertHostId={props.session?.host_id} onClose={() => setOpen(false)} />
-      )}
-    </>
-  )
 }
 
 export default function StatusBar(props: { session: Session; host?: Host; rtt?: number | null; cwd?: string | null }) {
@@ -198,7 +133,7 @@ export default function StatusBar(props: { session: Session; host?: Host; rtt?: 
             <span aria-hidden="true">⇅ </span>{props.rtt} ms
           </span>
         )}
-        {/* capătul din dreapta: attach (chip-ul de transferuri stă în bara de taburi, global) */}
+        {/* capătul din dreapta: attach (transferurile stau acum în widgetul plutitor jos-dreapta) */}
         <span className="ml-auto flex min-w-0 items-center gap-2">
           {attachOneLiner && (
             <button

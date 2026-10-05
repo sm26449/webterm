@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useI18n } from '../lib/i18n'
 
 const WHEEL_UP = '\x1b[<64;40;10M'.repeat(3) // rapoarte SGR de rotiță: tmux
@@ -34,6 +34,21 @@ export default function MobileKeybar(props: {
 }) {
   const { t } = useI18n()
   const [ctrl, setCtrl] = useState(false)
+  // Publicăm înălţimea reală a keybar-ului în `--wt-keybar-h` (pe <html>), ca widgetul plutitor
+  // de transferuri — portat în <body>, deci fără acces la acest DOM — să se aşeze DEASUPRA lui pe
+  // mobil şi să nu acopere niciodată tastatura de comenzi. ResizeObserver: înălţimea variază cu
+  // safe-area-inset şi cu wrap-ul. La demontare (desktop / fără sesiune vie) o resetăm → widgetul
+  // coboară la marginea de jos.
+  const rootRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const el = rootRef.current
+    if (!el) return
+    const setVar = () => document.documentElement.style.setProperty('--wt-keybar-h', `${el.offsetHeight}px`)
+    setVar()
+    const ro = new ResizeObserver(setVar)
+    ro.observe(el)
+    return () => { ro.disconnect(); document.documentElement.style.removeProperty('--wt-keybar-h') }
+  }, [])
   // ⇞/⇟ injectează rapoarte de rotiță SGR pe care doar tmux le interpretează;
   // pe backend „pty" (fără tmux) octeții ar ajunge tastați în shell ca gunoi
   const keys = props.backend === 'tmux' ? KEYS : KEYS.filter((k) => k.label !== '⇞' && k.label !== '⇟')
@@ -44,7 +59,7 @@ export default function MobileKeybar(props: {
   }
 
   return (
-    <div className="flex gap-1 overflow-x-auto border-t border-ink-800 bg-ink-900 px-2 pb-[max(0.375rem,env(safe-area-inset-bottom))] pt-1.5 md:hidden">
+    <div ref={rootRef} className="flex gap-1 overflow-x-auto border-t border-ink-800 bg-ink-900 px-2 pb-[max(0.375rem,env(safe-area-inset-bottom))] pt-1.5 md:hidden">
       <button
         className={`wt-touch shrink-0 rounded-md px-2.5 py-1 text-xs font-medium ${
           ctrl ? 'bg-sky-600 text-white' : 'bg-ink-800 text-slate-300'

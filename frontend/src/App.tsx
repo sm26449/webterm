@@ -18,7 +18,7 @@ import SharedView from './components/SharedView'
 import Sidebar from './components/Sidebar'
 import SessionView from './components/SessionView'
 import TabBar from './components/TabBar'
-import JobsBar from './components/JobsBar'
+import TransfersWidget from './components/TransfersWidget'
 import Toasts, { ToastItem } from './components/Toasts'
 import CopyToast from './components/CopyToast'
 import { errText, api, ApiError, AppState, Host, isSessionLive, Session, Snippet, SplitView, setStepupHandler, withStepup } from './lib/api'
@@ -1312,9 +1312,6 @@ function MainApp() {
             }}
           />
         )}
-      {/* transferuri în mers / picate / orfane — pe ORICE ecran (acasă, host, sesiune), nu doar în
-          panoul de fişiere care le-a pornit; se ascunde singură când nu e nimic */}
-      <JobsBar hosts={hosts} />
       <main className="wt-main flex min-h-0 min-w-0 flex-1">
         {/* GRILĂ multi-terminal: ia locul stack-ului keep-alive şi al split-ului (altfel o
             sesiune s-ar monta de două ori → două WS pe acelaşi PTY, războiul de detach tmux).
@@ -1619,6 +1616,10 @@ function MainApp() {
         </div>
       )}
       <CopyToast />
+      {/* transferuri (upload/download) pe ORICE ecran — widget plutitor jos-dreapta, portat în
+          <body>; se ascunde singur când nu e nimic. `activeSession` = ţinta pentru „inserează
+          calea" (doar în sesiunea activă a aceluiaşi host). */}
+      <TransfersWidget hosts={hosts} insertSid={activeSession?.id} insertHostId={activeSession?.host_id} />
       {gwFails >= 2 && (
         <div className="fixed left-1/2 top-3 z-50 flex -translate-x-1/2 items-center gap-2 rounded-full border border-rose-500/40 bg-ink-900 px-4 py-1.5 text-sm text-slate-200 shadow-2xl">
           <span className="wt-danger font-medium">

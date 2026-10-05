@@ -1,30 +1,21 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { Host } from '../lib/api'
 import { copyText } from '../lib/clipboard'
 import { useI18n } from '../lib/i18n'
-import { notify } from '../lib/notify'
-import { lsGet, lsSet } from '../lib/storage'
 import { insertPathInto } from '../lib/transfers'
 import { cancelUpload, dirName, discardUpload, dismissUpload, fmtBytes, fmtEta, fmtRate, openFilesAt, pauseUpload, resumeUpload, retryUpload } from '../lib/uploads'
 import { cancelDownload, dismissDownload, pauseDownload, resumeDownload, retryDownload } from '../lib/downloads'
-import { UploadJob, isActive, isDownload, uploadStore } from '../lib/uploadStore'
-import { ChevronIcon, DownloadIcon, UploadIcon } from './Icons'
+import { UploadJob, isActive, isDownload } from '../lib/uploadStore'
+import { DownloadIcon, UploadIcon } from './Icons'
 
-/* Bara globală de transferuri. Trăieşte sub cromul de sus şi deasupra workspace-ului, pe ORICE
-   ecran: incidentul cu upload-ul de 17 GB (2026-10-04) a arătat că singurul loc unde se vedea un
-   transfer era panoul de fişiere care l-a pornit — închis panoul, dispărută orice urmă.
+/* Helper-ele pentru transferuri — rândul (`JobRow`) şi funcţiile lui de stare — folosite acum
+   de widgetul plutitor (TransfersWidget). Incidentul cu upload-ul de 17 GB (2026-10-04) a arătat
+   că singurul loc unde se vedea un transfer era panoul de fişiere care l-a pornit — închis
+   panoul, dispărută orice urmă; de aici un loc GLOBAL, independent de panou.
 
-   Faza 2 (transfers phase 1): bara apare DOAR când ceva cere o decizie — `stalled`, `err` sau
-   `orphan` — şi dispare singură când s-a rezolvat. Progresul normal (running/done) stă în
-   chip-ul din bara de stare a sesiunii (StatusBar → TransfersPopover), care foloseşte ACELAŞI
-   rând (`JobRow`) cu aceleaşi acţiuni. O bară permanentă de 32 px pentru un upload sănătos
-   fura spaţiu de terminal degeaba; una care apare doar la probleme chiar e citită.
-
-   Vizual tăcută (cifre monospaţiate, fără emoji), complet operabilă de la tastatură (ţinte
-   de 24 px). Tranziţiile de stare se anunţă o singură dată printr-o regiune `aria-live`
-   politicoasă, montată PERMANENT (o regiune care apare odată cu primul mesaj nu e citită —
-   vezi Toasts.tsx); când tab-ul e în fundal, `done`/`err` dau şi o notificare de browser. */
-const COLLAPSED_KEY = 'wt_jobs_collapsed'
+   Fosta bandă `<JobsBar>` (progres în banda de sus doar pentru stalled/err/orphan) + chip-ul din
+   bara de stare au fost unificate în TransfersWidget; aici rămâne doar logica partajată de rând,
+   ca să nu se dubleze. Rândul e vizual tăcut (cifre monospaţiate, fără emoji) şi complet operabil
+   de la tastatură (ţinte de 24 px). */
 const MAX_ATTEMPTS_SHOWN = 8
 
 const STATE_CLS: Record<UploadJob['state'], string> = {
@@ -139,72 +130,3 @@ export function JobRow(props: { job: UploadJob; hostName: string; insertSid?: st
 export const jobHostName = (j: UploadJob, hosts: Host[]) =>
   j.hostName || hosts.find((h) => h.id === j.hostId)?.name || `#${j.hostId}`
 
-export default function JobsBar(props: { hosts: Host[] }) {
-  const { t } = useI18n()
-  const snap = useSyncExternalStore(uploadStore.subscribe, uploadStore.snapshot)
-  const jobs = useMemo(() => [...snap.values()], [snap])
-  const [collapsed, setCollapsed] = useState(() => lsGet(COLLAPSED_KEY) === '1')
-  const toggle = () => { setCollapsed((c) => { lsSet(COLLAPSED_KEY, c ? '0' : '1'); return !c }) }
-
-  // Anunţuri: diferenţa de stare faţă de randarea anterioară, DOAR pentru tranziţiile care
-  // contează (→stalled, →err, →done). Progresul nu se anunţă — ar vorbi la fiecare procent.
-  // Aceeaşi diferenţă alimentează notificarea de browser, dar numai cu tab-ul în fundal: cu
-  // pagina în faţă chip-ul/bara spun deja totul, iar un pop-up de OS peste ea ar fi zgomot.
-  const prev = useRef<Map<string, UploadJob['state']>>(new Map())
-  const [announce, setAnnounce] = useState('')
-  useEffect(() => {
-    const msgs: string[] = []
-    const next = new Map<string, UploadJob['state']>()
-    for (const j of jobs) {
-      const was = prev.current.get(j.id)
-      next.set(j.id, j.state)
-      if (was === j.state || was === undefined) continue
-      if (j.state === 'stalled') msgs.push(t('jobs.srStalled', { name: j.name }))
-      else if (j.state === 'err') {
-        msgs.push(t('jobs.srFailed', { name: j.name, error: j.error ?? '' }))
-        if (document.hidden) notify(t('transfers.notifyFailed'), `${j.name} — ${j.error ?? ''}`, 'warn', `upload-${j.id}`)
-      } else if (j.state === 'done') {
-        msgs.push(t('jobs.srDone', { name: j.name }))
-        if (document.hidden) notify(t('transfers.notifyDone'), j.name, 'info', `upload-${j.id}`)
-      }
-    }
-    prev.current = next
-    if (msgs.length) setAnnounce(msgs.join('; '))
-  }, [jobs, t])
-
-  const attention = jobs.filter(needsAttention)
-  const stalled = attention.filter((j) => j.state === 'stalled').length
-  const failed = attention.filter((j) => j.state === 'err').length
-  const orphan = attention.filter((j) => j.state === 'orphan').length
-
-  return (
-    <>
-      {/* regiune live permanentă (goală când nu e nimic de spus) */}
-      <div aria-live="polite" className="sr-only">{announce}</div>
-      {attention.length > 0 && (
-        <section aria-label={t('jobs.title')} className="wt-jobsbar shrink-0 px-2 text-xs">
-          {/* linia de sumar + chevron; pliat = doar atât */}
-          <div className="flex h-8 items-center gap-2">
-            <button type="button" onClick={toggle} aria-expanded={!collapsed}
-              aria-label={collapsed ? t('jobs.expand') : t('jobs.collapse')}
-              className={`${BTN} text-slate-300`}>
-              <ChevronIcon open={!collapsed} />
-            </button>
-            <span aria-hidden="true" className="wt-warn"><UploadIcon /></span>
-            <span className="font-mono tabular-nums text-slate-200">
-              {t('transfers.needAttention', { count: attention.length })}
-              {stalled > 0 && <> · <span className="wt-warn">{t('jobs.summaryStalled', { count: stalled })}</span></>}
-              {failed > 0 && <> · <span className="wt-danger">{t('jobs.summaryFailed', { count: failed })}</span></>}
-              {orphan > 0 && <> · <span className="wt-warn">{t('transfers.summaryOrphan', { count: orphan })}</span></>}
-            </span>
-          </div>
-          {!collapsed && (
-            <ul className="max-h-40 overflow-y-auto pb-1 pl-8">
-              {attention.map((j) => <JobRow key={j.id} job={j} hostName={jobHostName(j, props.hosts)} />)}
-            </ul>
-          )}
-        </section>
-      )}
-    </>
-  )
-}

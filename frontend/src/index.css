@@ -259,17 +259,12 @@ body {
   }
 }
 
-/* chip-ul de transferuri din bara de stare: pulsează DOAR pe stalled/retrying — mişcarea e
-   semnal („legătura a tăcut"), nu decor; un upload sănătos stă nemişcat */
+/* pilula de transferuri pulsează DOAR cât ceva cere atenţie (stalled/retrying/err) — mişcarea e
+   semnal („legătura a tăcut"), nu decor; un transfer sănătos stă nemişcat */
 @keyframes pulse-chip {
   50% {
     opacity: 0.55;
   }
-}
-.wt-transfers-chip {
-  /* conturul ia culoarea stării (currentColor, prin tonul .wt-info/.wt-warn/.wt-danger) —
-     Tailwind nu poate pune alfa pe `ring-current`, de aceea stă aici */
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 40%, transparent);
 }
 .wt-chip-pulse {
   animation: pulse-chip 1.6s ease-in-out infinite;
@@ -277,6 +272,64 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .wt-chip-pulse {
     animation: none;
+  }
+}
+
+/* ── Widget plutitor de transferuri (TransfersWidget) ──────────────────────────────────────
+   UN singur loc pentru progresul upload/download, portat în <body> → ÎN AFARA .wt-workspace.
+   De aceea îşi re-declară AICI paleta întunecată fixă + variantele luminoase ale stărilor
+   semantice: altfel, pe tema deschisă (Aurora), moştenea tokenii de text închişi de pe <body>
+   (text închis pe suprafaţa întunecată a widgetului). Acelaşi truc ca .wt-workspace/.wt-command. */
+.wt-transfers-widget {
+  position: fixed;
+  right: 12px;
+  bottom: 12px;
+  left: auto;
+  z-index: 40;                 /* sub dialoguri/modale (z-50/60/70), peste conţinutul paginii */
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;       /* pilula/cardul se aliniază la dreapta */
+  /* gutter-ul (pe mobil se întinde pe lăţime) nu trebuie să fure clickuri de la terminal */
+  pointer-events: none;
+  --ink-950: 8 11 18;
+  --ink-900: 15 20 32;
+  --ink-800: 24 30 46;
+  --ink-700: 42 51 71;
+  --ink-600: 60 72 100;
+  --tx-100: 241 245 249;
+  --tx-200: 226 232 240;
+  --tx-300: 203 213 225;
+  --tx-400: 156 170 190;
+  --tx-500: 122 136 158;
+  --tx-600: 128 141 160;
+  --link: 129 140 248;
+  color: rgb(var(--tx-200));
+}
+.wt-transfers-widget > * {
+  pointer-events: auto;
+}
+/* stările semantice: pe cromul întunecat mereu varianta luminoasă (ca în .wt-workspace) */
+.wt-transfers-widget .wt-good { color: #34d399; }
+.wt-transfers-widget .wt-danger { color: #f87171; }
+.wt-transfers-widget .wt-warn { color: #fbbf24; }
+.wt-transfers-widget .wt-info { color: #7dd3fc; }
+.wt-transfers-widget .wt-accent { color: #93c5fd; }
+
+/* suprafaţa plutitoare (pilulă + card): crom ridicat, contur fin, umbră care o desprinde de pagină */
+.wt-transfers-surface {
+  background: var(--chrome-elev);
+  border: 1px solid var(--chrome-line);
+  box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.6);
+}
+
+@media (max-width: 767px) {
+  /* mobil: întinde-te între gutter-e şi stai DEASUPRA keybar-ului (înălţimea lui, publicată de
+     MobileKeybar în --wt-keybar-h; 0 când nu există keybar) ca să nu acoperi niciodată tastatura
+     de comenzi sau inputul terminalului */
+  .wt-transfers-widget {
+    left: 12px;
+    right: 12px;
+    bottom: calc(var(--wt-keybar-h, 0px) + 12px);
   }
 }
 
