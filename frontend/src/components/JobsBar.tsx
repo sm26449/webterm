@@ -5,7 +5,7 @@ import { useI18n } from '../lib/i18n'
 import { notify } from '../lib/notify'
 import { lsGet, lsSet } from '../lib/storage'
 import { insertPathInto } from '../lib/transfers'
-import { cancelUpload, dirName, discardUpload, dismissUpload, fmtEta, fmtRate, openFilesAt, pauseUpload, resumeUpload, retryUpload } from '../lib/uploads'
+import { cancelUpload, dirName, discardUpload, dismissUpload, fmtBytes, fmtEta, fmtRate, openFilesAt, pauseUpload, resumeUpload, retryUpload } from '../lib/uploads'
 import { cancelDownload, dismissDownload, pauseDownload, resumeDownload, retryDownload } from '../lib/downloads'
 import { UploadJob, isActive, isDownload, uploadStore } from '../lib/uploadStore'
 import { ChevronIcon, DownloadIcon, UploadIcon } from './Icons'
@@ -85,6 +85,8 @@ export function JobRow(props: { job: UploadJob; hostName: string; insertSid?: st
         title={jobStatusText(j, t)}>
         {jobStatusText(j, t)}
       </span>
+      {/* dimensiunea totală a fişierului — cerută la click pe chip; ascunsă pe ecrane înguste */}
+      <span className="hidden shrink-0 font-mono tabular-nums text-slate-500 md:inline" title={`${fmtBytes(j.pos)} / ${fmtBytes(j.size)}`}>{fmtBytes(j.size)}</span>
       <span className={`font-mono tabular-nums sm:hidden ${STATE_CLS[j.state]}`}>{j.pct}%</span>
       {/* acţiuni după stare — nume accesibil = acţiune + fişier, ca în FilePanel */}
       {(j.state === 'err' || j.state === 'stalled') && (

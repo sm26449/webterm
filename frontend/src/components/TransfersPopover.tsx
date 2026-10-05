@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useI18n } from '../lib/i18n'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import type { UploadJob } from '../lib/uploadStore'
@@ -21,13 +22,18 @@ export default function TransfersPopover(props: {
   const { t } = useI18n()
   const ref = useRef<HTMLDivElement>(null)
   useFocusTrap(ref, props.onClose)
-  const [pos, setPos] = useState<{ bottom: number; right: number } | null>(null)
+  const [pos, setPos] = useState<{ top?: number; bottom?: number; right: number } | null>(null)
 
   useLayoutEffect(() => {
     const place = () => {
       const r = props.anchor?.getBoundingClientRect()
-      if (!r) { setPos({ bottom: 40, right: 8 }); return }
-      setPos({ bottom: Math.max(4, window.innerHeight - r.top + 6), right: Math.max(4, window.innerWidth - r.right) })
+      if (!r) { setPos({ top: 44, right: 8 }); return }
+      const right = Math.max(4, window.innerWidth - r.right)
+      // Chip-ul stă acum SUS (bara de taburi): deschidem în JOS, sub el. Dacă ancora e în jumătatea
+      // de jos a ecranului (ex. viitoare mutare), deschidem în SUS. Fără asta, ancorarea pe `bottom`
+      // împingea panoul deasupra ecranului → click „nu arăta nimic".
+      if (r.top < window.innerHeight / 2) setPos({ top: Math.round(r.bottom + 6), right })
+      else setPos({ bottom: Math.max(4, Math.round(window.innerHeight - r.top + 6)), right })
     }
     place()
     window.addEventListener('resize', place)
@@ -51,10 +57,10 @@ export default function TransfersPopover(props: {
   // ultimul rând a dispărut (dismiss / expirare) → nu lăsăm un dialog gol pe ecran
   useEffect(() => { if (props.jobs.length === 0) onCloseRef.current() }, [props.jobs.length])
 
-  return (
+  return createPortal(
     <div ref={ref} role="dialog" aria-modal="true" aria-label={t('jobs.title')}
-      className="wt-jobsbar fixed z-50 w-[min(92vw,38rem)] rounded-lg border border-ink-700 px-2 pb-1 text-xs shadow-2xl"
-      style={pos ? { bottom: pos.bottom, right: pos.right } : { visibility: 'hidden' }}>
+      className="wt-jobsbar fixed z-[60] max-h-[70vh] w-[min(92vw,38rem)] overflow-hidden rounded-lg border border-ink-700 px-2 pb-1 text-xs shadow-2xl"
+      style={pos ? { top: pos.top, bottom: pos.bottom, right: pos.right } : { visibility: 'hidden' }}>
       <div className="flex h-8 items-center gap-2">
         <span className="font-semibold text-slate-200">{t('jobs.title')}</span>
         <span className="font-mono tabular-nums text-slate-400">{t('jobs.summary', { count: props.jobs.length })}</span>
@@ -67,5 +73,5 @@ export default function TransfersPopover(props: {
         ))}
       </ul>
     </div>
-  )
+    , document.body)
 }
