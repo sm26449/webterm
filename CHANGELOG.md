@@ -9,6 +9,56 @@ back.
 
 ## [Unreleased]
 
+### Security
+*(hardening from four independent security reviews of our own gateway — our mirror pentest plus
+three external second opinions; every real finding verified in code before fixing, each with a
+regression test. Gateway/frontend only; the agent-side items ride the next agent release.)*
+- **A closed session's scrollback could be read over the session WebSocket without step-up on a
+  2FA host.** The step-up gate sat inside the live-hub branch; a closed session (no hub) streamed
+  its transcript to any authenticated cookie. The 2FA requirement is now computed from the host
+  regardless of session state — a closed 2FA session starts locked and replays nothing until a
+  step-up window is opened.
+- **SSH deploy-key batch and rotate wrote `authorized_keys` to target hosts without the target's
+  step-up.** Only the source host's fresh factor was required. Each `require_2fa` target now needs
+  its own open step-up window or is skipped with `sshkey.targetNeeds2fa`.
+- **TOTP was never used as a step-up factor.** A user with TOTP but no passkey opened a 2FA host's
+  step-up window with the account password alone, so a flagged host got no real second factor.
+  Step-up now goes passkey → SSO → **TOTP (verified and consumed atomically)** → password only when
+  no second factor is configured; the UI prompts for the 6-digit code (`stepup.totp`).
+- **`stepup_window_ok` extended the window as a side effect of reading it.** Used in passive and
+  periodic checks (the forward WebSocket's 60 s revalidation, the history "blocked" computation) it
+  let an idle background tab hold step-up open to the absolute cap and let merely listing history
+  slide the window on every 2FA host. A read-only `stepup_window_is_open` now backs every passive
+  check; the WebSocket **unlock** requires a fresh factor, not a kept-alive window.
+- **`delete_session` and `revoke_share` lacked step-up on 2FA hosts** (unlike `kill_session`) —
+  destroying transcripts or cutting a share on a protected host needed no second factor. Both now
+  require it.
+- **Metadata could cross the "API token = no 2FA" line.** A read-scoped token received a 2FA host's
+  session list/titles, and `/api/audit` returned executed-command text for 2FA hosts without a
+  step-up window. Sessions are now withheld from tokens / filtered by window, and audit detail is
+  redacted for hosts the caller has not stepped up to.
+- **SSO accounts could not change their e-mail** (the password re-auth always fails for them); they
+  now re-authenticate with a fresh SSO window or an account passkey.
+- **Revoking a single web session** now clears that user's step-up windows and bumps the forward
+  epoch, like "revoke others" already did.
+- **Login accepts only a small body (4 KiB) before parsing**, and Caddy caps pre-auth routes at
+  256 KB, closing a pre-authentication memory-amplification path.
+- **X-Forwarded-For is trusted only from an explicitly configured proxy CIDR.** The default is now
+  fail-closed (a private/loopback peer is no longer assumed to be our proxy); set
+  `WEBTERM_TRUSTED_PROXY_CIDRS` when running behind one. (Production was already safe — the app
+  container's port is not published — but the default should be safe too.)
+- **Paths inserted into the terminal are stripped of control bytes** (`\r \n \x1b …`): shell
+  quoting stopped shell parsing but raw control bytes still reached the PTY line discipline.
+- `totp/disable` now clears step-up windows; `restore.sh` bounds the decompressed size and member
+  count of a restored archive (`WEBTERM_RESTORE_MAX_BYTES` / `_MAX_MEMBERS`).
+- New hermetic suites: `sec_stepup_hardening`, `sec_login_proxy`, `sec_sso_account`,
+  `sec_closed_scrollback`; the X-Forwarded-For tests were updated for the new fail-closed default
+  and gained checks for it.
+- Deferred to the agent release: hardening the agent's systemd unit (`NoNewPrivileges`, …) and a
+  type guard on malformed control frames. Still your call: moving the agent-signing key off the
+  gateway host, and making cosign verification mandatory at deploy.
+
+
 ## [3.2.0] — 2026-10-05 · agent (55)
 
 ### Changed — agent (55), one bundled rollout

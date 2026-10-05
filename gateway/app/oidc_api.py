@@ -87,18 +87,18 @@ async def callback(request: Request, code: str = "", state: str = ""):
 
     # --- step-up: userul e DEJA logat; re-auth-ul deschide fereastra pe host ---
     if info["intent"] == "stepup":
-        # un step-up FĂRĂ host nu are ce deschide — îl respingem explicit, nu-l lăsăm să cadă
-        # în calea de login (care ar emite o sesiune nouă, surprinzător).
-        if not info["host_id"]:
-            return _redirect_err("bad_request")
         cur = await security.user_for_token(request.cookies.get(security.COOKIE_NAME))
         if not cur or cur["sso_subject"] != sub:
             await audit.record(time.time(), email or "sso", ip, "GET", "/api/oidc/callback", 403,
                                "step-up SSO: identitate nepotrivită cu sesiunea")
             return _redirect_err("stepup_mismatch")
-        security.open_stepup_window(cur["id"], info["host_id"])
+        # host_id=0 (sau lipsă) = re-auth account-scope: schimbarea emailului/parolei unui cont SSO
+        # (fix 7), unde parola locală e un hash aleator. Altfel, fereastră per-host ca până acum.
+        hid = info["host_id"] or 0
+        security.open_stepup_window(cur["id"], hid)
         await audit.record(time.time(), cur["email"], ip, "GET", "/api/oidc/callback", 200,
-                           "step-up SSO reuşit pe host %d" % info["host_id"])
+                           ("step-up SSO reuşit, account-scope" if not hid
+                            else "step-up SSO reuşit pe host %d" % hid))
         # fereastra e deschisă; frontend-ul reia acţiunea (tiparul withStepup). Semnalăm prin
         # query, nu printr-un hash arbitrar (anti open-redirect).
         resp = RedirectResponse("/?stepup=ok", status_code=303)

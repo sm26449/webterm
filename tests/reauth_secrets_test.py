@@ -119,7 +119,11 @@ async def main():
             self.client = type("C", (), {"host": peer})()
 
     saved = config.TRUSTED_PROXY_HOPS
+    saved_cidrs = config.TRUSTED_PROXY_CIDRS
     try:
+        # fix 10: default-ul e acum fail-closed — un peer privat/loopback NU mai e crezut automat.
+        # Pentru cazurile de hop-counting de mai jos declarăm EXPLICIT CIDR-urile proxy-ului de test.
+        config.TRUSTED_PROXY_CIDRS = ["10.0.0.0/8", "127.0.0.0/8", "172.16.0.0/12"]
         config.TRUSTED_PROXY_HOPS = 1
         check("1 hop, un singur XFF → clientul văzut de proxy",
               security.client_ip(FakeReq("1.2.3.4")) == "1.2.3.4")
@@ -140,10 +144,15 @@ async def main():
         check("peer public → XFF ignorat complet (nu e proxy-ul nostru)",
               security.client_ip(FakeReq("1.2.3.4", peer="8.8.8.8")) == "8.8.8.8",
               security.client_ip(FakeReq("1.2.3.4", peer="8.8.8.8")))
-        check("peer privat → XFF crezut (proxy pe reţeaua docker)",
+        check("peer din CIDR configurat (docker) → XFF crezut",
               security.client_ip(FakeReq("1.2.3.4", peer="172.18.0.5")) == "1.2.3.4")
-        check("peer loopback → XFF crezut (proxy pe aceeaşi maşină)",
+        check("peer loopback din CIDR configurat → XFF crezut",
               security.client_ip(FakeReq("1.2.3.4", peer="127.0.0.1")) == "1.2.3.4")
+        # fix 10: DEFAULT fail-closed — fără CIDR-uri configurate, nici măcar un peer privat nu e
+        # crezut (un peer privat nu înseamnă „proxy-ul nostru"); folosim IP-ul direct al peer-ului.
+        config.TRUSTED_PROXY_CIDRS = []
+        check("default (fără CIDR): peer privat → XFF IGNORAT, folosim peer-ul",
+              security.client_ip(FakeReq("1.2.3.4", peer="172.18.0.5")) == "172.18.0.5")
         # listă explicită de CIDR-uri: doar proxy-ul declarat, nu orice reţea privată
         config.TRUSTED_PROXY_CIDRS = ["172.18.0.0/16"]
         check("CIDR explicit: peer din proxy → XFF crezut",
@@ -157,7 +166,7 @@ async def main():
         config.TRUSTED_PROXY_CIDRS = []
     finally:
         config.TRUSTED_PROXY_HOPS = saved
-        config.TRUSTED_PROXY_CIDRS = []
+        config.TRUSTED_PROXY_CIDRS = saved_cidrs
 
     print(f"\n{ok}/{total} passed")
     return ok == total

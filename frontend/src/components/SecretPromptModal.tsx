@@ -13,11 +13,22 @@ export default function SecretPromptModal(props: {
 }) {
   const { t } = useI18n()
   const [value, setValue] = useState('')
+  const [err, setErr] = useState('')
   const dialogRef = useRef<HTMLDivElement>(null)
   useFocusTrap(dialogRef, props.onCancel)
 
+  const otp = !!props.ask.otp
+
   const submit = (e: FormEvent) => {
     e.preventDefault()
+    // OTP: validăm formatul (6 cifre) client-side şi anunţăm eroarea prin role="alert" — altfel
+    // trimiterea unui cod evident greşit ar consuma singura reîncercare de step-up a serverului.
+    if (otp) {
+      const code = value.replace(/\s/g, '')
+      if (!/^\d{6}$/.test(code)) { setErr(t('stepup.totpInvalid')); return }
+      props.onSubmit(code)
+      return
+    }
     props.onSubmit(value)
   }
 
@@ -32,18 +43,32 @@ export default function SecretPromptModal(props: {
         onClick={(e) => e.stopPropagation()}
       >
         <form onSubmit={submit}>
+          {otp && (
+            <div className="mb-2 text-sm font-medium text-slate-100">{props.ask.title}</div>
+          )}
           <label className="block text-sm leading-relaxed text-slate-200" htmlFor="wt-secret-input">
-            {props.ask.title}
+            {otp ? (props.ask.label ?? props.ask.title) : props.ask.title}
           </label>
           <input
             id="wt-secret-input"
             autoFocus
             type={props.ask.masked ? 'password' : 'text'}
             autoComplete={props.ask.masked ? 'current-password' : 'one-time-code'}
+            inputMode={otp ? 'numeric' : undefined}
+            pattern={otp ? '[0-9]{6}' : undefined}
+            maxLength={otp ? 6 : undefined}
+            aria-invalid={otp && err ? true : undefined}
+            aria-describedby={otp ? 'wt-secret-hint' : undefined}
             value={value}
-            onChange={(e) => setValue(e.target.value)}
-            className="mt-3 w-full rounded-lg border border-ink-700 bg-ink-900 px-3 py-2 text-sm outline-none focus:border-sky-600"
+            onChange={(e) => { setValue(e.target.value); if (err) setErr('') }}
+            className="mt-3 min-h-[36px] w-full rounded-lg border border-ink-700 bg-ink-900 px-3 py-2 text-sm outline-none focus:border-sky-600"
           />
+          {otp && props.ask.hint && (
+            <p id="wt-secret-hint" className="mt-2 text-xs text-slate-400">{props.ask.hint}</p>
+          )}
+          {otp && err && (
+            <p role="alert" className="mt-2 text-xs text-rose-400">{err}</p>
+          )}
           <div className="mt-5 flex justify-end gap-2">
             <button
               type="button"

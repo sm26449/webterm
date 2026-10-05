@@ -37,6 +37,17 @@ describe('numele din inbox (timestamp + MIME)', () => {
     expect(inboxName({ name: '../x/y.txt', type: 'text/plain' }, when)).toBe('2026-10-04_14-03-22__x_y.txt')
     expect(inboxName({ name: '...', type: 'image/png' }, when)).toBe('2026-10-04_14-03-22_file.png')
   })
+  // Octeţii de control dintr-un nume ostil se scot: numele devine parte dintr-o cale tastată la
+  // prompt, iar un `\r`/`\n`/`\x1b` ar ajunge la line discipline-ul PTY-ului nefiltrat de citare.
+  it('octeţii de control din nume sunt scoşi', () => {
+    const noCtl = (s: string) => !/[\x00-\x1f\x7f]/.test(s)
+    expect(inboxName({ name: 'a\rb.txt', type: 'text/plain' }, when)).toBe('2026-10-04_14-03-22_ab.txt')
+    expect(inboxName({ name: 'a\nb.txt', type: 'text/plain' }, when)).toBe('2026-10-04_14-03-22_ab.txt')
+    expect(inboxName({ name: 'x\x1b[31m.txt', type: 'text/plain' }, when)).toBe('2026-10-04_14-03-22_x[31m.txt')
+    // nume format DOAR din octeţi de control → cade pe `file.<ext>` (nu rămâne gol)
+    expect(inboxName({ name: '\r\n\x00', type: 'image/png' }, when)).toBe('2026-10-04_14-03-22_file.png')
+    expect(noCtl(inboxName({ name: 'q\x7f\x1bw', type: 'text/plain' }, when))).toBe(true)
+  })
 })
 
 describe('citare shell pentru calea inserată', () => {
@@ -66,7 +77,6 @@ describe('citare shell pentru calea inserată', () => {
       '/root/.webterm/inbox/a&&b',
       '/root/.webterm/inbox/a|b',
       '/root/.webterm/inbox/a>b',
-      '/root/.webterm/inbox/x\ninjected',
       '/root/.webterm/inbox/{a,b}',
       '/root/.webterm/inbox/x*',
     ]) {
@@ -80,6 +90,19 @@ describe('citare shell pentru calea inserată', () => {
   it('un nume controlat nu devine flag sau ~user (apare doar după un /)', () => {
     expect(shellQuote('/root/.webterm/inbox/-rf')).toBe('/root/.webterm/inbox/-rf')  // `-` nu e la început de cuvânt
     expect(shellQuote('/root/.webterm/inbox/~root')).toBe('/root/.webterm/inbox/~root')  // `~` nu e la început de cuvânt
+  })
+  // Octeţii de control (`\r \n \x1b \x00-\x1f \x7f`) nu sunt opriţi de citare — ajung la line
+  // discipline-ul PTY-ului (un `\r` TRIMITE linia). Îi scoatem înainte de citare, deci rezultatul
+  // e mereu fără octeţi de control; pentru restul rămâne o cale normală (citată doar dacă trebuie).
+  it('octeţii de control sunt scoşi înainte de citare', () => {
+    const noCtl = (s: string) => !/[\x00-\x1f\x7f]/.test(s)
+    expect(shellQuote('/tmp/a\rb.txt')).toBe('/tmp/ab.txt')       // `\r` scos → cale curată, necitată
+    expect(shellQuote('/tmp/a\nb.txt')).toBe('/tmp/ab.txt')       // `\n` scos
+    expect(shellQuote('/tmp/a\x1b[31mb.txt')).toBe("'/tmp/a[31mb.txt'")  // ESC scos; `[` cere citare
+    expect(shellQuote('/tmp/a\x00b.txt')).toBe('/tmp/ab.txt')     // NUL scos
+    for (const evil of ['/tmp/x\r', '/tmp/x\n\rrm -rf ~', '/tmp/\x1b]0;x', '/tmp/\x7f']) {
+      expect(noCtl(shellQuote(evil))).toBe(true)
+    }
   })
 })
 

@@ -7,7 +7,10 @@
    focus-trap, Escape), iar apelanţii — inclusiv cod non-React din lib/ — cheamă `askSecret()`
    şi primesc un Promise. Fără gazdă înregistrată (fereastră popout, teste) cădem înapoi pe
    window.prompt: mai bine un prompt nemascat decât un flux de re-autentificare blocat. */
-export type SecretAsk = { title: string; masked: boolean }
+/** `otp`: cod de unică folosinţă de 6 cifre (TOTP step-up). Randează un input numeric
+    (`inputmode="numeric"`, `autocomplete="one-time-code"`, pattern 6 cifre) cu validare
+    client-side anunţată prin `role="alert"`. `label`/`hint` dau textul vizibil al câmpului. */
+export type SecretAsk = { title: string; masked: boolean; otp?: boolean; label?: string; hint?: string }
 
 let host: ((ask: SecretAsk) => Promise<string | null>) | null = null
 
@@ -17,8 +20,13 @@ export function registerSecretPrompt(fn: ((ask: SecretAsk) => Promise<string | n
 
 /** `masked` implicit true (parole). Codurile scurte cu viaţă de 30s (TOTP/email) pot cere
     `masked: false` — să vezi ce tastezi ajută, iar riscul de umăr e minim. */
-export function askSecret(title: string, opts?: { masked?: boolean }): Promise<string | null> {
-  const ask: SecretAsk = { title, masked: opts?.masked !== false }
+export function askSecret(
+  title: string,
+  opts?: { masked?: boolean; otp?: boolean; label?: string; hint?: string },
+): Promise<string | null> {
+  const ask: SecretAsk = {
+    title, masked: opts?.masked !== false, otp: opts?.otp, label: opts?.label, hint: opts?.hint,
+  }
   if (host) return host(ask)
   return Promise.resolve(window.prompt(title))
 }

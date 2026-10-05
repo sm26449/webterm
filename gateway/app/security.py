@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import logging
 import re
 import secrets
 import sys
@@ -22,6 +23,8 @@ from .errors import ApiError
 from fastapi import Request, WebSocket
 
 from . import config, db, email_alerts, totp
+
+log = logging.getLogger("webterm")
 
 # ── Vault (secrete criptate la repaus: token agent, parole/chei SSH) ──────────
 _fernet: Optional[Fernet] = None
@@ -219,7 +222,28 @@ def _peer_is_trusted(peer: str) -> bool:
             except ValueError:
                 continue
         return False
-    return ip.is_private or ip.is_loopback
+    # DEFAULT fail-closed (audit 2026-10-05): fără CIDR-uri configurate NU mai credem automat
+    # orice peer privat/loopback. Un `X-Forwarded-For` crezut de la un peer necontrolat lasă
+    # clientul să-şi aleagă „IP-ul real" — scapă de propriul lockout sau îl provoacă pe al
+    # altcuiva — iar „privat" nu înseamnă „proxy-ul nostru" (alt container, alt host din LAN pot
+    # fi şi ele private). Când lista e goală folosim peer-ul direct al socketului (vezi
+    # `client_ip`) şi notăm O SINGURĂ dată, ca operatorul să ştie că trebuie să seteze
+    # `WEBTERM_TRUSTED_PROXY_CIDRS` cu CIDR-ul proxy-ului lui.
+    _note_xff_untrusted()
+    return False
+
+
+_xff_note_logged = False
+
+
+def _note_xff_untrusted() -> None:
+    global _xff_note_logged
+    if _xff_note_logged:
+        return
+    _xff_note_logged = True
+    log.info("WEBTERM_TRUSTED_PROXY_CIDRS nesetat: X-Forwarded-For/CF-Connecting-IP NU sunt "
+             "crezute; folosesc IP-ul direct al peer-ului pentru rate-limit/lockout. "
+             "Setează CIDR-ul reverse-proxy-ului tău (ex. 172.18.0.0/16) ca să foloseşti antetul.")
 
 
 def client_ip(request: Request) -> str:
@@ -710,6 +734,22 @@ def stepup_window_ok(user_id: int, host_id: int) -> bool:
     # primul step-up, ca un cookie furat să nu poată ține „sudo-ul" viu la nesfârșit lovind endpoint-uri.
     _stepup_windows[(user_id, host_id)] = (opened_at, min(now + STEPUP_WINDOW, opened_at + STEPUP_WINDOW_MAX))
     return True
+
+
+def stepup_window_is_open(user_id: int, host_id: int) -> bool:
+    """Ca `stepup_window_ok`, dar DOAR citeşte: verifică exp>now FĂRĂ să gliseze fereastra.
+    Pentru verificările PASIVE/periodice — revalidarea WS de forward, lista „blocat" din istoric,
+    lock-ul la ataşarea pe WS — acolo simpla CITIRE a stării nu trebuie să ţină „sudo-ul" viu:
+    altfel un cont care doar se uită la istoric sau un tunel care doar transportă octeţi ar
+    prelungi fereastra la nesfârşit, fără ca omul să fi prezentat vreun factor. `stepup_window_ok`
+    (glisant) rămâne DOAR pe intrarea unei acţiuni sensibile reale, unde folosirea ferestrei
+    chiar E intenţia. Urmează stilul fără-mutaţie al lui `stepup_window_fresh` (nici nu şterge
+    rândul expirat — pur read)."""
+    rec = _stepup_windows.get((user_id, host_id))
+    if rec is None:
+        return False
+    _opened_at, exp = rec
+    return exp >= time.time()
 
 
 def stepup_window_fresh(user_id: int, host_id: int, max_age: float = 120.0) -> bool:

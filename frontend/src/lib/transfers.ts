@@ -51,7 +51,11 @@ export const isGenericName = (name: string): boolean =>
 export function inboxName(file: { name: string; type: string }, when: Date, n = 1): string {
   const stamp = stampFor(when) + (n > 1 ? `-${n}` : '')
   if (isGenericName(file.name)) return `${stamp}.${extFromMime(file.type)}`
-  const clean = file.name.replace(/[/\\]/g, '_').replace(/^\s+|\s+$/g, '').replace(/^\.+/, '') || `file.${extFromMime(file.type)}`
+  // Octeţii de control (`\r \n \x1b \x00-\x1f \x7f`) ies PRIMII: numele devine parte dintr-o cale
+  // care se tastează apoi la prompt (vezi shellQuote). Citarea cu apostrof opreşte shell-ul, dar
+  // NU line discipline-ul PTY-ului — un `\r` în nume ar trimite linia, `\x1b` ar începe o secvenţă
+  // escape. Un nume de fişier legitim nu are de ce să conţină aşa ceva.
+  const clean = file.name.replace(/[\x00-\x1f\x7f]/g, '').replace(/[/\\]/g, '_').replace(/^\s+|\s+$/g, '').replace(/^\.+/, '') || `file.${extFromMime(file.type)}`
   return `${stamp}_${clean}`
 }
 
@@ -61,8 +65,13 @@ export function inboxName(file: { name: string; type: string }, when: Date, n = 
     `$`, `` ` ``, `\` şi `!` sunt complet inerte în sh/bash/zsh/fish; apostroful din interior
     devine `'\''`. */
 export function shellQuote(p: string): string {
-  if (p && /^[A-Za-z0-9_\-./~:@%+=,]+$/.test(p)) return p
-  return `'${p.replace(/'/g, `'\\''`)}'`
+  // Scoatem întâi octeţii de control (`\x00-\x1f \x7f`, adică `\r \n \x1b \x00` …): apostroful
+  // inertizează `$`/`` ` ``/`\`/`!` pentru PARSER-ul shell-ului, dar octeţii de control ajung
+  // nefiltraţi la LINE DISCIPLINE-ul PTY-ului — un `\r` trimite linia (execuţie fără Enter de la
+  // om), `\x1b` deschide o secvenţă escape. O cale inserată nu are motiv legitim să-i conţină.
+  const safe = p.replace(/[\x00-\x1f\x7f]/g, '')
+  if (safe && /^[A-Za-z0-9_\-./~:@%+=,]+$/.test(safe)) return safe
+  return `'${safe.replace(/'/g, `'\\''`)}'`
 }
 
 // ── retenţie ──────────────────────────────────────────────────────────────────────────────

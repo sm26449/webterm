@@ -19,7 +19,15 @@
 		# HSTS is TLS-specific (the rest of the security headers come from the app)
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 	}
-	# request body size limit (uploads through the agent have their own path)
+	# Pre-auth routes carry only tiny JSON / WebAuthn assertions (credentials, a 6-digit
+	# code), so cap them hard at the edge: a large pre-auth body is rejected before it ever
+	# reaches the app (the backend keeps its own app-level cap too). 256KB is generous for any
+	# login/setup/WebAuthn/OIDC payload yet closes the unauthenticated memory-amplification path.
+	@preauth path /api/login /api/setup /api/webauthn/* /api/oidc/*
+	request_body @preauth {
+		max_size 256KB
+	}
+	# request body size limit for everything else (uploads through the agent have their own path)
 	request_body {
 		max_size 5GB
 	}

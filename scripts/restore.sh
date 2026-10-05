@@ -9,6 +9,8 @@
 #   WEBTERM_TOOL_IMAGE          image with python3   (default python:3.12-alpine)
 #   COMPOSE_FILE                compose file to (re)start the app (default docker-compose.yml)
 #   WEBTERM_BACKUP_PASSPHRASE   required if the archive is encrypted (.enc from backup.sh)
+#   WEBTERM_RESTORE_MAX_BYTES   decompressed-size cap, anti compression-bomb (default 2 GiB)
+#   WEBTERM_RESTORE_MAX_MEMBERS max number of entries in the archive       (default 20000)
 set -euo pipefail
 
 ARCHIVE="${1:?usage: ./restore.sh <archive.tar.gz|.enc>}"
@@ -16,6 +18,12 @@ SRC_NAME="$ARCHIVE"      # numele TASTAT de om; `$ARCHIVE` devine un mktemp dup�
 [ -f "$ARCHIVE" ] || { echo "not found: $ARCHIVE"; exit 1; }
 VOLUME="${WEBTERM_VOLUME:-webterm_webterm-data}"
 OWNER="${WEBTERM_UID:-10001:10001}"
+# Plafon anti bombă de compresie (acelaşi spirit ca `_gunzip_bounded` din gateway/app/backup.py):
+# un tar.gz mic poate declara/expanda la zeci de GB şi umple volumul de date la extragere. Un
+# snapshot WebTerm real e mic (DB + cheie), deci plafonăm DECOMPRIMATUL la 2 GiB şi numărul de
+# membri — refuzăm înainte de a atinge discul. Configurabil pentru instalări mari.
+RESTORE_MAX_BYTES="${WEBTERM_RESTORE_MAX_BYTES:-2147483648}"      # 2 GiB decomprimat
+RESTORE_MAX_MEMBERS="${WEBTERM_RESTORE_MAX_MEMBERS:-20000}"       # nr. maxim de intrări în arhivă
 # Vezi nota din `backup.sh`: `WEBTERM_IMAGE` înseamnă imaginea GATEWAY-ULUI peste tot
 # altundeva, iar aici însemna „o imagine cu python3". Backupul a păţit-o deja o dată şi s-a
 # reparat local; restaurarea nu avea nici măcar acea plasă, şi pierde mai mult: entrypoint-ul
@@ -119,12 +127,38 @@ fi
 # mută în /data/.restore-prev ca plasă de siguranță. Tot în Python (fără capcane de globbing).
 docker run --rm -i --entrypoint python3 \
   -v "$VOLUME":/data -v "$ADIR":/in:ro -e ABASE="$ABASE" -e OWNER="$OWNER" \
+  -e MAXB="$RESTORE_MAX_BYTES" -e MAXM="$RESTORE_MAX_MEMBERS" \
   "$IMAGE" - <<'PY'
-import os, sys, shutil, sqlite3, tarfile
+import io, gzip, os, sys, shutil, sqlite3, tarfile
 staging, prev = "/data/.restore-staging", "/data/.restore-prev"
+maxb, maxm = int(os.environ["MAXB"]), int(os.environ["MAXM"])
 shutil.rmtree(staging, ignore_errors=True); os.makedirs(staging)
-with tarfile.open("/in/" + os.environ["ABASE"], "r:gz") as t:
-    t.extractall(staging, filter="data")          # anti path-traversal/symlink (Py 3.12)
+# Decomprimare MĂRGINITĂ (acelaşi spirit ca _gunzip_bounded din gateway/app/backup.py): citim
+# gzip-ul în bucăţi şi abandonăm dacă depăşeşte plafonul, ca o bombă de compresie să nu
+# materializeze zeci de GB nici în RAM, nici pe disc. `GzipFile.read(n)` decomprimă cel mult n.
+flat, read = io.BytesIO(), 0
+try:
+    with gzip.open("/in/" + os.environ["ABASE"], "rb") as g:
+        while True:
+            chunk = g.read(1 << 20)
+            if not chunk:
+                break
+            read += len(chunk)
+            if read > maxb:
+                shutil.rmtree(staging, ignore_errors=True)
+                sys.exit("refusing: archive unpacks beyond %d bytes (possible compression bomb)" % maxb)
+            flat.write(chunk)
+except (OSError, EOFError) as e:
+    shutil.rmtree(staging, ignore_errors=True); sys.exit("corrupt archive, or not a WebTerm backup: %s" % e)
+flat.seek(0)
+# tar-ul e acum plat ŞI mărginit; plafonăm şi numărul de membri (anti epuizare de inode-uri /
+# many-tiny-files) înainte de extragere.
+with tarfile.open(fileobj=flat, mode="r:") as t:
+    members = t.getmembers()
+    if len(members) > maxm:
+        shutil.rmtree(staging, ignore_errors=True)
+        sys.exit("refusing: archive has %d entries (> %d)" % (len(members), maxm))
+    t.extractall(staging, members=members, filter="data")   # anti path-traversal/symlink (Py 3.12)
 db = os.path.join(staging, "webterm.db")
 if not os.path.exists(db):
     shutil.rmtree(staging, ignore_errors=True); sys.exit("archive without webterm.db")

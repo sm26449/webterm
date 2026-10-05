@@ -30,7 +30,7 @@ import { copyText } from './lib/clipboard'
 import { CopyIcon, ShieldIcon } from './components/Icons'
 import { ensureNotificationPermission, notify, notifyError, registerToast } from './lib/notify'
 import { restoreOrphans } from './lib/uploads'
-import { registerSecretPrompt, SecretAsk } from './lib/secretPrompt'
+import { askSecret, registerSecretPrompt, SecretAsk } from './lib/secretPrompt'
 import SecretPromptModal from './components/SecretPromptModal'
 import { markBooted } from './lib/failsafe'
 import { useMetricsTick } from './lib/metrics'
@@ -776,7 +776,8 @@ function MainApp() {
   // NB: HOOK — trebuie definit ÎNAINTE de orice `return` timpuriu (Rules of Hooks).
   const stepupCredential = useCallback(async (
     hostId: number,
-  ): Promise<{ stepup_grant?: string; stepup_password?: string } | null> => {
+    code?: string,
+  ): Promise<{ stepup_grant?: string; stepup_password?: string; totp?: string } | null> => {
     if (appState?.webauthn_available) {
       try {
         const options = await api<Record<string, unknown>>('/api/webauthn/stepup/options', {
@@ -791,6 +792,17 @@ function MainApp() {
         notify('2FA', t('app.twofaFailed'), 'warn')
         return null
       }
+    }
+    // User cu TOTP activ, dar fără passkey pe acest deploy: backend-ul refuză cu `stepup.totp`
+    // şi aşteaptă un cod de 6 cifre în câmpul `totp` al cererii /stepup (acolo unde altfel merge
+    // `stepup_password`). Cod scurt, viaţă 30s → input NEMASCAT, numeric, `one-time-code` (vezi
+    // SecretPromptModal cu `otp`). Un TOTP real e un al doilea factor, nu doar re-auth cu parola.
+    if (code === 'stepup.totp') {
+      const otp = await askSecret(t('stepup.totpTitle'), {
+        masked: false, otp: true, label: t('stepup.totpLabel'), hint: t('stepup.totpHint'),
+      })
+      if (otp === null) return null
+      return { totp: otp.trim() }
     }
     // fără passkey disponibil (deploy IP-only) — asta e RE-AUTENTIFICARE cu parola
     // contului, nu un al doilea factor real; etichetăm cinstit
@@ -814,8 +826,8 @@ function MainApp() {
     if (appState?.authenticated) restoreOrphans()
   }, [appState?.authenticated])
   useEffect(() => {
-    setStepupHandler(async (hostId) => {
-      const cred = await stepupCredential(hostId)
+    setStepupHandler(async (hostId, code) => {
+      const cred = await stepupCredential(hostId, code)
       if (!cred) return false
       try {
         await api(`/api/hosts/${hostId}/stepup`, { method: 'POST', body: JSON.stringify(cred) })

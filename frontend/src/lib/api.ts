@@ -313,7 +313,10 @@ function checkGatewayVersion(res: Response) {
 // (run, fs/*, update, provision, uninstall). Ca să nu împrăștiem ceremonia passkey în fiecare
 // componentă, o înregistrăm o dată aici: la un 403 de step-up pe o rută /api/hosts/{id}/…, rulăm
 // ceremonia (care deschide fereastra de step-up pe server) și reîncercăm cererea O SINGURĂ dată.
-type StepupHandler = (hostId: number) => Promise<boolean>
+// `code` e codul stabil al refuzului (`stepup.password` / `stepup.totp` / `stepup.passkey`):
+// handler-ul alege ce cere omului — passkey, parola contului SAU un cod TOTP de 6 cifre
+// (useri cu TOTP activ, fără passkey). Opţional: rutele vechi încă pot chema fără cod.
+type StepupHandler = (hostId: number, code?: string) => Promise<boolean>
 let stepupHandler: StepupHandler | null = null
 export function setStepupHandler(fn: StepupHandler | null): void {
   stepupHandler = fn
@@ -327,8 +330,8 @@ function hostIdFromPath(path: string): number | null {
 // Pentru call-site-uri unde host_id NU e în URL (raw fetch de fișiere; /api/forwards/{fid}/telnet;
 // /api/sessions/{sid}/reconnect) — deschide manual fereastra de step-up pentru host și spune dacă a
 // reușit, ca apelantul să reîncerce. Întoarce false dacă nu e niciun handler sau userul anulează.
-export async function ensureStepup(hostId: number): Promise<boolean> {
-  return stepupHandler ? stepupHandler(hostId) : false
+export async function ensureStepup(hostId: number, code?: string): Promise<boolean> {
+  return stepupHandler ? stepupHandler(hostId, code) : false
 }
 
 // Un 403 e „de step-up" (necesită re-verificare 2FA) după detaliul mesajului.
@@ -344,7 +347,9 @@ export async function withStepup<T>(hostId: number, fn: () => Promise<T>): Promi
   try {
     return await fn()
   } catch (e) {
-    if (isStepupError(e) && (await ensureStepup(hostId))) return fn()
+    // trecem codul refuzului (`stepup.totp` vs `stepup.password`) ca handler-ul să ştie ce să ceară
+    const code = e instanceof ApiError ? e.code : ''
+    if (isStepupError(e) && (await ensureStepup(hostId, code))) return fn()
     throw e
   }
 }
@@ -393,7 +398,7 @@ export async function api<T>(path: string, options: RequestInit = {}, _retried =
     if (res.status === 403 && !_retried && stepupHandler
         && !path.endsWith('/stepup') && isStepup) {
       const hostId = hostIdFromPath(path)
-      if (hostId != null && (await stepupHandler(hostId))) {
+      if (hostId != null && (await stepupHandler(hostId, code))) {
         return api<T>(path, options, true)
       }
     }
