@@ -26,6 +26,7 @@ const browser=await chromium.launch()
 const ctx=await browser.newContext({viewport:{width:1200,height:800},locale:'en-US',permissions:['clipboard-read','clipboard-write']})
 try{
   const page=await ctx.newPage()
+  await page.addInitScript(() => { try { for (const k of ['wt_walkthrough_done','wt_tip_addhost_agent','wt_tip_addhost_ssh','wt_tip_terminal_paste','wt_tip_toolbar']) localStorage.setItem(k, '1') } catch { /**/ } })  // walkthrough de primă rulare OFF: nu bloca fluxul de test
   const clip=()=>page.evaluate(()=>navigator.clipboard.readText().catch(()=>'<err>'))
   await page.goto(BASE)
   await page.fill('input[type=email]',EMAIL); await page.fill('input[type=password]',PASSWORD)

@@ -4,6 +4,8 @@ import { useI18n } from '../../lib/i18n'
 import { allTimezones, browserTimezone, getTimezone, setTimezone, timeInZone } from '../../lib/tz'
 import UpdateCommand from '../UpdateCommand'
 import { lsGet, lsSet } from '../../lib/storage'
+import { isWalkthroughDone, markWalkthroughDone, resetWalkthrough } from '../../lib/walkthrough'
+import { resetAllTips } from '../../lib/coachtips'
 import { INBOX_REL, PasteDest, inboxDays, pasteDest, setInboxDays, setPasteDest } from '../../lib/transfers'
 import { field, heading } from './ui'
 
@@ -20,6 +22,11 @@ export default function PreferencesTab() {
   const [tz, setTz] = useState(getTimezone())
   const [clock, setClock] = useState(timeInZone(getTimezone()))
   const [srMode, setSrMode] = useState(() => lsGet('wt_sr') === '1')
+  // „arată turul pentru sesiuni noi" = inversul lui `wt_walkthrough_done` (toggle-ul doar
+  // setează/şterge cheaia; bifat = se redeschide automat la prima rulare următoare)
+  const [showWalk, setShowWalk] = useState(() => !isWalkthroughDone())
+  // confirmare după „arată din nou sfaturile": sfaturile reapar pe măsură ce ajungi la UI-ul lor
+  const [tipsReset, setTipsReset] = useState(false)
   const [unicode11, setUnicode11] = useState(() => lsGet('wt_unicode11') === '1')
   const [upd, setUpd] = useState<UpdateInfo | null>(null)
   const [updBusy, setUpdBusy] = useState(false)
@@ -82,6 +89,50 @@ export default function PreferencesTab() {
           </span>
         </span>
       </label>
+
+      {/* ── Turul de bun venit ── */}
+      <h3 className={heading}>{t('walkthrough.settingsTitle')}</h3>
+      <label className="mt-2 flex cursor-pointer items-start gap-2.5 text-sm text-slate-300">
+        <input
+          type="checkbox"
+          checked={showWalk}
+          onChange={(e) => {
+            setShowWalk(e.target.checked)
+            // bifat → ştergem cheia (reapare la prima rulare); debifat → marcăm gata (nu mai apare)
+            if (e.target.checked) resetWalkthrough()
+            else markWalkthroughDone()
+          }}
+          className="mt-0.5 h-4 w-4 rounded accent-sky-600"
+        />
+        <span>{t('walkthrough.settingsToggle')}</span>
+      </label>
+      {/* Redeschidere imediată: App ţine starea modalului, deci o cerem printr-un eveniment
+          global (acelaşi tipar ca wt-focus-search/wt-session-insert) — nu atinge `wt_walkthrough_done`. */}
+      <button
+        type="button"
+        onClick={() => window.dispatchEvent(new Event('wt-open-walkthrough'))}
+        className="mt-2 rounded-lg border border-ink-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-ink-800"
+      >
+        {t('walkthrough.replayButton')}
+      </button>
+
+      {/* ── Sfaturi contextuale ── */}
+      {/* Complementare walkthrough-ului: hint-uri de o singură dată, lângă UI-ul concret. „Arată
+          din nou" şterge toate cheile wt_tip_* (resetAllTips), deci reapar pe măsură ce ajungi
+          la funcţiile lor — fără să redeschidă nimic acum (spre deosebire de „reia turul"). */}
+      <h3 className={heading}>{t('tips.resetTitle')}</h3>
+      <p className="mt-1 text-xs text-slate-500">{t('tips.resetDesc')}</p>
+      <button
+        type="button"
+        onClick={() => { resetAllTips(); setTipsReset(true) }}
+        className="mt-2 rounded-lg border border-ink-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-ink-800"
+      >
+        {t('tips.resetButton')}
+      </button>
+      {/* `role="status"`: resetarea e anunţată, nu doar colorată în verde */}
+      <span role="status" className={tipsReset ? 'mt-2 block text-xs wt-good' : 'sr-only'}>
+        {tipsReset ? t('tips.resetDone') : ''}
+      </span>
 
       {/* ── Terminal ── */}
       <h3 className={heading}>{t('settings.terminal')}</h3>

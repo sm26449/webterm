@@ -6,6 +6,10 @@ import InstallCommand, { AGENT_PYTHON_MIN } from './InstallCommand'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { btn } from './settings/ui'
 import { fmtTs } from '../lib/tz'
+import CoachTip from './CoachTip'
+import { TIP_ADDHOST_AGENT, TIP_ADDHOST_SSH } from '../lib/coachtips'
+import { isWalkthroughDone } from '../lib/walkthrough'
+import { ServerIcon, KeyIcon } from './Icons'
 
 type ConnType = 'agent' | 'ssh' | 'ssh-jump' | 'telnet' | 'telnet-jump'
 
@@ -37,6 +41,10 @@ export default function AddHostModal(props: {
   // un host „jump" (ssh-jump/telnet-jump) e definit de agentul `via` — la editare arătăm doar
   // comutatorul de PROTOCOL (SSH↔Telnet), nu selectorul generic (a-l muta pe „agent" l-ar rupe).
   const isJump = connType === 'ssh-jump' || connType === 'telnet-jump'
+  // Sfaturile contextuale (coach tips) nu apar peste walkthrough-ul de primă rulare (fie marcat
+  // gata, fie nemontat acum) şi doar la CREARE — la editare hostul e deja configurat, un hint
+  // „ce e modul agent" ar fi redundant. Copia variază după tipul ales (agent vs ssh/jump).
+  const coachAllowed = !edit && (isWalkthroughDone() || !document.querySelector('[data-testid="walkthrough"]'))
   const [name, setName] = useState(edit?.name ?? '')
   const [note, setNote] = useState(edit?.note ?? '')
   const [tags, setTags] = useState((edit?.tags ?? []).join(', '))
@@ -346,6 +354,30 @@ export default function AddHostModal(props: {
                 ? t('addhost.telnetJumpDesc')
                 : t('addhost.telnetDesc')}
             </p>
+
+            {/* Sfat contextual, variat după tip: agent = tot pachetul (sesiuni/fişiere/Docker/
+                servicii/forward-uri, instalat cu comanda de mai jos); ssh/jump = sesiuni/fişiere/
+                serial + bastion. Non-modal, o singură dată (vezi CoachTip + lib/coachtips). */}
+            {coachAllowed && connType === 'agent' && (
+              <CoachTip
+                tipKey={TIP_ADDHOST_AGENT}
+                show
+                icon={<ServerIcon />}
+                title={t('tips.addhost.agent.title')}
+                body={t('tips.addhost.agent.body')}
+                className="mt-1"
+              />
+            )}
+            {coachAllowed && connType !== 'agent' && (
+              <CoachTip
+                tipKey={TIP_ADDHOST_SSH}
+                show
+                icon={<KeyIcon />}
+                title={t('tips.addhost.ssh.title')}
+                body={t('tips.addhost.ssh.body')}
+                className="mt-1"
+              />
+            )}
 
             <label className="block">
               <span className={label}>{t('addhost.name')}</span>

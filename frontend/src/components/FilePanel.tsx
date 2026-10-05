@@ -81,7 +81,16 @@ async function readEntry(entry: any, prefix: string, out: UpItem[]): Promise<voi
   }
 }
 
-export default function FilePanel(props: { host: Host; sessionId: string; onClose: () => void; overlay?: boolean; embed?: boolean }) {
+export default function FilePanel(props: {
+  host: Host; sessionId: string; onClose: () => void; overlay?: boolean; embed?: boolean
+  /** cale la care panoul navighează la MONTARE, oprind follow-ul (din meniul contextual al
+      terminalului: „Deschide calea" pe un director, „Descarcă…", „Fişier/Dosar nou” ancorate pe cwd).
+      Absent → comportament normal (urmăreşte cwd-ul sesiunii). */
+  revealPath?: string
+  /** după ce s-a încărcat directorul, declanşează modul inline existent de fişier/dosar nou —
+      refolosim UI-ul + `doNewFile`/`doMkdir`, fără să duplicăm nimic. */
+  initialAction?: 'newFile' | 'newFolder'
+}) {
   const { t } = useI18n()
   const isAgent = !props.host.connection_type || props.host.connection_type === 'agent'
   const asideRef = useRef<HTMLElement>(null)
@@ -170,10 +179,23 @@ export default function FilePanel(props: { host: Host; sessionId: string; onClos
   // transferuri („deschide aici" pe un upload orfan), care are prioritate şi opreşte follow-ul
   useEffect(() => {
     if (!isAgent) return
+    // `revealPath` (meniul contextual al terminalului) are prioritate şi opreşte follow-ul — vrem
+    // panoul FIX la calea cerută, nu tras înapoi la cwd de primul `cd`.
+    if (props.revealPath) { setFollow(false); load(props.revealPath); return }
     const wanted = takeFilesDir(props.host.id)
     if (wanted) { setFollow(false); load(wanted) } else loadSessionCwd()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAgent])
+  // `initialAction` („Fişier/Dosar nou" din submeniul terminalului): odată ce directorul s-a
+  // încărcat, intrăm în modul inline EXISTENT (`newFile`/`newFolder`) — aceeaşi cale ca butoanele
+  // din bară, deci `doNewFile`/`doMkdir` rămân singura implementare. O SINGURĂ dată per montare.
+  const didInitActionRef = useRef(false)
+  useEffect(() => {
+    if (!props.initialAction || didInitActionRef.current || !listing) return
+    didInitActionRef.current = true
+    if (props.initialAction === 'newFolder') { setNewFile(null); setNewFolder('') }
+    else { setNewFolder(null); setNewFileErr(''); setNewFile('') }
+  }, [listing, props.initialAction])
   // acelaşi buton apăsat cât panoul e DEJA deschis pe host: navigăm direct
   useEffect(() => {
     const onOpen = (e: Event) => {

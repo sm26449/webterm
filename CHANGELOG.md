@@ -9,6 +9,33 @@ back.
 
 ## [Unreleased]
 
+## [3.4.0] — 2026-10-05 · agent (56)
+
+### Added
+- **A first-run welcome walkthrough.** New sessions show a 7-step overlay (Welcome, Add a host,
+  Sessions and the terminal, Paste or drop files, The toolbox, Security, You're all set) with
+  Next/Back, "Skip for now" and "Don't show again". It appears once after the first login and is
+  re-openable from the `?` help overlay and Settings → Preferences. Illustrations are inline SVG so
+  they stay crisp in both themes and never go stale. New users were discovering features by accident;
+  this hands them the map up front.
+- **File actions in the terminal's right-click menu.** A nested "Files" submenu — anchored on the
+  session's current directory (OSC-7, falling back to home) — adds Open files here, Upload here,
+  Download, New file and New folder, reusing the existing Files panel, Monaco editor and transfer
+  engine (no duplication). Plus a top-level "Clear terminal" (sends Ctrl-L, so it also works under
+  tmux, unlike a local clear the server replays) and "Open path in Files" when the selection looks
+  like a path. Quick file work no longer means opening the side panel first.
+- **Contextual one-time tips.** Small, non-modal, dismissible hints at the right moment: on the
+  add-host form tailored to the connection type (agent vs ssh/jump), near the terminal on the first
+  session (paste a screenshot or drag & drop a file — it lands on the host and the path is typed),
+  and pointing at the toolbar. Each shows once; Settings → Preferences can reset them. They teach in
+  context, complementing the upfront walkthrough.
+
+### Changed
+- **Opening a very large file now says so plainly.** The editor already capped the preview (full
+  edit up to 1 MiB, first 256 KiB read-only beyond that); it now adds a banner with the file's real
+  size and a one-time toast, so accidentally opening a multi-gigabyte file is visibly safe, not
+  silent.
+
 ## [3.3.1] — 2026-10-05 · agent (56)
 
 ### Changed

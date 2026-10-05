@@ -123,6 +123,10 @@ try {
   // textul RO de referință, deci fixăm limba ca headless-ul (default EN) să nu comute pe engleză.
   const page = await browser.newPage({ viewport: { width: 1440, height: 860 }, locale: 'en-US' })
   page.on('pageerror', (e) => pageErrors.push(String(e)))
+  // Presetăm `wt_walkthrough_done`: altfel walkthrough-ul de primă rulare s-ar deschide singur
+  // după login şi ar acoperi dashboard-ul, blocând restul fluxului. Redeschiderea manuală din
+  // „?" o testăm explicit la final (acolo e DORIT să apară).
+  await page.addInitScript(() => { try { for (const k of ['wt_walkthrough_done','wt_tip_addhost_agent','wt_tip_addhost_ssh','wt_tip_terminal_paste','wt_tip_toolbar']) localStorage.setItem(k, '1') } catch { /**/ } })
 
   const screenText = () =>
     page.evaluate(() => {
@@ -590,6 +594,88 @@ try {
   await page.keyboard.type('cat /tmp/wt_edit.txt\n')
   check('salvarea din editor a scris pe host', await waitScreen('linia3noua'))
 
+  // ── FILE ACTIONS în meniul contextual al terminalului (refoloseşte panoul/editorul/motorul) ──
+  // Panoul de fişiere e deschis pe /tmp, deci cwd-ul (OSC 7) ancorează acţiunile acolo.
+  const cursorY = () => page.evaluate(() => {
+    const sid = location.hash.replace('#/s/', '')
+    const term = window.__wtTerms?.get(sid)
+    return term ? term.buffer.active.cursorY : -1
+  })
+  await activePane.locator('.xterm-screen').click({ button: 'right' })
+  const ctx = page.locator('[role=menu][aria-label="Terminal actions"]')
+  check('meniul contextual al terminalului se deschide', await visible(ctx))
+  check('meniul contextual grupează acţiunile în submeniul Files',
+    (await ctx.locator('button[aria-haspopup="menu"]:has-text("Files")').count()) > 0)
+
+  // Upload here… urcă prin motorul de upload (lib). Punem fişierul direct pe inputul ascuns —
+  // acelaşi efect ca alegerea din dialogul de fişiere (onChange → uploadHere → cwd), fără să
+  // depindem de un filechooser headless (fragil). Închidem întâi meniul (Escape).
+  await page.keyboard.press('Escape')
+  await page.locator('input[data-testid="wt-ctx-upload"]').setInputFiles({
+    name: 'wt_ctx_up.txt', mimeType: 'text/plain', buffer: Buffer.from('ctx-upload-ok'),
+  })
+  await page.waitForTimeout(1500)
+  await activePane.locator('.xterm-screen').click()
+  await page.keyboard.type('cat /tmp/wt_ctx_up.txt\n')
+  check('Upload here (meniu) urcă fişierul în cwd', await waitScreen('ctx-upload-ok'))
+  // scoatem jobul din widgetul de transferuri ca testul „pilula" de mai jos să vadă DOAR wt_edit.txt
+  // (altfel pilula pliată rezumă mai multe joburi şi nu mai conţine numele aşteptat)
+  await page.evaluate(() => {
+    const s = window.__wtTransfers?.store
+    if (!s?.snapshot) return
+    for (const j of s.snapshot().values()) if ((j.name || '').includes('wt_ctx_up')) s.remove(j.id)
+  })
+
+  // New folder → panoul se (re)deschide pe cwd în modul inline „dosar nou" (reutilizează doMkdir)
+  await activePane.locator('.xterm-screen').click({ button: 'right' })
+  await ctx.locator('button[aria-haspopup="menu"]:has-text("Files")').click()
+  await ctx.locator('button:has-text("New folder")').click()
+  const fpCtx = page.locator('aside[aria-label="Session files"]').last()
+  const nfCtx = fpCtx.locator('input[placeholder="folder name"]')
+  await nfCtx.fill('wt_ctx_dir'); await nfCtx.press('Enter')
+  // mkdir + re-listarea sunt asincrone: pollăm lista până apare directorul (nu un singur read)
+  const dirListed = await pollValue(() => fpCtx.textContent().then((t) => t ?? ''), (t) => t.includes('wt_ctx_dir'))
+  check('New folder (meniu) creează directorul în cwd', dirListed.includes('wt_ctx_dir'))
+
+  // Clear terminal = Ctrl-L: shell-ul redesenează promptul SUS (cursorY scade spre 0), NU un clear local
+  await activePane.locator('.xterm-screen').click()
+  await page.keyboard.type('seq 1 40\n')
+  // aşteptăm ca output-ul să fi coborât cursorul (rendering asincron pe runner încărcat)
+  const yBefore = await pollValue(cursorY, (y) => y > 2, 8000)
+  await activePane.locator('.xterm-screen').click({ button: 'right' })
+  await ctx.locator('button:has-text("Clear terminal")').click()
+  // pollăm până Ctrl-L redesenează promptul sus (nu un singur read după un sleep fix)
+  const yAfter = await pollValue(cursorY, (y) => y >= 0 && y <= 2, 8000)
+  check('Clear terminal trimite Ctrl-L şi shell-ul redesenează promptul sus',
+    yAfter >= 0 && yAfter <= 2 && yAfter < yBefore, `${yBefore} → ${yAfter}`)
+
+  // Fişier mare (>1 MiB): la deschidere în editor apar bannerul + doar-citire (reutilizează FileEditor)
+  await activePane.locator('.xterm-screen').click()
+  // ~1.9 MB CU rânduri (seq), nu o singură linie uriaşă: tot peste 1 MiB (deci trunchiat + doar
+  // citire), dar Monaco îl randează uşor (virtualizare pe rânduri) — fără să încetinească runnerul.
+  await page.keyboard.type('seq 1 300000 > /tmp/wt_big.txt\n')
+  await page.waitForTimeout(1500)
+  await fpCtx.locator('button[title="Reload"]').click()
+  await fpCtx.locator('input[placeholder="filter…"]').fill('wt_big')
+  // scrierea + re-listarea sunt asincrone: pollăm până apare rândul (ca la testul cu nume special)
+  await pollValue(() => fpCtx.textContent().then((t) => t ?? ''), (t) => t.includes('wt_big.txt'))
+  const bigRow = fpCtx.locator('div.group').filter({ hasText: 'wt_big.txt' }).first()
+  await bigRow.hover()
+  await bigRow.locator('button[title="Edit"]').click()
+  const cmBig = page.locator('.monaco-editor')
+  await cmBig.waitFor({ state: 'visible', timeout: 15000 })
+  const bigBanner = page.locator('[data-testid="editor-bigfile-banner"]')
+  check('editor: banner de fişier mare la fişier trunchiat',
+    (await visible(bigBanner, 10000)) && ((await bigBanner.textContent()) ?? '').includes('read-only'))
+  const bigDlg = page.locator('[role=dialog][aria-label^="Edit"]')
+  check('editor: fişierul mare e doar în citire (fără buton Save)',
+    (await bigDlg.locator('button:has-text("Save")').count()) === 0)
+  // curăţenie pentru testele următoare: închide editorul şi goleşte filtrul (panoul rămâne pe /tmp)
+  await bigDlg.locator('button:has-text("Close")').click()
+  await fpCtx.locator('input[placeholder="filter…"]').fill('')
+  await fpCtx.locator('button[title="Reload"]').click()
+  await page.waitForTimeout(600)
+
   // ── Faza 4 (Val 5): confirmare de overwrite la upload peste fișier existent ──
   await filePanel.locator('input[type=file]').setInputFiles({
     name: 'wt_edit.txt', mimeType: 'text/plain', buffer: Buffer.from('continut-suprascris-faza4'),
@@ -975,6 +1061,71 @@ try {
     await visible(connDlg.locator('text=API token')))
   await connDlg.locator('button:has-text("Cancel")').click()
   await tbx.locator('button[aria-label="Close"]').click().catch(() => {})
+
+  // ── Sfaturi contextuale (coach tips): apariţie scalonată + persistenţă + reset ──
+  // Presetarea de la început a marcat toate cheile `wt_tip_*` ca văzute (ca sfaturile să nu
+  // blocheze fluxul). Aici le ŞTERGEM — păstrând `wt_walkthrough_done`, altfel turul s-ar
+  // deschide peste sesiune — ca să testăm apariţia reală pe prima sesiune vie. (Persistenţa o
+  // verificăm pe cheia din localStorage, NU printr-un reload: reload-ul ar re-rula addInitScript
+  // şi ar re-preseta cheile, mascând exact dismiss-ul pe care vrem să-l dovedim.)
+  await goHome()
+  await page.evaluate(() => {
+    try { for (const k of ['wt_tip_addhost_agent', 'wt_tip_addhost_ssh', 'wt_tip_terminal_paste', 'wt_tip_toolbar']) localStorage.removeItem(k) } catch { /**/ }
+  })
+  await newSession(page)
+  await page.waitForSelector('.xterm-screen', { timeout: 15000 })
+  const pasteTip = page.locator('[data-testid="coachtip-wt_tip_terminal_paste"]')
+  const toolbarTip = page.locator('[data-testid="coachtip-wt_tip_toolbar"]')
+  check('tips: sfatul de paste/drop apare pe prima sesiune vie', await visible(pasteTip, 8000))
+  // „Got it" închide sfatul; dovada persistenţei e cheia scrisă, nu un reload (vezi mai sus)
+  await pasteTip.locator('button:has-text("Got it")').click()
+  check('tips: închiderea persistă (wt_tip_terminal_paste=1)',
+    (await page.evaluate(() => localStorage.getItem('wt_tip_terminal_paste'))) === '1')
+  // scalonare: toolbar-ul apare DOAR după ce paste-ul s-a închis (niciodată simultan)
+  check('tips: sfatul de toolbar apare după închiderea celui de paste', await visible(toolbarTip, 8000))
+  await toolbarTip.locator('button:has-text("Got it")').click()
+  check('tips: ambele sfaturi închise după „Got it"',
+    (await hidden(pasteTip)) && (await hidden(toolbarTip)))
+  // „Arată din nou sfaturile" din Setări → Preferinţe şterge toate cheile wt_tip_*
+  await goHome()
+  await page.click('button[aria-label="Settings"]')
+  await page.click('button:has-text("Preferences")')
+  await page.click('button:has-text("Show contextual tips again")')
+  check('tips: „reset tips" din Setări şterge toate cheile wt_tip_*',
+    await page.evaluate(() => ['wt_tip_addhost_agent', 'wt_tip_addhost_ssh', 'wt_tip_terminal_paste', 'wt_tip_toolbar'].every((k) => localStorage.getItem(k) === null)))
+  await page.keyboard.press('Escape')
+  // după reset, sfatul reapare pe o sesiune nouă (readus la viaţă, nu mort definitiv)
+  await goHome()
+  await newSession(page)
+  await page.waitForSelector('.xterm-screen', { timeout: 15000 })
+  check('tips: după reset, sfatul de paste reapare pe o sesiune nouă', await visible(pasteTip, 8000))
+  await pasteTip.locator('button:has-text("Got it")').click().catch(() => {})   // curăţenie: nu lăsa sfatul deschis peste testul de walkthrough
+
+  // ── Walkthrough de bun venit: redeschiderea manuală din „?" ──
+  // Auto-open-ul e dezactivat (am presetat `wt_walkthrough_done` la început), deci aici testăm
+  // DOAR calea manuală + persistenţa bifei „nu mai arăta". Ştergem întâi cheia ca verificarea
+  // finală să fie reală (bifa chiar o re-scrie), nu doar să reconfirme presetarea.
+  await goHome()
+  await page.evaluate(() => { try { localStorage.removeItem('wt_walkthrough_done') } catch { /**/ } })
+  // focus pe un buton (nu în terminal/câmp): „?" nu se declanşează dintr-un câmp sau din terminal
+  await page.focus('button[aria-label="Settings"]')
+  await page.keyboard.press('?')
+  await page.waitForSelector('[role=dialog][aria-label="Keyboard shortcuts"]', { timeout: 5000 })
+  await page.click('button:has-text("Replay the welcome walkthrough")')
+  const walk = page.locator('[data-testid="walkthrough"]')
+  check('walkthrough: „?" → Replay deschide turul la pasul 1',
+    (await visible(walk)) && ((await walk.textContent()) ?? '').includes('Welcome to WebTerm'))
+  await walk.locator('button:has-text("Next")').click()
+  check('walkthrough: Next avansează la pasul 2 (Add a host)',
+    ((await walk.textContent()) ?? '').includes('Add a host'))
+  await walk.locator('button[aria-label="Step 7 of 7"]').click()
+  check('walkthrough: dot-ul sare la ultimul pas (You\'re all set)',
+    ((await walk.textContent()) ?? '').includes("You're all set"))
+  await walk.locator('input[type=checkbox]').check()
+  await walk.locator('button:has-text("Skip for now")').click()
+  check('walkthrough: turul se închide după Skip', await hidden(walk))
+  check('walkthrough: „nu mai arăta" + închidere persistă wt_walkthrough_done=1',
+    (await page.evaluate(() => localStorage.getItem('wt_walkthrough_done'))) === '1')
 
   check('fără erori JS în pagină', pageErrors.length === 0)
   if (pageErrors.length) console.error('pageerrors:', pageErrors)

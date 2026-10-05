@@ -49,6 +49,7 @@ const browser = await chromium.launch()
 const errs = []
 try {
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, locale: 'en-US' })
+  await page.addInitScript(() => { try { for (const k of ['wt_walkthrough_done','wt_tip_addhost_agent','wt_tip_addhost_ssh','wt_tip_terminal_paste','wt_tip_toolbar']) localStorage.setItem(k, '1') } catch { /**/ } })  // walkthrough de primă rulare OFF: nu bloca fluxul de test
   page.on('pageerror', (e) => errs.push(String(e)))
   await page.goto(BASE)
   await page.fill('input[type=email]', EMAIL)

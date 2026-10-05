@@ -11,6 +11,7 @@ import Dashboard from './components/Dashboard'
 import HostOverview from './components/HostOverview'
 import LoginPage from './components/LoginPage'
 import KeyboardHelp from './components/KeyboardHelp'
+import Walkthrough from './components/Walkthrough'
 import SnippetParams, { snippetParams } from './components/SnippetParams'
 import PaneErrorBoundary from './components/PaneErrorBoundary'
 import PopoutView from './components/PopoutView'
@@ -35,6 +36,7 @@ import SecretPromptModal from './components/SecretPromptModal'
 import { markBooted } from './lib/failsafe'
 import { useMetricsTick } from './lib/metrics'
 import { matchShortcut, ShortcutId } from './lib/shortcuts'
+import { shouldAutoOpen } from './lib/walkthrough'
 import { fmtTs, getTimezone } from './lib/tz'
 
 /* localStorage „sigur": Safari cu „Block all cookies" / iframe sandbox aruncă SecurityError chiar la
@@ -307,6 +309,10 @@ function MainApp() {
   const [showHistory, setShowHistory] = useState(false)
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false)
   const [helpOpen, setHelpOpen] = useState(false)
+  // walkthrough de primă rulare: `auto` = deschis singur la prima rulare (marchează „gata" la
+  // finalizare); `auto:false` = redeschis manual din „?"/Setări (nu atinge starea fără bifă)
+  const [walkthrough, setWalkthrough] = useState<{ auto: boolean } | null>(null)
+  const walkAutoRef = useRef(false)   // auto-open o SINGURĂ dată per montare, nu la fiecare poll
   // snippets în paletă: încărcate o dată la deschiderea ei (nu la fiecare poll)
   const [snippets, setSnippets] = useState<Snippet[]>([])
   const [snipParams, setSnipParams] = useState<Snippet | null>(null)
@@ -825,6 +831,24 @@ function MainApp() {
   useEffect(() => {
     if (appState?.authenticated) restoreOrphans()
   }, [appState?.authenticated])
+
+  // Auto-deschiderea walkthrough-ului la PRIMA rulare: doar după autentificare (nu pe login) şi
+  // doar dacă `wt_walkthrough_done` lipseşte. `walkAutoRef` ne apără de poll-ul de 5s (authenticated
+  // rămâne true, dar nu vrem să-l redeschidem). E2e-urile presetează cheia → shouldAutoOpen=false,
+  // deci fluxul de login nu e atins. NB: HOOK — înainte de orice `return` timpuriu.
+  useEffect(() => {
+    if (!appState?.authenticated || walkAutoRef.current) return
+    walkAutoRef.current = true
+    if (shouldAutoOpen(true)) setWalkthrough({ auto: true })
+  }, [appState?.authenticated])
+
+  // Redeschiderea manuală: Setări → Preferinţe cere turul printr-un eveniment (componenta e
+  // adâncă în SettingsModal), iar „?" îl cere prin prop. Ambele îl deschid în mod `auto:false`.
+  useEffect(() => {
+    const onOpen = () => setWalkthrough({ auto: false })
+    window.addEventListener('wt-open-walkthrough', onOpen)
+    return () => window.removeEventListener('wt-open-walkthrough', onOpen)
+  }, [])
   useEffect(() => {
     setStepupHandler(async (hostId, code) => {
       const cred = await stepupCredential(hostId, code)
@@ -1487,7 +1511,15 @@ function MainApp() {
           onCancel={() => setSnipParams(null)}
         />
       )}
-      {helpOpen && <KeyboardHelp onClose={() => setHelpOpen(false)} />}
+      {helpOpen && (
+        <KeyboardHelp
+          onClose={() => setHelpOpen(false)}
+          onReplayWalkthrough={() => { setHelpOpen(false); setWalkthrough({ auto: false }) }}
+        />
+      )}
+      {walkthrough && (
+        <Walkthrough auto={walkthrough.auto} onClose={() => setWalkthrough(null)} />
+      )}
       {credReq && (
         <CredentialModal
           title={credReq.title}

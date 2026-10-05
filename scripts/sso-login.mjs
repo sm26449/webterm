@@ -22,6 +22,7 @@ const fail = (m) => { if (!failed) failed = m }
 
 const browser = await chromium.launch()
 const page = await browser.newPage({ locale: 'en-US' })
+await page.addInitScript(() => { try { for (const k of ['wt_walkthrough_done','wt_tip_addhost_agent','wt_tip_addhost_ssh','wt_tip_terminal_paste','wt_tip_toolbar']) localStorage.setItem(k, '1') } catch { /**/ } })  // walkthrough de primă rulare OFF: nu bloca fluxul de test
 const pageErrors = []
 page.on('pageerror', (e) => pageErrors.push(e.message))
 

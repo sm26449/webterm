@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { startAuthentication } from '@simplewebauthn/browser'
 import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
@@ -21,7 +21,7 @@ import ForwardsPanel from './ForwardsPanel'
 import DockerPanel from './DockerPanel'
 import ServicesPanel from './ServicesPanel'
 import ToolboxPanel from './ToolboxPanel'
-import { ClockIcon, CopyIcon, DockerIcon, ExternalLinkIcon, FilesIcon, ForwardIcon, GitBranchIcon, LinkIcon, MoreIcon, NoteIcon, PasteIcon, PencilIcon, PopoutIcon, SearchIcon, ServicesIcon, StopIcon, ToolboxIcon, TrashIcon } from './Icons'
+import { ClockIcon, CopyIcon, DockerIcon, DownloadIcon, ExternalLinkIcon, FileIcon, FilesIcon, FolderIcon, ForwardIcon, GitBranchIcon, LinkIcon, MoreIcon, NoteIcon, PasteIcon, PencilIcon, PopoutIcon, SearchIcon, ServicesIcon, StopIcon, ToolboxIcon, TrashIcon } from './Icons'
 import MobileKeybar from './MobileKeybar'
 import SnippetsMenu from './SnippetsMenu'
 import TranscriptPlayer from './TranscriptPlayer'
@@ -37,7 +37,15 @@ import { startUpload } from '../lib/uploads'
 import { uploadStore } from '../lib/uploadStore'
 import { ensureInbox, inboxName, isGenericName, markPasteHintSeen, pasteDest, pasteHintSeen, pasteSubject, pasteSubjectText, pasteToastKey, pruneInbox, registerInsertTarget, resolveHome } from '../lib/transfers'
 import type { PasteDest } from '../lib/transfers'
+import { baseName, looksLikePath, resolveTermPath } from '../lib/termpath'
 import { UploadIcon } from './Icons'
+import CoachTip from './CoachTip'
+import { TIP_TERMINAL_PASTE, TIP_TOOLBAR, isTipDismissed } from '../lib/coachtips'
+import { isWalkthroughDone } from '../lib/walkthrough'
+
+// FileEditor (Monaco) e greu → lazy, exact ca-n FilePanel: intră în bundle doar când deschizi
+// o cale-fişier din meniul contextual. Refolosim ACEEAŞI componentă (siguranţa la fişiere mari gratis).
+const FileEditor = lazy(() => import('./FileEditor'))
 
 type ConnState = 'connecting' | 'open' | 'reconnecting' | 'ended'
 
@@ -406,6 +414,18 @@ export default function SessionView(props: {
     setLinksOpen(true)
   }, [])
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null)
+  // meniu contextual → acţiuni de fişiere. `filesReveal`/`filesAction` conduc FilePanel prin
+  // `revealPath`/`initialAction`; `filesNonce` FORŢEAZĂ remontarea (prop-ul de reveal se citeşte
+  // doar la montare) ca „Descarcă…/Fişier nou” să re-navigheze chiar dacă panoul era deja deschis.
+  const [filesReveal, setFilesReveal] = useState<string | undefined>(undefined)
+  const [filesAction, setFilesAction] = useState<'newFile' | 'newFolder' | undefined>(undefined)
+  const [filesNonce, setFilesNonce] = useState(0)
+  // o cale-fişier selectată se deschide DIRECT în FileEditor (aceeaşi componentă ca panoul)
+  const [editorFile, setEditorFile] = useState<{ path: string; name: string } | null>(null)
+  const uploadInputRef = useRef<HTMLInputElement>(null)
+  // cât submeniul „Fişiere ▸” e deschis, el îşi tratează propriul Escape (←/Esc îl închide),
+  // deci handlerul global de Escape al meniului nu trebuie să închidă TOT meniul peste el
+  const submenuOpenRef = useRef(false)
   const longPressRef = useRef<number | null>(null)
   const remoteResizeReloadRef = useRef<number | null>(null)   // debounce pt. recrearea rendererului la resize de la alt client
   // Escape închide meniul contextual (înainte ca xterm să trimită Esc în shell)
@@ -413,6 +433,8 @@ export default function SessionView(props: {
     if (!ctxMenu) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        // submeniul deschis îşi înghite propriul Escape (îl închide doar pe el); altfel închidem tot
+        if (submenuOpenRef.current) return
         e.preventDefault()
         e.stopPropagation()
         setCtxMenu(null)
@@ -426,6 +448,36 @@ export default function SessionView(props: {
   const themeForHost = () => termTheme(hostScheme(props.host?.id))
   const [termBg, setTermBg] = useState(() => themeForHost().background || '#0b0e14')
   const isLive = !exited
+
+  // ── Sfaturi contextuale (coach tips) ─────────────────────────────────────────────────────
+  // Completează walkthrough-ul de primă rulare (nu-l dublează): arătate o dată, la momentul
+  // potrivit, lângă UI-ul concret. Scalonate — întâi paste/drop (doar unde transferul merge),
+  // apoi, DUPĂ ce acela e închis, toolbar-ul — ca două callout-uri să nu apară simultan.
+  const [showPasteTip, setShowPasteTip] = useState(false)
+  const [showToolbarTip, setShowToolbarTip] = useState(false)
+  useEffect(() => {
+    if (!isLive) return
+    let cancelled = false
+    let timer = 0
+    // Walkthrough-ul are prioritate: fie e deja marcat gata, fie nu e montat acum. Dacă e
+    // deschis, reîncercăm scurt până se închide — poll mărginit, fără sleep fix (ar bloca e2e).
+    const allowed = () => isWalkthroughDone() || !document.querySelector('[data-testid="walkthrough"]')
+    const start = () => {
+      if (cancelled) return
+      if (!allowed()) { timer = window.setTimeout(start, 600); return }
+      // paste întâi (doar pe hosturi cu transfer, adică agent); altfel direct toolbar
+      if (canTransfer && !isTipDismissed(TIP_TERMINAL_PASTE)) setShowPasteTip(true)
+      else if (!isTipDismissed(TIP_TOOLBAR)) setShowToolbarTip(true)
+    }
+    timer = window.setTimeout(start, 900)   // după ce terminalul s-a aşezat
+    return () => { cancelled = true; clearTimeout(timer) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLive])
+  // paste închis → toolbar, scalonat (nu simultan); dacă toolbar-ul e deja văzut, nu mai apare
+  const onPasteTipDismiss = () => {
+    setShowPasteTip(false)
+    if (!isTipDismissed(TIP_TOOLBAR)) window.setTimeout(() => setShowToolbarTip(true), 500)
+  }
 
   // sondajul de RTT rulează pe TOATE panourile montate, indiferent de pauză:
   // pe lângă măsurătoare, frame-urile lui mici sunt keepalive-ul care împiedică
@@ -1383,6 +1435,53 @@ export default function SessionView(props: {
     }
   }
 
+  // -- acţiuni de fişiere din meniul contextual al terminalului ------------------------------
+  // Toate refolosesc panoul de fişiere / editorul / motorul de upload existente — NU duplicăm
+  // nimic din transfer engine. Ancora e cwd-ul din OSC 7; fără el (shell integration oprită)
+  // cădem pe home-ul rezolvat, ca drop-ul/paste-ul de fişiere.
+  const filesAnchorDir = async (): Promise<string> => cwdRef.current ?? await resolveHome(props.host!.id)
+
+  // (Re)deschide FilePanel la o cale (sau la cwd, când `dir` lipseşte → urmăreşte cwd-ul). Remontăm
+  // prin nonce ca prop-ul `revealPath` să fie recitit chiar dacă panoul era deja deschis altundeva.
+  const revealFiles = (dir?: string, action?: 'newFile' | 'newFolder') => {
+    setFilesReveal(dir)
+    setFilesAction(action)
+    setFilesNonce((n) => n + 1)
+    closeOthers('files')
+    setShowFiles(true)
+  }
+
+  // „Deschide calea": fişier → editor (Monaco; siguranţa la fişiere mari vine gratis din FileEditor),
+  // director sau necunoscut → panoul la acea cale. `fs` listează doar directoare, `fs/preview` doar
+  // fişiere — le folosim ca sonde ca să alegem corect, fără un endpoint de `stat` separat.
+  const openSelectedPath = async (raw: string) => {
+    const host = props.host
+    if (!host) return
+    const p = resolveTermPath(raw, await filesAnchorDir())
+    try {
+      await api(`/api/hosts/${host.id}/fs?path=${encodeURIComponent(p)}`)
+      revealFiles(p); return                                   // e director
+    } catch { /* nu e director */ }
+    try {
+      await api(`/api/hosts/${host.id}/fs/preview?path=${encodeURIComponent(p)}`)
+      setEditorFile({ path: p, name: baseName(p) }); return    // e fişier
+    } catch { /* nici fişier lizibil */ }
+    revealFiles(p)                                             // necunoscut → panoul arată propria eroare
+  }
+
+  // „Încarcă aici…": urcăm direct prin motorul de upload (lib), fără cuplare la FilePanel. Un
+  // singur toast de sumar (ca la paste/drop), nu unul per fişier.
+  const uploadHere = async (files: File[]) => {
+    const host = props.host
+    if (!host || !files.length) return
+    const dir = (await filesAnchorDir()).replace(/\/+$/, '')
+    const ids = await Promise.all(files.map((f) =>
+      startUpload({ hostId: host.id, hostName: host.name, dest: `${dir}/${f.name}`, file: f }).catch(() => null)))
+    const failed = ids.filter((id) => !id || uploadStore.get(id)?.state !== 'done').length
+    if (failed) notifyToast(t('session.ctxFilesUploadErr', { failed, total: files.length }), 'warn')
+    else notifyToast(t('session.ctxFilesUploadOk', { count: files.length, dir }), 'info')
+  }
+
   // -- comenzi (OSC 133) -----------------------------------------------------
 
   const jumpTo = (c: Command) => {
@@ -2030,6 +2129,28 @@ export default function SessionView(props: {
         <span className="sr-only">{t('session.srHint')}</span>
         <div ref={containerRef} role="application" aria-label={t('session.terminalAria')} className="h-full w-full" />
 
+        {/* Sfaturi contextuale ancorate la terminal: paste/drop jos-stânga, iar unealta-bară
+            sus-dreapta (spre butoanele din header). z-20 → sub overlay-ul de drop (z-30). */}
+        {canTransfer && (
+          <CoachTip
+            tipKey={TIP_TERMINAL_PASTE}
+            show={showPasteTip}
+            onDismiss={onPasteTipDismiss}
+            icon={<PasteIcon />}
+            title={t('tips.terminal.paste.title')}
+            body={t('tips.terminal.paste.body')}
+            className="absolute bottom-3 left-3"
+          />
+        )}
+        <CoachTip
+          tipKey={TIP_TOOLBAR}
+          show={showToolbarTip}
+          icon={<ToolboxIcon />}
+          title={t('tips.toolbar.title')}
+          body={t('tips.toolbar.body')}
+          className="absolute right-3 top-3"
+        />
+
         {/* Drop pe terminal: spune UNDE aterizează fişierul (cwd din OSC 7 sau home) înainte să
             dai drumul. Butonul e o ţintă de drop alternativă: lăsat pe el, deschide panoul de
             fişiere, de unde alegi directorul şi re-tragi. */}
@@ -2184,7 +2305,8 @@ export default function SessionView(props: {
         />
       )}
       {showFiles && props.host && (
-        <FilePanel host={props.host} sessionId={session.id} onClose={() => setShowFiles(false)} overlay={narrowPane} />
+        <FilePanel key={filesNonce} host={props.host} sessionId={session.id} onClose={() => setShowFiles(false)}
+          overlay={narrowPane} revealPath={filesReveal} initialAction={filesAction} />
       )}
       {showGit && props.host && (
         <GitPanel host={props.host} sessionId={session.id} onClose={() => setShowGit(false)} overlay={narrowPane} />
@@ -2219,8 +2341,9 @@ export default function SessionView(props: {
             aria-label={t('session.terminalActions')}
             className="fixed z-40 w-52 rounded-xl border border-ink-700 bg-ink-900 p-1 shadow-2xl"
             style={{
+              // clamp mai generos la jos: meniul are acum mai multe rânduri (+ submeniul „Fişiere”)
               left: Math.min(ctxMenu.x, window.innerWidth - 216),
-              top: Math.min(ctxMenu.y, window.innerHeight - 176),
+              top: Math.max(8, Math.min(ctxMenu.y, window.innerHeight - 360)),
             }}
           >
             <MoreItem disabled={!termRef.current?.hasSelection()} onClick={() => { copySelection(); setCtxMenu(null) }}>
@@ -2239,6 +2362,37 @@ export default function SessionView(props: {
             <MoreItem onClick={() => { termRef.current?.selectAll(); setCtxMenu(null) }}>
               <span className="inline-block w-4" aria-hidden="true" /> {t('session.selectAll')}
             </MoreItem>
+            {/* Clear terminal: trimite Ctrl-L (\x0c), NU `term.clear()` local — pe tmux serverul
+                rejoacă bufferul la reconectare, deci un clear local reapare; Ctrl-L e ce vrea
+                utilizatorul şi e inofensiv la prompt sau într-un editor. */}
+            {isLive && (
+              <MoreItem onClick={() => { send('\x0c'); termRef.current?.focus(); setCtxMenu(null) }}>
+                <span className="inline-block w-4" aria-hidden="true" /> {t('session.clearTerminal')}
+              </MoreItem>
+            )}
+            {/* „Deschide calea": doar când selecţia arată fără echivoc a cale (vezi lib/termpath) */}
+            {(() => {
+              const sel = termRef.current?.hasSelection() ? (termRef.current.getSelection() || '').trim() : ''
+              return sel && looksLikePath(sel) ? (
+                <MoreItem onClick={() => { void openSelectedPath(sel); setCtxMenu(null) }}>
+                  <FilesIcon /> {t('session.openPathInFiles')}
+                </MoreItem>
+              ) : null
+            })()}
+            {props.host && (
+              <FilesSubmenu
+                subtitle={cwd ? t('session.ctxFilesInDir', { dir: cwd }) : t('session.ctxFilesHomeFallback')}
+                onOpenChange={(o) => { submenuOpenRef.current = o }}
+                onCloseMenu={() => setCtxMenu(null)}
+                items={[
+                  { key: 'open', icon: <FilesIcon />, label: t('session.ctxFilesOpenHere'), onClick: () => revealFiles() },
+                  { key: 'upload', icon: <UploadIcon />, label: t('session.ctxFilesUpload'), onClick: () => uploadInputRef.current?.click() },
+                  { key: 'download', icon: <DownloadIcon />, label: t('session.ctxFilesDownload'), onClick: () => { void (async () => revealFiles(await filesAnchorDir()))() } },
+                  { key: 'newfile', icon: <FileIcon />, label: t('session.ctxFilesNewFile'), onClick: () => { void (async () => revealFiles(await filesAnchorDir(), 'newFile'))() } },
+                  { key: 'newfolder', icon: <FolderIcon />, label: t('session.ctxFilesNewFolder'), onClick: () => { void (async () => revealFiles(await filesAnchorDir(), 'newFolder'))() } },
+                ]}
+              />
+            )}
             <MoreItem onClick={() => { setShowSearch(true); setCtxMenu(null) }}>
               <SearchIcon /> {t('session.searchScrollbackMenu')}
             </MoreItem>
@@ -2255,6 +2409,21 @@ export default function SessionView(props: {
             )}
           </div>
         </>
+      )}
+
+      {/* input ascuns pentru „Încarcă aici…": stă la rădăcină (nu în meniu) ca să supravieţuiască
+          închiderii meniului — altfel dialogul de fişiere al sistemului s-ar pierde când se demontează */}
+      {isLive && props.host && (
+        <input ref={uploadInputRef} type="file" multiple className="hidden" data-testid="wt-ctx-upload"
+          onChange={(e) => { if (e.target.files?.length) void uploadHere(Array.from(e.target.files)); e.target.value = '' }} />
+      )}
+      {/* cale-fişier selectată → editor Monaco (aceeaşi componentă ca-n panou, deci siguranţa la
+          fişiere mari + salvarea atomică vin gratis) */}
+      {editorFile && props.host && (
+        <Suspense fallback={null}>
+          <FileEditor hostId={props.host.id} path={editorFile.path} name={editorFile.name}
+            onClose={() => setEditorFile(null)} onSaved={() => { /* fişier salvat pe host; nimic de reîmprospătat aici */ }} />
+        </Suspense>
       )}
 
       <StatusBar session={session} host={props.host} rtt={isLive ? rtt : null} cwd={cwd} />
@@ -2336,5 +2505,105 @@ function MoreItem(props: { onClick: () => void; disabled?: boolean; children: Re
     >
       {props.children}
     </button>
+  )
+}
+
+/** Submeniul „Fişiere ▸" din meniul contextual al terminalului: un flyout cu acţiuni de fişiere.
+    Flip la stânga lângă marginea din dreapta; tastatură (→/Enter deschide, ↑/↓ între iteme,
+    ←/Esc închide), roving focus, închidere la mouse-leave. role=menu/menuitem, ţinte ≥24px. */
+function FilesSubmenu(props: {
+  subtitle: string
+  items: { key: string; icon?: React.ReactNode; label: string; onClick: () => void }[]
+  onCloseMenu: () => void
+  onOpenChange?: (open: boolean) => void
+}) {
+  const { t } = useI18n()
+  const [open, setOpen] = useState(false)
+  const [active, setActive] = useState(0)       // roving focus (tastatură)
+  const [flip, setFlip] = useState(false)       // deschide spre stânga lângă marginea din dreapta
+  const btnRef = useRef<HTMLButtonElement>(null)
+  const itemRefs = useRef<(HTMLButtonElement | null)[]>([])
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | 0>(0)
+  // raportăm starea sus printr-un ref (fără să re-rulăm efectul la fiecare render al părintelui)
+  const onOpenChangeRef = useRef(props.onOpenChange)
+  onOpenChangeRef.current = props.onOpenChange
+  useEffect(() => { onOpenChangeRef.current?.(open); return () => onOpenChangeRef.current?.(false) }, [open])
+
+  // la deschidere: decide flip după spaţiul din dreapta + focus pe primul item (roving)
+  useEffect(() => {
+    if (!open) return
+    const r = btnRef.current?.getBoundingClientRect()
+    if (r) setFlip(r.right + 212 > window.innerWidth)
+    setActive(0)
+    const id = requestAnimationFrame(() => itemRefs.current[0]?.focus())
+    return () => cancelAnimationFrame(id)
+  }, [open])
+  useEffect(() => { if (open) itemRefs.current[active]?.focus() }, [active, open])
+
+  const show = () => { clearTimeout(closeTimer.current); setOpen(true) }
+  const hideSoon = () => { closeTimer.current = setTimeout(() => setOpen(false), 180) }  // gap mic între ancoră şi flyout
+  const choose = (fn: () => void) => { setOpen(false); fn(); props.onCloseMenu() }
+
+  const onKey = (e: React.KeyboardEvent) => {
+    if (!open) {
+      if (e.key === 'ArrowRight' || e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(true) }
+      return
+    }
+    const n = props.items.length
+    if (e.key === 'ArrowDown') { e.preventDefault(); setActive((a) => (a + 1) % n) }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); setActive((a) => (a - 1 + n) % n) }
+    else if (e.key === 'ArrowLeft' || e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); setOpen(false); btnRef.current?.focus() }
+    else if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); choose(props.items[active].onClick) }
+  }
+
+  // Handlerele stau pe BUTOANE (native-interactive) şi pe flyout-ul cu role=menu — nu pe un div
+  // „gol", ca să nu declanşăm avertismentele jsx-a11y de element static interactiv.
+  return (
+    <div className="relative">
+      <button
+        ref={btnRef}
+        role="menuitem"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onMouseEnter={show}
+        onMouseLeave={hideSoon}
+        onMouseDown={(e) => e.preventDefault()}
+        // deschide (nu comută): hover-ul l-a putut deschide deja, iar un click care l-ar închide
+        // la loc e şi derutant, şi face flyout-ul imposibil de acţionat cu mouse-ul (hover→click)
+        onClick={() => show()}
+        onKeyDown={onKey}
+        className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-slate-300 hover:bg-ink-800"
+      >
+        <FilesIcon /> <span className="flex-1">{t('session.ctxFilesMenu')}</span>
+        <span aria-hidden="true" className="text-slate-500">▸</span>
+      </button>
+      {open && (
+        <div
+          role="menu"
+          aria-label={t('session.ctxFilesMenu')}
+          tabIndex={-1}
+          onMouseEnter={show}
+          onMouseLeave={hideSoon}
+          className={`absolute top-0 z-50 w-52 rounded-xl border border-ink-700 bg-ink-900 p-1 shadow-2xl outline-none ${flip ? 'right-full mr-1' : 'left-full ml-1'}`}
+        >
+          <div className="truncate px-2.5 py-1 text-[11px] text-slate-500" title={props.subtitle}>{props.subtitle}</div>
+          {props.items.map((it, i) => (
+            <button
+              key={it.key}
+              ref={(el) => { itemRefs.current[i] = el }}
+              role="menuitem"
+              tabIndex={-1}
+              onMouseEnter={() => setActive(i)}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => choose(it.onClick)}
+              onKeyDown={onKey}
+              className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-slate-300 hover:bg-ink-800"
+            >
+              {it.icon ?? <span className="inline-block w-4" aria-hidden="true" />} {it.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   )
 }

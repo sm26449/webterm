@@ -51,8 +51,8 @@ const TAGS = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa', 'best-prac
 // Pe temă (× 2 teme): login, dashboard, sesiune, host online × (Overview, Sessions, Files,
 // Forwards, Services, Docker, Toolbox/Connections, Toolbox/SSH keys) = 8, host offline ×
 // (Overview, Sessions) = 2, toast de eroare, Settings × 7, file browser, Status, Add host × 3,
-// FleetRun, `?`, paleta, ConfirmModal = 30 (+ Monaco cu WT_AGENT=1). Mobil: sesiune dark + light.
-const PER_THEME = 30 + (HAS_AGENT ? 1 : 0)
+// FleetRun, `?`, walkthrough, paleta, ConfirmModal = 31 (+ Monaco cu WT_AGENT=1). Mobil: sesiune dark + light.
+const PER_THEME = 31 + (HAS_AGENT ? 1 : 0)
 const EXPECTED_SCANS = 2 * PER_THEME + 2
 
 /** Pas tolerant: dacă un selector a derapat, notăm şi mergem mai departe.
@@ -188,6 +188,9 @@ try {
     const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 2, locale: 'en-US' })
     const page = await ctx.newPage()
     page.on('dialog', (d) => d.accept())
+    // presetăm `wt_walkthrough_done`: walkthrough-ul de primă rulare s-ar deschide singur după
+    // login şi ar acoperi dashboard-ul, derutând scanarea. Îl redeschidem explicit mai jos.
+    await page.addInitScript(() => { try { for (const k of ['wt_walkthrough_done','wt_tip_addhost_agent','wt_tip_addhost_ssh','wt_tip_terminal_paste','wt_tip_toolbar']) localStorage.setItem(k, '1') } catch { /**/ } })
 
     // login page
     await page.goto(BASE)
@@ -433,6 +436,27 @@ try {
       await escapeRestores(page, 'button[aria-label="Settings"]', 'ajutorul `?`')
     }, page)
 
+    // walkthrough de bun venit (modal, ambele teme): redeschis din „?" → scanăm ţinte/contrast/keyboard
+    await step('walkthrough de bun venit', async () => {
+      await page.focus('button[aria-label="Settings"]')
+      await page.keyboard.press('?')
+      await page.waitForSelector('[role=dialog][aria-label="Keyboard shortcuts"]', { timeout: 5000 })
+      await page.click('button:has-text("Replay the welcome walkthrough")')
+      await page.waitForSelector('[data-testid="walkthrough"]', { timeout: 5000 })
+      await page.waitForTimeout(300)
+      await page.screenshot({ path: `${OUT}/${theme}-16b-walkthrough.png` })
+      await scan(page, `${theme} walkthrough`)
+      check('walkthrough: → avansează la tastatură', await (async () => {
+        const before = await page.locator('[data-testid="walkthrough"] h2').textContent()
+        await page.keyboard.press('ArrowRight')
+        await page.waitForTimeout(250)
+        const after = await page.locator('[data-testid="walkthrough"] h2').textContent()
+        return before !== after
+      })())
+      await page.keyboard.press('Escape')   // = Skip for now (nu bifăm → nu schimbă starea)
+      await page.waitForTimeout(300)
+    }, page)
+
     // paleta de comenzi: scanare + operabilă cu săgeţi şi Enter
     await step('paleta de comenzi', async () => {
       await page.focus('button[aria-label="Settings"]')
@@ -501,6 +525,9 @@ try {
   const mctx = await browser.newContext({ ...devices['iPhone 13'], locale: 'en-US' })
   const m = await mctx.newPage()
   m.on('dialog', (d) => d.accept())
+  // context NOU = localStorage gol → walkthrough-ul de primă rulare s-ar auto-deschide după login
+  // şi ar intercepta click-urile din drawer-ul mobil. Îl presetăm, ca în contextele desktop.
+  await m.addInitScript(() => { try { for (const k of ['wt_walkthrough_done','wt_tip_addhost_agent','wt_tip_addhost_ssh','wt_tip_terminal_paste','wt_tip_toolbar']) localStorage.setItem(k, '1') } catch { /**/ } })
   await m.goto(BASE)
   await m.evaluate(() => localStorage.setItem('wt_theme', 'dark'))
   await m.reload()

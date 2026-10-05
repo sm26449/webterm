@@ -166,6 +166,7 @@ async function auditDevice(cfg) {
   const browser = await browserType.launch()
   const ctx = await browser.newContext({ ...cfg.device, locale: 'en-US' })   // UI i18n → limbă RO fixă
   const page = await ctx.newPage()
+  await page.addInitScript(() => { try { for (const k of ['wt_walkthrough_done','wt_tip_addhost_agent','wt_tip_addhost_ssh','wt_tip_terminal_paste','wt_tip_toolbar']) localStorage.setItem(k, '1') } catch { /**/ } })  // walkthrough de primă rulare OFF: nu bloca fluxul de test
   const errors = []
   const reached = new Set()
   let blocker = ''            // de ce s-a oprit fluxul, raportat o singură dată

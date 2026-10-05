@@ -275,6 +275,24 @@ body {
   }
 }
 
+/* Tranziţia dintre paşii walkthrough-ului (Walkthrough.tsx): o apariţie scurtă a cardului şi
+   a conţinutului la fiecare pas. Mişcarea e pur decorativă, deci o anulăm complet pentru cine
+   a cerut „reduce motion" — conţinutul rămâne instant, fără nicio translaţie. */
+@keyframes wt-step-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+.wt-step-anim {
+  animation: wt-step-in 180ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .wt-step-anim {
+    animation: none;
+  }
+}
+
 /* ── Widget plutitor de transferuri (TransfersWidget) ──────────────────────────────────────
    UN singur loc pentru progresul upload/download, portat în <body> → ÎN AFARA .wt-workspace.
    De aceea îşi re-declară AICI paleta întunecată fixă + variantele luminoase ale stărilor

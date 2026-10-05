@@ -31,6 +31,7 @@ dexec('-d', CONTAINER, 'python3', '/srv/webterm/agent/ptyd.py', 'run')
 const browser = await chromium.launch()
 try {
   const page = await browser.newPage({ viewport: { width: 1440, height: 860 }, locale: 'en-US' })
+  await page.addInitScript(() => { try { for (const k of ['wt_walkthrough_done','wt_tip_addhost_agent','wt_tip_addhost_ssh','wt_tip_terminal_paste','wt_tip_toolbar']) localStorage.setItem(k, '1') } catch { /**/ } })  // walkthrough de primă rulare OFF: nu bloca fluxul de test
   const screen = () => page.evaluate(() => {
     const term = window.__wtTerms?.get(location.hash.replace('#/s/', ''))
     if (!term) return ''

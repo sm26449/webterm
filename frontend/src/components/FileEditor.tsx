@@ -9,6 +9,8 @@ import { errText, api, ensureStepup } from '../lib/api'
 import { useI18n } from '../lib/i18n'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { useTheme } from '../lib/theme'
+import { fmtBytes } from '../lib/uploads'
+import { notifyToast } from '../lib/notify'
 import ConfirmModal from './ConfirmModal'
 
 // Workerele Monaco, bundle-uite LOCAL de Vite (`?worker`) — fără CDN, fără phone-home, ca
@@ -121,13 +123,23 @@ export default function FileEditor(props: {
   themeRef.current = monacoTheme
   useEffect(() => { monaco.editor.setTheme(monacoTheme) }, [monacoTheme])
 
+  // Stefan: utilizatorul trebuie NOTIFICAT activ când un fişier e prea mare ca să fie randat întreg,
+  // nu doar printr-un badge discret. Toast-ul (o dată per deschidere) e dublat de bannerul din antet.
+  const truncToastRef = useRef(false)
   useEffect(() => {
     let alive = true
     api<Preview>(`/api/hosts/${props.hostId}/fs/preview?path=${encodeURIComponent(props.path)}`)
-      .then((p) => { if (alive) setPv(p) })
+      .then((p) => {
+        if (!alive) return
+        setPv(p)
+        if (p.truncated && !truncToastRef.current) {
+          truncToastRef.current = true
+          notifyToast(t('files.bigFileToast', { name: props.name, size: fmtBytes(p.size) }), 'warn')
+        }
+      })
       .catch((e) => { if (alive) setError(errText(e, t) || t('files.readFail')) })
     return () => { alive = false }
-  }, [props.hostId, props.path, t])
+  }, [props.hostId, props.path, props.name, t])
 
   useEffect(() => {
     if (!pv || pv.binary || !host.current) return
@@ -247,6 +259,14 @@ export default function FileEditor(props: {
           </div>
         </div>
 
+        {/* Banner de fişier mare: badge-ul din antet e discret, iar Stefan vrea să fie EXPLICIT
+            că vezi doar începutul, în citire. O linie cu dimensiunea reală (formaterul comun). */}
+        {pv?.truncated && (
+          <div role="status" data-testid="editor-bigfile-banner"
+            className="flex items-center gap-2 border-b border-ink-800 bg-amber-500/10 px-4 py-1.5 text-xs wt-warn">
+            {t('files.bigFileBanner', { size: fmtBytes(pv.size) })}
+          </div>
+        )}
         {/* `role="alert"` montat permanent: eroarea de salvare e anunţată, nu doar colorată
             (focusul rămâne în Monaco, unde nimic nu o semnalează) */}
         <div role="alert" className={error ? 'border-b border-ink-800 bg-ink-800 px-4 py-1.5 text-xs wt-danger' : 'sr-only'}>{error}</div>

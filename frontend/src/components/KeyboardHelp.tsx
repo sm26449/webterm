@@ -33,7 +33,7 @@ const GROUP_KEY: Record<string, string> = {
   app: 'shortcuts.groupApp',
 }
 
-export default function KeyboardHelp(props: { onClose: () => void }) {
+export default function KeyboardHelp(props: { onClose: () => void; onReplayWalkthrough?: () => void }) {
   const { t } = useI18n()
   const dialogRef = useRef<HTMLDivElement>(null)
   useFocusTrap(dialogRef, props.onClose)
@@ -83,6 +83,20 @@ export default function KeyboardHelp(props: { onClose: () => void }) {
             </dl>
           </div>
         ))}
+
+        {/* Redeschiderea walkthrough-ului de bun venit: „?" e locul pe care îl caută cineva blocat,
+            deci e şi punctul firesc de a reporni turul. Delegăm către App (care ţine starea modalului). */}
+        {props.onReplayWalkthrough && (
+          <div className="mt-5 border-t border-ink-800 pt-4">
+            <button
+              type="button"
+              onClick={props.onReplayWalkthrough}
+              className="wt-touch rounded-lg px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800"
+            >
+              {t('walkthrough.replayHelp')}
+            </button>
+          </div>
+        )}
 
         <p className="mt-5 text-xs text-slate-500">
           {t('shortcuts.footer1')} <code className="font-mono">Ctrl+C</code> {t('shortcuts.footer2')}{' '}
