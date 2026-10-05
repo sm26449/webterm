@@ -9,6 +9,19 @@ back.
 
 ## [Unreleased]
 
+### Changed — agent (56)
+- **A malformed control frame no longer crashes the agent.** A frame that was valid JSON but not an
+  object (`[]`, `42`, `"x"`) reached the control handler and raised `AttributeError` on `.get()`,
+  killing the agent process (systemd restarted it). The agent now checks the frame is an object and
+  logs-and-skips anything malformed, mirroring the gateway-side guard. (`agent_v56` suite.)
+- **Optional agent hardening, opt-in.** Installing with `WEBTERM_AGENT_HARDENED=1` adds
+  `NoNewPrivileges=true` to the agent's systemd unit. It is NOT the default on purpose: the agent
+  runs arbitrary shells as its user, and `NoNewPrivileges` disables `sudo` inside sessions — so the
+  OS-upgrade button and the Docker `sudo -n` fallback stop working. Documented in the RUNBOOK; the
+  operator opts in knowingly. `ProtectSystem`/`SystemCallFilter`/`ProtectHome` are deliberately not
+  applied (they would break arbitrary shells and home browsing).
+
+
 ### Changed
 - **Transfers are now one floating, collapsible widget in the bottom-right corner** instead of a
   chip in the tab strip (which crowded or overlapped the tabs) plus a separate top strip. It is its

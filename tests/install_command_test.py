@@ -163,6 +163,43 @@ async def main():
               'cat > "$HOME/.config/systemd/user/webterm-agent.service"' in script
               and script.index('webterm-agent.service" <<UNIT') < script.index("daemon-reload"))
 
+        # ── întărire OPŢIONALĂ: WEBTERM_AGENT_HARDENED=1 → NoNewPrivileges (v56) ──
+        # NoNewPrivileges blochează escaladarea prin setuid, deci `sudo` moare în sesiuni
+        # (OS-upgrade + docker-sudo pică) → NU e implicit. În loc să re-implementăm logica,
+        # rulăm CHIAR fragmentul de shell care scrie unit-ul, cu şi fără env var, şi inspectăm
+        # unit-ul generat — exact ce ajunge pe host.
+        import subprocess
+        frag_start = script.index('mkdir -p "$HOME/.config/systemd/user"')
+        frag_end = script.index("\nUNIT\n", frag_start) + len("\nUNIT\n")
+        fragment = script[frag_start:frag_end]
+
+        def _gen_unit(hardened):
+            d = tempfile.mkdtemp()
+            wrapper = "set -eu\nPY=/opt/py\nAGENT=/opt/ptyd.py\n" + fragment
+            env = dict(os.environ, HOME=d)
+            if hardened:
+                env["WEBTERM_AGENT_HARDENED"] = "1"
+            else:
+                env.pop("WEBTERM_AGENT_HARDENED", None)
+            subprocess.run(["sh", "-c", wrapper], env=env, check=True)
+            with open(os.path.join(d, ".config/systemd/user/webterm-agent.service")) as f:
+                return f.read()
+
+        default_unit = _gen_unit(False)
+        hardened_unit = _gen_unit(True)
+        check("unit implicit: FĂRĂ NoNewPrivileges (sudo rămâne funcţional în sesiuni)",
+              "NoNewPrivileges" not in default_unit, default_unit)
+        check("unit implicit: tot are KillMode=process (fără regresie)",
+              "KillMode=process" in default_unit)
+        check("unit întărit (WEBTERM_AGENT_HARDENED=1): are NoNewPrivileges=true",
+              "\nNoNewPrivileges=true\n" in hardened_unit, hardened_unit)
+        check("unit întărit: NoNewPrivileges în [Service], între WatchdogSec şi [Install]",
+              "[Service]" in hardened_unit
+              and hardened_unit.index("WatchdogSec") < hardened_unit.index("NoNewPrivileges")
+              < hardened_unit.index("[Install]"))
+        check("scriptul oferă opt-in-ul prin env (nu-l forţează)",
+              "WEBTERM_AGENT_HARDENED" in script)
+
     # ── digestul agentului în scriptul de instalare (F-11) ──────────────────
     # Capcana: `/agent/ptyd.py` NU serveşte fişierul din repo. Cu o cheie de flotă — pe care
     # gateway-ul şi-o generează singur, deci cazul obişnuit — `UPDATE_PUBKEY` e substituit.

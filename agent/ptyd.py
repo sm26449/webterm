@@ -44,7 +44,7 @@ import termios
 import threading
 import time
 
-AGENT_VERSION = 55
+AGENT_VERSION = 56
 
 # Sub atâtea secunde de valabilitate, un certificat se roteşte prea des ca un pin pe el să
 # însemne altceva decât o cădere programată. 48h: peste ce emite un CA intern (12h la Caddy),
@@ -3743,9 +3743,20 @@ class Agent:
                 continue
             ftype, body = item[:1], item[1:]
             if ftype == FRAME_CTRL:
+                # Un frame de control corupt NU trebuie să doboare agentul: altfel excepţia urcă
+                # din _drain_inbox în bucla principală şi opreşte procesul (systemd reporneşte, dar
+                # e tot un crash — şi un crash-loop dacă gateway-ul repetă frame-ul). „Corupt"
+                # înseamnă mai mult decât JSON invalid: un JSON VALID care nu e obiect (`42`, `[]`,
+                # `"x"`) dă AttributeError la `msg.get("op")` din handle_ctrl — CHIAR ÎNAINTE de
+                # try-ul lui intern (care începe abia la `create`) — deci scăpa pe lângă el. Oglindim
+                # garda de pe gateway (core.py: isinstance-dict + ValueError/TypeError/KeyError/
+                # AttributeError): verificăm tipul şi prindem per-frame → log + skip, nu fatal.
                 try:
-                    self.handle_ctrl(json.loads(body.decode()))
-                except (ValueError, UnicodeDecodeError) as e:
+                    msg = json.loads(body.decode())
+                    if not isinstance(msg, dict):
+                        raise ValueError("ctrl frame is not a JSON object")
+                    self.handle_ctrl(msg)
+                except (ValueError, TypeError, KeyError, AttributeError, UnicodeDecodeError) as e:
                     log("bad ctrl frame: %s" % e)
             elif ftype == FRAME_DATA:
                 sid = body[:SID_LEN].decode(errors="replace")

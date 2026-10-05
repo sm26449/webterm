@@ -206,6 +206,24 @@ Two things worth knowing before you need them:
 | cron watchdog (G1, stale liveness) | event loop stalled on hosts without systemd | agent + `* * * * * ptyd start` |
 | `send_fwd` fragmentation + bounded backlogs | large upload / fast producer → no oversized frame / OOM | gateway + agent |
 
+### Optional agent hardening (opt-in, off by default)
+
+The agent intentionally runs **arbitrary login shells as its own user, including `sudo`** — that is
+what the OS-upgrade button and the docker-sudo fallback rely on. So the default systemd unit does
+**not** carry `NoNewPrivileges` / `ProtectSystem=strict` / `SystemCallFilter`: those would break
+core functionality (and `ProtectHome` would break browsing the user's home in the Files panel).
+
+If you accept the tradeoff, install with the env flag set:
+
+```sh
+WEBTERM_AGENT_HARDENED=1 curl -fsS https://<gw>/install/<token>.sh | sh
+```
+
+This adds **only** `NoNewPrivileges=true` to the `[Service]` section. The cost: **`sudo` stops
+working inside sessions**, so the **OS-upgrade button** and the **docker-sudo fallback** no longer
+work — the operator opts in knowingly. Everything else (`KillMode=process`, `WatchdogSec=45`,
+session survival) is unchanged. The default install stays exactly as before.
+
 ## Deploy rules (so you never reach steps 1–4)
 
 1. Deploy with `cd /opt/webterm && sudo ./upgrade.sh vX.Y.Z` — it pins the **digest** the tag

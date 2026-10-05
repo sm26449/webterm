@@ -6563,6 +6563,18 @@ fi
 SUP=""
 if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
   mkdir -p "$HOME/.config/systemd/user"
+  # Întărire OPŢIONALĂ (NU implicit): WEBTERM_AGENT_HARDENED=1 la instalare adaugă
+  # NoNewPrivileges=true în unit. ATENŢIE: asta blochează escaladarea prin binare setuid, deci
+  # `sudo` NU mai merge ÎN SESIUNI — butonul de OS-upgrade şi fallback-ul docker-sudo pică. Nu
+  # forţăm nimic altceva (ProtectSystem=strict / ProtectHome / SystemCallFilter ar rupe browsing-ul
+  # de fişiere din home şi shell-urile arbitrare pe care agentul le rulează intenţionat ca userul
+  # lui). Operatorul optează conştient; implicitul rămâne ca azi (fără NoNewPrivileges).
+  HARDENING=""
+  if [ "${{WEBTERM_AGENT_HARDENED:-}}" = "1" ]; then
+    HARDENING="# Hardening opt-in (WEBTERM_AGENT_HARDENED=1): blochează escaladarea prin setuid.
+# Efect secundar INTENŢIONAT: sudo nu mai funcţionează în sesiuni → OS-upgrade + docker-sudo pică.
+NoNewPrivileges=true"
+  fi
   cat > "$HOME/.config/systemd/user/webterm-agent.service" <<UNIT
 [Unit]
 Description=WebTerm agent (ptyd)
@@ -6583,6 +6595,7 @@ KillMode=process
 # interval, systemd kills and restarts it (complementary to the G1 liveness check over
 # cron, which does not run under systemd). The agent pings at about half the interval.
 WatchdogSec=45
+$HARDENING
 
 [Install]
 WantedBy=default.target

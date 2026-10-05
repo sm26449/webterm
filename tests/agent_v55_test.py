@@ -64,7 +64,9 @@ def frame(rid, off, path, data):
 tmp = tempfile.mkdtemp(prefix="v55-")
 
 # ───────────────────────── versiune ─────────────────────────
-check("AGENT_VERSION == 55", ptyd.AGENT_VERSION == 55, ptyd.AGENT_VERSION)
+# pin pe „cel puţin 55" (ca agent_v54_test): feature-ul FRAME_FSWRITE există din v55 încolo, deci
+# testul nu trebuie să se spargă la fiecare creştere de AGENT_VERSION (ex. bump-ul la 56).
+check("AGENT_VERSION >= 55", ptyd.AGENT_VERSION >= 55, ptyd.AGENT_VERSION)
 check("FRAME_FSWRITE == b'W'", ptyd.FRAME_FSWRITE == b"W", ptyd.FRAME_FSWRITE)
 check("antetul binar e >QQH (rid, offset, path_len)", ptyd.FSWRITE_HDR.format in (">QQH", b">QQH"),
       ptyd.FSWRITE_HDR.format)
