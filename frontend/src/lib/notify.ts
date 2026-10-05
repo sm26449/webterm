@@ -34,6 +34,14 @@ export function notify(title: string, body: string, kind: 'info' | 'warn' = 'inf
   toastHost?.(`${title} — ${body}`, kind)
 }
 
+/** Toast informativ ÎN PAGINĂ, pe o singură linie (fără titlu), care NU foloseşte Notification
+    API a OS-ului. De ce nu `notify()`: confirmările de acţiune (paste/drop → „salvat, calea
+    inserată") se întâmplă fix când tabul e în faţă şi omul se uită la ecran — un pop-up de
+    sistem ar fi spam şi redundant. Mesajul se anunţă oricum prin regiunea live a stivei. */
+export function notifyToast(message: string, kind: 'info' | 'warn' = 'info') {
+  toastHost?.(message, kind)
+}
+
 /** Eroare acţionabilă (ex. „nu m-am putut conecta: port greşit"): MEREU un toast ÎN PAGINĂ,
     nu o notificare de OS. Omul tocmai a apăsat ceva şi se uită la ecran — vrea motivul acolo,
     vizibil şi persistent, nu într-un pop-up de sistem pe care-l poate rata. */

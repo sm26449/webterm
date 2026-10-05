@@ -104,6 +104,48 @@ export function inboxDays(): number {
 }
 export const setInboxDays = (n: number) => lsSet(INBOX_DAYS_KEY, String(Math.max(0, Math.floor(n) || 0)))
 
+// ── feedback de paste/drop (toast-uri care EXPLICĂ ce s-a întâmplat) ────────────────────────
+// Problema de UX pe care o rezolvă: singurul semn al unui paste era calea apărută la prompt, deci
+// omul nu înţelegea că screenshot-ul lui a fost urcat în inbox. Logica de ALEGERE a mesajului
+// (captură vs nume vs N fişiere; inbox vs directorul sesiunii; pornire vs final) stă aici, pură şi
+// testată — componenta doar traduce şi afişează; textele propriu-zise trăiesc în catalog (i18n).
+
+/** Ce „lucru lipit/tras" descriem într-un toast:
+    - 1 fişier cu nume generic (captură de ecran) → `screenshot` (fără nume util de arătat);
+    - 1 fişier cu nume                             → `file` (numele original, prietenos de citit);
+    - N fişiere                                    → `files` (numărul). */
+export interface PasteSubject { kind: 'screenshot' | 'file' | 'files'; name: string; count: number }
+export function pasteSubject(files: { name: string }[]): PasteSubject {
+  if (files.length === 1) {
+    const name = files[0].name
+    return { kind: isGenericName(name) ? 'screenshot' : 'file', name, count: 1 }
+  }
+  return { kind: 'files', name: files[0]?.name ?? '', count: files.length }
+}
+
+/** Cheia i18n a toastului, din fază + destinaţie + fel. Pură (testată); NU construieşte textul
+    (ăla cere `t` şi pluralul subiectului) — doar alege formularea. La `done` separăm singular de
+    plural fiindcă partea cu „calea/căile … Enter" nu se acordă altfel corect în română. */
+export function pasteToastKey(phase: 'start' | 'done', dest: PasteDest, kind: PasteSubject['kind']): string {
+  const d = dest === 'cwd' ? 'Cwd' : 'Inbox'
+  if (phase === 'start') return `transfers.pasteStart${d}`
+  return `transfers.pasteDone${d}${kind === 'files' ? 'Many' : 'One'}`
+}
+
+/** Fragmentul tradus care umple `{subject}`: captura → cuvântul tradus, un fişier → numele lui,
+    N fişiere → „N fişiere" (cu pluralul corect al limbii). */
+export function pasteSubjectText(s: PasteSubject, t: (k: string, v?: Record<string, string | number>) => string): string {
+  if (s.kind === 'screenshot') return t('transfers.pasteSubjShot')
+  if (s.kind === 'files') return t('transfers.pasteSubjMany', { count: s.count })
+  return s.name
+}
+
+// Educaţie „o singură dată": la PRIMUL paste de captură, toastul de final capătă o propoziţie în
+// plus care spune la ce foloseşte (predai un screenshot unui CLI). Memorat în localStorage.
+export const PASTE_HINT_KEY = 'wt_paste_hint_seen'
+export const pasteHintSeen = (): boolean => lsGet(PASTE_HINT_KEY) === '1'
+export const markPasteHintSeen = (): void => lsSet(PASTE_HINT_KEY, '1')
+
 // ── registrul ţintelor de inserare (sid → tastează în terminal) ───────────────────────────
 // Job-ul trăieşte în motor, nu în componentă: când se termină, tab-ul care l-a pornit poate
 // fi închis. Atunci NU tastăm nicăieri (ar ateriza în alt terminal, poate pe alt host) — rândul

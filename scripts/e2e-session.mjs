@@ -711,6 +711,16 @@ try {
     dt.items.add(new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], 'image.png', { type: 'image/png' }))
     ta.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }))
   })
+  // Feedback de UX: la final apare un toast care EXPLICĂ ce s-a întâmplat (salvat în inbox + calea
+  // inserată la prompt). Apare simultan cu inserarea căii şi lâncezeşte ~6 s — pollăm des, într-o
+  // fereastră generoasă pornită chiar după paste, ca să nu ratăm momentul pe un runner lent.
+  let pasteToast = false
+  for (let i = 0; i < 80 && !pasteToast; i++) {
+    const txt = (await page.locator('.wt-toast').allTextContents()).join(' ')
+    if (/added to the prompt|adăugat/i.test(txt)) pasteToast = true
+    else await page.waitForTimeout(200)
+  }
+  check('paste de imagine: toastul explică salvarea şi inserarea căii', pasteToast)
   check('paste de imagine: calea din inbox e tastată la prompt', await waitScreen('/.webterm/inbox/', 15000))
   await page.keyboard.type('&& echo PASTE_OK\n')
   check('fişierul lipit există pe host (4 octeţi)', await waitScreen('PASTE_OK', 8000))

@@ -30,12 +30,13 @@ import StatusBar from './StatusBar'
 import { copyText, readText } from '../lib/clipboard'
 import { copySession, history as clipHistory } from '../lib/cliphistory'
 import PastePicker from './PastePicker'
-import { notify, notifyError } from '../lib/notify'
+import { notify, notifyError, notifyToast } from '../lib/notify'
 import { useConfirm } from '../lib/confirm'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { startUpload } from '../lib/uploads'
 import { uploadStore } from '../lib/uploadStore'
-import { ensureInbox, inboxName, isGenericName, pasteDest, pruneInbox, registerInsertTarget, resolveHome } from '../lib/transfers'
+import { ensureInbox, inboxName, isGenericName, markPasteHintSeen, pasteDest, pasteHintSeen, pasteSubject, pasteSubjectText, pasteToastKey, pruneInbox, registerInsertTarget, resolveHome } from '../lib/transfers'
+import type { PasteDest } from '../lib/transfers'
 import { UploadIcon } from './Icons'
 
 type ConnState = 'connecting' | 'open' | 'reconnecting' | 'ended'
@@ -296,18 +297,36 @@ export default function SessionView(props: {
       home-ul hostului (rezolvat absolut, ca inserarea să dea o cale pe care o înţelege orice CLI) */
   const sessionDir = useCallback(async (): Promise<string> =>
     cwdRef.current ?? await resolveHome(props.host!.id), [props.host])
-  const uploadFiles = useCallback((dir: string, files: { file: File; name: string }[], onDone?: (name: string) => void) => {
+  const uploadFiles = useCallback((dir: string, files: { file: File; name: string }[], onDone?: (name: string) => void): Promise<string[]> => {
     const host = props.host!
-    for (const { file, name } of files) {
-      void startUpload({ hostId: host.id, hostName: host.name, dest: `${dir.replace(/\/$/, '')}/${name}`, file,
-                         then: 'insert-path', sid: session.id })
-        .then((id) => { if (onDone && uploadStore.get(id)?.state === 'done') onDone(name) })
-    }
+    // întoarcem id-urile (rezolvate la finalul primei treceri): apelantul citeşte starea finală din
+    // store ca să decidă toastul de „gata" vs eroare — un singur toast per paste, nu unul per fişier
+    return Promise.all(files.map(({ file, name }) =>
+      startUpload({ hostId: host.id, hostName: host.name, dest: `${dir.replace(/\/$/, '')}/${name}`, file,
+                    then: 'insert-path', sid: session.id })
+        .then((id) => { if (onDone && uploadStore.get(id)?.state === 'done') onDone(name); return id })))
   }, [props.host, session.id])
+  // Toast de final (sau de eroare) după ce toate fişierele unui paste/drop au trecut. Explică
+  // SEMANTICA paste-ului (salvat unde + calea inserată la prompt), complementar cu widgetul de
+  // transferuri (care arată job-ul). Un singur toast, indiferent câte fişiere.
+  const finishPaste = (ids: string[], dest: PasteDest, subject: string, kind: ReturnType<typeof pasteSubject>['kind']) => {
+    const jobs = ids.map((id) => uploadStore.get(id))
+    const failed = jobs.filter((j) => !j || j.state !== 'done')
+    if (failed.length) { notifyError(t('transfers.uploadFailedTitle'), failed[0]?.error || t('files.genericErr')); return }
+    let msg = t(pasteToastKey('done', dest, kind), { subject })
+    // prima captură lipită: o propoziţie în plus despre LA CE foloseşte (o singură dată)
+    if (kind === 'screenshot' && !pasteHintSeen()) { msg += ' ' + t('transfers.pasteFirstHint'); markPasteHintSeen() }
+    notifyToast(msg, 'info')
+  }
   const onTermDrop = async (files: File[]) => {
+    const subj = pasteSubject(files)
+    const subject = pasteSubjectText(subj, t)
+    // feedback IMEDIAT (înainte de orice await): tragerea fişierelor trebuie să se simtă confirmată
+    notifyToast(t(pasteToastKey('start', 'cwd', subj.kind), { subject }), 'info')
     try {
       const dir = await sessionDir()
-      uploadFiles(dir, files.map((f) => ({ file: f, name: f.name })))
+      const ids = await uploadFiles(dir, files.map((f) => ({ file: f, name: f.name })))
+      finishPaste(ids, 'cwd', subject, subj.kind)
     } catch (e) { notifyError(t('transfers.uploadFailedTitle'), errText(e, t) || t('files.genericErr')) }
   }
   // Paste de imagine/fişier: un CLI cu AI rulat aici NU vede clipboardul browserului — îi dăm
@@ -315,14 +334,20 @@ export default function SessionView(props: {
   // prompt. Numele: timestamp + extensie din MIME; fişierele cu nume îl păstrează, prefixat.
   const pasteFiles = async (files: File[]) => {
     const host = props.host!
+    const dest: PasteDest = pasteDest()
+    const toInbox = dest === 'inbox'
+    const subj = pasteSubject(files)
+    const subject = pasteSubjectText(subj, t)
+    // feedback IMEDIAT, înainte de ensureInbox/resolveHome (round-trip): Ctrl+V trebuie confirmat pe loc
+    notifyToast(t(pasteToastKey('start', dest, subj.kind), { subject }), 'info')
     try {
-      const toInbox = pasteDest() === 'inbox'
       const dir = toInbox ? await ensureInbox(host.id) : await sessionDir()
       const when = new Date()
       let generic = 0
       const items = files.map((f) => ({ file: f, name: inboxName(f, when, isGenericName(f.name) ? ++generic : 1) }))
       // retenţia inbox-ului rulează după un upload reuşit, niciodată peste fişierul tocmai urcat
-      uploadFiles(dir, items, toInbox ? (name) => { void pruneInbox(host.id, dir, name) } : undefined)
+      const ids = await uploadFiles(dir, items, toInbox ? (name) => { void pruneInbox(host.id, dir, name) } : undefined)
+      finishPaste(ids, dest, subject, subj.kind)
     } catch (e) { notifyError(t('transfers.uploadFailedTitle'), errText(e, t) || t('files.genericErr')) }
   }
   const pasteFilesRef = useRef(pasteFiles)

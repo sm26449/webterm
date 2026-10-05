@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
-  RETENTION_BATCH, extFromMime, inboxName, isGenericName, selectExpired, shellQuote, stampFor,
+  RETENTION_BATCH, extFromMime, inboxName, isGenericName, pasteSubject, pasteSubjectText,
+  pasteToastKey, selectExpired, shellQuote, stampFor,
 } from './transfers'
 
 const when = new Date(2026, 9, 4, 14, 3, 22)   // 2026-10-04 14:03:22 local
@@ -103,6 +104,31 @@ describe('citare shell pentru calea inserată', () => {
     for (const evil of ['/tmp/x\r', '/tmp/x\n\rrm -rf ~', '/tmp/\x1b]0;x', '/tmp/\x7f']) {
       expect(noCtl(shellQuote(evil))).toBe(true)
     }
+  })
+})
+
+describe('feedback de paste/drop (alegerea mesajului)', () => {
+  it('subiectul: captură (nume generic) vs fişier cu nume vs N fişiere', () => {
+    expect(pasteSubject([{ name: 'image.png' }])).toEqual({ kind: 'screenshot', name: 'image.png', count: 1 })
+    expect(pasteSubject([{ name: 'Pasted Graphic.tiff' }]).kind).toBe('screenshot')
+    expect(pasteSubject([{ name: 'raport.pdf' }])).toEqual({ kind: 'file', name: 'raport.pdf', count: 1 })
+    expect(pasteSubject([{ name: 'a.png' }, { name: 'b.png' }])).toEqual({ kind: 'files', name: 'a.png', count: 2 })
+    expect(pasteSubject([]).kind).toBe('files')
+  })
+  it('cheia toastului: fază × destinaţie × fel (singular vs N)', () => {
+    expect(pasteToastKey('start', 'inbox', 'screenshot')).toBe('transfers.pasteStartInbox')
+    expect(pasteToastKey('start', 'cwd', 'file')).toBe('transfers.pasteStartCwd')
+    expect(pasteToastKey('done', 'inbox', 'screenshot')).toBe('transfers.pasteDoneInboxOne')
+    expect(pasteToastKey('done', 'inbox', 'file')).toBe('transfers.pasteDoneInboxOne')
+    expect(pasteToastKey('done', 'inbox', 'files')).toBe('transfers.pasteDoneInboxMany')
+    expect(pasteToastKey('done', 'cwd', 'files')).toBe('transfers.pasteDoneCwdMany')
+  })
+  it('textul subiectului: captură → cuvânt tradus, fişier → numele, N → fragment cu count', () => {
+    // `t` fals: captura întoarce cheia, N întoarce „N files" (ca să verificăm doar ramurile)
+    const t = (k: string, v?: Record<string, string | number>) => (v ? `${k}:${v.count}` : k)
+    expect(pasteSubjectText({ kind: 'screenshot', name: 'image.png', count: 1 }, t)).toBe('transfers.pasteSubjShot')
+    expect(pasteSubjectText({ kind: 'file', name: 'raport.pdf', count: 1 }, t)).toBe('raport.pdf')
+    expect(pasteSubjectText({ kind: 'files', name: 'a.png', count: 3 }, t)).toBe('transfers.pasteSubjMany:3')
   })
 })
 
