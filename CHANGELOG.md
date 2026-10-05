@@ -9,6 +9,8 @@ back.
 
 ## [Unreleased]
 
+## [3.3.0] — 2026-10-05 · agent (56)
+
 ### Changed — agent (56)
 - **A malformed control frame no longer crashes the agent.** A frame that was valid JSON but not an
   object (`[]`, `42`, `"x"`) reached the control handler and raised `AttributeError` on `.get()`,
