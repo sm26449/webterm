@@ -9,6 +9,67 @@ back.
 
 ## [Unreleased]
 
+## [3.5.1] — 2026-10-06 · agent (56)
+
+A "what we show is what we deliver" pass: every hint, doc and claim was checked against the
+code, in both directions. No agent change (AGENT_VERSION stays 56), so no fleet update.
+
+### Security
+- **The login lockout counted the proxy's IP, so all users shared one counter.** Since 3.3.0,
+  `X-Forwarded-For` is believed only from `WEBTERM_TRUSTED_PROXY_CIDRS`, but no installer set
+  it. Behind Traefik/Caddy every client looked like the proxy: 5 bad logins from anyone locked
+  out everyone, the audit showed the proxy's IP, and new-IP alerts never fired. New
+  `WEBTERM_TRUSTED_PROXY_HOSTS` names the proxy by its compose service name (resolved through
+  docker DNS, cached 60 s, fail-closed). The compose files default it to `traefik` / `caddy`, so
+  upgrading fixes existing installs with no `.env` change.
+- **Guardrail: `block` rules now win over `confirm` rules regardless of order.** The first
+  matching rule used to win, so a broad `confirm` (`^rm`) listed above a `block`
+  (`rm -rf /`) let `POST /run` with `confirmed: true` through. Server and browser both fixed.
+
+### Added
+- **A `?` next to every setting that needs explaining.** Click it (it works on touch) and a
+  popover says what the setting is for, gives a copyable example where useful, and links to the
+  documentation **for the version you run**. It is in 19 places: tokens, guardrail, signing key,
+  enrollment groups, deploy-key policy, SMTP, webhook, resource alerts, forward domain, SFTP/FTPS
+  backup, OS-updates badge, tags, 2FA step-up, credential policy, install-link TTL, AI tools,
+  Toolbox and forwards SSO. A test checks that every link points to an existing heading.
+- **New guides:** [HOSTS](docs/HOSTS.md), [AUTOMATION-TOKENS](docs/AUTOMATION-TOKENS.md),
+  [ALERTS](docs/ALERTS.md), [GUARDRAIL](docs/GUARDRAIL.md), [AI-TOOLS](docs/AI-TOOLS.md).
+- **"Forget" stored credentials** in Host overview. `POST /api/hosts/{id}/forget-credentials`
+  had existed since F-05 with no button. It asks for confirmation, your password, and step-up on
+  2FA hosts.
+- **About: a "give it a star on GitHub" card.**
+
+### Fixed: the UI said something the code doesn't do
+- Tokens: `read` never included the audit log, which is cookie-only on purpose.
+- Resource alerts also go to the webhook, not only to SMTP. The SMTP hint listed 2 of about 15
+  alert events.
+- The guardrail is always enforced on fleet runs and tokens, not only with shell integration.
+- The SSH-host tip promised a file browser and a serial console, which are agent-only. The
+  sidebar no longer offers Files on SSH/telnet hosts, where it failed with "host offline".
+- Host 2FA is a step-up (passkey, SSO, password or TOTP), not passkey-only.
+- The reinstall dialog said "expires in 24h"; the server grants 1 hour.
+- The command palette matched only English keywords, so searching "setări" found nothing. It
+  now matches the translated labels, diacritic-insensitive.
+- The `?` cheatsheet and SHORTCUTS.md now list the gestures nobody could find (right-click /
+  long-press terminal menu, Ctrl+Shift+C, Shift+Enter in search, Mod+S, Mod+Enter, split
+  divider keys, double-click).
+- Toolbox history times follow the timezone chosen in Settings. Remaining hardcoded English
+  strings are translated. Romanian now uses comma-below ș/ț everywhere.
+
+### Docs
+- README/SECURITY/THREAT-MODEL and the guides were corrected against the code:
+  - the setup token lives in `/data/setup-token` and is no longer printed in the logs
+  - the signing key is auto-generated on first boot, with steps to replace it
+  - `backup.sh` refuses unattended plaintext backups
+  - transfers appear in the floating widget
+  - the Cloudflare token lives in `secrets/`
+  - the Toolbox has four tabs and the vault is Fernet
+- Env vars that existed but were undocumented: `TRUSTED_PROXY_HOSTS/CIDRS/HOPS`,
+  `TRUST_CF_IP`, `ARCHIVE_DAYS`, `CLOSED_ARCHIVE_DAYS`, `TRANSCRIPT_MAX/KEEP_BYTES`,
+  `UPDATE_REPO`, the `*_FILE` secret convention, and the agent-side `WEBTERM_INSTANCE_ID` and
+  `WEBTERM_SESSION`.
+
 ## [3.5.0] — 2026-10-06 · agent (56)
 
 Frontend only, no agent change (AGENT_VERSION stays 56). The 3.4.0 tag never published an image

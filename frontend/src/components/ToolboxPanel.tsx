@@ -7,6 +7,7 @@ import { useDrawer } from '../lib/useDrawer'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { TerminalPromptIcon, PlusIcon, TrashIcon, PencilIcon, CopyIcon } from './Icons'
 import HelpTip from './HelpTip'
+import { fmtTs, getTimezone, uiLocale } from '../lib/tz'
 
 // Bibliotecă de reţete built-in (client-side): comenzi comune pe categorii, cu {placeholder}-e.
 // Acţiunea e Copy (universal — merge şi din pagina hostului, şi din sesiune); lipeşti în terminal.
@@ -242,8 +243,13 @@ export default function ToolboxPanel(props: {
     catch (e) { setError(errText(e, t)) }
   }
   // data+ora comenzii din history (created e epoch în secunde)
-  const fmtTs = (epoch: number) => new Date(epoch * 1000).toLocaleString(undefined,
-    { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+  // pe fusul ales în Setări (lib/tz), nu pe al browserului — ca restul UI-ului
+  const fmtShort = (epoch: number) => {
+    try {
+      return new Intl.DateTimeFormat(uiLocale(), { timeZone: getTimezone(), month: 'short', day: 'numeric',
+        hour: '2-digit', minute: '2-digit' }).format(new Date(epoch * 1000))
+    } catch { return fmtTs(epoch) }
+  }
 
   const asideCls = props.embed
     ? 'flex h-full w-full min-h-0 flex-col bg-ink-900'
@@ -634,7 +640,7 @@ export default function ToolboxPanel(props: {
                   title={h.exit_code == null ? '' : 'exit ' + h.exit_code} aria-hidden="true" />
                 <span className="min-w-0 flex-1">
                   <code className="block break-all font-mono text-[11.5px] text-slate-300">{h.command}</code>
-                  <span className="font-mono text-[10px] text-slate-500" title={new Date(h.created * 1000).toLocaleString()}>{fmtTs(h.created)}</span>
+                  <span className="font-mono text-[10px] text-slate-500" title={fmtTs(h.created)}>{fmtShort(h.created)}</span>
                 </span>
                 <span className="mt-0.5 shrink-0 text-slate-600 group-hover:text-sky-400"><CopyIcon /></span>
               </button>
