@@ -42,8 +42,37 @@ back.
   rows list `targets: null`. Tags are normalised like host tags; more than 20 is a 400
   (`snippet.tooManyTags`), a malformed value a 400 (`snippet.badTargets`). Still
   browser-only: automation tokens get 401.
+- **Test connection in Add host and Edit host** (SSH, SSH-jump, Telnet, Telnet-jump). A wrong
+  port, user or password used to surface only at the first connection, after the host was
+  saved. The test runs the gateway's real dial (through the via agent's tunnel for the jump
+  types), stops after the login and closes everything; it saves nothing. The result is shown
+  per stage (TCP, SSH greeting, host key with its SHA256 fingerprint, authentication), with the
+  same messages you get when connecting, and the failing field gets the focus. After a
+  successful test the button reads **Save (verified)** and the saved host is **pinned to the
+  host key the test saw**, instead of trusting whatever answers the first connection. The
+  server accepts only the key its own test saw for that target in the last 10 minutes, so a
+  client cannot pin a key of its choosing, and an existing pin on the same target can still
+  only change through the host-key alarm. The test can reach any address the gateway can, so
+  it is browser-only, capped at 10 seconds and 10 tests a minute per account, refuses the cloud
+  metadata address (also when a name resolves to it), and is audited without the credential.
+  See [docs/HOSTS.md](docs/HOSTS.md#testing-a-connection).
+- **Generate a key for this host, before saving it.** With SSH or SSH-jump and key
+  authentication, Add host (and Edit host) creates an Ed25519 key pair on the gateway, keeps the
+  private key encrypted in the vault and shows the public key with the exact command to run on
+  the target. Test connection uses it; saving makes it the host's stored key. An unused key is
+  deleted after an hour, and only the account that generated it can attach it. Before, key
+  generation existed only after saving, in Edit host. SSH-jump hosts can now use key
+  authentication from the form too.
+- API: `POST /api/hosts/test` (`{ok, stages: [{id, ok, ms, code, vars, detail}], hostkey}`),
+  `POST /api/hosts/ssh-key/pending`, and `pin_hostkey` / `pending_key_id` on host create and
+  update. All browser-only (automation tokens get 401).
 
 ### Fixed
+- **A key generated in Edit host broke the connection to that host.** `/ssh-key/generate`
+  stored the bare private key while every reader expected the JSON credential format, so
+  connecting failed with a server error, and **Show public key** failed on every pasted key for
+  the opposite reason. Both formats are now read, and new keys are stored like any other
+  credential.
 - **Pausing an upload could take effect only after the in-flight slices finished.** A pause
   pressed while the next slices were being read and checksummed missed them, so they were
   still sent. On a slow machine that delayed the pause by up to a slice's transfer time. This

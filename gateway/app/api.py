@@ -1503,6 +1503,13 @@ class HostIn(BaseModel):
     # Înrolare (doar agent): cât e valid link-ul + o parolă temporară OPŢIONALĂ cerută la instalare
     enroll_ttl: int = 3600               # secunde; implicit 1h (plafonat 5min..30 zile)
     enroll_password: str = ""            # write-only; gol = fără parolă
+    # Testul de conexiune (POST /api/hosts/test): cheia de host văzută de test. Serverul o
+    # acceptă DOAR dacă e exact cea din cache-ul testului (user + ţintă, ~10 min) — altfel un
+    # client ar putea pina o cheie arbitrară. Gol = TOFU la prima conectare, ca până acum.
+    pin_hostkey: str = ""
+    # Cheia generată în formular (POST /api/hosts/ssh-key/pending): privata, deja în seif, devine
+    # credenţialul stocat al hostului (auth key, politica `stored`); rândul în aşteptare se şterge.
+    pending_key_id: str = ""
 
 
 MAX_TAGS = 20
@@ -1555,6 +1562,23 @@ def _credential_blob(h: "HostIn"):
     return security.encrypt_secret(json.dumps(payload))
 
 
+def _decode_credential(blob: str) -> dict:
+    """Blobul de credenţiale din seif → {password} / {key, passphrase?}.
+    Formatul e JSON (vezi `_credential_blob`). EXCEPŢIE moştenită: `/ssh-key/generate` scria până
+    în 3.5.4 PEM-ul GOL, nu JSON — iar conectarea cu un astfel de host crăpa cu JSONDecodeError
+    (500) la `json.loads`. Rândurile vechi rămân citibile: un PEM gol devine {key}."""
+    raw = security.decrypt_secret(blob)
+    try:
+        cred = json.loads(raw)
+    except ValueError:
+        cred = None
+    if isinstance(cred, dict):
+        return cred
+    if raw.lstrip().startswith("-----BEGIN"):
+        return {"key": raw}
+    raise ApiError(400, "sshkey.badKey", "the stored credential is unreadable")
+
+
 def _resolve_credential(row, body_credential="", body_passphrase=""):
     """Credențialele de folosit la conectare: din request (politică `ask`) sau
     decriptate din seif. Returnează dict {password} sau {key, passphrase?}."""
@@ -1566,7 +1590,7 @@ def _resolve_credential(row, body_credential="", body_passphrase=""):
         return {"password": body_credential}
     if not row["credential_encrypted"]:
         raise ApiError(400, "host.noStoredCredentials", "no stored credentials for this host")
-    return json.loads(security.decrypt_secret(row["credential_encrypted"]))
+    return _decode_credential(row["credential_encrypted"])
 
 
 async def _connect_direct(row, request, body_credential="", body_passphrase=""):
@@ -1597,32 +1621,41 @@ async def _connect_direct(row, request, body_credential="", body_passphrase=""):
             await core.dial_ssh_jump(row, cred)
         else:
             await core.dial_ssh(row, cred)
-    except core.ForwardError as e:
+    except (core.ForwardError, core.HostKeyMismatch, asyncssh.Error, OSError,
+            asyncio.TimeoutError) as e:
+        if isinstance(e, asyncssh.PermissionDenied):
+            security.record_login_failure(ip)
+        raise _ssh_dial_error(e, row)
+    security.record_login_success(ip)
+
+
+def _ssh_dial_error(e: BaseException, row) -> ApiError:
+    """Clasificatorul COMUN al eşecurilor de dial SSH (direct / jump): conectarea reală
+    (`_connect_direct`) şi testul de conexiune (`POST /api/hosts/test`) dau ACELAŞI cod pentru
+    aceeaşi cauză, deci omul vede acelaşi mesaj în formular şi la prima conectare."""
+    if isinstance(e, core.ForwardError):
         # agentul nu poate deschide TCP spre ţintă (refuzat / fără rută / gazdă greşită)
-        raise ApiError(502, "sshjump.unreachable",
-                       "the agent could not reach %s:%s — %s"
-                       % (row["hostname"], row["ssh_port"] or 22, e))
-    except core.HostKeyMismatch as e:
-        raise ApiError(409, "ssh.hostKeyChanged",
-                       "the host key fingerprint changed (%s → %s) — possible MITM; connection refused"
-                       % (e.old_fp or "?", e.new_fp or "?"),
-                       vars={"old_fp": e.old_fp, "new_fp": e.new_fp})
-    except asyncssh.PermissionDenied:
-        security.record_login_failure(ip)
+        return ApiError(502, "sshjump.unreachable",
+                        "the agent could not reach %s:%s — %s"
+                        % (row["hostname"], row["ssh_port"] or 22, e))
+    if isinstance(e, core.HostKeyMismatch):
+        return ApiError(409, "ssh.hostKeyChanged",
+                        "the host key fingerprint changed (%s → %s) — possible MITM; connection refused"
+                        % (e.old_fp or "?", e.new_fp or "?"),
+                        vars={"old_fp": e.old_fp, "new_fp": e.new_fp})
+    if isinstance(e, asyncssh.PermissionDenied):
         # ţinta a răspuns, dar a RESPINS credenţialele (user/parolă greşite ori metodă nepotrivită)
-        raise ApiError(401, "ssh.authFailed",
-                       "%s@%s rejected the credentials — wrong password, or the server wants a key"
-                       % (row["ssh_username"] or "", row["hostname"]))
-    except asyncio.TimeoutError:
+        return ApiError(401, "ssh.authFailed",
+                        "%s@%s rejected the credentials — wrong password, or the server wants a key"
+                        % (row["ssh_username"] or "", row["hostname"]))
+    if isinstance(e, asyncio.TimeoutError):
         # TCP s-a conectat, dar NICIUN banner SSH în SSH_CONNECT_TIMEOUT: aproape sigur
         # portul e greşit / nu e un server SSH acolo / e filtrat. `str(TimeoutError)` e gol,
         # deci construim noi un mesaj cu sens (altfel UI-ul arăta „cannot connect: ").
-        raise ApiError(504, "ssh.noBanner",
-                       "no SSH greeting from %s:%s within %ds — wrong port, not an SSH server, "
-                       "or filtered" % (row["hostname"], row["ssh_port"] or 22, core.SSH_CONNECT_TIMEOUT))
-    except (asyncssh.Error, OSError) as e:
-        raise ApiError(502, "ssh.connectFailed", f"cannot connect over SSH: {e or type(e).__name__}")
-    security.record_login_success(ip)
+        return ApiError(504, "ssh.noBanner",
+                        "no SSH greeting from %s:%s within %ds — wrong port, not an SSH server, "
+                        "or filtered" % (row["hostname"], row["ssh_port"] or 22, core.SSH_CONNECT_TIMEOUT))
+    return ApiError(502, "ssh.connectFailed", f"cannot connect over SSH: {e or type(e).__name__}")
 
 
 async def _connect_telnet(row, request, body_credential=""):
@@ -1638,7 +1671,7 @@ async def _connect_telnet(row, request, body_credential=""):
     if row["credential_policy"] == "ask":
         password = body_credential or ""
     elif row["credential_encrypted"]:
-        password = json.loads(security.decrypt_secret(row["credential_encrypted"])).get("password", "")
+        password = _decode_credential(row["credential_encrypted"]).get("password", "")
     creds = {"username": row["ssh_username"] or "", "password": password}
     try:
         await core.dial_telnet(row, creds)
@@ -1935,6 +1968,20 @@ async def create_host(host: HostIn, user=Depends(security.require_user)):
         via = await db.fetchone("SELECT connection_type FROM hosts WHERE id=?", host.via_host_id)
         if not via or (via["connection_type"] or "agent") != "agent":
             raise ApiError(400, "sshjump.needsAgent", "pick an agent host to reach the target through")
+    port = host.ssh_port or (23 if ctype in ("telnet", "telnet-jump") else 22)
+    # pin din testul de conexiune: doar cheia pe care TESTUL a văzut-o pe aceeaşi ţintă
+    known = None
+    if host.pin_hostkey:
+        if ctype not in ("ssh", "ssh-jump"):
+            raise ApiError(400, "hosttest.pinMismatch", "only SSH hosts have a host key to pin")
+        known = _verified_pin(user["id"], ctype, host.hostname, port, host.via_host_id, host.pin_hostkey)
+    if host.pending_key_id and ctype not in ("ssh", "ssh-jump"):
+        raise ApiError(400, "sshkey.notSsh", "SSH key generation is only for SSH hosts")
+    cred_blob, auth_method, policy = _credential_blob(host), host.auth_method, host.credential_policy
+    if host.pending_key_id:
+        # revendicare ATOMICĂ (DELETE … RETURNING): cheia se leagă o singură dată, doar de userul ei
+        cred_blob = await _claim_pending_key(user["id"], host.pending_key_id)
+        auth_method, policy = "key", "stored"
     token = security.new_token()
     enroll = security.new_token()[:32]
     ttl = max(300, min(30 * 86400, int(host.enroll_ttl or 3600)))   # 5 min .. 30 zile, implicit 1h
@@ -1947,17 +1994,16 @@ async def create_host(host: HostIn, user=Depends(security.require_user)):
         "INSERT INTO hosts(name, note, folder, token_hash, token_encrypted, enroll_token,"
         " enroll_expires, enroll_pass_hash, created, connection_type, hostname, ssh_username,"
         " ssh_port, auth_method, credential_encrypted, require_2fa, credential_policy, tags,"
-        " via_host_id, ephemeral)"
-        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " via_host_id, ephemeral, known_hosts)"
+        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         host.name.strip(), host.note, host.folder.strip(), security.sha256_hex(token),
         security.encrypt_secret(token), enroll,
         time.time() + ttl, pass_hash, time.time(),
         ctype, host.hostname.strip() or None, host.ssh_username.strip() or None,
-        host.ssh_port or (23 if ctype in ("telnet", "telnet-jump") else 22),
-        host.auth_method, _credential_blob(host),
-        int(host.require_2fa), host.credential_policy, _norm_tags(host.tags),
+        port, auth_method, cred_blob,
+        int(host.require_2fa), policy, _norm_tags(host.tags),
         host.via_host_id if ctype in ("ssh-jump", "telnet-jump") else None,
-        1 if (host.ephemeral and ctype in ("ssh-jump", "telnet-jump")) else 0)
+        1 if (host.ephemeral and ctype in ("ssh-jump", "telnet-jump")) else 0, known)
     row = await db.fetchone("SELECT * FROM hosts WHERE id=?", host_id)
     return dict(_host_json(row), install_command=_install_command(enroll, pw),
                 install_command_dedicated=_install_command_dedicated(enroll, pw),
@@ -2336,7 +2382,7 @@ async def _ensure_forward_source(host_id: int):
     if row["require_2fa"] or row["credential_policy"] != "stored" or not row["credential_encrypted"]:
         return None
     try:
-        cred = json.loads(security.decrypt_secret(row["credential_encrypted"]))
+        cred = _decode_credential(row["credential_encrypted"])
         return await core.dial_ssh(row, cred)
     except Exception:
         return None
@@ -4908,6 +4954,8 @@ class HostPatch(BaseModel):
     via_host_id: Optional[int] = None     # ssh-jump: hostul-agent prin care tunelăm
     tags: Optional[str] = None
     alerts_muted: Optional[bool] = None   # opreşte alertele de host-offline pentru acest host
+    pin_hostkey: Optional[str] = None     # vezi HostIn: doar cheia văzută de testul de conexiune
+    pending_key_id: Optional[str] = None  # vezi HostIn: cheia generată în formular devine credenţialul
     stepup_grant: str = ""
     stepup_password: str = ""
 
@@ -4936,6 +4984,12 @@ async def update_host(host_id: int, host: HostPatch, user=Depends(security.requi
             return bool(given[f])
         return given[f] != row[f]
     touches_conn = any(_conn_changed(f) for f in _CONN_FIELDS)
+    # cheia generată în formular = credenţial nou; un pin de host-key diferit de cel stocat =
+    # schimbă CE maşină acceptăm. Ambele sunt din clasa provisioning-ului (step-up pe 2FA).
+    pin_given = (given.get("pin_hostkey") or "").strip()
+    pend_given = (given.get("pending_key_id") or "").strip()
+    if pend_given or (pin_given and not _same_hostkey(pin_given, row["known_hosts"] or "")):
+        touches_conn = True
     if touches_conn:
         # Repointarea unui host către altă mașină (sau altă credențială) e echivalentă cu
         # provisioning-ul: cine are doar cookie-ul nu trebuie să poată face asta pe un host 2FA.
@@ -4990,11 +5044,35 @@ async def update_host(host_id: int, host: HostPatch, user=Depends(security.requi
     # Întoarcerea la SSH după ce agentul a preluat: detaliile de conexiune supraviețuiesc
     # provisioning-ului, dar credențialul e ȘTERS dacă politica era `ephemeral`. Fără el nu
     # ne putem conecta, deci cerem unul acum, în loc să eșuăm abia la prima conectare.
-    if (new_type == "ssh" and policy == "stored"
+    if pend_given and new_type not in ("ssh", "ssh-jump"):
+        raise ApiError(400, "sshkey.notSsh", "SSH key generation is only for SSH hosts")
+    if (new_type == "ssh" and policy == "stored" and not pend_given
             and not given.get("credential") and not row["credential_encrypted"]):
         raise ApiError(400, "host.noStoredCredentials",
                        "the host no longer has stored SSH credentials "
                        "(removed when the agent was installed) — enter the password or key")
+
+    # Pinul de host-key aparține MAȘINII vechi: dacă am mutat hostul în altă parte, pinul
+    # respinge noua mașină la fiecare încercare, iar mesajul arată ca un MITM. Îl resetăm
+    # explicit (TOFU repinează la prima conectare) și O SPUNEM în răspuns.
+    repinned = (("hostname" in given and hostname != (row["hostname"] or ""))
+                or ("ssh_port" in given and given["ssh_port"] != row["ssh_port"]))
+    new_pin = None
+    if pin_given:
+        if new_type not in ("ssh", "ssh-jump"):
+            raise ApiError(400, "hosttest.pinMismatch", "only SSH hosts have a host key to pin")
+        eff_port = (given["ssh_port"] if "ssh_port" in given else row["ssh_port"]) or 22
+        new_pin = _verified_pin(user["id"], new_type, hostname, eff_port, eff("via_host_id") or 0, pin_given)
+        # Pe ACEEAŞI ţintă, un pin existent se schimbă doar prin fluxul de alarmă („accept",
+        # cu amprentele la vedere, auditat şi alertat) — nu printr-un test făcut fără host_id
+        # (care n-a comparat cu pinul) urmat de un PATCH. Altfel testul ar ocoli alarma de MITM.
+        if not repinned and row["known_hosts"] and not _same_hostkey(new_pin, row["known_hosts"]):
+            raise ApiError(409, "hosttest.pinConflict",
+                           "this host already has a different pinned host key — review it with the "
+                           "host-key alarm instead")
+    if pend_given:
+        given["auth_method"], given["credential_policy"] = "key", "stored"
+        given.pop("credential", None)
 
     sets, vals = [], []
     for col, key in (("name", "name"), ("note", "note"), ("folder", "folder"),
@@ -5032,14 +5110,16 @@ async def update_host(host_id: int, host: HostPatch, user=Depends(security.requi
             credential=given["credential"], passphrase=given.get("passphrase") or "",
             credential_policy=policy))
         sets.append("credential_encrypted=?"); vals.append(blob)
-    # Pinul de host-key aparține MAȘINII vechi: dacă am mutat hostul în altă parte, pinul
-    # respinge noua mașină la fiecare încercare, iar mesajul arată ca un MITM. Îl resetăm
-    # explicit (TOFU repinează la prima conectare) și O SPUNEM în răspuns.
-    repinned = (("hostname" in given and hostname != (row["hostname"] or ""))
-                or ("ssh_port" in given and given["ssh_port"] != row["ssh_port"]))
     if repinned:
-        sets.append("known_hosts=NULL")
+        # ţintă nouă: pinul vechi pleacă; dacă testul a văzut-o, pinăm direct cheia ei
+        sets.append("known_hosts=?"); vals.append(new_pin)
         sets.append("hostkey_alarm=NULL")      # pin nou = alarma veche nu mai are obiect
+    elif new_pin and not row["known_hosts"]:
+        sets.append("known_hosts=?"); vals.append(new_pin)
+    if pend_given:
+        # ultima, după toate validările: revendicarea şterge rândul în aşteptare
+        sets.append("credential_encrypted=?")
+        vals.append(await _claim_pending_key(user["id"], pend_given))
     if not sets:
         return {"ok": True, "changed": False}
     vals.append(host_id)
@@ -5664,14 +5744,15 @@ async def host_generate_ssh_key(host_id: int, body: SessionIn, user=Depends(secu
     row = await db.fetchone("SELECT * FROM hosts WHERE id=?", host_id)
     if not row:
         raise ApiError(404, "host.missing", "no such host")
-    if (row["connection_type"] or "agent") != "ssh":
+    if (row["connection_type"] or "agent") not in ("ssh", "ssh-jump"):
         raise ApiError(400, "sshkey.notSsh", "SSH key generation is only for SSH hosts")
     await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
-    import asyncssh
     k = asyncssh.generate_private_key("ssh-ed25519")
+    # ACELAŞI format de blob ca `_credential_blob` ({"key": PEM}). Până în 3.5.4 aici se scria
+    # PEM-ul gol, iar conectarea cu cheia generată crăpa la json.loads (vezi _decode_credential).
     await db.execute(
         "UPDATE hosts SET auth_method='key', credential_policy='stored', credential_encrypted=? WHERE id=?",
-        security.encrypt_secret(k.export_private_key().decode()), host_id)
+        security.encrypt_secret(json.dumps({"key": k.export_private_key().decode()})), host_id)
     log.info("generated a new SSH key for host #%d (by %s)", host_id, user["email"])
     return {"public_key": k.export_public_key().decode().strip(), "fingerprint": k.get_fingerprint()}
 
@@ -5686,13 +5767,330 @@ async def host_ssh_key_public(host_id: int, body: SessionIn, user=Depends(securi
     await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
     if not row["credential_encrypted"] or (row["auth_method"] or "") != "key":
         raise ApiError(400, "sshkey.none", "this host has no stored SSH key")
-    import asyncssh
     try:
-        k = asyncssh.import_private_key(security.decrypt_secret(row["credential_encrypted"]))
+        # blobul e {"key": PEM, "passphrase"?} (sau PEM gol, pe rânduri dinainte de 3.5.4);
+        # înainte se importa blobul JSON ca atare, deci „Show public key" pica pe ORICE cheie lipită
+        cred = _decode_credential(row["credential_encrypted"])
+        k = asyncssh.import_private_key(cred["key"], cred.get("passphrase") or None)
     except Exception:                                   # noqa: BLE001
         raise ApiError(400, "sshkey.badKey", "the stored SSH credential is not a private key (it may be a password)")
     return {"public_key": k.export_public_key().decode().strip(), "fingerprint": k.get_fingerprint(),
             "known_hosts": row["known_hosts"] or ""}
+
+
+# ── Testul de conexiune din Add host + cheia generată la creare (3.5.4) ──────
+# `POST /api/hosts/test` rulează dial-ul real (core.probe_ssh / probe_telnet) cu câmpurile din
+# formular, fără să salveze nimic. Poate sonda ORICE gazdă:port, adică e un scaner de porturi
+# din interiorul reţelei gazdei — de-aia: doar cookie (nu token de automatizare), plafon per
+# user, metadatele cloud blocate (după rezolvare, nu doar pe text), portul validat, audit fără
+# credenţial. Credenţialul din cerere trăieşte doar în memorie, pe durata testului.
+
+# Aceeaşi listă ca la webhook / SMTP: reţelele private rămân permise (un server SSH în LAN e
+# exact ţinta unui produs self-hosted), doar serviciul de metadate al cloudului e refuzat.
+_METADATA_HOSTS = ("169.254.169.254", "metadata.google.internal", "fd00:ec2::254")
+
+
+def _is_metadata_target(host: str) -> bool:
+    """Numele sau adresa (inclusiv forma IPv4-mapată `::ffff:169.254.169.254`) e cea de metadate."""
+    import ipaddress
+    h = (host or "").strip().strip("[]").lower().rstrip(".")
+    if h in _METADATA_HOSTS:
+        return True
+    try:
+        ip = ipaddress.ip_address(h.split("%", 1)[0])
+    except ValueError:
+        return False
+    if ip.version == 6 and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    return str(ip) in _METADATA_HOSTS
+
+
+HOSTTEST_RATE = 10              # teste per user …
+HOSTTEST_WINDOW = 60.0          # … pe fereastra asta (secunde)
+_hosttest_hits: dict = {}       # user_id -> [monotonic, …]
+
+
+def _hosttest_rate(user_id) -> None:
+    now = time.monotonic()
+    hits = [t for t in _hosttest_hits.get(user_id, []) if now - t < HOSTTEST_WINDOW]
+    if len(hits) >= HOSTTEST_RATE:
+        retry = int(HOSTTEST_WINDOW - (now - hits[0])) + 1
+        _hosttest_hits[user_id] = hits
+        raise ApiError(429, "hosttest.rateLimited",
+                       "too many connection tests; retry in %ds" % retry,
+                       headers={"Retry-After": str(retry)}, vars={"retry": retry})
+    hits.append(now)
+    _hosttest_hits[user_id] = hits
+
+
+# Cheia de host văzută de ultimul test, per (user, ţintă). Create/update acceptă `pin_hostkey`
+# DOAR dacă e exact cheia de aici: clientul nu poate „inventa" un pin, poate doar confirma ce a
+# văzut serverul. RAM, ~10 min — un restart îl goleşte (salvarea cade atunci pe TOFU).
+HOSTKEY_TEST_TTL = 600.0
+_tested_hostkeys: dict = {}     # (user_id, via, host, port) -> (keyline, fingerprint, monotonic)
+
+
+def _test_target(user_id, ctype: str, hostname: str, port, via) -> tuple:
+    jump = ctype in _JUMP_TYPES
+    return (user_id, int(via or 0) if jump else 0, (hostname or "").strip().lower(), int(port or 0))
+
+
+def _same_hostkey(a: str, b: str) -> bool:
+    """Două linii de cheie publică OpenSSH sunt aceeaşi cheie (tip + blob; comentariul nu contează)."""
+    pa, pb = (a or "").split(), (b or "").split()
+    return len(pa) >= 2 and len(pb) >= 2 and pa[:2] == pb[:2]
+
+
+def _remember_tested_hostkey(target: tuple, keyline: str, fp: str) -> None:
+    now = time.monotonic()
+    for k in [k for k, v in _tested_hostkeys.items() if now - v[2] > HOSTKEY_TEST_TTL]:
+        _tested_hostkeys.pop(k, None)
+    if len(_tested_hostkeys) > 2000:            # plafon dur: cel mai vechi pleacă
+        _tested_hostkeys.pop(min(_tested_hostkeys, key=lambda k: _tested_hostkeys[k][2]), None)
+    _tested_hostkeys[target] = (keyline, fp, now)
+
+
+def _verified_pin(user_id, ctype: str, hostname: str, port, via, pin: str) -> str:
+    """Linia de cheie de pinat (cea văzută de server, NU textul clientului) — sau 400. `pin` poate
+    fi linia publică întoarsă de test sau amprenta ei SHA256."""
+    ent = _tested_hostkeys.get(_test_target(user_id, ctype, hostname, port, via))
+    pin = (pin or "").strip()
+    if (ent and time.monotonic() - ent[2] <= HOSTKEY_TEST_TTL
+            and (pin == ent[1] or _same_hostkey(pin, ent[0]))):
+        return ent[0]
+    raise ApiError(400, "hosttest.pinMismatch",
+                   "pin_hostkey does not match the host key seen by a recent connection test "
+                   "of this target — run the test again")
+
+
+async def _pending_key(user_id, pending_id: str):
+    """Rândul cheii în aşteptare — al ACESTUI user şi neexpirat — sau 400."""
+    row = None
+    if pending_id:
+        row = await db.fetchone(
+            "SELECT * FROM pending_ssh_keys WHERE id=? AND user_id=? AND created>=?",
+            pending_id, user_id, time.time() - core.PENDING_KEY_TTL)
+    if not row:
+        raise ApiError(400, "sshkey.pendingMissing",
+                       "the generated key expired or does not exist — generate a new one")
+    return row
+
+
+async def _claim_pending_key(user_id, pending_id: str) -> str:
+    """Revendicare ATOMICĂ (DELETE … RETURNING): blobul criptat al privatei, o singură dată."""
+    row = await db.execute_returning(
+        "DELETE FROM pending_ssh_keys WHERE id=? AND user_id=? AND created>=? "
+        "RETURNING credential_encrypted",
+        pending_id, user_id, time.time() - core.PENDING_KEY_TTL)
+    if not row:
+        raise ApiError(400, "sshkey.pendingMissing",
+                       "the generated key expired or does not exist — generate a new one")
+    return row["credential_encrypted"]
+
+
+@router.post("/api/hosts/ssh-key/pending")
+async def pending_ssh_key(request: Request, user=Depends(security.require_user)):
+    """Generează o pereche Ed25519 ÎNAINTE ca hostul să existe (formularul Add host): privata
+    stă criptată în seif, legată de user, ~1h; întoarce publica + `pending_key_id`. Create /
+    update cu `pending_key_id` o leagă de host ca credenţial stocat. Doar Ed25519."""
+    await core.purge_pending_ssh_keys()
+    # plafon per user: cele mai vechi pleacă (un dublu-click nu blochează pe nimeni o oră)
+    old = await db.fetchall("SELECT id FROM pending_ssh_keys WHERE user_id=? ORDER BY created DESC",
+                            user["id"])
+    for r in old[core.PENDING_KEYS_PER_USER - 1:]:
+        await db.execute("DELETE FROM pending_ssh_keys WHERE id=?", r["id"])
+    k = asyncssh.generate_private_key("ssh-ed25519", comment="webterm")
+    pub = k.export_public_key().decode().strip()
+    fp = k.get_fingerprint()
+    pid = security.new_token()[:32]
+    now = time.time()
+    await db.execute(
+        "INSERT INTO pending_ssh_keys(id, user_id, credential_encrypted, public_key, fingerprint, created)"
+        " VALUES(?,?,?,?,?,?)", pid, user["id"],
+        security.encrypt_secret(json.dumps({"key": k.export_private_key().decode()})), pub, fp, now)
+    audit.detail(request, "generated a pending SSH key %s" % fp)
+    return {"pending_key_id": pid, "public_key": pub, "fingerprint": fp,
+            "expires": now + core.PENDING_KEY_TTL}
+
+
+class HostTestIn(BaseModel):
+    connection_type: str = "ssh"         # ssh | ssh-jump | telnet | telnet-jump
+    hostname: str = ""
+    ssh_port: Optional[int] = None       # None = portul implicit al protocolului
+    ssh_username: str = ""
+    auth_method: str = "password"        # password | key
+    credential: str = ""                 # write-only, doar în memorie pe durata testului
+    passphrase: str = ""
+    via_host_id: int = 0                 # familia jump: agentul prin care tunelăm
+    host_id: int = 0                     # editare: hostul existent (credenţialul stocat + pinul lui)
+    pending_key_id: str = ""             # cheia generată în formular, încă nelegată
+    stepup_grant: str = ""
+    stepup_password: str = ""
+
+
+# Etapa picată → cod i18n, când clasa e a testului (TCP, banner, pin…). Cauzele care au deja un
+# cod la conectarea reală (auth respinsă, agent care nu ajunge la ţintă, eroare SSH) trec prin
+# `_ssh_dial_error`, ca formularul să arate EXACT mesajul pe care l-ar vedea omul la conectare.
+_HOSTTEST_CODES = (
+    ("tcp:dns", "hosttest.dns"),
+    ("tcp:refused", "hosttest.refused"),
+    ("tcp:unreachable", "hosttest.unreachable"),
+    ("tcp:timeout", "hosttest.tcpTimeout"),
+    ("banner:not_ssh", "hosttest.notSsh"),
+    ("banner:closed", "hosttest.closed"),
+    ("banner:silent", "hosttest.telnetSilent"),
+    ("hostkey:mismatch", "hosttest.hostKeyMismatch"),
+    ("hostkey:timeout", "hosttest.timeout"),
+    ("auth:timeout", "hosttest.timeout"),
+    ("auth:skipped", "hosttest.authSkipped"),
+)
+
+
+def _hosttest_stage(st: dict, row: dict, ssh: bool, expected_fp: str = "", offered_fp: str = "") -> dict:
+    """Etapa din core → forma publică {id, ok, ms?, code?, vars?, detail?, warn?, skipped?}.
+    Excepţia (cu textul ei englezesc) NU iese din server — doar codul."""
+    out = {"id": st["id"], "ok": bool(st["ok"])}
+    for f in ("ms", "detail", "warn", "skipped"):
+        if st.get(f) is not None:
+            out[f] = st[f]
+    if st["ok"]:
+        return out
+    kind, exc = st.get("kind") or "", st.get("exc")
+    code = dict(_HOSTTEST_CODES).get("%s:%s" % (st["id"], kind)) if kind else None
+    if st["id"] == "banner" and kind == "timeout":
+        code = "ssh.noBanner" if ssh else "hosttest.closed"
+    if code is None:
+        if exc is not None:
+            err = _ssh_dial_error(exc, row)
+            code = err.code
+            if err.vars:
+                out["vars"] = err.vars
+        else:
+            code = "hosttest.failed"
+    if code == "hosttest.hostKeyMismatch":
+        out["vars"] = {"old_fp": expected_fp, "new_fp": offered_fp}
+    out["code"] = code
+    return out
+
+
+@router.post("/api/hosts/test")
+async def test_host_connection(body: HostTestIn, request: Request, user=Depends(security.require_user)):
+    """„Test connection" din Add host / Edit host: tcp → banner → host key → auth, cu dial-ul real,
+    fără să salveze nimic. Întoarce {ok, stages, hostkey?}; textul îl pune UI-ul din coduri."""
+    ctype = body.connection_type or ""
+    if ctype not in ("ssh", "ssh-jump", "telnet", "telnet-jump"):
+        raise ApiError(400, "hosttest.badType", "connection tests are for ssh, ssh-jump, telnet and telnet-jump")
+    ssh = ctype in ("ssh", "ssh-jump")
+    hostname = body.hostname.strip()
+    # urma în jurnal ÎNAINTE de orice refuz: o sondă blocată (metadate, plafon) contează la audit
+    audit.detail(request, "connection test (%s) to %s:%s" % (ctype, hostname[:200], body.ssh_port or ""))
+    if not hostname:
+        raise ApiError(400, "host.hostnameRequired", "hostname required for a direct connection")
+    port = body.ssh_port if body.ssh_port is not None else (22 if ssh else 23)
+    if not 1 <= int(port) <= 65535:
+        raise ApiError(400, "hosttest.badPort", "the port must be between 1 and 65535")
+    if ssh and not body.ssh_username.strip():
+        raise ApiError(400, "ssh.userRequired", "an SSH username is required")
+    if len(hostname) > 253 or any(c.isspace() or ord(c) < 32 for c in hostname):
+        raise ApiError(400, "hosttest.badHost", "not a valid host name or address")
+    row = None
+    if body.host_id:
+        row = await db.fetchone("SELECT * FROM hosts WHERE id=?", body.host_id)
+        if not row:
+            raise ApiError(404, "host.missing", "no such host")
+        # testul cu credenţialul STOCAT al unui host = conectare la el: aceleaşi cerinţe de step-up
+        await _require_host_stepup(body.host_id, user, body.stepup_grant, body.stepup_password)
+    _hosttest_rate(user["id"])
+    if _is_metadata_target(hostname):
+        raise ApiError(400, "hosttest.blocked", "that address is the cloud metadata service")
+    via = body.via_host_id if ctype in _JUMP_TYPES else 0
+    if via:
+        vrow = await db.fetchone("SELECT connection_type FROM hosts WHERE id=?", via)
+        if not vrow or (vrow["connection_type"] or "agent") != "agent":
+            raise ApiError(400, "sshjump.needsAgent", "pick an agent host to reach the target through")
+        if not isinstance(core.sources.get(via), core.AgentConnection):
+            raise ApiError(409, "hosttest.viaOffline", "the jump host's agent is offline — the test needs it online")
+    elif ctype in _JUMP_TYPES:
+        raise ApiError(400, "sshjump.needsAgent", "pick an agent host to reach the target through")
+
+    # credenţialul: cheia generată > ce s-a tastat > cel stocat al hostului editat (doar dacă
+    # metoda e aceeaşi — altfel parola stocată ar fi încercată drept cheie). Nimic → auth sărit.
+    auth = "key" if body.auth_method == "key" else "password"
+    cred = None
+    if ssh:
+        if body.pending_key_id:
+            pk = await _pending_key(user["id"], body.pending_key_id)
+            cred, auth = _decode_credential(pk["credential_encrypted"]), "key"
+        elif body.credential:
+            cred = ({"key": body.credential, "passphrase": body.passphrase or None} if auth == "key"
+                    else {"password": body.credential})
+        elif (row is not None and row["credential_encrypted"] and row["credential_policy"] != "ask"
+              and (row["auth_method"] or "password") == auth):
+            cred = _decode_credential(row["credential_encrypted"])
+        if cred is not None and auth == "key":
+            try:
+                asyncssh.import_private_key(cred.get("key") or "", cred.get("passphrase") or None)
+            except Exception:                           # noqa: BLE001 — cheie greşită / passphrase greşit
+                raise ApiError(400, "hosttest.badKey",
+                               "the private key could not be read — wrong passphrase, or not a private key")
+    target = {"id": body.host_id or 0, "name": row["name"] if row else hostname,
+              "connection_type": ctype, "hostname": hostname, "ssh_port": int(port),
+              "ssh_username": body.ssh_username.strip(), "auth_method": auth,
+              "via_host_id": via or None, "known_hosts": None}
+    # hostul editat, pe ACEEAŞI ţintă, are deja un pin: testul îl verifică (şi refuză înainte
+    # de auth dacă diferă) — exact ce ar face conectarea reală.
+    expected = ""
+    if (ssh and row is not None and row["known_hosts"]
+            and (row["hostname"] or "").lower() == hostname.lower()
+            and int(row["ssh_port"] or 22) == int(port)
+            and (row["via_host_id"] or 0) == (via or 0)):
+        expected = row["known_hosts"]
+
+    # rezolvare + poartă de metadate pe ADRESELE rezultate (un nume care rezolvă la 169.254.169.254
+    # nu trece). Jump: rezolvă agentul, în reţeaua lui — verificăm best-effort şi local.
+    addrs, pre = None, None
+    try:
+        resolved = await core.resolve_target(hostname, int(port))
+    except core.ProbeFailed as pf:
+        resolved = []
+        if not via:
+            pre = pf
+    if any(_is_metadata_target(sa[0]) for _f, sa in resolved):
+        raise ApiError(400, "hosttest.blocked", "that address is the cloud metadata service")
+    if not via:
+        addrs = resolved
+
+    if pre is not None:
+        res = {"stages": [{"id": "tcp", "ok": False, "ms": 0, "kind": pre.kind, "exc": pre.exc}],
+               "hostkey": None}
+    else:
+        probe = (core.probe_ssh(target, cred, addrs, expected) if ssh
+                 else core.probe_telnet(target, addrs))
+        try:
+            # plasa de siguranţă: probe-ul îşi respectă singur bugetul de PROBE_TIMEOUT
+            res = await asyncio.wait_for(probe, core.PROBE_TIMEOUT + 3)
+        except asyncio.TimeoutError:
+            res = {"stages": [{"id": "tcp", "ok": False, "kind": "timeout"}], "hostkey": None}
+
+    expected_fp = core.hostkey_fingerprint(expected) if expected else ""
+    hk = res.get("hostkey")
+    stages = [_hosttest_stage(st, target, ssh, expected_fp, hk["fingerprint_sha256"] if hk else "")
+              for st in res["stages"]]
+    ok = bool(stages) and all(s["ok"] or s.get("warn") or s.get("skipped") for s in stages)
+    hostkey_ok = any(s["id"] == "hostkey" and s["ok"] for s in stages)
+    out = {"ok": ok, "stages": stages}
+    if hk:
+        out["hostkey"] = {"type": hk["type"], "fingerprint_sha256": hk["fingerprint_sha256"]}
+        if hostkey_ok:
+            # cheia pe care create/update o vor accepta ca `pin_hostkey` (şi doar pe ea)
+            out["hostkey"]["key"] = hk["key"]
+            _remember_tested_hostkey(_test_target(user["id"], ctype, hostname, port, via),
+                                     hk["key"], hk["fingerprint_sha256"])
+    failed = next((s for s in stages if not s["ok"] and not s.get("warn") and not s.get("skipped")), None)
+    audit.detail(request, "connection test (%s) to %s:%s%s → %s" % (
+        ctype, hostname, port, " via host #%d" % via if via else "",
+        "ok" if not failed else "failed at %s (%s)" % (failed["id"], failed.get("code", ""))))
+    return out
 
 
 # ── Chei de deploy host→host (Toolbox → SSH keys) ────────────────────────────
@@ -7722,7 +8120,7 @@ async def browser_ws(ws: WebSocket, sid: str):
             host = await db.fetchone("SELECT * FROM hosts WHERE id=?", row["host_id"])
             if host and host["connection_type"] == "ssh" and host["credential_encrypted"]:
                 try:
-                    cred = json.loads(security.decrypt_secret(host["credential_encrypted"]))
+                    cred = _decode_credential(host["credential_encrypted"])
                     conn = await core.dial_ssh(host, cred)
                     await conn.create(sid, row["rows"], row["cols"], "xterm-256color")
                 except Exception as e:

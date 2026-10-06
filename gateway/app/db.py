@@ -271,6 +271,20 @@ CREATE TABLE IF NOT EXISTS ssh_key_deployments (
     UNIQUE(key_id, target_host_id)
 );
 CREATE INDEX IF NOT EXISTS idx_sshdep_target ON ssh_key_deployments(target_host_id);
+
+-- Chei SSH generate din formularul Add host ÎNAINTE ca hostul să existe (3.5.4): privata e
+-- criptată cu seiful (acelaşi blob ca `hosts.credential_encrypted`), legată de userul care a
+-- generat-o; un create/update de host o „consumă" (rândul se şterge), altfel expiră în ~1h
+-- (core.PENDING_KEY_TTL). `id` e un token aleator, nu un autoincrement ghicibil.
+CREATE TABLE IF NOT EXISTS pending_ssh_keys (
+    id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    credential_encrypted TEXT NOT NULL,
+    public_key TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    created REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pending_keys_user ON pending_ssh_keys(user_id, created);
 """
 
 # additive migrations for DBs created by an older version

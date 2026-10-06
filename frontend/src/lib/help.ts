@@ -29,6 +29,7 @@ export const HELP = {
   require2fa: { doc: 'docs/HOSTS.md#require-2fa-step-up' },
   credentialPolicy: { doc: 'docs/HOSTS.md#credential-policies' },
   enrollTtl: { doc: 'docs/HOSTS.md#install-links-and-their-ttl' },
+  hostTest: { doc: 'docs/HOSTS.md#testing-a-connection' },
   aiTools: { doc: 'docs/AI-TOOLS.md#what-it-is-for' },
   toolbox: { doc: 'docs/DATABASE-TOOLBOX.md#connections--one-click-to-a-database-cli' },
   forwardsSso: { doc: 'docs/SSO.md#register-a-webterm-instance-in-your-idp' },

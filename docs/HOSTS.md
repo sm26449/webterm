@@ -53,6 +53,56 @@ What the code enforces:
   port, user, credential…) drops the live connection so the new parameters take effect, and on
   a host with **Require 2FA** it needs a step-up first.
 
+## Testing a connection
+
+**Test connection** sits next to **Save** in Add host and Edit host, for SSH, SSH-jump, Telnet
+and Telnet-jump. It runs the same dial the gateway uses when you open a terminal, stops right
+after the login, and closes everything. It saves nothing, opens no session and starts no
+shell. The result is shown per stage, so you see *where* it broke:
+
+| Stage | What it checks | Typical failure |
+|---|---|---|
+| **TCP** | The gateway (or, for a jump type, the agent) can open the port | Refused (wrong port, service down), unreachable / timed out (firewall, wrong address), name not found |
+| **SSH** / **Telnet** | Something answers: the SSH greeting, or for telnet any banner or login prompt within 3 seconds | Not an SSH server on that port; no greeting at all. A silent telnet device is only a *warning*: some wait for the first Enter |
+| **host key** | The server's host key; its SHA256 fingerprint is shown | On an existing host whose pinned key differs: the test stops here and the password is **not** sent |
+| **authentication** | The user and password or key are accepted | The same message you would get when connecting |
+
+What you need to know:
+
+- The whole test is capped at 10 seconds. You can cancel it.
+- After a successful test the save button reads **Save (verified)**. Saving then **pins the host
+  key the test saw**, so the host is protected from its first connection instead of trusting
+  whatever answers first. The server only accepts the exact key its own test saw for that
+  target in the last 10 minutes; a client cannot supply its own. On an existing host that
+  already has a different pinned key, a test-then-save cannot replace it: a changed key goes
+  through the host-key alarm, where you compare fingerprints and accept explicitly.
+- Changing any connection field after a test (hostname, port, user, password, key, via host)
+  clears the result; test again before saving as verified.
+- In Edit host, leaving the password empty tests with the stored credential. On a host with
+  **Require 2FA** that needs a step-up first, exactly like connecting.
+- With the **Ask every time** policy there is nothing to log in with, so the test stops after
+  the host key and says authentication was not tested.
+- For SSH-jump and Telnet-jump the test goes through the via agent's tunnel, so that agent has
+  to be online.
+- **Limits.** The test can reach any address the gateway can, so it is browser-only (automation
+  tokens are refused), limited to 10 tests per minute per account, and it refuses the cloud
+  metadata service (`169.254.169.254`, `metadata.google.internal`, `fd00:ec2::254`), also when
+  a name resolves to it. Every test is in the audit log as *connection test to host:port →
+  result*; the credential is never logged or stored.
+
+**Generate a key for this host.** With SSH or SSH-jump and *SSH key* authentication, the form
+can create an Ed25519 key pair for you, also before the host exists. The private key is
+created on the gateway and kept encrypted in its vault; the form shows only the public key and
+the command to run on the target:
+
+```sh
+mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo '<public key>' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys
+```
+
+Run it there, press **Test connection** (it uses the new key), then save: the key becomes the
+host's stored credential. An unused generated key is deleted after one hour, and only the
+account that generated it can attach it to a host. Only Ed25519 is offered.
+
 ## Tags
 
 Free-form labels for finding hosts: `prod`, `debian`, `web`, `customer-x`.

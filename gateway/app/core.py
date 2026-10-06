@@ -3680,6 +3680,25 @@ class SshSource(SessionSource):
             self._conn.close()
 
 
+def _ssh_auth_kwargs(host_row, credential: Optional[dict]) -> dict:
+    """kwargs de user + autentificare + timeout pentru asyncssh.connect — COMUNE pentru dial_ssh,
+    dial_ssh_jump şi testul de conexiune (probe_ssh), ca testul să încerce exact ce încearcă
+    conectarea reală. `credential` e {password} sau {key, passphrase?} — doar în memorie.
+    `None` = fără credenţial (testul doar până la host key): nicio metodă de auth nu se încearcă."""
+    kwargs = dict(username=host_row["ssh_username"], connect_timeout=SSH_CONNECT_TIMEOUT,
+                  keepalive_interval=30, keepalive_count_max=4)
+    if credential is None:
+        kwargs.update(client_keys=[], agent_path=None, password=None, password_auth=False,
+                      kbdint_auth=False, public_key_auth=False, host_based_auth=False,
+                      gss_auth=False)
+    elif host_row["auth_method"] == "key":
+        pk = asyncssh.import_private_key(credential["key"], credential.get("passphrase") or None)
+        kwargs["client_keys"] = [pk]
+    else:
+        kwargs["password"] = credential.get("password", "")
+    return kwargs
+
+
 async def dial_ssh(host_row, credential: dict) -> SshSource:
     """Deschide (și pinează host key-ul) o conexiune SSH și o înregistrează ca
     sursă. `credential` e {password} sau {key, passphrase?} — doar în memorie.
@@ -3692,18 +3711,10 @@ async def dial_ssh(host_row, credential: dict) -> SshSource:
         host = host_row["hostname"]
         port = host_row["ssh_port"] or 22
         stored = host_row["known_hosts"]
-        kwargs = dict(host=host, port=port, username=host_row["ssh_username"],
-                      connect_timeout=SSH_CONNECT_TIMEOUT,
-                      keepalive_interval=30, keepalive_count_max=4)
+        kwargs = dict(host=host, port=port)
+        kwargs.update(_ssh_auth_kwargs(host_row, credential))
         pin_kwargs, holder = _hostkey_kwargs(host_row)
         kwargs.update(pin_kwargs)
-
-        if host_row["auth_method"] == "key":
-            pk = asyncssh.import_private_key(credential["key"],
-                                            credential.get("passphrase") or None)
-            kwargs["client_keys"] = [pk]
-        else:
-            kwargs["password"] = credential.get("password", "")
 
         try:
             conn = await asyncssh.connect(**kwargs)
@@ -3805,6 +3816,37 @@ async def _ssh_jump_pump(fs: "ForwardStream", sock: socket.socket) -> None:
         pass
 
 
+async def _open_jump_bridge(host_row) -> tuple:
+    """Puntea ssh-jump: ForwardStream prin agentul `via_host_id` la hostname:ssh_port văzut de
+    agent + socketpair local + pompă. Întoarce (fs, ssh_sock, bridge_sock, pump) — `ssh_sock` e
+    capătul pe care rulează asyncssh. Ridică ForwardError (agent offline / ţinta refuză).
+    Comună pentru dial_ssh_jump şi testul de conexiune (probe_ssh)."""
+    via = sources.get(host_row["via_host_id"])
+    if not isinstance(via, AgentConnection):
+        raise ForwardError("the jump host's agent is offline")
+    fs = await via.open_forward(host_row["hostname"], host_row["ssh_port"] or 22)
+    try:
+        ssh_sock, bridge_sock = await _inet_socketpair()
+    except BaseException:
+        await fs.close()
+        raise
+    pump = asyncio.create_task(_ssh_jump_pump(fs, bridge_sock))
+    return fs, ssh_sock, bridge_sock, pump
+
+
+async def _close_jump_bridge(fs, ssh_sock, bridge_sock, pump) -> None:
+    pump.cancel()
+    for s in (ssh_sock, bridge_sock):
+        try:
+            s.close()
+        except Exception:   # noqa: BLE001
+            pass
+    try:
+        await fs.close()
+    except Exception:       # noqa: BLE001
+        pass
+
+
 async def dial_ssh_jump(host_row, credential: dict) -> SshJumpSource:
     """Ca `dial_ssh`, dar peste tunelul agentului `via_host_id`: deschide un ForwardStream la
     hostname:ssh_port văzut de agent, bridge-uieşte la un socketpair, şi rulează asyncssh pe el.
@@ -3814,37 +3856,21 @@ async def dial_ssh_jump(host_row, credential: dict) -> SshJumpSource:
         existing = sources.get(host_row["id"])
         if isinstance(existing, SshJumpSource):
             return existing
-        via = sources.get(host_row["via_host_id"])
-        if not isinstance(via, AgentConnection):
-            raise ForwardError("the jump host's agent is offline")
-        fs = await via.open_forward(host_row["hostname"], host_row["ssh_port"] or 22)
-        ssh_sock, bridge_sock = await _inet_socketpair()
-        pump = asyncio.create_task(_ssh_jump_pump(fs, bridge_sock))
         stored = host_row["known_hosts"]
-        kwargs = dict(sock=ssh_sock, username=host_row["ssh_username"],
-                      connect_timeout=SSH_CONNECT_TIMEOUT,
-                      keepalive_interval=30, keepalive_count_max=4)
+        # kwargs ÎNAINTE de tunel: o cheie privată ilizibilă nu mai deschide (şi lasă) un forward
+        auth_kwargs = _ssh_auth_kwargs(host_row, credential)
+        fs, ssh_sock, bridge_sock, pump = await _open_jump_bridge(host_row)
+        kwargs = dict(sock=ssh_sock)
+        kwargs.update(auth_kwargs)
         pin_kwargs, holder = _hostkey_kwargs(host_row)
         kwargs.update(pin_kwargs)
-        if host_row["auth_method"] == "key":
-            pk = asyncssh.import_private_key(credential["key"], credential.get("passphrase") or None)
-            kwargs["client_keys"] = [pk]
-        else:
-            kwargs["password"] = credential.get("password", "")
-        def _teardown():
-            pump.cancel()
-            for s in (ssh_sock, bridge_sock):
-                try:
-                    s.close()
-                except Exception:   # noqa: BLE001
-                    pass
         try:
             conn = await asyncssh.connect(**kwargs)
         except asyncssh.HostKeyNotVerifiable as e:
-            _teardown(); await fs.close()
+            await _close_jump_bridge(fs, ssh_sock, bridge_sock, pump)
             raise await _hostkey_mismatch(host_row, holder, e)
         except Exception as e:
-            _teardown(); await fs.close()
+            await _close_jump_bridge(fs, ssh_sock, bridge_sock, pump)
             # un rând în logul gateway-ului cu ţinta + cauza: altfel ssh-jump eşua „mut" (asyncssh
             # loghează la INFO, fără host/port), iar utilizatorul rămânea fără niciun indiciu.
             log.warning("ssh-jump dial failed: %s -> %s:%s via host %s: %s: %s",
@@ -3974,6 +4000,313 @@ async def dial_telnet(host_row, credential: dict) -> TelnetSource:
         src = TelnetSource(host_row["id"], reader, writer, credential)
         sources[host_row["id"]] = src
         return src
+
+
+# ---------------------------------------------------------------------------
+# „Test connection" (Add host): ACEEAŞI cale de dial, oprită după autentificare
+# ---------------------------------------------------------------------------
+# Formularul de host se salva „pe încredere": portul, userul sau parola greşite ieşeau la
+# iveală abia la prima conectare. Testul rulează dial-ul real (aceleaşi kwargs asyncssh din
+# `_ssh_auth_kwargs`, aceeaşi punte prin agent `_open_jump_bridge` pentru jump) şi se opreşte
+# după auth: nicio sursă în `sources`, nicio sesiune, niciun PTY, nimic scris în DB. Fiecare
+# etapă (tcp → banner → hostkey → auth) are rezultatul ei, ca UI-ul să spună UNDE s-a rupt.
+# Codurile (i18n) le pune api.py, cu acelaşi clasificator ca la conectarea reală.
+
+PROBE_TIMEOUT = 10.0         # plafonul DUR al unui test, toate etapele la un loc
+PROBE_BANNER_WAIT = 5.0      # cât aşteptăm greeting-ul SSH după TCP (în bugetul de mai sus)
+PROBE_TELNET_WAIT = 3.0      # cât aşteptăm un banner / prompt de login de la un device telnet
+_TELNET_PROMPT_RE = re.compile(rb"(login|username|user name|password)\s*:", re.I)
+
+
+class ProbeFailed(Exception):
+    """Etapa `stage` a picat. `kind` = clasa internă (timeout/refused/unreachable/dns/not_ssh/
+    closed/mismatch); `exc` = excepţia originală, pentru clasificatorul comun din api.py."""
+
+    def __init__(self, stage: str, kind: str = "", exc: Optional[BaseException] = None):
+        super().__init__("%s: %s" % (stage, kind or type(exc).__name__))
+        self.stage = stage
+        self.kind = kind
+        self.exc = exc
+
+
+class _ProbeHostKeyClient(asyncssh.SSHClient):
+    """Clientul testului: lista de încredere e GOALĂ, deci asyncssh ne consultă pentru ORICE
+    cheie oferită — o capturăm (amprenta, pentru UI şi pentru pinul de la salvare) fără să
+    pinăm nimic. Dacă hostul editat are deja un pin şi cheia diferă, refuzăm AICI, înainte de
+    auth: testul nu trimite parola unei ţinte care nu e cea pinată (posibil MITM)."""
+
+    _holder: dict = None
+
+    def validate_host_public_key(self, host, addr, port, key):
+        h = self._holder
+        h["key"] = key
+        h["at"] = time.monotonic()
+        exp = h.get("expected")
+        return exp is None or key == exp
+
+
+async def resolve_target(hostname: str, port: int) -> list:
+    """[(family, sockaddr)] pentru hostname:port (A + AAAA), fără duplicate. ProbeFailed('tcp',
+    'dns') dacă numele nu se rezolvă. api.py verifică adresele (metadate cloud) ÎNAINTE de dial,
+    iar testul se conectează exact la ele — fără o a doua rezolvare care ar putea răspunde altceva."""
+    loop = asyncio.get_running_loop()
+    try:
+        infos = await asyncio.wait_for(
+            loop.getaddrinfo(hostname, port, type=socket.SOCK_STREAM), 5.0)
+    except (OSError, asyncio.TimeoutError, UnicodeError) as e:
+        raise ProbeFailed("tcp", "dns", e)
+    out, seen = [], set()
+    for fam, _t, _p, _c, sa in infos:
+        if fam in (socket.AF_INET, socket.AF_INET6) and sa[0] not in seen:
+            seen.add(sa[0])
+            out.append((fam, sa))
+    if not out:
+        raise ProbeFailed("tcp", "dns")
+    return out
+
+
+async def _probe_tcp(addrs: list, left) -> socket.socket:
+    """Primul socket TCP conectat dintre adresele rezolvate (în ordinea resolverului)."""
+    loop = asyncio.get_running_loop()
+    last: Optional[BaseException] = None
+    for fam, sa in addrs:
+        s = socket.socket(fam, socket.SOCK_STREAM)
+        s.setblocking(False)
+        try:
+            await asyncio.wait_for(loop.sock_connect(s, sa), left())
+            return s
+        except asyncio.TimeoutError:
+            s.close()
+            raise ProbeFailed("tcp", "timeout")
+        except OSError as e:
+            s.close()
+            last = e
+    raise ProbeFailed("tcp", "refused" if isinstance(last, ConnectionRefusedError) else "unreachable", last)
+
+
+async def _peek(sock: socket.socket, timeout: float) -> bytes:
+    """Primii octeţi de la server FĂRĂ să-i consume (MSG_PEEK): vedem greeting-ul SSH, apoi
+    asyncssh citeşte acelaşi socket de la zero. b'' = serverul a închis."""
+    loop = asyncio.get_running_loop()
+    fut = loop.create_future()
+    fd = sock.fileno()
+    loop.add_reader(fd, lambda: fut.done() or fut.set_result(None))
+    try:
+        await asyncio.wait_for(fut, timeout)
+    finally:
+        loop.remove_reader(fd)
+    return sock.recv(4096, socket.MSG_PEEK)
+
+
+def _ssh_version_line(data: bytes) -> str:
+    """Linia `SSH-2.0-…` din ce a trimis serverul (RFC 4253 permite rânduri înaintea ei),
+    redusă la ASCII tipăribil şi tăiată — e dată de la o ţintă oarecare, nu text de încredere."""
+    for ln in data.split(b"\n"):
+        if ln.startswith(b"SSH-"):
+            txt = ln.rstrip(b"\r").decode("ascii", "replace")
+            return "".join(c for c in txt if 32 <= ord(c) < 127)[:80]
+    return ""
+
+
+def _stage_ms(t0: float) -> int:
+    return max(0, int((time.monotonic() - t0) * 1000))
+
+
+async def probe_ssh(host_row, credential: Optional[dict], addrs: Optional[list] = None,
+                    expected_key: str = "") -> dict:
+    """Testul de conexiune SSH / SSH-jump. `host_row` = dict cu câmpurile din formular (nu se
+    citeşte şi nu se scrie nimic în DB); `credential` = {password} / {key, passphrase?} sau None
+    (fără credenţial: testul se opreşte după host key, auth = „sărit"); `addrs` = rezultatul lui
+    `resolve_target` (doar SSH direct); `expected_key` = pinul existent al hostului editat.
+    Întoarce {stages: [...], hostkey: {type, fingerprint_sha256, key}|None}; o etapă picată
+    poartă `kind`/`exc` (api.py le transformă în coduri). Eşecurile de reţea nu ridică."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + PROBE_TIMEOUT
+
+    def left() -> float:
+        return max(0.05, deadline - loop.time())
+
+    res: dict = {"stages": [], "hostkey": None}
+    stages = res["stages"]
+    jump = (host_row["connection_type"] or "") == "ssh-jump"
+    bridge = None
+    sock = None
+    conn = None
+    stage, t0 = "tcp", time.monotonic()
+    try:
+        # kwargs ÎNAINTE de reţea: o cheie ilizibilă nu deschide nimic (api.py o validează deja)
+        auth_kwargs = _ssh_auth_kwargs(host_row, credential)
+        auth_kwargs["connect_timeout"] = None          # termenul îl dă wait_for-ul de mai jos
+        auth_kwargs.pop("keepalive_interval", None)
+        auth_kwargs.pop("keepalive_count_max", None)
+        # 1) TCP — direct: la adresele deja verificate; jump: ForwardStream prin agent (ca dial-ul)
+        try:
+            if jump:
+                bridge = await asyncio.wait_for(_open_jump_bridge(host_row), left())
+                sock = bridge[1]
+            else:
+                sock = await _probe_tcp(addrs or [], left)
+        except asyncio.TimeoutError:
+            raise ProbeFailed("tcp", "timeout")
+        except ForwardError as e:
+            raise ProbeFailed("tcp", "", e)
+        stages.append({"id": "tcp", "ok": True, "ms": _stage_ms(t0)})
+        # 2) greeting-ul SSH
+        stage, t0 = "banner", time.monotonic()
+        try:
+            data = await _peek(sock, min(PROBE_BANNER_WAIT, left()))
+        except asyncio.TimeoutError:
+            raise ProbeFailed("banner", "timeout")
+        except OSError as e:
+            raise ProbeFailed("banner", "closed", e)
+        if not data:
+            raise ProbeFailed("banner", "closed")
+        version = _ssh_version_line(data)
+        if not version:
+            raise ProbeFailed("banner", "not_ssh")
+        stages.append({"id": "banner", "ok": True, "ms": _stage_ms(t0), "detail": version})
+        # 3+4) host key + autentificare: asyncssh.connect cu kwargs-urile dial-ului real
+        stage, t0 = "hostkey", time.monotonic()
+        holder = {"key": None, "at": None,
+                  "expected": asyncssh.import_public_key(expected_key) if expected_key else None}
+
+        def _factory():
+            c = _ProbeHostKeyClient()
+            c._holder = holder
+            return c
+        kwargs = dict(sock=sock, known_hosts=lambda _h, _a, _p: ([], [], []), client_factory=_factory)
+        if not jump:
+            kwargs["host"] = host_row["hostname"]
+        kwargs.update(auth_kwargs)
+        err: Optional[BaseException] = None
+        try:
+            conn = await asyncio.wait_for(asyncssh.connect(**kwargs), left())
+        except (asyncssh.Error, OSError, asyncio.TimeoutError) as e:
+            err = e
+        key = holder["key"]
+        if key is not None:
+            try:
+                res["hostkey"] = {"type": key.get_algorithm(), "fingerprint_sha256": key.get_fingerprint(),
+                                  "key": key.export_public_key().decode().strip()}
+            except Exception:   # noqa: BLE001 — cheie exotică: fără amprentă, nu crash
+                res["hostkey"] = None
+        if key is None or (holder["expected"] is not None and key != holder["expected"]):
+            if key is not None:
+                raise ProbeFailed("hostkey", "mismatch", err)
+            if isinstance(err, asyncio.TimeoutError):
+                raise ProbeFailed("hostkey", "timeout")
+            raise ProbeFailed("hostkey", "", err)
+        at = holder["at"] or time.monotonic()
+        stages.append({"id": "hostkey", "ok": True, "ms": max(0, int((at - t0) * 1000))})
+        stage, t0 = "auth", at
+        if credential is None:
+            # nimic de încercat (politica „ask", fără parolă tastată): auth rămâne netestat
+            stages.append({"id": "auth", "ok": False, "skipped": True, "kind": "skipped"})
+            return res
+        if err is not None:
+            raise ProbeFailed("auth", "timeout" if isinstance(err, asyncio.TimeoutError) else "", err)
+        stages.append({"id": "auth", "ok": True, "ms": _stage_ms(t0)})
+        return res
+    except ProbeFailed as pf:
+        stages.append({"id": pf.stage, "ok": False, "ms": _stage_ms(t0), "kind": pf.kind, "exc": pf.exc})
+        return res
+    except (asyncssh.Error, OSError, ValueError) as e:    # neprevăzut: tot pe etapa curentă
+        stages.append({"id": stage, "ok": False, "ms": _stage_ms(t0), "kind": "", "exc": e})
+        return res
+    finally:
+        # NIMIC deschis după test: conexiunea, socketul direct, puntea prin agent
+        if conn is not None:
+            conn.close()
+            try:
+                await asyncio.wait_for(conn.wait_closed(), 2.0)
+            except Exception:   # noqa: BLE001
+                pass
+        if bridge is not None:
+            await _close_jump_bridge(*bridge)
+        elif sock is not None:
+            try:
+                sock.close()
+            except Exception:   # noqa: BLE001
+                pass
+
+
+async def probe_telnet(host_row, addrs: Optional[list] = None) -> dict:
+    """Testul telnet / telnet-jump: etapa TCP (direct, sau prin agent ca dial-ul real), apoi dacă
+    device-ul trimite ceva (negociere telnet, banner, prompt de login) în PROBE_TELNET_WAIT.
+    Tăcerea NU e eşec: unele device-uri tac până la primul Enter — e un avertisment."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + PROBE_TIMEOUT
+
+    def left() -> float:
+        return max(0.05, deadline - loop.time())
+
+    res: dict = {"stages": [], "hostkey": None}
+    stages = res["stages"]
+    jump = (host_row["connection_type"] or "") == "telnet-jump"
+    fs = None
+    sock = None
+    t0 = time.monotonic()
+    try:
+        try:
+            if jump:
+                via = sources.get(host_row["via_host_id"])
+                if not isinstance(via, AgentConnection):
+                    raise ForwardError("the jump host's agent is offline")
+                fs = await asyncio.wait_for(
+                    via.open_forward(host_row["hostname"], host_row["ssh_port"] or 23), left())
+            else:
+                sock = await _probe_tcp(addrs or [], left)
+        except asyncio.TimeoutError:
+            raise ProbeFailed("tcp", "timeout")
+        except ForwardError as e:
+            raise ProbeFailed("tcp", "", e)
+        stages.append({"id": "tcp", "ok": True, "ms": _stage_ms(t0)})
+        t0 = time.monotonic()
+        wait = min(PROBE_TELNET_WAIT, left())
+        try:
+            if fs is not None:
+                data = await asyncio.wait_for(fs.read(), wait)
+                data = b"" if data is None else data
+            else:
+                data = await asyncio.wait_for(loop.sock_recv(sock, 4096), wait)
+        except asyncio.TimeoutError:
+            stages.append({"id": "banner", "ok": False, "warn": True, "kind": "silent", "ms": _stage_ms(t0)})
+            return res
+        except OSError as e:
+            raise ProbeFailed("banner", "closed", e)
+        if not data:
+            raise ProbeFailed("banner", "closed")
+        stages.append({"id": "banner", "ok": True, "ms": _stage_ms(t0),
+                       "detail": "prompt" if _TELNET_PROMPT_RE.search(data) else "data"})
+        return res
+    except ProbeFailed as pf:
+        stages.append({"id": pf.stage, "ok": False, "ms": _stage_ms(t0), "kind": pf.kind, "exc": pf.exc})
+        return res
+    finally:
+        if fs is not None:
+            try:
+                await fs.close()
+            except Exception:   # noqa: BLE001
+                pass
+        if sock is not None:
+            try:
+                sock.close()
+            except Exception:   # noqa: BLE001
+                pass
+
+
+# ── Chei SSH generate la CREAREA hostului (în aşteptare) ─────────────────────
+# „Generează o cheie pentru acest host" din formularul Add host: privata se naşte pe gateway şi
+# stă criptată în seif (acelaşi Fernet ca restul credenţialelor, acelaşi format de blob) într-un
+# rând `pending_ssh_keys` legat de userul care a generat-o, până când (a) o leagă un create /
+# update de host, sau (b) expiră. Expirarea e leneşă (la fiecare acces) + sweep-ul din main.py.
+PENDING_KEY_TTL = 3600
+PENDING_KEYS_PER_USER = 10
+
+
+async def purge_pending_ssh_keys() -> None:
+    """Şterge cheile în aşteptare expirate (privata nu stă în seif mai mult decât trebuie)."""
+    await db.execute("DELETE FROM pending_ssh_keys WHERE created < ?", time.time() - PENDING_KEY_TTL)
 
 
 # ---------------------------------------------------------------------------

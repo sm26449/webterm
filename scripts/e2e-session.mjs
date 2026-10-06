@@ -1249,6 +1249,106 @@ try {
   await connDlg.locator('button:has-text("Cancel")').click()
   await tbx.locator('button[aria-label="Close"]').click().catch(() => {})
 
+  // ── Add host → Test connection + cheie generată la creare (3.5.4) ──
+  // Ţintă SSH REALĂ fără sshd în imagine: un server asyncssh (asyncssh e deja în container, e
+  // dependenţa gateway-ului) pornit pe 127.0.0.1:2222 prin agentul de test. Gateway-ul îl sună
+  // pe loopback-ul containerului — exact dial-ul real. Cheile publice acceptate vin din
+  // ~/.ssh/authorized_keys (root), deci one-liner-ul afişat de formular chiar e testat.
+  const ciRun = async (command) => (await (await fetch(`${BASE}/api/hosts/${ciHost.id}/run`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie, Origin: BASE },
+    body: JSON.stringify({ command, timeout: 30 }),
+  })).json())
+  const sshdPy = [
+    'import asyncio, os, asyncssh',
+    "AK = os.path.expanduser('~/.ssh/authorized_keys')",
+    'class S(asyncssh.SSHServer):',
+    '    def begin_auth(self, u): return True',
+    '    def password_auth_supported(self): return True',
+    "    def validate_password(self, u, p): return u == 'e2e' and p == 'parola-e2e-ssh-123456'",
+    '    def public_key_auth_supported(self): return True',
+    '    def validate_public_key(self, u, k):',
+    "        want = k.export_public_key().decode().split()[:2]",
+    '        try: lines = open(AK).read().splitlines()',
+    '        except OSError: return False',
+    '        return any(l.split()[:2] == want for l in lines)',
+    'async def main():',
+    "    key = asyncssh.generate_private_key('ssh-ed25519')",
+    "    await asyncssh.create_server(S, '127.0.0.1', 2222, server_host_keys=[key])",
+    "    open('/tmp/wt-e2e-sshd.pid', 'w').write(str(os.getpid()))",
+    "    open('/tmp/wt-e2e-sshd.fp', 'w').write(key.get_fingerprint())",
+    '    await asyncio.sleep(1800)',
+    'asyncio.run(main())',
+  ].join('\n')
+  const sshdB64 = Buffer.from(sshdPy).toString('base64')
+  // re-rulabil (CI re-încearcă E2E o dată): serverul încercării anterioare e oprit întâi
+  const sshdStart = await ciRun(
+    '[ -f /tmp/wt-e2e-sshd.pid ] && kill "$(cat /tmp/wt-e2e-sshd.pid)" 2>/dev/null; sleep 0.3; '
+    + 'rm -f /tmp/wt-e2e-sshd.fp /tmp/wt-e2e-sshd.pid; '
+    + `echo ${sshdB64} | base64 -d > /tmp/wt-e2e-sshd.py && `
+    + '(setsid nohup python3 /tmp/wt-e2e-sshd.py >/tmp/wt-e2e-sshd.log 2>&1 </dev/null &); '
+    + 'for i in $(seq 1 60); do [ -s /tmp/wt-e2e-sshd.fp ] && break; sleep 0.25; done; cat /tmp/wt-e2e-sshd.fp')
+  const sshdFp = (sshdStart.stdout ?? '').trim()
+  if (!sshdFp.startsWith('SHA256:')) console.error('fixture sshd:', sshdStart, (await ciRun('cat /tmp/wt-e2e-sshd.log')).stdout)
+  const addHostDlg = page.locator('[role=dialog][aria-label="Add a host"]')
+  const openAddSsh = async (name, port) => {
+    await goHome()
+    await page.click('button[aria-label="Add host"]')
+    await addHostDlg.getByRole('button', { name: 'SSH', exact: true }).click()
+    await addHostDlg.getByLabel('Name', { exact: true }).fill(name)
+    await addHostDlg.getByLabel('Hostname / IP').fill('127.0.0.1')
+    await addHostDlg.locator('input[aria-label="Port"]').fill(String(port))
+    await addHostDlg.getByLabel('User', { exact: true }).fill('e2e')
+  }
+  const testResult = addHostDlg.locator('[data-testid="hosttest-result"]')
+  // portul închis: etapa TCP pică, cu textul tradus, iar focusul merge pe câmpul Port
+  await openAddSsh('e2e-closed-port', 1)
+  await addHostDlg.getByLabel('SSH password').fill('orice')
+  await addHostDlg.locator('[data-testid="hosttest-run"]').click()
+  check('hosttest: port închis → „TCP failed: Connection refused" + focus pe Port',
+    await visible(testResult.locator('text=Connection refused'), 15000)
+    && (await page.evaluate(() => document.activeElement?.getAttribute('aria-label'))) === 'Port')
+  await addHostDlg.locator('button:has-text("Cancel")').last().click()
+  await hidden(addHostDlg)
+  // ţinta reală: test reuşit → „Save (verified)" → hostul e pinat cu cheia văzută de test
+  await openAddSsh('e2e-ssh-tested', 2222)
+  await addHostDlg.getByLabel('SSH password').fill('parola-e2e-ssh-123456')
+  await addHostDlg.locator('[data-testid="hosttest-run"]').click()
+  const okStages = addHostDlg.locator('[data-testid="hosttest-stages"] li[data-state="ok"]')
+  await visible(testResult.locator('text=Connection verified'), 15000)
+  check('hosttest: SSH real → 4 etape ✓ (TCP, SSH, host key cu amprenta, authentication)',
+    (await okStages.count()) === 4 && ((await testResult.textContent()) ?? '').includes(sshdFp || 'SHA256:'))
+  const saveVerified = addHostDlg.locator('button:has-text("Save (verified)")')
+  check('hosttest: după test butonul devine „Save (verified)"', await visible(saveVerified))
+  await saveVerified.click()
+  await addHostDlg.locator('button:has-text("Done")').click()
+  const sshHosts = await (await fetch(`${BASE}/api/hosts`, { headers: { Cookie: cookie } })).json()
+  const tested = sshHosts.find((h) => h.name === 'e2e-ssh-tested')
+  const hk = tested ? await (await fetch(`${BASE}/api/hosts/${tested.id}/hostkey`, { headers: { Cookie: cookie } })).json() : {}
+  check('hosttest: hostul salvat e pinat de la creare cu cheia văzută de test',
+    !!tested && hk.pinned === true && hk.fingerprint === sshdFp)
+  // cheia generată în formular: publica + one-liner-ul; rulat pe ţintă → testul trece cu cheia
+  await openAddSsh('e2e-ssh-genkey', 2222)
+  await addHostDlg.locator('label:has-text("SSH key")').click()
+  await addHostDlg.locator('button:has-text("Generate a key for this host")').click()
+  const pendingPub = addHostDlg.locator('[data-testid="pending-key-pub"]')
+  check('hosttest: „Generate a key for this host" arată cheia publică ed25519',
+    await visible(pendingPub) && ((await pendingPub.textContent()) ?? '').startsWith('ssh-ed25519 '))
+  const oneLiner = (await addHostDlg.locator('[data-testid="pending-key"] code').nth(1).textContent()) ?? ''
+  await ciRun(oneLiner)
+  await addHostDlg.locator('[data-testid="hosttest-run"]').click()
+  await visible(testResult.locator('text=Connection verified'), 15000)
+  await addHostDlg.locator('button:has-text("Save (verified)")').click()
+  await addHostDlg.locator('button:has-text("Done")').click()
+  const genHost = (await (await fetch(`${BASE}/api/hosts`, { headers: { Cookie: cookie } })).json())
+    .find((h) => h.name === 'e2e-ssh-genkey')
+  check('hosttest: one-liner rulat pe ţintă → test reuşit cu cheia, salvată ca auth key',
+    !!genHost && genHost.auth_method === 'key' && genHost.has_credentials === true)
+  // curăţenie: hosturile SSH de test nu trebuie să schimbe sidebar-ul pentru paşii următori
+  for (const h of [tested, genHost]) {
+    if (h) await fetch(`${BASE}/api/hosts/${h.id}`, { method: 'DELETE', headers: { Cookie: cookie, Origin: BASE } })
+  }
+  await ciRun('[ -f /tmp/wt-e2e-sshd.pid ] && kill "$(cat /tmp/wt-e2e-sshd.pid)"; rm -f /tmp/wt-e2e-sshd.pid')
+
   // ── AI tools (3.5.0): manager pentru CLAUDE.md / sub-agenţi / skill-uri, prin API-ul fs ──
   // Deschis din meniul contextual al terminalului (calea principală), pe scope-ul Global (~) ca
   // să nu depindem de cwd-ul OSC 7. Creăm un agent din şablonul „Code reviewer", verificăm

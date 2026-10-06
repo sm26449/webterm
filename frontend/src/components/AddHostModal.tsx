@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useRef, useState } from 'react'
-import { errText, api, Host } from '../lib/api'
+import { errText, api, ApiError, Host, withStepup } from '../lib/api'
 import { copyText } from '../lib/clipboard'
 import { useI18n } from '../lib/i18n'
 import InstallCommand, { AGENT_PYTHON_MIN } from './InstallCommand'
@@ -11,6 +11,7 @@ import { TIP_ADDHOST_AGENT, TIP_ADDHOST_SSH } from '../lib/coachtips'
 import { isWalkthroughDone } from '../lib/walkthrough'
 import { ServerIcon, KeyIcon } from './Icons'
 import HelpTip from './HelpTip'
+import { connSignature, failingField, stageViews, summaryText, TestResult } from '../lib/hosttest'
 
 type ConnType = 'agent' | 'ssh' | 'ssh-jump' | 'telnet' | 'telnet-jump'
 
@@ -57,9 +58,13 @@ export default function AddHostModal(props: {
     (edit?.auth_method as 'password' | 'key') || 'password')
   const [secret, setSecret] = useState('')
   const [passphrase, setPassphrase] = useState('')
-  const [sshPub, setSshPub] = useState('')       // cheia publică generată/derivată, de copiat
+  const [sshPub, setSshPub] = useState('')       // cheia publică derivată din cea stocată, de copiat
   const [sshBusy, setSshBusy] = useState(false)
   const [sshCopied, setSshCopied] = useState(false)
+  // cheia generată în formular (POST /api/hosts/ssh-key/pending): privata stă criptată pe gateway,
+  // aici avem doar publica + id-ul; salvarea o leagă de host ca credenţial stocat
+  const [pendingKey, setPendingKey] = useState<{ id: string; pub: string; fp: string } | null>(null)
+  const [keyCopied, setKeyCopied] = useState<'' | 'pub' | 'cmd'>('')
   const [policy, setPolicy] = useState<'stored' | 'ask'>(
     (edit?.credential_policy as 'stored' | 'ask') || 'stored')
   const [require2fa, setRequire2fa] = useState(edit?.require_2fa ?? false)
@@ -74,15 +79,67 @@ export default function AddHostModal(props: {
   const [enrollTtl, setEnrollTtl] = useState(3600)
   const [enrollPass, setEnrollPass] = useState('')
 
+  // „Test connection": rezultatul e legat de amprenta câmpurilor de conexiune din momentul
+  // testului — orice editare ulterioară (host, port, user, parolă, cheie, via) îl invalidează,
+  // deci „Salvează (verificat)" + pinul de host-key nu pot pleca pentru altă ţintă decât cea testată.
+  const isSshLike = connType === 'ssh' || connType === 'ssh-jump'
+  const isTelnet = connType === 'telnet' || connType === 'telnet-jump'
+  const usePending = !!pendingKey && isSshLike && authMethod === 'key' && policy === 'stored'
+  const sig = connSignature({ connType, hostname: hostname.trim(), port, username: username.trim(),
+    authMethod, secret, passphrase, viaHost, policy, pending: usePending ? pendingKey?.id : '' })
+  const [testing, setTesting] = useState(false)
+  const [testState, setTestState] = useState<{ sig: string; res?: TestResult; err?: string } | null>(null)
+  const testAbort = useRef<{ ac: AbortController; timedOut: boolean } | null>(null)
+  const testBtnRef = useRef<HTMLButtonElement>(null)
+  const cancelTestRef = useRef<HTMLButtonElement>(null)
+  useEffect(() => () => testAbort.current?.ac.abort(), [])     // modal închis în timpul testului
+  // câmp de conexiune schimbat după test → rezultatul (şi „verificat") nu mai e valabil: derivat,
+  // nu şters printr-un efect, ca să nu existe nicio randare cu un „verificat" vechi
+  const shownTest = testState && testState.sig === sig ? testState : null
+  const testRes = shownTest?.res ?? null
+  const testErr = shownTest?.err ?? ''
+  const verified = !!testRes && testRes.ok
+
   const [created, setCreated] = useState<Host | null>(null)
   const [online, setOnline] = useState(false)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
-  // La eşec, focusul merge pe primul câmp al formularului, marcat `aria-invalid` + legat de
-  // mesaj (WCAG 3.3.1): serverul întoarce o singură eroare, nu una per câmp.
+  // La eşec, focusul merge pe câmpul VINOVAT (hostname, port, user, credenţial, via) când codul
+  // erorii îl indică, altfel pe primul câmp; câmpul e marcat `aria-invalid` + legat de mesaj
+  // (WCAG 3.3.1). Înainte mergea MEREU pe „Nume" — şi pentru un port greşit (review 3.5.3).
   const firstFieldRef = useRef<HTMLInputElement>(null)
-  const invalid = error ? { 'aria-invalid': true as const, 'aria-describedby': 'addhost-error' } : {}
-  function fail(msg: string) { setError(msg); firstFieldRef.current?.focus() }
+  const hostnameRef = useRef<HTMLInputElement>(null)
+  const portRef = useRef<HTMLInputElement>(null)
+  const usernameRef = useRef<HTMLInputElement>(null)
+  const secretRef = useRef<HTMLInputElement>(null)
+  const keyRef = useRef<HTMLTextAreaElement>(null)
+  const viaRef = useRef<HTMLSelectElement>(null)
+  type Field = 'name' | 'hostname' | 'port' | 'username' | 'secret' | 'via'
+  const [errField, setErrField] = useState<Field>('name')
+  const [errDesc, setErrDesc] = useState('addhost-error')
+  const showsError = !!error || !!testErr || (!!testRes && !testRes.ok)
+  const invalidFor = (f: Field) => showsError && errField === f
+    ? { 'aria-invalid': true as const, 'aria-describedby': errDesc } : {}
+  const invalid = invalidFor('name')
+  function focusField(f: Field) {
+    const el = f === 'name' ? firstFieldRef.current : f === 'hostname' ? hostnameRef.current
+      : f === 'port' ? portRef.current : f === 'username' ? usernameRef.current
+      : f === 'via' ? viaRef.current : (secretRef.current ?? keyRef.current)
+    setErrField(el ? f : 'name')
+    ;(el ?? firstFieldRef.current)?.focus()
+  }
+  function fieldForCode(code: string): Field {
+    if (/^(host\.hostnameRequired|hosttest\.(badHost|blocked|dns))$/.test(code)) return 'hostname'
+    if (code === 'hosttest.badPort') return 'port'
+    if (code === 'ssh.userRequired') return 'username'
+    if (/^(sshjump\.(needsAgent|viaLoop)|hosttest\.viaOffline)$/.test(code)) return 'via'
+    if (/^(host\.(noStoredCredentials|credentialsRequired)|hosttest\.badKey|sshkey\.pendingMissing)$/.test(code)) return 'secret'
+    return 'name'
+  }
+  function fail(msg: string, err?: unknown) {
+    setError(msg); setErrDesc('addhost-error')
+    focusField(err instanceof ApiError ? fieldForCode(err.code) : 'name')
+  }
 
   // Onboarding la scară: „O maşină" (formularul clasic) vs „Mai multe maşini" (token de grup —
   // un one-liner reutilizabil). Creat AICI, unde userul chiar adaugă hosturi; gestiunea (listă +
@@ -173,9 +230,16 @@ export default function AddHostModal(props: {
       // altfel simpla redenumire a hostului i-ar fi golit credenţialele.
       if (policy === 'ask') {
         if (!edit) Object.assign(body, { credential: '', passphrase: '' })
+      } else if (usePending) {
+        // cheia generată aici: serverul leagă privata (deja în seif) de host — auth key, stored
+        Object.assign(body, { pending_key_id: pendingKey?.id, auth_method: 'key' })
+        if (!edit) Object.assign(body, { credential: '', passphrase: '' })
       } else if (secret || !edit) {
         Object.assign(body, { credential: secret, passphrase })
       }
+      // testul a văzut cheia de host: hostul pleacă pinat de la salvare (serverul acceptă DOAR
+      // cheia pe care a văzut-o el la test, pe aceeaşi ţintă — nu ce trimite clientul)
+      if (verified && isSshLike && testRes?.hostkey?.key) body.pin_hostkey = testRes.hostkey.key
     }
     setBusy(true)
     try {
@@ -190,22 +254,99 @@ export default function AddHostModal(props: {
         else setCreated(h)
       }
     } catch (err) {
-      fail(errText(err, t) || t('addhost.genericError'))
+      fail(errText(err, t) || t('addhost.genericError'), err)
     } finally {
       setBusy(false)
     }
   }
 
-  // Helpers de cheie SSH (doar pe hosturi SSH deja create): generează o pereche pe gateway şi
-  // arată PUBLICA de pus în authorized_keys, ori derivă publica din cea stocată.
-  async function sshKeyAction(path: 'generate' | 'public') {
+  // „Test connection": tcp → banner → host key → auth, prin dial-ul real al gateway-ului, fără
+  // să salveze nimic. Serverul are plafonul lui de 10 s; aici: termen de rezervă + „Anulează".
+  async function runTest() {
+    if (testing) return
+    setError(''); setTestState(null); setTesting(true)
+    // butonul de test devine `disabled` cât rulează → focusul s-ar pierde pe <body>; îl ducem pe
+    // „Anulează", iar la final înapoi pe buton (sau pe câmpul vinovat, la eşec)
+    const ctl = { ac: new AbortController(), timedOut: false }
+    testAbort.current = ctl
+    // doar dacă testul încă rulează: un răspuns sub un cadru (port închis pe loopback) a mutat
+    // deja focusul pe câmpul vinovat, iar „Anulează" nu trebuie să i-l fure
+    requestAnimationFrame(() => { if (testAbort.current === ctl) cancelTestRef.current?.focus() })
+    const backToButton = () => requestAnimationFrame(() => {
+      const a = document.activeElement
+      if (!a || a === document.body || a === cancelTestRef.current) testBtnRef.current?.focus()
+    })
+    const timer = setTimeout(() => { ctl.timedOut = true; ctl.ac.abort() }, 20_000)
+    const thisSig = sig
+    const body: Record<string, unknown> = {
+      connection_type: connType, hostname: hostname.trim(), ssh_port: port, ssh_username: username.trim(),
+      auth_method: usePending ? 'key' : authMethod, via_host_id: isJump ? viaHost : 0,
+    }
+    if (edit) body.host_id = edit.id
+    if (isSshLike && policy === 'stored') {
+      if (usePending) body.pending_key_id = pendingKey?.id
+      else if (secret) Object.assign(body, { credential: secret, passphrase })
+    }
+    const send = () => api<TestResult>('/api/hosts/test',
+      { method: 'POST', body: JSON.stringify(body), signal: ctl.ac.signal })
+    try {
+      // la editarea unui host 2FA, testul cu credenţialul STOCAT cere step-up (ca la conectare)
+      const r = edit ? await withStepup(edit.id, send) : await send()
+      if (testAbort.current !== ctl) return
+      setTestState({ sig: thisSig, res: r })
+      if (!r.ok) {
+        setErrDesc('addhost-test-result')
+        const f = failingField(r)
+        if (f) focusField(f)
+      }
+    } catch (err) {
+      if (testAbort.current !== ctl) return
+      if (ctl.ac.signal.aborted) {
+        setTestState({ sig: thisSig, err: ctl.timedOut ? t('hosttest.timedOut') : t('hosttest.cancelled') })
+      } else {
+        setTestState({ sig: thisSig, err: errText(err, t) || t('err.hosttest.failed') })
+        setErrDesc('addhost-test-result')
+        if (err instanceof ApiError) focusField(fieldForCode(err.code))
+      }
+    } finally {
+      clearTimeout(timer)
+      if (testAbort.current === ctl) { testAbort.current = null; setTesting(false); backToButton() }
+    }
+  }
+
+  // „Generează o cheie pentru acest host" — la CREARE şi la editare: perechea Ed25519 se naşte pe
+  // gateway, privata stă criptată în seif (~1 h) până o leagă salvarea; aici ajunge doar publica.
+  async function generatePendingKey() {
+    setSshBusy(true); setError('')
+    try {
+      const r = await api<{ pending_key_id: string; public_key: string; fingerprint: string }>(
+        '/api/hosts/ssh-key/pending', { method: 'POST', body: JSON.stringify({}) })
+      setPendingKey({ id: r.pending_key_id, pub: r.public_key, fp: r.fingerprint })
+      setSecret(''); setPassphrase('')
+    } catch (err) {
+      fail(errText(err, t) || String(err), err)
+    } finally {
+      setSshBusy(false)
+    }
+  }
+  const installCmd = pendingKey
+    ? `mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo '${pendingKey.pub}' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys`
+    : ''
+  function copyKey(what: 'pub' | 'cmd') {
+    copyText(what === 'pub' ? pendingKey?.pub ?? '' : installCmd).then((okc) => {
+      if (okc) { setKeyCopied(what); setTimeout(() => setKeyCopied(''), 1500) }
+    })
+  }
+
+  // Doar pe hosturi deja create: derivă PUBLICA din privata stocată (ca s-o re-copiezi în
+  // authorized_keys). Generarea trece prin cheia în aşteptare de mai sus, ca la creare.
+  async function showStoredPublic() {
     if (!edit) return
     setSshBusy(true); setError('')
     try {
-      const r = await api<{ public_key: string }>(`/api/hosts/${edit.id}/ssh-key/${path}`,
+      const r = await api<{ public_key: string }>(`/api/hosts/${edit.id}/ssh-key/public`,
         { method: 'POST', body: JSON.stringify({}) })
       setSshPub(r.public_key)
-      if (path === 'generate') setSecret('')     // privata e acum stocată; golim câmpul
     } catch (err) {
       setError(errText(err, t) || String(err))
     } finally {
@@ -391,7 +532,8 @@ export default function AddHostModal(props: {
                 {(connType === 'ssh-jump' || connType === 'telnet-jump') && (
                   <label className="block">
                     <span className={label}>{t('addhost.jumpVia')}</span>
-                    <select required value={viaHost || ''} disabled={!!pj} onChange={(e) => setViaHost(Number(e.target.value))}
+                    <select ref={viaRef} {...invalidFor('via')} required value={viaHost || ''} disabled={!!pj}
+                      onChange={(e) => setViaHost(Number(e.target.value))}
                       className={`${field} disabled:opacity-60`}>
                       <option value="">{t('addhost.jumpViaPick')}</option>
                       {pj && !agentHosts.some((h) => h.id === pj.viaHostId) && <option value={pj.viaHostId}>{pj.viaName}</option>}
@@ -403,12 +545,14 @@ export default function AddHostModal(props: {
                 <div className="flex gap-2">
                   <label className="block min-w-0 flex-1">
                     <span className={label}>{(connType === 'ssh-jump' || connType === 'telnet-jump') ? t('addhost.jumpTarget') : 'Hostname / IP'}</span>
-                    <input required placeholder={t('addhost.hostnamePlaceholder')} value={hostname}
+                    <input ref={hostnameRef} {...invalidFor('hostname')} required
+                      placeholder={t('addhost.hostnamePlaceholder')} value={hostname}
                       onChange={(e) => setHostname(e.target.value)} className={field} />
                   </label>
                   <label className="block w-24 shrink-0">
                     <span className={label}>{t('addHost.port')}</span>
-                    <input type="number" min={1} max={65535} value={port} aria-label={t('addHost.port')}
+                    <input ref={portRef} {...invalidFor('port')} type="number" min={1} max={65535} value={port}
+                      aria-label={t('addHost.port')}
                       onChange={(e) => setPort(Number(e.target.value))} className={field} />
                   </label>
                 </div>
@@ -417,14 +561,14 @@ export default function AddHostModal(props: {
                 {connType !== 'telnet-jump' && (
                 <label className="block">
                   <span className={label}>{t('addhost.user')}{(connType === 'ssh' || connType === 'ssh-jump') ? '' : t('addhost.optionalSuffix')}</span>
-                  <input required={connType === 'ssh' || connType === 'ssh-jump'}
+                  <input ref={usernameRef} {...invalidFor('username')} required={connType === 'ssh' || connType === 'ssh-jump'}
                     placeholder={(connType === 'ssh' || connType === 'ssh-jump') ? t('addhost.userPlaceholderSsh') : t('addhost.userPlaceholderOther')}
                     value={username}
                     onChange={(e) => setUsername(e.target.value)} className={field} />
                 </label>
                 )}
 
-                {connType === 'ssh' && (
+                {isSshLike && (
                   <div>
                     <span className={label}>{t('addhost.authentication')}</span>
                     <div className="flex gap-2 text-sm">
@@ -459,11 +603,41 @@ export default function AddHostModal(props: {
                 </div>
 
                 {policy === 'stored' && (
-                  connType === 'ssh' && authMethod === 'key' ? (
+                  isSshLike && authMethod === 'key' ? (
                     <div className="space-y-3">
+                      {/* cheie generată aici (în aşteptare): câmpul de privată dispare — privata e
+                          deja pe gateway; omul pune publica pe ţintă, testează, salvează. */}
+                      {pendingKey ? (
+                        <div className="space-y-2 rounded-lg bg-ink-800/60 p-3 ring-1 ring-ink-700" data-testid="pending-key">
+                          <p className="text-xs text-slate-300">{t('addhost.pendingKeyHint')}</p>
+                          <div className="flex items-start gap-2">
+                            <code className="min-w-0 flex-1 break-all rounded bg-ink-900 px-2 py-1 font-mono text-[11px] text-slate-200"
+                              data-testid="pending-key-pub">{pendingKey.pub}</code>
+                            <button type="button" onClick={() => copyKey('pub')}
+                              className="min-h-6 shrink-0 text-xs wt-link hover:underline">
+                              {keyCopied === 'pub' ? t('addhost.copied') : t('addhost.copyPub')}
+                            </button>
+                          </div>
+                          <span className="block text-[11px] text-slate-500">
+                            {t('addhost.pendingKeyCmd', { user: username.trim() || '…' })}
+                          </span>
+                          <div className="flex items-start gap-2">
+                            <code className="min-w-0 flex-1 break-all rounded bg-ink-900 px-2 py-1 font-mono text-[11px] text-slate-200">{installCmd}</code>
+                            <button type="button" onClick={() => copyKey('cmd')}
+                              className="min-h-6 shrink-0 text-xs wt-link hover:underline">
+                              {keyCopied === 'cmd' ? t('addhost.copied') : t('addhost.copyCmd')}
+                            </button>
+                          </div>
+                          <p className="text-[11px] text-slate-500">{t('addhost.pendingKeyFp', { fp: pendingKey.fp })}</p>
+                          <button type="button" onClick={() => setPendingKey(null)}
+                            className="min-h-6 text-xs wt-link hover:underline">
+                            {t('addhost.useOwnKey')}
+                          </button>
+                        </div>
+                      ) : (<>
                       <label className="block">
                         <span className={label}>{t('addhost.privateKey')}</span>
-                        <textarea placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                        <textarea ref={keyRef} {...invalidFor('secret')} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
                           value={secret} onChange={(e) => setSecret(e.target.value)}
                           rows={4} className={`${field} font-mono text-xs`} />
                       </label>
@@ -472,23 +646,21 @@ export default function AddHostModal(props: {
                         <input type="password" placeholder={t('addhost.passphrasePlaceholder')} value={passphrase}
                           onChange={(e) => setPassphrase(e.target.value)} className={field} autoComplete="new-password" />
                       </label>
-                      {/* generarea/afişarea cheii necesită un host existent (are nevoie de host_id).
-                          La CREARE nu putem genera încă — spunem clar de ce, ca userul fără cheie
-                          să nu ajungă în fundătură crezând că trebuie să lipească una. */}
-                      {!edit && (
-                        <p className="text-xs text-slate-500">{t('addhost.genKeyAfterSave')}</p>
-                      )}
-                      {edit && (
-                        <div className="rounded-lg bg-ink-800/60 p-2 ring-1 ring-ink-700">
+                      </>)}
+                      <div className="rounded-lg bg-ink-800/60 p-2 ring-1 ring-ink-700">
                           <div className="flex flex-wrap gap-2">
-                            <button type="button" disabled={sshBusy} onClick={() => sshKeyAction('generate')}
-                              className="rounded-lg bg-ink-800 px-2.5 py-1 text-xs text-slate-200 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-40">
-                              {t('addhost.genKey')}
-                            </button>
-                            <button type="button" disabled={sshBusy} onClick={() => sshKeyAction('public')}
-                              className="rounded-lg bg-ink-800 px-2.5 py-1 text-xs text-slate-200 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-40">
-                              {t('addhost.showPubKey')}
-                            </button>
+                            {!pendingKey && (
+                              <button type="button" disabled={sshBusy} onClick={generatePendingKey}
+                                className="rounded-lg bg-ink-800 px-2.5 py-1 text-xs text-slate-200 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-40">
+                                {sshBusy ? t('addhost.genKeyBusy') : t('addhost.genKeyHost')}
+                              </button>
+                            )}
+                            {edit && (
+                              <button type="button" disabled={sshBusy} onClick={showStoredPublic}
+                                className="rounded-lg bg-ink-800 px-2.5 py-1 text-xs text-slate-200 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-40">
+                                {t('addhost.showPubKey')}
+                              </button>
+                            )}
                           </div>
                           {sshPub && (
                             <div className="mt-2">
@@ -503,12 +675,11 @@ export default function AddHostModal(props: {
                             </div>
                           )}
                         </div>
-                      )}
                     </div>
                   ) : (
                     <label className="block">
                       <span className={label}>{connType === 'telnet' ? t('addhost.passwordTelnet') : t('addhost.passwordSsh')}</span>
-                      <input type="password" placeholder="•••••••" value={secret}
+                      <input ref={secretRef} {...invalidFor('secret')} type="password" placeholder="•••••••" value={secret}
                         onChange={(e) => setSecret(e.target.value)} className={field} autoComplete="new-password" />
                     </label>
                   )
@@ -573,8 +744,58 @@ export default function AddHostModal(props: {
               )}
             </label>
 
+            {/* Rezultatul testului: regiune `status` montată MEREU (o regiune live apărută odată cu
+                textul nu e anunţată de toate cititoarele); rezumatul e o propoziţie, etapele dedesubt. */}
+            {connType !== 'agent' && (
+              <div id="addhost-test-result" role="status" aria-live="polite" data-testid="hosttest-result"
+                className={testing || testRes || testErr ? 'rounded-lg border border-ink-700 p-3 text-xs' : 'sr-only'}>
+                {testing ? (
+                  <p className="text-slate-400">{t('hosttest.running')}</p>
+                ) : testErr ? (
+                  <p className="wt-danger">{testErr}</p>
+                ) : testRes ? (
+                  <>
+                    <p className={`text-sm font-medium ${testRes.ok ? 'wt-good' : 'wt-danger'}`}>
+                      {summaryText(testRes, t, isTelnet)}
+                    </p>
+                    <ul className="mt-2 space-y-1" data-testid="hosttest-stages">
+                      {stageViews(testRes, t, isTelnet).map((v) => (
+                        <li key={v.id} className="flex gap-2" data-stage={v.id} data-state={v.state}>
+                          <span aria-hidden="true" className={`w-3 shrink-0 text-center font-bold ${
+                            v.state === 'ok' ? 'wt-good' : v.state === 'warn' ? 'wt-warn'
+                              : v.state === 'skip' ? 'text-slate-500' : 'wt-danger'}`}>{v.icon}</span>
+                          <span className="sr-only">{t(`hosttest.state.${v.state}`)}:</span>
+                          <span className="shrink-0 font-medium text-slate-200">{v.label}</span>
+                          {v.text && <span className="min-w-0 break-all text-slate-400">{v.text}</span>}
+                        </li>
+                      ))}
+                    </ul>
+                    {verified && isSshLike && testRes.hostkey?.key && (
+                      <p className="mt-2 text-[11px] text-slate-500">{t('hosttest.willPin')}</p>
+                    )}
+                  </>
+                ) : null}
+              </div>
+            )}
             <div id="addhost-error" role="alert" className={error ? 'text-sm wt-danger' : 'sr-only'}>{error}</div>
-            <div className="flex flex-wrap justify-end gap-2">
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              {connType !== 'agent' && (
+                <span className="mr-auto flex items-center gap-1">
+                  {testing ? (
+                    <button ref={cancelTestRef} type="button" onClick={() => testAbort.current?.ac.abort()}
+                      className={`${btn.ghost} px-3 py-2`}>
+                      {t('hosttest.cancel')}
+                    </button>
+                  ) : null}
+                  <button ref={testBtnRef} type="button" onClick={runTest} data-testid="hosttest-run"
+                    disabled={testing || busy || !hostname.trim() || (isSshLike && !username.trim()) || (isJump && !viaHost)}
+                    aria-describedby="addhost-test-result"
+                    className="rounded-lg px-3 py-2 text-sm font-medium text-slate-200 ring-1 ring-ink-600 hover:bg-ink-800 disabled:opacity-50">
+                    {testing ? t('hosttest.running') : t('hosttest.button')}
+                  </button>
+                  <HelpTip id="hostTest" />
+                </span>
+              )}
               <button type="button" onClick={props.onClose} className={`${btn.ghost} px-4 py-2`}>
                 {t('addhost.cancel')}
               </button>
@@ -589,6 +810,7 @@ export default function AddHostModal(props: {
               )}
               <button disabled={busy} className={`${btn.primary} px-4 py-2`}>
                 {busy ? (edit ? t('addhost.saving') : t('addhost.adding'))
+                  : verified ? t('addhost.saveVerified')
                   : edit ? t('addhost.save')
                   : connType === 'agent' ? t('addhost.continue')
                   : pj ? t('addhost.saveTarget') : t('addhost.add')}
