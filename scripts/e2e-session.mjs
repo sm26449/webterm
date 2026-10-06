@@ -780,6 +780,7 @@ try {
     else await page.waitForTimeout(200)
   }
   check('pause: transferul intră în pauză', sawPaused)
+  if (!sawPaused) console.error('  [diag] starea jobului:', await page.evaluate((id) => window.__wtTransfers?.store?.get?.(id)?.state, jobId))
   await page.unroute(UP_RE)                      // reluarea de acum înainte curge normal (rapid)
   await page.evaluate((id) => window.__wtTransfers.resumeUpload(id), jobId)
   // se termină după reluare — verificăm pe HOST că fişierul are toţi octeţii (reluat corect, nu corupt)
@@ -816,26 +817,40 @@ try {
   await activePane.locator('.xterm-screen').click()
   await page.keyboard.type(`printf salut > "/tmp/${SPECIAL}"\n`)
   await page.waitForTimeout(700)
+  // Ducem panoul EXPLICIT în /tmp: după paste-ul de imagine (inbox) sau un upload lent, panoul
+  // putea rămâne în alt director, iar fişierul „lipsea" din listă din motive de test, nu de produs.
+  const fpPathInput = filePanel.locator('input[title*="Type a path"]')
+  await fpPathInput.fill('/tmp')
+  await fpPathInput.press('Enter')
+  await pollValue(() => fpPathInput.inputValue(), (v) => v === '/tmp')
   await filePanel.locator('button[title="Reload"]').click()
   await filePanel.locator('input[placeholder="filter…"]').fill('raport')
   // Pollăm: după Reload listarea FS se întoarce ASINCRON, iar panoul se re-randează după ea —
   // un singur read (chiar şi după 500 ms) prindea lista încă ne-împrospătată pe un runner lent.
   const spText = await pollValue(() => filePanel.textContent().then((t) => t ?? ''), (t) => t.includes(SPECIAL))
   check('fișier cu spații/diacritice apare în listă', spText.includes(SPECIAL))
+  if (!spText.includes(SPECIAL)) console.error('  [diag] panoul e în', await fpPathInput.inputValue())
   const spRow = filePanel.locator('div.group').filter({ hasText: SPECIAL }).first()
+  // Fără rândul din listă NU mai crăpăm tot scriptul (crash-ul forţa re-rularea pe un container
+  // cu stare rămasă, unde picau apoi alte verificări): verificările de mai jos pică individual.
+  let spEditOk = false, spDelOk = false
+  if (spText.includes(SPECIAL)) {
   await spRow.hover()
   await spRow.locator('button[title="Edit"]').click()
   const spCm = page.locator('.monaco-editor')
   await spCm.waitFor({ state: 'visible', timeout: 15000 })
   await page.waitForTimeout(600)
-  check('editorul deschide fișierul cu nume special (encoding preview)', ((await page.locator('.monaco-editor .view-lines').textContent()) ?? '').includes('salut'))
+  spEditOk = ((await page.locator('.monaco-editor .view-lines').textContent()) ?? '').includes('salut')
   await page.keyboard.press('Escape')
   await page.waitForTimeout(400)
   await spRow.hover()
   await spRow.locator('button[title="Delete"]').click()
   await filePanel.locator('button:has-text("Delete")').last().click()
   await page.waitForTimeout(800)
-  check('ștergerea fișierului cu nume special reușește (encoding delete)', !((await filePanel.textContent()) ?? '').includes('raport ședință'))
+  spDelOk = !((await filePanel.textContent()) ?? '').includes('raport ședință')
+  }
+  check('editorul deschide fișierul cu nume special (encoding preview)', spEditOk)
+  check('ștergerea fișierului cu nume special reușește (encoding delete)', spDelOk)
 
   // ── Port forwards: panoul (declară un forward, apare în listă) ──
   await activePane.locator('button[title^="Port forwards"]').click()
@@ -919,8 +934,9 @@ try {
       const r = await fetch(`/api/hosts/${hid}/fs/cwd?sid=${sid}`, { credentials: 'same-origin' })
       return r.ok ? (await r.json()).cwd : `ERR ${r.status}`
     }, [host.id, x1sid]),
-    (v) => v === '/tmp')
+    (v) => v === '/tmp', 20000)
   check('agentul raportează cwd-ul sesiunii pentru deschiderea panoului', cwdApi === '/tmp')
+  if (cwdApi !== '/tmp') console.error('  [diag] fs/cwd a întors', JSON.stringify(cwdApi), 'pentru sid', x1sid)
 
   await newSession(page)                     // X2
   await page.waitForSelector('.xterm-screen', { timeout: 15000 })
