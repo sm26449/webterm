@@ -9,6 +9,14 @@ back.
 
 ## [Unreleased]
 
+### Fixed
+- **Pausing an upload could take effect only after the in-flight slices finished.** A pause
+  pressed while the next slices were being read and checksummed missed them, so they were
+  still sent. On a slow machine that delayed the pause by up to a slice's transfer time. This
+  was also the root of the last e2e check that failed only in CI: the stuck pause test kept
+  the shell busy, which then failed the next check (the special-characters file). Pause and
+  cancel are now checked right before each slice is sent.
+
 ## [3.5.3] — 2026-10-06 · agent (57)
 
 Fixes from four external UI reviews, each claim checked in the code first (34 of 34 confirmed),

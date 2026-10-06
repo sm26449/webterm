@@ -364,6 +364,15 @@ async function runLoop(c: Ctl): Promise<void> {
         else reject(new PausedSignal())           // pauză (sau abort la pauză): iese curat
       }
       xhr.timeout = 300_000
+      // Pauza/anularea apăsate cât citeam felia (arrayBuffer + CRC) nu prindeau XHR-ul ăsta în
+      // `c.xhrs`: abortInflight rula înainte să existe, deci felia pleca oricum şi pauza se aplica
+      // abia după ce rafala se termina. Pe un runner lent (CI) fereastra era destul de mare ca
+      // pauza să întârzie zeci de secunde (3.5.3). Verificăm chiar înainte de trimitere.
+      if (c.paused || c.cancelled) {
+        done()
+        reject(c.cancelled ? new Error('abort') : new PausedSignal())
+        return
+      }
       xhr.send(body)
     })
 
@@ -430,7 +439,10 @@ async function runLoop(c: Ctl): Promise<void> {
         if (doCrc) crc = crc32(crc, new Uint8Array(buf))   // ordinea fişierului, o singură dată per felie
         dispatchPos = end
         burst.push({ start, end, buf })
+        if (c.paused || c.cancelled) break      // pauză în timp ce citeam: nu mai construim rafala
       }
+      if (c.cancelled) return
+      if (c.paused) throw new PausedSignal()
       const t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now())
       const results = await Promise.allSettled(burst.map((b) => sendWithRetry(b.start, b.buf)))
       if (c.cancelled) return
