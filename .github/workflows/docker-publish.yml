@@ -416,8 +416,13 @@ jobs:
           # flake, deşi codul era bun). Testul e re-rulabil (setup-sau-login; fiecare rulare îşi
           # creează host + agent propriu). O a doua şansă transformă un flake rar într-un eşec
           # neglijabil, fără să ascundă o regresie reală (aia pică de două ori).
-          run_e2e() { E2E_SETUP_TOKEN=ci-e2e-token node e2e-session.mjs http://127.0.0.1:8000 smoke; }
-          run_e2e || { echo "::warning::E2E sessions failed once (timing-sensitive) — retrying"; sleep 3; run_e2e; }
+          # Liniile FAIL / [diag] ajung şi ca ADNOTĂRI: logul complet al jobului cere autentificare,
+          # adnotările se citesc public (API check-runs) — aşa un eşec intermitent se poate
+          # diagnostica fără acces la log. GitHub limitează la 10 adnotări de fiecare tip per pas.
+          annotate() { grep -E '^  (FAIL|\[diag\])' "$1" | head -10 | sed 's/^  /::warning title=E2E attempt '"$2"'::/' || true; }
+          run_e2e() { E2E_SETUP_TOKEN=ci-e2e-token node e2e-session.mjs http://127.0.0.1:8000 smoke 2>&1 | tee "/tmp/e2e-$1.log"; return "${PIPESTATUS[0]}"; }
+          run_e2e 1 || { annotate /tmp/e2e-1.log 1; echo "::warning::E2E sessions failed once (timing-sensitive) — retrying"; sleep 3;
+                         run_e2e 2 || { annotate /tmp/e2e-2.log 2; exit 1; }; }
 
       # Accesibilitate (axe-core, WCAG 2.1 AA) pe suprafața reală, cu agent online.
       # Blocantă: conținutul terminalului NU e în DOM (renderer WebGL), deci cititoarele de
