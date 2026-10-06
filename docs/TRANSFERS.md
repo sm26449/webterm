@@ -3,24 +3,31 @@
 How files move between your browser and a host, and — the part that matters for AI CLIs —
 how a screenshot in your clipboard becomes a **path** a tool on the host can open.
 
-Everything here uses the agent's existing file API (`fs` list / mkdir / upload / delete). No
-gateway or agent change was needed; a host that already runs the agent has all of it.
+Paste and drop (phase 1) use the agent's existing file API (`fs` list / mkdir / upload /
+delete) — no gateway or agent change was needed for them, so a host that already runs the agent
+has them. The performance work (phase 2, below) did add to both: the binary `FRAME_FSWRITE`
+upload frame in agent v55 and the gateway's reorder window (`_UploadWindow`).
 
 ## Where transfers show up
 
-- **Transfers chip** in the tab strip (right end, next to the split-view chips; shown only while
-  jobs exist — on every page: sessions, host pages and the Dashboard, so a running upload is never
-  out of sight when you switch context):
-  `↑ file 63% · 24 MB/s · 9m` for one upload, `↑ N transfers · 63%` for several. Click (or
-  Enter) opens a **popover** with the full list and the actions: Retry, Cancel, Dismiss,
-  Discard, Open folder, and for finished uploads **Copy path** / **Insert path** (insert types
-  the path into the current session when it is on the same host). The chip pulses only while
-  something is **stalled** or **retrying** (respects `prefers-reduced-motion`).
-- **Transfers strip** (under the top chrome, on every screen): appears **only when a job needs
-  a decision** — stalled, failed, or incomplete after a reload — and disappears when resolved.
-  A healthy upload never claims that space. State changes are still announced once through a
-  polite live region; with the tab in the background, *done* and *failed* also raise a browser
-  notification.
+Since 3.3.0 all progress lives in **one floating Transfers widget** in the **bottom-right
+corner** — on every page (sessions, host pages, the Dashboard), shown only while jobs exist, so a
+running transfer is never out of sight when you switch context. (It replaced the earlier tab-strip
+chip, its popover and the attention strip under the top chrome.) On a phone it spans the width
+between the gutters and sits above the key bar, so it never covers the terminal input.
+
+- **Collapsed** (the default, and remembered): a compact pill — `file 63%` for one job,
+  `N transfers · 63%` for several. It pulses only while something is **stalled**, **retrying** or
+  **failed** (respects `prefers-reduced-motion`). Click (or Enter) to expand.
+- **Expanded**: a card with every job — name, size, progress, speed, ETA — and its actions:
+  Retry, Pause / Resume, Cancel, Dismiss, Discard, Open folder, and for finished uploads
+  **Copy path** / **Insert path** (insert types the path into the current session when it is on
+  the same host). **Clear finished** appears once everything has stopped; **–** collapses it back
+  to the pill.
+- When a job newly **needs a decision** — stalled, failed, or incomplete after a reload — the
+  widget expands by itself, once (it does not fight you if you collapse it again). State changes
+  are announced once through a polite live region; with the tab in the background, *done* and
+  *failed* also raise a browser notification.
 - **Files panel**: the per-host rows it always had.
 
 ## Pipelining, adaptive chunks, pause/resume (phase 2)
@@ -46,7 +53,7 @@ smaller when it ran long or hit a stall/retry (cheaper retries). The gateway re-
 into 1 MiB blocks toward the agent, so the HTTP chunk size is **not** bounded by the 16 MiB agent
 frame — only by the reorder-window memory above.
 
-**Pause / Resume.** Each running transfer has a **Pause** button (in the chip popover and the strip);
+**Pause / Resume.** Each running transfer has a **Pause** button (in the Transfers widget);
 pausing stops sending, aborts the in-flight chunks, and keeps the `File` + offset in memory and the
 `.wtpart` temp on the host. **Resume** re-enters from the real offset via `fs_upload/status`. A reload
 while paused loses the `File` (as always) — the row comes back **Incomplete**; re-drop the same file
@@ -72,7 +79,7 @@ offset; **Discard** deletes the partial on the host.
 ## Downloads (host → browser)
 
 The **Download** button on a file row now goes through the **same engine** as uploads, so a download
-is a job too: it shows a `↓` row in the chip/strip with progress, speed and ETA, and can be retried
+is a job too: it shows a `↓` row in the Transfers widget with progress, speed and ETA, and can be retried
 or paused. The gateway serves `GET /fs/download` with **HTTP Range** support (206) over the existing
 `fs_read` (which already reads from any offset) — **no agent change**. The browser fetches from the
 current offset, with the same byte-level watchdog (Stalled → abort → retry with backoff); on a blip it
@@ -127,7 +134,7 @@ The file is uploaded to the host's **inbox** and its path is typed at the prompt
 - The inserted path is **shell-quoted only when needed** (spaces or special characters →
   single quotes, `'` inside becomes `'\''`), so a plain path stays plain.
 - If the tab that received the paste is closed by the time the upload finishes, nothing is
-  typed anywhere (it could be a different host's shell); the row stays in the popover with
+  typed anywhere (it could be a different host's shell); the row stays in the Transfers widget with
   **Copy path** until you dismiss it.
 
 **Settings → Preferences → Transfers** lets you send pasted files to the **session directory**

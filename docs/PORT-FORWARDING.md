@@ -141,7 +141,8 @@ The routing is already in `docker-compose.prod.yml`:
   the same application (which does the handshake + proxy). The app re-validates the
   Host against the exact domain suffix — defense-in-depth on top of the regex.
 - A **wildcard** certificate via DNS-01 (Cloudflare): `tls.domains` requests
-  `<domain>` + `*.<domain>` on the existing `le` resolver.
+  `<domain>` + `*.<domain>` on the `${WEBTERM_CERT_RESOLVER}` resolver, which is `ledns`
+  (DNS-01) when a Cloudflare token is configured (`le` is HTTP-01 and cannot issue a wildcard).
 
 The only manual step is the wildcard DNS record (one time):
 
@@ -176,5 +177,5 @@ every slug at once. **Without one** (HTTP-01, the default) forwards get no certi
 matches subdomains by pattern, so Traefik has no name list to request, and a wildcard is
 the only thing that would cover them — which HTTP-01 cannot issue. Port forwarding over
 HTTPS therefore requires a DNS-01 token. Wildcard DNS is required either way. **The Cloudflare
-token stays in `.env`, not in the application** — a secret with DNS privileges
+token stays in `secrets/cf_dns_api_token` (mounted into Traefik only), not in the application** — a secret with DNS privileges
 doesn't enter the app's blast radius.

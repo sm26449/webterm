@@ -164,8 +164,10 @@ See [design/ARCHITECTURE.md](design/ARCHITECTURE.md) for the agent's resilience
    and tells you the remedy — it used to swallow it.
 5. **Scheduled server-side backups are unencrypted** — the server holds the vault
    key in cleartext anyway. On **download** they are encrypted with your
-   passphrase. The ops backup (`scripts/backup.sh`) can be encrypted with
-   `WEBTERM_BACKUP_PASSPHRASE`.
+   passphrase. The ops backup (`scripts/backup.sh`) **is** encrypted with
+   `WEBTERM_BACKUP_PASSPHRASE`, which `install.sh` generates: an unattended run without a
+   passphrase deletes the archive and exits 1 (only `WEBTERM_BACKUP_ALLOW_PLAINTEXT=1`
+   overrides that).
 6. **Automation tokens bypass 2FA and passkeys by design.** A token is a bearer
    secret: whoever holds it acts without a second factor. That is why they are
    deliberately narrow — an explicit allowlist of read endpoints plus fleet `run`,
@@ -225,9 +227,12 @@ instance is answered locally by the audit log, not by us.
 
 1. **Domain + HTTPS + passkeys** — not just IP/password.
 2. **Keep the default dedicated agent user** — do not install as root unless a host needs it.
-3. **Decide the signing channel before enrolling agents** (see invariant 4): the project's
-   release key by default, or your own deployment key for independence — knowing it lets a
-   compromised gateway sign agent code.
+3. **Decide the signing key before enrolling agents** (see invariant 4): a fresh install
+   generates its own unencrypted deployment key on first boot — knowing it lets a compromised
+   gateway sign agent code. To use your own or a passphrase-protected key instead, put it in
+   place before first boot or before enrolling hosts: `/api/signing/generate` and `/import`
+   return 409 once a key exists, so you replace `data/agent-signing.key` and
+   `data/agent-signing.pub` on disk and restart the gateway.
 4. **Protect the gateway** — it is the security SPOF. Firewall, HSTS, timely updates.
 5. **Off-host + encrypted backups**; an **offline** copy of the signing key
    (without it you can no longer sign updates).

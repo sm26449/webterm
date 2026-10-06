@@ -240,6 +240,6 @@ published port that way is unreliable across Docker setups.) For a faithful test
 domain — that's the validated production flow.
 
 **Blueprint caveat:** blueprint field names are version-sensitive (this one targets the Authentik
-line pinned in the compose file, tested on 2026.8.2) and can fail to apply if they run before the
+line pinned in the compose file, currently 2026.8.3) and can fail to apply if they run before the
 default flows exist — if the provider doesn't appear, run `provision.sh` or register the
 application via the Authentik UI (the steps above), which always works.

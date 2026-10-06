@@ -92,6 +92,7 @@ markers (no agent change); fleet runs are written automatically. Persisted in
 
 The [single-account invariant](../README.md#security) applies: anyone who gets
 past login administers all hosts. Commands and history run at the same access level
-as the interactive shell — no new privileges. Fleet runs and history require either an
-authenticated browser session or an automation token with the `run` scope; hosts marked
+as the interactive shell — no new privileges. Fleet runs require either an
+authenticated browser session or an automation token with the `run` scope (the global
+history is browser-session only); hosts marked
 "require 2FA" refuse automation tokens outright.

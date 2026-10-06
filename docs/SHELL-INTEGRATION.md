@@ -22,7 +22,7 @@ In the host's session, press the **`⌘`** button in the toolbar → **"Enable s
 integration"**. The application **types the command into the terminal** (you see it,
 so you know exactly what runs on your server). The command:
 
-1. downloads `~/.webterm/shell-integration.sh` (~7 KB) using `python3` (the only
+1. downloads `~/.webterm/shell-integration.sh` (~9 KB) using `python3` (the only
    dependency the agent requires anyway);
 2. appends to `~/.bashrc` / `~/.zshrc` (idempotent — running it repeatedly doesn't
    duplicate):

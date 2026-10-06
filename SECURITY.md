@@ -66,7 +66,7 @@ please report it.
 
 ## Supported versions
 
-*Policy last reviewed: 2026-10-04 (3.3.1).*
+*Policy last reviewed: 2026-10-06 (3.5.1).*
 
 Actively developed; security fixes go into the latest version (`main` / the latest `vX.Y.Z` tag).
 Run the most recent official image or build from `main`.
@@ -75,5 +75,11 @@ Run the most recent official image or build from `main`.
 
 - Run with a **domain + HTTPS + passkeys**, not just IP/password.
 - Install agents as a **dedicated least-privilege user**, not root, wherever you can.
-- Generate your **fleet signing key** (Settings → Security) before enrolling agents.
+- Your **fleet signing key** is generated automatically on the first boot of an install with no
+  hosts (unencrypted, so auto-updates survive a restart); Settings → Security shows it. To use your
+  own or a passphrase-protected key instead, set it up **before first boot or before enrolling
+  hosts**: generate/import return 409 once a key exists, so you place `data/agent-signing.key`
+  (PEM, mode 600) and `data/agent-signing.pub` (its public key, hex) yourself and restart the
+  gateway. Swapping it after hosts are enrolled means reinstalling every agent (or the rollover in
+  [docs/design/SIGNED-UPDATES.md](docs/design/SIGNED-UPDATES.md)).
 - Do not expose `insecure` mode in production.

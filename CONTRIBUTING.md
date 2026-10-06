@@ -13,7 +13,7 @@ so we hold a high bar for correctness and testing. Please also read [docs/THREAT
 - `frontend/src/` — React + TypeScript + Vite + xterm.js.
 - `tests/` — Python suite (unit + integration) plus `.mjs`/`.sh` end-to-end scripts.
 - `docs/design/` — architecture notes (`ARCHITECTURE`, `SIGNED-UPDATES`, `SESSION-LIFECYCLE`,
-  `TELNET-BASTION`, `FUTURE-DIRECTIONS`).
+  `SPLIT-VIEWS`, `TELNET-BASTION`, `FUTURE-DIRECTIONS`).
 - `scripts/` — agent signing, backup/restore, e2e/smoke for CI.
 
 ## Build & run (dev)
@@ -55,7 +55,8 @@ focus restore, ConfirmModal trap, palette arrows+Enter). Moderate/minor counts a
 as a trend only. `scripts/mobile-audit.mjs` additionally blocks on interaction targets
 smaller than 24 px and on horizontal overflow at 320 px (reflow). Statically,
 `eslint-plugin-jsx-a11y` (recommended) runs in `npx eslint .`: rules that were clean when
-introduced are errors; the five with pre-existing hits are warnings until the sweep.
+introduced are errors; the four with pre-existing hits are warnings until the sweep, and
+`no-autofocus` is off (its uses are all initial focus inside dialogs, as the APG modal pattern asks).
 
 Add new suites to `scripts/run-tests.sh` (the list lives there, once — it used to be
 duplicated in the Makefile and in CI, and drifted).

@@ -1,14 +1,15 @@
 # Toolbox — database connections, command library & history
 
 The **Toolbox** is a per-host side panel, reached from a host's page or from the
-toolbar inside a session. It has three tabs:
+toolbar inside a session. It has four tabs:
 
 - **Connections** — saved launchers for the database CLIs on the host.
+- **SSH keys** — host-to-host deploy keys; covered in [SSH-KEYS](SSH-KEYS.md).
 - **Library** — built-in command recipes you copy and paste.
 - **History** — the host's own command history, searchable.
 
-Connections is the tab with a security model worth understanding; the other two
-are conveniences and are covered briefly at the end.
+Connections is the tab with a security model worth understanding here; Library and
+History are conveniences and are covered briefly at the end.
 
 ## Connections — one click to a database CLI
 
@@ -44,7 +45,7 @@ for most connections.
 ### Stored — encrypted, and never on the wire in the clear
 
 For a database you open constantly, you can store the password. It is kept in the
-**same encrypted vault as your SSH credentials** (Fernet / AES-GCM, unlocked by
+**same encrypted vault as your SSH credentials** (Fernet — AES-128-CBC + HMAC-SHA256 — unlocked by
 the server key). It is **never returned by the API** — editing a stored connection
 shows a blank password field; leaving it blank keeps the existing secret.
 
