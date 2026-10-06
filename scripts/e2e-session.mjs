@@ -1249,7 +1249,48 @@ try {
   await connDlg.locator('button:has-text("Cancel")').click()
   await tbx.locator('button[aria-label="Close"]').click().catch(() => {})
 
+  // ── AI tools (3.5.0): manager pentru CLAUDE.md / sub-agenţi / skill-uri, prin API-ul fs ──
+  // Deschis din meniul contextual al terminalului (calea principală), pe scope-ul Global (~) ca
+  // să nu depindem de cwd-ul OSC 7. Creăm un agent din şablonul „Code reviewer", verificăm
+  // FIŞIERUL de pe host (nu doar UI-ul), apoi îl ştergem prin ConfirmModal.
+  const runOnHost = async (command) => (await (await fetch(`${BASE}/api/hosts/${ciHost.id}/run`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie, Origin: BASE },
+    body: JSON.stringify({ command, timeout: 30 }),
+  })).json())
+  await page.locator('.xterm-screen').last().click({ button: 'right' })
+  await page.locator('[role=menu][aria-label="Terminal actions"] button:has-text("AI tools")').click()
+  const ai = page.locator('aside[aria-label="AI tools"]').last()
+  check('ai: panoul AI tools se deschide din meniul contextual', await visible(ai, 8000))
+  await ai.locator('[role=tab]:has-text("Global")').click()
+  await ai.locator('button:has-text("New agent")').click()
+  await ai.locator('input[placeholder="code-reviewer"]').fill('Bad Name')
+  await ai.locator('form button[type=submit]').click()
+  check('ai: un nume invalid e refuzat (regula + sugestie), fără să creeze ceva pe host',
+    await visible(ai.locator('[role=alert]:has-text("Try: bad-name")'))
+    && ((await runOnHost('ls ~/.claude/agents 2>/dev/null')).stdout ?? '').trim() === '')
+  await ai.locator('input[placeholder="code-reviewer"]').fill('e2e-reviewer')
+  await ai.locator('form select').selectOption('agent-reviewer')
+  await ai.locator('form button[type=submit]').click()
+  const aiEditor = page.locator('[role=dialog][aria-label="Edit e2e-reviewer"]')
+  check('ai: crearea deschide editorul pe fişierul nou', await visible(aiEditor, 10000))
+  await page.keyboard.press('Escape')
+  await hidden(aiEditor)
+  const aiFile = await pollValue(
+    async () => (await runOnHost('cat ~/.claude/agents/e2e-reviewer.md')).stdout ?? '',
+    (v) => v.includes('name: e2e-reviewer'))
+  check('ai: fişierul e pe host, cu frontmatter-ul şablonului',
+    aiFile.includes('name: e2e-reviewer') && aiFile.includes('tools: Read, Grep, Glob, Bash'))
+  check('ai: lista arată agentul cu descrierea din frontmatter',
+    await visible(ai.locator('li:has-text("e2e-reviewer"):has-text("Reviews recent code changes")'), 8000))
+  await ai.locator('button[aria-label="Delete e2e-reviewer"]').click()
+  await page.locator('[role=alertdialog] button:has-text("Delete")').click()
+  await hidden(ai.locator('li:has-text("e2e-reviewer")'), 8000)
+  const aiGone = await runOnHost('test -e ~/.claude/agents/e2e-reviewer.md && echo there || echo gone')
+  check('ai: ştergerea (cu confirmare) scoate fişierul de pe host', (aiGone.stdout ?? '').trim() === 'gone')
+  await ai.locator('button[aria-label="Close"]').click().catch(() => {})
+
   // ── Add host → Test connection + cheie generată la creare (3.5.4) ──
+  // După AI tools (care cer vederea de sesiune): de aici înainte paşii pornesc de pe Home.
   // Ţintă SSH REALĂ fără sshd în imagine: un server asyncssh (asyncssh e deja în container, e
   // dependenţa gateway-ului) pornit pe 127.0.0.1:2222 prin agentul de test. Gateway-ul îl sună
   // pe loopback-ul containerului — exact dial-ul real. Cheile publice acceptate vin din
@@ -1305,7 +1346,7 @@ try {
   await addHostDlg.getByLabel('SSH password').fill('orice')
   await addHostDlg.locator('[data-testid="hosttest-run"]').click()
   check('hosttest: port închis → „TCP failed: Connection refused" + focus pe Port',
-    await visible(testResult.locator('text=Connection refused'), 15000)
+    await visible(testResult.locator('text=Connection refused').first(), 15000)
     && (await page.evaluate(() => document.activeElement?.getAttribute('aria-label'))) === 'Port')
   await addHostDlg.locator('button:has-text("Cancel")').last().click()
   await hidden(addHostDlg)
@@ -1348,46 +1389,6 @@ try {
     if (h) await fetch(`${BASE}/api/hosts/${h.id}`, { method: 'DELETE', headers: { Cookie: cookie, Origin: BASE } })
   }
   await ciRun('[ -f /tmp/wt-e2e-sshd.pid ] && kill "$(cat /tmp/wt-e2e-sshd.pid)"; rm -f /tmp/wt-e2e-sshd.pid')
-
-  // ── AI tools (3.5.0): manager pentru CLAUDE.md / sub-agenţi / skill-uri, prin API-ul fs ──
-  // Deschis din meniul contextual al terminalului (calea principală), pe scope-ul Global (~) ca
-  // să nu depindem de cwd-ul OSC 7. Creăm un agent din şablonul „Code reviewer", verificăm
-  // FIŞIERUL de pe host (nu doar UI-ul), apoi îl ştergem prin ConfirmModal.
-  const runOnHost = async (command) => (await (await fetch(`${BASE}/api/hosts/${ciHost.id}/run`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie, Origin: BASE },
-    body: JSON.stringify({ command, timeout: 30 }),
-  })).json())
-  await page.locator('.xterm-screen').last().click({ button: 'right' })
-  await page.locator('[role=menu][aria-label="Terminal actions"] button:has-text("AI tools")').click()
-  const ai = page.locator('aside[aria-label="AI tools"]').last()
-  check('ai: panoul AI tools se deschide din meniul contextual', await visible(ai, 8000))
-  await ai.locator('[role=tab]:has-text("Global")').click()
-  await ai.locator('button:has-text("New agent")').click()
-  await ai.locator('input[placeholder="code-reviewer"]').fill('Bad Name')
-  await ai.locator('form button[type=submit]').click()
-  check('ai: un nume invalid e refuzat (regula + sugestie), fără să creeze ceva pe host',
-    await visible(ai.locator('[role=alert]:has-text("Try: bad-name")'))
-    && ((await runOnHost('ls ~/.claude/agents 2>/dev/null')).stdout ?? '').trim() === '')
-  await ai.locator('input[placeholder="code-reviewer"]').fill('e2e-reviewer')
-  await ai.locator('form select').selectOption('agent-reviewer')
-  await ai.locator('form button[type=submit]').click()
-  const aiEditor = page.locator('[role=dialog][aria-label="Edit e2e-reviewer"]')
-  check('ai: crearea deschide editorul pe fişierul nou', await visible(aiEditor, 10000))
-  await page.keyboard.press('Escape')
-  await hidden(aiEditor)
-  const aiFile = await pollValue(
-    async () => (await runOnHost('cat ~/.claude/agents/e2e-reviewer.md')).stdout ?? '',
-    (v) => v.includes('name: e2e-reviewer'))
-  check('ai: fişierul e pe host, cu frontmatter-ul şablonului',
-    aiFile.includes('name: e2e-reviewer') && aiFile.includes('tools: Read, Grep, Glob, Bash'))
-  check('ai: lista arată agentul cu descrierea din frontmatter',
-    await visible(ai.locator('li:has-text("e2e-reviewer"):has-text("Reviews recent code changes")'), 8000))
-  await ai.locator('button[aria-label="Delete e2e-reviewer"]').click()
-  await page.locator('[role=alertdialog] button:has-text("Delete")').click()
-  await hidden(ai.locator('li:has-text("e2e-reviewer")'), 8000)
-  const aiGone = await runOnHost('test -e ~/.claude/agents/e2e-reviewer.md && echo there || echo gone')
-  check('ai: ştergerea (cu confirmare) scoate fişierul de pe host', (aiGone.stdout ?? '').trim() === 'gone')
-  await ai.locator('button[aria-label="Close"]').click().catch(() => {})
 
   // ── Sfaturi contextuale (coach tips): apariţie scalonată + persistenţă + reset ──
   // Presetarea de la început a marcat toate cheile `wt_tip_*` ca văzute (ca sfaturile să nu
