@@ -30,16 +30,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Runner FIXAT pe ubuntu-24.04, nu `ubuntu-latest`: eticheta aceea trece pe Ubuntu 26 din
+  # 2026-10-19, iar un release nu trebuie să-şi schimbe mediul de build din senin (apt, Python,
+  # Docker, fonturi). Trecerea pe 26 o facem deliberat, cu un run verde înainte.
   # Testele Python unitare/hermetice (fără agent, tmux, sshd sau browser real) + testele de
   # AUTH (stepup in-process ASGI; security pornește un uvicorn efemer local). Rulează RAPID
   # (no docker build) and blocks publishing the image if it fails (build: needs: unit-tests).
   # Testele care cer agent/ssh real (ssh, integration_m1/storm/file_transfer) rămân dev-only —
   # calea live e acoperită de e2e-session.mjs + fs-test.sh + fwd-test.sh.
   unit-tests:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Secret scan (gitleaks — working tree)
         run: |
           # blocks a PR that adds a real secret. Test fixtures (dummy passwords/tokens,
@@ -134,7 +137,7 @@ jobs:
 
   build:
     needs: unit-tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
@@ -144,7 +147,7 @@ jobs:
       id-token: write
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Update-urile de agent sunt semnate Ed25519, iar agenții refuză semnături
       # nevalide. Semnătura din repo a rămas odată nesincronizată luni de zile
@@ -245,7 +248,7 @@ jobs:
           print("agent signature: valid")
           EOF
 
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       # Failsafe (post-mortem v1.0.11, ecran alb livrat în producție): imaginea
       # NU se publică dacă UI-ul nu pornește. Build local (load, același cache
@@ -485,7 +488,7 @@ jobs:
 
       - name: Mobile screenshots on failure
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: mobile-screenshots
           path: /tmp/wt-shots
@@ -497,7 +500,7 @@ jobs:
 
       - name: Log in to ghcr.io
         if: github.event_name != 'pull_request'   # PR-urile (ex. dependabot) validează build+teste, NU publică
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -505,7 +508,7 @@ jobs:
 
       - name: Tags and metadata
         id: meta
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |

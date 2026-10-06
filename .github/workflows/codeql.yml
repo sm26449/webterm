@@ -19,7 +19,7 @@ permissions:
 jobs:
   analyze:
     name: Analyze ${{ matrix.language }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       security-events: write   # publică rezultatele în tab-ul Security
       actions: read
@@ -29,11 +29,11 @@ jobs:
       matrix:
         language: [python, javascript-typescript]
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      # Limbaje interpretate → fără build; CodeQL extrage direct. Acţiunile oficiale CodeQL
-      # sunt pe tag major (@v3), ca în ghidul GitHub; dependabot (github-actions) le urmăreşte.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Limbaje interpretate → fără build; CodeQL extrage direct. Fixate pe SHA ca restul
+      # acţiunilor (v4 = runtime Node 24; v3 rula pe Node 20, depreciat pe runnere din 2025-09).
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4
         with:
           languages: ${{ matrix.language }}
           # `security-extended`, nu `security-and-quality`: vrem o POARTĂ de securitate cu recall
@@ -42,6 +42,6 @@ jobs:
           # e deja acoperită de ruff (Python) + eslint/tsc (frontend).
           queries: security-extended
       - name: Analyze
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4
         with:
           category: "/language:${{ matrix.language }}"
