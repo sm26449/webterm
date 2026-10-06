@@ -1110,7 +1110,8 @@ function HostMenu(props: {
               <PlusIcon /> {props.connectionType !== 'agent' ? t('sidebar.connect') : t('sidebar.newSession')}
             </button>
             <div className="my-1 border-t border-ink-700" role="separator" />
-            {props.online && (
+            {/* Files merge doar prin agent: pe SSH/telnet apelurile picau cu „host offline" */}
+            {props.online && (!props.connectionType || props.connectionType === 'agent') && (
               <button role="menuitem" className={`${item} text-slate-200`} onClick={act(props.onFiles)}>
                 <FilesIcon /> {t('sidebar.files')}
               </button>

@@ -6,6 +6,11 @@ holds the user-facing guides and the internal architecture notes.
 ## Guides
 
 - [RUNBOOK](RUNBOOK.md) — operations and recovery procedures
+- [HOSTS](HOSTS.md) — connection types, tags, 2FA step-up, credential policies, install links, Wake-on-LAN, the OS-updates badge
+- [AUTOMATION-TOKENS](AUTOMATION-TOKENS.md) — API tokens for cron/CI/monitoring: scopes, curl examples, what they can never do
+- [ALERTS](ALERTS.md) — email and webhook alerts: every event, resource thresholds, muting
+- [GUARDRAIL](GUARDRAIL.md) — confirm/block rules for dangerous commands, and where they apply
+- [AI-TOOLS](AI-TOOLS.md) — managing Claude Code subagents, skills and CLAUDE.md on a host
 - [SHORTCUTS](SHORTCUTS.md) — keyboard shortcuts
 - [SHELL-INTEGRATION](SHELL-INTEGRATION.md) — OSC 133 "commands as objects" setup
 - [PORT-FORWARDING](PORT-FORWARDING.md) — exposing host services through the browser

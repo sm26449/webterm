@@ -6,6 +6,7 @@ import { copyText } from '../../lib/clipboard'
 import { btn, downloadBlob, field, heading } from './ui'
 import { useConfirm } from '../../lib/confirm'
 import { askSecret } from '../../lib/secretPrompt'
+import HelpTip from '../HelpTip'
 
 // Backup & restore: arhivă criptată descărcabilă, backup automat programat, copii stocate pe
 // server, copie off-host (OAuth Google Drive/Dropbox sau SFTP/FTPS direct) şi restore din .wtbk.
@@ -577,8 +578,9 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
           configurăm doar unde şi cum ne conectăm, cu credenţialele criptate în seif. */}
       {isDirect && (
       <form onSubmit={saveDirect} data-testid="direct-backup-form" className="mt-3 flex flex-col gap-2">
-        <p className="text-xs text-slate-500">
-          {directForm.kind === 'sftp' ? t('settings.direct.sftpHint') : t('settings.direct.ftpsHint')}
+        <p className="flex items-start gap-2 text-xs text-slate-500">
+          <span>{directForm.kind === 'sftp' ? t('settings.direct.sftpHint') : t('settings.direct.ftpsHint')}</span>
+          <HelpTip id="directBackup" />
         </p>
         <div className="flex gap-2">
           <input value={directForm.host} spellCheck={false} autoComplete="off"

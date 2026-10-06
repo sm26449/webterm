@@ -6,6 +6,7 @@ import { useI18n } from '../lib/i18n'
 import { useDrawer } from '../lib/useDrawer'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { TerminalPromptIcon, PlusIcon, TrashIcon, PencilIcon, CopyIcon } from './Icons'
+import HelpTip from './HelpTip'
 
 // Bibliotecă de reţete built-in (client-side): comenzi comune pe categorii, cu {placeholder}-e.
 // Acţiunea e Copy (universal — merge şi din pagina hostului, şi din sesiune); lipeşti în terminal.
@@ -333,7 +334,7 @@ export default function ToolboxPanel(props: {
             <div className="p-4 text-center text-xs text-slate-500">{t('toolbox.loading')}</div>
           ) : rows.length === 0 ? (
             <div className="p-6 text-center text-xs text-slate-500">
-              {t('toolbox.empty')}<br />
+              <span className="inline-flex items-center gap-2">{t('toolbox.empty')}<HelpTip id="toolbox" /></span><br />
               <button onClick={() => setEdit(blank())} className="mt-2 wt-link">{t('toolbox.newFirst')}</button>
             </div>
           ) : (

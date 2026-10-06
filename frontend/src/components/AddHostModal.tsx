@@ -10,6 +10,7 @@ import CoachTip from './CoachTip'
 import { TIP_ADDHOST_AGENT, TIP_ADDHOST_SSH } from '../lib/coachtips'
 import { isWalkthroughDone } from '../lib/walkthrough'
 import { ServerIcon, KeyIcon } from './Icons'
+import HelpTip from './HelpTip'
 
 type ConnType = 'agent' | 'ssh' | 'ssh-jump' | 'telnet' | 'telnet-jump'
 
@@ -527,6 +528,7 @@ export default function AddHostModal(props: {
                   onChange={(e) => setRequire2fa(e.target.checked)}
                   className="h-4 w-4 rounded accent-sky-600" />
                 {t('addhost.require2fa')}
+                <HelpTip id="require2fa" />
               </label>
             )}
 
@@ -536,7 +538,7 @@ export default function AddHostModal(props: {
             {connType === 'agent' && !edit && (
               <div className="flex flex-col gap-2 rounded-lg border border-ink-800 p-3">
                 <label className="block">
-                  <span className={label}>{t('addhost.enrollTtl')}</span>
+                  <span className={label + ' flex items-center gap-2'}>{t('addhost.enrollTtl')}<HelpTip id="enrollTtl" /></span>
                   <select value={enrollTtl} onChange={(e) => setEnrollTtl(Number(e.target.value))} className={field}>
                     <option value={900}>{t('addhost.ttl15m')}</option>
                     <option value={3600}>{t('addhost.ttl1h')}</option>
@@ -561,7 +563,7 @@ export default function AddHostModal(props: {
             </label>
 
             <label className="block">
-              <span className={label}>{t('addhost.tags')}</span>
+              <span className={label + ' flex items-center gap-2'}>{t('addhost.tags')}<HelpTip id="tags" /></span>
               <input placeholder={t('addhost.tagsPlaceholder')} value={tags} list="wt-tag-suggestions"
                 onChange={(e) => setTags(e.target.value)} className={field} />
               {(props.tagSuggestions ?? []).length > 0 && (

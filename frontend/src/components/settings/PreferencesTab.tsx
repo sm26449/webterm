@@ -9,6 +9,7 @@ import { resetAllTips } from '../../lib/coachtips'
 import { INBOX_REL, PasteDest, inboxDays, pasteDest, setInboxDays, setPasteDest } from '../../lib/transfers'
 import { UpdatesMode, setUpdatesMode, unmuteAllHosts, useUpdatesPref } from '../../lib/updatesPref'
 import { field, heading } from './ui'
+import HelpTip from '../HelpTip'
 
 // Preferinţe: fus orar, accesibilitate (mod screen-reader), verificarea de versiune. Extras din
 // SettingsModal ca tab de sine stătător (îşi ţine starea, se încarcă la montare).
@@ -177,7 +178,7 @@ export default function PreferencesTab() {
       {/* ── Insigna de update-uri OS (lib/updatesPref) ── */}
       {/* Nivelul global al „mascării"; cel per host stă în meniul ⋯ al hostului şi în modalul de
           update-uri, iar aici doar numărăm hosturile ascunse şi le putem readuce pe toate. */}
-      <h3 className={heading}>{t('updates.prefTitle')}</h3>
+      <h3 className={heading + ' flex items-center gap-2'}>{t('updates.prefTitle')}<HelpTip id="updatesBadge" /></h3>
       <p className="mt-1 text-xs text-slate-500">{t('updates.prefDesc')}</p>
       <select value={updPref.mode} aria-label={t('updates.prefTitle')}
         onChange={(e) => setUpdatesMode(e.target.value as UpdatesMode)} className={field + ' mt-2'}>

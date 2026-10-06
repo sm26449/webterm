@@ -1028,7 +1028,8 @@ tests/                     unit + integration suite (dev): telnet (shim/bastion)
 docs/                      RUNBOOK · SHORTCUTS · SHELL-INTEGRATION ·
                           PORT-FORWARDING · FLEET · SERIAL-CONSOLE ·
                           SSH-KEYS · SSH-JUMP · DATABASE-TOOLBOX · SSO ·
-                          TRANSFERS · THREAT-MODEL
+                          TRANSFERS · THREAT-MODEL · HOSTS ·
+                          AUTOMATION-TOKENS · ALERTS · GUARDRAIL · AI-TOOLS
   design/                  architecture notes: ARCHITECTURE · SIGNED-UPDATES ·
                           SESSION-LIFECYCLE · SPLIT-VIEWS ·
                           TELNET-BASTION · FUTURE-DIRECTIONS

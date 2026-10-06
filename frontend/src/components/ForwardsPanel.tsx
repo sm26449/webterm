@@ -4,6 +4,7 @@ import { useI18n } from '../lib/i18n'
 import { useDrawer } from '../lib/useDrawer'
 import { LinkIcon, PencilIcon, PlusIcon, RefreshIcon, TrashIcon } from './Icons'
 import { copyText } from '../lib/clipboard'
+import HelpTip from './HelpTip'
 
 type ProbeState = 'checking' | 'up' | 'down'
 
@@ -310,7 +311,7 @@ export default function ForwardsPanel(props: {
                 nu din WebTerm. Doar arătăm ce/unde, fără să pretindem că provisionăm noi ceva. */}
             {(fApp === 'proxmox' || fApp === 'portainer' || fApp === 'grafana') && (
               <div className="rounded border border-ink-700 bg-ink-900/60 px-2.5 py-2 text-[11px] leading-snug text-slate-400">
-                <span className="font-semibold text-slate-300">{t('forwards.ssoTitle')}</span> {t('forwards.ssoHint')}
+                <span className="font-semibold text-slate-300">{t('forwards.ssoTitle')}</span> {t('forwards.ssoHint')} <HelpTip id="forwardsSso" />
                 {fApp === 'proxmox' && <span className="mt-1 block wt-good">{t('forwards.ssoProxmox')}</span>}
                 {fApp === 'portainer' && <span className="mt-1 block wt-warn">{t('forwards.ssoPortainer')}</span>}
                 {fApp === 'grafana' && <span className="mt-1 block wt-good">{t('forwards.ssoGrafana')}</span>}

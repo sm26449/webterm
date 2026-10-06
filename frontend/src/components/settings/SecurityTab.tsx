@@ -9,6 +9,7 @@ import { KeyIcon } from '../Icons'
 import { copyText } from '../../lib/clipboard'
 import { downloadBlob, field, heading } from './ui'
 import { askSecret } from '../../lib/secretPrompt'
+import HelpTip from '../HelpTip'
 
 interface Passkey {
   id: number
@@ -437,7 +438,7 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
       )}
 
       {/* ── Cheie de semnare a flotei ── */}
-      <h3 className={heading}>{t('settings.signingKey')}</h3>
+      <h3 className={heading + ' flex items-center gap-2'}>{t('settings.signingKey')}<HelpTip id="signingKey" /></h3>
       <p className="mt-1 text-xs text-slate-500">
         {t('settings.signHintA')} <span className="text-slate-300">{t('settings.signHintYourKey')}</span>{t('settings.signHintB')} <span className="text-slate-300">{t('settings.signHintBeforeEnroll')}</span>{t('settings.signHintC')}
       </p>
@@ -731,7 +732,7 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
       )}
 
       {/* ── Token-uri de automatizare ── */}
-      <h3 className={heading}>{t('settings.tokens.title')}</h3>
+      <h3 className={heading + ' flex items-center gap-2'}>{t('settings.tokens.title')}<HelpTip id="tokens" /></h3>
       <p className="mt-1 text-xs text-slate-500">{t('settings.tokens.hint')}</p>
       {tokPlain && (
         <div role="status" aria-live="polite" className="mt-2 rounded-lg bg-emerald-500/10 p-3 ring-1 ring-emerald-500/30">
@@ -800,7 +801,7 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
       </form>
 
       {/* ── Token-uri de înrolare DE GRUP (onboarding la scară) ── */}
-      <h3 className={heading}>{t('settings.enrollGroups.title')}</h3>
+      <h3 className={heading + ' flex items-center gap-2'}>{t('settings.enrollGroups.title')}<HelpTip id="enrollGroups" /></h3>
       <p className="mt-1 text-xs text-slate-500">{t('settings.enrollGroups.hint')}</p>
       {/* crearea trăieşte în fluxul de onboarding (+ host → „Mai multe maşini"); aici e doar
           gestiunea credenţialei (listă + revocare), plus un pointer ca s-o găseşti. */}
@@ -838,7 +839,7 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
       </ul>
 
       {/* ── Guardrail de comenzi ── */}
-      <h3 className={heading}>{t('settings.dkpolicy.title')}</h3>
+      <h3 className={heading + ' flex items-center gap-2'}>{t('settings.dkpolicy.title')}<HelpTip id="deployKeyPolicy" /></h3>
       <p className="mt-1 text-xs text-slate-500">{t('settings.dkpolicy.hint')}</p>
       <label className="mt-2 flex cursor-pointer items-start gap-2.5 text-sm text-slate-300">
         <input type="checkbox" checked={dkPolicy.require_2fa_source} className="mt-0.5 h-4 w-4 rounded accent-sky-600"
@@ -854,7 +855,7 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
       </label>
       {dkPolicyMsg && <div className="mt-1 text-xs text-slate-500">{dkPolicyMsg}</div>}
 
-      <h3 className={heading}>{t('settings.guardrail')}</h3>
+      <h3 className={heading + ' flex items-center gap-2'}>{t('settings.guardrail')}<HelpTip id="guardrail" /></h3>
       <label className="mt-2 flex cursor-pointer items-start gap-2.5 text-sm text-slate-300">
         <input
           type="checkbox"

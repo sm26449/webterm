@@ -10,6 +10,7 @@ import {
   singlePath, slugify, templatesFor, validName,
 } from '../lib/aitools'
 import { PlusIcon, RefreshIcon } from './Icons'
+import HelpTip from './HelpTip'
 
 const FileEditor = lazy(() => import('./FileEditor'))
 
@@ -261,7 +262,7 @@ export default function AiToolsPanel(props: {
       {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Escape pe regiunea drawer-ului (vezi useDrawer) */}
       <aside ref={asideRef} className={asideCls} aria-label={t('ai.title')} onKeyDown={drawer.onKeyDown}>
         <div className="flex items-center gap-2 border-b border-ink-800 px-3 py-2">
-          <span className="text-sm font-semibold text-slate-200">{t('ai.title')}</span>
+          <span className="flex items-center gap-2 text-sm font-semibold text-slate-200">{t('ai.title')}<HelpTip id="aiTools" /></span>
           <span className="text-[11px] text-slate-500">Claude Code · AGENTS.md</span>
           <button onClick={load} className="wt-touch ml-auto shrink-0 rounded px-1.5 text-slate-400 hover:bg-ink-800"
             title={t('ai.reload')} aria-label={t('ai.reload')}><RefreshIcon /></button>

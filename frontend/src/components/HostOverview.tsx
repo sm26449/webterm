@@ -12,6 +12,8 @@ import { DockerIcon, DownloadIcon, FilesIcon, ForwardIcon, LinkIcon, NoteIcon, P
 import SessionPreview from './SessionPreview'
 import Sparkline from './Sparkline'
 import TranscriptPlayer from './TranscriptPlayer'
+import HelpTip from './HelpTip'
+import type { HelpId } from '../lib/help'
 
 // Panourile hub-ului se încarcă DOAR când deschizi tab-ul lor (FilePanel aduce Monaco — mare),
 // nu în bundle-ul paginii de host. `embed` le randează full-width, fără drawer/scrim/close.
@@ -710,8 +712,8 @@ function HostDetail({ host }: { host: Host }) {
       )}
 
       <Card title={t('host.secSecurity')} icon={<ShieldIcon />} accent="#38bdf8">
-        <Row k={t('host.twoFaOnConnect')} v={host.require_2fa ? t('host.yesPasskey') : t('host.no')} tone={host.require_2fa ? 'good' : undefined} />
-        <Row k={t('host.credentials')} v={credPolicy} action={host.has_credentials && host.credential_policy !== 'ask' ? (
+        <Row k={t('host.twoFaOnConnect')} help="require2fa" v={host.require_2fa ? t('host.yesPasskey') : t('host.no')} tone={host.require_2fa ? 'good' : undefined} />
+        <Row k={t('host.credentials')} help="credentialPolicy" v={credPolicy} action={host.has_credentials && host.credential_policy !== 'ask' ? (
           <button onClick={forgetCreds} disabled={forgetting}
             className="wt-touch rounded-md border border-ink-700 px-2 py-0.5 text-xs text-slate-300 hover:border-rose-500/60 hover:text-rose-300 disabled:opacity-50">
             {t('host.forgetCreds')}
@@ -760,10 +762,10 @@ function HostDetail({ host }: { host: Host }) {
   )
 }
 
-function Row(props: { k: string; v: string; mono?: boolean; tone?: 'good'; badge?: string; action?: React.ReactNode }) {
+function Row(props: { k: string; v: string; mono?: boolean; tone?: 'good'; badge?: string; action?: React.ReactNode; help?: HelpId }) {
   return (
     <div className="flex items-center justify-between gap-3 border-b border-ink-800/60 py-2 last:border-0">
-      <dt className="shrink-0 text-sm text-slate-500">{props.k}</dt>
+      <dt className="flex shrink-0 items-center gap-1.5 text-sm text-slate-500">{props.k}{props.help && <HelpTip id={props.help} />}</dt>
       <dd className={`min-w-0 truncate text-right text-sm ${props.tone === 'good' ? 'wt-good' : 'text-slate-200'} ${props.mono ? 'font-mono' : ''}`}>
         {props.v}
         {props.badge && (

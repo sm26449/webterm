@@ -149,6 +149,28 @@ def main():
         missing = sorted(c for c in codes if ("err." + c) not in cat)
         check(f"{lang}: fiecare cod de eroare are cheie în catalog", not missing, str(missing[:8]))
 
+    # 5. Ajutorul „?" (lib/help.ts) trimite la documentaţie pe GitHub. Un link spre un fişier
+    #    redenumit sau spre un titlu reformulat duce omul pe un 404 / în capul paginii exact când
+    #    a cerut ajutor — deci fiecare `doc: 'docs/X.md#ancora'` trebuie să existe în repo.
+    help_src = open(os.path.join(SRC, "lib", "help.ts"), encoding="utf-8").read()
+    docs = re.findall(r"(\w+): \{ doc: '([^']+)'", help_src)
+    check("help.ts: registrul nu e gol", len(docs) > 10, str(len(docs)))
+
+    def slug(h):
+        return re.sub(r"[^\w\- ]", "", h.strip().lower()).replace(" ", "-")
+
+    for hid, ref in docs:
+        path, _, anchor = ref.partition("#")
+        full = os.path.join(ROOT, path)
+        if not os.path.isfile(full):
+            check(f"help.{hid}: {path} există", False, "lipseşte")
+            continue
+        heads = [slug(m) for m in re.findall(r"^#{1,6} (.+)$", open(full, encoding="utf-8").read(), re.M)]
+        check(f"help.{hid}: {ref} duce la un titlu existent", not anchor or anchor in heads)
+        for lang, cat in (("en", en), ("ro", ro)):
+            check(f"help.{hid}: titlu + text în {lang}",
+                  bool(cat.get(f"help.{hid}.title")) and bool(cat.get(f"help.{hid}.body")))
+
     print(f"\n{ok}/{total} teste trecute")
     return ok == total
 

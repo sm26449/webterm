@@ -4,6 +4,7 @@ import { askSecret } from '../../lib/secretPrompt'
 import { useI18n } from '../../lib/i18n'
 import { btn, field, heading } from './ui'
 import { fmtTs } from '../../lib/tz'
+import HelpTip from '../HelpTip'
 
 // Notificări: domeniul de port-forwarding, alerte pe email (SMTP) + webhook, praguri de resurse.
 // Extras din SettingsModal ca tab de sine stătător (îşi ţine starea, se încarcă la montare).
@@ -124,7 +125,7 @@ export default function NotificationsTab() {
   return (
     <div>
       {/* ── Port forwarding (domeniu) ── */}
-      <h3 className={heading}>{t('settings.forward.title')}</h3>
+      <h3 className={heading + ' flex items-center gap-2'}>{t('settings.forward.title')}<HelpTip id="forwardDomain" /></h3>
       <p className="mt-1 text-xs text-slate-500">
         {t('settings.forward.hintA')} <span className="font-mono">{t('settings.forward.subdomain')}</span>{t('settings.forward.hintB')} <span className="font-mono">{t('settings.forward.exampleDomain')}</span>{t('settings.forward.hintC')} <span className="font-mono">.env</span>{t('settings.forward.hintD')}
       </p>
@@ -171,7 +172,7 @@ export default function NotificationsTab() {
       </div>
 
       {/* ── Alerte pe email (SMTP) ── */}
-      <h3 className={heading}>{t('settings.smtp.title')}</h3>
+      <h3 className={heading + ' flex items-center gap-2'}>{t('settings.smtp.title')}<HelpTip id="smtp" /></h3>
       <p className="mt-1 text-xs text-slate-500">{t('settings.smtp.hint')}</p>
       <div className="mt-2 flex flex-col gap-2">
         <div className="flex gap-2">
@@ -200,7 +201,7 @@ export default function NotificationsTab() {
         <input value={smtp.webhook} onChange={(e) => setSmtp({ ...smtp, webhook: e.target.value })}
           placeholder={t('settings.smtp.webhookPlaceholder')} aria-label={t('settings.smtp.webhook')}
           spellCheck={false} className={field} />
-        <p className="text-xs text-slate-500">{t('settings.smtp.webhookHint')}</p>
+        <p className="flex items-start gap-2 text-xs text-slate-500"><span>{t('settings.smtp.webhookHint')}</span><HelpTip id="webhook" /></p>
         <div className="flex items-center gap-2">
           <button disabled={busy} onClick={saveSmtp} className={btn.primary}>
             {t('settings.save')}
@@ -239,7 +240,7 @@ export default function NotificationsTab() {
       </div>
 
       {/* ── Alerte pe resurse ── */}
-      <h3 className={heading}>{t('settings.alerts.title')}</h3>
+      <h3 className={heading + ' flex items-center gap-2'}>{t('settings.alerts.title')}<HelpTip id="resourceAlerts" /></h3>
       <p className="mt-1 text-xs text-slate-500">{t('settings.alerts.hint')}</p>
       <div className="mt-2 flex flex-wrap items-center gap-3">
         {([['cpu', 'CPU'], ['mem', 'RAM'], ['disk', t('settings.alerts.disk')]] as const).map(([k, label]) => (
