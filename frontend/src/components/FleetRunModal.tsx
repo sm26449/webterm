@@ -374,13 +374,13 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
                               if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); setRenaming(null) }
                             }}
                             className="w-36 rounded bg-ink-800 px-1.5 py-0.5 text-[11px] text-slate-200 ring-1 ring-sky-500" />
-                          <button type="button" onClick={renameSaved} className="text-[11px] wt-link hover:underline">{t('fleet.renameSave')}</button>
+                          <button type="button" onClick={renameSaved} className="min-h-6 px-1 text-[11px] wt-link hover:underline">{t('fleet.renameSave')}</button>
                         </span>
                       ) : (
-                        <span key={s.id} className="inline-flex items-center gap-1 rounded bg-ink-800 px-1.5 py-0.5 text-[11px] text-slate-300 ring-1 ring-ink-700">
+                        <span key={s.id} className="inline-flex items-center gap-0.5 rounded bg-ink-800 pl-1.5 text-[11px] text-slate-300 ring-1 ring-ink-700">
                           <button type="button" onClick={() => pickSaved(s)} title={s.body}
                             aria-label={t('fleet.pickSaved', { name: s.title })}
-                            className="inline-flex items-center gap-1 hover:text-white">
+                            className="inline-flex min-h-6 items-center gap-1 hover:text-white">
                             <span>{s.title}</span>
                             {snippetParams(s.body).length > 0 && (
                               <span aria-hidden="true" className="font-mono text-[10px] text-slate-500">{'{…}'}</span>
@@ -389,10 +389,10 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
                           <SnippetTags tags={snippetTags(s)} />
                           <button type="button" onClick={() => setRenaming({ id: s.id, title: s.title })}
                             aria-label={t('fleet.renameSaved', { name: s.title })} title={t('fleet.renameSaved', { name: s.title })}
-                            className="text-slate-500 hover:text-slate-200">✎</button>
+                            className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-slate-200">✎</button>
                           <button type="button" onClick={() => deleteSaved(s)}
                             aria-label={t('fleet.removeSaved', { name: s.title })} title={t('fleet.removeSaved', { name: s.title })}
-                            className="text-slate-500 hover:wt-danger">×</button>
+                            className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:wt-danger">×</button>
                         </span>
                       ))}
                       {visibleSnips.length === 0 && (
