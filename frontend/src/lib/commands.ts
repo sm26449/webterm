@@ -1,11 +1,13 @@
 import { IMarker, Terminal } from '@xterm/xterm'
 import type { CommandGuard, CommandRule } from './api'
 
-/** Prima regulă care se potrivește pe comandă (regex, case-insensitive). null = trece.
+/** Regula care se potrivește pe comandă (regex, case-insensitive), regulile `block` înaintea
+    celor `confirm` — la fel ca serverul (`_match_guard_rule`). null = trece.
     Regex invalid e ignorat (serverul îl validează la salvare, dar suntem defensivi). */
 export function matchCommandRule(cmd: string, guard: CommandGuard | null | undefined): CommandRule | null {
   if (!guard?.enabled || !cmd) return null
-  for (const r of guard.rules) {
+  const ordered = [...guard.rules.filter((r) => r.action === 'block'), ...guard.rules.filter((r) => r.action !== 'block')]
+  for (const r of ordered) {
     try { if (new RegExp(r.pattern, 'i').test(cmd)) return r } catch { /* regex invalid: sări */ }
   }
   return null

@@ -1240,8 +1240,10 @@ async def _guard_rule_over_budget(pattern: str, where: str) -> None:
 
 
 async def _match_guard_rule(cmd: str) -> dict | None:
-    """Prima regulă activă care se potriveşte pe comandă, sau None. Regex invalid = ignorat
-    (aceeaşi toleranţă ca în client: serverul validează la salvare, dar nu ne oprim aici)."""
+    """Regula activă care se potriveşte pe comandă, sau None — regulile `block` ÎNAINTEA celor
+    `confirm`. Înainte câştiga prima din listă: un `confirm` larg (`rm`) pus deasupra unui
+    `block` (`rm -rf /`) făcea blocarea ocolibilă cu `confirmed: true` (3.5.1). Regex invalid =
+    ignorat (aceeaşi toleranţă ca în client: serverul validează la salvare)."""
     guard = await _load_command_guard()
     if not guard.get("enabled"):
         return None
@@ -1253,7 +1255,10 @@ async def _match_guard_rule(cmd: str) -> dict | None:
     # se eliberează, iar regula patologică e sărită cu urmă în audit (vezi
     # `security.regex_search_budget`). Regulile sănătoase se comportă identic.
     try:
-        for r in guard.get("rules", []):
+        rules = guard.get("rules", [])
+        ordered = [r for r in rules if r.get("action") == "block"] + \
+                  [r for r in rules if r.get("action") != "block"]
+        for r in ordered:
             try:
                 hit = await security.regex_search_budget(r["pattern"], [cmd], re.IGNORECASE,
                                                          GUARD_RE_BUDGET)

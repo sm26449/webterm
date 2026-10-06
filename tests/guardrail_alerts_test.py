@@ -54,6 +54,14 @@ async def main():
     check("regula `confirm` se potriveşte",
           (await api._match_guard_rule("reboot now"))["action"] == "confirm")
     check("comandă inofensivă → nicio regulă", await api._match_guard_rule("ls -la") is None)
+    # 3.5.1: un `confirm` larg DEASUPRA unui `block` nu mai face blocarea ocolibilă cu confirmed:true
+    await db.execute("UPDATE app_settings SET value=? WHERE key='command_guard'",
+                     json.dumps({"enabled": True, "rules": [
+                         {"pattern": r"^rm\b", "action": "confirm"},
+                         {"pattern": r"rm\s+-rf\s+/", "action": "block"}]}))
+    check("`block` câştigă chiar dacă un `confirm` e mai sus în listă",
+          (await api._match_guard_rule("rm -rf /"))["action"] == "block")
+    check("…iar `confirm` se aplică în rest", (await api._match_guard_rule("rm x"))["action"] == "confirm")
     await db.execute("UPDATE app_settings SET value=? WHERE key='command_guard'",
                      json.dumps({"enabled": False, "rules": [
                          {"pattern": r"rm\s+-rf\s+/", "action": "block"}]}))
