@@ -9,6 +9,87 @@ back.
 
 ## [Unreleased]
 
+## [3.5.3] — 2026-10-06 · agent (57)
+
+Fixes from four external UI reviews, each claim checked in the code first (34 of 34 confirmed),
+plus the rest of the 3.5.x backlog. No agent change, so no fleet update.
+
+### Fixed: phones and tablets
+- The phone ⋯ menu now has **Docker, Services and Toolbox**; they used to be unreachable below
+  640 px. **Saved commands** opens as a bottom sheet (on phones the menu item and Alt+S used to
+  do nothing).
+- **Who's connected** works at every width: 👁 N in the header (it stays visible on a
+  landscape phone), a "Connected (N)" item in ⋯, and a bottom sheet on phones. **Kicking a
+  viewer asks for confirmation.**
+- **The keybar shows on every touch device**, tablets included (before, only below 768 px).
+  It adds **Alt** (latched like Ctrl), **Home/End/PgUp/PgDn** with real terminal sequences, and
+  modifier codes on the arrow keys. A latched Ctrl/Alt is clearly highlighted.
+
+### Fixed: safety
+- **Fleet run:**
+  - starts with **no hosts selected** ("Select all (N)" is one click);
+  - has a **timeout** field (1–300 s);
+  - has a **Stop** button that stops dispatching further hosts;
+  - no longer sends `confirmed: true` without a human confirming. If the guardrail rules failed
+    to load, server-side confirm rules used to be skipped.
+- **Pop-out windows get the guardrail and step-up.** Before, a popped-out terminal had no
+  guardrail at all, and its password prompt was an unmasked `window.prompt`.
+- **The guardrail's block strip and confirm dialog name the rule** (`/pattern/`). A declined
+  confirm shows a neutral "Cancelled — not run" in Git, Docker and Services. Before, Git showed
+  a red error and the others showed nothing.
+- **Share links:**
+  - after a reload the owner still sees that a link is live (read-only/writable, expiry) and can
+    revoke it, through a new authenticated `GET /api/sessions/{sid}/share` that never returns
+    the URL;
+  - Revoke clears the link only when the server actually revoked it.
+- **Turning off TOTP or deleting the last passkey** now says what happens to hosts that
+  require 2FA.
+- **Recovery codes** can be copied or downloaded as .txt.
+- **A shield on the sidebar row** marks hosts that require 2FA.
+
+### Fixed: the UI said something untrue
+- The walkthrough no longer promises files and serial on SSH hosts, and no longer says "?
+  works any time".
+- The SSH tip no longer promises persistent sessions. SSH sessions end when the gateway
+  restarts; the 3.5.1 wording was wrong.
+- The README diagram no longer shows Files over SSH.
+- The sidebar empty state pointed at a "+ host" button that didn't exist; it now has a real
+  Add host button.
+- Smaller text fixes:
+  - "Password SSH" in the add-host form;
+  - "● ● online" in Diagnostics;
+  - untranslated online/offline on the host page;
+  - Romanian labels in the English Toolbox library.
+
+### Changed
+- **Load failures say so.** Toolbox, History, Devices and Audit show "Couldn't load — Retry"
+  instead of an empty list. The ten "error" fallbacks are real sentences.
+- Silent failures now show a toast: rename, note save, share revoke.
+- **Names and icons:**
+  - the host tab "Databases" is now **Toolbox**;
+  - Diagnostics is spelled the same everywhere;
+  - buttons use sentence case;
+  - Rename has its own icon (not Edit's pencil), and Share has its own (not Links' chain);
+  - the Commands button reads ❯N instead of ⌘N.
+- **Host page:** each session row has an **Open** button.
+- **Update pill:** says "Update available: X".
+- **"Stop session…"** is a labelled item in ⋯, and the confirm says that closing the tab keeps
+  the session running.
+- **Settings keeps unsaved edits** when you switch tabs.
+- Text the server writes into the terminal (lost-output marker, history seam) is in English.
+
+### Dependencies and CI
+- uvicorn 0.54.0, webauthn 3.0.1, PyJWT 2.15.1, websockets 16.1.1, typescript-eslint, globals,
+  Playwright 1.63.0 everywhere, and the node image digest. Lockfiles were regenerated (the
+  Dependabot PRs had stale lockfiles). monaco-editor stays on 0.52: 0.57 moved its exports and
+  breaks the build, so the migration is planned with the 3.6 editor work.
+- **The E2E flakiness had two causes, both in the test setup:**
+  - a retry couldn't start its agent, because of the agent's single-instance lock, and then
+    tested a host that had no agent;
+  - CI ran the browser on the runner instead of in the Playwright image that ci-local uses.
+  Both are fixed. A failed run now posts its FAIL lines and the agent log as public
+  annotations.
+
 ## [3.5.2] — 2026-10-06 · agent (57)
 
 The rest of the 3.5.x backlog, including the agent items, so we didn't jump to 3.6. **Agent 57:**
