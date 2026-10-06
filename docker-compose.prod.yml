@@ -194,6 +194,7 @@ services:
       # `env_file: .env` is deliberately NOT used — it would hand CF_DNS_API_TOKEN to the app
       # too, which today is seen ONLY by Traefik (a separation worth keeping).
       WEBTERM_UPDATE_REPO: ${WEBTERM_UPDATE_REPO:-}
+      WEBTERM_SIGNING_AUTOGEN: ${WEBTERM_SIGNING_AUTOGEN:-1}
       # alerts (SMTP + webhook). They can also be configured from the UI, which stores them in the DB.
       WEBTERM_SMTP_HOST: ${WEBTERM_SMTP_HOST:-}
       WEBTERM_SMTP_PORT: ${WEBTERM_SMTP_PORT:-587}

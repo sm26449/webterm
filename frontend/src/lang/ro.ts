@@ -123,6 +123,7 @@ const ro: Lang = {
     'err.host.needs2faSso': "Hostul cere 2FA — te re-autentificăm cu SSO…",
     'err.host.hostnameRequired': "Pentru o conexiune directă e nevoie de un hostname.",
     'err.host.badType': "Tip de conexiune necunoscut.",
+    'err.host.badCredentialPolicy': "Politică de credențiale necunoscută — folosește una dintre: {allowed}.",
     'err.host.hasJumpChildren': "Prin acest host trec ținte jump salvate — redirecționează-le sau șterge-le mai întâi.",
     'err.sshjump.needsAgent': "Alege un host-agent prin care să ajungi la țintă.",
     'err.sshjump.viaLoop': "Un host de salt nu poate trece prin el însuși — lanțul s-ar închide în buclă.",

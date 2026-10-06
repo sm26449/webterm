@@ -1514,6 +1514,19 @@ def _norm_tags(s: str) -> str:
     return ",".join(out)
 
 
+# Politicile de credenţiale cunoscute. Serverul accepta ORICE text: un `credential_policy` scris
+# greşit printr-un client API (`"Ask"`, `"never"`) era tratat ca `stored` în unele locuri şi ca
+# altceva în altele (3.5.2). Refuzăm la intrare, cu cod.
+_CRED_POLICIES = ("stored", "ask", "ephemeral")
+
+
+def _check_cred_policy(policy: str) -> None:
+    if policy not in _CRED_POLICIES:
+        raise ApiError(400, "host.badCredentialPolicy",
+                       "credential_policy must be one of: %s" % ", ".join(_CRED_POLICIES),
+                       vars={"allowed": ", ".join(_CRED_POLICIES)})
+
+
 def _credential_blob(h: "HostIn"):
     """Fernet blob holding the credentials, or None (agent host / `ask` policy / empty)."""
     if h.connection_type == "agent" or h.credential_policy == "ask" or not h.credential:
@@ -1882,6 +1895,7 @@ async def create_host(host: HostIn, user=Depends(security.require_user)):
     # şi credenţialul aruncat de _credential_blob. PATCH-ul dădea deja 400 — acum şi POST-ul.
     if ctype not in ("agent", "ssh", "ssh-jump", "telnet", "telnet-jump"):
         raise ApiError(400, "host.badType", "unknown connection type")
+    _check_cred_policy(host.credential_policy)
     if ctype in ("ssh", "ssh-jump", "telnet", "telnet-jump") and not host.hostname.strip():
         raise ApiError(400, "host.hostnameRequired", "hostname required for a direct connection")
     if ctype in ("ssh", "ssh-jump") and not host.ssh_username.strip():
@@ -4910,6 +4924,7 @@ async def update_host(host_id: int, host: HostPatch, user=Depends(security.requi
     hostname = (eff("hostname") or "").strip()
     ssh_username = (eff("ssh_username") or "").strip()
     policy = eff("credential_policy") or "stored"
+    _check_cred_policy(policy)
     auth_method = eff("auth_method") or "password"
 
     if new_type in ("ssh", "ssh-jump", "telnet", "telnet-jump") and not hostname:

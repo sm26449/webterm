@@ -125,6 +125,7 @@ const en: Lang = {
     'err.host.needs2faSso': "This host requires 2FA — re-authenticating with SSO…",
     'err.host.hostnameRequired': "A hostname is required for a direct connection.",
     'err.host.badType': "Unknown connection type.",
+    'err.host.badCredentialPolicy': "Unknown credential policy — use one of: {allowed}.",
     'err.host.hasJumpChildren': "Saved jump targets are routed through this host — re-route or delete them first.",
     'err.sshjump.needsAgent': "Pick an agent host to reach the target through.",
     'err.sshjump.viaLoop': "A jump host cannot route through itself — the chain would loop.",

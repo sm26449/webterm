@@ -236,7 +236,10 @@ async def lifespan(app: FastAPI):
     # explicită a operatorului, semnalată în UI prin `signing_missing`.
     if not signing.key_exists():
         has_hosts = bool(await db.fetchone("SELECT 1 FROM hosts LIMIT 1"))
-        if not signing.should_autogenerate(has_hosts):
+        if not config.SIGNING_AUTOGEN:
+            log.info("no fleet signing key and WEBTERM_SIGNING_AUTOGEN=0: not generating one "
+                     "(agents keep the key embedded at build time)")
+        elif not signing.should_autogenerate(has_hosts):
             log.warning("no fleet signing key, but hosts are already enrolled: "
                         "the agents use the maintainer's key. Generating one now would then require "
                         "reinstalling every agent — see Settings → Security")

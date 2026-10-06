@@ -743,6 +743,7 @@ Everything in `.env` (see `.env.example`):
 | `WEBTERM_UPDATE_CHECK` | `0` disables the "a newer version exists" check entirely (it overrides the UI switch). WebTerm never updates itself; the check only tells you |
 | `WEBTERM_UPDATE_COMMAND` | the upgrade command the UI **displays** when a new version exists. It is never executed |
 | `WEBTERM_UPDATE_REPO` | the GitHub `owner/repo` the version check asks (default `sm26449/webterm`) — set it on a fork |
+| `WEBTERM_SIGNING_AUTOGEN` | `1` | `0` = don't generate a fleet signing key on the first boot of a new install — for an offline, build-time key (see *Agent update signing*) |
 | `WEBTERM_CERT_MIN_DAYS` | how many days before expiry the `webterm-cert-check` timer starts warning (default 15). **Not read from `.env`** — the timer reads `/etc/default/webterm-cert-check`, which `install.sh` writes |
 | `WEBTERM_CERT_RESOLVER` | `le` (HTTP-01, needs port 80 reachable) or `ledns` (DNS-01 via Cloudflare). Written by `install.sh`/`deploy.sh` from whether you gave a Cloudflare token — see the note under `CF_DNS_API_TOKEN` |
 | `WEBTERM_OIDC_ISSUER` | SSO issuer URL, e.g. `https://auth.example.com/application/o/webterm/`. **Optional** — SSO is off until issuer + client id + secret are all set |
@@ -909,7 +910,8 @@ to own that key:
 - **Build-time key (fork & build your own image)** — a key that stays offline, used to
   sign at build/commit time, never on the gateway. A deployment key on the gateway takes
   precedence (the gateway re-signs with it), so this path needs a gateway with no
-  `data/agent-signing.key`:
+  `data/agent-signing.key` — set `WEBTERM_SIGNING_AUTOGEN=0` **before the first boot**, so a
+  new install doesn't generate one:
 
   ```sh
   scripts/gen-signing-key.py /secure/path/webterm-signing-key.pem

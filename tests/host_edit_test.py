@@ -126,6 +126,13 @@ async def main():
         # ── 5. validări: nu lăsăm hostul într-o stare neconectabilă ──────────
         r = await c.patch(f"/api/hosts/{hid}", json={"connection_type": "quantum"})
         check("tip de conexiune necunoscut → 400", r.status_code == 400, str(r.status_code))
+        # 3.5.2: credential_policy necunoscută → 400 cu cod (înainte orice text era acceptat)
+        rb = await c.post("/api/hosts", json={"name": "x", "credential_policy": "never"})
+        check("POST cu credential_policy necunoscută → 400 host.badCredentialPolicy",
+              rb.status_code == 400 and rb.headers.get("x-webterm-error") == "host.badCredentialPolicy",
+              f"{rb.status_code} {rb.text[:80]}")
+        rb = await c.patch(f"/api/hosts/{hid}", json={"credential_policy": "Ask"})
+        check("PATCH cu credential_policy necunoscută → 400", rb.status_code == 400, f"{rb.status_code}")
         r2 = await c.post("/api/hosts", json={"name": "gol"})
         hid2 = r2.json()["id"]
         r = await c.patch(f"/api/hosts/{hid2}", json={"connection_type": "ssh"})

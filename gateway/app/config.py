@@ -60,6 +60,11 @@ IMAGE_REF = os.environ.get("WEBTERM_IMAGE_REF", "")
 UPDATE_CHECK = _str("WEBTERM_UPDATE_CHECK", "1") != "0"
 UPDATE_CHECK_TOKEN = _secret("WEBTERM_UPDATE_CHECK_TOKEN")
 UPDATE_REPO = _str("WEBTERM_UPDATE_REPO", "sm26449/webterm")
+# Generarea AUTOMATĂ a cheii de semnare la prima pornire (instalare nouă). `0` o opreşte, ca o
+# cheie ţinută OFFLINE (semnare la build, `scripts/gen-signing-key.py`) să poată fi folosită pe o
+# instalare nouă: cu generarea automată, gateway-ul avea mereu o cheie de deployment, care are
+# prioritate, deci calea „cheie offline" era inaccesibilă (3.5.2).
+SIGNING_AUTOGEN = os.environ.get("WEBTERM_SIGNING_AUTOGEN", "1").lower() not in ("0", "false", "no")
 # Ce trebuie rulat ca să iei versiunea nouă. UI-ul o AFIȘEAZĂ, nu o execută: un buton
 # care repornește aplicația din interiorul ei ar cere gateway-ului drept de creare de
 # containere, adică root pe host. Update-ul rămâne o decizie dată de la tastatură.
