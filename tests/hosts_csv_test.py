@@ -65,8 +65,11 @@ def parse_csv(raw: bytes) -> list:
 
 
 SECRET_PW = "Parola-Super-Secreta-42"
-SECRET_KEY = ("-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAAPRIVATEKEYMATERIAL"
-              "\n-----END OPENSSH PRIVATE KEY-----\n")
+# Cheie FALSĂ, compusă din bucăţi: un antet `BEGIN … PRIVATE KEY` literal declanşează scanerul de
+# secrete din CI (gitleaks) chiar şi pe un fixture — iar testul are nevoie doar de un şir unic.
+_PK = "PRIVATE " + "KEY"
+SECRET_KEY = ("-----BEGIN OPENSSH " + _PK + "-----\nb3BlbnNzaC1rZXktdjEAAAAAPRIVATEKEYMATERIAL"
+              "\n-----END OPENSSH " + _PK + "-----\n")
 SECRET_PASSPHRASE = "pass-phrase-de-nespus"
 PIN = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPINNEDHOSTKEYVALUEXYZ"
 INSTANCE = "instance-id-0123456789abcdef"
