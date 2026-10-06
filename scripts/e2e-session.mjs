@@ -127,6 +127,15 @@ if (process.env.AGENT_TOKEN_FILE) {
   }
   check('agent pornit extern și online', true)
 } else {
+  // O REÎNCERCARE (CI rulează scriptul de 2 ori la eşec) găsea agentul rulării anterioare încă viu.
+  // Agentul are lock de instanţă unică, deci cel nou ieşea pe loc („already running"), iar cel vechi
+  // rămânea legat de hostul VECHI: UI-ul mergea (alegea hostul vechi, online), dar apelurile API pe
+  // `host.id` (fs/cwd, upload cu pauză) dădeau „host offline" 45 s. A doua încercare nu putea trece
+  // niciodată — nu era flake. Oprim explicit agentul anterior înainte să-l pornim pe cel nou.
+  try {
+    execFileSync('docker', ['exec', '-e', 'HOME=/root', CONTAINER, 'python3', '/srv/webterm/agent/ptyd.py', 'stop'],
+      { stdio: 'ignore', timeout: 25000 })
+  } catch { /* nu rula niciunul */ }
   execFileSync('docker', ['exec', CONTAINER, 'sh', '-c',
     `mkdir -p /root/.webterm && printf '%s' '${agentCfg}' > /root/.webterm/agent.json`])
   // logul agentului într-un fişier din container: cu `exec -d` simplu se pierdea, iar „agentul a
@@ -135,6 +144,9 @@ if (process.env.AGENT_TOKEN_FILE) {
     'exec python3 /srv/webterm/agent/ptyd.py run >>/tmp/wt-agent.log 2>&1'])
   check('agent pornit în container', true)
 }
+// Aşteptăm ca EXACT hostul acestei rulări să fie online — `.dot-live` de mai jos se mulţumea cu
+// ORICE host online, deci un agent vechi rămas viu masca faptul că al nostru nu se conectase.
+await waitAgentOnline(host.id, 'start', 60000)
 
 // -- 3. UI prin Playwright ----------------------------------------------------
 const pageErrors = []
