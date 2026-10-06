@@ -79,6 +79,16 @@ export interface SplitView {
   position: number
 }
 
+/** Cum revine agentul după un reboot (raportat de agent v57+, vezi docs/HOSTS.md#starting-at-boot). */
+export interface HostSupervision {
+  mode: 'systemd' | 'cron' | 'none'
+  /** systemd --user fără linger porneşte serviciul abia la primul login, nu la boot */
+  linger: boolean
+  boot: boolean
+  scope?: 'user' | 'system'
+  watchdog?: boolean
+}
+
 export interface Host {
   /** alarmă de host-key schimbat nerezolvată (SSH direct/jump); null când totul e în regulă */
   hostkey_alarm?: { old_fp?: string; new_fp?: string; changed_at?: number } | null
@@ -87,6 +97,8 @@ export interface Host {
   note: string
   alerts_muted?: boolean
   updates?: { count: number; security: number | null; manager: string | null } | null
+  /** pornirea agentului la boot (agent v57+); null = necunoscut (agent mai vechi / ne-agent) */
+  supervision?: HostSupervision | null
   online: boolean
   hostname: string | null
   agent_user: string | null

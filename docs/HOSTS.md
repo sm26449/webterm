@@ -229,6 +229,48 @@ yourself in a terminal.
   again** in Preferences clears every per-host hide.
 - Hiding affects only the sidebar list. The chip on the host page is always shown.
 
+## Starting at boot
+
+**Why it matters.** The agent is what makes an agent host reachable. If nothing starts it
+again after a reboot (a kernel update, a power cut, a RAM upgrade), the host stays **offline**
+in WebTerm until someone logs in over SSH and runs `python3 ~/.webterm/ptyd.py start`. That
+is exactly the situation WebTerm exists to avoid.
+
+**Where you see it.** The host page's **Agent** card has a **Starts at boot** row: **Yes
+(systemd)**, **Yes (cron)**, **Only after a login (no linger)**, **No**, or **Unknown**. A host
+that will not come back by itself also gets a small amber **⚠** on its sidebar row. Agents from
+v57 report this in their diagnostics snapshot (on connect, then hourly). Older agents show
+**Unknown** until they update.
+
+**The modes**, the same ones the installer sets up:
+
+| Mode | What it is | Starts at boot when |
+|---|---|---|
+| systemd | a user service, `~/.config/systemd/user/webterm-agent.service` (`Restart=always`, `KillMode=process`, a 45 s watchdog) | the unit is enabled **and** linger is on for the agent's user |
+| systemd (system) | a system unit in `/etc/systemd/system`, for agents run as root by hand | the unit is enabled |
+| cron | `@reboot … ptyd.py start # webterm`, plus a `* * * * *` watchdog line that restarts a dead or hung agent | the `@reboot` line is present |
+
+**Linger.** A systemd *user* service runs inside the user's service manager, and by default
+that manager starts only when the user logs in. `loginctl enable-linger <user>` starts it at
+boot instead. Enabling linger usually needs root once, which the agent (running as that user)
+does not have. **Enable** tries anyway, without prompting. If it is refused, you get the exact
+command to run as root, and the row shows **Only after a login (no linger)**. The dedicated-user
+install command (`useradd … && loginctl enable-linger webterm`) already does this.
+
+**Changing it from the UI.** On an online agent host (v57+), use the button on the row:
+
+- **Enable** sets up what the installer would. It uses systemd if a user service manager is
+  reachable, and otherwise falls back to the two cron lines. When systemd is used, old WebTerm
+  cron lines are removed, so you never run two mechanisms. An existing unit file is enabled as
+  it is, never rewritten, so an opt-in hardened unit (`WEBTERM_AGENT_HARDENED=1`) keeps its
+  settings.
+- **Disable** asks for confirmation, then runs `systemctl --user disable` (deliberately
+  **without** `--now`) and removes only the WebTerm lines from the crontab. If the crontab
+  cannot be read, it is left untouched rather than rewritten.
+
+Neither action restarts or stops the agent that is running now. The change takes effect at the
+next boot. On a 2FA host both actions need a step-up, and each one is recorded in the audit log.
+
 ## Diagnostics
 
 A health and inventory view of an agent host, without SSH: the **Diagnostics** button on the

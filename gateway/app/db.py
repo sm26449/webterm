@@ -379,6 +379,11 @@ MIGRATIONS = [
     # Persistă până la „accept" (re-pin după verificare out-of-band) sau până la resetarea
     # pinului (PATCH cu hostname/port nou). Cât e setată, conectarea e REFUZATĂ fără dial.
     "ALTER TABLE hosts ADD COLUMN hostkey_alarm TEXT",
+    # Cum revine agentul după un reboot (agent v57+): JSON {mode, linger, boot[, scope, watchdog]},
+    # extras din diagnostic LA PRIMIRE (core.supervision_summary) şi rescris direct de comutarea
+    # din UI (POST /api/hosts/{id}/autostart). '' = snapshot fără raportare (agent < 57);
+    # NULL = rând de dinaintea coloanei. Ambele → „necunoscut" în UI.
+    "ALTER TABLE hosts ADD COLUMN supervision_summary TEXT",
 ]
 
 # tabele adăugate ulterior (executeScript de mai sus le creează pe DB-uri noi;

@@ -431,6 +431,15 @@ export default function Sidebar(props: {
                   </button>
                 )
               })()}
+              {/* agentul NU porneşte singur la boot (agent v57+): după un reboot hostul rămâne offline
+                  până îl porneşte cineva prin SSH. Semnal discret; detaliul + butonul sunt în
+                  pagina hostului (cardul Agent). Necunoscut (agent mai vechi) = nimic. */}
+              {(!host.connection_type || host.connection_type === 'agent') && host.supervision?.boot === false && (
+                <span role="img"
+                  title={t('sidebar.noAutostartTitle')}
+                  aria-label={t('sidebar.noAutostartAria', { name: host.name })}
+                  className="wt-warn shrink-0 text-[11px] leading-none opacity-70">⚠</span>
+              )}
             </div>
             {host.hostname && (
               <div className="truncate font-mono text-xs text-slate-500">

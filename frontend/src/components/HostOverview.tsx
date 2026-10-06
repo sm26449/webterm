@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
-import { errText, isSessionLive, api, AppLink, Host, Session, timeAgo, withStepup } from '../lib/api'
+import { errText, isSessionLive, api, AppLink, Host, HostSupervision, Session, timeAgo, withStepup } from '../lib/api'
 import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
 import { useI18n } from '../lib/i18n'
 import { peekFilesDir } from '../lib/uploads'
@@ -691,6 +691,44 @@ function HostDetail({ host }: { host: Host }) {
       setForgetting(false)
     }
   }
+  // Pornirea la boot (agent v57+). `supLocal` ţine răspunsul comutării până când poll-ul listei
+  // de hosturi aduce o valoare nouă (gateway-ul o stochează imediat, deci vine aceeaşi).
+  const [supLocal, setSupLocal] = useState<HostSupervision | null | undefined>(undefined)
+  const [autostartBusy, setAutostartBusy] = useState(false)
+  const hs = host.supervision
+  useEffect(() => { setSupLocal(undefined) }, [host.id, hs?.mode, hs?.boot, hs?.linger])
+  const sup = supLocal !== undefined ? supLocal : hs ?? null
+  const canAutostart = host.online && (host.agent_version ?? 0) >= 57
+  const supLabel = !sup ? t('host.autostartUnknown')
+    : sup.boot ? t('host.autostartYes', { mode: sup.mode === 'cron' ? 'cron' : 'systemd' })
+    : sup.mode === 'systemd' && !sup.linger ? t('host.autostartNoLinger')
+    : t('host.no')
+  const toggleAutostart = async (enable: boolean) => {
+    if (!enable) {
+      const ok = await confirm({
+        title: t('host.autostartDisableTitle', { host: host.name }),
+        message: t('host.autostartDisableMsg'),
+        confirmLabel: t('host.autostartDisable'), danger: true,
+      })
+      if (!ok) return
+    }
+    setAutostartBusy(true)
+    try {
+      const r = await withStepup(host.id, () => api<{ supervision: HostSupervision | null; hint: string }>(
+        `/api/hosts/${host.id}/autostart`, { method: 'POST', body: JSON.stringify({ enable }) }))
+      setSupLocal(r.supervision)
+      const s2 = r.supervision
+      if (enable && s2 && !s2.boot && s2.mode === 'systemd' && !s2.linger) {
+        notify(t('host.autostartLingerTitle'), t('host.autostartLingerBody', { user: host.agent_user || 'USER' }), 'warn')
+      } else {
+        notify(enable ? t('host.autostartEnabled', { host: host.name }) : t('host.autostartDisabled', { host: host.name }), '', 'info')
+      }
+    } catch (e) {
+      notifyError(t('host.autostartFailed'), errText(e, t) || '')
+    } finally {
+      setAutostartBusy(false)
+    }
+  }
   const [hostApps, setHostApps] = useState<AppLink[]>([])
   useEffect(() => {
     let gone = false
@@ -726,6 +764,15 @@ function HostDetail({ host }: { host: Host }) {
           <Row k={t('host.version')} v={host.agent_version != null ? `v${host.agent_version}` : t('host.notInstalled')}
             badge={host.update_pending ? t('host.updateAvailable') : undefined} />
           {host.last_heartbeat != null && <Row k={t('host.lastActivity')} v={timeAgo(host.last_heartbeat, t)} />}
+          <Row k={t('host.autostart')} help="autostart" v={supLabel} tone={sup?.boot ? 'good' : undefined}
+            badge={sup && !sup.boot ? t('host.autostartRisk') : undefined}
+            action={canAutostart && sup ? (
+              <button onClick={() => toggleAutostart(!sup.boot)} disabled={autostartBusy}
+                className={`wt-touch rounded-md border border-ink-700 px-2 py-0.5 text-xs text-slate-300 disabled:opacity-50 ${
+                  sup.boot ? 'hover:border-rose-500/60 hover:text-rose-300' : 'hover:border-emerald-500/60 hover:text-emerald-300'}`}>
+                {sup.boot ? t('host.autostartDisable') : t('host.autostartEnable')}
+              </button>
+            ) : undefined} />
         </Card>
       )}
 

@@ -1486,10 +1486,13 @@ class AgentConnection(SessionSource):
             return
         self.diagnostics = diag
         summary = updates_summary(diag)
+        sup = supervision_summary(diag)
         await db.execute(
-            "UPDATE hosts SET diagnostics=?, diagnostics_at=?, updates_summary=? WHERE id=?",
+            "UPDATE hosts SET diagnostics=?, diagnostics_at=?, updates_summary=?, "
+            "supervision_summary=? WHERE id=?",
             blob, diag.get("collected_at") or time.time(),
-            json.dumps(summary) if summary else "", self.host_id)
+            json.dumps(summary) if summary else "",
+            json.dumps(sup) if sup else "", self.host_id)
 
     async def get_diagnostics(self) -> dict:
         """Snapshot proaspăt, on-demand (butonul Refresh). Îl şi persistăm, ca ultimul cunoscut."""
@@ -2041,6 +2044,27 @@ def updates_summary(diag) -> Optional[dict]:
     return {"count": u["count"],
             "security": sec if isinstance(sec, int) and not isinstance(sec, bool) else None,
             "manager": _clip(u.get("manager"), 32)}
+
+
+SUPERVISION_MODES = ("systemd", "cron", "none")
+
+
+def supervision_summary(diag) -> Optional[dict]:
+    """{mode, linger, boot[, scope][, watchdog]} din `diag["supervision"]` (agent v57+): porneşte
+    agentul singur după un reboot? Listă ALBĂ de chei şi valori, ca la `updates_summary` — vine de
+    la agent şi ajunge în fiecare răspuns de listare. None = agent mai vechi / formă invalidă.
+    Stocat în `hosts.supervision_summary` la primire (şi direct din răspunsul op-ului `autostart`)."""
+    s = diag.get("supervision") if isinstance(diag, dict) else None
+    if not isinstance(s, dict) or s.get("mode") not in SUPERVISION_MODES:
+        return None
+    if not isinstance(s.get("boot"), bool) or not isinstance(s.get("linger"), bool):
+        return None
+    out = {"mode": s["mode"], "linger": s["linger"], "boot": s["boot"]}
+    if s.get("scope") in ("user", "system"):
+        out["scope"] = s["scope"]
+    if isinstance(s.get("watchdog"), bool):
+        out["watchdog"] = s["watchdog"]
+    return out
 
 
 async def reconcile(conn: AgentConnection, msg: dict) -> None:

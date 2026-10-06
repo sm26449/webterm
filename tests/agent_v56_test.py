@@ -54,7 +54,9 @@ def ctrl(obj_or_bytes):
 
 
 # ───────────────────────── versiune ─────────────────────────
-check("AGENT_VERSION == 56", ptyd.AGENT_VERSION == 56, ptyd.AGENT_VERSION)
+# pin pe „cel puţin 56" (ca agent_v54/v55_test): garda de tip există din v56 încolo, deci testul
+# nu trebuie să se spargă la fiecare creştere de AGENT_VERSION (ex. bump-ul la 57).
+check("AGENT_VERSION >= 56", ptyd.AGENT_VERSION >= 56, ptyd.AGENT_VERSION)
 check("FRAME_CTRL == b'J'", ptyd.FRAME_CTRL == b"J", ptyd.FRAME_CTRL)
 
 # ═════════════════════════ 1. bug-ul brut: handle_ctrl pe un non-obiect crapă ═════════════════════════

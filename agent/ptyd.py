@@ -11,6 +11,8 @@ Usage:
   ptyd.py stop             stop the running daemon
   ptyd.py status           print daemon status
   ptyd.py info             print paths, commands and upload location
+  ptyd.py selftest         import check only (run on a new version before it replaces this one)
+  ptyd.py uninstall [-y]   remove the agent from this host
 
 Config: ~/.webterm/agent.json  {"url": "wss://gw/agent/ws", "token": "..."}
 """
@@ -44,7 +46,7 @@ import termios
 import threading
 import time
 
-AGENT_VERSION = 56
+AGENT_VERSION = 57
 
 # Sub atâtea secunde de valabilitate, un certificat se roteşte prea des ca un pin pe el să
 # însemne altceva decât o cădere programată. 48h: peste ce emite un CA intern (12h la Caddy),
@@ -457,6 +459,10 @@ _TMUX_VER = _tmux_version()
 #    (degradare minoră, ZERO erori) în loc să rişte `bad key`.
 _TMUX_HAS_21 = _TMUX_VER is None or _TMUX_VER >= (2, 1)
 _TMUX_HAS_NONE_KEY = _TMUX_VER is None or _TMUX_VER >= (2, 4)
+#  · `new-session -e VAR=val` (mediu per sesiune): tmux 3.1. Aici NU tratăm „necunoscut" ca
+#    modern: un flag respins nu dă zgomot în config, ci face `new-session` să EŞUEZE (sesiune
+#    moartă). Fără versiune sigură, renunţăm la -e (vezi Session.spawn_client).
+_TMUX_HAS_NEW_SESSION_ENV = _TMUX_VER is not None and _TMUX_VER >= (3, 1)
 
 # Opţiuni valide pe orice tmux rezonabil (shell/istoric/comportament de bază).
 _TMUX_BASE_OPTIONS = [
@@ -959,7 +965,8 @@ def collect_diagnostics(force_updates=False):
     snap = {"collected_at": int(time.time())}
     for key, fn in (("system", _diag_system), ("cpu", _diag_cpu), ("memory", _diag_mem),
                     ("storage", _diag_storage), ("network", _diag_net),
-                    ("updates", lambda: _diag_updates(force=force_updates))):
+                    ("updates", lambda: _diag_updates(force=force_updates)),
+                    ("supervision", _diag_supervision)):        # v57: porneşte singur la boot?
         try:
             snap[key] = fn()
         except Exception:      # noqa: BLE001 — diagnosticul nu are voie să doboare agentul
@@ -1307,6 +1314,18 @@ class Session:
                     # care se redesenează des. Un singur client per sesiune.
                     argv = [TMUX_BIN, "-L", TMUX_SOCKET, "-f", TMUX_CONF,
                             "new-session", "-A", "-D", "-s", TMUX_SESSION_PREFIX + self.sid]
+                    # `env` de mai sus ajunge doar la CLIENTUL tmux. Shell-ul din sesiune
+                    # moşteneşte mediul SERVERULUI (fixat de clientul care l-a pornit, adică de
+                    # PRIMA sesiune) plus `update-environment` — din care WEBTERM_SESSION/TZ nu
+                    # fac parte. Deci, din a doua sesiune încolo, shell-ul vedea id-ul (şi fusul)
+                    # primei sesiuni. `new-session -e` (tmux ≥ 3.1; 3.0 îl are doar pe
+                    # new-window/split-window) pune variabilele în mediul sesiunii noi. La `-A`
+                    # pe o sesiune existentă tmux ignoră `-e` — acolo mediul e deja al ei.
+                    # Pe tmux mai vechi rămâne comportamentul de dinainte (degradare, nu eroare).
+                    if _TMUX_HAS_NEW_SESSION_ENV:
+                        argv[-2:-2] = ["-e", "WEBTERM_SESSION=" + self.sid]
+                        if self.tz:
+                            argv[-2:-2] = ["-e", "TZ=" + self.tz]
                     if self.cmd:
                         argv += [shell, "-lc", self.cmd]
                     os.execve(TMUX_BIN, argv, env)
@@ -1874,6 +1893,302 @@ def ensure_systemd_killmode():
     return None
 
 
+# ---------------------------------------------------------------------------
+# Pornire la boot (v57): raportare structurată + comutare din UI
+# ---------------------------------------------------------------------------
+# Un agent pornit de mână (sau orfan după un `--reexec`) merge perfect până la primul reboot,
+# după care hostul rămâne OFFLINE în WebTerm până intră cineva prin SSH şi îl porneşte — exact
+# situaţia pe care produsul ar trebui s-o evite (găsită pe hostul de producţie, 2026-10-06).
+# `_diag_supervision` intră în diagnostic (push la conectare + orar), deci UI-ul ştie pe fiecare
+# host dacă agentul revine singur; op-ul `autostart` îl porneşte/opreşte fără SSH.
+# NU înlocuieşte `_detect_supervision` (text liber pentru `info`, de care depinde print_info).
+
+SUPERVISION_TIMEOUT = 5         # plafon per subproces (systemctl/crontab/loginctl) — diagnosticul
+                                # rulează pe un worker, dar tot nu are voie să atârne
+_CRON_MARK = "webterm/ptyd.py"  # aceleaşi repere ca la dezinstalare (_cron_remove_webterm)
+_CRON_WATCHDOG_MARK = "webterm-watchdog"
+_LINGER_DIR = "/var/lib/systemd/linger"
+
+
+def _sup_run(argv, input_bytes=None):
+    """(returncode, stdout, stderr) sau None dacă binarul lipseşte / a expirat. Mărginit în timp."""
+    try:
+        r = subprocess.run(argv, input=input_bytes, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, timeout=SUPERVISION_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return (r.returncode, r.stdout.decode("utf-8", "replace"), r.stderr.decode("utf-8", "replace"))
+
+
+def _sup_user():
+    try:
+        return pwd.getpwuid(os.getuid()).pw_name
+    except KeyError:
+        return ""
+
+
+def _user_unit_path():
+    return os.path.join(os.path.expanduser("~"), ".config/systemd/user", _UNIT_NAME)
+
+
+def _user_unit_link():
+    """Symlink-ul pe care îl creează `systemctl --user enable` (WantedBy=default.target)."""
+    return os.path.join(os.path.expanduser("~"), ".config/systemd/user/default.target.wants",
+                        _UNIT_NAME)
+
+
+def _systemctl_is_enabled(user_scope):
+    """True/False după `systemctl [--user] is-enabled`, sau None când nu putem afla (systemctl
+    lipsă, fără bus de user — tipic sub cron sau după un reexec orfan). Doar „enabled" contează:
+    `enabled-runtime` stă în /run şi dispare exact la reboot-ul despre care întrebăm."""
+    if not shutil.which("systemctl"):
+        return None
+    r = _sup_run(["systemctl"] + (["--user"] if user_scope else []) + ["is-enabled", _UNIT_NAME])
+    if r is None:
+        return None
+    state = (r[1].strip().splitlines() or [""])[0].strip()
+    if not state:
+        return None                 # doar stderr („Failed to connect to bus") → necunoscut
+    return state == "enabled"
+
+
+def _crontab_read():
+    """(citit, linii). `citit=False` = n-am putut citi crontab-ul → apelantul NU are voie să-l
+    scrie (altfel ştergea tot ce avea omul acolo; vezi _uninstall_agent). „no crontab for X"
+    (exit 1) e un crontab GOL, nu o eroare. None = `crontab` lipseşte de pe host."""
+    r = _sup_run(["crontab", "-l"])
+    if r is None:
+        return None
+    if r[0] == 0:
+        return True, r[1].splitlines()
+    if "no crontab" in r[2].lower():
+        return True, []
+    return False, []
+
+
+def _crontab_write(lines):
+    """Scrie crontab-ul; gol → `crontab -r`. True dacă a reuşit."""
+    body = ("\n".join(lines) + "\n") if any(ln.strip() for ln in lines) else ""
+    r = _sup_run(["crontab", "-"] if body else ["crontab", "-r"],
+                 input_bytes=body.encode() if body else None)
+    return r is not None and (r[0] == 0 or not body)
+
+
+def _cron_starts_agent(line):
+    """Linia porneşte agentul nostru: reperul instalatorului (`~/.webterm/ptyd.py`) sau calea
+    REALĂ a acestui fişier (un agent rulat din altă parte — altfel liniile scrise de `autostart`
+    n-ar mai fi recunoscute şi s-ar dubla la fiecare Enable)."""
+    return _CRON_MARK in line or SELF_PATH in line
+
+
+def _cron_is_ours(line):
+    return _cron_starts_agent(line) or _CRON_WATCHDOG_MARK in line
+
+
+def _cron_remove_webterm():
+    """Scoate DOAR liniile noastre (@reboot + watchdog) din crontab. Întoarce None dacă e în
+    regulă (inclusiv „nimic de scos" / crontab absent), altfel textul unui avertisment.
+    Folosit şi de dezinstalare, şi de `autostart` cu enable=false."""
+    rd = _crontab_read()
+    if rd is None:
+        return None                 # crontab poate lipsi — nu e o eroare
+    readable, lines = rd
+    if not readable:
+        return "cron (nu am putut citi crontab-ul; liniile WebTerm au rămas)"
+    kept = [ln for ln in lines if not _cron_is_ours(ln)]
+    if len(kept) == len(lines):
+        return None
+    if not _crontab_write(kept):
+        return "cron (scrierea crontab-ului a eşuat)"
+    return None
+
+
+def _cron_scan(lines):
+    """(@reboot, watchdog) — doar linii active (nu comentate) care pornesc agentul nostru."""
+    reboot = watchdog = False
+    for ln in lines:
+        s = ln.strip()
+        if not s or s.startswith("#") or not _cron_starts_agent(s):
+            continue
+        if s.startswith("@reboot"):
+            reboot = True
+        else:
+            watchdog = True
+    return reboot, watchdog
+
+
+def _diag_supervision():
+    """Cum revine agentul după un reboot. Structurat, pentru UI:
+      mode     — "systemd" | "cron" | "none"
+      scope    — "user" | "system" (doar la systemd)
+      linger   — /var/lib/systemd/linger/<user>: fără el, `systemd --user` porneşte serviciul
+                 abia la PRIMUL login al userului, nu la boot
+      watchdog — cron: linia de la fiecare minut care îl reporneşte dacă moare
+      boot     — concluzia: porneşte singur la boot?
+    Rapid şi mărginit (≤3 subprocese, fiecare cu SUPERVISION_TIMEOUT). Nu aruncă."""
+    user = _sup_user()
+    linger = bool(user) and os.path.exists(os.path.join(_LINGER_DIR, user))
+    # systemd --user (ce scrie instalatorul, inclusiv pentru root)
+    user_on = _systemctl_is_enabled(True)
+    if user_on is None:             # fără bus: citim direct ce lasă `enable` pe disc
+        user_on = os.path.lexists(_user_unit_link())
+    # unit de sistem — doar pentru root (instalatorul nu-l scrie, dar un operator îl poate
+    # muta acolo; ensure_systemd_killmode îl cunoaşte deja ca a doua variantă)
+    system_on = False
+    if os.getuid() == 0 and os.path.exists(os.path.join("/etc/systemd/system", _UNIT_NAME)):
+        system_on = bool(_systemctl_is_enabled(False))
+    rd = _crontab_read()
+    reboot, watchdog = _cron_scan(rd[1]) if rd and rd[0] else (False, False)
+    if system_on:
+        mode, scope, boot = "systemd", "system", True
+    elif user_on:
+        mode, scope, boot = "systemd", "user", linger or reboot
+    elif reboot or watchdog:
+        mode, scope, boot = "cron", None, reboot
+    else:
+        mode, scope, boot = "none", None, False
+    out = {"mode": mode, "linger": linger, "boot": bool(boot)}
+    if scope:
+        out["scope"] = scope
+    if mode == "cron":
+        out["watchdog"] = watchdog
+    return out
+
+
+# Unit-ul systemd --user al agentului. COPIE a celui din scriptul de instalare (gateway/app/api.py,
+# `install_script`, heredoc-ul `cat > …/webterm-agent.service <<UNIT`) — ţine-le SEMANTIC în
+# sincron: o schimbare acolo (KillMode, WatchdogSec, Restart) se face şi aici. Diferenţă voită:
+# hardening-ul opt-in (WEBTERM_AGENT_HARDENED) e o decizie de la instalare pe care agentul n-o
+# cunoaşte, de aceea un unit EXISTENT nu se rescrie niciodată (ar pierde NoNewPrivileges).
+_UNIT_TEMPLATE = """\
+[Unit]
+Description=WebTerm agent (ptyd)
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%(py)s %(agent)s run
+Restart=always
+RestartSec=3
+# KillMode=process: the tmux server that HOLDS the sessions is started by a child of the agent,
+# so it lives in this unit's cgroup. The default (control-group) would kill it on every
+# stop/restart/watchdog kill of the agent — i.e. every session on the host would die on an
+# agent crash or a `systemctl --user restart`. With `process` systemd stops only the agent;
+# tmux keeps running and the restarted agent re-adopts the sessions.
+KillMode=process
+# Watchdog: if the agent's event loop blocks and stops sending WATCHDOG=1 within this
+# interval, systemd kills and restarts it (complementary to the G1 liveness check over
+# cron, which does not run under systemd). The agent pings at about half the interval.
+WatchdogSec=45
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def _python_bin():
+    return sys.executable or shutil.which("python3") or "python3"
+
+
+def _cron_lines(py, agent):
+    """Liniile de cron ale instalatorului (gateway/app/api.py, fallback-ul `crontab -`) — aceleaşi
+    două, aceleaşi comentarii-reper, ca dezinstalarea să le găsească indiferent cine le-a scris."""
+    return ["@reboot %s %s start # webterm" % (py, agent),
+            "* * * * * %s %s start # webterm-watchdog" % (py, agent)]
+
+
+def _autostart_enable():
+    """Porneşte agentul la boot. Ca instalatorul: systemd --user dacă merge, altfel cron.
+    Întoarce (eroare_sau_None, hint_sau_""). NU porneşte acum o a doua instanţă: unit-ul se
+    activează fără `--now` (o instanţă nouă ar da peste lock, ar ieşi 0, iar Restart=always ar
+    repeta asta la 3 s la nesfârşit) — efectul e la următorul boot."""
+    py, agent = _python_bin(), SELF_PATH
+    if any(c.isspace() for c in py + agent):
+        return "the agent or python path contains whitespace; set up autostart by hand", ""
+    hint = ""
+    sysd = shutil.which("systemctl") and _sup_run(["systemctl", "--user", "show-environment"])
+    if sysd and sysd[0] == 0:
+        unit = _user_unit_path()
+        try:
+            if not os.path.exists(unit):
+                os.makedirs(os.path.dirname(unit), exist_ok=True)
+                tmp = unit + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    f.write(_UNIT_TEMPLATE % {"py": py, "agent": agent})
+                os.replace(tmp, unit)
+            _sup_run(["systemctl", "--user", "daemon-reload"])
+            r = _sup_run(["systemctl", "--user", "enable", _UNIT_NAME])
+            enabled = r is not None and r[0] == 0
+        except OSError as e:
+            log("autostart: could not write the systemd unit: %s" % e)
+            enabled = False
+        if enabled:
+            # un singur mecanism: scoatem cron-ul vechi (ca instalatorul)
+            w = _cron_remove_webterm()
+            if w:
+                log("autostart: %s" % w)
+            user = _sup_user()
+            if user and not os.path.exists(os.path.join(_LINGER_DIR, user)):
+                # fără root, polkit refuză de obicei; încercăm totuşi, fără prompt interactiv
+                _sup_run(["loginctl", "--no-ask-password", "enable-linger", user])
+                if not os.path.exists(os.path.join(_LINGER_DIR, user)):
+                    hint = ("systemd starts the agent only after %s logs in; to start it at "
+                            "boot, run once as root: loginctl enable-linger %s" % (user, user))
+            return None, hint
+        # systemctl a refuzat → încercăm cron, ca instalatorul
+    rd = _crontab_read()
+    if rd is None:
+        return "neither systemd --user nor crontab is available on this host", ""
+    readable, lines = rd
+    if not readable:
+        return "could not read the crontab; it was left untouched", ""
+    kept = [ln for ln in lines if not _cron_is_ours(ln)] + _cron_lines(py, agent)
+    if not _crontab_write(kept):
+        return "could not write the crontab", ""
+    return None, hint
+
+
+def _autostart_disable():
+    """Opreşte pornirea la boot. Agentul care rulează ACUM rămâne pornit: `disable` FĂRĂ `--now`
+    (altfel systemd ar omorî chiar procesul care răspunde cererii). Întoarce (eroare_sau_None, "")."""
+    errs = []
+    if shutil.which("systemctl"):
+        if _systemctl_is_enabled(True) or os.path.lexists(_user_unit_link()):
+            _sup_run(["systemctl", "--user", "disable", _UNIT_NAME])
+        if os.path.lexists(_user_unit_link()):
+            # fără bus de user `disable` nu ajunge la manager — scoatem direct symlink-ul
+            try:
+                os.remove(_user_unit_link())
+            except OSError:
+                errs.append("systemd --user unit is still enabled")
+        if os.getuid() == 0 and _systemctl_is_enabled(False):
+            r = _sup_run(["systemctl", "disable", _UNIT_NAME])
+            if r is None or r[0] != 0:
+                errs.append("system unit is still enabled")
+    elif os.path.lexists(_user_unit_link()):
+        try:
+            os.remove(_user_unit_link())
+        except OSError:
+            errs.append("systemd --user unit is still enabled")
+    w = _cron_remove_webterm()
+    if w:
+        errs.append(w)
+    return ("; ".join(errs) or None), ""
+
+
+def autostart_set(enable):
+    """Op-ul `autostart`: aplică şi întoarce {"supervision": starea NOUĂ, "hint", "error"}."""
+    err, hint = _autostart_enable() if enable else _autostart_disable()
+    state = _diag_supervision()
+    if not err and bool(state.get("boot")) != bool(enable) and not hint:
+        # comanda a „reuşit", dar starea citită înapoi spune altceva — nu raportăm succes fals
+        err = "autostart is still %s" % ("off" if enable else "on")
+    return {"supervision": state, "hint": hint, "error": err or ""}
+
+
+_AUTOSTART_LOCK = threading.Lock()     # cel mult o comutare în zbor (crontab citit-scris nu e atomic)
+
+
 class Agent:
     def __init__(self, config):
         self.config = config
@@ -2282,6 +2597,26 @@ class Agent:
         finally:
             self._run_sem.release()
 
+    def _autostart_worker(self, rid, enable):
+        """Rulează `autostart_set` şi răspunde cu starea NOUĂ citită înapoi (nu cu ce sperăm că
+        s-a întâmplat). Eliberează MEREU `_AUTOSTART_LOCK`."""
+        try:
+            try:
+                res = autostart_set(enable)
+            except Exception as e:      # noqa: BLE001 — op-ul nu are voie să doboare agentul
+                log("autostart(%s) failed: %r" % (enable, e))
+                self.send_ctrl({"ok": False, "id": rid, "code": "autostart_failed", "msg": str(e)})
+                return
+            if res["error"]:
+                self.send_ctrl({"ok": False, "id": rid, "code": "autostart_failed",
+                                "msg": res["error"], "supervision": res["supervision"]})
+            else:
+                self.send_ctrl({"ok": True, "id": rid, "supervision": res["supervision"],
+                                "hint": res["hint"]})
+            log("autostart %s → %s" % ("on" if enable else "off", res["supervision"]))
+        finally:
+            _AUTOSTART_LOCK.release()
+
     def _start_diag(self, rid=None):
         """Porneşte o colectare de diagnostic pe un worker — CEL MULT UNA în zbor (audit 2026-10):
         `run` are semafor tocmai ca sute de cereri să nu pornească sute de procese; `diagnostics`
@@ -2544,12 +2879,6 @@ class Agent:
                     self.send_data(s.sid, chunk)
                 self.send_ctrl({"event": "replay_end", "sid": s.sid, "offset": s.stream_offset})
 
-            elif op == "detach":
-                s = self.sessions.get(msg["sid"])
-                if s:
-                    s.attached = False
-                ok()
-
             elif op == "resize":
                 s = self.sessions.get(msg["sid"])
                 if not s:
@@ -2607,10 +2936,6 @@ class Agent:
                     return err("alive")
                 self._drop_session(s)
                 ok()
-
-            elif op == "list":
-                ok(sessions=[s.meta() for s in self.sessions.values()],
-                   agent_version=AGENT_VERSION, proto=PROTO)
 
             elif op == "run":
                 # rulare non-interactivă a unei comenzi (consola de flotă): captură
@@ -2853,6 +3178,18 @@ class Agent:
                 except (ValueError, TypeError, OSError) as e:
                     err("wake_error", str(e))
 
+            elif op == "autostart":
+                # v57: porneşte/opreşte pornirea la boot (systemd --user / cron). Pe un worker:
+                # systemctl/crontab/loginctl pot dura secunde. Cel mult o comutare în zbor.
+                enable = msg.get("enable")
+                if not isinstance(enable, bool):
+                    return err("bad_request", "enable must be a boolean")
+                if not _AUTOSTART_LOCK.acquire(False):
+                    return err("busy", "an autostart change is already in progress")
+                threading.Thread(target=self._autostart_worker, args=(rid, enable),
+                                 daemon=True).start()
+                # NU răspundem aici — worker-ul trimite reply-ul cu acelaşi id
+
             elif op == "diagnostics":
                 # Refresh on-demand din panoul Diagnostic. Colectăm pe un worker (apelează `ip`)
                 # ca să nu blocăm loop-ul; worker-ul trimite reply-ul cu acelaşi id. Cel mult o
@@ -2936,10 +3273,6 @@ class Agent:
                     return err("configure", str(e))
                 self.serials[stream] = Serial(stream, fd)
                 self.sel.register(fd, selectors.EVENT_READ, ("serial", stream))
-                ok()
-
-            elif op == "serial_close":
-                self._serial_teardown(msg.get("stream"), notify=False)
                 ok()
 
             elif op == "update":
@@ -3542,18 +3875,10 @@ class Agent:
             # variantă lua atunci `cur=""` → `kept=[]` → `body=""` → `crontab -r`, adică ştergea
             # TOT crontab-ul utilizatorului ca să scoată două rânduri de-ale noastre. Dacă nu
             # putem citi, nu scriem: mai bine rămân două linii moarte decât să pierdem ce n-am
-            # pus noi acolo.
-            r = subprocess.run(["crontab", "-l"], timeout=10,
-                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-            if r.returncode == 0:
-                kept = [ln for ln in r.stdout.decode().splitlines()
-                        if "webterm/ptyd.py" not in ln and "webterm-watchdog" not in ln]
-                body = ("\n".join(kept) + "\n") if any(k.strip() for k in kept) else ""
-                subprocess.run(["crontab", "-"] if body else ["crontab", "-r"],
-                               input=body.encode() if body else None,
-                               timeout=10, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            else:
-                warn.append("cron (nu am putut citi crontab-ul; liniile WebTerm au rămas)")
+            # pus noi acolo. Logica stă în _cron_remove_webterm (v57), comună cu `autostart`.
+            w = _cron_remove_webterm()
+            if w:
+                warn.append(w)
         except (OSError, subprocess.SubprocessError):
             pass                                   # crontab poate lipsi — nu e o eroare
         # 3) serverul tmux (decomisionare — doar sesiunile noastre `-L webterm`)
@@ -3915,9 +4240,11 @@ Supervision:      %s
 Commands:
   status          python3 %s status
   start           python3 %s start
+  run             python3 %s run        (foreground, logs to the terminal)
   stop            python3 %s stop
   restart         %s
   info            python3 %s info
+  selftest        python3 %s selftest   (import check, prints the version)
 
 File transfer:
   Files uploaded from the interface are saved into the directory you have
@@ -3930,7 +4257,7 @@ File transfer:
         user, shell, url,
         SELF_PATH, CONFIG_PATH, LOG_PATH, WEBTERM_DIR,
         _detect_supervision(),
-        SELF_PATH, SELF_PATH, SELF_PATH, restart, SELF_PATH,
+        SELF_PATH, SELF_PATH, SELF_PATH, SELF_PATH, restart, SELF_PATH, SELF_PATH,
         home, user))
 
 

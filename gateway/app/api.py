@@ -1663,6 +1663,21 @@ def _host_updates(row) -> dict | None:
     return core.updates_summary(d)
 
 
+def _host_supervision(row) -> dict | None:
+    """Pornirea la boot a agentului (agent v57+): {mode, linger, boot[, scope, watchdog]} din
+    coloana `supervision_summary` (scrisă la primirea diagnosticului / după comutarea din UI).
+    None = necunoscut (agent mai vechi, coloană goală sau JSON stricat) — UI-ul arată „necunoscut",
+    nu „nu"."""
+    raw = row["supervision_summary"] if "supervision_summary" in row.keys() else None
+    if not raw:
+        return None
+    try:
+        s = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return core.supervision_summary({"supervision": s})
+
+
 _JUMP_TYPES = ("ssh-jump", "telnet-jump")
 
 
@@ -1699,6 +1714,7 @@ def _host_json(row) -> dict:
         "tags": [t for t in ((row["tags"] or "").split(",")
                              if "tags" in row.keys() and row["tags"] else [])],
         "updates": _host_updates(row),
+        "supervision": _host_supervision(row) if is_agent else None,
         "conflict": core.host_conflict(row["id"]),
         # Agentul a fost scos de pe host. Hostul rămâne până când cineva confirmă în UI —
         # poate nu vrei să-l ştergi, ci doar să-l reinstalezi, caz în care marcajul dispare
@@ -5322,6 +5338,54 @@ async def uninstall_host(host_id: int, force: bool = False,
     return {"ok": True, "uninstalled": uninstalled, "warnings": warnings}
 
 
+class AutostartIn(BaseModel):
+    enable: bool
+    stepup_grant: str = ""       # 2FA: grant/parolă pt. host-uri cu require_2fa (H1)
+    stepup_password: str = ""
+
+
+AUTOSTART_MIN_AGENT = 57         # op-ul `autostart` există din agentul v57
+
+
+@router.post("/api/hosts/{host_id}/autostart")
+async def host_autostart(host_id: int, body: AutostartIn, request: Request,
+                         user=Depends(security.require_user)):
+    """Porneşte / opreşte pornirea agentului la boot (systemd --user, altfel cron — ca
+    instalatorul). Agentul care rulează ACUM nu e atins: efectul e la următorul reboot.
+    Răspunsul poartă starea NOUĂ citită înapoi de agent, stocată imediat (badge-ul din sidebar
+    nu aşteaptă diagnosticul orar). Fără root, `linger` rămâne de obicei oprit → `hint`."""
+    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)   # H1
+    audit.detail(request, "autostart %s" % ("enable" if body.enable else "disable"))
+    row = await db.fetchone("SELECT id, connection_type FROM hosts WHERE id=?", host_id)
+    if not row:
+        raise ApiError(404, "host.missing", "no such host")
+    if (row["connection_type"] or "agent") != "agent":
+        raise ApiError(400, "host.autostartNotAgent",
+                       "only hosts with an agent have something to start at boot")
+    conn = core.sources.get(host_id)
+    if not isinstance(conn, core.AgentConnection):
+        raise ApiError(409, "host.offline", "the host is offline; its agent is not connected")
+    if (conn.agent_version or 0) < AUTOSTART_MIN_AGENT:
+        raise ApiError(409, "host.autostartAgentOld",
+                       "the agent on this host is too old to change autostart (needs v%d, has v%s); "
+                       "update it first" % (AUTOSTART_MIN_AGENT, conn.agent_version),
+                       vars={"need": AUTOSTART_MIN_AGENT, "have": conn.agent_version or 0})
+    try:
+        resp = await conn.request("autostart", enable=body.enable, timeout=30)
+    except (core.AgentGone, asyncio.TimeoutError):
+        raise ApiError(504, "host.noAnswer", "the host did not answer in time")
+    sup = core.supervision_summary({"supervision": resp.get("supervision")})
+    if sup:
+        await db.execute("UPDATE hosts SET supervision_summary=? WHERE id=?",
+                         json.dumps(sup), host_id)
+    if not resp.get("ok"):
+        raise ApiError(400, "host.autostartFailed",
+                       "could not change autostart: %s" % core._clip(resp.get("msg") or
+                                                                    resp.get("code") or "?", 300),
+                       vars={"reason": core._clip(resp.get("msg") or "", 200) or ""})
+    return {"ok": True, "supervision": sup, "hint": core._clip(resp.get("hint") or "", 500) or ""}
+
+
 # ---------------------------------------------------------------------------
 # Sessions
 # ---------------------------------------------------------------------------
@@ -6637,6 +6701,8 @@ if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/d
 # Efect secundar INTENŢIONAT: sudo nu mai funcţionează în sesiuni → OS-upgrade + docker-sudo pică.
 NoNewPrivileges=true"
   fi
+  # Unit-ul are o COPIE în agent (agent/ptyd.py, `_UNIT_TEMPLATE`), folosită când operatorul
+  # activează pornirea la boot din UI (op-ul `autostart`). Ţine-le SEMANTIC în sincron.
   cat > "$HOME/.config/systemd/user/webterm-agent.service" <<UNIT
 [Unit]
 Description=WebTerm agent (ptyd)
@@ -6680,6 +6746,7 @@ fi
 
 if [ -z "$SUP" ] && command -v crontab >/dev/null 2>&1; then
   # @reboot starts it at boot; the watchdog restarts it if the process dies
+  # (aceleaşi linii şi în agent: agent/ptyd.py `_cron_lines`, pentru comutarea din UI)
   ( crontab -l 2>/dev/null | grep -v 'webterm/ptyd.py' | grep -v 'webterm-watchdog' ; \
     echo "@reboot $PY $AGENT start # webterm" ; \
     echo "* * * * * $PY $AGENT start # webterm-watchdog" ) | crontab - && SUP="cron"

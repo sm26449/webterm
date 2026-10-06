@@ -23,6 +23,7 @@ export const HELP = {
   forwardDomain: { doc: 'docs/PORT-FORWARDING.md#configurable-domain-settings' },
   directBackup: { doc: 'docs/RUNBOOK.md#backuprestore-from-the-application-v1061-no-shell-on-the-server' },
   updatesBadge: { doc: 'docs/HOSTS.md#os-updates-badge' },
+  autostart: { doc: 'docs/HOSTS.md#starting-at-boot' },
   wol: { doc: 'docs/HOSTS.md#wake-on-lan' },
   tags: { doc: 'docs/HOSTS.md#tags' },
   require2fa: { doc: 'docs/HOSTS.md#require-2fa-step-up' },
