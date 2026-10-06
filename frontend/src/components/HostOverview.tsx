@@ -1,9 +1,11 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
-import { isSessionLive, api, AppLink, Host, Session, timeAgo } from '../lib/api'
+import { errText, isSessionLive, api, AppLink, Host, Session, timeAgo, withStepup } from '../lib/api'
 import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
 import { useI18n } from '../lib/i18n'
 import { peekFilesDir } from '../lib/uploads'
 import { useConfirm } from '../lib/confirm'
+import { notify, notifyError } from '../lib/notify'
+import { askSecret } from '../lib/secretPrompt'
 import { hostHistory } from '../lib/metrics'
 import { updatesSignal, useUpdatesPref } from '../lib/updatesPref'
 import { DockerIcon, DownloadIcon, FilesIcon, ForwardIcon, LinkIcon, NoteIcon, PencilIcon, PlusIcon, PopoutIcon, RefreshIcon, ServerIcon, ServicesIcon, ShieldIcon, SplitIcon, TerminalPromptIcon, ToolboxIcon, TrashIcon } from './Icons'
@@ -659,10 +661,34 @@ function Card(props: { title: string; icon?: React.ReactNode; accent?: string; c
 /** Cardurile de info ale hostului: conexiune, securitate, agent, apps, notă. */
 function HostDetail({ host }: { host: Host }) {
   const { t } = useI18n()
+  const { confirm } = useConfirm()
+  const [forgetting, setForgetting] = useState(false)
   const isAgent = (host.connection_type ?? 'agent') === 'agent'
   const credPolicy = host.credential_policy === 'ask' ? t('host.credAsk')
     : host.credential_policy === 'ephemeral' ? t('host.credEphemeral')
     : host.has_credentials ? t('host.credStored') : t('host.credNone')
+  // Ruta exista de la F-05, dar niciun buton n-o chema. Ireversibil: pe un host fără agent,
+  // credenţiala stocată era singurul drum până la el — de aici confirmarea + parola contului.
+  const forgetCreds = async () => {
+    const ok = await confirm({
+      title: t('host.forgetCredsTitle', { host: host.name }),
+      message: isAgent ? t('host.forgetCredsMsgAgent') : t('host.forgetCredsMsgSsh'),
+      confirmLabel: t('host.forgetCreds'), danger: true,
+    })
+    if (!ok) return
+    const pw = await askSecret(t('host.forgetCredsPassword'))
+    if (!pw) return
+    setForgetting(true)
+    try {
+      await withStepup(host.id, () => api(`/api/hosts/${host.id}/forget-credentials`,
+        { method: 'POST', body: JSON.stringify({ current_password: pw }) }))
+      notify(t('host.forgetCredsDone', { host: host.name }), '', 'info')
+    } catch (e) {
+      notifyError(t('host.forgetCredsFailed'), errText(e, t) || '')
+    } finally {
+      setForgetting(false)
+    }
+  }
   const [hostApps, setHostApps] = useState<AppLink[]>([])
   useEffect(() => {
     let gone = false
@@ -685,7 +711,12 @@ function HostDetail({ host }: { host: Host }) {
 
       <Card title={t('host.secSecurity')} icon={<ShieldIcon />} accent="#38bdf8">
         <Row k={t('host.twoFaOnConnect')} v={host.require_2fa ? t('host.yesPasskey') : t('host.no')} tone={host.require_2fa ? 'good' : undefined} />
-        <Row k={t('host.credentials')} v={credPolicy} />
+        <Row k={t('host.credentials')} v={credPolicy} action={host.has_credentials && host.credential_policy !== 'ask' ? (
+          <button onClick={forgetCreds} disabled={forgetting}
+            className="wt-touch rounded-md border border-ink-700 px-2 py-0.5 text-xs text-slate-300 hover:border-rose-500/60 hover:text-rose-300 disabled:opacity-50">
+            {t('host.forgetCreds')}
+          </button>
+        ) : undefined} />
       </Card>
 
       {isAgent && (
@@ -729,7 +760,7 @@ function HostDetail({ host }: { host: Host }) {
   )
 }
 
-function Row(props: { k: string; v: string; mono?: boolean; tone?: 'good'; badge?: string }) {
+function Row(props: { k: string; v: string; mono?: boolean; tone?: 'good'; badge?: string; action?: React.ReactNode }) {
   return (
     <div className="flex items-center justify-between gap-3 border-b border-ink-800/60 py-2 last:border-0">
       <dt className="shrink-0 text-sm text-slate-500">{props.k}</dt>
@@ -739,6 +770,7 @@ function Row(props: { k: string; v: string; mono?: boolean; tone?: 'good'; badge
           <span className="wt-warn ml-2 rounded bg-amber-500/15 px-1.5 py-0.5 align-middle text-[10px] font-semibold uppercase tracking-wide">{props.badge}</span>
         )}
       </dd>
+      {props.action && <div className="shrink-0">{props.action}</div>}
     </div>
   )
 }
