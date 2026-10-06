@@ -39,6 +39,8 @@ const ro: Lang = {
     'about.licenseValue': 'MIT · cod deschis',
     'about.project': 'Proiect',
     'about.whatsNew': 'Ce e nou',
+    'about.starTitle': 'Dă-i o stea pe GitHub',
+    'about.starBody': 'Dacă WebTerm se ridică la nivelul așteptărilor tale, o stea îi ajută pe alții să-l găsească.',
     'changelog.title': 'Ce e nou',
     'changelog.aria': 'Jurnal de modificări WebTerm',
     'changelog.loading': 'Se încarcă jurnalul de modificări…',

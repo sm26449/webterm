@@ -40,6 +40,8 @@ const en: Lang = {
     'about.licenseValue': 'MIT · open source',
     'about.project': 'Project',
     'about.whatsNew': "What's new",
+    'about.starTitle': 'Give WebTerm a star on GitHub',
+    'about.starBody': 'If it lives up to what you expect from it, a star helps other people find it.',
     'changelog.title': "What's new",
     'changelog.aria': 'WebTerm changelog',
     'changelog.loading': 'Loading the changelog…',

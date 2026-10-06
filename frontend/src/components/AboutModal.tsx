@@ -2,7 +2,7 @@ import { lazy, Suspense, useRef, useState } from 'react'
 import { getBootVersion } from '../lib/api'
 import { useI18n } from '../lib/i18n'
 import { useFocusTrap } from '../lib/useFocusTrap'
-import { LogoMark } from './Icons'
+import { LogoMark, StarIcon } from './Icons'
 
 const ChangelogModal = lazy(() => import('./ChangelogModal'))
 
@@ -72,6 +72,19 @@ export default function AboutModal(props: { onClose: () => void }) {
             </dd>
           </div>
         </dl>
+
+        <a
+          href={REPO}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="mt-5 flex items-center gap-3 rounded-xl border border-ink-700 px-3 py-2.5 text-left hover:border-amber-400/60 hover:bg-ink-800/60"
+        >
+          <span className="shrink-0 text-amber-400"><StarIcon size={18} /></span>
+          <span className="min-w-0">
+            <span className="block text-sm font-medium text-slate-200">{t('about.starTitle')}</span>
+            <span className="block text-xs text-slate-400">{t('about.starBody')}</span>
+          </span>
+        </a>
 
         <p className="mt-4 text-center text-[11px] text-slate-400">© 2026 Stefan Maldaianu</p>
       </div>

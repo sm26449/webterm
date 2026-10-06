@@ -19,6 +19,12 @@ function Icon(props: { children: React.ReactNode; size?: number }) {
   )
 }
 
+export const StarIcon = ({ size = 14 }: { size?: number }) => (
+  <Icon size={size}>
+    <path d="m12 2 3.1 6.3 6.9 1-5 4.9 1.2 6.8L12 17.8 5.8 21l1.2-6.8-5-4.9 6.9-1Z" />
+  </Icon>
+)
+
 export const NoteIcon = () => (
   <Icon>
     <path d="M12 20h9" />
