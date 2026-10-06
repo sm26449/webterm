@@ -585,6 +585,19 @@ try {
   await page.locator('div:not([aria-hidden="true"]) > .wt-window').last().locator('.xterm-screen').click()
   await page.keyboard.type('echo DUPA_ISTORIC_$((40+2))\n')
   check('istoric: terminalul rămâne viu după replay-ul cu istoric', await waitScreen('DUPA_ISTORIC_42'))
+  // Tab în fundal care ratează output → la revenire resync FULL → `term.reset()` în browser.
+  // Resync-ul aduce şi el istoricul tmux; altfel scrollback-ul s-ar scurta la prima comutare de tab.
+  const histSid = await page.evaluate(() => location.hash.replace('#/s/', ''))
+  await page.keyboard.type('sleep 2; echo WT_BG_$((6*7))\n')
+  await page.locator(`button[data-tab]:not([data-tab="${histSid}"])`).first().evaluate((el) => el.click())
+  await page.waitForTimeout(5000)               // output-ul soseşte cât tabul e pauzat
+  await page.locator(`button[data-tab="${histSid}"]`).evaluate((el) => el.click())
+  const bgOk = await waitScreen('WT_BG_42', 15000)
+  const histAfterResync = await pollValue(
+    () => screenText().then((t) => t.split('\n').filter((l) => l.trim() === 'WT_HIST_100').length),
+    (n) => n > 0, 15000)
+  check('istoric: după resync-ul de revenire din fundal, rândul 100 e tot în scrollback, o dată',
+    bgOk && histAfterResync === 1, `bg=${bgOk} ${histAfterResync}× WT_HIST_100`)
 
   // ── Faza 2 (Val 5): panoul de fișiere — drawer, follow-cwd, operații ──
   await activePane.locator('.xterm-screen').click()

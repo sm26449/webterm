@@ -340,6 +340,170 @@ async def t9_locked_client_gets_no_resync():
     hub.out_f.close(); hub.cast_f.close()
 
 
+import base64  # noqa: E402
+import zlib  # noqa: E402
+
+HIST = b"\x1b[32mvechi 1\x1b[0m\nvechi 2\n"
+
+
+class HistSource(core.AgentConnection):
+    """Agent tmux v57 fals: `history` răspunde cu HIST; `on_history` rulează CÂT „aşteptăm"
+    agentul (acolo simulăm output live / blocare sosite în fereastra de aşteptare)."""
+
+    def __init__(self, version=57, reply=True, on_history=None):
+        self.agent_version = version
+        self.backend = "tmux"
+        self.reply = reply
+        self.on_history = on_history
+        self.ops = []
+
+    async def request(self, op, timeout=20.0, **fields):
+        self.ops.append(dict(fields, op=op))
+        if op != "history":
+            return {"ok": True}
+        if self.on_history:
+            self.on_history()
+        await asyncio.sleep(0.01)
+        if not self.reply:
+            return {"ok": False, "code": "multi_pane"}
+        return {"ok": True, "z": base64.b64encode(zlib.compress(HIST)).decode()}
+
+
+def hist_ops(src):
+    return [o for o in src.ops if o["op"] == "history"]
+
+
+def binary_frames(ws):
+    return [x for x in ws.sent if isinstance(x, bytes)]
+
+
+async def t10_full_resync_brings_tmux_history():
+    # Tab revenit din fundal după output ratat: resync FULL → `term.reset()` în browser. Fără
+    # istoric în acelaşi frame, scrollback-ul tabului se scurta la coadă — feature-ul de la
+    # ataşare ar fi părut stricat la prima comutare de tab.
+    sid = "a1" + "0" * 30
+    hub = make_hub(sid)
+    ws = FakeWs()
+    client = core.BrowserClient(ws, hub)
+    client.replay_sb = 10000
+    hub.clients.add(client)
+    during = b"sosit-cat-asteptam-agentul\n"
+
+    def live_output():
+        # output live în fereastra de aşteptare: scris în transcript (neflush-uit) ŞI pus
+        # în coadă — drain → flush → cutoff de după trebuie să-l livreze EXACT o dată
+        hub.out_f.write(during)
+        client.push(during)
+
+    src = HistSource(on_history=live_output)
+    hub._source = lambda: src
+    before = b"inainte-de-pauza\n"
+    hub.out_f.write(before)
+    client.pause()
+    client.push(before)
+    client.resume()
+    await run_sender_briefly(client, secs=0.5)
+
+    frames = binary_frames(ws)
+    check("full: op history cerut cu sb-ul de la ataşare",
+          hist_ops(src) == [{"sid": sid, "lines": 10000, "op": "history"}], str(src.ops))
+    check("full: UN singur frame binar după resync (clientul face reset la primul)",
+          len(frames) == 1, [len(f) for f in frames])
+    data = frames[0] if frames else b""
+    check("full: istoricul + îmbinarea vin ÎNAINTEA tail-ului, în acelaşi frame",
+          data.startswith(b"\x1b[0m\x1b[32mvechi 1") and core.HISTORY_SEAM in data
+          and data.index(core.HISTORY_SEAM) < data.index(before), repr(data[:60]))
+    check("full: output-ul sosit cât aşteptam agentul ajunge EXACT o dată",
+          stream_bytes(ws).count(during) == 1, stream_bytes(ws).count(during))
+    check("full: nicio comutare alt-screen / ştergere în frame", not core.ALT_SCREEN_RE.search(data))
+    hub.out_f.close(); hub.cast_f.close()
+
+
+async def t11_lossy_and_fallback_unchanged():
+    sid = "a2" + "0" * 30
+    hub = make_hub(sid)
+    ws = FakeWs()
+    client = core.BrowserClient(ws, hub)
+    client.replay_sb = 10000
+    hub.clients.add(client)
+    src = HistSource()
+    hub._source = lambda: src
+    hub.out_f.write(b"pe-disc\n"); hub.out_f.flush()
+    client.buffered = config.CLIENT_BUFFER_LIMIT + 1
+    client.push(b"x")                   # overflow → lossy
+    client.buffered = 0
+    await run_sender_briefly(client, secs=0.3)
+    check("lossy: NU cere istoric", hist_ops(src) == [], str(src.ops))
+    check("lossy: frame-ul e doar tail-ul", core.HISTORY_SEAM not in stream_bytes(ws))
+    hub.out_f.close(); hub.cast_f.close()
+
+    for name, s2, sb in (("agent v56", HistSource(version=56), 10000),
+                         ("ok:false de la agent", HistSource(reply=False), 10000),
+                         ("frontend vechi (sb=0)", HistSource(), 0)):
+        sid = ("a3%02d" % len(name)) + "0" * 28
+        hub = make_hub(sid)
+        ws = FakeWs()
+        client = core.BrowserClient(ws, hub)
+        client.replay_sb = sb
+        hub.clients.add(client)
+        hub._source = lambda s2=s2: s2
+        hub.out_f.write(b"coada\n")
+        client.pause(); client.push(b"coada\n"); client.resume()
+        await run_sender_briefly(client, secs=0.3)
+        frames = binary_frames(ws)
+        check("fallback tăcut (%s): un frame, doar tail-ul" % name,
+              len(frames) == 1 and frames[0] == core.read_tail(sid), [f[:40] for f in frames])
+        hub.out_f.close(); hub.cast_f.close()
+
+
+async def t12_lock_during_history_wait_sends_nothing():
+    # Idle-lock-ul poate cădea cât aşteptăm agentul (secunde): garda de securitate de la
+    # începutul `_resync` trebuie re-verificată — nimic din scrollback pe un socket blocat.
+    sid = "a4" + "0" * 30
+    hub = make_hub(sid)
+    ws = FakeWs()
+    client = core.BrowserClient(ws, hub)
+    client.replay_sb = 10000
+    hub.clients.add(client)
+    secret = b"scrollback-secret\n"
+    hub.out_f.write(secret); hub.out_f.flush()
+    src = HistSource(on_history=client.lock)
+    hub._source = lambda: src
+    await client._resync(full=True)
+    check("blocat cât aşteptam istoricul: nimic trimis (nici resync, nici tail)",
+          ws.sent == [], repr(ws.sent)[:80])
+    hub.out_f.close(); hub.cast_f.close()
+
+
+async def t13_resync_requested_during_wait_is_absorbed():
+    # Un overflow cât aşteptăm agentul cere lossy; resync-ul FULL în curs îl acoperă integral
+    # (drain + cutoff proaspăt DUPĂ aşteptare). Fără absorbţie urma imediat un lossy → încă un
+    # `term.reset()` FĂRĂ istoric, adică exact simptomul pe care îl reparăm.
+    sid = "a5" + "0" * 30
+    hub = make_hub(sid)
+    ws = FakeWs()
+    client = core.BrowserClient(ws, hub)
+    client.replay_sb = 10000
+    hub.clients.add(client)
+
+    def overflow():
+        client.buffered = config.CLIENT_BUFFER_LIMIT + 1
+        client.push(b"x")
+        client.buffered = 0
+
+    src = HistSource(on_history=overflow)
+    hub._source = lambda: src
+    client.pause(); client.push(b"y"); client.resume()
+    await run_sender_briefly(client, secs=0.5)
+    types = [x.get("type") for x in ws.sent if isinstance(x, dict)]
+    check("resync cerut în timpul aşteptării: absorbit (un singur resync, cu istoric)",
+          types.count("resync") == 1 and len(binary_frames(ws)) == 1
+          and core.HISTORY_SEAM in binary_frames(ws)[0], str(types))
+    check("…şi nu rămâne nicio intenţie lossy agăţată (ar declanşa un reset fără istoric la prima trezire)",
+          client._pending_resync == core.RESYNC_NONE, client._pending_resync)
+    hub.out_f.close(); hub.cast_f.close()
+
+
 def main():
     t1_read_tail_end_bound()
     asyncio.run(t2_resume_includes_unflushed())
@@ -350,6 +514,10 @@ def main():
     asyncio.run(t7_overflow_cannot_downgrade_full())
     asyncio.run(t8_unlock_pause_resume_keeps_intent())
     asyncio.run(t9_locked_client_gets_no_resync())
+    asyncio.run(t10_full_resync_brings_tmux_history())
+    asyncio.run(t11_lossy_and_fallback_unchanged())
+    asyncio.run(t12_lock_during_history_wait_sends_nothing())
+    asyncio.run(t13_resync_requested_during_wait_is_absorbed())
     ok = sum(1 for _, c in results if c)
     print(f"\n{ok}/{len(results)} passed")
     return ok == len(results)

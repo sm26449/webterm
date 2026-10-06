@@ -7207,6 +7207,7 @@ async def shared_ws(ws: WebSocket, token: str):
     sb, sb_rows = core.parse_replay_params(getattr(ws, "query_params", None) or {})
     if client:
         client.replay_limit = core.replay_tail_limit(sb, core.stream_is_plain(hub))
+        client.replay_sb = sb             # resync-ul FULL (resume/unlock) readuce şi istoricul tmux
     if not start_locked:
         replay = await core.attach_replay(row["id"], hub, sb, sb_rows)
         if hub and (hub.locked or (share_2fa and not any(
@@ -7376,6 +7377,7 @@ async def browser_ws(ws: WebSocket, sid: str):
     sb, sb_rows = core.parse_replay_params(getattr(ws, "query_params", None) or {})
     if client:
         client.replay_limit = core.replay_tail_limit(sb, core.stream_is_plain(hub))
+        client.replay_sb = sb             # resync-ul FULL (resume/unlock) readuce şi istoricul tmux
     if not start_locked:
         replay = await core.attach_replay(sid, hub, sb, sb_rows)
         if hub and hub.locked:

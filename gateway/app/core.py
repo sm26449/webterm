@@ -397,7 +397,7 @@ def read_tail(sid: str, limit: int = config.BROWSER_TAIL_BYTES,
 #    de istoric în loc să-l lase în scrollback.
 #  · Orice eşec (agent < 57, backend pty, pane-uri multiple, timeout, răspuns invalid) = None →
 #    comportamentul de azi, fără nicio urmă în UI.
-# NU se aplică la resync (resume/unlock): acolo coada rămâne cea istorică (vezi `_resync`).
+# Se aplică şi la resync-ul FULL (resume/unlock, vezi `_resync`), cu acelaşi bloc; lossy nu cere istoric.
 HISTORY_MIN_AGENT = 57
 HISTORY_MAX_LINES = 20000            # plafon server-side pe `sb` (browserul cere 10000 / 3000)
 HISTORY_MAX_BYTES = 4 * 1024 * 1024  # plafon pe captura DECOMPRIMATĂ (agentul taie la fel)
@@ -612,6 +612,10 @@ class BrowserClient:
         # ca un tab de desktop pe o sesiune pty să nu-şi micşoreze scrollback-ul de la 2 MiB la
         # 256 KiB la fiecare comutare de tab. Setat de handler-ul WS (`replay_tail_limit`).
         self.replay_limit = config.BROWSER_TAIL_BYTES
+        # scrollback-ul declarat de browser la ataşare (`?sb=`): 0 = fără istoric tmux (frontend
+        # vechi / client de test). Refolosit de resync-ul FULL, care altfel ar da `term.reset()`
+        # şi ar lăsa tabul revenit din fundal doar cu coada — adică exact simptomul reparat.
+        self.replay_sb = 0
 
     def _request_resync(self, level: int) -> None:
         # combină prin max — un „full" cerut de unlock nu poate fi degradat de
@@ -710,6 +714,27 @@ class BrowserClient:
         # căruia avertizează comentariul din `read_tail`), iar un client cronic lent ar
         # declanșa repaint-uri în buclă (fiecare umflă transcriptul și îl împinge înapoi
         # peste limita de buffer). Gaura de checkpoint rămâne — documentată, mărginită.
+        #
+        # Istoricul tmux (doar pe full): cerut ÎNAINTE de drain → flush → tell, deci nu atinge
+        # garanţia de mai sus — tot ce soseşte cât aşteptăm agentul intră în coadă, iar drain-ul
+        # de după îl aruncă fiindcă e ≤ cutoff (deci în tail). Blocul pleacă în ACELAŞI frame cu
+        # tail-ul: clientul face `term.reset()` la primul binar de după „resync". Orice eşec =
+        # b"" = resync-ul de dinainte. Lossy nu cere niciodată istoric.
+        block = b""
+        if full and self.replay_sb > 0 and not self.hub.closed:
+            raw = await fetch_tmux_history(self.hub._source(), self.hub.sid, self.replay_sb)
+            if raw:
+                block = await asyncio.to_thread(build_history_block, raw, self.replay_sb,
+                                                self.hub.rows)
+            # aşteptarea poate ţine secunde: re-verificăm garda de securitate de sus
+            if self.locked or self.hub.locked:
+                self._drain_queue()
+                return
+            # Un overflow (lossy) sau un unlock (full) cerut CÂT aşteptam e acoperit integral de
+            # resync-ul ăsta (cutoff proaspăt, după drain); altfel ar urma imediat un al doilea
+            # resync — unul lossy ar da iar `term.reset()` fără istoric. Sentinelele lor pleacă
+            # oricum la drain.
+            self._pending_resync = RESYNC_NONE
         self._drain_queue()
         cutoff = None
         gen = None
@@ -737,8 +762,8 @@ class BrowserClient:
         # 2 MiB trimişi exact clientului care nu ţine pasul ar întreţine bucla de overflow.
         limit = self.replay_limit if full else config.BROWSER_TAIL_BYTES
         tail = await asyncio.to_thread(read_tail, self.hub.sid, limit=limit, end=cutoff)
-        await self.send_bytes(tail)
-        self._sent_since_ping += len(tail)
+        await self.send_bytes(block + tail)
+        self._sent_since_ping += len(block) + len(tail)
         # Garanția „≤ cutoff în tail, > cutoff în coadă" cade în două cazuri:
         #  · cutoff=None — lossy, sau flush eșuat: citirea a fost nemărginită;
         #  · _maybe_cap a RESCRIS fișierul cât citeam (plafonul de 64MiB): offseturile

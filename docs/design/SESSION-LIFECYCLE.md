@@ -93,8 +93,17 @@ tmux session** puts the pane's real history above the tail:
 
 Streams that are not tmux traffic, such as the pty backend, telnet, serial and closed sessions,
 get a 2 MiB tail instead of 256 KiB when the browser's scrollback is large (desktop). Mobile keeps
-256 KiB. Resume and unlock resyncs do **not** fetch tmux history; they replay the tail, at the
-attach-time window for a full resync and at 256 KiB for a lossy one.
+256 KiB.
+
+A **full resync** (a background tab resuming after it missed output, an unlock, recovery after a
+pong timeout) resets the browser terminal, so it fetches the tmux history too, using the `sb` given
+at attach. It does that *before* the drain, flush and cutoff sequence, so the "≤ cutoff in the
+tail, > cutoff in the queue" guarantee is untouched: whatever arrives during the wait is drained
+and comes back through the tail. The guarantee also means that a resync requested during the
+wait (an overflow or an unlock) is already covered, so its pending intent is cleared rather than
+followed by a second reset without history. If the hub locks during the wait, nothing is sent.
+A **lossy resync** (a slow client) is unchanged: no history, a 256 KiB tail. A full resync's tail
+uses the window the client got at attach.
 
 ## The screen is not the source of truth
 
