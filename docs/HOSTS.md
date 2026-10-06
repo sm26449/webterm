@@ -118,6 +118,72 @@ Normalisation, done on the server: lowercased, duplicates removed, each tag cut 
 characters, at most 20 tags per host. Tags are labels only: they grant nothing and restrict
 nothing.
 
+## Export and import (CSV)
+
+Move a set of hosts to another WebTerm gateway, or keep the list in a spreadsheet and load it
+back. **No secret ever goes into the file.**
+
+**Export.** Hover a folder header in the sidebar and press its download icon (the folder's
+hosts come pre-selected), or open **Add host → Import CSV → Export hosts…**. Tick hosts one by
+one, or select them in bulk with **All**, a **Folder** chip or a **#tag** chip, then press
+**Export CSV**. The browser downloads `webterm-hosts-YYYYMMDD.csv` (UTF-8 with a BOM, so Excel
+shows diacritics correctly; RFC 4180 quoting).
+
+Columns, always in this order:
+
+```
+name,connection_type,hostname,port,username,via_host,folder,tags,note,require_2fa,credential_policy,auth_method,agent_note
+```
+
+- `via_host` is the **name** of the agent an ssh-jump/telnet-jump target goes through (ids do
+  not survive a move to another gateway).
+- `tags` are space-separated; `require_2fa` is `0`/`1`.
+- Agent hosts leave `port`, `username`, `credential_policy` and `auth_method` empty and carry
+  `agent_note` = "reinstall the agent on the new gateway".
+- Never exported: passwords, private keys, passphrases, enrollment links, agent tokens,
+  instance ids, pinned host keys (`known_hosts`) and share links. A host-key pin is a fact
+  about *this* gateway's first contact; the new gateway pins on its own first connection (or
+  on a **Test connection**).
+- "Connect once" targets are not exported, exactly as they are not in the sidebar.
+- Hosts that **require 2FA** are exported without a step-up: the file holds the same metadata
+  `GET /api/hosts` already shows to the signed-in browser. Step-up guards access *to* a host
+  (shell, files, stored credentials), not its name and address.
+- Cells starting with `=`, `+`, `-` or `@` get a leading `'`, so a spreadsheet shows them as
+  text instead of running them as a formula (CSV injection). The import removes that `'`
+  again.
+
+**Import.** **Add host → Import CSV**: drop the file, pick it, or paste the text. The browser
+parses it and shows a preview, one row per host, with a status:
+
+| Status | Meaning |
+|---|---|
+| New | will be created |
+| Agent | will be created **pending**; it needs its agent installed |
+| Exists already | same name, or same hostname + port + username; skipped |
+| Error | the reason: missing name/type/hostname/username, unknown `connection_type`, invalid port, `via_host` not found / not an agent / ambiguous |
+
+Rows that can be created are ticked; untick any you do not want. Applied to all ticked rows:
+an optional **folder** (otherwise each row keeps its own), **extra tags**, and the
+**credential policy** of SSH/Telnet rows — *Ask every time* by default, or *Stored*, in
+which case you add the password or key later by editing the host. **Test connection** and
+**Generate a key** stay per host (edit the host after the import); they are not applied in
+bulk.
+
+The gateway re-checks everything: every row goes through exactly the validation of
+`POST /api/hosts`, duplicates are detected again on the server, at most 500 rows per import.
+Agent rows are created first, so an ssh-jump row can name an agent defined further down the
+same file. One audit entry records "imported N hosts (M skipped)".
+
+Each imported agent host gets **its own install command**, valid for 24 hours, shown after
+the import (a fresh one is under the host's **⋯ → Reinstall**). A group enrollment link
+cannot be offered here: running a group link *creates a new host* on every machine, it cannot
+attach to hosts that already exist, so it would duplicate every imported agent.
+
+API (browser session only; automation tokens are refused):
+`GET /api/hosts/export.csv?ids=1,2,3` and `POST /api/hosts/import` with
+`{"rows": [{…columns as text…}], "options": {"folder": "", "tags": "", "credential_policy": "ask"}}`,
+which answers with one result per row: `{index, ok, id?, code?, vars?}`.
+
 ## Require 2FA (step-up)
 
 Mark a host as one that a stolen browser session must not be enough to reach. On such a host,

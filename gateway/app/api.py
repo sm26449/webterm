@@ -2,8 +2,10 @@
 
 import asyncio
 import base64
+import csv
 import hashlib
 import html
+import io
 import json
 import logging
 import os
@@ -1952,18 +1954,33 @@ async def list_hosts(user=Depends(security.require_scope("read"))):
     return [_host_json(r) for r in rows]
 
 
-@router.post("/api/hosts")
-async def create_host(host: HostIn, user=Depends(security.require_user)):
+_HOST_TYPES = ("agent", "ssh", "ssh-jump", "telnet", "telnet-jump")
+
+
+async def _validate_host(host: HostIn, user) -> dict:
+    """SINGURA cale de validare pentru un host nou — `POST /api/hosts` şi importul CSV trec
+    amândouă pe aici, ca un rând de CSV să nu poată crea ceva ce formularul ar refuza (sau
+    invers). Întoarce valorile normalizate pe care le scrie `_insert_host`."""
     ctype = host.connection_type or "agent"
     # Un tip necunoscut („SSH", typo de script) era coerce TĂCUT la agent: 200 cu un host agent
     # şi credenţialul aruncat de _credential_blob. PATCH-ul dădea deja 400 — acum şi POST-ul.
-    if ctype not in ("agent", "ssh", "ssh-jump", "telnet", "telnet-jump"):
+    if ctype not in _HOST_TYPES:
         raise ApiError(400, "host.badType", "unknown connection type")
+    # Numele gol trecea: UI-ul are `required`, dar API-ul (şi acum CSV-ul) nu — un host fără
+    # nume e un rând pe care nu-l mai găseşti în sidebar.
+    if not host.name.strip():
+        raise ApiError(400, "host.nameRequired", "a host name is required")
     _check_cred_policy(host.credential_policy)
     if ctype in ("ssh", "ssh-jump", "telnet", "telnet-jump") and not host.hostname.strip():
         raise ApiError(400, "host.hostnameRequired", "hostname required for a direct connection")
     if ctype in ("ssh", "ssh-jump") and not host.ssh_username.strip():
         raise ApiError(400, "ssh.userRequired", "an SSH username is required")
+    # metoda de autentificare era scrisă orbeşte; un „pasword" dintr-un CSV ar fi dat un host
+    # care nu se mai conectează niciodată, fără nicio explicaţie
+    if ctype in ("ssh", "ssh-jump") and host.auth_method not in ("password", "key"):
+        raise ApiError(400, "host.badAuthMethod", "auth_method must be password or key")
+    if host.ssh_port is not None and not 1 <= host.ssh_port <= 65535:
+        raise ApiError(400, "host.badPort", "the port must be between 1 and 65535")
     if ctype in ("ssh-jump", "telnet-jump"):
         via = await db.fetchone("SELECT connection_type FROM hosts WHERE id=?", host.via_host_id)
         if not via or (via["connection_type"] or "agent") != "agent":
@@ -1977,6 +1994,12 @@ async def create_host(host: HostIn, user=Depends(security.require_user)):
         known = _verified_pin(user["id"], ctype, host.hostname, port, host.via_host_id, host.pin_hostkey)
     if host.pending_key_id and ctype not in ("ssh", "ssh-jump"):
         raise ApiError(400, "sshkey.notSsh", "SSH key generation is only for SSH hosts")
+    return {"ctype": ctype, "port": port, "known": known}
+
+
+async def _insert_host(host: HostIn, user, v: dict):
+    """Scrie hostul validat de `_validate_host`. Întoarce (rândul, tokenul de enroll, parola)."""
+    ctype, port, known = v["ctype"], v["port"], v["known"]
     cred_blob, auth_method, policy = _credential_blob(host), host.auth_method, host.credential_policy
     if host.pending_key_id:
         # revendicare ATOMICĂ (DELETE … RETURNING): cheia se leagă o singură dată, doar de userul ei
@@ -2005,9 +2028,241 @@ async def create_host(host: HostIn, user=Depends(security.require_user)):
         host.via_host_id if ctype in ("ssh-jump", "telnet-jump") else None,
         1 if (host.ephemeral and ctype in ("ssh-jump", "telnet-jump")) else 0, known)
     row = await db.fetchone("SELECT * FROM hosts WHERE id=?", host_id)
+    return row, enroll, pw
+
+
+@router.post("/api/hosts")
+async def create_host(host: HostIn, user=Depends(security.require_user)):
+    v = await _validate_host(host, user)
+    row, enroll, pw = await _insert_host(host, user, v)
     return dict(_host_json(row), install_command=_install_command(enroll, pw),
                 install_command_dedicated=_install_command_dedicated(enroll, pw),
                 enroll_expires=row["enroll_expires"])
+
+
+# ── Export / import CSV ──────────────────────────────────────────────────────
+# Mutarea unui subset de hosturi pe alt gateway, sau o listă editabilă într-un spreadsheet.
+# NICIUN secret nu intră în fişier: nici credenţiale/chei/passphrase-uri, nici tokenuri de
+# enroll/agent, nici instance id-uri, nici pinurile known_hosts, nici tokenuri de share. Exportul
+# construieşte fiecare rând dintr-o listă ALBĂ de coloane — nu din `SELECT *` filtrat — ca o
+# coloană secretă adăugată mâine să nu ajungă singură în CSV.
+HOSTS_CSV_COLUMNS = ("name", "connection_type", "hostname", "port", "username", "via_host",
+                     "folder", "tags", "note", "require_2fa", "credential_policy", "auth_method",
+                     "agent_note")
+HOSTS_CSV_AGENT_NOTE = "reinstall the agent on the new gateway"
+HOSTS_IMPORT_MAX = 500
+# CSV injection: o celulă care începe cu = + - @ (sau TAB/CR) e o FORMULĂ pentru Excel/LibreOffice
+# („=HYPERLINK(...)" într-o notă). O prefixăm cu `'`, pe care spreadsheet-ul îl ia drept „text".
+# Prefixăm şi celulele care încep deja cu apostroafe urmate de un declanşator, ca importul (care
+# scoate EXACT un `'`, vezi `lib/hostscsv.ts`) să fie fără pierderi: „'=x" → „''=x" → „'=x".
+_CSV_FORMULA_RE = re.compile(r"^'*[=+\-@\t\r]")
+
+
+def _csv_cell(v) -> str:
+    s = "" if v is None else str(v)
+    return "'" + s if _CSV_FORMULA_RE.match(s) else s
+
+
+def _hosts_csv(rows, names_by_id: dict) -> str:
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\r\n")          # RFC 4180: CRLF, ghilimele doar la nevoie
+    w.writerow(HOSTS_CSV_COLUMNS)
+    for r in rows:
+        ctype = r["connection_type"] or "agent"
+        agent = ctype == "agent"
+        via = r["via_host_id"] if ctype in _JUMP_TYPES else None
+        w.writerow([_csv_cell(x) for x in (
+            r["name"], ctype, r["hostname"] or "",
+            "" if agent else (r["ssh_port"] or ""),
+            "" if agent else (r["ssh_username"] or ""),
+            names_by_id.get(via, "") if via else "",
+            r["folder"] or "", " ".join(_tag_list(r["tags"] or "", None)), r["note"] or "",
+            1 if r["require_2fa"] else 0,
+            "" if agent else (r["credential_policy"] or ""),
+            (r["auth_method"] or "") if ctype in ("ssh", "ssh-jump") else "",
+            HOSTS_CSV_AGENT_NOTE if agent else "")])
+    return buf.getvalue()
+
+
+@router.get("/api/hosts/export.csv")
+async def export_hosts_csv(request: Request, ids: str = "", user=Depends(security.require_user)):
+    """Exportă hosturile alese ca CSV. Doar cookie (`require_user`): un token de automatizare
+    nu scoate inventarul flotei.
+
+    Vizibilitate = lista de hosturi din sidebar: ţintele efemere („conectează o dată") NU intră.
+    Hosturile cu `require_2fa` INTRĂ, fără step-up: exportul e doar metadate (nume, adresă,
+    port, user, folder) — exact ce `GET /api/hosts` arată deja aceluiaşi cookie fără step-up.
+    Step-up-ul păzeşte accesul LA host (shell, fişiere, credenţiale), nu numele lui."""
+    try:
+        wanted = sorted({int(x) for x in ids.replace(" ", "").split(",") if x})
+    except ValueError:
+        raise ApiError(400, "hostcsv.badIds", "ids must be a comma-separated list of host ids")
+    if not wanted:
+        raise ApiError(400, "hostcsv.noIds", "pick at least one host to export")
+    if len(wanted) > 10000:
+        raise ApiError(400, "hostcsv.badIds", "ids must be a comma-separated list of host ids")
+    rows = await db.fetchall(
+        "SELECT * FROM hosts WHERE ephemeral=0 AND id IN (%s) ORDER BY name COLLATE NOCASE, id"
+        % ",".join("?" * len(wanted)), *wanted)
+    names = {r["id"]: r["name"] for r in await db.fetchall("SELECT id, name FROM hosts")}
+    body = "﻿" + _hosts_csv(rows, names)     # BOM: Excel deschide diacriticele corect
+    audit.detail(request, "exported %d hosts as CSV" % len(rows))
+    fname = "webterm-hosts-%s.csv" % time.strftime("%Y%m%d")
+    return Response(content=body.encode("utf-8"), media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": 'attachment; filename="%s"' % fname,
+                             "Cache-Control": "no-store"})
+
+
+class HostCsvRow(BaseModel):
+    """Un rând de CSV, ca şiruri (aşa cum le-a parsat clientul). Coloanele necunoscute — inclusiv
+    `agent_note` — sunt ignorate; nimic de aici nu e un secret."""
+    model_config = {"coerce_numbers_to_str": True}
+    name: str = ""
+    connection_type: str = ""
+    hostname: str = ""
+    port: str = ""
+    username: str = ""
+    via_host: str = ""
+    folder: str = ""
+    tags: str = ""
+    note: str = ""
+    require_2fa: str = ""
+    credential_policy: str = ""
+    auth_method: str = ""
+
+
+class HostImportOptions(BaseModel):
+    folder: str = ""                 # gol = folderul din fişier
+    tags: str = ""                   # etichete ADĂUGATE fiecărui rând
+    credential_policy: str = ""      # rândurile SSH/telnet; gol = coloana din fişier, apoi `ask`
+    enroll_ttl: int = 86400          # link-urile de instalare ale agenţilor (implicit 24h)
+
+
+class HostImportIn(BaseModel):
+    rows: list = []
+    options: HostImportOptions = HostImportOptions()
+
+
+def _csv_bool(v) -> bool:
+    return str(v).strip().lower() in ("1", "true", "yes", "y", "da")
+
+
+def _csv_port(v) -> Optional[int]:
+    s = str(v or "").strip()
+    if not s:
+        return None
+    if not s.isdigit() or not 1 <= int(s) <= 65535:
+        raise ApiError(400, "host.badPort", "the port must be between 1 and 65535")
+    return int(s)
+
+
+async def _resolve_via(name: str) -> int:
+    """`via_host` e NUMELE agentului (id-urile nu supravieţuiesc mutării pe alt gateway).
+    Mai multe agente cu acelaşi nume = ambiguu; un host non-agent cu numele ăsta trece mai
+    departe, ca validarea comună să-l refuze cu codul ei (`sshjump.needsAgent`)."""
+    name = name.strip()
+    if not name:
+        raise ApiError(400, "hostcsv.viaRequired", "a jump host needs via_host (the agent's name)")
+    cands = await db.fetchall(
+        "SELECT id, connection_type FROM hosts WHERE ephemeral=0 AND lower(name)=lower(?)", name)
+    agents = [c for c in cands if (c["connection_type"] or "agent") == "agent"]
+    if len(agents) > 1:
+        raise ApiError(400, "hostcsv.viaAmbiguous", "more than one agent host has this name",
+                       vars={"name": name})
+    if agents:
+        return agents[0]["id"]
+    if cands:
+        return cands[0]["id"]
+    raise ApiError(400, "hostcsv.viaMissing", "no agent host with this name", vars={"name": name})
+
+
+async def _check_duplicate(h: HostIn, v: dict) -> None:
+    """Serverul re-verifică duplicatele — statusul din previzualizarea clientului nu contează.
+    Duplicat = acelaşi nume (fără diferenţă de majuscule) SAU, la conexiunile directe, aceeaşi
+    adresă + port + user. Ţintele efemere nu contează (dispar singure)."""
+    dup = await db.fetchone("SELECT 1 FROM hosts WHERE ephemeral=0 AND lower(name)=lower(?)",
+                            h.name.strip())
+    if not dup and v["ctype"] != "agent":
+        dup = await db.fetchone(
+            "SELECT 1 FROM hosts WHERE ephemeral=0 AND coalesce(connection_type,'agent')!='agent'"
+            " AND lower(hostname)=lower(?) AND ssh_port=?"
+            " AND lower(coalesce(ssh_username,''))=lower(?)",
+            h.hostname.strip(), v["port"], h.ssh_username.strip())
+    if dup:
+        raise ApiError(409, "hostcsv.duplicate", "a host with this name or address already exists",
+                       vars={"name": h.name.strip()})
+
+
+async def _import_row(r: HostCsvRow, opts: HostImportOptions, user) -> tuple:
+    """Un rând → host nou. Ordinea verificărilor e oglindită de previzualizarea din
+    `lib/hostscsv.ts` (acelaşi cod de eroare pe acelaşi rând)."""
+    ctype = r.connection_type.strip().lower()
+    if not ctype:
+        raise ApiError(400, "hostcsv.typeRequired", "connection_type is required")
+    agent = ctype == "agent"
+    port = None if agent else _csv_port(r.port)
+    via_id = await _resolve_via(r.via_host) if ctype in _JUMP_TYPES else 0
+    h = HostIn(
+        name=r.name, note=r.note, folder=opts.folder.strip() or r.folder,
+        connection_type=ctype, hostname=r.hostname, ssh_username="" if agent else r.username,
+        ssh_port=port, via_host_id=via_id,
+        auth_method=r.auth_method.strip().lower() or "password",
+        require_2fa=_csv_bool(r.require_2fa),
+        # agentul n-are credenţiale (ca la Add host → Agent); restul: opţiunea, apoi fişierul,
+        # apoi `ask` — CSV-ul nu duce parole, deci `stored` ar însemna „fără nimic stocat"
+        credential_policy="stored" if agent else (
+            opts.credential_policy or r.credential_policy.strip().lower() or "ask"),
+        tags=" ".join(x for x in (r.tags, opts.tags) if x.strip()), enroll_ttl=opts.enroll_ttl)
+    v = await _validate_host(h, user)
+    await _check_duplicate(h, v)
+    return await _insert_host(h, user, v)
+
+
+@router.post("/api/hosts/import")
+async def import_hosts(body: HostImportIn, request: Request, user=Depends(security.require_user)):
+    """Importă hosturi dintr-un CSV parsat de client. Fiecare rând trece prin EXACT validarea
+    lui `POST /api/hosts` (`_validate_host`); duplicatele sunt sărite. Rândurile agent intră
+    PRIMELE, ca ţintele ssh-jump/telnet-jump din acelaşi fişier să-şi găsească agentul după nume.
+
+    Agenţii importaţi sunt hosturi în aşteptare, ca la Add host → Agent: token propriu + link de
+    instalare cu TTL. Un link de GRUP nu se poate folosi aici — `/install/group` CREEAZĂ un host
+    nou la fiecare rulare, nu se leagă de unul existent — deci întoarcem comanda per host."""
+    if len(body.rows) > HOSTS_IMPORT_MAX:
+        raise ApiError(400, "hostcsv.tooMany", "at most %d rows per import" % HOSTS_IMPORT_MAX,
+                       vars={"max": HOSTS_IMPORT_MAX})
+    opts = body.options
+    if opts.credential_policy:
+        _check_cred_policy(opts.credential_policy)
+    parsed = []
+    for i, raw in enumerate(body.rows):
+        try:
+            parsed.append((i, HostCsvRow.model_validate(raw if isinstance(raw, dict) else None)))
+        except ValidationError:
+            parsed.append((i, None))
+    is_agent = lambda p: p[1] is not None and p[1].connection_type.strip().lower() == "agent"  # noqa: E731
+    order = [p for p in parsed if is_agent(p)] + [p for p in parsed if not is_agent(p)]
+    results = {}
+    created = 0
+    for i, r in order:
+        try:
+            if r is None:
+                raise ApiError(400, "hostcsv.badRow", "a row must be an object of text cells")
+            row, enroll, pw = await _import_row(r, opts, user)
+        except ApiError as e:
+            results[i] = {"index": i, "ok": False, "code": e.code, "vars": e.vars,
+                          "skipped": e.code == "hostcsv.duplicate"}
+            continue
+        created += 1
+        res = {"index": i, "ok": True, "id": row["id"], "name": row["name"]}
+        if (row["connection_type"] or "agent") == "agent":
+            res.update(install_command=_install_command(enroll, pw),
+                       install_command_dedicated=_install_command_dedicated(enroll, pw),
+                       enroll_expires=row["enroll_expires"])
+        results[i] = res
+    skipped = len(body.rows) - created
+    audit.detail(request, "imported %d hosts (%d skipped)" % (created, skipped))
+    return {"results": [results[i] for i in sorted(results)], "created": created,
+            "skipped": skipped}
 
 
 class EnrollRenew(BaseModel):

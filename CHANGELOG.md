@@ -10,6 +10,21 @@ back.
 ## [Unreleased]
 
 ### Added
+- **Export and import hosts as CSV.** Moving a set of hosts to another gateway meant
+  re-typing every one; there was no way to get the list out, or into a spreadsheet and back.
+  Export from a folder header in the sidebar or from **Add host → Import CSV → Export hosts…**
+  (select by host, folder or tag); import from the new **Import CSV** mode in Add host, with a
+  preview that marks each row new / agent (pending) / exists / error before anything is
+  created. **No secrets are ever in the file** (no passwords, keys, enrollment or agent
+  tokens, host-key pins or share links), formula-looking cells are neutralised against CSV
+  injection, and every imported row goes through exactly the validation of Add host — the
+  two now share one function — with duplicates skipped by the server. Agent hosts come back
+  pending, each with its own install command: a group link cannot attach to hosts that
+  already exist. See [docs/HOSTS.md](docs/HOSTS.md#export-and-import-csv).
+- `POST /api/hosts` now refuses an empty name (`host.nameRequired`), a port outside 1–65535
+  (`host.badPort`) and an SSH auth method other than password/key (`host.badAuthMethod`).
+  They were accepted and produced hosts that could never connect; the CSV import made the
+  gap easy to hit.
 - **A Security card on the Dashboard** answers "is everything OK right now?" in one glance:
   your 2FA, active share links, the command guardrail, the signing key, hosts requiring 2FA,
   backups, alert channels and agent versions. It used to take four trips through Settings and

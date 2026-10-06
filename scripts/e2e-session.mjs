@@ -10,6 +10,7 @@
    Prereq: containerul <smoke> pornit cu WEBTERM_SETUP_TOKEN=$E2E_SETUP_TOKEN,
    WEBTERM_PUBLIC_URL=http://127.0.0.1:8000, WEBTERM_AGENT_INSECURE=1. */
 import { execFileSync } from 'node:child_process'
+import { readFile } from 'node:fs/promises'
 import { chromium } from 'playwright'
 
 const BASE = process.argv[2] ?? 'http://127.0.0.1:8000'
@@ -1430,6 +1431,57 @@ try {
     if (h) await fetch(`${BASE}/api/hosts/${h.id}`, { method: 'DELETE', headers: { Cookie: cookie, Origin: BASE } })
   }
   await ciRun('[ -f /tmp/wt-e2e-sshd.pid ] && kill "$(cat /tmp/wt-e2e-sshd.pid)"; rm -f /tmp/wt-e2e-sshd.pid')
+
+  // ── Export / import CSV de hosturi (3.5.4) ──
+  // Export: Add host → Import CSV → „Export hosts…" → All → descărcarea chiar pleacă, cu BOM şi
+  // antetul fix. Import: un CSV lipit cu 2 rânduri SSH, unul cu numele agentului de test
+  // (duplicat), unul nou → previzualizarea le marchează exists/new, iar importul creează exact 1.
+  await goHome()
+  await page.click('button[aria-label="Add host"]')
+  await addHostDlg.getByRole('button', { name: 'Import CSV', exact: true }).click()
+  await addHostDlg.locator('button:has-text("Export hosts…")').click()
+  const csvExport = page.locator('[data-testid="csv-export"]')
+  await visible(csvExport)
+  await csvExport.getByRole('button', { name: 'All', exact: true }).click()
+  const [csvDl] = await Promise.all([
+    page.waitForEvent('download', { timeout: 15000 }),
+    csvExport.locator('button:has-text("Export CSV (")').click(),
+  ])
+  const csvBytes = await readFile(await csvDl.path())
+  const csvText = csvBytes.toString('utf8')
+  check('csv: exportul descarcă webterm-hosts-AAAALLZZ.csv cu BOM + antetul fix + hostul de test',
+    /^webterm-hosts-\d{8}\.csv$/.test(csvDl.suggestedFilename())
+    && csvBytes[0] === 0xef && csvBytes[1] === 0xbb && csvBytes[2] === 0xbf
+    && csvText.slice(1).startsWith('name,connection_type,hostname,port,username,via_host,folder,tags,note,'
+      + 'require_2fa,credential_policy,auth_method,agent_note\r\n')
+    && csvText.includes('\r\nci-local,agent,'))
+  await page.click('button[aria-label="Add host"]')
+  await addHostDlg.getByRole('button', { name: 'Import CSV', exact: true }).click()
+  await addHostDlg.locator('[data-testid="csv-text"]').fill(
+    'name,connection_type,hostname,port,username\r\n'
+    + 'ci-local,ssh,10.77.0.1,22,e2e\r\n'
+    + 'e2e-csv-new,ssh,10.77.0.2,2200,e2e\r\n')
+  await addHostDlg.locator('button:has-text("Preview")').click()
+  const csvStatus = addHostDlg.locator('[data-testid="csv-row-status"]')
+  await visible(csvStatus.first())
+  // lista de hosturi existente soseşte asincron: aşteptăm activ statusul final, cu plafon
+  let kinds = []
+  for (let i = 0; i < 50 && kinds.join(',') !== 'exists,new'; i++) {
+    kinds = await csvStatus.evaluateAll((els) => els.map((e) => e.getAttribute('data-kind')))
+    if (kinds.join(',') !== 'exists,new') await page.waitForTimeout(100)
+  }
+  check('csv: previzualizarea marchează duplicatul „exists" şi rândul nou „new"',
+    kinds.join(',') === 'exists,new')
+  await addHostDlg.locator('button:has-text("Import (1)")').click()
+  await visible(addHostDlg.locator('[data-testid="csv-import-result"]'), 10000)
+  const afterCsv = await (await fetch(`${BASE}/api/hosts`, { headers: { Cookie: cookie } })).json()
+  const csvNew = afterCsv.filter((h) => h.name === 'e2e-csv-new')
+  check('csv: importul creează exact 1 host (SSH, port 2200, politica ask), duplicatul rămâne neatins',
+    csvNew.length === 1 && csvNew[0].ssh_port === 2200 && csvNew[0].credential_policy === 'ask'
+    && afterCsv.filter((h) => h.name === 'ci-local').length === 1)
+  await addHostDlg.locator('button:has-text("Done")').click()
+  await hidden(addHostDlg)
+  for (const h of csvNew) await fetch(`${BASE}/api/hosts/${h.id}`, { method: 'DELETE', headers: { Cookie: cookie, Origin: BASE } })
 
   // ── Sfaturi contextuale (coach tips): apariţie scalonată + persistenţă + reset ──
   // Presetarea de la început a marcat toate cheile `wt_tip_*` ca văzute (ca sfaturile să nu

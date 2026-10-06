@@ -30,6 +30,7 @@ export const HELP = {
   credentialPolicy: { doc: 'docs/HOSTS.md#credential-policies' },
   enrollTtl: { doc: 'docs/HOSTS.md#install-links-and-their-ttl' },
   hostTest: { doc: 'docs/HOSTS.md#testing-a-connection' },
+  hostsCsv: { doc: 'docs/HOSTS.md#export-and-import-csv' },
   aiTools: { doc: 'docs/AI-TOOLS.md#what-it-is-for' },
   toolbox: { doc: 'docs/DATABASE-TOOLBOX.md#connections--one-click-to-a-database-cli' },
   forwardsSso: { doc: 'docs/SSO.md#register-a-webterm-instance-in-your-idp' },

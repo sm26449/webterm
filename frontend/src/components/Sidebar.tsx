@@ -9,12 +9,13 @@ import { useFocusTrap } from '../lib/useFocusTrap'
 import InstallCommand from './InstallCommand'
 import { hostColor, reachState } from '../lib/host'
 import { allSchemes, hostSchemeRaw, setHostScheme } from '../lib/termtheme'
-import { ActivityIcon, CloseIcon, CollapseIcon, FilesIcon, FolderMoveIcon, GearIcon, KeyIcon, LogoMark, MoreIcon, NoteIcon, PlusIcon, PowerIcon, RefreshIcon, SearchIcon, ServerIcon, ShieldSmallIcon, TerminalPromptIcon } from './Icons'
+import { ActivityIcon, CloseIcon, CollapseIcon, DownloadIcon, FilesIcon, FolderMoveIcon, GearIcon, KeyIcon, LogoMark, MoreIcon, NoteIcon, PlusIcon, PowerIcon, RefreshIcon, SearchIcon, ServerIcon, ShieldSmallIcon, TerminalPromptIcon } from './Icons'
 import { fmt } from '../lib/shortcuts'
 import { setHostMuted, updatesSignal, useUpdatesPref } from '../lib/updatesPref'
 
 // modale rar folosite → chunk-uri separate, în afara bundle-ului inițial
 const AddHostModal = lazy(() => import('./AddHostModal'))
+const ExportHostsModal = lazy(() => import('./HostsCsv').then((m) => ({ default: m.ExportHostsModal })))
 const SettingsModal = lazy(() => import('./SettingsModal'))
 const FleetRunModal = lazy(() => import('./FleetRunModal'))
 const StatusModal = lazy(() => import('./StatusModal'))
@@ -78,6 +79,8 @@ export default function Sidebar(props: {
   const [showAdd, setShowAdd] = useState(false)
   const [editHost, setEditHost] = useState<Host | null>(null)
   const [jumpVia, setJumpVia] = useState<Host | null>(null)   // agentul-gazdă pentru care adăugăm o ţintă SSH-jump
+  // dialogul de export CSV; `folder` = preselecţia (antetul unui folder), undefined = nimic bifat
+  const [exportCsv, setExportCsv] = useState<{ folder?: string } | null>(null)
   const [showSettings, setShowSettings] = useState(false)
   const [settingsCat, setSettingsCat] = useState<'securitate' | 'backup' | 'notificari' | undefined>(undefined)
   const [showFleetRun, setShowFleetRun] = useState(false)
@@ -825,6 +828,15 @@ export default function Sidebar(props: {
                         <NoteIcon />
                       </button>
                     )}
+                    {/* export CSV al grupului: dialogul se deschide cu hosturile folderului bifate */}
+                    <button
+                      onClick={() => setExportCsv({ folder })}
+                      title={t('hostcsv.exportFolderAria', { folder: folder || t('sidebar.noFolder') })}
+                      aria-label={t('hostcsv.exportFolderAria', { folder: folder || t('sidebar.noFolder') })}
+                      className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded opacity-0 hover:text-slate-200 focus-visible:opacity-100 group-hover/folder:opacity-100 [@media(hover:none)]:opacity-100"
+                    >
+                      <DownloadIcon />
+                    </button>
                     {/* cu host-uri căzute în grup, contorul devine „vii/total" — altfel un grup
                         PLIAT ascundea complet că are ceva jos */}
                     <span className="shrink-0 text-slate-400"
@@ -947,11 +959,16 @@ export default function Sidebar(props: {
         {showAdd && (
           <AddHostModal
             tagSuggestions={allTags}
+            onSaved={props.onChanged}
+            onExportCsv={() => { setShowAdd(false); setExportCsv({}) }}
             onClose={() => {
               setShowAdd(false)
               props.onChanged()
             }}
           />
+        )}
+        {exportCsv && (
+          <ExportHostsModal hosts={props.hosts} presetFolder={exportCsv.folder} onClose={() => setExportCsv(null)} />
         )}
         {editHost && (
           <AddHostModal

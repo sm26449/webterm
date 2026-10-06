@@ -11,6 +11,7 @@ import { TIP_ADDHOST_AGENT, TIP_ADDHOST_SSH } from '../lib/coachtips'
 import { isWalkthroughDone } from '../lib/walkthrough'
 import { ServerIcon, KeyIcon } from './Icons'
 import HelpTip from './HelpTip'
+import { HostsCsvImport } from './HostsCsv'
 import { connSignature, failingField, stageViews, summaryText, TestResult } from '../lib/hosttest'
 
 type ConnType = 'agent' | 'ssh' | 'ssh-jump' | 'telnet' | 'telnet-jump'
@@ -33,6 +34,8 @@ export default function AddHostModal(props: {
   presetJump?: { viaHostId: number; viaName: string }
   /** „Conectează o dată": deschide o sesiune pe ţinta efemeră tocmai creată, fără s-o salvezi în sidebar */
   onConnect?: (host: Host) => void
+  /** „Exportă hosturi…" din modul Import CSV: părintele închide modalul şi deschide exportul */
+  onExportCsv?: () => void
 }) {
   const { t } = useI18n()
   const edit = props.host
@@ -144,7 +147,19 @@ export default function AddHostModal(props: {
   // Onboarding la scară: „O maşină" (formularul clasic) vs „Mai multe maşini" (token de grup —
   // un one-liner reutilizabil). Creat AICI, unde userul chiar adaugă hosturi; gestiunea (listă +
   // revocare) rămâne în Settings → Security. Doar la CREARE (la editare, un host = un host).
-  const [mode, setMode] = useState<'one' | 'many'>('one')
+  const [mode, setMode] = useState<'one' | 'many' | 'csv'>('one')
+  // comutatorul O maşină / Mai multe maşini / Import CSV — acelaşi în toate trei modurile
+  const modeSwitch = (
+    <div className="flex gap-1 rounded-xl bg-ink-800 p-1 text-sm">
+      {(['one', 'many', 'csv'] as const).map((m) => (
+        <button key={m} type="button" onClick={() => setMode(m)} aria-pressed={mode === m}
+          className={`flex-1 rounded-lg px-3 py-1.5 font-medium transition ${
+            mode === m ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
+          {m === 'one' ? t('addhost.modeOne') : m === 'many' ? t('addhost.modeMany') : t('addhost.modeCsv')}
+        </button>
+      ))}
+    </div>
+  )
   const [grp, setGrp] = useState({ name: '', days: 30, max_uses: 0, folder: '', require_2fa: false,
     current_password: '', enroll_password: '' })
   const [grpCmd, setGrpCmd] = useState('')
@@ -358,19 +373,16 @@ export default function AddHostModal(props: {
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
       <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={edit ? t('addhost.editTitle') : t('addhost.title')}
         className="glass max-h-[90vh] w-full max-w-xl overflow-y-auto rounded-2xl p-6">
-        {!created && mode === 'many' && !edit ? (
+        {!created && mode === 'csv' && !edit ? (
           <div className="space-y-4">
             <h2 className="font-semibold">{t('addhost.title')}</h2>
-            {/* comutator O maşină / Mai multe maşini */}
-            <div className="flex gap-1 rounded-xl bg-ink-800 p-1 text-sm">
-              {(['one', 'many'] as const).map((m) => (
-                <button key={m} type="button" onClick={() => setMode(m)} aria-pressed={mode === m}
-                  className={`flex-1 rounded-lg px-3 py-1.5 font-medium transition ${
-                    mode === m ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
-                  {m === 'one' ? t('addhost.modeOne') : t('addhost.modeMany')}
-                </button>
-              ))}
-            </div>
+            {modeSwitch}
+            <HostsCsvImport onClose={props.onClose} onImported={props.onSaved} onExport={props.onExportCsv} />
+          </div>
+        ) : !created && mode === 'many' && !edit ? (
+          <div className="space-y-4">
+            <h2 className="font-semibold">{t('addhost.title')}</h2>
+            {modeSwitch}
             {grpCmd ? (
               <div role="status" aria-live="polite" className="space-y-3">
                 <p className="text-sm text-slate-300">{t('addhost.groupCreated')}</p>
@@ -438,17 +450,7 @@ export default function AddHostModal(props: {
         ) : !created ? (
           <form onSubmit={submit} className="space-y-4">
             <h2 className="font-semibold">{edit ? t('addhost.editTitle', { name: edit.name }) : t('addhost.title')}</h2>
-            {!edit && !pj && (
-              <div className="flex gap-1 rounded-xl bg-ink-800 p-1 text-sm">
-                {(['one', 'many'] as const).map((m) => (
-                  <button key={m} type="button" onClick={() => setMode(m)} aria-pressed={mode === m}
-                    className={`flex-1 rounded-lg px-3 py-1.5 font-medium transition ${
-                      mode === m ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
-                    {m === 'one' ? t('addhost.modeOne') : t('addhost.modeMany')}
-                  </button>
-                ))}
-              </div>
-            )}
+            {!edit && !pj && modeSwitch}
             {edit && (
               <p className="text-xs text-slate-500">{t('addhost.editHint')}</p>
             )}
