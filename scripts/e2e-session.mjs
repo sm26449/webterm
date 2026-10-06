@@ -129,8 +129,10 @@ if (process.env.AGENT_TOKEN_FILE) {
 } else {
   execFileSync('docker', ['exec', CONTAINER, 'sh', '-c',
     `mkdir -p /root/.webterm && printf '%s' '${agentCfg}' > /root/.webterm/agent.json`])
-  execFileSync('docker', ['exec', '-d', '-e', 'HOME=/root', CONTAINER,
-    'python3', '/srv/webterm/agent/ptyd.py', 'run'])
+  // logul agentului într-un fişier din container: cu `exec -d` simplu se pierdea, iar „agentul a
+  // fost offline 45 s" (adnotare CI, 3.5.2) nu spunea DE CE. CI-ul îl citeşte la eşec.
+  execFileSync('docker', ['exec', '-d', '-e', 'HOME=/root', CONTAINER, 'sh', '-c',
+    'exec python3 /srv/webterm/agent/ptyd.py run >>/tmp/wt-agent.log 2>&1'])
   check('agent pornit în container', true)
 }
 
