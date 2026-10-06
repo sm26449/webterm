@@ -5,7 +5,7 @@ registry (`frontend/src/lib/shortcuts.ts`), so anything registered there appears
 automatically. A few shortcuts are handled directly in components rather than through the
 registry (`Alt+1…9`, `Alt+↑/↓`, `Ctrl+M`, `Mod+Shift+K`); those are listed in the cheatsheet
 through an explicit `EXTRA` block in `KeyboardHelp.tsx`, which is the part that can fall behind.
-Panel-local keys (`Mod+S`, `Mod+Enter`) are not in the cheatsheet.
+Panel-local keys and mouse/touch gestures (below) are listed there too, since 3.5.1.
 
 `Mod` = **⌘** on macOS, **Ctrl** everywhere else.
 
@@ -42,6 +42,15 @@ Panel-local keys (`Mod+S`, `Mod+Enter`) are not in the cheatsheet.
 |---|---|
 | `Mod+S` | File editor: save |
 | `Mod+Enter` | Git panel: commit (from the message field) |
+| `Shift+Enter` | Scrollback search: previous match (`Enter` = next) |
+| `←` / `→` on the split divider | Resize the split; double-click the divider resets it to 50/50 |
+
+## Mouse and touch
+
+| Gesture | Action |
+|---|---|
+| Right-click / long-press in a terminal | Terminal menu: open the selected path in Files (when the selection looks like a path), upload into the session's folder, new file/folder here, clear the terminal |
+| Double-click a session in Host overview | Open it |
 
 ## Terminal (owned by the shell)
 

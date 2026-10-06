@@ -242,7 +242,7 @@ export default function SerialModal(props: {
               </label>
               <label className="text-xs text-slate-400">{t('serial.parity')}
                 <select value={parity} aria-label={t('serial.parity')} onChange={(e) => setParity(e.target.value)} className={`${sel} mt-1 w-full`}>
-                  <option value="none">none</option><option value="even">even</option><option value="odd">odd</option>
+                  <option value="none">{t('serial.parityNone')}</option><option value="even">{t('serial.parityEven')}</option><option value="odd">{t('serial.parityOdd')}</option>
                 </select>
               </label>
               <label className="text-xs text-slate-400">Stop
@@ -252,7 +252,7 @@ export default function SerialModal(props: {
               </label>
               <label className="text-xs text-slate-400">Flow
                 <select value={flow} aria-label={t('serial.flow')} onChange={(e) => setFlow(e.target.value)} className={`${sel} mt-1 w-full`}>
-                  <option value="none">none</option><option value="rtscts">RTS/CTS</option><option value="xonxoff">XON/XOFF</option>
+                  <option value="none">{t('serial.flowNone')}</option><option value="rtscts">RTS/CTS</option><option value="xonxoff">XON/XOFF</option>
                 </select>
               </label>
             </div>

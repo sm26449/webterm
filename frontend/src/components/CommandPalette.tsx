@@ -35,6 +35,9 @@ function score(query: string, text: string): number | null {
   return 500 - gaps
 }
 
+/** litere mici, fără diacritice (ă→a, ș→s): căutarea nu trebuie să depindă de tastatură */
+const fold = (s: string) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+
 export default function CommandPalette(props: {
   open: boolean
   onClose: () => void
@@ -192,7 +195,7 @@ export default function CommandPalette(props: {
   }, [t, props.hosts, props.sessions, props.openTabs, props.snippets, props.hasActiveSession, apps]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const results = useMemo(() => {
-    const q = query.trim().toLowerCase()
+    const q = fold(query.trim())
     if (!q) {
       // acțiunile globale (Adaugă host, Temă, Setări, Status) rămân mereu
       // accesibile — cu flote mari, slice-ul simplu le-ar tăia (sunt ultimele)
@@ -201,7 +204,9 @@ export default function CommandPalette(props: {
       return [...rest.slice(0, 40 - globals.length), ...globals]
     }
     return items
-      .map((it) => ({ it, sc: score(q, it.text) }))
+      // potrivim şi pe eticheta TRADUSĂ, nu doar pe cuvintele-cheie englezeşti din `text`: un
+      // utilizator RO care tasta „setări" nu găsea nimic. Fără diacritice, ca „setari" să meargă.
+      .map((it) => ({ it, sc: score(q, fold(`${it.text} ${it.label} ${it.sub ?? ''}`)) }))
       .filter((x) => x.sc !== null)
       .sort((a, b) => (b.sc as number) - (a.sc as number))
       .slice(0, 40)

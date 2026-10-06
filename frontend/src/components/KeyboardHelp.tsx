@@ -21,8 +21,20 @@ const EXTRA: Record<string, { labelKey: string; keys: string }[]> = {
   // terminal (e un caracter) — adică exact utilizatorul prins înăuntru nu avea cum să afle
   // cum iese. `Ctrl+Shift+K` e la fel: singura cale spre paletă din terminal, fiindcă
   // `Ctrl+K` e kill-line al shell-ului. Ambele sunt tratate în componente, nu în registru.
-  session: [{ labelKey: 'shortcuts.tabFocusMode', keys: 'Ctrl+M' }],
-  app: [{ labelKey: 'shortcuts.paletteFromTerminal', keys: 'Ctrl+Shift+K' }],
+  session: [
+    { labelKey: 'shortcuts.tabFocusMode', keys: 'Ctrl+M' },
+    // gesturi tratate local în componente — existau, dar nu le găsea nimeni (audit 3.5.1)
+    { labelKey: 'shortcuts.copyAlways', keys: 'Ctrl+Shift+C' },
+    { labelKey: 'shortcuts.searchPrev', keys: 'Shift+Enter' },
+    { labelKey: 'shortcuts.termMenu', keys: 'shortcuts.kTermMenu' },
+  ],
+  app: [
+    { labelKey: 'shortcuts.paletteFromTerminal', keys: 'Ctrl+Shift+K' },
+    { labelKey: 'shortcuts.editorSave', keys: 'Mod+S' },
+    { labelKey: 'shortcuts.gitCommit', keys: 'Mod+Enter' },
+    { labelKey: 'shortcuts.splitDivider', keys: 'shortcuts.kDivider' },
+    { labelKey: 'shortcuts.openSessionRow', keys: 'shortcuts.kDblClick' },
+  ],
 }
 
 // numele grupului e și identificator (filtrează SHORTCUTS după s.group) — nu-l
@@ -71,11 +83,12 @@ export default function KeyboardHelp(props: { onClose: () => void; onReplayWalkt
                 </div>
               ))}
               {(EXTRA[g] ?? []).map((s) => (
-                <div key={s.keys} className="flex items-center justify-between gap-4 py-2">
+                <div key={s.labelKey} className="flex items-center justify-between gap-4 py-2">
                   <dt className="min-w-0 text-slate-300">{t(s.labelKey)}</dt>
                   <dd className="shrink-0">
                     <kbd className="rounded-md bg-ink-800 px-2 py-1 font-mono text-xs text-slate-300 ring-1 ring-ink-700">
-                      {fmt(s.keys)}
+                      {/* gesturile (click dreapta, dublu-click) se traduc; tastele se formatează per OS */}
+                      {s.keys.startsWith('shortcuts.') ? t(s.keys) : fmt(s.keys)}
                     </kbd>
                   </dd>
                 </div>

@@ -637,7 +637,7 @@ function StatTiles({ host }: { host: Host }) {
         <StatTile label={t('host.disk')} pct={diskPct} sub={`${gib(m.disk_used)} / ${gib(m.disk_total)} GiB`} />
       )}
       {m.load1 != null && (
-        <StatTile label="Load" big={m.load1.toFixed(2)} sub={`5m ${(m.load5 ?? 0).toFixed(2)} · 15m ${(m.load15 ?? 0).toFixed(2)}`} />
+        <StatTile label={t('host.load')} big={m.load1.toFixed(2)} sub={`5m ${(m.load5 ?? 0).toFixed(2)} · 15m ${(m.load15 ?? 0).toFixed(2)}`} />
       )}
     </div>
   )
