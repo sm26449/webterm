@@ -42,6 +42,29 @@ async def main():
     finally:
         config.TRUSTED_PROXY_CIDRS = saved
 
+    # ── 3.5.1: proxy numit prin DNS (WEBTERM_TRUSTED_PROXY_HOSTS) ──
+    # Compose-urile setează implicit `traefik`/`caddy`; înainte nimic nu seta CIDR-ul, deci în
+    # prod lockout-ul număra IP-ul proxy-ului şi toţi clienţii împărţeau acelaşi contor.
+    saved_hosts = config.TRUSTED_PROXY_HOSTS
+    try:
+        config.TRUSTED_PROXY_CIDRS = []
+        config.TRUSTED_PROXY_HOSTS = ["localhost"]
+        security._proxy_ips = None
+        check("host numit: IP-ul lui (127.0.0.1) e crezut", security._peer_is_trusted("127.0.0.1"))
+        check("host numit: alt peer privat NU e crezut", not security._peer_is_trusted("10.0.0.5"))
+        config.TRUSTED_PROXY_HOSTS = ["nu-exista.invalid"]
+        security._proxy_ips = None
+        check("host care nu se rezolvă → fail-closed", not security._peer_is_trusted("127.0.0.1"))
+        config.TRUSTED_PROXY_HOSTS = ["localhost"]
+        config.TRUSTED_PROXY_CIDRS = ["172.18.0.0/16"]
+        security._proxy_ips = None
+        check("host + CIDR: ambele surse sunt crezute", security._peer_is_trusted("127.0.0.1")
+              and security._peer_is_trusted("172.18.0.9"))
+    finally:
+        config.TRUSTED_PROXY_CIDRS = saved
+        config.TRUSTED_PROXY_HOSTS = saved_hosts
+        security._proxy_ips = None
+
     # ── fix 9: plafon pe corpul de login ÎNAINTE de parse / argon2 ──
     config.ensure_dirs()
     security.init_crypto(config.load_secret())

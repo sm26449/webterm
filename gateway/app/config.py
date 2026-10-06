@@ -176,13 +176,18 @@ TRANSCRIPT_KEEP_BYTES = _num("WEBTERM_TRANSCRIPT_KEEP_BYTES", 16 * 1024 * 1024)
 # Cloudflare→Traefik=2. Cloudflare users can instead trust CF-Connecting-IP.
 TRUSTED_PROXY_HOPS = max(1, _num("WEBTERM_TRUSTED_PROXY_HOPS", 1))
 TRUST_CF_CONNECTING_IP = os.environ.get("WEBTERM_TRUST_CF_IP", "").lower() in ("1", "true", "yes")
-# Cine are voie să scrie X-Forwarded-For. Implicit: orice peer din reţea privată/loopback —
-# într-un deployment normal proxy-ul e pe reţeaua docker. Dacă aplicaţia devine accesibilă din
-# altă parte a reţelei interne (alt container, alt host din LAN), „privat" nu mai e suficient:
-# atunci restrânge la CIDR-ul proxy-ului, ex. `172.18.0.0/16` sau `10.1.2.3/32`.
-# Semnalat de auditul de ciclu de viaţă, 2026-08-06.
+# Cine are voie să scrie X-Forwarded-For. Fără nimic setat: NIMENI (fail-closed, audit
+# 2026-10-05) — se foloseşte peer-ul socketului. Două feluri de a numi proxy-ul:
+#  - CIDR-uri explicite, ex. `172.18.0.0/16` sau `10.1.2.3/32`;
+#  - nume de host rezolvate prin DNS, ex. `traefik` — numele serviciului din compose. Docker îl
+#    rezolvă EXACT la IP-ul containerului proxy, deci e mai strict decât un CIDR şi nu depinde de
+#    subnetul (aleatoriu) al reţelei. Compose-urile îl setează implicit (`traefik` / `caddy`):
+#    până în 3.5.1 nimic nu seta CIDR-ul, aşa că lockout-ul număra IP-ul proxy-ului şi toţi
+#    clienţii împărţeau acelaşi contor.
 TRUSTED_PROXY_CIDRS = [c.strip() for c in
                        os.environ.get("WEBTERM_TRUSTED_PROXY_CIDRS", "").split(",") if c.strip()]
+TRUSTED_PROXY_HOSTS = [h.strip() for h in
+                       os.environ.get("WEBTERM_TRUSTED_PROXY_HOSTS", "").split(",") if h.strip()]
 CLIENT_BUFFER_LIMIT = _num("WEBTERM_CLIENT_BUFFER", 1024 * 1024)  # per-browser-ws backlog before forced resync
 
 # Brute-force: câte eșecuri per IP în fereastră înainte de lockout. Implicit 5

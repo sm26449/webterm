@@ -207,6 +207,8 @@ services:
       # security: who may set X-Forwarded-For, and how long sessions last
       WEBTERM_TRUSTED_PROXY_HOPS: ${WEBTERM_TRUSTED_PROXY_HOPS:-1}
       WEBTERM_TRUSTED_PROXY_CIDRS: ${WEBTERM_TRUSTED_PROXY_CIDRS:-}
+      # the compose service name of the proxy; docker DNS resolves it to exactly its IP
+      WEBTERM_TRUSTED_PROXY_HOSTS: ${WEBTERM_TRUSTED_PROXY_HOSTS:-traefik}
       WEBTERM_TRUST_CF_IP: ${WEBTERM_TRUST_CF_IP:-}
       WEBTERM_IP_MAX_FAILS: ${WEBTERM_IP_MAX_FAILS:-5}
       WEBTERM_SESSION_TTL_DAYS: ${WEBTERM_SESSION_TTL_DAYS:-30}

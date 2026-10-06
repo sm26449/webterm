@@ -10,6 +10,7 @@ import json
 import logging
 import re
 import secrets
+import socket
 import sys
 import time
 from typing import Optional
@@ -212,6 +213,8 @@ def _peer_is_trusted(peer: str) -> bool:
         ip = ipaddress.ip_address(peer)
     except ValueError:
         return False
+    if config.TRUSTED_PROXY_HOSTS and peer in _proxy_host_ips():
+        return True
     if config.TRUSTED_PROXY_CIDRS:
         # listă explicită → strict. Un CIDR invalid nu deschide poarta: îl ignorăm, iar dacă
         # niciunul nu se potriveşte, antetul nu e crezut (fail-closed).
@@ -221,6 +224,8 @@ def _peer_is_trusted(peer: str) -> bool:
                     return True
             except ValueError:
                 continue
+        return False
+    if config.TRUSTED_PROXY_HOSTS:
         return False
     # DEFAULT fail-closed (audit 2026-10-05): fără CIDR-uri configurate NU mai credem automat
     # orice peer privat/loopback. Un `X-Forwarded-For` crezut de la un peer necontrolat lasă
@@ -234,6 +239,27 @@ def _peer_is_trusted(peer: str) -> bool:
 
 
 _xff_note_logged = False
+_proxy_ips: tuple[float, frozenset] | None = None
+_PROXY_DNS_TTL = 60.0
+
+
+def _proxy_host_ips() -> frozenset:
+    """IP-urile la care se rezolvă acum `WEBTERM_TRUSTED_PROXY_HOSTS` (cache 60 s — un proxy
+    recreat primeşte alt IP). În docker rezolvă DNS-ul încorporat (127.0.0.11), deci e local şi
+    rapid. Un nume care nu se rezolvă nu adaugă nimic: fail-closed, nu deschis."""
+    global _proxy_ips
+    now = time.monotonic()
+    if _proxy_ips is not None and now - _proxy_ips[0] < _PROXY_DNS_TTL:
+        return _proxy_ips[1]
+    ips = set()
+    for host in config.TRUSTED_PROXY_HOSTS:
+        try:
+            for info in socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP):
+                ips.add(info[4][0])
+        except OSError:
+            log.warning("WEBTERM_TRUSTED_PROXY_HOSTS: %r nu se rezolvă — antetul nu e crezut de la el", host)
+    _proxy_ips = (now, frozenset(ips))
+    return _proxy_ips[1]
 
 
 def _note_xff_untrusted() -> None:
