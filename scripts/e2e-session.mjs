@@ -901,6 +901,16 @@ try {
   // un singur read (chiar şi după 500 ms) prindea lista încă ne-împrospătată pe un runner lent.
   const spText = await pollValue(() => filePanel.textContent().then((t) => t ?? ''), (t) => t.includes(SPECIAL))
   check('fișier cu spații/diacritice apare în listă', spText.includes(SPECIAL))
+  if (!spText.includes(SPECIAL)) {
+    // CI-ul pica aici constant, local niciodată: a ajuns comanda în shell? cu ce nume s-a creat?
+    // (tmux fără locale UTF-8 transformă ș/ț în „_" — atunci lista are alt nume)
+    await activePane.locator('.xterm-screen').click()
+    await page.keyboard.type('ls -b /tmp | grep -i raport; locale | head -3\n')
+    await page.waitForTimeout(1200)
+    const tail = (await screenText()).split('\n').filter((l) => l.trim()).slice(-6).join(' ⏎ ')
+    console.error('  [diag] ecran:', tail.slice(-300))
+    console.error('  [diag] panou:', (spText.match(/raport[^\n]{0,40}/) || ['(nimic cu raport)'])[0])
+  }
   if (!spText.includes(SPECIAL)) console.error('  [diag] panoul e în', await fpPathInput.inputValue())
   const spRow = filePanel.locator('div.group').filter({ hasText: SPECIAL }).first()
   // Fără rândul din listă NU mai crăpăm tot scriptul (crash-ul forţa re-rularea pe un container
