@@ -1,6 +1,11 @@
-import { useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { matchCommandRule } from '../lib/commands'
-import { errText, api, ApiError, ensureStepup, isEphemeralHost, CommandGuard, Host } from '../lib/api'
+import { errText, api, ApiError, ensureStepup, isEphemeralHost, CommandGuard, Host, Snippet } from '../lib/api'
+import {
+  fillSnippet, hostsMatchingTags, migrateFleetSaved, snippetParams, snippetTags, sortForFleet,
+  tagsOfHosts, targetsPayload,
+} from '../lib/snippets'
+import SnippetTags from './SnippetTags'
 import { useI18n } from '../lib/i18n'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { useConfirm } from '../lib/confirm'
@@ -40,31 +45,95 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
   const stopRef = useRef(false)                             // Stop: nu mai trimitem hosturi noi
   const [stopping, setStopping] = useState(false)
   const [command, setCommand] = useState('')
-  // Comenzi fleet SALVATE, în localStorage (per-browser): declanşare manuală, zero stare în
-  // gateway — aliniat cu „fără background always-on". Un cron în gateway ar fi fost scope creep.
-  const SAVED_KEY = 'wt-fleet-saved'
-  type SavedCmd = { name: string; command: string }
-  const [saved, setSaved] = useState<SavedCmd[]>(() => {
-    try { return JSON.parse(localStorage.getItem(SAVED_KEY) || '[]') } catch { return [] }
-  })
-  const persistSaved = (next: SavedCmd[]) => {
-    setSaved(next)
-    try { localStorage.setItem(SAVED_KEY, JSON.stringify(next.slice(0, 50))) } catch { /* quota/private */ }
-  }
+  // Comenzi fleet SALVATE = snippet-uri (3.5.4), pe server: aceleaşi pe orice dispozitiv şi
+  // aceleaşi cu cele din terminal (Alt+S, Toolbox). Un snippet poate purta ţinte pe etichete —
+  // alegerea lui preselectează hosturile online care poartă ORICARE dintre ele. Înainte trăiau în
+  // localStorage (`wt-fleet-saved`); la prima deschidere le migrăm (lib/snippets).
+  const [snips, setSnips] = useState<Snippet[] | null>(null)
+  const [snipErr, setSnipErr] = useState('')
+  const [savedFilter, setSavedFilter] = useState('')
+  const [renaming, setRenaming] = useState<{ id: number; title: string } | null>(null)
+  const [migrated, setMigrated] = useState(0)
+  // ţintele snippet-ului ales (pentru linia „se potriveşte cu N hosturi")
+  const [picked, setPicked] = useState<string[] | null>(null)
+  // snippet cu {{parametri}} ales: câmpurile înlocuiesc textarea până când sunt completate
+  const [paramTpl, setParamTpl] = useState<{ body: string; values: Record<string, string> } | null>(null)
+  const [remember, setRemember] = useState(false)
+  const loadSnips = useCallback(async () => {
+    try { setSnips(await api<Snippet[]>('/api/snippets')); setSnipErr('') }
+    catch (e) { setSnipErr(errText(e, t) || t('fleet.savedLoadFailed')); setSnips((p) => p ?? []) }
+  }, [t])
+  useEffect(() => {
+    let alive = true
+    ;(async () => {
+      let storage: Storage | null = null
+      try { storage = window.localStorage } catch { /* privat / blocat → nimic de migrat */ }
+      if (storage) {
+        const r = await migrateFleetSaved({
+          storage,
+          list: () => api<Snippet[]>('/api/snippets'),
+          create: (x) => api('/api/snippets', { method: 'POST', body: JSON.stringify(x) }),
+        }).catch(() => null)
+        if (alive && r?.status === 'done' && r.uploaded) setMigrated(r.uploaded)
+      }
+      if (alive) await loadSnips()
+    })()
+    return () => { alive = false }
+  }, [loadSnips])
+
   const [saveName, setSaveName] = useState('')
+  const pickSaved = (s: Snippet) => {
+    if (snippetParams(s.body).length) setParamTpl({ body: s.body, values: {} })
+    else { setParamTpl(null); setCommand(s.body) }
+    const tags = snippetTags(s)
+    // DOAR ţintele explicite ale snippet-ului preselectează (3.5.3: nimic selectat implicit);
+    // un snippet fără ţinte nu atinge selecţia pe care ai făcut-o deja
+    if (tags.length) {
+      setSelected(new Set(hostsMatchingTags(runnable, tags).map((h) => h.id)))
+      setPicked(tags)
+    } else setPicked(null)
+  }
   const saveCurrent = async () => {
-    const cmd = command.trim()
+    // cu parametri în curs, salvăm ŞABLONUL ({{x}}), nu o completare parţială
+    const cmd = paramTpl ? paramTpl.body : command.trim()
     const name = saveName.trim().slice(0, 60)
-    if (!cmd || !name) return
-    // suprascriere NU tăcută: dacă numele există deja, cerem confirmare (înainte se înlocuia
-    // fără avertisment — puteai pierde o comandă salvată dintr-o coincidenţă de nume).
-    if (saved.some((s) => s.name === name)
+    if (!cmd || !name || snips === null) return
+    const existing = snips.find((s) => s.title === name)
+    // suprascriere NU tăcută: acelaşi nume cu altă comandă cere confirmare
+    if (existing && existing.body !== cmd
         && !(await confirm({
           title: t('fleet.overwriteTitle'), message: t('fleet.overwriteConfirm', { name }),
           danger: true, confirmLabel: t('fleet.replace'),
         }))) return
-    persistSaved([...saved.filter((s) => s.name !== name), { name, command: cmd }])
-    setSaveName('')
+    const targets = remember ? { targets: targetsPayload(tagsOfHosts(chosen)) } : {}
+    setSnipErr('')
+    try {
+      if (existing) {
+        await api(`/api/snippets/${existing.id}`, { method: 'PATCH', body: JSON.stringify({ title: name, body: cmd, ...targets }) })
+      } else {
+        await api('/api/snippets', { method: 'POST', body: JSON.stringify({ title: name, body: cmd, ...targets }) })
+      }
+      setSaveName('')
+      await loadSnips()
+    } catch (e) { setSnipErr(errText(e, t) || t('fleet.saveFailed')) }
+  }
+  const renameSaved = async () => {
+    if (!renaming) return
+    const s = snips?.find((x) => x.id === renaming.id)
+    const title = renaming.title.trim().slice(0, 60)
+    if (!s || !title || title === s.title) { setRenaming(null); return }
+    try {
+      // fără `targets` în corp → serverul păstrează ţintele
+      await api(`/api/snippets/${s.id}`, { method: 'PATCH', body: JSON.stringify({ title, body: s.body }) })
+      setRenaming(null)
+      await loadSnips()
+    } catch (e) { setSnipErr(errText(e, t) || t('fleet.saveFailed')) }
+  }
+  const deleteSaved = async (s: Snippet) => {
+    if (!(await confirm({ title: t('snippets.deleteTitle', { title: s.title }),
+      message: t('snippets.confirmDelete', { title: s.title }), danger: true }))) return
+    try { await api(`/api/snippets/${s.id}`, { method: 'DELETE' }); await loadSnips() }
+    catch (e) { setSnipErr(errText(e, t) || t('snippets.deleteFailed')) }
   }
   const [results, setResults] = useState<Record<number, RunResult>>({})
   const [expanded, setExpanded] = useState<number | null>(null)
@@ -77,6 +146,18 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
     setSelected((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n })
 
   const timeoutOk = Number.isInteger(timeoutSec) && timeoutSec >= 1 && timeoutSec <= 300
+  const tplParams = paramTpl ? snippetParams(paramTpl.body) : []
+  const paramsMissing = !!paramTpl && tplParams.some((p) => !(paramTpl.values[p] ?? '').trim())
+  // comanda efectivă: cu parametri în curs, completarea live a şablonului
+  const effective = paramTpl ? fillSnippet(paramTpl.body, paramTpl.values) : command
+  const chosenTags = tagsOfHosts(chosen)
+  const pickedMatches = picked ? hostsMatchingTags(runnable, picked).length : 0
+  const sortedSnips = useMemo(() => sortForFleet(snips ?? []), [snips])
+  const fq = savedFilter.trim().toLowerCase()
+  const visibleSnips = fq
+    ? sortedSnips.filter((s) => s.title.toLowerCase().includes(fq) || s.body.toLowerCase().includes(fq)
+      || snippetTags(s).some((x) => x.includes(fq)))
+    : sortedSnips
 
   async function run() {
     // Guardrail: serverul aplică regulile şi pe `/run` — `block` refuză, `confirm` cere un DA
@@ -255,33 +336,113 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
                     </button>
                   ))}
                 </div>
-                <div className="mt-1 flex items-center gap-2">
+                {picked && (
+                  <p data-testid="fleet-matches" role="status" className="text-[11px] text-slate-400">
+                    {pickedMatches
+                      ? t('fleet.matchesHosts', { count: pickedMatches, tags: picked.join(', ') })
+                      : t('fleet.matchesNone', { tags: picked.join(', ') })}
+                  </p>
+                )}
+                {/* ── comenzi salvate (= snippet-uri, pe server) ── */}
+                <div data-testid="fleet-saved" className="rounded-lg border border-ink-800 p-2">
+                  <div className="mb-1 flex flex-wrap items-baseline gap-x-2">
+                    <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">{t('fleet.savedTitle')}</span>
+                    <span className="text-[10px] text-slate-500">{t('fleet.savedShared')}</span>
+                  </div>
+                  {migrated > 0 && <p role="status" className="mb-1 text-[11px] wt-good">{t('fleet.migrated', { count: migrated })}</p>}
+                  {snips !== null && snips.length > 6 && (
+                    <input value={savedFilter} onChange={(e) => setSavedFilter(e.target.value)}
+                      placeholder={t('fleet.savedFilter')} aria-label={t('fleet.savedFilter')}
+                      className="mb-1 w-full rounded bg-ink-800 px-2 py-0.5 text-[11px] text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500" />
+                  )}
+                  {snips === null ? (
+                    <p className="text-[11px] text-slate-500">{t('toolbox.loading')}</p>
+                  ) : snips.length === 0 ? (
+                    <p className="text-[11px] text-slate-500">{t('fleet.savedEmpty')}</p>
+                  ) : (
+                    <div className="flex max-h-28 flex-wrap items-center gap-1 overflow-y-auto">
+                      {visibleSnips.map((s) => renaming?.id === s.id ? (
+                        <span key={s.id} className="inline-flex items-center gap-1">
+                          <input autoFocus value={renaming.title} aria-label={t('fleet.renameSaved', { name: s.title })}
+                            onChange={(e) => setRenaming({ id: s.id, title: e.target.value })}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') { e.preventDefault(); renameSaved() }
+                              // Escape anulează DOAR redenumirea, nu închide consola
+                              if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); setRenaming(null) }
+                            }}
+                            className="w-36 rounded bg-ink-800 px-1.5 py-0.5 text-[11px] text-slate-200 ring-1 ring-sky-500" />
+                          <button type="button" onClick={renameSaved} className="text-[11px] wt-link hover:underline">{t('fleet.renameSave')}</button>
+                        </span>
+                      ) : (
+                        <span key={s.id} className="inline-flex items-center gap-1 rounded bg-ink-800 px-1.5 py-0.5 text-[11px] text-slate-300 ring-1 ring-ink-700">
+                          <button type="button" onClick={() => pickSaved(s)} title={s.body}
+                            aria-label={t('fleet.pickSaved', { name: s.title })}
+                            className="inline-flex items-center gap-1 hover:text-white">
+                            <span>{s.title}</span>
+                            {snippetParams(s.body).length > 0 && (
+                              <span aria-hidden="true" className="font-mono text-[10px] text-slate-500">{'{…}'}</span>
+                            )}
+                          </button>
+                          <SnippetTags tags={snippetTags(s)} />
+                          <button type="button" onClick={() => setRenaming({ id: s.id, title: s.title })}
+                            aria-label={t('fleet.renameSaved', { name: s.title })} title={t('fleet.renameSaved', { name: s.title })}
+                            className="text-slate-500 hover:text-slate-200">✎</button>
+                          <button type="button" onClick={() => deleteSaved(s)}
+                            aria-label={t('fleet.removeSaved', { name: s.title })} title={t('fleet.removeSaved', { name: s.title })}
+                            className="text-slate-500 hover:wt-danger">×</button>
+                        </span>
+                      ))}
+                      {visibleSnips.length === 0 && (
+                        <span className="text-[11px] text-slate-500">{t('snippets.noMatch', { q: savedFilter })}</span>
+                      )}
+                    </div>
+                  )}
+                  {snipErr && <p role="alert" className="mt-1 text-[11px] wt-danger">{snipErr}</p>}
+                </div>
+                <div className="mt-1 flex flex-wrap items-center gap-2">
                   <label className="text-xs font-semibold uppercase tracking-wide text-slate-400">{t('fleet.command')}</label>
                   <input value={saveName} onChange={(e) => setSaveName(e.target.value)}
                     onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); saveCurrent() } }}
                     placeholder={t('fleet.saveNamePlaceholder')} aria-label={t('fleet.saveName')}
                     className="ml-auto w-40 rounded bg-ink-800 px-2 py-0.5 text-[11px] text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500" />
-                  <button type="button" onClick={saveCurrent} disabled={!command.trim() || !saveName.trim()}
+                  <button type="button" onClick={saveCurrent}
+                    disabled={!(paramTpl ? paramTpl.body : command.trim()) || !saveName.trim() || snips === null}
                     className="text-[11px] wt-link hover:underline disabled:opacity-40">
                     {t('fleet.saveCurrent')}
                   </button>
                 </div>
-                {saved.length > 0 && (
-                  <div className="flex flex-wrap items-center gap-1">
-                    {saved.map((s) => (
-                      <span key={s.name} className="inline-flex items-center gap-1 rounded bg-ink-800 px-1.5 py-0.5 text-[11px] text-slate-300 ring-1 ring-ink-700">
-                        <button type="button" onClick={() => setCommand(s.command)} title={s.command}
-                          className="hover:text-white">{s.name}</button>
-                        <button type="button" onClick={() => persistSaved(saved.filter((x) => x.name !== s.name))}
-                          aria-label={t('fleet.removeSaved', { name: s.name })} className="text-slate-500 hover:wt-danger">×</button>
-                      </span>
+                <label className={`flex items-center gap-1.5 text-[11px] ${chosenTags.length ? 'text-slate-400' : 'text-slate-600'}`}>
+                  <input type="checkbox" checked={remember && chosenTags.length > 0} disabled={!chosenTags.length}
+                    onChange={(e) => setRemember(e.target.checked)} />
+                  {chosenTags.length ? t('fleet.rememberTags', { tags: chosenTags.join(', ') }) : t('fleet.rememberNoTags')}
+                </label>
+                {paramTpl ? (
+                  <div data-testid="fleet-params" className="space-y-2 rounded-lg bg-ink-800/50 p-2 ring-1 ring-ink-700">
+                    <div className="flex items-center">
+                      <span className="text-xs font-medium text-slate-400">{t('fleet.paramsTitle')}</span>
+                      <button type="button" onClick={() => { setCommand(effective); setParamTpl(null) }}
+                        aria-label={t('fleet.paramsDismiss')} title={t('fleet.paramsDismiss')}
+                        className="ml-auto rounded px-1.5 text-slate-500 hover:bg-ink-700 hover:text-slate-300">✕</button>
+                    </div>
+                    {tplParams.map((p, i) => (
+                      <label key={p} className="block">
+                        <span className="mb-0.5 block font-mono text-[11px] text-slate-400">{p}</span>
+                        <input autoFocus={i === 0} value={paramTpl.values[p] ?? ''}
+                          onChange={(e) => setParamTpl({ ...paramTpl, values: { ...paramTpl.values, [p]: e.target.value } })}
+                          className="w-full rounded bg-ink-800 px-2 py-1 font-mono text-xs text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500" />
+                      </label>
                     ))}
-                    <span className="ml-1 text-[10px] text-slate-600">{t('fleet.savedHere')}</span>
+                    <div>
+                      <span className="mb-0.5 block text-[11px] text-slate-400">{t('snippetparams.finalCommand')}</span>
+                      <code className="block max-h-24 overflow-auto whitespace-pre-wrap break-all rounded bg-[#0b0e14] p-2 font-mono text-xs text-emerald-300">{effective}</code>
+                    </div>
+                    {paramsMissing && <p className="text-[11px] text-slate-500">{t('fleet.paramsMissing')}</p>}
                   </div>
+                ) : (
+                  <textarea value={command} onChange={(e) => setCommand(e.target.value)} rows={3} autoFocus spellCheck={false}
+                    placeholder={t('fleet.commandPlaceholder')} aria-label={t('fleet.command')}
+                    className="rounded-lg bg-ink-800 px-3 py-2 font-mono text-sm text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500" />
                 )}
-                <textarea value={command} onChange={(e) => setCommand(e.target.value)} rows={3} autoFocus spellCheck={false}
-                  placeholder={t('fleet.commandPlaceholder')} aria-label={t('fleet.command')}
-                  className="rounded-lg bg-ink-800 px-3 py-2 font-mono text-sm text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500" />
                 <div className="flex flex-wrap items-center gap-2">
                   <label htmlFor="fleet-timeout" className="text-xs text-slate-400">{t('fleet.timeoutLabel')}</label>
                   <input id="fleet-timeout" type="number" min={1} max={300} step={1} inputMode="numeric"
@@ -340,7 +501,12 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
 
         <footer className="flex items-center gap-2 border-t border-ink-800 px-4 py-3">
           {phase === 'pick' && (
-            <button disabled={chosen.length === 0 || !command.trim() || !timeoutOk} onClick={() => setPhase('confirm')}
+            <button disabled={chosen.length === 0 || !effective.trim() || !timeoutOk || paramsMissing}
+              onClick={() => {
+                // parametrii completaţi devin comanda propriu-zisă (confirmarea + rularea o citesc pe ea)
+                if (paramTpl) { setCommand(effective); setParamTpl(null) }
+                setPhase('confirm')
+              }}
               className="rounded-lg bg-sky-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-40">
               {t('fleet.continue')}
             </button>

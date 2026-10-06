@@ -198,7 +198,9 @@ what it does not cover, is in [Security](#security) and
 - Shortcuts for scrollback search, close/reopen/navigate tabs, split, popout,
   font, snippets — [full map](docs/SHORTCUTS.md)
 - **Parametrized snippets** (`{{param}}`): a form at run time, with a preview of
-  the final command before execution
+  the final command before execution. Snippets live on the gateway (every device) and
+  double as the fleet console's saved commands, optionally with **target tags** that
+  preselect the matching hosts — see [docs/FLEET.md](docs/FLEET.md#saved-fleet-commands)
 
 **Fleet**
 - Per-host metrics (CPU, RAM, disk, load) with a **trend sparkline**, plus a subtle
@@ -1052,7 +1054,7 @@ administer your servers with. The CI chain, in order:
    ephemeral container, a headless Chromium checks that the UI reaches a working
    screen, with no JS errors. Catches exactly the class of bug that produced the
    white screen in v1.0.11.
-3. **E2E with a REAL agent** (`scripts/e2e-session.mjs`, 143 checks) — starts an
+3. **E2E with a REAL agent** (`scripts/e2e-session.mjs`, 150 checks) — starts an
    agent in a container **with tmux installed, i.e. the backend production uses**,
    opens sessions through the UI, types commands, verifies the output, tab
    switching, pause/re-sync, shortcuts, parametrized snippets, alert thresholds,

@@ -58,7 +58,8 @@ CI_TESTS="agent_hardening agent_reliability agent_tmux_hygiene ed25519_kat
           api_errors hostkey_alarm handshake_events migration_failfast
           pentest_forward_token pentest_xff_lockout pentest_oidc_alg
           upload_window
-          sec_stepup_hardening sec_login_proxy sec_sso_account sec_closed_scrollback sec_setup_token security_summary"
+          sec_stepup_hardening sec_login_proxy sec_sso_account sec_closed_scrollback sec_setup_token security_summary
+          snippet_targets"
 
 # security_test e ultimul: îşi porneşte singur un uvicorn efemer şi verifică auth obligatoriu
 # pe fs, CSWSH, lockout 429, headere, traversare, gating enroll/share — regresii pe care

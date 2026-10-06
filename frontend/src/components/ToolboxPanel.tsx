@@ -1,5 +1,7 @@
 import { ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import { errText, api, ApiError, Connection, DeployKeyDeployment, DeployKeyInfo, Host, Snippet, withStepup } from '../lib/api'
+import { parseTagInput, snippetTags, targetsPayload } from '../lib/snippets'
+import SnippetTags from './SnippetTags'
 import { copyText } from '../lib/clipboard'
 import { useConfirm } from '../lib/confirm'
 import { useI18n } from '../lib/i18n'
@@ -230,15 +232,16 @@ export default function ToolboxPanel(props: {
   // Comenzi proprii în Library: NU un store nou — refolosim snippet-urile existente
   // (/api/snippets, aceleaşi pe care le vezi în palette/sidebar). „Adaugă" = creează un snippet.
   const [snips, setSnips] = useState<Snippet[] | null>(null)
-  const [snipEdit, setSnipEdit] = useState<{ id?: number; title: string; body: string } | null>(null)
+  // `tags` = ţintele pentru consola de flotă, ca text liber („prod, web"); gol = fără ţinte
+  const [snipEdit, setSnipEdit] = useState<{ id?: number; title: string; body: string; tags: string } | null>(null)
   const loadSnips = useCallback(async () => {
     try { setSnips(await api<Snippet[]>('/api/snippets')) } catch { setSnips([]) }
   }, [])
   useEffect(() => { if (tab === 'library' && snips === null) loadSnips() }, [tab, snips, loadSnips])
-  async function saveSnip(d: { id?: number; title: string; body: string }) {
+  async function saveSnip(d: { id?: number; title: string; body: string; tags: string }) {
     try {
       await api(`/api/snippets${d.id ? '/' + d.id : ''}`, { method: d.id ? 'PATCH' : 'POST',
-        body: JSON.stringify({ title: d.title, body: d.body }) })
+        body: JSON.stringify({ title: d.title, body: d.body, targets: targetsPayload(parseTagInput(d.tags)) }) })
       setSnipEdit(null); await loadSnips()
     } catch (e) { setError(errText(e, t)) }
   }
@@ -325,7 +328,7 @@ export default function ToolboxPanel(props: {
               title={t('toolbox.new')} aria-label={t('toolbox.new')}><PlusIcon /></button>
           )}
           {tab === 'library' && (
-            <button onClick={() => setSnipEdit({ title: '', body: '' })} className="wt-touch ml-auto shrink-0 rounded px-1.5 wt-link hover:bg-ink-800"
+            <button onClick={() => setSnipEdit({ title: '', body: '', tags: '' })} className="wt-touch ml-auto shrink-0 rounded px-1.5 wt-link hover:bg-ink-800"
               title={t('toolbox.lib.add')} aria-label={t('toolbox.lib.add')}><PlusIcon /></button>
           )}
           {!props.embed && (
@@ -601,8 +604,9 @@ export default function ToolboxPanel(props: {
                         <span className="w-28 shrink-0 truncate text-[12px] text-slate-300">{s.title}</span>
                         <code className="min-w-0 flex-1 truncate font-mono text-[11px] text-slate-500">{s.body}</code>
                       </button>
+                      <SnippetTags tags={snippetTags(s)} />
                       {/* vizibile şi la focus din tastatură, nu doar la hover (altfel Tab trecea prin butoane invizibile) */}
-                      <button onClick={() => setSnipEdit({ id: s.id, title: s.title, body: s.body })}
+                      <button onClick={() => setSnipEdit({ id: s.id, title: s.title, body: s.body, tags: snippetTags(s).join(', ') })}
                         className="shrink-0 rounded p-1 text-slate-500 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 hover:bg-ink-700 hover:text-slate-200 [@media(hover:none)]:opacity-100"
                         title={t('toolbox.edit')} aria-label={`${t('toolbox.edit')} ${s.title}`}><PencilIcon /></button>
                       <button onClick={() => delSnip(s)}
@@ -675,6 +679,13 @@ export default function ToolboxPanel(props: {
                 <textarea value={snipEdit.body} onChange={(ev) => setSnipEdit({ ...snipEdit, body: ev.target.value })}
                   rows={3} placeholder="sudo systemctl restart {{service}}"
                   className="w-full rounded bg-ink-800 px-2 py-1 font-mono text-[12px] text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" />
+              </label>
+              <label className="block">
+                <span className="mb-0.5 block text-xs text-slate-400">{t('snippets.targetsLabel')}</span>
+                <input value={snipEdit.tags} onChange={(ev) => setSnipEdit({ ...snipEdit, tags: ev.target.value })}
+                  placeholder={t('snippets.targetsPlaceholder')}
+                  className="w-full rounded bg-ink-800 px-2 py-1 text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" />
+                <span className="mt-0.5 block text-[10.5px] leading-snug text-slate-500">{t('snippets.targetsHint')}</span>
               </label>
             </div>
             <div className="mt-4 flex justify-end gap-2 text-sm">

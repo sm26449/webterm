@@ -384,6 +384,11 @@ MIGRATIONS = [
     # din UI (POST /api/hosts/{id}/autostart). '' = snapshot fără raportare (agent < 57);
     # NULL = rând de dinaintea coloanei. Ambele → „necunoscut" în UI.
     "ALTER TABLE hosts ADD COLUMN supervision_summary TEXT",
+    # Ţintele implicite ale unui snippet (3.5.4): comenzile salvate din consola de flotă au trăit
+    # doar în localStorage (per-browser) — acum un „saved command" de flotă ESTE un snippet, cu
+    # etichete de host opţionale. JSON {"tags": ["prod","web"]}; NULL = fără ţinte (rândurile
+    # vechi şi snippet-urile de terminal obişnuite).
+    "ALTER TABLE snippets ADD COLUMN targets TEXT",
 ]
 
 # tabele adăugate ulterior (executeScript de mai sus le creează pe DB-uri noi;

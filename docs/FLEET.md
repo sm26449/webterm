@@ -39,12 +39,40 @@ stdout/stderr plus the exit code, with a timeout (max 300s) and an output cap
 
 ## Saved fleet commands
 
-In the fleet console, press **Save command** to name the command you just typed; it
-appears as a chip you can click to reload it, or remove with ×. Saved commands live in
-your **browser** (localStorage), not on the gateway — they are a personal convenience,
-not shared state, and there is deliberately no in-gateway scheduler (that would break
-the "single replica, no always-on background state" design; use the host's own cron or
-an automation token for scheduled runs).
+A saved fleet command **is a snippet**: the same server-side store you reach from the
+terminal (`Alt+S`, the command palette, Toolbox → Library). Save a command once and it is
+there on every device, in the fleet console and in the terminal.
+
+- **Save.** Type a command, name it and press **Save command**. Saving a name that
+  already exists with a different command asks before replacing it.
+- **Targets by tag (optional).** Tick **Remember target tags: prod, web** before saving and
+  the snippet keeps the tags of the hosts you selected. Picking that command later selects
+  the **online** agent hosts that carry **any** of those tags, and a line says how many it
+  matched ("matches 3 online hosts"). You can still change the selection before running.
+  Only a snippet's explicit tags select hosts: a command without targets leaves your
+  selection alone, and nothing is selected when the console opens.
+- **Parameters.** `{{param}}` placeholders work as in the terminal: picking such a command
+  shows a field per parameter and the final command; **Continue** stays disabled until
+  every parameter is filled.
+- **Rename (✎) and delete (×)** change the snippet itself, so the terminal sees the change
+  too. Commands with targets are listed first and show their tags as `#tag` chips.
+- Target tags can also be edited wherever snippets are edited (Alt+S → Manage, Toolbox →
+  Library). They are normalised like host tags (lowercase, no duplicates, 32 characters);
+  more than 20 distinct tags is refused.
+
+**Migration from older versions.** Up to 3.5.3 saved fleet commands lived only in the
+browser (localStorage key `wt-fleet-saved`). The first time you open the fleet console
+after upgrading, each of them is uploaded as a snippet (the saved name becomes the title;
+a command whose body already exists as a snippet is skipped). The local key is removed only
+after every upload succeeded; if one fails, the key stays and the next opening retries,
+skipping what already made it. Two tabs opening at once are serialised by a short-lived
+lock in localStorage, so nothing is uploaded twice. Commands saved in another browser
+migrate when the console is opened there.
+
+There is deliberately no in-gateway scheduler (that would break the "single replica, no
+always-on background state" design; use the host's own cron or an automation token for
+scheduled runs). The snippet API (`/api/snippets`) is browser-session only: automation
+tokens get 401.
 
 ## Fleet-scale onboarding
 

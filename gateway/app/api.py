@@ -1505,18 +1505,28 @@ class HostIn(BaseModel):
     enroll_password: str = ""            # write-only; gol = fără parolă
 
 
-def _norm_tags(s: str) -> str:
-    """Normalizează etichetele: lowercase, fără spaţii/duplicate, plafon de număr şi lungime
-    (un host compromis... nu, hosturile nu-şi setează tag-urile — dar UI-ul poate trimite orice)."""
+MAX_TAGS = 20
+
+
+def _tag_list(s: str, limit: Optional[int] = MAX_TAGS) -> list:
+    """Lista de etichete normalizate: lowercase, fără spaţii/duplicate, max 32 de caractere
+    fiecare. `limit=None` NU taie — ţintele de snippet vor să ştie câte au venit, ca să refuze
+    peste plafon în loc să piardă în tăcere etichetele de la coadă."""
     seen, out = set(), []
     for tag in (s or "").replace(",", " ").split():
         tag = tag.strip().lower()[:32]
         if tag and tag not in seen:
             seen.add(tag)
             out.append(tag)
-        if len(out) >= 20:
+        if limit is not None and len(out) >= limit:
             break
-    return ",".join(out)
+    return out
+
+
+def _norm_tags(s: str) -> str:
+    """Normalizează etichetele: lowercase, fără spaţii/duplicate, plafon de număr şi lungime
+    (un host compromis... nu, hosturile nu-şi setează tag-urile — dar UI-ul poate trimite orice)."""
+    return ",".join(_tag_list(s))
 
 
 # Politicile de credenţiale cunoscute. Serverul accepta ORICE text: un `credential_policy` scris
@@ -5180,6 +5190,42 @@ async def forget_credentials(host_id: int, body: ForgetCredsIn,
 class SnippetIn(BaseModel):
     title: str
     body: str
+    # Ţinte implicite pentru consola de flotă: {"tags": [...]} sau null. `object`, nu un model
+    # tipat: o formă greşită trebuie să dea 400 cu cod (`snippet.badTargets`, tradus în UI),
+    # nu 422-ul generic al Pydantic. Absent din corp = clienţii vechi → nu atingem coloana.
+    targets: Optional[object] = None
+
+
+def _snippet_targets(raw) -> Optional[str]:
+    """Validează + normalizează ţintele unui snippet → JSON de stocat sau None (fără ţinte).
+    Etichetele se normalizează EXACT ca la hosturi (`_tag_list`), ca „Prod" să nimerească
+    hostul etichetat „prod". Peste MAX_TAGS → 400, nu tăiere tăcută."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or set(raw) - {"tags"}:
+        raise ApiError(400, "snippet.badTargets", 'targets must be null or {"tags": [...]}')
+    tags = raw.get("tags") or []
+    if not isinstance(tags, list) or not all(isinstance(x, str) for x in tags):
+        raise ApiError(400, "snippet.badTargets", "targets.tags must be a list of strings")
+    norm = _tag_list(" ".join(tags), limit=None)
+    if len(norm) > MAX_TAGS:
+        raise ApiError(400, "snippet.tooManyTags", "at most %d target tags" % MAX_TAGS,
+                       vars={"limit": MAX_TAGS})
+    return json.dumps({"tags": norm}) if norm else None
+
+
+def _snippet_out(r) -> dict:
+    """Rândul din DB → JSON-ul API. `targets` e null pe rândurile vechi (coloană NULL) sau
+    stricate — un JSON corupt nu are voie să rupă toată lista de snippet-uri."""
+    targets = None
+    if r["targets"]:
+        try:
+            t = json.loads(r["targets"])
+            if isinstance(t, dict) and isinstance(t.get("tags"), list) and t["tags"]:
+                targets = {"tags": [str(x) for x in t["tags"]]}
+        except ValueError:
+            targets = None
+    return {"id": r["id"], "title": r["title"], "body": r["body"], "targets": targets}
 
 
 # Snippet-uri de transfer gata făcute: fișiere mari sau host↔host se fac cu comenzi
@@ -5213,27 +5259,39 @@ async def seed_default_snippets() -> None:
 @router.get("/api/snippets")
 async def list_snippets(user=Depends(security.require_user)):
     rows = await db.fetchall("SELECT * FROM snippets ORDER BY title")
-    return [{"id": r["id"], "title": r["title"], "body": r["body"]} for r in rows]
+    return [_snippet_out(r) for r in rows]
 
 
 @router.post("/api/snippets")
 async def create_snippet(s: SnippetIn, user=Depends(security.require_user)):
     if not s.title.strip() or not s.body:
         raise ApiError(400, "snippet.required", "title and body required")
-    # idempotent: același titlu+conținut nu creează un duplicat
+    targets = _snippet_targets(s.targets)
+    # idempotent: același titlu+conținut nu creează un duplicat. Dacă vin ţinte pe un
+    # duplicat, le adoptăm (re-salvarea din consola de flotă cu „ţine minte etichetele")
     dup = await db.fetchone("SELECT id FROM snippets WHERE title=? AND body=?",
                             s.title.strip(), s.body)
     if dup:
+        if targets is not None:
+            await db.execute("UPDATE snippets SET targets=? WHERE id=?", targets, dup["id"])
         return {"id": dup["id"]}
-    sid = await db.execute("INSERT INTO snippets(title, body, created) VALUES(?,?,?)",
-                           s.title.strip(), s.body, time.time())
+    sid = await db.execute("INSERT INTO snippets(title, body, created, targets) VALUES(?,?,?,?)",
+                           s.title.strip(), s.body, time.time(), targets)
     return {"id": sid}
 
 
 @router.patch("/api/snippets/{sid}")
 async def update_snippet(sid: int, s: SnippetIn, user=Depends(security.require_user)):
-    await db.execute("UPDATE snippets SET title=?, body=? WHERE id=?",
-                     s.title.strip(), s.body, sid)
+    if not s.title.strip() or not s.body:
+        raise ApiError(400, "snippet.required", "title and body required")
+    # `targets` absent din corp (clienţii vechi trimit doar title+body) → ţintele rămân;
+    # `targets: null` explicit → se şterg.
+    if "targets" in s.model_fields_set:
+        await db.execute("UPDATE snippets SET title=?, body=?, targets=? WHERE id=?",
+                         s.title.strip(), s.body, _snippet_targets(s.targets), sid)
+    else:
+        await db.execute("UPDATE snippets SET title=?, body=? WHERE id=?",
+                         s.title.strip(), s.body, sid)
     return {"ok": True}
 
 

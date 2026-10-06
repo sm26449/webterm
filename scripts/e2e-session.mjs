@@ -96,7 +96,8 @@ if (!cookie) fail('nici setup, nici login n-au întors un cookie de sesiune')
 const hostRes = await fetch(`${BASE}/api/hosts`, {
   method: 'POST',
   headers: { 'Content-Type': 'application/json', Cookie: cookie, Origin: BASE },
-  body: JSON.stringify({ name: 'ci-local', note: '', connection_type: 'agent', require_2fa: false }),
+  // eticheta `e2e-fleet`: o foloseşte pasul de comenzi salvate cu ţinte (consola de flotă)
+  body: JSON.stringify({ name: 'ci-local', note: '', connection_type: 'agent', require_2fa: false, tags: 'e2e-fleet' }),
 })
 if (!hostRes.ok) fail(`crearea hostului a eșuat: ${hostRes.status}`)
 const host = await hostRes.json()
@@ -1009,6 +1010,50 @@ try {
   check('grila de flotă arată output-ul comenzii', fleetText.includes('FLEET_OK'))
   await page.keyboard.press('Escape')
   check('modalul de flotă se închide cu Escape (focus-trap)', await hidden(fleet))
+
+  // ── Comenzi salvate de flotă = snippet-uri pe server (3.5.4) ──
+  // (a) migrarea one-time: o comandă din vechiul localStorage urcă pe server la deschidere
+  await page.evaluate(() => localStorage.setItem('wt-fleet-saved',
+    JSON.stringify([{ name: 'E2E legacy', command: 'echo LEGACY_E2E' }])))
+  await page.locator('button[aria-label="Run across multiple hosts"]').click()
+  check('consola de flotă se redeschide', await visible(fleet))
+  const legacyBtn = fleet.getByRole('button', { name: 'Use saved command: E2E legacy' })
+  check('comanda din localStorage a migrat (listată din server)', await visible(legacyBtn, 8000))
+  const migratedState = await page.evaluate(async () => ({
+    key: localStorage.getItem('wt-fleet-saved'),
+    onServer: (await fetch('/api/snippets', { credentials: 'same-origin' }).then((r) => r.json()))
+      .some((x) => x.body === 'echo LEGACY_E2E'),
+  }))
+  check('migrarea: snippet pe server + cheia locală ştearsă',
+    migratedState.onServer && migratedState.key === null)
+  // (b) salvare cu ţinte: hostul e2e poartă eticheta `e2e-fleet`
+  await fleet.locator('textarea[aria-label="Command"]').fill('echo TAGGED_E2E')
+  await fleet.getByRole('button', { name: /^Select all/ }).click()
+  await fleet.getByLabel(/Remember target tags: .*e2e-fleet/).check()
+  await fleet.locator('input[aria-label="Name this command"]').fill('E2E tagged')
+  await fleet.getByRole('button', { name: 'Save command' }).click()
+  await page.waitForTimeout(800)
+  const tagged = await page.evaluate(async () =>
+    (await fetch('/api/snippets', { credentials: 'same-origin' }).then((r) => r.json()))
+      .find((x) => x.title === 'E2E tagged'))
+  check('comanda de flotă salvată pe server cu ţintele (tags)',
+    !!tagged && tagged.body === 'echo TAGGED_E2E' && (tagged.targets?.tags ?? []).includes('e2e-fleet'))
+  await page.keyboard.press('Escape')
+  await hidden(fleet)
+  // (c) redeschis: listată din server; alegerea ei preselectează hostul etichetat
+  await page.locator('button[aria-label="Run across multiple hosts"]').click()
+  const taggedBtn = fleet.getByRole('button', { name: 'Use saved command: E2E tagged' })
+  check('comanda cu ţinte e listată după redeschidere', await visible(taggedBtn, 8000))
+  check('nimic preselectat înainte de alegere', (await fleet.locator('button[aria-pressed="true"]').count()) === 0)
+  await taggedBtn.click()
+  await page.waitForTimeout(300)
+  const pressed = fleet.locator('button[aria-pressed="true"]')
+  check('alegerea ei selectează hostul etichetat (+ „matches 1")',
+    (await pressed.count()) === 1 && ((await pressed.first().textContent()) ?? '').includes('ci-local')
+    && /matches 1 online host/.test((await fleet.getByTestId('fleet-matches').textContent()) ?? '')
+    && (await fleet.locator('textarea[aria-label="Command"]').inputValue()) === 'echo TAGGED_E2E')
+  await page.keyboard.press('Escape')
+  await hidden(fleet)
 
   // op `run` la nivel de API: exit code-uri CORECTE (regresie reaper — comenzi
   // eșuate raportate ca succes), timeout respectat, captură. ×5 pe eșec ca să

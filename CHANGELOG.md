@@ -26,6 +26,22 @@ back.
   only while that host is unlocked, like the session list.
 - API: `GET /api/security/summary`, `GET /api/shares`, `POST /api/shares/revoke-all`, all
   browser-only (automation tokens get 401).
+- **Fleet saved commands are now snippets, stored on the gateway.** They lived only in the
+  browser's localStorage, so a command saved on the laptop did not exist on the phone, and
+  the terminal's snippets and the fleet's saved commands were two lists for one idea. A saved
+  fleet command is now a snippet that can carry **target tags**: picking it selects the online
+  hosts with any of those tags and says how many matched; you can still change the selection.
+  `{{param}}` placeholders work in the fleet console too. Save offers "remember target tags"
+  from the selected hosts; rename and delete edit the snippet itself. Snippet editors (Alt+S,
+  Toolbox → Library) show and edit the tags. On first opening the fleet console, commands
+  saved in that browser are uploaded once (deduplicated by command); the local copy is
+  removed only after all of them made it, so a failed upload is retried next time. See
+  [docs/FLEET.md](docs/FLEET.md#saved-fleet-commands).
+- API: `/api/snippets` accepts and returns an optional `targets` (`{"tags": [...]}` or
+  `null`). Old clients keep working: a PATCH without `targets` leaves them unchanged, and old
+  rows list `targets: null`. Tags are normalised like host tags; more than 20 is a 400
+  (`snippet.tooManyTags`), a malformed value a 400 (`snippet.badTargets`). Still
+  browser-only: automation tokens get 401.
 
 ### Fixed
 - **Pausing an upload could take effect only after the in-flight slices finished.** A pause

@@ -184,6 +184,8 @@ export interface Snippet {
   id: number
   title: string
   body: string
+  /** ţinte implicite pentru consola de flotă (etichete de host); null = fără */
+  targets?: { tags: string[] } | null
 }
 
 export interface SearchHit {

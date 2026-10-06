@@ -2,15 +2,13 @@ import { FormEvent, useRef, useState } from 'react'
 import { Snippet } from '../lib/api'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { useI18n } from '../lib/i18n'
+import { fillSnippet, snippetParams } from '../lib/snippets'
 
 /** Parametrii unui snippet: placeholder-ele `{{nume}}` din corp devin câmpuri.
     Comanda finală e arătată integral înainte de rulare — pe un terminal de
     producție, „ce anume se va executa" nu e o întrebare retorică. */
-export const snippetParams = (body: string): string[] =>
-  [...new Set([...body.matchAll(/\{\{\s*([\w.-]+)\s*\}\}/g)].map((m) => m[1]))]
-
-export const fillSnippet = (body: string, values: Record<string, string>): string =>
-  body.replace(/\{\{\s*([\w.-]+)\s*\}\}/g, (_, k: string) => values[k] ?? '')
+// helperii trăiesc în lib/snippets (îi foloseşte şi consola de flotă); re-exportaţi pentru importurile vechi
+export { snippetParams, fillSnippet }
 
 export default function SnippetParams(props: {
   snippet: Snippet

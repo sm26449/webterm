@@ -3,6 +3,8 @@ import { errText, api, Snippet } from '../lib/api'
 import { useConfirm } from '../lib/confirm'
 import { useI18n } from '../lib/i18n'
 import SnippetParams, { snippetParams } from './SnippetParams'
+import SnippetTags from './SnippetTags'
+import { parseTagInput, snippetTags, targetsPayload } from '../lib/snippets'
 
 /** Dropdown cu comenzi salvate: click pe una → o inserează în sesiune.
     „Gestionează" deschide un mic editor (adaugă / editează / șterge). */
@@ -35,6 +37,8 @@ export default function SnippetsMenu(props: {
   const [editId, setEditId] = useState<number | null>(null)
   const [title, setTitle] = useState('')
   const [body, setBody] = useState('')
+  // ţintele pentru consola de flotă, ca text liber („prod, web"); gol = fără ţinte
+  const [tags, setTags] = useState('')
   const [filter, setFilter] = useState('')
   const [saveErr, setSaveErr] = useState('')
   const [saving, setSaving] = useState(false)
@@ -65,11 +69,13 @@ export default function SnippetsMenu(props: {
     setSaveErr('')
     setSaving(true)
     try {
-      if (editId) await api(`/api/snippets/${editId}`, { method: 'PATCH', body: JSON.stringify({ title, body }) })
-      else await api('/api/snippets', { method: 'POST', body: JSON.stringify({ title, body }) })
+      const targets = targetsPayload(parseTagInput(tags))
+      if (editId) await api(`/api/snippets/${editId}`, { method: 'PATCH', body: JSON.stringify({ title, body, targets }) })
+      else await api('/api/snippets', { method: 'POST', body: JSON.stringify({ title, body, targets }) })
       // formularul se golește DOAR la succes — la eroare păstrăm ce ai scris
       setTitle('')
       setBody('')
+      setTags('')
       setEditId(null)
       load()
     } catch (e) {
@@ -158,6 +164,7 @@ export default function SnippetsMenu(props: {
                             {t('snippets.paramsCount', { n: params.length })}
                           </span>
                         )}
+                        <SnippetTags tags={snippetTags(s)} className="ml-auto" />
                       </div>
                       <div className="truncate font-mono text-[11px] text-slate-500">{s.body}</div>
                     </button>
@@ -186,12 +193,20 @@ export default function SnippetsMenu(props: {
                 rows={2}
                 className="w-full rounded-lg bg-ink-800 px-2 py-1.5 font-mono text-xs ring-1 ring-ink-700 focus:ring-sky-500"
               />
+              <input
+                value={tags}
+                onChange={(e) => setTags(e.target.value)}
+                placeholder={t('snippets.targetsPlaceholder')}
+                aria-label={t('snippets.targetsLabel')}
+                title={t('snippets.targetsHint')}
+                className="w-full rounded-lg bg-ink-800 px-2 py-1.5 text-xs ring-1 ring-ink-700 placeholder:text-slate-600 focus:ring-sky-500"
+              />
               {saveErr && <div className="px-1 text-xs wt-danger">{saveErr}</div>}
               <div className="flex gap-1.5">
                 <button onClick={save} disabled={saving} className="rounded-lg bg-sky-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-sky-700 disabled:opacity-50">
                   {saving ? t('snippets.saving') : editId ? t('common.save') : t('snippets.add')}
                 </button>
-                <button onClick={() => { setManaging(false); setEditId(null); setTitle(''); setBody('') }} className="rounded-lg px-2.5 py-1 text-xs text-slate-400 hover:bg-ink-800">
+                <button onClick={() => { setManaging(false); setEditId(null); setTitle(''); setBody(''); setTags('') }} className="rounded-lg px-2.5 py-1 text-xs text-slate-400 hover:bg-ink-800">
                   {t('snippets.back')}
                 </button>
               </div>
@@ -199,11 +214,12 @@ export default function SnippetsMenu(props: {
                 {snips.map((s) => (
                   <div key={s.id} className="flex items-center gap-1 rounded-lg px-2 py-1 hover:bg-ink-800">
                     <button
-                      onClick={() => { setEditId(s.id); setTitle(s.title); setBody(s.body) }}
+                      onClick={() => { setEditId(s.id); setTitle(s.title); setBody(s.body); setTags(snippetTags(s).join(', ')) }}
                       className="min-w-0 flex-1 truncate text-left text-xs text-slate-300"
                     >
                       {s.title}
                     </button>
+                    <SnippetTags tags={snippetTags(s)} />
                     {/* ţintă de 24px (era textul „✕" gol, ~10px) şi culoare semantică, nu rose-500/80 */}
                     <button onClick={() => remove(s.id, s.title)}
                       title={t('snippets.deleteTitle', { title: s.title })}
