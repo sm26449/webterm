@@ -131,6 +131,16 @@ def _send_blocking(cfg: dict, subject: str, body: str) -> None:
     msg["From"] = cfg["from"]
     msg["To"] = cfg["to"]
     msg.set_content(body)
+    # Portul 465 = TLS IMPLICIT (SMTPS): conexiunea e TLS de la primul octet, iar `smtplib.SMTP`
+    # aştepta acolo un banner în clar şi expira tăcut. Îl tratăm separat, cu acelaşi context care
+    # verifică certificatul; pe orice alt port rămâne SMTP + STARTTLS opţional (3.5.2).
+    if int(cfg["port"]) == 465:
+        with smtplib.SMTP_SSL(cfg["host"], 465, timeout=15,
+                              context=ssl.create_default_context()) as s:
+            if cfg["user"]:
+                s.login(cfg["user"], cfg["password"])
+            s.send_message(msg)
+        return
     with smtplib.SMTP(cfg["host"], cfg["port"], timeout=15) as s:
         if cfg["starttls"]:
             # M2: context care VERIFICĂ certificatul serverului (hostname + CA). Fără el,
@@ -217,6 +227,22 @@ async def send_test() -> None:
         await _record(K_EMAIL_LAST_FAILED, subject, str(e))
         raise
     await _record(K_EMAIL_LAST_SENT, subject)
+
+
+async def send_webhook_test() -> None:
+    """POST de test pe webhook, SINCRON, şi aruncă la eşec (butonul „Test webhook" din UI)."""
+    cfg = await load_config()
+    url = cfg.get("webhook") or ""
+    if not url:
+        raise RuntimeError("no webhook URL is configured")
+    subject = "Test de configurare"
+    try:
+        await asyncio.to_thread(_post_webhook, url, subject,
+                                "This is a test alert from WebTerm. If it arrives, alerts reach this channel.")
+    except Exception as e:
+        await _record(K_WEBHOOK_LAST_FAILED, subject, str(e))
+        raise
+    await _record(K_WEBHOOK_LAST_SENT, subject)
 
 
 _EVICT_AFTER = 3600.0        # > orice min_interval folosit; peste atât intrarea nu mai throttle-uiește

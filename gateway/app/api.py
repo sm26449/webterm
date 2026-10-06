@@ -637,6 +637,14 @@ async def update_account(body: AccountUpdate, request: Request, user=Depends(sec
         security.clear_stepup_for(user["id"])   # H1: rotirea parolei închide ferestrele de step-up
         security.bump_forward_epoch()           # M3: și invalidează token-urile de port-forward
         await _revoke_all_shares()              # M3-shares: rotirea parolei omoară share-urile derivate
+    # Modulul de alerte promitea asta din prima zi („schimbare de parolă"), dar nimeni nu chema
+    # alerta: o parolă schimbată de un cookie furat trecea neanunţată (3.5.2). Emailul vechi
+    # primeşte tot alerta — `cfg["to"]` e cutia de alerte a instanţei, nu adresa contului.
+    changed = [w for w, on in (("password", bool(body.new_password)),
+                               ("email (%s → %s)" % (user["email"], email), email != user["email"])) if on]
+    if changed:
+        email_alerts.notify_security_change("account %s changed" % " and ".join(changed),
+                                            security.client_ip(request), user["email"])
     return {"ok": True, "email": email}
 
 
@@ -1408,6 +1416,18 @@ async def save_smtp(body: SmtpIn, request: Request, user=Depends(security.requir
     # parola: doar dacă a fost furnizată (gol = păstreaz-o pe cea existentă)
     if body.password:
         await _set_setting("smtp_password_enc", security.encrypt_secret(body.password))
+    return {"ok": True}
+
+
+@router.post("/api/settings/webhook/test")
+async def test_webhook(user=Depends(security.require_user)):
+    """Posts a test alert to the configured webhook and reports the result (the SMTP test sent
+    an email only, so a broken webhook stayed invisible until a real alert was lost)."""
+    try:
+        await email_alerts.send_webhook_test()
+    except Exception as e:
+        log.warning("webhook test failed: %s: %s", type(e).__name__, e)
+        raise ApiError(400, "settings.webhookSendFailed", f"sending failed: {e}")
     return {"ok": True}
 
 

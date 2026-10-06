@@ -252,6 +252,69 @@ async def main():
     finally:
         email_alerts._send_blocking = orig_send
 
+    # ── 3.5.2: SMTPS pe 465, test de webhook, alertă la schimbarea parolei ──
+    import smtplib
+    used = []
+
+    class _Fake:
+        def __init__(self, kind):
+            self.kind = kind
+        def __call__(self, host, port, timeout=None, context=None):
+            used.append((self.kind, port, context is not None))
+            return self
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def starttls(self, context=None):
+            used.append(("starttls",))
+        def login(self, u, p):
+            pass
+        def send_message(self, m):
+            pass
+    orig_smtp, orig_ssl = smtplib.SMTP, smtplib.SMTP_SSL
+    smtplib.SMTP, smtplib.SMTP_SSL = _Fake("plain"), _Fake("ssl")
+    try:
+        base = {"host": "mx", "user": "", "password": "", "from": "a@b", "to": "c@d", "starttls": True}
+        email_alerts._send_blocking(dict(base, port=465), "s", "b")
+        check("port 465 → SMTP_SSL cu context verificat, fără STARTTLS",
+              used == [("ssl", 465, True)], str(used))
+        used.clear()
+        email_alerts._send_blocking(dict(base, port=587), "s", "b")
+        check("port 587 → SMTP + STARTTLS (neschimbat)", used == [("plain", 587, False), ("starttls",)], str(used))
+    finally:
+        smtplib.SMTP, smtplib.SMTP_SSL = orig_smtp, orig_ssl
+
+    posted = []
+    orig_post = email_alerts._post_webhook
+    email_alerts._post_webhook = lambda url, subject, body: posted.append(url)
+    sec_events = []
+    orig_sec = email_alerts.notify_security_change
+    email_alerts.notify_security_change = lambda what, ip, email: sec_events.append(what)
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=_ORIGIN) as c:
+            r = await c.post("/api/login", json={"email": "a@b.co", "password": "parolabuna1"})
+            await db.execute("DELETE FROM app_settings WHERE key='alert_webhook'")
+            r = await c.post("/api/settings/webhook/test")
+            check("test webhook fără URL → 400 cu cod", r.status_code == 400
+                  and r.headers.get("x-webterm-error") == "settings.webhookSendFailed", r.text[:80])
+            await api._set_setting("alert_webhook", "https://hooks.example/x")
+            r = await c.post("/api/settings/webhook/test")
+            check("test webhook cu URL → 200 şi POST pe URL", r.status_code == 200
+                  and posted == ["https://hooks.example/x"], f"{r.status_code} {posted}")
+            # fără SMTP poarta de cod-pe-email nu se aplică (altfel ar cere un cod de la un dispozitiv nou)
+            await db.execute("DELETE FROM app_settings WHERE key IN ('smtp_host','smtp_to','smtp_from')")
+            config.SMTP_HOST = ""
+            r = await c.post("/api/account", json={"current_password": "parolabuna1",
+                                                   "new_password": "parolanoua22"})
+            check("schimbarea parolei trimite alertă de securitate",
+                  r.status_code == 200 and any("password" in w for w in sec_events),
+                  f"{r.status_code} {r.text[:80]} {sec_events}")
+    finally:
+        email_alerts._post_webhook = orig_post
+        email_alerts.notify_security_change = orig_sec
+
     await db.close()
     print(f"\n{ok}/{total} passed")
     return ok == total

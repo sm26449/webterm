@@ -100,6 +100,21 @@ export default function NotificationsTab() {
     } finally { setSmtpTesting(false) }
   }
 
+  // Test pe webhook: acelaşi tipar ca testul SMTP (salvează întâi formularul), dar posteaza pe canalul
+  // de chat — înainte singurul test trimitea email, deci un webhook greşit se vedea abia la o alertă pierdută
+  async function testWebhook() {
+    setSmtpMsg(''); setSmtpErr(''); setSmtpTesting(true)
+    try {
+      await postSmtp()
+      setSmtp((s) => ({ ...s, password: '' }))
+      await loadSmtp()
+      await api('/api/settings/webhook/test', { method: 'POST' })
+      setSmtpMsg(t('settings.smtp.webhookTestSent'))
+    } catch (err) {
+      setSmtpErr(errText(err, t) || t('settings.error'))
+    } finally { setSmtpTesting(false) }
+  }
+
   // Port forwarding: domeniu configurabil
   const [fwd, setFwd] = useState<FwdCfg | null>(null)
   const [fwdDomain, setFwdDomain] = useState('')
@@ -209,6 +224,11 @@ export default function NotificationsTab() {
           <button disabled={smtpTesting} onClick={testSmtp} className={btn.secondary}>
             {smtpTesting ? t('settings.smtp.sending') : t('settings.smtp.sendTest')}
           </button>
+          {smtp.webhook.trim() && (
+            <button disabled={smtpTesting} onClick={testWebhook} className={btn.secondary}>
+              {t('settings.smtp.testWebhook')}
+            </button>
+          )}
           <span role="status" className={smtpMsg ? 'text-sm wt-good' : 'sr-only'}>{smtpMsg}</span>
           <span id="smtp-error" role="alert" className={smtpErr ? 'text-sm wt-danger' : 'sr-only'}>{smtpErr}</span>
         </div>

@@ -19,8 +19,9 @@ Both live in **Settings → Notifications**, under *Email alerts (SMTP)*.
 STARTTLS*. An email is sent only when **host, From and To** are all set; the user is
 optional (no `login` when it is empty). Mail goes out through a plain SMTP connection
 (15 s timeout), upgraded with `STARTTLS` when the box is ticked — and STARTTLS **verifies
-the server certificate** (hostname + CA), so a self-signed relay fails. Implicit TLS
-(port 465, SMTPS) is not supported. The subject is prefixed `[WebTerm] `.
+the server certificate** (hostname + CA), so a self-signed relay fails. **Port 465** uses
+implicit TLS (SMTPS) instead — the connection is TLS from the first byte, with the same
+certificate check, and the STARTTLS box is ignored (since 3.5.2). The subject is prefixed `[WebTerm] `.
 
 **Webhook.** One URL, independent of SMTP (works with no mail server at all). It must be
 `http://` or `https://`; private-network addresses (a Mattermost in your LAN) are fine,
@@ -49,8 +50,8 @@ one; it is stored encrypted.
 
 **Test.** *Send test email* first **saves** the form (so it tests what you typed, not the
 old config), then sends a test message synchronously and shows the SMTP error if it fails.
-It tests **email only** — there is no webhook test button; the webhook is exercised by the
-next real alert.
+*Test webhook* (shown when a webhook URL is set, since 3.5.2) does the same for the
+webhook: it saves, posts a test alert and shows the error if the POST fails.
 
 **Delivery status.** Under the buttons the tab shows the last email/webhook **sent** and
 the last one that **failed** (with the error), persisted by the gateway. A failure newer
@@ -67,7 +68,7 @@ key, so a gateway restart resets them.
 | IP blocked after failed login attempts | An IP reaches the failed-auth cap and is locked out (15 min lockout). Only real IPs, not per-account internal counters. | 1 per IP / 15 min |
 | New login on your account | Successful login from an IP never seen for this account. | none (first time per IP only) |
 | A new device attached to a live session | Someone attaches to a live session from an IP not seen on a successful login for the account, or a guest attaches through a share link. | 1 per IP / 15 min |
-| Security change: … | Account created; automation token created (name + scopes); group enrollment token created; TOTP enabled / disabled; passkey enrolled / deleted; SSH host key re-pinned for a host. | none |
+| Security change: … | Account created; automation token created (name + scopes); group enrollment token created; TOTP enabled / disabled; passkey enrolled / deleted; SSH host key re-pinned for a host; account password and/or email changed (since 3.5.2). | none |
 | A 2FA-protected host was unlocked | Step-up passed on a host marked *Require 2FA*. | 1 per host+IP / 15 min |
 | SSH deploy key DEPLOYED / REVOKED: source → target | A deploy key was added to or removed from a target's `authorized_keys`. | none |
 | SSH host key changed — connection refused | An SSH-direct or SSH-jump target offered a host key that does not match the pinned one; the connection was refused. | 1 per host / 15 min |
@@ -172,7 +173,7 @@ in `.env`, the environment value comes back. Remove it from `.env` (and redeploy
 ## Maintenance notes
 
 - Backend: `gateway/app/email_alerts.py` (all `notify_*`, `_post_webhook`, `check_metrics`),
-  settings routes `/api/settings/smtp`, `/api/settings/smtp/test`, `/api/settings/alerts` in
+  settings routes `/api/settings/smtp`, `/api/settings/smtp/test`, `/api/settings/webhook/test`, `/api/settings/alerts` in
   `gateway/app/api.py`, offline sweep `core.sweep_hosts_offline`, gateway disk / signing-key
   checks in `gateway/app/main.py`; mute = `PATCH /api/hosts/{id}` with `alerts_muted`.
 - Frontend: `frontend/src/components/settings/NotificationsTab.tsx`, bell in `Sidebar.tsx`.
