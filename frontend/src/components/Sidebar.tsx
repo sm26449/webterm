@@ -11,6 +11,7 @@ import { hostColor, reachState } from '../lib/host'
 import { allSchemes, hostSchemeRaw, setHostScheme } from '../lib/termtheme'
 import { ActivityIcon, CloseIcon, CollapseIcon, FilesIcon, FolderMoveIcon, GearIcon, KeyIcon, LogoMark, MoreIcon, NoteIcon, PlusIcon, PowerIcon, RefreshIcon, SearchIcon, ServerIcon, TerminalPromptIcon } from './Icons'
 import { fmt } from '../lib/shortcuts'
+import { setHostMuted, updatesSignal, useUpdatesPref } from '../lib/updatesPref'
 
 // modale rar folosite → chunk-uri separate, în afara bundle-ului inițial
 const AddHostModal = lazy(() => import('./AddHostModal'))
@@ -236,6 +237,7 @@ export default function Sidebar(props: {
   // Wake-on-LAN: gateway-ul cere unui agent vecin să trimită magic packet-ul. Feedback pe toast.
   const [waking, setWaking] = useState<number | null>(null)
   const [updFor, setUpdFor] = useState<Host | null>(null)   // hostul cu modalul de update-uri deschis
+  const updPref = useUpdatesPref()
   async function wakeHost(host: Host) {
     setWaking(host.id)
     try {
@@ -405,23 +407,30 @@ export default function Sidebar(props: {
                   {liveCount}
                 </span>
               )}
-              {/* update-uri OS în aşteptare (din diagnosticele agentului v51+): atenţionare vizibilă
-                  în listă, fără să deschizi hostul. Roşcat dacă are update-uri de SECURITATE. */}
-              {host.updates && host.updates.count > 0 && (
-                <button type="button"
-                  onClick={(e) => { e.stopPropagation(); setUpdFor(host) }}
-                  title={host.updates.security
-                    ? t('updates.badgeSecTitle', { count: host.updates.count, sec: host.updates.security })
-                    : t('updates.badgeTitle', { count: host.updates.count })}
-                  aria-label={host.updates.security
-                    ? t('updates.badgeSecTitle', { count: host.updates.count, sec: host.updates.security })
-                    : t('updates.badgeTitle', { count: host.updates.count })}
-                  className={`relative inline-flex min-h-6 shrink-0 items-center rounded-full px-1.5 text-[11px] font-semibold tabular-nums before:absolute before:-inset-1.5 before:content-[''] ${host.updates.security
-                    ? 'bg-rose-700 text-white hover:bg-rose-600'
-                    : 'bg-amber-500 text-ink-950 hover:bg-amber-400'}`}>
-                  ⬆ {host.updates.count}
-                </button>
-              )}
+              {/* update-uri OS în aşteptare (din diagnosticele agentului v51+). Semnal DISCRET, sub
+                  liveness şi sesiuni în ierarhie: update-urile obişnuite = doar număr în contur
+                  (fără fond saturat — „încurca"), securitatea = punct roşu + număr. Modul global
+                  şi mascarea per host vin din lib/updatesPref (Setări → Preferinţe, meniul ⋯). */}
+              {(() => {
+                const sig = updatesSignal(host.id, host.updates, updPref.mode, updPref.muted)
+                if (sig === 'none' || !host.updates) return null
+                const label = sig === 'security'
+                  ? t('updates.badgeSecTitle', { count: host.updates.count, sec: host.updates.security ?? 0 })
+                  : t('updates.badgeTitle', { count: host.updates.count })
+                return (
+                  <button type="button"
+                    onClick={(e) => { e.stopPropagation(); setUpdFor(host) }}
+                    title={label} aria-label={label}
+                    className={`relative inline-flex min-h-6 shrink-0 items-center gap-1 rounded-full px-1.5 text-[11px] tabular-nums ring-1 before:absolute before:-inset-1.5 before:content-[''] ${sig === 'security'
+                      ? 'wt-danger font-semibold ring-rose-500/40 hover:bg-rose-500/10'
+                      : 'text-slate-500 ring-ink-700 hover:bg-ink-800 hover:text-slate-300'}`}>
+                    {sig === 'security'
+                      ? <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-rose-500" />
+                      : <span aria-hidden="true">↑</span>}
+                    {host.updates.count}
+                  </button>
+                )
+              })()}
             </div>
             {host.hostname && (
               <div className="truncate font-mono text-xs text-slate-500">
@@ -567,6 +576,8 @@ export default function Sidebar(props: {
               onReinstall={() => reinstall(host)}
               onProvision={() => provision(host)}
               onToggle2fa={() => toggle2fa(host)}
+              updatesMuted={updPref.muted.has(host.id)}
+              onToggleUpdatesMute={() => setHostMuted(host.id, !updPref.muted.has(host.id))}
               onUninstall={() => uninstallHost(host)}
               onDelete={() => deleteHost(host)}
             />
@@ -962,6 +973,7 @@ export default function Sidebar(props: {
           deschidem o sesiune cu comanda interactivă (glue, nu un package-manager reimplementat). */}
       {updFor && updFor.updates && (
         <UpdatesDialog host={updFor} onClose={() => setUpdFor(null)}
+          onMute={() => { setHostMuted(updFor.id, true); setUpdFor(null) }}
           onUpgrade={() => { const h = updFor; setUpdFor(null); props.onUpgrade(h) }} />
       )}
     </>
@@ -970,7 +982,7 @@ export default function Sidebar(props: {
 
 /** Modalul de update-uri OS. Componentă separată ca să poată avea focus-trap (hook-urile nu pot
     sta într-un JSX condiţional): Tab rămâne înăuntru, Escape închide, focusul se întoarce pe badge. */
-function UpdatesDialog(props: { host: Host; onClose: () => void; onUpgrade: () => void }) {
+function UpdatesDialog(props: { host: Host; onClose: () => void; onUpgrade: () => void; onMute: () => void }) {
   const { t } = useI18n()
   const ref = useRef<HTMLDivElement>(null)
   useFocusTrap(ref, props.onClose)
@@ -990,7 +1002,10 @@ function UpdatesDialog(props: { host: Host; onClose: () => void; onUpgrade: () =
           </p>
         )}
         <p className="mt-2 text-xs text-slate-500">{t('updates.hint')}</p>
-        <div className="mt-4 flex justify-end gap-2 text-sm">
+        <div className="mt-4 flex flex-wrap items-center justify-end gap-2 text-sm">
+          {/* „nu-mi mai arăta" direct de unde vezi semnalul; revenirea e din meniul ⋯ al hostului */}
+          <button onClick={props.onMute} title={t('updates.muteHostHint')}
+            className="mr-auto rounded px-2 py-1.5 text-xs text-slate-500 hover:bg-ink-800 hover:text-slate-300">{t('updates.muteHost')}</button>
           <button onClick={props.onClose}
             className="rounded px-3 py-1.5 text-slate-400 hover:bg-ink-800">{t('common.cancel')}</button>
           <button onClick={props.onUpgrade}
@@ -1035,6 +1050,8 @@ function HostMenu(props: {
   onReinstall: () => void
   onProvision: () => void
   onToggle2fa: () => void
+  updatesMuted: boolean
+  onToggleUpdatesMute: () => void
   onUninstall: () => void
   onDelete: () => void
 }) {
@@ -1133,6 +1150,12 @@ function HostMenu(props: {
             )}
             <button role="menuitem" className={`${item} text-slate-200`} onClick={act(props.onToggle2fa)}>
               <KeyIcon /> {props.require2fa ? t('sidebar.require2faOn') : t('sidebar.require2faOff')}
+            </button>
+            {/* mascarea per host a semnalului de update-uri OS (preferinţă locală, lib/updatesPref):
+                pentru hostul pe care-l actualizezi oricum pe alt drum şi nu vrei badge-ul în listă */}
+            <button role="menuitem" className={`${item} text-slate-200`} onClick={act(props.onToggleUpdatesMute)}>
+              <span className="grid h-4 w-4 place-items-center text-[13px]" aria-hidden="true">{props.updatesMuted ? '↑' : '⊘'}</span>
+              {props.updatesMuted ? t('updates.unmuteHost') : t('updates.muteHostMenu')}
             </button>
             {/* schemă de culori proprie hostului: „producția e roșiatică" —
                 un semnal vizual imposibil de ratat când ai 5 host-uri deschise */}

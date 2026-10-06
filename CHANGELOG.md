@@ -9,6 +9,33 @@ back.
 
 ## [Unreleased]
 
+## [3.5.0] — 2026-10-06 · agent (56)
+
+Frontend only, no agent change (AGENT_VERSION stays 56). The 3.4.0 tag never published an image
+(GitHub Actions could not assign a runner during an incident), so 3.5.0 is the first image that
+includes the 3.4.0 features below.
+
+### Added
+- **AI tools: a manager for Claude Code's config files.** A new panel, opened from the terminal's
+  right-click menu ("AI tools") or the host page's "AI tools" tab, lists, creates, edits and deletes
+  the files coding harnesses read, at their real locations: `CLAUDE.md`, subagents
+  (`.claude/agents/<name>.md`), skills (`.claude/skills/<name>/SKILL.md`) and a generic `AGENTS.md`.
+  Two scopes: Global (`~/.claude`) and Project. From a terminal, the project is the session's current
+  directory (OSC-7). Starter templates cover a blank agent, a code reviewer, a blank skill,
+  `CLAUDE.md` and `AGENTS.md`. Names are validated the way Claude Code expects them (lowercase letters,
+  digits and hyphens), and an existing file is never overwritten. Everything goes through the existing
+  file API and the Monaco editor. The agent writes the files as the same OS user the harness runs as,
+  so they belong to that user. WebTerm only manages these files and never runs them. Agent hosts
+  only.
+
+### Changed
+- **The OS-updates badge is quieter and can be hidden.** In the host list, ordinary updates now show
+  as a muted outlined count instead of a filled amber pill. Security updates keep an accent, a red
+  dot next to the count, instead of a solid red block. Settings → Preferences → "OS updates badge"
+  chooses between all updates, only security updates, or hidden. Each host can also hide its badge,
+  from its ⋯ menu or from the updates dialog ("Hide for this host"), and Preferences can bring them all
+  back. The host page always shows the count, neutral unless it includes security updates.
+
 ## [3.4.0] — 2026-10-05 · agent (56)
 
 ### Added

@@ -137,7 +137,7 @@ services:
     networks: [webterm, internal]
 
   app:
-    image: ${WEBTERM_IMAGE:-ghcr.io/sm26449/webterm:v3.4.0}
+    image: ${WEBTERM_IMAGE:-ghcr.io/sm26449/webterm:v3.5.0}
     restart: unless-stopped
     logging: *default-logging
     security_opt:
@@ -179,7 +179,7 @@ services:
       # so the app knows, and shows in the UI, which image it is running. `WEBTERM_IMAGE` e
       # pinuit pe DIGEST de upgrade.sh (imuabil); eticheta lizibilă (vX.Y.Z) stă în
       # WEBTERM_IMAGE_TAG şi e cea afişată, când există.
-      WEBTERM_IMAGE_REF: ${WEBTERM_IMAGE_TAG:-${WEBTERM_IMAGE:-ghcr.io/sm26449/webterm:v3.4.0}}
+      WEBTERM_IMAGE_REF: ${WEBTERM_IMAGE_TAG:-${WEBTERM_IMAGE:-ghcr.io/sm26449/webterm:v3.5.0}}
       # the "is there a new version?" check: 0 disables it entirely (overrides the UI switch)
       WEBTERM_UPDATE_CHECK: ${WEBTERM_UPDATE_CHECK:-1}
       # optional read-only token, only while the repo is private (empty = works on a public repo)

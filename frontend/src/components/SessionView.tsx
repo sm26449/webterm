@@ -20,6 +20,8 @@ import GitPanel from './GitPanel'
 import ForwardsPanel from './ForwardsPanel'
 import DockerPanel from './DockerPanel'
 import ServicesPanel from './ServicesPanel'
+// AI tools se deschide rar (din meniul contextual) → bundle separat, ca FileEditor
+const AiToolsPanel = lazy(() => import('./AiToolsPanel'))
 import ToolboxPanel from './ToolboxPanel'
 import { ClockIcon, CopyIcon, DockerIcon, DownloadIcon, ExternalLinkIcon, FileIcon, FilesIcon, FolderIcon, ForwardIcon, GitBranchIcon, LinkIcon, MoreIcon, NoteIcon, PasteIcon, PencilIcon, PopoutIcon, SearchIcon, ServicesIcon, StopIcon, ToolboxIcon, TrashIcon } from './Icons'
 import MobileKeybar from './MobileKeybar'
@@ -273,8 +275,10 @@ export default function SessionView(props: {
   const [showDocker, setShowDocker] = useState(false)
   const [showServices, setShowServices] = useState(false)
   const [showToolbox, setShowToolbox] = useState(false)
+  const [showAi, setShowAi] = useState(false)
   // un singur panou din dreapta o dată: la deschiderea unuia, le închid pe celelalte
-  const closeOthers = (keep: 'files' | 'cmd' | 'fwd' | 'git' | 'docker' | 'services' | 'toolbox') => {
+  const closeOthers = (keep: 'files' | 'cmd' | 'fwd' | 'git' | 'docker' | 'services' | 'toolbox' | 'ai') => {
+    if (keep !== 'ai') setShowAi(false)
     if (keep !== 'files') setShowFiles(false)
     if (keep !== 'cmd') setShowCommands(false)
     if (keep !== 'fwd') setShowForwards(false)
@@ -2323,6 +2327,12 @@ export default function SessionView(props: {
         <ServicesPanel host={props.host} onClose={() => setShowServices(false)} overlay={narrowPane}
           onJournal={(u) => { setShowServices(false); props.onJournal?.(props.host!, u) }} />
       )}
+      {showAi && props.host && (
+        <Suspense fallback={null}>
+          <AiToolsPanel host={props.host} onClose={() => setShowAi(false)} overlay={narrowPane}
+            projectDir={cwd ?? undefined} />
+        </Suspense>
+      )}
       {showToolbox && props.host && (
         <ToolboxPanel host={props.host} onClose={() => setShowToolbox(false)} overlay={narrowPane}
           onOpen={(h, cid) => { setShowToolbox(false); props.onOpenConnection?.(h, cid) }} />
@@ -2392,6 +2402,13 @@ export default function SessionView(props: {
                   { key: 'newfolder', icon: <FolderIcon />, label: t('session.ctxFilesNewFolder'), onClick: () => { void (async () => revealFiles(await filesAnchorDir(), 'newFolder'))() } },
                 ]}
               />
+            )}
+            {/* AI tools: CLAUDE.md / sub-agenţi / skill-uri pentru proiectul din cwd (OSC 7) —
+                acelaşi user de OS ca harness-ul care le citeşte. Doar prin agent (API-ul fs). */}
+            {props.host && (props.host.connection_type ?? 'agent') === 'agent' && (
+              <MoreItem onClick={() => { closeOthers('ai'); setShowAi(true); setCtxMenu(null) }}>
+                <span className="grid h-4 w-4 place-items-center text-[13px]" aria-hidden="true">✦</span> {t('session.ctxAiTools')}
+              </MoreItem>
             )}
             <MoreItem onClick={() => { setShowSearch(true); setCtxMenu(null) }}>
               <SearchIcon /> {t('session.searchScrollbackMenu')}

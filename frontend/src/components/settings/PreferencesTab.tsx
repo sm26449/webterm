@@ -7,6 +7,7 @@ import { lsGet, lsSet } from '../../lib/storage'
 import { isWalkthroughDone, markWalkthroughDone, resetWalkthrough } from '../../lib/walkthrough'
 import { resetAllTips } from '../../lib/coachtips'
 import { INBOX_REL, PasteDest, inboxDays, pasteDest, setInboxDays, setPasteDest } from '../../lib/transfers'
+import { UpdatesMode, setUpdatesMode, unmuteAllHosts, useUpdatesPref } from '../../lib/updatesPref'
 import { field, heading } from './ui'
 
 // Preferinţe: fus orar, accesibilitate (mod screen-reader), verificarea de versiune. Extras din
@@ -33,6 +34,7 @@ export default function PreferencesTab() {
   // transferuri: unde ajung fişierele lipite în terminal + retenţia inbox-ului (lib/transfers.ts)
   const [dest, setDest] = useState<PasteDest>(pasteDest)
   const [days, setDays] = useState<string>(() => String(inboxDays()))
+  const updPref = useUpdatesPref()
 
   useEffect(() => {
     const iv = setInterval(() => setClock(timeInZone(tz)), 1000)
@@ -171,6 +173,24 @@ export default function PreferencesTab() {
           className={field + ' max-w-[8rem]'} />
         <span className="mt-0.5 block text-xs text-slate-500">{t('transfers.inboxDaysHint')}</span>
       </label>
+
+      {/* ── Insigna de update-uri OS (lib/updatesPref) ── */}
+      {/* Nivelul global al „mascării"; cel per host stă în meniul ⋯ al hostului şi în modalul de
+          update-uri, iar aici doar numărăm hosturile ascunse şi le putem readuce pe toate. */}
+      <h3 className={heading}>{t('updates.prefTitle')}</h3>
+      <p className="mt-1 text-xs text-slate-500">{t('updates.prefDesc')}</p>
+      <select value={updPref.mode} aria-label={t('updates.prefTitle')}
+        onChange={(e) => setUpdatesMode(e.target.value as UpdatesMode)} className={field + ' mt-2'}>
+        <option value="all">{t('updates.modeAll')}</option>
+        <option value="security">{t('updates.modeSecurity')}</option>
+        <option value="off">{t('updates.modeOff')}</option>
+      </select>
+      {updPref.muted.size > 0 && (
+        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+          <span>{t('updates.prefMuted', { count: updPref.muted.size })}</span>
+          <button type="button" onClick={unmuteAllHosts} className="wt-link">{t('updates.prefUnmuteAll')}</button>
+        </div>
+      )}
 
       {/* ── Verificare de versiune ── */}
       <h3 className={heading}>{t('settings.update.title')}</h3>

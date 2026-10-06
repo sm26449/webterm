@@ -5,6 +5,7 @@ import { useI18n } from '../lib/i18n'
 import { peekFilesDir } from '../lib/uploads'
 import { useConfirm } from '../lib/confirm'
 import { hostHistory } from '../lib/metrics'
+import { updatesSignal, useUpdatesPref } from '../lib/updatesPref'
 import { DockerIcon, DownloadIcon, FilesIcon, ForwardIcon, LinkIcon, NoteIcon, PencilIcon, PlusIcon, PopoutIcon, RefreshIcon, ServerIcon, ServicesIcon, ShieldIcon, SplitIcon, TerminalPromptIcon, ToolboxIcon, TrashIcon } from './Icons'
 import SessionPreview from './SessionPreview'
 import Sparkline from './Sparkline'
@@ -17,8 +18,9 @@ const ForwardsPanel = lazy(() => import('./ForwardsPanel'))
 const ServicesPanel = lazy(() => import('./ServicesPanel'))
 const DockerPanel = lazy(() => import('./DockerPanel'))
 const ToolboxPanel = lazy(() => import('./ToolboxPanel'))
+const AiToolsPanel = lazy(() => import('./AiToolsPanel'))
 
-type HubTab = 'overview' | 'sessions' | 'files' | 'forwards' | 'services' | 'docker' | 'databases'
+type HubTab = 'overview' | 'sessions' | 'files' | 'forwards' | 'services' | 'docker' | 'databases' | 'ai'
 
 /** Pagina unui host: navigare de sesiuni (stânga) + previzualizare (dreapta).
    Click pe o sesiune = preview; „Deschide" (sau dublu-click) = terminal. */
@@ -137,6 +139,7 @@ export default function HostOverview(props: {
     { id: 'services', label: t('host.tabServices'), show: agentReady, icon: <ServicesIcon /> },
     { id: 'docker', label: t('host.tabDocker'), show: agentReady, icon: <DockerIcon /> },
     { id: 'databases', label: t('host.tabDatabases'), show: agentReady, icon: <ToolboxIcon /> },
+    { id: 'ai', label: t('host.tabAi'), show: agentReady, icon: <span aria-hidden="true" className="text-[13px] leading-none">✦</span> },
   ]
   // dacă tab-ul curent devine indisponibil (agentul a căzut), cădem înapoi pe Overview
   const visibleTabs = tabs.filter((x) => x.show)
@@ -398,6 +401,11 @@ export default function HostOverview(props: {
             <ToolboxPanel embed host={host} onClose={() => setTab('overview')} onOpen={(h, cid) => props.onConnectionOpen(h, cid)} />
           </Suspense>
         )}
+        {tab === 'ai' && (
+          <Suspense fallback={paneFallback}>
+            <AiToolsPanel embed host={host} onClose={() => setTab('overview')} />
+          </Suspense>
+        )}
         </div>
       </div>
 
@@ -544,6 +552,7 @@ function StatTile(props: { label: string; pct?: number; big?: string; sub?: stri
     Prezentă mereu, deci pagina are identitate şi când hostul n-are metrici/sesiuni. */
 function StatusBand({ host }: { host: Host }) {
   const { t } = useI18n()
+  const updPref = useUpdatesPref()
   const reach = reachState(host)
   const color = hostColor(host)
   const isAgent = (host.connection_type ?? 'agent') === 'agent'
@@ -557,10 +566,19 @@ function StatusBand({ host }: { host: Host }) {
     : host.hostname ? hostAt(host) : protoLabel(host)
   // chip-urile sunt rezumatul de sus; detaliul (versiune agent, 2FA, auth) stă în carduri,
   // ca să nu dublăm. Aici doar semnale „la o privire": backend, update-uri OS, etichete.
-  const chips: { label: string; tone?: 'warn' | 'danger' }[] = []
+  const chips: { label: string; tone?: 'warn' | 'danger'; title?: string }[] = []
   if (isAgent && host.backend) chips.push({ label: host.backend })
-  if (host.updates && host.updates.count > 0)
-    chips.push({ label: `⬆ ${host.updates.count}`, tone: host.updates.security ? 'danger' : 'warn' })
+  // update-uri OS: pe pagina hostului (unde ai venit deliberat) chip-ul apare mereu, dar NEUTRU;
+  // accent doar pentru securitate şi doar dacă semnalul nu e mascat (global sau per host)
+  if (host.updates && host.updates.count > 0) {
+    const sig = updatesSignal(host.id, host.updates, updPref.mode, updPref.muted)
+    chips.push({
+      label: `↑ ${host.updates.count}`, tone: sig === 'security' ? 'danger' : undefined,
+      title: host.updates.security
+        ? t('updates.chipSecTitle', { count: host.updates.count, sec: host.updates.security })
+        : t('updates.chipTitle', { count: host.updates.count }),
+    })
+  }
   for (const tag of (host.tags || []).slice(0, 5)) chips.push({ label: tag })
   return (
     <div className="relative overflow-hidden rounded-2xl border border-ink-700/70 bg-ink-800/40 p-5">
@@ -577,7 +595,7 @@ function StatusBand({ host }: { host: Host }) {
         {chips.length > 0 && (
           <div className="ml-auto flex flex-wrap items-center gap-2">
             {chips.map((c, i) => (
-              <span key={i} className={`rounded-lg px-2.5 py-1 text-xs font-medium ring-1 ${
+              <span key={i} title={c.title} className={`rounded-lg px-2.5 py-1 text-xs font-medium ring-1 ${
                 c.tone === 'danger' ? 'bg-rose-500/10 wt-danger ring-rose-500/30'
                 : c.tone === 'warn' ? 'bg-amber-500/10 wt-warn ring-amber-500/30'
                 : 'bg-ink-900/50 text-slate-400 ring-ink-700'}`}>{c.label}</span>
