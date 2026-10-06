@@ -1274,6 +1274,20 @@ async def _match_guard_rule(cmd: str) -> dict | None:
         security.regex_worker_release()
 
 
+async def _enforce_guard(cmd: str, confirmed: bool) -> None:
+    """Aplică guardrail-ul pe o comandă care pleacă spre host: `block` → 403, `confirm` fără un DA
+    explicit → 409 (clientul întreabă omul şi retrimite cu `confirmed: true`). Folosit de `/run` ŞI
+    de acţiunile din panouri (git care scrie, docker, services): înainte doar `/run` era verificat,
+    deci o regulă `systemctl\\s+stop` nu oprea butonul Stop din panoul de servicii (3.5.2)."""
+    rule = await _match_guard_rule(cmd)
+    if rule and rule["action"] == "block":
+        raise ApiError(403, "run.guardBlocked", "command blocked by a guardrail: /%s/" % rule["pattern"],
+                       vars={"pattern": rule["pattern"]})
+    if rule and not confirmed:
+        raise ApiError(409, "run.guardConfirm", "command flagged for confirmation by a guardrail: /%s/"
+                       % rule["pattern"], vars={"pattern": rule["pattern"]})
+
+
 @router.get("/api/settings/command-guard")
 async def get_command_guard(user=Depends(security.require_user)):
     return await _load_command_guard()
@@ -3052,13 +3066,7 @@ async def host_run(host_id: int, body: RunIn, request: Request,
     # strangulare curat: cine ocoleşte UI-ul ocolea şi regula. Semnalat de auditul extern
     # (2026-08-06). `block` refuză; `confirm` cere confirmare explicită în cerere — serverul
     # nu poate deschide un dialog, dar poate pretinde că cineva a răspuns la el.
-    rule = await _match_guard_rule(cmd)
-    if rule and rule["action"] == "block":
-        raise ApiError(403, "run.guardBlocked", "command blocked by a guardrail: /%s/" % rule["pattern"],
-                       vars={"pattern": rule["pattern"]})
-    if rule and not body.confirmed:
-        raise ApiError(409, "run.guardConfirm", "command flagged for confirmation by a guardrail: /%s/"
-                       % rule["pattern"], vars={"pattern": rule["pattern"]})
+    await _enforce_guard(cmd, body.confirmed)
     cmd_timeout = min(max(int(body.timeout), 1), 300)
     conn = core.source_for(host_id)
     if not isinstance(conn, core.AgentConnection):
@@ -3084,11 +3092,13 @@ async def host_run(host_id: int, body: RunIn, request: Request,
 # cale/mesaj), (3) NU scrie în command_history (status/diff se cer des; ar inunda
 # istoricul). Scope: status/diff/stage/commit — merge/rebase/push rămân la CLI.
 _GIT_SUBCMDS = {"status", "diff", "rev-parse", "add", "reset", "restore", "commit"}
+_GIT_WRITE_SUBCMDS = {"add", "reset", "restore", "commit"}
 
 
 class GitIn(BaseModel):
     args: list[str]
     cwd: str
+    confirmed: bool = False    # guardrail `confirm` (doar subcomenzile care scriu)
     stepup_grant: str = ""     # 2FA: la fel ca /run, orice acțiune pe host 2FA cere step-up
     stepup_password: str = ""
 
@@ -3108,6 +3118,10 @@ async def host_git(host_id: int, body: GitIn, user=Depends(security.require_user
     cmd = " ".join(shlex.quote(p) for p in (["git", "-C", cwd] + list(body.args)))
     if len(cmd) > 8000:
         raise ApiError(400, "run.tooLong", "command too long")
+    # status/diff/rev-parse se cer la fiecare refresh şi nu schimbă nimic — guardrail-ul doar pe
+    # subcomenzile care SCRIU (add/reset/restore/commit), ca o regulă `git\s+reset` să conteze
+    if body.args[0] in _GIT_WRITE_SUBCMDS:
+        await _enforce_guard(cmd, body.confirmed)
     conn = core.source_for(host_id)
     if not isinstance(conn, core.AgentConnection):
         raise ApiError(409, "host.offline", "host offline or has no agent")
@@ -3210,6 +3224,7 @@ async def docker_list(host_id: int, kind: str, user=Depends(security.require_use
 class DockerAction(BaseModel):
     container: str
     action: str
+    confirmed: bool = False    # guardrail `confirm`
     stepup_grant: str = ""
     stepup_password: str = ""
 
@@ -3223,6 +3238,8 @@ async def docker_action(host_id: int, body: DockerAction, request: Request,
         raise ApiError(400, "docker.badAction", "unknown docker action")
     if not _DOCKER_ID.match(body.container or ""):
         raise ApiError(400, "docker.badContainer", "invalid container id")
+    # guardrail pe comanda echivalentă din shell, ca o regulă `docker\s+stop` să oprească şi butonul
+    await _enforce_guard("docker %s %s" % (body.action, body.container), body.confirmed)
     audit.detail(request, "docker %s %s" % (body.action, body.container))
     resp = await _docker_run(host_id, [body.action, body.container], timeout=30)
     if resp.get("exit_code") != 0:
@@ -3298,6 +3315,7 @@ async def services_list(host_id: int, failed: bool = False, user=Depends(securit
 class ServiceAction(BaseModel):
     unit: str
     action: str
+    confirmed: bool = False    # guardrail `confirm`
     stepup_grant: str = ""
     stepup_password: str = ""
 
@@ -3313,9 +3331,10 @@ async def service_action(host_id: int, body: ServiceAction, request: Request,
         raise ApiError(400, "services.badAction", "unknown service action")
     if not _UNIT_RE.match(body.unit or ""):
         raise ApiError(400, "services.badUnit", "invalid unit name")
+    svc_cmd = "systemctl %s %s" % (shlex.quote(body.action), shlex.quote(body.unit))
+    await _enforce_guard(svc_cmd, body.confirmed)
     audit.detail(request, "service %s %s" % (body.action, body.unit))
-    resp = await _host_run(host_id,
-        "systemctl %s %s" % (shlex.quote(body.action), shlex.quote(body.unit)), timeout=30)
+    resp = await _host_run(host_id, svc_cmd, timeout=30)
     if resp.get("exit_code") != 0:
         raise ApiError(400, "services.failed", (resp.get("stderr") or "systemctl failed").strip()[:300])
     return {"ok": True}

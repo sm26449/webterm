@@ -1,5 +1,5 @@
 import { ReactNode, useCallback, useEffect, useRef, useState } from 'react'
-import { errText, api, ApiError, Host, withStepup } from '../lib/api'
+import { errText, api, ApiError, Host, withGuardConfirm, withStepup } from '../lib/api'
 import { useConfirm } from '../lib/confirm'
 import { useI18n } from '../lib/i18n'
 import { copyText } from '../lib/clipboard'
@@ -95,8 +95,9 @@ export default function DockerPanel(props: {
     }))) return
     setBusy(id); setError('')
     try {
-      await withStepup(props.host.id, () => api(`/api/hosts/${props.host.id}/docker/action`,
-        { method: 'POST', body: JSON.stringify({ container: id, action: act }) }))
+      await withStepup(props.host.id, () => withGuardConfirm((pattern) => confirm({ title: t('guard.confirmTitle'), message: t('guard.confirmMsg', { pattern }), danger: true, confirmLabel: t('guard.confirmRun') }),
+        (confirmed) => api(`/api/hosts/${props.host.id}/docker/action`,
+          { method: 'POST', body: JSON.stringify({ container: id, action: act, confirmed }) })))
       await load(kind)
     } catch (e) {
       setError(errText(e, t) || t('docker.error'))

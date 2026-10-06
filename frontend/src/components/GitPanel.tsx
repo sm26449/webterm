@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { errText, api, Host } from '../lib/api'
+import { errText, api, ApiError, Host, withGuardConfirm } from '../lib/api'
+import { useConfirm } from '../lib/confirm'
 import { getCwd } from '../lib/cwd'
 import { useI18n } from '../lib/i18n'
 import { notify } from '../lib/notify'
@@ -84,6 +85,7 @@ function DiffView({ text }: { text: string }) {
 
 export default function GitPanel(props: { host: Host; sessionId: string; onClose: () => void; overlay?: boolean }) {
   const { t } = useI18n()
+  const { confirm } = useConfirm()
   const isAgent = !props.host.connection_type || props.host.connection_type === 'agent'
   const asideCls = 'fixed inset-y-0 right-0 z-40 flex w-[90vw] max-w-sm flex-col border-l border-ink-800 bg-ink-900 shadow-2xl outline-none'
     + (props.overlay ? '' : ' sm:static sm:z-auto sm:w-80 sm:max-w-none sm:shrink-0 sm:shadow-none')
@@ -102,11 +104,16 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
   const [msg, setMsg] = useState('')
   const loadSeq = useRef(0)
 
+  // subcomenzile care scriu (add/reset/restore/commit) trec prin guardrail pe server: la o regulă
+  // `confirm` întrebăm aici şi retrimitem; un refuz devine eroarea obişnuită de mai jos
   const gitcmd = useCallback(async (args: string[]): Promise<GitResult> => {
-    return api<GitResult>(`/api/hosts/${props.host.id}/git`, {
-      method: 'POST', body: JSON.stringify({ args, cwd }),
-    })
-  }, [props.host.id, cwd])
+    const r = await withGuardConfirm((pattern) => confirm({ title: t('guard.confirmTitle'), message: t('guard.confirmMsg', { pattern }), danger: true, confirmLabel: t('guard.confirmRun') }),
+      (confirmed) => api<GitResult>(`/api/hosts/${props.host.id}/git`, {
+        method: 'POST', body: JSON.stringify({ args, cwd, confirmed }),
+      }))
+    if (r === null) throw new ApiError(409, t('guard.cancelled'))
+    return r
+  }, [props.host.id, cwd, confirm, t])
 
   const refresh = useCallback(async () => {
     if (!cwd) return

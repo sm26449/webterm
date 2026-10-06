@@ -34,6 +34,15 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
   const [guard, setGuard] = useState<CommandGuard>({ enabled: true, rules: [] })
   const [guardMsg, setGuardMsg] = useState('')
   const saveGuard = async () => {
+    // Serverul validează cu `re` din Python, terminalul potriveşte cu RegExp din JS: un pattern
+    // valid doar în Python (ex. `(?P<n>…)`, `\Z`) trecea la salvare şi era apoi SĂRIT tăcut în
+    // terminal. Îl refuzăm aici, numindu-l, ca regula să se comporte la fel peste tot.
+    for (const r of guard?.rules ?? []) {
+      try { new RegExp(r.pattern, 'i') } catch {
+        setGuardMsg(t('settings.guardJsInvalid', { pattern: r.pattern }))
+        return
+      }
+    }
     try {
       const saved = await api<CommandGuard>('/api/settings/command-guard',
         { method: 'POST', body: JSON.stringify(guard) })

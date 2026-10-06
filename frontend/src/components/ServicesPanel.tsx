@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { errText, api, ApiError, Host, withStepup } from '../lib/api'
+import { errText, api, ApiError, Host, withGuardConfirm, withStepup } from '../lib/api'
 import { useConfirm } from '../lib/confirm'
 import { useI18n } from '../lib/i18n'
 import { useDrawer } from '../lib/useDrawer'
@@ -56,8 +56,9 @@ export default function ServicesPanel(props: {
     }))) return
     setBusy(unit); setError('')
     try {
-      await withStepup(props.host.id, () => api(`/api/hosts/${props.host.id}/services/action`,
-        { method: 'POST', body: JSON.stringify({ unit, action }) }))
+      await withStepup(props.host.id, () => withGuardConfirm((pattern) => confirm({ title: t('guard.confirmTitle'), message: t('guard.confirmMsg', { pattern }), danger: true, confirmLabel: t('guard.confirmRun') }),
+        (confirmed) => api(`/api/hosts/${props.host.id}/services/action`,
+          { method: 'POST', body: JSON.stringify({ unit, action, confirmed }) })))
       await load()
     } catch (e) {
       setError(errText(e, t) || (e instanceof ApiError ? e.message : t('services.error')))

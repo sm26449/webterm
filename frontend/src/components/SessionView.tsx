@@ -244,6 +244,14 @@ export default function SessionView(props: {
   // guardrail de comenzi: config live într-un ref (handler-ul de taste e capturat la
   // montare, deci nu poate citi prop-ul direct), + dialog de confirmare + mesaj tranzitoriu
   const commandGuardRef = useRef(props.commandGuard)
+  /** Prima linie dintr-un text (lipit) care atinge o regulă de guardrail, sau null. */
+  const guardedLine = (text: string): string | null => {
+    for (const line of text.split(/\r?\n/)) {
+      const l = line.trim()
+      if (l && matchCommandRule(l, commandGuardRef.current)) return l
+    }
+    return null
+  }
   useEffect(() => { commandGuardRef.current = props.commandGuard }, [props.commandGuard])
   // `t` prin ref, ca `commandGuard` de mai sus. Efectul terminalului depinde doar de
   // `session.id` (are `eslint-disable` pe `exhaustive-deps`, deliberat: re-rularea lui ar
@@ -812,18 +820,30 @@ export default function SessionView(props: {
     registerInsertTarget(session.id, (text) => { send(text); term.focus() })
     // Paste cu FIŞIERE (captură, înaintea handler-ului xterm de pe textarea): preluăm doar când
     // clipboardul aduce fişiere/imagini; textul simplu nu trece pe aici — xterm îl lipeşte ca
-    // până acum (bracketed paste). Pe hosturi fără agent nu interceptăm nimic.
+    // până acum (bracketed paste) — cu excepţia unui text multi-linie care atinge guardrail-ul.
     const onPasteFiles = (e: ClipboardEvent) => {
-      if (!canTransferRef.current) return
       const cd = e.clipboardData
       if (!cd) return
-      const files = Array.from(cd.files)
-      if (!files.length) {
+      // fişierele merg doar prin agent; guardrail-ul pe textul lipit se aplică oriunde
+      const files = canTransferRef.current ? Array.from(cd.files) : []
+      if (!files.length && canTransferRef.current) {
         for (const it of Array.from(cd.items)) {
           if (it.kind === 'file') { const f = it.getAsFile(); if (f) files.push(f) }
         }
       }
-      if (!files.length) return
+      if (!files.length) {
+        // Text cu mai multe linii: fără bracketed paste în shell, fiecare linie se EXECUTĂ la lipire,
+        // ocolind verificarea de la Enter. Dacă vreo linie atinge o regulă, nu lipim deloc.
+        const text = cd.getData('text/plain')
+        const hit = text.includes('\n') ? guardedLine(text) : null
+        if (hit) {
+          e.preventDefault()
+          e.stopPropagation()
+          setGuardMsg(tRef.current('session.pasteGuarded', { cmd: hit.slice(0, 70) }))
+          window.setTimeout(() => setGuardMsg(null), 5000)
+        }
+        return
+      }
       e.preventDefault()
       e.stopPropagation()
       void pasteFilesRef.current(files)
@@ -869,10 +889,13 @@ export default function SessionView(props: {
     // următorul Ctrl+C să întrerupă, nu să recopieze.
     term.attachCustomKeyEventHandler((e) => {
       if (e.type !== 'keydown') return true
-      // Guardrail de comenzi: la Enter simplu, verificăm comanda TASTATĂ (via OSC 133)
-      // ÎNAINTE s-o trimitem. block → curăță linia; confirm → dialog. Fără shell
-      // integration (promptRow lipsă) sau într-un TUI, pendingCommand e null → trece.
-      if (e.key === 'Enter' && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey) {
+      // Guardrail de comenzi: la Enter, verificăm comanda TASTATĂ (via OSC 133) ÎNAINTE s-o
+      // trimitem. block → curăță linia; confirm → dialog. Fără shell integration (promptRow
+      // lipsă) sau într-un TUI, pendingCommand e null → trece. Shift/Ctrl+Enter şi Ctrl+J
+      // execută şi ele linia în shell (CR / LF) — scăpau verificării până în 3.5.2.
+      const submits = (e.key === 'Enter' && !e.altKey && !e.metaKey)
+        || (e.ctrlKey && e.code === 'KeyJ' && !e.shiftKey && !e.altKey && !e.metaKey)
+      if (submits) {
         const cmd = trackerRef.current?.pendingCommand()
         const rule = cmd ? matchCommandRule(cmd, commandGuardRef.current) : null
         if (rule && cmd) {
@@ -1599,7 +1622,11 @@ export default function SessionView(props: {
     // bracketed paste (ca `paste()`): multi-linie rămâne inert. „run" adaugă Enter DUPĂ,
     // deliberat separat, ca auto-execuţia să fie o alegere, nu implicit.
     termRef.current?.paste(text)
-    if (run) send('\r')
+    // „lipeşte şi rulează" nu ocoleşte guardrail-ul: dacă o linie atinge o regulă, lipim fără
+    // Enter — verificarea de la Enter (sau dialogul de confirmare) decide apoi, ca la tastare
+    const hit = run ? guardedLine(text) : null
+    if (hit) setGuardMsg(t('session.pasteGuarded', { cmd: hit.slice(0, 70) }))
+    else if (run) send('\r')
     termRef.current?.focus()
   }
 

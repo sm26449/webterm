@@ -279,6 +279,22 @@ export async function withSecondFactor<T>(t: (k: string, v?: Record<string, stri
   }
 }
 
+/* Guardrail pe acţiunile din panouri (git care scrie, docker, services, /run): serverul răspunde
+   409 `run.guardConfirm` când o regulă `confirm` se potriveşte. Întrebăm omul (`ask` primeşte
+   pattern-ul regulii) şi retrimitem cu `confirmed: true`; refuzul întoarce null. `block` (403)
+   trece mai departe ca eroare obişnuită — errText îl traduce. */
+export async function withGuardConfirm<T>(ask: (pattern: string) => Promise<boolean>,
+                                          send: (confirmed: boolean) => Promise<T>): Promise<T | null> {
+  try {
+    return await send(false)
+  } catch (err) {
+    if (!(err instanceof ApiError) || err.code !== 'run.guardConfirm') throw err
+    const pattern = /\/(.*)\/\s*$/.exec(err.message)?.[1] ?? ''
+    if (!(await ask(pattern))) return null
+    return await send(true)
+  }
+}
+
 // Versiunea gateway-ului văzută la primul răspuns API. Când headerul se
 // schimbă (s-a făcut deploy cât aplicația era deschisă), anunțăm o singură
 // dată — App afișează bannerul „Versiune nouă — Reîncarcă". Fereastra PWA

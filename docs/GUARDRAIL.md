@@ -47,9 +47,10 @@ this browser pick up the new rules straight away.
 | `confirm` | Enter is held; a *Potentially dangerous command* dialog shows the line, with **Cancel (clear)** (focused by default) and **Run**. Escape = cancel. | One dialog for the whole run, **Run on all** to continue | `409 run.guardConfirm` unless the request carries `"confirmed": true` |
 | `block` | Enter is swallowed, Ctrl+U is sent to clear the line, and *Blocked by guardrail: …* shows for 4 s | Refused before dispatch: *Blocked by the guardrail* | `403 run.guardBlocked`, always — no flag overrides it |
 
-**The first matching rule wins**, in the order they are listed — on the client and on the
-server alike. A `block` rule placed *below* a `confirm` rule that also matches is never
-reached, and the command needs only a confirmation. Put your `block` rules first.
+**`block` rules win.** Every `block` rule is checked before any `confirm` rule, on the
+client and on the server alike, so the order of the list doesn't matter: a command that
+matches both is blocked. (Before 3.5.1 the first match in list order won, which let a broad
+`confirm` rule above a `block` rule turn the block into a mere confirmation.)
 
 Cancelling a confirmation in the terminal also clears the line (Ctrl+U), so a stray second
 Enter does not run it.
@@ -60,6 +61,7 @@ Enter does not run it.
 |---|---|---|
 | **Run on fleet** (Fleet console) | the browser before dispatch, **and** the server on each host's `/run` | yes, server-side |
 | **Automation tokens** (`run` scope → `POST /api/hosts/{id}/run`) | the server | yes, server-side |
+| **Panel actions** (since 3.5.2): Services start/stop/restart, Docker start/stop/restart, Git add/reset/restore/commit | the server, on the equivalent shell command (`systemctl stop nginx.service`, `docker restart web1`, `git -C /repo reset -- a.txt`) | yes, server-side; the panel asks you on a `confirm` rule |
 | **Commands typed in a terminal** | the browser, at Enter | only with shell integration, and only in the browser |
 
 **Server-side, on `/run`.** `POST /api/hosts/{id}/run` is a clean choke point, so the
@@ -69,8 +71,8 @@ gateway re-checks every command there regardless of the client: `block` → 403,
 yes". The fleet console sends it after asking you; a token caller sets it itself.
 
 **In a terminal, only with shell integration.** The gateway does not inspect the keystroke
-stream of a PTY. The check runs in the browser, when you press a plain **Enter** (no Ctrl,
-Alt, Meta or Shift): it reads the line you typed from the screen, from the end of the
+stream of a PTY. The check runs in the browser, when a key submits the line — **Enter**
+(also with Shift or Ctrl) or **Ctrl+J**: it reads the line you typed from the screen, from the end of the
 prompt (the OSC 133 `B` marker) to the cursor. Without
 [shell integration](SHELL-INTEGRATION.md) there is no prompt marker, so there is nothing to
 check and Enter passes straight through. Inside a full-screen program (vim, htop, less —
@@ -79,18 +81,18 @@ the alternate screen) the check is skipped too.
 **Why it's a safety net, not a barrier.** In the terminal the check is client-side and
 heuristic, so it is easy to step around, deliberately or not:
 
-- a key that submits the line without being a plain Enter (for example Ctrl+J in bash, or
-  Shift+Enter) is not checked;
-- pasted text that contains its own newline is sent as input, not as an Enter keypress;
+- multi-line pasted text is checked line by line: if any line matches a rule, the paste is
+  held back (paste the lines one at a time, so Enter checks each); "paste and run" from the
+  clipboard history pastes without the Enter in that case. Single-line pastes are checked
+  when you press Enter, like typing;
 - the line is read from the screen up to the cursor, so text to the right of the cursor,
   aliases, variables and scripts are invisible to it (`rm -rf "$DIR"` with `DIR=/` is not
   `rm -rf /`);
 - a host without shell integration is not covered at all;
 - anyone signed in can switch the guardrail off in Settings.
 
-Other features that run commands on a host build fixed commands of their own (the git
-panel's allowed subcommands, Docker start/stop/restart and logs, systemd services) and do
-**not** go through the guardrail.
+Read-only panel calls (git status/diff, Docker lists and logs, the services list) are not
+checked: they change nothing, and they run on every refresh.
 
 ## Writing patterns
 
@@ -142,6 +144,10 @@ Empty patterns are dropped silently. Patterns are trimmed and cut to 300 charact
   that command (it does not block or confirm it), and the skip is written to the audit log
   as principal `system:guardrail`, status `408`, with the rule's pattern. If you see those
   entries, simplify the rule.
+- **Patterns must be valid in both Python and JavaScript.** The server matches with Python
+  `re`, the terminal with the browser's `RegExp`. Settings refuses a pattern the browser
+  can't compile (e.g. `(?P<name>…)`), so a rule can't silently stop working in the terminal.
+  Prefer syntax common to both; `\A`/`\Z` compile in JS but mean something else there.
 - **A rule whose regex fails to compile on the server** (only possible if the stored
   setting was edited outside the UI) is ignored on `/run`, not treated as a match.
 - **`/run` commands are limited to 8000 characters**; longer commands are refused before
@@ -152,13 +158,16 @@ Empty patterns are dropped silently. Patterns are trimmed and cut to 300 charact
   refreshes immediately; another browser or device that already has WebTerm open keeps the
   rules it loaded until it reloads the app state. The fleet console always fetches the
   current rules before a run, and the server always uses the saved ones.
+- **Block rules win.** When a `block` and a `confirm` rule both match, the command is blocked,
+  whatever their order in the list (since 3.5.1).
 - **Turning it off** (`Check dangerous commands on Enter` unchecked, then Save) disables
-  every check: terminal, fleet console and the server-side `/run` check.
+  every check: terminal, fleet console, panel actions and the server-side `/run` check.
 
 ## Maintenance notes
 
 - Backend: `gateway/app/api.py` — `COMMAND_GUARD_DEFAULT`, `_load_command_guard`,
-  `_match_guard_rule`, `GET`/`POST /api/settings/command-guard`, enforcement in `host_run`;
+  `_match_guard_rule`, `_enforce_guard` (used by `host_run`, `host_git` writes, `docker_action`,
+  `service_action`), `GET`/`POST /api/settings/command-guard`;
   the time-budgeted matcher is `security.regex_search_budget` (`REGEX_BUDGET = 0.25`) in
   `gateway/app/security.py`. Stored in the `command_guard` setting as JSON.
 - Frontend: `matchCommandRule` and `pendingCommand` in `frontend/src/lib/commands.ts`; the

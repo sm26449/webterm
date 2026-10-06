@@ -117,6 +117,29 @@ async def main():
         check("/run: comandă inofensivă neatinsă de guardrail",
               "guardrail" not in r.text, r.text[:80])
 
+        # 3.5.2: acţiunile din panouri trec prin ACELAŞI guardrail, pe comanda echivalentă din shell
+        await db.execute("UPDATE app_settings SET value=? WHERE key='command_guard'",
+                         json.dumps({"enabled": True, "rules": [
+                             {"pattern": r"systemctl\s+stop", "action": "block"},
+                             {"pattern": r"docker\s+restart", "action": "confirm"},
+                             {"pattern": r"git\b.*\breset\b", "action": "confirm"}]}))
+        r = await c.post(f"/api/hosts/{hid}/services/action", json={"unit": "nginx.service", "action": "stop"})
+        check("services: Stop blocat de o regulă `systemctl stop` → 403",
+              r.status_code == 403 and "guardrail" in r.text, r.text[:80])
+        r = await c.post(f"/api/hosts/{hid}/services/action", json={"unit": "nginx.service", "action": "start"})
+        check("services: Start nu e atins", "guardrail" not in r.text, r.text[:80])
+        r = await c.post(f"/api/hosts/{hid}/docker/action", json={"container": "web1", "action": "restart"})
+        check("docker: Restart cere confirmare → 409 guardConfirm",
+              r.status_code == 409 and "guardrail" in r.text, r.text[:80])
+        r = await c.post(f"/api/hosts/{hid}/docker/action",
+                         json={"container": "web1", "action": "restart", "confirmed": True})
+        check("docker: cu confirmed:true trece de guardrail", "guardrail" not in r.text, r.text[:80])
+        r = await c.post(f"/api/hosts/{hid}/git", json={"args": ["reset", "--", "a.txt"], "cwd": "/srv/repo"})
+        check("git: o subcomandă care scrie trece prin guardrail → 409",
+              r.status_code == 409 and "guardrail" in r.text, r.text[:80])
+        r = await c.post(f"/api/hosts/{hid}/git", json={"args": ["status"], "cwd": "/srv/repo"})
+        check("git: citirile (status) nu sunt verificate", "guardrail" not in r.text, r.text[:80])
+
         # F-09, bariera de la SALVARE: regula patologică e refuzată cu 400 (fuzz cu acelaşi buget);
         # regulile implicite şi una polinomială (`.*.*=`) trec — bugetul nu respinge regex-uri reale.
         t0 = time.monotonic()
