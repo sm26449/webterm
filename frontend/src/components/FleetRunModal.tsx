@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from 'react'
 import { matchCommandRule } from '../lib/commands'
-import { errText, api, ensureStepup, isEphemeralHost, CommandGuard, Host } from '../lib/api'
+import { errText, api, ApiError, ensureStepup, isEphemeralHost, CommandGuard, Host } from '../lib/api'
 import { useI18n } from '../lib/i18n'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { useConfirm } from '../lib/confirm'
@@ -8,7 +8,8 @@ import { notifyError } from '../lib/notify'
 import { copyText } from '../lib/clipboard'
 
 type RunResult = {
-  status: 'running' | 'done' | 'error'
+  // queued = încă netrimis (dispatch limitat); cancelled = nu s-a rulat (Stop sau guardrail refuzat)
+  status: 'queued' | 'running' | 'done' | 'error' | 'cancelled'
   exit_code?: number | null
   timed_out?: boolean
   stdout?: string
@@ -32,7 +33,12 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
     [props.hosts],
   )
   const [phase, setPhase] = useState<'pick' | 'confirm' | 'running'>('pick')
-  const [selected, setSelected] = useState<Set<number>>(() => new Set(runnable.map((h) => h.id)))
+  // NICIUN host preselectat: o comandă pe flotă e o acţiune cu rază mare — „toţi" trebuie să fie
+  // o alegere explicită (butonul „Selectează tot (N)"), nu starea implicită peste care dai Enter
+  const [selected, setSelected] = useState<Set<number>>(() => new Set())
+  const [timeoutSec, setTimeoutSec] = useState(60)          // 1–300, plafonat şi de server
+  const stopRef = useRef(false)                             // Stop: nu mai trimitem hosturi noi
+  const [stopping, setStopping] = useState(false)
   const [command, setCommand] = useState('')
   // Comenzi fleet SALVATE, în localStorage (per-browser): declanşare manuală, zero stare în
   // gateway — aliniat cu „fără background always-on". Un cron în gateway ar fi fost scope creep.
@@ -70,45 +76,91 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
   const toggle = (id: number) =>
     setSelected((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n })
 
+  const timeoutOk = Number.isInteger(timeoutSec) && timeoutSec >= 1 && timeoutSec <= 300
+
   async function run() {
-    // Guardrail: serverul aplică acum regulile şi pe `/run` — `block` refuză, `confirm` cere
-    // un DA explicit. Îl întrebăm pe om AICI, o singură dată pentru toată flota, altfel ar
-    // primi un 409 pe fiecare host şi n-ar şti de ce.
+    // Guardrail: serverul aplică regulile şi pe `/run` — `block` refuză, `confirm` cere un DA
+    // explicit. Îl întrebăm pe om AICI, o singură dată pentru toată flota. `confirmed: true` pleacă
+    // DOAR dacă omul chiar a confirmat o regulă potrivită — înainte, un fetch eşuat al regulilor
+    // cădea pe „nicio regulă" şi trimitea totuşi `confirmed: true`, adică ocolea confirmarea serverului.
     const guard = await api<CommandGuard>('/api/settings/command-guard').catch(() => null)
     const rule = matchCommandRule(command.trim(), guard)
     if (rule?.action === 'block') {
       notifyError(t('fleet.guardBlockedTitle'), t('fleet.guardBlocked', { pattern: rule.pattern }))
       return
     }
-    const confirmed = rule ? await confirm({
+    const humanConfirmed = rule ? await confirm({
       title: t('fleet.guardConfirmTitle'), message: t('fleet.guardConfirm', { pattern: rule.pattern }),
       danger: true, confirmLabel: t('fleet.runOnAll'),
     }) : false
-    if (rule && !confirmed) return
+    if (rule && !humanConfirmed) return
+    // Dacă totuşi serverul răspunde 409 run.guardConfirm (reguli necunoscute aici), întrebăm O
+    // SINGURĂ dată pentru toată rularea (ca withGuardConfirm din lib/api.ts) — promisiunea e
+    // partajată, deci N hosturi care primesc 409 în paralel nu deschid N dialoguri.
+    let lateAnswer: Promise<boolean> | null = humanConfirmed ? Promise.resolve(true) : null
+    const askLate = (msg: string) => {
+      if (!lateAnswer) {
+        const pattern = /\/(.*)\/\s*$/.exec(msg)?.[1] ?? ''
+        lateAnswer = confirm({
+          title: t('fleet.guardConfirmTitle'), message: t('fleet.guardConfirm', { pattern }),
+          danger: true, confirmLabel: t('fleet.runOnAll'),
+        })
+      }
+      return lateAnswer
+    }
     // Pre-flight step-up: fiecare host cu require_2fa are nevoie de propria fereastră. Le deblocăm
-    // SERIAL aici (un prompt pe rând) ca dispatch-ul paralel de mai jos să nu declanşeze N ceremonii
+    // SERIAL aici (un prompt pe rând) ca dispatch-ul de mai jos să nu declanşeze N ceremonii
     // passkey simultan — sau, pe SSO, un redirect de pagină întreagă care ar omorî toată rularea.
     // Un host pentru care userul anulează step-up-ul e marcat „skipped", nu bombardat cu 403-uri.
     const skipped: Record<number, boolean> = {}
     for (const h of chosen.filter((x) => x.require_2fa)) {
       if (!(await ensureStepup(h.id))) skipped[h.id] = true
     }
-    const dispatch = chosen.filter((h) => !skipped[h.id])
+    const queue = chosen.filter((h) => !skipped[h.id])
+    stopRef.current = false
+    setStopping(false)
     setPhase('running')
     setResults(Object.fromEntries(chosen.map((h) => [h.id,
       skipped[h.id] ? { status: 'error', error: t('fleet.stepupSkipped') } as RunResult
-        : { status: 'running' } as RunResult])))
-    // o cerere PER host, în paralel; fiecare rând se completează când răspunde
-    await Promise.all(dispatch.map(async (h) => {
+        : { status: 'queued' } as RunResult])))
+    const body = (confirmed: boolean) =>
+      JSON.stringify({ command: command.trim(), timeout: timeoutSec, confirmed })
+    const runOne = async (h: Host) => {
+      setResults((prev) => ({ ...prev, [h.id]: { status: 'running' } }))
       try {
-        const r = await api<RunResult>(`/api/hosts/${h.id}/run`, {
-          method: 'POST', body: JSON.stringify({ command: command.trim(), timeout: 60, confirmed: true }),
-        })
+        let r: RunResult
+        try {
+          r = await api<RunResult>(`/api/hosts/${h.id}/run`, { method: 'POST', body: body(humanConfirmed) })
+        } catch (e) {
+          if (!(e instanceof ApiError) || e.code !== 'run.guardConfirm') throw e
+          if (!(await askLate(e.message))) {
+            setResults((prev) => ({ ...prev, [h.id]: { status: 'cancelled', error: t('guard.cancelled') } }))
+            return
+          }
+          r = await api<RunResult>(`/api/hosts/${h.id}/run`, { method: 'POST', body: body(true) })
+        }
         setResults((prev) => ({ ...prev, [h.id]: { ...r, status: 'done' } }))
       } catch (e) {
         setResults((prev) => ({ ...prev, [h.id]: { status: 'error', error: errText(e, t) || t('fleet.error') } }))
       }
-    }))
+    }
+    // Dispatch cu concurenţă limitată (nu toate deodată): altfel „Stop" n-ar avea ce opri —
+    // toate cererile ar fi deja plecate. O cerere trimisă NU poate fi anulată pe server; Stop
+    // doar nu mai trimite hosturi noi, iar cele rămase devin „nerulate".
+    const LIMIT = 6
+    let next = 0
+    const worker = async () => {
+      while (next < queue.length) {
+        const h = queue[next++]
+        if (stopRef.current) {
+          setResults((prev) => ({ ...prev, [h.id]: { status: 'cancelled', error: t('fleet.notRunStopped') } }))
+          continue
+        }
+        await runOne(h)
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(LIMIT, queue.length) }, worker))
+    setStopping(false)
   }
 
   const summary = useMemo(() => {
@@ -117,7 +169,8 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
       total: vals.length,
       ok: vals.filter((r) => r.status === 'done' && !r.timed_out && r.exit_code === 0).length,
       fail: vals.filter((r) => r.status === 'error' || r.timed_out || (r.status === 'done' && r.exit_code !== 0)).length,
-      running: vals.filter((r) => r.status === 'running').length,
+      running: vals.filter((r) => r.status === 'running' || r.status === 'queued').length,
+      cancelled: vals.filter((r) => r.status === 'cancelled').length,
     }
   }, [results])
 
@@ -127,6 +180,8 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
       const r = results[h.id]
       const badge = !r ? '—'
         : r.status === 'error' ? t('fleet.reportError', { error: r.error ?? '' })
+        : r.status === 'cancelled' ? (r.error ?? t('fleet.cancelledBadge'))
+        : r.status === 'queued' || r.status === 'running' ? t('fleet.running')
         : r.timed_out ? 'TIMEOUT'
         : `exit ${r.exit_code}`
       md += `## ${h.name} — ${badge}\n\n`
@@ -143,6 +198,8 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
   const rowState = (r?: RunResult) => {
     // culorile prin clasele semantice theme-aware (tokenii sky/rose/emerald-400 cădeau sub AA pe Aurora)
     if (!r || r.status === 'running') return { dot: 'bg-sky-500 dot-live', badge: t('fleet.running'), cls: 'wt-accent' }
+    if (r.status === 'queued') return { dot: 'bg-slate-600', badge: t('fleet.queued'), cls: 'text-slate-400' }
+    if (r.status === 'cancelled') return { dot: 'bg-slate-600', badge: t('fleet.cancelledBadge'), cls: 'text-slate-400' }
     if (r.status === 'error') return { dot: 'bg-rose-500', badge: r.error || t('fleet.error'), cls: 'wt-danger' }
     if (r.timed_out) return { dot: 'bg-rose-500', badge: `timeout · ${r.duration}s`, cls: 'wt-danger' }
     const ok = r.exit_code === 0
@@ -150,7 +207,8 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
   }
   const oneLine = (r?: RunResult) => {
     if (!r || r.status === 'running') return t('fleet.connecting')
-    if (r.status === 'error') return r.error || t('fleet.error')
+    if (r.status === 'queued') return t('fleet.queuedLine')
+    if (r.status === 'error' || r.status === 'cancelled') return r.error || t('fleet.error')
     const body = (r.stdout || r.stderr || '').trim().split('\n').filter(Boolean)
     return body.length ? body[body.length - 1] : t('fleet.noOutput')
   }
@@ -167,6 +225,7 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
               <span className="wt-good"> ✓{summary.ok}</span>
               <span className="wt-danger"> ✕{summary.fail}</span>
               {summary.running > 0 && <span className="wt-accent"> ●{summary.running}</span>}
+              {summary.cancelled > 0 && <span className="text-slate-400"> ⊘{summary.cancelled}</span>}
             </span>
           )}
           <button onClick={props.onClose} aria-label={t('fleet.close')}
@@ -184,7 +243,7 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
                   <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">{t('fleet.hostsCount', { sel: chosen.length, total: runnable.length })}</span>
                   <button onClick={() => setSelected(new Set(chosen.length === runnable.length ? [] : runnable.map((h) => h.id)))}
                     className="text-xs wt-link hover:underline">
-                    {chosen.length === runnable.length ? t('fleet.deselectAll') : t('fleet.allOnline')}
+                    {chosen.length === runnable.length ? t('fleet.deselectAll') : t('fleet.selectAllN', { n: runnable.length })}
                   </button>
                 </div>
                 <div className="flex flex-wrap gap-1.5">
@@ -223,6 +282,15 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
                 <textarea value={command} onChange={(e) => setCommand(e.target.value)} rows={3} autoFocus spellCheck={false}
                   placeholder={t('fleet.commandPlaceholder')} aria-label={t('fleet.command')}
                   className="rounded-lg bg-ink-800 px-3 py-2 font-mono text-sm text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500" />
+                <div className="flex flex-wrap items-center gap-2">
+                  <label htmlFor="fleet-timeout" className="text-xs text-slate-400">{t('fleet.timeoutLabel')}</label>
+                  <input id="fleet-timeout" type="number" min={1} max={300} step={1} inputMode="numeric"
+                    value={Number.isNaN(timeoutSec) ? '' : timeoutSec}
+                    onChange={(e) => setTimeoutSec(e.target.value === '' ? NaN : Math.trunc(Number(e.target.value)))}
+                    aria-invalid={!timeoutOk}
+                    className="w-20 rounded bg-ink-800 px-2 py-0.5 font-mono text-xs text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500" />
+                  <span className={`text-[11px] ${timeoutOk ? 'text-slate-500' : 'wt-danger'}`}>{t('fleet.timeoutRange')}</span>
+                </div>
                 <p className="text-xs text-slate-500">{t('fleet.commandHint')}</p>
               </>
             )}
@@ -234,6 +302,7 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
           <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4">
             <div className="wt-warn flex items-center gap-2 font-medium">⚠ {t('fleet.youRunOn')} {t('fleet.hostCount', { count: chosen.length })}</div>
             <div className="rounded-lg bg-ink-800/60 px-3 py-2 font-mono text-sm text-slate-200">$ {command.trim()}</div>
+            <div className="text-xs text-slate-500">{t('fleet.timeoutSummary', { n: timeoutSec })}</div>
             <div className="flex flex-wrap gap-1.5">
               {chosen.map((h) => <span key={h.id} className="rounded bg-ink-800 px-2 py-0.5 font-mono text-xs text-slate-400 ring-1 ring-ink-700">{h.name}</span>)}
             </div>
@@ -271,7 +340,7 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
 
         <footer className="flex items-center gap-2 border-t border-ink-800 px-4 py-3">
           {phase === 'pick' && (
-            <button disabled={chosen.length === 0 || !command.trim()} onClick={() => setPhase('confirm')}
+            <button disabled={chosen.length === 0 || !command.trim() || !timeoutOk} onClick={() => setPhase('confirm')}
               className="rounded-lg bg-sky-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-40">
               {t('fleet.continue')}
             </button>
@@ -293,7 +362,16 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
               </button>
               <button disabled={summary.running > 0} onClick={() => { setPhase('pick'); setResults({}); setExpanded(null) }}
                 className="rounded-lg px-3 py-1.5 text-sm text-slate-400 hover:bg-ink-800 disabled:opacity-40">{t('fleet.newRun')}</button>
-              <span className="ml-auto text-xs text-slate-500">{summary.running > 0 ? t('fleet.running') : t('fleet.done')}</span>
+              {summary.running > 0 && (
+                <button disabled={stopping}
+                  onClick={() => { stopRef.current = true; setStopping(true) }}
+                  className="rounded-lg px-3 py-1.5 text-sm wt-danger ring-1 ring-ink-700 hover:bg-ink-800 disabled:opacity-60">
+                  {stopping ? t('fleet.stopping') : t('fleet.stop')}
+                </button>
+              )}
+              <span role="status" className="ml-auto text-xs text-slate-500">
+                {summary.running > 0 ? (stopping ? t('fleet.stoppingHint') : t('fleet.running')) : t('fleet.done')}
+              </span>
             </>
           )}
         </footer>

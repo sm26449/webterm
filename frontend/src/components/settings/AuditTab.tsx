@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
-import { api } from '../../lib/api'
+import { api, errText } from '../../lib/api'
 import { useI18n } from '../../lib/i18n'
 import { fmtTs } from '../../lib/tz'
 import { field, heading } from './ui'
+import LoadFailed from '../LoadFailed'
 
 // Jurnalul de audit (cine / ce / când / de la ce IP, pe fiecare acţiune care schimbă ceva).
 // Extras din SettingsModal ca tab de sine stătător: îşi ţine propria stare şi se încarcă la
@@ -21,6 +22,9 @@ export default function AuditTab() {
   const [auditBusy, setAuditBusy] = useState(false)
   const [auditEnd, setAuditEnd] = useState(false)   // ultima pagină primită era incompletă
   const [auditDays, setAuditDays] = useState(0)
+  // eşecul are starea lui: înainte catch-ul înghiţea eroarea şi lista rămânea goală, fără
+  // niciun semn — la un jurnal de AUDIT, „gol" pe un fetch picat e exact minciuna de evitat
+  const [auditErr, setAuditErr] = useState<{ msg: string; reset: boolean } | null>(null)
   const seq = useRef(0)
 
   // `reset` = filtre noi (pornim de la cel mai recent); altfel paginăm în trecut de la ts-ul
@@ -31,6 +35,7 @@ export default function AuditTab() {
   async function loadAudit(reset: boolean) {
     const my = ++seq.current
     setAuditBusy(true)
+    setAuditErr(null)
     try {
       const last = audit && audit.length ? audit[audit.length - 1] : null
       const before = reset || !last ? 0 : last.ts
@@ -43,7 +48,10 @@ export default function AuditTab() {
       setAuditDays(r.retention_days)
       setAuditEnd(r.entries.length < AUDIT_PAGE)
       setAudit((cur) => (reset ? r.entries : [...(cur ?? []), ...r.entries]))
-    } catch { /* jurnalul e informativ — o eroare nu blochează Setările */ }
+    } catch (e) {
+      // jurnalul e informativ — o eroare nu blochează Setările, dar se VEDE (cu Reîncearcă)
+      if (my === seq.current) { setAuditErr({ msg: errText(e, t), reset }); if (reset) setAudit(null) }
+    }
     if (my === seq.current) setAuditBusy(false)
   }
 
@@ -98,7 +106,15 @@ export default function AuditTab() {
         ))}
       </ul>
 
-      {audit !== null && audit.length === 0 && (
+      {audit === null && !auditErr && (
+        <p className="mt-3 text-xs text-slate-500">{t('settings.audit.loading')}</p>
+      )}
+      {auditErr && (
+        <div className="mt-3 rounded-lg ring-1 ring-ink-700">
+          <LoadFailed compact message={auditErr.msg} onRetry={() => loadAudit(auditErr.reset)} />
+        </div>
+      )}
+      {!auditErr && audit !== null && audit.length === 0 && (
         <p className="mt-3 text-xs text-slate-500">{t('settings.audit.empty')}</p>
       )}
       <div className="mt-3 flex items-center gap-3">

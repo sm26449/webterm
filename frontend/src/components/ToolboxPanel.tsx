@@ -7,41 +7,44 @@ import { useDrawer } from '../lib/useDrawer'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { TerminalPromptIcon, PlusIcon, TrashIcon, PencilIcon, CopyIcon } from './Icons'
 import HelpTip from './HelpTip'
+import LoadFailed from './LoadFailed'
 import { fmtTs, getTimezone, uiLocale } from '../lib/tz'
 
 // Bibliotecă de reţete built-in (client-side): comenzi comune pe categorii, cu {placeholder}-e.
 // Acţiunea e Copy (universal — merge şi din pagina hostului, şi din sesiune); lipeşti în terminal.
-const LIBRARY: { cat: string; items: { label: string; cmd: string }[] }[] = [
+// Etichetele trec prin catalog (en/ro) — înainte erau literale româneşti şi la userii EN.
+type Tr = (k: string, v?: Record<string, string | number>) => string
+const library = (t: Tr): { cat: string; items: { label: string; cmd: string }[] }[] => [
   { cat: 'git', items: [
-    { label: 'status', cmd: 'git status' },
-    { label: 'log grafic', cmd: 'git log --oneline --graph --decorate -20' },
-    { label: 'pull --rebase', cmd: 'git pull --rebase' },
-    { label: 'branch nou', cmd: 'git checkout -b {branch}' },
-    { label: 'stash', cmd: 'git stash' },
+    { label: t('toolbox.lib.gitStatus'), cmd: 'git status' },
+    { label: t('toolbox.lib.gitLog'), cmd: 'git log --oneline --graph --decorate -20' },
+    { label: t('toolbox.lib.gitPull'), cmd: 'git pull --rebase' },
+    { label: t('toolbox.lib.gitBranch'), cmd: 'git checkout -b {branch}' },
+    { label: t('toolbox.lib.gitStash'), cmd: 'git stash' },
   ] },
   { cat: 'docker', items: [
-    { label: 'ps', cmd: 'docker ps -a' },
-    { label: 'logs -f', cmd: 'docker logs -f {container}' },
-    { label: 'shell în container', cmd: 'docker exec -it {container} sh' },
-    { label: 'compose up', cmd: 'docker compose up -d' },
-    { label: 'prune', cmd: 'docker system prune -f' },
+    { label: t('toolbox.lib.dockerPs'), cmd: 'docker ps -a' },
+    { label: t('toolbox.lib.dockerLogs'), cmd: 'docker logs -f {container}' },
+    { label: t('toolbox.lib.dockerShell'), cmd: 'docker exec -it {container} sh' },
+    { label: t('toolbox.lib.dockerUp'), cmd: 'docker compose up -d' },
+    { label: t('toolbox.lib.dockerPrune'), cmd: 'docker system prune -f' },
   ] },
   { cat: 'systemd', items: [
-    { label: 'status', cmd: 'systemctl status {service}' },
-    { label: 'restart', cmd: 'systemctl restart {service}' },
-    { label: 'jurnal live', cmd: 'journalctl -u {service} -f' },
-    { label: 'failed units', cmd: 'systemctl --failed --no-legend --no-pager' },
-    { label: 'timers', cmd: 'systemctl list-timers --all --no-pager' },
+    { label: t('toolbox.lib.sdStatus'), cmd: 'systemctl status {service}' },
+    { label: t('toolbox.lib.sdRestart'), cmd: 'systemctl restart {service}' },
+    { label: t('toolbox.lib.sdJournal'), cmd: 'journalctl -u {service} -f' },
+    { label: t('toolbox.lib.sdFailed'), cmd: 'systemctl --failed --no-legend --no-pager' },
+    { label: t('toolbox.lib.sdTimers'), cmd: 'systemctl list-timers --all --no-pager' },
   ] },
   { cat: 'system', items: [
-    { label: 'disc', cmd: 'df -h' },
-    { label: 'mărimi dir', cmd: 'du -sh * | sort -h' },
-    { label: 'memorie', cmd: 'free -h' },
-    { label: 'porturi', cmd: 'ss -tulnp' },
+    { label: t('toolbox.lib.sysDisk'), cmd: 'df -h' },
+    { label: t('toolbox.lib.sysDirSizes'), cmd: 'du -sh * | sort -h' },
+    { label: t('toolbox.lib.sysMemory'), cmd: 'free -h' },
+    { label: t('toolbox.lib.sysPorts'), cmd: 'ss -tulnp' },
   ] },
   { cat: 'db', items: [
-    { label: 'pg_dump', cmd: 'pg_dump -U {user} {db} > {db}.sql' },
-    { label: 'mysqldump', cmd: 'mysqldump -u {user} -p {db} > {db}.sql' },
+    { label: t('toolbox.lib.dbPgDump'), cmd: 'pg_dump -U {user} {db} > {db}.sql' },
+    { label: t('toolbox.lib.dbMysqlDump'), cmd: 'mysqldump -u {user} -p {db} > {db}.sql' },
   ] },
 ]
 type Hist = { id: number; command: string; cwd: string; exit_code: number | null; created: number }
@@ -101,6 +104,9 @@ export default function ToolboxPanel(props: {
   const [tab, setTab] = useState<'connections' | 'sshkeys' | 'library' | 'history'>('connections')
   const [q, setQ] = useState('')                          // filtru pt. Library/History
   const [hist, setHist] = useState<Hist[] | null>(null)   // istoricul de comenzi al hostului
+  // eşecul de încărcare e o stare a lui, NU lista goală (altfel „n-ai nimic" minte)
+  const [histErr, setHistErr] = useState<string | null>(null)
+  const [connErr, setConnErr] = useState<string | null>(null)
   const copy = (cmd: string) => { copyText(cmd) }         // copyText afişează toast-ul standard
 
   // ── SSH keys (chei de deploy host→host): privata trăieşte pe hostul sursă; aici doar
@@ -216,9 +222,9 @@ export default function ToolboxPanel(props: {
   const loadHist = useCallback(async () => {
     try {
       const r = await api<Hist[]>(`/api/history?host_id=${props.host.id}&limit=200`)
-      setHist(r)
-    } catch { setHist([]) }
-  }, [props.host.id])
+      setHistErr(null); setHist(r)
+    } catch (e) { setHistErr(errText(e, t)); setHist([]) }
+  }, [props.host.id, t])
   useEffect(() => { if (tab === 'history' && hist === null) loadHist() }, [tab, hist, loadHist])
 
   // Comenzi proprii în Library: NU un store nou — refolosim snippet-urile existente
@@ -264,9 +270,10 @@ export default function ToolboxPanel(props: {
       // `withStepup` panoul arăta doar un 403 sec, fără să deschidă fereastra de passkey
       const r = await withStepup(props.host.id, () =>
         api<{ connections: Connection[] }>(`/api/hosts/${props.host.id}/connections`))
-      setRows(r.connections)
+      setConnErr(null); setRows(r.connections)
     } catch (e) {
-      setError(errText(e, t) || (e instanceof ApiError ? e.message : t('toolbox.error'))); setRows([])
+      // eşecul de încărcare are starea lui (LoadFailed + Reîncearcă) — nu banner + „gol"
+      setConnErr(errText(e, t) || (e instanceof ApiError ? e.message : t('toolbox.error'))); setRows([])
     }
   }, [props.host.id, t])
   useEffect(() => { load() }, [load])
@@ -338,6 +345,8 @@ export default function ToolboxPanel(props: {
           {/* ── CONNECTIONS (Databases) — grilă de carduri ── */}
           {tab === 'connections' && (rows === null ? (
             <div className="p-4 text-center text-xs text-slate-500">{t('toolbox.loading')}</div>
+          ) : connErr !== null ? (
+            <LoadFailed message={connErr} onRetry={() => { setRows(null); load() }} />
           ) : rows.length === 0 ? (
             <div className="p-6 text-center text-xs text-slate-500">
               <span className="inline-flex items-center gap-2">{t('toolbox.empty')}<HelpTip id="toolbox" /></span><br />
@@ -604,7 +613,7 @@ export default function ToolboxPanel(props: {
                 </div>
               )
             })()}
-            {LIBRARY.map((grp) => {
+            {library(t).map((grp) => {
             const items = grp.items.filter((it) => !q ||
               it.cmd.toLowerCase().includes(q.toLowerCase()) || it.label.toLowerCase().includes(q.toLowerCase()) ||
               grp.cat.includes(q.toLowerCase()))
@@ -629,6 +638,8 @@ export default function ToolboxPanel(props: {
           {/* ── HISTORY (comenzile hostului, din OSC 133; Copy) ── */}
           {tab === 'history' && (hist === null ? (
             <div className="p-4 text-center text-xs text-slate-500">{t('toolbox.loading')}</div>
+          ) : histErr !== null ? (
+            <LoadFailed message={histErr} onRetry={() => { setHistErr(null); setHist(null) }} />
           ) : (() => {
             const items = hist.filter((h) => !q || h.command.toLowerCase().includes(q.toLowerCase()))
             if (!items.length) return <div className="p-6 text-center text-xs text-slate-500">{t('toolbox.histEmpty')}</div>

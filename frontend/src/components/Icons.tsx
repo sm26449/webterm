@@ -334,3 +334,22 @@ export const ExternalLinkIcon = () => (
     <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
   </svg>
 )
+
+// „Redenumeşte": casetă de nume cu cursor de text (I-beam) — distinct de PencilIcon,
+// care rămâne „editează conţinutul"
+export const RenameIcon = ({ size = 12 }: { size?: number }) => (
+  <Icon size={size}>
+    <path d="M14 7H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h10" />
+    <path d="M20 7a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2" />
+    <path d="M17 4v16" />
+    <path d="M15 4h4" />
+    <path d="M15 20h4" />
+  </Icon>
+)
+
+// scut mic pentru rândul de host care cere 2FA (ShieldIcon are dimensiunea fixă de 16)
+export const ShieldSmallIcon = ({ size = 12 }: { size?: number }) => (
+  <Icon size={size}>
+    <path d="M12 3 5 6v5c0 4.6 3 7.6 7 9 4-1.4 7-4.4 7-9V6l-7-3Z" />
+  </Icon>
+)

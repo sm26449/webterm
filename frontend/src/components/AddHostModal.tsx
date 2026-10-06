@@ -507,7 +507,7 @@ export default function AddHostModal(props: {
                     </div>
                   ) : (
                     <label className="block">
-                      <span className={label}>{t('addhost.password')}{connType === 'telnet' ? ' Telnet' : ' SSH'}</span>
+                      <span className={label}>{connType === 'telnet' ? t('addhost.passwordTelnet') : t('addhost.passwordSsh')}</span>
                       <input type="password" placeholder="•••••••" value={secret}
                         onChange={(e) => setSecret(e.target.value)} className={field} autoComplete="new-password" />
                     </label>

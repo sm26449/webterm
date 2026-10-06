@@ -51,7 +51,6 @@ flowchart TB
     A -.->|"telnet bastion<br/><i>from inside the network</i>"| TEL
 
     SSHH --> T
-    SSHH --> FS
     SSHH --> FWD
     TEL --> T
 ```

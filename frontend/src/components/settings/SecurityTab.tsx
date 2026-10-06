@@ -1,7 +1,7 @@
 import { startRegistration } from '@simplewebauthn/browser'
 import qrcode from 'qrcode-generator'
 import { FormEvent, useEffect, useRef, useState } from 'react'
-import { errText, api, CommandGuard, DeployKeyPolicy, withSecondFactor as withSecondFactorT } from '../../lib/api'
+import { errText, api, CommandGuard, DeployKeyPolicy, Host, withSecondFactor as withSecondFactorT } from '../../lib/api'
 import { useI18n } from '../../lib/i18n'
 import { useConfirm } from '../../lib/confirm'
 import { fmtTs } from '../../lib/tz'
@@ -10,6 +10,7 @@ import { copyText } from '../../lib/clipboard'
 import { downloadBlob, field, heading } from './ui'
 import { askSecret } from '../../lib/secretPrompt'
 import HelpTip from '../HelpTip'
+import LoadFailed from '../LoadFailed'
 
 interface Passkey {
   id: number
@@ -139,7 +140,12 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
   type WebSess = { id: number; label: string; created: number; last_seen: number
                    expires: number; new_device: boolean; current: boolean }
   const [devices, setDevices] = useState<WebSess[] | null>(null)
-  const loadDevices = () => api<WebSess[]>('/api/account/sessions').then(setDevices).catch(() => setDevices([]))
+  // eşecul de încărcare are starea lui: „niciun alt dispozitiv" pe un fetch picat ar linişti
+  // exact omul care verifică dacă cineva i-a furat sesiunea
+  const [devicesErr, setDevicesErr] = useState<string | null>(null)
+  const loadDevices = () => api<WebSess[]>('/api/account/sessions')
+    .then((r) => { setDevicesErr(null); setDevices(r) })
+    .catch((e) => { setDevicesErr(errText(e, t)); setDevices([]) })
 
   // 2FA (TOTP)
   const [totpEnabled, setTotpEnabled] = useState(false)
@@ -148,6 +154,7 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
   const [enrollPw, setEnrollPw] = useState('')   // M1: re-auth pt. înrolarea 2FA (setup + activate)
   const [activateCode, setActivateCode] = useState('')
   const [recoveryCodes, setRecoveryCodes] = useState<string[] | null>(null)
+  const [codesCopied, setCodesCopied] = useState(false)
   const [pendingAction, setPendingAction] = useState<'disable' | 'regen' | null>(null)
   const [actionPw, setActionPw] = useState('')
 
@@ -373,6 +380,22 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
   const withSecondFactor = <T,>(send: (extra: object) => Promise<T>) => withSecondFactorT(t, send)
 
   async function remove(id: number) {
+    // Consecinţa întâi. Ultimul passkey: hosturile cu 2FA cad pe următoarea treaptă a scării de
+    // step-up (TOTP dacă e activ, altfel parola). Penultimul: rămâi cu unul singur — dacă vreun
+    // host cere 2FA, refolosim avertismentul de blocare (`singlePasskeyWarning`).
+    if (passkeys.length === 1) {
+      if (!(await confirm({
+        title: t('settings.lastPasskeyTitle'),
+        message: totpEnabled ? t('settings.lastPasskeyWarnTotp') : t('settings.lastPasskeyWarnPassword'),
+        danger: true, confirmLabel: t('settings.delete'),
+      }))) return
+    } else if (passkeys.length === 2) {
+      const hosts = await api<Host[]>('/api/hosts').catch(() => [] as Host[])
+      if (hosts.some((h) => h.require_2fa) && !(await confirm({
+        title: t('settings.lastPasskeyTitle'), message: t('settings.singlePasskeyWarning'),
+        danger: true, confirmLabel: t('settings.delete'),
+      }))) return
+    }
     // M1: scoaterea unui factor rezistent la phishing e schimbare de credențiale — cere parola.
     const password = await askSecret(t('settings.passkeyRemovePrompt'))
     if (password === null) return
@@ -394,6 +417,10 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
       <p className="mt-1 text-xs text-slate-500">{t('settings.devicesHint')}</p>
       {devices === null ? (
         <div className="mt-2 text-xs text-slate-500">{t('settings.loading')}</div>
+      ) : devicesErr !== null ? (
+        <div className="mt-2 rounded-lg ring-1 ring-ink-700">
+          <LoadFailed compact message={devicesErr} onRetry={() => { setDevices(null); loadDevices() }} />
+        </div>
       ) : devices.length === 0 ? (
         <div className="mt-2 text-xs text-slate-500">{t('settings.devicesNone')}</div>
       ) : (
@@ -625,7 +652,16 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
               {t('settings.totp.regen')}
             </button>
             <button
-              onClick={() => { setPendingAction('disable'); setActionPw('') }}
+              onClick={async () => {
+                // consecinţa ÎNAINTE de parolă: scara de step-up e passkey → SSO → TOTP → parolă,
+                // deci fără passkey hosturile cu 2FA rămân doar pe parolă (niciun al doilea factor)
+                if (!(await confirm({
+                  title: t('settings.totpDisableTitle'),
+                  message: passkeys.length === 0 ? t('settings.totpDisableWarnNoPasskey') : t('settings.totpDisableWarn'),
+                  danger: true, confirmLabel: t('settings.totp.disable'),
+                }))) return
+                setPendingAction('disable'); setActionPw('')
+              }}
               className="rounded-lg bg-ink-800 px-3 py-1.5 text-sm wt-danger ring-1 ring-ink-700 hover:bg-ink-700"
             >
               {t('settings.totp.disable')}
@@ -731,12 +767,32 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
               <span key={c} className="select-all rounded bg-ink-900 px-2 py-1 text-center">{c}</span>
             ))}
           </div>
-          <button
-            onClick={() => setRecoveryCodes(null)}
-            className="mt-3 rounded-lg bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700"
-          >
-            {t('settings.totp.savedThem')}
-          </button>
+          {/* Copy + .txt: altfel singura cale era selecţia manuală, cod cu cod */}
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button type="button"
+              onClick={() => copyText(recoveryCodes.join('\n')).then((okc) => { if (okc) { setCodesCopied(true); setTimeout(() => setCodesCopied(false), 1500) } })}
+              className="rounded-lg bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700">
+              {codesCopied ? t('settings.cloud.copied') : t('settings.totp.copyCodes')}
+            </button>
+            <button type="button"
+              onClick={() => {
+                const blob = new Blob([recoveryCodes.join('\n') + '\n'], { type: 'text/plain' })
+                const url = URL.createObjectURL(blob)
+                const a = document.createElement('a')
+                a.href = url; a.download = 'webterm-recovery-codes.txt'
+                document.body.appendChild(a); a.click(); a.remove()
+                setTimeout(() => URL.revokeObjectURL(url), 1000)
+              }}
+              className="rounded-lg bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700">
+              {t('settings.totp.downloadCodes')}
+            </button>
+            <button
+              onClick={() => setRecoveryCodes(null)}
+              className="rounded-lg bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700"
+            >
+              {t('settings.totp.savedThem')}
+            </button>
+          </div>
         </div>
       )}
 

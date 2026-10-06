@@ -41,6 +41,7 @@ export default function DockerPanel(props: {
   const [kind, setKind] = useState<Kind>('containers')
   const [rows, setRows] = useState<Row[] | null>(null)
   const [error, setError] = useState('')
+  const [note, setNote] = useState('')   // notă neutră (guardrail anulat) — nu eroare
   const [denied, setDenied] = useState(false)   // userul agentului nu e în grupul docker → card de remediere
   const [copied, setCopied] = useState('')      // care din comenzile de remediere tocmai s-a copiat
   const [busy, setBusy] = useState('')          // id-ul containerului pe care rulează o acţiune
@@ -93,11 +94,14 @@ export default function DockerPanel(props: {
       message: t(act === 'stop' ? 'docker.confirmStop' : 'docker.confirmRestart', { name: name || id.slice(0, 12) }),
       confirmLabel: t('docker.' + act), danger: true,
     }))) return
-    setBusy(id); setError('')
+    setBusy(id); setError(''); setNote('')
     try {
-      await withStepup(props.host.id, () => withGuardConfirm((pattern) => confirm({ title: t('guard.confirmTitle'), message: t('guard.confirmMsg', { pattern }), danger: true, confirmLabel: t('guard.confirmRun') }),
+      // null = omul a refuzat confirmarea guardrail-ului: nimic nu s-a rulat — notă neutră,
+      // nu tăcere (înainte panoul nu spunea nimic, ca şi cum acţiunea ar fi mers)
+      const r = await withStepup(props.host.id, () => withGuardConfirm((pattern) => confirm({ title: t('guard.confirmTitle'), message: t('guard.confirmMsg', { pattern }), danger: true, confirmLabel: t('guard.confirmRun') }),
         (confirmed) => api(`/api/hosts/${props.host.id}/docker/action`,
           { method: 'POST', body: JSON.stringify({ container: id, action: act, confirmed }) })))
+      if (r === null) { setNote(t('guard.cancelled')); return }
       await load(kind)
     } catch (e) {
       setError(errText(e, t) || t('docker.error'))
@@ -147,6 +151,7 @@ export default function DockerPanel(props: {
       {tabs}
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
         {error && <div className="mb-2 rounded-lg bg-ink-800 px-3 py-2 text-xs wt-warn">{error}</div>}
+        {note && !error && <div role="status" className="mb-2 rounded-lg bg-ink-800/60 px-3 py-2 text-xs text-slate-400">{note}</div>}
 
         {/* userul agentului nu e în grupul docker → remediere clară, nu un mesaj mort.
             (gateway-ul a încercat deja `sudo -n` transparent; dacă vezi asta, nu e nici în grup

@@ -212,7 +212,8 @@ export default function DiagnosticModal(props: { host: Host; onClose: () => void
           <h2 className="font-semibold">🩺 {t('diag.title')} · {props.host.name}</h2>
           <div className="flex items-center gap-3">
             <span className={`text-xs ${diag?.online ? 'wt-good' : 'wt-danger'}`}>
-              {diag ? (diag.online ? `● ${t('diag.stateOnline')}` : `● ${t('diag.stateOffline')}`) : ''}
+              {/* glifa (●/○) e deja în textul tradus — nu o mai prefixăm a doua oară */}
+              {diag ? (diag.online ? t('diag.stateOnline') : t('diag.stateOffline')) : ''}
             </span>
             <button onClick={props.onClose} aria-label={t('diag.close')}
               className="wt-touch grid place-items-center rounded-md px-2 py-1 text-slate-400 hover:bg-ink-800">✕</button>

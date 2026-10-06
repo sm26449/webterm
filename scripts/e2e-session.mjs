@@ -948,6 +948,8 @@ try {
   const fleet = page.locator('div[aria-label="Run across multiple hosts"]')
   check('modalul de rulare pe flotă se deschide', await visible(fleet))
   await fleet.locator('textarea[aria-label="Command"]').fill('echo FLEET_OK')
+  // niciun host nu e preselectat (3.5.3): „Select all (N)" e o alegere explicită
+  await fleet.getByRole('button', { name: /^Select all/ }).click()
   await fleet.getByRole('button', { name: /Continue/ }).click()
   await fleet.getByRole('button', { name: /Run on \d+ host/ }).click()
   await page.waitForTimeout(3500)

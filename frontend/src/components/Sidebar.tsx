@@ -9,7 +9,7 @@ import { useFocusTrap } from '../lib/useFocusTrap'
 import InstallCommand from './InstallCommand'
 import { hostColor, reachState } from '../lib/host'
 import { allSchemes, hostSchemeRaw, setHostScheme } from '../lib/termtheme'
-import { ActivityIcon, CloseIcon, CollapseIcon, FilesIcon, FolderMoveIcon, GearIcon, KeyIcon, LogoMark, MoreIcon, NoteIcon, PlusIcon, PowerIcon, RefreshIcon, SearchIcon, ServerIcon, TerminalPromptIcon } from './Icons'
+import { ActivityIcon, CloseIcon, CollapseIcon, FilesIcon, FolderMoveIcon, GearIcon, KeyIcon, LogoMark, MoreIcon, NoteIcon, PlusIcon, PowerIcon, RefreshIcon, SearchIcon, ServerIcon, ShieldSmallIcon, TerminalPromptIcon } from './Icons'
 import { fmt } from '../lib/shortcuts'
 import { setHostMuted, updatesSignal, useUpdatesPref } from '../lib/updatesPref'
 
@@ -401,6 +401,16 @@ export default function Sidebar(props: {
                   {' — '}{reach === 'online' ? t('sidebar.stateOnline') : reach === 'ondemand' ? t('dashboard.onDemandConnect') : t('sidebar.stateOffline')}
                 </span>
               </button>
+              {/* hostul cere 2FA (step-up) la conectare: semnal mic, permanent — altfel afli abia
+                  când ţi se cere codul. Textul stă în aria-label/title (role=img), nu doar culoare. */}
+              {!!host.require_2fa && (
+                <span role="img"
+                  title={t('sidebar.require2faBadge')}
+                  aria-label={t('sidebar.require2faBadgeAria', { name: host.name })}
+                  className="wt-good shrink-0 leading-none opacity-80">
+                  <ShieldSmallIcon />
+                </span>
+              )}
               {liveCount > 0 && (
                 <span className="shrink-0 rounded-full bg-emerald-500/15 px-1.5 text-[10px] font-semibold wt-good"
                   title={t('sidebar.liveSessions', { count: liveCount })}>
@@ -760,8 +770,13 @@ export default function Sidebar(props: {
 
       <div className="flex-1 overflow-y-auto">
         {props.hosts.length === 0 && (
-          <div className="p-4 text-sm text-slate-500">
-            {t('sidebar.noHostsYet')}
+          <div className="space-y-3 p-4 text-sm text-slate-500">
+            <p>{t('sidebar.noHostsYet')}</p>
+            {/* CTA vizibil: butonul din header e doar un „+" fără text, uşor de ratat */}
+            <button type="button" onClick={() => setShowAdd(true)}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-700">
+              <PlusIcon /> {t('nav.addHost')}
+            </button>
           </div>
         )}
         {(() => {
@@ -876,8 +891,10 @@ export default function Sidebar(props: {
           {hostsOnline}/{props.hosts.length} {t('nav.statusBarHosts')}
         </span>
         {newVersion && (
-          <span className="wt-warn ml-auto shrink-0 rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium ring-1 ring-amber-500/25">
-            {newVersion}
+          // textul spune CE e (nu doar un număr de versiune lângă alt număr de versiune);
+          // min-w-0 + truncate: în sidebarul îngust se scurtează pastila, nu se rupe bara
+          <span className="wt-warn ml-auto min-w-0 truncate rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium ring-1 ring-amber-500/25">
+            {t('sidebar.updatePill', { version: newVersion })}
           </span>
         )}
         <span className={`font-mono text-slate-400 ${newVersion ? '' : 'ml-auto'}`}>v{version || '—'}</span>

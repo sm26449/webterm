@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { api, Host } from '../lib/api'
+import { api, errText, Host } from '../lib/api'
+import { notifyError } from '../lib/notify'
+import LoadFailed from './LoadFailed'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { useI18n } from '../lib/i18n'
 import { copyText } from '../lib/clipboard'
@@ -19,9 +21,13 @@ type HistItem = {
     flotă), pe toate hosturile și sesiunile. E și un audit-log ușor. */
 export default function HistoryModal(props: { hosts: Host[]; onClose: () => void }) {
   const { t } = useI18n()
+  const tr = t   // în efectul de mai jos `t` e umbrit de timer
   const [q, setQ] = useState('')
   const [hostId, setHostId] = useState<number | null>(null)
   const [items, setItems] = useState<HistItem[] | null>(null)
+  // eşecul de încărcare NU e „niciun istoric": stare proprie + Reîncearcă
+  const [loadErr, setLoadErr] = useState<string | null>(null)
+  const [reload, setReload] = useState(0)
   const [copied, setCopied] = useState<number | null>(null)
   const [confirmClear, setConfirmClear] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -42,11 +48,11 @@ export default function HistoryModal(props: { hosts: Host[]; onClose: () => void
       if (hostId != null) p.set('host_id', String(hostId))
       p.set('limit', '300')
       api<HistItem[]>(`/api/history?${p.toString()}`)
-        .then((r) => { if (my === seq.current) setItems(r) })
-        .catch(() => { if (my === seq.current) setItems([]) })
+        .then((r) => { if (my === seq.current) { setLoadErr(null); setItems(r) } })
+        .catch((e) => { if (my === seq.current) { setLoadErr(errText(e, tr)); setItems([]) } })
     }, 200)
     return () => clearTimeout(t)
-  }, [q, hostId])
+  }, [q, hostId, reload, tr])
 
   async function copy(it: HistItem) {
     if (!await copyText(it.command)) return      // fără bifă când copierea a eşuat
@@ -54,8 +60,9 @@ export default function HistoryModal(props: { hosts: Host[]; onClose: () => void
   }
   async function clearAll() {
     setConfirmClear(false)
-    await api('/api/history', { method: 'DELETE' }).catch(() => {})
-    setItems([])
+    // golim lista doar dacă serverul chiar a şters — altfel arătam „gol" peste un istoric intact
+    try { await api('/api/history', { method: 'DELETE' }); setItems([]) }
+    catch (e) { notifyError(t('history.clearAll'), errText(e, t)) }
   }
 
   // parametrul se numea `t` şi umbrea funcţia de traducere din scope-ul componentei
@@ -89,6 +96,8 @@ export default function HistoryModal(props: { hosts: Host[]; onClose: () => void
         <div className="min-h-0 flex-1 overflow-y-auto">
           {items == null ? (
             <div className="p-6 text-center text-sm text-slate-500">{t('history.loading')}</div>
+          ) : loadErr !== null ? (
+            <LoadFailed message={loadErr} onRetry={() => { setItems(null); setLoadErr(null); setReload((n) => n + 1) }} />
           ) : items.length === 0 ? (
             <div className="p-6 text-center text-sm text-slate-500">
               {q.trim() ? t('history.noResults') : t('history.empty')}

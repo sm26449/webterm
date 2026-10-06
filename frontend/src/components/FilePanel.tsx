@@ -9,7 +9,7 @@ import { startDownload } from '../lib/downloads'
 import { isActive, uploadStore } from '../lib/uploadStore'
 import { uiLocale } from '../lib/tz'
 import {
-  DownloadIcon, FileIcon, FolderIcon, LinkIcon, PencilIcon,
+  DownloadIcon, FileIcon, FolderIcon, LinkIcon, PencilIcon, RenameIcon,
   PlusIcon, RefreshIcon, TrashIcon,
 } from './Icons'
 
@@ -659,7 +659,7 @@ export default function FilePanel(props: {
                   <button onClick={() => downloadArchive(e)} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-slate-200"
                     title={t('files.downloadArchive')} aria-label={t('files.downloadArchiveAria', { name: e.name })}><DownloadIcon /></button>
                 )}
-                <button onClick={() => setRenaming(e.name)} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-slate-200" title={t('files.rename')} aria-label={t('files.renameAria', { name: e.name })}><PencilIcon /></button>
+                <button onClick={() => setRenaming(e.name)} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-slate-200" title={t('files.rename')} aria-label={t('files.renameAria', { name: e.name })}><RenameIcon /></button>
                 <button onClick={() => setConfirmDel(e)} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-rose-300" title={t('files.delete')} aria-label={`${t('files.delete')} ${e.name}`}><TrashIcon /></button>
               </div>
             </div>

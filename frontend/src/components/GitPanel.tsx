@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { errText, api, ApiError, Host, withGuardConfirm } from '../lib/api'
+import { errText, api, Host, withGuardConfirm } from '../lib/api'
 import { useConfirm } from '../lib/confirm'
 import { getCwd } from '../lib/cwd'
 import { useI18n } from '../lib/i18n'
@@ -63,6 +63,8 @@ function parseStatus(out: string, t: (key: string) => string): { repo: RepoInfo;
   return { repo, files }
 }
 
+// marcaj: omul a refuzat confirmarea unei reguli guardrail (nu e eroare, nimic nu s-a rulat)
+const GUARD_CANCELLED = new Error('guard-cancelled')
 const isStaged = (f: GitFile) => f.index !== ' ' && f.index !== '?'
 const isUnstaged = (f: GitFile) => f.work !== ' ' && f.work !== '?' && !f.untracked
 
@@ -98,6 +100,12 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
   const [notRepo, setNotRepo] = useState(false)
   const [files, setFiles] = useState<GitFile[]>([])
   const [error, setError] = useState('')
+  const [note, setNote] = useState('')   // notă neutră (ex. guardrail anulat) — nu eroare
+  // eroare sau anulare de guardrail: fiecare în locul ei
+  const fail = (e: unknown, fallback: string) => {
+    if (e === GUARD_CANCELLED) setNote(t('guard.cancelled'))
+    else setError(errText(e, t) || fallback)
+  }
   const [busy, setBusy] = useState(false)
   const [sel, setSel] = useState<{ path: string; staged: boolean } | null>(null)
   const [diff, setDiff] = useState('')
@@ -111,14 +119,16 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
       (confirmed) => api<GitResult>(`/api/hosts/${props.host.id}/git`, {
         method: 'POST', body: JSON.stringify({ args, cwd, confirmed }),
       }))
-    if (r === null) throw new ApiError(409, t('guard.cancelled'))
+    // refuzul omului la o regulă `confirm` NU e o eroare: aruncăm un marcaj recunoscut mai jos
+    // şi-l afişăm ca notă neutră („Anulat — nu s-a rulat"), nu cu roşu
+    if (r === null) throw GUARD_CANCELLED
     return r
   }, [props.host.id, cwd, confirm, t])
 
   const refresh = useCallback(async () => {
     if (!cwd) return
     const my = ++loadSeq.current
-    setError('')
+    setError(''); setNote('')
     try {
       const rp = await gitcmd(['rev-parse', '--show-toplevel'])
       if (my !== loadSeq.current) return
@@ -131,7 +141,7 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
       setFiles(parsed.files)
     } catch (e) {
       if (my !== loadSeq.current) return
-      setError(errText(e, t) || t('git.error.generic'))
+      fail(e, t('git.error.generic'))
     }
   }, [cwd, gitcmd, t])
 
@@ -175,18 +185,18 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
       setDiff(r.stdout || t('git.nothingToShow'))
     } catch (e) {
       setDiff('')
-      setError(errText(e, t) || t('git.error.diff'))
+      fail(e, t('git.error.diff'))
     }
   }
 
   async function mutate(args: string[]) {
     setBusy(true)
-    setError('')
+    setError(''); setNote('')
     try {
       const r = await gitcmd(args)
       if (r.exit_code !== 0) setError((r.stderr || r.stdout || t('git.error.opFailed')).trim())
     } catch (e) {
-      setError(errText(e, t) || t('git.error.generic'))
+      fail(e, t('git.error.generic'))
     } finally {
       setBusy(false)
       setSel(null); setDiff('')
@@ -201,7 +211,7 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
     const m = msg.trim()
     if (!m) return
     setBusy(true)
-    setError('')
+    setError(''); setNote('')
     try {
       const r = await gitcmd(['commit', '-m', m])
       if (r.exit_code === 0) {
@@ -212,7 +222,7 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
         setError((r.stderr || r.stdout || t('git.error.commitFailed')).trim())
       }
     } catch (e) {
-      setError(errText(e, t) || t('git.error.generic'))
+      fail(e, t('git.error.generic'))
     } finally {
       setBusy(false)
     }
@@ -301,6 +311,7 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
         )}
 
         {error && <div className="border-b border-ink-800 bg-ink-800 px-3 py-1.5 text-[11px] wt-danger">{error}</div>}
+        {note && !error && <div role="status" className="border-b border-ink-800 bg-ink-800/60 px-3 py-1.5 text-[11px] text-slate-400">{note}</div>}
 
         {notRepo && (
           <div className="flex flex-1 flex-col items-center justify-center gap-2 p-4 text-center">

@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { ReactNode, useRef, useState } from 'react'
 import { useI18n } from '../lib/i18n'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import AccountTab from './settings/AccountTab'
@@ -21,7 +21,17 @@ export default function SettingsModal(props: {
 }) {
   const { t } = useI18n()
   // categoria activă: modalul nu mai e un scroll lung — arată o secțiune odată
-  const [cat, setCat] = useState<'cont' | 'securitate' | 'audit' | 'aspect' | 'notificari' | 'backup' | 'preferinte'>(props.initialCat ?? 'cont')
+  type Cat = 'cont' | 'securitate' | 'audit' | 'aspect' | 'notificari' | 'backup' | 'preferinte'
+  const [cat, setCatRaw] = useState<Cat>(props.initialCat ?? 'cont')
+  // Tab-urile VIZITATE rămân montate (ascunse cu `hidden`), ca o editare nesalvată să supravieţuiască
+  // unei schimbări de categorie — înainte se monta doar tab-ul activ şi un formular pe jumătate
+  // completat (SMTP, backup, parolă) dispărea tăcut la un click pe rail. Am ales asta în locul unui
+  // avertisment „ai modificări nesalvate": acela ar cere fiecărui tab din şapte să-şi raporteze corect
+  // starea „murdară" (risc de fals-pozitive/negative pe fiecare câmp); aici fiecare tab rămâne exact
+  // cum era, se schimbă doar cadrul. Tab-urile nevizitate tot nu se montează (încărcare leneşă).
+  const [visited, setVisited] = useState<Set<Cat>>(() => new Set([props.initialCat ?? 'cont']))
+  const setCat = (c: Cat) => { setCatRaw(c); setVisited((v) => (v.has(c) ? v : new Set(v).add(c))) }
+  const pane = (c: Cat, node: ReactNode) => visited.has(c) ? <div hidden={cat !== c}>{node}</div> : null
   const CATS = [
     { id: 'cont', label: t('settings.cat.account') },
     { id: 'securitate', label: t('settings.cat.security') },
@@ -65,25 +75,25 @@ export default function SettingsModal(props: {
             ))}
           </nav>
 
-          {/* conținut: doar categoria activă, scrollabil */}
+          {/* conținut: categoria activă vizibilă (cele vizitate stau montate, ascunse), scrollabil */}
           <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
             {/* coloană de lectură: peste ~70ch textul devine greu de urmărit;
                 secţiunile cu liste (audit, backup) folosesc toată lăţimea */}
             <div className={cat === 'audit' || cat === 'backup' ? '' : 'max-w-3xl'}>
 
-        {cat === 'cont' && <AccountTab email={props.email} onAccountChanged={props.onAccountChanged} />}
+        {pane('cont', <AccountTab email={props.email} onAccountChanged={props.onAccountChanged} />)}
 
-        {cat === 'preferinte' && <PreferencesTab />}
+        {pane('preferinte', <PreferencesTab />)}
 
-        {cat === 'aspect' && <AppearanceTab onAccountChanged={props.onAccountChanged} />}
+        {pane('aspect', <AppearanceTab onAccountChanged={props.onAccountChanged} />)}
 
-        {cat === 'securitate' && <SecurityTab webauthnAvailable={props.webauthnAvailable} onAccountChanged={props.onAccountChanged} />}
+        {pane('securitate', <SecurityTab webauthnAvailable={props.webauthnAvailable} onAccountChanged={props.onAccountChanged} />)}
 
-        {cat === 'audit' && <AuditTab />}
+        {pane('audit', <AuditTab />)}
 
-        {cat === 'notificari' && <NotificationsTab />}
+        {pane('notificari', <NotificationsTab />)}
 
-        {cat === 'backup' && <BackupTab onAccountChanged={props.onAccountChanged} />}
+        {pane('backup', <BackupTab onAccountChanged={props.onAccountChanged} />)}
             </div>
 
           </div>

@@ -23,6 +23,7 @@ export default function ServicesPanel(props: {
   const drawer = useDrawer(asideRef, props.onClose, !props.embed)
   const [rows, setRows] = useState<Svc[] | null>(null)
   const [error, setError] = useState('')
+  const [note, setNote] = useState('')   // notă neutră (guardrail anulat) — nu eroare
   const [busy, setBusy] = useState('')          // unitatea pe care rulează o acţiune
   const [filter, setFilter] = useState('')
   const [failedOnly, setFailedOnly] = useState(false)   // triaj „ce e stricat pe hostul ăsta"
@@ -54,11 +55,13 @@ export default function ServicesPanel(props: {
       message: t(action === 'stop' ? 'services.confirmStop' : 'services.confirmRestart', { unit }),
       confirmLabel: t('services.' + action), danger: true,
     }))) return
-    setBusy(unit); setError('')
+    setBusy(unit); setError(''); setNote('')
     try {
-      await withStepup(props.host.id, () => withGuardConfirm((pattern) => confirm({ title: t('guard.confirmTitle'), message: t('guard.confirmMsg', { pattern }), danger: true, confirmLabel: t('guard.confirmRun') }),
+      // null = guardrail refuzat de om: nimic nu s-a rulat — o spunem, neutru
+      const r = await withStepup(props.host.id, () => withGuardConfirm((pattern) => confirm({ title: t('guard.confirmTitle'), message: t('guard.confirmMsg', { pattern }), danger: true, confirmLabel: t('guard.confirmRun') }),
         (confirmed) => api(`/api/hosts/${props.host.id}/services/action`,
           { method: 'POST', body: JSON.stringify({ unit, action, confirmed }) })))
+      if (r === null) { setNote(t('guard.cancelled')); return }
       await load()
     } catch (e) {
       setError(errText(e, t) || (e instanceof ApiError ? e.message : t('services.error')))
@@ -93,6 +96,7 @@ export default function ServicesPanel(props: {
             title={t('services.failedOnly')}>{t('services.failed')}</button>
         </div>
         {error && <div className="border-b border-ink-800 bg-ink-800 px-3 py-1.5 text-[11px] wt-danger">{error}</div>}
+        {note && !error && <div role="status" className="border-b border-ink-800 bg-ink-800/60 px-3 py-1.5 text-[11px] text-slate-400">{note}</div>}
         <div className="min-h-0 flex-1 overflow-y-auto p-3">
           {rows === null ? (
             <div className="p-4 text-center text-xs text-slate-500">{t('services.loading')}</div>

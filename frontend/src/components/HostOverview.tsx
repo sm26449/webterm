@@ -112,14 +112,19 @@ export default function HostOverview(props: {
 
   const row = (s: Session) => {
     const live = isSessionLive(s, host ? [host] : undefined)
+    // Rândul = două butoane surori (nu imbricate): clicul pe corp alege previzualizarea,
+    // „Deschide" e vizibil mereu — dublu-clicul rămâne scurtătură, dar nu mai e singura cale.
     return (
+      <div key={s.id} className={`flex w-full items-center ${
+        selected === s.id ? 'bg-ink-800' : 'hover:bg-ink-800/50'
+      }`}>
       <button
-        key={s.id}
+        type="button"
         onClick={() => setSelected(s.id)}
         onDoubleClick={() => props.onOpenSession(s.id)}
-        className={`flex w-full items-center gap-2.5 px-3 py-2 text-left ${
-          selected === s.id ? 'bg-ink-800' : 'hover:bg-ink-800/50'
-        }`}
+        aria-pressed={selected === s.id}
+        title={t('host.rowPreview')}
+        className="flex min-w-0 flex-1 items-center gap-2.5 py-2 pl-3 pr-1 text-left focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-sky-500"
       >
         <span aria-hidden="true" className={`h-2 w-2 shrink-0 ${s.state === 'lost' ? 'rounded-sm' : 'rounded-full'} ${
           live ? 'bg-emerald-400 dot-live' : s.state === 'lost' ? 'bg-rose-500' : 'bg-slate-600'}`} />
@@ -132,6 +137,13 @@ export default function HostOverview(props: {
         </span>
         {s.connected_clients > 0 && <span className="shrink-0 text-[11px] text-slate-500">👁 {s.connected_clients}</span>}
       </button>
+      <button
+        type="button"
+        onClick={() => props.onOpenSession(s.id)}
+        aria-label={t('host.rowOpenAria', { name: s.title || t('host.sessionFallback') })}
+        className="wt-link mr-2 shrink-0 rounded px-2 py-1 text-xs font-medium ring-1 ring-ink-700 hover:bg-ink-700"
+      >{t('host.rowOpen')}</button>
+      </div>
     )
   }
 
@@ -183,7 +195,7 @@ export default function HostOverview(props: {
             <span className="font-mono">{host.hostname ? `${host.ssh_username || host.agent_user || ''}@${host.hostname}` : t('host.notConfigured')}</span>
             {' · '}
             <span className={host.online ? 'wt-good' : 'text-slate-500'}>
-              {host.online ? 'online' : (host.connection_type === 'agent' ? 'offline' : t('host.connectOnDemand'))}
+              {host.online ? t('host.statusOnline') : (isAgent ? t('host.statusOffline') : t('host.connectOnDemand'))}
             </span>
             {host.online && m && (
               <span className="ml-2 hidden font-mono text-slate-600 tabular-nums sm:inline">
