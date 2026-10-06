@@ -43,7 +43,10 @@ FSWRITE_HDR = struct.Struct(">QQH")   # rid, offset, path_len
 SID_LEN = 32
 AGENT_PROTO_BIN_FSWRITE = 55          # prima versiune de agent care vorbeşte FRAME_FSWRITE + CRC incremental
 
-GAP_MARKER = b"\r\n\x1b[7m[webterm: unele date au fost pierdute aici]\x1b[0m\r\n"
+# Marcajele scrise de SERVER în fluxul terminalului (golul de aici, îmbinarea `HISTORY_SEAM`) nu
+# pot urma limba din browser — serverul n-o ştie. Sunt în engleză, limba de referinţă a produsului
+# (catalogul `en` e rezerva UI-ului), ca toate să vorbească aceeaşi limbă (3.5.3).
+GAP_MARKER = b"\r\n\x1b[7m[webterm: some output was lost here]\x1b[0m\r\n"
 
 sources: Dict[int, "SessionSource"] = {}
 
@@ -405,8 +408,8 @@ HISTORY_MAX_Z = 2 * 1024 * 1024      # plafon pe câmpul base64 primit (agentul 
 HISTORY_TIMEOUT = 3.0                # cât poate întârzia ataşarea; peste = fallback tăcut
 HISTORY_MAX_ROWS = 500
 LARGE_REPLAY_MIN_SCROLLBACK = 5000   # browserele „desktop" (SCROLLBACK 10000); mobilul cere 3000
-HISTORY_SEAM = (b"\x1b[0m\x1b[2m\xe2\x94\x80\xe2\x94\x80 webterm: tmux history above \xc2\xb7 "
-                b"recent output replayed below (its first lines may repeat the last ones above) "
+HISTORY_SEAM = (b"\x1b[0m\x1b[2m\xe2\x94\x80\xe2\x94\x80 webterm: history above \xc2\xb7 "
+                b"recent output below (the first lines may repeat) "
                 b"\xe2\x94\x80\xe2\x94\x80\x1b[0m")
 
 # secvenţe escape într-un rând de captură (str, deja decodat): CSI, şiruri OSC/DCS/SOS/PM/APC

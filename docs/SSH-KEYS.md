@@ -124,3 +124,8 @@ deploy form — the policy only refuses the unrestricted choice.
   tables `ssh_keys` and `ssh_key_deployments`; tests in `tests/ssh_keys_test.py` (the rotate
   case runs only where `ssh-keygen` is installed).
 - Only ed25519 keys are generated and accepted; the path `~/.ssh/webterm_ed25519` is fixed.
+- Two deploy routes: the UI uses `POST /api/hosts/{source}/deploy-key/deploy-batch` (routed by
+  the SOURCE, one fresh factor for all targets). `POST /api/hosts/{target}/deploy-key/deploy`
+  (routed by the TARGET, factor bound to it) is the single-target compatibility route for API
+  clients; both go through `_dk_deploy_one`, and `ssh_keys_test.py` exercises the deploy logic
+  through it. Keep them in step.
