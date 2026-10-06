@@ -9,6 +9,58 @@ back.
 
 ## [Unreleased]
 
+## [3.5.2] — 2026-10-06 · agent (57)
+
+The rest of the 3.5.x backlog, including the agent items, so we didn't jump to 3.6. **Agent 57:**
+every host updates its agent on reconnect. Hosts with open sessions defer the restart; force
+it from the host card.
+
+### Added
+- **Full history in the terminal scrollback.** Opening an existing tmux session used to show
+  only tens to hundreds of lines, or none. The browser got only the last 256 KiB of the raw
+  stream, and tmux scrolls with a scroll region, which xterm never moves into its scrollback.
+  The agent now reads the session's real history from tmux (`capture-pane`, with colours,
+  compressed, capped at 1 MiB). The scrollback is filled up to 10000 lines on desktop and
+  3000 on mobile, the same on a resume after a background tab. A dim line marks where the
+  live replay starts; the few lines just below it may repeat. The commands panel works as
+  before. Streams without tmux (pty, telnet, serial, closed sessions) replay 2 MiB on
+  desktop instead of 256 KiB. Older agents fall back silently to the previous replay.
+- **"Starts at boot" per host.** The agent reports whether it comes back after a reboot
+  (systemd user unit with linger, a cron `@reboot` line, or nothing). Host overview shows
+  it with an Enable/Disable button, and the sidebar warns when a host won't come back.
+  Enabling never kills the running agent. When linger needs root, the UI says so.
+- **Test webhook** button in Settings → Notifications.
+- `WEBTERM_SIGNING_AUTOGEN=0`: skip generating a fleet signing key on first boot, so an
+  offline build-time key can be used on a new install.
+
+### Security
+- **Guardrail on panel actions.** Services start/stop/restart, Docker start/stop/restart and
+  Git add/reset/restore/commit now go through the same server-side check as `/run`, on the
+  equivalent shell command, and the panel asks on a `confirm` rule.
+- **Guardrail in the terminal.** Shift/Ctrl+Enter and Ctrl+J are checked like Enter. A
+  multi-line paste with a guarded line is held back. Paste-and-run pastes without the Enter.
+- **Guardrail patterns** that the browser can't compile are refused at save, because the
+  terminal would silently skip them.
+- **Changing the account password or email sends a security alert.** The alert module had
+  promised it from day one, but nothing called it.
+
+### Fixed
+- **SMTP on port 465** (implicit TLS) works. It used to wait for a plaintext banner and time
+  out.
+- **`credential_policy`:** an unknown value is refused (400). It used to be stored and then
+  read inconsistently.
+- **Agent:** in tmux mode, every session after the first saw the first session's
+  `WEBTERM_SESSION` (and `TZ`). They are now passed with `new-session -e` (tmux ≥ 3.1).
+- **Agent:** the dead ops `list`, `detach` and `serial_close` were removed. `info` lists the
+  `run` and `selftest` subcommands.
+
+### CI
+- Every action is on its Node 24 release, pinned by SHA (CodeQL moved off a floating `@v3`).
+- Runners are pinned to `ubuntu-24.04` ahead of `ubuntu-latest` becoming Ubuntu 26
+  (2026-10-19).
+- The E2E step posts its FAIL/[diag] lines as public annotations, and e2e waits for the test
+  agent before checks that need it.
+
 ## [3.5.1] — 2026-10-06 · agent (56)
 
 A "what we show is what we deliver" pass: every hint, doc and claim was checked against the
