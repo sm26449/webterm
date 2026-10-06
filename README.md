@@ -984,8 +984,8 @@ docker exec smoke sh -c 'printf "%s" "{\"url\":\"ws://127.0.0.1:8000/agent/ws\",
 # or the script dies with ERR_MODULE_NOT_FOUND: Cannot find package 'playwright'
 docker run --rm --network host -v "$PWD/scripts:/w" -w /w \
   -e AGENT_TOKEN_FILE=/w/token -e E2E_SETUP_TOKEN=ci-e2e-token \
-  mcr.microsoft.com/playwright:v1.61.1-noble \
-  sh -c 'npm i --no-save playwright@1.61.1 >/dev/null 2>&1 && node e2e-session.mjs http://127.0.0.1:8000 smoke'
+  mcr.microsoft.com/playwright:v1.63.0-noble \
+  sh -c 'npm i --no-save playwright@1.63.0 >/dev/null 2>&1 && node e2e-session.mjs http://127.0.0.1:8000 smoke'
 ```
 
 `AGENT_TOKEN_FILE` makes the script write the enrol token to disk instead of shelling out to

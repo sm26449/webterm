@@ -16,7 +16,7 @@ set -uo pipefail
 
 REPO=${REPO:-$(cd "$(dirname "$0")/.." && pwd)}
 NM=${PW_MODULES:-$REPO/frontend/node_modules}
-PW=mcr.microsoft.com/playwright:v1.61.1-noble
+PW=mcr.microsoft.com/playwright:v1.63.0-noble
 IMG=${IMG:-webterm-verify:local}
 P1=8000; P2=8001; P3=8002; P4=8003; P5=8004; P6=8005; P7=8006
 C1=wtci-smoke; C2=wtci-fwd; C3=wtci-sso; C4=wtci-bkapp; C5=wtci-rsapp; C6=wtci-feat; C7=wtci-jump

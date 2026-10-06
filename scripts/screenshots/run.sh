@@ -8,13 +8,13 @@
 #   scripts/screenshots/run.sh [out_dir]
 #
 # Prereq: docker plus the images ghcr.io/sm26449/webterm:<tag> and
-# mcr.microsoft.com/playwright:v1.61.1-noble locally. No node dependency on the host.
+# mcr.microsoft.com/playwright:v1.63.0-noble locally. No node dependency on the host.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="${1:-$ROOT/docs/screenshots}"
 IMAGE="${WEBTERM_IMAGE:-ghcr.io/sm26449/webterm:v2.0.0}"
-PW_IMAGE="mcr.microsoft.com/playwright:v1.61.1-noble"
+PW_IMAGE="mcr.microsoft.com/playwright:v1.63.0-noble"
 NET=wt-shots-net
 APP=wt-shots-app
 TOKEN=shots-setup-token
@@ -134,7 +134,7 @@ sleep 6   # a few heartbeats → metrics/sparkline
 
 say "── Playwright: capturing the screens (dark + light) ──"
 # The `playwright` npm package is NOT in the mcr image (only the browsers, in /ms-playwright);
-# we mount it from frontend/node_modules (1.61.1, matching the image's browsers). On a fresh
+# we mount it from frontend/node_modules (1.63.0, matching the image's browsers). On a fresh
 # clone that directory does not exist until you run `npm ci` in frontend/ — set PW_MODULES to
 # point somewhere else if you keep it elsewhere.
 PW_MODULES="${PW_MODULES:-$ROOT/frontend/node_modules}"

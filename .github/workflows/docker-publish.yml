@@ -290,7 +290,7 @@ jobs:
           fi
           mkdir -p /tmp/wt-smoke && cd /tmp/wt-smoke
           npm init -y >/dev/null 2>&1
-          npm install --no-save --no-audit --no-fund playwright@1.61.1 >/dev/null
+          npm install --no-save --no-audit --no-fund playwright@1.63.0 >/dev/null
           npx playwright install --with-deps chromium
           # scriptul rulează de LÂNGĂ node_modules: ESM rezolvă importul
           # 'playwright' relativ la fișier, nu la cwd
@@ -449,7 +449,7 @@ jobs:
           # `npm install` ulterior le consideră „extraneous" şi le CURĂŢĂ. Instalat separat,
           # axe-core ştergea chiar `playwright`, iar pasul pica cu ERR_MODULE_NOT_FOUND —
           # descoperit rulând pasul local, nu citindu-l.
-          npm install --no-save --no-audit --no-fund playwright@1.61.1 @axe-core/playwright >/dev/null
+          npm install --no-save --no-audit --no-fund playwright@1.63.0 @axe-core/playwright >/dev/null
           # Rulează în IMAGINEA oficială Playwright (aceeaşi pe care o foloseşte scripts/ci-local.sh
           # prin `pwrun`), nu direct pe runner: poarta măsoară mărimi de ţinte (target-size) şi
           # contrast, iar ambele depind de fonturile şi de browserul instalate. Pe runner (fonturi
@@ -461,7 +461,7 @@ jobs:
             -v /tmp/wt-shots:/out -w / \
             -e BASE=http://127.0.0.1:8000 -e A11Y_MAX_SERIOUS=0 \
             -e A11Y_EMAIL=e2e@example.com -e A11Y_PASSWORD=parola-e2e-123456 \
-            mcr.microsoft.com/playwright:v1.61.1-noble \
+            mcr.microsoft.com/playwright:v1.63.0-noble \
             sh -c 'cp /repo/tests/ui_review.mjs / && node /ui_review.mjs'
 
       # API-ul de fișiere cap-coadă (agent real): rename, conflict de mtime,
@@ -501,7 +501,7 @@ jobs:
           docker run --rm --network host \
             -v "$GITHUB_WORKSPACE:/repo:ro" -v /tmp/wt-smoke/node_modules:/node_modules:ro \
             -v /tmp/wt-shots:/out -w / \
-            mcr.microsoft.com/playwright:v1.61.1-noble \
+            mcr.microsoft.com/playwright:v1.63.0-noble \
             sh -c 'cp /repo/scripts/mobile-audit.mjs / && node /mobile-audit.mjs http://127.0.0.1:8000 /out'
 
       - name: Mobile screenshots on failure
