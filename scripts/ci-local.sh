@@ -253,8 +253,11 @@ e2e_attempt() {
       if [ -s "$OUT/agent-token" ]; then
         TOK=$(cat "$OUT/agent-token")
         CFG="{\"url\":\"ws://127.0.0.1:8000/agent/ws\",\"token\":\"$TOK\",\"insecure\":true}"
+        # agentul încercării anterioare ţine lock-ul de instanţă unică: oprit întâi, altfel cel nou
+        # iese pe loc („already running") şi hostul nou nu primeşte niciodată agent
+        docker exec -e HOME=/root $C1 python3 /srv/webterm/agent/ptyd.py stop >/dev/null 2>&1 || true
         docker exec $C1 sh -c "mkdir -p /root/.webterm && printf '%s' '$CFG' > /root/.webterm/agent.json"
-        docker exec -d -e HOME=/root $C1 python3 /srv/webterm/agent/ptyd.py run
+        docker exec -d -e HOME=/root $C1 sh -c 'exec python3 /srv/webterm/agent/ptyd.py run >>/tmp/wt-agent.log 2>&1'
         break
       fi
       sleep 1

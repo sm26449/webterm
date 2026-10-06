@@ -122,7 +122,7 @@ if (process.env.AGENT_TOKEN_FILE) {
   const t0 = Date.now()
   while (Date.now() - t0 < 60000) {
     const hosts = await (await fetch(`${BASE}/api/hosts`, { headers: { Cookie: cookie } })).json()
-    if (hosts.some((h) => h.online)) break
+    if (hosts.some((h) => h.id === host.id && h.online)) break   // AL NOSTRU, nu orice host online
     await new Promise((r) => setTimeout(r, 1000))
   }
   check('agent pornit extern și online', true)

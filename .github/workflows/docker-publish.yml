@@ -415,8 +415,6 @@ jobs:
           docker exec -u root smoke sh -c \
             'apt-get update -qq && apt-get install -y -qq --no-install-recommends tmux' >/dev/null
           docker exec smoke sh -c 'command -v tmux' >/dev/null || { echo "tmux is missing"; exit 1; }
-          cd /tmp/wt-smoke
-          cp "$GITHUB_WORKSPACE/scripts/e2e-session.mjs" .
           # Retry o dată: acest e2e conduce un AGENT REAL prin tmux + Playwright, deci e
           # inerent sensibil la timing sub încărcarea runnerului (a blocat deja un release pe un
           # flake, deşi codul era bun). Testul e re-rulabil (setup-sau-login; fiecare rulare îşi
@@ -434,7 +432,36 @@ jobs:
             docker logs smoke 2>&1 | grep -iE "agent|ws.*(clos|disconn)|outbox|timeout|Traceback" | grep -viE "GET /|POST /|accepted" | tail -1 \
               | sed 's/^/::error title=E2E '"$2"' gateway log::/' || true
           }
-          run_e2e() { E2E_SETUP_TOKEN=ci-e2e-token node e2e-session.mjs http://127.0.0.1:8000 smoke 2>&1 | tee "/tmp/e2e-$1.log"; return "${PIPESTATUS[0]}"; }
+          # E2E rulează în ACEEAŞI imagine Playwright ca `scripts/ci-local.sh` (şi ca pasul a11y de mai
+          # jos): pe runner, cu Chromium-ul descărcat de npm, pica pe cod care trecea local — tastarea
+          # de diacritice, pauza upload-ului (3.5.2, de 4 ori la rând). Acelaşi mediu ⇒ acelaşi verdict.
+          # Containerul n-are CLI docker, deci agentul îl porneşte watcher-ul de aici, când scriptul a
+          # scris tokenul (AGENT_TOKEN_FILE) — exact calea din ci-local. Agentul rulării anterioare e
+          # OPRIT întâi: lock-ul de instanţă unică făcea ca reîncercarea să nu-şi poată porni agentul.
+          mkdir -p /tmp/wt-out
+          run_e2e() {
+            rm -f /tmp/wt-out/agent-token
+            ( for _ in $(seq 1 120); do
+                if [ -s /tmp/wt-out/agent-token ]; then
+                  TOK=$(cat /tmp/wt-out/agent-token)
+                  CFG="{\"url\":\"ws://127.0.0.1:8000/agent/ws\",\"token\":\"$TOK\",\"insecure\":true}"
+                  docker exec -e HOME=/root smoke python3 /srv/webterm/agent/ptyd.py stop >/dev/null 2>&1 || true
+                  docker exec smoke sh -c "mkdir -p /root/.webterm && printf '%s' '$CFG' > /root/.webterm/agent.json"
+                  docker exec -d -e HOME=/root smoke sh -c 'exec python3 /srv/webterm/agent/ptyd.py run >>/tmp/wt-agent.log 2>&1'
+                  break
+                fi
+                sleep 1
+              done ) &
+            local watcher=$!
+            docker run --rm --network host \
+              -v "$GITHUB_WORKSPACE:/repo:ro" -v /tmp/wt-smoke/node_modules:/node_modules:ro -v /tmp/wt-out:/out -w / \
+              -e E2E_SETUP_TOKEN=ci-e2e-token -e AGENT_TOKEN_FILE=/out/agent-token \
+              mcr.microsoft.com/playwright:v1.63.0-noble \
+              sh -c 'cp /repo/scripts/e2e-session.mjs / && node /e2e-session.mjs http://127.0.0.1:8000 smoke' 2>&1 | tee "/tmp/e2e-$1.log"
+            local rc=${PIPESTATUS[0]}
+            kill $watcher 2>/dev/null || true
+            return $rc
+          }
           run_e2e 1 || { annotate /tmp/e2e-1.log 1; echo "::warning::E2E sessions failed once (timing-sensitive) — retrying"; sleep 3;
                          run_e2e 2 || { annotate /tmp/e2e-2.log 2; exit 1; }; }
 
