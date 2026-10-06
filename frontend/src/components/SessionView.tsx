@@ -31,7 +31,7 @@ import TranscriptPlayer from './TranscriptPlayer'
 import { shortcutFor } from '../lib/shortcuts'
 import StatusBar from './StatusBar'
 import { copyText, readText } from '../lib/clipboard'
-import { copySession, history as clipHistory } from '../lib/cliphistory'
+import { clearAll as clearClipHistory, copySession, history as clipHistory, remove as removeClip, setLabel as setClipLabel, type ClipEntry } from '../lib/cliphistory'
 import PastePicker from './PastePicker'
 import { notify, notifyError, notifyToast } from '../lib/notify'
 import { useConfirm } from '../lib/confirm'
@@ -439,8 +439,11 @@ export default function SessionView(props: {
     return () => clearTimeout(t)
   }, [replaying])
   const [moreOpen, setMoreOpen] = useState(false)
-  // paste picker: history-ul de clipboard al ACESTUI terminal (Cmd+Shift+V) — vezi lib/cliphistory
-  const [pasteItems, setPasteItems] = useState<string[] | null>(null)
+  // paste picker: history-ul de clipboard GLOBAL, comun tuturor terminalelor (Cmd+Shift+V) — vezi
+  // lib/cliphistory. Eticheta sursei = titlul sesiunii sau numele hostului, ţinută la zi aici.
+  const [pasteItems, setPasteItems] = useState<ClipEntry[] | null>(null)
+  const clipLabel = session.title || props.host?.name || ''
+  useEffect(() => { setClipLabel(session.id, clipLabel) }, [session.id, clipLabel])
   // meniul „Linkuri": URL-urile din buffer, extrase la deschidere (nu continuu) — vezi lib/urls
   const [linksOpen, setLinksOpen] = useState(false)
   const [links, setLinks] = useState<string[]>([])
@@ -975,7 +978,7 @@ export default function SessionView(props: {
         term.clearSelection()
         return false
       }
-      // Cmd/Ctrl+Shift+V: paste picker din history-ul ACESTUI terminal. Cmd+V simplu rămâne
+      // Cmd/Ctrl+Shift+V: paste picker din history-ul GLOBAL (toate terminalele). Cmd+V simplu rămâne
       // paste normal (nu-l interceptăm — lipirea a ceva copiat din alt app trebuie să meargă).
       if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'v' || e.key === 'V')) {
         openPastePicker()
@@ -1310,6 +1313,8 @@ export default function SessionView(props: {
           }, 300)
         } else if (msg.type === 'locked') {
           setLocked(true); setLockErr('')
+          // idle-lock: history-ul de clipboard (posibile parole/tokenuri) nu supravieţuieşte blocării
+          clearClipHistory(); setPasteItems(null)
         } else if (msg.type === 'unlocked') {
           setLocked(false); setUnlocking(false); setLockErr('')
         } else if (msg.type === 'unlock_failed') {
@@ -1661,10 +1666,10 @@ export default function SessionView(props: {
     termRef.current?.focus()
   }
 
-  // paste picker: deschidem cu un SNAPSHOT al history-ului sesiunii (nu live, ca lista să nu
-  // sară sub degete cât alegi). Închiderea = null.
+  // paste picker: deschidem cu un SNAPSHOT al history-ului global (nu live, ca lista să nu
+  // sară sub degete cât alegi); se reîmprospătează doar la ✕ / „Clear history". Închiderea = null.
   function openPastePicker() {
-    setPasteItems(clipHistory(session.id))
+    setPasteItems(clipHistory())
   }
   function pasteFromHistory(text: string, run: boolean) {
     setPasteItems(null)
@@ -2038,6 +2043,8 @@ export default function SessionView(props: {
           items={pasteItems}
           onPaste={(txt) => pasteFromHistory(txt, false)}
           onPasteRun={(txt) => pasteFromHistory(txt, true)}
+          onRemove={(txt) => { removeClip(txt); setPasteItems(clipHistory()) }}
+          onClear={() => { clearClipHistory(); setPasteItems([]) }}
           onClose={() => setPasteItems(null)}
         />
       )}

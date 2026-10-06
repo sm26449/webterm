@@ -34,7 +34,14 @@ Panel-local keys and mouse/touch gestures (below) are listed there too, since 3.
 | `Alt+P` | Detach the session into a window |
 | `Alt+S` | Saved commands (snippets) |
 | `Alt++` / `Alt+−` | Larger / smaller font |
-| `Mod+Shift+V` | Paste picker — clipboard history of this terminal (`Shift+Enter` in the picker = paste and run) |
+| `Mod+Shift+V` | Paste picker — clipboard history shared by all terminals (`Shift+Enter` in the picker = paste and run) |
+
+The paste picker lists what you copied in **any** terminal of this window: the last 10 copies,
+newest first, each with its source session and age ("emaildb · 4 min ago"). An entry expires
+1 hour after it was last copied; copying the same text again moves it back to the top. `✕`
+removes one entry and **Clear history** removes all of them. The history lives in memory only
+(never in browser storage, since it often holds passwords and tokens): a reload loses it, and
+it is cleared on idle-lock and on logout. A popped-out session window has its own history.
 
 ## Panels (only while the panel has focus)
 

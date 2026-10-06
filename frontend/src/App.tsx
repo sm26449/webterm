@@ -31,6 +31,7 @@ import { copyText } from './lib/clipboard'
 import { CopyIcon, ShieldIcon } from './components/Icons'
 import { ensureNotificationPermission, notify, notifyError, registerToast } from './lib/notify'
 import { restoreOrphans } from './lib/uploads'
+import { clearAll as clearClipHistory } from './lib/cliphistory'
 import { askSecret, registerSecretPrompt, SecretAsk } from './lib/secretPrompt'
 import SecretPromptModal from './components/SecretPromptModal'
 import { markBooted } from './lib/failsafe'
@@ -834,6 +835,11 @@ function MainApp() {
   useEffect(() => {
     if (appState?.authenticated) restoreOrphans()
   }, [appState?.authenticated])
+  // history-ul de clipboard (în memorie, poate ţine parole/tokenuri) moare odată cu sesiunea web:
+  // logout explicit SAU expirare (401 / poll) — orice tranziţie spre neautentificat
+  useEffect(() => {
+    if (appState?.authenticated === false) clearClipHistory()
+  }, [appState?.authenticated])
 
   // Auto-deschiderea walkthrough-ului la PRIMA rulare: doar după autentificare (nu pe login) şi
   // doar dacă `wt_walkthrough_done` lipseşte. `walkAutoRef` ne apără de poll-ul de 5s (authenticated
@@ -1505,6 +1511,7 @@ function MainApp() {
           onCancel={() => setShowLogoutConfirm(false)}
           onConfirm={async () => {
             setShowLogoutConfirm(false)
+            clearClipHistory()
             await api('/api/logout', { method: 'POST' })
             setAppState({ ...appState, authenticated: false })
           }}

@@ -67,6 +67,18 @@ back.
   `POST /api/hosts/ssh-key/pending`, and `pin_hostkey` / `pending_key_id` on host create and
   update. All browser-only (automation tokens get 401).
 
+### Changed
+- **The paste picker (`Mod+Shift+V`) now shows one clipboard history shared by every terminal
+  in the window.** It used to keep a separate list per terminal, so something copied in one
+  tab was missing from the picker in the next one, which is the usual reason to open it. The
+  history holds the last 10 copies, newest first (a re-copy moves the entry to the top). Each
+  entry shows where it came from and how old it is ("emaildb · 4 min ago") and expires 1 hour
+  after it was last copied. Each entry has a ✕, and the picker has a **Clear history** button.
+  The history stays in memory only, never in browser storage, because it often holds
+  passwords and tokens. It is lost on reload and cleared on idle-lock and on logout or an
+  expired web session. Pop-out windows keep their own history. Paste-and-run still holds
+  back the Enter when a line matches a guardrail rule.
+
 ### Fixed
 - **A key generated in Edit host broke the connection to that host.** `/ssh-key/generate`
   stored the bare private key while every reader expected the JSON credential format, so

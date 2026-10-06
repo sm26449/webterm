@@ -569,6 +569,47 @@ try {
   await page.waitForTimeout(1500)
   check('comenzile se înregistrează în continuare', ((await cmdPanel.textContent()) ?? '').includes('DUPA_ZGOMOT'))
 
+  // ── History de clipboard GLOBAL (3.5.4): copiat în sesiunea curentă (C), lipit în D ──
+  // Până la 3.5.3 history-ul era per terminal: picker-ul altui tab era gol pentru ce copiai în C.
+  // Copiem comanda din panoul lui C, deschidem D, Ctrl+Shift+V: intrarea apare cu eticheta lui
+  // C (titlul sesiunii) şi, lipită, ajunge pe ecranul lui D.
+  const sidC = await page.evaluate(() => location.hash.replace('#/s/', ''))
+  await activePane.locator('.xterm-screen').click()
+  await page.keyboard.type('echo CLIPX_$((6*7))\n')
+  await page.waitForTimeout(1200)
+  const clipRow = cmdPanel.locator('div.group').filter({ hasText: 'echo CLIPX_' }).first()
+  await clipRow.hover()
+  await clipRow.getByRole('button', { name: 'command', exact: true }).click()
+  await clipboardUntil(page, (c) => c.trim() === 'echo CLIPX_$((6*7))')
+  const titleC = await page.evaluate(async (sid) => {
+    const arr = await (await fetch('/api/sessions')).json()
+    return (Array.isArray(arr) ? arr : []).find((s) => s.id === sid)?.title ?? ''
+  }, sidC)
+  // A e închisă deja (player-ul de transcript): ţinta e o sesiune NOUĂ, D, la prompt curat
+  await goHome()
+  await newSession(page)
+  await page.waitForSelector('.xterm-screen', { timeout: 15000 })
+  await page.waitForTimeout(1500)
+  await page.keyboard.type('echo D_$((50+5))\n')
+  await waitScreen('D_55')
+  await activePane.locator('.xterm-screen').click()
+  await page.keyboard.press('Control+Shift+V')
+  const picker = page.locator('[role=dialog][aria-label="Paste from history"]')
+  check('paste picker (global): se deschide în D cu Ctrl+Shift+V', await visible(picker))
+  const clipEntry = picker.locator('li').filter({ hasText: 'echo CLIPX_' }).first()
+  const clipSrc = (await clipEntry.locator('.pp-source').textContent({ timeout: 3000 }).catch(() => '')) ?? ''
+  if (!titleC || !clipSrc.includes(titleC)) console.log(`     [diag] titleC=${JSON.stringify(titleC)} sursa=${JSON.stringify(clipSrc)}`)
+  check('paste picker (global): copierea din C e listată în D, cu eticheta lui C', !!titleC && clipSrc.includes(titleC))
+  await clipEntry.locator('button').first().click()
+  check('paste picker (global): intrarea din C, lipită, apare pe ecranul lui D',
+    await waitScreen('echo CLIPX_$((6*7))'))
+  await page.keyboard.press('Enter')         // curăţenie: promptul lui D rămâne gol
+  await page.waitForTimeout(600)
+  // înapoi pe C: verificările de mai jos folosesc panoul de comenzi al lui C
+  await page.locator(`button[data-tab="${sidC}"]`).evaluate((el) => el.click())
+  await page.waitForTimeout(800)
+  await activePane.locator('.xterm-screen').click()
+
   // ── Faza 3 (consola de flotă): istoric global de comenzi (OSC 133 → server) ──
   await page.keyboard.press('Control+Shift+K')
   await page.waitForTimeout(300)
