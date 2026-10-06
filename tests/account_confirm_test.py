@@ -39,6 +39,9 @@ def check(name, cond, detail=""):
 class FakeReq:
     def __init__(self, token=None):
         self.cookies = {security.COOKIE_NAME: token} if token else {}
+        # update_account trimite acum o alertă de securitate cu IP-ul clientului (3.5.2)
+        self.client = None
+        self.headers = {}
 
 
 async def main():
