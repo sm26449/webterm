@@ -45,6 +45,25 @@ const newSession = async (page) => {
   await page.click('button[title="Host actions"]')
   await page.click('button[title="New session"]')
 }
+/* Sub încărcare (runner CI ocupat) agentul de test poate pierde scurt conexiunea şi reveni.
+   Verificările care cer agentul (upload cu pauză, fs/cwd) picau atunci cu „host offline" (409),
+   fără legătură cu ce testează. Înainte de ele aşteptăm agentul online şi NOTĂM cât a lipsit:
+   o deconectare care se repetă e un semnal real, pe care log-ul trebuie să-l arate. */
+const waitAgentOnline = async (hostId, label, ms = 45000) => {
+  const t0 = Date.now()
+  let online = false
+  while (Date.now() - t0 < ms) {
+    try {
+      const hs = await (await fetch(`${BASE}/api/hosts`, { headers: { Cookie: cookie } })).json()
+      online = hs.some((h) => h.id === hostId && h.online)
+    } catch { online = false }
+    if (online) break
+    await new Promise((r) => setTimeout(r, 500))
+  }
+  const waited = Date.now() - t0
+  if (waited > 600 || !online) console.error(`  [diag] ${label}: agentul ${online ? 'a revenit după' : 'tot offline după'} ${Math.round(waited / 100) / 10}s`)
+  return online
+}
 const fail = (msg) => {
   console.error(`EROARE: ${msg}`)
   process.exit(1)
@@ -741,6 +760,7 @@ try {
   // — pe care o verificăm în store. La pauză XHR-urile în zbor sunt anulate → route.continue
   // poate pica, de aceea try/catch.
   const UP_RE = /\/fs\/upload\?/
+  await waitAgentOnline(host.id, 'pause/upload')
   // Ţinem fiecare felie în zbor 30 s (nu 8): felia TREBUIE să fie încă reţinută când o punem pe
   // pauză. Cu 8 s, pe un runner încărcat, `visible(pwidget)` (până la 8 s) + poll-ul după jobul
   // activ (până la 8 s) puteau ele singure consuma fereastra → felia se elibera, iar cele 24 MB
@@ -760,7 +780,7 @@ try {
   // scurtă cursă faţă de apariţia widgetului, care poate arăta întâi jobul de download „done" ce
   // lâncezeşte 20 s). Filtrăm pe `!j.dir` (upload) + stare activă.
   let jobId = null
-  for (let i = 0; i < 40 && !jobId; i++) {
+  for (let i = 0; i < 100 && !jobId; i++) {
     jobId = await page.evaluate(() => {
       const snap = window.__wtTransfers?.store?.snapshot?.()
       if (!snap) return null
@@ -770,6 +790,8 @@ try {
     if (!jobId) await page.waitForTimeout(200)
   }
   check('pause: upload activ găsit în store', !!jobId)
+  if (!jobId) console.error('  [diag] joburi în store:', await page.evaluate(() =>
+    JSON.stringify([...(window.__wtTransfers?.store?.snapshot?.()?.values?.() ?? [])].map((j) => ({ dir: j.dir, state: j.state, err: j.error })))))
   await page.evaluate((id) => window.__wtTransfers.pauseUpload(id), jobId)
   // Verificăm starea în store (sursa pe care o citeşte UI-ul). NU textul widgetului: cât jobul de
   // download „done" mai lâncezeşte (20 s), sumarul arată „2 transfers", nu starea per-job.
@@ -927,12 +949,13 @@ try {
   // /proc pe backend pty; pane_current_path pe tmux. Așa panoul se deschide unde
   // ești, nu în ~, chiar dacă integrarea shell nu e activă pe host.
   const x1sid = (await page.evaluate(() => location.hash)).replace('#/s/', '')
+  await waitAgentOnline(host.id, 'fs/cwd')
   // Pollăm API-ul: agentul raportează cwd-ul din /proc (pty) / pane_current_path (tmux), care se
   // actualizează ASINCRON după `cd /tmp` — un singur fetch îl prindea încă pe cel vechi pe loopback-ul rapid.
   const cwdApi = await pollValue(
     () => page.evaluate(async ([hid, sid]) => {
       const r = await fetch(`/api/hosts/${hid}/fs/cwd?sid=${sid}`, { credentials: 'same-origin' })
-      return r.ok ? (await r.json()).cwd : `ERR ${r.status}`
+      return r.ok ? (await r.json()).cwd : `ERR ${r.status} ${(await r.json().catch(() => ({}))).code ?? ''}`
     }, [host.id, x1sid]),
     (v) => v === '/tmp', 20000)
   check('agentul raportează cwd-ul sesiunii pentru deschiderea panoului', cwdApi === '/tmp')
