@@ -278,6 +278,9 @@ function MainApp() {
   })
   const [addHostSignal, setAddHostSignal] = useState(0)
   const [settingsSignal, setSettingsSignal] = useState(0)
+  // tab-ul cu care se deschid Setările la următorul semnal (cardul Securitate → „Backup"); gol =
+  // alegerea obişnuită a Sidebar-ului (punctul de pe rotiţă / Cont)
+  const [settingsCat, setSettingsCat] = useState<'securitate' | 'backup' | 'notificari' | undefined>(undefined)
   const [statusSignal, setStatusSignal] = useState(0)
   // activitate pe tab-uri din fundal: ultimul out_offset „văzut" per sesiune.
   // Tab-ul activ e mereu la zi; un tab abia deschis pornește de la offset-ul
@@ -1272,6 +1275,7 @@ function MainApp() {
         open={sidebarOpen}
         addHostSignal={addHostSignal}
         settingsSignal={settingsSignal}
+        settingsCat={settingsCat}
         statusSignal={statusSignal}
         onClose={() => setSidebarOpen(false)}
         collapsed={sidebarCollapsed}
@@ -1432,6 +1436,8 @@ function MainApp() {
             onAddHost={() => setAddHostSignal((n) => n + 1)}
             onOpenPalette={() => setPaletteOpen(true)}
             onOpenSidebar={() => setSidebarOpen(true)}
+            onOpenSettings={(cat) => { setSettingsCat(cat); setSettingsSignal((n) => n + 1) }}
+            onOpenStatus={() => setStatusSignal((n) => n + 1)}
           />
         )}</PaneErrorBoundary>)}
       </main>
@@ -1473,7 +1479,7 @@ function MainApp() {
           onSelectHost={selectHost}
           onAddHost={() => setAddHostSignal((n) => n + 1)}
           onFiles={setFilesHost}
-          onOpenSettings={() => setSettingsSignal((n) => n + 1)}
+          onOpenSettings={() => { setSettingsCat(undefined); setSettingsSignal((n) => n + 1) }}
           onOpenStatus={() => setStatusSignal((n) => n + 1)}
           onOpenHistory={() => { setPaletteOpen(false); setShowHistory(true) }}
           snippets={snippets}

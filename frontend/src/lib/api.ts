@@ -236,6 +236,28 @@ export interface Session {
   out_offset: number
 }
 
+/* Rezumatul de securitate (GET /api/security/summary, 3.5.4). Serverul NU trimite proză: doar
+   `id` + `status` + `value`; textul îl compune SecurityCard din catalog. Un `id` necunoscut
+   (gateway mai nou decât bundle-ul) se sare, nu se randează ca cheie brută. */
+export type SecurityStatus = 'ok' | 'warn' | 'bad' | 'info'
+export interface SecurityCheck {
+  id: string
+  status: SecurityStatus
+  value: Record<string, unknown>
+}
+
+/** Un link de share activ (GET /api/shares). Fără token/URL — nu există nici pe server. */
+export interface ShareRow {
+  sid: string
+  title: string
+  host_id: number
+  host_name: string
+  by: string
+  writable: boolean
+  expires: number
+  viewers: number
+}
+
 export class ApiError extends Error {
   status: number
   /** Cod stabil trimis de server în antetul `X-WebTerm-Error` (vezi gateway/app/errors.py).

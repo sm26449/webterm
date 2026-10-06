@@ -21,6 +21,7 @@ holds the user-facing guides and the internal architecture notes.
 - [SSH-KEYS](SSH-KEYS.md) — Toolbox → SSH keys: host-to-host deploy keys, multi-target deploy, test/verify/alias/rotate, the deploy-key policy
 - [SSH-JUMP](SSH-JUMP.md) — SSH-jump and Telnet-jump targets reached through an agent, nesting under the agent, "Connect once", the host-key-change alarm
 - [SSO](SSO.md) — OIDC single sign-on (Authentik), step-up and break-glass
+- [SECURITY-SUMMARY](SECURITY-SUMMARY.md) — the Dashboard's Security card (what each check means) and the share-links inventory with Revoke all
 - [THREAT-MODEL](THREAT-MODEL.md) — what the security model defends, and what it does not
 
 ## Architecture notes (`design/`)

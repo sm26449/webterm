@@ -48,6 +48,8 @@ export default function Sidebar(props: {
   open: boolean
   addHostSignal: number
   settingsSignal: number
+  /** tab-ul cerut odată cu semnalul (cardul Securitate de pe Dashboard); gol = alegerea obişnuită */
+  settingsCat?: 'securitate' | 'backup' | 'notificari'
   statusSignal: number
   onClose: () => void
   collapsed: boolean
@@ -77,6 +79,7 @@ export default function Sidebar(props: {
   const [editHost, setEditHost] = useState<Host | null>(null)
   const [jumpVia, setJumpVia] = useState<Host | null>(null)   // agentul-gazdă pentru care adăugăm o ţintă SSH-jump
   const [showSettings, setShowSettings] = useState(false)
+  const [settingsCat, setSettingsCat] = useState<'securitate' | 'backup' | 'notificari' | undefined>(undefined)
   const [showFleetRun, setShowFleetRun] = useState(false)
   const [showStatus, setShowStatus] = useState(false)
   const [showAbout, setShowAbout] = useState(false)
@@ -109,7 +112,7 @@ export default function Sidebar(props: {
   }, [props.addHostSignal])
   // aceleași semnale pentru setări/status — folosite de acțiunile din ⌘K
   useEffect(() => {
-    if (props.settingsSignal > 0) setShowSettings(true)
+    if (props.settingsSignal > 0) { setSettingsCat(props.settingsCat); setShowSettings(true) }
   }, [props.settingsSignal])
   useEffect(() => {
     if (props.statusSignal > 0) setShowStatus(true)
@@ -700,7 +703,7 @@ export default function Sidebar(props: {
               ? t('sidebar.settingsSigningLocked')
               : props.signingMissing ? t('sidebar.settingsSigningMissing')
                 : props.backupReady ? t('sidebar.settingsBackupReady') : t('sidebar.settingsPasskeys')}
-            onClick={() => setShowSettings(true)}
+            onClick={() => { setSettingsCat(undefined); setShowSettings(true) }}
             aria-label={t('settings.title')}
             className="wt-touch relative inline-flex items-center justify-center rounded-md px-2 py-1 text-sm text-slate-500 hover:bg-ink-800"
           >
@@ -971,7 +974,7 @@ export default function Sidebar(props: {
           <SettingsModal
             email={props.email}
             webauthnAvailable={props.webauthnAvailable}
-            initialCat={props.signingMissing ? 'securitate' : props.backupReady ? 'backup' : undefined}
+            initialCat={settingsCat ?? (props.signingMissing ? 'securitate' : props.backupReady ? 'backup' : undefined)}
             onAccountChanged={props.onAccountChanged}
             onClose={() => setShowSettings(false)}
           />

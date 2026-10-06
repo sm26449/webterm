@@ -5,6 +5,8 @@ import { useI18n } from '../lib/i18n'
 import { hostHistory } from '../lib/metrics'
 import { EyeIcon, PlusIcon, ServerIcon, TerminalPromptIcon } from './Icons'
 import Sparkline from './Sparkline'
+import SecurityCard, { SecurityTarget } from './SecurityCard'
+import SharesModal from './SharesModal'
 import { fmt } from '../lib/shortcuts'
 
 // culoare + glif per tip de app (dalele din strip + butoanele de pe host)
@@ -30,8 +32,19 @@ export default function Dashboard(props: {
   onAddHost: () => void
   onOpenPalette: () => void
   onOpenSidebar: () => void
+  /** cardul Securitate duce la locul unde se repară: Setări pe tab-ul potrivit / Status */
+  onOpenSettings: (cat: 'securitate' | 'backup' | 'notificari') => void
+  onOpenStatus: () => void
 }) {
   const { t } = useI18n()
+  const [sharesOpen, setSharesOpen] = useState(false)
+  // „Revocă tot"/„Revocă" din inventar schimbă rândul „Link-uri de share" → cardul se reîncarcă
+  const [secRefresh, setSecRefresh] = useState(0)
+  const navigateSecurity = (target: SecurityTarget) => {
+    if (target.kind === 'shares') setSharesOpen(true)
+    else if (target.kind === 'status') props.onOpenStatus()
+    else props.onOpenSettings(target.cat)
+  }
   const byId = new Map(props.hosts.map((h) => [h.id, h]))
   // apps (forward-uri promovate) agregate din toată flota — strip-ul „one pane of glass"
   const [apps, setApps] = useState<AppLink[]>([])
@@ -91,6 +104,12 @@ export default function Dashboard(props: {
             {t('dashboard.jumpTo')} <kbd className="hidden rounded bg-ink-700 px-1.5 text-xs text-slate-200 sm:inline">{fmt('Mod+K')}</kbd>
           </button>
         </div>
+
+        {/* Securitate: „e totul în regulă acum?" la o privire (3.5.4) */}
+        <SecurityCard onNavigate={navigateSecurity} refreshSignal={secRefresh} />
+        {sharesOpen && (
+          <SharesModal onClose={() => setSharesOpen(false)} onChanged={() => setSecRefresh((n) => n + 1)} />
+        )}
 
         {/* Apps: forward-urile promovate, un click din „acasă" — nu mai ieşi din WebTerm */}
         {apps.length > 0 && (

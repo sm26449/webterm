@@ -347,6 +347,47 @@ try {
   }
   check('sparkline CPU pe cardul de host', sparkOk)
 
+  // ── Securitate (3.5.4): cardul de pe dashboard, inventarul de share-uri, „Revoke all" ──
+  // Cardul se încarcă asincron (GET /api/security/summary) — aşteptăm rândul, nu doar secţiunea.
+  const secCard = page.locator('[data-testid="security-card"]')
+  const sharesRow = secCard.locator('li[data-check="shares"]')
+  const secOk = await sharesRow.waitFor({ state: 'attached', timeout: 15000 }).then(() => true).catch(() => false)
+  check('cardul Securitate pe dashboard, cu rândul „Share links"', secOk && (await sharesRow.count()) === 1)
+  // un link de share pe o sesiune LIVE (A sau B), creat prin API din pagină (cookie-ul browserului)
+  const shareSid = await page.evaluate(async () => {
+    const ss = await (await fetch('/api/sessions', { credentials: 'same-origin' })).json()
+    const live = ss.find((s) => s.state === 'live')
+    if (!live) return null
+    const r = await fetch(`/api/sessions/${live.id}/share`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
+      body: JSON.stringify({ writable: false, expires_minutes: 30 }),
+    })
+    return r.ok ? live.id : null
+  })
+  // cardul e deschis singur când ceva cere atenţie (aici: 2FA-ul contului); dacă nu, îl deschidem
+  const secToggle = secCard.locator('button[aria-expanded]').first()
+  if ((await secToggle.getAttribute('aria-expanded')) === 'false') await secToggle.click()
+  await sharesRow.locator('button').click()
+  const sharesDlg = page.locator('[role=dialog][aria-labelledby="wt-shares-title"]')
+  check('inventarul de share-uri arată linkul abia creat',
+    !!shareSid && await visible(sharesDlg.locator(`li[data-share="${shareSid}"]`), 10000))
+  // „Revoke all": confirmare de pericol, apoi parola CONTULUI (askSecret, mascat)
+  await sharesDlg.locator('button:has-text("Revoke all")').click()
+  await page.locator('[role=alertdialog]').locator('button:has-text("Revoke all")').click()
+  const pwDlg = page.locator('[role=dialog][aria-label^="Your account password (revoking all"]')
+  await visible(pwDlg)
+  await pwDlg.locator('input').fill(PASSWORD)
+  await pwDlg.locator('button[type=submit]').click()
+  const emptyOk = await visible(sharesDlg.locator('[data-testid="shares-empty"]'), 10000)
+  const left = await page.evaluate(async () =>
+    (await (await fetch('/api/shares', { credentials: 'same-origin' })).json()).shares.length)
+  check('„Revoke all" (cu parola) goleşte inventarul — UI şi API', emptyOk && left === 0)
+  await page.keyboard.press('Escape')
+  await hidden(sharesDlg, 3000)
+  // rândul din card se reîmprospătează după revocare (semnal de la inventar, nu poll-ul de 60 s)
+  const sharesStatus = await pollValue(() => sharesRow.getAttribute('data-status'), (v) => v === 'ok', 8000)
+  check('cardul Securitate: rândul „Share links" revine la OK', sharesStatus === 'ok')
+
   // player de transcript pe o sesiune închisă: închidem sesiunea A și o redăm
   await page.evaluate((sid) =>
     fetch(`/api/sessions/${sid}/kill`, { method: 'POST', credentials: 'same-origin' }), sidA)

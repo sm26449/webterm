@@ -9,6 +9,24 @@ back.
 
 ## [Unreleased]
 
+### Added
+- **A Security card on the Dashboard** answers "is everything OK right now?" in one glance:
+  your 2FA, active share links, the command guardrail, the signing key, hosts requiring 2FA,
+  backups, alert channels and agent versions. It used to take four trips through Settings and
+  the sessions, and nothing listed the live share links. Every row opens the place where you
+  fix it. The card collapses to one line when everything is OK and opens itself when something
+  needs attention. TLS expiry is deliberately not a row: the certificate is served by Traefik,
+  outside the app, and the gateway cannot see it (the host-side `webterm-cert-check` timer
+  does). See [docs/SECURITY-SUMMARY.md](docs/SECURITY-SUMMARY.md).
+- **Share-links inventory**: every active link in the fleet, with who created it, read-only or
+  writable, expiry and how many guests are connected now, plus per-row **Revoke** and
+  **Revoke all**. Revoke all asks for the account password (SSO: a fresh re-authentication),
+  disconnects every guest, is audited and sends a security alert. The link URL is never shown
+  again: only a hash of its token is stored. Links on 2FA hosts are counted but described
+  only while that host is unlocked, like the session list.
+- API: `GET /api/security/summary`, `GET /api/shares`, `POST /api/shares/revoke-all`, all
+  browser-only (automation tokens get 401).
+
 ### Fixed
 - **Pausing an upload could take effect only after the in-flight slices finished.** A pause
   pressed while the next slices were being read and checksummed missed them, so they were

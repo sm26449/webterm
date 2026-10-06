@@ -484,7 +484,7 @@ async def _issue_cookie(response: Response, user_id: int, request: Request,
 
 
 async def _revoke_all_shares(owner_email: str | None = None,
-                             owner_id: int | None = None) -> None:
+                             owner_id: int | None = None) -> int:
     """Share-urile (PTY live, opţional writable) sunt acces DERIVAT — mor la logout /
     schimbare de parolă, ca token-urile de forward (M3). Altfel un share creat cu un
     cookie furat supravieţuieşte deconectării owner-ului până la expirare (max 24h).
@@ -493,23 +493,28 @@ async def _revoke_all_shares(owner_email: str | None = None,
     global, iar de la conturile multiple (1.0.137) asta însemna: logout-ul lui A omoară
     link-urile lui B, într-un mod imposibil de diagnosticat („de ce a murit share-ul de
     incident?"). Semnalat de un audit extern. Fără argument (sau pe share-uri vechi, fără
-    `share_by`) rămâne global — la schimbarea parolei după compromitere vrei exact asta."""
+    `share_by`) rămâne global — la schimbarea parolei după compromitere vrei exact asta.
+
+    Întoarce câte link-uri ÎNCĂ ACTIVE (neexpirate) au fost revocate — „Revocă tot" din
+    inventarul de share-uri (3.5.4) îl arată omului. Rândurile expirate se curăţă şi ele, dar
+    nu se numără: n-ar mai fi deschis nimic."""
+    now = time.time()
     if owner_email or owner_id is not None:
         # id-ul e cheia; emailul rămâne rezervă pentru share-urile create înainte de migrare.
         # Cheiat DOAR pe email, o schimbare de email scotea share-urile de sub orice revocare.
         where = " WHERE share_token IS NOT NULL AND (share_by_id=? OR share_by=?)"
         args = (owner_id, owner_email)
-        rows = await db.fetchall("SELECT id FROM sessions" + where, *args)
-        await db.execute("UPDATE sessions SET share_token=NULL, share_expires=NULL,"
-                         " share_writable=0" + where, *args)
-        sids = {r["id"] for r in rows}
     else:
-        await db.execute("UPDATE sessions SET share_token=NULL, share_expires=NULL, share_writable=0"
-                         " WHERE share_token IS NOT NULL")
-        sids = None
+        where = " WHERE share_token IS NOT NULL"
+        args = ()
+    rows = await db.fetchall("SELECT id, share_expires FROM sessions" + where, *args)
+    await db.execute("UPDATE sessions SET share_token=NULL, share_expires=NULL,"
+                     " share_writable=0" + where, *args)
+    sids = {r["id"] for r in rows}
     for sid, hub in list(core.hubs.items()):
-        if sids is None or sid in sids:
+        if sid in sids:
             await hub.revoke_shares()      # închide invitaţii deja conectaţi (stop broadcast)
+    return sum(1 for r in rows if (r["share_expires"] or 0) > now)
 
 
 @router.post("/api/logout")
@@ -6525,6 +6530,210 @@ async def revoke_share(sid: str, user=Depends(security.require_user)):
     if hub:
         await hub.revoke_shares()   # închide invitaţii deja conectaţi (notificare + stop broadcast)
     return {"ok": True}
+
+
+# ── Inventarul share-urilor + rezumatul de securitate (3.5.4) ────────────────────────────
+# Până acum, „e totul în regulă acum?" cerea patru locuri (Setări → Securitate, sesiunile
+# partajate, guardrail-ul, cheia de semnare), iar link-urile de share live din flotă nu le
+# lista nimic. Ambele endpoint-uri doar AGREGĂ starea existentă — nicio stocare nouă — şi
+# sunt DOAR pe cookie (`require_user`): un token de automatizare nu vede inventarul de acces.
+
+def _share_guests(sid: str) -> int:
+    """Invitaţii conectaţi ACUM printr-un link de share: clienţii hub-ului care nu sunt owner
+    (exact pe cei pe care `SessionHub.revoke_shares` îi deconectează)."""
+    hub = core.hubs.get(sid)
+    return sum(1 for c in hub.clients if not c.is_owner) if hub else 0
+
+
+async def _active_shares(user) -> tuple[list, int]:
+    """Share-urile active (neexpirate) vizibile userului + câte sunt ASCUNSE.
+
+    Aceeaşi regulă ca lista de sesiuni şi `GET /api/sessions/{sid}/share` (meta-leak): titlul
+    şi hostul unei sesiuni de pe un host `require_2fa` se arată doar cu fereastra de step-up
+    deschisă pe hostul ăla — citire PASIVĂ, nu glisează fereastra. Ascunsele se NUMĂRĂ totuşi:
+    rezumatul care ar spune „0 link-uri" cât există unul pe un host 2FA ar minţi exact la
+    întrebarea pentru care există. Tokenul (hash-ul) nu e nici măcar selectat."""
+    rows = await db.fetchall(
+        "SELECT s.id, s.title, s.host_id, s.share_expires, s.share_writable, s.share_by,"
+        " h.name AS host_name, h.require_2fa"
+        " FROM sessions s LEFT JOIN hosts h ON h.id = s.host_id"
+        " WHERE s.share_token IS NOT NULL AND s.share_expires > ?"
+        " ORDER BY s.share_expires", time.time())
+    out, hidden = [], 0
+    for r in rows:
+        if r["require_2fa"] and not security.stepup_window_is_open(user["id"], r["host_id"]):
+            hidden += 1
+            continue
+        out.append({"sid": r["id"], "title": r["title"] or "", "host_id": r["host_id"],
+                    "host_name": r["host_name"] or "", "by": r["share_by"] or "",
+                    "writable": bool(r["share_writable"]), "expires": r["share_expires"],
+                    "viewers": _share_guests(r["id"])})
+    return out, hidden
+
+
+@router.get("/api/shares")
+async def list_shares(user=Depends(security.require_user)):
+    """Toate link-urile de share active din flotă — FĂRĂ token şi fără URL: în DB stă doar
+    hash-ul, iar URL-ul se arată o singură dată, la creare (vezi create_share)."""
+    shares, hidden = await _active_shares(user)
+    return {"shares": shares, "hidden": hidden}
+
+
+class RevokeAllSharesIn(BaseModel):
+    current_password: str = ""
+    stepup_grant: str = ""      # conturi SSO: grant passkey account-scope (host_id=0)
+
+
+@router.post("/api/shares/revoke-all")
+async def revoke_all_shares(body: RevokeAllSharesIn, request: Request,
+                            user=Depends(security.require_user)):
+    """„Revocă tot": butonul de panică din inventar. Global (toate conturile, toate hosturile,
+    inclusiv cele 2FA ascunse din listă) — exact ramura folosită la schimbarea parolei.
+
+    Cere parola CONTULUI, ca restul operaţiilor cu greutate: un cookie furat singur nu poate
+    rupe dintr-un POST toate link-urile pe care un coleg le-a dat la un incident. Conturile SSO
+    n-au parolă locală utilizabilă → acceptăm re-auth-ul lor real (grant passkey sau fereastra
+    account-scope deschisă de SSO), ca la `/api/account`."""
+    if user["sso_subject"] and config.OIDC_ENABLED:
+        ok_reauth = (bool(body.stepup_grant)
+                     and security.consume_stepup_grant(body.stepup_grant, user["id"], 0)) \
+            or security.stepup_window_is_open(user["id"], 0)
+        if not ok_reauth:
+            raise ApiError(403, "shares.ssoReauth",
+                           "re-authenticate with SSO or a passkey to revoke all share links")
+    else:
+        await _require_reauth_for_secret(user, body.current_password, "revoking all share links")
+    n = await _revoke_all_shares()       # global + deconectează invitaţii live (hub.revoke_shares)
+    audit.detail(request, "revoked all share links (%d active)" % n)
+    log.warning("all share links revoked (%d active) by %s", n, user["email"])
+    email_alerts.notify_security_change("all share links were revoked (%d active)" % n,
+                                        security.client_ip(request), user["email"])
+    return {"ok": True, "revoked": n}
+
+
+# Vârsta peste care ultimul backup reuşit devine „vechi": perioada programării + o zi de
+# toleranţă (un daily ratat o dată = avertisment; un weekly nu avertizează în ziua a 3-a).
+# Fără programare, pragul e cel al unui daily: „~2 zile".
+_BACKUP_GRACE = 86400
+
+
+async def _check_backup() -> dict:
+    sched = await _get_setting("backup_schedule", "off")
+    last_local = float(await _get_setting("backup_last", "0") or 0)
+    stored = backup.list_backups()
+    if stored:
+        last_local = max(last_local, float(stored[0]["created"]))
+    err = await _get_json_setting("backup_last_error")
+    cloud = await cloudbackup.status()
+    offsite = bool(cloud.get("configured"))
+    last_cloud = float(cloud.get("last_ok") or 0) if offsite else 0.0
+    last_ok = max(last_local, last_cloud)
+    value = {"last_ok": last_ok or None, "schedule": sched,
+             "failed_at": (float(err.get("ts") or 0) or None) if err else None,
+             "failed_stage": (err.get("stage") or "") if err else "",
+             # copiile OFF-HOST sunt mereu criptate (cloudbackup refuză upload-ul fără parolă);
+             # snapshot-urile locale stau necriptate prin design (serverul are oricum cheia)
+             "offsite": offsite, "encrypted": offsite and bool(cloud.get("has_passphrase"))}
+    period = backup.SCHEDULE_PERIODS.get(sched, 86400)
+    if err or not last_ok:
+        status = "bad"
+    elif time.time() - last_ok > period + _BACKUP_GRACE:
+        status = "warn"
+    else:
+        status = "ok"
+    return {"id": "backup", "status": status, "value": value}
+
+
+async def _security_checks(user) -> list:
+    checks = []
+    hosts = await db.fetchall(
+        "SELECT id, require_2fa, connection_type, agent_version, uninstalled_at"
+        " FROM hosts WHERE COALESCE(ephemeral, 0) = 0")
+    any_2fa = any(h["require_2fa"] for h in hosts)
+
+    # 1. al doilea factor al contului CURENT
+    pk = await db.fetchone("SELECT COUNT(*) c FROM webauthn_credentials WHERE user_id=?", user["id"])
+    passkeys = pk["c"] if pk else 0
+    totp = bool(user["totp_enabled"])
+    sso = bool(user["sso_subject"]) and config.OIDC_ENABLED
+    if passkeys == 0 and not totp:
+        # contul SSO îşi face al doilea factor la IdP — nu-l putem vedea, deci nu-l declarăm „rău"
+        st = "info" if sso else "bad"
+    elif passkeys == 1 and not totp and any_2fa:
+        st = "warn"          # o singură cheie fizică pierdută = hosturile 2FA închise
+    else:
+        st = "ok"
+    checks.append({"id": "account2fa", "status": st,
+                   "value": {"passkeys": passkeys, "totp": totp, "sso": sso, "hosts2fa": any_2fa}})
+
+    # 2. link-urile de share active (toate, inclusiv cele ascunse de pe hosturi 2FA)
+    rows = await db.fetchall(
+        "SELECT share_writable FROM sessions WHERE share_token IS NOT NULL AND share_expires > ?",
+        time.time())
+    writable = sum(1 for r in rows if r["share_writable"])
+    checks.append({"id": "shares",
+                   "status": "bad" if writable else ("warn" if rows else "ok"),
+                   "value": {"active": len(rows), "writable": writable}})
+
+    # 3. guardrail-ul de comenzi
+    g = await _load_command_guard()
+    rules = len(g.get("rules") or [])
+    checks.append({"id": "guardrail",
+                   "status": "ok" if g.get("enabled") and rules else "warn",
+                   "value": {"enabled": bool(g.get("enabled")), "rules": rules}})
+
+    # 4. cheia de semnare — aceeaşi definiţie ca punctul de pe rotiţa Setărilor (/api/state)
+    if not signing.key_exists():
+        key_state, st = "missing", "warn"
+    elif signing.is_encrypted() and not signing.is_loaded():
+        key_state, st = "locked", "bad"
+    else:
+        key_state, st = "ok", "ok"
+    checks.append({"id": "signingKey", "status": st, "value": {"state": key_state}})
+
+    # 5. câte hosturi cer 2FA (informativ: alegerea e per host)
+    checks.append({"id": "hosts2fa", "status": "info",
+                   "value": {"on": sum(1 for h in hosts if h["require_2fa"]), "total": len(hosts)}})
+
+    # 6. backup
+    checks.append(await _check_backup())
+
+    # 7. canalele de alertă — doar DACĂ sunt configurate, niciodată valorile (parola SMTP,
+    #    URL-ul webhook-ului poartă adesea un secret în path)
+    cfg = await email_alerts.load_config()
+    smtp, webhook = email_alerts._configured(cfg), bool(cfg.get("webhook"))
+    checks.append({"id": "alerts", "status": "ok" if smtp or webhook else "warn",
+                   "value": {"smtp": smtp, "webhook": webhook}})
+
+    # 8. agenţii: versiunea celor ONLINE faţă de cea livrată cu gateway-ul. Offline nu e o
+    #    problemă de securitate (se actualizează la reconectare) — se numără separat.
+    expected = core.agent_expected().get("version")
+    agents = [h for h in hosts
+              if (h["connection_type"] or "agent") == "agent" and not h["uninstalled_at"]]
+    online = outdated = 0
+    for h in agents:
+        src = core.sources.get(h["id"])
+        if src is None:
+            continue
+        online += 1
+        v = getattr(src, "agent_version", None) or h["agent_version"] or 0
+        if expected and v < expected:
+            outdated += 1
+    checks.append({"id": "agents", "status": "warn" if outdated else "ok",
+                   "value": {"expected": expected, "online": online, "outdated": outdated,
+                             "offline": len(agents) - online}})
+
+    # TLS: expirarea certificatului NU e cunoscută din aplicaţie — certul îl serveşte Traefik, iar
+    # verificarea lui trăieşte pe host (scripts/cert-check.sh, timer systemd). Nu inventăm o
+    # sondă aici; check-ul lipseşte în loc să spună ceva neverificat.
+    return checks
+
+
+@router.get("/api/security/summary")
+async def security_summary(user=Depends(security.require_user)):
+    """„E totul în regulă acum?" — o listă de verificări {id, status, value}. Fără proză:
+    frontend-ul compune textul din i18n după `id` + `value`."""
+    return {"checks": await _security_checks(user), "ts": time.time()}
 
 
 @router.get("/api/shared/{token}")
