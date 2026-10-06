@@ -426,12 +426,13 @@ jobs:
           # adnotările se citesc public (API check-runs) — aşa un eşec intermitent se poate
           # diagnostica fără acces la log. GitHub limitează la 10 adnotări de fiecare tip per pas.
           annotate() {
-            grep -E '^  (FAIL|\[diag\])' "$1" | head -10 | sed 's/^  /::warning title=E2E attempt '"$2"'::/' || true
-            # DE CE cade agentul: liniile lui de deconectare/eroare + ce a văzut gateway-ul
-            docker exec smoke sh -c 'grep -iE "disconnect|closed|error|reconnect|timeout|refus|traceback" /tmp/wt-agent.log | tail -5' 2>/dev/null \
-              | sed 's/^/::warning title=E2E '"$2"' agent log::/' || true
-            docker logs smoke 2>&1 | grep -iE "agent.*(disconnect|closed|lost|gone|supersed|overflow|timeout)|outbox|frame too" | tail -5 \
-              | sed 's/^/::warning title=E2E '"$2"' gateway log::/' || true
+            # GitHub ţine max. 10 adnotări de fiecare TIP per pas: FAIL/[diag] ca warning (≤4 per
+            # încercare), logurile ca ERROR — altfel le înghiţea plafonul de warning-uri (3.5.2)
+            grep -E '^  (FAIL|\[diag\])' "$1" | head -4 | sed 's/^  /::warning title=E2E attempt '"$2"'::/' || true
+            docker exec smoke sh -c 'tail -n 4 /tmp/wt-agent.log' 2>/dev/null \
+              | sed 's/^/::error title=E2E '"$2"' agent log tail::/' || true
+            docker logs smoke 2>&1 | grep -iE "agent|ws.*(clos|disconn)|outbox|timeout|Traceback" | grep -viE "GET /|POST /|accepted" | tail -1 \
+              | sed 's/^/::error title=E2E '"$2"' gateway log::/' || true
           }
           run_e2e() { E2E_SETUP_TOKEN=ci-e2e-token node e2e-session.mjs http://127.0.0.1:8000 smoke 2>&1 | tee "/tmp/e2e-$1.log"; return "${PIPESTATUS[0]}"; }
           run_e2e 1 || { annotate /tmp/e2e-1.log 1; echo "::warning::E2E sessions failed once (timing-sensitive) — retrying"; sleep 3;
