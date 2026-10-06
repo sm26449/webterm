@@ -9,6 +9,11 @@ back.
 
 ## [Unreleased]
 
+## [3.5.4] — 2026-10-07 · agent (57)
+
+Five features the product owner picked from the UI reviews, built one at a time, each
+with its own tests, plus two fixes. No agent change, so no fleet update.
+
 ### Added
 - **Export and import hosts as CSV.** Moving a set of hosts to another gateway meant
   re-typing every one; there was no way to get the list out, or into a spreadsheet and back.
@@ -21,10 +26,6 @@ back.
   two now share one function — with duplicates skipped by the server. Agent hosts come back
   pending, each with its own install command: a group link cannot attach to hosts that
   already exist. See [docs/HOSTS.md](docs/HOSTS.md#export-and-import-csv).
-- `POST /api/hosts` now refuses an empty name (`host.nameRequired`), a port outside 1–65535
-  (`host.badPort`) and an SSH auth method other than password/key (`host.badAuthMethod`).
-  They were accepted and produced hosts that could never connect; the CSV import made the
-  gap easy to hit.
 - **A Security card on the Dashboard** answers "is everything OK right now?" in one glance:
   your 2FA, active share links, the command guardrail, the signing key, hosts requiring 2FA,
   backups, alert channels and agent versions. It used to take four trips through Settings and
@@ -83,6 +84,10 @@ back.
   update. All browser-only (automation tokens get 401).
 
 ### Changed
+- `POST /api/hosts` now refuses an empty name (`host.nameRequired`), a port outside 1–65535
+  (`host.badPort`) and an SSH auth method other than password/key (`host.badAuthMethod`).
+  They were accepted and produced hosts that could never connect; the CSV import made the
+  gap easy to hit.
 - **The paste picker (`Mod+Shift+V`) now shows one clipboard history shared by every terminal
   in the window.** It used to keep a separate list per terminal, so something copied in one
   tab was missing from the picker in the next one, which is the usual reason to open it. The
