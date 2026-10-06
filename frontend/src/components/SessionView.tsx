@@ -12,6 +12,7 @@ import { clearCwd, parseOsc7, setCwd } from '../lib/cwd'
 import { FONT_STORAGE_KEY, preferredFont, setPreferredFont } from '../lib/font'
 import { extractUrls } from '../lib/urls'
 import { useI18n } from '../lib/i18n'
+import { fmtTs } from '../lib/tz'
 import { hostScheme, termTheme } from '../lib/termtheme'
 import CommandsPanel from './CommandsPanel'
 import HostLoadRing from './HostLoadRing'
@@ -23,7 +24,7 @@ import ServicesPanel from './ServicesPanel'
 // AI tools se deschide rar (din meniul contextual) → bundle separat, ca FileEditor
 const AiToolsPanel = lazy(() => import('./AiToolsPanel'))
 import ToolboxPanel from './ToolboxPanel'
-import { ClockIcon, CopyIcon, DockerIcon, DownloadIcon, ExternalLinkIcon, FileIcon, FilesIcon, FolderIcon, ForwardIcon, GitBranchIcon, LinkIcon, MoreIcon, NoteIcon, PasteIcon, PencilIcon, PopoutIcon, SearchIcon, ServicesIcon, StopIcon, ToolboxIcon, TrashIcon } from './Icons'
+import { ClockIcon, CopyIcon, DockerIcon, DownloadIcon, ExternalLinkIcon, FileIcon, FilesIcon, FolderIcon, ForwardIcon, GitBranchIcon, MoreIcon, NoteIcon, PasteIcon, PencilIcon, PopoutIcon, SearchIcon, ServicesIcon, ShareIcon, StopIcon, ToolboxIcon, TrashIcon } from './Icons'
 import MobileKeybar from './MobileKeybar'
 import SnippetsMenu from './SnippetsMenu'
 import TranscriptPlayer from './TranscriptPlayer'
@@ -244,11 +245,13 @@ export default function SessionView(props: {
   // guardrail de comenzi: config live într-un ref (handler-ul de taste e capturat la
   // montare, deci nu poate citi prop-ul direct), + dialog de confirmare + mesaj tranzitoriu
   const commandGuardRef = useRef(props.commandGuard)
-  /** Prima linie dintr-un text (lipit) care atinge o regulă de guardrail, sau null. */
-  const guardedLine = (text: string): string | null => {
+  /** Prima linie dintr-un text (lipit) care atinge o regulă de guardrail (+ tiparul regulii, ca
+      mesajul să spună DE CE, ca în fleet/panouri), sau null. */
+  const guardedLine = (text: string): { line: string; pattern: string } | null => {
     for (const line of text.split(/\r?\n/)) {
       const l = line.trim()
-      if (l && matchCommandRule(l, commandGuardRef.current)) return l
+      const rule = l ? matchCommandRule(l, commandGuardRef.current) : null
+      if (rule) return { line: l, pattern: rule.pattern }
     }
     return null
   }
@@ -261,7 +264,7 @@ export default function SessionView(props: {
   // deci mereu proaspăt, fără să atingem ciclul de viaţă al terminalului.
   const tRef = useRef(t)
   tRef.current = t
-  const [cmdConfirm, setCmdConfirm] = useState<{ cmd: string } | null>(null)
+  const [cmdConfirm, setCmdConfirm] = useState<{ cmd: string; pattern: string } | null>(null)
   const [guardMsg, setGuardMsg] = useState<string | null>(null)
   // confirm()/alert() native → dialoguri proprii + toast-uri (vezi lib/confirm.tsx: de ce)
   const { confirm } = useConfirm()
@@ -397,7 +400,27 @@ export default function SessionView(props: {
   const [shareOpen, setShareOpen] = useState(false)          // panoul de opțiuni
   const [shareWritable, setShareWritable] = useState(false)  // opțiune: writable?
   const [shareExpiry, setShareExpiry] = useState(1440)       // opțiune: minute
-  const [shareIsWritable, setShareIsWritable] = useState(false)  // al link-ului DEJA generat
+  // share-ul ACTIV (de pe server): supravieţuieşte reload-ului. URL-ul (`shareUrl`) există doar în
+  // tab-ul care l-a generat — token-ul e hash-uit pe server, deci nu se poate reconstrui; după un
+  // reload rămân starea (read-only/writable, expirare) şi butonul de revocare.
+  const [shareActive, setShareActive] = useState<{ writable: boolean; expires?: number } | null>(null)
+  useEffect(() => {
+    if (props.popout) return           // fereastra popout n-are UI de share
+    let alive = true
+    api<{ active: boolean; writable?: boolean; expires?: number }>(`/api/sessions/${session.id}/share`)
+      .then((r) => { if (alive) setShareActive(r.active ? { writable: !!r.writable, expires: r.expires } : null) })
+      .catch(() => { /* gateway vechi / fără drept: rămâne starea locală */ })
+    return () => { alive = false }
+  }, [session.id, props.popout])
+  // link expirat → bara dispare singură (altfel „Revocă" ar rămâne pe un link deja mort)
+  useEffect(() => {
+    if (!shareActive?.expires) return
+    const ms = shareActive.expires * 1000 - Date.now()
+    const clear = () => { setShareActive(null); setShareUrl(null) }
+    if (ms <= 0) { clear(); return }
+    const timer = window.setTimeout(clear, Math.min(ms, 2 ** 31 - 1))
+    return () => clearTimeout(timer)
+  }, [shareActive])
   // roster (cine e conectat) + kick — pentru owner
   const [roster, setRoster] = useState<{
     id: string; label: string; owner: boolean; writable: boolean
@@ -524,11 +547,11 @@ export default function SessionView(props: {
       // host cu 2FA → crearea share-ului cere step-up (H1); withStepup rulează ceremonia
       // passkey/parolă și reîncearcă o dată. Ruta n-are host_id în URL, deci îl dăm explicit.
       const r = await withStepup(session.host_id, () =>
-        api<{ url: string; writable: boolean }>(`/api/sessions/${session.id}/share`, {
+        api<{ url: string; writable: boolean; expires?: number }>(`/api/sessions/${session.id}/share`, {
           method: 'POST', body: JSON.stringify({ writable: shareWritable, expires_minutes: shareExpiry }),
         }))
       setShareUrl(r.url)
-      setShareIsWritable(r.writable)
+      setShareActive({ writable: r.writable, expires: r.expires })
       setShareOpen(false)
     } catch (e) {
       notifyError(t('session.shareLink'), errText(e, t) || t('session.shareLinkFailed'))
@@ -543,15 +566,30 @@ export default function SessionView(props: {
       title: t('session.revokeShareTitle'), message: t('session.confirmRevokeShare'),
       danger: true, confirmLabel: t('session.revoke'),
     }))) return
-    await api(`/api/sessions/${session.id}/share`, { method: 'DELETE' }).catch(() => {})
-    setShareUrl(null)
-    setShareIsWritable(false)
+    // starea se curăţă DOAR la succes: înainte, un DELETE eşuat (step-up refuzat, reţea) ascundea
+    // linkul din UI deşi rămânea VALID pe server — owner-ul credea că l-a revocat.
+    try {
+      await withStepup(session.host_id, () =>
+        api(`/api/sessions/${session.id}/share`, { method: 'DELETE' }))
+      setShareUrl(null)
+      setShareActive(null)
+    } catch (e) {
+      notifyError(t('session.shareRevokeFailed'), errText(e, t))
+    }
   }
 
-  // owner scoate un invitat din sesiune
-  const kick = (id: string) => {
+  // owner scoate un invitat din sesiune — cu confirmare: un ✕ de 24px lângă rândul tău din
+  // roster e uşor de nimerit greşit, iar celălalt pierde terminalul fără avertisment
+  const kick = async (c: { id: string; label: string; ip?: string; agent?: string }) => {
+    setShowRoster(false)
+    const who = (c.label === 'self' ? t('session.roleSelf') : c.label === 'guest' ? t('session.roleGuest') : c.label)
+      + (c.ip || c.agent ? ` (${[c.ip, c.agent ? shortAgent(c.agent) : ''].filter(Boolean).join(' · ')})` : '')
+    if (!(await confirm({
+      title: t('session.removeFromSession'), message: t('session.confirmKick', { who }),
+      danger: true, confirmLabel: t('session.kick'),
+    }))) return
     const ws = wsRef.current
-    if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'kick', id }))
+    if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'kick', id: c.id }))
   }
 
   // „Sunt încă aici" din bannerul de pre-idle-lock (App): `hub.last_interaction` pe server se
@@ -839,7 +877,7 @@ export default function SessionView(props: {
         if (hit) {
           e.preventDefault()
           e.stopPropagation()
-          setGuardMsg(tRef.current('session.pasteGuarded', { cmd: hit.slice(0, 70) }))
+          setGuardMsg(tRef.current('session.pasteGuarded', { cmd: hit.line.slice(0, 70), pattern: hit.pattern }))
           window.setTimeout(() => setGuardMsg(null), 5000)
         }
         return
@@ -901,10 +939,10 @@ export default function SessionView(props: {
         if (rule && cmd) {
           if (rule.action === 'block') {
             send('\x15')   // Ctrl+U: șterge linia periculoasă din shell
-            setGuardMsg(tRef.current('session.blockedByGuardrail', { cmd: cmd.slice(0, 70) }))
+            setGuardMsg(tRef.current('session.blockedByGuardrail', { cmd: cmd.slice(0, 70), pattern: rule.pattern }))
             window.setTimeout(() => setGuardMsg((m) => (m && m.includes(cmd.slice(0, 70)) ? null : m)), 4000)
           } else {
-            setCmdConfirm({ cmd })   // confirm: dialog (Enter e blocat mai jos)
+            setCmdConfirm({ cmd, pattern: rule.pattern })   // confirm: dialog (Enter e blocat mai jos)
           }
           return false               // NU trimite Enter la host
         }
@@ -1450,10 +1488,16 @@ export default function SessionView(props: {
   }
 
   async function saveMeta(next: { title?: string; note?: string }) {
-    await api(`/api/sessions/${session.id}`, {
-      method: 'PATCH',
-      body: JSON.stringify(next),
-    }).catch(() => {})
+    // Eşecul era înghiţit (`.catch(() => {})`): redenumirea/nota păreau salvate, iar la următorul
+    // poll reveneau tăcut la valoarea veche. Acum spunem ce n-a mers; textul rămâne în câmp.
+    try {
+      await api(`/api/sessions/${session.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(next),
+      })
+    } catch (e) {
+      notifyError(next.title !== undefined ? t('session.renameFailed') : t('session.noteSaveFailed'), errText(e, t))
+    }
     props.onChanged()
   }
 
@@ -1630,7 +1674,7 @@ export default function SessionView(props: {
     // „lipeşte şi rulează" nu ocoleşte guardrail-ul: dacă o linie atinge o regulă, lipim fără
     // Enter — verificarea de la Enter (sau dialogul de confirmare) decide apoi, ca la tastare
     const hit = run ? guardedLine(text) : null
-    if (hit) setGuardMsg(t('session.pasteGuarded', { cmd: hit.slice(0, 70) }))
+    if (hit) setGuardMsg(t('session.pasteGuarded', { cmd: hit.line.slice(0, 70), pattern: hit.pattern }))
     else if (run) send('\r')
     termRef.current?.focus()
   }
@@ -1638,7 +1682,7 @@ export default function SessionView(props: {
   async function killSession() {
     if (!(await confirm({
       title: t('session.killTitle'), message: t('session.confirmKill'),
-      danger: true, confirmLabel: t('session.stop'),
+      danger: true, confirmLabel: t('session.stopSession'),
     }))) return
     // host cu 2FA → 403 de step-up: withStepup rulează ceremonia passkey și reîncearcă o dată
     await withStepup(session.host_id, () =>
@@ -1674,6 +1718,9 @@ export default function SessionView(props: {
   const inputPaused = isLive && conn !== 'open' && !replaying && !wsDenied
 
   const hostAccent = props.host ? hostColor(props.host) : '#64748b'
+  // Docker / Servicii / Toolbox: doar host-uri de agent (rulează prin op-ul `run`) — aceeaşi
+  // regulă pentru butoanele din bară şi pentru itemii din meniul ⋯
+  const agentHost = !props.host?.connection_type || props.host.connection_type === 'agent'
   const reach = props.host ? reachState(props.host) : 'offline'
 
   return (
@@ -1744,18 +1791,74 @@ export default function SessionView(props: {
           {/* Încărcarea host-ului activ, dintr-o privire (CPU + memorie). Din metricile pe care
               app-ul le ia oricum la poll — vezi HostLoadRing. Stă între nume şi butoane. */}
           {props.host && <HostLoadRing host={props.host} />}
+          {/* roster: apare când mai e cineva conectat; owner-ul poate da kick. La ORICE lăţime
+              (era `lg:flex`, deci pe telefon/tabletă nu vedeai cine se uită şi nu puteai scoate
+              pe nimeni) — şi în header, care rămâne vizibil şi pe telefonul în peisaj, unde
+              `.wt-compact-y` ascunde toată bara de stare cu avertismentul „👁 N conectaţi". */}
+          {roster.length > 1 && (
+            <div className="relative">
+              <button
+                onClick={() => setShowRoster((v) => !v)}
+                title={t('session.whoConnected')}
+                aria-label={`${t('session.whoConnected')}: ${roster.length}`}
+                aria-expanded={showRoster}
+                data-testid="session-roster"
+                className="wt-warn wt-touch flex items-center gap-1 rounded-md px-1.5 py-1 text-xs tabular-nums ring-1 ring-ink-700 hover:bg-ink-800"
+              ><span aria-hidden="true">👁</span> {roster.length}</button>
+              {showRoster && (
+                <>
+                  <div className="fixed inset-0 z-30" onClick={() => setShowRoster(false)} />
+                  {/* telefon: foaie de jos (butonul poate sta oriunde în bară → un dropdown ancorat ar ieşi
+                      din ecran la stânga); de la sm în sus, dropdown sub buton */}
+                  <div className="fixed inset-x-2 bottom-[calc(var(--wt-keybar-h,0px)+0.5rem)] z-40 max-h-[60dvh] overflow-y-auto rounded-lg bg-ink-900 p-1.5 text-xs ring-1 ring-ink-700 shadow-xl sm:absolute sm:inset-x-auto sm:bottom-auto sm:right-0 sm:top-full sm:mt-1 sm:w-72">
+                    <div className="px-2 py-1 text-[11px] uppercase tracking-wide text-slate-500">{t('session.connectedCount', { count: roster.length })}</div>
+                    {roster.map((c) => (
+                      <div key={c.id} className="rounded py-0.5 hover:bg-ink-800">
+                        <div className="flex items-center gap-2 px-2 py-1">
+                        <span className="min-w-0 flex-1 truncate text-slate-200">
+                          {c.label === 'self' ? t('session.roleSelf')
+                            : c.label === 'guest' ? t('session.roleGuest')
+                            : c.label}{c.id === yourIdRef.current ? ` ${t('session.you')}` : ''}
+                        </span>
+                        {c.owner
+                          ? <span className="shrink-0 text-[10px] text-slate-500">owner</span>
+                          : <span className={`shrink-0 text-[10px] ${c.writable ? 'wt-warn' : 'text-slate-500'}`}>{c.writable ? t('session.canWrite') : t('session.canView')}</span>}
+                        {!c.owner && (
+                          <button onClick={() => { void kick(c) }} title={t('session.removeFromSession')} aria-label={t('session.removeFromSession')}
+                            className="wt-danger grid h-6 w-6 shrink-0 place-items-center rounded hover:bg-ink-700">✕</button>
+                        )}
+                        </div>
+                        {/* De unde e ataşat. Fără asta „mai e cineva conectat" nu-ţi spunea
+                            dacă e telefonul tău sau altcineva — deci nu puteai reacţiona. */}
+                        {(c.ip || c.agent) && (
+                          <div className="flex items-center gap-1.5 px-2 pb-1 text-[10px] text-slate-500">
+                            <span className="min-w-0 truncate">{c.ip}{c.agent ? ' · ' + shortAgent(c.agent) : ''}</span>
+                            {c.known === false && (
+                              <span title={t('session.deviceNewTitle')}
+                                className="wt-warn shrink-0 rounded bg-amber-500/15 px-1">{t('session.deviceNew')}</span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
           {/* Pe mobil ține DOAR esențialul în bară (căutare + paste); restul
               intră în meniul ⋯. Pe iPhone SE, cinci butoane + badge + titlu
               împingeau toolbarul afară din ecran. */}
           <ToolButton title={t('session.searchScrollback', { shortcut: shortcutFor('search') })} active={showSearch} onClick={() => setShowSearch(!showSearch)}><SearchIcon /></ToolButton>
-          {/* comenzi (OSC 133): navighezi între ele cu Alt+↑/↓ */}
+          {/* comenzi (OSC 133): navighezi între ele cu Alt+↑/↓. Eticheta era „⌘N" — tasta Cmd de
+              pe Mac, fără sens pe Linux/Windows; „❯" e promptul, neutru pe orice platformă. */}
           <span className="hidden sm:contents">
             <ToolButton
               title={commands.length ? t('session.commandsCount', { count: commands.length }) : t('session.commandsActivate')}
               active={showCommands}
               onClick={toggleCommands}
             >
-              <span className="font-mono text-xs">⌘{commands.length > 0 ? commands.length : ''}</span>
+              <span className="font-mono text-xs">❯{commands.length > 0 ? commands.length : ''}</span>
             </ToolButton>
           </span>
           {/* fișiere: navighezi/editezi/transferi; urmărește cwd-ul din terminal */}
@@ -1778,7 +1881,7 @@ export default function SessionView(props: {
           </span>
           {/* docker: containere/imagini/volume/reţele + shell în container. Doar host-uri de
               agent (docker CLI e local pe host; SSH/telnet n-au op-ul `run`). */}
-          {(!props.host?.connection_type || props.host.connection_type === 'agent') && (
+          {agentHost && (
             <span className="hidden sm:contents">
               <ToolButton title={t('session.dockerTooltip')} active={showDocker} onClick={toggleDocker}>
                 <DockerIcon />
@@ -1787,7 +1890,7 @@ export default function SessionView(props: {
           )}
           {/* servicii systemd: listă + start/stop/restart. Doar host-uri de agent (systemctl e
               local pe host, prin op-ul `run` — ca Docker). */}
-          {(!props.host?.connection_type || props.host.connection_type === 'agent') && (
+          {agentHost && (
             <span className="hidden sm:contents">
               <ToolButton title={t('session.servicesTooltip')} active={showServices} onClick={toggleServices}>
                 <ServicesIcon />
@@ -1795,21 +1898,23 @@ export default function SessionView(props: {
             </span>
           )}
           {/* Toolbox: lansatoare de conexiuni DB. Doar host-uri de agent (CLI-ul rulează pe host). */}
-          {(!props.host?.connection_type || props.host.connection_type === 'agent') && (
+          {agentHost && (
             <span className="hidden sm:contents">
               <ToolButton title={t('session.toolboxTooltip')} active={showToolbox} onClick={toggleToolbox}>
                 <ToolboxIcon />
               </ToolButton>
             </span>
           )}
+          {/* Comenzi salvate: montat la ORICE lăţime (doar butonul-declanşator e ascuns pe telefon).
+              Înainte tot meniul stătea într-un `hidden sm:contents`, deci itemul din ⋯ şi Alt+S
+              deschideau un dropdown invizibil; pe telefon apare acum ca foaie de jos. */}
           {isLive && (
-            <span className="hidden sm:contents">
-              <SnippetsMenu
-                open={snippetsOpen}
-                onOpenChange={setSnippetsOpen}
-                onInsert={(b) => { send(b); termRef.current?.focus() }}
-              />
-            </span>
+            <SnippetsMenu
+              open={snippetsOpen}
+              onOpenChange={setSnippetsOpen}
+              triggerClassName="hidden sm:grid"
+              onInsert={(b) => { send(b); termRef.current?.focus() }}
+            />
           )}
           <ToolButton title={t('session.paste')} onClick={paste}><PasteIcon /></ToolButton>
           <ToolButton title={t('paste.fromHistoryTitle', { shortcut: shortcutFor('pastePicker') })} active={pasteItems !== null} onClick={openPastePicker}><ClockIcon /></ToolButton>
@@ -1824,54 +1929,7 @@ export default function SessionView(props: {
             <ToolButton title={t('session.fontSmaller')} onClick={() => setPreferredFont(fontSize - 1)}>A−</ToolButton>
             <ToolButton title={t('session.fontLarger')} onClick={() => setPreferredFont(fontSize + 1)}>A+</ToolButton>
             {!props.popout && (
-              <ToolButton title={t('session.shareLinkTooltip')} active={!!shareUrl || shareOpen} onClick={share}><LinkIcon /></ToolButton>
-            )}
-            {/* roster: apare când mai e cineva conectat; owner-ul poate da kick */}
-            {roster.length > 1 && (
-              <div className="relative">
-                <button
-                  onClick={() => setShowRoster((v) => !v)}
-                  title={t('session.whoConnected')}
-                  className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800"
-                >👁 {roster.length}</button>
-                {showRoster && (
-                  <>
-                    <div className="fixed inset-0 z-30" onClick={() => setShowRoster(false)} />
-                    <div className="absolute right-0 top-full z-40 mt-1 w-72 rounded-lg bg-ink-900 p-1.5 text-xs ring-1 ring-ink-700 shadow-xl">
-                      <div className="px-2 py-1 text-[11px] uppercase tracking-wide text-slate-500">{t('session.connectedCount', { count: roster.length })}</div>
-                      {roster.map((c) => (
-                        <div key={c.id} className="rounded py-0.5 hover:bg-ink-800">
-                          <div className="flex items-center gap-2 px-2 py-1">
-                          <span className="min-w-0 flex-1 truncate text-slate-200">
-                            {c.label === 'self' ? t('session.roleSelf')
-                              : c.label === 'guest' ? t('session.roleGuest')
-                              : c.label}{c.id === yourIdRef.current ? ` ${t('session.you')}` : ''}
-                          </span>
-                          {c.owner
-                            ? <span className="shrink-0 text-[10px] text-slate-500">owner</span>
-                            : <span className={`shrink-0 text-[10px] ${c.writable ? 'wt-warn' : 'text-slate-500'}`}>{c.writable ? t('session.canWrite') : t('session.canView')}</span>}
-                          {!c.owner && (
-                            <button onClick={() => kick(c.id)} title={t('session.removeFromSession')} aria-label={t('session.removeFromSession')}
-                              className="wt-danger grid h-6 w-6 shrink-0 place-items-center rounded hover:bg-ink-700">✕</button>
-                          )}
-                          </div>
-                          {/* De unde e ataşat. Fără asta „mai e cineva conectat" nu-ţi spunea
-                              dacă e telefonul tău sau altcineva — deci nu puteai reacţiona. */}
-                          {(c.ip || c.agent) && (
-                            <div className="flex items-center gap-1.5 px-2 pb-1 text-[10px] text-slate-500">
-                              <span className="min-w-0 truncate">{c.ip}{c.agent ? ' · ' + shortAgent(c.agent) : ''}</span>
-                              {c.known === false && (
-                                <span title={t('session.deviceNewTitle')}
-                                  className="wt-warn shrink-0 rounded bg-amber-500/15 px-1">{t('session.deviceNew')}</span>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  </>
-                )}
-              </div>
+              <ToolButton title={t('session.shareLinkTooltip')} active={!!shareUrl || !!shareActive || shareOpen} onClick={share}><ShareIcon /></ToolButton>
             )}
             {props.onPopout && !props.popout && (
               <ToolButton title={t('session.detachWindow', { shortcut: shortcutFor('popout') })} onClick={props.onPopout}><PopoutIcon /></ToolButton>
@@ -1894,40 +1952,71 @@ export default function SessionView(props: {
             {moreOpen && (
               <>
                 <div className="fixed inset-0 z-30" onClick={() => setMoreOpen(false)} />
-                <div className="absolute right-0 z-40 mt-1 w-52 rounded-xl border border-ink-700 bg-ink-900 p-1 shadow-2xl">
-                  {/* acțiunile scoase din bară pe ecrane înguste */}
+                <div className="absolute right-0 z-40 mt-1 max-h-[calc(100dvh-5rem)] w-56 overflow-y-auto rounded-xl border border-ink-700 bg-ink-900 p-1 shadow-2xl">
+                  {/* acțiunile scoase din bară pe ecrane înguste — ACELEAŞI reguli de
+                      disponibilitate ca butoanele din bară (Docker/Servicii/Toolbox: doar agent) */}
                   <span className="sm:hidden">
-                    <MoreItem onClick={() => { setShowCommands(true); setShowFiles(false); setMoreOpen(false) }}>
-                      <span className="font-mono text-xs">⌘</span> {t('session.commands')}{commands.length ? ` (${commands.length})` : ''}
+                    <MoreItem onClick={() => { if (!showCommands) toggleCommands(); setMoreOpen(false) }}>
+                      <span className="font-mono text-xs" aria-hidden="true">❯</span> {t('session.commands')}{commands.length ? ` (${commands.length})` : ''}
                     </MoreItem>
-                    <MoreItem onClick={() => { setShowFiles(true); setShowCommands(false); setShowForwards(false); setShowGit(false); setMoreOpen(false) }}>
+                    <MoreItem onClick={() => { if (!showFiles) toggleFiles(); setMoreOpen(false) }}>
                       <FilesIcon /> {t('session.files')}
                     </MoreItem>
-                    <MoreItem onClick={() => { setShowGit(true); setShowFiles(false); setShowCommands(false); setShowForwards(false); setMoreOpen(false) }}>
+                    <MoreItem onClick={() => { if (!showGit) toggleGit(); setMoreOpen(false) }}>
                       <GitBranchIcon /> Git
                     </MoreItem>
-                    <MoreItem onClick={() => { setShowForwards(true); setShowFiles(false); setShowCommands(false); setMoreOpen(false) }}>
+                    <MoreItem onClick={() => { if (!showForwards) toggleForwards(); setMoreOpen(false) }}>
                       <ForwardIcon /> {t('session.portForwards')}
                     </MoreItem>
+                    {agentHost && (
+                      <MoreItem onClick={() => { if (!showDocker) toggleDocker(); setMoreOpen(false) }}>
+                        <DockerIcon /> {t('docker.title')}
+                      </MoreItem>
+                    )}
+                    {agentHost && (
+                      <MoreItem onClick={() => { if (!showServices) toggleServices(); setMoreOpen(false) }}>
+                        <ServicesIcon /> {t('services.title')}
+                      </MoreItem>
+                    )}
+                    {agentHost && (
+                      <MoreItem onClick={() => { if (!showToolbox) toggleToolbox(); setMoreOpen(false) }}>
+                        <ToolboxIcon /> {t('toolbox.title')}
+                      </MoreItem>
+                    )}
                     {isLive && (
                       <MoreItem onClick={() => { setSnippetsOpen(true); setMoreOpen(false) }}>
-                        <span className="font-mono text-xs">❯_</span> {t('session.savedCommands')}
+                        <span className="font-mono text-xs" aria-hidden="true">❯_</span> {t('session.savedCommands')}
                       </MoreItem>
                     )}
                   </span>
-                  <MoreItem onClick={() => { openLinks(); setMoreOpen(false) }}><LinkIcon /> {t('session.links')}</MoreItem>
+                  {roster.length > 1 && (
+                    <MoreItem onClick={() => { setShowRoster(true); setMoreOpen(false) }}>
+                      <span aria-hidden="true">👁</span> {t('session.connectedCount', { count: roster.length })}
+                    </MoreItem>
+                  )}
+                  <MoreItem onClick={() => { openLinks(); setMoreOpen(false) }}><ExternalLinkIcon /> {t('session.links')}</MoreItem>
                   <MoreItem onClick={() => { setShowNote(!showNote); setMoreOpen(false) }}><NoteIcon /> {t('session.note')}</MoreItem>
                   <MoreItem onClick={() => { copySelection(); setMoreOpen(false) }}><CopyIcon /> {t('session.copySelection')}</MoreItem>
                   <MoreItem onClick={() => setPreferredFont(fontSize + 1)}>A+ {t('session.fontLarger')}</MoreItem>
                   <MoreItem onClick={() => setPreferredFont(fontSize - 1)}>A− {t('session.fontSmaller')}</MoreItem>
                   {!props.popout && (
-                    <MoreItem onClick={() => { share(); setMoreOpen(false) }}><LinkIcon /> {t('session.shareLink')}</MoreItem>
+                    <MoreItem onClick={() => { share(); setMoreOpen(false) }}><ShareIcon /> {t('session.shareLink')}</MoreItem>
                   )}
                   <MoreItem onClick={() => {
                     if (document.fullscreenElement) document.exitFullscreen()
                     else document.documentElement.requestFullscreen().catch(() => {})
                     setMoreOpen(false)
                   }}>⛶ {t('session.fullscreen')}</MoreItem>
+                  {/* oprirea, cu etichetă text: în bară e doar pictograma ■, uşor de confundat cu
+                      „închide tab-ul" (care NU opreşte sesiunea) */}
+                  {isLive && (
+                    <>
+                      <div className="my-1 h-px bg-ink-800" aria-hidden="true" />
+                      <MoreItem onClick={() => { setMoreOpen(false); void killSession() }}>
+                        <span className="wt-danger flex items-center gap-2"><StopIcon /> {t('session.stopSessionMenu')}</span>
+                      </MoreItem>
+                    </>
+                  )}
                 </div>
               </>
             )}
@@ -1958,7 +2047,7 @@ export default function SessionView(props: {
       )}
 
       {/* Panou de opțiuni share (înainte de generare) */}
-      {shareOpen && !shareUrl && (
+      {shareOpen && !shareUrl && !shareActive && (
         <div className="flex flex-wrap items-center gap-3 border-b border-ink-800 bg-ink-900/70 px-3 py-2 text-sm">
           <label className="flex cursor-pointer items-center gap-1.5 text-xs text-slate-300">
             <input type="checkbox" checked={shareWritable} onChange={(e) => setShareWritable(e.target.checked)} className="h-3.5 w-3.5 rounded accent-sky-600" />
@@ -1985,19 +2074,28 @@ export default function SessionView(props: {
       )}
 
       {/* Link generat */}
-      {shareUrl && (
+      {(shareUrl || shareActive) && (
         <div className="flex items-center gap-2 border-b border-ink-800 bg-ink-900/70 px-3 py-2 text-sm">
-          <span className={`shrink-0 rounded px-1.5 py-0.5 text-[11px] ${shareIsWritable ? 'wt-warn bg-amber-500/15' : 'bg-ink-800 text-slate-400'}`}>
-            {shareIsWritable ? t('session.shareWritable') : t('session.shareReadOnly')}
+          <span className={`shrink-0 rounded px-1.5 py-0.5 text-[11px] ${shareActive?.writable ? 'wt-warn bg-amber-500/15' : 'bg-ink-800 text-slate-400'}`}>
+            {shareActive?.writable ? t('session.shareWritable') : t('session.shareReadOnly')}
           </span>
-          <code className="wt-good min-w-0 flex-1 truncate rounded bg-black/40 px-2 py-1 font-mono text-xs">{shareUrl}</code>
-          <button
+          {shareActive?.expires && (
+            <span className="hidden shrink-0 text-[11px] text-slate-500 sm:inline">
+              {t('session.shareExpires', { time: fmtTs(shareActive.expires) })}
+            </span>
+          )}
+          {shareUrl ? (
+            <code className="wt-good min-w-0 flex-1 truncate rounded bg-black/40 px-2 py-1 font-mono text-xs">{shareUrl}</code>
+          ) : (
+            <span className="min-w-0 flex-1 text-xs text-slate-400">{t('session.shareActiveNoUrl')}</span>
+          )}
+          {shareUrl && <button
             onClick={() => { copyText(shareUrl).then((ok) => { if (!ok) return
               setCopied(true); setTimeout(() => setCopied(false), 1200) }) }}
             className="shrink-0 rounded bg-sky-600 px-2 py-1 text-xs font-medium text-white hover:bg-sky-700"
           >
             {copied ? '✓' : t('session.copy')}
-          </button>
+          </button>}
           <button onClick={revokeShare} className="wt-danger shrink-0 rounded px-2 py-1 text-xs hover:bg-ink-800">
             {t('session.revoke')}
           </button>
@@ -2230,7 +2328,12 @@ export default function SessionView(props: {
               <div className="mt-2 rounded-lg bg-ink-950 px-3 py-2 font-mono text-[13px] text-slate-200 break-all ring-1 ring-ink-800">
                 {cmdConfirm.cmd}
               </div>
-              <div id="wt-guard-desc" className="mt-2 text-xs text-slate-400">{t('session.sureToRun')}</div>
+              {/* regula care a prins comanda — fleet şi panourile o arătau deja; fără ea nu ştiai
+                  DE CE e „periculoasă" şi nici ce regulă să ajustezi în Setări → Securitate */}
+              <div id="wt-guard-desc" className="mt-2 text-xs text-slate-400">
+                <span className="break-all font-mono text-slate-300">{t('session.guardRule', { pattern: cmdConfirm.pattern })}</span>
+                {' · '}{t('session.sureToRun')}
+              </div>
               <div className="mt-4 flex justify-end gap-2">
                 {/* focusul iniţial pe Anulează: acţiunea sigură e implicitul într-un dialog
                     de comandă periculoasă (acelaşi tipar ca ConfirmModal cu `danger`) */}
@@ -2446,7 +2549,7 @@ export default function SessionView(props: {
               <SearchIcon /> {t('session.searchScrollbackMenu')}
             </MoreItem>
             <MoreItem onClick={() => { openLinks(); setCtxMenu(null) }}>
-              <LinkIcon /> {t('session.links')}
+              <ExternalLinkIcon /> {t('session.links')}
             </MoreItem>
             {props.onSplitView && (
               <MoreItem onClick={() => { props.onSplitView!(); setCtxMenu(null) }}>

@@ -99,6 +99,18 @@ async def main():
             sid, hid2fa, "t", "closed", time.time(), 24, 80, security.sha256_hex("x"),
             time.time() + 3600)
         security.clear_stepup_for(uid)
+        # starea share-ului (3.5.3): pe host 2FA fără fereastră → „inactiv" (meta-leak), iar
+        # cu fereastră → activ, FĂRĂ url/token în răspuns (token-ul e hash-uit, nu se reconstruieşte)
+        r = await c.get(f"/api/sessions/{sid}/share")
+        check("share_state pe host 2FA fără fereastră → inactiv",
+              r.status_code == 200 and r.json() == {"active": False}, r.text[:120])
+        security.open_stepup_window(uid, hid2fa)
+        r = await c.get(f"/api/sessions/{sid}/share")
+        j = r.json() if r.status_code == 200 else {}
+        check("share_state cu fereastră → activ, fără url/token",
+              j.get("active") is True and "url" not in j and "token" not in j
+              and security.sha256_hex("x") not in r.text, r.text[:160])
+        security.clear_stepup_for(uid)
         r = await c.request("DELETE", f"/api/sessions/{sid}/share")
         check("revoke_share pe host 2FA fără fereastră → 403", r.status_code == 403, r.text[:120])
         r = await c.request("DELETE", f"/api/sessions/{sid}")
@@ -106,6 +118,8 @@ async def main():
         security.open_stepup_window(uid, hid2fa)
         r = await c.request("DELETE", f"/api/sessions/{sid}/share")
         check("revoke_share cu fereastră deschisă → 200", r.status_code == 200, r.text[:120])
+        r = await c.get(f"/api/sessions/{sid}/share")
+        check("share_state după revocare → inactiv", r.json() == {"active": False}, r.text[:120])
         r = await c.request("DELETE", f"/api/sessions/{sid}")
         check("delete_session cu fereastră deschisă → 200", r.status_code == 200, r.text[:120])
 

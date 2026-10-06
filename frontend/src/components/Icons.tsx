@@ -67,6 +67,17 @@ export const StopIcon = () => (
   </Icon>
 )
 
+/* „Partajează" (trei noduri legate): distinct de LinkIcon, pe care meniul ⋯ îl folosea şi
+   pentru „Linkuri" şi pentru „Link de partajare" — două acţiuni diferite, aceeaşi pictogramă. */
+export const ShareIcon = () => (
+  <Icon>
+    <circle cx="18" cy="5" r="3" />
+    <circle cx="6" cy="12" r="3" />
+    <circle cx="18" cy="19" r="3" />
+    <path d="m8.6 13.5 6.8 4M15.4 6.5l-6.8 4" />
+  </Icon>
+)
+
 export const TrashIcon = () => (
   <Icon>
     <path d="M3 6h18" />

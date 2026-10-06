@@ -11,6 +11,9 @@ export default function SnippetsMenu(props: {
   /** control extern (scurtătura Alt+S din App) */
   open?: boolean
   onOpenChange?: (open: boolean) => void
+  /** clase pentru butonul-declanşator (ex. `hidden sm:grid`): pe telefon butonul nu încape în
+      bară, dar meniul TREBUIE să rămână montat — îl deschid itemul din ⋯ şi Alt+S */
+  triggerClassName?: string
 }) {
   const { t } = useI18n()
   const { confirm } = useConfirm()
@@ -98,14 +101,19 @@ export default function SnippetsMenu(props: {
     <div ref={ref} className="relative">
       <button
         title={t('snippets.savedCommands')}
+        aria-label={t('snippets.savedCommands')}
+        aria-expanded={open}
         onMouseDown={(e) => e.preventDefault()}
         onClick={() => setOpen((v) => !v)}
-        className="rounded-md px-1.5 py-1 text-sm text-slate-400 hover:bg-ink-700"
+        className={`wt-touch place-items-center rounded-md px-1.5 py-1 text-sm text-slate-400 hover:bg-ink-700 ${props.triggerClassName ?? 'grid'}`}
       >
         ❯_
       </button>
       {open && (
-        <div className="absolute right-0 z-30 mt-1 w-72 rounded-xl border border-ink-700 bg-ink-900 p-1.5 shadow-2xl">
+        /* telefon (< sm): foaie de jos peste keybar — fără ancoră vizibilă în bară, un dropdown
+           absolut ar apărea în colţul greşit sau în afara ecranului; de la sm: dropdown clasic */
+        <div data-testid="snippets-menu"
+          className="fixed inset-x-2 bottom-[calc(var(--wt-keybar-h,0px)+0.5rem)] z-40 rounded-xl border border-ink-700 bg-ink-900 p-1.5 shadow-2xl sm:absolute sm:inset-x-auto sm:bottom-auto sm:right-0 sm:z-30 sm:mt-1 sm:w-72">
           {!managing ? (
             <>
               {/* filtrare: peste ~6 snippets, lista nu se mai scanează cu ochiul */}

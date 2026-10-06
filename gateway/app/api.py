@@ -6487,6 +6487,32 @@ async def create_share(sid: str, request: Request, body: ShareIn = ShareIn(),
             "expires": expires, "writable": bool(body.writable)}
 
 
+@router.get("/api/sessions/{sid}/share")
+async def share_state(sid: str, user=Depends(security.require_user)):
+    """Starea share-ului activ al unei sesiuni — ca owner-ul să-şi regăsească link-ul activ şi
+    butonul de revocare după un reload (până în 3.5.3 starea trăia doar în memoria tab-ului).
+
+    URL-ul NU se întoarce, nici aici: token-ul e stocat HASH-uit (vezi create_share), deci nu
+    poate fi reconstruit — se arată o singură dată, la creare. Întoarcem doar ce e nevoie pentru
+    UI (activ / expirare / writable / al meu) şi DOAR unui utilizator de browser (`require_user`,
+    nu token de automatizare). Pe un host 2FA fără fereastră de step-up deschisă răspundem
+    „inactiv", ca la lista de sesiuni (meta-leak): citire PASIVĂ, nu glisează fereastra."""
+    row = await db.fetchone(
+        "SELECT host_id, share_token, share_expires, share_writable, share_by_id"
+        " FROM sessions WHERE id=?", sid)
+    if not row:
+        raise ApiError(404, "session.missing", "no such session")
+    hrow = await db.fetchone("SELECT require_2fa FROM hosts WHERE id=?", row["host_id"])
+    if hrow and hrow["require_2fa"] and not security.stepup_window_is_open(user["id"], row["host_id"]):
+        return {"active": False}
+    active = bool(row["share_token"]) and (row["share_expires"] or 0) > time.time()
+    if not active:
+        return {"active": False}
+    return {"active": True, "expires": row["share_expires"],
+            "writable": bool(row["share_writable"]),
+            "mine": row["share_by_id"] == user["id"]}
+
+
 @router.delete("/api/sessions/{sid}/share")
 async def revoke_share(sid: str, user=Depends(security.require_user)):
     # H1: pe un host 2FA, revocarea share-ului e o acţiune de host (simetric cu crearea lui, care

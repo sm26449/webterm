@@ -356,6 +356,18 @@ textarea {
   @apply outline-none;
 }
 
+/* Keybar-ul tactil (MobileKeybar): după TIPUL de pointer, nu după lăţime. Cu `md:hidden` un
+   iPad/tabletă fără tastatură fizică (≥768px) rămânea fără Esc/Ctrl/săgeţi, iar o fereastră
+   îngustă de desktop primea taste de care n-are nevoie. Deget → vizibil; mouse → ascuns. */
+.wt-keybar {
+  display: none;
+}
+@media (pointer: coarse) {
+  .wt-keybar {
+    display: flex;
+  }
+}
+
 /* Telefon în peisaj (înălțime mică): cromul (header + tab-uri + status +
    keybar) mânca ~85% din ecran — rămâneau 8 rânduri de terminal. Compactăm
    tot ce nu e terminal; keybar-ul rămâne (e singura tastatură de comenzi). */
