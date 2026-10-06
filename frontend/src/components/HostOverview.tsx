@@ -813,13 +813,17 @@ function Row(props: { k: string; v: string; mono?: boolean; tone?: 'good'; badge
   return (
     <div className="flex items-center justify-between gap-3 border-b border-ink-800/60 py-2 last:border-0">
       <dt className="flex shrink-0 items-center gap-1.5 text-sm text-slate-500">{props.k}{props.help && <HelpTip id={props.help} />}</dt>
-      <dd className={`min-w-0 truncate text-right text-sm ${props.tone === 'good' ? 'wt-good' : 'text-slate-200'} ${props.mono ? 'font-mono' : ''}`}>
-        {props.v}
-        {props.badge && (
-          <span className="wt-warn ml-2 rounded bg-amber-500/15 px-1.5 py-0.5 align-middle text-[10px] font-semibold uppercase tracking-wide">{props.badge}</span>
-        )}
+      {/* acţiunea stă ÎN <dd>: un <div> frate cu <dt>/<dd> într-un <dl> e invalid (axe:
+          definition-list, serios) — cititoarele de ecran pierd perechea termen/valoare */}
+      <dd className={`flex min-w-0 items-center justify-end gap-3 text-right text-sm ${props.tone === 'good' ? 'wt-good' : 'text-slate-200'} ${props.mono ? 'font-mono' : ''}`}>
+        <span className="min-w-0 truncate">
+          {props.v}
+          {props.badge && (
+            <span className="wt-warn ml-2 rounded bg-amber-500/15 px-1.5 py-0.5 align-middle text-[10px] font-semibold uppercase tracking-wide">{props.badge}</span>
+          )}
+        </span>
+        {props.action && <span className="shrink-0">{props.action}</span>}
       </dd>
-      {props.action && <div className="shrink-0">{props.action}</div>}
     </div>
   )
 }
