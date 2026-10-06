@@ -105,7 +105,10 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
           title: t('fleet.overwriteTitle'), message: t('fleet.overwriteConfirm', { name }),
           danger: true, confirmLabel: t('fleet.replace'),
         }))) return
-    const targets = remember ? { targets: targetsPayload(tagsOfHosts(chosen)) } : {}
+    // bifa e activă doar când hosturile alese AU etichete; altfel nu trimitem `targets` deloc
+    // (un `null` ar şterge ţintele existente ale unui snippet suprascris)
+    const tags = tagsOfHosts(chosen)
+    const targets = remember && tags.length ? { targets: targetsPayload(tags) } : {}
     setSnipErr('')
     try {
       if (existing) {
