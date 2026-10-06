@@ -7194,14 +7194,26 @@ async def shared_ws(ws: WebSocket, token: str):
     # măcar de un cookie furat, doar de URL.
     # Decis ÎNAINTE de replay: dacă e blocată, nu scurgem scrollback-ul (read_tail).
     start_locked = False
+    share_2fa = False
     if hub:
         hrow2 = await db.fetchone("SELECT require_2fa FROM hosts WHERE id=?", row["host_id"])
         if hrow2 and hrow2["require_2fa"]:
+            share_2fa = True
             hub.lock_idle = config.IDLE_LOCK_SECS
             owner_present = any(getattr(c, "is_owner", False) for c in hub.clients)
             start_locked = hub.locked or not owner_present
+    # Aceeaşi politică de replay ca owner-ul (istoric tmux inclus), sub ACEEAŞI condiţie: fără
+    # owner prezent pe un host 2FA, invitatul nu primeşte nimic din scrollback.
+    sb, sb_rows = core.parse_replay_params(getattr(ws, "query_params", None) or {})
+    if client:
+        client.replay_limit = core.replay_tail_limit(sb, core.stream_is_plain(hub))
     if not start_locked:
-        await ws.send_bytes(await asyncio.to_thread(core.read_tail, row["id"]))
+        replay = await core.attach_replay(row["id"], hub, sb, sb_rows)
+        if hub and (hub.locked or (share_2fa and not any(
+                getattr(c, "is_owner", False) for c in hub.clients))):
+            start_locked = True          # blocată / owner plecat cât aşteptam agentul → nimic scurs
+        else:
+            await ws.send_bytes(replay)
     if hub:
         hub.clients.add(client)
         client.sender_task = asyncio.create_task(client.sender())
@@ -7359,8 +7371,19 @@ async def browser_ws(ws: WebSocket, sid: str):
     # closed sessions: replaying the alt-screen exit would blank the history.
     # Sesiune blocată → NU replaya scrollback-ul; la deblocare (passkey), hub.unlock() pune
     # un _RESYNC în coadă care-l retrimite din transcript. Astfel bufferul nu se scurge cât e blocat.
+    # `?sb=&rows=` (scrollback-ul şi rândurile browserului): istoric tmux deasupra cozii pe o
+    # sesiune live sub tmux, fereastră mai mare pe un flux fără tmux — vezi `core.attach_replay`.
+    sb, sb_rows = core.parse_replay_params(getattr(ws, "query_params", None) or {})
+    if client:
+        client.replay_limit = core.replay_tail_limit(sb, core.stream_is_plain(hub))
     if not start_locked:
-        await ws.send_bytes(await asyncio.to_thread(core.read_tail, sid))
+        replay = await core.attach_replay(sid, hub, sb, sb_rows)
+        if hub and hub.locked:
+            # blocată (idle-lock) cât aşteptam istoricul de la agent: nu scurgem nimic; calea
+            # `start_locked` de mai jos ne blochează clientul şi trimite „locked"
+            start_locked = True
+        else:
+            await ws.send_bytes(replay)
     elif not hub:
         # Sesiune ÎNCHISĂ pe host 2FA fără fereastră de step-up: nu există hub care să trimită un
         # „locked" prin broadcast, deci semnalăm direct pe acest socket şi NU trimitem scrollback.

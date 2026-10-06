@@ -565,6 +565,100 @@ def tmux_server_wedged():
     return b"exited unexpectedly" in err or b"lost server" in err
 
 
+# v57: istoricul REAL al pane-ului tmux, pentru scrollback-ul unui browser care se ataşează
+# proaspăt. Gateway-ul rejuca doar ultimii 256 KiB din transcript, iar sub tmux fluxul ăla e
+# mai ales redesenare (scroll-region + `CSI n S`, pe care xterm.js NU le pune în scrollback),
+# deci browserul vedea câteva ecrane. tmux ţine însă 50000 de rânduri per pane, cu culori.
+HISTORY_MAX_LINES = 50000            # = history-limit; gateway-ul plafonează oricum mai jos
+HISTORY_MAX_BYTES = 4 * 1024 * 1024  # plafon pe captura BRUTĂ (păstrăm rândurile cele mai noi)
+HISTORY_MAX_REPLY = 1024 * 1024     # plafon pe câmpul `z` (base64) din răspuns. OUTBOX_LIMIT e
+                                     # 4 MiB, iar depăşirea lui DECONECTEAZĂ agentul (toate sesiunile):
+                                     # un singur frame mare plus output-ul altor sesiuni nu au voie
+                                     # să-l atingă — de-aia un plafon mult sub el, nu „4 MiB brut".
+HISTORY_TIMEOUT = 5                  # per comandă tmux (pe worker, dar tot mărginit)
+_HISTORY_SEM = threading.BoundedSemaphore(2)   # câte capturi în zbor (F5 în rafală pe 2 taburi)
+
+
+def history_capture_argv(sid, n):
+    """argv-ul tmux pentru ultimele `n` rânduri de istoric ale sesiunii, FĂRĂ ecranul vizibil.
+
+    · ţinta ca SESIUNE (`name:`), ca la `session_cwd` — pe tmux 3.4 `=name` nu rezolvă pane-ul;
+    · `-e` păstrează culorile (doar SGR), `-J` uneşte rândurile împachetate (browserul are altă
+      lăţime, le reîmpachetează singur);
+    · `-E -1` = se opreşte DEASUPRA ecranului vizibil: pe ăla îl pictează redraw-ul tmux de la
+      ataşare, deci nu-l dublăm."""
+    return ["capture-pane", "-p", "-e", "-J", "-t", TMUX_SESSION_PREFIX + sid + ":",
+            "-S", "-%d" % int(n), "-E", "-1"]
+
+
+def cap_history_bytes(data, limit=HISTORY_MAX_BYTES):
+    """(date, trunchiat). Peste plafon păstrăm SFÂRŞITUL (rândurile recente), tăiat la un
+    început de rând — un rând rupt la jumătate ar putea începe în mijlocul unei secvenţe SGR."""
+    if len(data) <= limit:
+        return data, False
+    cut = data[-limit:]
+    nl = cut.find(b"\n")
+    return (cut[nl + 1:] if nl >= 0 else b""), True
+
+
+def parse_history_probe(out):
+    """`#{history_size} #{window_panes}` → (hsize, panes) sau None dacă ieşirea e ciudată."""
+    parts = (out or b"").decode("ascii", "replace").split()
+    if len(parts) != 2 or not all(p.isdigit() for p in parts):
+        return None
+    return int(parts[0]), int(parts[1])
+
+
+def tmux_history(sid, lines):
+    """Captura de istoric pentru op-ul `history`. Întoarce un dict de răspuns:
+    {z, n, lines, truncated} la succes, {error, msg} altfel. Blocant (subprocess) — doar pe worker."""
+    target = TMUX_SESSION_PREFIX + sid + ":"
+    try:
+        r = tmux_cmd("display-message", "-p", "-t", target,
+                     "#{history_size} #{window_panes}", timeout=HISTORY_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return {"error": "capture_failed", "msg": "tmux display-message: %s" % e}
+    probe = parse_history_probe(r.stdout) if r.returncode == 0 else None
+    if probe is None:
+        return {"error": "capture_failed",
+                "msg": (r.stderr or b"").decode("utf-8", "replace").strip()[:200] or "bad probe"}
+    hsize, panes = probe
+    if panes != 1:
+        # Cu pane-uri multiple fluxul browserului e layout-ul tmux, nu un singur pane; istoricul
+        # pane-ului activ (altă lăţime) lipit deasupra ar minţi. Gateway-ul rămâne pe transcript.
+        return {"error": "multi_pane", "msg": "%d panes" % panes}
+    n = min(int(lines), hsize, HISTORY_MAX_LINES)
+    if n <= 0:
+        # fără istoric: NU rulăm capture-pane — pe hsize=0, `-S -N -E -1` e prins de tmux la
+        # rândul 0 VIZIBIL, adică am dubla primul rând de pe ecran
+        data, truncated = b"", False
+    else:
+        try:
+            r = tmux_cmd(*history_capture_argv(sid, n), timeout=HISTORY_TIMEOUT)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return {"error": "capture_failed", "msg": "tmux capture-pane: %s" % e}
+        if r.returncode != 0:
+            return {"error": "capture_failed",
+                    "msg": (r.stderr or b"").decode("utf-8", "replace").strip()[:200]}
+        data, truncated = cap_history_bytes(r.stdout or b"")
+    z, data, more = encode_history(data)
+    return {"z": z, "n": len(data), "lines": data.count(b"\n"), "truncated": truncated or more}
+
+
+def encode_history(data, max_reply=HISTORY_MAX_REPLY):
+    """(z, date_efective, trunchiat): zlib + base64, cu `z` ≤ max_reply. Escape-urile de culoare în
+    JSON ar fi \\u001b (×6), iar textul de terminal se comprimă bine — link-ul agentului e partajat
+    cu toate sesiunile hostului. Dacă tot nu încape (conţinut aproape incompresibil), înjumătăţim
+    păstrând rândurile RECENTE până încape; la limită, istoric gol (gateway-ul cade pe transcript)."""
+    truncated = False
+    while True:
+        z = base64.b64encode(zlib.compress(data, 6)).decode("ascii")
+        if len(z) <= max_reply or not data:
+            return z, data, truncated
+        data, _ = cap_history_bytes(data, len(data) // 2)
+        truncated = True
+
+
 def tmux_cmdline_matches(parts, socket):
     """True dacă un cmdline (listă de octeți split pe NUL din /proc/<pid>/cmdline)
     e un proces `tmux -L <socket>` — server sau client pe socketul nostru. Pur, ca
@@ -2617,6 +2711,20 @@ class Agent:
         finally:
             _AUTOSTART_LOCK.release()
 
+    def _history_worker(self, rid, sid, lines):
+        """Rulează `tmux_history` şi răspunde cu acelaşi id. Eliberează MEREU `_HISTORY_SEM`."""
+        try:
+            try:
+                res = tmux_history(sid, lines)
+            except Exception as e:      # noqa: BLE001 — op-ul nu are voie să doboare agentul
+                res = {"error": "capture_failed", "msg": repr(e)[:200]}
+            if res.get("error"):
+                self.send_ctrl({"ok": False, "id": rid, "code": res["error"], "msg": res.get("msg", "")})
+            else:
+                self.send_ctrl(dict(res, ok=True, id=rid))
+        finally:
+            _HISTORY_SEM.release()
+
     def _start_diag(self, rid=None):
         """Porneşte o colectare de diagnostic pe un worker — CEL MULT UNA în zbor (audit 2026-10):
         `run` are semafor tocmai ca sute de cereri să nu pornească sute de procese; `diagnostics`
@@ -3123,6 +3231,25 @@ class Agent:
                     except OSError:
                         cwd = None
                 ok(cwd=cwd or os.path.expanduser("~"))
+
+            elif op == "history":
+                # v57: istoricul pane-ului tmux (capture-pane) pentru scrollback-ul unui browser
+                # proaspăt ataşat. Pe un worker: capture-pane pe 50k rânduri poate dura, iar loop-ul
+                # ăsta serveşte toate sesiunile. Backend pty → ok:false; gateway-ul cade pe transcript.
+                sid = msg.get("sid")
+                s = self.sessions.get(sid) if isinstance(sid, str) else None
+                if not s:
+                    return err("no_session")
+                if s.backend != "tmux":
+                    return err("not_tmux", "pty backend: no tmux history (the transcript is the history)")
+                lines = msg.get("lines")
+                if not isinstance(lines, int) or isinstance(lines, bool) or lines <= 0:
+                    return err("bad_request", "lines must be a positive integer")
+                if not _HISTORY_SEM.acquire(False):
+                    return err("busy", "too many history captures in flight")
+                threading.Thread(target=self._history_worker, args=(rid, sid, lines),
+                                 daemon=True).start()
+                # NU răspundem aici — worker-ul trimite reply-ul cu acelaşi id
 
             elif op == "fwd_open":
                 # deschide un tunel TCP către un serviciu văzut de host (port forwarding,

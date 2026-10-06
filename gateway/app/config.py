@@ -171,6 +171,10 @@ WEB_SESSION_IDLE = int(_num("WEBTERM_SESSION_IDLE_HOURS", 12, float) * 3600)
 # un step-up passkey. 0 = dezactivat. Apără de sesiuni autentificate nesupravegheate.
 IDLE_LOCK_SECS = _num("WEBTERM_IDLE_LOCK_SECS", 300)
 BROWSER_TAIL_BYTES = 256 * 1024  # transcript tail replayed to a connecting browser
+# Fereastra MARE de replay: doar pentru fluxuri fără tmux (backend pty, SSH/telnet direct, sesiuni
+# închise) şi doar pentru browsere cu scrollback mare (desktop, vezi `core.replay_tail_limit`).
+# Sub tmux, istoricul vine din `capture-pane` (op-ul `history`), nu dintr-un transcript mai lung.
+BROWSER_TAIL_BYTES_LARGE = 2 * 1024 * 1024
 # per-session transcript cap: when .out passes MAX, keep only the last KEEP bytes
 # (head-truncated, gap-marked) so a runaway `cat`/`yes` can't fill the disk.
 TRANSCRIPT_MAX_BYTES = _num("WEBTERM_TRANSCRIPT_MAX_BYTES", 64 * 1024 * 1024)

@@ -20,6 +20,7 @@ import ssl
 import struct
 import time
 import uuid
+import zlib
 from pathlib import Path
 from typing import Dict, Optional, Set
 
@@ -375,6 +376,174 @@ def read_tail(sid: str, limit: int = config.BROWSER_TAIL_BYTES,
 
 
 # ---------------------------------------------------------------------------
+# Istoricul tmux la ataşare (agent v57, op-ul `history`)
+# ---------------------------------------------------------------------------
+# Problema: la ataşare rejucam doar ultimii 256 KiB din transcript. Sub tmux fluxul ăla e mai ales
+# redesenare, iar tmux derulează cu scroll-region + `CSI n S` — pe care xterm.js NU le pune în
+# scrollback (doar LF-ul la baza regiunii o face). Deci scrollback-ul unei sesiuni lungi ieşea
+# zeci-sute de rânduri, sau nimic. Istoricul real e în tmux (50000 rânduri/pane, cu culori).
+#
+# Designul (2026-10): ISTORIC DIN tmux DEASUPRA + COADA DE TRANSCRIPT DEDESUBT, într-un singur frame.
+#  · capture-pane pierde OSC 133 (marcajele panoului de comenzi / istoricului global) → coada
+#    rămâne EXACT cea de azi (aceleaşi 256 KiB, aceeaşi filtrare), deci panoul vede aceleaşi
+#    marcaje ca înainte; istoricul de deasupra e doar text colorat, fără marcaje.
+#  · Îmbinarea NU e deduplicată, deliberat. Am încercat potrivirea textuală coadă↔istoric, dar
+#    nu ştim ce rânduri din coadă ajung în scrollback-ul xterm: cele derulate de tmux cu `CSI S`
+#    se pierd la replay. Tăind din istoric rândurile „acoperite" de coadă le-am fi pierdut de tot.
+#    Preferăm o repetiţie mărginită (exact rândurile pe care coada le pune în scrollback — adică
+#    scrollback-ul de azi) unei pierderi tăcute; îmbinarea e MARCATĂ vizibil (`HISTORY_SEAM`).
+#  · După istoric împingem ecranul în scrollback (rows-1 LF) şi ducem cursorul sus: coada începe
+#    oriunde în flux, adesea cu poziţionări absolute (CUP) care altfel ar suprascrie ultimul ecran
+#    de istoric în loc să-l lase în scrollback.
+#  · Orice eşec (agent < 57, backend pty, pane-uri multiple, timeout, răspuns invalid) = None →
+#    comportamentul de azi, fără nicio urmă în UI.
+# NU se aplică la resync (resume/unlock): acolo coada rămâne cea istorică (vezi `_resync`).
+HISTORY_MIN_AGENT = 57
+HISTORY_MAX_LINES = 20000            # plafon server-side pe `sb` (browserul cere 10000 / 3000)
+HISTORY_MAX_BYTES = 4 * 1024 * 1024  # plafon pe captura DECOMPRIMATĂ (agentul taie la fel)
+HISTORY_MAX_Z = 2 * 1024 * 1024      # plafon pe câmpul base64 primit (agentul îl ţine ≤ 1 MiB)
+HISTORY_TIMEOUT = 3.0                # cât poate întârzia ataşarea; peste = fallback tăcut
+HISTORY_MAX_ROWS = 500
+LARGE_REPLAY_MIN_SCROLLBACK = 5000   # browserele „desktop" (SCROLLBACK 10000); mobilul cere 3000
+HISTORY_SEAM = (b"\x1b[0m\x1b[2m\xe2\x94\x80\xe2\x94\x80 webterm: tmux history above \xc2\xb7 "
+                b"recent output replayed below (its first lines may repeat the last ones above) "
+                b"\xe2\x94\x80\xe2\x94\x80\x1b[0m")
+
+# secvenţe escape într-un rând de captură (str, deja decodat): CSI, şiruri OSC/DCS/SOS/PM/APC
+# (până la terminator sau final de rând), ESC + intermediari + final, ESC orfan
+_HIST_ESC_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[\]PX^_].*?(?:\x07|\x1b\\|\Z)"
+                          r"|\x1b[ -/]*[0-~]|\x1b")
+_HIST_SGR_RE = re.compile(r"\x1b\[[0-9;:]*m\Z")
+# C0 (fără TAB) + DEL + C1. C1 contează: xterm.js tratează U+009B ca CSI, deci un „\u009b?1049h"
+# în text ar comuta ecranul alternativ ocolind ALT_SCREEN_RE (care vede doar forma ESC [).
+_HIST_CTRL_RE = re.compile(r"[\x00-\x08\x0a-\x1f\x7f-\x9f]")
+_HIST_TRAIL_RE = re.compile(r"[ ]+((?:\x1b\[[0-9;:]*m)*)\Z")   # `-J` păstrează spaţiile de la coadă
+
+
+def sanitize_history_line(line: str) -> str:
+    """Un rând de captură → doar text + SGR. Tot restul (poziţionări, ştergeri, comutări de ecran,
+    OSC, controale C0/C1) iese: nimic din istoric nu are voie să mute cursorul, să şteargă ecranul
+    sau să intre în alt-screen. capture-pane `-e` emite oricum doar SGR — asta e plasa."""
+    out = []
+    pos = 0
+    for m in _HIST_ESC_RE.finditer(line):
+        out.append(_HIST_CTRL_RE.sub("", line[pos:m.start()]))
+        if _HIST_SGR_RE.match(m.group(0)):
+            out.append(m.group(0))
+        pos = m.end()
+    out.append(_HIST_CTRL_RE.sub("", line[pos:]))
+    return _HIST_TRAIL_RE.sub(r"\1", "".join(out))
+
+
+def history_lines(raw: bytes, max_lines: int) -> list:
+    """Captura brută → ultimele `max_lines` rânduri, sanitizate."""
+    if max_lines <= 0 or not raw:
+        return []
+    lines = raw.decode("utf-8", "replace").split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()                    # capture-pane termină cu \n
+    return [sanitize_history_line(ln) for ln in lines[-max_lines:]]
+
+
+def build_history_block(raw: bytes, max_lines: int, rows: int) -> bytes:
+    """Blocul pus ÎNAINTEA cozii: istoric (CRLF, pt. xterm) + îmbinarea marcată + ecranul împins în
+    scrollback + cursor sus. b"" dacă nu e nimic de pus (→ replay-ul de azi, neschimbat)."""
+    lines = history_lines(raw, max_lines)
+    if not lines:
+        return b""
+    rows = max(1, min(int(rows or 24), HISTORY_MAX_ROWS))
+    block = (b"\x1b[0m" + "\r\n".join(lines).encode("utf-8") + b"\x1b[0m\r\n" + HISTORY_SEAM
+             + b"\r\n" + b"\n" * (rows - 1) + b"\x1b[H")
+    return ALT_SCREEN_RE.sub(b"", block)   # redundant după sanitizare — aceeaşi regulă ca la coadă
+
+
+def decode_history_reply(resp) -> Optional[bytes]:
+    """Răspunsul agentului → captura brută, sau None la orice abatere (mărime, base64, zlib)."""
+    if not isinstance(resp, dict) or not resp.get("ok"):
+        return None
+    z = resp.get("z")
+    if not isinstance(z, str) or len(z) > HISTORY_MAX_Z:
+        return None
+    try:
+        d = zlib.decompressobj()
+        raw = d.decompress(base64.b64decode(z, validate=True), HISTORY_MAX_BYTES + 1)
+    except (ValueError, zlib.error):
+        return None
+    if len(raw) > HISTORY_MAX_BYTES or d.unconsumed_tail:
+        return None                    # bombă de decompresie / agent care ignoră plafonul
+    return raw
+
+
+def history_capable(src) -> bool:
+    return (isinstance(src, AgentConnection) and src.backend == "tmux"
+            and (src.agent_version or 0) >= HISTORY_MIN_AGENT)
+
+
+async def fetch_tmux_history(src, sid: str, lines: int,
+                             timeout: float = HISTORY_TIMEOUT) -> Optional[bytes]:
+    """Istoricul pane-ului tmux al sesiunii, sau None (agent vechi/pty, eşec, timeout). Nu aruncă."""
+    if lines <= 0 or not history_capable(src):
+        return None
+    try:
+        resp = await asyncio.wait_for(
+            src.request("history", timeout=timeout, sid=sid, lines=int(lines)), timeout + 1.0)
+    except Exception as e:            # noqa: BLE001 — AgentGone, timeout, ws închis: fallback tăcut
+        log.debug("history %s: %r — falling back to the transcript tail", sid[:8], e)
+        return None
+    if not (isinstance(resp, dict) and resp.get("ok")):
+        log.debug("history %s: %s", sid[:8], (resp or {}).get("code") if isinstance(resp, dict) else resp)
+        return None
+    return await asyncio.to_thread(decode_history_reply, resp)
+
+
+def stream_is_plain(hub) -> bool:
+    """True = transcriptul NU e trafic tmux (backend pty, telnet, serial) sau sesiunea e închisă
+    (transcriptul e tot ce a rămas). Necunoscut (fără sursă) şi SSH (tmux pe remote) → False."""
+    if hub is None:
+        return True
+    src = hub._source()
+    return src is not None and getattr(src, "backend", None) in ("pty", "telnet", "telnet-fwd",
+                                                                  "serial-fwd")
+
+
+def replay_tail_limit(scrollback: int, plain: bool) -> int:
+    """Cât transcript rejucăm. Fereastra mare doar pe flux fără tmux ŞI pe un browser cu scrollback
+    mare (desktop); mobilul rămâne pe fereastra istorică (memorie + timp de parsare)."""
+    if plain and scrollback >= LARGE_REPLAY_MIN_SCROLLBACK:
+        return config.BROWSER_TAIL_BYTES_LARGE
+    return config.BROWSER_TAIL_BYTES
+
+
+def parse_replay_params(qp) -> tuple:
+    """`?sb=<scrollback>&rows=<rânduri>` de pe WS → (sb, rows), plafonate. Lipsă/invalid → 0
+    (sb=0 = replay-ul istoric, exact ca un frontend vechi sau un client de test)."""
+    def num(key, hi):
+        try:
+            return max(0, min(int(qp.get(key) or 0), hi))
+        except (TypeError, ValueError):
+            return 0
+    return num("sb", HISTORY_MAX_LINES), num("rows", HISTORY_MAX_ROWS)
+
+
+async def attach_replay(sid: str, hub, scrollback: int = 0, rows: int = 0) -> bytes:
+    """Replay-ul unei ataşări PROASPETE: [istoric tmux + îmbinare] + coada de transcript.
+
+    Istoricul se cere ÎNAINTE de citirea cozii: coada rămâne cât mai aproape de momentul în care
+    apelantul adaugă clientul în hub (fereastra de checkpoint documentată la `read_tail` nu creşte).
+    Clientul NU e încă în `hub.clients` cât aşteptăm agentul, deci nimic din coada live nu se
+    poate intercala sau dubla. Apelantul re-verifică blocarea după (aşteptarea ţine ≤ ~4s)."""
+    block = b""
+    if hub is not None and scrollback > 0:
+        raw = await fetch_tmux_history(hub._source(), sid, min(scrollback, HISTORY_MAX_LINES))
+        if raw:
+            block = await asyncio.to_thread(build_history_block, raw, scrollback,
+                                            rows or hub.rows)
+    limit = config.BROWSER_TAIL_BYTES if block else replay_tail_limit(scrollback, stream_is_plain(hub))
+    tail = await asyncio.to_thread(read_tail, sid, limit=limit)
+    return block + tail
+
+
+# ---------------------------------------------------------------------------
 # Browser client (one websocket attached to a hub)
 # ---------------------------------------------------------------------------
 
@@ -439,6 +608,10 @@ class BrowserClient:
         # input-ul REFUZAT până la re-autentificare cu passkey. Diferă de `paused`:
         # clientul NU se poate debloca singur (cere un grant de step-up).
         self.locked = False
+        # cât transcript primeşte un resync FULL (resume/unlock): acelaşi cât a primit la ataşare,
+        # ca un tab de desktop pe o sesiune pty să nu-şi micşoreze scrollback-ul de la 2 MiB la
+        # 256 KiB la fiecare comutare de tab. Setat de handler-ul WS (`replay_tail_limit`).
+        self.replay_limit = config.BROWSER_TAIL_BYTES
 
     def _request_resync(self, level: int) -> None:
         # combină prin max — un „full" cerut de unlock nu poate fi degradat de
@@ -560,7 +733,10 @@ class BrowserClient:
         # (posibil declanșat repetat prin pause/resume) să nu blocheze event-loop-ul.
         # Mărginit la `cutoff`: un checkpoint concurent (cât citim) poate flush-ui octeți
         # care sunt DEJA în coada noastră — fără margine ar ajunge și în tail, și din coadă.
-        tail = await asyncio.to_thread(read_tail, self.hub.sid, end=cutoff)
+        # Fereastra: cea de la ataşare DOAR pe full; lossy (client lent) rămâne pe cea istorică —
+        # 2 MiB trimişi exact clientului care nu ţine pasul ar întreţine bucla de overflow.
+        limit = self.replay_limit if full else config.BROWSER_TAIL_BYTES
+        tail = await asyncio.to_thread(read_tail, self.hub.sid, limit=limit, end=cutoff)
         await self.send_bytes(tail)
         self._sent_since_ping += len(tail)
         # Garanția „≤ cutoff în tail, > cutoff în coadă" cade în două cazuri:

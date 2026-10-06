@@ -86,7 +86,9 @@ export default function SharedView(props: { token: string }) {
     ro.observe(container.current!)
 
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
-    const ws = new WebSocket(`${proto}://${window.location.host}/ws/shared/${props.token}`)
+    // sb: istoricul tmux deasupra cozii, ca la owner (aceeaşi politică de replay); rows lipsă →
+    // serverul ia grila PTY-ului, pe care invitatul o oglindeşte oricum
+    const ws = new WebSocket(`${proto}://${window.location.host}/ws/shared/${props.token}?sb=10000`)
     ws.binaryType = 'arraybuffer'
     ws.onopen = () => setConn('open')
     // writable: input-ul vizitatorului merge la sesiune. Gate-uit prin writableRef

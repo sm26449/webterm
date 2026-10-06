@@ -1182,7 +1182,12 @@ export default function SessionView(props: {
       try { stale.close() } catch { /* deja închis */ }
     }
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
-    const ws = new WebSocket(`${proto}://${window.location.host}/ws/sessions/${session.id}`)
+    // sb/rows: serverul pune istoricul real al pane-ului tmux (capture-pane) deasupra cozii de
+    // transcript, cât încape în scrollback-ul NOSTRU (10000 desktop / 3000 mobil), şi împinge
+    // ultimul ecran în scrollback cu `rows` (plafonate server-side; vezi core.attach_replay)
+    const rows = termRef.current?.rows ?? 0
+    const ws = new WebSocket(
+      `${proto}://${window.location.host}/ws/sessions/${session.id}?sb=${SCROLLBACK}&rows=${rows}`)
     ws.binaryType = 'arraybuffer'
     wsRef.current = ws
     setConn('connecting')

@@ -50,6 +50,52 @@ write to flush the last one. Reloading the page would show an empty terminal and
 would be missing the last command. A delayed flush closes that — the rule is that persistence must
 not depend on more output arriving, because for an idle terminal it never does.
 
+## Replay on attach
+
+A browser that attaches gets one binary frame before the live stream: the **transcript tail** —
+the last 256 KiB of the flushed `.out`, with alt-screen switches, full clears and resets stripped
+(`read_tail`). The unflushed checkpoint window is deliberately left out: replaying it into a
+terminal of a different size collides with the tmux resize redraw.
+
+Under tmux that tail is a poor scrollback. tmux scrolls with a scroll region and `CSI n S`, and
+xterm.js only moves lines into scrollback on a line feed at the bottom of the region — so 256 KiB
+of tmux traffic often leaves tens of lines, or none. Since agent 57, a **fresh attach to a live
+tmux session** puts the pane's real history above the tail:
+
+- The browser sends `?sb=<its scrollback>&rows=<its rows>` on the session (and share) websocket;
+  the gateway clamps both. With no `sb` (an old frontend, a test client) the replay is exactly the
+  old one.
+- The gateway asks the agent for `history {sid, lines: sb}`. The agent runs
+  `tmux capture-pane -p -e -J -S -N -E -1` on `wt-<sid>:` on a worker thread: colours kept,
+  wrapped lines joined, and the visible screen left out (the redraw that follows the attach paints
+  it). With no history it skips the capture, and with several panes it declines. The reply is
+  zlib + base64 and capped at 1 MiB, far below the agent's 4 MiB outbox limit, which would drop
+  the whole agent connection. The most recent lines are kept when it has to truncate.
+- The gateway keeps only text and SGR from the capture: no cursor movement, no clears, no
+  alt-screen, no OSC, no C0/C1 controls. It joins the lines with CRLF and adds a dim seam line.
+  Then it pushes the screen into scrollback with `rows - 1` line feeds and homes the cursor, so
+  that the tail, which often starts with absolute cursor positioning, cannot overwrite the last
+  screen of history. The **unchanged** tail follows in the same frame.
+- **The commands panel still works** because the tail is unchanged: OSC 133 markers come from the
+  tail, exactly as before. `capture-pane` drops OSC sequences, so the history above has none.
+- **The seam is not deduplicated, on purpose.** Lines the tail scrolls into xterm's scrollback can
+  appear twice, just below the seam. That is at most the scrollback a tmux session showed before
+  this change. Trimming the history by text-matching it against the tail would lose lines: we
+  cannot tell which tail lines reach scrollback, because the ones tmux scrolled with `CSI S`
+  never do.
+- Any failure falls back silently to the old replay: agent below 57, the pty backend, several
+  panes, a 3 s timeout, or an oversized or corrupt reply. The history request is made before the
+  tail is read, and the client joins the hub only after the frame is sent, so the live queue
+  cannot interleave with it or duplicate it. If the hub locks while the gateway waits for the agent,
+  nothing is sent.
+- Shares follow the owner's policy: they get the history whenever they would get the tail, and get
+  nothing on a 2FA host with no owner present.
+
+Streams that are not tmux traffic, such as the pty backend, telnet, serial and closed sessions,
+get a 2 MiB tail instead of 256 KiB when the browser's scrollback is large (desktop). Mobile keeps
+256 KiB. Resume and unlock resyncs do **not** fetch tmux history; they replay the tail, at the
+attach-time window for a full resync and at 256 KiB for a lossy one.
+
 ## The screen is not the source of truth
 
 Under tmux, structured data (OSC 133 shell markers, OSC 52 clipboard) arrives through DCS

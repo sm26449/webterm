@@ -563,6 +563,29 @@ try {
     histFinal.some((h) => (h.command ?? '').trim() === 'echo DUPA_RELOAD'),
     JSON.stringify(histFinal.filter((h) => (h.command ?? '').includes('DUPA_RELOAD'))))
 
+  // ── ISTORIC tmux la reataşare (agent v57, op-ul `history`) ──
+  // Înainte, ataşarea rejuca doar ultimii 256 KiB din transcript; sub tmux asta însemna câteva
+  // ecrane. Aici: 3000 de rânduri numerotate, apoi >256 KiB de umplutură (deci rândul 100 e
+  // garantat ÎN AFARA cozii de transcript), reload, şi rândul 100 trebuie să fie în scrollback-ul
+  // xterm — adus doar de capture-pane. O singură dată: îmbinarea nu are voie să-l dubleze.
+  await activePane.locator('.xterm-screen').click()
+  await page.keyboard.type("seq -f 'WT_HIST_%g' 1 3000; yes " + 'F'.repeat(96) + ' | head -n 3500; echo WT_HIST_$((7*6))\n')
+  check('istoric: output-ul mare s-a terminat', await waitScreen('WT_HIST_42', 30000))
+  await page.reload({ waitUntil: 'domcontentloaded' })
+  await page.waitForSelector('.xterm-screen', { timeout: 20000 })
+  const histLines = await pollValue(
+    () => screenText().then((t) => t.split('\n').filter((l) => l.trim() === 'WT_HIST_100').length),
+    (n) => n > 0, 20000)
+  const sbInfo = await page.evaluate(() => {
+    const t = window.__wtTerms?.get(location.hash.replace('#/s/', ''))
+    return t ? `scrollback=${t.options.scrollback} length=${t.buffer.active.length}` : 'no term'
+  })
+  check('istoric: după reload scrollback-ul conţine rândul 100 (capture-pane), o singură dată',
+    histLines === 1, `${histLines}× WT_HIST_100; ${sbInfo}`)
+  await page.locator('div:not([aria-hidden="true"]) > .wt-window').last().locator('.xterm-screen').click()
+  await page.keyboard.type('echo DUPA_ISTORIC_$((40+2))\n')
+  check('istoric: terminalul rămâne viu după replay-ul cu istoric', await waitScreen('DUPA_ISTORIC_42'))
+
   // ── Faza 2 (Val 5): panoul de fișiere — drawer, follow-cwd, operații ──
   await activePane.locator('.xterm-screen').click()
   await page.keyboard.type('cd /tmp\n')
