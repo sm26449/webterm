@@ -164,7 +164,7 @@ export default function Dashboard(props: {
                     </span>
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-sm font-medium text-slate-100">{s.title || t('dashboard.session')}</span>
-                      <span className="block truncate text-xs" style={{ color }}>{h?.name ?? t('dashboard.host')}</span>
+                      <span className="wt-hostlabel block truncate text-xs" style={{ color }}>{h?.name ?? t('dashboard.host')}</span>
                     </span>
                     <span className="shrink-0 text-right text-[11px] text-slate-500">
                       {timeAgo(s.created, t)}

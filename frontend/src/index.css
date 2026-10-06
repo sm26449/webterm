@@ -525,6 +525,13 @@ textarea {
 :root[data-theme='macos'] .wt-canvas .wt-warn { color: #92400e; }
 :root[data-theme='macos'] .wt-canvas .wt-accent { color: #1d4ed8; }
 :root[data-theme='macos'] .wt-canvas .wt-info { color: #0369a1; }
+/* Numele hostului pe cardurile „Reia sesiunea" era scris în culoarea hostului (paletă pastel,
+   gândită pentru fundal închis): pe Aurora, #34d399 pe alb dă ~1,9:1. axe nu-l vedea fiindcă
+   fundalul cardului e semi-transparent peste gradient (contrast „incomplet"), dar la hover
+   fundalul devine opac şi poarta de accesibilitate îl prindea — cardul Securitate (3.5.4) a
+   mutat layout-ul exact sub cursorul rămas după login. Identitatea de culoare rămâne pe bordură
+   şi pe icon; textul trece pe tokenul secundar (AA). `!important`: bate `style={{ color }}`. */
+:root[data-theme='macos'] .wt-canvas .wt-hostlabel { color: rgb(var(--tx-400)) !important; }
 
 /* editorul de fișiere: conținutul e pe fundal de terminal (întunecat fix),
    deci tokenii de text trebuie să fie mereu varianta deschisă — pe Aurora,
