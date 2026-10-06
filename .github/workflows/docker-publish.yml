@@ -133,7 +133,13 @@ jobs:
       - name: Python tests (unit, hermetic) + security
         # the list lives in scripts/run-tests.sh, also used by `make test` — otherwise the local
         # gate silently diverges from CI's (it did: CI 22 files, make test 2)
-        run: scripts/run-tests.sh ci
+        # suitele picate ajung şi ca ADNOTĂRI (citibile public), ca la E2E: logul jobului cere
+        # autentificare, iar un eşec intermitent pe tag (3.5.2) nu spunea CARE suită a picat
+        run: |
+          set -o pipefail
+          scripts/run-tests.sh ci 2>&1 | tee /tmp/unit.log || {
+            grep -E 'FAILED|^  FAIL' /tmp/unit.log | head -10 | sed 's/^ */::warning title=unit tests::/'
+            exit 1; }
 
   build:
     needs: unit-tests
