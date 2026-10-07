@@ -143,10 +143,19 @@ Press `?` for the cheatsheet.
   **commit**, without opening GitHub. Focused scope: merge/rebase/push/branch stay
   in the CLI
 - **Docker panel** (toolbar button, agent hosts): tabs for **containers / images /
-  volumes / networks**, **start/stop/restart** a container, view **logs**, and open a
-  **shell inside a container** in its own terminal tab (`docker exec`, bash with an
-  sh fallback for minimal images). Runs the host's `docker` CLI through the agent — no
-  extra daemon exposure; the same 2FA step-up as any host action
+  volumes / networks**, **start/stop/restart** a container, and open a **shell inside a
+  container** in its own terminal tab (`docker exec`, bash with an sh fallback for minimal
+  images). **Logs** opens a terminal tab that follows the container's log live
+  (`docker logs --tail 500 --timestamps -f`): colours, scrollback, search (Mod+Shift+F),
+  Ctrl+C to stop; for a stopped container it prints the last 500 lines and the tab keeps
+  them. Running containers show **CPU %** and **memory used / limit (%)**, from
+  `docker stats --no-stream`, refreshed every 5 s while the panel is open and the browser
+  tab is visible, coloured with the same 70 % / 90 % thresholds as the host gauges; if
+  `docker stats` takes longer than 6 s (many containers, busy host) the cards say *Stats
+  unavailable* and the panel retries every 30 s. Runs the host's `docker` CLI through the
+  agent — no extra daemon exposure; the same 2FA step-up as any host action. Where the
+  agent's user is not in the `docker` group but has passwordless `sudo`, every call (the
+  lists, stats and the Logs tab) goes through `sudo -n`, never a password prompt
 - **Database connections** (Toolbox → *Connections*, toolbar + host page, agent hosts):
   saved launchers for **PostgreSQL / MySQL·MariaDB / MongoDB / ClickHouse / Redis**. One
   click opens a session with the right client (`psql` / `mysql` / `mongosh` /
@@ -162,7 +171,8 @@ Press `?` for the cheatsheet.
   paste into any terminal, and it works from the host page with no session open; plus the
   host's own **command history** (from OSC 133), searchable, click to copy
 - **systemd services** (toolbar button, agent hosts): list units with live state, filter,
-  and **start / stop / restart** — through the agent, step-up-gated on 2FA hosts. Runs as
+  **Logs** (a terminal tab following `journalctl -u <unit> -f`, the same behaviour as Logs in
+  the Docker panel), and **start / stop / restart** — through the agent, step-up-gated on 2FA hosts. Runs as
   the agent's user, so system units need the right privileges (surfaced, not silently swallowed)
 - **Port forwarding** (toolbar button): expose web services from the host through
   the browser, protected by your own auth — Docker containers, monitoring, admin

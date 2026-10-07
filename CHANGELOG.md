@@ -9,6 +9,35 @@ back.
 
 ## [Unreleased]
 
+### Added
+- **CPU and memory per container in the Docker panel.** Each running container shows CPU % and
+  memory used / limit (%), coloured with the shared 70 % / 90 % thresholds (`lib/thresholds`).
+  New endpoint `GET /api/hosts/{id}/docker/stats`, with the same rules as the container list
+  (signed-in browser session, step-up on 2FA hosts; automation tokens get 401). It runs
+  `docker stats --no-stream` through the agent's `run` op, so no agent update, and returns
+  numbers, not docker's strings: docker prints memory in binary units (`MiB`, `GiB`) and network
+  and disk I/O in decimal ones (`kB`, `MB`), and `--` while a container starts or stops; the
+  gateway parses all of them into bytes and percents, and anything it cannot read becomes
+  `null` instead of a guessed number. The panel polls every 5 s only while it is open on
+  Containers and the browser tab is visible. `docker stats` samples for about two seconds and
+  gets slower with many containers, so it has a 6 s timeout: past that the cards say *Stats
+  unavailable* and polling slows to 30 s, instead of an error every 5 s. Results are shared
+  for 3 s with one run in flight per host, so two open tabs do not double the load on the host.
+
+### Changed
+- **Docker "Logs" follows the log live, like Services "Logs".** It used to open a modal with a
+  snapshot of the last 500 lines, while the button with the same name in Services opened a
+  terminal following `journalctl -f`: two behaviours under one label. Docker "Logs" now opens a
+  terminal tab running `docker logs --tail 500 --timestamps -f <container>`, so you get colours,
+  scrollback, search (Mod+Shift+F) and Ctrl+C to stop. The snapshot modal is removed rather than
+  kept as a second option: the live tab starts with the same 500 lines, and for a stopped
+  container `docker logs -f` prints them and exits, leaving them in the tab's history, so the
+  snapshot showed nothing the tab does not. Its endpoint (`GET /api/hosts/{id}/docker/logs`) is
+  gone with it. The container id is validated with the same pattern as the other Docker actions
+  and shell-quoted. Where the agent's user cannot reach the Docker socket but has passwordless
+  `sudo`, the tab uses `sudo -n` (as the panel's other calls do), never a password prompt. The
+  Romanian label is now "Log-uri" in both panels (Services said "Jurnal").
+
 ## [3.5.9] — 2026-10-07 · agent (57)
 
 Search in Settings (EN and RO, diacritic-insensitive, jumps to and highlights the section),

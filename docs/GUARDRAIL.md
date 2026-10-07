@@ -91,8 +91,10 @@ heuristic, so it is easy to step around, deliberately or not:
 - a host without shell integration is not covered at all;
 - anyone signed in can switch the guardrail off in Settings.
 
-Read-only panel calls (git status/diff, Docker lists and logs, the services list) are not
-checked: they change nothing, and they run on every refresh.
+Read-only panel calls (git status/diff, Docker lists and stats, the services list) are not
+checked: they change nothing, and they run on every refresh. The same goes for the **Logs**
+buttons in the Docker and Services panels: they open a terminal tab that runs `docker logs -f` /
+`journalctl -f`, a read the gateway builds from a validated id, not a command you typed.
 
 ## Writing patterns
 

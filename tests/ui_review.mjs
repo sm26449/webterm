@@ -154,6 +154,21 @@ async function hostTab(page, label) {
   await page.locator('nav[aria-label="Host sections"] button', { hasText: label }).first().click()
   await page.waitForTimeout(900)
 }
+/** API Docker mock-uit (CI n-are demon docker): un container pornit cu CPU/MEM la praguri
+    diferite (ca scanarea de contrast să vadă culorile warn/danger pe ambele teme) + unul oprit. */
+async function mockDocker(page) {
+  const json = (body) => ({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
+  await page.route((u) => /\/api\/hosts\/\d+\/docker$/.test(u.pathname) && u.searchParams.get('kind') === 'containers',
+    (route) => route.fulfill(json({ kind: 'containers', rows: [
+      { ID: '3f2a1b4c5d6e' + 'a'.repeat(52), Names: 'web-mock', Image: 'nginx:1.27', State: 'running', Status: 'Up 2 hours' },
+      { ID: 'bbbbbbbbbbbb' + 'b'.repeat(52), Names: 'job-mock', Image: 'alpine:3.20', State: 'exited', Status: 'Exited (0) 1 hour ago' },
+    ] })))
+  await page.route((u) => /\/api\/hosts\/\d+\/docker\/stats$/.test(u.pathname),
+    (route) => route.fulfill(json({ available: true, rows: [
+      { id: '3f2a1b4c5d6e', name: 'web-mock', cpu_pct: 95.2, mem_used: 805306368, mem_limit: 1073741824, mem_pct: 75,
+        net_rx: 1200, net_tx: 0, block_read: 0, block_write: 0, pids: 3 },
+    ] })))
+}
 async function openSettings(page) {
   await page.click('button[aria-label="Settings"]')
   await page.waitForSelector('[role=dialog][aria-modal="true"]')
@@ -307,10 +322,24 @@ try {
     }, page)
     for (const [label, wait] of [['Files', 'button[title="New file"]'], ['Forwards', null], ['Services', null], ['Docker', null]]) {
       await step(`tab ${label}`, async () => {
+        // Containerul de CI nu are demon docker: fără mock, tabul Docker ar arăta doar eroarea
+        // „docker absent" şi scanarea n-ar vedea niciodată cardurile, butonul Logs sau rândul
+        // CPU/MEM (3.5.10). API mock-uit doar pentru tabul ăsta; `step` face unrouteAll la eşec.
+        if (label === 'Docker') await mockDocker(page)
         await hostTab(page, label)
         if (wait) await page.waitForSelector(wait, { timeout: 8000 })
+        if (label === 'Docker') {
+          const panel = page.locator('aside[aria-label="Docker"]')
+          const memLine = panel.getByText(/MEM .*\/.*\(\d+%\)/)
+          await memLine.first().waitFor({ timeout: 12000 }).catch(() => {})
+          check('Docker: rândul CPU/MEM apare pe containerul pornit (API mock)',
+            await memLine.count() >= 1 && await panel.getByText('CPU', { exact: false }).count() > 0)
+          check('Docker: butonul Logs are nume accesibil cu containerul',
+            await panel.locator('button[aria-label="Logs web-mock"]').count() === 1)
+        }
         await page.screenshot({ path: `${OUT}/${theme}-10-host-${label.toLowerCase()}.png` })
         await scan(page, `${theme} host page: ${label.toLowerCase()} panel`)
+        if (label === 'Docker') await page.unrouteAll({ behavior: 'ignoreErrors' })
       }, page)
     }
     await step('tab Toolbox', async () => {
