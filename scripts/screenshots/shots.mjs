@@ -151,7 +151,7 @@ try {
   await gear.first().click()
   await sleep(1200)
   // derulează la secțiunea de securitate dacă e nevoie
-  const sec = page.locator('text=Fleet signing key')
+  const sec = page.locator('text=Agent signing key')
   if (await sec.count()) { await sec.first().scrollIntoViewIfNeeded().catch(() => {}); await sleep(500) }
   await shotBoth('05-security')
 } catch (e) { log('security FAILED: ' + e.message); FAILED.push('security') }

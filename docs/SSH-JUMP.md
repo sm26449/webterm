@@ -22,7 +22,7 @@ the same `ForwardTelnetSource`, only owned by a saved host instead of a forward.
    (indented; collapses with the agent's folder). One click opens its page: Overview + Sessions
    (the agent-only sections — Files, Forwards, Services… — belong to the agent, not to the target).
 4. **Connect once** — the same form, no saved host: an **ephemeral** target is created, hidden
-   from the sidebar, dashboard, palette and fleet run, and a session opens immediately. A reaper
+   from the sidebar, dashboard, palette and Run on hosts, and a session opens immediately. A reaper
    (every 60 s) deletes it once it is at least two minutes old and has no `live`/`creating`
    session. An ephemeral target cannot be promoted to a saved one; save it instead if you need it again.
 5. **New session** on the target → the session runs through the agent's tunnel. The agent must be

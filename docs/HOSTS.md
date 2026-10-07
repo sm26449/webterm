@@ -279,7 +279,7 @@ any value and clamps it to **5 minutes – 30 days**.
   over the SSH connection and waits up to about 40 s for the agent to connect.
 
 Enrolling many machines with one reusable token is a separate feature (enrollment groups):
-see [FLEET.md](FLEET.md#fleet-scale-onboarding).
+see [Bulk enrollment](FLEET.md#bulk-enrollment).
 
 ## When a host goes offline mid-session
 

@@ -16,8 +16,8 @@ For anything a person does (terminals, files, settings), use the browser.
   `updates`, `tags`…) from a cron job or an uptime checker.
 - **Inventory** — `GET /api/sessions` lists live and recent sessions.
 - **Fleet automation** — `POST /api/hosts/{id}/run` runs one non-interactive command on one
-  agent host and returns its exit code, stdout and stderr. This is the same endpoint the Fleet
-  console calls once per host.
+  agent host and returns its exit code, stdout and stderr. This is the same endpoint **Run on hosts**
+  calls once per host.
 
 Every other route of the API accepts only the browser session cookie.
 
@@ -78,7 +78,7 @@ Response:
 {"exit_code": 0, "timed_out": false, "stdout": "…", "stderr": "", "duration": 0.04}
 ```
 
-The command is also recorded in the searchable command history with source `fleet`.
+The command is also recorded in the searchable command history with source `fleet` (labelled *Run on hosts* in the UI).
 
 Errors you should handle in a script:
 
@@ -159,7 +159,7 @@ on the browser session. In particular a token cannot:
   ends up in CI logs, `.env` files and scripts, which is the wrong place for operational history.
   The same applies to transcripts, previews, search and the agent log.
 - **Create, change or delete accounts**, or create/revoke tokens (`/api/tokens` is cookie-only).
-- **Touch the fleet signing key** (unlock, lock, export).
+- **Touch the agent signing key** (unlock, lock, export).
 - **Download backups** (they contain the vault key).
 - **Open or create shares.**
 - **Reach a host with *Require 2FA*.** Step-up needs a passkey or a person, so `/run` on such a

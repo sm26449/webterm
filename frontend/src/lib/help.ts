@@ -15,7 +15,7 @@ export const HELP = {
     example: (o: string) => `curl -s -H "Authorization: Bearer wt_…" ${o}/api/hosts | jq '.[] | {name, online}'` },
   guardrail: { doc: 'docs/GUARDRAIL.md#rules-confirm-vs-block' },
   signingKey: { doc: 'docs/design/SIGNED-UPDATES.md#whose-key' },
-  enrollGroups: { doc: 'docs/FLEET.md#fleet-scale-onboarding' },
+  enrollGroups: { doc: 'docs/FLEET.md#bulk-enrollment' },
   deployKeyPolicy: { doc: 'docs/SSH-KEYS.md#deploy-key-policy-settings--security' },
   smtp: { doc: 'docs/ALERTS.md#events' },
   webhook: { doc: 'docs/ALERTS.md#channels-email-and-webhook' },

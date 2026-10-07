@@ -80,7 +80,7 @@ key, so a gateway restart resets them.
 | [host] CPU / memory / disk at N% (threshold T%) | See [Resource thresholds](#resource-thresholds). | 1 per host+metric / 30 min, plus hysteresis |
 | [host] … back to N% | The metric dropped to threshold − 10 points. | — |
 | Gateway disk is filling up (N% free) | The gateway's data volume has less than 10 % free (checked every minute). | 1 / 6 h |
-| The signing key is locked — agents are NOT updating | The encrypted fleet signing key is locked since the last restart **and** at least one agent is on an older version (checked daily). | 1 / 12 h |
+| The signing key is locked — agents are NOT updating | The encrypted agent signing key is locked since the last restart **and** at least one agent is on an older version (checked daily). | 1 / 12 h |
 | Agent: update REFUSED (code) | An agent refused a signed update, or the gateway refused to push one because `ptyd.py.sig` is missing. | 1 per host / 6 h |
 | Off-host backup is FAILING (provider) | The scheduled upload to the off-host destination failed **2 or more times in a row**. | 1 / 12 h |
 | Scheduled backup is FAILING | The scheduled local snapshot itself failed (disk full, DB locked, read-only volume). | 1 / 12 h |

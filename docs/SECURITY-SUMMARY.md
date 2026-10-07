@@ -14,7 +14,7 @@ Problem / Info), never by colour alone. Every row links to the place where you f
 | **Your 2FA** | how many passkeys your account has, and whether TOTP is on | **Problem** with neither; **Attention** with exactly one passkey and no TOTP while some host requires 2FA (losing that one key locks you out of those hosts); SSO accounts without a local factor show **Info** — their second factor lives at the IdP |
 | **Share links** | active (not expired) share links, and how many are writable | **OK** with none; **Attention** with any; **Problem** if any is writable |
 | **Command guardrail** | enabled, number of rules | **Attention** if disabled or with no rules |
-| **Signing key** | the fleet signing key: present, locked, missing (the same signal as the dot on the Settings gear) | **Problem** when locked (agents cannot update); **Attention** when missing |
+| **Signing key** | the agent signing key: present, locked, missing (the same signal as the dot on the Settings gear) | **Problem** when locked (agents cannot update); **Attention** when missing |
 | **Hosts requiring 2FA** | X of Y hosts have *Require 2FA* | **Info** only — it is a per-host choice |
 | **Backup** | last successful backup (local snapshot or off-host copy), last failure, whether an encrypted off-host copy exists | **Problem** if the last attempt failed or there has never been a backup; **Attention** if the last good one is older than the schedule period plus a day (about 2 days with daily or no schedule, 8 with weekly) |
 | **Alert channels** | whether SMTP and/or a webhook are configured (never their values) | **Attention** if neither |

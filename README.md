@@ -33,7 +33,7 @@ flowchart TB
       FS["<b>Files</b><br/><i>browse · edit · upload/download · git panel</i>"]
       SER["<b>Serial console</b><br/><i>RS232/RS485/USB on the host</i>"]
       FWD["<b>Port forwarding</b><br/><i>an internal web UI on its own subdomain</i>"]
-      RUN["<b>Fleet run</b><br/><i>one command → many hosts</i><br/><i>metrics · alerts · diagnostics</i>"]
+      RUN["<b>Run on hosts</b><br/><i>one command → many hosts</i><br/><i>metrics · alerts · diagnostics</i>"]
     end
 
     B <-->|WebSocket| G
@@ -115,7 +115,7 @@ Monaco — the VS Code editor — since 3.x).
 
 ![Editor](docs/screenshots/04-editor-dark.png)
 
-**Security** — the fleet signing key, passkeys, 2FA (here on the light theme).
+**Security** — the agent signing key, passkeys, 2FA (here on the light theme).
 
 ![Security](docs/screenshots/05-security-light.png)
 
@@ -199,8 +199,8 @@ what it does not cover, is in [Security](#security) and
   font, snippets — [full map](docs/SHORTCUTS.md)
 - **Parametrized snippets** (`{{param}}`): a form at run time, with a preview of
   the final command before execution. Snippets live on the gateway (every device) and
-  double as the fleet console's saved commands, optionally with **target tags** that
-  preselect the matching hosts — see [docs/FLEET.md](docs/FLEET.md#saved-fleet-commands)
+  double as the saved commands of **Run on hosts**, optionally with **target tags** that
+  preselect the matching hosts — see [docs/FLEET.md](docs/FLEET.md#saved-commands)
 
 **Fleet**
 - Per-host metrics (CPU, RAM, disk, load) with a **trend sparkline**, plus a subtle
@@ -288,7 +288,7 @@ what it does not cover, is in [Security](#security) and
   inside a **terminal tab** through the agent — with port **discovery** (rich
   metadata: VID:PID, USB serial, driver, physical path, UART type) and **physical
   identification** (unplug/replug the adapter). [details](docs/SERIAL-CONSOLE.md)
-- **Run across multiple hosts** (fleet console): one command → N hosts → a grid of
+- **Run on hosts**: one command → N hosts → a grid of
   live results (state, exit code, output per host), with a deliberate confirmation
   first. **Save a command** under a name and re-run it later (kept per-browser).
   "Copy report" as markdown. [details](docs/FLEET.md)
@@ -303,10 +303,10 @@ what it does not cover, is in [Security](#security) and
   server-side** (they follow you across devices) and the active one is restored on reload. Toggle
   **broadcast** to type into every pane simultaneously (an amber band marks each pane) —
   interactive fleet ops, not just one-shot commands. [details](docs/design/SPLIT-VIEWS.md)
-- **Fleet-scale onboarding**: a reusable **group enrollment token** — one install
+- **Bulk enrollment**: a reusable **group enrollment token** — one install
   one-liner run on many machines, each auto-registering as its own host with its own
   agent token (individually revocable). Opt-in, expiring, revocable, use-capped, and
-  every auto-enrollment is audited + alerted. [how-to](docs/FLEET.md#fleet-scale-onboarding)
+  every auto-enrollment is audited + alerted. [how-to](docs/FLEET.md#bulk-enrollment)
 - **App bookmarks** (Proxmox / Portainer / Grafana / anything web): a wizard turns
   "add my Proxmox" into a named tile — internally a `https` port-forward on its own
   subdomain, behind your auth. They show on an **Apps** strip on the dashboard, as
@@ -633,7 +633,7 @@ In the UI: **+ host** → you get a `curl … | sh` command. Copy/paste → Ente
 server, **as the user you want to work as** (the agent's user = the sessions'
 shell). (Onboarding many machines at once? Use a **group enrollment token** instead — create one
 from **+ host → "Many machines"**: a single reusable one-liner, each machine self-registers as its
-own host. See [Fleet-scale onboarding](docs/FLEET.md#fleet-scale-onboarding).) The script downloads the agent into `~/.webterm/`, starts it and sets up
+own host. See [Bulk enrollment](docs/FLEET.md#bulk-enrollment).) The script downloads the agent into `~/.webterm/`, starts it and sets up
 automatic restart (systemd `--user` with Restart=always, otherwise cron `@reboot`
 + watchdog). It also **appends one line to `~/.bashrc` and `~/.zshrc`** so shell integration
 (OSC 133) works — the commands panel, per-command exit codes and `cd` tracking depend on it.
@@ -750,7 +750,7 @@ Everything in `.env` (see `.env.example`):
 | `WEBTERM_UPDATE_CHECK` | `0` disables the "a newer version exists" check entirely (it overrides the UI switch). WebTerm never updates itself; the check only tells you |
 | `WEBTERM_UPDATE_COMMAND` | the upgrade command the UI **displays** when a new version exists. It is never executed |
 | `WEBTERM_UPDATE_REPO` | the GitHub `owner/repo` the version check asks (default `sm26449/webterm`) — set it on a fork |
-| `WEBTERM_SIGNING_AUTOGEN` | `1` | `0` = don't generate a fleet signing key on the first boot of a new install — for an offline, build-time key (see *Agent update signing*) |
+| `WEBTERM_SIGNING_AUTOGEN` | `1` | `0` = don't generate an agent signing key on the first boot of a new install — for an offline, build-time key (see *Agent update signing*) |
 | `WEBTERM_CERT_MIN_DAYS` | how many days before expiry the `webterm-cert-check` timer starts warning (default 15). **Not read from `.env`** — the timer reads `/etc/default/webterm-cert-check`, which `install.sh` writes |
 | `WEBTERM_CERT_RESOLVER` | `le` (HTTP-01, needs port 80 reachable) or `ledns` (DNS-01 via Cloudflare). Written by `install.sh`/`deploy.sh` from whether you gave a Cloudflare token — see the note under `CF_DNS_API_TOKEN` |
 | `WEBTERM_OIDC_ISSUER` | SSO issuer URL, e.g. `https://auth.example.com/application/o/webterm/`. **Optional** — SSO is off until issuer + client id + secret are all set |
@@ -806,7 +806,7 @@ step-up** — protecting against unattended authenticated sessions
 (`WEBTERM_IDLE_LOCK_SECS`, default 5 min). An optional **command guardrail**
 (Settings → Security): regex rules that require **confirmation** or **block**
 dangerous commands at Enter (e.g. `rm -rf`, `mkfs`) — editable, and enforced on the
-server for `/run` as well, so a fleet command cannot walk around the browser.
+server for `/run` as well, so a command sent with Run on hosts cannot walk around the browser.
 
 **You find out when someone attaches.** A session can be watched by more than one client —
 your own second tab, a phone, a share link. The viewer count told you *how many*, silently, so
@@ -1035,7 +1035,7 @@ tests/                     unit + integration suite (dev): telnet (shim/bastion)
                           session reconciliation, agent hygiene+hardening, idle-lock,
                           security, ssh, transcript, provisioning…
 docs/                      RUNBOOK · SHORTCUTS · SHELL-INTEGRATION ·
-                          PORT-FORWARDING · FLEET · SERIAL-CONSOLE ·
+                          PORT-FORWARDING · FLEET (Run on hosts) · SERIAL-CONSOLE ·
                           SSH-KEYS · SSH-JUMP · DATABASE-TOOLBOX · SSO ·
                           TRANSFERS · THREAT-MODEL · HOSTS ·
                           AUTOMATION-TOKENS · ALERTS · GUARDRAIL · AI-TOOLS
@@ -1065,7 +1065,7 @@ administer your servers with. The CI chain, in order:
    opens sessions through the UI, types commands, verifies the output, tab
    switching, pause/re-sync, shortcuts, parametrized snippets, alert thresholds,
    transcript replay, the OSC 133 flow + **block actions**, the file panel,
-   **port forwarding**, **fleet run**, **command history**, and a **reconnect with
+   **port forwarding**, **Run on hosts**, **command history**, and a **reconnect with
    history replay** (no duplicate entries, no prompts captured as commands, new
    commands still recorded). Running this on the `pty` fallback would test a
    different backend than production — that gap hid a whole class of bugs.

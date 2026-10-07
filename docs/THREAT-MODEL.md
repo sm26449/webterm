@@ -92,7 +92,7 @@ See [design/ARCHITECTURE.md](design/ARCHITECTURE.md) for the agent's resilience
    signature protects the **persistence** of the agent code, but `run`/`fs`
    commands are not individually signed. *Consequence:* protect the gateway like
    the crown jewels.
-4. **The fleet signing key is a trade-off, not a strict upgrade.** There are two
+4. **The agent signing key is a trade-off, not a strict upgrade.** There are two
    channels, and picking one decides *who* can put code on your hosts.
 
    - **Your own deployment key — this is the default, and it is generated for you.** On the

@@ -478,7 +478,7 @@ BEHIND=$(printf '%s' "$STATE" | awk '/^BEHIND/{print $2}')
 say "What is left to do"
 case "$KEY_LINE" in
   "1 1")
-    warn "the fleet signing key is ENCRYPTED → after a restart it is LOCKED."
+    warn "the agent signing key is ENCRYPTED → after a restart it is LOCKED."
     echo "    Agents will NOT update until you unlock it: Settings → Security → unlock."
     TODO=$((TODO + 1)) ;;
   "1 0") echo "  signing key: loaded automatically (no passphrase) — agents can update" ;;

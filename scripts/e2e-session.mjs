@@ -1216,8 +1216,8 @@ try {
   await fwdPanel.locator('button[aria-label="Close forwards panel"]').click()
 
   // ── Faza 2 (consola de flotă): rulare pe mai multe hosturi ──
-  await page.locator('button[aria-label="Run across multiple hosts"]').click()
-  const fleet = page.locator('div[aria-label="Run across multiple hosts"]')
+  await page.locator('button[aria-label="Run on hosts"]').click()
+  const fleet = page.locator('div[aria-label="Run on hosts"]')
   check('modalul de rulare pe flotă se deschide', await visible(fleet))
   await fleet.locator('textarea[aria-label="Command"]').fill('echo FLEET_OK')
   // niciun host nu e preselectat (3.5.3): „Select all (N)" e o alegere explicită
@@ -1235,7 +1235,7 @@ try {
   // (a) migrarea one-time: o comandă din vechiul localStorage urcă pe server la deschidere
   await page.evaluate(() => localStorage.setItem('wt-fleet-saved',
     JSON.stringify([{ name: 'E2E legacy', command: 'echo LEGACY_E2E' }])))
-  await page.locator('button[aria-label="Run across multiple hosts"]').click()
+  await page.locator('button[aria-label="Run on hosts"]').click()
   check('consola de flotă se redeschide', await visible(fleet))
   const legacyBtn = fleet.getByRole('button', { name: 'Use saved command: E2E legacy' })
   check('comanda din localStorage a migrat (listată din server)', await visible(legacyBtn, 8000))
@@ -1261,7 +1261,7 @@ try {
   await page.keyboard.press('Escape')
   await hidden(fleet)
   // (c) redeschis: listată din server; alegerea ei preselectează hostul etichetat
-  await page.locator('button[aria-label="Run across multiple hosts"]').click()
+  await page.locator('button[aria-label="Run on hosts"]').click()
   const taggedBtn = fleet.getByRole('button', { name: 'Use saved command: E2E tagged' })
   check('comanda cu ţinte e listată după redeschidere', await visible(taggedBtn, 8000))
   check('nimic preselectat înainte de alegere', (await fleet.locator('button[aria-pressed="true"]').count()) === 0)

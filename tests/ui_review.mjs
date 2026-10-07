@@ -419,13 +419,13 @@ try {
     }, page)
 
     // FleetRun
-    await step('fleet run', async () => {
-      await page.click('button[aria-label="Run across multiple hosts"]')
-      await page.waitForSelector('[role=dialog][aria-label="Run across multiple hosts"]', { timeout: 8000 })
+    await step('run on hosts', async () => {
+      await page.click('button[aria-label="Run on hosts"]')
+      await page.waitForSelector('[role=dialog][aria-label="Run on hosts"]', { timeout: 8000 })
       await page.waitForTimeout(400)
       await page.screenshot({ path: `${OUT}/${theme}-15-fleetrun.png` })
-      await scan(page, `${theme} fleet run modal`)
-      await escapeRestores(page, 'button[aria-label="Run across multiple hosts"]', 'FleetRun')
+      await scan(page, `${theme} run on hosts modal`)
+      await escapeRestores(page, 'button[aria-label="Run on hosts"]', 'FleetRun')
     }, page)
 
     // `?` — ajutorul de scurtături (din afara unui câmp / terminal); focusul revine unde era

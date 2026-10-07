@@ -16,7 +16,7 @@ holds the user-facing guides and the internal architecture notes.
 - [PORT-FORWARDING](PORT-FORWARDING.md) — exposing host services through the browser
 - [TRANSFERS](TRANSFERS.md) — uploads and downloads: the floating Transfers widget, resume semantics, drop on the terminal (session cwd), paste an image → inbox + path typed at the prompt (for Claude Code, aider, …), inbox convention and retention
 - [DATABASE-TOOLBOX](DATABASE-TOOLBOX.md) — database connection launchers, stored-credential model, command library & history
-- [FLEET](FLEET.md) — running a command across multiple hosts
+- [FLEET](FLEET.md) — Run on hosts (one command on several hosts), saved commands, bulk enrollment, command history
 - [SERIAL-CONSOLE](SERIAL-CONSOLE.md) — serial devices (RS232/RS485/USB) through the agent
 - [SSH-KEYS](SSH-KEYS.md) — Toolbox → SSH keys: host-to-host deploy keys, multi-target deploy, test/verify/alias/rotate, the deploy-key policy
 - [SSH-JUMP](SSH-JUMP.md) — SSH-jump and Telnet-jump targets reached through an agent, nesting under the agent, "Connect once", the host-key-change alarm

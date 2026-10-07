@@ -4,7 +4,7 @@ A list of regular expressions that catch commands you almost never mean to run �
 `rm -rf /`, `mkfs`, `dd of=/dev/…`, `DROP TABLE` — and either ask **"are you sure?"** or
 refuse them outright. It is there for the tired-operator moment: the wrong tab, the wrong
 host, a pasted line that was meant for a scratch VM. Use it to protect against your own
-typos, and against scripts and automation tokens that call the fleet `run` endpoint.
+typos, and against scripts and automation tokens that call the `run` endpoint.
 
 It is **a safety net, not a barrier**. Anyone who is past login can turn it off, and a
 terminal session can always run a command the guardrail would have stopped (see
@@ -14,11 +14,11 @@ terminal session can always run a command the guardrail would have stopped (see
 
 - **Catching mistakes before they execute.** A matching command is either held for a
   confirmation dialog (`confirm`) or refused (`block`).
-- **Making fleet-wide commands deliberate.** In **Run on fleet**, a matching command asks
+- **Making multi-host commands deliberate.** In **Run on hosts**, a matching command asks
   once — *"This command matches a guardrail rule (/…/) and will run on ALL selected hosts.
   Continue?"* — before anything is dispatched.
 - **Holding automation to the same rules.** Automation tokens with the `run` scope go
-  through the same server-side check as the fleet console; see
+  through the same server-side check as Run on hosts; see
   [AUTOMATION-TOKENS.md](AUTOMATION-TOKENS.md).
 
 It is on by default and ships with six `confirm` rules:
@@ -42,7 +42,7 @@ guardrail**: the **Check dangerous commands on Enter** switch, one row per rule 
 until you press Save; the server then validates every pattern, and the open terminals in
 this browser pick up the new rules straight away.
 
-| Action | In a terminal | In Run on fleet | Via `POST /api/hosts/{id}/run` |
+| Action | In a terminal | In Run on hosts | Via `POST /api/hosts/{id}/run` |
 |---|---|---|---|
 | `confirm` | Enter is held; a *Potentially dangerous command* dialog shows the line, with **Cancel (clear)** (focused by default) and **Run**. Escape = cancel. | One dialog for the whole run, **Run on all** to continue | `409 run.guardConfirm` unless the request carries `"confirmed": true` |
 | `block` | Enter is swallowed, Ctrl+U is sent to clear the line, and *Blocked by guardrail: …* shows for 4 s | Refused before dispatch: *Blocked by the guardrail* | `403 run.guardBlocked`, always — no flag overrides it |
@@ -59,7 +59,7 @@ Enter does not run it.
 
 | Path | Checked by | Enforced? |
 |---|---|---|
-| **Run on fleet** (Fleet console) | the browser before dispatch, **and** the server on each host's `/run` | yes, server-side |
+| **Run on hosts** | the browser before dispatch, **and** the server on each host's `/run` | yes, server-side |
 | **Automation tokens** (`run` scope → `POST /api/hosts/{id}/run`) | the server | yes, server-side |
 | **Panel actions** (since 3.5.2): Services start/stop/restart, Docker start/stop/restart, Git add/reset/restore/commit | the server, on the equivalent shell command (`systemctl stop nginx.service`, `docker restart web1`, `git -C /repo reset -- a.txt`) | yes, server-side; the panel asks you on a `confirm` rule |
 | **Commands typed in a terminal** | the browser, at Enter | only with shell integration, and only in the browser |
@@ -68,7 +68,7 @@ Enter does not run it.
 gateway re-checks every command there regardless of the client: `block` → 403,
 `confirm` → 409 unless `confirmed` is true. The server cannot open a dialog, so
 `confirmed: true` means "a human (or a script that knows what it is doing) already said
-yes". The fleet console sends it after asking you; a token caller sets it itself.
+yes". Run on hosts sends it after asking you; a token caller sets it itself.
 
 **In a terminal, only with shell integration.** The gateway does not inspect the keystroke
 stream of a PTY. The check runs in the browser, when a key submits the line — **Enter**
@@ -104,7 +104,7 @@ checked: they change nothing, and they run on every refresh.
 - **No multiline flag.** `^` is the start of the whole command (leading and trailing
   whitespace are trimmed first), not the start of each line.
 - **Stay in the common subset of Python and JavaScript regex.** The server validates with
-  Python's `re.compile`; the terminal and fleet checks run the same pattern as a JavaScript
+  Python's `re.compile`; the terminal and Run on hosts checks run the same pattern as a JavaScript
   `RegExp`. A pattern that is valid only in Python (e.g. a named group written `(?P<name>…)`)
   saves fine and works on `/run`, but the browser silently skips it — so it would not
   protect the terminal. Stick to `\b`, `\s`, `\d`, character classes, groups, alternation
@@ -156,12 +156,12 @@ Empty patterns are dropped silently. Patterns are trimmed and cut to 300 charact
   host.
 - **Browsers pick up changes from the app state.** The browser where you press Save
   refreshes immediately; another browser or device that already has WebTerm open keeps the
-  rules it loaded until it reloads the app state. The fleet console always fetches the
+  rules it loaded until it reloads the app state. Run on hosts always fetches the
   current rules before a run, and the server always uses the saved ones.
 - **Block rules win.** When a `block` and a `confirm` rule both match, the command is blocked,
   whatever their order in the list (since 3.5.1).
 - **Turning it off** (`Check dangerous commands on Enter` unchecked, then Save) disables
-  every check: terminal, fleet console, panel actions and the server-side `/run` check.
+  every check: terminal, Run on hosts, panel actions and the server-side `/run` check.
 
 ## Maintenance notes
 
@@ -171,5 +171,5 @@ Empty patterns are dropped silently. Patterns are trimmed and cut to 300 charact
   the time-budgeted matcher is `security.regex_search_budget` (`REGEX_BUDGET = 0.25`) in
   `gateway/app/security.py`. Stored in the `command_guard` setting as JSON.
 - Frontend: `matchCommandRule` and `pendingCommand` in `frontend/src/lib/commands.ts`; the
-  Enter handler and the confirm dialog in `components/SessionView.tsx`; the fleet check in
+  Enter handler and the confirm dialog in `components/SessionView.tsx`; the Run on hosts check in
   `components/FleetRunModal.tsx`; the editor in `components/settings/SecurityTab.tsx`.

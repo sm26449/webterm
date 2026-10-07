@@ -9,6 +9,25 @@ back.
 
 ## [Unreleased]
 
+### Changed
+- **Wording: one name per idea for "fleet".** The UI used "fleet" for two different things — all
+  your servers, and the action of running one command on several hosts — and the action alone had
+  five names ("Fleet run", "Run a command across multiple hosts", "Run across multiple hosts",
+  "Run on multiple hosts", "Fleet console"). In Romanian "flotă" read as ships. Now:
+  - the action (sidebar button, dialog title, tooltips, history label, token scope, snippet
+    targets, docs) is **Run on hosts** / **Rulează pe hosturi**;
+  - the key that signs agent updates is the **Agent signing key** / **Cheia de semnare a
+    agenților** (was "Fleet signing key" / "Cheie de semnare a flotei");
+  - group-token onboarding is **Bulk enrollment** / **Înrolare în masă** (was "Fleet enrollment
+    (bulk onboarding)" / "Înrolare de flotă (onboarding în masă)");
+  - the whole set of servers stays **fleet** in English and becomes **infrastructură** in
+    Romanian.
+
+  Only visible text changed: i18n keys, routes, API values (history source `fleet`, token scope
+  `run`) and behaviour are the same. `docs/FLEET.md` keeps its file name; its headings are now
+  *Run on hosts*, *Saved commands* and *Bulk enrollment*, with the old anchors
+  (`#saved-fleet-commands`, `#fleet-scale-onboarding`) kept so existing links still land.
+
 ### Fixed
 - **Sidebar logo no longer truncated to "WebT…".** Next to the six header buttons the word
   didn't fit at the default 288 px width, and never on phones (44 px touch buttons). The mark
