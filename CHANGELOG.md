@@ -9,6 +9,63 @@ back.
 
 ## [Unreleased]
 
+A design system under the whole UI. **Nothing changes functionally**: every button, route,
+keyboard shortcut and text does what it did; the screens look more consistent, and the light
+theme (Aurora) is finished.
+
+### Changed
+- **One type scale, nothing below 11px.** The UI used 12 hand-picked sizes (`text-[9px]` …
+  `text-[22px]`), 49 of them under 11px, which is unreadable on 1× screens and below Apple's 11pt
+  minimum. All 348 uses now sit on a scale defined in `tailwind.config.js`: `text-2xs` (11px, the
+  floor), `xs` 12, `compact` 13, `sm` 14, `base` 16, `lg`, `xl`, `display` 22, `2xl`, `3xl`. Labels
+  that were 9–10.5px are now 11px. The only exception is the session thumbnail on the host page,
+  an `aria-hidden` picture of a terminal screen.
+- **Three corner radii.** Nine radius variants were used for the same kinds of elements (a primary
+  button was `rounded`, `rounded-lg` or `rounded-xl` depending on the screen). Now controls are
+  6px (`rounded-md`), cards, menus and popovers 12px (`rounded-xl`), dialogs 16px (`rounded-2xl`).
+- **SVG icons instead of emoji.** About 170 emoji and Unicode glyphs were used as icons (🔌 🩺 👁
+  🔔 ⚠ ✕ ✓ ☰ ⛶ ⌨ ▶ ▸ ⇅ 🕒 📁 …). They rendered differently on every OS, were missing on some
+  Android builds and in headless Chromium, and sat badly next to the line icons. They are now SVG
+  icons from `Icons.tsx`, in the same style: the status bar (clock, folder, latency), the session
+  toolbar (menu, commands, fullscreen, close split, copied), the host page (menu, serial,
+  diagnostics, AI tools, play, viewers), the sidebar (alerts, wake, warnings, the host menu), every
+  close button, the diagnostics journal, fleet run, files, git, services, transcripts, toasts and
+  the idle lock. Content keeps its characters: the © lines, arrows that are notation in a sentence,
+  key names in keyboard legends and on the keybar, and all translated texts.
+- **Shared components.** `Button` (primary / secondary / danger / ghost, three sizes, loading),
+  `IconButton` (an accessible name is required), `Badge`, `EmptyState`, `ErrorState` (the
+  "could not load" state; `LoadFailed` now uses it) and `Card`, in `components/ui/`. The sidebar,
+  session toolbar, host page, Dashboard, Settings, files panel, transfers and about 50 dialog
+  buttons use them, so the same "Save" looks the same everywhere. Primary buttons no longer
+  lighten on hover (white on the lighter indigo fell to 4.47:1).
+- **One set of threshold colours.** The CPU gauge and the sparkline under it showed the same 70/90%
+  thresholds in two different greens and reds. `lib/thresholds.ts` is now the single source for
+  the gauges, the sparklines and the toolbar load ring, with chart colours that keep 3:1 on both
+  themes.
+- **Semantic colour tokens.** `--ok`, `--warn`, `--danger`, `--info`, `--accent` (and chart
+  `--viz-*`) are CSS variables with values for both themes, exposed to Tailwind as `text-ok`,
+  `bg-danger/10` etc. The existing `.wt-good` / `.wt-warn` / `.wt-danger` classes read them, which
+  replaces 13 per-zone colour overrides. On Aurora the green and info blue are a shade darker, so
+  they keep AA on tinted badges.
+
+### Fixed
+- **Aurora: the host page is light.** It was rendered in the forced-dark palette of the terminal
+  area, so choosing Aurora gave a white sidebar next to a black host page. It now follows the
+  theme, like the Dashboard; the session previews on it stay dark. The terminal area itself (tabs,
+  session toolbar, terminal, status bar, session drawers) stays dark in both themes on purpose —
+  see `docs/design/DESIGN-SYSTEM.md`.
+- **Aurora contrast.** Status chips and badges that used dark-theme-only colours (the agent update
+  badge, the "update blocked" chip, OS-update chips, the diagnostics journal, the changelog's
+  current version and inline code, link hovers) now use the semantic tokens and pass AA on both
+  themes.
+
+### Added
+- **`docs/design/DESIGN-SYSTEM.md`**: the tokens, the components, when to use which, and the
+  do/don't for icons and sizes.
+- **A regression guard** (`frontend/src/design.guard.test.ts`, runs with the unit tests and
+  `npm run lint`) fails on arbitrary `text-[Npx]` sizes, radii outside the scale, and emoji or
+  icon glyphs in `.tsx` files, with an allowlist for the deliberate exceptions.
+
 ## [3.5.6] — 2026-10-07 · agent (57)
 
 The file editor moves to monaco-editor 0.57 in a slim build: opening a file downloads about

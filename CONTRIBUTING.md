@@ -13,7 +13,7 @@ so we hold a high bar for correctness and testing. Please also read [docs/THREAT
 - `frontend/src/` — React + TypeScript + Vite + xterm.js.
 - `tests/` — Python suite (unit + integration) plus `.mjs`/`.sh` end-to-end scripts.
 - `docs/design/` — architecture notes (`ARCHITECTURE`, `SIGNED-UPDATES`, `SESSION-LIFECYCLE`,
-  `SPLIT-VIEWS`, `TELNET-BASTION`, `FUTURE-DIRECTIONS`).
+  `SPLIT-VIEWS`, `TELNET-BASTION`, `FUTURE-DIRECTIONS`) and the UI `DESIGN-SYSTEM`.
 - `scripts/` — agent signing, backup/restore, e2e/smoke for CI.
 
 ## Build & run (dev)
@@ -140,6 +140,12 @@ locally — see the README's "Security" section.
   in English**. Over time the mix resolves itself in the right direction, without a churn commit
   that would destroy the history behind every explanation.
 - Write code that matches its surroundings (naming, comment density, idiom).
+- **UI work follows [docs/design/DESIGN-SYSTEM.md](docs/design/DESIGN-SYSTEM.md):** use the
+  components in `frontend/src/components/ui/` (`Button`, `IconButton`, `Badge`, `EmptyState`,
+  `ErrorState`, `Card`), the type scale (nothing below `text-2xs` = 11px), the three radii, the
+  semantic colour tokens, and SVG icons from `Icons.tsx` — never emoji as icons. The frontend unit
+  tests include a guard that fails on arbitrary `text-[Npx]` sizes, off-scale radii and emoji
+  icons in `.tsx`; deliberate exceptions go in its allowlist with a reason.
 - Comments explain **why**, not **what** (constraints, pitfalls); they should not narrate the next line.
 - One PR = one coherent change, with tests. Describe the impact and how you tested it.
 - **Security** issues: NOT in a public PR/issue — see [SECURITY.md](SECURITY.md).
