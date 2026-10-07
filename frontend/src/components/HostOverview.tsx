@@ -7,6 +7,7 @@ import { useConfirm } from '../lib/confirm'
 import { notify, notifyError } from '../lib/notify'
 import { askSecret } from '../lib/secretPrompt'
 import { hostHistory } from '../lib/metrics'
+import { pressureColor, pressureTextColor } from '../lib/thresholds'
 import { updatesSignal, useUpdatesPref } from '../lib/updatesPref'
 import { DockerIcon, DownloadIcon, FilesIcon, ForwardIcon, LinkIcon, NoteIcon, PencilIcon, PlusIcon, PopoutIcon, RefreshIcon, ServerIcon, ServicesIcon, ShieldIcon, SplitIcon, TerminalPromptIcon, ToolboxIcon, TrashIcon } from './Icons'
 import SessionPreview from './SessionPreview'
@@ -521,14 +522,12 @@ function SessionThumb(props: {
   )
 }
 
-/** Prag de culoare pentru metrici: verde <70% · chihlimbar <90% · roşu peste. */
-function pctColor(p: number): string {
-  return p < 70 ? '#10b981' : p < 90 ? '#f59e0b' : '#f43f5e'
-}
-
-/** Inel de progres cu procentul în centru — gauge-ul de dashboard. */
-function Gauge({ pct, color, size = 60 }: { pct: number; color: string; size?: number }) {
+/** Inel de progres cu procentul în centru — gauge-ul de dashboard. Pragurile şi culorile vin din
+    lib/thresholds (aceleaşi ca Sparkline şi HostLoadRing): arcul ia culoarea de grafic, cifra pe
+    cea de text (AA pe ambele teme). */
+function Gauge({ pct, size = 60 }: { pct: number; size?: number }) {
   const v = Math.max(0, Math.min(100, Math.round(pct)))
+  const color = pressureColor(pct)
   return (
     <div className="relative shrink-0" style={{ width: size, height: size }}>
       <svg viewBox="0 0 40 40" className="h-full w-full -rotate-90" aria-hidden="true">
@@ -537,14 +536,13 @@ function Gauge({ pct, color, size = 60 }: { pct: number; color: string; size?: n
           pathLength={100} strokeDasharray="100" strokeDashoffset={100 - v} style={{ stroke: color }}
           className="transition-[stroke-dashoffset,stroke] duration-500 ease-out motion-reduce:transition-none" />
       </svg>
-      <span className="absolute inset-0 grid place-items-center font-mono text-sm font-semibold tabular-nums" style={{ color }}>{v}%</span>
+      <span className="absolute inset-0 grid place-items-center font-mono text-sm font-semibold tabular-nums" style={{ color: pressureTextColor(pct) }}>{v}%</span>
     </div>
   )
 }
 
 /** Un tile de metrică: etichetă + gauge (ori cifră mare) + sub-text + sparkline opţional. */
 function StatTile(props: { label: string; pct?: number; big?: string; sub?: string; spark?: number[]; sparkLabel?: string }) {
-  const color = props.pct != null ? pctColor(props.pct) : '#94a3b8'
   return (
     <div className="rounded-2xl border border-ink-700/70 bg-ink-800/40 p-4">
       <div className="flex items-start justify-between gap-3">
@@ -553,7 +551,7 @@ function StatTile(props: { label: string; pct?: number; big?: string; sub?: stri
           {props.big != null && <div className="mt-2 font-mono text-3xl font-semibold leading-none tabular-nums text-slate-100">{props.big}</div>}
           {props.sub && <div className="mt-1.5 truncate font-mono text-xs text-slate-500 tabular-nums">{props.sub}</div>}
         </div>
-        {props.pct != null && <Gauge pct={props.pct} color={color} size={64} />}
+        {props.pct != null && <Gauge pct={props.pct} size={64} />}
       </div>
       {props.spark && props.spark.length > 1 && (
         <div className="mt-3">

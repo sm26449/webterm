@@ -1,4 +1,5 @@
 import { useI18n } from '../lib/i18n'
+import { pressureColor } from '../lib/thresholds'
 
 /** Sparkline SVG minimal (fără librărie): tendința ultimelor ~5 minute.
     Scala e FIXĂ 0-100% — un grafic auto-scalat ar face 3% CPU să arate ca o
@@ -21,7 +22,7 @@ export default function Sparkline(props: {
   }
 
   const last = vals[vals.length - 1]
-  const color = last >= 90 ? '#f87171' : last >= 70 ? '#fbbf24' : '#34d399'
+  const color = pressureColor(last)   // lib/thresholds: aceleaşi praguri ca HostLoadRing şi gauge-urile
   const step = w / (vals.length - 1)
   const y = (v: number) => h - (Math.max(0, Math.min(100, v)) / 100) * (h - 2) - 1
   const line = vals.map((v, i) => `${i === 0 ? 'M' : 'L'}${(i * step).toFixed(1)},${y(v).toFixed(1)}`).join(' ')
@@ -37,9 +38,9 @@ export default function Sparkline(props: {
       aria-label={t('sparkline.ariaLabel', { label: props.label, value: Math.round(last) })}
       className={props.fluid ? 'block w-full overflow-visible' : 'shrink-0 overflow-visible'}
     >
-      <path d={area} fill={color} opacity={0.14} />
-      <path d={line} fill="none" stroke={color} strokeWidth={1.25} strokeLinejoin="round" strokeLinecap="round" />
-      <circle cx={w} cy={y(last)} r={1.6} fill={color} />
+      <path d={area} style={{ fill: color }} opacity={0.14} />
+      <path d={line} fill="none" style={{ stroke: color }} strokeWidth={1.25} strokeLinejoin="round" strokeLinecap="round" />
+      <circle cx={w} cy={y(last)} r={1.6} style={{ fill: color }} />
     </svg>
   )
 }

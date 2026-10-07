@@ -28,6 +28,18 @@
   /* marginea câmpurilor de text: `ink-700` dădea 1,3:1 pe alb — practic invizibilă, iar
      WCAG 1.4.11 cere ≥3:1 pentru conturul componentelor. Măsurat: 3,30:1 pe cel mai deschis fundal. */
   --field-border: 122 132 152;
+  /* ── tokeni semantici de stare (design system, docs/design/DESIGN-SYSTEM.md) ──
+     Text pe suprafeţele deschise: fiecare trece ≥4,5:1 pe cel mai slab fundal al temei
+     (ink-800). Expuşi în Tailwind ca `text-ok`, `bg-danger/15` etc. şi citiţi de .wt-good & co. */
+  --ok: 4 120 87;          /* #047857 emerald-700 */
+  --warn: 146 64 14;       /* #92400e amber-800 — amber-700 dădea 4,41:1 pe ink-800 */
+  --danger: 185 28 28;     /* #b91c1c red-700 */
+  --info: 3 105 161;       /* #0369a1 sky-700 */
+  --accent: 29 78 216;     /* #1d4ed8 blue-700 */
+  /* culori de grafic (praguri 70/90 %, lib/thresholds.ts): non-text → ţintă 3:1 (WCAG 1.4.11) */
+  --viz-ok: 5 150 105;     /* #059669 — 3,8:1 pe alb */
+  --viz-warn: 217 119 6;   /* #d97706 — 3,2:1 */
+  --viz-danger: 225 29 72; /* #e11d48 — 4,7:1 */
 
   --glass-bg: rgba(255, 255, 255, 0.72);
   --glass-hairline: rgba(20, 27, 45, 0.09);
@@ -59,6 +71,14 @@
   --link: 129 140 248;     /* indigo-400 — AA pe fundal închis */
   --focus: 129 140 248;
   --field-border: 101 115 140;   /* 3,39:1 pe ink-800 închis */
+  --ok: 52 211 153;        /* #34d399 */
+  --warn: 251 191 36;      /* #fbbf24 */
+  --danger: 248 113 113;   /* #f87171 */
+  --info: 125 211 252;     /* #7dd3fc */
+  --accent: 147 197 253;   /* #93c5fd */
+  --viz-ok: 52 211 153;
+  --viz-warn: 251 191 36;
+  --viz-danger: 248 113 113;
 
   --glass-bg: rgba(21, 27, 41, 0.82);
   --glass-hairline: rgba(255, 255, 255, 0.06);
@@ -135,6 +155,16 @@ body {
   --tx-600: 128 141 160;
   --link: 129 140 248;
   --scrollbar: rgba(148, 163, 184, 0.3);
+  /* stările semantice pe cromul întunecat: mereu varianta luminoasă (verdele închis al temei
+     deschise cade sub AA aici) — înainte erau 5 reguli `.wt-workspace .wt-good {…}` separate */
+  --ok: 52 211 153;
+  --warn: 251 191 36;
+  --danger: 248 113 113;
+  --info: 125 211 252;
+  --accent: 147 197 253;
+  --viz-ok: 52 211 153;
+  --viz-warn: 251 191 36;
+  --viz-danger: 248 113 113;
 }
 .wt-main {
   padding: 0;
@@ -209,6 +239,11 @@ body {
   --tx-400: 156 170 190;
   --tx-500: 122 136 158;
   --tx-600: 128 141 160;
+  --ok: 52 211 153;
+  --warn: 251 191 36;
+  --danger: 248 113 113;
+  --info: 125 211 252;
+  --accent: 147 197 253;
   color: rgb(var(--tx-200));
   /* opac + fără backdrop-filter: un fundal semi-transparent SAU un backdrop-filter
      face ca verificatorii de contrast (și compunerea reală) să cadă pe primul
@@ -321,17 +356,17 @@ body {
   --tx-500: 122 136 158;
   --tx-600: 128 141 160;
   --link: 129 140 248;
+  /* stările semantice: pe cromul întunecat mereu varianta luminoasă (ca în .wt-workspace) */
+  --ok: 52 211 153;
+  --warn: 251 191 36;
+  --danger: 248 113 113;
+  --info: 125 211 252;
+  --accent: 147 197 253;
   color: rgb(var(--tx-200));
 }
 .wt-transfers-widget > * {
   pointer-events: auto;
 }
-/* stările semantice: pe cromul întunecat mereu varianta luminoasă (ca în .wt-workspace) */
-.wt-transfers-widget .wt-good { color: #34d399; }
-.wt-transfers-widget .wt-danger { color: #f87171; }
-.wt-transfers-widget .wt-warn { color: #fbbf24; }
-.wt-transfers-widget .wt-info { color: #7dd3fc; }
-.wt-transfers-widget .wt-accent { color: #93c5fd; }
 
 /* suprafaţa plutitoare (pilulă + card): crom ridicat, contur fin, umbră care o desprinde de pagină */
 .wt-transfers-surface {
@@ -442,14 +477,14 @@ textarea {
   text-decoration: underline;
 }
 
-/* stări semantice theme-aware (trec AA pe ambele fundaluri): ok/warn/danger/info.
+/* stări semantice theme-aware (trec AA pe ambele fundaluri): ok/warn/danger/info/accent.
    Vocabular unic pentru online/attached/reconnecting/offline/lost — culoarea e
-   dublată mereu de text/icon, nu e singurul semnal (WCAG 1.4.1). */
+   dublată mereu de text/icon, nu e singurul semnal (WCAG 1.4.1).
+   Design system 3.5.7: clasele citesc tokenii `--ok/--warn/--danger/--info/--accent`, definiţi
+   pe temă (:root) şi re-definiţi în zonele cu paletă proprie (.wt-workspace, .wt-command,
+   .wt-transfers-widget, .wt-canvas). Înainte, fiecare zonă avea propriile 5 reguli cu hexuri. */
 .wt-good {
-  color: #047857;
-}
-:root[data-theme='dark'] .wt-good {
-  color: #34d399;
+  color: rgb(var(--ok));
 }
 /* insigna „N sesiuni vii" din sidebar: verde pe fond verde 15% peste rândul SELECTAT (ink-800).
    Pe Aurora #047857 dădea ~4,2:1 acolo (sub AA la 10px) — prins de axe când hostul selectat avea
@@ -461,61 +496,27 @@ textarea {
   color: #34d399;
 }
 .wt-danger {
-  color: #b91c1c;
-}
-:root[data-theme='dark'] .wt-danger {
-  color: #f87171;
+  color: rgb(var(--danger));
 }
 .wt-warn {
-  /* amber-800, nu amber-700: #b45309 dădea 4,41:1 pe `bg-ink-800` deschis (chip-uri, toast
-     de avertizare) — sub AA. Acum 6,2:1 pe cel mai slab fundal al temei. */
-  color: #92400e;
-}
-:root[data-theme='dark'] .wt-warn {
-  color: #fbbf24;
+  color: rgb(var(--warn));
 }
 /* Accentul de „selectat" (chip de limbă, badge „you", host bifat în fleet run).
    Erau `text-sky-300` necondiţionat — un token proiectat pentru fundal ÎNCHIS, folosit şi
-   peste alb. Măsurat: 1,30:1 pe badge-ul „you", 1,46:1 pe limba activă, 1,76:1 pe hostul
-   selectat, adică practic invizibile în tema deschisă. Poarta de a11y nu le vedea, fiindcă
-   scana doar suprafeţe fără starea asta. Aceeaşi structură ca .wt-good/.wt-danger. */
+   peste alb (1,3–1,8:1 în tema deschisă). */
 .wt-accent {
-  color: #1d4ed8;
-}
-:root[data-theme='dark'] .wt-accent {
-  color: #93c5fd;
-}
-.wt-workspace .wt-accent {
-  color: #93c5fd;
+  color: rgb(var(--accent));
 }
 /* informativ (sky): „on demand", hint-uri de stare neutre-dar-evidenţiate. Pe deschis sky-700
    (5,2:1 pe cel mai slab fundal), pe închis sky-300 (9,7:1). */
 .wt-info {
-  color: #0369a1;
-}
-:root[data-theme='dark'] .wt-info {
-  color: #7dd3fc;
-}
-.wt-workspace .wt-info {
-  color: #7dd3fc;
+  color: rgb(var(--info));
 }
 /* text secundar (meta, hint-uri): legat de --tx-500 al temei active, singurul ton „estompat"
    care trece 4,5:1 pe TOATE suprafeţele ambelor teme (4,52:1 pe ink-800 închis, cel mai slab).
    Există ca să nu se mai aleagă din ochi între slate-500 şi slate-600. */
 .wt-muted {
   color: rgb(var(--tx-500));
-}
-
-/* cromul workspace-ului e mereu întunecat → stările semantice folosesc mereu
-   varianta luminoasă, indiferent de tema aleasă (verdele închis cade sub AA aici) */
-.wt-workspace .wt-good {
-  color: #34d399;
-}
-.wt-workspace .wt-danger {
-  color: #f87171;
-}
-.wt-workspace .wt-warn {
-  color: #fbbf24;
 }
 
 /* Dashboard-ul („acasă") NU e terminal, dar trăieşte în `.wt-workspace`, deci moştenea paleta
@@ -538,15 +539,18 @@ textarea {
   --tx-600: 96 100 114;
   --link: 79 70 229;
   --scrollbar: rgba(20, 27, 45, 0.22);
+  --ok: 4 120 87;
+  --warn: 146 64 14;
+  --danger: 185 28 28;
+  --info: 3 105 161;
+  --accent: 29 78 216;
+  --viz-ok: 5 150 105;
+  --viz-warn: 217 119 6;
+  --viz-danger: 225 29 72;
   color: rgb(var(--tx-200));
   background: var(--app-gradient);
   background-attachment: fixed;
 }
-:root[data-theme='macos'] .wt-canvas .wt-good { color: #047857; }
-:root[data-theme='macos'] .wt-canvas .wt-danger { color: #b91c1c; }
-:root[data-theme='macos'] .wt-canvas .wt-warn { color: #92400e; }
-:root[data-theme='macos'] .wt-canvas .wt-accent { color: #1d4ed8; }
-:root[data-theme='macos'] .wt-canvas .wt-info { color: #0369a1; }
 /* Numele hostului pe cardurile „Reia sesiunea" era scris în culoarea hostului (paletă pastel,
    gândită pentru fundal închis): pe Aurora, #34d399 pe alb dă ~1,9:1. axe nu-l vedea fiindcă
    fundalul cardului e semi-transparent peste gradient (contrast „incomplet"), dar la hover
