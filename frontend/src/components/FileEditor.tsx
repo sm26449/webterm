@@ -1,30 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
-import * as monaco from 'monaco-editor'
-import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker'
-import jsonWorker from 'monaco-editor/esm/vs/language/json/json.worker?worker'
-import cssWorker from 'monaco-editor/esm/vs/language/css/css.worker?worker'
-import htmlWorker from 'monaco-editor/esm/vs/language/html/html.worker?worker'
-import tsWorker from 'monaco-editor/esm/vs/language/typescript/ts.worker?worker'
+import * as monaco from 'monaco-editor/editor/editor.api'
+import './monacoSetup'          // feature-urile, limbajele şi workerul (Monaco slim, vezi acolo)
 import { errText, api, ensureStepup } from '../lib/api'
+import { detectLanguage } from '../lib/editorLang'
 import { useI18n } from '../lib/i18n'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { useTheme } from '../lib/theme'
 import { fmtBytes } from '../lib/uploads'
 import { notifyToast } from '../lib/notify'
 import ConfirmModal from './ConfirmModal'
-
-// Workerele Monaco, bundle-uite LOCAL de Vite (`?worker`) — fără CDN, fără phone-home, ca
-// restul gateway-ului. Întregul modul e lazy-loaded din FilePanel, deci Monaco (~mare) + workerele
-// se descarcă DOAR când deschizi editorul, nu în bundle-ul principal.
-;(self as unknown as { MonacoEnvironment: monaco.Environment }).MonacoEnvironment = {
-  getWorker(_id, label) {
-    if (label === 'json') return new jsonWorker()
-    if (label === 'css' || label === 'scss' || label === 'less') return new cssWorker()
-    if (label === 'html' || label === 'handlebars' || label === 'razor') return new htmlWorker()
-    if (label === 'typescript' || label === 'javascript') return new tsWorker()
-    return new editorWorker()
-  },
-}
 
 interface Preview {
   path: string
@@ -34,35 +18,6 @@ interface Preview {
   truncated: boolean
   binary: boolean
   text: string
-}
-
-// extensie → id de limbaj Monaco (built-in). Monaco aduce gramaticile cu el; cele necunoscute
-// (toml→ini, nginx→plaintext) cad pe cel mai apropiat, niciodată eroare.
-function monacoLang(name: string, firstLine: string): string {
-  const n = name.toLowerCase()
-  if (n === 'dockerfile') return 'dockerfile'
-  if (n.includes('nginx')) return 'ini'
-  const ext = n.includes('.') ? n.split('.').pop()! : ''
-  const map: Record<string, string> = {
-    js: 'javascript', jsx: 'javascript', mjs: 'javascript', cjs: 'javascript',
-    ts: 'typescript', tsx: 'typescript',
-    json: 'json', json5: 'json', webmanifest: 'json',
-    py: 'python', pyw: 'python',
-    md: 'markdown', markdown: 'markdown',
-    html: 'html', htm: 'html',
-    css: 'css', scss: 'scss', less: 'less',
-    xml: 'xml', svg: 'xml', xsl: 'xml', plist: 'xml',
-    yaml: 'yaml', yml: 'yaml',
-    sql: 'sql',
-    c: 'cpp', h: 'cpp', cpp: 'cpp', cc: 'cpp', cxx: 'cpp', hpp: 'cpp',
-    rs: 'rust', php: 'php', go: 'go', rb: 'ruby', java: 'java',
-    sh: 'shell', bash: 'shell', zsh: 'shell', ksh: 'shell',
-    toml: 'ini', conf: 'ini', cfg: 'ini', ini: 'ini', properties: 'ini', env: 'ini',
-    dockerfile: 'dockerfile',
-  }
-  if (map[ext]) return map[ext]
-  if (/^#!.*\b(sh|bash|zsh)\b/.test(firstLine)) return 'shell'
-  return 'plaintext'
 }
 
 /** Editor de fișiere cu Monaco (motorul VS Code): highlight după tip, temă după tema aplicației
@@ -141,12 +96,14 @@ export default function FileEditor(props: {
     return () => { alive = false }
   }, [props.hostId, props.path, props.name, t])
 
+  const wrapLabel = useRef('')
+  wrapLabel.current = t('files.toggleWrap')
   useEffect(() => {
     if (!pv || pv.binary || !host.current) return
     const firstLine = pv.text.slice(0, (pv.text.indexOf('\n') + 1) || 200)
     const ed = monaco.editor.create(host.current, {
       value: pv.text,
-      language: monacoLang(props.name, firstLine),
+      language: detectLanguage(props.path, firstLine),
       theme: themeRef.current,        // vs / vs-dark după tema aplicației
       readOnly: !pv.editable,
       automaticLayout: true,          // se redimensionează cu dialogul
@@ -160,6 +117,17 @@ export default function FileEditor(props: {
     editor.current = ed
     // Ctrl/Cmd+S din interiorul editorului (Monaco prinde tastatura când are focus)
     ed.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => saveRef.current(false))
+    // Alt+Z ca în VS Code: încadrarea rândurilor lungi (loguri, config-uri cu linii lungi) —
+    // apare şi în meniul de click-dreapta şi în paleta F1. Eticheta vine din ref: `t` în
+    // dependenţe ar re-crea editorul (şi ar pierde textul nesalvat) la schimbarea limbii.
+    let wrap = false
+    ed.addAction({
+      id: 'wt.toggleWordWrap',
+      label: wrapLabel.current,
+      keybindings: [monaco.KeyMod.Alt | monaco.KeyCode.KeyZ],
+      contextMenuGroupId: '9_view',
+      run: (e) => { wrap = !wrap; e.updateOptions({ wordWrap: wrap ? 'on' : 'off' }) },
+    })
     // dirty față de versiunea încărcată; getAlternativeVersionId ignoră undo/redo care ajung
     // înapoi la același text, deci Ctrl+Z până la original stinge indicatorul.
     const model = ed.getModel()
@@ -173,7 +141,7 @@ export default function FileEditor(props: {
       ed.getModel()?.dispose(); ed.dispose(); editor.current = undefined
       dirtyRef.current = false; setDirty(false)
     }
-  }, [pv, props.name])
+  }, [pv, props.path])
 
   async function save(force = false) {
     if (!pv || !editor.current || pv.binary || !pv.editable) return

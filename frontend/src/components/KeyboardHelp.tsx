@@ -31,6 +31,9 @@ const EXTRA: Record<string, { labelKey: string; keys: string }[]> = {
   app: [
     { labelKey: 'shortcuts.paletteFromTerminal', keys: 'Ctrl+Shift+K' },
     { labelKey: 'shortcuts.editorSave', keys: 'Mod+S' },
+    // tratate de Monaco în editor (3.5.6): F1 listează restul comenzilor editorului cu tastele lor
+    { labelKey: 'shortcuts.editorWrap', keys: 'Alt+Z' },
+    { labelKey: 'shortcuts.editorCommands', keys: 'F1' },
     { labelKey: 'shortcuts.gitCommit', keys: 'Mod+Enter' },
     { labelKey: 'shortcuts.splitDivider', keys: 'shortcuts.kDivider' },
     { labelKey: 'shortcuts.openSessionRow', keys: 'shortcuts.kDblClick' },
