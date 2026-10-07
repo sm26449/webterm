@@ -7,13 +7,18 @@ import { SHEET_CLS } from '../lib/sheet'
 import { useDrawer } from '../lib/useDrawer'
 import SheetBar from './SheetBar'
 import { cancelUpload, dismissUpload, isUploadBusy, startUpload as engineStart, takeFilesDir } from '../lib/uploads'
-import { startDownload } from '../lib/downloads'
-import { isActive, uploadStore } from '../lib/uploadStore'
+import { BulkItem, startArchiveDownload, startDownload, startDownloads } from '../lib/downloads'
+import { isActive, sizeKnown, uploadStore } from '../lib/uploadStore'
+import { fmtBytes } from '../lib/uploads'
 import { uiLocale } from '../lib/tz'
 import {
-  DownloadIcon, FileIcon, FolderIcon, LinkIcon, PencilIcon, RenameIcon,
+  EMPTY_SELECTION, Selection, allState, previewNames, prune, rangeTo, toggleAll, toggleKey, visibleSelected,
+} from '../lib/selection'
+import {
+  CopyIcon, DownloadIcon, FileIcon, FolderIcon, LinkIcon, PencilIcon, RenameIcon,
   PlusIcon, RefreshIcon, TrashIcon,
 } from './Icons'
+import CopyToHostDialog, { CopyItem } from './CopyToHostDialog'
 
 // CodeMirror e greu → lazy: intră doar când deschizi un fișier
 const FileEditor = lazy(() => import('./FileEditor'))
@@ -133,6 +138,16 @@ export default function FilePanel(props: {
   const [newFile, setNewFile] = useState<string | null>(null)
   const [newFileErr, setNewFileErr] = useState('')
   const [confirmDel, setConfirmDel] = useState<Entry | null>(null)
+  // Selecţie multiplă (3.5.5): bife pe rânduri, Shift/Ctrl+click, Space / Shift+săgeţi, long-press
+  // pe touch. Modelul e pur (lib/selection.ts); cheile = numele din listarea curentă.
+  const [selection, setSelection] = useState<Selection>(EMPTY_SELECTION)
+  const [confirmBulk, setConfirmBulk] = useState<Entry[] | null>(null)
+  const [copyItems, setCopyItems] = useState<CopyItem[] | null>(null)
+  const pathRef = useRef<string | null>(null)
+  // long-press (touch): porneşte selecţia; click-ul care urmează ridicării degetului e înghiţit
+  const pressRef = useRef<{ timer: number; x: number; y: number } | null>(null)
+  const suppressClickRef = useRef(false)
+  const lastPointerRef = useRef<string>('mouse')
   const fileInput = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
   const loadSeq = useRef(0)
@@ -149,6 +164,10 @@ export default function FilePanel(props: {
       if (my !== loadSeq.current) return          // un load mai nou a pornit între timp
       setListing(l)
       setPath(l.path)
+      // alt director → selecţia se goleşte; acelaşi (reload după ştergere/rename) → doar ce mai există
+      setSelection((s) => (pathRef.current === l.path ? prune(s, l.entries.map((e) => e.name)) : EMPTY_SELECTION))
+      pathRef.current = l.path
+      setConfirmBulk(null)
       setSel(0)
       setConfirmDel(null)
       setRenaming(null)
@@ -163,6 +182,9 @@ export default function FilePanel(props: {
       setSel(0)
       setConfirmDel(null)
       setRenaming(null)
+      setSelection(EMPTY_SELECTION)
+      setConfirmBulk(null)
+      pathRef.current = null
     }
   }, [props.host.id, t])
 
@@ -256,6 +278,15 @@ export default function FilePanel(props: {
     })
     return es
   }, [listing, filter, showHidden, sort])
+  // ordinea VIZIBILĂ (filtru + sortare): intervalele şi „Selectează tot" lucrează pe ea
+  const order = useMemo(() => view.map((e) => e.name), [view])
+  const picked = useMemo(() => {
+    const byName = new Map(view.map((e) => [e.name, e]))
+    return visibleSelected(selection, order).map((n) => byName.get(n)!)
+  }, [selection, order, view])
+  const allSel = allState(selection, order)
+  const selAllRef = useRef<HTMLInputElement>(null)
+  useEffect(() => { if (selAllRef.current) selAllRef.current.indeterminate = allSel === 'some' }, [allSel])
 
   async function download(e: Entry) {
     // Prin MOTORUL de transfer (phase 2): progres, retry, pauză şi reluare, vizibile în chip/bară —
@@ -271,15 +302,96 @@ export default function FilePanel(props: {
     }
   }
 
-  // director (sau fişier) → tar.gz făcut pe host şi streamat; răspunsul începe abia după ce
-  // tar-ul termină (plafon 5 min pe host), deci browserul „aşteaptă" o vreme la foldere mari —
-  // e în regulă, download managerul preia de acolo
-  function downloadArchive(e: Entry) {
-    const url = `/api/hosts/${props.host.id}/fs/archive?path=${encodeURIComponent(join(listing!.path, e.name))}`
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `${e.name}.tgz`
-    a.click()
+  // director → tar.gz făcut pe host, acum prin MOTORUL de transfer (3.5.5): rând în Transferuri cu
+  // „se pregăteşte arhiva…" cât rulează tar-ul (până la 5 min), octeţii primiţi, Cancel şi eroarea
+  // serverului. Nu e resumabil (arhivă generată din mers) — Retry o reporneşte.
+  async function downloadArchive(e: Entry) {
+    try {
+      await startArchiveDownload({ hostId: props.host.id, hostName: props.host.name,
+                                   path: join(listing!.path, e.name), name: `${e.name}.tgz` })
+    } catch (err) {
+      setError(errText(err, t) || t('files.genericErr'))
+    }
+  }
+
+  // ── acţiuni în BLOC pe selecţie ──
+  function bulkDownload() {
+    if (!listing || !picked.length) return
+    const items: BulkItem[] = picked.map((e) => ({ hostId: props.host.id, hostName: props.host.name,
+      path: join(listing.path, e.name), name: e.name, size: e.size, dir: e.dir }))
+    // startDownloads cere selectorul de folder PRIMUL (gestul click-ului); job-urile rulează mai departe
+    void startDownloads(items).then((errs) => {
+      if (errs && errs.length) setError(t('files.bulkDownloadFailed', { count: errs.length }) + ' ' + errs.slice(0, 3).join('; '))
+    })
+  }
+
+  async function doBulkDelete(items: Entry[]) {
+    setConfirmBulk(null)
+    if (!listing) return
+    const dir = listing.path
+    setBusy(true)
+    const failed: string[] = []
+    const failedNames: string[] = []
+    for (const e of items) {
+      try {
+        // aceeaşi regulă ca ştergerea simplă: folderele recursiv (confirmarea a spus-o explicit)
+        await api(`/api/hosts/${props.host.id}/fs/delete`, {
+          method: 'POST', body: JSON.stringify({ path: join(dir, e.name), recursive: e.dir }),
+        })
+      } catch (err) {
+        failed.push(`${e.name}: ${errText(err, t) || t('files.genericErr')}`)
+        failedNames.push(e.name)
+      }
+    }
+    setBusy(false)
+    await load(dir)
+    // ce a eşuat rămâne selectat (poţi reîncerca / vedea ce a rămas); restul a dispărut din listare
+    setSelection({ keys: new Set(failedNames), anchor: null })
+    if (failed.length) setError(t('files.bulkDeleteFailed', { count: failed.length, total: items.length }) + ' ' + failed.slice(0, 3).join('; '))
+  }
+
+  function openCopy() {
+    if (!listing || !picked.some((e) => !e.dir)) return
+    setCopyItems(picked.map((e) => ({ name: e.name, path: join(listing.path, e.name), dir: e.dir, mode: e.mode })))
+  }
+
+  // modificatori pe rând: Shift = interval de la ancoră, Ctrl/Cmd = comută; întoarce true dacă a
+  // fost un click de SELECŢIE (atunci butonul numelui nu navighează / nu copiază)
+  function selectClick(ev: React.MouseEvent, e: Entry, i: number): boolean {
+    if (ev.shiftKey) {
+      setSelection((s) => rangeTo(s, order, e.name, ev.ctrlKey || ev.metaKey))
+      setSel(i)
+      return true
+    }
+    if (ev.ctrlKey || ev.metaKey) {
+      setSelection((s) => toggleKey(s, e.name))
+      setSel(i)
+      return true
+    }
+    return false
+  }
+
+  // long-press pe touch (500 ms, fără să mişti degetul): comută rândul → modul de selecţie; cât
+  // există o selecţie, un tap pe rând COMUTĂ în loc să navigheze (ca în galeriile de pe telefon)
+  function pressStart(ev: React.PointerEvent, e: Entry, i: number) {
+    lastPointerRef.current = ev.pointerType
+    if (ev.pointerType !== 'touch') return
+    pressCancel()
+    const timer = window.setTimeout(() => {
+      pressRef.current = null
+      suppressClickRef.current = true
+      setSelection((s) => toggleKey(s, e.name))
+      setSel(i)
+      try { navigator.vibrate?.(15) } catch { /* fără vibraţie */ }
+    }, 500)
+    pressRef.current = { timer, x: ev.clientX, y: ev.clientY }
+  }
+  function pressMove(ev: React.PointerEvent) {
+    const p = pressRef.current
+    if (p && (Math.abs(ev.clientX - p.x) > 10 || Math.abs(ev.clientY - p.y) > 10)) pressCancel()
+  }
+  function pressCancel() {
+    if (pressRef.current) { window.clearTimeout(pressRef.current.timer); pressRef.current = null }
   }
 
   // FileEditor încarcă singur conținutul (preview cu partial-read) și decide
@@ -433,8 +545,33 @@ export default function FilePanel(props: {
 
   function onKeyDown(ev: React.KeyboardEvent) {
     // Escape cu confirmarea de ştergere deschisă = anulează confirmarea, nu închide panoul
-    if (ev.key === 'Escape' && confirmDel) { ev.preventDefault(); ev.stopPropagation(); setConfirmDel(null); return }
-    if (editing || renaming || newFolder !== null || newFile !== null || confirmDel) return
+    if (ev.key === 'Escape' && (confirmDel || confirmBulk)) {
+      ev.preventDefault(); ev.stopPropagation(); setConfirmDel(null); setConfirmBulk(null); return
+    }
+    // Escape cu o selecţie = goleşte selecţia (al doilea Escape închide panoul, ca înainte)
+    if (ev.key === 'Escape' && selection.keys.size) { ev.preventDefault(); ev.stopPropagation(); setSelection(EMPTY_SELECTION); return }
+    if (editing || renaming || newFolder !== null || newFile !== null || confirmDel || confirmBulk) return
+    // Shift+săgeţi: extinde selecţia de la ancoră (sau de la rândul curent, dacă nu e ancoră)
+    if (ev.shiftKey && (ev.key === 'ArrowDown' || ev.key === 'ArrowUp')) {
+      ev.preventDefault()
+      if (!view.length) return
+      const next = ev.key === 'ArrowDown' ? Math.min(view.length - 1, sel + 1) : Math.max(0, sel - 1)
+      const cur = view[sel]?.name ?? view[0].name
+      setSelection((s) => rangeTo(s.anchor != null && order.includes(s.anchor) ? s : { ...s, anchor: cur }, order, view[next].name))
+      setSel(next)
+      return
+    }
+    if (ev.key === ' ') {                 // Space: comută rândul focalizat
+      const e = view[sel]; if (!e) return
+      ev.preventDefault()
+      setSelection((s) => toggleKey(s, e.name))
+      return
+    }
+    if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'a') {   // Ctrl/Cmd+A: tot ce se vede
+      ev.preventDefault()
+      setSelection((s) => toggleAll(s, order))
+      return
+    }
     if (ev.key === 'ArrowDown') { ev.preventDefault(); setSel((s) => Math.min(view.length - 1, s + 1)) }
     else if (ev.key === 'ArrowUp') { ev.preventDefault(); setSel((s) => Math.max(0, s - 1)) }
     else if (ev.key === 'Enter') {
@@ -444,6 +581,8 @@ export default function FilePanel(props: {
     } else if (ev.key === 'Backspace') {
       ev.preventDefault(); if (listing && listing.path !== '/') navigate(listing.parent)
     } else if (ev.key === 'Delete') {
+      // cu o selecţie: ştergerea în bloc (o singură confirmare); altfel rândul curent, ca înainte
+      if (picked.length) { ev.preventDefault(); setConfirmDel(null); setConfirmBulk(picked); return }
       const e = view[sel]; if (e) { ev.preventDefault(); setConfirmDel(e) }
     }
   }
@@ -553,6 +692,13 @@ export default function FilePanel(props: {
         </div>
         {/* sortare: ţinte de ≥24px (erau text de 10px fără padding) + direcţia anunţată, nu doar ▲/▼ */}
         <div className="flex items-center gap-1 border-b border-ink-800 px-2 text-[10px] uppercase tracking-wide text-slate-600">
+          {/* „Selectează tot" = ce se VEDE (filtrul şi .* respectate); tri-state */}
+          <label className="grid h-6 w-6 shrink-0 cursor-pointer place-items-center [@media(pointer:coarse)]:h-9 [@media(pointer:coarse)]:w-9" title={t('files.selectAll')}>
+            <input ref={selAllRef} type="checkbox" checked={allSel === 'all'} disabled={!view.length}
+              aria-label={t('files.selectAll')} data-testid="wt-files-select-all"
+              onChange={() => setSelection((s) => toggleAll(s, order))}
+              className="h-3.5 w-3.5 cursor-pointer accent-sky-500 [@media(pointer:coarse)]:h-6 [@media(pointer:coarse)]:w-6" />
+          </label>
           {(['name', 'size', 'mtime'] as SortKey[]).map((k) => (
             <button key={k} onClick={() => setSort((s) => ({ key: k, asc: s.key === k ? !s.asc : true }))}
               aria-pressed={sort.key === k}
@@ -610,10 +756,27 @@ export default function FilePanel(props: {
               </div>
             </div>
           )}
-          {view.map((e, i) => (
-            <div key={e.name} data-idx={i}
-              className={`group flex items-center gap-2 px-3 py-1 text-[12px] ${i === sel ? 'bg-ink-800' : 'hover:bg-ink-800/60'} ${dropRow === e.name ? 'bg-sky-500/10 ring-2 ring-inset ring-sky-400' : ''}`}
-              onClick={() => setSel(i)}
+          {view.map((e, i) => {
+            const checked = selection.keys.has(e.name)
+            return (
+            <div key={e.name} data-idx={i} data-selected={checked || undefined}
+              className={`group flex items-center gap-2 py-1 pl-1 pr-3 text-[12px] [@media(pointer:coarse)]:select-none ${i === sel ? 'bg-ink-800' : checked ? 'bg-sky-500/10' : 'hover:bg-ink-800/60'} ${dropRow === e.name ? 'bg-sky-500/10 ring-2 ring-inset ring-sky-400' : ''}`}
+              onClick={(ev) => {
+                if (suppressClickRef.current) { suppressClickRef.current = false; return }   // capătul unui long-press
+                if (selectClick(ev, e, i)) return
+                // touch, în modul selecţie: un tap oriunde pe rând îl comută
+                if (lastPointerRef.current === 'touch' && selection.keys.size) setSelection((s) => toggleKey(s, e.name))
+                setSel(i)
+              }}
+              // Shift+click nu trebuie să selecteze TEXT între rânduri
+              onMouseDown={(ev) => { if (ev.shiftKey) ev.preventDefault() }}
+              onPointerDown={(ev) => pressStart(ev, e, i)}
+              onPointerMove={pressMove}
+              onPointerUp={pressCancel}
+              onPointerCancel={pressCancel}
+              onPointerLeave={pressCancel}
+              // long-press pe Android deschide altfel meniul de sistem (copiere text / link)
+              onContextMenu={(ev) => { if (lastPointerRef.current === 'touch') ev.preventDefault() }}
               // drop pe un rând de DIRECTOR → upload în el (nu în directorul afişat). stopPropagation:
               // altfel handler-ul <aside> ar urca aceleaşi fişiere încă o dată în directorul curent.
               // `aria-dropeffect` e deprecat — indiciul pentru cititoare e un text ascuns vizual.
@@ -624,6 +787,18 @@ export default function FilePanel(props: {
                 if (!listing) return
                 startUpload(await collectDrop(ev), join(listing.path, e.name))
               } : undefined}>
+              {/* bifa: click-ul ei NU ajunge la rând (fără navigare / copiere de nume); Shift = interval */}
+              <label className="grid h-6 w-6 shrink-0 cursor-pointer place-items-center [@media(pointer:coarse)]:h-9 [@media(pointer:coarse)]:w-9"
+                onClick={(ev) => ev.stopPropagation()} onPointerDown={(ev) => ev.stopPropagation()}>
+                <input type="checkbox" checked={checked} aria-label={t('files.selectRow', { name: e.name })}
+                  onChange={() => { /* decide onClick, care vede Shift/Ctrl */ }}
+                  onClick={(ev) => {
+                    ev.stopPropagation()
+                    setSelection((s) => (ev.shiftKey ? rangeTo(s, order, e.name, ev.ctrlKey || ev.metaKey) : toggleKey(s, e.name)))
+                    setSel(i)
+                  }}
+                  className="h-3.5 w-3.5 cursor-pointer accent-sky-500 [@media(pointer:coarse)]:h-6 [@media(pointer:coarse)]:w-6" />
+              </label>
               <span className={`shrink-0 ${e.dir ? 'wt-link' : e.link ? 'text-slate-400' : 'text-slate-500'}`}>
                 {e.dir ? <FolderIcon /> : e.link ? <LinkIcon /> : <FileIcon />}
               </span>
@@ -635,6 +810,13 @@ export default function FilePanel(props: {
                   className="min-w-0 flex-1 rounded bg-ink-800 px-1 py-0.5 font-mono text-[11px] text-slate-100 ring-1 ring-sky-500" />
               ) : (
                 <button onClick={(ev) => {
+                    // click de selecţie (modificator / după long-press / tap în modul selecţie pe touch):
+                    // rândul l-a tratat deja — nu navigăm, nu copiem numele
+                    if (ev.shiftKey || ev.ctrlKey || ev.metaKey) return
+                    if (suppressClickRef.current) { suppressClickRef.current = false; ev.stopPropagation(); return }
+                    if (lastPointerRef.current === 'touch' && selection.keys.size) {
+                      ev.stopPropagation(); setSelection((s) => toggleKey(s, e.name)); setSel(i); return
+                    }
                     if (e.dir) { navigate(join(listing!.path, e.name)); return }
                     if (ev.detail >= 3) copyToClip(join(listing!.path, e.name))
                     else if (ev.detail === 2) copyToClip(e.name)
@@ -652,7 +834,9 @@ export default function FilePanel(props: {
               {/* acțiuni la hover (mouse), la focus în rând (tastatură — `hidden` le scotea din
                   fluxul de Tab, deci de la tastatură NU puteai şterge/redenumi) / mereu (touch).
                   Ţinte de 24px, fiecare cu etichetă care numeşte intrarea. */}
-              <div className="hidden shrink-0 items-center gap-0.5 group-hover:flex group-focus-within:flex [@media(hover:none)]:flex">
+              {/* stopPropagation: o acţiune pe rând (ex. Şterge) nu e şi un tap de selecţie pe touch */}
+              {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions -- doar opreşte bubbling-ul spre rând; butoanele din el au tastatura lor */}
+              <div onClick={(ev) => ev.stopPropagation()} className="hidden shrink-0 items-center gap-0.5 group-hover:flex group-focus-within:flex [@media(hover:none)]:flex">
                 {!e.dir && (
                   <button onClick={() => edit(e)} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-slate-200" title={t('files.edit')} aria-label={`${t('files.edit')} ${e.name}`}><PencilIcon /></button>
                 )}
@@ -668,7 +852,8 @@ export default function FilePanel(props: {
                 <button onClick={() => setConfirmDel(e)} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-rose-300" title={t('files.delete')} aria-label={`${t('files.delete')} ${e.name}`}><TrashIcon /></button>
               </div>
             </div>
-          ))}
+            )
+          })}
           {listing && view.length === 0 && (
             <div className="px-3 py-6 text-center text-[11px] text-slate-500">
               {filter ? t('files.emptyFilter') : t('files.emptyDir')}
@@ -680,6 +865,44 @@ export default function FilePanel(props: {
             <div className="px-3 py-2 text-center text-[10px] wt-warn">{t('files.truncated')}</div>
           )}
         </div>
+
+        {/* bara de selecţie: „N selectate · Descarcă · Şterge · Copiază pe host… · Renunţă" */}
+        {picked.length > 0 && (
+          <div role="toolbar" aria-label={t('files.selBarAria')} data-testid="wt-files-selbar"
+            className="flex flex-wrap items-center gap-1 border-t border-ink-800 bg-ink-800/70 px-2 py-1 text-[11px]">
+            <span className="mr-1 font-medium text-slate-200" aria-live="polite">{t('files.selCount', { count: picked.length })}</span>
+            <button onClick={bulkDownload} className="wt-touch inline-flex h-6 items-center gap-1 rounded px-1.5 text-slate-300 hover:bg-ink-700">
+              <DownloadIcon />{t('files.download')}</button>
+            <button onClick={() => { setConfirmDel(null); setConfirmBulk(picked) }} disabled={busy}
+              className="wt-touch inline-flex h-6 items-center gap-1 rounded px-1.5 text-slate-300 hover:bg-ink-700 hover:text-rose-300 disabled:opacity-40">
+              <TrashIcon />{t('files.delete')}</button>
+            <button onClick={openCopy} disabled={!picked.some((e) => !e.dir)}
+              title={picked.some((e) => !e.dir) ? t('copy.open') : t('copy.foldersNext')}
+              className="wt-touch inline-flex h-6 items-center gap-1 rounded px-1.5 text-slate-300 hover:bg-ink-700 disabled:opacity-40">
+              <CopyIcon />{t('copy.open')}</button>
+            <button onClick={() => setSelection(EMPTY_SELECTION)} className="wt-touch ml-auto inline-flex h-6 items-center rounded px-1.5 text-slate-400 hover:bg-ink-700">
+              {t('files.selClear')}</button>
+          </div>
+        )}
+
+        {confirmBulk && (() => {
+          const pv = previewNames(confirmBulk.map((e) => e.name))
+          const nDirs = confirmBulk.filter((e) => e.dir).length
+          return (
+            <div className="border-t border-ink-800 bg-ink-800/80 px-3 py-2 text-[11px]" role="alertdialog" aria-label={t('files.bulkDeleteTitle')}>
+              <p className="text-slate-300">{t('files.bulkDeleteConfirm', { count: confirmBulk.length })}</p>
+              <p className="mt-0.5 break-all font-mono wt-danger">
+                {pv.shown.join(', ')}{pv.more ? ` ${t('files.andMore', { count: pv.more })}` : ''}
+              </p>
+              {nDirs > 0 && <p className="mt-0.5 wt-warn">{t('files.bulkDeleteDirs', { count: nDirs })}</p>}
+              <div className="mt-1.5 flex gap-2">
+                <button autoFocus onClick={() => setConfirmBulk(null)} className="rounded px-2 py-0.5 text-slate-400 hover:bg-ink-700">{t('files.cancel')}</button>
+                <button onClick={() => void doBulkDelete(confirmBulk)} className="rounded bg-rose-600 px-2 py-0.5 font-medium text-white hover:bg-rose-700">
+                  {t('files.bulkDeleteGo', { count: confirmBulk.length })}</button>
+              </div>
+            </div>
+          )
+        })()}
 
         {/* confirmare ștergere (inline, nu window.confirm) */}
         {confirmDel && (
@@ -720,7 +943,7 @@ export default function FilePanel(props: {
                       {u.state === 'done' ? '✓' : u.state === 'err' ? '✗'
                         : u.state === 'stalled' ? t('jobs.stateStalled')
                         : u.state === 'retrying' ? t('jobs.stateRetrying', { n: u.attempts, max: 8 })
-                        : `${u.pct}%`}
+                        : sizeKnown(u) ? `${u.pct}%` : fmtBytes(u.pos)}
                     </span>
                     <button onClick={() => cancelOrDismiss(u.id, live)} className="grid h-6 w-6 shrink-0 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-rose-300"
                       title={label} aria-label={`${label} ${u.name}`}>✕</button>
@@ -740,6 +963,11 @@ export default function FilePanel(props: {
           </div>
         )}
       </aside>
+
+      {copyItems && (
+        <CopyToHostDialog srcHost={props.host} items={copyItems} onClose={() => setCopyItems(null)}
+          onStarted={() => setSelection(EMPTY_SELECTION)} />
+      )}
 
       {/* editor CodeMirror (lazy) — highlight, fișiere mari view-only, conflict */}
       {editing && (

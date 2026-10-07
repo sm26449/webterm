@@ -170,6 +170,71 @@ R=$(docker exec "$CT" sh -c 'ls /root/wtfstest/.wtarch.* 2>/dev/null | wc -l')
 R=$(j -o /dev/null -w '%{http_code}' "$FS/archive?path=$(enc '/')")
 [ "$R" = "400" ] && ok "archive pe / refuzat" || no "archive root guard" "cod $R"
 
+# --- copiere host → host pe server (3.5.5): AL DOILEA agent în acelaşi container ---
+# Agentul are lock de instanţă unică per HOME (~/.webterm/ptyd.lock) şi socket tmux per UID, deci
+# un al doilea agent rulează curat ca ALT user (alt HOME, alt lock, alt /tmp/tmux-UID). Fiecare e
+# un host separat în WebTerm → copierea A → B trece prin gateway exact ca între două maşini.
+jget() { python3 -c "import sys,json;d=json.load(sys.stdin);print(eval(sys.argv[1]))" "$1" 2>/dev/null; }
+docker exec "$CT" sh -c 'id wtcopy >/dev/null 2>&1 || useradd -m -s /bin/sh wtcopy' >/dev/null 2>&1
+H2_JSON=$(j -X POST "$B/api/hosts" -H 'Content-Type: application/json' \
+  -d '{"name":"fs-copy-b","note":"","connection_type":"agent","require_2fa":false}')
+H2=$(echo "$H2_JSON" | jget 'd["id"]')
+ENR2=$(echo "$H2_JSON" | grep -oE 'install/[A-Za-z0-9_-]+\.sh' | head -1 | sed 's|install/||;s|\.sh||')
+TOK2=$(curl -s "$B/install/$ENR2.sh" | grep -oE '^TOKEN="[^"]+"' | sed 's/TOKEN="//;s/"//')
+CFG2="{\"url\":\"ws://127.0.0.1:8000/agent/ws\",\"token\":\"$TOK2\",\"insecure\":true}"
+docker exec -u wtcopy -e HOME=/home/wtcopy "$CT" sh -c "mkdir -p /home/wtcopy/.webterm /home/wtcopy/in && printf '%s' '$CFG2' > /home/wtcopy/.webterm/agent.json"
+docker exec -d -u wtcopy -e HOME=/home/wtcopy "$CT" sh -c 'exec python3 /srv/webterm/agent/ptyd.py run >>/tmp/wt-agent2.log 2>&1'
+ON2=""
+for i in $(seq 1 30); do
+  ON2=$(j "$B/api/hosts" | python3 -c "import sys,json;print(next((1 for h in json.load(sys.stdin) if h['id']==$H2 and h.get('online')),''))" 2>/dev/null)
+  [ -n "$ON2" ] && break; sleep 1
+done
+[ -n "$ON2" ] && ok "copy: a second agent (user wtcopy, own HOME) is online as host $H2" \
+  || no "copy: second agent" "not online: $(docker exec "$CT" tail -n 3 /tmp/wt-agent2.log 2>/dev/null)"
+
+# fişiere de test pe A: unul mic + unul de 3 MiB aleator (mai multe blocuri de 1 MiB, nealiniat)
+docker exec "$CT" sh -c 'printf "copy-me-v1" > /root/wtfstest/cp-a.txt && head -c 3146001 /dev/urandom > /root/wtfstest/cp-big.bin'
+copy_wait() {   # $1 = corpul JSON → tipăreşte starea finală (JSON) a job-ului
+  local jid st r
+  jid=$(j -X POST "$B/api/fs/copy" -H 'Content-Type: application/json' -d "$1" | jget 'd["job_id"]')
+  [ -z "$jid" ] && { echo '{}'; return; }
+  for _ in $(seq 1 120); do
+    r=$(j "$B/api/fs/copy/$jid?files=1")
+    st=$(echo "$r" | jget 'd["state"]')
+    [ "$st" != "running" ] && { echo "$r"; return; }
+    sleep 0.5
+  done
+  echo "$r"
+}
+R=$(copy_wait "{\"src_host\":$HOST_ID,\"paths\":[\"~/wtfstest/cp-a.txt\",\"~/wtfstest/cp-big.bin\"],\"dst_host\":$H2,\"dst_dir\":\"~/in\",\"on_conflict\":\"skip\"}")
+[ "$(echo "$R" | jget 'd["state"]')" = "done" ] && [ "$(echo "$R" | jget 'd["files_done"]')" = "2" ] \
+  && ok "copy A → B: job done, 2/2 files" || no "copy A → B" "$R"
+S1=$(docker exec "$CT" sha256sum /root/wtfstest/cp-big.bin | cut -d' ' -f1)
+S2=$(docker exec "$CT" sha256sum /home/wtcopy/in/cp-big.bin 2>/dev/null | cut -d' ' -f1)
+[ -n "$S1" ] && [ "$S1" = "$S2" ] && ok "copy A → B: 3 MiB file arrives byte-identical (sha256)" || no "copy content" "$S1 vs $S2"
+R=$(docker exec "$CT" cat /home/wtcopy/in/cp-a.txt 2>/dev/null)
+[ "$R" = "copy-me-v1" ] && ok "copy A → B: small file content identical" || no "copy small" "got: $R"
+R=$(docker exec "$CT" stat -c %U /home/wtcopy/in/cp-big.bin 2>/dev/null)
+[ "$R" = "wtcopy" ] && ok "copy A → B: owned by the destination agent's user" || no "copy owner" "$R"
+R=$(docker exec "$CT" sh -c 'ls -a /home/wtcopy/in | grep -c wtpart')
+[ "$R" = "0" ] && ok "copy A → B: no .wtpart temp left on the destination" || no "copy temp" "$R left"
+R=$(copy_wait "{\"src_host\":$HOST_ID,\"paths\":[\"~/wtfstest/cp-a.txt\"],\"dst_host\":$H2,\"dst_dir\":\"~/in\",\"on_conflict\":\"rename\"}")
+docker exec "$CT" test -f "/home/wtcopy/in/cp-a (1).txt" && ok "copy on_conflict=rename → 'cp-a (1).txt'" || no "copy rename" "$R"
+R=$(copy_wait "{\"src_host\":$HOST_ID,\"paths\":[\"/dev/zero\",\"~/wtfstest/arc dir\"],\"dst_host\":$H2,\"dst_dir\":\"~/in\",\"on_conflict\":\"skip\"}")
+echo "$R" | grep -q '"code":"files.notRegular"' && ok "copy: special file (/dev/zero) refused per file" || no "copy special" "$R"
+echo "$R" | grep -q '"code":"copy.folder"' && ok "copy: folder refused per file (next agent update)" || no "copy folder" "$R"
+j -X POST "$FS/mkdir" -H 'Content-Type: application/json' -d '{"path":"~/wtfstest/cpdst"}' >/dev/null
+R=$(copy_wait "{\"src_host\":$HOST_ID,\"paths\":[\"~/wtfstest/cp-a.txt\"],\"dst_host\":$HOST_ID,\"dst_dir\":\"~/wtfstest/cpdst\",\"on_conflict\":\"skip\"}")
+R2=$(docker exec "$CT" cat /root/wtfstest/cpdst/cp-a.txt 2>/dev/null)
+[ "$R2" = "copy-me-v1" ] && ok "copy on the same host (src == dst, other folder)" || no "copy same host" "$R"
+R=$(j -o /dev/null -w '%{http_code}' -X POST "$B/api/fs/copy" -H 'Content-Type: application/json' \
+  -d "{\"src_host\":$HOST_ID,\"paths\":[\"/root/../etc/shadow\"],\"dst_host\":$H2,\"dst_dir\":\"~/in\"}")
+[ "$R" = "400" ] && ok "copy: '..' in a source path refused (400)" || no "copy traversal" "cod $R"
+# curăţenie: al doilea agent oprit, hostul lui şters (paşii următori — mobile/a11y — văd doar hostul e2e)
+docker exec -u wtcopy -e HOME=/home/wtcopy "$CT" python3 /srv/webterm/agent/ptyd.py stop >/dev/null 2>&1 || true
+j -X DELETE "$B/api/hosts/$H2" >/dev/null
+docker exec "$CT" rm -rf /home/wtcopy/in >/dev/null 2>&1
+
 # --- delete fișier / dir (recursiv) ---
 R=$(j -X POST "$FS/delete" -H 'Content-Type: application/json' -d '{"path":"~/wtfstest/renamed.txt"}')
 echo "$R" | grep -q '"ok":true' && ok "delete a file" || no "delete file" "$R"

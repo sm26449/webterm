@@ -922,6 +922,98 @@ try {
   }
   check('download: jobul se termină (Done)', dlDone)
 
+  // ── 3.5.5: selecţie multiplă + descărcare în bloc + folder prin Transferuri + copiere pe host ──
+  // Headless n-are cu cine vorbi un selector de fişier/folder (File System Access) — îl scoatem, ca
+  // motorul să cadă pe Blob (evenimente de download capturabile), exact calea browserelor fără FSA.
+  await page.evaluate(() => {
+    const w = window
+    try { Object.defineProperty(w, 'showSaveFilePicker', { value: undefined, configurable: true }) } catch { /* */ }
+    try { Object.defineProperty(w, 'showDirectoryPicker', { value: undefined, configurable: true }) } catch { /* */ }
+  })
+  await activePane.locator('.xterm-screen').click()
+  await page.keyboard.type('printf sel-unu > /tmp/wt_sel1.txt; printf sel-doi > /tmp/wt_sel2.txt; mkdir -p /tmp/wt_seldir/sub /tmp/wt_cpdst && printf in-dir > /tmp/wt_seldir/sub/x.txt\n')
+  await page.waitForTimeout(800)
+  await filePanel.locator('button[title="Reload"]').click()
+  await filePanel.locator('input[placeholder="filter…"]').fill('wt_sel')
+  await pollValue(() => filePanel.textContent().then((t) => t ?? ''), (t) => t.includes('wt_sel2.txt') && t.includes('wt_seldir'))
+  // „Selectează tot" = ce se VEDE: filtrul lasă wt_sel1.txt, wt_sel2.txt şi folderul wt_seldir
+  await filePanel.locator('[data-testid="wt-files-select-all"]').check()
+  const selbar = filePanel.locator('[data-testid="wt-files-selbar"]')
+  check('multi-select: „Select all" respectă filtrul (3 rânduri) şi arată bara de selecţie',
+    (await visible(selbar)) && ((await selbar.textContent()) ?? '').includes('3 selected'))
+  // deselectăm folderul cu Ctrl+click pe rândul lui → rămân cele 2 fişiere
+  await filePanel.locator('div.group').filter({ hasText: 'wt_seldir' }).first().click({ modifiers: ['Control'] })
+  check('multi-select: Ctrl+click comută un rând (2 selectate)', ((await selbar.textContent()) ?? '').includes('2 selected'))
+  const dls = []
+  const onDl = (d) => dls.push(d.suggestedFilename())
+  page.on('download', onDl)
+  await selbar.locator('button:has-text("Download")').click()
+  let bulkJobs = 0
+  for (let i = 0; i < 60 && (bulkJobs < 2 || dls.length < 2); i++) {
+    bulkJobs = await page.evaluate(() => {
+      const snap = window.__wtTransfers?.store?.snapshot?.()
+      return snap ? [...snap.values()].filter((j) => j.dir === 'down' && /wt_sel[12]\.txt$/.test(j.dest)).length : 0
+    })
+    if (bulkJobs < 2 || dls.length < 2) await page.waitForTimeout(250)
+  }
+  check('bulk download: 2 fişiere selectate → 2 joburi de transfer', bulkJobs === 2)
+  check('bulk download: ambele fişiere chiar se descarcă', dls.includes('wt_sel1.txt') && dls.includes('wt_sel2.txt'))
+  await filePanel.locator('[data-testid="wt-files-selbar"] button:has-text("Clear")').click()
+  check('multi-select: Clear goleşte selecţia (bara dispare)', await hidden(selbar))
+
+  // folder → .tgz prin MOTOR: rând de arhivă în Transferuri (fără %, octeţi primiţi), apoi Done
+  const dirRow = filePanel.locator('div.group').filter({ hasText: 'wt_seldir' }).first()
+  await dirRow.hover()
+  await dirRow.locator('button[aria-label="Download wt_seldir as a .tgz archive"]').click()
+  let arState = ''
+  for (let i = 0; i < 80 && arState !== 'done'; i++) {
+    arState = await page.evaluate(() => {
+      const snap = window.__wtTransfers?.store?.snapshot?.()
+      const j = snap ? [...snap.values()].find((x) => x.kind === 'archive' && x.dest.endsWith('/wt_seldir')) : null
+      return j ? j.state : ''
+    })
+    if (arState !== 'done') await page.waitForTimeout(250)
+  }
+  check('folder download: rând de arhivă în Transferuri care se termină (Done)', arState === 'done')
+  check('folder download: arhiva .tgz chiar se descarcă', dls.includes('wt_seldir.tgz'))
+  page.off('download', onDl)
+
+  // Copy to host… : pe un singur agent testăm copierea pe ACELAŞI host, în alt folder (permisă —
+  // duplicat / mutare de date fără browser). Copierea A → B între doi agenţi e în fs-test.sh.
+  await filePanel.locator('div.group').filter({ hasText: 'wt_sel1.txt' }).first()
+    .locator('input[type=checkbox]').check()
+  await filePanel.locator('[data-testid="wt-files-selbar"] button:has-text("Copy to host")').click()
+  const cdlg = page.locator('[data-testid="wt-copy-dialog"]')
+  check('copy: dialogul „Copy to host…" se deschide din bara de selecţie', await visible(cdlg))
+  // întâi lăsăm dialogul să termine listarea iniţială (hosturi + ~), apoi tastăm destinaţia şi
+  // aşteptăm ca folderul tastat să fie cel listat (câmpul devine calea canonică)
+  await pollValue(() => cdlg.locator('ul[aria-label="Folders"] li').count(), (n) => n > 0)
+  await cdlg.locator('#wt-copy-dir').fill('/tmp/wt_cpdst')
+  await cdlg.locator('#wt-copy-dir').press('Enter')
+  await pollValue(() => cdlg.locator('ul[aria-label="Folders"]').textContent().then((t) => t ?? ''), (t) => t.includes('No subfolders'))
+  await page.waitForTimeout(300)
+  const cpDirTyped = await cdlg.locator('#wt-copy-dir').inputValue()
+  await cdlg.locator('button:has-text("Copy 1 file")').click()
+  let cpState = ''
+  for (let i = 0; i < 80 && cpState !== 'done'; i++) {
+    cpState = await page.evaluate(() => {
+      const snap = window.__wtTransfers?.store?.snapshot?.()
+      const j = snap ? [...snap.values()].find((x) => x.dir === 'copy') : null
+      return j ? j.state : ''
+    })
+    if (cpState !== 'done' && cpState !== 'err') await page.waitForTimeout(250)
+    else break
+  }
+  check('copy: job „copy" în Transferuri, terminat pe server (Done)', cpState === 'done')
+  await activePane.locator('.xterm-screen').click()
+  await page.keyboard.type('cat /tmp/wt_cpdst/wt_sel1.txt && echo " CP_OK"\n')
+  const cpOk = await waitScreen('sel-unu CP_OK')
+  check('copy: fişierul a ajuns în folderul destinaţie, cu acelaşi conţinut', cpOk)
+  if (!cpOk) console.error('  [diag] copy: dir tastat =', cpDirTyped, '· rând =', await page.evaluate(() =>
+    JSON.stringify([...(window.__wtTransfers?.store?.snapshot?.()?.values?.() ?? [])].filter((j) => j.dir === 'copy')
+      .map((j) => ({ dest: j.dest, state: j.state, detail: j.detail, err: j.error })))))
+  await filePanel.locator('input[placeholder="filter…"]').fill('')
+
   // ── Transfers phase 2: PAUSE apoi RESUME un upload (continuă de la offset-ul real) ──
   // Întârziem fiecare felie cu route() ca upload-ul să fie GARANTAT încă în curs când îl punem pe
   // pauză (localhost + agent în container e altfel prea rapid). Pauza/reluarea le dăm prin hook-ul de
@@ -1271,7 +1363,8 @@ try {
   await page.locator('input[placeholder="e.g. prod-debug"]').fill('e2e-split')
   // deterministic: wizard-ul pre-bifează primele taburi (pot fi 3–4 → grilă). Debifăm tot şi
   // alegem EXACT 2 sesiuni → un split cu divider, ca să testăm calea de 2 panouri.
-  const boxes = page.locator('input[type="checkbox"]:visible')
+  // doar bifele WIZARD-ului: panoul de fişiere deschis în spate are şi el bife (selecţie, 3.5.5)
+  const boxes = page.locator('[aria-labelledby="wt-split-wizard-title"] input[type="checkbox"]:visible')
   for (let i = (await boxes.count()) - 1; i >= 0; i--) { if (await boxes.nth(i).isChecked()) await boxes.nth(i).click() }
   await boxes.nth(0).click(); await boxes.nth(1).click()
   await page.locator('button:has-text("Show side by side")').click()

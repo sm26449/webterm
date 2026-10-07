@@ -4,10 +4,11 @@ import type { Host } from '../lib/api'
 import { useI18n } from '../lib/i18n'
 import { notify } from '../lib/notify'
 import { lsGet, lsSet } from '../lib/storage'
-import { dismissUpload } from '../lib/uploads'
+import { dismissUpload, fmtBytes } from '../lib/uploads'
 import { dismissDownload } from '../lib/downloads'
-import { UploadJob, isActive, isDownload, uploadStore } from '../lib/uploadStore'
-import { DownloadIcon, UploadIcon } from './Icons'
+import { dismissCopy } from '../lib/copyjobs'
+import { UploadJob, isActive, isCopy, isDownload, sizeKnown, uploadStore } from '../lib/uploadStore'
+import { CopyIcon, DownloadIcon, UploadIcon } from './Icons'
 import { JobRow, jobHostName, needsAttention } from './JobsBar'
 
 /* Widget-ul plutitor de transferuri: UN SINGUR loc pentru tot progresul (upload/download),
@@ -86,7 +87,9 @@ export default function TransfersWidget(props: { hosts: Host[]; insertSid?: stri
   if (jobs.length === 0) return null
 
   // sumar general: procentul pe octeţii transferurilor VII (ca în fostul chip)
-  const live = jobs.filter(isActive)
+  // doar job-urile cu mărime CUNOSCUTĂ intră în %: o arhivă din mers (size 0, pos în creştere) ar
+  // împinge sumarul peste 100%
+  const live = jobs.filter((j) => isActive(j) && sizeKnown(j))
   const totalSize = live.reduce((a, j) => a + j.size, 0)
   const totalPos = live.reduce((a, j) => a + j.pos, 0)
   const overallPct = totalSize ? Math.round((totalPos / totalSize) * 100) : null
@@ -97,13 +100,15 @@ export default function TransfersWidget(props: { hosts: Host[]; insertSid?: stri
   const allTerminal = jobs.every(isTerminal)
   const canClear = allTerminal && jobs.some(isDismissable)
   const clearFinished = () => {
-    for (const j of jobs) if (isDismissable(j)) (isDownload(j) ? dismissDownload : dismissUpload)(j.id)
+    for (const j of jobs) if (isDismissable(j)) (isCopy(j) ? dismissCopy : isDownload(j) ? dismissDownload : dismissUpload)(j.id)
   }
   // iconul = sensul când e un singur job; pentru mai multe rămâne „↑" (upload e cazul uzual)
-  const icon = jobs.length === 1 && isDownload(jobs[0]) ? <DownloadIcon /> : <UploadIcon size={12} />
+  const icon = jobs.length === 1 && isCopy(jobs[0]) ? <CopyIcon />
+    : jobs.length === 1 && isDownload(jobs[0]) ? <DownloadIcon /> : <UploadIcon size={12} />
   const countLabel = `${t('transfers.chipMany', { count: jobs.length })}${overallPct != null ? ` · ${overallPct}%` : ''}`
   // pliat: un job → `nume 63%`; mai multe → `N transferuri · 63%`
-  const summary = jobs.length === 1 ? `${jobs[0].name} ${jobs[0].pct}%` : countLabel
+  const one = jobs[0]
+  const summary = jobs.length === 1 ? `${one.name} ${sizeKnown(one) ? `${one.pct}%` : fmtBytes(one.pos)}` : countLabel
 
   return createPortal(
     <div role="region" aria-label={t('jobs.title')} className="wt-transfers-widget">

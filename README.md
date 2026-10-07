@@ -217,7 +217,10 @@ what it does not cover, is in [Security](#security) and
   bytes already uploaded, re-dropping the same file continues where it left off, and
   a **CRC-32 integrity check** guards the commit; every upload also shows up in the
   **Transfers widget** (see below); **download a folder (or file) as a
-  `.tgz` archive** (tarred on the host, streamed down); a **Monaco** (VS Code) editor with
+  `.tgz` archive** (tarred on the host, streamed down as a Transfers job with Cancel);
+  **multi-select** (checkboxes, Shift/Ctrl+click, long-press on phones) with bulk
+  download / delete and **copy to another host** — agent → gateway → agent, the data never
+  passes through your browser ([details](docs/TRANSFERS.md#copy-to-another-host)); a **Monaco** (VS Code) editor with
   highlighting, large files opened view-only (partial-read), atomic save with
   conflict detection
 - **Transfers** — [details](docs/TRANSFERS.md): progress lives in **one floating widget in the
@@ -1054,7 +1057,7 @@ administer your servers with. The CI chain, in order:
    ephemeral container, a headless Chromium checks that the UI reaches a working
    screen, with no JS errors. Catches exactly the class of bug that produced the
    white screen in v1.0.11.
-3. **E2E with a REAL agent** (`scripts/e2e-session.mjs`, 169 checks) — starts an
+3. **E2E with a REAL agent** (`scripts/e2e-session.mjs`, 179 checks) — starts an
    agent in a container **with tmux installed, i.e. the backend production uses**,
    opens sessions through the UI, types commands, verifies the output, tab
    switching, pause/re-sync, shortcuts, parametrized snippets, alert thresholds,
@@ -1063,7 +1066,7 @@ administer your servers with. The CI chain, in order:
    history replay** (no duplicate entries, no prompts captured as commands, new
    commands still recorded). Running this on the `pty` fallback would test a
    different backend than production — that gap hid a whole class of bugs.
-4. **FS API** (`scripts/fs-test.sh`, 42) — end-to-end file operations with a real agent.
+4. **FS API** (`scripts/fs-test.sh`, 53) — end-to-end file operations with a real agent.
 5. **Port forwarding** (`scripts/fwd-test.sh`) — auth handshake, HTTP +
    WebSocket proxy + **https targets**, **configurable domain**, **SSH hosts**
    (real sshd), and security tests (slug-bound token, anti-SSRF, the 2FA gate,

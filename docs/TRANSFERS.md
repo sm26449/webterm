@@ -93,9 +93,131 @@ Where the file lands:
   memory, so a file larger than **1 GiB** needs a browser with the File System Access API — otherwise
   the download is refused with a clear message.
 
-**Not yet:** resume **across a page reload** (we don't persist the file handle) and resumable
-**directory** archives (`.tgz` is still a plain streamed link). Downloads rely on TLS for integrity;
-there is no end-to-end CRC check like uploads have.
+**Not yet:** resume **across a page reload** (we don't persist the file handle). Downloads rely on
+TLS for integrity; there is no end-to-end CRC check like uploads have.
+
+## Folder downloads (`.tgz`)
+
+The download button on a **folder** row packs the folder into a `.tgz` **on the host** (`tar` through
+the agent's existing `run` op, next to the folder) and streams it through `GET /fs/archive`. Since
+3.5.5 that stream is a Transfers job like any download, not a bare link:
+
+- the row first says **preparing the archive on the host…** while `tar` runs (up to the agent's
+  5-minute cap — the byte watchdog only starts once the response begins);
+- then it shows the **bytes received** and the speed. The archive is built on the fly, so its size
+  is **not known in advance** — there is no percentage, the bar is indeterminate;
+- **Cancel** closes the connection; the gateway then deletes the temporary `.wtarch.<id>.tgz` on
+  the host;
+- on failure the row shows the **server's message** (translated where we have a code: *the folder
+  could not be archived*, *permission denied*, *archiving the file-system root is refused* …);
+- it is **not resumable** — the row says so. Every request produces a new archive, so there is no
+  stable offset to continue from. **Retry** starts it again from zero (the destination is truncated).
+
+Saving follows the file downloads: with the File System Access API you pick the destination and the
+archive streams to disk; otherwise it is collected in a Blob, and an archive that grows past
+**1 GiB** fails with the *too large for this browser* message.
+
+## Multi-select in the Files panel
+
+Every row has a checkbox. On a desktop:
+
+- **click** a checkbox, or **Ctrl/Cmd+click** a row, toggles it; **Shift+click** selects the range
+  from the last row you touched (the *anchor*) to this one; **Ctrl+Shift+click** adds the range to
+  the selection;
+- **Space** toggles the focused row, **Shift+↑/↓** extends the selection from the anchor,
+  **Ctrl/Cmd+A** selects everything visible, **Escape** clears the selection (a second Escape closes
+  the panel), **Delete** with a selection asks to delete the selection;
+- the checkbox in the sort bar is **Select all**: it selects what you **see** — the filter and the
+  hidden-files toggle are respected — and clears those rows on a second press.
+
+On a phone or tablet, **long-press** a row (half a second, without moving) to start selecting; while
+something is selected, a tap on a row toggles it instead of opening it. The checkboxes are 24 px
+(36 px rows) on touch screens.
+
+The single-row gestures are unchanged: double-click a file name copies the name, triple-click copies
+the full path, and dropping files on a folder row uploads into that folder. Clicks on a checkbox
+never trigger them. Navigating to another folder clears the selection; reloading the same folder
+keeps what still exists.
+
+A **selection bar** appears at the bottom: **N selected · Download · Delete · Copy to host… · Clear**.
+
+- **Download** starts **one Transfers job per item**: files through the download engine (Range,
+  pause, retry), folders as `.tgz` archives (above). With the File System Access API you choose a
+  **folder once** and every file streams into it (a name that already exists there gets ` (1)`, it is
+  never overwritten silently); without it each item is saved as a Blob, and a file over 1 GiB is
+  reported instead of started. At most 3 run at a time.
+- **Delete** asks **once**, listing the count and the first five names; if folders are included it
+  says so — they are deleted **recursively**, the same rule as deleting one folder. Items are deleted
+  one by one; failures are **reported per item** (*2 of 7 could not be deleted: …*) and stay
+  selected.
+
+## Copy to another host
+
+**Copy to host…** in the selection bar copies the selected **files** to another host **through the
+gateway**: agent A → gateway → agent B. The data never passes through your browser (useful from a
+phone, or over a slow link), and nothing has to be installed between the two hosts.
+
+The dialog asks for:
+
+- the **destination host** — only hosts with an **online agent**; the source host is listed last as
+  *(same host)*: copying within one host (another folder, or a duplicate next to the original) is
+  allowed;
+- the **destination folder** — a path field plus a small folder browser (it lists the destination
+  through the same API as the Files panel, so a 2FA host asks for its step-up there);
+- **if a file already exists**: **Skip**, **Overwrite** (atomic replace; the existing file keeps its
+  permissions), or **Keep both** — the copy is named `name (1).ext`, `name (2).ext` … (`a.tar.gz`
+  becomes `a (1).tar.gz`, `.bashrc` becomes `.bashrc (1)`). Copying a file onto itself with
+  *Overwrite* is skipped.
+
+The job appears in the **Transfers widget** as a **copy A → B** row: percentage over the total
+size, speed, *files 3/5 · skipped: 1 · failed: 1*, **Cancel**, and on failure the first error with
+**Retry**, which starts a new job with only the files that failed. Closing the tab does not stop the
+copy — it runs on the server — but a reload loses the row.
+
+**How it works.** `POST /api/fs/copy` `{src_host, paths[], dst_host, dst_dir, on_conflict}` returns
+a `job_id`; `GET /api/fs/copy/{job_id}` reports per-file and total bytes, state and errors (`?files=1`
+for every file row); `DELETE /api/fs/copy/{job_id}` cancels. The gateway reads each file with the
+agent's `fs_read` (as a download does) and writes it with the **upload machinery**: the destination
+gets the same `.wtpart.<id>` temporary file, the bytes are applied strictly in order (binary frames
+on agent ≥ 55), and the commit checks the **CRC-32** of what was read on the source against the CRC
+the destination agent computed on disk **before** the atomic rename — a corrupted copy never appears
+under its final name. A file that changes on the source during the copy (size or mtime) fails
+instead of landing half old, half new.
+
+**Backpressure and memory.** Each file has one reader and one writer joined by a small bounded
+queue: the reader stops when 4 source chunks (256 KiB each) are waiting, and the writer waits for
+the destination agent's acknowledgement of every 1 MiB block. The gateway therefore holds a few
+megabytes per file in flight, never the file. A job copies **2 files at a time**; at most 4 jobs per
+user (16 on the gateway) run at once.
+
+**Cancel** stops the file in flight and **deletes its temporary file on the destination**; files
+already copied **stay**. A source read error, a refused file or a CRC mismatch fails **that file**
+only; the job continues and ends as *failed* with the per-file errors.
+
+**Limits**
+
+- at most **1000 files** per copy; the total size is unlimited (and shown);
+- **folders are not copied** — the button is disabled for a selection of folders only, and folders in
+  a mixed selection are left out with a note. Walking a tree with the current agent operations would
+  lose the executable bits (the agent has no `chmod` operation) and silently follow symlinks; copying
+  folders between hosts comes with the **next agent update**;
+- **special files** (devices, FIFOs, sockets — e.g. `/dev/zero`) are refused, the same guard as
+  downloads; **symbolic links** to files are followed and copied as the file they point to;
+- **permissions and ownership are not copied**: a new file gets the destination agent's default
+  mode (umask, usually `0644`) and is owned by the destination agent's user. The dialog warns when
+  a selected file is private on the source (e.g. `0600`, an SSH key);
+- paths must be absolute or `~/…`, without `..` segments or control characters; two sources with
+  the same file name in one job are refused.
+
+**Security.** Session cookie only — an automation token gets `401`. Both ends need what reading and
+writing files need on their own: the **step-up** of a 2FA host is required on the **source and on
+the destination**. Each job is visible and cancellable only by the account that started it. The
+audit log records `copy N files A:/path → B:/dir` (and the cancel).
+
+**Jobs live in the gateway's memory.** A finished job stays queryable for **one hour**. A **gateway
+restart loses running jobs**: files already committed stay; the temporary file of the one in
+flight is removed by the upload garbage collector after 24 hours (or on the next upload into that
+folder). Start the copy again with **Skip** to finish the rest.
 
 ## Drop on the terminal → upload to the session directory
 

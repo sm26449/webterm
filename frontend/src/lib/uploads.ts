@@ -672,7 +672,8 @@ function ensureGlobalListeners() {
   // nu). Browserul arată propriul text; noi doar cerem confirmarea.
   window.addEventListener('beforeunload', (e) => {
     for (const j of uploadStore.snapshot().values()) {
-      if (isActive(j)) { e.preventDefault(); return }
+      // o copiere host → host rulează pe SERVER: închiderea tab-ului n-o opreşte, nu cerem confirmare
+      if (isActive(j) && j.dir !== 'copy') { e.preventDefault(); return }
     }
   })
   // Legătura a revenit / tab-ul a redevenit vizibil: reluăm ce a picat (nu şi 401 — acela cere

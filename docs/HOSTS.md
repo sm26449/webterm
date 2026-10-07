@@ -188,7 +188,8 @@ which answers with one result per row: `{index, ok, id?, code?, vars?}`.
 
 Mark a host as one that a stolen browser session must not be enough to reach. On such a host,
 **every sensitive action** asks for a fresh second factor first: opening or attaching to a
-session, `run`, every file operation, Docker/services/ports, diagnostics and the agent log,
+session, `run`, every file operation (a [copy to another host](TRANSFERS.md#copy-to-another-host)
+needs it on **both** hosts), Docker/services/ports, diagnostics and the agent log,
 port-forward handshakes, Wake-on-LAN, a new install link, provisioning, forgetting
 credentials, and changing the host's connection fields.
 

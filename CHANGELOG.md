@@ -10,8 +10,10 @@ back.
 ## [Unreleased]
 
 The phone is where "your sessions, anywhere" was weakest — every external UI review said so.
-Three phone fixes, plus a "host offline" card in the session view. Frontend only; no agent change,
-so no fleet update.
+Three phone fixes, plus a "host offline" card in the session view. Then the file manager grows up:
+multi-select with bulk download/delete, folder downloads as real Transfers jobs, and copying files
+from one host to another through the gateway. Gateway + frontend only; **no agent change**, so no
+fleet update (agents stay at 57).
 
 ### Changed
 - **Session panels are full-screen sheets on phones.** Files, Git, Forwards, Docker, Services,
@@ -51,6 +53,35 @@ so no fleet update.
   The real-agent E2E now stops and restarts the agent mid-run (169 checks) to prove the card
   appears, dismisses, clears, and that the tmux session streams again afterwards. See
   [docs/HOSTS.md](docs/HOSTS.md#when-a-host-goes-offline-mid-session).
+- **Multi-select in the Files panel.** Acting on ten files meant ten hovers and ten confirmations.
+  Rows now have checkboxes, with Shift+click ranges, Ctrl/Cmd+click toggles, Space / Shift+↑↓ /
+  Ctrl+A / Escape on the keyboard, long-press to start selecting on phones, and a **Select all**
+  that selects only what the filter shows (selecting rows you cannot see is how bulk deletes go
+  wrong). A selection bar offers **Download** (one Transfers job per item; with the File System
+  Access API you pick a folder once), **Delete** (one confirmation with the count, the first names
+  and whether folders are deleted recursively; failures reported per item) and **Copy to host…**.
+  The selection model is a pure, unit-tested lib. Double/triple-click and drop-on-folder keep
+  working. See [docs/TRANSFERS.md](docs/TRANSFERS.md#multi-select-in-the-files-panel).
+- **Folder downloads go through Transfers.** The `.tgz` of a folder was a bare link: no progress, no
+  cancel, and a failed `tar` showed up as a nameless failed download. It is now a Transfers row:
+  *preparing the archive on the host…*, then bytes received (the size is unknown up front, so no
+  fake percentage), Cancel (the temp archive on the host is deleted), the server's error, and Retry
+  — which restarts, because an archive built on the fly cannot be resumed (the row says so). See
+  [docs/TRANSFERS.md](docs/TRANSFERS.md#folder-downloads-tgz).
+- **Copy files to another host, server-side.** Moving a file between two of your hosts meant
+  downloading it to the device you happen to hold and uploading it again — over a phone link, twice.
+  `POST /api/fs/copy` now streams it agent → gateway → agent: the source is read with `fs_read`, the
+  destination written through the resumable-upload machinery (in-order blocks, binary frames, CRC-32
+  checked before the atomic rename), with a bounded queue so the gateway holds a few chunks per file,
+  never the file. Skip / overwrite / keep both (`name (1).ext`), cancel (the destination temp is
+  removed, finished files stay), per-file errors, a copy row in the Transfers widget, step-up on
+  **both** hosts, cookie only, audited. Copying within one host is allowed. **Limits:** files only —
+  folders need an agent `chmod` to keep executable bits and come with the next agent update; at most
+  1000 files per job; special files refused; permissions and ownership are the destination's; jobs
+  live in gateway memory (a restart loses running jobs). Tested hermetically with two fake agents
+  (`tests/fs_copy_test.py`, 92 suites) and end to end with a second real agent in the smoke container
+  (`fs-test.sh`); the E2E (179 checks) covers bulk download, the folder job and a same-host copy
+  through the dialog. See [docs/TRANSFERS.md](docs/TRANSFERS.md#copy-to-another-host).
 
 ### Fixed
 - **Live-sessions badge contrast on Aurora.** The green "N live sessions" count on a sidebar host

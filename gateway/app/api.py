@@ -30,6 +30,7 @@ from urllib.parse import quote, urlparse
 
 from .errors import ApiError
 from . import webauthn_api
+from . import fscopy
 from . import (audit, backup, cloudbackup, config, core, db, email_alerts, health, security,
                signing, totp, updatecheck)
 
@@ -281,6 +282,13 @@ def _rate_limited(retry: int) -> ApiError:
 # Le dăm un COD după substring — UI-ul traduce şi poate oferi un remediu („rulează ca alt
 # user", „eliberează spaţiu"); mesajul brut (cu calea) rămâne în `detail`. (audit UX §4.3/§8.F3)
 _FILE_ERROR_CODES = (
+    # copierea host → host (fscopy): mesajele ei proprii, înaintea celor generice
+    ("folders cannot be copied", "copy.folder"),
+    ("source file changed", "copy.sourceChanged"),
+    ("destination appeared", "copy.appeared"),
+    ("no free name", "copy.noFreeName"),
+    ("host offline", "host.offline"),
+    ("not a regular file", "files.notRegular"),
     ("permission denied", "files.permissionDenied"),
     ("operation not permitted", "files.permissionDenied"),
     ("read-only file system", "files.readOnly"),
@@ -2562,6 +2570,114 @@ async def fs_upload_abort(host_id: int, path: str, upload_id: str,
     _check_upload_id(upload_id)
     await core.fs_upload_abort(host_id, path, upload_id)
     return {"ok": True}
+
+
+# ── Copiere host → host, pe server (3.5.5) ───────────────────────────────────────────────
+# Octeţii curg agent A → gateway → agent B (fs_read + maşinăria de upload resumabil), nu prin
+# browser. Aceleaşi porţi ca rutele fs: cookie (`require_user` — un token de automatizare primeşte
+# 401), step-up pe AMBELE hosturi (citire pe sursă = /fs/download, scriere pe destinaţie =
+# /fs/upload; fiecare cere `_require_host_stepup` pe hostul ei). Job-ul trăieşte în memorie (vezi
+# fscopy.py); GET/DELETE văd doar job-urile userului care le-a pornit.
+class FsCopyIn(BaseModel):
+    src_host: int
+    paths: list = Field(default_factory=list)
+    dst_host: int
+    dst_dir: str
+    on_conflict: str = "skip"
+
+
+def _copy_refused(e: "fscopy.CopyRefused") -> ApiError:
+    status = 429 if e.code == "copy.busy" else 400
+    return ApiError(status, e.code, str(e), vars=e.vars or None)
+
+
+async def _copy_host(host_id: int, what: str):
+    """Hostul unei copieri: există, e cu agent şi agentul e conectat ACUM."""
+    row = await db.fetchone("SELECT id, name, connection_type FROM hosts WHERE id=?", host_id)
+    if not row:
+        raise ApiError(404, "host.missing", "no such host")
+    if (row["connection_type"] or "agent") != "agent":
+        raise ApiError(400, "copy.notAgent", "the %s host has no agent (file copy needs one)" % what)
+    return row
+
+
+def _copy_code_of(msg: str) -> str:
+    return _file_api_error(core.FileError(msg)).code
+
+
+@router.post("/api/fs/copy")
+async def fs_copy_start(body: FsCopyIn, request: Request, user=Depends(security.require_user)):
+    """Porneşte o copiere de fişiere de pe `src_host` în `dst_dir` pe `dst_host` → `{job_id}`.
+    `on_conflict`: skip | overwrite | rename („nume (1).ext"). src == dst e permis (duplicat /
+    copiere în alt director pe acelaşi host). Folderele sunt refuzate per fişier (vezi fscopy)."""
+    if body.on_conflict not in fscopy.CONFLICT_MODES:
+        raise ApiError(400, "copy.badConflict", "on_conflict must be skip, overwrite or rename")
+    paths = body.paths
+    if not paths:
+        raise ApiError(400, "copy.empty", "nothing to copy")
+    if len(paths) > fscopy.COPY_MAX_FILES:
+        raise ApiError(400, "copy.tooMany", "at most %d files per copy" % fscopy.COPY_MAX_FILES,
+                       vars={"max": fscopy.COPY_MAX_FILES})
+    try:
+        for p in paths:
+            fscopy.check_path(p, "path")
+        fscopy.check_path(body.dst_dir, "dst_dir")
+        names = [fscopy.src_name(p) for p in paths]
+    except fscopy.CopyRefused as e:
+        raise _copy_refused(e)
+    if len(set(names)) != len(names):
+        raise ApiError(400, "copy.duplicateNames", "two sources have the same file name")
+    src = await _copy_host(body.src_host, "source")
+    dst = await _copy_host(body.dst_host, "destination")
+    # step-up pe AMBELE capete, ca la /fs/download (sursa) şi /fs/upload (destinaţia)
+    await _require_host_stepup(body.src_host, user)
+    if body.dst_host != body.src_host:
+        await _require_host_stepup(body.dst_host, user)
+    try:
+        core._agent_or_raise(body.src_host)
+        core._agent_or_raise(body.dst_host)
+        # dst_dir canonic (absolut) + verificat că e un director: fs_list pe destinaţie
+        listing = await core.fs_list(body.dst_host, body.dst_dir)
+        dst_dir = listing.get("path") or body.dst_dir
+        src_home = None
+        if body.src_host == body.dst_host and any(p == "~" or p.startswith("~/") for p in paths):
+            src_home = (await core.fs_list(body.src_host, "~")).get("path")
+    except core.AgentGone:
+        raise ApiError(409, "host.offline", "the host is offline")
+    except (core.FileError, TimeoutError) as e:
+        raise _file_api_error(e)
+    first = paths[0] if len(paths) == 1 else (paths[0].rstrip("/").rsplit("/", 1)[0] or "/")
+    audit.detail(request, "copy %d file%s %s:%s → %s:%s" % (
+        len(paths), "" if len(paths) == 1 else "s", src["name"], first, dst["name"], dst_dir))
+    try:
+        job = fscopy.start(user["id"], body.src_host, src["name"], body.dst_host, dst["name"],
+                           dst_dir, paths, body.on_conflict, src_home=src_home)
+    except fscopy.CopyRefused as e:
+        raise _copy_refused(e)
+    log.info("fs copy %s started: %d files host=%s → host=%s:%s", job.id, len(paths),
+             body.src_host, body.dst_host, dst_dir)
+    return {"job_id": job.id, "dst_dir": dst_dir}
+
+
+@router.get("/api/fs/copy/{job_id}")
+async def fs_copy_status(job_id: str, files: int = 0, user=Depends(security.require_user)):
+    """Progresul: totaluri, stare, erorile per fişier; `files=1` adaugă toate rândurile."""
+    job = fscopy.get(job_id, user["id"])
+    if not job:
+        raise ApiError(404, "copy.missing", "no such copy job (finished jobs expire after an hour)")
+    return fscopy.to_dict(job, bool(files), code_of=_copy_code_of)
+
+
+@router.delete("/api/fs/copy/{job_id}")
+async def fs_copy_cancel(job_id: str, request: Request, user=Depends(security.require_user)):
+    """Anulează: fişierul în zbor se opreşte şi temp-ul lui de pe destinaţie se şterge; fişierele
+    deja copiate RĂMÂN. Idempotent pe un job terminat."""
+    job = fscopy.get(job_id, user["id"])
+    if not job:
+        raise ApiError(404, "copy.missing", "no such copy job (finished jobs expire after an hour)")
+    audit.detail(request, "cancel copy %s → %s:%s" % (job.src_host_name, job.dst_host_name, job.dst_dir))
+    await fscopy.cancel(job)
+    return fscopy.to_dict(job, False, code_of=_copy_code_of)
 
 
 # praguri editor: sub LIMIT încarci tot (editabil); peste, doar primii HEAD

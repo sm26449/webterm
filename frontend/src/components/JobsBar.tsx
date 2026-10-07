@@ -4,8 +4,9 @@ import { useI18n } from '../lib/i18n'
 import { insertPathInto } from '../lib/transfers'
 import { cancelUpload, dirName, discardUpload, dismissUpload, fmtBytes, fmtEta, fmtRate, openFilesAt, pauseUpload, resumeUpload, retryUpload } from '../lib/uploads'
 import { cancelDownload, dismissDownload, pauseDownload, resumeDownload, retryDownload } from '../lib/downloads'
-import { UploadJob, isActive, isDownload } from '../lib/uploadStore'
-import { DownloadIcon, UploadIcon } from './Icons'
+import { canRetryCopy, cancelCopy, dismissCopy, retryCopy } from '../lib/copyjobs'
+import { UploadJob, canPause, isActive, isCopy, isDownload, sizeKnown } from '../lib/uploadStore'
+import { CopyIcon, DownloadIcon, UploadIcon } from './Icons'
 
 /* Helper-ele pentru transferuri — rândul (`JobRow`) şi funcţiile lui de stare — folosite acum
    de widgetul plutitor (TransfersWidget). Incidentul cu upload-ul de 17 GB (2026-10-04) a arătat
@@ -33,6 +34,19 @@ export const needsAttention = (j: UploadJob) => j.state === 'stalled' || j.state
 const BTN = 'wt-touch inline-flex h-6 min-w-6 shrink-0 items-center justify-center rounded px-1.5 text-[11px] font-medium hover:bg-ink-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400'
 
 export function jobStatusText(j: UploadJob, t: (k: string, v?: Record<string, string | number>) => string): string {
+  // arhivă din mers: mărimea nu se ştie → octeţii primiţi (nu %); detaliul spune „se pregăteşte" /
+  // „nu se poate relua". Copiere host → host: % + rezumatul fişierelor de pe server.
+  if (!sizeKnown(j) && j.state !== 'err') {
+    const got = j.pos > 0 ? `${fmtBytes(j.pos)} · ${fmtRate(j.bytesPerSec)}` : ''
+    const st = j.state === 'running' ? '' : j.state === 'stalled' ? t('jobs.stateStalled')
+      : j.state === 'done' ? t('jobs.stateDone') : j.state === 'cancelled' ? t('jobs.stateCancelled') : ''
+    return [got, st, j.detail].filter(Boolean).join(' · ')
+  }
+  if (isCopy(j) && j.state !== 'err' && j.detail) {
+    const head = j.state === 'running' ? `${j.pct}% · ${fmtRate(j.bytesPerSec)}`
+      : j.state === 'done' ? `100% · ${t('jobs.stateDone')}` : t('jobs.stateCancelled')
+    return `${head} · ${j.detail}`
+  }
   switch (j.state) {
     case 'running': return `${j.pct}% · ${fmtRate(j.bytesPerSec)} · ${t('jobs.eta')} ${fmtEta(j.etaSec, t)}`
     case 'stalled': return `${j.pct}% · ${t('jobs.stateStalled')}`
@@ -52,40 +66,45 @@ export function JobRow(props: { job: UploadJob; hostName: string; insertSid?: st
   const { t } = useI18n()
   const j = props.job
   const down = isDownload(j)
-  const name = `${props.hostName} · ${j.name}`
-  const canInsert = !down && !!props.insertSid && props.insertHostId === j.hostId
-  // Acţiunile diferă pe sens: up → uploads.ts, down → downloads.ts. Rândul e identic altfel.
-  const onRetry = () => (down ? retryDownload(j.id) : retryUpload(j.id))
-  const onCancel = () => (down ? cancelDownload(j.id) : cancelUpload(j.id))
-  const onDismiss = () => (down ? dismissDownload(j.id) : dismissUpload(j.id))
+  const copy = isCopy(j)
+  // copiere: hostName e deja „A → B" (scris de motor)
+  const name = `${copy ? j.hostName : props.hostName} · ${j.name}`
+  const canInsert = !down && !copy && !!props.insertSid && props.insertHostId === j.hostId
+  const known = sizeKnown(j)
+  // Acţiunile diferă pe sens: up → uploads.ts, down → downloads.ts (fişiere + arhive), copy →
+  // copyjobs.ts (job pe server). Rândul e identic altfel.
+  const onRetry = () => (copy ? void retryCopy(j.id) : down ? retryDownload(j.id) : retryUpload(j.id))
+  const onCancel = () => (copy ? void cancelCopy(j.id) : down ? cancelDownload(j.id) : cancelUpload(j.id))
+  const onDismiss = () => (copy ? dismissCopy(j.id) : down ? dismissDownload(j.id) : dismissUpload(j.id))
   const onPause = () => (down ? pauseDownload(j.id) : pauseUpload(j.id))
   const onResume = () => (down ? resumeDownload(j.id) : resumeUpload(j.id))
   return (
     <li className="flex h-8 items-center gap-2">
       <span aria-hidden="true" className={`shrink-0 ${STATE_CLS[j.state]}`}>
-        {down ? <DownloadIcon /> : <UploadIcon size={12} />}
+        {copy ? <CopyIcon /> : down ? <DownloadIcon /> : <UploadIcon size={12} />}
       </span>
       <span className="min-w-0 flex-1 truncate text-slate-200" title={j.dest}>{name}</span>
-      <div role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={j.pct}
-        aria-label={t('jobs.progressAria', { name: j.name, pct: j.pct })}
+      {/* mărime necunoscută (arhivă din mers): bară nedeterminată — fără aria-valuenow */}
+      <div role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={known ? j.pct : undefined}
+        aria-label={known ? t('jobs.progressAria', { name: j.name, pct: j.pct }) : `${j.name}: ${fmtBytes(j.pos)}`}
         className="h-1 w-12 shrink-0 overflow-hidden rounded-full bg-ink-700 sm:w-32">
-        <div className={`h-full rounded-full transition-[width] duration-200 ease-out motion-reduce:transition-none ${BAR_CLS[j.state]}`}
-          style={{ width: `${j.state === 'err' ? 100 : j.pct}%` }} />
+        <div className={`h-full rounded-full transition-[width] duration-200 ease-out motion-reduce:transition-none ${BAR_CLS[j.state]} ${!known && isActive(j) ? 'animate-pulse opacity-60 motion-reduce:animate-none' : ''}`}
+          style={{ width: `${j.state === 'err' || (!known && j.state !== 'cancelled') ? 100 : j.pct}%` }} />
       </div>
       <span className={`hidden min-w-0 truncate font-mono tabular-nums sm:inline ${STATE_CLS[j.state]}`}
         title={jobStatusText(j, t)}>
         {jobStatusText(j, t)}
       </span>
       {/* dimensiunea totală a fişierului — cerută la click pe chip; ascunsă pe ecrane înguste */}
-      <span className="hidden shrink-0 font-mono tabular-nums text-slate-500 md:inline" title={`${fmtBytes(j.pos)} / ${fmtBytes(j.size)}`}>{fmtBytes(j.size)}</span>
-      <span className={`font-mono tabular-nums sm:hidden ${STATE_CLS[j.state]}`}>{j.pct}%</span>
+      <span className="hidden shrink-0 font-mono tabular-nums text-slate-500 md:inline" title={`${fmtBytes(j.pos)} / ${fmtBytes(j.size)}`}>{known ? fmtBytes(j.size) : fmtBytes(j.pos)}</span>
+      <span className={`font-mono tabular-nums sm:hidden ${STATE_CLS[j.state]}`}>{known ? `${j.pct}%` : fmtBytes(j.pos)}</span>
       {/* acţiuni după stare — nume accesibil = acţiune + fişier, ca în FilePanel */}
-      {(j.state === 'err' || j.state === 'stalled') && (
+      {(j.state === 'err' || j.state === 'stalled') && (!copy || canRetryCopy(j.id)) && (
         <button type="button" onClick={onRetry} className={`${BTN} wt-info`}
           aria-label={`${t('jobs.retry')} ${j.name}`}>{t('jobs.retry')}</button>
       )}
       {/* Pauză pe un transfer viu; Resume pe unul pus pe pauză. Simetric upload/download. */}
-      {isActive(j) && (
+      {isActive(j) && canPause(j) && (
         <button type="button" onClick={onPause} className={`${BTN} text-slate-300`}
           aria-label={`${t('jobs.pause')} ${j.name}`}>{t('jobs.pause')}</button>
       )}
@@ -114,7 +133,7 @@ export function JobRow(props: { job: UploadJob; hostName: string; insertSid?: st
         <button type="button" onClick={() => insertPathInto(props.insertSid, j.dest)} className={`${BTN} wt-info`}
           aria-label={`${t('transfers.insertPath')} ${j.name}`}>{t('transfers.insertPath')}</button>
       )}
-      {j.state === 'done' && !down && (
+      {j.state === 'done' && !down && !copy && (
         <button type="button" onClick={() => { void copyText(j.dest) }} className={`${BTN} text-slate-300`}
           aria-label={`${t('transfers.copyPath')} ${j.name}`}>{t('transfers.copyPath')}</button>
       )}
