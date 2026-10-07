@@ -5,6 +5,11 @@ holds the user-facing guides and the internal architecture notes.
 
 ## Guides
 
+- [INSTALL](INSTALL.md) — every install route, the image deploy, single sign-on, putting agents on hosts, Makefile shortcuts, backups
+- [CONFIGURATION](CONFIGURATION.md) — every environment variable (gateway, agent side, backup script)
+- [FEATURES](FEATURES.md) — the full feature list, the reasoning behind the design, what persistence covers
+- [SECURITY-FEATURES](SECURITY-FEATURES.md) — every security control in detail: devices, step-up, tokens, audit, signed agent updates
+- [DEVELOPMENT](DEVELOPMENT.md) — building from source, the test suites, the repository layout, the CI release gates
 - [RUNBOOK](RUNBOOK.md) — operations and recovery procedures
 - [HOSTS](HOSTS.md) — connection types, tags, 2FA step-up, credential policies, install links, Wake-on-LAN, the OS-updates badge
 - [AUTOMATION-TOKENS](AUTOMATION-TOKENS.md) — API tokens for cron/CI/monitoring: scopes, curl examples, what they can never do

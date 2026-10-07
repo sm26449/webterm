@@ -130,7 +130,7 @@ that would be correct for running your own fork, and wrong to merge here.
 
 Deployers can generate or import **their own deployment key** from the UI (Settings → Security)
 without touching the source; for your own fork, generate a key pair and substitute `UPDATE_PUBKEY`
-locally — see the README's "Security" section.
+locally — see [Signed agent updates](docs/SECURITY-FEATURES.md#signed-agent-updates).
 
 ## Screenshots (README / docs)
 

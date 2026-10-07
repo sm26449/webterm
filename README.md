@@ -6,12 +6,13 @@
 
 **Persistent terminals for your whole infrastructure, in the browser.**
 
-Open a shell on any of your machines from a browser — including a phone — and come back to it
-hours later with the process still running and the scrollback intact. Close the tab, restart the
-gateway, reboot your laptop: the session is on the host, in tmux, and it waits.
+Open a shell on any of your machines from a browser — including a phone — and come back hours
+later with the process still running and the scrollback intact: the session lives in tmux **on
+the host**, not in the gateway. A small agent dials **out** to the gateway, so nothing listens on
+your servers and a machine behind NAT works like one with a public IP; SSH and telnet cover the
+gear you cannot install anything on.
 
-Nothing listens on your servers. A small agent dials **out** to the gateway, so a machine behind
-NAT or on a mobile connection works exactly like one with a public IP.
+<a id="what-it-is-for"></a>
 
 ```mermaid
 flowchart TB
@@ -55,1074 +56,235 @@ flowchart TB
     TEL --> T
 ```
 
-The agent is the path worth having: it dials out, so nothing listens on your servers, and
-your sessions live in tmux on the host rather than in the gateway's memory. SSH and telnet
-need nothing installed and are there for machines you do not own — a switch, a customer's
-box — with the trade that those sessions end when the gateway restarts.
-
 > [!WARNING]
-> **Read this before exposing it to a network.** **Anyone who gets past the login gets, on every
-> host, exactly the access of the user its agent runs as** — the same as handing over an SSH key
-> for that user. It is built for a **single trusted administrator**: there are no roles, and the
-> **gateway is a single point of total compromise**.
->
-> The agent never escalates: it runs as whoever installed it. The install command offered by
-> default creates a dedicated unprivileged `webterm` user and runs as that, so the answer above is
-> "webterm's access", not root. Choose the *current user* tab while you are root and it becomes a
-> root shell on that host — the installer says so before it proceeds.
->
-> So: use a **domain with HTTPS and passkeys**, not an IP with a password, and keep the default
-> dedicated user unless you need more. What it defends against and what it does not:
-> **[docs/THREAT-MODEL.md](docs/THREAT-MODEL.md)**. Reporting a vulnerability:
-> **[SECURITY.md](SECURITY.md)**.
-
-## What it is for
-
-You administer a handful of machines and you are tired of losing a long-running job because your
-SSH client dropped, or of not being able to check on something from your phone.
-
-WebTerm gives every host a list of named sessions with notes and the full history of what came
-back (what you type is never recorded). It records each session to disk so you can replay it, search across all of them,
-browse and edit files, expose a service from a host on its own subdomain, and reach a switch on a
-host's private network without hopping through a shell first. From the same pane you also open a
-**database console** (psql/mysql/mongosh/…), see **pending OS updates** and upgrade in a terminal,
-and **start/stop systemd services** — the day-to-day machine management, not just a raw shell.
-
-It is built for **one trusted administrator**. There are no roles, and that is a deliberate
-decision explained below.
+> **Anyone who gets past the login gets, on every host, the access of the user its agent runs
+> as** — like handing over an SSH key for that user. WebTerm is built for a **single trusted
+> administrator**: there are no roles, and the gateway is a single point of total compromise.
+> Use a domain with HTTPS and passkeys, and keep the default unprivileged `webterm` agent user.
+> Read [Security](#security) and [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) before exposing it.
 
 ## Screenshots
 
-> Fictional data (a demo fleet, not real hosts). Generated reproducibly with
-> [`scripts/screenshots/run.sh`](scripts/screenshots/run.sh). Dark theme below; a
-> light theme also exists (light chrome, the workspace stays dark like a real
-> terminal). **Captured on v2.0.0** and not yet regenerated for 3.x: the editor shown
-> is the earlier CodeMirror one (the editor is Monaco since 3.x), the dashboard predates
-> the host-page hub, and the Security tab predates the deploy-key policy.
+Fictional demo fleet, captured on v3.5.8 with
+[`scripts/screenshots/run.sh`](scripts/screenshots/run.sh). The images follow your GitHub theme
+(dark or light); the terminal itself stays dark in both.
 
-**Fleet dashboard** — hosts, online status, metrics, folders.
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="docs/screenshots/01-dashboard-light.png">
+  <img alt="Dashboard: Security card, sessions to resume and the fleet grouped by folder" src="docs/screenshots/01-dashboard-dark.png">
+</picture>
 
-![Fleet dashboard](docs/screenshots/01-dashboard-dark.png)
+| A session with the Commands panel | Run on hosts, results per host |
+|---|---|
+| <picture><source media="(prefers-color-scheme: light)" srcset="docs/screenshots/02-terminal-light.png"><img alt="Terminal session with the Commands panel: exit code and duration of every command" src="docs/screenshots/02-terminal-dark.png"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="docs/screenshots/07-run-on-hosts-light.png"><img alt="Run on hosts: one saved command on four hosts, exit code and output per host" src="docs/screenshots/07-run-on-hosts-dark.png"></picture> |
+| **The host page** | **Files, with multi-select** |
+| <picture><source media="(prefers-color-scheme: light)" srcset="docs/screenshots/05-host-light.png"><img alt="Host page: metrics, live session previews, security and agent status" src="docs/screenshots/05-host-dark.png"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="docs/screenshots/03-files-light.png"><img alt="Files panel next to the terminal, three files selected for a bulk action" src="docs/screenshots/03-files-dark.png"></picture> |
+| **Settings → Security** | **The editor (Monaco)** |
+| <picture><source media="(prefers-color-scheme: light)" srcset="docs/screenshots/06-security-light.png"><img alt="Settings, Security tab: connected devices, agent signing key, passkeys, 2FA" src="docs/screenshots/06-security-dark.png"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="docs/screenshots/04-editor-light.png"><img alt="Monaco editor open on a shell script on the host" src="docs/screenshots/04-editor-dark.png"></picture> |
 
-**Live terminal** — persistent tmux sessions, reattachable from any device.
+<p align="center"><img alt="A session on a phone, with the two-row key bar" src="docs/screenshots/08-phone-dark.png" width="260"></p>
 
-![Live terminal](docs/screenshots/02-terminal-dark.png)
+<a id="why"></a>
 
-**Files + editor** — browse, edit and transfer files on the host (editor shown: CodeMirror, v2.0.0;
-Monaco — the VS Code editor — since 3.x).
+## Why WebTerm
 
-![File browser](docs/screenshots/03-files-dark.png)
+- **The session outlives everything above it.** It is a tmux session on your machine: close the
+  tab, restart or upgrade the gateway, kill the agent, switch to a phone — it is still there,
+  re-adopted by name.
+- **Nothing to expose on your servers.** The agent is one stdlib-only Python file that dials out
+  over WebSocket with a token bound to that machine; the gateway stores no login for it.
+- **SSH and telnet when you cannot install anything** — a switch, a customer's box — with the
+  honest trade that those sessions live in the gateway and end when it restarts.
+- **More than a shell:** files, an editor, Docker, systemd, database consoles, port forwards,
+  one command on many hosts, pending OS updates — from the same pane, phone included.
+- **Built to sit on the internet:** passkeys, 2FA step-up per host, signed agent updates, an
+  audit log, encrypted backups, and a CI chain that blocks a broken image from shipping.
 
-![Editor](docs/screenshots/04-editor-dark.png)
+The long version, with the reasoning: [docs/FEATURES.md](docs/FEATURES.md#why).
 
-**Security** — the agent signing key, passkeys, 2FA (here on the light theme).
+<a id="quick-install"></a>
+<a id="installing-verifiably"></a>
+<a id="deploy-from-an-image-production-no-build"></a>
+<a id="clean-server-one-command-installsh"></a>
+<a id="already-have-docker-deploysh"></a>
+<a id="optional-single-sign-on-with-authentik"></a>
+<a id="provisioning-a-server"></a>
+<a id="the-dedicated-user-cannot-sudo--decide-what-it-may-do"></a>
+<a id="removing-the-agent-from-a-host"></a>
 
-![Security](docs/screenshots/06-security-light.png)
+## Quick start
 
-## Why
-
-Put a terminal in a browser and the session ends up living in the thing in the
-middle. Restart it, deploy over it, lose the network for a minute, and the work
-goes with it. That is not a bug in any particular implementation — it is what
-happens when the session belongs to the server you happen to be looking through.
-
-WebTerm puts it somewhere else. The session is a `tmux` session **on your own
-machine**, on its own socket. The gateway is a window onto it, and windows can be
-closed, upgraded and rebuilt without touching what is behind them. Kill the agent
-and the session keeps running. Restart the gateway and it is re-adopted by name.
-Close the laptop and open a phone.
-
-**Two ways to reach a machine, and the difference is the whole product.**
-
-*With the agent* — a single Python file, stdlib only, that dials **out** over
-WebSocket. Nothing listens on your server, so NAT and firewalls are not obstacles
-and there is no port to expose. It authenticates with a token bound to that one
-machine, and the gateway stores no login for it: there is nothing to steal because
-there is nothing to store. Sessions live in tmux and outlive everything above them.
-
-*Direct SSH or telnet* — for a switch, a box you do not own, a machine where you
-cannot install anything. Nothing to deploy on the target. The trade is real and
-worth knowing: that session lives in the gateway's memory, so a gateway restart
-ends it, and any credential you choose to save is kept in the encrypted vault
-rather than not kept at all. You can also tell a host to never store one and ask
-you each time.
-
-So the agent is not overhead you pay to use this. It is the part that makes a
-session something you come back to instead of something you start again.
-
-Around that: everything is bounded (2 MiB of scrollback per session, 32 sessions
-per host, stop-and-wait flow control every 256 KiB, rotated logs, capped
-transcripts), the agent restarts itself after a kill or a reboot, and idle cost is
-close to nothing. It is built to sit on the public internet — what that means, and
-what it does not cover, is in [Security](#security) and
-[docs/THREAT-MODEL.md](docs/THREAT-MODEL.md).
-
-## Features
-
-**Sessions**
-- Sessions as conversations: title, note, full history of everything the host
-  printed, search (what you type is never recorded — see Security)
-- Multiple devices at once on the same session (desktop + phone, live)
-- **Instant tabs**: recent sessions stay mounted (terminal + buffer), and
-  switching is just a visibility change. The stream flows **only** on visible
-  panes; background tabs are paused at the gateway and re-sync on return if they
-  missed anything
-- Named **split views** (2–4 sessions, saved server-side — see Fleet), popout into
-  its own window, layout restored on reload
-- **History replay**: closed sessions can be replayed in the UI (play/pause,
-  seek, 1×/2×/4×), not just downloaded (`.cast`)
-- **History as text**: a **Text** tab next to the player renders the transcript with
-  control sequences stripped — searchable, and downloadable as `.txt`. Replay is faithful
-  but useless when a full-screen app ran inside (it repaints the same screen instead of
-  scrolling); text is how that history becomes readable
-
-**Session sharing**
-- **Share link** for a session: **read-only** or **writable** (the guest can
-  type), with **expiry** and **instant revocation**. The guest window mirrors the
-  owner's PTY grid (size + its own zoom); on revoke, the broadcast stops and the
-  terminal is wiped with a dedicated "403" page
-- **Roster** of viewers (how many / who) and **kick** from the session; optional
-  watermark over the share
-
-**Commands as objects (OSC 133)** — [details](docs/SHELL-INTEGRATION.md)
-- With shell integration enabled, every command has identity — exit code,
-  duration, its own output. A side panel lists all commands, `Alt+↑/↓` jumps
-  between them, green/red gutter decorations
-- **Per-command actions**: "Run again" (drops it at the prompt — you run it with
-  Enter, nothing re-runs blindly), copy the command / the output / as markdown
-  (command + output + exit code, ready to paste into a ticket)
-- We re-render nothing → **TUIs stay intact** (vim, htop, Claude Code)
-
-**Keyboard-first** — press `?` for the cheatsheet
-- Command palette (⌘K): sessions, hosts, actions, snippets
-- Shortcuts for scrollback search, close/reopen/navigate tabs, split, popout,
-  font, snippets — [full map](docs/SHORTCUTS.md)
-- **Parametrized snippets** (`{{param}}`): a form at run time, with a preview of
-  the final command before execution. Snippets live on the gateway (every device) and
-  double as the saved commands of **Run on hosts**, optionally with **target tags** that
-  preselect the matching hosts — see [docs/FLEET.md](docs/FLEET.md#saved-commands)
-
-**Fleet**
-- Per-host metrics (CPU, RAM, disk, load) with a **trend sparkline**, plus a subtle
-  **dual-arc load ring** in the session toolbar (CPU + memory of the active host at
-  a glance, exact numbers in its tooltip)
-- **Threshold alerts** (CPU/RAM/disk) over email and/or webhook, with hysteresis and throttling
-- **In-session file manager** (toolbar button): a side panel that **follows the
-  terminal's `cd`** (OSC 7), dense listing with sort/filter/keyboard navigation,
-  mkdir/rename/delete, **create a file in place** (empty, or filled straight **from
-  your clipboard** — paste a config without making a local file first), double-click
-  a file name to copy it, triple-click to copy its full path,
-  drag&drop upload (including **folders**) with a real progress
-  bar + cancel — **resumable**: a dropped connection (or a closed laptop) keeps the
-  bytes already uploaded, re-dropping the same file continues where it left off, and
-  a **CRC-32 integrity check** guards the commit; every upload also shows up in the
-  **Transfers widget** (see below); **download a folder (or file) as a
-  `.tgz` archive** (tarred on the host, streamed down as a Transfers job with Cancel);
-  **multi-select** (checkboxes, Shift/Ctrl+click, long-press on phones) with bulk
-  download / delete and **copy to another host** — agent → gateway → agent, the data never
-  passes through your browser ([details](docs/TRANSFERS.md#copy-to-another-host)); a **Monaco** (VS Code) editor with
-  syntax highlighting for what you edit on a server (shell, YAML, JSON, INI/systemd/.env, TOML,
-  Dockerfile, nginx, Python, JS/TS, SQL, XML/HTML, CSS, Markdown, Go, Rust, PHP, Ruby, Lua, Perl,
-  PowerShell, C/C++, Java, HCL), find/replace, folding, multi-cursor, `Alt+Z` word wrap, large
-  files opened view-only (partial-read), atomic save with conflict detection. It is a slim build:
-  highlighting only, no language-service autocompletion
-- **Transfers** — [details](docs/TRANSFERS.md): progress lives in **one floating widget in the
-  bottom-right corner** — a compact pill (`file 63%`, `N transfers · 63%`) that expands into a
-  card with every job and its actions, and opens by itself when a job needs a decision (stalled,
-  failed, incomplete). **Drop files on the terminal** to upload them into the session's current
-  directory (OSC 7) and get the path typed at the prompt; **paste a screenshot or a file** into
-  the terminal and it lands in the host's inbox (`~/.webterm/inbox/<timestamp>.png`) with its
-  path typed for you — AI CLIs (Claude Code, aider, …) cannot read your browser clipboard, so
-  WebTerm materialises the file on the host and hands them the path. Inbox retention is a
-  setting (7 days by default). Born from a real incident (a 17 GB drop that
-  silently stopped at chunk 1579 while gateway and agent were healthy): a byte-level
-  **watchdog** marks the row **Stalled** after 20 s without progress, aborts and re-sends the
-  chunk after 60 s, retries each chunk up to 8 times with capped backoff, and resumes by itself
-  when the browser comes back online or the tab becomes visible again. When retries run out the
-  row turns red with the reason and a **Retry** button (the file stays in memory, so it
-  continues from the offset the host confirms — including after a passkey step-up or a new
-  sign-in). After a page reload, unfinished uploads are listed as **Incomplete**: drag the same
-  file into the same folder to resume, **Open folder** jumps there, **Discard** deletes the
-  temporary part on the host. Closing the tab while something is uploading asks for
-  confirmation.
-- **Git panel** (toolbar button): for the repo in the session's current directory
-  (follows `cd` via OSC 7) — status, **colored diff**, stage/unstage and
-  **commit**, without opening GitHub. Focused scope: merge/rebase/push/branch stay
-  in the CLI
-- **Docker panel** (toolbar button, agent hosts): tabs for **containers / images /
-  volumes / networks**, **start/stop/restart** a container, view **logs**, and open a
-  **shell inside a container** in its own terminal tab (`docker exec`, bash with an
-  sh fallback for minimal images). Runs the host's `docker` CLI through the agent — no
-  extra daemon exposure; the same 2FA step-up as any host action
-- **Database connections** (Toolbox → *Connections*, toolbar + host page, agent hosts):
-  saved launchers for **PostgreSQL / MySQL·MariaDB / MongoDB / ClickHouse / Redis**. One
-  click opens a session with the right client (`psql` / `mysql` / `mongosh` /
-  `clickhouse-client` / `redis-cli`) already pointed at host, port, user and database — no
-  connection strings to remember. Two credential policies: **Ask** (the client prompts;
-  WebTerm stores nothing) or **Stored** — the password is kept in the same encrypted vault
-  as SSH credentials and the agent types it **once** into the client's password prompt on
-  the PTY; it never appears in argv, `ps`, the environment, a file, or the transcript. On a
-  2FA host, both **launching** and **creating/editing** a connection cost a step-up factor —
-  a saved connection is a credentialed hole into the host. [details](docs/DATABASE-TOOLBOX.md)
-- **Command library & history** (Toolbox → *Library* / *History*): a built-in **library** of
-  command recipes (git, docker, systemd, system, db) with `{placeholder}`s — click to copy,
-  paste into any terminal, and it works from the host page with no session open; plus the
-  host's own **command history** (from OSC 133), searchable, click to copy
-- **systemd services** (toolbar button, agent hosts): list units with live state, filter,
-  and **start / stop / restart** — through the agent, step-up-gated on 2FA hosts. Runs as
-  the agent's user, so system units need the right privileges (surfaced, not silently swallowed)
-- **Port forwarding** (toolbar button): expose web services from the host through
-  the browser, protected by your own auth — Docker containers, monitoring, admin
-  panels bound to localhost. Reverse-proxy **HTTP + HTTPS + WebSocket** (no
-  `ssh -L`, works from an iPad too); on **agent** hosts through the WSS tunnel, on
-  **SSH** hosts through a direct-tcpip channel. Each forward on an isolated
-  subdomain (`<slug>.<domain>`, domain configurable in Settings), `__Host-`
-  cookie, slug-bound HMAC token, anti-SSRF. The connection opens only on real
-  traffic. [details](docs/PORT-FORWARDING.md)
-- **Telnet bastion** (`telnet` scheme on a forward): the CLI of a device on the
-  host's LAN (switch/router) inside a **terminal tab**, tunneled through the agent
-  — the host becomes a jump host. Custom IAC shim; password redacted from the
-  transcript, OSC 133/52 filtered from the untrusted device; **↻ 1-click
-  reconnect** if the agent drops. [details](docs/design/TELNET-BASTION.md)
-- **Serial console** (RS232/RS485/USB): a serial device attached to the host,
-  inside a **terminal tab** through the agent — with port **discovery** (rich
-  metadata: VID:PID, USB serial, driver, physical path, UART type) and **physical
-  identification** (unplug/replug the adapter). [details](docs/SERIAL-CONSOLE.md)
-- **Run on hosts**: one command → N hosts → a grid of
-  live results (state, exit code, output per host), with a deliberate confirmation
-  first. **Save a command** under a name and re-run it later (kept per-browser).
-  "Copy report" as markdown. [details](docs/FLEET.md)
-- **Split views — named, saved, several of them**: a "+ Split view" button (or **right-click a
-  terminal → Add to split view**) turns 2–4 open sessions into a layout you **name** (2 = a
-  resizable split with a draggable divider + grip, 3–4 = a **2×2 grid**, all live at once). Each
-  pane is bordered — the focused one gets an accent border so it's clear where your keys go — and
-  each split view rides in the tab bar as its own **chip** next to the session tabs: click to
-  switch between layouts and single sessions like tabs (clicking a tab leaves the split, its chip
-  stays so you return anytime). A session can appear in a tab **and** in split views at once; only
-  the view you're on is live (so a session never fights itself for size). Definitions are **saved
-  server-side** (they follow you across devices) and the active one is restored on reload. Toggle
-  **broadcast** to type into every pane simultaneously (an amber band marks each pane) —
-  interactive fleet ops, not just one-shot commands. [details](docs/design/SPLIT-VIEWS.md)
-- **Bulk enrollment**: a reusable **group enrollment token** — one install
-  one-liner run on many machines, each auto-registering as its own host with its own
-  agent token (individually revocable). Opt-in, expiring, revocable, use-capped, and
-  every auto-enrollment is audited + alerted. [how-to](docs/FLEET.md#bulk-enrollment)
-- **App bookmarks** (Proxmox / Portainer / Grafana / anything web): a wizard turns
-  "add my Proxmox" into a named tile — internally a `https` port-forward on its own
-  subdomain, behind your auth. They show on an **Apps** strip on the dashboard, as
-  buttons on the host, and open by name from ⌘K; any forward can be promoted to one.
-  **Ready-made presets** for the common database & observability consoles — Adminer,
-  pgAdmin, phpMyAdmin, Mongo Express, Kibana, ClickHouse — so a bookmark gets the right
-  label, colour and glyph. Point the app's OIDC at the same Authentik and it's single sign-on
-- **Wake-on-LAN**: a **Wake** button on an offline agent host — a neighbouring agent on
-  the same LAN sends the magic packet (MAC read from the host's last diagnostics)
-- **Host tags**: free-form tags on hosts ("prod", "debian") on top of folders; the
-  sidebar search matches them and tag chips filter the list in one click
-- **SSH key helpers** (direct-SSH hosts): generate an Ed25519 key pair from the UI
-  (private key kept in the vault, public key shown to drop into `authorized_keys`), or
-  re-show the public key later — no `ssh-keygen` by hand
-- **Global command history**: search across every command run — on all hosts and
-  sessions, from the command palette. Also a light audit log
-- **Pending OS updates, at a glance**: the agent counts pending packages (apt / dnf / zypper /
-  pacman / apk, checked every few hours, read-only) and a host with updates shows a **badge in
-  the sidebar** — red when any are security — so you see it **without opening the host**. Click
-  it to review the count, then **Upgrade in a terminal**: WebTerm opens a session running the
-  right upgrade command for the detected manager. It never installs on its own — it's glue to
-  the terminal, not a package-manager UI (`WEBTERM_UPDATES_CHECK_SECS=0` turns it off)
-- **Host diagnostics** (host menu, available even offline): a tabbed panel with a full
-  **host snapshot** — OS/kernel/uptime, CPU model/cores/load, memory + swap, **every
-  filesystem**, and **each network interface** (IPv4/IPv6, MAC, MTU) with the **routing
-  table**; a **Ports** tab runs `ss -tulnp` on demand (protocol, port, address and the owning
-  process). The agent pushes the snapshot on connect and hourly, and you can **Refresh** on
-  demand; the last snapshot is **persisted**, so a host's IPs, routes and disks stay visible
-  **when it's down** (labelled "as of …"). Plus live link health (**agent↔gateway RTT**,
-  uptime/reconnects), an **event timeline** (connect/disconnect + reason) and the **agent
-  log** — debugging without SSH
-- Time zone synced across sessions; the server clock in the status bar
-
-**Data & backup** — [details](docs/RUNBOOK.md)
-- **Backup/restore from Settings**, no server access needed: download a
-  crash-consistent DB snapshot (`VACUUM INTO`) + the vault key, **encrypted with a
-  password you choose** (scrypt → AES-256-GCM). Automatic daily/weekly backup
-  (kept 7 days, in-UI notification). Validated restore (password + `integrity_check`)
-  with a pre-restore snapshot as a safety net
-
-**Appearance & accessibility**
-- UI themes: Aurora (light), Midnight (dark), Auto (follows the system); **installable PWA**
-  (add to home screen on mobile, install on desktop) with a network-first service worker that
-  bypasses every live path, so terminals always reach the network and a deploy never serves stale
-- **Custom terminal themes**: scheme editor with live preview, **iTerm2/VS Code
-  import**, per-host scheme ("production is reddish")
-- **Watermark** optional (Settings → Appearance): a tiled overlay (email/host/time)
-  over the workspace **and** over shared sessions (applied server-side) — deters
-  leaks / gives traceability
-- **Resizable sidebar**: drag its edge (or arrow keys on the handle; double-click to
-  reset) to trade list detail for terminal width — persisted per browser
-- **Offline hosts sink** to the bottom of their sidebar group, showing **how long
-  they've been down** plus an editable **note** ("stopped it myself, waiting for
-  parts") and a per-host **mute for offline alerts** — right where you look for them
-- Guaranteed minimum contrast (WCAG AA) in the terminal, screen-reader mode
-  (opt-in), `Ctrl+M` to Tab out of the terminal
-- Desktop-grade copy/paste: Ctrl/Cmd+C on a selection copies (no selection = ^C),
-  copy-on-select, right-click context menu, focus events (vim `autoread`)
-- **The interface speaks English and Romanian**, picked from the browser and
-  switchable in Settings. A third language is one file: copy `frontend/src/lang/en.ts`,
-  translate the values, register it — the catalogue is checked in CI, so a missing key
-  fails the build rather than showing a raw key to a user
-
-**Operating it**
-- **One-click provisioning**: give WebTerm an existing SSH connection to a host and it
-  installs the agent over it — no copying an install command by hand
-  (host → *Provision*; the same enrolment token, just delivered for you)
-- **Alerts by email *and* webhook** — Slack, Discord, Teams, or any endpoint that
-  accepts JSON (`WEBTERM_ALERT_WEBHOOK`, or Settings → Notifications). The webhook is
-  independent of SMTP: if chat is where you actually look, you never need a mail server.
-  Covers resource thresholds **and** security events: login from a new device, a new
-  account or automation token, a credential change, an agent going offline, a
-  2FA-protected host unlocked, an auto-enrollment, a failing off-host backup
-- **Update notice**: the gateway checks whether a newer release exists and says so in
-  the UI — it never updates itself (`WEBTERM_UPDATE_CHECK=0` turns the check off,
-  `WEBTERM_UPDATE_COMMAND` sets the command it shows you)
-- **Certificate expiry watch**: the installer sets up a `webterm-cert-check` timer that
-  warns before the certificate runs out, so a renewal that quietly stopped working is
-  noticed while there is still time (`WEBTERM_CERT_MIN_DAYS`, default 15)
-- **Clean uninstall**: `./remove.sh` (or `make remove`) takes the gateway back off the
-  machine and asks before anything irreversible — it tells you exactly which volumes
-  hold your data and refuses to guess on your behalf
-
-## Quick install
-
-Prerequisites: Docker + Docker Compose, a domain (recommended) or an IP, and `make`
-if you want the shortcuts below (`make token`, `make upgrade` — everything they wrap
-can also be run by hand).
-
-**Architecture.** The published image is `linux/amd64`. On anything else — a Raspberry Pi,
-an ARM VPS, an Apple Silicon machine running Docker natively — use `setup.sh`, which builds
-from source locally (about half a minute) and never touches the registry; the base images are
-multi-arch and nothing in the build is architecture-specific. `install.sh` is the path that
-pulls the prebuilt image, so that one wants amd64. The agent is a single stdlib Python file
-and runs on any architecture either way.
-
-Ports **80** and **443** must be free: `docker-compose.yml` binds them for TLS. If
-something else already holds them, add a `docker-compose.override.yml`. Note the
-`!override` tag: compose **concatenates** port lists, so without it 80 and 443 stay
-published and the container still fails to start.
-
-```yaml
-services:
-  caddy:
-    ports: !override
-      - "8080:80"
-      - "8443:443"
-```
-
-Then pass the port to `setup.sh` as part of the host — `./setup.sh 192.168.1.10:8443`.
-It keeps the port in `WEBTERM_PUBLIC_URL` (the agent install command shown in the UI is
-generated from that URL, so it is wrong without it) and strips it from `WEBTERM_DOMAIN`,
-which becomes Caddy's site address and must not carry one.
-
-```sh
-git clone https://github.com/sm26449/webterm && cd webterm
-./setup.sh term.example.com          # or ./setup.sh 192.168.1.10 to test on an IP
-```
-
-The script checks Docker, writes `.env`, builds the image, starts everything
-(Caddy does TLS automatically for a domain) and prints the **setup token** for
-the first account. Open the URL, enter the token + email + password, then add a
-passkey from **⚙ Settings**.
-
-Without the interactive script: copy `.env.example` → `.env`, fill it in, and
-`docker compose up -d --build`. The setup token:
-
-```sh
-make token          # or, without make:
-docker compose exec -T app cat /data/setup-token
-```
-
-### Installing verifiably
-
-`install.sh` supports a `curl … | sudo bash` form (its header shows it, for cloud-init and
-Ansible). It is convenient, and it is also the most privileged thing you will do with this
-project: it fetches from `main` — a branch that can move — and runs as root. The path below is
-the same script, only one you can read first and pin to a release.
+On a fresh **Ubuntu/Debian** server (amd64) with a domain pointing at it and ports 80/443 free:
 
 ```sh
 git clone https://github.com/sm26449/webterm.git
 cd webterm
-git checkout v3.5.8           # the release tag (see the version badge); a tag cannot move under you, a branch can
-less install.sh              # it is meant to be read
+git checkout v3.5.8          # the release tag from the version badge; a tag cannot move under you
+less install.sh             # it is meant to be read: it runs as root
 sudo ./install.sh --domain term.example.com --email you@example.com
 ```
 
-Reading it also tells you the one thing that surprises people: the installer contacts
-`api.ipify.org` once, to compare your public IP with what the domain resolves to and warn you
-early if DNS points somewhere else. It is the only third party the installer touches, and the
-check is skipped if the request fails.
+The installer sets up Docker, the Traefik + WebTerm stack in `/opt/webterm`, a Let's Encrypt
+certificate (HTTP-01 by default; add `--cf-token` for Cloudflare DNS-01 and a wildcard for
+port-forward subdomains), the firewall and a daily encrypted backup — then prints the URL and a
+**setup token**. Open the URL, create the first account with that token, and add a passkey in
+**Settings → Security**.
 
-## Deploy from an image (production, no build)
+Then **+ Add host** in the sidebar gives you a one-line install command for the agent: run it on
+the server, and the host comes online. By default it creates a dedicated, unprivileged `webterm`
+user and runs as that.
 
-Every push to `main` publishes an image to the GitHub Container Registry
-(`ghcr.io/sm26449/webterm`). On the server you build nothing: pull the image
-and start, with **Traefik** issuing the Let's Encrypt certificate. By default that is
-**HTTP-01** — no DNS provider involved; the domain must resolve to this server and
-port 80 must be reachable. Give it a Cloudflare token and it switches to **DNS-01**
-(`install.sh` and `deploy.sh` both write `WEBTERM_CERT_RESOLVER` from whether the token
-is present): that works behind the Cloudflare proxy or through NAT with no port 80
-exposed, and it is the only way to get the **wildcard** that port-forward subdomains need.
+Other routes, all in [docs/INSTALL.md](docs/INSTALL.md):
 
-**One token** for the common case: the app setup token (auto-generated). The Cloudflare
-token is optional (see above). Pulling the public image needs no authentication; a GitHub
-`read:packages` token is only needed if you **fork and keep your own image private**.
+- **Already have Docker?** `cp .env.prod.example .env`, fill it in, `./deploy.sh` —
+  [details](docs/INSTALL.md#already-have-docker-deploysh).
+- **Build from source, ARM, or an IP for testing:** `./setup.sh term.example.com` (or
+  `./setup.sh 192.168.1.10`) — [details](docs/INSTALL.md#quick-install).
+- **Single sign-on** with Authentik (bundled or your own) —
+  [details](docs/INSTALL.md#optional-single-sign-on-with-authentik).
+- **Putting agents on hosts:** many at once, OS support, what to grant the `webterm` user, and
+  how to remove it — [details](docs/INSTALL.md#provisioning-a-server).
 
-> **Not on Cloudflare?** You do not need it. Leave `CF_DNS_API_TOKEN` empty and Traefik
-> uses HTTP-01. The only thing you give up is TLS on port-forward subdomains (they need a
-> wildcard, and only DNS-01 can issue one); the application itself gets its certificate
-> normally.
+<a id="persistence"></a>
 
-### Clean server? One command: `install.sh`
+## Features
 
-On a freshly installed Ubuntu/Debian, the installer does the whole chain: Docker
-(official repo), runtime files in `/opt/webterm`, `.env` (chmod 600), firewall
-(ufw: OpenSSH + 80/443), the Traefik + app stack, daily backup (systemd timer,
-03:30, keeps 14 archives) and a health check. Idempotent — running it again keeps
-`.env` and the data.
+One line per feature; the guides have the depth, and [docs/FEATURES.md](docs/FEATURES.md) has
+everything in one page.
 
-```sh
-# interactive (asks for domain and email; the Cloudflare token is optional):
-git clone https://github.com/sm26449/webterm && cd webterm
-sudo ./install.sh
+**Terminal & sessions**
+- Persistent tmux sessions with titles, notes and searchable history, open on several devices at
+  once — [how persistence works](docs/FEATURES.md#persistence)
+- Replay closed sessions (player or plain text) — [session lifecycle](docs/design/SESSION-LIFECYCLE.md)
+- Commands as objects (OSC 133): exit code, duration and output per command, jump between them —
+  [docs/SHELL-INTEGRATION.md](docs/SHELL-INTEGRATION.md)
+- Named split views (2–4 sessions), broadcast typing, popout windows — [docs/design/SPLIT-VIEWS.md](docs/design/SPLIT-VIEWS.md)
+- Share links, read-only or writable, expiring and revocable — [docs/FEATURES.md](docs/FEATURES.md#session-sharing)
+- Keyboard-first: command palette, parametrized snippets, a full shortcut map — [docs/SHORTCUTS.md](docs/SHORTCUTS.md)
+- A phone-friendly UI with a two-row key bar, installable as a PWA; English and Romanian
 
-# or non-interactive (cloud-init, Ansible, etc.):
-sudo ./install.sh --non-interactive \
-  --domain term.example.com --email you@example.com \
-  --ghcr-token-file <file-with-the-token>
-```
+**Hosts & infrastructure**
+- Agent, SSH, SSH-jump and telnet hosts; folders, tags, per-host 2FA and credential policies —
+  [docs/HOSTS.md](docs/HOSTS.md), [docs/SSH-JUMP.md](docs/SSH-JUMP.md)
+- A host page with metrics, live session previews, diagnostics, Wake-on-LAN and "starts at boot" —
+  [docs/HOSTS.md](docs/HOSTS.md)
+- Run on hosts: one command on many hosts with results per host; saved commands are server-side
+  snippets with optional tag targets — [docs/FLEET.md](docs/FLEET.md)
+- Bulk enrollment with a group token — [docs/FLEET.md](docs/FLEET.md#bulk-enrollment)
+- Docker and systemd panels, pending OS updates with "upgrade in a terminal" — [docs/FEATURES.md](docs/FEATURES.md#fleet)
+- Port forwarding to an internal web UI on its own subdomain, app bookmarks — [docs/PORT-FORWARDING.md](docs/PORT-FORWARDING.md)
+- Telnet bastion and serial consoles through the agent — [docs/design/TELNET-BASTION.md](docs/design/TELNET-BASTION.md),
+  [docs/SERIAL-CONSOLE.md](docs/SERIAL-CONSOLE.md)
+- Database consoles and a command library (Toolbox), SSH deploy keys, AI-tool config —
+  [docs/DATABASE-TOOLBOX.md](docs/DATABASE-TOOLBOX.md), [docs/SSH-KEYS.md](docs/SSH-KEYS.md), [docs/AI-TOOLS.md](docs/AI-TOOLS.md)
 
-**TLS needs no Cloudflare account.** With no token, Let's Encrypt is obtained over
-**HTTP-01**: all it needs is that `term.example.com` resolves to this server and that
-port 80 is reachable from the internet. Add `--cf-token` only if you are behind the
-Cloudflare proxy or behind NAT without port 80 — or if you use **port forwarding**:
-those live on subdomains matched by a pattern, so Traefik cannot
-derive their names and only a wildcard covers them — and only DNS-01 can issue a wildcard.
-On HTTP-01 the application itself gets TLS normally; forwards do not.
+**Files & transfers**
+- A Files panel that follows the terminal's `cd`, with multi-select, bulk download/delete and
+  copy to another host — [docs/TRANSFERS.md](docs/TRANSFERS.md)
+- Resumable uploads with an integrity check, folder downloads as `.tgz`, one Transfers widget —
+  [docs/TRANSFERS.md](docs/TRANSFERS.md)
+- Drop a file on the terminal, or paste a screenshot, and its path is typed at the prompt —
+  [docs/TRANSFERS.md](docs/TRANSFERS.md)
+- A Monaco (VS Code) editor and a Git panel — [docs/FEATURES.md](docs/FEATURES.md#fleet)
 
-`sudo ./install.sh --help` lists all options (`--dir`, `--image`, `--no-ufw`,
-`--no-backup`…). At the end you get the URL and the setup token.
+**Security**
+- Passkeys, TOTP, per-host step-up and idle lock, a command guardrail — [docs/GUARDRAIL.md](docs/GUARDRAIL.md)
+- A Security card on the dashboard that says what needs attention — [docs/SECURITY-SUMMARY.md](docs/SECURITY-SUMMARY.md)
+- Signed agent updates with your own key, audit log, scoped automation tokens —
+  [docs/SECURITY-FEATURES.md](docs/SECURITY-FEATURES.md), [docs/AUTOMATION-TOKENS.md](docs/AUTOMATION-TOKENS.md)
 
-### Already have Docker? `deploy.sh`
-
-```sh
-# on the server, with Docker installed
-git clone https://github.com/sm26449/webterm && cd webterm
-cp .env.prod.example .env
-#   WEBTERM_DOMAIN      = term.example.com
-#   LETSENCRYPT_EMAIL   = you@example.com
-#   CF_DNS_API_TOKEN    = (optional) Cloudflare token, Zone:DNS:Edit — leave empty for HTTP-01
-#   GHCR_TOKEN_FILE     = (optional) GitHub token, read:packages — only for a private/forked image
-./deploy.sh            # or: make deploy
-```
-
-`deploy.sh` generates the setup token if missing, authenticates to ghcr.io, pulls
-the image and starts the stack (Traefik + docker-socket-proxy + app). It reuses
-the data volume, so moving from a previous Caddy stack keeps SQLite + the
-transcripts. Open `https://your-domain`, enter the setup token (`deploy.sh`
-prints it), create the account + passkey. Secrets (setup token, Cloudflare token, OIDC
-client secret, SMTP password, Authentik keys) live as files in `/opt/webterm/secrets/`
-(0700) mounted at `/run/secrets`, not in `.env`: Traefik reads container metadata through
-docker-socket-proxy and that metadata includes every container's environment. `deploy.sh`
-moves any value it still finds in `.env` into its file.
-
-Update with `./upgrade.sh` — it takes a backup, syncs the host-side scripts and hands off to
-`deploy.sh`. (`make pull` exists for a quick image swap, but it bypasses `deploy.sh`, so it
-records no rollback point and runs no health gate.) Deploy a specific version
-with a recorded rollback point: `./deploy.sh v3.5.8` (or a digest:
-`./deploy.sh ghcr.io/sm26449/webterm@sha256:…`) — if the new container does
-not become healthy, the script rolls back automatically; any time afterwards,
-`./rollback.sh` returns you to the previous image with a single command.
-
-**Upgrading: one command.** `cd /opt/webterm && sudo ./upgrade.sh` takes the
-latest published version; pass a tag to target one. It resolves the version, checks ghcr auth
-and disk space, pulls the image, **takes a backup**, **syncs the files that run on the host**
-(compose, the operator scripts — `backup.sh`, `restore.sh`, `rollback.sh`, `deploy.sh`,
-`remove.sh`, `cert-check.sh` — and `upgrade.sh` itself; `/opt/webterm` is not a git checkout, so
-otherwise they stay frozen at whatever the installer put there). When `deploy/` holds a newer
-`webterm-backup`/`webterm-cert-check` unit than the one installed for this directory in
-`/etc/systemd/system`, it re-installs that too (`daemon-reload`, timer re-enabled) — the units
-were previously written once by the installer and never touched again. Then it hands off to `deploy.sh`
-for the pinned deploy with automatic rollback. The pin is the image **digest**, not the tag:
-`upgrade.sh` resolves `vX.Y.Z` to `ghcr.io/…/webterm@sha256:…` once, after the pull, and
-everything downstream — the kit it extracts, `.env`, `.prev-image`, the rollback — uses that
-(tags can be re-pointed; digests cannot). Published images are signed with keyless cosign and
-carry provenance + SBOM; with `cosign` installed and `WEBTERM_COSIGN_IDENTITY` set in `.env`,
-`upgrade.sh` verifies the signature before running anything from the image, and otherwise
-prints that it skipped it (see [docs/RUNBOOK.md](docs/RUNBOOK.md), "Verifying an image"). The full
-recovery procedure (including when the UI is completely unreachable):
-[docs/RUNBOOK.md](docs/RUNBOOK.md).
-
-**The three tokens, in short:**
-
-| Token | Where | Scope | Role |
-|---|---|---|---|
-| Cloudflare (optional) | `CF_DNS_API_TOKEN` in `.env` | Zone : DNS : Edit (your zone) | the TLS certificate via DNS-01 (wildcard for forwards); empty → HTTP-01 |
-| GitHub *(optional)* | file in `GHCR_TOKEN_FILE` | `read:packages` | only to pull a **private/forked** image |
-| Setup | generated by `deploy.sh` in `secrets/webterm_setup_token` | — | the gate for creating the first account |
-
-### Optional: single sign-on with Authentik
-
-WebTerm ships **standalone by default** — nothing above mentions an identity provider, and the
-login page shows no SSO button unless you configure one. For central identity + MFA + offboarding
-across one or many instances, add [Authentik](https://goauthentik.io/). Three ways in, pick one:
-
-**A) Bundle Authentik with WebTerm (fewest steps).** One flag runs Authentik in the same stack,
-behind the same Traefik, generates its secrets **unique to this install**, and auto-creates the
-OIDC application:
-
-```sh
-# DNS: an A/AAAA record for auth.example.com → this host, then:
-sudo ./install.sh --domain term.example.com --email you@example.com \
-     --with-authentik --authentik-domain auth.example.com
-#   already installed?  cd /opt/webterm && ./deploy.sh --with-authentik   (set AUTHENTIK_DOMAIN in .env)
-```
-
-Under the hood it sets `COMPOSE_PROFILES=authentik` in `.env` (so every later `docker compose up
--d` / `./upgrade.sh` keeps Authentik too), generates `AUTHENTIK_*`/`PG_PASS`, waits for Authentik,
-then runs the provisioner and writes the `WEBTERM_OIDC_*` lines back. Re-running is safe.
-
-**B) You already run Authentik.** Don't bundle a second one — point WebTerm at yours. Either create
-the OIDC application from Authentik's UI (an OAuth2/OpenID provider, confidential, redirect URI
-`https://term.example.com/api/oidc/callback`, scopes `openid email profile`) and copy its client id
-+ secret into WebTerm's `.env`; **or** let the provisioner do it against your Authentik:
-
-```sh
-cd /opt/webterm/deploy/authentik
-AUTHENTIK_DOMAIN=auth.yourcompany.com WEBTERM_DOMAIN=term.example.com \
-  AUTHENTIK_API_TOKEN=<an Authentik API token> python3 provision.py
-#   → prints WEBTERM_OIDC_* ; paste into /opt/webterm/.env, then: ./deploy.sh
-```
-
-Set `WEBTERM_OIDC_ISSUER`, `_CLIENT_ID`, `_CLIENT_SECRET`, `_PROVIDER_NAME` in `.env` and
-`./deploy.sh`. Leave `COMPOSE_PROFILES` empty — you are not running the bundled Authentik.
-
-**C) Central Authentik, many WebTerms (production topology).** Run Authentik once as its own stack
-(`deploy/authentik/docker-compose.prod.yml`, behind the same Traefik), then register each WebTerm
-against it. See [docs/SSO.md](docs/SSO.md).
-
-**First login & verifying it works** (any of the three): the **"Sign in with &lt;provider&gt;"
-button only appears once a local account exists** — WebTerm's first-run always creates the
-break-glass admin first. So: open `https://term.example.com`, create the local admin with the
-setup token (printed by `install.sh`/`deploy.sh`), *then* the SSO button shows. Add the person you
-want to a **`wt-access` group** in Authentik, click **Sign in with Authentik**, authenticate — you
-land back provisioned as a full admin of that instance. If the button is missing, the account
-isn't created yet or SSO env isn't set; if the IdP shows "access denied", that user isn't in
-`wt-access`.
-
-Whichever you pick: the provisioner gates the app on a `wt-access` group (a user reaches the
-instance only once you add them to it), the local admin stays a **break-glass** account that can
-always log in even if Authentik is down, and there is no in-app RBAC — everyone who gets in is a
-full admin of that instance (separate trust by running separate instances). To evaluate the whole
-flow on one laptop first (localhost, no domain), use `deploy/authentik/docker-compose.yml` (see the
-"Try it locally" section of [docs/SSO.md](docs/SSO.md) — it notes the one hostname tweak Docker needs).
-
-> Authentik version: the compose files pin a current stable line (`2026.8.x`). The provisioner and
-> the reference blueprint are written to tolerate Authentik's cross-version model changes; if you
-> run a much older or newer Authentik and provisioning complains, register the app from the UI.
-
-## Provisioning a server
-
-In the UI: **+ host** → you get a `curl … | sh` command. Copy/paste → Enter on the
-server, **as the user you want to work as** (the agent's user = the sessions'
-shell). (Onboarding many machines at once? Use a **group enrollment token** instead — create one
-from **+ host → "Many machines"**: a single reusable one-liner, each machine self-registers as its
-own host. See [Bulk enrollment](docs/FLEET.md#bulk-enrollment).) The script downloads the agent into `~/.webterm/`, starts it and sets up
-automatic restart (systemd `--user` with Restart=always, otherwise cron `@reboot`
-+ watchdog). It also **appends one line to `~/.bashrc` and `~/.zshrc`** so shell integration
-(OSC 133) works — the commands panel, per-command exit codes and `cd` tracking depend on it.
-Set `WEBTERM_NO_SHELL_INTEGRATION=1` before running the command to skip that; everything else
-works without it. Requires python3 ≥ 3.6; **`tmux` is what makes sessions persistent** — without it
-the agent runs on a plain PTY and sessions die with it.
-On-server diagnostics: `python3 ~/.webterm/ptyd.py info`.
-
-**Agent OS support.** The agent is Linux-first: the core (sessions, files, port-forwards, serial)
-runs on any Linux with **python3 ≥ 3.6** and **tmux** — the installer checks for python3 and stops
-with a clear message if it is missing. Everything else **degrades cleanly** by capability rather
-than failing:
-
-| Feature | Needs | Elsewhere |
-|---|---|---|
-| Pending-updates badge + "upgrade in a terminal" | `apt-get`, `dnf`, `zypper`, `checkupdates` (pacman) or `apk` | none of these → no badge, feature hidden |
-| Database connections (Toolbox) | the DB client on the host (`psql` / `mysql` / `mongosh` / `clickhouse-client` / `redis-cli`) | client missing → a clear "not installed" message |
-| Services panel | `systemctl` (systemd) | non-systemd → "systemctl not available" |
-| Listening ports (Diagnostics) | `ss` (iproute2) | absent → a clear "ss (iproute2) is not available" message |
-| Metrics / network diagnostics | `/proc`, `/sys`, `ip` | partial on non-Linux |
-
-So the full feature set is a **systemd distro** (Debian/Ubuntu, Fedora/RHEL, openSUSE, Arch) — pending-updates detection also covers Alpine (`apk`); on a non-systemd system, a BSD or
-a minimal container the terminal and files still work and the rest simply doesn't appear — nothing
-crashes. Windows hosts are not supported (use SSH to a Linux jump host instead). The "upgrade in a
-terminal" action runs as the agent's user: as root it upgrades directly, otherwise it uses
-passwordless sudo if available, and if neither applies it prints the exact command to run yourself
-(the default dedicated `webterm` user has no sudo).
-
-The install link itself is hardened: it is **single-use**, expires after a
-**configurable TTL** (default 1 hour, 5 min–30 days — set it when creating the
-host, renewable from the host card), and can additionally require an **install
-password** (letters/digits/`._-`), sent as a header by the one-liner — never in
-the URL — hashed at rest and rate-limited against guessing. Both options exist
-for group enrollment tokens too. A link that was created but **never used** shows
-a badge on the host card, so a forgotten (or leaked) one-liner gets noticed.
-
-### The dedicated user cannot `sudo` — decide what it may do
-
-The recommended install runs the agent as a dedicated `webterm` user, created with
-`useradd -m -s /bin/bash webterm`. That user has **no password and no sudo**, which is the
-whole point: whoever gets past the login gets that user's access and nothing more. It also
-means your first `sudo apt install` in a session fails with *"Sorry, try again"* — sudo is
-asking for a password the account does not have.
-
-Grant it deliberately, from a root shell on that host. Three shapes, most restrictive first:
-
-```sh
-# 1. Narrow — only the commands you actually need. Best ratio: a compromised gateway
-#    gets those commands, not the machine.
-sudo tee /etc/sudoers.d/webterm >/dev/null <<'EOF'
-webterm ALL=(root) NOPASSWD: /usr/bin/systemctl restart nginx, /usr/bin/journalctl
-EOF
-sudo chmod 440 /etc/sudoers.d/webterm && sudo visudo -c
-
-# 2. Full sudo, password required — you type it, an attacker with your session cookie
-#    cannot become root without it. Use this if you administer the host from WebTerm.
-sudo passwd webterm
-sudo usermod -aG sudo webterm        # RHEL/Fedora: -aG wheel
-
-# 3. Full sudo, no password — convenient, and gives up most of what the dedicated user
-#    bought you: the agent is root again in practice.
-echo 'webterm ALL=(ALL) NOPASSWD:ALL' | sudo tee /etc/sudoers.d/webterm
-sudo chmod 440 /etc/sudoers.d/webterm
-```
-
-Option 2 is worth understanding rather than copying: the password is typed into a WebTerm
-terminal. It is **not** written to the transcript — input is never recorded, precisely so
-prompts with echo off do not leak — but it is still a password travelling through the
-gateway. If that is the wrong trade for a given host, use option 1.
-
-Serial consoles need one more group, since `/dev/ttyUSB*` is not world-readable:
-
-```sh
-sudo usermod -aG dialout webterm     # some distros: uucp
-```
-
-Group changes apply to **new** sessions; close the tab and open a new one.
-
-### Removing the agent from a host
-
-```sh
-python3 ~/.webterm/ptyd.py uninstall        # asks first; -y to skip
-```
-
-It stops the agent and its supervision, kills the WebTerm tmux server (sessions on that host
-end) and deletes `~/.webterm`. It does **not** remove the host from WebTerm — it tells the
-gateway it is gone, and the host list shows *agent removed on the server* with a button to
-remove it. Two reasons: you may only be reinstalling, in which case the notice clears by
-itself when the agent reconnects; and deleting the host takes its name, forwards and session
-links with it, so that decision stays with someone signed in rather than with whoever has a
-shell on the machine.
-
-## Configuration
-
-Everything in `.env` (see `.env.example`):
-
-| Variable | Role |
-|---|---|
-| `WEBTERM_PUBLIC_URL` | public URL (browser, agents, WebAuthn), e.g. `https://term.example.com` |
-| `WEBTERM_DOMAIN` | the domain for TLS (Caddy on a local build, Traefik on an image deploy) |
-| `LETSENCRYPT_EMAIL` | email for the Let's Encrypt certificate (Traefik deploy) |
-| `CF_DNS_API_TOKEN` | Cloudflare token (Zone:DNS:Edit), **optional**. Empty → Let's Encrypt over HTTP-01, no DNS provider needed (domain resolves here + port 80 reachable). Set it behind the CF proxy or NAT, and for a wildcard covering all forward subdomains |
-| `WEBTERM_AGENT_INSECURE` | `1` only for IP access (self-signed). **Local build only** — `docker-compose.prod.yml` deliberately does not pass it, so an image deploy cannot turn off TLS verification toward the agent (`tests/compose_env_test.py` records the exception). It also leaves the **agent bootstrap unauthenticated**: the install one-liner fetches with `curl -k`, and certificate pinning only begins on the first connection — so whoever can intercept that single download installs their own agent, with their own update key, at the rights you run it as. Enrol over a network you trust, or issue a real certificate first. The UI says so next to the command |
-| `WEBTERM_SETUP_TOKEN` | fixed for the first account; empty = generated into `/data/setup-token` (owner-only, 0600) inside the container, and only a short prefix is logged. Read it with `make token` |
-| `WEBTERM_CLIENT_BUFFER` | per-browser backlog before resync (default 1 MiB) |
-| `WEBTERM_TRUSTED_PROXY_HOSTS` | comma-separated proxy **host names** allowed to set `X-Forwarded-For`, resolved through docker DNS to the proxy container's exact IP. The compose files default it to `traefik` (`docker-compose.prod.yml`) and `caddy` (`docker-compose.yml`). With neither this nor the CIDRs set, the header is ignored and the socket peer is used |
-| `WEBTERM_TRUSTED_PROXY_CIDRS` | comma-separated CIDRs (e.g. `172.18.0.0/16`) also allowed to set `X-Forwarded-For` — an alternative or addition to the host names |
-| `WEBTERM_TRUSTED_PROXY_HOPS` | how many trusted proxies sit in front of the gateway (default 1; Cloudflare → Traefik = 2). The client IP is read that many entries from the right of `X-Forwarded-For` |
-| `WEBTERM_TRUST_CF_IP` | `1` to take the client IP from `CF-Connecting-IP` (behind Cloudflare). Honoured only on a request from a trusted proxy (above) |
-| `WEBTERM_ARCHIVE_DAYS` | days an archived transcript is kept before it is deleted for good (default 120) |
-| `WEBTERM_CLOSED_ARCHIVE_DAYS` | days after which a **closed** session's transcript moves to the archive (default 30; `0` = off) |
-| `WEBTERM_TRANSCRIPT_MAX_BYTES` / `WEBTERM_TRANSCRIPT_KEEP_BYTES` | per-session transcript cap: past MAX (default 64 MiB) only the last KEEP bytes (default 16 MiB) are kept, with a gap marker |
-| `WEBTERM_ALERT_WEBHOOK` | Slack/Discord/Teams or any JSON endpoint for security alerts. Independent of SMTP — with chat configured you never need a mail server. Also settable in Settings → Notifications |
-| `WEBTERM_UPDATE_CHECK` | `0` disables the "a newer version exists" check entirely (it overrides the UI switch). WebTerm never updates itself; the check only tells you |
-| `WEBTERM_UPDATE_COMMAND` | the upgrade command the UI **displays** when a new version exists. It is never executed |
-| `WEBTERM_UPDATE_REPO` | the GitHub `owner/repo` the version check asks (default `sm26449/webterm`) — set it on a fork |
-| `WEBTERM_SIGNING_AUTOGEN` | `1` | `0` = don't generate an agent signing key on the first boot of a new install — for an offline, build-time key (see *Agent update signing*) |
-| `WEBTERM_CERT_MIN_DAYS` | how many days before expiry the `webterm-cert-check` timer starts warning (default 15). **Not read from `.env`** — the timer reads `/etc/default/webterm-cert-check`, which `install.sh` writes |
-| `WEBTERM_CERT_RESOLVER` | `le` (HTTP-01, needs port 80 reachable) or `ledns` (DNS-01 via Cloudflare). Written by `install.sh`/`deploy.sh` from whether you gave a Cloudflare token — see the note under `CF_DNS_API_TOKEN` |
-| `WEBTERM_OIDC_ISSUER` | SSO issuer URL, e.g. `https://auth.example.com/application/o/webterm/`. **Optional** — SSO is off until issuer + client id + secret are all set |
-| `WEBTERM_OIDC_CLIENT_ID` / `WEBTERM_OIDC_CLIENT_SECRET` | the OIDC client credentials from your IdP (`provision.sh` prints them for Authentik) |
-| `WEBTERM_OIDC_PROVIDER_NAME` | the button label, e.g. `Authentik` (default `SSO`) |
-| `WEBTERM_OIDC_SCOPES` | requested scopes, default `openid email profile` |
-| `WEBTERM_OIDC_ALLOWED_GROUPS` | optional, comma-separated; if set, the token's `groups` claim must contain one (defence-in-depth on top of the IdP's own gate) |
-
-See [docs/SSO.md](docs/SSO.md) for the full model (break-glass, per-instance access, 2FA step-up).
-
-**Secrets as files.** `WEBTERM_SETUP_TOKEN`, `WEBTERM_OIDC_CLIENT_SECRET`, `WEBTERM_SMTP_PASSWORD`,
-`WEBTERM_ALERT_WEBHOOK` and `WEBTERM_UPDATE_CHECK_TOKEN` can also be read from a file named by the
-same variable with a `_FILE` suffix (e.g. `WEBTERM_SETUP_TOKEN_FILE=/run/secrets/webterm_setup_token`),
-so they stay out of the container's environment. A non-empty value in the environment wins; a missing
-or empty file means "not set". `docker-compose.prod.yml` uses this for the setup token, the OIDC
-secret and the SMTP password.
-
-**On the hosts (agent side).** `WEBTERM_INSTANCE_ID` overrides the per-machine id the agent derives
-from `/etc/machine-id` (the gateway fences each host token to that id) — set it on cloned VMs or
-containers that share a machine-id. In the other direction, the agent sets `WEBTERM_SESSION` (the
-session id) in the environment of the session it starts, so scripts can tell they run inside WebTerm.
-
-## Persistence
-
-**Persistence is tmux.** Without `tmux` on the host the agent falls back to a plain PTY
-and says so (Host details → Backend: `pty`), but the fallback is silent in the sense that
-matters: sessions still open and still work — they just do not survive an agent restart.
-The table below describes the tmux backend.
-
-| Event | Effect |
-|---|---|
-| Close the tab / browser | nothing — the gateway stays attached and keeps recording |
-| Gateway restarts | the agent reconnects, exact reattach from the offset |
-| Agent dies (`kill -9`) | tmux keeps the sessions; the new agent re-adopts them |
-| Server reboots | sessions are marked "lost"; the conversation & history remain |
-
-History: `<sid>.out` (raw stream, replayed on reconnect) + `<sid>.cast`
-(asciicast v2 with timestamps, downloadable). Both hold **output only**: input is
-never written to a transcript, so a password typed at an echo-off prompt cannot
-leak into a recording or a backup of one. Closed sessions
-stay in the sidebar until you delete them.
+**Operations**
+- Email and webhook alerts (security events, resource thresholds) — [docs/ALERTS.md](docs/ALERTS.md)
+- Encrypted backups from the UI, scheduled, off-host to Drive/Dropbox/SFTP/FTPS — [docs/INSTALL.md](docs/INSTALL.md#backup)
+- One-command upgrade with automatic rollback — [Upgrade and rollback](#upgrade-and-rollback)
+- Recovery procedures, including when the UI is unreachable — [docs/RUNBOOK.md](docs/RUNBOOK.md)
 
 ## Security
 
-Hardened for public exposure: argon2 passwords + passkeys, single-use setup token
-(anti-hijack on first start), brute-force lockout on the real client IP (since 3.5.1,
-X-Forwarded-For is believed only from the proxy named in `WEBTERM_TRUSTED_PROXY_HOSTS` /
-`WEBTERM_TRUSTED_PROXY_CIDRS` — see Configuration), constant-time login (no account enumeration), `__Host-` HttpOnly/Secure cookie,
-Origin check on the WebSocket (anti-CSWSH), CSP + HSTS + anti-clickjacking,
-path-traversal blocked. On **2FA** hosts, the terminal **locks on inactivity**
-(output suppressed + input refused server-side) and resuming requires a **passkey
-step-up** — protecting against unattended authenticated sessions
-(`WEBTERM_IDLE_LOCK_SECS`, default 5 min). An optional **command guardrail**
-(Settings → Security): regex rules that require **confirmation** or **block**
-dangerous commands at Enter (e.g. `rm -rf`, `mkfs`) — editable, and enforced on the
-server for `/run` as well, so a command sent with Run on hosts cannot walk around the browser.
+Hardened for public exposure: argon2 passwords and passkeys, a single-use setup token,
+brute-force lockout on the real client IP, `__Host-` cookies, Origin checks on every WebSocket,
+CSP and HSTS. Hosts can require a 2FA **step-up** to connect and lock their terminals on
+inactivity; a command guardrail can confirm or block dangerous commands, server-side. What you
+type is never recorded — transcripts hold output only.
 
-**You find out when someone attaches.** A session can be watched by more than one client —
-your own second tab, a phone, a share link. The viewer count told you *how many*, silently, so
-you learned about a second client only if you were looking at that corner of the toolbar at that
-second. Now every client already attached gets a notification (a system one, so it arrives with
-the tab in the background), and the viewer list shows the IP and browser of each, next to the
-button that removes them. A client attaching from an address never seen on a successful login is
-flagged **new device**, its notification is raised to a warning, and an email goes out —
-throttled per address, because an alert that fires constantly is an alert nobody reads.
+**The single-account invariant.** There are no roles: every account is a full administrator of
+the whole fleet, and whoever gets past the login has the shell and files of each agent's user,
+like SSH. More accounts buy attribution in the audit log, not isolation; to separate trust, run
+separate instances. That is why the defaults are a dedicated unprivileged agent user, passkeys,
+and a domain with HTTPS.
 
-**Credential changes from an unfamiliar device need the account's inbox.** Changing the password
-or the email from a session opened on an address never seen on a successful login also requires a
-six-digit code mailed to the account address — closing the case where someone who already has your
-password rotates it and locks you out. A code rather than a link: links are clickable by anyone who
-reaches the inbox, and mail scanners open them on their own. It escalates rather than refuses,
-because being blocked from changing a leaked password while travelling is not security. Applies
-only when SMTP is configured; without a mail channel it would be a permanent lockout.
+Agent updates are Ed25519-signed with a key your gateway generates on first boot, so your fleet
+trusts only your key. Keep an offline backup of `data/agent-signing.key`: without it, deployed
+agents accept no more updates.
 
-**Changing your passkeys needs a second factor too.** With 2FA on, the code from your phone (or
-a recovery code); without it, the emailed code from an unfamiliar device. Otherwise whoever has
-the password could enrol *their own* passkey — a permanent, phishing-resistant key to your
-account. Email is deliberately not accepted in place of the phone: it would make two-factor worth
-exactly as much as access to the mailbox.
+- Every control in detail: [docs/SECURITY-FEATURES.md](docs/SECURITY-FEATURES.md)
+- What the model defends and what it does not: [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md)
+- Reporting a vulnerability: [SECURITY.md](SECURITY.md)
 
-**And a way back in, from the server.** `docker exec -it webterm-app-1 python3 -m app.admin`
-(`list`, `passwd`, `disable-2fa`, `logout-all`) recovers the account over SSH. Every gate above
-is another way to lock yourself out; the product can be strict in the browser because this
-exists, and shell on the server is a far higher bar than a mailbox. See RUNBOOK §5.
+## Configuration
 
-**Signed-in devices (Settings → Security).** The account lists every browser currently signed
-in — device label, when it was last seen, which one is *this* device, and a badge on any
-unfamiliar new device. Sign out one device, or **sign out everywhere else** in one click (which
-also closes any open step-up windows). It's the in-UI answer to a suspected stolen cookie, short
-of rotating the password — and, unlike `logout-all`, it doesn't need shell on the server.
+Everything lives in `.env` next to the compose file (`.env.prod.example` for an image deploy;
+`install.sh` writes it for you). The ones you are most likely to touch:
 
-That signal decides **how loud to be, never whether to check**. No device is ever trusted enough
-to skip step-up, the idle lock, or 2FA: an IP and a user-agent both travel with a stolen session
-cookie, so a "trusted device" exemption would be waved through by exactly the attacker it looks
-like it stops.
+| Variable | Role |
+|---|---|
+| `WEBTERM_PUBLIC_URL` | public URL used by browsers, agents and passkeys, e.g. `https://term.example.com` |
+| `WEBTERM_DOMAIN` | the domain the TLS certificate is issued for |
+| `LETSENCRYPT_EMAIL` | contact for Let's Encrypt (image deploy) |
+| `CF_DNS_API_TOKEN` | optional Cloudflare token: DNS-01 instead of HTTP-01, and a wildcard for forwards |
+| `WEBTERM_ALERT_WEBHOOK` | Slack/Discord/Teams or any JSON endpoint for alerts (also in Settings → Notifications) |
+| `WEBTERM_SMTP_HOST` / `WEBTERM_ALERT_TO` | email alerts; without an SMTP host they are off |
+| `WEBTERM_OIDC_ISSUER` / `_CLIENT_ID` / `_CLIENT_SECRET` | single sign-on; off until all three are set ([docs/SSO.md](docs/SSO.md)) |
+| `WEBTERM_TRUSTED_PROXY_HOSTS` | the proxy allowed to set `X-Forwarded-For` (compose sets it for you) |
 
-**Security model:** whoever gets past login has access to the files and shell of
-the agent's user (like SSH). That's why: run it with a **domain + passkeys** (not
-just IP/password), install agents as a **dedicated, non-root user** where you can,
-and complete setup immediately after deploy. `tests/security_test.py` covers the
-protections.
+The full reference — every variable, secrets as `_FILE`s, agent-side and backup-script settings:
+**[docs/CONFIGURATION.md](docs/CONFIGURATION.md)**.
 
-**Off-host backup, from the UI (Settings → Backup).** Connect Google Drive or Dropbox with
-one button (OAuth) and scheduled backups leave automatically into your account,
-**encrypted with your passphrase** — the provider gets a file it cannot read; with no
-passphrase configured we refuse to upload. Least privilege: `drive.file` (only files the
-app itself creates) or a Dropbox *App folder* app. Separate remote retention. You can also
-point backups at **your own SFTP or FTPS server** from the same screen — for SFTP the host
-key is **pinned on first use** (confirm the `SHA256:` fingerprint before Save unlocks; a
-later key change is refused), FTPS verifies the server certificate — with credentials stored
-encrypted and the archive leaving already encrypted. See `docs/RUNBOOK.md` for the details.
+<a id="backup"></a>
 
-If cloud OAuth is more than you want, `scripts/backup.sh` copies the encrypted archive off-host
-with tools you already have — no `rclone config`: **rsync-over-SSH** (`WEBTERM_BACKUP_RSYNC=user@host:/path/`,
-key auth) or **FTPS** (`WEBTERM_BACKUP_FTPS=ftp://host/path/`, `curl --ssl-reqd` — TLS enforced so
-the password never crosses in clear; plain FTP is refused). `WEBTERM_BACKUP_REMOTE` (any rclone
-backend: S3/B2/…) still works too. Every path refuses to upload an unencrypted archive. The same
-`AUTHENTIK_BACKUP_RSYNC`/`_FTPS` options exist for the Authentik backup (`deploy/authentik/backup.sh`).
+Back up the `webterm-data` volume, and above all `agent-signing.key` in it; the archive's
+passphrase and `.env` are **not** in it. Backups from the UI and the scheduled timer:
+[docs/INSTALL.md](docs/INSTALL.md#backup); the rebuild checklist:
+[docs/RUNBOOK.md](docs/RUNBOOK.md#what-the-archive-does-not-contain).
 
-**Accounts (Settings → Account).** You can create more than one account, so each person
-signs in with their own password, passkeys and 2FA, and the audit log records *who*. There
-are **no roles**: every account is a full administrator over the whole fleet — multiple
-accounts buy attribution, not isolation.
+<a id="commands-makefile"></a>
 
-**Automation tokens (Settings → Security).** For cron, CI or monitoring: a bearer token
-with an explicit scope (`read` for `/api/status`, `/api/hosts` and `/api/sessions`; `run` for
-`POST /api/hosts/{id}/run`), mandatory expiry, hashed at rest, revocable in one click, and recorded in the audit log as
-`token:<name>`. It is deliberately narrow — no accounts, no signing key, no backups, and
-**hosts marked 2FA refuse tokens** because step-up needs a human with a passkey. The audit
-log is **not** reachable with a token, on purpose: it holds full command text, operator emails
-and IPs, so `/api/audit` stays browser-session only.
+## Upgrade and rollback
 
 ```sh
-curl -H "Authorization: Bearer wt_…" https://your-domain/api/status
+cd /opt/webterm && sudo ./upgrade.sh     # latest release; or pass a tag: sudo ./upgrade.sh v3.5.8
+./rollback.sh                           # back to the previous image, any time afterwards
 ```
 
-**Audit log (Settings → Audit).** Every request that changes something (POST/PATCH/DELETE
-on `/api`) is recorded with actor, IP, path, status and a detail (which command, which
-file, share writable or not), together with the reads that take data *out* — file
-downloads, transcripts, previews. Request bodies are never stored — passwords and file
-contents don't reach the log. `POST /api/history` is skipped (it has its own table), as
-are rejected requests with no actor. Retention via `WEBTERM_AUDIT_DAYS` (default 120 days).
-The browser session can be tightened with `WEBTERM_SESSION_TTL_DAYS` (default 30) and
-`WEBTERM_SESSION_IDLE_HOURS` (default 12).
-
-**Signed agent updates (Ed25519).** Agents only accept `ptyd.py` signed with the
-key whose public half is pinned inside them (`UPDATE_PUBKEY`, TOFU at install); CI
-refuses the build if `agent/ptyd.py` changed without re-signing. There are two ways
-to own that key:
-
-- **Per-deployment key (the default — you get one automatically)** — on the first boot
-  of an install with no key and no enrolled hosts, the gateway generates its own key,
-  substitutes `UPDATE_PUBKEY` in the `ptyd.py` it serves, and re-signs at runtime, so
-  your fleet trusts only *your* key. It lives on the gateway (`data/agent-signing.key`)
-  and is written **without a passphrase**, because auto-updates must survive a restart
-  nobody is watching. **Settings → Security** shows its status; the *generate* and
-  *import* buttons there apply only to an install that does not have a key yet (they return
-  409 once one exists — so, after the first boot, practically never). To use your own or a
-  passphrase-protected key, replace it **before enrolling hosts**: stop the gateway, put
-  your PEM (Ed25519, PKCS8) in `data/agent-signing.key` (mode 600) and its public key as 64
-  hex characters in `data/agent-signing.pub`, and start it again (or place both before the
-  first boot, so nothing is generated). After hosts are enrolled, a new key means
-  reinstalling every agent, or the rollover in the design note. Full model: [docs/design/SIGNED-UPDATES.md](docs/design/SIGNED-UPDATES.md).
-- **Build-time key (fork & build your own image)** — a key that stays offline, used to
-  sign at build/commit time, never on the gateway. A deployment key on the gateway takes
-  precedence (the gateway re-signs with it), so this path needs a gateway with no
-  `data/agent-signing.key` — set `WEBTERM_SIGNING_AUTOGEN=0` **before the first boot**, so a
-  new install doesn't generate one:
-
-  ```sh
-  scripts/gen-signing-key.py /secure/path/webterm-signing-key.pem
-  git add agent/ptyd.py agent/ptyd.py.sig && git commit -m "own signing key"
-  ```
-  On every later `ptyd.py` change: `WEBTERM_AGENT_SIGNING_KEY=<key.pem> scripts/sign-agent.py`.
-
-Either way, **keep an offline backup of the private key** — without it, deployed
-agents accept no more updates. Honest trade-off: a gateway-resident per-deployment key
-means a fully-compromised gateway (with the key *unlocked*) could sign a malicious
-update — but the gateway is already the single point of total compromise (see the
-[threat model](docs/THREAT-MODEL.md)), so this doesn't widen the blast radius.
-
-## Commands (Makefile)
-
-```sh
-make help      # full list
-make up        # build + start (dev)    make logs-app  # gateway logs
-make down      # stop                   make token     # the setup token
-make restart   # restart gateway        make backup    # data backup to ./backups
-make update    # git pull + rebuild     make test      # the test suite
-make deploy    # production (image)     make pull      # pull the latest image
-#                                        (backup needs WEBTERM_BACKUP_PASSPHRASE)
-```
-
-## Development
-
-```sh
-python3 -m venv .venv && .venv/bin/pip install \
-  -r gateway/requirements.txt -r gateway/requirements-dev.txt
-cd frontend && npm ci && npm run build && cd ..
-
-# backend with reload + frontend vite dev (proxy to :8000)
-PYTHONPATH=gateway .venv/bin/uvicorn app.main:app --reload &
-cd frontend && npm run dev
-```
-
-### Tests
-
-One runner, used by both CI and you — `scripts/run-tests.sh`. The list of suites lives
-there, in one place: when it was duplicated, `make test` silently ran 2 files while CI ran
-22.
-
-```sh
-make test         # hermetic suite — EXACTLY what CI gates the image on
-make test-local   # + the suites that need real tmux/agent on this machine
-```
-
-The `local` group starts a real agent. It is **sandboxed from any production agent** on the
-same box (`tests/tmux_sandbox.py`): `$HOME` does not isolate tmux — the socket lives in
-`$TMUX_TMPDIR/tmux-<uid>/`, keyed by UID — so tests get their own `TMUX_TMPDIR` and refuse
-to run if the computed socket is the production one while an agent is alive. Without that,
-a test run adopts and then kills the live sessions (it did, on 2026-08-05).
-
-Suites needing a running stack (`instance_fence`, `storm`) or system users (`ssh`,
-`provision`, which create/delete accounts via sudo) are listed by the runner but not run
-automatically.
-
-**E2E in a browser** (Playwright, real agent). CI runs `scripts/e2e-session.mjs`; to run it
-locally without Node installed:
-
-```sh
-docker run -d --name smoke -p 8000:8000 -e WEBTERM_SETUP_TOKEN=ci-e2e-token \
-  -e WEBTERM_PUBLIC_URL=http://127.0.0.1:8000 -e WEBTERM_AGENT_INSECURE=1 webterm-smoke:ci
-# tmux inside the container: WITHOUT it the agent falls back to the `pty` backend and the
-# E2E tests a different backend than production — that gap hid a whole class of bugs
-docker exec -u root smoke sh -c 'apt-get update -qq && apt-get install -y -qq tmux'
-docker exec smoke sh -c 'printf "%s" "{\"url\":\"ws://127.0.0.1:8000/agent/ws\",\"token\":\"$TOK\",\"insecure\":true}" > /root/.webterm/agent.json'
-# the Playwright image ships the BROWSERS, not the npm package — install it first,
-# or the script dies with ERR_MODULE_NOT_FOUND: Cannot find package 'playwright'
-docker run --rm --network host -v "$PWD/scripts:/w" -w /w \
-  -e AGENT_TOKEN_FILE=/w/token -e E2E_SETUP_TOKEN=ci-e2e-token \
-  mcr.microsoft.com/playwright:v1.63.0-noble \
-  sh -c 'npm i --no-save playwright@1.63.0 >/dev/null 2>&1 && node e2e-session.mjs http://127.0.0.1:8000 smoke'
-```
-
-`AGENT_TOKEN_FILE` makes the script write the enrol token to disk instead of shelling out to
-`docker` (it has no Docker CLI inside the Playwright image); start the agent yourself with
-that token, as above.
-
-## Layout
-
-```
-agent/
-  ptyd.py                  single-file agent (stdlib, Python 3.6+), Ed25519-signed
-  shell-integration.sh     OSC 133 markers (bash/zsh), installed with the agent (opt out
-                           with WEBTERM_NO_SHELL_INTEGRATION=1); appends one line to ~/.bashrc
-gateway/app/
-  main.py                  FastAPI, security headers, static, periodic reapers
-  api.py                   REST + WS agent/browser + installer + idle-lock 2FA
-  core.py                  session hubs, liveness reconciliation, file transfer,
-                          telnet-via-agent, port forwarding
-  telnet.py                IAC shim + OSC filter for the telnet bastion (untrusted device)
-  security.py              passwords, sessions, rate-limit, brute-force, passkey step-up
-  email_alerts.py          security alerts + resource thresholds (hysteresis)
-  webauthn_api.py          passkeys
-  backup.py                backup/restore from Settings (VACUUM INTO snapshot,
-                          scrypt→AES-GCM encryption, restore at boot)
-  db.py / config.py        SQLite + configuration
-frontend/src/
-  components/              SessionView, TabBar, CommandsPanel, ForwardsPanel,
-                          FleetRunModal, HistoryModal, TranscriptPlayer…
-  lib/                     shortcuts (single registry), commands (OSC 133),
-                           termtheme (schemes + iTerm/VSCode import), metrics
-scripts/
-  e2e-session.mjs          E2E with a REAL agent (runs in CI)
-  e2e-jump.mjs             jump-host UI: nesting, form, host hub (CI, no agent)
-  fs-test.sh · fwd-test.sh file operations · port forwarding (CI)
-  mobile-audit.mjs         responsive audit on real devices (CI)
-  smoke-boot.mjs           boot smoke test (UI starts with no JS errors)
-  sso-login.mjs            SSO login UI contract when OIDC is on (CI)
-  sign-agent.py            signs the agent at release (the key stays offline)
-tests/                     unit + integration suite (dev): telnet (shim/bastion),
-                          session reconciliation, agent hygiene+hardening, idle-lock,
-                          security, ssh, transcript, provisioning…
-docs/                      RUNBOOK · SHORTCUTS · SHELL-INTEGRATION ·
-                          PORT-FORWARDING · FLEET (Run on hosts) · SERIAL-CONSOLE ·
-                          SSH-KEYS · SSH-JUMP · DATABASE-TOOLBOX · SSO ·
-                          TRANSFERS · THREAT-MODEL · HOSTS ·
-                          AUTOMATION-TOKENS · ALERTS · GUARDRAIL · AI-TOOLS
-  design/                  architecture notes: ARCHITECTURE · SIGNED-UPDATES ·
-                          SESSION-LIFECYCLE · SPLIT-VIEWS ·
-                          TELNET-BASTION · FUTURE-DIRECTIONS
-deploy.sh · rollback.sh    production: pin, health gate, rollback
-```
-
-## Testing & release gates
-
-A broken build must not be able to reach production — least of all on a tool you
-administer your servers with. The CI chain, in order:
-
-0. **Unit tests and hygiene** (`unit-tests`, which everything else depends on) —
-   the Python + shell suite, `ruff`, a gitleaks scan, a check that the version badge
-   matches the code, a `requirements.lock` drift check, and **`pip-audit --strict`**,
-   which is blocking.
-1. **Agent signature verification** — if `agent/ptyd.py` changed without
-   re-signing, the build fails (agents would refuse the update anyway).
-2. **Boot smoke test** (`scripts/smoke-boot.mjs`) — the image starts in an
-   ephemeral container, a headless Chromium checks that the UI reaches a working
-   screen, with no JS errors. Catches exactly the class of bug that produced the
-   white screen in v1.0.11.
-3. **E2E with a REAL agent** (`scripts/e2e-session.mjs`, 181 checks) — starts an
-   agent in a container **with tmux installed, i.e. the backend production uses**,
-   opens sessions through the UI, types commands, verifies the output, tab
-   switching, pause/re-sync, shortcuts, parametrized snippets, alert thresholds,
-   transcript replay, the OSC 133 flow + **block actions**, the file panel,
-   **port forwarding**, **Run on hosts**, **command history**, and a **reconnect with
-   history replay** (no duplicate entries, no prompts captured as commands, new
-   commands still recorded). Running this on the `pty` fallback would test a
-   different backend than production — that gap hid a whole class of bugs.
-4. **FS API** (`scripts/fs-test.sh`, 53) — end-to-end file operations with a real agent.
-5. **Port forwarding** (`scripts/fwd-test.sh`) — auth handshake, HTTP +
-   WebSocket proxy + **https targets**, **configurable domain**, **SSH hosts**
-   (real sshd), and security tests (slug-bound token, anti-SSRF, the 2FA gate,
-   anti-CSWSH).
-6. **Mobile audit** (`scripts/mobile-audit.mjs`) — 10 real devices (iPhone/iPad/
-   Android, WebKit + Chromium); any layout regression blocks the image.
-7. **Accessibility** (axe-core, `A11Y_MAX_SERIOUS=0`) — a single serious violation
-   fails the build.
-
-Only if all pass does the image publish to ghcr. On deploy, `deploy.sh` keeps the
-previous image and does an **automatic rollback** if the new container doesn't
-become healthy; `rollback.sh` is the panic button over SSH. Full recovery:
+`upgrade.sh` takes a backup, pulls the image and pins it **by digest**, syncs the scripts that run
+on the host, and hands off to `deploy.sh`, which rolls back by itself if the new container does
+not become healthy. With `cosign` installed and `WEBTERM_COSIGN_IDENTITY` set, it verifies the
+image signature first. WebTerm never updates itself; the UI only tells you a release exists.
+Details: [docs/INSTALL.md](docs/INSTALL.md#upgrading); when things go wrong:
 [docs/RUNBOOK.md](docs/RUNBOOK.md).
 
-## Backup
+<a id="development"></a>
+<a id="tests"></a>
+<a id="layout"></a>
+<a id="testing--release-gates"></a>
 
-Everything that matters is in the `webterm-data` volume (`/data`): `webterm.db`,
-`transcripts/`, `secret`, and `agent-signing.key` — the last being the one artefact whose
-loss is irreversible: without it the fleet can never be updated again.
+## Contributing and tests
 
-What is **not** in the volume, and therefore not in the archive: the archive's own
-passphrase (`/etc/default/webterm-backup`), `/opt/webterm/.env`, and the TLS certificates.
-That matters only when you rebuild the machine — and then it matters a great deal, because
-the passphrase lives on the machine you are about to wipe. The checklist and the full
-rebuild procedure are in [docs/RUNBOOK.md](docs/RUNBOOK.md#what-the-archive-does-not-contain).
+```sh
+make test         # the hermetic suite — exactly what CI gates the image on
+make test-local   # + the suites that need a real tmux/agent (sandboxed from production)
+```
 
-`make backup` writes to `./backups`. Set **`WEBTERM_BACKUP_PASSPHRASE`** (in
-`/etc/default/webterm-backup` for the scheduled timer) and it writes an encrypted
-`.tar.gz.enc`. Without it, an interactive run warns and writes plaintext, but a
-**non-interactive run refuses and exits 1** — the archive would contain the vault key
-in the clear. That is deliberate; it also means an unconfigured cron job produces
-nothing at all. `WEBTERM_BACKUP_ALLOW_PLAINTEXT=1` overrides it, and is not advised.
-
-**From the app (Settings → Backup)** — no server access needed:
-
-- **Download a backup** any time: a crash-consistent DB snapshot (`VACUUM INTO`) +
-  the vault key + optionally the transcripts. Because it includes the key (which
-  decrypts all credentials), the download is **encrypted with a password you
-  choose** (scrypt → AES-256-GCM) — **without the password you cannot restore,
-  don't lose it**.
-- **Automatic backup** daily/weekly, kept 7 days on the server. When it's ready
-  you get an in-app notification and can download it (encrypted on download).
-- **Restore** from a `.wtbk`: after validation (password + DB integrity), the app
-  restarts and replaces the data; a pre-restore snapshot is saved automatically as
-  a safety net.
-
-Your job is to move the copies **off-site** — a backup left on the same server
-does not protect you from losing the VPS. See [RUNBOOK](docs/RUNBOOK.md).
+Before an image is published, CI runs the unit suite, ruff, gitleaks and `pip-audit`, verifies
+the agent signature, boots the image, and drives it in a browser: an E2E run with a **real agent
+on tmux** (`scripts/e2e-session.mjs`, 181 checks), file and port-forward tests, a mobile audit on
+10 devices and an accessibility gate. Building from source, the test layout and the full chain:
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). How to contribute — including re-signing the agent
+and regenerating these screenshots — is in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-[MIT](LICENSE) · see [CHANGELOG](CHANGELOG.md) for history.
+[MIT](LICENSE) · history in the [CHANGELOG](CHANGELOG.md).
 
-## Acknowledgments
-
+<a id="acknowledgments"></a>
 Built by Stefan Maldaianu, with development assistance from Claude (Anthropic).

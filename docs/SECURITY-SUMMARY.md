@@ -26,7 +26,7 @@ and every 60 seconds while the tab is visible.
 
 **TLS certificate expiry is not a row on purpose.** The certificate is served by Traefik,
 outside the application; the gateway has no reliable view of it. The host-side check is
-`scripts/cert-check.sh`, installed as the `webterm-cert-check` systemd timer (see "Certificate expiry watch" in the [main README](../README.md)).
+`scripts/cert-check.sh`, installed as the `webterm-cert-check` systemd timer (see "Certificate expiry watch" in [FEATURES.md](FEATURES.md#operating-it)).
 
 The data comes from `GET /api/security/summary` — a list of `{id, status, value}` with no
 prose (the UI writes the text in your language). It is browser-only: automation tokens get
