@@ -370,8 +370,14 @@ async function auditDevice(cfg) {
         //    auditul rulează singur, pasul e sărit cu o notă, nu raportat drept „ok". Ţintele mici
         //    nu le măsurăm aici: interiorul Monaco (textarea-ul de input, gutter-ul) nu sunt ţinte. ──
         try {
-        await openFiles()
-        const pathInput = filesAside.locator('input[title*="Type a path"]')
+        // aserţie explicită: dacă foaia Files nu se deschide, bug-ul spune ASTA, nu un timeout
+        // de pe un selector de mai jos
+        if (!(await openFiles().then(() => true, () => false)) || !(await filesAside.isVisible())) {
+          throw new Error('foaia Files nu s-a deschis (aside[aria-label="Session files"] invizibil)')
+        }
+        // aria-label, nu title: foaia se deschide sub cursorul parcat al lui Playwright, deci
+        // TooltipLayer îi scoate input-ului `title`-ul (vezi openFiles)
+        const pathInput = filesAside.locator('input[aria-label="Current directory path"]')
         await pathInput.fill('/tmp')
         await pathInput.press('Enter')
         await page.waitForTimeout(800)
