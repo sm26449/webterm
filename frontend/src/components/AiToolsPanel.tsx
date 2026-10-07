@@ -13,6 +13,7 @@ import {
 } from '../lib/aitools'
 import { PlusIcon, RefreshIcon } from './Icons'
 import HelpTip from './HelpTip'
+import { Button } from './ui'
 
 const FileEditor = lazy(() => import('./FileEditor'))
 
@@ -231,8 +232,7 @@ export default function AiToolsPanel(props: {
             {form.err && <div role="alert" className="text-[11px] wt-danger">{form.err}</div>}
             <div className="flex justify-end gap-2">
               <button type="button" className={btn} onClick={() => setForm(null)}>{t('common.cancel')}</button>
-              <button type="submit" disabled={busy}
-                className="rounded bg-sky-600 px-3 py-1 text-[11px] font-medium text-white hover:bg-sky-700 disabled:opacity-50">{t('ai.create')}</button>
+              <Button variant="primary" size="sm" type="submit" disabled={busy}>{t('ai.create')}</Button>
             </div>
           </form>
         )}

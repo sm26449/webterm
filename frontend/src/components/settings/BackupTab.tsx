@@ -3,7 +3,8 @@ import { api, ApiError, errText } from '../../lib/api'
 import { useI18n } from '../../lib/i18n'
 import { fmtTs } from '../../lib/tz'
 import { copyText } from '../../lib/clipboard'
-import { btn, downloadBlob, field, heading } from './ui'
+import { downloadBlob, field, heading } from './ui'
+import { Button } from '../ui'
 import { useConfirm } from '../../lib/confirm'
 import { askSecret } from '../../lib/secretPrompt'
 import HelpTip from '../HelpTip'
@@ -344,10 +345,9 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
           {t('settings.backup.includeTranscripts')}
         </label>
         <div className="flex items-center gap-2">
-          <button disabled={bkBusy} onClick={downloadBackupNow}
-            className={btn.primary}>
+          <Button variant="primary" disabled={bkBusy} onClick={downloadBackupNow}>
             {bkBusy ? t('settings.backup.preparing') : t('settings.downloadEncryptedBackup')}
-          </button>
+          </Button>
           <span role="status" className={bkMsg ? 'text-sm wt-good' : 'sr-only'}>{bkMsg}</span>
           <span role="alert" className={bkErr ? 'text-sm wt-danger' : 'sr-only'}>{bkErr}</span>
         </div>
@@ -545,10 +545,9 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
           onChange={(e) => setCloudForm((f) => ({ ...f, current_password: e.target.value }))}
           placeholder={t('settings.cloud.accountPassword')} aria-label={t('settings.cloud.accountPassword')} className={field} />
         <div className="flex flex-wrap items-center gap-2">
-          <button type="submit" disabled={cloudBusy}
-            className="rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-50">
+          <Button variant="primary" type="submit" disabled={cloudBusy}>
             {t('settings.cloud.save')}
-          </button>
+          </Button>
           <button type="button" onClick={connectCloud} disabled={!cloud?.configured || cloudBusy}
             className="rounded-lg bg-ink-800 px-3 py-1.5 text-sm text-slate-200 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-40">
             {cloud?.connected ? t('settings.cloud.reconnect') : t('settings.cloud.connect')}
@@ -674,10 +673,9 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
           onChange={(e) => setDirectForm((f) => ({ ...f, current_password: e.target.value }))}
           placeholder={t('settings.cloud.accountPassword')} aria-label={t('settings.cloud.accountPassword')} className={field} />
         <div className="flex flex-wrap items-center gap-2">
-          <button type="submit" disabled={cloudBusy || (directForm.kind === 'sftp' && !directForm.hostkey)}
-            className="rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-50">
+          <Button variant="primary" type="submit" disabled={cloudBusy || (directForm.kind === 'sftp' && !directForm.hostkey)}>
             {t('settings.cloud.save')}
-          </button>
+          </Button>
           <button type="button" disabled={!cloud?.connected || cloudBusy}
             onClick={() => cloudAction('upload', t('settings.cloud.uploaded'))}
             className="rounded-lg bg-ink-800 px-3 py-1.5 text-sm text-slate-200 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-40">
@@ -707,10 +705,9 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
       </p>
       <div className="mt-2 flex flex-col gap-2">
         <div className="flex items-center gap-2">
-          <button onClick={() => restoreRef.current?.click()}
-            className={btn.secondary}>
+          <Button variant="secondary" onClick={() => restoreRef.current?.click()}>
             {t('settings.chooseFile')}
-          </button>
+          </Button>
           <span className="min-w-0 truncate text-xs text-slate-400">{restoreFile ? restoreFile.name : t('settings.noFileChosen')}</span>
           <input ref={restoreRef} type="file" accept=".wtbk,application/octet-stream" className="hidden"
             onChange={(e) => setRestoreFile(e.target.files?.[0] ?? null)} />
@@ -722,10 +719,9 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
           placeholder={t('settings.backup.restorePassPlaceholder')} aria-label={t('settings.backup.restorePass')}
           autoComplete="off" className={field} />
         <div>
-          <button disabled={bkBusy || !restoreFile} onClick={doRestore}
-            className={btn.danger}>
+          <Button variant="danger" disabled={bkBusy || !restoreFile} onClick={doRestore}>
             {bkBusy ? t('settings.backup.validating') : t('settings.backup.restoreAndRestart')}
-          </button>
+          </Button>
         </div>
       </div>
     </div>

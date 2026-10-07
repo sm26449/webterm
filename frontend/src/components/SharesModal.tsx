@@ -8,6 +8,7 @@ import { fmtTs } from '../lib/tz'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { EyeIcon } from './Icons'
 import LoadFailed from './LoadFailed'
+import { Button } from './ui'
 
 /* Inventarul link-urilor de share active din flotă (3.5.4). Până acum un link trăia doar în
    bara sesiunii lui: ca să afli „ce am dat cui" deschideai sesiune cu sesiune. Aici le vezi pe
@@ -91,10 +92,9 @@ export default function SharesModal(props: { onClose: () => void; onChanged: () 
           <h2 id="wt-shares-title" className="text-lg font-semibold">{t('shares.title')}</h2>
           <div className="flex items-center gap-2">
             {total > 0 && (
-              <button type="button" onClick={revokeAll} disabled={busy}
-                className="rounded-lg bg-rose-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-rose-700 disabled:opacity-50">
+              <Button variant="danger" type="button" onClick={revokeAll} disabled={busy}>
                 {t('shares.revokeAll')}
-              </button>
+              </Button>
             )}
             <button type="button" onClick={props.onClose} aria-label={t('common.close')}
               className="wt-touch grid place-items-center rounded-md px-2 py-1 text-slate-400 hover:bg-ink-800">

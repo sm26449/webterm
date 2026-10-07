@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useI18n } from '../lib/i18n'
 import { copyText } from '../lib/clipboard'
-import { btn } from './settings/ui'
+import { Button } from './ui'
 
 /** Starea verificării de versiune, când gazda vrea să o arate lângă comandă. `error` = ultima
     verificare a EŞUAT (GitHub inaccesibil, DNS, proxy): atunci spunem „n-am putut verifica" cu
@@ -27,9 +27,9 @@ export default function UpdateCommand(props: { command: string; status?: UpdateC
         <div role="alert" className="wt-warn mb-2 flex flex-wrap items-center gap-2 rounded-lg bg-amber-500/10 px-2.5 py-1.5 text-xs ring-1 ring-amber-500/30">
           <span className="min-w-0 flex-1 break-words">{t('settings.update.failed', { error: st.error })}</span>
           {st.onRetry && (
-            <button type="button" onClick={st.onRetry} disabled={st.checking} className={`${btn.secondary} px-2 py-0.5 text-xs`}>
+            <Button variant="secondary" size="sm" type="button" onClick={st.onRetry} disabled={st.checking}>
               {st.checking ? t('settings.update.checking') : t('settings.update.retry')}
-            </button>
+            </Button>
           )}
         </div>
       )}

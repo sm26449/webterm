@@ -1,6 +1,7 @@
 import { FormEvent, useRef, useState } from 'react'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { useI18n } from '../lib/i18n'
+import { Button } from './ui'
 
 export type CredField = {
   key: string
@@ -72,10 +73,9 @@ export default function CredentialModal(props: {
         <div className="flex justify-end gap-2">
           <button type="button" onClick={props.onCancel}
             className="rounded-lg px-4 py-2 text-sm text-slate-400 hover:bg-ink-800">{t('cred.cancel')}</button>
-          <button disabled={missing}
-            className="rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-40">
+          <Button variant="primary" size="lg" disabled={missing}>
             {props.submitLabel || t('cred.continue')}
-          </button>
+          </Button>
         </div>
       </form>
     </div>

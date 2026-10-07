@@ -3,6 +3,7 @@ import { Snippet } from '../lib/api'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { useI18n } from '../lib/i18n'
 import { fillSnippet, snippetParams } from '../lib/snippets'
+import { Button } from './ui'
 
 /** Parametrii unui snippet: placeholder-ele `{{nume}}` din corp devin câmpuri.
     Comanda finală e arătată integral înainte de rulare — pe un terminal de
@@ -65,9 +66,9 @@ export default function SnippetParams(props: {
             <button type="button" onClick={props.onCancel} className="rounded-lg px-4 py-2 text-sm text-slate-400 hover:bg-ink-800">
               {t('snippetparams.cancel')}
             </button>
-            <button className="rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-700">
+            <Button variant="primary" size="lg">
               {t('snippetparams.insert')}
-            </button>
+            </Button>
           </div>
         </form>
       </div>

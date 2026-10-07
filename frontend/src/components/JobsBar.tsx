@@ -7,6 +7,7 @@ import { cancelDownload, dismissDownload, pauseDownload, resumeDownload, retryDo
 import { canRetryCopy, cancelCopy, dismissCopy, retryCopy } from '../lib/copyjobs'
 import { UploadJob, canPause, isActive, isCopy, isDownload, sizeKnown } from '../lib/uploadStore'
 import { CopyIcon, DownloadIcon, UploadIcon } from './Icons'
+import { compactAction } from './ui'
 
 /* Helper-ele pentru transferuri — rândul (`JobRow`) şi funcţiile lui de stare — folosite acum
    de widgetul plutitor (TransfersWidget). Incidentul cu upload-ul de 17 GB (2026-10-04) a arătat
@@ -31,7 +32,7 @@ const BAR_CLS: Record<UploadJob['state'], string> = {
 /** stările care cer o decizie a omului — singurele care aduc bara pe ecran */
 export const needsAttention = (j: UploadJob) => j.state === 'stalled' || j.state === 'err' || j.state === 'orphan'
 
-const BTN = 'wt-touch inline-flex h-6 min-w-6 shrink-0 items-center justify-center rounded px-1.5 text-[11px] font-medium hover:bg-ink-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400'
+const BTN = compactAction   // design system (ui/classes)
 
 export function jobStatusText(j: UploadJob, t: (k: string, v?: Record<string, string | number>) => string): string {
   // arhivă din mers: mărimea nu se ştie → octeţii primiţi (nu %); detaliul spune „se pregăteşte" /

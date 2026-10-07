@@ -13,6 +13,7 @@ import { TerminalPromptIcon, PlusIcon, TrashIcon, PencilIcon, CopyIcon } from '.
 import HelpTip from './HelpTip'
 import LoadFailed from './LoadFailed'
 import { fmtTs, getTimezone, uiLocale } from '../lib/tz'
+import { Button } from './ui'
 
 // Bibliotecă de reţete built-in (client-side): comenzi comune pe categorii, cu {placeholder}-e.
 // Acţiunea e Copy (universal — merge şi din pagina hostului, şi din sesiune); lipeşti în terminal.
@@ -414,10 +415,9 @@ export default function ToolboxPanel(props: {
               {!dk.key ? (
                 <div className="text-center">
                   <p className="mb-2 text-[11.5px] leading-snug text-slate-400">{t('toolbox.ssh.none')}</p>
-                  <button onClick={dkGenerate} disabled={dkBusy !== ''}
-                    className="rounded bg-sky-600 px-3 py-1.5 text-[12px] font-medium text-white hover:bg-sky-700 disabled:opacity-40">
+                  <Button variant="primary" size="sm" onClick={dkGenerate} disabled={dkBusy !== ''}>
                     {dkBusy === 'generate' ? t('toolbox.ssh.generating') : t('toolbox.ssh.generate')}
-                  </button>
+                  </Button>
                 </div>
               ) : (
                 <>
@@ -468,11 +468,10 @@ export default function ToolboxPanel(props: {
                           placeholder={t('toolbox.ssh.restrictCmdPh')} aria-label={t('toolbox.ssh.restrictCmd')}
                           className="w-full rounded bg-ink-800 px-2 py-1 font-mono text-[11px] text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" />
                       )}
-                      <button onClick={dkDeploy} disabled={deployTo.size === 0 || dkBusy !== '' || (restrictMode === 'command' && !restrictCmd.trim())}
-                        className="rounded bg-sky-600 px-3 py-1.5 text-[12px] font-medium text-white hover:bg-sky-700 disabled:opacity-40">
+                      <Button variant="primary" size="sm" onClick={dkDeploy} disabled={deployTo.size === 0 || dkBusy !== '' || (restrictMode === 'command' && !restrictCmd.trim())}>
                         {dkBusy === 'deploy' ? t('toolbox.ssh.deploying')
                           : deployTo.size > 1 ? t('toolbox.ssh.deployN', { n: deployTo.size }) : t('toolbox.ssh.deploy')}
-                      </button>
+                      </Button>
                     </div>
                     <p className="mt-1 text-[10.5px] leading-snug text-slate-500">{t('toolbox.ssh.fromIpHint')}</p>
                   </div>
@@ -693,8 +692,7 @@ export default function ToolboxPanel(props: {
             </div>
             <div className="mt-4 flex justify-end gap-2 text-sm">
               <button onClick={() => setSnipEdit(null)} className="rounded px-3 py-1.5 text-slate-400 hover:bg-ink-800">{t('common.cancel')}</button>
-              <button onClick={() => saveSnip(snipEdit)} disabled={!snipEdit.title.trim() || !snipEdit.body.trim()}
-                className="rounded bg-sky-600 px-3 py-1.5 font-medium text-white hover:bg-sky-700 disabled:opacity-40">{t('common.save')}</button>
+              <Button variant="primary" onClick={() => saveSnip(snipEdit)} disabled={!snipEdit.title.trim() || !snipEdit.body.trim()}>{t('common.save')}</Button>
             </div>
         </TrapDialog>
       )}
@@ -765,8 +763,7 @@ export default function ToolboxPanel(props: {
             </div>
             <div className="mt-4 flex justify-end gap-2 text-sm">
               <button onClick={() => setEdit(null)} className="rounded px-3 py-1.5 text-slate-400 hover:bg-ink-800">{t('common.cancel')}</button>
-              <button onClick={() => save(edit)} disabled={!edit.label.trim()}
-                className="rounded bg-sky-600 px-3 py-1.5 font-medium text-white hover:bg-sky-700 disabled:opacity-40">{t('common.save')}</button>
+              <Button variant="primary" onClick={() => save(edit)} disabled={!edit.label.trim()}>{t('common.save')}</Button>
             </div>
         </TrapDialog>
       )}

@@ -3,7 +3,8 @@ import { api, errText, Host } from '../lib/api'
 import { useI18n } from '../lib/i18n'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { csvToRows, CsvRow, importPayload, IMPORT_MAX, previewRows, RowStatus } from '../lib/hostscsv'
-import { btn, field } from './settings/ui'
+import { field } from './settings/ui'
+import { Button } from './ui'
 import HelpTip from './HelpTip'
 import InstallCommand from './InstallCommand'
 
@@ -135,7 +136,7 @@ export function HostsCsvImport(props: { onClose: () => void; onImported?: () => 
           </div>
         )}
         <div className="text-right">
-          <button type="button" onClick={props.onClose} className={`${btn.primary} px-4 py-2`}>{t('addhost.done')}</button>
+          <Button variant="primary" size="lg" type="button" onClick={props.onClose}>{t('addhost.done')}</Button>
         </div>
       </div>
     )
@@ -154,9 +155,9 @@ export function HostsCsvImport(props: { onClose: () => void; onImported?: () => 
             <p className="text-slate-400">{t('hostcsv.dropHere')}</p>
             <input ref={fileRef} type="file" accept=".csv,text/csv" className="sr-only" data-testid="csv-file"
               aria-label={t('hostcsv.chooseFile')} onChange={(e) => void readFile(e.target.files?.[0])} />
-            <button type="button" onClick={() => fileRef.current?.click()} className={`${btn.secondary} mt-2`}>
+            <Button variant="secondary" type="button" onClick={() => fileRef.current?.click()} className="mt-2">
               {t('hostcsv.chooseFile')}
-            </button>
+            </Button>
           </div>
           <label className="block">
             <span className={label}>{t('hostcsv.pasteLabel')}</span>
@@ -228,22 +229,22 @@ export function HostsCsvImport(props: { onClose: () => void; onImported?: () => 
       <div id="csv-import-error" role="alert" className={error ? 'text-sm wt-danger' : 'sr-only'}>{error}</div>
       <div className="flex flex-wrap items-center justify-end gap-2">
         {props.onExport && !rows && (
-          <button type="button" onClick={props.onExport} className={`${btn.ghost} mr-auto`}>{t('hostcsv.exportLink')}</button>
+          <Button variant="ghost" type="button" onClick={props.onExport} className="mr-auto">{t('hostcsv.exportLink')}</Button>
         )}
         {rows && (
-          <button type="button" onClick={() => { setRows(null); setError('') }} className={`${btn.ghost} mr-auto`}>
+          <Button variant="ghost" type="button" onClick={() => { setRows(null); setError('') }} className="mr-auto">
             {t('hostcsv.back')}
-          </button>
+          </Button>
         )}
-        <button type="button" onClick={props.onClose} className={`${btn.ghost} px-4 py-2`}>{t('addhost.cancel')}</button>
+        <Button variant="ghost" size="lg" type="button" onClick={props.onClose}>{t('addhost.cancel')}</Button>
         {!rows ? (
-          <button type="button" disabled={!text.trim()} onClick={() => load(text)} className={`${btn.primary} px-4 py-2`}>
+          <Button variant="primary" size="lg" type="button" disabled={!text.trim()} onClick={() => load(text)}>
             {t('hostcsv.preview')}
-          </button>
+          </Button>
         ) : (
-          <button type="button" disabled={busy || nSel === 0} onClick={doImport} className={`${btn.primary} px-4 py-2`}>
+          <Button variant="primary" size="lg" type="button" disabled={busy || nSel === 0} onClick={doImport}>
             {t('hostcsv.importN', { n: nSel })}
-          </button>
+          </Button>
         )}
       </div>
     </div>
@@ -338,10 +339,10 @@ export function ExportHostsModal(props: { hosts: Host[]; presetFolder?: string; 
         </fieldset>
         <div role="alert" className={error ? 'text-sm wt-danger' : 'sr-only'}>{error}</div>
         <div className="flex justify-end gap-2">
-          <button type="button" onClick={props.onClose} className={`${btn.ghost} px-4 py-2`}>{t('addhost.cancel')}</button>
-          <button type="button" disabled={busy || sel.size === 0} onClick={doExport} className={`${btn.primary} px-4 py-2`}>
+          <Button variant="ghost" size="lg" type="button" onClick={props.onClose}>{t('addhost.cancel')}</Button>
+          <Button variant="primary" size="lg" type="button" disabled={busy || sel.size === 0} onClick={doExport}>
             {t('hostcsv.exportN', { n: sel.size })}
-          </button>
+          </Button>
         </div>
       </div>
     </div>

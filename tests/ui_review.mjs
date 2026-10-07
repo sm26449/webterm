@@ -36,7 +36,8 @@ const OFFLINE_HOST = 'a11y-offline'
 // Editorul Monaco cere un fişier real pe un agent online; CI-ul GitHub nu setează (încă)
 // variabila, deci pasul e sărit VIZIBIL (linie SKIP), nu tăcut.
 const HAS_AGENT = process.env.WT_AGENT === '1'
-const OUT = '/tmp/webterm-review'
+// capturile (ambele teme) — `ci-local.sh` le pune în $OUT/ui-review, ca să supravieţuiască containerului
+const OUT = process.env.UI_REVIEW_OUT || '/tmp/webterm-review'
 const a11y = []
 const skipped = []
 const checks = []

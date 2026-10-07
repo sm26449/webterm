@@ -4,6 +4,7 @@ import { useI18n } from '../lib/i18n'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { notify } from '../lib/notify'
 import { DownloadIcon, FileIcon, FolderIcon, LinkIcon } from './Icons'
+import { Button } from './ui'
 
 interface Entry {
   name: string
@@ -222,13 +223,11 @@ export default function FileBrowser(props: { host: Host; onClose: () => void }) 
           <span className="min-w-0 flex-1 truncate text-xs text-slate-500">
             {t('browser.uploadTo')} <code className="font-mono wt-link">{listing?.path ?? path}</code>
           </span>
-          <button
+          <Button variant="primary"
             onClick={() => fileInput.current?.click()}
-            disabled={busy || !listing}
-            className="shrink-0 rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-50"
-          >
+            disabled={busy || !listing} className="shrink-0">
             {t('browser.choose')}
-          </button>
+          </Button>
           <input
             ref={fileInput}
             type="file"
@@ -312,13 +311,11 @@ export default function FileBrowser(props: { host: Host; onClose: () => void }) 
             <div className="flex items-center gap-2 border-b border-ink-800 px-4 py-2">
               <span className="truncate font-mono text-xs text-slate-400">{editing.path}</span>
               <div className="ml-auto flex gap-2">
-                <button
+                <Button variant="primary" size="sm"
                   onClick={() => saveEdit(false)}
-                  disabled={saving}
-                  className="rounded-lg bg-sky-600 px-3 py-1 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-50"
-                >
+                  disabled={saving}>
                   {saving ? t('browser.saving') : t('browser.save')}
-                </button>
+                </Button>
                 <button onClick={() => { setConflict(false); setEditing(null) }} className="rounded-lg px-3 py-1 text-sm text-slate-400 hover:bg-ink-800">
                   {t('browser.cancel')}
                 </button>

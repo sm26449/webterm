@@ -10,6 +10,7 @@ import { hostHistory } from '../lib/metrics'
 import { pressureColor, pressureTextColor } from '../lib/thresholds'
 import { updatesSignal, useUpdatesPref } from '../lib/updatesPref'
 import { DockerIcon, DownloadIcon, FilesIcon, ForwardIcon, LinkIcon, NoteIcon, PencilIcon, PlusIcon, PopoutIcon, RefreshIcon, ServerIcon, ServicesIcon, ShieldIcon, SplitIcon, TerminalPromptIcon, ToolboxIcon, TrashIcon } from './Icons'
+import { Badge, Button, Card, EmptyState, IconButton, cardClass, iconButtonClass } from './ui'
 import SessionPreview from './SessionPreview'
 import Sparkline from './Sparkline'
 import TranscriptPlayer from './TranscriptPlayer'
@@ -173,9 +174,9 @@ export default function HostOverview(props: {
     <div className="flex h-full min-w-0 flex-1 flex-col">
       {/* ── header ── */}
       <div className="flex flex-wrap items-start gap-x-4 gap-y-3 border-b border-ink-800 px-4 pt-4 pb-3 sm:px-6">
-        <button onClick={props.onMenu} className={`wt-touch grid place-items-center rounded-md px-2 py-1 text-slate-400 hover:bg-ink-800 ${props.sidebarCollapsed ? '' : 'md:hidden'}`} aria-label={t('host.openHostListAria')}>
+        <IconButton size="md" onClick={props.onMenu} className={props.sidebarCollapsed ? '' : 'md:hidden'} label={t('host.openHostListAria')}>
           ☰
-        </button>
+        </IconButton>
         <div className="relative shrink-0">
           <div className="grid h-11 w-11 place-items-center rounded-xl bg-ink-800 text-slate-400 ring-1 ring-ink-700">
             <ServerIcon />
@@ -187,9 +188,9 @@ export default function HostOverview(props: {
           <div className="flex items-center gap-2">
             <h1 className="truncate text-lg font-semibold text-slate-100">{host.name}</h1>
             {host.connection_type && host.connection_type !== 'agent' && (
-              <span className="wt-accent rounded bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide">
+              <Badge tone="accent" className="py-0.5 uppercase tracking-wide">
                 {host.connection_type}
-              </span>
+              </Badge>
             )}
           </div>
           <div className="mt-0.5 truncate text-sm text-slate-500">
@@ -209,14 +210,12 @@ export default function HostOverview(props: {
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {/* Edit host — pe bară, lângă New session (Serial/Diagnostic au trecut în nav → Tools) */}
-          <button onClick={() => props.onEdit(host)} title={t('host.editHost')}
-            className="wt-touch flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800">
+          <Button variant="secondary" size="lg" onClick={() => props.onEdit(host)} title={t('host.editHost')} className="wt-touch">
             <PencilIcon /> <span className="hidden sm:inline">{t('host.editHost')}</span>
-          </button>
-          <button disabled={!canConnect} onClick={() => props.onNewSession(host)}
-            className="wt-touch flex items-center gap-1.5 rounded-lg bg-sky-600 px-3.5 py-2 text-sm font-medium text-white hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-40">
+          </Button>
+          <Button variant="primary" size="lg" disabled={!canConnect} onClick={() => props.onNewSession(host)} className="wt-touch">
             <PlusIcon /> {t('host.newSession')}
-          </button>
+          </Button>
         </div>
 
       </div>
@@ -233,7 +232,7 @@ export default function HostOverview(props: {
               <span className="grid h-4 w-4 shrink-0 place-items-center opacity-80">{x.icon}</span>
               {x.label}
               {x.id === 'sessions' && active.length > 0 && (
-                <span className="ml-auto rounded-full bg-emerald-500/15 px-1.5 text-[10px] font-semibold wt-good">{active.length}</span>
+                <Badge tone="ok" className="ml-auto">{active.length}</Badge>
               )}
             </button>
           ))}
@@ -297,22 +296,22 @@ export default function HostOverview(props: {
 
               {/* stare goală: fără sesiuni active, nu lăsăm un ecran pustiu — un îndemn clar */}
               {active.length === 0 && (
-                <div className="flex flex-col items-center gap-3 rounded-2xl border border-dashed border-ink-700 px-6 py-10 text-center">
-                  <span className="grid h-11 w-11 place-items-center rounded-xl bg-ink-800 text-slate-500 [&>svg]:h-5 [&>svg]:w-5"><TerminalPromptIcon /></span>
-                  <p className="text-sm text-slate-500">{t('host.noActiveSessions')}</p>
-                  <div className="flex items-center gap-2">
-                    <button disabled={!canConnect} onClick={() => props.onNewSession(host)}
-                      className="rounded-lg bg-sky-600 px-3.5 py-2 text-sm font-medium text-white hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-40">
-                      <span className="inline-flex items-center gap-1.5"><PlusIcon /> {t('host.newSession')}</span>
-                    </button>
-                    {closed.length > 0 && (
-                      <button onClick={() => setTab('sessions')}
-                        className="rounded-lg px-3 py-2 text-sm text-slate-400 ring-1 ring-ink-700 hover:bg-ink-800">
-                        {t('host.closed')} · {closed.length}
-                      </button>
-                    )}
-                  </div>
-                </div>
+                <EmptyState framed tone="neutral"
+                  icon={<TerminalPromptIcon />}
+                  title={t('host.noActiveSessions')}
+                  action={(
+                    <div className="flex items-center gap-2">
+                      <Button variant="primary" size="lg" disabled={!canConnect} onClick={() => props.onNewSession(host)}>
+                        <PlusIcon /> {t('host.newSession')}
+                      </Button>
+                      {closed.length > 0 && (
+                        <Button variant="secondary" size="lg" onClick={() => setTab('sessions')}>
+                          {t('host.closed')} · {closed.length}
+                        </Button>
+                      )}
+                    </div>
+                  )}
+                />
               )}
 
               <HostDetail host={host} />
@@ -350,44 +349,40 @@ export default function HostOverview(props: {
                         {selLive ? t('host.previewLive') : t('host.previewHistory')} · {timeAgo(sel.closed_at || sel.created, t)}
                       </div>
                     </div>
-                    <button onClick={() => props.onSplit(sel.id)} title={t('host.splitTitle')} aria-label={t('host.splitTitle')}
-                      className="hidden shrink-0 rounded p-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-200 lg:block"><SplitIcon /></button>
-                    <button onClick={() => props.onPopout(sel.id)} title={t('host.popoutTitle')} aria-label={t('host.popoutTitle')}
-                      className="hidden shrink-0 rounded p-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-200 lg:block"><PopoutIcon /></button>
+                    <IconButton size="md" touch={false} onClick={() => props.onSplit(sel.id)} label={t('host.splitTitle')}
+                      className="hidden lg:grid"><SplitIcon /></IconButton>
+                    <IconButton size="md" touch={false} onClick={() => props.onPopout(sel.id)} label={t('host.popoutTitle')}
+                      className="hidden lg:grid"><PopoutIcon /></IconButton>
                     {!selLive && (
-                      <button onClick={() => setPlaying(sel)} title={t('host.playTitle')} aria-label={t('host.playTitle')}
-                        className="wt-touch grid place-items-center rounded p-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-200">▶</button>
+                      <IconButton size="md" onClick={() => setPlaying(sel)} label={t('host.playTitle')}>▶</IconButton>
                     )}
                     <a href={`/api/sessions/${sel.id}/transcript?format=cast`} download title={t('host.downloadTitle')}
-                      className="wt-touch grid place-items-center rounded p-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-200"><DownloadIcon /></a>
+                      className={iconButtonClass('ghost', 'md')}><DownloadIcon /></a>
                     {!selLive && (
-                      <button onClick={async () => {
+                      <IconButton size="md" variant="danger" onClick={async () => {
                           if (!(await confirm({
                             title: t('host.deleteTitle'), message: t('session.confirmDelete'),
                             danger: true, confirmLabel: t('session.delete'),
                           }))) return
                           setDeletedIds((prev) => new Set(prev).add(sel.id))
                           props.onDeleteSession(sel.id); setSelected(null)
-                        }} title={t('host.deleteTitle')} aria-label={t('host.deleteTitle')}
-                        className="wt-touch grid place-items-center rounded p-1.5 text-slate-500 hover:bg-ink-800 hover:text-rose-400"><TrashIcon /></button>
+                        }} label={t('host.deleteTitle')}><TrashIcon /></IconButton>
                     )}
-                    <button onClick={() => props.onOpenSession(sel.id)}
-                      className="wt-touch ml-1 rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-700">
+                    <Button variant="primary" onClick={() => props.onOpenSession(sel.id)} className="wt-touch ml-1">
                       {selLive ? t('host.openTerminal') : t('host.viewHistory')}
-                    </button>
+                    </Button>
                   </div>
                   <div className="min-h-0 flex-1 bg-[#0b0e14] p-2">
                     <SessionPreview key={sel.id} sid={sel.id} live={selLive} />
                   </div>
                 </>
               ) : (
-                <div className="flex h-full flex-col items-center justify-center gap-3 text-sm text-slate-500">
-                  <p>{t('host.noSessionsYet')}</p>
-                  <button disabled={!canConnect} onClick={() => props.onNewSession(host)}
-                    className="rounded-lg bg-sky-600 px-3.5 py-2 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-40">
-                    <span className="inline-flex items-center gap-1.5"><PlusIcon /> {t('host.newSession')}</span>
-                  </button>
-                </div>
+                <EmptyState className="h-full" title={t('host.noSessionsYet')}
+                  action={(
+                    <Button variant="primary" size="lg" disabled={!canConnect} onClick={() => props.onNewSession(host)}>
+                      <PlusIcon /> {t('host.newSession')}
+                    </Button>
+                  )} />
               )}
             </div>
           </div>
@@ -544,7 +539,7 @@ function Gauge({ pct, size = 60 }: { pct: number; size?: number }) {
 /** Un tile de metrică: etichetă + gauge (ori cifră mare) + sub-text + sparkline opţional. */
 function StatTile(props: { label: string; pct?: number; big?: string; sub?: string; spark?: number[]; sparkLabel?: string }) {
   return (
-    <div className="rounded-2xl border border-ink-700/70 bg-ink-800/40 p-4">
+    <Card>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">{props.label}</div>
@@ -558,7 +553,7 @@ function StatTile(props: { label: string; pct?: number; big?: string; sub?: stri
           <Sparkline fluid values={props.spark} height={28} label={props.sparkLabel ?? props.label} />
         </div>
       )}
-    </div>
+    </Card>
   )
 }
 
@@ -595,7 +590,7 @@ function StatusBand({ host }: { host: Host }) {
   }
   for (const tag of (host.tags || []).slice(0, 5)) chips.push({ label: tag })
   return (
-    <div className="relative overflow-hidden rounded-2xl border border-ink-700/70 bg-ink-800/40 p-5">
+    <div className={`relative overflow-hidden ${cardClass} p-5`}>
       {/* glow discret în culoarea hostului — identitate fără zgomot */}
       <div className="pointer-events-none absolute -right-20 -top-24 h-56 w-56 rounded-full opacity-[0.08] blur-3xl" style={{ background: color }} aria-hidden="true" />
       <div className="relative flex flex-wrap items-center gap-x-6 gap-y-3">
@@ -609,9 +604,9 @@ function StatusBand({ host }: { host: Host }) {
         {chips.length > 0 && (
           <div className="ml-auto flex flex-wrap items-center gap-2">
             {chips.map((c, i) => (
-              <span key={i} title={c.title} className={`rounded-lg px-2.5 py-1 text-xs font-medium ring-1 ${
-                c.tone === 'danger' ? 'bg-rose-500/10 wt-danger ring-rose-500/30'
-                : c.tone === 'warn' ? 'bg-amber-500/10 wt-warn ring-amber-500/30'
+              <span key={i} title={c.title} className={`rounded-md px-2.5 py-1 text-xs font-medium ring-1 ${
+                c.tone === 'danger' ? 'bg-danger/10 text-danger ring-danger/30'
+                : c.tone === 'warn' ? 'bg-warn/10 text-warn ring-warn/30'
                 : 'bg-ink-900/50 text-slate-400 ring-ink-700'}`}>{c.label}</span>
             ))}
           </div>
@@ -654,10 +649,10 @@ function StatTiles({ host }: { host: Host }) {
 }
 
 /** Card de informaţii cu icon-chip colorat + eyebrow. */
-function Card(props: { title: string; icon?: React.ReactNode; accent?: string; className?: string; children: React.ReactNode }) {
+function InfoCard(props: { title: string; icon?: React.ReactNode; accent?: string; className?: string; children: React.ReactNode }) {
   const accent = props.accent ?? '#64748b'
   return (
-    <div className={`rounded-2xl border border-ink-700/70 bg-ink-800/40 p-4 ${props.className ?? ''}`}>
+    <Card className={props.className}>
       <div className="mb-2.5 flex items-center gap-2.5">
         {props.icon && (
           <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg [&>svg]:h-4 [&>svg]:w-4"
@@ -666,7 +661,7 @@ function Card(props: { title: string; icon?: React.ReactNode; accent?: string; c
         <h3 className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">{props.title}</h3>
       </div>
       <dl>{props.children}</dl>
-    </div>
+    </Card>
   )
 }
 
@@ -753,24 +748,24 @@ function HostDetail({ host }: { host: Host }) {
       {/* Connection: doar pe hosturi NON-agent (protocol/auth/via nu-s în bandă). Pe agent,
           protocolul/adresa/backend-ul sunt deja în banda de status → n-are rost un card redundant. */}
       {!isAgent && (
-        <Card title={t('host.secConnection')} icon={<ServerIcon />} accent={hostColor(host)}>
+        <InfoCard title={t('host.secConnection')} icon={<ServerIcon />} accent={hostColor(host)}>
           <Row k={t('host.protocol')} v={protoLabel(host)} />
           <Row k={t('host.authentication')} v={host.auth_method === 'key' ? t('host.sshKey') : host.auth_method === 'password' ? t('host.passwordLabel') : '—'} />
-        </Card>
+        </InfoCard>
       )}
 
-      <Card title={t('host.secSecurity')} icon={<ShieldIcon />} accent="#38bdf8">
+      <InfoCard title={t('host.secSecurity')} icon={<ShieldIcon />} accent="#38bdf8">
         <Row k={t('host.twoFaOnConnect')} help="require2fa" v={host.require_2fa ? t('host.yesPasskey') : t('host.no')} tone={host.require_2fa ? 'good' : undefined} />
         <Row k={t('host.credentials')} help="credentialPolicy" v={credPolicy} action={host.has_credentials && host.credential_policy !== 'ask' ? (
           <button onClick={forgetCreds} disabled={forgetting}
-            className="wt-touch rounded-md border border-ink-700 px-2 py-0.5 text-xs text-slate-300 hover:border-rose-500/60 hover:text-rose-300 disabled:opacity-50">
+            className="wt-touch rounded-md border border-ink-700 px-2 py-0.5 text-xs text-slate-300 hover:border-danger/60 hover:text-danger disabled:opacity-50">
             {t('host.forgetCreds')}
           </button>
         ) : undefined} />
-      </Card>
+      </InfoCard>
 
       {isAgent && (
-        <Card title={t('host.agent')} icon={<RefreshIcon />} accent="#a78bfa">
+        <InfoCard title={t('host.agent')} icon={<RefreshIcon />} accent="#a78bfa">
           <Row k={t('host.version')} v={host.agent_version != null ? `v${host.agent_version}` : t('host.notInstalled')}
             badge={host.update_pending ? t('host.updateAvailable') : undefined} />
           {host.last_heartbeat != null && <Row k={t('host.lastActivity')} v={timeAgo(host.last_heartbeat, t)} />}
@@ -779,15 +774,15 @@ function HostDetail({ host }: { host: Host }) {
             action={canAutostart && sup ? (
               <button onClick={() => toggleAutostart(!sup.boot)} disabled={autostartBusy}
                 className={`wt-touch rounded-md border border-ink-700 px-2 py-0.5 text-xs text-slate-300 disabled:opacity-50 ${
-                  sup.boot ? 'hover:border-rose-500/60 hover:text-rose-300' : 'hover:border-emerald-500/60 hover:text-emerald-300'}`}>
+                  sup.boot ? 'hover:border-danger/60 hover:text-danger' : 'hover:border-ok/60 hover:text-ok'}`}>
                 {sup.boot ? t('host.autostartDisable') : t('host.autostartEnable')}
               </button>
             ) : undefined} />
-        </Card>
+        </InfoCard>
       )}
 
       {hostApps.length > 0 && (
-        <Card title={t('dashboard.apps')} icon={<LinkIcon />} accent="#34d399" className="lg:col-span-2">
+        <InfoCard title={t('dashboard.apps')} icon={<LinkIcon />} accent="#34d399" className="lg:col-span-2">
           <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
             {hostApps.map((a) => {
               const color = HOST_APP_COLOR[a.app_type] || '#34d399'
@@ -807,13 +802,13 @@ function HostDetail({ host }: { host: Host }) {
               )
             })}
           </div>
-        </Card>
+        </InfoCard>
       )}
 
       {host.note && (
-        <Card title={t('host.secNote')} icon={<NoteIcon />} className="lg:col-span-2">
+        <InfoCard title={t('host.secNote')} icon={<NoteIcon />} className="lg:col-span-2">
           <p className="text-sm text-slate-400">{host.note}</p>
-        </Card>
+        </InfoCard>
       )}
     </div>
   )
@@ -829,7 +824,7 @@ function Row(props: { k: string; v: string; mono?: boolean; tone?: 'good'; badge
         <span className="min-w-0 truncate">
           {props.v}
           {props.badge && (
-            <span className="wt-warn ml-2 rounded bg-amber-500/15 px-1.5 py-0.5 align-middle text-[10px] font-semibold uppercase tracking-wide">{props.badge}</span>
+            <Badge tone="warn" className="ml-2 py-0.5 align-middle uppercase tracking-wide">{props.badge}</Badge>
           )}
         </span>
         {props.action && <span className="shrink-0">{props.action}</span>}

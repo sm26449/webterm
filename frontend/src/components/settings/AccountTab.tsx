@@ -3,6 +3,7 @@ import { api, ApiError, errText, withSecondFactor as withSecondFactorT } from '.
 import { askSecret } from '../../lib/secretPrompt'
 import { useI18n } from '../../lib/i18n'
 import { field, heading } from './ui'
+import { Button } from '../ui'
 
 // Cont: schimbarea emailului/parolei (cu al doilea factor pe dispozitiv nou — email-code) şi
 // conturile (toate cu drepturi depline; nu există roluri). Extras din SettingsModal.
@@ -116,10 +117,9 @@ export default function AccountTab(props: { email?: string | null; onAccountChan
           </div>
         )}
         <div className="flex items-center gap-3">
-          <button disabled={busy || !curPw}
-            className="rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-50">
+          <Button variant="primary" disabled={busy || !curPw}>
             {t('settings.saveAccount')}
-          </button>
+          </Button>
           {accountMsg && <span className="text-sm wt-good">{accountMsg}</span>}
           {accountErr && <span className="text-sm wt-danger">{accountErr}</span>}
         </div>
@@ -156,10 +156,9 @@ export default function AccountTab(props: { email?: string | null; onAccountChan
           onChange={(e) => setNewUser({ ...newUser, current_password: e.target.value })}
           placeholder={t('settings.currentPasswordConfirm')} aria-label={t('settings.currentPassword')} className={field} />
         <div className="flex items-center gap-3">
-          <button type="submit" disabled={busy || !newUser.current_password}
-            className="rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-50">
+          <Button variant="primary" type="submit" disabled={busy || !newUser.current_password}>
             {t('settings.users.add')}
-          </button>
+          </Button>
           {usersMsg && <span className="text-sm wt-good">{usersMsg}</span>}
           {usersErr && <span className="text-sm wt-danger">{usersErr}</span>}
         </div>

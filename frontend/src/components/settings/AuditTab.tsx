@@ -4,6 +4,7 @@ import { useI18n } from '../../lib/i18n'
 import { fmtTs } from '../../lib/tz'
 import { field, heading } from './ui'
 import LoadFailed from '../LoadFailed'
+import { Button } from '../ui'
 
 // Jurnalul de audit (cine / ce / când / de la ce IP, pe fiecare acţiune care schimbă ceva).
 // Extras din SettingsModal ca tab de sine stătător: îşi ţine propria stare şi se încarcă la
@@ -78,9 +79,7 @@ export default function AuditTab() {
             onChange={(e) => { setAuditFailed(e.target.checked) }} />
           {t('settings.audit.failedOnly')}
         </label>
-        <button onClick={() => loadAudit(true)} disabled={auditBusy}
-          className="rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-50"
-        >{t('settings.audit.filter')}</button>
+        <Button variant="primary" onClick={() => loadAudit(true)} disabled={auditBusy}>{t('settings.audit.filter')}</Button>
       </div>
 
       <ul className="mt-3 flex flex-col gap-1">

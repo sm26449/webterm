@@ -4,6 +4,7 @@ import { useI18n } from '../lib/i18n'
 import { SHEET_CLS } from '../lib/sheet'
 import { useDrawer } from '../lib/useDrawer'
 import SheetBar from './SheetBar'
+import { Button } from './ui'
 
 /** Lista comenzilor din sesiune (blocks): sari la oricare, vezi care a eșuat,
     copiază exact output-ul ei. Apare doar când shell integration e activă. */
@@ -51,12 +52,10 @@ export default function CommandsPanel(props: {
           <p className="text-xs leading-relaxed text-slate-500">
             {t('cmds.emptyHint')}
           </p>
-          <button
-            onClick={props.onSetup}
-            className="rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-700"
-          >
+          <Button variant="primary" size="sm"
+            onClick={props.onSetup}>
             {t('cmds.enableShell')}
-          </button>
+          </Button>
         </div>
       ) : (
         <div className="min-h-0 flex-1 overflow-y-auto">

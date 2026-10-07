@@ -25,6 +25,7 @@ import ServicesPanel from './ServicesPanel'
 const AiToolsPanel = lazy(() => import('./AiToolsPanel'))
 import ToolboxPanel from './ToolboxPanel'
 import { ClockIcon, CopyIcon, DockerIcon, DownloadIcon, ExternalLinkIcon, FileIcon, FilesIcon, FolderIcon, ForwardIcon, GitBranchIcon, MoreIcon, NoteIcon, PasteIcon, PencilIcon, PopoutIcon, SearchIcon, ServicesIcon, ShareIcon, StopIcon, ToolboxIcon, TrashIcon } from './Icons'
+import { Button, IconButton } from './ui'
 import MobileKeybar from './MobileKeybar'
 import SnippetsMenu from './SnippetsMenu'
 import TranscriptPlayer from './TranscriptPlayer'
@@ -1755,9 +1756,9 @@ export default function SessionView(props: {
       {/* min-w-0 + gap mai mic pe mobil: fără ele, badge-ul hostului și butoanele
           împing toolbarul în afara ecranului (iPhone SE / Galaxy S9) */}
       <header className="flex min-w-0 items-center gap-1 border-b border-ink-800 bg-ink-900 px-2 py-2 md:gap-2 md:px-3">
-        <button onClick={props.onMenu} aria-label={t('session.openHostList')} className={`wt-touch shrink-0 rounded-md px-2 py-1 text-slate-400 hover:bg-ink-800 ${props.sidebarCollapsed ? '' : 'md:hidden'}`}>
+        <IconButton size="md" onClick={props.onMenu} label={t('session.openHostList')} className={props.sidebarCollapsed ? '' : 'md:hidden'}>
           ☰
-        </button>
+        </IconButton>
         {props.host && (
           <span className="flex min-w-0 shrink items-center gap-1.5 rounded-md px-1.5 py-1"
             style={{ background: `${hostAccent}1f` }}
@@ -1835,8 +1836,8 @@ export default function SessionView(props: {
                           ? <span className="shrink-0 text-[10px] text-slate-500">owner</span>
                           : <span className={`shrink-0 text-[10px] ${c.writable ? 'wt-warn' : 'text-slate-500'}`}>{c.writable ? t('session.canWrite') : t('session.canView')}</span>}
                         {!c.owner && (
-                          <button onClick={() => { void kick(c) }} title={t('session.removeFromSession')} aria-label={t('session.removeFromSession')}
-                            className="wt-danger grid h-6 w-6 shrink-0 place-items-center rounded hover:bg-ink-700">✕</button>
+                          <IconButton touch={false} onClick={() => { void kick(c) }} label={t('session.removeFromSession')}
+                            className="wt-danger">✕</IconButton>
                         )}
                         </div>
                         {/* De unde e ataşat. Fără asta „mai e cineva conectat" nu-ţi spunea
@@ -2077,9 +2078,9 @@ export default function SessionView(props: {
               <option value={1440}>{t('session.expiry24h')}</option>
             </select>
           </label>
-          <button onClick={createShareLink} className="rounded bg-sky-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-sky-700">
+          <Button variant="primary" size="sm" onClick={createShareLink}>
             {t('session.generateLink')}
-          </button>
+          </Button>
           <button onClick={() => setShareOpen(false)} className="rounded px-2 py-1 text-xs text-slate-400 hover:bg-ink-800">
             {t('session.cancel')}
           </button>
@@ -2102,13 +2103,11 @@ export default function SessionView(props: {
           ) : (
             <span className="min-w-0 flex-1 text-xs text-slate-400">{t('session.shareActiveNoUrl')}</span>
           )}
-          {shareUrl && <button
+          {shareUrl && <Button variant="primary" size="sm"
             onClick={() => { copyText(shareUrl).then((ok) => { if (!ok) return
-              setCopied(true); setTimeout(() => setCopied(false), 1200) }) }}
-            className="shrink-0 rounded bg-sky-600 px-2 py-1 text-xs font-medium text-white hover:bg-sky-700"
-          >
+              setCopied(true); setTimeout(() => setCopied(false), 1200) }) }} className="shrink-0">
             {copied ? '✓' : t('session.copy')}
-          </button>}
+          </Button>}
           <button onClick={revokeShare} className="wt-danger shrink-0 rounded px-2 py-1 text-xs hover:bg-ink-800">
             {t('session.revoke')}
           </button>
@@ -2156,12 +2155,10 @@ export default function SessionView(props: {
             <>
               <span className="font-medium text-rose-200">{t('session.authExpired')}</span>
               <span className="text-slate-300">{t('session.authExpiredBody')}</span>
-              <button
-                onClick={() => window.dispatchEvent(new Event('wt-unauth'))}
-                className="ml-auto rounded bg-sky-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-sky-700"
-              >
+              <Button variant="primary" size="sm"
+                onClick={() => window.dispatchEvent(new Event('wt-unauth'))} className="ml-auto">
                 {t('session.signInAgain')}
-              </button>
+              </Button>
             </>
           ) : (
             <span className="text-rose-200">{t('session.wsForbidden')}</span>
@@ -2182,14 +2179,12 @@ export default function SessionView(props: {
             </span>
           )}
           {session.kind === 'telnet' && (
-            <button
+            <Button variant="primary" size="sm"
               onClick={reconnectTelnet}
               disabled={reconnecting}
-              title={t('session.reconnectTelnetTooltip')}
-              className="ml-auto rounded bg-sky-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-sky-700 disabled:opacity-50"
-            >
+              title={t('session.reconnectTelnetTooltip')} className="ml-auto">
               {reconnecting ? t('session.reconnectingBtn') : `↻ ${t('session.reconnect')}`}
-            </button>
+            </Button>
           )}
           <button
             onClick={() => setShowPlayer(true)}
@@ -2367,10 +2362,8 @@ export default function SessionView(props: {
                   onClick={() => { send('\x15'); setCmdConfirm(null); termRef.current?.focus() }}
                   className="rounded-lg bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700"
                 >{t('session.cancelClear')}</button>
-                <button
-                  onClick={() => { send('\r'); setCmdConfirm(null); termRef.current?.focus() }}
-                  className="rounded-lg bg-rose-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-rose-700"
-                >{t('session.run')}</button>
+                <Button variant="danger"
+                  onClick={() => { send('\r'); setCmdConfirm(null); termRef.current?.focus() }}>{t('session.run')}</Button>
               </div>
             </div>
           </div>
@@ -2388,10 +2381,9 @@ export default function SessionView(props: {
                 {t('session.lockedDesc')}
               </div>
               {lockErr && <div className="text-[12px] wt-danger">{lockErr}</div>}
-              <button ref={unlockBtnRef} onClick={reauth} disabled={unlocking}
-                className="mt-1 rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-50">
+              <Button variant="primary" size="lg" ref={unlockBtnRef} onClick={reauth} disabled={unlocking} className="mt-1">
                 {unlocking ? t('session.verifying') : `🔑 ${t('session.unlockWithPasskey')}`}
-              </button>
+              </Button>
             </div>
           </div>
         )}
@@ -2656,18 +2648,16 @@ function ToolButton(props: {
   onClick: () => void
   children: React.ReactNode
 }) {
+  // IconButton-ul design system-ului (label = aria-label + title); starea „activ" = fundal + accent
   return (
-    <button
-      title={props.title}
-      aria-label={props.title}
+    <IconButton
+      label={props.title}
       onMouseDown={(e) => e.preventDefault()} // păstrează focusul (și selecția) în terminal
       onClick={props.onClick}
-      className={`wt-touch grid place-items-center rounded-md px-1.5 py-1 text-sm hover:bg-ink-700 hover:text-slate-200 ${
-        props.active ? 'wt-accent bg-ink-700' : 'text-slate-400'
-      }`}
+      className={`text-sm ${props.active ? 'wt-accent bg-ink-700' : ''}`}
     >
       {props.children}
-    </button>
+    </IconButton>
   )
 }
 

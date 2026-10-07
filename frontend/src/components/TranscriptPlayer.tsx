@@ -6,6 +6,7 @@ import { useI18n } from '../lib/i18n'
 import { termTheme } from '../lib/termtheme'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { errText } from '../lib/api'
+import { Button } from './ui'
 
 type Cmd = { text: string; exitCode?: number; time: number }
 
@@ -371,14 +372,12 @@ export default function TranscriptPlayer(props: {
           <div className="border-t border-ink-800 px-4 py-3 text-sm wt-danger">{err}</div>
         ) : (
           <div className="flex items-center gap-3 border-t border-ink-800 px-4 py-2.5">
-            <button
+            <Button variant="primary"
               onClick={() => setPlaying((v) => !v)}
               disabled={loading || dur === 0}
-              aria-label={playing ? t('transcript.pause') : t('transcript.play')}
-              className="shrink-0 rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-50"
-            >
+              aria-label={playing ? t('transcript.pause') : t('transcript.play')} className="shrink-0">
               {playing ? '❚❚' : '▶'}
-            </button>
+            </Button>
             <span className="shrink-0 font-mono text-xs tabular-nums text-slate-400">
               {fmt(pos)} / {fmt(dur)}
             </span>

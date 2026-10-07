@@ -11,6 +11,7 @@ import { downloadBlob, field, heading } from './ui'
 import { askSecret } from '../../lib/secretPrompt'
 import HelpTip from '../HelpTip'
 import LoadFailed from '../LoadFailed'
+import { Button } from '../ui'
 
 interface Passkey {
   id: number
@@ -510,10 +511,9 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
                 <code className="px-1">/data</code> {t('settings.sign.storageHintD')} <span className="text-slate-300">{t('settings.sign.storageWholeFleet')}</span>.
               </p>
               <div>
-                <button disabled={signBusy} onClick={genSigningKey}
-                  className="rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-50">
+                <Button variant="primary" disabled={signBusy} onClick={genSigningKey}>
                   {signBusy ? t('settings.generating') : t('settings.sign.genFleetKey')}
-                </button>
+                </Button>
               </div>
             </>
           ) : (
@@ -542,10 +542,9 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
                 placeholder={t('settings.sign.storePassPlaceholder')} aria-label={t('settings.sign.storePass')}
                 autoComplete="new-password" className={field} />
               <div>
-                <button disabled={signBusy || !signPem} onClick={importSigningKey}
-                  className="rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-50">
+                <Button variant="primary" disabled={signBusy || !signPem} onClick={importSigningKey}>
                   {signBusy ? t('settings.importing') : t('settings.sign.importKey')}
-                </button>
+                </Button>
               </div>
             </>
           )}
@@ -571,10 +570,9 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
             <div className="flex gap-2">
               <input type="password" value={signUnlockPass} onChange={(e) => setSignUnlockPass(e.target.value)}
                 placeholder={t('settings.sign.keyPassword')} aria-label={t('settings.sign.keyPassword')} autoComplete="off" className={field} />
-              <button disabled={signBusy} onClick={unlockSigning}
-                className="shrink-0 rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-50">
+              <Button variant="primary" disabled={signBusy} onClick={unlockSigning} className="shrink-0">
                 {t('settings.sign.unlock')}
-              </button>
+              </Button>
             </div>
           )}
           <div className="flex flex-wrap gap-2">
@@ -624,13 +622,11 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
           </div>
         )}
       </div>
-      <button
+      <Button variant="primary"
         onClick={addPasskey}
-        disabled={busy || !props.webauthnAvailable || !window.PublicKeyCredential}
-        className="mt-3 rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-50"
-      >
+        disabled={busy || !props.webauthnAvailable || !window.PublicKeyCredential} className="mt-3">
         {t('settings.addPasskey')}
-      </button>
+      </Button>
       {securityErr && <div className="mt-2 text-sm wt-danger">{securityErr}</div>}
       {/* ── 2FA (TOTP) ── */}
       <h3 className={heading}>{t('settings.totp.title')}</h3>
@@ -686,13 +682,11 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
             className={field}
           />
           <div className="flex gap-2">
-            <button
+            <Button variant="primary"
               disabled={busy || !actionPw}
-              onClick={runPendingAction}
-              className="rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-50"
-            >
+              onClick={runPendingAction}>
               {t('settings.confirm')}
-            </button>
+            </Button>
             <button
               onClick={() => { setPendingAction(null); setActionPw('') }}
               className="rounded-lg px-3 py-1.5 text-sm text-slate-400 hover:bg-ink-800"
@@ -704,12 +698,10 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
       )}
 
       {!totpEnabled && !enroll && !recoveryCodes && (
-        <button
-          onClick={startEnroll}
-          className="mt-2 rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-700"
-        >
+        <Button variant="primary"
+          onClick={startEnroll} className="mt-2">
           {t('settings.totp.enable')}
-        </button>
+        </Button>
       )}
 
       {enroll && (
@@ -740,13 +732,11 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
             className={field}
           />
           <div className="flex gap-2">
-            <button
+            <Button variant="primary"
               disabled={busy || !activateCode.trim()}
-              onClick={confirmEnroll}
-              className="rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-50"
-            >
+              onClick={confirmEnroll}>
               {t('settings.totp.confirmActivate')}
-            </button>
+            </Button>
             <button
               onClick={() => { setEnroll(null); setActivateCode('') }}
               className="rounded-lg px-3 py-1.5 text-sm text-slate-400 hover:bg-ink-800"
@@ -857,10 +847,9 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
           onChange={(e) => setNewTok({ ...newTok, current_password: e.target.value })}
           placeholder={t('settings.currentPasswordConfirm')} aria-label={t('settings.currentPassword')} className={field} />
         <div className="flex items-center gap-3">
-          <button type="submit" disabled={busy || !newTok.current_password || !newTok.name}
-            className="rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-50">
+          <Button variant="primary" type="submit" disabled={busy || !newTok.current_password || !newTok.name}>
             {t('settings.tokens.create')}
-          </button>
+          </Button>
           {tokErr && <span className="text-sm wt-danger">{tokErr}</span>}
         </div>
       </form>
@@ -970,10 +959,8 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
         </div>
       )}
       <div className="mt-3 flex items-center gap-3">
-        <button
-          onClick={saveGuard}
-          className="rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-500"
-        >{t('settings.saveGuardrail')}</button>
+        <Button variant="primary"
+          onClick={saveGuard}>{t('settings.saveGuardrail')}</Button>
         {guardMsg && <span className="text-xs text-slate-400">{guardMsg}</span>}
       </div>
     </div>

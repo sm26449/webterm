@@ -3,6 +3,7 @@ import { Host, Session } from '../lib/api'
 import { tStatic, useI18n } from '../lib/i18n'
 import { fmtTs, getTimezone, timeInZone, uiLocale } from '../lib/tz'
 import { copyText } from '../lib/clipboard'
+import { Button } from './ui'
 
 // abrevierea de zile vine din catalog: era fixa, deci aparea si in interfata engleza
 const DAY = () => tStatic('time.d')
@@ -158,7 +159,7 @@ export default function StatusBar(props: { session: Session; host?: Host; rtt?: 
             <code className="wt-good flex-1 overflow-x-auto whitespace-nowrap rounded-md bg-black/40 px-2 py-1.5 font-mono text-[11px]">
               {attachOneLiner}
             </code>
-            <button
+            <Button variant="primary" size="sm"
               onClick={async () => {
                 try {
                   if (await copyText(attachOneLiner)) {
@@ -168,11 +169,9 @@ export default function StatusBar(props: { session: Session; host?: Host; rtt?: 
                 } catch {
                   /* origine http / permisiune refuzată: selectează manual */
                 }
-              }}
-              className="shrink-0 rounded-md bg-sky-600 px-2 py-1 text-xs font-medium text-white hover:bg-sky-700"
-            >
+              }} className="shrink-0">
               {copied ? '✓' : t('statusbar.copy')}
-            </button>
+            </Button>
           </div>
           <p className="mt-1.5 text-slate-600">
             {t('statusbar.detachHintBefore')}

@@ -4,7 +4,7 @@ import { copyText } from '../lib/clipboard'
 import { useI18n } from '../lib/i18n'
 import InstallCommand, { AGENT_PYTHON_MIN } from './InstallCommand'
 import { useFocusTrap } from '../lib/useFocusTrap'
-import { btn } from './settings/ui'
+import { Button } from './ui'
 import { fmtTs } from '../lib/tz'
 import CoachTip from './CoachTip'
 import { TIP_ADDHOST_AGENT, TIP_ADDHOST_SSH } from '../lib/coachtips'
@@ -390,9 +390,9 @@ export default function AddHostModal(props: {
                 <InstallCommand command={grpCmd} />
                 <p className="text-xs text-slate-500">{t('addhost.groupManageHint')}</p>
                 <div className="text-right">
-                  <button type="button" onClick={props.onClose} className={`${btn.primary} px-4 py-2`}>
+                  <Button variant="primary" size="lg" type="button" onClick={props.onClose}>
                     {t('addhost.done')}
-                  </button>
+                  </Button>
                 </div>
               </div>
             ) : (
@@ -437,12 +437,12 @@ export default function AddHostModal(props: {
                   placeholder={t('settings.currentPasswordConfirm')} aria-label={t('settings.currentPassword')} className={field} />
                 <div id="addhost-error" role="alert" className={error ? 'text-sm wt-danger' : 'sr-only'}>{error}</div>
                 <div className="flex justify-end gap-2">
-                  <button type="button" onClick={props.onClose} className={`${btn.ghost} px-4 py-2`}>
+                  <Button variant="ghost" size="lg" type="button" onClick={props.onClose}>
                     {t('addhost.cancel')}
-                  </button>
-                  <button disabled={busy || !grp.name || !grp.current_password} className={`${btn.primary} px-4 py-2`}>
+                  </Button>
+                  <Button variant="primary" size="lg" disabled={busy || !grp.name || !grp.current_password}>
                     {t('settings.enrollGroups.create')}
-                  </button>
+                  </Button>
                 </div>
               </form>
             )}
@@ -784,10 +784,9 @@ export default function AddHostModal(props: {
               {connType !== 'agent' && (
                 <span className="mr-auto flex items-center gap-1">
                   {testing ? (
-                    <button ref={cancelTestRef} type="button" onClick={() => testAbort.current?.ac.abort()}
-                      className={`${btn.ghost} px-3 py-2`}>
+                    <Button variant="ghost" size="lg" ref={cancelTestRef} type="button" onClick={() => testAbort.current?.ac.abort()}>
                       {t('hosttest.cancel')}
-                    </button>
+                    </Button>
                   ) : null}
                   <button ref={testBtnRef} type="button" onClick={runTest} data-testid="hosttest-run"
                     disabled={testing || busy || !hostname.trim() || (isSshLike && !username.trim()) || (isJump && !viaHost)}
@@ -798,9 +797,9 @@ export default function AddHostModal(props: {
                   <HelpTip id="hostTest" />
                 </span>
               )}
-              <button type="button" onClick={props.onClose} className={`${btn.ghost} px-4 py-2`}>
+              <Button variant="ghost" size="lg" type="button" onClick={props.onClose}>
                 {t('addhost.cancel')}
-              </button>
+              </Button>
               {/* preset jump: pe lângă „Salvează" (ţintă cuibărită sub agent), oferă „Conectează o
                   dată" — deschide sesiunea pe o ţintă EFEMERĂ, fără s-o lase în sidebar. */}
               {pj && props.onConnect && (
@@ -810,13 +809,13 @@ export default function AddHostModal(props: {
                   {t('addhost.connectOnce')}
                 </button>
               )}
-              <button disabled={busy} className={`${btn.primary} px-4 py-2`}>
+              <Button variant="primary" size="lg" disabled={busy}>
                 {busy ? (edit ? t('addhost.saving') : t('addhost.adding'))
                   : verified ? t('addhost.saveVerified')
                   : edit ? t('addhost.save')
                   : connType === 'agent' ? t('addhost.continue')
                   : pj ? t('addhost.saveTarget') : t('addhost.add')}
-              </button>
+              </Button>
             </div>
           </form>
         ) : created.connection_type !== 'agent' ? (
@@ -827,9 +826,9 @@ export default function AddHostModal(props: {
               {created.connection_type === 'ssh' ? t('addhost.sshInstallLater') : ''}
             </p>
             <div className="mt-4 flex justify-end">
-              <button onClick={props.onClose} className={`${btn.primary} px-4 py-2`}>
+              <Button variant="primary" size="lg" onClick={props.onClose}>
                 {t('addhost.done')}
-              </button>
+              </Button>
             </div>
           </div>
         ) : (
@@ -854,9 +853,9 @@ export default function AddHostModal(props: {
                   </span>
                 )}
               </div>
-              <button onClick={props.onClose} className={`${online ? btn.primary : btn.ghost} px-4 py-2`}>
+              <Button variant={online ? 'primary' : 'ghost'} size="lg" onClick={props.onClose}>
                 {online ? t('addhost.done') : t('addhost.closeInstallLater')}
-              </button>
+              </Button>
             </div>
             {stuck && !online && (
               <section className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs" aria-labelledby="addhost-stuck-title">

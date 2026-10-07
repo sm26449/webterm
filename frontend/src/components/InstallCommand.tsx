@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useI18n } from '../lib/i18n'
 import { copyText } from '../lib/clipboard'
+import { Button } from './ui'
 
 /** Comanda de instalare a agentului, în două variante.
 
@@ -56,7 +57,7 @@ export default function InstallCommand(props: { command: string; commandDedicate
         <code className="flex-1 select-all overflow-x-auto whitespace-nowrap rounded-lg bg-[#0b0e14] p-3 text-xs text-emerald-300">
           {cmd}
         </code>
-        <button
+        <Button variant="primary"
           onClick={async () => {
             // ✓ apare doar la copiere reală. `copyText` cade pe execCommand când
             // originea nu e securizată (deploy pe IP), deci de obicei reuşeşte.
@@ -66,11 +67,9 @@ export default function InstallCommand(props: { command: string; commandDedicate
             } else {
               setErr(t('addhost.clipboardError'))
             }
-          }}
-          className="shrink-0 rounded-lg bg-sky-600 px-3 text-sm font-medium text-white hover:bg-sky-700"
-        >
+          }} className="shrink-0">
           {copied ? '✓' : t('addhost.copy')}
-        </button>
+        </Button>
         <span role="status" className="sr-only">{copied ? t('settings.update.copied') : ''}</span>
       </div>
       <p className="mt-2 text-xs text-slate-500">

@@ -9,6 +9,7 @@ import { useTheme } from '../lib/theme'
 import { fmtBytes } from '../lib/uploads'
 import { notifyToast } from '../lib/notify'
 import ConfirmModal from './ConfirmModal'
+import { Button } from './ui'
 
 interface Preview {
   path: string
@@ -219,9 +220,9 @@ export default function FileEditor(props: {
           )}
           <div className="ml-auto flex shrink-0 gap-2">
             {pv && !pv.binary && pv.editable && (
-              <button onClick={() => save(false)} disabled={saving || !dirty} className="rounded-lg bg-sky-600 px-3 py-1 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-50">
+              <Button variant="primary" size="sm" onClick={() => save(false)} disabled={saving || !dirty}>
                 {saving ? t('files.saving') : t('files.save')}
-              </button>
+              </Button>
             )}
             <button onClick={requestClose} className="rounded-lg px-3 py-1 text-sm text-slate-400 hover:bg-ink-800">{t('files.close')}</button>
           </div>

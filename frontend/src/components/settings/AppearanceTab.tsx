@@ -7,7 +7,8 @@ import {
   allSchemes, clearCustomTheme, COLOR_KEYS, currentTermScheme,
   customTheme, parseThemeFile, saveCustomTheme, setTermScheme, termTheme,
 } from '../../lib/termtheme'
-import { btn, heading } from './ui'
+import { heading } from './ui'
+import { Button } from '../ui'
 
 // Aspect: limbă, temă (light/dark/auto), schema de culori a terminalului (+ editor live şi import
 // iTerm2/VS Code) şi watermark-ul de identitate. Extras din SettingsModal ca tab de sine stătător.
@@ -210,9 +211,9 @@ export default function AppearanceTab(props: { onAccountChanged: () => void }) {
         </div>
       )}
       <div className="mt-3 flex items-center gap-3">
-        <button onClick={saveWatermark} className={btn.primary}>
+        <Button variant="primary" onClick={saveWatermark}>
           {t('settings.saveWatermark')}
-        </button>
+        </Button>
         {/* două regiuni, nu una cu rol variabil: schimbarea rolului pe acelaşi nod nu e anunţată */}
         <span role="status" className={wmMsg && !wmErr ? 'text-xs wt-good' : 'sr-only'}>{wmErr ? '' : wmMsg}</span>
         <span role="alert" className={wmMsg && wmErr ? 'text-xs wt-danger' : 'sr-only'}>{wmErr ? wmMsg : ''}</span>

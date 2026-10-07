@@ -7,6 +7,7 @@ import {
   markWalkthroughDone,
   shouldMarkDoneOnClose,
 } from '../lib/walkthrough'
+import { Button } from './ui'
 
 /* Walkthrough de primă rulare: un overlay clasic multi-pas (Next / Back / „Skip for now" /
    „Don't show again") cu titlu, descriere şi o ilustraţie SVG inline pe pas. Se deschide o
@@ -270,14 +271,12 @@ export default function Walkthrough(props: { auto: boolean; onClose: () => void 
             >
               {t('walkthrough.back')}
             </button>
-            <button
+            <Button variant="primary"
               ref={nextRef}
               type="button"
-              onClick={() => (isLast ? close('finish') : go(step + 1))}
-              className="wt-touch rounded-lg bg-sky-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-sky-700"
-            >
+              onClick={() => (isLast ? close('finish') : go(step + 1))} className="wt-touch">
               {isLast ? t('walkthrough.getStarted') : t('walkthrough.next')}
-            </button>
+            </Button>
           </div>
         </div>
       </div>

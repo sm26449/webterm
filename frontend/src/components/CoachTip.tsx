@@ -2,6 +2,7 @@ import { ReactNode, useEffect, useState } from 'react'
 import { useI18n } from '../lib/i18n'
 import { CloseIcon } from './Icons'
 import { dismissTip, isTipDismissed } from '../lib/coachtips'
+import { Button } from './ui'
 
 /* Sfat contextual: un callout MIC, NON-MODAL, ancorat lângă un element relevant, arătat o
    singură dată (vezi lib/coachtips.ts). Completează walkthrough-ul de primă rulare — acela
@@ -79,13 +80,11 @@ export default function CoachTip(props: {
           <p className="text-sm font-semibold leading-tight text-slate-100">{props.title}</p>
           <p className="mt-1 text-xs leading-relaxed text-slate-300">{props.body}</p>
           <div className="mt-2.5 flex justify-end">
-            <button
+            <Button variant="primary" size="sm"
               type="button"
-              onClick={close}
-              className="wt-touch rounded-lg bg-sky-600 px-3 py-1 text-xs font-medium text-white hover:bg-sky-700"
-            >
+              onClick={close} className="wt-touch">
               {t('tips.gotIt')}
-            </button>
+            </Button>
           </div>
         </div>
         {/* ✕: a doua cale de închidere, tastabilă. aria-label prin t() (nu literal: testul i18n

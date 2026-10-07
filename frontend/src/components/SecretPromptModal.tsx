@@ -2,6 +2,7 @@ import { FormEvent, useRef, useState } from 'react'
 import { useI18n } from '../lib/i18n'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { SecretAsk } from '../lib/secretPrompt'
+import { Button } from './ui'
 
 // Fratele lui ConfirmModal, dar cu un input (mascat pentru parole): înlocuieşte
 // window.prompt() pe fluxurile de re-autentificare — acela arăta parola în clar.
@@ -77,12 +78,10 @@ export default function SecretPromptModal(props: {
             >
               {t('common.cancel')}
             </button>
-            <button
-              type="submit"
-              className="rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-700"
-            >
+            <Button variant="primary"
+              type="submit">
               {t('common.confirm')}
-            </button>
+            </Button>
           </div>
         </form>
       </div>

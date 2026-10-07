@@ -8,6 +8,7 @@ import Sparkline from './Sparkline'
 import SecurityCard, { SecurityTarget } from './SecurityCard'
 import SharesModal from './SharesModal'
 import { fmt } from '../lib/shortcuts'
+import { Badge, Button, EmptyState, eyebrow } from './ui'
 
 // culoare + glif per tip de app (dalele din strip + butoanele de pe host)
 const APP_COLOR: Record<string, string> = {
@@ -65,16 +66,16 @@ export default function Dashboard(props: {
 
   if (hosts.length === 0) {
     return (
-      <div className="wt-canvas flex h-full flex-col items-center justify-center gap-4 p-8 text-center">
-        <div className="wt-accent grid h-14 w-14 place-items-center rounded-2xl bg-sky-500/15"><ServerIcon /></div>
-        <div>
-          <h1 className="text-lg font-semibold text-slate-100">{t('dashboard.noHostsYet')}</h1>
-          <p className="mt-1 max-w-sm text-sm text-slate-500">{t('dashboard.addFirstHost')}</p>
-        </div>
-        <button onClick={props.onAddHost} className="flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-700">
-          <PlusIcon /> {t('dashboard.addHost')}
-        </button>
-      </div>
+      <EmptyState size="page" titleAs="h1" className="wt-canvas h-full"
+        icon={<ServerIcon />}
+        title={t('dashboard.noHostsYet')}
+        body={t('dashboard.addFirstHost')}
+        action={(
+          <Button variant="primary" size="lg" onClick={props.onAddHost} className="gap-2">
+            <PlusIcon /> {t('dashboard.addHost')}
+          </Button>
+        )}
+      />
     )
   }
 
@@ -82,12 +83,9 @@ export default function Dashboard(props: {
     // `wt-canvas`: dashboard-ul urmează tema aleasă (index.css) — e „acasă", nu terminal
     <div data-testid="dashboard" className="wt-canvas h-full overflow-y-auto">
       <div className="mx-auto max-w-7xl px-4 py-6 sm:px-8 sm:py-8">
-        <button
-          onClick={props.onOpenSidebar}
-          className="wt-touch mb-4 rounded-lg border border-ink-600 px-4 py-2 text-sm text-slate-300 hover:bg-ink-800 md:hidden"
-        >
+        <Button variant="secondary" size="lg" onClick={props.onOpenSidebar} className="wt-touch mb-4 md:hidden">
           ☰ {t('dashboard.openHostList')}
-        </button>
+        </Button>
         {/* antet + sumar flotă + comenzi */}
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
@@ -97,12 +95,9 @@ export default function Dashboard(props: {
               {' · '}{t('dashboard.activeSessionCount', { count: active.length })}
             </p>
           </div>
-          <button
-            onClick={props.onOpenPalette}
-            className="wt-touch flex items-center gap-2 rounded-lg bg-ink-800 px-3 py-2 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700"
-          >
+          <Button variant="secondary" size="lg" onClick={props.onOpenPalette} className="wt-touch gap-2">
             {t('dashboard.jumpTo')} <kbd className="hidden rounded bg-ink-700 px-1.5 text-xs text-slate-200 sm:inline">{fmt('Mod+K')}</kbd>
-          </button>
+          </Button>
         </div>
 
         {/* Securitate: „e totul în regulă acum?" la o privire (3.5.4) */}
@@ -114,7 +109,7 @@ export default function Dashboard(props: {
         {/* Apps: forward-urile promovate, un click din „acasă" — nu mai ieşi din WebTerm */}
         {apps.length > 0 && (
           <section className="mt-7">
-            <h2 className="mb-2.5 text-xs font-semibold uppercase tracking-wide text-slate-500">{t('dashboard.apps')}</h2>
+            <h2 className={`mb-2.5 ${eyebrow}`}>{t('dashboard.apps')}</h2>
             <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
               {apps.map((a) => {
                 const color = APP_COLOR[a.app_type] || '#34d399'
@@ -140,7 +135,7 @@ export default function Dashboard(props: {
 
         {/* sesiuni active de reluat */}
         <section className="mt-7">
-          <h2 className="mb-2.5 text-xs font-semibold uppercase tracking-wide text-slate-500">{t('dashboard.resumeSession')}</h2>
+          <h2 className={`mb-2.5 ${eyebrow}`}>{t('dashboard.resumeSession')}</h2>
           {active.length === 0 ? (
             <p className="rounded-xl border border-dashed border-ink-700 px-4 py-6 text-center text-sm text-slate-500">
               {/* pe touch nu există ⌘K — instrucțiunea ar fi o glumă proastă */}
@@ -186,7 +181,7 @@ export default function Dashboard(props: {
            secțiunea asta, reluarea unei sesiuni închise cerea drumul host → listă */}
         {recentClosed.length > 0 && (
           <section className="mt-8">
-            <h2 className="mb-2.5 text-xs font-semibold uppercase tracking-wide text-slate-500">{t('dashboard.closedRecently')}</h2>
+            <h2 className={`mb-2.5 ${eyebrow}`}>{t('dashboard.closedRecently')}</h2>
             <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
               {recentClosed.map((s) => {
                 const h = byId.get(s.host_id)
@@ -219,7 +214,7 @@ export default function Dashboard(props: {
         {/* flotă */}
         <section className="mt-8">
           <div className="mb-2.5 flex flex-wrap items-center gap-x-4 gap-y-1">
-            <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">{t('dashboard.fleet')}</h2>
+            <h2 className={eyebrow}>{t('dashboard.fleet')}</h2>
             {/* legendă stări — culoarea punctului e dublată de text (WCAG 1.4.1) */}
             <div className="flex items-center gap-3 text-[11px] text-slate-500">
               <span className="flex items-center gap-1"><span aria-hidden="true" className="h-2 w-2 rounded-full bg-emerald-400 ring-1 ring-emerald-700/50" /> {t('dashboard.online')}</span>
@@ -294,8 +289,7 @@ export default function Dashboard(props: {
                             )}
                           </span>
                           {liveCount > 0 && (
-                            <span className="wt-good shrink-0 rounded-full bg-emerald-500/15 px-1.5 text-[11px] font-semibold"
-                              aria-label={t('dashboard.connectedCount', { count: liveCount })}>{liveCount}</span>
+                            <Badge tone="ok" aria-label={t('dashboard.connectedCount', { count: liveCount })}>{liveCount}</Badge>
                           )}
                           {/* starea NU doar prin culoare (WCAG 1.4.1): `title` pe un span nu ajunge la cititorul de
                               ecran, deci textul stării e dublat `sr-only` lângă punct */}

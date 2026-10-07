@@ -19,6 +19,7 @@ import {
   PlusIcon, RefreshIcon, TrashIcon,
 } from './Icons'
 import CopyToHostDialog, { CopyItem } from './CopyToHostDialog'
+import { Button, IconButton } from './ui'
 
 // CodeMirror e greu → lazy: intră doar când deschizi un fișier
 const FileEditor = lazy(() => import('./FileEditor'))
@@ -596,11 +597,7 @@ export default function FilePanel(props: {
   const header = props.embed ? null : (
     <header className="flex items-center gap-2 border-b border-ink-800 px-3 py-2">
       <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">{t('files.title')}</span>
-      <button
-        onClick={props.onClose}
-        aria-label={t('files.closeAria')}
-        className="wt-touch ml-auto rounded px-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-300"
-      >✕</button>
+      <IconButton onClick={props.onClose} label={t('files.closeAria')} className="ml-auto">✕</IconButton>
     </header>
   )
 
@@ -651,8 +648,8 @@ export default function FilePanel(props: {
 
         {/* bara de cale + acțiuni pe director */}
         <div className="flex items-center gap-1 border-b border-ink-800 px-2 py-1.5">
-          <button onClick={() => listing && navigate(listing.parent)} disabled={!listing || listing.path === '/'}
-            className="wt-touch shrink-0 rounded px-1.5 text-slate-400 hover:bg-ink-800 disabled:opacity-30" title={t('files.upLevel')} aria-label={t('files.upLevel')}>↰</button>
+          <IconButton onClick={() => listing && navigate(listing.parent)} disabled={!listing || listing.path === '/'}
+            label={t('files.upLevel')}>↰</IconButton>
           <input
             value={path}
             aria-label={t('files.pathAria')}
@@ -662,12 +659,12 @@ export default function FilePanel(props: {
             className="min-w-0 flex-1 rounded bg-ink-800 px-2 py-1 font-mono text-[11px] text-slate-300 ring-1 ring-ink-700 focus:ring-sky-500"
             title={t('files.pathHint')}
           />
-          <button onClick={() => load(listing?.path ?? path)} className="wt-touch shrink-0 rounded px-1.5 text-slate-400 hover:bg-ink-800" title={t('files.reload')} aria-label={t('files.reload')}><RefreshIcon /></button>
+          <IconButton onClick={() => load(listing?.path ?? path)} label={t('files.reload')}><RefreshIcon /></IconButton>
           {/* deschiderea unuia închide restul: toolbar-ul rămâne interactiv deasupra modalului,
               iar un input montat SUB overlay i-ar fura focusul (tastezi într-un câmp invizibil) */}
-          <button onClick={() => { setNewFileErr(''); setNewFolder(null); setRenaming(null); setConfirmDel(null); setNewFile('') }} disabled={!listing} className="wt-touch shrink-0 rounded px-1.5 font-mono text-[13px] text-slate-400 hover:bg-ink-800 disabled:opacity-40" title={t('files.newFile')} aria-label={t('files.newFile')}>+📄</button>
-          <button onClick={() => { setNewFile(null); setNewFileErr(''); setNewFolder('') }} className="wt-touch shrink-0 rounded px-1.5 text-slate-400 hover:bg-ink-800" title={t('files.newDir')} aria-label={t('files.newDir')}><PlusIcon /></button>
-          <button onClick={() => fileInput.current?.click()} disabled={busy || !listing} className="wt-touch shrink-0 rounded px-1.5 wt-link hover:bg-ink-800 disabled:opacity-40" title={t('files.uploadHere')} aria-label={t('files.uploadHere')}>↑</button>
+          <IconButton onClick={() => { setNewFileErr(''); setNewFolder(null); setRenaming(null); setConfirmDel(null); setNewFile('') }} disabled={!listing} label={t('files.newFile')}>+📄</IconButton>
+          <IconButton onClick={() => { setNewFile(null); setNewFileErr(''); setNewFolder('') }} label={t('files.newDir')}><PlusIcon /></IconButton>
+          <IconButton onClick={() => fileInput.current?.click()} disabled={busy || !listing} label={t('files.uploadHere')} className="wt-link">↑</IconButton>
           <input ref={fileInput} type="file" multiple className="hidden" onChange={(e) => { if (e.target.files) pickFiles(e.target.files); e.target.value = '' }} />
         </div>
 
@@ -749,9 +746,9 @@ export default function FilePanel(props: {
                   className="w-full rounded bg-ink-800 px-2 py-1 font-mono text-[12px] text-slate-200 outline-none ring-1 ring-sky-500" />
                 {newFileErr && <div className="mt-1.5 text-[11px] wt-danger">{newFileErr}</div>}
                 <div className="mt-2.5 flex justify-end gap-2 text-[12px]">
-                  <button onClick={() => setNewFile(null)} className="rounded px-2 py-1 text-slate-400 hover:bg-ink-800">{t('files.cancel')}</button>
-                  <button onClick={() => doNewFile(newFile, 'clipboard')} disabled={!newFile.trim()} className="rounded px-2 py-1 text-slate-200 ring-1 ring-ink-600 hover:bg-ink-800 disabled:opacity-40">{t('files.newFromClip')}</button>
-                  <button onClick={() => doNewFile(newFile, 'empty')} disabled={!newFile.trim()} className="rounded bg-sky-600 px-2 py-1 font-medium text-white hover:bg-sky-700 disabled:opacity-40">{t('files.newEmpty')}</button>
+                  <Button variant="ghost" size="sm" onClick={() => setNewFile(null)}>{t('files.cancel')}</Button>
+                  <Button variant="secondary" size="sm" onClick={() => doNewFile(newFile, 'clipboard')} disabled={!newFile.trim()}>{t('files.newFromClip')}</Button>
+                  <Button variant="primary" size="sm" onClick={() => doNewFile(newFile, 'empty')} disabled={!newFile.trim()}>{t('files.newEmpty')}</Button>
                 </div>
               </div>
             </div>
@@ -838,18 +835,18 @@ export default function FilePanel(props: {
               {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions -- doar opreşte bubbling-ul spre rând; butoanele din el au tastatura lor */}
               <div onClick={(ev) => ev.stopPropagation()} className="hidden shrink-0 items-center gap-0.5 group-hover:flex group-focus-within:flex [@media(hover:none)]:flex">
                 {!e.dir && (
-                  <button onClick={() => edit(e)} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-slate-200" title={t('files.edit')} aria-label={`${t('files.edit')} ${e.name}`}><PencilIcon /></button>
+                  <IconButton touch={false} onClick={() => edit(e)} title={t('files.edit')} label={`${t('files.edit')} ${e.name}`}><PencilIcon /></IconButton>
                 )}
                 {!e.dir && (
-                  <button onClick={() => download(e)} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-slate-200" title={t('files.download')} aria-label={`${t('files.download')} ${e.name}`}><DownloadIcon /></button>
+                  <IconButton touch={false} onClick={() => download(e)} title={t('files.download')} label={`${t('files.download')} ${e.name}`}><DownloadIcon /></IconButton>
                 )}
                 {/* directoarele nu au download simplu — dar au arhivă (tar.gz pe host) */}
                 {e.dir && (
                   <button onClick={() => downloadArchive(e)} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-slate-200"
                     title={t('files.downloadArchive')} aria-label={t('files.downloadArchiveAria', { name: e.name })}><DownloadIcon /></button>
                 )}
-                <button onClick={() => setRenaming(e.name)} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-slate-200" title={t('files.rename')} aria-label={t('files.renameAria', { name: e.name })}><RenameIcon /></button>
-                <button onClick={() => setConfirmDel(e)} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-rose-300" title={t('files.delete')} aria-label={`${t('files.delete')} ${e.name}`}><TrashIcon /></button>
+                <IconButton touch={false} onClick={() => setRenaming(e.name)} title={t('files.rename')} label={t('files.renameAria', { name: e.name })}><RenameIcon /></IconButton>
+                <IconButton touch={false} variant="danger" onClick={() => setConfirmDel(e)} title={t('files.delete')} label={`${t('files.delete')} ${e.name}`}><TrashIcon /></IconButton>
               </div>
             </div>
             )
@@ -871,17 +868,17 @@ export default function FilePanel(props: {
           <div role="toolbar" aria-label={t('files.selBarAria')} data-testid="wt-files-selbar"
             className="flex flex-wrap items-center gap-1 border-t border-ink-800 bg-ink-800/70 px-2 py-1 text-[11px]">
             <span className="mr-1 font-medium text-slate-200" aria-live="polite">{t('files.selCount', { count: picked.length })}</span>
-            <button onClick={bulkDownload} className="wt-touch inline-flex h-6 items-center gap-1 rounded px-1.5 text-slate-300 hover:bg-ink-700">
-              <DownloadIcon />{t('files.download')}</button>
-            <button onClick={() => { setConfirmDel(null); setConfirmBulk(picked) }} disabled={busy}
-              className="wt-touch inline-flex h-6 items-center gap-1 rounded px-1.5 text-slate-300 hover:bg-ink-700 hover:text-rose-300 disabled:opacity-40">
-              <TrashIcon />{t('files.delete')}</button>
-            <button onClick={openCopy} disabled={!picked.some((e) => !e.dir)}
+            <Button variant="ghost" size="sm" onClick={bulkDownload} className="wt-touch">
+              <DownloadIcon />{t('files.download')}</Button>
+            <Button variant="ghost" size="sm" onClick={() => { setConfirmDel(null); setConfirmBulk(picked) }} disabled={busy}
+              className="wt-touch">
+              <TrashIcon />{t('files.delete')}</Button>
+            <Button variant="ghost" size="sm" onClick={openCopy} disabled={!picked.some((e) => !e.dir)}
               title={picked.some((e) => !e.dir) ? t('copy.open') : t('copy.foldersNext')}
-              className="wt-touch inline-flex h-6 items-center gap-1 rounded px-1.5 text-slate-300 hover:bg-ink-700 disabled:opacity-40">
-              <CopyIcon />{t('copy.open')}</button>
-            <button onClick={() => setSelection(EMPTY_SELECTION)} className="wt-touch ml-auto inline-flex h-6 items-center rounded px-1.5 text-slate-400 hover:bg-ink-700">
-              {t('files.selClear')}</button>
+              className="wt-touch">
+              <CopyIcon />{t('copy.open')}</Button>
+            <Button variant="ghost" size="sm" onClick={() => setSelection(EMPTY_SELECTION)} className="wt-touch ml-auto">
+              {t('files.selClear')}</Button>
           </div>
         )}
 
@@ -896,9 +893,9 @@ export default function FilePanel(props: {
               </p>
               {nDirs > 0 && <p className="mt-0.5 wt-warn">{t('files.bulkDeleteDirs', { count: nDirs })}</p>}
               <div className="mt-1.5 flex gap-2">
-                <button autoFocus onClick={() => setConfirmBulk(null)} className="rounded px-2 py-0.5 text-slate-400 hover:bg-ink-700">{t('files.cancel')}</button>
-                <button onClick={() => void doBulkDelete(confirmBulk)} className="rounded bg-rose-600 px-2 py-0.5 font-medium text-white hover:bg-rose-700">
-                  {t('files.bulkDeleteGo', { count: confirmBulk.length })}</button>
+                <Button variant="ghost" size="sm" autoFocus onClick={() => setConfirmBulk(null)}>{t('files.cancel')}</Button>
+                <Button variant="danger" size="sm" onClick={() => void doBulkDelete(confirmBulk)}>
+                  {t('files.bulkDeleteGo', { count: confirmBulk.length })}</Button>
               </div>
             </div>
           )
@@ -912,8 +909,8 @@ export default function FilePanel(props: {
               {confirmDel.dir ? t('files.deleteSuffixDir') : '?'}
             </p>
             <div className="flex gap-2">
-              <button onClick={() => doDelete(confirmDel)} className="rounded bg-rose-600 px-2 py-0.5 font-medium text-white hover:bg-rose-700">{t('files.delete')}</button>
-              <button onClick={() => setConfirmDel(null)} className="rounded px-2 py-0.5 text-slate-400 hover:bg-ink-700">{t('files.cancel')}</button>
+              <Button variant="danger" size="sm" onClick={() => doDelete(confirmDel)}>{t('files.delete')}</Button>
+              <Button variant="ghost" size="sm" onClick={() => setConfirmDel(null)}>{t('files.cancel')}</Button>
             </div>
           </div>
         )}
@@ -924,7 +921,7 @@ export default function FilePanel(props: {
             <p className="mb-1.5 text-slate-300">{t('files.overwrite', { count: overwrite.count })}</p>
             <div className="flex gap-2">
               <button onClick={() => reallyUpload(overwrite.items)} className="rounded bg-amber-600 px-2 py-0.5 font-medium text-white hover:bg-amber-700">{t('files.overwrite')}</button>
-              <button onClick={() => setOverwrite(null)} className="rounded px-2 py-0.5 text-slate-400 hover:bg-ink-700">{t('files.cancel')}</button>
+              <Button variant="ghost" size="sm" onClick={() => setOverwrite(null)}>{t('files.cancel')}</Button>
             </div>
           </div>
         )}
@@ -945,8 +942,8 @@ export default function FilePanel(props: {
                         : u.state === 'retrying' ? t('jobs.stateRetrying', { n: u.attempts, max: 8 })
                         : sizeKnown(u) ? `${u.pct}%` : fmtBytes(u.pos)}
                     </span>
-                    <button onClick={() => cancelOrDismiss(u.id, live)} className="grid h-6 w-6 shrink-0 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-rose-300"
-                      title={label} aria-label={`${label} ${u.name}`}>✕</button>
+                    <IconButton touch={false} variant="danger" onClick={() => cancelOrDismiss(u.id, live)}
+                      title={label} label={`${label} ${u.name}`}>✕</IconButton>
                   </div>
                   {/* bară de progres: se umple pe octeți (XHR onprogress), colorată după stare */}
                   <div className="mt-0.5 h-1 w-full overflow-hidden rounded-full bg-ink-800">

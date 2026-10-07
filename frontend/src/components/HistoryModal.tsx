@@ -5,6 +5,7 @@ import LoadFailed from './LoadFailed'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { useI18n } from '../lib/i18n'
 import { copyText } from '../lib/clipboard'
+import { Button } from './ui'
 
 type HistItem = {
   id: number
@@ -134,7 +135,7 @@ export default function HistoryModal(props: { hosts: Host[]; onClose: () => void
             {confirmClear ? (
               <span className="flex items-center gap-2">
                 {t('history.confirmClear')}
-                <button onClick={clearAll} className="rounded bg-rose-600 px-2 py-0.5 font-medium text-white hover:bg-rose-700">{t('history.clearBtn')}</button>
+                <Button variant="danger" size="sm" onClick={clearAll}>{t('history.clearBtn')}</Button>
                 <button onClick={() => setConfirmClear(false)} className="rounded px-1.5 py-0.5 text-slate-400 hover:bg-ink-800">{t('history.no')}</button>
               </span>
             ) : (

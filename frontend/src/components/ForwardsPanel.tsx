@@ -7,6 +7,7 @@ import SheetBar from './SheetBar'
 import { LinkIcon, PencilIcon, PlusIcon, RefreshIcon, TrashIcon } from './Icons'
 import { copyText } from '../lib/clipboard'
 import HelpTip from './HelpTip'
+import { Button } from './ui'
 
 type ProbeState = 'checking' | 'up' | 'down'
 
@@ -321,9 +322,9 @@ export default function ForwardsPanel(props: {
               </div>
             )}
             <div className="flex gap-2">
-              <button onClick={submitForward} disabled={busy} className="rounded-lg bg-sky-600 px-3 py-1 font-medium text-white hover:bg-sky-700 disabled:opacity-50">
+              <Button variant="primary" size="sm" onClick={submitForward} disabled={busy}>
                 {busy ? t('forwards.saving') : editing ? t('forwards.save') : t('forwards.addShort')}
-              </button>
+              </Button>
               <button onClick={closeForm} className="rounded-lg px-3 py-1 text-slate-400 hover:bg-ink-800">{t('forwards.cancel')}</button>
             </div>
           </div>
@@ -344,7 +345,7 @@ export default function ForwardsPanel(props: {
           {forwards && forwards.length === 0 && !adding && !editing && (
             <div className="flex flex-col items-center gap-2 px-4 py-8 text-center text-[12px] text-slate-500">
               <p>{t('forwards.empty')}</p>
-              <button onClick={openAdd} className="rounded-lg bg-sky-600 px-3 py-1.5 text-white hover:bg-sky-700">{t('forwards.addFirst')}</button>
+              <Button variant="primary" onClick={openAdd}>{t('forwards.addFirst')}</Button>
             </div>
           )}
           {forwards && forwards.length > 0 && (
@@ -420,7 +421,7 @@ export default function ForwardsPanel(props: {
           <div className="border-t border-ink-800 bg-ink-800/80 px-3 py-2 text-[11px]">
             <p className="mb-1.5 text-slate-300">{t('forwards.confirmDelPre')} <span className="font-mono wt-danger">{confirmDel.label}</span>?</p>
             <div className="flex gap-2">
-              <button onClick={() => remove(confirmDel)} className="rounded bg-rose-600 px-2 py-0.5 font-medium text-white hover:bg-rose-700">{t('forwards.delete')}</button>
+              <Button variant="danger" size="sm" onClick={() => remove(confirmDel)}>{t('forwards.delete')}</Button>
               <button onClick={() => setConfirmDel(null)} className="rounded px-2 py-0.5 text-slate-400 hover:bg-ink-700">{t('forwards.cancel')}</button>
             </div>
           </div>

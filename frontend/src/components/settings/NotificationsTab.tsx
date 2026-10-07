@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react'
 import { api, ApiError, errText } from '../../lib/api'
 import { askSecret } from '../../lib/secretPrompt'
 import { useI18n } from '../../lib/i18n'
-import { btn, field, heading } from './ui'
+import { field, heading } from './ui'
+import { Button } from '../ui'
 import { fmtTs } from '../../lib/tz'
 import HelpTip from '../HelpTip'
 
@@ -150,12 +151,12 @@ export default function NotificationsTab() {
             placeholder={t('settings.forward.inputPlaceholder')} aria-label={t('settings.forward.ariaLabel')} spellCheck={false}
             aria-invalid={fwdErr ? true : undefined} aria-describedby={fwdErr ? 'fwd-error' : undefined}
             className={`${field} font-mono`} />
-          <button disabled={fwdBusy} onClick={saveFwd} className={`${btn.primary} shrink-0`}>
+          <Button variant="primary" disabled={fwdBusy} onClick={saveFwd} className="shrink-0">
             {t('settings.save')}
-          </button>
-          <button disabled={fwdBusy} onClick={() => { setFwdMsg(''); setFwdErr(''); loadFwd() }} className={`${btn.secondary} shrink-0`}>
+          </Button>
+          <Button variant="secondary" disabled={fwdBusy} onClick={() => { setFwdMsg(''); setFwdErr(''); loadFwd() }} className="shrink-0">
             {t('settings.recheck')}
-          </button>
+          </Button>
         </div>
         {/* regiuni live montate permanent: confirmarea e `status`, eroarea `alert` (WCAG 4.1.3) */}
         <span role="status" className={fwdMsg ? 'text-sm wt-good' : 'sr-only'}>{fwdMsg}</span>
@@ -218,16 +219,16 @@ export default function NotificationsTab() {
           spellCheck={false} className={field} />
         <p className="flex items-start gap-2 text-xs text-slate-500"><span>{t('settings.smtp.webhookHint')}</span><HelpTip id="webhook" /></p>
         <div className="flex items-center gap-2">
-          <button disabled={busy} onClick={saveSmtp} className={btn.primary}>
+          <Button variant="primary" disabled={busy} onClick={saveSmtp}>
             {t('settings.save')}
-          </button>
-          <button disabled={smtpTesting} onClick={testSmtp} className={btn.secondary}>
+          </Button>
+          <Button variant="secondary" disabled={smtpTesting} onClick={testSmtp}>
             {smtpTesting ? t('settings.smtp.sending') : t('settings.smtp.sendTest')}
-          </button>
+          </Button>
           {smtp.webhook.trim() && (
-            <button disabled={smtpTesting} onClick={testWebhook} className={btn.secondary}>
+            <Button variant="secondary" disabled={smtpTesting} onClick={testWebhook}>
               {t('settings.smtp.testWebhook')}
-            </button>
+            </Button>
           )}
           <span role="status" className={smtpMsg ? 'text-sm wt-good' : 'sr-only'}>{smtpMsg}</span>
           <span id="smtp-error" role="alert" className={smtpErr ? 'text-sm wt-danger' : 'sr-only'}>{smtpErr}</span>
@@ -273,9 +274,9 @@ export default function NotificationsTab() {
             <span className="text-slate-500">%</span>
           </label>
         ))}
-        <button disabled={busy} onClick={saveThresholds} className={btn.primary}>
+        <Button variant="primary" disabled={busy} onClick={saveThresholds}>
           {t('settings.alerts.saveThresholds')}
-        </button>
+        </Button>
         <span role="status" className={alertMsg ? 'text-sm wt-good' : 'sr-only'}>{alertMsg}</span>
         <span role="alert" className={alertErr ? 'text-sm wt-danger' : 'sr-only'}>{alertErr}</span>
       </div>

@@ -1,0 +1,11 @@
+/* Design system — componente de bază. Ghid: docs/design/DESIGN-SYSTEM.md */
+export { default as Button } from './Button'
+export { default as IconButton } from './IconButton'
+export { default as Badge, badgeClass } from './Badge'
+export { default as EmptyState } from './EmptyState'
+export { default as ErrorState } from './ErrorState'
+export { default as Card } from './Card'
+export { Spinner } from './Spinner'
+export { btn, buttonClass, iconButtonClass, compactAction, eyebrow, cardClass } from './classes'
+export type { ButtonVariant, ButtonSize, IconButtonVariant, IconButtonSize } from './classes'
+export type { BadgeTone } from './Badge'

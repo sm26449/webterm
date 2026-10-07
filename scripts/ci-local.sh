@@ -305,6 +305,7 @@ curl -fsS -X POST "$BASE1/api/setup" -H 'Content-Type: application/json' \
 # 62 de scanări aşteptate în loc de 64) — util când pasul pică doar acolo.
 pwrun tests/ui_review.mjs -e SCRIPT_ARGS="" -e BASE="$BASE1" -e A11Y_MAX_SERIOUS=0 \
   -e A11Y_EMAIL=e2e@example.com -e A11Y_PASSWORD=parola-e2e-123456 -e WT_AGENT="${WT_AGENT:-1}" \
+  -e UI_REVIEW_OUT=/out/ui-review \
   && ok "accessibility" || no "accessibility"
 fi
 

@@ -1,5 +1,6 @@
 import { Component, Fragment, ReactNode } from 'react'
 import { useI18n } from '../lib/i18n'
+import { Button } from './ui'
 
 /** Fallback-ul de eroare ca funcțional separat: clasa nu poate folosi hooks,
     dar UI-ul de failsafe are nevoie de `t()`. */
@@ -12,12 +13,10 @@ function PaneErrorFallback(props: { error: Error; onRemount: () => void }) {
       <div className="text-xs text-slate-500">
         {t('paneerr.intact')}
       </div>
-      <button
-        onClick={props.onRemount}
-        className="rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-700"
-      >
+      <Button variant="primary" size="lg"
+        onClick={props.onRemount}>
         {t('paneerr.remount')}
-      </button>
+      </Button>
     </div>
   )
 }

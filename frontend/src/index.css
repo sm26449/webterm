@@ -31,10 +31,10 @@
   /* ── tokeni semantici de stare (design system, docs/design/DESIGN-SYSTEM.md) ──
      Text pe suprafeţele deschise: fiecare trece ≥4,5:1 pe cel mai slab fundal al temei
      (ink-800). Expuşi în Tailwind ca `text-ok`, `bg-danger/15` etc. şi citiţi de .wt-good & co. */
-  --ok: 4 120 87;          /* #047857 emerald-700 */
+  --ok: 6 95 70;          /* #065f46 emerald-800 — emerald-700 dădea 4,2:1 pe o insignă verde (tentă 10 %) peste ink-800 */
   --warn: 146 64 14;       /* #92400e amber-800 — amber-700 dădea 4,41:1 pe ink-800 */
   --danger: 185 28 28;     /* #b91c1c red-700 */
-  --info: 3 105 161;       /* #0369a1 sky-700 */
+  --info: 7 89 133;        /* #075985 sky-800 — sky-700 era la limită (4,5:1) pe insignele cu tentă */
   --accent: 29 78 216;     /* #1d4ed8 blue-700 */
   /* culori de grafic (praguri 70/90 %, lib/thresholds.ts): non-text → ţintă 3:1 (WCAG 1.4.11) */
   --viz-ok: 5 150 105;     /* #059669 — 3,8:1 pe alb */
@@ -490,10 +490,7 @@ textarea {
    Pe Aurora #047857 dădea ~4,2:1 acolo (sub AA la 10px) — prins de axe când hostul selectat avea
    sesiuni vii în timpul scanării. Pe temele deschise un verde mai închis (~6:1). */
 .wt-livecount {
-  color: #065f46;
-}
-:root[data-theme='dark'] .wt-livecount {
-  color: #34d399;
+  color: rgb(var(--ok));   /* = .wt-good, de când --ok (deschis) e emerald-800 */
 }
 .wt-danger {
   color: rgb(var(--danger));
@@ -539,10 +536,10 @@ textarea {
   --tx-600: 96 100 114;
   --link: 79 70 229;
   --scrollbar: rgba(20, 27, 45, 0.22);
-  --ok: 4 120 87;
+  --ok: 6 95 70;
   --warn: 146 64 14;
   --danger: 185 28 28;
-  --info: 3 105 161;
+  --info: 7 89 133;
   --accent: 29 78 216;
   --viz-ok: 5 150 105;
   --viz-warn: 217 119 6;

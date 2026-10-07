@@ -10,6 +10,7 @@ import { dismissCopy } from '../lib/copyjobs'
 import { UploadJob, isActive, isCopy, isDownload, sizeKnown, uploadStore } from '../lib/uploadStore'
 import { CopyIcon, DownloadIcon, UploadIcon } from './Icons'
 import { JobRow, jobHostName, needsAttention } from './JobsBar'
+import { IconButton, compactAction } from './ui'
 
 /* Widget-ul plutitor de transferuri: UN SINGUR loc pentru tot progresul (upload/download),
    jos-dreapta, portat în <body>. Înlocuieşte fostul triptic (chip în bara de taburi + popover
@@ -35,7 +36,7 @@ const isTerminal = (j: UploadJob) => !isActive(j) && j.state !== 'paused'
 const isDismissable = (j: UploadJob) => j.state === 'done' || j.state === 'err' || j.state === 'cancelled'
 
 // butoanele din header: ţintă ≥24 px (44 px la touch prin wt-touch), focus vizibil
-const BTN = 'wt-touch inline-flex h-6 min-w-6 shrink-0 items-center justify-center rounded px-1.5 text-[11px] font-medium hover:bg-ink-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400'
+const BTN = compactAction   // design system (ui/classes)
 
 export default function TransfersWidget(props: { hosts: Host[]; insertSid?: string; insertHostId?: number }) {
   const { t } = useI18n()
@@ -136,11 +137,11 @@ export default function TransfersWidget(props: { hosts: Host[]; insertSid?: stri
               <button type="button" onClick={clearFinished} className={`${BTN} ml-auto text-slate-300`}
                 aria-label={t('transfers.clearFinished')}>{t('transfers.clearFinished')}</button>
             )}
-            <button type="button" onClick={toggle} aria-label={t('transfers.minimize')} title={t('transfers.minimize')}
-              className={`${BTN} ${canClear ? '' : 'ml-auto'} text-slate-300`}>
+            <IconButton type="button" onClick={toggle} label={t('transfers.minimize')}
+              className={`hover:bg-ink-700 ${canClear ? '' : 'ml-auto'}`}>
               {/* „–" = minimizează la pilulă (aria-label poartă sensul) */}
               <span aria-hidden="true" className="text-base leading-none">–</span>
-            </button>
+            </IconButton>
           </div>
           <ul className="min-h-0 flex-1 overflow-y-auto px-2 pb-1">
             {jobs.map((j) => (

@@ -5,6 +5,7 @@ import { useI18n } from '../lib/i18n'
 import SnippetParams, { snippetParams } from './SnippetParams'
 import SnippetTags from './SnippetTags'
 import { parseTagInput, snippetTags, targetsPayload } from '../lib/snippets'
+import { Button } from './ui'
 
 /** Dropdown cu comenzi salvate: click pe una → o inserează în sesiune.
     „Gestionează" deschide un mic editor (adaugă / editează / șterge). */
@@ -203,9 +204,9 @@ export default function SnippetsMenu(props: {
               />
               {saveErr && <div className="px-1 text-xs wt-danger">{saveErr}</div>}
               <div className="flex gap-1.5">
-                <button onClick={save} disabled={saving} className="rounded-lg bg-sky-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-sky-700 disabled:opacity-50">
+                <Button variant="primary" size="sm" onClick={save} disabled={saving}>
                   {saving ? t('snippets.saving') : editId ? t('common.save') : t('snippets.add')}
-                </button>
+                </Button>
                 <button onClick={() => { setManaging(false); setEditId(null); setTitle(''); setBody(''); setTags('') }} className="rounded-lg px-2.5 py-1 text-xs text-slate-400 hover:bg-ink-800">
                   {t('snippets.back')}
                 </button>

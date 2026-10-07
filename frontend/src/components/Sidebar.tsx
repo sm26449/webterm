@@ -14,6 +14,7 @@ import { allSchemes, hostSchemeRaw, setHostScheme } from '../lib/termtheme'
 import { ActivityIcon, CloseIcon, CollapseIcon, DownloadIcon, FilesIcon, FolderMoveIcon, GearIcon, KeyIcon, LogoMark, MoreIcon, NoteIcon, PlusIcon, PowerIcon, RefreshIcon, SearchIcon, ServerIcon, ShieldSmallIcon, TerminalPromptIcon } from './Icons'
 import { fmt } from '../lib/shortcuts'
 import { setHostMuted, updatesSignal, useUpdatesPref } from '../lib/updatesPref'
+import { Badge, Button, IconButton } from './ui'
 
 // modale rar folosite → chunk-uri separate, în afara bundle-ului inițial
 const AddHostModal = lazy(() => import('./AddHostModal'))
@@ -416,10 +417,9 @@ export default function Sidebar(props: {
                 </span>
               )}
               {liveCount > 0 && (
-                <span className="shrink-0 rounded-full bg-emerald-500/15 px-1.5 text-[10px] font-semibold wt-livecount"
-                  title={t('sidebar.liveSessions', { count: liveCount })}>
+                <Badge tone="ok" title={t('sidebar.liveSessions', { count: liveCount })}>
                   {liveCount}
-                </span>
+                </Badge>
               )}
               {/* update-uri OS în aşteptare (din diagnosticele agentului v51+). Semnal DISCRET, sub
                   liveness şi sesiuni în ierarhie: update-urile obişnuite = doar număr în contur
@@ -486,12 +486,11 @@ export default function Sidebar(props: {
                     : t('sidebar.downNoHeartbeat')}
                 </span>
                 {host.note && <span className="truncate italic" title={host.note}>· {host.note}</span>}
-                <button
+                <IconButton touch={false}
                   onClick={(e) => { e.stopPropagation(); editNote(host) }}
-                  title={t('sidebar.noteAria', { name: host.name })}
-                  aria-label={t('sidebar.noteAria', { name: host.name })}
-                  className="grid min-h-6 min-w-6 place-items-center shrink-0 rounded p-1 opacity-0 hover:text-slate-200 focus-visible:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100"
-                ><NoteIcon /></button>
+                  label={t('sidebar.noteAria', { name: host.name })}
+                  className="opacity-0 focus-visible:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100"
+                ><NoteIcon /></IconButton>
                 {/* Alerte offline on/off: mut = clopoţel tăiat, vizibil şi fără hover (ca să ştii
                     că e tăcut); pornit = doar la hover. Doar host-uri de agent (doar ele alertează). */}
                 {(!host.connection_type || host.connection_type === 'agent') && (
@@ -509,12 +508,11 @@ export default function Sidebar(props: {
                 {/* Wake-on-LAN: cere unui agent vecin din acelaşi LAN să trimită magic packet-ul.
                     Doar host-uri de agent (WoL n-are sens pe SSH/telnet). */}
                 {canWake(host) && (
-                  <button
+                  <IconButton touch={false}
                     onClick={(e) => { e.stopPropagation(); wakeHost(host) }}
                     disabled={waking === host.id}
-                    title={t('sidebar.wakeTitle')} aria-label={t('sidebar.wakeAria', { name: host.name })}
-                    className="grid min-h-6 min-w-6 shrink-0 place-items-center rounded p-1 hover:text-slate-200 disabled:opacity-40 focus-visible:opacity-100"
-                  >{waking === host.id ? '…' : '⏻'}</button>
+                    title={t('sidebar.wakeTitle')} label={t('sidebar.wakeAria', { name: host.name })}
+                  >{waking === host.id ? '…' : '⏻'}</IconButton>
                 )}
               </div>
             )}
@@ -562,7 +560,9 @@ export default function Sidebar(props: {
               }) + (SIGNATURE_BLOCKS.has(host.update_blocked)
                 ? t('sidebar.updateBlockedHint')
                 : t('sidebar.updateBlockedLog'))}
-              className="wt-danger shrink-0 cursor-help rounded-md bg-rose-900/60 px-1.5 py-0.5 text-xs"
+              // tokeni de stare (nu bg-rose-900/60): pe Aurora fundalul închis + roşul închis al
+              // textului dădeau ~2:1
+              className="shrink-0 cursor-help rounded-md bg-danger/10 px-1.5 py-0.5 text-xs text-danger"
             >
               {t('sidebar.updateBlockedBadge')}
             </span>
@@ -574,7 +574,7 @@ export default function Sidebar(props: {
                  transforma tăcut în cuvântul „null" în tooltip. */
               title={t('sidebar.updateAgentTitle',
                 { from: host.agent_version ?? '?', to: host.agent_latest ?? '?' })}
-              className="wt-warn shrink-0 rounded-md bg-amber-900/60 px-1.5 py-1 text-xs hover:bg-amber-800/60"
+              className="shrink-0 rounded-md bg-warn/10 px-1.5 py-1 text-xs text-warn hover:bg-warn/20"
             >
               ↑ v{host.agent_latest}
             </button>
@@ -669,44 +669,30 @@ export default function Sidebar(props: {
             rând dens de fişiere, 44px ar rupe layout-ul — acolo compromisul e deliberat. */}
         <div className="flex shrink-0 items-center gap-0.5">
           {/* Doar pe desktop: pe mobil sidebarul e un drawer, care se închide oricum. */}
-          <button
-            title={t('nav.collapseSidebar')} aria-label={t('nav.collapseSidebar')}
+          <IconButton size="md" label={t('nav.collapseSidebar')}
             onClick={props.onToggleCollapse}
-            className="wt-touch hidden items-center justify-center rounded-md px-2 py-1 text-sm text-slate-400 hover:bg-ink-800 hover:text-slate-200 md:inline-flex"
+            className="hidden md:grid"
           >
             <CollapseIcon />
-          </button>
-          <button
-            title={t('nav.addHost')} aria-label={t('nav.addHost')}
-            onClick={() => setShowAdd(true)}
-            className="wt-touch inline-flex items-center justify-center rounded-md px-2 py-1 text-sm text-slate-400 hover:bg-ink-800 hover:text-slate-200"
-          >
+          </IconButton>
+          <IconButton size="md" label={t('nav.addHost')} onClick={() => setShowAdd(true)}>
             <PlusIcon />
-          </button>
-          <button
-            title={t('nav.fleetRun')}
-            aria-label={t('nav.fleetRunAria')}
-            onClick={() => setShowFleetRun(true)}
-            className="wt-touch inline-flex items-center justify-center rounded-md px-2 py-1 text-sm text-slate-500 hover:bg-ink-800"
-          >
+          </IconButton>
+          <IconButton size="md" label={t('nav.fleetRunAria')} title={t('nav.fleetRun')}
+            onClick={() => setShowFleetRun(true)}>
             <TerminalPromptIcon />
-          </button>
-          <button
-            title={t('nav.status')}
-            aria-label={t('nav.status')}
-            onClick={() => setShowStatus(true)}
-            className="wt-touch inline-flex items-center justify-center rounded-md px-2 py-1 text-sm text-slate-500 hover:bg-ink-800"
-          >
+          </IconButton>
+          <IconButton size="md" label={t('nav.status')} onClick={() => setShowStatus(true)}>
             <ActivityIcon />
-          </button>
-          <button
+          </IconButton>
+          <IconButton size="md"
             title={props.signingLocked
               ? t('sidebar.settingsSigningLocked')
               : props.signingMissing ? t('sidebar.settingsSigningMissing')
                 : props.backupReady ? t('sidebar.settingsBackupReady') : t('sidebar.settingsPasskeys')}
             onClick={() => { setSettingsCat(undefined); setShowSettings(true) }}
-            aria-label={t('settings.title')}
-            className="wt-touch relative inline-flex items-center justify-center rounded-md px-2 py-1 text-sm text-slate-500 hover:bg-ink-800"
+            label={t('settings.title')}
+            className="relative"
           >
             <GearIcon />
             {(props.backupReady || props.signingMissing || props.signingLocked) && (
@@ -717,15 +703,10 @@ export default function Sidebar(props: {
                 className={`absolute right-1 top-1 h-2 w-2 rounded-full ring-2 ring-ink-900 ${
                   props.signingLocked ? 'bg-rose-500' : props.signingMissing ? 'bg-amber-400' : 'bg-sky-400'}`} />
             )}
-          </button>
-          <button
-            title={t('sidebar.signOut')}
-            aria-label={t('sidebar.signOut')}
-            onClick={props.onLogout}
-            className="wt-touch inline-flex items-center justify-center rounded-md px-2 py-1 text-sm text-slate-500 hover:bg-ink-800"
-          >
+          </IconButton>
+          <IconButton size="md" label={t('sidebar.signOut')} onClick={props.onLogout}>
             <PowerIcon />
-          </button>
+          </IconButton>
         </div>
       </div>
 
@@ -742,14 +723,13 @@ export default function Sidebar(props: {
           className="w-full rounded-lg bg-ink-800 py-1.5 pl-8 pr-7 text-sm placeholder-slate-600 ring-1 ring-ink-700 focus:ring-sky-600"
         />
         {query ? (
-          <button
+          <IconButton touch={false}
             onClick={() => setQuery('')}
-            aria-label={t('sidebar.clearSearch')}
-            title={t('sidebar.clearSearch')}
-            className="absolute right-4 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded text-slate-500 hover:text-slate-300"
+            label={t('sidebar.clearSearch')}
+            className="absolute right-4 top-1/2 -translate-y-1/2"
           >
             <CloseIcon size={13} />
-          </button>
+          </IconButton>
         ) : (
           /* badge-ul de scurtătură: doar unde EXISTĂ tastatură */
           <button
@@ -777,10 +757,9 @@ export default function Sidebar(props: {
           <div className="space-y-3 p-4 text-sm text-slate-500">
             <p>{t('sidebar.noHostsYet')}</p>
             {/* CTA vizibil: butonul din header e doar un „+" fără text, uşor de ratat */}
-            <button type="button" onClick={() => setShowAdd(true)}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-700">
+            <Button type="button" variant="primary" onClick={() => setShowAdd(true)}>
               <PlusIcon /> {t('nav.addHost')}
-            </button>
+            </Button>
           </div>
         )}
         {(() => {
@@ -1048,14 +1027,12 @@ function UpdatesDialog(props: { host: Host; onClose: () => void; onUpgrade: () =
         <p className="mt-2 text-xs text-slate-500">{t('updates.hint')}</p>
         <div className="mt-4 flex flex-wrap items-center justify-end gap-2 text-sm">
           {/* „nu-mi mai arăta" direct de unde vezi semnalul; revenirea e din meniul ⋯ al hostului */}
-          <button onClick={props.onMute} title={t('updates.muteHostHint')}
-            className="mr-auto rounded px-2 py-1.5 text-xs text-slate-500 hover:bg-ink-800 hover:text-slate-300">{t('updates.muteHost')}</button>
-          <button onClick={props.onClose}
-            className="rounded px-3 py-1.5 text-slate-400 hover:bg-ink-800">{t('common.cancel')}</button>
-          <button onClick={props.onUpgrade}
-            className="rounded bg-sky-600 px-3 py-1.5 font-medium text-white hover:bg-sky-700">
+          <Button variant="ghost" size="sm" onClick={props.onMute} title={t('updates.muteHostHint')}
+            className="mr-auto">{t('updates.muteHost')}</Button>
+          <Button variant="ghost" onClick={props.onClose}>{t('common.cancel')}</Button>
+          <Button variant="primary" onClick={props.onUpgrade}>
             {t('updates.openTerminal')}
-          </button>
+          </Button>
         </div>
       </div>
     </div>
@@ -1125,14 +1102,13 @@ function HostMenu(props: {
   const act = (fn: () => void) => () => { setOpen(false); btnRef.current?.focus(); fn() }
   return (
     <div className="relative shrink-0">
-      <button
+      <IconButton
         ref={btnRef}
-        title={t('sidebar.hostActions')} aria-label={t('sidebar.hostActions')} aria-haspopup="menu" aria-expanded={open}
+        label={t('sidebar.hostActions')} aria-haspopup="menu" aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
-        className="wt-touch grid place-items-center rounded-md p-1 text-slate-500 hover:bg-ink-700 hover:text-slate-200"
       >
         <MoreIcon />
-      </button>
+      </IconButton>
       {open && (
         <>
           <div className="fixed inset-0 z-30" onClick={() => setOpen(false)} />
@@ -1271,9 +1247,9 @@ export function CommandModal(props: { cmd: string; cmdDedicated?: string; onClos
         </p>
         <InstallCommand command={props.cmd} commandDedicated={props.cmdDedicated} />
         <div className="mt-4 text-right">
-          <button onClick={props.onClose} className="rounded-lg px-4 py-2 text-sm text-slate-400 hover:bg-ink-800">
+          <Button variant="ghost" size="lg" onClick={props.onClose}>
             {t('sidebar.close')}
-          </button>
+          </Button>
         </div>
       </div>
     </div>

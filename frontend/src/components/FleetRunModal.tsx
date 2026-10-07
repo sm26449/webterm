@@ -11,6 +11,7 @@ import { useFocusTrap } from '../lib/useFocusTrap'
 import { useConfirm } from '../lib/confirm'
 import { notifyError } from '../lib/notify'
 import { copyText } from '../lib/clipboard'
+import { Button } from './ui'
 
 type RunResult = {
   // queued = încă netrimis (dispatch limitat); cancelled = nu s-a rulat (Stop sau guardrail refuzat)
@@ -504,15 +505,14 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
 
         <footer className="flex items-center gap-2 border-t border-ink-800 px-4 py-3">
           {phase === 'pick' && (
-            <button disabled={chosen.length === 0 || !effective.trim() || !timeoutOk || paramsMissing}
+            <Button variant="primary" disabled={chosen.length === 0 || !effective.trim() || !timeoutOk || paramsMissing}
               onClick={() => {
                 // parametrii completaţi devin comanda propriu-zisă (confirmarea + rularea o citesc pe ea)
                 if (paramTpl) { setCommand(effective); setParamTpl(null) }
                 setPhase('confirm')
-              }}
-              className="rounded-lg bg-sky-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-40">
+              }}>
               {t('fleet.continue')}
-            </button>
+            </Button>
           )}
           {phase === 'confirm' && (
             <>

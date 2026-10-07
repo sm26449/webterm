@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { errText, api, Host } from '../lib/api'
 import { useI18n } from '../lib/i18n'
 import { useFocusTrap } from '../lib/useFocusTrap'
-import { btn } from './settings/ui'
+import { Button } from './ui'
 
 interface SerialPort {
   device: string
@@ -262,10 +262,10 @@ export default function SerialModal(props: {
         </div>
 
         <div className="mt-5 flex justify-end gap-2">
-          <button type="button" onClick={props.onClose} className={`${btn.ghost} px-4 py-2`}>{t('serial.cancel')}</button>
-          <button type="button" onClick={open} disabled={busy || !device.trim()} className={`${btn.primary} px-4 py-2`}>
+          <Button variant="ghost" size="lg" type="button" onClick={props.onClose}>{t('serial.cancel')}</Button>
+          <Button variant="primary" size="lg" type="button" onClick={open} disabled={busy || !device.trim()}>
             {busy ? t('serial.opening') : t('serial.open')}
-          </button>
+          </Button>
         </div>
       </div>
     </div>
