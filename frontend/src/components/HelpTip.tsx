@@ -80,7 +80,7 @@ export default function HelpTip(props: { id: HelpId; className?: string }) {
         aria-label={t('help.aria', { topic: title })}
         aria-expanded={open}
         aria-controls={open ? popId : undefined}
-        className={`wt-touch inline-grid h-5 w-5 shrink-0 place-items-center rounded-full border border-ink-700 align-middle text-[11px] font-semibold leading-none text-slate-400 hover:border-sky-500/60 hover:text-sky-300 ${props.className ?? ''}`}
+        className={`wt-touch inline-grid h-5 w-5 shrink-0 place-items-center rounded-full border border-ink-700 align-middle text-2xs font-semibold leading-none text-slate-400 hover:border-sky-500/60 hover:text-sky-300 ${props.className ?? ''}`}
       >
         ?
       </button>
@@ -101,10 +101,10 @@ export default function HelpTip(props: { id: HelpId; className?: string }) {
               <CloseIcon size={14} />
             </button>
           </div>
-          <p className="mt-2 whitespace-pre-line text-[13px] leading-relaxed text-slate-300">{t(`help.${props.id}.body`)}</p>
+          <p className="mt-2 whitespace-pre-line text-compact leading-relaxed text-slate-300">{t(`help.${props.id}.body`)}</p>
           {example && (
-            <div className="mt-3 flex items-start gap-2 rounded-lg border border-ink-800 bg-ink-950/60 p-2">
-              <code className="min-w-0 flex-1 break-all font-mono text-[11.5px] text-slate-300">{example}</code>
+            <div className="mt-3 flex items-start gap-2 rounded-md border border-ink-800 bg-ink-950/60 p-2">
+              <code className="min-w-0 flex-1 break-all font-mono text-xs text-slate-300">{example}</code>
               <button type="button" onClick={() => copyText(example)} aria-label={t('help.copyExample')}
                 className="wt-touch grid shrink-0 place-items-center rounded-md p-1 text-slate-400 hover:bg-ink-800 hover:text-slate-200">
                 <CopyIcon />
@@ -112,7 +112,7 @@ export default function HelpTip(props: { id: HelpId; className?: string }) {
             </div>
           )}
           <a href={docsUrl(entry.doc)} target="_blank" rel="noopener noreferrer"
-            className="wt-link mt-3 inline-flex items-center gap-1 text-[13px] font-medium hover:underline">
+            className="wt-link mt-3 inline-flex items-center gap-1 text-compact font-medium hover:underline">
             {t('help.readDocs')} <ArrowRightIcon />
           </a>
         </div>,

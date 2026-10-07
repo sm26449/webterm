@@ -17,7 +17,7 @@ import { connSignature, failingField, stageViews, summaryText, TestResult } from
 type ConnType = 'agent' | 'ssh' | 'ssh-jump' | 'telnet' | 'telnet-jump'
 
 const field =
-  'w-full rounded-lg bg-ink-800 px-4 py-2.5 placeholder-slate-500 ring-1 ring-[rgb(var(--field-border))] focus:ring-sky-600'
+  'w-full rounded-md bg-ink-800 px-4 py-2.5 placeholder-slate-500 ring-1 ring-[rgb(var(--field-border))] focus:ring-sky-600'
 const label = 'mb-1 block text-xs font-medium text-slate-400'
 
 // După cât timp fără agent arătăm panoul de depanare. 45 s = instalarea (descărcare + pip-free
@@ -153,7 +153,7 @@ export default function AddHostModal(props: {
     <div className="flex gap-1 rounded-xl bg-ink-800 p-1 text-sm">
       {(['one', 'many', 'csv'] as const).map((m) => (
         <button key={m} type="button" onClick={() => setMode(m)} aria-pressed={mode === m}
-          className={`flex-1 rounded-lg px-3 py-1.5 font-medium transition ${
+          className={`flex-1 rounded-md px-3 py-1.5 font-medium transition ${
             mode === m ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
           {m === 'one' ? t('addhost.modeOne') : m === 'many' ? t('addhost.modeMany') : t('addhost.modeCsv')}
         </button>
@@ -422,7 +422,7 @@ export default function AddHostModal(props: {
                 <label className="flex cursor-pointer items-center gap-2.5 text-sm text-slate-300">
                   <input type="checkbox" checked={grp.require_2fa}
                     onChange={(e) => setGrp({ ...grp, require_2fa: e.target.checked })}
-                    className="h-4 w-4 rounded accent-sky-600" />
+                    className="h-4 w-4 rounded-md accent-sky-600" />
                   {t('settings.enrollGroups.require2fa')}
                 </label>
                 <label className="block">
@@ -465,7 +465,7 @@ export default function AddHostModal(props: {
                 {([['ssh-jump', 'SSH-jump'], ['telnet-jump', 'Telnet-jump']] as [ConnType, string][]).map(([ct, lbl]) => (
                   <button key={ct} type="button" aria-pressed={connType === ct}
                     onClick={() => { setConnType(ct); setPort(ct === 'telnet-jump' ? 23 : 22) }}
-                    className={`flex-1 rounded-lg px-2 py-1.5 text-[13px] font-medium transition ${
+                    className={`flex-1 rounded-md px-2 py-1.5 text-compact font-medium transition ${
                       connType === ct ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
                     {lbl}
                   </button>
@@ -476,7 +476,7 @@ export default function AddHostModal(props: {
                 {([['agent', 'Agent'], ['ssh', 'SSH'], ['telnet', 'Telnet']] as [ConnType, string][]).map(([ct, label]) => (
                   <button key={ct} type="button" aria-pressed={connType === ct}
                     onClick={() => { setConnType(ct); setPort(ct === 'telnet' ? 23 : 22) }}
-                    className={`flex-1 rounded-lg px-2 py-1.5 text-[13px] font-medium transition ${
+                    className={`flex-1 rounded-md px-2 py-1.5 text-compact font-medium transition ${
                       connType === ct ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
                     {label}
                   </button>
@@ -541,7 +541,7 @@ export default function AddHostModal(props: {
                       {pj && !agentHosts.some((h) => h.id === pj.viaHostId) && <option value={pj.viaHostId}>{pj.viaName}</option>}
                       {agentHosts.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}
                     </select>
-                    <span className="mt-0.5 block text-[11px] text-slate-500">{t('addhost.jumpViaHint')}</span>
+                    <span className="mt-0.5 block text-2xs text-slate-500">{t('addhost.jumpViaHint')}</span>
                   </label>
                 )}
                 <div className="flex gap-2">
@@ -575,7 +575,7 @@ export default function AddHostModal(props: {
                     <span className={label}>{t('addhost.authentication')}</span>
                     <div className="flex gap-2 text-sm">
                       {(['password', 'key'] as const).map((m) => (
-                        <label key={m} className={`flex-1 cursor-pointer rounded-lg px-3 py-1.5 text-center ring-1 ${
+                        <label key={m} className={`flex-1 cursor-pointer rounded-md px-3 py-1.5 text-center ring-1 ${
                           authMethod === m ? 'bg-ink-700 ring-sky-600' : 'ring-ink-700 hover:bg-ink-800'
                         }`}>
                           <input type="radio" name="auth" className="sr-only"
@@ -593,7 +593,7 @@ export default function AddHostModal(props: {
                   <span className={label}>{t('addhost.credentials')}</span>
                   <div className="flex gap-2 text-sm">
                     {(['stored', 'ask'] as const).map((p) => (
-                      <label key={p} className={`flex-1 cursor-pointer rounded-lg px-3 py-1.5 text-center ring-1 ${
+                      <label key={p} className={`flex-1 cursor-pointer rounded-md px-3 py-1.5 text-center ring-1 ${
                         policy === p ? 'bg-ink-700 ring-sky-600' : 'ring-ink-700 hover:bg-ink-800'
                       }`}>
                         <input type="radio" name="policy" className="sr-only"
@@ -610,27 +610,27 @@ export default function AddHostModal(props: {
                       {/* cheie generată aici (în aşteptare): câmpul de privată dispare — privata e
                           deja pe gateway; omul pune publica pe ţintă, testează, salvează. */}
                       {pendingKey ? (
-                        <div className="space-y-2 rounded-lg bg-ink-800/60 p-3 ring-1 ring-ink-700" data-testid="pending-key">
+                        <div className="space-y-2 rounded-md bg-ink-800/60 p-3 ring-1 ring-ink-700" data-testid="pending-key">
                           <p className="text-xs text-slate-300">{t('addhost.pendingKeyHint')}</p>
                           <div className="flex items-start gap-2">
-                            <code className="min-w-0 flex-1 break-all rounded bg-ink-900 px-2 py-1 font-mono text-[11px] text-slate-200"
+                            <code className="min-w-0 flex-1 break-all rounded-md bg-ink-900 px-2 py-1 font-mono text-2xs text-slate-200"
                               data-testid="pending-key-pub">{pendingKey.pub}</code>
                             <button type="button" onClick={() => copyKey('pub')}
                               className="min-h-6 shrink-0 text-xs wt-link hover:underline">
                               {keyCopied === 'pub' ? t('addhost.copied') : t('addhost.copyPub')}
                             </button>
                           </div>
-                          <span className="block text-[11px] text-slate-500">
+                          <span className="block text-2xs text-slate-500">
                             {t('addhost.pendingKeyCmd', { user: username.trim() || '…' })}
                           </span>
                           <div className="flex items-start gap-2">
-                            <code className="min-w-0 flex-1 break-all rounded bg-ink-900 px-2 py-1 font-mono text-[11px] text-slate-200">{installCmd}</code>
+                            <code className="min-w-0 flex-1 break-all rounded-md bg-ink-900 px-2 py-1 font-mono text-2xs text-slate-200">{installCmd}</code>
                             <button type="button" onClick={() => copyKey('cmd')}
                               className="min-h-6 shrink-0 text-xs wt-link hover:underline">
                               {keyCopied === 'cmd' ? t('addhost.copied') : t('addhost.copyCmd')}
                             </button>
                           </div>
-                          <p className="text-[11px] text-slate-500">{t('addhost.pendingKeyFp', { fp: pendingKey.fp })}</p>
+                          <p className="text-2xs text-slate-500">{t('addhost.pendingKeyFp', { fp: pendingKey.fp })}</p>
                           <button type="button" onClick={() => setPendingKey(null)}
                             className="min-h-6 text-xs wt-link hover:underline">
                             {t('addhost.useOwnKey')}
@@ -649,26 +649,26 @@ export default function AddHostModal(props: {
                           onChange={(e) => setPassphrase(e.target.value)} className={field} autoComplete="new-password" />
                       </label>
                       </>)}
-                      <div className="rounded-lg bg-ink-800/60 p-2 ring-1 ring-ink-700">
+                      <div className="rounded-md bg-ink-800/60 p-2 ring-1 ring-ink-700">
                           <div className="flex flex-wrap gap-2">
                             {!pendingKey && (
                               <button type="button" disabled={sshBusy} onClick={generatePendingKey}
-                                className="rounded-lg bg-ink-800 px-2.5 py-1 text-xs text-slate-200 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-40">
+                                className="rounded-md bg-ink-800 px-2.5 py-1 text-xs text-slate-200 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-40">
                                 {sshBusy ? t('addhost.genKeyBusy') : t('addhost.genKeyHost')}
                               </button>
                             )}
                             {edit && (
                               <button type="button" disabled={sshBusy} onClick={showStoredPublic}
-                                className="rounded-lg bg-ink-800 px-2.5 py-1 text-xs text-slate-200 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-40">
+                                className="rounded-md bg-ink-800 px-2.5 py-1 text-xs text-slate-200 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-40">
                                 {t('addhost.showPubKey')}
                               </button>
                             )}
                           </div>
                           {sshPub && (
                             <div className="mt-2">
-                              <p className="text-[11px] text-slate-500">{t('addhost.pubKeyHint')}</p>
+                              <p className="text-2xs text-slate-500">{t('addhost.pubKeyHint')}</p>
                               <div className="mt-1 flex items-center gap-2">
-                                <code className="min-w-0 flex-1 break-all rounded bg-ink-900 px-2 py-1 font-mono text-[11px] text-slate-200">{sshPub}</code>
+                                <code className="min-w-0 flex-1 break-all rounded-md bg-ink-900 px-2 py-1 font-mono text-2xs text-slate-200">{sshPub}</code>
                                 <button type="button" onClick={() => copyText(sshPub).then((okc) => { if (okc) { setSshCopied(true); setTimeout(() => setSshCopied(false), 1500) } })}
                                   className="shrink-0 text-xs wt-link hover:underline">
                                   {sshCopied ? t('settings.cloud.copied') : t('settings.cloud.copy')}
@@ -699,7 +699,7 @@ export default function AddHostModal(props: {
               <label className="flex cursor-pointer items-center gap-2.5 text-sm text-slate-300">
                 <input type="checkbox" checked={require2fa}
                   onChange={(e) => setRequire2fa(e.target.checked)}
-                  className="h-4 w-4 rounded accent-sky-600" />
+                  className="h-4 w-4 rounded-md accent-sky-600" />
                 {t('addhost.require2fa')}
                 <HelpTip id="require2fa" />
               </label>
@@ -709,7 +709,7 @@ export default function AddHostModal(props: {
                 opţională. Parola merge ca header la instalare (nu în URL), deci un URL scurs
                 într-un log nu ajunge — dă-o pe alt canal decât one-liner-ul. */}
             {connType === 'agent' && !edit && (
-              <div className="flex flex-col gap-2 rounded-lg border border-ink-800 p-3">
+              <div className="flex flex-col gap-2 rounded-md border border-ink-800 p-3">
                 <label className="block">
                   <span className={label + ' flex items-center gap-2'}>{t('addhost.enrollTtl')}<HelpTip id="enrollTtl" /></span>
                   <select value={enrollTtl} onChange={(e) => setEnrollTtl(Number(e.target.value))} className={field}>
@@ -750,7 +750,7 @@ export default function AddHostModal(props: {
                 textul nu e anunţată de toate cititoarele); rezumatul e o propoziţie, etapele dedesubt. */}
             {connType !== 'agent' && (
               <div id="addhost-test-result" role="status" aria-live="polite" data-testid="hosttest-result"
-                className={testing || testRes || testErr ? 'rounded-lg border border-ink-700 p-3 text-xs' : 'sr-only'}>
+                className={testing || testRes || testErr ? 'rounded-md border border-ink-700 p-3 text-xs' : 'sr-only'}>
                 {testing ? (
                   <p className="text-slate-400">{t('hosttest.running')}</p>
                 ) : testErr ? (
@@ -773,7 +773,7 @@ export default function AddHostModal(props: {
                       ))}
                     </ul>
                     {verified && isSshLike && testRes.hostkey?.key && (
-                      <p className="mt-2 text-[11px] text-slate-500">{t('hosttest.willPin')}</p>
+                      <p className="mt-2 text-2xs text-slate-500">{t('hosttest.willPin')}</p>
                     )}
                   </>
                 ) : null}
@@ -791,7 +791,7 @@ export default function AddHostModal(props: {
                   <button ref={testBtnRef} type="button" onClick={runTest} data-testid="hosttest-run"
                     disabled={testing || busy || !hostname.trim() || (isSshLike && !username.trim()) || (isJump && !viaHost)}
                     aria-describedby="addhost-test-result"
-                    className="rounded-lg px-3 py-2 text-sm font-medium text-slate-200 ring-1 ring-ink-600 hover:bg-ink-800 disabled:opacity-50">
+                    className="rounded-md px-3 py-2 text-sm font-medium text-slate-200 ring-1 ring-ink-600 hover:bg-ink-800 disabled:opacity-50">
                     {testing ? t('hosttest.running') : t('hosttest.button')}
                   </button>
                   <HelpTip id="hostTest" />
@@ -805,7 +805,7 @@ export default function AddHostModal(props: {
               {pj && props.onConnect && (
                 <button type="button" disabled={busy || !name.trim() || !hostname.trim() || !viaHost}
                   onClick={(e) => submit(e as unknown as FormEvent, true)}
-                  className="rounded-lg px-4 py-2 text-sm font-medium text-slate-200 ring-1 ring-ink-600 hover:bg-ink-800 disabled:opacity-50">
+                  className="rounded-md px-4 py-2 text-sm font-medium text-slate-200 ring-1 ring-ink-600 hover:bg-ink-800 disabled:opacity-50">
                   {t('addhost.connectOnce')}
                 </button>
               )}
@@ -858,7 +858,7 @@ export default function AddHostModal(props: {
               </Button>
             </div>
             {stuck && !online && (
-              <section className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs" aria-labelledby="addhost-stuck-title">
+              <section className="mt-4 rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs" aria-labelledby="addhost-stuck-title">
                 <h3 id="addhost-stuck-title" className="wt-warn text-sm font-semibold">{t('addhost.stuckTitle')}</h3>
                 <p className="mt-1 text-slate-400">{t('addhost.stuckIntro')}</p>
                 <ol className="mt-2 list-decimal space-y-1 pl-4 text-slate-300">
@@ -868,8 +868,8 @@ export default function AddHostModal(props: {
                   <li>{t('addhost.stuckTime')}</li>
                   <li>
                     {t('addhost.stuckLog')}{' '}
-                    <code className="select-all rounded bg-ink-900 px-1 font-mono text-[11px] text-slate-200">journalctl --user -u webterm-agent -n 50</code>{' '}
-                    · <code className="select-all rounded bg-ink-900 px-1 font-mono text-[11px] text-slate-200">tail -n 30 ~/.webterm/ptyd.log</code>
+                    <code className="select-all rounded-md bg-ink-900 px-1 font-mono text-2xs text-slate-200">journalctl --user -u webterm-agent -n 50</code>{' '}
+                    · <code className="select-all rounded-md bg-ink-900 px-1 font-mono text-2xs text-slate-200">tail -n 30 ~/.webterm/ptyd.log</code>
                   </li>
                 </ol>
                 {/* ce a văzut gateway-ul: încercări refuzate = cauza, nu simptomul */}

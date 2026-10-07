@@ -85,7 +85,7 @@ export default function AuditTab() {
       <ul className="mt-3 flex flex-col gap-1">
         {(audit ?? []).map((e, i) => (
           <li key={`${e.ts}-${i}`}
-            className="rounded-lg bg-ink-800/60 px-3 py-2 text-xs ring-1 ring-ink-700">
+            className="rounded-md bg-ink-800/60 px-3 py-2 text-xs ring-1 ring-ink-700">
             <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
               <span className="font-mono tabular-nums text-slate-400">
                 {fmtTs(e.ts)}
@@ -109,7 +109,7 @@ export default function AuditTab() {
         <p className="mt-3 text-xs text-slate-500">{t('settings.audit.loading')}</p>
       )}
       {auditErr && (
-        <div className="mt-3 rounded-lg ring-1 ring-ink-700">
+        <div className="mt-3 rounded-md ring-1 ring-ink-700">
           <LoadFailed compact message={auditErr.msg} onRetry={() => loadAudit(auditErr.reset)} />
         </div>
       )}

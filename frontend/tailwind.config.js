@@ -4,34 +4,43 @@ const v = (name) => `rgb(var(--${name}) / <alpha-value>)`
 export default {
   content: ['./index.html', './src/**/*.{ts,tsx}'],
   theme: {
+    // ── Raze: TREI trepte (+ `full` pentru forme rotunde: buline, pilule, avatare) ─────────
+    //   md  6px  — controale: butoane, câmpuri, chip-uri, badge-uri, itemi de meniu
+    //   xl  12px — carduri, popover-e, meniuri, panouri
+    //   2xl 16px — dialoguri/modale, foi, cardul de login
+    // Scara ÎNLOCUIEŞTE pe cea Tailwind (nu o extinde): `rounded`, `rounded-sm`, `rounded-lg`,
+    // `rounded-3xl` nu mai generează nimic. Garda (src/design.guard.test.ts) le prinde înainte.
+    borderRadius: {
+      none: '0',
+      md: '6px',
+      xl: '12px',
+      '2xl': '16px',
+      full: '9999px',
+    },
+    // ── Scara tipografică (design system 3.5.7, docs/design/DESIGN-SYSTEM.md) ───────────────
+    // `text-2xs` (11px) e CEA MAI MICĂ mărime permisă pentru text: HIG cere ≥11pt, iar sub 11px
+    // CSS etichetele devin ilizibile pe ecrane 1×. `compact` (13px) e treapta dintre xs şi sm,
+    // folosită de rândurile dense, proza din modale şi liniile de comandă monospace. Mărimile
+    // arbitrare `text-[Npx]` sunt interzise de garda din src/design.guard.test.ts (vitest).
+    fontSize: {
+      '2xs': ['11px', { lineHeight: '16px' }],
+      xs: ['12px', { lineHeight: '16px' }],
+      compact: ['13px', { lineHeight: '20px' }],
+      sm: ['14px', { lineHeight: '20px' }],
+      base: ['16px', { lineHeight: '24px' }],
+      lg: ['18px', { lineHeight: '28px' }],
+      xl: ['20px', { lineHeight: '28px' }],
+      display: ['22px', { lineHeight: '28px' }],   // titlul de pe ecranul de login
+      '2xl': ['24px', { lineHeight: '32px' }],
+      '3xl': ['30px', { lineHeight: '36px' }],
+      hero: ['60px', { lineHeight: '1' }],          // cifra „403" de pe pagina de share revocat
+    },
     extend: {
       fontFamily: {
         // același font ca terminalul → identitate de terminal în chrome.
         // Toate `font-mono` din UI (adrese, IP-uri, protocol, timestamp) cad
         // acum pe JetBrains Mono, nu pe Menlo/SFMono-ul de sistem.
         mono: ['"JetBrains Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'monospace'],
-      },
-      // ── Raze: TREI trepte (+ `full` pentru forme rotunde: buline, pilule, avatare) ───────
-      //   md  6px  — controale: butoane, câmpuri, chip-uri, badge-uri, itemi de meniu
-      //   xl  12px — carduri, popover-e, meniuri, panouri
-      //   2xl 16px — dialoguri/modale, foi, cardul de login
-      // Sunt chiar valorile Tailwind; le fixăm aici ca sursă explicită a scării.
-      borderRadius: {
-        md: '6px',
-        xl: '12px',
-        '2xl': '16px',
-      },
-      // ── Scara tipografică (design system 3.5.7, docs/design/DESIGN-SYSTEM.md) ─────────────
-      // `text-2xs` (11px) e CEA MAI MICĂ mărime permisă pentru text: HIG cere ≥11pt, iar sub 11px
-      // CSS etichetele devin ilizibile pe ecrane 1×. `compact` (13px) e treapta dintre xs şi sm,
-      // folosită de rândurile dense, proza din modale şi liniile de comandă monospace. Restul
-      // treptelor rămân cele Tailwind (xs 12 · sm 14 · base 16 · lg 18 · xl 20 · 2xl 24 · 3xl 30).
-      // Mărimile arbitrare `text-[Npx]` sunt interzise de scripts/check-design.mjs (npm run lint).
-      fontSize: {
-        '2xs': ['11px', { lineHeight: '16px' }],
-        compact: ['13px', { lineHeight: '20px' }],
-        display: ['22px', { lineHeight: '28px' }],   // titlul de pe ecranul de login
-        hero: ['60px', { lineHeight: '1' }],          // cifra „403" de pe pagina de share revocat
       },
       colors: {
         // ── Tokeni semantici (variabile CSS în index.css, valori pentru AMBELE teme) ──────────

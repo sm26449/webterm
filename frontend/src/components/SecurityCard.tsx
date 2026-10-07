@@ -164,7 +164,7 @@ export default function SecurityCard(props: {
                 const target = TARGET[c.id]
                 const body = (
                   <>
-                    <span aria-hidden="true" className={`grid h-5 w-5 shrink-0 place-items-center rounded-full text-[11px] font-bold ${TONE[c.status]}`}>{GLYPH[c.status]}</span>
+                    <span aria-hidden="true" className={`grid h-5 w-5 shrink-0 place-items-center rounded-full text-2xs font-bold ${TONE[c.status]}`}>{GLYPH[c.status]}</span>
                     <span className="sr-only">{statusWord(c.status)}:</span>
                     <span className="w-40 shrink-0 truncate text-sm text-slate-300 max-sm:w-auto">{d!.label}</span>
                     <span className="min-w-0 flex-1 truncate text-xs text-slate-400">{d!.value}</span>
@@ -175,7 +175,7 @@ export default function SecurityCard(props: {
                   <li key={c.id} data-check={c.id} data-status={c.status}>
                     {target ? (
                       <button type="button" onClick={() => props.onNavigate(target)}
-                        className="flex min-h-9 w-full flex-wrap items-center gap-x-3 gap-y-0.5 rounded-lg px-2 py-1.5 text-left hover:bg-ink-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 sm:flex-nowrap">
+                        className="flex min-h-9 w-full flex-wrap items-center gap-x-3 gap-y-0.5 rounded-md px-2 py-1.5 text-left hover:bg-ink-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 sm:flex-nowrap">
                         {body}
                       </button>
                     ) : (

@@ -121,7 +121,7 @@ export default function TransfersWidget(props: { hosts: Host[]; insertSid?: stri
           aria-label={`${t('jobs.title')}: ${summary} — ${t('transfers.expand')}`}
           title={t('transfers.chipTitle')}
           data-testid="wt-transfers-pill"
-          className={`wt-transfers-surface ${tone} ${pulse ? 'wt-chip-pulse' : ''} wt-touch inline-flex h-8 max-w-[min(88vw,22rem)] items-center gap-1.5 rounded-full px-3 font-mono text-[12px] tabular-nums hover:brightness-110 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400`}>
+          className={`wt-transfers-surface ${tone} ${pulse ? 'wt-chip-pulse' : ''} wt-touch inline-flex h-8 max-w-[min(88vw,22rem)] items-center gap-1.5 rounded-full px-3 font-mono text-xs tabular-nums hover:brightness-110 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400`}>
           <span aria-hidden="true" className="shrink-0">{icon}</span>
           <span className="truncate">{summary}</span>
         </button>

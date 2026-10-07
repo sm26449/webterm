@@ -130,11 +130,11 @@ export default function AccountTab(props: { email?: string | null; onAccountChan
       <p className="mt-1 text-xs text-slate-500">{t('settings.users.hint')}</p>
       <ul className="mt-2 flex flex-col gap-1">
         {users.map((u) => (
-          <li key={u.id} className="flex items-center gap-2 rounded-lg bg-ink-800/60 px-3 py-2 text-sm ring-1 ring-ink-700">
+          <li key={u.id} className="flex items-center gap-2 rounded-md bg-ink-800/60 px-3 py-2 text-sm ring-1 ring-ink-700">
             <span className="min-w-0 flex-1 truncate text-slate-200">{u.email}</span>
-            {u.is_self && <span className="wt-chip-accent shrink-0 rounded px-1.5 py-0.5 text-[11px]">{t('settings.users.you')}</span>}
-            {u.totp && <span className="shrink-0 text-[11px] text-slate-500">2FA</span>}
-            {u.passkeys > 0 && <span className="shrink-0 text-[11px] text-slate-500">{t('settings.users.passkeys', { n: u.passkeys })}</span>}
+            {u.is_self && <span className="wt-chip-accent shrink-0 rounded-md px-1.5 py-0.5 text-2xs">{t('settings.users.you')}</span>}
+            {u.totp && <span className="shrink-0 text-2xs text-slate-500">2FA</span>}
+            {u.passkeys > 0 && <span className="shrink-0 text-2xs text-slate-500">{t('settings.users.passkeys', { n: u.passkeys })}</span>}
             {!u.is_self && users.length > 1 && (
               <button onClick={() => removeUser(u)} className="shrink-0 text-xs wt-danger hover:underline">
                 {t('settings.delete')}

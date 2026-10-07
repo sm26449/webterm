@@ -50,20 +50,20 @@ export default function SnippetParams(props: {
                 autoFocus={i === 0}
                 value={values[p] ?? ''}
                 onChange={(e) => setValues({ ...values, [p]: e.target.value })}
-                className="w-full rounded-lg bg-ink-800 px-3 py-2 text-sm ring-1 ring-ink-700 focus:ring-sky-600"
+                className="w-full rounded-md bg-ink-800 px-3 py-2 text-sm ring-1 ring-ink-700 focus:ring-sky-600"
               />
             </label>
           ))}
 
           <div>
             <span className="mb-1 block text-xs font-medium text-slate-400">{t('snippetparams.finalCommand')}</span>
-            <code className="block max-h-32 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-[#0b0e14] p-3 font-mono text-xs text-emerald-300">
+            <code className="block max-h-32 overflow-auto whitespace-pre-wrap break-all rounded-md bg-[#0b0e14] p-3 font-mono text-xs text-emerald-300">
               {preview}
             </code>
           </div>
 
           <div className="flex justify-end gap-2 pt-1">
-            <button type="button" onClick={props.onCancel} className="rounded-lg px-4 py-2 text-sm text-slate-400 hover:bg-ink-800">
+            <button type="button" onClick={props.onCancel} className="rounded-md px-4 py-2 text-sm text-slate-400 hover:bg-ink-800">
               {t('snippetparams.cancel')}
             </button>
             <Button variant="primary" size="lg">

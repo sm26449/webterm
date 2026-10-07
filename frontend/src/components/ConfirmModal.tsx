@@ -39,14 +39,14 @@ export default function ConfirmModal(props: {
           <button
             autoFocus={!!props.danger}
             onClick={props.onCancel}
-            className="rounded-lg px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800"
+            className="rounded-md px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800"
           >
             {props.cancelLabel ?? t('common.cancel')}
           </button>
           <button
             autoFocus={!props.danger}
             onClick={props.onConfirm}
-            className={`rounded-lg px-3 py-1.5 text-sm font-medium text-white ${confirmBtn}`}
+            className={`rounded-md px-3 py-1.5 text-sm font-medium text-white ${confirmBtn}`}
           >
             {props.confirmLabel ?? t('common.confirm')}
           </button>

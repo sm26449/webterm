@@ -74,7 +74,7 @@ export default function KeyboardHelp(props: { onClose: () => void; onReplayWalkt
 
         {groups.map((g) => (
           <div key={g} className="mt-5">
-            <h3 className="text-[13px] font-semibold uppercase tracking-wide text-slate-400">{t(GROUP_KEY[g])}</h3>
+            <h3 className="text-compact font-semibold uppercase tracking-wide text-slate-400">{t(GROUP_KEY[g])}</h3>
             <dl className="mt-2 divide-y divide-ink-800 text-sm">
               {SHORTCUTS.filter((s) => s.group === g).map((s) => (
                 <div key={s.id} className="flex items-center justify-between gap-4 py-2">
@@ -108,7 +108,7 @@ export default function KeyboardHelp(props: { onClose: () => void; onReplayWalkt
             <button
               type="button"
               onClick={props.onReplayWalkthrough}
-              className="wt-touch rounded-lg px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800"
+              className="wt-touch rounded-md px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800"
             >
               {t('walkthrough.replayHelp')}
             </button>

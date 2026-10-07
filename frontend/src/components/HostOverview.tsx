@@ -128,22 +128,22 @@ export default function HostOverview(props: {
         title={t('host.rowPreview')}
         className="flex min-w-0 flex-1 items-center gap-2.5 py-2 pl-3 pr-1 text-left focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-sky-500"
       >
-        <span aria-hidden="true" className={`h-2 w-2 shrink-0 ${s.state === 'lost' ? 'rounded-sm' : 'rounded-full'} ${
+        <span aria-hidden="true" className={`h-2 w-2 shrink-0 ${s.state === 'lost' ? 'rounded-md' : 'rounded-full'} ${
           live ? 'bg-emerald-400 dot-live' : s.state === 'lost' ? 'bg-rose-500' : 'bg-slate-600'}`} />
         <span className="min-w-0 flex-1">
           <span className="block truncate text-sm text-slate-200">{s.title || t('host.sessionFallback')}</span>
-          <span className="block truncate text-[11px] text-slate-600">
+          <span className="block truncate text-2xs text-slate-600">
             {live ? t('host.stateActive') : s.state === 'lost' ? t('host.stateLost') : t('host.stateClosed')}
             {s.exit_status != null ? ` · exit ${s.exit_status}` : ''} · {timeAgo(s.closed_at || s.created, t)}
           </span>
         </span>
-        {s.connected_clients > 0 && <span className="flex shrink-0 items-center gap-1 text-[11px] text-slate-500"><EyeIcon /> {s.connected_clients}</span>}
+        {s.connected_clients > 0 && <span className="flex shrink-0 items-center gap-1 text-2xs text-slate-500"><EyeIcon /> {s.connected_clients}</span>}
       </button>
       <button
         type="button"
         onClick={() => props.onOpenSession(s.id)}
         aria-label={t('host.rowOpenAria', { name: s.title || t('host.sessionFallback') })}
-        className="wt-link mr-2 shrink-0 rounded px-2 py-1 text-xs font-medium ring-1 ring-ink-700 hover:bg-ink-700"
+        className="wt-link mr-2 shrink-0 rounded-md px-2 py-1 text-xs font-medium ring-1 ring-ink-700 hover:bg-ink-700"
       >{t('host.rowOpen')}</button>
       </div>
     )
@@ -226,7 +226,7 @@ export default function HostOverview(props: {
           className="flex shrink-0 gap-1 overflow-x-auto border-b border-ink-800 p-2 md:w-52 md:flex-col md:overflow-x-visible md:overflow-y-auto md:border-b-0 md:border-r">
           {visibleTabs.map((x) => (
             <button key={x.id} onClick={() => setTab(x.id)} aria-current={tab === x.id ? 'page' : undefined}
-              className={`flex shrink-0 items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition md:w-full ${
+              className={`flex shrink-0 items-center gap-2.5 rounded-md px-3 py-2 text-sm font-medium transition md:w-full ${
                 tab === x.id ? 'bg-ink-800 text-slate-100 ring-1 ring-ink-700'
                              : 'text-slate-400 hover:bg-ink-800/50 hover:text-slate-200'}`}>
               <span className="grid h-4 w-4 shrink-0 place-items-center opacity-80">{x.icon}</span>
@@ -241,17 +241,17 @@ export default function HostOverview(props: {
           {(agentReady || isAgent) && (
             <>
               <div className="mx-2 my-1 hidden self-stretch border-t border-ink-800 md:block" aria-hidden="true" />
-              <div className="hidden px-3 pb-0.5 pt-1 text-[10px] font-semibold uppercase tracking-wider text-slate-600 md:block">{t('host.tools')}</div>
+              <div className="hidden px-3 pb-0.5 pt-1 text-2xs font-semibold uppercase tracking-wider text-slate-600 md:block">{t('host.tools')}</div>
               {agentReady && (
                 <button onClick={() => props.onSerial(host)}
-                  className="flex shrink-0 items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium text-slate-400 transition hover:bg-ink-800/50 hover:text-slate-200 md:w-full">
+                  className="flex shrink-0 items-center gap-2.5 rounded-md px-3 py-2 text-sm font-medium text-slate-400 transition hover:bg-ink-800/50 hover:text-slate-200 md:w-full">
                   <span className="grid h-4 w-4 shrink-0 place-items-center opacity-80"><PlugIcon /></span>
                   {t('host.serialConsole')}
                 </button>
               )}
               {isAgent && (
                 <button onClick={() => props.onDiagnostic(host)}
-                  className="flex shrink-0 items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium text-slate-400 transition hover:bg-ink-800/50 hover:text-slate-200 md:w-full">
+                  className="flex shrink-0 items-center gap-2.5 rounded-md px-3 py-2 text-sm font-medium text-slate-400 transition hover:bg-ink-800/50 hover:text-slate-200 md:w-full">
                   <span className="grid h-4 w-4 shrink-0 place-items-center opacity-80"><StethoscopeIcon /></span>
                   {t('host.diagnostic')}
                 </button>
@@ -278,9 +278,9 @@ export default function HostOverview(props: {
 
               {active.length > 0 && (
                 <section>
-                  <div className="mb-3 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                  <div className="mb-3 flex items-center gap-2 text-2xs font-semibold uppercase tracking-wider text-slate-500">
                     {t('host.active')} <span className="text-slate-600">· {active.length}</span>
-                    <button onClick={() => setTab('sessions')} className="wt-link ml-auto inline-flex items-center gap-1 rounded px-1 py-1 text-[11px] normal-case">{t('host.allSessions')} <ArrowRightIcon size={11} /></button>
+                    <button onClick={() => setTab('sessions')} className="wt-link ml-auto inline-flex items-center gap-1 rounded-md px-1 py-1 text-2xs normal-case">{t('host.allSessions')} <ArrowRightIcon size={11} /></button>
                   </div>
                   {/* thumbnail-uri LIVE: fiecare card e un preview read-only al sesiunii, auto-fit */}
                   <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))' }}>
@@ -322,7 +322,7 @@ export default function HostOverview(props: {
         {tab === 'sessions' && (
           <div className="flex min-h-0 flex-1 flex-col md:flex-row">
             <div className="max-h-[38%] w-full shrink-0 overflow-y-auto border-b border-ink-800 md:max-h-none md:w-[320px] md:border-b-0 md:border-r">
-              <div className="px-3 pb-1 pt-3 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+              <div className="px-3 pb-1 pt-3 text-2xs font-semibold uppercase tracking-wide text-slate-500">
                 {t('host.active')} {active.length > 0 && <span className="text-slate-600">· {active.length}</span>}
               </div>
               {active.length === 0
@@ -330,7 +330,7 @@ export default function HostOverview(props: {
                 : active.map(row)}
               {closed.length > 0 && (
                 <>
-                  <div className="px-3 pb-1 pt-4 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                  <div className="px-3 pb-1 pt-4 text-2xs font-semibold uppercase tracking-wide text-slate-500">
                     {t('host.closed')} <span className="text-slate-600">· {closed.length}</span>
                   </div>
                   {closed.map(row)}
@@ -345,7 +345,7 @@ export default function HostOverview(props: {
                       selLive ? 'bg-emerald-400 dot-live' : sel.state === 'lost' ? 'bg-rose-500' : 'bg-slate-600'}`} />
                     <div className="min-w-[8rem] flex-1">
                       <div className="truncate text-sm font-medium text-slate-200">{sel.title || t('host.sessionFallback')}</div>
-                      <div className="truncate text-[11px] text-slate-600">
+                      <div className="truncate text-2xs text-slate-600">
                         {selLive ? t('host.previewLive') : t('host.previewHistory')} · {timeAgo(sel.closed_at || sel.created, t)}
                       </div>
                     </div>
@@ -468,12 +468,13 @@ function ThumbPreview({ sid, live }: { sid: string; live: boolean }) {
           <rect x="3" y="4" width="18" height="16" rx="2" />
           <path d="M7 9l3 3-3 3M13 15h4" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
-        <span className="text-[11px]">{t('host.previewEmpty')}</span>
+        <span className="text-2xs">{t('host.previewEmpty')}</span>
       </div>
     )
   }
   return (
-    <pre className="h-full w-full overflow-hidden whitespace-pre px-2.5 py-2 font-mono text-[9px] leading-[1.4] text-slate-400">{text}</pre>
+    // miniatură = imagine a ecranului (excepţie de la scara tipografică, vezi design.guard.test.ts)
+    <pre aria-hidden="true" className="h-full w-full overflow-hidden whitespace-pre px-2.5 py-2 font-mono text-[9px] leading-[1.4] text-slate-400">{text}</pre>
   )
 }
 
@@ -496,13 +497,13 @@ function SessionThumb(props: {
           <ThumbPreview sid={s.id} live />
           {/* overlay „deschide" la hover */}
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/0 opacity-0 transition group-hover:bg-black/30 group-hover:opacity-100">
-            <span className="rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-medium text-white shadow-lg">{t('host.openTerminal')}</span>
+            <span className="rounded-xl bg-sky-600 px-3 py-1.5 text-xs font-medium text-white shadow-lg">{t('host.openTerminal')}</span>
           </div>
         </div>
         <div className="flex items-center gap-2 px-3 py-2">
           <span className="h-2 w-2 shrink-0 rounded-full bg-emerald-400 dot-live" />
           <span className="min-w-0 flex-1 truncate text-sm text-slate-200">{s.title || t('host.sessionFallback')}</span>
-          {s.connected_clients > 0 && <span className="flex shrink-0 items-center gap-1 text-[11px] text-slate-500"><EyeIcon /> {s.connected_clients}</span>}
+          {s.connected_clients > 0 && <span className="flex shrink-0 items-center gap-1 text-2xs text-slate-500"><EyeIcon /> {s.connected_clients}</span>}
         </div>
       </button>
       {/* acţiuni rapide — apar la hover ŞI când focusul e înăuntru (altfel erau focusabile dar
@@ -542,7 +543,7 @@ function StatTile(props: { label: string; pct?: number; big?: string; sub?: stri
     <Card>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">{props.label}</div>
+          <div className="text-2xs font-semibold uppercase tracking-wider text-slate-500">{props.label}</div>
           {props.big != null && <div className="mt-2 font-mono text-3xl font-semibold leading-none tabular-nums text-slate-100">{props.big}</div>}
           {props.sub && <div className="mt-1.5 truncate font-mono text-xs text-slate-500 tabular-nums">{props.sub}</div>}
         </div>
@@ -655,10 +656,10 @@ function InfoCard(props: { title: string; icon?: React.ReactNode; accent?: strin
     <Card className={props.className}>
       <div className="mb-2.5 flex items-center gap-2.5">
         {props.icon && (
-          <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg [&>svg]:h-4 [&>svg]:w-4"
+          <span className="grid h-8 w-8 shrink-0 place-items-center rounded-md [&>svg]:h-4 [&>svg]:w-4"
             style={{ background: `${accent}1a`, color: accent }}>{props.icon}</span>
         )}
-        <h3 className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">{props.title}</h3>
+        <h3 className="text-2xs font-semibold uppercase tracking-wider text-slate-500">{props.title}</h3>
       </div>
       <dl>{props.children}</dl>
     </Card>
@@ -791,11 +792,11 @@ function HostDetail({ host }: { host: Host }) {
                   title={a.enabled ? a.url : t('dashboard.appDisabled')}
                   className={`group flex items-center gap-3 rounded-xl border border-ink-700 bg-ink-900/40 px-3 py-2.5 ${
                     a.enabled ? 'hover:border-ink-500 hover:bg-ink-800' : 'cursor-not-allowed opacity-50'}`}>
-                  <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg font-mono text-sm font-bold"
+                  <span className="grid h-9 w-9 shrink-0 place-items-center rounded-md font-mono text-sm font-bold"
                     style={{ background: `${color}22`, color }}>{a.label.slice(0, 1).toUpperCase()}</span>
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-sm font-medium text-slate-200">{a.label}</span>
-                    <span className="block truncate font-mono text-[11px] text-slate-500">{a.url.replace(/^https?:\/\//, '')}</span>
+                    <span className="block truncate font-mono text-2xs text-slate-500">{a.url.replace(/^https?:\/\//, '')}</span>
                   </span>
                   {a.enabled && <span className="shrink-0 text-slate-600 group-hover:text-slate-400"><ArrowUpRightIcon /></span>}
                 </a>

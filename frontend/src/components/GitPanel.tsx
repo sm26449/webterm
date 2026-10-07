@@ -74,7 +74,7 @@ const isUnstaged = (f: GitFile) => f.work !== ' ' && f.work !== '?' && !f.untrac
 function DiffView({ text }: { text: string }) {
   const lines = text.split('\n')
   return (
-    <pre className="min-h-0 flex-1 overflow-auto px-2 py-1 font-mono text-[11px] leading-snug">
+    <pre className="min-h-0 flex-1 overflow-auto px-2 py-1 font-mono text-2xs leading-snug">
       {lines.map((l, i) => {
         let cls = 'text-slate-400'
         if (l.startsWith('@@')) cls = 'wt-link'
@@ -238,10 +238,10 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
     <header className="flex items-center gap-2 border-b border-ink-800 px-3 py-2">
       <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">{t('git.title')}</span>
       <button onClick={refresh} disabled={!cwd || busy}
-        className="wt-touch ml-auto rounded px-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-300 disabled:opacity-30"
+        className="wt-touch ml-auto rounded-md px-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-300 disabled:opacity-30"
         title={t('git.reloadStatus')} aria-label={t('git.reloadStatus')}><RefreshIcon /></button>
       <button onClick={props.onClose} aria-label={t('git.closeAria')}
-        className="wt-touch rounded px-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-300"><CloseIcon size={14} /></button>
+        className="wt-touch rounded-md px-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-300"><CloseIcon size={14} /></button>
     </header>
   )
 
@@ -270,8 +270,8 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
     const active = sel?.path === f.path && sel.staged === (group === 'staged')
     return (
       <div key={group + f.path}
-        className={`group flex items-center gap-2 px-3 py-1 text-[12px] ${active ? 'bg-ink-800' : 'hover:bg-ink-800/60'}`}>
-        <span className={`w-4 shrink-0 text-center font-mono text-[11px] font-bold ${s.cls}`} title={t(s.label)}>{ch === '?' ? '?' : ch}</span>
+        className={`group flex items-center gap-2 px-3 py-1 text-xs ${active ? 'bg-ink-800' : 'hover:bg-ink-800/60'}`}>
+        <span className={`w-4 shrink-0 text-center font-mono text-2xs font-bold ${s.cls}`} title={t(s.label)}>{ch === '?' ? '?' : ch}</span>
         <button onClick={() => openDiff(f, group === 'staged')}
           className="min-w-0 flex-1 truncate text-left font-mono text-slate-200" title={f.path}>
           {f.path}
@@ -279,11 +279,11 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
         {/* ţinte de 24px + etichetă care numeşte fişierul: „+"/„−" singure nu spun nimic cititorului */}
         {group === 'staged' ? (
           <button onClick={() => unstage(f)} disabled={busy}
-            className="grid h-6 w-6 shrink-0 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-amber-300 disabled:opacity-40"
+            className="grid h-6 w-6 shrink-0 place-items-center rounded-md text-slate-500 hover:bg-ink-700 hover:text-amber-300 disabled:opacity-40"
             title={t('git.unstage')} aria-label={`${t('git.unstage')} ${f.path}`}>−</button>
         ) : (
           <button onClick={() => stage(f)} disabled={busy}
-            className="grid h-6 w-6 shrink-0 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-emerald-300 disabled:opacity-40"
+            className="grid h-6 w-6 shrink-0 place-items-center rounded-md text-slate-500 hover:bg-ink-700 hover:text-emerald-300 disabled:opacity-40"
             title={t('git.stage')} aria-label={`${t('git.stage')} ${f.path}`}>+</button>
         )}
       </div>
@@ -291,7 +291,7 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
   }
 
   const groupHead = (label: string, n: number) => (
-    <div className="flex items-center gap-2 border-y border-ink-800/60 bg-ink-800/30 px-3 py-0.5 text-[10px] uppercase tracking-wide text-slate-500">
+    <div className="flex items-center gap-2 border-y border-ink-800/60 bg-ink-800/30 px-3 py-0.5 text-2xs uppercase tracking-wide text-slate-500">
       <span>{label}</span><span className="tabular-nums text-slate-600">{n}</span>
     </div>
   )
@@ -306,7 +306,7 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
 
         {/* bara de branch */}
         {repo && (
-          <div className="flex items-center gap-2 border-b border-ink-800 px-3 py-1.5 text-[11px]">
+          <div className="flex items-center gap-2 border-b border-ink-800 px-3 py-1.5 text-2xs">
             <span className="inline-flex items-center gap-1 font-mono font-medium text-slate-300" title={cwd}><GitBranchIcon size={12} /> {repo.branch}</span>
             {repo.ahead > 0 && <span className="wt-good inline-flex items-center tabular-nums" title={t('git.aheadTitle')}><ArrowUpIcon size={11} />{repo.ahead}</span>}
             {repo.behind > 0 && <span className="wt-warn inline-flex items-center tabular-nums" title={t('git.behindTitle')}><ArrowDownIcon size={11} />{repo.behind}</span>}
@@ -314,13 +314,13 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
           </div>
         )}
 
-        {error && <div className="border-b border-ink-800 bg-ink-800 px-3 py-1.5 text-[11px] wt-danger">{error}</div>}
-        {note && !error && <div role="status" className="border-b border-ink-800 bg-ink-800/60 px-3 py-1.5 text-[11px] text-slate-400">{note}</div>}
+        {error && <div className="border-b border-ink-800 bg-ink-800 px-3 py-1.5 text-2xs wt-danger">{error}</div>}
+        {note && !error && <div role="status" className="border-b border-ink-800 bg-ink-800/60 px-3 py-1.5 text-2xs text-slate-400">{note}</div>}
 
         {notRepo && (
           <div className="flex flex-1 flex-col items-center justify-center gap-2 p-4 text-center">
             <p className="text-xs text-slate-500">{t('git.notRepo')}</p>
-            <p className="font-mono text-[10px] text-slate-600" title={cwd}>{cwd || '—'}</p>
+            <p className="font-mono text-2xs text-slate-600" title={cwd}>{cwd || '—'}</p>
           </div>
         )}
 
@@ -334,17 +334,17 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
               {untracked.length > 0 && groupHead(t('git.groupUntracked'), untracked.length)}
               {untracked.map((f) => row(f, 'untracked'))}
               {files.length === 0 && (
-                <div className="px-3 py-6 text-center text-[11px] text-slate-500">{t('git.nothingToCommit')}</div>
+                <div className="px-3 py-6 text-center text-2xs text-slate-500">{t('git.nothingToCommit')}</div>
               )}
             </div>
 
             {/* diff-ul fișierului selectat */}
             {sel && (
               <div className="flex min-h-0 flex-1 flex-col border-t border-ink-800">
-                <div className="flex items-center gap-2 border-b border-ink-800 px-3 py-1 text-[10px] text-slate-500">
+                <div className="flex items-center gap-2 border-b border-ink-800 px-3 py-1 text-2xs text-slate-500">
                   <span className="truncate font-mono" title={sel.path}>{sel.path}</span>
                   <span className="ml-auto shrink-0">{sel.staged ? t('git.diffStaged') : t('git.diffWorktree')}</span>
-                  <button onClick={() => { setSel(null); setDiff('') }} className="grid h-6 w-6 shrink-0 place-items-center rounded hover:bg-ink-800 hover:text-slate-300" title={t('git.closeDiff')} aria-label={t('git.closeDiff')}><CloseIcon size={14} /></button>
+                  <button onClick={() => { setSel(null); setDiff('') }} className="grid h-6 w-6 shrink-0 place-items-center rounded-md hover:bg-ink-800 hover:text-slate-300" title={t('git.closeDiff')} aria-label={t('git.closeDiff')}><CloseIcon size={14} /></button>
                 </div>
                 <DiffView text={diff} />
               </div>
@@ -358,14 +358,14 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
                 onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); commit() } }}
                 placeholder={staged.length ? t('git.commitPlaceholder') : t('git.commitPlaceholderEmpty')}
                 rows={2}
-                className="w-full resize-none rounded bg-ink-800 px-2 py-1 font-mono text-[11px] text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500"
+                className="w-full resize-none rounded-md bg-ink-800 px-2 py-1 font-mono text-2xs text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500"
               />
               <div className="mt-1 flex items-center gap-2">
-                <span className="text-[10px] text-slate-500">{t('git.stagedCount', { n: staged.length })}</span>
+                <span className="text-2xs text-slate-500">{t('git.stagedCount', { n: staged.length })}</span>
                 <button
                   onClick={commit}
                   disabled={busy || !msg.trim() || staged.length === 0}
-                  className="ml-auto rounded bg-emerald-600 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
+                  className="ml-auto rounded-md bg-emerald-600 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
                 >{t('git.commit')}</button>
               </div>
             </div>

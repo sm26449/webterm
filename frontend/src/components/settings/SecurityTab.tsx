@@ -419,31 +419,31 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
       {devices === null ? (
         <div className="mt-2 text-xs text-slate-500">{t('settings.loading')}</div>
       ) : devicesErr !== null ? (
-        <div className="mt-2 rounded-lg ring-1 ring-ink-700">
+        <div className="mt-2 rounded-md ring-1 ring-ink-700">
           <LoadFailed compact message={devicesErr} onRetry={() => { setDevices(null); loadDevices() }} />
         </div>
       ) : devices.length === 0 ? (
         <div className="mt-2 text-xs text-slate-500">{t('settings.devicesNone')}</div>
       ) : (
-        <div className="mt-2 divide-y divide-ink-800 rounded-lg ring-1 ring-ink-700">
+        <div className="mt-2 divide-y divide-ink-800 rounded-md ring-1 ring-ink-700">
           {devices.map((d) => (
             <div key={d.id} className="flex items-center gap-3 px-3 py-2 text-sm">
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
                   <span className="truncate text-slate-200">{d.label}</span>
                   {d.current && (
-                    <span className="wt-accent shrink-0 rounded bg-sky-500/15 px-1.5 text-[10px]">
+                    <span className="wt-accent shrink-0 rounded-md bg-sky-500/15 px-1.5 text-2xs">
                       {t('settings.deviceThis')}
                     </span>
                   )}
                   {d.new_device && !d.current && (
                     <span title={t('session.deviceNewTitle')}
-                      className="wt-warn shrink-0 rounded bg-amber-500/15 px-1.5 text-[10px]">
+                      className="wt-warn shrink-0 rounded-md bg-amber-500/15 px-1.5 text-2xs">
                       {t('session.deviceNew')}
                     </span>
                   )}
                 </div>
-                <div className="mt-0.5 text-[11px] text-slate-500">
+                <div className="mt-0.5 text-2xs text-slate-500">
                   {t('settings.deviceSeen', { when: fmtTs(d.last_seen || d.created) })}
                 </div>
               </div>
@@ -470,7 +470,7 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
             await api('/api/account/sessions/revoke-others', { method: 'POST' }).catch(() => {})
             loadDevices()
           }}
-          className="mt-2 rounded-lg px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800"
+          className="mt-2 rounded-md px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800"
         >{t('settings.devicesRevokeOthers')}</button>
       )}
 
@@ -483,13 +483,13 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
         <div className="mt-2 text-xs text-slate-500">{t('settings.loading')}</div>
       ) : !sign.exists ? (
         <div className="mt-2 flex flex-col gap-2">
-          <div className="rounded-lg bg-amber-500/10 p-2.5 text-xs wt-warn ring-1 ring-amber-500/25">
+          <div className="rounded-md bg-amber-500/10 p-2.5 text-xs wt-warn ring-1 ring-amber-500/25">
             {t('settings.sign.noKeyYet')}
           </div>
           <div className="flex gap-1 text-sm">
             {([['gen', t('settings.sign.genNewKey')], ['import', t('settings.sign.importExistingKey')]] as const).map(([m, label]) => (
               <button key={m} onClick={() => { setSignMode(m); setSignErr('') }}
-                className={`rounded-lg px-3 py-1.5 ring-1 ${signMode === m
+                className={`rounded-md px-3 py-1.5 ring-1 ${signMode === m
                   ? 'bg-sky-600 text-white ring-sky-600' : 'bg-ink-800 text-slate-300 ring-ink-700 hover:bg-ink-700'}`}>
                 {label}
               </button>
@@ -506,7 +506,7 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
               <input type="password" value={signPass2} onChange={(e) => setSignPass2(e.target.value)}
                 placeholder={t('settings.sign.confirmPassIfSet')} aria-label={t('settings.sign.confirmKeyPass')}
                 autoComplete="new-password" className={field} />
-              <p className="text-[11px] text-slate-500">
+              <p className="text-2xs text-slate-500">
                 {t('settings.sign.storageHintA')} <span className="text-slate-300">{t('settings.sign.storageEncrypted')}</span> {t('settings.sign.storageHintB')} <span className="wt-warn">{t('settings.sign.storageInClear')}</span>{t('settings.sign.storageHintC')}
                 <code className="px-1">/data</code> {t('settings.sign.storageHintD')} <span className="text-slate-300">{t('settings.sign.storageWholeFleet')}</span>.
               </p>
@@ -518,12 +518,12 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
             </>
           ) : (
             <>
-              <p className="text-[11px] text-slate-500">
+              <p className="text-2xs text-slate-500">
                 {t('settings.sign.importHintA')} <span className="text-slate-300">{t('settings.sign.importHintAlreadySigned')}</span>{t('settings.sign.importHintB')} <span className="text-slate-300">{t('settings.sign.importHintNoReenroll')}</span>.
               </p>
               <div className="flex items-center gap-2">
                 <button onClick={() => signPemRef.current?.click()}
-                  className="rounded-lg bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700">
+                  className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700">
                   {t('settings.sign.choosePemFile')}
                 </button>
                 <span className="min-w-0 truncate text-xs text-slate-400">{signPemName || t('settings.noFile')}</span>
@@ -559,13 +559,13 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
             {!sign.encrypted && <span className="text-slate-500">{t('settings.sign.inClearOnServer')}</span>}
           </div>
           {sign.pubkey && (
-            <div className="font-mono text-[11px] text-slate-500 break-all">
+            <div className="font-mono text-2xs text-slate-500 break-all">
               {t('settings.sign.fingerprint')} {sign.pubkey.slice(0, 16)}…{sign.pubkey.slice(-8)}
             </div>
           )}
           {/* Întrebarea pe care şi-o pune oricine modifică agentul: „trebuie să semnez ceva?".
               Răspunsul e nu, dar nicăieri nu scria — iar tăcerea aici costă timp pierdut. */}
-          <p className="text-[11px] text-slate-500">{t('settings.sign.selfSigns')}</p>
+          <p className="text-2xs text-slate-500">{t('settings.sign.selfSigns')}</p>
           {sign.encrypted && !sign.unlocked && (
             <div className="flex gap-2">
               <input type="password" value={signUnlockPass} onChange={(e) => setSignUnlockPass(e.target.value)}
@@ -577,18 +577,18 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
           )}
           <div className="flex flex-wrap gap-2">
             <button onClick={downloadSigningKey} disabled={signBusy}
-              className="rounded-lg bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-50">
+              className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-50">
               {t('settings.downloadEncryptedBackup')}
             </button>
             {sign.encrypted && sign.unlocked && (
               <button onClick={lockSigning}
-                className="rounded-lg bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700">
+                className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700">
                 {t('settings.sign.lock')}
               </button>
             )}
           </div>
           {sign.encrypted && sign.unlocked && (
-            <p className="text-[11px] text-slate-500">
+            <p className="text-2xs text-slate-500">
               {t('settings.sign.unlockedWarning')}
             </p>
           )}
@@ -606,7 +606,7 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
       </p>
       <div className="mt-2 space-y-1">
         {passkeys.map((p) => (
-          <div key={p.id} className="flex items-center justify-between rounded-lg bg-ink-800 px-3 py-2 text-sm">
+          <div key={p.id} className="flex items-center justify-between rounded-md bg-ink-800 px-3 py-2 text-sm">
             <span className="inline-flex items-center gap-2">
               <KeyIcon /> {p.name}
             </span>
@@ -617,7 +617,7 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
         ))}
         {passkeys.length === 0 && <div className="text-xs text-slate-500">{t('settings.noPasskeys')}</div>}
         {lockoutRisk && (
-          <div className="rounded-lg bg-amber-500/10 p-2.5 text-xs wt-warn ring-1 ring-amber-500/25">
+          <div className="rounded-md bg-amber-500/10 p-2.5 text-xs wt-warn ring-1 ring-amber-500/25">
             {t('settings.singlePasskeyWarning')}
           </div>
         )}
@@ -643,7 +643,7 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
           <div className="flex gap-2">
             <button
               onClick={() => { setPendingAction('regen'); setActionPw('') }}
-              className="rounded-lg bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700"
+              className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700"
             >
               {t('settings.totp.regen')}
             </button>
@@ -658,7 +658,7 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
                 }))) return
                 setPendingAction('disable'); setActionPw('')
               }}
-              className="rounded-lg bg-ink-800 px-3 py-1.5 text-sm wt-danger ring-1 ring-ink-700 hover:bg-ink-700"
+              className="rounded-md bg-ink-800 px-3 py-1.5 text-sm wt-danger ring-1 ring-ink-700 hover:bg-ink-700"
             >
               {t('settings.totp.disable')}
             </button>
@@ -689,7 +689,7 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
             </Button>
             <button
               onClick={() => { setPendingAction(null); setActionPw('') }}
-              className="rounded-lg px-3 py-1.5 text-sm text-slate-400 hover:bg-ink-800"
+              className="rounded-md px-3 py-1.5 text-sm text-slate-400 hover:bg-ink-800"
             >
               {t('settings.cancel')}
             </button>
@@ -713,11 +713,11 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
             <img
               src={qrDataUrl(enroll.uri)}
               alt={t('settings.totp.qrAlt')}
-              className="rounded-lg bg-white p-2"
+              className="rounded-md bg-white p-2"
               width={180}
               height={180}
             />
-            <code className="select-all break-all rounded bg-ink-800 px-2 py-1 font-mono text-xs text-slate-300">
+            <code className="select-all break-all rounded-md bg-ink-800 px-2 py-1 font-mono text-xs text-slate-300">
               {enroll.secret}
             </code>
           </div>
@@ -739,7 +739,7 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
             </Button>
             <button
               onClick={() => { setEnroll(null); setActivateCode('') }}
-              className="rounded-lg px-3 py-1.5 text-sm text-slate-400 hover:bg-ink-800"
+              className="rounded-md px-3 py-1.5 text-sm text-slate-400 hover:bg-ink-800"
             >
               {t('settings.cancel')}
             </button>
@@ -748,20 +748,20 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
       )}
 
       {recoveryCodes && (
-        <div className="mt-3 rounded-lg bg-amber-500/10 p-3 ring-1 ring-amber-500/25">
+        <div className="mt-3 rounded-md bg-amber-500/10 p-3 ring-1 ring-amber-500/25">
           <p className="text-xs font-medium wt-warn">
             {t('settings.totp.recoveryWarning')}
           </p>
           <div className="mt-2 grid grid-cols-2 gap-1 font-mono text-sm text-slate-200">
             {recoveryCodes.map((c) => (
-              <span key={c} className="select-all rounded bg-ink-900 px-2 py-1 text-center">{c}</span>
+              <span key={c} className="select-all rounded-md bg-ink-900 px-2 py-1 text-center">{c}</span>
             ))}
           </div>
           {/* Copy + .txt: altfel singura cale era selecţia manuală, cod cu cod */}
           <div className="mt-3 flex flex-wrap gap-2">
             <button type="button"
               onClick={() => copyText(recoveryCodes.join('\n')).then((okc) => { if (okc) { setCodesCopied(true); setTimeout(() => setCodesCopied(false), 1500) } })}
-              className="rounded-lg bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700">
+              className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700">
               {codesCopied ? t('settings.cloud.copied') : t('settings.totp.copyCodes')}
             </button>
             <button type="button"
@@ -773,12 +773,12 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
                 document.body.appendChild(a); a.click(); a.remove()
                 setTimeout(() => URL.revokeObjectURL(url), 1000)
               }}
-              className="rounded-lg bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700">
+              className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700">
               {t('settings.totp.downloadCodes')}
             </button>
             <button
               onClick={() => setRecoveryCodes(null)}
-              className="rounded-lg bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700"
+              className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700"
             >
               {t('settings.totp.savedThem')}
             </button>
@@ -790,10 +790,10 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
       <h3 className={heading + ' flex items-center gap-2'}>{t('settings.tokens.title')}<HelpTip id="tokens" /></h3>
       <p className="mt-1 text-xs text-slate-500">{t('settings.tokens.hint')}</p>
       {tokPlain && (
-        <div role="status" aria-live="polite" className="mt-2 rounded-lg bg-emerald-500/10 p-3 ring-1 ring-emerald-500/30">
+        <div role="status" aria-live="polite" className="mt-2 rounded-md bg-emerald-500/10 p-3 ring-1 ring-emerald-500/30">
           <p className="wt-good text-xs">{t('settings.tokens.copyNow')}</p>
           <div className="mt-1 flex items-center gap-2">
-            <code className="min-w-0 flex-1 break-all rounded bg-ink-900 px-2 py-1 font-mono text-xs text-slate-200">{tokPlain}</code>
+            <code className="min-w-0 flex-1 break-all rounded-md bg-ink-900 px-2 py-1 font-mono text-xs text-slate-200">{tokPlain}</code>
             <button type="button" onClick={() => copyText(tokPlain).then((okc) => { if (okc) { setTokCopied(true); setTimeout(() => setTokCopied(false), 1500) } })}
               className="shrink-0 text-xs wt-link hover:underline">
               {tokCopied ? t('settings.cloud.copied') : t('settings.cloud.copy')}
@@ -803,14 +803,14 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
       )}
       <ul className="mt-2 flex flex-col gap-1">
         {tokens.map((tk) => (
-          <li key={tk.id} className="flex items-center gap-2 rounded-lg bg-ink-800/60 px-3 py-2 text-sm ring-1 ring-ink-700">
+          <li key={tk.id} className="flex items-center gap-2 rounded-md bg-ink-800/60 px-3 py-2 text-sm ring-1 ring-ink-700">
             <span className="min-w-0 flex-1 truncate text-slate-200">{tk.name}</span>
-            <span className="shrink-0 font-mono text-[11px] text-slate-500">{tk.scopes}</span>
-            <span className={`shrink-0 text-[11px] ${tk.expired ? 'wt-danger' : 'text-slate-500'}`}>
+            <span className="shrink-0 font-mono text-2xs text-slate-500">{tk.scopes}</span>
+            <span className={`shrink-0 text-2xs ${tk.expired ? 'wt-danger' : 'text-slate-500'}`}>
               {tk.expired ? t('settings.tokens.expired')
                 : t('settings.tokens.expires', { date: fmtTs(tk.expires, 'date') })}
             </span>
-            <span className="shrink-0 text-[11px] text-slate-600">
+            <span className="shrink-0 text-2xs text-slate-600">
               {tk.last_used ? t('settings.tokens.lastUsed', { when: fmtTs(tk.last_used, 'date') })
                 : t('settings.tokens.neverUsed')}
             </span>
@@ -866,19 +866,19 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
       {groupErr && <p className="mt-2 text-sm wt-danger">{groupErr}</p>}
       <ul className="mt-2 flex flex-col gap-1">
         {groups.map((g) => (
-          <li key={g.id} className="flex items-center gap-2 rounded-lg bg-ink-800/60 px-3 py-2 text-sm ring-1 ring-ink-700">
+          <li key={g.id} className="flex items-center gap-2 rounded-md bg-ink-800/60 px-3 py-2 text-sm ring-1 ring-ink-700">
             <span className="min-w-0 flex-1 truncate text-slate-200">{g.name}
-              {g.folder && <span className="ml-1 inline-flex items-center gap-0.5 text-[11px] text-slate-500"><ArrowRightIcon size={10} />{g.folder}</span>}
+              {g.folder && <span className="ml-1 inline-flex items-center gap-0.5 text-2xs text-slate-500"><ArrowRightIcon size={10} />{g.folder}</span>}
               {g.require_2fa ? (
-                <span className="wt-warn ml-1 text-[11px]" title={t('settings.enrollGroups.require2fa')}>
+                <span className="wt-warn ml-1 text-2xs" title={t('settings.enrollGroups.require2fa')}>
                   2FA<span className="sr-only"> — {t('settings.enrollGroups.require2fa')}</span>
                 </span>
               ) : null}
             </span>
-            <span className="shrink-0 text-[11px] text-slate-500">
+            <span className="shrink-0 text-2xs text-slate-500">
               {t('settings.enrollGroups.uses', { n: g.uses, max: g.max_uses || '∞' })}
             </span>
-            <span className={`shrink-0 text-[11px] ${g.revoked || g.expired ? 'wt-danger' : 'text-slate-500'}`}>
+            <span className={`shrink-0 text-2xs ${g.revoked || g.expired ? 'wt-danger' : 'text-slate-500'}`}>
               {g.revoked ? t('settings.enrollGroups.revoked')
                 : g.expired ? t('settings.tokens.expired')
                   : t('settings.tokens.expires', { date: fmtTs(g.expires, 'date') })}
@@ -896,13 +896,13 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
       <h3 className={heading + ' flex items-center gap-2'}>{t('settings.dkpolicy.title')}<HelpTip id="deployKeyPolicy" /></h3>
       <p className="mt-1 text-xs text-slate-500">{t('settings.dkpolicy.hint')}</p>
       <label className="mt-2 flex cursor-pointer items-start gap-2.5 text-sm text-slate-300">
-        <input type="checkbox" checked={dkPolicy.require_2fa_source} className="mt-0.5 h-4 w-4 rounded accent-sky-600"
+        <input type="checkbox" checked={dkPolicy.require_2fa_source} className="mt-0.5 h-4 w-4 rounded-md accent-sky-600"
           onChange={(e) => saveDkPolicy({ ...dkPolicy, require_2fa_source: e.target.checked })} />
         <span>{t('settings.dkpolicy.require2fa')}
           <span className="mt-0.5 block text-xs text-slate-500">{t('settings.dkpolicy.require2faHint')}</span></span>
       </label>
       <label className="mt-2 flex cursor-pointer items-start gap-2.5 text-sm text-slate-300">
-        <input type="checkbox" checked={dkPolicy.require_restrict} className="mt-0.5 h-4 w-4 rounded accent-sky-600"
+        <input type="checkbox" checked={dkPolicy.require_restrict} className="mt-0.5 h-4 w-4 rounded-md accent-sky-600"
           onChange={(e) => saveDkPolicy({ ...dkPolicy, require_restrict: e.target.checked })} />
         <span>{t('settings.dkpolicy.requireRestrict')}
           <span className="mt-0.5 block text-xs text-slate-500">{t('settings.dkpolicy.requireRestrictHint')}</span></span>
@@ -915,7 +915,7 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
           type="checkbox"
           checked={guard.enabled}
           onChange={(e) => setGuard({ ...guard, enabled: e.target.checked })}
-          className="mt-0.5 h-4 w-4 rounded accent-sky-600"
+          className="mt-0.5 h-4 w-4 rounded-md accent-sky-600"
         />
         <span>
           {t('settings.guardrailToggle')}
@@ -934,13 +934,13 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
                 spellCheck={false}
                 placeholder={t('settings.guardrailRegexPlaceholder')}
                 onChange={(e) => setGuard({ ...guard, rules: guard.rules.map((x, j) => j === i ? { ...x, pattern: e.target.value } : x) })}
-                className="min-w-0 flex-1 rounded-lg border border-ink-700 bg-ink-900 px-2.5 py-1.5 font-mono text-xs text-slate-200 focus:border-sky-500 focus:outline-none"
+                className="min-w-0 flex-1 rounded-md border border-ink-700 bg-ink-900 px-2.5 py-1.5 font-mono text-xs text-slate-200 focus:border-sky-500 focus:outline-none"
               />
               <select
                 value={r.action}
                 aria-label={t('settings.guardrailActionFor', { pattern: r.pattern || String(i + 1) })}
                 onChange={(e) => setGuard({ ...guard, rules: guard.rules.map((x, j) => j === i ? { ...x, action: e.target.value as 'confirm' | 'block' } : x) })}
-                className="shrink-0 rounded-lg border border-ink-700 bg-ink-900 px-2 py-1.5 text-xs text-slate-200"
+                className="shrink-0 rounded-md border border-ink-700 bg-ink-900 px-2 py-1.5 text-xs text-slate-200"
               >
                 <option value="confirm">{t('settings.guardrailConfirm')}</option>
                 <option value="block">{t('settings.guardrailBlock')}</option>

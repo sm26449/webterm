@@ -113,7 +113,7 @@ export default function StatusModal(props: { onClose: () => void }) {
             </div>
 
             <div>
-              <h3 className="text-[13px] font-semibold uppercase tracking-wide text-slate-400">{t('status.storage')}</h3>
+              <h3 className="text-compact font-semibold uppercase tracking-wide text-slate-400">{t('status.storage')}</h3>
               <dl className="mt-2 divide-y divide-ink-800 text-sm">
                 <Row k={t('status.transcriptsActive')} v={`${humanBytes(s.storage.transcripts_bytes)} · ${t('status.filesCount', { count: s.storage.transcripts_files })}`} />
                 <Row k={t('status.archive')} v={`${humanBytes(s.storage.archive_bytes)} · ${t('status.filesCount', { count: s.storage.archive_files })}`} />
@@ -136,7 +136,7 @@ export default function StatusModal(props: { onClose: () => void }) {
             </div>
 
             <div>
-              <h3 className="text-[13px] font-semibold uppercase tracking-wide text-slate-400">{t('status.system')}</h3>
+              <h3 className="text-compact font-semibold uppercase tracking-wide text-slate-400">{t('status.system')}</h3>
               <dl className="mt-2 divide-y divide-ink-800 text-sm">
                 <Row k={t('status.uptime')} v={humanUptime(s.uptime_seconds)} />
                 <div className="flex items-center justify-between py-2">
@@ -179,7 +179,7 @@ export default function StatusModal(props: { onClose: () => void }) {
             {/* sănătatea gateway-ului însuși — degradarea vizibilă înainte de cădere */}
             {s.gateway && (
               <div>
-                <h3 className="text-[13px] font-semibold uppercase tracking-wide text-slate-400">{t('status.gatewayHealth')}</h3>
+                <h3 className="text-compact font-semibold uppercase tracking-wide text-slate-400">{t('status.gatewayHealth')}</h3>
                 <dl className="mt-2 divide-y divide-ink-800 text-sm">
                   <Row k={t('status.processMemory')} v={`${s.gateway.rss_mb} MiB`} />
                   <div className="flex items-center justify-between gap-3 py-2">

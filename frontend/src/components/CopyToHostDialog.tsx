@@ -109,13 +109,13 @@ export default function CopyToHostDialog(props: {
   }
 
   const subdirs = (listing?.entries ?? []).filter((e) => e.dir)
-  const BTN = 'rounded px-2 py-1 text-[12px]'
+  const BTN = 'rounded-md px-2 py-1 text-xs'
 
   return createPortal(
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4" onClick={props.onClose}>
       {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Escape local: altfel îl prinde şi drawer-ul panoului de fişiere (portalul păstrează bubbling-ul React) */}
       <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="wt-copy-title" data-testid="wt-copy-dialog"
-        className="glass flex max-h-[90vh] w-full max-w-md flex-col rounded-2xl p-4 text-[12px]"
+        className="glass flex max-h-[90vh] w-full max-w-md flex-col rounded-2xl p-4 text-xs"
         onClick={(e) => e.stopPropagation()}
         onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); props.onClose() } }}>
         <h2 id="wt-copy-title" className="text-base font-semibold">
@@ -128,7 +128,7 @@ export default function CopyToHostDialog(props: {
           <p className="mt-1 wt-warn">{t('copy.noHosts')}</p>
         ) : (
           <select id="wt-copy-host" value={dst ?? ''} onChange={(e) => pick(Number(e.target.value))}
-            className="mt-1 w-full rounded bg-ink-800 px-2 py-1.5 text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500">
+            className="mt-1 w-full rounded-md bg-ink-800 px-2 py-1.5 text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500">
             {(hosts ?? []).map((h) => (
               <option key={h.id} value={h.id}>{h.id === props.srcHost.id ? t('copy.sameHost', { host: h.name }) : h.name}</option>
             ))}
@@ -138,19 +138,19 @@ export default function CopyToHostDialog(props: {
         <label className="mt-3 block text-slate-300" htmlFor="wt-copy-dir">{t('copy.dstDir')}</label>
         <div className="mt-1 flex gap-1">
           <button type="button" disabled={!listing || listing.path === '/'} onClick={() => dst != null && listing && browse(dst, listing.parent)}
-            className="wt-touch shrink-0 rounded px-2 text-slate-400 ring-1 ring-ink-700 hover:bg-ink-800 disabled:opacity-30"
+            className="wt-touch shrink-0 rounded-md px-2 text-slate-400 ring-1 ring-ink-700 hover:bg-ink-800 disabled:opacity-30"
             aria-label={t('files.upLevel')} title={t('files.upLevel')}><LevelUpIcon size={14} /></button>
           <input id="wt-copy-dir" value={dir} spellCheck={false} onChange={(e) => setDir(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter' && dst != null) { e.preventDefault(); void browse(dst, dir) } }}
-            className="min-w-0 flex-1 rounded bg-ink-800 px-2 py-1 font-mono text-[11px] text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500" />
+            className="min-w-0 flex-1 rounded-md bg-ink-800 px-2 py-1 font-mono text-2xs text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500" />
         </div>
-        <ul aria-label={t('copy.folders')} className="mt-1 max-h-36 min-h-[3rem] overflow-y-auto rounded bg-ink-900/60 ring-1 ring-ink-800">
+        <ul aria-label={t('copy.folders')} className="mt-1 max-h-36 min-h-[3rem] overflow-y-auto rounded-md bg-ink-900/60 ring-1 ring-ink-800">
           {listErr && <li className="px-2 py-1 wt-danger">{listErr}</li>}
           {!listErr && listing && subdirs.length === 0 && <li className="px-2 py-1 text-slate-500">{t('copy.noSubfolders')}</li>}
           {subdirs.map((d) => (
             <li key={d.name}>
               <button type="button" onClick={() => dst != null && browse(dst, `${listing!.path.replace(/\/$/, '')}/${d.name}`)}
-                className="flex w-full items-center gap-2 px-2 py-1 text-left font-mono text-[11px] wt-link hover:bg-ink-800 [@media(pointer:coarse)]:min-h-[36px]">
+                className="flex w-full items-center gap-2 px-2 py-1 text-left font-mono text-2xs wt-link hover:bg-ink-800 [@media(pointer:coarse)]:min-h-[36px]">
                 <FolderIcon />{d.name}/
               </button>
             </li>
@@ -171,7 +171,7 @@ export default function CopyToHostDialog(props: {
 
         {folders > 0 && <p className="mt-3 wt-warn">{t('copy.foldersSkipped', { count: folders })}</p>}
         {privateN > 0 && <p className="mt-2 wt-warn">{t('copy.privateWarn', { count: privateN })}</p>}
-        <p className="mt-2 text-[11px] text-slate-500">{t('copy.limits')}</p>
+        <p className="mt-2 text-2xs text-slate-500">{t('copy.limits')}</p>
         {err && <p role="alert" className="mt-2 wt-danger">{err}</p>}
 
         <div className="mt-4 flex justify-end gap-2">

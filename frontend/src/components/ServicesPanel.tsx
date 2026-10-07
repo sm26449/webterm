@@ -82,24 +82,24 @@ export default function ServicesPanel(props: {
         {drawer.sheet && <SheetBar title={t('services.title')} onBack={props.onClose} />}
         <div className="flex items-center gap-2 border-b border-ink-800 px-3 py-2">
           <span className="text-sm font-semibold text-slate-200">{t('services.title')}</span>
-          <button onClick={load} className="wt-touch ml-auto shrink-0 rounded px-1.5 text-slate-400 hover:bg-ink-800"
+          <button onClick={load} className="wt-touch ml-auto shrink-0 rounded-md px-1.5 text-slate-400 hover:bg-ink-800"
             title={t('services.reload')} aria-label={t('services.reload')}><RefreshIcon /></button>
           {!props.embed && (
             <button onClick={props.onClose} aria-label={t('common.close')}
-              className="wt-touch shrink-0 rounded px-2 py-1 text-slate-400 hover:bg-ink-800"><CloseIcon size={14} /></button>
+              className="wt-touch shrink-0 rounded-md px-2 py-1 text-slate-400 hover:bg-ink-800"><CloseIcon size={14} /></button>
           )}
         </div>
         <div className="flex items-center gap-2 border-b border-ink-800 px-3 py-1.5">
           <input value={filter} onChange={(e) => setFilter(e.target.value)}
             placeholder={t('services.filterPh')}
-            className="min-w-0 flex-1 rounded bg-ink-800/60 px-2 py-1 text-xs text-slate-300 ring-1 ring-ink-700 focus:ring-sky-500" />
+            className="min-w-0 flex-1 rounded-md bg-ink-800/60 px-2 py-1 text-xs text-slate-300 ring-1 ring-ink-700 focus:ring-sky-500" />
           <button onClick={() => setFailedOnly((v) => !v)} aria-pressed={failedOnly}
-            className={`shrink-0 rounded px-2 py-1 text-[11px] font-medium ${failedOnly
+            className={`shrink-0 rounded-md px-2 py-1 text-2xs font-medium ${failedOnly
               ? 'bg-rose-500/20 wt-danger' : 'text-slate-400 hover:bg-ink-800'}`}
             title={t('services.failedOnly')}>{t('services.failed')}</button>
         </div>
-        {error && <div className="border-b border-ink-800 bg-ink-800 px-3 py-1.5 text-[11px] wt-danger">{error}</div>}
-        {note && !error && <div role="status" className="border-b border-ink-800 bg-ink-800/60 px-3 py-1.5 text-[11px] text-slate-400">{note}</div>}
+        {error && <div className="border-b border-ink-800 bg-ink-800 px-3 py-1.5 text-2xs wt-danger">{error}</div>}
+        {note && !error && <div role="status" className="border-b border-ink-800 bg-ink-800/60 px-3 py-1.5 text-2xs text-slate-400">{note}</div>}
         <div className="min-h-0 flex-1 overflow-y-auto p-3">
           {rows === null ? (
             <div className="p-4 text-center text-xs text-slate-500">{t('services.loading')}</div>
@@ -114,18 +114,18 @@ export default function ServicesPanel(props: {
                     <div className="flex items-start gap-2">
                       <span className={`mt-1 h-2 w-2 shrink-0 rounded-full ${dot(s)}`} aria-hidden="true" />
                       <div className="min-w-0 flex-1">
-                        <div className="truncate font-mono text-[12px] font-medium text-slate-200" title={s.unit}>
+                        <div className="truncate font-mono text-xs font-medium text-slate-200" title={s.unit}>
                           {s.unit.replace(/\.service$/, '')}
                         </div>
-                        <div className={`text-[11px] ${tone}`}>{s.active}{s.sub && s.sub !== s.active ? ` · ${s.sub}` : ''}</div>
+                        <div className={`text-2xs ${tone}`}>{s.active}{s.sub && s.sub !== s.active ? ` · ${s.sub}` : ''}</div>
                       </div>
                     </div>
-                    {s.desc && <div className="line-clamp-2 text-[11px] text-slate-500" title={s.desc}>{s.desc}</div>}
+                    {s.desc && <div className="line-clamp-2 text-2xs text-slate-500" title={s.desc}>{s.desc}</div>}
                     <div className="mt-auto flex flex-wrap items-center gap-1 border-t border-ink-800/60 pt-2">
                       {props.onJournal && (
                         <button onClick={() => props.onJournal!(s.unit)}
                           title={t('services.logs')} aria-label={t('services.logs') + ' ' + s.unit}
-                          className="rounded px-1.5 py-0.5 text-[11px] text-slate-400 hover:bg-ink-700 hover:text-sky-300">
+                          className="rounded-md px-1.5 py-0.5 text-2xs text-slate-400 hover:bg-ink-700 hover:text-sky-300">
                           {t('services.logs')}
                         </button>
                       )}
@@ -133,7 +133,7 @@ export default function ServicesPanel(props: {
                         {(['start', 'stop', 'restart'] as Action[]).map((a) => (
                           <button key={a} onClick={() => act(s.unit, a)} disabled={busy === s.unit}
                             title={t('services.' + a)} aria-label={t('services.' + a) + ' ' + s.unit}
-                            className="grid h-6 w-6 place-items-center rounded text-[11px] text-slate-400 hover:bg-ink-700 hover:text-slate-100 disabled:opacity-40">
+                            className="grid h-6 w-6 place-items-center rounded-md text-2xs text-slate-400 hover:bg-ink-700 hover:text-slate-100 disabled:opacity-40">
                             {a === 'start' ? <PlayIcon size={11} /> : a === 'stop' ? <SquareIcon size={11} /> : <RefreshIcon size={13} />}
                           </button>
                         ))}

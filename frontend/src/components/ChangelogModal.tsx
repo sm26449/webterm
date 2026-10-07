@@ -13,7 +13,7 @@ function Spans({ spans }: { spans: Span[] }) {
     <>
       {spans.map((s, i) =>
         s.bold ? <strong key={i} className="font-semibold text-slate-100">{s.text}</strong>
-          : s.code ? <code key={i} className="rounded bg-ink-800 px-1 py-0.5 text-[0.85em] text-sky-300">{s.text}</code>
+          : s.code ? <code key={i} className="rounded-md bg-ink-800 px-1 py-0.5 text-[0.85em] text-sky-300">{s.text}</code>
             : <span key={i}>{s.text}</span>,
       )}
     </>
@@ -32,12 +32,12 @@ function renderBlock(b: Block, i: number) {
       return <h4 key={i} className="mt-4 text-sm font-semibold text-slate-300">{b.text}</h4>
     case 'item':
       return (
-        <li key={i} className="ml-4 list-disc text-[13px] leading-relaxed text-slate-400 marker:text-slate-600">
+        <li key={i} className="ml-4 list-disc text-compact leading-relaxed text-slate-400 marker:text-slate-600">
           <Spans spans={b.spans} />
         </li>
       )
     default:
-      return <p key={i} className="mt-2 text-[13px] leading-relaxed text-slate-400"><Spans spans={b.spans} /></p>
+      return <p key={i} className="mt-2 text-compact leading-relaxed text-slate-400"><Spans spans={b.spans} /></p>
   }
 }
 

@@ -215,7 +215,7 @@ export default function FileEditor(props: {
           )}
           <span className="truncate font-mono text-xs text-slate-400">{props.path}</span>
           {pv?.truncated && (
-            <span className="shrink-0 rounded bg-amber-500/15 px-1.5 py-0.5 text-[11px] wt-warn ring-1 ring-amber-500/25" title={t('files.bigFileTitle')}>
+            <span className="shrink-0 rounded-md bg-amber-500/15 px-1.5 py-0.5 text-2xs wt-warn ring-1 ring-amber-500/25" title={t('files.bigFileTitle')}>
               {t('files.viewOnlyBadge')}
             </span>
           )}
@@ -225,7 +225,7 @@ export default function FileEditor(props: {
                 {saving ? t('files.saving') : t('files.save')}
               </Button>
             )}
-            <button onClick={requestClose} className="rounded-lg px-3 py-1 text-sm text-slate-400 hover:bg-ink-800">{t('files.close')}</button>
+            <button onClick={requestClose} className="rounded-md px-3 py-1 text-sm text-slate-400 hover:bg-ink-800">{t('files.close')}</button>
           </div>
         </div>
 
@@ -246,7 +246,7 @@ export default function FileEditor(props: {
             className="flex items-center gap-3 border-b border-ink-800 bg-amber-500/10 px-4 py-2 text-xs">
             <span id="editor-conflict-msg" className="wt-warn">{t('files.conflictMsg')}</span>
             {/* amber-700, nu amber-600: alb pe amber-600 = 3,19:1 (sub AA); pe amber-700 = 4,7:1 */}
-            <button onClick={() => { setConflict(false); save(true) }} className="rounded bg-amber-700 px-2 py-0.5 font-medium text-white hover:bg-amber-800">{t('files.overwriteAnyway')}</button>
+            <button onClick={() => { setConflict(false); save(true) }} className="rounded-md bg-amber-700 px-2 py-0.5 font-medium text-white hover:bg-amber-800">{t('files.overwriteAnyway')}</button>
             {/* focusul iniţial pe acţiunea SIGURĂ (APG alertdialog): un Enter din inerţie nu suprascrie */}
             <button autoFocus onClick={() => setConflict(false)} className="text-slate-400 hover:underline">{t('files.cancel')}</button>
           </div>
@@ -259,7 +259,7 @@ export default function FileEditor(props: {
             <a href={`/api/hosts/${props.hostId}/fs/download?path=${encodeURIComponent(props.path)}`} download={props.name} className="wt-link hover:underline">{t('files.download')}</a>
           </div>
         )}
-        {pv && !pv.binary && <div ref={host} className="min-h-0 flex-1 overflow-hidden text-[13px]" />}
+        {pv && !pv.binary && <div ref={host} className="min-h-0 flex-1 overflow-hidden text-compact" />}
       </div>
 
       {/* confirmare de renunțare — în interiorul containerului z-[60], ca să stea deasupra

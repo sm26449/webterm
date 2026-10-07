@@ -249,7 +249,7 @@ export default function Walkthrough(props: { auto: boolean; onClose: () => void 
             type="checkbox"
             checked={dontShow}
             onChange={(e) => setDontShow(e.target.checked)}
-            className="h-4 w-4 rounded accent-sky-600"
+            className="h-4 w-4 rounded-md accent-sky-600"
           />
           <span>{t('walkthrough.dontShow')}</span>
         </label>
@@ -258,7 +258,7 @@ export default function Walkthrough(props: { auto: boolean; onClose: () => void 
           <button
             type="button"
             onClick={() => close('skip')}
-            className="wt-touch rounded-lg px-3 py-1.5 text-sm text-slate-400 hover:bg-ink-800 hover:text-slate-200"
+            className="wt-touch rounded-md px-3 py-1.5 text-sm text-slate-400 hover:bg-ink-800 hover:text-slate-200"
           >
             {t('walkthrough.skip')}
           </button>
@@ -267,7 +267,7 @@ export default function Walkthrough(props: { auto: boolean; onClose: () => void 
               type="button"
               onClick={() => go(step - 1)}
               disabled={step === 0}
-              className="wt-touch rounded-lg px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800 disabled:opacity-40"
+              className="wt-touch rounded-md px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800 disabled:opacity-40"
             >
               {t('walkthrough.back')}
             </button>

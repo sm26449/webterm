@@ -176,7 +176,7 @@ export default function AiToolsPanel(props: {
     : 'fixed inset-y-0 right-0 z-40 flex w-[90vw] max-w-md flex-col border-l border-ink-800 bg-ink-900 shadow-2xl outline-none'
     + (props.overlay ? '' : ' sm:static sm:z-auto sm:w-96 sm:max-w-none sm:shrink-0 sm:shadow-none')
   const scrimCls = props.embed ? 'hidden' : 'fixed inset-0 z-30 bg-black/60' + (props.overlay ? '' : ' sm:hidden')
-  const btn = 'rounded px-2 py-1 text-[11px] text-slate-400 hover:bg-ink-700 hover:text-slate-100 disabled:opacity-40'
+  const btn = 'rounded-md px-2 py-1 text-2xs text-slate-400 hover:bg-ink-700 hover:text-slate-100 disabled:opacity-40'
   const bases: AiBases | null = home ? { home, project: project || null } : null
 
   const singleRow = (kind: 'claude-md' | 'agents-md', present: string | null) => {
@@ -184,10 +184,10 @@ export default function AiToolsPanel(props: {
     if (!path) return null
     const label = kind === 'claude-md' ? 'CLAUDE.md' : 'AGENTS.md'
     return (
-      <div className="flex items-center gap-2 rounded-lg border border-ink-700/70 bg-ink-800/40 px-3 py-2">
+      <div className="flex items-center gap-2 rounded-md border border-ink-700/70 bg-ink-800/40 px-3 py-2">
         <div className="min-w-0 flex-1">
-          <div className="font-mono text-[12px] font-medium text-slate-200">{label}</div>
-          <div className="truncate font-mono text-[11px] text-slate-500" title={path}>{shown(path)}</div>
+          <div className="font-mono text-xs font-medium text-slate-200">{label}</div>
+          <div className="truncate font-mono text-2xs text-slate-500" title={path}>{shown(path)}</div>
         </div>
         {present
           ? <button className={btn} disabled={busy} onClick={() => setEditing({ path, name: label })}>{t('ai.edit')}</button>
@@ -204,7 +204,7 @@ export default function AiToolsPanel(props: {
       <section aria-label={title} className="mt-4">
         <div className="flex items-center gap-2">
           <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-400">{title}</h3>
-          <span className="truncate font-mono text-[11px] text-slate-500" title={dir}>{shown(dir)}</span>
+          <span className="truncate font-mono text-2xs text-slate-500" title={dir}>{shown(dir)}</span>
           <button className={btn + ' ml-auto inline-flex items-center gap-1'} disabled={busy}
             onClick={() => setForm({ kind, name: '', tpl: templatesFor(kind)[0].id, err: '' })}>
             <PlusIcon /> {t(kind === 'agent' ? 'ai.newAgent' : 'ai.newSkill')}
@@ -212,24 +212,24 @@ export default function AiToolsPanel(props: {
         </div>
         {form?.kind === kind && (
           // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Escape închide formularul inline fără să închidă drawer-ul (vezi useDrawer)
-          <form className="mt-2 grid gap-2 rounded-lg border border-sky-700/50 bg-ink-800/60 p-3"
+          <form className="mt-2 grid gap-2 rounded-md border border-sky-700/50 bg-ink-800/60 p-3"
             onSubmit={(e) => { e.preventDefault(); submitForm() }}
             onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); setForm(null) } }}>
-            <label className="text-[11px] text-slate-400">
+            <label className="text-2xs text-slate-400">
               {t('ai.name')}
               <input autoFocus value={form.name} spellCheck={false}
                 onChange={(e) => setForm({ ...form, name: e.target.value, err: '' })}
                 placeholder={kind === 'agent' ? 'code-reviewer' : 'release-notes'}
-                className="mt-1 block w-full rounded bg-ink-900 px-2 py-1 font-mono text-xs text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500" />
+                className="mt-1 block w-full rounded-md bg-ink-900 px-2 py-1 font-mono text-xs text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500" />
             </label>
-            <label className="text-[11px] text-slate-400">
+            <label className="text-2xs text-slate-400">
               {t('ai.template')}
               <select value={form.tpl} onChange={(e) => setForm({ ...form, tpl: e.target.value })}
-                className="mt-1 block w-full rounded bg-ink-900 px-2 py-1 text-xs text-slate-200 ring-1 ring-ink-700">
+                className="mt-1 block w-full rounded-md bg-ink-900 px-2 py-1 text-xs text-slate-200 ring-1 ring-ink-700">
                 {templatesFor(kind).map((x) => <option key={x.id} value={x.id}>{t('ai.tpl.' + x.id)}</option>)}
               </select>
             </label>
-            {form.err && <div role="alert" className="text-[11px] wt-danger">{form.err}</div>}
+            {form.err && <div role="alert" className="text-2xs wt-danger">{form.err}</div>}
             <div className="flex justify-end gap-2">
               <button type="button" className={btn} onClick={() => setForm(null)}>{t('common.cancel')}</button>
               <Button variant="primary" size="sm" type="submit" disabled={busy}>{t('ai.create')}</Button>
@@ -237,14 +237,14 @@ export default function AiToolsPanel(props: {
           </form>
         )}
         {items.length === 0 ? (
-          <p className="mt-2 text-[11px] text-slate-500">{t(kind === 'agent' ? 'ai.noAgents' : 'ai.noSkills')}</p>
+          <p className="mt-2 text-2xs text-slate-500">{t(kind === 'agent' ? 'ai.noAgents' : 'ai.noSkills')}</p>
         ) : (
           <ul className="mt-2 grid gap-1.5">
             {items.map((it) => (
-              <li key={it.name} className="flex items-start gap-2 rounded-lg border border-ink-700/70 bg-ink-800/40 px-3 py-2">
+              <li key={it.name} className="flex items-start gap-2 rounded-md border border-ink-700/70 bg-ink-800/40 px-3 py-2">
                 <div className="min-w-0 flex-1">
-                  <div className="truncate font-mono text-[12px] font-medium text-slate-200" title={it.path}>{it.name}</div>
-                  {it.desc && <div className="line-clamp-2 text-[11px] text-slate-500" title={it.desc}>{it.desc}</div>}
+                  <div className="truncate font-mono text-xs font-medium text-slate-200" title={it.path}>{it.name}</div>
+                  {it.desc && <div className="line-clamp-2 text-2xs text-slate-500" title={it.desc}>{it.desc}</div>}
                 </div>
                 <button className={btn} disabled={busy} onClick={() => setEditing({ path: it.path, name: it.name })}
                   aria-label={`${t('ai.edit')} ${it.name}`}>{t('ai.edit')}</button>
@@ -266,12 +266,12 @@ export default function AiToolsPanel(props: {
         {drawer.sheet && <SheetBar title={t('ai.title')} onBack={props.onClose} />}
         <div className="flex items-center gap-2 border-b border-ink-800 px-3 py-2">
           <span className="flex items-center gap-2 text-sm font-semibold text-slate-200">{t('ai.title')}<HelpTip id="aiTools" /></span>
-          <span className="text-[11px] text-slate-500">Claude Code · AGENTS.md</span>
-          <button onClick={load} className="wt-touch ml-auto shrink-0 rounded px-1.5 text-slate-400 hover:bg-ink-800"
+          <span className="text-2xs text-slate-500">Claude Code · AGENTS.md</span>
+          <button onClick={load} className="wt-touch ml-auto shrink-0 rounded-md px-1.5 text-slate-400 hover:bg-ink-800"
             title={t('ai.reload')} aria-label={t('ai.reload')}><RefreshIcon /></button>
           {!props.embed && (
             <button onClick={props.onClose} aria-label={t('common.close')}
-              className="wt-touch shrink-0 rounded px-2 py-1 text-slate-400 hover:bg-ink-800"><CloseIcon size={14} /></button>
+              className="wt-touch shrink-0 rounded-md px-2 py-1 text-slate-400 hover:bg-ink-800"><CloseIcon size={14} /></button>
           )}
         </div>
         {!isAgent ? (
@@ -282,7 +282,7 @@ export default function AiToolsPanel(props: {
               <div role="tablist" aria-label={t('ai.scope')} className="flex gap-1">
                 {(['global', 'project'] as AiScope[]).map((s) => (
                   <button key={s} role="tab" aria-selected={scope === s} onClick={() => setScope(s)}
-                    className={`rounded px-2.5 py-1 text-xs font-medium ${scope === s ? 'bg-ink-700 text-slate-100' : 'text-slate-400 hover:bg-ink-800'}`}>
+                    className={`rounded-md px-2.5 py-1 text-xs font-medium ${scope === s ? 'bg-ink-700 text-slate-100' : 'text-slate-400 hover:bg-ink-800'}`}>
                     {t(s === 'global' ? 'ai.scopeGlobal' : 'ai.scopeProject')}
                   </button>
                 ))}
@@ -291,15 +291,15 @@ export default function AiToolsPanel(props: {
                 <form className="mt-2 flex gap-2" onSubmit={(e) => { e.preventDefault(); applyProject() }}>
                   <input value={projInput} onChange={(e) => setProjInput(e.target.value)} spellCheck={false}
                     aria-label={t('ai.projectDir')} placeholder={t('ai.projectPh')}
-                    className="min-w-0 flex-1 rounded bg-ink-800/60 px-2 py-1 font-mono text-xs text-slate-300 ring-1 ring-ink-700 focus:ring-sky-500" />
-                  <button type="submit" className="shrink-0 rounded border border-ink-700 px-2 py-1 text-[11px] text-slate-300 hover:bg-ink-800">{t('ai.open')}</button>
+                    className="min-w-0 flex-1 rounded-md bg-ink-800/60 px-2 py-1 font-mono text-xs text-slate-300 ring-1 ring-ink-700 focus:ring-sky-500" />
+                  <button type="submit" className="shrink-0 rounded-md border border-ink-700 px-2 py-1 text-2xs text-slate-300 hover:bg-ink-800">{t('ai.open')}</button>
                 </form>
               )}
-              <p className="mt-1.5 text-[11px] text-slate-500">
+              <p className="mt-1.5 text-2xs text-slate-500">
                 {t(scope === 'global' ? 'ai.scopeGlobalHint' : 'ai.scopeProjectHint')}
               </p>
             </div>
-            {error && <div role="alert" className="border-b border-ink-800 bg-ink-800 px-3 py-1.5 text-[11px] wt-danger">{error}</div>}
+            {error && <div role="alert" className="border-b border-ink-800 bg-ink-800 px-3 py-1.5 text-2xs wt-danger">{error}</div>}
             <div className="min-h-0 flex-1 overflow-y-auto p-3">
               {data === null ? (
                 <div className="p-4 text-center text-xs text-slate-500">{t('ai.loading')}</div>

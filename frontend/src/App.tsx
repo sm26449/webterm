@@ -78,7 +78,7 @@ function FingerprintRow(props: { label: string; value?: string; copyLabel: strin
     <div className="flex items-center gap-2">
       <dt className="w-32 shrink-0 text-slate-500">{props.label}</dt>
       <dd className="min-w-0 flex-1">
-        <code className="block truncate rounded bg-black/40 px-2 py-1 font-mono text-slate-200" title={props.value}>
+        <code className="block truncate rounded-md bg-black/40 px-2 py-1 font-mono text-slate-200" title={props.value}>
           {props.value || '—'}
         </code>
       </dd>
@@ -1575,7 +1575,7 @@ function MainApp() {
                 <input autoFocus value={wizard.name} onChange={(e) => setWizard((w) => (w ? { ...w, name: e.target.value.slice(0, 80) } : w))}
                   onKeyDown={(e) => { if (e.key === 'Enter' && wizard.sel.length >= 2) saveWizard() }}
                   placeholder={t('split.namePlaceholder')}
-                  className="w-full rounded bg-ink-800 px-2 py-1 text-sm text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" />
+                  className="w-full rounded-md bg-ink-800 px-2 py-1 text-sm text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" />
               </label>
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
@@ -1587,12 +1587,12 @@ function MainApp() {
                 const atCap = !checked && wizard.sel.length >= GRID_MAX
                 return (
                   <label key={sid}
-                    className={`flex items-center gap-2.5 rounded-lg px-2.5 py-2 ${atCap ? 'opacity-40' : 'cursor-pointer hover:bg-ink-800/60'}`}>
+                    className={`flex items-center gap-2.5 rounded-md px-2.5 py-2 ${atCap ? 'opacity-40' : 'cursor-pointer hover:bg-ink-800/60'}`}>
                     <input type="checkbox" checked={checked} disabled={atCap} onChange={() => toggleWizardPick(sid)}
                       className="h-4 w-4 shrink-0 accent-sky-500" />
                     <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: h ? hostColor(h) : '#64748b' }} />
                     <span className="min-w-0 flex-1 truncate text-sm text-slate-200">{s.title}</span>
-                    <span className="shrink-0 truncate font-mono text-[11px] text-slate-500">{h?.name}</span>
+                    <span className="shrink-0 truncate font-mono text-2xs text-slate-500">{h?.name}</span>
                   </label>
                 )
               })}
@@ -1600,11 +1600,11 @@ function MainApp() {
             <footer className="flex items-center gap-2 border-t border-ink-800 px-4 py-3">
               <span className="text-xs text-slate-500">{t('grid.pickCount', { n: wizard.sel.length, max: GRID_MAX })}</span>
               <button onClick={() => setWizard(null)}
-                className="ml-auto rounded-lg px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800">
+                className="ml-auto rounded-md px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800">
                 {t('common.cancel')}
               </button>
               <button disabled={wizard.sel.length < 2} onClick={saveWizard}
-                className="rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-40">
+                className="rounded-md bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-40">
                 {wizard.id ? t('common.save') : t('grid.pickConfirm')}
               </button>
             </footer>
@@ -1634,11 +1634,11 @@ function MainApp() {
             <p className="mt-3 text-sm leading-relaxed text-slate-300">{t('hostkey.meaning')}</p>
             <div className="mt-5 flex flex-wrap justify-end gap-2">
               <button onClick={() => setHostKeyAlarm(null)}
-                className="rounded-lg px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800">
+                className="rounded-md px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800">
                 {t('hostkey.keepBlocking')}
               </button>
               <button onClick={acceptHostKey} disabled={hostKeyBusy}
-                className="rounded-lg bg-rose-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-rose-700 disabled:opacity-50">
+                className="rounded-md bg-rose-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-rose-700 disabled:opacity-50">
                 {t('hostkey.accept')}
               </button>
             </div>
@@ -1658,7 +1658,7 @@ function MainApp() {
             <div className="text-xs text-slate-400">{t('idle.warnBody', { s: idleWarn })}</div>
           </div>
           <button onClick={stillHere}
-            className="shrink-0 rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-700">
+            className="shrink-0 rounded-md bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-700">
             {t('idle.stillHere')}
           </button>
           <button onClick={() => setIdleDismissed(true)} aria-label={t('app.close')}

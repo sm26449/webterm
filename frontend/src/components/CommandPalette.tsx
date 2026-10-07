@@ -272,7 +272,7 @@ export default function CommandPalette(props: {
                 i === sel ? 'bg-sky-500/15' : ''
               }`}
             >
-              <span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg" style={{ background: `${it.color}22`, color: it.color }}>
+              <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md" style={{ background: `${it.color}22`, color: it.color }}>
                 {it.icon ?? (it.kind === 'session' ? <TerminalPromptIcon /> : it.kind === 'host' ? <ServerIcon /> : <PlusIcon />)}
               </span>
               <span className="min-w-0 flex-1">
@@ -281,14 +281,14 @@ export default function CommandPalette(props: {
                   {it.sub}
                 </span>
               </span>
-              <span className="shrink-0 text-[11px] text-slate-400">{it.hint}</span>
+              <span className="shrink-0 text-2xs text-slate-400">{it.hint}</span>
             </button>
           ))}
         </div>
-        <div className="flex items-center gap-3 border-t border-white/5 px-4 py-2 text-[11px] text-slate-400">
-          <span><kbd className="rounded bg-white/10 px-1 text-slate-300">↑</kbd><kbd className="ml-0.5 rounded bg-white/10 px-1 text-slate-300">↓</kbd> {t('palette.footNavigate')}</span>
-          <span><kbd className="rounded bg-white/10 px-1 text-slate-300">↵</kbd> {t('palette.footOpen')}</span>
-          <span><kbd className="rounded bg-white/10 px-1 text-slate-300">esc</kbd> {t('palette.footClose')}</span>
+        <div className="flex items-center gap-3 border-t border-white/5 px-4 py-2 text-2xs text-slate-400">
+          <span><kbd className="rounded-md bg-white/10 px-1 text-slate-300">↑</kbd><kbd className="ml-0.5 rounded-md bg-white/10 px-1 text-slate-300">↓</kbd> {t('palette.footNavigate')}</span>
+          <span><kbd className="rounded-md bg-white/10 px-1 text-slate-300">↵</kbd> {t('palette.footOpen')}</span>
+          <span><kbd className="rounded-md bg-white/10 px-1 text-slate-300">esc</kbd> {t('palette.footClose')}</span>
           <span className="ml-auto">{t('palette.footHostNew')}</span>
         </div>
       </div>

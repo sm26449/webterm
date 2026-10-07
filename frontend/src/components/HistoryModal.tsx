@@ -87,12 +87,12 @@ export default function HistoryModal(props: { hosts: Host[]; onClose: () => void
             className="min-w-0 flex-1 bg-transparent px-1 py-1 text-sm text-slate-200 placeholder-slate-500 outline-none" />
           <select value={hostId ?? ''} onChange={(e) => setHostId(e.target.value ? Number(e.target.value) : null)}
             aria-label={t('history.filterByHost')}
-            className="shrink-0 rounded bg-ink-800 px-1.5 py-1 text-xs text-slate-300 ring-1 ring-ink-700">
+            className="shrink-0 rounded-md bg-ink-800 px-1.5 py-1 text-xs text-slate-300 ring-1 ring-ink-700">
             <option value="">{t('history.allHosts')}</option>
             {hostsWithHistory.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}
           </select>
           <button onClick={props.onClose} aria-label={t('common.close')}
-            className="shrink-0 rounded px-2 text-slate-500 hover:bg-ink-800 hover:text-slate-300"><CloseIcon size={14} /></button>
+            className="shrink-0 rounded-md px-2 text-slate-500 hover:bg-ink-800 hover:text-slate-300"><CloseIcon size={14} /></button>
         </header>
 
         <div className="min-h-0 flex-1 overflow-y-auto">
@@ -111,17 +111,17 @@ export default function HistoryModal(props: { hosts: Host[]; onClose: () => void
                 <div key={it.id} className="group flex items-start gap-2.5 border-b border-ink-800/60 px-3 py-2 hover:bg-ink-800/40">
                   <span className={`mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full ${it.exit_code == null ? 'bg-slate-600' : failed ? 'bg-rose-500' : 'bg-emerald-500'}`} aria-hidden="true" />
                   <div className="min-w-0 flex-1">
-                    <div className="truncate font-mono text-[13px] text-slate-200">{it.command}</div>
-                    <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10.5px] text-slate-500">
+                    <div className="truncate font-mono text-compact text-slate-200">{it.command}</div>
+                    <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-2xs text-slate-500">
                       {it.host_name && <span className="wt-link">{it.host_name}</span>}
-                      {it.source === 'fleet' && <span className="rounded bg-ink-800 px-1 wt-accent">{t('history.fleet')}</span>}
+                      {it.source === 'fleet' && <span className="rounded-md bg-ink-800 px-1 wt-accent">{t('history.fleet')}</span>}
                       {it.exit_code != null && <span className={failed ? 'wt-danger' : ''}>exit {it.exit_code}</span>}
                       {it.cwd && <span className="truncate font-mono">{it.cwd}</span>}
                       <span className="tabular-nums">{rel(it.created)}</span>
                     </div>
                   </div>
                   <button onClick={() => copy(it)} title={t('history.copyTitle')}
-                    className="shrink-0 rounded px-1.5 py-0.5 text-[11px] wt-link opacity-0 hover:bg-ink-700 group-hover:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100">
+                    className="shrink-0 rounded-md px-1.5 py-0.5 text-2xs wt-link opacity-0 hover:bg-ink-700 group-hover:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100">
                     {copied === it.id ? <CheckIcon size={12} /> : t('history.copy')}
                   </button>
                 </div>
@@ -130,17 +130,17 @@ export default function HistoryModal(props: { hosts: Host[]; onClose: () => void
           )}
         </div>
 
-        <footer className="flex items-center gap-2 border-t border-ink-800 px-3 py-2 text-[11px] text-slate-500">
+        <footer className="flex items-center gap-2 border-t border-ink-800 px-3 py-2 text-2xs text-slate-500">
           <span>{t('history.commandsCount', { count: items?.length ?? 0 })}</span>
           <span className="ml-auto">
             {confirmClear ? (
               <span className="flex items-center gap-2">
                 {t('history.confirmClear')}
                 <Button variant="danger" size="sm" onClick={clearAll}>{t('history.clearBtn')}</Button>
-                <button onClick={() => setConfirmClear(false)} className="rounded px-1.5 py-0.5 text-slate-400 hover:bg-ink-800">{t('history.no')}</button>
+                <button onClick={() => setConfirmClear(false)} className="rounded-md px-1.5 py-0.5 text-slate-400 hover:bg-ink-800">{t('history.no')}</button>
               </span>
             ) : (
-              <button onClick={() => setConfirmClear(true)} className="rounded px-1.5 py-0.5 text-slate-400 hover:bg-ink-800 hover:text-rose-300">{t('history.clearAll')}</button>
+              <button onClick={() => setConfirmClear(true)} className="rounded-md px-1.5 py-0.5 text-slate-400 hover:bg-ink-800 hover:text-rose-300">{t('history.clearAll')}</button>
             )}
           </span>
         </footer>

@@ -269,9 +269,9 @@ export default function TranscriptPlayer(props: {
           <span className="flex min-w-0 items-center gap-1.5 truncate text-sm font-medium text-slate-200">
             <PlayIcon size={11} /> {props.title || t('transcript.sessionFallback')}
           </span>
-          <span className="shrink-0 rounded bg-ink-800 px-2 py-0.5 text-[11px] text-slate-400">{t('transcript.badge')}</span>
+          <span className="shrink-0 rounded-md bg-ink-800 px-2 py-0.5 text-2xs text-slate-400">{t('transcript.badge')}</span>
           {/* redare = fidel; text = citibil și căutabil (esențial după aplicații pe tot ecranul) */}
-          <div className="ml-auto flex shrink-0 gap-1 rounded-lg bg-ink-800 p-0.5">
+          <div className="ml-auto flex shrink-0 gap-1 rounded-md bg-ink-800 p-0.5">
             {([['play', t('transcript.tabPlay')], ['text', t('transcript.tabText')]] as const).map(([m, label]) => (
               <button key={m} onClick={() => (m === 'text' ? showText() : setMode('play'))}
                 aria-current={mode === m ? 'true' : undefined}
@@ -301,7 +301,7 @@ export default function TranscriptPlayer(props: {
                 placeholder={t('transcript.searchPlaceholder')}
                 aria-label={t('transcript.searchPlaceholder')}
                 spellCheck={false}
-                className="min-w-0 flex-1 rounded-lg bg-ink-800 px-3 py-1.5 text-sm text-slate-200 placeholder-slate-500 ring-1 ring-ink-700 focus:ring-sky-500"
+                className="min-w-0 flex-1 rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-200 placeholder-slate-500 ring-1 ring-ink-700 focus:ring-sky-500"
               />
               <span className="shrink-0 text-xs tabular-nums text-slate-500">
                 {q.trim()
@@ -333,7 +333,7 @@ export default function TranscriptPlayer(props: {
                 <pre className="whitespace-pre-wrap break-all font-mono text-xs leading-relaxed text-slate-200">{text}</pre>
               )}
             </div>
-            <div className="border-t border-ink-800 px-4 py-2 text-[11px] text-slate-500">
+            <div className="border-t border-ink-800 px-4 py-2 text-2xs text-slate-500">
               {t('transcript.textHint')}
             </div>
           </div>
@@ -345,7 +345,7 @@ export default function TranscriptPlayer(props: {
           </div>
           {cmds.length > 0 && (
             <aside className="hidden w-60 shrink-0 flex-col overflow-y-auto border-l border-ink-800 bg-ink-900 sm:flex">
-              <div className="sticky top-0 z-10 border-b border-ink-800 bg-ink-900 px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+              <div className="sticky top-0 z-10 border-b border-ink-800 bg-ink-900 px-3 py-2 text-2xs font-semibold uppercase tracking-wide text-slate-400">
                 {t('transcript.commands')} <span className="text-slate-500">{cmds.length}</span>
               </div>
               {cmds.map((c, i) => {
@@ -360,7 +360,7 @@ export default function TranscriptPlayer(props: {
                     <span className={`mt-1 h-1.5 w-1.5 shrink-0 rounded-full ${c.exitCode ? 'bg-red-400' : 'bg-emerald-400'}`} aria-hidden="true" />
                     <span className="min-w-0 flex-1">
                       <span className="block truncate font-mono text-xs text-slate-200">{c.text}</span>
-                      <span className="text-[10px] tabular-nums text-slate-500">{fmt(c.time)}</span>
+                      <span className="text-2xs tabular-nums text-slate-500">{fmt(c.time)}</span>
                     </span>
                   </button>
                 )
@@ -397,7 +397,7 @@ export default function TranscriptPlayer(props: {
                 <button
                   key={s}
                   onClick={() => setSpeed(s)}
-                  className={`rounded px-2 py-1 text-xs ${
+                  className={`rounded-md px-2 py-1 text-xs ${
                     speed === s ? 'bg-sky-600 text-white' : 'bg-ink-800 text-slate-400 hover:bg-ink-700'
                   }`}
                 >

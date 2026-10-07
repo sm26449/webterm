@@ -101,7 +101,7 @@ export default function LoginPage(props: {
 
   return (
     <div className="flex h-full items-center justify-center p-5">
-      <div className="login-card w-full max-w-[380px] rounded-3xl p-8 sm:p-9">
+      <div className="login-card w-full max-w-[380px] rounded-2xl p-8 sm:p-9">
         <div className="flex flex-col items-center text-center">
           <div className="brand-badge flex h-14 w-14 items-center justify-center rounded-2xl">
             {/* marca „Flota": promptul se deschide spre trei noduri (hosturile) */}
@@ -113,8 +113,8 @@ export default function LoginPage(props: {
               <circle cx="14.6" cy="16.9" r="2.1" fill="#fff" />
             </svg>
           </div>
-          <h1 className="mt-4 text-[22px] font-semibold tracking-tight text-slate-200">WebTerm</h1>
-          <p className="mt-1 text-[13px] leading-relaxed text-slate-500">
+          <h1 className="mt-4 text-display font-semibold tracking-tight text-slate-200">WebTerm</h1>
+          <p className="mt-1 text-compact leading-relaxed text-slate-500">
             {props.setupRequired ? t('login.subtitle.setup') : t('login.subtitle.login')}
           </p>
         </div>
@@ -154,7 +154,7 @@ export default function LoginPage(props: {
                 onChange={(e) => setSetupToken(e.target.value)}
                 className={inputClass}
               />
-              <p className="mt-1 px-1 text-[12px] leading-snug text-slate-500">
+              <p className="mt-1 px-1 text-xs leading-snug text-slate-500">
                 {t('login.setupTokenHint')}{' '}
                 (<code className="font-mono">docker compose logs app</code>).
               </p>
@@ -179,7 +179,7 @@ export default function LoginPage(props: {
                 onChange={(e) => setTotpCode(e.target.value)}
                 className={inputClass}
               />
-              <p className="mt-1 px-1 text-[12px] leading-snug text-slate-500">
+              <p className="mt-1 px-1 text-xs leading-snug text-slate-500">
                 {t('login.totpHint')}
               </p>
             </div>
@@ -189,13 +189,13 @@ export default function LoginPage(props: {
           <div
             id="login-error"
             role="alert"
-            className={error ? 'wt-danger rounded-lg bg-rose-500/10 px-3 py-2 text-[13px] ring-1 ring-rose-500/20' : 'sr-only'}
+            className={error ? 'wt-danger rounded-md bg-rose-500/10 px-3 py-2 text-compact ring-1 ring-rose-500/20' : 'sr-only'}
           >
             {error}
           </div>
           <button
             disabled={busy}
-            className="mt-1 rounded-xl bg-sky-600 py-3 text-[15px] font-medium text-white shadow-sm transition hover:bg-sky-700 active:scale-[0.99] disabled:opacity-50"
+            className="mt-1 rounded-xl bg-sky-600 py-3 text-base font-medium text-white shadow-sm transition hover:bg-sky-700 active:scale-[0.99] disabled:opacity-50"
           >
             {busy ? t('login.processing') : props.setupRequired ? t('login.createAccount') : totpRequired ? t('login.confirmCode') : t('login.enter')}
           </button>
@@ -211,11 +211,11 @@ export default function LoginPage(props: {
           const both = passkeyOn && ssoOn
           const btn =
             'flex flex-1 items-center justify-center gap-2 rounded-xl bg-ink-800/60 py-3 ' +
-            'text-[14px] font-medium text-slate-300 ring-1 ring-ink-700 transition ' +
+            'text-sm font-medium text-slate-300 ring-1 ring-ink-700 transition ' +
             'hover:bg-ink-700/60 disabled:opacity-50'
           return (
             <>
-              <div className="my-5 flex items-center gap-3 text-[11px] uppercase tracking-widest text-slate-600">
+              <div className="my-5 flex items-center gap-3 text-2xs uppercase tracking-widest text-slate-600">
                 <span className="h-px flex-1 bg-ink-700" />
                 {t('login.or')}
                 <span className="h-px flex-1 bg-ink-700" />
@@ -236,7 +236,7 @@ export default function LoginPage(props: {
           )
         })()}
 
-        <footer className="mt-7 border-t border-ink-800/70 pt-4 text-center text-[11px] leading-relaxed text-slate-600">
+        <footer className="mt-7 border-t border-ink-800/70 pt-4 text-center text-2xs leading-relaxed text-slate-600">
           <span className="font-medium text-slate-500">WebTerm</span>
           {version && <span className="tabular-nums"> · v{version}</span>} · {t('login.footer.tagline')}
           <br />

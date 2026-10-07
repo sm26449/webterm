@@ -341,7 +341,7 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
           autoComplete="current-password" className={field} />
         <label className="flex items-center gap-2 text-sm text-slate-400">
           <input type="checkbox" checked={bkTx} onChange={(e) => setBkTx(e.target.checked)}
-            className="h-4 w-4 rounded accent-sky-600" />
+            className="h-4 w-4 rounded-md accent-sky-600" />
           {t('settings.backup.includeTranscripts')}
         </label>
         <div className="flex items-center gap-2">
@@ -361,7 +361,7 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
       <div className="mt-2 flex gap-2">
         {([['off', t('settings.backup.off')], ['daily', t('settings.backup.daily')], ['weekly', t('settings.backup.weekly')]] as const).map(([val, label]) => (
           <button key={val} onClick={() => saveSchedule(val)}
-            className={`rounded-lg px-3 py-1.5 text-sm ring-1 ${
+            className={`rounded-md px-3 py-1.5 text-sm ring-1 ${
               (bkStatus?.schedule ?? 'off') === val
                 ? 'bg-sky-600 text-white ring-sky-600'
                 : 'bg-ink-800 text-slate-300 ring-ink-700 hover:bg-ink-700'
@@ -373,14 +373,14 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
       {bkStatus && bkStatus.schedule !== 'off' && (
         <label className="mt-2 flex items-center gap-2 text-sm text-slate-400">
           <input type="checkbox" checked={bkStatus.include_transcripts}
-            onChange={(e) => toggleScheduleTx(e.target.checked)} className="h-4 w-4 rounded accent-sky-600" />
+            onChange={(e) => toggleScheduleTx(e.target.checked)} className="h-4 w-4 rounded-md accent-sky-600" />
           {t('settings.backup.includeTranscriptsAuto')}
         </label>
       )}
 
       {/* starea scheduler-ului: ultima rulare, eroarea persistentă (roşu), scadenţa, copia off-host */}
       {bkStatus && (bkStatus.schedule !== 'off' || bkStatus.last_run || bkStatus.last_error) && (
-        <div className="mt-3 flex flex-col gap-1 rounded-lg bg-ink-800/60 px-3 py-2 text-xs ring-1 ring-ink-700" data-testid="backup-sched-status">
+        <div className="mt-3 flex flex-col gap-1 rounded-md bg-ink-800/60 px-3 py-2 text-xs ring-1 ring-ink-700" data-testid="backup-sched-status">
           {bkStatus.last_run ? (
             <span className={bkStatus.last_run.ok ? 'text-slate-400' : 'wt-danger'}>
               {bkStatus.last_run.ok
@@ -417,7 +417,7 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
         <div className="mt-3 space-y-1">
           <div className="text-xs text-slate-500">{t('settings.backup.storedLabel', { days: bkStatus.retention_days })}</div>
           {bkStatus.backups.map((b) => (
-            <div key={b.name} className="flex items-center justify-between gap-2 rounded-lg bg-ink-800 px-3 py-2 text-sm">
+            <div key={b.name} className="flex items-center justify-between gap-2 rounded-md bg-ink-800 px-3 py-2 text-sm">
               <span className="min-w-0 flex-1 truncate font-mono text-xs text-slate-300" title={b.name}>
                 {b.name}
                 <span className="ml-2 text-slate-500">{(b.size / 1024).toFixed(0)} KB</span>
@@ -464,14 +464,14 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
         {(cloud?.providers ?? []).map((p) => (
           <button key={p.id} type="button"
             onClick={() => setCloudForm((f) => ({ ...f, provider: p.id }))}
-            className={`wt-touch rounded-lg px-3 py-1.5 text-sm ${
+            className={`wt-touch rounded-md px-3 py-1.5 text-sm ${
               cloudForm.provider === p.id ? 'bg-sky-600 text-white' : 'bg-ink-800 text-slate-300 hover:bg-ink-700'}`}
           >{p.label}</button>
         ))}
         {[{ id: 'sftp', label: 'SFTP' }, { id: 'ftps', label: 'FTPS' }].map((p) => (
           <button key={p.id} type="button"
             onClick={() => { setCloudForm((f) => ({ ...f, provider: p.id })); setDirectForm((f) => ({ ...f, kind: p.id, port: p.id === 'sftp' ? 22 : 21 })) }}
-            className={`wt-touch rounded-lg px-3 py-1.5 text-sm ${
+            className={`wt-touch rounded-md px-3 py-1.5 text-sm ${
               cloudForm.provider === p.id ? 'bg-sky-600 text-white' : 'bg-ink-800 text-slate-300 hover:bg-ink-700'}`}
           >{p.label}</button>
         ))}
@@ -486,7 +486,7 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
       {!isDirect && cloudHelp && (() => {
         const p = (cloud?.providers ?? []).find((x) => x.id === cloudForm.provider)
         return (
-          <ol className="mt-2 flex list-decimal flex-col gap-1 rounded-lg bg-ink-800/60 p-3 pl-7 text-xs text-slate-400 ring-1 ring-ink-700">
+          <ol className="mt-2 flex list-decimal flex-col gap-1 rounded-md bg-ink-800/60 p-3 pl-7 text-xs text-slate-400 ring-1 ring-ink-700">
             <li>
               {t('settings.cloud.step1')}{' '}
               <a href={p?.console_url} target="_blank" rel="noreferrer" className="wt-link hover:underline">
@@ -497,7 +497,7 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
             <li>
               {t('settings.cloud.step3')}
               <div className="mt-1 flex items-center gap-2">
-                <code className="min-w-0 flex-1 truncate rounded bg-ink-900 px-2 py-1 text-[11px] text-slate-300">
+                <code className="min-w-0 flex-1 truncate rounded-md bg-ink-900 px-2 py-1 text-2xs text-slate-300">
                   {cloud?.redirect_uri}
                 </code>
                 <button type="button" onClick={copyRedirect} className="shrink-0 text-xs wt-link hover:underline">
@@ -536,7 +536,7 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
           <label className="flex items-center gap-2 text-sm text-slate-400">
             <input type="checkbox" checked={cloudForm.include_transcripts}
               onChange={(e) => setCloudForm((f) => ({ ...f, include_transcripts: e.target.checked }))}
-              className="h-4 w-4 rounded accent-sky-600" />
+              className="h-4 w-4 rounded-md accent-sky-600" />
             {t('settings.backup.includeTranscripts')}
           </label>
         </div>
@@ -549,12 +549,12 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
             {t('settings.cloud.save')}
           </Button>
           <button type="button" onClick={connectCloud} disabled={!cloud?.configured || cloudBusy}
-            className="rounded-lg bg-ink-800 px-3 py-1.5 text-sm text-slate-200 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-40">
+            className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-200 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-40">
             {cloud?.connected ? t('settings.cloud.reconnect') : t('settings.cloud.connect')}
           </button>
           <button type="button" disabled={!cloud?.connected || cloudBusy}
             onClick={() => cloudAction('upload', t('settings.cloud.uploaded'))}
-            className="rounded-lg bg-ink-800 px-3 py-1.5 text-sm text-slate-200 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-40">
+            className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-200 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-40">
             {t('settings.cloud.uploadNow')}
           </button>
           {cloud?.connected && (
@@ -604,7 +604,7 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
             {(['key', 'password'] as const).map((m) => (
               <button key={m} type="button"
                 onClick={() => setDirectForm((f) => ({ ...f, auth: m }))}
-                className={`wt-touch rounded-lg px-3 py-1.5 text-sm ${
+                className={`wt-touch rounded-md px-3 py-1.5 text-sm ${
                   directForm.auth === m ? 'bg-sky-600 text-white' : 'bg-ink-800 text-slate-300 hover:bg-ink-700'}`}
               >{m === 'key' ? t('settings.direct.authKey') : t('settings.direct.authPassword')}</button>
             ))}
@@ -624,10 +624,10 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
 
         {/* SFTP: pinuirea host-key-ului (TOFU). Fără amprentă confirmată nu se poate salva. */}
         {directForm.kind === 'sftp' && (
-          <div className="rounded-lg bg-ink-800/60 p-3 ring-1 ring-ink-700">
+          <div className="rounded-md bg-ink-800/60 p-3 ring-1 ring-ink-700">
             <div className="flex flex-wrap items-center gap-2">
               <button type="button" onClick={probeHost} disabled={cloudBusy || !directForm.host || !directForm.user}
-                className="rounded-lg bg-ink-800 px-3 py-1.5 text-sm text-slate-200 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-40">
+                className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-200 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-40">
                 {t('settings.direct.probe')}
               </button>
               {directForm.hostkey
@@ -664,7 +664,7 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
           <label className="flex items-center gap-2 text-sm text-slate-400">
             <input type="checkbox" checked={directForm.include_transcripts}
               onChange={(e) => setDirectForm((f) => ({ ...f, include_transcripts: e.target.checked }))}
-              className="h-4 w-4 rounded accent-sky-600" />
+              className="h-4 w-4 rounded-md accent-sky-600" />
             {t('settings.backup.includeTranscripts')}
           </label>
         </div>
@@ -678,7 +678,7 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
           </Button>
           <button type="button" disabled={!cloud?.connected || cloudBusy}
             onClick={() => cloudAction('upload', t('settings.cloud.uploaded'))}
-            className="rounded-lg bg-ink-800 px-3 py-1.5 text-sm text-slate-200 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-40">
+            className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-200 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-40">
             {t('settings.cloud.uploadNow')}
           </button>
           {cloud?.connected && isDirect && (

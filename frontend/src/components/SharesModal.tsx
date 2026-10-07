@@ -119,7 +119,7 @@ export default function SharesModal(props: { onClose: () => void; onChanged: () 
                 <ul aria-label={t('shares.title')} className="mt-3 flex flex-col gap-1.5">
                   {shares.map((s) => (
                     <li key={s.sid} data-share={s.sid}
-                      className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg bg-ink-800/60 px-3 py-2 text-sm ring-1 ring-ink-700">
+                      className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md bg-ink-800/60 px-3 py-2 text-sm ring-1 ring-ink-700">
                       <span className="min-w-0 flex-1">
                         <span className="block truncate font-medium text-slate-200">{s.title || t('dashboard.session')}</span>
                         <span className="block truncate text-xs text-slate-400">
@@ -129,7 +129,7 @@ export default function SharesModal(props: { onClose: () => void; onChanged: () 
                         </span>
                       </span>
                       {/* badge cu TEXT, nu doar culoare: „poate tasta" e ce contează la o privire */}
-                      <span className={`shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium ${
+                      <span className={`shrink-0 rounded-md px-1.5 py-0.5 text-2xs font-medium ${
                         s.writable ? 'wt-danger bg-rose-500/15' : 'text-slate-300 bg-ink-700'}`}>
                         {s.writable ? t('session.shareWritable') : t('session.shareReadOnly')}
                       </span>

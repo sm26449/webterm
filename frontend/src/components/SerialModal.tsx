@@ -116,8 +116,8 @@ export default function SerialModal(props: {
     if (ok) props.onClose()
   }
 
-  const sel = 'rounded-lg border border-ink-700 bg-ink-900 px-2 py-1.5 text-sm text-slate-200'
-  const chip = 'inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium'   // minim 11 px (audit tipografie)
+  const sel = 'rounded-md border border-ink-700 bg-ink-900 px-2 py-1.5 text-sm text-slate-200'
+  const chip = 'inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-2xs font-medium'   // minim 11 px (audit tipografie)
 
   const foundLabel = (d: string) => {
     const p = (ports ?? []).find((x) => x.device === d)
@@ -154,32 +154,32 @@ export default function SerialModal(props: {
 
             {/* banner mod identificare */}
             {identifying && !found && (
-              <div role="status" className="wt-warn mb-2 rounded-lg bg-amber-500/10 px-3 py-2 text-xs ring-1 ring-amber-500/30">
+              <div role="status" className="wt-warn mb-2 rounded-md bg-amber-500/10 px-3 py-2 text-xs ring-1 ring-amber-500/30">
                 <span aria-hidden="true" className="inline-block align-[-2px]"><SearchIcon size={12} /></span> <b>{t('serial.identifyModeTitle')}</b> {t('serial.identifyModeBody')}
               </div>
             )}
             {found?.phase === 'removed' && (
-              <div role="status" className="wt-warn mb-2 rounded-lg bg-amber-500/10 px-3 py-2 text-xs ring-1 ring-amber-500/30">
+              <div role="status" className="wt-warn mb-2 rounded-md bg-amber-500/10 px-3 py-2 text-xs ring-1 ring-amber-500/30">
                 <span aria-hidden="true" className="inline-block align-[-2px]"><MinusIcon size={12} /></span> <b className="font-mono">{found.device}</b> {t('serial.wasRemovedPre')} <b>{t('serial.removed')}</b> {t('serial.wasRemovedPost')}
               </div>
             )}
             {found?.phase === 'back' && (
-              <div role="status" className="wt-good mb-2 flex items-center justify-between rounded-lg bg-emerald-500/10 px-3 py-2 text-xs ring-1 ring-emerald-500/30">
+              <div role="status" className="wt-good mb-2 flex items-center justify-between rounded-md bg-emerald-500/10 px-3 py-2 text-xs ring-1 ring-emerald-500/30">
                 <span><span aria-hidden="true" className="inline-block align-[-2px]"><CheckIcon size={12} /></span> <b className="font-mono">{foundLabel(found.device)}</b> {t('serial.cameBack')} <b>{t('serial.selected')}</b>.</span>
                 <button type="button" onClick={() => setFound(null)} aria-label={t('serial.dismissFound')}
-                  className="grid h-6 w-6 place-items-center rounded hover:bg-ink-700"><CloseIcon size={12} /></button>
+                  className="grid h-6 w-6 place-items-center rounded-md hover:bg-ink-700"><CloseIcon size={12} /></button>
               </div>
             )}
 
             {discovering && !ports ? (
-              <div className="rounded-lg bg-ink-800 px-3 py-2 text-sm text-slate-500">{t('serial.searchingPorts')}</div>
+              <div className="rounded-md bg-ink-800 px-3 py-2 text-sm text-slate-500">{t('serial.searchingPorts')}</div>
             ) : ports && ports.length ? (
               <div className="max-h-56 space-y-1 overflow-y-auto">
                 {ports.map((p) => {
                   const isFound = found?.device === p.device
                   return (
                     <label key={p.device}
-                      className={`flex cursor-pointer items-start gap-2 rounded-lg px-2.5 py-1.5 text-sm ring-1 ${
+                      className={`flex cursor-pointer items-start gap-2 rounded-md px-2.5 py-1.5 text-sm ring-1 ${
                         device === p.device ? 'bg-sky-600/15 ring-sky-600'
                         : isFound ? 'bg-orange-600/10 ring-orange-600/60'
                         : 'bg-ink-800 ring-ink-700 hover:bg-ink-700'}`}>
@@ -192,7 +192,7 @@ export default function SerialModal(props: {
                           {p.busy && <span className={`${chip} wt-danger bg-rose-500/15`} title={t('serial.heldOpenBy', { who: p.busy })}>{t('serial.inUse', { who: p.busy })}</span>}
                         </span>
                         {p.desc && p.desc !== p.device &&
-                          <span className="block truncate text-[11px] text-slate-400">{p.desc}</span>}
+                          <span className="block truncate text-2xs text-slate-400">{p.desc}</span>}
                         {/* metadate */}
                         <span className="mt-0.5 flex flex-wrap items-center gap-1">
                           {p.driver && <span className={`${chip} bg-ink-700 text-slate-300`}>{p.driver}</span>}
@@ -207,7 +207,7 @@ export default function SerialModal(props: {
                 })}
               </div>
             ) : (
-              <div className="rounded-lg bg-ink-800 px-3 py-2 text-xs text-slate-500">
+              <div className="rounded-md bg-ink-800 px-3 py-2 text-xs text-slate-500">
                 {t('serial.noPortsPre')} <span className="font-mono">/dev/ttyUSB0</span>{t('serial.noPortsMid')} <span className="font-mono">dialout</span>{t('serial.noPortsPost')}
               </div>
             )}
@@ -220,7 +220,7 @@ export default function SerialModal(props: {
               <input value={device} spellCheck={false} onChange={(e) => setDevice(e.target.value)}
                 placeholder="/dev/ttyUSB0" aria-required="true"
                 aria-invalid={err ? true : undefined} aria-describedby={err ? 'serial-error' : undefined}
-                className="w-full rounded-lg border border-ink-700 bg-ink-900 px-2.5 py-1.5 font-mono text-sm text-slate-200 focus:border-sky-500 focus:outline-none" />
+                className="w-full rounded-md border border-ink-700 bg-ink-900 px-2.5 py-1.5 font-mono text-sm text-slate-200 focus:border-sky-500 focus:outline-none" />
             </label>
             <label className="shrink-0">
               <span className="mb-1 block text-xs font-medium text-slate-400">Baud</span>

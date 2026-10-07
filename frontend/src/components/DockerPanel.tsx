@@ -77,10 +77,10 @@ export default function DockerPanel(props: {
   const sudoersCmd = `echo "${agentUser} ALL=(root) NOPASSWD: /usr/bin/docker" | sudo tee /etc/sudoers.d/${agentUser}-docker >/dev/null && sudo chmod 440 /etc/sudoers.d/${agentUser}-docker`
   const groupCmd = `sudo usermod -aG docker ${agentUser}`
   const cmdRow = (id: string, cmd: string) => (
-    <div className="flex items-center gap-2 rounded-lg bg-ink-900/70 px-3 py-2 ring-1 ring-ink-700">
-      <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap font-mono text-[11.5px] text-slate-200">{cmd}</code>
+    <div className="flex items-center gap-2 rounded-md bg-ink-900/70 px-3 py-2 ring-1 ring-ink-700">
+      <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap font-mono text-xs text-slate-200">{cmd}</code>
       <button onClick={() => copyText(cmd).then((ok) => { if (ok) { setCopied(id); setTimeout(() => setCopied(''), 1500) } })}
-        className="shrink-0 rounded px-2 py-0.5 text-[11px] wt-link hover:bg-ink-800">
+        className="shrink-0 rounded-md px-2 py-0.5 text-2xs wt-link hover:bg-ink-800">
         {copied === id ? t('docker.denied.copied') : t('docker.denied.copy')}
       </button>
     </div>
@@ -128,10 +128,10 @@ export default function DockerPanel(props: {
     <header className="flex items-center gap-2 border-b border-ink-800 px-3 py-2">
       <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">{t('docker.title')}</span>
       <button onClick={() => load(kind)} title={t('docker.refresh')} aria-label={t('docker.refresh')}
-        className="wt-touch ml-auto rounded px-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-300"><RefreshIcon /></button>
+        className="wt-touch ml-auto rounded-md px-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-300"><RefreshIcon /></button>
       {!props.embed && (
         <button onClick={props.onClose} aria-label={t('docker.closeAria')}
-          className="wt-touch rounded px-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-300"><CloseIcon size={14} /></button>
+          className="wt-touch rounded-md px-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-300"><CloseIcon size={14} /></button>
       )}
     </header>
   )
@@ -140,7 +140,7 @@ export default function DockerPanel(props: {
     <div className="flex gap-1 border-b border-ink-800 px-2 py-1.5">
       {KINDS.map((k) => (
         <button key={k} onClick={() => setKind(k)}
-          className={`rounded px-2 py-1 text-xs font-medium ${kind === k ? 'bg-ink-700 text-slate-100' : 'text-slate-400 hover:bg-ink-800'}`}>
+          className={`rounded-md px-2 py-1 text-xs font-medium ${kind === k ? 'bg-ink-700 text-slate-100' : 'text-slate-400 hover:bg-ink-800'}`}>
           {t(`docker.tab.${k}`)}
         </button>
       ))}
@@ -152,8 +152,8 @@ export default function DockerPanel(props: {
       {header}
       {tabs}
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
-        {error && <div className="mb-2 rounded-lg bg-ink-800 px-3 py-2 text-xs wt-warn">{error}</div>}
-        {note && !error && <div role="status" className="mb-2 rounded-lg bg-ink-800/60 px-3 py-2 text-xs text-slate-400">{note}</div>}
+        {error && <div className="mb-2 rounded-md bg-ink-800 px-3 py-2 text-xs wt-warn">{error}</div>}
+        {note && !error && <div role="status" className="mb-2 rounded-md bg-ink-800/60 px-3 py-2 text-xs text-slate-400">{note}</div>}
 
         {/* userul agentului nu e în grupul docker → remediere clară, nu un mesaj mort.
             (gateway-ul a încercat deja `sudo -n` transparent; dacă vezi asta, nu e nici în grup
@@ -162,14 +162,14 @@ export default function DockerPanel(props: {
         {denied && (
           <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-4">
             <div className="mb-1 text-sm font-semibold wt-warn">{t('docker.denied.title')}</div>
-            <p className="mb-2 text-[12px] leading-relaxed text-slate-400">{t('docker.denied.body')}</p>
-            <p className="mb-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[12px] leading-relaxed wt-warn">{t('docker.denied.warn')}</p>
-            <p className="mb-1 text-[11px] text-slate-400">{t('docker.denied.optSudo')}</p>
+            <p className="mb-2 text-xs leading-relaxed text-slate-400">{t('docker.denied.body')}</p>
+            <p className="mb-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs leading-relaxed wt-warn">{t('docker.denied.warn')}</p>
+            <p className="mb-1 text-2xs text-slate-400">{t('docker.denied.optSudo')}</p>
             {cmdRow('sudo', sudoersCmd)}
-            <p className="mb-1 mt-3 text-[11px] text-slate-400">{t('docker.denied.optGroup')}</p>
+            <p className="mb-1 mt-3 text-2xs text-slate-400">{t('docker.denied.optGroup')}</p>
             {cmdRow('group', groupCmd)}
-            <p className="mt-2 text-[11px] text-slate-500">{t('docker.denied.after')}</p>
-            <button onClick={() => load(kind)} className="mt-3 rounded-lg px-3 py-1.5 text-[12px] text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800">
+            <p className="mt-2 text-2xs text-slate-500">{t('docker.denied.after')}</p>
+            <button onClick={() => load(kind)} className="mt-3 rounded-md px-3 py-1.5 text-xs text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800">
               {t('docker.denied.retry')}
             </button>
           </div>
@@ -195,27 +195,27 @@ export default function DockerPanel(props: {
                     <span className={`mt-1 h-2 w-2 shrink-0 rounded-full ${running ? 'bg-emerald-500' : 'bg-slate-600'}`} aria-hidden="true" />
                     <div className="min-w-0 flex-1">
                       <div className="truncate text-sm font-medium text-slate-200" title={r.Names}>{name}</div>
-                      <div className="truncate font-mono text-[11px] text-slate-500" title={r.Image}>{r.Image}</div>
-                      <div className={`font-mono text-[10px] ${running ? 'wt-good' : 'text-slate-500'}`} title={r.Status}>{state}</div>
+                      <div className="truncate font-mono text-2xs text-slate-500" title={r.Image}>{r.Image}</div>
+                      <div className={`font-mono text-2xs ${running ? 'wt-good' : 'text-slate-500'}`} title={r.Status}>{state}</div>
                     </div>
-                    {busy === id && <span className="shrink-0 text-[10px] text-slate-500">…</span>}
+                    {busy === id && <span className="shrink-0 text-2xs text-slate-500">…</span>}
                   </div>
                   <div className="mt-auto flex flex-wrap items-center gap-1 border-t border-ink-800/60 pt-2">
                     {running && props.onOpenContainerShell && (
                       <button onClick={() => props.onOpenContainerShell!(id)}
-                        className="inline-flex items-center gap-1 rounded bg-sky-600/15 px-1.5 py-0.5 text-[11px] wt-accent hover:bg-sky-600/25">
+                        className="inline-flex items-center gap-1 rounded-md bg-sky-600/15 px-1.5 py-0.5 text-2xs wt-accent hover:bg-sky-600/25">
                         <TerminalPromptIcon /> {t('docker.shell')}
                       </button>
                     )}
                     {running
                       ? <button disabled={!!busy} onClick={() => action(id, 'stop', name)}
-                          className="rounded px-1.5 py-0.5 text-[11px] text-slate-400 ring-1 ring-ink-700 hover:bg-ink-800 disabled:opacity-40">{t('docker.stop')}</button>
+                          className="rounded-md px-1.5 py-0.5 text-2xs text-slate-400 ring-1 ring-ink-700 hover:bg-ink-800 disabled:opacity-40">{t('docker.stop')}</button>
                       : <button disabled={!!busy} onClick={() => action(id, 'start', name)}
-                          className="rounded px-1.5 py-0.5 text-[11px] wt-good ring-1 ring-ink-700 hover:bg-ink-800 disabled:opacity-40">{t('docker.start')}</button>}
+                          className="rounded-md px-1.5 py-0.5 text-2xs wt-good ring-1 ring-ink-700 hover:bg-ink-800 disabled:opacity-40">{t('docker.start')}</button>}
                     {running && <button disabled={!!busy} onClick={() => action(id, 'restart', name)}
-                      className="rounded px-1.5 py-0.5 text-[11px] text-slate-400 ring-1 ring-ink-700 hover:bg-ink-800 disabled:opacity-40">{t('docker.restart')}</button>}
+                      className="rounded-md px-1.5 py-0.5 text-2xs text-slate-400 ring-1 ring-ink-700 hover:bg-ink-800 disabled:opacity-40">{t('docker.restart')}</button>}
                     <button onClick={() => showLogs(id)}
-                      className="ml-auto rounded px-1.5 py-0.5 text-[11px] text-slate-400 ring-1 ring-ink-700 hover:bg-ink-800">{t('docker.logs')}</button>
+                      className="ml-auto rounded-md px-1.5 py-0.5 text-2xs text-slate-400 ring-1 ring-ink-700 hover:bg-ink-800">{t('docker.logs')}</button>
                   </div>
                 </div>
               )
@@ -227,7 +227,7 @@ export default function DockerPanel(props: {
                 <div className="truncate text-sm text-slate-200">
                   {kind === 'images' ? `${r.Repository}:${r.Tag}` : (r.Name || r.Driver)}
                 </div>
-                <div className="mt-0.5 truncate font-mono text-[11px] text-slate-500">
+                <div className="mt-0.5 truncate font-mono text-2xs text-slate-500">
                   {kind === 'images' ? `${r.ID?.slice(0, 12)} · ${r.Size}`
                     : kind === 'volumes' ? `${r.Driver} · ${r.Mountpoint || ''}`
                     : `${r.Driver} · ${r.Scope}`}
@@ -255,10 +255,10 @@ export default function DockerPanel(props: {
           <header className="flex items-center gap-2 border-b border-ink-800 px-4 py-2">
             <h2 id="wt-docker-logs-title" className="min-w-0 flex-1 truncate text-sm font-semibold">{t('docker.logsFor', { name: logsFor })}</h2>
             <button onClick={() => setLogsFor(null)} aria-label={t('common.close')}
-              className="wt-touch rounded px-1.5 text-slate-400 hover:bg-ink-800"><CloseIcon size={14} /></button>
+              className="wt-touch rounded-md px-1.5 text-slate-400 hover:bg-ink-800"><CloseIcon size={14} /></button>
           </header>
           {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- regiune derulabilă: fără tabindex nu se poate derula din tastatură */}
-          <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap px-4 py-3 font-mono text-[11px] leading-relaxed text-slate-300" tabIndex={0}>{logs}</pre>
+          <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap px-4 py-3 font-mono text-2xs leading-relaxed text-slate-300" tabIndex={0}>{logs}</pre>
         </LogsDialog>
       )}
     </>

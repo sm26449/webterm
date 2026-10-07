@@ -203,7 +203,7 @@ export default function ForwardsPanel(props: {
     <header className="flex items-center gap-2 border-b border-ink-800 px-3 py-2">
       <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">{t('forwards.title')}</span>
       <button onClick={props.onClose} aria-label={t('forwards.closeAria')}
-        className="wt-touch ml-auto rounded px-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-300"><CloseIcon size={14} /></button>
+        className="wt-touch ml-auto rounded-md px-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-300"><CloseIcon size={14} /></button>
     </header>
   )
 
@@ -245,49 +245,49 @@ export default function ForwardsPanel(props: {
 
         <div className="flex items-center gap-2 border-b border-ink-800 px-3 py-1.5">
           <button onClick={() => (adding ? closeForm() : openAdd())} aria-expanded={adding}
-            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[12px] font-medium wt-link hover:bg-ink-800">
+            className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs font-medium wt-link hover:bg-ink-800">
             <PlusIcon /> {t('forwards.add')}
           </button>
-          <button onClick={load} title={t('forwards.refresh')} aria-label={t('forwards.refresh')} className="wt-touch ml-auto rounded px-1.5 text-slate-400 hover:bg-ink-800"><RefreshIcon /></button>
+          <button onClick={load} title={t('forwards.refresh')} aria-label={t('forwards.refresh')} className="wt-touch ml-auto rounded-md px-1.5 text-slate-400 hover:bg-ink-800"><RefreshIcon /></button>
         </div>
 
         {/* wizard: apps cunoscute cu un click — presetează portul/scheme şi le marchează ca „app"
             (dală pe dashboard). Intern e tot un forward. */}
         {isAgent && (
           <div className="flex flex-wrap items-center gap-1.5 border-b border-ink-800 px-3 py-2">
-            <span className="mr-1 text-[11px] uppercase tracking-wide text-slate-500">{t('forwards.addApp')}</span>
+            <span className="mr-1 text-2xs uppercase tracking-wide text-slate-500">{t('forwards.addApp')}</span>
             <button onClick={() => presetApp('proxmox')}
-              className="rounded px-2 py-0.5 text-[11px] font-medium ring-1 ring-ink-700 hover:bg-ink-800"
+              className="rounded-md px-2 py-0.5 text-2xs font-medium ring-1 ring-ink-700 hover:bg-ink-800"
               style={{ color: '#ec8b3c' }}>Proxmox</button>
             <button onClick={() => presetApp('portainer')}
-              className="rounded px-2 py-0.5 text-[11px] font-medium ring-1 ring-ink-700 hover:bg-ink-800"
+              className="rounded-md px-2 py-0.5 text-2xs font-medium ring-1 ring-ink-700 hover:bg-ink-800"
               style={{ color: '#57a8e6' }}>Portainer</button>
             <button onClick={() => presetApp('grafana')}
-              className="rounded px-2 py-0.5 text-[11px] font-medium ring-1 ring-ink-700 hover:bg-ink-800"
+              className="rounded-md px-2 py-0.5 text-2xs font-medium ring-1 ring-ink-700 hover:bg-ink-800"
               style={{ color: '#f59e0b' }}>Grafana</button>
             {DB_APPS.map((a) => (
               <button key={a.type} onClick={() => presetApp(a.type)}
-                className="rounded px-2 py-0.5 text-[11px] font-medium ring-1 ring-ink-700 hover:bg-ink-800"
+                className="rounded-md px-2 py-0.5 text-2xs font-medium ring-1 ring-ink-700 hover:bg-ink-800"
                 style={{ color: a.color }}>{APP_PRESETS[a.type].label}</button>
             ))}
             <button onClick={() => presetApp('custom')}
-              className="rounded px-2 py-0.5 text-[11px] font-medium text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800">{t('forwards.appCustom')}</button>
+              className="rounded-md px-2 py-0.5 text-2xs font-medium text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800">{t('forwards.appCustom')}</button>
           </div>
         )}
 
         {(adding || editing) && (
           // Escape în formular închide FORMULARUL, nu tot panoul (nu urcă la drawer)
           // eslint-disable-next-line jsx-a11y/no-static-element-interactions -- doar Escape, pe containerul câmpurilor
-          <div className="flex flex-col gap-2 border-b border-ink-800 bg-ink-800/40 px-3 py-3 text-[12px]"
+          <div className="flex flex-col gap-2 border-b border-ink-800 bg-ink-800/40 px-3 py-3 text-xs"
             onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); closeForm() } }}>
             <input autoFocus value={fLabel} onChange={(e) => setFLabel(e.target.value)} placeholder={t('forwards.namePlaceholder')}
-              className="rounded bg-ink-800 px-2 py-1 text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500" />
+              className="rounded-md bg-ink-800 px-2 py-1 text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500" />
             {fScheme === 'telnet' ? (
-              <div className="text-[11px] leading-snug text-slate-500">
+              <div className="text-2xs leading-snug text-slate-500">
                 {t('forwards.telnetInfo.pre')} <span className="text-slate-300">{t('forwards.telnetInfo.emphasis')}</span>{t('forwards.telnetInfo.post')}
               </div>
             ) : (
-              <div className="text-[11px] leading-snug text-slate-500">
+              <div className="text-2xs leading-snug text-slate-500">
                 {t('forwards.addressLabel')} <span className="font-mono wt-link break-all">{previewHost}</span>
                 {editing
                   ? <span className="text-slate-600"> · {t('forwards.addressFixed')}</span>
@@ -296,25 +296,25 @@ export default function ForwardsPanel(props: {
             )}
             <div className="flex gap-2">
               <input value={fHost} onChange={(e) => setFHost(e.target.value)} placeholder="127.0.0.1"
-                className="min-w-0 flex-1 rounded bg-ink-800 px-2 py-1 font-mono text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500" />
+                className="min-w-0 flex-1 rounded-md bg-ink-800 px-2 py-1 font-mono text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500" />
               <input value={fPort} onChange={(e) => setFPort(e.target.value.replace(/\D/g, ''))} placeholder={t('forwards.portPlaceholder')} inputMode="numeric"
-                className="w-16 rounded bg-ink-800 px-2 py-1 font-mono text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500" />
+                className="w-16 rounded-md bg-ink-800 px-2 py-1 font-mono text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500" />
               <select value={fScheme} aria-label={t('forwards.scheme')} onChange={(e) => {
                 const v = e.target.value as 'http' | 'https' | 'telnet'
                 setFScheme(v)
                 if (v === 'telnet' && !fPort) setFPort('23')
               }}
-                className="rounded bg-ink-800 px-1 py-1 text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500">
+                className="rounded-md bg-ink-800 px-1 py-1 text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500">
                 <option value="http">http</option><option value="https">https</option>
                 {isAgent && <option value="telnet">telnet</option>}
               </select>
             </div>
             <input value={fDesc} onChange={(e) => setFDesc(e.target.value)} placeholder={t('forwards.descPlaceholder')}
-              className="rounded bg-ink-800 px-2 py-1 text-slate-300 ring-1 ring-ink-700 focus:ring-sky-500" />
+              className="rounded-md bg-ink-800 px-2 py-1 text-slate-300 ring-1 ring-ink-700 focus:ring-sky-500" />
             {/* indiciu SSO onest: outcome-ul „un singur login" vine din config-ul APP-ului,
                 nu din WebTerm. Doar arătăm ce/unde, fără să pretindem că provisionăm noi ceva. */}
             {(fApp === 'proxmox' || fApp === 'portainer' || fApp === 'grafana') && (
-              <div className="rounded border border-ink-700 bg-ink-900/60 px-2.5 py-2 text-[11px] leading-snug text-slate-400">
+              <div className="rounded-md border border-ink-700 bg-ink-900/60 px-2.5 py-2 text-2xs leading-snug text-slate-400">
                 <span className="font-semibold text-slate-300">{t('forwards.ssoTitle')}</span> {t('forwards.ssoHint')} <HelpTip id="forwardsSso" />
                 {fApp === 'proxmox' && <span className="mt-1 block wt-good">{t('forwards.ssoProxmox')}</span>}
                 {fApp === 'portainer' && <span className="mt-1 block wt-warn">{t('forwards.ssoPortainer')}</span>}
@@ -325,15 +325,15 @@ export default function ForwardsPanel(props: {
               <Button variant="primary" size="sm" onClick={submitForward} disabled={busy}>
                 {busy ? t('forwards.saving') : editing ? t('forwards.save') : t('forwards.addShort')}
               </Button>
-              <button onClick={closeForm} className="rounded-lg px-3 py-1 text-slate-400 hover:bg-ink-800">{t('forwards.cancel')}</button>
+              <button onClick={closeForm} className="rounded-md px-3 py-1 text-slate-400 hover:bg-ink-800">{t('forwards.cancel')}</button>
             </div>
           </div>
         )}
 
-        {error && <div className="border-b border-ink-800 bg-ink-800 px-3 py-1.5 text-[11px] wt-danger">{error}</div>}
+        {error && <div className="border-b border-ink-800 bg-ink-800 px-3 py-1.5 text-2xs wt-danger">{error}</div>}
 
         {!isAgent && (
-          <div className="border-b border-ink-800 bg-ink-800/40 px-3 py-2 text-[11px] leading-relaxed text-slate-400">
+          <div className="border-b border-ink-800 bg-ink-800/40 px-3 py-2 text-2xs leading-relaxed text-slate-400">
             {t('forwards.sshInfo')}{' '}
             {props.host.require_2fa
               ? t('forwards.sshInfo2fa')
@@ -343,7 +343,7 @@ export default function ForwardsPanel(props: {
 
         <div className="min-h-0 flex-1 overflow-y-auto p-3">
           {forwards && forwards.length === 0 && !adding && !editing && (
-            <div className="flex flex-col items-center gap-2 px-4 py-8 text-center text-[12px] text-slate-500">
+            <div className="flex flex-col items-center gap-2 px-4 py-8 text-center text-xs text-slate-500">
               <p>{t('forwards.empty')}</p>
               <Button variant="primary" onClick={openAdd}>{t('forwards.addFirst')}</Button>
             </div>
@@ -363,26 +363,26 @@ export default function ForwardsPanel(props: {
                 </button>
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-1.5">
-                    <span className="truncate text-[13.5px] font-semibold text-slate-200">{f.label}</span>
+                    <span className="truncate text-sm font-semibold text-slate-200">{f.label}</span>
                     {f.app_type && (
-                      <span className="shrink-0 rounded px-1.5 text-[9.5px] font-bold uppercase tracking-wide"
+                      <span className="shrink-0 rounded-md px-1.5 text-2xs font-bold uppercase tracking-wide"
                         style={{ color: APP_COLOR[f.app_type] || '#34d399', background: `${APP_COLOR[f.app_type] || '#34d399'}1f` }}
                         title={t('forwards.isApp')}>{t('forwards.appBadge')}</span>
                     )}
                   </div>
                   {isTelnet
-                    ? <div className="truncate text-[11.5px] text-slate-500">{t('forwards.telnetSubtitle')}</div>
-                    : <div className="truncate font-mono text-[11.5px] wt-link" title={f.url}>{urlHost(f)}</div>}
-                  <div className="truncate font-mono text-[11px] text-slate-500">
+                    ? <div className="truncate text-xs text-slate-500">{t('forwards.telnetSubtitle')}</div>
+                    : <div className="truncate font-mono text-xs wt-link" title={f.url}>{urlHost(f)}</div>}
+                  <div className="truncate font-mono text-2xs text-slate-500">
                     → {f.target_host}:{f.target_port} · {f.scheme} · <span className={probeTone(f)}>{dotTitle(f)}</span>
                   </div>
-                  {f.description && <div className="mt-0.5 line-clamp-2 text-[11.5px] text-slate-500">{f.description}</div>}
+                  {f.description && <div className="mt-0.5 line-clamp-2 text-xs text-slate-500">{f.description}</div>}
                 </div>
                 {!isTelnet && (
                   <button onClick={() => togglePromote(f)} aria-pressed={!!f.app_type}
                     title={f.app_type ? t('forwards.demoteApp') : t('forwards.promoteApp')}
                     aria-label={f.app_type ? t('forwards.demoteApp') : t('forwards.promoteApp')}
-                    className={`grid h-6 w-6 shrink-0 place-items-center rounded hover:bg-ink-700 ${f.app_type ? 'wt-warn' : 'text-slate-500 hover:text-amber-300'}`}>
+                    className={`grid h-6 w-6 shrink-0 place-items-center rounded-md hover:bg-ink-700 ${f.app_type ? 'wt-warn' : 'text-slate-500 hover:text-amber-300'}`}>
                     <StarIcon filled={!!f.app_type} />
                   </button>
                 )}
@@ -390,24 +390,24 @@ export default function ForwardsPanel(props: {
               <div className="mt-auto flex flex-wrap items-center gap-1 border-t border-ink-800/60 pt-2">
                 {isTelnet ? (
                   <button onClick={() => openTelnet(f)} disabled={opening === f.id} title={t('forwards.openInTerminal')}
-                    className="rounded px-1.5 py-0.5 text-[11px] font-medium wt-link hover:bg-ink-800 disabled:opacity-50">
+                    className="rounded-md px-1.5 py-0.5 text-2xs font-medium wt-link hover:bg-ink-800 disabled:opacity-50">
                     {opening === f.id ? t('forwards.opening') : t('forwards.open')}
                   </button>
                 ) : (<>
                   {f.enabled ? (
                     <a href={f.url} target="_blank" rel="noopener noreferrer" title={t('forwards.openNewTab')}
-                      className="rounded px-1.5 py-0.5 text-[11px] font-medium wt-link hover:bg-ink-800">{t('forwards.open')}</a>
+                      className="rounded-md px-1.5 py-0.5 text-2xs font-medium wt-link hover:bg-ink-800">{t('forwards.open')}</a>
                   ) : (
-                    <button onClick={() => toggle(f)} title={t('forwards.startTitle')} className="rounded px-1.5 py-0.5 text-[11px] text-slate-400 hover:bg-ink-800">{t('forwards.start')}</button>
+                    <button onClick={() => toggle(f)} title={t('forwards.startTitle')} className="rounded-md px-1.5 py-0.5 text-2xs text-slate-400 hover:bg-ink-800">{t('forwards.start')}</button>
                   )}
-                  <button onClick={() => copyLink(f)} title={t('forwards.copyLink')} aria-label={`${t('forwards.copyLink')} ${f.label}`} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-slate-200">
+                  <button onClick={() => copyLink(f)} title={t('forwards.copyLink')} aria-label={`${t('forwards.copyLink')} ${f.label}`} className="grid h-6 w-6 place-items-center rounded-md text-slate-500 hover:bg-ink-700 hover:text-slate-200">
                     {copied === f.id ? <span className="wt-good"><CheckIcon size={12} /></span> : <LinkIcon />}
                   </button>
-                  {f.enabled && <button onClick={() => toggle(f)} title={t('forwards.stop')} aria-label={`${t('forwards.stop')} ${f.label}`} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-amber-300"><PauseIcon size={12} /></button>}
+                  {f.enabled && <button onClick={() => toggle(f)} title={t('forwards.stop')} aria-label={`${t('forwards.stop')} ${f.label}`} className="grid h-6 w-6 place-items-center rounded-md text-slate-500 hover:bg-ink-700 hover:text-amber-300"><PauseIcon size={12} /></button>}
                 </>)}
                 <span className="ml-auto flex items-center gap-0.5">
-                  <button onClick={() => openEdit(f)} title={t('forwards.edit')} aria-label={`${t('forwards.edit')} ${f.label}`} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-slate-200"><PencilIcon /></button>
-                  <button onClick={() => setConfirmDel(f)} title={t('forwards.delete')} aria-label={`${t('forwards.delete')} ${f.label}`} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-rose-300"><TrashIcon /></button>
+                  <button onClick={() => openEdit(f)} title={t('forwards.edit')} aria-label={`${t('forwards.edit')} ${f.label}`} className="grid h-6 w-6 place-items-center rounded-md text-slate-500 hover:bg-ink-700 hover:text-slate-200"><PencilIcon /></button>
+                  <button onClick={() => setConfirmDel(f)} title={t('forwards.delete')} aria-label={`${t('forwards.delete')} ${f.label}`} className="grid h-6 w-6 place-items-center rounded-md text-slate-500 hover:bg-ink-700 hover:text-rose-300"><TrashIcon /></button>
                 </span>
               </div>
             </div>
@@ -418,11 +418,11 @@ export default function ForwardsPanel(props: {
         </div>
 
         {confirmDel && (
-          <div className="border-t border-ink-800 bg-ink-800/80 px-3 py-2 text-[11px]">
+          <div className="border-t border-ink-800 bg-ink-800/80 px-3 py-2 text-2xs">
             <p className="mb-1.5 text-slate-300">{t('forwards.confirmDelPre')} <span className="font-mono wt-danger">{confirmDel.label}</span>?</p>
             <div className="flex gap-2">
               <Button variant="danger" size="sm" onClick={() => remove(confirmDel)}>{t('forwards.delete')}</Button>
-              <button onClick={() => setConfirmDel(null)} className="rounded px-2 py-0.5 text-slate-400 hover:bg-ink-700">{t('forwards.cancel')}</button>
+              <button onClick={() => setConfirmDel(null)} className="rounded-md px-2 py-0.5 text-slate-400 hover:bg-ink-700">{t('forwards.cancel')}</button>
             </div>
           </div>
         )}

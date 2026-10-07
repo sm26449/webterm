@@ -374,12 +374,12 @@ export default function Sidebar(props: {
         <div
           onClick={() => props.onSelectHost(host.id)}
           style={selected ? { boxShadow: `inset 2px 0 0 ${color}` } : undefined}
-          className={`group flex cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-2 ${
+          className={`group flex cursor-pointer items-center gap-2.5 rounded-md px-2.5 py-2 ${
             selected ? 'bg-ink-800 ring-1 ring-ink-700' : 'hover:bg-ink-800/60'
           } ${viaChild ? 'opacity-60' : ''}`}
         >
           <div className="relative shrink-0">
-            <div className="grid h-8 w-8 place-items-center rounded-lg" style={{ background: `${color}22`, color }}>
+            <div className="grid h-8 w-8 place-items-center rounded-md" style={{ background: `${color}22`, color }}>
               <ServerIcon />
             </div>
             {/* starea NU e doar culoare (WCAG 1.4.1): on-demand = inel gol, online = plin,
@@ -400,7 +400,7 @@ export default function Sidebar(props: {
                   Acelaşi tipar ca pe cardurile din Dashboard. */}
               <button type="button"
                 onClick={(e) => { e.stopPropagation(); props.onSelectHost(host.id) }}
-                className="min-h-6 min-w-0 truncate rounded text-left text-sm font-medium focus:outline-none focus-visible:ring-1 focus-visible:ring-sky-500">
+                className="min-h-6 min-w-0 truncate rounded-md text-left text-sm font-medium focus:outline-none focus-visible:ring-1 focus-visible:ring-sky-500">
                 {host.name}
                 <span className="sr-only">
                   {' — '}{reach === 'online' ? t('sidebar.stateOnline') : reach === 'ondemand' ? t('dashboard.onDemandConnect') : t('sidebar.stateOffline')}
@@ -435,7 +435,7 @@ export default function Sidebar(props: {
                   <button type="button"
                     onClick={(e) => { e.stopPropagation(); setUpdFor(host) }}
                     title={label} aria-label={label}
-                    className={`relative inline-flex min-h-6 shrink-0 items-center gap-1 rounded-full px-1.5 text-[11px] tabular-nums ring-1 before:absolute before:-inset-1.5 before:content-[''] ${sig === 'security'
+                    className={`relative inline-flex min-h-6 shrink-0 items-center gap-1 rounded-full px-1.5 text-2xs tabular-nums ring-1 before:absolute before:-inset-1.5 before:content-[''] ${sig === 'security'
                       ? 'wt-danger font-semibold ring-rose-500/40 hover:bg-rose-500/10'
                       : 'text-slate-500 ring-ink-700 hover:bg-ink-800 hover:text-slate-300'}`}>
                     {sig === 'security'
@@ -469,7 +469,7 @@ export default function Sidebar(props: {
                   <button key={tag} type="button"
                     onClick={(e) => { e.stopPropagation(); setQuery(tag) }}
                     title={t('sidebar.filterByTag', { tag })}
-                    className="relative inline-flex min-h-6 items-center rounded bg-ink-700/60 px-1.5 text-[11px] text-slate-400 hover:bg-ink-700 hover:text-slate-200">
+                    className="relative inline-flex min-h-6 items-center rounded-md bg-ink-700/60 px-1.5 text-2xs text-slate-400 hover:bg-ink-700 hover:text-slate-200">
                     {tag}
                   </button>
                 ))}
@@ -500,7 +500,7 @@ export default function Sidebar(props: {
                     aria-label={host.alerts_muted
                       ? t('sidebar.alertsUnmuteAria', { name: host.name })
                       : t('sidebar.alertsMuteAria', { name: host.name })}
-                    className={`grid min-h-6 min-w-6 shrink-0 place-items-center rounded p-1 focus-visible:opacity-100 ${host.alerts_muted
+                    className={`grid min-h-6 min-w-6 shrink-0 place-items-center rounded-md p-1 focus-visible:opacity-100 ${host.alerts_muted
                       ? 'wt-warn opacity-100 hover:opacity-80'
                       : 'opacity-0 hover:text-slate-200 group-hover:opacity-100 [@media(hover:none)]:opacity-100'}`}
                   >{host.alerts_muted ? <BellOffIcon /> : <BellIcon />}</button>
@@ -538,7 +538,7 @@ export default function Sidebar(props: {
                 </span>
                 <button
                   onClick={(e) => { e.stopPropagation(); deleteHost(host) }}
-                  className="wt-danger shrink-0 rounded px-1.5 py-1 text-[11px] ring-1 ring-ink-700 hover:bg-ink-800"
+                  className="wt-danger shrink-0 rounded-md px-1.5 py-1 text-2xs ring-1 ring-ink-700 hover:bg-ink-800"
                 >{t('sidebar.uninstalledRemove')}</button>
               </div>
             )}
@@ -720,7 +720,7 @@ export default function Sidebar(props: {
           onChange={(e) => setQuery(e.target.value)}
           aria-label={t('sidebar.searchAria')}
           placeholder={t('sidebar.searchPlaceholder')}
-          className="w-full rounded-lg bg-ink-800 py-1.5 pl-8 pr-7 text-sm placeholder-slate-600 ring-1 ring-ink-700 focus:ring-sky-600"
+          className="w-full rounded-md bg-ink-800 py-1.5 pl-8 pr-7 text-sm placeholder-slate-600 ring-1 ring-ink-700 focus:ring-sky-600"
         />
         {query ? (
           <IconButton touch={false}
@@ -736,7 +736,7 @@ export default function Sidebar(props: {
             onClick={props.onOpenPalette}
             title={t('sidebar.paletteTitle', { key: fmt('Mod+K') })}
             aria-label={t('sidebar.openPalette')}
-            className="absolute right-3 top-1/2 hidden min-h-6 -translate-y-1/2 items-center rounded bg-white/5 px-1.5 text-[11px] text-slate-400 hover:bg-white/10 hover:text-slate-200 [@media(hover:hover)]:inline-flex"
+            className="absolute right-3 top-1/2 hidden min-h-6 -translate-y-1/2 items-center rounded-md bg-white/5 px-1.5 text-2xs text-slate-400 hover:bg-white/10 hover:text-slate-200 [@media(hover:hover)]:inline-flex"
           >
             {fmt('Mod+K')}
           </button>
@@ -800,7 +800,7 @@ export default function Sidebar(props: {
                         onClick={() => renameGroup(folder)}
                         title={t('sidebar.renameGroupAria', { folder })}
                         aria-label={t('sidebar.renameGroupAria', { folder })}
-                        className="shrink-0 rounded p-1 opacity-0 hover:text-slate-200 focus-visible:opacity-100 group-hover/folder:opacity-100 [@media(hover:none)]:opacity-100"
+                        className="shrink-0 rounded-md p-1 opacity-0 hover:text-slate-200 focus-visible:opacity-100 group-hover/folder:opacity-100 [@media(hover:none)]:opacity-100"
                       >
                         <NoteIcon />
                       </button>
@@ -810,7 +810,7 @@ export default function Sidebar(props: {
                       onClick={() => setExportCsv({ folder })}
                       title={t('hostcsv.exportFolderAria', { folder: folder || t('sidebar.noFolder') })}
                       aria-label={t('hostcsv.exportFolderAria', { folder: folder || t('sidebar.noFolder') })}
-                      className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded opacity-0 hover:text-slate-200 focus-visible:opacity-100 group-hover/folder:opacity-100 [@media(hover:none)]:opacity-100"
+                      className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md opacity-0 hover:text-slate-200 focus-visible:opacity-100 group-hover/folder:opacity-100 [@media(hover:none)]:opacity-100"
                     >
                       <DownloadIcon />
                     </button>
@@ -851,7 +851,7 @@ export default function Sidebar(props: {
                   </span>
                   <span className="truncate text-sm">{h.title || t('sidebar.untitled')}</span>
                   {h.matches > 0 && (
-                    <span className="ml-auto shrink-0 text-[10px] text-slate-400">
+                    <span className="ml-auto shrink-0 text-2xs text-slate-400">
                       {t('sidebar.matchCount', { count: h.matches })}
                     </span>
                   )}
@@ -873,7 +873,7 @@ export default function Sidebar(props: {
         onClick={() => setShowStatus(true)}
         title={t('nav.statusBarTitle', { online: hostsOnline, total: props.hosts.length })
           + (newVersion ? ' · ' + t('status.updateAvailable', { version: newVersion }) : '')}
-        className="flex shrink-0 items-center gap-2 border-t border-ink-800 px-3 py-1.5 text-left text-[11px] text-slate-500 hover:bg-ink-800/60"
+        className="flex shrink-0 items-center gap-2 border-t border-ink-800 px-3 py-1.5 text-left text-2xs text-slate-500 hover:bg-ink-800/60"
       >
         <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${
           props.hosts.length === 0 ? 'bg-slate-600'
@@ -885,7 +885,7 @@ export default function Sidebar(props: {
         {newVersion && (
           // textul spune CE e (nu doar un număr de versiune lângă alt număr de versiune);
           // min-w-0 + truncate: în sidebarul îngust se scurtează pastila, nu se rupe bara
-          <span className="wt-warn ml-auto min-w-0 truncate rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium ring-1 ring-amber-500/25">
+          <span className="wt-warn ml-auto min-w-0 truncate rounded-full bg-amber-500/15 px-1.5 py-0.5 text-2xs font-medium ring-1 ring-amber-500/25">
             {t('sidebar.updatePill', { version: newVersion })}
           </span>
         )}
@@ -918,7 +918,7 @@ export default function Sidebar(props: {
             const w = clampSb(sbWidth + d)
             setSbWidth(w); saveSbWidth(w)
           }}
-          className="absolute inset-y-0 -right-1 z-10 w-2 cursor-col-resize rounded hover:bg-sky-500/30 focus:outline-none focus-visible:bg-sky-500/50"
+          className="absolute inset-y-0 -right-1 z-10 w-2 cursor-col-resize rounded-md hover:bg-sky-500/30 focus:outline-none focus-visible:bg-sky-500/50"
         />
       </div>
       {/* mobile drawer — lăţime fixă (body-ul e w-full, lăţimea o dă wrapperul) */}
@@ -1093,7 +1093,7 @@ function HostMenu(props: {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [open, schemeOpen])
-  const item = 'flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm hover:bg-ink-800'
+  const item = 'flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm hover:bg-ink-800'
   // La alegerea unei acţiuni meniul se închide şi item-ul dispare din DOM; dacă acţiunea deschide
   // un dialog (confirmare de ştergere), focus-trap-ul lui ar memora un element deja demontat
   // şi la Escape focusul ar cădea pe <body>. APG: închiderea unui meniu întoarce focusul pe
@@ -1201,7 +1201,7 @@ function HostMenu(props: {
                   >
                     <span className="flex gap-0.5" aria-hidden="true">
                       {[s.theme.red, s.theme.green, s.theme.blue].map((c, i) => (
-                        <span key={i} className="h-2.5 w-1 rounded-sm" style={{ background: c }} />
+                        <span key={i} className="h-2.5 w-1 rounded-md" style={{ background: c }} />
                       ))}
                     </span>
                     {s.name}

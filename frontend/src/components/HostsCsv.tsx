@@ -168,7 +168,7 @@ export function HostsCsvImport(props: { onClose: () => void; onImported?: () => 
         </>
       ) : (
         <>
-          <div className="max-h-64 overflow-auto rounded-lg ring-1 ring-ink-700">
+          <div className="max-h-64 overflow-auto rounded-md ring-1 ring-ink-700">
             <table className="w-full text-left text-xs">
               <caption className="sr-only">{t('hostcsv.previewCaption')}</caption>
               <thead className="sticky top-0 bg-ink-900 text-slate-400">
@@ -325,11 +325,11 @@ export function ExportHostsModal(props: { hosts: Host[]; presetFolder?: string; 
             )
           })}
         </div>
-        <fieldset className="max-h-64 overflow-y-auto rounded-lg p-1 ring-1 ring-ink-700">
+        <fieldset className="max-h-64 overflow-y-auto rounded-md p-1 ring-1 ring-ink-700">
           <legend className="sr-only">{t('hostcsv.hostsLegend')}</legend>
           {list.length === 0 && <p className="p-2 text-sm text-slate-500">{t('hostcsv.noHosts')}</p>}
           {list.map((h) => (
-            <label key={h.id} className="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-sm hover:bg-ink-800">
+            <label key={h.id} className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1 text-sm hover:bg-ink-800">
               <input type="checkbox" checked={sel.has(h.id)} className="h-4 w-4 accent-sky-600"
                 onChange={() => { const n = new Set(sel); if (n.has(h.id)) n.delete(h.id); else n.add(h.id); setSel(n) }} />
               <span className="min-w-0 flex-1 truncate text-slate-200">{h.name}</span>

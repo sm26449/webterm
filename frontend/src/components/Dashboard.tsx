@@ -96,7 +96,7 @@ export default function Dashboard(props: {
             </p>
           </div>
           <Button variant="secondary" size="lg" onClick={props.onOpenPalette} className="wt-touch gap-2">
-            {t('dashboard.jumpTo')} <kbd className="hidden rounded bg-ink-700 px-1.5 text-xs text-slate-200 sm:inline">{fmt('Mod+K')}</kbd>
+            {t('dashboard.jumpTo')} <kbd className="hidden rounded-md bg-ink-700 px-1.5 text-xs text-slate-200 sm:inline">{fmt('Mod+K')}</kbd>
           </Button>
         </div>
 
@@ -119,11 +119,11 @@ export default function Dashboard(props: {
                     title={a.enabled ? a.url : t('dashboard.appDisabled')}
                     className={`group flex items-center gap-3 rounded-xl border border-ink-700 bg-ink-800/50 px-3 py-2.5 ${
                       a.enabled ? 'hover:border-ink-500 hover:bg-ink-800' : 'cursor-not-allowed opacity-50'}`}>
-                    <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg font-mono text-sm font-bold"
+                    <span className="grid h-9 w-9 shrink-0 place-items-center rounded-md font-mono text-sm font-bold"
                       style={{ background: `${color}22`, color }}>{glyph}</span>
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-sm font-medium text-slate-200">{a.label}</span>
-                      <span className="block truncate text-[11px] text-slate-500">{a.host_name}{a.enabled ? '' : ` · ${t('dashboard.appOff')}`}</span>
+                      <span className="block truncate text-2xs text-slate-500">{a.host_name}{a.enabled ? '' : ` · ${t('dashboard.appOff')}`}</span>
                     </span>
                     <span className="shrink-0 text-slate-600 group-hover:text-slate-400"><ArrowUpRightIcon /></span>
                   </a>
@@ -140,7 +140,7 @@ export default function Dashboard(props: {
             <p className="rounded-xl border border-dashed border-ink-700 px-4 py-6 text-center text-sm text-slate-500">
               {/* pe touch nu există ⌘K — instrucțiunea ar fi o glumă proastă */}
               {t('dashboard.noActiveSession')}
-              <span className="hidden sm:inline"> {t('dashboard.orWith')} <kbd className="rounded bg-ink-700 px-1 text-slate-300">{fmt('Mod+K')}</kbd></span>.
+              <span className="hidden sm:inline"> {t('dashboard.orWith')} <kbd className="rounded-md bg-ink-700 px-1 text-slate-300">{fmt('Mod+K')}</kbd></span>.
             </p>
           ) : (
             <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
@@ -154,14 +154,14 @@ export default function Dashboard(props: {
                     className="group flex items-center gap-3 overflow-hidden rounded-xl border border-ink-700 bg-ink-900/60 p-3 text-left hover:border-ink-600 hover:bg-ink-800"
                     style={{ borderLeft: `3px solid ${color}` }}
                   >
-                    <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg" style={{ background: `${color}22`, color }}>
+                    <span className="grid h-9 w-9 shrink-0 place-items-center rounded-md" style={{ background: `${color}22`, color }}>
                       <TerminalPromptIcon />
                     </span>
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-sm font-medium text-slate-100">{s.title || t('dashboard.session')}</span>
                       <span className="wt-hostlabel block truncate text-xs" style={{ color }}>{h?.name ?? t('dashboard.host')}</span>
                     </span>
-                    <span className="shrink-0 text-right text-[11px] text-slate-500">
+                    <span className="shrink-0 text-right text-2xs text-slate-500">
                       {timeAgo(s.created, t)}
                       {s.connected_clients > 0 && (
                         <span className="mt-0.5 flex items-center justify-end gap-1" title={t('dashboard.connectedCount', { count: s.connected_clients })}>
@@ -193,14 +193,14 @@ export default function Dashboard(props: {
                     className="group flex items-center gap-3 overflow-hidden rounded-xl border border-ink-700/60 bg-ink-900/40 p-3 text-left hover:border-ink-600 hover:bg-ink-800"
                     style={{ borderLeft: `3px solid ${color}66` }}
                   >
-                    <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-ink-800 text-slate-500">
+                    <span className="grid h-9 w-9 shrink-0 place-items-center rounded-md bg-ink-800 text-slate-500">
                       <TerminalPromptIcon />
                     </span>
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-sm text-slate-300">{s.title || t('dashboard.session')}</span>
                       <span className="block truncate text-xs text-slate-500">{h?.name ?? t('dashboard.host')}</span>
                     </span>
-                    <span className="shrink-0 text-right text-[11px] text-slate-500">
+                    <span className="shrink-0 text-right text-2xs text-slate-500">
                       {s.state === 'lost' ? t('dashboard.lost') : t('dashboard.closed')}
                       <span className="block">{timeAgo(s.closed_at || s.created, t)}</span>
                     </span>
@@ -216,7 +216,7 @@ export default function Dashboard(props: {
           <div className="mb-2.5 flex flex-wrap items-center gap-x-4 gap-y-1">
             <h2 className={eyebrow}>{t('dashboard.fleet')}</h2>
             {/* legendă stări — culoarea punctului e dublată de text (WCAG 1.4.1) */}
-            <div className="flex items-center gap-3 text-[11px] text-slate-500">
+            <div className="flex items-center gap-3 text-2xs text-slate-500">
               <span className="flex items-center gap-1"><span aria-hidden="true" className="h-2 w-2 rounded-full bg-emerald-400 ring-1 ring-emerald-700/50" /> {t('dashboard.online')}</span>
               <span className="flex items-center gap-1"><span aria-hidden="true" className="h-2 w-2 rounded-full bg-sky-500" /> {t('dashboard.onDemand')}</span>
               <span className="flex items-center gap-1"><span aria-hidden="true" className="h-2 w-2 rounded-full bg-slate-600" /> {t('dashboard.offline')}</span>
@@ -228,7 +228,7 @@ export default function Dashboard(props: {
               if (inF.length === 0) return null
               return (
                 <div key={folder || '__root__'}>
-                  {folder && <div className="wt-muted mb-1.5 text-[11px] font-medium uppercase tracking-wide">{folder}</div>}
+                  {folder && <div className="wt-muted mb-1.5 text-2xs font-medium uppercase tracking-wide">{folder}</div>}
                   <div className="grid gap-1.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
                     {inF.map((h) => {
                       const color = hostColor(h)
@@ -255,7 +255,7 @@ export default function Dashboard(props: {
                         <div
                           key={h.id}
                           onClick={() => props.onSelectHost(h.id)}
-                          className="group flex cursor-pointer items-center gap-2.5 overflow-hidden rounded-lg px-2.5 py-2 ring-1 ring-ink-700 hover:bg-ink-800"
+                          className="group flex cursor-pointer items-center gap-2.5 overflow-hidden rounded-md px-2.5 py-2 ring-1 ring-ink-700 hover:bg-ink-800"
                           style={{ borderLeft: `3px solid ${color}` }}
                         >
                           <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md" style={{ background: `${color}22`, color }}>
@@ -266,14 +266,14 @@ export default function Dashboard(props: {
                               type="button"
                               onClick={(e) => { e.stopPropagation(); props.onSelectHost(h.id) }}
                               aria-label={t('dashboard.openHost', { name: h.name })}
-                              className="block min-h-6 w-full truncate text-left text-sm text-slate-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 rounded-sm"
+                              className="block min-h-6 w-full truncate text-left text-sm text-slate-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 rounded-md"
                             >
                               {h.name}
                             </button>
-                            <span className="block truncate font-mono text-[11px] text-slate-500">{protoLabel(h)} · {hostAt(h)}</span>
+                            <span className="block truncate font-mono text-2xs text-slate-500">{protoLabel(h)} · {hostAt(h)}</span>
                             {health && (
                               <span className="flex items-center gap-1.5">
-                                <span className="min-w-0 flex-1 truncate font-mono text-[11px] tabular-nums text-slate-500">
+                                <span className="min-w-0 flex-1 truncate font-mono text-2xs tabular-nums text-slate-500">
                                   {health}
                                   {/* nota apare şi aici, nu doar în sidebar: „de ce e jos" trebuie
                                       să te găsească pe orice ecran te uiţi după host */}

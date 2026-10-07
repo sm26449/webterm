@@ -139,7 +139,7 @@ export default function HostOfflineOverlay(props: {
           {visible && target && actions ? (
             <div data-testid="host-offline"
               role="group" aria-labelledby={`wt-off-${session.id}`}
-              className="pointer-events-auto w-full max-w-lg rounded-lg border border-amber-500/40 bg-ink-900/95 px-3 py-2.5 text-sm shadow-lg backdrop-blur-sm">
+              className="pointer-events-auto w-full max-w-lg rounded-xl border border-amber-500/40 bg-ink-900/95 px-3 py-2.5 text-sm shadow-lg backdrop-blur-sm">
               <div className="flex items-start gap-2">
                 {/* nu doar culoare: icon + titlu explicit */}
                 <span aria-hidden="true" className="wt-warn mt-0.5 shrink-0"><WarningIcon /></span>

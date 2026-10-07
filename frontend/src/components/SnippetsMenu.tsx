@@ -132,7 +132,7 @@ export default function SnippetsMenu(props: {
                   onChange={(e) => setFilter(e.target.value)}
                   placeholder={t('snippets.filterPlaceholder')}
                   aria-label={t('snippets.filterAria')}
-                  className="mb-1 w-full rounded-lg bg-ink-800 px-2 py-1.5 text-sm ring-1 ring-ink-700 placeholder:text-slate-600 focus:ring-sky-500"
+                  className="mb-1 w-full rounded-md bg-ink-800 px-2 py-1.5 text-sm ring-1 ring-ink-700 placeholder:text-slate-600 focus:ring-sky-500"
                 />
               )}
               <div className="max-h-64 overflow-y-auto">
@@ -157,25 +157,25 @@ export default function SnippetsMenu(props: {
                         if (params.length) setAskParams(s)
                         else props.onInsert(s.body)
                       }}
-                      className="block w-full rounded-lg px-2 py-1.5 text-left hover:bg-ink-800"
+                      className="block w-full rounded-md px-2 py-1.5 text-left hover:bg-ink-800"
                     >
                       <div className="flex items-center gap-1.5">
                         <span className="truncate text-sm text-slate-200">{s.title}</span>
                         {params.length > 0 && (
-                          <span className="shrink-0 rounded bg-ink-800 px-1 text-[10px] text-slate-400 ring-1 ring-ink-700">
+                          <span className="shrink-0 rounded-md bg-ink-800 px-1 text-2xs text-slate-400 ring-1 ring-ink-700">
                             {t('snippets.paramsCount', { n: params.length })}
                           </span>
                         )}
                         <SnippetTags tags={snippetTags(s)} className="ml-auto" />
                       </div>
-                      <div className="truncate font-mono text-[11px] text-slate-500">{s.body}</div>
+                      <div className="truncate font-mono text-2xs text-slate-500">{s.body}</div>
                     </button>
                   )
                 })}
               </div>
               <button
                 onClick={() => setManaging(true)}
-                className="mt-1 w-full rounded-lg px-2 py-1 text-left text-xs wt-link hover:bg-ink-800"
+                className="mt-1 w-full rounded-md px-2 py-1 text-left text-xs wt-link hover:bg-ink-800"
               >
                 {t('snippets.manage')}
               </button>
@@ -186,14 +186,14 @@ export default function SnippetsMenu(props: {
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
                 placeholder={t('snippets.titlePlaceholder')}
-                className="w-full rounded-lg bg-ink-800 px-2 py-1.5 text-sm ring-1 ring-ink-700 focus:ring-sky-500"
+                className="w-full rounded-md bg-ink-800 px-2 py-1.5 text-sm ring-1 ring-ink-700 focus:ring-sky-500"
               />
               <textarea
                 value={body}
                 onChange={(e) => setBody(e.target.value)}
                 placeholder={t('snippets.bodyPlaceholder')}
                 rows={2}
-                className="w-full rounded-lg bg-ink-800 px-2 py-1.5 font-mono text-xs ring-1 ring-ink-700 focus:ring-sky-500"
+                className="w-full rounded-md bg-ink-800 px-2 py-1.5 font-mono text-xs ring-1 ring-ink-700 focus:ring-sky-500"
               />
               <input
                 value={tags}
@@ -201,20 +201,20 @@ export default function SnippetsMenu(props: {
                 placeholder={t('snippets.targetsPlaceholder')}
                 aria-label={t('snippets.targetsLabel')}
                 title={t('snippets.targetsHint')}
-                className="w-full rounded-lg bg-ink-800 px-2 py-1.5 text-xs ring-1 ring-ink-700 placeholder:text-slate-600 focus:ring-sky-500"
+                className="w-full rounded-md bg-ink-800 px-2 py-1.5 text-xs ring-1 ring-ink-700 placeholder:text-slate-600 focus:ring-sky-500"
               />
               {saveErr && <div className="px-1 text-xs wt-danger">{saveErr}</div>}
               <div className="flex gap-1.5">
                 <Button variant="primary" size="sm" onClick={save} disabled={saving}>
                   {saving ? t('snippets.saving') : editId ? t('common.save') : t('snippets.add')}
                 </Button>
-                <button onClick={() => { setManaging(false); setEditId(null); setTitle(''); setBody(''); setTags('') }} className="rounded-lg px-2.5 py-1 text-xs text-slate-400 hover:bg-ink-800">
+                <button onClick={() => { setManaging(false); setEditId(null); setTitle(''); setBody(''); setTags('') }} className="rounded-md px-2.5 py-1 text-xs text-slate-400 hover:bg-ink-800">
                   {t('snippets.back')}
                 </button>
               </div>
               <div className="max-h-40 overflow-y-auto border-t border-ink-800 pt-1">
                 {snips.map((s) => (
-                  <div key={s.id} className="flex items-center gap-1 rounded-lg px-2 py-1 hover:bg-ink-800">
+                  <div key={s.id} className="flex items-center gap-1 rounded-md px-2 py-1 hover:bg-ink-800">
                     <button
                       onClick={() => { setEditId(s.id); setTitle(s.title); setBody(s.body); setTags(snippetTags(s).join(', ')) }}
                       className="min-w-0 flex-1 truncate text-left text-xs text-slate-300"
@@ -226,7 +226,7 @@ export default function SnippetsMenu(props: {
                     <button onClick={() => remove(s.id, s.title)}
                       title={t('snippets.deleteTitle', { title: s.title })}
                       aria-label={t('snippets.deleteTitle', { title: s.title })}
-                      className="grid h-6 w-6 shrink-0 place-items-center rounded text-xs wt-danger hover:bg-ink-700">
+                      className="grid h-6 w-6 shrink-0 place-items-center rounded-md text-xs wt-danger hover:bg-ink-700">
                       <CloseIcon size={14} />
                     </button>
                   </div>

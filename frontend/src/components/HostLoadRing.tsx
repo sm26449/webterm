@@ -30,7 +30,7 @@ export default function HostLoadRing(props: { host: Host }) {
     // role="img" pe wrapper: aria-label pe un div generic e nume ARIA interzis (ignorat de unele
     // cititoare); tabIndex + focus-within fac tooltip-ul (singurul loc cu cifrele exacte)
     // accesibil şi de la tastatură, nu doar pe hover
-    <div className="group relative hidden shrink-0 items-center rounded px-1 focus:outline-none focus-visible:ring-1 focus-visible:ring-sky-500 sm:flex"
+    <div className="group relative hidden shrink-0 items-center rounded-md px-1 focus:outline-none focus-visible:ring-1 focus-visible:ring-sky-500 sm:flex"
       role="img" tabIndex={0} aria-label={t('loadring.aria', { cpu, mem: mem ?? '—' })}>
       <svg viewBox="0 0 40 40" className="h-6 w-6 -rotate-90" aria-hidden="true">
         {/* CPU — arc exterior */}
@@ -49,14 +49,14 @@ export default function HostLoadRing(props: { host: Host }) {
 
       {/* tooltip: sub indicator (toolbarul e sus). Cifrele exacte, aliniate. */}
       <div role="tooltip"
-        className="pointer-events-none absolute right-0 top-full z-20 mt-2 w-max rounded-lg border border-ink-700 bg-ink-900 px-3 py-2 text-xs opacity-0 shadow-lg transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+        className="pointer-events-none absolute right-0 top-full z-20 mt-2 w-max rounded-xl border border-ink-700 bg-ink-900 px-3 py-2 text-xs opacity-0 shadow-lg transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
         <div className="flex items-baseline justify-between gap-6">
-          <span className="text-[11px] uppercase tracking-wide text-slate-500">{t('loadring.cpu')}</span>
+          <span className="text-2xs uppercase tracking-wide text-slate-500">{t('loadring.cpu')}</span>
           <span className="font-mono font-semibold tabular-nums" style={{ color: pressureTextColor(cpu) }}>{cpu}%</span>
         </div>
         {mem != null && (
           <div className="mt-1 flex items-baseline justify-between gap-6">
-            <span className="text-[11px] uppercase tracking-wide text-slate-500">{t('loadring.memory')}</span>
+            <span className="text-2xs uppercase tracking-wide text-slate-500">{t('loadring.memory')}</span>
             <span className="font-mono font-semibold tabular-nums" style={{ color: pressureTextColor(mem) }}>
               {gb(m.mem_used)} / {gb(m.mem_total)} GB
             </span>
@@ -64,11 +64,11 @@ export default function HostLoadRing(props: { host: Host }) {
         )}
         {m.load1 != null && (
           <div className="mt-1 flex items-baseline justify-between gap-6">
-            <span className="text-[11px] uppercase tracking-wide text-slate-500">{t('loadring.load')}</span>
+            <span className="text-2xs uppercase tracking-wide text-slate-500">{t('loadring.load')}</span>
             <span className="font-mono tabular-nums text-slate-300">{load}</span>
           </div>
         )}
-        <div className="mt-1.5 border-t border-ink-800 pt-1.5 text-[11px] text-slate-500">
+        <div className="mt-1.5 border-t border-ink-800 pt-1.5 text-2xs text-slate-500">
           {t('loadring.swapHint')}
         </div>
       </div>

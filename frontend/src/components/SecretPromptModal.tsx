@@ -62,7 +62,7 @@ export default function SecretPromptModal(props: {
             aria-describedby={otp ? 'wt-secret-hint' : undefined}
             value={value}
             onChange={(e) => { setValue(e.target.value); if (err) setErr('') }}
-            className="mt-3 min-h-[36px] w-full rounded-lg border border-ink-700 bg-ink-900 px-3 py-2 text-sm outline-none focus:border-sky-600"
+            className="mt-3 min-h-[36px] w-full rounded-md border border-ink-700 bg-ink-900 px-3 py-2 text-sm outline-none focus:border-sky-600"
           />
           {otp && props.ask.hint && (
             <p id="wt-secret-hint" className="mt-2 text-xs text-slate-400">{props.ask.hint}</p>
@@ -74,7 +74,7 @@ export default function SecretPromptModal(props: {
             <button
               type="button"
               onClick={props.onCancel}
-              className="rounded-lg px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800"
+              className="rounded-md px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800"
             >
               {t('common.cancel')}
             </button>

@@ -322,31 +322,31 @@ export default function ToolboxPanel(props: {
           {(['connections', 'sshkeys', 'library', 'history'] as const).map((tb) => (
             <button key={tb} onClick={() => setTab(tb)}
               aria-pressed={tab === tb}
-              className={`rounded px-2 py-1 text-[12px] font-medium ${tab === tb
+              className={`rounded-md px-2 py-1 text-xs font-medium ${tab === tb
                 ? 'bg-ink-800 text-slate-100' : 'text-slate-400 hover:bg-ink-800/60'}`}>
               {t('toolbox.tab.' + tb)}
             </button>
           ))}
           {tab === 'connections' && (
-            <button onClick={() => setEdit(blank())} className="wt-touch ml-auto shrink-0 rounded px-1.5 wt-link hover:bg-ink-800"
+            <button onClick={() => setEdit(blank())} className="wt-touch ml-auto shrink-0 rounded-md px-1.5 wt-link hover:bg-ink-800"
               title={t('toolbox.new')} aria-label={t('toolbox.new')}><PlusIcon /></button>
           )}
           {tab === 'library' && (
-            <button onClick={() => setSnipEdit({ title: '', body: '', tags: '' })} className="wt-touch ml-auto shrink-0 rounded px-1.5 wt-link hover:bg-ink-800"
+            <button onClick={() => setSnipEdit({ title: '', body: '', tags: '' })} className="wt-touch ml-auto shrink-0 rounded-md px-1.5 wt-link hover:bg-ink-800"
               title={t('toolbox.lib.add')} aria-label={t('toolbox.lib.add')}><PlusIcon /></button>
           )}
           {!props.embed && (
             <button onClick={props.onClose} aria-label={t('common.close')}
-              className={`wt-touch shrink-0 rounded px-2 py-1 text-slate-400 hover:bg-ink-800${(tab === 'connections' || tab === 'library') ? '' : ' ml-auto'}`}><CloseIcon size={14} /></button>
+              className={`wt-touch shrink-0 rounded-md px-2 py-1 text-slate-400 hover:bg-ink-800${(tab === 'connections' || tab === 'library') ? '' : ' ml-auto'}`}><CloseIcon size={14} /></button>
           )}
         </div>
         {(tab === 'library' || tab === 'history') && (
           <div className="border-b border-ink-800 px-3 py-1.5">
             <input value={q} onChange={(e) => setQ(e.target.value)} placeholder={t('toolbox.filterPh')} aria-label={t('toolbox.filterPh')}
-              className="w-full rounded bg-ink-800/60 px-2 py-1 text-xs text-slate-300 ring-1 ring-ink-700 focus:ring-sky-500" />
+              className="w-full rounded-md bg-ink-800/60 px-2 py-1 text-xs text-slate-300 ring-1 ring-ink-700 focus:ring-sky-500" />
           </div>
         )}
-        {error && <div className="border-b border-ink-800 bg-ink-800 px-3 py-1.5 text-[11px] wt-danger">{error}</div>}
+        {error && <div className="border-b border-ink-800 bg-ink-800 px-3 py-1.5 text-2xs wt-danger">{error}</div>}
         <div className="min-h-0 flex-1 overflow-y-auto">
 
           {/* ── CONNECTIONS (Databases) — grilă de carduri ── */}
@@ -367,29 +367,29 @@ export default function ToolboxPanel(props: {
                 return (
                   <div key={c.id} className="flex flex-col gap-2 rounded-xl border border-ink-700/70 bg-ink-800/40 p-3">
                     <div className="flex items-start gap-2.5">
-                      <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg font-mono text-[11px] font-bold"
+                      <span className="grid h-8 w-8 shrink-0 place-items-center rounded-md font-mono text-2xs font-bold"
                         style={{ background: `${color}22`, color }} title={e?.label} aria-hidden="true">
                         {(e?.label || c.engine).slice(0, 2).toLowerCase()}
                       </span>
                       <div className="min-w-0 flex-1">
-                        <div className="truncate text-[13px] font-medium text-slate-200">{c.label}</div>
-                        <div className="truncate font-mono text-[11px] text-slate-500">
+                        <div className="truncate text-compact font-medium text-slate-200">{c.label}</div>
+                        <div className="truncate font-mono text-2xs text-slate-500">
                           {c.username ? c.username + '@' : ''}{c.target_host || 'localhost'}
                           {c.target_port ? ':' + c.target_port : ''}{c.dbname ? '/' + c.dbname : ''}
                         </div>
-                        <div className="text-[10px] uppercase tracking-wide text-slate-600">
+                        <div className="text-2xs uppercase tracking-wide text-slate-600">
                           {e?.label || c.engine} · {c.cred_policy === 'stored' ? t('toolbox.stored') : t('toolbox.ask')}
                         </div>
                       </div>
                     </div>
                     <div className="mt-auto flex items-center gap-1 border-t border-ink-800/60 pt-2">
                       <button onClick={() => props.onOpen(props.host, c.id)}
-                        className="inline-flex items-center gap-1 rounded bg-sky-600/15 px-2 py-0.5 text-[11px] font-medium wt-accent hover:bg-sky-600/25"
+                        className="inline-flex items-center gap-1 rounded-md bg-sky-600/15 px-2 py-0.5 text-2xs font-medium wt-accent hover:bg-sky-600/25"
                         title={t('toolbox.open')}><TerminalPromptIcon /> {t('toolbox.open')}</button>
                       <span className="ml-auto flex items-center gap-0.5">
-                        <button onClick={() => setEdit(toDraft(c))} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-slate-200"
+                        <button onClick={() => setEdit(toDraft(c))} className="grid h-6 w-6 place-items-center rounded-md text-slate-500 hover:bg-ink-700 hover:text-slate-200"
                           title={t('toolbox.edit')} aria-label={`${t('toolbox.edit')} ${c.label}`}><PencilIcon /></button>
-                        <button onClick={() => del(c)} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-rose-300"
+                        <button onClick={() => del(c)} className="grid h-6 w-6 place-items-center rounded-md text-slate-500 hover:bg-ink-700 hover:text-rose-300"
                           title={t('toolbox.delete')} aria-label={`${t('toolbox.delete')} ${c.label}`}><TrashIcon /></button>
                       </span>
                     </div>
@@ -408,57 +408,57 @@ export default function ToolboxPanel(props: {
               </div>
             ) : <div className="p-4 text-center text-xs text-slate-500">{t('toolbox.loading')}</div>
           ) : (
-            <div className="space-y-3 p-3 text-[12px]">
-              <p className="rounded bg-amber-500/10 px-2 py-1.5 text-[11px] leading-snug wt-warn">
+            <div className="space-y-3 p-3 text-xs">
+              <p className="rounded-md bg-amber-500/10 px-2 py-1.5 text-2xs leading-snug wt-warn">
                 {t('toolbox.ssh.warn')}
               </p>
               {!dk.key ? (
                 <div className="text-center">
-                  <p className="mb-2 text-[11.5px] leading-snug text-slate-400">{t('toolbox.ssh.none')}</p>
+                  <p className="mb-2 text-xs leading-snug text-slate-400">{t('toolbox.ssh.none')}</p>
                   <Button variant="primary" size="sm" onClick={dkGenerate} disabled={dkBusy !== ''}>
                     {dkBusy === 'generate' ? t('toolbox.ssh.generating') : t('toolbox.ssh.generate')}
                   </Button>
                 </div>
               ) : (
                 <>
-                  <div className="rounded border border-ink-800 bg-ink-800/40 p-2">
+                  <div className="rounded-md border border-ink-800 bg-ink-800/40 p-2">
                     <div className="flex items-center gap-2">
-                      <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-slate-300"
+                      <span className="min-w-0 flex-1 truncate font-mono text-2xs text-slate-300"
                         title={dk.key.fingerprint}>{dk.key.fingerprint}</span>
                       <button onClick={() => copy(dk.key!.public_key)}
-                        className="shrink-0 rounded p-1 text-slate-500 hover:bg-ink-700 hover:text-sky-400"
+                        className="shrink-0 rounded-md p-1 text-slate-500 hover:bg-ink-700 hover:text-sky-400"
                         title={t('toolbox.ssh.copyPub')} aria-label={t('toolbox.ssh.copyPub')}><CopyIcon /></button>
                       <button onClick={dkRotate} disabled={dkBusy !== ''}
-                        className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-slate-400 hover:bg-ink-700 hover:text-amber-300"
+                        className="shrink-0 rounded-md px-1.5 py-0.5 text-2xs text-slate-400 hover:bg-ink-700 hover:text-amber-300"
                         title={t('toolbox.ssh.rotateHint')}>{dkBusy === 'rotate' ? t('toolbox.ssh.rotating') : t('toolbox.ssh.rotate')}</button>
                       <button onClick={dkDelete} disabled={dkBusy !== ''}
-                        className="shrink-0 rounded p-1 text-slate-500 hover:bg-ink-700 hover:text-rose-300"
+                        className="shrink-0 rounded-md p-1 text-slate-500 hover:bg-ink-700 hover:text-rose-300"
                         title={t('toolbox.ssh.deleteKey')} aria-label={t('toolbox.ssh.deleteKey')}><TrashIcon /></button>
                     </div>
-                    <div className="mt-0.5 font-mono text-[10px] text-slate-500">~/.ssh/webterm_ed25519</div>
+                    <div className="mt-0.5 font-mono text-2xs text-slate-500">~/.ssh/webterm_ed25519</div>
                   </div>
 
-                  <div className="rounded border border-ink-800 p-2">
-                    <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-slate-500">{t('toolbox.ssh.deployTo')}</div>
+                  <div className="rounded-md border border-ink-800 p-2">
+                    <div className="mb-1 text-2xs font-medium uppercase tracking-wide text-slate-500">{t('toolbox.ssh.deployTo')}</div>
                     <div className="flex flex-col gap-1.5">
-                      <div className="max-h-36 overflow-y-auto rounded ring-1 ring-ink-700">
+                      <div className="max-h-36 overflow-y-auto rounded-md ring-1 ring-ink-700">
                         {dkHosts.length === 0 ? (
-                          <div className="px-2 py-1.5 text-[11px] text-slate-500">{t('toolbox.ssh.noTargets')}</div>
+                          <div className="px-2 py-1.5 text-2xs text-slate-500">{t('toolbox.ssh.noTargets')}</div>
                         ) : dkHosts.map((h) => (
-                          <label key={h.id} className={`flex items-center gap-2 px-2 py-1 text-[12px] ${h.online ? 'text-slate-200 hover:bg-ink-800/60' : 'text-slate-600'}`}>
+                          <label key={h.id} className={`flex items-center gap-2 px-2 py-1 text-xs ${h.online ? 'text-slate-200 hover:bg-ink-800/60' : 'text-slate-600'}`}>
                             <input type="checkbox" disabled={!h.online} checked={deployTo.has(h.id)}
                               onChange={(ev) => setDeployTo((s) => { const n = new Set(s); if (ev.target.checked) n.add(h.id); else n.delete(h.id); return n })} />
                             <span className="min-w-0 flex-1 truncate">{h.name}{h.agent_user ? ` (${h.agent_user})` : ''}</span>
-                            {!h.online && <span className="shrink-0 text-[10px]">{t('toolbox.ssh.offline')}</span>}
+                            {!h.online && <span className="shrink-0 text-2xs">{t('toolbox.ssh.offline')}</span>}
                           </label>
                         ))}
                       </div>
                       <input value={fromIp} onChange={(ev) => setFromIp(ev.target.value)}
                         placeholder={t('toolbox.ssh.fromIpPh')} aria-label={t('toolbox.ssh.fromIp')}
-                        className="w-full rounded bg-ink-800 px-2 py-1 font-mono text-[11px] text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" />
+                        className="w-full rounded-md bg-ink-800 px-2 py-1 font-mono text-2xs text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" />
                       <select value={restrictMode} onChange={(ev) => setRestrictMode(ev.target.value as 'none' | 'restrict' | 'command')}
                         aria-label={t('toolbox.ssh.restrict')}
-                        className="w-full rounded bg-ink-800 px-2 py-1 text-[12px] text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500">
+                        className="w-full rounded-md bg-ink-800 px-2 py-1 text-xs text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500">
                         <option value="none">{t('toolbox.ssh.restrictNone')}</option>
                         <option value="restrict">{t('toolbox.ssh.restrictLock')}</option>
                         <option value="command">{t('toolbox.ssh.restrictCmd')}</option>
@@ -466,14 +466,14 @@ export default function ToolboxPanel(props: {
                       {restrictMode === 'command' && (
                         <input value={restrictCmd} onChange={(ev) => setRestrictCmd(ev.target.value)}
                           placeholder={t('toolbox.ssh.restrictCmdPh')} aria-label={t('toolbox.ssh.restrictCmd')}
-                          className="w-full rounded bg-ink-800 px-2 py-1 font-mono text-[11px] text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" />
+                          className="w-full rounded-md bg-ink-800 px-2 py-1 font-mono text-2xs text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" />
                       )}
                       <Button variant="primary" size="sm" onClick={dkDeploy} disabled={deployTo.size === 0 || dkBusy !== '' || (restrictMode === 'command' && !restrictCmd.trim())}>
                         {dkBusy === 'deploy' ? t('toolbox.ssh.deploying')
                           : deployTo.size > 1 ? t('toolbox.ssh.deployN', { n: deployTo.size }) : t('toolbox.ssh.deploy')}
                       </Button>
                     </div>
-                    <p className="mt-1 text-[10.5px] leading-snug text-slate-500">{t('toolbox.ssh.fromIpHint')}</p>
+                    <p className="mt-1 text-2xs leading-snug text-slate-500">{t('toolbox.ssh.fromIpHint')}</p>
                   </div>
 
                   {/* rezultate per ţintă (deploy / rotate): rămân până le închizi; eşecurile cu codul
@@ -481,15 +481,15 @@ export default function ToolboxPanel(props: {
                   {dkResults && (dkResults.items.length > 0 || dkResults.leftOld.length > 0) && (() => {
                     const failed = dkResults.items.filter((r) => !r.ok).map((r) => r.target_host_id)
                     return (
-                      <div role="status" className="rounded border border-ink-700 bg-ink-800/40 p-2">
+                      <div role="status" className="rounded-md border border-ink-700 bg-ink-800/40 p-2">
                         <div className="mb-1 flex items-center gap-2">
-                          <span className="text-[11px] font-medium uppercase tracking-wide text-slate-500">
+                          <span className="text-2xs font-medium uppercase tracking-wide text-slate-500">
                             {t(dkResults.kind === 'rotate' ? 'toolbox.ssh.rotateResults' : 'toolbox.ssh.deployResults')}
                           </span>
                           <button onClick={() => setDkResults(null)} aria-label={t('toolbox.ssh.resultsDismiss')} title={t('toolbox.ssh.resultsDismiss')}
-                            className="ml-auto grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-slate-200"><CloseIcon size={14} /></button>
+                            className="ml-auto grid h-6 w-6 place-items-center rounded-md text-slate-500 hover:bg-ink-700 hover:text-slate-200"><CloseIcon size={14} /></button>
                         </div>
-                        <ul className="space-y-0.5 text-[11px]">
+                        <ul className="space-y-0.5 text-2xs">
                           {dkResults.items.map((r) => (
                             <li key={r.target_host_id} className="flex items-start gap-1.5">
                               <span className={`mt-0.5 shrink-0 ${r.ok ? 'wt-good' : 'wt-danger'}`} aria-hidden="true">{r.ok ? <CheckIcon size={12} /> : <CloseIcon size={12} />}</span>
@@ -503,17 +503,17 @@ export default function ToolboxPanel(props: {
                           ))}
                         </ul>
                         {dkResults.leftOld.length > 0 && (
-                          <p className="mt-1.5 text-[11px] leading-snug wt-warn">
+                          <p className="mt-1.5 text-2xs leading-snug wt-warn">
                             {t('toolbox.ssh.leftOld', { targets: dkResults.leftOld.map((x) => x.target_name || dkName(x.target_host_id)).join(', ') })}
                           </p>
                         )}
                         {failed.length > 0 && (
                           <div className="mt-1.5 flex flex-wrap items-center gap-2">
                             <button onClick={() => dkDeployTo(failed)} disabled={dkBusy !== ''}
-                              className="rounded px-2 py-1 text-[11px] font-medium text-slate-200 ring-1 ring-ink-600 hover:bg-ink-700 disabled:opacity-40">
+                              className="rounded-md px-2 py-1 text-2xs font-medium text-slate-200 ring-1 ring-ink-600 hover:bg-ink-700 disabled:opacity-40">
                               {t('toolbox.ssh.retryFailed')}
                             </button>
-                            {dkResults.kind === 'rotate' && <span className="text-[10.5px] text-slate-500">{t('toolbox.ssh.retryUsesForm')}</span>}
+                            {dkResults.kind === 'rotate' && <span className="text-2xs text-slate-500">{t('toolbox.ssh.retryUsesForm')}</span>}
                           </div>
                         )}
                       </div>
@@ -521,50 +521,50 @@ export default function ToolboxPanel(props: {
                   })()}
 
                   <div>
-                    <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-slate-500">{t('toolbox.ssh.deployments')}</div>
+                    <div className="mb-1 text-2xs font-medium uppercase tracking-wide text-slate-500">{t('toolbox.ssh.deployments')}</div>
                     {dk.deployments.length === 0 ? (
-                      <p className="text-[11px] text-slate-500">{t('toolbox.ssh.noDeployments')}</p>
+                      <p className="text-2xs text-slate-500">{t('toolbox.ssh.noDeployments')}</p>
                     ) : dk.deployments.map((d) => (
                       <div key={d.id} className="group flex items-center gap-2 border-b border-ink-800/60 py-1.5">
                         <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${DK_STATUS[d.status]}`}
                           title={t('toolbox.ssh.status.' + d.status)} aria-hidden="true" />
                         <div className="min-w-0 flex-1">
-                          <div className="truncate text-[12px] text-slate-200">{d.target_name || t('toolbox.ssh.deletedHost')}</div>
-                          <div className="truncate font-mono text-[10.5px] text-slate-500">
+                          <div className="truncate text-xs text-slate-200">{d.target_name || t('toolbox.ssh.deletedHost')}</div>
+                          <div className="truncate font-mono text-2xs text-slate-500">
                             {d.target_user || '?'}@{d.target_hostname || d.target_name}
                             {d.options ? ' · ' + d.options : ''} · {t('toolbox.ssh.status.' + d.status)}
                           </div>
                         </div>
                         <button onClick={() => copy(`ssh ${d.target_user || 'user'}@${d.target_hostname || d.target_name}`)}
-                          className="shrink-0 rounded p-1 text-slate-500 hover:bg-ink-700 hover:text-sky-400"
+                          className="shrink-0 rounded-md p-1 text-slate-500 hover:bg-ink-700 hover:text-sky-400"
                           title={t('toolbox.ssh.copySsh')} aria-label={t('toolbox.ssh.copySsh')}><CopyIcon /></button>
                         {d.status !== 'revoked' && d.target_name && (
                           <>
                             <button onClick={() => dkTest(d)} disabled={dkBusy !== ''}
-                              className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-slate-400 hover:bg-ink-700 hover:text-emerald-300"
+                              className="shrink-0 rounded-md px-1.5 py-0.5 text-2xs text-slate-400 hover:bg-ink-700 hover:text-emerald-300"
                               title={t('toolbox.ssh.testHint')}>{dkBusy === 'test' + d.id ? '…' : t('toolbox.ssh.test')}</button>
                             <button onClick={() => dkVerify(d)} disabled={dkBusy !== ''}
-                              className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-slate-400 hover:bg-ink-700 hover:text-slate-200"
+                              className="shrink-0 rounded-md px-1.5 py-0.5 text-2xs text-slate-400 hover:bg-ink-700 hover:text-slate-200"
                               title={t('toolbox.ssh.verify')}>{t('toolbox.ssh.verify')}</button>
                             <button onClick={() => dkSshConfig(d)} disabled={dkBusy !== ''}
-                              className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-slate-400 hover:bg-ink-700 hover:text-sky-300"
+                              className="shrink-0 rounded-md px-1.5 py-0.5 text-2xs text-slate-400 hover:bg-ink-700 hover:text-sky-300"
                               title={t('toolbox.ssh.aliasHint')}>{dkBusy === 'cfg' + d.id ? '…' : t('toolbox.ssh.alias')}</button>
                             <button onClick={() => dkRevoke(d)} disabled={dkBusy !== ''}
-                              className="shrink-0 rounded p-1 text-slate-500 hover:bg-ink-700 hover:text-rose-300"
+                              className="shrink-0 rounded-md p-1 text-slate-500 hover:bg-ink-700 hover:text-rose-300"
                               title={t('toolbox.ssh.revoke')} aria-label={t('toolbox.ssh.revoke')}><TrashIcon /></button>
                           </>
                         )}
                       </div>
                     ))}
                     {testResult && (
-                      <div role="status" className={`mt-1.5 rounded px-2 py-1.5 text-[11px] leading-snug ${testResult.ok ? 'bg-emerald-500/10 wt-good' : 'bg-rose-500/10 wt-danger'}`}>
+                      <div role="status" className={`mt-1.5 rounded-md px-2 py-1.5 text-2xs leading-snug ${testResult.ok ? 'bg-emerald-500/10 wt-good' : 'bg-rose-500/10 wt-danger'}`}>
                         <span className="font-medium">{testResult.ok ? t('toolbox.ssh.testOk') : t('toolbox.ssh.testFail')}</span>
                         {' '}<span className="font-mono">{testResult.dest}</span>
-                        {testResult.detail ? <div className="mt-0.5 whitespace-pre-wrap break-all font-mono text-[10px] text-slate-400">{testResult.detail}</div> : null}
+                        {testResult.detail ? <div className="mt-0.5 whitespace-pre-wrap break-all font-mono text-2xs text-slate-400">{testResult.detail}</div> : null}
                       </div>
                     )}
                     {dk.deployments.some((d) => d.status !== 'revoked') && (
-                      <p className="mt-1.5 text-[10.5px] leading-snug text-slate-500">
+                      <p className="mt-1.5 text-2xs leading-snug text-slate-500">
                         {t('toolbox.ssh.sudoersHint')}{' '}
                         <button className="wt-link" onClick={() => {
                           const u = dk.deployments.find((d) => d.status !== 'revoked')?.target_user || 'webterm'
@@ -578,11 +578,11 @@ export default function ToolboxPanel(props: {
 
               {dk.inbound.length > 0 && (
                 <div>
-                  <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-slate-500">{t('toolbox.ssh.inbound')}</div>
+                  <div className="mb-1 text-2xs font-medium uppercase tracking-wide text-slate-500">{t('toolbox.ssh.inbound')}</div>
                   {dk.inbound.map((k, i) => (
                     <div key={i} className="border-b border-ink-800/60 py-1.5">
-                      <div className="text-[12px] text-slate-200">{k.source_name}</div>
-                      <div className="truncate font-mono text-[10.5px] text-slate-500" title={k.fingerprint}>{k.fingerprint}</div>
+                      <div className="text-xs text-slate-200">{k.source_name}</div>
+                      <div className="truncate font-mono text-2xs text-slate-500" title={k.fingerprint}>{k.fingerprint}</div>
                     </div>
                   ))}
                 </div>
@@ -599,20 +599,20 @@ export default function ToolboxPanel(props: {
               if (!mine.length) return null
               return (
                 <div>
-                  <div className="sticky top-0 bg-ink-900/95 px-3 py-1 font-mono text-[10px] uppercase tracking-wide text-slate-500">{t('toolbox.lib.yours')}</div>
+                  <div className="sticky top-0 bg-ink-900/95 px-3 py-1 font-mono text-2xs uppercase tracking-wide text-slate-500">{t('toolbox.lib.yours')}</div>
                   {mine.map((s) => (
                     <div key={s.id} className="group flex items-center gap-2 border-b border-ink-800/60 px-3 py-1.5 hover:bg-ink-800/50">
                       <button onClick={() => copy(s.body)} className="flex min-w-0 flex-1 items-center gap-2 text-left" title={t('toolbox.copy')}>
-                        <span className="w-28 shrink-0 truncate text-[12px] text-slate-300">{s.title}</span>
-                        <code className="min-w-0 flex-1 truncate font-mono text-[11px] text-slate-500">{s.body}</code>
+                        <span className="w-28 shrink-0 truncate text-xs text-slate-300">{s.title}</span>
+                        <code className="min-w-0 flex-1 truncate font-mono text-2xs text-slate-500">{s.body}</code>
                       </button>
                       <SnippetTags tags={snippetTags(s)} />
                       {/* vizibile şi la focus din tastatură, nu doar la hover (altfel Tab trecea prin butoane invizibile) */}
                       <button onClick={() => setSnipEdit({ id: s.id, title: s.title, body: s.body, tags: snippetTags(s).join(', ') })}
-                        className="shrink-0 rounded p-1 text-slate-500 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 hover:bg-ink-700 hover:text-slate-200 [@media(hover:none)]:opacity-100"
+                        className="shrink-0 rounded-md p-1 text-slate-500 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 hover:bg-ink-700 hover:text-slate-200 [@media(hover:none)]:opacity-100"
                         title={t('toolbox.edit')} aria-label={`${t('toolbox.edit')} ${s.title}`}><PencilIcon /></button>
                       <button onClick={() => delSnip(s)}
-                        className="shrink-0 rounded p-1 text-slate-500 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 hover:bg-ink-700 hover:text-rose-300 [@media(hover:none)]:opacity-100"
+                        className="shrink-0 rounded-md p-1 text-slate-500 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 hover:bg-ink-700 hover:text-rose-300 [@media(hover:none)]:opacity-100"
                         title={t('toolbox.delete')} aria-label={`${t('toolbox.delete')} ${s.title}`}><TrashIcon /></button>
                     </div>
                   ))}
@@ -626,13 +626,13 @@ export default function ToolboxPanel(props: {
             if (!items.length) return null
             return (
               <div key={grp.cat}>
-                <div className="sticky top-0 bg-ink-900/95 px-3 py-1 font-mono text-[10px] uppercase tracking-wide text-slate-500">{grp.cat}</div>
+                <div className="sticky top-0 bg-ink-900/95 px-3 py-1 font-mono text-2xs uppercase tracking-wide text-slate-500">{grp.cat}</div>
                 {items.map((it) => (
                   <button key={it.cmd} onClick={() => copy(it.cmd)}
                     className="group flex w-full items-center gap-2 border-b border-ink-800/60 px-3 py-1.5 text-left hover:bg-ink-800/50"
                     title={t('toolbox.copy')}>
-                    <span className="w-28 shrink-0 truncate text-[12px] text-slate-300">{it.label}</span>
-                    <code className="min-w-0 flex-1 truncate font-mono text-[11px] text-slate-500">{it.cmd}</code>
+                    <span className="w-28 shrink-0 truncate text-xs text-slate-300">{it.label}</span>
+                    <code className="min-w-0 flex-1 truncate font-mono text-2xs text-slate-500">{it.cmd}</code>
                     <span className="shrink-0 text-slate-600 group-hover:text-sky-400"><CopyIcon /></span>
                   </button>
                 ))}
@@ -656,8 +656,8 @@ export default function ToolboxPanel(props: {
                 <span className={`mt-0.5 h-1.5 w-1.5 shrink-0 rounded-full ${h.exit_code === 0 ? 'bg-emerald-500' : h.exit_code == null ? 'bg-slate-600' : 'bg-rose-500'}`}
                   title={h.exit_code == null ? '' : 'exit ' + h.exit_code} aria-hidden="true" />
                 <span className="min-w-0 flex-1">
-                  <code className="block break-all font-mono text-[11.5px] text-slate-300">{h.command}</code>
-                  <span className="font-mono text-[10px] text-slate-500" title={fmtTs(h.created)}>{fmtShort(h.created)}</span>
+                  <code className="block break-all font-mono text-xs text-slate-300">{h.command}</code>
+                  <span className="font-mono text-2xs text-slate-500" title={fmtTs(h.created)}>{fmtShort(h.created)}</span>
                 </span>
                 <span className="mt-0.5 shrink-0 text-slate-600 group-hover:text-sky-400"><CopyIcon /></span>
               </button>
@@ -669,29 +669,29 @@ export default function ToolboxPanel(props: {
       {snipEdit && (
         <TrapDialog onClose={() => setSnipEdit(null)} labelledBy="wt-toolbox-snip-title">
             <h2 id="wt-toolbox-snip-title" className="mb-1 text-base font-semibold">{snipEdit.id ? t('toolbox.lib.editTitle') : t('toolbox.lib.newTitle')}</h2>
-            <p className="mb-3 text-[11px] leading-snug text-slate-500">{t('toolbox.lib.hint')}</p>
+            <p className="mb-3 text-2xs leading-snug text-slate-500">{t('toolbox.lib.hint')}</p>
             <div className="space-y-2 text-sm">
               <label className="block">
                 <span className="mb-0.5 block text-xs text-slate-400">{t('toolbox.lib.fTitle')}</span>
                 <input autoFocus value={snipEdit.title} onChange={(ev) => setSnipEdit({ ...snipEdit, title: ev.target.value })}
-                  placeholder="restart nginx" className="w-full rounded bg-ink-800 px-2 py-1 text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" />
+                  placeholder="restart nginx" className="w-full rounded-md bg-ink-800 px-2 py-1 text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" />
               </label>
               <label className="block">
                 <span className="mb-0.5 block text-xs text-slate-400">{t('toolbox.lib.fBody')}</span>
                 <textarea value={snipEdit.body} onChange={(ev) => setSnipEdit({ ...snipEdit, body: ev.target.value })}
                   rows={3} placeholder="sudo systemctl restart {{service}}"
-                  className="w-full rounded bg-ink-800 px-2 py-1 font-mono text-[12px] text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" />
+                  className="w-full rounded-md bg-ink-800 px-2 py-1 font-mono text-xs text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" />
               </label>
               <label className="block">
                 <span className="mb-0.5 block text-xs text-slate-400">{t('snippets.targetsLabel')}</span>
                 <input value={snipEdit.tags} onChange={(ev) => setSnipEdit({ ...snipEdit, tags: ev.target.value })}
                   placeholder={t('snippets.targetsPlaceholder')}
-                  className="w-full rounded bg-ink-800 px-2 py-1 text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" />
-                <span className="mt-0.5 block text-[10.5px] leading-snug text-slate-500">{t('snippets.targetsHint')}</span>
+                  className="w-full rounded-md bg-ink-800 px-2 py-1 text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" />
+                <span className="mt-0.5 block text-2xs leading-snug text-slate-500">{t('snippets.targetsHint')}</span>
               </label>
             </div>
             <div className="mt-4 flex justify-end gap-2 text-sm">
-              <button onClick={() => setSnipEdit(null)} className="rounded px-3 py-1.5 text-slate-400 hover:bg-ink-800">{t('common.cancel')}</button>
+              <button onClick={() => setSnipEdit(null)} className="rounded-md px-3 py-1.5 text-slate-400 hover:bg-ink-800">{t('common.cancel')}</button>
               <Button variant="primary" onClick={() => saveSnip(snipEdit)} disabled={!snipEdit.title.trim() || !snipEdit.body.trim()}>{t('common.save')}</Button>
             </div>
         </TrapDialog>
@@ -704,23 +704,23 @@ export default function ToolboxPanel(props: {
               <label className="block">
                 <span className="mb-0.5 block text-xs text-slate-400">{t('toolbox.fLabel')}</span>
                 <input autoFocus value={edit.label} onChange={(ev) => setEdit({ ...edit, label: ev.target.value })}
-                  placeholder="prod-postgres" className="w-full rounded bg-ink-800 px-2 py-1 text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" />
+                  placeholder="prod-postgres" className="w-full rounded-md bg-ink-800 px-2 py-1 text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" />
               </label>
               <label className="block">
                 <span className="mb-0.5 block text-xs text-slate-400">{t('toolbox.fEngine')}</span>
                 <select value={edit.engine}
                   onChange={(ev) => setEdit({ ...edit, engine: ev.target.value as Connection['engine'] })}
-                  className="w-full rounded bg-ink-800 px-2 py-1 text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500">
+                  className="w-full rounded-md bg-ink-800 px-2 py-1 text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500">
                   {ENGINES.map((e) => <option key={e.id} value={e.id}>{e.label}</option>)}
                 </select>
               </label>
               <div className="flex gap-2">
                 <label className="block flex-1"><span className="mb-0.5 block text-xs text-slate-400">{t('toolbox.fHost')}</span>
                   <input value={edit.target_host} onChange={(ev) => setEdit({ ...edit, target_host: ev.target.value })}
-                    placeholder="localhost" className="w-full rounded bg-ink-800 px-2 py-1 font-mono text-[12px] text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" /></label>
+                    placeholder="localhost" className="w-full rounded-md bg-ink-800 px-2 py-1 font-mono text-xs text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" /></label>
                 <label className="block w-24"><span className="mb-0.5 block text-xs text-slate-400">{t('toolbox.fPort')}</span>
                   <input value={edit.target_port} inputMode="numeric" onChange={(ev) => setEdit({ ...edit, target_port: ev.target.value.replace(/\D/g, '') })}
-                    placeholder={String(engOf(edit.engine)?.port || '')} className="w-full rounded bg-ink-800 px-2 py-1 font-mono text-[12px] text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" /></label>
+                    placeholder={String(engOf(edit.engine)?.port || '')} className="w-full rounded-md bg-ink-800 px-2 py-1 font-mono text-xs text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" /></label>
               </div>
               {/* influxdb2: user → Org (2.x nu are useri aici, are organizaţii), fără câmp de bază
                   (o alegi cu `use` în shell); secretul e un TOKEN, nu o parolă — etichetăm ca atare */}
@@ -728,11 +728,11 @@ export default function ToolboxPanel(props: {
                 <label className="block flex-1"><span className="mb-0.5 block text-xs text-slate-400">
                   {t(edit.engine === 'influxdb2' ? 'toolbox.fOrg' : 'toolbox.fUser')}</span>
                   <input value={edit.username} onChange={(ev) => setEdit({ ...edit, username: ev.target.value })}
-                    className="w-full rounded bg-ink-800 px-2 py-1 font-mono text-[12px] text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" /></label>
+                    className="w-full rounded-md bg-ink-800 px-2 py-1 font-mono text-xs text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" /></label>
                 {edit.engine !== 'influxdb2' && (
                   <label className="block flex-1"><span className="mb-0.5 block text-xs text-slate-400">{t('toolbox.fDb')}</span>
                     <input value={edit.dbname} onChange={(ev) => setEdit({ ...edit, dbname: ev.target.value })}
-                      className="w-full rounded bg-ink-800 px-2 py-1 font-mono text-[12px] text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" /></label>
+                      className="w-full rounded-md bg-ink-800 px-2 py-1 font-mono text-xs text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" /></label>
                 )}
               </div>
               {!noStored(edit.engine) && (
@@ -740,7 +740,7 @@ export default function ToolboxPanel(props: {
                   <span className="mb-0.5 block text-xs text-slate-400">{t('toolbox.fAuth')}</span>
                   <select value={edit.cred_policy}
                     onChange={(ev) => setEdit({ ...edit, cred_policy: ev.target.value as 'ask' | 'stored' })}
-                    className="w-full rounded bg-ink-800 px-2 py-1 text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500">
+                    className="w-full rounded-md bg-ink-800 px-2 py-1 text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500">
                     <option value="ask">{t('toolbox.authAsk')}</option>
                     <option value="stored">{t('toolbox.authStored')}</option>
                   </select>
@@ -753,16 +753,16 @@ export default function ToolboxPanel(props: {
                   <input type="password" value={edit.credential} autoComplete="new-password"
                     onChange={(ev) => setEdit({ ...edit, credential: ev.target.value })}
                     placeholder={edit.id ? t('toolbox.pwKeep') : ''}
-                    className="w-full rounded bg-ink-800 px-2 py-1 font-mono text-[12px] text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" />
+                    className="w-full rounded-md bg-ink-800 px-2 py-1 font-mono text-xs text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" />
                 </label>
               )}
-              <p className="text-[11px] text-slate-500">
+              <p className="text-2xs text-slate-500">
                 {edit.engine === 'influxdb2' ? t('toolbox.influx2Hint')
                   : !noStored(edit.engine) && edit.cred_policy === 'stored' ? t('toolbox.storedHint') : t('toolbox.askHint')}
               </p>
             </div>
             <div className="mt-4 flex justify-end gap-2 text-sm">
-              <button onClick={() => setEdit(null)} className="rounded px-3 py-1.5 text-slate-400 hover:bg-ink-800">{t('common.cancel')}</button>
+              <button onClick={() => setEdit(null)} className="rounded-md px-3 py-1.5 text-slate-400 hover:bg-ink-800">{t('common.cancel')}</button>
               <Button variant="primary" onClick={() => save(edit)} disabled={!edit.label.trim()}>{t('common.save')}</Button>
             </div>
         </TrapDialog>

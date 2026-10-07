@@ -45,7 +45,7 @@ export default function InstallCommand(props: { command: string; commandDedicate
   return (
     <div>
       {props.commandDedicated && (
-        <div className="mt-3 inline-flex gap-1 rounded-lg bg-ink-800/70 p-1">
+        <div className="mt-3 inline-flex gap-1 rounded-md bg-ink-800/70 p-1">
           <Tab on={dedicated} label={t('addhost.asDedicated')}
                onClick={() => { setDedicated(true); setCopied(false) }} />
           <Tab on={!dedicated} label={t('addhost.asCurrent')}
@@ -55,7 +55,7 @@ export default function InstallCommand(props: { command: string; commandDedicate
       <div className="mt-2 flex items-stretch gap-2">
         {/* fundal opac întunecat FIX (nu black/50 peste sticla albă din Aurora):
             emerald-300 are contrast bun doar pe întunecat plin */}
-        <code className="flex-1 select-all overflow-x-auto whitespace-nowrap rounded-lg bg-[#0b0e14] p-3 text-xs text-emerald-300">
+        <code className="flex-1 select-all overflow-x-auto whitespace-nowrap rounded-md bg-[#0b0e14] p-3 text-xs text-emerald-300">
           {cmd}
         </code>
         <Button variant="primary"
@@ -80,7 +80,7 @@ export default function InstallCommand(props: { command: string; commandDedicate
         // `wt-warn`, nu `text-amber-300`: al doilea e un token pentru fundal ÎNCHIS, iar
         // modalul urmează tema. Exact clasa de defect pe care o descrie `.wt-accent` în
         // index.css — text galben-deschis peste alb, sub 2:1, invizibil în tema deschisă.
-        <p className="wt-warn mt-2 rounded-lg bg-amber-500/10 p-2 text-xs ring-1 ring-amber-500/30">
+        <p className="wt-warn mt-2 rounded-md bg-amber-500/10 p-2 text-xs ring-1 ring-amber-500/30">
           {t('addhost.insecureBootstrap')}
         </p>
       )}

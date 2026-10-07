@@ -55,7 +55,7 @@ export default function CredentialModal(props: {
                 onChange={(e) => set(f.key, e.target.value)}
                 placeholder={f.placeholder}
                 rows={5}
-                className="w-full rounded-lg bg-ink-800 px-3 py-2 font-mono text-xs placeholder-slate-500 ring-1 ring-ink-700 focus:ring-sky-600"
+                className="w-full rounded-md bg-ink-800 px-3 py-2 font-mono text-xs placeholder-slate-500 ring-1 ring-ink-700 focus:ring-sky-600"
               />
             ) : (
               <input
@@ -65,14 +65,14 @@ export default function CredentialModal(props: {
                 value={values[f.key] || ''}
                 onChange={(e) => set(f.key, e.target.value)}
                 placeholder={f.placeholder}
-                className="w-full rounded-lg bg-ink-800 px-4 py-2.5 placeholder-slate-500 ring-1 ring-ink-700 focus:ring-sky-600"
+                className="w-full rounded-md bg-ink-800 px-4 py-2.5 placeholder-slate-500 ring-1 ring-ink-700 focus:ring-sky-600"
               />
             )}
           </label>
         ))}
         <div className="flex justify-end gap-2">
           <button type="button" onClick={props.onCancel}
-            className="rounded-lg px-4 py-2 text-sm text-slate-400 hover:bg-ink-800">{t('cred.cancel')}</button>
+            className="rounded-md px-4 py-2 text-sm text-slate-400 hover:bg-ink-800">{t('cred.cancel')}</button>
           <Button variant="primary" size="lg" disabled={missing}>
             {props.submitLabel || t('cred.continue')}
           </Button>

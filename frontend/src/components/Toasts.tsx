@@ -44,7 +44,7 @@ export default function Toasts(props: {
     <div
       key={item.id}
       role={item.kind === 'error' ? 'alert' : 'status'}
-      className={`wt-toast pointer-events-auto flex items-start gap-2 rounded-lg border px-3 py-2.5 text-left text-sm shadow-lg ${
+      className={`wt-toast pointer-events-auto flex items-start gap-2 rounded-xl border px-3 py-2.5 text-left text-sm shadow-lg ${
         item.kind === 'error'
           ? 'border-rose-500/50 bg-ink-800 wt-danger'
           : item.kind === 'warn'
@@ -59,7 +59,7 @@ export default function Toasts(props: {
         type="button"
         onClick={() => props.onDismiss(item.id)}
         aria-label={t('toast.dismiss')}
-        className="-mr-1 -mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded text-slate-400 hover:bg-ink-700 hover:text-slate-100"
+        className="-mr-1 -mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-md text-slate-400 hover:bg-ink-700 hover:text-slate-100"
       >
         <CloseIcon size={14} />
       </button>

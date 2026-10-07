@@ -78,7 +78,7 @@ export default function SessionPreview(props: { sid: string; live: boolean }) {
             <rect x="3" y="4" width="18" height="16" rx="2" />
             <path d="M7 9l3 3-3 3M13 15h4" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
-          <span className="text-[11px]">{t('host.previewEmpty')}</span>
+          <span className="text-2xs">{t('host.previewEmpty')}</span>
         </div>
       )}
     </div>

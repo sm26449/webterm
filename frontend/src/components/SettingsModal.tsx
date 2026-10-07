@@ -68,7 +68,7 @@ export default function SettingsModal(props: {
                 key={c.id}
                 onClick={() => setCat(c.id)}
                 aria-current={cat === c.id ? 'true' : undefined}
-                className={`wt-touch shrink-0 rounded-lg px-3 py-2 text-left text-sm sm:w-full ${
+                className={`wt-touch shrink-0 rounded-md px-3 py-2 text-left text-sm sm:w-full ${
                   cat === c.id ? 'bg-sky-600 text-white' : 'text-slate-300 hover:bg-ink-800'
                 }`}
               >

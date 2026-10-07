@@ -176,7 +176,7 @@ export default function NotificationsTab() {
           </div>
         )}
         {fwd && fwd.is_custom && !(fwd.dns_ok && fwd.cert_ok) && (
-          <div className="rounded-lg border border-ink-700 bg-ink-800/50 p-3 text-xs text-slate-400">
+          <div className="rounded-md border border-ink-700 bg-ink-800/50 p-3 text-xs text-slate-400">
             <p className="mb-1.5 font-medium text-slate-300">{t('settings.forward.toActivateA')} <span className="font-mono">{fwd.domain}</span> {t('settings.forward.toActivateB')}</p>
             <ol className="ml-4 list-decimal space-y-1">
               <li>{t('settings.forward.step1Label')} <span className="font-mono wt-link">*.{fwd.domain}</span> → <span className="font-mono">A {fwd.server_ip || t('settings.forward.ipServerPlaceholder')}</span> (DNS-only)</li>

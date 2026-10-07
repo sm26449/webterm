@@ -170,7 +170,7 @@ export default function SharedView(props: { token: string }) {
               <path className="wt-slash-in" d="M4 20 20 4" stroke="#fca5a5" strokeWidth="2.4" strokeLinecap="round" />
             </svg>
           </div>
-          <div className="font-mono text-6xl font-black tracking-tighter" style={{ color: '#f1f5f9' }}>403</div>
+          <div className="font-mono text-hero font-black tracking-tighter" style={{ color: '#f1f5f9' }}>403</div>
           <h1 className="text-lg font-semibold" style={{ color: '#e2e8f0' }}>{t(`share.revoke${revokeIdx}.title`)}</h1>
           <p className="max-w-xs text-sm leading-relaxed" style={{ color: '#94a3b8' }}>{t(`share.revoke${revokeIdx}.body`)}</p>
         </div>
@@ -184,18 +184,18 @@ export default function SharedView(props: { token: string }) {
       <div className="wt-window flex h-full flex-col">
         <header className="flex items-center gap-2 border-b border-ink-800 bg-ink-900 px-4 py-2">
           <span className="text-sm font-medium">{title || t('share.titleFallback')}</span>
-          <span className={`rounded px-2 py-0.5 text-[11px] ${writable ? 'wt-good bg-emerald-500/15' : 'bg-ink-800 text-slate-400'}`}>
+          <span className={`rounded-md px-2 py-0.5 text-2xs ${writable ? 'wt-good bg-emerald-500/15' : 'bg-ink-800 text-slate-400'}`}>
             {writable ? t('share.canWrite') : t('share.readOnly')}
           </span>
           {/* zoom invitat: reglaj peste fit (fontul se adaptează, grila rămâne a owner-ului) */}
           {conn === 'open' && (
             <div className="ml-auto flex items-center gap-1">
               <button onClick={() => bumpZoom(-0.1)} title={t('share.zoomOut')}
-                className="grid h-6 w-6 place-items-center rounded text-slate-400 hover:bg-ink-800 hover:text-slate-200">A−</button>
+                className="grid h-6 w-6 place-items-center rounded-md text-slate-400 hover:bg-ink-800 hover:text-slate-200">A−</button>
               <button onClick={() => { zoomRef.current = 1; setZoom(1); applyFit() }} title={t('share.zoomFit')}
-                className="rounded px-1.5 text-[11px] tabular-nums text-slate-500 hover:bg-ink-800 hover:text-slate-300">{Math.round(zoom * 100)}%</button>
+                className="rounded-md px-1.5 text-2xs tabular-nums text-slate-500 hover:bg-ink-800 hover:text-slate-300">{Math.round(zoom * 100)}%</button>
               <button onClick={() => bumpZoom(0.1)} title={t('share.zoomIn')}
-                className="grid h-6 w-6 place-items-center rounded text-slate-400 hover:bg-ink-800 hover:text-slate-200">A+</button>
+                className="grid h-6 w-6 place-items-center rounded-md text-slate-400 hover:bg-ink-800 hover:text-slate-200">A+</button>
             </div>
           )}
           {conn !== 'open' && (
@@ -210,7 +210,7 @@ export default function SharedView(props: { token: string }) {
             <div className="absolute inset-0 grid place-items-center bg-black/70 p-4 text-center">
               <div className="max-w-sm space-y-1">
                 <div className="text-base font-semibold text-slate-100">{t('share.lockedTitle')}</div>
-                <div className="text-[13px] text-slate-400">
+                <div className="text-compact text-slate-400">
                   {t('share.lockedBody')}
                 </div>
               </div>

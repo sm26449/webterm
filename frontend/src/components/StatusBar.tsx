@@ -84,12 +84,12 @@ export default function StatusBar(props: { session: Session; host?: Host; rtt?: 
     s.state === 'lost' ? 'wt-danger' : 'text-slate-500'
 
   return (
-    <div className="wt-statusbar wt-compact-y border-t border-ink-800 bg-ink-900 text-[11px] text-slate-400">
+    <div className="wt-statusbar wt-compact-y border-t border-ink-800 bg-ink-900 text-2xs text-slate-400">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-3 py-1.5">
         <span className={`inline-flex items-center gap-1.5 font-medium ${stateColor}`}>
           {/* punctul e decorativ (eticheta text e chiar lângă); „pierdută"/„host offline" au şi formă
               diferită (pătrat), nu doar altă culoare */}
-          <span aria-hidden="true" className={`h-1.5 w-1.5 ${hostDown || s.state === 'lost' ? 'rounded-sm' : 'rounded-full'} ${hostDown ? 'bg-amber-500' : live ? 'bg-emerald-500 dot-live' : s.state === 'lost' ? 'bg-rose-500' : 'bg-slate-500'}`} />
+          <span aria-hidden="true" className={`h-1.5 w-1.5 ${hostDown || s.state === 'lost' ? 'rounded-md' : 'rounded-full'} ${hostDown ? 'bg-amber-500' : live ? 'bg-emerald-500 dot-live' : s.state === 'lost' ? 'bg-rose-500' : 'bg-slate-500'}`} />
           {stateLabel}
         </span>
         {/* Hostul n-are tmux → sesiunea asta NU supravieţuieşte unei căderi de agent sau
@@ -141,7 +141,7 @@ export default function StatusBar(props: { session: Session; host?: Host; rtt?: 
             <button
               onClick={() => setShowAttach((v) => !v)}
               // py-1 (nu 0.5): ţintă de ≥24 px la 11 px text, fără să crească bara (audit 6.x)
-              className="wt-link rounded px-1.5 py-1 hover:bg-ink-800"
+              className="wt-link rounded-md px-1.5 py-1 hover:bg-ink-800"
               title={t('statusbar.attachTitle')}
             >
               {/* „⌘" sugera tasta Cmd — eticheta spune acum ce face de fapt */}
@@ -157,7 +157,7 @@ export default function StatusBar(props: { session: Session; host?: Host; rtt?: 
             {t('statusbar.attachIntro')}
           </p>
           <div className="flex items-stretch gap-2">
-            <code className="wt-good flex-1 overflow-x-auto whitespace-nowrap rounded-md bg-black/40 px-2 py-1.5 font-mono text-[11px]">
+            <code className="wt-good flex-1 overflow-x-auto whitespace-nowrap rounded-md bg-black/40 px-2 py-1.5 font-mono text-2xs">
               {attachOneLiner}
             </code>
             <Button variant="primary" size="sm"

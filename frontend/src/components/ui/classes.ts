@@ -68,7 +68,7 @@ export function iconButtonClass(variant: IconButtonVariant = 'ghost', size: Icon
 /** acţiune text COMPACTĂ în rânduri dense (rândurile de transfer: Retry · Pause · Cancel…): 24px,
     44px la touch prin .wt-touch. Culoarea o dă locul (`wt-info`, `wt-danger`, `text-slate-300`). */
 export const compactAction =
-  'wt-touch inline-flex h-6 min-w-6 shrink-0 items-center justify-center rounded-md px-1.5 text-[11px] font-medium ' +
+  'wt-touch inline-flex h-6 min-w-6 shrink-0 items-center justify-center rounded-md px-1.5 text-2xs font-medium ' +
   'hover:bg-ink-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400'
 
 /** titlul de secţiune („eyebrow"): mic, majuscule, estompat — UN singur tratament */

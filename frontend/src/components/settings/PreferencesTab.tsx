@@ -83,7 +83,7 @@ export default function PreferencesTab() {
             setSrMode(e.target.checked)
             lsSet('wt_sr', e.target.checked ? '1' : '0')
           }}
-          className="mt-0.5 h-4 w-4 rounded accent-sky-600"
+          className="mt-0.5 h-4 w-4 rounded-md accent-sky-600"
         />
         <span>
           {t('settings.screenReaderMode')}
@@ -105,7 +105,7 @@ export default function PreferencesTab() {
             if (e.target.checked) resetWalkthrough()
             else markWalkthroughDone()
           }}
-          className="mt-0.5 h-4 w-4 rounded accent-sky-600"
+          className="mt-0.5 h-4 w-4 rounded-md accent-sky-600"
         />
         <span>{t('walkthrough.settingsToggle')}</span>
       </label>
@@ -114,7 +114,7 @@ export default function PreferencesTab() {
       <button
         type="button"
         onClick={() => window.dispatchEvent(new Event('wt-open-walkthrough'))}
-        className="mt-2 rounded-lg border border-ink-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-ink-800"
+        className="mt-2 rounded-md border border-ink-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-ink-800"
       >
         {t('walkthrough.replayButton')}
       </button>
@@ -128,7 +128,7 @@ export default function PreferencesTab() {
       <button
         type="button"
         onClick={() => { resetAllTips(); setTipsReset(true) }}
-        className="mt-2 rounded-lg border border-ink-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-ink-800"
+        className="mt-2 rounded-md border border-ink-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-ink-800"
       >
         {t('tips.resetButton')}
       </button>
@@ -147,7 +147,7 @@ export default function PreferencesTab() {
             setUnicode11(e.target.checked)
             lsSet('wt_unicode11', e.target.checked ? '1' : '0')
           }}
-          className="mt-0.5 h-4 w-4 rounded accent-sky-600"
+          className="mt-0.5 h-4 w-4 rounded-md accent-sky-600"
         />
         <span>
           {t('settings.unicode11')}
@@ -211,7 +211,7 @@ export default function PreferencesTab() {
                   { method: 'POST', body: JSON.stringify({ enabled }) }))
               } catch { /* rămâne starea optimistă; reîncercarea e o re-deschidere */ }
             }}
-            className="mt-0.5 h-4 w-4 rounded accent-sky-600"
+            className="mt-0.5 h-4 w-4 rounded-md accent-sky-600"
           />
           <span>
             {t('settings.update.label')}
@@ -244,7 +244,7 @@ export default function PreferencesTab() {
             finally { setUpdBusy(false) }
           }}
           disabled={updBusy}
-          className="mt-2 rounded-lg border border-ink-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-ink-800 disabled:opacity-50"
+          className="mt-2 rounded-md border border-ink-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-ink-800 disabled:opacity-50"
         >
           {updBusy ? t('settings.update.checking') : t('settings.update.checkNow')}
         </button>

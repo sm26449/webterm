@@ -76,7 +76,7 @@ export default function AppearanceTab(props: { onAccountChanged: () => void }) {
       <div className="mt-2 flex flex-wrap gap-2">
         {LANG_ORDER.map((code) => (
           <button key={code} onClick={() => setLang(code)} aria-pressed={lang === code}
-            className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm ring-1 transition ${
+            className={`flex items-center gap-2 rounded-md px-3 py-2 text-sm ring-1 transition ${
               lang === code
                 ? 'wt-chip-accent ring-sky-500/40'
                 : 'bg-ink-800 text-slate-300 ring-ink-700 hover:bg-ink-700'}`}>
@@ -84,14 +84,14 @@ export default function AppearanceTab(props: { onAccountChanged: () => void }) {
           </button>
         ))}
       </div>
-      <p className="mt-1 text-[12px] text-slate-500">{t('settings.languageHint')}</p>
+      <p className="mt-1 text-xs text-slate-500">{t('settings.languageHint')}</p>
 
       {/* ── Temă ── */}
       <h3 className={heading}>{t('settings.theme')}</h3>
       <div className="mt-2 flex gap-2">
         {([['macos', 'Aurora'], ['dark', 'Midnight'], ['auto', t('settings.themeAuto')]] as const).map(([value, label]) => (
           <button key={value} onClick={() => setTheme(value)} aria-pressed={themePrefValue === value}
-            className={`rounded-lg px-3 py-1.5 text-sm ring-1 ${
+            className={`rounded-md px-3 py-1.5 text-sm ring-1 ${
               themePrefValue === value
                 ? 'bg-sky-600 text-white ring-sky-600'
                 : 'bg-ink-800 text-slate-300 ring-ink-700 hover:bg-ink-700'}`}>
@@ -105,13 +105,13 @@ export default function AppearanceTab(props: { onAccountChanged: () => void }) {
       <div className="mt-2 flex flex-wrap gap-2">
         {allSchemes().map((s) => (
           <button key={s.id} onClick={() => { setTermScheme(s.id); setScheme(s.id) }} aria-pressed={scheme === s.id}
-            className={`flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm ring-1 ${
+            className={`flex items-center gap-2 rounded-md px-3 py-1.5 text-sm ring-1 ${
               scheme === s.id
                 ? 'bg-sky-600 text-white ring-sky-600'
                 : 'bg-ink-800 text-slate-300 ring-ink-700 hover:bg-ink-700'}`}>
             <span className="flex gap-0.5" aria-hidden="true">
               {[s.theme.red, s.theme.green, s.theme.blue, s.theme.magenta].map((c, i) => (
-                <span key={i} className="h-3 w-1.5 rounded-sm" style={{ background: c }} />
+                <span key={i} className="h-3 w-1.5 rounded-md" style={{ background: c }} />
               ))}
             </span>
             {s.id === 'custom' ? t('settings.customSchemeName') : s.name}
@@ -122,11 +122,11 @@ export default function AppearanceTab(props: { onAccountChanged: () => void }) {
       {/* schemă proprie: editor + import iTerm2/VS Code */}
       <div className="mt-2 flex flex-wrap items-center gap-2">
         <button onClick={openEditor}
-          className="rounded-lg bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700">
+          className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700">
           {customTheme() ? t('settings.editMyScheme') : t('settings.customScheme')}
         </button>
         <button onClick={() => fileRef.current?.click()}
-          className="rounded-lg bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700"
+          className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700"
           title={t('settings.importThemeTitle')}>
           {t('settings.importTheme')}
         </button>
@@ -134,7 +134,7 @@ export default function AppearanceTab(props: { onAccountChanged: () => void }) {
           onChange={(e) => e.target.files?.[0] && importTheme(e.target.files[0])} />
         {customTheme() && (
           <button onClick={() => { clearCustomTheme(); setTermScheme('webterm-dark'); setScheme('webterm-dark'); setEditing(false) }}
-            className="rounded-lg px-2 py-1.5 text-xs wt-danger hover:bg-ink-800">
+            className="rounded-md px-2 py-1.5 text-xs wt-danger hover:bg-ink-800">
             {t('settings.deleteMyScheme')}
           </button>
         )}
@@ -157,7 +157,7 @@ export default function AppearanceTab(props: { onAccountChanged: () => void }) {
               <label key={k} className="flex items-center gap-2 text-xs text-slate-400">
                 <input type="color" value={draft[k] ?? '#000000'} aria-label={t('color.' + k)}
                   onChange={(e) => applyDraft({ ...draft, [k]: e.target.value })}
-                  className="h-6 w-8 shrink-0 cursor-pointer rounded border border-ink-700 bg-transparent" />
+                  className="h-6 w-8 shrink-0 cursor-pointer rounded-md border border-ink-700 bg-transparent" />
                 <span className="truncate">{t('color.' + k)}</span>
               </label>
             ))}
@@ -170,7 +170,7 @@ export default function AppearanceTab(props: { onAccountChanged: () => void }) {
       <label className="mt-2 flex cursor-pointer items-start gap-2.5 text-sm text-slate-300">
         <input type="checkbox" checked={wm.enabled}
           onChange={(e) => setWm({ ...wm, enabled: e.target.checked })}
-          className="mt-0.5 h-4 w-4 rounded accent-sky-600" />
+          className="mt-0.5 h-4 w-4 rounded-md accent-sky-600" />
         <span>
           {t('settings.watermarkToggle')}
           <span className="mt-0.5 block text-xs text-slate-500">
@@ -186,7 +186,7 @@ export default function AppearanceTab(props: { onAccountChanged: () => void }) {
             {t('settings.text')}
             <input type="text" value={wm.content} maxLength={200}
               onChange={(e) => setWm({ ...wm, content: e.target.value })}
-              className="mt-1 w-full rounded-lg border border-ink-700 bg-ink-900 px-2.5 py-1.5 font-mono text-sm text-slate-200 focus:border-sky-500 focus:outline-none" />
+              className="mt-1 w-full rounded-md border border-ink-700 bg-ink-900 px-2.5 py-1.5 font-mono text-sm text-slate-200 focus:border-sky-500 focus:outline-none" />
           </label>
           <div className="grid grid-cols-3 gap-3">
             <label className="block text-xs text-slate-400">

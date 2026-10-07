@@ -128,7 +128,7 @@ export default function TabBar(props: {
         onClick={props.onHome}
         title={t('tabbar.home')}
         aria-label={t('tabbar.home')}
-        className={`wt-touch wt-tabbtn mb-1.5 flex shrink-0 items-center justify-center rounded-lg px-2.5 py-1.5 ${
+        className={`wt-touch wt-tabbtn mb-1.5 flex shrink-0 items-center justify-center rounded-md px-2.5 py-1.5 ${
           props.activeSid === null ? 'is-active' : ''
         }`}
       >
@@ -143,7 +143,7 @@ export default function TabBar(props: {
             : t('tabbar.sortManualTitle')}
           aria-label={t('tabbar.toggleSort')}
           aria-pressed={props.sort === 'activity'}
-          className={`wt-touch wt-tabbtn mb-1.5 flex shrink-0 items-center gap-1 rounded-lg px-2 py-1.5 text-[11px] ${
+          className={`wt-touch wt-tabbtn mb-1.5 flex shrink-0 items-center gap-1 rounded-md px-2 py-1.5 text-2xs ${
             props.sort === 'activity' ? 'is-active' : 'text-slate-500'}`}
         >
           <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor"
@@ -181,7 +181,7 @@ export default function TabBar(props: {
               onDrop={(e) => { e.preventDefault(); drop() }}
               onDragEnd={drop}
               style={active ? { background: `color-mix(in srgb, ${color} 18%, var(--chrome-elev))` } : undefined}
-              className={`wt-tab group mb-1.5 flex shrink-0 items-stretch rounded-lg ${active ? 'is-active' : ''} ${
+              className={`wt-tab group mb-1.5 flex shrink-0 items-stretch rounded-md ${active ? 'is-active' : ''} ${
                 drag === s.id ? 'opacity-40' : ''} ${
                 over === s.id && drag && drag !== s.id ? 'ring-2 ring-sky-400/70' : ''} ${
                 drag ? 'cursor-grabbing' : 'cursor-grab'}`}
@@ -208,7 +208,7 @@ export default function TabBar(props: {
                       pierdută/exit≠0 = PĂTRAT roşu; textul pentru cititoare e în span-ul sr-only */}
                   <span
                     aria-hidden="true"
-                    className={`h-1.5 w-1.5 shrink-0 ${(s.state === 'lost' || failed) ? 'rounded-sm' : 'rounded-full'} ${stateDot}`}
+                    className={`h-1.5 w-1.5 shrink-0 ${(s.state === 'lost' || failed) ? 'rounded-md' : 'rounded-full'} ${stateDot}`}
                     title={failed ? t('tabbar.closedWithExit', { code: s.exit_status ?? '' }) : undefined}
                     style={live ? { background: color } : (s.state === 'lost' || failed) ? undefined : { background: '#475569' }}
                   />
@@ -225,7 +225,7 @@ export default function TabBar(props: {
                   )}
                 </span>
                 {host && (
-                  <span className="mt-0.5 max-w-[160px] truncate text-[11px] font-medium leading-none" style={{ color }}>
+                  <span className="mt-0.5 max-w-[160px] truncate text-2xs font-medium leading-none" style={{ color }}>
                     {host.name}
                   </span>
                 )}
@@ -234,7 +234,7 @@ export default function TabBar(props: {
                 onClick={() => props.onClose(s.id)}
                 title={t('tabbar.closeTabTitle')}
                 aria-label={t('tabbar.closeTab')}
-                className="wt-touch wt-tabbtn mr-1 mt-0.5 grid shrink-0 place-items-center self-start rounded p-1.5 opacity-0 focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100"
+                className="wt-touch wt-tabbtn mr-1 mt-0.5 grid shrink-0 place-items-center self-start rounded-md p-1.5 opacity-0 focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100"
               >
                 <CloseIcon size={13} />
               </button>
@@ -255,7 +255,7 @@ export default function TabBar(props: {
             const active = v.id === sp.activeId
             return (
               <div key={v.id}
-                className={`wt-tab group mb-1.5 flex shrink-0 items-stretch rounded-lg ${active ? 'is-active' : ''}`}>
+                className={`wt-tab group mb-1.5 flex shrink-0 items-stretch rounded-md ${active ? 'is-active' : ''}`}>
                 <button onClick={() => sp.onSelect(v.id)} aria-pressed={active}
                   title={t('split.switchTo', { name: v.name })}
                   className={`flex min-w-0 items-center gap-1.5 py-1.5 pl-2 pr-1 text-sm ${active ? '' : 'text-slate-400'}`}>
@@ -266,11 +266,11 @@ export default function TabBar(props: {
                   <span className="max-w-[120px] truncate">{v.name}</span>
                 </button>
                 <button onClick={() => sp.onEdit(v.id)} title={t('split.edit')} aria-label={t('split.edit')}
-                  className="wt-tabbtn mt-0.5 grid shrink-0 place-items-center self-start rounded p-1.5 opacity-0 focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100">
+                  className="wt-tabbtn mt-0.5 grid shrink-0 place-items-center self-start rounded-md p-1.5 opacity-0 focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100">
                   <PencilIcon size={12} />
                 </button>
                 <button onClick={() => sp.onDelete(v.id)} title={t('split.delete')} aria-label={t('split.delete')}
-                  className="wt-tabbtn mr-1 mt-0.5 grid shrink-0 place-items-center self-start rounded p-1.5 opacity-0 hover:text-rose-300 focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100">
+                  className="wt-tabbtn mr-1 mt-0.5 grid shrink-0 place-items-center self-start rounded-md p-1.5 opacity-0 hover:text-rose-300 focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100">
                   <CloseIcon size={12} />
                 </button>
               </div>
@@ -278,10 +278,10 @@ export default function TabBar(props: {
           })}
           {props.tabs.length >= 2 && (
             <button onClick={sp.onCreate} title={t('split.create')} aria-label={t('split.create')}
-              className="wt-accent wt-touch wt-tabbtn mb-1.5 flex shrink-0 items-center gap-1 rounded-lg px-2 py-1.5 hover:bg-ink-800">
+              className="wt-accent wt-touch wt-tabbtn mb-1.5 flex shrink-0 items-center gap-1 rounded-md px-2 py-1.5 hover:bg-ink-800">
               <PlusIcon />
               {/* etichetă la prima folosire (fără split-uri încă) — altfel „+" gol nu se citea ca „split" */}
-              {sp.views.length === 0 && <span className="text-[11px] font-medium">{t('split.title')}</span>}
+              {sp.views.length === 0 && <span className="text-2xs font-medium">{t('split.title')}</span>}
             </button>
           )}
           {sp.activeId != null && (
@@ -290,11 +290,11 @@ export default function TabBar(props: {
                 title={sp.broadcast ? t('grid.broadcastOnBtn') : t('grid.broadcastOff')}
                 aria-label={sp.broadcast ? t('grid.broadcastOnBtn') : t('grid.broadcastOff')}
                 aria-pressed={sp.broadcast}
-                className={`wt-touch wt-tabbtn mb-1.5 flex shrink-0 items-center justify-center rounded-lg px-2 py-1.5 text-[12px] font-semibold ${
+                className={`wt-touch wt-tabbtn mb-1.5 flex shrink-0 items-center justify-center rounded-md px-2 py-1.5 text-xs font-semibold ${
                   sp.broadcast ? 'bg-amber-500 !text-ink-950' : 'text-slate-500'}`}
               ><KeyboardIcon /></button>
               <button onClick={sp.onExit} title={t('grid.exit')} aria-label={t('grid.exit')}
-                className="wt-touch wt-tabbtn mb-1.5 flex shrink-0 items-center justify-center rounded-lg px-2 py-1.5 text-slate-500"
+                className="wt-touch wt-tabbtn mb-1.5 flex shrink-0 items-center justify-center rounded-md px-2 py-1.5 text-slate-500"
               ><CloseIcon size={13} /></button>
             </>
           )}
@@ -311,7 +311,7 @@ export default function TabBar(props: {
           aria-expanded={listOpen}
           aria-label={t('tabbar.allTabsTitle', { count: props.tabs.length })}
           title={t('tabbar.allTabsTitle', { count: props.tabs.length })}
-          className={`wt-touch wt-tabbtn mb-1.5 mr-2 flex shrink-0 items-center justify-center gap-1 rounded-lg border-l border-white/10 px-2 py-1.5 text-[12px] font-medium tabular-nums ${
+          className={`wt-touch wt-tabbtn mb-1.5 mr-2 flex shrink-0 items-center justify-center gap-1 rounded-md border-l border-white/10 px-2 py-1.5 text-xs font-medium tabular-nums ${
             listOpen ? 'is-active' : ''}`}
         >
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor"
@@ -415,7 +415,7 @@ function AllTabsMenu(props: {
                   tabIndex={-1}
                   data-tab-item={s.id}
                   onClick={() => props.onSelect(s.id)}
-                  className={`flex min-h-[44px] min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-ink-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400 ${
+                  className={`flex min-h-[44px] min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-ink-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400 ${
                     active ? 'bg-ink-800 ring-1 ring-sky-500/50' : ''}`}
                 >
                   <span className="w-[3px] shrink-0 self-stretch rounded-full" style={{ background: color }} aria-hidden="true" />
@@ -423,19 +423,19 @@ function AllTabsMenu(props: {
                     <span className="flex items-center gap-1.5 text-sm text-slate-200">
                       {/* starea nu e doar culoare: vie = rotund, pierdută/exit≠0 = PĂTRAT roşu, + textul de dedesubt */}
                       <span aria-hidden="true"
-                        className={`h-1.5 w-1.5 shrink-0 ${st === 'lost' || st === 'failed' ? 'rounded-sm bg-rose-500' : 'rounded-full'} ${st === 'live' ? 'dot-live' : ''}`}
+                        className={`h-1.5 w-1.5 shrink-0 ${st === 'lost' || st === 'failed' ? 'rounded-md bg-rose-500' : 'rounded-full'} ${st === 'live' ? 'dot-live' : ''}`}
                         style={st === 'live' ? { background: color } : st === 'closed' ? { background: '#475569' } : undefined} />
                       <span className="truncate">{title}</span>
                       {hasActivity && <span data-activity className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400" aria-hidden="true" />}
                     </span>
-                    <span className="mt-0.5 flex min-w-0 items-center gap-1 text-[11px] leading-tight">
+                    <span className="mt-0.5 flex min-w-0 items-center gap-1 text-2xs leading-tight">
                       {host && <span className="truncate font-medium" style={{ color }}>{host.name}</span>}
                       {host && <span className="text-slate-600" aria-hidden="true">·</span>}
                       <span className={`shrink-0 ${st === 'live' ? 'wt-good' : st === 'closed' ? 'text-slate-500' : 'wt-danger'}`}>{stateText}</span>
                       {hasActivity && <span className="shrink-0 wt-warn">· {t('tabbar.newOutput')}</span>}
                     </span>
                   </span>
-                  {active && <span className="shrink-0 text-[10px] font-medium uppercase tracking-wide wt-link">{t('tabbar.current')}</span>}
+                  {active && <span className="shrink-0 text-2xs font-medium uppercase tracking-wide wt-link">{t('tabbar.current')}</span>}
                 </button>
                 <button
                   role="menuitem"
@@ -443,7 +443,7 @@ function AllTabsMenu(props: {
                   onClick={() => closeTab(s.id, idx)}
                   aria-label={`${t('tabbar.closeTabTitle')} — ${title}`}
                   title={t('tabbar.closeTabTitle')}
-                  className="wt-touch grid min-h-[44px] min-w-[44px] shrink-0 place-items-center rounded-lg text-slate-400 hover:bg-ink-800 hover:text-slate-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400"
+                  className="wt-touch grid min-h-[44px] min-w-[44px] shrink-0 place-items-center rounded-md text-slate-400 hover:bg-ink-800 hover:text-slate-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400"
                 >
                   <CloseIcon size={14} />
                 </button>

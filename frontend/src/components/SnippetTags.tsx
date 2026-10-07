@@ -12,7 +12,7 @@ export default function SnippetTags(props: { tags: string[]; className?: string 
       <span className="sr-only">{label}</span>
       {props.tags.map((tag) => (
         <span key={tag} aria-hidden="true"
-          className="rounded bg-sky-500/10 px-1 font-mono text-[10px] leading-4 wt-accent ring-1 ring-sky-500/30">
+          className="rounded-md bg-sky-500/10 px-1 font-mono text-2xs leading-4 wt-accent ring-1 ring-sky-500/30">
           #{tag}
         </span>
       ))}

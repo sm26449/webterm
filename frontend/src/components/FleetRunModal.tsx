@@ -315,7 +315,7 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
             </span>
           )}
           <button onClick={props.onClose} aria-label={t('fleet.close')}
-            className="ml-auto rounded px-2 py-1 text-slate-500 hover:bg-ink-800 hover:text-slate-300"><CloseIcon size={14} /></button>
+            className="ml-auto rounded-md px-2 py-1 text-slate-500 hover:bg-ink-800 hover:text-slate-300"><CloseIcon size={14} /></button>
         </header>
 
         {/* ── faza „alegi" ── */}
@@ -335,35 +335,35 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
                 <div className="flex flex-wrap gap-1.5">
                   {runnable.map((h) => (
                     <button key={h.id} onClick={() => toggle(h.id)} aria-pressed={selected.has(h.id)}
-                      className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 font-mono text-[13px] ${
+                      className={`inline-flex items-center gap-1 rounded-md border px-2.5 py-1 font-mono text-compact ${
                         selected.has(h.id) ? 'border-sky-500 bg-sky-500/10 wt-accent' : 'border-ink-700 bg-ink-800 text-slate-400 hover:border-ink-600'}`}>
                       {selected.has(h.id) && <CheckIcon size={12} />}{h.name}
                     </button>
                   ))}
                 </div>
                 {picked && (
-                  <p data-testid="fleet-matches" role="status" className="text-[11px] text-slate-400">
+                  <p data-testid="fleet-matches" role="status" className="text-2xs text-slate-400">
                     {pickedMatches
                       ? t('fleet.matchesHosts', { count: pickedMatches, tags: picked.join(', ') })
                       : t('fleet.matchesNone', { tags: picked.join(', ') })}
                   </p>
                 )}
                 {/* ── comenzi salvate (= snippet-uri, pe server) ── */}
-                <div data-testid="fleet-saved" className="rounded-lg border border-ink-800 p-2">
+                <div data-testid="fleet-saved" className="rounded-md border border-ink-800 p-2">
                   <div className="mb-1 flex flex-wrap items-baseline gap-x-2">
                     <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">{t('fleet.savedTitle')}</span>
-                    <span className="text-[10px] text-slate-500">{t('fleet.savedShared')}</span>
+                    <span className="text-2xs text-slate-500">{t('fleet.savedShared')}</span>
                   </div>
-                  {migrated > 0 && <p role="status" className="mb-1 text-[11px] wt-good">{t('fleet.migrated', { count: migrated })}</p>}
+                  {migrated > 0 && <p role="status" className="mb-1 text-2xs wt-good">{t('fleet.migrated', { count: migrated })}</p>}
                   {snips !== null && snips.length > 6 && (
                     <input value={savedFilter} onChange={(e) => setSavedFilter(e.target.value)}
                       placeholder={t('fleet.savedFilter')} aria-label={t('fleet.savedFilter')}
-                      className="mb-1 w-full rounded bg-ink-800 px-2 py-0.5 text-[11px] text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500" />
+                      className="mb-1 w-full rounded-md bg-ink-800 px-2 py-0.5 text-2xs text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500" />
                   )}
                   {snips === null ? (
-                    <p className="text-[11px] text-slate-500">{t('toolbox.loading')}</p>
+                    <p className="text-2xs text-slate-500">{t('toolbox.loading')}</p>
                   ) : snips.length === 0 ? (
-                    <p className="text-[11px] text-slate-500">{t('fleet.savedEmpty')}</p>
+                    <p className="text-2xs text-slate-500">{t('fleet.savedEmpty')}</p>
                   ) : (
                     <div className="flex max-h-28 flex-wrap items-center gap-1 overflow-y-auto">
                       {visibleSnips.map((s) => renaming?.id === s.id ? (
@@ -375,17 +375,17 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
                               // Escape anulează DOAR redenumirea, nu închide consola
                               if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); setRenaming(null) }
                             }}
-                            className="w-36 rounded bg-ink-800 px-1.5 py-0.5 text-[11px] text-slate-200 ring-1 ring-sky-500" />
-                          <button type="button" onClick={renameSaved} className="min-h-6 px-1 text-[11px] wt-link hover:underline">{t('fleet.renameSave')}</button>
+                            className="w-36 rounded-md bg-ink-800 px-1.5 py-0.5 text-2xs text-slate-200 ring-1 ring-sky-500" />
+                          <button type="button" onClick={renameSaved} className="min-h-6 px-1 text-2xs wt-link hover:underline">{t('fleet.renameSave')}</button>
                         </span>
                       ) : (
-                        <span key={s.id} className="inline-flex items-center gap-0.5 rounded bg-ink-800 pl-1.5 text-[11px] text-slate-300 ring-1 ring-ink-700">
+                        <span key={s.id} className="inline-flex items-center gap-0.5 rounded-md bg-ink-800 pl-1.5 text-2xs text-slate-300 ring-1 ring-ink-700">
                           <button type="button" onClick={() => pickSaved(s)} title={s.body}
                             aria-label={t('fleet.pickSaved', { name: s.title })}
                             className="inline-flex min-h-6 items-center gap-1 hover:text-white">
                             <span>{s.title}</span>
                             {snippetParams(s.body).length > 0 && (
-                              <span aria-hidden="true" className="font-mono text-[10px] text-slate-500">{'{…}'}</span>
+                              <span aria-hidden="true" className="font-mono text-2xs text-slate-500">{'{…}'}</span>
                             )}
                           </button>
                           <SnippetTags tags={snippetTags(s)} />
@@ -396,55 +396,55 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
                         </span>
                       ))}
                       {visibleSnips.length === 0 && (
-                        <span className="text-[11px] text-slate-500">{t('snippets.noMatch', { q: savedFilter })}</span>
+                        <span className="text-2xs text-slate-500">{t('snippets.noMatch', { q: savedFilter })}</span>
                       )}
                     </div>
                   )}
-                  {snipErr && <p role="alert" className="mt-1 text-[11px] wt-danger">{snipErr}</p>}
+                  {snipErr && <p role="alert" className="mt-1 text-2xs wt-danger">{snipErr}</p>}
                 </div>
                 <div className="mt-1 flex flex-wrap items-center gap-2">
                   <label className="text-xs font-semibold uppercase tracking-wide text-slate-400">{t('fleet.command')}</label>
                   <input value={saveName} onChange={(e) => setSaveName(e.target.value)}
                     onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); saveCurrent() } }}
                     placeholder={t('fleet.saveNamePlaceholder')} aria-label={t('fleet.saveName')}
-                    className="ml-auto w-40 rounded bg-ink-800 px-2 py-0.5 text-[11px] text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500" />
+                    className="ml-auto w-40 rounded-md bg-ink-800 px-2 py-0.5 text-2xs text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500" />
                   <button type="button" onClick={saveCurrent}
                     disabled={!(paramTpl ? paramTpl.body : command.trim()) || !saveName.trim() || snips === null}
-                    className="text-[11px] wt-link hover:underline disabled:opacity-40">
+                    className="text-2xs wt-link hover:underline disabled:opacity-40">
                     {t('fleet.saveCurrent')}
                   </button>
                 </div>
-                <label className={`flex items-center gap-1.5 text-[11px] ${chosenTags.length ? 'text-slate-400' : 'text-slate-600'}`}>
+                <label className={`flex items-center gap-1.5 text-2xs ${chosenTags.length ? 'text-slate-400' : 'text-slate-600'}`}>
                   <input type="checkbox" checked={remember && chosenTags.length > 0} disabled={!chosenTags.length}
                     onChange={(e) => setRemember(e.target.checked)} />
                   {chosenTags.length ? t('fleet.rememberTags', { tags: chosenTags.join(', ') }) : t('fleet.rememberNoTags')}
                 </label>
                 {paramTpl ? (
-                  <div data-testid="fleet-params" className="space-y-2 rounded-lg bg-ink-800/50 p-2 ring-1 ring-ink-700">
+                  <div data-testid="fleet-params" className="space-y-2 rounded-md bg-ink-800/50 p-2 ring-1 ring-ink-700">
                     <div className="flex items-center">
                       <span className="text-xs font-medium text-slate-400">{t('fleet.paramsTitle')}</span>
                       <button type="button" onClick={() => { setCommand(effective); setParamTpl(null) }}
                         aria-label={t('fleet.paramsDismiss')} title={t('fleet.paramsDismiss')}
-                        className="ml-auto rounded px-1.5 text-slate-500 hover:bg-ink-700 hover:text-slate-300"><CloseIcon size={14} /></button>
+                        className="ml-auto rounded-md px-1.5 text-slate-500 hover:bg-ink-700 hover:text-slate-300"><CloseIcon size={14} /></button>
                     </div>
                     {tplParams.map((p, i) => (
                       <label key={p} className="block">
-                        <span className="mb-0.5 block font-mono text-[11px] text-slate-400">{p}</span>
+                        <span className="mb-0.5 block font-mono text-2xs text-slate-400">{p}</span>
                         <input autoFocus={i === 0} value={paramTpl.values[p] ?? ''}
                           onChange={(e) => setParamTpl({ ...paramTpl, values: { ...paramTpl.values, [p]: e.target.value } })}
-                          className="w-full rounded bg-ink-800 px-2 py-1 font-mono text-xs text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500" />
+                          className="w-full rounded-md bg-ink-800 px-2 py-1 font-mono text-xs text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500" />
                       </label>
                     ))}
                     <div>
-                      <span className="mb-0.5 block text-[11px] text-slate-400">{t('snippetparams.finalCommand')}</span>
-                      <code className="block max-h-24 overflow-auto whitespace-pre-wrap break-all rounded bg-[#0b0e14] p-2 font-mono text-xs text-emerald-300">{effective}</code>
+                      <span className="mb-0.5 block text-2xs text-slate-400">{t('snippetparams.finalCommand')}</span>
+                      <code className="block max-h-24 overflow-auto whitespace-pre-wrap break-all rounded-md bg-[#0b0e14] p-2 font-mono text-xs text-emerald-300">{effective}</code>
                     </div>
-                    {paramsMissing && <p className="text-[11px] text-slate-500">{t('fleet.paramsMissing')}</p>}
+                    {paramsMissing && <p className="text-2xs text-slate-500">{t('fleet.paramsMissing')}</p>}
                   </div>
                 ) : (
                   <textarea value={command} onChange={(e) => setCommand(e.target.value)} rows={3} autoFocus spellCheck={false}
                     placeholder={t('fleet.commandPlaceholder')} aria-label={t('fleet.command')}
-                    className="rounded-lg bg-ink-800 px-3 py-2 font-mono text-sm text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500" />
+                    className="rounded-md bg-ink-800 px-3 py-2 font-mono text-sm text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500" />
                 )}
                 <div className="flex flex-wrap items-center gap-2">
                   <label htmlFor="fleet-timeout" className="text-xs text-slate-400">{t('fleet.timeoutLabel')}</label>
@@ -452,8 +452,8 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
                     value={Number.isNaN(timeoutSec) ? '' : timeoutSec}
                     onChange={(e) => setTimeoutSec(e.target.value === '' ? NaN : Math.trunc(Number(e.target.value)))}
                     aria-invalid={!timeoutOk}
-                    className="w-20 rounded bg-ink-800 px-2 py-0.5 font-mono text-xs text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500" />
-                  <span className={`text-[11px] ${timeoutOk ? 'text-slate-500' : 'wt-danger'}`}>{t('fleet.timeoutRange')}</span>
+                    className="w-20 rounded-md bg-ink-800 px-2 py-0.5 font-mono text-xs text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500" />
+                  <span className={`text-2xs ${timeoutOk ? 'text-slate-500' : 'wt-danger'}`}>{t('fleet.timeoutRange')}</span>
                 </div>
                 <p className="text-xs text-slate-500">{t('fleet.commandHint')}</p>
               </>
@@ -465,10 +465,10 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
         {phase === 'confirm' && (
           <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4">
             <div className="wt-warn flex items-center gap-2 font-medium"><WarningIcon /> {t('fleet.youRunOn')} {t('fleet.hostCount', { count: chosen.length })}</div>
-            <div className="rounded-lg bg-ink-800/60 px-3 py-2 font-mono text-sm text-slate-200">$ {command.trim()}</div>
+            <div className="rounded-md bg-ink-800/60 px-3 py-2 font-mono text-sm text-slate-200">$ {command.trim()}</div>
             <div className="text-xs text-slate-500">{t('fleet.timeoutSummary', { n: timeoutSec })}</div>
             <div className="flex flex-wrap gap-1.5">
-              {chosen.map((h) => <span key={h.id} className="rounded bg-ink-800 px-2 py-0.5 font-mono text-xs text-slate-400 ring-1 ring-ink-700">{h.name}</span>)}
+              {chosen.map((h) => <span key={h.id} className="rounded-md bg-ink-800 px-2 py-0.5 font-mono text-xs text-slate-400 ring-1 ring-ink-700">{h.name}</span>)}
             </div>
           </div>
         )}
@@ -476,7 +476,7 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
         {/* ── faza „grila" ── */}
         {phase === 'running' && (
           <div className="min-h-0 flex-1 overflow-y-auto">
-            <div className="border-b border-ink-800 bg-ink-800/40 px-4 py-2 font-mono text-[13px] text-slate-300">$ {command.trim()}</div>
+            <div className="border-b border-ink-800 bg-ink-800/40 px-4 py-2 font-mono text-compact text-slate-300">$ {command.trim()}</div>
             {chosen.map((h) => {
               const r = results[h.id]; const st = rowState(r); const isOpen = expanded === h.id
               const full = [r?.stdout, r?.stderr].filter(Boolean).join('\n').trim()
@@ -486,14 +486,14 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
                     className="flex w-full items-center gap-2.5 px-4 py-2.5 text-left hover:bg-ink-800/40">
                     <span aria-hidden="true" className={`h-2.5 w-2.5 shrink-0 rounded-full ${st.dot}`} />
                     <span className="min-w-0 flex-1">
-                      <span className="block font-mono text-[13.5px] font-semibold text-slate-200">{h.name}</span>
-                      <span className={`block truncate font-mono text-[11.5px] ${r?.status === 'error' || (r?.status === 'done' && r?.exit_code !== 0) ? 'wt-danger opacity-80' : 'text-slate-500'}`}>{oneLine(r)}</span>
+                      <span className="block font-mono text-sm font-semibold text-slate-200">{h.name}</span>
+                      <span className={`block truncate font-mono text-xs ${r?.status === 'error' || (r?.status === 'done' && r?.exit_code !== 0) ? 'wt-danger opacity-80' : 'text-slate-500'}`}>{oneLine(r)}</span>
                     </span>
-                    <span className={`shrink-0 rounded-full border border-ink-700 px-2 py-0.5 font-mono text-[11px] ${st.cls}`}>{st.badge}</span>
+                    <span className={`shrink-0 rounded-full border border-ink-700 px-2 py-0.5 font-mono text-2xs ${st.cls}`}>{st.badge}</span>
                   </button>
                   {isOpen && (
                     <div className="px-4 pb-3 pl-11">
-                      <pre className="max-h-72 overflow-auto rounded-lg border border-ink-700 bg-ink-950 px-3 py-2 font-mono text-[12px] text-slate-200">{full || t('fleet.noOutput')}</pre>
+                      <pre className="max-h-72 overflow-auto rounded-md border border-ink-700 bg-ink-950 px-3 py-2 font-mono text-xs text-slate-200">{full || t('fleet.noOutput')}</pre>
                     </div>
                   )}
                 </div>
@@ -516,24 +516,24 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
           {phase === 'confirm' && (
             <>
               <button onClick={run}
-                className="rounded-lg bg-amber-500 px-4 py-1.5 text-sm font-semibold text-ink-950 hover:bg-amber-400">
+                className="rounded-md bg-amber-500 px-4 py-1.5 text-sm font-semibold text-ink-950 hover:bg-amber-400">
                 {t('fleet.runOn')} {t('fleet.hostCount', { count: chosen.length })}
               </button>
-              <button onClick={() => setPhase('pick')} className="rounded-lg px-3 py-1.5 text-sm text-slate-400 hover:bg-ink-800">{t('fleet.back')}</button>
+              <button onClick={() => setPhase('pick')} className="rounded-md px-3 py-1.5 text-sm text-slate-400 hover:bg-ink-800">{t('fleet.back')}</button>
             </>
           )}
           {phase === 'running' && (
             <>
               <button disabled={summary.running > 0} onClick={copyReport}
-                className="rounded-lg bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-40">
+                className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-40">
                 {copied ? t('fleet.copied') : t('fleet.copyReport')}
               </button>
               <button disabled={summary.running > 0} onClick={() => { setPhase('pick'); setResults({}); setExpanded(null) }}
-                className="rounded-lg px-3 py-1.5 text-sm text-slate-400 hover:bg-ink-800 disabled:opacity-40">{t('fleet.newRun')}</button>
+                className="rounded-md px-3 py-1.5 text-sm text-slate-400 hover:bg-ink-800 disabled:opacity-40">{t('fleet.newRun')}</button>
               {summary.running > 0 && (
                 <button disabled={stopping}
                   onClick={() => { stopRef.current = true; setStopping(true) }}
-                  className="rounded-lg px-3 py-1.5 text-sm wt-danger ring-1 ring-ink-700 hover:bg-ink-800 disabled:opacity-60">
+                  className="rounded-md px-3 py-1.5 text-sm wt-danger ring-1 ring-ink-700 hover:bg-ink-800 disabled:opacity-60">
                   {stopping ? t('fleet.stopping') : t('fleet.stop')}
                 </button>
               )}

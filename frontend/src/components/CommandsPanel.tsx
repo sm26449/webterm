@@ -38,11 +38,11 @@ export default function CommandsPanel(props: {
       {drawer.sheet && <SheetBar title={t('session.commands')} onBack={props.onClose} />}
       <header className="flex items-center gap-2 border-b border-ink-800 px-3 py-2">
         <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">{t('cmds.commands')}</span>
-        <span className="rounded bg-ink-800 px-1.5 text-[11px] text-slate-500">{props.commands.length}</span>
+        <span className="rounded-md bg-ink-800 px-1.5 text-2xs text-slate-500">{props.commands.length}</span>
         <button
           onClick={props.onClose}
           aria-label={t('cmds.closePanel')}
-          className="wt-touch ml-auto rounded px-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-300"
+          className="wt-touch ml-auto rounded-md px-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-300"
         >
           <CloseIcon size={14} />
         </button>
@@ -75,20 +75,20 @@ export default function CommandsPanel(props: {
                       className={`h-1.5 w-1.5 shrink-0 rounded-full ${failed ? 'bg-rose-500' : 'bg-emerald-500'}`}
                       aria-hidden="true"
                     />
-                    <span className="truncate font-mono text-[11px] text-slate-200">{c.text}</span>
+                    <span className="truncate font-mono text-2xs text-slate-200">{c.text}</span>
                   </div>
-                  <div className="mt-0.5 flex items-center gap-2 pl-3 text-[10px] tabular-nums text-slate-500">
+                  <div className="mt-0.5 flex items-center gap-2 pl-3 text-2xs tabular-nums text-slate-500">
                     {failed && <span className="wt-danger">exit {c.exitCode}</span>}
                     {c.endedAt && <span>{cmdDuration(c)}</span>}
                   </div>
                 </button>
                 {/* acțiuni pe bloc: la hover (mouse), la focus în rând (tastatură — altfel erau
                     în DOM dar invizibile, Tab „sărea" prin butoane nevăzute) şi mereu pe touch */}
-                <div className="mt-1 hidden flex-wrap items-center gap-x-2 gap-y-1 pl-3 text-[10px] group-hover:flex group-focus-within:flex [@media(hover:none)]:flex">
+                <div className="mt-1 hidden flex-wrap items-center gap-x-2 gap-y-1 pl-3 text-2xs group-hover:flex group-focus-within:flex [@media(hover:none)]:flex">
                   <button
                     onClick={() => props.onRerun(c)}
                     title={t('cmds.rerunTitle')}
-                    className="min-h-6 rounded px-1 py-0.5 font-medium wt-link hover:bg-ink-700"
+                    className="min-h-6 rounded-md px-1 py-0.5 font-medium wt-link hover:bg-ink-700"
                   >
                     {t('cmds.rerun')}
                   </button>

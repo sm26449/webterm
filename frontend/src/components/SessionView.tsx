@@ -1745,7 +1745,7 @@ export default function SessionView(props: {
       {/* broadcast activ: bandă de avertizare vizibilă în FIECARE panou al grilei — tastezi în
           toate host-urile deodată, deci ambiguitatea „unde scriu" trebuie să fie zero */}
       {props.broadcasting && (
-        <div className="shrink-0 bg-amber-500/90 px-2 py-0.5 text-center text-[11px] font-semibold text-ink-950">
+        <div className="shrink-0 bg-amber-500/90 px-2 py-0.5 text-center text-2xs font-semibold text-ink-950">
           <span className="inline-flex items-center gap-1"><KeyboardIcon size={12} />{t('grid.broadcastOn')}</span>
         </div>
       )}
@@ -1795,7 +1795,7 @@ export default function SessionView(props: {
         </div>
         <span role="status" aria-live="polite" className="shrink-0">
           {connBadge && (
-            <span className={`rounded px-2 py-0.5 text-xs ${connBadge.cls}`}>{connBadge.text}</span>
+            <span className={`rounded-md px-2 py-0.5 text-xs ${connBadge.cls}`}>{connBadge.text}</span>
           )}
         </span>
         <div className="ml-auto flex shrink-0 items-center gap-0.5">
@@ -1821,10 +1821,10 @@ export default function SessionView(props: {
                   <div className="fixed inset-0 z-30" onClick={() => setShowRoster(false)} />
                   {/* telefon: foaie de jos (butonul poate sta oriunde în bară → un dropdown ancorat ar ieşi
                       din ecran la stânga); de la sm în sus, dropdown sub buton */}
-                  <div className="fixed inset-x-2 bottom-[calc(var(--wt-keybar-h,0px)+0.5rem)] z-40 max-h-[60dvh] overflow-y-auto rounded-lg bg-ink-900 p-1.5 text-xs ring-1 ring-ink-700 shadow-xl sm:absolute sm:inset-x-auto sm:bottom-auto sm:right-0 sm:top-full sm:mt-1 sm:w-72">
-                    <div className="px-2 py-1 text-[11px] uppercase tracking-wide text-slate-500">{t('session.connectedCount', { count: roster.length })}</div>
+                  <div className="fixed inset-x-2 bottom-[calc(var(--wt-keybar-h,0px)+0.5rem)] z-40 max-h-[60dvh] overflow-y-auto rounded-xl bg-ink-900 p-1.5 text-xs ring-1 ring-ink-700 shadow-xl sm:absolute sm:inset-x-auto sm:bottom-auto sm:right-0 sm:top-full sm:mt-1 sm:w-72">
+                    <div className="px-2 py-1 text-2xs uppercase tracking-wide text-slate-500">{t('session.connectedCount', { count: roster.length })}</div>
                     {roster.map((c) => (
-                      <div key={c.id} className="rounded py-0.5 hover:bg-ink-800">
+                      <div key={c.id} className="rounded-md py-0.5 hover:bg-ink-800">
                         <div className="flex items-center gap-2 px-2 py-1">
                         <span className="min-w-0 flex-1 truncate text-slate-200">
                           {c.label === 'self' ? t('session.roleSelf')
@@ -1832,8 +1832,8 @@ export default function SessionView(props: {
                             : c.label}{c.id === yourIdRef.current ? ` ${t('session.you')}` : ''}
                         </span>
                         {c.owner
-                          ? <span className="shrink-0 text-[10px] text-slate-500">owner</span>
-                          : <span className={`shrink-0 text-[10px] ${c.writable ? 'wt-warn' : 'text-slate-500'}`}>{c.writable ? t('session.canWrite') : t('session.canView')}</span>}
+                          ? <span className="shrink-0 text-2xs text-slate-500">owner</span>
+                          : <span className={`shrink-0 text-2xs ${c.writable ? 'wt-warn' : 'text-slate-500'}`}>{c.writable ? t('session.canWrite') : t('session.canView')}</span>}
                         {!c.owner && (
                           <IconButton touch={false} onClick={() => { void kick(c) }} label={t('session.removeFromSession')}
                             className="wt-danger"><CloseIcon size={14} /></IconButton>
@@ -1842,11 +1842,11 @@ export default function SessionView(props: {
                         {/* De unde e ataşat. Fără asta „mai e cineva conectat" nu-ţi spunea
                             dacă e telefonul tău sau altcineva — deci nu puteai reacţiona. */}
                         {(c.ip || c.agent) && (
-                          <div className="flex items-center gap-1.5 px-2 pb-1 text-[10px] text-slate-500">
+                          <div className="flex items-center gap-1.5 px-2 pb-1 text-2xs text-slate-500">
                             <span className="min-w-0 truncate">{c.ip}{c.agent ? ' · ' + shortAgent(c.agent) : ''}</span>
                             {c.known === false && (
                               <span title={t('session.deviceNewTitle')}
-                                className="wt-warn shrink-0 rounded bg-amber-500/15 px-1">{t('session.deviceNew')}</span>
+                                className="wt-warn shrink-0 rounded-md bg-amber-500/15 px-1">{t('session.deviceNew')}</span>
                             )}
                           </div>
                         )}
@@ -2063,14 +2063,14 @@ export default function SessionView(props: {
       {shareOpen && !shareUrl && !shareActive && (
         <div className="flex flex-wrap items-center gap-3 border-b border-ink-800 bg-ink-900/70 px-3 py-2 text-sm">
           <label className="flex cursor-pointer items-center gap-1.5 text-xs text-slate-300">
-            <input type="checkbox" checked={shareWritable} onChange={(e) => setShareWritable(e.target.checked)} className="h-3.5 w-3.5 rounded accent-sky-600" />
+            <input type="checkbox" checked={shareWritable} onChange={(e) => setShareWritable(e.target.checked)} className="h-3.5 w-3.5 rounded-md accent-sky-600" />
             {t('session.allowWrite')}
             {shareWritable && <span className="wt-warn" title={t('session.writableWarning')} aria-label={t('session.writableWarning')} role="img"><WarningIcon /></span>}
           </label>
           <label className="flex items-center gap-1.5 text-xs text-slate-400">
             {t('session.expiresIn')}
             <select value={shareExpiry} aria-label={t('session.shareExpiry')} onChange={(e) => setShareExpiry(Number(e.target.value))}
-              className="rounded border border-ink-700 bg-ink-900 px-1.5 py-1 text-xs text-slate-200">
+              className="rounded-md border border-ink-700 bg-ink-900 px-1.5 py-1 text-xs text-slate-200">
               <option value={15}>{t('session.expiry15m')}</option>
               <option value={60}>{t('session.expiry1h')}</option>
               <option value={480}>{t('session.expiry8h')}</option>
@@ -2080,7 +2080,7 @@ export default function SessionView(props: {
           <Button variant="primary" size="sm" onClick={createShareLink}>
             {t('session.generateLink')}
           </Button>
-          <button onClick={() => setShareOpen(false)} className="rounded px-2 py-1 text-xs text-slate-400 hover:bg-ink-800">
+          <button onClick={() => setShareOpen(false)} className="rounded-md px-2 py-1 text-xs text-slate-400 hover:bg-ink-800">
             {t('session.cancel')}
           </button>
         </div>
@@ -2089,16 +2089,16 @@ export default function SessionView(props: {
       {/* Link generat */}
       {(shareUrl || shareActive) && (
         <div className="flex items-center gap-2 border-b border-ink-800 bg-ink-900/70 px-3 py-2 text-sm">
-          <span className={`shrink-0 rounded px-1.5 py-0.5 text-[11px] ${shareActive?.writable ? 'wt-warn bg-amber-500/15' : 'bg-ink-800 text-slate-400'}`}>
+          <span className={`shrink-0 rounded-md px-1.5 py-0.5 text-2xs ${shareActive?.writable ? 'wt-warn bg-amber-500/15' : 'bg-ink-800 text-slate-400'}`}>
             {shareActive?.writable ? t('session.shareWritable') : t('session.shareReadOnly')}
           </span>
           {shareActive?.expires && (
-            <span className="hidden shrink-0 text-[11px] text-slate-500 sm:inline">
+            <span className="hidden shrink-0 text-2xs text-slate-500 sm:inline">
               {t('session.shareExpires', { time: fmtTs(shareActive.expires) })}
             </span>
           )}
           {shareUrl ? (
-            <code className="wt-good min-w-0 flex-1 truncate rounded bg-black/40 px-2 py-1 font-mono text-xs">{shareUrl}</code>
+            <code className="wt-good min-w-0 flex-1 truncate rounded-md bg-black/40 px-2 py-1 font-mono text-xs">{shareUrl}</code>
           ) : (
             <span className="min-w-0 flex-1 text-xs text-slate-400">{t('session.shareActiveNoUrl')}</span>
           )}
@@ -2107,7 +2107,7 @@ export default function SessionView(props: {
               setCopied(true); setTimeout(() => setCopied(false), 1200) }) }} className="shrink-0">
             {copied ? <CheckIcon /> : t('session.copy')}
           </Button>}
-          <button onClick={revokeShare} className="wt-danger shrink-0 rounded px-2 py-1 text-xs hover:bg-ink-800">
+          <button onClick={revokeShare} className="wt-danger shrink-0 rounded-md px-2 py-1 text-xs hover:bg-ink-800">
             {t('session.revoke')}
           </button>
         </div>
@@ -2138,7 +2138,7 @@ export default function SessionView(props: {
               else if (e.key === 'Enter') searchRef.current?.findNext(search)
               else if (e.key === 'Escape') setShowSearch(false)
             }}
-            className="w-56 rounded bg-ink-800 px-2 py-1 text-sm ring-1 ring-ink-700"
+            className="w-56 rounded-md bg-ink-800 px-2 py-1 text-sm ring-1 ring-ink-700"
           />
           <button aria-label={t('session.prevResult')} className="text-xs text-slate-400 hover:text-slate-200" onClick={() => searchRef.current?.findPrevious(search)}><ArrowUpIcon size={14} /></button>
           <button aria-label={t('session.nextResult')} className="text-xs text-slate-400 hover:text-slate-200" onClick={() => searchRef.current?.findNext(search)}><ArrowDownIcon size={14} /></button>
@@ -2309,7 +2309,7 @@ export default function SessionView(props: {
             fişiere, de unde alegi directorul şi re-tragi. */}
         {dropHover && (
           <div role="status"
-            className="pointer-events-none absolute inset-1.5 z-30 flex flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-sky-400/70 bg-ink-950/85 p-4 text-center backdrop-blur-sm">
+            className="pointer-events-none absolute inset-1.5 z-30 flex flex-col items-center justify-center gap-2 rounded-md border-2 border-dashed border-sky-400/70 bg-ink-950/85 p-4 text-center backdrop-blur-sm">
             <span aria-hidden="true" className="wt-info"><UploadIcon size={22} /></span>
             <div className="max-w-full truncate font-mono text-sm text-slate-100" title={cwd ?? '~'}>
               {t('transfers.dropTo', { dir: cwd ?? '~' })}
@@ -2333,7 +2333,7 @@ export default function SessionView(props: {
         {/* Guardrail: comandă blocată (mesaj tranzitoriu) */}
         {guardMsg && (
           <div role="status" aria-live="assertive"
-            className="wt-danger pointer-events-none absolute bottom-3 left-1/2 z-30 -translate-x-1/2 rounded-lg bg-ink-900/95 px-3 py-1.5 text-xs ring-1 ring-rose-500/30 shadow-lg">
+            className="wt-danger pointer-events-none absolute bottom-3 left-1/2 z-30 -translate-x-1/2 rounded-xl bg-ink-900/95 px-3 py-1.5 text-xs ring-1 ring-rose-500/30 shadow-lg">
             <span className="inline-flex items-center gap-1.5"><ShieldIcon size={13} />{guardMsg}</span>
           </div>
         )}
@@ -2344,7 +2344,7 @@ export default function SessionView(props: {
             className="absolute inset-0 z-30 grid place-items-center bg-ink-950/80 p-6 backdrop-blur-sm">
             <div className="w-full max-w-md rounded-xl bg-ink-900 p-4 ring-1 ring-ink-700 shadow-2xl">
               <div id="wt-guard-title" className="wt-warn flex items-center gap-2 text-sm font-semibold"><ShieldIcon /> {t('session.dangerousCommand')}</div>
-              <div className="mt-2 rounded-lg bg-ink-950 px-3 py-2 font-mono text-[13px] text-slate-200 break-all ring-1 ring-ink-800">
+              <div className="mt-2 rounded-md bg-ink-950 px-3 py-2 font-mono text-compact text-slate-200 break-all ring-1 ring-ink-800">
                 {cmdConfirm.cmd}
               </div>
               {/* regula care a prins comanda — fleet şi panourile o arătau deja; fără ea nu ştiai
@@ -2359,7 +2359,7 @@ export default function SessionView(props: {
                 <button
                   ref={cmdCancelBtnRef}
                   onClick={() => { send('\x15'); setCmdConfirm(null); termRef.current?.focus() }}
-                  className="rounded-lg bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700"
+                  className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700"
                 >{t('session.cancelClear')}</button>
                 <Button variant="danger"
                   onClick={() => { send('\r'); setCmdConfirm(null); termRef.current?.focus() }}>{t('session.run')}</Button>
@@ -2376,10 +2376,10 @@ export default function SessionView(props: {
             <div className="flex max-w-sm flex-col items-center gap-3">
               <div className="grid h-12 w-12 place-items-center rounded-full bg-ink-800 text-slate-300" aria-hidden="true"><LockIcon size={22} /></div>
               <div id="wt-lock-title" className="text-base font-semibold text-slate-100">{t('session.lockedTitle')}</div>
-              <div id="wt-lock-desc" className="text-[13px] leading-relaxed text-slate-400">
+              <div id="wt-lock-desc" className="text-compact leading-relaxed text-slate-400">
                 {t('session.lockedDesc')}
               </div>
-              {lockErr && <div className="text-[12px] wt-danger">{lockErr}</div>}
+              {lockErr && <div className="text-xs wt-danger">{lockErr}</div>}
               <Button variant="primary" size="lg" ref={unlockBtnRef} onClick={reauth} disabled={unlocking} className="mt-1">
                 {unlocking ? t('session.verifying') : <><KeyIcon size={14} /> {t('session.unlockWithPasskey')}</>}
               </Button>
@@ -2419,7 +2419,7 @@ export default function SessionView(props: {
             aria-live="assertive"
             className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-black/40"
           >
-            <span className={`flex items-center gap-2 rounded-lg bg-ink-900/95 px-3 py-2 text-xs text-amber-200 shadow-lg ring-1 transition-shadow ${
+            <span className={`flex items-center gap-2 rounded-xl bg-ink-900/95 px-3 py-2 text-xs text-amber-200 shadow-lg ring-1 transition-shadow ${
               inputFlash ? 'ring-2 ring-amber-400 shadow-amber-400/40' : 'ring-amber-500/30'}`}>
               <span
                 className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-amber-500/30 border-t-amber-400"
@@ -2432,7 +2432,7 @@ export default function SessionView(props: {
         {/* după reconectare: câte taste s-au pierdut cât eram deconectaţi */}
         {inputNotice && (
           <div role="status" aria-live="polite"
-            className="pointer-events-none absolute bottom-3 left-1/2 z-30 -translate-x-1/2 rounded-lg bg-ink-900/95 px-3 py-1.5 text-xs text-amber-200 ring-1 ring-amber-500/30 shadow-lg">
+            className="pointer-events-none absolute bottom-3 left-1/2 z-30 -translate-x-1/2 rounded-xl bg-ink-900/95 px-3 py-1.5 text-xs text-amber-200 ring-1 ring-amber-500/30 shadow-lg">
             <span className="inline-flex items-center gap-1.5"><KeyboardIcon size={12} />{inputNotice}</span>
           </div>
         )}
@@ -2667,7 +2667,7 @@ function MoreItem(props: { onClick: () => void; disabled?: boolean; children: Re
       onMouseDown={(e) => e.preventDefault()}
       onClick={props.onClick}
       disabled={props.disabled}
-      className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-slate-300 hover:bg-ink-800 disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent"
+      className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-slate-300 hover:bg-ink-800 disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent"
     >
       {props.children}
     </button>
@@ -2738,7 +2738,7 @@ function FilesSubmenu(props: {
         // la loc e şi derutant, şi face flyout-ul imposibil de acţionat cu mouse-ul (hover→click)
         onClick={() => show()}
         onKeyDown={onKey}
-        className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-slate-300 hover:bg-ink-800"
+        className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-slate-300 hover:bg-ink-800"
       >
         <FilesIcon /> <span className="flex-1">{t('session.ctxFilesMenu')}</span>
         <span aria-hidden="true" className="text-slate-500"><ChevronIcon size={12} /></span>
@@ -2752,7 +2752,7 @@ function FilesSubmenu(props: {
           onMouseLeave={hideSoon}
           className={`absolute top-0 z-50 w-52 rounded-xl border border-ink-700 bg-ink-900 p-1 shadow-2xl outline-none ${flip ? 'right-full mr-1' : 'left-full ml-1'}`}
         >
-          <div className="truncate px-2.5 py-1 text-[11px] text-slate-500" title={props.subtitle}>{props.subtitle}</div>
+          <div className="truncate px-2.5 py-1 text-2xs text-slate-500" title={props.subtitle}>{props.subtitle}</div>
           {props.items.map((it, i) => (
             <button
               key={it.key}
@@ -2763,7 +2763,7 @@ function FilesSubmenu(props: {
               onMouseDown={(e) => e.preventDefault()}
               onClick={() => choose(it.onClick)}
               onKeyDown={onKey}
-              className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-slate-300 hover:bg-ink-800"
+              className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-slate-300 hover:bg-ink-800"
             >
               {it.icon ?? <span className="inline-block w-4" aria-hidden="true" />} {it.label}
             </button>

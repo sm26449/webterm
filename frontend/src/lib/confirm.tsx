@@ -147,16 +147,16 @@ function PromptModal(props: { o: PromptOptions; onSubmit: (v: string) => void; o
           onChange={(e) => { setValue(e.target.value); if (error) setError(null) }}
           aria-invalid={error ? true : undefined}
           aria-describedby={error ? 'wt-prompt-error' : undefined}
-          className="mt-1 w-full rounded-lg border border-ink-700 bg-ink-900 px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-sky-500"
+          className="mt-1 w-full rounded-md border border-ink-700 bg-ink-900 px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-sky-500"
         />
         {error && <p id="wt-prompt-error" role="alert" className="wt-danger mt-1 text-xs">{error}</p>}
         <div className="mt-6 flex justify-end gap-2">
           <button type="button" onClick={props.onCancel}
-            className="rounded-lg px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800">
+            className="rounded-md px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800">
             {props.o.cancelLabel ?? t('common.cancel')}
           </button>
           <button type="submit"
-            className="rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-700">
+            className="rounded-md bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-700">
             {props.o.confirmLabel ?? t('common.confirm')}
           </button>
         </div>

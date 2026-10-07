@@ -24,7 +24,7 @@ export default function UpdateCommand(props: { command: string; status?: UpdateC
   return (
     <div>
       {st?.error && (
-        <div role="alert" className="wt-warn mb-2 flex flex-wrap items-center gap-2 rounded-lg bg-amber-500/10 px-2.5 py-1.5 text-xs ring-1 ring-amber-500/30">
+        <div role="alert" className="wt-warn mb-2 flex flex-wrap items-center gap-2 rounded-md bg-amber-500/10 px-2.5 py-1.5 text-xs ring-1 ring-amber-500/30">
           <span className="min-w-0 flex-1 break-words">{t('settings.update.failed', { error: st.error })}</span>
           {st.onRetry && (
             <Button variant="secondary" size="sm" type="button" onClick={st.onRetry} disabled={st.checking}>
@@ -33,7 +33,7 @@ export default function UpdateCommand(props: { command: string; status?: UpdateC
           )}
         </div>
       )}
-      <div className="flex items-center gap-2 rounded-lg border border-ink-700 bg-ink-950 px-2.5 py-1.5">
+      <div className="flex items-center gap-2 rounded-md border border-ink-700 bg-ink-950 px-2.5 py-1.5">
         {/* overflow-x pe cod: o comandă lungă derulează în cutia ei, nu lăţeşte modalul */}
         <code className="min-w-0 flex-1 overflow-x-auto whitespace-pre font-mono text-xs text-slate-300">
           {props.command}
@@ -49,7 +49,7 @@ export default function UpdateCommand(props: { command: string; status?: UpdateC
               })
               .catch(() => {})
           }}
-          className="shrink-0 rounded border border-ink-700 px-2 py-0.5 text-[11px] text-slate-400 hover:bg-ink-800"
+          className="shrink-0 rounded-md border border-ink-700 px-2 py-0.5 text-2xs text-slate-400 hover:bg-ink-800"
         >
           {copied ? t('settings.update.copied') : t('settings.update.copy')}
         </button>

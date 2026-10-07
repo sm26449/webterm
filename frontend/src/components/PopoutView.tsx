@@ -136,7 +136,7 @@ export default function PopoutView(props: { sid: string }) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 text-slate-500">
         <div className="text-lg">{t('popout.gone')}</div>
-        <button onClick={() => window.close()} className="rounded-lg bg-ink-800 px-4 py-2 text-sm text-slate-300 hover:bg-ink-700">
+        <button onClick={() => window.close()} className="rounded-md bg-ink-800 px-4 py-2 text-sm text-slate-300 hover:bg-ink-700">
           {t('popout.close')}
         </button>
       </div>
