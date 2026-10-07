@@ -248,7 +248,8 @@ export default function SettingsModal(props: {
                               }`}
                             >
                               <div className="text-sm text-slate-200">{h.title}</div>
-                              {h.hint && <div className="mt-0.5 line-clamp-2 text-xs text-slate-500">{h.hint}</div>}
+                              {/* slate-400, nu 500: pe fundalul opţiunii active (sky/15) 500 pica sub 4,5:1 în tema dark */}
+                              {h.hint && <div className="mt-0.5 line-clamp-2 text-xs text-slate-400">{h.hint}</div>}
                             </div>
                           )
                         })}
