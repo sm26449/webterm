@@ -117,7 +117,7 @@ Monaco — the VS Code editor — since 3.x).
 
 **Security** — the agent signing key, passkeys, 2FA (here on the light theme).
 
-![Security](docs/screenshots/05-security-light.png)
+![Security](docs/screenshots/06-security-light.png)
 
 ## Why
 

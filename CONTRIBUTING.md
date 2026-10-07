@@ -132,6 +132,30 @@ Deployers can generate or import **their own deployment key** from the UI (Setti
 without touching the source; for your own fork, generate a key pair and substitute `UPDATE_PUBKEY`
 locally — see the README's "Security" section.
 
+## Screenshots (README / docs)
+
+The images in `docs/screenshots/` are generated, never hand-made, and always from **fictional
+data** (hosts like `web-01`, `db-01`, `edge-router`, private 10.x / 192.168.x addresses, the
+account `demo@example.com`). One command regenerates all of them:
+
+```sh
+(cd frontend && npm ci)          # once: the `playwright` npm package the capture script imports
+scripts/screenshots/run.sh       # → docs/screenshots/*.png, dark + light, then pngquant
+```
+
+It needs docker plus two local images: the WebTerm image of the current version
+(`ghcr.io/sm26449/webterm:v<GATEWAY_VERSION>`, override with `WEBTERM_IMAGE=…`) and
+`mcr.microsoft.com/playwright:v1.63.0-noble`. The script starts a throwaway WebTerm container
+(`wt-shots-app`), seeds the demo fleet (`seed.py`) and real agents inside it, captures with
+`shots.mjs`, shrinks the PNGs (aim: under ~400 KB each) and removes the container and its network.
+Never point it at a real instance.
+
+After a UI change breaks a capture (the script exits non-zero and names the step), fix the
+selector in `shots.mjs` — they use the English aria-labels from `frontend/src/lang/en.ts`.
+Iterate quickly with `KEEP=1` on the first run and `REUSE=1 ONLY=files,fleet` afterwards
+(see the header of `run.sh` for every knob); `docker rm -f wt-shots-app; docker network rm
+wt-shots-net` when done.
+
 ## Style & PRs
 
 - **Language.** Commits, CHANGELOG, docs and user-facing strings are in English. Code comments
