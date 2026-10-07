@@ -52,8 +52,9 @@ const TAGS = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa', 'best-prac
 // Pe temă (× 2 teme): login, dashboard, sesiune, host online × (Overview, Sessions, Files,
 // Forwards, Services, Docker, Toolbox/Connections, Toolbox/SSH keys) = 8, host offline ×
 // (Overview, Sessions) = 2, toast de eroare, Settings × 7, file browser, Status, Add host × 3,
-// FleetRun, `?`, walkthrough, paleta, ConfirmModal = 31 (+ Monaco cu WT_AGENT=1). Mobil: sesiune dark + light.
-const PER_THEME = 31 + (HAS_AGENT ? 1 : 0)
+// FleetRun, `?`, walkthrough, paleta, ConfirmModal, panoul de alerte = 32 (+ Monaco cu WT_AGENT=1).
+// Mobil: sesiune dark + light.
+const PER_THEME = 32 + (HAS_AGENT ? 1 : 0)
 const EXPECTED_SCANS = 2 * PER_THEME + 2
 
 /** Pas tolerant: dacă un selector a derapat, notăm şi mergem mai departe.
@@ -436,6 +437,22 @@ try {
       await page.screenshot({ path: `${OUT}/${theme}-08-status.png` })
       await scan(page, `${theme} status`)
       await escapeRestores(page, 'button[aria-label="Status"]', 'Status')
+    }, page)
+
+    // Alertele din aplicaţie (3.5.11): clopoţelul din sidebar → panoul cu istoricul. Login-ul de
+    // la începutul rulării a lăsat deja o alertă „login de pe un IP nou", deci lista nu e goală;
+    // deschidem şi detaliile primei alerte, ca blocul <pre> să treacă şi el prin axe.
+    await step('alerte', async () => {
+      await page.click('[data-testid="wt-alerts-bell"]')
+      await page.waitForSelector('[data-testid="wt-alerts-panel"]', { timeout: 8000 })
+      await page.waitForSelector('[data-testid="wt-alerts-panel"] li, [data-testid="wt-alerts-panel"] :text("No alerts")',
+        { timeout: 8000 })
+      const details = page.locator('[data-testid="wt-alerts-panel"] button[aria-expanded="false"]').first()
+      if (await details.count()) await details.click()
+      await page.waitForTimeout(300)
+      await page.screenshot({ path: `${OUT}/${theme}-08b-alerts.png` })
+      await scan(page, `${theme} alerts panel`)
+      await escapeRestores(page, '[data-testid="wt-alerts-bell"]', 'Alerts')
     }, page)
 
     // add-host modal: formularul de agent, formularul SSH (host direct), „Many machines"

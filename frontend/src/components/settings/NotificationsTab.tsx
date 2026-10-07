@@ -3,8 +3,9 @@ import { api, ApiError, errText } from '../../lib/api'
 import { askSecret } from '../../lib/secretPrompt'
 import { useI18n } from '../../lib/i18n'
 import { field, heading } from './ui'
-import { Button } from '../ui'
+import { Button, ErrorState } from '../ui'
 import { fmtTs } from '../../lib/tz'
+import { AlertPref, applyPref, groupPrefs } from '../../lib/alerts'
 import HelpTip from '../HelpTip'
 
 // Notificări: domeniul de port-forwarding, alerte pe email (SMTP) + webhook, praguri de resurse.
@@ -136,7 +137,33 @@ export default function NotificationsTab() {
     } finally { setFwdBusy(false) }
   }
 
-  useEffect(() => { loadSmtp(); loadThresholds(); loadFwd() }, [])
+  // Evenimente de alertă (3.5.11): per tip, email (+ webhook) şi istoric în aplicaţie. Fiecare
+  // bifă se salvează imediat (un singur tip pe cerere); la eroare revenim la starea serverului.
+  const [prefs, setPrefs] = useState<AlertPref[] | null>(null)
+  const [prefsErr, setPrefsErr] = useState('')
+  const [prefsLoadErr, setPrefsLoadErr] = useState(false)
+  const [prefsMsg, setPrefsMsg] = useState('')
+  const loadPrefs = () => {
+    setPrefsLoadErr(false)
+    api<{ prefs: AlertPref[] }>('/api/alerts/prefs').then((r) => setPrefs(r.prefs)).catch(() => setPrefsLoadErr(true))
+  }
+  async function togglePref(kind: string, field: 'email' | 'inapp', value: boolean) {
+    if (!prefs) return
+    const next = applyPref(prefs, kind, field, value)
+    setPrefs(next); setPrefsErr(''); setPrefsMsg('')
+    const p = next.find((x) => x.kind === kind)!
+    try {
+      const r = await api<{ prefs: AlertPref[] }>('/api/alerts/prefs', {
+        method: 'POST', body: JSON.stringify({ prefs: { [kind]: { email: p.email, inapp: p.inapp } } }),
+      })
+      setPrefs(r.prefs); setPrefsMsg(t('settings.alertPrefs.saved'))
+    } catch (err) {
+      setPrefsErr(errText(err, t) || t('settings.error'))
+      loadPrefs()
+    }
+  }
+
+  useEffect(() => { loadSmtp(); loadThresholds(); loadFwd(); loadPrefs() }, [])
 
   return (
     <div>
@@ -288,6 +315,66 @@ export default function NotificationsTab() {
           <span role="status" className={alertMsg ? 'text-sm wt-good' : 'sr-only'}>{alertMsg}</span>
           <span role="alert" className={alertErr ? 'text-sm wt-danger' : 'sr-only'}>{alertErr}</span>
         </div>
+      </section>
+
+      <section data-setting-id="alertPrefs">
+        {/* ── Evenimente de alertă: email / în aplicaţie, per tip ── */}
+        <h3 className={heading + ' flex items-center gap-2'}>{t('settings.alertPrefs.title')}<HelpTip id="alertPrefs" /></h3>
+        <p className="mt-1 text-xs text-slate-500">{t('settings.alertPrefs.hint')}</p>
+        <p className="mt-1 text-xs text-slate-500">{t('settings.alertPrefs.fleetNote')}</p>
+        {prefsLoadErr && <ErrorState compact title={t('settings.alertPrefs.loadFailed')} onRetry={loadPrefs} />}
+        {prefs && (
+          <div className="mt-2 flex flex-col gap-3" data-testid="alert-prefs">
+            {groupPrefs(prefs).map(({ group, items }) => (
+              <table key={group} className="w-full table-fixed text-sm">
+                <caption className="pb-1 text-left text-xs font-semibold text-slate-400">{t(`alerts.group.${group}`)}</caption>
+                <thead className="sr-only">
+                  <tr>
+                    <th scope="col">{t('settings.alertPrefs.colEvent')}</th>
+                    <th scope="col">{t('settings.alertPrefs.colEmail')}</th>
+                    <th scope="col">{t('settings.alertPrefs.colInapp')}</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-ink-800">
+                  {items.map((p) => {
+                    const label = t(`alerts.kind.${p.kind}`)
+                    return (
+                      <tr key={p.kind} data-alert-kind={p.kind}>
+                        <td className="py-1.5 pr-2 align-top text-slate-300">
+                          <span className="break-words">{label}</span>
+                          {p.security && (
+                            <span className="mt-0.5 block text-2xs text-slate-500">{t('settings.alertPrefs.alwaysRecorded')}</span>
+                          )}
+                          {p.security && !p.email && (
+                            <span className="mt-0.5 block text-2xs wt-warn" role="note">{t('settings.alertPrefs.securityEmailOff')}</span>
+                          )}
+                        </td>
+                        <td className="w-20 py-1.5 align-top">
+                          <label className="wt-touch inline-flex items-center gap-1.5 text-xs text-slate-400">
+                            <input type="checkbox" checked={p.email}
+                              aria-label={t('settings.alertPrefs.emailAria', { event: label })}
+                              onChange={(e) => togglePref(p.kind, 'email', e.target.checked)} />
+                            <span aria-hidden="true">{t('settings.alertPrefs.colEmail')}</span>
+                          </label>
+                        </td>
+                        <td className="w-28 py-1.5 align-top">
+                          <label className="wt-touch inline-flex items-center gap-1.5 text-xs text-slate-400">
+                            <input type="checkbox" checked={p.inapp} disabled={p.security}
+                              aria-label={t('settings.alertPrefs.inappAria', { event: label })}
+                              onChange={(e) => togglePref(p.kind, 'inapp', e.target.checked)} />
+                            <span aria-hidden="true">{t('settings.alertPrefs.colInapp')}</span>
+                          </label>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            ))}
+          </div>
+        )}
+        <span role="status" className={prefsMsg ? 'text-sm wt-good' : 'sr-only'}>{prefsMsg}</span>
+        <span role="alert" className={prefsErr ? 'text-sm wt-danger' : 'sr-only'}>{prefsErr}</span>
       </section>
     </div>
   )

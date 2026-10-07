@@ -84,6 +84,8 @@ export const SETTINGS_INDEX: readonly SettingSection[] = [
     keywords: 'webhook slack discord teams ntfy chat alerts alerte' },
   { id: 'resourceAlerts', cat: 'notificari', titleKey: 'settings.alerts.title', hintKey: 'settings.alerts.hint',
     keywords: 'cpu ram memory disk threshold load alerts prag memorie resurse' },
+  { id: 'alertPrefs', cat: 'notificari', titleKey: 'settings.alertPrefs.title', hintKey: 'settings.alertPrefs.hint',
+    keywords: 'alert events notifications bell history in-app email toggle mute security clopotel istoric evenimente notificari alerte' },
   // ── Backup ──
   { id: 'backupDownload', cat: 'backup', titleKey: 'settings.backup.downloadTitle',
     keywords: 'backup download export archive copie descarca arhiva' },

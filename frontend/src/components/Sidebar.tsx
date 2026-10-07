@@ -12,6 +12,7 @@ import { hostColor, reachState } from '../lib/host'
 import { canWake } from '../lib/hostOffline'
 import { wakeHost as wakeShared } from '../lib/wake'
 import { allSchemes, hostSchemeRaw, setHostScheme } from '../lib/termtheme'
+import { AlertsBell } from './AlertsPanel'
 import { ActivityIcon, ArrowUpIcon, BanIcon, BellIcon, BellOffIcon, ChevronIcon, CloseIcon, CollapseIcon, DownloadIcon, FilesIcon, FolderMoveIcon, GearIcon, KeyIcon, LinkIcon, LogoMark, MoreIcon, NoteIcon, PaletteIcon, PencilIcon, PlugIcon, PlusIcon, PowerIcon, RefreshIcon, SearchIcon, ServerIcon, ShieldSmallIcon, StethoscopeIcon, SubItemIcon, TerminalPromptIcon, WarningIcon } from './Icons'
 import { fmt } from '../lib/shortcuts'
 import { setHostMuted, updatesSignal, useUpdatesPref } from '../lib/updatesPref'
@@ -715,8 +716,12 @@ export default function Sidebar(props: {
         </div>
       </div>
 
-      <div className="relative px-3 py-2">
-        <span className="pointer-events-none absolute left-5 top-1/2 -translate-y-1/2 text-slate-400">
+      {/* rândul de căutare + clopoţelul de alerte (3.5.11). Clopoţelul NU stă în antet: acolo
+          şase butoane umplu deja lăţimea implicită (288px) — un al şaptelea ieşea din sidebar pe
+          desktop şi tăia „Deconectare" în drawer-ul de 44px/buton de pe telefon. */}
+      <div className="flex items-center gap-1 px-3 py-2">
+      <div className="relative min-w-0 flex-1">
+        <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-slate-400">
           <SearchIcon />
         </span>
         <input
@@ -731,7 +736,7 @@ export default function Sidebar(props: {
           <IconButton touch={false}
             onClick={() => setQuery('')}
             label={t('sidebar.clearSearch')}
-            className="absolute right-4 top-1/2 -translate-y-1/2"
+            className="absolute right-1 top-1/2 -translate-y-1/2"
           >
             <CloseIcon size={13} />
           </IconButton>
@@ -741,11 +746,15 @@ export default function Sidebar(props: {
             onClick={props.onOpenPalette}
             title={t('sidebar.paletteTitle', { key: fmt('Mod+K') })}
             aria-label={t('sidebar.openPalette')}
-            className="absolute right-3 top-1/2 hidden min-h-6 -translate-y-1/2 items-center rounded-md bg-white/5 px-1.5 text-2xs text-slate-400 hover:bg-white/10 hover:text-slate-200 [@media(hover:hover)]:inline-flex"
+            className="absolute right-0 top-1/2 hidden min-h-6 -translate-y-1/2 items-center rounded-md bg-white/5 px-1.5 text-2xs text-slate-400 hover:bg-white/10 hover:text-slate-200 [@media(hover:hover)]:inline-flex"
           >
             {fmt('Mod+K')}
           </button>
         )}
+      </div>
+      <AlertsBell hosts={props.hosts}
+        onOpenHost={(id) => { props.onSelectHost(id); props.onClose() }}
+        onOpenSettings={() => { setSettingsCat({ cat: 'notificari', section: 'alertPrefs' }); setShowSettings(true) }} />
       </div>
 
       {groups.length > 0 && (
