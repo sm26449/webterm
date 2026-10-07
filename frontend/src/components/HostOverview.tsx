@@ -48,6 +48,7 @@ export default function HostOverview(props: {
   onConnectionOpen: (host: Host, connId: number) => void
   onJournal: (host: Host, unit: string) => void
   onContainerShell: (host: Host, containerId: string) => void
+  onContainerLogs: (host: Host, containerId: string, name?: string) => void
   onSerial: (host: Host) => void
   onDiagnostic: (host: Host) => void
   onEdit: (host: Host) => void
@@ -407,7 +408,8 @@ export default function HostOverview(props: {
         )}
         {tab === 'docker' && (
           <Suspense fallback={paneFallback}>
-            <DockerPanel embed host={host} onClose={() => setTab('overview')} onOpenContainerShell={(cid) => props.onContainerShell(host, cid)} />
+            <DockerPanel embed host={host} onClose={() => setTab('overview')} onOpenContainerShell={(cid) => props.onContainerShell(host, cid)}
+              onOpenContainerLogs={(cid, name) => props.onContainerLogs(host, cid, name)} />
           </Suspense>
         )}
         {tab === 'databases' && (

@@ -977,6 +977,7 @@ function MainApp() {
       onChanged={refresh}
       onOpenSession={async (sid) => { await refresh(); selectSession(sid) }}
       onOpenContainerShell={openContainerShell}
+      onOpenContainerLogs={openContainerLogs}
       onJournal={openJournal}
       onOpenConnection={openConnection}
       onDeleted={() => { closeTab(s.id); refresh() }}
@@ -1230,6 +1231,29 @@ function MainApp() {
     }
   }
 
+  // „Logs" dintr-un container Docker: sesiune care urmăreşte `docker logs --tail 500 -f` (gateway-ul
+  // validează id-ul şi construieşte comanda). Acelaşi flux/2FA ca „Logs" din Services, mai jos.
+  async function openContainerLogs(host: Host, container: string, name?: string) {
+    const body: Record<string, unknown> = {
+      title: `logs: ${(name || container.slice(0, 12)).slice(0, 40)}`, tz: getTimezone(), docker_logs: container,
+    }
+    if (host.require_2fa) {
+      const cred = await stepupCredential(host.id)
+      if (!cred) return
+      Object.assign(body, cred)
+    }
+    try {
+      const r = await api<{ id: string }>(`/api/hosts/${host.id}/sessions`, {
+        method: 'POST', body: JSON.stringify(body),
+      })
+      await refresh()
+      openTab(r.id)
+      navigate(r.id)
+    } catch (e) {
+      startFailed(host, e)
+    }
+  }
+
   // „Logs": sesiune care urmăreşte `journalctl -u <unit> -f` pe host. Acelaşi flux/2FA.
   async function openJournal(host: Host, unit: string) {
     const body: Record<string, unknown> = { title: '', tz: getTimezone(), journal_unit: unit }
@@ -1439,6 +1463,7 @@ function MainApp() {
             onConnectionOpen={openConnection}
             onJournal={openJournal}
             onContainerShell={openContainerShell}
+            onContainerLogs={openContainerLogs}
             onSerial={setSerialHost}
             onDiagnostic={setDiagHost}
             onEdit={setEditHostApp}

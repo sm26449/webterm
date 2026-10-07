@@ -1,4 +1,4 @@
-import { ReactNode, useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { errText, api, ApiError, Host, withGuardConfirm, withStepup } from '../lib/api'
 import { useConfirm } from '../lib/confirm'
 import { useI18n } from '../lib/i18n'
@@ -6,7 +6,8 @@ import { copyText } from '../lib/clipboard'
 import { SHEET_CLS } from '../lib/sheet'
 import { useDrawer } from '../lib/useDrawer'
 import SheetBar from './SheetBar'
-import { useFocusTrap } from '../lib/useFocusTrap'
+import { DockerStat, DockerStatsResponse, fmtMem, fmtPct, matchStats, nextStatsDelay, startPolling } from '../lib/dockerStats'
+import { pressureTextColor } from '../lib/thresholds'
 import { CloseIcon, RefreshIcon, TerminalPromptIcon } from './Icons'
 
 // Panou Docker: containere / imagini / volume / reţele ale host-ului, plus start/stop/restart
@@ -16,25 +17,12 @@ type Row = Record<string, string>
 type Kind = 'containers' | 'images' | 'volumes' | 'networks'
 const KINDS: Kind[] = ['containers', 'images', 'volumes', 'networks']
 
-// Overlay-ul de log-uri ca dialog REAL: focus-trap + Escape + rol/etichetă. Înainte era un div
-// peste panou fără niciuna — Tab ieşea în pagina de sub el, Escape nu-l închidea (audit a11y).
-function LogsDialog(props: { onClose: () => void; children: ReactNode }) {
-  const ref = useRef<HTMLDivElement>(null)
-  useFocusTrap(ref, props.onClose)
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={props.onClose}>
-      <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="wt-docker-logs-title"
-        className="glass flex max-h-[80vh] w-full max-w-3xl flex-col rounded-2xl" onClick={(e) => e.stopPropagation()}>
-        {props.children}
-      </div>
-    </div>
-  )
-}
-
 export default function DockerPanel(props: {
   host: Host; onClose: () => void; overlay?: boolean; embed?: boolean
   /** deschide un tab de terminal cu un shell în containerul dat (docker exec) */
   onOpenContainerShell?: (containerId: string) => void
+  /** „Logs": tab de terminal care urmăreşte `docker logs --tail 500 -f` (ca „Logs" din Services) */
+  onOpenContainerLogs?: (containerId: string, name?: string) => void
 }) {
   const { t } = useI18n()
   const { confirm } = useConfirm()
@@ -47,8 +35,10 @@ export default function DockerPanel(props: {
   const [denied, setDenied] = useState(false)   // userul agentului nu e în grupul docker → card de remediere
   const [copied, setCopied] = useState('')      // care din comenzile de remediere tocmai s-a copiat
   const [busy, setBusy] = useState('')          // id-ul containerului pe care rulează o acţiune
-  const [logsFor, setLogsFor] = useState<string | null>(null)
-  const [logs, setLogs] = useState('')
+  // statistici per container (`docker stats`): null = încă nimic; `statsOff` = hostul n-a
+  // răspuns în timp (timeout) sau endpoint-ul a eşuat — afişăm „indisponibil", nu o eroare
+  const [stats, setStats] = useState<DockerStat[] | null>(null)
+  const [statsOff, setStatsOff] = useState(false)
 
   const asideCls = drawer.sheet ? SHEET_CLS : props.embed
     ? 'flex h-full w-full min-h-0 flex-col bg-ink-900'
@@ -110,19 +100,58 @@ export default function DockerPanel(props: {
     } finally { setBusy('') }
   }
 
-  async function showLogs(id: string) {
-    setLogsFor(id); setLogs(t('docker.loadingLogs'))
-    try {
-      const r = await api<{ logs: string }>(`/api/hosts/${props.host.id}/docker/logs?container=${encodeURIComponent(id)}`)
-      setLogs(r.logs || t('docker.noLogs'))
-    } catch (e) {
-      setLogs(errText(e, t) || t('docker.error'))
-    }
-  }
-
   // câmpuri utile după kind (docker `{{json .}}` are chei cu majusculă). `State` e sursa de
   // adevăr când există (paused/restarting NU sunt „running"); cădem pe `Status` doar dacă lipseşte
   const isRunning = (r: Row) => r.State ? r.State.toLowerCase() === 'running' : /^up/i.test(r.Status || '')
+
+  // Sondare `docker stats` la ~5 s, DOAR cât panoul e montat, pe tabul Containers, cu măcar un
+  // container pornit şi fără eroare de listă; pe `document.hidden` se suspendă (lib/dockerStats).
+  // Timeout pe host → 30 s; eroare → stop (lista arată deja problema; fără furtună de cereri).
+  const anyRunning = kind === 'containers' && !!rows && rows.some(isRunning)
+  const pollStats = anyRunning && !error && !denied
+  useEffect(() => {
+    if (!pollStats) return
+    let alive = true
+    const stop = startPolling(async () => {
+      try {
+        const r = await api<DockerStatsResponse>(`/api/hosts/${props.host.id}/docker/stats`)
+        if (!alive) return null
+        setStats(r.rows || []); setStatsOff(!r.available)
+        return nextStatsDelay(r.available ? 'ok' : 'unavailable')
+      } catch {
+        if (alive) setStatsOff(true)
+        return nextStatsDelay('error')
+      }
+    }, document)
+    return () => { alive = false; stop() }
+  }, [pollStats, props.host.id])
+
+  const statsLine = (id: string, names: string) => {
+    if (statsOff) return <div className="text-2xs text-slate-500">{t('docker.stats.unavailable')}</div>
+    const s = matchStats(stats, id, names)
+    if (!s) return null
+    const cpu = fmtPct(s.cpu_pct)
+    const mem = fmtMem(s.mem_used, s.mem_limit)
+    const memPct = fmtPct(s.mem_pct)
+    if (!cpu && !mem) return null
+    // eticheta (CPU/MEM) e TEXT, culoarea de prag doar o repetă (WCAG 1.4.1); tokenii AA din thresholds
+    return (
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 font-mono text-2xs text-slate-400">
+        {cpu && (
+          <span title={t('docker.stats.cpuTitle')}>
+            {t('docker.stats.cpu')}{' '}
+            <span style={{ color: pressureTextColor(s.cpu_pct ?? 0) }}>{cpu}</span>
+          </span>
+        )}
+        {mem && (
+          <span className="min-w-0 truncate" title={t('docker.stats.memTitle')}>
+            {t('docker.stats.mem')} {mem}
+            {memPct && <> (<span style={{ color: pressureTextColor(s.mem_pct ?? 0) }}>{memPct}</span>)</>}
+          </span>
+        )}
+      </div>
+    )
+  }
 
   const header = (
     <header className="flex items-center gap-2 border-b border-ink-800 px-3 py-2">
@@ -197,6 +226,7 @@ export default function DockerPanel(props: {
                       <div className="truncate text-sm font-medium text-slate-200" title={r.Names}>{name}</div>
                       <div className="truncate font-mono text-2xs text-slate-500" title={r.Image}>{r.Image}</div>
                       <div className={`font-mono text-2xs ${running ? 'wt-good' : 'text-slate-500'}`} title={r.Status}>{state}</div>
+                      {running && statsLine(id, r.Names || '')}
                     </div>
                     {busy === id && <span className="shrink-0 text-2xs text-slate-500">…</span>}
                   </div>
@@ -214,8 +244,11 @@ export default function DockerPanel(props: {
                           className="rounded-md px-1.5 py-0.5 text-2xs wt-good ring-1 ring-ink-700 hover:bg-ink-800 disabled:opacity-40">{t('docker.start')}</button>}
                     {running && <button disabled={!!busy} onClick={() => action(id, 'restart', name)}
                       className="rounded-md px-1.5 py-0.5 text-2xs text-slate-400 ring-1 ring-ink-700 hover:bg-ink-800 disabled:opacity-40">{t('docker.restart')}</button>}
-                    <button onClick={() => showLogs(id)}
-                      className="ml-auto rounded-md px-1.5 py-0.5 text-2xs text-slate-400 ring-1 ring-ink-700 hover:bg-ink-800">{t('docker.logs')}</button>
+                    {props.onOpenContainerLogs && (
+                      <button onClick={() => props.onOpenContainerLogs!(id, name)}
+                        title={t('docker.logsHint')} aria-label={`${t('docker.logs')} ${name}`}
+                        className="ml-auto rounded-md px-1.5 py-0.5 text-2xs text-slate-400 ring-1 ring-ink-700 hover:bg-ink-800">{t('docker.logs')}</button>
+                    )}
                   </div>
                 </div>
               )
@@ -248,19 +281,6 @@ export default function DockerPanel(props: {
         {drawer.sheet && <SheetBar title={t('docker.title')} onBack={props.onClose} />}
         {body}
       </aside>
-
-      {/* logs: dialog modal peste panou (focus-trap, Escape, etichetat de titlu) */}
-      {logsFor && (
-        <LogsDialog onClose={() => setLogsFor(null)}>
-          <header className="flex items-center gap-2 border-b border-ink-800 px-4 py-2">
-            <h2 id="wt-docker-logs-title" className="min-w-0 flex-1 truncate text-sm font-semibold">{t('docker.logsFor', { name: logsFor })}</h2>
-            <button onClick={() => setLogsFor(null)} aria-label={t('common.close')}
-              className="wt-touch rounded-md px-1.5 text-slate-400 hover:bg-ink-800"><CloseIcon size={14} /></button>
-          </header>
-          {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- regiune derulabilă: fără tabindex nu se poate derula din tastatură */}
-          <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap px-4 py-3 font-mono text-2xs leading-relaxed text-slate-300" tabIndex={0}>{logs}</pre>
-        </LogsDialog>
-      )}
     </>
   )
 }
