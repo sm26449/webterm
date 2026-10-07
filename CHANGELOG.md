@@ -52,6 +52,11 @@ so no fleet update.
   appears, dismisses, clears, and that the tmux session streams again afterwards. See
   [docs/HOSTS.md](docs/HOSTS.md#when-a-host-goes-offline-mid-session).
 
+### Fixed
+- **Live-sessions badge contrast on Aurora.** The green "N live sessions" count on a sidebar host
+  row measured ~4.2:1 on the selected row (below AA at 10 px). The axe gate only caught it once
+  the scanned host had live sessions while selected; light themes now use a darker green (~6:1).
+
 ## [3.5.4] — 2026-10-07 · agent (57)
 
 Five features the product owner picked from the UI reviews, built one at a time, each

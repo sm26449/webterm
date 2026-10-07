@@ -451,6 +451,15 @@ textarea {
 :root[data-theme='dark'] .wt-good {
   color: #34d399;
 }
+/* insigna „N sesiuni vii" din sidebar: verde pe fond verde 15% peste rândul SELECTAT (ink-800).
+   Pe Aurora #047857 dădea ~4,2:1 acolo (sub AA la 10px) — prins de axe când hostul selectat avea
+   sesiuni vii în timpul scanării. Pe temele deschise un verde mai închis (~6:1). */
+.wt-livecount {
+  color: #065f46;
+}
+:root[data-theme='dark'] .wt-livecount {
+  color: #34d399;
+}
 .wt-danger {
   color: #b91c1c;
 }

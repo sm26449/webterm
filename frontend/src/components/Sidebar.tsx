@@ -416,7 +416,7 @@ export default function Sidebar(props: {
                 </span>
               )}
               {liveCount > 0 && (
-                <span className="shrink-0 rounded-full bg-emerald-500/15 px-1.5 text-[10px] font-semibold wt-good"
+                <span className="shrink-0 rounded-full bg-emerald-500/15 px-1.5 text-[10px] font-semibold wt-livecount"
                   title={t('sidebar.liveSessions', { count: liveCount })}>
                   {liveCount}
                 </span>
