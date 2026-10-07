@@ -9,6 +9,12 @@ back.
 
 ## [Unreleased]
 
+## [3.5.5] — 2026-10-07 · agent (57)
+
+Phone experience, a host-offline card in the session view, and file-manager upgrades
+(multi-select, folder downloads through Transfers, server-side copy to another host).
+No agent change, so no fleet update.
+
 The phone is where "your sessions, anywhere" was weakest — every external UI review said so.
 Three phone fixes, plus a "host offline" card in the session view. Then the file manager grows up:
 multi-select with bulk download/delete, folder downloads as real Transfers jobs, and copying files
