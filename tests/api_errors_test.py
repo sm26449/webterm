@@ -70,7 +70,7 @@ def unit_checks():
 
     # RuntimeError-urile din core → coduri, nu instrucţiuni de meniu în UI
     rt = [
-        ("the fleet signing key is LOCKED — unlock it from Settings → Security", "signing.locked"),
+        ("the fleet signing key is LOCKED — unlock it from Settings → Infrastructure & tokens", "signing.locked"),
         ("agent/ptyd.py.sig missing — run scripts/sign-agent.py", "signing.sigMissing"),
         ("the agent refused the update (downgrade)", "update.refused"),
         ("agent refused: limit", "agent.refused"),

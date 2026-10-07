@@ -559,7 +559,7 @@ def notify_signing_locked(behind: int) -> None:
     _fire("The signing key is locked — agents are NOT updating",
           f"The gateway has an ENCRYPTED signing key, and it is locked since the last restart.\n"
           f"{behind} agent(s) are on an older version and cannot be updated.\n\n"
-          f"Unlock it: Settings → Security → unlock the agent signing key.\n"
+          f"Unlock it: Settings → Infrastructure & tokens → Agent signing key.\n"
           f"Agent updates are signed, and without the key the gateway refuses (correctly) to "
           f"push unsigned code to the hosts.")
 

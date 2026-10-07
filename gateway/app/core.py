@@ -2185,7 +2185,7 @@ async def force_update_agent(host_id: int) -> dict:
     if payload is None:
         if signing.key_exists() and not signing.is_loaded():
             raise RuntimeError("the fleet signing key is LOCKED — unlock it from "
-                               "Settings → Security to update agents")
+                               "Settings → Infrastructure & tokens to update agents")
         raise RuntimeError("agent/ptyd.py.sig missing — run scripts/sign-agent.py")
     content_b64, sig_b64 = payload
     resp = await conn.request("update", force=True, content_b64=content_b64, sig_b64=sig_b64)

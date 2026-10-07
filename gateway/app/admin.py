@@ -95,7 +95,7 @@ async def cmd_disable_2fa(args) -> None:
         "UPDATE users SET totp_enabled=0, totp_secret_encrypted=NULL, totp_last_counter=NULL"
         " WHERE id=?", user["id"])
     await db.execute("DELETE FROM recovery_codes WHERE user_id=?", user["id"])
-    print("✓ 2FA disabled for %s (enrol it again from Settings → Security)" % user["email"])
+    print("✓ 2FA disabled for %s (enrol it again from Settings → Sign-in & 2FA)" % user["email"])
     # Ferestrele de step-up NU se închid aici: dezactivarea 2FA e ce faci când eşti deja blocat
     # afară, iar a te tăia din propria sesiune în acel moment ar fi exact pe dos.
     await db.execute("DELETE FROM web_sessions WHERE user_id=?", user["id"])

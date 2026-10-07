@@ -479,7 +479,7 @@ say "What is left to do"
 case "$KEY_LINE" in
   "1 1")
     warn "the agent signing key is ENCRYPTED → after a restart it is LOCKED."
-    echo "    Agents will NOT update until you unlock it: Settings → Security → unlock."
+    echo "    Agents will NOT update until you unlock it: Settings → Infrastructure & tokens → Agent signing key."
     TODO=$((TODO + 1)) ;;
   "1 0") echo "  signing key: loaded automatically (no passphrase) — agents can update" ;;
   "0 0") echo "  no deployment key: using the official channel signed by the maintainer" ;;

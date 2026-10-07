@@ -256,7 +256,7 @@ def main():
         rk, _ = run(dk, ["-y"], KEY_EXISTS="1", KEY_ENC="1", BEHIND="2")
         outk = rk.stdout + rk.stderr
         check("cheie criptată → spune că agenţii NU se actualizează până la deblocare",
-              "LOCKED" in outk and "Settings → Security" in outk, outk[-600:])
+              "LOCKED" in outk and "Settings → Infrastructure & tokens" in outk, outk[-600:])
         check("raportează câţi agenţi au rămas în urmă", "2 host(s)" in outk, outk[-600:])
         check("explică restartul amânat cât sunt sesiuni deschise", "DEFERRED" in outk, outk[-400:])
 
