@@ -80,7 +80,7 @@ export default function HelpTip(props: { id: HelpId; className?: string }) {
         aria-label={t('help.aria', { topic: title })}
         aria-expanded={open}
         aria-controls={open ? popId : undefined}
-        className={`wt-touch inline-grid h-5 w-5 shrink-0 place-items-center rounded-full border border-ink-700 align-middle text-2xs font-semibold leading-none text-slate-400 hover:border-sky-500/60 hover:text-sky-300 ${props.className ?? ''}`}
+        className={`wt-touch inline-grid h-5 w-5 shrink-0 place-items-center rounded-full border border-ink-700 align-middle text-2xs font-semibold leading-none text-slate-400 hover:border-sky-500/60 hover:text-link ${props.className ?? ''}`}
       >
         ?
       </button>

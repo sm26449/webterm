@@ -68,7 +68,7 @@ export default function SecretPromptModal(props: {
             <p id="wt-secret-hint" className="mt-2 text-xs text-slate-400">{props.ask.hint}</p>
           )}
           {otp && err && (
-            <p role="alert" className="mt-2 text-xs text-rose-400">{err}</p>
+            <p role="alert" className="mt-2 text-xs wt-danger">{err}</p>
           )}
           <div className="mt-5 flex justify-end gap-2">
             <button

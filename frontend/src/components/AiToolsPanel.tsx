@@ -248,7 +248,7 @@ export default function AiToolsPanel(props: {
                 </div>
                 <button className={btn} disabled={busy} onClick={() => setEditing({ path: it.path, name: it.name })}
                   aria-label={`${t('ai.edit')} ${it.name}`}>{t('ai.edit')}</button>
-                <button className={btn + ' hover:!text-rose-300'} disabled={busy} onClick={() => remove(kind, it)}
+                <button className={btn + ' hover:!text-danger'} disabled={busy} onClick={() => remove(kind, it)}
                   aria-label={`${t('ai.delete')} ${it.name}`}>{t('ai.delete')}</button>
               </li>
             ))}

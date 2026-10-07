@@ -125,7 +125,7 @@ export default function ServicesPanel(props: {
                       {props.onJournal && (
                         <button onClick={() => props.onJournal!(s.unit)}
                           title={t('services.logs')} aria-label={t('services.logs') + ' ' + s.unit}
-                          className="rounded-md px-1.5 py-0.5 text-2xs text-slate-400 hover:bg-ink-700 hover:text-sky-300">
+                          className="rounded-md px-1.5 py-0.5 text-2xs text-slate-400 hover:bg-ink-700 hover:text-link">
                           {t('services.logs')}
                         </button>
                       )}

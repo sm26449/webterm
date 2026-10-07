@@ -171,7 +171,9 @@ export default function HostOverview(props: {
   )
 
   return (
-    <div className="flex h-full min-w-0 flex-1 flex-col">
+    // `wt-canvas`: pagina hostului urmează tema aleasă, ca Dashboard-ul (pe Aurora rămânea neagră);
+    // doar previzualizările de terminal de pe ea rămân întunecate (`wt-workspace` local)
+    <div className="wt-canvas flex h-full min-w-0 flex-1 flex-col">
       {/* ── header ── */}
       <div className="flex flex-wrap items-start gap-x-4 gap-y-3 border-b border-ink-800 px-4 pt-4 pb-3 sm:px-6">
         <IconButton size="md" onClick={props.onMenu} className={props.sidebarCollapsed ? '' : 'md:hidden'} label={t('host.openHostListAria')}>
@@ -181,7 +183,7 @@ export default function HostOverview(props: {
           <div className="grid h-11 w-11 place-items-center rounded-xl bg-ink-800 text-slate-400 ring-1 ring-ink-700">
             <ServerIcon />
           </div>
-          <span className={`absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full ring-2 ring-[color:var(--term-bg)] ${
+          <span className={`absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full ring-2 ring-ink-900 ${
             host.online ? 'bg-emerald-400' : 'bg-slate-500'}`} />
         </div>
         <div className="min-w-[10rem] flex-1">
@@ -372,7 +374,7 @@ export default function HostOverview(props: {
                       {selLive ? t('host.openTerminal') : t('host.viewHistory')}
                     </Button>
                   </div>
-                  <div className="min-h-0 flex-1 bg-[#0b0e14] p-2">
+                  <div className="wt-workspace min-h-0 flex-1 p-2">
                     <SessionPreview key={sel.id} sid={sel.id} live={selLive} />
                   </div>
                 </>
@@ -493,7 +495,7 @@ function SessionThumb(props: {
       <button onClick={props.onOpen} className="block w-full text-left"
         title={t('host.openTerminal')} aria-label={`${s.title || t('host.sessionFallback')} — ${t('host.openTerminal')}`}>
         {/* fereastra de preview: snapshot text al transcriptului (fiabil la orice dimensiune) */}
-        <div className="relative h-[132px] w-full overflow-hidden bg-[#0b0e14]">
+        <div className="wt-workspace relative h-[132px] w-full overflow-hidden">
           <ThumbPreview sid={s.id} live />
           {/* overlay „deschide" la hover */}
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/0 opacity-0 transition group-hover:bg-black/30 group-hover:opacity-100">
@@ -792,7 +794,7 @@ function HostDetail({ host }: { host: Host }) {
                   title={a.enabled ? a.url : t('dashboard.appDisabled')}
                   className={`group flex items-center gap-3 rounded-xl border border-ink-700 bg-ink-900/40 px-3 py-2.5 ${
                     a.enabled ? 'hover:border-ink-500 hover:bg-ink-800' : 'cursor-not-allowed opacity-50'}`}>
-                  <span className="grid h-9 w-9 shrink-0 place-items-center rounded-md font-mono text-sm font-bold"
+                  <span className="wt-hostlabel grid h-9 w-9 shrink-0 place-items-center rounded-md font-mono text-sm font-bold"
                     style={{ background: `${color}22`, color }}>{a.label.slice(0, 1).toUpperCase()}</span>
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-sm font-medium text-slate-200">{a.label}</span>

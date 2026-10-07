@@ -257,18 +257,18 @@ export default function ForwardsPanel(props: {
           <div className="flex flex-wrap items-center gap-1.5 border-b border-ink-800 px-3 py-2">
             <span className="mr-1 text-2xs uppercase tracking-wide text-slate-500">{t('forwards.addApp')}</span>
             <button onClick={() => presetApp('proxmox')}
-              className="rounded-md px-2 py-0.5 text-2xs font-medium ring-1 ring-ink-700 hover:bg-ink-800"
-              style={{ color: '#ec8b3c' }}>Proxmox</button>
+              className="inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-2xs font-medium text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800">
+              <span aria-hidden="true" className="h-2 w-2 rounded-full" style={{ background: '#ec8b3c' }} />Proxmox</button>
             <button onClick={() => presetApp('portainer')}
-              className="rounded-md px-2 py-0.5 text-2xs font-medium ring-1 ring-ink-700 hover:bg-ink-800"
-              style={{ color: '#57a8e6' }}>Portainer</button>
+              className="inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-2xs font-medium text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800">
+              <span aria-hidden="true" className="h-2 w-2 rounded-full" style={{ background: '#57a8e6' }} />Portainer</button>
             <button onClick={() => presetApp('grafana')}
-              className="rounded-md px-2 py-0.5 text-2xs font-medium ring-1 ring-ink-700 hover:bg-ink-800"
-              style={{ color: '#f59e0b' }}>Grafana</button>
+              className="inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-2xs font-medium text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800">
+              <span aria-hidden="true" className="h-2 w-2 rounded-full" style={{ background: '#f59e0b' }} />Grafana</button>
             {DB_APPS.map((a) => (
               <button key={a.type} onClick={() => presetApp(a.type)}
-                className="rounded-md px-2 py-0.5 text-2xs font-medium ring-1 ring-ink-700 hover:bg-ink-800"
-                style={{ color: a.color }}>{APP_PRESETS[a.type].label}</button>
+                className="inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-2xs font-medium text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800">
+                <span aria-hidden="true" className="h-2 w-2 rounded-full" style={{ background: a.color }} />{APP_PRESETS[a.type].label}</button>
             ))}
             <button onClick={() => presetApp('custom')}
               className="rounded-md px-2 py-0.5 text-2xs font-medium text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800">{t('forwards.appCustom')}</button>
@@ -365,7 +365,7 @@ export default function ForwardsPanel(props: {
                   <div className="flex items-center gap-1.5">
                     <span className="truncate text-sm font-semibold text-slate-200">{f.label}</span>
                     {f.app_type && (
-                      <span className="shrink-0 rounded-md px-1.5 text-2xs font-bold uppercase tracking-wide"
+                      <span className="wt-hostlabel shrink-0 rounded-md px-1.5 text-2xs font-bold uppercase tracking-wide"
                         style={{ color: APP_COLOR[f.app_type] || '#34d399', background: `${APP_COLOR[f.app_type] || '#34d399'}1f` }}
                         title={t('forwards.isApp')}>{t('forwards.appBadge')}</span>
                     )}
@@ -382,7 +382,7 @@ export default function ForwardsPanel(props: {
                   <button onClick={() => togglePromote(f)} aria-pressed={!!f.app_type}
                     title={f.app_type ? t('forwards.demoteApp') : t('forwards.promoteApp')}
                     aria-label={f.app_type ? t('forwards.demoteApp') : t('forwards.promoteApp')}
-                    className={`grid h-6 w-6 shrink-0 place-items-center rounded-md hover:bg-ink-700 ${f.app_type ? 'wt-warn' : 'text-slate-500 hover:text-amber-300'}`}>
+                    className={`grid h-6 w-6 shrink-0 place-items-center rounded-md hover:bg-ink-700 ${f.app_type ? 'wt-warn' : 'text-slate-500 hover:text-warn'}`}>
                     <StarIcon filled={!!f.app_type} />
                   </button>
                 )}
@@ -403,11 +403,11 @@ export default function ForwardsPanel(props: {
                   <button onClick={() => copyLink(f)} title={t('forwards.copyLink')} aria-label={`${t('forwards.copyLink')} ${f.label}`} className="grid h-6 w-6 place-items-center rounded-md text-slate-500 hover:bg-ink-700 hover:text-slate-200">
                     {copied === f.id ? <span className="wt-good"><CheckIcon size={12} /></span> : <LinkIcon />}
                   </button>
-                  {f.enabled && <button onClick={() => toggle(f)} title={t('forwards.stop')} aria-label={`${t('forwards.stop')} ${f.label}`} className="grid h-6 w-6 place-items-center rounded-md text-slate-500 hover:bg-ink-700 hover:text-amber-300"><PauseIcon size={12} /></button>}
+                  {f.enabled && <button onClick={() => toggle(f)} title={t('forwards.stop')} aria-label={`${t('forwards.stop')} ${f.label}`} className="grid h-6 w-6 place-items-center rounded-md text-slate-500 hover:bg-ink-700 hover:text-warn"><PauseIcon size={12} /></button>}
                 </>)}
                 <span className="ml-auto flex items-center gap-0.5">
                   <button onClick={() => openEdit(f)} title={t('forwards.edit')} aria-label={`${t('forwards.edit')} ${f.label}`} className="grid h-6 w-6 place-items-center rounded-md text-slate-500 hover:bg-ink-700 hover:text-slate-200"><PencilIcon /></button>
-                  <button onClick={() => setConfirmDel(f)} title={t('forwards.delete')} aria-label={`${t('forwards.delete')} ${f.label}`} className="grid h-6 w-6 place-items-center rounded-md text-slate-500 hover:bg-ink-700 hover:text-rose-300"><TrashIcon /></button>
+                  <button onClick={() => setConfirmDel(f)} title={t('forwards.delete')} aria-label={`${t('forwards.delete')} ${f.label}`} className="grid h-6 w-6 place-items-center rounded-md text-slate-500 hover:bg-ink-700 hover:text-danger"><TrashIcon /></button>
                 </span>
               </div>
             </div>

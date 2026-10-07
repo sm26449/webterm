@@ -948,7 +948,7 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
               <button
                 onClick={() => setGuard({ ...guard, rules: guard.rules.filter((_, j) => j !== i) })}
                 aria-label={t('settings.deleteRule')}
-                className="shrink-0 rounded-md px-2 py-1 text-slate-500 hover:bg-ink-800 hover:text-rose-300"
+                className="shrink-0 rounded-md px-2 py-1 text-slate-500 hover:bg-ink-800 hover:text-danger"
               ><CloseIcon size={14} /></button>
             </div>
           ))}

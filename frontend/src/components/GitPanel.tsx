@@ -279,11 +279,11 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
         {/* ţinte de 24px + etichetă care numeşte fişierul: „+"/„−" singure nu spun nimic cititorului */}
         {group === 'staged' ? (
           <button onClick={() => unstage(f)} disabled={busy}
-            className="grid h-6 w-6 shrink-0 place-items-center rounded-md text-slate-500 hover:bg-ink-700 hover:text-amber-300 disabled:opacity-40"
+            className="grid h-6 w-6 shrink-0 place-items-center rounded-md text-slate-500 hover:bg-ink-700 hover:text-warn disabled:opacity-40"
             title={t('git.unstage')} aria-label={`${t('git.unstage')} ${f.path}`}>−</button>
         ) : (
           <button onClick={() => stage(f)} disabled={busy}
-            className="grid h-6 w-6 shrink-0 place-items-center rounded-md text-slate-500 hover:bg-ink-700 hover:text-emerald-300 disabled:opacity-40"
+            className="grid h-6 w-6 shrink-0 place-items-center rounded-md text-slate-500 hover:bg-ink-700 hover:text-ok disabled:opacity-40"
             title={t('git.stage')} aria-label={`${t('git.stage')} ${f.path}`}>+</button>
         )}
       </div>

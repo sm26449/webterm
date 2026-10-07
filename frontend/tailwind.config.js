@@ -52,6 +52,8 @@ export default {
         danger: v('danger'),
         info: v('info'),
         accent: v('accent'),
+        // = .wt-link (indigo AA pe ambele teme); pentru hover-uri: `hover:text-link`
+        link: v('link'),
         // culorile de grafic (gauge, sparkline, inel de încărcare): ţintă WCAG 1.4.11 = 3:1
         viz: { ok: v('viz-ok'), warn: v('viz-warn'), danger: v('viz-danger') },
         // suprafeţe: nume semantice peste aceeaşi scară `ink` (tema o redefineşte, iar zonele

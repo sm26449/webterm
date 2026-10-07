@@ -716,7 +716,7 @@ export default function FilePanel(props: {
             </div>
           )}
           {drag && dropRow && (
-            <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 bg-ink-900/95 px-3 py-1 text-center font-mono text-2xs text-sky-200">
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 bg-ink-900/95 px-3 py-1 text-center font-mono text-2xs wt-accent">
               {t('transfers.dropIntoFolder', { name: dropRow })}
             </div>
           )}

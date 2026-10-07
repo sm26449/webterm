@@ -389,7 +389,7 @@ export default function ToolboxPanel(props: {
                       <span className="ml-auto flex items-center gap-0.5">
                         <button onClick={() => setEdit(toDraft(c))} className="grid h-6 w-6 place-items-center rounded-md text-slate-500 hover:bg-ink-700 hover:text-slate-200"
                           title={t('toolbox.edit')} aria-label={`${t('toolbox.edit')} ${c.label}`}><PencilIcon /></button>
-                        <button onClick={() => del(c)} className="grid h-6 w-6 place-items-center rounded-md text-slate-500 hover:bg-ink-700 hover:text-rose-300"
+                        <button onClick={() => del(c)} className="grid h-6 w-6 place-items-center rounded-md text-slate-500 hover:bg-ink-700 hover:text-danger"
                           title={t('toolbox.delete')} aria-label={`${t('toolbox.delete')} ${c.label}`}><TrashIcon /></button>
                       </span>
                     </div>
@@ -426,13 +426,13 @@ export default function ToolboxPanel(props: {
                       <span className="min-w-0 flex-1 truncate font-mono text-2xs text-slate-300"
                         title={dk.key.fingerprint}>{dk.key.fingerprint}</span>
                       <button onClick={() => copy(dk.key!.public_key)}
-                        className="shrink-0 rounded-md p-1 text-slate-500 hover:bg-ink-700 hover:text-sky-400"
+                        className="shrink-0 rounded-md p-1 text-slate-500 hover:bg-ink-700 hover:text-link"
                         title={t('toolbox.ssh.copyPub')} aria-label={t('toolbox.ssh.copyPub')}><CopyIcon /></button>
                       <button onClick={dkRotate} disabled={dkBusy !== ''}
-                        className="shrink-0 rounded-md px-1.5 py-0.5 text-2xs text-slate-400 hover:bg-ink-700 hover:text-amber-300"
+                        className="shrink-0 rounded-md px-1.5 py-0.5 text-2xs text-slate-400 hover:bg-ink-700 hover:text-warn"
                         title={t('toolbox.ssh.rotateHint')}>{dkBusy === 'rotate' ? t('toolbox.ssh.rotating') : t('toolbox.ssh.rotate')}</button>
                       <button onClick={dkDelete} disabled={dkBusy !== ''}
-                        className="shrink-0 rounded-md p-1 text-slate-500 hover:bg-ink-700 hover:text-rose-300"
+                        className="shrink-0 rounded-md p-1 text-slate-500 hover:bg-ink-700 hover:text-danger"
                         title={t('toolbox.ssh.deleteKey')} aria-label={t('toolbox.ssh.deleteKey')}><TrashIcon /></button>
                     </div>
                     <div className="mt-0.5 font-mono text-2xs text-slate-500">~/.ssh/webterm_ed25519</div>
@@ -536,21 +536,21 @@ export default function ToolboxPanel(props: {
                           </div>
                         </div>
                         <button onClick={() => copy(`ssh ${d.target_user || 'user'}@${d.target_hostname || d.target_name}`)}
-                          className="shrink-0 rounded-md p-1 text-slate-500 hover:bg-ink-700 hover:text-sky-400"
+                          className="shrink-0 rounded-md p-1 text-slate-500 hover:bg-ink-700 hover:text-link"
                           title={t('toolbox.ssh.copySsh')} aria-label={t('toolbox.ssh.copySsh')}><CopyIcon /></button>
                         {d.status !== 'revoked' && d.target_name && (
                           <>
                             <button onClick={() => dkTest(d)} disabled={dkBusy !== ''}
-                              className="shrink-0 rounded-md px-1.5 py-0.5 text-2xs text-slate-400 hover:bg-ink-700 hover:text-emerald-300"
+                              className="shrink-0 rounded-md px-1.5 py-0.5 text-2xs text-slate-400 hover:bg-ink-700 hover:text-ok"
                               title={t('toolbox.ssh.testHint')}>{dkBusy === 'test' + d.id ? '…' : t('toolbox.ssh.test')}</button>
                             <button onClick={() => dkVerify(d)} disabled={dkBusy !== ''}
                               className="shrink-0 rounded-md px-1.5 py-0.5 text-2xs text-slate-400 hover:bg-ink-700 hover:text-slate-200"
                               title={t('toolbox.ssh.verify')}>{t('toolbox.ssh.verify')}</button>
                             <button onClick={() => dkSshConfig(d)} disabled={dkBusy !== ''}
-                              className="shrink-0 rounded-md px-1.5 py-0.5 text-2xs text-slate-400 hover:bg-ink-700 hover:text-sky-300"
+                              className="shrink-0 rounded-md px-1.5 py-0.5 text-2xs text-slate-400 hover:bg-ink-700 hover:text-link"
                               title={t('toolbox.ssh.aliasHint')}>{dkBusy === 'cfg' + d.id ? '…' : t('toolbox.ssh.alias')}</button>
                             <button onClick={() => dkRevoke(d)} disabled={dkBusy !== ''}
-                              className="shrink-0 rounded-md p-1 text-slate-500 hover:bg-ink-700 hover:text-rose-300"
+                              className="shrink-0 rounded-md p-1 text-slate-500 hover:bg-ink-700 hover:text-danger"
                               title={t('toolbox.ssh.revoke')} aria-label={t('toolbox.ssh.revoke')}><TrashIcon /></button>
                           </>
                         )}
@@ -612,7 +612,7 @@ export default function ToolboxPanel(props: {
                         className="shrink-0 rounded-md p-1 text-slate-500 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 hover:bg-ink-700 hover:text-slate-200 [@media(hover:none)]:opacity-100"
                         title={t('toolbox.edit')} aria-label={`${t('toolbox.edit')} ${s.title}`}><PencilIcon /></button>
                       <button onClick={() => delSnip(s)}
-                        className="shrink-0 rounded-md p-1 text-slate-500 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 hover:bg-ink-700 hover:text-rose-300 [@media(hover:none)]:opacity-100"
+                        className="shrink-0 rounded-md p-1 text-slate-500 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 hover:bg-ink-700 hover:text-danger [@media(hover:none)]:opacity-100"
                         title={t('toolbox.delete')} aria-label={`${t('toolbox.delete')} ${s.title}`}><TrashIcon /></button>
                     </div>
                   ))}
@@ -633,7 +633,7 @@ export default function ToolboxPanel(props: {
                     title={t('toolbox.copy')}>
                     <span className="w-28 shrink-0 truncate text-xs text-slate-300">{it.label}</span>
                     <code className="min-w-0 flex-1 truncate font-mono text-2xs text-slate-500">{it.cmd}</code>
-                    <span className="shrink-0 text-slate-600 group-hover:text-sky-400"><CopyIcon /></span>
+                    <span className="shrink-0 text-slate-600 group-hover:text-link"><CopyIcon /></span>
                   </button>
                 ))}
               </div>
@@ -659,7 +659,7 @@ export default function ToolboxPanel(props: {
                   <code className="block break-all font-mono text-xs text-slate-300">{h.command}</code>
                   <span className="font-mono text-2xs text-slate-500" title={fmtTs(h.created)}>{fmtShort(h.created)}</span>
                 </span>
-                <span className="mt-0.5 shrink-0 text-slate-600 group-hover:text-sky-400"><CopyIcon /></span>
+                <span className="mt-0.5 shrink-0 text-slate-600 group-hover:text-link"><CopyIcon /></span>
               </button>
             ))
           })())}

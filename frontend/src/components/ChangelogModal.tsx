@@ -13,7 +13,7 @@ function Spans({ spans }: { spans: Span[] }) {
     <>
       {spans.map((s, i) =>
         s.bold ? <strong key={i} className="font-semibold text-slate-100">{s.text}</strong>
-          : s.code ? <code key={i} className="rounded-md bg-ink-800 px-1 py-0.5 text-[0.85em] text-sky-300">{s.text}</code>
+          : s.code ? <code key={i} className="rounded-md bg-ink-800 px-1 py-0.5 text-[0.85em] wt-accent">{s.text}</code>
             : <span key={i}>{s.text}</span>,
       )}
     </>
@@ -24,7 +24,7 @@ function renderBlock(b: Block, i: number) {
   switch (b.kind) {
     case 'version':
       return (
-        <h3 key={i} className={`mt-6 flex items-baseline gap-2 border-t border-ink-800 pt-4 text-base font-semibold first:mt-0 first:border-0 first:pt-0 ${b.current ? 'text-sky-300' : 'text-slate-100'}`}>
+        <h3 key={i} className={`mt-6 flex items-baseline gap-2 border-t border-ink-800 pt-4 text-base font-semibold first:mt-0 first:border-0 first:pt-0 ${b.current ? 'wt-accent' : 'text-slate-100'}`}>
           {b.text}
         </h3>
       )

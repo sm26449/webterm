@@ -554,6 +554,8 @@ textarea {
    fundalul devine opac şi poarta de accesibilitate îl prindea — cardul Securitate (3.5.4) a
    mutat layout-ul exact sub cursorul rămas după login. Identitatea de culoare rămâne pe bordură
    şi pe icon; textul trece pe tokenul secundar (AA). `!important`: bate `style={{ color }}`. */
+/* Aceeaşi regulă pentru monogramele de app (PVE/PTN…, culoarea app-ului): din 3.5.7 pagina hostului
+   şi panourile ei sunt şi ele pe .wt-canvas, deci pe Aurora textul pastel cădea sub AA acolo. */
 :root[data-theme='macos'] .wt-canvas .wt-hostlabel { color: rgb(var(--tx-400)) !important; }
 
 /* editorul de fișiere: conținutul e pe fundal de terminal (întunecat fix),

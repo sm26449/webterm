@@ -270,7 +270,7 @@ export default function TabBar(props: {
                   <PencilIcon size={12} />
                 </button>
                 <button onClick={() => sp.onDelete(v.id)} title={t('split.delete')} aria-label={t('split.delete')}
-                  className="wt-tabbtn mr-1 mt-0.5 grid shrink-0 place-items-center self-start rounded-md p-1.5 opacity-0 hover:text-rose-300 focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100">
+                  className="wt-tabbtn mr-1 mt-0.5 grid shrink-0 place-items-center self-start rounded-md p-1.5 opacity-0 hover:text-danger focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100">
                   <CloseIcon size={12} />
                 </button>
               </div>

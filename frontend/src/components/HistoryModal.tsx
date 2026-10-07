@@ -140,7 +140,7 @@ export default function HistoryModal(props: { hosts: Host[]; onClose: () => void
                 <button onClick={() => setConfirmClear(false)} className="rounded-md px-1.5 py-0.5 text-slate-400 hover:bg-ink-800">{t('history.no')}</button>
               </span>
             ) : (
-              <button onClick={() => setConfirmClear(true)} className="rounded-md px-1.5 py-0.5 text-slate-400 hover:bg-ink-800 hover:text-rose-300">{t('history.clearAll')}</button>
+              <button onClick={() => setConfirmClear(true)} className="rounded-md px-1.5 py-0.5 text-slate-400 hover:bg-ink-800 hover:text-danger">{t('history.clearAll')}</button>
             )}
           </span>
         </footer>
