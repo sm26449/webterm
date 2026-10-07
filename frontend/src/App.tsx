@@ -703,6 +703,9 @@ function MainApp() {
       // scurtăturile „simple" (?, /) nu se declanșează cât scrii într-un câmp
       // sau în terminal — acolo caracterul aparține conținutului
       if ((id === 'help' || id === 'focusSidebar') && (inField || inTerminal)) return
+      // „/" dintr-un dialog modal aparţine dialogului (Setări: căutarea, 3.5.9) — altfel ar muta
+      // focusul în sidebar-ul DE SUB modal, adică în afara capcanei de focus
+      if (id === 'focusSidebar' && (e.target as HTMLElement)?.closest?.('[role="dialog"][aria-modal="true"]')) return
       // Ctrl+K în terminal rămâne kill-line al shell-ului (pe mac ⌘K e liber)
       if (id === 'palette' && inTerminal && e.ctrlKey && !e.metaKey) return
 
