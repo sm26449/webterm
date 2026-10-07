@@ -51,7 +51,7 @@ const note = (dev, screen, severity, msg, extra) =>
 
 // Etapele pe care auditul TREBUIE să le atingă pe fiecare device. Fără asta, orice selector
 // derapat transformă poarta într-un no-op verde: nu se măsoară nimic şi nimeni nu află.
-const REQUIRED = ['login', 'dashboard', 'pagina-host', 'session', 'tastare']
+const REQUIRED = ['login', 'dashboard', 'setari-cautare', 'pagina-host', 'session', 'tastare']
 
 /** Măsurători în pagină: overflow, elemente în afara viewportului, ținte mici. */
 const MEASURE = () => {
@@ -213,6 +213,40 @@ async function auditDevice(cfg) {
       await page.waitForTimeout(700)
       await shot('03-sidebar')
       await check('sidebar')
+      await page.keyboard.press('Escape').catch(() => {})
+      await page.mouse.click(5, 5).catch(() => {})
+      await page.waitForTimeout(500)
+    }
+
+    // ── Setări: căutarea (3.5.9) încape, iar lista de rezultate e folosibilă şi la 320px ──
+    // rotiţa stă în sidebar: pe telefon întâi deschidem sertarul
+    if (await menu.isVisible().catch(() => false)) {
+      await menu.click()
+      await page.waitForTimeout(600)
+    }
+    const gear = page.locator('button[aria-label="Settings"]:visible').first()
+    if (!(await gear.isVisible().catch(() => false))) {
+      note(cfg.name, 'setari-cautare', 'bug', 'butonul Settings nu e vizibil')
+    } else {
+      await gear.click()
+      const search = page.locator('[role=dialog][aria-modal="true"] [role=search] input')
+      await search.waitFor({ state: 'visible', timeout: 5000 })
+      await search.fill('alert')
+      await page.locator('[role=listbox] [role=option]').first().waitFor({ state: 'visible', timeout: 5000 })
+      await page.waitForTimeout(300)
+      await shot('03b-setari-cautare')
+      await check('setari-cautare')
+      const w = await page.evaluate(() => ({
+        input: document.querySelector('[role=search] input')?.getBoundingClientRect().width ?? 0,
+        option: document.querySelector('[role=listbox] [role=option]')?.getBoundingClientRect().width ?? 0,
+      }))
+      if (w.input < 160) note(cfg.name, 'setari-cautare', 'bug', `câmpul de căutare din Setări e prea îngust (${Math.round(w.input)}px)`)
+      else if (w.option < 200) note(cfg.name, 'setari-cautare', 'bug', `rezultatele căutării sunt prea înguste (${Math.round(w.option)}px)`)
+      else reached.add('setari-cautare')
+      // primul Escape goleşte căutarea, al doilea închide Setările; apoi sertarul, ca mai sus
+      await page.keyboard.press('Escape')
+      await page.keyboard.press('Escape')
+      await page.waitForTimeout(300)
       await page.keyboard.press('Escape').catch(() => {})
       await page.mouse.click(5, 5).catch(() => {})
       await page.waitForTimeout(500)

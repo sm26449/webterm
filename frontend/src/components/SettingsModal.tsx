@@ -79,7 +79,6 @@ export default function SettingsModal(props: {
   const listId = useId()
   const optId = (i: number) => `${listId}-opt-${i}`
   const searchRef = useRef<HTMLInputElement>(null)
-  const closeRef = useRef<HTMLButtonElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
 
   // Saltul la o secţiune: aşteptăm cadrul în care tab-ul ei e montat ŞI vizibil (offsetParent).
@@ -134,12 +133,6 @@ export default function SettingsModal(props: {
 
   const dialogRef = useRef<HTMLDivElement>(null)
   useFocusTrap(dialogRef, props.onClose)
-  // useFocusTrap pune focusul pe primul element focusabil, care acum ar fi căutarea — pe telefon
-  // asta ar deschide tastatura la fiecare deschidere a Setărilor. Focusul rămâne unde era înainte
-  // de căutare (Închide); „/" duce la căutare.
-  useEffect(() => {
-    if (document.activeElement === searchRef.current) closeRef.current?.focus()
-  }, [])
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
@@ -152,10 +145,18 @@ export default function SettingsModal(props: {
           }
         }}
         className="glass flex h-[92vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl sm:h-[88vh] lg:max-w-4xl xl:max-w-5xl">
-        {/* antet fix: titlu, căutare, închidere */}
-        <div className="flex items-center gap-3 border-b border-ink-800 px-4 py-3 sm:px-5">
-          <h2 className="shrink-0 text-lg font-semibold">{t('settings.title')}</h2>
-          <div role="search" className="relative ml-auto min-w-0 flex-1 sm:max-w-xs">
+        {/* antet fix: titlu, căutare, închidere. În DOM „Închide" vine ÎNAINTEA căutării: useFocusTrap
+            pune focusul pe primul element focusabil, iar pe telefon un câmp focusat la deschidere ar
+            scoate tastatura de fiecare dată (focusul rămâne pe Închide, ca înainte; „/" duce la
+            căutare). Vizual: pe telefon căutarea are rândul ei, sub titlu (la 320px n-ar încăpea
+            lângă el); de la `sm` stă între titlu şi Închide. */}
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-ink-800 px-4 py-3 sm:flex-nowrap sm:px-5">
+          <h2 className="order-1 shrink-0 text-lg font-semibold">{t('settings.title')}</h2>
+          <IconButton size="md" onClick={props.onClose} label={t('settings.close')}
+            className="order-2 ml-auto sm:order-3 sm:ml-0">
+            <CloseIcon size={14} />
+          </IconButton>
+          <div role="search" className="relative order-3 w-full min-w-0 sm:order-2 sm:ml-auto sm:w-auto sm:max-w-xs sm:flex-1">
             <span aria-hidden="true" className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-500">
               <SearchIcon size={14} />
             </span>
@@ -176,16 +177,13 @@ export default function SettingsModal(props: {
               autoComplete="off"
               spellCheck={false}
               enterKeyHint="go"
-              className="w-full rounded-md bg-ink-800 py-1.5 pl-8 pr-8 text-sm text-slate-200 placeholder-slate-500 ring-1 ring-[rgb(var(--field-border))] focus:ring-sky-500"
+              className="w-full rounded-md bg-ink-800 py-1.5 pl-8 pr-8 text-base text-slate-200 sm:text-sm placeholder-slate-500 ring-1 ring-[rgb(var(--field-border))] focus:ring-sky-500"
             />
             {!query && (
               <kbd aria-hidden="true"
                 className="pointer-events-none absolute right-2 top-1/2 hidden -translate-y-1/2 rounded-md bg-ink-700 px-1.5 text-2xs text-slate-400 sm:block">/</kbd>
             )}
           </div>
-          <IconButton ref={closeRef} size="md" onClick={props.onClose} label={t('settings.close')}>
-            <CloseIcon size={14} />
-          </IconButton>
         </div>
 
         <div className="flex min-h-0 flex-1 flex-col sm:flex-row">

@@ -371,11 +371,19 @@ try {
     // ── Settings: TOATE tab-urile ──
     await step('setări', async () => {
       await openSettings(page)
-      for (const tab of ['Account', 'Security', 'Audit', 'Appearance', 'Notifications', 'Backup', 'Preferences']) {
+      // fostul „Security" e spart (3.5.9) în „Sign-in & 2FA" + „Infrastructure & tokens"
+      for (const tab of ['Account', 'Sign-in & 2FA', 'Infrastructure & tokens', 'Audit', 'Appearance', 'Notifications', 'Backup', 'Preferences']) {
+        const slug = tab.toLowerCase().replace(/[^a-z0-9]+/g, '-')
         await settingsTab(page, tab)
-        await page.screenshot({ path: `${OUT}/${theme}-05-settings-${tab.toLowerCase()}.png` })
-        await scan(page, `${theme} settings: ${tab.toLowerCase()}`)
+        await page.screenshot({ path: `${OUT}/${theme}-05-settings-${slug}.png` })
+        await scan(page, `${theme} settings: ${slug}`)
       }
+      // căutarea din Setări: lista de rezultate (listbox grupat pe tab-uri) trece şi ea prin axe
+      await page.fill('[role=search] input', 'alert')
+      await page.waitForSelector('[role=listbox] [role=option]', { timeout: 5000 })
+      await page.screenshot({ path: `${OUT}/${theme}-05-settings-search.png` })
+      await scan(page, `${theme} settings: search results`)
+      await page.fill('[role=search] input', '')
       await escapeRestores(page, 'button[aria-label="Settings"]', 'Settings')
     }, page)
 

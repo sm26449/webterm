@@ -1743,6 +1743,35 @@ try {
   check('tips: „reset tips" din Setări şterge toate cheile wt_tip_*',
     await page.evaluate(() => ['wt_tip_addhost_agent', 'wt_tip_addhost_ssh', 'wt_tip_terminal_paste', 'wt_tip_toolbar'].every((k) => localStorage.getItem(k) === null)))
   await page.keyboard.press('Escape')
+
+  // ── Căutarea din Setări (3.5.9): rezultatul ales comută tab-ul şi evidenţiază secţiunea ──
+  await page.click('button[aria-label="Settings"]')
+  const setSearch = page.locator('[role=dialog] [role=search] input')
+  const curTab = () => page.locator('nav[aria-label="Settings categories"] button[aria-current="true"]').textContent()
+  const flashed = (id) => page.waitForFunction((sid) => {
+    const el = document.querySelector(`[data-setting-id="${sid}"]`)
+    return !!el && el.offsetParent !== null && el.classList.contains('wt-setting-flash')
+  }, id, { timeout: 5000 }).then(() => true, () => false)
+  await setSearch.fill('webhook')
+  await page.locator('[role=listbox] [role=option]').first().waitFor({ state: 'visible', timeout: 5000 })
+  await page.keyboard.press('Enter')
+  const whOk = await flashed('webhook')
+  check('setări: „webhook" + Enter → tab-ul Notifications, secţiunea webhook evidenţiată',
+    whOk && (await curTab()) === 'Notifications')
+  await setSearch.fill('passkey')
+  await page.keyboard.press('Enter')
+  const pkOk = await flashed('passkeys')
+  check('setări: „passkey" + Enter → tab-ul Sign-in & 2FA, secţiunea Passkeys',
+    pkOk && (await curTab()) === 'Sign-in & 2FA')
+  // „/" (focus în afara unui câmp) duce la căutare; Escape goleşte, nu închide modalul
+  await page.locator('nav[aria-label="Settings categories"] button', { hasText: 'Account' }).click()
+  await page.keyboard.press('/')
+  await page.keyboard.type('zzqx')
+  const noneShown = await visible(page.locator('[role=dialog] >> text=No setting matches'), 3000)
+  await page.keyboard.press('Escape')
+  check('setări: „/" focusează căutarea, starea goală apare, Escape goleşte fără să închidă',
+    noneShown && (await setSearch.inputValue()) === '' && (await page.locator('[role=dialog][aria-label="Settings"]').isVisible()))
+  await page.keyboard.press('Escape')
   // după reset, sfatul reapare pe o sesiune nouă (readus la viaţă, nu mort definitiv)
   await goHome()
   await newSession(page)

@@ -186,11 +186,12 @@ await step('host', async () => {
   await shotBoth(page, '05-host')
 })
 
-// -- 5. Settings → Security ----------------------------------------------------------------
+// -- 5. Settings → Sign-in & 2FA ---------------------------------------------------------
 await step('security', async () => {
   await page.locator('button[aria-label="Settings"]').first().click()
   await page.waitForTimeout(1000)
-  await page.getByRole('button', { name: 'Security', exact: true }).first().click()
+  // fostul tab „Security" e spart (3.5.9); poza 06-security arată acum „Sign-in & 2FA"
+  await page.getByRole('button', { name: 'Sign-in & 2FA', exact: true }).first().click()
   await page.waitForTimeout(1500)
   await shotBoth(page, '06-security')
   await page.keyboard.press('Escape')
