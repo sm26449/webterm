@@ -567,6 +567,28 @@ textarea {
   --tx-600: 128 141 160;
 }
 
+/* Regiunea live a lui Monaco (anunţuri pentru cititoare de ecran: „linia 12", rezultate de
+   căutare…). Monaco o creează O SINGURĂ DATĂ pe pagină, direct în <body>, şi n-o scoate la dispose
+   — e singleton: dacă am şterge-o la închiderea editorului, următorul editor n-ar mai anunţa
+   nimic. Stilul lui (0.57) o împinge la left:-999em, adică „în afara ecranului" — ce raporta
+   auditul mobil pe fiecare telefon după ce închideai editorul. O ascundem ca .sr-only, ÎN
+   viewport şi decupată: rămâne în arborele de accesibilitate, nu iese din ecran, nu se vede.
+   `body >` + !important: bate regulile Monaco (care au şi ele !important pe position). */
+body > .monaco-aria-container {
+  position: absolute !important;
+  left: 0 !important;
+  top: 0 !important;
+  width: 1px !important;
+  height: 1px !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  overflow: hidden !important;
+  clip: rect(0 0 0 0) !important;
+  clip-path: inset(50%) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+
 /* focus vizibil la navigare cu tastatura (nu și la click cu mouse-ul) */
 :where(button, a, input, textarea, select, [tabindex]):focus-visible {
   outline: 2px solid rgb(var(--focus));

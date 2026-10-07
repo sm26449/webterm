@@ -72,6 +72,16 @@ import 'monaco-editor/languages/definitions/hcl/register'
   getWorker: () => new editorWorker(),
 }
 
+// Închiderea editorului (dispose) anulează lucrul asincron în curs (folding, tokenizare, încărcarea
+// leneşă a limbajului) — iar câteva promisiuni Monaco anulate ajung neprinse la window ca
+// `Canceled: Canceled`. Nu e o eroare (anularea e intenţionată), dar apare ca eroare JS în consolă
+// şi în auditul mobil (reflow-320, închidere la <1s după deschidere). Tăcem STRICT CancellationError-ul
+// Monaco (name === message === 'Canceled', exact testul lui isCancellationError); orice altceva trece.
+window.addEventListener('unhandledrejection', (e) => {
+  const r: unknown = e.reason
+  if (r instanceof Error && r.name === 'Canceled' && r.message === 'Canceled') e.preventDefault()
+})
+
 // ── limbaje care NU au tokenizer de bază în Monaco: JSON (avea doar serviciul greu), TOML, nginx ──
 
 const jsonConf: monaco.languages.LanguageConfiguration = {
