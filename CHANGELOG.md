@@ -9,6 +9,12 @@ back.
 
 ## [Unreleased]
 
+## [3.5.9] — 2026-10-07 · agent (57)
+
+Search in Settings (EN and RO, diacritic-insensitive, jumps to and highlights the section),
+and the Security tab split into **Sign-in & 2FA** and **Infrastructure & tokens**. The
+Dashboard Security card now opens the exact section. No agent change.
+
 ### Added
 - **Search in Settings.** A search box at the top of the Settings dialog (or press `/` while the
   dialog has focus and no field is focused). It searches every section by its title, its help
