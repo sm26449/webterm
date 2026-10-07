@@ -639,7 +639,8 @@ export default function FilePanel(props: {
                     if (ev.detail >= 3) copyToClip(join(listing!.path, e.name))
                     else if (ev.detail === 2) copyToClip(e.name)
                   }}
-                  className={`min-w-0 flex-1 truncate text-left font-mono ${e.dir ? 'wt-link' : 'text-slate-200'} ${e.dir ? '' : 'select-none'}`}
+                  // pe deget: rândul are măcar 36px (era 18px, sub pragul WCAG 2.5.8 de 24px); cu mouse rămâne compact
+                  className={`min-w-0 flex-1 truncate text-left font-mono [@media(pointer:coarse)]:min-h-[36px] ${e.dir ? 'wt-link' : 'text-slate-200'} ${e.dir ? '' : 'select-none'}`}
                   title={e.dir ? e.name : t('files.copyHint', { name: e.name })}>{e.name}{e.dir ? '/' : ''}</button>
               )}
               {/* meta pe UN rând: mode · dim · data (ascunse când apar acțiunile) */}
