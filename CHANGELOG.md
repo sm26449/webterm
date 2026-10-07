@@ -9,6 +9,11 @@ back.
 
 ## [Unreleased]
 
+## [3.5.8] — 2026-10-07 · agent (57)
+
+One name per idea for "fleet" (Run on hosts / Agent signing key / Bulk enrollment; RO
+"infrastructură"), and the sidebar logo no longer truncates. No agent change.
+
 ### Changed
 - **Wording: one name per idea for "fleet".** The UI used "fleet" for two different things — all
   your servers, and the action of running one command on several hosts — and the action alone had
