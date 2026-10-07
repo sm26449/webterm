@@ -9,6 +9,12 @@ back.
 
 ## [Unreleased]
 
+## [3.5.7] — 2026-10-07 · agent (57)
+
+A design system: one type scale, three corner radii, shared status colours for both themes,
+shared Button/IconButton/Badge/EmptyState/ErrorState/Card components, SVG icons instead of
+emoji, and the light theme finished on the host page. Nothing changes functionally. No agent change.
+
 A design system under the whole UI. **Nothing changes functionally**: every button, route,
 keyboard shortcut and text does what it did; the screens look more consistent, and the light
 theme (Aurora) is finished.
