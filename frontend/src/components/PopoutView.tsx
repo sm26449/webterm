@@ -20,6 +20,8 @@ export default function PopoutView(props: { sid: string }) {
   const { t } = useI18n()
   const [session, setSession] = useState<Session | null>(null)
   const [host, setHost] = useState<Host | undefined>(undefined)
+  // părintele ţintelor jump: overlay-ul „host offline" vorbeşte despre agentul lui
+  const [viaHost, setViaHost] = useState<Host | undefined>(undefined)
   const [gone, setGone] = useState(false)
   const [guard, setGuard] = useState<CommandGuard | null>(null)
   const [webauthn, setWebauthn] = useState(false)
@@ -47,6 +49,7 @@ export default function PopoutView(props: { sid: string }) {
         const h = hosts.find((x) => x.id === s.host_id)
         setSession(s)
         setHost(h)
+        setViaHost(h?.via_host_id ? hosts.find((x) => x.id === h.via_host_id) : undefined)
         document.title = `${s.title || t('app.sessionFallback')}${h ? ' · ' + hostAt(h) : ''} · WebTerm`
       } catch {
         /* retry on next tick */
@@ -150,6 +153,7 @@ export default function PopoutView(props: { sid: string }) {
       <SessionView
         session={session}
         host={host}
+        viaHost={viaHost}
         popout
         commandGuard={guard}
         stepupCredential={stepupCredential}

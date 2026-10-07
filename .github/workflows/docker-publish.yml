@@ -440,7 +440,7 @@ jobs:
           # OPRIT întâi: lock-ul de instanţă unică făcea ca reîncercarea să nu-şi poată porni agentul.
           mkdir -p /tmp/wt-out
           run_e2e() {
-            rm -f /tmp/wt-out/agent-token
+            rm -f /tmp/wt-out/agent-token /tmp/wt-out/agent-ctl
             ( for _ in $(seq 1 120); do
                 if [ -s /tmp/wt-out/agent-token ]; then
                   TOK=$(cat /tmp/wt-out/agent-token)
@@ -449,6 +449,19 @@ jobs:
                   docker exec smoke sh -c "mkdir -p /root/.webterm && printf '%s' '$CFG' > /root/.webterm/agent.json"
                   docker exec -d -e HOME=/root smoke sh -c 'exec python3 /srv/webterm/agent/ptyd.py run >>/tmp/wt-agent.log 2>&1'
                   break
+                fi
+                sleep 1
+              done
+              # stop/start din mijlocul testului (overlay-ul „host offline"), acelaşi agent.json;
+              # ştergerea fişierului = confirmarea pentru test (vezi agentCtl în e2e-session.mjs)
+              for _ in $(seq 1 3600); do
+                kill -0 $$ 2>/dev/null || break
+                if [ -s /tmp/wt-out/agent-ctl ]; then
+                  case "$(cat /tmp/wt-out/agent-ctl)" in
+                    stop)  docker exec -e HOME=/root smoke python3 /srv/webterm/agent/ptyd.py stop >/dev/null 2>&1 || true ;;
+                    start) docker exec -d -e HOME=/root smoke sh -c 'exec python3 /srv/webterm/agent/ptyd.py run >>/tmp/wt-agent.log 2>&1' ;;
+                  esac
+                  rm -f /tmp/wt-out/agent-ctl
                 fi
                 sleep 1
               done ) &

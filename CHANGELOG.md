@@ -10,7 +10,8 @@ back.
 ## [Unreleased]
 
 The phone is where "your sessions, anywhere" was weakest — every external UI review said so.
-Three fixes, frontend only; no agent change, so no fleet update.
+Three phone fixes, plus a "host offline" card in the session view. Frontend only; no agent change,
+so no fleet update.
 
 ### Changed
 - **Session panels are full-screen sheets on phones.** Files, Git, Forwards, Docker, Services,
@@ -33,6 +34,23 @@ Three fixes, frontend only; no agent change, so no fleet update.
   to row 1 plus a toggle, remembered per device. Key sequences and the Ctrl/Alt latch are
   unchanged; the terminal re-fits when the bar changes height. See
   [docs/SHORTCUTS.md](docs/SHORTCUTS.md#touch-key-bar-phones-and-tablets).
+
+### Added
+- **A "host offline" card inside the session.** When the agent of an open session's host
+  disconnected, the only signal was "Host offline — reconnecting" in the 11 px status bar (hidden
+  entirely in compact landscape), and the terminal silently stopped echoing. Wake-on-LAN and
+  Diagnostics lived in the sidebar's ⋯ menu, where nobody looks mid-session. Now a non-modal card
+  sits at the top of the terminal: **offline since HH:MM** and for how long, the **reason** when
+  the gateway knows it (agent uninstalled, refused as relocated/cloned, restarting for an agent
+  update, or the disconnect reason from the connection log; never guessed), and **Diagnostics**,
+  **Wake** (same rule and endpoint as the sidebar, now one shared helper), **Open host page** and
+  **Dismiss** (until the next outage). It never takes the keyboard focus. When the agent is back
+  it disappears and a short "back online" confirmation fades out (aria-live). Jump targets name
+  their parent's agent; direct SSH/telnet get a "Connection lost" variant with **Reconnect** for
+  telnet. Pop-out windows get the same card; shared (guest) links show none. Frontend only.
+  The real-agent E2E now stops and restarts the agent mid-run (169 checks) to prove the card
+  appears, dismisses, clears, and that the tmux session streams again afterwards. See
+  [docs/HOSTS.md](docs/HOSTS.md#when-a-host-goes-offline-mid-session).
 
 ## [3.5.4] — 2026-10-07 · agent (57)
 

@@ -280,6 +280,38 @@ any value and clamps it to **5 minutes – 30 days**.
 Enrolling many machines with one reusable token is a separate feature (enrollment groups):
 see [FLEET.md](FLEET.md#fleet-scale-onboarding).
 
+## When a host goes offline mid-session
+
+If the agent of an open session's host disconnects, a card appears at the top of the terminal
+(it does not cover the prompt at the bottom and does not take the keyboard focus):
+
+- **"\<host\> is offline"**, with **Offline since HH:MM · duration** (date and time once it is
+  more than ~20 hours old). The time is the agent's disconnect from the host's connection log
+  when the page can read it, otherwise the last heartbeat, otherwise the moment the page noticed.
+- **Reason**, only when the gateway knows it: the agent was uninstalled, it was refused as
+  relocated/cloned (`instance_refused`), it is restarting to apply an agent update, or the
+  disconnect reason from the log (clean close, no heartbeat for 90 s, WebSocket error, replaced
+  by a reconnect). Nothing is guessed. On a 2FA host the log needs a step-up, which the card never
+  asks for on its own: without an open step-up window it just shows no reason.
+- **Diagnostics** (the same window as the host menu; offline it shows the connection log and the
+  last snapshot), **Wake** (exactly when the sidebar offers ⏻, see below), **Open host page**,
+  and **Dismiss**, which hides the card in this session until the next outage.
+
+When the agent reconnects the card goes away by itself and a short *"\<host\> is back online"*
+confirmation fades out (also announced to screen readers). tmux sessions survive the outage and
+are re-adopted, so the terminal simply picks up again.
+
+Other connection types:
+
+- **SSH-jump / telnet-jump targets** depend on their parent's agent: when it is down the card
+  names the parent (*"Jump host \<parent\> is offline"*), and its actions apply to the parent.
+- **Direct SSH / telnet** have no agent and no heartbeat. When the gateway loses a session's
+  connection the card says *"Connection to \<host\> lost"*; telnet sessions get **Reconnect**
+  (the same action as the session bar). A dropped direct SSH connection ends the remote shell, which the
+  gateway cannot tell apart from `exit`, so it shows as a closed session; open a new one.
+- **Shared links (guest view)** show no card: they carry no host information and no admin actions.
+- **Pop-out windows** show the same card; **Open host page** opens the main app in a new tab.
+
 ## Wake-on-LAN
 
 Turn a powered-off agent host back on from the browser. Wake-on-LAN is a layer-2 broadcast,
@@ -287,7 +319,8 @@ so the gateway cannot send it itself: it asks **another agent that is online on 
 LAN** to send the magic packet.
 
 How to use it: an offline agent host shows a **⏻** button on its sidebar row (next to the
-offline-alerts bell). Click it; the toast says *Wake packet sent to … via \<neighbour\>*.
+offline-alerts bell), and an open session on it shows a **Wake** button on its offline card.
+Click either; the toast says *Wake packet sent to … via \<neighbour\>*.
 
 What has to be true:
 

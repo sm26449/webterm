@@ -937,12 +937,19 @@ function MainApp() {
   // Un panou: un tab normal (grid=false) sau un panou dintr-un split-view (grid=true). În split
   // toate panourile stream-uiesc simultan; `isActive` = panoul selectat (ţinta snippet/font/căutare
   // + inelul albastru). Acelaşi renderer pentru 2 (divider) şi 3–4 (grilă 2×2).
+  // părintele unei ţinte jump (overlay-ul „host offline" vorbeşte despre agentul lui)
+  const viaHostOf = (hostId: number) => {
+    const via = hosts.find((h) => h.id === hostId)?.via_host_id
+    return via ? hosts.find((h) => h.id === via) : undefined
+  }
   const renderPane = (s: Session, isActive: boolean, grid?: boolean) => (
     <SessionView
       key={s.id}
       session={s}
       stepupCredential={stepupCredential}
       host={hosts.find((h) => h.id === s.host_id)}
+      viaHost={viaHostOf(s.host_id)}
+      onOpenHost={selectHost}
       commandGuard={appState.command_guard}
       registerSend={grid ? registerSend : undefined}
       onUserData={grid ? handleUserData : undefined}

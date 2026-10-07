@@ -30,6 +30,7 @@ import SnippetsMenu from './SnippetsMenu'
 import TranscriptPlayer from './TranscriptPlayer'
 import { shortcutFor } from '../lib/shortcuts'
 import StatusBar from './StatusBar'
+import HostOfflineOverlay from './HostOfflineOverlay'
 import { copyText, readText } from '../lib/clipboard'
 import { clearAll as clearClipHistory, copySession, history as clipHistory, remove as removeClip, setLabel as setClipLabel, type ClipEntry } from '../lib/cliphistory'
 import PastePicker from './PastePicker'
@@ -118,6 +119,11 @@ export default function SessionView(props: {
   onSplitClosed?: () => void
   onChanged: () => void
   onDeleted: () => void
+  /** hostul-părinte (`via_host_id`) al unei ţinte SSH/telnet-jump — overlay-ul „host offline"
+      vorbeşte despre el când tunelul agentului lui a căzut */
+  viaHost?: Host
+  /** pagina unui host (overlay-ul „host offline"); lipsă în pop-out → link spre aplicaţie */
+  onOpenHost?: (id: number) => void
   /** deschide o sesiune existentă (după sid) — folosit de panoul de forward-uri
       pentru a lansa o sesiune telnet-bastion într-un tab de terminal */
   onOpenSession?: (sid: string) => void
@@ -2268,6 +2274,18 @@ export default function SessionView(props: {
             OPRIT primea tăcere totală şi niciun indiciu că modul există. Îl anunţăm aici — vizibil
             doar pentru cititoarele de ecran — cum îl activează + cum iese (Ctrl+M). Vezi audit A4. */}
         <span className="sr-only">{t('session.srHint')}</span>
+        {/* host căzut: card ne-modal sus, ÎNAINTEA terminalului în ordinea DOM — ajungi la butoane
+            cu Tab din header fără ca terminalul să-şi piardă focusul singur (nu se autofocusează) */}
+        <HostOfflineOverlay
+          session={session}
+          host={props.host}
+          viaHost={props.viaHost}
+          lostReason={exited && session.state !== 'closed' && exited.reason !== 'exited' && exited.reason !== 'session_gone'
+            ? exited.reason : null}
+          onOpenHost={props.onOpenHost}
+          onReconnect={session.kind === 'telnet' ? reconnectTelnet : undefined}
+          reconnecting={reconnecting}
+        />
         <div ref={containerRef} role="application" aria-label={t('session.terminalAria')} className="h-full w-full" />
 
         {/* Sfaturi contextuale ancorate la terminal: paste/drop jos-stânga, iar unealta-bară

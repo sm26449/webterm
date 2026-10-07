@@ -65,6 +65,42 @@ const waitAgentOnline = async (hostId, label, ms = 45000) => {
   if (waited > 600 || !online) console.error(`  [diag] ${label}: agentul ${online ? 'a revenit după' : 'tot offline după'} ${Math.round(waited / 100) / 10}s`)
   return online
 }
+/* Oprirea / repornirea agentului din MIJLOCUL testului (overlay-ul „host offline"). Pe calea
+   AGENT_TOKEN_FILE (CI + ci-local: Playwright rulează fără docker CLI) scriem comanda în
+   `agent-ctl`, lângă fişierul de token; watcher-ul din afară o execută cu ACEEAŞI configuraţie
+   (agent.json rămâne, deci acelaşi token) şi şterge fişierul = confirmare. Altfel, docker exec. */
+const agentCtl = async (cmd) => {
+  if (process.env.AGENT_TOKEN_FILE) {
+    const { writeFileSync, existsSync } = await import('node:fs')
+    const { dirname, join } = await import('node:path')
+    const f = join(dirname(process.env.AGENT_TOKEN_FILE), 'agent-ctl')
+    writeFileSync(f, cmd)
+    const t0 = Date.now()
+    while (existsSync(f) && Date.now() - t0 < 40000) await new Promise((r) => setTimeout(r, 300))
+    return !existsSync(f)
+  }
+  try {
+    if (cmd === 'stop') {
+      execFileSync('docker', ['exec', '-e', 'HOME=/root', CONTAINER, 'python3', '/srv/webterm/agent/ptyd.py', 'stop'],
+        { stdio: 'ignore', timeout: 25000 })
+    } else {
+      execFileSync('docker', ['exec', '-d', '-e', 'HOME=/root', CONTAINER, 'sh', '-c',
+        'exec python3 /srv/webterm/agent/ptyd.py run >>/tmp/wt-agent.log 2>&1'])
+    }
+    return true
+  } catch { return false }
+}
+const waitAgentOffline = async (hostId, ms = 30000) => {
+  const t0 = Date.now()
+  while (Date.now() - t0 < ms) {
+    try {
+      const hs = await (await fetch(`${BASE}/api/hosts`, { headers: { Cookie: cookie } })).json()
+      if (hs.some((h) => h.id === hostId && !h.online)) return true
+    } catch { /* reîncearcă */ }
+    await new Promise((r) => setTimeout(r, 500))
+  }
+  return false
+}
 const fail = (msg) => {
   console.error(`EROARE: ${msg}`)
   process.exit(1)
@@ -1116,6 +1152,55 @@ try {
   check('run: exit code corect pe eșec ×5 (regresie reaper)', runChecks.allExit7)
   check('run: timeout respectat', runChecks.timedOut)
   check('run: stdout capturat + exit 0', runChecks.out === 'ABC' && runChecks.oExit === 0)
+
+  // ── Host offline: overlay în sesiune ──
+  // Agentul REAL e oprit (`ptyd.py stop`) şi repornit cu aceeaşi configuraţie: sesiunea deschisă
+  // trebuie să arate cardul (de când + Diagnostic), Dismiss să-l ascundă, iar la revenire cardul
+  // dispare peste tot şi se anunţă „back online". Sesiunile tmux supravieţuiesc opririi agentului
+  // şi sunt re-adoptate — verificăm că terminalul curge din nou (restul testului depinde de agent).
+  await goHome()
+  await newSession(page)
+  await page.waitForSelector('.xterm-screen', { timeout: 15000 })
+  await page.waitForTimeout(1300)
+  const offWin = page.locator('div:not([aria-hidden="true"]) > .wt-window').last()
+  await offWin.locator('.xterm-screen').click()
+  await page.keyboard.type('echo OFF_PRE_$((40+2))\n')
+  await waitScreen('OFF_PRE_42')
+  const offCard = offWin.locator('[data-testid="host-offline"]')
+  const stopped = await agentCtl('stop')
+  const wentOffline = await waitAgentOffline(host.id)
+  // App-ul re-citeşte /api/hosts la 5s: cardul apare la următorul poll
+  check('host offline: overlay-ul apare în sesiunea deschisă (agent oprit)',
+    stopped && wentOffline && await visible(offCard, 15000))
+  const offText = (await offCard.textContent().catch(() => '')) ?? ''
+  check('host offline: „Offline since HH:MM" + buton Diagnostics',
+    /Offline since \d{1,2}:\d{2}/.test(offText)
+      && await offCard.getByRole('button', { name: 'Diagnostics' }).isVisible().catch(() => false))
+  check('host offline: cardul nu fură focusul terminalului',
+    await page.evaluate(() => !!document.activeElement?.classList.contains('xterm-helper-textarea')))
+  // celelalte sesiuni deschise pe acelaşi host (taburi montate) îşi au propriul card — Dismiss
+  // e per-cădere ŞI per-sesiune, deci după el trebuie să rămână cel puţin unul în pagină
+  const allCards = page.locator('[data-testid="host-offline"]')
+  await offCard.getByRole('button', { name: 'Dismiss' }).click()
+  check('host offline: Dismiss ascunde overlay-ul (doar în sesiunea asta)',
+    (await hidden(offCard)) && (await allCards.count()) > 0)
+  const backPill = offWin.locator('[data-testid="host-back-online"]')
+  // aşteptarea porneşte ÎNAINTE de repornire: confirmarea e vizibilă doar câteva secunde
+  const backSeen = backPill.waitFor({ state: 'visible', timeout: 70000 })
+    .then(async () => ((await backPill.textContent()) ?? '') + ' | '
+      + ((await offWin.locator('[data-testid="host-offline-live"]').textContent()) ?? ''))
+    .catch(() => '')
+  const restarted = await agentCtl('start')
+  const backOnline = await waitAgentOnline(host.id, 'host-offline overlay', 60000)
+  const backText = await backSeen
+  check('host offline: la revenire cardul dispare din toate sesiunile',
+    restarted && backOnline && (await pollValue(() => allCards.count(), (n) => n === 0, 15000)) === 0)
+  check('host offline: „back online" anunţat (vizibil + regiunea aria-live)',
+    (backText.match(/is back online/g) ?? []).length === 2)
+  await offWin.locator('.xterm-screen').click()
+  await page.keyboard.type('echo OFF_POST_$((40+2))\n')
+  check('host offline: terminalul curge din nou după repornirea agentului (tmux re-adoptat)',
+    await waitScreen('OFF_POST_42', 30000))
 
   // ── Test #1: izolare cwd pe sesiune (mecanismul din spatele split-ului) ──
   // Fiecare panou de fișiere filtrează evenimentele OSC 7 după sid-ul sesiunii

@@ -248,7 +248,7 @@ docker exec $C1 sh -c 'command -v tmux' >/dev/null || { no "tmux în container";
 # retry-uim O DATĂ: e inerent sensibil la timing (agent real + tmux) şi un flake nu trebuie să
 # blocheze. O regresie reală pică de două ori.
 e2e_attempt() {
-  rm -f "$OUT/agent-token"      # $OUT există deja, creat la începutul scriptului
+  rm -f "$OUT/agent-token" "$OUT/agent-ctl"   # $OUT există deja, creat la începutul scriptului
   ( for _ in $(seq 1 120); do
       if [ -s "$OUT/agent-token" ]; then
         TOK=$(cat "$OUT/agent-token")
@@ -259,6 +259,21 @@ e2e_attempt() {
         docker exec $C1 sh -c "mkdir -p /root/.webterm && printf '%s' '$CFG' > /root/.webterm/agent.json"
         docker exec -d -e HOME=/root $C1 sh -c 'exec python3 /srv/webterm/agent/ptyd.py run >>/tmp/wt-agent.log 2>&1'
         break
+      fi
+      sleep 1
+    done
+    # comenzi din mijlocul testului (overlay-ul „host offline"): `agent-ctl` = stop | start, cu
+    # ACELAŞI agent.json (acelaşi token); ştergerea fişierului e confirmarea pentru test.
+    # Watcher-ul trăieşte cât rularea Playwright (îl omorâm după ea). Plafon + `kill -0 $$`: un
+    # job de fundal dintr-un script ignoră Ctrl-C, deci fără ele o rulare întreruptă lăsa bucla vie.
+    for _ in $(seq 1 3600); do
+      kill -0 $$ 2>/dev/null || break
+      if [ -s "$OUT/agent-ctl" ]; then
+        case "$(cat "$OUT/agent-ctl")" in
+          stop)  docker exec -e HOME=/root $C1 python3 /srv/webterm/agent/ptyd.py stop >/dev/null 2>&1 || true ;;
+          start) docker exec -d -e HOME=/root $C1 sh -c 'exec python3 /srv/webterm/agent/ptyd.py run >>/tmp/wt-agent.log 2>&1' ;;
+        esac
+        rm -f "$OUT/agent-ctl"
       fi
       sleep 1
     done ) &

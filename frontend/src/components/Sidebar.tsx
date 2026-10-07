@@ -8,6 +8,8 @@ import { useConfirm } from '../lib/confirm'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import InstallCommand from './InstallCommand'
 import { hostColor, reachState } from '../lib/host'
+import { canWake } from '../lib/hostOffline'
+import { wakeHost as wakeShared } from '../lib/wake'
 import { allSchemes, hostSchemeRaw, setHostScheme } from '../lib/termtheme'
 import { ActivityIcon, CloseIcon, CollapseIcon, DownloadIcon, FilesIcon, FolderMoveIcon, GearIcon, KeyIcon, LogoMark, MoreIcon, NoteIcon, PlusIcon, PowerIcon, RefreshIcon, SearchIcon, ServerIcon, ShieldSmallIcon, TerminalPromptIcon } from './Icons'
 import { fmt } from '../lib/shortcuts'
@@ -244,14 +246,10 @@ export default function Sidebar(props: {
   const [waking, setWaking] = useState<number | null>(null)
   const [updFor, setUpdFor] = useState<Host | null>(null)   // hostul cu modalul de update-uri deschis
   const updPref = useUpdatesPref()
+  // helperul e comun cu overlay-ul „host offline" din sesiune (lib/wake): acelaşi endpoint şi toast
   async function wakeHost(host: Host) {
     setWaking(host.id)
-    try {
-      const r = await withStepup(host.id, () => api<{ via: string }>(`/api/hosts/${host.id}/wake`, { method: 'POST' }))
-      notify(t('sidebar.wakeSent', { host: host.name }), t('sidebar.wakeVia', { peer: r.via }), 'info')
-    } catch (e) {
-      notify(t('sidebar.wakeFailed', { host: host.name }), errText(e, t) || '', 'warn')
-    } finally { setWaking(null) }
+    try { await wakeShared(host, t) } finally { setWaking(null) }
   }
 
   // Opreşte/porneşte alertele de host-offline pe acest host. Util pentru o maşină oprită
@@ -510,7 +508,7 @@ export default function Sidebar(props: {
                 )}
                 {/* Wake-on-LAN: cere unui agent vecin din acelaşi LAN să trimită magic packet-ul.
                     Doar host-uri de agent (WoL n-are sens pe SSH/telnet). */}
-                {(!host.connection_type || host.connection_type === 'agent') && (
+                {canWake(host) && (
                   <button
                     onClick={(e) => { e.stopPropagation(); wakeHost(host) }}
                     disabled={waking === host.id}
