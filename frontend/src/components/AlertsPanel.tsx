@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { createPortal } from 'react-dom'
 import { api, errText, timeAgo, type Host } from '../lib/api'
 import { AlertItem, AlertPage, badgeText, mergePage, normSeverity, setUnread, severityTone, unreadStore } from '../lib/alerts'
 import { useI18n } from '../lib/i18n'
@@ -44,10 +45,13 @@ export function AlertsBell(props: { hosts: Host[]; onOpenHost: (id: number) => v
           </span>
         )}
       </IconButton>
-      {open && (
+      {/* portal în <body>: sidebar-ul (sticlă / backdrop-filter) e containing block pentru `fixed`,
+          deci randat pe loc, dialogul rămânea închis în lăţimea sidebar-ului în loc să fie centrat */}
+      {open && createPortal(
         <AlertsPanel hosts={props.hosts} onClose={() => setOpen(false)}
           onOpenHost={(id) => { setOpen(false); props.onOpenHost(id) }}
-          onOpenSettings={() => { setOpen(false); props.onOpenSettings() }} />
+          onOpenSettings={() => { setOpen(false); props.onOpenSettings() }} />,
+        document.body,
       )}
     </>
   )

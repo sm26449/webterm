@@ -1115,6 +1115,7 @@ const ro: Lang = {
     'alerts.kind.gateway_disk': "Discul gateway-ului se umple",
     'alerts.kind.signing_locked': "Cheia de semnare blocată, agenții nu se actualizează",
     'alerts.kind.backup_failed': "Backup programat sau off-host eșuat",
+    'alerts.kind.system': "Altele",
     'settings.alertPrefs.title': "Evenimente de alertă",
     'settings.alertPrefs.hint': "Alege, pentru fiecare eveniment, dacă pleacă pe email (și pe webhook) și dacă rămâne în istoricul de alerte din aplicație (clopoțelul din bara laterală). Alegerile sunt per cont.",
     'settings.alertPrefs.colEvent': "Eveniment",

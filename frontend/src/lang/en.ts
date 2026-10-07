@@ -1099,6 +1099,7 @@ const en: Lang = {
     'alerts.kind.gateway_disk': "Gateway disk filling up",
     'alerts.kind.signing_locked': "Signing key locked, agents not updating",
     'alerts.kind.backup_failed': "Scheduled or off-host backup failing",
+    'alerts.kind.system': "Other",
     'settings.alertPrefs.title': "Alert events",
     'settings.alertPrefs.hint': "Choose, per event, whether it goes out by email (and webhook) and whether it is kept in the in-app alert history (the bell in the sidebar). These choices are per account.",
     'settings.alertPrefs.colEvent': "Event",
