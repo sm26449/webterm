@@ -172,7 +172,8 @@ export default function SettingsModal(props: {
               aria-keyshortcuts="/"
               aria-autocomplete="list"
               aria-expanded={searching && flat.length > 0}
-              aria-controls={listId}
+              // aria-controls doar cât lista există (un id inexistent e o referinţă ARIA ruptă)
+              aria-controls={searching && flat.length > 0 ? listId : undefined}
               aria-activedescendant={searching && flat[active] ? optId(active) : undefined}
               autoComplete="off"
               spellCheck={false}
