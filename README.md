@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/sm26449/webterm/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/sm26449/webterm/actions/workflows/docker-publish.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v3.5.10-blue)](https://github.com/sm26449/webterm/tags)
+[![Version](https://img.shields.io/badge/version-v3.5.11-blue)](https://github.com/sm26449/webterm/tags)
 
 **Persistent terminals for your whole infrastructure, in the browser.**
 
@@ -119,7 +119,7 @@ On a fresh **Ubuntu/Debian** server (amd64) with a domain pointing at it and por
 ```sh
 git clone https://github.com/sm26449/webterm.git
 cd webterm
-git checkout v3.5.10          # the release tag from the version badge; a tag cannot move under you
+git checkout v3.5.11          # the release tag from the version badge; a tag cannot move under you
 less install.sh             # it is meant to be read: it runs as root
 sudo ./install.sh --domain term.example.com --email you@example.com
 ```
@@ -252,7 +252,7 @@ passphrase and `.env` are **not** in it. Backups from the UI and the scheduled t
 ## Upgrade and rollback
 
 ```sh
-cd /opt/webterm && sudo ./upgrade.sh     # latest release; or pass a tag: sudo ./upgrade.sh v3.5.10
+cd /opt/webterm && sudo ./upgrade.sh     # latest release; or pass a tag: sudo ./upgrade.sh v3.5.11
 ./rollback.sh                           # back to the previous image, any time afterwards
 ```
 

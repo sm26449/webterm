@@ -9,6 +9,8 @@ back.
 
 ## [Unreleased]
 
+## [3.5.11] — 2026-10-07 · agent (57)
+
 ### Added
 - **In-app alert history.** Alerts existed only as email or webhook: on an instance without
   SMTP a sign-in from a new IP, a host going offline or a failing backup left no trace in the
