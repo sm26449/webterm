@@ -9,6 +9,11 @@ back.
 
 ## [Unreleased]
 
+## [3.5.10] — 2026-10-07 · agent (57)
+
+Docker: **Logs** opens a live terminal (`docker logs -f`, with colours, search and Ctrl+C), like
+Services; each running container shows CPU and memory, refreshed every few seconds. No agent change.
+
 ### Added
 - **CPU and memory per container in the Docker panel.** Each running container shows CPU % and
   memory used / limit (%), coloured with the shared 70 % / 90 % thresholds (`lib/thresholds`).
