@@ -290,6 +290,12 @@ Press `?` for the cheatsheet.
   Covers resource thresholds **and** security events: login from a new device, a new
   account or automation token, a credential change, an agent going offline, a
   2FA-protected host unlocked, an auto-enrollment, a failing off-host backup
+- **In-app alert history** — every alert also lands behind the bell next to the sidebar
+  search, with an unread count, severity, a link to the host and the full text — so an
+  instance without SMTP or a webhook still sees *new login*, *host offline* or *backup
+  failing*. Per account and per event type you choose email (+ webhook) and in-app; security
+  events always stay in the history. Last 500 per account, 30 days.
+  [how it works](ALERTS.md#in-app-history-and-per-event-preferences)
 - **Update notice**: the gateway checks whether a newer release exists and says so in
   the UI — it never updates itself (`WEBTERM_UPDATE_CHECK=0` turns the check off,
   `WEBTERM_UPDATE_COMMAND` sets the command it shows you)

@@ -9,6 +9,39 @@ back.
 
 ## [Unreleased]
 
+### Added
+- **In-app alert history.** Alerts existed only as email or webhook: on an instance without
+  SMTP a sign-in from a new IP, a host going offline or a failing backup left no trace in the
+  UI. Every event that is emailed (or would be) is now also stored in the gateway database and
+  shown behind a bell next to the sidebar search — unread count on the badge (and in the
+  button's accessible name, not only as a coloured dot), newest first, severity as icon + word,
+  relative time, a link to the host when there is one, full text under *Details*, *Mark all
+  read*, *Clear*, *Unread only*. Account events (new sign-in, attach from a new place,
+  password / email / 2FA / passkey changes, 2FA host unlock) go to that account only; fleet
+  events go to every account, each with its own read state — there are no roles, so "visible
+  to admins" means visible to everyone. Last 500 per account and 30 days, pruned on insert;
+  the text goes through a scrubber (tokens, `password=`, URL credentials, private keys) before
+  it is stored. The badge polls a count-only endpoint every 60 s and stops while the tab is
+  hidden. New API: `GET /api/alerts`, `GET /api/alerts/unread`, `POST /api/alerts/read`,
+  `DELETE /api/alerts` — browser session only (automation tokens get 401), each query filtered
+  on the caller's account.
+- **Per-event alert preferences** (Settings → Notifications → *Alert events*, searchable, with
+  a `?` help). Per account and per event type: **Email** (also covers the webhook) and **In
+  app**; the defaults are today's behaviour (email on, in-app on), and only deviations are
+  stored, so a new event type starts on. The email is one inbox for the whole instance, so an
+  account event follows that account's choice and a fleet event is sent while **at least
+  one** account wants it — one account cannot silence an alert another administrator relies
+  on. **Security events always stay in the in-app history** (the toggle is locked, with the
+  reason shown): turning off the alert is the first thing someone who took over the account
+  would do, and the history is what remains. Their email can still be turned off, with a
+  warning. API: `GET` / `POST /api/alerts/prefs`; changes are audited.
+
+### Changed
+- `email_alerts._fire` and the `notify_*` helpers take the event kind, severity, host and
+  account; call sites pass the host id and the account id where they have them. Deleting an
+  account now also deletes its alert history and preferences. `POST /api/alerts/read` is left
+  out of the audit log (it would log every time someone reads the bell); clearing is audited.
+
 ## [3.5.10] — 2026-10-07 · agent (57)
 
 Docker: **Logs** opens a live terminal (`docker logs -f`, with colours, search and Ctrl+C), like

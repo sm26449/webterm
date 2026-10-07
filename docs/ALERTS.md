@@ -5,7 +5,11 @@ out, a login from a new place, a host that stopped reporting, a disk filling up,
 that keeps failing. WebTerm sends the same alert to two independent channels — **email
 (SMTP)** for the archive and a **webhook** (Slack, Discord, Mattermost, Teams or any JSON
 endpoint) for reacting. Configure either, both or neither: with nothing configured every
-alert is a silent no-op.
+alert is a silent no-op on the external channels.
+
+Every alert is **also kept in the app**, whether or not a channel is configured: the bell
+next to the sidebar search shows the unread count and opens the history (see
+[In-app history and per-event preferences](#in-app-history-and-per-event-preferences)).
 
 Alerts are deliberately **rare**. There is no email per failed login (that would be a
 mail-bombing vector) — only the signals worth reading, each throttled so a persistent
@@ -134,6 +138,62 @@ alert, and there is no global mute other than clearing the channels.
 - **Un-muting re-arms** the alert: a host that is still offline alerts again on the next
   sweep, so you learn it is still down rather than staying silent by inertia.
 - While muted, a host coming back online sends no *back online* message either.
+
+## In-app history and per-event preferences
+
+Since 3.5.11 every alert that is emailed (or would be, if SMTP were set up) is also stored in
+the gateway database, so an instance without SMTP or a webhook still shows *a new login*, *a
+host went offline* or *a backup is failing*.
+
+**Where.** The bell next to the sidebar search (on a phone: in the menu drawer). The badge is
+the number of unread alerts and the button's accessible name says it too (*Alerts — unread:
+3*). The panel lists the newest first, with severity (icon + word: *Critical*, *Warning*,
+*Info*, *Resolved*), how long ago, the event type, a link to the host when the alert is about
+one, and the full text under *Details*. *Mark all read*, *Clear* (asks first) and *Unread
+only* act on **your** history only. Opening an alert's details marks it read; nothing is
+marked read just because the panel was opened. The count refreshes every 60 s while the tab is
+visible (no polling in a background tab).
+
+**Who sees what.** There are no roles — every account is a full administrator — so:
+
+- events about **one account** (sign-in from a new IP, a new device attached to a live
+  session, password / email / 2FA / passkey changes, unlocking a 2FA-protected host) go to
+  that account only;
+- everything else (hosts, thresholds, SSH keys, host keys, new accounts and tokens, backups,
+  the gateway's disk and signing key) is copied to **every** account, each with its own
+  read/unread state.
+
+**Retention.** The last **500 alerts per account**, for at most **30 days**; older rows are
+dropped when a new one arrives. Deleting an account deletes its history and preferences. The
+text is the same as the email, with tokens, `password=`-style values, credentials in URLs and
+private keys redacted.
+
+**Per-event preferences** (Settings → Notifications → *Alert events*). For each event type,
+per account:
+
+| Toggle | Default | Effect |
+|---|---|---|
+| **Email** | on | the email **and** the webhook for that event |
+| **In app** | on | whether the event is added to your history |
+
+The email goes to one instance-wide inbox (`smtp_to`), not to each account, so: an
+**account** event follows that account's choice; a **fleet** event is sent when **at least
+one** account still wants it — one account cannot silence an alert another administrator
+relies on.
+
+**Security events stay in the history.** For *sign-in from a new IP*, *new device attached*,
+*account changes*, *new account / token / host key re-pinned / shares revoked*, *SSH deploy
+key*, *SSH host key changed*, *agent cloning refused* and *auto-enrolled host*, the in-app
+toggle is locked on. Their email can be turned off, with a warning: if someone takes over the
+account, turning off the email is the first thing they would do — the history is the trace
+that remains. *IP blocked* and *2FA host unlocked* are security-relevant but frequent and
+expected, so they can be turned off completely.
+
+API (signed-in browser session only — automation tokens get 401, like the rest of the
+account API): `GET /api/alerts?limit=&before=&unread=`, `GET /api/alerts/unread`,
+`POST /api/alerts/read` (`{"ids": [..]}` or `{"all": true}`), `DELETE /api/alerts`,
+`GET` / `POST /api/alerts/prefs` (`{"prefs": {"host_offline": {"email": false, "inapp": true}}}`).
+Clearing and preference changes are in the audit log; marking as read is not (noise).
 
 ## Configuration via environment
 

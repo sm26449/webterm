@@ -55,6 +55,11 @@ See [SSO.md](SSO.md) for the full single-sign-on model (break-glass, per-instanc
 
 With no SMTP host the email alerts are off; everything else works, and the webhook above is
 independent of it. Details and the list of events: [ALERTS.md](ALERTS.md).
+Alerts are recorded in the app either way (the bell in the sidebar); which event types are
+emailed or kept in the history is a per-account choice in Settings → Notifications → *Alert
+events*, not an environment variable — see
+[ALERTS.md](ALERTS.md#in-app-history-and-per-event-preferences). There is nothing to
+configure for the history itself: last 500 alerts per account, 30 days.
 
 | Variable | Role |
 |---|---|
