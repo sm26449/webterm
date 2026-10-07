@@ -676,3 +676,19 @@ body > .monaco-aria-container {
   background: rgba(2, 132, 199, 0.25);
   color: #bfdbfe;
 }
+
+/* Antetul sidebar-ului: cuvântul „WebTerm" lângă siglă doar când încape lângă cele şase butoane
+   (32px cu mouse, 44px la touch prin .wt-touch). Altfel rămâne doar sigla — nu „WebT…". */
+.wt-sbhead { container-type: inline-size; }
+.wt-wordmark { display: none; }
+@container (min-width: 340px) {
+  .wt-wordmark { display: inline; }
+}
+@media (pointer: coarse) {
+  @container (min-width: 340px) {
+    .wt-wordmark { display: none; }
+  }
+  @container (min-width: 410px) {
+    .wt-wordmark { display: inline; }
+  }
+}

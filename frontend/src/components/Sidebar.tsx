@@ -653,14 +653,18 @@ export default function Sidebar(props: {
       {/* overflow-hidden + min-w-0: garantează că butoanele de header NU ies din
           lățimea sidebar-ului peste conținutul principal (altfel un buton acoperă
           „Acasă" din TabBar pe desktop) */}
-      <div className="flex items-center justify-between gap-1 overflow-hidden border-b border-ink-800 px-4 py-3">
+      <div className="wt-sbhead flex items-center justify-between gap-1 overflow-hidden border-b border-ink-800 px-4 py-3">
+        {/* Sigla e mereu vizibilă; cuvântul „WebTerm" apare DOAR când încape (container query pe
+            antet, vezi .wt-wordmark în index.css). Înainte se trunchia la „WebT…" lângă cele şase
+            butoane — pe lăţimea implicită de 288px şi mereu pe telefon (butoane de 44px). Numele
+            accesibil rămâne în aria-label/title. */}
         <button
           onClick={() => setShowAbout(true)}
           title={t('nav.about')}
           aria-label={t('nav.about')}
-          className="flex min-w-0 items-center gap-2 truncate rounded-md py-1 font-semibold tracking-tight hover:underline"
+          className="wt-touch flex min-h-8 min-w-8 shrink-0 items-center justify-center gap-2 rounded-md py-1 font-semibold tracking-tight hover:underline"
         >
-          <LogoMark /> WebTerm
+          <LogoMark /><span className="wt-wordmark whitespace-nowrap">WebTerm</span>
         </button>
         {/* `wt-touch` (44px, activ doar sub `pointer: coarse`) pe navigaţia PRINCIPALĂ.
             Auditul mobil raportează ţintele mici ca `ux`, nu ca `bug`, deci nu blochează

@@ -9,6 +9,12 @@ back.
 
 ## [Unreleased]
 
+### Fixed
+- **Sidebar logo no longer truncated to "WebT…".** Next to the six header buttons the word
+  didn't fit at the default 288 px width, and never on phones (44 px touch buttons). The mark
+  is always shown; the word appears only when it fits (a CSS container query on the header).
+  The button keeps its accessible name and stays at least 32 px (44 px on touch).
+
 ## [3.5.7] — 2026-10-07 · agent (57)
 
 A design system: one type scale, three corner radii, shared status colours for both themes,
