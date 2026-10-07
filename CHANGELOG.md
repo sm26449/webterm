@@ -9,6 +9,11 @@ back.
 
 ## [Unreleased]
 
+## [3.5.6] — 2026-10-07 · agent (57)
+
+The file editor moves to monaco-editor 0.57 in a slim build: opening a file downloads about
+3.4 MB instead of up to 9.8 MB. No agent change.
+
 ### Changed
 - **The file editor is a slim Monaco build on monaco-editor 0.57.** 3.5.3 held monaco back on
   0.52 because 0.57 changed its package `exports` (`./*` → `./esm/vs/*.js`), so the old
