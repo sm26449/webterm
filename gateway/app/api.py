@@ -3662,6 +3662,29 @@ async def _docker_run(host_id: int, argv: list[str], timeout: int = 20) -> dict:
     return resp
 
 
+def _docker_error(err: str) -> ApiError:
+    """Eroarea clară pentru un `docker …` cu exit≠0: lipsă / fără acces / altceva. Comună listei
+    şi statisticilor, ca acelaşi host să spună acelaşi lucru în ambele locuri."""
+    # docker lipseşte / demonul e oprit / userul agentului nu e în grupul docker: mesaj clar,
+    # nu o listă goală tăcută (frontend-ul deosebeşte „nu e docker aici" de „zero containere")
+    low = (err or "").lower()
+    if "command not found" in low or ("not found" in low and "docker" in low):
+        return ApiError(400, "docker.absent", "docker is not installed on this host")
+    if _docker_denied(err):
+        # am încercat deja `sudo -n` în _docker_run şi tot a picat → ghidăm userul să dea acces
+        # Onest (audit 2026-10-04, LOW #8): accesul la socketul docker ESTE root pe host, deci
+        # orice remediu renunţă la bariera userului dedicat din THREAT-MODEL. O spunem, nu o
+        # ascundem după comandă; regula sudoers îngustă e preferată (explicită, jurnalizată,
+        # merge imediat prin fallback-ul `sudo -n` de mai sus, fără restart de agent).
+        return ApiError(400, "docker.denied",
+                        "the agent's user isn't in the docker group and has no passwordless sudo. "
+                        "Either fix makes that user root-equivalent on the host (docker access is "
+                        "root) and gives up the dedicated-user barrier from the threat model — "
+                        "grant it deliberately, as root: a sudoers rule limited to docker "
+                        "(preferred), or usermod -aG docker <agent-user> and restart the agent.")
+    return ApiError(400, "docker.failed", (err or "").strip()[:300] or "docker failed")
+
+
 @router.get("/api/hosts/{host_id}/docker")
 async def docker_list(host_id: int, kind: str, user=Depends(security.require_user)):
     """Listează containere/imagini/volume/reţele. Fiecare rând e un JSON (format Go template),
@@ -3673,24 +3696,7 @@ async def docker_list(host_id: int, kind: str, user=Depends(security.require_use
     resp = await _docker_run(host_id, argv)
     ec, out, err = resp.get("exit_code"), resp.get("stdout", ""), (resp.get("stderr") or "")
     if ec != 0:
-        # docker lipseşte / demonul e oprit / userul agentului nu e în grupul docker: mesaj clar,
-        # nu o listă goală tăcută (frontend-ul deosebeşte „nu e docker aici" de „zero containere")
-        low = err.lower()
-        if "command not found" in low or ("not found" in low and "docker" in low):
-            raise ApiError(400, "docker.absent", "docker is not installed on this host")
-        if _docker_denied(err):
-            # am încercat deja `sudo -n` în _docker_run şi tot a picat → ghidăm userul să dea acces
-            # Onest (audit 2026-10-04, LOW #8): accesul la socketul docker ESTE root pe host, deci
-            # orice remediu renunţă la bariera userului dedicat din THREAT-MODEL. O spunem, nu o
-            # ascundem după comandă; regula sudoers îngustă e preferată (explicită, jurnalizată,
-            # merge imediat prin fallback-ul `sudo -n` de mai sus, fără restart de agent).
-            raise ApiError(400, "docker.denied",
-                           "the agent's user isn't in the docker group and has no passwordless sudo. "
-                           "Either fix makes that user root-equivalent on the host (docker access is "
-                           "root) and gives up the dedicated-user barrier from the threat model — "
-                           "grant it deliberately, as root: a sudoers rule limited to docker "
-                           "(preferred), or usermod -aG docker <agent-user> and restart the agent.")
-        raise ApiError(400, "docker.failed", err.strip()[:300] or "docker failed")
+        raise _docker_error(err)
     rows = []
     for line in out.splitlines():
         line = line.strip()
@@ -3701,6 +3707,137 @@ async def docker_list(host_id: int, kind: str, user=Depends(security.require_use
         except json.JSONDecodeError:
             pass
     return {"kind": kind, "rows": rows}
+
+
+# ── Statistici per container (`docker stats --no-stream`) ────────────────────
+# docker scrie mărimile pentru oameni: memoria în unităţi BINARE („12.3MiB / 7.6GiB", go-units
+# BytesSize), reţeaua şi discul în ZECIMALE („1.2kB / 0B", HumanSize), procentele cu „%". Un
+# container care porneşte/se opreşte chiar în timpul eşantionării dă „--" (sau „-- / --"). Le
+# transformăm AICI în numere (octeţi, procente) — frontend-ul formatează, nu parsează text.
+_SIZE_UNITS = {
+    "b": 1,
+    "kb": 1000, "mb": 1000 ** 2, "gb": 1000 ** 3, "tb": 1000 ** 4, "pb": 1000 ** 5,
+    "kib": 1024, "mib": 1024 ** 2, "gib": 1024 ** 3, "tib": 1024 ** 4, "pib": 1024 ** 5,
+}
+_SIZE_RE = re.compile(r"^([0-9]+(?:\.[0-9]+)?|\.[0-9]+)(?:[eE]([+-]?[0-9]{1,3}))?\s*([A-Za-z]*)$")
+_STATS_NA = {"", "-", "--", "n/a", "na"}
+_DOCKER_STATS_TIMEOUT = 6    # secunde; `--no-stream` eşantionează ~2 s, peste asta hostul e încărcat
+_DOCKER_STATS_TTL = 3.0      # mai multe taburi pe acelaşi panou → o singură rulare pe host la ~3 s
+_docker_stats_cache: dict = {}      # host_id → (monotonic, rezultat)
+_docker_stats_inflight: dict = {}   # host_id → Task (o singură rulare în zbor pe host)
+
+
+def _parse_size(text) -> Optional[int]:
+    """„12.3MiB" → 12897485; „1.2kB" → 1200; „0B" → 0. `None` pentru „--", gol sau unitate
+    necunoscută (mai bine «indisponibil» decât un număr inventat)."""
+    if not isinstance(text, str):
+        return None
+    t = text.strip()
+    if t.lower() in _STATS_NA:
+        return None
+    m = _SIZE_RE.match(t)
+    if not m:
+        return None
+    mult = _SIZE_UNITS.get((m.group(3) or "b").lower())
+    if mult is None:
+        return None
+    val = float(m.group(1)) * (10 ** int(m.group(2)) if m.group(2) else 1) * mult
+    if val != val or val in (float("inf"), float("-inf")) or val < 0:   # NaN / inf
+        return None
+    return int(round(val))
+
+
+def _parse_pct(text) -> Optional[float]:
+    """„12.34%" → 12.34. `None` pentru „--"/gol/text. CPU poate trece de 100 (mai multe nuclee)."""
+    if not isinstance(text, str):
+        return None
+    t = text.strip().rstrip("%").strip()
+    if t.lower() in _STATS_NA:
+        return None
+    try:
+        v = float(t)
+    except ValueError:
+        return None
+    if v != v or v in (float("inf"), float("-inf")) or v < 0:
+        return None
+    return round(v, 2)
+
+
+def _parse_pair(text) -> tuple:
+    """„12.3MiB / 7.6GiB" → (12897485, 8160437862). Fiecare jumătate poate lipsi („-- / --")."""
+    if not isinstance(text, str) or "/" not in text:
+        return (_parse_size(text), None)
+    a, _, b = text.partition("/")
+    return (_parse_size(a), _parse_size(b))
+
+
+def _parse_docker_stats(out: str) -> list:
+    """Ieşirea lui `docker stats --no-stream --format '{{json .}}'` (un JSON pe linie) → rânduri
+    cu numere. Liniile care nu sunt JSON (avertismente, gunoi) sunt sărite, nu fatale."""
+    rows = []
+    for line in (out or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            r = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(r, dict):
+            continue
+        mem_used, mem_limit = _parse_pair(r.get("MemUsage"))
+        mem_pct = _parse_pct(r.get("MemPerc"))
+        if mem_pct is None and mem_used is not None and mem_limit:
+            mem_pct = round(mem_used * 100.0 / mem_limit, 2)
+        net_rx, net_tx = _parse_pair(r.get("NetIO"))
+        blk_r, blk_w = _parse_pair(r.get("BlockIO"))
+        pids = r.get("PIDs")
+        try:
+            pids = int(str(pids).strip())
+        except (TypeError, ValueError):
+            pids = None
+        rows.append({
+            "id": str(r.get("ID") or r.get("Container") or ""),
+            "name": str(r.get("Name") or ""),
+            "cpu_pct": _parse_pct(r.get("CPUPerc")),
+            "mem_used": mem_used, "mem_limit": mem_limit, "mem_pct": mem_pct,
+            "net_rx": net_rx, "net_tx": net_tx,
+            "block_read": blk_r, "block_write": blk_w,
+            "pids": pids,
+        })
+    return rows
+
+
+async def _docker_stats_fetch(host_id: int) -> dict:
+    resp = await _docker_run(host_id, ["stats", "--no-stream", "--format", "{{json .}}"],
+                             timeout=_DOCKER_STATS_TIMEOUT)
+    if resp.get("timed_out") or resp.get("exit_code") is None:
+        # hostul n-a terminat în timp (multe containere / încărcat): „indisponibil", NU o eroare —
+        # panoul îşi răreşte singur sondajul; nu cache-uim, următorul tick reîncearcă
+        return {"available": False, "reason": "timeout", "rows": []}
+    if resp.get("exit_code") != 0:
+        raise _docker_error(resp.get("stderr") or "")
+    out = {"available": True, "rows": _parse_docker_stats(resp.get("stdout", ""))}
+    _docker_stats_cache[host_id] = (time.monotonic(), out)
+    return out
+
+
+@router.get("/api/hosts/{host_id}/docker/stats")
+async def docker_stats(host_id: int, user=Depends(security.require_user)):
+    """CPU %, memorie (folosită/limită/%), I/O de reţea şi disc pentru containerele PORNITE.
+    Aceleaşi reguli de acces ca docker_list (cookie, step-up pe host 2FA); numere, nu text."""
+    await _require_host_stepup(host_id, user)   # EXACT ca docker_list
+    hit = _docker_stats_cache.get(host_id)
+    if hit and time.monotonic() - hit[0] < _DOCKER_STATS_TTL:
+        return hit[1]
+    task = _docker_stats_inflight.get(host_id)
+    if task is None:
+        task = asyncio.ensure_future(_docker_stats_fetch(host_id))
+        _docker_stats_inflight[host_id] = task
+        task.add_done_callback(lambda _t, h=host_id: _docker_stats_inflight.pop(h, None))
+    # shield: un client care închide panoul (cerere anulată) nu anulează rularea pe care o
+    # aşteaptă şi celelalte taburi
+    return await asyncio.shield(task)
 
 
 class DockerAction(BaseModel):
@@ -3729,17 +3866,20 @@ async def docker_action(host_id: int, body: DockerAction, request: Request,
     return {"ok": True}
 
 
-@router.get("/api/hosts/{host_id}/docker/logs")
-async def docker_logs(host_id: int, container: str, user=Depends(security.require_user)):
-    """Ultimele ~500 de linii de log ale unui container (snapshot, nu flux live)."""
-    # log-urile unui container sunt un loc clasic de secrete/tokenuri → step-up pe host 2FA,
-    # ca la orice citire de date de pe host (fs_read/fs_preview)
-    await _require_host_stepup(host_id, user)
-    if not _DOCKER_ID.match(container or ""):
-        raise ApiError(400, "docker.badContainer", "invalid container id")
-    resp = await _docker_run(host_id, ["logs", "--tail", "500", "--timestamps", container], timeout=20)
-    # docker logs scrie şi pe stderr (log-urile aplicaţiei) — le concatenăm în ordinea uzuală
-    return {"logs": (resp.get("stdout", "") + resp.get("stderr", ""))[:200000]}
+def _docker_logs_cmd(container: str) -> str:
+    """Comanda sesiunii „Logs" a unui container: `docker logs --tail 500 -f` într-un terminal
+    (culori, scrollback, căutare, Ctrl+C), ca „Logs" din Services (`journalctl -f`). Id-ul e
+    validat de apelant cu _DOCKER_ID ŞI shell-quotat aici.
+
+    Accesul la docker urmează `_docker_run`: direct dacă userul agentului ajunge la socket, altfel
+    `sudo -n` (passwordless) dacă există — NICIODATĂ un prompt de parolă agăţat în terminal;
+    altfel rulăm comanda simplă, ca omul să vadă eroarea reală a lui docker, plus o indicaţie."""
+    logs = "docker logs --tail 500 --timestamps -f %s" % shlex.quote(container)
+    sh = ('if docker version >/dev/null 2>&1; then exec %s; '
+          'elif command -v sudo >/dev/null 2>&1 && sudo -n docker version >/dev/null 2>&1; then exec sudo -n %s; '
+          'else %s; echo; echo "[WebTerm] If docker reported a permission error: the agent user cannot reach '
+          'the Docker daemon. The Docker panel shows the fix options."; fi') % (logs, logs, logs)
+    return "sh -c %s" % shlex.quote(sh)
 
 
 # ── systemd services + listening ports: acelaşi model ca Docker (prin op-ul `run`, ZERO op nou
@@ -5919,6 +6059,7 @@ class SessionIn(BaseModel):
     stepup_password: str = ""  # 2FA fallback (deploy IP-only, fără passkey)
     stepup_totp: str = ""    # 2FA: cod TOTP/recovery pt. conturi cu TOTP fără passkey (fix 3)
     docker_container: str = ""  # dacă e setat: sesiunea e un shell ÎN acest container (docker exec)
+    docker_logs: str = ""       # dacă e setat: sesiunea urmăreşte `docker logs -f` al containerului
     os_upgrade: bool = False    # dacă e True: sesiunea rulează comanda INTERACTIVĂ de upgrade OS
     connection_id: int = 0      # dacă e setat: sesiunea rulează CLI-ul DB al conexiunii salvate
     journal_unit: str = ""      # dacă e setat: sesiunea urmăreşte `journalctl -u <unit> -f`
@@ -7121,6 +7262,18 @@ async def create_session(host_id: int, body: SessionIn, request: Request,
         cmd = "docker exec -it %s sh -c %s" % (c, shlex.quote(inner))
         if not title.strip() or title.startswith("Session "):
             title = "docker: " + body.docker_container[:24]
+    elif body.docker_logs:
+        # „Logs" dintr-un container: sesiune cu `docker logs --tail 500 -f` — acelaşi model ca
+        # journal_unit din Services (terminal real: culori, scrollback, căutare, Ctrl+C opreşte).
+        # Ca „Logs" din Services şi ca lista Docker, NU trece prin guardrail: e o citire (vezi
+        # docs/GUARDRAIL.md, „read-only panel calls"). Step-up-ul pe host 2FA s-a cerut mai sus.
+        if ctype != "agent":
+            raise ApiError(400, "session.containerAgentOnly", "container shells are only available on agent hosts")
+        if not _DOCKER_ID.match(body.docker_logs):
+            raise ApiError(400, "docker.badContainer", "invalid container id")
+        cmd = _docker_logs_cmd(body.docker_logs)
+        if not title.strip() or title.startswith("Session "):
+            title = "logs: " + body.docker_logs[:24]
     elif body.os_upgrade:
         # „Upgrade într-un terminal": deschidem o sesiune care rulează comanda INTERACTIVĂ de
         # upgrade pentru managerul detectat (din diagnostics). NU input arbitrar — o hartă fixă,
