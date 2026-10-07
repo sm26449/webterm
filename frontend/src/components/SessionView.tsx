@@ -24,7 +24,7 @@ import ServicesPanel from './ServicesPanel'
 // AI tools se deschide rar (din meniul contextual) → bundle separat, ca FileEditor
 const AiToolsPanel = lazy(() => import('./AiToolsPanel'))
 import ToolboxPanel from './ToolboxPanel'
-import { ClockIcon, CopyIcon, DockerIcon, DownloadIcon, ExternalLinkIcon, FileIcon, FilesIcon, FolderIcon, ForwardIcon, GitBranchIcon, MoreIcon, NoteIcon, PasteIcon, PencilIcon, PopoutIcon, SearchIcon, ServicesIcon, ShareIcon, StopIcon, ToolboxIcon, TrashIcon } from './Icons'
+import { ArrowDownIcon, ArrowUpIcon, CheckIcon, ChevronIcon, ClockIcon, CloseIcon, CollapseLeftIcon, CopyIcon, DockerIcon, DownloadIcon, ExternalLinkIcon, EyeIcon, FileIcon, FilesIcon, FolderIcon, ForwardIcon, FullscreenIcon, GitBranchIcon, KeyIcon, KeyboardIcon, LockIcon, MenuIcon, MoreIcon, NoteIcon, PasteIcon, PencilIcon, PlayIcon, PopoutIcon, RefreshIcon, SearchIcon, ServicesIcon, ShareIcon, ShieldIcon, SparkleIcon, StopIcon, TerminalPromptIcon, ToolboxIcon, TrashIcon, UploadIcon, WarningIcon } from './Icons'
 import { Button, IconButton } from './ui'
 import MobileKeybar from './MobileKeybar'
 import SnippetsMenu from './SnippetsMenu'
@@ -43,7 +43,6 @@ import { uploadStore } from '../lib/uploadStore'
 import { ensureInbox, inboxName, isGenericName, markPasteHintSeen, pasteDest, pasteHintSeen, pasteSubject, pasteSubjectText, pasteToastKey, pruneInbox, registerInsertTarget, resolveHome } from '../lib/transfers'
 import type { PasteDest } from '../lib/transfers'
 import { baseName, looksLikePath, resolveTermPath } from '../lib/termpath'
-import { UploadIcon } from './Icons'
 import CoachTip from './CoachTip'
 import { TIP_TERMINAL_PASTE, TIP_TOOLBAR, isTipDismissed } from '../lib/coachtips'
 import { isWalkthroughDone } from '../lib/walkthrough'
@@ -1747,7 +1746,7 @@ export default function SessionView(props: {
           toate host-urile deodată, deci ambiguitatea „unde scriu" trebuie să fie zero */}
       {props.broadcasting && (
         <div className="shrink-0 bg-amber-500/90 px-2 py-0.5 text-center text-[11px] font-semibold text-ink-950">
-          ⌨ {t('grid.broadcastOn')}
+          <span className="inline-flex items-center gap-1"><KeyboardIcon size={12} />{t('grid.broadcastOn')}</span>
         </div>
       )}
       {/* bandă de identitate = culoarea host-ului (o vezi și în tab) */}
@@ -1757,7 +1756,7 @@ export default function SessionView(props: {
           împing toolbarul în afara ecranului (iPhone SE / Galaxy S9) */}
       <header className="flex min-w-0 items-center gap-1 border-b border-ink-800 bg-ink-900 px-2 py-2 md:gap-2 md:px-3">
         <IconButton size="md" onClick={props.onMenu} label={t('session.openHostList')} className={props.sidebarCollapsed ? '' : 'md:hidden'}>
-          ☰
+          <MenuIcon />
         </IconButton>
         {props.host && (
           <span className="flex min-w-0 shrink items-center gap-1.5 rounded-md px-1.5 py-1"
@@ -1816,7 +1815,7 @@ export default function SessionView(props: {
                 aria-expanded={showRoster}
                 data-testid="session-roster"
                 className="wt-warn wt-touch flex items-center gap-1 rounded-md px-1.5 py-1 text-xs tabular-nums ring-1 ring-ink-700 hover:bg-ink-800"
-              ><span aria-hidden="true">👁</span> {roster.length}</button>
+              ><EyeIcon /> {roster.length}</button>
               {showRoster && (
                 <>
                   <div className="fixed inset-0 z-30" onClick={() => setShowRoster(false)} />
@@ -1837,7 +1836,7 @@ export default function SessionView(props: {
                           : <span className={`shrink-0 text-[10px] ${c.writable ? 'wt-warn' : 'text-slate-500'}`}>{c.writable ? t('session.canWrite') : t('session.canView')}</span>}
                         {!c.owner && (
                           <IconButton touch={false} onClick={() => { void kick(c) }} label={t('session.removeFromSession')}
-                            className="wt-danger">✕</IconButton>
+                            className="wt-danger"><CloseIcon size={14} /></IconButton>
                         )}
                         </div>
                         {/* De unde e ataşat. Fără asta „mai e cineva conectat" nu-ţi spunea
@@ -1870,7 +1869,7 @@ export default function SessionView(props: {
               active={showCommands}
               onClick={toggleCommands}
             >
-              <span className="font-mono text-xs">❯{commands.length > 0 ? commands.length : ''}</span>
+              <span className="inline-flex items-center font-mono text-xs"><ChevronIcon size={14} />{commands.length > 0 ? commands.length : ''}</span>
             </ToolButton>
           </span>
           {/* fișiere: navighezi/editezi/transferi; urmărește cwd-ul din terminal */}
@@ -1937,7 +1936,7 @@ export default function SessionView(props: {
             <span className="mx-0.5 h-4 w-px bg-ink-700" aria-hidden="true" />
             <ToolButton title={t('session.linksTooltip')} active={linksOpen} onClick={openLinks}><ExternalLinkIcon /></ToolButton>
             <ToolButton title={t('session.note')} active={showNote} onClick={() => setShowNote(!showNote)}><NoteIcon /></ToolButton>
-            <ToolButton title={t('session.copySelection')} onClick={copySelection}>{copied ? '✓' : <CopyIcon />}</ToolButton>
+            <ToolButton title={t('session.copySelection')} onClick={copySelection}>{copied ? <CheckIcon size={16} /> : <CopyIcon />}</ToolButton>
             <ToolButton title={t('session.fontSmaller')} onClick={() => setPreferredFont(fontSize - 1)}>A−</ToolButton>
             <ToolButton title={t('session.fontLarger')} onClick={() => setPreferredFont(fontSize + 1)}>A+</ToolButton>
             {!props.popout && (
@@ -1947,7 +1946,7 @@ export default function SessionView(props: {
               <ToolButton title={t('session.detachWindow', { shortcut: shortcutFor('popout') })} onClick={props.onPopout}><PopoutIcon /></ToolButton>
             )}
             {props.onSplitClosed && (
-              <ToolButton title={t('session.closeSplit')} onClick={props.onSplitClosed}>⇤</ToolButton>
+              <ToolButton title={t('session.closeSplit')} onClick={props.onSplitClosed}><CollapseLeftIcon /></ToolButton>
             )}
             <ToolButton
               title={t('session.fullscreen')}
@@ -1955,7 +1954,7 @@ export default function SessionView(props: {
                 if (document.fullscreenElement) document.exitFullscreen()
                 else document.documentElement.requestFullscreen().catch(() => {})
               }}
-            >⛶</ToolButton>
+            ><FullscreenIcon /></ToolButton>
           </div>
 
           {/* overflow: mobil ȘI tablete */}
@@ -1969,7 +1968,7 @@ export default function SessionView(props: {
                       disponibilitate ca butoanele din bară (Docker/Servicii/Toolbox: doar agent) */}
                   <span className="sm:hidden">
                     <MoreItem onClick={() => { if (!showCommands) toggleCommands(); setMoreOpen(false) }}>
-                      <span className="font-mono text-xs" aria-hidden="true">❯</span> {t('session.commands')}{commands.length ? ` (${commands.length})` : ''}
+                      <ChevronIcon size={16} /> {t('session.commands')}{commands.length ? ` (${commands.length})` : ''}
                     </MoreItem>
                     <MoreItem onClick={() => { if (!showFiles) toggleFiles(); setMoreOpen(false) }}>
                       <FilesIcon /> {t('session.files')}
@@ -1997,13 +1996,13 @@ export default function SessionView(props: {
                     )}
                     {isLive && (
                       <MoreItem onClick={() => { setSnippetsOpen(true); setMoreOpen(false) }}>
-                        <span className="font-mono text-xs" aria-hidden="true">❯_</span> {t('session.savedCommands')}
+                        <TerminalPromptIcon /> {t('session.savedCommands')}
                       </MoreItem>
                     )}
                   </span>
                   {roster.length > 1 && (
                     <MoreItem onClick={() => { setShowRoster(true); setMoreOpen(false) }}>
-                      <span aria-hidden="true">👁</span> {t('session.connectedCount', { count: roster.length })}
+                      <EyeIcon size={16} /> {t('session.connectedCount', { count: roster.length })}
                     </MoreItem>
                   )}
                   <MoreItem onClick={() => { openLinks(); setMoreOpen(false) }}><ExternalLinkIcon /> {t('session.links')}</MoreItem>
@@ -2018,7 +2017,7 @@ export default function SessionView(props: {
                     if (document.fullscreenElement) document.exitFullscreen()
                     else document.documentElement.requestFullscreen().catch(() => {})
                     setMoreOpen(false)
-                  }}>⛶ {t('session.fullscreen')}</MoreItem>
+                  }}><FullscreenIcon /> {t('session.fullscreen')}</MoreItem>
                   {/* oprirea, cu etichetă text: în bară e doar pictograma ■, uşor de confundat cu
                       „închide tab-ul" (care NU opreşte sesiunea) */}
                   {isLive && (
@@ -2066,7 +2065,7 @@ export default function SessionView(props: {
           <label className="flex cursor-pointer items-center gap-1.5 text-xs text-slate-300">
             <input type="checkbox" checked={shareWritable} onChange={(e) => setShareWritable(e.target.checked)} className="h-3.5 w-3.5 rounded accent-sky-600" />
             {t('session.allowWrite')}
-            {shareWritable && <span className="wt-warn" title={t('session.writableWarning')} aria-label={t('session.writableWarning')} role="img">⚠</span>}
+            {shareWritable && <span className="wt-warn" title={t('session.writableWarning')} aria-label={t('session.writableWarning')} role="img"><WarningIcon /></span>}
           </label>
           <label className="flex items-center gap-1.5 text-xs text-slate-400">
             {t('session.expiresIn')}
@@ -2106,7 +2105,7 @@ export default function SessionView(props: {
           {shareUrl && <Button variant="primary" size="sm"
             onClick={() => { copyText(shareUrl).then((ok) => { if (!ok) return
               setCopied(true); setTimeout(() => setCopied(false), 1200) }) }} className="shrink-0">
-            {copied ? '✓' : t('session.copy')}
+            {copied ? <CheckIcon /> : t('session.copy')}
           </Button>}
           <button onClick={revokeShare} className="wt-danger shrink-0 rounded px-2 py-1 text-xs hover:bg-ink-800">
             {t('session.revoke')}
@@ -2141,8 +2140,8 @@ export default function SessionView(props: {
             }}
             className="w-56 rounded bg-ink-800 px-2 py-1 text-sm ring-1 ring-ink-700"
           />
-          <button aria-label={t('session.prevResult')} className="text-xs text-slate-400 hover:text-slate-200" onClick={() => searchRef.current?.findPrevious(search)}>↑</button>
-          <button aria-label={t('session.nextResult')} className="text-xs text-slate-400 hover:text-slate-200" onClick={() => searchRef.current?.findNext(search)}>↓</button>
+          <button aria-label={t('session.prevResult')} className="text-xs text-slate-400 hover:text-slate-200" onClick={() => searchRef.current?.findPrevious(search)}><ArrowUpIcon size={14} /></button>
+          <button aria-label={t('session.nextResult')} className="text-xs text-slate-400 hover:text-slate-200" onClick={() => searchRef.current?.findNext(search)}><ArrowDownIcon size={14} /></button>
         </div>
       )}
 
@@ -2183,14 +2182,14 @@ export default function SessionView(props: {
               onClick={reconnectTelnet}
               disabled={reconnecting}
               title={t('session.reconnectTelnetTooltip')} className="ml-auto">
-              {reconnecting ? t('session.reconnectingBtn') : `↻ ${t('session.reconnect')}`}
+              {reconnecting ? t('session.reconnectingBtn') : <><RefreshIcon size={12} /> {t('session.reconnect')}</>}
             </Button>
           )}
           <button
             onClick={() => setShowPlayer(true)}
-            className={`text-xs wt-link hover:underline${session.kind === 'telnet' ? '' : ' ml-auto'}`}
+            className={`inline-flex items-center gap-1 text-xs wt-link hover:underline${session.kind === 'telnet' ? '' : ' ml-auto'}`}
           >
-            ▶ {t('session.playHistory')}
+            <PlayIcon size={10} /> {t('session.playHistory')}
           </button>
           <a
             href={`/api/sessions/${session.id}/transcript?format=cast`}
@@ -2335,7 +2334,7 @@ export default function SessionView(props: {
         {guardMsg && (
           <div role="status" aria-live="assertive"
             className="wt-danger pointer-events-none absolute bottom-3 left-1/2 z-30 -translate-x-1/2 rounded-lg bg-ink-900/95 px-3 py-1.5 text-xs ring-1 ring-rose-500/30 shadow-lg">
-            🛡 {guardMsg}
+            <span className="inline-flex items-center gap-1.5"><ShieldIcon size={13} />{guardMsg}</span>
           </div>
         )}
 
@@ -2344,7 +2343,7 @@ export default function SessionView(props: {
           <div role="alertdialog" aria-modal="true" aria-labelledby="wt-guard-title" aria-describedby="wt-guard-desc"
             className="absolute inset-0 z-30 grid place-items-center bg-ink-950/80 p-6 backdrop-blur-sm">
             <div className="w-full max-w-md rounded-xl bg-ink-900 p-4 ring-1 ring-ink-700 shadow-2xl">
-              <div id="wt-guard-title" className="wt-warn flex items-center gap-2 text-sm font-semibold">🛡 {t('session.dangerousCommand')}</div>
+              <div id="wt-guard-title" className="wt-warn flex items-center gap-2 text-sm font-semibold"><ShieldIcon /> {t('session.dangerousCommand')}</div>
               <div className="mt-2 rounded-lg bg-ink-950 px-3 py-2 font-mono text-[13px] text-slate-200 break-all ring-1 ring-ink-800">
                 {cmdConfirm.cmd}
               </div>
@@ -2375,14 +2374,14 @@ export default function SessionView(props: {
           <div role="alertdialog" aria-modal="true" aria-labelledby="wt-lock-title" aria-describedby="wt-lock-desc"
             className="absolute inset-0 z-20 grid place-items-center bg-ink-950/95 backdrop-blur-sm p-6 text-center">
             <div className="flex max-w-sm flex-col items-center gap-3">
-              <div className="grid h-12 w-12 place-items-center rounded-full bg-ink-800 text-2xl" aria-hidden="true">🔒</div>
+              <div className="grid h-12 w-12 place-items-center rounded-full bg-ink-800 text-slate-300" aria-hidden="true"><LockIcon size={22} /></div>
               <div id="wt-lock-title" className="text-base font-semibold text-slate-100">{t('session.lockedTitle')}</div>
               <div id="wt-lock-desc" className="text-[13px] leading-relaxed text-slate-400">
                 {t('session.lockedDesc')}
               </div>
               {lockErr && <div className="text-[12px] wt-danger">{lockErr}</div>}
               <Button variant="primary" size="lg" ref={unlockBtnRef} onClick={reauth} disabled={unlocking} className="mt-1">
-                {unlocking ? t('session.verifying') : `🔑 ${t('session.unlockWithPasskey')}`}
+                {unlocking ? t('session.verifying') : <><KeyIcon size={14} /> {t('session.unlockWithPasskey')}</>}
               </Button>
             </div>
           </div>
@@ -2434,7 +2433,7 @@ export default function SessionView(props: {
         {inputNotice && (
           <div role="status" aria-live="polite"
             className="pointer-events-none absolute bottom-3 left-1/2 z-30 -translate-x-1/2 rounded-lg bg-ink-900/95 px-3 py-1.5 text-xs text-amber-200 ring-1 ring-amber-500/30 shadow-lg">
-            ⌨ {inputNotice}
+            <span className="inline-flex items-center gap-1.5"><KeyboardIcon size={12} />{inputNotice}</span>
           </div>
         )}
         {/* feedback de copiere vizibil peste terminal — pe mobil butonul „✓"
@@ -2442,7 +2441,7 @@ export default function SessionView(props: {
         {copied && (
           <div role="status" aria-live="polite"
             className="wt-good pointer-events-none absolute bottom-3 left-1/2 z-10 -translate-x-1/2 rounded-full bg-black/75 px-3 py-1 text-xs">
-            {t('session.copied')} ✓
+            <span className="inline-flex items-center gap-1">{t('session.copied')} <CheckIcon size={12} /></span>
           </div>
         )}
       </div>
@@ -2559,7 +2558,7 @@ export default function SessionView(props: {
                 acelaşi user de OS ca harness-ul care le citeşte. Doar prin agent (API-ul fs). */}
             {props.host && (props.host.connection_type ?? 'agent') === 'agent' && (
               <MoreItem onClick={() => { closeOthers('ai'); setShowAi(true); setCtxMenu(null) }}>
-                <span className="grid h-4 w-4 place-items-center text-[13px]" aria-hidden="true">✦</span> {t('session.ctxAiTools')}
+                <span className="grid h-4 w-4 place-items-center" aria-hidden="true"><SparkleIcon /></span> {t('session.ctxAiTools')}
               </MoreItem>
             )}
             <MoreItem onClick={() => { setShowSearch(true); setCtxMenu(null) }}>
@@ -2616,7 +2615,7 @@ function LinksDialog(props: { links: string[]; onClose: () => void; onCopy: (u: 
         <div className="flex items-center justify-between border-b border-ink-800 px-4 py-3">
           <h2 id="wt-links-title" className="text-sm font-semibold">{t('session.links')}{props.links.length ? ` (${props.links.length})` : ''}</h2>
           <button onClick={props.onClose} aria-label={t('common.close')}
-                  className="rounded-md px-2 py-1 text-slate-400 hover:bg-ink-800">✕</button>
+                  className="rounded-md px-2 py-1 text-slate-400 hover:bg-ink-800"><CloseIcon size={14} /></button>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto p-2">
           {props.links.length === 0
@@ -2742,7 +2741,7 @@ function FilesSubmenu(props: {
         className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-slate-300 hover:bg-ink-800"
       >
         <FilesIcon /> <span className="flex-1">{t('session.ctxFilesMenu')}</span>
-        <span aria-hidden="true" className="text-slate-500">▸</span>
+        <span aria-hidden="true" className="text-slate-500"><ChevronIcon size={12} /></span>
       </button>
       {open && (
         <div

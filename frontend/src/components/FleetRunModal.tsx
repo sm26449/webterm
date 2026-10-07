@@ -11,7 +11,8 @@ import { useFocusTrap } from '../lib/useFocusTrap'
 import { useConfirm } from '../lib/confirm'
 import { notifyError } from '../lib/notify'
 import { copyText } from '../lib/clipboard'
-import { Button } from './ui'
+import { Button, IconButton } from './ui'
+import { BanIcon, CheckIcon, CloseIcon, DotIcon, PencilIcon, WarningIcon } from './Icons'
 
 type RunResult = {
   // queued = încă netrimis (dispatch limitat); cancelled = nu s-a rulat (Stop sau guardrail refuzat)
@@ -305,16 +306,16 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
         <header className="flex items-center gap-2 border-b border-ink-800 px-4 py-3">
           <span className="font-semibold">{t('nav.fleetRunAria')}</span>
           {phase === 'running' && (
-            <span className="font-mono text-xs text-slate-500">
-              <b className="text-slate-300">{summary.total}</b> {t('fleet.hosts')} ·
-              <span className="wt-good"> ✓{summary.ok}</span>
-              <span className="wt-danger"> ✕{summary.fail}</span>
-              {summary.running > 0 && <span className="wt-accent"> ●{summary.running}</span>}
-              {summary.cancelled > 0 && <span className="text-slate-400"> ⊘{summary.cancelled}</span>}
+            <span className="flex items-center gap-2 font-mono text-xs text-slate-500">
+              <span><b className="text-slate-300">{summary.total}</b> {t('fleet.hosts')} ·</span>
+              <span className="wt-good inline-flex items-center gap-0.5"><CheckIcon size={12} />{summary.ok}</span>
+              <span className="wt-danger inline-flex items-center gap-0.5"><CloseIcon size={12} />{summary.fail}</span>
+              {summary.running > 0 && <span className="wt-accent inline-flex items-center gap-0.5"><DotIcon size={7} />{summary.running}</span>}
+              {summary.cancelled > 0 && <span className="inline-flex items-center gap-0.5 text-slate-400"><BanIcon />{summary.cancelled}</span>}
             </span>
           )}
           <button onClick={props.onClose} aria-label={t('fleet.close')}
-            className="ml-auto rounded px-2 py-1 text-slate-500 hover:bg-ink-800 hover:text-slate-300">✕</button>
+            className="ml-auto rounded px-2 py-1 text-slate-500 hover:bg-ink-800 hover:text-slate-300"><CloseIcon size={14} /></button>
         </header>
 
         {/* ── faza „alegi" ── */}
@@ -334,9 +335,9 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
                 <div className="flex flex-wrap gap-1.5">
                   {runnable.map((h) => (
                     <button key={h.id} onClick={() => toggle(h.id)} aria-pressed={selected.has(h.id)}
-                      className={`rounded-lg border px-2.5 py-1 font-mono text-[13px] ${
+                      className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 font-mono text-[13px] ${
                         selected.has(h.id) ? 'border-sky-500 bg-sky-500/10 wt-accent' : 'border-ink-700 bg-ink-800 text-slate-400 hover:border-ink-600'}`}>
-                      {selected.has(h.id) ? '✓ ' : ''}{h.name}
+                      {selected.has(h.id) && <CheckIcon size={12} />}{h.name}
                     </button>
                   ))}
                 </div>
@@ -388,12 +389,10 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
                             )}
                           </button>
                           <SnippetTags tags={snippetTags(s)} />
-                          <button type="button" onClick={() => setRenaming({ id: s.id, title: s.title })}
-                            aria-label={t('fleet.renameSaved', { name: s.title })} title={t('fleet.renameSaved', { name: s.title })}
-                            className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-slate-200">✎</button>
-                          <button type="button" onClick={() => deleteSaved(s)}
-                            aria-label={t('fleet.removeSaved', { name: s.title })} title={t('fleet.removeSaved', { name: s.title })}
-                            className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:wt-danger">×</button>
+                          <IconButton type="button" touch={false} onClick={() => setRenaming({ id: s.id, title: s.title })}
+                            label={t('fleet.renameSaved', { name: s.title })}><PencilIcon size={14} /></IconButton>
+                          <IconButton type="button" touch={false} variant="danger" onClick={() => deleteSaved(s)}
+                            label={t('fleet.removeSaved', { name: s.title })}><CloseIcon size={14} /></IconButton>
                         </span>
                       ))}
                       {visibleSnips.length === 0 && (
@@ -426,7 +425,7 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
                       <span className="text-xs font-medium text-slate-400">{t('fleet.paramsTitle')}</span>
                       <button type="button" onClick={() => { setCommand(effective); setParamTpl(null) }}
                         aria-label={t('fleet.paramsDismiss')} title={t('fleet.paramsDismiss')}
-                        className="ml-auto rounded px-1.5 text-slate-500 hover:bg-ink-700 hover:text-slate-300">✕</button>
+                        className="ml-auto rounded px-1.5 text-slate-500 hover:bg-ink-700 hover:text-slate-300"><CloseIcon size={14} /></button>
                     </div>
                     {tplParams.map((p, i) => (
                       <label key={p} className="block">
@@ -465,7 +464,7 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
         {/* ── faza „confirmi" (pas deliberat) ── */}
         {phase === 'confirm' && (
           <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4">
-            <div className="wt-warn flex items-center gap-2 font-medium">⚠ {t('fleet.youRunOn')} {t('fleet.hostCount', { count: chosen.length })}</div>
+            <div className="wt-warn flex items-center gap-2 font-medium"><WarningIcon /> {t('fleet.youRunOn')} {t('fleet.hostCount', { count: chosen.length })}</div>
             <div className="rounded-lg bg-ink-800/60 px-3 py-2 font-mono text-sm text-slate-200">$ {command.trim()}</div>
             <div className="text-xs text-slate-500">{t('fleet.timeoutSummary', { n: timeoutSec })}</div>
             <div className="flex flex-wrap gap-1.5">

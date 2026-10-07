@@ -6,7 +6,7 @@ import { notifyError, notifyToast } from '../lib/notify'
 import { askSecret } from '../lib/secretPrompt'
 import { fmtTs } from '../lib/tz'
 import { useFocusTrap } from '../lib/useFocusTrap'
-import { EyeIcon } from './Icons'
+import { CloseIcon, EyeIcon } from './Icons'
 import LoadFailed from './LoadFailed'
 import { Button } from './ui'
 
@@ -98,7 +98,7 @@ export default function SharesModal(props: { onClose: () => void; onChanged: () 
             )}
             <button type="button" onClick={props.onClose} aria-label={t('common.close')}
               className="wt-touch grid place-items-center rounded-md px-2 py-1 text-slate-400 hover:bg-ink-800">
-              ✕
+              <CloseIcon size={14} />
             </button>
           </div>
         </div>

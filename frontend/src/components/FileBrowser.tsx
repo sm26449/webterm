@@ -3,7 +3,7 @@ import { errText, api, ensureStepup, Host } from '../lib/api'
 import { useI18n } from '../lib/i18n'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { notify } from '../lib/notify'
-import { DownloadIcon, FileIcon, FolderIcon, LinkIcon } from './Icons'
+import { ArrowRightIcon, CheckIcon, CloseIcon, DownloadIcon, FileIcon, FolderIcon, LevelUpIcon, LinkIcon, PencilIcon } from './Icons'
 import { Button } from './ui'
 
 interface Entry {
@@ -186,7 +186,7 @@ export default function FileBrowser(props: { host: Host; onClose: () => void }) 
         <div className="flex items-center gap-2 border-b border-ink-800 px-4 py-3">
           <span className="font-semibold">{t('browser.title', { name: props.host.name })}</span>
           <button onClick={props.onClose} aria-label={t('browser.close')} className="ml-auto rounded-md px-2 py-1 text-slate-400 hover:bg-ink-800">
-            ✕
+            <CloseIcon size={14} />
           </button>
         </div>
 
@@ -196,9 +196,9 @@ export default function FileBrowser(props: { host: Host; onClose: () => void }) 
             onClick={() => listing && load(listing.parent)}
             disabled={!listing || listing.path === '/'}
             className="shrink-0 rounded px-2 py-0.5 text-slate-400 hover:bg-ink-800 disabled:opacity-30"
-            title={t('browser.up')}
+            title={t('browser.up')} aria-label={t('browser.up')}
           >
-            ↰
+            <LevelUpIcon size={14} />
           </button>
           <input
             value={path}
@@ -210,8 +210,8 @@ export default function FileBrowser(props: { host: Host; onClose: () => void }) 
             className="min-w-0 flex-1 rounded-md bg-ink-800 px-2 py-1 font-mono text-xs text-slate-300 ring-1 ring-ink-700 focus:ring-sky-500"
             title={t('browser.pathTitle')}
           />
-          <button onClick={() => load(path)} className="shrink-0 rounded px-2 py-0.5 text-xs text-slate-400 hover:bg-ink-800" title={t('browser.go')}>
-            →
+          <button onClick={() => load(path)} className="shrink-0 rounded px-2 py-0.5 text-xs text-slate-400 hover:bg-ink-800" title={t('browser.go')} aria-label={t('browser.go')}>
+            <ArrowRightIcon size={14} />
           </button>
           <button onClick={() => load('~')} className="shrink-0 rounded px-2 py-0.5 text-xs text-slate-500 hover:bg-ink-800">
             ~
@@ -266,8 +266,8 @@ export default function FileBrowser(props: { host: Host; onClose: () => void }) 
               {!e.dir && <span className="shrink-0 font-mono text-xs tabular-nums text-slate-500">{fmtSize(e.size)}</span>}
               {!e.dir && (
                 <div className="flex shrink-0 items-center gap-0.5">
-                  <button onClick={() => edit(e)} className="rounded px-1.5 py-0.5 text-slate-500 hover:bg-ink-700 hover:text-slate-200" title={t('browser.edit')}>
-                    ✎
+                  <button onClick={() => edit(e)} className="rounded px-1.5 py-0.5 text-slate-500 hover:bg-ink-700 hover:text-slate-200" title={t('browser.edit')} aria-label={t('browser.edit')}>
+                    <PencilIcon size={14} />
                   </button>
                   <button onClick={() => download(e)} className="rounded px-1.5 py-0.5 text-slate-500 hover:bg-ink-700 hover:text-slate-200" title={t('browser.download')}>
                     <DownloadIcon />
@@ -290,7 +290,7 @@ export default function FileBrowser(props: { host: Host; onClose: () => void }) 
               <div key={name} className="flex items-center gap-2 py-0.5">
                 <span className="truncate text-slate-400">{name}</span>
                 <span className={`ml-auto ${st === 'done' ? 'wt-good' : st === 'err' ? 'wt-danger' : 'wt-link'}`}>
-                  {st === 'up' ? '…' : st === 'done' ? '✓' : '✗'}
+                  {st === 'up' ? '…' : st === 'done' ? <CheckIcon /> : <CloseIcon size={14} />}
                 </span>
               </div>
             ))}

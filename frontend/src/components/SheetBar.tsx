@@ -1,4 +1,5 @@
 import { useI18n } from '../lib/i18n'
+import { ArrowLeftIcon } from './Icons'
 
 /** Antetul FIX al unui panou deschis ca foaie pe telefon (vezi lib/sheet.ts): „← Terminal"
     mare + titlul panoului. Foaia nu derulează (doar lista din ea), deci bara stă mereu sus.
@@ -15,7 +16,7 @@ export default function SheetBar(props: { title: string; onBack: () => void }) {
         aria-label={t('sheet.backAria')}
         className="wt-touch flex min-h-[40px] shrink-0 items-center gap-1.5 rounded-md px-2 text-sm font-medium wt-link hover:bg-ink-800"
       >
-        <span aria-hidden="true">←</span> {t('sheet.back')}
+        <ArrowLeftIcon /> {t('sheet.back')}
       </button>
       <h2 className="min-w-0 flex-1 truncate text-right text-sm font-semibold text-slate-200">{props.title}</h2>
     </div>

@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { useI18n } from '../lib/i18n'
 import type { ToastKind } from '../lib/notify'
+import { CloseIcon, WarningIcon } from './Icons'
 
 export interface ToastItem {
   id: string
@@ -52,7 +53,7 @@ export default function Toasts(props: {
       }`}
     >
       {/* un indicator vizual pe lângă culoare — eroarea nu se bazează DOAR pe roşu (daltonism) */}
-      {item.kind === 'error' && <span aria-hidden="true" className="mt-px shrink-0 font-semibold">⚠</span>}
+      {item.kind === 'error' && <span aria-hidden="true" className="mt-0.5 shrink-0"><WarningIcon /></span>}
       <span className="min-w-0 flex-1 break-words">{item.message}</span>
       <button
         type="button"
@@ -60,7 +61,7 @@ export default function Toasts(props: {
         aria-label={t('toast.dismiss')}
         className="-mr-1 -mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded text-slate-400 hover:bg-ink-700 hover:text-slate-100"
       >
-        <span aria-hidden="true">✕</span>
+        <CloseIcon size={14} />
       </button>
     </div>
   )

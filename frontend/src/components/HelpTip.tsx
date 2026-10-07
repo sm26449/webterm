@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom'
 import { copyText } from '../lib/clipboard'
 import { docsUrl, HELP, HelpId } from '../lib/help'
 import { useI18n } from '../lib/i18n'
-import { CloseIcon, CopyIcon } from './Icons'
+import { ArrowRightIcon, CloseIcon, CopyIcon } from './Icons'
 
 /* „?" lângă o setare: la CLICK (nu hover — pe touch tooltip-urile nu există) deschide un
    popover cu la ce folosește, un exemplu copiabil și linkul spre documentația versiunii care
@@ -112,8 +112,8 @@ export default function HelpTip(props: { id: HelpId; className?: string }) {
             </div>
           )}
           <a href={docsUrl(entry.doc)} target="_blank" rel="noopener noreferrer"
-            className="wt-link mt-3 inline-block text-[13px] font-medium hover:underline">
-            {t('help.readDocs')} →
+            className="wt-link mt-3 inline-flex items-center gap-1 text-[13px] font-medium hover:underline">
+            {t('help.readDocs')} <ArrowRightIcon />
           </a>
         </div>,
         document.body,

@@ -28,7 +28,7 @@ import { useI18n } from './lib/i18n'
 import { useConfirm } from './lib/confirm'
 import { useFocusTrap } from './lib/useFocusTrap'
 import { copyText } from './lib/clipboard'
-import { CopyIcon, ShieldIcon } from './components/Icons'
+import { CloseIcon, CopyIcon, ShieldIcon } from './components/Icons'
 import { ensureNotificationPermission, notify, notifyError, registerToast } from './lib/notify'
 import { restoreOrphans } from './lib/uploads'
 import { clearAll as clearClipHistory } from './lib/cliphistory'
@@ -1663,7 +1663,7 @@ function MainApp() {
           </button>
           <button onClick={() => setIdleDismissed(true)} aria-label={t('app.close')}
             className="shrink-0 rounded-md px-2 py-1 text-slate-500 hover:bg-ink-800 hover:text-slate-300">
-            ✕
+            <CloseIcon size={14} />
           </button>
         </div>
       )}
@@ -1698,7 +1698,7 @@ function MainApp() {
             aria-label={t('app.close')}
             className="rounded-full px-2 py-1 text-slate-500 hover:bg-ink-800 hover:text-slate-300"
           >
-            ✕
+            <CloseIcon size={14} />
           </button>
         </div>
       )}

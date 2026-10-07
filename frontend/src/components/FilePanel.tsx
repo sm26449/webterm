@@ -14,10 +14,7 @@ import { uiLocale } from '../lib/tz'
 import {
   EMPTY_SELECTION, Selection, allState, previewNames, prune, rangeTo, toggleAll, toggleKey, visibleSelected,
 } from '../lib/selection'
-import {
-  CopyIcon, DownloadIcon, FileIcon, FolderIcon, LinkIcon, PencilIcon, RenameIcon,
-  PlusIcon, RefreshIcon, TrashIcon,
-} from './Icons'
+import { ArrowsLeftRightIcon, CheckIcon, ChevronDownIcon, ChevronUpIcon, CloseIcon, CopyIcon, DownloadIcon, FileIcon, FilePlusIcon, FolderIcon, LevelUpIcon, LinkIcon, PencilIcon, PlusIcon, RefreshIcon, RenameIcon, TrashIcon, UploadIcon } from './Icons'
 import CopyToHostDialog, { CopyItem } from './CopyToHostDialog'
 import { Button, IconButton } from './ui'
 
@@ -597,7 +594,7 @@ export default function FilePanel(props: {
   const header = props.embed ? null : (
     <header className="flex items-center gap-2 border-b border-ink-800 px-3 py-2">
       <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">{t('files.title')}</span>
-      <IconButton onClick={props.onClose} label={t('files.closeAria')} className="ml-auto">✕</IconButton>
+      <IconButton onClick={props.onClose} label={t('files.closeAria')} className="ml-auto"><CloseIcon size={14} /></IconButton>
     </header>
   )
 
@@ -649,7 +646,7 @@ export default function FilePanel(props: {
         {/* bara de cale + acțiuni pe director */}
         <div className="flex items-center gap-1 border-b border-ink-800 px-2 py-1.5">
           <IconButton onClick={() => listing && navigate(listing.parent)} disabled={!listing || listing.path === '/'}
-            label={t('files.upLevel')}>↰</IconButton>
+            label={t('files.upLevel')}><LevelUpIcon size={14} /></IconButton>
           <input
             value={path}
             aria-label={t('files.pathAria')}
@@ -662,9 +659,9 @@ export default function FilePanel(props: {
           <IconButton onClick={() => load(listing?.path ?? path)} label={t('files.reload')}><RefreshIcon /></IconButton>
           {/* deschiderea unuia închide restul: toolbar-ul rămâne interactiv deasupra modalului,
               iar un input montat SUB overlay i-ar fura focusul (tastezi într-un câmp invizibil) */}
-          <IconButton onClick={() => { setNewFileErr(''); setNewFolder(null); setRenaming(null); setConfirmDel(null); setNewFile('') }} disabled={!listing} label={t('files.newFile')}>+📄</IconButton>
+          <IconButton onClick={() => { setNewFileErr(''); setNewFolder(null); setRenaming(null); setConfirmDel(null); setNewFile('') }} disabled={!listing} label={t('files.newFile')}><FilePlusIcon /></IconButton>
           <IconButton onClick={() => { setNewFile(null); setNewFileErr(''); setNewFolder('') }} label={t('files.newDir')}><PlusIcon /></IconButton>
-          <IconButton onClick={() => fileInput.current?.click()} disabled={busy || !listing} label={t('files.uploadHere')} className="wt-link">↑</IconButton>
+          <IconButton onClick={() => fileInput.current?.click()} disabled={busy || !listing} label={t('files.uploadHere')} className="wt-link"><UploadIcon /></IconButton>
           <input ref={fileInput} type="file" multiple className="hidden" onChange={(e) => { if (e.target.files) pickFiles(e.target.files); e.target.value = '' }} />
         </div>
 
@@ -680,8 +677,8 @@ export default function FilePanel(props: {
           {/* „follow cwd" are sens doar legat de o sesiune; în embed (tab-ul hostului) nu avem una */}
           {!props.embed && (
             <button onClick={follow ? () => setFollow(false) : enableFollow} aria-pressed={follow}
-              className={`min-h-[28px] min-w-[28px] shrink-0 rounded px-1.5 py-0.5 ${follow ? 'wt-good ring-1 ring-emerald-600/40' : 'text-slate-500 hover:bg-ink-800'}`}
-              title={t('files.followCwd')} aria-label={t('files.followCwd')}>⇄ cwd</button>
+              className={`inline-flex min-h-[28px] min-w-[28px] shrink-0 items-center gap-1 rounded px-1.5 py-0.5 ${follow ? 'wt-good ring-1 ring-emerald-600/40' : 'text-slate-500 hover:bg-ink-800'}`}
+              title={t('files.followCwd')} aria-label={t('files.followCwd')}><ArrowsLeftRightIcon size={12} /> cwd</button>
           )}
           <button onClick={() => setShowHidden((v) => !v)} aria-pressed={showHidden}
             className={`min-h-[28px] min-w-[28px] shrink-0 rounded px-1.5 py-0.5 ${showHidden ? 'wt-link' : 'text-slate-500 hover:bg-ink-800'}`}
@@ -699,8 +696,10 @@ export default function FilePanel(props: {
           {(['name', 'size', 'mtime'] as SortKey[]).map((k) => (
             <button key={k} onClick={() => setSort((s) => ({ key: k, asc: s.key === k ? !s.asc : true }))}
               aria-pressed={sort.key === k}
-              className={`min-h-[24px] rounded px-1.5 py-1 hover:text-slate-400 ${sort.key === k ? 'text-slate-400' : ''}`}>
-              {k === 'name' ? t('files.sortName') : k === 'size' ? t('files.sortSize') : t('files.sortDate')}{sort.key === k ? (sort.asc ? ' ▲' : ' ▼') : ''}
+              className={`inline-flex min-h-[24px] items-center gap-0.5 rounded px-1.5 py-1 hover:text-slate-400 ${sort.key === k ? 'text-slate-400' : ''}`}>
+              {k === 'name' ? t('files.sortName') : k === 'size' ? t('files.sortSize') : t('files.sortDate')}{sort.key === k ? (sort.asc ? <ChevronUpIcon size={10} /> : <ChevronDownIcon size={10} />) : ''}
+              {/* direcţia rămâne în numele accesibil (era ▲/▼ în text) */}
+              {sort.key === k && <span className="sr-only"> {sort.asc ? t('files.sortAsc') : t('files.sortDesc')}</span>}
             </button>
           ))}
         </div>
@@ -737,7 +736,7 @@ export default function FilePanel(props: {
                 role="dialog" aria-labelledby="wt-files-newfile-title"
                 onClick={(e) => e.stopPropagation()}>
                 <div id="wt-files-newfile-title" className="mb-2 flex items-center gap-2 text-[12px] text-slate-300">
-                  <span className="text-[14px]" aria-hidden="true">📄</span>{t('files.newFile')}
+                  <FileIcon />{t('files.newFile')}
                 </div>
                 <input autoFocus value={newFile} aria-label={t('files.newFilePh')}
                   onChange={(e) => { setNewFile(e.target.value); if (newFileErr) setNewFileErr('') }}
@@ -937,13 +936,13 @@ export default function FilePanel(props: {
                     <span className="truncate text-slate-400" title={u.dest}>{u.name}</span>
                     <span className={`ml-auto tabular-nums ${u.state === 'done' ? 'wt-good' : u.state === 'err' ? 'wt-danger'
                       : u.state === 'stalled' || u.state === 'retrying' ? 'wt-warn' : 'wt-link'}`}>
-                      {u.state === 'done' ? '✓' : u.state === 'err' ? '✗'
+                      {u.state === 'done' ? <CheckIcon size={12} /> : u.state === 'err' ? <CloseIcon size={12} />
                         : u.state === 'stalled' ? t('jobs.stateStalled')
                         : u.state === 'retrying' ? t('jobs.stateRetrying', { n: u.attempts, max: 8 })
                         : sizeKnown(u) ? `${u.pct}%` : fmtBytes(u.pos)}
                     </span>
                     <IconButton touch={false} variant="danger" onClick={() => cancelOrDismiss(u.id, live)}
-                      title={label} label={`${label} ${u.name}`}>✕</IconButton>
+                      title={label} label={`${label} ${u.name}`}><CloseIcon size={14} /></IconButton>
                   </div>
                   {/* bară de progres: se umple pe octeți (XHR onprogress), colorată după stare */}
                   <div className="mt-0.5 h-1 w-full overflow-hidden rounded-full bg-ink-800">

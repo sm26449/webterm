@@ -4,6 +4,7 @@ import { tStatic, useI18n } from '../lib/i18n'
 import { fmtTs, getTimezone, timeInZone, uiLocale } from '../lib/tz'
 import { copyText } from '../lib/clipboard'
 import { Button } from './ui'
+import { ArrowsUpDownIcon, CheckIcon, FolderIcon, TimeIcon } from './Icons'
 
 // abrevierea de zile vine din catalog: era fixa, deci aparea si in interfata engleza
 const DAY = () => tStatic('time.d')
@@ -117,21 +118,21 @@ export default function StatusBar(props: { session: Session; host?: Host; rtt?: 
         )}
         {/* ceasul serverului, în fusul sesiunii — răspunde la „cât e ceasul
             acolo?" fără să tastezi `date` în mijlocul unei comenzi */}
-        {live && <span className="tabular-nums" title={t('statusbar.clockTitle', { tz: getTimezone() })}><span aria-hidden="true">🕒 </span>{clock}</span>}
+        {live && <span className="inline-flex items-center gap-1 tabular-nums" title={t('statusbar.clockTitle', { tz: getTimezone() })}><TimeIcon />{clock}</span>}
         {/* cwd raportat de shell prin OSC 7 — apare doar cu shell integration
             activă; panoul de fișiere urmărește aceeași cale */}
         {live && props.cwd && (
-          <span className="min-w-0 max-w-[16rem] truncate font-mono wt-link" title={props.cwd}>
-            <span aria-hidden="true">📁 </span>{shortPath(props.cwd)}
+          <span className="inline-flex min-w-0 max-w-[16rem] items-center gap-1 font-mono wt-link" title={props.cwd}>
+            <span className="shrink-0" aria-hidden="true"><FolderIcon size={12} /></span><span className="truncate">{shortPath(props.cwd)}</span>
           </span>
         )}
         {props.rtt != null && (
           /* latența browser↔gateway pe websocket-ul sesiunii, sondată la 30s */
           <span
-            className={`tabular-nums ${props.rtt < 120 ? 'wt-good' : props.rtt < 350 ? 'wt-warn' : 'wt-danger'}`}
+            className={`inline-flex items-center gap-1 tabular-nums ${props.rtt < 120 ? 'wt-good' : props.rtt < 350 ? 'wt-warn' : 'wt-danger'}`}
             title={t('statusbar.rttTitle')}
           >
-            <span aria-hidden="true">⇅ </span>{props.rtt} ms
+            <ArrowsUpDownIcon />{props.rtt} ms
           </span>
         )}
         {/* capătul din dreapta: attach (transferurile stau acum în widgetul plutitor jos-dreapta) */}
@@ -170,7 +171,7 @@ export default function StatusBar(props: { session: Session; host?: Host; rtt?: 
                   /* origine http / permisiune refuzată: selectează manual */
                 }
               }} className="shrink-0">
-              {copied ? '✓' : t('statusbar.copy')}
+              {copied ? <CheckIcon /> : t('statusbar.copy')}
             </Button>
           </div>
           <p className="mt-1.5 text-slate-600">

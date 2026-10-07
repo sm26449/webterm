@@ -7,7 +7,7 @@ import { SHEET_CLS } from '../lib/sheet'
 import { useDrawer } from '../lib/useDrawer'
 import SheetBar from './SheetBar'
 import { useFocusTrap } from '../lib/useFocusTrap'
-import { RefreshIcon, TerminalPromptIcon } from './Icons'
+import { CloseIcon, RefreshIcon, TerminalPromptIcon } from './Icons'
 
 // Panou Docker: containere / imagini / volume / reţele ale host-ului, plus start/stop/restart
 // şi „shell în container". TOTUL prin op-ul `run` al agentului (docker CLI rulat pe host) —
@@ -131,7 +131,7 @@ export default function DockerPanel(props: {
         className="wt-touch ml-auto rounded px-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-300"><RefreshIcon /></button>
       {!props.embed && (
         <button onClick={props.onClose} aria-label={t('docker.closeAria')}
-          className="wt-touch rounded px-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-300">✕</button>
+          className="wt-touch rounded px-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-300"><CloseIcon size={14} /></button>
       )}
     </header>
   )
@@ -255,7 +255,7 @@ export default function DockerPanel(props: {
           <header className="flex items-center gap-2 border-b border-ink-800 px-4 py-2">
             <h2 id="wt-docker-logs-title" className="min-w-0 flex-1 truncate text-sm font-semibold">{t('docker.logsFor', { name: logsFor })}</h2>
             <button onClick={() => setLogsFor(null)} aria-label={t('common.close')}
-              className="wt-touch rounded px-1.5 text-slate-400 hover:bg-ink-800">✕</button>
+              className="wt-touch rounded px-1.5 text-slate-400 hover:bg-ink-800"><CloseIcon size={14} /></button>
           </header>
           {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- regiune derulabilă: fără tabindex nu se poate derula din tastatură */}
           <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap px-4 py-3 font-mono text-[11px] leading-relaxed text-slate-300" tabIndex={0}>{logs}</pre>

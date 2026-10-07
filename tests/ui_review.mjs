@@ -387,7 +387,8 @@ try {
       await page.waitForTimeout(800)
       await page.screenshot({ path: `${OUT}/${theme}-06-files.png` })
       await scan(page, `${theme} file browser`)
-      await page.locator('.fixed.z-50 button', { hasText: '✕' }).first().click()
+      // după aria-label, nu după glifă: butonul are acum o pictogramă SVG (design system 3.5.7)
+      await page.locator('.fixed.z-50 button[aria-label="Close"]').first().click()
     }, page)
 
     // Panoul de Status: suprafaţă pe care poarta n-o atingea deloc, deşi e unde se uită

@@ -3,6 +3,7 @@ import { api } from '../lib/api'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { tStatic, useI18n } from '../lib/i18n'
 import UpdateCommand from './UpdateCommand'
+import { CloseIcon } from './Icons'
 
 // abrevierea de zile vine din catalog: era fixa, deci aparea si in interfata engleza
 const DAY = () => tStatic('time.d')
@@ -94,7 +95,7 @@ export default function StatusModal(props: { onClose: () => void }) {
         <div className="flex items-center justify-between">
           <h2 className="text-lg font-semibold">{t('status.title')}</h2>
           <button onClick={props.onClose} aria-label={t('common.close')} className="rounded-md px-2 py-1 text-slate-400 hover:bg-ink-800">
-            ✕
+            <CloseIcon size={14} />
           </button>
         </div>
 

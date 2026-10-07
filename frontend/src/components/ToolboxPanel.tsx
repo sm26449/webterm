@@ -9,7 +9,7 @@ import { SHEET_CLS } from '../lib/sheet'
 import { useDrawer } from '../lib/useDrawer'
 import SheetBar from './SheetBar'
 import { useFocusTrap } from '../lib/useFocusTrap'
-import { TerminalPromptIcon, PlusIcon, TrashIcon, PencilIcon, CopyIcon } from './Icons'
+import { CheckIcon, CloseIcon, CopyIcon, PencilIcon, PlusIcon, TerminalPromptIcon, TrashIcon } from './Icons'
 import HelpTip from './HelpTip'
 import LoadFailed from './LoadFailed'
 import { fmtTs, getTimezone, uiLocale } from '../lib/tz'
@@ -337,7 +337,7 @@ export default function ToolboxPanel(props: {
           )}
           {!props.embed && (
             <button onClick={props.onClose} aria-label={t('common.close')}
-              className={`wt-touch shrink-0 rounded px-2 py-1 text-slate-400 hover:bg-ink-800${(tab === 'connections' || tab === 'library') ? '' : ' ml-auto'}`}>✕</button>
+              className={`wt-touch shrink-0 rounded px-2 py-1 text-slate-400 hover:bg-ink-800${(tab === 'connections' || tab === 'library') ? '' : ' ml-auto'}`}><CloseIcon size={14} /></button>
           )}
         </div>
         {(tab === 'library' || tab === 'history') && (
@@ -487,12 +487,12 @@ export default function ToolboxPanel(props: {
                             {t(dkResults.kind === 'rotate' ? 'toolbox.ssh.rotateResults' : 'toolbox.ssh.deployResults')}
                           </span>
                           <button onClick={() => setDkResults(null)} aria-label={t('toolbox.ssh.resultsDismiss')} title={t('toolbox.ssh.resultsDismiss')}
-                            className="ml-auto grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-slate-200">✕</button>
+                            className="ml-auto grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-slate-200"><CloseIcon size={14} /></button>
                         </div>
                         <ul className="space-y-0.5 text-[11px]">
                           {dkResults.items.map((r) => (
                             <li key={r.target_host_id} className="flex items-start gap-1.5">
-                              <span className={`shrink-0 font-bold ${r.ok ? 'wt-good' : 'wt-danger'}`} aria-hidden="true">{r.ok ? '✓' : '✗'}</span>
+                              <span className={`mt-0.5 shrink-0 ${r.ok ? 'wt-good' : 'wt-danger'}`} aria-hidden="true">{r.ok ? <CheckIcon size={12} /> : <CloseIcon size={12} />}</span>
                               <span className="min-w-0 flex-1 break-words">
                                 <span className="text-slate-200">{dkName(r.target_host_id, r.target_name)}</span>
                                 {' — '}

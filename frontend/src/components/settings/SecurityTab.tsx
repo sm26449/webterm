@@ -5,7 +5,7 @@ import { errText, api, CommandGuard, DeployKeyPolicy, Host, withSecondFactor as 
 import { useI18n } from '../../lib/i18n'
 import { useConfirm } from '../../lib/confirm'
 import { fmtTs } from '../../lib/tz'
-import { KeyIcon } from '../Icons'
+import { ArrowRightIcon, CloseIcon, KeyIcon } from '../Icons'
 import { copyText } from '../../lib/clipboard'
 import { downloadBlob, field, heading } from './ui'
 import { askSecret } from '../../lib/secretPrompt'
@@ -868,7 +868,7 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
         {groups.map((g) => (
           <li key={g.id} className="flex items-center gap-2 rounded-lg bg-ink-800/60 px-3 py-2 text-sm ring-1 ring-ink-700">
             <span className="min-w-0 flex-1 truncate text-slate-200">{g.name}
-              {g.folder && <span className="ml-1 text-[11px] text-slate-500"><span aria-hidden="true">→ </span>{g.folder}</span>}
+              {g.folder && <span className="ml-1 inline-flex items-center gap-0.5 text-[11px] text-slate-500"><ArrowRightIcon size={10} />{g.folder}</span>}
               {g.require_2fa ? (
                 <span className="wt-warn ml-1 text-[11px]" title={t('settings.enrollGroups.require2fa')}>
                   2FA<span className="sr-only"> — {t('settings.enrollGroups.require2fa')}</span>
@@ -949,7 +949,7 @@ export default function SecurityTab(props: { webauthnAvailable: boolean; onAccou
                 onClick={() => setGuard({ ...guard, rules: guard.rules.filter((_, j) => j !== i) })}
                 aria-label={t('settings.deleteRule')}
                 className="shrink-0 rounded-md px-2 py-1 text-slate-500 hover:bg-ink-800 hover:text-rose-300"
-              >✕</button>
+              ><CloseIcon size={14} /></button>
             </div>
           ))}
           <button

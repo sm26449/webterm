@@ -2,7 +2,7 @@ import { lazy, Suspense, useRef, useState } from 'react'
 import { getBootVersion } from '../lib/api'
 import { useI18n } from '../lib/i18n'
 import { useFocusTrap } from '../lib/useFocusTrap'
-import { LogoMark, StarIcon } from './Icons'
+import { CloseIcon, LogoMark, StarIcon } from './Icons'
 
 const ChangelogModal = lazy(() => import('./ChangelogModal'))
 
@@ -40,7 +40,7 @@ export default function AboutModal(props: { onClose: () => void }) {
               </p>
             </div>
           </div>
-          <button onClick={props.onClose} aria-label={t('common.close')} className="wt-touch grid place-items-center rounded-md px-2 py-1 text-slate-400 hover:bg-ink-800">✕</button>
+          <button onClick={props.onClose} aria-label={t('common.close')} className="wt-touch grid place-items-center rounded-md px-2 py-1 text-slate-400 hover:bg-ink-800"><CloseIcon size={14} /></button>
         </div>
 
         <p className="mt-4 text-sm leading-relaxed text-slate-300">

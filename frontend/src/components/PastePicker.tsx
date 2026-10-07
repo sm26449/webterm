@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { ClipEntry } from '../lib/cliphistory'
 import { useI18n } from '../lib/i18n'
 import { useFocusTrap } from '../lib/useFocusTrap'
+import { CloseIcon, EnterIcon } from './Icons'
 
 // Paste picker: history-ul de clipboard GLOBAL — ce s-a copiat din ORICE terminal al ferestrei
 // (Cmd+Shift+V / buton / click-dreapta), cu sursa şi vârsta sub fiecare intrare.
@@ -97,7 +98,7 @@ export default function PastePicker(props: {
                       title={t('paste.pasteRunTitle')}
                       className="wt-touch shrink-0 rounded-md px-2 py-1.5 text-[11px] font-medium wt-warn hover:bg-ink-700"
                     >
-                      ⏎ {t('paste.run')}
+                      <span className="inline-flex items-center gap-1"><EnterIcon size={12} />{t('paste.run')}</span>
                     </button>
                     <button
                       data-pp-own-enter
@@ -106,7 +107,7 @@ export default function PastePicker(props: {
                       aria-label={t('paste.removeAria', { item: preview(item.text).slice(0, 40) })}
                       className="wt-touch mr-1 flex h-7 min-w-7 shrink-0 items-center justify-center rounded-md px-1.5 text-xs text-slate-400 hover:bg-ink-700 hover:text-slate-100"
                     >
-                      <span aria-hidden="true">✕</span>
+                      <CloseIcon size={14} />
                     </button>
                   </li>
                 ))}

@@ -7,7 +7,7 @@ import { notify } from '../lib/notify'
 import { SHEET_CLS } from '../lib/sheet'
 import { useDrawer } from '../lib/useDrawer'
 import SheetBar from './SheetBar'
-import { RefreshIcon } from './Icons'
+import { ArrowDownIcon, ArrowUpIcon, CloseIcon, GitBranchIcon, RefreshIcon } from './Icons'
 
 // Panou git în limbajul panoului de fișiere: status/diff/stage/commit pentru
 // repo-ul din directorul curent al sesiunii (OSC 7). Rulează totul prin
@@ -241,7 +241,7 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
         className="wt-touch ml-auto rounded px-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-300 disabled:opacity-30"
         title={t('git.reloadStatus')} aria-label={t('git.reloadStatus')}><RefreshIcon /></button>
       <button onClick={props.onClose} aria-label={t('git.closeAria')}
-        className="wt-touch rounded px-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-300">✕</button>
+        className="wt-touch rounded px-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-300"><CloseIcon size={14} /></button>
     </header>
   )
 
@@ -307,9 +307,9 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
         {/* bara de branch */}
         {repo && (
           <div className="flex items-center gap-2 border-b border-ink-800 px-3 py-1.5 text-[11px]">
-            <span className="font-mono font-medium text-slate-300" title={cwd}>⎇ {repo.branch}</span>
-            {repo.ahead > 0 && <span className="wt-good tabular-nums" title={t('git.aheadTitle')}>↑{repo.ahead}</span>}
-            {repo.behind > 0 && <span className="wt-warn tabular-nums" title={t('git.behindTitle')}>↓{repo.behind}</span>}
+            <span className="inline-flex items-center gap-1 font-mono font-medium text-slate-300" title={cwd}><GitBranchIcon size={12} /> {repo.branch}</span>
+            {repo.ahead > 0 && <span className="wt-good inline-flex items-center tabular-nums" title={t('git.aheadTitle')}><ArrowUpIcon size={11} />{repo.ahead}</span>}
+            {repo.behind > 0 && <span className="wt-warn inline-flex items-center tabular-nums" title={t('git.behindTitle')}><ArrowDownIcon size={11} />{repo.behind}</span>}
             {files.length === 0 && <span className="ml-auto text-slate-600">{t('git.cleanTree')}</span>}
           </div>
         )}
@@ -344,7 +344,7 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
                 <div className="flex items-center gap-2 border-b border-ink-800 px-3 py-1 text-[10px] text-slate-500">
                   <span className="truncate font-mono" title={sel.path}>{sel.path}</span>
                   <span className="ml-auto shrink-0">{sel.staged ? t('git.diffStaged') : t('git.diffWorktree')}</span>
-                  <button onClick={() => { setSel(null); setDiff('') }} className="grid h-6 w-6 shrink-0 place-items-center rounded hover:bg-ink-800 hover:text-slate-300" title={t('git.closeDiff')} aria-label={t('git.closeDiff')}>✕</button>
+                  <button onClick={() => { setSel(null); setDiff('') }} className="grid h-6 w-6 shrink-0 place-items-center rounded hover:bg-ink-800 hover:text-slate-300" title={t('git.closeDiff')} aria-label={t('git.closeDiff')}><CloseIcon size={14} /></button>
                 </div>
                 <DiffView text={diff} />
               </div>

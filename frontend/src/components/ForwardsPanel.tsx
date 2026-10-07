@@ -4,7 +4,7 @@ import { useI18n } from '../lib/i18n'
 import { SHEET_CLS } from '../lib/sheet'
 import { useDrawer } from '../lib/useDrawer'
 import SheetBar from './SheetBar'
-import { LinkIcon, PencilIcon, PlusIcon, RefreshIcon, TrashIcon } from './Icons'
+import { CheckIcon, CloseIcon, LinkIcon, PauseIcon, PencilIcon, PlusIcon, RefreshIcon, StarIcon, TrashIcon } from './Icons'
 import { copyText } from '../lib/clipboard'
 import HelpTip from './HelpTip'
 import { Button } from './ui'
@@ -203,7 +203,7 @@ export default function ForwardsPanel(props: {
     <header className="flex items-center gap-2 border-b border-ink-800 px-3 py-2">
       <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">{t('forwards.title')}</span>
       <button onClick={props.onClose} aria-label={t('forwards.closeAria')}
-        className="wt-touch ml-auto rounded px-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-300">✕</button>
+        className="wt-touch ml-auto rounded px-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-300"><CloseIcon size={14} /></button>
     </header>
   )
 
@@ -383,7 +383,7 @@ export default function ForwardsPanel(props: {
                     title={f.app_type ? t('forwards.demoteApp') : t('forwards.promoteApp')}
                     aria-label={f.app_type ? t('forwards.demoteApp') : t('forwards.promoteApp')}
                     className={`grid h-6 w-6 shrink-0 place-items-center rounded hover:bg-ink-700 ${f.app_type ? 'wt-warn' : 'text-slate-500 hover:text-amber-300'}`}>
-                    {f.app_type ? '★' : '☆'}
+                    <StarIcon filled={!!f.app_type} />
                   </button>
                 )}
               </div>
@@ -401,9 +401,9 @@ export default function ForwardsPanel(props: {
                     <button onClick={() => toggle(f)} title={t('forwards.startTitle')} className="rounded px-1.5 py-0.5 text-[11px] text-slate-400 hover:bg-ink-800">{t('forwards.start')}</button>
                   )}
                   <button onClick={() => copyLink(f)} title={t('forwards.copyLink')} aria-label={`${t('forwards.copyLink')} ${f.label}`} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-slate-200">
-                    {copied === f.id ? <span className="text-[11px] wt-good">✓</span> : <LinkIcon />}
+                    {copied === f.id ? <span className="wt-good"><CheckIcon size={12} /></span> : <LinkIcon />}
                   </button>
-                  {f.enabled && <button onClick={() => toggle(f)} title={t('forwards.stop')} aria-label={`${t('forwards.stop')} ${f.label}`} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-amber-300 text-[11px]">⏸</button>}
+                  {f.enabled && <button onClick={() => toggle(f)} title={t('forwards.stop')} aria-label={`${t('forwards.stop')} ${f.label}`} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-amber-300"><PauseIcon size={12} /></button>}
                 </>)}
                 <span className="ml-auto flex items-center gap-0.5">
                   <button onClick={() => openEdit(f)} title={t('forwards.edit')} aria-label={`${t('forwards.edit')} ${f.label}`} className="grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-ink-700 hover:text-slate-200"><PencilIcon /></button>

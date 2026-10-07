@@ -5,7 +5,7 @@ import { hostColor } from '../lib/host'
 import { useI18n } from '../lib/i18n'
 import { PHONE_QUERY, useMediaQuery } from '../lib/sheet'
 import { isOverflowing, menuNav, showAllTabsButton, tabState } from '../lib/tablist'
-import { CloseIcon, HomeIcon, PlusIcon, PencilIcon } from './Icons'
+import { CloseIcon, HomeIcon, KeyboardIcon, PencilIcon, PlusIcon } from './Icons'
 
 /** Sesiunile deschise ca tab-uri (setul de lucru), pe cromul întunecat.
    Fiecare tab arată host-ul (nume + culoare stabilă) ca să distingi instant
@@ -292,7 +292,7 @@ export default function TabBar(props: {
                 aria-pressed={sp.broadcast}
                 className={`wt-touch wt-tabbtn mb-1.5 flex shrink-0 items-center justify-center rounded-lg px-2 py-1.5 text-[12px] font-semibold ${
                   sp.broadcast ? 'bg-amber-500 !text-ink-950' : 'text-slate-500'}`}
-              >⌨</button>
+              ><KeyboardIcon /></button>
               <button onClick={sp.onExit} title={t('grid.exit')} aria-label={t('grid.exit')}
                 className="wt-touch wt-tabbtn mb-1.5 flex shrink-0 items-center justify-center rounded-lg px-2 py-1.5 text-slate-500"
               ><CloseIcon size={13} /></button>

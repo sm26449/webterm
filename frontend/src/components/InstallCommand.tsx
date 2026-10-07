@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useI18n } from '../lib/i18n'
 import { copyText } from '../lib/clipboard'
 import { Button } from './ui'
+import { CheckIcon } from './Icons'
 
 /** Comanda de instalare a agentului, în două variante.
 
@@ -68,7 +69,7 @@ export default function InstallCommand(props: { command: string; commandDedicate
               setErr(t('addhost.clipboardError'))
             }
           }} className="shrink-0">
-          {copied ? '✓' : t('addhost.copy')}
+          {copied ? <CheckIcon /> : t('addhost.copy')}
         </Button>
         <span role="status" className="sr-only">{copied ? t('settings.update.copied') : ''}</span>
       </div>

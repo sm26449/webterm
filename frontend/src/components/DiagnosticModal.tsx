@@ -3,6 +3,7 @@ import { errText, api, Host } from '../lib/api'
 import { useI18n } from '../lib/i18n'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { fmtTs } from '../lib/tz'
+import { ArrowUpCircleIcon, CheckCircleIcon, CloseIcon, DotIcon, HourglassIcon, StethoscopeIcon, WarningIcon } from './Icons'
 
 type T = (key: string, vars?: Record<string, string | number>) => string
 
@@ -65,13 +66,15 @@ function fmtBytes(n: number): string {
 }
 
 // aspectul fiecărui tip de eveniment din jurnal (label = cheie i18n)
-const META: Record<string, { icon: string; cls: string; label: string }> = {
-  connect: { icon: '🟢', cls: 'wt-good', label: 'diag.evtConnect' },
-  disconnect: { icon: '🔴', cls: 'wt-danger', label: 'diag.evtDisconnect' },
-  update_pushed: { icon: '⬆️', cls: 'text-sky-300', label: 'diag.evtUpdatePushed' },
-  update_deferred: { icon: '⏳', cls: 'text-sky-300', label: 'diag.evtUpdateDeferred' },
-  update_applied: { icon: '✅', cls: 'wt-good', label: 'diag.evtUpdateApplied' },
-  conflict: { icon: '⚠️', cls: 'text-amber-300', label: 'diag.evtConflict' },
+// pictogramele SVG (nu emoji) iau culoarea stării din `cls`; `wt-info`/`wt-warn` în loc de
+// sky-300/amber-300, care cădeau sub AA pe tema deschisă
+const META: Record<string, { icon: React.ReactNode; cls: string; label: string }> = {
+  connect: { icon: <DotIcon size={10} />, cls: 'wt-good', label: 'diag.evtConnect' },
+  disconnect: { icon: <DotIcon size={10} />, cls: 'wt-danger', label: 'diag.evtDisconnect' },
+  update_pushed: { icon: <ArrowUpCircleIcon />, cls: 'wt-info', label: 'diag.evtUpdatePushed' },
+  update_deferred: { icon: <HourglassIcon />, cls: 'wt-info', label: 'diag.evtUpdateDeferred' },
+  update_applied: { icon: <CheckCircleIcon />, cls: 'wt-good', label: 'diag.evtUpdateApplied' },
+  conflict: { icon: <WarningIcon />, cls: 'wt-warn', label: 'diag.evtConflict' },
 }
 
 const REASON: Record<string, { text: string; danger?: boolean }> = {
@@ -209,14 +212,14 @@ export default function DiagnosticModal(props: { host: Host; onClose: () => void
         className="glass flex h-[85vh] w-full max-w-3xl flex-col rounded-2xl">
         {/* antet */}
         <div className="flex items-center justify-between border-b border-ink-800 px-5 py-3">
-          <h2 className="font-semibold">🩺 {t('diag.title')} · {props.host.name}</h2>
+          <h2 className="flex items-center gap-2 font-semibold"><StethoscopeIcon /> {t('diag.title')} · {props.host.name}</h2>
           <div className="flex items-center gap-3">
             <span className={`text-xs ${diag?.online ? 'wt-good' : 'wt-danger'}`}>
               {/* glifa (●/○) e deja în textul tradus — nu o mai prefixăm a doua oară */}
               {diag ? (diag.online ? t('diag.stateOnline') : t('diag.stateOffline')) : ''}
             </span>
             <button onClick={props.onClose} aria-label={t('diag.close')}
-              className="wt-touch grid place-items-center rounded-md px-2 py-1 text-slate-400 hover:bg-ink-800">✕</button>
+              className="wt-touch grid place-items-center rounded-md px-2 py-1 text-slate-400 hover:bg-ink-800"><CloseIcon size={14} /></button>
           </div>
         </div>
 
@@ -359,7 +362,7 @@ export default function DiagnosticModal(props: { host: Host; onClose: () => void
                       {snap.network.interfaces.map((it) => (
                         <div key={it.name} className="rounded-lg bg-ink-800 px-3 py-2 text-sm ring-1 ring-ink-700">
                           <div className="flex items-center gap-2">
-                            <span className={`text-[10px] ${it.state === 'up' ? 'wt-good' : 'text-slate-500'}`}>●</span>
+                            <span className={it.state === 'up' ? 'wt-good' : 'text-slate-500'} aria-hidden="true"><DotIcon size={7} /></span>
                             <span className="font-mono text-[13px] text-slate-200">{it.name}</span>
                             <span className="text-[11px] text-slate-500">{it.state}</span>
                             {it.mtu ? <span className="text-[11px] text-slate-600">MTU {it.mtu}</span> : null}
@@ -463,11 +466,11 @@ export default function DiagnosticModal(props: { host: Host; onClose: () => void
                   {diag.events.length ? (
                     <ul className="space-y-1">
                       {diag.events.map((e, i) => {
-                        const m = META[e.event] || { icon: '•', cls: 'text-slate-300', label: e.event }
+                        const m = META[e.event] || { icon: <DotIcon size={6} />, cls: 'text-slate-300', label: e.event }
                         const r = e.event === 'disconnect' ? REASON[e.reason] : undefined
                         return (
                           <li key={i} className="flex items-start gap-2 rounded-lg bg-ink-800 px-2.5 py-1.5 text-sm ring-1 ring-ink-700">
-                            <span className="mt-0.5">{m.icon}</span>
+                            <span className={`mt-1 grid w-3.5 shrink-0 place-items-center ${m.cls}`} aria-hidden="true">{m.icon}</span>
                             <span className="min-w-0 flex-1">
                               <span className="flex flex-wrap items-baseline gap-x-2">
                                 <span className={`font-medium ${m.cls}`}>{t(m.label)}</span>

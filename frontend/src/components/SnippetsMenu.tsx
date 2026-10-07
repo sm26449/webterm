@@ -6,6 +6,7 @@ import SnippetParams, { snippetParams } from './SnippetParams'
 import SnippetTags from './SnippetTags'
 import { parseTagInput, snippetTags, targetsPayload } from '../lib/snippets'
 import { Button } from './ui'
+import { CloseIcon, TerminalPromptIcon } from './Icons'
 
 /** Dropdown cu comenzi salvate: click pe una → o inserează în sesiune.
     „Gestionează" deschide un mic editor (adaugă / editează / șterge). */
@@ -114,7 +115,7 @@ export default function SnippetsMenu(props: {
         onClick={() => setOpen((v) => !v)}
         className={`wt-touch place-items-center rounded-md px-1.5 py-1 text-sm text-slate-400 hover:bg-ink-700 ${props.triggerClassName ?? 'grid'}`}
       >
-        ❯_
+        <TerminalPromptIcon />
       </button>
       {open && (
         /* telefon (< sm): foaie de jos peste keybar — fără ancoră vizibilă în bară, un dropdown
@@ -226,7 +227,7 @@ export default function SnippetsMenu(props: {
                       title={t('snippets.deleteTitle', { title: s.title })}
                       aria-label={t('snippets.deleteTitle', { title: s.title })}
                       className="grid h-6 w-6 shrink-0 place-items-center rounded text-xs wt-danger hover:bg-ink-700">
-                      ✕
+                      <CloseIcon size={14} />
                     </button>
                   </div>
                 ))}

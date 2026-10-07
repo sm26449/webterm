@@ -5,6 +5,7 @@ import { SHEET_CLS } from '../lib/sheet'
 import { useDrawer } from '../lib/useDrawer'
 import SheetBar from './SheetBar'
 import { Button } from './ui'
+import { CloseIcon } from './Icons'
 
 /** Lista comenzilor din sesiune (blocks): sari la oricare, vezi care a eșuat,
     copiază exact output-ul ei. Apare doar când shell integration e activă. */
@@ -43,7 +44,7 @@ export default function CommandsPanel(props: {
           aria-label={t('cmds.closePanel')}
           className="wt-touch ml-auto rounded px-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-300"
         >
-          ✕
+          <CloseIcon size={14} />
         </button>
       </header>
 

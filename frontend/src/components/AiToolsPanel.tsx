@@ -11,7 +11,7 @@ import {
   AiBases, AiScope, collectionDir, frontmatterDescription, itemName, itemPath,
   singlePath, slugify, templatesFor, validName,
 } from '../lib/aitools'
-import { PlusIcon, RefreshIcon } from './Icons'
+import { CloseIcon, PlusIcon, RefreshIcon } from './Icons'
 import HelpTip from './HelpTip'
 import { Button } from './ui'
 
@@ -271,7 +271,7 @@ export default function AiToolsPanel(props: {
             title={t('ai.reload')} aria-label={t('ai.reload')}><RefreshIcon /></button>
           {!props.embed && (
             <button onClick={props.onClose} aria-label={t('common.close')}
-              className="wt-touch shrink-0 rounded px-2 py-1 text-slate-400 hover:bg-ink-800">✕</button>
+              className="wt-touch shrink-0 rounded px-2 py-1 text-slate-400 hover:bg-ink-800"><CloseIcon size={14} /></button>
           )}
         </div>
         {!isAgent ? (

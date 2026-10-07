@@ -9,7 +9,7 @@ import { askSecret } from '../lib/secretPrompt'
 import { hostHistory } from '../lib/metrics'
 import { pressureColor, pressureTextColor } from '../lib/thresholds'
 import { updatesSignal, useUpdatesPref } from '../lib/updatesPref'
-import { DockerIcon, DownloadIcon, FilesIcon, ForwardIcon, LinkIcon, NoteIcon, PencilIcon, PlusIcon, PopoutIcon, RefreshIcon, ServerIcon, ServicesIcon, ShieldIcon, SplitIcon, TerminalPromptIcon, ToolboxIcon, TrashIcon } from './Icons'
+import { ArrowRightIcon, ArrowUpIcon, ArrowUpRightIcon, DockerIcon, DownloadIcon, EyeIcon, FilesIcon, ForwardIcon, LinkIcon, MenuIcon, NoteIcon, PencilIcon, PlayIcon, PlugIcon, PlusIcon, PopoutIcon, RefreshIcon, ServerIcon, ServicesIcon, ShieldIcon, SparkleIcon, SplitIcon, StethoscopeIcon, TerminalPromptIcon, ToolboxIcon, TrashIcon } from './Icons'
 import { Badge, Button, Card, EmptyState, IconButton, cardClass, iconButtonClass } from './ui'
 import SessionPreview from './SessionPreview'
 import Sparkline from './Sparkline'
@@ -137,7 +137,7 @@ export default function HostOverview(props: {
             {s.exit_status != null ? ` · exit ${s.exit_status}` : ''} · {timeAgo(s.closed_at || s.created, t)}
           </span>
         </span>
-        {s.connected_clients > 0 && <span className="shrink-0 text-[11px] text-slate-500">👁 {s.connected_clients}</span>}
+        {s.connected_clients > 0 && <span className="flex shrink-0 items-center gap-1 text-[11px] text-slate-500"><EyeIcon /> {s.connected_clients}</span>}
       </button>
       <button
         type="button"
@@ -157,7 +157,7 @@ export default function HostOverview(props: {
     { id: 'services', label: t('host.tabServices'), show: agentReady, icon: <ServicesIcon /> },
     { id: 'docker', label: t('host.tabDocker'), show: agentReady, icon: <DockerIcon /> },
     { id: 'databases', label: t('host.tabDatabases'), show: agentReady, icon: <ToolboxIcon /> },
-    { id: 'ai', label: t('host.tabAi'), show: agentReady, icon: <span aria-hidden="true" className="text-[13px] leading-none">✦</span> },
+    { id: 'ai', label: t('host.tabAi'), show: agentReady, icon: <SparkleIcon /> },
   ]
   // dacă tab-ul curent devine indisponibil (agentul a căzut), cădem înapoi pe Overview
   const visibleTabs = tabs.filter((x) => x.show)
@@ -175,7 +175,7 @@ export default function HostOverview(props: {
       {/* ── header ── */}
       <div className="flex flex-wrap items-start gap-x-4 gap-y-3 border-b border-ink-800 px-4 pt-4 pb-3 sm:px-6">
         <IconButton size="md" onClick={props.onMenu} className={props.sidebarCollapsed ? '' : 'md:hidden'} label={t('host.openHostListAria')}>
-          ☰
+          <MenuIcon />
         </IconButton>
         <div className="relative shrink-0">
           <div className="grid h-11 w-11 place-items-center rounded-xl bg-ink-800 text-slate-400 ring-1 ring-ink-700">
@@ -245,14 +245,14 @@ export default function HostOverview(props: {
               {agentReady && (
                 <button onClick={() => props.onSerial(host)}
                   className="flex shrink-0 items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium text-slate-400 transition hover:bg-ink-800/50 hover:text-slate-200 md:w-full">
-                  <span className="grid h-4 w-4 shrink-0 place-items-center text-[13px] opacity-80">🔌</span>
+                  <span className="grid h-4 w-4 shrink-0 place-items-center opacity-80"><PlugIcon /></span>
                   {t('host.serialConsole')}
                 </button>
               )}
               {isAgent && (
                 <button onClick={() => props.onDiagnostic(host)}
                   className="flex shrink-0 items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium text-slate-400 transition hover:bg-ink-800/50 hover:text-slate-200 md:w-full">
-                  <span className="grid h-4 w-4 shrink-0 place-items-center text-[13px] opacity-80">🩺</span>
+                  <span className="grid h-4 w-4 shrink-0 place-items-center opacity-80"><StethoscopeIcon /></span>
                   {t('host.diagnostic')}
                 </button>
               )}
@@ -280,7 +280,7 @@ export default function HostOverview(props: {
                 <section>
                   <div className="mb-3 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
                     {t('host.active')} <span className="text-slate-600">· {active.length}</span>
-                    <button onClick={() => setTab('sessions')} className="wt-link ml-auto rounded px-1 py-1 text-[11px] normal-case">{t('host.allSessions')} →</button>
+                    <button onClick={() => setTab('sessions')} className="wt-link ml-auto inline-flex items-center gap-1 rounded px-1 py-1 text-[11px] normal-case">{t('host.allSessions')} <ArrowRightIcon size={11} /></button>
                   </div>
                   {/* thumbnail-uri LIVE: fiecare card e un preview read-only al sesiunii, auto-fit */}
                   <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))' }}>
@@ -354,7 +354,7 @@ export default function HostOverview(props: {
                     <IconButton size="md" touch={false} onClick={() => props.onPopout(sel.id)} label={t('host.popoutTitle')}
                       className="hidden lg:grid"><PopoutIcon /></IconButton>
                     {!selLive && (
-                      <IconButton size="md" onClick={() => setPlaying(sel)} label={t('host.playTitle')}>▶</IconButton>
+                      <IconButton size="md" onClick={() => setPlaying(sel)} label={t('host.playTitle')}><PlayIcon /></IconButton>
                     )}
                     <a href={`/api/sessions/${sel.id}/transcript?format=cast`} download title={t('host.downloadTitle')}
                       className={iconButtonClass('ghost', 'md')}><DownloadIcon /></a>
@@ -502,7 +502,7 @@ function SessionThumb(props: {
         <div className="flex items-center gap-2 px-3 py-2">
           <span className="h-2 w-2 shrink-0 rounded-full bg-emerald-400 dot-live" />
           <span className="min-w-0 flex-1 truncate text-sm text-slate-200">{s.title || t('host.sessionFallback')}</span>
-          {s.connected_clients > 0 && <span className="shrink-0 text-[11px] text-slate-500">👁 {s.connected_clients}</span>}
+          {s.connected_clients > 0 && <span className="flex shrink-0 items-center gap-1 text-[11px] text-slate-500"><EyeIcon /> {s.connected_clients}</span>}
         </div>
       </button>
       {/* acţiuni rapide — apar la hover ŞI când focusul e înăuntru (altfel erau focusabile dar
@@ -575,14 +575,14 @@ function StatusBand({ host }: { host: Host }) {
     : host.hostname ? hostAt(host) : protoLabel(host)
   // chip-urile sunt rezumatul de sus; detaliul (versiune agent, 2FA, auth) stă în carduri,
   // ca să nu dublăm. Aici doar semnale „la o privire": backend, update-uri OS, etichete.
-  const chips: { label: string; tone?: 'warn' | 'danger'; title?: string }[] = []
+  const chips: { label: React.ReactNode; tone?: 'warn' | 'danger'; title?: string }[] = []
   if (isAgent && host.backend) chips.push({ label: host.backend })
   // update-uri OS: pe pagina hostului (unde ai venit deliberat) chip-ul apare mereu, dar NEUTRU;
   // accent doar pentru securitate şi doar dacă semnalul nu e mascat (global sau per host)
   if (host.updates && host.updates.count > 0) {
     const sig = updatesSignal(host.id, host.updates, updPref.mode, updPref.muted)
     chips.push({
-      label: `↑ ${host.updates.count}`, tone: sig === 'security' ? 'danger' : undefined,
+      label: <><ArrowUpIcon size={11} /> {host.updates.count}</>, tone: sig === 'security' ? 'danger' : undefined,
       title: host.updates.security
         ? t('updates.chipSecTitle', { count: host.updates.count, sec: host.updates.security })
         : t('updates.chipTitle', { count: host.updates.count }),
@@ -604,7 +604,7 @@ function StatusBand({ host }: { host: Host }) {
         {chips.length > 0 && (
           <div className="ml-auto flex flex-wrap items-center gap-2">
             {chips.map((c, i) => (
-              <span key={i} title={c.title} className={`rounded-md px-2.5 py-1 text-xs font-medium ring-1 ${
+              <span key={i} title={c.title} className={`inline-flex items-center gap-0.5 rounded-md px-2.5 py-1 text-xs font-medium ring-1 ${
                 c.tone === 'danger' ? 'bg-danger/10 text-danger ring-danger/30'
                 : c.tone === 'warn' ? 'bg-warn/10 text-warn ring-warn/30'
                 : 'bg-ink-900/50 text-slate-400 ring-ink-700'}`}>{c.label}</span>
@@ -797,7 +797,7 @@ function HostDetail({ host }: { host: Host }) {
                     <span className="block truncate text-sm font-medium text-slate-200">{a.label}</span>
                     <span className="block truncate font-mono text-[11px] text-slate-500">{a.url.replace(/^https?:\/\//, '')}</span>
                   </span>
-                  {a.enabled && <span className="shrink-0 text-slate-600 group-hover:text-slate-400">↗</span>}
+                  {a.enabled && <span className="shrink-0 text-slate-600 group-hover:text-slate-400"><ArrowUpRightIcon /></span>}
                 </a>
               )
             })}

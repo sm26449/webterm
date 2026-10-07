@@ -7,6 +7,7 @@ import { termTheme } from '../lib/termtheme'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { errText } from '../lib/api'
 import { Button } from './ui'
+import { CloseIcon, PauseIcon, PlayIcon } from './Icons'
 
 type Cmd = { text: string; exitCode?: number; time: number }
 
@@ -265,8 +266,8 @@ export default function TranscriptPlayer(props: {
         className="wt-workspace flex h-[85vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl bg-ink-900 shadow-2xl ring-1 ring-ink-700"
       >
         <header className="flex items-center gap-3 border-b border-ink-800 px-4 py-2.5">
-          <span className="truncate text-sm font-medium text-slate-200">
-            ▶ {props.title || t('transcript.sessionFallback')}
+          <span className="flex min-w-0 items-center gap-1.5 truncate text-sm font-medium text-slate-200">
+            <PlayIcon size={11} /> {props.title || t('transcript.sessionFallback')}
           </span>
           <span className="shrink-0 rounded bg-ink-800 px-2 py-0.5 text-[11px] text-slate-400">{t('transcript.badge')}</span>
           {/* redare = fidel; text = citibil și căutabil (esențial după aplicații pe tot ecranul) */}
@@ -287,7 +288,7 @@ export default function TranscriptPlayer(props: {
             {mode === 'text' ? t('transcript.downloadTxt') : t('transcript.download')}
           </a>
           <button onClick={props.onClose} aria-label={t('transcript.close')} className="shrink-0 rounded-md px-2 py-1 text-slate-400 hover:bg-ink-800">
-            ✕
+            <CloseIcon size={14} />
           </button>
         </header>
 
@@ -376,7 +377,7 @@ export default function TranscriptPlayer(props: {
               onClick={() => setPlaying((v) => !v)}
               disabled={loading || dur === 0}
               aria-label={playing ? t('transcript.pause') : t('transcript.play')} className="shrink-0">
-              {playing ? '❚❚' : '▶'}
+              {playing ? <PauseIcon /> : <PlayIcon />}
             </Button>
             <span className="shrink-0 font-mono text-xs tabular-nums text-slate-400">
               {fmt(pos)} / {fmt(dur)}

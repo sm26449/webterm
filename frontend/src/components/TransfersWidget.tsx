@@ -8,7 +8,7 @@ import { dismissUpload, fmtBytes } from '../lib/uploads'
 import { dismissDownload } from '../lib/downloads'
 import { dismissCopy } from '../lib/copyjobs'
 import { UploadJob, isActive, isCopy, isDownload, sizeKnown, uploadStore } from '../lib/uploadStore'
-import { CopyIcon, DownloadIcon, UploadIcon } from './Icons'
+import { CopyIcon, DownloadIcon, MinusIcon, UploadIcon } from './Icons'
 import { JobRow, jobHostName, needsAttention } from './JobsBar'
 import { IconButton, compactAction } from './ui'
 
@@ -140,7 +140,7 @@ export default function TransfersWidget(props: { hosts: Host[]; insertSid?: stri
             <IconButton type="button" onClick={toggle} label={t('transfers.minimize')}
               className={`hover:bg-ink-700 ${canClear ? '' : 'ml-auto'}`}>
               {/* „–" = minimizează la pilulă (aria-label poartă sensul) */}
-              <span aria-hidden="true" className="text-base leading-none">–</span>
+              <MinusIcon />
             </IconButton>
           </div>
           <ul className="min-h-0 flex-1 overflow-y-auto px-2 pb-1">

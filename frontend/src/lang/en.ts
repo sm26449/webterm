@@ -860,6 +860,8 @@ const en: Lang = {
     'files.sortName': "name",
     'files.sortSize': "size",
     'files.sortDate': "date",
+    'files.sortAsc': "ascending",
+    'files.sortDesc': "descending",
     'files.dropHere': "Release to upload here",
     'files.newDirPh': "folder name",
     'files.edit': "Edit",

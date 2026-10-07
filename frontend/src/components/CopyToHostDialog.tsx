@@ -5,7 +5,7 @@ import { Conflict, startCopy } from '../lib/copyjobs'
 import { useI18n } from '../lib/i18n'
 import { lsGet, lsSet } from '../lib/storage'
 import { useFocusTrap } from '../lib/useFocusTrap'
-import { FolderIcon } from './Icons'
+import { FolderIcon, LevelUpIcon } from './Icons'
 
 /* „Copiază pe host…" (3.5.5): alegi hostul destinaţie (doar hosturi cu agent ONLINE; sursa apare
    ultima, ca „acelaşi host" — duplicat / alt director), folderul destinaţie (câmp + un mic
@@ -139,7 +139,7 @@ export default function CopyToHostDialog(props: {
         <div className="mt-1 flex gap-1">
           <button type="button" disabled={!listing || listing.path === '/'} onClick={() => dst != null && listing && browse(dst, listing.parent)}
             className="wt-touch shrink-0 rounded px-2 text-slate-400 ring-1 ring-ink-700 hover:bg-ink-800 disabled:opacity-30"
-            aria-label={t('files.upLevel')} title={t('files.upLevel')}>↰</button>
+            aria-label={t('files.upLevel')} title={t('files.upLevel')}><LevelUpIcon size={14} /></button>
           <input id="wt-copy-dir" value={dir} spellCheck={false} onChange={(e) => setDir(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter' && dst != null) { e.preventDefault(); void browse(dst, dir) } }}
             className="min-w-0 flex-1 rounded bg-ink-800 px-2 py-1 font-mono text-[11px] text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500" />

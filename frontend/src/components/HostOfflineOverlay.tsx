@@ -9,6 +9,7 @@ import {
 } from '../lib/hostOffline'
 import { wakeHost } from '../lib/wake'
 import DiagnosticModal from './DiagnosticModal'
+import { CheckIcon, PowerIcon, RefreshIcon, WarningIcon } from './Icons'
 
 // cât rămâne vizibilă confirmarea „din nou online" (se estompează în ultima secundă)
 const BACK_MS = 6000
@@ -141,7 +142,7 @@ export default function HostOfflineOverlay(props: {
               className="pointer-events-auto w-full max-w-lg rounded-lg border border-amber-500/40 bg-ink-900/95 px-3 py-2.5 text-sm shadow-lg backdrop-blur-sm">
               <div className="flex items-start gap-2">
                 {/* nu doar culoare: icon + titlu explicit */}
-                <span aria-hidden="true" className="wt-warn mt-0.5 shrink-0">⚠</span>
+                <span aria-hidden="true" className="wt-warn mt-0.5 shrink-0"><WarningIcon /></span>
                 <div className="min-w-0 flex-1">
                   <div id={`wt-off-${session.id}`} className="font-semibold text-slate-100">{title}</div>
                   <div className="tabular-nums text-xs text-slate-300" title={since != null ? fmtTs(since) : undefined}>
@@ -163,7 +164,7 @@ export default function HostOfflineOverlay(props: {
                 {actions.reconnect && props.onReconnect && (
                   <button type="button" onClick={props.onReconnect} disabled={props.reconnecting}
                     className={`${btn} bg-sky-600 text-white ring-sky-500 hover:bg-sky-700 disabled:opacity-50`}>
-                    {props.reconnecting ? t('session.reconnectingBtn') : `↻ ${t('hostOffline.reconnect')}`}
+                    {props.reconnecting ? t('session.reconnectingBtn') : <><RefreshIcon size={12} /><span className="ml-1">{t('hostOffline.reconnect')}</span></>}
                   </button>
                 )}
                 {actions.diagnostics && (
@@ -175,7 +176,7 @@ export default function HostOfflineOverlay(props: {
                   <button type="button" disabled={waking} title={t('sidebar.wakeTitle')}
                     onClick={async () => { setWaking(true); try { await wakeHost(target, t) } finally { setWaking(false) } }}
                     className={`${secondary} disabled:opacity-50`}>
-                    <span aria-hidden="true" className="mr-1">⏻</span>{waking ? t('hostOffline.waking') : t('hostOffline.wake')}
+                    <span aria-hidden="true" className="mr-1"><PowerIcon size={12} /></span>{waking ? t('hostOffline.waking') : t('hostOffline.wake')}
                   </button>
                 )}
                 {actions.hostPage && (props.onOpenHost ? (
@@ -197,7 +198,7 @@ export default function HostOfflineOverlay(props: {
           ) : back ? (
             <div data-testid="host-back-online"
               className={`rounded-full border border-emerald-500/40 bg-ink-900/95 px-3 py-1 text-xs font-medium text-slate-100 shadow-lg motion-safe:transition-opacity motion-safe:duration-1000 ${back.fading ? 'opacity-0' : 'opacity-100'}`}>
-              <span aria-hidden="true" className="wt-good mr-1">✓</span>{t('hostOffline.backOnline', { host: back.name })}
+              <span aria-hidden="true" className="wt-good mr-1 inline-block align-[-2px]"><CheckIcon size={12} /></span>{t('hostOffline.backOnline', { host: back.name })}
             </div>
           ) : null}
         </div>

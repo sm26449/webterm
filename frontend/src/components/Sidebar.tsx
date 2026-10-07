@@ -11,7 +11,7 @@ import { hostColor, reachState } from '../lib/host'
 import { canWake } from '../lib/hostOffline'
 import { wakeHost as wakeShared } from '../lib/wake'
 import { allSchemes, hostSchemeRaw, setHostScheme } from '../lib/termtheme'
-import { ActivityIcon, CloseIcon, CollapseIcon, DownloadIcon, FilesIcon, FolderMoveIcon, GearIcon, KeyIcon, LogoMark, MoreIcon, NoteIcon, PlusIcon, PowerIcon, RefreshIcon, SearchIcon, ServerIcon, ShieldSmallIcon, TerminalPromptIcon } from './Icons'
+import { ActivityIcon, ArrowUpIcon, BanIcon, BellIcon, BellOffIcon, ChevronIcon, CloseIcon, CollapseIcon, DownloadIcon, FilesIcon, FolderMoveIcon, GearIcon, KeyIcon, LinkIcon, LogoMark, MoreIcon, NoteIcon, PaletteIcon, PencilIcon, PlugIcon, PlusIcon, PowerIcon, RefreshIcon, SearchIcon, ServerIcon, ShieldSmallIcon, StethoscopeIcon, SubItemIcon, TerminalPromptIcon, WarningIcon } from './Icons'
 import { fmt } from '../lib/shortcuts'
 import { setHostMuted, updatesSignal, useUpdatesPref } from '../lib/updatesPref'
 import { Badge, Button, IconButton } from './ui'
@@ -440,7 +440,7 @@ export default function Sidebar(props: {
                       : 'text-slate-500 ring-ink-700 hover:bg-ink-800 hover:text-slate-300'}`}>
                     {sig === 'security'
                       ? <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-rose-500" />
-                      : <span aria-hidden="true">↑</span>}
+                      : <ArrowUpIcon size={11} />}
                     {host.updates.count}
                   </button>
                 )
@@ -452,7 +452,7 @@ export default function Sidebar(props: {
                 <span role="img"
                   title={t('sidebar.noAutostartTitle')}
                   aria-label={t('sidebar.noAutostartAria', { name: host.name })}
-                  className="wt-warn shrink-0 text-[11px] leading-none opacity-70">⚠</span>
+                  className="wt-warn shrink-0 leading-none opacity-70"><WarningIcon size={12} /></span>
               )}
             </div>
             {host.hostname && (
@@ -503,7 +503,7 @@ export default function Sidebar(props: {
                     className={`grid min-h-6 min-w-6 shrink-0 place-items-center rounded p-1 focus-visible:opacity-100 ${host.alerts_muted
                       ? 'wt-warn opacity-100 hover:opacity-80'
                       : 'opacity-0 hover:text-slate-200 group-hover:opacity-100 [@media(hover:none)]:opacity-100'}`}
-                  >{host.alerts_muted ? '🔕' : '🔔'}</button>
+                  >{host.alerts_muted ? <BellOffIcon /> : <BellIcon />}</button>
                 )}
                 {/* Wake-on-LAN: cere unui agent vecin din acelaşi LAN să trimită magic packet-ul.
                     Doar host-uri de agent (WoL n-are sens pe SSH/telnet). */}
@@ -512,20 +512,20 @@ export default function Sidebar(props: {
                     onClick={(e) => { e.stopPropagation(); wakeHost(host) }}
                     disabled={waking === host.id}
                     title={t('sidebar.wakeTitle')} label={t('sidebar.wakeAria', { name: host.name })}
-                  >{waking === host.id ? '…' : '⏻'}</IconButton>
+                  >{waking === host.id ? '…' : <PowerIcon size={14} />}</IconButton>
                 )}
               </div>
             )}
             {host.conflict && (
-              <div className="truncate text-xs wt-danger"
+              <div className="flex items-center gap-1 text-xs wt-danger"
                 title={t('sidebar.conflictTitle')}>
-                ⚠ {t('sidebar.conflictBody')}
+                <span className="shrink-0"><WarningIcon size={12} /></span><span className="truncate">{t('sidebar.conflictBody')}</span>
               </div>
             )}
             {/* link de instalare încă valabil şi nefolosit: ca să observi unul uitat/scurs */}
             {host.enroll_pending && (
-              <div className="truncate text-xs wt-warn" title={t('sidebar.enrollPendingTitle')}>
-                🔗 {host.enroll_protected ? t('sidebar.enrollPendingProtected') : t('sidebar.enrollPending')}
+              <div className="flex items-center gap-1 text-xs wt-warn" title={t('sidebar.enrollPendingTitle')}>
+                <span className="shrink-0"><LinkIcon size={12} /></span><span className="truncate">{host.enroll_protected ? t('sidebar.enrollPendingProtected') : t('sidebar.enrollPending')}</span>
               </div>
             )}
             {/* Agentul a fost scos de pe host cu `ptyd.py uninstall`. Nu ştergem nimic
@@ -533,8 +533,8 @@ export default function Sidebar(props: {
                 sine la reconectare. Ştergerea rămâne o apăsare conştientă, aici. */}
             {host.uninstalled_at && !host.online && (
               <div className="mt-1 flex items-center gap-2">
-                <span className="truncate text-xs wt-warn" title={t('sidebar.uninstalledTitle')}>
-                  ⚠ {t('sidebar.uninstalledBadge')}
+                <span className="flex min-w-0 items-center gap-1 text-xs wt-warn" title={t('sidebar.uninstalledTitle')}>
+                  <span className="shrink-0"><WarningIcon size={12} /></span><span className="truncate">{t('sidebar.uninstalledBadge')}</span>
                 </span>
                 <button
                   onClick={(e) => { e.stopPropagation(); deleteHost(host) }}
@@ -791,7 +791,7 @@ export default function Sidebar(props: {
                       onClick={() => setCollapsedFolders({ ...collapsedFolders, [folder]: !collapsed })}
                       className="flex min-w-0 flex-1 items-center gap-1.5 text-left hover:text-slate-300"
                     >
-                      <span className="text-[10px]">{collapsed ? '▸' : '▾'}</span>
+                      <ChevronIcon open={!collapsed} size={12} />
                       <span className="opacity-70"><FolderMoveIcon /></span>
                       <span className={`truncate ${folder ? '' : 'italic text-slate-400'}`}>{folder || t('sidebar.noFolder')}</span>
                     </button>
@@ -1138,24 +1138,24 @@ function HostMenu(props: {
             )}
             {props.online && (!props.connectionType || props.connectionType === 'agent') && (
               <button role="menuitem" className={`${item} text-slate-200`} onClick={act(props.onSerial)}>
-                <span className="grid h-4 w-4 place-items-center text-[13px]">🔌</span> {t('sidebar.serialConsole')}
+                <PlugIcon /> {t('sidebar.serialConsole')}
               </button>
             )}
             {(!props.connectionType || props.connectionType === 'agent') && (
               // SSH-jump: adaugă o ţintă din LAN-ul acestui agent, tunelată prin el. Ţinta
               // salvată apare cuibărită sub host, în sidebar.
               <button role="menuitem" className={`${item} text-slate-200`} onClick={act(props.onAddJump)}>
-                <span className="grid h-4 w-4 place-items-center text-[13px]">↳</span> {t('sidebar.addSshJump')}
+                <SubItemIcon /> {t('sidebar.addSshJump')}
               </button>
             )}
             {(!props.connectionType || props.connectionType === 'agent') && (
               // și când e OFFLINE: exact atunci vrei să vezi DE CE (jurnal de conexiune)
               <button role="menuitem" className={`${item} text-slate-200`} onClick={act(props.onDiagnostic)}>
-                <span className="grid h-4 w-4 place-items-center text-[13px]">🩺</span> {t('sidebar.diagnostic')}
+                <StethoscopeIcon /> {t('sidebar.diagnostic')}
               </button>
             )}
             <button role="menuitem" className={`${item} text-slate-200`} onClick={act(props.onEdit)}>
-              <span className="grid h-4 w-4 place-items-center text-[13px]">✎</span> {t('sidebar.editHost')}
+              <PencilIcon size={16} /> {t('sidebar.editHost')}
             </button>
             <button role="menuitem" className={`${item} text-slate-200`} onClick={act(props.onFolder)}>
               <FolderMoveIcon /> {t('sidebar.moveToGroup')}
@@ -1175,13 +1175,13 @@ function HostMenu(props: {
             {/* mascarea per host a semnalului de update-uri OS (preferinţă locală, lib/updatesPref):
                 pentru hostul pe care-l actualizezi oricum pe alt drum şi nu vrei badge-ul în listă */}
             <button role="menuitem" className={`${item} text-slate-200`} onClick={act(props.onToggleUpdatesMute)}>
-              <span className="grid h-4 w-4 place-items-center text-[13px]" aria-hidden="true">{props.updatesMuted ? '↑' : '⊘'}</span>
+              {props.updatesMuted ? <ArrowUpIcon size={16} /> : <BanIcon size={16} />}
               {props.updatesMuted ? t('updates.unmuteHost') : t('updates.muteHostMenu')}
             </button>
             {/* schemă de culori proprie hostului: „producția e roșiatică" —
                 un semnal vizual imposibil de ratat când ai 5 host-uri deschise */}
             <button role="menuitem" className={`${item} text-slate-200`} onClick={() => setSchemeOpen((v) => !v)}>
-              <span className="inline-block w-4" aria-hidden="true">◧</span> {t('sidebar.hostColours')}
+              <PaletteIcon /> {t('sidebar.hostColours')}
             </button>
             {schemeOpen && (
               <div className="mb-1 ml-6 mr-1 space-y-0.5">

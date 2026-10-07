@@ -875,6 +875,8 @@ const ro: Lang = {
     'files.sortName': "nume",
     'files.sortSize': "dim",
     'files.sortDate': "data",
+    'files.sortAsc': "crescător",
+    'files.sortDesc': "descrescător",
     'files.dropHere': "Eliberează pentru a încărca aici",
     'files.newDirPh': "nume director",
     'files.edit': "Editează",

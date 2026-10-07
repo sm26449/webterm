@@ -5,7 +5,7 @@ import { useI18n } from '../lib/i18n'
 import { SHEET_CLS } from '../lib/sheet'
 import { useDrawer } from '../lib/useDrawer'
 import SheetBar from './SheetBar'
-import { RefreshIcon } from './Icons'
+import { CloseIcon, PlayIcon, RefreshIcon, SquareIcon } from './Icons'
 
 // Panou Servicii systemd: listă (nume/stare/descriere) + start/stop/restart. TOTUL prin op-ul
 // `run` al agentului (systemctl rulat pe host) — niciun op nou în agent, deci fără re-semnare.
@@ -86,7 +86,7 @@ export default function ServicesPanel(props: {
             title={t('services.reload')} aria-label={t('services.reload')}><RefreshIcon /></button>
           {!props.embed && (
             <button onClick={props.onClose} aria-label={t('common.close')}
-              className="wt-touch shrink-0 rounded px-2 py-1 text-slate-400 hover:bg-ink-800">✕</button>
+              className="wt-touch shrink-0 rounded px-2 py-1 text-slate-400 hover:bg-ink-800"><CloseIcon size={14} /></button>
           )}
         </div>
         <div className="flex items-center gap-2 border-b border-ink-800 px-3 py-1.5">
@@ -134,7 +134,7 @@ export default function ServicesPanel(props: {
                           <button key={a} onClick={() => act(s.unit, a)} disabled={busy === s.unit}
                             title={t('services.' + a)} aria-label={t('services.' + a) + ' ' + s.unit}
                             className="grid h-6 w-6 place-items-center rounded text-[11px] text-slate-400 hover:bg-ink-700 hover:text-slate-100 disabled:opacity-40">
-                            {a === 'start' ? '▶' : a === 'stop' ? '■' : '↻'}
+                            {a === 'start' ? <PlayIcon size={11} /> : a === 'stop' ? <SquareIcon size={11} /> : <RefreshIcon size={13} />}
                           </button>
                         ))}
                       </span>

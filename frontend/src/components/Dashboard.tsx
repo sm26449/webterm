@@ -3,7 +3,7 @@ import { isEphemeralHost, isSessionLive, api, AppLink, Host, Session, timeAgo } 
 import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
 import { useI18n } from '../lib/i18n'
 import { hostHistory } from '../lib/metrics'
-import { EyeIcon, PlusIcon, ServerIcon, TerminalPromptIcon } from './Icons'
+import { ArrowUpRightIcon, DiamondIcon, EyeIcon, MenuIcon, PlusIcon, ServerIcon, TerminalPromptIcon } from './Icons'
 import Sparkline from './Sparkline'
 import SecurityCard, { SecurityTarget } from './SecurityCard'
 import SharesModal from './SharesModal'
@@ -17,7 +17,7 @@ const APP_COLOR: Record<string, string> = {
   'mongo-express': '#4bd494', kibana: '#f04e98', clickhouse: '#f0cf5a',
 }
 const APP_GLYPH: Record<string, string> = {
-  proxmox: 'PVE', portainer: 'PTN', grafana: 'GRA', custom: '◆',
+  proxmox: 'PVE', portainer: 'PTN', grafana: 'GRA',   // custom: fără monogramă → DiamondIcon
   adminer: 'ADM', pgadmin: 'PGA', phpmyadmin: 'PMA',
   'mongo-express': 'MEX', kibana: 'KIB', clickhouse: 'CH',
 }
@@ -84,7 +84,7 @@ export default function Dashboard(props: {
     <div data-testid="dashboard" className="wt-canvas h-full overflow-y-auto">
       <div className="mx-auto max-w-7xl px-4 py-6 sm:px-8 sm:py-8">
         <Button variant="secondary" size="lg" onClick={props.onOpenSidebar} className="wt-touch mb-4 md:hidden">
-          ☰ {t('dashboard.openHostList')}
+          <MenuIcon /> {t('dashboard.openHostList')}
         </Button>
         {/* antet + sumar flotă + comenzi */}
         <div className="flex flex-wrap items-end justify-between gap-4">
@@ -113,7 +113,7 @@ export default function Dashboard(props: {
             <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
               {apps.map((a) => {
                 const color = APP_COLOR[a.app_type] || '#34d399'
-                const glyph = APP_GLYPH[a.app_type] || '◆'
+                const glyph = APP_GLYPH[a.app_type] || <DiamondIcon />
                 return (
                   <a key={a.id} href={a.enabled ? a.url : undefined} target="_blank" rel="noopener noreferrer"
                     title={a.enabled ? a.url : t('dashboard.appDisabled')}
@@ -125,7 +125,7 @@ export default function Dashboard(props: {
                       <span className="block truncate text-sm font-medium text-slate-200">{a.label}</span>
                       <span className="block truncate text-[11px] text-slate-500">{a.host_name}{a.enabled ? '' : ` · ${t('dashboard.appOff')}`}</span>
                     </span>
-                    <span className="shrink-0 text-slate-600 group-hover:text-slate-400">↗</span>
+                    <span className="shrink-0 text-slate-600 group-hover:text-slate-400"><ArrowUpRightIcon /></span>
                   </a>
                 )
               })}

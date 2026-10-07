@@ -3,6 +3,7 @@ import { api, errText, SecurityCheck, SecurityStatus, timeAgo } from '../lib/api
 import { useI18n } from '../lib/i18n'
 import HelpTip from './HelpTip'
 import LoadFailed from './LoadFailed'
+import { CheckIcon, CloseIcon } from './Icons'
 
 /* Cardul „Securitate" de pe Dashboard: „e totul în regulă acum?" la o privire. Înainte răspunsul
    cerea patru drumuri (Setări → Securitate, fiecare sesiune partajată, guardrail-ul, cheia de
@@ -29,7 +30,10 @@ const TARGET: Record<string, SecurityTarget | undefined> = {
   // hosts2fa: informativ — alegerea e per host (Editează hostul), nu un loc unic de reparat
 }
 
-const GLYPH: Record<SecurityStatus, string> = { ok: '✓', warn: '!', bad: '✕', info: 'i' }
+// pictograme SVG (erau glifele ✓ ! ✕ i): aceeaşi formă distinctă per stare, fără font
+const GLYPH: Record<SecurityStatus, React.ReactNode> = {
+  ok: <CheckIcon size={12} />, warn: <span className="font-bold">!</span>, bad: <CloseIcon size={12} />, info: <span className="font-bold">i</span>,
+}
 const TONE: Record<SecurityStatus, string> = {
   ok: 'wt-good bg-emerald-500/15', warn: 'wt-warn bg-amber-500/15',
   bad: 'wt-danger bg-rose-500/15', info: 'text-slate-400 bg-ink-700/60',

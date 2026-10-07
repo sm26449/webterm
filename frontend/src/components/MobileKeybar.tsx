@@ -3,6 +3,7 @@ import { useI18n } from '../lib/i18n'
 import { keybarLayout, keybarRows, KeyDef, readKeybarExpanded, SHORT_VIEWPORT_QUERY, writeKeybarExpanded } from '../lib/keybar'
 import { applyMods } from '../lib/keymods'
 import { useMediaQuery } from '../lib/sheet'
+import { ChevronDownIcon, ChevronUpIcon, PasteIcon } from './Icons'
 
 /** Tastele extra pentru tastaturile tactile, pe DOUĂ rânduri: rândul 1 = ce-ţi trebuie mereu
     (Ctrl/Alt latch-uiţi, Esc, Tab, săgeţi), rândul 2 = restul (^C ^D ⇞ ⇟ | / - ~ Home/End/PgUp/PgDn
@@ -121,7 +122,7 @@ export default function MobileKeybar(props: {
             aria-label={layout.rows === 2 ? t('keybar.collapse') : t('keybar.expand')}
             title={layout.rows === 2 ? t('keybar.collapse') : t('keybar.expand')}
           >
-            <span aria-hidden="true">{layout.rows === 2 ? '⌄' : '⌃'}</span>
+            {layout.rows === 2 ? <ChevronDownIcon size={14} /> : <ChevronUpIcon size={14} />}
           </button>
         )}
       </div>
@@ -137,7 +138,7 @@ export default function MobileKeybar(props: {
               onMouseDown={(e) => e.preventDefault()} // tastatura virtuală rămâne deschisă
               onClick={props.onPaste}
             >
-              ⎘
+              <PasteIcon />
             </button>
             {row2.map((k) => keyBtn(k, 'min-w-[44px] shrink-0 grow'))}
           </div>

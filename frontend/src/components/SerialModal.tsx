@@ -3,6 +3,7 @@ import { errText, api, Host } from '../lib/api'
 import { useI18n } from '../lib/i18n'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { Button } from './ui'
+import { CheckIcon, ChevronIcon, CloseIcon, MinusIcon, PlugIcon, SearchIcon } from './Icons'
 
 interface SerialPort {
   device: string
@@ -116,7 +117,7 @@ export default function SerialModal(props: {
   }
 
   const sel = 'rounded-lg border border-ink-700 bg-ink-900 px-2 py-1.5 text-sm text-slate-200'
-  const chip = 'rounded px-1.5 py-0.5 text-[11px] font-medium'   // minim 11 px (audit tipografie)
+  const chip = 'inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium'   // minim 11 px (audit tipografie)
 
   const foundLabel = (d: string) => {
     const p = (ports ?? []).find((x) => x.device === d)
@@ -154,19 +155,19 @@ export default function SerialModal(props: {
             {/* banner mod identificare */}
             {identifying && !found && (
               <div role="status" className="wt-warn mb-2 rounded-lg bg-amber-500/10 px-3 py-2 text-xs ring-1 ring-amber-500/30">
-                <span aria-hidden="true">🔍</span> <b>{t('serial.identifyModeTitle')}</b> {t('serial.identifyModeBody')}
+                <span aria-hidden="true" className="inline-block align-[-2px]"><SearchIcon size={12} /></span> <b>{t('serial.identifyModeTitle')}</b> {t('serial.identifyModeBody')}
               </div>
             )}
             {found?.phase === 'removed' && (
               <div role="status" className="wt-warn mb-2 rounded-lg bg-amber-500/10 px-3 py-2 text-xs ring-1 ring-amber-500/30">
-                <span aria-hidden="true">➖</span> <b className="font-mono">{found.device}</b> {t('serial.wasRemovedPre')} <b>{t('serial.removed')}</b> {t('serial.wasRemovedPost')}
+                <span aria-hidden="true" className="inline-block align-[-2px]"><MinusIcon size={12} /></span> <b className="font-mono">{found.device}</b> {t('serial.wasRemovedPre')} <b>{t('serial.removed')}</b> {t('serial.wasRemovedPost')}
               </div>
             )}
             {found?.phase === 'back' && (
               <div role="status" className="wt-good mb-2 flex items-center justify-between rounded-lg bg-emerald-500/10 px-3 py-2 text-xs ring-1 ring-emerald-500/30">
-                <span><span aria-hidden="true">✓</span> <b className="font-mono">{foundLabel(found.device)}</b> {t('serial.cameBack')} <b>{t('serial.selected')}</b>.</span>
+                <span><span aria-hidden="true" className="inline-block align-[-2px]"><CheckIcon size={12} /></span> <b className="font-mono">{foundLabel(found.device)}</b> {t('serial.cameBack')} <b>{t('serial.selected')}</b>.</span>
                 <button type="button" onClick={() => setFound(null)} aria-label={t('serial.dismissFound')}
-                  className="grid h-6 w-6 place-items-center rounded hover:bg-ink-700"><span aria-hidden="true">×</span></button>
+                  className="grid h-6 w-6 place-items-center rounded hover:bg-ink-700"><CloseIcon size={12} /></button>
               </div>
             )}
 
@@ -198,7 +199,7 @@ export default function SerialModal(props: {
                           {p.vid && p.pid && <span className={`${chip} bg-ink-700 font-mono text-slate-400`}>{p.vid}:{p.pid}</span>}
                           {p.uart && <span className={`${chip} bg-ink-700 text-slate-300`}>UART {p.uart}</span>}
                           {p.serial && <span className={`${chip} wt-accent bg-sky-500/15 font-mono`} title={t('serial.usbUniqueSerial')}>SN {p.serial}</span>}
-                          {p.by_path && <span className={`${chip} bg-ink-700 text-slate-400`} title={p.by_path}>🔌 {t('serial.physicalPort')}</span>}
+                          {p.by_path && <span className={`${chip} bg-ink-700 text-slate-400`} title={p.by_path}><PlugIcon size={11} /> {t('serial.physicalPort')}</span>}
                         </span>
                       </span>
                     </label>
@@ -231,7 +232,7 @@ export default function SerialModal(props: {
 
           {/* avansat: biți/paritate/stop/flow */}
           <button type="button" onClick={() => setAdvanced((v) => !v)} aria-expanded={advanced} className="text-xs text-slate-400 hover:text-slate-200">
-            {advanced ? '▾' : '▸'} {t('serial.advanced')}
+            <span className="inline-flex items-center gap-1"><ChevronIcon open={advanced} size={12} /> {t('serial.advanced')}</span>
           </button>
           {advanced && (
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">

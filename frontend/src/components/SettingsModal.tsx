@@ -9,6 +9,7 @@ import NotificationsTab from './settings/NotificationsTab'
 import BackupTab from './settings/BackupTab'
 import PreferencesTab from './settings/PreferencesTab'
 import { IconButton } from './ui'
+import { CloseIcon } from './Icons'
 
 // Cadrul modalului de Setări: antet, rail-ul de categorii şi dispecerizarea tab-ului activ.
 // God-component-ul de odinioară a fost spart pe tab-uri în ./settings/*Tab.tsx — fiecare îşi ţine
@@ -54,7 +55,7 @@ export default function SettingsModal(props: {
         <div className="flex items-center justify-between border-b border-ink-800 px-5 py-3">
           <h2 className="text-lg font-semibold">{t('settings.title')}</h2>
           <IconButton size="md" onClick={props.onClose} label={t('settings.close')}>
-            ✕
+            <CloseIcon size={14} />
           </IconButton>
         </div>
 

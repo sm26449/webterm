@@ -6,6 +6,7 @@ import { useFocusTrap } from '../lib/useFocusTrap'
 import { useI18n } from '../lib/i18n'
 import { copyText } from '../lib/clipboard'
 import { Button } from './ui'
+import { CheckIcon, CloseIcon } from './Icons'
 
 type HistItem = {
   id: number
@@ -91,7 +92,7 @@ export default function HistoryModal(props: { hosts: Host[]; onClose: () => void
             {hostsWithHistory.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}
           </select>
           <button onClick={props.onClose} aria-label={t('common.close')}
-            className="shrink-0 rounded px-2 text-slate-500 hover:bg-ink-800 hover:text-slate-300">✕</button>
+            className="shrink-0 rounded px-2 text-slate-500 hover:bg-ink-800 hover:text-slate-300"><CloseIcon size={14} /></button>
         </header>
 
         <div className="min-h-0 flex-1 overflow-y-auto">
@@ -121,7 +122,7 @@ export default function HistoryModal(props: { hosts: Host[]; onClose: () => void
                   </div>
                   <button onClick={() => copy(it)} title={t('history.copyTitle')}
                     className="shrink-0 rounded px-1.5 py-0.5 text-[11px] wt-link opacity-0 hover:bg-ink-700 group-hover:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100">
-                    {copied === it.id ? '✓' : t('history.copy')}
+                    {copied === it.id ? <CheckIcon size={12} /> : t('history.copy')}
                   </button>
                 </div>
               )

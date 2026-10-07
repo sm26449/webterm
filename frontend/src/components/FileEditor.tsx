@@ -10,6 +10,7 @@ import { fmtBytes } from '../lib/uploads'
 import { notifyToast } from '../lib/notify'
 import ConfirmModal from './ConfirmModal'
 import { Button } from './ui'
+import { DotIcon } from './Icons'
 
 interface Preview {
   path: string
@@ -210,7 +211,7 @@ export default function FileEditor(props: {
         <div className="flex items-center gap-2 border-b border-ink-800 px-4 py-2">
           {/* punct „nesalvat" ca în VS Code — vizibil și pentru cititoare de ecran prin title/aria */}
           {dirty && (
-            <span className="wt-accent shrink-0 text-base leading-none" title={t('files.unsaved')} aria-label={t('files.unsaved')} data-testid="editor-dirty">●</span>
+            <span className="wt-accent shrink-0 leading-none" title={t('files.unsaved')} aria-label={t('files.unsaved')} role="img" data-testid="editor-dirty"><DotIcon /></span>
           )}
           <span className="truncate font-mono text-xs text-slate-400">{props.path}</span>
           {pv?.truncated && (
