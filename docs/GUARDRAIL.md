@@ -172,4 +172,4 @@ Empty patterns are dropped silently. Patterns are trimmed and cut to 300 charact
   `gateway/app/security.py`. Stored in the `command_guard` setting as JSON.
 - Frontend: `matchCommandRule` and `pendingCommand` in `frontend/src/lib/commands.ts`; the
   Enter handler and the confirm dialog in `components/SessionView.tsx`; the Run on hosts check in
-  `components/FleetRunModal.tsx`; the editor in `components/settings/SecurityTab.tsx`.
+  `components/FleetRunModal.tsx`; the editor in `components/settings/InfrastructureTab.tsx`.

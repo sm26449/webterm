@@ -198,4 +198,4 @@ on the browser session. In particular a token cannot:
 - Backend: `gateway/app/security.py` (`TOKEN_PREFIX`, `api_token_principal`, `require_scope`),
   `gateway/app/api.py` (`TOKEN_SCOPES`, `TOKEN_MAX_DAYS`, `/api/tokens*`, `host_run`), audit actor
   in `gateway/app/main.py` (`audit_log` middleware); table `api_tokens`.
-- UI: `frontend/src/components/settings/SecurityTab.tsx`.
+- UI: `frontend/src/components/settings/InfrastructureTab.tsx`.
