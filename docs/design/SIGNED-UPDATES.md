@@ -28,7 +28,7 @@ This is the part worth reading carefully, because the answer changed.
 Each **deployment** generates its own Ed25519 key at first boot, stored in the data volume. When
 the gateway serves the agent source — at install and on every update — it substitutes its own
 public key into `UPDATE_PUBKEY` and signs with its private half. Agents therefore trust *your*
-gateway, not the project. The UI calls this key the **agent signing key** (Settings → Security).
+gateway, not the project. The UI calls this key the **agent signing key** (Settings → Infrastructure & tokens).
 
 The project's own key still signs the copy in the repository. That is the **official channel**: a
 fallback for a deployment that has no key of its own. In practice a fresh install always has one,

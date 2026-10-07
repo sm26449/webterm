@@ -9,6 +9,31 @@ back.
 
 ## [Unreleased]
 
+### Added
+- **Search in Settings.** A search box at the top of the Settings dialog (or press `/` while the
+  dialog has focus and no field is focused). It searches every section by its title, its help
+  text and a list of synonyms in English and Romanian ("webhook slack", "yubikey", "bearer",
+  "fus orar"), ignoring diacritics, so "setari" finds "setări". Results are grouped by tab;
+  choosing one (click, or arrows + Enter) opens that tab, scrolls to the section and outlines it
+  briefly (a static outline under reduced motion). Escape clears the search. Settings had grown
+  to eight tabs and about thirty sections, and "where is the webhook?" had become a real
+  question: it sits under Notifications, inside the SMTP block. The index is
+  `frontend/src/lib/settingsIndex.ts`; every section carries a `data-setting-id`, and a unit test
+  fails when a section has no index entry or an entry has no section.
+
+### Changed
+- **The Security tab is split in two.** It had grown to eight sections that answered two
+  different questions. **Sign-in & 2FA** / **Autentificare și 2FA** is about how *you* get in:
+  connected devices, passkeys, TOTP. **Infrastructure & tokens** / **Infrastructură și
+  tokenuri** is about the fleet and integrations: the agent signing key, automation tokens,
+  bulk enrollment, the deploy-key policy and the command guardrail. Each section's code moved
+  unchanged. Links into Settings follow: the Dashboard Security card now opens the exact section
+  (2FA → passkeys, guardrail, signing key, backup → automatic backup, alerts → email alerts),
+  scrolled into view, and the dot on the Settings gear opens the signing key when it is missing
+  *or* locked (it used to handle only "missing"). Docs and UI messages that said "Settings →
+  Security" now name the new tab. Messages written by the gateway itself (and `upgrade.sh`)
+  still say "Settings → Security"; they change with the next gateway release.
+
 ## [3.5.8] — 2026-10-07 · agent (57)
 
 One name per idea for "fleet" (Run on hosts / Agent signing key / Bulk enrollment; RO

@@ -15,7 +15,7 @@ path-traversal blocked. On **2FA** hosts, the terminal **locks on inactivity**
 (output suppressed + input refused server-side) and resuming requires a **passkey
 step-up** — protecting against unattended authenticated sessions
 (`WEBTERM_IDLE_LOCK_SECS`, default 5 min). An optional **command guardrail**
-(Settings → Security): regex rules that require **confirmation** or **block**
+(Settings → Infrastructure & tokens): regex rules that require **confirmation** or **block**
 dangerous commands at Enter (e.g. `rm -rf`, `mkfs`) — editable, and enforced on the
 server for `/run` as well, so a command sent with Run on hosts cannot walk around the browser.
 
@@ -47,7 +47,7 @@ exactly as much as access to the mailbox.
 is another way to lock yourself out; the product can be strict in the browser because this
 exists, and shell on the server is a far higher bar than a mailbox. See RUNBOOK §5.
 
-**Signed-in devices (Settings → Security).** The account lists every browser currently signed
+**Signed-in devices (Settings → Sign-in & 2FA).** The account lists every browser currently signed
 in — device label, when it was last seen, which one is *this* device, and a badge on any
 unfamiliar new device. Sign out one device, or **sign out everywhere else** in one click (which
 also closes any open step-up windows). It's the in-UI answer to a suspected stolen cookie, short
@@ -86,7 +86,7 @@ signs in with their own password, passkeys and 2FA, and the audit log records *w
 are **no roles**: every account is a full administrator over the whole fleet — multiple
 accounts buy attribution, not isolation.
 
-**Automation tokens (Settings → Security).** For cron, CI or monitoring: a bearer token
+**Automation tokens (Settings → Infrastructure & tokens).** For cron, CI or monitoring: a bearer token
 with an explicit scope (`read` for `/api/status`, `/api/hosts` and `/api/sessions`; `run` for
 `POST /api/hosts/{id}/run`), mandatory expiry, hashed at rest, revocable in one click, and recorded in the audit log as
 `token:<name>`. It is deliberately narrow — no accounts, no signing key, no backups, and
@@ -118,7 +118,7 @@ to own that key:
   substitutes `UPDATE_PUBKEY` in the `ptyd.py` it serves, and re-signs at runtime, so
   your fleet trusts only *your* key. It lives on the gateway (`data/agent-signing.key`)
   and is written **without a passphrase**, because auto-updates must survive a restart
-  nobody is watching. **Settings → Security** shows its status; the *generate* and
+  nobody is watching. **Settings → Infrastructure & tokens** shows its status; the *generate* and
   *import* buttons there apply only to an install that does not have a key yet (they return
   409 once one exists — so, after the first boot, practically never). To use your own or a
   passphrase-protected key, replace it **before enrolling hosts**: stop the gateway, put

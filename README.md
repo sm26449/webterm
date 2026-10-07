@@ -79,8 +79,8 @@ Fictional demo fleet, captured on v3.5.8 with
 | <picture><source media="(prefers-color-scheme: light)" srcset="docs/screenshots/02-terminal-light.png"><img alt="Terminal session with the Commands panel: exit code and duration of every command" src="docs/screenshots/02-terminal-dark.png"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="docs/screenshots/07-run-on-hosts-light.png"><img alt="Run on hosts: one saved command on four hosts, exit code and output per host" src="docs/screenshots/07-run-on-hosts-dark.png"></picture> |
 | **The host page** | **Files, with multi-select** |
 | <picture><source media="(prefers-color-scheme: light)" srcset="docs/screenshots/05-host-light.png"><img alt="Host page: metrics, live session previews, security and agent status" src="docs/screenshots/05-host-dark.png"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="docs/screenshots/03-files-light.png"><img alt="Files panel next to the terminal, three files selected for a bulk action" src="docs/screenshots/03-files-dark.png"></picture> |
-| **Settings → Security** | **The editor (Monaco)** |
-| <picture><source media="(prefers-color-scheme: light)" srcset="docs/screenshots/06-security-light.png"><img alt="Settings, Security tab: connected devices, agent signing key, passkeys, 2FA" src="docs/screenshots/06-security-dark.png"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="docs/screenshots/04-editor-light.png"><img alt="Monaco editor open on a shell script on the host" src="docs/screenshots/04-editor-dark.png"></picture> |
+| **Settings → Sign-in & 2FA** | **The editor (Monaco)** |
+| <picture><source media="(prefers-color-scheme: light)" srcset="docs/screenshots/06-security-light.png"><img alt="Settings, Sign-in &amp; 2FA tab: connected devices, passkeys, 2FA" src="docs/screenshots/06-security-dark.png"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="docs/screenshots/04-editor-light.png"><img alt="Monaco editor open on a shell script on the host" src="docs/screenshots/04-editor-dark.png"></picture> |
 
 <p align="center"><img alt="A session on a phone, with the two-row key bar" src="docs/screenshots/08-phone-dark.png" width="260"></p>
 
@@ -128,7 +128,7 @@ The installer sets up Docker, the Traefik + WebTerm stack in `/opt/webterm`, a L
 certificate (HTTP-01 by default; add `--cf-token` for Cloudflare DNS-01 and a wildcard for
 port-forward subdomains), the firewall and a daily encrypted backup — then prints the URL and a
 **setup token**. Open the URL, create the first account with that token, and add a passkey in
-**Settings → Security**.
+**Settings → Sign-in & 2FA**.
 
 Then **+ Add host** in the sidebar gives you a one-line install command for the agent: run it on
 the server, and the host comes online. By default it creates a dedicated, unprivileged `webterm`

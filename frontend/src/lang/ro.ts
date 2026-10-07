@@ -255,7 +255,7 @@ const ro: Lang = {
     'err.signing.importFailed': "Cheia de semnare nu a putut fi importată — vezi logul gateway-ului.",
     'err.signing.badKey': "Cheie PEM invalidă sau frază greșită.",
     'err.signing.notEd25519': "Cheia nu e ed25519 — WebTerm folosește doar ed25519.",
-    'err.signing.locked': "Cheia de semnare a agenților e blocată — deblocheaz-o din Setări → Securitate ca să actualizezi agenții.",
+    'err.signing.locked': "Cheia de semnare a agenților e blocată — deblocheaz-o din Setări → Infrastructură și tokenuri ca să actualizezi agenții.",
     'err.signing.sigMissing': "Semnătura agentului lipsește pe gateway — semnează agentul (scripts/sign-agent.py).",
     'err.update.failed': "Actualizarea agentului a eșuat.",
     'err.update.refused': "Agentul a refuzat actualizarea.",
@@ -624,7 +624,7 @@ const ro: Lang = {
     'serial.cancel': "Anulează",
     'serial.opening': "Deschid…",
     'serial.open': "Deschide",
-    'fleet.guardBlocked': "Comanda e BLOCATĂ de guardrail (regula /{pattern}/). Modifică regula din Setări → Securitate dacă vrei s-o rulezi.",
+    'fleet.guardBlocked': "Comanda e BLOCATĂ de guardrail (regula /{pattern}/). Modifică regula din Setări → Infrastructură și tokenuri dacă vrei s-o rulezi.",
     'fleet.guardConfirm': "Comanda se potrivește cu o regulă de guardrail (/{pattern}/) și va rula pe TOATE hosturile selectate. Continui?",
     'fleet.error': "Eșuat — hostul n-a dat detalii",
     'fleet.reportTitle.one': "Rulare pe {count} host",
@@ -1582,7 +1582,7 @@ const ro: Lang = {
     'addhost.modeMany': "Mai multe mașini",
     'addhost.manyDesc': "Creează un token de grup reutilizabil, apoi rulează un singur one-liner pe fiecare mașină — fiecare se înregistrează ca host propriu.",
     'addhost.groupCreated': "Token de grup creat.",
-    'addhost.groupManageHint': "Îl administrezi sau revoci mai târziu din Settings → Security.",
+    'addhost.groupManageHint': "Îl administrezi sau revoci mai târziu din Setări → Infrastructură și tokenuri.",
     'addhost.showPubKey': "Arată cheia publică",
     'addhost.pubKeyHint': "Adaugă linia asta în ~/.ssh/authorized_keys pe server:",
     'addhost.cancel': "Anulează",
@@ -2493,7 +2493,7 @@ const ro: Lang = {
     'settings.deviceRevoke': 'Deconectează',
     'settings.devicesRevokeOthers': 'Deconectează de peste tot',
     'settings.devicesRevokeOthersConfirm': "Deconectezi toate celelalte dispozitive?\n\nAcesta rămâne conectat. Ferestrele de step-up 2FA se închid, deci hosturile protejate vor cere din nou passkey-ul.",
-    // Dialoguri proprii (useConfirm/promptText) ale tab-ului Securitate: titluri + verbe; mesajele
+    // Dialoguri proprii (useConfirm/promptText) ale fostului tab Securitate (azi Autentificare + Infrastructură): titluri + verbe; mesajele
     // rămân cheile `settings.*Confirm` existente.
     'security.revokeTokenTitle': "Revocă tokenul",
     'security.revokeGroupTitle': "Revocă tokenul de grup",

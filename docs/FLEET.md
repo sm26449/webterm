@@ -89,7 +89,7 @@ enrollment token**.
    (0 = unlimited), an optional **folder** the new hosts land in, and whether new hosts
    should **require 2FA**. Creating it re-authenticates and asks for your second factor — a
    reusable token that can register hosts is a provisioning-class credential. (The tokens
-   you've created are **listed and revoked** under **Settings → Security**, which is the
+   you've created are **listed and revoked** under **Settings → Infrastructure & tokens**, which is the
    credential-management surface — not where you create them.)
 2. You get **one install one-liner**, shown once. Run it on every machine (config
    management, a `for` loop over SSH, a golden image's first-boot script, …).
@@ -100,7 +100,7 @@ enrollment token**.
 **Why this is safe.** The group token only *authorizes creation* — it never becomes the
 credential a machine keeps. Every machine ends up with its own per-host token, so you can
 revoke one machine without touching the others (exactly like a hand-added host). The group
-token itself is **revocable** (Settings → Security; already-enrolled machines keep
+token itself is **revocable** (Settings → Infrastructure & tokens; already-enrolled machines keep
 working, no new machine can enroll), **expires**, and is **use-capped** (enforced
 atomically, so concurrent installs can't overshoot the cap). Every auto-enrollment is
 written to the **audit log** (actor `group:<name>`) and raises a **security alert**

@@ -1,7 +1,7 @@
 # Security summary and share links
 
 The **Security** card on the Dashboard answers one question at a glance: *is everything
-OK right now?* Before 3.5.4 that took four trips (Settings → Security, each shared session,
+OK right now?* Before 3.5.4 that took four trips (Settings → Security, as the tab was then called, each shared session,
 the guardrail, the signing key), and nothing listed the live share links across the fleet.
 
 ## What the card checks

@@ -1,4 +1,4 @@
-# Automation tokens (Settings → Security)
+# Automation tokens (Settings → Infrastructure & tokens)
 
 API keys for scripts that have no browser and no passkey: a cron job that checks which hosts are
 offline, a CI step that runs one command on a host after a deploy, a monitoring probe that reads
@@ -23,7 +23,7 @@ Every other route of the API accepts only the browser session cookie.
 
 ## Creating a token
 
-1. **Settings → Security → Automation tokens.**
+1. **Settings → Infrastructure & tokens → Automation tokens.**
 2. **Name** — required, at most 60 characters (longer names are cut). Pick something that tells
    you later what you would be breaking by revoking it (e.g. `cron-uptime`).
 3. **days** — lifetime, default 90. The server clamps it to **1–365**; there is no "never

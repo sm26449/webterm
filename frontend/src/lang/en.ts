@@ -257,7 +257,7 @@ const en: Lang = {
     'err.signing.importFailed': "The signing key could not be imported — see the gateway log.",
     'err.signing.badKey': "Invalid PEM key or wrong passphrase.",
     'err.signing.notEd25519': "The key is not ed25519 — WebTerm uses ed25519 only.",
-    'err.signing.locked': "The agent signing key is locked — unlock it from Settings → Security to update agents.",
+    'err.signing.locked': "The agent signing key is locked — unlock it from Settings → Infrastructure & tokens to update agents.",
     'err.signing.sigMissing': "The agent signature is missing on the gateway — sign the agent (scripts/sign-agent.py).",
     'err.update.failed': "The agent update failed.",
     'err.update.refused': "The agent refused the update.",
@@ -619,7 +619,7 @@ const en: Lang = {
     'serial.cancel': "Cancel",
     'serial.opening': "Opening…",
     'serial.open': "Open",
-    'fleet.guardBlocked': "This command is BLOCKED by the guardrail (rule /{pattern}/). Change the rule in Settings → Security if you mean to run it.",
+    'fleet.guardBlocked': "This command is BLOCKED by the guardrail (rule /{pattern}/). Change the rule in Settings → Infrastructure & tokens if you mean to run it.",
     'fleet.guardConfirm': "This command matches a guardrail rule (/{pattern}/) and will run on ALL selected hosts. Continue?",
     'fleet.error': "Failed — the host gave no details",
     'fleet.reportTitle.one': "Run on {count} host",
@@ -1541,7 +1541,7 @@ const en: Lang = {
     'addhost.modeMany': "Many machines",
     'addhost.manyDesc': "Create a reusable group token, then run one install one-liner on every machine — each self-registers as its own host.",
     'addhost.groupCreated': "Group token created.",
-    'addhost.groupManageHint': "Manage or revoke it later in Settings → Security.",
+    'addhost.groupManageHint': "Manage or revoke it later in Settings → Infrastructure & tokens.",
     'addhost.showPubKey': "Show public key",
     'addhost.pubKeyHint': "Add this line to ~/.ssh/authorized_keys on the server:",
     'addhost.cancel': "Cancel",
@@ -2448,7 +2448,7 @@ const en: Lang = {
     'settings.deviceRevoke': 'Sign out',
     'settings.devicesRevokeOthers': 'Sign out everywhere else',
     'settings.devicesRevokeOthersConfirm': "Sign out every other device?\n\nThis one stays signed in. Any open 2FA step-up windows close, so protected hosts will ask for your passkey again.",
-    // Dialoguri proprii (useConfirm/promptText) ale tab-ului Securitate: titluri + verbe; mesajele
+    // Dialoguri proprii (useConfirm/promptText) ale fostului tab Securitate (azi Autentificare + Infrastructură): titluri + verbe; mesajele
     // rămân cheile `settings.*Confirm` existente.
     'security.revokeTokenTitle': "Revoke the token",
     'security.revokeGroupTitle': "Revoke the group token",

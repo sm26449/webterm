@@ -94,7 +94,7 @@ can reach this host, by fingerprint.
   still read `~/.ssh/webterm_ed25519` like any other file of the agent user — the usual
   "anyone past login has the agent user's access" premise of the threat model.)
 
-## Deploy-key policy (Settings → Security)
+## Deploy-key policy (Settings → Infrastructure & tokens)
 
 Optional hardening, **off by default**, two switches saved on change:
 

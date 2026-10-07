@@ -145,7 +145,7 @@ neither the password nor a 2FA code (it *is* the stronger factor). Once in, set 
 in Settings → Account.
 
 **You know the password but lost the 2FA device.** Use one of the ten recovery codes printed
-when you enabled 2FA; each works once. Then regenerate the set in Settings → Security.
+when you enabled 2FA; each works once. Then regenerate the set in Settings → Sign-in & 2FA.
 
 **You know the password, lost the 2FA device *and* the recovery codes.** The password alone
 cannot get you in — login returns `totp_required`. Disable 2FA from the server:

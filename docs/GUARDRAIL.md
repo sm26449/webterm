@@ -1,4 +1,4 @@
-# Command guardrail (Settings → Security)
+# Command guardrail (Settings → Infrastructure & tokens)
 
 A list of regular expressions that catch commands you almost never mean to run —
 `rm -rf /`, `mkfs`, `dd of=/dev/…`, `DROP TABLE` — and either ask **"are you sure?"** or
@@ -36,7 +36,7 @@ It is on by default and ships with six `confirm` rules:
 
 ## Rules: confirm vs block
 
-Each rule is a pattern plus an action. The editor is in **Settings → Security → Command
+Each rule is a pattern plus an action. The editor is in **Settings → Infrastructure & tokens → Command
 guardrail**: the **Check dangerous commands on Enter** switch, one row per rule (pattern,
 `confirm`/`block`, ✕ to delete), **+ add rule**, and **Save guardrail**. Nothing applies
 until you press Save; the server then validates every pattern, and the open terminals in

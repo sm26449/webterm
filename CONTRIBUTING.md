@@ -128,7 +128,7 @@ collaborator with push access should work on a fork when touching `ptyd.py`, or 
 re-sign before the PR can go green. Do **not** replace `UPDATE_PUBKEY` with your own key in a PR —
 that would be correct for running your own fork, and wrong to merge here.
 
-Deployers can generate or import **their own deployment key** from the UI (Settings → Security)
+Deployers can generate or import **their own deployment key** from the UI (Settings → Infrastructure & tokens)
 without touching the source; for your own fork, generate a key pair and substitute `UPDATE_PUBKEY`
 locally — see [Signed agent updates](docs/SECURITY-FEATURES.md#signed-agent-updates).
 
