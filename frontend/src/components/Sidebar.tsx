@@ -3,6 +3,7 @@ import { lsGet } from '../lib/storage'
 import { errText, isSessionLive, api, ApiError, getBootVersion, Host, SearchHit, Session, timeAgo, withStepup } from '../lib/api'
 import { notify, notifyError } from '../lib/notify'
 import { fmtTs } from '../lib/tz'
+import type { SettingsTarget } from '../lib/settingsIndex'
 import { useI18n } from '../lib/i18n'
 import { useConfirm } from '../lib/confirm'
 import { useFocusTrap } from '../lib/useFocusTrap'
@@ -53,7 +54,7 @@ export default function Sidebar(props: {
   addHostSignal: number
   settingsSignal: number
   /** tab-ul cerut odată cu semnalul (cardul Securitate de pe Dashboard); gol = alegerea obişnuită */
-  settingsCat?: 'securitate' | 'backup' | 'notificari'
+  settingsCat?: SettingsTarget
   statusSignal: number
   onClose: () => void
   collapsed: boolean
@@ -85,7 +86,7 @@ export default function Sidebar(props: {
   // dialogul de export CSV; `folder` = preselecţia (antetul unui folder), undefined = nimic bifat
   const [exportCsv, setExportCsv] = useState<{ folder?: string } | null>(null)
   const [showSettings, setShowSettings] = useState(false)
-  const [settingsCat, setSettingsCat] = useState<'securitate' | 'backup' | 'notificari' | undefined>(undefined)
+  const [settingsCat, setSettingsCat] = useState<SettingsTarget | undefined>(undefined)
   const [showFleetRun, setShowFleetRun] = useState(false)
   const [showStatus, setShowStatus] = useState(false)
   const [showAbout, setShowAbout] = useState(false)
@@ -972,7 +973,10 @@ export default function Sidebar(props: {
           <SettingsModal
             email={props.email}
             webauthnAvailable={props.webauthnAvailable}
-            initialCat={settingsCat ?? (props.signingMissing ? 'securitate' : props.backupReady ? 'backup' : undefined)}
+            // fără ţintă explicită, punctul de pe rotiţă alege: cheia de semnare (lipsă sau blocată —
+            // acelaşi lucru îl spune şi title-ul rotiţei) → backup gata → Cont
+            initialCat={settingsCat?.cat ?? (props.signingMissing || props.signingLocked ? 'infrastructura' : props.backupReady ? 'backup' : undefined)}
+            initialSection={settingsCat?.section ?? (props.signingMissing || props.signingLocked ? 'signingKey' : undefined)}
             onAccountChanged={props.onAccountChanged}
             onClose={() => setShowSettings(false)}
           />

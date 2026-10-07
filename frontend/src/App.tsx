@@ -24,6 +24,7 @@ import Toasts, { ToastItem } from './components/Toasts'
 import CopyToast from './components/CopyToast'
 import { errText, api, ApiError, AppState, Host, isSessionLive, Session, Snippet, SplitView, setStepupHandler, withStepup } from './lib/api'
 import { hostAt, hostColor } from './lib/host'
+import type { SettingsTarget } from './lib/settingsIndex'
 import { useI18n } from './lib/i18n'
 import { useConfirm } from './lib/confirm'
 import { useFocusTrap } from './lib/useFocusTrap'
@@ -281,7 +282,7 @@ function MainApp() {
   const [settingsSignal, setSettingsSignal] = useState(0)
   // tab-ul cu care se deschid Setările la următorul semnal (cardul Securitate → „Backup"); gol =
   // alegerea obişnuită a Sidebar-ului (punctul de pe rotiţă / Cont)
-  const [settingsCat, setSettingsCat] = useState<'securitate' | 'backup' | 'notificari' | undefined>(undefined)
+  const [settingsCat, setSettingsCat] = useState<SettingsTarget | undefined>(undefined)
   const [statusSignal, setStatusSignal] = useState(0)
   // activitate pe tab-uri din fundal: ultimul out_offset „văzut" per sesiune.
   // Tab-ul activ e mereu la zi; un tab abia deschis pornește de la offset-ul

@@ -6,6 +6,7 @@ import { hostHistory } from '../lib/metrics'
 import { ArrowUpRightIcon, DiamondIcon, EyeIcon, MenuIcon, PlusIcon, ServerIcon, TerminalPromptIcon } from './Icons'
 import Sparkline from './Sparkline'
 import SecurityCard, { SecurityTarget } from './SecurityCard'
+import type { SettingsTarget } from '../lib/settingsIndex'
 import SharesModal from './SharesModal'
 import { fmt } from '../lib/shortcuts'
 import { Badge, Button, EmptyState, eyebrow } from './ui'
@@ -34,7 +35,7 @@ export default function Dashboard(props: {
   onOpenPalette: () => void
   onOpenSidebar: () => void
   /** cardul Securitate duce la locul unde se repară: Setări pe tab-ul potrivit / Status */
-  onOpenSettings: (cat: 'securitate' | 'backup' | 'notificari') => void
+  onOpenSettings: (target: SettingsTarget) => void
   onOpenStatus: () => void
 }) {
   const { t } = useI18n()
@@ -44,7 +45,7 @@ export default function Dashboard(props: {
   const navigateSecurity = (target: SecurityTarget) => {
     if (target.kind === 'shares') setSharesOpen(true)
     else if (target.kind === 'status') props.onOpenStatus()
-    else props.onOpenSettings(target.cat)
+    else props.onOpenSettings(target.target)
   }
   const byId = new Map(props.hosts.map((h) => [h.id, h]))
   // apps (forward-uri promovate) agregate din toată flota — strip-ul „one pane of glass"

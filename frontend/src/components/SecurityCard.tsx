@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useState } from 'react'
 import { api, errText, SecurityCheck, SecurityStatus, timeAgo } from '../lib/api'
 import { useI18n } from '../lib/i18n'
+import type { SettingsTarget } from '../lib/settingsIndex'
 import HelpTip from './HelpTip'
 import LoadFailed from './LoadFailed'
 import { CheckIcon, CloseIcon } from './Icons'
@@ -14,18 +15,20 @@ import { CheckIcon, CloseIcon } from './Icons'
    doar culoare (WCAG 1.4.1): fiecare rând are un glif distinct (✓ ! ✕ i) şi cuvântul stării,
    vizibil pentru cititorul de ecran. Fiecare rând duce acolo unde se repară. */
 
+// Setările: tab-ul ŞI secţiunea — de la 3.5.9 (fostul tab „Securitate" spart în două) rândul duce
+// direct la secţiunea care se repară, derulată şi evidenţiată, nu doar la începutul unui tab lung.
 export type SecurityTarget =
-  | { kind: 'settings'; cat: 'securitate' | 'backup' | 'notificari' }
+  | { kind: 'settings'; target: SettingsTarget }
   | { kind: 'shares' }
   | { kind: 'status' }
 
 const TARGET: Record<string, SecurityTarget | undefined> = {
-  account2fa: { kind: 'settings', cat: 'securitate' },
+  account2fa: { kind: 'settings', target: { cat: 'autentificare', section: 'passkeys' } },
   shares: { kind: 'shares' },
-  guardrail: { kind: 'settings', cat: 'securitate' },
-  signingKey: { kind: 'settings', cat: 'securitate' },
-  backup: { kind: 'settings', cat: 'backup' },
-  alerts: { kind: 'settings', cat: 'notificari' },
+  guardrail: { kind: 'settings', target: { cat: 'infrastructura', section: 'guardrail' } },
+  signingKey: { kind: 'settings', target: { cat: 'infrastructura', section: 'signingKey' } },
+  backup: { kind: 'settings', target: { cat: 'backup', section: 'backupAuto' } },
+  alerts: { kind: 'settings', target: { cat: 'notificari', section: 'smtp' } },
   agents: { kind: 'status' },
   // hosts2fa: informativ — alegerea e per host (Editează hostul), nu un loc unic de reparat
 }

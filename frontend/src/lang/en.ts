@@ -1048,6 +1048,15 @@ const en: Lang = {
     'host.credEphemeral': "Ephemeral (bootstrap only)",
     'host.credStored': "Stored, encrypted",
     'host.credNone': "None",
+    // Setări: tab-urile desprinse din fostul „Security" (3.5.9) + căutarea în setări
+    'settings.cat.signin': "Sign-in & 2FA",
+    'settings.cat.infra': "Infrastructure & tokens",
+    'settings.search.label': "Search settings",
+    'settings.search.placeholder': "Search settings…",
+    'settings.search.results': "Matching settings",
+    'settings.search.count': "Results: {n}",
+    'settings.search.none': "No setting matches “{query}”",
+    'settings.search.noneHint': "Try another word, in English or Romanian: “webhook”, “passkey”, “fus orar”.",
     // ── 3.5.5: selecţie multiplă, folder prin Transferuri, copiere pe alt host ──
     'files.selectAll': "Select all (visible)",
     'files.selectRow': "Select {name}",
@@ -2240,7 +2249,6 @@ const en: Lang = {
     'settings.close': "Close",
     'settings.categoriesNav': "Settings categories",
     'settings.cat.account': "Account",
-    'settings.cat.security': "Security",
     'settings.cat.audit': "Audit",
 
     // audit log

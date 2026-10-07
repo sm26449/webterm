@@ -692,3 +692,26 @@ body > .monaco-aria-container {
     .wt-wordmark { display: inline; }
   }
 }
+
+/* Căutarea din Setări (3.5.9): secţiunea aleasă e încadrată scurt, apoi conturul se stinge.
+   `scroll-margin-top` lasă loc conturului (outline-offset) sub marginea de sus a panoului derulat.
+   La prefers-reduced-motion conturul nu se mai stinge treptat: stă pe loc şi dispare când JS
+   scoate clasa (regula globală de mai sus ar scurta animaţia la zero, deci n-ar mai apărea deloc). */
+[data-setting-id] {
+  scroll-margin-top: 12px;
+}
+@keyframes wt-setting-flash {
+  0%, 45% { outline-color: rgb(var(--accent) / 0.9); }
+  100% { outline-color: rgb(var(--accent) / 0); }
+}
+.wt-setting-flash {
+  outline: 2px solid rgb(var(--accent) / 0.9);
+  outline-offset: 6px;
+  border-radius: 12px;
+  animation: wt-setting-flash 2.2s ease-out forwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .wt-setting-flash {
+    animation-name: none;
+  }
+}

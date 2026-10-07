@@ -61,71 +61,73 @@ export default function AuditTab() {
 
   return (
     <div>
-      <h3 className={heading + ' !mt-0'}>{t('settings.audit.title')}</h3>
-      <p className="mt-1 text-xs text-slate-500">{t('settings.audit.hint')}</p>
+      <section data-setting-id="audit">
+        <h3 className={heading + ' !mt-0'}>{t('settings.audit.title')}</h3>
+        <p className="mt-1 text-xs text-slate-500">{t('settings.audit.hint')}</p>
 
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <input
-          value={auditQ}
-          onChange={(e) => setAuditQ(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') loadAudit(true) }}
-          placeholder={t('settings.audit.searchPlaceholder')}
-          aria-label={t('settings.audit.searchAria')}
-          spellCheck={false}
-          className={field + ' min-w-40 flex-1'}
-        />
-        <label className="flex items-center gap-2 text-xs text-slate-400">
-          <input type="checkbox" checked={auditFailed}
-            onChange={(e) => { setAuditFailed(e.target.checked) }} />
-          {t('settings.audit.failedOnly')}
-        </label>
-        <Button variant="primary" onClick={() => loadAudit(true)} disabled={auditBusy}>{t('settings.audit.filter')}</Button>
-      </div>
-
-      <ul className="mt-3 flex flex-col gap-1">
-        {(audit ?? []).map((e, i) => (
-          <li key={`${e.ts}-${i}`}
-            className="rounded-md bg-ink-800/60 px-3 py-2 text-xs ring-1 ring-ink-700">
-            <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-              <span className="font-mono tabular-nums text-slate-400">
-                {fmtTs(e.ts)}
-              </span>
-              {/* respins ≠ reușit: la audit, eșecurile sunt cele mai interesante */}
-              <span className={`font-mono ${e.status >= 400 ? 'wt-danger' : 'wt-good'}`}>
-                {e.status}
-              </span>
-              <span className="font-mono text-slate-300">{e.method} {e.path}</span>
-            </div>
-            <div className="mt-0.5 flex flex-wrap gap-x-3 text-slate-500">
-              <span>{e.actor || t('settings.audit.anonymous')}</span>
-              {e.ip && <span className="font-mono">{e.ip}</span>}
-              {e.detail && <span className="font-mono text-slate-400">{e.detail}</span>}
-            </div>
-          </li>
-        ))}
-      </ul>
-
-      {audit === null && !auditErr && (
-        <p className="mt-3 text-xs text-slate-500">{t('settings.audit.loading')}</p>
-      )}
-      {auditErr && (
-        <div className="mt-3 rounded-md ring-1 ring-ink-700">
-          <LoadFailed compact message={auditErr.msg} onRetry={() => loadAudit(auditErr.reset)} />
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <input
+            value={auditQ}
+            onChange={(e) => setAuditQ(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') loadAudit(true) }}
+            placeholder={t('settings.audit.searchPlaceholder')}
+            aria-label={t('settings.audit.searchAria')}
+            spellCheck={false}
+            className={field + ' min-w-40 flex-1'}
+          />
+          <label className="flex items-center gap-2 text-xs text-slate-400">
+            <input type="checkbox" checked={auditFailed}
+              onChange={(e) => { setAuditFailed(e.target.checked) }} />
+            {t('settings.audit.failedOnly')}
+          </label>
+          <Button variant="primary" onClick={() => loadAudit(true)} disabled={auditBusy}>{t('settings.audit.filter')}</Button>
         </div>
-      )}
-      {!auditErr && audit !== null && audit.length === 0 && (
-        <p className="mt-3 text-xs text-slate-500">{t('settings.audit.empty')}</p>
-      )}
-      <div className="mt-3 flex items-center gap-3">
-        {!auditEnd && audit !== null && audit.length > 0 && (
-          <button onClick={() => loadAudit(false)} disabled={auditBusy}
-            className="text-xs wt-link hover:underline disabled:opacity-50"
-          >{auditBusy ? t('settings.audit.loading') : t('settings.audit.more')}</button>
+
+        <ul className="mt-3 flex flex-col gap-1">
+          {(audit ?? []).map((e, i) => (
+            <li key={`${e.ts}-${i}`}
+              className="rounded-md bg-ink-800/60 px-3 py-2 text-xs ring-1 ring-ink-700">
+              <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                <span className="font-mono tabular-nums text-slate-400">
+                  {fmtTs(e.ts)}
+                </span>
+                {/* respins ≠ reușit: la audit, eșecurile sunt cele mai interesante */}
+                <span className={`font-mono ${e.status >= 400 ? 'wt-danger' : 'wt-good'}`}>
+                  {e.status}
+                </span>
+                <span className="font-mono text-slate-300">{e.method} {e.path}</span>
+              </div>
+              <div className="mt-0.5 flex flex-wrap gap-x-3 text-slate-500">
+                <span>{e.actor || t('settings.audit.anonymous')}</span>
+                {e.ip && <span className="font-mono">{e.ip}</span>}
+                {e.detail && <span className="font-mono text-slate-400">{e.detail}</span>}
+              </div>
+            </li>
+          ))}
+        </ul>
+
+        {audit === null && !auditErr && (
+          <p className="mt-3 text-xs text-slate-500">{t('settings.audit.loading')}</p>
         )}
-        {auditDays > 0 && (
-          <span className="text-xs text-slate-500">{t('settings.audit.retention', { days: auditDays })}</span>
+        {auditErr && (
+          <div className="mt-3 rounded-md ring-1 ring-ink-700">
+            <LoadFailed compact message={auditErr.msg} onRetry={() => loadAudit(auditErr.reset)} />
+          </div>
         )}
-      </div>
+        {!auditErr && audit !== null && audit.length === 0 && (
+          <p className="mt-3 text-xs text-slate-500">{t('settings.audit.empty')}</p>
+        )}
+        <div className="mt-3 flex items-center gap-3">
+          {!auditEnd && audit !== null && audit.length > 0 && (
+            <button onClick={() => loadAudit(false)} disabled={auditBusy}
+              className="text-xs wt-link hover:underline disabled:opacity-50"
+            >{auditBusy ? t('settings.audit.loading') : t('settings.audit.more')}</button>
+          )}
+          {auditDays > 0 && (
+            <span className="text-xs text-slate-500">{t('settings.audit.retention', { days: auditDays })}</span>
+          )}
+        </div>
+      </section>
     </div>
   )
 }

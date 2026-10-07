@@ -71,153 +71,161 @@ export default function AppearanceTab(props: { onAccountChanged: () => void }) {
 
   return (
     <div>
-      {/* ── Limbă ── */}
-      <h3 className={heading + ' !mt-0'}>{t('settings.language')}</h3>
-      <div className="mt-2 flex flex-wrap gap-2">
-        {LANG_ORDER.map((code) => (
-          <button key={code} onClick={() => setLang(code)} aria-pressed={lang === code}
-            className={`flex items-center gap-2 rounded-md px-3 py-2 text-sm ring-1 transition ${
-              lang === code
-                ? 'wt-chip-accent ring-sky-500/40'
-                : 'bg-ink-800 text-slate-300 ring-ink-700 hover:bg-ink-700'}`}>
-            <span className="text-base leading-none">{LANGS[code].meta.flag}</span> {LANGS[code].meta.name}
-          </button>
-        ))}
-      </div>
-      <p className="mt-1 text-xs text-slate-500">{t('settings.languageHint')}</p>
-
-      {/* ── Temă ── */}
-      <h3 className={heading}>{t('settings.theme')}</h3>
-      <div className="mt-2 flex gap-2">
-        {([['macos', 'Aurora'], ['dark', 'Midnight'], ['auto', t('settings.themeAuto')]] as const).map(([value, label]) => (
-          <button key={value} onClick={() => setTheme(value)} aria-pressed={themePrefValue === value}
-            className={`rounded-md px-3 py-1.5 text-sm ring-1 ${
-              themePrefValue === value
-                ? 'bg-sky-600 text-white ring-sky-600'
-                : 'bg-ink-800 text-slate-300 ring-ink-700 hover:bg-ink-700'}`}>
-            {label}
-          </button>
-        ))}
-      </div>
-
-      {/* ── Schema de culori a terminalului ── */}
-      <h3 className={heading}>{t('settings.termColors')}</h3>
-      <div className="mt-2 flex flex-wrap gap-2">
-        {allSchemes().map((s) => (
-          <button key={s.id} onClick={() => { setTermScheme(s.id); setScheme(s.id) }} aria-pressed={scheme === s.id}
-            className={`flex items-center gap-2 rounded-md px-3 py-1.5 text-sm ring-1 ${
-              scheme === s.id
-                ? 'bg-sky-600 text-white ring-sky-600'
-                : 'bg-ink-800 text-slate-300 ring-ink-700 hover:bg-ink-700'}`}>
-            <span className="flex gap-0.5" aria-hidden="true">
-              {[s.theme.red, s.theme.green, s.theme.blue, s.theme.magenta].map((c, i) => (
-                <span key={i} className="h-3 w-1.5 rounded-md" style={{ background: c }} />
-              ))}
-            </span>
-            {s.id === 'custom' ? t('settings.customSchemeName') : s.name}
-          </button>
-        ))}
-      </div>
-
-      {/* schemă proprie: editor + import iTerm2/VS Code */}
-      <div className="mt-2 flex flex-wrap items-center gap-2">
-        <button onClick={openEditor}
-          className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700">
-          {customTheme() ? t('settings.editMyScheme') : t('settings.customScheme')}
-        </button>
-        <button onClick={() => fileRef.current?.click()}
-          className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700"
-          title={t('settings.importThemeTitle')}>
-          {t('settings.importTheme')}
-        </button>
-        <input ref={fileRef} type="file" accept=".itermcolors,.json,application/json,text/xml" className="hidden"
-          onChange={(e) => e.target.files?.[0] && importTheme(e.target.files[0])} />
-        {customTheme() && (
-          <button onClick={() => { clearCustomTheme(); setTermScheme('webterm-dark'); setScheme('webterm-dark'); setEditing(false) }}
-            className="rounded-md px-2 py-1.5 text-xs wt-danger hover:bg-ink-800">
-            {t('settings.deleteMyScheme')}
-          </button>
-        )}
-      </div>
-      <p className="mt-1 text-xs text-slate-500">
-        {t('settings.importThemeHintA')}<code className="font-mono">.itermcolors</code>{t('settings.importThemeHintB')} <span className="font-mono">iTerm2-Color-Schemes</span> {t('settings.importThemeHintC')}
-      </p>
-      <div role="alert" className={importErr ? 'mt-1 text-sm wt-danger' : 'sr-only'}>{importErr}</div>
-
-      {editing && (
-        <div className="mt-3 rounded-xl border border-ink-700 p-3">
-          <div className="mb-2 flex items-center justify-between">
-            <span className="text-sm font-medium text-slate-300">{t('settings.mySchemeLive')}</span>
-            <button onClick={() => setEditing(false)} className="text-xs text-slate-400 hover:text-slate-200">
-              {t('settings.done')}
+      <section data-setting-id="language">
+        {/* ── Limbă ── */}
+        <h3 className={heading + ' !mt-0'}>{t('settings.language')}</h3>
+        <div className="mt-2 flex flex-wrap gap-2">
+          {LANG_ORDER.map((code) => (
+            <button key={code} onClick={() => setLang(code)} aria-pressed={lang === code}
+              className={`flex items-center gap-2 rounded-md px-3 py-2 text-sm ring-1 transition ${
+                lang === code
+                  ? 'wt-chip-accent ring-sky-500/40'
+                  : 'bg-ink-800 text-slate-300 ring-ink-700 hover:bg-ink-700'}`}>
+              <span className="text-base leading-none">{LANGS[code].meta.flag}</span> {LANGS[code].meta.name}
             </button>
-          </div>
-          <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 sm:grid-cols-3">
-            {COLOR_KEYS.map((k) => (
-              <label key={k} className="flex items-center gap-2 text-xs text-slate-400">
-                <input type="color" value={draft[k] ?? '#000000'} aria-label={t('color.' + k)}
-                  onChange={(e) => applyDraft({ ...draft, [k]: e.target.value })}
-                  className="h-6 w-8 shrink-0 cursor-pointer rounded-md border border-ink-700 bg-transparent" />
-                <span className="truncate">{t('color.' + k)}</span>
-              </label>
-            ))}
-          </div>
+          ))}
         </div>
-      )}
+        <p className="mt-1 text-xs text-slate-500">{t('settings.languageHint')}</p>
+      </section>
 
-      {/* ── Watermark ── */}
-      <h3 className={heading}>{t('settings.watermark')}</h3>
-      <label className="mt-2 flex cursor-pointer items-start gap-2.5 text-sm text-slate-300">
-        <input type="checkbox" checked={wm.enabled}
-          onChange={(e) => setWm({ ...wm, enabled: e.target.checked })}
-          className="mt-0.5 h-4 w-4 rounded-md accent-sky-600" />
-        <span>
-          {t('settings.watermarkToggle')}
-          <span className="mt-0.5 block text-xs text-slate-500">
-            {t('settings.watermarkHint')} <code className="font-mono">{'${email}'}</code>{' '}
-            <code className="font-mono">{'${host}'}</code> <code className="font-mono">{'${date}'}</code>{' '}
-            <code className="font-mono">{'${time}'}</code>.
-          </span>
-        </span>
-      </label>
-      {wm.enabled && (
-        <div className="mt-3 space-y-3">
-          <label className="block text-xs text-slate-400">
-            {t('settings.text')}
-            <input type="text" value={wm.content} maxLength={200}
-              onChange={(e) => setWm({ ...wm, content: e.target.value })}
-              className="mt-1 w-full rounded-md border border-ink-700 bg-ink-900 px-2.5 py-1.5 font-mono text-sm text-slate-200 focus:border-sky-500 focus:outline-none" />
-          </label>
-          <div className="grid grid-cols-3 gap-3">
-            <label className="block text-xs text-slate-400">
-              {t('settings.opacity')} <span className="text-slate-500">{wm.opacity.toFixed(2)}</span>
-              <input type="range" min={0.02} max={0.5} step={0.01} value={wm.opacity}
-                onChange={(e) => setWm({ ...wm, opacity: parseFloat(e.target.value) })}
-                className="mt-1 w-full accent-sky-600" />
-            </label>
-            <label className="block text-xs text-slate-400">
-              {t('settings.angle')} <span className="text-slate-500">{wm.angle}°</span>
-              <input type="range" min={-90} max={90} step={5} value={wm.angle}
-                onChange={(e) => setWm({ ...wm, angle: parseInt(e.target.value, 10) })}
-                className="mt-1 w-full accent-sky-600" />
-            </label>
-            <label className="block text-xs text-slate-400">
-              {t('settings.size')} <span className="text-slate-500">{wm.fontSize}px</span>
-              <input type="range" min={8} max={40} step={1} value={wm.fontSize}
-                onChange={(e) => setWm({ ...wm, fontSize: parseInt(e.target.value, 10) })}
-                className="mt-1 w-full accent-sky-600" />
-            </label>
-          </div>
+      <section data-setting-id="theme">
+        {/* ── Temă ── */}
+        <h3 className={heading}>{t('settings.theme')}</h3>
+        <div className="mt-2 flex gap-2">
+          {([['macos', 'Aurora'], ['dark', 'Midnight'], ['auto', t('settings.themeAuto')]] as const).map(([value, label]) => (
+            <button key={value} onClick={() => setTheme(value)} aria-pressed={themePrefValue === value}
+              className={`rounded-md px-3 py-1.5 text-sm ring-1 ${
+                themePrefValue === value
+                  ? 'bg-sky-600 text-white ring-sky-600'
+                  : 'bg-ink-800 text-slate-300 ring-ink-700 hover:bg-ink-700'}`}>
+              {label}
+            </button>
+          ))}
         </div>
-      )}
-      <div className="mt-3 flex items-center gap-3">
-        <Button variant="primary" onClick={saveWatermark}>
-          {t('settings.saveWatermark')}
-        </Button>
-        {/* două regiuni, nu una cu rol variabil: schimbarea rolului pe acelaşi nod nu e anunţată */}
-        <span role="status" className={wmMsg && !wmErr ? 'text-xs wt-good' : 'sr-only'}>{wmErr ? '' : wmMsg}</span>
-        <span role="alert" className={wmMsg && wmErr ? 'text-xs wt-danger' : 'sr-only'}>{wmErr ? wmMsg : ''}</span>
-      </div>
+      </section>
+
+      <section data-setting-id="termColors">
+        {/* ── Schema de culori a terminalului ── */}
+        <h3 className={heading}>{t('settings.termColors')}</h3>
+        <div className="mt-2 flex flex-wrap gap-2">
+          {allSchemes().map((s) => (
+            <button key={s.id} onClick={() => { setTermScheme(s.id); setScheme(s.id) }} aria-pressed={scheme === s.id}
+              className={`flex items-center gap-2 rounded-md px-3 py-1.5 text-sm ring-1 ${
+                scheme === s.id
+                  ? 'bg-sky-600 text-white ring-sky-600'
+                  : 'bg-ink-800 text-slate-300 ring-ink-700 hover:bg-ink-700'}`}>
+              <span className="flex gap-0.5" aria-hidden="true">
+                {[s.theme.red, s.theme.green, s.theme.blue, s.theme.magenta].map((c, i) => (
+                  <span key={i} className="h-3 w-1.5 rounded-md" style={{ background: c }} />
+                ))}
+              </span>
+              {s.id === 'custom' ? t('settings.customSchemeName') : s.name}
+            </button>
+          ))}
+        </div>
+
+        {/* schemă proprie: editor + import iTerm2/VS Code */}
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <button onClick={openEditor}
+            className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700">
+            {customTheme() ? t('settings.editMyScheme') : t('settings.customScheme')}
+          </button>
+          <button onClick={() => fileRef.current?.click()}
+            className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700"
+            title={t('settings.importThemeTitle')}>
+            {t('settings.importTheme')}
+          </button>
+          <input ref={fileRef} type="file" accept=".itermcolors,.json,application/json,text/xml" className="hidden"
+            onChange={(e) => e.target.files?.[0] && importTheme(e.target.files[0])} />
+          {customTheme() && (
+            <button onClick={() => { clearCustomTheme(); setTermScheme('webterm-dark'); setScheme('webterm-dark'); setEditing(false) }}
+              className="rounded-md px-2 py-1.5 text-xs wt-danger hover:bg-ink-800">
+              {t('settings.deleteMyScheme')}
+            </button>
+          )}
+        </div>
+        <p className="mt-1 text-xs text-slate-500">
+          {t('settings.importThemeHintA')}<code className="font-mono">.itermcolors</code>{t('settings.importThemeHintB')} <span className="font-mono">iTerm2-Color-Schemes</span> {t('settings.importThemeHintC')}
+        </p>
+        <div role="alert" className={importErr ? 'mt-1 text-sm wt-danger' : 'sr-only'}>{importErr}</div>
+
+        {editing && (
+          <div className="mt-3 rounded-xl border border-ink-700 p-3">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-sm font-medium text-slate-300">{t('settings.mySchemeLive')}</span>
+              <button onClick={() => setEditing(false)} className="text-xs text-slate-400 hover:text-slate-200">
+                {t('settings.done')}
+              </button>
+            </div>
+            <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 sm:grid-cols-3">
+              {COLOR_KEYS.map((k) => (
+                <label key={k} className="flex items-center gap-2 text-xs text-slate-400">
+                  <input type="color" value={draft[k] ?? '#000000'} aria-label={t('color.' + k)}
+                    onChange={(e) => applyDraft({ ...draft, [k]: e.target.value })}
+                    className="h-6 w-8 shrink-0 cursor-pointer rounded-md border border-ink-700 bg-transparent" />
+                  <span className="truncate">{t('color.' + k)}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
+      </section>
+
+      <section data-setting-id="watermark">
+        {/* ── Watermark ── */}
+        <h3 className={heading}>{t('settings.watermark')}</h3>
+        <label className="mt-2 flex cursor-pointer items-start gap-2.5 text-sm text-slate-300">
+          <input type="checkbox" checked={wm.enabled}
+            onChange={(e) => setWm({ ...wm, enabled: e.target.checked })}
+            className="mt-0.5 h-4 w-4 rounded-md accent-sky-600" />
+          <span>
+            {t('settings.watermarkToggle')}
+            <span className="mt-0.5 block text-xs text-slate-500">
+              {t('settings.watermarkHint')} <code className="font-mono">{'${email}'}</code>{' '}
+              <code className="font-mono">{'${host}'}</code> <code className="font-mono">{'${date}'}</code>{' '}
+              <code className="font-mono">{'${time}'}</code>.
+            </span>
+          </span>
+        </label>
+        {wm.enabled && (
+          <div className="mt-3 space-y-3">
+            <label className="block text-xs text-slate-400">
+              {t('settings.text')}
+              <input type="text" value={wm.content} maxLength={200}
+                onChange={(e) => setWm({ ...wm, content: e.target.value })}
+                className="mt-1 w-full rounded-md border border-ink-700 bg-ink-900 px-2.5 py-1.5 font-mono text-sm text-slate-200 focus:border-sky-500 focus:outline-none" />
+            </label>
+            <div className="grid grid-cols-3 gap-3">
+              <label className="block text-xs text-slate-400">
+                {t('settings.opacity')} <span className="text-slate-500">{wm.opacity.toFixed(2)}</span>
+                <input type="range" min={0.02} max={0.5} step={0.01} value={wm.opacity}
+                  onChange={(e) => setWm({ ...wm, opacity: parseFloat(e.target.value) })}
+                  className="mt-1 w-full accent-sky-600" />
+              </label>
+              <label className="block text-xs text-slate-400">
+                {t('settings.angle')} <span className="text-slate-500">{wm.angle}°</span>
+                <input type="range" min={-90} max={90} step={5} value={wm.angle}
+                  onChange={(e) => setWm({ ...wm, angle: parseInt(e.target.value, 10) })}
+                  className="mt-1 w-full accent-sky-600" />
+              </label>
+              <label className="block text-xs text-slate-400">
+                {t('settings.size')} <span className="text-slate-500">{wm.fontSize}px</span>
+                <input type="range" min={8} max={40} step={1} value={wm.fontSize}
+                  onChange={(e) => setWm({ ...wm, fontSize: parseInt(e.target.value, 10) })}
+                  className="mt-1 w-full accent-sky-600" />
+              </label>
+            </div>
+          </div>
+        )}
+        <div className="mt-3 flex items-center gap-3">
+          <Button variant="primary" onClick={saveWatermark}>
+            {t('settings.saveWatermark')}
+          </Button>
+          {/* două regiuni, nu una cu rol variabil: schimbarea rolului pe acelaşi nod nu e anunţată */}
+          <span role="status" className={wmMsg && !wmErr ? 'text-xs wt-good' : 'sr-only'}>{wmErr ? '' : wmMsg}</span>
+          <span role="alert" className={wmMsg && wmErr ? 'text-xs wt-danger' : 'sr-only'}>{wmErr ? wmMsg : ''}</span>
+        </div>
+      </section>
     </div>
   )
 }

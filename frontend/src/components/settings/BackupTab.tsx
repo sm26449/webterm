@@ -325,405 +325,413 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
 
   return (
     <div>
-      {/* ── Descarcă un backup acum ── */}
-      <h3 className={heading + ' !mt-0'}>{t('settings.backup.downloadTitle')}</h3>
-      <p className="mt-1 text-xs text-slate-500">
-        {t('settings.backup.downloadHintA')} <span className="text-slate-300">{t('settings.backup.encryptedWithPass')}</span> {t('settings.backup.downloadHintB')} <span className="text-slate-300">{t('settings.backup.dontLoseIt')}</span>{t('settings.backup.downloadHintC')}
-      </p>
-      <div className="mt-2 flex flex-col gap-2">
-        <input type="password" value={bkPass} onChange={(e) => setBkPass(e.target.value)}
-          placeholder={t('settings.backup.encPassPlaceholder')} aria-label={t('settings.backup.encPass')}
-          autoComplete="new-password" className={field} />
-        <input type="password" value={bkPass2} onChange={(e) => setBkPass2(e.target.value)}
-          placeholder={t('settings.backup.confirmPass')} aria-label={t('settings.backup.confirmPass')} autoComplete="new-password" className={field} />
-        <input type="password" value={bkReauth} onChange={(e) => setBkReauth(e.target.value)}
-          placeholder={t('settings.reauthPlaceholder')} aria-label={t('settings.reauthLabel')}
-          autoComplete="current-password" className={field} />
-        <label className="flex items-center gap-2 text-sm text-slate-400">
-          <input type="checkbox" checked={bkTx} onChange={(e) => setBkTx(e.target.checked)}
-            className="h-4 w-4 rounded-md accent-sky-600" />
-          {t('settings.backup.includeTranscripts')}
-        </label>
-        <div className="flex items-center gap-2">
-          <Button variant="primary" disabled={bkBusy} onClick={downloadBackupNow}>
-            {bkBusy ? t('settings.backup.preparing') : t('settings.downloadEncryptedBackup')}
-          </Button>
-          <span role="status" className={bkMsg ? 'text-sm wt-good' : 'sr-only'}>{bkMsg}</span>
-          <span role="alert" className={bkErr ? 'text-sm wt-danger' : 'sr-only'}>{bkErr}</span>
-        </div>
-      </div>
-
-      {/* ── Backup automat ── */}
-      <h3 className={heading}>{t('settings.backup.autoTitle')}</h3>
-      <p className="mt-1 text-xs text-slate-500">
-        {t('settings.backup.autoHintA')}{bkStatus ? ' ' + t('settings.backup.autoHintRetention', { days: bkStatus.retention_days }) : ''}{t('settings.backup.autoHintB')}
-      </p>
-      <div className="mt-2 flex gap-2">
-        {([['off', t('settings.backup.off')], ['daily', t('settings.backup.daily')], ['weekly', t('settings.backup.weekly')]] as const).map(([val, label]) => (
-          <button key={val} onClick={() => saveSchedule(val)}
-            className={`rounded-md px-3 py-1.5 text-sm ring-1 ${
-              (bkStatus?.schedule ?? 'off') === val
-                ? 'bg-sky-600 text-white ring-sky-600'
-                : 'bg-ink-800 text-slate-300 ring-ink-700 hover:bg-ink-700'
-            }`}>
-            {label}
-          </button>
-        ))}
-      </div>
-      {bkStatus && bkStatus.schedule !== 'off' && (
-        <label className="mt-2 flex items-center gap-2 text-sm text-slate-400">
-          <input type="checkbox" checked={bkStatus.include_transcripts}
-            onChange={(e) => toggleScheduleTx(e.target.checked)} className="h-4 w-4 rounded-md accent-sky-600" />
-          {t('settings.backup.includeTranscriptsAuto')}
-        </label>
-      )}
-
-      {/* starea scheduler-ului: ultima rulare, eroarea persistentă (roşu), scadenţa, copia off-host */}
-      {bkStatus && (bkStatus.schedule !== 'off' || bkStatus.last_run || bkStatus.last_error) && (
-        <div className="mt-3 flex flex-col gap-1 rounded-md bg-ink-800/60 px-3 py-2 text-xs ring-1 ring-ink-700" data-testid="backup-sched-status">
-          {bkStatus.last_run ? (
-            <span className={bkStatus.last_run.ok ? 'text-slate-400' : 'wt-danger'}>
-              {bkStatus.last_run.ok
-                ? t('settings.backup.lastRunOk', { when: fmtTs(bkStatus.last_run.ts), name: bkStatus.last_run.name })
-                : t('settings.backup.lastRunFailed', { when: fmtTs(bkStatus.last_run.ts) })}
-            </span>
-          ) : (
-            <span className="text-slate-500">{t('settings.backup.neverRan')}</span>
-          )}
-          {bkStatus.last_error && (
-            <span className="wt-danger break-words" role="alert">
-              {t('settings.backup.lastError', { when: fmtTs(bkStatus.last_error.ts), error: bkStatus.last_error.error })}
-            </span>
-          )}
-          {bkStatus.schedule !== 'off' && bkStatus.next_due != null && (
-            <span className="text-slate-500">
-              {bkStatus.next_due <= Date.now() / 1000
-                ? t('settings.backup.dueNow')
-                : t('settings.backup.nextDue', { when: fmtTs(bkStatus.next_due) })}
-            </span>
-          )}
-          <span className={cloud?.connected && !cloud.last_ok ? 'wt-warn' : 'text-slate-500'}>
-            {cloud?.connected
-              ? t('settings.backup.cloudLine', { dest: cloud.account || cloud.provider }) + ' · ' + (cloud.last_ok
-                ? t('settings.backup.cloudLastGood', { when: fmtTs(cloud.last_ok) })
-                : t('settings.backup.cloudNever'))
-              : t('settings.backup.cloudNone')}
-          </span>
-        </div>
-      )}
-
-      {/* backup-uri stocate pe server */}
-      {bkStatus && bkStatus.backups.length > 0 && (
-        <div className="mt-3 space-y-1">
-          <div className="text-xs text-slate-500">{t('settings.backup.storedLabel', { days: bkStatus.retention_days })}</div>
-          {bkStatus.backups.map((b) => (
-            <div key={b.name} className="flex items-center justify-between gap-2 rounded-md bg-ink-800 px-3 py-2 text-sm">
-              <span className="min-w-0 flex-1 truncate font-mono text-xs text-slate-300" title={b.name}>
-                {b.name}
-                <span className="ml-2 text-slate-500">{(b.size / 1024).toFixed(0)} KB</span>
-              </span>
-              <button onClick={() => downloadStored(b.name)} className="shrink-0 text-xs wt-link hover:underline">{t('settings.download')}</button>
-              <button onClick={() => deleteStored(b.name)} className="shrink-0 text-xs wt-danger hover:underline">{t('settings.delete')}</button>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* ── Copie off-host în cloud (Google Drive / Dropbox) ── */}
-      <h3 className={heading}>{t('settings.cloud.title')}</h3>
-      <p className="mt-1 text-xs text-slate-500">{t('settings.cloud.hint')}</p>
-
-      {/* stare curentă: prima linie pe care o citește omul când deschide secțiunea */}
-      <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
-        <span className={`rounded-full px-2 py-0.5 ring-1 ${
-          cloud?.connected ? 'wt-good bg-emerald-500/10 ring-emerald-500/30'
-            : cloud?.configured ? 'wt-warn bg-amber-500/10 ring-amber-500/30'
-              : 'bg-ink-800 text-slate-400 ring-ink-700'}`}>
-          {cloud?.connected ? t('settings.cloud.connectedAs', { account: cloud.account || '—' })
-            : cloud?.configured ? t('settings.cloud.notConnected')
-              : t('settings.cloud.notConfigured')}
-        </span>
-        {cloud?.last?.ts ? (
-          <span className={cloud.last.ok ? 'text-slate-500' : 'wt-danger'}>
-            {cloud.last.ok
-              ? t('settings.cloud.lastOk', {
-                when: fmtTs(cloud.last.ts),
-                name: cloud.last.name || '',
-              })
-              : t('settings.cloud.lastFailed', {
-                when: fmtTs(cloud.last.ts),
-                error: cloud.last.error || '',
-              })}
-          </span>
-        ) : null}
-      </div>
-
-      {/* pasul 1: alegerea destinaţiei — OAuth (Drive/Dropbox) sau server propriu (SFTP/FTPS).
-          instrucțiunile stau lângă câmpuri, nu în documentație, ca să nu ceară alt tab */}
-      <div className="mt-3 flex flex-wrap gap-2">
-        {(cloud?.providers ?? []).map((p) => (
-          <button key={p.id} type="button"
-            onClick={() => setCloudForm((f) => ({ ...f, provider: p.id }))}
-            className={`wt-touch rounded-md px-3 py-1.5 text-sm ${
-              cloudForm.provider === p.id ? 'bg-sky-600 text-white' : 'bg-ink-800 text-slate-300 hover:bg-ink-700'}`}
-          >{p.label}</button>
-        ))}
-        {[{ id: 'sftp', label: 'SFTP' }, { id: 'ftps', label: 'FTPS' }].map((p) => (
-          <button key={p.id} type="button"
-            onClick={() => { setCloudForm((f) => ({ ...f, provider: p.id })); setDirectForm((f) => ({ ...f, kind: p.id, port: p.id === 'sftp' ? 22 : 21 })) }}
-            className={`wt-touch rounded-md px-3 py-1.5 text-sm ${
-              cloudForm.provider === p.id ? 'bg-sky-600 text-white' : 'bg-ink-800 text-slate-300 hover:bg-ink-700'}`}
-          >{p.label}</button>
-        ))}
-        {!isDirect && (
-          <button type="button" onClick={() => setCloudHelp(!cloudHelp)}
-            className="text-xs wt-link hover:underline">
-            {cloudHelp ? t('settings.cloud.hideSteps') : t('settings.cloud.showSteps')}
-          </button>
-        )}
-      </div>
-
-      {!isDirect && cloudHelp && (() => {
-        const p = (cloud?.providers ?? []).find((x) => x.id === cloudForm.provider)
-        return (
-          <ol className="mt-2 flex list-decimal flex-col gap-1 rounded-md bg-ink-800/60 p-3 pl-7 text-xs text-slate-400 ring-1 ring-ink-700">
-            <li>
-              {t('settings.cloud.step1')}{' '}
-              <a href={p?.console_url} target="_blank" rel="noreferrer" className="wt-link hover:underline">
-                {p?.console_url}
-              </a>
-            </li>
-            <li>{t('settings.cloud.step2')} <span className="font-mono text-slate-300">{p?.app_type}</span></li>
-            <li>
-              {t('settings.cloud.step3')}
-              <div className="mt-1 flex items-center gap-2">
-                <code className="min-w-0 flex-1 truncate rounded-md bg-ink-900 px-2 py-1 text-2xs text-slate-300">
-                  {cloud?.redirect_uri}
-                </code>
-                <button type="button" onClick={copyRedirect} className="shrink-0 text-xs wt-link hover:underline">
-                  {copied ? t('settings.cloud.copied') : t('settings.cloud.copy')}
-                </button>
-              </div>
-            </li>
-            <li>{t('settings.cloud.step4')}</li>
-            <li>{t('settings.cloud.step5')}</li>
-          </ol>
-        )
-      })()}
-
-      {/* pasul 2 (OAuth): credențialele aplicației + parola de criptare */}
-      {!isDirect && (
-      <form onSubmit={saveCloud} className="mt-3 flex flex-col gap-2">
-        <input value={cloudForm.client_id} spellCheck={false} autoComplete="off"
-          onChange={(e) => setCloudForm((f) => ({ ...f, client_id: e.target.value }))}
-          placeholder={t('settings.cloud.clientId')} aria-label={t('settings.cloud.clientId')} className={field} />
-        <input type="password" value={cloudForm.client_secret} autoComplete="new-password"
-          onChange={(e) => setCloudForm((f) => ({ ...f, client_secret: e.target.value }))}
-          placeholder={cloud?.configured ? t('settings.cloud.clientSecretKeep') : t('settings.cloud.clientSecret')}
-          aria-label={t('settings.cloud.clientSecret')} className={field} />
-        <input type="password" value={cloudForm.passphrase} autoComplete="new-password"
-          onChange={(e) => setCloudForm((f) => ({ ...f, passphrase: e.target.value }))}
-          placeholder={t('settings.cloud.passphrase')} aria-label={t('settings.cloud.passphrase')} className={field} />
-        <p className="text-xs text-slate-500">{t('settings.cloud.passphraseHint')}</p>
-        <div className="flex flex-wrap items-center gap-3">
+      <section data-setting-id="backupDownload">
+        {/* ── Descarcă un backup acum ── */}
+        <h3 className={heading + ' !mt-0'}>{t('settings.backup.downloadTitle')}</h3>
+        <p className="mt-1 text-xs text-slate-500">
+          {t('settings.backup.downloadHintA')} <span className="text-slate-300">{t('settings.backup.encryptedWithPass')}</span> {t('settings.backup.downloadHintB')} <span className="text-slate-300">{t('settings.backup.dontLoseIt')}</span>{t('settings.backup.downloadHintC')}
+        </p>
+        <div className="mt-2 flex flex-col gap-2">
+          <input type="password" value={bkPass} onChange={(e) => setBkPass(e.target.value)}
+            placeholder={t('settings.backup.encPassPlaceholder')} aria-label={t('settings.backup.encPass')}
+            autoComplete="new-password" className={field} />
+          <input type="password" value={bkPass2} onChange={(e) => setBkPass2(e.target.value)}
+            placeholder={t('settings.backup.confirmPass')} aria-label={t('settings.backup.confirmPass')} autoComplete="new-password" className={field} />
+          <input type="password" value={bkReauth} onChange={(e) => setBkReauth(e.target.value)}
+            placeholder={t('settings.reauthPlaceholder')} aria-label={t('settings.reauthLabel')}
+            autoComplete="current-password" className={field} />
           <label className="flex items-center gap-2 text-sm text-slate-400">
-            {t('settings.cloud.keep')}
-            <input type="number" min={1} max={365} value={cloudForm.keep}
-              onChange={(e) => setCloudForm((f) => ({ ...f, keep: Number(e.target.value) }))}
-              aria-label={t('settings.cloud.keep')}
-              className={field + ' w-20'} />
-          </label>
-          <label className="flex items-center gap-2 text-sm text-slate-400">
-            <input type="checkbox" checked={cloudForm.include_transcripts}
-              onChange={(e) => setCloudForm((f) => ({ ...f, include_transcripts: e.target.checked }))}
+            <input type="checkbox" checked={bkTx} onChange={(e) => setBkTx(e.target.checked)}
               className="h-4 w-4 rounded-md accent-sky-600" />
             {t('settings.backup.includeTranscripts')}
           </label>
+          <div className="flex items-center gap-2">
+            <Button variant="primary" disabled={bkBusy} onClick={downloadBackupNow}>
+              {bkBusy ? t('settings.backup.preparing') : t('settings.downloadEncryptedBackup')}
+            </Button>
+            <span role="status" className={bkMsg ? 'text-sm wt-good' : 'sr-only'}>{bkMsg}</span>
+            <span role="alert" className={bkErr ? 'text-sm wt-danger' : 'sr-only'}>{bkErr}</span>
+          </div>
         </div>
-        {/* re-auth: configurarea deschide un canal permanent prin care pleacă backup-uri */}
-        <input type="password" value={cloudForm.current_password} autoComplete="current-password"
-          onChange={(e) => setCloudForm((f) => ({ ...f, current_password: e.target.value }))}
-          placeholder={t('settings.cloud.accountPassword')} aria-label={t('settings.cloud.accountPassword')} className={field} />
-        <div className="flex flex-wrap items-center gap-2">
-          <Button variant="primary" type="submit" disabled={cloudBusy}>
-            {t('settings.cloud.save')}
-          </Button>
-          <button type="button" onClick={connectCloud} disabled={!cloud?.configured || cloudBusy}
-            className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-200 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-40">
-            {cloud?.connected ? t('settings.cloud.reconnect') : t('settings.cloud.connect')}
-          </button>
-          <button type="button" disabled={!cloud?.connected || cloudBusy}
-            onClick={() => cloudAction('upload', t('settings.cloud.uploaded'))}
-            className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-200 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-40">
-            {t('settings.cloud.uploadNow')}
-          </button>
-          {cloud?.connected && (
-            <button type="button" disabled={cloudBusy}
-              onClick={() => cloudAction('disconnect', t('settings.cloud.disconnected'))}
-              className="text-xs wt-danger hover:underline">
-              {t('settings.cloud.disconnect')}
-            </button>
-          )}
-          <button type="button" onClick={loadCloud} className="text-xs wt-link hover:underline">
-            {t('settings.cloud.refresh')}
-          </button>
-        </div>
-        <span role="status" className={cloudMsg ? 'text-sm wt-good' : 'sr-only'}>{cloudMsg}</span>
-        <span role="alert" className={cloudErr ? 'text-sm wt-danger' : 'sr-only'}>{cloudErr}</span>
-      </form>
-      )}
+      </section>
 
-      {/* pasul 2 (server propriu): SFTP/FTPS scris din UI. Arhiva pleacă DEJA criptată; aici
-          configurăm doar unde şi cum ne conectăm, cu credenţialele criptate în seif. */}
-      {isDirect && (
-      <form onSubmit={saveDirect} data-testid="direct-backup-form" className="mt-3 flex flex-col gap-2">
-        <p className="flex items-start gap-2 text-xs text-slate-500">
-          <span>{directForm.kind === 'sftp' ? t('settings.direct.sftpHint') : t('settings.direct.ftpsHint')}</span>
-          <HelpTip id="directBackup" />
+      <section data-setting-id="backupAuto">
+        {/* ── Backup automat ── */}
+        <h3 className={heading}>{t('settings.backup.autoTitle')}</h3>
+        <p className="mt-1 text-xs text-slate-500">
+          {t('settings.backup.autoHintA')}{bkStatus ? ' ' + t('settings.backup.autoHintRetention', { days: bkStatus.retention_days }) : ''}{t('settings.backup.autoHintB')}
         </p>
-        <div className="flex gap-2">
-          <input value={directForm.host} spellCheck={false} autoComplete="off"
-            onChange={(e) => setDirectForm((f) => ({ ...f, host: e.target.value }))}
-            placeholder={t('settings.direct.host')} aria-label={t('settings.direct.host')}
-            className={field + ' flex-1'} />
-          <input type="number" min={1} max={65535} value={directForm.port}
-            onChange={(e) => setDirectForm((f) => ({ ...f, port: Number(e.target.value) }))}
-            placeholder={t('settings.direct.port')} aria-label={t('settings.direct.port')}
-            className={field + ' w-24'} />
+        <div className="mt-2 flex gap-2">
+          {([['off', t('settings.backup.off')], ['daily', t('settings.backup.daily')], ['weekly', t('settings.backup.weekly')]] as const).map(([val, label]) => (
+            <button key={val} onClick={() => saveSchedule(val)}
+              className={`rounded-md px-3 py-1.5 text-sm ring-1 ${
+                (bkStatus?.schedule ?? 'off') === val
+                  ? 'bg-sky-600 text-white ring-sky-600'
+                  : 'bg-ink-800 text-slate-300 ring-ink-700 hover:bg-ink-700'
+              }`}>
+              {label}
+            </button>
+          ))}
         </div>
-        <input value={directForm.user} spellCheck={false} autoComplete="off"
-          onChange={(e) => setDirectForm((f) => ({ ...f, user: e.target.value }))}
-          placeholder={t('settings.direct.user')} aria-label={t('settings.direct.user')} className={field} />
-        <input value={directForm.path} spellCheck={false} autoComplete="off"
-          onChange={(e) => setDirectForm((f) => ({ ...f, path: e.target.value }))}
-          placeholder={t('settings.direct.path')} aria-label={t('settings.direct.path')} className={field} />
+        {bkStatus && bkStatus.schedule !== 'off' && (
+          <label className="mt-2 flex items-center gap-2 text-sm text-slate-400">
+            <input type="checkbox" checked={bkStatus.include_transcripts}
+              onChange={(e) => toggleScheduleTx(e.target.checked)} className="h-4 w-4 rounded-md accent-sky-600" />
+            {t('settings.backup.includeTranscriptsAuto')}
+          </label>
+        )}
 
-        {/* metoda de auth: cheie SSH (doar SFTP) sau parolă */}
-        {directForm.kind === 'sftp' && (
-          <div className="flex gap-2">
-            {(['key', 'password'] as const).map((m) => (
-              <button key={m} type="button"
-                onClick={() => setDirectForm((f) => ({ ...f, auth: m }))}
-                className={`wt-touch rounded-md px-3 py-1.5 text-sm ${
-                  directForm.auth === m ? 'bg-sky-600 text-white' : 'bg-ink-800 text-slate-300 hover:bg-ink-700'}`}
-              >{m === 'key' ? t('settings.direct.authKey') : t('settings.direct.authPassword')}</button>
+        {/* starea scheduler-ului: ultima rulare, eroarea persistentă (roşu), scadenţa, copia off-host */}
+        {bkStatus && (bkStatus.schedule !== 'off' || bkStatus.last_run || bkStatus.last_error) && (
+          <div className="mt-3 flex flex-col gap-1 rounded-md bg-ink-800/60 px-3 py-2 text-xs ring-1 ring-ink-700" data-testid="backup-sched-status">
+            {bkStatus.last_run ? (
+              <span className={bkStatus.last_run.ok ? 'text-slate-400' : 'wt-danger'}>
+                {bkStatus.last_run.ok
+                  ? t('settings.backup.lastRunOk', { when: fmtTs(bkStatus.last_run.ts), name: bkStatus.last_run.name })
+                  : t('settings.backup.lastRunFailed', { when: fmtTs(bkStatus.last_run.ts) })}
+              </span>
+            ) : (
+              <span className="text-slate-500">{t('settings.backup.neverRan')}</span>
+            )}
+            {bkStatus.last_error && (
+              <span className="wt-danger break-words" role="alert">
+                {t('settings.backup.lastError', { when: fmtTs(bkStatus.last_error.ts), error: bkStatus.last_error.error })}
+              </span>
+            )}
+            {bkStatus.schedule !== 'off' && bkStatus.next_due != null && (
+              <span className="text-slate-500">
+                {bkStatus.next_due <= Date.now() / 1000
+                  ? t('settings.backup.dueNow')
+                  : t('settings.backup.nextDue', { when: fmtTs(bkStatus.next_due) })}
+              </span>
+            )}
+            <span className={cloud?.connected && !cloud.last_ok ? 'wt-warn' : 'text-slate-500'}>
+              {cloud?.connected
+                ? t('settings.backup.cloudLine', { dest: cloud.account || cloud.provider }) + ' · ' + (cloud.last_ok
+                  ? t('settings.backup.cloudLastGood', { when: fmtTs(cloud.last_ok) })
+                  : t('settings.backup.cloudNever'))
+                : t('settings.backup.cloudNone')}
+            </span>
+          </div>
+        )}
+
+        {/* backup-uri stocate pe server */}
+        {bkStatus && bkStatus.backups.length > 0 && (
+          <div className="mt-3 space-y-1">
+            <div className="text-xs text-slate-500">{t('settings.backup.storedLabel', { days: bkStatus.retention_days })}</div>
+            {bkStatus.backups.map((b) => (
+              <div key={b.name} className="flex items-center justify-between gap-2 rounded-md bg-ink-800 px-3 py-2 text-sm">
+                <span className="min-w-0 flex-1 truncate font-mono text-xs text-slate-300" title={b.name}>
+                  {b.name}
+                  <span className="ml-2 text-slate-500">{(b.size / 1024).toFixed(0)} KB</span>
+                </span>
+                <button onClick={() => downloadStored(b.name)} className="shrink-0 text-xs wt-link hover:underline">{t('settings.download')}</button>
+                <button onClick={() => deleteStored(b.name)} className="shrink-0 text-xs wt-danger hover:underline">{t('settings.delete')}</button>
+              </div>
             ))}
           </div>
         )}
-        {directForm.kind === 'sftp' && directForm.auth === 'key' ? (
-          <textarea value={directForm.ssh_key} spellCheck={false} autoComplete="off" rows={4}
-            onChange={(e) => setDirectForm((f) => ({ ...f, ssh_key: e.target.value }))}
-            placeholder={cloud?.direct?.has_key ? t('settings.direct.sshKeyKeep') : t('settings.direct.sshKey')}
-            aria-label={t('settings.direct.sshKey')} className={field + ' font-mono text-xs'} />
-        ) : (
-          <input type="password" value={directForm.password} autoComplete="new-password"
-            onChange={(e) => setDirectForm((f) => ({ ...f, password: e.target.value }))}
-            placeholder={cloud?.direct?.has_password ? t('settings.direct.passwordKeep') : t('settings.direct.password')}
-            aria-label={t('settings.direct.password')} className={field} />
-        )}
+      </section>
 
-        {/* SFTP: pinuirea host-key-ului (TOFU). Fără amprentă confirmată nu se poate salva. */}
-        {directForm.kind === 'sftp' && (
-          <div className="rounded-md bg-ink-800/60 p-3 ring-1 ring-ink-700">
-            <div className="flex flex-wrap items-center gap-2">
-              <button type="button" onClick={probeHost} disabled={cloudBusy || !directForm.host || !directForm.user}
-                className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-200 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-40">
-                {t('settings.direct.probe')}
-              </button>
-              {directForm.hostkey
-                ? <span className="text-xs wt-good">{t('settings.direct.hostkeyPinned')}</span>
-                : <span className="text-xs wt-warn">{t('settings.direct.hostkeyNeeded')}</span>}
-            </div>
-            {probeInfo && (
-              <p className="mt-2 break-all text-xs text-slate-400">
-                {t('settings.direct.confirmFingerprint')}
-                <span className="mt-1 block font-mono text-slate-200">{probeInfo.fingerprint}</span>
-              </p>
-            )}
-          </div>
-        )}
-        {/* FTPS: CA/cert PEM opţional pentru servere self-signed (public, nu e secret) */}
-        {directForm.kind === 'ftps' && (
-          <textarea value={directForm.ca} spellCheck={false} autoComplete="off" rows={3}
-            onChange={(e) => setDirectForm((f) => ({ ...f, ca: e.target.value }))}
-            placeholder={cloud?.direct?.has_ca ? t('settings.direct.caKeep') : t('settings.direct.ca')}
-            aria-label={t('settings.direct.ca')} className={field + ' font-mono text-xs'} />
-        )}
+      <section data-setting-id="backupCloud">
+        {/* ── Copie off-host în cloud (Google Drive / Dropbox) ── */}
+        <h3 className={heading}>{t('settings.cloud.title')}</h3>
+        <p className="mt-1 text-xs text-slate-500">{t('settings.cloud.hint')}</p>
 
-        <input type="password" value={directForm.passphrase} autoComplete="new-password"
-          onChange={(e) => setDirectForm((f) => ({ ...f, passphrase: e.target.value }))}
-          placeholder={t('settings.cloud.passphrase')} aria-label={t('settings.cloud.passphrase')} className={field} />
-        <p className="text-xs text-slate-500">{t('settings.cloud.passphraseHint')}</p>
-        <div className="flex flex-wrap items-center gap-3">
-          <label className="flex items-center gap-2 text-sm text-slate-400">
-            {t('settings.cloud.keep')}
-            <input type="number" min={1} max={365} value={directForm.keep}
-              onChange={(e) => setDirectForm((f) => ({ ...f, keep: Number(e.target.value) }))}
-              aria-label={t('settings.cloud.keep')} className={field + ' w-20'} />
-          </label>
-          <label className="flex items-center gap-2 text-sm text-slate-400">
-            <input type="checkbox" checked={directForm.include_transcripts}
-              onChange={(e) => setDirectForm((f) => ({ ...f, include_transcripts: e.target.checked }))}
-              className="h-4 w-4 rounded-md accent-sky-600" />
-            {t('settings.backup.includeTranscripts')}
-          </label>
+        {/* stare curentă: prima linie pe care o citește omul când deschide secțiunea */}
+        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+          <span className={`rounded-full px-2 py-0.5 ring-1 ${
+            cloud?.connected ? 'wt-good bg-emerald-500/10 ring-emerald-500/30'
+              : cloud?.configured ? 'wt-warn bg-amber-500/10 ring-amber-500/30'
+                : 'bg-ink-800 text-slate-400 ring-ink-700'}`}>
+            {cloud?.connected ? t('settings.cloud.connectedAs', { account: cloud.account || '—' })
+              : cloud?.configured ? t('settings.cloud.notConnected')
+                : t('settings.cloud.notConfigured')}
+          </span>
+          {cloud?.last?.ts ? (
+            <span className={cloud.last.ok ? 'text-slate-500' : 'wt-danger'}>
+              {cloud.last.ok
+                ? t('settings.cloud.lastOk', {
+                  when: fmtTs(cloud.last.ts),
+                  name: cloud.last.name || '',
+                })
+                : t('settings.cloud.lastFailed', {
+                  when: fmtTs(cloud.last.ts),
+                  error: cloud.last.error || '',
+                })}
+            </span>
+          ) : null}
         </div>
-        {/* re-auth: configurarea deschide un canal permanent prin care pleacă backup-uri */}
-        <input type="password" value={directForm.current_password} autoComplete="current-password"
-          onChange={(e) => setDirectForm((f) => ({ ...f, current_password: e.target.value }))}
-          placeholder={t('settings.cloud.accountPassword')} aria-label={t('settings.cloud.accountPassword')} className={field} />
-        <div className="flex flex-wrap items-center gap-2">
-          <Button variant="primary" type="submit" disabled={cloudBusy || (directForm.kind === 'sftp' && !directForm.hostkey)}>
-            {t('settings.cloud.save')}
-          </Button>
-          <button type="button" disabled={!cloud?.connected || cloudBusy}
-            onClick={() => cloudAction('upload', t('settings.cloud.uploaded'))}
-            className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-200 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-40">
-            {t('settings.cloud.uploadNow')}
-          </button>
-          {cloud?.connected && isDirect && (
-            <button type="button" disabled={cloudBusy}
-              onClick={() => cloudAction('disconnect', t('settings.direct.removed'))}
-              className="text-xs wt-danger hover:underline">
-              {t('settings.direct.remove')}
+
+        {/* pasul 1: alegerea destinaţiei — OAuth (Drive/Dropbox) sau server propriu (SFTP/FTPS).
+            instrucțiunile stau lângă câmpuri, nu în documentație, ca să nu ceară alt tab */}
+        <div className="mt-3 flex flex-wrap gap-2">
+          {(cloud?.providers ?? []).map((p) => (
+            <button key={p.id} type="button"
+              onClick={() => setCloudForm((f) => ({ ...f, provider: p.id }))}
+              className={`wt-touch rounded-md px-3 py-1.5 text-sm ${
+                cloudForm.provider === p.id ? 'bg-sky-600 text-white' : 'bg-ink-800 text-slate-300 hover:bg-ink-700'}`}
+            >{p.label}</button>
+          ))}
+          {[{ id: 'sftp', label: 'SFTP' }, { id: 'ftps', label: 'FTPS' }].map((p) => (
+            <button key={p.id} type="button"
+              onClick={() => { setCloudForm((f) => ({ ...f, provider: p.id })); setDirectForm((f) => ({ ...f, kind: p.id, port: p.id === 'sftp' ? 22 : 21 })) }}
+              className={`wt-touch rounded-md px-3 py-1.5 text-sm ${
+                cloudForm.provider === p.id ? 'bg-sky-600 text-white' : 'bg-ink-800 text-slate-300 hover:bg-ink-700'}`}
+            >{p.label}</button>
+          ))}
+          {!isDirect && (
+            <button type="button" onClick={() => setCloudHelp(!cloudHelp)}
+              className="text-xs wt-link hover:underline">
+              {cloudHelp ? t('settings.cloud.hideSteps') : t('settings.cloud.showSteps')}
             </button>
           )}
-          <button type="button" onClick={loadCloud} className="text-xs wt-link hover:underline">
-            {t('settings.cloud.refresh')}
-          </button>
         </div>
-        <span role="status" className={cloudMsg ? 'text-sm wt-good' : 'sr-only'}>{cloudMsg}</span>
-        <span role="alert" className={cloudErr ? 'text-sm wt-danger' : 'sr-only'}>{cloudErr}</span>
-      </form>
-      )}
 
-      {/* ── Restore ── */}
-      <h3 className={heading}>{t('settings.backup.restoreTitle')}</h3>
-      <p className="mt-1 text-xs text-slate-500">
-        {t('settings.backup.restoreHintA')} <span className="font-mono">.wtbk</span> {t('settings.backup.restoreHintB')}
-        <span className="wt-warn"> {t('settings.backup.restoreRestarts')}</span> {t('settings.backup.restoreHintC')}
-      </p>
-      <div className="mt-2 flex flex-col gap-2">
-        <div className="flex items-center gap-2">
-          <Button variant="secondary" onClick={() => restoreRef.current?.click()}>
-            {t('settings.chooseFile')}
-          </Button>
-          <span className="min-w-0 truncate text-xs text-slate-400">{restoreFile ? restoreFile.name : t('settings.noFileChosen')}</span>
-          <input ref={restoreRef} type="file" accept=".wtbk,application/octet-stream" className="hidden"
-            onChange={(e) => setRestoreFile(e.target.files?.[0] ?? null)} />
-        </div>
-        {restoreFile && (
-          <p className="text-xs text-slate-400">{restorePreview(restoreFile)}</p>
+        {!isDirect && cloudHelp && (() => {
+          const p = (cloud?.providers ?? []).find((x) => x.id === cloudForm.provider)
+          return (
+            <ol className="mt-2 flex list-decimal flex-col gap-1 rounded-md bg-ink-800/60 p-3 pl-7 text-xs text-slate-400 ring-1 ring-ink-700">
+              <li>
+                {t('settings.cloud.step1')}{' '}
+                <a href={p?.console_url} target="_blank" rel="noreferrer" className="wt-link hover:underline">
+                  {p?.console_url}
+                </a>
+              </li>
+              <li>{t('settings.cloud.step2')} <span className="font-mono text-slate-300">{p?.app_type}</span></li>
+              <li>
+                {t('settings.cloud.step3')}
+                <div className="mt-1 flex items-center gap-2">
+                  <code className="min-w-0 flex-1 truncate rounded-md bg-ink-900 px-2 py-1 text-2xs text-slate-300">
+                    {cloud?.redirect_uri}
+                  </code>
+                  <button type="button" onClick={copyRedirect} className="shrink-0 text-xs wt-link hover:underline">
+                    {copied ? t('settings.cloud.copied') : t('settings.cloud.copy')}
+                  </button>
+                </div>
+              </li>
+              <li>{t('settings.cloud.step4')}</li>
+              <li>{t('settings.cloud.step5')}</li>
+            </ol>
+          )
+        })()}
+
+        {/* pasul 2 (OAuth): credențialele aplicației + parola de criptare */}
+        {!isDirect && (
+        <form onSubmit={saveCloud} className="mt-3 flex flex-col gap-2">
+          <input value={cloudForm.client_id} spellCheck={false} autoComplete="off"
+            onChange={(e) => setCloudForm((f) => ({ ...f, client_id: e.target.value }))}
+            placeholder={t('settings.cloud.clientId')} aria-label={t('settings.cloud.clientId')} className={field} />
+          <input type="password" value={cloudForm.client_secret} autoComplete="new-password"
+            onChange={(e) => setCloudForm((f) => ({ ...f, client_secret: e.target.value }))}
+            placeholder={cloud?.configured ? t('settings.cloud.clientSecretKeep') : t('settings.cloud.clientSecret')}
+            aria-label={t('settings.cloud.clientSecret')} className={field} />
+          <input type="password" value={cloudForm.passphrase} autoComplete="new-password"
+            onChange={(e) => setCloudForm((f) => ({ ...f, passphrase: e.target.value }))}
+            placeholder={t('settings.cloud.passphrase')} aria-label={t('settings.cloud.passphrase')} className={field} />
+          <p className="text-xs text-slate-500">{t('settings.cloud.passphraseHint')}</p>
+          <div className="flex flex-wrap items-center gap-3">
+            <label className="flex items-center gap-2 text-sm text-slate-400">
+              {t('settings.cloud.keep')}
+              <input type="number" min={1} max={365} value={cloudForm.keep}
+                onChange={(e) => setCloudForm((f) => ({ ...f, keep: Number(e.target.value) }))}
+                aria-label={t('settings.cloud.keep')}
+                className={field + ' w-20'} />
+            </label>
+            <label className="flex items-center gap-2 text-sm text-slate-400">
+              <input type="checkbox" checked={cloudForm.include_transcripts}
+                onChange={(e) => setCloudForm((f) => ({ ...f, include_transcripts: e.target.checked }))}
+                className="h-4 w-4 rounded-md accent-sky-600" />
+              {t('settings.backup.includeTranscripts')}
+            </label>
+          </div>
+          {/* re-auth: configurarea deschide un canal permanent prin care pleacă backup-uri */}
+          <input type="password" value={cloudForm.current_password} autoComplete="current-password"
+            onChange={(e) => setCloudForm((f) => ({ ...f, current_password: e.target.value }))}
+            placeholder={t('settings.cloud.accountPassword')} aria-label={t('settings.cloud.accountPassword')} className={field} />
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="primary" type="submit" disabled={cloudBusy}>
+              {t('settings.cloud.save')}
+            </Button>
+            <button type="button" onClick={connectCloud} disabled={!cloud?.configured || cloudBusy}
+              className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-200 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-40">
+              {cloud?.connected ? t('settings.cloud.reconnect') : t('settings.cloud.connect')}
+            </button>
+            <button type="button" disabled={!cloud?.connected || cloudBusy}
+              onClick={() => cloudAction('upload', t('settings.cloud.uploaded'))}
+              className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-200 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-40">
+              {t('settings.cloud.uploadNow')}
+            </button>
+            {cloud?.connected && (
+              <button type="button" disabled={cloudBusy}
+                onClick={() => cloudAction('disconnect', t('settings.cloud.disconnected'))}
+                className="text-xs wt-danger hover:underline">
+                {t('settings.cloud.disconnect')}
+              </button>
+            )}
+            <button type="button" onClick={loadCloud} className="text-xs wt-link hover:underline">
+              {t('settings.cloud.refresh')}
+            </button>
+          </div>
+          <span role="status" className={cloudMsg ? 'text-sm wt-good' : 'sr-only'}>{cloudMsg}</span>
+          <span role="alert" className={cloudErr ? 'text-sm wt-danger' : 'sr-only'}>{cloudErr}</span>
+        </form>
         )}
-        <input type="password" value={restorePass} onChange={(e) => setRestorePass(e.target.value)}
-          placeholder={t('settings.backup.restorePassPlaceholder')} aria-label={t('settings.backup.restorePass')}
-          autoComplete="off" className={field} />
-        <div>
-          <Button variant="danger" disabled={bkBusy || !restoreFile} onClick={doRestore}>
-            {bkBusy ? t('settings.backup.validating') : t('settings.backup.restoreAndRestart')}
-          </Button>
+
+        {/* pasul 2 (server propriu): SFTP/FTPS scris din UI. Arhiva pleacă DEJA criptată; aici
+            configurăm doar unde şi cum ne conectăm, cu credenţialele criptate în seif. */}
+        {isDirect && (
+        <form onSubmit={saveDirect} data-testid="direct-backup-form" className="mt-3 flex flex-col gap-2">
+          <p className="flex items-start gap-2 text-xs text-slate-500">
+            <span>{directForm.kind === 'sftp' ? t('settings.direct.sftpHint') : t('settings.direct.ftpsHint')}</span>
+            <HelpTip id="directBackup" />
+          </p>
+          <div className="flex gap-2">
+            <input value={directForm.host} spellCheck={false} autoComplete="off"
+              onChange={(e) => setDirectForm((f) => ({ ...f, host: e.target.value }))}
+              placeholder={t('settings.direct.host')} aria-label={t('settings.direct.host')}
+              className={field + ' flex-1'} />
+            <input type="number" min={1} max={65535} value={directForm.port}
+              onChange={(e) => setDirectForm((f) => ({ ...f, port: Number(e.target.value) }))}
+              placeholder={t('settings.direct.port')} aria-label={t('settings.direct.port')}
+              className={field + ' w-24'} />
+          </div>
+          <input value={directForm.user} spellCheck={false} autoComplete="off"
+            onChange={(e) => setDirectForm((f) => ({ ...f, user: e.target.value }))}
+            placeholder={t('settings.direct.user')} aria-label={t('settings.direct.user')} className={field} />
+          <input value={directForm.path} spellCheck={false} autoComplete="off"
+            onChange={(e) => setDirectForm((f) => ({ ...f, path: e.target.value }))}
+            placeholder={t('settings.direct.path')} aria-label={t('settings.direct.path')} className={field} />
+
+          {/* metoda de auth: cheie SSH (doar SFTP) sau parolă */}
+          {directForm.kind === 'sftp' && (
+            <div className="flex gap-2">
+              {(['key', 'password'] as const).map((m) => (
+                <button key={m} type="button"
+                  onClick={() => setDirectForm((f) => ({ ...f, auth: m }))}
+                  className={`wt-touch rounded-md px-3 py-1.5 text-sm ${
+                    directForm.auth === m ? 'bg-sky-600 text-white' : 'bg-ink-800 text-slate-300 hover:bg-ink-700'}`}
+                >{m === 'key' ? t('settings.direct.authKey') : t('settings.direct.authPassword')}</button>
+              ))}
+            </div>
+          )}
+          {directForm.kind === 'sftp' && directForm.auth === 'key' ? (
+            <textarea value={directForm.ssh_key} spellCheck={false} autoComplete="off" rows={4}
+              onChange={(e) => setDirectForm((f) => ({ ...f, ssh_key: e.target.value }))}
+              placeholder={cloud?.direct?.has_key ? t('settings.direct.sshKeyKeep') : t('settings.direct.sshKey')}
+              aria-label={t('settings.direct.sshKey')} className={field + ' font-mono text-xs'} />
+          ) : (
+            <input type="password" value={directForm.password} autoComplete="new-password"
+              onChange={(e) => setDirectForm((f) => ({ ...f, password: e.target.value }))}
+              placeholder={cloud?.direct?.has_password ? t('settings.direct.passwordKeep') : t('settings.direct.password')}
+              aria-label={t('settings.direct.password')} className={field} />
+          )}
+
+          {/* SFTP: pinuirea host-key-ului (TOFU). Fără amprentă confirmată nu se poate salva. */}
+          {directForm.kind === 'sftp' && (
+            <div className="rounded-md bg-ink-800/60 p-3 ring-1 ring-ink-700">
+              <div className="flex flex-wrap items-center gap-2">
+                <button type="button" onClick={probeHost} disabled={cloudBusy || !directForm.host || !directForm.user}
+                  className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-200 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-40">
+                  {t('settings.direct.probe')}
+                </button>
+                {directForm.hostkey
+                  ? <span className="text-xs wt-good">{t('settings.direct.hostkeyPinned')}</span>
+                  : <span className="text-xs wt-warn">{t('settings.direct.hostkeyNeeded')}</span>}
+              </div>
+              {probeInfo && (
+                <p className="mt-2 break-all text-xs text-slate-400">
+                  {t('settings.direct.confirmFingerprint')}
+                  <span className="mt-1 block font-mono text-slate-200">{probeInfo.fingerprint}</span>
+                </p>
+              )}
+            </div>
+          )}
+          {/* FTPS: CA/cert PEM opţional pentru servere self-signed (public, nu e secret) */}
+          {directForm.kind === 'ftps' && (
+            <textarea value={directForm.ca} spellCheck={false} autoComplete="off" rows={3}
+              onChange={(e) => setDirectForm((f) => ({ ...f, ca: e.target.value }))}
+              placeholder={cloud?.direct?.has_ca ? t('settings.direct.caKeep') : t('settings.direct.ca')}
+              aria-label={t('settings.direct.ca')} className={field + ' font-mono text-xs'} />
+          )}
+
+          <input type="password" value={directForm.passphrase} autoComplete="new-password"
+            onChange={(e) => setDirectForm((f) => ({ ...f, passphrase: e.target.value }))}
+            placeholder={t('settings.cloud.passphrase')} aria-label={t('settings.cloud.passphrase')} className={field} />
+          <p className="text-xs text-slate-500">{t('settings.cloud.passphraseHint')}</p>
+          <div className="flex flex-wrap items-center gap-3">
+            <label className="flex items-center gap-2 text-sm text-slate-400">
+              {t('settings.cloud.keep')}
+              <input type="number" min={1} max={365} value={directForm.keep}
+                onChange={(e) => setDirectForm((f) => ({ ...f, keep: Number(e.target.value) }))}
+                aria-label={t('settings.cloud.keep')} className={field + ' w-20'} />
+            </label>
+            <label className="flex items-center gap-2 text-sm text-slate-400">
+              <input type="checkbox" checked={directForm.include_transcripts}
+                onChange={(e) => setDirectForm((f) => ({ ...f, include_transcripts: e.target.checked }))}
+                className="h-4 w-4 rounded-md accent-sky-600" />
+              {t('settings.backup.includeTranscripts')}
+            </label>
+          </div>
+          {/* re-auth: configurarea deschide un canal permanent prin care pleacă backup-uri */}
+          <input type="password" value={directForm.current_password} autoComplete="current-password"
+            onChange={(e) => setDirectForm((f) => ({ ...f, current_password: e.target.value }))}
+            placeholder={t('settings.cloud.accountPassword')} aria-label={t('settings.cloud.accountPassword')} className={field} />
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="primary" type="submit" disabled={cloudBusy || (directForm.kind === 'sftp' && !directForm.hostkey)}>
+              {t('settings.cloud.save')}
+            </Button>
+            <button type="button" disabled={!cloud?.connected || cloudBusy}
+              onClick={() => cloudAction('upload', t('settings.cloud.uploaded'))}
+              className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-200 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-40">
+              {t('settings.cloud.uploadNow')}
+            </button>
+            {cloud?.connected && isDirect && (
+              <button type="button" disabled={cloudBusy}
+                onClick={() => cloudAction('disconnect', t('settings.direct.removed'))}
+                className="text-xs wt-danger hover:underline">
+                {t('settings.direct.remove')}
+              </button>
+            )}
+            <button type="button" onClick={loadCloud} className="text-xs wt-link hover:underline">
+              {t('settings.cloud.refresh')}
+            </button>
+          </div>
+          <span role="status" className={cloudMsg ? 'text-sm wt-good' : 'sr-only'}>{cloudMsg}</span>
+          <span role="alert" className={cloudErr ? 'text-sm wt-danger' : 'sr-only'}>{cloudErr}</span>
+        </form>
+        )}
+      </section>
+
+      <section data-setting-id="backupRestore">
+        {/* ── Restore ── */}
+        <h3 className={heading}>{t('settings.backup.restoreTitle')}</h3>
+        <p className="mt-1 text-xs text-slate-500">
+          {t('settings.backup.restoreHintA')} <span className="font-mono">.wtbk</span> {t('settings.backup.restoreHintB')}
+          <span className="wt-warn"> {t('settings.backup.restoreRestarts')}</span> {t('settings.backup.restoreHintC')}
+        </p>
+        <div className="mt-2 flex flex-col gap-2">
+          <div className="flex items-center gap-2">
+            <Button variant="secondary" onClick={() => restoreRef.current?.click()}>
+              {t('settings.chooseFile')}
+            </Button>
+            <span className="min-w-0 truncate text-xs text-slate-400">{restoreFile ? restoreFile.name : t('settings.noFileChosen')}</span>
+            <input ref={restoreRef} type="file" accept=".wtbk,application/octet-stream" className="hidden"
+              onChange={(e) => setRestoreFile(e.target.files?.[0] ?? null)} />
+          </div>
+          {restoreFile && (
+            <p className="text-xs text-slate-400">{restorePreview(restoreFile)}</p>
+          )}
+          <input type="password" value={restorePass} onChange={(e) => setRestorePass(e.target.value)}
+            placeholder={t('settings.backup.restorePassPlaceholder')} aria-label={t('settings.backup.restorePass')}
+            autoComplete="off" className={field} />
+          <div>
+            <Button variant="danger" disabled={bkBusy || !restoreFile} onClick={doRestore}>
+              {bkBusy ? t('settings.backup.validating') : t('settings.backup.restoreAndRestart')}
+            </Button>
+          </div>
         </div>
-      </div>
+      </section>
     </div>
   )
 }
