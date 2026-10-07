@@ -38,8 +38,8 @@ async def main():
 
     # capturăm notificările (fără email/webhook real)
     changes, unlocks = [], []
-    email_alerts.notify_security_change = lambda what, ip, email: changes.append(what)
-    email_alerts.notify_host_unlocked = lambda host, ip, email: unlocks.append(host)
+    email_alerts.notify_security_change = lambda what, ip, email, **k: changes.append(what)
+    email_alerts.notify_host_unlocked = lambda host, ip, email, **k: unlocks.append(host)
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=_ORIGIN) as c:

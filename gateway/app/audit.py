@@ -28,7 +28,8 @@ MAX_ROWS = 200_000
 
 # calea completă e „ținta" (are id-urile în ea); nu logăm query string-ul — poate conține
 # token de share/enroll, iar valoarea lui de audit e zero față de riscul de a-l persista
-_SKIP = ("/api/history",)      # zgomot pur: istoricul de comenzi are deja tabelul lui
+_SKIP = ("/api/history",      # zgomot pur: istoricul de comenzi are deja tabelul lui
+         "/api/alerts/read")  # „am citit alertele" = zgomot la fiecare deschidere a clopoţelului
 
 # Citiri care SCOT DATE din sistem. Middleware-ul înregistra doar metodele care schimbă ceva,
 # ceea ce lăsa exfiltrarea complet nevăzută: descărcarea unui fişier, transcriptul unei sesiuni,

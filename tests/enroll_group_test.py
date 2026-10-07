@@ -38,8 +38,8 @@ async def main():
     await api.init_setup_token()
 
     enrolled = []
-    email_alerts.notify_host_enrolled = lambda group, ip: enrolled.append(group)
-    email_alerts.notify_security_change = lambda what, ip, email: None
+    email_alerts.notify_host_enrolled = lambda group, ip, **k: enrolled.append(group)
+    email_alerts.notify_security_change = lambda what, ip, email, **k: None
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=_ORIGIN) as c:

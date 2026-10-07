@@ -520,7 +520,7 @@ async def note_new_login(user, ip: str, user_agent: str) -> bool:
         " ON CONFLICT(user_id, ip_hash) DO UPDATE SET logins = logins + 1",
         user["id"], ih, time.time())
     if row is None:
-        email_alerts.notify_new_login(ip, user_agent, user["email"])
+        email_alerts.notify_new_login(ip, user_agent, user["email"], user_id=user["id"])
     return not established
 
 

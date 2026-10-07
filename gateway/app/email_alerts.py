@@ -13,7 +13,7 @@ import ssl
 import time
 from email.message import EmailMessage
 
-from . import config, db
+from . import alert_history, config, db
 
 log = logging.getLogger("webterm")
 
@@ -183,10 +183,21 @@ async def send_account_code(to_email: str, code: str, what: str) -> None:
         "password. Change it from a device you normally use." % (code, what))
 
 
-def _fire(subject: str, body: str) -> None:
-    """Send without blocking the handler; swallow any error (best-effort)."""
+def _fire(subject: str, body: str, kind: str = "system", severity: str = "info",
+          host_id=None, user_id=None, user_email=None) -> None:
+    """Send without blocking the handler; swallow any error (best-effort).
+
+    3.5.11: înainte de canalul extern, evenimentul se înregistrează în istoricul din aplicaţie
+    (`alert_history.record`) pentru conturile cărora le priveşte, iar preferinţele lor decid dacă
+    mai pleacă pe email/webhook. O eroare la înregistrare NU opreşte emailul (best-effort)."""
     async def _run():
         cfg = None
+        try:
+            if not await alert_history.record(kind, severity, subject, body, host_id=host_id,
+                                              user_id=user_id, user_email=user_email):
+                return                      # toate conturile vizate au oprit emailul pentru tipul ăsta
+        except Exception as e:              # noqa: BLE001 — istoricul nu rupe alerta
+            log.warning("in-app alert not recorded (%s): %s", kind, e)
         try:
             cfg = await load_config()
             if _configured(cfg):
@@ -267,10 +278,10 @@ def notify_lockout(ip: str, fails: int) -> None:
     _fire("IP blocked after failed login attempts",
           f"IP {ip} was temporarily blocked after {fails} failed authentication "
           f"attempts.\n\nIf this was not you, someone is trying to guess your "
-          f"password — but access is blocked.")
+          f"password — but access is blocked.", kind="lockout", severity="warning")
 
 
-def notify_agent_relocation(host_name: str, instance_short: str) -> None:
+def notify_agent_relocation(host_name: str, instance_short: str, host_id=None) -> None:
     """Un agent a încercat să se conecteze de pe o ALTĂ maşină pe tokenul unui host deja fixat
     (clonă de VM / token furat şi mutat) — conexiunea a fost REFUZATĂ. Semnal de compromis puternic.
     Cel mult o alertă / 15 min per host (un atacator care reîncearcă nu ne inundă)."""
@@ -280,10 +291,11 @@ def notify_agent_relocation(host_name: str, instance_short: str) -> None:
           f"Host '{host_name}' is pinned to one machine, but its token was used from a "
           f"DIFFERENT machine (instance {instance_short}…) — the connection was REFUSED.\n\n"
           f"If you are NOT reinstalling the host: someone has the agent's token and is trying "
-          f"to use it elsewhere. Check the host; revoke or reinstall the agent if needed.")
+          f"to use it elsewhere. Check the host; revoke or reinstall the agent if needed.",
+          kind="agent_relocation", severity="critical", host_id=host_id)
 
 
-def notify_agent_ip_change(host_name: str, old_ip: str, new_ip: str) -> None:
+def notify_agent_ip_change(host_name: str, old_ip: str, new_ip: str, host_id=None) -> None:
     """Agentul unui host s-a reconectat de la un IP nou. Informativ (IP-urile se schimbă legitim:
     DHCP / reboot / NAT), dar util ca semnal. Cel mult o alertă / oră per host."""
     if not _throttled(f"agentip:{host_name}", 3600):
@@ -292,19 +304,20 @@ def notify_agent_ip_change(host_name: str, old_ip: str, new_ip: str) -> None:
           f"The agent on host '{host_name}' connected from a new IP.\n\n"
           f"New: {new_ip}\nPrevious: {old_ip}\n\n"
           f"Normal after a reboot or a network change. If the host has a fixed IP you did not touch, "
-          f"it is worth a look.")
+          f"it is worth a look.", kind="agent_ip_change", severity="info", host_id=host_id)
 
 
-def notify_new_login(ip: str, user_agent: str, email: str) -> None:
+def notify_new_login(ip: str, user_agent: str, email: str, user_id=None) -> None:
     """A successful login from an IP never seen before. The most valuable signal."""
     _fire("New login on your account",
           f"Successful authentication for {email} from a new IP.\n\n"
           f"IP: {ip}\nBrowser: {user_agent or '?'}\n\n"
           f"If this was not you, change the password immediately and review the active "
-          f"sessions in settings.")
+          f"sessions in settings.", kind="new_login", severity="warning",
+          user_id=user_id, user_email=email)
 
 
-def notify_session_attach(title: str, ip: str, user_agent: str, email: str) -> None:
+def notify_session_attach(title: str, ip: str, user_agent: str, email: str, user_id=None) -> None:
     """Cineva s-a ataşat la o sesiune VIE de pe un IP nemaivăzut la un login al contului.
     Throttled per IP: dacă deschizi cinci taburi de pe acelaşi loc nou, primeşti un mesaj, nu
     cinci. Ataşările de pe locuri cunoscute nu trimit nimic — altfel alerta devine zgomot şi
@@ -316,17 +329,25 @@ def notify_session_attach(title: str, ip: str, user_agent: str, email: str) -> N
           f"IP: {ip}\nBrowser: {user_agent or '?'}\n\n"
           f"This IP has not been seen on a successful login for this account. If it was not "
           f"you, open the session and remove that client from the viewer list, then change "
-          f"the password — the browser session behind it stays valid until you do.")
+          f"the password — the browser session behind it stays valid until you do.",
+          kind="session_attach", severity="warning", user_id=user_id, user_email=email)
 
 
-def notify_security_change(what: str, ip: str, email: str) -> None:
-    """A sensitive account change (password, 2FA, new passkey, new account, new API token)."""
+def notify_security_change(what: str, ip: str, email: str, fleet: bool = False,
+                           severity: str = "warning", user_id=None, host_id=None) -> None:
+    """A sensitive account change (password, 2FA, new passkey, new account, new API token).
+
+    `fleet=True`: schimbarea priveşte TOATĂ instanţa (cont nou, token de automatizare, token de
+    grup, host key re-pinat, share-uri revocate) → istoricul o arată fiecărui cont (`admin_change`);
+    altfel e a contului care a făcut-o (`account_change`)."""
     _fire(f"Security change: {what}",
           f"On account {email}: {what}.\nIP: {ip}\n\n"
-          f"If this was not you, the account is probably compromised.")
+          f"If this was not you, the account is probably compromised.",
+          kind="admin_change" if fleet else "account_change", severity=severity,
+          host_id=host_id, user_id=None if fleet else user_id, user_email=None if fleet else email)
 
 
-def notify_host_key_changed(host_name: str, detail: str) -> None:
+def notify_host_key_changed(host_name: str, detail: str, host_id=None) -> None:
     """Host-key-ul unei ţinte SSH (direct sau jump) NU se potriveşte cu cel pinat — ori s-a
     re-provizionat legitim, ori e un MITM activ. Conexiunea a fost REFUZATĂ. Semnal puternic,
     throttle per host (15 min) ca un atacator care reîncearcă să nu inunde."""
@@ -335,11 +356,12 @@ def notify_host_key_changed(host_name: str, detail: str) -> None:
     _fire("SSH host key changed — connection refused",
           f"The pinned SSH host key for '{host_name}' did not match on connect — the connection "
           f"was REFUSED.\n{detail}\n\nIf you did not re-provision this host, this is a possible "
-          f"man-in-the-middle. Verify out-of-band before clearing the pinned key.")
+          f"man-in-the-middle. Verify out-of-band before clearing the pinned key.",
+          kind="host_key_changed", severity="critical", host_id=host_id)
 
 
 def notify_ssh_key_action(action: str, source: str, target: str, fingerprint: str,
-                          ip: str, email: str) -> None:
+                          ip: str, email: str, host_id=None) -> None:
     """O cheie de deploy a fost pusă/scoasă din authorized_keys pe o ţintă — adică s-a acordat
     sau retras acces SSH DURABIL, care supravieţuieşte revocării cookie-urilor şi chiar opririi
     WebTerm. Fiecare muchie nouă trebuie să fie un eveniment văzut, nu o descoperire la audit.
@@ -348,10 +370,11 @@ def notify_ssh_key_action(action: str, source: str, target: str, fingerprint: st
           f"On account {email}: the deploy key of host '{source}' ({fingerprint}) was "
           f"{action} on host '{target}'.\nIP: {ip}\n\n"
           f"If this was not you, revoke the key from Toolbox → SSH keys on '{source}' "
-          f"and check ~/.ssh/authorized_keys on '{target}'.")
+          f"and check ~/.ssh/authorized_keys on '{target}'.",
+          kind="ssh_key", severity="warning", host_id=host_id)
 
 
-def notify_host_enrolled(group_name: str, ip: str) -> None:
+def notify_host_enrolled(group_name: str, ip: str, host_id=None) -> None:
     """Un host nou s-a auto-înmatriculat în flotă printr-un token de grup. Înrolarea era un act
     deliberat, per-host, dintr-un browser autentificat; un token de grup o face din afară, deci
     fiecare maşină nouă merită o urmă vizibilă. Throttle per grup (10 min): un rollout de zeci de
@@ -363,10 +386,11 @@ def notify_host_enrolled(group_name: str, ip: str) -> None:
           f"IP: {ip}\n\n"
           f"If you are rolling out machines, this is expected (one alert per group per 10 min). "
           f"If not, revoke the token in Settings → the host got its own agent credential and can "
-          f"reach the gateway until you remove it.")
+          f"reach the gateway until you remove it.", kind="host_enrolled", severity="warning",
+          host_id=host_id)
 
 
-def notify_host_unlocked(host_name: str, ip: str, email: str) -> None:
+def notify_host_unlocked(host_name: str, ip: str, email: str, host_id=None, user_id=None) -> None:
     """A host marked `require_2fa` was just unlocked (step-up passed) — i.e. a PROTECTED host
     is now being accessed. These are the hosts explicitly flagged as sensitive, so an unlock is
     exactly the event worth surfacing. Throttled per host+IP (15 min): the step-up window is
@@ -377,7 +401,8 @@ def notify_host_unlocked(host_name: str, ip: str, email: str) -> None:
           f"Account: {email}\nHost: {host_name}\nIP: {ip}\n\n"
           f"Step-up (passkey or account password) passed, so this host — which you marked as "
           f"requiring 2FA — is now accessible for a short window. If this was not you, change "
-          f"your password and review the active sessions in settings.")
+          f"your password and review the active sessions in settings.",
+          kind="host_unlocked", severity="info", host_id=host_id, user_id=user_id, user_email=email)
 
 
 # ---------------------------------------------------------------------------
@@ -476,14 +501,16 @@ def check_metrics(host_id: int, host_name: str, metrics: dict, thresholds: dict)
                 f"Host {host_name} crossed the alert threshold.\n\n"
                 f"Metric: {_LABELS[key]}\nValue: {value:.1f}%\nThreshold: {limit}%\n\n"
                 f"You get a single alert while it stays above the threshold; "
-                f"you will hear again when it drops below {max(0, limit - HYSTERESIS)}%.")
+                f"you will hear again when it drops below {max(0, limit - HYSTERESIS)}%.",
+                kind="resource", severity="warning", host_id=host_id)
         elif _firing.get(state_key) and value <= limit - HYSTERESIS:
             # revenire la normal: re-armăm și confirmăm rezolvarea
             _firing[state_key] = False
             _fire(
                 f"[{host_name}] {_LABELS[key]} back to {value:.0f}%",
                 f"Host {host_name}: {_LABELS[key]} dropped to {value:.1f}% "
-                f"(below the {limit}% threshold minus the {HYSTERESIS}-point margin).")
+                f"(below the {limit}% threshold minus the {HYSTERESIS}-point margin).",
+                kind="resource", severity="ok", host_id=host_id)
 
 
 # ── hostul a tăcut / a revenit ────────────────────────────────────────────────
@@ -512,20 +539,23 @@ def notify_host_offline(host_id: int, host_name: str, silent_for: float,
               f"WebTerm, or reinstall the agent and this clears itself.\n"
               f"If you did NOT: the agent was stopped by someone with shell access on the "
               f"host — the uninstall report is only authenticated by the host token. "
-              f"Investigate the machine; do not assume the removal was intentional.")
+              f"Investigate the machine; do not assume the removal was intentional.",
+              kind="host_offline", severity="warning", host_id=host_id)
         return
     _fire(f"[{host_name}] host offline",
           f"The agent on '{host_name}' has not reported for {int(silent_for)}s.\n\n"
           f"The tmux sessions on the host keep running — what broke is the link to the "
           f"gateway: the agent stopped, network/DNS, or the machine went down.\n"
-          f"Check: `tmux -L webterm ls` on the host, then `~/.webterm/ptyd.log`.")
+          f"Check: `tmux -L webterm ls` on the host, then `~/.webterm/ptyd.log`.",
+          kind="host_offline", severity="warning", host_id=host_id)
 
 
 def notify_host_online(host_id: int, host_name: str) -> None:
     """Perechea celei de sus: fără ea, o alertă de cădere rămâne deschisă la nesfârşit. Chemată
     de sweep DOAR când chiar trimisesem o alertă de offline (hosts.offline_notified=1)."""
     _fire(f"[{host_name}] host back online",
-          f"The agent on '{host_name}' is reporting again.")
+          f"The agent on '{host_name}' is reporting again.",
+          kind="host_offline", severity="ok", host_id=host_id)
 
 
 def notify_disk_low(free: int, total: int, pct: float) -> None:
@@ -544,7 +574,8 @@ def notify_disk_low(free: int, total: int, pct: float) -> None:
           f"When it runs out, the database and the transcripts stop being writable: logins "
           f"start failing with 500 while the container still reports healthy.\n\n"
           f"Transcripts are the usual cause. Lower WEBTERM_ARCHIVE_DAYS, or "
-          f"WEBTERM_TRANSCRIPT_MAX_BYTES, or make room on the volume.")
+          f"WEBTERM_TRANSCRIPT_MAX_BYTES, or make room on the volume.",
+          kind="gateway_disk", severity="critical")
 
 
 def notify_signing_locked(behind: int) -> None:
@@ -561,7 +592,7 @@ def notify_signing_locked(behind: int) -> None:
           f"{behind} agent(s) are on an older version and cannot be updated.\n\n"
           f"Unlock it: Settings → Infrastructure & tokens → Agent signing key.\n"
           f"Agent updates are signed, and without the key the gateway refuses (correctly) to "
-          f"push unsigned code to the hosts.")
+          f"push unsigned code to the hosts.", kind="signing_locked", severity="warning")
 
 
 def notify_update_refused(host_id: int, code: str, hint: str) -> None:
@@ -571,7 +602,8 @@ def notify_update_refused(host_id: int, code: str, hint: str) -> None:
     _fire("Agent: update REFUSED (%s)" % code,
           f"Host #{host_id} refused the agent update.\n\nReason: {code}\n{hint}\n\n"
           f"Until this is fixed the host stays on the old agent version — including without the "
-          f"security fixes shipped since.")
+          f"security fixes shipped since.", kind="update_refused", severity="warning",
+          host_id=host_id)
 
 
 def notify_backup_failed(provider: str, fails: int, last_ok_ts: float, error: str) -> None:
@@ -594,7 +626,8 @@ def notify_backup_failed(provider: str, fails: int, last_ok_ts: float, error: st
           f"{age}\n\nLast error: {error}\n\n"
           f"Common causes: expired OAuth authorisation (reconnect in Settings → Backup), a wrong "
           f"encryption passphrase, or the SFTP/FTPS server being unreachable or its host key "
-          f"having changed. Until fixed, you have no fresh off-host copy of the vault.")
+          f"having changed. Until fixed, you have no fresh off-host copy of the vault.",
+          kind="backup_failed", severity="critical")
 
 
 def notify_local_backup_failed(error: str, last_ok_ts: float) -> None:
@@ -615,4 +648,4 @@ def notify_local_backup_failed(error: str, last_ok_ts: float) -> None:
           f"Common causes: the gateway disk is full, the database is locked by another process, or "
           f"the data volume is read-only. Until fixed, the local snapshots age out under retention "
           f"and there is no fresh copy of the vault — download a backup manually from Settings → "
-          f"Backup if you cannot fix it right away.")
+          f"Backup if you cannot fix it right away.", kind="backup_failed", severity="critical")

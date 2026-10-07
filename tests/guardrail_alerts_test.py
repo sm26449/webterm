@@ -158,7 +158,7 @@ async def main():
     # ── alerte: host căzut / revenit, o singură dată per tranziţie ──
     sent = []
     orig_fire = email_alerts._fire
-    email_alerts._fire = lambda subject, body: sent.append(subject)
+    email_alerts._fire = lambda subject, body, **k: sent.append(subject)
     # dedup-ul trăieşte acum în DB (hosts.offline_notified), nu în RAM: îl resetăm între cazuri
     await db.execute("UPDATE hosts SET offline_notified=0, alerts_muted=0 WHERE id=?", hid)
     try:
@@ -290,7 +290,7 @@ async def main():
     email_alerts._post_webhook = lambda url, subject, body: posted.append(url)
     sec_events = []
     orig_sec = email_alerts.notify_security_change
-    email_alerts.notify_security_change = lambda what, ip, email: sec_events.append(what)
+    email_alerts.notify_security_change = lambda what, ip, email, **k: sec_events.append(what)
     try:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=_ORIGIN) as c:

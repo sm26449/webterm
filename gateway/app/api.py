@@ -31,8 +31,8 @@ from urllib.parse import quote, urlparse
 from .errors import ApiError
 from . import webauthn_api
 from . import fscopy
-from . import (audit, backup, cloudbackup, config, core, db, email_alerts, health, security,
-               signing, totp, updatecheck)
+from . import (alert_history, audit, backup, cloudbackup, config, core, db, email_alerts, health,
+               security, signing, totp, updatecheck)
 
 log = logging.getLogger("webterm")
 router = APIRouter()
@@ -659,7 +659,8 @@ async def update_account(body: AccountUpdate, request: Request, user=Depends(sec
                                ("email (%s → %s)" % (user["email"], email), email != user["email"])) if on]
     if changed:
         email_alerts.notify_security_change("account %s changed" % " and ".join(changed),
-                                            security.client_ip(request), user["email"])
+                                            security.client_ip(request), user["email"],
+                                            user_id=user["id"])
     return {"ok": True, "email": email}
 
 
@@ -753,7 +754,7 @@ async def create_user(body: UserIn, request: Request, user=Depends(security.requ
     # un cont nou = un admin egal în plus (nu există roluri): cel mai valoros eveniment de
     # securitate. Ajunge pe email ŞI webhook (via _fire), ca oricare schimbare de credenţiale.
     email_alerts.notify_security_change("a new WebTerm account was created (%s)" % email,
-                                        security.client_ip(request), user["email"])
+                                        security.client_ip(request), user["email"], fleet=True)
     return await list_users(user)
 
 
@@ -784,6 +785,8 @@ async def delete_user(uid: int, body: ReauthOnly, request: Request,
                 "DELETE FROM webauthn_credentials WHERE user_id=?",
                 "DELETE FROM recovery_codes WHERE user_id=?",
                 "DELETE FROM seen_logins WHERE user_id=?",
+                "DELETE FROM alerts WHERE user_id=?",          # istoricul de alerte (3.5.11)
+                "DELETE FROM alert_prefs WHERE user_id=?",
                 "DELETE FROM users WHERE id=?"):
         await db.execute(sql, uid)
     # …„tot" trebuia să însemne şi asta. Token-urile de automatizare emise de contul şters îi
@@ -968,7 +971,7 @@ async def create_token(body: TokenIn, request: Request, user=Depends(security.re
     # (email + webhook), la fel ca un passkey nou sau un cont nou.
     email_alerts.notify_security_change(
         "an automation token was created (%s, scopes: %s)" % (name, ",".join(scopes)),
-        security.client_ip(request), user["email"])
+        security.client_ip(request), user["email"], fleet=True)
     # valoarea în clar se întoarce O SINGURĂ DATĂ; în DB stă doar hash-ul
     return {"token": raw, "tokens": await list_tokens(user)}
 
@@ -1030,7 +1033,7 @@ async def create_enroll_group(body: EnrollGroupIn, request: Request,
              name, max_uses, days, bool(body.require_2fa), bool(pw), user["email"])
     # un token de grup = o cheie care poate înmatricula hosturi noi în flotă: eveniment de securitate
     email_alerts.notify_security_change("a group enrollment token was created (%s)" % name,
-                                        security.client_ip(request), user["email"])
+                                        security.client_ip(request), user["email"], fleet=True)
     # valoarea în clar se întoarce O SINGURĂ DATĂ; în DB stă doar hash-ul
     return {"token": raw, "install_command": _group_install_command(raw, pw),
             "groups": await list_enroll_groups(user)}
@@ -1090,7 +1093,8 @@ async def totp_activate(body: TotpActivate, request: Request,
         await db.execute(
             "INSERT INTO recovery_codes(user_id, code_hash, created) VALUES(?,?,?)",
             user["id"], security.sha256_hex(c), time.time())
-    email_alerts.notify_security_change("2FA (TOTP) enabled", security.client_ip(request), user["email"])
+    email_alerts.notify_security_change("2FA (TOTP) enabled", security.client_ip(request), user["email"],
+                                        user_id=user["id"])
     return {"ok": True, "recovery_codes": codes}
 
 
@@ -1116,7 +1120,8 @@ async def totp_disable(body: TotpDisable, request: Request,
     # „sudo" deschis cât timp 2FA era activ să nu supravieţuiască slăbirii contului (ca la rotirea
     # parolei / schimbarea passkey-ului).
     security.clear_stepup_for(user["id"])
-    email_alerts.notify_security_change("2FA (TOTP) disabled", security.client_ip(request), user["email"])
+    email_alerts.notify_security_change("2FA (TOTP) disabled", security.client_ip(request), user["email"],
+                                        severity="critical", user_id=user["id"])
     return {"ok": True}
 
 
@@ -1481,6 +1486,77 @@ async def save_alert_thresholds(body: ThresholdsIn, user=Depends(security.requir
         await _set_setting(f"alert_{key}", str(value))
     email_alerts.invalidate_thresholds()   # cache-ul de la check_metrics
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Istoricul de alerte în aplicaţie + preferinţe per eveniment (3.5.11, alert_history.py)
+# ---------------------------------------------------------------------------
+# Doar cookie (require_user), ca restul API-ului: un token de automatizare NU e un cont, deci
+# n-are un istoric al lui, iar „ce alerte de securitate a văzut omul" nu e treaba unui cron.
+# Fiecare interogare e filtrată pe `user["id"]` — un cont nu vede, nu marchează şi nu şterge
+# rândurile altuia (fan-out-ul evenimentelor de flotă îi dă fiecăruia propria copie).
+
+class AlertsReadIn(BaseModel):
+    ids: Optional[list[int]] = None        # lipsă = toate
+    all: bool = False
+
+
+class AlertPrefIn(BaseModel):
+    email: bool = True
+    inapp: bool = True
+
+
+class AlertPrefsIn(BaseModel):
+    prefs: dict[str, AlertPrefIn]
+
+
+@router.get("/api/alerts")
+async def list_alerts(limit: int = 50, before: Optional[int] = None, unread: bool = False,
+                      user=Depends(security.require_user)):
+    """Alertele contului, cele mai noi primele; `before` = id-ul ultimului rând văzut (paginare)."""
+    return await alert_history.list_for(user["id"], limit=limit, before=before, unread_only=unread)
+
+
+@router.get("/api/alerts/unread")
+async def alerts_unread(user=Depends(security.require_user)):
+    """Doar contorul — poll-ul ieftin al clopoţelului (o interogare pe index)."""
+    return {"unread": await alert_history.unread_count(user["id"])}
+
+
+@router.post("/api/alerts/read")
+async def alerts_mark_read(body: AlertsReadIn, user=Depends(security.require_user)):
+    if not body.all and not body.ids:
+        raise ApiError(400, "alerts.nothingToMark", "pass `ids` or `all: true`")
+    n = await alert_history.mark_read(user["id"], None if body.all else body.ids)
+    return {"ok": True, "unread": n}
+
+
+@router.delete("/api/alerts")
+async def alerts_clear(request: Request, user=Depends(security.require_user)):
+    n = await alert_history.clear(user["id"])
+    audit.detail(request, "cleared %d in-app alert(s)" % n)
+    return {"ok": True, "cleared": n}
+
+
+@router.get("/api/alerts/prefs")
+async def get_alert_prefs(user=Depends(security.require_user)):
+    return {"prefs": await alert_history.get_prefs(user["id"])}
+
+
+@router.post("/api/alerts/prefs")
+async def save_alert_prefs(body: AlertPrefsIn, request: Request, user=Depends(security.require_user)):
+    """Toggle-uri per tip: email (+ webhook) şi în aplicaţie. Tipurile de securitate rămân
+    înregistrate în aplicaţie oricum (`inapp` e ignorat pentru ele) — vezi alert_history.py."""
+    try:
+        prefs = await alert_history.set_prefs(
+            user["id"], {k: v.model_dump() for k, v in body.prefs.items()})
+    except ValueError as e:
+        raise ApiError(400, "alerts.unknownKind", "unknown alert kind: %s" % e,
+                       vars={"kind": str(e)[:40]})
+    off = [k for k, v in body.prefs.items() if not v.email]
+    if off:
+        audit.detail(request, "alert email off for: %s" % ",".join(sorted(off))[:300])
+    return {"prefs": prefs}
 
 
 # ---------------------------------------------------------------------------
@@ -4686,7 +4762,7 @@ async def host_hostkey_accept(host_id: int, body: HostKeyAcceptIn, request: Requ
                                   detail="%s → %s by %s" % (old_fp, new_fp, user["email"]))
     email_alerts.notify_security_change(
         "SSH host key re-pinned for host '%s' (%s → %s)" % (row["name"], old_fp, new_fp),
-        security.client_ip(request), user["email"])
+        security.client_ip(request), user["email"], fleet=True, host_id=host_id)
     return {"ok": True, "fingerprint": new_fp if new_key else None, "pinned": bool(new_key)}
 
 
@@ -6243,7 +6319,8 @@ async def host_stepup(host_id: int, body: SessionIn, request: Request,
     # deblocare PROASPĂTĂ (nu re-apel idempotent cât fereastra e deschisă) a unui host marcat 2FA
     # = un host protejat tocmai a fost accesat: notificăm (email + webhook), throttle-uit per host.
     if not was_open and row and row["require_2fa"]:
-        email_alerts.notify_host_unlocked(row["name"], security.client_ip(request), user["email"])
+        email_alerts.notify_host_unlocked(row["name"], security.client_ip(request), user["email"],
+                                          host_id=host_id, user_id=user["id"])
     return {"ok": True, "window": security.STEPUP_WINDOW}
 
 
@@ -6884,7 +6961,7 @@ async def _dk_deploy_one(key, target_id: int, from_ip: str, confirmed: bool,
             key["id"], target_id, options, line, now, user["email"])
     email_alerts.notify_ssh_key_action("DEPLOYED", source["name"] if source else "?",
                                        target["name"], key["fingerprint"],
-                                       security.client_ip(request), user["email"])
+                                       security.client_ip(request), user["email"], host_id=target_id)
     if request is not None:
         audit.detail(request, "deploy-key %s -> %s" % (key["fingerprint"], target["name"]))
     return {"ok": True, "line": line, "target_user": target["agent_user"] or ""}
@@ -7006,7 +7083,7 @@ async def deploy_key_revoke(host_id: int, body: DeployKeyIn, request: Request,
         time.time(), key["id"], host_id)
     email_alerts.notify_ssh_key_action("REVOKED", source["name"] if source else "?",
                                        target["name"], key["fingerprint"],
-                                       security.client_ip(request), user["email"])
+                                       security.client_ip(request), user["email"], host_id=host_id)
     return {"ok": True, "removed": "WT_REMOVED" in out}
 
 
@@ -7587,7 +7664,7 @@ async def revoke_all_shares(body: RevokeAllSharesIn, request: Request,
     audit.detail(request, "revoked all share links (%d active)" % n)
     log.warning("all share links revoked (%d active) by %s", n, user["email"])
     email_alerts.notify_security_change("all share links were revoked (%d active)" % n,
-                                        security.client_ip(request), user["email"])
+                                        security.client_ip(request), user["email"], fleet=True)
     return {"ok": True, "revoked": n}
 
 
@@ -8107,7 +8184,7 @@ async def group_install_script(group_token: str, request: Request):
              host_id, grp["name"], security.client_ip(request))
     await audit.record(time.time(), "group:" + grp["name"], security.client_ip(request), "POST",
                        "/install/group", 200, "host #%d auto-enrolled (group '%s')" % (host_id, grp["name"]))
-    email_alerts.notify_host_enrolled(grp["name"], security.client_ip(request))
+    email_alerts.notify_host_enrolled(grp["name"], security.client_ip(request), host_id=host_id)
     return _install_script_for(token)
 
 
@@ -8293,7 +8370,7 @@ async def agent_ws(ws: WebSocket):
         await core.record_handshake_refusal(row["id"], "handshake_instance_conflict", ip,
                                             detail="instance %s ≠ pinned %s"
                                                    % ((instance or "<none>")[:8], pinned[:8]))
-        email_alerts.notify_agent_relocation(row["name"], (instance or "<none>")[:8])
+        email_alerts.notify_agent_relocation(row["name"], (instance or "<none>")[:8], host_id=row["id"])
         await ws.close(code=4409)
         return
     if instance and not pinned:
@@ -8313,7 +8390,7 @@ async def agent_ws(ws: WebSocket):
                                           detail="pinning race: another instance won")
             await core.record_handshake_refusal(row["id"], "handshake_instance_conflict", ip,
                                                 detail="pinning race: another instance won")
-            email_alerts.notify_agent_relocation(row["name"], instance[:8])
+            email_alerts.notify_agent_relocation(row["name"], instance[:8], host_id=row["id"])
             await ws.close(code=4409)
             return
     # observabilitate IP: unde e văzut agentul (IP sursă prin proxy). IP-urile se schimbă legitim
@@ -8329,7 +8406,7 @@ async def agent_ws(ws: WebSocket):
             # deşi nu s-a mutat nimic. Evenimentul rămâne în jurnal pentru audit. (Consecvent
             # cu suprimarea alarmei de conflict pe hosturi pinned.)
             if not row["instance_id"]:
-                email_alerts.notify_agent_ip_change(row["name"], row["agent_ip"], ip)
+                email_alerts.notify_agent_ip_change(row["name"], row["agent_ip"], ip, host_id=row["id"])
         await db.execute("UPDATE hosts SET agent_ip=? WHERE id=?", ip, row["id"])
     await ws.accept()
     # `pinned` = fence-ul anti-clonă e activ (instance_id fixat). Un supersede pe un host pinned
@@ -8630,7 +8707,8 @@ async def browser_ws(ws: WebSocket, sid: str):
                            "ataşat la sesiune pe host %s" % row["host_id"])
         if not client.known:
             email_alerts.notify_session_attach(
-                row["title"], client.remote_addr, client.user_agent, user["email"])
+                row["title"], client.remote_addr, client.user_agent, user["email"],
+                user_id=user["id"])
         if start_locked:
             if not hub.locked:
                 await hub.lock()                 # idle → blochează toţi clienţii + broadcast

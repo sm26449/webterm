@@ -80,9 +80,9 @@ async def main():
     hid = await _insert_host("victim", port, old_pub)
 
     emails = []
-    email_alerts.notify_host_key_changed = lambda host, detail: emails.append((host, detail))
+    email_alerts.notify_host_key_changed = lambda host, detail, **k: emails.append((host, detail))
     changes = []
-    email_alerts.notify_security_change = lambda what, ip, email: changes.append(what)
+    email_alerts.notify_security_change = lambda what, ip, email, **k: changes.append(what)
 
     row = await db.fetchone("SELECT * FROM hosts WHERE id=?", hid)
     raised = None

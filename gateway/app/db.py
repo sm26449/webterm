@@ -285,6 +285,37 @@ CREATE TABLE IF NOT EXISTS pending_ssh_keys (
     created REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_pending_keys_user ON pending_ssh_keys(user_id, created);
+
+-- Istoricul de alerte ÎN APLICAŢIE (3.5.11): fiecare eveniment care pleacă (sau ar pleca) pe
+-- email/webhook se înregistrează şi aici, câte un rând PER CONT căruia îi priveşte. Fără SMTP
+-- alertele erau invizibile. Evenimentele de cont (login nou, parolă, 2FA) → doar contul lui;
+-- cele de flotă/instanţă → fiecare cont (nu există roluri: toate conturile sunt admin).
+-- Retenţie: ultimele 500 per cont şi maxim 30 de zile, tăiate la inserare (email_alerts).
+-- `details` e corpul alertei trecut prin `email_alerts.scrub` — fără tokenuri/parole.
+CREATE TABLE IF NOT EXISTS alerts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    ts REAL NOT NULL,
+    kind TEXT NOT NULL,                     -- id stabil din email_alerts.KINDS
+    severity TEXT NOT NULL DEFAULT 'info',  -- critical | warning | info | ok
+    title TEXT NOT NULL,
+    details TEXT DEFAULT '',
+    host_id INTEGER,                        -- hostul la care se referă, dacă e cazul
+    read INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_alerts_user ON alerts(user_id, id);
+CREATE INDEX IF NOT EXISTS idx_alerts_unread ON alerts(user_id, read);
+
+-- Preferinţe per cont şi per tip de eveniment: email (email + webhook) on/off, în aplicaţie
+-- on/off. Doar ABATERILE de la implicit stau aici (lipsă rând = email on, în aplicaţie on), deci
+-- un tip nou de alertă porneşte cu comportamentul de azi fără migrare de date.
+CREATE TABLE IF NOT EXISTS alert_prefs (
+    user_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    email INTEGER NOT NULL DEFAULT 1,
+    inapp INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (user_id, kind)
+);
 """
 
 # additive migrations for DBs created by an older version

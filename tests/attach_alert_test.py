@@ -140,7 +140,7 @@ async def main():
     # ---- emailul e throttled per adresă ----
     sent = []
     orig = email_alerts._fire
-    email_alerts._fire = lambda subj, body: sent.append((subj, body))
+    email_alerts._fire = lambda subj, body, **k: sent.append((subj, body))
     try:
         email_alerts.notify_session_attach("deploy", "203.0.113.9", "Firefox/128", "u@example.com")
         email_alerts.notify_session_attach("deploy", "203.0.113.9", "Firefox/128", "u@example.com")

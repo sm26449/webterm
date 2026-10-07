@@ -3495,7 +3495,8 @@ async def _hostkey_mismatch(host_row, holder, err) -> "HostKeyMismatch":
                 host_row["name"], host_row["id"], old_fp or "?", new_fp or "?")
     try:
         email_alerts.notify_host_key_changed(
-            host_row["name"], "pinned: %s\noffered: %s\n%s" % (old_fp or "?", new_fp or "?", str(err)[:200]))
+            host_row["name"], "pinned: %s\noffered: %s\n%s" % (old_fp or "?", new_fp or "?", str(err)[:200]),
+            host_id=host_row["id"])
     except Exception:       # noqa: BLE001 — alerta nu rupe calea
         pass
     return HostKeyMismatch(str(err), old_fp, new_fp)

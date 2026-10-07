@@ -40,7 +40,7 @@ def check(name, cond, detail=""):
 
 # alertele pleacă în fundal pe SMTP/webhook — în test doar le numărăm
 FIRED = []
-email_alerts._fire = lambda subject, body: FIRED.append(subject)
+email_alerts._fire = lambda subject, body, **k: FIRED.append(subject)
 
 
 class FakeClient:
