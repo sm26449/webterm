@@ -387,6 +387,19 @@ textarea {
   }
 }
 
+/* Panou de sesiune ca FOAIE pe telefon (lib/sheet.ts): fixă pe tot ecranul, deci #root nu-i mai
+   dă padding-ul de notch — şi-l ia singură, pe toate laturile (peisaj: notch-ul e lateral).
+   `overscroll-behavior: contain` pe foaie ŞI pe listele ei: derularea până la capăt nu mai
+   declanşează pull-to-refresh şi nici nu mişcă pagina din spate. */
+.wt-sheet {
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)
+    env(safe-area-inset-left);
+  overscroll-behavior: contain;
+}
+.wt-sheet * {
+  overscroll-behavior: contain;
+}
+
 /* Drawer-ul de sidebar pe mobil: fundal OPAC. Sticla mată arată bine peste
    gradientul aplicației, dar peste conținut (dashboard) lasă textul să
    transpară — pe telefon citeai două ecrane suprapuse. */

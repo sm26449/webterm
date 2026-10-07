@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { errText, api, Host, PortForward, withStepup } from '../lib/api'
 import { useI18n } from '../lib/i18n'
+import { SHEET_CLS } from '../lib/sheet'
 import { useDrawer } from '../lib/useDrawer'
+import SheetBar from './SheetBar'
 import { LinkIcon, PencilIcon, PlusIcon, RefreshIcon, TrashIcon } from './Icons'
 import { copyText } from '../lib/clipboard'
 import HelpTip from './HelpTip'
@@ -33,7 +35,7 @@ export default function ForwardsPanel(props: {
   const [opening, setOpening] = useState<number | null>(null)
   const asideRef = useRef<HTMLElement>(null)
   const drawer = useDrawer(asideRef, props.onClose, !props.embed)
-  const asideCls = props.embed
+  const asideCls = drawer.sheet ? SHEET_CLS : props.embed
     ? 'flex h-full w-full min-h-0 flex-col bg-ink-900'
     : 'fixed inset-y-0 right-0 z-40 flex w-[90vw] max-w-sm flex-col border-l border-ink-800 bg-ink-900 shadow-2xl outline-none'
     + (props.overlay ? '' : ' sm:static sm:z-auto sm:w-80 sm:max-w-none sm:shrink-0 sm:shadow-none')
@@ -237,7 +239,8 @@ export default function ForwardsPanel(props: {
       <div className={scrimCls} onClick={props.onClose} aria-hidden="true" />
       {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Escape pe regiunea drawer-ului (vezi useDrawer): intenţionat pe <aside>, nu pe document */}
       <aside ref={asideRef} aria-label={t('forwards.panelAria')} className={asideCls} onKeyDown={drawer.onKeyDown}>
-        {header}
+        {drawer.sheet && <SheetBar title={t('forwards.title')} onBack={props.onClose} />}
+        {!drawer.sheet && header}
 
         <div className="flex items-center gap-2 border-b border-ink-800 px-3 py-1.5">
           <button onClick={() => (adding ? closeForm() : openAdd())} aria-expanded={adding}

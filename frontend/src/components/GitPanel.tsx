@@ -4,7 +4,9 @@ import { useConfirm } from '../lib/confirm'
 import { getCwd } from '../lib/cwd'
 import { useI18n } from '../lib/i18n'
 import { notify } from '../lib/notify'
+import { SHEET_CLS } from '../lib/sheet'
 import { useDrawer } from '../lib/useDrawer'
+import SheetBar from './SheetBar'
 import { RefreshIcon } from './Icons'
 
 // Panou git în limbajul panoului de fișiere: status/diff/stage/commit pentru
@@ -89,11 +91,11 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
   const { t } = useI18n()
   const { confirm } = useConfirm()
   const isAgent = !props.host.connection_type || props.host.connection_type === 'agent'
-  const asideCls = 'fixed inset-y-0 right-0 z-40 flex w-[90vw] max-w-sm flex-col border-l border-ink-800 bg-ink-900 shadow-2xl outline-none'
-    + (props.overlay ? '' : ' sm:static sm:z-auto sm:w-80 sm:max-w-none sm:shrink-0 sm:shadow-none')
-  const scrimCls = 'fixed inset-0 z-30 bg-black/60' + (props.overlay ? '' : ' sm:hidden')
   const asideRef = useRef<HTMLElement>(null)
   const drawer = useDrawer(asideRef, props.onClose)
+  const asideCls = drawer.sheet ? SHEET_CLS : 'fixed inset-y-0 right-0 z-40 flex w-[90vw] max-w-sm flex-col border-l border-ink-800 bg-ink-900 shadow-2xl outline-none'
+    + (props.overlay ? '' : ' sm:static sm:z-auto sm:w-80 sm:max-w-none sm:shrink-0 sm:shadow-none')
+  const scrimCls = 'fixed inset-0 z-30 bg-black/60' + (props.overlay ? '' : ' sm:hidden')
 
   const [cwd, setCwdState] = useState('')
   const [repo, setRepo] = useState<RepoInfo | null>(null)
@@ -249,6 +251,7 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
         <div className={scrimCls} onClick={props.onClose} aria-hidden="true" />
         {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Escape pe regiunea drawer-ului (vezi useDrawer): intenţionat pe <aside>, nu pe document */}
         <aside ref={asideRef} aria-label={t('git.panelAria')} className={asideCls} onKeyDown={drawer.onKeyDown}>
+          {drawer.sheet && <SheetBar title={'Git'} onBack={props.onClose} />}
           {header}
           <div className="flex flex-1 flex-col items-center justify-center gap-3 p-4 text-center">
             <p className="text-xs leading-relaxed text-slate-500">
@@ -298,6 +301,7 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
       <div className={scrimCls} onClick={props.onClose} aria-hidden="true" />
       {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Escape pe regiunea drawer-ului (vezi useDrawer): intenţionat pe <aside>, nu pe document */}
       <aside ref={asideRef} aria-label={t('git.panelAria')} className={asideCls} onKeyDown={drawer.onKeyDown}>
+        {drawer.sheet && <SheetBar title={'Git'} onBack={props.onClose} />}
         {header}
 
         {/* bara de branch */}

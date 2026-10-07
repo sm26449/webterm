@@ -2,7 +2,9 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { errText, api, ApiError, Host, withGuardConfirm, withStepup } from '../lib/api'
 import { useConfirm } from '../lib/confirm'
 import { useI18n } from '../lib/i18n'
+import { SHEET_CLS } from '../lib/sheet'
 import { useDrawer } from '../lib/useDrawer'
+import SheetBar from './SheetBar'
 import { RefreshIcon } from './Icons'
 
 // Panou Servicii systemd: listă (nume/stare/descriere) + start/stop/restart. TOTUL prin op-ul
@@ -28,7 +30,7 @@ export default function ServicesPanel(props: {
   const [filter, setFilter] = useState('')
   const [failedOnly, setFailedOnly] = useState(false)   // triaj „ce e stricat pe hostul ăsta"
 
-  const asideCls = props.embed
+  const asideCls = drawer.sheet ? SHEET_CLS : props.embed
     ? 'flex h-full w-full min-h-0 flex-col bg-ink-900'
     : 'fixed inset-y-0 right-0 z-40 flex w-[90vw] max-w-md flex-col border-l border-ink-800 bg-ink-900 shadow-2xl outline-none'
     + (props.overlay ? '' : ' sm:static sm:z-auto sm:w-96 sm:max-w-none sm:shrink-0 sm:shadow-none')
@@ -77,6 +79,7 @@ export default function ServicesPanel(props: {
       <div className={scrimCls} onClick={props.onClose} aria-hidden="true" />
       {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Escape pe regiunea drawer-ului (vezi useDrawer): intenţionat pe <aside>, nu pe document */}
       <aside ref={asideRef} className={asideCls} aria-label={t('services.title')} onKeyDown={drawer.onKeyDown}>
+        {drawer.sheet && <SheetBar title={t('services.title')} onBack={props.onClose} />}
         <div className="flex items-center gap-2 border-b border-ink-800 px-3 py-2">
           <span className="text-sm font-semibold text-slate-200">{t('services.title')}</span>
           <button onClick={load} className="wt-touch ml-auto shrink-0 rounded px-1.5 text-slate-400 hover:bg-ink-800"

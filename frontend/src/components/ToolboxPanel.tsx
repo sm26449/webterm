@@ -5,7 +5,9 @@ import SnippetTags from './SnippetTags'
 import { copyText } from '../lib/clipboard'
 import { useConfirm } from '../lib/confirm'
 import { useI18n } from '../lib/i18n'
+import { SHEET_CLS } from '../lib/sheet'
 import { useDrawer } from '../lib/useDrawer'
+import SheetBar from './SheetBar'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { TerminalPromptIcon, PlusIcon, TrashIcon, PencilIcon, CopyIcon } from './Icons'
 import HelpTip from './HelpTip'
@@ -260,7 +262,7 @@ export default function ToolboxPanel(props: {
     } catch { return fmtTs(epoch) }
   }
 
-  const asideCls = props.embed
+  const asideCls = drawer.sheet ? SHEET_CLS : props.embed
     ? 'flex h-full w-full min-h-0 flex-col bg-ink-900'
     : 'fixed inset-y-0 right-0 z-40 flex w-[90vw] max-w-md flex-col border-l border-ink-800 bg-ink-900 shadow-2xl outline-none'
     + (props.overlay ? '' : ' sm:static sm:z-auto sm:w-96 sm:max-w-none sm:shrink-0 sm:shadow-none')
@@ -314,6 +316,7 @@ export default function ToolboxPanel(props: {
       <div className={scrimCls} onClick={props.onClose} aria-hidden="true" />
       {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Escape pe regiunea drawer-ului (vezi useDrawer): intenţionat pe <aside>, nu pe document */}
       <aside ref={asideRef} className={asideCls} aria-label={t('toolbox.title')} onKeyDown={drawer.onKeyDown}>
+        {drawer.sheet && <SheetBar title={t('toolbox.title')} onBack={props.onClose} />}
         <div className="flex items-center gap-1 border-b border-ink-800 px-2 py-1.5">
           {(['connections', 'sshkeys', 'library', 'history'] as const).map((tb) => (
             <button key={tb} onClick={() => setTab(tb)}

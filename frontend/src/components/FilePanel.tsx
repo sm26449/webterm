@@ -3,7 +3,9 @@ import { errText, api, Host } from '../lib/api'
 import { copyText, readText } from '../lib/clipboard'
 import { getCwd } from '../lib/cwd'
 import { useI18n } from '../lib/i18n'
+import { SHEET_CLS } from '../lib/sheet'
 import { useDrawer } from '../lib/useDrawer'
+import SheetBar from './SheetBar'
 import { cancelUpload, dismissUpload, isUploadBusy, startUpload as engineStart, takeFilesDir } from '../lib/uploads'
 import { startDownload } from '../lib/downloads'
 import { isActive, uploadStore } from '../lib/uploadStore'
@@ -98,7 +100,7 @@ export default function FilePanel(props: {
   // `embed`: panoul umple un tab din pagina hostului (full-width, fără drawer/scrim/close).
   // Altfel: pe pane-uri înguste (split pe iPad) e DRAWER peste terminal, nu coloană statică —
   // o coloană de 320px într-un pane de 240px strivește terminalul la ~0px.
-  const asideCls = props.embed
+  const asideCls = drawer.sheet ? SHEET_CLS : props.embed
     ? 'flex h-full w-full min-h-0 flex-col bg-ink-900'
     : 'fixed inset-y-0 right-0 z-40 flex w-[90vw] max-w-sm flex-col border-l border-ink-800 bg-ink-900 shadow-2xl outline-none'
     + (props.overlay ? '' : ' sm:static sm:z-auto sm:w-80 sm:max-w-none sm:shrink-0 sm:shadow-none')
@@ -469,7 +471,8 @@ export default function FilePanel(props: {
         <div className={scrimCls} onClick={props.onClose} aria-hidden="true" />
         {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Escape pe regiunea drawer-ului (vezi useDrawer): intenţionat pe <aside>, nu pe document */}
         <aside ref={asideRef} aria-label={t('files.sessionAria')} className={asideCls} onKeyDown={drawer.onKeyDown}>
-          {header}
+          {drawer.sheet && <SheetBar title={t('session.files')} onBack={props.onClose} />}
+          {!drawer.sheet && header}
           <div className="flex flex-1 flex-col items-center justify-center gap-3 p-4 text-center">
             <p className="text-xs leading-relaxed text-slate-500">
               {t('files.noAgent', { type: props.host.connection_type?.toUpperCase() ?? '' })}
@@ -497,7 +500,8 @@ export default function FilePanel(props: {
           startUpload(await collectDrop(e))
         }}
       >
-        {header}
+        {drawer.sheet && <SheetBar title={t('session.files')} onBack={props.onClose} />}
+        {!drawer.sheet && header}
 
         {/* agent în urmă: mkdir/rename/delete/salvarea atomică cer agentul nou */}
         {props.host.update_pending && (
@@ -535,16 +539,16 @@ export default function FilePanel(props: {
             aria-label={t('files.filterAria')}
             onChange={(e) => { setFilter(e.target.value); setSel(0) }}
             placeholder={t('files.filterPh')}
-            className="min-w-0 flex-1 rounded bg-ink-800/60 px-2 py-0.5 text-slate-300 ring-1 ring-ink-700 focus:ring-sky-500"
+            className="min-h-[28px] min-w-0 flex-1 rounded bg-ink-800/60 px-2 py-0.5 text-slate-300 ring-1 ring-ink-700 focus:ring-sky-500"
           />
           {/* „follow cwd" are sens doar legat de o sesiune; în embed (tab-ul hostului) nu avem una */}
           {!props.embed && (
             <button onClick={follow ? () => setFollow(false) : enableFollow} aria-pressed={follow}
-              className={`shrink-0 rounded px-1.5 py-0.5 ${follow ? 'wt-good ring-1 ring-emerald-600/40' : 'text-slate-500 hover:bg-ink-800'}`}
+              className={`min-h-[28px] min-w-[28px] shrink-0 rounded px-1.5 py-0.5 ${follow ? 'wt-good ring-1 ring-emerald-600/40' : 'text-slate-500 hover:bg-ink-800'}`}
               title={t('files.followCwd')} aria-label={t('files.followCwd')}>⇄ cwd</button>
           )}
           <button onClick={() => setShowHidden((v) => !v)} aria-pressed={showHidden}
-            className={`shrink-0 rounded px-1.5 py-0.5 ${showHidden ? 'wt-link' : 'text-slate-500 hover:bg-ink-800'}`}
+            className={`min-h-[28px] min-w-[28px] shrink-0 rounded px-1.5 py-0.5 ${showHidden ? 'wt-link' : 'text-slate-500 hover:bg-ink-800'}`}
             title={t('files.showHidden')} aria-label={t('files.showHidden')}>.*</button>
         </div>
         {/* sortare: ţinte de ≥24px (erau text de 10px fără padding) + direcţia anunţată, nu doar ▲/▼ */}

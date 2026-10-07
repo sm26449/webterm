@@ -2,7 +2,9 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { errText, api, ApiError, Host } from '../lib/api'
 import { useConfirm } from '../lib/confirm'
 import { useI18n } from '../lib/i18n'
+import { SHEET_CLS } from '../lib/sheet'
 import { useDrawer } from '../lib/useDrawer'
+import SheetBar from './SheetBar'
 import { lsGet, lsSet } from '../lib/storage'
 import { resolveHome } from '../lib/transfers'
 import {
@@ -168,7 +170,7 @@ export default function AiToolsPanel(props: {
   // căile afişate cu `~` în loc de home — mai scurte şi exact cum le scrii în terminal
   const shown = (p: string) => (home && (p === home || p.startsWith(home + '/')) ? '~' + p.slice(home.length) : p)
 
-  const asideCls = props.embed
+  const asideCls = drawer.sheet ? SHEET_CLS : props.embed
     ? 'flex h-full w-full min-h-0 flex-col bg-ink-900'
     : 'fixed inset-y-0 right-0 z-40 flex w-[90vw] max-w-md flex-col border-l border-ink-800 bg-ink-900 shadow-2xl outline-none'
     + (props.overlay ? '' : ' sm:static sm:z-auto sm:w-96 sm:max-w-none sm:shrink-0 sm:shadow-none')
@@ -261,6 +263,7 @@ export default function AiToolsPanel(props: {
       <div className={scrimCls} onClick={props.onClose} aria-hidden="true" />
       {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Escape pe regiunea drawer-ului (vezi useDrawer) */}
       <aside ref={asideRef} className={asideCls} aria-label={t('ai.title')} onKeyDown={drawer.onKeyDown}>
+        {drawer.sheet && <SheetBar title={t('ai.title')} onBack={props.onClose} />}
         <div className="flex items-center gap-2 border-b border-ink-800 px-3 py-2">
           <span className="flex items-center gap-2 text-sm font-semibold text-slate-200">{t('ai.title')}<HelpTip id="aiTools" /></span>
           <span className="text-[11px] text-slate-500">Claude Code · AGENTS.md</span>

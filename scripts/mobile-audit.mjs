@@ -169,6 +169,10 @@ async function auditDevice(cfg) {
   await page.addInitScript(() => { try { for (const k of ['wt_walkthrough_done','wt_tip_addhost_agent','wt_tip_addhost_ssh','wt_tip_terminal_paste','wt_tip_toolbar']) localStorage.setItem(k, '1') } catch { /**/ } })  // walkthrough de primă rulare OFF: nu bloca fluxul de test
   const errors = []
   const reached = new Set()
+  // telefon în portret (sub `sm`): aici foaia, lista de taburi şi keybar-ul pe 2 rânduri sunt
+  // OBLIGATORII — o etapă sărită e bug, ca şi celelalte din REQUIRED
+  const isPhone = (cfg.device.viewport?.width ?? 1024) < 640
+  const required = isPhone ? [...REQUIRED, 'keybar', 'foaie-panou', 'lista-taburi'] : REQUIRED
   let blocker = ''            // de ce s-a oprit fluxul, raportat o singură dată
   page.on('pageerror', (e) => errors.push(String(e).slice(0, 120)))
 
@@ -276,8 +280,122 @@ async function auditDevice(cfg) {
         await page.waitForTimeout(600)
         await shot('07-panou-comenzi')
         await check('panou-comenzi')
-        await cmdBtn.click().catch(() => {})
+        // pe telefon în peisaj panoul e FOAIE (acoperă şi butonul din toolbar): se închide din „← Terminal"
+        const sheetBack = page.locator('[data-testid="sheet-back"]:visible')
+        if (await sheetBack.isVisible().catch(() => false)) await sheetBack.click().catch(() => {})
+        else await cmdBtn.click({ timeout: 5000 }).catch(() => {})
         await page.waitForTimeout(300)
+      }
+
+      // ── keybar tactil: 2 rânduri pe telefon în portret, 1 rând + comutator pe viewport scund ──
+      const kb = await page.evaluate(() => {
+        const el = document.querySelector('[data-testid="mobile-keybar"]')
+        if (!el || el.offsetHeight === 0) return null
+        return {
+          rows: el.getAttribute('data-rows'),
+          row2: !!el.querySelector('[data-keybar-row="2"]'),
+          toggle: !!el.querySelector('[data-keybar-row="1"] button[aria-expanded]'),
+          h: el.offsetHeight, vh: window.innerHeight,
+        }
+      })
+      if (!kb) {
+        note(cfg.name, 'keybar', isPhone ? 'bug' : 'info', 'keybar-ul tactil nu e vizibil')
+      } else {
+        note(cfg.name, 'keybar', 'info', `keybar: ${kb.rows} rând(uri), ${kb.h}px`)
+        if (kb.vh >= 420 && (kb.rows !== '2' || !kb.row2 || kb.toggle)) {
+          note(cfg.name, 'keybar', 'bug', `keybar: aştept 2 rânduri fără comutator la ${kb.vh}px înălţime (rows=${kb.rows})`)
+        } else if (kb.vh < 420 && (kb.rows !== '1' || !kb.toggle)) {
+          note(cfg.name, 'keybar', 'bug', `keybar: pe viewport scund aştept 1 rând + comutator (rows=${kb.rows})`)
+        } else {
+          reached.add('keybar')
+        }
+      }
+
+      // ── panou ca FOAIE pe tot ecranul (telefon / peisaj scund): Files → acoperă viewport-ul,
+      //    are „← Terminal", iar „← Terminal" ŞI butonul Back al browserului (Android) închid foaia
+      //    fără să părăsească sesiunea ──
+      const sheetMode = await page.evaluate(() =>
+        matchMedia('(max-width: 639.98px), (pointer: coarse) and (max-height: 480px)').matches)
+      if (sheetMode) {
+        const filesAside = page.locator('aside[aria-label="Session files"]')
+        const openFiles = async () => {
+          const tb = page.locator('button[title="Files (browse, edit, transfer)"]:visible').first()
+          if (await tb.isVisible().catch(() => false)) await tb.click()
+          else {
+            await page.locator('button[title="More"]:visible').first().click()
+            await page.locator('[role="menuitem"]:has-text("Files"):visible').first().click()
+          }
+          await filesAside.waitFor({ state: 'visible', timeout: 8000 })
+          await page.waitForTimeout(400)
+        }
+        await openFiles()
+        await shot('08-foaie-fisiere')
+        await check('foaie-fisiere')
+        const box = await filesAside.boundingBox()
+        const vp = page.viewportSize()
+        const back = page.locator('[data-testid="sheet-back"]:visible')
+        if (!box || box.width < vp.width - 2 || box.height < vp.height - 2 || box.x > 1 || box.y > 1) {
+          note(cfg.name, 'foaie-fisiere', 'bug',
+            `foaia Files nu acoperă ecranul: ${box ? `${Math.round(box.width)}×${Math.round(box.height)}` : 'absentă'} în ${vp.width}×${vp.height}`)
+        } else if (!(await back.isVisible().catch(() => false))) {
+          note(cfg.name, 'foaie-fisiere', 'bug', 'foaia Files n-are butonul „← Terminal" vizibil')
+        } else {
+          const hash0 = await page.evaluate(() => location.hash)
+          await back.click()
+          await filesAside.waitFor({ state: 'detached', timeout: 5000 })
+          await page.waitForTimeout(300)
+          // Back-ul browserului (Android / swipe-back iOS): închide foaia, rămâi în aceeaşi sesiune
+          await openFiles()
+          await page.goBack().catch(() => {})
+          const closed = await filesAside.waitFor({ state: 'detached', timeout: 5000 }).then(() => true, () => false)
+          await page.waitForTimeout(300)
+          const hash1 = await page.evaluate(() => location.hash)
+          const termVisible = await page.locator('.xterm-screen').first().isVisible().catch(() => false)
+          if (!closed) note(cfg.name, 'foaie-fisiere', 'bug', 'Back-ul browserului nu închide foaia Files')
+          else if (hash1 !== hash0 || !termVisible) {
+            note(cfg.name, 'foaie-fisiere', 'bug', `Back-ul browserului a părăsit sesiunea (${hash0} → ${hash1})`)
+          } else reached.add('foaie-panou')
+        }
+      }
+
+      // ── lista „toate taburile" (telefon): a doua sesiune pe calea reală, apoi lista le arată
+      //    pe AMÂNDOUĂ, cu cea curentă marcată, iar un tap comută ──
+      if (isPhone) {
+        await page.locator('nav[aria-label="Open sessions"] button[aria-label="Home"]').first().click()
+        await page.waitForSelector('[data-testid="dashboard"]', { timeout: 10000 })
+        await page.waitForTimeout(800)
+        await cards.last().click({ timeout: 10000 })
+        await page.waitForTimeout(1000)
+        await page.locator('button:has-text("New session"):visible').first().click()
+        await page.waitForFunction(() => document.querySelectorAll('button[data-tab]').length >= 2, null, { timeout: 20000 })
+        await page.waitForSelector('.xterm-screen', { timeout: 20000 })
+        await page.waitForTimeout(1500)
+        const nTabs = await page.locator('button[data-tab]').count()
+        const allBtn = page.locator('[data-testid="all-tabs"]')
+        if (!(await allBtn.isVisible().catch(() => false))) {
+          note(cfg.name, 'lista-taburi', 'bug', 'butonul „toate taburile" nu e vizibil pe telefon')
+        } else {
+          await allBtn.click()
+          const menu = page.locator('[data-testid="all-tabs-menu"]')
+          await menu.waitFor({ state: 'visible', timeout: 5000 })
+          await page.waitForTimeout(300)
+          await shot('09-lista-taburi')
+          await check('lista-taburi')
+          const n = await menu.locator('[role="menuitemradio"]').count()
+          const current = await menu.locator('[role="menuitemradio"][aria-checked="true"]').count()
+          if (n !== nTabs || current !== 1) {
+            note(cfg.name, 'lista-taburi', 'bug', `lista arată ${n} taburi (${current} curente), bara are ${nTabs}`)
+          } else {
+            const other = menu.locator('[role="menuitemradio"][aria-checked="false"]').first()
+            const sid = await other.getAttribute('data-tab-item')
+            await other.click()
+            await menu.waitFor({ state: 'detached', timeout: 5000 })
+            await page.waitForTimeout(500)
+            const hash = await page.evaluate(() => location.hash)
+            if (hash !== `#/s/${sid}`) note(cfg.name, 'lista-taburi', 'bug', `tap pe tab nu a comutat (${hash} ≠ #/s/${sid})`)
+            else reached.add('lista-taburi')
+          }
+        }
       }
     }
 
@@ -294,7 +412,7 @@ async function auditDevice(cfg) {
     // Poarta trebuie să fie onestă şi când NU a măsurat: prima etapă neatinsă e un bug.
     // Fără asta, „0 probleme” a însemnat „nu am apucat să testez sesiunea”, luni în şir.
     // Raportăm doar punctul de rupere, nu toată cascada de după el.
-    const missing = REQUIRED.find((s) => !reached.has(s))
+    const missing = required.find((s) => !reached.has(s))
     if (missing) {
       note(cfg.name, missing, 'bug',
         `etapa "${missing}" nu s-a rulat, deci nu a fost auditată${blocker ? ` — ${blocker}` : ''}`)

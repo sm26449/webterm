@@ -9,6 +9,31 @@ back.
 
 ## [Unreleased]
 
+The phone is where "your sessions, anywhere" was weakest — every external UI review said so.
+Three fixes, frontend only; no agent change, so no fleet update.
+
+### Changed
+- **Session panels are full-screen sheets on phones.** Files, Git, Forwards, Docker, Services,
+  Toolbox, AI tools and Commands were desktop side drawers: on a 390 px phone you got a
+  panel squeezed beside a terminal sliver, both unusable. Below 640 px (and on a phone in
+  landscape) they now cover the screen, with a sticky **← Terminal** button and the panel title
+  on top, notch/home-bar safe areas respected, the page behind locked, and list scrolling that no
+  longer triggers pull-to-refresh. The **Android back button / swipe-back closes the panel**
+  instead of leaving WebTerm: opening a sheet adds a history entry with the same URL, so the
+  `#/s/…` routes are untouched. Done once, in the shared drawer hook, for all eight panels.
+  Tablets and desktops are unchanged.
+- **All tabs, one tap away.** The tab bar scrolls sideways with ~150 px tabs, so a phone showed
+  two or three and gave no hint there were more. A tab-count button now sits at the end of the
+  bar (always on phones, elsewhere whenever the tabs overflow) and opens a list of every open tab
+  with its host, live / closed / lost state and new-output dot; tap to switch, or close a tab
+  (the session keeps running). Keyboard: a proper menu with arrow keys, Home/End and Escape.
+- **The touch key bar has two rows.** Its single scrolling row hid everything right of `PgDn`.
+  Row 1 holds what you always need (`Ctrl`, `Alt`, `Esc`, `Tab`, arrows), row 2 the rest (paste,
+  `^C` `^D`, `| / - ~`, Home/End/PgUp/PgDn, …). On short screens (phone in landscape) it collapses
+  to row 1 plus a toggle, remembered per device. Key sequences and the Ctrl/Alt latch are
+  unchanged; the terminal re-fits when the bar changes height. See
+  [docs/SHORTCUTS.md](docs/SHORTCUTS.md#touch-key-bar-phones-and-tablets).
+
 ## [3.5.4] — 2026-10-07 · agent (57)
 
 Five features the product owner picked from the UI reviews, built one at a time, each

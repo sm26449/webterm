@@ -1,7 +1,9 @@
 import { useRef } from 'react'
 import { Command, cmdDuration } from '../lib/commands'
 import { useI18n } from '../lib/i18n'
+import { SHEET_CLS } from '../lib/sheet'
 import { useDrawer } from '../lib/useDrawer'
+import SheetBar from './SheetBar'
 
 /** Lista comenzilor din sesiune (blocks): sari la oricare, vezi care a eșuat,
     copiază exact output-ul ei. Apare doar când shell integration e activă. */
@@ -24,13 +26,14 @@ export default function CommandsPanel(props: {
   // terminal (cu scrim); pe pane-uri late revine coloana laterală clasică.
   // Decizia pe lățimea REALĂ a pane-ului, nu pe viewport.
   const scrimCls = 'fixed inset-0 z-30 bg-black/60' + (props.overlay ? '' : ' sm:hidden')
-  const asideCls = 'fixed inset-y-0 right-0 z-40 flex w-[85vw] max-w-xs flex-col border-l border-ink-800 bg-ink-900 shadow-2xl outline-none'
+  const asideCls = drawer.sheet ? SHEET_CLS : 'fixed inset-y-0 right-0 z-40 flex w-[85vw] max-w-xs flex-col border-l border-ink-800 bg-ink-900 shadow-2xl outline-none'
     + (props.overlay ? '' : ' sm:static sm:z-auto sm:w-64 sm:max-w-none sm:shrink-0 sm:shadow-none')
   return (
     <>
     <div className={scrimCls} onClick={props.onClose} aria-hidden="true" />
     {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Escape pe regiunea drawer-ului (vezi useDrawer): intenţionat pe <aside>, nu pe document */}
     <aside ref={asideRef} aria-label={t('cmds.sessionCommands')} className={asideCls} onKeyDown={drawer.onKeyDown}>
+      {drawer.sheet && <SheetBar title={t('session.commands')} onBack={props.onClose} />}
       <header className="flex items-center gap-2 border-b border-ink-800 px-3 py-2">
         <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">{t('cmds.commands')}</span>
         <span className="rounded bg-ink-800 px-1.5 text-[11px] text-slate-500">{props.commands.length}</span>

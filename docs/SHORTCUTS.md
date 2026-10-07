@@ -58,6 +58,26 @@ it is cleared on idle-lock and on logout. A popped-out session window has its ow
 |---|---|
 | Right-click / long-press in a terminal | Terminal menu: open the selected path in Files (when the selection looks like a path), upload into the session's folder, new file/folder here, clear the terminal |
 | Double-click a session in Host overview | Open it |
+| Tap the tab-count button at the end of the tab bar (phones, or whenever tabs don't fit) | List of **all** open tabs: host, live / closed / lost, new-output dot; tap to switch, ✕ closes the tab (the session keeps running). `↑`/`↓`/`Home`/`End` move, `Esc` closes |
+| Back button / swipe-back while a panel is open on a phone | Closes the panel (Files, Git, Forwards, Docker, Services, Toolbox, AI tools, Commands) and returns to the terminal, instead of leaving the app |
+
+## Touch key bar (phones and tablets)
+
+Shown under the terminal on any touch-first device (coarse pointer), at any width; hidden with a
+mouse. Since 3.5.5 it has **two rows**, so no key hides off-screen:
+
+| Row | Keys |
+|---|---|
+| 1 — always needed | `Ctrl` and `Alt` (latched: tap, then the next key gets the modifier; lit while armed), `Esc`, `Tab`, `↑` `↓` `←` `→` |
+| 2 — the rest | Paste `⎘`, `^C` `^D`, `⇞` `⇟` (tmux scrollback, tmux hosts only), `\|` `/` `-` `~`, `Home` `End` `PgUp` `PgDn`, `^Z` `^R` |
+
+Row 2 scrolls sideways on narrow phones; a fade on its right edge shows there is more.
+On a **short screen** (under ~420 px tall, e.g. a phone in landscape) the bar collapses to row 1
+plus a `⌃` toggle that brings row 2 back; the choice is remembered on that device only. `Ctrl`/`Alt`
+combine with any key the way xterm sends them (`Alt+↑` = `ESC [1;3A`, `Ctrl+PgUp` = `ESC [5;5~`).
+
+On phones, session panels open as a **full-screen sheet** with a `← Terminal` button at the top
+(`Esc` also closes them); on tablets and desktops they stay side panels.
 
 ## Terminal (owned by the shell)
 

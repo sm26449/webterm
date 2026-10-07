@@ -1,7 +1,10 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { isSessionLive, Host, Session } from '../lib/api'
 import { hostColor } from '../lib/host'
 import { useI18n } from '../lib/i18n'
+import { PHONE_QUERY, useMediaQuery } from '../lib/sheet'
+import { isOverflowing, menuNav, showAllTabsButton, tabState } from '../lib/tablist'
 import { CloseIcon, HomeIcon, PlusIcon, PencilIcon } from './Icons'
 
 /** Sesiunile deschise ca tab-uri (setul de lucru), pe cromul întunecat.
@@ -78,6 +81,33 @@ export default function TabBar(props: {
   // roving tabindex: un singur tab e în ordinea de Tab — cel activ, sau primul când eşti pe Acasă
   const focusIdx = Math.max(0, props.tabs.findIndex((s) => s.id === props.activeSid))
 
+  // „Toate taburile": pe telefon se văd 2–3 taburi de ~148px şi nimic nu spune că mai sunt.
+  // Butonul stă ÎN AFARA zonei care derulează (altfel ar derula şi el din ecran) şi apare sub `sm`
+  // sau oriunde taburile nu încap (ResizeObserver pe zona derulantă + pe rândul de taburi).
+  const phone = useMediaQuery(PHONE_QUERY)
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const rowRef = useRef<HTMLDivElement>(null)
+  const listBtnRef = useRef<HTMLButtonElement>(null)
+  const [overflowing, setOverflowing] = useState(false)
+  const [listOpen, setListOpen] = useState(false)
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const upd = () => setOverflowing(isOverflowing(el.scrollWidth, el.clientWidth))
+    upd()
+    const ro = new ResizeObserver(upd)
+    ro.observe(el)
+    if (rowRef.current) ro.observe(rowRef.current)
+    return () => ro.disconnect()
+  }, [props.tabs.length, props.split?.views.length])
+  const showListBtn = showAllTabsButton(props.tabs.length, phone, overflowing)
+  // lista se închide singură când nu mai are ce arăta (ultimul tab închis / butonul a dispărut)
+  useEffect(() => { if (listOpen && !showListBtn) setListOpen(false) }, [listOpen, showListBtn])
+  const dismissList = (refocus: boolean) => {
+    setListOpen(false)
+    if (refocus) requestAnimationFrame(() => listBtnRef.current?.focus())
+  }
+
   const drop = () => {
     if (drag && over && drag !== over) {
       const order = props.tabs.map((s) => s.id)
@@ -92,7 +122,8 @@ export default function TabBar(props: {
     setOver(null)
   }
   return (
-    <nav aria-label={t('tabbar.openSessions')} className="wt-tabstrip flex items-stretch gap-0.5 overflow-x-auto px-2 pt-1.5">
+    <nav aria-label={t('tabbar.openSessions')} className="wt-tabstrip flex items-stretch pt-1.5">
+    <div ref={scrollRef} className="flex min-w-0 flex-1 items-stretch gap-0.5 overflow-x-auto px-2">
       <button
         onClick={props.onHome}
         title={t('tabbar.home')}
@@ -130,7 +161,7 @@ export default function TabBar(props: {
           tab vine cu butonul lui de închidere ca frate (axe: aria-required-children, critic, pe
           fiecare pagină). Toolbar-ul acceptă orice controale, păstrează navigarea cu săgeţi
           (roving tabindex) şi `aria-current="page"` spune care tab e activ. */}
-      <div role="toolbar" aria-label={t('tabbar.sessionTabs')} aria-orientation="horizontal" className="flex items-stretch gap-0.5">
+      <div ref={rowRef} role="toolbar" aria-label={t('tabbar.sessionTabs')} aria-orientation="horizontal" className="flex items-stretch gap-0.5">
         {props.tabs.map((s, idx) => {
           const active = s.id === props.activeSid
           const hasActivity = !active && props.activity.has(s.id)
@@ -270,6 +301,158 @@ export default function TabBar(props: {
         </div>
         )
       })()}
+    </div>
+      {showListBtn && (
+        <button
+          ref={listBtnRef}
+          data-testid="all-tabs"
+          onClick={() => setListOpen((v) => !v)}
+          aria-haspopup="menu"
+          aria-expanded={listOpen}
+          aria-label={t('tabbar.allTabsTitle', { count: props.tabs.length })}
+          title={t('tabbar.allTabsTitle', { count: props.tabs.length })}
+          className={`wt-touch wt-tabbtn mb-1.5 mr-2 flex shrink-0 items-center justify-center gap-1 rounded-lg border-l border-white/10 px-2 py-1.5 text-[12px] font-medium tabular-nums ${
+            listOpen ? 'is-active' : ''}`}
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+            strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <rect x="1.5" y="4.5" width="10" height="9" rx="1.5" /><path d="M4.5 2.5h8a2 2 0 0 1 2 2v7" />
+          </svg>
+          {props.tabs.length}
+        </button>
+      )}
+      {listOpen && (
+        <AllTabsMenu
+          tabs={props.tabs}
+          activeSid={props.activeSid}
+          activity={props.activity}
+          hosts={props.hosts}
+          phone={phone}
+          anchor={listBtnRef.current?.getBoundingClientRect() ?? null}
+          onSelect={(sid) => { dismissList(false); props.onSelect(sid) }}
+          onCloseTab={props.onClose}
+          onDismiss={() => dismissList(true)}
+        />
+      )}
     </nav>
+  )
+}
+
+/** Lista TUTUROR taburilor deschise (butonul de la capătul barei). Meniu WAI-ARIA: fiecare rând =
+    un `menuitemradio` (comută; `aria-checked` = tabul curent) + un `menuitem` de închidere (detach:
+    sesiunea rulează mai departe). ↑/↓/Home/End mută focusul prin toţi itemii, Escape închide şi
+    întoarce focusul pe buton, Tab iese (ca la orice meniu). Pe telefon = foaie de jos; altfel
+    dropdown ancorat sub buton. Portat în <body>: cromul poate avea `backdrop-filter`, care ar
+    transforma `position: fixed` în „fixed faţă de bară". */
+function AllTabsMenu(props: {
+  tabs: Session[]
+  activeSid: string | null
+  activity: Set<string>
+  hosts: Host[]
+  phone: boolean
+  anchor: DOMRect | null
+  onSelect: (sid: string) => void
+  onCloseTab: (sid: string) => void
+  onDismiss: () => void
+}) {
+  const { t } = useI18n()
+  const ref = useRef<HTMLDivElement>(null)
+  const items = () => Array.from(ref.current?.querySelectorAll<HTMLElement>('[role="menuitemradio"],[role="menuitem"]') ?? [])
+  useEffect(() => {
+    const cur = ref.current?.querySelector<HTMLElement>('[aria-checked="true"]')
+      ?? ref.current?.querySelector<HTMLElement>('[role="menuitemradio"]')
+    cur?.focus()
+  }, [])
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); props.onDismiss(); return }
+    if (e.key === 'Tab') { e.preventDefault(); props.onDismiss(); return }
+    const list = items()
+    const next = menuNav(e.key, list.indexOf(document.activeElement as HTMLElement), list.length)
+    if (next === null) return
+    e.preventDefault()
+    list[next]?.focus()
+  }
+  const closeTab = (sid: string, idx: number) => {
+    props.onCloseTab(sid)
+    // rândul dispare: focusul trece pe rândul care i-a luat locul (sau pe ultimul), nu pe <body>
+    requestAnimationFrame(() => {
+      const rows = Array.from(ref.current?.querySelectorAll<HTMLElement>('[role="menuitemradio"]') ?? [])
+      rows[Math.min(idx, rows.length - 1)]?.focus()
+    })
+  }
+  const a = props.anchor
+  const sheet = props.phone || !a
+  const placement = sheet
+    ? 'inset-x-0 bottom-0 max-h-[70dvh] rounded-t-2xl pb-[max(0.5rem,env(safe-area-inset-bottom))]'
+    : 'w-80 max-h-[60vh] rounded-xl'
+  const style = !sheet && a ? { top: a.bottom + 4, right: Math.max(8, window.innerWidth - a.right) } : undefined
+
+  return createPortal(
+    <>
+      <div className="fixed inset-0 z-50 bg-black/40" onClick={props.onDismiss} aria-hidden="true" />
+      {/* eslint-disable-next-line jsx-a11y/no-static-element-interactions -- navigarea din tastatură a meniului (↑/↓/Escape) e pe container, nu pe fiecare item */}
+      <div ref={ref} onKeyDown={onKeyDown} style={style} data-testid="all-tabs-menu"
+        className={`fixed z-50 flex flex-col overflow-hidden border border-ink-700 bg-ink-900 shadow-2xl ${placement}`}>
+        <p id="wt-alltabs-title" className="shrink-0 border-b border-ink-800 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-slate-400">
+          {t('tabbar.listTitle')} · {props.tabs.length}
+        </p>
+        <div role="menu" aria-labelledby="wt-alltabs-title" className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-1">
+          {props.tabs.map((s, idx) => {
+            const active = s.id === props.activeSid
+            const live = isSessionLive(s, props.hosts)
+            const host = props.hosts.find((h) => h.id === s.host_id)
+            const color = host ? hostColor(host) : '#64748b'
+            const st = tabState(s, live)
+            const hasActivity = !active && props.activity.has(s.id)
+            const title = s.title || t('tabbar.session')
+            const stateText = st === 'live' ? t('host.stateActive') : st === 'lost' ? t('host.stateLost')
+              : st === 'failed' ? t('tabbar.closedWithExit', { code: s.exit_status ?? '' }) : t('host.stateClosed')
+            return (
+              <div key={s.id} role="none" className="flex items-stretch gap-1">
+                <button
+                  role="menuitemradio"
+                  aria-checked={active}
+                  tabIndex={-1}
+                  data-tab-item={s.id}
+                  onClick={() => props.onSelect(s.id)}
+                  className={`flex min-h-[44px] min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-ink-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400 ${
+                    active ? 'bg-ink-800 ring-1 ring-sky-500/50' : ''}`}
+                >
+                  <span className="w-[3px] shrink-0 self-stretch rounded-full" style={{ background: color }} aria-hidden="true" />
+                  <span className="flex min-w-0 flex-1 flex-col">
+                    <span className="flex items-center gap-1.5 text-sm text-slate-200">
+                      {/* starea nu e doar culoare: vie = rotund, pierdută/exit≠0 = PĂTRAT roşu, + textul de dedesubt */}
+                      <span aria-hidden="true"
+                        className={`h-1.5 w-1.5 shrink-0 ${st === 'lost' || st === 'failed' ? 'rounded-sm bg-rose-500' : 'rounded-full'} ${st === 'live' ? 'dot-live' : ''}`}
+                        style={st === 'live' ? { background: color } : st === 'closed' ? { background: '#475569' } : undefined} />
+                      <span className="truncate">{title}</span>
+                      {hasActivity && <span data-activity className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400" aria-hidden="true" />}
+                    </span>
+                    <span className="mt-0.5 flex min-w-0 items-center gap-1 text-[11px] leading-tight">
+                      {host && <span className="truncate font-medium" style={{ color }}>{host.name}</span>}
+                      {host && <span className="text-slate-600" aria-hidden="true">·</span>}
+                      <span className={`shrink-0 ${st === 'live' ? 'wt-good' : st === 'closed' ? 'text-slate-500' : 'wt-danger'}`}>{stateText}</span>
+                      {hasActivity && <span className="shrink-0 wt-warn">· {t('tabbar.newOutput')}</span>}
+                    </span>
+                  </span>
+                  {active && <span className="shrink-0 text-[10px] font-medium uppercase tracking-wide wt-link">{t('tabbar.current')}</span>}
+                </button>
+                <button
+                  role="menuitem"
+                  tabIndex={-1}
+                  onClick={() => closeTab(s.id, idx)}
+                  aria-label={`${t('tabbar.closeTabTitle')} — ${title}`}
+                  title={t('tabbar.closeTabTitle')}
+                  className="wt-touch grid min-h-[44px] min-w-[44px] shrink-0 place-items-center rounded-lg text-slate-400 hover:bg-ink-800 hover:text-slate-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400"
+                >
+                  <CloseIcon size={14} />
+                </button>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+    </>,
+    document.body,
   )
 }
