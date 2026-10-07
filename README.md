@@ -221,8 +221,11 @@ what it does not cover, is in [Security](#security) and
   **multi-select** (checkboxes, Shift/Ctrl+click, long-press on phones) with bulk
   download / delete and **copy to another host** — agent → gateway → agent, the data never
   passes through your browser ([details](docs/TRANSFERS.md#copy-to-another-host)); a **Monaco** (VS Code) editor with
-  highlighting, large files opened view-only (partial-read), atomic save with
-  conflict detection
+  syntax highlighting for what you edit on a server (shell, YAML, JSON, INI/systemd/.env, TOML,
+  Dockerfile, nginx, Python, JS/TS, SQL, XML/HTML, CSS, Markdown, Go, Rust, PHP, Ruby, Lua, Perl,
+  PowerShell, C/C++, Java, HCL), find/replace, folding, multi-cursor, `Alt+Z` word wrap, large
+  files opened view-only (partial-read), atomic save with conflict detection. It is a slim build:
+  highlighting only, no language-service autocompletion
 - **Transfers** — [details](docs/TRANSFERS.md): progress lives in **one floating widget in the
   bottom-right corner** — a compact pill (`file 63%`, `N transfers · 63%`) that expands into a
   card with every job and its actions, and opens by itself when a job needs a decision (stalled,
@@ -1057,7 +1060,7 @@ administer your servers with. The CI chain, in order:
    ephemeral container, a headless Chromium checks that the UI reaches a working
    screen, with no JS errors. Catches exactly the class of bug that produced the
    white screen in v1.0.11.
-3. **E2E with a REAL agent** (`scripts/e2e-session.mjs`, 179 checks) — starts an
+3. **E2E with a REAL agent** (`scripts/e2e-session.mjs`, 181 checks) — starts an
    agent in a container **with tmux installed, i.e. the backend production uses**,
    opens sessions through the UI, types commands, verifies the output, tab
    switching, pause/re-sync, shortcuts, parametrized snippets, alert thresholds,

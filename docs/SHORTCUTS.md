@@ -48,6 +48,11 @@ it is cleared on idle-lock and on logout. A popped-out session window has its ow
 | Shortcut | Action |
 |---|---|
 | `Mod+S` | File editor: save |
+| `Mod+F` / `Mod+H` | File editor: find / replace |
+| `Mod+G` | File editor: go to line |
+| `Mod+/` | File editor: toggle line comment (in the file's language) |
+| `Alt+Z` | File editor: toggle word wrap |
+| `F1` | File editor: command palette (every editor command, with its shortcut) |
 | `Mod+Enter` | Git panel: commit (from the message field) |
 | `Shift+Enter` | Scrollback search: previous match (`Enter` = next) |
 | `←` / `→` on the split divider | Resize the split; double-click the divider resets it to 50/50 |

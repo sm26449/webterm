@@ -194,6 +194,12 @@ try {
   // textul RO de referință, deci fixăm limba ca headless-ul (default EN) să nu comute pe engleză.
   const page = await browser.newPage({ viewport: { width: 1440, height: 860 }, locale: 'en-US' })
   page.on('pageerror', (e) => pageErrors.push(String(e)))
+  // violări CSP (worker blocat, script/stil refuzat) — apar doar în consolă, nu ca pageerror.
+  // Le citeşte verificarea editorului Monaco (workerul trebuie să pornească sub CSP-ul real).
+  const cspErrors = []
+  page.on('console', (m) => {
+    if (m.type() === 'error' && /Content Security Policy|Refused to (create|load|execute)/i.test(m.text())) cspErrors.push(m.text())
+  })
   // Presetăm `wt_walkthrough_done`: altfel walkthrough-ul de primă rulare s-ar deschide singur
   // după login şi ar acoperi dashboard-ul, blocând restul fluxului. Redeschiderea manuală din
   // „?" o testăm explicit la final (acolo e DORIT să apară).
@@ -782,6 +788,50 @@ try {
   await activePane.locator('.xterm-screen').click()
   await page.keyboard.type('cat /tmp/wt_edit.txt\n')
   check('salvarea din editor a scris pe host', await waitScreen('linia3noua'))
+
+  // Monaco SLIM (3.5.6): doar tokenizerele Monarch de bază + un singur worker (editor.worker).
+  // Un .yaml trebuie să iasă COLORAT (≥3 clase de token: implicit, cheie, număr/comentariu — un
+  // limbaj neînregistrat dă o singură clasă), iar workerul editorului să se încarce sub CSP-ul
+  // REAL al gateway-ului (script-src 'self', fără worker-src) fără nicio violare. Editorul slim
+  // nu-şi cere singur workerul la editare obişnuită, deci îl pornim explicit, cu URL-ul exact pe
+  // care îl foloseşte MonacoEnvironment.getWorker (citit din chunk-ul FileEditor deja încărcat).
+  await activePane.locator('.xterm-screen').click()
+  await page.keyboard.type('printf "name: web\\nport: 8080 # comentariu\\n" > /tmp/wt_hl.yaml\n')
+  await page.waitForTimeout(700)
+  await filePanel.locator('button[title="Reload"]').click()
+  await filePanel.locator('input[placeholder="filter…"]').fill('wt_hl')
+  await pollValue(() => filePanel.textContent().then((t) => t ?? ''), (t) => t.includes('wt_hl.yaml'))
+  const hlRow = filePanel.locator('div.group').filter({ hasText: 'wt_hl.yaml' }).first()
+  await hlRow.hover()
+  await hlRow.locator('button[title="Edit"]').click()
+  await page.locator('.monaco-editor').waitFor({ state: 'visible', timeout: 15000 })
+  const hlClasses = await pollValue(() => page.evaluate(() => [...new Set([...document.querySelectorAll(
+    '.monaco-editor .view-lines span[class^="mtk"]')].map((el) => el.className))]), (c) => c.length >= 3, 8000)
+  check('editor: un .yaml e colorat (tokenizer Monarch, Monaco slim)', hlClasses.length >= 3)
+  if (hlClasses.length < 3) console.error('  [diag] clase de token:', hlClasses)
+  console.log(`     [diag] workere pornite de editor până aici: ${page.workers().map((w) => w.url().split('/').pop()).join(', ') || 'niciunul'}`)
+  const workerRes = await page.evaluate(async () => {
+    const chunk = performance.getEntriesByType('resource').map((e) => e.name)
+      .find((n) => /\/assets\/FileEditor-[^/]*\.js$/.test(n))
+    if (!chunk) return 'chunk FileEditor negăsit'
+    const url = ((await (await fetch(chunk)).text()).match(/\/assets\/editor\.worker-[\w-]+\.js/) ?? [])[0]
+    if (!url) return 'URL-ul workerului negăsit în chunk'
+    return await new Promise((resolve) => {
+      let w
+      const onViol = (e) => resolve(`CSP: ${e.violatedDirective} ${e.blockedURI}`)
+      document.addEventListener('securitypolicyviolation', onViol, { once: true })
+      const done = (r) => { document.removeEventListener('securitypolicyviolation', onViol); w?.terminate(); resolve(r) }
+      try { w = new Worker(url) } catch (e) { done(`excepţie: ${e}`); return }
+      w.onerror = (e) => done(`eroare: ${e.message || 'încărcare eşuată'}`)
+      setTimeout(() => done('ok'), 2000)       // fără eroare în 2s = scriptul s-a încărcat şi rulează
+    })
+  })
+  check('editor: workerul Monaco se încarcă sub CSP-ul gateway-ului (fără violări)', workerRes === 'ok' && cspErrors.length === 0)
+  if (workerRes !== 'ok' || cspErrors.length) console.error('  [diag] worker:', workerRes, cspErrors)
+  // curăţenie: închidem editorul (fişierul e curat → fără confirmare) şi refacem filtrul de dinainte
+  await page.locator('[role=dialog][aria-label^="Edit"] button:has-text("Close")').click()
+  await filePanel.locator('input[placeholder="filter…"]').fill('wt_edit')
+  await page.waitForTimeout(400)
 
   // ── FILE ACTIONS în meniul contextual al terminalului (refoloseşte panoul/editorul/motorul) ──
   // Panoul de fişiere e deschis pe /tmp, deci cwd-ul (OSC 7) ancorează acţiunile acolo.

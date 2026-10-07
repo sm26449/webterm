@@ -9,6 +9,87 @@ back.
 
 ## [Unreleased]
 
+### Changed
+- **The file editor is a slim Monaco build on monaco-editor 0.57.** 3.5.3 held monaco back on
+  0.52 because 0.57 changed its package `exports` (`./*` → `./esm/vs/*.js`), so the old
+  `monaco-editor/esm/vs/...` imports stopped resolving and the build failed. Instead of only
+  fixing the import paths, the editor no longer imports `monaco-editor` whole: it imports the
+  editor API (`monaco-editor/editor/editor.api`), only the features you use on a config file,
+  and only the basic syntax highlighters for what a sysadmin edits on a host.
+  - **Languages:** shell, YAML, JSON/JSONC, INI (also systemd units, `.env`, `.conf`, `.cnf`,
+    `.properties`), TOML, Dockerfile, nginx, Python, JavaScript, TypeScript, SQL, XML, HTML, CSS
+    (also SCSS/Less), Markdown, Go, Rust, PHP, Ruby, Lua, Perl, PowerShell, C/C++, Java and HCL
+    (Terraform). Monaco has no basic highlighter for JSON, TOML or nginx, so WebTerm ships small
+    ones of its own. Anything else opens as plain text.
+  - **Language detection** works from the full path, not just the extension. It recognizes
+    well-known names (`Dockerfile`, `Containerfile`, `Makefile`, `.bashrc`, `.zshrc`, `.env.*`,
+    `Gemfile`, `Cargo.lock`…), treats everything under `/etc/nginx/` as nginx (so
+    `sites-available/default` is highlighted even without an extension), and falls back to the
+    shebang (`#!/usr/bin/env python3`) or an `<?xml` header. The rules live in
+    `lib/editorLang.ts` and have unit tests. `Makefile` uses the shell highlighter, because Monaco
+    has none for make.
+  - **Features kept:** find/replace, folding, bracket matching, multi-cursor, comment toggling
+    (`Ctrl+/`), go to line (`Ctrl+G`), the command palette (`F1`), the context menu, line
+    operations (move/copy/delete lines, sort, trim), word navigation, smart select and the
+    read-only notice. **New:** `Alt+Z` toggles word wrap, also available from the context menu
+    and `F1`.
+  - **The trade-off: no language-service autocompletion or validation any more.** The
+    TypeScript, CSS, HTML and JSON language services and their workers are gone. That means no
+    IntelliSense on `.js`/`.ts`, no JSON schema validation, and no CSS/HTML completion or error
+    squiggles. The word-based suggestion popup is also gone (it only offered words that were
+    already in the file). For an editor whose job is fixing a config on a server, highlighting
+    is what matters, and `ts.worker` alone was 5.9 MB. Only `editor.worker` is still bundled.
+  - **Sizes** (`vite build`; gzip at level 6, which is what the gateway serves):
+
+    | | before (0.52, full) | after (0.57, slim) |
+    |---|---|---|
+    | FileEditor chunk | 3.34 MB (859 KB gz) | 3.15 MB (818 KB gz) |
+    | FileEditor CSS + codicon font | 214 KB (65 KB gz) | 283 KB (95 KB gz) |
+    | editor.worker | 232 KB (71 KB gz) | 276 KB (83 KB gz) |
+    | ts / css / html / json workers | 5.9 / 1.0 / 0.67 / 0.36 MB | — |
+    | **opening a `.ts` or `.js` file** | **9.8 MB (2.4 MB gz)** | **3.4–3.7 MB (≈0.92–1.0 MB gz)** |
+    | opening a `.json` file | 4.2 MB (1.1 MB gz) | same as any other file |
+    | opening a config (`.yaml`, `.conf`, `.sh`) | 3.8 MB (1.0 MB gz) | 3.4–3.7 MB (≈0.92–1.0 MB gz) |
+    | all built assets (whole app) | 14.5 MB | 5.9 MB |
+
+    The worst case (any JS/TS file) is 62% smaller, and the image is 8.6 MB lighter. A config
+    file did **not** get much cheaper: the editor core itself (`editor.api` with no features or
+    languages) is ~2.8 MB minified in 0.57. Its widget, text model, view, quick-input and
+    diff-engine code is not split into optional modules. The features above add ~0.38 MB. The
+    goal of "well under 3 MB raw" for the first open is therefore not met: it is ~3.4 MB, plus
+    the 276 KB worker in the rare case that a feature asks for it. The slim setup never starts
+    the worker during normal editing. Over the wire (gzip) it is ~0.9–1.0 MB. Getting further
+    would mean stubbing Monaco internals (the diff editor, the GPU renderer) through bundler
+    aliases, which would break silently on the next Monaco minor, so it was not done.
+  - **CSP:** the gateway's policy has no `worker-src`, so workers fall back to
+    `script-src 'self'`. The worker is a same-origin file under `/assets/` (no `blob:`, no CDN),
+    so it is allowed. A new e2e check loads it under the real CSP and fails on any violation. A
+    second new check opens a `.yaml` file and confirms that it is highlighted.
+- **The mobile audit now opens the file editor from the phone Files sheet**, on every phone
+  profile. It checks that the dialog fits the screen, that there is no horizontal scroll, and
+  that a `.yaml` file renders highlighted. Until now no gate had checked the editor on a phone.
+  Adding the step surfaced three problems:
+  - **Monaco's screen-reader live region sat off-screen.** Monaco creates
+    `.monaco-aria-container` once per page, directly in `<body>`, and keeps it for the page's
+    lifetime. It is a singleton: removing it when the editor closes would silence announcements
+    in the next editor. Its own CSS pushes it to `left:-999em`, so after the editor had been
+    opened once, every later screen had an element outside the viewport. It is now styled like
+    `.sr-only`: a clipped 1×1 px box inside the viewport, still in the accessibility tree.
+  - **Closing the editor less than a second after opening it threw JS errors.** The errors
+    were Monaco's intentional cancellations (`Canceled: Canceled`), which ended up as unhandled
+    promise rejections. The editor now silences exactly that error and nothing else.
+  - **The audit lost the Files button on the iPhone landscape profile.** This was a test bug,
+    not a UI bug. The app's own tooltip layer moves a button's `title` into a data attribute
+    while a *mouse* hovers it. Playwright clicks with a mouse even on an emulated iPhone, and
+    leaves the pointer parked on the button. On the third opening, the toolbar Files button
+    therefore had no `title`, and the audit's `button[title=…]` selector waited for nothing.
+    Real touch input never triggers that tooltip. The audit now selects toolbar buttons by
+    `aria-label`. It also picks the toolbar or "More" path using the same 640 px breakpoint
+    as the UI, instead of a non-waiting `isVisible()`.
+- monaco-editor 0.52.2 → 0.57.0 (it now depends on `dompurify` and `marked`, which are bundled
+  into the editor chunk). Dependabot has no ignore rule for monaco, so future 0.57.x/0.5x
+  minors arrive as normal PRs.
+
 ## [3.5.5] — 2026-10-07 · agent (57)
 
 Phone experience, a host-offline card in the session view, and file-manager upgrades

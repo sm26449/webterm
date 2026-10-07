@@ -319,11 +319,18 @@ async function auditDevice(cfg) {
       if (sheetMode) {
         const filesAside = page.locator('aside[aria-label="Session files"]')
         const openFiles = async () => {
-          const tb = page.locator('button[title="Files (browse, edit, transfer)"]:visible').first()
-          if (await tb.isVisible().catch(() => false)) await tb.click()
+          // Selectăm după `aria-label`, NU după `title`: TooltipLayer mută `title`-ul în `data-wtt` cât
+          // timp cursorul MOUSE stă pe buton (tooltip-ul propriu). Playwright dă click cu mouse-ul
+          // şi pe iPhone-ul emulat, iar cursorul rămâne parcat pe butonul Files → la a treia
+          // deschidere (iPhone în peisaj, unde Files e în bară) butonul n-avea `title` şi testul
+          // aştepta 30s degeaba. Pe touch real tooltip-ul nu apare (doar pointerType 'mouse').
+          // Calea o alegem după ACELAŞI breakpoint ca UI-ul (Tailwind `sm` = 640px): de la 640px în
+          // sus Files e în bară, iar intrarea din „More" e `sm:hidden` intenţionat.
+          const wide = await page.evaluate(() => matchMedia('(min-width: 640px)').matches)
+          if (wide) await page.locator('button[aria-label="Files (browse, edit, transfer)"]:visible').first().click({ timeout: 10000 })
           else {
-            await page.locator('button[title="More"]:visible').first().click()
-            await page.locator('[role="menuitem"]:has-text("Files"):visible').first().click()
+            await page.locator('button[aria-label="More"]:visible').first().click()
+            await page.locator('[role="menuitem"]:has-text("Files"):visible').first().click({ timeout: 10000 })
           }
           await filesAside.waitFor({ state: 'visible', timeout: 8000 })
           await page.waitForTimeout(400)
@@ -356,6 +363,73 @@ async function auditDevice(cfg) {
             note(cfg.name, 'foaie-fisiere', 'bug', `Back-ul browserului a părăsit sesiunea (${hash0} → ${hash1})`)
           } else reached.add('foaie-panou')
         }
+
+        // ── editorul de fişiere (Monaco slim, 3.5.6) deschis DIN foaia Files: dialogul trebuie să
+        //    încapă în ecran, fără scroll orizontal, cu editorul randat şi textul colorat. Fişierul
+        //    îl lasă e2e-session.mjs în /tmp (rulează înainte în `ci-local.sh all` şi în CI); când
+        //    auditul rulează singur, pasul e sărit cu o notă, nu raportat drept „ok". Ţintele mici
+        //    nu le măsurăm aici: interiorul Monaco (textarea-ul de input, gutter-ul) nu sunt ţinte. ──
+        try {
+        await openFiles()
+        const pathInput = filesAside.locator('input[title*="Type a path"]')
+        await pathInput.fill('/tmp')
+        await pathInput.press('Enter')
+        await page.waitForTimeout(800)
+        const edBtn = filesAside.locator('button[aria-label="Edit wt_hl.yaml"]')
+        if (!(await edBtn.count())) {
+          note(cfg.name, 'editor-telefon', 'info', 'SKIP: /tmp/wt_hl.yaml lipseşte (rulează întâi e2e-session.mjs)')
+        } else {
+          await edBtn.first().dispatchEvent('click')
+          const dlg = page.locator('[role=dialog][aria-label^="Edit"]')
+          const opened = await page.locator('.monaco-editor').waitFor({ state: 'visible', timeout: 15000 }).then(() => true, () => false)
+          await page.waitForTimeout(800)
+          await shot('10-editor')
+          const m = await page.evaluate(() => {
+            const d = document.querySelector('[role=dialog][aria-label^="Edit"]')?.getBoundingClientRect()
+            const ed = document.querySelector('.monaco-editor')?.getBoundingClientRect()
+            return {
+              vw: window.innerWidth, vh: window.innerHeight,
+              overflowX: document.documentElement.scrollWidth > window.innerWidth + 1,
+              dlg: d && { l: d.left, r: d.right, t: d.top, b: d.bottom },
+              edH: ed ? Math.round(ed.height) : 0,
+              text: document.querySelector('.monaco-editor .view-lines')?.textContent ?? '',
+              tokens: new Set([...document.querySelectorAll('.monaco-editor .view-lines span[class^="mtk"]')].map((s) => s.className)).size,
+            }
+          })
+          if (!opened) note(cfg.name, 'editor-telefon', 'bug', 'editorul Monaco nu s-a deschis din foaia Files')
+          else if (m.overflowX) note(cfg.name, 'editor-telefon', 'bug', `editor: scroll orizontal pe pagină (${m.vw}px)`)
+          else if (!m.dlg || m.dlg.l < -1 || m.dlg.t < -1 || m.dlg.r > m.vw + 1 || m.dlg.b > m.vh + 1) {
+            note(cfg.name, 'editor-telefon', 'bug', `editor: dialogul iese din ecran ${JSON.stringify(m.dlg)} în ${m.vw}×${m.vh}`)
+          } else if (m.edH < 120 || !m.text.includes('name') || m.tokens < 3) {
+            note(cfg.name, 'editor-telefon', 'bug', `editor: zonă ${m.edH}px, text ${m.text.includes('name') ? 'ok' : 'lipsă'}, ${m.tokens} clase de token`)
+          } else {
+            reached.add('editor-telefon')
+            note(cfg.name, 'editor-telefon', 'info', `editor: ${m.edH}px înălţime, ${m.tokens} clase de token`)
+          }
+          await dlg.locator('button:has-text("Close")').click().catch(() => {})
+          await dlg.waitFor({ state: 'detached', timeout: 5000 }).catch(() => {})
+        }
+        } catch (e) {
+          note(cfg.name, 'editor-telefon', 'bug', `editor: pasul s-a oprit: ${String(e).slice(0, 140)}`)
+          await shot('10-editor-eroare').catch(() => {})
+          const diag = await page.evaluate(() => {
+            const out = { vw: innerWidth, vh: innerHeight, hash: location.hash, sheet: !!document.querySelector('aside[aria-label="Session files"]'), btns: [] }
+            for (const b of document.querySelectorAll('button[aria-label="Files (browse, edit, transfer)"]')) {
+              const r = b.getBoundingClientRect()
+              const chain = []
+              for (let p = b; p && p !== document.body && chain.length < 8; p = p.parentElement) {
+                const s = getComputedStyle(p)
+                chain.push(`${p.tagName.toLowerCase()}.${String(p.className).split(' ').slice(0, 3).join('.')}:${s.display}/${s.visibility}`)
+              }
+              out.btns.push({ r: [r.x, r.y, r.width, r.height].map(Math.round), chain })
+            }
+            return out
+          }).catch((x) => String(x))
+          console.log(`  [diag ${cfg.name}] ${JSON.stringify(diag)}`)
+        }
+        await page.locator('[data-testid="sheet-back"]:visible').click().catch(() => {})
+        await filesAside.waitFor({ state: 'detached', timeout: 5000 }).catch(() => {})
+        await page.waitForTimeout(300)
       }
 
       // ── lista „toate taburile" (telefon): a doua sesiune pe calea reală, apoi lista le arată
