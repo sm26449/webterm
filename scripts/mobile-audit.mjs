@@ -219,18 +219,18 @@ async function auditDevice(cfg) {
     }
 
     // ── Setări: căutarea (3.5.9) încape, iar lista de rezultate e folosibilă şi la 320px ──
-    // rotiţa stă în sidebar: pe telefon întâi deschidem sertarul
-    if (await menu.isVisible().catch(() => false)) {
-      await menu.click()
-      await page.waitForTimeout(600)
-    }
-    const gear = page.locator('button[aria-label="Settings"]:visible').first()
-    if (!(await gear.isVisible().catch(() => false))) {
-      note(cfg.name, 'setari-cautare', 'bug', 'butonul Settings nu e vizibil')
+    // Intrăm pe calea de pe telefon care nu cere sertarul: rândul „Your 2FA" din cardul Securitate
+    // (link adânc → Setări pe „Sign-in & 2FA"). Rotiţa stă în sidebar, iar sertarul lăsat deschis
+    // ar acoperi cardul hostului din etapa următoare.
+    const twofa = page.locator('[data-testid="dashboard"] button', { hasText: 'Your 2FA' }).first()
+    if (!(await twofa.isVisible().catch(() => false))) {
+      note(cfg.name, 'setari-cautare', 'bug', 'rândul „Your 2FA" din cardul Securitate nu e vizibil')
     } else {
-      await gear.click()
+      await twofa.click()
       const search = page.locator('[role=dialog][aria-modal="true"] [role=search] input')
       await search.waitFor({ state: 'visible', timeout: 5000 })
+      const tab = await page.locator('nav[aria-label="Settings categories"] button[aria-current="true"]').textContent()
+      if (tab !== 'Sign-in & 2FA') note(cfg.name, 'setari-cautare', 'bug', `link-ul din cardul Securitate a deschis tab-ul „${tab}"`)
       await search.fill('alert')
       await page.locator('[role=listbox] [role=option]').first().waitFor({ state: 'visible', timeout: 5000 })
       await page.waitForTimeout(300)
@@ -242,14 +242,12 @@ async function auditDevice(cfg) {
       }))
       if (w.input < 160) note(cfg.name, 'setari-cautare', 'bug', `câmpul de căutare din Setări e prea îngust (${Math.round(w.input)}px)`)
       else if (w.option < 200) note(cfg.name, 'setari-cautare', 'bug', `rezultatele căutării sunt prea înguste (${Math.round(w.option)}px)`)
-      else reached.add('setari-cautare')
-      // primul Escape goleşte căutarea, al doilea închide Setările; apoi sertarul, ca mai sus
+      else if (tab === 'Sign-in & 2FA') reached.add('setari-cautare')
+      // primul Escape goleşte căutarea, al doilea închide Setările
       await page.keyboard.press('Escape')
       await page.keyboard.press('Escape')
+      await page.locator('[role=dialog][aria-modal="true"]').waitFor({ state: 'detached', timeout: 5000 }).catch(() => {})
       await page.waitForTimeout(300)
-      await page.keyboard.press('Escape').catch(() => {})
-      await page.mouse.click(5, 5).catch(() => {})
-      await page.waitForTimeout(500)
     }
 
     // Calea REALĂ a unui om pe telefon: tap pe cardul hostului → pagina hostului
