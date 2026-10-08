@@ -40,6 +40,11 @@ PUBLIC = {
     "/api/logout": "trebuie să meargă și cu o sesiune deja invalidă",
     "/api/shared/{token}": "tokenul de share ESTE credențialul (hash-uit, cu expirare)",
     "/ws/shared/{token}": "idem, pe WebSocket",
+    # link-urile de replay (3.5.12): tokenul (hash-uit, cu expirare ≤ 7 zile, revocabil) vine în
+    # antetul `X-Replay-Token` — de-asta nu apare în cale; doar GET, rate-limit per IP, 404 unic
+    "/api/replay/meta": "tokenul de replay ESTE credenţialul; doar titlul/eticheta înregistrării",
+    "/api/replay/cast": "idem; înregistrarea UNEI sesiuni închise (mascată opţional), auditată",
+    "/api/replay/text": "idem; vizualizarea text a aceleiaşi înregistrări, auditată",
     "/ws/sessions/{sid}": "autentifică în handler cu `require_user_ws` (Depends nu merge pe WS)",
     "/agent/ws": "agentul se autentifică cu tokenul lui de host, în handshake",
     "/agent/uninstalled": ("agentul anunţă că a fost scos de pe host; se autentifică cu "

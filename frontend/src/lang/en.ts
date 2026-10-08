@@ -1086,6 +1086,8 @@ const en: Lang = {
     'alerts.kind.session_attach': "New device attached to a live session",
     'alerts.kind.account_change': "Password, email, 2FA or passkey changed",
     'alerts.kind.host_unlocked': "2FA-protected host unlocked",
+    'alerts.kind.replay_link': "Public replay link created for a recording",
+    'alerts.kind.replay_opened': "One of your replay links was opened",
     'alerts.kind.admin_change': "New account, API or enrollment token, host key re-pinned, shares revoked",
     'alerts.kind.ssh_key': "SSH deploy key deployed or revoked",
     'alerts.kind.host_key_changed': "SSH host key changed (connection refused)",

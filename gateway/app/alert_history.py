@@ -46,6 +46,10 @@ KINDS: dict = {
     "session_attach":   {"group": "account",  "scope": "account", "security": True},
     "account_change":   {"group": "account",  "scope": "account", "security": True},
     "host_unlocked":    {"group": "account",  "scope": "account", "security": False},
+    # link-uri de replay (3.5.12): crearea e o cale nouă de acces PUBLIC → securitate (mereu în
+    # aplicaţie); deschiderea e informativă, throttle-uită per link
+    "replay_link":      {"group": "account",  "scope": "account", "security": True},
+    "replay_opened":    {"group": "account",  "scope": "account", "security": False},
     # securitatea instanţei
     "admin_change":     {"group": "security", "scope": "fleet", "security": True},
     "ssh_key":          {"group": "security", "scope": "fleet", "security": True},
@@ -75,24 +79,70 @@ def kind_meta(kind: str) -> dict:
 # Corpurile de alertă sunt compuse de noi şi nu conţin secrete — dar unele citează texte venite
 # din afară (eroarea unui upload de backup, motivul unui refuz de update). Un URL cu credenţiale
 # (`sftp://user:parola@…`) sau un token în mesajul de eroare ar ajunge altfel în DB şi în UI.
-_SCRUB = [
-    (re.compile(r"\bwt_[A-Za-z0-9_\-]{8,}"), "wt_***"),                       # token de automatizare
-    (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=\-]{8,}"), "Bearer ***"),
-    (re.compile(r"(?i)(://[^/\s:@]+):[^@/\s]+@"), r"\1:***@"),                 # user:parola@ în URL
-    (re.compile(r"(?i)\b(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|"
-                r"refresh[_-]?token|client[_-]?secret|passphrase)(\s*[=:]\s*)([^\s&,;]+)"),
-     r"\1\2***"),
-    (re.compile(r"(?i)([?&](?:token|key|sig|signature|code|access_token)=)[^&\s]+"), r"\1***"),
-    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(-----END [A-Z ]*PRIVATE KEY-----|$)", re.S),
-     "[private key redacted]"),
+#
+# 3.5.12: aceleaşi tipare servesc şi mascarea înregistrărilor partajate prin link de replay
+# (`replay.py`), deci sunt scrise ca (regex, GRUPUL de ascuns):
+#   * alertele înlocuiesc grupul cu `***` (o cheie privată dispare cu totul, cu BEGIN/END);
+#   * replay-ul îl înlocuieşte cu `*` de ACEEAŞI lungime, ca poziţionarea din terminal să nu
+#     se strice — vezi `replay.mask_secrets`.
+# Valorile exclud caracterele de control (`\x00-\x1f`, `\x7f`): într-un flux de terminal o valoare
+# e urmată adesea direct de o secvenţă de culoare (`\x1b[0m`), care altfel ar fi înghiţită şi
+# mascată — adică stricată. Separatorul `cheie=valoare` e `[ \t]*`, nu `\s*`: un prompt
+# `Password:` urmat de rând nou nu trebuie să mascheze primul cuvânt al rândului următor.
+_V = r"[^\s\x00-\x1f\x7f\"'&,;]"           # un caracter de valoare „simplă"
+_PRIVATE_KEY = re.compile(r"(-----BEGIN [A-Z ]*PRIVATE KEY-----)(.*?)(-----END [A-Z ]*PRIVATE KEY-----|\Z)",
+                          re.S)
+SECRET_PATTERNS = [
+    (re.compile(r"\b(wt_)([A-Za-z0-9_\-]{8,})"), 2),                  # token de automatizare
+    (re.compile(r"(?i)\b(bearer[ \t]+)([A-Za-z0-9._~+/=\-]{8,})"), 2),
+    (re.compile(r"(?i)(://[^/\s:@\x00-\x1f]+:)([^@/\s\x00-\x1f]+)(@)"), 2),   # user:parola@ în URL
+    (re.compile(r"(?i)\b([A-Za-z0-9_\-]*(?:password|passwd|pwd|secret|token|api[_-]?key|"
+                r"access[_-]?key|private[_-]?key|client[_-]?secret|passphrase)[A-Za-z0-9_\-]*)"
+                # o culoare între `=` şi valoare (`password=\x1b[31mhunter2`) nu salvează valoarea
+                r"([ \t]*[=:][ \t]*)((?:\x1b\[[0-9;]*m)*)([\"']?)(" + _V + r"+)"), 5),
+    (re.compile(r"(?i)([?&](?:token|key|sig|signature|code|access_token)=)([^&\s\x00-\x1f\x7f]+)"), 2),
+    (_PRIVATE_KEY, 2),          # replay: corpul cheii (BEGIN/END rămân, ca omul să vadă ce era)
+    # chei de cloud / forje, recunoscute după formă (fără „cheie=" în faţă)
+    (re.compile(r"\b((?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA|AIPA)[A-Z0-9]{16})\b"), 1),   # AWS
+    (re.compile(r"\b(gh[pousr]_[A-Za-z0-9]{30,})"), 1),                 # GitHub (clasic)
+    (re.compile(r"\b(github_pat_[A-Za-z0-9_]{22,})"), 1),               # GitHub (fine-grained)
+    (re.compile(r"\b(glpat-[A-Za-z0-9_\-]{20,})"), 1),                  # GitLab
+    (re.compile(r"\b(xox[abposr]-[A-Za-z0-9\-]{10,})"), 1),             # Slack
+    (re.compile(r"\b(sk-[A-Za-z0-9_\-]{20,})"), 1),                     # OpenAI / Anthropic (sk-ant-…)
+    (re.compile(r"\b([rs]k_(?:live|test)_[A-Za-z0-9]{16,})"), 1),       # Stripe
+    (re.compile(r"\b(AIza[0-9A-Za-z_\-]{35})"), 1),                     # Google API key
+    (re.compile(r"\b(eyJ[A-Za-z0-9_\-]{8,}\.eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,})"), 1),  # JWT
 ]
 
 
+def secret_spans(s: str) -> list:
+    """[(start, end)] — porţiunile de ascuns din `s`, nesuprapuse, în ordine. Porţiunile care
+    se suprapun (două tipare pe acelaşi secret) se UNESC: altfel cea pierzătoare ar lăsa la
+    vedere tocmai coada pe care n-o acoperea cealaltă."""
+    found = []
+    for rx, grp in SECRET_PATTERNS:
+        for m in rx.finditer(s):
+            a, b = m.span(grp)
+            if b > a:
+                found.append((a, b))
+    found.sort()
+    out: list = []
+    for a, b in found:
+        if out and a <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        else:
+            out.append((a, b))
+    return out
+
+
 def scrub(text: str, limit: int = 2000) -> str:
-    s = str(text or "")
-    for rx, repl in _SCRUB:
-        s = rx.sub(repl, s)
-    return s[:limit]
+    s = _PRIVATE_KEY.sub("[private key redacted]", str(text or ""))
+    parts, pos = [], 0
+    for a, b in secret_spans(s):
+        parts.append(s[pos:a] + "***")
+        pos = b
+    parts.append(s[pos:])
+    return "".join(parts)[:limit]
 
 
 # ── înregistrare ──────────────────────────────────────────────────────────────────────────

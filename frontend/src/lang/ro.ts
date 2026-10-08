@@ -1102,6 +1102,8 @@ const ro: Lang = {
     'alerts.kind.session_attach': "Dispozitiv nou atașat la o sesiune vie",
     'alerts.kind.account_change': "Parolă, email, 2FA sau passkey schimbate",
     'alerts.kind.host_unlocked': "Host protejat cu 2FA deblocat",
+    'alerts.kind.replay_link': "Link public de replay creat pentru o înregistrare",
+    'alerts.kind.replay_opened': "Unul dintre link-urile tale de replay a fost deschis",
     'alerts.kind.admin_change': "Cont nou, token API sau de înrolare, cheie de host re-fixată, share-uri revocate",
     'alerts.kind.ssh_key': "Cheie SSH de deploy pusă sau retrasă",
     'alerts.kind.host_key_changed': "Cheia SSH a hostului s-a schimbat (conexiune refuzată)",

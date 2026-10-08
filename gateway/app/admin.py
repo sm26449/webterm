@@ -47,7 +47,10 @@ async def _revoke_everything(user_id: int, why: str) -> None:
     await db.execute("DELETE FROM web_sessions WHERE user_id=?", user_id)
     await db.execute("UPDATE sessions SET share_token=NULL, share_expires=NULL"
                      " WHERE share_by_id=?", user_id)
-    print("· revoked: web sessions and share links (%s)" % why)
+    await db.execute("DELETE FROM replay_opens WHERE link_id IN"
+                     " (SELECT id FROM replay_links WHERE user_id=?)", user_id)
+    await db.execute("DELETE FROM replay_links WHERE user_id=?", user_id)
+    print("· revoked: web sessions, share links and replay links (%s)" % why)
     print("· port-forward tickets live in the gateway's memory (max 12h):"
           " `docker compose restart app` kills them now")
 

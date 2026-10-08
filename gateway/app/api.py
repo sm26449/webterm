@@ -32,7 +32,7 @@ from .errors import ApiError
 from . import webauthn_api
 from . import fscopy
 from . import (alert_history, audit, backup, cloudbackup, config, core, db, email_alerts, health,
-               security, signing, totp, updatecheck)
+               replay, security, signing, totp, updatecheck)
 
 log = logging.getLogger("webterm")
 router = APIRouter()
@@ -527,6 +527,34 @@ async def _revoke_all_shares(owner_email: str | None = None,
     return sum(1 for r in rows if (r["share_expires"] or 0) > now)
 
 
+async def _delete_replay_links(where: str, *args) -> int:
+    """Şterge link-urile de replay care se potrivesc (+ jurnalul lor de deschideri) şi întoarce
+    câte erau ÎNCĂ ACTIVE. Ştergere, nu marcaj: un link revocat nu mai are ce arăta, iar urma
+    durabilă a deschiderilor stă oricum în audit_log."""
+    rows = await db.fetchall("SELECT id, expires FROM replay_links" + where, *args)
+    if not rows:
+        return 0
+    ids = [r["id"] for r in rows]
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        marks = ",".join("?" * len(chunk))
+        await db.execute("DELETE FROM replay_opens WHERE link_id IN (%s)" % marks, *chunk)
+        await db.execute("DELETE FROM replay_links WHERE id IN (%s)" % marks, *chunk)
+    now = time.time()
+    return sum(1 for r in rows if r["expires"] > now)
+
+
+async def _revoke_replay_links(owner_id: int | None = None) -> int:
+    """Revocarea link-urilor de replay pe căile pe care mor şi share-urile live: schimbarea
+    parolei (global — după un compromis vrei TOT acest acces derivat tăiat), ştergerea contului
+    (doar ale lui), „Revocă tot" din inventar (global). NU şi la logout: un link de replay nu e
+    o vedere a unui terminal viu, ci o înregistrare încheiată, cu expirare de maxim 7 zile — iar
+    omul care partajează o înregistrare şi apoi se deconectează nu se aşteaptă s-o fi retras."""
+    if owner_id is None:
+        return await _delete_replay_links("")
+    return await _delete_replay_links(" WHERE user_id=?", owner_id)
+
+
 @router.post("/api/logout")
 async def logout(request: Request, response: Response):
     tok = request.cookies.get(security.COOKIE_NAME)
@@ -652,6 +680,7 @@ async def update_account(body: AccountUpdate, request: Request, user=Depends(sec
         security.clear_stepup_for(user["id"])   # H1: rotirea parolei închide ferestrele de step-up
         security.bump_forward_epoch()           # M3: și invalidează token-urile de port-forward
         await _revoke_all_shares()              # M3-shares: rotirea parolei omoară share-urile derivate
+        await _revoke_replay_links()            # …şi link-urile de replay (aceeaşi regulă, globală)
     # Modulul de alerte promitea asta din prima zi („schimbare de parolă"), dar nimeni nu chema
     # alerta: o parolă schimbată de un cookie furat trecea neanunţată (3.5.2). Emailul vechi
     # primeşte tot alerta — `cfg["to"]` e cutia de alerte a instanţei, nu adresa contului.
@@ -805,6 +834,7 @@ async def delete_user(uid: int, body: ReauthOnly, request: Request,
     security.clear_stepup_for(uid)
     security.bump_forward_epoch(uid)      # şi biletele lui de port-forward, ca la logout
     await _revoke_all_shares(row["email"], uid)
+    await _revoke_replay_links(uid)
     if ntok:
         log.warning("account deleted: revoked %d automation token(s) issued by %s",
                     ntok, row["email"])
@@ -7507,6 +7537,7 @@ async def delete_session(sid: str, user=Depends(security.require_user)):
     if row["state"] in ("creating", "live"):
         raise ApiError(409, "session.live", "the session is live; close it first")
     await db.execute("DELETE FROM sessions WHERE id=?", sid)
+    await _delete_replay_links(" WHERE sid=?", sid)     # înregistrarea nu mai e de partajat
     # nu ștergem transcriptul pe loc: îl arhivăm (recuperabil ~120 zile), apoi
     # janitor-ul îl curăță definitiv după retenție
     core.archive_transcript(sid)
@@ -7661,6 +7692,7 @@ async def revoke_all_shares(body: RevokeAllSharesIn, request: Request,
     else:
         await _require_reauth_for_secret(user, body.current_password, "revoking all share links")
     n = await _revoke_all_shares()       # global + deconectează invitaţii live (hub.revoke_shares)
+    n += await _revoke_replay_links()    # butonul de panică acoperă şi link-urile de replay
     audit.detail(request, "revoked all share links (%d active)" % n)
     log.warning("all share links revoked (%d active) by %s", n, user["email"])
     email_alerts.notify_security_change("all share links were revoked (%d active)" % n,
@@ -7793,6 +7825,21 @@ async def security_summary(user=Depends(security.require_user)):
     return {"checks": await _security_checks(user), "ts": time.time()}
 
 
+async def _public_watermark(owner_email: str, title: str) -> dict:
+    """Watermark-ul unei suprafeţe PUBLICE (share live, link de replay), cu ${email}/${host}
+    rezolvate server-side — emailul nu pleacă dacă template-ul nu-l foloseşte."""
+    wm = await _load_watermark()
+    if not wm.get("enabled"):
+        return {"enabled": False}
+    if not owner_email:
+        first = await db.fetchone("SELECT email FROM users ORDER BY created LIMIT 1")
+        owner_email = first["email"] if first else ""
+    content = (wm["content"]
+               .replace("${email}", owner_email)
+               .replace("${host}", title or ""))
+    return {**wm, "content": content}
+
+
 @router.get("/api/shared/{token}")
 async def shared_meta(token: str):
     """Public: minimal session info for the read-only shared view."""
@@ -7804,20 +7851,10 @@ async def shared_meta(token: str):
     # watermark pe link-ul partajat = trasabilitatea celei mai riscante suprafețe
     # (sesiune vizibilă unui terț). Rezolvăm ${email}/${host} SERVER-SIDE, ca să nu
     # expunem emailul dacă template-ul nu-l folosește; ${time}/${date} le lasă clientul.
-    wm = await _load_watermark()
-    if wm.get("enabled"):
-        # emailul celui care A CREAT share-ul (share_by); pentru share-uri de dinainte de
-        # conturile multiple, revenim la primul cont — comportamentul de până acum
-        owner_email = row["share_by"] if "share_by" in row.keys() and row["share_by"] else ""
-        if not owner_email:
-            first = await db.fetchone("SELECT email FROM users ORDER BY created LIMIT 1")
-            owner_email = first["email"] if first else ""
-        content = (wm["content"]
-                   .replace("${email}", owner_email)
-                   .replace("${host}", row["title"] or ""))
-        wm = {**wm, "content": content}
-    else:
-        wm = {"enabled": False}
+    # emailul celui care A CREAT share-ul (share_by); pentru share-uri de dinainte de
+    # conturile multiple, revenim la primul cont — comportamentul de până acum
+    owner_email = row["share_by"] if "share_by" in row.keys() and row["share_by"] else ""
+    wm = await _public_watermark(owner_email, row["title"])
     return {"title": row["title"], "state": row["state"],
             "rows": row["rows"], "cols": row["cols"], "watermark": wm,
             "writable": bool(row["share_writable"])}
@@ -7860,6 +7897,238 @@ async def session_preview(sid: str, user=Depends(security.require_user)):
     await _require_session_host_stepup(sid, user)
     data = await asyncio.to_thread(core.read_tail, sid, limit=32 * 1024)
     return Response(content=data, media_type="application/octet-stream")
+
+
+# ---------------------------------------------------------------------------
+# Link-uri de replay (3.5.12): înregistrarea unei sesiuni ÎNCHISE, partajată public, doar-citire
+# ---------------------------------------------------------------------------
+# Modelul de securitate e cel al share-urilor live, cu câteva strângeri:
+#   * tokenul: 256 de biţi (`security.new_token`), stocat DOAR ca sha256 — URL-ul se arată o
+#     singură dată, la creare; în listă nu există nici token, nici URL;
+#   * tokenul călătoreşte în FRAGMENTUL paginii (`/#/replay/<token>`, nu ajunge la server la
+#     încărcare) şi în antetul `X-Replay-Token` la API — nu în cale, deci nu în jurnalul de
+#     acces al unui proxy şi nici în `audit_log.path`;
+#   * expirare obligatorie (1 h / 24 h / 7 zile), revocare per link / toate, plus pe căile pe
+#     care mor share-urile (schimbare de parolă, ştergere de cont, „Revocă tot");
+#   * crearea: doar din browser (`require_user`, cookie), cu step-up pe hosturile 2FA — aceeaşi
+#     poartă ca citirea transcriptului; doar sesiuni ÎNCHISE (o sesiune vie încă scrie);
+#   * public: 404 IDENTIC pentru necunoscut / expirat / revocat / sesiune ştearsă (fără oracol),
+#     limită de rată per IP, `Cache-Control: no-store`, `X-Robots-Tag: noindex`;
+#   * fiecare deschidere: rând în audit_log (IP prin `client_ip`, user-agent trunchiat), contor +
+#     „ultima deschidere" în listă, alertă în aplicaţie către cel care a creat link-ul (cel mult
+#     una per link la 10 minute).
+
+_REPLAY_HEADERS = {"Cache-Control": "no-store", "X-Robots-Tag": "noindex, nofollow",
+                   "Referrer-Policy": "no-referrer"}
+_LABEL_BAD = re.compile(r"[\x00-\x1f\x7f  ‪-‮⁦-⁩]")
+
+
+class ReplayLinkIn(BaseModel):
+    expires_hours: int = replay.DEFAULT_EXPIRY_HOURS
+    label: str = ""
+    redact: bool = True               # „ascunde secretele probabile" — implicit PORNIT
+    stepup_grant: str = ""
+    stepup_password: str = ""
+
+
+def _replay_link_json(r) -> dict:
+    return {"id": r["id"], "sid": r["sid"], "title": r["title"] or "",
+            "host_id": r["host_id"], "host_name": r["host_name"] or "",
+            "label": r["label"] or "", "redact": bool(r["redact"]),
+            "created": r["created"], "expires": r["expires"],
+            "opens": r["open_count"] or 0, "last_opened": r["last_opened"],
+            "last_ip": r["last_ip"] or ""}
+
+
+@router.post("/api/sessions/{sid}/replay-links")
+async def create_replay_link(sid: str, request: Request, body: ReplayLinkIn = ReplayLinkIn(),
+                             user=Depends(security.require_user)):
+    """Link public, doar-citire, către ÎNREGISTRAREA unei sesiuni închise. URL-ul (cu tokenul)
+    se întoarce o singură dată, aici."""
+    if not core.valid_sid(sid):
+        raise ApiError(404, "session.missing", "no such session")
+    row = await db.fetchone("SELECT id, host_id, state, title FROM sessions WHERE id=?", sid)
+    if not row:
+        raise ApiError(404, "session.missing", "no such session")
+    # aceeaşi poartă ca GET /transcript: pe un host 2FA, a scoate înregistrarea din instanţă
+    # (şi încă printr-un link fără cont) cere al doilea factor
+    await _require_host_stepup(row["host_id"], user, body.stepup_grant, body.stepup_password)
+    if row["state"] != "closed":
+        raise ApiError(409, "replay.notClosed",
+                       "only the recording of a closed session can be shared")
+    _, cast_path = core.transcript_paths(sid)
+    if not cast_path.exists():
+        raise ApiError(404, "transcript.missing", "no transcript for this session")
+    if body.expires_hours not in replay.EXPIRY_HOURS:
+        raise ApiError(400, "replay.badExpiry", "expiry must be 1 hour, 24 hours or 7 days")
+    label = _LABEL_BAD.sub("", body.label or "").strip()[:replay.LABEL_MAX]
+    now = time.time()
+    await _delete_replay_links(" WHERE expires <= ?", now)
+    mine = await db.fetchone("SELECT COUNT(*) AS c FROM replay_links WHERE user_id=?", user["id"])
+    here = await db.fetchone("SELECT COUNT(*) AS c FROM replay_links WHERE user_id=? AND sid=?",
+                             user["id"], sid)
+    if mine["c"] >= replay.MAX_ACTIVE_PER_USER or here["c"] >= replay.MAX_ACTIVE_PER_SESSION:
+        raise ApiError(409, "replay.tooMany",
+                       "too many active replay links — revoke some first")
+    token = security.new_token()
+    expires = now + body.expires_hours * 3600
+    link_id = await db.execute(
+        "INSERT INTO replay_links(token_hash, sid, user_id, label, redact, created, expires)"
+        " VALUES(?,?,?,?,?,?,?)",
+        security.sha256_hex(token), sid, user["id"], label, 1 if body.redact else 0, now, expires)
+    audit.detail(request, "replay link #%d for %s (%dh, %s)%s" % (
+        link_id, sid[:8], body.expires_hours, "masked" if body.redact else "UNMASKED",
+        (" label=%r" % label) if label else ""))
+    email_alerts.notify_replay_created(row["title"] or "", label, body.expires_hours,
+                                       bool(body.redact), security.client_ip(request),
+                                       user["email"], user_id=user["id"])
+    return {"id": link_id, "url": f"{config.PUBLIC_URL}/#/replay/{token}", "sid": sid,
+            "label": label, "redact": bool(body.redact), "created": now, "expires": expires}
+
+
+@router.get("/api/replay-links")
+async def list_replay_links(sid: str = "", user=Depends(security.require_user)):
+    """Link-urile de replay ACTIVE ale contului (nu ale altora) — fără token şi fără URL.
+    Pe un host 2FA, rândul apare doar cu fereastra de step-up deschisă (ca lista de share-uri:
+    titlul sesiunii e conţinut); restul se NUMĂRĂ în `hidden`."""
+    now = time.time()
+    await _delete_replay_links(" WHERE expires <= ?", now)
+    sql = ("SELECT r.*, s.title, s.host_id, h.name AS host_name, h.require_2fa"
+           " FROM replay_links r LEFT JOIN sessions s ON s.id = r.sid"
+           " LEFT JOIN hosts h ON h.id = s.host_id WHERE r.user_id=? AND r.expires > ?")
+    args: list = [user["id"], now]
+    if sid:
+        sql += " AND r.sid=?"
+        args.append(sid)
+    rows = await db.fetchall(sql + " ORDER BY r.created DESC", *args)
+    out, hidden = [], 0
+    for r in rows:
+        if r["require_2fa"] and not security.stepup_window_is_open(user["id"], r["host_id"]):
+            hidden += 1
+            continue
+        out.append(_replay_link_json(r))
+    return {"links": out, "hidden": hidden}
+
+
+@router.delete("/api/replay-links/{link_id}")
+async def revoke_replay_link(link_id: int, request: Request, user=Depends(security.require_user)):
+    row = await db.fetchone(
+        "SELECT r.id, r.sid, s.host_id FROM replay_links r LEFT JOIN sessions s ON s.id = r.sid"
+        " WHERE r.id=? AND r.user_id=?", link_id, user["id"])
+    if not row:
+        # al altui cont = la fel de inexistent ca unul şters: nicio confirmare a id-ului
+        raise ApiError(404, "replay.missing", "no such replay link")
+    if row["host_id"]:
+        await _require_host_stepup(row["host_id"], user)   # simetric cu crearea (H1)
+    await _delete_replay_links(" WHERE id=?", link_id)
+    audit.detail(request, "replay link #%d for %s revoked" % (link_id, row["sid"][:8]))
+    return {"ok": True}
+
+
+@router.post("/api/replay-links/revoke-all")
+async def revoke_all_replay_links(request: Request, user=Depends(security.require_user)):
+    """Toate link-urile de replay ale CONTULUI. Fără re-autentificare: revocarea doar reduce
+    accesul, iar link-urile altor conturi nu sunt atinse (butonul global e /api/shares/revoke-all)."""
+    n = await _revoke_replay_links(user["id"])
+    audit.detail(request, "all own replay links revoked (%d active)" % n)
+    return {"ok": True, "revoked": n}
+
+
+async def _replay_lookup(request: Request):
+    """Rezolvă tokenul din antet la (link, sesiune). ORICE eşec → acelaşi 404 (necunoscut,
+    expirat, revocat, sesiune ştearsă/neînchisă, înregistrare dispărută) — şi se numără la
+    limita de rată, ca un scanner să fie oprit devreme."""
+    ip = security.client_ip(request)
+    retry = replay.gate(ip)
+    if retry:
+        raise ApiError(429, "replay.rateLimited", "too many requests; retry in %ds" % retry,
+                       headers={**_REPLAY_HEADERS, "Retry-After": str(retry)},
+                       vars={"retry": retry})
+    token = request.headers.get("x-replay-token") or ""
+    row = None
+    if 20 <= len(token) <= 128:
+        h = security.sha256_hex(token)
+        row = await db.fetchone(
+            "SELECT r.*, s.title, s.state, s.created AS s_created, s.closed_at, s.rows, s.cols,"
+            " u.email AS owner_email"
+            " FROM replay_links r JOIN sessions s ON s.id = r.sid"
+            " LEFT JOIN users u ON u.id = r.user_id"
+            " WHERE r.token_hash=? AND r.expires > ?", h, time.time())
+        if row is not None and not security.tokens_equal(row["token_hash"], h):
+            row = None
+    if row is not None:
+        if row["state"] != "closed" or not core.valid_sid(row["sid"]) \
+                or not core.transcript_paths(row["sid"])[1].exists():
+            row = None
+    if row is None:
+        replay.record_miss(ip)
+        raise ApiError(404, "link.invalid", "invalid or expired link", headers=_REPLAY_HEADERS)
+    return row
+
+
+async def _replay_opened(request: Request, row, what: str) -> None:
+    """Contabilizează o deschidere: contor + ultima deschidere, jurnalul per link (ultimele
+    OPENS_KEPT), un rând în audit_log (prin middleware: actor = link-ul, IP = client_ip) şi
+    alerta în aplicaţie către cel care l-a creat (throttle per link)."""
+    ip = security.client_ip(request)
+    ua = (request.headers.get("user-agent") or "")[:160]
+    now = time.time()
+    await db.execute("UPDATE replay_links SET open_count=open_count+1, last_opened=?, last_ip=?"
+                     " WHERE id=?", now, ip[:64], row["id"])
+    await db.execute("INSERT INTO replay_opens(link_id, ts, ip, user_agent) VALUES(?,?,?,?)",
+                     row["id"], now, ip[:64], ua)
+    await db.execute(
+        "DELETE FROM replay_opens WHERE link_id=? AND id <= COALESCE((SELECT id FROM replay_opens"
+        " WHERE link_id=? ORDER BY id DESC LIMIT 1 OFFSET ?), -1)",
+        row["id"], row["id"], replay.OPENS_KEPT)
+    audit.actor(request, "replay-link #%d" % row["id"])
+    audit.detail(request, "replay %s of %s via link #%d%s · ua=%s" % (
+        what, row["sid"][:8], row["id"], (" (%s)" % row["label"]) if row["label"] else "", ua))
+    if row["owner_email"]:
+        email_alerts.notify_replay_opened(row["id"], row["title"] or "", row["label"] or "",
+                                          ip, ua, row["owner_email"], user_id=row["user_id"])
+
+
+@router.get("/api/replay/meta")
+async def replay_meta(request: Request):
+    """Public (tokenul din `X-Replay-Token` E credenţialul): ce îi trebuie paginii de replay ca
+    să se aşeze — titlu, eticheta link-ului, momentele sesiunii, dacă e mascată. Nimic despre
+    host, cont sau alte sesiuni. Nu se numără ca deschidere (nu scoate conţinut)."""
+    row = await _replay_lookup(request)
+    wm = await _public_watermark(row["owner_email"] or "", row["title"])
+    return Response(content=json.dumps({
+        "title": row["title"] or "", "label": row["label"] or "", "redact": bool(row["redact"]),
+        "expires": row["expires"], "started": row["s_created"], "closed_at": row["closed_at"],
+        "rows": row["rows"], "cols": row["cols"], "watermark": wm}),
+        media_type="application/json", headers=_REPLAY_HEADERS)
+
+
+@router.get("/api/replay/cast")
+async def replay_cast(request: Request):
+    """Public: înregistrarea (asciicast v2, formatul player-ului), mascată dacă link-ul o cere."""
+    row = await _replay_lookup(request)
+    _, cast_path = core.transcript_paths(row["sid"])
+    try:
+        if row["redact"]:
+            data = await asyncio.to_thread(replay.redacted_cast_file, cast_path)
+        else:
+            data = await asyncio.to_thread(cast_path.read_bytes)
+    except OSError:
+        replay.record_miss(security.client_ip(request))
+        raise ApiError(404, "link.invalid", "invalid or expired link", headers=_REPLAY_HEADERS)
+    await _replay_opened(request, row, "played")
+    return Response(content=data, media_type="application/octet-stream", headers=_REPLAY_HEADERS)
+
+
+@router.get("/api/replay/text")
+async def replay_text(request: Request):
+    """Public: vizualizarea TEXT (fără secvenţe de control, coada de 2 MB), mascată la fel."""
+    row = await _replay_lookup(request)
+    text = await asyncio.to_thread(core.transcript_text, row["sid"], TEXT_VIEW_TAIL)
+    if row["redact"]:
+        text = await asyncio.to_thread(replay.mask_secrets, text)
+    await _replay_opened(request, row, "read as text")
+    return Response(content=text, media_type="text/plain; charset=utf-8", headers=_REPLAY_HEADERS)
 
 
 # ---------------------------------------------------------------------------

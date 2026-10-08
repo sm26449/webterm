@@ -316,6 +316,37 @@ CREATE TABLE IF NOT EXISTS alert_prefs (
     inapp INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (user_id, kind)
 );
+
+-- Link-uri de replay (3.5.12): acces PUBLIC, doar-citire, la înregistrarea unei sesiuni ÎNCHISE.
+-- Tokenul stă HASH-uit (sha256, ca share-urile live şi tokenurile de automatizare): URL-ul se
+-- arată o singură dată, la creare. Expirarea e obligatorie (max 7 zile). `user_id` = contul care
+-- l-a creat — singurul care îl vede în listă şi îl poate revoca (plus revocările globale).
+CREATE TABLE IF NOT EXISTS replay_links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_hash TEXT UNIQUE NOT NULL,
+    sid TEXT NOT NULL,
+    user_id INTEGER NOT NULL,
+    label TEXT DEFAULT '',
+    redact INTEGER NOT NULL DEFAULT 1,      -- „ascunde secretele probabile" (best-effort)
+    created REAL NOT NULL,
+    expires REAL NOT NULL,
+    open_count INTEGER NOT NULL DEFAULT 0,
+    last_opened REAL,
+    last_ip TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_replay_links_user ON replay_links(user_id, expires);
+CREATE INDEX IF NOT EXISTS idx_replay_links_sid ON replay_links(sid);
+
+-- Jurnalul de deschideri al unui link de replay (cine, când, de unde) — ultimele 50 per link;
+-- pleacă odată cu link-ul. Copia durabilă e în audit_log.
+CREATE TABLE IF NOT EXISTS replay_opens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    link_id INTEGER NOT NULL,
+    ts REAL NOT NULL,
+    ip TEXT DEFAULT '',
+    user_agent TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_replay_opens_link ON replay_opens(link_id, id);
 """
 
 # additive migrations for DBs created by an older version

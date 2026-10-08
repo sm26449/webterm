@@ -405,6 +405,35 @@ def notify_host_unlocked(host_name: str, ip: str, email: str, host_id=None, user
           kind="host_unlocked", severity="info", host_id=host_id, user_id=user_id, user_email=email)
 
 
+def notify_replay_created(title: str, label: str, hours: int, redact: bool, ip: str,
+                          email: str, user_id=None) -> None:
+    """S-a creat un link PUBLIC de replay către înregistrarea unei sesiuni. E o cale de acces
+    fără cont, deci contul trebuie s-o vadă — mai ales dacă n-a creat-o el (cookie furat).
+    Fără throttle: crearea e rară şi deliberată."""
+    span = "1 hour" if hours == 1 else ("7 days" if hours == 168 else "%d hours" % hours)
+    _fire("Public replay link created",
+          f"Account: {email}\nSession: {title or '(untitled)'}\n"
+          + (f"Label: {label}\n" if label else "")
+          + f"Valid for: {span}\nSecret masking: {'on' if redact else 'OFF'}\nIP: {ip}\n\n"
+          f"Anyone with the link can watch this recording until it expires. If this was not "
+          f"you, revoke it from the dashboard (Share links) and change your password.",
+          kind="replay_link", severity="warning", user_id=user_id, user_email=email)
+
+
+def notify_replay_opened(link_id: int, title: str, label: str, ip: str, user_agent: str,
+                         email: str, user_id=None) -> None:
+    """Cineva a deschis un link de replay. Doar contului care l-a creat; cel mult o alertă per
+    link la 10 minute (un invitat care derulează şi reîncarcă nu inundă istoricul)."""
+    if not _throttled("replay:%d" % link_id, 600):
+        return
+    _fire("Your replay link was opened",
+          f"Session: {title or '(untitled)'}\n"
+          + (f"Link: {label}\n" if label else f"Link: #{link_id}\n")
+          + f"IP: {ip}\nBrowser: {user_agent or '?'}\n\n"
+          f"Further opens in the next 10 minutes are counted in the link list, not alerted.",
+          kind="replay_opened", severity="info", user_id=user_id, user_email=email)
+
+
 # ---------------------------------------------------------------------------
 # Alerte pe praguri de resurse (CPU / RAM / disc)
 # ---------------------------------------------------------------------------

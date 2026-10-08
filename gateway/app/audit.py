@@ -52,7 +52,9 @@ _READ_MARKERS = (
 # jurnalul răspundea „nimic", deşi un `q=BEGIN OPENSSH PRIVATE KEY` scanează tot istoricul.
 # `tests/audit_reads_test.py` compară lista asta cu rutele care chiar citesc transcripturi,
 # ca următoarea să nu mai scape la fel.
-_AUDITED_PATHS = ("/api/search",)
+# `/api/replay/*`: înregistrarea scoasă printr-un link PUBLIC de replay (3.5.12) — actorul e
+# link-ul (`replay-link #N`), nu un cont; fiecare deschidere e o urmă.
+_AUDITED_PATHS = ("/api/search", "/api/replay/cast", "/api/replay/text")
 
 
 def audited_read(path: str) -> bool:
