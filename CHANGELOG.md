@@ -9,6 +9,66 @@ back.
 
 ## [Unreleased]
 
+**This release updates the agent (57 → 58)** — hosts update on reconnect (deferred while a host has
+open sessions; force it from the host card). The gateway keeps working with agents 50–57: the new
+behaviour turns on per host, by agent version, and an older agent gets exactly the previous one.
+
+### Added
+- **Copy whole folders to another host, with their permissions.** Since 3.5.5 *Copy to host…*
+  copied files only: walking a tree with the agent's existing operations would have landed a
+  `deploy.sh` without its executable bit and a `0600` key readable by others. Folders are now
+  copied with everything in them: the gateway walks the source with `fs_list` (bounded: 1000 files
+  and 1000 folders per job, 32 levels, a directory listed truncated is an error rather than a silent
+  partial copy), creates the folders on the destination parents first, copies the files through the
+  same resumable-upload machinery (CRC-32 before the atomic rename), and applies the **source's
+  permission bits** to files and to the folders it created — folders last and deepest first, so a
+  read-only folder still receives its files. **setuid, setgid and sticky are never copied.**
+  **Symbolic links inside a folder are not copied** (their target is a path on the source host;
+  following them could leave the tree or loop) and **special files** are skipped — both listed with
+  a note. For a folder that already exists, *Skip* and *Overwrite* merge into it (existing files
+  kept or replaced), *Keep both* copies it as `name (1)`. Copying a folder into itself is refused.
+  Plain file copies now keep their permissions too. The Transfers row shows the file being copied
+  and, at the end, a summary (skipped, links and special files not copied, permissions not
+  applied). **Retry** moved to the server (`POST /api/fs/copy/{job_id}/retry`, step-up on both
+  hosts): a folder with failures is merged into the very same destination folder — also under
+  *Keep both*, where it has another name — skipping what already arrived. See
+  [docs/TRANSFERS.md](docs/TRANSFERS.md#copy-to-another-host).
+- **Scrollback history with tmux panes.** Since agent 57 a fresh attach fills the scrollback from
+  tmux's own history, but a session whose tmux window was split into panes got nothing (the agent
+  declined with `multi_pane`), so exactly the sessions with the most going on fell back to a few
+  screens of raw output. A **zoomed** pane is now captured like a single pane, and with several
+  visible panes the gateway gets the **active pane's** history, marked *history of the active pane
+  above (N panes)* since the browser shows the whole layout. The capture now targets the probed
+  pane by id, so switching panes between the probe and the capture cannot mix two panes' histories.
+
+### Changed — agent (58)
+- **New `fs_chmod` operation.** Applies `mode & 0o777` (setuid/setgid/sticky are stripped by the
+  agent, whatever the gateway asks) to a regular file or a directory. It never follows a symbolic
+  link: it `lstat`s the path, opens it with `O_NOFOLLOW` (`O_PATH` on Linux, so no read permission
+  is needed and a device is never opened), checks it is the same inode, and changes the mode
+  through the descriptor. Strict input validation (path string without NUL; integer mode 0–0o7777,
+  not a bool). Like every `fs_*` operation it acts as the agent's user, so the operating system
+  decides what it may change. The gateway calls it only on agents ≥ 58; with an older destination
+  agent a copy still works, without permissions, and the job says *permissions not kept
+  (destination agent older than 58)* (`copy.noModes`).
+- **`fs_stat` reports `mode`** (the `0o777` bits, as `fs_list` already did), so a single file copy
+  knows its permissions without listing the parent folder. With a source agent older than 58 the
+  gateway falls back to that listing.
+- **`history` accepts `pane: "active"`** and reports `panes` / `zoomed`; the probe reads the active
+  pane's id and zoom flag (`#{pane_id} #{window_zoomed_flag}`). Without `pane` the reply is exactly
+  agent 57's, so a gateway that does not ask gets no unmarked history. Agent 57 ignores the field
+  and keeps declining with `multi_pane`, which the gateway handles as before (silent fallback).
+
+### Tests
+- New hermetic suites `agent_v58` (fs_chmod on a real filesystem: masking, symlinks and their
+  targets, FIFOs, the no-`O_PATH` path, an inode swapped between `lstat` and `open`; the op's
+  validation; the history probe and pane targeting with a mocked tmux, and with a **real tmux on an
+  isolated socket** — skipped where tmux is missing; the gateway's seam and fallbacks) and
+  `fs_copy_folders` (two fake agents: a full tree with modes, the agent < 58 fallback with no
+  `fs_chmod` call, merges, rename, into-itself, limits, unreadable and uncreatable folders, retry
+  into the same folder, step-up on retry) — 101 suites. `fs-test.sh` copies a folder between two
+  real agents and checks the modes on disk, the executable bit and the skipped symlink.
+
 ## [3.5.15] — 2026-10-08 · agent (57)
 
 ### Security
@@ -545,7 +605,8 @@ fleet update (agents stay at 57).
   never the file. Skip / overwrite / keep both (`name (1).ext`), cancel (the destination temp is
   removed, finished files stay), per-file errors, a copy row in the Transfers widget, step-up on
   **both** hosts, cookie only, audited. Copying within one host is allowed. **Limits:** files only —
-  folders need an agent `chmod` to keep executable bits and come with the next agent update; at most
+  folders need an agent `chmod` to keep executable bits and come with the next agent update (they
+  did: agent 58, see [Unreleased]); at most
   1000 files per job; special files refused; permissions and ownership are the destination's; jobs
   live in gateway memory (a restart loses running jobs). Tested hermetically with two fake agents
   (`tests/fs_copy_test.py`, 92 suites) and end to end with a second real agent in the smoke container

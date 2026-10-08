@@ -217,8 +217,8 @@ A **selection bar** appears at the bottom: **N selected · Download · Delete ·
 
 ## Copy to another host
 
-**Copy to host…** in the selection bar copies the selected **files** to another host **through the
-gateway**: agent A → gateway → agent B. The data never passes through your browser (useful from a
+**Copy to host…** in the selection bar copies the selected **files and folders** to another host
+**through the gateway**: agent A → gateway → agent B. The data never passes through your browser (useful from a
 phone, or over a slow link), and nothing has to be installed between the two hosts.
 
 The dialog asks for:
@@ -228,15 +228,28 @@ The dialog asks for:
   allowed;
 - the **destination folder** — a path field plus a small folder browser (it lists the destination
   through the same API as the Files panel, so a 2FA host asks for its step-up there);
-- **if a file already exists**: **Skip**, **Overwrite** (atomic replace; the existing file keeps its
-  permissions), or **Keep both** — the copy is named `name (1).ext`, `name (2).ext` … (`a.tar.gz`
-  becomes `a (1).tar.gz`, `.bashrc` becomes `.bashrc (1)`). Copying a file onto itself with
-  *Overwrite* is skipped.
+- **if a file or folder already exists**: **Skip**, **Overwrite** (atomic replace), or **Keep
+  both** — the copy is named `name (1).ext`, `name (2).ext` … (`a.tar.gz` becomes `a (1).tar.gz`,
+  `.bashrc` becomes `.bashrc (1)`, a folder `proj` becomes `proj (1)`). Copying a file or folder
+  onto itself with *Overwrite* is skipped. For a **folder that already exists**, *Skip* and
+  *Overwrite* **merge** into it — files already there are left alone (*Skip*, like `cp -rn`) or
+  replaced (*Overwrite*), missing ones are added; *Keep both* copies the whole folder next to it.
+
+The dialog also says, for the chosen destination, whether **permissions are kept** (destination
+agent 58 or newer) or not (older agent — it names the host and says that scripts lose their
+executable bit).
 
 The job appears in the **Transfers widget** as a **copy A → B** row: percentage over the total
-size, speed, *files 3/5 · skipped: 1 · failed: 1*, **Cancel**, and on failure the first error with
-**Retry**, which starts a new job with only the files that failed. Closing the tab does not stop the
-copy — it runs on the server — but a reload loses the row.
+size, speed, the file being copied right now (*→ proj/bin/run.sh*), *files 3/5 · folders 2/2 ·
+skipped: 1 · failed: 1*, **Cancel**, and on failure the first error with **Retry**. When it ends
+the row keeps a **summary**: what was skipped, how many symbolic links and special files inside
+folders were **not copied**, files whose permissions could not be applied, and *permissions not
+kept* when the destination agent is older than 58. **Retry** runs on the server
+(`POST /api/fs/copy/{job_id}/retry`): it starts a new job with what failed — a failed file at the
+top level is copied again; a folder with failures is walked again and **merged into the very same
+destination folder** (also with *Keep both*, where it has another name there), skipping what is
+already there, i.e. what succeeded the first time. Closing the tab does not stop the copy — it runs
+on the server — but a reload loses the row.
 
 **How it works.** `POST /api/fs/copy` `{src_host, paths[], dst_host, dst_dir, on_conflict}` returns
 a `job_id`; `GET /api/fs/copy/{job_id}` reports per-file and total bytes, state and errors (`?files=1`
@@ -258,25 +271,56 @@ user (16 on the gateway) run at once.
 already copied **stay**. A source read error, a refused file or a CRC mismatch fails **that file**
 only; the job continues and ends as *failed* with the per-file errors.
 
+**Folders** (WebTerm 3.6, agent 58). The gateway walks the source tree with the agent's existing
+`fs_list`, before copying anything, so the total is known up front. It then creates the folders on
+the destination (`fs_mkdir`, parents before children), copies the files through the same machinery
+as above, and finally applies the folders' permissions **deepest first** — a read-only (`0555`)
+folder on the source would otherwise refuse the files copied into it. Inside a folder:
+
+- **symbolic links are not copied** (decision for 3.6): a link's target is a path on the *source*
+  host, often absolute; on another host it points elsewhere or nowhere, and following it could leave
+  the tree or loop. Each one is listed as *skipped* with the note `copy.symlinkSkipped`. A link you
+  **select** yourself is still copied as the file it points to, as before;
+- **special files** (devices, FIFOs, sockets) are skipped with the note `copy.specialSkipped` (the
+  agent's `fs_read` refuses them, the same guard as downloads);
+- a subfolder the source agent cannot read fails as **its own row**; the rest is copied. A folder
+  that cannot be created on the destination fails with its contents (`copy.parentFailed`), nothing
+  is written under it;
+- copying a folder **into itself** (same host, destination inside the source) is refused
+  (`copy.intoItself`).
+
+**Permissions.** With a destination agent **58 or newer**, every copied file and every folder the
+copy created gets the **source's permission bits** (`rwx` for user, group and others — `0o777`).
+**setuid, setgid and sticky are never copied**: the gateway masks them and the agent's new
+`fs_chmod` operation masks them again. `fs_chmod` works on a file descriptor opened with
+`O_NOFOLLOW` (and `O_PATH` on Linux), checks that it is the same inode it `lstat`-ed, accepts only
+regular files and directories, and **never follows a symbolic link**. A permission that cannot be
+applied leaves the file copied, with the destination's default mode and a note
+(`copy.modeFailed`). Folders that already existed (a merge) keep their own permissions. With a
+destination agent **older than 58**, files and folders are copied **without** their permissions —
+new files get the destination agent's default mode (umask, usually `0644`), so scripts lose their
+executable bit — and the job says so (`notes: [copy.noModes]`, *permissions not kept* in the
+widget). Ownership is never copied: everything belongs to the destination agent's user.
+
 **Limits**
 
-- at most **1000 files** per copy; the total size is unlimited (and shown);
-- **folders are not copied** — the button is disabled for a selection of folders only, and folders in
-  a mixed selection are left out with a note. Walking a tree with the current agent operations would
-  lose the executable bits (the agent has no `chmod` operation) and silently follow symlinks; copying
-  folders between hosts comes with the **next agent update**;
-- **special files** (devices, FIFOs, sockets — e.g. `/dev/zero`) are refused, the same guard as
-  downloads; **symbolic links** to files are followed and copied as the file they point to;
-- **permissions and ownership are not copied**: a new file gets the destination agent's default
-  mode (umask, usually `0644`) and is owned by the destination agent's user. The dialog warns when
-  a selected file is private on the source (e.g. `0600`, an SSH key);
+- at most **1000 files** and **1000 folders** per copy, counting everything inside the selected
+  folders, and **32 levels** of nesting; a folder with more than 2000 entries in one directory
+  cannot be listed whole and is refused (`copy.folderTooLarge`, `copy.folderTooDeep`) rather than
+  copied partially. The total size is unlimited (and shown);
+- **special files** you select (devices, FIFOs, sockets — e.g. `/dev/zero`) are refused, the same
+  guard as downloads; a **symbolic link you select** is followed and copied as the file it points
+  to (links *inside* folders are not copied, see above);
+- **permissions** are kept only with a destination agent 58 or newer (see above); **ownership** is
+  never copied. With an older destination agent the dialog warns when a selected file is private on
+  the source (e.g. `0600`, an SSH key);
 - paths must be absolute or `~/…`, without `..` segments or control characters; two sources with
   the same file name in one job are refused.
 
 **Security.** Session cookie only — an automation token gets `401`. Both ends need what reading and
 writing files need on their own: the **step-up** of a 2FA host is required on the **source and on
 the destination**. Each job is visible and cancellable only by the account that started it. The
-audit log records `copy N files A:/path → B:/dir` (and the cancel).
+audit log records `copy N files A:/path → B:/dir` (and the cancel and the retry).
 
 **Jobs live in the gateway's memory.** A finished job stays queryable for **one hour**. A **gateway
 restart loses running jobs**: files already committed stay; the temporary file of the one in

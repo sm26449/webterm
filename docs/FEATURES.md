@@ -48,6 +48,11 @@ what it does not cover, is in [Security](SECURITY-FEATURES.md) and
 - Sessions as conversations: title, note, full history of everything the host
   printed, search (what you type is never recorded — see Security)
 - Multiple devices at once on the same session (desktop + phone, live)
+- **Full scrollback on attach**: opening a live tmux session fills the scrollback from tmux's own
+  history (up to 10000 lines on desktop, 3000 on a phone; agent 57), not just the last screens of
+  raw output. When you split the session's tmux window into panes (agent 58), you get the
+  **active pane's** history, marked as such; a zoomed pane counts as a single pane
+  ([details](design/SESSION-LIFECYCLE.md))
 - **Instant tabs**: recent sessions stay mounted (terminal + buffer), and
   switching is just a visibility change. The stream flows **only** on visible
   panes; background tabs are paused at the gateway and re-sync on return if they
@@ -148,8 +153,9 @@ Press `?` for the cheatsheet.
   **Transfers widget** (see below); **download a folder (or file) as a
   `.tgz` archive** (tarred on the host, streamed down as a Transfers job with Cancel);
   **multi-select** (checkboxes, Shift/Ctrl+click, long-press on phones) with bulk
-  download / delete and **copy to another host** — agent → gateway → agent, the data never
-  passes through your browser ([details](TRANSFERS.md#copy-to-another-host)); a **Monaco** (VS Code) editor with
+  download / delete and **copy to another host** — files and **whole folders**, agent → gateway →
+  agent, the data never passes through your browser; permissions (including the executable bit)
+  are kept when the destination runs agent 58 or newer ([details](TRANSFERS.md#copy-to-another-host)); a **Monaco** (VS Code) editor with
   syntax highlighting for what you edit on a server (shell, YAML, JSON, INI/systemd/.env, TOML,
   Dockerfile, nginx, Python, JS/TS, SQL, XML/HTML, CSS, Markdown, Go, Rust, PHP, Ruby, Lua, Perl,
   PowerShell, C/C++, Java, HCL), find/replace, folding, multi-cursor, `Alt+Z` word wrap, large
