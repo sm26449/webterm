@@ -465,6 +465,11 @@ MIGRATIONS = [
     # etichete de host opţionale. JSON {"tags": ["prod","web"]}; NULL = fără ţinte (rândurile
     # vechi şi snippet-urile de terminal obişnuite).
     "ALTER TABLE snippets ADD COLUMN targets TEXT",
+    # Alerte localizabile (3.5.15): cheia STABILĂ a mesajului + parametrii lui (JSON, trecuţi prin
+    # `alert_history.scrub`), ca panoul din aplicaţie să le afişeze în limba interfeţei.
+    # `title`/`details` rămân textul englezesc al emailului; NULL = rând vechi → textul stocat.
+    "ALTER TABLE alerts ADD COLUMN msg_key TEXT",
+    "ALTER TABLE alerts ADD COLUMN msg_params TEXT",
 ]
 
 # tabele adăugate ulterior (executeScript de mai sus le creează pe DB-uri noi;

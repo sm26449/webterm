@@ -170,6 +170,26 @@ async def main():
         check("alerta de backup eşuat ajunge în istoric fără secretele din mesajul de eroare",
               bf and "topsecret" not in bf[-1]["details"] and "deadbeef" not in bf[-1]["details"]
               and bf[-1]["severity"] == "critical", str([dict(x) for x in bf]))
+        # 3.5.15: cheia mesajului + parametrii (pentru UI-ul localizat) trec prin ACELAŞI scrub
+        check("3.5.15: backup eşuat → msg_key + parametri, fără secretele din eroare",
+              bf and bf[-1]["msg_key"] == "backup_failed" and bf[-1]["msg_params"]
+              and "topsecret" not in bf[-1]["msg_params"] and "deadbeef" not in bf[-1]["msg_params"]
+              and '"age_key":"offhost_never"' in bf[-1]["msg_params"], str([dict(x) for x in bf][-1:]))
+        adm = await _rows(u2, "admin_change")   # u1 şi-a pierdut-o la testul de retenţie
+        check("3.5.15: schimbare de securitate → cheie stabilă + descriere cu cheie proprie",
+              adm and adm[0]["msg_key"] == "security_change"
+              and '"what_key":"account_created"' in (adm[0]["msg_params"] or "")
+              and "doi@x.co" in adm[0]["msg_params"], str(dict(adm[0])) if adm else "")
+        mp = alert_history.message_params({"ok": "x", "Bad Key": "y", "n": 3, "flag": True,
+                                           "obj": {"a": 1}, "err": "token=sekrit123"})
+        check("3.5.15: message_params — doar nume simple, scalari, valori scrub-uite",
+              '"Bad Key"' not in mp and '"n":3' in mp and '"flag":true' in mp
+              and "sekrit123" not in mp, mp)
+        await alert_history.record("resource", "info", "cheie invalidă", "", key="Not-A-Key!",
+                                   params={"x": 1})
+        bad = await db.fetchone("SELECT msg_key, msg_params FROM alerts WHERE title='cheie invalidă'")
+        check("3.5.15: o cheie cu format greşit nu ajunge în DB (rândul rămâne pe text)",
+              bad and bad["msg_key"] is None and bad["msg_params"] is None, str(dict(bad)) if bad else "")
 
         # ── API: autentificare ────────────────────────────────────────────────────────────
         for method, path in (("GET", "/api/alerts"), ("GET", "/api/alerts/unread"),
@@ -198,7 +218,15 @@ async def main():
         theirs = {x["id"] for x in await db.fetchall("SELECT id FROM alerts WHERE user_id=?", u1)}
         check("contul 2 nu vede niciun rând al contului 1", mine and not (mine & theirs))
         check("câmpurile unui rând", set((await b.get("/api/alerts?limit=1")).json()["alerts"][0])
-              == {"id", "ts", "kind", "severity", "title", "details", "host_id", "read"})
+              == {"id", "ts", "kind", "severity", "title", "details", "host_id", "read",
+                  "msg_key", "msg_params"})
+        olds = [x for x in (await a.get("/api/alerts?limit=200")).json()["alerts"]
+                if x["title"].startswith("umplutură")]
+        check("3.5.15: rândurile vechi (fără cheie) → msg_key null, params {} (UI arată textul stocat)",
+              olds and olds[0]["msg_key"] is None and olds[0]["msg_params"] == {}, str(olds[:1]))
+        withkey = [x for x in (await a.get("/api/alerts?limit=200")).json()["alerts"] if x["msg_key"]]
+        check("3.5.15: API-ul întoarce parametrii decodaţi (obiect, nu JSON)",
+              withkey and isinstance(withkey[0]["msg_params"], dict), str(withkey[:1]))
 
         unread_before = (await a.get("/api/alerts/unread")).json()["unread"]
         foreign = sorted(theirs)[-1]
@@ -263,6 +291,27 @@ async def main():
         groups = {m["group"] for m in alert_history.KINDS.values()}
         missing += [g for g in groups if ("'alerts.group.%s':" % g) not in src]
         check(f"{lang}.ts: etichete pentru toate tipurile şi grupurile", not missing, str(missing))
+
+    # 3.5.15: fiecare cheie de mesaj pe care o trimite serverul are titlu + detalii în ambele
+    # cataloage, iar fiecare `what_key` are descrierea lui — altfel UI-ul cade tăcut pe engleză
+    import re
+    app_dir = os.path.join(os.path.dirname(__file__), "..", "gateway", "app")
+    ea = open(os.path.join(app_dir, "email_alerts.py"), encoding="utf-8").read()
+    msg_keys = set(re.findall(r'\bkey="([a-z0-9_]+)"', ea))
+    msg_keys |= {k for pair in re.findall(r'key="([a-z0-9_]+)" if [^\n]+ else "([a-z0-9_]+)"', ea) for k in pair}
+    what_keys = set()
+    for fn in ("api.py", "webauthn_api.py"):
+        src = open(os.path.join(app_dir, fn), encoding="utf-8").read()
+        what_keys |= set(re.findall(r'"((?:[a-z0-9]+_)+[a-z0-9]+)"', " ".join(
+            re.findall(r'what_key=\(?([^,)]+(?:\n[^,)]+)*)', src))))
+    check("serverul chiar trimite chei de mesaj (testul nu e gol)", len(msg_keys) > 20 and len(what_keys) > 8,
+          f"{sorted(msg_keys)} {sorted(what_keys)}")
+    for lang in ("en", "ro"):
+        src = open(os.path.join(lang_dir, lang + ".ts"), encoding="utf-8").read()
+        miss = [k for k in sorted(msg_keys)
+                if ("'alertmsg.%s.title':" % k) not in src or ("'alertmsg.%s.details':" % k) not in src]
+        miss += ["what." + k for k in sorted(what_keys) if ("'alertmsg.what.%s':" % k) not in src]
+        check(f"{lang}.ts: alertmsg.* pentru fiecare cheie trimisă de server", not miss, str(miss))
 
     print(f"\n{ok}/{total} teste trecute")
     return ok == total

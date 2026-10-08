@@ -694,9 +694,13 @@ async def update_account(body: AccountUpdate, request: Request, user=Depends(sec
     changed = [w for w, on in (("password", bool(body.new_password)),
                                ("email (%s → %s)" % (user["email"], email), email != user["email"])) if on]
     if changed:
+        pw_on, em_on = bool(body.new_password), email != user["email"]
         email_alerts.notify_security_change("account %s changed" % " and ".join(changed),
                                             security.client_ip(request), user["email"],
-                                            user_id=user["id"])
+                                            user_id=user["id"],
+                                            what_key=("password_email_changed" if pw_on and em_on else
+                                                      "password_changed" if pw_on else "email_changed"),
+                                            what_params={"old": user["email"], "new": email})
     return {"ok": True, "email": email}
 
 
@@ -790,7 +794,8 @@ async def create_user(body: UserIn, request: Request, user=Depends(security.requ
     # un cont nou = un admin egal în plus (nu există roluri): cel mai valoros eveniment de
     # securitate. Ajunge pe email ŞI webhook (via _fire), ca oricare schimbare de credenţiale.
     email_alerts.notify_security_change("a new WebTerm account was created (%s)" % email,
-                                        security.client_ip(request), user["email"], fleet=True)
+                                        security.client_ip(request), user["email"], fleet=True,
+                                        what_key="account_created", what_params={"account": email})
     return await list_users(user)
 
 
@@ -1008,7 +1013,8 @@ async def create_token(body: TokenIn, request: Request, user=Depends(security.re
     # (email + webhook), la fel ca un passkey nou sau un cont nou.
     email_alerts.notify_security_change(
         "an automation token was created (%s, scopes: %s)" % (name, ",".join(scopes)),
-        security.client_ip(request), user["email"], fleet=True)
+        security.client_ip(request), user["email"], fleet=True,
+        what_key="api_token_created", what_params={"name": name, "scopes": ",".join(scopes)})
     # valoarea în clar se întoarce O SINGURĂ DATĂ; în DB stă doar hash-ul
     return {"token": raw, "tokens": await list_tokens(user)}
 
@@ -1070,7 +1076,8 @@ async def create_enroll_group(body: EnrollGroupIn, request: Request,
              name, max_uses, days, bool(body.require_2fa), bool(pw), user["email"])
     # un token de grup = o cheie care poate înmatricula hosturi noi în flotă: eveniment de securitate
     email_alerts.notify_security_change("a group enrollment token was created (%s)" % name,
-                                        security.client_ip(request), user["email"], fleet=True)
+                                        security.client_ip(request), user["email"], fleet=True,
+                                        what_key="enroll_token_created", what_params={"name": name})
     # valoarea în clar se întoarce O SINGURĂ DATĂ; în DB stă doar hash-ul
     return {"token": raw, "install_command": _group_install_command(raw, pw),
             "groups": await list_enroll_groups(user)}
@@ -1131,7 +1138,7 @@ async def totp_activate(body: TotpActivate, request: Request,
             "INSERT INTO recovery_codes(user_id, code_hash, created) VALUES(?,?,?)",
             user["id"], security.sha256_hex(c), time.time())
     email_alerts.notify_security_change("2FA (TOTP) enabled", security.client_ip(request), user["email"],
-                                        user_id=user["id"])
+                                        user_id=user["id"], what_key="totp_enabled")
     return {"ok": True, "recovery_codes": codes}
 
 
@@ -1158,7 +1165,7 @@ async def totp_disable(body: TotpDisable, request: Request,
     # parolei / schimbarea passkey-ului).
     security.clear_stepup_for(user["id"])
     email_alerts.notify_security_change("2FA (TOTP) disabled", security.client_ip(request), user["email"],
-                                        severity="critical", user_id=user["id"])
+                                        severity="critical", user_id=user["id"], what_key="totp_disabled")
     return {"ok": True}
 
 
@@ -4865,7 +4872,8 @@ async def host_hostkey_accept(host_id: int, body: HostKeyAcceptIn, request: Requ
                                   detail="%s → %s by %s" % (old_fp, new_fp, user["email"]))
     email_alerts.notify_security_change(
         "SSH host key re-pinned for host '%s' (%s → %s)" % (row["name"], old_fp, new_fp),
-        security.client_ip(request), user["email"], fleet=True, host_id=host_id)
+        security.client_ip(request), user["email"], fleet=True, host_id=host_id,
+        what_key="host_key_repinned", what_params={"host": row["name"], "old_fp": old_fp, "new_fp": new_fp})
     return {"ok": True, "fingerprint": new_fp if new_key else None, "pinned": bool(new_key)}
 
 
@@ -7831,7 +7839,8 @@ async def revoke_all_shares(body: RevokeAllSharesIn, request: Request,
     audit.detail(request, "revoked all share links (%d active)" % n)
     log.warning("all share links revoked (%d active) by %s", n, user["email"])
     email_alerts.notify_security_change("all share links were revoked (%d active)" % n,
-                                        security.client_ip(request), user["email"], fleet=True)
+                                        security.client_ip(request), user["email"], fleet=True,
+                                        what_key="shares_revoked", what_params={"n": n})
     return {"ok": True, "revoked": n}
 
 

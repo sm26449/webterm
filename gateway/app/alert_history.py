@@ -179,11 +179,40 @@ async def _prune(uid: int, now: float) -> None:
         uid, now - KEEP_DAYS * 86400, uid, KEEP_PER_USER)
 
 
+_KEY_RE = re.compile(r"^[a-z0-9_]{1,48}$")
+_PARAM_RE = re.compile(r"^[a-z0-9_]{1,32}$")
+
+
+def message_params(params) -> str:
+    """JSON-ul parametrilor unui mesaj localizabil (3.5.15) — sau '' dacă nu sunt.
+
+    UI-ul traduce titlul/detaliile din cheia mesajului + aceşti parametri, deci parametrii ajung
+    în DB şi în UI exact ca textul englezesc: trec prin ACELAŞI `scrub` (o eroare de upload cu
+    `user:parola@` în URL nu scapă pe aici). Doar scalari, nume de parametru simple, valori
+    mărginite — un apelant nu poate strecura obiecte sau chei arbitrare în catalog."""
+    import json
+    out = {}
+    for k, v in (params or {}).items():
+        if not _PARAM_RE.match(str(k)):
+            continue
+        if isinstance(v, bool):
+            out[k] = v
+        elif isinstance(v, (int, float)):
+            out[k] = v
+        elif v is not None:
+            out[k] = scrub(str(v), 500)
+    return json.dumps(out, separators=(",", ":"), ensure_ascii=False) if out else ""
+
+
 async def record(kind: str, severity: str, title: str, details: str = "",
-                 host_id=None, user_id=None, user_email=None) -> bool:
+                 host_id=None, user_id=None, user_email=None, key=None, params=None) -> bool:
     """Înregistrează evenimentul pentru conturile cărora le priveşte şi întoarce dacă trebuie
     trimis şi pe canalul extern (email/webhook), după preferinţe. Best-effort: fără DB (startup/
-    shutdown) nu înregistrează nimic şi lasă emailul să plece, ca înainte."""
+    shutdown) nu înregistrează nimic şi lasă emailul să plece, ca înainte.
+
+    `key` + `params` (3.5.15): cheia STABILĂ a mesajului şi parametrii lui, ca panoul din
+    aplicaţie să afişeze alerta în limba interfeţei. `title`/`details` rămân textul englezesc
+    (emailul/webhook-ul îl folosesc, iar rândurile vechi fără cheie se afişează aşa)."""
     if not db.connected():
         return True
     meta = kind_meta(kind)
@@ -197,21 +226,34 @@ async def record(kind: str, severity: str, title: str, details: str = "",
     now = time.time()
     t, d = scrub(title, 200), scrub(details)
     hid = int(host_id) if host_id else None
+    mk = key if key and _KEY_RE.match(str(key)) else None
+    mp = message_params(params) if mk else ""
     for u in uids:
         if not (meta["security"] or prefs.get(u, (True, True))[1]):
             continue
         await db.execute(
-            "INSERT INTO alerts(user_id, ts, kind, severity, title, details, host_id, read)"
-            " VALUES(?,?,?,?,?,?,?,0)", u, now, kind, severity, t, d, hid)
+            "INSERT INTO alerts(user_id, ts, kind, severity, title, details, host_id, read,"
+            " msg_key, msg_params) VALUES(?,?,?,?,?,?,?,0,?,?)", u, now, kind, severity, t, d, hid,
+            mk, mp or None)
         await _prune(u, now)
     return want_email
 
 
 # ── citire / stare (folosite de rutele din api.py; TOATE filtrate pe user_id) ──────────────
 def _row(r) -> dict:
+    import json
+    params = {}
+    if r["msg_key"] and r["msg_params"]:
+        try:
+            params = json.loads(r["msg_params"])
+        except ValueError:
+            params = {}
     return {"id": r["id"], "ts": r["ts"], "kind": r["kind"], "severity": r["severity"],
             "title": r["title"], "details": r["details"] or "", "host_id": r["host_id"],
-            "read": bool(r["read"])}
+            "read": bool(r["read"]),
+            # rândurile de dinainte de 3.5.15 n-au cheie → UI-ul arată textul stocat
+            "msg_key": r["msg_key"] or None,
+            "msg_params": params if isinstance(params, dict) else {}}
 
 
 async def unread_count(uid: int) -> int:

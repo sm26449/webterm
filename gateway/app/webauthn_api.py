@@ -196,7 +196,8 @@ async def register_verify(body: CredentialBody, request: Request,
         user["id"], result.credential_id, result.credential_public_key,
         result.sign_count, body.name[:60] or "passkey", time.time())
     email_alerts.notify_security_change(
-        "new passkey enrolled", security.client_ip(request), user["email"], user_id=user["id"])
+        "new passkey enrolled", security.client_ip(request), user["email"], user_id=user["id"],
+        what_key="passkey_added")
     return {"ok": True}
 
 
@@ -343,5 +344,5 @@ async def delete_credential(cred_id: int, body: CredDelete, request: Request,
     security.clear_stepup_for(user["id"])
     email_alerts.notify_security_change(
         "passkey deleted", security.client_ip(request), user["email"], severity="critical",
-        user_id=user["id"])
+        user_id=user["id"], what_key="passkey_deleted")
     return {"ok": True}

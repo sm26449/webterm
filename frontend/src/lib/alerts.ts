@@ -20,6 +20,9 @@ export interface AlertItem {
   details: string
   host_id: number | null
   read: boolean
+  /** 3.5.15: cheia stabilă a mesajului + parametrii lui (null pe rândurile vechi) */
+  msg_key?: string | null
+  msg_params?: Record<string, string | number | boolean>
 }
 
 export interface AlertPage { alerts: AlertItem[]; unread: number; next_before: number | null }
@@ -70,6 +73,43 @@ export function applyPref(prefs: AlertPref[], kind: string, field: 'email' | 'in
     if (field === 'inapp' && p.security) return { ...p, inapp: true }
     return { ...p, [field]: value }
   })
+}
+
+// ── texte localizate (3.5.15) ─────────────────────────────────────────────────────────────
+type TFn = (key: string, vars?: Record<string, string | number>) => string
+
+/** Titlul + detaliile unei alerte în limba interfeţei.
+
+   Serverul trimite, pe lângă textul englezesc al emailului, o cheie stabilă (`msg_key`) şi
+   parametrii ei. Cheile din catalog sunt `alertmsg.<cheie>.title` / `.details`. Rândurile vechi
+   (fără cheie) şi cheile pe care UI-ul nu le cunoaşte (server mai nou) rămân pe textul stocat —
+   `t()` întoarce chiar numele cheii când lipseşte, după asta le recunoaştem.
+
+   Câţiva parametri sunt la rândul lor coduri de tradus (metrica, descrierea schimbării de
+   securitate, durata link-ului de replay, vechimea ultimului backup). */
+export function localizeAlert(a: AlertItem, t: TFn): { title: string; details: string } {
+  const stored = { title: a.title, details: a.details }
+  if (!a.msg_key) return stored
+  const base = 'alertmsg.' + a.msg_key
+  const raw = a.msg_params || {}
+  const p: Record<string, string | number> = {}
+  for (const [k, v] of Object.entries(raw)) p[k] = typeof v === 'boolean' ? String(v) : v
+  const tr = (key: string, vars?: Record<string, string | number>) => {
+    const s = t(key, vars)
+    return s === key ? null : s
+  }
+  if (typeof raw.metric === 'string') p.metric = tr('alertmsg.metric.' + raw.metric) ?? raw.metric
+  if (typeof raw.what_key === 'string') p.what = tr('alertmsg.what.' + raw.what_key, p) ?? String(raw.what ?? '')
+  if (typeof raw.hours === 'number') {
+    p.span = raw.hours === 168 ? (tr('alertmsg.span7d') ?? '7d') : (tr('alertmsg.span', { count: raw.hours }) ?? `${raw.hours}h`)
+  }
+  if (typeof raw.masking === 'boolean') p.masking = tr(raw.masking ? 'alertmsg.maskingOn' : 'alertmsg.maskingOff') ?? String(raw.masking)
+  if (typeof raw.age_key === 'string') p.age = tr('alertmsg.age.' + raw.age_key, p) ?? ''
+  if ('session' in raw && !raw.session) p.session = tr('alertmsg.untitled') ?? ''
+  if ('browser' in raw && !raw.browser) p.browser = '?'
+  const title = tr(base + '.title', p)
+  if (title == null) return stored
+  return { title, details: tr(base + '.details', p) ?? a.details }
 }
 
 /** combină o pagină nouă (paginare „încarcă mai multe") fără duplicate, newest-first */

@@ -184,17 +184,22 @@ async def send_account_code(to_email: str, code: str, what: str) -> None:
 
 
 def _fire(subject: str, body: str, kind: str = "system", severity: str = "info",
-          host_id=None, user_id=None, user_email=None) -> None:
+          host_id=None, user_id=None, user_email=None, key=None, params=None) -> None:
     """Send without blocking the handler; swallow any error (best-effort).
 
     3.5.11: înainte de canalul extern, evenimentul se înregistrează în istoricul din aplicaţie
     (`alert_history.record`) pentru conturile cărora le priveşte, iar preferinţele lor decid dacă
-    mai pleacă pe email/webhook. O eroare la înregistrare NU opreşte emailul (best-effort)."""
+    mai pleacă pe email/webhook. O eroare la înregistrare NU opreşte emailul (best-effort).
+
+    3.5.15: `key`/`params` = cheia stabilă a mesajului + parametrii lui, pentru panoul din
+    aplicaţie (tradus în limba UI-ului, cheile `alertmsg.<key>.title|details`). Emailul şi
+    webhook-ul rămân pe textul englezesc `subject`/`body`."""
     async def _run():
         cfg = None
         try:
             if not await alert_history.record(kind, severity, subject, body, host_id=host_id,
-                                              user_id=user_id, user_email=user_email):
+                                              user_id=user_id, user_email=user_email,
+                                              key=key, params=params):
                 return                      # toate conturile vizate au oprit emailul pentru tipul ăsta
         except Exception as e:              # noqa: BLE001 — istoricul nu rupe alerta
             log.warning("in-app alert not recorded (%s): %s", kind, e)
@@ -278,7 +283,8 @@ def notify_lockout(ip: str, fails: int) -> None:
     _fire("IP blocked after failed login attempts",
           f"IP {ip} was temporarily blocked after {fails} failed authentication "
           f"attempts.\n\nIf this was not you, someone is trying to guess your "
-          f"password — but access is blocked.", kind="lockout", severity="warning")
+          f"password — but access is blocked.", kind="lockout", severity="warning",
+          key="lockout", params={"ip": ip, "fails": fails})
 
 
 def notify_agent_relocation(host_name: str, instance_short: str, host_id=None) -> None:
@@ -292,7 +298,8 @@ def notify_agent_relocation(host_name: str, instance_short: str, host_id=None) -
           f"DIFFERENT machine (instance {instance_short}…) — the connection was REFUSED.\n\n"
           f"If you are NOT reinstalling the host: someone has the agent's token and is trying "
           f"to use it elsewhere. Check the host; revoke or reinstall the agent if needed.",
-          kind="agent_relocation", severity="critical", host_id=host_id)
+          kind="agent_relocation", severity="critical", host_id=host_id,
+          key="agent_relocation", params={"host": host_name, "instance": instance_short})
 
 
 def notify_agent_ip_change(host_name: str, old_ip: str, new_ip: str, host_id=None) -> None:
@@ -304,7 +311,8 @@ def notify_agent_ip_change(host_name: str, old_ip: str, new_ip: str, host_id=Non
           f"The agent on host '{host_name}' connected from a new IP.\n\n"
           f"New: {new_ip}\nPrevious: {old_ip}\n\n"
           f"Normal after a reboot or a network change. If the host has a fixed IP you did not touch, "
-          f"it is worth a look.", kind="agent_ip_change", severity="info", host_id=host_id)
+          f"it is worth a look.", kind="agent_ip_change", severity="info", host_id=host_id,
+          key="agent_ip_change", params={"host": host_name, "new_ip": new_ip, "old_ip": old_ip})
 
 
 def notify_new_login(ip: str, user_agent: str, email: str, user_id=None) -> None:
@@ -314,7 +322,8 @@ def notify_new_login(ip: str, user_agent: str, email: str, user_id=None) -> None
           f"IP: {ip}\nBrowser: {user_agent or '?'}\n\n"
           f"If this was not you, change the password immediately and review the active "
           f"sessions in settings.", kind="new_login", severity="warning",
-          user_id=user_id, user_email=email)
+          user_id=user_id, user_email=email,
+          key="new_login", params={"email": email, "ip": ip, "browser": user_agent or ""})
 
 
 def notify_session_attach(title: str, ip: str, user_agent: str, email: str, user_id=None) -> None:
@@ -330,21 +339,32 @@ def notify_session_attach(title: str, ip: str, user_agent: str, email: str, user
           f"This IP has not been seen on a successful login for this account. If it was not "
           f"you, open the session and remove that client from the viewer list, then change "
           f"the password — the browser session behind it stays valid until you do.",
-          kind="session_attach", severity="warning", user_id=user_id, user_email=email)
+          kind="session_attach", severity="warning", user_id=user_id, user_email=email,
+          key="session_attach",
+          params={"email": email, "session": title or "", "ip": ip, "browser": user_agent or ""})
 
 
 def notify_security_change(what: str, ip: str, email: str, fleet: bool = False,
-                           severity: str = "warning", user_id=None, host_id=None) -> None:
+                           severity: str = "warning", user_id=None, host_id=None,
+                           what_key=None, what_params=None) -> None:
     """A sensitive account change (password, 2FA, new passkey, new account, new API token).
 
     `fleet=True`: schimbarea priveşte TOATĂ instanţa (cont nou, token de automatizare, token de
     grup, host key re-pinat, share-uri revocate) → istoricul o arată fiecărui cont (`admin_change`);
-    altfel e a contului care a făcut-o (`account_change`)."""
+    altfel e a contului care a făcut-o (`account_change`).
+
+    `what_key`/`what_params` (3.5.15): aceeaşi descriere, ca cheie stabilă (`alertmsg.what.<key>`)
+    pentru panoul din aplicaţie; fără ea UI-ul arată `what` în engleză, în textul tradus."""
+    params = dict(what_params or {})
+    params.update({"what": what, "email": email, "ip": ip})
+    if what_key:
+        params["what_key"] = what_key
     _fire(f"Security change: {what}",
           f"On account {email}: {what}.\nIP: {ip}\n\n"
           f"If this was not you, the account is probably compromised.",
           kind="admin_change" if fleet else "account_change", severity=severity,
-          host_id=host_id, user_id=None if fleet else user_id, user_email=None if fleet else email)
+          host_id=host_id, user_id=None if fleet else user_id, user_email=None if fleet else email,
+          key="security_change", params=params)
 
 
 def notify_host_key_changed(host_name: str, detail: str, host_id=None) -> None:
@@ -357,7 +377,8 @@ def notify_host_key_changed(host_name: str, detail: str, host_id=None) -> None:
           f"The pinned SSH host key for '{host_name}' did not match on connect — the connection "
           f"was REFUSED.\n{detail}\n\nIf you did not re-provision this host, this is a possible "
           f"man-in-the-middle. Verify out-of-band before clearing the pinned key.",
-          kind="host_key_changed", severity="critical", host_id=host_id)
+          kind="host_key_changed", severity="critical", host_id=host_id,
+          key="host_key_changed", params={"host": host_name, "detail": detail})
 
 
 def notify_ssh_key_action(action: str, source: str, target: str, fingerprint: str,
@@ -371,7 +392,10 @@ def notify_ssh_key_action(action: str, source: str, target: str, fingerprint: st
           f"{action} on host '{target}'.\nIP: {ip}\n\n"
           f"If this was not you, revoke the key from Toolbox → SSH keys on '{source}' "
           f"and check ~/.ssh/authorized_keys on '{target}'.",
-          kind="ssh_key", severity="warning", host_id=host_id)
+          kind="ssh_key", severity="warning", host_id=host_id,
+          key="ssh_key_revoked" if action.upper() == "REVOKED" else "ssh_key_deployed",
+          params={"source": source, "target": target, "fingerprint": fingerprint,
+                  "email": email, "ip": ip})
 
 
 def notify_host_enrolled(group_name: str, ip: str, host_id=None) -> None:
@@ -387,7 +411,7 @@ def notify_host_enrolled(group_name: str, ip: str, host_id=None) -> None:
           f"If you are rolling out machines, this is expected (one alert per group per 10 min). "
           f"If not, revoke the token in Settings → the host got its own agent credential and can "
           f"reach the gateway until you remove it.", kind="host_enrolled", severity="warning",
-          host_id=host_id)
+          host_id=host_id, key="host_enrolled", params={"group": group_name, "ip": ip})
 
 
 def notify_host_unlocked(host_name: str, ip: str, email: str, host_id=None, user_id=None) -> None:
@@ -402,7 +426,8 @@ def notify_host_unlocked(host_name: str, ip: str, email: str, host_id=None, user
           f"Step-up (passkey or account password) passed, so this host — which you marked as "
           f"requiring 2FA — is now accessible for a short window. If this was not you, change "
           f"your password and review the active sessions in settings.",
-          kind="host_unlocked", severity="info", host_id=host_id, user_id=user_id, user_email=email)
+          kind="host_unlocked", severity="info", host_id=host_id, user_id=user_id, user_email=email,
+          key="host_unlocked", params={"email": email, "host": host_name, "ip": ip})
 
 
 def notify_replay_created(title: str, label: str, hours: int, redact: bool, ip: str,
@@ -417,7 +442,10 @@ def notify_replay_created(title: str, label: str, hours: int, redact: bool, ip: 
           + f"Valid for: {span}\nSecret masking: {'on' if redact else 'OFF'}\nIP: {ip}\n\n"
           f"Anyone with the link can watch this recording until it expires. If this was not "
           f"you, revoke it from the dashboard (Share links) and change your password.",
-          kind="replay_link", severity="warning", user_id=user_id, user_email=email)
+          kind="replay_link", severity="warning", user_id=user_id, user_email=email,
+          key="replay_created_label" if label else "replay_created",
+          params={"email": email, "session": title or "", "label": label or "", "hours": int(hours),
+                  "masking": bool(redact), "ip": ip})
 
 
 def notify_replay_opened(link_id: int, title: str, label: str, ip: str, user_agent: str,
@@ -431,7 +459,10 @@ def notify_replay_opened(link_id: int, title: str, label: str, ip: str, user_age
           + (f"Link: {label}\n" if label else f"Link: #{link_id}\n")
           + f"IP: {ip}\nBrowser: {user_agent or '?'}\n\n"
           f"Further opens in the next 10 minutes are counted in the link list, not alerted.",
-          kind="replay_opened", severity="info", user_id=user_id, user_email=email)
+          kind="replay_opened", severity="info", user_id=user_id, user_email=email,
+          key="replay_opened",
+          params={"session": title or "", "link": label or "#%d" % link_id, "ip": ip,
+                  "browser": user_agent or ""})
 
 
 # ---------------------------------------------------------------------------
@@ -531,7 +562,11 @@ def check_metrics(host_id: int, host_name: str, metrics: dict, thresholds: dict)
                 f"Metric: {_LABELS[key]}\nValue: {value:.1f}%\nThreshold: {limit}%\n\n"
                 f"You get a single alert while it stays above the threshold; "
                 f"you will hear again when it drops below {max(0, limit - HYSTERESIS)}%.",
-                kind="resource", severity="warning", host_id=host_id)
+                kind="resource", severity="warning", host_id=host_id,
+                key="resource_high",
+                params={"host": host_name, "metric": key, "value": "%.0f" % value,
+                        "value1": "%.1f" % value, "threshold": limit,
+                        "rearm": max(0, limit - HYSTERESIS)})
         elif _firing.get(state_key) and value <= limit - HYSTERESIS:
             # revenire la normal: re-armăm și confirmăm rezolvarea
             _firing[state_key] = False
@@ -539,7 +574,10 @@ def check_metrics(host_id: int, host_name: str, metrics: dict, thresholds: dict)
                 f"[{host_name}] {_LABELS[key]} back to {value:.0f}%",
                 f"Host {host_name}: {_LABELS[key]} dropped to {value:.1f}% "
                 f"(below the {limit}% threshold minus the {HYSTERESIS}-point margin).",
-                kind="resource", severity="ok", host_id=host_id)
+                kind="resource", severity="ok", host_id=host_id,
+                key="resource_ok",
+                params={"host": host_name, "metric": key, "value": "%.0f" % value,
+                        "value1": "%.1f" % value, "threshold": limit, "margin": HYSTERESIS})
 
 
 # ── hostul a tăcut / a revenit ────────────────────────────────────────────────
@@ -569,14 +607,16 @@ def notify_host_offline(host_id: int, host_name: str, silent_for: float,
               f"If you did NOT: the agent was stopped by someone with shell access on the "
               f"host — the uninstall report is only authenticated by the host token. "
               f"Investigate the machine; do not assume the removal was intentional.",
-              kind="host_offline", severity="warning", host_id=host_id)
+              kind="host_offline", severity="warning", host_id=host_id,
+              key="host_offline_uninstall", params={"host": host_name, "secs": int(silent_for)})
         return
     _fire(f"[{host_name}] host offline",
           f"The agent on '{host_name}' has not reported for {int(silent_for)}s.\n\n"
           f"The tmux sessions on the host keep running — what broke is the link to the "
           f"gateway: the agent stopped, network/DNS, or the machine went down.\n"
           f"Check: `tmux -L webterm ls` on the host, then `~/.webterm/ptyd.log`.",
-          kind="host_offline", severity="warning", host_id=host_id)
+          kind="host_offline", severity="warning", host_id=host_id,
+          key="host_offline", params={"host": host_name, "secs": int(silent_for)})
 
 
 def notify_host_online(host_id: int, host_name: str) -> None:
@@ -584,7 +624,8 @@ def notify_host_online(host_id: int, host_name: str) -> None:
     de sweep DOAR când chiar trimisesem o alertă de offline (hosts.offline_notified=1)."""
     _fire(f"[{host_name}] host back online",
           f"The agent on '{host_name}' is reporting again.",
-          kind="host_offline", severity="ok", host_id=host_id)
+          kind="host_offline", severity="ok", host_id=host_id,
+          key="host_online", params={"host": host_name})
 
 
 def notify_disk_low(free: int, total: int, pct: float) -> None:
@@ -604,7 +645,9 @@ def notify_disk_low(free: int, total: int, pct: float) -> None:
           f"start failing with 500 while the container still reports healthy.\n\n"
           f"Transcripts are the usual cause. Lower WEBTERM_ARCHIVE_DAYS, or "
           f"WEBTERM_TRANSCRIPT_MAX_BYTES, or make room on the volume.",
-          kind="gateway_disk", severity="critical")
+          kind="gateway_disk", severity="critical",
+          key="gateway_disk", params={"free": gb(free), "total": gb(total), "pct": "%.1f" % pct,
+                                      "pct0": "%.0f" % pct})
 
 
 def notify_signing_locked(behind: int) -> None:
@@ -621,7 +664,8 @@ def notify_signing_locked(behind: int) -> None:
           f"{behind} agent(s) are on an older version and cannot be updated.\n\n"
           f"Unlock it: Settings → Infrastructure & tokens → Agent signing key.\n"
           f"Agent updates are signed, and without the key the gateway refuses (correctly) to "
-          f"push unsigned code to the hosts.", kind="signing_locked", severity="warning")
+          f"push unsigned code to the hosts.", kind="signing_locked", severity="warning",
+          key="signing_locked", params={"behind": int(behind)})
 
 
 def notify_update_refused(host_id: int, code: str, hint: str) -> None:
@@ -632,7 +676,8 @@ def notify_update_refused(host_id: int, code: str, hint: str) -> None:
           f"Host #{host_id} refused the agent update.\n\nReason: {code}\n{hint}\n\n"
           f"Until this is fixed the host stays on the old agent version — including without the "
           f"security fixes shipped since.", kind="update_refused", severity="warning",
-          host_id=host_id)
+          host_id=host_id, key="update_refused",
+          params={"host_id": host_id, "code": code, "hint": hint})
 
 
 def notify_backup_failed(provider: str, fails: int, last_ok_ts: float, error: str) -> None:
@@ -656,7 +701,10 @@ def notify_backup_failed(provider: str, fails: int, last_ok_ts: float, error: st
           f"Common causes: expired OAuth authorisation (reconnect in Settings → Backup), a wrong "
           f"encryption passphrase, or the SFTP/FTPS server being unreachable or its host key "
           f"having changed. Until fixed, you have no fresh off-host copy of the vault.",
-          kind="backup_failed", severity="critical")
+          kind="backup_failed", severity="critical", key="backup_failed",
+          params={"provider": provider, "fails": int(fails), "error": error,
+                  "age_key": "offhost_last" if last_ok_ts else "offhost_never",
+                  "days": "%.1f" % ((time.time() - last_ok_ts) / 86400) if last_ok_ts else ""})
 
 
 def notify_local_backup_failed(error: str, last_ok_ts: float) -> None:
@@ -677,4 +725,7 @@ def notify_local_backup_failed(error: str, last_ok_ts: float) -> None:
           f"Common causes: the gateway disk is full, the database is locked by another process, or "
           f"the data volume is read-only. Until fixed, the local snapshots age out under retention "
           f"and there is no fresh copy of the vault — download a backup manually from Settings → "
-          f"Backup if you cannot fix it right away.", kind="backup_failed", severity="critical")
+          f"Backup if you cannot fix it right away.", kind="backup_failed", severity="critical",
+          key="backup_local_failed",
+          params={"error": error, "age_key": "local_last" if last_ok_ts else "local_never",
+                  "days": "%.1f" % ((time.time() - last_ok_ts) / 86400) if last_ok_ts else ""})

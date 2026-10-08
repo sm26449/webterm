@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 import { api, errText, timeAgo, type Host } from '../lib/api'
-import { AlertItem, AlertPage, badgeText, mergePage, normSeverity, setUnread, severityTone, unreadStore } from '../lib/alerts'
+import { AlertItem, AlertPage, badgeText, localizeAlert, mergePage, normSeverity, setUnread, severityTone, unreadStore } from '../lib/alerts'
 import { useI18n } from '../lib/i18n'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { fmtTs } from '../lib/tz'
@@ -189,6 +189,7 @@ export default function AlertsPanel(props: {
                 const sev = normSeverity(a.severity)
                 const open = expanded.has(a.id)
                 const hn = hostName(a.host_id)
+                const txt = localizeAlert(a, t)
                 return (
                   <li key={a.id} className={`px-4 py-3 ${a.read ? '' : 'bg-sky-500/5'}`} data-alert-id={a.id}>
                     <div className="flex flex-wrap items-center gap-1.5">
@@ -198,7 +199,7 @@ export default function AlertsPanel(props: {
                         <time dateTime={new Date(a.ts * 1000).toISOString()}>{t('alerts.ago', { time: timeAgo(a.ts, t) })}</time>
                       </span>
                     </div>
-                    <p className={`mt-1 break-words text-sm ${a.read ? 'text-slate-300' : 'font-medium text-slate-100'}`}>{a.title}</p>
+                    <p className={`mt-1 break-words text-sm ${a.read ? 'text-slate-300' : 'font-medium text-slate-100'}`}>{txt.title}</p>
                     <p className="mt-0.5 text-2xs text-slate-500">{t(`alerts.kind.${a.kind}`)}</p>
                     <div className="mt-1.5 flex flex-wrap items-center gap-1">
                       {a.details && (
@@ -222,7 +223,7 @@ export default function AlertsPanel(props: {
                       )}
                     </div>
                     {open && a.details && (
-                      <pre className="mt-2 whitespace-pre-wrap break-words rounded-md bg-ink-950/60 p-2 font-mono text-2xs text-slate-300">{a.details}</pre>
+                      <pre className="mt-2 whitespace-pre-wrap break-words rounded-md bg-ink-950/60 p-2 font-mono text-2xs text-slate-300">{txt.details}</pre>
                     )}
                   </li>
                 )
