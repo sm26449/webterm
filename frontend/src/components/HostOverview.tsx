@@ -426,7 +426,8 @@ export default function HostOverview(props: {
       </div>
 
       {playing && (
-        <TranscriptPlayer sid={playing.id} title={playing.title} onClose={() => setPlaying(null)} />
+        <TranscriptPlayer sid={playing.id} title={playing.title} onClose={() => setPlaying(null)}
+          shareHostId={playing.state === 'closed' ? playing.host_id : undefined} />
       )}
     </div>
   )

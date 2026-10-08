@@ -3,6 +3,12 @@ import { RefObject, useEffect, useRef } from 'react'
 /** Accessible modal behaviour for a dialog container: trap Tab focus inside it,
    close on Escape, move focus in on open and restore it to the trigger on close.
    Pair with role="dialog" aria-modal="true" and an aria-label on the container. */
+/* Capcanele active, în ordinea deschiderii. Escape e ascultat pe DOCUMENT (vezi mai jos), deci cu
+   două dialoguri suprapuse (ex. „Partajează replay" peste player) ambele îl primeau şi se închideau
+   împreună — `stopPropagation` nu opreşte alţi ascultători de pe acelaşi nod. Doar cel din vârf
+   reacţionează. */
+const openTraps: HTMLElement[] = []
+
 export function useFocusTrap(ref: RefObject<HTMLElement>, onClose: () => void): void {
   // onClose e aproape mereu o arrow inline (identitate nouă la fiecare render al
   // părintelui — inclusiv la poll-ul de 5s al aplicației). Dacă ar fi în deps,
@@ -35,6 +41,7 @@ export function useFocusTrap(ref: RefObject<HTMLElement>, onClose: () => void): 
     // grilei de rulare pe flotă). Tab-trapping rămâne pe dialog.
     const onEsc = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
+      if (openTraps[openTraps.length - 1] !== el) return    // un dialog deschis peste noi îl ia
       e.preventDefault()
       e.stopPropagation()
       onCloseRef.current()
@@ -63,9 +70,12 @@ export function useFocusTrap(ref: RefObject<HTMLElement>, onClose: () => void): 
 
     el.addEventListener('keydown', onKey)
     document.addEventListener('keydown', onEsc)
+    openTraps.push(el)
     return () => {
       el.removeEventListener('keydown', onKey)
       document.removeEventListener('keydown', onEsc)
+      const i = openTraps.lastIndexOf(el)
+      if (i >= 0) openTraps.splice(i, 1)
       // restore focus to whatever opened the dialog — dacă mai e în pagină: butonul care a
       // deschis modalul poate să fi dispărut între timp (listă re-randată după acţiune)
       const prev = prevRef.current

@@ -2203,7 +2203,8 @@ export default function SessionView(props: {
         </div>
       )}
       {showPlayer && (
-        <TranscriptPlayer sid={session.id} title={title} onClose={() => setShowPlayer(false)} />
+        <TranscriptPlayer sid={session.id} title={title} onClose={() => setShowPlayer(false)}
+          shareHostId={session.state === 'closed' ? session.host_id : undefined} />
       )}
 
       {/* terminal — click-dreapta deschide meniul propriu de acțiuni; oprim

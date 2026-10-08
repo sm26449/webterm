@@ -16,6 +16,8 @@ import SnippetParams, { snippetParams } from './components/SnippetParams'
 import PaneErrorBoundary from './components/PaneErrorBoundary'
 import PopoutView from './components/PopoutView'
 import SharedView from './components/SharedView'
+import ReplayView from './components/ReplayView'
+import { replayTokenFromHash } from './lib/replay'
 import Sidebar from './components/Sidebar'
 import SessionView from './components/SessionView'
 import TabBar from './components/TabBar'
@@ -98,11 +100,14 @@ interface Route {
   host: number | null         // pagina unui host
   popout: string | null
   shared: string | null
+  replay: string | null       // link public de replay (3.5.12): tokenul din fragment
 }
 
 function parseHash(): Route {
   const h = window.location.hash
-  const base = { primary: null, host: null, popout: null, shared: null }
+  const base = { primary: null, host: null, popout: null, shared: null, replay: null }
+  const replay = replayTokenFromHash(h)
+  if (replay) return { ...base, replay }
   const shared = h.match(/^#\/shared\/([A-Za-z0-9_-]+)$/)
   if (shared) return { ...base, shared: shared[1] }
   const pop = h.match(/^#\/popout\/([0-9a-f]{32})$/)
@@ -177,6 +182,14 @@ export default function App() {
       <>
         <BootReady />
         <SharedView token={route.shared} />
+      </>
+    )
+  // Public replay link (closed-session recording) — no login, no app chrome, only the player.
+  if (route.replay)
+    return (
+      <>
+        <BootReady />
+        <ReplayView token={route.replay} />
       </>
     )
   // Popout window: render only the terminal, no app chrome.

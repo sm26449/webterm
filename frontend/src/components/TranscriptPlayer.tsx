@@ -6,8 +6,10 @@ import { useI18n } from '../lib/i18n'
 import { termTheme } from '../lib/termtheme'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { errText } from '../lib/api'
+import { CastEvent, parseCast } from '../lib/replay'
 import { Button } from './ui'
-import { CloseIcon, PauseIcon, PlayIcon } from './Icons'
+import { CloseIcon, PauseIcon, PlayIcon, ShareIcon } from './Icons'
+import ReplayLinkDialog from './ReplayLinkDialog'
 
 type Cmd = { text: string; exitCode?: number; time: number }
 
@@ -76,12 +78,18 @@ async function buildCommands(evs: Ev[]): Promise<Cmd[]> {
     Seek = reset + rescriere de la zero până la momentul t. Transcripturile sunt
     plafonate (16-64 MB), iar xterm scrie foarte repede când nu așteptăm timpii,
     deci e simplu și corect — fără snapshot-uri de stare. */
-type Ev = [number, string, string]   // [timp, tip ('o'|'i'), date]
+type Ev = CastEvent   // [timp, tip ('o'|'i'), date]
 
 export default function TranscriptPlayer(props: {
   sid: string
   title: string
-  onClose: () => void
+  onClose?: () => void
+  /** host-ul unei sesiuni ÎNCHISE: activează „Partajează replay" (link public, doar-citire) */
+  shareHostId?: number
+  /** pagina publică de replay: înregistrarea vine prin tokenul link-ului, nu prin cookie */
+  source?: { cast: () => Promise<string>; text: () => Promise<string> }
+  /** fără overlay de modal, fără Închide/Descarcă — pagina publică îşi are propriul cadru */
+  embedded?: boolean
 }) {
   const { t } = useI18n()
   const box = useRef<HTMLDivElement>(null)
@@ -93,7 +101,11 @@ export default function TranscriptPlayer(props: {
   const baseRef = useRef(0)         // poziția în transcript la (re)pornire
   const cursorRef = useRef(0)       // indexul următorului eveniment de scris
   const dialogRef = useRef<HTMLDivElement>(null)
-  useFocusTrap(dialogRef, props.onClose)
+  const noTrapRef = useRef<HTMLDivElement>(null)       // pagina publică: nimic de prins în capcană
+  const onClose = props.onClose ?? (() => {})
+  // pagina publică nu e un dialog: fără capcană de focus şi fără Escape (ref-ul gol = no-op)
+  useFocusTrap(props.embedded ? noTrapRef : dialogRef, onClose)
+  const [shareOpen, setShareOpen] = useState(false)
 
   const [dur, setDur] = useState(0)
   const [pos, setPos] = useState(0)
@@ -119,10 +131,14 @@ export default function TranscriptPlayer(props: {
     try {
       // `tail`: aducem coada (2 MB), nu zeci de MB — pentru „ce s-a întâmplat aici"
       // e destul, iar descărcarea completă e la un click distanță
-      const r = await fetch(`/api/sessions/${props.sid}/transcript?format=txt&tail=true`,
-        { credentials: 'same-origin' })
-      if (!r.ok) throw new Error(t('transcript.errDownload'))
-      setText(await r.text())
+      if (props.source) {
+        setText(await props.source.text())
+      } else {
+        const r = await fetch(`/api/sessions/${props.sid}/transcript?format=txt&tail=true`,
+          { credentials: 'same-origin' })
+        if (!r.ok) throw new Error(t('transcript.errDownload'))
+        setText(await r.text())
+      }
     } catch (e) {
       setTextErr(errText(e, t) || String(e))
       setText('')
@@ -159,22 +175,19 @@ export default function TranscriptPlayer(props: {
     let alive = true
     ;(async () => {
       try {
-        const res = await fetch(`/api/sessions/${props.sid}/transcript?format=cast`, {
-          credentials: 'same-origin',
-        })
-        if (!res.ok) throw new Error(t('transcript.errDownload'))
-        const text = await res.text()
-        if (!alive) return
-        const evs: Ev[] = []
-        for (const line of text.split('\n')) {
-          if (!line.trim() || line.startsWith('{"version"')) continue   // header
-          try {
-            const e = JSON.parse(line)
-            if (Array.isArray(e) && typeof e[0] === 'number') evs.push(e as Ev)
-          } catch {
-            /* linie coruptă: o sărim, nu stricăm redarea */
-          }
+        let text: string
+        if (props.source) {
+          text = await props.source.cast()
+        } else {
+          const res = await fetch(`/api/sessions/${props.sid}/transcript?format=cast`, {
+            credentials: 'same-origin',
+          })
+          if (!res.ok) throw new Error(t('transcript.errDownload'))
+          text = await res.text()
         }
+        if (!alive) return
+        // antetul şi liniile corupte se sar (o linie stricată nu opreşte redarea)
+        const evs: Ev[] = parseCast(text)
         evRef.current = evs
         setDur(evs.length ? evs[evs.length - 1][0] : 0)
         setLoading(false)
@@ -198,6 +211,8 @@ export default function TranscriptPlayer(props: {
       term.dispose()
       termRef.current = undefined
     }
+    // `source` e stabil pe durata paginii publice (memo în ReplayView)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.sid, t])
 
   // -- redare ----------------------------------------------------------------
@@ -256,14 +271,17 @@ export default function TranscriptPlayer(props: {
     return `${m}:${String(sec).padStart(2, '0')}`
   }
 
+  const embedded = !!props.embedded
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+    <div className={embedded ? 'flex min-h-0 flex-1 flex-col' : 'fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4'}>
       <div
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
+        ref={embedded ? noTrapRef : dialogRef}
+        role={embedded ? 'region' : 'dialog'}
+        aria-modal={embedded ? undefined : 'true'}
         aria-label={t('transcript.dialogAria', { title: props.title })}
-        className="wt-workspace flex h-[85vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl bg-ink-900 shadow-2xl ring-1 ring-ink-700"
+        className={embedded
+          ? 'wt-workspace flex min-h-0 flex-1 flex-col overflow-hidden bg-ink-900'
+          : 'wt-workspace flex h-[85vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl bg-ink-900 shadow-2xl ring-1 ring-ink-700'}
       >
         <header className="flex items-center gap-3 border-b border-ink-800 px-4 py-2.5">
           <span className="flex min-w-0 items-center gap-1.5 truncate text-sm font-medium text-slate-200">
@@ -280,16 +298,26 @@ export default function TranscriptPlayer(props: {
               >{label}</button>
             ))}
           </div>
-          <a
-            href={`/api/sessions/${props.sid}/transcript?format=${mode === 'text' ? 'txt' : 'cast'}`}
-            download
-            className="shrink-0 text-xs wt-link hover:underline"
-          >
-            {mode === 'text' ? t('transcript.downloadTxt') : t('transcript.download')}
-          </a>
-          <button onClick={props.onClose} aria-label={t('transcript.close')} className="shrink-0 rounded-md px-2 py-1 text-slate-400 hover:bg-ink-800">
-            <CloseIcon size={14} />
-          </button>
+          {props.shareHostId !== undefined && !props.source && (
+            <Button type="button" size="sm" onClick={() => setShareOpen(true)} className="wt-touch shrink-0"
+              data-testid="replay-share" aria-haspopup="dialog">
+              <ShareIcon size={12} /> {t('replay.shareButton')}
+            </Button>
+          )}
+          {!props.source && (
+            <a
+              href={`/api/sessions/${props.sid}/transcript?format=${mode === 'text' ? 'txt' : 'cast'}`}
+              download
+              className="shrink-0 text-xs wt-link hover:underline"
+            >
+              {mode === 'text' ? t('transcript.downloadTxt') : t('transcript.download')}
+            </a>
+          )}
+          {!embedded && (
+            <button onClick={onClose} aria-label={t('transcript.close')} className="wt-touch shrink-0 rounded-md px-2 py-1 text-slate-400 hover:bg-ink-800">
+              <CloseIcon size={14} />
+            </button>
+          )}
         </header>
 
         {mode === 'text' && (
@@ -408,6 +436,10 @@ export default function TranscriptPlayer(props: {
           </div>
         )}
       </div>
+      {shareOpen && props.shareHostId !== undefined && (
+        <ReplayLinkDialog sid={props.sid} hostId={props.shareHostId} title={props.title}
+          onClose={() => setShareOpen(false)} />
+      )}
     </div>
   )
 }

@@ -36,6 +36,7 @@ export const HELP = {
   toolbox: { doc: 'docs/DATABASE-TOOLBOX.md#connections--one-click-to-a-database-cli' },
   forwardsSso: { doc: 'docs/SSO.md#register-a-webterm-instance-in-your-idp' },
   securitySummary: { doc: 'docs/SECURITY-SUMMARY.md#what-the-card-checks' },
+  replayLinks: { doc: 'docs/FEATURES.md#replay-links' },
 } satisfies Record<string, { doc: string; example?: (origin: string) => string }>
 
 export type HelpId = keyof typeof HELP

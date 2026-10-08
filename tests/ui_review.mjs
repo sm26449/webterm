@@ -52,9 +52,10 @@ const TAGS = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa', 'best-prac
 // Pe temă (× 2 teme): login, dashboard, sesiune, host online × (Overview, Sessions, Files,
 // Forwards, Services, Docker, Toolbox/Connections, Toolbox/SSH keys) = 8, host offline ×
 // (Overview, Sessions) = 2, toast de eroare, Settings × 7, file browser, Status, Add host × 3,
-// FleetRun, `?`, walkthrough, paleta, ConfirmModal, panoul de alerte = 32 (+ Monaco cu WT_AGENT=1).
+// FleetRun, `?`, walkthrough, paleta, ConfirmModal, panoul de alerte, dialogul „link de replay"
+// + pagina PUBLICĂ de replay = 34 (+ Monaco cu WT_AGENT=1).
 // Mobil: sesiune dark + light.
-const PER_THEME = 32 + (HAS_AGENT ? 1 : 0)
+const PER_THEME = 34 + (HAS_AGENT ? 1 : 0)
 const EXPECTED_SCANS = 2 * PER_THEME + 2
 
 /** Pas tolerant: dacă un selector a derapat, notăm şi mergem mai departe.
@@ -453,6 +454,79 @@ try {
       await page.screenshot({ path: `${OUT}/${theme}-08b-alerts.png` })
       await scan(page, `${theme} alerts panel`)
       await escapeRestores(page, '[data-testid="wt-alerts-bell"]', 'Alerts')
+    }, page)
+
+    // Link de replay (3.5.12): dialogul de creare (deschis PESTE player) şi pagina PUBLICĂ, deschisă
+    // într-un context FĂRĂ cookie — ambele prin axe, pe tema curentă. Sesiunea închisă vine din
+    // e2e-session (o ucide acolo); dacă lipseşte, închidem una aici. Link-ul se revocă la final.
+    await step('link de replay', async () => {
+      await loadHosts(page)
+      const closedSid = async () => {
+        const r = await api(page, '/api/sessions')
+        return (r.body ?? []).find((x) => x.state === 'closed' && x.host_id === hostIds[HOST])?.id
+      }
+      let sid = await closedSid()
+      if (!sid) {
+        const c = await api(page, `/api/hosts/${hostIds[HOST]}/sessions`, { method: 'POST', body: '{}' })
+        if (!c.ok) throw new Error(`POST /sessions ${c.status}`)
+        await page.waitForTimeout(1500)
+        await api(page, `/api/sessions/${c.body.id}/kill`, { method: 'POST' })
+        for (let i = 0; i < 20 && !(sid = await closedSid()); i++) await page.waitForTimeout(500)
+        if (!sid) throw new Error('nicio sesiune închisă pe ' + HOST)
+      }
+      await page.evaluate((x) => { window.location.hash = `/s/${x}` }, sid)
+      await page.locator('button:has-text("play history")').first().click({ timeout: 15000 })
+      const player = page.locator('[role=dialog][aria-label^="Playing recording"]')
+      await player.waitFor({ timeout: 8000 })
+      await page.click('[data-testid="replay-share"]')
+      const dlg = page.locator('[data-testid="replay-dialog"]')
+      await dlg.waitFor({ timeout: 8000 })
+      await page.waitForTimeout(400)
+      await page.screenshot({ path: `${OUT}/${theme}-08c-replay-dialog.png` })
+      await scan(page, `${theme} replay link dialog`)
+      check('link de replay: „Mask likely secrets" e bifat implicit',
+        await dlg.locator('input[type=checkbox]').isChecked())
+      check('link de replay: expirarea implicită e 24 h',
+        await dlg.locator('input[type=radio][value="24"]').isChecked())
+      await dlg.locator('input[maxlength="80"]').fill('a11y review')
+      await page.click('[data-testid="replay-create"]')
+      await page.locator('[data-testid="replay-created"]').waitFor({ timeout: 8000 })
+      const url = await page.locator('[data-testid="replay-created"] input').inputValue()
+      check('link de replay: URL-ul e un fragment #/replay/<token>', /#\/replay\/[A-Za-z0-9_-]{20,}$/.test(url),
+        { note: url })
+      // două dialoguri suprapuse: Escape închide DOAR pe cel de sus, player-ul rămâne deschis
+      await page.keyboard.press('Escape')
+      await page.waitForTimeout(400)
+      check('Escape închide doar dialogul de replay, nu şi player-ul de dedesubt',
+        !(await dlg.isVisible().catch(() => false)) && (await player.isVisible().catch(() => false)))
+      await page.keyboard.press('Escape')
+      await page.waitForTimeout(300)
+
+      const token = url.split('#/replay/')[1]
+      const pctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 2, locale: 'en-US' })
+      try {
+        const pub = await pctx.newPage()
+        await pub.addInitScript((th) => { try { localStorage.setItem('wt_theme', th) } catch { /**/ } }, theme)
+        await pub.goto(`${BASE}/#/replay/${token}`)
+        await pub.waitForSelector('.xterm-screen', { timeout: 10000 })
+        await pub.waitForTimeout(1000)
+        const robots = await pub.evaluate(() => document.querySelector('meta[name=robots]')?.getAttribute('content') ?? '')
+        check('pagina publică de replay: meta robots noindex', robots.includes('noindex'), { note: robots })
+        check('pagina publică de replay: fără cromul aplicaţiei (sidebar, setări)',
+          (await pub.locator('.wt-sidebar, button[aria-label="Settings"]').count()) === 0)
+        await pub.screenshot({ path: `${OUT}/${theme}-08d-replay-public.png` })
+        await scan(pub, `${theme} public replay page`)
+        const links = await api(page, `/api/replay-links?sid=${sid}`)
+        const mine = (links.body?.links ?? [])
+        check('link de replay: deschiderea paginii publice apare în listă (contor ≥ 1)',
+          mine.some((l) => l.label === 'a11y review' && l.opens >= 1), { note: JSON.stringify(mine).slice(0, 200) })
+        for (const l of mine) await api(page, `/api/replay-links/${l.id}`, { method: 'DELETE' })
+        await pub.reload()
+        check('după revocare, pagina publică arată pagina generică (fără conţinut)',
+          await pub.waitForSelector('[data-testid="replay-invalid"]', { timeout: 8000 }).then(() => true, () => false))
+      } finally {
+        await pctx.close()
+      }
     }, page)
 
     // add-host modal: formularul de agent, formularul SSH (host direct), „Many machines"

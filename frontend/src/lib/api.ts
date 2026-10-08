@@ -260,6 +260,32 @@ export interface ShareRow {
   viewers: number
 }
 
+/** Un link de replay al contului (GET /api/replay-links, 3.5.12). Fără token/URL: URL-ul se
+    arată o singură dată, la creare (`ReplayLinkCreated`). */
+export interface ReplayLinkRow {
+  id: number
+  sid: string
+  title: string
+  host_id: number | null
+  host_name: string
+  label: string
+  redact: boolean
+  created: number
+  expires: number
+  opens: number
+  last_opened: number | null
+  last_ip: string
+}
+export interface ReplayLinkCreated {
+  id: number
+  url: string
+  sid: string
+  label: string
+  redact: boolean
+  created: number
+  expires: number
+}
+
 export class ApiError extends Error {
   status: number
   /** Cod stabil trimis de server în antetul `X-WebTerm-Error` (vezi gateway/app/errors.py).

@@ -29,4 +29,7 @@ paths = [
   '''tests/ed25519_kat_test\.py''',
   '''tests/totp_test\.py''',
   '''tests/signing_test\.py''',
+  # mascarea secretelor din link-urile de replay (3.5.12) se testează PE secrete false cu formă
+  # reală (bloc de cheie privată trunchiat, sk-…, AKIA…EXAMPLE) — exact ce trebuie să recunoască
+  '''tests/replay_links_test\.py''',
 ]

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { api, errText, ShareRow, withSecondFactor, withStepup } from '../lib/api'
+import { api, errText, ReplayLinkRow, ShareRow, withSecondFactor, withStepup } from '../lib/api'
 import { useConfirm } from '../lib/confirm'
 import { useI18n } from '../lib/i18n'
 import { notifyError, notifyToast } from '../lib/notify'
@@ -7,8 +7,10 @@ import { askSecret } from '../lib/secretPrompt'
 import { fmtTs } from '../lib/tz'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { CloseIcon, EyeIcon } from './Icons'
+import HelpTip from './HelpTip'
 import LoadFailed from './LoadFailed'
-import { Button } from './ui'
+import { ReplayLinkItem } from './ReplayLinkDialog'
+import { Button, eyebrow } from './ui'
 
 /* Inventarul link-urilor de share active din flotă (3.5.4). Până acum un link trăia doar în
    bara sesiunii lui: ca să afli „ce am dat cui" deschideai sesiune cu sesiune. Aici le vezi pe
@@ -24,13 +26,54 @@ export default function SharesModal(props: { onClose: () => void; onChanged: () 
   const [data, setData] = useState<{ shares: ShareRow[]; hidden: number } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  // link-urile de replay (3.5.12) ale CONTULUI — înregistrări închise, nu terminale vii
+  const [replays, setReplays] = useState<{ links: ReplayLinkRow[]; hidden: number } | null>(null)
 
   const load = useCallback(() => {
     setError(null)
     api<{ shares: ShareRow[]; hidden: number }>('/api/shares')
       .then(setData)
       .catch((e) => setError(errText(e, t) || t('common.loadFailed')))
+    api<{ links: ReplayLinkRow[]; hidden: number }>('/api/replay-links')
+      .then(setReplays)
+      .catch(() => setReplays({ links: [], hidden: 0 }))
   }, [t])
+
+  async function revokeReplay(l: ReplayLinkRow) {
+    if (!(await confirm({
+      title: t('replay.revokeTitle'),
+      message: t('replay.revokeConfirm', { label: l.label || t('replay.unlabeled') }),
+      danger: true, confirmLabel: t('session.revoke'),
+    }))) return
+    setBusy(true)
+    try {
+      const del = () => api(`/api/replay-links/${l.id}`, { method: 'DELETE' })
+      await (l.host_id ? withStepup(l.host_id, del) : del())
+      notifyToast(t('replay.revoked'))
+      load()
+    } catch (e) {
+      notifyError(t('replay.revokeFailed'), errText(e, t))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function revokeAllReplays() {
+    if (!(await confirm({
+      title: t('replay.revokeAllTitle'), message: t('replay.revokeAllConfirm'),
+      danger: true, confirmLabel: t('replay.revokeAll'),
+    }))) return
+    setBusy(true)
+    try {
+      const r = await api<{ revoked: number }>('/api/replay-links/revoke-all', { method: 'POST' })
+      notifyToast(t('replay.revokedAll', { count: r.revoked }))
+      load()
+    } catch (e) {
+      notifyError(t('replay.revokeFailed'), errText(e, t))
+    } finally {
+      setBusy(false)
+    }
+  }
   useEffect(() => { load() }, [load])
 
   async function revokeOne(s: ShareRow) {
@@ -76,7 +119,9 @@ export default function SharesModal(props: { onClose: () => void; onChanged: () 
   }
 
   const shares = data?.shares ?? []
-  const total = shares.length + (data?.hidden ?? 0)
+  const replayLinks = replays?.links ?? []
+  const replayTotal = replayLinks.length + (replays?.hidden ?? 0)
+  const total = shares.length + (data?.hidden ?? 0) + replayTotal
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={props.onClose}>
@@ -149,6 +194,34 @@ export default function SharesModal(props: { onClose: () => void; onChanged: () 
               {data.hidden > 0 && (
                 <p className="mt-3 text-xs text-slate-400">{t('shares.hidden', { count: data.hidden })}</p>
               )}
+
+              <section aria-labelledby="wt-replays-title" className="mt-6" data-testid="replay-links-section">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 id="wt-replays-title" className={`${eyebrow} flex items-center gap-1.5`}>
+                    {t('replay.sectionTitle')} <HelpTip id="replayLinks" />
+                  </h3>
+                  {replayTotal > 0 && (
+                    <Button type="button" size="sm" onClick={revokeAllReplays} disabled={busy}>
+                      {t('replay.revokeAll')}
+                    </Button>
+                  )}
+                </div>
+                <p className="mt-1 text-xs text-slate-400">{t('replay.sectionIntro')}</p>
+                {replays === null ? (
+                  <p className="mt-2 text-xs text-slate-500" aria-live="polite">{t('replay.loading')}</p>
+                ) : replayLinks.length === 0 && replays.hidden === 0 ? (
+                  <p className="mt-2 text-xs text-slate-400">{t('replay.noneAnywhere')}</p>
+                ) : (
+                  <ul aria-label={t('replay.sectionTitle')} className="mt-2 flex flex-col gap-1.5">
+                    {replayLinks.map((l) => (
+                      <ReplayLinkItem key={l.id} link={l} busy={busy} showSession onRevoke={() => void revokeReplay(l)} />
+                    ))}
+                  </ul>
+                )}
+                {(replays?.hidden ?? 0) > 0 && (
+                  <p className="mt-2 text-xs text-slate-400">{t('replay.hidden', { count: replays!.hidden })}</p>
+                )}
+              </section>
             </>
           )}
         </div>
