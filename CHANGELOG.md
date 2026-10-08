@@ -9,6 +9,8 @@ back.
 
 ## [Unreleased]
 
+## [3.5.12] — 2026-10-08 · agent (57)
+
 ### Added
 - **Replay links for closed-session recordings.** Showing a vendor or another team what
   happened in a session meant downloading the `.cast` and mailing it — a copy of everything the
@@ -35,6 +37,8 @@ back.
   `GET /api/replay/{meta,cast,text}`.
 
 ### Fixed
+- **Unknown `/api/…` paths return 404.** The single-page fallback answered them with the app's HTML
+  and status 200, so a mistyped API call looked like a success.
 - **Escape closed two dialogs at once.** Every focus-trapped dialog listened for Escape on the
   document, so a dialog opened on top of another (a confirmation over a list, the replay-link
   dialog over the player) closed both. Only the topmost dialog reacts now.

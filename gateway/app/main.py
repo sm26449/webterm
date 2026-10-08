@@ -523,6 +523,10 @@ if FRONTEND_DIST.exists():
     async def spa(path: str):
         # resolve and contain: '..' segments must not escape the dist dir
         # (raw ASGI clients don't normalize the path for us)
+        # an unknown /api/* route is a 404, not the SPA page with 200 (clients and tests would
+        # mistake HTML for a response)
+        if path == "api" or path.startswith("api/"):
+            raise HTTPException(404, "Not Found")
         target = (_DIST / path).resolve()
         if path and target.is_file() and target.is_relative_to(_DIST):
             return FileResponse(target)
