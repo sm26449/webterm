@@ -997,6 +997,8 @@ function MainApp() {
       key={s.id}
       session={s}
       stepupCredential={stepupCredential}
+      stepupMethod={appState.stepup_method ?? null}
+      webauthn={!!appState.webauthn_available}
       host={hosts.find((h) => h.id === s.host_id)}
       viaHost={viaHostOf(s.host_id)}
       onOpenHost={selectHost}

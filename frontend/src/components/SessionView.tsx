@@ -48,7 +48,7 @@ import { baseName, looksLikePath, resolveTermPath } from '../lib/termpath'
 import CoachTip from './CoachTip'
 import { TIP_TERMINAL_PASTE, TIP_TOOLBAR, isTipDismissed } from '../lib/coachtips'
 import { isWalkthroughDone } from '../lib/walkthrough'
-import { lockTextKeys, ssoStepupRedirect } from '../lib/stepup'
+import { lockTextKeys, ssoStepupRedirect, stepupPrompt, unlockLabelKey, type StepupMethod } from '../lib/stepup'
 
 // FileEditor (Monaco) e greu → lazy, exact ca-n FilePanel: intră în bundle doar când deschizi
 // o cale-fişier din meniul contextual. Refolosim ACEEAŞI componentă (siguranţa la fişiere mari gratis).
@@ -116,6 +116,10 @@ export default function SessionView(props: {
       DOAR de passkey: pe o instalare pe IP gol (fără WebAuthn) sesiunea blocată devenea
       irecuperabilă, fiindcă nu exista nicio cale de deblocare. */
   stepupCredential?: (hostId: number, code?: string) => Promise<{ stepup_grant?: string; stepup_password?: string; totp?: string } | null>
+  /** factorul contului (`/api/state.stepup_method`) + dacă WebAuthn e disponibil: eticheta
+      butonului de deblocare spune ce se va cere (passkey / cod / SSO), nu mereu „passkey" */
+  stepupMethod?: StepupMethod | null
+  webauthn?: boolean
   onMenu: () => void
   sidebarCollapsed?: boolean
   onPopout?: () => void
@@ -252,6 +256,7 @@ export default function SessionView(props: {
   // codul ultimului refuz de deblocare (ex. `stepup.totp`): următoarea încercare cere exact
   // factorul pe care serverul l-a cerut, nu iar parola
   const unlockCodeRef = useRef('')
+  const [unlockCode, setUnlockCode] = useState('')   // acelaşi cod, pentru eticheta butonului
   const unlockBtnRef = useRef<HTMLButtonElement>(null)
   const [reconnecting, setReconnecting] = useState(false)
   const [title, setTitle] = useState(session.title)
@@ -1330,16 +1335,17 @@ export default function SessionView(props: {
             if (termRef.current) connect()
           }, 300)
         } else if (msg.type === 'locked') {
-          setLocked(true); setLockErr(''); unlockCodeRef.current = ''
+          setLocked(true); setLockErr(''); unlockCodeRef.current = ''; setUnlockCode('')
           setLockReason(typeof msg.reason === 'string' ? msg.reason : '')
           // idle-lock: history-ul de clipboard (posibile parole/tokenuri) nu supravieţuieşte blocării
           clearClipHistory(); setPasteItems(null)
         } else if (msg.type === 'unlocked') {
-          setLocked(false); setUnlocking(false); setLockErr(''); unlockCodeRef.current = ''
+          setLocked(false); setUnlocking(false); setLockErr(''); unlockCodeRef.current = ''; setUnlockCode('')
         } else if (msg.type === 'unlock_failed') {
           setUnlocking(false)
           const code = typeof msg.code === 'string' ? msg.code : ''
           unlockCodeRef.current = code
+          setUnlockCode(code)
           if (code === 'host.needs2faSso') {
             // user SSO: re-auth PROASPĂT la IdP; la întoarcere, „Deblochează" trece pe fereastra
             // deschisă de callback (≤120 s, ca orice factor proaspăt)
@@ -2412,7 +2418,7 @@ export default function SessionView(props: {
               </div>
               {lockErr && <div className="text-xs wt-danger">{lockErr}</div>}
               <Button variant="primary" size="lg" ref={unlockBtnRef} onClick={reauth} disabled={unlocking} className="mt-1">
-                {unlocking ? t('session.verifying') : <><KeyIcon size={14} /> {t('session.unlockWithPasskey')}</>}
+                {unlocking ? t('session.verifying') : <><KeyIcon size={14} /> {t(unlockLabelKey(stepupPrompt(unlockCode || null, props.stepupMethod, props.webauthn ?? true)))}</>}
               </Button>
             </div>
           </div>

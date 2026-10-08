@@ -3050,7 +3050,7 @@ async def proxy_forward_http(request: Request, host_id: int, thost: str,
 # Pe FORWARD-ID: folosește ținta STOCATĂ (declarată de admin), nu un host:port din
 # URL — fără suprafață SSRF de „probează orice".
 @router.get("/api/forwards/{fid}/probe")
-async def forward_probe(fid: int, stepup_grant: str = "", stepup_password: str = "",
+async def forward_probe(fid: int, stepup_grant: str = "", stepup_password: str = "", stepup_totp: str = "",
                         user=Depends(security.require_user)):
     # `enabled=0` era ignorat aici: butonul „Oprit" din UI e singura pârghie de „taie accesul
     # acum", iar pe calea HTTP funcţiona (404). Pe telnet şi pe probă, sesiunea se deschidea şi
@@ -3061,7 +3061,7 @@ async def forward_probe(fid: int, stepup_grant: str = "", stepup_password: str =
     # Proba spune dacă un port e deschis în reţeaua host-ului — un oracol de recunoaştere,
     # aceeaşi clasă cu restul acţiunilor de host. Fără gard, un cookie furat putea scana
     # ţinte pe un host cu 2FA fără să creeze nimic.
-    await _require_host_stepup(row["host_id"], user, stepup_grant, stepup_password)
+    await _require_host_stepup(row["host_id"], user, stepup_grant, stepup_password, stepup_totp)
     conn = await _ensure_forward_source(row["host_id"])
     if conn is None:
         raise ApiError(409, "forward.hostOffline", "the host is offline (or an SSH host that needs an open session)")
@@ -3670,6 +3670,7 @@ class RunIn(BaseModel):
     timeout: int = 60
     stepup_grant: str = ""     # 2FA: grant/parolă pt. host-uri cu require_2fa (H1)
     stepup_password: str = ""
+    stepup_totp: str = ""       # 2FA: cod TOTP/recovery (conturi cu TOTP fără passkey)
     confirmed: bool = False    # guardrail: regula „confirm" cere un DA explicit (vezi host_run)
 
 
@@ -3677,7 +3678,7 @@ class RunIn(BaseModel):
 async def host_run(host_id: int, body: RunIn, request: Request,
                    user=Depends(security.require_scope("run"))):
     audit.detail(request, "cmd: " + body.command.strip()[:200])
-    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)   # H1
+    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)   # H1
     cmd = body.command.strip()
     if not cmd:
         raise ApiError(400, "run.empty", "empty command")
@@ -3723,11 +3724,12 @@ class GitIn(BaseModel):
     confirmed: bool = False    # guardrail `confirm` (doar subcomenzile care scriu)
     stepup_grant: str = ""     # 2FA: la fel ca /run, orice acțiune pe host 2FA cere step-up
     stepup_password: str = ""
+    stepup_totp: str = ""       # 2FA: cod TOTP/recovery (conturi cu TOTP fără passkey)
 
 
 @router.post("/api/hosts/{host_id}/git")
 async def host_git(host_id: int, body: GitIn, user=Depends(security.require_user)):
-    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)   # H1
+    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)   # H1
     if not body.args or body.args[0] not in _GIT_SUBCMDS:
         raise ApiError(400, "git.badSubcommand", "git subcommand not allowed")
     cwd = (body.cwd or "").strip()
@@ -4009,13 +4011,14 @@ class DockerAction(BaseModel):
     confirmed: bool = False    # guardrail `confirm`
     stepup_grant: str = ""
     stepup_password: str = ""
+    stepup_totp: str = ""       # 2FA: cod TOTP/recovery (conturi cu TOTP fără passkey)
 
 
 @router.post("/api/hosts/{host_id}/docker/action")
 async def docker_action(host_id: int, body: DockerAction, request: Request,
                         user=Depends(security.require_user)):
     """start/stop/restart pe un container. Acţiune pe host → aceeaşi poartă de step-up ca /run."""
-    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
+    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)
     if body.action not in _DOCKER_ACTIONS:
         raise ApiError(400, "docker.badAction", "unknown docker action")
     if not _DOCKER_ID.match(body.container or ""):
@@ -4122,6 +4125,7 @@ class ServiceAction(BaseModel):
     confirmed: bool = False    # guardrail `confirm`
     stepup_grant: str = ""
     stepup_password: str = ""
+    stepup_totp: str = ""       # 2FA: cod TOTP/recovery (conturi cu TOTP fără passkey)
 
 
 @router.post("/api/hosts/{host_id}/services/action")
@@ -4130,7 +4134,7 @@ async def service_action(host_id: int, body: ServiceAction, request: Request,
     """start/stop/restart pe o unitate. Acţiune pe host → step-up ca /run şi docker_action.
     Rulează ca userul agentului: fără root/policykit, stop/start pe unităţi de sistem eşuează
     cu „access denied" — surfaced ca atare, nu tăcut."""
-    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
+    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)
     if body.action not in _SERVICE_ACTIONS:
         raise ApiError(400, "services.badAction", "unknown service action")
     if not _UNIT_RE.match(body.unit or ""):
@@ -4301,6 +4305,7 @@ class ConnectionIn(BaseModel):
     credential: str = ""      # write-only; doar pt. `stored`. Gol la editare = păstrează ce e stocat.
     stepup_grant: str = ""    # 2FA: orice mutaţie pe host require_2fa cere step-up (H1) — vezi audit v53
     stepup_password: str = ""
+    stepup_totp: str = ""       # 2FA: cod TOTP/recovery (conturi cu TOTP fără passkey)
 
 
 def _validate_connection(body: ConnectionIn) -> None:
@@ -4327,12 +4332,12 @@ def _validate_connection(body: ConnectionIn) -> None:
 
 
 @router.get("/api/hosts/{host_id}/connections")
-async def list_connections(host_id: int, stepup_grant: str = "", stepup_password: str = "",
+async def list_connections(host_id: int, stepup_grant: str = "", stepup_password: str = "", stepup_totp: str = "",
                            user=Depends(security.require_user)):
     # Aceeaşi poartă ca `list_forwards`: lista arată `target_host:target_port`, user, dbname şi
     # motor pentru fiecare bază de pe host — harta internă a datelor. Create/patch/delete pe
     # aceeaşi resursă cereau step-up; citirea o dădea gratis unui cookie furat (audit 2026-10-04).
-    await _require_host_stepup(host_id, user, stepup_grant, stepup_password)
+    await _require_host_stepup(host_id, user, stepup_grant, stepup_password, stepup_totp)
     rows = await db.fetchall("SELECT * FROM connections WHERE host_id=? ORDER BY label", host_id)
     return {"connections": [_connection_json(r) for r in rows]}
 
@@ -4343,7 +4348,7 @@ async def create_connection(host_id: int, body: ConnectionIn, user=Depends(secur
         raise ApiError(404, "host.missing", "no such host")
     # H1: o conexiune `stored` ţine o parolă DB care poate fi exfiltrată redirectând target_host →
     # pe host-uri 2FA orice mutaţie CRUD trebuie să coste un factor (ca /forwards, /run). audit v53.
-    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
+    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)
     _validate_connection(body)
     # `stored` → parola criptată în vault (acelaşi mecanism ca la SSH). `ask` → nimic stocat.
     blob = security.encrypt_secret(body.credential) if (body.cred_policy == "stored" and body.credential) else None
@@ -4360,7 +4365,7 @@ async def update_connection(host_id: int, conn_id: int, body: ConnectionIn,
                             user=Depends(security.require_user)):
     if not await db.fetchone("SELECT id FROM connections WHERE id=? AND host_id=?", conn_id, host_id):
         raise ApiError(404, "connection.missing", "no such connection")
-    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)   # H1 (audit v53)
+    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)   # H1 (audit v53)
     _validate_connection(body)
     await db.execute(
         "UPDATE connections SET label=?, engine=?, target_host=?, target_port=?, username=?,"
@@ -4379,8 +4384,8 @@ async def update_connection(host_id: int, conn_id: int, body: ConnectionIn,
 
 @router.delete("/api/hosts/{host_id}/connections/{conn_id}")
 async def delete_connection(host_id: int, conn_id: int, stepup_grant: str = "",
-                            stepup_password: str = "", user=Depends(security.require_user)):
-    await _require_host_stepup(host_id, user, stepup_grant, stepup_password)   # H1 (audit v53)
+                            stepup_password: str = "", stepup_totp: str = "", user=Depends(security.require_user)):
+    await _require_host_stepup(host_id, user, stepup_grant, stepup_password, stepup_totp)   # H1 (audit v53)
     await db.execute("DELETE FROM connections WHERE id=? AND host_id=?", conn_id, host_id)
     return {"ok": True}
 
@@ -4740,6 +4745,7 @@ class ForwardIn(BaseModel):
     app_type: str = ""                 # non-gol → apare ca „app" (bookmark) cu icon + pe dashboard
     stepup_grant: str = ""
     stepup_password: str = ""
+    stepup_totp: str = ""       # 2FA: cod TOTP/recovery (conturi cu TOTP fără passkey)
 
 
 class ForwardPatch(BaseModel):
@@ -4752,6 +4758,7 @@ class ForwardPatch(BaseModel):
     app_type: str | None = None        # setează/promovează sau scoate (→ "") statutul de app
     stepup_grant: str = ""
     stepup_password: str = ""
+    stepup_totp: str = ""       # 2FA: cod TOTP/recovery (conturi cu TOTP fără passkey)
 
 
 def _validate_forward(host: str, port: int, scheme: str):
@@ -4807,12 +4814,12 @@ def _forward_json(row) -> dict:
 
 
 @router.get("/api/hosts/{host_id}/forwards")
-async def list_forwards(host_id: int, stepup_grant: str = "", stepup_password: str = "",
+async def list_forwards(host_id: int, stepup_grant: str = "", stepup_password: str = "", stepup_totp: str = "",
                         user=Depends(security.require_user)):
     # Lista arată `target_host:target_port` pentru fiecare tunel — exact informaţia pentru care
     # s-a pus step-up pe probă („ce port intern e deschis"). Create/patch/delete/probe/telnet îl
     # cereau toate; lista o dădea gratis, deci gardul era ocolibil prin simpla citire.
-    await _require_host_stepup(host_id, user, stepup_grant, stepup_password)
+    await _require_host_stepup(host_id, user, stepup_grant, stepup_password, stepup_totp)
     rows = await db.fetchall(
         "SELECT * FROM port_forwards WHERE host_id=? ORDER BY created", host_id)
     return [_forward_json(r) for r in rows]
@@ -4866,6 +4873,7 @@ async def audit_list(limit: int = 200, before: float = 0.0, q: str = "",
 class HostKeyAcceptIn(BaseModel):
     stepup_grant: str = ""
     stepup_password: str = ""
+    stepup_totp: str = ""       # 2FA: cod TOTP/recovery (conturi cu TOTP fără passkey)
 
 
 @router.get("/api/hosts/{host_id}/hostkey")
@@ -4895,7 +4903,7 @@ async def host_hostkey_accept(host_id: int, body: HostKeyAcceptIn, request: Requ
     row = await db.fetchone("SELECT id, name, known_hosts, hostkey_alarm FROM hosts WHERE id=?", host_id)
     if not row:
         raise ApiError(404, "host.missing", "no such host")
-    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
+    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)
     try:
         alarm = json.loads(row["hostkey_alarm"] or "null")
     except ValueError:
@@ -5000,7 +5008,7 @@ async def create_forward(host_id: int, body: ForwardIn,
     # citirea istoricului a fost închisă cu step-up între timp, deci premisa a căzut şi
     # forward-urile rămăseseră singura acţiune de host descoperită. Vezi şi `forward_auth`,
     # care apără ACCESUL: fără el, gardul de aici ar opri doar crearea de forward-uri noi.
-    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
+    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)
     _validate_forward(body.target_host, body.target_port, body.scheme)
     # invalid = 400, nu coerţie tăcută: "Portainer " (majusculă/spaţiu) „reuşea" dar tile-ul
     # nu apărea nicăieri — clientul afla abia căutându-l pe dashboard (audit 2026-09)
@@ -5036,7 +5044,7 @@ async def update_forward(fid: int, body: ForwardPatch,
     if not row:
         raise ApiError(404, "forward.missing", "no such forward")
     # re-ţintirea unui forward existent e la fel de puternică precum crearea lui
-    await _require_host_stepup(row["host_id"], user, body.stepup_grant, body.stepup_password)
+    await _require_host_stepup(row["host_id"], user, body.stepup_grant, body.stepup_password, body.stepup_totp)
     host = body.target_host if body.target_host is not None else row["target_host"]
     port = body.target_port if body.target_port is not None else row["target_port"]
     scheme = body.scheme if body.scheme is not None else row["scheme"]
@@ -5056,14 +5064,14 @@ async def update_forward(fid: int, body: ForwardPatch,
 
 
 @router.delete("/api/forwards/{fid}")
-async def delete_forward(fid: int, stepup_grant: str = "", stepup_password: str = "",
+async def delete_forward(fid: int, stepup_grant: str = "", stepup_password: str = "", stepup_totp: str = "",
                          user=Depends(security.require_user)):
     row = await db.fetchone("SELECT host_id FROM port_forwards WHERE id=?", fid)
     if not row:
         return {"ok": True}                     # idempotent: deja nu există
     # ştergerea nu deschide acces, dar e o schimbare de configurare a unui host cu 2FA —
     # şi, mai practic, cine poate şterge poate re-crea imediat cu altă ţintă
-    await _require_host_stepup(row["host_id"], user, stepup_grant, stepup_password)
+    await _require_host_stepup(row["host_id"], user, stepup_grant, stepup_password, stepup_totp)
     await db.execute("DELETE FROM port_forwards WHERE id=?", fid)
     # Biletul e semnat pe SLUG, iar `_unique_slug` recicla slug-ul unui forward şters: un bilet
     # vechi (emis pentru altă ţintă) redevenea valid pe forward-ul nou cu acelaşi nume. Verificat:
@@ -5080,6 +5088,7 @@ class TelnetOpenIn(BaseModel):
     tz: str | None = None
     stepup_grant: str = ""
     stepup_password: str = ""
+    stepup_totp: str = ""       # 2FA: cod TOTP/recovery (conturi cu TOTP fără passkey)
 
 
 @router.post("/api/forwards/{fid}/telnet")
@@ -5096,7 +5105,7 @@ async def open_forward_telnet(fid: int, body: TelnetOpenIn,
     if not row:
         raise ApiError(404, "forward.missing", "no such forward")
     # H1: sesiune interactivă prin agentul host-ului — aceeași poartă ca create_session
-    await _require_host_stepup(row["host_id"], user, body.stepup_grant, body.stepup_password)
+    await _require_host_stepup(row["host_id"], user, body.stepup_grant, body.stepup_password, body.stepup_totp)
     if row["scheme"] != "telnet":
         raise ApiError(400, "forward.notTelnet", "this forward is not a telnet forward")
     title = body.title.strip() or row["label"] or f'{row["target_host"]}:{row["target_port"]}'
@@ -5124,6 +5133,7 @@ class SerialOpenIn(BaseModel):
     tz: str | None = None
     stepup_grant: str = ""
     stepup_password: str = ""
+    stepup_totp: str = ""       # 2FA: cod TOTP/recovery (conturi cu TOTP fără passkey)
 
 
 @router.post("/api/hosts/{host_id}/serial/discover")
@@ -5148,7 +5158,7 @@ async def serial_open(host_id: int, body: SerialOpenIn, user=Depends(security.re
     row = await db.fetchone("SELECT id FROM hosts WHERE id=?", host_id)
     if not row:
         raise ApiError(404, "host.missing", "no such host")
-    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
+    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)
     # normpath colapsează `..` ÎNAINTE de verificare: `/dev/../etc/shadow` → `/etc/shadow` → refuzat.
     # Nu e o gaură (agentul respinge oricum ne-tty-urile prin `os.isatty`, iar /dev/* e deja permis),
     # dar închide explicit intenţia „doar sub /dev/" în planul de control, semnalat de audit.
@@ -5703,6 +5713,7 @@ class HostPatch(BaseModel):
     pending_key_id: Optional[str] = None  # vezi HostIn: cheia generată în formular devine credenţialul
     stepup_grant: str = ""
     stepup_password: str = ""
+    stepup_totp: str = ""       # 2FA: cod TOTP/recovery (conturi cu TOTP fără passkey)
 
 
 # câmpurile care schimbă UNDE și CU CE ne conectăm — aceeași clasă cu provisioning-ul
@@ -5738,13 +5749,13 @@ async def update_host(host_id: int, host: HostPatch, user=Depends(security.requi
     if touches_conn:
         # Repointarea unui host către altă mașină (sau altă credențială) e echivalentă cu
         # provisioning-ul: cine are doar cookie-ul nu trebuie să poată face asta pe un host 2FA.
-        await _require_host_stepup(host_id, user, host.stepup_grant, host.stepup_password)
+        await _require_host_stepup(host_id, user, host.stepup_grant, host.stepup_password, host.stepup_totp)
     elif given.get("alerts_muted") and row["require_2fa"]:
         # A REDUCE monitorizarea unui host 2FA cere step-up: sweep-ul refuză explicit ca marcajul
         # neautentificat de uninstall să cumpere tăcere (core.py, audit 2026-08) — un cookie furat
         # n-are voie s-o cumpere nici pe calea asta. RE-activarea alertelor rămâne liberă (întăreşte
         # monitorizarea), simetric cu politica din `set_require_2fa`.
-        await _require_host_stepup(host_id, user, host.stepup_grant, host.stepup_password)
+        await _require_host_stepup(host_id, user, host.stepup_grant, host.stepup_password, host.stepup_totp)
 
     old_type = row["connection_type"] or "agent"
     new_type = given.get("connection_type", old_type)
@@ -5896,6 +5907,7 @@ class Toggle2fa(BaseModel):
     enabled: bool
     stepup_grant: str = ""
     stepup_password: str = ""
+    stepup_totp: str = ""       # 2FA: cod TOTP/recovery (conturi cu TOTP fără passkey)
 
 
 @router.post("/api/hosts/{host_id}/require-2fa")
@@ -5904,7 +5916,7 @@ async def set_require_2fa(host_id: int, body: Toggle2fa, user=Depends(security.r
     GAP-fix: DEZACTIVAREA cere step-up — altfel un cookie furat stingea 2FA pe host și tot
     gard-ul H1 devenea no-op. `_require_host_stepup` citește valoarea CURENTĂ (încă 1 la
     dezactivare → cere step-up; 0 la activare → no-op, întărirea securității nu cere factor)."""
-    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
+    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)
     await db.execute("UPDATE hosts SET require_2fa=? WHERE id=?", int(body.enabled), host_id)
     if body.enabled:
         # Biletul de forward e valabil 12h şi nu ştie de host. Cine marchează un host „cere 2FA"
@@ -6235,6 +6247,7 @@ class AutostartIn(BaseModel):
     enable: bool
     stepup_grant: str = ""       # 2FA: grant/parolă pt. host-uri cu require_2fa (H1)
     stepup_password: str = ""
+    stepup_totp: str = ""       # 2FA: cod TOTP/recovery (conturi cu TOTP fără passkey)
 
 
 AUTOSTART_MIN_AGENT = 57         # op-ul `autostart` există din agentul v57
@@ -6247,7 +6260,7 @@ async def host_autostart(host_id: int, body: AutostartIn, request: Request,
     instalatorul). Agentul care rulează ACUM nu e atins: efectul e la următorul reboot.
     Răspunsul poartă starea NOUĂ citită înapoi de agent, stocată imediat (badge-ul din sidebar
     nu aşteaptă diagnosticul orar). Fără root, `linger` rămâne de obicei oprit → `hint`."""
-    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)   # H1
+    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)   # H1
     audit.detail(request, "autostart %s" % ("enable" if body.enable else "disable"))
     row = await db.fetchone("SELECT id, connection_type FROM hosts WHERE id=?", host_id)
     if not row:
@@ -6355,13 +6368,13 @@ async def list_sessions(user=Depends(security.require_scope("read"))):
 
 @router.get("/api/hosts/{host_id}/sessions")
 async def host_sessions(host_id: int, limit: int = 200, offset: int = 0,
-                        stepup_grant: str = "", stepup_password: str = "",
+                        stepup_grant: str = "", stepup_password: str = "", stepup_totp: str = "",
                         user=Depends(security.require_user)):
     """Complete session history for one host (active + closed), paginated — used
     by the host page so it isn't limited by the global recent-closed window."""
     # meta-leak: titlurile/istoricul sesiunilor de pe un host 2FA cer step-up, ca restul citirilor
     # de host (fs/services/deploy-key). Fără 2FA pe host → no-op.
-    await _require_host_stepup(host_id, user, stepup_grant, stepup_password)
+    await _require_host_stepup(host_id, user, stepup_grant, stepup_password, stepup_totp)
     limit = max(1, min(limit, 500))
     rows = await db.fetchall(
         "SELECT * FROM sessions WHERE host_id=? ORDER BY created DESC LIMIT ? OFFSET ?",
@@ -6530,7 +6543,7 @@ async def host_generate_ssh_key(host_id: int, body: SessionIn, user=Depends(secu
         raise ApiError(404, "host.missing", "no such host")
     if (row["connection_type"] or "agent") not in ("ssh", "ssh-jump"):
         raise ApiError(400, "sshkey.notSsh", "SSH key generation is only for SSH hosts")
-    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
+    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)
     k = asyncssh.generate_private_key("ssh-ed25519")
     # ACELAŞI format de blob ca `_credential_blob` ({"key": PEM}). Până în 3.5.4 aici se scria
     # PEM-ul gol, iar conectarea cu cheia generată crăpa la json.loads (vezi _decode_credential).
@@ -6548,7 +6561,7 @@ async def host_ssh_key_public(host_id: int, body: SessionIn, user=Depends(securi
     row = await db.fetchone("SELECT * FROM hosts WHERE id=?", host_id)
     if not row:
         raise ApiError(404, "host.missing", "no such host")
-    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
+    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)
     if not row["credential_encrypted"] or (row["auth_method"] or "") != "key":
         raise ApiError(400, "sshkey.none", "this host has no stored SSH key")
     try:
@@ -6710,6 +6723,7 @@ class HostTestIn(BaseModel):
     pending_key_id: str = ""             # cheia generată în formular, încă nelegată
     stepup_grant: str = ""
     stepup_password: str = ""
+    stepup_totp: str = ""       # 2FA: cod TOTP/recovery (conturi cu TOTP fără passkey)
 
 
 # Etapa picată → cod i18n, când clasa e a testului (TCP, banner, pin…). Cauzele care au deja un
@@ -6783,7 +6797,7 @@ async def test_host_connection(body: HostTestIn, request: Request, user=Depends(
         if not row:
             raise ApiError(404, "host.missing", "no such host")
         # testul cu credenţialul STOCAT al unui host = conectare la el: aceleaşi cerinţe de step-up
-        await _require_host_stepup(body.host_id, user, body.stepup_grant, body.stepup_password)
+        await _require_host_stepup(body.host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)
     _hosttest_rate(user["id"])
     if _is_metadata_target(hostname):
         raise ApiError(400, "hosttest.blocked", "that address is the cloud metadata service")
@@ -7178,7 +7192,7 @@ async def deploy_key_generate(host_id: int, body: DeployKeyIn, request: Request,
     if (await _dk_policy())["require_2fa_source"] and not (host["require_2fa"] or 0):
         raise ApiError(400, "sshkey.needs2faSource",
                        "policy requires 2FA on deploy-key sources — enable 2FA on this host first")
-    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
+    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)
     if await db.fetchone("SELECT id FROM ssh_keys WHERE host_id=?", host_id):
         raise ApiError(409, "sshkey.exists", "this host already has a deploy key")
     # Garda anti-pivot: dacă hostul e deja ŢINTA unei chei active, a genera o cheie pe el
@@ -7279,7 +7293,7 @@ async def deploy_key_revoke(host_id: int, body: DeployKeyIn, request: Request,
     key = await _dk_key_row(body.key_host_id)
     source = await db.fetchone("SELECT * FROM hosts WHERE id=?", key["host_id"])
     audit.detail(request, "deploy-key revoke %s from %s" % (key["fingerprint"], target["name"]))
-    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
+    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)
     blob, _fp = _dk_validate(key["public_key"])
     resp = await _host_run(host_id, _dk_revoke_recipe(blob), timeout=20)
     out = resp.get("stdout") or ""
@@ -7306,7 +7320,7 @@ async def deploy_key_verify(host_id: int, body: DeployKeyIn,
     `edited` = blob-ul e acolo dar linia diferă (opţiuni schimbate manual), `missing` = deloc."""
     await _dk_agent_host(host_id)
     key = await _dk_key_row(body.key_host_id)
-    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
+    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)
     dep = await db.fetchone(
         "SELECT * FROM ssh_key_deployments WHERE key_id=? AND target_host_id=?",
         key["id"], host_id)
@@ -7328,12 +7342,12 @@ async def deploy_key_verify(host_id: int, body: DeployKeyIn,
 
 @router.delete("/api/hosts/{host_id}/deploy-key")
 async def deploy_key_delete(host_id: int, request: Request, stepup_grant: str = "",
-                            stepup_password: str = "", user=Depends(security.require_user)):
+                            stepup_password: str = "", stepup_totp: str = "", user=Depends(security.require_user)):
     """Şterge cheia de pe hostul SURSĂ (fişiere + evidenţă). Refuză cât timp există deploy-uri
     active: altfel rămân uşi deschise pe ţinte fără nicio urmă în inventar — revocă-le întâi."""
     host = await _dk_agent_host(host_id)
     key = await _dk_key_row(host_id)
-    await _require_host_stepup(host_id, user, stepup_grant, stepup_password)
+    await _require_host_stepup(host_id, user, stepup_grant, stepup_password, stepup_totp)
     # doar deploy-urile pe ţinte care ÎNCĂ există blochează ştergerea: o ţintă scoasă din flotă
     # nu mai e revocabilă de aici oricum (rândul orfan a stat vizibil în UI drept avertisment),
     # altfel cheia devenea de neşters pentru totdeauna
@@ -7372,7 +7386,7 @@ async def deploy_key_test(host_id: int, body: DeployKeyIn, user=Depends(security
     conectare). Întoarce reachable + detaliu, fără să schimbe nimic pe ţintă."""
     await _dk_agent_host(host_id)
     await _dk_key_row(host_id)      # sursa trebuie să aibă cheia
-    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
+    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)
     tuser, thost = await _dk_ssh_target(body.target_host_id)
     dest = ("%s@%s" % (tuser, thost)) if tuser else thost
     cmd = ("command ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new "
@@ -7394,7 +7408,7 @@ async def deploy_key_ssh_config(host_id: int, body: DeployKeyIn, request: Reques
     e delimitat de markere WebTerm, deci re-scrierea/ştergerea nu atinge restul config-ului."""
     await _dk_agent_host(host_id)
     await _dk_key_row(host_id)
-    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
+    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)
     trow = await db.fetchone("SELECT name FROM hosts WHERE id=?", body.target_host_id)
     tuser, thost = await _dk_ssh_target(body.target_host_id)
     alias = re.sub(r"[^A-Za-z0-9._-]", "-", (trow["name"] if trow else "") or thost)[:48]
@@ -7514,7 +7528,7 @@ async def create_session(host_id: int, body: SessionIn, request: Request,
     if not row:
         raise ApiError(404, "host.missing", "no such host")
     # 2FA step-up (server-side; bifa din client nu e de încredere) — deschide/consultă fereastra
-    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password)
+    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)
     ctype = row["connection_type"] or "agent"
     if ctype in ("ssh", "ssh-jump"):
         await _connect_direct(row, request, body.credential, body.passphrase)
@@ -7729,6 +7743,7 @@ class ShareIn(BaseModel):
     expires_minutes: int = 1440   # 24h implicit
     stepup_grant: str = ""        # 2FA: pe host cu require_2fa, crearea share-ului cere step-up (H1)
     stepup_password: str = ""
+    stepup_totp: str = ""       # 2FA: cod TOTP/recovery (conturi cu TOTP fără passkey)
 
 
 @router.post("/api/sessions/{sid}/share")
@@ -7744,7 +7759,7 @@ async def create_share(sid: str, request: Request, body: ShareIn = ShareIn(),
     # unui host — pe un host cu require_2fa e o acțiune sensibilă ca `run`/`kill`, deci cere step-up.
     # (Fără asta, un share writable ținea sesiunea trează — inputul invitatului resetează idle-lock-ul
     # — ocolind 2FA-ul care altfel s-ar re-cere.)
-    await _require_host_stepup(row["host_id"], user, body.stepup_grant, body.stepup_password)
+    await _require_host_stepup(row["host_id"], user, body.stepup_grant, body.stepup_password, body.stepup_totp)
     mins = max(1, min(1440, int(body.expires_minutes)))   # 1 min … 24h
     expires = time.time() + mins * 60
     token = security.new_token()
@@ -8133,6 +8148,7 @@ class ReplayLinkIn(BaseModel):
     redact: bool = True               # „ascunde secretele probabile" — implicit PORNIT
     stepup_grant: str = ""
     stepup_password: str = ""
+    stepup_totp: str = ""       # 2FA: cod TOTP/recovery (conturi cu TOTP fără passkey)
 
 
 def _replay_link_json(r) -> dict:
@@ -8156,7 +8172,7 @@ async def create_replay_link(sid: str, request: Request, body: ReplayLinkIn = Re
         raise ApiError(404, "session.missing", "no such session")
     # aceeaşi poartă ca GET /transcript: pe un host 2FA, a scoate înregistrarea din instanţă
     # (şi încă printr-un link fără cont) cere al doilea factor
-    await _require_host_stepup(row["host_id"], user, body.stepup_grant, body.stepup_password)
+    await _require_host_stepup(row["host_id"], user, body.stepup_grant, body.stepup_password, body.stepup_totp)
     if row["state"] != "closed":
         raise ApiError(409, "replay.notClosed",
                        "only the recording of a closed session can be shared")

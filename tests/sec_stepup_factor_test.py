@@ -177,6 +177,38 @@ async def main():
               r.status_code == 403 and _code(r) == "stepup.totp", r.text[:160])
         r = await c.post(f"/api/hosts/{gated}/stepup", json={"stepup_totp": totp_mod.generate(secret)})
         check("TOTP activ: codul deschide fereastra", r.status_code == 200, r.text[:160])
+
+        # ── 3.5.15: rutele cu step-up inline acceptă şi `stepup_totp` (nu doar grant+parolă) ──
+        # Înainte, un cont cu TOTP (fără passkey) nu putea face step-up INLINE pe ele: parola
+        # singură e refuzată pe un host 2FA, iar câmpul TOTP era ignorat. Fiecare rută: fără cod →
+        # 403 stepup.totp; cu cod → trece de poarta de step-up (eşuează mai departe, host offline).
+        inline = [
+            ("POST", f"/api/hosts/{gated}/deploy-key/generate", {}),
+            ("POST", f"/api/hosts/{gated}/run", {"command": "true"}),
+            ("POST", f"/api/hosts/{gated}/docker/action", {"container": "web", "action": "restart"}),
+            ("POST", f"/api/hosts/{gated}/sessions", {}),
+            ("GET", f"/api/hosts/{gated}/forwards", None),
+        ]
+        for method, path, body in inline:
+            for with_code in (False, True):
+                security._stepup_windows.clear()
+                await db.execute("UPDATE users SET totp_last_counter=0 WHERE id=?", uid)
+                code = totp_mod.generate(secret) if with_code else ""
+                if body is None:
+                    r = await c.request(method, path, params={"stepup_totp": code} if code else None)
+                else:
+                    r = await c.request(method, path, json={**body, **({"stepup_totp": code} if code else {})})
+                if with_code:
+                    check(f"{method} {path.split(str(gated))[1]} cu stepup_totp → trece de step-up",
+                          not (r.status_code == 403 and (_code(r) or "").startswith(("stepup.", "host.needs2fa"))),
+                          "%s %s" % (r.status_code, r.text[:160]))
+                else:
+                    check(f"{method} {path.split(str(gated))[1]} fără factor → 403 stepup.totp",
+                          r.status_code == 403 and _code(r) == "stepup.totp", "%s %s" % (r.status_code, r.text[:160]))
+        security._stepup_windows.clear()
+        await db.execute("UPDATE users SET totp_last_counter=0 WHERE id=?", uid)
+        r = await c.post(f"/api/hosts/{gated}/run", json={"command": "true", "stepup_totp": "000000"})
+        check("stepup_totp greşit → tot 403 (codul chiar e verificat)", r.status_code == 403, r.text[:160])
         other2 = (await c.post("/api/hosts", json={"name": "devine-critic-2"})).json()["id"]
         r = await c.post(f"/api/hosts/{other2}/require-2fa", json={"enabled": True})
         check("require-2fa ON cu TOTP → fără warning", r.status_code == 200 and "warning" not in r.json(),

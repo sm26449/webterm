@@ -36,6 +36,20 @@ export function stepupPrompt(
   return webauthn ? 'passkey' : 'password'
 }
 
+/** Eticheta butonului de deblocare de pe terminalul blocat (3.5.15). Spunea mereu „Deblochează
+    cu passkey", inclusiv pentru conturile cu cod de autentificare, SSO sau fără niciun factor —
+    adică exact omul care n-avea passkey citea că i se cere unul. Aceeaşi decizie ca promptul
+    (`stepupPrompt`): codul ultimului refuz câştigă, altfel metoda contului. */
+export function unlockLabelKey(kind: StepupPrompt): string {
+  switch (kind) {
+    case 'passkey': return 'session.unlockWithPasskey'
+    case 'totp': return 'session.unlockWithTotp'
+    case 'sso': return 'session.unlockWithSso'
+    case 'needsFactor': return 'session.unlockNeedsFactor'
+    default: return 'session.unlock'
+  }
+}
+
 /** Mesajul `locked` de pe WS-ul terminalului poartă (opţional) motivul. `stepup_max` = plafonul
     absolut de 60 min de la factorul care a autorizat terminalul pe un host 2FA. */
 export function lockTextKeys(reason: string | undefined | null): { title: string; desc: string } {

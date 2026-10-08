@@ -167,6 +167,8 @@ export default function PopoutView(props: { sid: string }) {
         popout
         commandGuard={guard}
         stepupCredential={stepupCredential}
+        stepupMethod={stepupMethod}
+        webauthn={webauthn}
         onMenu={() => {}}
         onChanged={() => {}}
         onDeleted={() => window.close()}

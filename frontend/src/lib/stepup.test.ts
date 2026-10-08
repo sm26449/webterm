@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { lockTextKeys, stepupPrompt } from './stepup'
+import { lockTextKeys, stepupPrompt, unlockLabelKey } from './stepup'
+import en from '../lang/en'
+import ro from '../lang/ro'
 
 describe('stepupPrompt', () => {
   it('codul refuzului câştigă asupra metodei contului', () => {
@@ -29,5 +31,27 @@ describe('lockTextKeys', () => {
     expect(lockTextKeys('stepup_max').desc).toBe('session.lockedDescMax')
     expect(lockTextKeys('idle').title).toBe('session.lockedTitle')
     expect(lockTextKeys(undefined).desc).toBe('session.lockedDesc')
+  })
+})
+
+describe('unlockLabelKey (3.5.15: eticheta butonului de deblocare)', () => {
+  it('spune ce se va cere, nu mereu „passkey"', () => {
+    expect(unlockLabelKey(stepupPrompt(null, 'passkey', true))).toBe('session.unlockWithPasskey')
+    expect(unlockLabelKey(stepupPrompt(null, 'totp', true))).toBe('session.unlockWithTotp')
+    expect(unlockLabelKey(stepupPrompt(null, 'sso', true))).toBe('session.unlockWithSso')
+    expect(unlockLabelKey(stepupPrompt(null, 'none', true))).toBe('session.unlockNeedsFactor')
+    // passkey fără WebAuthn (IP gol) → nu promitem un passkey
+    expect(unlockLabelKey(stepupPrompt(null, 'passkey', false))).toBe('session.unlock')
+  })
+  it('codul ultimului refuz câştigă asupra metodei contului', () => {
+    expect(unlockLabelKey(stepupPrompt('stepup.totp', 'passkey', true))).toBe('session.unlockWithTotp')
+    expect(unlockLabelKey(stepupPrompt('host.needs2faSso', 'passkey', true))).toBe('session.unlockWithSso')
+  })
+  it('fiecare etichetă există în EN şi RO', () => {
+    for (const k of ['passkey', 'totp', 'sso', 'needsFactor', 'password'] as const) {
+      const key = unlockLabelKey(k)
+      expect(en.strings[key], key).toBeTruthy()
+      expect(ro.strings[key], key).toBeTruthy()
+    }
   })
 })
