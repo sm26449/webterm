@@ -9,6 +9,8 @@ back.
 
 ## [Unreleased]
 
+## [3.5.15] — 2026-10-08 · agent (57)
+
 ### Security
 - **Live share links are rate-limited per IP.** `/api/shared/{token}` and `/ws/shared/{token}`
   were the only public token endpoints without a per-IP limit (replay links got one in 3.5.12),
@@ -59,6 +61,7 @@ back.
   SSO*, or *Set up 2FA to unlock*; the description no longer mentions a passkey.
 
 ### Fixed
+- **The phone host drawer closes with Escape**, not only by tapping outside it (unless a dialog is open on top).
 - **Docker Shell on hosts where only `sudo` reaches the daemon.** The list, stats and live logs
   already fell back to `sudo -n` when the agent's user is not in the `docker` group; the
   container Shell ran a bare `docker exec` and died with "permission denied". It now uses the

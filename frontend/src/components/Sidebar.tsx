@@ -125,6 +125,18 @@ export default function Sidebar(props: {
   useEffect(() => {
     if (props.statusSignal > 0) setShowStatus(true)
   }, [props.statusSignal])
+  // drawer-ul mobil se închide şi cu Escape (nu doar din scrim) — dar NU când deasupra lui e
+  // deschis un dialog: acela îşi tratează singur Escape-ul (useFocusTrap, doar cel de sus)
+  useEffect(() => {
+    if (!props.open) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.defaultPrevented) return
+      if (document.querySelector('[role="dialog"], [role="alertdialog"]')) return
+      onCloseRef.current()
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [props.open])
 
   // scurtătura globală „/": focusează inputul de căutare din copia VIZIBILĂ a
   // sidebarului (sunt două: desktop + drawer mobil; cea ascunsă nu e focusabilă)
