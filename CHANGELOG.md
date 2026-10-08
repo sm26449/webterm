@@ -9,6 +9,8 @@ back.
 
 ## [Unreleased]
 
+## [3.5.14] — 2026-10-08 · agent (57)
+
 ### Added
 - **Downloads resume after a page reload** (File System Access path — Chrome/Edge). A 40 GB
   download that died with the tab (reload, crash, closed laptop) used to vanish from Transfers and
