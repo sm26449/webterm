@@ -1,7 +1,12 @@
 /* Copiere host → host (3.5.5) în widgetul de Transferuri. Copierea propriu-zisă rulează pe
    GATEWAY (`POST /api/fs/copy`, vezi gateway/app/fscopy.py) — octeţii nu trec prin browser. Aici
    doar o pornim, îi oglindim starea în uploadStore (polling `GET /api/fs/copy/{id}`, ~1 s) şi
-   dăm Cancel (`DELETE`) / Retry (re-porneşte DOAR fişierele eşuate, cu aceleaşi opţiuni).
+   dăm Cancel (`DELETE`) / Retry (job nou pe server cu ce a eşuat, aceleaşi opţiuni).
+
+   Foldere (3.6, agent 58): serverul copiază tot arborele; rândul arată fişierul în lucru, iar la
+   final un rezumat (foldere, sărite, link-uri/fişiere speciale necopiate, permisiuni păstrate sau
+   nu — destinaţie cu agent < 58). Retry-ul e pe SERVER (`POST /api/fs/copy/{id}/retry`): un folder
+   se îmbină în exact folderul de data trecută, deci nu re-trimitem căi din browser.
 
    Rândul e `dir: 'copy'`: fără pauză (serverul nu are), fără „Insert path". Un reload al paginii
    pierde rândul, dar NU job-ul: copierea continuă pe server (n-o legăm de tab). Partea pură
@@ -19,7 +24,11 @@ const tr: T = (k, vars) => {
 
 export type Conflict = 'skip' | 'overwrite' | 'rename'
 
-export interface CopyFileRow { src: string; name: string; dst: string; size: number; done: number; state: string; error?: string; code?: string }
+export interface CopyFileRow {
+  src: string; name: string; dst: string; size: number; done: number; state: string; error?: string; code?: string
+  kind?: 'file' | 'dir' | 'link'; note?: string; note_code?: string
+}
+export interface CopyNote { code: string; msg: string }
 export interface CopyStatus {
   job_id: string
   state: 'running' | 'done' | 'failed' | 'cancelled'
@@ -30,6 +39,12 @@ export interface CopyStatus {
   total_bytes: number; done_bytes: number
   files_total: number; files_done: number; files_skipped: number; files_failed: number
   errors: CopyFileRow[]
+  // 3.6 (lipsesc pe un gateway mai vechi — tratate opţional)
+  folders_total?: number; folders_done?: number
+  modes?: boolean | null
+  notes?: CopyNote[]
+  current?: string[]
+  noted?: CopyFileRow[]; noted_total?: number
 }
 
 export interface StartCopyOpts {
@@ -54,17 +69,34 @@ export function fileErrText(e: CopyFileRow, t: T): string {
   return e.error || t('files.genericErr')
 }
 
+/** Rezumatul notelor: link-uri / fişiere speciale necopiate, permisiuni neaplicate, destinaţie
+    fără păstrarea permisiunilor (agent < 58). `noted` vine plafonat la 50 de rânduri de server —
+    numărăm ce vedem, iar restul (noted_total) intră la „necopiate". */
+export function copyNotes(s: CopyStatus, t: T): string[] {
+  const out: string[] = []
+  const noted = s.noted ?? []
+  const modeFailed = noted.filter((n) => n.note_code === 'copy.modeFailed').length
+  const notCopied = Math.max(0, (s.noted_total ?? noted.length) - modeFailed)
+  if (notCopied) out.push(t('transfers.copyNotCopied', { n: notCopied }))
+  if (modeFailed) out.push(t('transfers.copyModeFailed', { n: modeFailed }))
+  if ((s.notes ?? []).some((n) => n.code === 'copy.noModes')) out.push(t('transfers.copyNoModes'))
+  return out
+}
+
 /** Starea serverului → câmpurile rândului din widget. Pur (testat):
-    - running → running, % pe octeţi (0 până se ştie totalul);
-    - done → done (100%), cu „N sărite" în detaliu;
+    - running → running, % pe octeţi (0 până se ştie totalul), cu fişierul în lucru („→ nume");
+    - done → done (100%), cu „N sărite" + notele (necopiate, permisiuni) în detaliu;
     - failed → err, cu prima eroare (numele fişierului + motivul tradus) şi câte au eşuat;
     - cancelled → cancelled. */
 export function copyPatch(s: CopyStatus, t: T): Partial<UploadJob> {
   const pct = s.total_bytes > 0 ? Math.min(100, Math.round((s.done_bytes / s.total_bytes) * 100))
     : (s.state === 'done' ? 100 : 0)
   const parts = [t('transfers.copyFiles', { done: s.files_done, total: s.files_total })]
+  if (s.folders_total) parts.push(t('transfers.copyFolders', { done: s.folders_done ?? 0, total: s.folders_total }))
   if (s.files_skipped) parts.push(t('transfers.copySkipped', { n: s.files_skipped }))
   if (s.files_failed) parts.push(t('transfers.copyFailed', { n: s.files_failed }))
+  if (s.state === 'running' && s.current?.length) parts.unshift(`→ ${s.current.join(', ')}`)
+  else parts.push(...copyNotes(s, t))
   const base: Partial<UploadJob> = {
     size: s.total_bytes, pos: s.done_bytes, pct, detail: parts.join(' · '), dest: s.dst_dir,
   }
@@ -78,13 +110,16 @@ export function copyPatch(s: CopyStatus, t: T): Partial<UploadJob> {
   return { ...base, state: 'done', pct: 100, bytesPerSec: 0, etaSec: 0 }
 }
 
-/** Eticheta rândului: un fişier → numele lui; mai multe → „N fişiere". */
+/** Eticheta rândului: o cale → numele ei (fişier sau folder); mai multe → „N elemente". */
 export function copyLabel(paths: string[], t: T): string {
-  if (paths.length === 1) return paths[0].slice(paths[0].lastIndexOf('/') + 1)
+  if (paths.length === 1) {
+    const p = paths[0].replace(/\/+$/, '')
+    return p.slice(p.lastIndexOf('/') + 1)
+  }
   return t('transfers.copyNFiles', { n: paths.length })
 }
 
-interface CopyCtl { opts: StartCopyOpts; jobId: string; timer: number | null; lastPos: number; lastAt: number }
+interface CopyCtl { opts: StartCopyOpts; jobId: string; timer: number | null; lastPos: number; lastAt: number; label: string }
 const ctls = new Map<string, CopyCtl>()          // rowId → controller
 
 function poll(rowId: string): void {
@@ -135,13 +170,18 @@ export async function startCopy(o: StartCopyOpts): Promise<string> {
     await api(`/api/hosts/${o.dstHost}/fs?path=${encodeURIComponent(o.dstDir)}`)
     r = await post()
   }
+  return track(r, o, copyLabel(o.paths, tr), 1)
+}
+
+/** Rândul din Transferuri pentru un job pornit (start sau retry) + polling-ul lui. */
+function track(r: { job_id: string; dst_dir: string }, o: StartCopyOpts, label: string, attempts: number): string {
   const rowId = copyRowId(r.job_id)
   uploadStore.set({
     id: rowId, dir: 'copy', hostId: o.srcHost, hostName: `${o.srcName} → ${o.dstName}`,
-    dest: r.dst_dir, name: copyLabel(o.paths, tr), size: 0, pos: 0, pct: 0, bytesPerSec: 0, etaSec: null,
-    state: 'running', attempts: 1, detail: tr('transfers.copyFiles', { done: 0, total: o.paths.length }),
+    dest: r.dst_dir, name: label, size: 0, pos: 0, pct: 0, bytesPerSec: 0, etaSec: null,
+    state: 'running', attempts, detail: tr('transfers.copyFiles', { done: 0, total: o.paths.length }),
   })
-  ctls.set(rowId, { opts: { ...o, dstDir: r.dst_dir }, jobId: r.job_id, timer: null, lastPos: 0, lastAt: 0 })
+  ctls.set(rowId, { opts: { ...o, dstDir: r.dst_dir }, jobId: r.job_id, timer: null, lastPos: 0, lastAt: 0, label })
   poll(rowId)
   return rowId
 }
@@ -158,17 +198,25 @@ export async function cancelCopy(rowId: string): Promise<void> {
   } catch { uploadStore.patch(rowId, { state: 'cancelled', bytesPerSec: 0, etaSec: null }) }
 }
 
-/** Retry: doar fişierele eşuate, aceleaşi opţiuni (destinaţie, conflict) — un job NOU pe server. */
+/** Retry: un job NOU pe server cu ce a eşuat, aceleaşi opţiuni (`POST /api/fs/copy/{id}/retry`).
+    Serverul ştie arborele: un fişier dintr-un folder ajunge înapoi în ACELAŞI folder (şi la
+    „păstrează-le pe amândouă", unde folderul are alt nume pe destinaţie). Step-up ca la start. */
 export async function retryCopy(rowId: string): Promise<void> {
   const c = ctls.get(rowId)
   if (!c) return
+  const post = () => api<{ job_id: string; dst_dir: string }>(`/api/fs/copy/${c.jobId}/retry`, { method: 'POST' })
   try {
-    const s = await api<CopyStatus & { files?: CopyFileRow[] }>(`/api/fs/copy/${c.jobId}?files=1`)
-    const failed = (s.files ?? s.errors).filter((f) => f.state === 'err').map((f) => f.src)
-    if (!failed.length) return
+    let r: { job_id: string; dst_dir: string }
+    try { r = await post() } catch (e) {
+      if (!isStepupError(e)) throw e
+      await api(`/api/hosts/${c.opts.srcHost}/fs?path=${encodeURIComponent('~')}`)
+      await api(`/api/hosts/${c.opts.dstHost}/fs?path=${encodeURIComponent(c.opts.dstDir)}`)
+      r = await post()
+    }
+    const attempts = (uploadStore.get(rowId)?.attempts ?? 1) + 1
     ctls.delete(rowId)
     uploadStore.remove(rowId)
-    await startCopy({ ...c.opts, paths: failed })
+    track(r, c.opts, c.label, attempts)
   } catch (e) {
     uploadStore.patch(rowId, { state: 'err', error: errText(e, tr) })
   }

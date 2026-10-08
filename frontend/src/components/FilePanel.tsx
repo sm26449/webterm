@@ -349,7 +349,7 @@ export default function FilePanel(props: {
   }
 
   function openCopy() {
-    if (!listing || !picked.some((e) => !e.dir)) return
+    if (!listing || !picked.length) return
     setCopyItems(picked.map((e) => ({ name: e.name, path: join(listing.path, e.name), dir: e.dir, mode: e.mode })))
   }
 
@@ -872,9 +872,7 @@ export default function FilePanel(props: {
             <Button variant="ghost" size="sm" onClick={() => { setConfirmDel(null); setConfirmBulk(picked) }} disabled={busy}
               className="wt-touch">
               <TrashIcon />{t('files.delete')}</Button>
-            <Button variant="ghost" size="sm" onClick={openCopy} disabled={!picked.some((e) => !e.dir)}
-              title={picked.some((e) => !e.dir) ? t('copy.open') : t('copy.foldersNext')}
-              className="wt-touch">
+            <Button variant="ghost" size="sm" onClick={openCopy} title={t('copy.open')} className="wt-touch">
               <CopyIcon />{t('copy.open')}</Button>
             <Button variant="ghost" size="sm" onClick={() => setSelection(EMPTY_SELECTION)} className="wt-touch ml-auto">
               {t('files.selClear')}</Button>

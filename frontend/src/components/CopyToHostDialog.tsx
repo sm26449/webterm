@@ -13,15 +13,18 @@ import { FolderIcon, LevelUpIcon } from './Icons'
    şi regula „dacă există". Copierea rulează pe gateway (lib/copyjobs.ts) şi apare în Transferuri;
    dialogul se închide imediat ce job-ul a pornit.
 
-   Limitele se spun AICI, înainte de click, nu după: folderele nu se copiază (vin cu următorul
-   update de agent), iar permisiunile nu se păstrează — un fişier privat (ex. 0600) aterizează cu
-   permisiunile implicite ale destinaţiei, de obicei 0644. */
+   Limitele se spun AICI, înainte de click, nu după. Folderele (3.6) se copiază cu tot conţinutul;
+   permisiunile se păstrează doar dacă agentul DESTINAŢIEI e ≥ 58 (op-ul `fs_chmod`) — altfel
+   spunem, pentru hostul ales, că un fişier privat (ex. 0600) aterizează cu permisiunile implicite
+   (de obicei 0644) şi că scripturile îşi pierd bitul de execuţie. */
 
 export interface CopyItem { name: string; path: string; dir: boolean; mode: number }
 interface DirEntry { name: string; dir: boolean }
 interface Listing { path: string; parent: string; entries: DirEntry[]; truncated: boolean }
 
 const LAST_DIR = (hostId: number) => `wt_copy_dir_${hostId}`
+/** agentul de la care destinaţia păstrează permisiunile (op-ul `fs_chmod`) */
+const COPY_MODES_MIN_AGENT = 58
 const LAST_CONFLICT = 'wt_copy_conflict'
 
 export default function CopyToHostDialog(props: {
@@ -36,8 +39,8 @@ export default function CopyToHostDialog(props: {
   useFocusTrap(ref, props.onClose)
   const files = useMemo(() => props.items.filter((i) => !i.dir), [props.items])
   const folders = props.items.length - files.length
-  // fişier „privat" = fără niciun drept pentru grup/alţii (0600, 0400…): pe destinaţie va primi
-  // permisiunile implicite (umask-ul agentului) — o cheie SSH ar deveni citibilă de alţii
+  // fişier „privat" = fără niciun drept pentru grup/alţii (0600, 0400…): pe o destinaţie cu agent
+  // < 58 primeşte permisiunile implicite (umask-ul agentului) — o cheie SSH ar deveni citibilă
   const privateN = files.filter((f) => (f.mode & 0o077) === 0 && f.mode !== 0).length
 
   const [hosts, setHosts] = useState<Host[] | null>(null)
@@ -89,14 +92,17 @@ export default function CopyToHostDialog(props: {
     void browse(hostId, last)
   }
 
+  const target = hosts?.find((h) => h.id === dst)
+  // `fs_chmod` există din agentul 58; versiune necunoscută = tratată ca veche (spunem, nu promitem)
+  const keepsModes = (target?.agent_version ?? 0) >= COPY_MODES_MIN_AGENT
+
   const submit = async () => {
-    if (dst == null || !files.length || busy) return
-    const target = hosts?.find((h) => h.id === dst)
+    if (dst == null || !props.items.length || busy) return
     setBusy(true); setErr('')
     try {
       await startCopy({
         srcHost: props.srcHost.id, srcName: props.srcHost.name, dstHost: dst, dstName: target?.name ?? `#${dst}`,
-        paths: files.map((f) => f.path), dstDir: dir.trim() || '~', onConflict: conflict,
+        paths: props.items.map((f) => f.path), dstDir: dir.trim() || '~', onConflict: conflict,
       })
       lsSet(LAST_DIR(dst), dir.trim() || '~')
       lsSet(LAST_CONFLICT, conflict)
@@ -119,7 +125,8 @@ export default function CopyToHostDialog(props: {
         onClick={(e) => e.stopPropagation()}
         onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); props.onClose() } }}>
         <h2 id="wt-copy-title" className="text-base font-semibold">
-          {t('copy.title', { count: files.length, host: props.srcHost.name })}
+          {folders > 0 ? t('copy.titleItems', { count: props.items.length, host: props.srcHost.name })
+            : t('copy.title', { count: files.length, host: props.srcHost.name })}
         </h2>
         <p className="mt-1 text-slate-400">{t('copy.serverSide')}</p>
 
@@ -169,16 +176,19 @@ export default function CopyToHostDialog(props: {
           </div>
         </fieldset>
 
-        {folders > 0 && <p className="mt-3 wt-warn">{t('copy.foldersSkipped', { count: folders })}</p>}
-        {privateN > 0 && <p className="mt-2 wt-warn">{t('copy.privateWarn', { count: privateN })}</p>}
+        {folders > 0 && <p className="mt-3 text-slate-300">{t('copy.foldersInfo', { count: folders })}</p>}
+        {target && (keepsModes
+          ? <p className="mt-2 text-slate-400" data-testid="wt-copy-modes">{t('copy.modesKept')}</p>
+          : <p className="mt-2 wt-warn" data-testid="wt-copy-modes">{t('copy.modesLost', { host: target.name })}</p>)}
+        {!keepsModes && privateN > 0 && <p className="mt-2 wt-warn">{t('copy.privateWarn', { count: privateN })}</p>}
         <p className="mt-2 text-2xs text-slate-500">{t('copy.limits')}</p>
         {err && <p role="alert" className="mt-2 wt-danger">{err}</p>}
 
         <div className="mt-4 flex justify-end gap-2">
           <button type="button" onClick={props.onClose} className={`${BTN} text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800`}>{t('files.cancel')}</button>
-          <button type="button" onClick={() => void submit()} disabled={busy || dst == null || !files.length || !!listErr}
+          <button type="button" onClick={() => void submit()} disabled={busy || dst == null || !props.items.length || !!listErr}
             className={`${BTN} bg-sky-600 font-medium text-white hover:bg-sky-700 disabled:opacity-40`}>
-            {t('copy.start', { count: files.length })}
+            {folders > 0 ? t('copy.startItems', { count: props.items.length }) : t('copy.start', { count: files.length })}
           </button>
         </div>
       </div>

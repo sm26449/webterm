@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { CopyStatus, cancelCopy, copyLabel, copyPatch, copyRowId, dismissCopy, fileErrText, startCopy } from './copyjobs'
+import { CopyStatus, cancelCopy, canRetryCopy, copyLabel, copyNotes, copyPatch, copyRowId, dismissCopy, fileErrText, retryCopy, startCopy } from './copyjobs'
 import { numberedName } from './downloads'
 import { canPause, isCopy, sizeKnown, uploadStore } from './uploadStore'
 
@@ -51,8 +51,28 @@ describe('copyPatch: starea serverului → rândul din Transferuri', () => {
     expect(p.state).toBe('cancelled')
     expect(p.bytesPerSec).toBe(0)
   })
+  it('foldere (3.6): „folders d/t" în detaliu, fişierul în lucru în faţă cât rulează', () => {
+    const p = copyPatch(st({ folders_total: 3, folders_done: 1, current: ['proj/run.sh'] }), t)
+    expect(p.detail).toContain('transfers.copyFolders{"done":1,"total":3}')
+    expect(p.detail!.startsWith('→ proj/run.sh')).toBe(true)
+  })
+  it('rezumatul de la final: necopiate (link-uri / speciale), permisiuni neaplicate, agent < 58', () => {
+    const noted = [
+      { src: '/p/ln', name: 'p/ln', dst: '', size: 0, done: 0, state: 'skipped', note: 'symbolic link', note_code: 'copy.symlinkSkipped' },
+      { src: '/p/x', name: 'p/x', dst: '/d/p/x', size: 1, done: 1, state: 'done', note: 'permissions not applied: x', note_code: 'copy.modeFailed' },
+    ]
+    const s = st({ state: 'done', noted, noted_total: 3, notes: [{ code: 'copy.noModes', msg: 'm' }] })
+    expect(copyNotes(s, t)).toEqual(['transfers.copyNotCopied{"n":2}', 'transfers.copyModeFailed{"n":1}', 'transfers.copyNoModes'])
+    expect(copyPatch(s, t).detail).toContain('transfers.copyNoModes')
+  })
+  it('gateway vechi (fără câmpurile 3.6): nicio notă, niciun „folders"', () => {
+    const p = copyPatch(st({ state: 'done' }), t)
+    expect(p.detail).not.toContain('copyFolders')
+    expect(copyNotes(st(), t)).toEqual([])
+  })
   it('eticheta: un fişier = numele lui; mai multe = „N fişiere"', () => {
     expect(copyLabel(['/a/b/raport.pdf'], t)).toBe('raport.pdf')
+    expect(copyLabel(['/a/b/proj/'], t)).toBe('proj')
     expect(copyLabel(['/a/x', '/a/y'], t)).toBe('transfers.copyNFiles{"n":2}')
   })
 })
@@ -90,6 +110,7 @@ describe('motorul de copiere: POST → rând în store → polling → done / ca
       const method = init?.method ?? 'GET'
       calls.push({ url, method, body: init?.body as string | undefined })
       const json = url === '/api/fs/copy' && method === 'POST' ? { job_id: 'abc', dst_dir: '/home/u/in' }
+        : url === '/api/fs/copy/abc/retry' ? { job_id: 'r2', dst_dir: '/home/u/in' }
         : method === 'DELETE' ? { ...status, state: 'cancelled' } : status
       return new Response(JSON.stringify(json), { status: 200, headers: { 'Content-Type': 'application/json' } })
     }))
@@ -120,6 +141,21 @@ describe('motorul de copiere: POST → rând în store → polling → done / ca
     const polls = calls.filter((c) => c.url.startsWith('/api/fs/copy/abc')).length
     await vi.advanceTimersByTimeAsync(5000)
     expect(calls.filter((c) => c.url.startsWith('/api/fs/copy/abc')).length).toBe(polls)   // nu mai pollează
+  })
+  it('retry: POST /retry pe SERVER (nu re-trimite căi), rândul vechi înlocuit de unul nou', async () => {
+    const id = await startCopy({ srcHost: 1, srcName: 'a', dstHost: 2, dstName: 'b', paths: ['/s/proj'], dstDir: '/in', onConflict: 'rename' })
+    status = st({ job_id: 'abc', state: 'failed', files_failed: 1 })
+    await vi.advanceTimersByTimeAsync(1100)
+    expect(uploadStore.get(id)!.state).toBe('err')
+    expect(canRetryCopy(id)).toBe(true)
+    await retryCopy(id)
+    expect(calls.some((c) => c.method === 'POST' && c.url === '/api/fs/copy/abc/retry')).toBe(true)
+    expect(calls.filter((c) => c.url === '/api/fs/copy' && c.method === 'POST').length).toBe(1)
+    expect(uploadStore.get(id)).toBeUndefined()
+    const row = uploadStore.get(copyRowId('r2'))!
+    expect(row.name).toBe('proj')
+    expect(row.attempts).toBe(2)
+    dismissCopy(copyRowId('r2'))
   })
   it('cancel: DELETE pe job + rândul trece în cancelled', async () => {
     const id = await startCopy({ srcHost: 1, srcName: 'a', dstHost: 2, dstName: 'b', paths: ['/s/a'], dstDir: '/in', onConflict: 'skip' })
