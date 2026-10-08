@@ -1134,6 +1134,16 @@ const ro: Lang = {
     'err.replay.tooMany': "Prea multe linkuri de replay active — revocă întâi câteva.",
     'err.replay.missing': "Linkul de replay nu mai există.",
     'err.replay.rateLimited': "Prea multe cereri — reîncearcă în {retry} s.",
+    // ── 3.5.13: reluarea download-urilor după reload ──
+    'transfers.dlInterrupted': "Întrerupt",
+    'transfers.dlStartOver': "De la capăt",
+    'transfers.dlChanged': "Fișierul s-a schimbat pe host de la începutul descărcării — apasă De la capăt ca să-l descarci din nou",
+    'transfers.dlPermDenied': "Permisiunea de a scrie fișierul nu a fost acordată — apasă Reia ca să fii întrebat din nou",
+    'transfers.dlFileGone': "Fișierul parțial a fost mutat sau șters — Renunță, apoi descarcă din nou",
+    'transfers.dlSaving': "se salvează progresul pe disc…",
+    'transfers.dlPreparing': "se redeschide fișierul parțial…",
+    'transfers.dlNoSeek': "Browserul nu poate continua scrierea într-un fișier existent",
+    'transfers.dlStepup': "Hostul cere 2FA — confirmă, apoi apasă Reia",
     // ── 3.5.11: istoricul de alerte în aplicaţie + toggle-uri per eveniment ──
     'alerts.title': "Alerte",
     'alerts.bellAria': "Alerte",

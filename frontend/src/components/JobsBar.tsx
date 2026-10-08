@@ -3,7 +3,7 @@ import { copyText } from '../lib/clipboard'
 import { useI18n } from '../lib/i18n'
 import { insertPathInto } from '../lib/transfers'
 import { cancelUpload, dirName, discardUpload, dismissUpload, fmtBytes, fmtEta, fmtRate, openFilesAt, pauseUpload, resumeUpload, retryUpload } from '../lib/uploads'
-import { cancelDownload, dismissDownload, pauseDownload, resumeDownload, retryDownload } from '../lib/downloads'
+import { cancelDownload, discardDownload, dismissDownload, pauseDownload, restartDownload, resumeDownload, resumeInterrupted, retryDownload } from '../lib/downloads'
 import { canRetryCopy, cancelCopy, dismissCopy, retryCopy } from '../lib/copyjobs'
 import { UploadJob, canPause, isActive, isCopy, isDownload, sizeKnown } from '../lib/uploadStore'
 import { CopyIcon, DownloadIcon, UploadIcon } from './Icons'
@@ -48,6 +48,17 @@ export function jobStatusText(j: UploadJob, t: (k: string, v?: Record<string, st
       : j.state === 'done' ? `100% · ${t('jobs.stateDone')}` : t('jobs.stateCancelled')
     return `${head} · ${j.detail}`
   }
+  // download: nota de stare (checkpoint pe disc, permisiune refuzată, fişier parţial dispărut)
+  // se adaugă la textul stării; un download întrerupt într-o sesiune anterioară e „Întrerupt"
+  // (reluabil din rând), nu „orfan" ca la upload (acolo re-tragi fişierul)
+  if (isDownload(j) && j.state !== 'err' && j.state !== 'done') {
+    const base = j.state === 'orphan' ? `${j.pct}% · ${t('transfers.dlInterrupted')}` : jobStatusBase(j, t)
+    return j.detail ? `${base} · ${j.detail}` : base
+  }
+  return jobStatusBase(j, t)
+}
+
+function jobStatusBase(j: UploadJob, t: (k: string, v?: Record<string, string | number>) => string): string {
   switch (j.state) {
     case 'running': return `${j.pct}% · ${fmtRate(j.bytesPerSec)} · ${t('jobs.eta')} ${fmtEta(j.etaSec, t)}`
     case 'stalled': return `${j.pct}% · ${t('jobs.stateStalled')}`
@@ -100,7 +111,7 @@ export function JobRow(props: { job: UploadJob; hostName: string; insertSid?: st
       <span className="hidden shrink-0 font-mono tabular-nums text-slate-500 md:inline" title={`${fmtBytes(j.pos)} / ${fmtBytes(j.size)}`}>{known ? fmtBytes(j.size) : fmtBytes(j.pos)}</span>
       <span className={`font-mono tabular-nums sm:hidden ${STATE_CLS[j.state]}`}>{known ? `${j.pct}%` : fmtBytes(j.pos)}</span>
       {/* acţiuni după stare — nume accesibil = acţiune + fişier, ca în FilePanel */}
-      {(j.state === 'err' || j.state === 'stalled') && (!copy || canRetryCopy(j.id)) && (
+      {(j.state === 'err' || j.state === 'stalled') && (!copy || canRetryCopy(j.id)) && !j.restartable && (
         <button type="button" onClick={onRetry} className={`${BTN} wt-info`}
           aria-label={`${t('jobs.retry')} ${j.name}`}>{t('jobs.retry')}</button>
       )}
@@ -113,7 +124,17 @@ export function JobRow(props: { job: UploadJob; hostName: string; insertSid?: st
         <button type="button" onClick={onResume} className={`${BTN} wt-info`}
           aria-label={`${t('jobs.resume')} ${j.name}`}>{t('jobs.resume')}</button>
       )}
-      {j.state === 'orphan' && (
+      {/* download întrerupt (sesiune anterioară): Resume cere permisiunea de scriere pe fişier — din
+          click, de aceea rândul cheamă direct motorul */}
+      {j.state === 'orphan' && down && (
+        <button type="button" onClick={() => resumeInterrupted(j.id)} className={`${BTN} wt-info`}
+          aria-label={`${t('jobs.resume')} ${j.name}`}>{t('jobs.resume')}</button>
+      )}
+      {j.restartable && down && (j.state === 'err' || j.state === 'orphan') && (
+        <button type="button" onClick={() => restartDownload(j.id)} className={`${BTN} wt-warn`}
+          aria-label={`${t('transfers.dlStartOver')} ${j.name}`}>{t('transfers.dlStartOver')}</button>
+      )}
+      {j.state === 'orphan' && !down && (
         <button type="button" onClick={() => openFilesAt(j.hostId, dirName(j.dest))}
           className={`${BTN} wt-info`} aria-label={`${t('jobs.openFolder')} ${j.name}`}>
           {t('jobs.openFolder')}
@@ -124,7 +145,7 @@ export function JobRow(props: { job: UploadJob; hostName: string; insertSid?: st
           aria-label={`${t('jobs.cancel')} ${j.name}`}>{t('jobs.cancel')}</button>
       )}
       {j.state === 'orphan' && (
-        <button type="button" onClick={() => discardUpload(j.id)} className={`${BTN} wt-danger`}
+        <button type="button" onClick={() => (down ? discardDownload(j.id) : discardUpload(j.id))} className={`${BTN} wt-danger`}
           aria-label={`${t('jobs.discard')} ${j.name}`}>{t('jobs.discard')}</button>
       )}
       {/* done upload: calea fişierului urcat e lucrul util — pentru un CLI care ia căi (Claude Code,

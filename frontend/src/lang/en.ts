@@ -1118,6 +1118,16 @@ const en: Lang = {
     'err.replay.tooMany': "Too many active replay links — revoke some first.",
     'err.replay.missing': "That replay link no longer exists.",
     'err.replay.rateLimited': "Too many requests — retry in {retry} s.",
+    // ── 3.5.13: reluarea download-urilor după reload ──
+    'transfers.dlInterrupted': "Interrupted",
+    'transfers.dlStartOver': "Start over",
+    'transfers.dlChanged': "The file changed on the host since the download started — Start over to download it again",
+    'transfers.dlPermDenied': "Permission to write the file was not granted — Resume to ask again",
+    'transfers.dlFileGone': "The partial file was moved or deleted — Discard, then download again",
+    'transfers.dlSaving': "saving progress to disk…",
+    'transfers.dlPreparing': "reopening the partial file…",
+    'transfers.dlNoSeek': "This browser cannot continue writing into an existing file",
+    'transfers.dlStepup': "This host requires 2FA — confirm it, then Resume",
     // ── 3.5.11: istoricul de alerte în aplicaţie + toggle-uri per eveniment ──
     'alerts.title': "Alerts",
     'alerts.bellAria': "Alerts",
