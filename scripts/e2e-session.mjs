@@ -506,7 +506,8 @@ try {
   // aici nu e că sidebarul dispare, ci că EXISTĂ cale de întoarcere: ☰ e ascuns pe desktop
   // exact cât timp sidebarul e vizibil, iar plierea fără buton de redeschidere ar fi o capcană.
   const sidebar = page.locator('.wt-sidebar').first()
-  const reopen  = page.locator('button[aria-label="Open host list"]:visible').first()
+  // `^=`: cu alerte necitite numele accesibil devine „Open host list — unread alerts: N" (3.5.15)
+  const reopen  = page.locator('button[aria-label^="Open host list"]:visible').first()
   check('sidebarul e vizibil implicit', await visible(sidebar))
   check('☰ e ascuns cât timp sidebarul e vizibil', !(await reopen.isVisible().catch(() => false)))
   await page.click('button[title="Hide the host list"]')

@@ -207,7 +207,7 @@ async function auditDevice(cfg) {
     reached.add('dashboard')
 
     // sidebar (drawer pe mobil — pe tablete e permanent vizibil)
-    const menu = page.locator('button[aria-label="Open host list"]').first()
+    const menu = page.locator('button[aria-label^="Open host list"]').first()
     if (await menu.isVisible().catch(() => false)) {
       await menu.click()
       await page.waitForTimeout(700)
