@@ -26,6 +26,8 @@ const AiToolsPanel = lazy(() => import('./AiToolsPanel'))
 import ToolboxPanel from './ToolboxPanel'
 import { ArrowDownIcon, ArrowUpIcon, CheckIcon, ChevronIcon, ClockIcon, CloseIcon, CollapseLeftIcon, CopyIcon, DockerIcon, DownloadIcon, ExternalLinkIcon, EyeIcon, FileIcon, FilesIcon, FolderIcon, ForwardIcon, FullscreenIcon, GitBranchIcon, KeyIcon, KeyboardIcon, LockIcon, MenuIcon, MoreIcon, NoteIcon, PasteIcon, PencilIcon, PlayIcon, PopoutIcon, RefreshIcon, SearchIcon, ServicesIcon, ShareIcon, ShieldIcon, SparkleIcon, StopIcon, TerminalPromptIcon, ToolboxIcon, TrashIcon, UploadIcon, WarningIcon } from './Icons'
 import { Button, IconButton } from './ui'
+import { MenuUnreadBadge, useUnreadAlerts } from './AlertsPanel'
+import { menuLabel } from '../lib/alerts'
 import MobileKeybar from './MobileKeybar'
 import SnippetsMenu from './SnippetsMenu'
 import TranscriptPlayer from './TranscriptPlayer'
@@ -145,6 +147,7 @@ export default function SessionView(props: {
 }) {
   const { session } = props
   const { t } = useI18n()
+  const unreadAlerts = useUnreadAlerts()
   const containerRef = useRef<HTMLDivElement>(null)
   // lățimea REALĂ a pane-ului (nu a viewportului): sub prag, panourile laterale
   // devin drawer overlay ca să nu strivească terminalul (split pe iPad)
@@ -1780,8 +1783,10 @@ export default function SessionView(props: {
       {/* min-w-0 + gap mai mic pe mobil: fără ele, badge-ul hostului și butoanele
           împing toolbarul în afara ecranului (iPhone SE / Galaxy S9) */}
       <header className="flex min-w-0 items-center gap-1 border-b border-ink-800 bg-ink-900 px-2 py-2 md:gap-2 md:px-3">
-        <IconButton size="md" onClick={props.onMenu} label={t('session.openHostList')} className={props.sidebarCollapsed ? '' : 'md:hidden'}>
+        <IconButton size="md" onClick={props.onMenu} label={menuLabel(t('session.openHostList'), unreadAlerts, t)}
+          className={`relative ${props.sidebarCollapsed ? '' : 'md:hidden'}`}>
           <MenuIcon />
+          <MenuUnreadBadge n={unreadAlerts} />
         </IconButton>
         {props.host && (
           <span className="flex min-w-0 shrink items-center gap-1.5 rounded-md px-1.5 py-1"

@@ -11,6 +11,8 @@ import { pressureColor, pressureTextColor } from '../lib/thresholds'
 import { updatesSignal, useUpdatesPref } from '../lib/updatesPref'
 import { ArrowRightIcon, ArrowUpIcon, ArrowUpRightIcon, DockerIcon, DownloadIcon, EyeIcon, FilesIcon, ForwardIcon, LinkIcon, MenuIcon, NoteIcon, PencilIcon, PlayIcon, PlugIcon, PlusIcon, PopoutIcon, RefreshIcon, ServerIcon, ServicesIcon, ShieldIcon, SparkleIcon, SplitIcon, StethoscopeIcon, TerminalPromptIcon, ToolboxIcon, TrashIcon } from './Icons'
 import { Badge, Button, Card, EmptyState, IconButton, cardClass, iconButtonClass } from './ui'
+import { MenuUnreadBadge, useUnreadAlerts } from './AlertsPanel'
+import { menuLabel } from '../lib/alerts'
 import SessionPreview from './SessionPreview'
 import Sparkline from './Sparkline'
 import TranscriptPlayer from './TranscriptPlayer'
@@ -54,6 +56,7 @@ export default function HostOverview(props: {
   onEdit: (host: Host) => void
 }) {
   const { t } = useI18n()
+  const unreadAlerts = useUnreadAlerts()
   // confirm() nativ → dialog propriu (vezi lib/confirm.tsx: de ce)
   const { confirm } = useConfirm()
   const { host } = props
@@ -177,8 +180,10 @@ export default function HostOverview(props: {
     <div className="wt-canvas flex h-full min-w-0 flex-1 flex-col">
       {/* ── header ── */}
       <div className="flex flex-wrap items-start gap-x-4 gap-y-3 border-b border-ink-800 px-4 pt-4 pb-3 sm:px-6">
-        <IconButton size="md" onClick={props.onMenu} className={props.sidebarCollapsed ? '' : 'md:hidden'} label={t('host.openHostListAria')}>
+        <IconButton size="md" onClick={props.onMenu} className={`relative ${props.sidebarCollapsed ? '' : 'md:hidden'}`}
+          label={menuLabel(t('host.openHostListAria'), unreadAlerts, t)}>
           <MenuIcon />
+          <MenuUnreadBadge n={unreadAlerts} />
         </IconButton>
         <div className="relative shrink-0">
           <div className="grid h-11 w-11 place-items-center rounded-xl bg-ink-800 text-slate-400 ring-1 ring-ink-700">

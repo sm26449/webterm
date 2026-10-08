@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { AlertItem, AlertPref, applyPref, badgeText, groupPrefs, localizeAlert, mergePage, normSeverity, severityTone } from './alerts'
+import { AlertItem, AlertPref, applyPref, badgeText, groupPrefs, localizeAlert, menuLabel, mergePage, normSeverity, severityTone } from './alerts'
 import en from '../lang/en'
 import ro from '../lang/ro'
 
@@ -130,6 +130,21 @@ describe('localizeAlert (3.5.15)', () => {
         expect(lang[`alertmsg.${k}.title`], k).toBeTruthy()
         expect(lang[`alertmsg.${k}.details`], k).toBeTruthy()
       }
+    }
+  })
+})
+
+describe('menuLabel (3.5.15, ☰ on phones)', () => {
+  const t = (k: string, v?: Record<string, string | number>) => `${k}|${v?.label}|${v?.n}`
+  it('no unread → the plain label; unread → the count is in the accessible name, capped like the badge', () => {
+    expect(menuLabel('Open host list', 0, t)).toBe('Open host list')
+    expect(menuLabel('Open host list', 3, t)).toBe('alerts.menuAriaUnread|Open host list|3')
+    expect(menuLabel('Open host list', 250, t)).toBe('alerts.menuAriaUnread|Open host list|99+')
+  })
+  it('the catalog entry names both the button and the count in EN and RO', () => {
+    for (const lang of [en.strings, ro.strings]) {
+      expect(lang['alerts.menuAriaUnread']).toContain('{label}')
+      expect(lang['alerts.menuAriaUnread']).toContain('{n}')
     }
   })
 })

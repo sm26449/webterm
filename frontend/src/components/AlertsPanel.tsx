@@ -27,9 +27,27 @@ function SevIcon(props: { sev: string }) {
   return <WarningIcon size={12} />
 }
 
+/** Necitite din store-ul COMUN (un singur poll pe pagină, oricâţi abonaţi — lib/alerts.ts). */
+export function useUnreadAlerts(): number {
+  return useSyncExternalStore(unreadStore.subscribe, unreadStore.snapshot)
+}
+
+/** Indicatorul de pe ☰: punct + cifră (nu doar culoare), decorativ — numărul e deja în numele
+    accesibil al butonului. `inline` = în fluxul textului (butonul cu etichetă de pe Dashboard). */
+export function MenuUnreadBadge(props: { n: number; inline?: boolean }) {
+  if (props.n <= 0) return null
+  return (
+    <span aria-hidden="true" data-testid="wt-menu-unread"
+      className={`${props.inline ? 'ml-1' : 'absolute -right-1 -top-1'} inline-flex min-w-4 items-center justify-center gap-0.5 rounded-full bg-rose-600 px-1 text-2xs font-semibold leading-4 text-white ring-2 ring-ink-900`}>
+      <span className="h-1.5 w-1.5 rounded-full bg-white" />
+      {badgeText(props.n)}
+    </span>
+  )
+}
+
 export function AlertsBell(props: { hosts: Host[]; onOpenHost: (id: number) => void; onOpenSettings: () => void }) {
   const { t } = useI18n()
-  const unread = useSyncExternalStore(unreadStore.subscribe, unreadStore.snapshot)
+  const unread = useUnreadAlerts()
   const [open, setOpen] = useState(false)
   const label = unread > 0 ? t('alerts.bellAriaUnread', { n: unread }) : t('alerts.bellAria')
   return (

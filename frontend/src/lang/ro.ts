@@ -1138,6 +1138,7 @@ const ro: Lang = {
     'alertmsg.backup_failed.details': "Încărcarea programată a backup-ului pe '{provider}' a eşuat de {fails} ori la rând.\n\n{age}\n\nUltima eroare: {error}\n\nCauze frecvente: autorizare OAuth expirată (reconectează din Setări → Backup), o parolă de criptare greşită, sau serverul SFTP/FTPS e inaccesibil ori şi-a schimbat cheia de host. Până se rezolvă, nu ai o copie off-host recentă a seifului.",
     'alertmsg.backup_local_failed.title': "Backup-ul programat EŞUEAZĂ",
     'alertmsg.backup_local_failed.details': "Backup-ul programat de pe gateway-ul WebTerm a eşuat.\n\n{age}\n\nUltima eroare: {error}\n\nCauze frecvente: discul gateway-ului e plin, baza de date e blocată de alt proces, sau volumul de date e read-only. Până se rezolvă, snapshot-urile locale expiră prin retenţie şi nu există o copie recentă a seifului — descarcă manual un backup din Setări → Backup dacă nu poţi rezolva imediat.",
+    'alerts.menuAriaUnread': "{label} — alerte necitite: {n}",
     'err.stepup.needsFactor': "Configurează un passkey sau un cod de autentificare (TOTP) ca să accesezi hosturile care cer 2FA. Parola contului singură nu mai e acceptată.",
     'err.history.ssoReauth': "Re-autentifică-te cu SSO sau cu un passkey ca să ştergi istoricul comenzilor.",
     'err.history.denied': "Neînregistrat.",

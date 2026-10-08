@@ -10,6 +10,8 @@ import type { SettingsTarget } from '../lib/settingsIndex'
 import SharesModal from './SharesModal'
 import { fmt } from '../lib/shortcuts'
 import { Badge, Button, EmptyState, eyebrow } from './ui'
+import { MenuUnreadBadge, useUnreadAlerts } from './AlertsPanel'
+import { menuLabel } from '../lib/alerts'
 
 // culoare + glif per tip de app (dalele din strip + butoanele de pe host)
 const APP_COLOR: Record<string, string> = {
@@ -39,6 +41,7 @@ export default function Dashboard(props: {
   onOpenStatus: () => void
 }) {
   const { t } = useI18n()
+  const unreadAlerts = useUnreadAlerts()
   const [sharesOpen, setSharesOpen] = useState(false)
   // „Revocă tot"/„Revocă" din inventar schimbă rândul „Link-uri de share" → cardul se reîncarcă
   const [secRefresh, setSecRefresh] = useState(0)
@@ -84,8 +87,10 @@ export default function Dashboard(props: {
     // `wt-canvas`: dashboard-ul urmează tema aleasă (index.css) — e „acasă", nu terminal
     <div data-testid="dashboard" className="wt-canvas h-full overflow-y-auto">
       <div className="mx-auto max-w-7xl px-4 py-6 sm:px-8 sm:py-8">
-        <Button variant="secondary" size="lg" onClick={props.onOpenSidebar} className="wt-touch mb-4 md:hidden">
+        <Button variant="secondary" size="lg" onClick={props.onOpenSidebar} className="wt-touch mb-4 md:hidden"
+          aria-label={menuLabel(t('dashboard.openHostList'), unreadAlerts, t)}>
           <MenuIcon /> {t('dashboard.openHostList')}
+          <MenuUnreadBadge n={unreadAlerts} inline />
         </Button>
         {/* antet + sumar flotă + comenzi */}
         <div className="flex flex-wrap items-end justify-between gap-4">

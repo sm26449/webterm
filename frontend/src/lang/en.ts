@@ -1121,6 +1121,7 @@ const en: Lang = {
     'alertmsg.backup_failed.details': "The scheduled backup upload to '{provider}' has failed {fails} time(s) in a row.\n\n{age}\n\nLast error: {error}\n\nCommon causes: expired OAuth authorisation (reconnect in Settings → Backup), a wrong encryption passphrase, or the SFTP/FTPS server being unreachable or its host key having changed. Until fixed, you have no fresh off-host copy of the vault.",
     'alertmsg.backup_local_failed.title': "Scheduled backup is FAILING",
     'alertmsg.backup_local_failed.details': "The scheduled backup on the WebTerm gateway failed.\n\n{age}\n\nLast error: {error}\n\nCommon causes: the gateway disk is full, the database is locked by another process, or the data volume is read-only. Until fixed, the local snapshots age out under retention and there is no fresh copy of the vault — download a backup manually from Settings → Backup if you cannot fix it right away.",
+    'alerts.menuAriaUnread': "{label} — unread alerts: {n}",
     'err.stepup.needsFactor': "Set up a passkey or an authenticator code (TOTP) to access hosts that require 2FA. The account password alone is no longer accepted.",
     'err.history.ssoReauth': "Re-authenticate with SSO or a passkey to clear the command history.",
     'err.history.denied': "Not recorded.",

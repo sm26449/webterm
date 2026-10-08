@@ -112,6 +112,12 @@ export function localizeAlert(a: AlertItem, t: TFn): { title: string; details: s
   return { title, details: tr(base + '.details', p) ?? a.details }
 }
 
+/** Numele accesibil al butonului ☰ când există alerte necitite (3.5.15): pe telefon clopoţelul
+    stă DOAR în drawer, deci ☰ e singurul loc vizibil care poate spune „ai alerte". */
+export function menuLabel(label: string, unread: number, t: TFn): string {
+  return unread > 0 ? t('alerts.menuAriaUnread', { label, n: badgeText(unread) }) : label
+}
+
 /** combină o pagină nouă (paginare „încarcă mai multe") fără duplicate, newest-first */
 export function mergePage(cur: AlertItem[], next: AlertItem[]): AlertItem[] {
   const seen = new Set(cur.map((a) => a.id))
