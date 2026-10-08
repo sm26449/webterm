@@ -70,6 +70,42 @@ what it does not cover, is in [Security](SECURITY-FEATURES.md) and
 - **Roster** of viewers (how many / who) and **kick** from the session; optional
   watermark over the share
 
+### Replay links
+
+A **replay link** shares the *recording* of one **closed** session with someone who has no
+account — a vendor, a colleague on another team, an incident write-up. Open the player
+(history replay) on a closed session and choose **Share replay**.
+
+- **What the guest gets**: a page with only the player for that one recording (play/pause,
+  seek, speed, the *Text* tab) — no app chrome, no other API, no download button. The page is
+  `noindex`, sends no referrer, and the recording is served `Cache-Control: no-store`.
+- **Expiry is mandatory**: 1 hour, 24 hours (default) or 7 days. Several links per recording
+  are allowed, each with an optional **label** ("vendor ticket 4711") so you know which one
+  to revoke.
+- **Mask likely secrets** (on by default): values that look like secrets are replaced with
+  asterisks — `wt_` tokens, `Bearer …`, `password=` / `token=` / `*_secret_*=` values,
+  credentials in URLs, private-key blocks, AWS access key IDs, GitHub / GitLab / Slack /
+  Stripe / Google keys, `sk-…` API keys, JWTs. The masking runs over the whole output stream,
+  so a secret split across two network chunks is still found; the replacement keeps the same
+  width and leaves escape sequences intact, so timing and screen layout do not change.
+  **It is best-effort** and the dialog says so: a secret with no recognisable shape, or one a
+  full-screen app paints character by character with cursor moves in between, stays visible.
+  What you *type* is never recorded in the first place.
+- **The link is shown once**: only a hash of the token is stored. The list (in the dialog and
+  under *Share links* on the dashboard) shows each link's label, expiry, whether it is masked,
+  **how many times it was opened and when / from which IP it was opened last** — with
+  **Revoke** per link and **Revoke all my replay links**.
+- **Every open is logged and alerted**: an audit-log row (actor `replay-link #N`, client IP,
+  truncated user agent) and an in-app alert to the account that created the link — at most
+  one per link every 10 minutes. Creating a link is an alert too.
+- **Revocation** also happens when you change your password (all replay links, like live
+  shares), when your account is deleted, with the dashboard's global **Revoke all**, and when
+  the session is deleted. Logging out does **not** revoke them (unlike live shares): a replay
+  link is a finished recording with a short, fixed lifetime, not a window into a live terminal.
+- **2FA hosts**: creating or revoking a link for a session on a host that requires 2FA asks for
+  step-up, like reading its transcript. Only a browser session can manage links — automation
+  tokens get 401.
+
 ### Commands as objects (OSC 133)
 
 [Details](SHELL-INTEGRATION.md).

@@ -69,6 +69,33 @@ decisions follow from this.
   also answers *who* — every account is a distinct identity, even though all of
   them are equally powerful (see limitation 2).
 
+### Public (unauthenticated) surface
+
+Everything reachable without a browser session, and what makes it the credential. The full
+list is enforced by `tests/route_auth_test.py` (a new public route must be declared there, with
+a reason):
+
+- **Login / setup / SSO / passkey login** — the gates themselves; per-IP lockout, single-use
+  setup token.
+- **Install links** (`/install/…`) — the enroll token *is* the credential: 24 h, single-use
+  (group tokens: opt-in, capped, revocable, audited + alerted).
+- **Live share links** (`#/shared/<token>`, `/api/shared/…`, `/ws/shared/…`) — 256-bit token,
+  stored hashed, expiry ≤ 24 h, revocable; die on logout and password change; refused while
+  the 2FA idle-lock holds.
+- **Replay links** (`#/replay/<token>`, `GET /api/replay/{meta,cast,text}`, 3.5.12) — read-only
+  access to the recording of **one closed session**. 256-bit token, stored as sha256, shown
+  once; carried in the URL **fragment** (never sent to the server on page load, never in a
+  `Referer`) and in an `X-Replay-Token` header (never in a request path, so not in proxy access
+  logs or `audit_log.path`). Expiry is mandatory (1 h / 24 h / 7 days). Unknown, expired,
+  revoked or deleted all return the **same** 404 (status, body and headers), and a per-IP limit
+  (60 requests/min; 20 misses in 10 min block the IP for 10 min — for valid tokens too, so the
+  block is not an oracle) bounds both scanning and the CPU cost of masking. Responses are
+  `no-store` + `noindex`. Created only from a browser session, with 2FA step-up on flagged
+  hosts; each open is audited and alerted to the creator.
+  *Residual risk, by design:* whoever holds the link sees the recording until it expires or is
+  revoked — including any secret the best-effort masking did not recognise. Treat a replay link
+  like the recording itself.
+
 See [design/ARCHITECTURE.md](design/ARCHITECTURE.md) for the agent's resilience
 (crash, stall, OOM, tmux wedge).
 

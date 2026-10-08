@@ -74,6 +74,8 @@ key, so a gateway restart resets them.
 | A new device attached to a live session | Someone attaches to a live session from an IP not seen on a successful login for the account, or a guest attaches through a share link. | 1 per IP / 15 min |
 | Security change: … | Account created; automation token created (name + scopes); group enrollment token created; TOTP enabled / disabled; passkey enrolled / deleted; SSH host key re-pinned for a host; account password and/or email changed (since 3.5.2). | none |
 | A 2FA-protected host was unlocked | Step-up passed on a host marked *Require 2FA*. | 1 per host+IP / 15 min |
+| Public replay link created | A [replay link](FEATURES.md#replay-links) to a closed session's recording was created (expiry, masking on/off, IP). Goes to the creating account only. | none |
+| Your replay link was opened | Someone opened (played or read as text) one of your replay links; IP + browser. Goes to the creating account only. | 1 per link / 10 min |
 | SSH deploy key DEPLOYED / REVOKED: source → target | A deploy key was added to or removed from a target's `authorized_keys`. | none |
 | SSH host key changed — connection refused | An SSH-direct or SSH-jump target offered a host key that does not match the pinned one; the connection was refused. | 1 per host / 15 min |
 | Agent rejected: relocation/cloning attempt | A pinned host's agent token was used from a different machine; refused. | 1 per host / 15 min |
@@ -157,8 +159,8 @@ visible (no polling in a background tab).
 **Who sees what.** There are no roles — every account is a full administrator — so:
 
 - events about **one account** (sign-in from a new IP, a new device attached to a live
-  session, password / email / 2FA / passkey changes, unlocking a 2FA-protected host) go to
-  that account only;
+  session, password / email / 2FA / passkey changes, unlocking a 2FA-protected host, replay
+  links created / opened) go to that account only;
 - everything else (hosts, thresholds, SSH keys, host keys, new accounts and tokens, backups,
   the gateway's disk and signing key) is copied to **every** account, each with its own
   read/unread state.
@@ -182,7 +184,7 @@ one** account still wants it — one account cannot silence an alert another adm
 relies on.
 
 **Security events stay in the history.** For *sign-in from a new IP*, *new device attached*,
-*account changes*, *new account / token / host key re-pinned / shares revoked*, *SSH deploy
+*account changes*, *replay link created*, *new account / token / host key re-pinned / shares revoked*, *SSH deploy
 key*, *SSH host key changed*, *agent cloning refused* and *auto-enrolled host*, the in-app
 toggle is locked on. Their email can be turned off, with a warning: if someone takes over the
 account, turning off the email is the first thing they would do — the history is the trace

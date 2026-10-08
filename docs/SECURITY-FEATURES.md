@@ -107,6 +107,21 @@ are rejected requests with no actor. Retention via `WEBTERM_AUDIT_DAYS` (default
 The browser session can be tightened with `WEBTERM_SESSION_TTL_DAYS` (default 30) and
 `WEBTERM_SESSION_IDLE_HOURS` (default 12).
 
+**Replay links: a recording leaves the instance only on purpose, and you see every open.**
+(3.5.12) A public link to the recording of one *closed* session ([FEATURES.md](FEATURES.md#replay-links)).
+The token is 256-bit, stored only as a hash and shown once; it travels in the page's URL
+fragment and in a request header, never in a request path, so it does not land in proxy logs
+or in the audit log. Expiry is mandatory (1 h / 24 h / 7 days). The public endpoints answer an
+unknown, expired, revoked or deleted link with one identical 404, are rate-limited per IP
+(a run of wrong tokens blocks valid ones too, so the block itself reveals nothing), and send
+`Cache-Control: no-store` and `X-Robots-Tag: noindex`. Creating a link needs a browser session
+(not an automation token) and, on a 2FA host, step-up — the same gate as reading the transcript —
+and raises a security alert; every open is written to the audit log with the client IP and a
+truncated user agent, counted in the link list, and alerted in-app to the creator (once per link
+per 10 minutes). "Mask likely secrets" is on by default and reuses the alert scrubber's
+patterns; it is best-effort and the UI says so. Password change and the dashboard's
+*Revoke all* end every replay link; deleting an account ends its links.
+
 <a id="signed-agent-updates"></a>
 **Signed agent updates (Ed25519).** Agents only accept `ptyd.py` signed with the
 key whose public half is pinned inside them (`UPDATE_PUBKEY`, TOFU at install); CI

@@ -9,6 +9,36 @@ back.
 
 ## [Unreleased]
 
+### Added
+- **Replay links for closed-session recordings.** Showing a vendor or another team what
+  happened in a session meant downloading the `.cast` and mailing it — a copy of everything the
+  host printed, with no expiry, no revocation and no idea who watched it. *Share replay* in the
+  player of a closed session now creates a public, read-only link (`#/replay/<token>`) that
+  renders only that recording's player: mandatory expiry (1 h, 24 h by default, or 7 days),
+  optional label, several links per recording. **Mask likely secrets** is on by default — the
+  alert scrubber's patterns, extended with AWS / GitHub / GitLab / Slack / Stripe / Google keys,
+  `sk-…` keys and JWTs, applied across the whole output stream so a secret split between two
+  network chunks is still caught, with same-width replacement that leaves escape sequences and
+  timing intact; it is best-effort, and the dialog warns that recordings may contain sensitive
+  data. Every open is audited (client IP, truncated user agent), counted in the link list
+  (opens, last opened, from where) and raises an in-app alert to the link's creator, at most
+  once per link per 10 minutes; creating a link is alerted too (new alert kinds *replay link
+  created* / *replay link opened*). Links are listed and revoked per link or all at once in the
+  dialog and under *Share links* on the dashboard, and die on password change, account
+  deletion, the global *Revoke all* and session deletion — not on logout, since a recording
+  with a fixed short lifetime is not a live terminal. Security model as live shares, tightened:
+  token hashed and shown once, carried in the URL fragment and an `X-Replay-Token` header (never
+  in a request path or the audit log), one identical 404 for unknown / expired / revoked,
+  per-IP rate limit, `no-store` + `noindex`, browser session + 2FA step-up to create. New API:
+  `POST /api/sessions/{sid}/replay-links`, `GET /api/replay-links`,
+  `DELETE /api/replay-links/{id}`, `POST /api/replay-links/revoke-all`, and the public
+  `GET /api/replay/{meta,cast,text}`.
+
+### Fixed
+- **Escape closed two dialogs at once.** Every focus-trapped dialog listened for Escape on the
+  document, so a dialog opened on top of another (a confirmation over a list, the replay-link
+  dialog over the player) closed both. Only the topmost dialog reacts now.
+
 ## [3.5.11] — 2026-10-07 · agent (57)
 
 ### Added
