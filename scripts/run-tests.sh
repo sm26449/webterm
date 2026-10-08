@@ -57,7 +57,7 @@ CI_TESTS="agent_hardening agent_reliability agent_tmux_hygiene ed25519_kat
           split_views ssh_keys ssh_jump telnet_jump docker_sudo docker_stats host_delete diagnostics_cap agent_v54 agent_v55 agent_v56 agent_v57 deploy_script forward_proxy_headers
           api_errors hostkey_alarm handshake_events migration_failfast
           pentest_forward_token pentest_xff_lockout pentest_oidc_alg
-          upload_window fs_copy
+          upload_window fs_copy download_resume
           sec_stepup_hardening sec_login_proxy sec_sso_account sec_closed_scrollback sec_setup_token security_summary
           sec_stepup_cap sec_stepup_factor
           snippet_targets host_test_connection hosts_csv alert_history replay_links"

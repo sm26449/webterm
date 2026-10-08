@@ -4458,6 +4458,16 @@ async def fs_size(host_id: int, path: str) -> Optional[int]:
     """Dimensiunea unui fişier de pe host, O(1) (agent v50+ `fs_stat`). Pentru download-ul resumabil
     cu Range: clientul are nevoie de total ca să ceară felii şi să arate progresul. Întoarce None pe
     agenţi mai vechi (fără fs_stat) → endpoint-ul cade pe streaming fără Range (ca înainte)."""
+    st = await fs_stat_file(host_id, path)
+    return st[0] if st else None
+
+
+async def fs_stat_file(host_id: int, path: str) -> Optional[tuple]:
+    """(size, mtime|None) pentru un fişier obişnuit, din `fs_stat` (agent v50+, care întoarce deja
+    `mtime` — FĂRĂ schimbare de agent). None pe agenţi mai vechi SAU pe un symlink: `fs_stat` face
+    `lstat`, deci pentru un link `size` e lungimea ŢINTEI ca text, nu a fişierului — un
+    Content-Length/Range construit din ea ar trunchia (sau rupe) descărcarea. Fără mărime, endpoint-ul
+    cade pe streamingul fără Range, care urmează link-ul corect (fs_read)."""
     conn = _agent_or_raise(host_id)
     if (conn.agent_version or 0) < 50:
         return None
@@ -4468,7 +4478,10 @@ async def fs_size(host_id: int, path: str) -> Optional[int]:
         raise FileError("not found")
     if resp.get("dir"):
         raise FileError("is a directory")
-    return int(resp.get("size", 0))
+    if resp.get("link"):
+        return None
+    mt = resp.get("mtime")
+    return int(resp.get("size", 0)), (int(mt) if isinstance(mt, (int, float)) else None)
 
 
 async def fs_archive_prepare(host_id: int, path: str) -> str:

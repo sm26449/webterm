@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field, ValidationError
 from typing import Optional
 
 from urllib.parse import quote, urlparse
+from email.utils import formatdate
 
 from .errors import ApiError
 from . import webauthn_api
@@ -179,6 +180,9 @@ async def app_state(request: Request):
     return {"setup_required": not has_user,
             "authenticated": user is not None,
             "email": user["email"] if user else None,
+            # id-ul contului: clientul îşi cheiază după el stările locale per cont (ex. descărcările
+            # întrerupte din IndexedDB) — alt cont în acelaşi browser nu le vede pe ale primului
+            "user_id": user["id"] if user else None,
             "webauthn_available": _webauthn_available(),
             # cum face ACEST cont step-up pe un host 2FA: passkey | sso | totp | none (3.5.13:
             # parola singură nu mai e acceptată — `none` = UI-ul trimite la Setări → 2FA)
@@ -2457,6 +2461,14 @@ def _parse_range(header: str, size: int):
     return (start, min(end, size - 1))
 
 
+def download_etag(size, mtime) -> Optional[str]:
+    """ETag slab `W/"<size>-<mtime>"` din `fs_stat` — None dacă lipseşte oricare (agent vechi,
+    symlink): fără validator, clientul nu oferă reluare după reload."""
+    if size is None or mtime is None:
+        return None
+    return 'W/"%d-%d"' % (int(size), int(mtime))
+
+
 @router.get("/api/hosts/{host_id}/fs/download")
 async def fs_download(host_id: int, request: Request, path: str, user=Depends(security.require_user)):
     """Streamează un fişier de pe host. Suportă `Range: bytes=start-[end]` (HTTP 206) ca motorul de
@@ -2472,9 +2484,11 @@ async def fs_download(host_id: int, request: Request, path: str, user=Depends(se
 
     # Dimensiunea (dacă o putem afla ieftin) deschide Range + Content-Length. Best-effort: dacă
     # fs_stat nu există / eşuează, cădem pe streamingul de dintotdeauna, fără Range.
-    size = None
+    size = mtime = None
     try:
-        size = await core.fs_size(host_id, path)
+        st = await core.fs_stat_file(host_id, path)
+        if st:
+            size, mtime = st
     except core.AgentGone:
         raise ApiError(409, "host.offline", "the host is offline")
     except (core.FileError, TimeoutError):
@@ -2508,6 +2522,16 @@ async def fs_download(host_id: int, request: Request, path: str, user=Depends(se
     headers = {"Content-Disposition": f'attachment; filename="{name}"'}
     if size is not None:
         headers["Accept-Ranges"] = "bytes"          # anunţă clientului că poate cere felii
+    etag = download_etag(size, mtime)
+    if etag:
+        # Validatorul pentru reluarea DUPĂ RELOAD (3.5.13): browserul ţine în IndexedDB ETag-ul de
+        # la începutul descărcării şi îl compară cu cel al fiecărui răspuns 206 — dacă fişierul de pe
+        # host s-a schimbat între timp (alt size sau alt mtime), nu lipeşte octeţi noi peste cei
+        # vechi, ci cere „Start over". Slab (W/): size+mtime nu garantează octeţi identici (o
+        # rescriere în aceeaşi secundă cu aceeaşi mărime trece), dar e tot ce dă `fs_stat` fără un
+        # hash pe host — iar un hash al unui fişier de 40 GB la fiecare felie nu e o opţiune.
+        headers["ETag"] = etag
+        headers["Last-Modified"] = formatdate(mtime, usegmt=True)
     if isinstance(rng, tuple):
         headers["Content-Range"] = f"bytes {start}-{end}/{size}"
         headers["Content-Length"] = str(limit)
