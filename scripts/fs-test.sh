@@ -232,7 +232,7 @@ docker exec "$CT" sh -c 'mkdir -p /root/wtfstest/cptree/bin && printf "#!/bin/sh
 R=$(copy_wait "{\"src_host\":$HOST_ID,\"paths\":[\"~/wtfstest/cptree\"],\"dst_host\":$H2,\"dst_dir\":\"~/in\",\"on_conflict\":\"skip\"}")
 [ "$(echo "$R" | jget 'd["state"]')" = "done" ] && [ "$(echo "$R" | jget 'd["modes"]')" = "True" ] \
   && ok "copy folder A → B: done, permissions kept (destination agent 58)" || no "copy folder modes" "$R"
-R2=$(docker exec "$CT" stat -c '%a %a %a' /home/wtcopy/in/cptree/bin/run.sh /home/wtcopy/in/cptree/key /home/wtcopy/in/cptree/bin 2>/dev/null)
+R2=$(docker exec "$CT" stat -c '%a' /home/wtcopy/in/cptree/bin/run.sh /home/wtcopy/in/cptree/key /home/wtcopy/in/cptree/bin 2>/dev/null | tr '\n' ' ' | sed 's/ $//')
 [ "$R2" = "755 600 750" ] && ok "copy folder: run.sh 0755 (setuid dropped), key 0600, bin/ 0750" || no "copy folder modes on disk" "$R2"
 docker exec -u wtcopy "$CT" sh /home/wtcopy/in/cptree/bin/run.sh 2>/dev/null | grep -q ok \
   && docker exec "$CT" test -x /home/wtcopy/in/cptree/bin/run.sh \
