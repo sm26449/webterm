@@ -1833,12 +1833,12 @@ try {
     })
   }, meUid)
   await page.reload({ waitUntil: 'domcontentloaded' })
-  const dlRow = await pollValue(() => page.evaluate(() => {
+  const intRow = await pollValue(() => page.evaluate(() => {
     const snap = window.__wtTransfers?.store?.snapshot?.()
     const j = snap ? [...snap.values()].find((x) => x.dir === 'down' && x.dest === '/tmp/wt_dl_resume.bin') : null
     return j ? `${j.state}:${j.pct}` : ''
   }), (v) => v !== '', 15000)
-  check('download întrerupt: după reload apare în Transferuri ca „Interrupted" (40%)', dlRow === 'orphan:40', dlRow)
+  check('download întrerupt: după reload apare în Transferuri ca „Interrupted" (40%)', intRow === 'orphan:40', intRow)
   const dlDiscard = page.locator('button[aria-label="Discard wt_dl_resume.bin"]')
   check('download întrerupt: rândul oferă Resume şi Discard',
     (await visible(page.locator('button[aria-label="Resume wt_dl_resume.bin"]'))) && (await visible(dlDiscard)))
