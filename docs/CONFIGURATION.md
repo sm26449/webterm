@@ -36,6 +36,7 @@ is the full reference.
 | `WEBTERM_OIDC_PROVIDER_NAME` | the button label, e.g. `Authentik` (default `SSO`) |
 | `WEBTERM_OIDC_SCOPES` | requested scopes, default `openid email profile` |
 | `WEBTERM_OIDC_ALLOWED_GROUPS` | optional, comma-separated; if set, the token's `groups` claim must contain one (defence-in-depth on top of the IdP's own gate) |
+| `WEBTERM_OIDC_REQUIRE_AUTH_TIME` | default `1`: an SSO **step-up** whose `id_token` has no `auth_time` claim is refused (WebTerm asks for `max_age=0`, and OIDC Core then requires the claim — without it the "re-authentication" is an unverifiable `prompt=login`). The gateway logs `SSO step-up REFUSED: the IdP did not return auth_time…`: configure the IdP to emit `auth_time` (Authentik does by default). `0` = the pre-3.5.14 lenient behaviour (accept with a warning). Ordinary logins are not affected |
 
 See [SSO.md](SSO.md) for the full single-sign-on model (break-glass, per-instance access, 2FA step-up).
 

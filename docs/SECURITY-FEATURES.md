@@ -12,9 +12,15 @@ X-Forwarded-For is believed only from the proxy named in `WEBTERM_TRUSTED_PROXY_
 `WEBTERM_TRUSTED_PROXY_CIDRS` — see [CONFIGURATION.md](CONFIGURATION.md)), constant-time login (no account enumeration), `__Host-` HttpOnly/Secure cookie,
 Origin check on the WebSocket (anti-CSWSH), CSP + HSTS + anti-clickjacking,
 path-traversal blocked. On **2FA** hosts, the terminal **locks on inactivity**
-(output suppressed + input refused server-side) and resuming requires a **passkey
-step-up** — protecting against unattended authenticated sessions
-(`WEBTERM_IDLE_LOCK_SECS`, default 5 min). An optional **command guardrail**
+(output suppressed + input refused server-side) and resuming requires a **fresh second
+factor** (passkey, TOTP code or SSO re-authentication) — protecting against unattended
+authenticated sessions (`WEBTERM_IDLE_LOCK_SECS`, default 5 min). Since 3.5.14 a terminal kept
+**in use** locks too, **60 minutes after the factor that authorised it** unless a newer step-up
+window is open — the same absolute cap every other action on the host already had; the lock
+covers share-link guests as well. And the **account password alone is no longer a step-up**: an
+account with neither a passkey nor TOTP is told to enrol one before it can open a 2FA host (see
+[HOSTS.md](HOSTS.md#require-2fa-step-up)). The WebSocket Origin check compares scheme, host and
+port (an `http://` page on the same name is not our `https://` origin). An optional **command guardrail**
 (Settings → Infrastructure & tokens): regex rules that require **confirmation** or **block**
 dangerous commands at Enter (e.g. `rm -rf`, `mkfs`) — editable, and enforced on the
 server for `/run` as well, so a command sent with Run on hosts cannot walk around the browser.

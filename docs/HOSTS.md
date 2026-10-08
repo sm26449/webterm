@@ -207,7 +207,13 @@ simply switch it off. Muting offline alerts on a 2FA host also needs a step-up.
    identity provider.
 3. **TOTP code** (or a recovery code) — if TOTP is enabled and there is no passkey. Codes are
    single-use (a replayed code is refused) and the attempts are rate-limited per account.
-4. **Account password** — only when the account has neither a passkey nor TOTP.
+
+**The account password alone is not accepted** (since 3.5.14). An account with neither a
+passkey nor TOTP (nor SSO) cannot open a 2FA host: the step-up answers *"set up a passkey or
+an authenticator code (TOTP) to access hosts that require 2FA"* and the UI offers a button to
+**Settings → Sign-in & 2FA**. The password is the factor you already gave at login, so it was
+never a second factor. Turning **Require 2FA** on is still allowed without a factor, but the UI
+warns you right away that you will not be able to open the host until you enrol one.
 
 **The step-up window.** A successful factor opens a window for **that host** (per account),
 like `sudo`: further actions pass without asking again. The window closes after **5 minutes
@@ -218,6 +224,15 @@ grant itself must be used within 120 s.
 **Terminals lock when idle.** A terminal on a 2FA host locks after
 `WEBTERM_IDLE_LOCK_SECS` seconds (default 300; `0` turns it off) without input, hides its
 scrollback, and asks for a factor again to unlock.
+
+**…and after one hour, even when busy** (since 3.5.14). A terminal kept in use is locked once
+**60 minutes** have passed since the factor that authorised it (the step-up it was opened or
+attached with, or its last unlock), unless you have opened a newer step-up window on that host
+in the meantime. The overlay says *"Locked: re-confirm 2FA every 60 min on this host"*. As with
+the idle lock, the processes keep running; only input and output are held until you unlock with
+a fresh factor. The lock covers every client attached to the terminal, **share-link guests
+included** — a writable guest no longer stays usable just because the owner keeps the
+terminal busy.
 
 **Automation tokens are refused outright** on these hosts (*"the host requires 2FA — not
 reachable with an automation token"*): a token cannot present a passkey, so a 2FA host stays

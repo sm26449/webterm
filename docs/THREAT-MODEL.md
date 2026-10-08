@@ -34,8 +34,15 @@ decisions follow from this.
 ## What it DEFENDS (invariants to maintain)
 
 - **Authentication & session**: no bypass; constant-time login (no account
-  enumeration); lockout on the real IP; 2FA step-up (passkey) on flagged hosts;
-  idle-lock with re-authentication.
+  enumeration); lockout on the real IP; 2FA step-up on flagged hosts with a **real second
+  factor** (passkey, TOTP or SSO re-authentication — the account password alone is refused
+  since 3.5.14); the step-up window slides for 5 min but is capped at **60 min from the
+  factor**, and since 3.5.14 that cap also locks a terminal kept in use (every client of it,
+  share guests included); idle-lock with re-authentication. Mutations on a 2FA host's
+  sessions (rename/note) need the step-up; the global command-history wipe needs the account
+  password and is audited; command-history writes for a 2FA host need an open window or an
+  unlocked terminal of the same account. The WebSocket Origin must match `WEBTERM_PUBLIC_URL`
+  on scheme + host + port.
 - **SSO / OIDC** (optional, off unless configured): authorization-code + **PKCE
   (S256)**; `id_token` validated with a **fixed RS256 allowlist** (no `alg:none`, no
   algorithm confusion), mandatory `aud`/`iss`/`exp`/`iat`, single-use server-side
@@ -81,7 +88,8 @@ a reason):
   (group tokens: opt-in, capped, revocable, audited + alerted).
 - **Live share links** (`#/shared/<token>`, `/api/shared/…`, `/ws/shared/…`) — 256-bit token,
   stored hashed, expiry ≤ 24 h, revocable; die on logout and password change; refused while
-  the 2FA idle-lock holds.
+  the 2FA idle-lock holds, and locked with the owner's terminal when its 60-minute step-up cap
+  is reached.
 - **Replay links** (`#/replay/<token>`, `GET /api/replay/{meta,cast,text}`, 3.5.12) — read-only
   access to the recording of **one closed session**. 256-bit token, stored as sha256, shown
   once; carried in the URL **fragment** (never sent to the server on page load, never in a

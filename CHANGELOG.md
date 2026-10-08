@@ -9,6 +9,59 @@ back.
 
 ## [Unreleased]
 
+### Security
+- **A terminal on a 2FA host now locks 60 minutes after the factor that authorised it, even
+  while in use.** The step-up window had an absolute cap of one hour, but the terminal WebSocket
+  looked at it only when attaching; its periodic check only revalidated the web session, and the
+  idle lock measures inactivity. So a terminal kept busy (or kept alive by a script typing into
+  it) stayed unlocked indefinitely, and a writable share-link guest stayed usable for as long as
+  the owner kept the session alive. Each terminal now records when it was authorised (the
+  opening time of the step-up window it was attached with, or its last unlock) and the 15-second
+  lock sweep locks it once 60 minutes have passed, unless an attached owner has opened a newer
+  step-up window on that host. The lock is the existing one — processes keep running, input and
+  output are held, unlocking needs a fresh factor — and it is per terminal, so it reaches every
+  attached client, guests included. The overlay says why (*"Locked: re-confirm 2FA every 60 min
+  on this host"*); the `locked` WebSocket message gained an optional `reason`.
+- **The account password alone no longer passes a step-up on a 2FA host.** For an account with
+  neither a passkey nor TOTP, the last rung of the step-up ladder accepted the password — the
+  same factor already given at login, so "Require 2FA" demanded no second factor at all. It now
+  answers `403 stepup.needsFactor` (*"set up a passkey or an authenticator code (TOTP) to access
+  hosts that require 2FA"*) whatever password is sent, and the UI offers a button to Settings →
+  Sign-in & 2FA instead of asking for a password that would be refused. Passkey, TOTP and SSO
+  re-authentication are unchanged; the password still works as a `sudo`-style re-auth where no
+  2FA is involved (deploying a key to a host without Require 2FA). Turning Require 2FA on is not
+  blocked, but answers with a `warning` so the UI can say you will not be able to open the host
+  until you enrol a factor. `/api/state` now reports `stepup_method`
+  (`passkey`/`sso`/`totp`/`none`), so the step-up prompt asks for the right factor first — a
+  TOTP account on a domain install no longer gets a passkey ceremony that cannot succeed — and
+  unlocking a terminal now sends the TOTP code and sees a factor enrolled after the terminal
+  was opened.
+- **Mutations that skipped the step-up.** Renaming a session or editing its note
+  (`PATCH /api/sessions/{sid}`) now needs the step-up on a 2FA host, like the other session
+  routes. Clearing the whole command history (`DELETE /api/history`) — a global, irreversible
+  wipe of traces across all hosts and accounts — now needs the account password (SSO: passkey
+  or SSO re-authentication) and is recorded in the audit log with the number of entries.
+  Writing a history entry for a 2FA host (`POST /api/history`) now needs an open step-up window
+  or an unlocked terminal on that host attached by the same account, so entries from a terminal
+  in use are kept while a stolen cookie cannot plant commands in a protected host's history; a
+  refusal is an opaque 403.
+- **WebSocket Origin check compares the scheme.** The terminal and share WebSockets compared
+  only `host:port` with `WEBTERM_PUBLIC_URL`, so an `http://` page on the same name passed as our
+  `https://` origin; they now compare scheme, host and port (default ports normalised). The
+  port-forward WebSocket compared only the hostname and now also requires the public scheme.
+- **Deploying a key to one target now also gates the source host.** The single-target deploy
+  checked a fresh factor on the target only; on a source marked Require 2FA it now needs that
+  host's step-up window too, consistent with the batch and rotate paths (stable code
+  `sshkey.sourceNeeds2fa`, checked before the target's single-use grant is consumed).
+- **SSO step-up without `auth_time` is refused by default.** WebTerm sends `max_age=0`, and
+  OIDC Core then requires `auth_time` in the id_token; without it the re-authentication was an
+  unverifiable `prompt=login` that was accepted with a warning. New
+  `WEBTERM_OIDC_REQUIRE_AUTH_TIME` (default `1` = refuse, with a log line telling the admin to
+  configure the IdP; `0` = the previous lenient behaviour). Ordinary logins are unaffected.
+- **A corrupt password hash is a wrong password, not a server error.** `verify_password` let
+  argon2's `InvalidHashError` / `VerificationError` escape, so a damaged hash in the database
+  turned login and re-authentication into a 500. It now returns False and logs one warning.
+
 ## [3.5.12] — 2026-10-08 · agent (57)
 
 ### Added
