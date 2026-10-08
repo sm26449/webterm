@@ -8021,13 +8021,28 @@ async def _public_watermark(owner_email: str, title: str) -> dict:
     return {**wm, "content": content}
 
 
+def _share_gate(ip: str) -> None:
+    """Limita per IP pe share-ul LIVE (3.5.15) — acelaşi limitator ca link-urile de replay, cu
+    găleată proprie (`replay.SHARE_LIMIT`): total + eşecuri, blocarea pe eşecuri valabilă pentru
+    ORICE token (şi unul valid), ca blocajul să nu fie un oracol."""
+    retry = replay.SHARE_LIMIT.gate(ip)
+    if retry:
+        raise ApiError(429, "share.rateLimited", "too many requests; retry in %ds" % retry,
+                       headers={"Retry-After": str(retry)}, vars={"retry": retry})
+
+
 @router.get("/api/shared/{token}")
-async def shared_meta(token: str):
+async def shared_meta(token: str, request: Request):
     """Public: minimal session info for the read-only shared view."""
-    row = await db.fetchone(
-        "SELECT * FROM sessions WHERE share_token=? AND share_expires > ?",
-        security.sha256_hex(token), time.time())
+    ip = security.client_ip(request)
+    _share_gate(ip)
+    row = None
+    if 8 <= len(token) <= 128:
+        row = await db.fetchone(
+            "SELECT * FROM sessions WHERE share_token=? AND share_expires > ?",
+            security.sha256_hex(token), time.time())
     if not row:
+        replay.SHARE_LIMIT.record_miss(ip)
         raise ApiError(404, "link.invalid", "invalid or expired link")
     # watermark pe link-ul partajat = trasabilitatea celei mai riscante suprafețe
     # (sesiune vizibilă unui terț). Rezolvăm ${email}/${host} SERVER-SIDE, ca să nu
@@ -8920,10 +8935,20 @@ async def shared_ws(ws: WebSocket, token: str):
     if not _origin_ok(ws):
         await ws.close(code=4403)
         return
-    row = await db.fetchone(
-        "SELECT * FROM sessions WHERE share_token=? AND share_expires > ?",
-        security.sha256_hex(token), time.time())
+    # 3.5.15: aceeaşi limită per IP ca /api/shared/{token} (aceeaşi găleată: o pagină de share
+    # face o cerere meta + un WS, plus reconectări). 4429 = prea multe; ÎNAINTE de lookup, deci
+    # un IP blocat nu mai află nimic — nici despre un token valid.
+    ip = security.client_ip(ws)
+    if replay.SHARE_LIMIT.gate(ip):
+        await ws.close(code=4429)
+        return
+    row = None
+    if 8 <= len(token) <= 128:
+        row = await db.fetchone(
+            "SELECT * FROM sessions WHERE share_token=? AND share_expires > ?",
+            security.sha256_hex(token), time.time())
     if not row:
+        replay.SHARE_LIMIT.record_miss(ip)
         await ws.close(code=4404)
         return
     await ws.accept()
@@ -8973,12 +8998,12 @@ async def shared_ws(ws: WebSocket, token: str):
         client.replay_limit = core.replay_tail_limit(sb, core.stream_is_plain(hub))
         client.replay_sb = sb             # resync-ul FULL (resume/unlock) readuce şi istoricul tmux
     if not start_locked:
-        replay = await core.attach_replay(row["id"], hub, sb, sb_rows)
+        replay_bytes = await core.attach_replay(row["id"], hub, sb, sb_rows)
         if hub and (hub.locked or (share_2fa and not any(
                 getattr(c, "is_owner", False) for c in hub.clients))):
             start_locked = True          # blocată / owner plecat cât aşteptam agentul → nimic scurs
         else:
-            await ws.send_bytes(replay)
+            await ws.send_bytes(replay_bytes)
     if hub:
         hub.clients.add(client)
         client.sender_task = asyncio.create_task(client.sender())

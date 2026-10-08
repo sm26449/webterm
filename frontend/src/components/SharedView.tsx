@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { Terminal } from '@xterm/xterm'
-import { api, WatermarkConfig } from '../lib/api'
+import { api, ApiError, errText, WatermarkConfig } from '../lib/api'
 import { useI18n } from '../lib/i18n'
 import { termTheme } from '../lib/termtheme'
 import Watermark from './Watermark'
@@ -20,6 +20,7 @@ export default function SharedView(props: { token: string }) {
   const container = useRef<HTMLDivElement>(null)
   const [title, setTitle] = useState('')
   const [error, setError] = useState('')
+  const [wsLimited, setWsLimited] = useState(false)   // WS închis 4429: limită per IP (3.5.15)
   const [conn, setConn] = useState<'connecting' | 'open' | 'closed' | 'locked' | 'revoked'>('connecting')
   const [lockMax, setLockMax] = useState(false)
   const [termBg] = useState(() => readTheme().background || '#0b0e14')
@@ -58,7 +59,9 @@ export default function SharedView(props: { token: string }) {
         setWatermark(m.watermark ?? null)   // ${email}/${host} deja rezolvate server-side
         document.title = t('share.docTitle', { title: m.title || t('app.sessionFallback') })
       })
-      .catch(() => setError(t('share.errInvalid')))
+      // 429 (3.5.15: limită per IP pe link-urile publice) ≠ link invalid: spunem cât să aştepte
+      .catch((e) => setError(e instanceof ApiError && e.code === 'share.rateLimited'
+        ? (errText(e, t) || t('share.errInvalid')) : t('share.errInvalid')))
   }, [props.token, t])
 
   useEffect(() => {
@@ -135,7 +138,10 @@ export default function SharedView(props: { token: string }) {
       }
     }
     // NU suprascrie 'revoked' (mesajul revoked ajunge ÎNAINTEA close-ului; altfel „deconectat" ar învinge)
-    ws.onclose = () => setConn((c) => (c === 'revoked' ? c : 'closed'))
+    ws.onclose = (ev) => {
+      if (ev.code === 4429) { setWsLimited(true); return }
+      setConn((c) => (c === 'revoked' ? c : 'closed'))
+    }
 
     return () => {
       ro.disconnect()
@@ -147,8 +153,8 @@ export default function SharedView(props: { token: string }) {
     }
   }, [props.token, error])
 
-  if (error) {
-    return <div className="flex h-full items-center justify-center text-slate-500">{error}</div>
+  if (error || wsLimited) {
+    return <div className="flex h-full items-center justify-center text-slate-500">{error || t('share.errRateLimitedWs')}</div>
   }
 
   // Revocat/expirat: înlocuim COMPLET terminalul cu o pagină dedicată (nu overlay peste conţinutul

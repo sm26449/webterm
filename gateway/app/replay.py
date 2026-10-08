@@ -174,51 +174,82 @@ def redacted_cast_file(path) -> bytes:
 #   * total: RATE_MAX cereri / RATE_WINDOW (un invitat legitim face 2-3);
 #   * eşecuri: MISS_MAX tokenuri necunoscute / MISS_WINDOW → blocat MISS_LOCK secunde, pentru
 #     ORICE token (şi unul valid) — altfel blocajul ar fi el însuşi un oracol.
+#
+# 3.5.15: acelaşi limitator păzeşte şi link-urile de share LIVE (`/api/shared/{token}`,
+# `/ws/shared/{token}`), care până acum n-aveau nicio limită per IP. E o clasă cu găleţi
+# SEPARATE per suprafaţă: un scanner blocat pe share-uri nu blochează replay-urile aceluiaşi IP
+# (şi invers), iar fiecare suprafaţă îşi poate avea plafoanele ei.
 RATE_MAX, RATE_WINDOW = 60, 60.0
 MISS_MAX, MISS_WINDOW, MISS_LOCK = 20, 600.0, 600.0
-_req: dict = {}
-_miss: dict = {}
-_locked: dict = {}
 
 
-def _prune(now: float) -> None:
-    if len(_req) + len(_miss) + len(_locked) < 2048:
-        return
-    for d, w in ((_req, RATE_WINDOW), (_miss, MISS_WINDOW)):
-        for k in [k for k, ts in d.items() if not ts or now - ts[-1] > w]:
-            d.pop(k, None)
-    for k in [k for k, t in _locked.items() if t <= now]:
-        _locked.pop(k, None)
+class PublicLimiter:
+    """Limită per IP pentru un endpoint public cu token în URL/antet (vezi comentariul de sus)."""
+
+    def __init__(self, rate_max=RATE_MAX, rate_window=RATE_WINDOW, miss_max=MISS_MAX,
+                 miss_window=MISS_WINDOW, miss_lock=MISS_LOCK):
+        self.rate_max, self.rate_window = rate_max, rate_window
+        self.miss_max, self.miss_window, self.miss_lock = miss_max, miss_window, miss_lock
+        self._req: dict = {}
+        self._miss: dict = {}
+        self._locked: dict = {}
+
+    def _prune(self, now: float) -> None:
+        if len(self._req) + len(self._miss) + len(self._locked) < 2048:
+            return
+        for d, w in ((self._req, self.rate_window), (self._miss, self.miss_window)):
+            for k in [k for k, ts in d.items() if not ts or now - ts[-1] > w]:
+                d.pop(k, None)
+        for k in [k for k, t in self._locked.items() if t <= now]:
+            self._locked.pop(k, None)
+
+    def gate(self, ip: str) -> int:
+        """0 = cererea trece; altfel câte secunde să aştepte clientul (429 + Retry-After)."""
+        now = time.time()
+        self._prune(now)
+        until = self._locked.get(ip, 0)
+        if until > now:
+            return int(until - now) + 1
+        ts = [t for t in self._req.get(ip, []) if now - t < self.rate_window]
+        if len(ts) >= self.rate_max:
+            self._req[ip] = ts
+            return int(self.rate_window - (now - ts[0])) + 1
+        ts.append(now)
+        self._req[ip] = ts
+        return 0
+
+    def record_miss(self, ip: str) -> None:
+        now = time.time()
+        ts = [t for t in self._miss.get(ip, []) if now - t < self.miss_window]
+        ts.append(now)
+        if len(ts) >= self.miss_max:
+            self._locked[ip] = now + self.miss_lock
+            ts = []
+        self._miss[ip] = ts
+
+    def reset(self) -> None:
+        self._req.clear()
+        self._miss.clear()
+        self._locked.clear()
+
+
+REPLAY_LIMIT = PublicLimiter()          # /api/replay/*
+# share live: o pagină de invitat = o cerere meta + un WS (+ reconectări), iar o demonstraţie
+# urmărită de o sală întreagă din spatele aceluiaşi NAT e un caz legitim → plafon total dublu
+SHARE_LIMIT = PublicLimiter(rate_max=2 * RATE_MAX)   # /api/shared/{token} + /ws/shared/{token}
+_LIMITERS = (REPLAY_LIMIT, SHARE_LIMIT)
 
 
 def gate(ip: str) -> int:
-    """0 = cererea trece; altfel câte secunde să aştepte clientul (429 + Retry-After)."""
-    now = time.time()
-    _prune(now)
-    until = _locked.get(ip, 0)
-    if until > now:
-        return int(until - now) + 1
-    ts = [t for t in _req.get(ip, []) if now - t < RATE_WINDOW]
-    if len(ts) >= RATE_MAX:
-        _req[ip] = ts
-        return int(RATE_WINDOW - (now - ts[0])) + 1
-    ts.append(now)
-    _req[ip] = ts
-    return 0
+    """Replay (compatibilitate): vezi `PublicLimiter.gate`."""
+    return REPLAY_LIMIT.gate(ip)
 
 
 def record_miss(ip: str) -> None:
-    now = time.time()
-    ts = [t for t in _miss.get(ip, []) if now - t < MISS_WINDOW]
-    ts.append(now)
-    if len(ts) >= MISS_MAX:
-        _locked[ip] = now + MISS_LOCK
-        ts = []
-    _miss[ip] = ts
+    REPLAY_LIMIT.record_miss(ip)
 
 
 def reset_limits() -> None:
-    """Pentru teste."""
-    _req.clear()
-    _miss.clear()
-    _locked.clear()
+    """Pentru teste: goleşte TOATE găleţile (replay + share)."""
+    for lim in _LIMITERS:
+        lim.reset()

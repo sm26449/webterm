@@ -1138,6 +1138,8 @@ const ro: Lang = {
     'alertmsg.backup_failed.details': "Încărcarea programată a backup-ului pe '{provider}' a eşuat de {fails} ori la rând.\n\n{age}\n\nUltima eroare: {error}\n\nCauze frecvente: autorizare OAuth expirată (reconectează din Setări → Backup), o parolă de criptare greşită, sau serverul SFTP/FTPS e inaccesibil ori şi-a schimbat cheia de host. Până se rezolvă, nu ai o copie off-host recentă a seifului.",
     'alertmsg.backup_local_failed.title': "Backup-ul programat EŞUEAZĂ",
     'alertmsg.backup_local_failed.details': "Backup-ul programat de pe gateway-ul WebTerm a eşuat.\n\n{age}\n\nUltima eroare: {error}\n\nCauze frecvente: discul gateway-ului e plin, baza de date e blocată de alt proces, sau volumul de date e read-only. Până se rezolvă, snapshot-urile locale expiră prin retenţie şi nu există o copie recentă a seifului — descarcă manual un backup din Setări → Backup dacă nu poţi rezolva imediat.",
+    'err.share.rateLimited': "Prea multe cereri din această reţea — aşteaptă câteva minute şi deschide din nou link-ul.",
+    'share.errRateLimitedWs': "Prea multe încercări de conectare din această reţea — aşteaptă câteva minute şi reîncarcă pagina.",
     'docker.stats.cpuBoth': "{host} din host · {core} dintr-un nucleu",
     'docker.stats.cpuPerCore': "{core} dintr-un nucleu (numărul de nuclee al hostului e necunoscut — peste 100% înseamnă mai mult de un nucleu)",
     'docker.stats.perCoreShort': "per nucleu",
