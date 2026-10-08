@@ -9,6 +9,8 @@ back.
 
 ## [Unreleased]
 
+## [3.5.16] — 2026-10-08 · agent (58)
+
 **This release updates the agent (57 → 58)** — hosts update on reconnect (deferred while a host has
 open sessions; force it from the host card). The gateway keeps working with agents 50–57: the new
 behaviour turns on per host, by agent version, and an older agent gets exactly the previous one.
