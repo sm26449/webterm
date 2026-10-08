@@ -48,12 +48,17 @@ export interface UploadJob {
       (`size` 0 → rândul arată octeţii primiţi, nu un %), iar o arhivă generată din mers nu se
       poate relua — fără pauză; Retry o reporneşte de la zero. */
   kind?: 'archive'
-  /** copy: rezumatul fişierelor (`3/5 · 1 sărit`), deja tradus, pentru rând */
+  /** copy: rezumatul fişierelor (`3/5 · 1 sărit`), deja tradus, pentru rând; download: o notă de
+      stare (checkpoint pe disc, permisiune refuzată, fişier parţial dispărut) */
   detail?: string
+  /** download: fişierul s-a schimbat pe host de la începutul descărcării — rândul oferă „Start over"
+      (de la zero, în acelaşi fişier) în loc să lipească octeţi noi peste cei vechi */
+  restartable?: boolean
 }
 
 /** Stări în care transferul chiar se mişcă (sau încearcă) — ţin `beforeunload` şi apar în sumar.
-    `paused` NU e activă (nimic nu curge) — un reload o pierde (upload → orfan, ca înainte). */
+    `paused` NU e activă (nimic nu curge) — un reload o pierde (upload → orfan, ca înainte; download
+    cu File System Access → „Întrerupt", reluabil: pauza face checkpoint pe disc). */
 export const ACTIVE_STATES: ReadonlySet<JobState> = new Set(['running', 'stalled', 'retrying'])
 export const isActive = (j: UploadJob) => ACTIVE_STATES.has(j.state)
 export const isDownload = (j: UploadJob) => j.dir === 'down'

@@ -35,6 +35,7 @@ import { copyText } from './lib/clipboard'
 import { CloseIcon, CopyIcon, ShieldIcon } from './components/Icons'
 import { ensureNotificationPermission, notify, notifyError, registerToast } from './lib/notify'
 import { restoreOrphans } from './lib/uploads'
+import { forgetDownloads, hideInterruptedDownloads, restoreInterruptedDownloads, setDownloadUser } from './lib/downloads'
 import { clearAll as clearClipHistory } from './lib/cliphistory'
 import { askSecret, registerSecretPrompt, SecretAsk } from './lib/secretPrompt'
 import SecretPromptModal from './components/SecretPromptModal'
@@ -874,6 +875,16 @@ function MainApp() {
   useEffect(() => {
     if (appState?.authenticated) restoreOrphans()
   }, [appState?.authenticated])
+  // download-uri File System Access întrerupte de un reload (IndexedDB, cheiate pe user id): rânduri
+  // „Întrerupt — Resume / Discard". Ieşirea din sesiune le ascunde şi opreşte persistarea.
+  useEffect(() => {
+    if (appState?.authenticated && appState.user_id != null) {
+      setDownloadUser(appState.user_id)
+      void restoreInterruptedDownloads()
+    } else if (appState?.authenticated === false) {
+      hideInterruptedDownloads()
+    }
+  }, [appState?.authenticated, appState?.user_id])
   // history-ul de clipboard (în memorie, poate ţine parole/tokenuri) moare odată cu sesiunea web:
   // logout explicit SAU expirare (401 / poll) — orice tranziţie spre neautentificat
   useEffect(() => {
@@ -1583,6 +1594,9 @@ function MainApp() {
           onConfirm={async () => {
             setShowLogoutConfirm(false)
             clearClipHistory()
+            // logout explicit: descărcările întrerupte ale contului se uită (IndexedDB); un IDB
+            // blocat nu are voie să ţină logout-ul pe loc
+            await Promise.race([forgetDownloads(), new Promise((r) => setTimeout(r, 1500))])
             await api('/api/logout', { method: 'POST' })
             setAppState({ ...appState, authenticated: false })
           }}

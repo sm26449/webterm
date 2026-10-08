@@ -21,6 +21,9 @@ export interface AppState {
   setup_required: boolean
   authenticated: boolean
   email: string | null
+  /** id-ul contului (null neautentificat): cheia stărilor locale per cont — ex. descărcările
+      întrerupte din IndexedDB (lib/dlresume.ts), ca alt cont în acelaşi browser să nu le vadă */
+  user_id?: number | null
   webauthn_available: boolean
   /** Factorul de step-up al contului pe un host 2FA (3.5.13): passkey | sso | totp | none.
       `none` = parola singură nu mai ajunge — UI-ul trimite la Setări → Autentificare & 2FA. */
