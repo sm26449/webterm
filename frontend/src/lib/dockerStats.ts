@@ -26,6 +26,8 @@ export interface DockerStatsResponse {
   available: boolean
   reason?: string
   rows: DockerStat[]
+  /** nucleele hostului (din snapshot-ul de diagnostic al agentului); null/lipsă = necunoscut */
+  host_cpus?: number | null
 }
 
 export const STATS_INTERVAL = 5000
@@ -45,6 +47,32 @@ export function matchStats(stats: DockerStat[] | null | undefined, id: string, n
 export function fmtPct(p: number | null | undefined): string | null {
   if (p == null || !Number.isFinite(p)) return null
   return p < 10 ? `${p.toFixed(1)}%` : `${Math.round(p)}%`
+}
+
+/** CPU-ul unui container RELATIV la host (3.5.15).
+
+    `docker stats` raportează procentul pe UN nucleu: 400% = patru nuclee pline, deci pe o maşină
+    de 8 nuclee „96%" nu e „aproape plin", e 12% din host — iar pragurile de culoare (gândite pe
+    0–100% din capacitate) colorau roşu un container care folosea un singur nucleu. Împărţim la
+    numărul de nuclee când îl ştim; altfel rămânem pe valoarea brută, marcată „per nucleu".
+    `pressure` = valoarea pe care se aplică pragurile de culoare. */
+export interface CpuShare {
+  /** % din capacitatea hostului (null dacă nucleele sunt necunoscute) */
+  hostPct: number | null
+  /** % dintr-un nucleu, exact cum îl dă docker */
+  corePct: number | null
+  /** procentul folosit pentru culoarea de prag */
+  pressure: number
+}
+
+export function cpuShare(raw: number | null | undefined, hostCpus: number | null | undefined): CpuShare {
+  const core = raw != null && Number.isFinite(raw) && raw >= 0 ? raw : null
+  const n = typeof hostCpus === 'number' && Number.isInteger(hostCpus) && hostCpus > 0 ? hostCpus : null
+  if (core == null) return { hostPct: null, corePct: null, pressure: 0 }
+  if (n == null) return { hostPct: null, corePct: core, pressure: core }
+  // docker poate depăşi uşor N×100 între eşantioane; „din host" nu trece de 100%
+  const host = Math.min(100, core / n)
+  return { hostPct: host, corePct: core, pressure: host }
 }
 
 /** „120.5 MB / 1.94 GB" sau doar „120.5 MB" când limita lipseşte */

@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { DockerStat, fmtMem, fmtPct, matchStats, nextStatsDelay, startPolling, STATS_INTERVAL, STATS_SLOW_INTERVAL, VisibilitySource } from './dockerStats'
+import { DockerStat, cpuShare, fmtMem, fmtPct, matchStats, nextStatsDelay, startPolling, STATS_INTERVAL, STATS_SLOW_INTERVAL, VisibilitySource } from './dockerStats'
+import en from '../lang/en'
+import ro from '../lang/ro'
 
 const stat = (o: Partial<DockerStat>): DockerStat => ({
   id: '', name: '', cpu_pct: null, mem_used: null, mem_limit: null, mem_pct: null,
@@ -139,5 +141,41 @@ describe('bucla de sondare', () => {
     await vi.advanceTimersByTimeAsync(30000)
     expect(maxLive).toBe(1)
     stop()
+  })
+})
+
+describe('CPU relativ la host (3.5.15)', () => {
+  it('împarte la nucleele hostului: 96% dintr-un nucleu pe 8 nuclee = 12% din host', () => {
+    const s = cpuShare(96, 8)
+    expect(s.hostPct).toBe(12)
+    expect(s.corePct).toBe(96)
+    expect(s.pressure).toBe(12)          // culoarea de prag urmează valoarea normalizată
+    expect(fmtPct(s.hostPct)).toBe('12%')
+  })
+  it('400% pe 4 nuclee = 100% din host; o depăşire de eşantionare nu trece de 100%', () => {
+    expect(cpuShare(400, 4).hostPct).toBe(100)
+    expect(cpuShare(430, 4).hostPct).toBe(100)
+    expect(cpuShare(430, 4).corePct).toBe(430)
+  })
+  it('nuclee necunoscute / invalide → valoarea brută, pragul pe ea', () => {
+    for (const n of [null, undefined, 0, -1, 2.5, NaN]) {
+      const s = cpuShare(150, n as number | null | undefined)
+      expect(s.hostPct).toBeNull()
+      expect(s.corePct).toBe(150)
+      expect(s.pressure).toBe(150)
+    }
+  })
+  it('fără valoare CPU → nimic de afişat', () => {
+    expect(cpuShare(null, 8)).toEqual({ hostPct: null, corePct: null, pressure: 0 })
+    expect(cpuShare(NaN, 8).corePct).toBeNull()
+    expect(cpuShare(-3, 8).corePct).toBeNull()
+  })
+  it('textele „din host · dintr-un nucleu" există în EN şi RO, cu ambele valori', () => {
+    for (const lang of [en.strings, ro.strings]) {
+      expect(lang['docker.stats.cpuBoth']).toContain('{host}')
+      expect(lang['docker.stats.cpuBoth']).toContain('{core}')
+      expect(lang['docker.stats.cpuPerCore']).toContain('{core}')
+      expect(lang['docker.stats.perCoreShort']).toBeTruthy()
+    }
   })
 })

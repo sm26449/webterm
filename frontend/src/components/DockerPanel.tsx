@@ -6,7 +6,7 @@ import { copyText } from '../lib/clipboard'
 import { SHEET_CLS } from '../lib/sheet'
 import { useDrawer } from '../lib/useDrawer'
 import SheetBar from './SheetBar'
-import { DockerStat, DockerStatsResponse, fmtMem, fmtPct, matchStats, nextStatsDelay, startPolling } from '../lib/dockerStats'
+import { DockerStat, DockerStatsResponse, cpuShare, fmtMem, fmtPct, matchStats, nextStatsDelay, startPolling } from '../lib/dockerStats'
 import { pressureTextColor } from '../lib/thresholds'
 import { CloseIcon, RefreshIcon, TerminalPromptIcon } from './Icons'
 
@@ -39,6 +39,7 @@ export default function DockerPanel(props: {
   // răspuns în timp (timeout) sau endpoint-ul a eşuat — afişăm „indisponibil", nu o eroare
   const [stats, setStats] = useState<DockerStat[] | null>(null)
   const [statsOff, setStatsOff] = useState(false)
+  const [hostCpus, setHostCpus] = useState<number | null>(null)   // nucleele hostului (CPU% relativ la host)
 
   const asideCls = drawer.sheet ? SHEET_CLS : props.embed
     ? 'flex h-full w-full min-h-0 flex-col bg-ink-900'
@@ -117,6 +118,7 @@ export default function DockerPanel(props: {
         const r = await api<DockerStatsResponse>(`/api/hosts/${props.host.id}/docker/stats`)
         if (!alive) return null
         setStats(r.rows || []); setStatsOff(!r.available)
+        if (r.available) setHostCpus(r.host_cpus ?? null)
         return nextStatsDelay(r.available ? 'ok' : 'unavailable')
       } catch {
         if (alive) setStatsOff(true)
@@ -130,7 +132,14 @@ export default function DockerPanel(props: {
     if (statsOff) return <div className="text-2xs text-slate-500">{t('docker.stats.unavailable')}</div>
     const s = matchStats(stats, id, names)
     if (!s) return null
-    const cpu = fmtPct(s.cpu_pct)
+    const share = cpuShare(s.cpu_pct, hostCpus)
+    const cpu = fmtPct(share.hostPct ?? share.corePct)
+    const corePct = fmtPct(share.corePct)
+    // tooltip + numele accesibil: AMBELE valori când ştim nucleele („12% din host · 96% dintr-un
+    // nucleu"); altfel valoarea brută, spusă explicit „per nucleu" — şi vizibil, nu doar în tooltip
+    const cpuFull = share.hostPct != null
+      ? t('docker.stats.cpuBoth', { host: cpu ?? '', core: corePct ?? '' })
+      : t('docker.stats.cpuPerCore', { core: corePct ?? '' })
     const mem = fmtMem(s.mem_used, s.mem_limit)
     const memPct = fmtPct(s.mem_pct)
     if (!cpu && !mem) return null
@@ -138,9 +147,13 @@ export default function DockerPanel(props: {
     return (
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 font-mono text-2xs text-slate-400">
         {cpu && (
-          <span title={t('docker.stats.cpuTitle')}>
-            {t('docker.stats.cpu')}{' '}
-            <span style={{ color: pressureTextColor(s.cpu_pct ?? 0) }}>{cpu}</span>
+          <span title={`${cpuFull} — ${t('docker.stats.cpuTitle')}`} data-testid="wt-docker-cpu">
+            <span aria-hidden="true">
+              {t('docker.stats.cpu')}{' '}
+              <span style={{ color: pressureTextColor(share.pressure) }}>{cpu}</span>
+              {share.hostPct == null && <span className="text-slate-500"> {t('docker.stats.perCoreShort')}</span>}
+            </span>
+            <span className="sr-only">{t('docker.stats.cpu')} {cpuFull}</span>
           </span>
         )}
         {mem && (
