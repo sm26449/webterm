@@ -46,7 +46,7 @@ import termios
 import threading
 import time
 
-AGENT_VERSION = 57
+AGENT_VERSION = 58
 
 # Sub atâtea secunde de valabilitate, un certificat se roteşte prea des ca un pin pe el să
 # însemne altceva decât o cădere programată. 48h: peste ce emite un CA intern (12h la Caddy),
@@ -579,15 +579,17 @@ HISTORY_TIMEOUT = 5                  # per comandă tmux (pe worker, dar tot mă
 _HISTORY_SEM = threading.BoundedSemaphore(2)   # câte capturi în zbor (F5 în rafală pe 2 taburi)
 
 
-def history_capture_argv(sid, n):
+def history_capture_argv(sid, n, pane=None):
     """argv-ul tmux pentru ultimele `n` rânduri de istoric ale sesiunii, FĂRĂ ecranul vizibil.
 
     · ţinta ca SESIUNE (`name:`), ca la `session_cwd` — pe tmux 3.4 `=name` nu rezolvă pane-ul;
+      v58: cu `pane` (id-ul `%N` citit de probe) ţinta e EXACT pane-ul sondat — între probe şi
+      captură omul poate comuta pane-ul activ, iar `-S` e calculat din history_size-ul ĂLUIA;
     · `-e` păstrează culorile (doar SGR), `-J` uneşte rândurile împachetate (browserul are altă
       lăţime, le reîmpachetează singur);
     · `-E -1` = se opreşte DEASUPRA ecranului vizibil: pe ăla îl pictează redraw-ul tmux de la
       ataşare, deci nu-l dublăm."""
-    return ["capture-pane", "-p", "-e", "-J", "-t", TMUX_SESSION_PREFIX + sid + ":",
+    return ["capture-pane", "-p", "-e", "-J", "-t", pane or (TMUX_SESSION_PREFIX + sid + ":"),
             "-S", "-%d" % int(n), "-E", "-1"]
 
 
@@ -601,31 +603,51 @@ def cap_history_bytes(data, limit=HISTORY_MAX_BYTES):
     return (cut[nl + 1:] if nl >= 0 else b""), True
 
 
+# v58: probe-ul citeşte şi pane-ul activ (id) şi dacă e zoom-at. `#{window_zoomed_flag}` există
+# din tmux 1.8, `#{pane_id}` din 1.6 — sub gate-ul de tmux al agentului oricum.
+HISTORY_PROBE_FMT = "#{history_size} #{window_panes} #{pane_id} #{window_zoomed_flag}"
+_PANE_ID_RE = re.compile(r"%[0-9]{1,9}\Z")
+
+
 def parse_history_probe(out):
-    """`#{history_size} #{window_panes}` → (hsize, panes) sau None dacă ieşirea e ciudată."""
+    """`HISTORY_PROBE_FMT` → (hsize, panes, pane_id, zoomed) sau None dacă ieşirea e ciudată.
+    pane_id e validat strict (`%<cifre>`): ajunge ca ţintă tmux în capture-pane."""
     parts = (out or b"").decode("ascii", "replace").split()
-    if len(parts) != 2 or not all(p.isdigit() for p in parts):
+    if (len(parts) != 4 or not all(p.isdigit() for p in (parts[0], parts[1], parts[3]))
+            or not _PANE_ID_RE.match(parts[2]) or parts[3] not in ("0", "1")):
         return None
-    return int(parts[0]), int(parts[1])
+    return int(parts[0]), int(parts[1]), parts[2], parts[3] == "1"
 
 
-def tmux_history(sid, lines):
+def tmux_history(sid, lines, active_pane=False):
     """Captura de istoric pentru op-ul `history`. Întoarce un dict de răspuns:
-    {z, n, lines, truncated} la succes, {error, msg} altfel. Blocant (subprocess) — doar pe worker."""
+    {z, n, lines, truncated, panes, zoomed} la succes, {error, msg} altfel. Blocant (subprocess)
+    — doar pe worker.
+
+    Pane-uri multiple (v58, „tmux multi-pane history"): până la v57 orice fereastră cu >1 pane
+    răspundea `multi_pane`, iar gateway-ul cădea pe coada de transcript — adică un split în tmux
+    lăsa browserul aproape fără scrollback. Acum:
+      · pane zoom-at (`resize-pane -Z`): browserul vede UN pane pe toată fereastra, exact ca la
+        un singur pane → captura lui, fără nicio condiţie;
+      · pane-uri vizibile simultan: captura pane-ului ACTIV, dar numai dacă gateway-ul o cere
+        explicit (`active_pane`) — el ştie s-o marcheze ca „istoricul pane-ului activ" (rândurile
+        sunt unite cu `-J`, deci lăţimea pane-ului nu contează: browserul le reîmpachetează).
+        Un gateway vechi nu cere → comportamentul v57 (`multi_pane`), neschimbat.
+    Captura ţinteşte pane-ul sondat după id, nu „pane-ul activ de acum" (vezi history_capture_argv)."""
     target = TMUX_SESSION_PREFIX + sid + ":"
     try:
-        r = tmux_cmd("display-message", "-p", "-t", target,
-                     "#{history_size} #{window_panes}", timeout=HISTORY_TIMEOUT)
+        r = tmux_cmd("display-message", "-p", "-t", target, HISTORY_PROBE_FMT, timeout=HISTORY_TIMEOUT)
     except (OSError, subprocess.TimeoutExpired) as e:
         return {"error": "capture_failed", "msg": "tmux display-message: %s" % e}
     probe = parse_history_probe(r.stdout) if r.returncode == 0 else None
     if probe is None:
         return {"error": "capture_failed",
                 "msg": (r.stderr or b"").decode("utf-8", "replace").strip()[:200] or "bad probe"}
-    hsize, panes = probe
-    if panes != 1:
-        # Cu pane-uri multiple fluxul browserului e layout-ul tmux, nu un singur pane; istoricul
-        # pane-ului activ (altă lăţime) lipit deasupra ar minţi. Gateway-ul rămâne pe transcript.
+    hsize, panes, pane_id, zoomed = probe
+    if panes != 1 and not zoomed and not active_pane:
+        # Cerere fără `pane: "active"` (gateway < 3.6 / agent-58-aware): fluxul browserului e
+        # layout-ul tmux, nu un singur pane; istoricul pane-ului activ lipit deasupra, NEMARCAT,
+        # ar minţi. Gateway-ul rămâne pe transcript, ca în v57.
         return {"error": "multi_pane", "msg": "%d panes" % panes}
     n = min(int(lines), hsize, HISTORY_MAX_LINES)
     if n <= 0:
@@ -634,7 +656,7 @@ def tmux_history(sid, lines):
         data, truncated = b"", False
     else:
         try:
-            r = tmux_cmd(*history_capture_argv(sid, n), timeout=HISTORY_TIMEOUT)
+            r = tmux_cmd(*history_capture_argv(sid, n, pane_id), timeout=HISTORY_TIMEOUT)
         except (OSError, subprocess.TimeoutExpired) as e:
             return {"error": "capture_failed", "msg": "tmux capture-pane: %s" % e}
         if r.returncode != 0:
@@ -642,7 +664,8 @@ def tmux_history(sid, lines):
                     "msg": (r.stderr or b"").decode("utf-8", "replace").strip()[:200]}
         data, truncated = cap_history_bytes(r.stdout or b"")
     z, data, more = encode_history(data)
-    return {"z": z, "n": len(data), "lines": data.count(b"\n"), "truncated": truncated or more}
+    return {"z": z, "n": len(data), "lines": data.count(b"\n"), "truncated": truncated or more,
+            "panes": panes, "zoomed": zoomed}
 
 
 def encode_history(data, max_reply=HISTORY_MAX_REPLY):
@@ -1803,6 +1826,55 @@ def _fs_crc32(path):
 
 
 # ---------------------------------------------------------------------------
+# fs_chmod (agent v58): biţii de permisiune pentru copierea host → host a folderelor
+# ---------------------------------------------------------------------------
+# Copierea pe server (gateway/app/fscopy.py) scrie fişierele prin maşinăria de upload, deci pe
+# destinaţie aterizează cu 0644 — un `deploy.sh` copiat nu mai e executabil, o cheie 0600 devine
+# citibilă de alţii. Op-ul aplică modul sursei DUPĂ commit. Reguli stricte:
+#  · doar biţii 0o777: setuid/setgid/sticky NU se copiază niciodată (un fişier setuid al altui
+#    host n-are ce căuta setuid aici), indiferent ce cere gateway-ul;
+#  · doar fişier obişnuit sau director; un symlink NU se urmează (ar schimba modul ŢINTEI, care
+#    poate fi oriunde): lstat refuză link-ul, iar fd-ul se deschide cu O_NOFOLLOW şi se verifică
+#    pe fstat că e ACELAŞI inode (dev, ino) — o înlocuire între lstat şi open e prinsă;
+#  · chmod-ul se face pe fd, nu pe nume. Cu O_PATH (Linux) fd-ul nu cere drept de citire şi nu
+#    „deschide" nimic (un device n-are efecte), iar chmod pe /proc/self/fd/N atinge exact inode-ul
+#    fd-ului (aşa face şi glibc pentru fchmodat). Fără O_PATH / fără /proc: O_RDONLY|O_NONBLOCK +
+#    fchmod (cere drept de citire — fişierele copiate sunt oricum 0644 până la chmod).
+# Ca toate op-urile fs, calea e a userului agentului (expanduser + abspath): agentul rulează CA el,
+# deci sistemul de operare decide ce poate schimba — nu există altă „rădăcină" de impus aici.
+CHMOD_MASK = 0o777
+
+
+def _fs_chmod(path, mode):
+    """Aplică `mode & 0o777` pe `path` (fişier obişnuit sau director, fără symlink-uri). Întoarce
+    modul aplicat; ridică OSError (ELOOP pe symlink, EINVAL pe tip greşit / inode schimbat)."""
+    mode &= CHMOD_MASK
+    st0 = os.lstat(path)
+    if stat.S_ISLNK(st0.st_mode):
+        raise OSError(errno.ELOOP, "is a symbolic link (not followed)")
+    if not (stat.S_ISREG(st0.st_mode) or stat.S_ISDIR(st0.st_mode)):
+        raise OSError(errno.EINVAL, "not a regular file or directory")
+    o_path = getattr(os, "O_PATH", 0) if os.path.isdir("/proc/self/fd") else 0
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    if o_path:
+        fd = os.open(path, o_path | os.O_NOFOLLOW | cloexec)
+    else:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY | os.O_NOFOLLOW | cloexec)
+    try:
+        st = os.fstat(fd)
+        if ((st.st_dev, st.st_ino) != (st0.st_dev, st0.st_ino)
+                or not (stat.S_ISREG(st.st_mode) or stat.S_ISDIR(st.st_mode))):
+            raise OSError(errno.EINVAL, "the path changed during chmod")
+        if o_path:
+            os.chmod("/proc/self/fd/%d" % fd, mode)
+        else:
+            os.fchmod(fd, mode)
+        return stat.S_IMODE(os.fstat(fd).st_mode) & CHMOD_MASK
+    finally:
+        os.close(fd)
+
+
+# ---------------------------------------------------------------------------
 # Serial: allowlist de device-uri (audit 2026-10)
 # ---------------------------------------------------------------------------
 # `serial_open` accepta ORICE tty din /dev — şi `/dev/pts/N` al altei sesiuni, şi `/dev/tty1`
@@ -2711,11 +2783,11 @@ class Agent:
         finally:
             _AUTOSTART_LOCK.release()
 
-    def _history_worker(self, rid, sid, lines):
+    def _history_worker(self, rid, sid, lines, active_pane=False):
         """Rulează `tmux_history` şi răspunde cu acelaşi id. Eliberează MEREU `_HISTORY_SEM`."""
         try:
             try:
-                res = tmux_history(sid, lines)
+                res = tmux_history(sid, lines, active_pane)
             except Exception as e:      # noqa: BLE001 — op-ul nu are voie să doboare agentul
                 res = {"error": "capture_failed", "msg": repr(e)[:200]}
             if res.get("error"):
@@ -3141,6 +3213,22 @@ class Agent:
                 except OSError as e:
                     err("fs_error", "%s: %s" % (path, e.strerror or e))
 
+            elif op == "fs_chmod":
+                # v58: modul sursei pe destinaţia unei copieri host → host (vezi _fs_chmod).
+                # Validare strictă: cale str fără NUL, mod int (nu bool) în 0..0o7777 — biţii
+                # speciali se taie în _fs_chmod, nu se refuză (un 04755 de pe sursă devine 0755).
+                p = msg.get("path")
+                mode = msg.get("mode")
+                if not isinstance(p, str) or not p or "\x00" in p:
+                    return err("bad_request", "path must be a non-empty string")
+                if not isinstance(mode, int) or isinstance(mode, bool) or not 0 <= mode <= 0o7777:
+                    return err("bad_request", "mode must be an integer between 0 and 0o7777")
+                path = os.path.abspath(os.path.expanduser(p))
+                try:
+                    ok(path=path, mode=_fs_chmod(path, mode))
+                except OSError as e:
+                    err("fs_error", "%s: %s" % (path, e.strerror or e))
+
             elif op == "fs_rename":
                 src = os.path.abspath(os.path.expanduser(msg["path"]))
                 dst = os.path.abspath(os.path.expanduser(msg["to"]))
@@ -3245,9 +3333,14 @@ class Agent:
                 lines = msg.get("lines")
                 if not isinstance(lines, int) or isinstance(lines, bool) or lines <= 0:
                     return err("bad_request", "lines must be a positive integer")
+                # v58: `pane: "active"` = gateway-ul acceptă istoricul pane-ului activ al unei
+                # ferestre cu mai multe pane-uri (şi îl marchează ca atare). Absent = ca în v57.
+                pane = msg.get("pane")
+                if pane not in (None, "active"):
+                    return err("bad_request", "pane must be \"active\" or absent")
                 if not _HISTORY_SEM.acquire(False):
                     return err("busy", "too many history captures in flight")
-                threading.Thread(target=self._history_worker, args=(rid, sid, lines),
+                threading.Thread(target=self._history_worker, args=(rid, sid, lines, pane == "active"),
                                  daemon=True).start()
                 # NU răspundem aici — worker-ul trimite reply-ul cu acelaşi id
 
@@ -3333,8 +3426,11 @@ class Agent:
                     # dir/link din CHIAR lstat-ul de mai sus: isdir()/islink() ar fi re-stat-uri
                     # separate (micro-TOCTOU) şi isdir URMEAZĂ symlink-ul — un link către un
                     # director ieşea dir=True aici dar dir=False în fs_list (v51: consistent).
+                    # `mode` (v58): biţii 0o777, ca în fs_list — copierea host → host îi aplică
+                    # pe destinaţie (fs_chmod); un gateway vechi ignoră câmpul
                     ok(exists=True, size=st.st_size, dir=stat.S_ISDIR(st.st_mode),
-                       link=stat.S_ISLNK(st.st_mode), mtime=int(st.st_mtime))
+                       link=stat.S_ISLNK(st.st_mode), mtime=int(st.st_mtime),
+                       mode=st.st_mode & 0o777)
                 except FileNotFoundError:
                     ok(exists=False, size=0)
                 except OSError as e:

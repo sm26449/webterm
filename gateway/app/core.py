@@ -398,7 +398,7 @@ def read_tail(sid: str, limit: int = config.BROWSER_TAIL_BYTES,
 #  · După istoric împingem ecranul în scrollback (rows-1 LF) şi ducem cursorul sus: coada începe
 #    oriunde în flux, adesea cu poziţionări absolute (CUP) care altfel ar suprascrie ultimul ecran
 #    de istoric în loc să-l lase în scrollback.
-#  · Orice eşec (agent < 57, backend pty, pane-uri multiple, timeout, răspuns invalid) = None →
+#  · Orice eşec (agent < 57, backend pty, pane-uri multiple pe agent 57, timeout, răspuns invalid) = None →
 #    comportamentul de azi, fără nicio urmă în UI.
 # Se aplică şi la resync-ul FULL (resume/unlock, vezi `_resync`), cu acelaşi bloc; lossy nu cere istoric.
 HISTORY_MIN_AGENT = 57
@@ -411,6 +411,26 @@ LARGE_REPLAY_MIN_SCROLLBACK = 5000   # browserele „desktop" (SCROLLBACK 10000)
 HISTORY_SEAM = (b"\x1b[0m\x1b[2m\xe2\x94\x80\xe2\x94\x80 webterm: history above \xc2\xb7 "
                 b"recent output below (the first lines may repeat) "
                 b"\xe2\x94\x80\xe2\x94\x80\x1b[0m")
+# Agent v58 („tmux multi-pane history"): într-o fereastră cu mai multe pane-uri VIZIBILE agentul dă
+# istoricul pane-ului ACTIV (cerut explicit cu `pane: "active"`; un agent 57 ignoră câmpul şi
+# răspunde `multi_pane` → transcriptul, ca înainte). Browserul vede tot layout-ul, deci îmbinarea
+# spune limpede de unde vine istoricul de deasupra. Un pane zoom-at = un singur pane vizibil →
+# îmbinarea obişnuită.
+HISTORY_SEAM_PANE = (b"\x1b[0m\x1b[2m\xe2\x94\x80\xe2\x94\x80 webterm: history of the active pane above "
+                     b"(%d panes) \xc2\xb7 recent output below (the first lines may repeat) "
+                     b"\xe2\x94\x80\xe2\x94\x80\x1b[0m")
+
+
+class PaneHistory(bytes):
+    """Captura de istoric (bytes) + câte pane-uri vizibile avea fereastra (1 = un singur pane sau
+    pane zoom-at). Subclasă de bytes ca apelanţii existenţi (`if raw:`, build_history_block) să
+    rămână neschimbaţi."""
+    panes = 1
+
+
+def history_seam(raw) -> bytes:
+    panes = getattr(raw, "panes", 1)
+    return HISTORY_SEAM_PANE % panes if panes > 1 else HISTORY_SEAM
 
 # secvenţe escape într-un rând de captură (str, deja decodat): CSI, şiruri OSC/DCS/SOS/PM/APC
 # (până la terminator sau final de rând), ESC + intermediari + final, ESC orfan
@@ -455,7 +475,7 @@ def build_history_block(raw: bytes, max_lines: int, rows: int) -> bytes:
     if not lines:
         return b""
     rows = max(1, min(int(rows or 24), HISTORY_MAX_ROWS))
-    block = (b"\x1b[0m" + "\r\n".join(lines).encode("utf-8") + b"\x1b[0m\r\n" + HISTORY_SEAM
+    block = (b"\x1b[0m" + "\r\n".join(lines).encode("utf-8") + b"\x1b[0m\r\n" + history_seam(raw)
              + b"\r\n" + b"\n" * (rows - 1) + b"\x1b[H")
     return ALT_SCREEN_RE.sub(b"", block)   # redundant după sanitizare — aceeaşi regulă ca la coadă
 
@@ -488,15 +508,26 @@ async def fetch_tmux_history(src, sid: str, lines: int,
     if lines <= 0 or not history_capable(src):
         return None
     try:
+        # `pane="active"`: agentul ≥ 58 dă şi istoricul pane-ului activ când fereastra are mai multe
+        # pane-uri; agentul 57 ignoră câmpul (răspunde `multi_pane`, fallback tăcut ca înainte)
         resp = await asyncio.wait_for(
-            src.request("history", timeout=timeout, sid=sid, lines=int(lines)), timeout + 1.0)
+            src.request("history", timeout=timeout, sid=sid, lines=int(lines), pane="active"),
+            timeout + 1.0)
     except Exception as e:            # noqa: BLE001 — AgentGone, timeout, ws închis: fallback tăcut
         log.debug("history %s: %r — falling back to the transcript tail", sid[:8], e)
         return None
     if not (isinstance(resp, dict) and resp.get("ok")):
         log.debug("history %s: %s", sid[:8], (resp or {}).get("code") if isinstance(resp, dict) else resp)
         return None
-    return await asyncio.to_thread(decode_history_reply, resp)
+    raw = await asyncio.to_thread(decode_history_reply, resp)
+    if raw is None:
+        return None
+    out = PaneHistory(raw)
+    panes = resp.get("panes")
+    if (isinstance(panes, int) and not isinstance(panes, bool) and 1 < panes <= 64
+            and resp.get("zoomed") is not True):
+        out.panes = panes
+    return out
 
 
 def stream_is_plain(hub) -> bool:

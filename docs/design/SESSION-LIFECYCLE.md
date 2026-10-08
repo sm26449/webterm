@@ -68,7 +68,7 @@ tmux session** puts the pane's real history above the tail:
 - The gateway asks the agent for `history {sid, lines: sb}`. The agent runs
   `tmux capture-pane -p -e -J -S -N -E -1` on `wt-<sid>:` on a worker thread: colours kept,
   wrapped lines joined, and the visible screen left out (the redraw that follows the attach paints
-  it). With no history it skips the capture, and with several panes it declines. The reply is
+  it). With no history it skips the capture. The reply is
   zlib + base64 and capped at 1 MiB, far below the agent's 4 MiB outbox limit, which would drop
   the whole agent connection. The most recent lines are kept when it has to truncate.
 - The gateway keeps only text and SGR from the capture: no cursor movement, no clears, no
@@ -83,8 +83,21 @@ tmux session** puts the pane's real history above the tail:
   this change. Trimming the history by text-matching it against the tail would lose lines: we
   cannot tell which tail lines reach scrollback, because the ones tmux scrolled with `CSI S`
   never do.
+- **Several panes** (agent 58). Until agent 57 a tmux window split into panes declined
+  (`multi_pane`), so a split session got almost no scrollback. The probe now also reads the active
+  pane's id and `window_zoomed_flag`, and the capture targets **that pane by id** (the user can
+  switch panes between the probe and the capture; `-S` was computed from the probed pane's
+  history). A **zoomed** pane is the only pane the browser sees, so it is captured like a single
+  pane. With several **visible** panes the agent captures the **active** pane only when the gateway
+  asks for it with `pane: "active"`, and replies with `panes` and `zoomed`; the gateway then marks
+  the seam *history of the active pane above (N panes)*, because the browser shows the whole
+  layout. The lines are joined (`-J`), so the pane's width does not matter: the browser re-wraps
+  them. The gateway always sends `pane: "active"`; agent 57 ignores the field and still declines
+  with `multi_pane`, which falls back as before. Per-pane history of the *other* panes is not
+  shown: there is one scrollback per browser terminal, and interleaving several panes' histories
+  into it would not be readable.
 - Any failure falls back silently to the old replay: agent below 57, the pty backend, several
-  panes, a 3 s timeout, or an oversized or corrupt reply. The history request is made before the
+  panes on agent 57, a 3 s timeout, or an oversized or corrupt reply. The history request is made before the
   tail is read, and the client joins the hub only after the frame is sent, so the live queue
   cannot interleave with it or duplicate it. If the hub locks while the gateway waits for the agent,
   nothing is sent.

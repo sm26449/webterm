@@ -165,7 +165,8 @@ OURS = ("@reboot /usr/bin/python3 /home/t/.webterm/ptyd.py start # webterm\n"
         "* * * * * /usr/bin/python3 /home/t/.webterm/ptyd.py start # webterm-watchdog\n")
 
 # ───────────────────────── versiune ─────────────────────────
-check("AGENT_VERSION == 57", ptyd.AGENT_VERSION == 57, ptyd.AGENT_VERSION)
+# v58 a crescut versiunea; gate-ul pe 57 (autostart/history) rămâne valabil pentru orice ≥ 57
+check("AGENT_VERSION >= 57", ptyd.AGENT_VERSION >= 57, ptyd.AGENT_VERSION)
 
 # ═════════════════════════ 1. parsare ═════════════════════════
 check("_cron_scan: @reboot + watchdog", ptyd._cron_scan(OURS.splitlines()) == (True, True))
@@ -627,7 +628,8 @@ argv = ptyd.history_capture_argv(HSID, 3000)
 check("history: argv = capture-pane -p -e -J, ţinta `wt-<sid>:` (ca session_cwd), -S -N -E -1",
       argv == ["capture-pane", "-p", "-e", "-J", "-t", ptyd.TMUX_SESSION_PREFIX + HSID + ":",
                "-S", "-3000", "-E", "-1"], argv)
-check("history: probe parsat", ptyd.parse_history_probe(b"1981 1\n") == (1981, 1))
+# v58: probe-ul are şi pane_id + window_zoomed_flag (agent_v58_test acoperă pane-urile multiple)
+check("history: probe parsat", ptyd.parse_history_probe(b"1981 1 %0 0\n") == (1981, 1, "%0", False))
 check("history: probe ciudat → None",
       ptyd.parse_history_probe(b"") is None and ptyd.parse_history_probe(b"x 1") is None
       and ptyd.parse_history_probe(b"1 2 3") is None)
@@ -638,7 +640,7 @@ check("cap: peste plafon → SFÂRŞITUL, tăiat la început de rând", d == b"c
 
 
 class FakeTmux:
-    def __init__(self, probe=b"1981 1\n", data=b"L1\nL2\n", rc=0, timeout_on=None):
+    def __init__(self, probe=b"1981 1 %0 0\n", data=b"L1\nL2\n", rc=0, timeout_on=None):
         self.calls = []
         self.probe, self.data, self.rc, self.timeout_on = probe, data, rc, timeout_on
 
@@ -663,17 +665,17 @@ def with_tmux(fake, fn):
 ft = FakeTmux()
 res = with_tmux(ft, lambda: ptyd.tmux_history(HSID, 3000))
 check("tmux_history: -S plafonat la history_size (1981 < 3000)",
-      ft.calls[1] == ptyd.history_capture_argv(HSID, 1981), ft.calls)
+      ft.calls[1] == ptyd.history_capture_argv(HSID, 1981, "%0"), ft.calls)
 check("tmux_history: probe pe ţinta `wt-<sid>:` cu history_size + window_panes",
       ft.calls[0][:4] == ["display-message", "-p", "-t", ptyd.TMUX_SESSION_PREFIX + HSID + ":"]
       and "#{history_size}" in ft.calls[0][4] and "#{window_panes}" in ft.calls[0][4], ft.calls[0])
 check("tmux_history: z = zlib+base64 al capturii, n/lines corecte",
       zlib.decompress(base64.b64decode(res["z"])) == b"L1\nL2\n" and res["n"] == 6 and res["lines"] == 2, res)
-ft = FakeTmux(probe=b"0 1")
+ft = FakeTmux(probe=b"0 1 %0 0")
 res = with_tmux(ft, lambda: ptyd.tmux_history(HSID, 3000))
 check("tmux_history: fără istoric → NU rulează capture-pane (ar dubla primul rând vizibil)",
       len(ft.calls) == 1 and res["n"] == 0, (ft.calls, res))
-res = with_tmux(FakeTmux(probe=b"500 2"), lambda: ptyd.tmux_history(HSID, 3000))
+res = with_tmux(FakeTmux(probe=b"500 2 %0 0"), lambda: ptyd.tmux_history(HSID, 3000))
 check("tmux_history: pane-uri multiple → multi_pane (gateway-ul rămâne pe transcript)",
       res.get("error") == "multi_pane", res)
 res = with_tmux(FakeTmux(rc=1), lambda: ptyd.tmux_history(HSID, 3000))
@@ -847,8 +849,9 @@ async def gw_history():
 
     c = HConn(57, "tmux", reply=good)
     got = await core.attach_replay(sid, HHub(c), 10000, 30)
+    # `pane: "active"` (gateway 3.6): un agent 57 ignoră câmpul — vezi agent_v58_test
     check("tmux v57: op history cerut cu sid + lines = sb",
-          c.sent == [{"sid": sid, "lines": 10000, "op": "history"}], c.sent)
+          c.sent == [{"sid": sid, "lines": 10000, "pane": "active", "op": "history"}], c.sent)
     check("tmux v57: istoric (cu culori) + îmbinare DEASUPRA cozii neschimbate",
           got.startswith(b"\x1b[0m\x1b[32mold 1\x1b[0m\r\nold 2") and got.endswith(plain_tail)
           and core.HISTORY_SEAM in got and got.index(core.HISTORY_SEAM) < len(got) - len(plain_tail))

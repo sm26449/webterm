@@ -406,7 +406,7 @@ async def t10_full_resync_brings_tmux_history():
 
     frames = binary_frames(ws)
     check("full: op history cerut cu sb-ul de la ataşare",
-          hist_ops(src) == [{"sid": sid, "lines": 10000, "op": "history"}], str(src.ops))
+          hist_ops(src) == [{"sid": sid, "lines": 10000, "pane": "active", "op": "history"}], str(src.ops))
     check("full: UN singur frame binar după resync (clientul face reset la primul)",
           len(frames) == 1, [len(f) for f in frames])
     data = frames[0] if frames else b""
