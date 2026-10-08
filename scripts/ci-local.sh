@@ -60,7 +60,14 @@ cleanup() {
   rm -rf "$OUT/ftps-certs" 2>/dev/null || true
   docker network rm $NET >/dev/null 2>&1 || true
 }
-trap cleanup EXIT
+# DOAR paşii care pornesc containere le şi curăţă. Înainte, `trap cleanup` rula la ORICE
+# invocare — şi `ci-local.sh lint unit` (static, fără containere) ştergea cu `docker rm -f`
+# containerele wtci-* ale unei porţi complete pornite în paralel din alt worktree. Rezultatul
+# arăta ca un „flake" de mobile/e2e (ERR_CONNECTION_REFUSED la jumătatea auditului).
+case " $ONLY " in
+  *" all "*|*" smoke "*|*" e2e "*|*" a11y "*|*" fs "*|*" fwd "*|*" mobile "*|*" sso "*|*" backup "*|*" features "*|*" jump "*)
+    trap cleanup EXIT ;;
+esac
 
 want() { case " $ONLY " in *" all "*|*" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
