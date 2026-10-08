@@ -3,8 +3,9 @@ import { startAuthentication } from '@simplewebauthn/browser'
 import { api, AppState, CommandGuard, Host, Session, setStepupHandler } from '../lib/api'
 import { hostAt } from '../lib/host'
 import { useI18n } from '../lib/i18n'
-import { registerToast } from '../lib/notify'
+import { notifyError, registerToast } from '../lib/notify'
 import { askSecret, registerSecretPrompt, SecretAsk } from '../lib/secretPrompt'
+import { StepupMethod, stepupPrompt } from '../lib/stepup'
 import SecretPromptModal from './SecretPromptModal'
 import SessionView from './SessionView'
 import Toasts, { ToastItem } from './Toasts'
@@ -25,6 +26,7 @@ export default function PopoutView(props: { sid: string }) {
   const [gone, setGone] = useState(false)
   const [guard, setGuard] = useState<CommandGuard | null>(null)
   const [webauthn, setWebauthn] = useState(false)
+  const [stepupMethod, setStepupMethod] = useState<StepupMethod | null>(null)
 
   useEffect(() => {
     let active = true
@@ -40,6 +42,7 @@ export default function PopoutView(props: { sid: string }) {
         if (state) {
           setGuard(state.command_guard ?? null)
           setWebauthn(!!state.webauthn_available)
+          setStepupMethod(state.stepup_method ?? null)
         }
         const s = sessions.find((x) => x.id === props.sid) ?? null
         if (!s) {
@@ -87,13 +90,20 @@ export default function PopoutView(props: { sid: string }) {
     return () => registerSecretPrompt(null)
   }, [])
 
-  // Ceremonia de step-up, aceeaşi scară ca în App.stepupCredential: passkey → TOTP → parola
-  // contului. SSO nu are nevoie de nimic aici: api() face singur redirectul la IdP pe 403
-  // `host.needs2faSso`, iar întoarcerea restaurează hash-ul (#/popout/<sid>).
+  // Ceremonia de step-up, aceeaşi scară ca în App.stepupCredential (lib/stepup.ts): passkey →
+  // TOTP → SSO; parola doar ca re-auth pe o ţintă fără 2FA. SSO nu are nevoie de nimic aici:
+  // api() face singur redirectul la IdP pe 403 `host.needs2faSso`, iar întoarcerea restaurează
+  // hash-ul (#/popout/<sid>). Fără niciun factor (3.5.14): mesajul, fără Setări (nu există aici).
   const stepupCredential = useCallback(async (
     hostId: number, code?: string,
   ): Promise<{ stepup_grant?: string; stepup_password?: string; totp?: string } | null> => {
-    if (webauthn) {
+    const kind = stepupPrompt(code, stepupMethod, webauthn)
+    if (kind === 'needsFactor') {
+      notifyError(t('stepup.needsFactorTitle'), t('err.stepup.needsFactor'))
+      return null
+    }
+    if (kind === 'sso') return {}
+    if (kind === 'passkey') {
       try {
         const options = await api<Record<string, unknown>>('/api/webauthn/stepup/options', {
           method: 'POST', body: JSON.stringify({ host_id: hostId }),
@@ -107,7 +117,7 @@ export default function PopoutView(props: { sid: string }) {
         return null
       }
     }
-    if (code === 'stepup.totp') {
+    if (kind === 'totp') {
       const otp = await askSecret(t('stepup.totpTitle'), {
         masked: false, otp: true, label: t('stepup.totpLabel'), hint: t('stepup.totpHint'),
       })
@@ -115,7 +125,7 @@ export default function PopoutView(props: { sid: string }) {
     }
     const pw = await askSecret(t('app.reauth'), { label: t('app.accountPassword'), hint: t('app.reauthSubtitle') })
     return pw === null ? null : { stepup_password: pw }
-  }, [webauthn, t])
+  }, [webauthn, stepupMethod, t])
 
   // handler-ul global: withStepup()/api() îl cheamă la un 403 de step-up (kill, share, fs…)
   useEffect(() => {

@@ -27,6 +27,7 @@ import CopyToast from './components/CopyToast'
 import { errText, api, ApiError, AppState, Host, isSessionLive, Session, Snippet, SplitView, setStepupHandler, withStepup } from './lib/api'
 import { hostAt, hostColor } from './lib/host'
 import type { SettingsTarget } from './lib/settingsIndex'
+import { stepupPrompt } from './lib/stepup'
 import { useI18n } from './lib/i18n'
 import { useConfirm } from './lib/confirm'
 import { useFocusTrap } from './lib/useFocusTrap'
@@ -798,14 +799,37 @@ function MainApp() {
     return alive
   }, [selectedSid, mru, openTabs, splitPaneKey])   // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Ceremonia de step-up pentru un host cu 2FA (passkey sau, fără WebAuthn, re-autentificare cu
-  // parola). Întoarce credențialul de trimis (grant sau parolă) ori null la anulare/eșec.
+  // 3.5.14: contul n-are niciun factor real (fără passkey, fără TOTP, fără SSO) — parola singură
+  // nu mai deschide un host 2FA. Explicăm şi oferim drumul direct la Setări → Autentificare & 2FA.
+  // NB: HOOK — înainte de orice `return` timpuriu.
+  const promptNeedsFactor = useCallback(async () => {
+    if (await confirm({
+      title: t('stepup.needsFactorTitle'), message: t('err.stepup.needsFactor'),
+      confirmLabel: t('stepup.openSignin'),
+    })) {
+      setSettingsCat({ cat: 'autentificare', section: 'totp' })
+      setSettingsSignal((n) => n + 1)
+    }
+  }, [confirm, t])
+
+  // Ceremonia de step-up pentru un host cu 2FA: passkey, cod TOTP, re-auth SSO — sau, doar pe o
+  // ţintă FĂRĂ 2FA (deploy de cheie, `stepup.password`), parola contului. Ce cerem decide
+  // `stepupPrompt` (lib/stepup.ts) din codul refuzului sau, proactiv, din `stepup_method`.
+  // Întoarce credențialul de trimis ori null la anulare/eșec.
   // NB: HOOK — trebuie definit ÎNAINTE de orice `return` timpuriu (Rules of Hooks).
   const stepupCredential = useCallback(async (
     hostId: number,
     code?: string,
   ): Promise<{ stepup_grant?: string; stepup_password?: string; totp?: string } | null> => {
-    if (appState?.webauthn_available) {
+    const kind = stepupPrompt(code, appState?.stepup_method, !!appState?.webauthn_available)
+    if (kind === 'needsFactor') {
+      await promptNeedsFactor()
+      return null
+    }
+    // SSO: nicio ceremonie inline — cererea pleacă fără factor, serverul răspunde
+    // `host.needs2faSso`, iar api() face redirectul la IdP (re-auth proaspăt)
+    if (kind === 'sso') return {}
+    if (kind === 'passkey') {
       try {
         const options = await api<Record<string, unknown>>('/api/webauthn/stepup/options', {
           method: 'POST', body: JSON.stringify({ host_id: hostId }),
@@ -820,19 +844,17 @@ function MainApp() {
         return null
       }
     }
-    // User cu TOTP activ, dar fără passkey pe acest deploy: backend-ul refuză cu `stepup.totp`
-    // şi aşteaptă un cod de 6 cifre în câmpul `totp` al cererii /stepup (acolo unde altfel merge
-    // `stepup_password`). Cod scurt, viaţă 30s → input NEMASCAT, numeric, `one-time-code` (vezi
-    // SecretPromptModal cu `otp`). Un TOTP real e un al doilea factor, nu doar re-auth cu parola.
-    if (code === 'stepup.totp') {
+    // User cu TOTP activ, fără passkey: backend-ul cere un cod de 6 cifre în câmpul `totp` al
+    // cererii /stepup (acolo unde altfel merge `stepup_password`). Cod scurt, viaţă 30s → input
+    // NEMASCAT, numeric, `one-time-code` (vezi SecretPromptModal cu `otp`).
+    if (kind === 'totp') {
       const otp = await askSecret(t('stepup.totpTitle'), {
         masked: false, otp: true, label: t('stepup.totpLabel'), hint: t('stepup.totpHint'),
       })
       if (otp === null) return null
       return { totp: otp.trim() }
     }
-    // fără passkey disponibil (deploy IP-only) — asta e RE-AUTENTIFICARE cu parola
-    // contului, nu un al doilea factor real; etichetăm cinstit
+    // `password`: re-AUTENTIFICARE cu parola contului (ţintă fără 2FA), nu un al doilea factor
     const v = await askCreds({
       title: t('app.reauth'),
       subtitle: t('app.reauthSubtitle'),
@@ -841,7 +863,7 @@ function MainApp() {
     })
     if (!v) return null
     return { stepup_password: v.password }
-  }, [appState?.webauthn_available, t])
+  }, [appState?.webauthn_available, appState?.stepup_method, promptNeedsFactor, t])
 
   // H1: înregistrează ceremonia ca handler global de step-up — `api()` o cheamă automat la un
   // 403 pe orice acțiune de host (run/fs/update/provision/uninstall), deschide fereastra pe

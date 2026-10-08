@@ -297,11 +297,22 @@ export default function Sidebar(props: {
   }
 
   async function toggle2fa(host: Host) {
-    await api(`/api/hosts/${host.id}/require-2fa`, {
+    const r = await api<{ ok: boolean; warning?: string }>(`/api/hosts/${host.id}/require-2fa`, {
       method: 'POST',
       body: JSON.stringify({ enabled: !host.require_2fa }),
     }).catch(fail)
     props.onChanged()
+    // 3.5.14: activarea nu e blocată, dar fără passkey/TOTP contul nu va mai putea deschide
+    // hostul — spunem acum (nu la primul Conectare) şi oferim drumul la Setări → 2FA
+    if (r && r.warning === 'stepup.needsFactor') {
+      if (await confirm({
+        title: t('stepup.needsFactorTitle'), message: t('host.require2faNoFactor', { name: host.name }),
+        confirmLabel: t('stepup.openSignin'),
+      })) {
+        setSettingsCat({ cat: 'autentificare', section: 'totp' })
+        setShowSettings(true)
+      }
+    }
   }
 
   async function provision(host: Host) {

@@ -22,6 +22,9 @@ export interface AppState {
   authenticated: boolean
   email: string | null
   webauthn_available: boolean
+  /** Factorul de step-up al contului pe un host 2FA (3.5.14): passkey | sso | totp | none.
+      `none` = parola singură nu mai ajunge — UI-ul trimite la Setări → Autentificare & 2FA. */
+  stepup_method?: 'passkey' | 'sso' | 'totp' | 'none' | null
   backup_ready?: boolean
   signing_missing?: boolean
   signing_locked?: boolean

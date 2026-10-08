@@ -46,6 +46,7 @@ import { baseName, looksLikePath, resolveTermPath } from '../lib/termpath'
 import CoachTip from './CoachTip'
 import { TIP_TERMINAL_PASTE, TIP_TOOLBAR, isTipDismissed } from '../lib/coachtips'
 import { isWalkthroughDone } from '../lib/walkthrough'
+import { lockTextKeys, ssoStepupRedirect } from '../lib/stepup'
 
 // FileEditor (Monaco) e greu → lazy, exact ca-n FilePanel: intră în bundle doar când deschizi
 // o cale-fişier din meniul contextual. Refolosim ACEEAŞI componentă (siguranţa la fişiere mari gratis).
@@ -112,7 +113,7 @@ export default function SessionView(props: {
       unde e definită o singură dată — SessionView avea o a doua implementare, care ştia
       DOAR de passkey: pe o instalare pe IP gol (fără WebAuthn) sesiunea blocată devenea
       irecuperabilă, fiindcă nu exista nicio cale de deblocare. */
-  stepupCredential?: (hostId: number) => Promise<{ stepup_grant?: string; stepup_password?: string } | null>
+  stepupCredential?: (hostId: number, code?: string) => Promise<{ stepup_grant?: string; stepup_password?: string; totp?: string } | null>
   onMenu: () => void
   sidebarCollapsed?: boolean
   onPopout?: () => void
@@ -242,6 +243,12 @@ export default function SessionView(props: {
   const [locked, setLocked] = useState(false)     // idle-lock 2FA: terminal blocat
   const [unlocking, setUnlocking] = useState(false)
   const [lockErr, setLockErr] = useState('')
+  // motivul blocării, din mesajul `locked` (3.5.14): `stepup_max` = plafonul de 60 min de la
+  // factorul care a autorizat terminalul; altfel (idle / ataşare fără step-up) textul de idle-lock
+  const [lockReason, setLockReason] = useState('')
+  // codul ultimului refuz de deblocare (ex. `stepup.totp`): următoarea încercare cere exact
+  // factorul pe care serverul l-a cerut, nu iar parola
+  const unlockCodeRef = useRef('')
   const unlockBtnRef = useRef<HTMLButtonElement>(null)
   const [reconnecting, setReconnecting] = useState(false)
   const [title, setTitle] = useState(session.title)
@@ -1320,13 +1327,28 @@ export default function SessionView(props: {
             if (termRef.current) connect()
           }, 300)
         } else if (msg.type === 'locked') {
-          setLocked(true); setLockErr('')
+          setLocked(true); setLockErr(''); unlockCodeRef.current = ''
+          setLockReason(typeof msg.reason === 'string' ? msg.reason : '')
           // idle-lock: history-ul de clipboard (posibile parole/tokenuri) nu supravieţuieşte blocării
           clearClipHistory(); setPasteItems(null)
         } else if (msg.type === 'unlocked') {
-          setLocked(false); setUnlocking(false); setLockErr('')
+          setLocked(false); setUnlocking(false); setLockErr(''); unlockCodeRef.current = ''
         } else if (msg.type === 'unlock_failed') {
-          setUnlocking(false); setLockErr(t('session.passkeyInvalid'))
+          setUnlocking(false)
+          const code = typeof msg.code === 'string' ? msg.code : ''
+          unlockCodeRef.current = code
+          if (code === 'host.needs2faSso') {
+            // user SSO: re-auth PROASPĂT la IdP; la întoarcere, „Deblochează" trece pe fereastra
+            // deschisă de callback (≤120 s, ca orice factor proaspăt)
+            ssoStepupRedirect(session.host_id)
+          } else if (code === 'stepup.needsFactor') {
+            setLockErr(t('err.stepup.needsFactor'))
+            void props.stepupCredential?.(session.host_id, code)   // dialogul cu drum spre Setări
+          } else if (code === 'stepup.totp') {
+            setLockErr(t('err.stepup.totp'))
+          } else {
+            setLockErr(t('session.passkeyInvalid'))
+          }
         } else if (msg.type === 'resize') {
           term.resize(msg.cols, msg.rows)
           // Resize venit de la server (alt client atașat la aceeași sesiune a
@@ -1478,7 +1500,7 @@ export default function SessionView(props: {
     setUnlocking(true); setLockErr('')
     try {
       const cred = props.stepupCredential
-        ? await props.stepupCredential(session.host_id)
+        ? await props.stepupCredential(session.host_id, unlockCodeRef.current || undefined)
         : await (async () => {
             const options = await api<Record<string, unknown>>('/api/webauthn/stepup/options', {
               method: 'POST', body: JSON.stringify({ host_id: session.host_id }),
@@ -1492,6 +1514,7 @@ export default function SessionView(props: {
       if (!cred) { setUnlocking(false); return }        // anulat de utilizator
       wsRef.current?.send(JSON.stringify({
         type: 'unlock', grant: cred.stepup_grant ?? '', password: cred.stepup_password ?? '',
+        totp: ('totp' in cred ? cred.totp : '') ?? '',
       }))
       // 'unlocked' de la server curăţă `locked`/`unlocking`
     } catch (e) {
@@ -2378,9 +2401,9 @@ export default function SessionView(props: {
             className="absolute inset-0 z-20 grid place-items-center bg-ink-950/95 backdrop-blur-sm p-6 text-center">
             <div className="flex max-w-sm flex-col items-center gap-3">
               <div className="grid h-12 w-12 place-items-center rounded-full bg-ink-800 text-slate-300" aria-hidden="true"><LockIcon size={22} /></div>
-              <div id="wt-lock-title" className="text-base font-semibold text-slate-100">{t('session.lockedTitle')}</div>
+              <div id="wt-lock-title" className="text-base font-semibold text-slate-100">{t(lockTextKeys(lockReason).title)}</div>
               <div id="wt-lock-desc" className="text-compact leading-relaxed text-slate-400">
-                {t('session.lockedDesc')}
+                {t(lockTextKeys(lockReason).desc)}
               </div>
               {lockErr && <div className="text-xs wt-danger">{lockErr}</div>}
               <Button variant="primary" size="lg" ref={unlockBtnRef} onClick={reauth} disabled={unlocking} className="mt-1">

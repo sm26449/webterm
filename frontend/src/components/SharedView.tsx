@@ -21,6 +21,7 @@ export default function SharedView(props: { token: string }) {
   const [title, setTitle] = useState('')
   const [error, setError] = useState('')
   const [conn, setConn] = useState<'connecting' | 'open' | 'closed' | 'locked' | 'revoked'>('connecting')
+  const [lockMax, setLockMax] = useState(false)
   const [termBg] = useState(() => readTheme().background || '#0b0e14')
   const [watermark, setWatermark] = useState<WatermarkConfig | null>(null)
   const [writable, setWritable] = useState(false)
@@ -104,7 +105,11 @@ export default function SharedView(props: { token: string }) {
         else if (msg.type === 'exit' || msg.type === 'lost') setConn('closed')
         // idle-lock 2FA: proprietarul trebuie să se re-autentifice; invitatul nu poate
         // debloca (n-are passkey) — doar așteaptă. Serverul nu trimite output cât e blocat.
-        else if (msg.type === 'locked') setConn('locked')
+        else if (msg.type === 'locked') {
+          // `stepup_max` (3.5.14): plafonul de 60 min de la factorul owner-ului pe un host 2FA
+          setLockMax(msg.reason === 'stepup_max')
+          setConn('locked')
+        }
         else if (msg.type === 'unlocked') setConn('open')   // urmează resync + tail din transcript
         // owner-ul a revocat linkul (sau a expirat) → ştergem ce a apucat să vadă + oprim tot
         else if (msg.type === 'revoked') {
@@ -211,7 +216,7 @@ export default function SharedView(props: { token: string }) {
               <div className="max-w-sm space-y-1">
                 <div className="text-base font-semibold text-slate-100">{t('share.lockedTitle')}</div>
                 <div className="text-compact text-slate-400">
-                  {t('share.lockedBody')}
+                  {lockMax ? t('share.lockedBodyMax') : t('share.lockedBody')}
                 </div>
               </div>
             </div>
