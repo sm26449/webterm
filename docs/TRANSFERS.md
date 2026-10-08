@@ -157,7 +157,7 @@ expires hides the rows; they come back when the same account signs in again.
 there is no file handle, the bytes live in the tab's memory; they still resume **within** the
 session), folder `.tgz` archives (generated on the fly, no stable validator), files reached through
 a **symbolic link** (the agent's `fs_stat` is an `lstat`, so the gateway has no size for the target —
-the link streams without `Range` and without a validator; before 3.5.13 the link's own
+the link streams without `Range` and without a validator; before this change the link's own
 length was sent as `Content-Length`, which broke the download), and hosts with an agent older than v50.
 
 ## Folder downloads (`.tgz`)
