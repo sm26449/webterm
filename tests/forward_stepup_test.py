@@ -235,11 +235,11 @@ async def main():
         # ── WebSocket: aceeaşi poartă, ÎNAINTE de accept ─────────────────────────
         # Un WS deschis pe host 2FA nu consulta fereastra deloc (doar biletul, valabil 1 h):
         # exact canalul interactiv (consolă web, noVNC) supravieţuia politicii.
-        async def _ws(ticket_val):
+        async def _ws(ticket_val, origin_scheme="http"):
             sent = []
             scope = {"type": "websocket", "path": "/ws", "query_string": b"",
                      "headers": [(b"host", fwd_host.encode()),
-                                 (b"origin", f"http://{fwd_host}".encode()),
+                                 (b"origin", f"{origin_scheme}://{fwd_host}".encode()),
                                  (b"cookie", f"{api.FWD_COOKIE}={ticket_val}".encode())]}
 
             async def receive():
@@ -260,6 +260,11 @@ async def main():
         # trece de poartă; agentul e offline → 1011 (nu 1008): dovada că refuzul de mai sus era fereastra
         check("WS pe host 2FA, fereastră deschisă: trece de poartă (1011 = host offline, nu 1008)",
               sent and sent[0].get("code") == 1011, str(sent))
+        # 3.5.14: Origin-ul trebuie să aibă şi SCHEMA din PUBLIC_URL (aici http): acelaşi host pe
+        # altă schemă nu e originul forward-ului (comparam doar hostname-ul)
+        sent = await _ws(ticket, origin_scheme="https")
+        check("WS forward: Origin cu altă schemă decât PUBLIC_URL → 1008",
+              sent and sent[0].get("code") == 1008, str(sent))
 
         # ── apps: un forward promovat la „bookmark" (app_type) apare în /api/apps ─────────
         security._stepup_windows.clear()

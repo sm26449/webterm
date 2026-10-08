@@ -189,10 +189,33 @@ async def main():
         info = oidc.complete(ss2, "c")
         check("step-up cu auth_time proaspăt → acceptat, intent/host păstrate",
               info["intent"] == "stepup" and info["host_id"] == 7, str(info))
+        # 3.5.14: auth_time LIPSĂ pe un step-up → REFUZ implicit (WEBTERM_OIDC_REQUIRE_AUTH_TIME=1);
+        # spec-ul îl cere când trimitem max_age, iar fără el „re-auth-ul" e doar prompt=login
+        check("implicit WEBTERM_OIDC_REQUIRE_AUTH_TIME=1", config.OIDC_REQUIRE_AUTH_TIME is True)
         us3 = oidc.begin(intent="stepup", host_id=7); ss3 = _state(us3)
         _MOCK["next_claims"] = base_claims(issuer, nonce=oidc._TXN[ss3]["nonce"])   # fără auth_time
-        check("step-up FĂRĂ auth_time → acceptat (compromis documentat: prompt=login singur)",
-              oidc.complete(ss3, "c")["intent"] == "stepup")
+        check("step-up FĂRĂ auth_time → OidcError (implicit strict)",
+              _raises(lambda: oidc.complete(ss3, "c")))
+        # opt-out explicit al adminului (IdP care nu poate emite claim-ul): compromisul vechi
+        config.OIDC_REQUIRE_AUTH_TIME = False
+        try:
+            us3b = oidc.begin(intent="stepup", host_id=7); ss3b = _state(us3b)
+            _MOCK["next_claims"] = base_claims(issuer, nonce=oidc._TXN[ss3b]["nonce"])
+            check("step-up FĂRĂ auth_time cu REQUIRE_AUTH_TIME=0 → acceptat (prompt=login singur)",
+                  oidc.complete(ss3b, "c")["intent"] == "stepup")
+            # chiar şi permisiv, un auth_time PREZENT dar vechi rămâne refuzat
+            us3c = oidc.begin(intent="stepup", host_id=7); ss3c = _state(us3c)
+            _MOCK["next_claims"] = base_claims(issuer, nonce=oidc._TXN[ss3c]["nonce"],
+                                               auth_time=int(oidc._TXN[ss3c]["ts"]) - 600)
+            check("REQUIRE_AUTH_TIME=0 nu slăbeşte verificarea unui auth_time PREZENT",
+                  _raises(lambda: oidc.complete(ss3c, "c")))
+        finally:
+            config.OIDC_REQUIRE_AUTH_TIME = True
+        # un LOGIN fără auth_time rămâne valid: cerinţa e doar pe step-up
+        ul0 = oidc.begin(intent="login"); sl0 = _state(ul0)
+        _MOCK["next_claims"] = base_claims(issuer, nonce=oidc._TXN[sl0]["nonce"])
+        check("login FĂRĂ auth_time → acceptat (cerinţa e doar pe step-up)",
+              oidc.complete(sl0, "c")["intent"] == "login")
         us4 = oidc.begin(intent="stepup", host_id=7); ss4 = _state(us4)
         _MOCK["next_claims"] = base_claims(issuer, nonce=oidc._TXN[ss4]["nonce"], auth_time="acum")
         check("step-up cu auth_time ne-numeric → OidcError", _raises(lambda: oidc.complete(ss4, "c")))

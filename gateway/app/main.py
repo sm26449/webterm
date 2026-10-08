@@ -154,6 +154,12 @@ async def _idle_lock_sweep() -> None:
             await core.sweep_idle_locks()
         except Exception:
             log.exception("the idle-lock sweep failed")
+        try:
+            # plafonul absolut de step-up (60 min de la factor) pe terminalele 2FA în uz — aceeaşi
+            # cadenţă de 15 s, deci un terminal expirat se blochează la cel mult ~15 s după plafon
+            await core.sweep_stepup_caps()
+        except Exception:
+            log.exception("the step-up cap sweep failed")
         await asyncio.sleep(_IDLE_LOCK_INTERVAL)
 
 FRONTEND_DIST = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"

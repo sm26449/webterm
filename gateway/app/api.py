@@ -180,6 +180,9 @@ async def app_state(request: Request):
             "authenticated": user is not None,
             "email": user["email"] if user else None,
             "webauthn_available": _webauthn_available(),
+            # cum face ACEST cont step-up pe un host 2FA: passkey | sso | totp | none (3.5.14:
+            # parola singură nu mai e acceptată — `none` = UI-ul trimite la Setări → 2FA)
+            "stepup_method": (await _stepup_method(user)) if user is not None else None,
             "backup_ready": backup_ready,
             "signing_missing": signing_missing,
             "signing_locked": signing_locked,
@@ -4553,6 +4556,17 @@ class HistoryIn(BaseModel):
     cwd: str = ""
 
 
+def _user_has_unlocked_terminal(user_id: int, host_id: int) -> bool:
+    """Contul are ACUM un terminal viu şi deblocat pe host, ataşat ca owner (nu invitat)?"""
+    for hub in list(core.hubs.values()):
+        if hub.host_id != host_id or hub.locked or hub.closed:
+            continue
+        for c in list(hub.clients):
+            if c.is_owner and c.user_id == user_id and not c.locked:
+                return True
+    return False
+
+
 @router.post("/api/history")
 async def add_history(body: HistoryIn, user=Depends(security.require_user)):
     """F-10: rândurile astea sunt RAPORTATE DE CLIENT (OSC 133 din browser), deci pot fi
@@ -4561,8 +4575,18 @@ async def add_history(body: HistoryIn, user=Depends(security.require_user)):
     Marcăm sursa explicit ca UI-ul să poată spune diferenţa."""
     hn = ""
     if body.host_id is not None:
-        row = await db.fetchone("SELECT name FROM hosts WHERE id=?", body.host_id)
+        row = await db.fetchone("SELECT name, require_2fa FROM hosts WHERE id=?", body.host_id)
         hn = row["name"] if row else ""
+        # Pe un host 2FA, scrierea în istoric cere ACELAŞI drept ca citirea lui: o fereastră de
+        # step-up deschisă — SAU un terminal DEBLOCAT pe acel host, ataşat chiar de acest cont
+        # (comenzile vin dintr-un terminal activ a cărui fereastră se poate fi închis între timp;
+        # nu pierdem istoricul unei lucrări legitime). Altfel, un cookie furat putea injecta
+        # comenzi false în istoricul unui host protejat. Refuzul e un 403 opac (fără nume de
+        # host, fără „există/nu există"): clientul raportează best-effort şi îl ignoră.
+        if row and row["require_2fa"] and not (
+                security.stepup_window_is_open(user["id"], body.host_id)
+                or _user_has_unlocked_terminal(user["id"], body.host_id)):
+            raise ApiError(403, "history.denied", "not recorded")
     await _record_history(body.host_id, hn, body.command, body.exit_code, body.cwd, "session")
     return {"ok": True}
 
@@ -4597,10 +4621,35 @@ async def search_history(q: str = "", host_id: int | None = None, limit: int = 2
     return [dict(r) for r in rows]
 
 
+class ClearHistoryIn(BaseModel):
+    current_password: str = ""
+    stepup_grant: str = ""      # conturi SSO: grant passkey account-scope (host_id=0)
+
+
 @router.delete("/api/history")
-async def clear_history(user=Depends(security.require_user)):
+async def clear_history(request: Request, body: ClearHistoryIn | None = None,
+                        user=Depends(security.require_user)):
+    """Şterge TOT istoricul de comenzi (toate conturile, toate hosturile, inclusiv cele 2FA pe
+    care istoricul nici nu le arată fără step-up). E o ştergere globală şi ireversibilă de urme,
+    deci cere re-auth ca „Revocă tot" (parola contului; SSO: grant passkey / fereastra
+    account-scope) şi rămâne în jurnalul de audit — un cookie furat nu-şi mai poate şterge
+    urmele dintr-un singur DELETE."""
+    body = body or ClearHistoryIn()
+    if user["sso_subject"] and config.OIDC_ENABLED:
+        ok_reauth = (bool(body.stepup_grant)
+                     and security.consume_stepup_grant(body.stepup_grant, user["id"], 0)) \
+            or security.stepup_window_is_open(user["id"], 0)
+        if not ok_reauth:
+            raise ApiError(403, "history.ssoReauth",
+                           "re-authenticate with SSO or a passkey to clear the command history")
+    else:
+        await _require_reauth_for_secret(user, body.current_password, "clearing the command history")
+    n = await db.fetchone("SELECT COUNT(*) AS c FROM command_history")
     await db.execute("DELETE FROM command_history")
-    return {"ok": True}
+    count = n["c"] if n else 0
+    audit.detail(request, "cleared the command history (%d entries)" % count)
+    log.warning("command history cleared (%d entries) by %s", count, user["email"])
+    return {"ok": True, "deleted": count}
 
 
 _APP_TYPES = ("", "proxmox", "portainer", "grafana", "custom",
@@ -5279,7 +5328,12 @@ async def handle_forward_ws(scope, receive, send):
     # interactiv către serviciul din spatele forward-ului. La fel ca browser_ws/shared_ws.
     origin = headers.get("origin")
     cookies = _parse_cookie_header(headers.get("cookie", ""))
-    if (not origin or urlparse(origin).hostname != host or not slug or "." in slug
+    # Şi SCHEMA trebuie să fie a noastră (cea din PUBLIC_URL): o pagină http:// pe acelaşi
+    # subdomeniu (MITM pe HTTP-ul simplu) nu e originul forward-ului de pe o instalare https.
+    o = _origin_tuple(origin or "")
+    pub = _origin_tuple(config.PUBLIC_URL)
+    if (not origin or o is None or pub is None or o[1] != host or o[0] != pub[0]
+            or not slug or "." in slug
             or not security.verify_forward_token(cookies.get(FWD_COOKIE), slug)):
         await send({"type": "websocket.close", "code": 1008})
         return
@@ -5783,6 +5837,11 @@ async def set_require_2fa(host_id: int, body: Toggle2fa, user=Depends(security.r
         # tocmai fiindcă e îngrijorat rămânea cu tunelurile deschise până la expirare: handshake-ul
         # NOU cerea step-up, cel vechi mergea în continuare. `logout` bumpează deja epoch-ul.
         security.bump_forward_epoch()
+        # 3.5.14: parola singură nu mai deschide un host 2FA. Nu blocăm activarea (întărirea
+        # securităţii nu cere nimic), dar spunem ACUM că, fără passkey/TOTP/SSO, contul nu va
+        # putea deschide hostul până nu înrolează un factor — nu la primul click pe Conectare.
+        if not await _user_has_stepup_factor(user):
+            return {"ok": True, "warning": "stepup.needsFactor"}
     return {"ok": True}
 
 
@@ -6236,8 +6295,31 @@ async def host_sessions(host_id: int, limit: int = 200, offset: int = 0,
     return [_session_json(r) for r in rows]
 
 
+_NEEDS_FACTOR_MSG = ("set up a passkey or an authenticator code (TOTP) to access hosts "
+                     "that require 2FA")
+
+
+async def _stepup_method(user) -> str:
+    """Factorul pe care scara de step-up (_stepup_consume_factor) îl va cere ACESTUI cont pe un
+    host 2FA, în aceeaşi ordine: passkey → sso → totp; `none` = niciun factor real (3.5.14)."""
+    if _webauthn_available() and await db.fetchone(
+            "SELECT 1 FROM webauthn_credentials WHERE user_id=? LIMIT 1", user["id"]):
+        return "passkey"
+    if user["sso_subject"] and config.OIDC_ENABLED:
+        return "sso"
+    if user["totp_enabled"]:
+        return "totp"
+    return "none"
+
+
+async def _user_has_stepup_factor(user) -> bool:
+    """Are contul un factor REAL de step-up pe un host 2FA? passkey (cu WebAuthn disponibil),
+    TOTP, sau SSO (re-auth la IdP). Parola singură nu e un al doilea factor (3.5.14)."""
+    return (await _stepup_method(user)) != "none"
+
+
 async def _stepup_consume_factor(host_id: int, user, grant: str, password: str,
-                                 totp: str, what: str = "") -> None:
+                                 totp: str, what: str = "", host_2fa: bool = True) -> None:
     """Scara comună de factor pentru step-up (host ŞI fresh-factor), apelată DUPĂ ce apelantul a
     tratat grant-ul şi fereastra: passkey → SSO → TOTP → parolă. Deschide fereastra la succes;
     ridică ApiError altfel. `what` doar nuanţează mesajul uman (codurile rămân stabile).
@@ -6247,7 +6329,11 @@ async def _stepup_consume_factor(host_id: int, user, grant: str, password: str,
     hostul „cu 2FA" nu primea niciun al doilea factor real. Acum, dacă `totp_enabled` şi nu există
     passkey, cerem codul TOTP (sau un cod de recuperare), verificat+consumat ATOMIC prin
     `verify_second_factor` (exact anti-replay-ul de la login: un cod observat/reluat e respins).
-    Parola rămâne acceptată DOAR când nu există NICI passkey, NICI TOTP."""
+    Parola singură NU mai deschide fereastra pe un host `require_2fa` (3.5.14, decizie de
+    politică): un cont fără passkey şi fără TOTP primea pe hostul „cu 2FA" exact acelaşi factor
+    ca la login — adică niciun al doilea factor. Acum primeşte `stepup.needsFactor` (403) cu
+    îndrumarea spre Setări → Autentificare & 2FA. `host_2fa=False` (gate-ul de „factor proaspăt"
+    pe o ţintă FĂRĂ 2FA — deploy de cheie) păstrează parola: acolo e re-auth tip `sudo`, nu 2FA."""
     has_passkey = await db.fetchone(
         "SELECT 1 FROM webauthn_credentials WHERE user_id=? LIMIT 1", user["id"])
     if _webauthn_available() and has_passkey:
@@ -6274,17 +6360,22 @@ async def _stepup_consume_factor(host_id: int, user, grant: str, password: str,
         security.record_login_success(key)
         security.open_stepup_window(user["id"], host_id)
         return
+    if host_2fa:
+        # Niciun factor real (fără passkey, fără TOTP, fără SSO): refuz, ORICE parolă ar veni.
+        # Nu verificăm parola deloc — n-ar schimba decizia, iar o verificare ar face din acest
+        # endpoint un oracol de parolă fără niciun câştig.
+        raise ApiError(403, "stepup.needsFactor", _NEEDS_FACTOR_MSG)
     if password and await _verify_reauth_password(user, password):
         security.open_stepup_window(user["id"], host_id)
         return
-    raise ApiError(403, "stepup.password", ("re-enter your account password (2FA)" + what))
+    raise ApiError(403, "stepup.password", ("re-enter your account password" + what))
 
 
 async def _require_host_stepup(host_id: int, user, grant: str = "", password: str = "",
                                totp: str = "") -> None:
     """H1: pe un host cu `require_2fa`, ORICE acțiune sensibilă (sesiune, `run`, `fs/*`, update,
-    provision) cere step-up — nu doar deschiderea unei sesiuni. Un grant passkey (single-use) sau
-    parola contului (fallback fără WebAuthn) deschide o FEREASTRĂ de step-up pe host (5 min); în
+    provision) cere step-up — nu doar deschiderea unei sesiuni. Un grant passkey (single-use), un
+    cod TOTP sau re-auth-ul SSO (NU parola singură, 3.5.14) deschide o FEREASTRĂ de step-up pe host (5 min); în
     fereastră, acțiunile ulterioare trec fără re-verificare (ca `sudo`), ca file-browser-ul să nu
     ceară passkey per-click. Fără 2FA pe host → no-op. Ridică 403 dacă lipsește step-up-ul."""
     row = await db.fetchone("SELECT require_2fa FROM hosts WHERE id=?", host_id)
@@ -6764,7 +6855,11 @@ async def _require_fresh_factor(host_id: int, user, grant: str = "", password: s
         return
     # aceeaşi scară ca _require_host_stepup (passkey → SSO → TOTP → parolă), inclusiv ramura TOTP
     # (fix 3): un cont cu TOTP fără passkey nu mai acordă acces SSH durabil cu parola singură.
-    await _stepup_consume_factor(host_id, user, grant, password, totp, " to grant SSH access")
+    # Pe o ţintă `require_2fa` (şi la deblocarea terminalului) parola singură e refuzată ca la
+    # _require_host_stepup; pe o ţintă fără 2FA rămâne re-auth-ul de tip `sudo` (3.5.14).
+    hrow = await db.fetchone("SELECT require_2fa FROM hosts WHERE id=?", host_id)
+    await _stepup_consume_factor(host_id, user, grant, password, totp, " to grant SSH access",
+                                 host_2fa=bool(hrow and hrow["require_2fa"]))
 
 
 async def _dk_key_row(source_host_id: int):
@@ -7060,6 +7155,19 @@ async def deploy_key_deploy(host_id: int, body: DeployKeyIn, request: Request,
     key = await _dk_key_row(body.key_host_id)
     if key["host_id"] == host_id:      # validare de formă înaintea cererii de factor
         raise ApiError(400, "sshkey.selfDeploy", "a host does not deploy its own key to itself")
+    # Şi SURSA e gardată (3.5.14), ca batch/rotate (unde ruta = sursa, deci factorul proaspăt e
+    # chiar pe ea): cheia privată stă pe sursă, iar deploy-ul îi lărgeşte accesul — pe o sursă
+    # `require_2fa` cerem fereastra ei de step-up. Verificat ÎNAINTEA factorului de pe ţintă,
+    # ca un grant single-use să nu fie consumat degeaba. Cod dedicat (nu `stepup.*`): un 403
+    # de step-up pe ruta ŢINTEI ar face clientul să deschidă fereastra pe hostul greşit.
+    src = await db.fetchone("SELECT require_2fa FROM hosts WHERE id=?", key["host_id"])
+    if src and src["require_2fa"]:
+        if isinstance(user, dict) and user.get("is_token"):
+            raise ApiError(403, "host.needs2faNoToken",
+                           "deploy keys are not reachable with an automation token")
+        if not security.stepup_window_ok(user["id"], key["host_id"]):
+            raise ApiError(403, "sshkey.sourceNeeds2fa",
+                           "the source host requires 2FA — open a step-up window on it first")
     await _require_fresh_factor(host_id, user, body.stepup_grant, body.stepup_password,
                                body.stepup_totp)   # H-3
     return await _dk_deploy_one(key, host_id, body.from_ip, body.confirmed, user, request,
@@ -7484,6 +7592,9 @@ async def update_session(sid: str, patch: SessionPatch,
     row = await db.fetchone("SELECT * FROM sessions WHERE id=?", sid)
     if not row:
         raise ApiError(404, "session.missing", "no such session")
+    # titlul/nota unei sesiuni de pe un host 2FA = mutaţie pe acel host, ca restul rutelor de
+    # sesiune (kill/share/transcript): fără step-up, un cookie furat redenumea terminale protejate
+    await _require_session_host_stepup(sid, user)
     title = patch.title if patch.title is not None else row["title"]
     note = patch.note if patch.note is not None else row["note"]
     await db.execute("UPDATE sessions SET title=?, note=? WHERE id=?",
@@ -8704,11 +8815,32 @@ def _origin_ok(ws: WebSocket) -> bool:
     """Block Cross-Site WebSocket Hijacking: the browser sends the cookie on a
     WS handshake even from a hostile page, so we require the Origin to be our
     own public origin. (SameSite=Lax does not reliably cover WS upgrades.)"""
-    from urllib.parse import urlparse
     origin = ws.headers.get("origin")
     if origin is None:
         return False          # real browsers always send Origin for WS
-    return urlparse(origin).netloc == urlparse(config.PUBLIC_URL).netloc
+    # Origin = scheme + host + port (RFC 6454). Comparam doar netloc-ul, deci o pagină servită
+    # pe http://<acelaşi host> (MITM pe HTTP-ul simplu, alt serviciu pe portul 80 al aceluiaşi
+    # nume) trecea drept „originul nostru" pe o instalare https. Porturile implicite se
+    # normalizează (https://x == https://x:443).
+    mine = _origin_tuple(config.PUBLIC_URL)
+    return mine is not None and _origin_tuple(origin) == mine
+
+
+_DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
+
+
+def _origin_tuple(url: str):
+    """(scheme, hostname, port) normalizat, sau None dacă nu e un origin http(s) valid."""
+    try:
+        p = urlparse((url or "").strip())
+        scheme = (p.scheme or "").lower()
+        host = (p.hostname or "").lower()
+        port = p.port if p.port is not None else _DEFAULT_PORTS.get(scheme)
+    except ValueError:            # port nenumeric / în afara intervalului
+        return None
+    if scheme not in ("http", "https") or not host or port is None:
+        return None
+    return scheme, host, port
 
 
 @router.websocket("/ws/shared/{token}")
@@ -8761,6 +8893,7 @@ async def shared_ws(ws: WebSocket, token: str):
         if hrow2 and hrow2["require_2fa"]:
             share_2fa = True
             hub.lock_idle = config.IDLE_LOCK_SECS
+            hub.stepup_cap = True        # plafonul absolut de step-up blochează şi invitaţii
             owner_present = any(getattr(c, "is_owner", False) for c in hub.clients)
             start_locked = hub.locked or not owner_present
     # Aceeaşi politică de replay ca owner-ul (istoric tmux inclus), sub ACEEAŞI condiţie: fără
@@ -8803,7 +8936,7 @@ async def shared_ws(ws: WebSocket, token: str):
             # invitatul NU poate debloca (n-are passkey) — doar aşteaptă re-auth-ul owner-ului.
             # Nu forţăm hub.lock() dintr-un invitat; sweep-ul de idle blochează hub-ul la nivel global.
             client.lock()
-            await client.send_text(json.dumps({"type": "locked"}))
+            await client.send_text(json.dumps({"type": "locked", "reason": hub.lock_reason or "owner"}))
 
     # revalidare periodică: linkul de share poate fi REVOCAT sau poate EXPIRA cât invitatul e
     # conectat. Fără asta, socketul deschis (validat doar la handshake) continuă broadcast-ul.
@@ -8852,6 +8985,13 @@ async def shared_ws(ws: WebSocket, token: str):
             await hub.broadcast_roster()
 
 
+async def _fresh_user(user):
+    """Rândul CURENT al contului. `browser_ws` îl citeşte o dată, la handshake — dar un terminal
+    trăieşte ore: dacă omul îşi înrolează TOTP/passkey (sau îşi schimbă parola) cât e deschis,
+    deblocarea trebuie să vadă factorii de ACUM, nu pe cei de la ataşare."""
+    return (await db.fetchone("SELECT * FROM users WHERE id=?", user["id"])) or user
+
+
 @router.websocket("/ws/sessions/{sid}")
 async def browser_ws(ws: WebSocket, sid: str):
     if not _origin_ok(ws):
@@ -8881,6 +9021,7 @@ async def browser_ws(ws: WebSocket, sid: str):
         client.is_owner = True
         client.writable = True
         client.label = "self"           # idem
+        client.user_id = user["id"]
         client.remote_addr = security.client_ip(ws)
         client.user_agent = ws.headers.get("user-agent", "")
         client.attached_at = time.time()
@@ -8927,8 +9068,13 @@ async def browser_ws(ws: WebSocket, sid: str):
     if host_2fa:
         if hub:
             hub.lock_idle = config.IDLE_LOCK_SECS      # 0 = fără idle-lock ÎN sesiune
-        start_locked = (hub.locked if hub else False) \
-            or not security.stepup_window_is_open(user["id"], row["host_id"])
+            hub.stepup_cap = True                      # plafon absolut 60 min (sweep_stepup_caps)
+        opened_at = security.stepup_window_opened_at(user["id"], row["host_id"])
+        start_locked = (hub.locked if hub else False) or opened_at is None
+        if hub and not start_locked:
+            # ataşare deblocată = autorizată de factorul care a deschis fereastra (opened_at, NU
+            # momentul ataşării — altfel o reataşare ar prelungi plafonul fără niciun factor nou)
+            hub.note_authorized(opened_at)
 
     # closed sessions: replaying the alt-screen exit would blank the history.
     # Sesiune blocată → NU replaya scrollback-ul; la deblocare (passkey), hub.unlock() pune
@@ -8980,10 +9126,10 @@ async def browser_ws(ws: WebSocket, sid: str):
                 user_id=user["id"])
         if start_locked:
             if not hub.locked:
-                await hub.lock()                 # idle → blochează toţi clienţii + broadcast
+                await hub.lock("stepup")         # fără fereastră → blochează toţi clienţii + broadcast
             else:
                 client.lock()
-                await client.send_text(json.dumps({"type": "locked"}))
+                await client.send_text(json.dumps({"type": "locked", "reason": hub.lock_reason}))
         conn = core.sources.get(row["host_id"])
         # sesiune SSH live fără sursă = gateway repornit; re-dial cu creds stocate
         # și re-atașează tmux-ul remote (persistență peste restart)
@@ -9032,10 +9178,12 @@ async def browser_ws(ws: WebSocket, sid: str):
                         continue
                     if cc.get("type") == "unlock":
                         try:
-                            await _require_fresh_factor(row["host_id"], user, cc.get("grant", ""),
-                                                        cc.get("password", ""), cc.get("totp", ""))
-                        except HTTPException:
-                            await ws.send_text(json.dumps({"type": "unlock_failed"}))
+                            await _require_fresh_factor(row["host_id"], await _fresh_user(user),
+                                                        cc.get("grant", ""), cc.get("password", ""),
+                                                        cc.get("totp", ""))
+                        except HTTPException as e:
+                            await ws.send_text(json.dumps(
+                                {"type": "unlock_failed", "code": getattr(e, "code", "")}))
                         else:
                             start_locked = False
                             await ws.send_text(json.dumps({"type": "unlocked"}))
@@ -9059,12 +9207,15 @@ async def browser_ws(ws: WebSocket, sid: str):
                     # Pe o instalare fără WebAuthn deblocarea merge pe parolă/TOTP, deci o sesiune
                     # blocată nu devine irecuperabilă.
                     try:
-                        await _require_fresh_factor(row["host_id"], user, ctl.get("grant", ""),
-                                                    ctl.get("password", ""), ctl.get("totp", ""))
-                    except HTTPException:
-                        await client.send_text(json.dumps({"type": "unlock_failed"}))
+                        await _require_fresh_factor(row["host_id"], await _fresh_user(user),
+                                                    ctl.get("grant", ""), ctl.get("password", ""),
+                                                    ctl.get("totp", ""))
+                    except HTTPException as e:
+                        await client.send_text(json.dumps(
+                            {"type": "unlock_failed", "code": getattr(e, "code", "")}))
                     else:
-                        await hub.unlock()
+                        # factorul tocmai prezentat (fereastră proaspătă) reporneşte plafonul
+                        await hub.unlock(security.stepup_window_opened_at(user["id"], row["host_id"]))
                 elif ctl.get("type") == "kick":
                     # DOAR owner-ul (client autentificat) scoate un INVITAT (nu owner).
                     # Închide WS-ul țintei → bucla ei se termină + roster rebroadcast.

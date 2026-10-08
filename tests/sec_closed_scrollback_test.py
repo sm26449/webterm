@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
 import httpx  # noqa: E402
 from app import api, config, core, db, security  # noqa: E402
+from app import totp as totp_mod  # noqa: E402
 
 _ORIGIN = {"origin": os.environ["WEBTERM_PUBLIC_URL"]}
 from app.main import app  # noqa: E402
@@ -118,14 +119,29 @@ async def main():
     check("unlock cu parolă greşită → unlock_failed, fără scrollback",
           "unlock_failed" in _types(ws) and SECRET not in b"".join(ws.sent_bytes))
 
-    # ── 4. unlock pe sesiune închisă cu parola corectă (fără passkey/TOTP) → redă transcriptul ──
+    # ── 4a. 3.5.14: parola CORECTĂ singură (cont fără passkey/TOTP) NU mai deblochează ──
+    security.clear_stepup_for(uid)
+    pw_only = {"type": "websocket.receive",
+               "text": json.dumps({"type": "unlock", "password": "parolabuna1"})}
+    ws = FakeWS(token, [pw_only])
+    await api.browser_ws(ws, sid)
+    fails = [json.loads(t) for t in ws.sent_text if '"unlock_failed"' in t]
+    check("unlock cu parola singură → unlock_failed code=stepup.needsFactor, fără scrollback",
+          fails and fails[-1].get("code") == "stepup.needsFactor"
+          and SECRET not in b"".join(ws.sent_bytes), str(fails))
+
+    # ── 4b. unlock cu un factor real proaspăt (TOTP) → redă transcriptul ──
+    secret = totp_mod.new_secret()
+    await db.execute("UPDATE users SET totp_enabled=1, totp_secret_encrypted=? WHERE id=?",
+                     security.encrypt_secret(secret), uid)
     security.clear_stepup_for(uid)
     good = {"type": "websocket.receive",
-            "text": json.dumps({"type": "unlock", "password": "parolabuna1"})}
+            "text": json.dumps({"type": "unlock", "totp": totp_mod.generate(secret)})}
     ws = FakeWS(token, [good])
     await api.browser_ws(ws, sid)
-    check("unlock cu factor proaspăt (parolă) → `unlocked` + scrollback redat",
+    check("unlock cu factor proaspăt (TOTP) → `unlocked` + scrollback redat",
           "unlocked" in _types(ws) and SECRET in b"".join(ws.sent_bytes))
+    await db.execute("UPDATE users SET totp_enabled=0, totp_secret_encrypted=NULL WHERE id=?", uid)
 
     # ── 5. host FĂRĂ 2FA: scrollback-ul se trimite ca înainte (fără regresie) ──
     sidn = "c" * 32

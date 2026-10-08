@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
 import httpx  # noqa: E402
 from app import api, config, core, db, security  # noqa: E402
+from app import totp as totp_mod  # noqa: E402
 
 _ORIGIN = {"origin": os.environ["WEBTERM_PUBLIC_URL"]}
 from app.main import app  # noqa: E402
@@ -36,6 +37,22 @@ from app.main import app  # noqa: E402
 ok = 0
 total = 0
 PW = "parolabuna1"
+TOTP_SECRET = totp_mod.new_secret()
+
+
+async def totp_on(uid, on=True):
+    """3.5.14: parola SINGURĂ nu mai e step-up pe un host `require_2fa` → secţiunile cu ţinte/surse
+    2FA folosesc un TOTP real. Îl pornim doar acolo: cu TOTP activ, şi re-auth-ul de pe hosturile
+    FĂRĂ 2FA (H-3) ar cere codul, nu parola, iar restul testului verifică exact calea cu parolă."""
+    await db.execute("UPDATE users SET totp_enabled=?, totp_secret_encrypted=? WHERE id=?",
+                     1 if on else 0, security.encrypt_secret(TOTP_SECRET) if on else None, uid)
+
+
+async def fresh_totp(uid):
+    """Un cod TOTP utilizabil ACUM: anti-replay-ul respinge reutilizarea aceluiaşi pas de 30 s,
+    deci resetăm contorul (ca un om care aşteaptă codul următor)."""
+    await db.execute("UPDATE users SET totp_last_counter=NULL WHERE id=?", uid)
+    return totp_mod.generate(TOTP_SECRET)
 
 # o cheie ed25519 validă, fixă (doar material PUBLIC) — pt. hosturile unde „adoptăm" fişiere
 # pre-existente fără să depindem de ssh-keygen pe maşina de test
@@ -261,7 +278,12 @@ async def main():
         check("ţintă 2FA fără factor → 403 (step-up)", r.status_code == 403, r.text)
         r = await c.post(f"/api/hosts/{ids['third']}/deploy-key/deploy",
                          json=dep | {"stepup_password": PW})
-        check("ţintă 2FA cu parolă → 200 (trece şi H1 şi H-3)",
+        check("ţintă 2FA cu parola SINGURĂ (cont fără passkey/TOTP) → 403 stepup.needsFactor (3.5.14)",
+              r.status_code == 403 and hdr(r) == "stepup.needsFactor", r.text)
+        await totp_on(uid)
+        r = await c.post(f"/api/hosts/{ids['third']}/deploy-key/deploy",
+                         json=dep | {"stepup_totp": await fresh_totp(uid)})
+        check("ţintă 2FA cu TOTP → 200 (trece şi H1 şi H-3)",
               r.status_code == 200 and src_pub in ak_lines(homes["third"]), r.text)
         await c.post(f"/api/hosts/{ids['third']}/deploy-key/revoke", json=dep)
         await db.execute("UPDATE hosts SET require_2fa=0 WHERE id=?", ids["third"])
@@ -279,16 +301,16 @@ async def main():
         security._stepup_windows[(uid, ids["third"])] = (_t.time() - 400, _t.time() + 300)
         check("fereastra veche NU e „proaspătă” (>120s)",
               not security.stepup_window_fresh(uid, ids["third"]))
-        r = await c.post(f"/api/hosts/{ids['third']}/stepup", json={"stepup_password": PW})
-        check("/stepup cu parolă pe fereastră veche → 200 (reînnoieşte opened_at)",
+        r = await c.post(f"/api/hosts/{ids['third']}/stepup", json={"stepup_totp": await fresh_totp(uid)})
+        check("/stepup cu TOTP pe fereastră veche → 200 (reînnoieşte opened_at)",
               r.status_code == 200, r.text)
         check("după /stepup fereastra E proaspătă",
               security.stepup_window_fresh(uid, ids["third"]))
         r = await c.post(f"/api/hosts/{ids['third']}/deploy-key/deploy", json=dep)
         check("deploy fără creds în corp, pe fereastra proaspătă → 200 (fără deadlock)",
               r.status_code == 200, r.text)
-        await c.post(f"/api/hosts/{ids['third']}/deploy-key/revoke",
-                     json=dep | {"stepup_password": PW})
+        await c.post(f"/api/hosts/{ids['third']}/deploy-key/revoke", json=dep)
+        await totp_on(uid, False)
         # /stepup cu parolă GREŞITĂ pe host non-2FA → 401, nu 200 tăcut (audit v54 #2)
         await db.execute("UPDATE hosts SET require_2fa=0 WHERE id=?", ids["third"])
         r = await c.post(f"/api/hosts/{ids['third']}/stepup", json={"stepup_password": "gresita"})
@@ -422,21 +444,23 @@ async def main():
               r.status_code == 400 and hdr(r) == "sshkey.needs2faSource", r.text)
         await db.execute("UPDATE hosts SET require_2fa=1 WHERE id=?", ids["psrc"])
         security.clear_stepup_for(uid)
-        r = await c.post(f"/api/hosts/{ids['psrc']}/deploy-key/generate",
-                         json={"stepup_password": PW})
+        await totp_on(uid)          # sursa e acum 2FA: step-up cu TOTP (parola singură nu mai trece)
+        # fluxul din UI: 403 stepup.totp → /stepup cu codul deschide fereastra → reîncercare
+        await c.post(f"/api/hosts/{ids['psrc']}/stepup", json={"stepup_totp": await fresh_totp(uid)})
+        r = await c.post(f"/api/hosts/{ids['psrc']}/deploy-key/generate", json={})
         check("cu 2FA activat pe sursă → generate 200", r.status_code == 200, r.text)
         psrc_pub = r.json()["public_key"]
 
         # require_restrict: deploy fără restricţie e refuzat; cu restrict/command trece şi compune linia
         security.clear_stepup_for(uid)
         r = await c.post(f"/api/hosts/{ids['psrc']}/deploy-key/deploy-batch",
-                         json={"target_host_ids": [ids["ptgt"]], "stepup_password": PW})
+                         json={"target_host_ids": [ids["ptgt"]], "stepup_totp": await fresh_totp(uid)})
         res = r.json()["results"][0]
         check("politica require_restrict: deploy fără restricţie → respins per-ţintă",
               res["ok"] is False and res.get("code") == "sshkey.restrictRequired", r.text)
         r = await c.post(f"/api/hosts/{ids['psrc']}/deploy-key/deploy-batch",
                          json={"target_host_ids": [ids["ptgt"]], "restrict": True,
-                               "command": 'rrsync -ro ~/data', "stepup_password": PW})
+                               "command": 'rrsync -ro ~/data', "stepup_totp": await fresh_totp(uid)})
         check("cu restrict+command → deploy OK", r.json()["results"][0]["ok"], r.text)
         line = [ln for ln in ak_lines(homes["ptgt"]) if psrc_pub in ln][0]
         check("linia conţine restrict + command= + cheia",
@@ -445,7 +469,7 @@ async def main():
         # comandă cu newline (injecţie H-1) → respinsă
         r = await c.post(f"/api/hosts/{ids['psrc']}/deploy-key/deploy-batch",
                          json={"target_host_ids": [ids["ptgt"]], "restrict": True,
-                               "command": "ls\nevil", "stepup_password": PW})
+                               "command": "ls\nevil", "stepup_totp": await fresh_totp(uid)})
         check("command cu newline → respins (badCommand)",
               r.json()["results"][0].get("code") == "sshkey.badCommand", r.text)
 
@@ -454,8 +478,9 @@ async def main():
                      json={"require_2fa_source": False, "require_restrict": False})
         security.clear_stepup_for(uid)
         r = await c.post(f"/api/hosts/{ids['psrc']}/deploy-key/deploy-batch",
-                         json={"target_host_ids": [ids["ptgt"]], "stepup_password": PW})
+                         json={"target_host_ids": [ids["ptgt"]], "stepup_totp": await fresh_totp(uid)})
         check("politica oprită → deploy nerestricţionat OK din nou", r.json()["results"][0]["ok"], r.text)
+        await totp_on(uid, False)
 
         # ── ţintă ŞTEARSĂ din flotă: evidenţa NU dispare (cheia e încă pe maşină), dar nici
         #    nu blochează pentru totdeauna ştergerea cheii de pe sursă ─────────

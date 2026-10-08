@@ -147,6 +147,11 @@ OIDC_SCOPES = _str("WEBTERM_OIDC_SCOPES", "openid email profile")
 # accesul e refuzat chiar dacă IdP-ul a emis tokenul. Gol = ne bazăm doar pe gating-ul din IdP.
 OIDC_ALLOWED_GROUPS = [g.strip() for g in _str("WEBTERM_OIDC_ALLOWED_GROUPS", "").split(",") if g.strip()]
 OIDC_ENABLED = bool(OIDC_ISSUER and OIDC_CLIENT_ID and OIDC_CLIENT_SECRET)
+# Step-up SSO: cerem `max_age=0`, deci după spec (OIDC Core §2) id_token-ul TREBUIE să poarte
+# `auth_time`. Implicit (1) un step-up fără claim e REFUZAT — altfel „re-autentificarea" e doar
+# `prompt=login`, o rugăminte fără dovadă. `0` = comportamentul vechi, permisiv (acceptă cu un
+# warning), pentru un IdP care nu poate emite claim-ul; adminul îl alege conştient.
+OIDC_REQUIRE_AUTH_TIME = _str("WEBTERM_OIDC_REQUIRE_AUTH_TIME", "1").lower() not in ("0", "false", "no")
 # redirect_uri fix, derivat din PUBLIC_URL — niciodată din input de request (anti open-redirect)
 OIDC_REDIRECT_URI = PUBLIC_URL + "/api/oidc/callback"
 

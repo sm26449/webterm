@@ -16,7 +16,7 @@ import time
 from typing import Optional
 
 from argon2 import PasswordHasher
-from argon2.exceptions import VerifyMismatchError
+from argon2.exceptions import Argon2Error, InvalidHashError, VerifyMismatchError
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
@@ -172,11 +172,25 @@ def hash_password(password: str) -> str:
     return _ph.hash(password)
 
 
+_bad_hash_logged = False
+
+
 def verify_password(password: str, password_hash: str) -> bool:
+    global _bad_hash_logged
     try:
         _ph.verify(password_hash, password)
         return True
     except VerifyMismatchError:
+        return False
+    except (InvalidHashError, Argon2Error) as e:
+        # Hash corupt / format necunoscut (InvalidHashError, VerificationError): tratat ca
+        # parolă greşită, nu ca 500 — altfel un rând stricat în DB transformă login-ul/step-up-ul
+        # într-o eroare de server (şi un oracol „hash-ul acestui cont e invalid"). Logăm o
+        # singură dată la warning, ca adminul să afle, fără să inundăm logul la fiecare încercare.
+        if not _bad_hash_logged:
+            _bad_hash_logged = True
+            log.warning("verify_password: stored password hash is invalid (%s) — "
+                        "treated as a mismatch; reset the account's password", type(e).__name__)
         return False
 
 
@@ -776,6 +790,20 @@ def stepup_window_is_open(user_id: int, host_id: int) -> bool:
         return False
     _opened_at, exp = rec
     return exp >= time.time()
+
+
+def stepup_window_opened_at(user_id: int, host_id: int) -> Optional[float]:
+    """Momentul în care s-a prezentat factorul care a deschis fereastra (user, host) — DOAR dacă
+    fereastra e deschisă ACUM; altfel None. Pur read (nu gliseză, nu şterge), ca
+    `stepup_window_is_open`. Îl foloseşte plafonul absolut al terminalelor 2FA
+    (core.sweep_stepup_caps): un terminal în uz se blochează la STEPUP_WINDOW_MAX de la factorul
+    care l-a autorizat, iar o fereastră deschisă DUPĂ acel moment (un step-up nou) îl
+    re-autorizează de la `opened_at` ei."""
+    rec = _stepup_windows.get((user_id, host_id))
+    if rec is None:
+        return None
+    opened_at, exp = rec
+    return opened_at if exp >= time.time() else None
 
 
 def stepup_window_fresh(user_id: int, host_id: int, max_age: float = 120.0) -> bool:

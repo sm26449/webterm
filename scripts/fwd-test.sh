@@ -251,9 +251,23 @@ esac
 # ...şi DUPĂ step-up tunelul chiar se deschide (audit 2026-10-04): cookie-ul de sesiune e `__Host-`,
 # deci pe subdomeniu ajunge DOAR biletul; verificarea ferestrei citea sesiunea → mereu „închis" →
 # redirect relativ → buclă infinită. Testul de mai sus nu o prindea: se oprea la primul 302.
-# Contul e2e n-are passkey, deci parola deschide fereastra (din curl nu putem face ceremonia).
+# 3.5.14: parola SINGURĂ nu mai deschide un host 2FA (contul fără passkey/TOTP primeşte
+# `stepup.needsFactor`). Din curl nu putem face ceremonia passkey, dar putem înrola un TOTP prin
+# API şi calcula codul (RFC 6238, stdlib) — exact al doilea factor pe care îl cere politica.
+CODE=$(sess -o /dev/null -w '%{http_code}' -X POST "$B/api/hosts/$SSH2/stepup" -H 'Content-Type: application/json' \
+  -d '{"stepup_password":"parola-e2e-123456"}')
+[ "$CODE" = "403" ] && ok "SEC: account password alone does not open a 2FA host (needs a factor)" \
+  || no "fwd-2fa-password-only" "cod $CODE"
+totp(){ python3 -c 'import sys,base64,hmac,struct,time
+s=sys.argv[1]; k=base64.b32decode(s.upper()+"="*(-len(s)%8))
+m=hmac.new(k,struct.pack(">Q",int(time.time()//30)),"sha1").digest(); o=m[-1]&15
+print(str((struct.unpack(">I",m[o:o+4])[0]&0x7fffffff)%1000000).zfill(6))' "$1"; }
+TSEC=$(sess -X POST "$B/api/totp/setup" -H 'Content-Type: application/json' \
+  -d '{"current_password":"parola-e2e-123456"}' | grep -oE '"secret":"[A-Z2-7]+"' | sed 's/"secret":"//;s/"//')
+sess -o /dev/null -X POST "$B/api/totp/activate" -H 'Content-Type: application/json' \
+  -d "{\"code\":\"$(totp "$TSEC")\",\"current_password\":\"parola-e2e-123456\"}"
 sess -o /dev/null -X POST "$B/api/hosts/$SSH2/stepup" -H 'Content-Type: application/json' \
-  -d '{"stepup_password":"parola-e2e-123456"}'
+  -d "{\"stepup_totp\":\"$(totp "$TSEC")\"}"
 LOC2F=$(curl -s -H "Cookie: $SC" -H "Host: $D" -D - -o /dev/null "$B/__wtfwd/auth?slug=$SF2SLUG&next=/" | grep -i '^location:' | tr -d '\r' | sed 's/location: //i')
 echo "$LOC2F" | grep -qE "$SF2SLUG\.$D/__wtfwd/set\?t=[0-9]+\." && ok "2FA host, window open: auth issues the ticket" || no "fwd-2fa-ticket" "$LOC2F"
 TK2F=$(echo "$LOC2F" | sed -E 's/.*[?&]t=([^&]+).*/\1/')

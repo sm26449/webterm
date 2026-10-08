@@ -59,6 +59,7 @@ CI_TESTS="agent_hardening agent_reliability agent_tmux_hygiene ed25519_kat
           pentest_forward_token pentest_xff_lockout pentest_oidc_alg
           upload_window fs_copy
           sec_stepup_hardening sec_login_proxy sec_sso_account sec_closed_scrollback sec_setup_token security_summary
+          sec_stepup_cap sec_stepup_factor
           snippet_targets host_test_connection hosts_csv alert_history replay_links"
 
 # security_test e ultimul: îşi porneşte singur un uvicorn efemer şi verifică auth obligatoriu

@@ -176,6 +176,7 @@ services:
       WEBTERM_OIDC_PROVIDER_NAME: ${WEBTERM_OIDC_PROVIDER_NAME:-}
       WEBTERM_OIDC_SCOPES: ${WEBTERM_OIDC_SCOPES:-}
       WEBTERM_OIDC_ALLOWED_GROUPS: ${WEBTERM_OIDC_ALLOWED_GROUPS:-}
+      WEBTERM_OIDC_REQUIRE_AUTH_TIME: ${WEBTERM_OIDC_REQUIRE_AUTH_TIME:-}
       # so the app knows, and shows in the UI, which image it is running. `WEBTERM_IMAGE` e
       # pinuit pe DIGEST de upgrade.sh (imuabil); eticheta lizibilă (vX.Y.Z) stă în
       # WEBTERM_IMAGE_TAG şi e cea afişată, când există.

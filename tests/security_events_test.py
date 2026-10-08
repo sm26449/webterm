@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
 import httpx  # noqa: E402
 from app import api, config, db, email_alerts, security  # noqa: E402
+from app import totp as totp_mod  # noqa: E402
 
 _ORIGIN = {"origin": os.environ["WEBTERM_PUBLIC_URL"]}
 from app.main import app  # noqa: E402
@@ -62,19 +63,25 @@ async def main():
         check("token nou → alertă de securitate",
               any("token" in w for w in changes[n_before:]), str(changes[n_before:]))
 
-        # 3. host cu require_2fa → step-up cu parola deschide fereastra → notify_host_unlocked
+        # 3. host cu require_2fa → step-up cu un factor real deschide fereastra → notify_host_unlocked.
+        # 3.5.14: parola SINGURĂ nu mai e un step-up (stepup.needsFactor), deci contul are TOTP.
         r = await c.post("/api/hosts", json={"name": "prod-secret", "connection_type": "agent",
                                              "require_2fa": True})
         check("host 2FA creat", r.status_code == 200, r.text[:120])
         hid = r.json()["id"]
-        r = await c.post("/api/hosts/%d/stepup" % hid, json={"stepup_password": PW})
-        check("step-up cu parola reuşeşte", r.status_code == 200, r.text[:120])
+        uid = (await db.fetchone("SELECT id FROM users LIMIT 1"))["id"]
+        secret = totp_mod.new_secret()
+        await db.execute("UPDATE users SET totp_enabled=1, totp_secret_encrypted=? WHERE id=?",
+                         security.encrypt_secret(secret), uid)
+        r = await c.post("/api/hosts/%d/stepup" % hid, json={"stepup_totp": totp_mod.generate(secret)})
+        check("step-up cu TOTP reuşeşte", r.status_code == 200, r.text[:120])
         check("host 2FA deblocat → alertă (host protejat accesat)",
               "prod-secret" in unlocks, str(unlocks))
 
         # 4. re-apel idempotent cât fereastra e deschisă NU mai alertează (fără zgomot)
         n_unlocks = len(unlocks)
-        await c.post("/api/hosts/%d/stepup" % hid, json={"stepup_password": PW})
+        r = await c.post("/api/hosts/%d/stepup" % hid, json={})
+        check("re-step-up în fereastră → 200 fără factor nou", r.status_code == 200, r.text[:120])
         check("re-step-up în fereastră NU re-alertează", len(unlocks) == n_unlocks)
 
     await db.close()

@@ -27,7 +27,7 @@ from typing import Dict, Optional, Set
 import asyncssh
 import telnetlib3
 
-from . import config, db, email_alerts, signing, telnet
+from . import config, db, email_alerts, security, signing, telnet
 
 log = logging.getLogger("webterm")
 
@@ -592,6 +592,9 @@ class BrowserClient:
         self.user_agent = ""
         self.known = True
         self.attached_at = 0.0
+        # contul clientului owner (None la invitaţi): plafonul de step-up al hub-ului
+        # (sweep_stepup_caps) se re-autorizează doar din ferestrele userilor ATAŞAŢI
+        self.user_id: Optional[int] = None
         self._sent_since_ping = 0
         self._ping_seq = 0
         self._pong_fut: Optional[asyncio.Future] = None
@@ -878,7 +881,17 @@ class SessionHub:
         # la re-auth cu passkey. `lock_idle=0` → dezactivat. Setat la connect din host.
         self.lock_idle = 0
         self.locked = False
+        self.lock_reason = ""        # "idle" | "stepup" (ataşare fără step-up) | "stepup_max"
         self.last_interaction = time.time()
+        # Plafonul ABSOLUT de step-up (3.5.14): pe un host require_2fa, terminalul se blochează
+        # când au trecut STEPUP_WINDOW_MAX secunde de la factorul care l-a autorizat — oricât de
+        # activ ar fi folosit (idle-lock-ul singur nu-l prindea niciodată pe un terminal în uz).
+        # `authorized_at` = opened_at-ul ferestrei cu care s-a ataşat deblocat / momentul
+        # ultimei deblocări; avansează când un owner ataşat deschide o fereastră mai nouă.
+        # La nivel de HUB (nu de client), ca idle-lock-ul: blocarea se propagă tuturor clienţilor,
+        # inclusiv invitaţilor prin share, care n-au cont şi deci nici fereastră proprie.
+        self.stepup_cap = False
+        self.authorized_at: Optional[float] = None
         self._last_checkpoint = 0.0
         self._unpersisted = 0
         self._idle_flush: Optional[asyncio.Task] = None
@@ -1190,22 +1203,38 @@ class SessionHub:
                     pass
         await self.broadcast_roster()
 
-    async def lock(self) -> None:
-        """Blochează sesiunea (idle-lock 2FA): output suprimat + input refuzat până la
-        re-auth cu passkey. Sesiunea (tmux) rulează mai departe — doar accesul e blocat."""
+    async def lock(self, reason: str = "idle") -> None:
+        """Blochează sesiunea (idle-lock 2FA / plafon de step-up): output suprimat + input
+        refuzat până la re-auth. Sesiunea (tmux) rulează mai departe — doar accesul e blocat.
+        `reason` ajunge în mesajul `locked`, ca overlay-ul să spună DE CE s-a blocat."""
         if self.locked:
             return
         self.locked = True
+        self.lock_reason = reason
         for c in list(self.clients):
             c.lock()
-        await self.broadcast_json({"type": "locked"})
-        log.info("session %s: locked (2FA idle-lock, %ds with no input)", self.sid, self.lock_idle)
+        await self.broadcast_json({"type": "locked", "reason": reason})
+        if reason == "stepup_max":
+            log.info("session %s: locked (2FA step-up older than %ds)", self.sid,
+                     security.STEPUP_WINDOW_MAX)
+        elif reason == "idle":
+            log.info("session %s: locked (2FA idle-lock, %ds with no input)", self.sid, self.lock_idle)
+        else:
+            log.info("session %s: locked (%s)", self.sid, reason)
 
-    async def unlock(self) -> None:
-        """Deblochează după un step-up passkey valid (vezi endpoint-ul WS 'unlock')."""
+    def note_authorized(self, ts: Optional[float]) -> None:
+        """Un factor prezentat la `ts` autorizează terminalul (doar avansează, nu dă înapoi)."""
+        if ts is not None and (self.authorized_at is None or ts > self.authorized_at):
+            self.authorized_at = ts
+
+    async def unlock(self, authorized_at: Optional[float] = None) -> None:
+        """Deblochează după un step-up valid (vezi endpoint-ul WS 'unlock'). `authorized_at` =
+        momentul factorului proaspăt care a deblocat (reporneşte plafonul absolut)."""
         if not self.locked:
             return
         self.locked = False
+        self.lock_reason = ""
+        self.authorized_at = authorized_at if authorized_at is not None else time.time()
         self.last_interaction = time.time()
         for c in list(self.clients):
             c.unlock()
@@ -2750,6 +2779,26 @@ async def sweep_idle_locks() -> None:
     for hub in list(hubs.values()):
         if hub.lock_idle and not hub.locked and now - hub.last_interaction > hub.lock_idle:
             await hub.lock()
+
+
+async def sweep_stepup_caps() -> None:
+    """Plafonul ABSOLUT de step-up pe terminalele 2FA (3.5.14). Un terminal ţinut în uz nu se
+    bloca niciodată: idle-lock-ul măsoară doar inactivitatea, iar fereastra de step-up (plafonată
+    la STEPUP_WINDOW_MAX) e consultată doar la ataşare. Acum: dacă au trecut STEPUP_WINDOW_MAX
+    secunde de la factorul care a autorizat hub-ul şi niciun owner ataşat n-a deschis între timp
+    o fereastră nouă, hub-ul se blochează (toţi clienţii, inclusiv invitaţii prin share).
+    Procesele rulează mai departe; deblocarea cere factor proaspăt, ca la idle-lock."""
+    now = time.time()
+    for hub in list(hubs.values()):
+        if not hub.stepup_cap or hub.locked or hub.closed:
+            continue
+        for c in list(hub.clients):
+            if c.is_owner and c.user_id is not None:
+                hub.note_authorized(security.stepup_window_opened_at(c.user_id, hub.host_id))
+        # authorized_at None pe un hub 2FA deblocat n-ar trebui să apară (ataşarea deblocată îl
+        # setează) — fail-closed: tratat ca expirat.
+        if hub.authorized_at is None or now - hub.authorized_at >= security.STEPUP_WINDOW_MAX:
+            await hub.lock("stepup_max")
 
 
 async def register_agent(ws, host_id: int, pinned: bool = False) -> AgentConnection:

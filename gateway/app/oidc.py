@@ -136,17 +136,27 @@ def _check_stepup_auth_time(auth_time, requested_at: float) -> None:
     autentificare FĂCUTĂ DUPĂ ce am cerut-o, nu o sesiune IdP veche refolosită. Cu `max_age`
     în cerere, `auth_time` e obligatoriu după spec — îl comparăm cu momentul `begin()`.
 
-    Compromis asumat când `auth_time` LIPSEŞTE: acceptăm (cu un WARNING, o singură dată).
-    Alternativa — refuz — ar închide step-up-ul pentru toţi userii SSO ai unui IdP care nu emite
-    claim-ul (configurare de scope/claim), fără ca adminul să afle de ce; `prompt=login` rămâne
-    onorat de IdP-urile standard (Authentik îl respectă), iar logul spune exact ce lipseşte.
+    Când `auth_time` LIPSEŞTE (3.5.14): implicit REFUZ (`WEBTERM_OIDC_REQUIRE_AUTH_TIME=1`) —
+    fără claim, step-up-ul SSO e doar `prompt=login`, pe care un IdP îl poate ignora fără ca noi
+    să aflăm. Logăm (o dată) exact ce trebuie configurat în IdP. `=0` păstrează compromisul vechi:
+    acceptăm cu un WARNING, pentru un IdP care nu poate emite claim-ul.
     Când claim-ul EXISTĂ, e verificat strict: un step-up „gratis" pe o sesiune veche e refuzat."""
     global _auth_time_missing_logged
     if auth_time is None:
+        if config.OIDC_REQUIRE_AUTH_TIME:
+            if not _auth_time_missing_logged:
+                _auth_time_missing_logged = True
+                log.warning("SSO step-up REFUSED: the IdP did not return `auth_time` although "
+                            "max_age=0 was requested (OIDC Core requires it). Configure the IdP "
+                            "to emit the auth_time claim in the id_token, or set "
+                            "WEBTERM_OIDC_REQUIRE_AUTH_TIME=0 to accept prompt=login alone")
+            raise OidcError("step-up without auth_time (configure the IdP to emit auth_time, "
+                            "or set WEBTERM_OIDC_REQUIRE_AUTH_TIME=0)")
         if not _auth_time_missing_logged:
             _auth_time_missing_logged = True
             log.warning("SSO step-up: the IdP did not return `auth_time` although max_age=0 was "
-                        "requested — accepting on `prompt=login` alone; configure the IdP to emit "
+                        "requested — accepting on `prompt=login` alone "
+                        "(WEBTERM_OIDC_REQUIRE_AUTH_TIME=0); configure the IdP to emit "
                         "auth_time for a verifiable step-up")
         return
     if isinstance(auth_time, bool) or not isinstance(auth_time, (int, float)):

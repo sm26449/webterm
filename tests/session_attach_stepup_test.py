@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
 import httpx  # noqa: E402
 from app import api, config, core, db, security  # noqa: E402
+from app import totp as totp_mod  # noqa: E402
 
 # Middleware-ul `csrf_guard` cere `Origin` pe metodele care schimbă ceva şi refuză
 # lipsa lui (ca `_origin_ok` pentru WebSocket). Testele imită un BROWSER, deci trimit
@@ -170,21 +171,38 @@ async def main():
         try:
             check("fără WebAuthn, calea de deblocare există (rp_id nu e domeniu)",
                   api._webauthn_available() is False)
+            # 3.5.14 (decizie de politică): parola SINGURĂ nu mai deschide un host 2FA — un cont
+            # fără passkey şi fără TOTP primea pe hostul „cu 2FA" exact factorul de la login.
+            # Refuz cu un cod stabil (UI-ul trimite la Setări → 2FA), ORICE parolă ar veni.
             security._stepup_windows.clear()
+            code = ""
             try:
                 await api._require_host_stepup(hid, me, "", PW)
+            except Exception as e:                        # noqa: BLE001
+                code = getattr(e, "code", "")
+            check("fără WebAuthn şi fără TOTP: parola CORECTĂ e refuzată (stepup.needsFactor)",
+                  code == "stepup.needsFactor" and not security.stepup_window_ok(uid, hid), code)
+            # Calea de deblocare fără WebAuthn rămâne: un cod TOTP (al doilea factor real).
+            secret = totp_mod.new_secret()
+            await db.execute("UPDATE users SET totp_enabled=1, totp_secret_encrypted=? WHERE id=?",
+                             security.encrypt_secret(secret), uid)
+            me_totp = await db.fetchone("SELECT * FROM users WHERE id=?", uid)
+            security._stepup_windows.clear()
+            try:
+                await api._require_host_stepup(hid, me_totp, "", "", totp_mod.generate(secret))
                 unlocked = security.stepup_window_ok(uid, hid)
             except Exception as e:                        # noqa: BLE001
                 unlocked = False
                 print("      (detaliu: %s)" % e)
-            check("fără WebAuthn, parola contului deblochează", unlocked is True)
+            check("fără WebAuthn, codul TOTP deblochează", unlocked is True)
             security._stepup_windows.clear()
             try:
-                await api._require_host_stepup(hid, me, "", "parola-gresita")
+                await api._require_host_stepup(hid, me_totp, "", "", "000000")
                 bad_ok = True
             except Exception:
                 bad_ok = False
-            check("parola greşită NU deblochează", bad_ok is False)
+            check("cod TOTP greşit NU deblochează", bad_ok is False)
+            await db.execute("UPDATE users SET totp_enabled=0, totp_secret_encrypted=NULL WHERE id=?", uid)
         finally:
             config.PUBLIC_URL = old_url
 

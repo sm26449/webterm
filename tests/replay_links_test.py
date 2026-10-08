@@ -233,8 +233,13 @@ async def main():
         check("host 2FA fără step-up → 403 stepup.*", r.status_code == 403
               and r.json().get("code", "").startswith("stepup."), r.text[:160])
         r = await a.post(f"/api/sessions/{S_2FA}/replay-links", json={"stepup_password": PW1})
+        # 3.5.14: parola singură nu mai e step-up (contul n-are passkey/TOTP)
+        check("host 2FA cu parola SINGURĂ → 403 stepup.needsFactor",
+              r.status_code == 403 and r.json().get("code") == "stepup.needsFactor", r.text[:160])
+        security.open_stepup_window(u1, hid2)          # = un factor real prezentat prin /stepup
+        r = await a.post(f"/api/sessions/{S_2FA}/replay-links", json={})
         j_2fa = r.json()
-        check("host 2FA cu parola contului → creat", r.status_code == 200, r.text[:160])
+        check("host 2FA cu fereastra de step-up deschisă → creat", r.status_code == 200, r.text[:160])
         security.clear_stepup_for(u1)
         r = await a.get("/api/replay-links")
         lst = r.json()
