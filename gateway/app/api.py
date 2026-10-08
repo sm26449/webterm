@@ -7941,9 +7941,17 @@ async def _security_checks(user) -> list:
         "SELECT share_writable FROM sessions WHERE share_token IS NOT NULL AND share_expires > ?",
         time.time())
     writable = sum(1 for r in rows if r["share_writable"])
+    # 3.5.15: şi link-urile de REPLAY active (3.5.12) sunt o cale publică de acces fără cont —
+    # numărate separat (pe toată instanţa, ca share-urile live: orice cont e admin), cu cele
+    # FĂRĂ mascarea secretelor scoase în evidenţă. Fără scriere, deci niciodată „bad" singure.
+    rp = await db.fetchone(
+        "SELECT COUNT(*) AS n, COALESCE(SUM(CASE WHEN redact=0 THEN 1 ELSE 0 END), 0) AS raw"
+        " FROM replay_links WHERE expires > ?", time.time())
+    replay_n, replay_raw = (int(rp["n"]), int(rp["raw"])) if rp else (0, 0)
     checks.append({"id": "shares",
-                   "status": "bad" if writable else ("warn" if rows else "ok"),
-                   "value": {"active": len(rows), "writable": writable}})
+                   "status": "bad" if writable else ("warn" if rows or replay_n else "ok"),
+                   "value": {"active": len(rows), "writable": writable,
+                             "replay": replay_n, "replay_unmasked": replay_raw}})
 
     # 3. guardrail-ul de comenzi
     g = await _load_command_guard()

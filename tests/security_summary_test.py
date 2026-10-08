@@ -224,14 +224,14 @@ async def main():
         await add_share(sid_ro, hplain, tok_ro)
         s = await summary(c)
         check("shares: un link read-only → warn",
-              s["shares"]["status"] == "warn" and s["shares"]["value"] == {"active": 1, "writable": 0},
+              s["shares"]["status"] == "warn" and s["shares"]["value"] == {"active": 1, "writable": 0, "replay": 0, "replay_unmasked": 0},
               str(s["shares"]))
         await add_share(sid_rw, hplain, tok_rw, writable=True, by="coleg@b.co")
         await add_share(sid_2fa, h2fa, tok_2fa)
         await add_share(sid_old, hplain, tok_old, expires_in=-60)        # expirat: nu contează
         s = await summary(c)
         check("shares: oricare writable → bad; expiratul nu se numără; cel 2FA da",
-              s["shares"]["status"] == "bad" and s["shares"]["value"] == {"active": 3, "writable": 1},
+              s["shares"]["status"] == "bad" and s["shares"]["value"] == {"active": 3, "writable": 1, "replay": 0, "replay_unmasked": 0},
               str(s["shares"]))
 
         core.hubs[sid_rw] = FakeHub(guests=2)
@@ -310,6 +310,27 @@ async def main():
               and a["actor"] == "a@b.co", str(dict(a) if a else None))
         s = await summary(c)
         check("după revoke-all: shares → ok", s["shares"]["status"] == "ok", str(s["shares"]))
+
+        # ── 3.5.15: link-urile de REPLAY active intră în acelaşi check, numărate separat ──
+        now = time.time()
+        for i, (redact, exp) in enumerate(((1, now + 3600), (0, now + 3600), (0, now - 60))):
+            await db.execute(
+                "INSERT INTO replay_links(token_hash, sid, user_id, redact, created, expires)"
+                " VALUES(?,?,?,?,?,?)", "h%d" % i + "0" * 62, "e" * 32, uid, redact, now, exp)
+        s = await summary(c)
+        check("replay: 2 active (unul FĂRĂ mascare), expiratul nu contează → warn, separat de share-uri",
+              s["shares"]["status"] == "warn"
+              and s["shares"]["value"] == {"active": 0, "writable": 0, "replay": 2, "replay_unmasked": 1},
+              str(s["shares"]))
+        await add_share("f" * 32, hplain, "TOKRP" + "q" * 20, writable=True)
+        s = await summary(c)
+        check("replay + un share writable → tot bad (writable domină)",
+              s["shares"]["status"] == "bad" and s["shares"]["value"]["replay"] == 2, str(s["shares"]))
+        await db.execute("UPDATE sessions SET share_token=NULL, share_expires=NULL, share_writable=0")
+        await db.execute("DELETE FROM replay_links")
+        s = await summary(c)
+        check("fără share-uri şi fără replay → ok", s["shares"]["status"] == "ok"
+              and s["shares"]["value"]["replay"] == 0, str(s["shares"]))
         r = await c.post("/api/shares/revoke-all", json={"current_password": PW})
         check("revoke-all pe nimic → 200, 0", r.status_code == 200 and r.json()["revoked"] == 0, r.text)
         core.hubs.pop(sid_rw, None)

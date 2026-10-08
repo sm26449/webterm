@@ -87,10 +87,15 @@ export default function SecurityCard(props: {
       }
       case 'shares': {
         const active = num(v.active), writable = num(v.writable)
+        // 3.5.15: link-urile de replay active — tot acces public fără cont, etichetate separat
+        const replay = num(v.replay), raw = num(v.replay_unmasked)
+        const parts: string[] = []
+        if (active) parts.push(t('secsum.shares.active', { count: active })
+          + (writable ? ` · ${t('secsum.shares.writable', { count: writable })}` : ''))
+        if (replay) parts.push(t('secsum.shares.replay', { count: replay })
+          + (raw ? ` · ${t('secsum.shares.replayUnmasked', { count: raw })}` : ''))
         return { label: t('secsum.shares'),
-          value: active === 0 ? t('secsum.shares.none')
-            : t('secsum.shares.active', { count: active })
-              + (writable ? ` · ${t('secsum.shares.writable', { count: writable })}` : '') }
+          value: parts.length ? parts.join(' · ') : t('secsum.shares.none') }
       }
       case 'guardrail':
         return { label: t('secsum.guardrail'),
