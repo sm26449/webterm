@@ -19,7 +19,10 @@ authenticated sessions (`WEBTERM_IDLE_LOCK_SECS`, default 5 min). Since 3.5.13 a
 window is open — the same absolute cap every other action on the host already had; the lock
 covers share-link guests as well. And the **account password alone is no longer a step-up**: an
 account with neither a passkey nor TOTP is told to enrol one before it can open a 2FA host (see
-[HOSTS.md](HOSTS.md#require-2fa-step-up)). The WebSocket Origin check compares scheme, host and
+[HOSTS.md](HOSTS.md#require-2fa-step-up)). Since 3.5.15 every route that accepts an inline
+step-up (`stepup_grant` / `stepup_password`) also accepts `stepup_totp`, so a TOTP-only account
+can step up inline too, and the lock overlay names the factor it will ask for (passkey,
+authenticator code, SSO) instead of always saying "passkey". The WebSocket Origin check compares scheme, host and
 port (an `http://` page on the same name is not our `https://` origin). An optional **command guardrail**
 (Settings → Infrastructure & tokens): regex rules that require **confirmation** or **block**
 dangerous commands at Enter (e.g. `rm -rf`, `mkfs`) — editable, and enforced on the
@@ -127,6 +130,15 @@ truncated user agent, counted in the link list, and alerted in-app to the creato
 per 10 minutes). "Mask likely secrets" is on by default and reuses the alert scrubber's
 patterns; it is best-effort and the UI says so. Password change and the dashboard's
 *Revoke all* end every replay link; deleting an account ends its links.
+
+**Live share links are rate-limited per IP too** (3.5.15). `/api/shared/{token}` and
+`/ws/shared/{token}` had no per-IP limit; they now use the replay links' limiter with a
+**separate bucket** (a block on one surface does not block the other): a total cap per IP per
+minute (120 — a guest page makes one metadata request and one WebSocket, and a room of viewers
+behind one NAT is legitimate) and a miss-based lock — 20 unknown tokens in 10 minutes block the
+IP for 10 minutes for **every** token, valid ones included, so the lock is not an oracle. The
+metadata endpoint answers `429 share.rateLimited` with `Retry-After`; the WebSocket closes with
+code `4429` before looking the token up, and the guest page says to wait and reload.
 
 <a id="signed-agent-updates"></a>
 **Signed agent updates (Ed25519).** Agents only accept `ptyd.py` signed with the

@@ -12,7 +12,7 @@ Problem / Info), never by colour alone. Every row links to the place where you f
 | Check | What it looks at | Status |
 |---|---|---|
 | **Your 2FA** | how many passkeys your account has, and whether TOTP is on | **Problem** with neither; **Attention** with exactly one passkey and no TOTP while some host requires 2FA (losing that one key locks you out of those hosts); SSO accounts without a local factor show **Info** — their second factor lives at the IdP |
-| **Share links** | active (not expired) share links, and how many are writable | **OK** with none; **Attention** with any; **Problem** if any is writable |
+| **Share links** | active (not expired) live share links and how many are writable; since 3.5.15 also active [replay links](FEATURES.md#replay-links) across the instance, shown separately (*2 live shares · 1 replay link*), with how many have secret masking off | **OK** with none; **Attention** with any live share or replay link; **Problem** if any live share is writable |
 | **Command guardrail** | enabled, number of rules | **Attention** if disabled or with no rules |
 | **Signing key** | the agent signing key: present, locked, missing (the same signal as the dot on the Settings gear) | **Problem** when locked (agents cannot update); **Attention** when missing |
 | **Hosts requiring 2FA** | X of Y hosts have *Require 2FA* | **Info** only — it is a per-host choice |
@@ -30,7 +30,7 @@ outside the application; the gateway has no reliable view of it. The host-side c
 
 The data comes from `GET /api/security/summary` — a list of `{id, status, value}` with no
 prose (the UI writes the text in your language). It is browser-only: automation tokens get
-`401`.
+`401`. The `shares` check's value is `{active, writable, replay, replay_unmasked}`.
 
 ## Share links inventory
 

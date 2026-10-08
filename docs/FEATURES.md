@@ -190,12 +190,18 @@ Press `?` for the cheatsheet.
   Ctrl+C to stop; for a stopped container it prints the last 500 lines and the tab keeps
   them. Running containers show **CPU %** and **memory used / limit (%)**, from
   `docker stats --no-stream`, refreshed every 5 s while the panel is open and the browser
-  tab is visible, coloured with the same 70 % / 90 % thresholds as the host gauges; if
+  tab is visible, coloured with the same 70 % / 90 % thresholds as the host gauges. `docker
+  stats` reports CPU per core (400 % = four full cores), so since 3.5.15 the panel divides it
+  by the host's core count (from the agent's diagnostics snapshot) and shows the share of the
+  host — the colour follows that value, and the tooltip / screen-reader text gives both
+  (*12% of host · 96% of one core*); when the core count is not known yet it shows the raw
+  value marked *per core*; if
   `docker stats` takes longer than 6 s (many containers, busy host) the cards say *Stats
   unavailable* and the panel retries every 30 s. Runs the host's `docker` CLI through the
   agent — no extra daemon exposure; the same 2FA step-up as any host action. Where the
   agent's user is not in the `docker` group but has passwordless `sudo`, every call (the
-  lists, stats and the Logs tab) goes through `sudo -n`, never a password prompt
+  lists, stats, the Logs tab and, since 3.5.15, the container Shell) goes through `sudo -n`,
+  never a password prompt; with neither, the tab shows docker's own error plus a hint
 - **Database connections** (Toolbox → *Connections*, toolbar + host page, agent hosts):
   saved launchers for **PostgreSQL / MySQL·MariaDB / MongoDB / ClickHouse / Redis**. One
   click opens a session with the right client (`psql` / `mysql` / `mongosh` /

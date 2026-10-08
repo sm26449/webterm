@@ -9,6 +9,64 @@ back.
 
 ## [Unreleased]
 
+### Security
+- **Live share links are rate-limited per IP.** `/api/shared/{token}` and `/ws/shared/{token}`
+  were the only public token endpoints without a per-IP limit (replay links got one in 3.5.12),
+  so a scanner could try tokens there for free. The replay limiter is now a reusable
+  `PublicLimiter` with a **separate bucket** for live shares: a total cap per IP (120 a minute —
+  a guest page makes a metadata request and a WebSocket, and a room of viewers behind one NAT is
+  legitimate) and the same miss-based lock (20 unknown tokens in 10 minutes block the IP for 10
+  minutes, **valid tokens included**, so the lock is not an oracle). The metadata endpoint
+  answers `429 share.rateLimited` with `Retry-After`; the WebSocket closes with `4429` before
+  the token is looked up, and the guest page says to wait instead of showing "invalid link".
+- **Every inline step-up accepts an authenticator code.** Since 3.5.13 the password alone no
+  longer passes a step-up on a 2FA host, but most routes that take an inline step-up
+  (`stepup_grant` / `stepup_password` — run, git, docker and service actions, connections,
+  forwards, serial, host edits, shares, replay links, deploy-key generate / revoke / verify /
+  test, new sessions…) ignored a TOTP code, so a TOTP-only account could only step up through
+  the separate `/stepup` call. They now all take `stepup_totp` (body or query, matching the
+  route) and pass it to `_require_host_stepup` / `_require_fresh_factor`.
+
+### Added
+- **Unread-alerts indicator on the ☰ button (phones).** On a phone the alerts bell lives only in
+  the drawer, so a new alert was invisible until you opened the menu. The menu button on the
+  dashboard, host page and session header now shows a dot with the count, and its accessible
+  name says it (*Open host list — unread alerts: 3*) — not colour alone. It reads the same
+  shared 60-second counter as the bell: no second poll.
+- **Alerts in the interface language.** The in-app alert panel showed the English email text to
+  Romanian users. Each alert now also stores a stable message key and its parameters (new
+  `alerts.msg_key` / `msg_params` columns; the parameters go through the same secret scrubber
+  as the text), and the panel renders `alertmsg.<key>.title/details` in English or Romanian —
+  including the nested bits (metric names, the security-change description, link validity,
+  masking on/off, backup age). Emails and webhooks stay in English; alerts recorded before this
+  version, and keys a UI does not know yet, keep showing their stored text.
+- **The security summary counts replay links.** The *Share links* check looked only at live
+  shares, though an active replay link is just as much a public way in. It now also reports
+  active replay links instance-wide, labelled separately (*2 live shares · 1 replay link*),
+  with how many have secret masking off; any active replay link makes the check *Attention*.
+
+### Changed
+- **Docker CPU % is relative to the host.** `docker stats` reports CPU per core, so on an
+  8-core host a container using one core read "96%" and was coloured red by thresholds meant
+  for the whole machine. The panel now divides by the host's core count (from the agent's
+  diagnostics snapshot, returned by the stats endpoint as `host_cpus` — no extra command on
+  the host) and colours the normalised value; the tooltip and screen-reader text give both
+  (*12% of host · 96% of one core*). Without a known core count it shows the raw value marked
+  *per core*.
+- **The terminal lock says which factor it wants.** The overlay's button read "Unlock with
+  passkey" for every account. It now follows `stepup_method` from `/api/state` (and the code
+  of a refused unlock): *Unlock with passkey*, *Unlock with authenticator code*, *Unlock with
+  SSO*, or *Set up 2FA to unlock*; the description no longer mentions a passkey.
+
+### Fixed
+- **Docker Shell on hosts where only `sudo` reaches the daemon.** The list, stats and live logs
+  already fell back to `sudo -n` when the agent's user is not in the `docker` group; the
+  container Shell ran a bare `docker exec` and died with "permission denied". It now uses the
+  same wrapper as Logs: direct, then `sudo -n` (never a password prompt), else the plain command
+  so docker's real error shows, plus a hint.
+- README screenshot 06 regenerated: it still showed the old Security tab instead of
+  *Sign-in & 2FA*.
+
 ## [3.5.14] — 2026-10-08 · agent (57)
 
 ### Added

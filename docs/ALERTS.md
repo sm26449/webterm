@@ -156,6 +156,18 @@ only* act on **your** history only. Opening an alert's details marks it read; no
 marked read just because the panel was opened. The count refreshes every 60 s while the tab is
 visible (no polling in a background tab).
 
+**On a phone** the bell is inside the drawer, so since 3.5.15 the menu button (☰) that opens
+it carries the same indicator — a dot with the count — and its accessible name includes it
+(*Open host list — unread alerts: 3*). It reads the same shared counter as the bell: one poll
+per page, however many buttons show it.
+
+**Language.** The email and webhook are always in English. Since 3.5.15 the in-app panel shows
+each alert in the interface language (English or Romanian): with every alert the gateway
+stores a stable message key and its parameters (host, IP, values — passed through the same
+redaction as the text) next to the English text, and the panel renders the translation.
+Alerts recorded before 3.5.15, and any key this UI version does not know, keep showing the
+stored English text.
+
 **Who sees what.** There are no roles — every account is a full administrator — so:
 
 - events about **one account** (sign-in from a new IP, a new device attached to a live
@@ -168,7 +180,7 @@ visible (no polling in a background tab).
 **Retention.** The last **500 alerts per account**, for at most **30 days**; older rows are
 dropped when a new one arrives. Deleting an account deletes its history and preferences. The
 text is the same as the email, with tokens, `password=`-style values, credentials in URLs and
-private keys redacted.
+private keys redacted — and so are the message parameters stored for the translated view.
 
 **Per-event preferences** (Settings → Notifications → *Alert events*). For each event type,
 per account:
@@ -192,7 +204,8 @@ that remains. *IP blocked* and *2FA host unlocked* are security-relevant but fre
 expected, so they can be turned off completely.
 
 API (signed-in browser session only — automation tokens get 401, like the rest of the
-account API): `GET /api/alerts?limit=&before=&unread=`, `GET /api/alerts/unread`,
+account API): `GET /api/alerts?limit=&before=&unread=` (each item also carries `msg_key` —
+`null` on older rows — and `msg_params`), `GET /api/alerts/unread`,
 `POST /api/alerts/read` (`{"ids": [..]}` or `{"all": true}`), `DELETE /api/alerts`,
 `GET` / `POST /api/alerts/prefs` (`{"prefs": {"host_offline": {"email": false, "inapp": true}}}`).
 Clearing and preference changes are in the audit log; marking as read is not (noise).
