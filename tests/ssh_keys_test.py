@@ -41,7 +41,7 @@ TOTP_SECRET = totp_mod.new_secret()
 
 
 async def totp_on(uid, on=True):
-    """3.5.14: parola SINGURĂ nu mai e step-up pe un host `require_2fa` → secţiunile cu ţinte/surse
+    """3.5.13: parola SINGURĂ nu mai e step-up pe un host `require_2fa` → secţiunile cu ţinte/surse
     2FA folosesc un TOTP real. Îl pornim doar acolo: cu TOTP activ, şi re-auth-ul de pe hosturile
     FĂRĂ 2FA (H-3) ar cere codul, nu parola, iar restul testului verifică exact calea cu parolă."""
     await db.execute("UPDATE users SET totp_enabled=?, totp_secret_encrypted=? WHERE id=?",
@@ -278,7 +278,7 @@ async def main():
         check("ţintă 2FA fără factor → 403 (step-up)", r.status_code == 403, r.text)
         r = await c.post(f"/api/hosts/{ids['third']}/deploy-key/deploy",
                          json=dep | {"stepup_password": PW})
-        check("ţintă 2FA cu parola SINGURĂ (cont fără passkey/TOTP) → 403 stepup.needsFactor (3.5.14)",
+        check("ţintă 2FA cu parola SINGURĂ (cont fără passkey/TOTP) → 403 stepup.needsFactor (3.5.13)",
               r.status_code == 403 and hdr(r) == "stepup.needsFactor", r.text)
         await totp_on(uid)
         r = await c.post(f"/api/hosts/{ids['third']}/deploy-key/deploy",

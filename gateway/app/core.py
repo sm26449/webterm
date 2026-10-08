@@ -883,7 +883,7 @@ class SessionHub:
         self.locked = False
         self.lock_reason = ""        # "idle" | "stepup" (ataşare fără step-up) | "stepup_max"
         self.last_interaction = time.time()
-        # Plafonul ABSOLUT de step-up (3.5.14): pe un host require_2fa, terminalul se blochează
+        # Plafonul ABSOLUT de step-up (3.5.13): pe un host require_2fa, terminalul se blochează
         # când au trecut STEPUP_WINDOW_MAX secunde de la factorul care l-a autorizat — oricât de
         # activ ar fi folosit (idle-lock-ul singur nu-l prindea niciodată pe un terminal în uz).
         # `authorized_at` = opened_at-ul ferestrei cu care s-a ataşat deblocat / momentul
@@ -2782,7 +2782,7 @@ async def sweep_idle_locks() -> None:
 
 
 async def sweep_stepup_caps() -> None:
-    """Plafonul ABSOLUT de step-up pe terminalele 2FA (3.5.14). Un terminal ţinut în uz nu se
+    """Plafonul ABSOLUT de step-up pe terminalele 2FA (3.5.13). Un terminal ţinut în uz nu se
     bloca niciodată: idle-lock-ul măsoară doar inactivitatea, iar fereastra de step-up (plafonată
     la STEPUP_WINDOW_MAX) e consultată doar la ataşare. Acum: dacă au trecut STEPUP_WINDOW_MAX
     secunde de la factorul care a autorizat hub-ul şi niciun owner ataşat n-a deschis între timp

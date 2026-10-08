@@ -106,7 +106,7 @@ export default function SharedView(props: { token: string }) {
         // idle-lock 2FA: proprietarul trebuie să se re-autentifice; invitatul nu poate
         // debloca (n-are passkey) — doar așteaptă. Serverul nu trimite output cât e blocat.
         else if (msg.type === 'locked') {
-          // `stepup_max` (3.5.14): plafonul de 60 min de la factorul owner-ului pe un host 2FA
+          // `stepup_max` (3.5.13): plafonul de 60 min de la factorul owner-ului pe un host 2FA
           setLockMax(msg.reason === 'stepup_max')
           setConn('locked')
         }

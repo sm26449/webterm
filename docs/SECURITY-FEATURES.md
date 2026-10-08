@@ -14,7 +14,7 @@ Origin check on the WebSocket (anti-CSWSH), CSP + HSTS + anti-clickjacking,
 path-traversal blocked. On **2FA** hosts, the terminal **locks on inactivity**
 (output suppressed + input refused server-side) and resuming requires a **fresh second
 factor** (passkey, TOTP code or SSO re-authentication) — protecting against unattended
-authenticated sessions (`WEBTERM_IDLE_LOCK_SECS`, default 5 min). Since 3.5.14 a terminal kept
+authenticated sessions (`WEBTERM_IDLE_LOCK_SECS`, default 5 min). Since 3.5.13 a terminal kept
 **in use** locks too, **60 minutes after the factor that authorised it** unless a newer step-up
 window is open — the same absolute cap every other action on the host already had; the lock
 covers share-link guests as well. And the **account password alone is no longer a step-up**: an

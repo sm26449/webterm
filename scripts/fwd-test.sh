@@ -251,7 +251,7 @@ esac
 # ...şi DUPĂ step-up tunelul chiar se deschide (audit 2026-10-04): cookie-ul de sesiune e `__Host-`,
 # deci pe subdomeniu ajunge DOAR biletul; verificarea ferestrei citea sesiunea → mereu „închis" →
 # redirect relativ → buclă infinită. Testul de mai sus nu o prindea: se oprea la primul 302.
-# 3.5.14: parola SINGURĂ nu mai deschide un host 2FA (contul fără passkey/TOTP primeşte
+# 3.5.13: parola SINGURĂ nu mai deschide un host 2FA (contul fără passkey/TOTP primeşte
 # `stepup.needsFactor`). Din curl nu putem face ceremonia passkey, dar putem înrola un TOTP prin
 # API şi calcula codul (RFC 6238, stdlib) — exact al doilea factor pe care îl cere politica.
 CODE=$(sess -o /dev/null -w '%{http_code}' -X POST "$B/api/hosts/$SSH2/stepup" -H 'Content-Type: application/json' \

@@ -1,4 +1,4 @@
-/* Ce îi cerem omului la un step-up pe un host (3.5.14).
+/* Ce îi cerem omului la un step-up pe un host (3.5.13).
 
    Serverul refuză cu un cod stabil (`stepup.passkey` / `stepup.totp` / `stepup.password` /
    `stepup.needsFactor` / `host.needs2faSso`), iar `/api/state` spune dinainte ce factor are

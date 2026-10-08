@@ -136,7 +136,7 @@ def _check_stepup_auth_time(auth_time, requested_at: float) -> None:
     autentificare FĂCUTĂ DUPĂ ce am cerut-o, nu o sesiune IdP veche refolosită. Cu `max_age`
     în cerere, `auth_time` e obligatoriu după spec — îl comparăm cu momentul `begin()`.
 
-    Când `auth_time` LIPSEŞTE (3.5.14): implicit REFUZ (`WEBTERM_OIDC_REQUIRE_AUTH_TIME=1`) —
+    Când `auth_time` LIPSEŞTE (3.5.13): implicit REFUZ (`WEBTERM_OIDC_REQUIRE_AUTH_TIME=1`) —
     fără claim, step-up-ul SSO e doar `prompt=login`, pe care un IdP îl poate ignora fără ca noi
     să aflăm. Logăm (o dată) exact ce trebuie configurat în IdP. `=0` păstrează compromisul vechi:
     acceptăm cu un WARNING, pentru un IdP care nu poate emite claim-ul.

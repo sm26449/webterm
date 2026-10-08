@@ -119,7 +119,7 @@ async def main():
     check("unlock cu parolă greşită → unlock_failed, fără scrollback",
           "unlock_failed" in _types(ws) and SECRET not in b"".join(ws.sent_bytes))
 
-    # ── 4a. 3.5.14: parola CORECTĂ singură (cont fără passkey/TOTP) NU mai deblochează ──
+    # ── 4a. 3.5.13: parola CORECTĂ singură (cont fără passkey/TOTP) NU mai deblochează ──
     security.clear_stepup_for(uid)
     pw_only = {"type": "websocket.receive",
                "text": json.dumps({"type": "unlock", "password": "parolabuna1"})}

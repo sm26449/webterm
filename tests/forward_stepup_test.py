@@ -260,7 +260,7 @@ async def main():
         # trece de poartă; agentul e offline → 1011 (nu 1008): dovada că refuzul de mai sus era fereastra
         check("WS pe host 2FA, fereastră deschisă: trece de poartă (1011 = host offline, nu 1008)",
               sent and sent[0].get("code") == 1011, str(sent))
-        # 3.5.14: Origin-ul trebuie să aibă şi SCHEMA din PUBLIC_URL (aici http): acelaşi host pe
+        # 3.5.13: Origin-ul trebuie să aibă şi SCHEMA din PUBLIC_URL (aici http): acelaşi host pe
         # altă schemă nu e originul forward-ului (comparam doar hostname-ul)
         sent = await _ws(ticket, origin_scheme="https")
         check("WS forward: Origin cu altă schemă decât PUBLIC_URL → 1008",

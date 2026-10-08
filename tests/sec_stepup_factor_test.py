@@ -1,4 +1,4 @@
-"""Patch de securitate 3.5.14 — step-up, mutaţii, Origin, deploy-key, argon2.
+"""Patch de securitate 3.5.13 — step-up, mutaţii, Origin, deploy-key, argon2.
 
   · fix 2 — parola SINGURĂ nu mai deschide un host `require_2fa` (decizie de politică): un cont
             fără passkey şi fără TOTP primeşte 403 `stepup.needsFactor`, orice parolă ar trimite

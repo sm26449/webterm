@@ -799,7 +799,7 @@ function MainApp() {
     return alive
   }, [selectedSid, mru, openTabs, splitPaneKey])   // eslint-disable-line react-hooks/exhaustive-deps
 
-  // 3.5.14: contul n-are niciun factor real (fără passkey, fără TOTP, fără SSO) — parola singură
+  // 3.5.13: contul n-are niciun factor real (fără passkey, fără TOTP, fără SSO) — parola singură
   // nu mai deschide un host 2FA. Explicăm şi oferim drumul direct la Setări → Autentificare & 2FA.
   // NB: HOOK — înainte de orice `return` timpuriu.
   const promptNeedsFactor = useCallback(async () => {

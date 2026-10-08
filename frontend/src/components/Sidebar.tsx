@@ -302,7 +302,7 @@ export default function Sidebar(props: {
       body: JSON.stringify({ enabled: !host.require_2fa }),
     }).catch(fail)
     props.onChanged()
-    // 3.5.14: activarea nu e blocată, dar fără passkey/TOTP contul nu va mai putea deschide
+    // 3.5.13: activarea nu e blocată, dar fără passkey/TOTP contul nu va mai putea deschide
     // hostul — spunem acum (nu la primul Conectare) şi oferim drumul la Setări → 2FA
     if (r && r.warning === 'stepup.needsFactor') {
       if (await confirm({

@@ -208,7 +208,7 @@ simply switch it off. Muting offline alerts on a 2FA host also needs a step-up.
 3. **TOTP code** (or a recovery code) — if TOTP is enabled and there is no passkey. Codes are
    single-use (a replayed code is refused) and the attempts are rate-limited per account.
 
-**The account password alone is not accepted** (since 3.5.14). An account with neither a
+**The account password alone is not accepted** (since 3.5.13). An account with neither a
 passkey nor TOTP (nor SSO) cannot open a 2FA host: the step-up answers *"set up a passkey or
 an authenticator code (TOTP) to access hosts that require 2FA"* and the UI offers a button to
 **Settings → Sign-in & 2FA**. The password is the factor you already gave at login, so it was
@@ -225,7 +225,7 @@ grant itself must be used within 120 s.
 `WEBTERM_IDLE_LOCK_SECS` seconds (default 300; `0` turns it off) without input, hides its
 scrollback, and asks for a factor again to unlock.
 
-**…and after one hour, even when busy** (since 3.5.14). A terminal kept in use is locked once
+**…and after one hour, even when busy** (since 3.5.13). A terminal kept in use is locked once
 **60 minutes** have passed since the factor that authorised it (the step-up it was opened or
 attached with, or its last unlock), unless you have opened a newer step-up window on that host
 in the meantime. The overlay says *"Locked: re-confirm 2FA every 60 min on this host"*. As with

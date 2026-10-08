@@ -64,7 +64,7 @@ async def main():
               any("token" in w for w in changes[n_before:]), str(changes[n_before:]))
 
         # 3. host cu require_2fa → step-up cu un factor real deschide fereastra → notify_host_unlocked.
-        # 3.5.14: parola SINGURĂ nu mai e un step-up (stepup.needsFactor), deci contul are TOTP.
+        # 3.5.13: parola SINGURĂ nu mai e un step-up (stepup.needsFactor), deci contul are TOTP.
         r = await c.post("/api/hosts", json={"name": "prod-secret", "connection_type": "agent",
                                              "require_2fa": True})
         check("host 2FA creat", r.status_code == 200, r.text[:120])

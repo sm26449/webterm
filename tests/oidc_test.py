@@ -189,7 +189,7 @@ async def main():
         info = oidc.complete(ss2, "c")
         check("step-up cu auth_time proaspăt → acceptat, intent/host păstrate",
               info["intent"] == "stepup" and info["host_id"] == 7, str(info))
-        # 3.5.14: auth_time LIPSĂ pe un step-up → REFUZ implicit (WEBTERM_OIDC_REQUIRE_AUTH_TIME=1);
+        # 3.5.13: auth_time LIPSĂ pe un step-up → REFUZ implicit (WEBTERM_OIDC_REQUIRE_AUTH_TIME=1);
         # spec-ul îl cere când trimitem max_age, iar fără el „re-auth-ul" e doar prompt=login
         check("implicit WEBTERM_OIDC_REQUIRE_AUTH_TIME=1", config.OIDC_REQUIRE_AUTH_TIME is True)
         us3 = oidc.begin(intent="stepup", host_id=7); ss3 = _state(us3)

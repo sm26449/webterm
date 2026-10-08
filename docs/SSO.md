@@ -90,7 +90,7 @@ no local passkey/password, so step-up is a **fresh re-authentication at the IdP*
 redirects with `prompt=login` and `max_age=0`; the IdP re-checks its own MFA — which can be a
 passkey there). On return WebTerm checks the `auth_time` claim of the new id_token: an
 authentication older than the step-up request is refused. If the IdP does not emit `auth_time`
-at all, the step-up is **refused** (since 3.5.14; OIDC Core requires the claim when `max_age` is
+at all, the step-up is **refused** (since 3.5.13; OIDC Core requires the claim when `max_age` is
 sent) and the gateway logs `SSO step-up REFUSED: the IdP did not return auth_time…` once —
 configure the IdP to include the claim. `WEBTERM_OIDC_REQUIRE_AUTH_TIME=0` restores the old
 lenient behaviour (accepted on `prompt=login` alone, with a warning) for an IdP that cannot emit

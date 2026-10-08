@@ -64,7 +64,7 @@ export default function HistoryModal(props: { hosts: Host[]; onClose: () => void
   async function clearAll() {
     setConfirmClear(false)
     // golim lista doar dacă serverul chiar a şters — altfel arătam „gol" peste un istoric intact
-    // ştergere globală, ireversibilă → re-auth cu parola CONTULUI (ca „Revocă tot"; 3.5.14)
+    // ştergere globală, ireversibilă → re-auth cu parola CONTULUI (ca „Revocă tot"; 3.5.13)
     const pw = await askSecret(t('history.clearPassword'))
     if (pw === null) return
     try {

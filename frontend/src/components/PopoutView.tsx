@@ -93,7 +93,7 @@ export default function PopoutView(props: { sid: string }) {
   // Ceremonia de step-up, aceeaşi scară ca în App.stepupCredential (lib/stepup.ts): passkey →
   // TOTP → SSO; parola doar ca re-auth pe o ţintă fără 2FA. SSO nu are nevoie de nimic aici:
   // api() face singur redirectul la IdP pe 403 `host.needs2faSso`, iar întoarcerea restaurează
-  // hash-ul (#/popout/<sid>). Fără niciun factor (3.5.14): mesajul, fără Setări (nu există aici).
+  // hash-ul (#/popout/<sid>). Fără niciun factor (3.5.13): mesajul, fără Setări (nu există aici).
   const stepupCredential = useCallback(async (
     hostId: number, code?: string,
   ): Promise<{ stepup_grant?: string; stepup_password?: string; totp?: string } | null> => {

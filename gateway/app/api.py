@@ -180,7 +180,7 @@ async def app_state(request: Request):
             "authenticated": user is not None,
             "email": user["email"] if user else None,
             "webauthn_available": _webauthn_available(),
-            # cum face ACEST cont step-up pe un host 2FA: passkey | sso | totp | none (3.5.14:
+            # cum face ACEST cont step-up pe un host 2FA: passkey | sso | totp | none (3.5.13:
             # parola singură nu mai e acceptată — `none` = UI-ul trimite la Setări → 2FA)
             "stepup_method": (await _stepup_method(user)) if user is not None else None,
             "backup_ready": backup_ready,
@@ -5837,7 +5837,7 @@ async def set_require_2fa(host_id: int, body: Toggle2fa, user=Depends(security.r
         # tocmai fiindcă e îngrijorat rămânea cu tunelurile deschise până la expirare: handshake-ul
         # NOU cerea step-up, cel vechi mergea în continuare. `logout` bumpează deja epoch-ul.
         security.bump_forward_epoch()
-        # 3.5.14: parola singură nu mai deschide un host 2FA. Nu blocăm activarea (întărirea
+        # 3.5.13: parola singură nu mai deschide un host 2FA. Nu blocăm activarea (întărirea
         # securităţii nu cere nimic), dar spunem ACUM că, fără passkey/TOTP/SSO, contul nu va
         # putea deschide hostul până nu înrolează un factor — nu la primul click pe Conectare.
         if not await _user_has_stepup_factor(user):
@@ -6301,7 +6301,7 @@ _NEEDS_FACTOR_MSG = ("set up a passkey or an authenticator code (TOTP) to access
 
 async def _stepup_method(user) -> str:
     """Factorul pe care scara de step-up (_stepup_consume_factor) îl va cere ACESTUI cont pe un
-    host 2FA, în aceeaşi ordine: passkey → sso → totp; `none` = niciun factor real (3.5.14)."""
+    host 2FA, în aceeaşi ordine: passkey → sso → totp; `none` = niciun factor real (3.5.13)."""
     if _webauthn_available() and await db.fetchone(
             "SELECT 1 FROM webauthn_credentials WHERE user_id=? LIMIT 1", user["id"]):
         return "passkey"
@@ -6314,7 +6314,7 @@ async def _stepup_method(user) -> str:
 
 async def _user_has_stepup_factor(user) -> bool:
     """Are contul un factor REAL de step-up pe un host 2FA? passkey (cu WebAuthn disponibil),
-    TOTP, sau SSO (re-auth la IdP). Parola singură nu e un al doilea factor (3.5.14)."""
+    TOTP, sau SSO (re-auth la IdP). Parola singură nu e un al doilea factor (3.5.13)."""
     return (await _stepup_method(user)) != "none"
 
 
@@ -6329,7 +6329,7 @@ async def _stepup_consume_factor(host_id: int, user, grant: str, password: str,
     hostul „cu 2FA" nu primea niciun al doilea factor real. Acum, dacă `totp_enabled` şi nu există
     passkey, cerem codul TOTP (sau un cod de recuperare), verificat+consumat ATOMIC prin
     `verify_second_factor` (exact anti-replay-ul de la login: un cod observat/reluat e respins).
-    Parola singură NU mai deschide fereastra pe un host `require_2fa` (3.5.14, decizie de
+    Parola singură NU mai deschide fereastra pe un host `require_2fa` (3.5.13, decizie de
     politică): un cont fără passkey şi fără TOTP primea pe hostul „cu 2FA" exact acelaşi factor
     ca la login — adică niciun al doilea factor. Acum primeşte `stepup.needsFactor` (403) cu
     îndrumarea spre Setări → Autentificare & 2FA. `host_2fa=False` (gate-ul de „factor proaspăt"
@@ -6375,7 +6375,7 @@ async def _require_host_stepup(host_id: int, user, grant: str = "", password: st
                                totp: str = "") -> None:
     """H1: pe un host cu `require_2fa`, ORICE acțiune sensibilă (sesiune, `run`, `fs/*`, update,
     provision) cere step-up — nu doar deschiderea unei sesiuni. Un grant passkey (single-use), un
-    cod TOTP sau re-auth-ul SSO (NU parola singură, 3.5.14) deschide o FEREASTRĂ de step-up pe host (5 min); în
+    cod TOTP sau re-auth-ul SSO (NU parola singură, 3.5.13) deschide o FEREASTRĂ de step-up pe host (5 min); în
     fereastră, acțiunile ulterioare trec fără re-verificare (ca `sudo`), ca file-browser-ul să nu
     ceară passkey per-click. Fără 2FA pe host → no-op. Ridică 403 dacă lipsește step-up-ul."""
     row = await db.fetchone("SELECT require_2fa FROM hosts WHERE id=?", host_id)
@@ -6856,7 +6856,7 @@ async def _require_fresh_factor(host_id: int, user, grant: str = "", password: s
     # aceeaşi scară ca _require_host_stepup (passkey → SSO → TOTP → parolă), inclusiv ramura TOTP
     # (fix 3): un cont cu TOTP fără passkey nu mai acordă acces SSH durabil cu parola singură.
     # Pe o ţintă `require_2fa` (şi la deblocarea terminalului) parola singură e refuzată ca la
-    # _require_host_stepup; pe o ţintă fără 2FA rămâne re-auth-ul de tip `sudo` (3.5.14).
+    # _require_host_stepup; pe o ţintă fără 2FA rămâne re-auth-ul de tip `sudo` (3.5.13).
     hrow = await db.fetchone("SELECT require_2fa FROM hosts WHERE id=?", host_id)
     await _stepup_consume_factor(host_id, user, grant, password, totp, " to grant SSH access",
                                  host_2fa=bool(hrow and hrow["require_2fa"]))
@@ -7155,7 +7155,7 @@ async def deploy_key_deploy(host_id: int, body: DeployKeyIn, request: Request,
     key = await _dk_key_row(body.key_host_id)
     if key["host_id"] == host_id:      # validare de formă înaintea cererii de factor
         raise ApiError(400, "sshkey.selfDeploy", "a host does not deploy its own key to itself")
-    # Şi SURSA e gardată (3.5.14), ca batch/rotate (unde ruta = sursa, deci factorul proaspăt e
+    # Şi SURSA e gardată (3.5.13), ca batch/rotate (unde ruta = sursa, deci factorul proaspăt e
     # chiar pe ea): cheia privată stă pe sursă, iar deploy-ul îi lărgeşte accesul — pe o sursă
     # `require_2fa` cerem fereastra ei de step-up. Verificat ÎNAINTEA factorului de pe ţintă,
     # ca un grant single-use să nu fie consumat degeaba. Cod dedicat (nu `stepup.*`): un 403

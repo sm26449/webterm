@@ -243,7 +243,7 @@ export default function SessionView(props: {
   const [locked, setLocked] = useState(false)     // idle-lock 2FA: terminal blocat
   const [unlocking, setUnlocking] = useState(false)
   const [lockErr, setLockErr] = useState('')
-  // motivul blocării, din mesajul `locked` (3.5.14): `stepup_max` = plafonul de 60 min de la
+  // motivul blocării, din mesajul `locked` (3.5.13): `stepup_max` = plafonul de 60 min de la
   // factorul care a autorizat terminalul; altfel (idle / ataşare fără step-up) textul de idle-lock
   const [lockReason, setLockReason] = useState('')
   // codul ultimului refuz de deblocare (ex. `stepup.totp`): următoarea încercare cere exact

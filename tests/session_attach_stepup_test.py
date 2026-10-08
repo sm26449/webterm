@@ -171,7 +171,7 @@ async def main():
         try:
             check("fără WebAuthn, calea de deblocare există (rp_id nu e domeniu)",
                   api._webauthn_available() is False)
-            # 3.5.14 (decizie de politică): parola SINGURĂ nu mai deschide un host 2FA — un cont
+            # 3.5.13 (decizie de politică): parola SINGURĂ nu mai deschide un host 2FA — un cont
             # fără passkey şi fără TOTP primea pe hostul „cu 2FA" exact factorul de la login.
             # Refuz cu un cod stabil (UI-ul trimite la Setări → 2FA), ORICE parolă ar veni.
             security._stepup_windows.clear()

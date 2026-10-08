@@ -1,4 +1,4 @@
-"""Plafonul ABSOLUT de step-up pe terminalele unui host 2FA (3.5.14).
+"""Plafonul ABSOLUT de step-up pe terminalele unui host 2FA (3.5.13).
 
 Gaura: `browser_ws` consulta fereastra de step-up DOAR la ataşare, iar revalidarea periodică
 verifica doar sesiunea web. Idle-lock-ul măsoară inactivitatea — deci un terminal ţinut în uz
