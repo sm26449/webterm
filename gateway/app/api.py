@@ -3957,9 +3957,32 @@ async def _docker_stats_fetch(host_id: int) -> dict:
         return {"available": False, "reason": "timeout", "rows": []}
     if resp.get("exit_code") != 0:
         raise _docker_error(resp.get("stderr") or "")
-    out = {"available": True, "rows": _parse_docker_stats(resp.get("stdout", ""))}
+    out = {"available": True, "rows": _parse_docker_stats(resp.get("stdout", "")),
+           "host_cpus": await _host_cpu_count(host_id)}
     _docker_stats_cache[host_id] = (time.monotonic(), out)
     return out
+
+
+async def _host_cpu_count(host_id: int) -> Optional[int]:
+    """Nucleele hostului (3.5.15), ca UI-ul să arate CPU-ul unui container RELATIV la host:
+    `docker stats` dă procentul pe UN nucleu (400% = patru nuclee pline), deci pe o maşină de 8
+    nuclee „96%" înseamnă 12% din host. Sursa e snapshot-ul de diagnostic pe care agentul îl
+    pushează deja (`cpu.cores` din /proc/cpuinfo) — întâi cel din memorie, apoi cel din DB; nicio
+    rulare în plus pe host. `None` = necunoscut → UI-ul arată valoarea brută, marcată „per nucleu"."""
+    diag = None
+    conn = core.source_for(host_id)
+    if isinstance(getattr(conn, "diagnostics", None), dict):
+        diag = conn.diagnostics
+    else:
+        row = await db.fetchone("SELECT diagnostics FROM hosts WHERE id=?", host_id)
+        if row and row["diagnostics"] and len(row["diagnostics"]) <= core.DIAG_MAX_BYTES:
+            try:
+                diag = json.loads(row["diagnostics"])
+            except ValueError:
+                diag = None
+    cpu = diag.get("cpu") if isinstance(diag, dict) else None
+    n = cpu.get("cores") if isinstance(cpu, dict) else None
+    return n if isinstance(n, int) and not isinstance(n, bool) and 0 < n <= 4096 else None
 
 
 @router.get("/api/hosts/{host_id}/docker/stats")
@@ -4006,20 +4029,39 @@ async def docker_action(host_id: int, body: DockerAction, request: Request,
     return {"ok": True}
 
 
+_DOCKER_ACCESS_HINT = ("[WebTerm] If docker reported a permission error: the agent user cannot reach "
+                       "the Docker daemon. The Docker panel shows the fix options.")
+
+
+def _docker_session_cmd(docker_cmd: str) -> str:
+    """Învelişul comun al sesiunilor Docker din terminal („Logs", „Shell"): accesul la docker
+    urmează `_docker_run` — direct dacă userul agentului ajunge la socket, altfel `sudo -n`
+    (passwordless) dacă există, NICIODATĂ un prompt de parolă agăţat în terminal; altfel rulăm
+    comanda simplă, ca omul să vadă eroarea reală a lui docker, plus o indicaţie.
+    `docker_cmd` e deja compus din bucăţi shell-quotate de apelant."""
+    sh = ('if docker version >/dev/null 2>&1; then exec %s; '
+          'elif command -v sudo >/dev/null 2>&1 && sudo -n docker version >/dev/null 2>&1; then exec sudo -n %s; '
+          'else %s; echo; echo %s; fi') % (docker_cmd, docker_cmd, docker_cmd, shlex.quote(_DOCKER_ACCESS_HINT))
+    return "sh -c %s" % shlex.quote(sh)
+
+
 def _docker_logs_cmd(container: str) -> str:
     """Comanda sesiunii „Logs" a unui container: `docker logs --tail 500 -f` într-un terminal
     (culori, scrollback, căutare, Ctrl+C), ca „Logs" din Services (`journalctl -f`). Id-ul e
-    validat de apelant cu _DOCKER_ID ŞI shell-quotat aici.
+    validat de apelant cu _DOCKER_ID ŞI shell-quotat aici. Acces: `_docker_session_cmd`."""
+    return _docker_session_cmd("docker logs --tail 500 --timestamps -f %s" % shlex.quote(container))
 
-    Accesul la docker urmează `_docker_run`: direct dacă userul agentului ajunge la socket, altfel
-    `sudo -n` (passwordless) dacă există — NICIODATĂ un prompt de parolă agăţat în terminal;
-    altfel rulăm comanda simplă, ca omul să vadă eroarea reală a lui docker, plus o indicaţie."""
-    logs = "docker logs --tail 500 --timestamps -f %s" % shlex.quote(container)
-    sh = ('if docker version >/dev/null 2>&1; then exec %s; '
-          'elif command -v sudo >/dev/null 2>&1 && sudo -n docker version >/dev/null 2>&1; then exec sudo -n %s; '
-          'else %s; echo; echo "[WebTerm] If docker reported a permission error: the agent user cannot reach '
-          'the Docker daemon. The Docker panel shows the fix options."; fi') % (logs, logs, logs)
-    return "sh -c %s" % shlex.quote(sh)
+
+def _docker_exec_cmd(container: str) -> str:
+    """Comanda sesiunii „Shell" a unui container (3.5.15: acelaşi direct → `sudo -n` → simplu +
+    indicaţie ca „Logs"; până acum era `docker exec` gol, care pe un host unde agentul nu e în
+    grupul docker murea cu „permission denied" chiar dacă lista şi logurile mergeau prin sudo).
+
+    bash dacă există, altfel sh. NU `exec bash || exec sh`: într-un shell NEinteractiv
+    `exec <lipsă>` iese cu 127 ÎNAINTE de `||`, deci pe imaginile fără bash (alpine/busybox)
+    sesiunea murea instant cu „bash: not found". `command -v` testează întâi, fără să iasă."""
+    inner = "command -v bash >/dev/null 2>&1 && exec bash || exec sh"
+    return _docker_session_cmd("docker exec -it %s sh -c %s" % (shlex.quote(container), shlex.quote(inner)))
 
 
 # ── systemd services + listening ports: acelaşi model ca Docker (prin op-ul `run`, ZERO op nou
@@ -7501,12 +7543,7 @@ async def create_session(host_id: int, body: SessionIn, request: Request,
             raise ApiError(400, "session.containerAgentOnly", "container shells are only available on agent hosts")
         if not _DOCKER_ID.match(body.docker_container):
             raise ApiError(400, "docker.badContainer", "invalid container id")
-        c = shlex.quote(body.docker_container)
-        # bash dacă există, altfel sh. NU `exec bash || exec sh`: într-un shell NEinteractiv
-        # `exec <lipsă>` iese cu 127 ÎNAINTE de `||`, deci pe imaginile fără bash (alpine/busybox)
-        # sesiunea murea instant cu „bash: not found". `command -v` testează întâi, fără să iasă.
-        inner = "command -v bash >/dev/null 2>&1 && exec bash || exec sh"
-        cmd = "docker exec -it %s sh -c %s" % (c, shlex.quote(inner))
+        cmd = _docker_exec_cmd(body.docker_container)
         if not title.strip() or title.startswith("Session "):
             title = "docker: " + body.docker_container[:24]
     elif body.docker_logs:

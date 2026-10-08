@@ -10,6 +10,7 @@ agentul e un FakeAgent (ca în docker_sudo_test), iar comanda sesiunii de loguri
 """
 import asyncio
 import os
+import json
 import shlex
 import stat
 import subprocess
@@ -164,6 +165,25 @@ def test_logs_cmd():
     check("injecţia nu rulează: `;` ajunge ca text în argv",
           "<x; touch /tmp/pwn>" in out, out)
 
+    # ── 3.5.15: „Shell" (docker exec) — acelaşi direct → sudo -n → simplu + indicaţie ──
+    ex = api._docker_exec_cmd("web-1.prod_x")
+    check("exec: tot `sh -c <quoted>`, cu fallback `sudo -n` şi fără sudo cu prompt",
+          ex.startswith("sh -c '") and "exec sudo -n docker exec -it" in shlex.split(ex)[2]
+          and "sudo docker" not in shlex.split(ex)[2], ex)
+    inner_sh = "<sh><-c><command -v bash >/dev/null 2>&1 && exec bash || exec sh>"
+    out = run(ex, DOCKER_OK="1")
+    check("exec, acces direct: argv exact (bash dacă există, altfel sh), fără sudo",
+          out.strip() == "<exec><-it><web-1.prod_x>" + inner_sh + "|sudo=0", out)
+    out = run(ex, SUDO_OK="1")
+    check("exec, fără socket + sudo passwordless → prin `sudo -n`",
+          out.strip() == "<exec><-it><web-1.prod_x>" + inner_sh + "|sudo=1", out)
+    out = run(ex)
+    check("exec, fără niciun acces: comanda simplă (eroarea reală) + indicaţia WebTerm",
+          "<exec>" in out and "[WebTerm]" in out and "|sudo=0" in out, out)
+    out = run(api._docker_exec_cmd("x; touch /tmp/pwn"), DOCKER_OK="1")
+    check("exec: injecţia nu rulează, `;` rămâne text într-un singur argument",
+          "<x; touch /tmp/pwn>" in out, out)
+
 
 async def test_api():
     config.ensure_dirs()
@@ -195,6 +215,25 @@ async def test_api():
         await c.get(f"/api/hosts/{hid}/docker/stats")
         check("stats: a doua cerere în TTL vine din cache (o singură rulare)",
               len(core.sources[hid].calls) == 1, str(len(core.sources[hid].calls)))
+
+        # ── 3.5.15: nucleele hostului, pentru CPU% relativ la host ──
+        check("stats: fără snapshot de diagnostic → host_cpus null (UI: brut, „per nucleu”)",
+              j.get("host_cpus") is None, str(j.get("host_cpus")))
+        await db.execute("UPDATE hosts SET diagnostics=? WHERE id=?",
+                         json.dumps({"cpu": {"cores": 8, "model": "x"}}), hid)
+        api._docker_stats_cache.pop(hid, None)
+        j = (await c.get(f"/api/hosts/{hid}/docker/stats")).json()
+        check("stats: host_cpus din snapshot-ul de diagnostic din DB", j.get("host_cpus") == 8, str(j)[:200])
+        core.sources[hid].diagnostics = {"cpu": {"cores": 4}}
+        api._docker_stats_cache.pop(hid, None)
+        j = (await c.get(f"/api/hosts/{hid}/docker/stats")).json()
+        check("stats: snapshot-ul din memorie (cel mai proaspăt) are prioritate", j.get("host_cpus") == 4, str(j)[:200])
+        for bad in (0, -2, "8", True, 10 ** 6):
+            core.sources[hid].diagnostics = {"cpu": {"cores": bad}}
+            api._docker_stats_cache.pop(hid, None)
+            j = (await c.get(f"/api/hosts/{hid}/docker/stats")).json()
+            check(f"stats: cores invalid {bad!r} → null", j.get("host_cpus") is None, str(j.get("host_cpus")))
+        core.sources[hid].diagnostics = None
 
         # ── timeout → „indisponibil", nu eroare; NU se cache-uieşte ──
         core.sources[hid3] = FakeAgent(hid3, [("docker stats", {"ok": True, "exit_code": None,
@@ -257,6 +296,11 @@ async def test_api():
             check("sesiune logs: 200", r.status_code == 200, r.text[:200])
             check("sesiune logs: comanda e _docker_logs_cmd(id)", captured.get("cmd") == api._docker_logs_cmd("3f2a1b4c5d6e"))
             check("sesiune logs: titlul trimis de client e păstrat", captured.get("title") == "logs: web")
+            captured.clear()
+            r = await c.post(f"/api/hosts/{hid}/sessions", json={"docker_container": "3f2a1b4c5d6e"})
+            check("3.5.15: sesiune Shell: comanda e _docker_exec_cmd(id) (fallback sudo -n)",
+                  r.status_code == 200 and captured.get("cmd") == api._docker_exec_cmd("3f2a1b4c5d6e"),
+                  f"{r.status_code} {captured}")
             captured.clear()
             await c.post(f"/api/hosts/{hid}/sessions", json={"docker_logs": "web"})
             check("sesiune logs fără titlu → „logs: <id>”", captured.get("title") == "logs: web", str(captured))
