@@ -11,7 +11,7 @@ e prinsă la commit, fişierul nu aterizează), on_conflict skip / overwrite / r
 mijlocul unui fişier (temp-ul de pe destinaţie şters, fişierele deja copiate rămân), eroare de
 citire pe sursă raportată per fişier (job-ul continuă), step-up cerut pe ORICARE capăt, token de
 automatizare → 401, traversare refuzată, plafonul de 1000 de fişiere, fişier special refuzat,
-folderele refuzate per fişier, src == dst, memoria mărginită (câteva felii, nu fişierul întreg),
+folderele copiate (detaliile în fs_copy_folders), src == dst, memoria mărginită (câteva felii, nu fişierul întreg),
 concurenţa mărginită, izolarea job-urilor pe user + TTL.
 """
 import asyncio
@@ -261,8 +261,9 @@ async def main():
         errs = {e["name"]: e for e in j.get("errors", [])}
         check("fişier special (/dev/zero) refuzat: files.notRegular",
               errs.get("zero", {}).get("code") == "files.notRegular", str(errs)[:300])
-        check("folder refuzat per fişier: copy.folder (vine cu următorul agent)",
-              errs.get("src", {}).get("code") == "copy.folder", str(errs)[:300])
+        check("folder (3.6 / agent 58): NU mai e refuzat — se copiază cu conţinutul (vezi fs_copy_folders)",
+              "src" not in errs and bytes(b.files.get("/tmp/src/two.txt", b"")) == b"hello copy\n",
+              str(errs)[:300])
         check("…restul job-ului s-a copiat", bytes(b.files.get("/tmp/after.txt", b"")) == b"still copied")
 
         # ── symlink spre fişier: se copiază conţinutul ţintei (ca download-ul) ──

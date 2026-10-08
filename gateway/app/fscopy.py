@@ -4,7 +4,7 @@ De ce pe server: „descarcă de pe A, urcă pe B" prin browser trece fiecare oc
 legătura omului (de multe ori un telefon pe 4G), deşi ambii agenţi stau lângă gateway. Aici
 octeţii curg agent A → gateway → agent B şi nu ating browserul; omul vede doar progresul.
 
-Agentul NU se schimbă (v57 rămâne): sursa se citeşte cu `fs_read` (felii de 256 KiB, ca la
+Pentru fişiere agentul nu are nimic special: sursa se citeşte cu `fs_read` (felii de 256 KiB, ca la
 download), destinaţia se scrie prin EXACT maşinăria de upload resumabil din core —
 `fs_upload_chunk` (fereastra `_UploadWindow`, FRAME_FSWRITE binar pe agent ≥55, CRC incremental)
 şi `fs_upload_commit` (verificare CRC-32 apoi rename atomic temp → ţintă). Deci destinaţia vede
@@ -17,10 +17,20 @@ agentului destinaţie pentru fiecare bloc de 1 MiB. Memoria ţinută de un fişi
 ≤ COPY_PREFETCH × 256 KiB + un bloc de 1 MiB (+ o felie) — niciodată fişierul întreg. Cel mult
 COPY_PARALLEL fişiere per job rulează simultan; numărul de job-uri vii e plafonat per user şi global.
 
-Folderele NU se copiază (decizie 3.5.5): fără un op de `chmod` pe agent, o copiere pe arbore
-(fs_list + fs_mkdir + fişiere) ar pierde biţii de execuţie (un `deploy.sh` ar ateriza
-ne-executabil) şi ar urma symlink-urile — o copie care arată completă dar nu se poartă la fel.
-Refuzăm explicit („vine cu următorul update de agent"), cu cod stabil (`copy.folder`).
+Foldere (agent v58, WebTerm 3.6): arborele sursei se parcurge cu `fs_list` (deja existent), pe
+destinaţie se creează directoarele (`fs_mkdir`), fişierele trec prin aceeaşi maşinărie de mai sus,
+iar modul sursei (biţii 0o777 — fără setuid/setgid/sticky) se aplică DUPĂ commit cu op-ul nou
+`fs_chmod` (doar destinaţie cu agent ≥ 58; mai vechi → copiem fără mod şi spunem asta în job:
+`copy.noModes`). Directoarele îşi primesc modul LA FINAL, cel mai adânc primul — un director 0555
+pe sursă n-ar mai accepta fişierele dacă l-am închide înainte. Limitele parcurgerii:
+COPY_MAX_FILES fişiere şi COPY_MAX_DIRS directoare per job, adâncime COPY_MAX_DEPTH; un director
+listat trunchiat (peste FS_MAX_LIST intrări) e o eroare, nu o copie incompletă tăcută.
+Symlink-urile din interiorul unui folder NU se copiază (decizie 3.6): ţinta unui link e o cale a
+SURSEI (adesea absolută) — pe alt host ar arăta altundeva sau nicăieri, iar urmarea lui ar putea
+ieşi din arbore sau intra în buclă. Rândul lor e „skipped" cu o notă vizibilă (`copy.symlinkSkipped`).
+Fişierele speciale (FIFO, device, socket) din arbore: tot „skipped" cu notă (fs_read le refuză oricum).
+Regula „dacă există" pentru un folder: skip / overwrite = ÎMBINARE în folderul existent (fişierele
+existente sărite, respectiv înlocuite — ca `cp -rn` / `cp -r`), rename = „nume (1)" nou.
 
 Job-urile trăiesc în MEMORIA gateway-ului (TTL după terminare). Un restart de gateway pierde
 job-urile în curs: fişierele deja comise rămân, temp-ul celui în zbor e curăţat oportunist de
@@ -37,7 +47,10 @@ from typing import Optional
 
 from . import core
 
-COPY_MAX_FILES = 1000                # fişiere per job
+COPY_MAX_FILES = 1000                # fişiere per job (inclusiv cele din foldere)
+COPY_MAX_DIRS = 1000                 # directoare per job (foldere copiate, v58)
+COPY_MAX_DEPTH = 32                  # adâncimea maximă sub un folder copiat
+COPY_CHMOD_MIN_AGENT = 58            # `fs_chmod` există din agentul v58
 COPY_PARALLEL = 2                    # fişiere copiate simultan într-un job
 COPY_PREFETCH = 4                    # felii fs_read ţinute în coada cititor → scriitor (backpressure)
 COPY_TTL = 3600                      # cât rămâne un job TERMINAT interogabil
@@ -110,21 +123,35 @@ def _join(d: str, name: str) -> str:
 
 # ── modelul ────────────────────────────────────────────────────────────────────────────────
 class CopyFile:
-    __slots__ = ("src", "name", "dst", "size", "done", "state", "error")
+    """Un rând al job-ului: fişier, director sau symlink (sărit). Rândurile de sus sunt căile cerute;
+    copiii unui folder (v58) au `root` = rândul folderului şi `rel` = calea relativă în el."""
+    __slots__ = ("src", "name", "dst", "size", "done", "state", "error", "kind", "root", "rel",
+                 "depth", "mode", "note", "overwrite", "merge", "created", "fixed_dst")
 
-    def __init__(self, src: str):
+    def __init__(self, src: str, name: Optional[str] = None, kind: str = "file",
+                 root: "Optional[CopyFile]" = None, rel: str = "", depth: int = 0):
         self.src = src
-        self.name = src_name(src)
+        self.name = name if name is not None else src_name(src)
         self.dst = ""                 # calea finală pe destinaţie (după regula de conflict)
         self.size = 0
         self.done = 0
         self.state = "queued"         # queued | running | done | skipped | err | cancelled
         self.error = ""               # mesajul brut (englez); ruta îi dă un cod stabil
+        self.kind = kind              # file | dir | link (link = doar în interiorul unui folder, sărit)
+        self.root = root              # rândul folderului de sus (copiii), None = cale cerută
+        self.rel = rel                # calea relativă sub folderul de sus („sub/x.sh")
+        self.depth = depth
+        self.mode = None              # biţii 0o777 ai sursei; None = necunoscut (nu se aplică)
+        self.note = ""                # informaţie fără eroare („symlink nu se copiază")
+        self.overwrite = False        # commit-ul are voie să înlocuiască o ţintă existentă
+        self.merge = False            # (folder) destinaţia exista deja → îmbinare
+        self.created = False          # (folder) l-am creat noi → îi aplicăm modul
+        self.fixed_dst = ""           # (retry) folderul de sus aterizează EXACT aici, îmbinat
 
 
 class CopyJob:
     def __init__(self, user_id, src_host, src_name_, dst_host, dst_name_, dst_dir, paths, on_conflict,
-                 src_home=None):
+                 src_home=None, files=None):
         self.id = uuid.uuid4().hex
         self.user_id = user_id
         self.src_host = src_host
@@ -134,7 +161,7 @@ class CopyJob:
         self.dst_dir = dst_dir         # canonic (absolut, din fs_list pe destinaţie)
         self.on_conflict = on_conflict
         self.src_home = src_home       # home-ul absolut al sursei (doar src==dst, pt. „acelaşi fişier")
-        self.files = [CopyFile(p) for p in paths]
+        self.files = files if files is not None else [CopyFile(p) for p in paths]
         self.state = "running"         # running | done | failed | cancelled
         self.created = time.time()
         self.finished: Optional[float] = None
@@ -143,6 +170,9 @@ class CopyJob:
         self.buffered = 0              # octeţi ţinuţi ACUM în gateway (cozi + blocuri în curs)
         self.peak_buffered = 0         # vârful — testele verifică plafonul de memorie
         self._claimed: set = set()     # căi de destinaţie deja alese în job (rename fără coliziuni interne)
+        self.modes: Optional[bool] = None   # True = destinaţia aplică modul (agent ≥ 58); None = încă nu ştim
+        self.notes: list = []          # note la nivel de job (ex. copy.noModes)
+        self._parent_modes: dict = {}  # director-părinte pe sursă → {nume: mod} (agent sursă < 58)
 
     def _hold(self, n: int) -> None:
         self.buffered += n
@@ -167,23 +197,141 @@ async def _stat(host_id: int, path: str) -> dict:
     return resp
 
 
+def _mode_of(v) -> Optional[int]:
+    return v & 0o777 if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else None
+
+
+async def _src_mode(job: CopyJob, path: str, st: dict) -> Optional[int]:
+    """Modul unei căi cerute: din `fs_stat` (agent sursă ≥ 58), altfel din listarea părintelui
+    (fs_list dă `mode` de mult) — o singură listare per părinte per job. Fără destinaţie care
+    aplică modul nu-l căutăm deloc."""
+    m = _mode_of(st.get("mode"))
+    if m is not None or not job.modes:
+        return m
+    parent, _, name = path.rstrip("/").rpartition("/")
+    parent = parent or "/"
+    if parent not in job._parent_modes:
+        try:
+            listing = await core.fs_list(job.src_host, parent)
+            job._parent_modes[parent] = {e.get("name"): _mode_of(e.get("mode"))
+                                         for e in listing.get("entries") or [] if isinstance(e, dict)}
+        except (core.FileError, TimeoutError):
+            job._parent_modes[parent] = {}
+    return job._parent_modes[parent].get(name)
+
+
+def _budget(job: CopyJob):
+    """(fişiere, directoare) deja în job — plafoanele se aplică pe tot job-ul."""
+    nf = sum(1 for f in job.files if f.kind != "dir")
+    nd = sum(1 for f in job.files if f.kind == "dir")
+    return nf, nd
+
+
+async def _walk(job: CopyJob, root: CopyFile) -> list:
+    """Arborele unui folder de sus → rândurile copiilor (pre-ordine: un director înaintea
+    conţinutului lui). Plafoane: fişiere/directoare per job, adâncime. Un subdirector ilizibil
+    devine un rând `err` (restul arborelui continuă); unul trunchiat (prea mare de listat) sau
+    depăşirea unui plafon = eroarea FOLDERULUI întreg (nu o copie parţială tăcută)."""
+    nf, nd = _budget(job)
+    listing = await core.fs_list(job.src_host, root.src)
+    top = listing.get("path") or _abs_src(job, root.src)
+    if job.src_host == job.dst_host:
+        d = job.dst_dir.rstrip("/") + "/"
+        if d.startswith(top.rstrip("/") + "/"):
+            raise core.FileError("cannot copy a folder into itself: %s" % top)
+    kids: list = []
+    stack = [(listing, top, "", 0)]
+    while stack:
+        lst, path, rel, depth = stack.pop()
+        if lst.get("truncated"):
+            raise core.FileError("folder too large to list (over %d entries in one folder): %s"
+                                 % (len(lst.get("entries") or []), path))
+        out: list = []
+        subdirs: list = []
+        for e in lst.get("entries") or []:
+            if not isinstance(e, dict) or not isinstance(e.get("name"), str):
+                continue
+            name = e["name"]
+            if name in ("", ".", "..") or "/" in name or _CTRL.search(name):
+                continue                      # un agent nu dă aşa ceva; nu-l transformăm în cale
+            crel = rel + "/" + name if rel else name
+            csrc = path.rstrip("/") + "/" + name
+            disp = root.name + "/" + crel
+            if e.get("link"):
+                c = CopyFile(csrc, disp, "link", root, crel, depth + 1)
+                c.state, c.note = "skipped", "symbolic link — not copied"
+                nf += 1
+            elif e.get("dir"):
+                if depth + 1 > COPY_MAX_DEPTH:
+                    raise core.FileError("folder too deep (more than %d levels): %s" % (COPY_MAX_DEPTH, top))
+                c = CopyFile(csrc, disp, "dir", root, crel, depth + 1)
+                c.mode = _mode_of(e.get("mode"))
+                nd += 1
+                subdirs.append(c)
+            else:
+                c = CopyFile(csrc, disp, "file", root, crel, depth + 1)
+                c.size = int(e.get("size") or 0)
+                c.mode = _mode_of(e.get("mode"))
+                nf += 1
+            if nf > COPY_MAX_FILES:
+                raise core.FileError("folder too large: more than %d files in one copy" % COPY_MAX_FILES)
+            if nd > COPY_MAX_DIRS:
+                raise core.FileError("folder too large: more than %d folders in one copy" % COPY_MAX_DIRS)
+            out.append(c)
+        kids.extend(out)
+        # parcurgere în adâncime cu stivă: subdirectoarele în ordine inversă, ca primul să iasă
+        # primul; copiii unui subdirector se adaugă oricum DUPĂ el în `kids` (pre-ordine)
+        for c in reversed(subdirs):
+            try:
+                sub = await core.fs_list(job.src_host, c.src)
+            except core.FileError as e:
+                c.state, c.error = "err", str(e) or "cannot list"
+                continue
+            stack.append((sub, c.src, c.rel, c.depth))
+    return kids
+
+
 async def _prepare(job: CopyJob, f: CopyFile) -> None:
-    """Faza 1 (toate fişierele, înainte de copiere): tipul şi mărimea pe sursă → totalul afişat."""
+    """Faza 1 (toate căile cerute, înainte de copiere): tipul şi mărimea pe sursă → totalul afişat;
+    un folder îşi parcurge arborele (copiii intră în job imediat după el)."""
     st = await _stat(job.src_host, f.src)
     if not st.get("exists"):
         raise core.FileError("%s: No such file or directory" % f.src)
     if st.get("dir"):
-        raise core.FileError("folders cannot be copied between hosts yet (needs the next agent update)")
-    # symlink: lstat-ul dă mărimea LINK-ului; mărimea reală vine din primul fs_read (care urmează
-    # link-ul doar spre un fişier obişnuit — exact ca download-ul)
-    f.size = 0 if st.get("link") else int(st.get("size", 0))
+        f.kind = "dir"
+        f.mode = await _src_mode(job, f.src, st)
+        kids = await _walk(job, f)
+        i = job.files.index(f)
+        job.files[i + 1:i + 1] = kids
+        return
+    # symlink cerut explicit: lstat-ul dă mărimea LINK-ului; mărimea reală vine din primul fs_read
+    # (care urmează link-ul doar spre un fişier obişnuit — exact ca download-ul). Modul link-ului
+    # (0777) nu spune nimic despre ţintă → nu aplicăm niciunul.
+    if st.get("link"):
+        f.size = 0
+    else:
+        f.size = int(st.get("size", 0))
+        f.mode = await _src_mode(job, f.src, st)
+
+
+async def _free_name(job: CopyJob, f: CopyFile) -> str:
+    for n in range(1, COPY_RENAME_MAX + 1):   # rename: „nume (n).ext" (folder: „nume (n)"), primul liber
+        cand = _join(job.dst_dir, "%s (%d)" % (f.name, n) if f.kind == "dir" else rename_candidate(f.name, n))
+        if cand in job._claimed:
+            continue
+        if not (await _stat(job.dst_host, cand)).get("exists"):
+            return cand
+    raise core.FileError("no free name for %s (tried %d)" % (f.name, COPY_RENAME_MAX))
 
 
 async def _resolve_dst(job: CopyJob, f: CopyFile) -> bool:
     """Alege calea finală după `on_conflict`. False = fişierul se sare (skip / acelaşi fişier)."""
+    if f.root is not None:
+        return await _resolve_child(job, f)
     want = _join(job.dst_dir, f.name)
     same_file = job.src_host == job.dst_host and _abs_src(job, f.src) == posixpath.normpath(want)
     st = await _stat(job.dst_host, want)
+    f.overwrite = job.on_conflict == "overwrite"
     if not st.get("exists") and want not in job._claimed:
         f.dst = want
         job._claimed.add(want)
@@ -198,15 +346,115 @@ async def _resolve_dst(job: CopyJob, f: CopyFile) -> bool:
         f.dst = want
         job._claimed.add(want)
         return True
-    for n in range(1, COPY_RENAME_MAX + 1):   # rename: „nume (n).ext", primul liber
-        cand = _join(job.dst_dir, rename_candidate(f.name, n))
-        if cand in job._claimed:
+    f.dst = await _free_name(job, f)
+    job._claimed.add(f.dst)
+    return True
+
+
+async def _resolve_child(job: CopyJob, f: CopyFile) -> bool:
+    """Un fişier din interiorul unui folder: calea e fixată de folder (`root.dst/rel`). Conflictul
+    contează doar la îmbinare: skip (şi retry) → sărit, overwrite → înlocuit (un director sau link
+    cu acelaşi nume → eroare). Într-un folder nou creat nu există nimic; commit-ul re-verifică."""
+    f.dst = f.root.dst.rstrip("/") + "/" + f.rel
+    if not f.root.merge:
+        return True
+    st = await _stat(job.dst_host, f.dst)
+    if not st.get("exists"):
+        return True
+    if job.on_conflict != "overwrite" or f.root.fixed_dst:
+        return False
+    if st.get("dir") or st.get("link"):
+        raise core.FileError("a folder or link with that name already exists on the destination")
+    f.overwrite = True
+    return True
+
+
+def _skip_tree(root: CopyFile, kids: list) -> None:
+    root.state = "skipped"
+    for c in kids:
+        if c.state == "queued":
+            c.state = "skipped"
+
+
+async def _mkdirs(job: CopyJob, root: CopyFile) -> None:
+    """Faza 2a pentru un folder de sus: alege destinaţia (regula de conflict), creează folderul şi
+    subdirectoarele în pre-ordine. Un subdirector care nu se poate crea îşi trage după el tot
+    conţinutul (rânduri `err` — nu scriem în ceva ce nu există)."""
+    kids = [c for c in job.files if c.root is root]
+    want = _join(job.dst_dir, root.name)
+    if root.fixed_dst:                        # retry: îmbinare în EXACT folderul de data trecută
+        st = await _stat(job.dst_host, root.fixed_dst)
+        if st.get("exists") and (not st.get("dir") or st.get("link")):
+            raise core.FileError("a file with that name already exists on the destination")
+        root.dst, root.merge = root.fixed_dst, bool(st.get("exists"))
+    else:
+        st = await _stat(job.dst_host, want)
+        same = job.src_host == job.dst_host and _abs_src(job, root.src) == posixpath.normpath(want)
+        if not st.get("exists") and want not in job._claimed:
+            root.dst = want
+        elif job.on_conflict == "rename":
+            root.dst = await _free_name(job, root)
+        elif same:
+            return _skip_tree(root, kids)     # un folder peste el însuşi: nimic de făcut
+        elif not st.get("dir") or st.get("link"):
+            if job.on_conflict == "skip":
+                return _skip_tree(root, kids)
+            raise core.FileError("a file with that name already exists on the destination")
+        else:
+            root.dst, root.merge = want, True  # skip / overwrite pe un folder existent = îmbinare
+    job._claimed.add(root.dst)
+    if not root.merge:
+        await core.fs_mkdir(job.dst_host, root.dst, parents=False)
+        root.created = True
+    root.state = "running"
+    failed: list = []                         # prefixe `rel/` ale directoarelor eşuate
+    for c in kids:
+        if job.cancelled:
+            return
+        under = next((p for p in failed if c.rel.startswith(p)), None)
+        if c.state == "err" and c.kind == "dir":
+            failed.append(c.rel + "/")        # subdirector ilizibil pe sursă (din _walk)
             continue
-        if not (await _stat(job.dst_host, cand)).get("exists"):
-            f.dst = cand
-            job._claimed.add(cand)
-            return True
-    raise core.FileError("no free name for %s (tried %d)" % (f.name, COPY_RENAME_MAX))
+        if c.state != "queued":
+            continue
+        if under is not None:
+            c.state, c.error = "err", "parent folder could not be created: %s" % under.rstrip("/")
+            if c.kind == "dir":
+                failed.append(c.rel + "/")
+            continue
+        if c.kind != "dir":
+            continue
+        c.dst = root.dst.rstrip("/") + "/" + c.rel
+        try:
+            st = await _stat(job.dst_host, c.dst) if root.merge else {}
+            if st.get("exists"):
+                if not st.get("dir") or st.get("link"):
+                    raise core.FileError("a file with that name already exists on the destination")
+            else:
+                await core.fs_mkdir(job.dst_host, c.dst, parents=False)
+                c.created = True
+            c.state = "running"
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:             # noqa: BLE001 — eroare PER DIRECTOR
+            _fail(c, e)
+            failed.append(c.rel + "/")
+
+
+async def _chmod(job: CopyJob, f: CopyFile) -> None:
+    """Modul sursei pe destinaţie (agent ≥ 58). Un eşec NU strică fişierul copiat: rămâne `done`,
+    cu o notă (păstrează permisiunile implicite ale destinaţiei)."""
+    if not job.modes or f.mode is None or not f.dst:
+        return
+    try:
+        resp = await core._agent_or_raise(job.dst_host).request("fs_chmod", path=f.dst,
+                                                                mode=f.mode & 0o777, timeout=30)
+        if not resp.get("ok"):
+            raise core.FileError(resp.get("msg") or resp.get("code") or "chmod failed")
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:                 # noqa: BLE001
+        f.note = "permissions not applied: %s" % (str(e) or type(e).__name__)
 
 
 async def _copy_file(job: CopyJob, f: CopyFile) -> None:
@@ -295,11 +543,13 @@ async def _copy_file(job: CopyJob, f: CopyFile) -> None:
         if first and f.done != first["size"]:
             raise core.FileError("short read: %d of %d bytes" % (f.done, first["size"]))
         # skip/rename: ţinta poate să fi apărut între alegere şi commit (alt proces) — nu o
-        # strivim. overwrite: commit-ul o înlocuieşte atomic (os.replace; modul ţintei rămâne).
-        if job.on_conflict != "overwrite" and (await _stat(job.dst_host, f.dst)).get("exists"):
+        # strivim. overwrite: commit-ul o înlocuieşte atomic (os.replace; modul ţintei rămâne —
+        # până la `_chmod` de mai jos, care pune modul SURSEI pe agent ≥ 58).
+        if not f.overwrite and (await _stat(job.dst_host, f.dst)).get("exists"):
             raise core.FileError("the destination appeared during the copy: %s" % f.dst)
         await core.fs_upload_commit(job.dst_host, f.dst, uid, crc32=crc)
         committed = True
+        await _chmod(job, f)
         f.state = "done"
     finally:
         if not rtask.done():
@@ -336,15 +586,34 @@ def _fail(f: CopyFile, e: BaseException) -> None:
 async def _run(job: CopyJob) -> None:
     tasks: list = []
     try:
-        for f in job.files:                    # faza 1: tip + mărime, ca totalul să se vadă devreme
+        # destinaţia aplică modul sursei? (`fs_chmod`, agent ≥ 58) — altfel copiem şi SPUNEM
+        ver = getattr(core.sources.get(job.dst_host), "agent_version", 0) or 0
+        job.modes = ver >= COPY_CHMOD_MIN_AGENT
+        if not job.modes:
+            job.notes.append({"code": "copy.noModes",
+                              "msg": "permissions not preserved (destination agent < %d)" % COPY_CHMOD_MIN_AGENT})
+        for f in [f for f in job.files if f.root is None]:   # faza 1: tip + mărime (+ arbore)
             if job.cancelled:
                 break
             try:
                 await _prepare(job, f)
             except asyncio.CancelledError:
                 raise
-            except Exception as e:             # noqa: BLE001 — eroare PER FIŞIER, jobul continuă
+            except Exception as e:             # noqa: BLE001 — eroare PER CALE, jobul continuă
                 _fail(f, e)
+        # faza 2a: folderele de sus — destinaţia + directoarele, în ordine (înaintea fişierelor)
+        for root in [f for f in job.files if f.root is None and f.kind == "dir" and f.state == "queued"]:
+            if job.cancelled:
+                break
+            try:
+                await _mkdirs(job, root)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:             # noqa: BLE001 — folderul eşuează, jobul continuă
+                _fail(root, e)
+                for c in job.files:
+                    if c.root is root and c.state == "queued":
+                        c.state, c.note = "skipped", "not copied: the folder could not be created"
         sem = asyncio.Semaphore(COPY_PARALLEL)
 
         async def one(f: CopyFile):
@@ -357,11 +626,26 @@ async def _run(job: CopyJob) -> None:
                     raise
                 except Exception as e:         # noqa: BLE001 — eroare PER FIŞIER, jobul continuă
                     f.done = 0
-                    _fail(f, e)
+                    if f.root is not None and "not a regular file" in str(e):
+                        # FIFO / device / socket în interiorul unui folder: fs_list nu le deosebeşte
+                        # de un fişier, fs_read le refuză. Sărit cu notă, nu eroare (ca symlink-urile).
+                        f.state, f.size = "skipped", 0
+                        f.note = "not a regular file (device, FIFO or socket) — not copied"
+                    else:
+                        _fail(f, e)
 
-        tasks = [asyncio.ensure_future(one(f)) for f in job.files if f.state == "queued"]
+        tasks = [asyncio.ensure_future(one(f)) for f in job.files
+                 if f.state == "queued" and f.kind == "file"
+                 and (f.root is None or f.root.state == "running")]
         if tasks:
             await asyncio.gather(*tasks)
+        # faza 2c: modul directoarelor create de noi, cel mai adânc primul (copiii stau mereu DUPĂ
+        # părinte în listă) — la final, ca un director read-only pe sursă să fi primit fişierele
+        for f in reversed(job.files):
+            if f.kind == "dir" and f.state == "running":
+                if f.created:
+                    await _chmod(job, f)
+                f.state = "done"
     except asyncio.CancelledError:
         # DELETE: oprim fişierele în zbor; fiecare îşi şterge temp-ul în `finally` (await permis —
         # anularea se livrează o singură dată), deci aşteptăm curăţenia înainte să raportăm.
@@ -401,7 +685,7 @@ def running(user_id=None) -> int:
 
 
 def start(user_id, src_host, src_host_name, dst_host, dst_host_name, dst_dir, paths, on_conflict,
-          src_home=None) -> CopyJob:
+          src_home=None, files=None) -> CopyJob:
     purge()
     if running(user_id) >= COPY_RUNNING_PER_USER or running() >= COPY_RUNNING_MAX:
         raise CopyRefused("copy.busy", "too many copy jobs running; wait for one to finish",
@@ -410,10 +694,37 @@ def start(user_id, src_host, src_host_name, dst_host, dst_host_name, dst_dir, pa
         raise CopyRefused("copy.busy", "too many copy jobs in memory; retry later",
                           {"max": COPY_RUNNING_PER_USER})
     job = CopyJob(user_id, src_host, src_host_name, dst_host, dst_host_name, dst_dir, paths,
-                  on_conflict, src_home=src_home)
+                  on_conflict, src_home=src_home, files=files)
     _jobs[job.id] = job
     job.task = asyncio.ensure_future(_run(job))
     return job
+
+
+def retry(old: CopyJob) -> CopyJob:
+    """Un job NOU cu ce n-a reuşit în `old` (eşuat / anulat), cu aceleaşi opţiuni. Retry-ul unui
+    folder NU poate fi „re-trimite căile eşuate" (un fişier din `a/b/` ar ateriza în dst_dir, iar
+    la rename folderul are alt nume pe destinaţie): re-parcurgem folderul şi îl ÎMBINĂM în EXACT
+    folderul de data trecută (`fixed_dst`), sărind ce există deja — adică exact ce a reuşit
+    (commit-ul e atomic: un fişier eşuat nu există sub numele final)."""
+    if old.finished is None:
+        raise CopyRefused("copy.running", "the copy is still running")
+    files = []
+    for f in old.files:
+        if f.root is not None:
+            continue
+        if f.kind == "dir":
+            bad = f.state in ("err", "cancelled") or any(
+                c.state in ("err", "cancelled") for c in old.files if c.root is f)
+            if bad:
+                nf = CopyFile(f.src)
+                nf.fixed_dst = f.dst            # "" = destinaţia nu se alesese → regula normală
+                files.append(nf)
+        elif f.state in ("err", "cancelled"):
+            files.append(CopyFile(f.src))
+    if not files:
+        raise CopyRefused("copy.nothingToRetry", "nothing failed in that copy")
+    return start(old.user_id, old.src_host, old.src_host_name, old.dst_host, old.dst_host_name,
+                 old.dst_dir, [], old.on_conflict, src_home=old.src_home, files=files)
 
 
 def get(job_id: str, user_id) -> Optional[CopyJob]:
@@ -433,32 +744,55 @@ async def cancel(job: CopyJob) -> None:
     await asyncio.wait({job.task}, timeout=COPY_CANCEL_WAIT)
 
 
+_NOTE_CODES = (("symbolic link", "copy.symlinkSkipped"), ("not a regular file", "copy.specialSkipped"),
+               ("permissions not applied", "copy.modeFailed"), ("not copied: the folder", "copy.parentFailed"))
+
+
 def to_dict(job: CopyJob, files: bool, code_of=None) -> dict:
     """Starea pentru GET. `files=False` (polling-ul widgetului) = doar totaluri + erorile (plafonate),
     ca un job de 1000 de fişiere să nu trimită 1000 de rânduri pe secundă. `code_of(msg)` dă
-    codul stabil al unei erori (maparea din api, aceeaşi ca la rutele fs)."""
+    codul stabil al unei erori (maparea din api, aceeaşi ca la rutele fs).
+
+    `files_*` numără fişierele (inclusiv symlink-urile sărite din foldere), `folders_*` directoarele;
+    `files_failed` = TOATE rândurile eşuate (şi folderele), ca un job `failed` să nu arate „0 eşuate".
+    `current` = fişierele în zbor (progresul per fişier din Transferuri), `notes` = note de job
+    (ex. `copy.noModes`), `noted` = rânduri cu o notă (symlink / fişier special sărit, mod neaplicat)."""
     total, done = job.totals()
     code_of = code_of or (lambda m: "files.failed")
 
     def row(f: CopyFile) -> dict:
-        r = {"src": f.src, "name": f.name, "dst": f.dst, "size": f.size, "done": f.done, "state": f.state}
+        r = {"src": f.src, "name": f.name, "dst": f.dst, "size": f.size, "done": f.done, "state": f.state,
+             "kind": f.kind}
         if f.error:
             r.update(error=f.error, code=code_of(f.error))
+        if f.note:
+            r["note"] = f.note
+            r["note_code"] = next((c for pre, c in _NOTE_CODES if f.note.startswith(pre)), "copy.note")
         return r
 
     errs = [f for f in job.files if f.state == "err"]
+    fl = [f for f in job.files if f.kind != "dir"]
+    dirs = [f for f in job.files if f.kind == "dir"]
+    noted = [f for f in job.files if f.note]
     out = {
         "job_id": job.id, "state": job.state,
         "src_host": job.src_host, "src_host_name": job.src_host_name,
         "dst_host": job.dst_host, "dst_host_name": job.dst_host_name,
         "dst_dir": job.dst_dir, "on_conflict": job.on_conflict,
         "total_bytes": total, "done_bytes": done,
-        "files_total": len(job.files),
-        "files_done": sum(1 for f in job.files if f.state == "done"),
-        "files_skipped": sum(1 for f in job.files if f.state == "skipped"),
+        "files_total": len(fl),
+        "files_done": sum(1 for f in fl if f.state == "done"),
+        "files_skipped": sum(1 for f in fl if f.state == "skipped"),
         "files_failed": len(errs),
+        "folders_total": len(dirs),
+        "folders_done": sum(1 for f in dirs if f.state == "done"),
+        "modes": job.modes,
+        "notes": list(job.notes),
+        "current": [f.name for f in fl if f.state == "running"][:COPY_PARALLEL],
         "created": job.created, "finished": job.finished,
         "errors": [row(f) for f in errs[:50]],
+        "noted": [row(f) for f in noted[:50]],
+        "noted_total": len(noted),
     }
     if files:
         out["files"] = [row(f) for f in job.files]

@@ -290,7 +290,10 @@ def _rate_limited(retry: int) -> ApiError:
 # user", „eliberează spaţiu"); mesajul brut (cu calea) rămâne în `detail`. (audit UX §4.3/§8.F3)
 _FILE_ERROR_CODES = (
     # copierea host → host (fscopy): mesajele ei proprii, înaintea celor generice
-    ("folders cannot be copied", "copy.folder"),
+    ("cannot copy a folder into itself", "copy.intoItself"),
+    ("folder too large", "copy.folderTooLarge"),
+    ("folder too deep", "copy.folderTooDeep"),
+    ("parent folder could not be created", "copy.parentFailed"),
     ("source file changed", "copy.sourceChanged"),
     ("destination appeared", "copy.appeared"),
     ("no free name", "copy.noFreeName"),
@@ -2749,7 +2752,8 @@ def _copy_code_of(msg: str) -> str:
 async def fs_copy_start(body: FsCopyIn, request: Request, user=Depends(security.require_user)):
     """Porneşte o copiere de fişiere de pe `src_host` în `dst_dir` pe `dst_host` → `{job_id}`.
     `on_conflict`: skip | overwrite | rename („nume (1).ext"). src == dst e permis (duplicat /
-    copiere în alt director pe acelaşi host). Folderele sunt refuzate per fişier (vezi fscopy)."""
+    copiere în alt director pe acelaşi host). Folderele (3.6, agent 58) se copiază cu tot arborele;
+    modul sursei se păstrează doar pe o destinaţie cu agent ≥ 58 (vezi fscopy)."""
     if body.on_conflict not in fscopy.CONFLICT_MODES:
         raise ApiError(400, "copy.badConflict", "on_conflict must be skip, overwrite or rename")
     paths = body.paths
@@ -2818,6 +2822,36 @@ async def fs_copy_cancel(job_id: str, request: Request, user=Depends(security.re
     audit.detail(request, "cancel copy %s → %s:%s" % (job.src_host_name, job.dst_host_name, job.dst_dir))
     await fscopy.cancel(job)
     return fscopy.to_dict(job, False, code_of=_copy_code_of)
+
+
+@router.post("/api/fs/copy/{job_id}/retry")
+async def fs_copy_retry(job_id: str, request: Request, user=Depends(security.require_user)):
+    """Re-porneşte (job NOU) ce a eşuat într-o copiere terminată, cu aceleaşi opţiuni. Un folder se
+    îmbină în EXACT folderul de data trecută, sărind ce există deja (fscopy.retry). Aceleaşi porţi
+    ca la pornire: step-up pe ambele capete, ambii agenţi conectaţi."""
+    old = fscopy.get(job_id, user["id"])
+    if not old:
+        raise ApiError(404, "copy.missing", "no such copy job (finished jobs expire after an hour)")
+    if old.finished is None:
+        raise ApiError(409, "copy.running", "the copy is still running")
+    await _copy_host(old.src_host, "source")
+    await _copy_host(old.dst_host, "destination")
+    await _require_host_stepup(old.src_host, user)
+    if old.dst_host != old.src_host:
+        await _require_host_stepup(old.dst_host, user)
+    try:
+        core._agent_or_raise(old.src_host)
+        core._agent_or_raise(old.dst_host)
+    except core.AgentGone:
+        raise ApiError(409, "host.offline", "the host is offline")
+    try:
+        job = fscopy.retry(old)
+    except fscopy.CopyRefused as e:
+        raise _copy_refused(e)
+    audit.detail(request, "retry copy %s → %s:%s (%d item%s)" % (
+        old.src_host_name, old.dst_host_name, old.dst_dir, len(job.files), "" if len(job.files) == 1 else "s"))
+    log.info("fs copy %s retried as %s", old.id, job.id)
+    return {"job_id": job.id, "dst_dir": job.dst_dir}
 
 
 # praguri editor: sub LIMIT încarci tot (editabil); peste, doar primii HEAD

@@ -222,7 +222,23 @@ R=$(copy_wait "{\"src_host\":$HOST_ID,\"paths\":[\"~/wtfstest/cp-a.txt\"],\"dst_
 docker exec "$CT" test -f "/home/wtcopy/in/cp-a (1).txt" && ok "copy on_conflict=rename → 'cp-a (1).txt'" || no "copy rename" "$R"
 R=$(copy_wait "{\"src_host\":$HOST_ID,\"paths\":[\"/dev/zero\",\"~/wtfstest/arc dir\"],\"dst_host\":$H2,\"dst_dir\":\"~/in\",\"on_conflict\":\"skip\"}")
 echo "$R" | grep -q '"code":"files.notRegular"' && ok "copy: special file (/dev/zero) refused per file" || no "copy special" "$R"
-echo "$R" | grep -q '"code":"copy.folder"' && ok "copy: folder refused per file (next agent update)" || no "copy folder" "$R"
+R2=$(docker exec "$CT" cat "/home/wtcopy/in/arc dir/sub/b.txt" 2>/dev/null)
+[ "$R2" = "doi" ] && ok "copy: a folder in the same job is copied with its subfolders (3.6, agent 58)" || no "copy folder" "$R"
+# folder cu moduri + symlink: modul sursei ajunge pe destinaţie (fs_chmod, agent 58), link-ul nu
+docker exec "$CT" sh -c 'mkdir -p /root/wtfstest/cptree/bin && printf "#!/bin/sh\necho ok\n" > /root/wtfstest/cptree/bin/run.sh \
+  && chmod 755 /root/wtfstest/cptree/bin/run.sh && printf K > /root/wtfstest/cptree/key && chmod 600 /root/wtfstest/cptree/key \
+  && chmod 4755 /root/wtfstest/cptree/bin/run.sh && chmod 750 /root/wtfstest/cptree/bin \
+  && ln -sf /etc/passwd /root/wtfstest/cptree/pw'
+R=$(copy_wait "{\"src_host\":$HOST_ID,\"paths\":[\"~/wtfstest/cptree\"],\"dst_host\":$H2,\"dst_dir\":\"~/in\",\"on_conflict\":\"skip\"}")
+[ "$(echo "$R" | jget 'd["state"]')" = "done" ] && [ "$(echo "$R" | jget 'd["modes"]')" = "True" ] \
+  && ok "copy folder A → B: done, permissions kept (destination agent 58)" || no "copy folder modes" "$R"
+R2=$(docker exec "$CT" stat -c '%a %a %a' /home/wtcopy/in/cptree/bin/run.sh /home/wtcopy/in/cptree/key /home/wtcopy/in/cptree/bin 2>/dev/null)
+[ "$R2" = "755 600 750" ] && ok "copy folder: run.sh 0755 (setuid dropped), key 0600, bin/ 0750" || no "copy folder modes on disk" "$R2"
+docker exec -u wtcopy "$CT" sh /home/wtcopy/in/cptree/bin/run.sh 2>/dev/null | grep -q ok \
+  && docker exec "$CT" test -x /home/wtcopy/in/cptree/bin/run.sh \
+  && ok "copy folder: the copied script is still executable" || no "copy folder exec" "not executable"
+docker exec "$CT" test ! -e /home/wtcopy/in/cptree/pw && echo "$R" | grep -q '"note_code":"copy.symlinkSkipped"' \
+  && ok "copy folder: the symlink inside is not copied (note copy.symlinkSkipped)" || no "copy folder symlink" "$R"
 j -X POST "$FS/mkdir" -H 'Content-Type: application/json' -d '{"path":"~/wtfstest/cpdst"}' >/dev/null
 R=$(copy_wait "{\"src_host\":$HOST_ID,\"paths\":[\"~/wtfstest/cp-a.txt\"],\"dst_host\":$HOST_ID,\"dst_dir\":\"~/wtfstest/cpdst\",\"on_conflict\":\"skip\"}")
 R2=$(docker exec "$CT" cat /root/wtfstest/cpdst/cp-a.txt 2>/dev/null)
