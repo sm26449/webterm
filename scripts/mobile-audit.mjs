@@ -214,7 +214,11 @@ async function auditDevice(cfg) {
       await shot('03-sidebar')
       await check('sidebar')
       await page.keyboard.press('Escape').catch(() => {})
-      await page.mouse.click(5, 5).catch(() => {})
+      // sertarul (w-72) stă în STÂNGA: un click în colţul (5,5) cădea pe el, nu pe scrim, deci
+      // sertarul rămânea deschis peste dashboard. Până în 3.5.15 pasul ăsta nici nu rula pe
+      // dashboard (butonul ☰ de acolo n-avea aria-label); acum închidem pe scrim, în dreapta.
+      const vp = page.viewportSize() || { width: 360, height: 640 }
+      await page.mouse.click(vp.width - 4, Math.round(vp.height / 2)).catch(() => {})
       await page.waitForTimeout(500)
     }
 
