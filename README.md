@@ -277,7 +277,7 @@ make test-local   # + the suites that need a real tmux/agent (sandboxed from pro
 
 Before an image is published, CI runs the unit suite, ruff, gitleaks and `pip-audit`, verifies
 the agent signature, boots the image, and drives it in a browser: an E2E run with a **real agent
-on tmux** (`scripts/e2e-session.mjs`, 184 checks), file and port-forward tests, a mobile audit on
+on tmux** (`scripts/e2e-session.mjs`, 187 checks), file and port-forward tests, a mobile audit on
 10 devices and an accessibility gate. Building from source, the test layout and the full chain:
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). How to contribute — including re-signing the agent
 and regenerating these screenshots — is in [CONTRIBUTING.md](CONTRIBUTING.md).

@@ -9,6 +9,33 @@ back.
 
 ## [Unreleased]
 
+### Added
+- **Downloads resume after a page reload** (File System Access path — Chrome/Edge). A 40 GB
+  download that died with the tab (reload, crash, closed laptop) used to vanish from Transfers and
+  start from zero, because nothing remembered where the bytes were going. The job — file handle,
+  host, path, size, server validator and a checkpoint — is now kept in IndexedDB, keyed by user id;
+  after a reload it shows as **Interrupted — Resume / Discard**. Resume asks to write the file again
+  (a browser rule: it needs a click), continues from `min(checkpoint, size on disk)`, and refuses to
+  glue new bytes onto old ones if the file changed on the host: the row offers **Start over** into
+  the same file instead. Chromium only commits a writable stream on `close()`, so the engine
+  checkpoints by closing and reopening it (`keepExistingData` + `seek`) on a **geometric** cadence
+  — each reopen copies the partial file, and a fixed 256 MiB step would cost ~160 full copies on
+  40 GB; now ~12, bounded by about 3× the file size in local I/O, at the price of losing up to a
+  third of the progress on a reload. Pause and a final error checkpoint too. Records expire after
+  7 days, are removed on completion / Cancel / Dismiss / Discard and on sign-out. Blob downloads
+  (Firefox/Safari, small files) and folder `.tgz` archives are unchanged — no file handle or no
+  stable validator.
+- `GET /api/hosts/{id}/fs/download` sends a weak `ETag: W/"<size>-<mtime>"` and `Last-Modified`,
+  from the `fs_stat` it already did (agent unchanged); `GET /api/state` returns `user_id`.
+
+### Fixed
+- **Downloading a symbolic link** sent the link's own length as `Content-Length` (`fs_stat` is an
+  `lstat`), which cut the download short or broke it. A link now streams without `Range` — the full
+  target, as before 3.2.0 — and is simply not resumable.
+- A file download on a 2FA host whose step-up window had expired retried a 403 eight times and ended
+  in *Server answered 403*; it now opens the step-up prompt and continues. Non-retryable answers
+  (404, 400, 403) fail at once with the server's message instead of after eight retries.
+
 ## [3.5.13] — 2026-10-08 · agent (57)
 
 **Upgrade note:** an account with neither a passkey nor an authenticator code (TOTP) can no longer

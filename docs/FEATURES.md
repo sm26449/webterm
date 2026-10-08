@@ -173,7 +173,11 @@ Press `?` for the cheatsheet.
   sign-in). After a page reload, unfinished uploads are listed as **Incomplete**: drag the same
   file into the same folder to resume, **Open folder** jumps there, **Discard** deletes the
   temporary part on the host. Closing the tab while something is uploading asks for
-  confirmation.
+  confirmation. **Downloads** saved through the File System Access API (Chrome/Edge) survive a
+  reload too: they come back as **Interrupted — Resume / Discard**, continue from the last
+  checkpoint on disk after you re-allow writing the file, and offer **Start over** if the file
+  changed on the host meanwhile (ETag from size + mtime). Blob downloads (Firefox/Safari, small
+  files) and folder archives resume only within the session.
 - **Git panel** (toolbar button): for the repo in the session's current directory
   (follows `cd` via OSC 7) — status, **colored diff**, stage/unstage and
   **commit**, without opening GitHub. Focused scope: merge/rebase/push/branch stay

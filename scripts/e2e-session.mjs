@@ -1805,6 +1805,52 @@ try {
   check('walkthrough: „nu mai arăta" + închidere persistă wt_walkthrough_done=1',
     (await page.evaluate(() => localStorage.getItem('wt_walkthrough_done'))) === '1')
 
+  // ── 3.5.13: download File System Access întrerupt de un reload → „Interrupted — Resume / Discard" ──
+  // Punem în IndexedDB DOAR metadatele (exact ce rămâne după un tab închis la mijlocul unui download),
+  // fără handle: în contextul off-the-record al Playwright citirea unui FileSystemFileHandle din IDB
+  // OPREŞTE browserul — motivul pentru care lista de la pornire nu atinge handle-urile. Resume (care
+  // îl citeşte) e acoperit de vitest (downloads.resume.test.ts) şi de o sondă cu profil persistent.
+  const meUid = await page.evaluate(async () =>
+    (await (await fetch('/api/state', { credentials: 'same-origin' })).json()).user_id)
+  await page.evaluate(async (uid) => {
+    await new Promise((res, rej) => {
+      const rq = indexedDB.open('webterm-transfers', 1)
+      rq.onupgradeneeded = () => {
+        const d = rq.result
+        if (!d.objectStoreNames.contains('downloads')) d.createObjectStore('downloads', { keyPath: 'key' })
+        if (!d.objectStoreNames.contains('handles')) d.createObjectStore('handles')
+      }
+      rq.onsuccess = () => {
+        const now = Date.now()
+        const t = rq.result.transaction('downloads', 'readwrite')
+        t.objectStore('downloads').put({ key: `${uid}:1:/tmp/wt_dl_resume.bin`, v: 1, userId: uid, hostId: 1,
+          hostName: 'e2e', path: '/tmp/wt_dl_resume.bin', name: 'wt_dl_resume.bin', size: 1000,
+          etag: 'W/"1000-1"', mtime: 1, checkpoint: 400, created: now, updated: now })
+        t.oncomplete = () => { rq.result.close(); res() }
+        t.onerror = () => rej(t.error)
+      }
+      rq.onerror = () => rej(rq.error)
+    })
+  }, meUid)
+  await page.reload({ waitUntil: 'domcontentloaded' })
+  const dlRow = await pollValue(() => page.evaluate(() => {
+    const snap = window.__wtTransfers?.store?.snapshot?.()
+    const j = snap ? [...snap.values()].find((x) => x.dir === 'down' && x.dest === '/tmp/wt_dl_resume.bin') : null
+    return j ? `${j.state}:${j.pct}` : ''
+  }), (v) => v !== '', 15000)
+  check('download întrerupt: după reload apare în Transferuri ca „Interrupted" (40%)', dlRow === 'orphan:40', dlRow)
+  const dlDiscard = page.locator('button[aria-label="Discard wt_dl_resume.bin"]')
+  check('download întrerupt: rândul oferă Resume şi Discard',
+    (await visible(page.locator('button[aria-label="Resume wt_dl_resume.bin"]'))) && (await visible(dlDiscard)))
+  await dlDiscard.click()
+  const dlLeft = await pollValue(() => page.evaluate(() => new Promise((res) => {
+    const rq = indexedDB.open('webterm-transfers', 1)
+    rq.onsuccess = () => { const g = rq.result.transaction('downloads').objectStore('downloads').count(); g.onsuccess = () => { rq.result.close(); res(g.result) } }
+    rq.onerror = () => res(-1)
+  })), (n) => n === 0, 5000)
+  check('download întrerupt: Discard scoate rândul şi înregistrarea din IndexedDB',
+    dlLeft === 0 && (await hidden(dlDiscard)), `idb=${dlLeft}`)
+
   check('fără erori JS în pagină', pageErrors.length === 0)
   if (pageErrors.length) console.error('pageerrors:', pageErrors)
 } finally {

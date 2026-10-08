@@ -93,8 +93,72 @@ Where the file lands:
   memory, so a file larger than **1 GiB** needs a browser with the File System Access API — otherwise
   the download is refused with a clear message.
 
-**Not yet:** resume **across a page reload** (we don't persist the file handle). Downloads rely on
-TLS for integrity; there is no end-to-end CRC check like uploads have.
+Downloads rely on TLS for integrity; there is no end-to-end CRC check like uploads have.
+
+### Resume after a page reload (3.5.13)
+
+Only on the **File System Access** path (Chrome/Edge — a single large file with the save picker, or
+a multi-select download into a folder you picked). There the browser gives us a
+`FileSystemFileHandle`, which can be stored in **IndexedDB** (database `webterm-transfers`) together
+with the host, the remote path, the total size, the server's **validator** and a **checkpoint** —
+the number of bytes known to be on disk. After a reload (or a crash, or a closed laptop) the job
+comes back in the Transfers widget as **Interrupted — Resume / Discard**:
+
+- **Resume** asks for permission to write the file again (the browser requires a click for that),
+  checks the file on disk and continues from `min(checkpoint, size on disk)` with a `Range` request.
+  A 2FA host asks for the step-up first, like any file action.
+- If the file **changed on the host** since the download started, the bytes are not glued together:
+  the row explains it and offers **Start over** — from zero, into the same file, truncated first.
+  The validator is a weak `ETag: W/"<size>-<mtime>"` (plus `Last-Modified`) that `GET /fs/download`
+  now sends, built from the `fs_stat` it already does — **no agent change**. It catches a changed
+  size or modification time; a rewrite with the same size inside the same second would pass.
+- Permission refused → the row says so and Resume asks again. The partial file moved or deleted →
+  the row says so; Discard and download again. Host offline, session expired → the usual errors and
+  Retry.
+- **Discard** forgets the job. The partial file normally stays where you saved it (deleting it
+  would need its handle and a permission prompt just for that); it is removed only when the handle
+  is already loaded and the browser already allows writing it. **Cancel** on a running download
+  deletes the partial file once it holds our bytes (before the first checkpoint the chosen file is
+  untouched).
+
+**Why checkpoints, and what they cost.** Chromium writes a `FileSystemWritableFileStream` into a
+swap file (`<name>.crswap`) and moves it over the real file only on `close()`. Bytes written but not
+closed are **lost** on reload. So the engine periodically closes the stream (the bytes become the
+file's), stores the offset, and reopens it with `createWritable({ keepExistingData: true })` +
+`truncate` + `seek`. The stored resume point is that committed offset, never the in-flight count.
+Reopening copies the existing file into a new swap file (a cheap clone on APFS/btrfs, a real copy on
+ext4/NTFS), and `close()` reads the file once for Chromium's safe-browsing check — so every checkpoint
+costs I/O proportional to what is already downloaded. A fixed step (every 256 MiB) would be
+quadratic: ~160 full copies for a 40 GB file. The step is therefore **geometric**: the next
+checkpoint comes after another `max(256 MiB, 50 % of what is committed)` (or after 30 s once at least
+64 MiB are pending, for slow links) — about 12 checkpoints for 40 GB, local I/O overhead bounded by
+roughly 3× the file size, and a reload loses at most about a third of the progress (the last
+≤256 MiB early on). **Pause** and a final error also checkpoint, so a paused download loses nothing
+on reload. These costs are estimates from Chromium's implementation; they have not been measured on
+every platform.
+
+Checked in a real Chromium (153, headless, with origin-private-file-system handles standing in for
+picker handles — the picker itself cannot be driven headless): bytes written without `close()` are
+gone after a reload; the handle survives IndexedDB across documents; `keepExistingData` + `truncate`
++ `seek` continues exactly at the checkpoint; `truncate` does not move the write cursor (hence the
+`seek`). One caveat found there: in an **off-the-record** profile (Playwright's default context, the
+equivalent of an Incognito window) reading a file handle back from IndexedDB **crashed the whole
+browser**. So the list shown at start-up never touches the handles — they live in a separate object
+store and are read only when you click **Resume** / **Start over**. Whether a real Incognito window
+with a picker handle behaves the same has not been verified.
+
+What is stored and when it goes away: host id, path, name, size, ETag, mtime, checkpoint, created /
+updated time and, in a separate store, the file handle — no cookies or tokens. Records are keyed by **user id** (another
+account in the same browser does not see them), removed on completion, Cancel, Dismiss and Discard,
+expire after **7 days** without activity, and are cleared on **sign-out**. A session that merely
+expires hides the rows; they come back when the same account signs in again.
+
+**Not resumable after a reload:** Blob downloads (Firefox, Safari, and small files in any browser —
+there is no file handle, the bytes live in the tab's memory; they still resume **within** the
+session), folder `.tgz` archives (generated on the fly, no stable validator), files reached through
+a **symbolic link** (the agent's `fs_stat` is an `lstat`, so the gateway has no size for the target —
+the link streams without `Range` and without a validator; before 3.5.13 the link's own
+length was sent as `Content-Length`, which broke the download), and hosts with an agent older than v50.
 
 ## Folder downloads (`.tgz`)
 
@@ -287,4 +351,5 @@ takes a filename — paste first, then finish the line.
 | localStorage | `wt_paste_dest` | `inbox` (default) or `cwd` |
 | localStorage | `wt_inbox_days` | retention in days, `0` = keep |
 | localStorage | `wt_up_<host>_<dest>_<size>_<mtime>` | resumable-upload metadata (see above) |
+| IndexedDB | `webterm-transfers` / `downloads` + `handles`, key `<user>:<host>:<path>` | interrupted File System Access downloads: metadata, and the file handle read only on Resume (see *Resume after a page reload*) |
 | host | `~/.webterm/inbox/` | pasted files |
