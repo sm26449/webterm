@@ -9,6 +9,13 @@ back.
 
 ## [Unreleased]
 
+## [3.5.13] — 2026-10-08 · agent (57)
+
+**Upgrade note:** an account with neither a passkey nor an authenticator code (TOTP) can no longer
+open hosts marked *Require 2FA* with the password alone: enrol a factor in Settings → Sign-in & 2FA.
+With SSO, the identity provider must return `auth_time` (Authentik does); otherwise set
+`WEBTERM_OIDC_REQUIRE_AUTH_TIME=0`.
+
 ### Security
 - **A terminal on a 2FA host now locks 60 minutes after the factor that authorised it, even
   while in use.** The step-up window had an absolute cap of one hour, but the terminal WebSocket
