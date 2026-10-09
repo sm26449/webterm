@@ -143,3 +143,24 @@ Only if all pass does the image publish to ghcr. On deploy, `deploy.sh` keeps th
 previous image and does an **automatic rollback** if the new container doesn't
 become healthy; `rollback.sh` is the panic button over SSH. Full recovery:
 [docs/RUNBOOK.md](RUNBOOK.md).
+
+### GitHub Releases (release notes)
+
+Pushing a `v*` tag also runs `.github/workflows/release-notes.yml`, **separately** from the image
+workflow (it neither waits for nor gates the image). It takes the tag's `## [x.y.z]` section from
+`CHANGELOG.md` with `scripts/changelog-section.py`, joins the hard-wrapped lines, makes
+repository-relative links absolute at the tag, appends a footer with the image
+(`ghcr.io/sm26449/webterm:vX.Y.Z`) and the upgrade command, and creates the GitHub Release — or
+**edits** it if it already exists, so re-running is harmless. The title names the agent only when
+the release changes it (`WebTerm 3.5.16 · agent 58`); the newest stable tag is marked *Latest*. A
+tag whose version has no CHANGELOG section fails the run (a release without notes is a mistake).
+
+```sh
+python3 scripts/changelog-section.py v3.5.16 --title    # WebTerm 3.5.16 · agent 58
+python3 scripts/changelog-section.py v3.5.16 --notes    # exactly the release body
+```
+
+To create the releases that older tags never got: *Actions → Release notes → Run workflow*, with
+`backfill` = how many of the newest tags to look at (default 10); tags that already have a release
+are left untouched. `tests/changelog_section_test.py` checks the extraction against the real
+CHANGELOG and the workflow's YAML (trigger, permissions, SHA-pinned actions).

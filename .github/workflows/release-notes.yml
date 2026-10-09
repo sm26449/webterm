@@ -1,0 +1,90 @@
+name: Release notes
+
+# A GitHub Release for every tag, with its notes taken from CHANGELOG.md (the `## [x.y.z]` section,
+# extracted by scripts/changelog-section.py) and a footer with the ghcr image and the upgrade
+# command. Until 3.5.17 tags had no release at all: the Releases sidebar stayed empty and a watcher
+# subscribed to releases never heard of one.
+#
+# SEPARATE from docker-publish.yml on purpose: the image is gated by the whole test chain and must
+# not depend on (or wait for, or be failed by) a page of text. The notes may appear a few minutes
+# before the image they name finishes publishing.
+#
+# Idempotent: an existing release is EDITED (title, notes, latest), never duplicated — re-running
+# the workflow, or re-pointing a tag, just refreshes the page.
+#
+# Supply chain as in the other workflows: actions pinned to the full commit SHA (`# vN` = readable
+# version), runner pinned to ubuntu-24.04, and no third-party release action — `gh` is preinstalled
+# on the runner and talks to the API with this job's GITHUB_TOKEN.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      backfill:
+        description: 'Create the missing releases for the newest N tags (tags that already have a release are left alone)'
+        required: true
+        default: '10'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-notes-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0          # all tags: "latest" is decided against every v* tag
+          persist-credentials: false
+
+      - name: Create or update the release(s)
+        env:
+          EVENT: ${{ github.event_name }}
+          TAG: ${{ github.ref_name }}
+          BACKFILL: ${{ github.event.inputs.backfill }}
+        run: |
+          set -euo pipefail
+          IMAGE="ghcr.io/${GH_REPO,,}"
+          # newest stable tag (no `-rc1` suffix) = the one GitHub shows as "Latest"
+          NEWEST=$(git tag --list 'v*' --sort=-v:refname | grep -v -- '-' | head -n1 || true)
+
+          publish() {   # $1 = tag, $2 = create-only (backfill: leave existing releases alone)
+            local tag="$1" only_create="$2" title latest pre
+            if ! python3 scripts/changelog-section.py "$tag" --notes --repo "$GH_REPO" --image "$IMAGE" > notes.md; then
+              echo "::warning::CHANGELOG.md has no section for $tag — no release"
+              return 1
+            fi
+            title=$(python3 scripts/changelog-section.py "$tag" --title)
+            latest=false; [ "$tag" = "$NEWEST" ] && latest=true
+            pre=""; case "$tag" in *-*) pre="--prerelease" ;; esac
+            if gh release view "$tag" >/dev/null 2>&1; then
+              if [ "$only_create" = 1 ]; then echo "$tag: release exists — skipped"; return 0; fi
+              gh release edit "$tag" --title "$title" --notes-file notes.md --latest="$latest" $pre
+              echo "$tag: release updated — $title (latest=$latest)"
+            else
+              gh release create "$tag" --verify-tag --title "$title" --notes-file notes.md --latest="$latest" $pre
+              echo "$tag: release created — $title (latest=$latest)"
+            fi
+          }
+
+          if [ "$EVENT" = "push" ]; then
+            # the CHANGELOG of the tagged commit itself (that is what the checkout holds)
+            publish "$TAG" 0
+          else
+            case "$BACKFILL" in ''|*[!0-9]*) echo "::error::backfill must be a number"; exit 1 ;; esac
+            # the CHANGELOG of the branch it was dispatched from: it holds every older section
+            fail=0
+            for t in $(git tag --list 'v*' --sort=-v:refname | head -n "$BACKFILL"); do
+              publish "$t" 1 || fail=1
+            done
+            exit $fail
+          fi
