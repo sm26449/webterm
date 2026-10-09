@@ -10,9 +10,9 @@ import tempfile
 import time
 
 # Mediul TREBUIE pus înainte de primul `import app` (config citeşte env la import).
-os.environ.setdefault("WEBTERM_DATA_DIR", tempfile.mkdtemp())
-os.environ.setdefault("WEBTERM_SETUP_TOKEN", "test-setup")
-os.environ.setdefault("WEBTERM_PUBLIC_URL", "http://localhost:8000")
+os.environ["WEBTERM_DATA_DIR"] = tempfile.mkdtemp()   # fiecare suită: DB proprie (run-tests.sh dă unul comun)
+os.environ["WEBTERM_SETUP_TOKEN"] = "test-setup"
+os.environ["WEBTERM_PUBLIC_URL"] = "http://localhost:8000"
 os.environ.setdefault("WEBTERM_UPDATE_CHECK", "0")          # fără reţea din teste
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "gateway"))
 
