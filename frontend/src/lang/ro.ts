@@ -1107,7 +1107,6 @@ const ro: Lang = {
     'roles.noAccessHost': "(un host pe care nu-l vezi)",
     'authz.notHere': "Rolul tău nu permite asta pe acest host ({perm})",
     'noaccess.title': "Nu ai încă acces la niciun host",
-    'noaccess.body': "Cere unui Owner sau Admin să-ți dea un rol: {admins}",
     'noaccess.bodyNoNames': "Cere unui Owner sau Admin al acestui WebTerm să-ți dea un rol.",
     'noaccess.hostTitle': "Inexistent sau fără acces",
     'noaccess.hostBody': "Hostul ăsta nu există sau rolul tău nu-l include.",

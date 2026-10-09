@@ -1091,7 +1091,6 @@ const en: Lang = {
     'roles.noAccessHost': "(a host you cannot see)",
     'authz.notHere': "Your role does not allow this on this host ({perm})",
     'noaccess.title': "You don't have access to any host yet",
-    'noaccess.body': "Ask an Owner or Admin to give you a role: {admins}",
     'noaccess.bodyNoNames': "Ask an Owner or Admin of this WebTerm to give you a role.",
     'noaccess.hostTitle': "Not found or no access",
     'noaccess.hostBody': "This host does not exist, or your role does not include it.",

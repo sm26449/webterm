@@ -1275,6 +1275,10 @@ the code is right and the reason is here.
 - No new `rbac_changed` alert kind: a binding change notifies `admin_change` (→ `security.view`
   holders, new message keys `role_granted` / `role_removed`) and `account_change` (→ the affected
   account, `access_changed`), so no new preference row appears.
+- `/api/me/permissions` does **not** list the Owners' and Admins' emails (§A.9 suggested it): an
+  account without access — e.g. a freshly provisioned SSO user — would learn exactly who holds the
+  most power. It returns `has_admins` and the UI says "ask an administrator" (security-first
+  default, pending the maintainer's confirmation; isolated in its own commit).
 - Webhook/e-mail delivery is unchanged: an event still leaves if at least one recipient wants it,
   and an event with no recipient at all still leaves (the instance mailbox is the admins').
 

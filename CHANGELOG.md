@@ -34,7 +34,8 @@ back.
 - **Read-only terminals.** With watch rights (Viewer, or an Operator on someone else's session) a
   terminal attaches *watching (read-only)*: the keyboard is inert and the server drops any input,
   resize or kick from that client.
-- **"No access yet" / "not found or no access" states**, naming who can grant access, and
+- **"No access yet" / "not found or no access" states** (asking an administrator — the names of
+  Owners and Admins are deliberately not disclosed to an account without access), and
   `GET /api/me/permissions` for the UI to hide what you have nowhere and explain (tooltip) what you
   lack on this host. The server enforces regardless; the UI gating is cosmetic.
 - **`python3 -m app.admin promote <email>`** (Owner over all hosts — the break-glass path when no

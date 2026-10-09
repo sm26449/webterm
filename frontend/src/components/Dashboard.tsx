@@ -70,15 +70,15 @@ export default function Dashboard(props: {
   const folders = [...new Set(hosts.map((h) => h.folder || ''))].sort((a, b) =>
     a === '' ? 1 : b === '' ? -1 : a.localeCompare(b))
 
-  // 3.6: o flotă goală pentru cine NU poate adăuga hosturi = „fără acces încă" — spunem pe cine
-  // să întrebe (cei cu users.manage), în loc să-l invităm la un „Adaugă host" care ar da 403
+  // 3.6: o flotă goală pentru cine NU poate adăuga hosturi = „fără acces încă" — îi spunem să
+  // întrebe un administrator (fără nume: serverul nu mai dezvăluie cine sunt), în loc să-l
+  // invităm la un „Adaugă host" care ar da 403
   if (hosts.length === 0 && !can(perms, 'hosts.create')) {
-    const admins = perms?.admins ?? []
     return (
       <EmptyState size="page" titleAs="h1" className="wt-canvas h-full" tone="neutral"
         icon={<LockIcon />}
         title={t('noaccess.title')}
-        body={admins.length ? t('noaccess.body', { admins: admins.join(', ') }) : t('noaccess.bodyNoNames')}
+        body={t('noaccess.bodyNoNames')}
       />
     )
   }

@@ -112,7 +112,8 @@ share or replay link they can no longer create is revoked.
 ## No access yet
 
 An account with no binding — a new account, or a new SSO login — can sign in but sees an empty
-fleet, with the names of the people who can grant access. A link to a host you cannot see shows
+fleet and a message to ask an administrator (the names of Owners and Admins are deliberately
+not shown to an account without access). A link to a host you cannot see shows
 "not found or no access", deliberately the same as a host that does not exist.
 
 SSO group-to-role mapping arrives in 3.6.1. Until then a new SSO user gets no access until an

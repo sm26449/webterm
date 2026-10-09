@@ -4,7 +4,7 @@ import ro from '../lang/ro'
 import { anyHost, can, canOn, getPerms, hasNoAccess, loadPerms, MyPerms, permsOn, roleLabel, ROLE_KEYS,
   scopeLabel, setPerms } from './perms'
 
-const base: MyPerms = { global: [], all_hosts: [], hosts: {}, bindings: [], owner: false, epoch: 1, admins: [] }
+const base: MyPerms = { global: [], all_hosts: [], hosts: {}, bindings: [], owner: false, epoch: 1, has_admins: true }
 const t = (k: string, v?: Record<string, string | number>) => {
   let s = en.strings[k] ?? k
   for (const [n, x] of Object.entries(v ?? {})) s = s.split('{' + n + '}').join(String(x))

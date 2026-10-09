@@ -31,7 +31,7 @@ export interface MyPerms {
   bindings: Binding[]
   owner: boolean
   epoch: number
-  admins: string[]
+  has_admins: boolean
 }
 
 export const ROLE_KEYS: readonly RoleKey[] = ['owner', 'admin', 'operator', 'viewer']

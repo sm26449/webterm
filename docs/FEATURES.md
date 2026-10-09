@@ -342,7 +342,7 @@ Press `?` for the cheatsheet.
   **whether you get a shell** there. Shell-equivalent permissions are flagged ⚑.
 - **Watching (read-only)** terminals for Viewers, and for Operators on someone else's session;
   input is dropped server-side, and a demotion takes effect on the open terminal immediately
-- **No access yet** state for new accounts and new SSO users, with the names of who can grant it
+- **No access yet** state for new accounts and new SSO users, telling them to ask an administrator
 - Automation tokens are capped by what their creator can do now; the last Owner cannot be removed;
   `python3 -m app.admin promote` is the break-glass path
 - Upgrading changes nothing: every existing account becomes Owner over all hosts

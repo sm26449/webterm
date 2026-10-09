@@ -221,7 +221,8 @@ async def main():
     me = (await op.get("/api/me/permissions")).json()
     check("me/permissions: Operator@prod — nimic pe toate hosturile, A în `hosts`",
           me["all_hosts"] == [] and str(a) in me["hosts"] and str(b) not in me["hosts"], str(me))
-    check("me/permissions: arată cine poate acorda acces (admins)", "owner@x.co" in me["admins"])
+    check("me/permissions: NU listează emailurile administratorilor (doar un flag)",
+          "admins" not in me and me.get("has_admins") is True and "owner@x.co" not in str(me), str(me))
     me = (await owner.get("/api/me/permissions")).json()
     check("me/permissions Owner: toate permisiunile pe toate hosturile",
           set(me["all_hosts"]) == set(authz.HOST_PERMS) and me["owner"] is True)

@@ -1124,14 +1124,15 @@ async def list_roles(user=Depends(authz.perm('users.manage'))):
 @router.get("/api/me/permissions")
 async def me_permissions(user=Depends(security.require_user)):
     """Ce poate contul curent, pentru gating-ul din UI (cosmetic — serverul decide oricum).
-    `admins` = cine poate acorda acces, ca ecranul „fără acces" să spună pe cine să întrebi."""
+
+    Implicit de securitate (revizuirea 3.6): NU listăm emailurile Owner-ilor/Admin-ilor — un cont
+    fără niciun acces (ex. un SSO nou provizionat) ar afla altfel cine sunt ţintele cu cele mai
+    multe drepturi. Doar un flag; UI-ul spune generic „cere unui administrator"."""
     grants = await authz.grants_for_user(user["id"])
     out = authz.me_json(grants, await authz.host_refs())
-    admins = await db.fetchall(
-        "SELECT DISTINCT u.email FROM users u JOIN role_bindings b ON b.user_id=u.id"
-        " JOIN roles r ON r.id=b.role_id WHERE b.scope_kind='all' AND r.key IN ('owner','admin')"
-        " ORDER BY u.email LIMIT 10")
-    out["admins"] = [r["email"] for r in admins]
+    out["has_admins"] = bool(await db.fetchone(
+        "SELECT 1 FROM role_bindings b JOIN roles r ON r.id=b.role_id"
+        " WHERE b.scope_kind='all' AND r.key IN ('owner','admin') LIMIT 1"))
     return out
 
 
