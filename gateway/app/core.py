@@ -952,6 +952,11 @@ class BrowserClient:
         # 2 MiB trimişi exact clientului care nu ţine pasul ar întreţine bucla de overflow.
         limit = self.replay_limit if full else config.BROWSER_TAIL_BYTES
         tail = await asyncio.to_thread(read_tail, self.hub.sid, limit=limit, end=cutoff)
+        # aşteptarea de mai sus (I/O pe thread) e o fereastră în care clientul/hub-ul se poate
+        # BLOCA — re-verificăm garda chiar înainte de a trimite scrollback-ul (fail-closed)
+        if self.locked or self.hub.locked:
+            self._drain_queue()
+            return
         await self.send_bytes(block + tail)
         self._sent_since_ping += len(block) + len(tail)
         # Garanția „≤ cutoff în tail, > cutoff în coadă" cade în două cazuri:
@@ -1526,18 +1531,30 @@ class SessionHub:
         if ts is not None and (self.authorized_at is None or ts > self.authorized_at):
             self.authorized_at = ts
 
-    async def unlock(self, authorized_at: Optional[float] = None) -> None:
+    async def unlock(self, authorized_at: Optional[float] = None, allow=None) -> None:
         """Deblochează după un step-up valid (vezi endpoint-ul WS 'unlock'). `authorized_at` =
-        momentul factorului proaspăt care a deblocat (reporneşte plafonul absolut)."""
+        momentul factorului proaspăt care a deblocat (reporneşte plafonul absolut).
+        `allow(client) -> bool` (3.6): doar clienţii acceptaţi se deblochează — ceilalţi (ex. un
+        alt cont fără propria fereastră de step-up) RĂMÂN blocaţi, fără nicio clipă deblocată
+        (nu deblocare-apoi-reblocare) şi fără să primească „unlocked"."""
         if not self.locked:
             return
         self.locked = False
         self.lock_reason = ""
         self.authorized_at = authorized_at if authorized_at is not None else time.time()
         self.last_interaction = time.time()
+        freed = [c for c in list(self.clients) if allow is None or allow(c)]
         for c in list(self.clients):
+            if c not in freed:
+                c.lock()                 # ţinut blocat per client (hub.locked tocmai a căzut)
+        for c in freed:
             c.unlock()
-        await self.broadcast_json({"type": "unlocked"})
+        payload = json.dumps({"type": "unlocked"})
+        for c in freed:
+            try:
+                await c.send_text(payload)
+            except Exception:
+                pass
         log.info("session %s: unlocked (passkey re-auth)", self.sid)
 
     def _source(self):

@@ -132,6 +132,16 @@ On a host that requires 2FA a watcher needs its own step-up like anyone else, an
 unlocks **its own** view: a read-only client cannot unlock a locked terminal for the person
 typing, and attaching without a step-up window locks only the watcher, never the writer.
 
+When several people **type** into the same 2FA terminal:
+
+- unlocking it (after the idle lock or the 60-minute cap) restarts the **60-minute cap from the
+  unlocking account's factor**;
+- every other account's view **stays locked** unless that account holds its own open step-up
+  window — it unlocks with its own factor, never with someone else's;
+- a second account that attaches without a window while someone is already working locks only
+  its own view; the person working is not interrupted. Alone on the terminal, attaching without a
+  window shows it locked, as before.
+
 ## Automation tokens and roles
 
 Automation tokens keep their `read` / `run` scopes and are additionally capped:

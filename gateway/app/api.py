@@ -984,7 +984,7 @@ async def delete_user(uid: int, body: ReauthOnly, request: Request,
         # rămân în jurnal (emailul e în `actor`), dar nu mai sunt „ale" nimănui: un snippet sau o
         # sesiune vie a contului şters nu devin editabile de un cont nou, rândurile de audit nu
         # devin „propriile rânduri" ale altcuiva.
-        await db.raise_user_id_floor(uid)
+        await db.raise_user_id_floor(uid, row["email"])
         for sql in ("UPDATE audit_log SET actor_id=? WHERE actor_id=?",
                     "UPDATE snippets SET created_by_id=? WHERE created_by_id=?",
                     "UPDATE sessions SET created_by_id=? WHERE created_by_id=?",
@@ -9973,7 +9973,12 @@ async def browser_ws(ws: WebSocket, sid: str):
                 row["title"], client.remote_addr, client.user_agent, user["email"],
                 user_id=user["id"])
         if start_locked:
-            if not hub.locked and client.writable:
+            # alt cont lucrează deja DEBLOCAT pe terminal → blocăm doar acest client (OPEN1): un al
+            # doilea cont fără fereastră nu are voie să închidă terminalul celui care lucrează
+            others_working = any(
+                c is not client and c.is_owner and c.writable and not c.locked
+                and c.user_id != user["id"] for c in hub.clients)
+            if not hub.locked and client.writable and not others_working:
                 await hub.lock("stepup")         # fără fereastră → blochează toţi clienţii + broadcast
             else:
                 # hub deja blocat, SAU un watcher read-only fără fereastră (3.6): blocăm DOAR acest
@@ -10098,19 +10103,15 @@ async def browser_ws(ws: WebSocket, sid: str):
                     else:
                         opened = security.stepup_window_opened_at(user["id"], row["host_id"])
                         if hub.locked:
-                            # factorul tocmai prezentat (fereastră proaspătă) reporneşte plafonul
-                            await hub.unlock(opened)
-                            # 3.6: factorul unui cont NU deblochează clienţii ALTUI cont: cine nu are
-                            # propria fereastră de step-up rămâne blocat până o deschide el
-                            for c in list(hub.clients):
-                                if (c is client or not c.is_owner or c.user_id == user["id"]
-                                        or security.stepup_window_is_open(c.user_id, row["host_id"])):
-                                    continue
-                                c.lock()
-                                try:
-                                    await c.send_text(json.dumps({"type": "locked", "reason": "stepup"}))
-                                except Exception:            # noqa: BLE001
-                                    pass
+                            # factorul tocmai prezentat (fereastră proaspătă) reporneşte plafonul.
+                            # 3.6: factorul unui cont NU deblochează clienţii ALTUI cont — cine nu
+                            # are propria fereastră de step-up nu e deblocat deloc (predicat, nu
+                            # deblocare-apoi-reblocare); invitaţii prin share păstrează regula lor
+                            hid_ = row["host_id"]
+                            uid_ = user["id"]
+                            await hub.unlock(opened, allow=lambda c: (
+                                c is client or not c.is_owner or c.user_id == uid_
+                                or security.stepup_window_is_open(c.user_id, hid_)))
                         elif client.locked:
                             # hub-ul merge, doar ACEST client era blocat (watcher sau alt cont fără
                             # fereastră): factorul lui îi deblochează propria vedere

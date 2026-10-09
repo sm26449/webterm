@@ -12,6 +12,12 @@
   L4  Wake-on-LAN foloseşte doar vecini pe care ai `host.wake`;
   R   o acordare de rol re-verificată SUB lock (un Admin retrogradat în timpul ceremoniei);
   P   proba unui forward nu întoarce eroarea brută a ţintei.
+A doua trecere de revizuire:
+  S1  scrollback: un resync care aşteaptă `read_tail` NU trimite nimic dacă între timp clientul /
+      hub-ul s-a blocat; `hub.unlock(allow=…)` nu deblochează (nici o clipă) clienţii respinşi;
+  S2  (OPEN1) un al doilea cont care SCRIE, ataşat fără fereastră, blochează doar propriul client;
+      proprietarul singur, fără fereastră, vede în continuare terminalul blocat;
+  S3  `user_id_floor` stricat (restaurat/editat) nu crapă crearea de cont şi nu permite refolosirea.
 (L3 — autentificarea rutelor SELF — e în route_auth_test.)
 """
 import asyncio
@@ -186,6 +192,105 @@ async def ws_tests(owner, prod):
         await c.aclose()
 
 
+async def second_pass(owner, prod):
+    # ── S1a: cursa de scrollback, forţată determinist cu un read_tail lent ──
+    sid = await U.add_session(prod, state="live")
+    hub = core.get_or_create_hub(await db.fetchone("SELECT * FROM sessions WHERE id=?", sid))
+    hub.attached = True
+    hub._source = lambda: FakeSource()
+    ws = FakeWS("x")
+    cl = core.BrowserClient(ws, hub)
+    cl.is_owner, cl.writable = True, True
+    hub.clients.add(cl)
+    gate = asyncio.Event()
+    orig_rt = core.read_tail
+
+    def slow_tail(*a, **kw):
+        import time as _t
+        while not gate.is_set():
+            _t.sleep(0.01)
+        return b"SECRET-SCROLLBACK"
+    core.read_tail = slow_tail
+    try:
+        task = asyncio.create_task(cl._resync(full=True))
+        await asyncio.sleep(0.1)                 # resync-ul aşteaptă acum în read_tail
+        await hub.lock("idle")                   # …iar terminalul se blochează exact atunci
+        gate.set()
+        await asyncio.wait_for(task, 5)
+    finally:
+        core.read_tail = orig_rt
+    check("S1: resync început înainte de blocare NU trimite scrollback-ul după",
+          not any(b"SECRET" in b for b in ws.sent_bytes), str(ws.sent_bytes)[:120])
+    # ── S1b: unlock cu predicat — clientul respins nu e deblocat nici o clipă ──
+    other = core.BrowserClient(FakeWS("y"), hub)
+    other.is_owner, other.writable, other.user_id = True, True, 4242
+    hub.clients.add(other)
+    other.lock()
+    seen = []
+    orig_unlock = other.unlock
+    other.unlock = lambda: seen.append("unlocked")
+    await hub.unlock(time.time(), allow=lambda c: c is cl)
+    check("S1: hub.unlock(allow) — clientul respins nu e deblocat deloc", seen == [] and other.locked)
+    check("S1: …şi nu primeşte „unlocked”", not any('"unlocked"' in t for t in other.ws.sent_text))
+    check("S1: clientul admis e deblocat", cl.locked is False and hub.locked is False)
+    other.unlock = orig_unlock
+    hub.clients.discard(cl)
+    hub.clients.discard(other)
+
+    # ── S2 (OPEN1): al doilea cont care scrie, fără fereastră, nu blochează hub-ul ──
+    await db.execute("UPDATE hosts SET require_2fa=1 WHERE id=?", prod)
+    w1 = await U.add_user("w1@x.co", bindings=[("operator", "folder", "prod")])
+    await U.add_user("w2@x.co", bindings=[("admin", "folder", "prod")])
+    c1, c2 = await U.login("w1@x.co"), await U.login("w2@x.co")
+    s2 = await U.add_session(prod, state="live", created_by=w1)
+    h2 = core.get_or_create_hub(await db.fetchone("SELECT * FROM sessions WHERE id=?", s2))
+    h2.attached = True
+    h2._source = lambda: FakeSource()
+    try:
+        security.clear_stepup_for(w1)
+        ws1, t1 = await attach(c1, s2)
+        check("S2: proprietarul singur, fără fereastră → terminalul e blocat (ca înainte)",
+              h2.locked is True and bool(ws1.msgs("locked")))
+        await finish(ws1, t1)
+        await h2.unlock(time.time())
+        security.open_stepup_window(w1, prod)
+        ws1, t1 = await attach(c1, s2)
+        check("fixture: proprietarul lucrează deblocat", h2.locked is False)
+        ws2, t2 = await attach(c2, s2)
+        check("S2: al doilea cont (rw, session.manage) fără fereastră → hub-ul RĂMÂNE deblocat",
+              ws2.init().get("readonly") is False and h2.locked is False)
+        c_w2 = next(c for c in h2.clients if c.ws is ws2)
+        check("S2: …doar clientul lui e blocat", c_w2.locked is True and bool(ws2.msgs("locked")))
+        await finish(ws2, t2)
+        await finish(ws1, t1)
+    finally:
+        await db.execute("UPDATE hosts SET require_2fa=0 WHERE id=?", prod)
+    await c1.aclose()
+    await c2.aclose()
+
+    # ── S3: user_id_floor stricat ──
+    top = (await db.fetchone("SELECT MAX(id) AS m FROM users"))["m"]
+    victim = await U.add_user("fl@x.co")
+    r = await owner.post("/api/users/%d/delete" % victim, json={"current_password": U.OWNER_PW})
+    check("fixture: cel mai nou cont şters", r.status_code == 200)
+    for n, bad in enumerate(("abc", "-5", "99999999999999999999", "1e300", "9007199254740993")):
+        await db.execute("UPDATE app_settings SET value=? WHERE key='user_id_floor'", bad)
+        r = await owner.post("/api/users", json={"email": "f%d@x.co" % n, "password": PW,
+                                                 "current_password": U.OWNER_PW})
+        nid = await db.fetchone("SELECT id FROM users WHERE email=?", "f%d@x.co" % n)
+        check("S3: prag %r → crearea de cont merge (200), fără refolosirea id-ului %d" % (bad, victim),
+              r.status_code == 200 and nid and nid["id"] > victim and nid["id"] < 2 ** 53,
+              "%s %s" % (r.status_code, nid and nid["id"]))
+    await db.execute("UPDATE app_settings SET value='-7' WHERE key='user_id_floor'")
+    await db.close()
+    await db.connect()
+    fl = (await db.fetchone("SELECT value FROM app_settings WHERE key='user_id_floor'"))["value"]
+    mx = (await db.fetchone("SELECT MAX(id) AS m FROM users"))["m"]
+    check("S3: la pornire, pragul invalid e înlocuit cu maximul surselor reale",
+          fl.isdigit() and int(fl) >= max(mx, victim), "%s (max id %s, şters %s)" % (fl, mx, victim))
+    del top
+
+
 async def insert_jump(name, folder, via, ctype="ssh-jump", port=22):
     return await db.execute(
         "INSERT INTO hosts(name, folder, connection_type, hostname, ssh_username, ssh_port,"
@@ -345,6 +450,8 @@ async def main():
         await pv.aclose()
     finally:
         api._ensure_forward_source = orig
+
+    await second_pass(owner, prod)
 
     for c in (owner, al, nb, admc):
         await c.aclose()

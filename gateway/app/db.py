@@ -377,6 +377,13 @@ CREATE TABLE IF NOT EXISTS role_bindings (
 );
 CREATE INDEX IF NOT EXISTS idx_rb_user ON role_bindings(user_id);
 CREATE INDEX IF NOT EXISTS idx_rb_scope ON role_bindings(scope_kind, scope_value);
+-- Id-urile conturilor şterse (3.6): sursă DURABILĂ a pragului de id (pe lângă `user_id_floor`),
+-- ca un prag pierdut/stricat într-un backup să nu permită refolosirea unui id. Nu se curăţă.
+CREATE TABLE IF NOT EXISTS deleted_accounts (
+    id INTEGER PRIMARY KEY,
+    email TEXT DEFAULT '',
+    deleted REAL NOT NULL
+);
 -- grup OIDC → (rol, scope): punct de extensie pentru 3.6.1 (maparea SSO). În 3.6.0 tabela există
 -- dar nu e citită de nimic — un login SSO nu primeşte legături automat.
 CREATE TABLE IF NOT EXISTS oidc_group_roles (
@@ -592,6 +599,7 @@ async def connect() -> None:
     from . import authz
     try:
         await authz.seed(_conn)
+        await repair_user_id_floor(_conn)
     except Exception as e:
         log.error("ROLE SEEDING FAILED — refusing to start: %s: %s", type(e).__name__, e)
         await _conn.close()
@@ -641,18 +649,65 @@ async def execute_returning(sql: str, *args):
 # moştenea urmele şi proprietatea celui vechi. Fără reconstrucţie de tabelă: un prag monoton în
 # app_settings (`user_id_floor`, ridicat la fiecare ştergere) + id explicit la inserare, calculat
 # în ACEEAŞI instrucţiune SQL (atomic, fără cursă între două creări concurente).
+USER_ID_FLOOR_MAX = 2 ** 53
+# Pragul stocat, DOAR dacă e un întreg zecimal sănătos în [0, 2^53]; altfel 0 (ignorat). Un prag
+# restaurat dintr-un backup sau scris de mână („abc", „-5", „1e300", 2^63) nu are voie nici să
+# crape crearea de cont (overflow → 500), nici să coboare pragul real.
+_FLOOR_OK = (
+    "(SELECT CASE WHEN value GLOB '[0-9]*' AND value NOT GLOB '*[^0-9]*' AND length(value) <= 16"
+    " AND CAST(value AS INTEGER) <= %d THEN CAST(value AS INTEGER) ELSE 0 END"
+    " FROM app_settings WHERE key='user_id_floor')" % USER_ID_FLOOR_MAX)
+# Celelalte surse ale pragului: tabela `deleted_accounts` şi id-urile NEGATE lăsate de ştergerea
+# unui cont (audit, snippet-uri, sesiuni, istoric) — chiar cu pragul pierdut sau stricat, un id
+# deja folosit nu se mai dă.
+_TOMBSTONES = (
+    "(SELECT MAX(COALESCE((SELECT MAX(id) FROM deleted_accounts), 0),"
+    " COALESCE(-(SELECT MIN(actor_id) FROM audit_log), 0),"
+    " COALESCE(-(SELECT MIN(created_by_id) FROM snippets), 0),"
+    " COALESCE(-(SELECT MIN(created_by_id) FROM sessions), 0),"
+    " COALESCE(-(SELECT MIN(user_id) FROM command_history), 0)))")
 NEXT_USER_ID_SQL = (
-    "(SELECT MAX(COALESCE((SELECT MAX(id) FROM users), 0),"
-    " COALESCE((SELECT CAST(value AS INTEGER) FROM app_settings WHERE key='user_id_floor'), 0))"
-    " + 1)")
+    "(SELECT MAX(COALESCE((SELECT MAX(id) FROM users), 0), COALESCE(" + _FLOOR_OK + ", 0),"
+    " " + _TOMBSTONES + ") + 1)")
 
 
-async def raise_user_id_floor(uid: int) -> None:
+async def raise_user_id_floor(uid: int, email: str = "") -> None:
     """Un id de cont folosit o dată nu mai e dat niciodată altui cont."""
+    uid = int(uid)
+    if not 0 < uid <= USER_ID_FLOOR_MAX:
+        return
+    await execute("INSERT OR IGNORE INTO deleted_accounts(id, email, deleted) VALUES(?,?,?)",
+                  uid, (email or "")[:200], time.time())
     await execute(
         "INSERT INTO app_settings(key, value) VALUES('user_id_floor', ?)"
-        " ON CONFLICT(key) DO UPDATE SET value=CAST(MAX(CAST(value AS INTEGER), ?) AS TEXT)",
-        str(int(uid)), int(uid))
+        " ON CONFLICT(key) DO UPDATE SET value=CAST(MAX(COALESCE(" + _FLOOR_OK + ", 0), ?) AS TEXT)",
+        str(uid), uid)
+
+
+async def repair_user_id_floor(conn) -> None:
+    """La pornire: un prag invalid (non-întreg, negativ, > 2^53 — ex. dintr-un backup restaurat
+    sau editat) e ignorat cu avertisment şi înlocuit cu maximul surselor reale (MAX(id) şi id-urile
+    negate ale conturilor şterse). Un prag valid, dar sub acele surse, e doar ridicat."""
+    cur = await conn.execute("SELECT value FROM app_settings WHERE key='user_id_floor'")
+    row = await cur.fetchone()
+    await cur.close()
+    cur = await conn.execute(
+        "SELECT MAX(COALESCE((SELECT MAX(id) FROM users), 0), " + _TOMBSTONES + ")")
+    real = int((await cur.fetchone())[0] or 0)
+    await cur.close()
+    raw = row[0] if row else None
+    ok = (isinstance(raw, str) and raw.isdigit() and len(raw) <= 16
+          and int(raw) <= USER_ID_FLOOR_MAX)
+    if row is not None and not ok:
+        log.warning("user_id_floor %r is invalid (restored or edited?) — ignored, reset to %d",
+                    str(raw)[:40], real)
+    want = max(real, int(raw) if ok else 0)
+    if row is None and want == 0:
+        return
+    if not ok or int(raw) != want:
+        await conn.execute(
+            "INSERT INTO app_settings(key, value) VALUES('user_id_floor', ?)"
+            " ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(want),))
 
 
 def now() -> float:

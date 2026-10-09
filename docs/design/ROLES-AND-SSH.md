@@ -1296,7 +1296,10 @@ locks only itself; every target field of a jump host needs `forward.manage` on t
 account ids are never reused (persisted `user_id_floor`, explicit ids at insert) and a deleted
 account's rows keep a negated id; live shares and replay links need your own session or
 `session.manage`; Wake-on-LAN peers need `host.wake`; grants are re-checked under the lock;
-SELF routes must authenticate (runtime + CI); probe errors are generic. See
+SELF routes must authenticate (runtime + CI); probe errors are generic. Second pass: the
+scrollback resync re-checks the lock after its read; `hub.unlock(allow=…)` never unlocks clients
+of accounts without their own window; a second writer attaching without a window locks only its
+own client; the id floor is validated and backed by a `deleted_accounts` table. See
 `tests/rbac_secreview_test.py`.
 
 **Tests:** `route_auth_test` (declaration, locators, token allowlist, code ↔ this appendix,

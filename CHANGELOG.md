@@ -105,6 +105,16 @@ back.
     undeclared one, and CI checks every non-public route authenticates;
   - a failed forward probe returns `forward.unreachable` instead of the target's raw network
     error (kept in the server log).
+- Second review pass:
+  - a scrollback resync that was already reading the transcript when the terminal locked could
+    still send it; the lock is re-checked right before sending, and an unlock never unlocks (not
+    even for an instant) the clients of an account without its own step-up window;
+  - a second account that can type, attaching to a 2FA terminal without a window while someone
+    is working, now locks only its own view instead of the whole terminal;
+  - the account-id floor is validated: a restored or edited value that is not a sane integer is
+    ignored with a warning and rebuilt from the real sources (existing ids and a new
+    `deleted_accounts` record), so it can neither break account creation nor let an id be
+    reused.
 
 
 ## [3.5.18] — 2026-10-09 · agent (58)
