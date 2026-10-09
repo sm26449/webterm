@@ -347,6 +347,46 @@ CREATE TABLE IF NOT EXISTS replay_opens (
     user_agent TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_replay_opens_link ON replay_opens(link_id, id);
+
+-- Roluri şi legături (3.6.0, docs/design/ROLES-AND-SSH.md §A.3). Un ROL = un set de permisiuni
+-- („ce"); o LEGĂTURĂ = (cont, rol, scope: all | folder | tag | host) („unde"). Pe un host,
+-- permisiunile efective = reuniunea legăturilor al căror scope se potriveşte. Rolurile
+-- predefinite (builtin=1) sunt re-scrise la FIECARE boot din catalogul din cod (authz.py), deci
+-- o permisiune nouă ajunge la ele fără migrare; rândurile builtin sunt read-only.
+CREATE TABLE IF NOT EXISTS roles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key TEXT UNIQUE,                        -- owner|admin|operator|viewer; NULL = rol custom (3.6.1)
+    name TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    perms TEXT NOT NULL DEFAULT '[]',       -- JSON: id-uri din catalog (validate la citire)
+    builtin INTEGER NOT NULL DEFAULT 0,
+    created REAL NOT NULL,
+    updated REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS role_bindings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    role_id INTEGER NOT NULL,
+    scope_kind TEXT NOT NULL,               -- all | folder | tag | host
+    scope_value TEXT NOT NULL DEFAULT '',   -- '' pt. all; numele folderului; tag (lowercase); id host
+    source TEXT NOT NULL DEFAULT 'manual',  -- manual | oidc | migration
+    expires REAL,                           -- NULL = permanentă; rezervat (legături temporare, 3.6.2)
+    created REAL NOT NULL,
+    created_by_id INTEGER,
+    UNIQUE(user_id, role_id, scope_kind, scope_value)
+);
+CREATE INDEX IF NOT EXISTS idx_rb_user ON role_bindings(user_id);
+CREATE INDEX IF NOT EXISTS idx_rb_scope ON role_bindings(scope_kind, scope_value);
+-- grup OIDC → (rol, scope): punct de extensie pentru 3.6.1 (maparea SSO). În 3.6.0 tabela există
+-- dar nu e citită de nimic — un login SSO nu primeşte legături automat.
+CREATE TABLE IF NOT EXISTS oidc_group_roles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    grp TEXT NOT NULL,
+    role_id INTEGER NOT NULL,
+    scope_kind TEXT NOT NULL,
+    scope_value TEXT NOT NULL DEFAULT '',
+    UNIQUE(grp, role_id, scope_kind, scope_value)
+);
 """
 
 # additive migrations for DBs created by an older version
@@ -470,6 +510,21 @@ MIGRATIONS = [
     # `title`/`details` rămân textul englezesc al emailului; NULL = rând vechi → textul stocat.
     "ALTER TABLE alerts ADD COLUMN msg_key TEXT",
     "ALTER TABLE alerts ADD COLUMN msg_params TEXT",
+    # 3.6.0 — roluri (docs/design/ROLES-AND-SSH.md §A.3): tokenurile primesc un plafon de rol +
+    # scope; atribuirea în audit/istoric/sesiuni/snippet-uri devine pe ID de cont, nu pe email.
+    "ALTER TABLE api_tokens ADD COLUMN role_id INTEGER",            # NULL = token vechi (doar scopes)
+    "ALTER TABLE api_tokens ADD COLUMN scope_kind TEXT DEFAULT 'all'",
+    "ALTER TABLE api_tokens ADD COLUMN scope_value TEXT DEFAULT ''",
+    "ALTER TABLE sessions ADD COLUMN created_by_id INTEGER",        # cine a deschis-o (NULL = pre-3.6)
+    "ALTER TABLE sessions ADD COLUMN origin TEXT DEFAULT 'web'",    # web | token | ssh (3.7)
+    "ALTER TABLE command_history ADD COLUMN user_id INTEGER",
+    "ALTER TABLE audit_log ADD COLUMN actor_id INTEGER",
+    "ALTER TABLE audit_log ADD COLUMN host_id INTEGER",             # completat de authz pe rutele de host
+    "ALTER TABLE audit_log ADD COLUMN via TEXT DEFAULT ''",         # cookie | token:<id>
+    "ALTER TABLE snippets ADD COLUMN created_by_id INTEGER",
+    "ALTER TABLE hosts ADD COLUMN crown_jewel INTEGER DEFAULT 0",   # rezervat (§A.11, 3.6.2)
+    "CREATE INDEX IF NOT EXISTS idx_audit_host ON audit_log(host_id, ts)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_log(actor_id, ts)",
 ]
 
 # tabele adăugate ulterior (executeScript de mai sus le creează pe DB-uri noi;
@@ -532,6 +587,16 @@ async def connect() -> None:
     # pt. state-ul ăsta). Elimină un fsync per commit pe calea caldă (heartbeat, checkpoint,
     # istoric) → câștig mare de I/O pe HDD/SD. (busy_timeout e setat mai sus, înainte de migrații.)
     await _conn.execute("PRAGMA synchronous=NORMAL")
+    # Roluri: rolurile predefinite + (o singură dată) fiecare cont existent → Owner @ all. ÎNAINTE
+    # de orice cerere: un upgrade nu are voie să lase nicio clipă un cont fără drepturi.
+    from . import authz
+    try:
+        await authz.seed(_conn)
+    except Exception as e:
+        log.error("ROLE SEEDING FAILED — refusing to start: %s: %s", type(e).__name__, e)
+        await _conn.close()
+        _conn = None
+        raise MigrationError("role seeding: %s: %s" % (type(e).__name__, e)) from e
     # curăță sesiunile web expirate (altfel tabelul crește la nesfârșit)
     await _conn.execute("DELETE FROM web_sessions WHERE expires < ?", (now(),))
     await _conn.commit()

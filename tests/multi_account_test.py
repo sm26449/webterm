@@ -1,9 +1,12 @@
-"""Conturi multiple, TOATE cu drepturi depline (fără RBAC).
+"""Conturi multiple: identităţi separate, atribuire, revocare reală — şi Owner-ii sunt egali.
 
 Cerut de două audituri externe (2026-08-06): la 2-3 oameni, contul partajat face
-imposibilă întrebarea „cine a făcut asta". Ce se schimbă e ATRIBUIREA, nu autorizarea —
-deci testele de aici verifică exact asta: identităţi separate, credenţiale separate,
-revocare reală la ştergere; şi NICIO diferenţă de drepturi între conturi.
+imposibilă întrebarea „cine a făcut asta". Până la 3.5 toate conturile aveau drepturi depline.
+De la 3.6 (roluri, docs/design/ROLES-AND-SSH.md §1) premisa se inversează: un cont NOU nu
+primeşte nimic din oficiu, iar „drepturi depline" înseamnă rolul Owner @ all — deci testul
+verifică acum că doi Owner-i sunt egali (al doilea e creat explicit cu rolul Owner), plus
+identităţi şi credenţiale separate şi revocarea reală la ştergere. Restricţiile pe roluri
+au suitele lor (rbac_*_test.py).
 """
 import asyncio
 import os
@@ -57,8 +60,10 @@ async def main():
                                              "current_password": PW1})
         check("parolă prea scurtă respinsă", r.status_code == 400)
         r = await a.post("/api/users", json={"email": "doi@x.co", "password": PW2,
-                                             "current_password": PW1})
-        check("cont creat cu re-auth", r.status_code == 200 and len(r.json()) == 2)
+                                             "current_password": PW1,
+                                             "role": "owner", "scope_kind": "all"})
+        check("cont creat cu re-auth (Owner @ all, explicit)", r.status_code == 200
+              and len(r.json()) == 2)
         r = await a.post("/api/users", json={"email": "DOI@x.co", "password": PW2,
                                              "current_password": PW1})
         check("email duplicat (case-insensitive) respins", r.status_code == 409)
@@ -91,12 +96,12 @@ async def main():
         me = [u for u in (await a.get("/api/users")).json() if u["is_self"]]
         check("lista marchează contul curent", len(me) == 1 and me[0]["email"] == "unu@x.co")
 
-    # ── contul nou e admin deplin: aceleaşi drepturi, fără roluri ──
+    # ── al doilea Owner e egal cu primul: aceleaşi drepturi ──
     async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=_ORIGIN) as b:
         r = await b.post("/api/login", json={"email": "doi@x.co", "password": PW2})
         check("contul nou se poate autentifica", r.status_code == 200 and r.json().get("ok"))
         r = await b.post("/api/hosts", json={"name": "al-doilea-cont"})
-        check("contul nou poate crea hosturi (drepturi depline, fără RBAC)", r.status_code == 200)
+        check("al doilea Owner poate crea hosturi (Owner-ii sunt egali)", r.status_code == 200)
         hid = r.json()["id"]
         r = await b.get("/api/audit?limit=20")
         entries = r.json()["entries"]
@@ -105,7 +110,7 @@ async def main():
               and any(e["actor"] == "unu@x.co" for e in entries),
               str([(e["actor"], e["path"]) for e in entries[:4]]))
         r = await b.post(f"/api/users/{me[0]['id']}/delete", json={"current_password": PW2})
-        check("un cont poate şterge alt cont (sunt egale)", r.status_code == 200)
+        check("un Owner poate şterge alt Owner (sunt egali; rămâne unul)", r.status_code == 200)
         r = await b.delete(f"/api/hosts/{hid}")
         check("curăţare host", r.status_code in (200, 404))
 

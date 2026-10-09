@@ -1,23 +1,29 @@
-"""Fiecare rută `/api/*` are autentificare — prin enumerare, nu prin listă scrisă de mână.
+"""Fiecare rută îşi DECLARĂ permisiunea — prin enumerare, nu prin listă scrisă de mână.
 
-Autentificarea e opt-in per rută (`user=Depends(security.require_user)`), adică proiectare
-FAIL-OPEN: uiți `Depends`, ruta devine publică și nimic nu se plânge. Acoperirea existentă
-era o listă albă de 14 rute verificate manual, din 111 — restul de 97 nu erau atinse de
-niciun test. O rută nouă fără autentificare trecea verde.
+Istoric: autentificarea era opt-in per rută (`user=Depends(security.require_user)`), adică
+FAIL-OPEN — uiţi `Depends` şi ruta devine publică. Testul enumera `router.routes` şi cerea o
+dependenţă de autentificare sau o intrare în `PUBLIC`, cu motiv.
 
-Testul enumeră `router.routes` și cere ca fiecare să aibă ori o dependență de autentificare,
-ori o intrare în `PUBLIC` de mai jos, cu motiv. Adăugarea unei rute publice devine astfel o
-decizie explicită, scrisă, nu o omisiune.
+De la 3.6 (roluri, docs/design/ROLES-AND-SSH.md §A.6.2) cerinţa e mai strictă: fiecare rută are
+EXACT O dependenţă `authz.perm(...)` (care autentifică ŞI autorizează), ori o intrare în
+`authz.PUBLIC` (credenţialul e în cerere) ori în `authz.SELF` (doar datele proprii), ambele cu
+motiv, în COD — nu în test. Acelaşi tabel îl foloseşte garda de la runtime (`authz.declared`),
+deci o rută uitată e inutilizabilă (500 `authz.undeclared`), nu deschisă.
+
+În plus: fiecare localizator de host (`host=`) numeşte un parametru REAL al rutei (prinde
+`host="hostid"`), iar permisiunea declarată se potriveşte cu matricea din Anexa A a documentului
+de design — documentul şi codul nu au voie să diveargă tăcut.
 """
-import inspect
 import os
 import pathlib
 import re
 import sys
+import tempfile
 
+os.environ.setdefault("WEBTERM_DATA_DIR", tempfile.mkdtemp())
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "gateway"))
 
-from app import api, oidc_api, webauthn_api  # noqa: E402
+from app import api, authz, oidc_api, webauthn_api  # noqa: E402
 
 ok = 0
 total = 0
@@ -30,119 +36,199 @@ def check(name, cond, detail=""):
     print(f"  {'PASS' if cond else 'FAIL'} {name}" + ("" if cond else f"  --  {detail}"))
 
 
-# Rute publice DECLARATE, fiecare cu motivul ei. O intrare nouă aici trebuie să vină cu o
-# frază — diferența dintre „știm de ea" și „ne-a scăpat".
-PUBLIC = {
-    "/healthz": "sonda de liveness a containerului; nu atinge date",
-    "/api/state": "spune doar dacă instalarea are cont — ecranul de setup depinde de el",
-    "/api/setup": "creează PRIMUL cont; se auto-dezactivează după (revendicare atomică)",
-    "/api/login": "poarta însăși",
-    "/api/logout": "trebuie să meargă și cu o sesiune deja invalidă",
-    "/api/shared/{token}": "tokenul de share ESTE credențialul (hash-uit, cu expirare)",
-    "/ws/shared/{token}": "idem, pe WebSocket",
-    # link-urile de replay (3.5.12): tokenul (hash-uit, cu expirare ≤ 7 zile, revocabil) vine în
-    # antetul `X-Replay-Token` — de-asta nu apare în cale; doar GET, rate-limit per IP, 404 unic
-    "/api/replay/meta": "tokenul de replay ESTE credenţialul; doar titlul/eticheta înregistrării",
-    "/api/replay/cast": "idem; înregistrarea UNEI sesiuni închise (mascată opţional), auditată",
-    "/api/replay/text": "idem; vizualizarea text a aceleiaşi înregistrări, auditată",
-    "/ws/sessions/{sid}": "autentifică în handler cu `require_user_ws` (Depends nu merge pe WS)",
-    "/agent/ws": "agentul se autentifică cu tokenul lui de host, în handshake",
-    "/agent/uninstalled": ("agentul anunţă că a fost scos de pe host; se autentifică cu "
-                           "tokenul LUI, nu cu o sesiune de utilizator. Nu şterge nimic — "
-                           "doar marchează, iar ştergerea rămâne o acţiune din UI"),
-    "/agent/ptyd.py": "sursa agentului: publică prin construcție, verificată prin semnătură",
-    "/agent/shell-integration.sh": "idem; integritatea se verifică prin sha256, nu prin auth",
-    "/install/{enroll_token}": "tokenul de enroll E credențialul; expiră în 24h, single-use",
-    "/install/group/{group_token}": ("tokenul de grup E credenţialul; opt-in, expiră, revocabil, "
-                                     "plafon de utilizări, auto-enroll auditat + alertat"),
-    "/__wtfwd/auth": "handshake-ul de forward; validează cookie-ul de sesiune în corp",
-    "/api/webauthn/login/options": "ceremonia de login cu passkey — ÎNAINTE de a avea sesiune",
-    "/api/webauthn/login/verify": "idem; verifică asserţiunea şi ABIA apoi deschide sesiunea",
-    "/api/oidc/status": "spune doar dacă SSO e activ + numele providerului — ecranul de login depinde de el",
-    "/api/oidc/login": "porneşte flow-ul OIDC — ÎNAINTE de a avea sesiune (redirect la IdP)",
-    "/api/oidc/callback": ("întoarcerea de la IdP: apărată de `state` (anti-CSRF, single-use) "
-                           "şi de validarea `id_token`, nu de o sesiune existentă"),
-}
-
-
 # TOATE routerele montate în `main.py`, nu doar `api`. Prima versiune a testului enumera
 # doar `api.router` şi rata complet `webauthn_api.router` — adică exact suprafaţa care
 # manevrează passkey-urile şi step-up-ul 2FA, unde costul unei omisiuni e cel mai mare.
-# Un test care acoperă jumătate din suprafaţă e mai rău decât niciunul: dă senzaţia de plasă.
 ROUTERS = {"api": api.router, "webauthn_api": webauthn_api.router, "oidc_api": oidc_api.router}
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+
+def _methods(r):
+    m = getattr(r, "methods", None)
+    return sorted(m) if m else ["WS"]
+
+
+def _body_fields(route) -> set:
+    """Câmpurile modelului de corp (pentru localizatorii `body:<câmp>`)."""
+    out = set()
+    dependant = getattr(route, "dependant", None)
+    for p in getattr(dependant, "body_params", []) or []:
+        ann = getattr(p, "field_info", None)
+        t = getattr(p, "type_", None) or getattr(getattr(p, "field_info", None), "annotation", None)
+        model = getattr(p, "type_", None)
+        for cand in (model, getattr(ann, "annotation", None), t):
+            fields = getattr(cand, "model_fields", None)
+            if fields:
+                out |= set(fields)
+    return out
+
+
+def _doc_matrix() -> dict:
+    """(METHOD, path) → (celula începe cu `—`, prima permisiune din coloana `Perm` a Anexei A)."""
+    doc = (ROOT / "docs" / "design" / "ROLES-AND-SSH.md").read_text(encoding="utf-8")
+    start = doc.index("## Appendix A")
+    end = doc.index("## Appendix B")
+    out = {}
+    for line in doc[start:end].splitlines():
+        if not line.startswith("| `"):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) < 3:
+            continue
+        m = re.match(r"`([^`]+)`", cells[0])
+        if not m:
+            continue
+        path = m.group(1)
+        perm = re.search(r"`([a-z]+\.[a-z_]+|run)`", cells[2])
+        dash = cells[2].startswith("—")
+        for meth in re.split(r"[/, ]+", cells[1]):
+            meth = meth.strip().upper()
+            if meth in ("GET", "POST", "PATCH", "DELETE", "PUT", "WS", "ANY"):
+                out[(meth, path)] = (dash, perm.group(1) if perm else None)
+    return out
 
 
 def main():
     routes = [r for rt in ROUTERS.values() for r in rt.routes if getattr(r, "path", None)]
     check("routerul chiar are rute (testul nu e gol)", len(routes) > 50, str(len(routes)))
 
-    # Garda de completitudine: dacă cineva montează un router nou în main.py şi uită să-l
-    # adauge aici, testul trebuie să CADĂ — altfel se repetă exact omisiunea de mai sus.
-    main_src = pathlib.Path(__file__).resolve().parent.parent / "gateway" / "app" / "main.py"
+    # Garda de completitudine: un router nou montat în main.py şi uitat aici → testul CADE.
+    main_src = ROOT / "gateway" / "app" / "main.py"
     mounted = set(re.findall(r"app\.include_router\((\w+)\.router\)", main_src.read_text()))
     check("fiecare router montat în main.py e acoperit de test",
           mounted == set(ROUTERS), f"montate: {sorted(mounted)} | acoperite: {sorted(ROUTERS)}")
 
-    unguarded = []
+    # 1. garda de runtime e pe TOATE routerele (plasa care acoperă şi un build patch-uit la cald)
+    for name, rt in ROUTERS.items():
+        has = any(getattr(d, "dependency", None) is authz.declared for d in rt.dependencies)
+        check(f"routerul `{name}` are garda fail-closed `authz.declared`", has)
+
+    # 2. fiecare rută: exact un perm(), sau PUBLIC / SELF cu motiv
+    undeclared, multi, both = [], [], []
     for r in routes:
-        ep = getattr(r, "endpoint", None)
-        if ep is None:
-            continue
-        # Două forme, amândouă corecte în FastAPI:
-        #   def f(user=Depends(security.require_user))        — în semnătură
-        #   @router.get(..., dependencies=[Depends(...)])     — pe rută
-        # Testul se uita doar la prima, deci respingea forma idiomatică de decorator. Un
-        # contribuitor care scrie corect primea eroare, iar „reparaţia" la îndemână era să-şi
-        # adauge ruta în PUBLIC — adică s-o declare publică pe una păzită. Un fals-pozitiv
-        # care împinge spre defectul real e mai rău decât o omisiune.
-        guarded = "require_user" in str(inspect.signature(ep)) or \
-                  "require_scope" in str(inspect.signature(ep))
-        for dep in getattr(r, "dependencies", []) or []:
-            call = getattr(dep, "dependency", None)
-            if call is not None and getattr(call, "__name__", "") in (
-                    "require_user", "require_scope", "require_user_ws"):
-                guarded = True
-            # `require_scope("read")` întoarce o closure — îi verificăm originea
-            if call is not None and getattr(call, "__qualname__", "").startswith("require_scope"):
-                guarded = True
-        if guarded:
-            continue
-        if r.path in PUBLIC:
-            continue
-        methods = ",".join(sorted(getattr(r, "methods", []) or [])) or "WS"
-        unguarded.append(f"{methods} {r.path}")
+        kind, spec = authz.route_spec(r)
+        label = "%s %s" % (",".join(_methods(r)), r.path)
+        if kind == "none":
+            undeclared.append(label)
+        elif kind == "multi":
+            multi.append(label)
+        elif kind == "perm" and (r.path in authz.PUBLIC
+                                 or any((m, r.path) in authz.SELF for m in _methods(r))):
+            both.append(label)
+    check("nicio rută fără permisiune declarată", not undeclared,
+          "adaugă Depends(authz.perm(...)) sau o intrare în authz.PUBLIC/SELF cu motiv: "
+          + ", ".join(sorted(undeclared)))
+    check("nicio rută cu mai multe dependenţe perm()", not multi, ", ".join(sorted(multi)))
+    check("nicio rută cu perm() ŞI în PUBLIC/SELF (ambiguu)", not both, ", ".join(sorted(both)))
 
-    check("nicio rută nepăzită și nedeclarată", not unguarded,
-          "adaugă Depends(require_user/require_scope) sau o intrare în PUBLIC cu motiv: "
-          + ", ".join(sorted(unguarded)))
+    # 3. nicio rută nu mai foloseşte direct require_scope (tokenurile trec prin perm(tokens=…))
+    legacy = []
+    for r in routes:
+        dep = getattr(r, "dependant", None)
+        for d in getattr(dep, "dependencies", []) or []:
+            q = getattr(d.call, "__qualname__", "")
+            if q.startswith("require_scope"):
+                legacy.append(r.path)
+    check("nicio rută pe `security.require_scope` (înlocuit de perm(tokens=…))", not legacy,
+          str(legacy))
 
-    # Invers: o intrare în PUBLIC care nu mai corespunde niciunei rute e o listă albă care
-    # se lărgește tăcut — exact clasa pe care `check_exists` din run-tests.sh o păzește.
+    # 4. motive nevide + nicio intrare orfană în PUBLIC/SELF
     paths = {r.path for r in routes}
-    stale = sorted(p for p in PUBLIC if p not in paths)
-    check("nicio intrare PUBLIC orfană", not stale, str(stale))
+    pairs = {(m, r.path) for r in routes for m in _methods(r)}
+    check("fiecare intrare PUBLIC are motiv", all(v.strip() for v in authz.PUBLIC.values()))
+    check("fiecare intrare SELF are motiv", all(v.strip() for v in authz.SELF.values()))
+    stale_p = sorted(p for p in authz.PUBLIC if p not in paths)
+    check("nicio intrare PUBLIC orfană", not stale_p, str(stale_p))
+    stale_s = sorted("%s %s" % k for k in authz.SELF if k not in pairs)
+    check("nicio intrare SELF orfană", not stale_s, str(stale_s))
 
-    # Rutele publice care SCRIU (nu doar citesc) sunt cele mai periculoase: fiecare trebuie
-    # să fie ori poarta de autentificare însăși, ori să aibă credențialul în URL.
-    # Verificăm METODELE, nu numele căii.
-    # Ceremonia WebAuthn de LOGIN e POST prin natura ei (trimite provocarea şi asserţiunea),
-    # şi trebuie să fie publică — se petrece înainte de a exista o sesiune. E poarta însăşi,
-    # ca `/api/login`.
-    # `/agent/uninstalled` scrie, dar scrie PUŢIN şi cu credenţial: tokenul hostului, acelaşi
-    # cu care agentul deschide WS-ul. Singurul efect e un marcaj („agentul a fost scos de pe
-    # host"), niciodată o ştergere — ştergerea rămâne o acţiune autentificată din UI, tocmai
-    # ca cine are shell pe o maşină să nu poată face hostul să dispară din tabloul operatorului.
+    # 5. localizatorii de host numesc parametri REALI ai rutei
+    bad_loc = []
+    for r in routes:
+        kind, spec = authz.route_spec(r)
+        if kind != "perm" or spec.host is None:
+            continue
+        params = set(re.findall(r"{(\w+)}", r.path))
+        if spec.host.startswith("body:"):
+            field = spec.host[5:]
+            if field not in _body_fields(r):
+                bad_loc.append("%s %s: %s" % (",".join(_methods(r)), r.path, spec.host))
+        elif spec.host not in params:
+            bad_loc.append("%s %s: %s" % (",".join(_methods(r)), r.path, spec.host))
+    check("fiecare `host=` numeşte un parametru real (cale sau corp)", not bad_loc, str(bad_loc))
+
+    # 6. permisiunile declarate există în catalog; tokenurile doar pe lista albă scurtă
+    unknown, tok_routes = [], set()
+    for r in routes:
+        kind, spec = authz.route_spec(r)
+        if kind == "perm":
+            unknown += [p for p in spec.perm if p not in authz.PERMS]
+            if spec.tokens:
+                tok_routes |= {(m, r.path) for m in _methods(r)}
+    check("toate permisiunile declarate sunt în catalog", not unknown, str(unknown))
+    expected_tok = {("GET", "/api/status"), ("GET", "/api/hosts"), ("GET", "/api/sessions"),
+                    ("POST", "/api/hosts/{host_id}/run")}
+    check("tokenurile de automatizare: EXACT lista albă de dinainte (status/hosts/sessions/run)",
+          tok_routes == expected_tok, str(sorted(tok_routes ^ expected_tok)))
+
+    # 7. codul ↔ Anexa A din documentul de design
+    docm = _doc_matrix()
+    mism = []
+    for r in routes:
+        kind, spec = authz.route_spec(r)
+        for m in _methods(r):
+            want = docm.get((m, r.path), "MISSING")
+            if want == "MISSING":
+                mism.append("%s %s: lipseşte din Anexa A" % (m, r.path))
+                continue
+            dash, dperm = want
+            if kind in ("public", "self"):
+                good = dash               # fără permisiune în cod ⇔ `—` în document
+            elif spec.list:
+                good = dperm == spec.perm[0]      # listă: „— / perm" sau „perm", filtrată
+            else:
+                good = not dash and dperm == spec.perm[0]
+            if not good:
+                mism.append("%s %s: cod=%s doc=%s" % (
+                    m, r.path, spec.perm[0] if kind == "perm" else kind, dperm or "—"))
+    check("permisiunea fiecărei rute = cea din Anexa A (docs/design/ROLES-AND-SSH.md)",
+          not mism, "\n      " + "\n      ".join(mism))
+
+    # 8. Rutele publice care SCRIU sunt cele mai periculoase: fiecare e ori poarta de
+    # autentificare însăşi, ori are credenţialul în cerere. Verificăm METODELE, nu numele.
     WRITE_OK = {"/api/setup", "/api/login", "/api/logout", "/install/{enroll_token}",
                 "/api/webauthn/login/options", "/api/webauthn/login/verify",
                 "/agent/uninstalled"}
     writers = set()
     for r in routes:
-        if r.path not in PUBLIC:
+        if r.path not in authz.PUBLIC:
             continue
         if {"POST", "PUT", "PATCH", "DELETE"} & set(getattr(r, "methods", []) or []):
             writers.add(r.path)
     check("orice rută publică ce scrie e declarată ca atare", not (writers - WRITE_OK),
           "publice + scriu, nedeclarate: " + str(sorted(writers - WRITE_OK)))
+
+    # 9. garda de runtime chiar refuză o rută nedeclarată (fail-closed, nu doar în CI)
+    import asyncio
+    from fastapi import APIRouter, FastAPI
+    import httpx
+    probe = APIRouter(dependencies=[__import__("fastapi").Depends(authz.declared)])
+
+    @probe.get("/api/__undeclared_probe")
+    async def _undeclared():          # noqa: ANN202
+        return {"open": True}
+
+    tapp = FastAPI()
+    tapp.include_router(probe)
+
+    async def _hit():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=tapp),
+                                     base_url="http://t") as c:
+            return await c.get("/api/__undeclared_probe")
+    resp = asyncio.run(_hit())
+    check("o rută NEDECLARATĂ răspunde 500 authz.undeclared (nu e deschisă)",
+          resp.status_code == 500 and resp.headers.get("x-webterm-error") == "authz.undeclared",
+          "%s %s" % (resp.status_code, resp.text[:120]))
 
     print(f"\n{ok}/{total} teste trecute")
     return ok == total

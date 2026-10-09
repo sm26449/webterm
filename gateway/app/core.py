@@ -1551,6 +1551,10 @@ class SessionHub:
         if self.closed:
             return                     # sesiune terminată/teardown: cast_f e închis →
                                        # _cast_event ar arunca ValueError și ar crăpa WS-ul
+        if not getattr(client, "writable", True):
+            # 3.6: un client read-only (invitat read-only SAU un cont cu doar `session.watch`) nu
+            # scrie niciodată în PTY — handler-ele WS filtrează deja; asta e plasa din hub.
+            return
         if self.locked or getattr(client, "locked", False):
             # ŞI per-client: `shared_ws` blochează invitatul cu `client.lock()`, nu cu
             # `hub.lock()` (corect — un invitat n-are voie să blocheze sesiunea owner-ului).
@@ -1590,7 +1594,9 @@ class SessionHub:
             return
         now = time.time()
         client.last_interaction = now
-        if client.is_owner:
+        # 3.6: doar un client care POATE scrie ţine terminalul treaz — un watcher read-only nu
+        # amână idle-lock-ul unei sesiuni 2FA în locul celui care a plecat de la tastatură
+        if client.is_owner and getattr(client, "writable", True):
             self.last_interaction = now
 
     async def resize(self, rows: int, cols: int) -> None:
@@ -3027,7 +3033,18 @@ async def purge_host(host_id: int, *, _depth: int = 0) -> None:
     # istoricul de comenzi e un jurnal GLOBAL (audit-lite) cu `host_name` propriu: îl păstrăm,
     # dar rupem legătura pe id ca filtrul „pe host" să nu-l atribuie următorului host cu acelaşi id
     await db.execute("UPDATE command_history SET host_id=NULL WHERE host_id=?", host_id)
+    # 3.6 (roluri): id-ul se REUTILIZEAZĂ, deci tot ce acordă acces pe `host:<id>` moare odată cu
+    # hostul — altfel o legătură (sau un token plafonat pe host) rămasă s-ar lipi singură de
+    # următorul host cu acelaşi id. Rândurile de audit primesc id-ul negat (ca cheile de deploy):
+    # rămân în jurnal, dar nu mai sunt atribuite hostului nou.
+    await db.execute("DELETE FROM role_bindings WHERE scope_kind='host' AND scope_value=?",
+                     str(host_id))
+    await db.execute("DELETE FROM api_tokens WHERE scope_kind='host' AND scope_value=?",
+                     str(host_id))
+    await db.execute("UPDATE audit_log SET host_id=? WHERE host_id=?", -host_id, host_id)
     await db.execute("DELETE FROM hosts WHERE id=?", host_id)
+    from . import authz
+    authz.bump_epoch()
 
     # starea din RAM cheiată pe host_id — ar fi moştenită de hostul următor cu acelaşi id
     pending_updates.pop(host_id, None)
@@ -3092,7 +3109,8 @@ async def sweep_stepup_caps() -> None:
         if not hub.stepup_cap or hub.locked or hub.closed:
             continue
         for c in list(hub.clients):
-            if c.is_owner and c.user_id is not None:
+            # 3.6: doar un client care poate SCRIE re-autorizează terminalul (nu un watcher)
+            if c.is_owner and c.user_id is not None and getattr(c, "writable", True):
                 hub.note_authorized(security.stepup_window_opened_at(c.user_id, hub.host_id))
         # authorized_at None pe un hub 2FA deblocat n-ar trebui să apară (ataşarea deblocată îl
         # setează) — fail-closed: tratat ca expirat.

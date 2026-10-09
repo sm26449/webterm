@@ -70,7 +70,10 @@ async def main():
             httpx.AsyncClient(transport=transport, base_url="http://t", headers=_ORIGIN) as b, \
             httpx.AsyncClient(transport=transport, base_url="http://t", headers=_ORIGIN) as anon:
         await a.post("/api/setup", json={"email": "unu@x.co", "password": PW1, "setup_token": "test-setup"})
-        r = await a.post("/api/users", json={"email": "doi@x.co", "password": PW2, "current_password": PW1})
+        # 3.6: al doilea cont e un Owner EXPLICIT (un cont nou nu mai primeşte nimic din oficiu);
+        # fan-out-ul de mai jos verifică exact „fiecare Owner primeşte copia lui"
+        r = await a.post("/api/users", json={"email": "doi@x.co", "password": PW2, "current_password": PW1,
+                                             "role": "owner", "scope_kind": "all"})
         check("al doilea cont creat", r.status_code == 200, r.text[:120])
         u1 = (await db.fetchone("SELECT id FROM users WHERE email='unu@x.co'"))["id"]
         u2 = (await db.fetchone("SELECT id FROM users WHERE email='doi@x.co'"))["id"]

@@ -16,6 +16,12 @@ proces se spune explicit, în loc să se pretindă făcut.
     docker exec -it webterm-app-1 python3 -m app.admin passwd you@example.com
     docker exec -it webterm-app-1 python3 -m app.admin disable-2fa you@example.com
     docker exec -it webterm-app-1 python3 -m app.admin logout-all you@example.com
+    docker exec -it webterm-app-1 python3 -m app.admin roles you@example.com
+    docker exec -it webterm-app-1 python3 -m app.admin promote you@example.com
+
+`promote` (3.6) e calea break-glass a rolurilor: face contul Owner peste toată flota. Cine are
+shell pe server are deja DB-ul şi cheia seifului, deci comanda nu acordă nimic nou — doar
+repară corect o instalare în care nimeni nu mai e Owner (ex. un restore parţial).
 """
 import argparse
 import asyncio
@@ -55,6 +61,24 @@ async def _revoke_everything(user_id: int, why: str) -> None:
           " `docker compose restart app` kills them now")
 
 
+async def _bindings_text(user_id: int) -> str:
+    rows = await db.fetchall(
+        "SELECT r.key, b.scope_kind, b.scope_value FROM role_bindings b JOIN roles r"
+        " ON r.id=b.role_id WHERE b.user_id=? ORDER BY b.id", user_id)
+    if not rows:
+        return "(no access)"
+    return ", ".join("%s@%s" % (r["key"], r["scope_kind"] if r["scope_kind"] == "all"
+                                else "%s:%s" % (r["scope_kind"], r["scope_value"])) for r in rows)
+
+
+async def _bump_authz_epoch() -> None:
+    """Gateway-ul rulează în ALT proces; îi spunem prin DB că legăturile s-au schimbat (bucla
+    lui de 60 s citeşte cheia şi invalidează cache-ul de permisiuni + re-verifică socket-urile)."""
+    await db.execute(
+        "INSERT INTO app_settings(key, value) VALUES('authz_epoch', ?)"
+        " ON CONFLICT(key) DO UPDATE SET value=excluded.value", "%.6f" % time.time())
+
+
 async def cmd_list(_args) -> None:
     rows = await db.fetchall(
         "SELECT u.id, u.email, u.created, u.totp_enabled,"
@@ -64,10 +88,35 @@ async def cmd_list(_args) -> None:
     if not rows:
         print("(no accounts — the instance has not been set up yet)")
         return
-    print("%-34s %-6s %-9s %s" % ("EMAIL", "2FA", "PASSKEYS", "LIVE SESSIONS"))
+    print("%-34s %-6s %-9s %-14s %s" % ("EMAIL", "2FA", "PASSKEYS", "LIVE SESSIONS", "ROLES"))
     for r in rows:
-        print("%-34s %-6s %-9d %d" % (r["email"], "on" if r["totp_enabled"] else "off",
-                                      r["passkeys"], r["live"]))
+        print("%-34s %-6s %-9d %-14d %s" % (r["email"], "on" if r["totp_enabled"] else "off",
+                                            r["passkeys"], r["live"],
+                                            await _bindings_text(r["id"])))
+
+
+async def cmd_roles(args) -> None:
+    user = await _find(args.email)
+    print("%s: %s" % (user["email"], await _bindings_text(user["id"])))
+
+
+async def cmd_promote(args) -> None:
+    """Owner @ all, idempotent. Auditat în jurnalul aplicaţiei, ca orice schimbare de acces."""
+    user = await _find(args.email)
+    role = await db.fetchone("SELECT id FROM roles WHERE key='owner'")
+    if not role:
+        print("the built-in roles are missing — start the gateway once first", file=sys.stderr)
+        raise SystemExit(2)
+    await db.execute(
+        "INSERT OR IGNORE INTO role_bindings(user_id, role_id, scope_kind, scope_value, source,"
+        " created) VALUES(?,?,'all','','manual',?)", user["id"], role["id"], time.time())
+    await db.execute(
+        "INSERT INTO audit_log(ts, actor, ip, method, path, status, detail, actor_id, via)"
+        " VALUES(?,?,?,?,?,?,?,?,?)", time.time(), "admin-cli", "-", "CLI", "/admin/promote", 200,
+        "promoted %s to Owner @ all hosts (break-glass)" % user["email"], user["id"], "cli")
+    await _bump_authz_epoch()
+    print("✓ %s is now Owner over all hosts (%s)" % (user["email"], await _bindings_text(user["id"])))
+    print("· the running gateway picks this up within about a minute")
 
 
 def _read_new_password() -> str:
@@ -123,12 +172,17 @@ async def main() -> None:
     p.add_argument("email")
     p = sub.add_parser("logout-all", help="kill every web session and share link of the account")
     p.add_argument("email")
+    p = sub.add_parser("roles", help="show the account's role bindings")
+    p.add_argument("email")
+    p = sub.add_parser("promote", help="make the account Owner over all hosts (break-glass)")
+    p.add_argument("email")
     args = ap.parse_args()
 
     await db.connect()
     try:
         await {"list": cmd_list, "passwd": cmd_passwd,
-               "disable-2fa": cmd_disable_2fa, "logout-all": cmd_logout_all}[args.cmd](args)
+               "disable-2fa": cmd_disable_2fa, "logout-all": cmd_logout_all,
+               "roles": cmd_roles, "promote": cmd_promote}[args.cmd](args)
     finally:
         await db.close()
 

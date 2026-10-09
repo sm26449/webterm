@@ -17,10 +17,10 @@ from webauthn.helpers.structs import (AuthenticatorSelectionCriteria,
                                       ResidentKeyRequirement,
                                       UserVerificationRequirement)
 
-from . import config, db, email_alerts, security
+from . import authz, config, db, email_alerts, security
 from .errors import ApiError
 
-router = APIRouter(prefix="/api/webauthn")
+router = APIRouter(prefix="/api/webauthn", dependencies=[Depends(authz.declared)])
 
 # issued challenges (single-user tool: a small in-memory set is plenty)
 _challenges = {}          # b64url(challenge) -> expiry epoch
@@ -265,7 +265,7 @@ class StepupVerify(BaseModel):
 
 
 @router.post("/stepup/options")
-async def stepup_options(body: StepupOptions, user=Depends(security.require_user)):
+async def stepup_options(body: StepupOptions, user=Depends(authz.perm('host.view', host='body:host_id', zero_is_self=True))):
     """La fel ca login/options, dar autentificat și limitat la passkey-urile
     utilizatorului curent (nu e un login nou, ci o re-verificare)."""
     creds = await db.fetchall(
@@ -282,7 +282,7 @@ async def stepup_options(body: StepupOptions, user=Depends(security.require_user
 
 @router.post("/stepup/verify")
 async def stepup_verify(body: StepupVerify, request: Request,
-                        user=Depends(security.require_user)):
+                        user=Depends(authz.perm('host.view', host='body:host_id', zero_is_self=True))):
     ip = security.client_ip(request)
     allowed, retry = security.login_allowed(ip)
     if not allowed:

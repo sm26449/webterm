@@ -1,6 +1,7 @@
 # Roles (3.6.x) and native SSH access (3.7.x)
 
-**Status:** proposal for maintainer review. Nothing here is implemented yet.
+**Status:** Part A milestone **3.6.0 (roles core) implemented** — see §7 for the implementation
+notes and the deviations from this text. 3.6.1/3.6.2 and Part B are still proposals.
 **Written:** 2026-10-09, against `main` at `fa9f026` (WebTerm 3.5.16, agent 58).
 **Audience:** the maintainer deciding scope, and whoever then builds it.
 
@@ -1201,6 +1202,97 @@ These are candidates for after 3.7, listed so they are not forgotten. None is pr
 
 ---
 
+## 7. Implementation notes (3.6.0)
+
+Milestone 3.6.0 is implemented in `gateway/app/authz.py` (catalogue, built-in roles, grants,
+`perm()`, the runtime guard, `PUBLIC`/`SELF`, seeding) plus the route and handler changes in
+`api.py`, `webauthn_api.py`, `oidc_api.py`, `alert_history.py`, `audit.py`, `main.py`,
+`admin.py` and `core.py` (read-only clients only). Where the code differs from the text above,
+the code is right and the reason is here.
+
+**Enforcement**
+
+- `perm()` returns exactly what `security.require_user` / `require_scope` returned, so handlers
+  did not change shape. `require_scope` is no longer used on routes; the token allowlist is
+  `perm(…, tokens="read"|"run")` on the same four routes.
+- **List routes never deny** (`list=True`). The text said a list passes "if the permission exists
+  on ≥1 host"; an account with no access would then get 403s instead of the empty fleet that the
+  "no access yet" UI needs. An empty list leaks nothing.
+- **Fast path:** when the permission holds on every host (a scope-`all` binding), `perm()` does
+  not look the host up, so an Owner's response for a missing host is byte-identical to 3.5. A
+  scoped principal gets the uniform 404 for both "missing" and "not visible".
+- 404 bodies per locator are the handlers' own: `host.missing`, `session.missing`,
+  `forward.missing`, `replay.missing`.
+- Body locators follow the code's field names: `/api/fs/copy` is `src_host` / `dst_host`.
+- `/__wtfwd/auth` and the WebSocket handlers authorize inside the handler (a dependency cannot
+  close a socket with our codes); `browser_ws` is declared with `authz.ws_perm`, `/__wtfwd/auth`
+  stays in `PUBLIC` and checks `forward.use` itself.
+- Binding removal is `POST /api/users/{uid}/bindings/{bid}/delete` with a reauth body (like
+  account deletion), not a DELETE with a body. `GET /api/roles` ships read-only in 3.6.0 (the UI
+  needs the catalogue); editing roles stays 3.6.1.
+
+**Stricter than the text (fail-closed choices)**
+
+- Session control: rename, kill, delete **and reconnect** need `session.open` plus own session
+  (or pre-3.6 `NULL`) or `session.manage`.
+- `POST /api/hosts/test` with `host_id` uses that host's stored credential, so it also needs
+  `host.edit` on it (besides `hosts.create`, and `forward.manage` on a jump `via`).
+- `POST /api/history` without a host needs `session.open` on at least one host.
+- Snippets with no recorded creator (pre-3.6) are editable only with `snippets.manage`; creating
+  a duplicate snippet no longer re-targets someone else's.
+- Deploy-key rotation refuses up front if any active target is outside the caller's
+  `deploykey.manage` scope (it would otherwise leave that edge half-rotated). `GET deploy-key`
+  keeps out-of-scope edges in the list but blanks their names and ids.
+- `GET /api/hosts/{id}/forwards` blanks `target_host`/`target_port` without `forward.manage`.
+- Replay-link listing stays own-only even with `shares.manage` (the matrix's "— / shares.manage"
+  would have widened it); `POST /api/shares/revoke-all` is global only with `shares.manage`,
+  otherwise it revokes your own links.
+- A read-only WebSocket client cannot resize or kick, and only writable clients keep a 2FA
+  terminal awake (`touch`, idle-lock) or re-authorize the 60-minute step-up cap — a watcher must
+  not hold a terminal open for someone who walked away. A live downgrade (open → watch) is applied
+  at once; an upgrade needs a reconnect.
+- `/api/state` filters host-key alarms to visible hosts and shows the backup / signing dots only
+  to holders of `backups.manage` / `signing.manage`; `/api/totp/status` counts only visible 2FA
+  hosts; the security summary without `security.view` returns only the account check.
+
+**Tokens**
+
+- Legacy scopes map to the permissions today's read routes need, or an upgrade would silently
+  empty existing monitoring tokens: `read` → `host.view`, `session.watch`, `recording.view`
+  (+ `security.view` for the status details); `run` → `host.view`, `run`. The legacy scope check
+  stays in front, and the result is then capped by the optional role/scope and by the creator.
+- Global permissions come only from scope-`all` bindings, so an Operator bound to a folder has no
+  `tokens.create`; an Operator over all hosts does.
+
+**Accounts, SSO, alerts**
+
+- A new account, including a **new SSO user**, gets no binding ("no access yet"). The group →
+  role mapping is 3.6.1, so until then an Owner/Admin grants access by hand. The
+  `oidc_group_roles` table already exists, unused. Accounts that existed at upgrade (SSO ones
+  included) were seeded as Owner.
+- Creating an account and changing bindings accept the SSO account-scope re-auth (passkey grant
+  or the SSO window), as `/api/account` does. Before, an SSO admin could not create accounts.
+- No new `rbac_changed` alert kind: a binding change notifies `admin_change` (→ `security.view`
+  holders, new message keys `role_granted` / `role_removed`) and `account_change` (→ the affected
+  account, `access_changed`), so no new preference row appears.
+- Webhook/e-mail delivery is unchanged: an event still leaves if at least one recipient wants it,
+  and an event with no recipient at all still leaves (the instance mailbox is the admins').
+
+**Data**
+
+- Seeding runs in `db.connect()` after the PRAGMAs (writes cannot precede `PRAGMA synchronous`).
+  `hosts.crown_jewel` exists but is unused (3.6.2).
+- The admin CLI gained `roles <email>` and `promote <email>`; it writes
+  `app_settings['authz_epoch']`, which the gateway polls from its 60-second reaper loop. Cached
+  grants also expire after 30 seconds on their own.
+
+**Tests:** `route_auth_test` (declaration, locators, token allowlist, code ↔ this appendix,
+runtime guard), `rbac_matrix_test` (generated from `authz.route_perms`: 6 principals × every
+non-public HTTP route, plus the no-oracle 404 comparison and authz-before-step-up),
+`rbac_filter_test`, `rbac_escalation_test`, `rbac_ws_test`, `rbac_migration_test`.
+
+---
+
 ## Appendix A: Route-by-route permission matrix
 
 Legend:
@@ -1245,7 +1337,7 @@ middleware plus ASGI WS middleware in `main.py`) and the SPA/asset catch-all. Li
 | `/agent/uninstalled` (8715) | POST | — | P | host token |
 | `/agent/ptyd.py` (8749) | GET | — | P | |
 | `/agent/shell-integration.sh` (8798) | GET | — | P | |
-| `/__wtfwd/auth` (5325) | GET | `forward.use` | H(slug→host) | **today only checks the session**; add the perm check before issuing the ticket |
+| `/__wtfwd/auth` (5325) | GET | — (handler checks `forward.use`) | P + H(slug→host) | PUBLIC route (the session cookie is validated in the handler); 3.6.0 checks `forward.use` on the forward's host before issuing the ticket: invisible host → the same 404 as a missing forward |
 | `/api/webauthn/login/options` (wa:205) | POST | — | P | |
 | `/api/webauthn/login/verify` (wa:215) | POST | — | P | |
 | `/api/oidc/status` (oi:40) | GET | — | P | |
@@ -1284,7 +1376,7 @@ middleware plus ASGI WS middleware in `main.py`) and the SPA/asset catch-all. Li
 | `/api/webauthn/stepup/verify` (wa:284) | POST | `host.view` | H(body) | idem; also resolves pending SSH approvals (3.7) |
 | `/api/webauthn/credentials` (wa:321) | GET | — | S | |
 | `/api/webauthn/credentials/{cred_id}` (wa:334) | DELETE | — | S | |
-| *new* `/api/me/permissions` | GET | — | S | §A.9 |
+| `/api/me/permissions` | GET | — | S | §A.9 (3.6.0) |
 | *new* `/api/account/ssh-keys` (3.7) | GET/POST/DELETE | — | S | second gate on POST/DELETE |
 
 ### A.3 Users, roles, tokens, enroll groups (G)
@@ -1294,8 +1386,11 @@ middleware plus ASGI WS middleware in `main.py`) and the SPA/asset catch-all. Li
 | `/api/users` (768) | GET | `users.manage` | G / S | without the perm → `[self]` ⚠ |
 | `/api/users` (779) | POST | `users.manage` | G | body gains role + scope; no-escalation |
 | `/api/users/{uid}/delete` (809) | POST | `users.manage` | G | Owners only by Owners; tokens are already deleted, add bindings + SSH keys |
-| *new* `/api/users/{uid}/bindings` | GET/POST/DELETE | `users.manage` | G | §A.6.6 |
-| *new* `/api/roles`, `/api/roles/{id}` | GET/POST/PATCH/DELETE | `roles.manage` (GET: `users.manage`) | G | 3.6.1 |
+| `/api/users/{uid}/bindings` | GET | `users.manage` | G | 3.6.0 |
+| `/api/users/{uid}/bindings` | POST | `users.manage` | G | §A.6.6; reauth + second gate (3.6.0) |
+| `/api/users/{uid}/bindings/{bid}/delete` | POST | `users.manage` | G | POST with a body (reauth), like account deletion — a DELETE with a body is badly supported by clients (3.6.0) |
+| `/api/roles` | GET | `users.manage` | G | catalogue + built-in roles (3.6.0) |
+| *new* `/api/roles`, `/api/roles/{id}` | POST/PATCH/DELETE | `roles.manage` | G | 3.6.1 |
 | *new* `/api/authz/explain` | GET | `users.manage` (or self) | G | |
 | *new* `/api/settings/oidc-roles` | GET/POST | `users.manage` | G | 3.6.1 |
 | `/api/tokens` (987) | GET | `tokens.create` | S / G | own; all with `tokens.manage` ⚠ |
@@ -1440,7 +1535,7 @@ middleware plus ASGI WS middleware in `main.py`) and the SPA/asset catch-all. Li
 | `/api/fs/copy` (2752) | POST | `files.read` (src) + `files.write` (dst) | H(body: src, dst) | su (both) | job stores `user_id` |
 | `/api/fs/copy/{job_id}` (2807) | GET | — (job owner / Owner) | S | | ⚠ today any account sees any job |
 | `/api/fs/copy/{job_id}` (2816) | DELETE | — (job owner / Owner) | S | | |
-| `/api/fs/copy/{job_id}/retry` (2828) | POST | as `/api/fs/copy`, re-checked | H(job) | su | |
+| `/api/fs/copy/{job_id}/retry` (2828) | POST | — (job owner; re-checks `files.read` + `files.write`) | S + H(job) | su | |
 
 ### A.9 Run, Docker, services, Toolbox, serial
 

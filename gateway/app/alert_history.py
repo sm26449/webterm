@@ -9,10 +9,10 @@ Cui îi priveşte un eveniment:
   * `scope="account"` — evenimentele unui cont anume (login nou, parolă/2FA/passkey schimbate,
     ataşare la o sesiune de pe un loc nou, deblocarea unui host 2FA): doar contul acela;
   * `scope="fleet"` — tot restul (host căzut, praguri, chei SSH, tokenuri, backup, discul
-    gateway-ului): FIECARE cont. Nu există roluri — orice cont e administrator deplin peste
-    flotă (docs/THREAT-MODEL.md) — deci „vizibil adminilor" înseamnă „vizibil tuturor".
-    Fan-out la inserare (un rând per cont), ca citit/necitit şi ştergerea să fie per cont, iar
-    izolarea între conturi să fie un simplu `WHERE user_id=?`.
+    gateway-ului). De la 3.6 (roluri): evenimentele unui HOST merg la cei cu `host.view` pe el,
+    cele de instanţă la cei cu `security.view` (vezi `_target_users`). Fan-out la inserare (un
+    rând per cont), ca citit/necitit şi ştergerea să fie per cont, iar izolarea între conturi
+    să fie un simplu `WHERE user_id=?`.
 
 Preferinţele (tabela `alert_prefs`) ţin doar abaterile de la implicit: email ON, în aplicaţie ON
 — adică exact comportamentul de dinainte. Emailul e o cutie COMUNĂ a instanţei (`smtp_to`), nu
@@ -146,10 +146,15 @@ def scrub(text: str, limit: int = 2000) -> str:
 
 
 # ── înregistrare ──────────────────────────────────────────────────────────────────────────
-async def _target_users(scope: str, user_id, user_email) -> list:
-    """Conturile cărora le priveşte evenimentul. Un eveniment de cont al cărui cont nu mai
-    poate fi găsit (ex. emailul tocmai s-a schimbat şi apelantul a dat adresa veche) cade pe
-    fan-out — mai bine vizibil tuturor administratorilor decât pierdut."""
+async def _target_users(scope: str, user_id, user_email, host_id=None) -> list:
+    """Conturile cărora le priveşte evenimentul (3.6, §A.6.8 — fan-out pe roluri):
+      * de cont → contul lui, ca până acum;
+      * de host (are `host_id`) → cei cu `host.view` pe acel host — un Operator pe `lab` nu
+        primeşte alertele (nici numele) hosturilor din `prod`;
+      * de instanţă/securitate (fără host) → cei cu `security.view`.
+    Un eveniment de cont al cărui cont nu mai poate fi găsit cade pe fan-out-ul de instanţă —
+    mai bine vizibil administratorilor decât pierdut."""
+    from . import authz
     if scope == "account":
         if user_id:
             row = await db.fetchone("SELECT id FROM users WHERE id=?", int(user_id))
@@ -159,7 +164,16 @@ async def _target_users(scope: str, user_id, user_email) -> list:
             row = await db.fetchone("SELECT id FROM users WHERE email=?", user_email)
             if row:
                 return [row["id"]]
-    return [r["id"] for r in await db.fetchall("SELECT id FROM users")]
+    out = []
+    ref = await authz.host_ref(host_id) if host_id else None
+    for r in await db.fetchall("SELECT id FROM users ORDER BY id"):
+        g = await authz.grants_for_user(r["id"])
+        if host_id:
+            if "host.view" in g.all_host_perms or (ref is not None and "host.view" in g.on(ref)):
+                out.append(r["id"])
+        elif g.has_global("security.view"):
+            out.append(r["id"])
+    return out
 
 
 async def _prefs_for(uids: list, kind: str) -> dict:
@@ -218,9 +232,12 @@ async def record(kind: str, severity: str, title: str, details: str = "",
     meta = kind_meta(kind)
     if severity not in SEVERITIES:
         severity = "info"
-    uids = await _target_users(meta["scope"], user_id, user_email)
+    uids = await _target_users(meta["scope"], user_id, user_email, host_id)
     if not uids:
-        return True                         # instanţă fără cont încă: nimic de înregistrat
+        # instanţă fără cont încă: nimic de înregistrat, emailul pleacă (ca înainte). Cu conturi
+        # dar fără niciun destinatar (n-ar trebui: ultimul Owner e protejat) — tot pleacă: cutia
+        # de alerte e a instanţei, iar o alertă pierdută e mai rea decât una în plus.
+        return True
     prefs = await _prefs_for(uids, kind)
     want_email = any(prefs.get(u, (True, True))[0] for u in uids)
     now = time.time()

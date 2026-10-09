@@ -32,11 +32,13 @@ from email.utils import formatdate
 from .errors import ApiError
 from . import webauthn_api
 from . import fscopy
-from . import (alert_history, audit, backup, cloudbackup, config, core, db, email_alerts, health,
-               replay, security, signing, totp, updatecheck)
+from . import (alert_history, audit, authz, backup, cloudbackup, config, core, db, email_alerts,
+               health, replay, security, signing, totp, updatecheck)
 
 log = logging.getLogger("webterm")
-router = APIRouter()
+# Garda de la nivel de router (3.6, fail-closed): o rută care nu-şi declară permisiunea
+# (`authz.perm(...)`, sau o intrare în authz.PUBLIC/SELF) răspunde 500 `authz.undeclared`.
+router = APIRouter(dependencies=[Depends(authz.declared)])
 # task-uri de fundal fire-and-forget (ex. curăţenie după un răspuns anulat) — ţinem referinţe
 # ca event loop-ul să nu le colecteze înainte să ruleze
 _bg_tasks: set = set()
@@ -163,20 +165,29 @@ async def app_state(request: Request):
     signing_locked = False
     hostkey_changed = []
     if user is not None:
+        # 3.6: totul de mai jos e filtrat pe rolul contului — alarmele doar pe hosturile pe care
+        # le vede, punctele de backup/semnare doar pentru cine le poate rezolva.
+        grants = await authz.grants_for_user(user["id"])
+        vis = await authz.visible_hosts(grants, "host.view")
         # alarme de host-key NEREZOLVATE (SSH direct/jump): UI-ul le arată persistent, nu ca
         # toast de 12 s. Un SELECT pe o coloană aproape mereu NULL — ieftin.
         for h in await db.fetchall(
                 "SELECT id, name, hostkey_alarm FROM hosts WHERE hostkey_alarm IS NOT NULL"):
+            if not authz.in_visible(vis, h["id"]):
+                continue
             a = _hostkey_alarm(h)
             if a:
                 hostkey_changed.append({"host_id": h["id"], "host_name": h["name"], **a})
         # punctul de pe rotiţă: backup nou de descărcat SAU un eşec de backup programat
         # nevăzut încă (înainte eşecul era complet tăcut în UI — audit UX §7.f1)
-        backup_ready = await _backup_needs_attention()
+        if grants.has_global("backups.manage"):
+            backup_ready = await _backup_needs_attention()
         # nudge pentru cheia de semnare a flotei: lipsă → recomandă generarea înainte de
         # a înrola agenți; criptată & blocată → agenții nu se pot actualiza până la deblocare
-        signing_missing = not signing.key_exists()
-        signing_locked = signing.key_exists() and signing.is_encrypted() and not signing.is_loaded()
+        if grants.has_global("signing.manage"):
+            signing_missing = not signing.key_exists()
+            signing_locked = (signing.key_exists() and signing.is_encrypted()
+                              and not signing.is_loaded())
     return {"setup_required": not has_user,
             "authenticated": user is not None,
             "email": user["email"] if user else None,
@@ -253,6 +264,13 @@ async def setup(creds: Credentials, request: Request, response: Response):
     row = await db.fetchone("SELECT id, email FROM users LIMIT 1")
     if not row or row["email"] != email:
         raise ApiError(409, "setup.alreadyConfigured", "already configured")   # altă cerere a câștigat cursa
+    # Primul cont = Owner peste toată flota (3.6). Legătura se scrie ÎNAINTE de cookie: nu
+    # există nicio clipă în care singurul cont al instalării să fie fără drepturi.
+    await db.execute(
+        "INSERT OR IGNORE INTO role_bindings(user_id, role_id, scope_kind, scope_value, source,"
+        " created) SELECT ?, id, 'all', '', 'manual', ? FROM roles WHERE key='owner'",
+        row["id"], time.time())
+    authz.bump_epoch()
     _setup_token = None              # single-use; setup is now closed
     # Contul e creat → fişierul 0600 nu mai are rost. Îl ştergem (best-effort) ca tokenul de setup
     # să nu zăbovească pe disc după ce şi-a făcut treaba.
@@ -731,24 +749,29 @@ async def totp_status(user=Depends(security.require_user)):
     # care vrei să-l ştii ÎNAINTE, nu în seara în care ţi-a căzut telefonul în apă.
     pk = await db.fetchone(
         "SELECT COUNT(*) AS c FROM webauthn_credentials WHERE user_id=?", user["id"])
-    gated = await db.fetchone("SELECT COUNT(*) AS c FROM hosts WHERE require_2fa=1")
+    # 3.6: doar hosturile pe care contul le VEDE — numărul total ar fi un oracol de flotă
+    vis = await authz.visible_hosts(await authz.grants_for_user(user["id"]), "host.view")
+    n2fa = sum(1 for r in await db.fetchall("SELECT id FROM hosts WHERE require_2fa=1")
+               if authz.in_visible(vis, r["id"]))
     return {"enabled": bool(user["totp_enabled"]),
             "recovery_remaining": remaining["c"] if remaining else 0,
             "passkeys": pk["c"] if pk else 0,
-            "hosts_2fa": gated["c"] if gated else 0,
-            "single_passkey_risk": bool(pk and pk["c"] == 1 and gated and gated["c"] > 0)}
+            "hosts_2fa": n2fa,
+            "single_passkey_risk": bool(pk and pk["c"] == 1 and n2fa > 0)}
 
 
 class TotpSetup(BaseModel):
     current_password: str = ""
 
 
-# ── Conturi (mai multe, TOATE cu drepturi depline) ───────────────────────────
-# Nu e RBAC şi nu pretinde să fie: nu există autorizare la nivel de obiect, deci orice cont
-# poate tot. Ce câştigă echipa e ATRIBUIREA — în `audit_log` apare cine a făcut fiecare
-# acţiune, iar fiecare om are propriile credenţiale (parolă, passkey, TOTP), deci revocarea
-# unui coleg e o ştergere de cont, nu o schimbare de parolă anunţată tuturor.
-# Cerut de două audituri externe (2026-08-06) ca fiind costul dominant la 2-3 oameni.
+# ── Conturi + roluri (3.6.0) ─────────────────────────────────────────────────
+# Până la 3.5 orice cont era administrator deplin peste toată flota (atribuire, nu izolare).
+# De la 3.6 fiecare cont are LEGĂTURI de rol (docs/design/ROLES-AND-SSH.md, authz.py): Owner /
+# Admin / Operator / Viewer peste un scope (toată flota, un folder, un tag, un host). Migrarea a
+# făcut din fiecare cont existent Owner @ all, deci o instalare cu un singur om nu vede nimic nou.
+# Un cont NOU nu primeşte nimic implicit („fără acces încă"); rolul se alege în acelaşi dialog.
+# Schimbările de legături sunt de clasa credenţialelor: parolă (sau re-auth SSO) + al doilea
+# factor, auditate, alertate. Regulile anti-escaladare stau în `authz.check_can_grant`.
 
 class UserIn(BaseModel):
     email: str
@@ -756,34 +779,118 @@ class UserIn(BaseModel):
     current_password: str = ""     # re-auth: un cont nou = încă o cheie la regat
     totp_code: str = ""            # al doilea factor (second_gate): TOTP/recovery dacă 2FA e activ
     email_code: str = ""           # …sau codul pe email, de pe un dispozitiv nou fără 2FA
+    stepup_grant: str = ""         # conturi SSO: grant passkey account-scope (host_id=0)
+    # rolul iniţial (opţional): gol = fără acces încă (implicit, NICIODATĂ Owner din oficiu)
+    role: str = ""
+    scope_kind: str = "folder"
+    scope_value: str = ""
 
 
 class ReauthOnly(BaseModel):
     current_password: str = ""
     totp_code: str = ""         # al doilea factor (second_gate) — folosit la ştergerea de cont
     email_code: str = ""
+    stepup_grant: str = ""
+
+
+class BindingIn(BaseModel):
+    role: str
+    scope_kind: str = "all"
+    scope_value: str = ""
+    current_password: str = ""
+    totp_code: str = ""
+    email_code: str = ""
+    stepup_grant: str = ""
+
+
+async def _reauth_for_access_change(user, request, body, what: str) -> None:
+    """Parola contului (conturile SSO: grant passkey account-scope sau fereastra SSO
+    account-scope, ca la /api/account) + al doilea factor. Aceeaşi poartă ca la crearea unui
+    cont: o legătură de rol e o cheie în plus la flotă."""
+    if user["sso_subject"] and config.OIDC_ENABLED:
+        ok_reauth = (bool(body.stepup_grant)
+                     and security.consume_stepup_grant(body.stepup_grant, user["id"], 0)) \
+            or security.stepup_window_is_open(user["id"], 0)
+        if not ok_reauth:
+            raise ApiError(403, "account.ssoReauth",
+                           "re-authenticate with SSO or a passkey to change access")
+    elif not await _verify_reauth_password(user, body.current_password):
+        raise ApiError(401, "auth.wrongPassword", "wrong password")
+    await webauthn_api.second_gate(user, request, body, what)
+
+
+async def _user_bindings(uid: int) -> list:
+    return [authz.binding_json(b) for b in await authz._load_bindings(uid)]
+
+
+async def _users_json(user, grants) -> list:
+    manage = grants.has_global("users.manage")
+    rows = await db.fetchall(
+        "SELECT u.id, u.email, u.created, u.totp_enabled, u.sso_subject,"
+        " (SELECT COUNT(*) FROM webauthn_credentials c WHERE c.user_id=u.id) AS passkeys"
+        " FROM users u ORDER BY u.created")
+    out = []
+    for r in rows:
+        if not manage and r["id"] != user["id"]:
+            continue                   # fără users.manage: doar propriul rând (§A.6.3)
+        out.append({"id": r["id"], "email": r["email"], "created": r["created"],
+                    "totp": bool(r["totp_enabled"]), "passkeys": r["passkeys"],
+                    "sso": bool(r["sso_subject"]),
+                    "is_self": r["id"] == user["id"],
+                    "bindings": await _user_bindings(r["id"])})
+    return out
 
 
 @router.get("/api/users")
-async def list_users(user=Depends(security.require_user)):
+async def list_users(request: Request, user=Depends(authz.perm('users.manage', list=True))):
+    return await _users_json(user, authz.grants_of(request))
+
+
+async def _after_access_change(uid: int) -> None:
+    """O legătură s-a schimbat: cache-ul de permisiuni moare, socket-urile lungi re-verifică
+    ACUM, biletele de forward ale contului mor (re-handshake → forward.use re-verificat), iar
+    accesul DERIVAT pe care nu-l mai poate acorda (share live, share writable, link de replay)
+    e retras pe hosturile unde a pierdut dreptul."""
+    authz.bump_epoch()
+    security.bump_forward_epoch(uid)
+    await _revoke_unauthorized_derived(uid)
+
+
+async def _revoke_unauthorized_derived(uid: int) -> None:
+    g = await authz.grants_for_user(uid)
     rows = await db.fetchall(
-        "SELECT u.id, u.email, u.created, u.totp_enabled,"
-        " (SELECT COUNT(*) FROM webauthn_credentials c WHERE c.user_id=u.id) AS passkeys"
-        " FROM users u ORDER BY u.created")
-    return [{"id": r["id"], "email": r["email"], "created": r["created"],
-             "totp": bool(r["totp_enabled"]), "passkeys": r["passkeys"],
-             "is_self": r["id"] == user["id"]} for r in rows]
+        "SELECT id, host_id, share_writable FROM sessions WHERE share_token IS NOT NULL"
+        " AND share_by_id=?", uid)
+    for r in rows:
+        have = await authz.perms_on(g, r["host_id"])
+        if "share.live" not in have or (r["share_writable"] and "share.live_write" not in have):
+            await db.execute("UPDATE sessions SET share_token=NULL, share_expires=NULL,"
+                             " share_writable=0 WHERE id=?", r["id"])
+            hub = core.hubs.get(r["id"])
+            if hub:
+                await hub.revoke_shares()
+    links = await db.fetchall(
+        "SELECT l.id, s.host_id FROM replay_links l LEFT JOIN sessions s ON s.id=l.sid"
+        " WHERE l.user_id=?", uid)
+    for ln in links:
+        if ln["host_id"] is None or "share.replay" not in await authz.perms_on(g, ln["host_id"]):
+            await _delete_replay_links(" WHERE id=?", ln["id"])
+
+
+def _scope_label(kind: str, value: str) -> str:
+    return "all hosts" if kind == "all" else "%s %s" % (kind, value)
 
 
 @router.post("/api/users")
-async def create_user(body: UserIn, request: Request, user=Depends(security.require_user)):
-    if not await _verify_reauth_password(user, body.current_password):
-        raise ApiError(401, "auth.wrongPassword", "wrong password")
-    # Un cont admin nou e o schimbare de credenţiale — o cheie permanentă în plus la regat, la
-    # fel ca înrolarea unui passkey. Deci trece prin acelaşi al doilea factor (second_gate): un
-    # cookie furat + parola ştiută nu mai pot, de pe un dispozitiv nou, să-şi lase un admin care
-    # supravieţuieşte rotaţiei parolei (recuperarea documentată).
-    await webauthn_api.second_gate(user, request, body, "create a new WebTerm account")
+async def create_user(body: UserIn, request: Request, user=Depends(authz.perm('users.manage'))):
+    grants = authz.grants_of(request)
+    role = (body.role or "").strip().lower()
+    kind = value = None
+    if role:
+        kind, value = authz.normalize_scope(body.scope_kind, body.scope_value)
+        # anti-escaladare ÎNAINTE de orice efect (şi înainte de a consuma al doilea factor)
+        await authz.check_can_grant(grants, role, kind, value)
+    await _reauth_for_access_change(user, request, body, "create a new WebTerm account")
     email = body.email.strip().lower()
     if not security.valid_email(email):
         raise ApiError(400, "account.badEmail", "invalid email")
@@ -791,15 +898,25 @@ async def create_user(body: UserIn, request: Request, user=Depends(security.requ
     if await db.fetchone("SELECT id FROM users WHERE email=?", email):
         raise ApiError(409, "account.emailTaken", "an account with that email already exists")
     pw = await security.hash_password_async(body.password)
-    await db.execute("INSERT INTO users(email, password_hash, created) VALUES(?,?,?)",
-                     email, pw, time.time())
-    log.info("new account created: %s (by %s)", email, user["email"])
-    # un cont nou = un admin egal în plus (nu există roluri): cel mai valoros eveniment de
-    # securitate. Ajunge pe email ŞI webhook (via _fire), ca oricare schimbare de credenţiale.
+    async with authz._lock:
+        uid = await db.execute("INSERT INTO users(email, password_hash, created) VALUES(?,?,?)",
+                               email, pw, time.time())
+        if role:
+            await db.execute(
+                "INSERT INTO role_bindings(user_id, role_id, scope_kind, scope_value, source,"
+                " created, created_by_id) VALUES(?,?,?,?,'manual',?,?)",
+                uid, await authz.role_id(role), kind, value, time.time(), user["id"])
+        authz.bump_epoch()
+    log.info("new account created: %s (by %s, role %s)", email, user["email"],
+             ("%s @ %s" % (role, _scope_label(kind, value))) if role else "none")
+    audit.detail(request, "account %s created, role %s" % (
+        email, ("%s @ %s" % (role, _scope_label(kind, value))) if role else "none"))
+    # un cont nou: cel mai valoros eveniment de securitate. Ajunge pe email ŞI webhook (via
+    # _fire) şi în istoricul celor cu security.view, ca oricare schimbare de credenţiale.
     email_alerts.notify_security_change("a new WebTerm account was created (%s)" % email,
                                         security.client_ip(request), user["email"], fleet=True,
                                         what_key="account_created", what_params={"account": email})
-    return await list_users(user)
+    return await _users_json(user, grants)
 
 
 # POST, nu DELETE: ştergerea cere parola în corp, iar un DELETE cu corp e prost suportat de
@@ -807,32 +924,38 @@ async def create_user(body: UserIn, request: Request, user=Depends(security.requ
 # jurnalul de audit şi în logurile proxy-ului.
 @router.post("/api/users/{uid}/delete")
 async def delete_user(uid: int, body: ReauthOnly, request: Request,
-                      user=Depends(security.require_user)):
-    if not await _verify_reauth_password(user, body.current_password):
-        raise ApiError(401, "auth.wrongPassword", "wrong password")
-    # Auditul intern (2026-09-23): crearea de cont era gardată cu second_gate, ştergerea NU —
-    # or ştergerea unui co-admin îi revocă passkey-urile, sesiunile şi codurile de recuperare,
-    # o schimbare de credenţiale mai grea decât crearea. Aceeaşi poartă, politică uniformă.
-    await webauthn_api.second_gate(user, request, body, "delete a WebTerm account")
+                      user=Depends(authz.perm('users.manage'))):
+    grants = authz.grants_of(request)
     if uid == user["id"]:
         # ştergerea propriului cont din propria sesiune = te blochezi la jumătatea operaţiei
         raise ApiError(400, "account.deleteSelf", "you cannot delete your own account; do it from another one")
     row = await db.fetchone("SELECT email FROM users WHERE id=?", uid)
     if not row:
         raise ApiError(404, "user.missing", "no such account")
-    n = (await db.fetchone("SELECT COUNT(*) AS c FROM users"))["c"]
-    if n <= 1:
-        raise ApiError(400, "account.deleteLast", "you cannot delete the last account")
-    # tot ce ţinea de el moare odată cu el: sesiuni web, passkey-uri, coduri de recuperare,
-    # IP-uri cunoscute. Altfel un cookie al contului şters ar rămâne valid.
-    for sql in ("DELETE FROM web_sessions WHERE user_id=?",
-                "DELETE FROM webauthn_credentials WHERE user_id=?",
-                "DELETE FROM recovery_codes WHERE user_id=?",
-                "DELETE FROM seen_logins WHERE user_id=?",
-                "DELETE FROM alerts WHERE user_id=?",          # istoricul de alerte (3.5.11)
-                "DELETE FROM alert_prefs WHERE user_id=?",
-                "DELETE FROM users WHERE id=?"):
-        await db.execute(sql, uid)
+    # Admin nu atinge Owner-ii (§A.5): ştergerea unui Owner e preluarea instanţei.
+    if await authz.is_owner_user(uid) and not grants.is_owner():
+        raise ApiError(403, "authz.ownerOnly", "only an Owner can delete an Owner")
+    await _reauth_for_access_change(user, request, body, "delete a WebTerm account")
+    async with authz._lock:
+        # verificările care contează pentru blocare se refac SUB lock (check-then-act atomic)
+        n = (await db.fetchone("SELECT COUNT(*) AS c FROM users"))["c"]
+        if n <= 1:
+            raise ApiError(400, "account.deleteLast", "you cannot delete the last account")
+        if await authz.is_owner_user(uid) and await authz.owner_count(exclude_user=uid) < 1:
+            raise ApiError(400, "authz.lastOwner", "you cannot remove the last Owner")
+        # tot ce ţinea de el moare odată cu el: sesiuni web, passkey-uri, coduri de recuperare,
+        # IP-uri cunoscute, legături de rol. Altfel un cookie al contului şters ar rămâne valid.
+        for sql in ("DELETE FROM web_sessions WHERE user_id=?",
+                    "DELETE FROM webauthn_credentials WHERE user_id=?",
+                    "DELETE FROM recovery_codes WHERE user_id=?",
+                    "DELETE FROM seen_logins WHERE user_id=?",
+                    "DELETE FROM alerts WHERE user_id=?",          # istoricul de alerte (3.5.11)
+                    "DELETE FROM alert_prefs WHERE user_id=?",
+                    "DELETE FROM role_bindings WHERE user_id=?",   # 3.6
+                    "DELETE FROM split_views WHERE user_id=?",
+                    "DELETE FROM users WHERE id=?"):
+            await db.execute(sql, uid)
+        authz.bump_epoch()
     # …„tot" trebuia să însemne şi asta. Token-urile de automatizare emise de contul şters îi
     # supravieţuiau până la expirare (până la un an), semnalat de un audit extern. Ele NU cer
     # cont ca să funcţioneze — sunt credenţiale de sine stătătoare — deci ştergerea contului
@@ -854,7 +977,118 @@ async def delete_user(uid: int, body: ReauthOnly, request: Request,
         log.warning("account deleted: revoked %d automation token(s) issued by %s",
                     ntok, row["email"])
     log.warning("account deleted: %s (by %s)", row["email"], user["email"])
-    return await list_users(user)
+    return await _users_json(user, grants)
+
+
+@router.get("/api/users/{uid}/bindings")
+async def list_bindings(uid: int, user=Depends(authz.perm('users.manage'))):
+    if not await db.fetchone("SELECT 1 FROM users WHERE id=?", uid):
+        raise ApiError(404, "user.missing", "no such account")
+    return {"bindings": await _user_bindings(uid)}
+
+
+@router.post("/api/users/{uid}/bindings")
+async def add_binding(uid: int, body: BindingIn, request: Request,
+                      user=Depends(authz.perm('users.manage'))):
+    """Adaugă o legătură (rol @ scope). Reguli (§A.6.6): niciodată pe tine însuţi; doar un
+    Owner atinge Owner-ii sau acordă Owner; rolul nu poate depăşi ce ai tu peste acel scope."""
+    grants = authz.grants_of(request)
+    if uid == user["id"]:
+        raise ApiError(403, "authz.selfBinding", "you cannot change your own access")
+    target = await db.fetchone("SELECT email FROM users WHERE id=?", uid)
+    if not target:
+        raise ApiError(404, "user.missing", "no such account")
+    role = (body.role or "").strip().lower()
+    kind, value = authz.normalize_scope(body.scope_kind, body.scope_value)
+    if await authz.is_owner_user(uid) and not grants.is_owner():
+        raise ApiError(403, "authz.ownerOnly", "only an Owner can change an Owner's access")
+    await authz.check_can_grant(grants, role, kind, value)
+    await _reauth_for_access_change(user, request, body, "change a WebTerm account's access")
+    async with authz._lock:
+        try:
+            await db.execute(
+                "INSERT INTO role_bindings(user_id, role_id, scope_kind, scope_value, source,"
+                " created, created_by_id) VALUES(?,?,?,?,'manual',?,?)",
+                uid, await authz.role_id(role), kind, value, time.time(), user["id"])
+        except sqlite3.IntegrityError:
+            raise ApiError(409, "authz.bindingExists", "that account already has this role here")
+        await _after_access_change(uid)
+    what = "%s granted %s @ %s" % (target["email"], role, _scope_label(kind, value))
+    audit.detail(request, "role " + what)
+    log.warning("role binding added: %s (by %s)", what, user["email"])
+    ip = security.client_ip(request)
+    email_alerts.notify_security_change("role granted: " + what, ip, user["email"], fleet=True,
+                                        what_key="role_granted",
+                                        what_params={"account": target["email"], "role": role,
+                                                     "scope": _scope_label(kind, value)})
+    email_alerts.notify_security_change("your access changed: " + what, ip, target["email"],
+                                        user_id=uid, what_key="access_changed",
+                                        what_params={"role": role,
+                                                     "scope": _scope_label(kind, value)})
+    return {"bindings": await _user_bindings(uid)}
+
+
+@router.post("/api/users/{uid}/bindings/{bid}/delete")
+async def remove_binding(uid: int, bid: int, body: ReauthOnly, request: Request,
+                         user=Depends(authz.perm('users.manage'))):
+    """Scoate o legătură. POST cu corp (re-auth), ca ştergerea de cont. Ultimul Owner rămâne."""
+    grants = authz.grants_of(request)
+    if uid == user["id"]:
+        raise ApiError(403, "authz.selfBinding", "you cannot change your own access")
+    row = await db.fetchone(
+        "SELECT b.id, b.scope_kind, b.scope_value, r.key AS role_key, u.email"
+        " FROM role_bindings b JOIN roles r ON r.id=b.role_id JOIN users u ON u.id=b.user_id"
+        " WHERE b.id=? AND b.user_id=?", bid, uid)
+    if not row:
+        raise ApiError(404, "authz.bindingMissing", "no such role binding")
+    if (row["role_key"] == "owner" or await authz.is_owner_user(uid)) and not grants.is_owner():
+        raise ApiError(403, "authz.ownerOnly", "only an Owner can change an Owner's access")
+    # a scoate un rol e tot o schimbare de acces asupra cuiva — doar în interiorul scope-ului tău
+    if row["role_key"] in authz.BUILTIN_ROLES:
+        await authz.check_can_grant(grants, row["role_key"], row["scope_kind"], row["scope_value"],
+                                    removing=True)
+    await _reauth_for_access_change(user, request, body, "change a WebTerm account's access")
+    async with authz._lock:
+        if (row["role_key"] == "owner" and row["scope_kind"] == "all"
+                and await authz.owner_count(exclude_binding=bid) < 1):
+            raise ApiError(400, "authz.lastOwner", "you cannot remove the last Owner")
+        await db.execute("DELETE FROM role_bindings WHERE id=? AND user_id=?", bid, uid)
+        await _after_access_change(uid)
+    what = "%s lost %s @ %s" % (row["email"], row["role_key"],
+                                _scope_label(row["scope_kind"], row["scope_value"]))
+    audit.detail(request, "role " + what)
+    log.warning("role binding removed: %s (by %s)", what, user["email"])
+    ip = security.client_ip(request)
+    scope = _scope_label(row["scope_kind"], row["scope_value"])
+    email_alerts.notify_security_change("role removed: " + what, ip, user["email"], fleet=True,
+                                        what_key="role_removed",
+                                        what_params={"account": row["email"],
+                                                     "role": row["role_key"], "scope": scope})
+    email_alerts.notify_security_change("your access changed: " + what, ip, row["email"],
+                                        user_id=uid, what_key="access_changed",
+                                        what_params={"role": row["role_key"], "scope": scope})
+    return {"bindings": await _user_bindings(uid)}
+
+
+@router.get("/api/roles")
+async def list_roles(user=Depends(authz.perm('users.manage'))):
+    """Catalogul de permisiuni (cu ⚑ = echivalent cu un shell) + rolurile predefinite.
+    Rolurile custom vin în 3.6.1; până atunci lista e fixă."""
+    return authz.catalogue_json()
+
+
+@router.get("/api/me/permissions")
+async def me_permissions(user=Depends(security.require_user)):
+    """Ce poate contul curent, pentru gating-ul din UI (cosmetic — serverul decide oricum).
+    `admins` = cine poate acorda acces, ca ecranul „fără acces" să spună pe cine să întrebi."""
+    grants = await authz.grants_for_user(user["id"])
+    out = authz.me_json(grants, await authz.host_refs())
+    admins = await db.fetchall(
+        "SELECT DISTINCT u.email FROM users u JOIN role_bindings b ON b.user_id=u.id"
+        " JOIN roles r ON r.id=b.role_id WHERE b.scope_kind='all' AND r.key IN ('owner','admin')"
+        " ORDER BY u.email LIMIT 10")
+    out["admins"] = [r["email"] for r in admins]
+    return out
 
 
 # ── Token-uri de automatizare ────────────────────────────────────────────────
@@ -872,12 +1106,32 @@ class TokenIn(BaseModel):
     current_password: str = ""
     totp_code: str = ""            # al doilea factor (second_gate): un token e o credenţială persistentă
     email_code: str = ""
+    # 3.6: plafon opţional de rol + scope. Efectivul tokenului = scopes ∩ rol ∩ ce poate
+    # creatorul ACUM (authz.grants_for_token) — deci nu poate depăşi niciodată contul care l-a emis.
+    role: str = ""
+    scope_kind: str = "all"
+    scope_value: str = ""
 
 
 def _token_row(r) -> dict:
+    keys = r.keys()
     return {"id": r["id"], "name": r["name"], "scopes": r["scopes"], "created": r["created"],
             "created_by": r["created_by"], "expires": r["expires"], "last_used": r["last_used"],
-            "expired": r["expires"] < time.time()}
+            "expired": r["expires"] < time.time(),
+            "role": (r["role_key"] if "role_key" in keys else None) or "",
+            "scope_kind": (r["scope_kind"] if "scope_kind" in keys else None) or "all",
+            "scope_value": (r["scope_value"] if "scope_value" in keys else None) or ""}
+
+
+async def _tokens_json(user, grants) -> list:
+    """Tokenurile PROPRII; toate, doar cu `tokens.manage` (§A.6.3)."""
+    sql = ("SELECT t.*, r.key AS role_key FROM api_tokens t LEFT JOIN roles r ON r.id=t.role_id")
+    if grants.has_global("tokens.manage"):
+        rows = await db.fetchall(sql + " ORDER BY t.created DESC")
+    else:
+        rows = await db.fetchall(sql + " WHERE t.created_by_id=? ORDER BY t.created DESC",
+                                 user["id"])
+    return [_token_row(r) for r in rows]
 
 
 # ── Token de înrolare DE GRUP (onboarding la scară de flotă) ─────────────────
@@ -984,13 +1238,24 @@ async def revoke_other_web_sessions(request: Request, user=Depends(security.requ
 
 
 @router.get("/api/tokens")
-async def list_tokens(user=Depends(security.require_user)):
-    rows = await db.fetchall("SELECT * FROM api_tokens ORDER BY created DESC")
-    return [_token_row(r) for r in rows]
+async def list_tokens(request: Request, user=Depends(authz.perm('tokens.create'))):
+    return await _tokens_json(user, authz.grants_of(request))
 
 
 @router.post("/api/tokens")
-async def create_token(body: TokenIn, request: Request, user=Depends(security.require_user)):
+async def create_token(body: TokenIn, request: Request, user=Depends(authz.perm('tokens.create'))):
+    grants = authz.grants_of(request)
+    role = (body.role or "").strip().lower()
+    tkind, tvalue = authz.normalize_scope(body.scope_kind, body.scope_value)
+    if role:
+        # rolul plafonului nu poate depăşi ce ai tu peste scope-ul tokenului (anti-escaladare);
+        # oricum efectivul e intersectat cu creatorul la FIECARE cerere
+        await authz.check_can_grant(grants, role, tkind, tvalue)
+    elif tkind == "host":
+        # un host inexistent nu e un scope (id-urile se reutilizează); unul invizibil = la fel
+        if (await authz.host_ref(tvalue) is None
+                or "host.view" not in await authz.perms_on(grants, tvalue)):
+            raise authz.not_found("host_id")
     if not await _verify_reauth_password(user, body.current_password):
         raise ApiError(401, "auth.wrongPassword", "wrong password")
     # Un token de automatizare e o credenţială persistentă (scope `run` = shell pe flotă) — la fel
@@ -1007,9 +1272,10 @@ async def create_token(body: TokenIn, request: Request, user=Depends(security.re
     raw = security.TOKEN_PREFIX + security.new_token()
     await db.execute(
         "INSERT INTO api_tokens(name, token_hash, scopes, created, created_by,"
-        " created_by_id, expires) VALUES(?,?,?,?,?,?,?)",
+        " created_by_id, expires, role_id, scope_kind, scope_value) VALUES(?,?,?,?,?,?,?,?,?,?)",
         name, security.sha256_hex(raw), ",".join(scopes), time.time(), user["email"],
-        user["id"], time.time() + days * 86400)
+        user["id"], time.time() + days * 86400,
+        (await authz.role_id(role)) if role else None, tkind, tvalue)
     log.info("automation token created: %s (%s, %dd) by %s", name, ",".join(scopes), days,
              user["email"])
     # un token nou = o credenţială de automatizare care poate citi/rula fără browser: notificăm
@@ -1019,21 +1285,23 @@ async def create_token(body: TokenIn, request: Request, user=Depends(security.re
         security.client_ip(request), user["email"], fleet=True,
         what_key="api_token_created", what_params={"name": name, "scopes": ",".join(scopes)})
     # valoarea în clar se întoarce O SINGURĂ DATĂ; în DB stă doar hash-ul
-    return {"token": raw, "tokens": await list_tokens(user)}
+    return {"token": raw, "tokens": await _tokens_json(user, grants)}
 
 
 @router.post("/api/tokens/{tid}/revoke")
-async def revoke_token(tid: int, user=Depends(security.require_user)):
-    row = await db.fetchone("SELECT name FROM api_tokens WHERE id=?", tid)
-    if not row:
+async def revoke_token(tid: int, request: Request, user=Depends(authz.perm('tokens.create'))):
+    grants = authz.grants_of(request)
+    row = await db.fetchone("SELECT name, created_by_id FROM api_tokens WHERE id=?", tid)
+    # al altui cont fără `tokens.manage` = la fel de inexistent ca unul şters (fără oracol)
+    if not row or (row["created_by_id"] != user["id"] and not grants.has_global("tokens.manage")):
         raise ApiError(404, "token.missing", "no such token")
     await db.execute("DELETE FROM api_tokens WHERE id=?", tid)
     log.warning("automation token revoked: %s (by %s)", row["name"], user["email"])
-    return await list_tokens(user)
+    return await _tokens_json(user, grants)
 
 
 @router.get("/api/enroll-groups")
-async def list_enroll_groups(user=Depends(security.require_user)):
+async def list_enroll_groups(user=Depends(authz.perm('hosts.create'))):
     rows = await db.fetchall("SELECT * FROM enroll_groups ORDER BY created DESC")
     return [_enroll_group_row(r) for r in rows]
 
@@ -1056,7 +1324,7 @@ def _clean_enroll_pass(raw: str) -> str:
 
 @router.post("/api/enroll-groups")
 async def create_enroll_group(body: EnrollGroupIn, request: Request,
-                              user=Depends(security.require_user)):
+                              user=Depends(authz.perm('hosts.create'))):
     if not await _verify_reauth_password(user, body.current_password):
         raise ApiError(401, "auth.wrongPassword", "wrong password")
     # Un token reutilizabil care poate CREA hosturi e clasă de provisioning — ca enroll-ul unui
@@ -1087,7 +1355,7 @@ async def create_enroll_group(body: EnrollGroupIn, request: Request,
 
 
 @router.post("/api/enroll-groups/{gid}/revoke")
-async def revoke_enroll_group(gid: int, user=Depends(security.require_user)):
+async def revoke_enroll_group(gid: int, user=Depends(authz.perm('hosts.create'))):
     row = await db.fetchone("SELECT name FROM enroll_groups WHERE id=?", gid)
     if not row:
         raise ApiError(404, "enrollgroup.missing", "no such enrollment group")
@@ -1364,12 +1632,12 @@ async def _enforce_guard(cmd: str, confirmed: bool) -> None:
 
 
 @router.get("/api/settings/command-guard")
-async def get_command_guard(user=Depends(security.require_user)):
+async def get_command_guard(user=Depends(authz.perm("settings.manage"))):
     return await _load_command_guard()
 
 
 @router.post("/api/settings/command-guard")
-async def save_command_guard(body: CommandGuardIn, user=Depends(security.require_user)):
+async def save_command_guard(body: CommandGuardIn, user=Depends(authz.perm('settings.manage'))):
     rules = []
     try:
         for r in body.rules[:100]:
@@ -1404,7 +1672,7 @@ async def get_watermark(user=Depends(security.require_user)):
 
 
 @router.post("/api/settings/watermark")
-async def save_watermark(body: WatermarkIn, user=Depends(security.require_user)):
+async def save_watermark(body: WatermarkIn, user=Depends(authz.perm('settings.manage'))):
     content = (body.content or "").strip()[:200]
     cfg = {
         "enabled": bool(body.enabled),
@@ -1418,7 +1686,7 @@ async def save_watermark(body: WatermarkIn, user=Depends(security.require_user))
 
 
 @router.get("/api/settings/smtp")
-async def get_smtp(user=Depends(security.require_user)):
+async def get_smtp(user=Depends(authz.perm('settings.manage'))):
     """The current SMTP config, WITHOUT the password (only whether one is set)."""
     cfg = await email_alerts.load_config()
     return {"host": cfg["host"], "port": cfg["port"], "user": cfg["user"],
@@ -1430,7 +1698,7 @@ async def get_smtp(user=Depends(security.require_user)):
 
 
 @router.post("/api/settings/smtp")
-async def save_smtp(body: SmtpIn, request: Request, user=Depends(security.require_user)):
+async def save_smtp(body: SmtpIn, request: Request, user=Depends(authz.perm('settings.manage'))):
     # Webhook-ul e un canal prin care gateway-ul TRIMITE date în afară, la o adresă aleasă de
     # cine configurează. Restul canalelor de exfiltrare (backup, tokenuri, share) cer deja
     # re-autentificare; ăsta nu cerea, deci un cookie furat putea îndrepta alertele spre orice
@@ -1487,7 +1755,7 @@ async def save_smtp(body: SmtpIn, request: Request, user=Depends(security.requir
 
 
 @router.post("/api/settings/webhook/test")
-async def test_webhook(user=Depends(security.require_user)):
+async def test_webhook(user=Depends(authz.perm('settings.manage'))):
     """Posts a test alert to the configured webhook and reports the result (the SMTP test sent
     an email only, so a broken webhook stayed invisible until a real alert was lost)."""
     try:
@@ -1499,7 +1767,7 @@ async def test_webhook(user=Depends(security.require_user)):
 
 
 @router.post("/api/settings/smtp/test")
-async def test_smtp(user=Depends(security.require_user)):
+async def test_smtp(user=Depends(authz.perm('settings.manage'))):
     """Send a test email to the destination address and report the result."""
     try:
         await email_alerts.send_test()
@@ -1520,13 +1788,13 @@ class UpdateCheckIn(BaseModel):
 
 
 @router.get("/api/settings/alerts")
-async def get_alert_thresholds(user=Depends(security.require_user)):
+async def get_alert_thresholds(user=Depends(authz.perm('settings.manage'))):
     """Praguri de alertă pe resurse (0 = metrica dezactivată)."""
     return await email_alerts.load_thresholds()
 
 
 @router.post("/api/settings/alerts")
-async def save_alert_thresholds(body: ThresholdsIn, user=Depends(security.require_user)):
+async def save_alert_thresholds(body: ThresholdsIn, user=Depends(authz.perm('settings.manage'))):
     for key, value in (("cpu", body.cpu), ("mem", body.mem), ("disk", body.disk)):
         if not 0 <= value <= 100:
             raise ApiError(400, "settings.badThreshold", "thresholds must be between 0 and 100")
@@ -2017,13 +2285,28 @@ def _install_command_dedicated(enroll_token: str, password: str = "") -> str:
 
 
 @router.get("/api/status")
-async def status(user=Depends(security.require_scope("read"))):
+async def status(request: Request, user=Depends(authz.perm('host.view', list=True, tokens='read'))):
     """Rezumat operațional: hosturi online, sesiuni, disc (transcripturi +
-    arhivă), uptime și versiuni. Alimentează panoul de status."""
-    hosts = await db.fetchall("SELECT id, connection_type, via_host_id FROM hosts")
+    arhivă), uptime și versiuni. Alimentează panoul de status.
+    3.6: totalurile numără DOAR hosturile vizibile contului (fără oracol de mărimea flotei),
+    sesiunile doar pe hosturile unde le poate vedea; discul şi sănătatea gateway-ului (date de
+    instanţă) doar cu `security.view`."""
+    grants = authz.grants_of(request)
+    vis = await authz.visible_hosts(grants, "host.view")
+    hosts = [h for h in await db.fetchall("SELECT id, connection_type, via_host_id FROM hosts")
+             if authz.in_visible(vis, h["id"])]
     online = sum(1 for h in hosts if _host_online(h))   # jump = agentul părinte (vezi _host_online)
-    rows = await db.fetchall("SELECT state, COUNT(*) AS c FROM sessions GROUP BY state")
+    svis = await authz.visible_hosts(grants, "session.watch", "recording.view")
+    if svis is None:
+        rows = await db.fetchall("SELECT state, COUNT(*) AS c FROM sessions GROUP BY state")
+    elif svis:
+        rows = await db.fetchall(
+            "SELECT state, COUNT(*) AS c FROM sessions WHERE host_id IN (%s) GROUP BY state"
+            % ",".join("?" * len(svis)), *sorted(svis))
+    else:
+        rows = []
     by_state = {r["state"]: r["c"] for r in rows}
+    instance = grants.has_global("security.view")
     return {
         "uptime_seconds": time.time() - _START_TIME,
         "gateway_version": config.GATEWAY_VERSION,
@@ -2035,8 +2318,8 @@ async def status(user=Depends(security.require_scope("read"))):
             "closed": by_state.get("closed", 0),
             "lost": by_state.get("lost", 0),
         },
-        "storage": await asyncio.to_thread(core.storage_stats),
-        "gateway": await health.snapshot(core, db),
+        "storage": (await asyncio.to_thread(core.storage_stats)) if instance else None,
+        "gateway": (await health.snapshot(core, db)) if instance else None,
     }
 
 
@@ -2061,7 +2344,7 @@ async def version_info(user=Depends(security.require_user)):
 
 
 @router.post("/api/version/check")
-async def version_check_toggle(body: UpdateCheckIn, user=Depends(security.require_user)):
+async def version_check_toggle(body: UpdateCheckIn, user=Depends(authz.perm('settings.manage'))):
     """Pornește/oprește verificarea. Oprită, gateway-ul nu mai face NICIO conexiune
     din proprie inițiativă spre exterior — de-aia merită să fie la un click."""
     await _set_setting("update_check", "1" if body.enabled else "0")
@@ -2070,7 +2353,7 @@ async def version_check_toggle(body: UpdateCheckIn, user=Depends(security.requir
 
 
 @router.post("/api/version/refresh")
-async def version_refresh(user=Depends(security.require_user)):
+async def version_refresh(user=Depends(authz.perm('settings.manage'))):
     """„Verifică acum" — automat întrebăm o dată pe zi, dar când chiar aștepți o
     versiune n-are rost să aștepți fereastra."""
     enabled = await _update_check_enabled()
@@ -2080,15 +2363,27 @@ async def version_refresh(user=Depends(security.require_user)):
 
 
 @router.get("/api/hosts")
-async def list_hosts(user=Depends(security.require_scope("read"))):
+async def list_hosts(request: Request,
+                     user=Depends(authz.perm('host.view', list=True, tokens='read'))):
+    vis = await authz.visible_hosts(authz.grants_of(request), "host.view")
     rows = await db.fetchall("SELECT * FROM hosts ORDER BY name")
-    return [_host_json(r) for r in rows]
+    out = []
+    for r in rows:
+        if not authz.in_visible(vis, r["id"]):
+            continue
+        j = _host_json(r)
+        # o ţintă jump vizibilă al cărei agent `via` NU e vizibil: nu-i dăm id-ul agentului
+        # (oracol de existenţă); UI-ul o afişează atunci la nivelul de sus, nu sub părinte
+        if j.get("via_host_id") and not authz.in_visible(vis, j["via_host_id"]):
+            j["via_host_id"] = None
+        out.append(j)
+    return out
 
 
 _HOST_TYPES = ("agent", "ssh", "ssh-jump", "telnet", "telnet-jump")
 
 
-async def _validate_host(host: HostIn, user) -> dict:
+async def _validate_host(host: HostIn, user, grants=None) -> dict:
     """SINGURA cale de validare pentru un host nou — `POST /api/hosts` şi importul CSV trec
     amândouă pe aici, ca un rând de CSV să nu poată crea ceva ce formularul ar refuza (sau
     invers). Întoarce valorile normalizate pe care le scrie `_insert_host`."""
@@ -2113,6 +2408,12 @@ async def _validate_host(host: HostIn, user) -> dict:
     if host.ssh_port is not None and not 1 <= host.ssh_port <= 65535:
         raise ApiError(400, "host.badPort", "the port must be between 1 and 65535")
     if ctype in ("ssh-jump", "telnet-jump"):
+        # 3.6 (§A.11.4): o ţintă jump deschide TCP DIN hostul `via` — un pivot de reţea, deci
+        # cere `forward.manage` acolo. Verificat înaintea existenţei: un `via` invizibil dă
+        # acelaşi 404 ca unul inexistent. `grants=None` doar din apelanţi interni fără cerere.
+        if grants is None:
+            raise authz.not_found("host_id")
+        await authz.require_on(grants, host.via_host_id, "forward.manage")
         via = await db.fetchone("SELECT connection_type FROM hosts WHERE id=?", host.via_host_id)
         if not via or (via["connection_type"] or "agent") != "agent":
             raise ApiError(400, "sshjump.needsAgent", "pick an agent host to reach the target through")
@@ -2163,8 +2464,8 @@ async def _insert_host(host: HostIn, user, v: dict):
 
 
 @router.post("/api/hosts")
-async def create_host(host: HostIn, user=Depends(security.require_user)):
-    v = await _validate_host(host, user)
+async def create_host(host: HostIn, request: Request, user=Depends(authz.perm('hosts.create'))):
+    v = await _validate_host(host, user, authz.grants_of(request))
     row, enroll, pw = await _insert_host(host, user, v)
     return dict(_host_json(row), install_command=_install_command(enroll, pw),
                 install_command_dedicated=_install_command_dedicated(enroll, pw),
@@ -2216,7 +2517,7 @@ def _hosts_csv(rows, names_by_id: dict) -> str:
 
 
 @router.get("/api/hosts/export.csv")
-async def export_hosts_csv(request: Request, ids: str = "", user=Depends(security.require_user)):
+async def export_hosts_csv(request: Request, ids: str = "", user=Depends(authz.perm('hosts.export'))):
     """Exportă hosturile alese ca CSV. Doar cookie (`require_user`): un token de automatizare
     nu scoate inventarul flotei.
 
@@ -2232,10 +2533,14 @@ async def export_hosts_csv(request: Request, ids: str = "", user=Depends(securit
         raise ApiError(400, "hostcsv.noIds", "pick at least one host to export")
     if len(wanted) > 10000:
         raise ApiError(400, "hostcsv.badIds", "ids must be a comma-separated list of host ids")
-    rows = await db.fetchall(
+    # 3.6: doar hosturile vizibile (un id cerut din afara scope-ului dispare tăcut, ca unul
+    # inexistent); numele `via` al unui jump se exportă doar dacă şi agentul e vizibil
+    vis = await authz.visible_hosts(authz.grants_of(request), "host.view")
+    rows = [r for r in await db.fetchall(
         "SELECT * FROM hosts WHERE ephemeral=0 AND id IN (%s) ORDER BY name COLLATE NOCASE, id"
-        % ",".join("?" * len(wanted)), *wanted)
-    names = {r["id"]: r["name"] for r in await db.fetchall("SELECT id, name FROM hosts")}
+        % ",".join("?" * len(wanted)), *wanted) if authz.in_visible(vis, r["id"])]
+    names = {r["id"]: r["name"] for r in await db.fetchall("SELECT id, name FROM hosts")
+             if authz.in_visible(vis, r["id"])}
     body = "﻿" + _hosts_csv(rows, names)     # BOM: Excel deschide diacriticele corect
     audit.detail(request, "exported %d hosts as CSV" % len(rows))
     fname = "webterm-hosts-%s.csv" % time.strftime("%Y%m%d")
@@ -2324,7 +2629,7 @@ async def _check_duplicate(h: HostIn, v: dict) -> None:
                        vars={"name": h.name.strip()})
 
 
-async def _import_row(r: HostCsvRow, opts: HostImportOptions, user) -> tuple:
+async def _import_row(r: HostCsvRow, opts: HostImportOptions, user, grants=None) -> tuple:
     """Un rând → host nou. Ordinea verificărilor e oglindită de previzualizarea din
     `lib/hostscsv.ts` (acelaşi cod de eroare pe acelaşi rând)."""
     ctype = r.connection_type.strip().lower()
@@ -2344,13 +2649,13 @@ async def _import_row(r: HostCsvRow, opts: HostImportOptions, user) -> tuple:
         credential_policy="stored" if agent else (
             opts.credential_policy or r.credential_policy.strip().lower() or "ask"),
         tags=" ".join(x for x in (r.tags, opts.tags) if x.strip()), enroll_ttl=opts.enroll_ttl)
-    v = await _validate_host(h, user)
+    v = await _validate_host(h, user, grants)
     await _check_duplicate(h, v)
     return await _insert_host(h, user, v)
 
 
 @router.post("/api/hosts/import")
-async def import_hosts(body: HostImportIn, request: Request, user=Depends(security.require_user)):
+async def import_hosts(body: HostImportIn, request: Request, user=Depends(authz.perm("hosts.create"))):
     """Importă hosturi dintr-un CSV parsat de client. Fiecare rând trece prin EXACT validarea
     lui `POST /api/hosts` (`_validate_host`); duplicatele sunt sărite. Rândurile agent intră
     PRIMELE, ca ţintele ssh-jump/telnet-jump din acelaşi fişier să-şi găsească agentul după nume.
@@ -2378,7 +2683,7 @@ async def import_hosts(body: HostImportIn, request: Request, user=Depends(securi
         try:
             if r is None:
                 raise ApiError(400, "hostcsv.badRow", "a row must be an object of text cells")
-            row, enroll, pw = await _import_row(r, opts, user)
+            row, enroll, pw = await _import_row(r, opts, user, authz.grants_of(request))
         except ApiError as e:
             results[i] = {"index": i, "ok": False, "code": e.code, "vars": e.vars,
                           "skipped": e.code == "hostcsv.duplicate"}
@@ -2402,7 +2707,7 @@ class EnrollRenew(BaseModel):
 
 
 @router.post("/api/hosts/{host_id}/enroll")
-async def renew_enroll(host_id: int, user=Depends(security.require_user),
+async def renew_enroll(host_id: int, user=Depends(authz.perm('host.admin', host='host_id')),
                        body: EnrollRenew = EnrollRenew()):
     """New install one-liner for an existing host (reinstall / new enroll). Body optional:
     fără el → 1h, fără parolă (retrocompatibil cu clienţii care nu trimit nimic)."""
@@ -2424,7 +2729,7 @@ async def renew_enroll(host_id: int, user=Depends(security.require_user),
 
 
 @router.get("/api/hosts/{host_id}/fs")
-async def fs_list(host_id: int, path: str = "~", user=Depends(security.require_user)):
+async def fs_list(host_id: int, path: str = "~", user=Depends(authz.perm('files.read', host='host_id'))):
     await _require_host_stepup(host_id, user)   # H1
     try:
         return await core.fs_list(host_id, path)
@@ -2435,7 +2740,7 @@ async def fs_list(host_id: int, path: str = "~", user=Depends(security.require_u
 
 
 @router.get("/api/hosts/{host_id}/fs/cwd")
-async def fs_cwd(host_id: int, sid: str, user=Depends(security.require_user)):
+async def fs_cwd(host_id: int, sid: str, user=Depends(authz.perm('files.read', host='host_id'))):
     """The session shell's cwd (so the panel opens where you actually are)."""
     await _require_host_stepup(host_id, user)   # H1
     try:
@@ -2480,7 +2785,7 @@ def download_etag(size, mtime) -> Optional[str]:
 
 
 @router.get("/api/hosts/{host_id}/fs/download")
-async def fs_download(host_id: int, request: Request, path: str, user=Depends(security.require_user)):
+async def fs_download(host_id: int, request: Request, path: str, user=Depends(authz.perm('files.read', host='host_id'))):
     """Streamează un fişier de pe host. Suportă `Range: bytes=start-[end]` (HTTP 206) ca motorul de
     transfer din browser (phase 2) să descarce în felii, cu progres, retry şi reluare de la offset.
     Fără Range (sau pe agenţi fără fs_stat) → 200 întreg, exact ca înainte. Nu schimbă agentul:
@@ -2556,7 +2861,7 @@ async def fs_download(host_id: int, request: Request, path: str, user=Depends(se
 
 
 @router.get("/api/hosts/{host_id}/fs/archive")
-async def fs_archive(host_id: int, path: str, user=Depends(security.require_user)):
+async def fs_archive(host_id: int, path: str, user=Depends(authz.perm('files.read', host='host_id'))):
     """Descarcă un fişier sau un DIRECTOR ca tar.gz. Arhiva se face pe host (tar prin op-ul
     `run` — agentul rămâne neschimbat), curge prin acelaşi streaming ca /fs/download, iar
     temp-ul de pe host se şterge când transferul se termină (sau pică)."""
@@ -2636,7 +2941,7 @@ def _log_chunk_start(host_id: int, upload_id: str, offset: int) -> None:
 @router.post("/api/hosts/{host_id}/fs/upload")
 async def fs_upload(host_id: int, request: Request, path: str,
                     if_mtime: int | None = None, upload_id: str | None = None,
-                    offset: int = 0, user=Depends(security.require_user)):
+                    offset: int = 0, user=Depends(authz.perm('files.write', host='host_id'))):
     """Body is the raw file (or, cu `upload_id`, o FELIE care începe la `offset`).
     Fără `upload_id`: one-shot — stream + commit atomic (ca înainte). Cu `upload_id`: append
     la temp-ul resumabil, fără commit (vezi /commit). `if_mtime` (opțional): salvare cu
@@ -2669,7 +2974,7 @@ async def fs_upload(host_id: int, request: Request, path: str,
 
 @router.get("/api/hosts/{host_id}/fs/upload/status")
 async def fs_upload_status(host_id: int, path: str, upload_id: str,
-                           user=Depends(security.require_user)):
+                           user=Depends(authz.perm('files.write', host='host_id'))):
     """Câţi octeţi au aterizat deja pentru `upload_id` — clientul reia de acolo. Cu agent v55
     răspunsul include şi `crc32` (CRC-ul octeţilor deja pe disc), ca clientul să continue
     verificarea de integritate şi după un resume, nu doar pe upload-urile din offset 0."""
@@ -2687,7 +2992,7 @@ async def fs_upload_status(host_id: int, path: str, upload_id: str,
 @router.post("/api/hosts/{host_id}/fs/upload/commit")
 async def fs_upload_commit(host_id: int, request: Request, path: str, upload_id: str,
                            if_mtime: int | None = None, crc32: int | None = None,
-                           user=Depends(security.require_user)):
+                           user=Depends(authz.perm('files.write', host='host_id'))):
     """Finalizează un upload resumabil: rename atomic temp → ţintă. `crc32` (opţional): verificare
     de integritate — dacă nu se potriveşte, temp-ul e şters şi commit-ul eşuează (fişier corupt
     nu ajunge la ţintă)."""
@@ -2707,7 +3012,7 @@ async def fs_upload_commit(host_id: int, request: Request, path: str, upload_id:
 
 @router.delete("/api/hosts/{host_id}/fs/upload")
 async def fs_upload_abort(host_id: int, path: str, upload_id: str,
-                          user=Depends(security.require_user)):
+                          user=Depends(authz.perm('files.write', host='host_id'))):
     """Anulează un upload resumabil şi şterge temp-ul de pe host."""
     await _require_host_stepup(host_id, user)
     _check_upload_id(upload_id)
@@ -2749,7 +3054,7 @@ def _copy_code_of(msg: str) -> str:
 
 
 @router.post("/api/fs/copy")
-async def fs_copy_start(body: FsCopyIn, request: Request, user=Depends(security.require_user)):
+async def fs_copy_start(body: FsCopyIn, request: Request, user=Depends(authz.perm('files.read', host='body:src_host'))):
     """Porneşte o copiere de fişiere de pe `src_host` în `dst_dir` pe `dst_host` → `{job_id}`.
     `on_conflict`: skip | overwrite | rename („nume (1).ext"). src == dst e permis (duplicat /
     copiere în alt director pe acelaşi host). Folderele (3.6, agent 58) se copiază cu tot arborele;
@@ -2771,6 +3076,9 @@ async def fs_copy_start(body: FsCopyIn, request: Request, user=Depends(security.
         raise _copy_refused(e)
     if len(set(names)) != len(names):
         raise ApiError(400, "copy.duplicateNames", "two sources have the same file name")
+    # 3.6: `files.read` pe sursă e verificat de dependenţa rutei; destinaţia cere `files.write`
+    # (o copiere host→host = download + upload, deci exact drepturile celor două, §A.4)
+    await authz.require_on(request, body.dst_host, "files.write")
     src = await _copy_host(body.src_host, "source")
     dst = await _copy_host(body.dst_host, "destination")
     # step-up pe AMBELE capete, ca la /fs/download (sursa) şi /fs/upload (destinaţia)
@@ -2837,6 +3145,10 @@ async def fs_copy_retry(job_id: str, request: Request, user=Depends(security.req
         raise ApiError(404, "copy.missing", "no such copy job (finished jobs expire after an hour)")
     if old.finished is None:
         raise ApiError(409, "copy.running", "the copy is still running")
+    # 3.6: drepturile se RE-verifică (pot fi fost retrase între timp) — ca la pornire
+    g = await authz.grants_for_user(user["id"])
+    await authz.require_on(g, old.src_host, "files.read")
+    await authz.require_on(g, old.dst_host, "files.write")
     await _copy_host(old.src_host, "source")
     await _copy_host(old.dst_host, "destination")
     await _require_host_stepup(old.src_host, user)
@@ -2867,7 +3179,7 @@ _PREVIEW_HEAD = 256 * 1024
 
 
 @router.get("/api/hosts/{host_id}/fs/preview")
-async def fs_preview(host_id: int, path: str, user=Depends(security.require_user)):
+async def fs_preview(host_id: int, path: str, user=Depends(authz.perm('files.read', host='host_id'))):
     """Conținut pentru editor: fișier întreg dacă e mic, altfel doar începutul
     (view-only). Detectează binar și întoarce mtime pentru verificarea de conflict."""
     await _require_host_stepup(host_id, user)   # H1
@@ -3115,7 +3427,7 @@ async def proxy_forward_http(request: Request, host_id: int, thost: str,
 # URL — fără suprafață SSRF de „probează orice".
 @router.get("/api/forwards/{fid}/probe")
 async def forward_probe(fid: int, stepup_grant: str = "", stepup_password: str = "", stepup_totp: str = "",
-                        user=Depends(security.require_user)):
+                        user=Depends(authz.perm('forward.use', host='fid'))):
     # `enabled=0` era ignorat aici: butonul „Oprit" din UI e singura pârghie de „taie accesul
     # acum", iar pe calea HTTP funcţiona (404). Pe telnet şi pe probă, sesiunea se deschidea şi
     # octeţii curgeau spre echipamentul din LAN, cu forward-ul dezactivat.
@@ -3227,13 +3539,13 @@ class ForwardDomainIn(BaseModel):
 
 
 @router.get("/api/settings/forward")
-async def get_forward_settings(user=Depends(security.require_user)):
+async def get_forward_settings(user=Depends(authz.perm('settings.manage'))):
     return await _forward_settings_json()
 
 
 @router.post("/api/settings/forward")
 async def save_forward_settings(body: ForwardDomainIn,
-                                user=Depends(security.require_user)):
+                                user=Depends(authz.perm('settings.manage'))):
     d = body.domain.strip().lower().rstrip(".")
     if not _valid_domain(d):
         raise ApiError(400, "settings.badForwardDomain", "invalid domain (e.g. apps.example.com)")
@@ -3356,7 +3668,7 @@ async def scheduled_backup_tick(now: float | None = None, force: bool = False) -
 
 
 @router.get("/api/backup/status")
-async def backup_status(user=Depends(security.require_user)):
+async def backup_status(user=Depends(authz.perm('backups.manage'))):
     sched = await _get_setting("backup_schedule", "off")
     last = float(await _get_setting("backup_last", "0") or 0)
     return {
@@ -3372,7 +3684,7 @@ async def backup_status(user=Depends(security.require_user)):
 
 
 @router.post("/api/backup/download")
-async def backup_download(body: BackupIn, user=Depends(security.require_user)):
+async def backup_download(body: BackupIn, user=Depends(authz.perm('backups.manage'))):
     await _require_reauth_for_secret(user, body.current_password, "downloading the backup")
     if len(body.passphrase) < 8:
         raise ApiError(400, "backup.passphraseTooShort", "the encryption passphrase must be at least 8 characters")
@@ -3386,7 +3698,7 @@ async def backup_download(body: BackupIn, user=Depends(security.require_user)):
 
 
 @router.post("/api/backup/stored/{name}/download")
-async def backup_download_stored(name: str, body: RestoreIn, user=Depends(security.require_user)):
+async def backup_download_stored(name: str, body: RestoreIn, user=Depends(authz.perm('backups.manage'))):
     await _require_reauth_for_secret(user, body.current_password, "downloading the backup")
     if len(body.passphrase) < 8:
         raise ApiError(400, "backup.passphraseTooShort", "the encryption passphrase must be at least 8 characters")
@@ -3401,7 +3713,7 @@ async def backup_download_stored(name: str, body: RestoreIn, user=Depends(securi
 
 
 @router.post("/api/backup/restore")
-async def backup_restore(request: Request, user=Depends(security.require_user)):
+async def backup_restore(request: Request, user=Depends(authz.perm('backups.manage'))):
     # Fișierul .wtbk vine ca body brut (octet-stream), parola într-un header — evităm
     # dependența python-multipart; parola e a userului, peste HTTPS, într-un header pe
     # care reverse-proxy-ul nu-l loghează.
@@ -3435,7 +3747,7 @@ async def backup_restore(request: Request, user=Depends(security.require_user)):
 
 
 @router.post("/api/backup/schedule")
-async def backup_schedule(body: BackupScheduleIn, user=Depends(security.require_user)):
+async def backup_schedule(body: BackupScheduleIn, user=Depends(authz.perm('backups.manage'))):
     if body.schedule not in ("off", "daily", "weekly"):
         raise ApiError(400, "backup.badSchedule", "invalid schedule (off/daily/weekly)")
     await _set_setting("backup_schedule", body.schedule)
@@ -3444,7 +3756,7 @@ async def backup_schedule(body: BackupScheduleIn, user=Depends(security.require_
 
 
 @router.delete("/api/backup/stored/{name}")
-async def backup_delete_stored(name: str, user=Depends(security.require_user)):
+async def backup_delete_stored(name: str, user=Depends(authz.perm('backups.manage'))):
     if "/" in name or "\\" in name or not name.endswith(".wtsnap"):
         raise ApiError(400, "generic.badName", "invalid name")
     p = config.DATA_DIR / "backups" / name
@@ -3456,7 +3768,7 @@ async def backup_delete_stored(name: str, user=Depends(security.require_user)):
 
 
 @router.post("/api/backup/seen")
-async def backup_seen(user=Depends(security.require_user)):
+async def backup_seen(user=Depends(authz.perm('backups.manage'))):
     # „văzut" acoperă şi ultimul eşec, nu doar ultimul succes (tab-ul Backup arată ambele)
     last = float(await _get_setting("backup_last", "0") or 0)
     err_ts = float((await _get_json_setting("backup_last_error")).get("ts") or 0)
@@ -3504,12 +3816,12 @@ class ProbeIn(BaseModel):
 
 
 @router.get("/api/backup/cloud")
-async def cloud_status(user=Depends(security.require_user)):
+async def cloud_status(user=Depends(authz.perm('backups.manage'))):
     return await cloudbackup.status()
 
 
 @router.post("/api/backup/cloud/config")
-async def cloud_config(body: CloudConfigIn, user=Depends(security.require_user)):
+async def cloud_config(body: CloudConfigIn, user=Depends(authz.perm('backups.manage'))):
     # Aceeași poartă ca la passkey/2FA: cine are cookie-ul, dar nu parola, nu poate
     # deschide o cale prin care backup-urile (cheia seifului) pleacă spre contul lui.
     if not await _verify_reauth_password(user, body.current_password):
@@ -3523,7 +3835,7 @@ async def cloud_config(body: CloudConfigIn, user=Depends(security.require_user))
 
 
 @router.post("/api/backup/cloud/probe")
-async def cloud_probe(body: ProbeIn, request: Request, user=Depends(security.require_user)):
+async def cloud_probe(body: ProbeIn, request: Request, user=Depends(authz.perm('backups.manage'))):
     """SFTP TOFU: testează conexiunea + întoarce amprenta host-key-ului de confirmat. Re-auth ca la
     config: cine are doar cookie-ul nu poate sonda servere arbitrare cu credenţiale scrise aici."""
     if not await _verify_reauth_password(user, body.current_password):
@@ -3536,7 +3848,7 @@ async def cloud_probe(body: ProbeIn, request: Request, user=Depends(security.req
 
 @router.post("/api/backup/cloud/direct")
 async def cloud_config_direct(body: DirectConfigIn, request: Request,
-                              user=Depends(security.require_user)):
+                              user=Depends(authz.perm('backups.manage'))):
     """Configurează o destinaţie DIRECTĂ (SFTP/FTPS). Aceeaşi poartă de re-auth ca la cloud: un
     cookie furat nu trebuie să poată deschide o cale prin care backup-urile (cheia seifului) pleacă
     spre serverul atacatorului. Auditat."""
@@ -3555,7 +3867,7 @@ async def cloud_config_direct(body: DirectConfigIn, request: Request,
 
 
 @router.get("/api/backup/cloud/authorize")
-async def cloud_authorize(user=Depends(security.require_user)):
+async def cloud_authorize(user=Depends(authz.perm('backups.manage'))):
     try:
         return {"url": await cloudbackup.authorize_url(user["id"])}
     except cloudbackup.CloudError as e:
@@ -3564,7 +3876,7 @@ async def cloud_authorize(user=Depends(security.require_user)):
 
 @router.get("/api/backup/cloud/callback")
 async def cloud_callback(code: str = "", state: str = "", error: str = "",
-                         user=Depends(security.require_user)):
+                         user=Depends(authz.perm('backups.manage'))):
     """Întoarcerea de la provider. Pagină simplă, fără JS (CSP-ul nostru interzice
     inline scripts) — fila se închide, iar panoul din Setări se reîmprospătează."""
     if error or not code:
@@ -3588,7 +3900,7 @@ async def cloud_callback(code: str = "", state: str = "", error: str = "",
 
 
 @router.post("/api/backup/cloud/upload")
-async def cloud_upload_now(user=Depends(security.require_user)):
+async def cloud_upload_now(user=Depends(authz.perm('backups.manage'))):
     try:
         name = await cloudbackup.upload_backup()
     except cloudbackup.CloudError as e:
@@ -3597,7 +3909,7 @@ async def cloud_upload_now(user=Depends(security.require_user)):
 
 
 @router.post("/api/backup/cloud/disconnect")
-async def cloud_disconnect(user=Depends(security.require_user)):
+async def cloud_disconnect(user=Depends(authz.perm('backups.manage'))):
     await cloudbackup.disconnect()
     return await cloudbackup.status()
 
@@ -3633,7 +3945,7 @@ def _signing_status() -> dict:
 
 
 @router.get("/api/signing/status")
-async def signing_status(user=Depends(security.require_user)):
+async def signing_status(user=Depends(authz.perm('signing.manage'))):
     return _signing_status()
 
 
@@ -3651,7 +3963,7 @@ async def changelog(user=Depends(security.require_user)):
 
 
 @router.post("/api/signing/generate")
-async def signing_generate(body: SigningGenIn, user=Depends(security.require_user)):
+async def signing_generate(body: SigningGenIn, user=Depends(authz.perm('signing.manage'))):
     await _require_reauth_for_secret(user, body.current_password, "generating the signing key")
     if signing.key_exists():
         raise ApiError(409, "signing.exists", "a fleet signing key already exists")
@@ -3666,7 +3978,7 @@ async def signing_generate(body: SigningGenIn, user=Depends(security.require_use
 
 
 @router.post("/api/signing/import")
-async def signing_import(body: SigningImportIn, user=Depends(security.require_user)):
+async def signing_import(body: SigningImportIn, user=Depends(authz.perm('signing.manage'))):
     await _require_reauth_for_secret(user, body.current_password, "importing the signing key")
     if signing.key_exists():
         raise ApiError(409, "signing.exists", "a fleet signing key already exists")
@@ -3684,7 +3996,7 @@ async def signing_import(body: SigningImportIn, user=Depends(security.require_us
 
 
 @router.post("/api/signing/unlock")
-async def signing_unlock(body: SigningPassIn, user=Depends(security.require_user)):
+async def signing_unlock(body: SigningPassIn, user=Depends(authz.perm('signing.manage'))):
     if not signing.key_exists():
         raise ApiError(404, "signing.missing", "no signing key")
     # Generarea, importul şi backupul cheii cer parola contului; deblocarea NU o cerea, deşi e
@@ -3700,7 +4012,7 @@ async def signing_unlock(body: SigningPassIn, user=Depends(security.require_user
 
 
 @router.post("/api/signing/lock")
-async def signing_lock(body: SigningPassIn, user=Depends(security.require_user)):
+async def signing_lock(body: SigningPassIn, user=Depends(authz.perm('signing.manage'))):
     # Blocarea opreşte auto-update-ul pe TOATĂ flota, dintr-un singur POST. Un cookie furat
     # putea face asta fără să dovedească nimic — o negare de serviciu ieftină şi tăcută.
     await _require_reauth_for_secret(user, body.current_password, "locking the signing key")
@@ -3709,7 +4021,7 @@ async def signing_lock(body: SigningPassIn, user=Depends(security.require_user))
 
 
 @router.post("/api/signing/backup")
-async def signing_backup(body: SigningPassIn, user=Depends(security.require_user)):
+async def signing_backup(body: SigningPassIn, user=Depends(authz.perm('signing.manage'))):
     """Descarcă o copie CRIPTATĂ a cheii de semnare (scrypt→AES-GCM, cu parola dată).
     Pierderea cheii = agenții existenți merg mai departe, dar nu mai primesc update-uri."""
     await _require_reauth_for_secret(user, body.current_password, "exporting the signing key")
@@ -3740,7 +4052,7 @@ class RunIn(BaseModel):
 
 @router.post("/api/hosts/{host_id}/run")
 async def host_run(host_id: int, body: RunIn, request: Request,
-                   user=Depends(security.require_scope("run"))):
+                   user=Depends(authz.perm('run', host='host_id', tokens='run'))):
     audit.detail(request, "cmd: " + body.command.strip()[:200])
     await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)   # H1
     cmd = body.command.strip()
@@ -3766,7 +4078,8 @@ async def host_run(host_id: int, body: RunIn, request: Request,
         raise ApiError(502, "run.failed", resp.get("msg") or "run failed")
     hrow = await db.fetchone("SELECT name FROM hosts WHERE id=?", host_id)
     await _record_history(host_id, hrow["name"] if hrow else "", cmd,
-                          resp.get("exit_code"), "", "fleet")
+                          resp.get("exit_code"), "", "fleet",
+                          user.get("actor_id") if isinstance(user, dict) else user["id"])
     return {"exit_code": resp.get("exit_code"), "timed_out": bool(resp.get("timed_out")),
             "stdout": resp.get("stdout", ""), "stderr": resp.get("stderr", ""),
             "duration": resp.get("duration")}
@@ -3792,7 +4105,7 @@ class GitIn(BaseModel):
 
 
 @router.post("/api/hosts/{host_id}/git")
-async def host_git(host_id: int, body: GitIn, user=Depends(security.require_user)):
+async def host_git(host_id: int, body: GitIn, user=Depends(authz.perm('run', host='host_id'))):
     await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)   # H1
     if not body.args or body.args[0] not in _GIT_SUBCMDS:
         raise ApiError(400, "git.badSubcommand", "git subcommand not allowed")
@@ -3892,7 +4205,7 @@ def _docker_error(err: str) -> ApiError:
 
 
 @router.get("/api/hosts/{host_id}/docker")
-async def docker_list(host_id: int, kind: str, user=Depends(security.require_user)):
+async def docker_list(host_id: int, kind: str, user=Depends(authz.perm('docker.view', host='host_id'))):
     """Listează containere/imagini/volume/reţele. Fiecare rând e un JSON (format Go template),
     parsat aici într-o listă de obiecte — frontend-ul primeşte date, nu text de ecran."""
     await _require_host_stepup(host_id, user)   # citeşte date de pe host → aceeaşi poartă ca fs_list
@@ -4052,7 +4365,7 @@ async def _host_cpu_count(host_id: int) -> Optional[int]:
 
 
 @router.get("/api/hosts/{host_id}/docker/stats")
-async def docker_stats(host_id: int, user=Depends(security.require_user)):
+async def docker_stats(host_id: int, user=Depends(authz.perm('docker.view', host='host_id'))):
     """CPU %, memorie (folosită/limită/%), I/O de reţea şi disc pentru containerele PORNITE.
     Aceleaşi reguli de acces ca docker_list (cookie, step-up pe host 2FA); numere, nu text."""
     await _require_host_stepup(host_id, user)   # EXACT ca docker_list
@@ -4080,7 +4393,7 @@ class DockerAction(BaseModel):
 
 @router.post("/api/hosts/{host_id}/docker/action")
 async def docker_action(host_id: int, body: DockerAction, request: Request,
-                        user=Depends(security.require_user)):
+                        user=Depends(authz.perm('docker.act', host='host_id'))):
     """start/stop/restart pe un container. Acţiune pe host → aceeaşi poartă de step-up ca /run."""
     await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)
     if body.action not in _DOCKER_ACTIONS:
@@ -4152,7 +4465,7 @@ _UNIT_RE = re.compile(r"^[A-Za-z0-9@._\\:-]{1,128}$")
 
 
 @router.get("/api/hosts/{host_id}/services")
-async def services_list(host_id: int, failed: bool = False, user=Depends(security.require_user)):
+async def services_list(host_id: int, failed: bool = False, user=Depends(authz.perm('services.view', host='host_id'))):
     """Unităţile systemd de tip service (nume, load/active/sub, descriere). Citire de stare de
     host → aceeaşi poartă de step-up ca docker_list / fs_list. `failed=1` → doar unităţile căzute
     (triajul „ce e stricat pe hostul ăsta"), cu `--state=failed` în loc de `--all`."""
@@ -4194,7 +4507,7 @@ class ServiceAction(BaseModel):
 
 @router.post("/api/hosts/{host_id}/services/action")
 async def service_action(host_id: int, body: ServiceAction, request: Request,
-                         user=Depends(security.require_user)):
+                         user=Depends(authz.perm('services.act', host='host_id'))):
     """start/stop/restart pe o unitate. Acţiune pe host → step-up ca /run şi docker_action.
     Rulează ca userul agentului: fără root/policykit, stop/start pe unităţi de sistem eşuează
     cu „access denied" — surfaced ca atare, nu tăcut."""
@@ -4213,7 +4526,7 @@ async def service_action(host_id: int, body: ServiceAction, request: Request,
 
 
 @router.get("/api/hosts/{host_id}/ports")
-async def listening_ports(host_id: int, user=Depends(security.require_user)):
+async def listening_ports(host_id: int, user=Depends(authz.perm('host.diagnostics', host='host_id'))):
     """Socket-urile în ASCULTARE (`ss -tulnH`), parsate. Citire de stare de host → step-up.
     Numele procesului cere de obicei root; fără el coloana `users` lipseşte, restul rămâne util."""
     await _require_host_stepup(host_id, user)
@@ -4268,7 +4581,7 @@ _DIAG_PROBES = {
 
 
 @router.get("/api/hosts/{host_id}/diag-probe")
-async def diag_probe(host_id: int, kind: str = "storage", user=Depends(security.require_user)):
+async def diag_probe(host_id: int, kind: str = "storage", user=Depends(authz.perm('host.diagnostics', host='host_id'))):
     """Probe on-demand (storage: lsblk/SMART/zpool · net: neighbors/firewall). Citire de stare de
     host → step-up ca ports/services. Text brut etichetat pe secţiuni — nu reinterpretăm modelul
     uneltei (glue), doar îl arătăm cohesiv."""
@@ -4397,7 +4710,7 @@ def _validate_connection(body: ConnectionIn) -> None:
 
 @router.get("/api/hosts/{host_id}/connections")
 async def list_connections(host_id: int, stepup_grant: str = "", stepup_password: str = "", stepup_totp: str = "",
-                           user=Depends(security.require_user)):
+                           user=Depends(authz.perm('toolbox.use', host='host_id'))):
     # Aceeaşi poartă ca `list_forwards`: lista arată `target_host:target_port`, user, dbname şi
     # motor pentru fiecare bază de pe host — harta internă a datelor. Create/patch/delete pe
     # aceeaşi resursă cereau step-up; citirea o dădea gratis unui cookie furat (audit 2026-10-04).
@@ -4407,7 +4720,7 @@ async def list_connections(host_id: int, stepup_grant: str = "", stepup_password
 
 
 @router.post("/api/hosts/{host_id}/connections")
-async def create_connection(host_id: int, body: ConnectionIn, user=Depends(security.require_user)):
+async def create_connection(host_id: int, body: ConnectionIn, user=Depends(authz.perm('toolbox.manage', host='host_id'))):
     if not await db.fetchone("SELECT id FROM hosts WHERE id=?", host_id):
         raise ApiError(404, "host.missing", "no such host")
     # H1: o conexiune `stored` ţine o parolă DB care poate fi exfiltrată redirectând target_host →
@@ -4426,7 +4739,7 @@ async def create_connection(host_id: int, body: ConnectionIn, user=Depends(secur
 
 @router.patch("/api/hosts/{host_id}/connections/{conn_id}")
 async def update_connection(host_id: int, conn_id: int, body: ConnectionIn,
-                            user=Depends(security.require_user)):
+                            user=Depends(authz.perm('toolbox.manage', host='host_id'))):
     if not await db.fetchone("SELECT id FROM connections WHERE id=? AND host_id=?", conn_id, host_id):
         raise ApiError(404, "connection.missing", "no such connection")
     await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)   # H1 (audit v53)
@@ -4448,7 +4761,7 @@ async def update_connection(host_id: int, conn_id: int, body: ConnectionIn,
 
 @router.delete("/api/hosts/{host_id}/connections/{conn_id}")
 async def delete_connection(host_id: int, conn_id: int, stepup_grant: str = "",
-                            stepup_password: str = "", stepup_totp: str = "", user=Depends(security.require_user)):
+                            stepup_password: str = "", stepup_totp: str = "", user=Depends(authz.perm('toolbox.manage', host='host_id'))):
     await _require_host_stepup(host_id, user, stepup_grant, stepup_password, stepup_totp)   # H1 (audit v53)
     await db.execute("DELETE FROM connections WHERE id=? AND host_id=?", conn_id, host_id)
     return {"ok": True}
@@ -4478,7 +4791,7 @@ def _split_view_json(row, panes=None):
             "broadcast": bool(row["broadcast"]), "position": row["position"] or 0}
 
 
-async def _validate_split_panes(panes) -> list:
+async def _validate_split_panes(panes, user=None) -> list:
     """2-4 sid-uri DISTINCTE, fiecare o sesiune existentă. Aceeaşi sesiune de două ori =
     doi clienţi tmux la două dimensiuni (război de resize) → respins, ca invariantul primary≠second."""
     if not isinstance(panes, list) or not (2 <= len(panes) <= 4):
@@ -4487,8 +4800,13 @@ async def _validate_split_panes(panes) -> list:
         raise ApiError(400, "splitview.badPane", "invalid session id")
     if len(set(panes)) != len(panes):
         raise ApiError(400, "splitview.dupPane", "the same session cannot appear twice")
+    grants = await authz.grants_for_user(user["id"]) if user is not None else None
     for sid in panes:
-        if not await db.fetchone("SELECT id FROM sessions WHERE id=?", sid):
+        row = await db.fetchone("SELECT id, host_id FROM sessions WHERE id=?", sid)
+        # 3.6: o sesiune pe care contul n-o poate vedea = una necunoscută (acelaşi 400)
+        if not row or grants is None or not (
+                await authz.perms_on(grants, row["host_id"])
+                & {"session.watch", "recording.view", "session.open"}):
             raise ApiError(400, "splitview.badPane", "unknown session in split view")
     return panes
 
@@ -4528,7 +4846,7 @@ async def create_split_view(body: SplitViewIn, user=Depends(security.require_use
     name = (body.name or "").strip()[:80]
     if not name:
         raise ApiError(400, "splitview.noName", "a split view needs a name")
-    panes = await _validate_split_panes(body.panes or [])
+    panes = await _validate_split_panes(body.panes or [], user)
     now = time.time()
     sid = await db.execute(
         "INSERT INTO split_views(user_id, name, panes, ratio, broadcast, position, created, updated)"
@@ -4550,7 +4868,7 @@ async def update_split_view(sv_id: int, body: SplitViewIn, user=Depends(security
             raise ApiError(400, "splitview.noName", "a split view needs a name")
         sets.append("name=?"); vals.append(name)
     if body.panes is not None:
-        panes = await _validate_split_panes(body.panes)
+        panes = await _validate_split_panes(body.panes, user)
         sets.append("panes=?"); vals.append(json.dumps(panes))
     if body.ratio is not None:
         sets.append("ratio=?"); vals.append(_split_ratio(body.ratio))
@@ -4616,7 +4934,7 @@ def _host_ipv4_ifaces(diag_json):
 
 
 @router.post("/api/hosts/{host_id}/wake")
-async def wake_host(host_id: int, request: Request, user=Depends(security.require_user)):
+async def wake_host(host_id: int, request: Request, user=Depends(authz.perm('host.wake', host='host_id'))):
     """Trimite un magic packet Wake-on-LAN către un host de agent OPRIT. WoL e broadcast L2, deci
     gateway-ul nu poate ajunge direct — cere unui agent ONLINE din ACELAŞI LAN să-l trimită. MAC-ul
     şi subnetul ţintei vin din ultimul diagnostic; peer-ul se alege după IP-urile LAN din
@@ -4641,8 +4959,11 @@ async def wake_host(host_id: int, request: Request, user=Depends(security.requir
     bcast = str(subnet.broadcast_address)
     # peer: un agent ONLINE, alt host, cu o interfaţă LAN în acelaşi subnet
     peer_conn = peer_name = None
+    # 3.6: doar un vecin pe care contul îl VEDE — răspunsul îl numeşte (`via`), iar un vecin din
+    # afara scope-ului ar fi şi o acţiune pe un host invizibil, şi un oracol de nume
+    peers_vis = await authz.visible_hosts(authz.grants_of(request), "host.view")
     for h in await db.fetchall("SELECT id, name, diagnostics FROM hosts WHERE connection_type='agent'"):
-        if h["id"] == host_id:
+        if h["id"] == host_id or not authz.in_visible(peers_vis, h["id"]):
             continue
         conn = core.source_for(h["id"])
         if not isinstance(conn, core.AgentConnection):      # online = are sursă
@@ -4676,15 +4997,16 @@ async def wake_host(host_id: int, request: Request, user=Depends(security.requir
 HISTORY_CAP = 10000
 
 
-async def _record_history(host_id, host_name, command, exit_code, cwd, source):
+async def _record_history(host_id, host_name, command, exit_code, cwd, source, user_id=None):
     cmd = (command or "").strip()
     if not cmd:
         return
     ec = exit_code if isinstance(exit_code, int) else None
     await db.execute(
-        "INSERT INTO command_history(host_id, host_name, command, exit_code, cwd, source, created)"
-        " VALUES(?,?,?,?,?,?,?)",
-        host_id, (host_name or "")[:120], cmd[:4000], ec, (cwd or "")[:500], source, time.time())
+        "INSERT INTO command_history(host_id, host_name, command, exit_code, cwd, source, created,"
+        " user_id) VALUES(?,?,?,?,?,?,?,?)",
+        host_id, (host_name or "")[:120], cmd[:4000], ec, (cwd or "")[:500], source, time.time(),
+        user_id)
     # plafon: păstrează ultimele HISTORY_CAP (id autoincrement ≈ ordine cronologică)
     await db.execute(
         "DELETE FROM command_history WHERE id <= (SELECT MAX(id) - ? FROM command_history)",
@@ -4710,7 +5032,7 @@ def _user_has_unlocked_terminal(user_id: int, host_id: int) -> bool:
 
 
 @router.post("/api/history")
-async def add_history(body: HistoryIn, user=Depends(security.require_user)):
+async def add_history(body: HistoryIn, user=Depends(authz.perm('session.open', host='body:host_id', optional_host=True))):
     """F-10: rândurile astea sunt RAPORTATE DE CLIENT (OSC 133 din browser), deci pot fi
     forjate de oricine are un cookie valid. Nu sunt probă şi nu trebuie tratate ca atare —
     urma reală e `audit_log`, scrisă de middleware, pe care clientul n-o poate atinge.
@@ -4729,15 +5051,30 @@ async def add_history(body: HistoryIn, user=Depends(security.require_user)):
                 security.stepup_window_is_open(user["id"], body.host_id)
                 or _user_has_unlocked_terminal(user["id"], body.host_id)):
             raise ApiError(403, "history.denied", "not recorded")
-    await _record_history(body.host_id, hn, body.command, body.exit_code, body.cwd, "session")
+    await _record_history(body.host_id, hn, body.command, body.exit_code, body.cwd, "session",
+                          user["id"])
     return {"ok": True}
 
 
 @router.get("/api/history")
-async def search_history(q: str = "", host_id: int | None = None, limit: int = 200,
-                         user=Depends(security.require_user)):
+async def search_history(request: Request, q: str = "", host_id: int | None = None,
+                         limit: int = 200,
+                         user=Depends(authz.perm('recording.view', list=True))):
     limit = min(max(limit, 1), 500)
     clauses, params = [], []
+    # 3.6: doar hosturile cu `recording.view`; rândurile fără host (NULL) doar cu `audit.view`.
+    # Filtru TĂCUT, în SQL — ca regula 2FA de mai jos.
+    grants = authz.grants_of(request)
+    vis = await authz.visible_hosts(grants, "recording.view")
+    if vis is not None:
+        null_ok = "host_id IS NULL OR " if grants.has_global("audit.view") else ""
+        if vis:
+            clauses.append("(%shost_id IN (%s))" % (null_ok, ",".join("?" * len(vis))))
+            params.extend(sorted(vis))
+        else:
+            clauses.append("(host_id IS NULL)" if null_ok else "0")
+    elif not grants.has_global("audit.view"):
+        clauses.append("host_id IS NOT NULL")
     if q.strip():
         clauses.append("command LIKE ?")
         params.append("%" + q.strip() + "%")
@@ -4770,7 +5107,7 @@ class ClearHistoryIn(BaseModel):
 
 @router.delete("/api/history")
 async def clear_history(request: Request, body: ClearHistoryIn | None = None,
-                        user=Depends(security.require_user)):
+                        user=Depends(authz.perm('history.clear'))):
     """Şterge TOT istoricul de comenzi (toate conturile, toate hosturile, inclusiv cele 2FA pe
     care istoricul nici nu le arată fără step-up). E o ştergere globală şi ireversibilă de urme,
     deci cere re-auth ca „Revocă tot" (parola contului; SSO: grant passkey / fereastra
@@ -4878,19 +5215,26 @@ def _forward_json(row) -> dict:
 
 
 @router.get("/api/hosts/{host_id}/forwards")
-async def list_forwards(host_id: int, stepup_grant: str = "", stepup_password: str = "", stepup_totp: str = "",
-                        user=Depends(security.require_user)):
+async def list_forwards(host_id: int, request: Request, stepup_grant: str = "",
+                        stepup_password: str = "", stepup_totp: str = "",
+                        user=Depends(authz.perm('forward.use', host='host_id'))):
     # Lista arată `target_host:target_port` pentru fiecare tunel — exact informaţia pentru care
     # s-a pus step-up pe probă („ce port intern e deschis"). Create/patch/delete/probe/telnet îl
     # cereau toate; lista o dădea gratis, deci gardul era ocolibil prin simpla citire.
     await _require_host_stepup(host_id, user, stepup_grant, stepup_password, stepup_totp)
     rows = await db.fetchall(
         "SELECT * FROM port_forwards WHERE host_id=? ORDER BY created", host_id)
-    return [_forward_json(r) for r in rows]
+    out = [_forward_json(r) for r in rows]
+    # 3.6: ţinta (`host:port` intern) doar cu `forward.manage` — cine doar DESCHIDE forward-uri
+    # (Viewer, Operator) vede eticheta şi URL-ul, nu harta reţelei interne a hostului
+    if "forward.manage" not in await authz.require_on(request, host_id, "forward.use"):
+        for f in out:
+            f["target_host"], f["target_port"] = "", None
+    return out
 
 
 @router.get("/api/apps")
-async def list_apps(user=Depends(security.require_user)):
+async def list_apps(request: Request, user=Depends(authz.perm('forward.use', list=True))):
     """Toate forward-urile promovate la „app" (bookmark), agregate din toată flota, pentru strip-ul
     de pe dashboard. NU expune `target_host:port` (motivul step-up-ului pe listarea per-host) — doar
     ce e nevoie ca să afişezi şi deschizi o dală: nume, subdomeniu, tip, host, activ. Deci nu cere
@@ -4899,6 +5243,8 @@ async def list_apps(user=Depends(security.require_user)):
         "SELECT f.id, f.label, f.slug, f.scheme, f.enabled, f.app_type, f.host_id, h.name AS host_name"
         " FROM port_forwards f JOIN hosts h ON h.id=f.host_id"
         " WHERE f.app_type IS NOT NULL AND f.app_type<>'' ORDER BY h.name, f.label")
+    vis = await authz.visible_hosts(authz.grants_of(request), "forward.use")   # 3.6
+    rows = [r for r in rows if authz.in_visible(vis, r["host_id"])]
     return [{
         "id": r["id"], "label": r["label"], "app_type": r["app_type"],
         "host_id": r["host_id"], "host_name": r["host_name"], "enabled": bool(r["enabled"]),
@@ -4907,9 +5253,9 @@ async def list_apps(user=Depends(security.require_user)):
 
 
 @router.get("/api/audit")
-async def audit_list(limit: int = 200, before: float = 0.0, q: str = "",
+async def audit_list(request: Request, limit: int = 200, before: float = 0.0, q: str = "",
                      failed_only: bool = False,
-                     user=Depends(security.require_user)):
+                     user=Depends(authz.perm('audit.view', list=True))):
     # `require_user`, nu `require_scope("read")`. Coloana `detail` conţine textul COMPLET al
     # comenzilor rulate pe flotă, interogările de căutare, emailul şi IP-ul fiecărui operator —
     # adică exact conţinutul pe care toate celelalte citiri (`/transcript`, `/preview`,
@@ -4917,7 +5263,14 @@ async def audit_list(limit: int = 200, before: float = 0.0, q: str = "",
     # ajunge în loguri de CI, în `.env`, în scripturi; nu are ce căuta în istoricul operaţional.
     """Jurnalul de audit: ce s-a schimbat prin UI/API, de către cine și de la ce IP.
     Paginare în trecut cu `before` (ts-ul ultimei linii primite)."""
-    entries = await audit.recent(limit, before, q.strip(), failed_only)
+    # 3.6: fără `audit.view` — doar propriile rânduri; cu el — rândurile fără host sau de pe
+    # hosturile vizibile (host_id-ul din coloană, sau din cale pe rândurile de dinainte de 3.6).
+    grants = authz.grants_of(request)
+    if grants.has_global("audit.view"):
+        vis = await authz.visible_hosts(grants, "host.view")
+        entries = await audit.recent(limit, before, q.strip(), failed_only, visible_hosts=vis)
+    else:
+        entries = await audit.recent(limit, before, q.strip(), failed_only, actor_id=user["id"])
     # meta-leak: `detail` conţine textul COMPLET al comenzilor rulate pe flotă — pe un host
     # `require_2fa` e exact conţinutul pe care /transcript, /search şi /history îl ţin în spatele
     # step-up-ului. Redactăm detaliul intrărilor care ţintesc un host 2FA fără fereastră deschisă
@@ -4941,7 +5294,7 @@ class HostKeyAcceptIn(BaseModel):
 
 
 @router.get("/api/hosts/{host_id}/hostkey")
-async def host_hostkey(host_id: int, user=Depends(security.require_user)):
+async def host_hostkey(host_id: int, user=Depends(authz.perm('host.diagnostics', host='host_id'))):
     """Starea pinului de host-key al unui host SSH (direct/jump): amprenta curentă (cea pinată,
     sau cea OFERITĂ dacă e o alarmă activă), cea anterioară şi momentul schimbării — ca omul să
     poată compara cu `ssh-keygen -lf /etc/ssh/ssh_host_*_key.pub` pe server, out-of-band."""
@@ -4959,7 +5312,7 @@ async def host_hostkey(host_id: int, user=Depends(security.require_user)):
 
 @router.post("/api/hosts/{host_id}/hostkey/accept")
 async def host_hostkey_accept(host_id: int, body: HostKeyAcceptIn, request: Request,
-                              user=Depends(security.require_user)):
+                              user=Depends(authz.perm('host.edit', host='host_id'))):
     """Re-pinează cheia NOUĂ după verificare out-of-band şi stinge alarma. Singura cale de
     re-pin din UI — înainte trucul era „schimb portul şi-l pun la loc" (audit UX §6.e2).
     Pe hosturile 2FA cere step-up (e echivalentul lui „ştergi known_hosts"); e auditat şi
@@ -4992,7 +5345,7 @@ async def host_hostkey_accept(host_id: int, body: HostKeyAcceptIn, request: Requ
 
 
 @router.get("/api/hosts/{host_id}/events")
-async def host_events(host_id: int, user=Depends(security.require_user)):
+async def host_events(host_id: int, user=Depends(authz.perm('host.diagnostics', host='host_id'))):
     """Jurnal de conexiune al agentului (ultimele 7 zile) + starea curentă — pentru panoul
     de diagnostic: cine a conectat/deconectat şi DE CE, când a venit un update etc."""
     await _require_host_stepup(host_id, user)   # F-05: IP-uri, versiuni, motive de reconectare
@@ -5028,7 +5381,7 @@ async def host_events(host_id: int, user=Depends(security.require_user)):
 
 
 @router.get("/api/hosts/{host_id}/agent-log")
-async def agent_log(host_id: int, user=Depends(security.require_user)):
+async def agent_log(host_id: int, user=Depends(authz.perm('host.diagnostics', host='host_id'))):
     """Tail-ul logului agentului (ptyd.log) — debug din UI, fără SSH pe host."""
     # H1: logul agentului conţine ce s-a întâmplat pe host şi poate include conţinut
     # scris de utilizator. `audit.py` îl clasifică drept citire care SCOATE date; poarta
@@ -5047,7 +5400,7 @@ async def agent_log(host_id: int, user=Depends(security.require_user)):
 
 
 @router.post("/api/hosts/{host_id}/diagnostics/refresh")
-async def diagnostics_refresh(host_id: int, user=Depends(security.require_user)):
+async def diagnostics_refresh(host_id: int, user=Depends(authz.perm('host.diagnostics', host='host_id'))):
     """Snapshot proaspăt cerut acum de la agent (butonul Refresh). Doar când hostul e online;
     altfel UI-ul arată ultimul snapshot persistat din `/events`. Aceeaşi poartă de step-up ca
     restul citirilor de host (scoate IP-uri, rute, mounturi)."""
@@ -5065,7 +5418,7 @@ async def diagnostics_refresh(host_id: int, user=Depends(security.require_user))
 
 @router.post("/api/hosts/{host_id}/forwards")
 async def create_forward(host_id: int, body: ForwardIn,
-                         user=Depends(security.require_user)):
+                         user=Depends(authz.perm('forward.manage', host='host_id'))):
     # Un forward e o gaură făcută la comandă în reţeaua host-ului: `127.0.0.1:2375` (API-ul
     # Docker) devine accesibil din afară. Pe un host cu 2FA, asta trebuie să coste un factor.
     # Comentariul de dinainte spunea că e „aceeaşi categorie ca citirea istoricului" — dar
@@ -5103,7 +5456,7 @@ async def create_forward(host_id: int, body: ForwardIn,
 
 @router.patch("/api/forwards/{fid}")
 async def update_forward(fid: int, body: ForwardPatch,
-                         user=Depends(security.require_user)):
+                         user=Depends(authz.perm('forward.manage', host='fid'))):
     row = await db.fetchone("SELECT * FROM port_forwards WHERE id=?", fid)
     if not row:
         raise ApiError(404, "forward.missing", "no such forward")
@@ -5129,7 +5482,7 @@ async def update_forward(fid: int, body: ForwardPatch,
 
 @router.delete("/api/forwards/{fid}")
 async def delete_forward(fid: int, stepup_grant: str = "", stepup_password: str = "", stepup_totp: str = "",
-                         user=Depends(security.require_user)):
+                         user=Depends(authz.perm('forward.manage', host='fid'))):
     row = await db.fetchone("SELECT host_id FROM port_forwards WHERE id=?", fid)
     if not row:
         return {"ok": True}                     # idempotent: deja nu există
@@ -5156,8 +5509,8 @@ class TelnetOpenIn(BaseModel):
 
 
 @router.post("/api/forwards/{fid}/telnet")
-async def open_forward_telnet(fid: int, body: TelnetOpenIn,
-                              user=Depends(security.require_user)):
+async def open_forward_telnet(fid: int, body: TelnetOpenIn, request: Request,
+                              user=Depends(authz.perm('forward.manage', host='fid'))):
     """Bastion telnet: deschide o sesiune de terminal către ținta unui forward
     (scheme=telnet), tunelată prin agentul host-ului. Spre deosebire de forward-urile
     web (subdomeniu + proxy HTTP), aici suprafața de acces e un TERMINAL pe originul
@@ -5168,13 +5521,17 @@ async def open_forward_telnet(fid: int, body: TelnetOpenIn,
     row = await db.fetchone("SELECT * FROM port_forwards WHERE id=? AND enabled=1", fid)
     if not row:
         raise ApiError(404, "forward.missing", "no such forward")
+    # 3.6: deschide o SESIUNE (terminal) prin forward → şi `session.open` pe host
+    await authz.require_on(request, row["host_id"], "session.open", "fid")
     # H1: sesiune interactivă prin agentul host-ului — aceeași poartă ca create_session
     await _require_host_stepup(row["host_id"], user, body.stepup_grant, body.stepup_password, body.stepup_totp)
     if row["scheme"] != "telnet":
         raise ApiError(400, "forward.notTelnet", "this forward is not a telnet forward")
     title = body.title.strip() or row["label"] or f'{row["target_host"]}:{row["target_port"]}'
     try:
-        return await core.create_telnet_session(row, title[:60], body.rows, body.cols, body.tz)
+        result = await core.create_telnet_session(row, title[:60], body.rows, body.cols, body.tz)
+        await _stamp_session(result, user)
+        return result
     except core.AgentGone:
         raise ApiError(409, "host.offline", "the host is offline (the agent is not connected)")
     except core.SessionLimitReached:
@@ -5201,7 +5558,7 @@ class SerialOpenIn(BaseModel):
 
 
 @router.post("/api/hosts/{host_id}/serial/discover")
-async def serial_discover(host_id: int, user=Depends(security.require_user)):
+async def serial_discover(host_id: int, user=Depends(authz.perm('serial.use', host='host_id'))):
     """List the real serial ports on the host (discovery, read-only)."""
     row = await db.fetchone("SELECT id FROM hosts WHERE id=?", host_id)
     if not row:
@@ -5216,7 +5573,7 @@ async def serial_discover(host_id: int, user=Depends(security.require_user)):
 
 
 @router.post("/api/hosts/{host_id}/serial/open")
-async def serial_open(host_id: int, body: SerialOpenIn, user=Depends(security.require_user)):
+async def serial_open(host_id: int, body: SerialOpenIn, user=Depends(authz.perm('serial.use', host='host_id'))):
     """Deschide o sesiune de consolă serială pe host. Interactiv → aceeași poartă de
     step-up ca sesiunile normale."""
     row = await db.fetchone("SELECT id FROM hosts WHERE id=?", host_id)
@@ -5235,8 +5592,10 @@ async def serial_open(host_id: int, body: SerialOpenIn, user=Depends(security.re
               "stop": body.stop, "flow": body.flow}
     title = (body.title or "").strip() or device.rsplit("/", 1)[-1]
     try:
-        return await core.create_serial_session(host_id, device, params, title[:60],
-                                                body.rows, body.cols, body.tz or None)
+        result = await core.create_serial_session(host_id, device, params, title[:60],
+                                                  body.rows, body.cols, body.tz or None)
+        await _stamp_session(result, user)
+        return result
     except core.AgentGone:
         raise ApiError(409, "host.offline", "the host is offline (the agent is not connected)")
     except core.SessionLimitReached:
@@ -5281,6 +5640,23 @@ async def _forward_window_ok(slug: str, ticket: str | None) -> bool:
         return True
     uid = security.forward_token_uid(ticket, slug)
     return uid is not None and security.stepup_window_is_open(uid, row["host_id"])
+
+
+async def _forward_authz_ok(slug: str, ticket: str | None) -> bool:
+    """3.6 (§A.6.4): biletul de forward trăieşte până la 12 h, mai mult decât un rol. Deci la
+    FIECARE cerere (HTTP) şi la fiecare revalidare (WS) re-verificăm că acel cont care a emis
+    biletul are încă `forward.use` pe hostul forward-ului. Cache pe epocă → o căutare în dict.
+    Fail-closed: orice nu se poate stabili (bilet invalid, forward dispărut) = refuz."""
+    uid = security.forward_token_uid(ticket, slug)
+    if uid is None:
+        return False
+    row = await db.fetchone("SELECT host_id FROM port_forwards WHERE slug=? AND enabled=1", slug)
+    if not row:
+        return False
+    if not await db.fetchone("SELECT 1 FROM users WHERE id=?", uid):
+        return False
+    grants = await authz.grants_for_user(uid)
+    return "forward.use" in await authz.perms_on(grants, row["host_id"])
 
 
 def _safe_next(nxt: str | None) -> str:
@@ -5329,7 +5705,8 @@ async def route_forward(request: Request):
     # întrebăm de vreo fereastră.
     ticket = request.cookies.get(FWD_COOKIE)
     if (not security.verify_forward_token(ticket, slug)
-            or not await _forward_window_ok(slug, ticket)):
+            or not await _forward_window_ok(slug, ticket)
+            or not await _forward_authz_ok(slug, ticket)):
         nxt = _safe_next(request.url.path + (("?" + request.url.query) if request.url.query else ""))
         loc = "%s/__wtfwd/auth?slug=%s&next=%s" % (config.PUBLIC_URL, slug, quote(nxt, safe=""))
         return RedirectResponse(loc, status_code=302)
@@ -5363,6 +5740,14 @@ async def forward_auth(request: Request, slug: str, next: str = "/"):
         "SELECT slug, host_id FROM port_forwards WHERE slug=? AND enabled=1", slug)
     if not row:
         raise ApiError(404, "forward.missing", "no such forward, or it is disabled")
+    # 3.6: biletul se emite DOAR cu `forward.use` pe hostul forward-ului. Un host invizibil dă
+    # exact 404-ul de mai sus (fără oracol); vizibil dar fără permisiune → 403 authz.denied.
+    have = await authz.perms_on(await authz.grants_for_user(user["id"]), row["host_id"])
+    if "host.view" not in have:
+        raise ApiError(404, "forward.missing", "no such forward, or it is disabled")
+    if "forward.use" not in have:
+        raise ApiError(403, "authz.denied", "your role does not allow this here (forward.use)",
+                       vars={"perm": "forward.use"})
     # Pe un host cu 2FA, cookie-ul singur nu deschide tunelul. Aici NU putem rula ceremonia
     # passkey (suntem pe un redirect de pagină, în afara SPA-ului), deci cerem o fereastră de
     # step-up deja deschisă din aplicaţie şi, dacă lipseşte, trimitem omul exact acolo unde o
@@ -5491,7 +5876,8 @@ async def handle_forward_ws(scope, receive, send):
     # interactiv (consolă web, noVNC, code-server). WS nu poate fi redirecţionat la handshake,
     # deci închidem cu 1008 (Policy Violation) — acelaşi cod ca refuzul de bilet/Origin de mai
     # sus; pagina forwardată reîncarcă, HTTP-ul o trimite la step-up.
-    if not await _forward_window_ok(slug, cookies.get(FWD_COOKIE)):
+    if (not await _forward_window_ok(slug, cookies.get(FWD_COOKIE))
+            or not await _forward_authz_ok(slug, cookies.get(FWD_COOKIE))):
         await send({"type": "websocket.close", "code": 1008})
         return
     row = await db.fetchone("SELECT * FROM port_forwards WHERE slug=? AND enabled=1", slug)
@@ -5570,18 +5956,25 @@ async def handle_forward_ws(scope, receive, send):
             # fereastra se închide la 5 min de inactivitate sau la `clear_stepup_for` (logout din
             # alt tab, schimbare passkey). Doar pe bilet, un WS deja deschis rămânea viu până la
             # 55 de minute după ce politica spunea „închis". 1008, ca la handshake.
+            wake = authz.subscribe()       # 3.6: o schimbare de rol re-verifică ACUM, nu la 60 s
             try:
                 while not closed.is_set():
-                    await asyncio.sleep(WS_REVALIDATE_SECS)
+                    try:
+                        await asyncio.wait_for(wake.wait(), WS_REVALIDATE_SECS)
+                    except asyncio.TimeoutError:
+                        pass
+                    wake.clear()
                     ticket = cookies.get(FWD_COOKIE)
                     if (not security.verify_forward_token(ticket, slug)
-                            or not await _forward_window_ok(slug, ticket)):
+                            or not await _forward_window_ok(slug, ticket)
+                            or not await _forward_authz_ok(slug, ticket)):
                         try:
                             await send({"type": "websocket.close", "code": 1008})
                         except Exception:
                             pass
                         break
             finally:
+                authz.unsubscribe(wake)
                 closed.set()
 
         async def browser_to_target():
@@ -5673,7 +6066,7 @@ class FsDelete(BaseModel):
 
 
 @router.post("/api/hosts/{host_id}/fs/mkdir")
-async def fs_mkdir(host_id: int, body: FsPath, user=Depends(security.require_user)):
+async def fs_mkdir(host_id: int, body: FsPath, user=Depends(authz.perm('files.write', host='host_id'))):
     await _require_host_stepup(host_id, user)   # H1
     try:
         await core.fs_mkdir(host_id, body.path, body.parents)
@@ -5685,7 +6078,7 @@ async def fs_mkdir(host_id: int, body: FsPath, user=Depends(security.require_use
 
 
 @router.post("/api/hosts/{host_id}/fs/rename")
-async def fs_rename(host_id: int, body: FsRename, user=Depends(security.require_user)):
+async def fs_rename(host_id: int, body: FsRename, user=Depends(authz.perm('files.write', host='host_id'))):
     await _require_host_stepup(host_id, user)   # H1
     try:
         await core.fs_rename(host_id, body.path, body.to)
@@ -5700,7 +6093,7 @@ async def fs_rename(host_id: int, body: FsRename, user=Depends(security.require_
 # de flag-ul `recursive`. Ștergerea recursivă e explicită, cerută din UI cu confirmare.
 @router.post("/api/hosts/{host_id}/fs/delete")
 async def fs_delete(host_id: int, body: FsDelete, request: Request,
-                    user=Depends(security.require_user)):
+                    user=Depends(authz.perm('files.delete', host='host_id'))):
     audit.detail(request, body.path + (" (recursiv)" if body.recursive else ""))
     await _require_host_stepup(host_id, user)   # H1
     try:
@@ -5713,7 +6106,7 @@ async def fs_delete(host_id: int, body: FsDelete, request: Request,
 
 
 @router.post("/api/hosts/{host_id}/update")
-async def update_agent(host_id: int, user=Depends(security.require_user)):
+async def update_agent(host_id: int, user=Depends(authz.perm('host.admin', host='host_id'))):
     """Update/restart the agent now; tmux sessions survive the restart."""
     await _require_host_stepup(host_id, user)   # H1
     try:
@@ -5732,7 +6125,7 @@ async def update_agent(host_id: int, user=Depends(security.require_user)):
 
 
 @router.get("/api/search")
-async def search(q: str, request: Request, user=Depends(security.require_user)):
+async def search(q: str, request: Request, user=Depends(authz.perm('recording.view', list=True))):
     """Search hosts, session titles/notes and transcript contents."""
     q = q.strip()
     if len(q) < 2:
@@ -5740,7 +6133,17 @@ async def search(q: str, request: Request, user=Depends(security.require_user)):
     # CE s-a căutat, nu doar că s-a căutat: „a rulat o căutare" nu răspunde la întrebarea
     # de după un cookie furat, iar interogarea E lucrul care spune ce urmărea atacatorul.
     audit.detail(request, "search: " + q)
-    rows = await db.fetchall("SELECT * FROM sessions ORDER BY created DESC LIMIT 500")
+    # 3.6 (§A.11.12): filtrul de vizibilitate e în SQL, ÎNAINTE de a citi vreun transcript —
+    # filtrat după citire ar fi şi o scurgere prin timp, şi un amplificator de DoS.
+    vis = await authz.visible_hosts(authz.grants_of(request), "recording.view")
+    if vis is None:
+        rows = await db.fetchall("SELECT * FROM sessions ORDER BY created DESC LIMIT 500")
+    elif vis:
+        rows = await db.fetchall(
+            "SELECT * FROM sessions WHERE host_id IN (%s) ORDER BY created DESC LIMIT 500"
+            % ",".join("?" * len(vis)), *sorted(vis))
+    else:
+        rows = []
     # Căutarea citeşte CONŢINUTUL transcripturilor, deci e aceeaşi clasă cu /transcript:
     # sesiunile de pe hosturi cu `require_2fa` intră doar dacă ai o fereastră de step-up
     # deschisă pentru hostul ăla. Filtrăm TĂCUT (nu 403): altfel căutarea globală ar deveni
@@ -5791,11 +6194,22 @@ _CONN_FIELDS = ("connection_type", "hostname", "ssh_username", "ssh_port",
 
 
 @router.patch("/api/hosts/{host_id}")
-async def update_host(host_id: int, host: HostPatch, user=Depends(security.require_user)):
+async def update_host(host_id: int, host: HostPatch, request: Request,
+                      user=Depends(authz.perm('host.edit', host='host_id'))):
     row = await db.fetchone("SELECT * FROM hosts WHERE id=?", host_id)
     if not row:
         raise ApiError(404, "host.missing", "no such host")
     given = host.model_dump(exclude_unset=True)
+    # 3.6 (§A.11.1): folderul şi etichetele DECID cine vede hostul — mutarea lui în `lab` dă
+    # shell fiecărui Operator din lab. Deci `host.edit` singur nu ajunge: cere `hosts.create` @ all.
+    grants = authz.grants_of(request)
+    scope_moved = (("folder" in given and (given["folder"] or "").strip() != (row["folder"] or ""))
+                   or ("tags" in given and _norm_tags(given["tags"] or "") != (row["tags"] or "")))
+    if scope_moved:
+        authz.require_global(grants, "hosts.create")
+    # …iar un `via` nou (familia jump) deschide TCP din alt host: `forward.manage` acolo (§A.11.4)
+    if given.get("via_host_id") and given["via_host_id"] != row["via_host_id"]:
+        await authz.require_on(grants, given["via_host_id"], "forward.manage")
     # `touches_conn` = un câmp de conexiune se SCHIMBĂ efectiv, nu doar e prezent în payload.
     # UI-ul (AddHostModal) trimite MEREU `connection_type`, chiar şi la o redenumire pură, deci
     # „prezent" însemna că ORICE editare pica pe calea de re-provisioning: agentul deconectat
@@ -5949,6 +6363,8 @@ async def update_host(host_id: int, host: HostPatch, user=Depends(security.requi
         return {"ok": True, "changed": False}
     vals.append(host_id)
     await db.execute("UPDATE hosts SET %s WHERE id=?" % ", ".join(sets), *vals)
+    if scope_moved or "via_host_id" in given or "connection_type" in given:
+        authz.bump_epoch()          # cine vede hostul s-a putut schimba: socket-urile re-verifică
 
     # O conexiune vie ține parametrii VECHI: fără demontare, editarea pare fără efect până
     # la următoarea deconectare accidentală.
@@ -5980,7 +6396,7 @@ class Toggle2fa(BaseModel):
 
 
 @router.post("/api/hosts/{host_id}/require-2fa")
-async def set_require_2fa(host_id: int, body: Toggle2fa, user=Depends(security.require_user)):
+async def set_require_2fa(host_id: int, body: Toggle2fa, user=Depends(authz.perm('host.admin', host='host_id'))):
     """Activează/dezactivează cererea de 2FA la conectarea pe acest host.
     GAP-fix: DEZACTIVAREA cere step-up — altfel un cookie furat stingea 2FA pe host și tot
     gard-ul H1 devenea no-op. `_require_host_stepup` citește valoarea CURENTĂ (încă 1 la
@@ -6001,7 +6417,7 @@ async def set_require_2fa(host_id: int, body: Toggle2fa, user=Depends(security.r
 
 
 @router.post("/api/hosts/{host_id}/provision")
-async def provision_agent(host_id: int, request: Request, user=Depends(security.require_user)):
+async def provision_agent(host_id: int, request: Request, user=Depends(authz.perm('host.admin', host='host_id'))):
     """Instalează agentul pe un host SSH: se conectează prin SSH, rulează
     installer-ul, AȘTEAPTĂ ca agentul să se conecteze (test), apoi trece host-ul
     în mod agent și șterge credențialele dacă politica e `ephemeral`."""
@@ -6080,7 +6496,7 @@ class ForgetCredsIn(BaseModel):
 
 @router.post("/api/hosts/{host_id}/forget-credentials")
 async def forget_credentials(host_id: int, body: ForgetCredsIn,
-                             user=Depends(security.require_user)):
+                             user=Depends(authz.perm('host.admin', host='host_id'))):
     """Delete the stored SSH credentials (once the agent has taken over, or at any time).
 
     F-05: ştergerea e IREVERSIBILĂ — dacă hostul nu mai are agent, credenţiala aia era
@@ -6136,7 +6552,26 @@ def _snippet_out(r) -> dict:
                 targets = {"tags": [str(x) for x in t["tags"]]}
         except ValueError:
             targets = None
-    return {"id": r["id"], "title": r["title"], "body": r["body"], "targets": targets}
+    keys = r.keys()
+    return {"id": r["id"], "title": r["title"], "body": r["body"], "targets": targets,
+            # 3.6 (§A.11.11): biblioteca e comună — arătăm cine a scris snippet-ul, ca un Owner
+            # să nu ruleze orbeşte o comandă pusă acolo de altcineva
+            "created_by_id": r["created_by_id"] if "created_by_id" in keys else None,
+            "created_by": (r["creator_email"] if "creator_email" in keys else None) or ""}
+
+
+async def _snippet_editable(sid: int, user) -> None:
+    """Un snippet al altcuiva (sau unul vechi, fără autor) se editează/şterge doar cu
+    `snippets.manage`. Fail-closed pe rândurile vechi: biblioteca e comună, iar un snippet
+    modificat e o comandă pe care altcineva o va rula."""
+    row = await db.fetchone("SELECT created_by_id FROM snippets WHERE id=?", sid)
+    if not row:
+        return                          # inexistent: comportamentul de dinainte (no-op 200)
+    if row["created_by_id"] is not None and row["created_by_id"] == user["id"]:
+        return
+    if not (await authz.grants_for_user(user["id"])).has_global("snippets.manage"):
+        raise ApiError(403, "authz.denied", "your role does not allow this here (snippets.manage)",
+                       vars={"perm": "snippets.manage"})
 
 
 # Snippet-uri de transfer gata făcute: fișiere mari sau host↔host se fac cu comenzi
@@ -6169,7 +6604,8 @@ async def seed_default_snippets() -> None:
 
 @router.get("/api/snippets")
 async def list_snippets(user=Depends(security.require_user)):
-    rows = await db.fetchall("SELECT * FROM snippets ORDER BY title")
+    rows = await db.fetchall("SELECT s.*, u.email AS creator_email FROM snippets s"
+                             " LEFT JOIN users u ON u.id = s.created_by_id ORDER BY s.title")
     return [_snippet_out(r) for r in rows]
 
 
@@ -6184,10 +6620,12 @@ async def create_snippet(s: SnippetIn, user=Depends(security.require_user)):
                             s.title.strip(), s.body)
     if dup:
         if targets is not None:
+            await _snippet_editable(dup["id"], user)    # 3.6: nu re-ţinteşti snippet-ul altcuiva
             await db.execute("UPDATE snippets SET targets=? WHERE id=?", targets, dup["id"])
         return {"id": dup["id"]}
-    sid = await db.execute("INSERT INTO snippets(title, body, created, targets) VALUES(?,?,?,?)",
-                           s.title.strip(), s.body, time.time(), targets)
+    sid = await db.execute("INSERT INTO snippets(title, body, created, targets, created_by_id)"
+                           " VALUES(?,?,?,?,?)",
+                           s.title.strip(), s.body, time.time(), targets, user["id"])
     return {"id": sid}
 
 
@@ -6195,6 +6633,7 @@ async def create_snippet(s: SnippetIn, user=Depends(security.require_user)):
 async def update_snippet(sid: int, s: SnippetIn, user=Depends(security.require_user)):
     if not s.title.strip() or not s.body:
         raise ApiError(400, "snippet.required", "title and body required")
+    await _snippet_editable(sid, user)
     # `targets` absent din corp (clienţii vechi trimit doar title+body) → ţintele rămân;
     # `targets: null` explicit → se şterg.
     if "targets" in s.model_fields_set:
@@ -6208,6 +6647,7 @@ async def update_snippet(sid: int, s: SnippetIn, user=Depends(security.require_u
 
 @router.delete("/api/snippets/{sid}")
 async def delete_snippet(sid: int, user=Depends(security.require_user)):
+    await _snippet_editable(sid, user)
     await db.execute("DELETE FROM snippets WHERE id=?", sid)
     return {"ok": True}
 
@@ -6226,7 +6666,7 @@ async def _refuse_if_jump_children(host_id: int) -> None:
 
 
 @router.delete("/api/hosts/{host_id}")
-async def delete_host(host_id: int, user=Depends(security.require_user)):
+async def delete_host(host_id: int, user=Depends(authz.perm("host.admin", host="host_id"))):
     await _require_host_stepup(host_id, user)   # F-05: ştergerea unui host cu 2FA e o acţiune de host
     live = await db.fetchone(
         "SELECT id FROM sessions WHERE host_id=? AND state IN ('creating','live')",
@@ -6265,7 +6705,7 @@ async def _purge_host_rows(host_id: int) -> None:
 
 @router.post("/api/hosts/{host_id}/uninstall")
 async def uninstall_host(host_id: int, force: bool = False,
-                         user=Depends(security.require_user)):
+                         user=Depends(authz.perm("host.admin", host="host_id"))):
     """Dezinstalează COMPLET agentul de pe server: îi cere să-și scoată supravegherea
     (systemd/cron) + serverul tmux + fișierele din ~/.webterm/ și să iasă, apoi îl scoate din
     WebTerm. Hosturile directe SSH/telnet n-au nimic instalat → doar scoatere din WebTerm.
@@ -6324,7 +6764,7 @@ AUTOSTART_MIN_AGENT = 57         # op-ul `autostart` există din agentul v57
 
 @router.post("/api/hosts/{host_id}/autostart")
 async def host_autostart(host_id: int, body: AutostartIn, request: Request,
-                         user=Depends(security.require_user)):
+                         user=Depends(authz.perm('host.admin', host='host_id'))):
     """Porneşte / opreşte pornirea agentului la boot (systemd --user, altfel cron — ca
     instalatorul). Agentul care rulează ACUM nu e atins: efectul e la următorul reboot.
     Răspunsul poartă starea NOUĂ citită înapoi de agent, stocată imediat (badge-ul din sidebar
@@ -6398,6 +6838,8 @@ def _session_json(row) -> dict:
         "closed_at": row["closed_at"], "exit_status": row["exit_status"],
         "close_reason": row["close_reason"], "rows": row["rows"], "cols": row["cols"],
         "kind": row["kind"] or "shell",   # shell | telnet (bastion) — UI arată Reconectează pe telnet
+        # cine a deschis-o (3.6; NULL = dinainte de roluri) — UI-ul ştie dacă poţi tasta în ea
+        "created_by_id": row["created_by_id"] if "created_by_id" in row.keys() else None,
         "connected_clients": len(core.hubs[row["id"]].clients)
             if row["id"] in core.hubs else 0,
         # offset-ul absolut al stream-ului de output (live din hub, altfel din DB):
@@ -6415,12 +6857,23 @@ CLOSED_SESSIONS_LIMIT = 200
 
 
 @router.get("/api/sessions")
-async def list_sessions(user=Depends(security.require_scope("read"))):
+async def list_sessions(request: Request,
+                        user=Depends(authz.perm(('session.watch', 'recording.view'), list=True, tokens='read'))):
+    # 3.6: doar sesiunile de pe hosturile unde contul (sau tokenul ∩ creatorul) le poate vedea —
+    # filtrul e în SQL, ca fereastra celor 200 de sesiuni închise să fie a LUI, nu a flotei
+    vis = await authz.visible_hosts(authz.grants_of(request), "session.watch", "recording.view")
+    if vis is not None and not vis:
+        return []
+    hf, hargs = "", []
+    if vis is not None:
+        hf = " AND host_id IN (%s)" % ",".join("?" * len(vis))
+        hargs = sorted(vis)
     active = await db.fetchall(
-        "SELECT * FROM sessions WHERE state IN ('creating','live') ORDER BY created DESC")
+        "SELECT * FROM sessions WHERE state IN ('creating','live')" + hf
+        + " ORDER BY created DESC", *hargs)
     closed = await db.fetchall(
-        "SELECT * FROM sessions WHERE state NOT IN ('creating','live') "
-        "ORDER BY created DESC LIMIT ?", CLOSED_SESSIONS_LIMIT)
+        "SELECT * FROM sessions WHERE state NOT IN ('creating','live')" + hf
+        + " ORDER BY created DESC LIMIT ?", *hargs, CLOSED_SESSIONS_LIMIT)
     rows = list(active) + list(closed)
     # meta-leak: lista (titluri, host, stare) de pe un host `require_2fa` e metadata la fel de
     # sensibilă ca transcriptul — o arătăm doar cu o fereastră de step-up deschisă pe hostul ăla.
@@ -6438,7 +6891,7 @@ async def list_sessions(user=Depends(security.require_scope("read"))):
 @router.get("/api/hosts/{host_id}/sessions")
 async def host_sessions(host_id: int, limit: int = 200, offset: int = 0,
                         stepup_grant: str = "", stepup_password: str = "", stepup_totp: str = "",
-                        user=Depends(security.require_user)):
+                        user=Depends(authz.perm(('session.watch', 'recording.view'), host='host_id'))):
     """Complete session history for one host (active + closed), paginated — used
     by the host page so it isn't limited by the global recent-closed window."""
     # meta-leak: titlurile/istoricul sesiunilor de pe un host 2FA cer step-up, ca restul citirilor
@@ -6570,7 +7023,7 @@ async def _require_host_stepup(host_id: int, user, grant: str = "", password: st
 
 @router.post("/api/hosts/{host_id}/stepup")
 async def host_stepup(host_id: int, body: SessionIn, request: Request,
-                      user=Depends(security.require_user)):
+                      user=Depends(authz.perm('host.view', host='host_id'))):
     """Deschide fereastra de step-up pe un host cu 2FA (din passkey grant sau parolă), ca
     frontend-ul să deblocheze file-browser-ul / fleet-run înainte de acțiuni. Idempotent."""
     was_open = security.stepup_window_ok(user["id"], host_id)
@@ -6602,7 +7055,7 @@ async def host_stepup(host_id: int, body: SessionIn, request: Request,
 
 
 @router.post("/api/hosts/{host_id}/ssh-key/generate")
-async def host_generate_ssh_key(host_id: int, body: SessionIn, user=Depends(security.require_user)):
+async def host_generate_ssh_key(host_id: int, body: SessionIn, user=Depends(authz.perm('host.edit', host='host_id'))):
     """Generează o pereche de chei Ed25519 PENTRU un host SSH: stochează privata ca credenţial
     (criptată în seif) şi întoarce PUBLICA o singură dată, ca s-o pui în `authorized_keys` pe
     server. Scuteşte userul de `ssh-keygen` + mutat fişiere. Schimbă credenţialul → clasă de
@@ -6624,7 +7077,7 @@ async def host_generate_ssh_key(host_id: int, body: SessionIn, user=Depends(secu
 
 
 @router.post("/api/hosts/{host_id}/ssh-key/public")
-async def host_ssh_key_public(host_id: int, body: SessionIn, user=Depends(security.require_user)):
+async def host_ssh_key_public(host_id: int, body: SessionIn, user=Depends(authz.perm('host.edit', host='host_id'))):
     """Derivă cheia PUBLICĂ din privata stocată (ca s-o re-copiezi în authorized_keys) + arată
     known_hosts-ul pinuit. POST (nu GET) fiindcă are nevoie de credenţialele de step-up în corp."""
     row = await db.fetchone("SELECT * FROM hosts WHERE id=?", host_id)
@@ -6755,7 +7208,7 @@ async def _claim_pending_key(user_id, pending_id: str) -> str:
 
 
 @router.post("/api/hosts/ssh-key/pending")
-async def pending_ssh_key(request: Request, user=Depends(security.require_user)):
+async def pending_ssh_key(request: Request, user=Depends(authz.perm("hosts.create"))):
     """Generează o pereche Ed25519 ÎNAINTE ca hostul să existe (formularul Add host): privata
     stă criptată în seif, legată de user, ~1h; întoarce publica + `pending_key_id`. Create /
     update cu `pending_key_id` o leagă de host ca credenţial stocat. Doar Ed25519."""
@@ -6841,7 +7294,7 @@ def _hosttest_stage(st: dict, row: dict, ssh: bool, expected_fp: str = "", offer
 
 
 @router.post("/api/hosts/test")
-async def test_host_connection(body: HostTestIn, request: Request, user=Depends(security.require_user)):
+async def test_host_connection(body: HostTestIn, request: Request, user=Depends(authz.perm('hosts.create'))):
     """„Test connection" din Add host / Edit host: tcp → banner → host key → auth, cu dial-ul real,
     fără să salveze nimic. Întoarce {ok, stages, hostkey?}; textul îl pune UI-ul din coduri."""
     ctype = body.connection_type or ""
@@ -6861,6 +7314,13 @@ async def test_host_connection(body: HostTestIn, request: Request, user=Depends(
     if len(hostname) > 253 or any(c.isspace() or ord(c) < 32 for c in hostname):
         raise ApiError(400, "hosttest.badHost", "not a valid host name or address")
     row = None
+    # 3.6: testul foloseşte credenţialul STOCAT al hostului editat → `host.edit` pe el; o ţintă
+    # jump deschide TCP din agentul `via` → `forward.manage` acolo (§A.11.4). Ambele înainte de
+    # existenţă/step-up: un host invizibil dă 404 ca unul inexistent.
+    if body.host_id:
+        await authz.require_on(request, body.host_id, "host.edit")
+    if ctype in _JUMP_TYPES and body.via_host_id:
+        await authz.require_on(request, body.via_host_id, "forward.manage")
     if body.host_id:
         row = await db.fetchone("SELECT * FROM hosts WHERE id=?", body.host_id)
         if not row:
@@ -7045,7 +7505,8 @@ def _dk_dep_json(d) -> dict:
 
 
 @router.get("/api/hosts/{host_id}/deploy-key")
-async def deploy_key_get(host_id: int, user=Depends(security.require_user)):
+async def deploy_key_get(host_id: int, request: Request,
+                         user=Depends(authz.perm('deploykey.manage', host='host_id'))):
     """Starea cheii de deploy a hostului: cheia (doar material public), unde e deployată,
     plus cheile ALTOR hosturi deployate AICI (inbound — vizibilitate pe graful de acces,
     inclusiv pentru garda anti-pivot din UI)."""
@@ -7067,12 +7528,29 @@ async def deploy_key_get(host_id: int, user=Depends(security.require_user)):
         " k.fingerprint AS fp FROM ssh_key_deployments d"
         " JOIN ssh_keys k ON k.id=d.key_id LEFT JOIN hosts h ON h.id=k.host_id"
         " WHERE d.target_host_id=? AND d.revoked_at IS NULL ORDER BY h.name", host_id)
+    # 3.6: muchiile spre/de la hosturi pe care contul NU le vede rămân în listă (o uşă deschisă
+    # nu dispare din inventar), dar fără nume, adresă sau id — altfel graful ar fi un oracol.
+    vis = await authz.visible_hosts(authz.grants_of(request), "host.view")
+    deployments = []
+    for d in deps:
+        j = _dk_dep_json(d)
+        if j["target_host_id"] is not None and not authz.in_visible(vis, j["target_host_id"]):
+            j.update(target_host_id=0, target_name="", target_hostname="", target_user="",
+                     hidden=True)
+        deployments.append(j)
+    inbound_out = []
+    for d in inbound:
+        sid_, sname = d["source_host_id"], d["source_name"]
+        hidden = sid_ is not None and not authz.in_visible(vis, sid_)
+        inbound_out.append({"source_host_id": 0 if hidden else sid_,
+                            "source_name": "" if hidden else sname,
+                            "fingerprint": d["fp"], "status": d["status"],
+                            **({"hidden": True} if hidden else {})})
     return {
         "key": {"id": key["id"], "public_key": key["public_key"], "fingerprint": key["fingerprint"],
                 "created": key["created"]} if key else None,
-        "deployments": [_dk_dep_json(d) for d in deps],
-        "inbound": [{"source_host_id": d["source_host_id"], "source_name": d["source_name"],
-                     "fingerprint": d["fp"], "status": d["status"]} for d in inbound],
+        "deployments": deployments,
+        "inbound": inbound_out,
     }
 
 
@@ -7120,12 +7598,12 @@ class DeployKeyPolicyIn(BaseModel):
 
 
 @router.get("/api/settings/deploy-key-policy")
-async def get_deploy_key_policy(user=Depends(security.require_user)):
+async def get_deploy_key_policy(user=Depends(authz.perm('settings.manage'))):
     return await _dk_policy()
 
 
 @router.post("/api/settings/deploy-key-policy")
-async def set_deploy_key_policy(body: DeployKeyPolicyIn, user=Depends(security.require_user)):
+async def set_deploy_key_policy(body: DeployKeyPolicyIn, user=Depends(authz.perm('settings.manage'))):
     cfg = {"require_2fa_source": body.require_2fa_source, "require_restrict": body.require_restrict}
     await _set_setting("deploykey_policy", json.dumps(cfg))
     return cfg
@@ -7194,6 +7672,10 @@ async def _dk_deploy_one(key, target_id: int, from_ip: str, confirmed: bool,
     dată). Ridică ApiError la eşec, ca batch-ul să prindă per-ţintă. Idempotent.
     `raw_options` (rotire): foloseşte opţiunile stocate ale muchiei verbatim şi sare peste
     politica require_restrict — e un re-deploy al unei muchii deja aprobate, nu una nouă."""
+    # 3.6 (§A.11.3): o cheie de deploy întinde încrederea A→B, deci `deploykey.manage` pe AMBELE.
+    # Sursa e verificată de rută; ţinta aici — înainte de existenţă (404 identic), per ţintă în
+    # batch/rotire. Fără cerere (apel intern) = refuz, fail-closed.
+    await authz.require_on(request, target_id, "deploykey.manage")
     target = await _dk_agent_host(target_id)
     source = await db.fetchone("SELECT * FROM hosts WHERE id=?", key["host_id"])
     if key["host_id"] == target_id:
@@ -7251,7 +7733,7 @@ async def _dk_deploy_one(key, target_id: int, from_ip: str, confirmed: bool,
 
 @router.post("/api/hosts/{host_id}/deploy-key/generate")
 async def deploy_key_generate(host_id: int, body: DeployKeyIn, request: Request,
-                              user=Depends(security.require_user)):
+                              user=Depends(authz.perm('deploykey.manage', host='host_id'))):
     """Generează perechea pe HOSTUL sursă (ssh-keygen local, prin `run`); privata nu apare în
     nicio comandă, stdout sau log — citim doar .pub, prin fs_read, şi îl validăm strict."""
     host = await _dk_agent_host(host_id)
@@ -7306,9 +7788,10 @@ async def deploy_key_generate(host_id: int, body: DeployKeyIn, request: Request,
 
 @router.post("/api/hosts/{host_id}/deploy-key/deploy")
 async def deploy_key_deploy(host_id: int, body: DeployKeyIn, request: Request,
-                            user=Depends(security.require_user)):
+                            user=Depends(authz.perm('deploykey.manage', host='host_id'))):
     """Deploy single-ţintă: ruta = ŢINTA (host_id), factor proaspăt legat de ţintă. Păstrat pt.
     compatibilitate; UI-ul foloseşte batch-ul source-routed de mai jos."""
+    await authz.require_on(request, body.key_host_id, "deploykey.manage")   # 3.6: şi pe SURSĂ
     key = await _dk_key_row(body.key_host_id)
     if key["host_id"] == host_id:      # validare de formă înaintea cererii de factor
         raise ApiError(400, "sshkey.selfDeploy", "a host does not deploy its own key to itself")
@@ -7333,7 +7816,7 @@ async def deploy_key_deploy(host_id: int, body: DeployKeyIn, request: Request,
 
 @router.post("/api/hosts/{host_id}/deploy-key/deploy-batch")
 async def deploy_key_deploy_batch(host_id: int, body: DeployKeyIn, request: Request,
-                                  user=Depends(security.require_user)):
+                                  user=Depends(authz.perm('deploykey.manage', host='host_id'))):
     """Deploy multi-ţintă: ruta = SURSA (host_id = hostul cheii), UN SINGUR factor proaspăt (decizia
     de acces e despre CHEIE, nu despre fiecare ţintă), apoi deploy la fiecare ţintă cu rezultat
     individual. Eşecul unei ţinte nu opreşte restul — ca fleet-run."""
@@ -7355,10 +7838,11 @@ async def deploy_key_deploy_batch(host_id: int, body: DeployKeyIn, request: Requ
 
 @router.post("/api/hosts/{host_id}/deploy-key/revoke")
 async def deploy_key_revoke(host_id: int, body: DeployKeyIn, request: Request,
-                            user=Depends(security.require_user)):
+                            user=Depends(authz.perm('deploykey.manage', host='host_id'))):
     """Scoate cheia de pe ŢINTĂ. Potrivim pe BLOB (nu pe linia întreagă): o linie editată
     manual (opţiuni adăugate pe ţintă) tot dispare — altfel revoke-ul „reuşea" degeaba."""
     target = await _dk_agent_host(host_id)
+    await authz.require_on(request, body.key_host_id, "deploykey.manage")   # 3.6: şi pe SURSĂ
     key = await _dk_key_row(body.key_host_id)
     source = await db.fetchone("SELECT * FROM hosts WHERE id=?", key["host_id"])
     audit.detail(request, "deploy-key revoke %s from %s" % (key["fingerprint"], target["name"]))
@@ -7383,11 +7867,12 @@ async def deploy_key_revoke(host_id: int, body: DeployKeyIn, request: Request,
 
 
 @router.post("/api/hosts/{host_id}/deploy-key/verify")
-async def deploy_key_verify(host_id: int, body: DeployKeyIn,
-                            user=Depends(security.require_user)):
+async def deploy_key_verify(host_id: int, body: DeployKeyIn, request: Request,
+                            user=Depends(authz.perm('deploykey.manage', host='host_id'))):
     """Reconciliere: linia deployată mai e pe ţintă aşa cum am scris-o? `deployed` = identică,
     `edited` = blob-ul e acolo dar linia diferă (opţiuni schimbate manual), `missing` = deloc."""
     await _dk_agent_host(host_id)
+    await authz.require_on(request, body.key_host_id, "deploykey.manage")   # 3.6: şi pe SURSĂ
     key = await _dk_key_row(body.key_host_id)
     await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)
     dep = await db.fetchone(
@@ -7411,7 +7896,7 @@ async def deploy_key_verify(host_id: int, body: DeployKeyIn,
 
 @router.delete("/api/hosts/{host_id}/deploy-key")
 async def deploy_key_delete(host_id: int, request: Request, stepup_grant: str = "",
-                            stepup_password: str = "", stepup_totp: str = "", user=Depends(security.require_user)):
+                            stepup_password: str = "", stepup_totp: str = "", user=Depends(authz.perm('deploykey.manage', host='host_id'))):
     """Şterge cheia de pe hostul SURSĂ (fişiere + evidenţă). Refuză cât timp există deploy-uri
     active: altfel rămân uşi deschise pe ţinte fără nicio urmă în inventar — revocă-le întâi."""
     host = await _dk_agent_host(host_id)
@@ -7449,11 +7934,13 @@ async def _dk_ssh_target(target_id: int) -> tuple[str, str]:
 
 
 @router.post("/api/hosts/{host_id}/deploy-key/test")
-async def deploy_key_test(host_id: int, body: DeployKeyIn, user=Depends(security.require_user)):
+async def deploy_key_test(host_id: int, body: DeployKeyIn, request: Request,
+                          user=Depends(authz.perm("deploykey.manage", host="host_id"))):
     """Probează `ssh sursă→ţintă` cu cheia de deploy (rulează PE sursă, prin op-ul `run`).
     BatchMode → nu atârnă la niciun prompt; accept-new → TOFU (scrie known_hosts la prima
     conectare). Întoarce reachable + detaliu, fără să schimbe nimic pe ţintă."""
     await _dk_agent_host(host_id)
+    await authz.require_on(request, body.target_host_id, "deploykey.manage")   # 3.6: şi pe ŢINTĂ
     await _dk_key_row(host_id)      # sursa trebuie să aibă cheia
     await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)
     tuser, thost = await _dk_ssh_target(body.target_host_id)
@@ -7471,11 +7958,12 @@ async def deploy_key_test(host_id: int, body: DeployKeyIn, user=Depends(security
 
 @router.post("/api/hosts/{host_id}/deploy-key/ssh-config")
 async def deploy_key_ssh_config(host_id: int, body: DeployKeyIn, request: Request,
-                                user=Depends(security.require_user)):
+                                user=Depends(authz.perm('deploykey.manage', host='host_id'))):
     """Scrie idempotent un bloc marcat în ~/.ssh/config pe SURSĂ pentru o ţintă, ca `ssh <alias>`
     să meargă fără `-i` (util agenţilor AI). Aliasul = numele ţintei, sanitizat. Revocabil: blocul
     e delimitat de markere WebTerm, deci re-scrierea/ştergerea nu atinge restul config-ului."""
     await _dk_agent_host(host_id)
+    await authz.require_on(request, body.target_host_id, "deploykey.manage")   # 3.6: şi pe ŢINTĂ
     await _dk_key_row(host_id)
     await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)
     trow = await db.fetchone("SELECT name FROM hosts WHERE id=?", body.target_host_id)
@@ -7503,7 +7991,7 @@ async def deploy_key_ssh_config(host_id: int, body: DeployKeyIn, request: Reques
 
 @router.post("/api/hosts/{host_id}/deploy-key/rotate")
 async def deploy_key_rotate(host_id: int, body: DeployKeyIn, request: Request,
-                            user=Depends(security.require_user)):
+                            user=Depends(authz.perm('deploykey.manage', host='host_id'))):
     """Rotire ghidată, în ordinea care NU lasă sursa fără acces (audit 2026-10-04, §5):
       1. perechea NOUĂ se generează ALĂTURI de cea veche (`webterm_ed25519.new`), nu peste ea;
       2. noua cheie publică se deployează pe fiecare ţintă activă (cu opţiunile stocate ale muchiei)
@@ -7515,6 +8003,12 @@ async def deploy_key_rotate(host_id: int, body: DeployKeyIn, request: Request,
     în timp ce sursa n-o mai avea — acces pierdut, UI verde. Un singur factor proaspăt."""
     host = await _dk_agent_host(host_id)
     key = await _dk_key_row(host_id)
+    # 3.6: rotirea re-scrie cheia pe FIECARE ţintă activă → `deploykey.manage` pe toate, verificat
+    # ÎNAINTE de orice efect (altfel o ţintă din afara scope-ului ar rămâne la jumătatea rotirii)
+    for d in await db.fetchall(
+            "SELECT target_host_id FROM ssh_key_deployments WHERE key_id=? AND revoked_at IS NULL"
+            " AND status != 'missing'", key["id"]):
+        await authz.require_on(request, d["target_host_id"], "deploykey.manage")
     await _require_fresh_factor(host_id, user, body.stepup_grant, body.stepup_password,
                                body.stepup_totp)
     old_blob, _ = _dk_validate(key["public_key"])
@@ -7590,12 +8084,41 @@ async def deploy_key_rotate(host_id: int, body: DeployKeyIn, request: Request,
             "left_with_old_key": left_old}
 
 
+async def _stamp_session(result, user, origin: str = "web") -> None:
+    """Cine a deschis sesiunea (3.6, §A.6.9 / Q5): Operatorii tastează doar în sesiunile LOR.
+    Scris imediat după creare; un rând pre-3.6 (NULL) rămâne „al tuturor"."""
+    sid = result.get("id") if isinstance(result, dict) else None
+    uid = user.get("actor_id") if isinstance(user, dict) else user["id"]
+    if sid and uid:
+        await db.execute("UPDATE sessions SET created_by_id=?, origin=? WHERE id=?",
+                         uid, origin, sid)
+
+
+async def _require_session_control(request, sid: str, user) -> None:
+    """Mutaţiile pe o sesiune (titlu, kill, ştergere, reconectare): `session.open` (verificat de
+    rută) + sesiunea e a ta — sau ai `session.manage` pe host (Q5: Operatorii urmăresc sesiunile
+    altora, dar nu le controlează)."""
+    row = await db.fetchone("SELECT host_id, created_by_id FROM sessions WHERE id=?", sid)
+    if not row:
+        return                                    # handlerul răspunde cu 404-ul lui
+    if row["created_by_id"] is None or row["created_by_id"] == user["id"]:
+        return
+    have = await authz.require_on(request, row["host_id"], "session.open", "sid")
+    if "session.manage" not in have:
+        raise ApiError(403, "authz.denied", "your role does not allow this here (session.manage)",
+                       vars={"perm": "session.manage"})
+
+
 @router.post("/api/hosts/{host_id}/sessions")
 async def create_session(host_id: int, body: SessionIn, request: Request,
-                         user=Depends(security.require_user)):
+                         user=Depends(authz.perm('session.open', host='host_id'))):
     row = await db.fetchone("SELECT * FROM hosts WHERE id=?", host_id)
     if not row:
         raise ApiError(404, "host.missing", "no such host")
+    # 3.6: un lansator DB e o sesiune (session.open, verificat de rută) care rulează clientul cu
+    # parola STOCATĂ a conexiunii → cere şi `toolbox.use`. Înainte de step-up (authz → 2FA).
+    if body.connection_id:
+        await authz.require_on(request, host_id, "toolbox.use")
     # 2FA step-up (server-side; bifa din client nu e de încredere) — deschide/consultă fereastra
     await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)
     ctype = row["connection_type"] or "agent"
@@ -7735,15 +8258,17 @@ async def create_session(host_id: int, body: SessionIn, request: Request,
                        vars={"limit": core.MAX_SESSIONS_HINT})
     except RuntimeError as e:
         raise _runtime_api_error(e, "session.createFailed")
+    await _stamp_session(result, user)
     return result
 
 
 @router.patch("/api/sessions/{sid}")
-async def update_session(sid: str, patch: SessionPatch,
-                         user=Depends(security.require_user)):
+async def update_session(sid: str, patch: SessionPatch, request: Request,
+                         user=Depends(authz.perm('session.open', host='sid'))):
     row = await db.fetchone("SELECT * FROM sessions WHERE id=?", sid)
     if not row:
         raise ApiError(404, "session.missing", "no such session")
+    await _require_session_control(request, sid, user)
     # titlul/nota unei sesiuni de pe un host 2FA = mutaţie pe acel host, ca restul rutelor de
     # sesiune (kill/share/transcript): fără step-up, un cookie furat redenumea terminale protejate
     await _require_session_host_stepup(sid, user)
@@ -7755,10 +8280,12 @@ async def update_session(sid: str, patch: SessionPatch,
 
 
 @router.post("/api/sessions/{sid}/reconnect")
-async def reconnect_session(sid: str, user=Depends(security.require_user)):
+async def reconnect_session(sid: str, request: Request,
+                            user=Depends(authz.perm('session.open', host='sid'))):
     """Reconectează o sesiune telnet-bastion căzută: telnet nou spre aceeași țintă,
     același tab/transcript. Doar pentru sesiuni telnet (nu shell/tmux — alea se
     re-adoptă singure la revenirea agentului)."""
+    await _require_session_control(request, sid, user)
     srow = await db.fetchone("SELECT host_id FROM sessions WHERE id=?", sid)
     if srow:   # H1: telnet nou prin agentul host-ului = poartă ca la create_session
         await _require_host_stepup(srow["host_id"], user)
@@ -7775,7 +8302,9 @@ async def reconnect_session(sid: str, user=Depends(security.require_user)):
 
 
 @router.post("/api/sessions/{sid}/kill")
-async def kill_session(sid: str, user=Depends(security.require_user)):
+async def kill_session(sid: str, request: Request,
+                       user=Depends(authz.perm('session.open', host='sid'))):
+    await _require_session_control(request, sid, user)
     srow = await db.fetchone("SELECT host_id FROM sessions WHERE id=?", sid)
     if srow:   # H1: a termina o sesiune pe un host cu 2FA e o acţiune de host → cere step-up
         await _require_host_stepup(srow["host_id"], user)
@@ -7789,10 +8318,12 @@ async def kill_session(sid: str, user=Depends(security.require_user)):
 
 
 @router.delete("/api/sessions/{sid}")
-async def delete_session(sid: str, user=Depends(security.require_user)):
+async def delete_session(sid: str, request: Request,
+                         user=Depends(authz.perm('session.open', host='sid'))):
     row = await db.fetchone("SELECT * FROM sessions WHERE id=?", sid)
     if not row:
         raise ApiError(404, "session.missing", "no such session")
+    await _require_session_control(request, sid, user)
     # H1: ştergerea (arhivarea) transcriptului unei sesiuni de pe un host 2FA e o acţiune de
     # host — aceeaşi poartă ca `kill`. Fără asta, un cookie furat putea arhiva/scoate din listă
     # sesiuni 2FA fără step-up, deşi citirea lor îl cere.
@@ -7817,13 +8348,16 @@ class ShareIn(BaseModel):
 
 @router.post("/api/sessions/{sid}/share")
 async def create_share(sid: str, request: Request, body: ShareIn = ShareIn(),
-                       user=Depends(security.require_user)):
+                       user=Depends(authz.perm('share.live', host='sid'))):
     """Link public, temporizat, către o sesiune. `writable` lasă vizitatorul să și
     TASTEZE (lărgește suprafața de încredere — opt-in per share); altfel doar vizualizare."""
     audit.detail(request, "writable" if body.writable else "read-only")
     row = await db.fetchone("SELECT id, host_id FROM sessions WHERE id=?", sid)
     if not row:
         raise ApiError(404, "session.missing", "no such session")
+    # 3.6: un share WRITABLE dă tastatura unui vizitator anonim → permisiune separată (⚑)
+    if body.writable:
+        await authz.require_on(request, row["host_id"], "share.live_write", "sid")
     # H1: un share (mai ales writable) e o cale de acces DURABILĂ, cookie-free, către terminalul
     # unui host — pe un host cu require_2fa e o acțiune sensibilă ca `run`/`kill`, deci cere step-up.
     # (Fără asta, un share writable ținea sesiunea trează — inputul invitatului resetează idle-lock-ul
@@ -7845,7 +8379,7 @@ async def create_share(sid: str, request: Request, body: ShareIn = ShareIn(),
 
 
 @router.get("/api/sessions/{sid}/share")
-async def share_state(sid: str, user=Depends(security.require_user)):
+async def share_state(sid: str, user=Depends(authz.perm('session.watch', host='sid'))):
     """Starea share-ului activ al unei sesiuni — ca owner-ul să-şi regăsească link-ul activ şi
     butonul de revocare după un reload (până în 3.5.3 starea trăia doar în memoria tab-ului).
 
@@ -7871,7 +8405,7 @@ async def share_state(sid: str, user=Depends(security.require_user)):
 
 
 @router.delete("/api/sessions/{sid}/share")
-async def revoke_share(sid: str, user=Depends(security.require_user)):
+async def revoke_share(sid: str, user=Depends(authz.perm('share.live', host='sid'))):
     # H1: pe un host 2FA, revocarea share-ului e o acţiune de host (simetric cu crearea lui, care
     # cere step-up). Fără gard, un cookie furat putea manipula share-urile fără al doilea factor.
     srow = await db.fetchone("SELECT host_id FROM sessions WHERE id=?", sid)
@@ -7897,7 +8431,7 @@ def _share_guests(sid: str) -> int:
     return sum(1 for c in hub.clients if not c.is_owner) if hub else 0
 
 
-async def _active_shares(user) -> tuple[list, int]:
+async def _active_shares(user, grants=None) -> tuple[list, int]:
     """Share-urile active (neexpirate) vizibile userului + câte sunt ASCUNSE.
 
     Aceeaşi regulă ca lista de sesiuni şi `GET /api/sessions/{sid}/share` (meta-leak): titlul
@@ -7907,12 +8441,23 @@ async def _active_shares(user) -> tuple[list, int]:
     întrebarea pentru care există. Tokenul (hash-ul) nu e nici măcar selectat."""
     rows = await db.fetchall(
         "SELECT s.id, s.title, s.host_id, s.share_expires, s.share_writable, s.share_by,"
-        " h.name AS host_name, h.require_2fa"
+        " s.share_by_id, h.name AS host_name, h.require_2fa"
         " FROM sessions s LEFT JOIN hosts h ON h.id = s.host_id"
         " WHERE s.share_token IS NOT NULL AND s.share_expires > ?"
         " ORDER BY s.share_expires", time.time())
+    # 3.6: fără `shares.manage` — doar share-urile tale; cu el — toate, dar tot DOAR de pe
+    # hosturile vizibile. Rândurile din afara scope-ului nici nu se numără în `hidden`
+    # (numărul ar fi un oracol de activitate pe hosturi pe care nu le vezi).
+    if grants is None:
+        grants = await authz.grants_for_user(user["id"])
+    manage = grants.has_global("shares.manage")
+    vis = await authz.visible_hosts(grants, "host.view")
     out, hidden = [], 0
     for r in rows:
+        if not authz.in_visible(vis, r["host_id"]):
+            continue
+        if not manage and r["share_by_id"] != user["id"]:
+            continue
         if r["require_2fa"] and not security.stepup_window_is_open(user["id"], r["host_id"]):
             hidden += 1
             continue
@@ -7924,10 +8469,10 @@ async def _active_shares(user) -> tuple[list, int]:
 
 
 @router.get("/api/shares")
-async def list_shares(user=Depends(security.require_user)):
+async def list_shares(request: Request, user=Depends(authz.perm('shares.manage', list=True))):
     """Toate link-urile de share active din flotă — FĂRĂ token şi fără URL: în DB stă doar
     hash-ul, iar URL-ul se arată o singură dată, la creare (vezi create_share)."""
-    shares, hidden = await _active_shares(user)
+    shares, hidden = await _active_shares(user, authz.grants_of(request))
     return {"shares": shares, "hidden": hidden}
 
 
@@ -7938,7 +8483,7 @@ class RevokeAllSharesIn(BaseModel):
 
 @router.post("/api/shares/revoke-all")
 async def revoke_all_shares(body: RevokeAllSharesIn, request: Request,
-                            user=Depends(security.require_user)):
+                            user=Depends(authz.perm('shares.manage', list=True))):
     """„Revocă tot": butonul de panică din inventar. Global (toate conturile, toate hosturile,
     inclusiv cele 2FA ascunse din listă) — exact ramura folosită la schimbarea parolei.
 
@@ -7955,8 +8500,13 @@ async def revoke_all_shares(body: RevokeAllSharesIn, request: Request,
                            "re-authenticate with SSO or a passkey to revoke all share links")
     else:
         await _require_reauth_for_secret(user, body.current_password, "revoking all share links")
-    n = await _revoke_all_shares()       # global + deconectează invitaţii live (hub.revoke_shares)
-    n += await _revoke_replay_links()    # butonul de panică acoperă şi link-urile de replay
+    if authz.grants_of(request).has_global("shares.manage"):
+        n = await _revoke_all_shares()       # global + deconectează invitaţii live (hub.revoke_shares)
+        n += await _revoke_replay_links()    # butonul de panică acoperă şi link-urile de replay
+    else:
+        # 3.6: fără `shares.manage`, „Revocă tot" = toate link-urile TALE (doar reduce acces)
+        n = await _revoke_all_shares(user["email"], user["id"])
+        n += await _revoke_replay_links(user["id"])
     audit.detail(request, "revoked all share links (%d active)" % n)
     log.warning("all share links revoked (%d active) by %s", n, user["email"])
     email_alerts.notify_security_change("all share links were revoked (%d active)" % n,
@@ -7998,11 +8548,17 @@ async def _check_backup() -> dict:
     return {"id": "backup", "status": status, "value": value}
 
 
-async def _security_checks(user) -> list:
+async def _security_checks(user, grants=None) -> list:
     checks = []
-    hosts = await db.fetchall(
+    if grants is None:
+        grants = await authz.grants_for_user(user["id"])
+    # 3.6: verificările de INSTANŢĂ doar cu `security.view`; fără el rămân cele ale contului tău,
+    # calculate peste hosturile pe care le vezi (fără oracol de mărimea flotei)
+    instance = grants.has_global("security.view")
+    vis = await authz.visible_hosts(grants, "host.view")
+    hosts = [h for h in await db.fetchall(
         "SELECT id, require_2fa, connection_type, agent_version, uninstalled_at"
-        " FROM hosts WHERE COALESCE(ephemeral, 0) = 0")
+        " FROM hosts WHERE COALESCE(ephemeral, 0) = 0") if authz.in_visible(vis, h["id"])]
     any_2fa = any(h["require_2fa"] for h in hosts)
 
     # 1. al doilea factor al contului CURENT
@@ -8019,6 +8575,8 @@ async def _security_checks(user) -> list:
         st = "ok"
     checks.append({"id": "account2fa", "status": st,
                    "value": {"passkeys": passkeys, "totp": totp, "sso": sso, "hosts2fa": any_2fa}})
+    if not instance:
+        return checks
 
     # 2. link-urile de share active (toate, inclusiv cele ascunse de pe hosturi 2FA)
     rows = await db.fetchall(
@@ -8092,10 +8650,10 @@ async def _security_checks(user) -> list:
 
 
 @router.get("/api/security/summary")
-async def security_summary(user=Depends(security.require_user)):
+async def security_summary(request: Request, user=Depends(authz.perm('security.view', list=True))):
     """„E totul în regulă acum?" — o listă de verificări {id, status, value}. Fără proză:
     frontend-ul compune textul din i18n după `id` + `value`."""
-    return {"checks": await _security_checks(user), "ts": time.time()}
+    return {"checks": await _security_checks(user, authz.grants_of(request)), "ts": time.time()}
 
 
 async def _public_watermark(owner_email: str, title: str) -> dict:
@@ -8153,7 +8711,7 @@ TEXT_VIEW_TAIL = 2 * 1024 * 1024       # cât citim pentru vizualizarea din UI (
 
 @router.get("/api/sessions/{sid}/transcript")
 async def get_transcript(sid: str, format: str = "out", tail: bool = False,
-                         user=Depends(security.require_user)):
+                         user=Depends(authz.perm('recording.view', host='sid'))):
     """`out` = fluxul brut, `cast` = asciicast (redare cu timing), `txt` = text citibil.
     `tail=true` (doar pentru txt) întoarce doar coada — vizualizarea din UI nu trage
     zeci de MB ca să arate ce s-a întâmplat ultima dată."""
@@ -8177,7 +8735,7 @@ async def get_transcript(sid: str, format: str = "out", tail: bool = False,
 
 
 @router.get("/api/sessions/{sid}/preview")
-async def session_preview(sid: str, user=Depends(security.require_user)):
+async def session_preview(sid: str, user=Depends(authz.perm('recording.view', host='sid'))):
     """Coada recentă a transcriptului (pentru previzualizare read-only în UI),
     fără secvențele de alt-screen care ar goli ecranul."""
     if not await db.fetchone("SELECT id FROM sessions WHERE id=?", sid):
@@ -8231,7 +8789,7 @@ def _replay_link_json(r) -> dict:
 
 @router.post("/api/sessions/{sid}/replay-links")
 async def create_replay_link(sid: str, request: Request, body: ReplayLinkIn = ReplayLinkIn(),
-                             user=Depends(security.require_user)):
+                             user=Depends(authz.perm('share.replay', host='sid'))):
     """Link public, doar-citire, către ÎNREGISTRAREA unei sesiuni închise. URL-ul (cu tokenul)
     se întoarce o singură dată, aici."""
     if not core.valid_sid(sid):
@@ -8290,8 +8848,13 @@ async def list_replay_links(sid: str = "", user=Depends(security.require_user)):
         sql += " AND r.sid=?"
         args.append(sid)
     rows = await db.fetchall(sql + " ORDER BY r.created DESC", *args)
+    # 3.6: un link al tău pe un host pe care nu-l mai vezi nu se arată (nici nu se numără);
+    # oricum a fost revocat la schimbarea rolului (`_revoke_unauthorized_derived`)
+    vis = await authz.visible_hosts(await authz.grants_for_user(user["id"]), "host.view")
     out, hidden = [], 0
     for r in rows:
+        if r["host_id"] is not None and not authz.in_visible(vis, r["host_id"]):
+            continue
         if r["require_2fa"] and not security.stepup_window_is_open(user["id"], r["host_id"]):
             hidden += 1
             continue
@@ -8300,7 +8863,7 @@ async def list_replay_links(sid: str = "", user=Depends(security.require_user)):
 
 
 @router.delete("/api/replay-links/{link_id}")
-async def revoke_replay_link(link_id: int, request: Request, user=Depends(security.require_user)):
+async def revoke_replay_link(link_id: int, request: Request, user=Depends(authz.perm('share.replay', host='link_id'))):
     row = await db.fetchone(
         "SELECT r.id, r.sid, s.host_id FROM replay_links r LEFT JOIN sessions s ON s.id = r.sid"
         " WHERE r.id=? AND r.user_id=?", link_id, user["id"])
@@ -9180,7 +9743,30 @@ async def _fresh_user(user):
     return (await db.fetchone("SELECT * FROM users WHERE id=?", user["id"])) or user
 
 
+async def _ws_access(user_id: int, row) -> str:
+    """Ce poate contul pe sesiunea asta (3.6, §A.6.4 + Q5): 'rw' | 'ro' | 'replay' | 'none' |
+    'hidden'. `hidden` = hostul nu e vizibil (răspunsul e identic cu o sesiune inexistentă).
+      · rw     — `session.open` ŞI (sesiunea e a ta / pre-3.6 / ai `session.manage`)
+      · ro     — sesiune VIE, cu `session.watch` (sau `session.open` pe sesiunea altcuiva)
+      · replay — sesiune ÎNCHISĂ, cu `recording.view`"""
+    have = await authz.perms_on(await authz.grants_for_user(user_id), row["host_id"])
+    if "host.view" not in have:
+        return "hidden"
+    live = row["state"] in ("creating", "live")
+    mine = row["created_by_id"] is None or row["created_by_id"] == user_id
+    if live:
+        if "session.open" in have and (mine or "session.manage" in have):
+            return "rw"
+        if "session.watch" in have or "session.open" in have:
+            return "ro"
+        return "none"
+    if "recording.view" in have:
+        return "replay"
+    return "none"
+
+
 @router.websocket("/ws/sessions/{sid}")
+@authz.ws_perm(("session.open", "session.watch", "recording.view"), host="sid")
 async def browser_ws(ws: WebSocket, sid: str):
     if not _origin_ok(ws):
         await ws.close(code=4403)
@@ -9199,6 +9785,13 @@ async def browser_ws(ws: WebSocket, sid: str):
     if not row:
         await ws.close(code=4404)
         return
+    # 3.6: autorizare ÎNAINTE de accept şi de orice replay. Host invizibil → 4404, exact ca o
+    # sesiune inexistentă; vizibil dar fără drept → 4403. (Înainte de accept() ambele ajung la
+    # client ca 403 de handshake — vezi nota de mai sus — deci nu scurg nimic.)
+    access = await _ws_access(user["id"], row)
+    if access in ("hidden", "none"):
+        await ws.close(code=4404 if access == "hidden" else 4403)
+        return
     await ws.accept()
 
     live = row["state"] in ("creating", "live")
@@ -9207,7 +9800,9 @@ async def browser_ws(ws: WebSocket, sid: str):
     if client:
         client.id = "o_" + security.new_token()[:10]
         client.is_owner = True
-        client.writable = True
+        # read-only (session.watch): tastatura e inertă, ca la un invitat read-only — octeţii
+        # de input se aruncă AICI şi în hub.handle_input (apărare în adâncime)
+        client.writable = access == "rw"
         client.label = "self"           # idem
         client.user_id = user["id"]
         client.remote_addr = security.client_ip(ws)
@@ -9231,6 +9826,8 @@ async def browser_ws(ws: WebSocket, sid: str):
         # avertiza („se blochează în 60 s") în loc să blocheze din senin (audit UX §6.c1)
         "lock_idle": hub.lock_idle if hub else 0,
         "lock_at": (hub.last_interaction + hub.lock_idle) if hub and hub.lock_idle else None,
+        # 3.6: „watching (read-only)" — UI-ul face tastatura inertă şi arată pastila
+        "readonly": access != "rw",
     }))
     # ATAŞAREA la o sesiune de pe un host cu 2FA cere step-up — fail-closed.
     # Aici era gaura prin care un cookie furat ajungea la un shell root: `browser_ws` cerea doar
@@ -9338,16 +9935,40 @@ async def browser_ws(ws: WebSocket, sid: str):
     # supravieţuieşte logout-ului/idle-expiry (tokenul e revocat server-side de destroy_web_session,
     # dar socketul rămâne şi acceptă input la nesfârşit). La invalidare → închide (4401).
     tok = ws.cookies.get(security.COOKIE_NAME)
+    wake = authz.subscribe()      # 3.6: o schimbare de rol re-verifică ACUM, nu la următorul tick
 
     async def _revalidate():
+        nonlocal access
         while True:
-            await asyncio.sleep(WS_REVALIDATE_SECS)
+            try:
+                await asyncio.wait_for(wake.wait(), WS_REVALIDATE_SECS)
+            except asyncio.TimeoutError:
+                pass
+            wake.clear()
             if not await security.session_valid(tok):
                 try:
                     await ws.close(code=4401)
                 except Exception:                    # noqa: BLE001
                     pass
                 return
+            # 3.6 (§A.6.4): drepturile se re-evaluează: pierdut → închis (4403); retrogradat de la
+            # scriere la urmărire → `writable` cade pe loc, iar clientul primeşte `readonly`.
+            cur = await db.fetchone("SELECT * FROM sessions WHERE id=?", sid)
+            now_access = await _ws_access(user["id"], cur) if cur else "hidden"
+            if now_access in ("hidden", "none") or (
+                    now_access == "replay" and access in ("rw", "ro") and hub is not None):
+                try:
+                    await ws.close(code=4403)
+                except Exception:                    # noqa: BLE001
+                    pass
+                return
+            if access == "rw" and now_access != "rw" and client is not None:
+                client.writable = False
+                try:
+                    await client.send_text(json.dumps({"type": "readonly"}))
+                except Exception:                    # noqa: BLE001
+                    pass
+            access = now_access if not (access != "rw" and now_access == "rw") else access
 
     reval_task = asyncio.create_task(_revalidate())
     try:
@@ -9378,7 +9999,8 @@ async def browser_ws(ws: WebSocket, sid: str):
                             await ws.send_bytes(await asyncio.to_thread(core.read_tail, sid))
                 continue
             if msg.get("bytes") is not None and hub:
-                await hub.handle_input(client, msg["bytes"])
+                if client.writable:          # 3.6: un client read-only nu scrie în PTY
+                    await hub.handle_input(client, msg["bytes"])
             elif msg.get("text") and hub:
                 try:
                     ctl = json.loads(msg["text"])
@@ -9407,7 +10029,8 @@ async def browser_ws(ws: WebSocket, sid: str):
                 elif ctl.get("type") == "kick":
                     # DOAR owner-ul (client autentificat) scoate un INVITAT (nu owner).
                     # Închide WS-ul țintei → bucla ei se termină + roster rebroadcast.
-                    if client.is_owner:
+                    # 3.6: şi doar dacă poate scrie (un watcher read-only nu dă afară pe nimeni)
+                    if client.is_owner and client.writable:
                         tid = ctl.get("id", "")
                         for c in list(hub.clients):
                             if c.id == tid and not c.is_owner:
@@ -9441,6 +10064,8 @@ async def browser_ws(ws: WebSocket, sid: str):
                         n = 0
                     await client.send_text(json.dumps({"type": "rtt", "n": n}))
                 elif ctl.get("type") == "resize":
+                    if not client.writable:
+                        continue             # 3.6: read-only nu schimbă grila celorlalţi
                     # last-writer-wins, but a viewer that hasn't interacted
                     # recently must not yank the size from the active device.
                     # EXCEPȚIE: un client care tocmai a devenit activ (focus/tab
@@ -9461,6 +10086,7 @@ async def browser_ws(ws: WebSocket, sid: str):
         pass
     finally:
         reval_task.cancel()
+        authz.unsubscribe(wake)
         if hub and client:
             hub.clients.discard(client)
             if client.sender_task:

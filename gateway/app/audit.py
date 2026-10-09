@@ -17,6 +17,7 @@ fișier. Jurnalul e o listă de acțiuni, nu o copie a traficului.
 """
 
 import logging
+import re
 import time
 
 from . import config, db
@@ -95,7 +96,7 @@ def actor(request, email: str) -> None:
 
 
 async def record(ts: float, actor_email: str, ip: str, method: str, path: str,
-                 status: int, det: str = "") -> None:
+                 status: int, det: str = "", actor_id=None, host_id=None, via: str = "") -> None:
     if _skip(method, path):
         return
     # Un client ANONIM nu trebuie să poată umfla jurnalul: orice 401/404 pe /api/* scria un rând,
@@ -106,10 +107,13 @@ async def record(ts: float, actor_email: str, ip: str, method: str, path: str,
     if not actor_email and status in (401, 403, 404, 405, 429):
         return
     try:
+        if host_id is None:
+            host_id = host_of_path(path)
         await db.execute(
-            "INSERT INTO audit_log(ts, actor, ip, method, path, status, detail)"
-            " VALUES(?,?,?,?,?,?,?)",
-            ts, actor_email[:200], ip[:64], method, path[:400], int(status), det[:500])
+            "INSERT INTO audit_log(ts, actor, ip, method, path, status, detail, actor_id,"
+            " host_id, via) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            ts, actor_email[:200], ip[:64], method, path[:400], int(status), det[:500],
+            actor_id, host_id, (via or "")[:64])
     except Exception:                       # noqa: BLE001 — auditul nu rupe cererea…
         # …dar nici nu dispare în tăcere. Se înghiţea complet, deci pista de audit se stingea
         # exact când contează: DB blocat, disc plin, migrare în curs — adică în timpul unui
@@ -133,12 +137,36 @@ async def prune() -> None:
         pass
 
 
+_HOST_IN_PATH = re.compile(r"^/(?:api/hosts|ws/hosts)/(\d+)(?:/|$)")
+
+
+def host_of_path(path: str):
+    """Hostul ţintit de o cale `/api/hosts/<id>/…` (rândurile de dinainte de coloana host_id)."""
+    m = _HOST_IN_PATH.match(path or "")
+    return int(m.group(1)) if m else None
+
+
 async def recent(limit: int = 200, before: float = 0.0, q: str = "",
-                 failed_only: bool = False) -> list:
+                 failed_only: bool = False, visible_hosts=None, actor_id=None) -> list:
     """Ultimele intrări, cele mai noi întâi. `q` filtrează pe cale/detaliu/IP (LIKE),
-    `before` paginează în trecut."""
-    sql = ["SELECT ts, actor, ip, method, path, status, detail FROM audit_log WHERE 1=1"]
+    `before` paginează în trecut.
+
+    3.6: `actor_id` = doar rândurile acelui cont (fără `audit.view`); `visible_hosts` (set de
+    id-uri, None = toate) = doar rândurile fără host sau de pe hosturile vizibile. Filtrul de
+    host e în SQL pe coloana `host_id` şi, pentru rândurile vechi (host_id NULL), pe cale."""
+    sql = ["SELECT ts, actor, ip, method, path, status, detail, host_id, via FROM audit_log"
+           " WHERE 1=1"]
     args: list = []
+    if actor_id is not None:
+        sql.append("AND actor_id = ?")
+        args.append(int(actor_id))
+    if visible_hosts is not None:
+        vis = sorted(visible_hosts)
+        if vis:
+            sql.append("AND (host_id IS NULL OR host_id IN (%s))" % ",".join("?" * len(vis)))
+            args += vis
+        else:
+            sql.append("AND host_id IS NULL")
     if before:
         sql.append("AND ts < ?")
         args.append(before)
@@ -150,4 +178,12 @@ async def recent(limit: int = 200, before: float = 0.0, q: str = "",
     sql.append("ORDER BY ts DESC LIMIT ?")
     args.append(max(1, min(1000, limit)))
     rows = await db.fetchall(" ".join(sql), *args)
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        if visible_hosts is not None and d.get("host_id") is None:
+            hid = host_of_path(d.get("path") or "")
+            if hid is not None and hid not in visible_hosts:
+                continue                  # rând vechi, pe un host pe care nu-l vezi
+        out.append(d)
+    return out

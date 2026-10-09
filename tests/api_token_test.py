@@ -147,8 +147,10 @@ async def main():
     # fără să fie una. Semnalat de un audit extern.
     async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=_ORIGIN) as c3:
         await c3.post("/api/login", json={"email": "a@b.co", "password": PW})
+        # 3.6: un cont nou nu primeşte nimic din oficiu — premisa testului e „alt cont deplin"
         await c3.post("/api/users", json={"email": "pleaca@b.co", "password": PW,
-                                          "current_password": PW})
+                                          "current_password": PW, "role": "owner",
+                                          "scope_kind": "all"})
     async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=_ORIGIN) as c4:
         await c4.post("/api/login", json={"email": "pleaca@b.co", "password": PW})
         gone_tok = (await c4.post("/api/tokens", json={
@@ -176,7 +178,8 @@ async def main():
     async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=_ORIGIN) as c6:
         await c6.post("/api/login", json={"email": "a@b.co", "password": PW})
         await c6.post("/api/users", json={"email": "vechi@b.co", "password": PW,
-                                          "current_password": PW})
+                                          "current_password": PW, "role": "owner",
+                                          "scope_kind": "all"})
     async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=_ORIGIN) as c7:
         await c7.post("/api/login", json={"email": "vechi@b.co", "password": PW})
         moved_tok = (await c7.post("/api/tokens", json={

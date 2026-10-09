@@ -15,7 +15,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .errors import ApiError
-from . import (api, audit, backup, config, core, db, email_alerts, health,
+from . import (api, audit, authz, backup, config, core, db, email_alerts, health,
                oidc_api, security, signing, webauthn_api)
 
 logging.basicConfig(level=logging.INFO,
@@ -138,6 +138,7 @@ async def _session_reaper() -> None:
             await core.purge_pending_ssh_keys()  # chei generate în Add host şi nefolosite (~1h)
             await core.sweep_hosts_offline()     # alertă la host căzut / revenit
             await _warn_if_disk_low()
+            await authz.poll_external_epoch()    # legături schimbate din `python3 -m app.admin`
         except Exception:
             log.exception("the session reaper failed")
         await asyncio.sleep(_REAPER_INTERVAL)
@@ -333,17 +334,31 @@ async def audit_log(request: Request, call_next):
         return resp
     try:
         actor = getattr(request.state, "audit_actor", "")
+        # 3.6 (§A.6.9): atribuirea pe ID, nu doar pe email — `authz.perm` pune principalul pe
+        # cerere (cont sau token → creatorul lui) şi hostul rutei, deci jurnalul răspunde la „cine,
+        # pe ce host, prin ce canal" fără a re-deriva nimic din cale.
+        principal = getattr(request.state, "principal", None)
+        actor_id = principal.user_id if principal is not None else None
+        via = principal.via if principal is not None else ""
+        if not actor and principal is not None:
+            actor = principal.email
         if not actor:
             user = await security.user_for_token(request.cookies.get(security.COOKIE_NAME))
             actor = user["email"] if user else ""
+            if user is not None:
+                actor_id, via = user["id"], "cookie"
         if not actor:
             # cererile de automatizare poartă Bearer, nu cookie: în jurnal apar ca
             # „token:<nume>", ca să nu pară acţiuni anonime
             tok = await security.api_token_principal(request)
             actor = ("token:" + tok["name"]) if tok else ""
+            if tok:
+                actor_id, via = tok.get("created_by_id"), "token:%d" % tok["id"]
         await audit.record(time.time(), actor, security.client_ip(request),
                            request.method, request.url.path, resp.status_code,
-                           getattr(request.state, "audit_detail", ""))
+                           getattr(request.state, "audit_detail", ""),
+                           actor_id=actor_id, host_id=getattr(request.state, "audit_host", None),
+                           via=via)
     except Exception:                       # noqa: BLE001 — auditul nu rupe cererea
         log.exception("writing the audit log failed")
     return resp

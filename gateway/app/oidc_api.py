@@ -5,19 +5,21 @@ Trei rute PUBLICE (nu există sesiune încă la login):
   · GET /api/oidc/login    — porneşte flow-ul (redirect la IdP); intent=login|stepup
   · GET /api/oidc/callback — întoarcere de la IdP: validează, provizionează, emite sesiunea
 
-Adminul local rămâne break-glass (parolă/passkey). Userii SSO sunt admin complet pe această
-instanţă (WebTerm n-are RBAC — vezi THREAT-MODEL); „cine ajunge aici" se decide în IdP + prin
+Adminul local rămâne break-glass (parolă/passkey). De la 3.6 un cont SSO NOU nu primeşte niciun
+rol automat („fără acces încă", până îi acordă un Owner/Admin unul) — maparea grupuri → roluri
+vine în 3.6.1 (tabela `oidc_group_roles` există deja ca punct de extensie). Conturile existente
+la upgrade au devenit Owner @ all. „Cine ajunge aici" se decide în IdP + prin
 `OIDC_ALLOWED_GROUPS`.
 """
 import time
 from urllib.parse import parse_qs, urlparse
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import RedirectResponse
 
-from . import audit, config, db, oidc, security
+from . import audit, authz, config, db, oidc, security
 
-router = APIRouter(prefix="/api/oidc")
+router = APIRouter(prefix="/api/oidc", dependencies=[Depends(authz.declared)])
 
 # Cookie care leagă `state` de BROWSERUL care a pornit login-ul (anti login-CSRF / fixare de
 # sesiune): fără el, cineva ar putea captura un code+state valid pentru contul LUI şi păcăli
@@ -95,6 +97,16 @@ async def callback(request: Request, code: str = "", state: str = ""):
         # host_id=0 (sau lipsă) = re-auth account-scope: schimbarea emailului/parolei unui cont SSO
         # (fix 7), unde parola locală e un hash aleator. Altfel, fereastră per-host ca până acum.
         hid = info["host_id"] or 0
+        # 3.6 (§A.6.7): ceremonia de step-up nu are voie să confirme existenţa/2FA-ul unui host
+        # pe care contul nu-l vede, nici să deschidă o fereastră pe el — `host.view` întâi.
+        if hid and "host.view" not in await authz.perms_on(
+                await authz.grants_for_user(cur["id"]), hid):
+            await audit.record(time.time(), cur["email"], ip, "GET", "/api/oidc/callback", 404,
+                               "step-up SSO refuzat: host invizibil sau inexistent",
+                               actor_id=cur["id"])
+            resp = _redirect_err("denied")
+            _clear_state_cookie(resp)
+            return resp
         security.open_stepup_window(cur["id"], hid)
         await audit.record(time.time(), cur["email"], ip, "GET", "/api/oidc/callback", 200,
                            ("step-up SSO reuşit, account-scope" if not hid

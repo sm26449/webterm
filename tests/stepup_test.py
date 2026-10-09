@@ -174,8 +174,14 @@ async def main():
         # `detail` conţine textul complet al comenzilor şi interogările de căutare.
         import inspect as _i
         sig = str(_i.signature(api.audit_list))
-        check("/api/audit cere require_user, nu require_scope",
-              "require_user" in sig and "require_scope" not in sig)
+        # 3.6: autentificarea + autorizarea trec prin `authz.perm` (o singură dependenţă); garanţia
+        # rămâne aceeaşi — doar cookie, niciun token — exprimată acum prin `tokens=None`.
+        from app import authz as _authz
+        specs = [_authz.spec_of(d.call) for r in api.router.routes
+                 if getattr(r, "path", "") == "/api/audit"
+                 for d in r.dependant.dependencies if _authz.spec_of(d.call)]
+        check("/api/audit cere cookie (perm fără tokens=), nu require_scope",
+              len(specs) == 1 and specs[0].tokens is None and "require_scope" not in sig)
 
     await db.close()
     print(f"\n{ok}/{total} passed")
