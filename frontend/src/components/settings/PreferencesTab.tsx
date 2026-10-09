@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from '../../lib/api'
 import { useI18n } from '../../lib/i18n'
+import { useSectionVisible } from '../../lib/perms'
 import { allTimezones, browserTimezone, getTimezone, setTimezone, timeInZone } from '../../lib/tz'
 import UpdateCommand from '../UpdateCommand'
 import { lsGet, lsSet } from '../../lib/storage'
@@ -21,6 +22,7 @@ type UpdateInfo = {
 
 export default function PreferencesTab() {
   const { t } = useI18n()
+  const vis = useSectionVisible()   // 3.6: secţiunile fără permisiunea globală nu apar
   const [tz, setTz] = useState(getTimezone())
   const [clock, setClock] = useState(timeInZone(getTimezone()))
   const [srMode, setSrMode] = useState(() => lsGet('wt_sr') === '1')
@@ -207,7 +209,7 @@ export default function PreferencesTab() {
         )}
       </section>
 
-      <section data-setting-id="appUpdate">
+      <section data-setting-id="appUpdate" hidden={!vis('appUpdate')}>
         {/* ── Verificare de versiune ── */}
         <h3 className={heading}>{t('settings.update.title')}</h3>
         {upd?.configurable === false ? (

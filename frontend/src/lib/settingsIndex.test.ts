@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import en from '../lang/en'
 import ro from '../lang/ro'
-import { catOfSection, fold, groupHits, searchSettings, SETTINGS_CATS, SETTINGS_INDEX, SettingsCat } from './settingsIndex'
+import { catOfSection, fold, groupHits, searchSettings, sectionVisible, SETTINGS_CATS, SETTINGS_INDEX, SettingsCat,
+  visibleCats } from './settingsIndex'
 
 // t() minimal peste un catalog (fără React): aceeaşi cădere pe `en` ca lib/i18n
 const tFor = (strings: Record<string, string>) => (key: string) => strings[key] ?? en.strings[key] ?? key
@@ -14,7 +15,7 @@ const sources = import.meta.glob('../components/settings/*Tab.tsx', {
   query: '?raw', import: 'default', eager: true,
 }) as Record<string, string>
 const TAB_FILE: Record<SettingsCat, string> = {
-  cont: 'AccountTab', autentificare: 'SignInTab', infrastructura: 'InfrastructureTab', audit: 'AuditTab',
+  cont: 'AccountTab', utilizatori: 'UsersTab', autentificare: 'SignInTab', infrastructura: 'InfrastructureTab', audit: 'AuditTab',
   aspect: 'AppearanceTab', notificari: 'NotificationsTab', backup: 'BackupTab', preferinte: 'PreferencesTab',
 }
 const renderedIds = (file: string) => {
@@ -134,5 +135,36 @@ describe('searchSettings', () => {
     expect(groups[0].cat).toBe('notificari')
     expect(new Set(groups.map((g) => g.cat)).size).toBe(groups.length)
     expect(groups.flatMap((g) => g.hits).length).toBe(searchSettings('alert', tEn).length)
+  })
+})
+
+describe('settings index: roluri (3.6) — ce vede un cont fără permisiuni globale', () => {
+  const none = () => false
+  const all = () => true
+  it('Owner (toate permisiunile): toate tab-urile şi toate secţiunile', () => {
+    expect(visibleCats(all).map((c) => c.id)).toEqual(SETTINGS_CATS.map((c) => c.id))
+    for (const s of SETTINGS_INDEX) expect(sectionVisible(s.id, all)).toBe(true)
+  })
+  it('fără permisiuni globale: Backup şi Infrastructură dispar; contul, rolul tău, 2FA şi preferinţele rămân', () => {
+    const ids = visibleCats(none).map((c) => c.id)
+    expect(ids).not.toContain('backup')
+    expect(ids).not.toContain('infrastructura')
+    for (const c of ['cont', 'utilizatori', 'autentificare', 'preferinte', 'audit', 'aspect', 'notificari'] as SettingsCat[]) {
+      expect(ids).toContain(c)
+    }
+    expect(sectionVisible('myAccess', none)).toBe(true)
+    expect(sectionVisible('users', none)).toBe(false)
+    expect(sectionVisible('smtp', none)).toBe(false)
+    expect(sectionVisible('alertPrefs', none)).toBe(true)
+  })
+  it('secţiunile cu permisiune folosesc doar id-uri din catalogul global', () => {
+    const GLOBAL = ['hosts.create', 'hosts.export', 'settings.manage', 'users.manage', 'roles.manage', 'tokens.create',
+      'tokens.manage', 'shares.manage', 'snippets.manage', 'history.clear', 'audit.view', 'security.view',
+      'backups.manage', 'signing.manage']
+    for (const s of SETTINGS_INDEX) if (s.perm) expect(GLOBAL, s.id).toContain(s.perm)
+  })
+  it('„Users & roles" e găsit după rol / permisiune', () => {
+    expect(ids('roles')).toContain('myAccess')
+    expect(ids('roluri', tRo)).toContain('myAccess')
   })
 })

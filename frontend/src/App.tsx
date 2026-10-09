@@ -32,7 +32,9 @@ import { useI18n } from './lib/i18n'
 import { useConfirm } from './lib/confirm'
 import { useFocusTrap } from './lib/useFocusTrap'
 import { copyText } from './lib/clipboard'
-import { CloseIcon, CopyIcon, ShieldIcon } from './components/Icons'
+import { CloseIcon, CopyIcon, LockIcon, ShieldIcon } from './components/Icons'
+import { EmptyState } from './components/ui'
+import { loadPerms } from './lib/perms'
 import { ensureNotificationPermission, notify, notifyError, registerToast } from './lib/notify'
 import { forgetUploads, hideUploadOrphans, restoreOrphans, setUploadUser } from './lib/uploads'
 import { forgetDownloads, hideInterruptedDownloads, restoreInterruptedDownloads, setDownloadUser } from './lib/downloads'
@@ -448,6 +450,9 @@ function MainApp() {
   }, [])
 
   const refresh = useCallback(async () => {
+    // 3.6: permisiunile contului (gating cosmetic) — reîmprospătate odată cu lista de hosturi,
+    // ca o schimbare de rol să se vadă fără reload; un eşec lasă starea veche
+    loadPerms()
     try {
       const [h, s, sv] = await Promise.all([
         api<Host[]>('/api/hosts'),
@@ -1503,7 +1508,12 @@ function MainApp() {
           })}
         </div>
         )}
-        {!splitActive && !primary && (<PaneErrorBoundary>{routeHost ? (
+        {!splitActive && !primary && (<PaneErrorBoundary>{!routeHost && route.host != null && lastHostsRef.current !== '' ? (
+          // link adânc spre un host pe care nu-l (mai) vezi: DELIBERAT ambiguu — „nu există" şi
+          // „nu ai acces" arată la fel, exact ca răspunsul serverului (404, fără oracol)
+          <EmptyState size="page" titleAs="h1" className="wt-canvas h-full" tone="neutral"
+            icon={<LockIcon />} title={t('noaccess.hostTitle')} body={t('noaccess.hostBody')} />
+        ) : routeHost ? (
           <HostOverview
             onMenu={() => { setSidebarCollapsed(false); lsSet('wt-sidebar-collapsed', '0'); setSidebarOpen(true) }}
             sidebarCollapsed={sidebarCollapsed}

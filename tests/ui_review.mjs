@@ -53,9 +53,10 @@ const TAGS = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa', 'best-prac
 // Forwards, Services, Docker, Toolbox/Connections, Toolbox/SSH keys) = 8, host offline ×
 // (Overview, Sessions) = 2, toast de eroare, Settings × 7, file browser, Status, Add host × 3,
 // FleetRun, `?`, walkthrough, paleta, ConfirmModal, panoul de alerte, dialogul „link de replay"
-// + pagina PUBLICĂ de replay + dialogul „Copy to host" (3.5.18) = 35 (+ Monaco cu WT_AGENT=1).
+// + pagina PUBLICĂ de replay + dialogul „Copy to host" (3.5.18) + Settings → Users & roles (3.6) = 36
+// (+ Monaco cu WT_AGENT=1).
 // Mobil: sesiune dark + light.
-const PER_THEME = 35 + (HAS_AGENT ? 1 : 0)
+const PER_THEME = 36 + (HAS_AGENT ? 1 : 0)
 const EXPECTED_SCANS = 2 * PER_THEME + 2
 
 /** Pas tolerant: dacă un selector a derapat, notăm şi mergem mai departe.
@@ -439,7 +440,7 @@ try {
     await step('setări', async () => {
       await openSettings(page)
       // fostul „Security" e spart (3.5.9) în „Sign-in & 2FA" + „Infrastructure & tokens"
-      for (const tab of ['Account', 'Sign-in & 2FA', 'Infrastructure & tokens', 'Audit', 'Appearance', 'Notifications', 'Backup', 'Preferences']) {
+      for (const tab of ['Account', 'Users & roles', 'Sign-in & 2FA', 'Infrastructure & tokens', 'Audit', 'Appearance', 'Notifications', 'Backup', 'Preferences']) {
         const slug = tab.toLowerCase().replace(/[^a-z0-9]+/g, '-')
         await settingsTab(page, tab)
         await page.screenshot({ path: `${OUT}/${theme}-05-settings-${slug}.png` })

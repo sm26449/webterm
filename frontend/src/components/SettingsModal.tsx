@@ -1,8 +1,10 @@
 import { KeyboardEvent, ReactNode, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useI18n } from '../lib/i18n'
 import { useFocusTrap } from '../lib/useFocusTrap'
-import { catOfSection, groupHits, searchSettings, SETTINGS_CATS, SettingsCat } from '../lib/settingsIndex'
+import { catOfSection, groupHits, searchSettings, sectionVisible, SETTINGS_CATS, SettingsCat, visibleCats } from '../lib/settingsIndex'
+import { can, usePerms } from '../lib/perms'
 import AccountTab from './settings/AccountTab'
+import UsersTab from './settings/UsersTab'
 import SignInTab from './settings/SignInTab'
 import InfrastructureTab from './settings/InfrastructureTab'
 import AuditTab from './settings/AuditTab'
@@ -54,6 +56,11 @@ export default function SettingsModal(props: {
   onAccountChanged: () => void   // refetch /api/state (refolosit și după salvarea watermark-ului)
 }) {
   const { t } = useI18n()
+  // 3.6: tab-urile/secţiunile pentru care contul n-are permisiunea globală nu apar (cosmetic —
+  // serverul refuză oricum); un tab fără nicio secţiune vizibilă dispare din rail şi din căutare
+  const perms = usePerms()
+  const has = (p: string) => can(perms, p)
+  const cats = visibleCats(has)
   // categoria activă: modalul nu mai e un scroll lung — arată o secțiune odată. Cu o secţiune cerută
   // şi fără tab explicit, tab-ul e cel al secţiunii (indexul ştie unde stă fiecare).
   const firstCat: SettingsCat = props.initialCat
@@ -73,7 +80,8 @@ export default function SettingsModal(props: {
   const [query, setQuery] = useState('')
   const [active, setActive] = useState(0)
   const searching = query.trim() !== ''
-  const hits = useMemo(() => searchSettings(query, t), [query, t])
+  const hits = useMemo(() => searchSettings(query, t).filter((h) => sectionVisible(h.section.id, (p) => can(perms, p))),
+    [query, t, perms])
   const groups = useMemo(() => groupHits(hits), [hits])
   const flat = useMemo(() => groups.flatMap((g) => g.hits), [groups])   // ordinea afişată = ordinea tastelor
   const listId = useId()
@@ -191,7 +199,7 @@ export default function SettingsModal(props: {
           {/* rail de categorii: coloană pe desktop, bandă orizontală pe mobil */}
           <nav aria-label={t('settings.categoriesNav')}
             className="flex shrink-0 gap-1 overflow-x-auto border-b border-ink-800 p-2 sm:w-44 lg:w-52 sm:flex-col sm:overflow-x-visible sm:border-b-0 sm:border-r">
-            {SETTINGS_CATS.map((c) => (
+            {cats.map((c) => (
               <button
                 key={c.id}
                 onClick={() => { setQuery(''); setCat(c.id) }}
@@ -265,6 +273,8 @@ export default function SettingsModal(props: {
             <div hidden={searching} className={cat === 'audit' || cat === 'backup' ? '' : 'max-w-3xl'}>
 
         {pane('cont', <AccountTab email={props.email} onAccountChanged={props.onAccountChanged} />)}
+
+        {pane('utilizatori', <UsersTab />)}
 
         {pane('preferinte', <PreferencesTab />)}
 

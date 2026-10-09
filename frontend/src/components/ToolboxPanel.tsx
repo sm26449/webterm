@@ -529,7 +529,7 @@ export default function ToolboxPanel(props: {
                         <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${DK_STATUS[d.status]}`}
                           title={t('toolbox.ssh.status.' + d.status)} aria-hidden="true" />
                         <div className="min-w-0 flex-1">
-                          <div className="truncate text-xs text-slate-200">{d.target_name || t('toolbox.ssh.deletedHost')}</div>
+                          <div className="truncate text-xs text-slate-200">{d.hidden ? t('roles.noAccessHost') : (d.target_name || t('toolbox.ssh.deletedHost'))}</div>
                           <div className="truncate font-mono text-2xs text-slate-500">
                             {d.target_user || '?'}@{d.target_hostname || d.target_name}
                             {d.options ? ' · ' + d.options : ''} · {t('toolbox.ssh.status.' + d.status)}
@@ -581,7 +581,7 @@ export default function ToolboxPanel(props: {
                   <div className="mb-1 text-2xs font-medium uppercase tracking-wide text-slate-500">{t('toolbox.ssh.inbound')}</div>
                   {dk.inbound.map((k, i) => (
                     <div key={i} className="border-b border-ink-800/60 py-1.5">
-                      <div className="text-xs text-slate-200">{k.source_name}</div>
+                      <div className="text-xs text-slate-200">{k.hidden ? t('roles.noAccessHost') : k.source_name}</div>
                       <div className="truncate font-mono text-2xs text-slate-500" title={k.fingerprint}>{k.fingerprint}</div>
                     </div>
                   ))}

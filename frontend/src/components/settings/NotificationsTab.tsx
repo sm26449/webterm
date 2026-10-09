@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { api, ApiError, errText } from '../../lib/api'
 import { askSecret } from '../../lib/secretPrompt'
 import { useI18n } from '../../lib/i18n'
+import { useSectionVisible } from '../../lib/perms'
 import { field, heading } from './ui'
 import { Button, ErrorState } from '../ui'
 import { fmtTs } from '../../lib/tz'
@@ -25,6 +26,7 @@ type AlertStatus = {
 
 export default function NotificationsTab() {
   const { t } = useI18n()
+  const vis = useSectionVisible()   // 3.6: secţiunile fără permisiunea globală nu apar
   const [busy, setBusy] = useState(false)
 
   // praguri de alertă pe resurse
@@ -167,7 +169,7 @@ export default function NotificationsTab() {
 
   return (
     <div>
-      <section data-setting-id="forwardDomain">
+      <section data-setting-id="forwardDomain" hidden={!vis('forwardDomain')}>
         {/* ── Port forwarding (domeniu) ── */}
         <h3 className={heading + ' flex items-center gap-2'}>{t('settings.forward.title')}<HelpTip id="forwardDomain" /></h3>
         <p className="mt-1 text-xs text-slate-500">
@@ -216,7 +218,7 @@ export default function NotificationsTab() {
         </div>
       </section>
 
-      <section data-setting-id="smtp">
+      <section data-setting-id="smtp" hidden={!vis('smtp')}>
         {/* ── Alerte pe email (SMTP) ── */}
         <h3 className={heading + ' flex items-center gap-2'}>{t('settings.smtp.title')}<HelpTip id="smtp" /></h3>
         <p className="mt-1 text-xs text-slate-500">{t('settings.smtp.hint')}</p>
@@ -294,7 +296,7 @@ export default function NotificationsTab() {
         </div>
       </section>
 
-      <section data-setting-id="resourceAlerts">
+      <section data-setting-id="resourceAlerts" hidden={!vis('resourceAlerts')}>
         {/* ── Alerte pe resurse ── */}
         <h3 className={heading + ' flex items-center gap-2'}>{t('settings.alerts.title')}<HelpTip id="resourceAlerts" /></h3>
         <p className="mt-1 text-xs text-slate-500">{t('settings.alerts.hint')}</p>

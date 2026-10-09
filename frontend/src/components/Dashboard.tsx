@@ -2,8 +2,9 @@ import { useEffect, useState } from 'react'
 import { isEphemeralHost, isSessionLive, api, AppLink, Host, Session, timeAgo } from '../lib/api'
 import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
 import { useI18n } from '../lib/i18n'
+import { can, usePerms } from '../lib/perms'
 import { hostHistory } from '../lib/metrics'
-import { ArrowUpRightIcon, DiamondIcon, EyeIcon, MenuIcon, PlusIcon, ServerIcon, TerminalPromptIcon } from './Icons'
+import { ArrowUpRightIcon, DiamondIcon, EyeIcon, LockIcon, MenuIcon, PlusIcon, ServerIcon, TerminalPromptIcon } from './Icons'
 import Sparkline from './Sparkline'
 import SecurityCard, { SecurityTarget } from './SecurityCard'
 import type { SettingsTarget } from '../lib/settingsIndex'
@@ -64,9 +65,23 @@ export default function Dashboard(props: {
   // contoarele şi grila de echipamente: FĂRĂ ţintele efemere („conectează o dată") —
   // `byId`/sesiunile rămân pe lista completă, ca tab-ul lor live să-şi păstreze hostul
   const hosts = props.hosts.filter((h) => !isEphemeralHost(h))
+  const perms = usePerms()
   const online = hosts.filter((h) => h.online).length
   const folders = [...new Set(hosts.map((h) => h.folder || ''))].sort((a, b) =>
     a === '' ? 1 : b === '' ? -1 : a.localeCompare(b))
+
+  // 3.6: o flotă goală pentru cine NU poate adăuga hosturi = „fără acces încă" — spunem pe cine
+  // să întrebe (cei cu users.manage), în loc să-l invităm la un „Adaugă host" care ar da 403
+  if (hosts.length === 0 && !can(perms, 'hosts.create')) {
+    const admins = perms?.admins ?? []
+    return (
+      <EmptyState size="page" titleAs="h1" className="wt-canvas h-full" tone="neutral"
+        icon={<LockIcon />}
+        title={t('noaccess.title')}
+        body={admins.length ? t('noaccess.body', { admins: admins.join(', ') }) : t('noaccess.bodyNoNames')}
+      />
+    )
+  }
 
   if (hosts.length === 0) {
     return (

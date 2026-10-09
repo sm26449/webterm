@@ -25,7 +25,7 @@ import ServicesPanel from './ServicesPanel'
 const AiToolsPanel = lazy(() => import('./AiToolsPanel'))
 import ToolboxPanel from './ToolboxPanel'
 import { ArrowDownIcon, ArrowUpIcon, CheckIcon, ChevronIcon, ClockIcon, CloseIcon, CollapseLeftIcon, CopyIcon, DockerIcon, DownloadIcon, ExternalLinkIcon, EyeIcon, FileIcon, FilesIcon, FolderIcon, ForwardIcon, FullscreenIcon, GitBranchIcon, KeyIcon, KeyboardIcon, LockIcon, MenuIcon, MoreIcon, NoteIcon, PasteIcon, PencilIcon, PlayIcon, PopoutIcon, RefreshIcon, SearchIcon, ServicesIcon, ShareIcon, ShieldIcon, SparkleIcon, StopIcon, TerminalPromptIcon, ToolboxIcon, TrashIcon, UploadIcon, WarningIcon } from './Icons'
-import { Button, IconButton } from './ui'
+import { Badge, Button, IconButton } from './ui'
 import { MenuUnreadBadge, useUnreadAlerts } from './AlertsPanel'
 import { menuLabel } from '../lib/alerts'
 import MobileKeybar from './MobileKeybar'
@@ -190,6 +190,10 @@ export default function SessionView(props: {
   // ONE-SHOT (fără buclă infinită de reconnect+replay dacă serverul închide socketul)
   const exitedRef = useRef(false)
   const muteRef = useRef(false)
+  // 3.6: ataşare read-only (rolul dă doar `session.watch`, sau sesiunea e a altcuiva): tastatura
+  // e inertă şi pastila „watching (read-only)" o spune. Serverul aruncă oricum input-ul.
+  const readOnlyRef = useRef(false)
+  const [readOnly, setReadOnly] = useState(false)
   // Input cât socketul NU e deschis: PAUZĂ explicită, nu buffer. Serverul rejoacă la fiecare
   // (re)conectare doar OUTPUT-ul (tail-ul tmux), niciodată input-ul, şi nu confirmă octeţii
   // primiţi — deci un buffer trimis „orb" la onopen ar ateriza într-un shell a cărui stare
@@ -633,7 +637,7 @@ export default function SessionView(props: {
   }, [isLive, locked])
 
   const send = useCallback((data: string | Uint8Array) => {
-    if (muteRef.current) return
+    if (muteRef.current || readOnlyRef.current) return
     const ws = wsRef.current
     if (ws?.readyState === WebSocket.OPEN) {
       ws.send(typeof data === 'string' ? new TextEncoder().encode(data) : data)
@@ -1302,8 +1306,16 @@ export default function SessionView(props: {
             rttSentRef.current.delete(msg.n)
             setRtt(Math.round(performance.now() - t0))
           }
-        } else if (msg.type === 'init') {
-          yourIdRef.current = msg.your_id ?? null   // ca să ne marcăm în roster
+        } else if (msg.type === 'init' || msg.type === 'readonly') {
+          if (msg.type === 'init') yourIdRef.current = msg.your_id ?? null   // ca să ne marcăm în roster
+          // `readonly` la init = ataşare doar-vizualizare; mesajul `readonly` = retrogradat în timp
+          // ce erai conectat (rolul s-a schimbat). Nu revenim la scriere pe acelaşi socket.
+          // la `init` starea vine din nou de la server (o reconectare după ce ai primit dreptul de
+          // scriere înapoi o ridică); `readonly` doar coboară
+          const ro = msg.type === 'readonly' || msg.readonly === true
+          readOnlyRef.current = ro
+          setReadOnly(ro)
+          if (termRef.current) termRef.current.options.disableStdin = ro
         } else if (msg.type === 'roster') {
           setRoster(Array.isArray(msg.clients) ? msg.clients : [])
         } else if (msg.type === 'attached') {
@@ -2198,6 +2210,14 @@ export default function SessionView(props: {
           ) : (
             <span className="text-rose-200">{t('session.wsForbidden')}</span>
           )}
+        </div>
+      )}
+
+      {readOnly && !exited && (
+        <div role="status" aria-live="polite" data-readonly-pill
+          className="flex items-center gap-2 border-b border-ink-800 bg-ink-900/80 px-4 py-1.5 text-sm">
+          <Badge tone="info" className="px-2 py-0.5"><EyeIcon size={12} /> {t('term.readonlyPill')}</Badge>
+          <span className="min-w-0 truncate text-xs text-slate-400">{t('term.readonlyBody')}</span>
         </div>
       )}
 

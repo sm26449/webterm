@@ -37,6 +37,7 @@ export const HELP = {
   forwardsSso: { doc: 'docs/SSO.md#register-a-webterm-instance-in-your-idp' },
   securitySummary: { doc: 'docs/SECURITY-SUMMARY.md#what-the-card-checks' },
   replayLinks: { doc: 'docs/FEATURES.md#replay-links' },
+  roles: { doc: 'docs/ROLES.md#giving-someone-access' },
 } satisfies Record<string, { doc: string; example?: (origin: string) => string }>
 
 export type HelpId = keyof typeof HELP

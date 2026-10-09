@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useRef, useState } from 'react'
 import { errText, api, CommandGuard, DeployKeyPolicy, withSecondFactor as withSecondFactorT } from '../../lib/api'
 import { useI18n } from '../../lib/i18n'
+import { useSectionVisible } from '../../lib/perms'
 import { useConfirm } from '../../lib/confirm'
 import { fmtTs } from '../../lib/tz'
 import { ArrowRightIcon, CloseIcon } from '../Icons'
@@ -16,6 +17,7 @@ import { Button } from '../ui'
 // secţiunilor e mutată ca atare (passkeys/2FA/dispozitive sunt în SignInTab).
 export default function InfrastructureTab(props: { onAccountChanged: () => void }) {
   const { t } = useI18n()
+  const vis = useSectionVisible()   // 3.6: secţiunile fără permisiunea globală nu apar
   // confirm() nativ → dialog propriu (vezi lib/confirm.tsx: de ce)
   const { confirm } = useConfirm()
   const [busy, setBusy] = useState(false)
@@ -223,7 +225,7 @@ export default function InfrastructureTab(props: { onAccountChanged: () => void 
 
   return (
     <div>
-      <section data-setting-id="signingKey">
+      <section data-setting-id="signingKey" hidden={!vis('signingKey')}>
         {/* ── Cheie de semnare a flotei ── */}
         <h3 className={heading + ' !mt-0 flex items-center gap-2'}>{t('settings.signingKey')}<HelpTip id="signingKey" /></h3>
         <p className="mt-1 text-xs text-slate-500">
@@ -348,7 +350,7 @@ export default function InfrastructureTab(props: { onAccountChanged: () => void 
         {signErr && <div className="mt-2 text-sm wt-danger">{signErr}</div>}
       </section>
 
-      <section data-setting-id="tokens">
+      <section data-setting-id="tokens" hidden={!vis('tokens')}>
         {/* ── Token-uri de automatizare ── */}
         <h3 className={heading + ' flex items-center gap-2'}>{t('settings.tokens.title')}<HelpTip id="tokens" /></h3>
         <p className="mt-1 text-xs text-slate-500">{t('settings.tokens.hint')}</p>
@@ -418,7 +420,7 @@ export default function InfrastructureTab(props: { onAccountChanged: () => void 
         </form>
       </section>
 
-      <section data-setting-id="enrollGroups">
+      <section data-setting-id="enrollGroups" hidden={!vis('enrollGroups')}>
         {/* ── Token-uri de înrolare DE GRUP (onboarding la scară) ── */}
         <h3 className={heading + ' flex items-center gap-2'}>{t('settings.enrollGroups.title')}<HelpTip id="enrollGroups" /></h3>
         <p className="mt-1 text-xs text-slate-500">{t('settings.enrollGroups.hint')}</p>
@@ -458,7 +460,7 @@ export default function InfrastructureTab(props: { onAccountChanged: () => void 
         </ul>
       </section>
 
-      <section data-setting-id="deployKeyPolicy">
+      <section data-setting-id="deployKeyPolicy" hidden={!vis('deployKeyPolicy')}>
         {/* ── Politica cheilor de deploy ── */}
         <h3 className={heading + ' flex items-center gap-2'}>{t('settings.dkpolicy.title')}<HelpTip id="deployKeyPolicy" /></h3>
         <p className="mt-1 text-xs text-slate-500">{t('settings.dkpolicy.hint')}</p>
@@ -477,7 +479,7 @@ export default function InfrastructureTab(props: { onAccountChanged: () => void 
         {dkPolicyMsg && <div className="mt-1 text-xs text-slate-500">{dkPolicyMsg}</div>}
       </section>
 
-      <section data-setting-id="guardrail">
+      <section data-setting-id="guardrail" hidden={!vis('guardrail')}>
         {/* ── Guardrail de comenzi ── */}
         <h3 className={heading + ' flex items-center gap-2'}>{t('settings.guardrail')}<HelpTip id="guardrail" /></h3>
         <label className="mt-2 flex cursor-pointer items-start gap-2.5 text-sm text-slate-300">

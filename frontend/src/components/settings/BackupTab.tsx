@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useRef, useState } from 'react'
 import { api, ApiError, errText } from '../../lib/api'
 import { useI18n } from '../../lib/i18n'
+import { useSectionVisible } from '../../lib/perms'
 import { fmtTs } from '../../lib/tz'
 import { copyText } from '../../lib/clipboard'
 import { downloadBlob, field, heading } from './ui'
@@ -14,6 +15,7 @@ import HelpTip from '../HelpTip'
 // Extras din SettingsModal ca tab de sine stătător (îşi ţine starea, se încarcă la montare).
 export default function BackupTab(props: { onAccountChanged: () => void }) {
   const { t } = useI18n()
+  const vis = useSectionVisible()   // 3.6: secţiunile fără permisiunea globală nu apar
   const { confirm } = useConfirm()   // nu `window.confirm`: vezi lib/confirm.tsx (temă, focus-trap, nu blochează pagina)
 
   // ── Backup off-host în cloud (Google Drive / Dropbox), conectat prin OAuth din UI ──
@@ -325,7 +327,7 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
 
   return (
     <div>
-      <section data-setting-id="backupDownload">
+      <section data-setting-id="backupDownload" hidden={!vis('backupDownload')}>
         {/* ── Descarcă un backup acum ── */}
         <h3 className={heading + ' !mt-0'}>{t('settings.backup.downloadTitle')}</h3>
         <p className="mt-1 text-xs text-slate-500">
@@ -355,7 +357,7 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
         </div>
       </section>
 
-      <section data-setting-id="backupAuto">
+      <section data-setting-id="backupAuto" hidden={!vis('backupAuto')}>
         {/* ── Backup automat ── */}
         <h3 className={heading}>{t('settings.backup.autoTitle')}</h3>
         <p className="mt-1 text-xs text-slate-500">
@@ -433,7 +435,7 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
         )}
       </section>
 
-      <section data-setting-id="backupCloud">
+      <section data-setting-id="backupCloud" hidden={!vis('backupCloud')}>
         {/* ── Copie off-host în cloud (Google Drive / Dropbox) ── */}
         <h3 className={heading}>{t('settings.cloud.title')}</h3>
         <p className="mt-1 text-xs text-slate-500">{t('settings.cloud.hint')}</p>
@@ -703,7 +705,7 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
         )}
       </section>
 
-      <section data-setting-id="backupRestore">
+      <section data-setting-id="backupRestore" hidden={!vis('backupRestore')}>
         {/* ── Restore ── */}
         <h3 className={heading}>{t('settings.backup.restoreTitle')}</h3>
         <p className="mt-1 text-xs text-slate-500">

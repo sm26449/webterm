@@ -15,7 +15,7 @@ interface Status {
   agent_latest: number | null
   hosts: { total: number; online: number; offline: number }
   sessions: { live: number; closed: number; lost: number }
-  storage: {
+  storage: null | {
     transcripts_files: number
     transcripts_bytes: number
     archive_files: number
@@ -24,7 +24,7 @@ interface Status {
     disk_free_bytes: number | null
     disk_total_bytes: number | null
   }
-  gateway?: {
+  gateway?: null | {
     rss_mb: number
     event_loop_lag_ms: number
     event_loop_lag_max_ms: number
@@ -112,28 +112,31 @@ export default function StatusModal(props: { onClose: () => void }) {
               <Stat label={t('status.sessionsLost')} value={s.sessions.lost} bad={s.sessions.lost > 0} muted />
             </div>
 
+            {/* 3.6: discul gateway-ului e o dată de INSTANŢĂ — doar cu `security.view` (altfel null) */}
+            {s.storage && ((st) => (
             <div>
               <h3 className="text-compact font-semibold uppercase tracking-wide text-slate-400">{t('status.storage')}</h3>
               <dl className="mt-2 divide-y divide-ink-800 text-sm">
-                <Row k={t('status.transcriptsActive')} v={`${humanBytes(s.storage.transcripts_bytes)} · ${t('status.filesCount', { count: s.storage.transcripts_files })}`} />
-                <Row k={t('status.archive')} v={`${humanBytes(s.storage.archive_bytes)} · ${t('status.filesCount', { count: s.storage.archive_files })}`} />
-                <Row k={t('status.archiveRetention')} v={t('status.retentionValue', { days: s.storage.retention_days })} />
+                <Row k={t('status.transcriptsActive')} v={`${humanBytes(st.transcripts_bytes)} · ${t('status.filesCount', { count: st.transcripts_files })}`} />
+                <Row k={t('status.archive')} v={`${humanBytes(st.archive_bytes)} · ${t('status.filesCount', { count: st.archive_files })}`} />
+                <Row k={t('status.archiveRetention')} v={t('status.retentionValue', { days: st.retention_days })} />
                 {/* Spaţiul RĂMAS, nu doar cât ocupăm. Un disc plin arăta identic cu unul gol:
                     containerul rămâne `healthy`, `db_ping` (o citire) rămâne verde, iar
                     login-ul dă 500. Sub 10% colorăm — e ultimul moment util. */}
-                {s.storage.disk_total_bytes ? (() => {
-                  const free = s.storage.disk_free_bytes ?? 0
-                  const pct = (free * 100) / s.storage.disk_total_bytes
+                {st.disk_total_bytes ? (() => {
+                  const free = st.disk_free_bytes ?? 0
+                  const pct = (free * 100) / st.disk_total_bytes
                   const cls = pct < 5 ? 'wt-danger' : pct < 10 ? 'wt-warn' : ''
                   return (
                     <Row k={t('status.diskFree')}
                          v={<span className={cls}>
-                              {humanBytes(free)} / {humanBytes(s.storage.disk_total_bytes)} ({pct.toFixed(0)}%)
+                              {humanBytes(free)} / {humanBytes(st.disk_total_bytes)} ({pct.toFixed(0)}%)
                             </span>} />
                   )
                 })() : null}
               </dl>
             </div>
+            ))(s.storage)}
 
             <div>
               <h3 className="text-compact font-semibold uppercase tracking-wide text-slate-400">{t('status.system')}</h3>

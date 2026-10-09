@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import { errText, isSessionLive, api, AppLink, Host, HostSupervision, Session, timeAgo, withStepup } from '../lib/api'
 import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
 import { useI18n } from '../lib/i18n'
+import { canOn, usePerms } from '../lib/perms'
 import { peekFilesDir } from '../lib/uploads'
 import { useConfirm } from '../lib/confirm'
 import { notify, notifyError } from '../lib/notify'
@@ -60,7 +61,13 @@ export default function HostOverview(props: {
   // confirm() nativ → dialog propriu (vezi lib/confirm.tsx: de ce)
   const { confirm } = useConfirm()
   const { host } = props
-  const canConnect = host.connection_type !== 'agent' || host.online
+  // 3.6: rolul pe ACEST host (cosmetic — serverul refuză oricum). Ce n-ai aici e dezactivat
+  // cu motivul în tooltip; tab-urile pe care nu le poţi folosi deloc pe host nu apar.
+  const perms = usePerms()
+  const may = (perm: string) => canOn(perms, host.id, perm)
+  const denied = (perm: string) => t('authz.notHere', { perm })
+  const mayOpen = may('session.open')
+  const canConnect = (host.connection_type !== 'agent' || host.online) && mayOpen
   const isAgent = (host.connection_type ?? 'agent') === 'agent'
   const agentReady = isAgent && !!host.online      // tab-urile prin agent cer agentul online
   const m = host.metrics
@@ -156,12 +163,12 @@ export default function HostOverview(props: {
   const tabs: { id: HubTab; label: string; show: boolean; icon: React.ReactNode }[] = [
     { id: 'overview', label: t('host.tabOverview'), show: true, icon: <ServerIcon /> },
     { id: 'sessions', label: t('host.tabSessions'), show: true, icon: <TerminalPromptIcon /> },
-    { id: 'files', label: t('host.tabFiles'), show: agentReady, icon: <FilesIcon /> },
-    { id: 'forwards', label: t('host.tabForwards'), show: agentReady, icon: <ForwardIcon /> },
-    { id: 'services', label: t('host.tabServices'), show: agentReady, icon: <ServicesIcon /> },
-    { id: 'docker', label: t('host.tabDocker'), show: agentReady, icon: <DockerIcon /> },
-    { id: 'databases', label: t('host.tabDatabases'), show: agentReady, icon: <ToolboxIcon /> },
-    { id: 'ai', label: t('host.tabAi'), show: agentReady, icon: <SparkleIcon /> },
+    { id: 'files', label: t('host.tabFiles'), show: agentReady && may('files.read'), icon: <FilesIcon /> },
+    { id: 'forwards', label: t('host.tabForwards'), show: agentReady && may('forward.use'), icon: <ForwardIcon /> },
+    { id: 'services', label: t('host.tabServices'), show: agentReady && may('services.view'), icon: <ServicesIcon /> },
+    { id: 'docker', label: t('host.tabDocker'), show: agentReady && may('docker.view'), icon: <DockerIcon /> },
+    { id: 'databases', label: t('host.tabDatabases'), show: agentReady && may('toolbox.use'), icon: <ToolboxIcon /> },
+    { id: 'ai', label: t('host.tabAi'), show: agentReady && may('files.read'), icon: <SparkleIcon /> },
   ]
   // dacă tab-ul curent devine indisponibil (agentul a căzut), cădem înapoi pe Overview
   const visibleTabs = tabs.filter((x) => x.show)
@@ -218,10 +225,12 @@ export default function HostOverview(props: {
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {/* Edit host — pe bară, lângă New session (Serial/Diagnostic au trecut în nav → Tools) */}
-          <Button variant="secondary" size="lg" onClick={() => props.onEdit(host)} title={t('host.editHost')} className="wt-touch">
+          <Button variant="secondary" size="lg" onClick={() => props.onEdit(host)} disabled={!may('host.edit')}
+            title={may('host.edit') ? t('host.editHost') : denied('host.edit')} className="wt-touch">
             <PencilIcon /> <span className="hidden sm:inline">{t('host.editHost')}</span>
           </Button>
-          <Button variant="primary" size="lg" disabled={!canConnect} onClick={() => props.onNewSession(host)} className="wt-touch">
+          <Button variant="primary" size="lg" disabled={!canConnect} onClick={() => props.onNewSession(host)} className="wt-touch"
+            title={mayOpen ? undefined : denied('session.open')}>
             <PlusIcon /> {t('host.newSession')}
           </Button>
         </div>
@@ -250,14 +259,14 @@ export default function HostOverview(props: {
             <>
               <div className="mx-2 my-1 hidden self-stretch border-t border-ink-800 md:block" aria-hidden="true" />
               <div className="hidden px-3 pb-0.5 pt-1 text-2xs font-semibold uppercase tracking-wider text-slate-600 md:block">{t('host.tools')}</div>
-              {agentReady && (
+              {agentReady && may('serial.use') && (
                 <button onClick={() => props.onSerial(host)}
                   className="flex shrink-0 items-center gap-2.5 rounded-md px-3 py-2 text-sm font-medium text-slate-400 transition hover:bg-ink-800/50 hover:text-slate-200 md:w-full">
                   <span className="grid h-4 w-4 shrink-0 place-items-center opacity-80"><PlugIcon /></span>
                   {t('host.serialConsole')}
                 </button>
               )}
-              {isAgent && (
+              {isAgent && may('host.diagnostics') && (
                 <button onClick={() => props.onDiagnostic(host)}
                   className="flex shrink-0 items-center gap-2.5 rounded-md px-3 py-2 text-sm font-medium text-slate-400 transition hover:bg-ink-800/50 hover:text-slate-200 md:w-full">
                   <span className="grid h-4 w-4 shrink-0 place-items-center opacity-80"><StethoscopeIcon /></span>

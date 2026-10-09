@@ -1,13 +1,11 @@
-import { FormEvent, useEffect, useState } from 'react'
+import { FormEvent, useState } from 'react'
 import { api, ApiError, errText, withSecondFactor as withSecondFactorT } from '../../lib/api'
-import { askSecret } from '../../lib/secretPrompt'
 import { useI18n } from '../../lib/i18n'
 import { field, heading } from './ui'
 import { Button } from '../ui'
 
-// Cont: schimbarea emailului/parolei (cu al doilea factor pe dispozitiv nou — email-code) şi
-// conturile (toate cu drepturi depline; nu există roluri). Extras din SettingsModal.
-type UserRow = { id: number; email: string; created: number; totp: boolean; passkeys: number; is_self: boolean }
+// Cont: schimbarea emailului/parolei (cu al doilea factor pe dispozitiv nou — email-code).
+// Lista de conturi + rolurile lor s-au mutat în UsersTab (3.6, „Users & roles").
 
 export default function AccountTab(props: { email?: string | null; onAccountChanged: () => void }) {
   const { t } = useI18n()
@@ -19,14 +17,6 @@ export default function AccountTab(props: { email?: string | null; onAccountChan
   const [codeAsked, setCodeAsked] = useState(false)
   const [accountMsg, setAccountMsg] = useState('')
   const [accountErr, setAccountErr] = useState('')
-
-  const [users, setUsers] = useState<UserRow[]>([])
-  const [newUser, setNewUser] = useState({ email: '', password: '', current_password: '' })
-  const [usersMsg, setUsersMsg] = useState('')
-  const [usersErr, setUsersErr] = useState('')
-  const loadUsers = () => api<UserRow[]>('/api/users').then(setUsers).catch(() => {})
-
-  useEffect(() => { loadUsers() }, [])   // încarcă lista la deschiderea tab-ului
 
   // second_gate acoperă acum şi operaţiile de cont (audit intern 2026-09-23): cu TOTP activ,
   // serverul cere codul — withSecondFactor îl cere reactiv şi reîncearcă o dată.
@@ -59,37 +49,6 @@ export default function AccountTab(props: { email?: string | null; onAccountChan
       setAccountErr(errText(err, t) || t('settings.error'))
     } finally {
       setBusy(false)
-    }
-  }
-
-  async function addUser(e: FormEvent) {
-    e.preventDefault()
-    setUsersErr(''); setUsersMsg(''); setBusy(true)
-    try {
-      // crearea de cont e gardată cu second_gate din 2.3.1, dar tab-ul ăsta nu primise
-      // prompt-ul: un admin cu TOTP vedea doar eroarea seacă „enter your 2FA code"
-      setUsers(await withSecondFactor((extra) => api<UserRow[]>('/api/users',
-        { method: 'POST', body: JSON.stringify({ ...newUser, ...extra }) })))
-      setNewUser({ email: '', password: '', current_password: '' })
-      setUsersMsg(t('settings.users.added'))
-    } catch (e) {
-      setUsersErr(errText(e, t) || String(e))
-    }
-    setBusy(false)
-  }
-
-  async function removeUser(u: UserRow) {
-    // ştergerea unui cont taie şi sesiunile lui: e o revocare, nu o ascundere.
-    // askSecret, nu window.prompt: aici se tastează parola TA — mascată, ca peste tot.
-    const pw = await askSecret(t('settings.users.deleteConfirm', { email: u.email }))
-    if (!pw) return
-    setUsersErr(''); setUsersMsg('')
-    try {
-      setUsers(await withSecondFactor((extra) => api<UserRow[]>(`/api/users/${u.id}/delete`,
-        { method: 'POST', body: JSON.stringify({ current_password: pw, ...extra }) })))
-      setUsersMsg(t('settings.users.deleted'))
-    } catch (e) {
-      setUsersErr(errText(e, t) || String(e))
     }
   }
 
@@ -127,46 +86,6 @@ export default function AccountTab(props: { email?: string | null; onAccountChan
         </form>
       </section>
 
-      <section data-setting-id="users">
-        {/* ── Conturi (toate cu drepturi depline) ── */}
-        <h3 className={heading}>{t('settings.users.title')}</h3>
-        <p className="mt-1 text-xs text-slate-500">{t('settings.users.hint')}</p>
-        <ul className="mt-2 flex flex-col gap-1">
-          {users.map((u) => (
-            <li key={u.id} className="flex items-center gap-2 rounded-md bg-ink-800/60 px-3 py-2 text-sm ring-1 ring-ink-700">
-              <span className="min-w-0 flex-1 truncate text-slate-200">{u.email}</span>
-              {u.is_self && <span className="wt-chip-accent shrink-0 rounded-md px-1.5 py-0.5 text-2xs">{t('settings.users.you')}</span>}
-              {u.totp && <span className="shrink-0 text-2xs text-slate-500">2FA</span>}
-              {u.passkeys > 0 && <span className="shrink-0 text-2xs text-slate-500">{t('settings.users.passkeys', { n: u.passkeys })}</span>}
-              {!u.is_self && users.length > 1 && (
-                <button onClick={() => removeUser(u)} className="shrink-0 text-xs wt-danger hover:underline">
-                  {t('settings.delete')}
-                </button>
-              )}
-            </li>
-          ))}
-        </ul>
-        <form onSubmit={addUser} className="mt-3 flex flex-col gap-2">
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <input type="email" value={newUser.email} autoComplete="off"
-              onChange={(e) => setNewUser({ ...newUser, email: e.target.value })}
-              placeholder={t('settings.users.emailPlaceholder')} aria-label={t('settings.email')} className={field} />
-            <input type="password" value={newUser.password} autoComplete="new-password"
-              onChange={(e) => setNewUser({ ...newUser, password: e.target.value })}
-              placeholder={t('settings.users.passwordPlaceholder')} aria-label={t('settings.newPassword')} className={field} />
-          </div>
-          <input type="password" value={newUser.current_password} autoComplete="current-password"
-            onChange={(e) => setNewUser({ ...newUser, current_password: e.target.value })}
-            placeholder={t('settings.currentPasswordConfirm')} aria-label={t('settings.currentPassword')} className={field} />
-          <div className="flex items-center gap-3">
-            <Button variant="primary" type="submit" disabled={busy || !newUser.current_password}>
-              {t('settings.users.add')}
-            </Button>
-            {usersMsg && <span className="text-sm wt-good">{usersMsg}</span>}
-            {usersErr && <span className="text-sm wt-danger">{usersErr}</span>}
-          </div>
-        </form>
-      </section>
     </div>
   )
 }

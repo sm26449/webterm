@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, errText, WatermarkConfig } from '../../lib/api'
 import { useI18n } from '../../lib/i18n'
+import { useSectionVisible } from '../../lib/perms'
 import { LANGS, LANG_ORDER } from '../../lang'
 import { useTheme } from '../../lib/theme'
 import {
@@ -14,6 +15,7 @@ import { Button } from '../ui'
 // iTerm2/VS Code) şi watermark-ul de identitate. Extras din SettingsModal ca tab de sine stătător.
 export default function AppearanceTab(props: { onAccountChanged: () => void }) {
   const { t, lang, setLang } = useI18n()
+  const vis = useSectionVisible()   // 3.6: secţiunile fără permisiunea globală nu apar
   const [themePrefValue, , setTheme] = useTheme()
   const [scheme, setScheme] = useState(currentTermScheme())
   const [editing, setEditing] = useState(false)     // editorul de schemă proprie
@@ -171,7 +173,7 @@ export default function AppearanceTab(props: { onAccountChanged: () => void }) {
         )}
       </section>
 
-      <section data-setting-id="watermark">
+      <section data-setting-id="watermark" hidden={!vis('watermark')}>
         {/* ── Watermark ── */}
         <h3 className={heading}>{t('settings.watermark')}</h3>
         <label className="mt-2 flex cursor-pointer items-start gap-2.5 text-sm text-slate-300">

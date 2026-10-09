@@ -5,6 +5,7 @@ import { notify, notifyError } from '../lib/notify'
 import { fmtTs } from '../lib/tz'
 import type { SettingsTarget } from '../lib/settingsIndex'
 import { useI18n } from '../lib/i18n'
+import { anyHost, can, canOn, usePerms } from '../lib/perms'
 import { useConfirm } from '../lib/confirm'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import InstallCommand from './InstallCommand'
@@ -78,6 +79,9 @@ export default function Sidebar(props: {
   signingLocked?: boolean
 }) {
   const { t } = useI18n()
+  // 3.6: „Adaugă host" doar cu `hosts.create`; consola de flotă doar dacă poţi rula undeva
+  const perms = usePerms()
+  const mayAddHost = can(perms, 'hosts.create')
   // confirm()/prompt()/alert() native → dialoguri proprii + toast-uri (vezi lib/confirm.tsx: de ce)
   const { confirm, promptText } = useConfirm()
   const fail = (e: unknown) => notifyError(t('sidebar.actionFailed'), errText(e, t) || t('sidebar.error'))
@@ -385,7 +389,8 @@ export default function Sidebar(props: {
     const liveCount = props.sessions.filter(
       (s) => s.host_id === host.id && isSessionLive(s, props.hosts)).length
     const selected = props.selectedHost === host.id
-    const canConnect = host.connection_type !== 'agent' || host.online
+    // 3.6: fără `session.open` pe host, „Sesiune nouă" e dezactivat (serverul refuză oricum)
+    const canConnect = (host.connection_type !== 'agent' || host.online) && canOn(perms, host.id, 'session.open')
     const color = hostColor(host)
     const reach = reachState(host)
     // ţintele cuibărite sub acest host (SSH-jump / telnet-prin-agent), filtrate ca lista principală
@@ -704,13 +709,17 @@ export default function Sidebar(props: {
           >
             <CollapseIcon />
           </IconButton>
-          <IconButton size="md" label={t('nav.addHost')} onClick={() => setShowAdd(true)}>
-            <PlusIcon />
-          </IconButton>
-          <IconButton size="md" label={t('nav.fleetRunAria')} title={t('nav.fleetRun')}
-            onClick={() => setShowFleetRun(true)}>
-            <TerminalPromptIcon />
-          </IconButton>
+          {mayAddHost && (
+            <IconButton size="md" label={t('nav.addHost')} onClick={() => setShowAdd(true)}>
+              <PlusIcon />
+            </IconButton>
+          )}
+          {anyHost(perms, 'run') && (
+            <IconButton size="md" label={t('nav.fleetRunAria')} title={t('nav.fleetRun')}
+              onClick={() => setShowFleetRun(true)}>
+              <TerminalPromptIcon />
+            </IconButton>
+          )}
           <IconButton size="md" label={t('nav.status')} onClick={() => setShowStatus(true)}>
             <ActivityIcon />
           </IconButton>
@@ -792,11 +801,13 @@ export default function Sidebar(props: {
       <div className="flex-1 overflow-y-auto">
         {props.hosts.length === 0 && (
           <div className="space-y-3 p-4 text-sm text-slate-500">
-            <p>{t('sidebar.noHostsYet')}</p>
+            <p>{mayAddHost ? t('sidebar.noHostsYet') : t('noaccess.title')}</p>
             {/* CTA vizibil: butonul din header e doar un „+" fără text, uşor de ratat */}
-            <Button type="button" variant="primary" onClick={() => setShowAdd(true)}>
-              <PlusIcon /> {t('nav.addHost')}
-            </Button>
+            {mayAddHost && (
+              <Button type="button" variant="primary" onClick={() => setShowAdd(true)}>
+                <PlusIcon /> {t('nav.addHost')}
+              </Button>
+            )}
           </div>
         )}
         {(() => {

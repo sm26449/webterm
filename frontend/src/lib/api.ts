@@ -148,6 +148,8 @@ export interface DeployKeyDeployment {
   status: 'deployed' | 'edited' | 'missing' | 'revoked'
   deployed_at: number
   revoked_at: number | null
+  /** 3.6: ţinta e pe un host pe care contul nu-l vede — rândul rămâne (uşa există), fără nume/id */
+  hidden?: boolean
 }
 export interface DeployKeyPolicy {
   require_2fa_source: boolean
@@ -157,7 +159,7 @@ export interface DeployKeyPolicy {
 export interface DeployKeyInfo {
   key: { id: number; public_key: string; fingerprint: string; created: number } | null
   deployments: DeployKeyDeployment[]
-  inbound: { source_host_id: number; source_name: string; fingerprint: string; status: string }[]
+  inbound: { source_host_id: number; source_name: string; fingerprint: string; status: string; hidden?: boolean }[]
 }
 
 export interface PortForward {
@@ -242,6 +244,8 @@ export interface Session {
   cols: number
   connected_clients: number
   out_offset: number
+  /** cine a deschis-o (3.6; null = dinainte de roluri) */
+  created_by_id?: number | null
 }
 
 /* Rezumatul de securitate (GET /api/security/summary, 3.5.4). Serverul NU trimite proză: doar

@@ -374,7 +374,8 @@ export default function ForwardsPanel(props: {
                     ? <div className="truncate text-xs text-slate-500">{t('forwards.telnetSubtitle')}</div>
                     : <div className="truncate font-mono text-xs wt-link" title={f.url}>{urlHost(f)}</div>}
                   <div className="truncate font-mono text-2xs text-slate-500">
-                    → {f.target_host}:{f.target_port} · {f.scheme} · <span className={probeTone(f)}>{dotTitle(f)}</span>
+                    {/* 3.6: fără `forward.manage` serverul nu trimite ţinta (harta reţelei interne) */}
+                    {f.target_host ? <>→ {f.target_host}:{f.target_port} · </> : null}{f.scheme} ·<span className={probeTone(f)}>{dotTitle(f)}</span>
                   </div>
                   {f.description && <div className="mt-0.5 line-clamp-2 text-xs text-slate-500">{f.description}</div>}
                 </div>
