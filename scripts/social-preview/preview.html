@@ -1,0 +1,78 @@
+<!doctype html>
+<!-- GitHub social preview (Settings → Social preview), 1280×640. Rendered by run.sh with
+     Playwright; the paths below are the ones inside its container (/repo = the repository,
+     /node_modules = frontend/node_modules for the JetBrains Mono font the terminal uses). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WebTerm social preview</title>
+<style>
+  @font-face { font-family: 'JBM'; font-weight: 700; src: url('file:///node_modules/@fontsource/jetbrains-mono/files/jetbrains-mono-latin-700-normal.woff2') format('woff2'); }
+  @font-face { font-family: 'JBM'; font-weight: 500; src: url('file:///node_modules/@fontsource/jetbrains-mono/files/jetbrains-mono-latin-500-normal.woff2') format('woff2'); }
+  :root {
+    /* the app's dark palette (frontend/src/index.css: --term-bg, --chrome-*, ink scale, indigo accent) */
+    --bg: #0b0e14;
+    --elev: #161c2b;
+    --line: rgba(255, 255, 255, 0.08);
+    --tx: #e6ebf3;
+    --tx-dim: #8b96aa;
+    --indigo: #6366f1;
+    --violet: #7c3aed;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 1280px; height: 640px; overflow: hidden; }
+  body {
+    background:
+      radial-gradient(900px 520px at 0% 0%, rgba(99, 102, 241, 0.22), transparent 60%),
+      radial-gradient(700px 500px at 100% 100%, rgba(124, 58, 237, 0.16), transparent 60%),
+      var(--bg);
+    color: var(--tx);
+    font-family: 'Liberation Sans', 'FreeSans', Arial, sans-serif;
+    position: relative;
+  }
+  .left {
+    position: absolute; left: 72px; top: 0; bottom: 0; width: 470px;
+    display: flex; flex-direction: column; justify-content: center;
+  }
+  .brand { display: flex; align-items: center; gap: 22px; }
+  .brand img { width: 84px; height: 84px; filter: drop-shadow(0 10px 24px rgba(79, 70, 229, 0.45)); }
+  .word { font-family: 'JBM', monospace; font-weight: 700; font-size: 64px; letter-spacing: -1.5px; }
+  .word .cursor { display: inline-block; width: 30px; height: 6px; background: var(--indigo); margin-left: 6px; vertical-align: -2px; }
+  .tag { margin-top: 34px; font-size: 32px; line-height: 1.28; font-weight: 700; color: var(--tx); }
+  .sub { margin-top: 22px; font-size: 20px; line-height: 1.45; color: var(--tx-dim); }
+  .chips { margin-top: 30px; display: flex; flex-wrap: wrap; gap: 10px; }
+  .chip {
+    font-family: 'JBM', monospace; font-weight: 500; font-size: 15px; color: #c7d2fe;
+    padding: 7px 12px; border-radius: 999px; background: rgba(99, 102, 241, 0.14); border: 1px solid rgba(129, 140, 248, 0.32);
+  }
+  .shot {
+    position: absolute; left: 590px; top: 64px; width: 860px; height: 538px;
+    border-radius: 16px; overflow: hidden; background: var(--elev);
+    border: 1px solid var(--line);
+    box-shadow: 0 40px 90px -20px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(99, 102, 241, 0.18);
+  }
+  .shot .bar { height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 14px; background: #121826; border-bottom: 1px solid var(--line); }
+  .shot .bar i { width: 11px; height: 11px; border-radius: 50%; background: #2a3347; display: block; }
+  /* the README capture is 2880×1800 (1440×900 @2x); show the host list and the terminal; the frame runs off the right edge */
+  .shot .img {
+    width: 100%; height: calc(100% - 30px);
+    background-image: url('file:///repo/docs/screenshots/02-terminal-dark.png');
+    background-size: 1180px auto; background-position: 0 0; background-repeat: no-repeat;
+  }
+</style>
+</head>
+<body>
+  <div class="left">
+    <div class="brand">
+      <img src="file:///repo/frontend/public/favicon.svg" alt="">
+      <div class="word">WebTerm<span class="cursor"></span></div>
+    </div>
+    <div class="tag">Persistent terminals for your whole infrastructure, in the browser.</div>
+    <div class="sub">Sessions live in tmux on the host. The agent dials out — nothing listens on your servers.</div>
+    <div class="chips">
+      <span class="chip">self-hosted</span><span class="chip">agent · SSH · telnet</span><span class="chip">MIT</span>
+    </div>
+  </div>
+  <div class="shot"><div class="bar"><i></i><i></i><i></i></div><div class="img"></div></div>
+</body>
+</html>

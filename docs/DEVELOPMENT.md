@@ -91,6 +91,8 @@ scripts/
   smoke-boot.mjs           boot smoke test (UI starts with no JS errors)
   sso-login.mjs            SSO login UI contract when OIDC is on (CI)
   sign-agent.py            signs the agent at release (the key stays offline)
+  changelog-section.py     a release's CHANGELOG section → GitHub Release notes (CI)
+  social-preview/          renders docs/social-preview.png (GitHub social card)
 tests/                     unit + integration suite (dev): telnet (shim/bastion),
                           session reconciliation, agent hygiene+hardening, idle-lock,
                           security, ssh, transcript, provisioning…
@@ -164,3 +166,13 @@ To create the releases that older tags never got: *Actions → Release notes →
 `backfill` = how many of the newest tags to look at (default 10); tags that already have a release
 are left untouched. `tests/changelog_section_test.py` checks the extraction against the real
 CHANGELOG and the workflow's YAML (trigger, permissions, SHA-pinned actions).
+
+### Social preview image
+
+`docs/social-preview.png` (1280×640, < 1 MB) is the card GitHub shows when the repository link is
+shared. It is generated, not drawn: `scripts/social-preview/preview.html` lays out the logo mark
+(`frontend/public/favicon.svg`), the wordmark in JetBrains Mono, the README's tagline and a crop of
+`docs/screenshots/02-terminal-dark.png` on the app's dark palette, and
+`scripts/social-preview/run.sh` renders it in the Playwright image and shrinks it with pngquant.
+Re-run it after the README screenshots or the tagline change. **GitHub has no API for it:** upload
+the PNG by hand in *Settings → General → Social preview*.
