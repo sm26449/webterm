@@ -1286,6 +1286,15 @@ the code is right and the reason is here.
   `app_settings['authz_epoch']`, which the gateway polls from its 60-second reaper loop. Cached
   grants also expire after 30 seconds on their own.
 
+**Security review fixes (before release):** a read-only client cannot unlock a 2FA-locked hub, and
+a factor unlocks only the presenting account's clients; a watcher attaching without a window
+locks only itself; every target field of a jump host needs `forward.manage` on the effective via;
+account ids are never reused (persisted `user_id_floor`, explicit ids at insert) and a deleted
+account's rows keep a negated id; live shares and replay links need your own session or
+`session.manage`; Wake-on-LAN peers need `host.wake`; grants are re-checked under the lock;
+SELF routes must authenticate (runtime + CI); probe errors are generic. See
+`tests/rbac_secreview_test.py`.
+
 **Tests:** `route_auth_test` (declaration, locators, token allowlist, code ↔ this appendix,
 runtime guard), `rbac_matrix_test` (generated from `authz.route_perms`: 6 principals × every
 non-public HTTP route, plus the no-oracle 404 comparison and authz-before-step-up),

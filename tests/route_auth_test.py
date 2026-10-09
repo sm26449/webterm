@@ -121,6 +121,16 @@ def main():
     check("nicio rută cu mai multe dependenţe perm()", not multi, ", ".join(sorted(multi)))
     check("nicio rută cu perm() ŞI în PUBLIC/SELF (ambiguu)", not both, ", ".join(sorted(both)))
 
+    # 2b. fiecare rută ne-PUBLICĂ autentifică: SELF are `require_user`/`require_user_ws` în
+    # arborele de dependenţe, perm() autentifică el însuşi; garda de runtime aplică ACEEAŞI regulă
+    noauth = []
+    for r in routes:
+        kind, _spec = authz.route_spec(r)
+        if kind != "public" and not authz.has_auth_dep(r):
+            noauth.append("%s %s" % (",".join(_methods(r)), r.path))
+    check("orice rută ne-publică are o dependenţă de autentificare (SELF incluse)", not noauth,
+          ", ".join(sorted(noauth)))
+
     # 3. nicio rută nu mai foloseşte direct require_scope (tokenurile trec prin perm(tokens=…))
     legacy = []
     for r in routes:
@@ -227,6 +237,28 @@ def main():
             return await c.get("/api/__undeclared_probe")
     resp = asyncio.run(_hit())
     check("o rută NEDECLARATĂ răspunde 500 authz.undeclared (nu e deschisă)",
+          resp.status_code == 500 and resp.headers.get("x-webterm-error") == "authz.undeclared",
+          "%s %s" % (resp.status_code, resp.text[:120]))
+
+    # 10. …şi o rută SELF FĂRĂ autentificare e refuzată la fel (nu doar una nedeclarată)
+    probe2 = APIRouter(dependencies=[__import__("fastapi").Depends(authz.declared)])
+    authz.SELF[("GET", "/api/__self_noauth_probe")] = "probe"
+    try:
+        @probe2.get("/api/__self_noauth_probe")
+        async def _self_noauth():     # noqa: ANN202
+            return {"open": True}
+
+        tapp2 = FastAPI()
+        tapp2.include_router(probe2)
+
+        async def _hit2():
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=tapp2),
+                                         base_url="http://t") as c:
+                return await c.get("/api/__self_noauth_probe")
+        resp = asyncio.run(_hit2())
+    finally:
+        authz.SELF.pop(("GET", "/api/__self_noauth_probe"), None)
+    check("o rută SELF fără require_user răspunde 500 authz.undeclared (fail-closed)",
           resp.status_code == 500 and resp.headers.get("x-webterm-error") == "authz.undeclared",
           "%s %s" % (resp.status_code, resp.text[:120]))
 

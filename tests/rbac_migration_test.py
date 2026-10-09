@@ -136,6 +136,25 @@ async def main():
     check("restore din 3.5 (fără rbac_seeded): toţi re-seeded ca Owner (4 conturi)", c == 4, str(c))
     await db.close()
 
+    # id-uri de cont nerefolosite, pe o bază venită din 3.5 (fără AUTOINCREMENT, fără reconstrucţie)
+    await db.connect()
+    top = (await db.fetchone("SELECT MAX(id) AS m FROM users"))["m"]
+    await db.raise_user_id_floor(top)
+    await db.execute("DELETE FROM users WHERE id=?", top)
+    await db.raise_user_id_floor(top)                      # idempotent
+    await db.execute("INSERT INTO users(id, email, password_hash, created) VALUES("
+                     + db.NEXT_USER_ID_SQL + ",'fresh@x.co','x',?)", time.time())
+    nid = (await db.fetchone("SELECT id FROM users WHERE email='fresh@x.co'"))["id"]
+    check("id-ul celui mai nou cont şters NU e dat contului următor (bază 3.5)", nid == top + 1,
+          "%s vs %s" % (nid, top))
+    await db.close()
+    await db.connect()
+    await db.execute("INSERT INTO users(id, email, password_hash, created) VALUES("
+                     + db.NEXT_USER_ID_SQL + ",'fresh2@x.co','x',?)", time.time())
+    n2 = (await db.fetchone("SELECT id FROM users WHERE email='fresh2@x.co'"))["id"]
+    check("…nici după o repornire", n2 == top + 2, str(n2))
+    await db.close()
+
     # rolurile predefinite sunt re-asertate din cod (un rând modificat de mână e reparat)
     con = sqlite3.connect(path)
     con.execute("UPDATE roles SET perms='[]', name='hacked' WHERE key='viewer'")

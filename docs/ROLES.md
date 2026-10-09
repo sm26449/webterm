@@ -56,6 +56,10 @@ Notes:
 - **Admin** is "everything except taking over the instance". Downloading or restoring a backup
   hands out the vault key, and the signing key signs agent updates for the whole fleet, so both
   stay with Owners. An Admin cannot create, change or delete an Owner.
+- An Admin is still a **co-admin for sessions and tokens**: with `session.manage` it can kill,
+  rename, share or type into any session — an Owner's included — and with `tokens.manage` /
+  `shares.manage` it can see and revoke everyone's tokens and links. Give Admin only to people
+  you would trust with the Owners' terminals.
 - **Operators** watch anyone's session on their hosts but type only into their own. Sessions
   opened before 3.6 count as everyone's.
 - **Viewers** cannot read files: file content is the most sensitive thing on a host.
@@ -123,6 +127,10 @@ any input from a read-only client, so this is not just a hidden button.
 
 Closed sessions open as a replay for anyone with **recording.view** on the host.
 
+On a host that requires 2FA a watcher needs its own step-up like anyone else, and its factor only
+unlocks **its own** view: a read-only client cannot unlock a locked terminal for the person
+typing, and attaching without a step-up window locks only the watcher, never the writer.
+
 ## Automation tokens and roles
 
 Automation tokens keep their `read` / `run` scopes and are additionally capped:
@@ -139,7 +147,9 @@ Automation tokens keep their `read` / `run` scopes and are additionally capped:
 - Every existing account becomes **Owner over all hosts** (`source: migration`). Nothing changes
   for anyone until you add other roles.
 - Existing automation tokens keep working unchanged.
-- Restoring a 3.5 backup on 3.6 seeds the roles again.
+- Restoring a 3.5 backup on 3.6 seeds the roles again: **every account in that backup becomes
+  Owner over all hosts** — including accounts you demoted since the backup was taken. Review
+  Settings → Users & roles after such a restore.
 - **Rolling back to 3.5 silently makes every account a full administrator again**: 3.5 ignores the
   role tables.
 

@@ -744,6 +744,30 @@ def route_spec(route) -> tuple[str, Any]:
     return "none", None
 
 
+_AUTH_DEPS = ("require_user", "require_user_ws")
+
+
+def _dep_calls(dependant, acc=None) -> list:
+    acc = [] if acc is None else acc
+    for d in getattr(dependant, "dependencies", []) or []:
+        acc.append(d.call)
+        _dep_calls(d, acc)
+    return acc
+
+
+def has_auth_dep(route) -> bool:
+    """Arborele de dependenţe al rutei autentifică: un `perm()` (care cheamă el însuşi
+    `require_user` / tokenul) sau `security.require_user[_ws]` direct. Un handler WebSocket
+    declarat cu `ws_perm` se autentifică în corp (dependenţele nu pot închide socketul cu codurile
+    noastre) — acolo marcajul e declaraţia."""
+    if spec_of(getattr(route, "endpoint", None)) is not None:
+        return True
+    for call in _dep_calls(getattr(route, "dependant", None)):
+        if spec_of(call) is not None or getattr(call, "__name__", "") in _AUTH_DEPS:
+            return True
+    return False
+
+
 _declared_ok: dict[int, bool] = {}
 
 
@@ -757,7 +781,9 @@ async def declared(request: HTTPConnection):
     ok = _declared_ok.get(key)
     if ok is None:
         kind, _ = route_spec(route)
-        ok = kind in ("perm", "public", "self")
+        # SELF = „doar datele proprii" — dar tot AUTENTIFICAT: o rută SELF fără dependenţă de
+        # autentificare e la fel de nedeclarată ca una fără nimic (fail-closed)
+        ok = kind == "public" or (kind in ("perm", "self") and has_auth_dep(route))
         _declared_ok[key] = ok
         if not ok:
             log.error("authz: route %s %s declares no permission — refused (fail-closed)",

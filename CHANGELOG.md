@@ -83,6 +83,27 @@ back.
   `deploykey.manage` on both ends; a writable share needs `share.live_write`.
 - A read-only watcher can no longer keep a 2FA terminal awake or re-authorize its 60-minute
   step-up cap — only a client that can type does.
+- Fixes from the independent security review of the roles work (each with a regression test in
+  `tests/rbac_secreview_test.py`):
+  - a read-only watcher could **unlock a 2FA-locked terminal for the writer**; it now gets
+    `unlock_failed authz.denied`, and a factor unlocks only the presenting account's clients —
+    other accounts without their own step-up window stay locked. A watcher attaching without a
+    window used to lock the whole terminal (a DoS on the writer); now only the watcher is locked;
+  - `host.edit` on a jump target could **re-target the pivot** (address, port, type) through an
+    agent outside the editor's scope; every target field now needs `forward.manage` on the
+    effective via host, changed or merely re-sent;
+  - **account ids were reused** after deleting the newest account, so a new account inherited the
+    old one's audit rows, snippets, live sessions and history. Ids now only grow (a persisted floor,
+    no table rebuild) and a deleted account's rows keep a negated id;
+  - live shares and replay links could be created or revoked on **someone else's session** with
+    just `share.live` / `share.replay`; they now also need your own session or `session.manage`;
+  - Wake-on-LAN now picks only neighbour agents you hold `host.wake` on;
+  - a role grant is checked again under the lock right before it is written, so an Admin demoted
+    during the confirmation cannot land it;
+  - a self-service route without an authentication dependency is refused at runtime like an
+    undeclared one, and CI checks every non-public route authenticates;
+  - a failed forward probe returns `forward.unreachable` instead of the target's raw network
+    error (kept in the server log).
 
 
 ## [3.5.18] — 2026-10-09 · agent (58)

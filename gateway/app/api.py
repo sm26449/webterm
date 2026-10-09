@@ -258,8 +258,8 @@ async def setup(creds: Credentials, request: Request, response: Response):
     # (await-ul de hash e ÎNTRE check și insert) și creau două conturi → încălcau
     # invariantul single-account (nu există autorizare pe obiect).
     await db.execute(
-        "INSERT INTO users(email, password_hash, created) "
-        "SELECT ?,?,? WHERE NOT EXISTS (SELECT 1 FROM users)",
+        "INSERT INTO users(id, email, password_hash, created) "
+        "SELECT " + db.NEXT_USER_ID_SQL + ",?,?,? WHERE NOT EXISTS (SELECT 1 FROM users)",
         email, pw_hash, time.time())
     row = await db.fetchone("SELECT id, email FROM users LIMIT 1")
     if not row or row["email"] != email:
@@ -881,6 +881,19 @@ def _scope_label(kind: str, value: str) -> str:
     return "all hosts" if kind == "all" else "%s %s" % (kind, value)
 
 
+async def _recheck_granter(user, role, kind, value, target_uid, removing=False) -> None:
+    """Regulile de acordare, din nou, pe drepturile CURENTE ale celui care acordă (fără cache:
+    epoca s-a putut schimba chiar acum). Chemată sub `authz._lock`, imediat înainte de scriere."""
+    authz._cache.pop(user["id"], None)
+    g = await authz.grants_for_user(user["id"])
+    if not g.has_global("users.manage"):
+        raise ApiError(403, "authz.denied", "your role does not allow this here (users.manage)",
+                       vars={"perm": "users.manage"})
+    if target_uid is not None and await authz.is_owner_user(target_uid) and not g.is_owner():
+        raise ApiError(403, "authz.ownerOnly", "only an Owner can change an Owner's access")
+    await authz.check_can_grant(g, role, kind, value, removing=removing)
+
+
 @router.post("/api/users")
 async def create_user(body: UserIn, request: Request, user=Depends(authz.perm('users.manage'))):
     grants = authz.grants_of(request)
@@ -899,7 +912,10 @@ async def create_user(body: UserIn, request: Request, user=Depends(authz.perm('u
         raise ApiError(409, "account.emailTaken", "an account with that email already exists")
     pw = await security.hash_password_async(body.password)
     async with authz._lock:
-        uid = await db.execute("INSERT INTO users(email, password_hash, created) VALUES(?,?,?)",
+        if role:
+            await _recheck_granter(user, role, kind, value, None)
+        uid = await db.execute("INSERT INTO users(id, email, password_hash, created)"
+                               " VALUES(" + db.NEXT_USER_ID_SQL + ",?,?,?)",
                                email, pw, time.time())
         if role:
             await db.execute(
@@ -937,6 +953,14 @@ async def delete_user(uid: int, body: ReauthOnly, request: Request,
         raise ApiError(403, "authz.ownerOnly", "only an Owner can delete an Owner")
     await _reauth_for_access_change(user, request, body, "delete a WebTerm account")
     async with authz._lock:
+        # drepturile celui care şterge, pe starea de ACUM (o retrogradare concurentă contează)
+        authz._cache.pop(user["id"], None)
+        g = await authz.grants_for_user(user["id"])
+        if not g.has_global("users.manage"):
+            raise ApiError(403, "authz.denied", "your role does not allow this here (users.manage)",
+                           vars={"perm": "users.manage"})
+        if await authz.is_owner_user(uid) and not g.is_owner():
+            raise ApiError(403, "authz.ownerOnly", "only an Owner can delete an Owner")
         # verificările care contează pentru blocare se refac SUB lock (check-then-act atomic)
         n = (await db.fetchone("SELECT COUNT(*) AS c FROM users"))["c"]
         if n <= 1:
@@ -953,8 +977,21 @@ async def delete_user(uid: int, body: ReauthOnly, request: Request,
                     "DELETE FROM alert_prefs WHERE user_id=?",
                     "DELETE FROM role_bindings WHERE user_id=?",   # 3.6
                     "DELETE FROM split_views WHERE user_id=?",
+                    "DELETE FROM pending_ssh_keys WHERE user_id=?",
                     "DELETE FROM users WHERE id=?"):
             await db.execute(sql, uid)
+        # 3.6: id-ul nu se mai refoloseşte (prag monoton), iar urmele lui primesc id-ul NEGAT —
+        # rămân în jurnal (emailul e în `actor`), dar nu mai sunt „ale" nimănui: un snippet sau o
+        # sesiune vie a contului şters nu devin editabile de un cont nou, rândurile de audit nu
+        # devin „propriile rânduri" ale altcuiva.
+        await db.raise_user_id_floor(uid)
+        for sql in ("UPDATE audit_log SET actor_id=? WHERE actor_id=?",
+                    "UPDATE snippets SET created_by_id=? WHERE created_by_id=?",
+                    "UPDATE sessions SET created_by_id=? WHERE created_by_id=?",
+                    "UPDATE sessions SET share_by_id=? WHERE share_by_id=?",
+                    "UPDATE command_history SET user_id=? WHERE user_id=?",
+                    "UPDATE role_bindings SET created_by_id=? WHERE created_by_id=?"):
+            await db.execute(sql, -uid, uid)
         authz.bump_epoch()
     # …„tot" trebuia să însemne şi asta. Token-urile de automatizare emise de contul şters îi
     # supravieţuiau până la expirare (până la un an), semnalat de un audit extern. Ele NU cer
@@ -1005,6 +1042,10 @@ async def add_binding(uid: int, body: BindingIn, request: Request,
     await authz.check_can_grant(grants, role, kind, value)
     await _reauth_for_access_change(user, request, body, "change a WebTerm account's access")
     async with authz._lock:
+        # 3.6 (cursă): între verificare şi scriere au trecut re-auth-ul şi al doilea factor — un
+        # Admin retrogradat între timp nu are voie să-şi vadă acordarea aterizând. Re-verificăm
+        # SUB lock, pe drepturile de ACUM.
+        await _recheck_granter(user, role, kind, value, uid)
         try:
             await db.execute(
                 "INSERT INTO role_bindings(user_id, role_id, scope_kind, scope_value, source,"
@@ -1049,6 +1090,9 @@ async def remove_binding(uid: int, bid: int, body: ReauthOnly, request: Request,
                                     removing=True)
     await _reauth_for_access_change(user, request, body, "change a WebTerm account's access")
     async with authz._lock:
+        if row["role_key"] in authz.BUILTIN_ROLES:
+            await _recheck_granter(user, row["role_key"], row["scope_kind"], row["scope_value"],
+                                   uid, removing=True)
         if (row["role_key"] == "owner" and row["scope_kind"] == "all"
                 and await authz.owner_count(exclude_binding=bid) < 1):
             raise ApiError(400, "authz.lastOwner", "you cannot remove the last Owner")
@@ -3444,7 +3488,11 @@ async def forward_probe(fid: int, stepup_grant: str = "", stepup_password: str =
     try:
         fs = await _open_target(conn, row["target_host"], row["target_port"], row["scheme"])
     except core.ForwardError as e:
-        return {"reachable": False, "detail": str(e)}
+        # detaliul brut (adresă/eroare de reţea a ţintei) rămâne în logul serverului; clientul
+        # primeşte un cod stabil — un Viewer cu `forward.use` nu vede ţinta nici aşa (3.6)
+        log.info("forward probe %s: target unreachable: %s", fid, e)
+        return {"reachable": False, "code": "forward.unreachable",
+                "detail": "the forwarded service is not reachable"}
     except (core.AgentGone, TimeoutError):
         raise ApiError(409, "host.offline", "the host is offline")
     try:
@@ -4959,9 +5007,10 @@ async def wake_host(host_id: int, request: Request, user=Depends(authz.perm('hos
     bcast = str(subnet.broadcast_address)
     # peer: un agent ONLINE, alt host, cu o interfaţă LAN în acelaşi subnet
     peer_conn = peer_name = None
-    # 3.6: doar un vecin pe care contul îl VEDE — răspunsul îl numeşte (`via`), iar un vecin din
-    # afara scope-ului ar fi şi o acţiune pe un host invizibil, şi un oracol de nume
-    peers_vis = await authz.visible_hosts(authz.grants_of(request), "host.view")
+    # 3.6: doar un vecin pe care contul are el însuşi `host.wake` — trimiterea pachetului e o
+    # ACŢIUNE pe vecin, iar răspunsul îl numeşte (`via`): un vecin doar vizibil (sau invizibil)
+    # n-are voie să fie folosit (şi n-ar trebui nici să-i apară numele)
+    peers_vis = await authz.visible_hosts(authz.grants_of(request), "host.wake")
     for h in await db.fetchall("SELECT id, name, diagnostics FROM hosts WHERE connection_type='agent'"):
         if h["id"] == host_id or not authz.in_visible(peers_vis, h["id"]):
             continue
@@ -6207,9 +6256,15 @@ async def update_host(host_id: int, host: HostPatch, request: Request,
                    or ("tags" in given and _norm_tags(given["tags"] or "") != (row["tags"] or "")))
     if scope_moved:
         authz.require_global(grants, "hosts.create")
-    # …iar un `via` nou (familia jump) deschide TCP din alt host: `forward.manage` acolo (§A.11.4)
-    if given.get("via_host_id") and given["via_host_id"] != row["via_host_id"]:
-        await authz.require_on(grants, given["via_host_id"], "forward.manage")
+    # …iar o ţintă jump deschide TCP DIN hostul `via` (§A.11.4): orice atingere a ţintei (adresă,
+    # port, tip, via — schimbată SAU doar retrimisă) cere `forward.manage` pe via-ul EFECTIV, ca la
+    # creare şi la /api/hosts/test. Altfel `host.edit` pe jump ar re-ţinti pivotul oriunde.
+    eff_type = given.get("connection_type") or row["connection_type"] or "agent"
+    if eff_type in _JUMP_TYPES and any(
+            f in given for f in ("hostname", "ssh_port", "connection_type", "via_host_id")):
+        eff_via = given["via_host_id"] if "via_host_id" in given else row["via_host_id"]
+        if eff_via:                 # fără via → refuzat mai jos (400 sshjump.needsAgent)
+            await authz.require_on(grants, eff_via, "forward.manage")
     # `touches_conn` = un câmp de conexiune se SCHIMBĂ efectiv, nu doar e prezent în payload.
     # UI-ul (AddHostModal) trimite MEREU `connection_type`, chiar şi la o redenumire pură, deci
     # „prezent" însemna că ORICE editare pica pe calea de re-provisioning: agentul deconectat
@@ -8355,6 +8410,9 @@ async def create_share(sid: str, request: Request, body: ShareIn = ShareIn(),
     row = await db.fetchone("SELECT id, host_id FROM sessions WHERE id=?", sid)
     if not row:
         raise ApiError(404, "session.missing", "no such session")
+    # 3.6: link-ul public e o extensie a sesiunii — doar pe a TA (sau pre-3.6, sau cu
+    # session.manage); altfel un Operator ar putea expune / înlocui link-ul altcuiva
+    await _require_session_control(request, sid, user)
     # 3.6: un share WRITABLE dă tastatura unui vizitator anonim → permisiune separată (⚑)
     if body.writable:
         await authz.require_on(request, row["host_id"], "share.live_write", "sid")
@@ -8405,7 +8463,9 @@ async def share_state(sid: str, user=Depends(authz.perm('session.watch', host='s
 
 
 @router.delete("/api/sessions/{sid}/share")
-async def revoke_share(sid: str, user=Depends(authz.perm('share.live', host='sid'))):
+async def revoke_share(sid: str, request: Request,
+                       user=Depends(authz.perm('share.live', host='sid'))):
+    await _require_session_control(request, sid, user)    # 3.6: doar pe sesiunea ta / manage
     # H1: pe un host 2FA, revocarea share-ului e o acţiune de host (simetric cu crearea lui, care
     # cere step-up). Fără gard, un cookie furat putea manipula share-urile fără al doilea factor.
     srow = await db.fetchone("SELECT host_id FROM sessions WHERE id=?", sid)
@@ -8797,6 +8857,8 @@ async def create_replay_link(sid: str, request: Request, body: ReplayLinkIn = Re
     row = await db.fetchone("SELECT id, host_id, state, title FROM sessions WHERE id=?", sid)
     if not row:
         raise ApiError(404, "session.missing", "no such session")
+    # 3.6: înregistrarea ALTCUIVA nu se publică fără session.manage pe host
+    await _require_session_control(request, sid, user)
     # aceeaşi poartă ca GET /transcript: pe un host 2FA, a scoate înregistrarea din instanţă
     # (şi încă printr-un link fără cont) cere al doilea factor
     await _require_host_stepup(row["host_id"], user, body.stepup_grant, body.stepup_password, body.stepup_totp)
@@ -9910,9 +9972,12 @@ async def browser_ws(ws: WebSocket, sid: str):
                 row["title"], client.remote_addr, client.user_agent, user["email"],
                 user_id=user["id"])
         if start_locked:
-            if not hub.locked:
+            if not hub.locked and client.writable:
                 await hub.lock("stepup")         # fără fereastră → blochează toţi clienţii + broadcast
             else:
+                # hub deja blocat, SAU un watcher read-only fără fereastră (3.6): blocăm DOAR acest
+                # client — un cont care nu poate tasta nu are voie să închidă terminalul celui care
+                # lucrează (DoS), iar output-ul nu-i ajunge până nu-şi prezintă propriul factor
                 client.lock()
                 await client.send_text(json.dumps({"type": "locked", "reason": hub.lock_reason}))
         conn = core.sources.get(row["host_id"])
@@ -10009,6 +10074,12 @@ async def browser_ws(ws: WebSocket, sid: str):
                 if ctl.get("type") == "pong":
                     client.on_pong(ctl.get("n", 0))
                 elif ctl.get("type") == "unlock":
+                    # 3.6: un client READ-ONLY nu deblochează terminalul pentru cei care scriu —
+                    # factorul lui îi deblochează cel mult propria vedere (dacă hub-ul nu e blocat)
+                    if hub.locked and not client.writable:
+                        await client.send_text(json.dumps(
+                            {"type": "unlock_failed", "code": "authz.denied"}))
+                        continue
                     # Deblocare: fix 5 — cerem un factor PROASPĂT (grant consumat / parolă / TOTP
                     # prezentate ACUM), NU doar o fereastră de step-up deschisă. Un terminal blocat
                     # nu trebuie să se deblocheze fiindcă activitatea a ţinut o fereastră în viaţă:
@@ -10024,8 +10095,26 @@ async def browser_ws(ws: WebSocket, sid: str):
                         await client.send_text(json.dumps(
                             {"type": "unlock_failed", "code": getattr(e, "code", "")}))
                     else:
-                        # factorul tocmai prezentat (fereastră proaspătă) reporneşte plafonul
-                        await hub.unlock(security.stepup_window_opened_at(user["id"], row["host_id"]))
+                        opened = security.stepup_window_opened_at(user["id"], row["host_id"])
+                        if hub.locked:
+                            # factorul tocmai prezentat (fereastră proaspătă) reporneşte plafonul
+                            await hub.unlock(opened)
+                            # 3.6: factorul unui cont NU deblochează clienţii ALTUI cont: cine nu are
+                            # propria fereastră de step-up rămâne blocat până o deschide el
+                            for c in list(hub.clients):
+                                if (c is client or not c.is_owner or c.user_id == user["id"]
+                                        or security.stepup_window_is_open(c.user_id, row["host_id"])):
+                                    continue
+                                c.lock()
+                                try:
+                                    await c.send_text(json.dumps({"type": "locked", "reason": "stepup"}))
+                                except Exception:            # noqa: BLE001
+                                    pass
+                        elif client.locked:
+                            # hub-ul merge, doar ACEST client era blocat (watcher sau alt cont fără
+                            # fereastră): factorul lui îi deblochează propria vedere
+                            client.unlock()
+                            await client.send_text(json.dumps({"type": "unlocked"}))
                 elif ctl.get("type") == "kick":
                     # DOAR owner-ul (client autentificat) scoate un INVITAT (nu owner).
                     # Închide WS-ul țintei → bucla ei se termină + roster rebroadcast.

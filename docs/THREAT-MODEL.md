@@ -128,6 +128,11 @@ See [design/ARCHITECTURE.md](design/ARCHITECTURE.md) for the agent's resilience
      — bind only Owners over such hosts;
    - deploy keys and jump hosts spread trust between hosts, so both need the permission on both
      ends;
+   - an **Admin** is a co-admin for sessions and tokens: it can take over or kill an Owner's
+     sessions and revoke everyone's tokens and links — only backups, the signing key and the
+     Owner role itself are out of its reach;
+   - **restoring a 3.5 backup** re-seeds every account in it as Owner, including accounts demoted
+     since the backup was taken;
    - **rolling back to 3.5 silently makes every account a full administrator again** (3.5 ignores
      the role tables).
 3. **The gateway is a single point of total compromise.** It commands every agent, with whatever

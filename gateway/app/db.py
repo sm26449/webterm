@@ -635,5 +635,25 @@ async def execute_returning(sql: str, *args):
     return row
 
 
+# 3.6 (roluri): id-ul unui cont e cheia de proprietate pentru audit (`actor_id`), sesiuni,
+# snippet-uri, istoric, joburi de copiere şi bilete de forward. Tabela `users` e `INTEGER PRIMARY
+# KEY` fără AUTOINCREMENT, deci SQLite REFOLOSEA id-ul celui mai nou cont şters — iar contul nou
+# moştenea urmele şi proprietatea celui vechi. Fără reconstrucţie de tabelă: un prag monoton în
+# app_settings (`user_id_floor`, ridicat la fiecare ştergere) + id explicit la inserare, calculat
+# în ACEEAŞI instrucţiune SQL (atomic, fără cursă între două creări concurente).
+NEXT_USER_ID_SQL = (
+    "(SELECT MAX(COALESCE((SELECT MAX(id) FROM users), 0),"
+    " COALESCE((SELECT CAST(value AS INTEGER) FROM app_settings WHERE key='user_id_floor'), 0))"
+    " + 1)")
+
+
+async def raise_user_id_floor(uid: int) -> None:
+    """Un id de cont folosit o dată nu mai e dat niciodată altui cont."""
+    await execute(
+        "INSERT INTO app_settings(key, value) VALUES('user_id_floor', ?)"
+        " ON CONFLICT(key) DO UPDATE SET value=CAST(MAX(CAST(value AS INTEGER), ?) AS TEXT)",
+        str(int(uid)), int(uid))
+
+
 def now() -> float:
     return time.time()

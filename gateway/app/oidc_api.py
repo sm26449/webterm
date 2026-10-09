@@ -146,7 +146,8 @@ async def callback(request: Request, code: str = "", state: str = ""):
             # nimeni nu-l ştie → login-ul local nu poate reuşi vreodată pentru ei.
             locked = await security.hash_password_async(security.new_token())
             await db.execute(
-                "INSERT INTO users(email, password_hash, created, sso_subject) VALUES(?,?,?,?)",
+                "INSERT INTO users(id, email, password_hash, created, sso_subject)"
+                " VALUES(" + db.NEXT_USER_ID_SQL + ",?,?,?,?)",
                 email, locked, time.time(), sub)
             user = await db.fetchone("SELECT * FROM users WHERE sso_subject=?", sub)
             await audit.record(time.time(), email, ip, "GET", "/api/oidc/callback", 201,
