@@ -503,7 +503,15 @@ jobs:
             -e BASE=http://127.0.0.1:8000 -e A11Y_MAX_SERIOUS=0 \
             -e A11Y_EMAIL=e2e@example.com -e A11Y_PASSWORD=parola-e2e-123456 \
             mcr.microsoft.com/playwright:v1.63.0-noble \
-            sh -c 'cp /repo/tests/ui_review.mjs / && node /ui_review.mjs'
+            sh -c 'cp /repo/tests/ui_review.mjs / && node /ui_review.mjs' 2>&1 | tee /tmp/wt-shots/a11y.log
+          rc=${PIPESTATUS[0]}
+          # Logurile job-ului nu se pot citi fără login; adnotările da. Fără ele, un eşec doar pe
+          # runner (3.5.18: trecea local de două ori) arăta doar „exit code 1".
+          if [ "$rc" != 0 ]; then
+            grep -E 'FAIL|EŞEC|^  - |SĂRIŢI|serious|critical|Error' /tmp/wt-shots/a11y.log \
+              | grep -vE '^\s*PASS' | tail -40 | while IFS= read -r l; do echo "::error::a11y: ${l:0:900}"; done
+          fi
+          exit "$rc"
 
       # API-ul de fișiere cap-coadă (agent real): rename, conflict de mtime,
       # preview view-only, salvare atomică, păstrarea permisiunilor, guard fișiere

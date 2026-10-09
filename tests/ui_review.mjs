@@ -354,9 +354,11 @@ try {
       await all.check()
       await page.getByRole('button', { name: 'Copy to host…' }).first().click()
       const dlg = page.locator('[data-testid="wt-copy-dialog"]')
-      await dlg.waitFor({ timeout: 8000 })
-      await dlg.locator('#wt-copy-host option').first().waitFor({ state: 'attached', timeout: 8000 })
-      await dlg.locator('ul[aria-label="Folders"] li').first().waitFor({ timeout: 8000 })
+      await dlg.waitFor({ timeout: 15000 })
+      await dlg.locator('#wt-copy-host option').first().waitFor({ state: 'attached', timeout: 15000 })
+      // lista de foldere a destinaţiei: aşteptăm LISTA (poate fi goală într-un home fără
+      // subfoldere vizibile), nu un <li> — pe runner pasul pica de două ori doar în CI (3.5.18)
+      await dlg.locator('ul[aria-label="Folders"]').waitFor({ state: 'attached', timeout: 15000 })
       await page.waitForTimeout(300)
       check('Copy to host: dialogul are titlu (aria-labelledby) şi focusul e în el',
         (await dlg.getAttribute('aria-labelledby')) === 'wt-copy-title'
