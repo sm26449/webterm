@@ -18,6 +18,9 @@ back.
   if it exists. The title names the agent when the release changes it (*WebTerm 3.5.16 · agent
   58*). A manual run backfills the newest N tags that have no release (default 10). See
   [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#github-releases-release-notes).
+- **A social preview image** (`docs/social-preview.png`, 1280×640) for links to the repository,
+  rendered from `scripts/social-preview/` (HTML + Playwright) so it can be regenerated when the UI
+  changes. It has to be uploaded by hand in GitHub's settings.
 
 ### Changed
 - **Unfinished uploads are remembered per account.** The resumable-upload metadata in localStorage
