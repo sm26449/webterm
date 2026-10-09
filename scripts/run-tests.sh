@@ -47,7 +47,7 @@ fi
 
 CI_TESTS="agent_hardening agent_reliability agent_tmux_hygiene ed25519_kat
           backup forward_validation idle_lock retention session_reconcile
-          telnet telnet_bastion telnet_shim totp transcript_cap stepup signing
+          telnet telnet_bastion telnet_shim totp transcript_cap transcript_cap_offloop stepup signing
           agent_update_signing signing_api uninstall ws_keepalive agent_events
           audit_log cloud_backup transcript_text shell_integration tail_altscreen
           guardrail_alerts multi_account api_token update_check install_command upgrade_script

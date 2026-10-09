@@ -1,6 +1,7 @@
 """Per-session transcript cap: once .out passes MAX it is head-truncated to the
 last KEEP bytes (gap-marked), and .cast stays a valid asciicast (header + tail).
 Pure unit test on SessionHub — no gateway/agent."""
+import asyncio
 import json
 import os
 import sys
@@ -37,7 +38,15 @@ hub._flush()
 out_path, cast_path = core.transcript_paths(sid)
 check("grows past the cap before truncation", out_path.stat().st_size > 20000)
 
-hub._maybe_cap()
+
+
+async def cap():
+    # 3.5.17: _maybe_cap doar declanşează; copierea rulează pe un thread (tests/transcript_cap_offloop_test.py)
+    hub._maybe_cap()
+    await hub._cap_task
+
+
+asyncio.run(cap())
 
 out_size = out_path.stat().st_size
 check("capped: .out <= KEEP + gap slack", out_size <= 8000 + len(core.GAP_MARKER) + 200)

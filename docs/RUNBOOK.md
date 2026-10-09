@@ -249,6 +249,12 @@ single-admin model (one client polls, not N).
   ~128 MiB per session in the worst case
   (head-truncated cap). When the session ceiling is reached, the API returns
   **409**, not 502 — a normal condition, not a gateway fault.
+- **The transcript cap runs off the event loop** (since 3.5.17). The 16 MiB tail is copied on a
+  worker thread into `.<sid>.{out,cast}.<token>.cap-tmp` next to the transcript, then swapped in
+  with `os.replace`; the loop only does the last few hundred KiB and the rename (<1 ms measured).
+  While a copy runs, the file can sit a little above 64 MiB. A `*.cap-tmp` file seen while the
+  gateway is running is a copy in progress; one left by a crash is deleted at the next start
+  (the original transcript is never removed before the swap). They are skipped by backups.
 - **Runaway output costs the HOST, not the gateway** (measured on a real agent, 2026-08-08).
   A single `yes` in one session drives `tmux: server` to ~100% CPU and the agent process to
   ~70–80%. Because one tmux server serves every session on that host, keystroke latency in

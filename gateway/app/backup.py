@@ -141,13 +141,17 @@ def make_snapshot(include_transcripts: bool = False) -> bytes:
             if include_transcripts and config.TRANSCRIPT_DIR.exists():
                 # Fişier cu fişier, tolerant la eşec. `tar.add` pe TOT directorul aruncă
                 # `OSError: unexpected end of data` dacă un transcript se micşorează în timp
-                # ce e citit — iar asta se întâmplă exact când trebuie: `_maybe_cap` trunchiază
+                # ce e citit — iar asta se întâmpla exact când trebuie: `_maybe_cap` trunchia
                 # in-place fişierele care trec de plafon, adică fix în sesiunile cu output
                 # masiv. Rezultatul era pierderea ÎNTREGII arhive, nu a unui fişier. Prins prin
                 # reproducere de auditul intern (2026-08-06).
                 base = config.TRANSCRIPT_DIR
                 tar.add(str(base), arcname="transcripts", recursive=False)
                 for f in sorted(base.rglob("*")):
+                    # temporarele plafonului de transcript (core.CAP_TMP_SUFFIX) sunt o copiere în
+                    # curs, nu date: originalul e încă la locul lui şi intră în arhivă
+                    if f.name.endswith(".cap-tmp"):
+                        continue
                     try:
                         tar.add(str(f), arcname="transcripts/" + str(f.relative_to(base)),
                                 recursive=False)

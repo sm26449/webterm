@@ -206,6 +206,9 @@ async def _scheduled_backup() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     config.ensure_dirs()
+    # temporarele unui plafon de transcript întrerupt (crash/oprire în timpul copierii off-loop):
+    # originalele sunt intacte, temporarele sunt doar spaţiu ocupat
+    core.cleanup_cap_temps()
     # Un restore pus în staging din UI se aplică ACUM, înainte de a citi cheia/DB-ul:
     # swap DB + data/secret. Vezi backup.apply_pending_restore.
     try:

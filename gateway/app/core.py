@@ -18,6 +18,7 @@ import shlex
 import socket
 import ssl
 import struct
+import threading
 import time
 import uuid
 import zlib
@@ -219,6 +220,155 @@ def archive_transcript(sid: str) -> None:
             log.exception("cannot archive %s", path)
 
 
+# ---------------------------------------------------------------------------
+# Plafonul de transcript, OFF-LOOP (3.5.17)
+# ---------------------------------------------------------------------------
+# Înainte, `_maybe_cap` copia 16 MiB (.out) + 16 MiB (.cast) PE event-loop: la fiecare ~48 MiB de
+# output TOATE terminalele gateway-ului îngheţau cât dura copierea (în prod: sesiuni Claude Code
+# lungi, 6/166 transcripturi tăiate, mai multe stând la 60–65 MB). O primă variantă off-loop
+# (`to_thread` pe tot blocul close→rescrie→reopen) a căzut la audit (v1.0.117): handle-urile vii
+# erau închise cât thread-ul lucra, iar teardown/mark_lost/on_exit le atingeau → ValueError →
+# conexiunea agentului cădea.
+#
+# Designul de acum NU atinge NICIODATĂ handle-urile vii în afara unui pas sincron scurt:
+#   1. loop (sincron): flush, instantaneu (out_end, cast_end) din fstat; deschidem fd-uri PROPRII
+#      de citire pe aceleaşi inode-uri (verificat) şi fişierele temporare de destinaţie.
+#   2. thread: construieşte în temporare EXACT rezultatul vechi — GAP_MARKER + ultimii KEEP octeţi
+#      până la out_end; header + eveniment de gol + linii întregi până la cast_end — apoi copiază
+#      din urmă (catch-up) ce s-a scris între timp în originale. Originalele sunt doar APPEND
+#      (singurul scriitor e loop-ul, prin out_f/cast_f, neatinse), deci un interval odată pe disc
+#      nu se mai schimbă: copiem intervale contigue cu `pread`, fără să mişcăm offsetul nimănui.
+#   3. loop (sincron, fără niciun `await`): flush, copiem restul (≤ CAP_RESIDUAL_MAX), deschidem
+#      handle-uri noi pe temporare, `os.replace` peste originale (atomic), schimbăm handle-urile,
+#      `out_gen += 1`. Pasul ăsta e singurul care închide un handle viu, şi îl închide în acelaşi
+#      tick în care îl înlocuieşte — exact proprietatea pe care o avea varianta sincronă.
+# Siguranţa la crash: originalul rămâne la locul lui până la `os.replace`; un crash la jumătate
+# lasă doar un temporar orfan (`.{sid}.*.cap-tmp`, şters la pornire), niciodată un transcript lipsă.
+# Teardown în timpul copierii: setează `abort` → thread-ul se opreşte, temporarele se şterg,
+# handle-urile (deja închise de teardown) nu mai sunt atinse.
+CAP_TMP_SUFFIX = ".cap-tmp"
+CAP_CHUNK = 1024 * 1024
+CAP_RESIDUAL_MAX = 256 * 1024     # cât poate copia pasul final PE loop (memcpy de sub 1 ms)
+CAP_CATCHUP_ROUNDS = 8            # runde de catch-up pe thread înainte de a preda loop-ului
+CAP_FINAL_ATTEMPTS = 2            # de câte ori re-predăm thread-ului un rest prea mare; apoi
+                                  # restul se copiază oricum pe loop (output mai rapid decât discul)
+CAP_RETRY_SECS = 60.0             # după un eşec (ENOSPC, fişier corupt) nu reîncercăm la fiecare checkpoint
+CAP_HEADER_MAX = 64 * 1024
+
+
+_CAST_TS_RE = re.compile(rb"\[\s*(-?[0-9]+(?:\.[0-9]+)?(?:[eE][-+]?[0-9]+)?)\s*,")
+
+
+class _CapAborted(Exception):
+    pass
+
+
+def cap_tmp_path(sid: str, kind: str, token: str) -> Path:
+    return config.TRANSCRIPT_DIR / (".%s.%s.%s%s" % (sid, kind, token, CAP_TMP_SUFFIX))
+
+
+def cleanup_cap_temps() -> int:
+    """La pornire: şterge temporarele rămase de la un plafon întrerupt de crash/oprire.
+    (Nicio copiere nu rulează încă — hub-urile nu există.)"""
+    removed = 0
+    try:
+        for p in config.TRANSCRIPT_DIR.glob(".*" + CAP_TMP_SUFFIX):
+            try:
+                p.unlink()
+                removed += 1
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return removed
+
+
+def _cap_copy(src_fd: int, dst, start: int, end: int, abort) -> int:
+    """Copiază [start, end) din `src_fd` (pread — nu mută niciun offset) în `dst`."""
+    pos = start
+    while pos < end:
+        if abort is not None and abort.is_set():
+            raise _CapAborted()
+        buf = os.pread(src_fd, min(CAP_CHUNK, end - pos), pos)
+        if not buf:
+            raise OSError("transcript shrank under the cap copy (%d < %d)" % (pos, end))
+        dst.write(buf)
+        pos += len(buf)
+    return pos
+
+
+class _CapJob:
+    """Starea unei tăieri în curs. Câmpurile `*_copied` = până unde a ajuns temporarul în original."""
+    __slots__ = ("out_src", "cast_src", "out_tmp", "cast_tmp", "out_tmp_path", "cast_tmp_path",
+                 "out_end", "cast_end", "out_copied", "cast_copied", "keep", "fallback_ts", "abort")
+
+
+def _cap_build(job: "_CapJob") -> None:
+    """Thread: rezultatul vechiului `_maybe_cap`, calculat pe instantaneul (out_end, cast_end)."""
+    keep = job.keep
+    # .out: GAP_MARKER + ultimii KEEP octeţi
+    job.out_tmp.write(GAP_MARKER)
+    job.out_copied = _cap_copy(job.out_src, job.out_tmp, max(0, job.out_end - keep),
+                               job.out_end, job.abort)
+    # .cast: header + eveniment de gol + linii întregi din ultimii KEEP octeţi
+    head = os.pread(job.cast_src, min(CAP_HEADER_MAX, job.cast_end), 0)
+    nl = head.find(b"\n")
+    if nl < 0:
+        raise OSError("asciicast header line missing or too long")
+    header = head[:nl + 1]
+    pos = max(len(header), job.cast_end - keep)
+    # aliniem la început de linie (dacă nu suntem deja pe unul)
+    if pos > len(header) and os.pread(job.cast_src, 1, pos - 1) != b"\n":
+        while pos < job.cast_end:
+            if job.abort.is_set():
+                raise _CapAborted()
+            buf = os.pread(job.cast_src, min(CAP_CHUNK, job.cast_end - pos), pos)
+            if not buf:
+                break
+            i = buf.find(b"\n")
+            if i >= 0:
+                pos += i + 1
+                break
+            pos += len(buf)
+        pos = min(pos, job.cast_end)
+    # Momentul golului = timestamp-ul primului eveniment PĂSTRAT (golul e chiar înaintea lui), ca
+    # fişierul să rămână monoton. Varianta veche punea „acum", adică DUPĂ toată coada → timpi
+    # descrescători, pe care unele player-e îi tratează ca salt înapoi.
+    # Doar prefixul `[<t>,` — linia întreagă poate depăşi orice fereastră fixă (un chunk mare
+    # JSON-escaped).
+    gap_ts = job.fallback_ts
+    m = _CAST_TS_RE.match(os.pread(job.cast_src, min(64, job.cast_end - pos), pos))
+    if m:
+        try:
+            gap_ts = json.loads(m.group(1))
+        except ValueError:
+            pass
+    job.cast_tmp.write(header)
+    job.cast_tmp.write((json.dumps([gap_ts, "o", GAP_MARKER.decode("utf-8", "replace")])
+                        + "\n").encode())
+    job.cast_copied = _cap_copy(job.cast_src, job.cast_tmp, pos, job.cast_end, job.abort)
+    _cap_catch_up(job)
+
+
+def _cap_catch_up(job: "_CapJob") -> None:
+    """Thread: aduce temporarele aproape de capătul (pe disc) al originalelor, în ordine."""
+    for _ in range(CAP_CATCHUP_ROUNDS):
+        out_eof = os.fstat(job.out_src).st_size
+        cast_eof = os.fstat(job.cast_src).st_size
+        if out_eof - job.out_copied <= CAP_RESIDUAL_MAX \
+                and cast_eof - job.cast_copied <= CAP_RESIDUAL_MAX:
+            break
+        job.out_copied = _cap_copy(job.out_src, job.out_tmp, job.out_copied, out_eof, job.abort)
+        job.cast_copied = _cap_copy(job.cast_src, job.cast_tmp, job.cast_copied, cast_eof,
+                                    job.abort)
+    # durabilitate: grosul datelor e pe disc înainte de `os.replace` (restul, mic, îl prinde
+    # următorul checkpoint, care face fsync pe noul out_f)
+    job.out_tmp.flush()
+    job.cast_tmp.flush()
+    os.fsync(job.out_tmp.fileno())
+    os.fsync(job.cast_tmp.fileno())
+
+
 def _dir_file_stats(path) -> tuple:
     """(număr fișiere, total bytes) pentru fișierele directe dintr-un director."""
     count = total = 0
@@ -354,11 +504,14 @@ def read_tail(sid: str, limit: int = config.BROWSER_TAIL_BYTES,
     # ar ajunge dublați. Fără `end`, comportamentul de attach rămâne neschimbat.
     out_path, _ = transcript_paths(sid)
     try:
-        size = out_path.stat().st_size
-        if end is not None:
-            size = min(size, end)
-        start = max(0, size - limit)
+        # mărimea din fd-ul DESCHIS, nu din cale: plafonul de transcript înlocuieşte fişierul
+        # (`os.replace`) — un stat pe cale urmat de open putea combina mărimea fişierului vechi
+        # cu conţinutul celui nou (seek dincolo de capăt → tail gol)
         with open(out_path, "rb") as f:
+            size = os.fstat(f.fileno()).st_size
+            if end is not None:
+                size = min(size, end)
+            start = max(0, size - limit)
             f.seek(start)
             data = f.read(size - start)
     except OSError:
@@ -928,6 +1081,10 @@ class SessionHub:
         self._idle_flush: Optional[asyncio.Task] = None
         self._last_resize = (self.rows, self.cols)
         self._redraw_task: Optional[asyncio.Task] = None
+        # plafonul de transcript (off-loop, vezi `_maybe_cap`): o singură tăiere în zbor
+        self._cap_task: Optional[asyncio.Task] = None
+        self._cap_abort: Optional[threading.Event] = None
+        self._cap_not_before = 0.0
 
         out_path, cast_path = transcript_paths(self.sid)
         is_new = not cast_path.exists()
@@ -961,20 +1118,21 @@ class SessionHub:
         self.cast_f.flush()
 
     def _maybe_cap(self) -> None:
-        """Head-truncate the transcript when .out exceeds the cap: keep the last
+        """Head-truncate the transcript when .out or .cast exceeds the cap: keep the last
         KEEP bytes, gap-marked. Bounds disk for a runaway `yes`/`cat bigfile`.
-        Rare (only past MAX), so the rewrite cost is acceptable.
 
-        NB: SINCRON intenționat (fără `await` între close→reopen al handle-urilor) — pe
-        event-loop-ul single-thread asta e atomic față de teardown/mark_lost/on_exit, care
-        închid out_f/cast_f fără să treacă prin _attach_lock. O versiune off-loop (to_thread)
-        deschide o fereastră în care acele căi de lifecycle ating handle-uri în curs de reschimbare
-        → ValueError pe handle închis → cade conexiunea agentului. (vezi audit v1.0.117; TODO:
-        variantă off-loop CORECTĂ cu coordonare de lock-uri, ca să nu mai înghețe la runaway output)."""
+        Doar DECLANŞEAZĂ (sincron, O(1)): copierea rulează pe un thread, iar handle-urile vii
+        se schimbă într-un singur pas sincron la final — vezi comentariul de la `CAP_TMP_SUFFIX`
+        (de ce varianta `to_thread` din v1.0.117 a căzut şi de ce asta nu are aceeaşi cursă).
+        O singură tăiere pe hub la un moment dat (`_cap_task`)."""
+        if self.closed or (self._cap_task is not None and not self._cap_task.done()):
+            return
+        if time.time() < self._cap_not_before:
+            return
         try:
             out_sz = self.out_f.tell()
             cast_sz = self.cast_f.tell()
-        except OSError:
+        except (OSError, ValueError):
             return
         # Declanşarea se uita DOAR la `.out`, dar `.cast` creşte mai repede (JSON-escaped:
         # măsurat ×1,35). Când `.out` atingea 64 MiB, `.cast` era pe la 86 MiB — deci
@@ -982,33 +1140,140 @@ class SessionHub:
         # documentaţie ieşea la mai puţin de jumătate din realitate. Taie oricare dintre ele.
         if out_sz < config.TRANSCRIPT_MAX_BYTES and cast_sz < config.TRANSCRIPT_MAX_BYTES:
             return
-        keep = config.TRANSCRIPT_KEEP_BYTES
+        self._cap_task = asyncio.create_task(self._cap_run())
+
+    def _cap_start(self) -> _CapJob:
+        """Loop, sincron: instantaneul + resursele PROPRII ale copierii (nimic partajat cu out_f)."""
+        self._flush()
         out_path, cast_path = transcript_paths(self.sid)
-        gap_ts = round(time.time() - self.created, 6)
-        gap_cast = (json.dumps([gap_ts, "o", GAP_MARKER.decode("utf-8", "replace")]) + "\n").encode()
+        job = _CapJob()
+        job.out_src = job.cast_src = None
+        job.out_tmp = job.cast_tmp = job.out_tmp_path = job.cast_tmp_path = None
+        job.abort = self._cap_abort = threading.Event()
+        job.keep = config.TRANSCRIPT_KEEP_BYTES
+        job.fallback_ts = round(time.time() - self.created, 6)
         try:
-            self.out_f.flush(); self.out_f.close()
-            with open(out_path, "rb") as f:
-                f.seek(max(0, out_sz - keep))
-                tail = f.read()
-            with open(out_path, "wb") as f:
-                f.write(GAP_MARKER + tail)
-            self.out_f = open(out_path, "ab")
-            self.out_gen += 1           # offseturile s-au mutat: invalidează cutoff-urile în zbor
-            # .cast: keep the header line + a gap event + the tail (snap to a line)
-            self.cast_f.flush(); self.cast_f.close()
-            with open(cast_path, "rb") as f:
-                header = f.readline()
-                csz = f.seek(0, 2)
-                f.seek(max(len(header), csz - keep))
-                chunk = f.read()
-            nl = chunk.find(b"\n")
-            tail_lines = chunk[nl + 1:] if nl >= 0 else b""
-            with open(cast_path, "wb") as f:
-                f.write(header + gap_cast + tail_lines)
-            self.cast_f = open(cast_path, "a", encoding="utf-8")
-        except OSError:
+            job.out_src = os.open(out_path, os.O_RDONLY)
+            job.cast_src = os.open(cast_path, os.O_RDONLY)
+            # aceleaşi inode-uri pe care scriu handle-urile vii (altfel calea a fost mutată —
+            # arhivare — şi n-avem ce tăia)
+            for src, live in ((job.out_src, self.out_f), (job.cast_src, self.cast_f)):
+                a, b = os.fstat(src), os.fstat(live.fileno())
+                if (a.st_dev, a.st_ino) != (b.st_dev, b.st_ino):
+                    raise OSError("transcript path no longer matches the open handle")
+            job.out_end = os.fstat(job.out_src).st_size
+            job.cast_end = os.fstat(job.cast_src).st_size
+            token = uuid.uuid4().hex[:12]
+            job.out_tmp_path = cap_tmp_path(self.sid, "out", token)
+            job.cast_tmp_path = cap_tmp_path(self.sid, "cast", token)
+            job.out_tmp = open(job.out_tmp_path, "xb")
+            job.cast_tmp = open(job.cast_tmp_path, "xb")
+        except BaseException:
+            self._cap_cleanup(job)
+            raise
+        return job
+
+    @staticmethod
+    def _cap_cleanup(job: _CapJob) -> None:
+        """Închide fd-urile copierii şi şterge temporarele care n-au ajuns peste originale."""
+        for fd in (job.out_src, job.cast_src):
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+        for f in (job.out_tmp, job.cast_tmp):
+            if f is not None:
+                try:
+                    f.close()
+                except (OSError, ValueError):
+                    pass
+        for p in (job.out_tmp_path, job.cast_tmp_path):
+            if p is not None:
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+
+    async def _cap_run(self) -> None:
+        job = None
+        if self.closed:                 # teardown între declanşare şi primul pas al taskului
+            return
+        try:
+            job = self._cap_start()
+            await asyncio.to_thread(_cap_build, job)
+            for attempt in range(CAP_FINAL_ATTEMPTS + 1):
+                if self.closed or job.abort.is_set():
+                    raise _CapAborted()
+                self._flush()
+                out_eof = os.fstat(job.out_src).st_size
+                cast_eof = os.fstat(job.cast_src).st_size
+                if (out_eof - job.out_copied <= CAP_RESIDUAL_MAX
+                        and cast_eof - job.cast_copied <= CAP_RESIDUAL_MAX) \
+                        or attempt == CAP_FINAL_ATTEMPTS:
+                    break
+                # rafală mai rapidă decât catch-up-ul: încă o rundă pe thread, nu pe loop
+                await asyncio.to_thread(_cap_catch_up, job)
+            self._cap_swap(job, out_eof, cast_eof)
+        except _CapAborted:
+            pass
+        except asyncio.CancelledError:
+            if job is not None:
+                job.abort.set()
+            raise
+        except Exception:                       # noqa: BLE001 — nu ajunge niciodată în bucla agentului
             log.exception("transcript cap %s failed", self.sid)
+            self._cap_not_before = time.time() + CAP_RETRY_SECS
+        finally:
+            if job is not None:
+                # Pe thread, NU pe loop: fd-urile de citire sunt ultima referinţă la inode-urile
+                # vechi (înlocuite de `os.replace`), deci închiderea lor eliberează 64+86 MiB de
+                # blocuri — măsurat: zeci de ms pe ext4, exact îngheţul pe care îl scoatem.
+                # `shield`: un cancel (oprirea gateway-ului) nu anulează curăţenia deja programată.
+                await asyncio.shield(asyncio.get_running_loop().run_in_executor(
+                    None, self._cap_cleanup, job))
+
+    def _cap_swap(self, job: _CapJob, out_eof: int, cast_eof: int) -> None:
+        """Loop, SINCRON (fără await): restul + schimbarea atomică. Între `_flush` (apelantul) şi
+        aici nu rulează nimic altceva pe loop, deci [*_copied, *_eof) e tot ce lipseşte."""
+        _cap_copy(job.out_src, job.out_tmp, job.out_copied, out_eof, None)
+        _cap_copy(job.cast_src, job.cast_tmp, job.cast_copied, cast_eof, None)
+        job.out_tmp.flush()
+        job.cast_tmp.flush()
+        out_path, cast_path = transcript_paths(self.sid)
+        # handle-urile noi se deschid ÎNAINTE de rename (fd-ul urmează inode-ul): dacă open-ul
+        # pică, originalele şi handle-urile vii sunt neatinse
+        new_out = open(job.out_tmp_path, "ab")
+        try:
+            new_cast = open(job.cast_tmp_path, "a", encoding="utf-8")
+        except BaseException:
+            new_out.close()
+            raise
+        try:
+            os.replace(job.out_tmp_path, out_path)
+        except BaseException:
+            new_out.close()
+            new_cast.close()
+            raise
+        job.out_tmp_path = None                 # a ajuns la locul lui: cleanup-ul nu-l mai şterge
+        old, self.out_f = self.out_f, new_out
+        self.out_gen += 1                       # offseturile s-au mutat: invalidează cutoff-urile în zbor
+        try:
+            old.close()
+        except (OSError, ValueError):
+            pass
+        try:
+            os.replace(job.cast_tmp_path, cast_path)
+        except BaseException:
+            # .out e deja tăiat, .cast nu: rămâne mare şi va redeclanşa — nimic pierdut
+            new_cast.close()
+            raise
+        job.cast_tmp_path = None
+        old, self.cast_f = self.cast_f, new_cast
+        try:
+            old.close()
+        except (OSError, ValueError):
+            pass
 
     def _schedule_idle_flush(self) -> None:
         """Persistă coada de output dacă sesiunea tace.
@@ -1041,11 +1306,10 @@ class SessionHub:
             self._schedule_idle_flush()       # nu scriem ACUM, dar nu uităm nici la nesfârşit
             return
         self._flush()
-        self._maybe_cap()                     # sync: rescrie fișierul atomic față de loop
+        self._maybe_cap()                     # doar declanşează: copierea e pe thread
         try:
             # fsync-ul (sincronizarea pe disc) e costul care blochează loop-ul pe
-            # calea fierbinte de output — îl mutăm pe un thread. _flush/_maybe_cap
-            # rămân sincrone ca să nu concureze cu scrierile de la attach.
+            # calea fierbinte de output — îl mutăm pe un thread.
             fd = self.out_f.fileno()
             await asyncio.to_thread(os.fsync, fd)   # durability: survive power loss
         except OSError:
@@ -1174,6 +1438,10 @@ class SessionHub:
         # taskul de flush întârziat ar scrie într-un fişier deja închis
         if self._idle_flush and not self._idle_flush.done():
             self._idle_flush.cancel()
+        # o tăiere de transcript în zbor se opreşte singură (thread-ul vede `abort`, taskul vede
+        # `closed`) şi îşi şterge temporarele; nu atinge handle-urile pe care le închidem aici
+        if self._cap_abort is not None:
+            self._cap_abort.set()
         hubs.pop(self.sid, None)
         session_sources.pop(self.sid, None)   # plasă de siguranță; sursa își face close-ul
         try:
@@ -2898,8 +3166,8 @@ def transcript_text(sid: str, tail_bytes: int = 0) -> str:
     """
     out_path, _ = transcript_paths(sid)
     try:
-        size = out_path.stat().st_size
         with open(out_path, "rb") as f:
+            size = os.fstat(f.fileno()).st_size      # fd-ul deschis: vezi read_tail
             if tail_bytes and size > tail_bytes:
                 f.seek(size - tail_bytes)
             raw = f.read()
@@ -2949,12 +3217,12 @@ def search_transcripts(rows, query: str):
         snippet, count = "", 0
         out_path, _ = transcript_paths(row["id"])
         try:
-            size = out_path.stat().st_size
             # bound total I/O per query: past the budget, only meta (title/note)
             # is searched so one query can't read gigabytes on the thread pool
             if total_read >= SEARCH_TOTAL_CAP:
                 raise OSError("search budget exhausted")
             with open(out_path, "rb") as f:
+                size = os.fstat(f.fileno()).st_size  # fd-ul deschis: vezi read_tail
                 if size > SEARCH_READ_CAP:
                     f.seek(size - SEARCH_READ_CAP)
                 chunk = f.read()

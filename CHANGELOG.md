@@ -9,6 +9,38 @@ back.
 
 ## [Unreleased]
 
+### Fixed
+- **Terminals no longer freeze when a long session's transcript hits its cap.** Past 64 MiB a
+  transcript keeps its last 16 MiB — and that copy (16 MiB of `.out` plus 16 MiB of `.cast`) ran on
+  the gateway's event loop, so every ~48 MiB of output in ONE session froze EVERY terminal, every
+  API call and every agent connection for as long as it took (138–152 ms measured on a 64 MiB
+  transcript; longer on a busy disk). In prod, 6 of 166 transcripts had been cut and several sit
+  at 60–65 MB — long Claude Code sessions, which is exactly where the freeze landed. A first
+  off-loop attempt (v1.0.117) had been reverted: it closed the live file handles while the thread
+  worked, and the session's close/exit/lost paths then wrote to a closed handle, dropping the
+  agent connection. Now the live handles are never touched during the copy: a worker thread
+  builds the truncated file next to the original from its own read descriptors (the original is
+  append-only), then catches up with what was written meanwhile; the loop only copies the last
+  ≤256 KiB and swaps the file in with `os.replace` in one synchronous step (<1 ms measured, worst
+  event-loop stall 6 ms during a 64 MiB cap). The result is byte-identical to before, bytes
+  written during the copy follow the kept tail in order, one cap at a time per session, and a
+  session closed, killed or archived mid-copy just abandons the copy. A crash mid-copy leaves the
+  untouched original plus a temporary file, deleted at the next start.
+- **`.cast` gap event timestamp.** The gap event was stamped "now", i.e. after every event of the
+  kept tail it precedes, so the recording's timestamps went backwards once per cap. It now takes
+  the timestamp of the first kept event.
+- **Transcript readers no longer mix two files' sizes.** `read_tail`, the text view and search
+  measured the file by path and then opened it; across a cap they could combine the old size with
+  the new content and return an empty tail. They now measure the descriptor they opened.
+
+### Tests
+- `transcript_cap_offloop` (new suite, 102 in all): identity with the old algorithm, output written
+  during the copy through the real output path (including bursts larger than the on-loop
+  residual), `.cast` validity and monotonic timestamps, `out_gen` invalidation, no second cap
+  while one runs, teardown / exit / lost / archive mid-copy, `read_tail` and `attach_replay`
+  hammered across the swap, a contained failure with back-off, crash-mid-copy recovery, and an
+  event-loop heartbeat that must stay under 50 ms while a 64 MiB transcript is capped.
+
 ## [3.5.16] — 2026-10-08 · agent (58)
 
 **This release updates the agent (57 → 58)** — hosts update on reconnect (deferred while a host has
