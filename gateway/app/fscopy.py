@@ -197,6 +197,53 @@ async def _stat(host_id: int, path: str) -> dict:
     return resp
 
 
+COPY_AUDIT_STAT_PARALLEL = 8          # fs_stat-uri simultane pentru textul de audit
+COPY_AUDIT_STAT_BUDGET = 10.0         # plafonul TOTAL al acelor stat-uri (s) — apoi „N items"
+
+
+def _plural(n: int, word: str) -> str:
+    return "%d %s%s" % (n, word, "" if n == 1 else "s")
+
+
+def audit_what(n_files: int, n_dirs: int, n_unknown: int = 0) -> str:
+    """„3 files" / „1 folder" / „2 files, 1 folder" — ce copiază o cerere, pentru audit_log.
+    Când tipul căilor nu se ştie (stat eşuat / host lent) spunem cinstit „N items"."""
+    if n_unknown:
+        return _plural(n_files + n_dirs + n_unknown, "item")
+    parts = []
+    if n_files or not n_dirs:
+        parts.append(_plural(n_files, "file"))
+    if n_dirs:
+        parts.append(_plural(n_dirs, "folder"))
+    return ", ".join(parts)
+
+
+async def count_kinds(host_id: int, paths: list, src_home: Optional[str] = None) -> tuple:
+    """(fişiere, foldere, necunoscute) printre căile CERUTE (nu arborele de sub foldere — acela se
+    află abia în faza 1 a job-ului). Doar pentru textul de audit: o cale care nu se poate stat-a
+    (inexistentă, host lent) e „necunoscută", nu o eroare — job-ul o raportează oricum pe rândul ei."""
+    sem = asyncio.Semaphore(COPY_AUDIT_STAT_PARALLEL)
+    kinds = ["?"] * len(paths)
+
+    async def one(i: int, p: str) -> None:
+        if src_home and (p == "~" or p.startswith("~/")):
+            p = src_home.rstrip("/") + p[1:]
+        async with sem:
+            try:
+                st = await _stat(host_id, posixpath.normpath(p))
+            except Exception:                      # noqa: BLE001 — audit best-effort
+                return
+        if st.get("exists"):
+            kinds[i] = "d" if st.get("dir") else "f"
+
+    try:
+        await asyncio.wait_for(asyncio.gather(*(one(i, p) for i, p in enumerate(paths))),
+                               COPY_AUDIT_STAT_BUDGET)
+    except (asyncio.TimeoutError, Exception):      # noqa: BLE001
+        pass
+    return kinds.count("f"), kinds.count("d"), kinds.count("?")
+
+
 def _mode_of(v) -> Optional[int]:
     return v & 0o777 if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else None
 

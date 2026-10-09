@@ -74,7 +74,12 @@ A byte-level watchdog marks a chunk **Stalled** after 20 s without progress and
 aborts + resends after 60 s; each chunk gets up to 8 attempts with capped backoff; the job
 resumes by itself on `online` / tab visible. After a page reload, unfinished uploads are listed
 as **Incomplete** — drop the same file into the same folder to continue from the confirmed
-offset; **Discard** deletes the partial on the host.
+offset; **Discard** deletes the partial on the host. That list is **per account** (3.5.17): the
+metadata is keyed by user id, so another account signing in on the same browser neither sees those
+rows nor resumes onto another account's partial; an expired session hides them until the same
+account signs in again; an explicit **Sign out** forgets them (and asks the host to delete the
+partials while the session is still valid — otherwise the server's temp GC removes them). Keys
+written by 3.5.16 and older carry no account and are dropped on first start.
 
 ## Downloads (host → browser)
 
@@ -320,7 +325,9 @@ widget). Ownership is never copied: everything belongs to the destination agent'
 **Security.** Session cookie only — an automation token gets `401`. Both ends need what reading and
 writing files need on their own: the **step-up** of a 2FA host is required on the **source and on
 the destination**. Each job is visible and cancellable only by the account that started it. The
-audit log records `copy N files A:/path → B:/dir` (and the cancel and the retry).
+audit log records what was selected — `copy 2 files, 1 folder A:/path → B:/dir` (the types come
+from a bounded `fs_stat` on the source; `N items` when that is not available) — and the cancel
+and the retry.
 
 **Jobs live in the gateway's memory.** A finished job stays queryable for **one hour**. A **gateway
 restart loses running jobs**: files already committed stay; the temporary file of the one in
@@ -394,6 +401,6 @@ takes a filename — paste first, then finish the line.
 |---|---|---|
 | localStorage | `wt_paste_dest` | `inbox` (default) or `cwd` |
 | localStorage | `wt_inbox_days` | retention in days, `0` = keep |
-| localStorage | `wt_up_<host>_<dest>_<size>_<mtime>` | resumable-upload metadata (see above) |
+| localStorage | `wt_up_u<user>_<host>_<dest>_<size>_<mtime>` | resumable-upload metadata, per account (see above) |
 | IndexedDB | `webterm-transfers` / `downloads` + `handles`, key `<user>:<host>:<path>` | interrupted File System Access downloads: metadata, and the file handle read only on Resume (see *Resume after a page reload*) |
 | host | `~/.webterm/inbox/` | pasted files |

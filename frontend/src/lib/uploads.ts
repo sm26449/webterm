@@ -149,20 +149,52 @@ export interface UploadMeta {
 }
 
 export const LS_PREFIX = 'wt_up_'
-// upload_id STABIL per (host, cale, fișier): persistat în localStorage, ca un reload de pagină
+// upload_id STABIL per (cont, host, cale, fișier): persistat în localStorage, ca un reload de pagină
 // să poată relua același upload (browserul nu re-citește fișierul singur — re-selectezi același
 // fișier și reia de unde a rămas, exact ca protocolul tus).
-export const upLsKey = (hostId: number, dest: string, size: number, lastModified: number) =>
-  `${LS_PREFIX}${hostId}_${dest}_${size}_${lastModified}`
+// 3.5.17: cheia poartă user id-ul (`wt_up_u<uid>_…`), ca la download-uri (dlresume.ts): alt cont în
+// acelaşi browser nu vede (şi nu poate „relua" peste) upload-urile altcuiva, iar logout-ul explicit
+// le uită. Cheile VECHI, fără cont (`wt_up_<host>_…`), nu au proprietar sigur → se şterg la pornire.
+export const upLsKey = (userId: number, hostId: number, dest: string, size: number, lastModified: number) =>
+  `${LS_PREFIX}u${userId}_${hostId}_${dest}_${size}_${lastModified}`
 
-/** Inversa lui `upLsKey` — necesară DOAR pentru valorile vechi (uid simplu), unde cheia e singura
-    sursă de host/cale. `dest` poate conţine `_`, de aceea tăiem de la capete, nu cu split. */
-export function parseUpLsKey(key: string): { hostId: number; dest: string; size: number; lastModified: number } | null {
+/** Inversa lui `upLsKey`. `dest` poate conţine `_`, de aceea tăiem de la capete, nu cu split.
+    O cheie în formatul vechi (fără `u<uid>_`) → null (vezi isLegacyUpKey). */
+export function parseUpLsKey(key: string): { userId: number; hostId: number; dest: string; size: number; lastModified: number } | null {
   if (!key.startsWith(LS_PREFIX)) return null
   const rest = key.slice(LS_PREFIX.length)
-  const m = rest.match(/^(\d+)_(.*)_(\d+)_(\d+)$/)
+  const m = rest.match(/^u(\d+)_(\d+)_(.*)_(\d+)_(\d+)$/)
   if (!m) return null
-  return { hostId: Number(m[1]), dest: m[2], size: Number(m[3]), lastModified: Number(m[4]) }
+  return { userId: Number(m[1]), hostId: Number(m[2]), dest: m[3], size: Number(m[4]), lastModified: Number(m[5]) }
+}
+
+/** Cheie `wt_up_*` care NU e în formatul cheiat pe cont (dinainte de 3.5.17, sau stricată). */
+export const isLegacyUpKey = (key: string): boolean => key.startsWith(LS_PREFIX) && parseUpLsKey(key) == null
+
+/** Împarte cheile `wt_up_*` după proprietar: ale contului curent (de arătat), vechi/fără cont (de
+    şters), ale altor conturi (neatinse — revin la login-ul lor). */
+export function classifyUpKeys(keys: string[], userId: number): { mine: string[]; legacy: string[]; others: string[] } {
+  const out = { mine: [] as string[], legacy: [] as string[], others: [] as string[] }
+  for (const k of keys) {
+    if (!k.startsWith(LS_PREFIX)) continue
+    const p = parseUpLsKey(k)
+    if (!p) out.legacy.push(k)
+    else if (p.userId === userId) out.mine.push(k)
+    else out.others.push(k)
+  }
+  return out
+}
+
+function lsKeysWithPrefix(prefix: string): string[] {
+  const keys: string[] = []
+  try {
+    const ls = window.localStorage
+    for (let i = 0; i < ls.length; i++) {
+      const k = ls.key(i)
+      if (k && k.startsWith(prefix)) keys.push(k)
+    }
+  } catch { return [] }
+  return keys
 }
 
 /** Valoarea din localStorage → metadate. Compatibil înapoi: un uid simplu (format vechi) devine
@@ -213,7 +245,10 @@ interface Ctl {
   hostName: string
   dest: string
   name: string
-  lsKey: string
+  /** cheia din localStorage; null = contul nu e (încă) cunoscut → nu persistăm nimic */
+  lsKey: string | null
+  /** contul care a pornit upload-ul (null = necunoscut) */
+  owner: number | null
   file: File | null            // null = orfan (după reload): ştim că există, nu-l putem relua
   xhrs: Set<XMLHttpRequest>    // feliile în zbor (pipelining: până la UP_WINDOW concurente)
   cancelled: boolean
@@ -240,7 +275,13 @@ function newUid(): string {
   return Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('')
 }
 
+// ── contul curent ─────────────────────────────────────────────────────────────────────────
+let currentUser: number | null = null
+/** App-ul o setează din `/api/state.user_id` (acelaşi tipar ca setDownloadUser). */
+export function setUploadUser(id: number | null): void { currentUser = id }
+
 function writeMeta(c: Ctl, pos: number) {
+  if (!c.lsKey || c.owner == null || c.owner !== currentUser) return
   const m: UploadMeta = { uid: c.id, hostId: c.hostId, hostName: c.hostName, dest: c.dest, name: c.name,
                           size: c.size, lastModified: c.lastModified, pos, updated: Date.now() }
   lsSet(c.lsKey, JSON.stringify(m))
@@ -485,7 +526,7 @@ async function runLoop(c: Ctl): Promise<void> {
     if (c.cancelled) return
     const crcQ = doCrc ? `&crc32=${crc >>> 0}` : ''
     await withStepup(hid, () => api(`/api/hosts/${hid}/fs/upload/commit?${q}${crcQ}`, { method: 'POST' }))
-    lsRemove(c.lsKey)
+    if (c.lsKey) lsRemove(c.lsKey)
     const inserted = c.then === 'insert-path' ? insertPathInto(c.sid, c.dest) : undefined
     publish(c, { pos: file.size, pct: 100, bytesPerSec: 0, etaSec: 0, state: 'done', inserted })
     ctls.delete(c.id)        // eliberăm File-ul; rândul rămâne în store până la dismiss/expirare
@@ -527,13 +568,14 @@ export interface StartUploadOpts {
     rulează doar după un `done`). */
 export async function startUpload(o: StartUploadOpts): Promise<string> {
   ensureGlobalListeners()
-  const lsKey = upLsKey(o.hostId, o.dest, o.file.size, o.file.lastModified)
-  const meta = parseUploadMeta(lsGet(lsKey), lsKey)
+  const owner = currentUser
+  const lsKey = owner == null ? null : upLsKey(owner, o.hostId, o.dest, o.file.size, o.file.lastModified)
+  const meta = lsKey ? parseUploadMeta(lsGet(lsKey), lsKey) : null
   const id = meta?.uid ?? newUid()
   let c = ctls.get(id)
   if (c && c.running) return id
   if (!c) {
-    c = { id, hostId: o.hostId, hostName: o.hostName, dest: o.dest, name: o.name ?? o.file.name, lsKey,
+    c = { id, hostId: o.hostId, hostName: o.hostName, dest: o.dest, name: o.name ?? o.file.name, lsKey, owner,
           file: o.file, xhrs: new Set(), cancelled: false, paused: false, running: false, authLost: false,
           size: o.file.size, lastModified: o.file.lastModified, then: o.then, sid: o.sid }
     ctls.set(id, c)
@@ -597,7 +639,7 @@ export function cancelUpload(id: string): void {
     abortInflight(c, 'cancel')
     fetch(`/api/hosts/${c.hostId}/fs/upload?path=${encodeURIComponent(c.dest)}&upload_id=${c.id}`,
       { method: 'DELETE', credentials: 'same-origin' }).catch(() => {})
-    lsRemove(c.lsKey)
+    if (c.lsKey) lsRemove(c.lsKey)
     ctls.delete(id)
   }
   uploadStore.remove(id)
@@ -621,28 +663,53 @@ export function isUploadBusy(hostId: number, dest: string): boolean {
   return false
 }
 
-/** La pornirea aplicaţiei: cheile `wt_up_*` rămase = transferuri neterminate într-o sesiune
-    anterioară. Fără File nu le putem relua, dar le ARĂTĂM (altfel omul nu ştie că pe host zace
-    un `.wtpart` de 12 GB şi că un re-drop ar continua de acolo, nu de la zero). */
-export function restoreOrphans(): void {
+/** La pornirea aplicaţiei (autentificat, cont cunoscut): cheile `wt_up_u<uid>_*` ale CONTULUI
+    CURENT rămase = transferuri neterminate într-o sesiune anterioară. Fără File nu le putem relua,
+    dar le ARĂTĂM (altfel omul nu ştie că pe host zace un `.wtpart` de 12 GB şi că un re-drop ar
+    continua de acolo, nu de la zero). Cheile vechi fără cont se şterg (nu ştim al cui e temp-ul —
+    GC-ul de pe server îl curăţă); cele ale altor conturi rămân neatinse. */
+export function restoreOrphans(userId: number | null = currentUser): void {
+  if (userId == null) return
   ensureGlobalListeners()
-  let keys: string[] = []
-  try {
-    for (let i = 0; i < window.localStorage.length; i++) {
-      const k = window.localStorage.key(i)
-      if (k && k.startsWith(LS_PREFIX)) keys.push(k)
-    }
-  } catch { keys = [] }
-  for (const k of keys) {
+  const { mine, legacy } = classifyUpKeys(lsKeysWithPrefix(LS_PREFIX), userId)
+  for (const k of legacy) lsRemove(k)
+  for (const k of mine) {
     const m = parseUploadMeta(lsGet(k), k)
     if (!m) { lsRemove(k); continue }          // valoare coruptă: nu are cum să reia nimic
     if (ctls.has(m.uid) || uploadStore.get(m.uid)) continue
     const c: Ctl = { id: m.uid, hostId: m.hostId, hostName: m.hostName, dest: m.dest, name: m.name, lsKey: k,
-                     file: null, xhrs: new Set(), cancelled: false, paused: false, running: false,
+                     owner: userId, file: null, xhrs: new Set(), cancelled: false, paused: false, running: false,
                      authLost: false, size: m.size, lastModified: m.lastModified }
     ctls.set(m.uid, c)
     publish(c, { pos: m.pos, pct: m.size ? Math.round((m.pos / m.size) * 100) : 0, state: 'orphan', attempts: 0 })
   }
+}
+
+/** Sesiunea web s-a terminat (expirare): ascundem rândurile orfane (cheile rămân — revin la
+    următorul login al ACELUIAŞI cont) şi nu mai persistăm nimic. */
+export function hideUploadOrphans(): void {
+  currentUser = null
+  for (const [id, c] of ctls) {
+    if (!c.running && !c.file && uploadStore.get(id)?.state === 'orphan') { ctls.delete(id); uploadStore.remove(id) }
+  }
+}
+
+/** Logout explicit: uită upload-urile neterminate ale contului — cheile din localStorage, rândurile
+    şi controlerele (feliile în zbor se taie; oricum ar pica cu 401). Temp-urile de pe host se cer
+    şterse best-effort cât sesiunea mai e validă (altfel le ia GC-ul de pe server). */
+export function forgetUploads(): void {
+  const uid = currentUser
+  currentUser = null
+  for (const [id, c] of ctls) {
+    if (c.owner !== uid && uid != null) continue
+    c.cancelled = true
+    abortInflight(c, 'cancel')
+    fetch(`/api/hosts/${c.hostId}/fs/upload?path=${encodeURIComponent(c.dest)}&upload_id=${c.id}`,
+      { method: 'DELETE', credentials: 'same-origin', keepalive: true }).catch(() => {})
+    ctls.delete(id)
+    uploadStore.remove(id)
+  }
+  if (uid != null) for (const k of lsKeysWithPrefix(`${LS_PREFIX}u${uid}_`)) lsRemove(k)
 }
 
 // ── navigare: „deschide panoul de fişiere al hostului în directorul ţintei" ──────────────

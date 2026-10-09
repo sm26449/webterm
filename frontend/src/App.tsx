@@ -34,7 +34,7 @@ import { useFocusTrap } from './lib/useFocusTrap'
 import { copyText } from './lib/clipboard'
 import { CloseIcon, CopyIcon, ShieldIcon } from './components/Icons'
 import { ensureNotificationPermission, notify, notifyError, registerToast } from './lib/notify'
-import { restoreOrphans } from './lib/uploads'
+import { forgetUploads, hideUploadOrphans, restoreOrphans, setUploadUser } from './lib/uploads'
 import { forgetDownloads, hideInterruptedDownloads, restoreInterruptedDownloads, setDownloadUser } from './lib/downloads'
 import { clearAll as clearClipHistory } from './lib/cliphistory'
 import { askSecret, registerSecretPrompt, SecretAsk } from './lib/secretPrompt'
@@ -870,11 +870,17 @@ function MainApp() {
   // 403 pe orice acțiune de host (run/fs/update/provision/uninstall), deschide fereastra pe
   // server prin /stepup și reîncearcă cererea. Fără asta, doar crearea sesiunii cerea 2FA.
   // NB: HOOK — tot înainte de orice `return` timpuriu.
-  // upload-uri rămase neterminate într-o sesiune anterioară (chei `wt_up_*`): le arătăm în bara
-  // de transferuri ca „orfane" imediat ce suntem autentificaţi (Discard are nevoie de API)
+  // upload-uri rămase neterminate într-o sesiune anterioară (chei `wt_up_u<uid>_*`, cheiate pe cont
+  // din 3.5.17): le arătăm în bara de transferuri ca „orfane" imediat ce ştim contul (Discard are
+  // nevoie de API). Expirarea sesiunii le ascunde; cheile rămân pentru acelaşi cont.
   useEffect(() => {
-    if (appState?.authenticated) restoreOrphans()
-  }, [appState?.authenticated])
+    if (appState?.authenticated && appState.user_id != null) {
+      setUploadUser(appState.user_id)
+      restoreOrphans(appState.user_id)
+    } else if (appState?.authenticated === false) {
+      hideUploadOrphans()
+    }
+  }, [appState?.authenticated, appState?.user_id])
   // download-uri File System Access întrerupte de un reload (IndexedDB, cheiate pe user id): rânduri
   // „Întrerupt — Resume / Discard". Ieşirea din sesiune le ascunde şi opreşte persistarea.
   useEffect(() => {
@@ -1596,8 +1602,10 @@ function MainApp() {
           onConfirm={async () => {
             setShowLogoutConfirm(false)
             clearClipHistory()
-            // logout explicit: descărcările întrerupte ale contului se uită (IndexedDB); un IDB
-            // blocat nu are voie să ţină logout-ul pe loc
+            // logout explicit: upload-urile neterminate (localStorage + temp-uri pe host, best-effort)
+            // şi descărcările întrerupte (IndexedDB) ale contului se uită; un IDB blocat nu are voie
+            // să ţină logout-ul pe loc
+            forgetUploads()
             await Promise.race([forgetDownloads(), new Promise((r) => setTimeout(r, 1500))])
             await api('/api/logout', { method: 'POST' })
             setAppState({ ...appState, authenticated: false })

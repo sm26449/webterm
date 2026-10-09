@@ -2791,14 +2791,17 @@ async def fs_copy_start(body: FsCopyIn, request: Request, user=Depends(security.
     except (core.FileError, TimeoutError) as e:
         raise _file_api_error(e)
     first = paths[0] if len(paths) == 1 else (paths[0].rstrip("/").rsplit("/", 1)[0] or "/")
-    audit.detail(request, "copy %d file%s %s:%s → %s:%s" % (
-        len(paths), "" if len(paths) == 1 else "s", src["name"], first, dst["name"], dst_dir))
+    # „copy 2 files, 1 folder alpha:/srv → beta:/backup": tipul căilor cerute vine de pe sursă (stat,
+    # plafonat în timp); înainte scria „copy N files" şi când selecţia era făcută din foldere
+    nf, nd, nu = await fscopy.count_kinds(body.src_host, paths, src_home)
+    audit.detail(request, "copy %s %s:%s → %s:%s" % (
+        fscopy.audit_what(nf, nd, nu), src["name"], first, dst["name"], dst_dir))
     try:
         job = fscopy.start(user["id"], body.src_host, src["name"], body.dst_host, dst["name"],
                            dst_dir, paths, body.on_conflict, src_home=src_home)
     except fscopy.CopyRefused as e:
         raise _copy_refused(e)
-    log.info("fs copy %s started: %d files host=%s → host=%s:%s", job.id, len(paths),
+    log.info("fs copy %s started: %s host=%s → host=%s:%s", job.id, fscopy.audit_what(nf, nd, nu),
              body.src_host, body.dst_host, dst_dir)
     return {"job_id": job.id, "dst_dir": dst_dir}
 
@@ -2848,8 +2851,11 @@ async def fs_copy_retry(job_id: str, request: Request, user=Depends(security.req
         job = fscopy.retry(old)
     except fscopy.CopyRefused as e:
         raise _copy_refused(e)
-    audit.detail(request, "retry copy %s → %s:%s (%d item%s)" % (
-        old.src_host_name, old.dst_host_name, old.dst_dir, len(job.files), "" if len(job.files) == 1 else "s"))
+    old_dirs = {f.src for f in old.files if f.root is None and f.kind == "dir"}
+    top = [f.src for f in job.files if f.root is None]
+    nd = sum(1 for p in top if p in old_dirs)
+    audit.detail(request, "retry copy %s %s → %s:%s" % (
+        fscopy.audit_what(len(top) - nd, nd), old.src_host_name, old.dst_host_name, old.dst_dir))
     log.info("fs copy %s retried as %s", old.id, job.id)
     return {"job_id": job.id, "dst_dir": job.dst_dir}
 

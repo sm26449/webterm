@@ -221,6 +221,10 @@ async def main():
         tree(a)
         b.mkdir(HOME + "/in")
 
+        async def last_audit(path="/api/fs/copy"):
+            rows = await db.fetchall("SELECT detail FROM audit_log WHERE path=? ORDER BY id DESC LIMIT 1", path)
+            return rows[0]["detail"] if rows else ""
+
         async def copy(paths, dst_dir=HOME + "/in", on_conflict="skip", src=A, dst=B):
             return await c.post("/api/fs/copy", json={"src_host": src, "paths": paths, "dst_host": dst,
                                                       "dst_dir": dst_dir, "on_conflict": on_conflict})
@@ -228,6 +232,9 @@ async def main():
         # ── v58 → v58: arborele complet, cu modurile ──
         r = await copy(["~/proj"])
         check("POST folder → 200", r.status_code == 200, r.text[:200])
+        det = await last_audit()
+        check("audit: un folder → „copy 1 folder alpha:~/proj → beta:/home/u/in” (nu „1 file”)",
+              det == "copy 1 folder alpha:~/proj → beta:%s/in" % HOME, det)
         j = await wait_done(c, r.json()["job_id"])
         D = HOME + "/in/proj"
         check("job done, fără erori", j["state"] == "done" and j["files_failed"] == 0, str(j)[:400])
@@ -388,6 +395,9 @@ async def main():
         a.read_fail.add(HOME + "/proj/sub/deep/x.bin")
         r = await copy(["~/proj", "~/key.pem"], dst_dir="/tmp/t3", on_conflict="rename")
         old = r.json()["job_id"]
+        det = await last_audit()
+        check("audit: selecţie mixtă → „copy 1 file, 1 folder alpha:~ → beta:/tmp/t3”",
+              det == "copy 1 file, 1 folder alpha:~ → beta:/tmp/t3", det)
         j = await wait_done(c, old)
         check("job cu un fişier eşuat în folder → failed", j["state"] == "failed"
               and [e["name"] for e in j["errors"]] == ["proj/sub/deep/x.bin"], str(j["errors"])[:300])
@@ -395,6 +405,9 @@ async def main():
         writes = b.writes
         r = await c.post("/api/fs/copy/%s/retry" % old)
         check("POST /retry → 200 + job nou", r.status_code == 200 and r.json()["job_id"] != old, r.text[:200])
+        det = await last_audit("/api/fs/copy/%s/retry" % old)
+        check("audit retry: „retry copy 1 folder alpha → beta:/tmp/t3”",
+              det == "retry copy 1 folder alpha → beta:/tmp/t3", det)
         j = await wait_done(c, r.json()["job_id"])
         check("retry: x.bin aterizează în ACELAŞI „proj (1)” (nu „proj (2)”)", j["state"] == "done"
               and bytes(b.files.get("/tmp/t3/proj (1)/sub/deep/x.bin", b"")) == bytes(
@@ -422,6 +435,13 @@ async def main():
         check("…şi fişierul ajunge", j["state"] == "done" and b.files.get("/tmp/key.pem") == bytearray(b"K"))
         await db.execute("UPDATE hosts SET require_2fa=0 WHERE id=?", B)
         check("job-ul altui user nu poate fi reluat (get → None)", fscopy.get(old, uid + 99) is None)
+
+    # textul de audit, pur
+    check("audit_what: 3 files / 1 file / 1 folder / 2 files, 3 folders / 0 files",
+          [fscopy.audit_what(*x) for x in ((3, 0), (1, 0), (0, 1), (2, 3), (0, 0))]
+          == ["3 files", "1 file", "1 folder", "2 files, 3 folders", "0 files"])
+    check("audit_what: tip necunoscut (stat eşuat) → „N items”",
+          fscopy.audit_what(1, 1, 1) == "3 items" and fscopy.audit_what(0, 0, 1) == "1 item")
 
     await db.close()
     print("\n%d/%d teste trecute" % (ok, total))

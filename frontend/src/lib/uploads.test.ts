@@ -1,34 +1,130 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
-  BACKOFF_CAP_MS, backoffMs, crc32, dirName, etaSec, fmtBytes, fmtEta, nextChunkSize, parseUpLsKey,
-  parseUploadMeta, resolveResync, speedTracker, UP_CHUNK, UP_CHUNK_MAX, UP_CHUNK_MIN, upLsKey,
+  BACKOFF_CAP_MS, backoffMs, classifyUpKeys, crc32, dirName, etaSec, fmtBytes, fmtEta, forgetUploads,
+  hideUploadOrphans, isLegacyUpKey, nextChunkSize, parseUpLsKey, parseUploadMeta, resolveResync,
+  restoreOrphans, setUploadUser, speedTracker, UP_CHUNK, UP_CHUNK_MAX, UP_CHUNK_MIN, upLsKey,
 } from './uploads'
+import { uploadStore } from './uploadStore'
 
 const UID = 'a'.repeat(32)
 
 describe('metadate persistate (wt_up_*)', () => {
-  it('cheia se construieşte şi se parsează înapoi, chiar cu `_` în cale', () => {
-    const k = upLsKey(7, '/srv/my_dir/big_file.iso', 17_000_000_000, 1700000000000)
-    expect(parseUpLsKey(k)).toEqual({ hostId: 7, dest: '/srv/my_dir/big_file.iso', size: 17_000_000_000, lastModified: 1700000000000 })
+  it('cheia (cheiată pe cont) se construieşte şi se parsează înapoi, chiar cu `_` în cale', () => {
+    const k = upLsKey(4, 7, '/srv/my_dir/big_file.iso', 17_000_000_000, 1700000000000)
+    expect(k.startsWith('wt_up_u4_7_')).toBe(true)
+    expect(parseUpLsKey(k)).toEqual({ userId: 4, hostId: 7, dest: '/srv/my_dir/big_file.iso', size: 17_000_000_000, lastModified: 1700000000000 })
     expect(parseUpLsKey('wt_lang')).toBeNull()
   })
 
-  it('format VECHI (doar uid): metadatele se reconstruiesc din cheie, pos necunoscut = 0', () => {
-    const k = upLsKey(3, '/tmp/a_b.bin', 10, 20)
+  it('cheile VECHI, fără cont, nu se parsează → legacy', () => {
+    expect(parseUpLsKey('wt_up_7_/srv/a.iso_10_20')).toBeNull()
+    expect(isLegacyUpKey('wt_up_7_/srv/a.iso_10_20')).toBe(true)
+    expect(isLegacyUpKey(upLsKey(1, 7, '/srv/a.iso', 10, 20))).toBe(false)
+    expect(isLegacyUpKey('wt_lang')).toBe(false)
+  })
+
+  it('classifyUpKeys: ale mele / vechi / ale altora (u1 ≠ u12)', () => {
+    const mine = upLsKey(1, 2, '/a', 1, 1)
+    const other = upLsKey(12, 2, '/a', 1, 1)
+    const legacy = 'wt_up_2_/a_1_1'
+    expect(classifyUpKeys([mine, other, legacy, 'wt_theme'], 1)).toEqual({ mine: [mine], legacy: [legacy], others: [other] })
+  })
+
+  it('valoare uid simplu: metadatele se reconstruiesc din cheie, pos necunoscut = 0', () => {
+    const k = upLsKey(1, 3, '/tmp/a_b.bin', 10, 20)
     const m = parseUploadMeta(UID, k)
     expect(m).toMatchObject({ uid: UID, hostId: 3, dest: '/tmp/a_b.bin', name: 'a_b.bin', size: 10, lastModified: 20, pos: 0, hostName: '' })
   })
 
-  it('format NOU (JSON): se citeşte întreg', () => {
+  it('format JSON: se citeşte întreg', () => {
     const raw = JSON.stringify({ uid: UID, hostId: 2, hostName: 'nas', dest: '/x/y.iso', name: 'y.iso', size: 5, lastModified: 9, pos: 3, updated: 1 })
-    expect(parseUploadMeta(raw, 'wt_up_2_/x/y.iso_5_9')).toEqual({ uid: UID, hostId: 2, hostName: 'nas', dest: '/x/y.iso', name: 'y.iso', size: 5, lastModified: 9, pos: 3, updated: 1 })
+    expect(parseUploadMeta(raw, 'wt_up_u1_2_/x/y.iso_5_9')).toEqual({ uid: UID, hostId: 2, hostName: 'nas', dest: '/x/y.iso', name: 'y.iso', size: 5, lastModified: 9, pos: 3, updated: 1 })
   })
 
   it('valori corupte → null (cheia e ştearsă de restoreOrphans)', () => {
-    expect(parseUploadMeta('not json, not hex', 'wt_up_1_/a_1_1')).toBeNull()
-    expect(parseUploadMeta(JSON.stringify({ uid: 'zz' }), 'wt_up_1_/a_1_1')).toBeNull()
-    expect(parseUploadMeta(null, 'wt_up_1_/a_1_1')).toBeNull()
-    expect(parseUploadMeta(UID, 'wt_up_broken')).toBeNull()   // uid vechi, dar cheia nu se poate parsa
+    expect(parseUploadMeta('not json, not hex', 'wt_up_u1_1_/a_1_1')).toBeNull()
+    expect(parseUploadMeta(JSON.stringify({ uid: 'zz' }), 'wt_up_u1_1_/a_1_1')).toBeNull()
+    expect(parseUploadMeta(null, 'wt_up_u1_1_/a_1_1')).toBeNull()
+    expect(parseUploadMeta(UID, 'wt_up_broken')).toBeNull()   // uid simplu, dar cheia nu se poate parsa
+  })
+})
+
+describe('upload-uri neterminate per cont (restoreOrphans / hideUploadOrphans / forgetUploads)', () => {
+  class FakeStorage {
+    m = new Map<string, string>()
+    get length() { return this.m.size }
+    key(i: number) { return [...this.m.keys()][i] ?? null }
+    getItem(k: string) { return this.m.has(k) ? this.m.get(k)! : null }
+    setItem(k: string, v: string) { this.m.set(k, v) }
+    removeItem(k: string) { this.m.delete(k) }
+  }
+  let storage: FakeStorage
+  let fetched: string[]
+  const meta = (uid: string, hostId: number, dest: string) =>
+    JSON.stringify({ uid, hostId, hostName: 'nas', dest, name: dest.slice(1), size: 100, lastModified: 1, pos: 40, updated: 1 })
+  const U1 = '1'.repeat(32), U2 = '2'.repeat(32), U3 = '3'.repeat(32)
+  beforeEach(() => {
+    storage = new FakeStorage()
+    fetched = []
+    vi.stubGlobal('window', { localStorage: storage, addEventListener: () => {} })
+    vi.stubGlobal('document', { addEventListener: () => {}, visibilityState: 'visible' })
+    vi.stubGlobal('fetch', (u: string) => { fetched.push(u); return Promise.resolve(new Response(null)) })
+    for (const id of [...uploadStore.snapshot().keys()]) uploadStore.remove(id)
+  })
+  afterEach(() => {
+    forgetUploads()       // curăţă controlerele modulului între teste
+    for (const id of [...uploadStore.snapshot().keys()]) uploadStore.remove(id)
+    vi.unstubAllGlobals()
+  })
+
+  it('arată doar orfanii contului curent, şterge cheile vechi, nu atinge alte conturi', () => {
+    storage.setItem(upLsKey(5, 1, '/a.iso', 100, 1), meta(U1, 1, '/a.iso'))
+    storage.setItem(upLsKey(6, 1, '/b.iso', 100, 1), meta(U2, 1, '/b.iso'))
+    storage.setItem('wt_up_1_/c.iso_100_1', U3)                  // format vechi, fără cont
+    storage.setItem('wt_theme', 'dark')
+    setUploadUser(5)
+    restoreOrphans(5)
+    const rows = [...uploadStore.snapshot().values()]
+    expect(rows.map((r) => [r.id, r.state])).toEqual([[U1, 'orphan']])
+    expect(storage.getItem('wt_up_1_/c.iso_100_1')).toBeNull()
+    expect(storage.getItem(upLsKey(6, 1, '/b.iso', 100, 1))).not.toBeNull()
+    expect(storage.getItem('wt_theme')).toBe('dark')
+  })
+
+  it('fără cont cunoscut nu arată nimic şi nu şterge nimic', () => {
+    storage.setItem('wt_up_1_/c.iso_100_1', U3)
+    restoreOrphans(null)
+    expect(uploadStore.snapshot().size).toBe(0)
+    expect(storage.getItem('wt_up_1_/c.iso_100_1')).toBe(U3)
+  })
+
+  it('expirarea sesiunii ascunde rândurile, dar cheile rămân pentru acelaşi cont', () => {
+    const k = upLsKey(5, 1, '/a.iso', 100, 1)
+    storage.setItem(k, meta(U1, 1, '/a.iso'))
+    setUploadUser(5)
+    restoreOrphans(5)
+    hideUploadOrphans()
+    expect(uploadStore.snapshot().size).toBe(0)
+    expect(storage.getItem(k)).not.toBeNull()
+    setUploadUser(5)
+    restoreOrphans(5)
+    expect(uploadStore.get(U1)?.state).toBe('orphan')
+  })
+
+  it('logout explicit: uită cheile + rândurile contului, cere ştergerea temp-ului, lasă alte conturi', () => {
+    const mine = upLsKey(5, 1, '/a.iso', 100, 1)
+    const other = upLsKey(6, 1, '/b.iso', 100, 1)
+    storage.setItem(mine, meta(U1, 1, '/a.iso'))
+    storage.setItem(other, meta(U2, 1, '/b.iso'))
+    setUploadUser(5)
+    restoreOrphans(5)
+    forgetUploads()
+    expect(storage.getItem(mine)).toBeNull()
+    expect(storage.getItem(other)).not.toBeNull()
+    expect(uploadStore.snapshot().size).toBe(0)
+    expect(fetched).toEqual([`/api/hosts/1/fs/upload?path=%2Fa.iso&upload_id=${U1}`])
+    restoreOrphans(5)                                          // nimic de restaurat după logout
+    expect(uploadStore.snapshot().size).toBe(0)
   })
 })
 
