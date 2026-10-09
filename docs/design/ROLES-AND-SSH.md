@@ -1122,6 +1122,10 @@ relies on `authz` for everything; building it on unfinished RBAC doubles the rev
 
 ## 5. Open questions for the maintainer
 
+> **Decided 2026-10-09:** the maintainer accepted the recommendation (**R**) on every question
+> below, questions 1–21. Implementation follows them; any change goes through this document first.
+
+
 Each has options and a recommendation (**R**).
 
 1. **Is the product stance change acceptable?** Today's docs say "no RBAC, by design".
