@@ -9,7 +9,7 @@ const job = (p: Partial<UploadJob>): UploadJob => ({
 })
 
 // Rândul din Transferuri: textul lung (fişierul în lucru, rezumatul, eroarea) pe linia a doua,
-// ca să nu strivească numele (capturile 3.5.17 ale copierii de foldere).
+// ca să nu strivească numele (capturile 3.5.18 ale copierii de foldere).
 describe('jobStatusParts', () => {
   it('copiere în curs: % + viteză pe linia numelui, fişierul + numărătorile dedesubt', () => {
     const p = jobStatusParts(job({ dir: 'copy', detail: '→ logs/a.log · files 6/14 · folders 2/3' }), t)

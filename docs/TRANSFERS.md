@@ -74,12 +74,12 @@ A byte-level watchdog marks a chunk **Stalled** after 20 s without progress and
 aborts + resends after 60 s; each chunk gets up to 8 attempts with capped backoff; the job
 resumes by itself on `online` / tab visible. After a page reload, unfinished uploads are listed
 as **Incomplete** — drop the same file into the same folder to continue from the confirmed
-offset; **Discard** deletes the partial on the host. That list is **per account** (3.5.17): the
+offset; **Discard** deletes the partial on the host. That list is **per account** (3.5.18): the
 metadata is keyed by user id, so another account signing in on the same browser neither sees those
 rows nor resumes onto another account's partial; an expired session hides them until the same
 account signs in again; an explicit **Sign out** forgets them (and asks the host to delete the
 partials while the session is still valid — otherwise the server's temp GC removes them). Keys
-written by 3.5.16 and older carry no account and are dropped on first start.
+written by 3.5.17 and older carry no account and are dropped on first start.
 
 ## Downloads (host → browser)
 

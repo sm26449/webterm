@@ -53,7 +53,7 @@ const TAGS = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa', 'best-prac
 // Forwards, Services, Docker, Toolbox/Connections, Toolbox/SSH keys) = 8, host offline ×
 // (Overview, Sessions) = 2, toast de eroare, Settings × 7, file browser, Status, Add host × 3,
 // FleetRun, `?`, walkthrough, paleta, ConfirmModal, panoul de alerte, dialogul „link de replay"
-// + pagina PUBLICĂ de replay + dialogul „Copy to host" (3.5.17) = 35 (+ Monaco cu WT_AGENT=1).
+// + pagina PUBLICĂ de replay + dialogul „Copy to host" (3.5.18) = 35 (+ Monaco cu WT_AGENT=1).
 // Mobil: sesiune dark + light.
 const PER_THEME = 35 + (HAS_AGENT ? 1 : 0)
 const EXPECTED_SCANS = 2 * PER_THEME + 2

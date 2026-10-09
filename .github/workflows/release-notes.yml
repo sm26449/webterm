@@ -2,7 +2,7 @@ name: Release notes
 
 # A GitHub Release for every tag, with its notes taken from CHANGELOG.md (the `## [x.y.z]` section,
 # extracted by scripts/changelog-section.py) and a footer with the ghcr image and the upgrade
-# command. Before 3.5.17 the notes lived only in CHANGELOG.md.
+# command. Before 3.5.18 the notes lived only in CHANGELOG.md.
 #
 # SEPARATE from docker-publish.yml on purpose: the image is gated by the whole test chain and must
 # not depend on (or wait for, or be failed by) a page of text. The notes may appear a few minutes

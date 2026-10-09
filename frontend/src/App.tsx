@@ -871,7 +871,7 @@ function MainApp() {
   // server prin /stepup și reîncearcă cererea. Fără asta, doar crearea sesiunii cerea 2FA.
   // NB: HOOK — tot înainte de orice `return` timpuriu.
   // upload-uri rămase neterminate într-o sesiune anterioară (chei `wt_up_u<uid>_*`, cheiate pe cont
-  // din 3.5.17): le arătăm în bara de transferuri ca „orfane" imediat ce ştim contul (Discard are
+  // din 3.5.18): le arătăm în bara de transferuri ca „orfane" imediat ce ştim contul (Discard are
   // nevoie de API). Expirarea sesiunii le ascunde; cheile rămân pentru acelaşi cont.
   useEffect(() => {
     if (appState?.authenticated && appState.user_id != null) {

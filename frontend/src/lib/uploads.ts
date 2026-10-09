@@ -152,7 +152,7 @@ export const LS_PREFIX = 'wt_up_'
 // upload_id STABIL per (cont, host, cale, fișier): persistat în localStorage, ca un reload de pagină
 // să poată relua același upload (browserul nu re-citește fișierul singur — re-selectezi același
 // fișier și reia de unde a rămas, exact ca protocolul tus).
-// 3.5.17: cheia poartă user id-ul (`wt_up_u<uid>_…`), ca la download-uri (dlresume.ts): alt cont în
+// 3.5.18: cheia poartă user id-ul (`wt_up_u<uid>_…`), ca la download-uri (dlresume.ts): alt cont în
 // acelaşi browser nu vede (şi nu poate „relua" peste) upload-urile altcuiva, iar logout-ul explicit
 // le uită. Cheile VECHI, fără cont (`wt_up_<host>_…`), nu au proprietar sigur → se şterg la pornire.
 export const upLsKey = (userId: number, hostId: number, dest: string, size: number, lastModified: number) =>
@@ -168,7 +168,7 @@ export function parseUpLsKey(key: string): { userId: number; hostId: number; des
   return { userId: Number(m[1]), hostId: Number(m[2]), dest: m[3], size: Number(m[4]), lastModified: Number(m[5]) }
 }
 
-/** Cheie `wt_up_*` care NU e în formatul cheiat pe cont (dinainte de 3.5.17, sau stricată). */
+/** Cheie `wt_up_*` care NU e în formatul cheiat pe cont (dinainte de 3.5.18, sau stricată). */
 export const isLegacyUpKey = (key: string): boolean => key.startsWith(LS_PREFIX) && parseUpLsKey(key) == null
 
 /** Împarte cheile `wt_up_*` după proprietar: ale contului curent (de arătat), vechi/fără cont (de

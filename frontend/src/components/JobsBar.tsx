@@ -40,7 +40,7 @@ type TFn = (k: string, v?: Record<string, string | number>) => string
     ce poate fi lung (fişierul copiat acum + numărători, rezumatul de la final, eroarea, nota de
     download, explicaţia „Incomplet"), pe o a doua linie. Înainte totul stătea pe o singură linie
     de 32 px, iar textul lung (o copiere de folder: „→ logs/access.log · files 6/14 · folders 2/3")
-    strivea numele rândului la lăţime zero şi se tăia el însuşi în „…" — văzut în capturile 3.5.17. */
+    strivea numele rândului la lăţime zero şi se tăia el însuşi în „…" — văzut în capturile 3.5.18. */
 export function jobStatusParts(j: UploadJob, t: TFn): { head: string; extra: string } {
   if (j.state === 'err') {
     const why = j.error || t('files.uploadFailed')

@@ -101,7 +101,7 @@ export function copyPatch(s: CopyStatus, t: T): Partial<UploadJob> {
     : (s.state === 'done' ? 100 : 0)
   const parts = [t('transfers.copyFiles', { done: s.files_done, total: s.files_total })]
   if (s.folders_total) parts.push(t('transfers.copyFolders', { done: s.folders_done ?? 0, total: s.folders_total }))
-  // un symlink dintr-un folder e şi „sărit" (files_skipped) şi „necopiat" (nota): în capturile 3.5.17
+  // un symlink dintr-un folder e şi „sărit" (files_skipped) şi „necopiat" (nota): în capturile 3.5.18
   // un singur link apărea ca „skipped: 1 · not copied: 1" — două lucruri. „Sărite" = doar cele care
   // existau deja pe destinaţie (regula Skip).
   const skipped = Math.max(0, s.files_skipped - (s.state === 'running' ? 0 : notCopiedCount(s)))

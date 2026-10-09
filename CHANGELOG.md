@@ -30,7 +30,7 @@ back.
   Keys are now `wt_up_u<user id>_…`, like the interrupted downloads in IndexedDB since 3.5.13: only
   the signed-in account's rows are shown, an expired session hides them until the same account
   returns, and an explicit **Sign out** forgets them (and asks the host to delete the partials).
-  Keys from 3.5.16 and older have no owner and are dropped on first start.
+  Keys from 3.5.17 and older have no owner and are dropped on first start.
 - **The audit log says what a copy really was.** `POST /api/fs/copy` was recorded as `copy N files`
   even when the selection was folders (since 3.5.16 a folder copies a whole tree). It now reads
   `copy 2 files, 1 folder alpha:/srv → beta:/backup` — the types come from a bounded `fs_stat` on
