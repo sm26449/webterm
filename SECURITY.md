@@ -43,10 +43,14 @@ explained in [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md), not bugs:
   operations are NOT sandboxed. Anyone who gets past login has that user's access across the whole
   fleet — like holding an SSH key for it. The install command offered by default creates a dedicated
   unprivileged `webterm` user; installing as the current user while root makes it root's.
-- **There is no per-object authorization / RBAC.** You may create several accounts, but **every
-  account is a full administrator** over the whole fleet: any of them can add hosts, run commands
-  anywhere, and read the audit log. Multiple accounts buy **attribution**, not isolation — this
-  used to read "the model is single-account", which understated what a second account can do.
+- **Roles separate hosts, not people sharing a shell.** Since 3.6.0 accounts have roles (Owner /
+  Admin / Operator / Viewer over all hosts, a folder, a tag or one host — see
+  [docs/ROLES.md](docs/ROLES.md)). They enforce which hosts an account can reach and whether it
+  gets a shell there. Inside a host where an account holds a shell-equivalent permission it has
+  the agent user's full power, and a shell on the host that runs WebTerm (or holds its backups) is
+  equivalent to Owner. A role-check bypass — reaching a host outside your scope, getting a shell
+  without a shell permission, or escalating your own role — **is** a vulnerability; please report
+  it.
 - **The gateway is a single point of total compromise** (it commands the agents). A compromised gateway =
   a compromised fleet.
 - **The gateway host holds the vault key, and so do its backups' secrets.** Scheduled backups

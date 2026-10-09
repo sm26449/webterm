@@ -6,20 +6,23 @@ reasoning is not lost, and so that anyone proposing them knows what was already 
 Nothing here touches WebTerm as it exists. Each would be an external, opt-in layer, built only if
 a concrete need appears.
 
-## Multi-user through isolation, not roles
+## Multi-user through isolation, below the roles
 
-WebTerm has accounts, but they are all equal, and `docs/THREAT-MODEL.md` says so plainly. The
-reason is that role-based access control inside a terminal is close to meaningless: a "read-only"
-user with a shell can read every file the process can, including private keys. Restricting the UI
-would be theatre.
+Since 3.6.0 WebTerm has roles ([ROLES.md](../ROLES.md)), scoped to hosts: an account can be
+limited to some hosts, and to watching instead of typing. What roles deliberately do **not**
+pretend is separation *inside* a host: a user with a shell there can read every file the agent's
+user can, including private keys. Restricting the UI on such a host would be theatre, which is why
+the role catalogue marks shell-equivalent permissions (⚑).
 
-If several people genuinely need separated access, the separation has to be below WebTerm:
+If several people genuinely need separated access on the **same** host, the separation still has
+to be below WebTerm:
 
 - one agent per Unix user on the host, each running as that user, so the operating system enforces
   the boundary that WebTerm cannot;
 - or one WebTerm instance per team, which is cheap — a container and a volume.
 
-Either is honest. Adding a `role` column would not be.
+Either is honest. A role that claimed to separate two people sharing one shell account would
+not be.
 
 ## SSH certificate authority
 

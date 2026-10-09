@@ -8,9 +8,11 @@ exactly as before (local email + password, passkeys, TOTP).
 
 Each WebTerm deployment keeps a **local admin** (created at first-run with the setup token) as
 a **break-glass** account — password + optional passkey, always able to log in even if the IdP
-is down. Everyone else clicks **"Sign in with <provider>"**, is provisioned on first login, and
-becomes a **full administrator on that instance**. WebTerm has **no in-app RBAC** (see
-[THREAT-MODEL.md](THREAT-MODEL.md)): SSO controls *who gets in*, not *what they can do once in*.
+is down. Everyone else clicks **"Sign in with <provider>"** and is provisioned on first login.
+SSO controls *who gets in*; **roles** ([ROLES.md](ROLES.md), 3.6) control *what they can do once
+in*. A newly provisioned SSO account starts with **no access** until an Owner or Admin binds it to
+a role (Settings → Users & roles); mapping IdP groups to roles automatically arrives in 3.6.1.
+Accounts that already existed when you upgraded to 3.6 became Owners.
 
 ## What SSO gives you (and what it does not)
 
@@ -20,11 +22,10 @@ becomes a **full administrator on that instance**. WebTerm has **no in-app RBAC*
   in your IdP. Bind each application to a group (e.g. `wt-prod`, `wt-dev`); a user reaches an
   instance only if they're in its group. This is real, coarse-grained RBAC at the
   *which-servers-can-I-log-into* level — configured entirely in the IdP, no WebTerm code.
-- **It does NOT give per-host authorization inside an instance.** Every user who gets into an
-  instance is a full admin over all of its hosts. To separate hosts by trust, split them across
-  **separate WebTerm instances** (e.g. a `wt-prod` instance with the critical hosts, a `wt-dev`
-  instance with the rest) and gate each with its own group. That gives host-group isolation
-  without in-app RBAC.
+- **Per-host authorization inside an instance comes from roles, not from the IdP.** Since 3.6
+  an Owner or Admin binds each account to a role over all hosts, a folder, a tag or one host
+  ([ROLES.md](ROLES.md)). Separate instances per trust level remain a valid, stronger split —
+  they also separate the gateway itself.
 
 ## Topology: one IdP, many WebTerm instances
 

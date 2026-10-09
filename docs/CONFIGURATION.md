@@ -40,6 +40,11 @@ is the full reference.
 
 See [SSO.md](SSO.md) for the full single-sign-on model (break-glass, per-instance access, 2FA step-up).
 
+Roles (3.6) have **no environment variables**: they live in the database and are managed in
+Settings → Users & roles, or with `python3 -m app.admin roles|promote` from the server
+([ROLES.md](ROLES.md)). A new SSO account starts with no access; `WEBTERM_OIDC_ROLE_MAP` (group →
+role bootstrap) is planned for 3.6.1 and is not read yet.
+
 <a id="security-and-sessions"></a>
 ### Sign-in, sessions, audit
 

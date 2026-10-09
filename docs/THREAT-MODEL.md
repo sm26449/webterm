@@ -73,8 +73,8 @@ decisions follow from this.
   requests with no actor — scanner traffic. A 401/403 that *does* carry an actor is kept,
   because that one says something. With one account it
   buys forensics ("what was done with my stolen cookie"); with several accounts it
-  also answers *who* — every account is a distinct identity, even though all of
-  them are equally powerful (see limitation 2).
+  also answers *who* — every account is a distinct identity, and since 3.6 every row also
+  carries the account id, the host and the channel (`cookie` / `token:<id>`).
 
 ### Public (unauthenticated) surface
 
@@ -115,13 +115,21 @@ See [design/ARCHITECTURE.md](design/ARCHITECTURE.md) for the agent's resilience
    dedicated `webterm` user, so it is that user's access; installing as the current user while
    root makes it root's. The agent itself never escalates. *Recommended mitigation:* keep the
    default dedicated user unless a host genuinely needs more.
-2. **There is no object-level authorization / RBAC.** You may create several
-   accounts (Settings → Account), but **every account is a full administrator**:
-   any of them can do anything, on every host. Multiple accounts buy
-   **attribution**, not isolation — each person has their own password, passkeys
-   and 2FA, and the audit log finally records *who*. Safe ONLY while every
-   account belongs to someone you trust with the whole fleet. Real isolation
-   (roles, per-host permissions, sandboxing) is still absent by design.
+2. **Roles separate hosts and shell / no-shell — not people sharing a shell.** Since 3.6.0
+   every account has role bindings (Owner / Admin / Operator / Viewer over all hosts, a folder,
+   a tag or one host — [ROLES.md](ROLES.md)). The gateway enforces two real boundaries: **which
+   hosts** an account can see or touch (an out-of-scope host is indistinguishable from a missing
+   one; lists, search, history, audit and alerts are filtered), and **whether it gets a shell**
+   there. Every check runs in one module (`authz.py`), declared per route, fail-closed for an
+   undeclared route, before the 2FA step-up. What roles **cannot** do is limit someone *inside* a
+   host where they hold a shell-equivalent permission (⚑): that person has the agent user's full
+   power on that host, including reading its keys. Three consequences to keep in mind:
+   - anyone with a shell on the host that runs WebTerm (or stores its backups) can become Owner
+     — bind only Owners over such hosts;
+   - deploy keys and jump hosts spread trust between hosts, so both need the permission on both
+     ends;
+   - **rolling back to 3.5 silently makes every account a full administrator again** (3.5 ignores
+     the role tables).
 3. **The gateway is a single point of total compromise.** It commands every agent, with whatever
    privileges each was installed with. A compromised gateway (RCE) = a compromised fleet. The update
    signature protects the **persistence** of the agent code, but `run`/`fs`
@@ -215,9 +223,10 @@ See [design/ARCHITECTURE.md](design/ARCHITECTURE.md) for the agent's resilience
    IP/self-signed deployments. Cert pinning makes it usable, but in production
    use a **domain + public CA**.
 8. **With SSO on, the IdP is a trust anchor.** Whoever the IdP lets authenticate
-   *and* places in the instance's group becomes a full admin of that instance —
-   WebTerm delegates *who gets in*, not *what they can do* (limitation 2 still
-   holds: no in-app RBAC). So the IdP's own security is in scope: its MFA, its
+   *and* places in the instance's group gets in. Since 3.6.0 a **new** SSO account starts
+   with no role ("no access yet") until an Owner or Admin grants one — group → role mapping
+   comes in 3.6.1 — while accounts that existed at the upgrade became Owners. So the IdP's own
+   security is in scope: its MFA, its
    session/consent settings, and **which users you put in the `wt-access` group**.
    WebTerm defends its half (token validation, verified-email adoption, group
    re-check); it cannot vouch for accounts the IdP itself issues. Separate trust

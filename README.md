@@ -58,8 +58,9 @@ flowchart TB
 
 > [!WARNING]
 > **Anyone who gets past the login gets, on every host, the access of the user its agent runs
-> as** — like handing over an SSH key for that user. WebTerm is built for a **single trusted
-> administrator**: there are no roles, and the gateway is a single point of total compromise.
+> as** — like handing over an SSH key for that user. Roles (3.6) limit **which hosts** an account
+> reaches and **whether it gets a shell** there, not what a shell can do; the gateway remains a
+> single point of total compromise.
 > Use a domain with HTTPS and passkeys, and keep the default unprivileged `webterm` agent user.
 > Read [Security](#security) and [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) before exposing it.
 
@@ -207,11 +208,12 @@ CSP and HSTS. Hosts can require a 2FA **step-up** to connect and lock their term
 inactivity; a command guardrail can confirm or block dangerous commands, server-side. What you
 type is never recorded — transcripts hold output only.
 
-**The single-account invariant.** There are no roles: every account is a full administrator of
-the whole fleet, and whoever gets past the login has the shell and files of each agent's user,
-like SSH. More accounts buy attribution in the audit log, not isolation; to separate trust, run
-separate instances. That is why the defaults are a dedicated unprivileged agent user, passkeys,
-and a domain with HTTPS.
+**Roles, honestly.** Since 3.6 every account has role bindings — Owner, Admin, Operator or Viewer
+over all hosts, a folder, a tag or a single host ([docs/ROLES.md](docs/ROLES.md)). The gateway
+enforces which hosts an account can see at all and whether it gets a shell there; whoever has a
+shell on a host has the files of that agent's user, like SSH. Upgrading changes nothing for
+existing accounts (they become Owners). That is why the defaults are a dedicated unprivileged
+agent user, passkeys, and a domain with HTTPS.
 
 Agent updates are Ed25519-signed with a key your gateway generates on first boot, so your fleet
 trusts only your key. Keep an offline backup of `data/agent-signing.key`: without it, deployed

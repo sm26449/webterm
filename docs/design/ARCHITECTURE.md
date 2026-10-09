@@ -78,9 +78,24 @@ The gateway is the most valuable thing in the system: whoever controls it contro
 running an agent. There is no privilege separation inside it — see `docs/THREAT-MODEL.md` for the
 full statement of what that does and does not mean.
 
-## Why there is no RBAC
+## Roles: what they enforce, and what they cannot
 
-Accounts exist, but they are all equal. Adding roles would mean deciding what a "read-only" user
-may do with a terminal that can `cat` a private key, and the honest answer is: nothing useful.
-Multi-tenant separation would have to happen below WebTerm, at the host level. That direction is
-sketched in [FUTURE-DIRECTIONS.md](FUTURE-DIRECTIONS.md) and deliberately not built.
+Until 3.5 every account was equal, and this section explained why: deciding what a "read-only"
+user may do with a terminal that can `cat` a private key has no useful answer. That is still true
+**inside** a host where someone has a shell.
+
+From 3.6.0 the gateway enforces the two boundaries it really can hold
+([ROLES.md](../ROLES.md), design in [ROLES-AND-SSH.md](ROLES-AND-SSH.md)):
+
+- **which hosts** an account can see or touch at all — the gateway never relays a frame or an
+  operation for a host outside the account's scope, and an out-of-scope host answers exactly like
+  a missing one;
+- **whether it gets a shell** on a host — without the shell-equivalent permissions (⚑) there is no
+  code-execution path.
+
+Everything finer (a terminal but no file deletion, say) is a guardrail, and the role catalogue
+marks it so. Authorization lives in one module, `gateway/app/authz.py`: every route declares its
+permission with `Depends(authz.perm(...))`, a router-level guard refuses an undeclared route at
+runtime (fail-closed), and the check order is authenticate → authorize → 2FA step-up. Separation
+*inside* a host (Unix users) is still below WebTerm — see
+[FUTURE-DIRECTIONS.md](FUTURE-DIRECTIONS.md).

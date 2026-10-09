@@ -62,6 +62,23 @@ A token used on a whitelisted endpoint without the matching scope gets
 `403 the token does not have the '<scope>' scope`. A token used on any other endpoint is simply
 not recognised there (401).
 
+### Roles: a token never exceeds its creator (3.6)
+
+A token acts **for the account that created it**, and only within what that account can do
+**now** ([ROLES.md](ROLES.md#automation-tokens-and-roles)):
+
+- the host list, the session list and the status counters show only the creator's hosts; `/run`
+  needs `run` on the host;
+- demote the creator and the token shrinks with them; remove their last role and the token sees
+  nothing; delete the account and the token stops working;
+- when creating a token you can narrow it further with an optional `role` (`viewer`, `operator`,
+  `admin`, `owner` — never above your own) and a scope (`scope_kind`: `all` / `folder` / `tag` /
+  `host`, plus `scope_value`);
+- creating tokens needs `tokens.create` over all hosts (Owner, Admin, Operator @ all); seeing and
+  revoking other people's tokens needs `tokens.manage`.
+
+Existing tokens keep working after the upgrade: their creators became Owners.
+
 ### The `run` request body (`RunIn`)
 
 | Field | Type | Default | Meaning |
@@ -151,7 +168,7 @@ curl -sS -X POST -H "Authorization: Bearer $WT_TOKEN" -H "Content-Type: applicat
 
 ## What tokens cannot do
 
-Only the four endpoints above accept a token (`security.require_scope`); everything else depends
+Only the four endpoints above accept a token (`authz.perm(…, tokens=…)`); everything else depends
 on the browser session. In particular a token cannot:
 
 - **Read the audit log.** `GET /api/audit` is cookie-only on purpose: its entries hold the full

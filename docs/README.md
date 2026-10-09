@@ -25,6 +25,7 @@ holds the user-facing guides and the internal architecture notes.
 - [SERIAL-CONSOLE](SERIAL-CONSOLE.md) — serial devices (RS232/RS485/USB) through the agent
 - [SSH-KEYS](SSH-KEYS.md) — Toolbox → SSH keys: host-to-host deploy keys, multi-target deploy, test/verify/alias/rotate, the deploy-key policy
 - [SSH-JUMP](SSH-JUMP.md) — SSH-jump and Telnet-jump targets reached through an agent, nesting under the agent, "Connect once", the host-key-change alarm
+- [ROLES](ROLES.md) — roles and scoped access (Owner / Admin / Operator / Viewer over all hosts, a folder, a tag or one host): what they enforce and what they cannot
 - [SSO](SSO.md) — OIDC single sign-on (Authentik), step-up and break-glass
 - [SECURITY-SUMMARY](SECURITY-SUMMARY.md) — the Dashboard's Security card (what each check means) and the share-links inventory with Revoke all
 - [THREAT-MODEL](THREAT-MODEL.md) — what the security model defends, and what it does not
@@ -33,7 +34,8 @@ holds the user-facing guides and the internal architecture notes.
 
 Why the system is shaped the way it is. Written for someone about to change it.
 
-- [ARCHITECTURE](design/ARCHITECTURE.md) — the three parts, the trust boundaries, why there are no roles
+- [ARCHITECTURE](design/ARCHITECTURE.md) — the three parts, the trust boundaries, what roles enforce and what they cannot
+- [ROLES-AND-SSH](design/ROLES-AND-SSH.md) — the roles design (3.6.x) with the route-by-route permission matrix, and the native SSH entry proposal (3.7.x)
 - [SIGNED-UPDATES](design/SIGNED-UPDATES.md) — how agent updates are signed, and how to rotate the key without touching a host
 - [SESSION-LIFECYCLE](design/SESSION-LIFECYCLE.md) — session states, reconciliation, transcripts, and why the screen is not the source of truth
 - [SPLIT-VIEWS](design/SPLIT-VIEWS.md) — named multi-pane layouts, the "only the active view is mounted" invariant, and why the same session can appear in many places safely

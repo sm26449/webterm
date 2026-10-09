@@ -129,7 +129,13 @@ docker exec -it webterm-app-1 python3 -m app.admin list
 docker exec -it webterm-app-1 python3 -m app.admin passwd you@example.com
 docker exec -it webterm-app-1 python3 -m app.admin disable-2fa you@example.com
 docker exec -it webterm-app-1 python3 -m app.admin logout-all you@example.com
+docker exec -it webterm-app-1 python3 -m app.admin roles you@example.com
+docker exec -it webterm-app-1 python3 -m app.admin promote you@example.com
 ```
+
+`promote` (3.6) makes the account **Owner over all hosts** — the way back when no Owner is left
+(for example after a partial restore). `roles` shows an account's bindings. The running gateway
+picks the change up within about a minute; the promotion is recorded in the audit log.
 
 Prefer it over the raw SQL below. It hashes with the application's own argon2 parameters, and it
 also **deletes the open web sessions and share links** — the hand-written `UPDATE` did not, so

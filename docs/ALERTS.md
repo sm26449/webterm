@@ -168,14 +168,19 @@ redaction as the text) next to the English text, and the panel renders the trans
 Alerts recorded before 3.5.15, and any key this UI version does not know, keep showing the
 stored English text.
 
-**Who sees what.** There are no roles — every account is a full administrator — so:
+**Who sees what** (by role, since 3.6 — [ROLES.md](ROLES.md)):
 
 - events about **one account** (sign-in from a new IP, a new device attached to a live
   session, password / email / 2FA / passkey changes, unlocking a 2FA-protected host, replay
-  links created / opened) go to that account only;
-- everything else (hosts, thresholds, SSH keys, host keys, new accounts and tokens, backups,
-  the gateway's disk and signing key) is copied to **every** account, each with its own
-  read/unread state.
+  links created / opened, "your access changed") go to that account only;
+- events about **one host** (offline, thresholds, host key changed, deploy keys, agent moved,
+  auto-enrolment) go to every account that can **see that host**;
+- instance events (new accounts, tokens and role changes, backups, the gateway's disk and
+  signing key, lockouts) go to accounts with **security.view** — Owners and Admins over all
+  hosts.
+
+Each account keeps its own read/unread state. A single-Owner install sees exactly what it saw
+before.
 
 **Retention.** The last **500 alerts per account**, for at most **30 days**; older rows are
 dropped when a new one arrives. Deleting an account deletes its history and preferences. The

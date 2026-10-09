@@ -92,8 +92,10 @@ backend: S3/B2/…) still works too. Every path refuses to upload an unencrypted
 
 **Accounts (Settings → Account).** You can create more than one account, so each person
 signs in with their own password, passkeys and 2FA, and the audit log records *who*. There
-are **no roles**: every account is a full administrator over the whole fleet — multiple
-accounts buy attribution, not isolation.
+are **roles** (3.6.0, [ROLES.md](ROLES.md)): Owner / Admin / Operator / Viewer bound to all
+hosts, a folder, a tag or one host. They enforce which hosts an account can reach and whether it
+gets a shell there; finer limits inside a host where it has a shell are guardrails, not
+boundaries.
 
 **Automation tokens (Settings → Infrastructure & tokens).** For cron, CI or monitoring: a bearer token
 with an explicit scope (`read` for `/api/status`, `/api/hosts` and `/api/sessions`; `run` for

@@ -9,6 +9,82 @@ back.
 
 ## [Unreleased]
 
+> **Upgrading to the 3.6 roles:** a single-user install sees no change. Every existing account
+> becomes **Owner over all hosts** at the first start (`source: migration`), so nobody loses
+> anything, and existing automation tokens keep working. New accounts — including new SSO users —
+> now start with **no access** until an Owner or Admin gives them a role. **Rolling back to 3.5
+> silently makes every account a full administrator again** (3.5 ignores the role tables).
+
+### Added
+- **Roles and scoped access** ([docs/ROLES.md](docs/ROLES.md), design in
+  [docs/design/ROLES-AND-SSH.md](docs/design/ROLES-AND-SSH.md)). Until now every account was a full
+  administrator of the whole fleet, so several people could share an instance only if each was
+  trusted with every host. Built-in roles **Owner, Admin, Operator, Viewer** are now bound to an
+  account over **all hosts, a folder, a tag or one host**; on a host, an account's permissions are
+  the union of its matching bindings. Instance permissions (settings, accounts, tokens, audit,
+  backups, signing key) count only from a binding over all hosts, so "Admin of folder lab" does not
+  administer the instance. Admin is everything except taking it over (backups, the signing key and
+  the global history wipe stay with Owners); Operators type only into their own sessions and watch
+  others; Viewers watch, read recordings and diagnostics, and cannot read files.
+- **Settings → Users & roles**: every account with its bindings as chips, add or remove a binding
+  (scope picker with the folders, tags and hosts you can see), a role chosen in the same dialog as
+  the account (default *no access yet*). Changes need your password (or a fresh SSO/passkey
+  confirmation) plus your second factor, are audited, and alert both the person affected and the
+  accounts that see the security summary.
+- **Read-only terminals.** With watch rights (Viewer, or an Operator on someone else's session) a
+  terminal attaches *watching (read-only)*: the keyboard is inert and the server drops any input,
+  resize or kick from that client.
+- **"No access yet" / "not found or no access" states**, naming who can grant access, and
+  `GET /api/me/permissions` for the UI to hide what you have nowhere and explain (tooltip) what you
+  lack on this host. The server enforces regardless; the UI gating is cosmetic.
+- **`python3 -m app.admin promote <email>`** (Owner over all hosts — the break-glass path when no
+  Owner is left) and **`roles <email>`**; `list` shows each account's roles.
+- Automation tokens can be narrowed at creation with an optional role and scope.
+
+### Changed
+- **Every route declares its permission.** Authorization lives in one module
+  (`gateway/app/authz.py`): each route has exactly one `Depends(authz.perm(...))`, or is listed as
+  PUBLIC / SELF with a reason. The order is authenticate → authorize → 2FA step-up, so step-up
+  never runs (and never answers) for someone without the permission.
+- **Lists are filtered by what you can see**, silently: hosts, sessions, search (filtered in SQL
+  *before* any transcript is read), command history, audit log (without `audit.view`: your own
+  entries), apps, shares, tokens, accounts, the status counters (the disk and gateway health need
+  `security.view`), the security summary, host-key alarms. Alerts fan out by role: host events to
+  whoever can see the host, instance events to `security.view` holders.
+- **Audit rows carry the account id, the host and the channel** (`cookie` / `token:<id>`), and
+  sessions, command history and snippets record who created them.
+- **Automation tokens are capped by their creator, live**: token scopes ∩ optional role ∩ what the
+  creator can do now. Demote the creator and the token shrinks; remove their roles and it sees
+  nothing; delete the account and it dies. The token allowlist (status, hosts, sessions, run) is
+  unchanged.
+- Snippets record their author (`created_by` in the API); editing or deleting someone else's (or
+  a pre-3.6 one) needs `snippets.manage`. A forward's internal target is shown only with `forward.manage`.
+- `tests/multi_account_test.py` changed premise: it now checks that two **Owners** are equal.
+
+### Security
+- **Fail-closed authorization.** A route that declares no permission answers `500
+  authz.undeclared` at runtime (router-level guard on all three routers), and
+  `tests/route_auth_test.py` fails CI for it, checks every host locator against the route's real
+  parameters, keeps the token allowlist exact, and compares every route with the appendix of the
+  design document. `tests/rbac_matrix_test.py` calls every non-public route as six different
+  principals, with expectations generated from the declarations.
+- **No existence oracle**: a host outside your scope answers with the same `404` body and headers
+  as a host that does not exist — for every route, the terminal WebSocket, the forward handshake,
+  the passkey and SSO step-up ceremonies.
+- **No escalation**: you can grant only what you hold over the scope you grant it on; only Owners
+  grant or touch Owners; nobody changes their own access; the **last Owner** cannot be removed or
+  deleted, also under concurrent requests (binding changes are serialised).
+- **Revocation is immediate**: a role change bumps an in-memory epoch that wakes every open
+  terminal and forward socket (a downgrade makes the terminal read-only, a loss closes it), kills
+  the account's forward tickets, re-checks `forward.use` on **every** forwarded request, and
+  revokes live shares, writable shares and replay links the account may no longer create.
+- **Folders and tags decide access**, so changing them needs `hosts.create` over all hosts (not
+  just `host.edit`); jump targets need `forward.manage` on their via host; deploy keys need
+  `deploykey.manage` on both ends; a writable share needs `share.live_write`.
+- A read-only watcher can no longer keep a 2FA terminal awake or re-authorize its 60-minute
+  step-up cap — only a client that can type does.
+
+
 ## [3.5.18] — 2026-10-09 · agent (58)
 
 ### Added

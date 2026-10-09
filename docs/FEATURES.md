@@ -331,6 +331,22 @@ Press `?` for the cheatsheet.
   translate the values, register it — the catalogue is checked in CI, so a missing key
   fails the build rather than showing a raw key to a user
 
+### Roles and scoped access
+
+- **Roles** (3.6): Owner, Admin, Operator and Viewer, each bound to **all hosts, a folder, a tag or
+  one host** — so several people can share an instance, each limited to the hosts they look
+  after. Settings → **Users & roles** shows every account with its bindings and adds or removes
+  them (password + second factor, audited, alerted). [the guide](ROLES.md)
+- What they enforce, honestly: **which hosts** you can see at all (an out-of-scope host looks
+  exactly like a missing one; lists, search, history, audit and alerts are filtered) and
+  **whether you get a shell** there. Shell-equivalent permissions are flagged ⚑.
+- **Watching (read-only)** terminals for Viewers, and for Operators on someone else's session;
+  input is dropped server-side, and a demotion takes effect on the open terminal immediately
+- **No access yet** state for new accounts and new SSO users, with the names of who can grant it
+- Automation tokens are capped by what their creator can do now; the last Owner cannot be removed;
+  `python3 -m app.admin promote` is the break-glass path
+- Upgrading changes nothing: every existing account becomes Owner over all hosts
+
 ### Operating it
 
 - **One-click provisioning**: give WebTerm an existing SSH connection to a host and it

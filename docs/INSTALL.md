@@ -228,14 +228,16 @@ button only appears once a local account exists** — WebTerm's first-run always
 break-glass admin first. So: open `https://term.example.com`, create the local admin with the
 setup token (printed by `install.sh`/`deploy.sh`), *then* the SSO button shows. Add the person you
 want to a **`wt-access` group** in Authentik, click **Sign in with Authentik**, authenticate — you
-land back provisioned as a full admin of that instance. If the button is missing, the account
+land back provisioned on that instance — with **no access** until an Owner or Admin gives the
+account a role in Settings → Users & roles (3.6; group → role mapping comes in 3.6.1). If the
+button is missing, the account
 isn't created yet or SSO env isn't set; if the IdP shows "access denied", that user isn't in
 `wt-access`.
 
 Whichever you pick: the provisioner gates the app on a `wt-access` group (a user reaches the
 instance only once you add them to it), the local admin stays a **break-glass** account that can
-always log in even if Authentik is down, and there is no in-app RBAC — everyone who gets in is a
-full admin of that instance (separate trust by running separate instances). To evaluate the whole
+always log in even if Authentik is down, and what each person can do once in is decided by
+their role ([ROLES.md](ROLES.md)); separate instances remain the stronger split. To evaluate the whole
 flow on one laptop first (localhost, no domain), use `deploy/authentik/docker-compose.yml` (see the
 "Try it locally" section of [docs/SSO.md](SSO.md) — it notes the one hostname tweak Docker needs).
 
