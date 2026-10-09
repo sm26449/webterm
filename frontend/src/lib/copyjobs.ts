@@ -72,11 +72,19 @@ export function fileErrText(e: CopyFileRow, t: T): string {
 /** Rezumatul notelor: link-uri / fişiere speciale necopiate, permisiuni neaplicate, destinaţie
     fără păstrarea permisiunilor (agent < 58). `noted` vine plafonat la 50 de rânduri de server —
     numărăm ce vedem, iar restul (noted_total) intră la „necopiate". */
+/** câte rânduri au fost lăsate deliberat necopiate (link-uri / fişiere speciale) — tot „sărite"
+    pentru server (`files_skipped`), dar numărate o singură dată în rezumat */
+export function notCopiedCount(s: CopyStatus): number {
+  const noted = s.noted ?? []
+  const modeFailed = noted.filter((n) => n.note_code === 'copy.modeFailed').length
+  return Math.max(0, (s.noted_total ?? noted.length) - modeFailed)
+}
+
 export function copyNotes(s: CopyStatus, t: T): string[] {
   const out: string[] = []
   const noted = s.noted ?? []
   const modeFailed = noted.filter((n) => n.note_code === 'copy.modeFailed').length
-  const notCopied = Math.max(0, (s.noted_total ?? noted.length) - modeFailed)
+  const notCopied = notCopiedCount(s)
   if (notCopied) out.push(t('transfers.copyNotCopied', { n: notCopied }))
   if (modeFailed) out.push(t('transfers.copyModeFailed', { n: modeFailed }))
   if ((s.notes ?? []).some((n) => n.code === 'copy.noModes')) out.push(t('transfers.copyNoModes'))
@@ -93,7 +101,11 @@ export function copyPatch(s: CopyStatus, t: T): Partial<UploadJob> {
     : (s.state === 'done' ? 100 : 0)
   const parts = [t('transfers.copyFiles', { done: s.files_done, total: s.files_total })]
   if (s.folders_total) parts.push(t('transfers.copyFolders', { done: s.folders_done ?? 0, total: s.folders_total }))
-  if (s.files_skipped) parts.push(t('transfers.copySkipped', { n: s.files_skipped }))
+  // un symlink dintr-un folder e şi „sărit" (files_skipped) şi „necopiat" (nota): în capturile 3.5.17
+  // un singur link apărea ca „skipped: 1 · not copied: 1" — două lucruri. „Sărite" = doar cele care
+  // existau deja pe destinaţie (regula Skip).
+  const skipped = Math.max(0, s.files_skipped - (s.state === 'running' ? 0 : notCopiedCount(s)))
+  if (skipped) parts.push(t('transfers.copySkipped', { n: skipped }))
   if (s.files_failed) parts.push(t('transfers.copyFailed', { n: s.files_failed }))
   if (s.state === 'running' && s.current?.length) parts.unshift(`→ ${s.current.join(', ')}`)
   else parts.push(...copyNotes(s, t))

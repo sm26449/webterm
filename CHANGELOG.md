@@ -9,6 +9,16 @@ back.
 
 ## [Unreleased]
 
+### Added
+- **GitHub Releases from the CHANGELOG.** The notes lived only in CHANGELOG.md, so the
+  repository's Releases page did not carry them and watching releases told nobody. A `v*` tag now also runs
+  `release-notes.yml` — a separate workflow, so it can neither hold up nor fail the image — which
+  takes that version's section from CHANGELOG.md (`scripts/changelog-section.py`), adds the image
+  (`ghcr.io/sm26449/webterm:vX.Y.Z`) and the upgrade command, and creates the release or updates it
+  if it exists. The title names the agent when the release changes it (*WebTerm 3.5.16 · agent
+  58*). A manual run backfills the newest N tags that have no release (default 10). See
+  [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#github-releases-release-notes).
+
 ### Changed
 - **Unfinished uploads are remembered per account.** The resumable-upload metadata in localStorage
   (`wt_up_*`) carried no account, so on a shared browser the next person to sign in saw the
@@ -22,6 +32,29 @@ back.
   even when the selection was folders (since 3.5.16 a folder copies a whole tree). It now reads
   `copy 2 files, 1 folder alpha:/srv → beta:/backup` — the types come from a bounded `fs_stat` on
   the source, falling back to `N items` if the host is slow — and the retry line says the same.
+
+### Fixed
+- **A folder copy's progress and summary were unreadable in Transfers.** Reviewing the 3.5.16
+  folder-copy UI in screenshots (both themes, desktop and phone) showed the Transfers row on one
+  32 px line: the long status (`→ logs/access.log · files 6/14 · folders 2/3`) squeezed the row's
+  name — *web-01 → web-02 · 3 items* — to zero width and was itself cut to `40% · 0 B/s · …`; on a
+  phone the status is hidden altogether, so the file being copied and the end-of-copy summary
+  never showed. The row now keeps the short status (%, speed, *Done*, *Failed*) next to the name,
+  which keeps a minimum width, and puts the long part — the file in progress and the counts, the
+  summary, the error, an upload's *Incomplete* explanation — on a second line, on phones too.
+  The summary also counted a symbolic link left out of a folder twice (*skipped: 1 · not copied:
+  1*); *skipped* now means only files that already existed on the destination.
+- **The Copy to host dialog scrolls** when its notes do not fit (a small phone with the
+  folder note, the older-agent warning and the private-files warning all shown); the buttons were
+  cut off below the screen.
+
+### Tests
+- `tests/ui_review.mjs` scans the Copy to host dialog in both themes (35 surfaces per theme).
+  `scripts/screenshots/run.sh` has an opt-in `ONLY=copy` step that captures the dialog, a folder
+  copy in progress and its summary, desktop and phone, for visual review (never part of the README
+  set). New hermetic suite `changelog_section` (the release-notes extraction against the real
+  CHANGELOG, and the workflow's YAML) — 103 suites; vitest for per-account upload keys, the
+  two-line Transfers row and the skipped/not-copied count.
 
 ## [3.5.17] — 2026-10-09 · agent (58)
 

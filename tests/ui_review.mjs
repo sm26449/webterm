@@ -53,9 +53,9 @@ const TAGS = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa', 'best-prac
 // Forwards, Services, Docker, Toolbox/Connections, Toolbox/SSH keys) = 8, host offline ×
 // (Overview, Sessions) = 2, toast de eroare, Settings × 7, file browser, Status, Add host × 3,
 // FleetRun, `?`, walkthrough, paleta, ConfirmModal, panoul de alerte, dialogul „link de replay"
-// + pagina PUBLICĂ de replay = 34 (+ Monaco cu WT_AGENT=1).
+// + pagina PUBLICĂ de replay + dialogul „Copy to host" (3.5.17) = 35 (+ Monaco cu WT_AGENT=1).
 // Mobil: sesiune dark + light.
-const PER_THEME = 34 + (HAS_AGENT ? 1 : 0)
+const PER_THEME = 35 + (HAS_AGENT ? 1 : 0)
 const EXPECTED_SCANS = 2 * PER_THEME + 2
 
 /** Pas tolerant: dacă un selector a derapat, notăm şi mergem mai departe.
@@ -344,6 +344,29 @@ try {
         if (label === 'Docker') await page.unrouteAll({ behavior: 'ignoreErrors' })
       }, page)
     }
+    // ── „Copy to host…" (3.5.5; foldere din 3.5.16): dialogul din bara de selecţie a tab-ului Files.
+    // Cu un singur host online, destinaţia e „(same host)" — dialogul e acelaşi. Selectăm tot din
+    // home (are şi foldere: .webterm/), deci se văd şi nota despre foldere şi cea despre permisiuni.
+    await step('dialog Copy to host', async () => {
+      await hostTab(page, 'Files')
+      await page.waitForSelector('button[title="New file"]', { timeout: 8000 })
+      const all = page.locator('[data-testid="wt-files-select-all"]')
+      await all.check()
+      await page.getByRole('button', { name: 'Copy to host…' }).first().click()
+      const dlg = page.locator('[data-testid="wt-copy-dialog"]')
+      await dlg.waitFor({ timeout: 8000 })
+      await dlg.locator('#wt-copy-host option').first().waitFor({ state: 'attached', timeout: 8000 })
+      await dlg.locator('ul[aria-label="Folders"] li').first().waitFor({ timeout: 8000 })
+      await page.waitForTimeout(300)
+      check('Copy to host: dialogul are titlu (aria-labelledby) şi focusul e în el',
+        (await dlg.getAttribute('aria-labelledby')) === 'wt-copy-title'
+          && await dlg.evaluate((d) => d.contains(document.activeElement)))
+      await page.screenshot({ path: `${OUT}/${theme}-11b-copy-to-host.png` })
+      await scan(page, `${theme} copy to host dialog`)
+      await page.keyboard.press('Escape')
+      await dlg.waitFor({ state: 'detached', timeout: 4000 })
+      await all.uncheck()
+    }, page)
     await step('tab Toolbox', async () => {
       // tab-ul care găzduieşte ToolboxPanel (Connections/SSH keys/Library/History); eticheta lui
       // e în tranziţie pe ramura asta (Toolbox ↔ Databases), acceptăm ambele

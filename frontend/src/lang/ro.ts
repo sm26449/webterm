@@ -1065,6 +1065,7 @@ const ro: Lang = {
     'host.credEphemeral': "Efemere (doar bootstrap)",
     'host.credStored': "Salvate, criptate",
     'host.credNone': "Niciuna",
+    'jobs.stateFailed': "Eșuat",
     'alertmsg.untitled': "(fără titlu)",
     'alertmsg.span.one': "{count} oră",
     'alertmsg.span.few': "{count} ore",

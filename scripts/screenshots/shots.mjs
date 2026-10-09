@@ -3,6 +3,9 @@
      node shots.mjs           (config from env: BASE, EMAIL, PASSWORD, ONLY)
    Each desktop screen is captured in dark AND light (light = the "macos" theme); the
    phone capture too. ONLY=terminal,fleet runs a subset (the others keep their old PNGs).
+   ONLY=copy (opt-in, never part of the default run): the "Copy to host" dialog with folders
+   selected, the Transfers row while a folder copies and its end-of-copy summary, desktop and
+   phone — a visual review of that feature, written to the given out_dir.
 
    Selectors: prefer aria-labels / roles from the English catalogue
    (frontend/src/lang/en.ts) — when a capture fails after a UI change, look there first. */
@@ -15,7 +18,10 @@ const ONLY = (process.env.ONLY ?? '').split(',').map((s) => s.trim()).filter(Boo
 const OUT = '/out'
 // failed steps: a failure leaves the OLD capture on disk, so it has to be fatal
 const FAILED = []
-const want = (step) => ONLY.length === 0 || ONLY.includes(step)
+// OPT_IN steps run only when named in ONLY: they are visual checks of one feature, not README
+// captures (their PNGs are looked at during review, not committed)
+const OPT_IN = ['copy']
+const want = (step) => (ONLY.length === 0 && !OPT_IN.includes(step)) || ONLY.includes(step)
 
 const log = (m) => console.log('  ' + m)
 
@@ -221,6 +227,69 @@ await step('fleet', async () => {
   await page.waitForTimeout(4000)
   await shotBoth(page, '07-run-on-hosts')
   await page.keyboard.press('Escape')
+})
+
+// -- opt-in: Copy to host (folders) — dialog, per-file progress, summary ---------------------
+// The running row is a MOCKED status (a small demo folder copies in well under the 1 s poll, so
+// the real one is never caught mid-flight); the summary afterwards is the server's real answer.
+const COPY_RUNNING = {
+  state: 'running', src_host: 0, src_host_name: 'web-01', dst_host: 0, dst_host_name: 'web-02',
+  dst_dir: '/root', on_conflict: 'skip', total_bytes: 512 * 1024 * 1024, done_bytes: 203 * 1024 * 1024,
+  files_total: 14, files_done: 6, files_skipped: 0, files_failed: 0, errors: [],
+  folders_total: 3, folders_done: 2, modes: true, notes: [], current: ['logs/access-2026-10-05.log'],
+  noted: [], noted_total: 0,
+}
+async function copyFlow(pg, prefix, { phone = false } = {}) {
+  // the Files tab of the host page (works the same on a phone, where the session toolbar folds)
+  await pg.locator('button[aria-label="Open host web-01"]').first().click()
+  await pg.waitForTimeout(1500)
+  await pg.getByRole('button', { name: 'Files', exact: true }).first().click()
+  await pg.waitForTimeout(1500)
+  const dir = pg.locator('button:text-is("project/")')
+  if (await dir.count()) { await dir.first().click(); await pg.waitForTimeout(1000) }
+  for (const f of ['logs', 'static', 'app.py']) {
+    await pg.locator(`input[type=checkbox][aria-label="Select ${f}"]`).check()
+  }
+  await pg.getByRole('button', { name: 'Copy to host…' }).first().click()
+  const dlg = pg.locator('[data-testid="wt-copy-dialog"]')
+  await dlg.waitFor({ timeout: 8000 })
+  await dlg.locator('#wt-copy-host').selectOption({ label: 'web-02' })
+  await pg.waitForTimeout(1200)                 // folder listing of the destination
+  await park(pg)
+  await shotBoth(pg, `${prefix}-copy-dialog`)
+  const startBtn = dlg.locator('button', { hasText: /^Copy \d+ item/ })
+  if (phone) {
+    // the bottom of the dialog (conflict rules, folder note, limits, buttons) — scrolled into view
+    await startBtn.scrollIntoViewIfNeeded()
+    await pg.waitForTimeout(300)
+    await shotBoth(pg, `${prefix}-copy-dialog-bottom`)
+  }
+  await pg.evaluate(() => localStorage.setItem('wt_transfers_min', '0'))
+  await pg.route((u) => /^\/api\/fs\/copy\/[0-9a-f]{32}$/.test(u.pathname), (route) => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    const jobId = route.request().url().split('/').pop()
+    return route.fulfill({ json: { ...COPY_RUNNING, job_id: jobId } })
+  })
+  await startBtn.click()
+  await pg.waitForTimeout(2500)
+  const pill = pg.locator('[data-testid="wt-transfers-pill"]')
+  if (await pill.count()) { await pill.click(); await pg.waitForTimeout(400) }
+  await park(pg)
+  await shotBoth(pg, `${prefix}-copy-running`)
+  await pg.unrouteAll({ behavior: 'ignoreErrors' })
+  await pg.waitForTimeout(2500)                 // next poll → the real, finished job
+  await park(pg)
+  await shotBoth(pg, `${prefix}-copy-summary`)
+}
+
+await step('copy', async () => {
+  await goHome(page)
+  await copyFlow(page, '09')
+  const phone = await newPage(browser, {
+    viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true,
+  })
+  await copyFlow(phone, '10-phone', { phone: true })
+  await phone.context().close()
 })
 
 // -- 7. phone: a session with the two-row keybar -------------------------------------------

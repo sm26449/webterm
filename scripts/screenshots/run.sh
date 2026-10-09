@@ -10,7 +10,8 @@
 # Env knobs:
 #   WEBTERM_IMAGE=…   image to capture (default: ghcr.io/sm26449/webterm:v<GATEWAY_VERSION>)
 #   PW_MODULES=…      a node_modules dir holding the `playwright` package (default: frontend/node_modules)
-#   ONLY=a,b          capture only these steps (dashboard,terminal,host,files,security,fleet,phone)
+#   ONLY=a,b          capture only these steps (dashboard,terminal,host,files,security,fleet,phone;
+#                     opt-in, never in the default run: copy — the folder-copy UI, for review)
 #   KEEP=1            leave the demo container running afterwards (iterate on shots.mjs)
 #   REUSE=1           reuse a container left by KEEP=1 instead of seeding a new one
 #   OPTIMIZE=0        skip the pngquant pass
@@ -190,6 +191,8 @@ docker exec "$APP" sh -c 'for d in 03 04 05 06; do for i in 1 2 3 4 5 6; do
   printf "10.0.1.%s - - [%s/Oct/2026:0%s:12:0%s] \"GET /health HTTP/1.1\" 200 15 \"-\" \"kube-probe/1.31\"\n" \
     $((20+i)) "$d" "$i" "$i"; done > /root/project/logs/access-2026-10-$d.log; done'
 docker exec "$APP" sh -c 'head -c 180000 /dev/urandom > /root/project/static/bundle.js.gz; head -c 42000 /dev/urandom > /root/project/static/logo.png'
+# a symbolic link inside a folder: copying the folder (ONLY=copy) lists it as "not copied"
+docker exec "$APP" ln -sf bundle.js.gz /root/project/static/latest.js.gz
 
 say "── waiting for the hosts to come online ──"
 # one login, then poll /api/hosts (logging in on every poll would trip the login rate limit)

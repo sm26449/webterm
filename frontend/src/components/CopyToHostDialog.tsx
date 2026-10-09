@@ -121,7 +121,7 @@ export default function CopyToHostDialog(props: {
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4" onClick={props.onClose}>
       {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Escape local: altfel îl prinde şi drawer-ul panoului de fişiere (portalul păstrează bubbling-ul React) */}
       <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="wt-copy-title" data-testid="wt-copy-dialog"
-        className="glass flex max-h-[90vh] w-full max-w-md flex-col rounded-2xl p-4 text-xs"
+        className="glass flex max-h-[90vh] w-full max-w-md flex-col overflow-y-auto overscroll-contain rounded-2xl p-4 text-xs"
         onClick={(e) => e.stopPropagation()}
         onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); props.onClose() } }}>
         <h2 id="wt-copy-title" className="text-base font-semibold">

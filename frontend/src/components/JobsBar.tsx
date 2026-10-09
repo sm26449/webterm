@@ -34,28 +34,47 @@ export const needsAttention = (j: UploadJob) => j.state === 'stalled' || j.state
 
 const BTN = compactAction   // design system (ui/classes)
 
-export function jobStatusText(j: UploadJob, t: (k: string, v?: Record<string, string | number>) => string): string {
+type TFn = (k: string, v?: Record<string, string | number>) => string
+
+/** Starea unui rând în DOUĂ părţi: `head` = scurt (%, viteză, Gata), pe linia numelui; `extra` =
+    ce poate fi lung (fişierul copiat acum + numărători, rezumatul de la final, eroarea, nota de
+    download, explicaţia „Incomplet"), pe o a doua linie. Înainte totul stătea pe o singură linie
+    de 32 px, iar textul lung (o copiere de folder: „→ logs/access.log · files 6/14 · folders 2/3")
+    strivea numele rândului la lăţime zero şi se tăia el însuşi în „…" — văzut în capturile 3.5.17. */
+export function jobStatusParts(j: UploadJob, t: TFn): { head: string; extra: string } {
+  if (j.state === 'err') {
+    const why = j.error || t('files.uploadFailed')
+    return { head: t('jobs.stateFailed'), extra: isCopy(j) && j.detail ? `${why} · ${j.detail}` : why }
+  }
   // arhivă din mers: mărimea nu se ştie → octeţii primiţi (nu %); detaliul spune „se pregăteşte" /
   // „nu se poate relua". Copiere host → host: % + rezumatul fişierelor de pe server.
-  if (!sizeKnown(j) && j.state !== 'err') {
+  if (!sizeKnown(j)) {
     const got = j.pos > 0 ? `${fmtBytes(j.pos)} · ${fmtRate(j.bytesPerSec)}` : ''
     const st = j.state === 'running' ? '' : j.state === 'stalled' ? t('jobs.stateStalled')
       : j.state === 'done' ? t('jobs.stateDone') : j.state === 'cancelled' ? t('jobs.stateCancelled') : ''
-    return [got, st, j.detail].filter(Boolean).join(' · ')
+    return { head: [got, st].filter(Boolean).join(' · '), extra: j.detail ?? '' }
   }
-  if (isCopy(j) && j.state !== 'err' && j.detail) {
+  if (isCopy(j) && j.detail) {
     const head = j.state === 'running' ? `${j.pct}% · ${fmtRate(j.bytesPerSec)}`
       : j.state === 'done' ? `100% · ${t('jobs.stateDone')}` : t('jobs.stateCancelled')
-    return `${head} · ${j.detail}`
+    return { head, extra: j.detail }
   }
   // download: nota de stare (checkpoint pe disc, permisiune refuzată, fişier parţial dispărut)
-  // se adaugă la textul stării; un download întrerupt într-o sesiune anterioară e „Întrerupt"
+  // merge pe a doua linie; un download întrerupt într-o sesiune anterioară e „Întrerupt"
   // (reluabil din rând), nu „orfan" ca la upload (acolo re-tragi fişierul)
-  if (isDownload(j) && j.state !== 'err' && j.state !== 'done') {
-    const base = j.state === 'orphan' ? `${j.pct}% · ${t('transfers.dlInterrupted')}` : jobStatusBase(j, t)
-    return j.detail ? `${base} · ${j.detail}` : base
+  if (isDownload(j) && j.state !== 'done') {
+    const head = j.state === 'orphan' ? `${j.pct}% · ${t('transfers.dlInterrupted')}` : jobStatusBase(j, t)
+    return { head, extra: j.detail ?? '' }
   }
-  return jobStatusBase(j, t)
+  // upload neterminat: explicaţia („trage acelaşi fişier…") e o propoziţie, nu o stare
+  if (j.state === 'orphan') return { head: `${j.pct}%`, extra: t('jobs.stateOrphan') }
+  return { head: jobStatusBase(j, t), extra: '' }
+}
+
+/** tot textul stării, pe un rând (titluri, anunţuri) */
+export function jobStatusText(j: UploadJob, t: TFn): string {
+  const { head, extra } = jobStatusParts(j, t)
+  return [head, extra].filter(Boolean).join(' · ')
 }
 
 function jobStatusBase(j: UploadJob, t: (k: string, v?: Record<string, string | number>) => string): string {
@@ -83,6 +102,7 @@ export function JobRow(props: { job: UploadJob; hostName: string; insertSid?: st
   const name = `${copy ? j.hostName : props.hostName} · ${j.name}`
   const canInsert = !down && !copy && !!props.insertSid && props.insertHostId === j.hostId
   const known = sizeKnown(j)
+  const status = jobStatusParts(j, t)
   // Acţiunile diferă pe sens: up → uploads.ts, down → downloads.ts (fişiere + arhive), copy →
   // copyjobs.ts (job pe server). Rândul e identic altfel.
   const onRetry = () => (copy ? void retryCopy(j.id) : down ? retryDownload(j.id) : retryUpload(j.id))
@@ -91,24 +111,27 @@ export function JobRow(props: { job: UploadJob; hostName: string; insertSid?: st
   const onPause = () => (down ? pauseDownload(j.id) : pauseUpload(j.id))
   const onResume = () => (down ? resumeDownload(j.id) : resumeUpload(j.id))
   return (
-    <li className="flex h-8 items-center gap-2">
+    <li className="py-0.5">
+      <div className="flex min-h-[1.75rem] items-center gap-2">
       <span aria-hidden="true" className={`shrink-0 ${STATE_CLS[j.state]}`}>
         {copy ? <CopyIcon /> : down ? <DownloadIcon /> : <UploadIcon size={12} />}
       </span>
-      <span className="min-w-0 flex-1 truncate text-slate-200" title={j.dest}>{name}</span>
+      {/* numele are o lăţime minimă: starea nu-l mai poate strivi la zero */}
+      <span className="min-w-[7rem] flex-1 truncate text-slate-200" title={`${name} — ${j.dest}`}>{name}</span>
       {/* mărime necunoscută (arhivă din mers): bară nedeterminată — fără aria-valuenow */}
       <div role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={known ? j.pct : undefined}
         aria-label={known ? t('jobs.progressAria', { name: j.name, pct: j.pct }) : `${j.name}: ${fmtBytes(j.pos)}`}
-        className="h-1 w-12 shrink-0 overflow-hidden rounded-full bg-ink-700 sm:w-32">
+        className="h-1 w-12 shrink-0 overflow-hidden rounded-full bg-ink-700 sm:w-20">
         <div className={`h-full rounded-full transition-[width] duration-200 ease-out motion-reduce:transition-none ${BAR_CLS[j.state]} ${!known && isActive(j) ? 'animate-pulse opacity-60 motion-reduce:animate-none' : ''}`}
           style={{ width: `${j.state === 'err' || (!known && j.state !== 'cancelled') ? 100 : j.pct}%` }} />
       </div>
-      <span className={`hidden min-w-0 truncate font-mono tabular-nums sm:inline ${STATE_CLS[j.state]}`}
-        title={jobStatusText(j, t)}>
-        {jobStatusText(j, t)}
+      <span className={`hidden min-w-0 max-w-[10rem] shrink-0 truncate font-mono tabular-nums sm:inline ${STATE_CLS[j.state]}`}
+        title={status.head}>
+        {status.head}
       </span>
       {/* dimensiunea totală a fişierului — cerută la click pe chip; ascunsă pe ecrane înguste */}
-      <span className="hidden shrink-0 font-mono tabular-nums text-slate-500 md:inline" title={`${fmtBytes(j.pos)} / ${fmtBytes(j.size)}`}>{known ? fmtBytes(j.size) : fmtBytes(j.pos)}</span>
+      {/* la o copiere mărimea e totalul arborelui — încape doar dacă nu mai e nimic de spus */}
+      <span className={`hidden shrink-0 font-mono tabular-nums text-slate-500 ${copy ? '' : 'md:inline'}`} title={`${fmtBytes(j.pos)} / ${fmtBytes(j.size)}`}>{known ? fmtBytes(j.size) : fmtBytes(j.pos)}</span>
       <span className={`font-mono tabular-nums sm:hidden ${STATE_CLS[j.state]}`}>{known ? `${j.pct}%` : fmtBytes(j.pos)}</span>
       {/* acţiuni după stare — nume accesibil = acţiune + fişier, ca în FilePanel */}
       {(j.state === 'err' || j.state === 'stalled') && (!copy || canRetryCopy(j.id)) && !j.restartable && (
@@ -162,6 +185,15 @@ export function JobRow(props: { job: UploadJob; hostName: string; insertSid?: st
       {(j.state === 'done' || j.state === 'err' || j.state === 'cancelled') && (
         <button type="button" onClick={onDismiss} className={`${BTN} text-slate-300`}
           aria-label={`${t('jobs.dismiss')} ${j.name}`}>{t('jobs.dismiss')}</button>
+      )}
+      </div>
+      {/* a doua linie: fişierul în lucru + numărători / rezumatul / eroarea — până la 2 rânduri,
+          textul întreg în title; aliniată sub nume (după icon) */}
+      {status.extra && (
+        <p className={`line-clamp-2 pb-0.5 pl-5 text-2xs [overflow-wrap:anywhere] ${j.state === 'err' ? 'wt-danger' : j.state === 'orphan' ? 'wt-warn' : 'text-slate-400'}`}
+          title={status.extra} data-testid="wt-job-detail">
+          {status.extra}
+        </p>
       )}
     </li>
   )

@@ -65,6 +65,14 @@ describe('copyPatch: starea serverului → rândul din Transferuri', () => {
     expect(copyNotes(s, t)).toEqual(['transfers.copyNotCopied{"n":2}', 'transfers.copyModeFailed{"n":1}', 'transfers.copyNoModes'])
     expect(copyPatch(s, t).detail).toContain('transfers.copyNoModes')
   })
+  it('un link necopiat nu e numărat şi ca „sărit" (o singură menţiune)', () => {
+    const noted = [{ src: '/p/ln', name: 'p/ln', dst: '', size: 0, done: 0, state: 'skipped', note: 'l', note_code: 'copy.symlinkSkipped' }]
+    const one = copyPatch(st({ state: 'done', files_skipped: 1, noted, noted_total: 1 }), t).detail!
+    expect(one).not.toContain('transfers.copySkipped')
+    expect(one).toContain('transfers.copyNotCopied{"n":1}')
+    const two = copyPatch(st({ state: 'done', files_skipped: 3, noted, noted_total: 1 }), t).detail!
+    expect(two).toContain('transfers.copySkipped{"n":2}')
+  })
   it('gateway vechi (fără câmpurile 3.6): nicio notă, niciun „folders"', () => {
     const p = copyPatch(st({ state: 'done' }), t)
     expect(p.detail).not.toContain('copyFolders')

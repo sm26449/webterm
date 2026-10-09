@@ -1049,6 +1049,7 @@ const en: Lang = {
     'host.credEphemeral': "Ephemeral (bootstrap only)",
     'host.credStored': "Stored, encrypted",
     'host.credNone': "None",
+    'jobs.stateFailed': "Failed",
     'alertmsg.untitled': "(untitled)",
     'alertmsg.span.one': "{count} hour",
     'alertmsg.span.other': "{count} hours",
