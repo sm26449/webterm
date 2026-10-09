@@ -108,6 +108,37 @@ async def main():
         check("_HOP_BY_HOP are `trailer` şi nu `trailers`",
               "trailer" in api._HOP_BY_HOP and "trailers" not in api._HOP_BY_HOP
               and "te" in api._HOP_BY_HOP)
+
+        # Origin (Grafana `POST /api/ds/query` → 403 „origin not allowed"): Origin-ul propriu
+        # al forward-ului e rescris pe originea ţintei; unul străin e refuzat de noi; lipsă → lipsă
+        async def send_with(origin):
+            c = FakeConn(reply)
+
+            async def src(host_id):
+                return c
+            api._ensure_forward_source = src
+            hdrs = [(b"host", b"slug.fwd.example")] + ([(b"origin", origin)] if origin else [])
+            try:
+                await api.proxy_forward_http(make_request(hdrs, b"POST"), 1, "10.0.0.9", 8080, "/x", "http")
+            except Exception as e:                     # noqa: BLE001
+                return None, e
+            return c.stream.sent.decode("latin1").split("\r\n\r\n", 1)[0].split("\r\n"), None
+        head, err = await send_with(b"http://slug.fwd.example")
+        check("Origin-ul forward-ului → rescris pe originea ţintei (same-origin pt. app)",
+              err is None and "Origin: http://10.0.0.9:8080" in head
+              and not any(h.lower().startswith("origin: http://slug") for h in head), str(head or err))
+        head, err = await send_with(b"http://evil.fwd.example")
+        check("Origin străin (alt forward de pe acelaşi site) → refuzat, nimic trimis ţintei",
+              head is None and getattr(err, "status_code", 0) == 403, str(err))
+        head, err = await send_with(b"https://slug.fwd.example")
+        check("Origin cu altă schemă decât PUBLIC_URL → refuzat",
+              head is None and getattr(err, "status_code", 0) == 403, str(err))
+        head, err = await send_with(None)
+        check("fără Origin → ţinta nu primeşte Origin", err is None
+              and not any(h.lower().startswith("origin:") for h in head), str(head or err))
+        head, err = await send_with(b"null")
+        check("Origin „null” → nu e trimis ţintei", err is None
+              and not any(h.lower().startswith("origin:") for h in head), str(head or err))
     finally:
         api._ensure_forward_source = orig
 

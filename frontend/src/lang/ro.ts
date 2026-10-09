@@ -145,6 +145,7 @@ const ro: Lang = {
     'err.enroll.invalid': "Tokenul de înrolare e invalid sau a expirat.",
     'err.forward.missing': "Forwardul nu mai există sau e oprit.",
     'err.forward.proxyError': "Serviciul forwardat nu a putut fi contactat.",
+    'err.forward.badOrigin': "Cerere refuzată: nu vine de pe pagina acestui forward.",
     'err.forward.badScheme': "Schema trebuie să fie http, https sau telnet.",
     'err.forward.badTarget': "Host țintă invalid — doar litere, cifre și . - : _",
     'err.forward.badPort': "Port invalid — folosește 1 până la 65535.",

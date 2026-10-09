@@ -9,7 +9,15 @@ back.
 
 ## [Unreleased]
 
+## [3.5.17] — 2026-10-09 · agent (58)
+
 ### Fixed
+- **Forwarded apps with their own CSRF check work (Grafana charts, Grafana Live).** The proxy sent the
+  target `Host: <ip>:<port>` but passed the browser's `Origin` (the forward subdomain) through, so
+  Grafana answered `POST /api/ds/query` and `/api/live/ws` with 403 "origin not allowed" — the
+  dashboard loaded, the panels stayed empty. WebTerm now checks the Origin itself (it must be the
+  forward's own subdomain on the instance's scheme, otherwise 403 — a sibling forward on the same
+  site cannot post with the shared SameSite=Lax cookie) and sends the target its own origin.
 - **Terminals no longer freeze when a long session's transcript hits its cap.** Past 64 MiB a
   transcript keeps its last 16 MiB — and that copy (16 MiB of `.out` plus 16 MiB of `.cast`) ran on
   the gateway's event loop, so every ~48 MiB of output in ONE session froze EVERY terminal, every

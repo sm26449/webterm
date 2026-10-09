@@ -210,9 +210,12 @@ async def t_writes_during_copy():
         hub._maybe_cap()
         check("second truncation does not start while one runs", hub._cap_task is task)
         i = 0
-        # plafon DUR: scriitorul nu poate întrece copierea la nesfârşit; şi KEEP + buget < MAX,
-        # ca checkpoint-urile de după să nu declanşeze legitim o a doua tăiere
-        budget = int(2.5 * MiB)
+        # plafon DUR: scriitorul nu poate întrece copierea la nesfârşit; şi KEEP + buget < MAX
+        # pentru AMBELE fişiere, ca checkpoint-urile de după să nu declanşeze legitim o a doua
+        # tăiere. Atenţie la `.cast`: creşte ×~1,35 faţă de `.out` (JSON-escaped), iar ultima
+        # rafală poate depăşi bugetul cu până la 600 KiB — cu 2,5 MiB `.cast`-ul ajungea la
+        # ~4,5 MiB > MAX când copierea lentă lăsa scriitorul să-şi termine bugetul (flaky 1/3).
+        budget = int(1.5 * MiB)
         while not task.done() and budget > 0:
             # rafale variate, unele peste CAP_RESIDUAL_MAX (forţează rundele de catch-up)
             n = 600 * 1024 if i % 7 == 3 else random.randint(10, 5000)

@@ -2950,6 +2950,26 @@ async def _open_target(conn, thost: str, tport: int, scheme: str):
     return fs
 
 
+def _fwd_origin_for_target(origin: str, fwd_host: str, scheme: str, thost: str, tport: int):
+    """Antetul `Origin` trimis ţintei unui forward. Aplicaţiile cu protecţie CSRF proprie
+    (Grafana: `POST /api/ds/query`, Grafana Live; la fel Gitea, Home Assistant…) compară
+    Origin-ul cu Host-ul primit — iar noi le trimitem `Host: <ţintă>:<port>`, deci Origin-ul
+    browserului (`https://slug.<domeniu>`) nu se potrivea niciodată: 403 „origin not allowed",
+    grafice goale, WebSocket mort. Verificarea o facem AICI (Origin-ul trebuie să fie chiar
+    subdomeniul forward-ului, pe schema PUBLIC_URL — altfel un forward-soră de pe acelaşi
+    site, care primeşte cookie-ul nostru SameSite=Lax, ar putea trimite POST-uri), apoi
+    rescriem Origin-ul la originea ţintei, ca app-ul să vadă o cerere same-origin.
+    Întoarce: None = fără Origin (absent / "null"), str = valoarea de trimis; ridică 403
+    dacă Origin-ul e străin."""
+    if not origin or origin == "null":
+        return None
+    o = _origin_tuple(origin)
+    pub = _origin_tuple(config.PUBLIC_URL)
+    if o is None or pub is None or o[0] != pub[0] or o[1] != fwd_host.split(":")[0].lower():
+        raise ApiError(403, "forward.badOrigin", "cross-origin request refused by the forward")
+    return "%s://%s:%d" % ("https" if scheme == "https" else "http", thost, tport)
+
+
 async def proxy_forward_http(request: Request, host_id: int, thost: str,
                              tport: int, target_path: str, scheme: str = "http"):
     """Reverse-proxy HTTP printr-un tunel de agent. Cererea browserului →
@@ -2959,6 +2979,8 @@ async def proxy_forward_http(request: Request, host_id: int, thost: str,
     # anti request-smuggling: path-ul ajunge într-o cerere HTTP raw
     if "\r" in target_path or "\n" in target_path:
         raise ApiError(400, "forward.badPath", "invalid path")
+    fwd_origin = _fwd_origin_for_target(request.headers.get("origin", ""),
+                                        request.headers.get("host", ""), scheme, thost, tport)
     conn = await _ensure_forward_source(host_id)
     if conn is None:
         raise ApiError(409, "forward.hostOffline", "the host is offline (or an SSH host that needs an open session)")
@@ -2987,7 +3009,7 @@ async def proxy_forward_http(request: Request, host_id: int, thost: str,
             lines = ["%s %s HTTP/1.0" % (request.method, target_path)]
             for k, v in request.headers.items():
                 kl = k.lower()
-                if kl in _HOP_BY_HOP or kl in ("host", "content-length"):
+                if kl in _HOP_BY_HOP or kl in ("host", "content-length", "origin"):
                     continue
                 if "\r" in v or "\n" in v:         # anti-injecție de headere
                     continue
@@ -2999,6 +3021,8 @@ async def proxy_forward_http(request: Request, host_id: int, thost: str,
                         continue
                 lines.append("%s: %s" % (k, v))
             lines.append("Host: %s:%d" % (thost, tport))
+            if fwd_origin:
+                lines.append("Origin: %s" % fwd_origin)
             if body:
                 lines.append("Content-Length: %d" % len(body))
             lines.append("Connection: close")
@@ -5501,6 +5525,11 @@ async def handle_forward_ws(scope, receive, send):
         for h, v in headers.items():
             if h in _WS_SKIP:
                 continue
+            if h == "origin":
+                # verificat mai sus (subdomeniul forward-ului); ţinta îl vede ca same-origin
+                # (Grafana Live refuza handshake-ul: Origin ≠ Host) — vezi _fwd_origin_for_target
+                v = "%s://%s:%d" % ("https" if row["scheme"] == "https" else "http",
+                                    row["target_host"], row["target_port"])
             if h == "cookie":
                 v = _strip_fwd_cookie(v)       # cookie-ul NOSTRU nu iese către ţintă
                 if not v:

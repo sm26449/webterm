@@ -147,6 +147,7 @@ const en: Lang = {
     'err.enroll.invalid': "This enrolment token is invalid or has expired.",
     'err.forward.missing': "That forward no longer exists, or it is disabled.",
     'err.forward.proxyError': "The forwarded service could not be reached.",
+    'err.forward.badOrigin': "Request refused: it did not come from this forward's own page.",
     'err.forward.badScheme': "The scheme must be http, https or telnet.",
     'err.forward.badTarget': "Invalid target host — letters, digits and . - : _ only.",
     'err.forward.badPort': "Invalid port — use 1 to 65535.",
