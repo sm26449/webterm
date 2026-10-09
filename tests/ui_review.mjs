@@ -350,7 +350,17 @@ try {
     await step('dialog Copy to host', async () => {
       await hostTab(page, 'Files')
       await page.waitForSelector('button[title="New file"]', { timeout: 8000 })
+      // „Selectează tot" e dezactivat pe o listă goală, iar home-ul containerului de CI are doar
+      // dotfiles — pe runner `check()` aştepta 30 s şi pasul era sărit (3.5.18, de două ori).
+      // Arătăm fişierele ascunse (.webterm/ e mereu acolo), ca selecţia să aibă şi foldere.
+      const hidden = page.getByRole('button', { name: 'Show hidden files (dotfiles)' }).first()
+      const showHiddenWas = (await hidden.getAttribute('aria-pressed')) === 'true'
+      if (!showHiddenWas) await hidden.click()
       const all = page.locator('[data-testid="wt-files-select-all"]')
+      await page.waitForFunction(() => {
+        const el = document.querySelector('[data-testid="wt-files-select-all"]')
+        return el && !el.disabled
+      }, null, { timeout: 15000 })
       await all.check()
       await page.getByRole('button', { name: 'Copy to host…' }).first().click()
       const dlg = page.locator('[data-testid="wt-copy-dialog"]')
@@ -368,6 +378,7 @@ try {
       await page.keyboard.press('Escape')
       await dlg.waitFor({ state: 'detached', timeout: 4000 })
       await all.uncheck()
+      if (!showHiddenWas) await hidden.click()
     }, page)
     await step('tab Toolbox', async () => {
       // tab-ul care găzduieşte ToolboxPanel (Connections/SSH keys/Library/History); eticheta lui
