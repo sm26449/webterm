@@ -66,8 +66,11 @@ jobs:
             latest=false; [ "$tag" = "$NEWEST" ] && latest=true
             pre=""; case "$tag" in *-*) pre="--prerelease" ;; esac
             if gh release view "$tag" >/dev/null 2>&1; then
-              if [ "$only_create" = 1 ]; then echo "$tag: release exists — skipped"; return 0; fi
-              gh release edit "$tag" --title "$title" --notes-file notes.md --latest="$latest" $pre
+              # A tag that was deleted and re-pushed (to re-run CI on the same version) turns its
+              # release into an untagged DRAFT; a plain edit then failed. Re-attach and publish.
+              draft=$(gh release view "$tag" --json isDraft -q .isDraft 2>/dev/null || echo false)
+              if [ "$only_create" = 1 ] && [ "$draft" != true ]; then echo "$tag: release exists — skipped"; return 0; fi
+              gh release edit "$tag" --tag "$tag" --draft=false --title "$title" --notes-file notes.md --latest="$latest" $pre
               echo "$tag: release updated — $title (latest=$latest)"
             else
               gh release create "$tag" --verify-tag --title "$title" --notes-file notes.md --latest="$latest" $pre
