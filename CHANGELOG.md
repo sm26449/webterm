@@ -9,6 +9,8 @@ back.
 
 ## [Unreleased]
 
+## [3.5.18] — 2026-10-09 · agent (58)
+
 ### Added
 - **GitHub Releases from the CHANGELOG.** The notes lived only in CHANGELOG.md, so the
   repository's Releases page did not carry them and watching releases told nobody. A `v*` tag now also runs
