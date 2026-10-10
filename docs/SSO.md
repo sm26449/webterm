@@ -34,9 +34,12 @@ WebTerm reads the id_token's **`groups`** claim — the same claim `WEBTERM_OIDC
 checks. In Settings → Users & roles → **SSO group mapping**, map a group name to a role and a
 scope. At every SSO sign-in and every SSO step-up WebTerm re-syncs the account's SSO-derived
 roles to the groups the IdP just sent: missing ones are added, ones whose group is gone are
-removed at once. Roles given by hand are never touched. The rules, examples with Authentik
-groups, and the edge cases (absent claim, case, the last Owner) are in
-[ROLES.md → SSO group mapping](ROLES.md#sso-group-mapping).
+removed at once. Roles given by hand are never touched. **Only SSO-only accounts
+receive group roles**: a local account that SSO adopts by email keeps its password, and with a
+local password the groups give it nothing until the person removes the password (Settings →
+Users & roles → Your access), which also removes its passkeys and 2FA. The rules, examples with
+Authentik groups, and the edge cases (absent or unreadable claim, exact names, the last Owner) are
+in [ROLES.md → SSO group mapping](ROLES.md#sso-group-mapping).
 
 With Authentik the `groups` claim is part of the default **profile** scope mapping, so nothing
 extra is needed as long as `WEBTERM_OIDC_SCOPES` includes `profile` (it does by default). If the

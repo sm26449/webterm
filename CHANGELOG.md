@@ -47,10 +47,26 @@ Custom roles and SSO group → role mapping — the design's "3.6.1" milestone
   no-escalation check as a binding over that scope, and Owner for an Owner mapping; reauth +
   second factor, audited, alerted. Fail-closed edge cases: an **absent** `groups` claim changes
   nothing (logged), a present-but-empty or unreadable one removes SSO bindings; group names match
-  exactly (case-sensitive, outer whitespace trimmed, ≤ 256 printable characters); only the first
+  exactly (raw, case-sensitive, ≤ 256 printable characters — see the review note below); only the first
   5000 groups are read; the **last Owner** is never removed by a sync (kept, logged, audited,
   critical alert); a host-scoped mapping is deleted with its host; only *mapped* group names are
   stored per account.
+
+- **Security review (before release).** An independent review found an Admin → Owner path: an
+  Admin creates a role-less local account with the future SSO user's email and a password he
+  knows; at that person's first SSO sign-in the account is adopted by email and the group
+  mapping grants it the person's roles, which the Admin then uses with his password. Fixed by
+  never **adding** group roles to an account that has a usable local password (removals still
+  apply, logged and audited as `sso.sync.skippedLocalPassword`). SSO-provisioned accounts have
+  none; others remove it themselves in Settings → Users & roles → Your access, which also revokes
+  passkeys, 2FA and other sessions (a planted passkey must not survive); setting a password drops
+  SSO-derived roles at once. Accounts from before 3.6.2 count as having a local password
+  (fail-closed). Also from the review: removing a mapping is refused when it would strip roles
+  from an account that outranks you; group names are matched raw (no trim/NFC — those created
+  aliases) and mapping names that normalisation would change are refused; the claim must be a
+  list of strings (anything else = no groups, audited); `*` mappings with real power are
+  Owner-only and always alert as critical; role names that look like another role (Cyrillic
+  `Оwner`, mixed alphabets) are refused.
 
 ### Changed
 - Role bindings record their source as `manual`, `migration` or `sso`. Adding by hand a binding

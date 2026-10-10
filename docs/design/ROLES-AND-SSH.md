@@ -1332,12 +1332,30 @@ two sync calls in `oidc_api.callback`, and `UsersTab.tsx`. Tests: `rbac_roles_te
   `POST /api/settings/oidc-roles/{mid}/delete` (reauth body, like the other removals). A mapping
   is a grant: the same `check_can_grant` as a binding, reauth + second gate.
 - **Sync semantics** (`ssomap.py`): absent `groups` claim → no change (logged); present but
-  empty or unreadable → no groups; exact, case-sensitive names after NFC + trimming; 5000-entry
+  empty or unreadable → no groups; exact, case-sensitive raw names (see the review fixes below); 5000-entry
   cap; `*` wildcard; manual/migration bindings never touched; an identical manual grant adopts an
   sso binding. Adding a mapping applies at the next SSO login/step-up only (never from stored
   group data); removing one prunes derived bindings **immediately**, from the *mapped* groups
   recorded at each account's last sync (`users.sso_groups`). The last Owner is never removed by
   a sync (kept, logged, audited, critical alert).
+- **Security review fixes (before release):**
+  - group roles are **never added** to an account with a usable local password
+    (`users.local_password`, 1 by default and for every pre-3.6.2 account; 0 only for accounts
+    provisioned by SSO or after "remove local password"). Removals still apply;
+    `sso.sync.skippedLocalPassword` is logged and audited. Removing the password (self-service,
+    SSO re-auth + second gate) also revokes passkeys, TOTP, recovery codes and other sessions;
+    setting a password drops SSO-derived bindings at once (the last Owner's is kept). This
+    closes Admin → Owner through a planted local account adopted by SSO, and its delete-and-
+    replant variant;
+  - removing a mapping is refused (`authz.outranked`, with a count) when the prune would touch an
+    account that outranks the actor;
+  - group names are matched raw (no trim/NFC); mapping names that normalisation would change, or
+    with control/format characters, are refused; the claim must be a list of strings (non-strings
+    dropped, other shapes = unreadable = no groups, audited);
+  - `*` mappings with instance or ⚑ permissions or scope `all` are Owner-only (create and
+    remove); every `*` mapping alerts as critical;
+  - custom role names whose confusable skeleton matches a built-in or existing role, or that mix
+    alphabets, are refused (`role.nameConfusable`).
 - **Not built:** the explain-access endpoint, the `WEBTERM_OIDC_ROLE_MAP` env bootstrap, and the
   design's 3.6.2 items (expiring bindings, crown-jewel warnings, deploy-key scope warnings).
   Passkey sign-in of an SSO account does not re-sync (documented in ROLES.md and THREAT-MODEL).

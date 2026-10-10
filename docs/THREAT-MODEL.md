@@ -241,7 +241,11 @@ See [design/ARCHITECTURE.md](design/ARCHITECTURE.md) for the agent's resilience
    a mapping, **IdP group membership grants WebTerm roles**: whoever can add people to a mapped
    group (an IdP admin, or a self-service group in the IdP) can grant that role. Map only groups
    whose membership you control as tightly as the role deserves, and never map a self-service
-   group to Owner or Admin. SSO-derived bindings are re-checked at every SSO login and SSO
+   group to Owner or Admin. Group roles reach **only accounts without a local password**: an
+   account adopted by email keeps its password, and whoever set it (say, an Admin who created the
+   account before the person's first SSO sign-in) must not inherit the person's group roles — so
+   it gets none until the person removes the password, which also revokes its passkeys and 2FA.
+   A `*` mapping with real power is Owner-only and always raises a critical alert. SSO-derived bindings are re-checked at every SSO login and SSO
    step-up; an SSO account that signs in with a **passkey** instead keeps its SSO-derived roles
    until its next SSO sign-in or step-up (remove the mapping or the binding to revoke at once).
    So the IdP's own security is in scope: its MFA, its

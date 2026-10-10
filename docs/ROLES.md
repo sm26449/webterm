@@ -123,7 +123,9 @@ a binding. Accounts that existed before the 3.6 upgrade (including SSO accounts)
 
 ## Custom roles
 
-Settings → Users & roles → **Roles** (needs **Custom roles**, `roles.manage`). A custom role is a
+Settings → Users & roles → **Roles** (needs **Custom roles**, `roles.manage`). Role names that
+only *look* like another role's — letters from another alphabet such as a Cyrillic `О` in
+`Оwner`, or a name mixing alphabets — are refused (`role.nameConfusable`). A custom role is a
 named set of permissions from the [catalogue](#permission-reference); where it applies is still
 decided by the scope of each binding, exactly like a built-in role. The editor groups the
 permissions as in the reference below and marks the shell-equivalent ones with ⚑; ticking any of
@@ -197,20 +199,41 @@ Settings → Users & roles → **SSO group mapping** (shown only when SSO is ena
   SSO sign-in, which adds it back while the mapping and the group membership exist — remove the
   mapping, or the person from the group, instead.
 
+**Accounts with a local password never receive roles from groups.** Only accounts that sign in
+with SSO only get group roles: an account created by the first SSO sign-in has no local password;
+an existing local account that SSO *adopted* by email keeps its password (and its passkeys and
+2FA), so its groups give it **nothing** — removals still apply, and the gateway logs and audits
+`sso.sync.skippedLocalPassword`. The reason: whoever set that password — for example an Admin who
+created `ceo@corp.example` before the real CEO's first SSO sign-in — could otherwise sign in with
+it and inherit what the CEO's groups grant (Owner). To receive group roles, the person removes
+the local password under Settings → Users & roles → **Your access** (after a fresh SSO
+confirmation). That also removes the account's passkeys, 2FA and other signed-in devices, because
+anyone who knew the password could have added a passkey; they can be set up again after signing
+in with SSO. Setting a local password again removes the SSO-derived roles immediately. Accounts
+from before 3.6.2 count as having a local password (WebTerm cannot tell which were adopted), so
+existing SSO users remove it once. The Users list marks such SSO accounts *local password*.
+
 **Who can map.** Mapping a group grants its role to everyone in the group, so it follows the same
 rules as giving a binding: `users.manage`, no escalation over the scope, and **only an Owner can
-map a group to Owner** (or remove such a mapping). Every change needs your password and second
-factor, is audited and alerts the security-summary holders.
+map a group to Owner** (or remove such a mapping). A **`*`** mapping (every SSO user) to a role
+with any instance permission or any ⚑ permission, or over all hosts, is **Owner-only** too, and
+every `*` mapping raises a critical alert. Removing a mapping is refused (`outranked`, with the
+number of accounts) when it would take roles away from an account that holds more than you.
+Every change needs your password and second factor, is audited and alerts the security-summary
+holders.
 
 **Edge cases, decided on the safe side.**
 
-- **Group names match exactly**, upper and lower case included (`Ops` is not `ops`): two IdP
-  groups that differ only by case are two groups. Surrounding spaces are ignored; names longer
-  than 256 characters or with control characters never match.
+- **Group names match exactly**, character for character, against the raw claim: upper and
+  lower case count (`Ops` is not `ops`), and nothing is trimmed or Unicode-normalised
+  (`wt-owners ` with a trailing space is not `wt-owners`). A mapping name that trimming or
+  Unicode normalisation (NFC) would change, or that has control or invisible (format) characters,
+  is refused when you create it; names are at most 256 characters.
 - **The `groups` claim is absent** from the id_token (the IdP does not send it): nothing changes
   for that sign-in, and the gateway logs a warning — a misconfigured IdP must not strip everyone's
-  access. **Present but empty** (or of a type WebTerm cannot read): the person is in no group, so
-  their SSO-derived bindings are removed.
+  access. **Present but empty**, or **unreadable** — anything but a list of strings, such as a
+  bare string: the person is in no group, so their SSO-derived bindings are removed (an unreadable
+  claim is also audited). Items of a list that are not strings are ignored, never converted.
 - **Huge group lists**: only the first 5000 entries are read; a truncated list can only grant
   less.
 - **The last Owner**: if the only remaining Owner holds Owner only through SSO and leaves the

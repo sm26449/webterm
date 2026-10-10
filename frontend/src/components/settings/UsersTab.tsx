@@ -1,5 +1,7 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react'
-import { api, errText, Host, withSecondFactor as withSecondFactorT } from '../../lib/api'
+import { api, ApiError, errText, Host, withSecondFactor as withSecondFactorT } from '../../lib/api'
+import { useConfirm } from '../../lib/confirm'
+import { ssoStepupRedirect } from '../../lib/stepup'
 import { askSecret } from '../../lib/secretPrompt'
 import { useI18n } from '../../lib/i18n'
 import { Binding, groupPerms, heldEverywhere, loadPerms, ROLE_KEYS, ROLE_PRESETS, roleBody, roleLabel, RoleRow,
@@ -22,7 +24,7 @@ import NotLoaded from './NotLoaded'
 
 type UserRow = {
   id: number; email: string; created: number; totp: boolean; passkeys: number; sso?: boolean
-  is_self: boolean; bindings?: Binding[]
+  is_self: boolean; bindings?: Binding[]; local_password?: boolean
 }
 
 type SsoMapping = {
@@ -279,7 +281,7 @@ function RolesSection(props: {
 /* ── Maparea grupurilor SSO ─────────────────────────────────────────────────────────────── */
 function SsoSection(props: {
   catalogue: RolesCatalogue | null; hosts: Host[]; isOwner: boolean
-  mappings: SsoMapping[]; reload: () => Promise<void>
+  mappings: SsoMapping[]; localPwAccounts: number; reload: () => Promise<void>
   done: (text: string) => void; fail: (e: unknown) => void
 }) {
   const { t } = useI18n()
@@ -330,6 +332,9 @@ function SsoSection(props: {
     <>
       <h3 className={heading + ' flex items-center gap-2'}>{t('roles.sso.title')}<HelpTip id="ssoMapping" /></h3>
       <p className="mt-1 text-xs text-slate-500">{t('roles.sso.hint')}</p>
+      <p className="mt-1 text-xs text-slate-400" data-sso-localpw-note>
+        {t('roles.sso.localPwNote', { n: props.localPwAccounts })}
+      </p>
       <ul className="mt-2 flex flex-col gap-1" data-sso-mappings>
         {props.mappings.length === 0 && <li className="text-sm text-slate-400">{t('roles.sso.none')}</li>}
         {props.mappings.map((m) => (
@@ -379,7 +384,8 @@ export default function UsersTab() {
   const [users, setUsers] = useState<UserRow[]>([])
   const [hosts, setHosts] = useState<Host[]>([])
   const [catalogue, setCatalogue] = useState<RolesCatalogue | null>(null)
-  const [sso, setSso] = useState<{ enabled: boolean; mappings: SsoMapping[] } | null>(null)
+  const [sso, setSso] = useState<{ enabled: boolean; mappings: SsoMapping[]; local_password_accounts?: number } | null>(null)
+  const { confirm } = useConfirm()
   const [msg, setMsg] = useState('')
   const [err, setErr] = useState('')
   // unde apare mesajul: lângă secţiunea care l-a produs (altfel un „Rol salvat" ar apărea sus,
@@ -396,7 +402,8 @@ export default function UsersTab() {
     .catch((e) => setUsersState({ status: 'error', error: errText(e, t) }))
   const loadCatalogue = () => api<RolesCatalogue>('/api/roles').then(setCatalogue)
     .catch((e) => setErr(t('common.loadFailed') + ' ' + errText(e, t)))
-  const loadSso = () => api<{ enabled: boolean; mappings: SsoMapping[] }>('/api/settings/oidc-roles').then(setSso)
+  const loadSso = () => api<{ enabled: boolean; mappings: SsoMapping[]; local_password_accounts?: number }>(
+    '/api/settings/oidc-roles').then(setSso)
     .catch(() => setSso(null))
   useEffect(() => {
     loadUsers()
@@ -482,7 +489,24 @@ export default function UsersTab() {
     } catch (x) { fail(x) }
   }
 
-  const mine = perms?.bindings ?? users.find((u) => u.is_self)?.bindings ?? []
+  // 3.6.2 (revizuirea de securitate): un cont SSO cu parolă locală nu primeşte roluri din
+  // grupuri. Omul îşi scoate singur parola (cu re-auth SSO); scoaterea revocă şi passkey-urile.
+  async function removeLocalPassword() {
+    if (!(await confirm({ title: t('roles.localPw.confirmTitle'), message: t('roles.localPw.confirmBody'),
+      confirmLabel: t('roles.localPw.remove'), danger: true }))) return
+    try {
+      await withSecondFactor((extra) => api('/api/account',
+        { method: 'POST', body: JSON.stringify({ remove_password: true, ...extra }) }))
+      await loadUsers()
+      done(t('roles.localPw.removed'))
+    } catch (x) {
+      if (x instanceof ApiError && x.code === 'account.ssoReauth') { ssoStepupRedirect(0); return }
+      fail(x)
+    }
+  }
+
+  const self = users.find((u) => u.is_self)
+  const mine = perms?.bindings ?? self?.bindings ?? []
   const others = users.filter((u) => !u.is_self)
   const sourceTitle = (b: Binding) => (b.source === 'migration' ? t('roles.sourceMigration')
     : b.source === 'sso' ? t('roles.sourceSso') : undefined)
@@ -503,6 +527,13 @@ export default function UsersTab() {
                 title={sourceTitle(b)}>{chip(b)}</Badge>
             ))}
         </div>
+        {self?.sso && self.local_password && (
+          <div className="mt-3 flex flex-col items-start gap-2 rounded-md bg-warn/10 px-3 py-2" data-localpw-self>
+            <p className="text-xs text-warn">{t('roles.localPw.mine')}</p>
+            <Button size="sm" variant="danger" onClick={removeLocalPassword}>{t('roles.localPw.remove')}</Button>
+          </div>
+        )}
+        {!manage && status('users')}
         <ul className="mt-3 flex flex-col gap-1 text-xs text-slate-400">
           {ROLE_KEYS.map((k) => (
             <li key={k} className="flex items-start gap-2">
@@ -527,6 +558,9 @@ export default function UsersTab() {
                 <span className="min-w-0 flex-1 truncate text-slate-200">{u.email}</span>
                 {u.is_self && <span className="wt-chip-accent shrink-0 rounded-md px-1.5 py-0.5 text-2xs">{t('settings.users.you')}</span>}
                 {u.sso && <span className="shrink-0 text-2xs text-slate-500">SSO</span>}
+                {u.sso && u.local_password && (
+                  <Badge tone="warn" title={t('roles.localPw.badgeHint')}>{t('roles.localPw.badge')}</Badge>
+                )}
                 {u.totp && <span className="shrink-0 text-2xs text-slate-500">2FA</span>}
                 {u.passkeys > 0 && <span className="shrink-0 text-2xs text-slate-500">{t('settings.users.passkeys', { n: u.passkeys })}</span>}
                 {!u.is_self && users.length > 1 && (
@@ -623,6 +657,7 @@ export default function UsersTab() {
       <section data-setting-id="ssoMapping" hidden={!manage || !sso?.enabled}>
         {manage && sso?.enabled && (
           <SsoSection catalogue={catalogue} hosts={hosts} isOwner={isOwner} mappings={sso.mappings}
+            localPwAccounts={sso.local_password_accounts ?? 0}
             reload={reloadSso} done={(x) => done(x, 'sso')} fail={(e) => fail(e, 'sso')} />
         )}
         {status('sso')}
