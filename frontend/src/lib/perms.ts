@@ -17,6 +17,7 @@ export type ScopeKind = 'all' | 'folder' | 'tag' | 'host'
 export interface Binding {
   id: number
   role: RoleKey | string
+  role_id?: number
   role_name: string
   scope_kind: ScopeKind
   scope_value: string
@@ -38,6 +39,75 @@ export const ROLE_KEYS: readonly RoleKey[] = ['owner', 'admin', 'operator', 'vie
 /** rolurile predefinite care dau un shell undeva (⚑): toate în afară de Viewer */
 export const SHELL_ROLES: readonly string[] = ['owner', 'admin', 'operator']
 export const SCOPE_KINDS: readonly ScopeKind[] = ['all', 'folder', 'tag', 'host']
+
+// ── Roluri custom (3.6.2) ─────────────────────────────────────────────────────────────────
+export interface PermSpec { id: string; kind: 'host' | 'global'; shell: boolean }
+export interface RoleRow {
+  id: number
+  key?: string
+  name: string
+  description?: string
+  perms: string[]
+  shell: boolean
+  bindings?: number
+  sso_bindings?: number
+  mappings?: number
+  editable?: boolean
+}
+export interface RolesCatalogue {
+  perms: PermSpec[]
+  roles: (RoleRow & { key: RoleKey })[]
+  custom: RoleRow[]
+  scopes: string[]
+}
+
+/** Grupele din editorul de roluri — aceeaşi împărţire ca în docs/ROLES.md („Permission
+    reference"). O permisiune din catalog care lipseşte de aici cade în ultimul grup potrivit
+    tipului ei (vezi `groupPerms`), deci o permisiune nouă nu dispare tăcut din editor. */
+export const PERM_GROUPS: readonly { id: string; perms: readonly string[] }[] = [
+  { id: 'hosts', perms: ['host.view', 'host.diagnostics', 'host.wake', 'host.edit', 'host.admin'] },
+  { id: 'sessions', perms: ['session.watch', 'recording.view', 'session.open', 'session.manage',
+    'share.live', 'share.live_write', 'share.replay'] },
+  { id: 'files', perms: ['files.read', 'files.write', 'files.delete'] },
+  { id: 'ops', perms: ['run', 'docker.view', 'docker.act', 'services.view', 'services.act', 'serial.use'] },
+  { id: 'network', perms: ['forward.use', 'forward.manage', 'toolbox.use', 'toolbox.manage', 'deploykey.manage'] },
+  { id: 'instance', perms: [] },
+]
+
+export function groupPerms(catalogue: PermSpec[]): { id: string; perms: PermSpec[] }[] {
+  const byId = new Map(catalogue.map((p) => [p.id, p]))
+  const placed = new Set<string>()
+  const out = PERM_GROUPS.map((g) => {
+    const perms = g.perms.map((id) => byId.get(id)).filter((p): p is PermSpec => !!p)
+    perms.forEach((p) => placed.add(p.id))
+    return { id: g.id, perms }
+  })
+  for (const p of catalogue) {
+    if (placed.has(p.id)) continue
+    const g = p.kind === 'global' ? out[out.length - 1] : out[0]
+    g.perms.push(p)
+  }
+  return out.filter((g) => g.perms.length > 0)
+}
+
+/** Modele de pornire din design (§A.5): nu sunt roluri predefinite, doar o bifare rapidă. */
+export const ROLE_PRESETS: readonly { id: string; labelKey: string; perms: readonly string[] }[] = [
+  { id: 'auditor', labelKey: 'roles.custom.presetAuditor', perms: ['host.view', 'recording.view', 'audit.view'] },
+  { id: 'filesOnly', labelKey: 'roles.custom.presetFilesOnly', perms: ['files.read', 'files.write'] },
+]
+
+/** Ce are contul peste TOATĂ instanţa: globalele + permisiunile de host de la o legătură `all`.
+    Plafonul (cosmetic) al editorului de roluri — serverul aplică exact aceeaşi regulă. */
+export function heldEverywhere(p: MyPerms | null): Set<string> | null {
+  if (!p) return null
+  return new Set([...p.global, ...p.all_hosts])
+}
+
+/** Valoarea din <select> pentru un rol: cheia celor predefinite, `id:N` pentru cele custom. */
+export const roleValue = (r: { key?: string; id: number }) => (r.key ? r.key : 'id:' + r.id)
+export function roleBody(v: string): { role?: string; role_id?: number } {
+  return v.startsWith('id:') ? { role_id: Number(v.slice(3)) } : { role: v }
+}
 
 /** permisiune globală (instanţă). `null` = încă necunoscut → permis. */
 export function can(p: MyPerms | null, perm: string): boolean {

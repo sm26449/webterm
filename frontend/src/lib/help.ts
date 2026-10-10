@@ -38,6 +38,8 @@ export const HELP = {
   securitySummary: { doc: 'docs/SECURITY-SUMMARY.md#what-the-card-checks' },
   replayLinks: { doc: 'docs/FEATURES.md#replay-links' },
   roles: { doc: 'docs/ROLES.md#giving-someone-access' },
+  customRoles: { doc: 'docs/ROLES.md#custom-roles' },
+  ssoMapping: { doc: 'docs/ROLES.md#sso-group-mapping' },
 } satisfies Record<string, { doc: string; example?: (origin: string) => string }>
 
 export type HelpId = keyof typeof HELP

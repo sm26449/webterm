@@ -53,6 +53,12 @@ export const SETTINGS_INDEX: readonly SettingSection[] = [
   { id: 'users', cat: 'utilizatori', titleKey: 'settings.users.title', hintKey: 'settings.users.hint',
     keywords: 'users accounts people team invite admin bindings utilizatori conturi echipa oameni legaturi',
     perm: 'users.manage' },
+  { id: 'roles', cat: 'utilizatori', titleKey: 'roles.custom.title', hintKey: 'roles.custom.hint',
+    keywords: 'custom roles permissions editor role create edit auditor files-only roluri custom permisiuni editor',
+    perm: 'roles.manage' },
+  { id: 'ssoMapping', cat: 'utilizatori', titleKey: 'roles.sso.title', hintKey: 'roles.sso.hint',
+    keywords: 'sso oidc authentik groups claim mapping group role idp grupuri mapare grup',
+    perm: 'users.manage' },
   // ── Autentificare şi 2FA ──
   { id: 'devices', cat: 'autentificare', titleKey: 'settings.devices', hintKey: 'settings.devicesHint',
     keywords: 'devices sessions browsers sign out logout revoke dispozitive sesiuni deconectare' },

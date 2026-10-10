@@ -53,10 +53,11 @@ const TAGS = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa', 'best-prac
 // Forwards, Services, Docker, Toolbox/Connections, Toolbox/SSH keys) = 8, host offline ×
 // (Overview, Sessions) = 2, toast de eroare, Settings × 7, file browser, Status, Add host × 3,
 // FleetRun, `?`, walkthrough, paleta, ConfirmModal, panoul de alerte, dialogul „link de replay"
-// + pagina PUBLICĂ de replay + dialogul „Copy to host" (3.5.18) + Settings → Users & roles (3.6) = 36
+// + pagina PUBLICĂ de replay + dialogul „Copy to host" (3.5.18) + Settings → Users & roles (3.6)
+// + editorul de roluri custom ŞI maparea grupurilor SSO deschise (3.6.2) = 37
 // (+ Monaco cu WT_AGENT=1).
 // Mobil: sesiune dark + light.
-const PER_THEME = 36 + (HAS_AGENT ? 1 : 0)
+const PER_THEME = 37 + (HAS_AGENT ? 1 : 0)
 const EXPECTED_SCANS = 2 * PER_THEME + 2
 
 /** Pas tolerant: dacă un selector a derapat, notăm şi mergem mai departe.
@@ -453,6 +454,37 @@ try {
       await scan(page, `${theme} settings: search results`)
       await page.fill('[role=search] input', '')
       await escapeRestores(page, 'button[aria-label="Settings"]', 'Settings')
+    }, page)
+
+    // 3.6.2: editorul de roluri custom (formularul deschis, cu grupele de permisiuni şi ⚑) şi
+    // secţiunea de mapare SSO. SSO nu e activ în containerul de CI, deci răspunsul mapărilor e
+    // completat aici cu `enabled: true` + o mapare de exemplu — secţiunea apare ca la o instanţă
+    // cu SSO, iar axe o vede. Nimic nu se salvează (formularul e doar deschis, apoi anulat).
+    await step('roluri custom + mapare SSO', async () => {
+      await page.route('**/api/settings/oidc-roles', async (route) => {
+        if (route.request().method() !== 'GET') return route.continue()
+        const r = await route.fetch()
+        const body = await r.json()
+        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+          ...body, enabled: true,
+          mappings: [{ id: 990001, group: 'wt-ops', role: 'operator', role_id: 0, role_name: 'Operator',
+            scope_kind: 'folder', scope_value: 'prod', sso_bindings: 2 }],
+        }) })
+      })
+      await openSettings(page)
+      await settingsTab(page, 'Users & roles')
+      await page.click('[data-new-role]')
+      await page.waitForSelector('[data-role-editor]')
+      await page.waitForSelector('[data-sso-mappings]')
+      await page.locator('[data-role-editor] input[type=checkbox]').nth(4).check()   // session.open → bannerul ⚑
+      await page.screenshot({ path: `${OUT}/${theme}-05-settings-roles-sso.png`, fullPage: true })
+      await scan(page, `${theme} settings: custom roles editor + SSO mapping`)
+      check(`${theme}: editorul de roluri are grupele de permisiuni (fieldset)`,
+        await page.locator('[data-role-editor] fieldset').count() >= 5)
+      await page.locator('[data-role-editor] button', { hasText: 'Cancel' }).click()
+      await page.unroute('**/api/settings/oidc-roles')
+      await page.keyboard.press('Escape')
+      await page.waitForTimeout(300)
     }, page)
 
     // file browser (overlay-ul din meniul ⋯, altă suprafaţă decât tab-ul Files al hostului)
