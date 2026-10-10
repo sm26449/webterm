@@ -9,6 +9,8 @@ back.
 
 ## [Unreleased]
 
+## [3.6.0] — 2026-10-10 · agent (58)
+
 > **Upgrading to the 3.6 roles:** a single-user install sees no change. Every existing account
 > becomes **Owner over all hosts** at the first start (`source: migration`), so nobody loses
 > anything, and existing automation tokens keep working. New accounts — including new SSO users —
@@ -115,7 +117,6 @@ back.
     ignored with a warning and rebuilt from the real sources (existing ids and a new
     `deleted_accounts` record), so it can neither break account creation nor let an id be
     reused.
-
 
 ## [3.5.18] — 2026-10-09 · agent (58)
 
