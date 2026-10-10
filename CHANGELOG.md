@@ -9,6 +9,61 @@ back.
 
 ## [Unreleased]
 
+Custom roles and SSO group → role mapping — the design's "3.6.1" milestone
+(docs/design/ROLES-AND-SSH.md), shipping as 3.6.2. No agent change.
+
+### Added
+- **Custom roles** (Settings → Users & roles → Roles, `roles.manage`). Build a role from the
+  permission catalogue, grouped as in docs/ROLES.md, with ⚑ on shell-equivalent permissions, a
+  "this role can give a shell" banner, the scope note (instance permissions only count over all
+  hosts) and two presets (Auditor, Files-only). Custom roles can be given to accounts, used at
+  account creation and mapped to SSO groups, like the built-ins. `GET /api/roles` now returns the
+  built-ins' ids and the custom roles with their use counts; it is readable with `users.manage`
+  or `roles.manage`.
+- **SSO group → role mapping** (Settings → Users & roles → SSO group mapping, shown when SSO is
+  on). The `oidc_group_roles` table from 3.6.0 is now used: at every SSO login **and every SSO
+  step-up** the account's `source: sso` bindings are re-synced to the id_token's `groups` claim —
+  added when a mapped group appears, removed at once when it goes; manual bindings are never
+  touched. `*` maps every SSO user. Removing a mapping removes the bindings derived from it
+  immediately; adding one applies at each person's next SSO sign-in. Why per-login and not on a
+  timer: the IdP is only asked at login and step-up (no SCIM), and step-up already returns a fresh
+  id_token, so the sensitive moments get fresh group data at no cost.
+
+### Security
+- **No escalation through roles.** A role may only contain permissions its editor holds over the
+  whole instance (the old and new set when editing); built-in roles are immutable; editing a role
+  in use also needs `users.manage` and the target rule for every account that has it; a role in
+  use cannot be deleted (409 with counts — the safer choice than cascading a silent mass
+  revocation). Every check is repeated under the authz lock right before writing, on the editor's
+  rights and the role's definition *at that moment* (the 3.6.0 race-fix pattern), and an edit
+  bumps the authz epoch at once (open terminals downgrade or close, forward tickets and derived
+  shares are re-checked).
+- **Target rule generalised.** "Only an Owner touches an Owner" now also covers custom roles:
+  granting, removing a binding or deleting an account fails with `authz.outranked` when the target
+  holds a permission the actor does not; deleting an account requires being able to remove each
+  of its bindings. Removing a custom-role binding is now checked like a built-in one (3.6.0
+  skipped the check because custom roles did not exist).
+- **SSO mapping is a grant.** Adding or removing a mapping needs `users.manage`, the same
+  no-escalation check as a binding over that scope, and Owner for an Owner mapping; reauth +
+  second factor, audited, alerted. Fail-closed edge cases: an **absent** `groups` claim changes
+  nothing (logged), a present-but-empty or unreadable one removes SSO bindings; group names match
+  exactly (case-sensitive, outer whitespace trimmed, ≤ 256 printable characters); only the first
+  5000 groups are read; the **last Owner** is never removed by a sync (kept, logged, audited,
+  critical alert); a host-scoped mapping is deleted with its host; only *mapped* group names are
+  stored per account.
+
+### Changed
+- Role bindings record their source as `manual`, `migration` or `sso`. Adding by hand a binding
+  that exists as `sso` turns it into a manual one.
+- New columns (`oidc_group_roles.created`, `created_by_id`; `users.sso_groups`, `sso_synced`) are
+  additive migrations; rolling back to 3.6.1 ignores them and stops the sync (SSO-derived
+  bindings then stay as they are).
+
+### Not in this release
+- The design's "3.6.2" items (time-bound bindings with expiry, crown-jewel host warnings,
+  deploy-key graph scope warnings), the explain-access endpoint and the
+  `WEBTERM_OIDC_ROLE_MAP` env bootstrap are still to come.
+
 ## [3.6.1] — 2026-10-10 · agent (58)
 
 UI correctness and trust fixes from an external UI audit (U01–U18). No new features; behaviour,

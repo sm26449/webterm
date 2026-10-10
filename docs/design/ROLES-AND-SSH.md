@@ -1,7 +1,9 @@
 # Roles (3.6.x) and native SSH access (3.7.x)
 
 **Status:** Part A milestone **3.6.0 (roles core) implemented** — see §7 for the implementation
-notes and the deviations from this text. 3.6.1/3.6.2 and Part B are still proposals.
+notes and the deviations from this text. The **3.6.1 milestone (custom roles + SSO mapping) is
+implemented and ships as product version 3.6.2** (version numbering shifted: 3.6.1 was a UI
+release) — see §7.1. The design's 3.6.2 items and Part B are still proposals.
 **Written:** 2026-10-09, against `main` at `fa9f026` (WebTerm 3.5.16, agent 58).
 **Audience:** the maintainer deciding scope, and whoever then builds it.
 
@@ -1307,6 +1309,39 @@ runtime guard), `rbac_matrix_test` (generated from `authz.route_perms`: 6 princi
 non-public HTTP route, plus the no-oracle 404 comparison and authz-before-step-up),
 `rbac_filter_test`, `rbac_escalation_test`, `rbac_ws_test`, `rbac_migration_test`.
 
+### 7.1 Implementation notes (custom roles + SSO mapping, shipped as 3.6.2)
+
+Code: `authz.py` (`RoleInfo`, `resolve_role`, `validate_role_fields`, `check_can_define`,
+`outranked_by` / `check_target`, `roles_json`; `check_can_grant` takes a built-in key or a
+`RoleInfo`), the role and mapping routes in `api.py`, `ssomap.py` (normalisation + sync), the
+two sync calls in `oidc_api.callback`, and `UsersTab.tsx`. Tests: `rbac_roles_test`,
+`rbac_oidc_test`. Where this differs from the text above:
+
+- **`source='sso'`**, not `'oidc'` (§A.3 comment).
+- **Editing a role in use** (bound or mapped) needs `users.manage` on top of `roles.manage`, and
+  the target rule for every account that has it. Rule 5 of §A.6.6 is applied to the old **and**
+  the new permission set, against what the editor holds over the whole instance (global perms
+  plus host perms from a scope-`all` binding) — a role has no scope of its own.
+- **Deleting a role in use is refused** (409 `role.inUse` with counts of bindings, mappings and
+  tokens) instead of cascading; the safer of the two options, no silent mass revocation.
+- **Target rule generalised** (`authz.outranked`): binding changes and account deletion are
+  refused when the target holds, over the whole instance, a permission the actor does not.
+  Account deletion also requires being able to remove each of the target's bindings. This is
+  stricter than 3.6.0 only where custom roles exist; built-in-only installs behave the same.
+- **Mapping endpoints** are `GET/POST /api/settings/oidc-roles` and
+  `POST /api/settings/oidc-roles/{mid}/delete` (reauth body, like the other removals). A mapping
+  is a grant: the same `check_can_grant` as a binding, reauth + second gate.
+- **Sync semantics** (`ssomap.py`): absent `groups` claim → no change (logged); present but
+  empty or unreadable → no groups; exact, case-sensitive names after NFC + trimming; 5000-entry
+  cap; `*` wildcard; manual/migration bindings never touched; an identical manual grant adopts an
+  sso binding. Adding a mapping applies at the next SSO login/step-up only (never from stored
+  group data); removing one prunes derived bindings **immediately**, from the *mapped* groups
+  recorded at each account's last sync (`users.sso_groups`). The last Owner is never removed by
+  a sync (kept, logged, audited, critical alert).
+- **Not built:** the explain-access endpoint, the `WEBTERM_OIDC_ROLE_MAP` env bootstrap, and the
+  design's 3.6.2 items (expiring bindings, crown-jewel warnings, deploy-key scope warnings).
+  Passkey sign-in of an SSO account does not re-sync (documented in ROLES.md and THREAT-MODEL).
+
 ---
 
 ## Appendix A: Route-by-route permission matrix
@@ -1405,10 +1440,14 @@ middleware plus ASGI WS middleware in `main.py`) and the SPA/asset catch-all. Li
 | `/api/users/{uid}/bindings` | GET | `users.manage` | G | 3.6.0 |
 | `/api/users/{uid}/bindings` | POST | `users.manage` | G | §A.6.6; reauth + second gate (3.6.0) |
 | `/api/users/{uid}/bindings/{bid}/delete` | POST | `users.manage` | G | POST with a body (reauth), like account deletion — a DELETE with a body is badly supported by clients (3.6.0) |
-| `/api/roles` | GET | `users.manage` | G | catalogue + built-in roles (3.6.0) |
-| *new* `/api/roles`, `/api/roles/{id}` | POST/PATCH/DELETE | `roles.manage` | G | 3.6.1 |
-| *new* `/api/authz/explain` | GET | `users.manage` (or self) | G | |
-| *new* `/api/settings/oidc-roles` | GET/POST | `users.manage` | G | 3.6.1 |
+| `/api/roles` | GET | `users.manage` / `roles.manage` | G | catalogue + built-in roles (3.6.0); + custom roles with use counts (3.6.2); either permission |
+| `/api/roles` | POST | `roles.manage` | G | create a custom role (3.6.2): perms ⊆ yours over the whole instance; reauth + second gate |
+| `/api/roles/{rid}` | PATCH | `roles.manage` | G | edit (3.6.2): old ∪ new perms ⊆ yours; a role in use also needs `users.manage` + the target rule for every bound account; built-ins 403 |
+| `/api/roles/{rid}/delete` | POST | `roles.manage` | G | delete (3.6.2): refused (409) while bound, mapped or used by a token; reauth body |
+| *new* `/api/authz/explain` | GET | `users.manage` (or self) | G | not built yet |
+| `/api/settings/oidc-roles` | GET | `users.manage` | G | SSO group → role mappings (3.6.2) |
+| `/api/settings/oidc-roles` | POST | `users.manage` | G | add a mapping: same grant rules as a binding (Owner only for Owner); reauth + second gate (3.6.2) |
+| `/api/settings/oidc-roles/{mid}/delete` | POST | `users.manage` | G | remove a mapping; derived SSO bindings removed at once (3.6.2) |
 | `/api/tokens` (987) | GET | `tokens.create` | S / G | own; all with `tokens.manage` ⚠ |
 | `/api/tokens` (993) | POST | `tokens.create` | G | role ⊆ creator |
 | `/api/tokens/{tid}/revoke` (1026) | POST | `tokens.create` | S / G | own, or any with `tokens.manage` |

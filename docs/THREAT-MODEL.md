@@ -134,7 +134,14 @@ See [design/ARCHITECTURE.md](design/ARCHITECTURE.md) for the agent's resilience
    - **restoring a 3.5 backup** re-seeds every account in it as Owner, including accounts demoted
      since the backup was taken;
    - **rolling back to 3.5 silently makes every account a full administrator again** (3.5 ignores
-     the role tables).
+     the role tables);
+   - **custom roles (3.6.2)** are built from the same catalogue and obey the same rule as
+     bindings: a role can only contain permissions its editor holds over the whole instance
+     (old and new set when editing), built-in roles are immutable, a role in use needs
+     `users.manage` to edit and cannot be deleted, and nobody can change the access of an account
+     that holds more than they do (`authz.outranked`). A custom role that holds everything an
+     Owner holds is **not** an Owner for the last-Owner protection — only the built-in Owner role
+     counts there.
 3. **The gateway is a single point of total compromise.** It commands every agent, with whatever
    privileges each was installed with. A compromised gateway (RCE) = a compromised fleet. The update
    signature protects the **persistence** of the agent code, but `run`/`fs`
@@ -228,11 +235,18 @@ See [design/ARCHITECTURE.md](design/ARCHITECTURE.md) for the agent's resilience
    IP/self-signed deployments. Cert pinning makes it usable, but in production
    use a **domain + public CA**.
 8. **With SSO on, the IdP is a trust anchor.** Whoever the IdP lets authenticate
-   *and* places in the instance's group gets in. Since 3.6.0 a **new** SSO account starts
-   with no role ("no access yet") until an Owner or Admin grants one — group → role mapping
-   comes in 3.6.1 — while accounts that existed at the upgrade became Owners. So the IdP's own
-   security is in scope: its MFA, its
-   session/consent settings, and **which users you put in the `wt-access` group**.
+   *and* places in the instance's group gets in. A **new** SSO account starts with no role
+   ("no access yet") unless one of its IdP groups is mapped to a role (3.6.2, Settings → Users &
+   roles → SSO group mapping), while accounts that existed at the 3.6 upgrade became Owners. With
+   a mapping, **IdP group membership grants WebTerm roles**: whoever can add people to a mapped
+   group (an IdP admin, or a self-service group in the IdP) can grant that role. Map only groups
+   whose membership you control as tightly as the role deserves, and never map a self-service
+   group to Owner or Admin. SSO-derived bindings are re-checked at every SSO login and SSO
+   step-up; an SSO account that signs in with a **passkey** instead keeps its SSO-derived roles
+   until its next SSO sign-in or step-up (remove the mapping or the binding to revoke at once).
+   So the IdP's own security is in scope: its MFA, its
+   session/consent settings, and **which users you put in the `wt-access` group** and in every
+   mapped group.
    WebTerm defends its half (token validation, verified-email adoption, group
    re-check); it cannot vouch for accounts the IdP itself issues. Separate trust
    levels by running **separate instances**, each gated by its own group, and keep

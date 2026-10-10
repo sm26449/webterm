@@ -229,7 +229,8 @@ break-glass admin first. So: open `https://term.example.com`, create the local a
 setup token (printed by `install.sh`/`deploy.sh`), *then* the SSO button shows. Add the person you
 want to a **`wt-access` group** in Authentik, click **Sign in with Authentik**, authenticate — you
 land back provisioned on that instance — with **no access** until an Owner or Admin gives the
-account a role in Settings → Users & roles (3.6; group → role mapping comes in 3.6.1). If the
+account a role in Settings → Users & roles, or one of its Authentik groups is mapped to a role
+there (SSO group mapping, 3.6.2). If the
 button is missing, the account
 isn't created yet or SSO env isn't set; if the IdP shows "access denied", that user isn't in
 `wt-access`.

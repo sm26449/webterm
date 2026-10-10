@@ -63,7 +63,8 @@ Notes:
 - **Operators** watch anyone's session on their hosts but type only into their own. Sessions
   opened before 3.6 count as everyone's.
 - **Viewers** cannot read files: file content is the most sensitive thing on a host.
-- Custom roles (for example an "Auditor" or a "Files-only" preset) come in 3.6.1.
+- Custom roles (for example from the "Auditor" or "Files-only" preset) are built in Settings
+  since 3.6.2 — see [Custom roles](#custom-roles).
 
 ## Scopes
 
@@ -116,9 +117,109 @@ fleet and a message to ask an administrator (the names of Owners and Admins are 
 not shown to an account without access). A link to a host you cannot see shows
 "not found or no access", deliberately the same as a host that does not exist.
 
-SSO group-to-role mapping arrives in 3.6.1. Until then a new SSO user gets no access until an
-Owner or Admin adds a binding. Accounts that existed before the upgrade (including SSO accounts)
-became Owners.
+A new SSO user gets the roles its IdP groups are mapped to ([SSO group
+mapping](#sso-group-mapping)); with no mapped group it has no access until an Owner or Admin adds
+a binding. Accounts that existed before the 3.6 upgrade (including SSO accounts) became Owners.
+
+## Custom roles
+
+Settings → Users & roles → **Roles** (needs **Custom roles**, `roles.manage`). A custom role is a
+named set of permissions from the [catalogue](#permission-reference); where it applies is still
+decided by the scope of each binding, exactly like a built-in role. The editor groups the
+permissions as in the reference below and marks the shell-equivalent ones with ⚑; ticking any of
+them shows a banner, because a role with ⚑ on a host *is* a shell there. Two presets give a
+quick start: **Auditor** (`host.view`, `recording.view`, `audit.view` — no live sessions) and
+**Files-only** (`files.read`, `files.write` — still ⚑ through `files.write`).
+
+The rules the server enforces (each one re-checked under a lock right before writing, on your
+rights *at that moment*):
+
+- **No escalation.** A role can only contain permissions you hold over the **whole instance**:
+  instance permissions, plus host permissions from a binding over **all hosts**. Editing checks
+  the old *and* the new set — you cannot edit (or delete) a role that holds anything you lack,
+  even to remove it. So an Admin can never build a role with backups, the signing key or the
+  history wipe.
+- **Built-in roles are immutable** (Owner, Admin, Operator, Viewer). Their permissions come from
+  the code.
+- **A role in use** (given to someone, or mapped to an SSO group) changes other people's access,
+  so editing it also needs **Accounts and their roles** (`users.manage`), and the target rule
+  below for every account that has it — an Admin cannot edit a role that an Owner holds.
+- **Deleting a role that is in use is refused** (it lists how many bindings, SSO mappings and
+  tokens still use it). Remove those first. This is deliberate: a single click never revokes a
+  group of people silently.
+- **Instance permissions in a role only count over all hosts.** Given over a folder, a tag or a
+  host, they are ignored (the editor says so).
+- **Nobody changes the access of an account that holds more than they do.** Granting, removing
+  or deleting fails with *outranked* when the target account holds a permission (over the whole
+  instance) that you do not — the 3.6.0 rule "only an Owner touches an Owner", generalised to
+  custom roles.
+- Every change asks for your password (or a fresh SSO / passkey confirmation) and your second
+  factor, is audited, and alerts the security-summary holders. A role edit takes effect
+  **immediately**: open terminals of the people who have it switch to read-only or close, and
+  their forwarded-app tickets and shares are re-checked.
+
+A custom role that happens to contain every permission is **not** an Owner: the last-Owner
+protection, "only an Owner grants Owner" and the Owner-only paths count only the built-in Owner
+role.
+
+## SSO group mapping
+
+Settings → Users & roles → **SSO group mapping** (shown only when SSO is enabled; needs
+`users.manage`). Map a group name from the id_token's `groups` claim to a role and a scope.
+
+**Example with Authentik.** Create the groups in Authentik (Directory → Groups) and add people:
+
+| Authentik group | WebTerm mapping | Effect |
+|---|---|---|
+| `wt-owners` | Owner · all hosts | the instance owners (keep this group tiny) |
+| `wt-admins` | Admin · all hosts | co-admins |
+| `wt-ops-prod` | Operator · folder `prod` | shell, files and run on the hosts in `prod` |
+| `wt-oncall` | Viewer · tag `web` | watch live sessions and recordings on `web` hosts |
+| `*` | Viewer · host `status-page` | every SSO user can watch one host |
+
+`*` means *every authenticated SSO user*. Authentik sends the `groups` claim through the default
+`profile` scope mapping.
+
+**When it applies.**
+
+- At every **SSO sign-in** and every **SSO step-up**, the account's SSO-derived bindings
+  (`source: sso`) are re-synced to the groups the IdP just sent: a mapped group the person is in
+  adds its binding, a binding whose group is gone is **removed at once** (open terminals switch
+  to read-only or close). Bindings given by hand (and the 3.6 migration's Owner bindings) are
+  **never touched**.
+- **Adding a mapping** takes effect at each person's next SSO sign-in or step-up — WebTerm never
+  grants from old group data.
+- **Removing a mapping** takes effect **immediately** for the accounts that got their binding
+  from it (from the groups recorded at their last sync — only the mapped ones are stored), unless
+  another remaining mapping still justifies the same binding.
+- Giving someone by hand a binding they already have through SSO turns it into a manual one: it
+  stays when the group goes. Removing an SSO-derived binding by hand lasts only until the next
+  SSO sign-in, which adds it back while the mapping and the group membership exist — remove the
+  mapping, or the person from the group, instead.
+
+**Who can map.** Mapping a group grants its role to everyone in the group, so it follows the same
+rules as giving a binding: `users.manage`, no escalation over the scope, and **only an Owner can
+map a group to Owner** (or remove such a mapping). Every change needs your password and second
+factor, is audited and alerts the security-summary holders.
+
+**Edge cases, decided on the safe side.**
+
+- **Group names match exactly**, upper and lower case included (`Ops` is not `ops`): two IdP
+  groups that differ only by case are two groups. Surrounding spaces are ignored; names longer
+  than 256 characters or with control characters never match.
+- **The `groups` claim is absent** from the id_token (the IdP does not send it): nothing changes
+  for that sign-in, and the gateway logs a warning — a misconfigured IdP must not strip everyone's
+  access. **Present but empty** (or of a type WebTerm cannot read): the person is in no group, so
+  their SSO-derived bindings are removed.
+- **Huge group lists**: only the first 5000 entries are read; a truncated list can only grant
+  less.
+- **The last Owner**: if the only remaining Owner holds Owner only through SSO and leaves the
+  Owner group, the binding is **kept** (WebTerm never locks itself out), logged as an error,
+  audited and alerted as critical. Make another account Owner, then fix the group.
+- **Signing in with a passkey** instead of SSO does not re-sync: an SSO account keeps its
+  SSO-derived roles until its next SSO sign-in or step-up. To revoke at once, remove the mapping
+  (immediate) or the binding.
+- A mapping on a single host is deleted together with the host.
 
 ## Read-only terminals
 

@@ -42,8 +42,10 @@ See [SSO.md](SSO.md) for the full single-sign-on model (break-glass, per-instanc
 
 Roles (3.6) have **no environment variables**: they live in the database and are managed in
 Settings → Users & roles, or with `python3 -m app.admin roles|promote` from the server
-([ROLES.md](ROLES.md)). A new SSO account starts with no access; `WEBTERM_OIDC_ROLE_MAP` (group →
-role bootstrap) is planned for 3.6.1 and is not read yet.
+([ROLES.md](ROLES.md)). SSO group → role mappings (3.6.2) live in the database too and are edited
+in the UI ([ROLES.md → SSO group mapping](ROLES.md#sso-group-mapping)); a new SSO account with no
+mapped group starts with no access. `WEBTERM_OIDC_ROLE_MAP` (an env bootstrap of the mappings) is
+not implemented and is not read.
 
 <a id="security-and-sessions"></a>
 ### Sign-in, sessions, audit

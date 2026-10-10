@@ -10,9 +10,10 @@ Each WebTerm deployment keeps a **local admin** (created at first-run with the s
 a **break-glass** account — password + optional passkey, always able to log in even if the IdP
 is down. Everyone else clicks **"Sign in with <provider>"** and is provisioned on first login.
 SSO controls *who gets in*; **roles** ([ROLES.md](ROLES.md), 3.6) control *what they can do once
-in*. A newly provisioned SSO account starts with **no access** until an Owner or Admin binds it to
-a role (Settings → Users & roles); mapping IdP groups to roles automatically arrives in 3.6.1.
-Accounts that already existed when you upgraded to 3.6 became Owners.
+in*. A newly provisioned SSO account starts with **no access** unless one of its IdP groups is
+mapped to a role (Settings → Users & roles → **SSO group mapping**, 3.6.2 — see
+[ROLES.md](ROLES.md#sso-group-mapping)); otherwise an Owner or Admin binds it by hand. Accounts
+that already existed when you upgraded to 3.6 became Owners.
 
 ## What SSO gives you (and what it does not)
 
@@ -26,6 +27,21 @@ Accounts that already existed when you upgraded to 3.6 became Owners.
   an Owner or Admin binds each account to a role over all hosts, a folder, a tag or one host
   ([ROLES.md](ROLES.md)). Separate instances per trust level remain a valid, stronger split —
   they also separate the gateway itself.
+
+## Groups → roles (3.6.2)
+
+WebTerm reads the id_token's **`groups`** claim — the same claim `WEBTERM_OIDC_ALLOWED_GROUPS`
+checks. In Settings → Users & roles → **SSO group mapping**, map a group name to a role and a
+scope. At every SSO sign-in and every SSO step-up WebTerm re-syncs the account's SSO-derived
+roles to the groups the IdP just sent: missing ones are added, ones whose group is gone are
+removed at once. Roles given by hand are never touched. The rules, examples with Authentik
+groups, and the edge cases (absent claim, case, the last Owner) are in
+[ROLES.md → SSO group mapping](ROLES.md#sso-group-mapping).
+
+With Authentik the `groups` claim is part of the default **profile** scope mapping, so nothing
+extra is needed as long as `WEBTERM_OIDC_SCOPES` includes `profile` (it does by default). If the
+gateway logs `the id_token for … has no groups claim`, the IdP is not sending it: the mapping
+then changes nothing for that sign-in.
 
 ## Topology: one IdP, many WebTerm instances
 
