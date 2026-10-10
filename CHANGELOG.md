@@ -9,6 +9,8 @@ back.
 
 ## [Unreleased]
 
+## [3.6.2] — 2026-10-11 · agent (58)
+
 Custom roles and SSO group → role mapping — the design's "3.6.1" milestone
 (docs/design/ROLES-AND-SSH.md), shipping as 3.6.2. No agent change.
 
