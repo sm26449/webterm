@@ -8,6 +8,8 @@ import { field, heading } from './ui'
 import { Badge, Button, IconButton } from '../ui'
 import { CloseIcon } from '../Icons'
 import HelpTip from '../HelpTip'
+import { canSave, type LoadState } from '../../lib/loadable'
+import NotLoaded from './NotLoaded'
 
 /* Settings → Users & roles (3.6). Extras din AccountTab: conturile şi, acum, LEGĂTURILE lor de
    rol (rol @ scope — docs/ROLES.md). Fără `users.manage` vezi doar propriul acces, read-only;
@@ -73,10 +75,14 @@ export default function UsersTab() {
     role: '', scope_kind: 'folder' as ScopeKind, scope_value: '' })
   const [grant, setGrant] = useState({ uid: '', role: 'viewer', scope_kind: 'folder' as ScopeKind, scope_value: '' })
 
-  const loadUsers = () => api<UserRow[]>('/api/users').then(setUsers).catch(() => {})
+  // U04: o listă de utilizatori goală pe un fetch picat ascundea conturile (şi rolurile) existente
+  const [usersState, setUsersState] = useState<LoadState>({ status: 'loading' })
+  const loadUsers = () => api<UserRow[]>('/api/users')
+    .then((r) => { setUsers(r); setUsersState({ status: 'ok' }) })
+    .catch((e) => setUsersState({ status: 'error', error: errText(e, t) }))
   useEffect(() => {
     loadUsers()
-    api<Host[]>('/api/hosts').then(setHosts).catch(() => {})
+    api<Host[]>('/api/hosts').then(setHosts).catch((e) => setErr(t('common.loadFailed') + ' ' + errText(e, t)))
   }, [])
 
   const withSecondFactor = <T,>(send: (extra: object) => Promise<T>) => withSecondFactorT(t, send)
@@ -176,8 +182,9 @@ export default function UsersTab() {
       <section data-setting-id="users" hidden={!manage}>
         <h3 className={heading}>{t('settings.users.title')}</h3>
         <p className="mt-1 text-xs text-slate-500">{t('settings.users.hint')}</p>
+        <NotLoaded state={usersState} onRetry={() => { setUsersState({ status: 'loading' }); void loadUsers() }} />
         <ul className="mt-2 flex flex-col gap-1" data-users-list>
-          {users.map((u) => (
+          {canSave(usersState) && users.map((u) => (
             <li key={u.id} className="flex flex-col gap-1.5 rounded-md bg-ink-800/60 px-3 py-2 text-sm ring-1 ring-ink-700">
               <div className="flex items-center gap-2">
                 <span className="min-w-0 flex-1 truncate text-slate-200">{u.email}</span>

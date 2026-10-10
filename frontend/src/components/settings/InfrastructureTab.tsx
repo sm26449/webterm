@@ -9,7 +9,9 @@ import { copyText } from '../../lib/clipboard'
 import { downloadBlob, field, heading } from './ui'
 import { askSecret } from '../../lib/secretPrompt'
 import HelpTip from '../HelpTip'
-import { Button } from '../ui'
+import { Button, ErrorState } from '../ui'
+import { canSave, type LoadState } from '../../lib/loadable'
+import NotLoaded from './NotLoaded'
 
 // Infrastructură şi tokenuri: cheia de semnare a agenţilor, token-urile de automatizare, înrolarea
 // în bloc (token-uri de grup), politica cheilor de deploy şi guardrail-ul de comenzi — setări care
@@ -25,7 +27,18 @@ export default function InfrastructureTab(props: { onAccountChanged: () => void 
   // Guardrail de comenzi — verificat client-side la Enter (via OSC 133)
   const [guard, setGuard] = useState<CommandGuard>({ enabled: true, rules: [] })
   const [guardMsg, setGuardMsg] = useState('')
+  // U04 — controale de SECURITATE: pe un fetch picat, formularul arăta „nicio regulă" şi un Save
+  // ŞTERGEA toate regulile guardrail-ului de pe server (la fel, o bifă a politicii cheilor de
+  // deploy trimitea celălalt câmp ca `false`). Formularele apar doar peste valorile încărcate.
+  const [guardState, setGuardState] = useState<LoadState>({ status: 'loading' })
+  const loadGuard = () => {
+    setGuardState({ status: 'loading' })
+    api<CommandGuard>('/api/settings/command-guard')
+      .then((g) => { setGuard(g); setGuardState({ status: 'ok' }) })
+      .catch((e) => setGuardState({ status: 'error', error: errText(e, t) }))
+  }
   const saveGuard = async () => {
+    if (!canSave(guardState)) return
     // Serverul validează cu `re` din Python, terminalul potriveşte cu RegExp din JS: un pattern
     // valid doar în Python (ex. `(?P<n>…)`, `\Z`) trecea la salvare şi era apoi SĂRIT tăcut în
     // terminal. Îl refuzăm aici, numindu-l, ca regula să se comporte la fel peste tot.
@@ -50,7 +63,15 @@ export default function InfrastructureTab(props: { onAccountChanged: () => void 
   // ── Politica cheilor de deploy (opţională): 2FA pe surse + numai chei restricţionate ──
   const [dkPolicy, setDkPolicy] = useState<DeployKeyPolicy>({ require_2fa_source: false, require_restrict: false })
   const [dkPolicyMsg, setDkPolicyMsg] = useState('')
+  const [dkState, setDkState] = useState<LoadState>({ status: 'loading' })
+  const loadDkPolicy = () => {
+    setDkState({ status: 'loading' })
+    api<DeployKeyPolicy>('/api/settings/deploy-key-policy')
+      .then((p) => { setDkPolicy(p); setDkState({ status: 'ok' }) })
+      .catch((e) => setDkState({ status: 'error', error: errText(e, t) }))
+  }
   const saveDkPolicy = async (next: DeployKeyPolicy) => {
+    if (!canSave(dkState)) return
     setDkPolicy(next)
     try {
       await api<DeployKeyPolicy>('/api/settings/deploy-key-policy', { method: 'POST', body: JSON.stringify(next) })
@@ -66,7 +87,14 @@ export default function InfrastructureTab(props: { onAccountChanged: () => void 
   const [tokPlain, setTokPlain] = useState('')     // valoarea în clar, arătată O SINGURĂ dată
   const [tokCopied, setTokCopied] = useState(false)
   const [tokErr, setTokErr] = useState('')
-  const loadTokens = () => api<TokenRow[]>('/api/tokens').then(setTokens).catch(() => {})
+  // U04: „niciun token" pe un fetch picat ar ascunde exact credenţiala pe care o cauţi
+  const [tokState, setTokState] = useState<LoadState>({ status: 'loading' })
+  const loadTokens = () => {
+    setTokState({ status: 'loading' })
+    api<TokenRow[]>('/api/tokens')
+      .then((r) => { setTokens(r); setTokState({ status: 'ok' }) })
+      .catch((e) => setTokState({ status: 'error', error: errText(e, t) }))
+  }
 
   async function addToken(e: FormEvent) {
     e.preventDefault()
@@ -108,7 +136,13 @@ export default function InfrastructureTab(props: { onAccountChanged: () => void 
   // maşini"); aici rămâne doar GESTIUNEA credenţialei: listare + revocare.
   const [groups, setGroups] = useState<GroupRow[]>([])
   const [groupErr, setGroupErr] = useState('')
-  const loadGroups = () => api<GroupRow[]>('/api/enroll-groups').then(setGroups).catch(() => {})
+  const [groupState, setGroupState] = useState<LoadState>({ status: 'loading' })
+  const loadGroups = () => {
+    setGroupState({ status: 'loading' })
+    api<GroupRow[]>('/api/enroll-groups')
+      .then((r) => { setGroups(r); setGroupState({ status: 'ok' }) })
+      .catch((e) => setGroupState({ status: 'error', error: errText(e, t) }))
+  }
 
   async function revokeGroup(g: GroupRow) {
     if (!(await confirm({
@@ -141,7 +175,14 @@ export default function InfrastructureTab(props: { onAccountChanged: () => void 
   const [signImpLoadPass, setSignImpLoadPass] = useState('')
   const [signImpStorePass, setSignImpStorePass] = useState('')
   const signPemRef = useRef<HTMLInputElement>(null)
-  const loadSigning = () => api<SignStatus>('/api/signing/status').then(setSign).catch(() => {})
+  // un fetch picat lăsa „loading…" pentru totdeauna — acum eroarea cu Reîncearcă
+  const [signLoadErr, setSignLoadErr] = useState<string | null>(null)
+  const loadSigning = () => {
+    setSignLoadErr(null)
+    api<SignStatus>('/api/signing/status')
+      .then((s) => setSign(s))
+      .catch((e) => setSignLoadErr(errText(e, t)))
+  }
 
   async function importSigningKey() {
     setSignErr(''); setSignMsg('')
@@ -214,8 +255,8 @@ export default function InfrastructureTab(props: { onAccountChanged: () => void 
     loadSigning()
     loadTokens()
     loadGroups()
-    api<CommandGuard>('/api/settings/command-guard').then(setGuard).catch(() => {})
-    api<DeployKeyPolicy>('/api/settings/deploy-key-policy').then(setDkPolicy).catch(() => {})
+    loadGuard()
+    loadDkPolicy()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -231,7 +272,11 @@ export default function InfrastructureTab(props: { onAccountChanged: () => void 
         <p className="mt-1 text-xs text-slate-500">
           {t('settings.signHintA')} <span className="text-slate-300">{t('settings.signHintYourKey')}</span>{t('settings.signHintB')} <span className="text-slate-300">{t('settings.signHintBeforeEnroll')}</span>{t('settings.signHintC')}
         </p>
-        {sign === null ? (
+        {sign === null && signLoadErr !== null ? (
+          <div className="mt-2 rounded-md ring-1 ring-ink-700">
+            <ErrorState compact title={t('settings.notLoaded')} message={signLoadErr} onRetry={loadSigning} />
+          </div>
+        ) : sign === null ? (
           <div className="mt-2 text-xs text-slate-500">{t('settings.loading')}</div>
         ) : !sign.exists ? (
           <div className="mt-2 flex flex-col gap-2">
@@ -366,8 +411,9 @@ export default function InfrastructureTab(props: { onAccountChanged: () => void 
             </div>
           </div>
         )}
+        <NotLoaded state={tokState} onRetry={loadTokens} />
         <ul className="mt-2 flex flex-col gap-1">
-          {tokens.map((tk) => (
+          {canSave(tokState) && tokens.map((tk) => (
             <li key={tk.id} className="flex items-center gap-2 rounded-md bg-ink-800/60 px-3 py-2 text-sm ring-1 ring-ink-700">
               <span className="min-w-0 flex-1 truncate text-slate-200">{tk.name}</span>
               <span className="shrink-0 font-mono text-2xs text-slate-500">{tk.scopes}</span>
@@ -427,12 +473,13 @@ export default function InfrastructureTab(props: { onAccountChanged: () => void 
         {/* crearea trăieşte în fluxul de onboarding (+ host → „Mai multe maşini"); aici e doar
             gestiunea credenţialei (listă + revocare), plus un pointer ca s-o găseşti. */}
         <p className="mt-1 text-xs text-slate-500">{t('settings.enrollGroups.createHint')}</p>
-        {groups.length === 0 && (
+        <NotLoaded state={groupState} onRetry={loadGroups} />
+        {canSave(groupState) && groups.length === 0 && (
           <p className="mt-2 text-xs text-slate-600">{t('settings.enrollGroups.none')}</p>
         )}
-        {groupErr && <p className="mt-2 text-sm wt-danger">{groupErr}</p>}
+        <p role="alert" className={groupErr ? 'mt-2 text-sm wt-danger' : 'sr-only'}>{groupErr}</p>
         <ul className="mt-2 flex flex-col gap-1">
-          {groups.map((g) => (
+          {canSave(groupState) && groups.map((g) => (
             <li key={g.id} className="flex items-center gap-2 rounded-md bg-ink-800/60 px-3 py-2 text-sm ring-1 ring-ink-700">
               <span className="min-w-0 flex-1 truncate text-slate-200">{g.name}
                 {g.folder && <span className="ml-1 inline-flex items-center gap-0.5 text-2xs text-slate-500"><ArrowRightIcon size={10} />{g.folder}</span>}
@@ -464,6 +511,8 @@ export default function InfrastructureTab(props: { onAccountChanged: () => void 
         {/* ── Politica cheilor de deploy ── */}
         <h3 className={heading + ' flex items-center gap-2'}>{t('settings.dkpolicy.title')}<HelpTip id="deployKeyPolicy" /></h3>
         <p className="mt-1 text-xs text-slate-500">{t('settings.dkpolicy.hint')}</p>
+        <NotLoaded state={dkState} onRetry={loadDkPolicy} />
+        {canSave(dkState) && (<>
         <label className="mt-2 flex cursor-pointer items-start gap-2.5 text-sm text-slate-300">
           <input type="checkbox" checked={dkPolicy.require_2fa_source} className="mt-0.5 h-4 w-4 rounded-md accent-sky-600"
             onChange={(e) => saveDkPolicy({ ...dkPolicy, require_2fa_source: e.target.checked })} />
@@ -477,11 +526,14 @@ export default function InfrastructureTab(props: { onAccountChanged: () => void 
             <span className="mt-0.5 block text-xs text-slate-500">{t('settings.dkpolicy.requireRestrictHint')}</span></span>
         </label>
         {dkPolicyMsg && <div className="mt-1 text-xs text-slate-500">{dkPolicyMsg}</div>}
+        </>)}
       </section>
 
       <section data-setting-id="guardrail" hidden={!vis('guardrail')}>
         {/* ── Guardrail de comenzi ── */}
         <h3 className={heading + ' flex items-center gap-2'}>{t('settings.guardrail')}<HelpTip id="guardrail" /></h3>
+        <NotLoaded state={guardState} onRetry={loadGuard} />
+        {canSave(guardState) && (<>
         <label className="mt-2 flex cursor-pointer items-start gap-2.5 text-sm text-slate-300">
           <input
             type="checkbox"
@@ -535,6 +587,7 @@ export default function InfrastructureTab(props: { onAccountChanged: () => void 
             onClick={saveGuard}>{t('settings.saveGuardrail')}</Button>
           {guardMsg && <span className="text-xs text-slate-400">{guardMsg}</span>}
         </div>
+        </>)}
       </section>
     </div>
   )

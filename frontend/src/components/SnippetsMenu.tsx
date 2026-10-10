@@ -5,7 +5,7 @@ import { useI18n } from '../lib/i18n'
 import SnippetParams, { snippetParams } from './SnippetParams'
 import SnippetTags from './SnippetTags'
 import { parseTagInput, snippetTags, targetsPayload } from '../lib/snippets'
-import { Button } from './ui'
+import { Button, ErrorState } from './ui'
 import { CloseIcon, TerminalPromptIcon } from './Icons'
 
 /** Dropdown cu comenzi salvate: click pe una → o inserează în sesiune.
@@ -47,7 +47,11 @@ export default function SnippetsMenu(props: {
   const [askParams, setAskParams] = useState<Snippet | null>(null)
   const ref = useRef<HTMLDivElement>(null)
 
-  const load = () => api<Snippet[]>('/api/snippets').then(setSnips).catch(() => {})
+  // eroare ≠ gol (U17): „niciun snippet" pe un fetch picat te trimitea să le re-creezi
+  const [loadErr, setLoadErr] = useState<string | null>(null)
+  const load = () => api<Snippet[]>('/api/snippets')
+    .then((r) => { setSnips(r); setLoadErr(null) })
+    .catch((e) => setLoadErr(errText(e, t) || t('common.loadFailed')))
   useEffect(() => {
     if (open) {
       setFilter('')
@@ -136,7 +140,10 @@ export default function SnippetsMenu(props: {
                 />
               )}
               <div className="max-h-64 overflow-y-auto">
-                {snips.length === 0 && (
+                {loadErr !== null && (
+                  <ErrorState compact title={t('common.loadFailed')} message={loadErr} onRetry={load} />
+                )}
+                {loadErr === null && snips.length === 0 && (
                   <div className="px-2 py-3 text-center text-xs text-slate-600">
                     {t('snippets.empty')}
                   </div>

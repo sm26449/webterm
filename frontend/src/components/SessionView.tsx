@@ -2131,20 +2131,21 @@ export default function SessionView(props: {
           <button onClick={() => setShareOpen(false)} className="rounded-md px-2 py-1 text-xs text-slate-400 hover:bg-ink-800">
             {t('session.cancel')}
           </button>
+          {/* riscul scris în clar, nu doar într-un tooltip (U14): un link scriptibil = shell pe host */}
+          {shareWritable && (
+            <p role="note" data-testid="share-writable-warning" className="wt-warn flex w-full items-start gap-1.5 text-xs">
+              <WarningIcon size={14} /><span>{t('session.writableRisk')}</span>
+            </p>
+          )}
         </div>
       )}
 
       {/* Link generat */}
       {(shareUrl || shareActive) && (
-        <div className="flex items-center gap-2 border-b border-ink-800 bg-ink-900/70 px-3 py-2 text-sm">
+        <div className="flex flex-wrap items-center gap-2 border-b border-ink-800 bg-ink-900/70 px-3 py-2 text-sm">
           <span className={`shrink-0 rounded-md px-1.5 py-0.5 text-2xs ${shareActive?.writable ? 'wt-warn bg-amber-500/15' : 'bg-ink-800 text-slate-400'}`}>
             {shareActive?.writable ? t('session.shareWritable') : t('session.shareReadOnly')}
           </span>
-          {shareActive?.expires && (
-            <span className="hidden shrink-0 text-2xs text-slate-500 sm:inline">
-              {t('session.shareExpires', { time: fmtTs(shareActive.expires) })}
-            </span>
-          )}
           {shareUrl ? (
             <code className="wt-good min-w-0 flex-1 truncate rounded-md bg-black/40 px-2 py-1 font-mono text-xs">{shareUrl}</code>
           ) : (
@@ -2158,6 +2159,13 @@ export default function SessionView(props: {
           <button onClick={revokeShare} className="wt-danger shrink-0 rounded-md px-2 py-1 text-xs hover:bg-ink-800">
             {t('session.revoke')}
           </button>
+          {/* expirarea pe rândul ei, pe ORICE lăţime (U14): era `hidden sm:inline`, deci pe
+              telefon nu vedeai cât mai trăieşte un link activ */}
+          {shareActive?.expires && (
+            <span data-testid="share-expires" className="w-full text-2xs text-slate-500">
+              {t('session.shareExpires', { time: fmtTs(shareActive.expires) })}
+            </span>
+          )}
         </div>
       )}
 

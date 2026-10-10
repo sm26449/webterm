@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { api, isEphemeralHost, AppLink, Host, Session, Snippet } from '../lib/api'
 import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
 import { applyTheme, currentTheme } from '../lib/theme'
@@ -64,6 +64,10 @@ export default function CommandPalette(props: {
   const listRef = useRef<HTMLDivElement>(null)
   const dialogRef = useRef<HTMLDivElement>(null)
   useFocusTrap(dialogRef, props.onClose)
+  // tiparul combobox + listbox din căutarea din Setări (U10): focusul rămâne în câmp, iar
+  // opţiunea activă e anunţată prin aria-activedescendant (înainte săgeţile mutau doar un fundal)
+  const listId = useId()
+  const optId = (i: number) => `${listId}-o${i}`
 
   // apps (forward-uri promovate) — deschidere după nume din paletă. Le luăm la fiecare deschidere
   // ca lista să fie proaspătă (o promovare/creare recentă apare imediat).
@@ -250,7 +254,14 @@ export default function CommandPalette(props: {
           onChange={(e) => { setQuery(e.target.value); setSel(0) }}
           placeholder={t('palette.searchPlaceholder')}
           aria-label={t('palette.searchAria')}
-          className="w-full bg-transparent px-5 py-4 text-base placeholder-slate-500 outline-none"
+          role="combobox"
+          aria-autocomplete="list"
+          aria-expanded={results.length > 0}
+          aria-controls={results.length > 0 ? listId : undefined}
+          aria-activedescendant={results[sel] ? optId(sel) : undefined}
+          autoComplete="off"
+          spellCheck={false}
+          className="w-full bg-transparent px-5 py-4 text-base placeholder-slate-500 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[rgb(var(--focus))]"
           onKeyDown={(e) => {
             if (e.key === 'ArrowDown') { e.preventDefault(); setSel((s) => Math.min(results.length - 1, s + 1)) }
             else if (e.key === 'ArrowUp') { e.preventDefault(); setSel((s) => Math.max(0, s - 1)) }
@@ -258,17 +269,28 @@ export default function CommandPalette(props: {
             else if (e.key === 'Escape') { e.preventDefault(); props.onClose() }
           }}
         />
+        {/* numărul de rezultate, anunţat la tastare (lista însăşi nu e „live") */}
+        <span role="status" className="sr-only">{t('palette.resultsCount', { n: results.length })}</span>
         <div ref={listRef} className="max-h-[52vh] overflow-y-auto border-t border-white/5 py-1.5">
           {results.length === 0 && (
             <div className="px-5 py-6 text-center text-sm text-slate-500">{t('palette.noResults', { query })}</div>
           )}
+          {results.length > 0 && (
+          <div id={listId} role="listbox" aria-label={t('palette.resultsAria')}>
           {results.map((it, i) => (
-            <button
+            <div
               key={it.key}
+              id={optId(i)}
+              role="option"
+              aria-selected={i === sel}
+              // focusul rămâne în câmp (aria-activedescendant); -1 doar ca opţiunea să primească clicul
+              tabIndex={-1}
               data-idx={i}
               onMouseMove={() => setSel(i)}
+              // mousedown: focusul nu pleacă din câmp până la alegere
+              onMouseDown={(e) => e.preventDefault()}
               onClick={() => pick(i)}
-              className={`flex w-full items-center gap-3 px-4 py-2 text-left ${
+              className={`flex w-full cursor-pointer items-center gap-3 px-4 py-2 text-left ${
                 i === sel ? 'bg-sky-500/15' : ''
               }`}
             >
@@ -282,8 +304,10 @@ export default function CommandPalette(props: {
                 </span>
               </span>
               <span className="shrink-0 text-2xs text-slate-400">{it.hint}</span>
-            </button>
+            </div>
           ))}
+          </div>
+          )}
         </div>
         <div className="flex items-center gap-3 border-t border-white/5 px-4 py-2 text-2xs text-slate-400">
           <span><kbd className="rounded-md bg-white/10 px-1 text-slate-300">↑</kbd><kbd className="ml-0.5 rounded-md bg-white/10 px-1 text-slate-300">↓</kbd> {t('palette.footNavigate')}</span>

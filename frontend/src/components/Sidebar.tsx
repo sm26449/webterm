@@ -17,7 +17,7 @@ import { AlertsBell } from './AlertsPanel'
 import { ActivityIcon, ArrowUpIcon, BanIcon, BellIcon, BellOffIcon, ChevronIcon, CloseIcon, CollapseIcon, DownloadIcon, FilesIcon, FolderMoveIcon, GearIcon, KeyIcon, LinkIcon, LogoMark, MoreIcon, NoteIcon, PaletteIcon, PencilIcon, PlugIcon, PlusIcon, PowerIcon, RefreshIcon, SearchIcon, ServerIcon, ShieldSmallIcon, StethoscopeIcon, SubItemIcon, TerminalPromptIcon, WarningIcon } from './Icons'
 import { fmt } from '../lib/shortcuts'
 import { setHostMuted, updatesSignal, useUpdatesPref } from '../lib/updatesPref'
-import { Badge, Button, IconButton } from './ui'
+import { Badge, Button, ErrorState, IconButton } from './ui'
 
 // modale rar folosite → chunk-uri separate, în afara bundle-ului inițial
 const AddHostModal = lazy(() => import('./AddHostModal'))
@@ -99,6 +99,8 @@ export default function Sidebar(props: {
   const [reinstallCmd, setReinstallCmd] = useState<{ cmd: string; dedicated?: string } | null>(null)
   const [query, setQuery] = useState('')
   const [historyHits, setHistoryHits] = useState<SearchHit[] | null>(null)
+  const [historyErr, setHistoryErr] = useState<string | null>(null)
+  const [searchRetry, setSearchRetry] = useState(0)
   const [newVersion, setNewVersion] = useState<string | null>(null)
 
   // „există versiune nouă?" — răspunsul e cache-uit server-side (1h), deci un apel
@@ -164,17 +166,21 @@ export default function Sidebar(props: {
     if (q.length < 2) {
       searchSeq.current++
       setHistoryHits(null)
+      setHistoryErr(null)
       return
     }
     const ctl = new AbortController()
-    const t = setTimeout(() => {
+    const timer = setTimeout(() => {
       const seq = ++searchSeq.current
       api<{ sessions: SearchHit[] }>(`/api/search?q=${encodeURIComponent(q)}`, { signal: ctl.signal })
-        .then((r) => { if (seq === searchSeq.current) setHistoryHits(r.sessions) })
-        .catch(() => { if (seq === searchSeq.current && !ctl.signal.aborted) setHistoryHits([]) })
+        .then((r) => { if (seq === searchSeq.current) { setHistoryErr(null); setHistoryHits(r.sessions) } })
+        // U17: o căutare EŞUATĂ nu e „Niciun rezultat" — starea de eroare, cu Reîncearcă
+        .catch((e) => {
+          if (seq === searchSeq.current && !ctl.signal.aborted) { setHistoryErr(errText(e, t) || t('common.loadFailed')); setHistoryHits(null) }
+        })
     }, 350)
-    return () => { clearTimeout(t); ctl.abort() }
-  }, [query])
+    return () => { clearTimeout(timer); ctl.abort() }
+  }, [query, searchRetry, t])
 
   async function reinstall(host: Host) {
     const r = await api<{ install_command: string; install_command_dedicated?: string }>(`/api/hosts/${host.id}/enroll`, {
@@ -305,10 +311,17 @@ export default function Sidebar(props: {
     const name = next.trim()
     if (name === folder) return
     const inGroup = props.hosts.filter((h) => (h.folder || '') === folder)
-    await Promise.all(inGroup.map((h) => api(`/api/hosts/${h.id}`, {
+    // U17: un PATCH eşuat (ex. rol fără `hosts.edit` pe unul dintre hosturi) era înghiţit — grupul
+    // părea redenumit pe jumătate fără nicio explicaţie. Spunem câte au eşuat şi de ce.
+    const results = await Promise.allSettled(inGroup.map((h) => api(`/api/hosts/${h.id}`, {
       method: 'PATCH',
       body: JSON.stringify({ name: h.name, note: h.note, folder: name }),
-    }).catch(() => {})))
+    })))
+    const failed = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+    if (failed.length) {
+      notifyError(t('sidebar.renameGroupFailed', { n: failed.length, total: inGroup.length }),
+        errText(failed[0].reason, t) || t('sidebar.error'))
+    }
     props.onChanged()
   }
 
@@ -678,7 +691,11 @@ export default function Sidebar(props: {
     window.addEventListener('pointerup', up)
   }
 
-  const body = (
+  // `drawer`: copia din sertarul de pe telefon (U11). Acolo antetul are DOAR Adaugă host + Închide;
+  // Rulează pe hosturi / Status / Setări / Deconectare devin rânduri cu etichetă jos în sertar —
+  // şase butoane de 44px nu încăpeau în 288px, iar `overflow-hidden` tăia „Deconectare".
+  const drawerRow = 'flex min-h-11 w-full items-center gap-3 px-4 py-2 text-left text-sm text-slate-300 hover:bg-ink-800'
+  const renderBody = (drawer: boolean) => (
     <div className="wt-sidebar flex h-full w-full flex-col border-r border-ink-800 bg-ink-900">
       {/* overflow-hidden + min-w-0: garantează că butoanele de header NU ies din
           lățimea sidebar-ului peste conținutul principal (altfel un buton acoperă
@@ -714,6 +731,12 @@ export default function Sidebar(props: {
               <PlusIcon />
             </IconButton>
           )}
+          {drawer && (
+            <IconButton size="md" label={t('nav.closeDrawer')} onClick={props.onClose}>
+              <CloseIcon size={14} />
+            </IconButton>
+          )}
+          {!drawer && (<>
           {anyHost(perms, 'run') && (
             <IconButton size="md" label={t('nav.fleetRunAria')} title={t('nav.fleetRun')}
               onClick={() => setShowFleetRun(true)}>
@@ -745,6 +768,7 @@ export default function Sidebar(props: {
           <IconButton size="md" label={t('sidebar.signOut')} onClick={props.onLogout}>
             <PowerIcon />
           </IconButton>
+          </>)}
         </div>
       </div>
 
@@ -878,6 +902,15 @@ export default function Sidebar(props: {
           })
         })()}
 
+        {historyErr !== null && historyHits === null && (
+          <div className="border-t border-ink-800 pb-2">
+            <div className="px-4 pb-1 pt-3 text-xs font-medium uppercase tracking-wide text-slate-400">
+              {t('sidebar.inSessionHistory')}
+            </div>
+            <ErrorState compact title={t('sidebar.searchFailed')} message={historyErr}
+              onRetry={() => setSearchRetry((n) => n + 1)} />
+          </div>
+        )}
         {historyHits !== null && (
           <div className="border-t border-ink-800 pb-2">
             <div className="px-4 pb-1 pt-3 text-xs font-medium uppercase tracking-wide text-slate-400">
@@ -912,6 +945,34 @@ export default function Sidebar(props: {
           </div>
         )}
       </div>
+
+      {/* sertarul de pe telefon (U11): acţiunile globale ca rânduri cu etichetă, ţinte de 44px */}
+      {drawer && (
+        <nav aria-label={t('nav.drawerActions')} className="shrink-0 border-t border-ink-800 py-1" data-testid="drawer-actions">
+          {anyHost(perms, 'run') && (
+            <button type="button" onClick={() => setShowFleetRun(true)} className={drawerRow}>
+              <TerminalPromptIcon /><span>{t('nav.fleetRunAria')}</span>
+            </button>
+          )}
+          <button type="button" onClick={() => setShowStatus(true)} className={drawerRow}>
+            <ActivityIcon /><span>{t('nav.status')}</span>
+          </button>
+          <button type="button" onClick={() => { setSettingsCat(undefined); setShowSettings(true) }} className={drawerRow}>
+            <GearIcon /><span>{t('settings.title')}</span>
+            {(props.backupReady || props.signingMissing || props.signingLocked) && (<>
+              <span aria-hidden="true" className={`ml-auto h-2 w-2 shrink-0 rounded-full ${
+                props.signingLocked ? 'bg-rose-500' : props.signingMissing ? 'bg-amber-400' : 'bg-sky-400'}`} />
+              <span className="sr-only">
+                {props.signingLocked ? t('sidebar.settingsSigningLocked')
+                  : props.signingMissing ? t('sidebar.settingsSigningMissing') : t('sidebar.settingsBackupReady')}
+              </span>
+            </>)}
+          </button>
+          <button type="button" onClick={props.onLogout} className={drawerRow}>
+            <PowerIcon /><span>{t('sidebar.signOut')}</span>
+          </button>
+        </nav>
+      )}
 
       {/* Bară de stare: versiunea care rulează + câţi agenţi răspund din câţi există.
           Două informaţii pe care le verifici des şi pentru care intrai până acum în
@@ -949,7 +1010,7 @@ export default function Sidebar(props: {
           EXACT când sidebarul e pliat (altfel ai plia fereastra fără cale de întoarcere). */}
       <div className={props.collapsed ? 'hidden' : 'relative hidden shrink-0 md:block'}
         style={{ width: sbWidth }}>
-        {body}
+        {renderBody(false)}
         {/* mâner de redimensionare: tras cu mouse-ul, săgeţi de la tastatură (splitter
             focusabil — tiparul ARIA de „window splitter"), dublu-click = lăţimea implicită */}
         <div
@@ -975,7 +1036,7 @@ export default function Sidebar(props: {
           <div className="absolute inset-0 bg-black/70" onClick={props.onClose} />
           {/* wt-drawer: fundal OPAC pe mobil. Sticla translucidă (--glass-bg) lăsa
               dashboard-ul să se vadă prin drawer — exact „suprapunerea" raportată */}
-          <div className="wt-drawer absolute inset-y-0 left-0 w-72 shadow-2xl">{body}</div>
+          <div className="wt-drawer absolute inset-y-0 left-0 w-72 shadow-2xl">{renderBody(true)}</div>
         </div>
       )}
       {/* modalele se randează o singură dată, nu în fiecare copie a sidebarului;

@@ -38,7 +38,7 @@
   --accent: 29 78 216;     /* #1d4ed8 blue-700 */
   /* culori de grafic (praguri 70/90 %, lib/thresholds.ts): non-text → ţintă 3:1 (WCAG 1.4.11) */
   --viz-ok: 5 150 105;     /* #059669 — 3,8:1 pe alb */
-  --viz-warn: 217 119 6;   /* #d97706 — 3,2:1 */
+  --viz-warn: 180 83 9;    /* #b45309 amber-700 — 4,4:1 pe ink-800 (suprafaţa de hover); #d97706 dădea 2,8:1 (audit UI 3.6.1, U08) */
   --viz-danger: 225 29 72; /* #e11d48 — 4,7:1 */
 
   --glass-bg: rgba(255, 255, 255, 0.72);
@@ -542,7 +542,7 @@ textarea {
   --info: 7 89 133;
   --accent: 29 78 216;
   --viz-ok: 5 150 105;
-  --viz-warn: 217 119 6;
+  --viz-warn: 180 83 9;    /* #b45309 — idem :root (U08) */
   --viz-danger: 225 29 72;
   color: rgb(var(--tx-200));
   background: var(--app-gradient);

@@ -74,3 +74,10 @@ export function visibleSelected(s: Selection, visible: readonly string[]): strin
 export function previewNames(names: readonly string[], n = 5): { shown: string[]; more: number } {
   return { shown: names.slice(0, n), more: Math.max(0, names.length - n) }
 }
+
+/** Tastele de NAVIGARE ale listei (săgeţi, Enter, Space, Delete…) se aplică doar când evenimentul
+    vine chiar de pe containerul listei (3.6.1, U09). Un keydown de pe un descendent focalizat —
+    butoanele Descarcă/Şterge ale rândului, bifa, numele — urcă (bubbling) până la listă; înainte,
+    Enter pe „Şterge" deschidea fişierul selectat, iar Space pe o bifă o comuta de două ori.
+    Descendentul îşi tratează singur tasta (activarea nativă a butonului / a bifei). */
+export const isListKeyTarget = (target: unknown, container: unknown): boolean => target === container

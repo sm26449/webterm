@@ -4,7 +4,7 @@ import { useI18n } from '../lib/i18n'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { csvToRows, CsvRow, importPayload, IMPORT_MAX, previewRows, RowStatus } from '../lib/hostscsv'
 import { field } from './settings/ui'
-import { Button } from './ui'
+import { Button, ErrorState } from './ui'
 import HelpTip from './HelpTip'
 import InstallCommand from './InstallCommand'
 
@@ -53,9 +53,15 @@ export function HostsCsvImport(props: { onClose: () => void; onImported?: () => 
   const fileRef = useRef<HTMLInputElement>(null)
   const textRef = useRef<HTMLTextAreaElement>(null)
 
-  useEffect(() => {
-    api<Host[]>('/api/hosts').then(setHosts).catch(() => {})
-  }, [])
+  // lista hosturilor existente decide „nou / există deja" în previzualizare: pe un fetch picat
+  // TOATE rândurile păreau noi (U17). Eroarea blochează previzualizarea până la Reîncearcă.
+  const [hostsErr, setHostsErr] = useState<string | null>(null)
+  const loadHosts = () => {
+    setHostsErr(null)
+    api<Host[]>('/api/hosts').then(setHosts).catch((e) => setHostsErr(errText(e, t) || t('common.loadFailed')))
+  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { loadHosts() }, [])
 
   const statuses = useMemo(() => (rows ? previewRows(rows, hosts, policy) : []), [rows, hosts, policy])
 
@@ -227,6 +233,8 @@ export function HostsCsvImport(props: { onClose: () => void; onImported?: () => 
         </>
       )}
       <div id="csv-import-error" role="alert" className={error ? 'text-sm wt-danger' : 'sr-only'}>{error}</div>
+      {/* hosturile existente nu s-au încărcat: previzualizarea n-ar putea marca duplicatele (U17) */}
+      {hostsErr !== null && <ErrorState compact title={t('hostcsv.hostsLoadFailed')} message={hostsErr} onRetry={loadHosts} />}
       <div className="flex flex-wrap items-center justify-end gap-2">
         {props.onExport && !rows && (
           <Button variant="ghost" type="button" onClick={props.onExport} className="mr-auto">{t('hostcsv.exportLink')}</Button>
@@ -238,7 +246,7 @@ export function HostsCsvImport(props: { onClose: () => void; onImported?: () => 
         )}
         <Button variant="ghost" size="lg" type="button" onClick={props.onClose}>{t('addhost.cancel')}</Button>
         {!rows ? (
-          <Button variant="primary" size="lg" type="button" disabled={!text.trim()} onClick={() => load(text)}>
+          <Button variant="primary" size="lg" type="button" disabled={!text.trim() || hostsErr !== null} onClick={() => load(text)}>
             {t('hostcsv.preview')}
           </Button>
         ) : (

@@ -10,6 +10,8 @@ import {
 } from '../../lib/termtheme'
 import { heading } from './ui'
 import { Button } from '../ui'
+import { canSave, type LoadState } from '../../lib/loadable'
+import NotLoaded from './NotLoaded'
 
 // Aspect: limbă, temă (light/dark/auto), schema de culori a terminalului (+ editor live şi import
 // iTerm2/VS Code) şi watermark-ul de identitate. Extras din SettingsModal ca tab de sine stătător.
@@ -29,10 +31,19 @@ export default function AppearanceTab(props: { onAccountChanged: () => void }) {
   })
   const [wmMsg, setWmMsg] = useState('')
   const [wmErr, setWmErr] = useState(false)   // acelaşi text, dar rol diferit: `alert` la eşec
-  useEffect(() => {
-    api<WatermarkConfig>('/api/settings/watermark').then(setWm).catch(() => {})
-  }, [])
+  // U04: un fetch picat lăsa valorile implicite („dezactivat") afişate ca setare — iar „Salvează"
+  // OPREA un watermark activ pe server. Formularul apare doar peste valorile încărcate.
+  const [wmState, setWmState] = useState<LoadState>({ status: 'loading' })
+  const loadWm = () => {
+    setWmState({ status: 'loading' })
+    api<WatermarkConfig>('/api/settings/watermark')
+      .then((r) => { setWm(r); setWmState({ status: 'ok' }) })
+      .catch((e) => setWmState({ status: 'error', error: errText(e, t) }))
+  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { loadWm() }, [])
   const saveWatermark = async () => {
+    if (!canSave(wmState)) return
     try {
       const saved = await api<WatermarkConfig>('/api/settings/watermark',
         { method: 'POST', body: JSON.stringify(wm) })
@@ -176,6 +187,8 @@ export default function AppearanceTab(props: { onAccountChanged: () => void }) {
       <section data-setting-id="watermark" hidden={!vis('watermark')}>
         {/* ── Watermark ── */}
         <h3 className={heading}>{t('settings.watermark')}</h3>
+        <NotLoaded state={wmState} onRetry={loadWm} />
+        {canSave(wmState) && (<>
         <label className="mt-2 flex cursor-pointer items-start gap-2.5 text-sm text-slate-300">
           <input type="checkbox" checked={wm.enabled}
             onChange={(e) => setWm({ ...wm, enabled: e.target.checked })}
@@ -227,6 +240,7 @@ export default function AppearanceTab(props: { onAccountChanged: () => void }) {
           <span role="status" className={wmMsg && !wmErr ? 'text-xs wt-good' : 'sr-only'}>{wmErr ? '' : wmMsg}</span>
           <span role="alert" className={wmMsg && wmErr ? 'text-xs wt-danger' : 'sr-only'}>{wmErr ? wmMsg : ''}</span>
         </div>
+        </>)}
       </section>
     </div>
   )

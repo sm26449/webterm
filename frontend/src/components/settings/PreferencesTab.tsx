@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { api } from '../../lib/api'
+import { api, errText } from '../../lib/api'
 import { useI18n } from '../../lib/i18n'
 import { useSectionVisible } from '../../lib/perms'
 import { allTimezones, browserTimezone, getTimezone, setTimezone, timeInZone } from '../../lib/tz'
@@ -11,6 +11,7 @@ import { INBOX_REL, PasteDest, inboxDays, pasteDest, setInboxDays, setPasteDest 
 import { UpdatesMode, setUpdatesMode, unmuteAllHosts, useUpdatesPref } from '../../lib/updatesPref'
 import { field, heading } from './ui'
 import HelpTip from '../HelpTip'
+import { ErrorState } from '../ui'
 
 // Preferinţe: fus orar, accesibilitate (mod screen-reader), verificarea de versiune. Extras din
 // SettingsModal ca tab de sine stătător (îşi ţine starea, se încarcă la montare).
@@ -45,8 +46,11 @@ export default function PreferencesTab() {
   }, [tz])
 
   // singura conexiune iniţiată de gateway spre exterior; o citim la deschiderea tab-ului
+  // U04: un fetch picat lăsa bifa dezactivată fără explicaţie — acum eroarea + Reîncearcă
+  const [updLoadErr, setUpdLoadErr] = useState<string | null>(null)
+  const loadUpd = () => { setUpdLoadErr(null); api<UpdateInfo>('/api/version').then(setUpd).catch((e) => setUpdLoadErr(errText(e, t))) }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { if (upd === null) api<UpdateInfo>('/api/version').then(setUpd).catch(() => {}) }, [])
+  useEffect(() => { if (upd === null) loadUpd() }, [])
 
   function chooseTz(value: string) {
     setTz(value)
@@ -212,6 +216,9 @@ export default function PreferencesTab() {
       <section data-setting-id="appUpdate" hidden={!vis('appUpdate')}>
         {/* ── Verificare de versiune ── */}
         <h3 className={heading}>{t('settings.update.title')}</h3>
+        {upd === null && updLoadErr !== null && (
+          <div className="mt-2 rounded-md ring-1 ring-ink-700"><ErrorState compact title={t('settings.notLoaded')} message={updLoadErr} onRetry={loadUpd} /></div>
+        )}
         {upd?.configurable === false ? (
           <p className="mt-2 text-xs text-slate-500">{t('settings.update.disabledByEnv')}</p>
         ) : (
@@ -271,7 +278,7 @@ export default function PreferencesTab() {
             <p className="text-xs text-slate-500">{t('settings.update.howTo')}</p>
             <UpdateCommand command={upd.update_command}
               status={{ error: upd.error, checking: updBusy,
-                        onRetry: () => { setUpdBusy(true); api<UpdateInfo>('/api/version/refresh', { method: 'POST' }).then(setUpd).catch(() => {}).finally(() => setUpdBusy(false)) } }} />
+                        onRetry: () => { setUpdBusy(true); api<UpdateInfo>('/api/version/refresh', { method: 'POST' }).then(setUpd).catch((e) => setUpd((u) => (u ? { ...u, error: errText(e, t) || t('common.loadFailed') } : u))).finally(() => setUpdBusy(false)) } }} />
           </div>
         )}
       </section>

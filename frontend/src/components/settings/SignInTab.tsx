@@ -10,7 +10,8 @@ import { copyText } from '../../lib/clipboard'
 import { field, heading } from './ui'
 import { askSecret } from '../../lib/secretPrompt'
 import LoadFailed from '../LoadFailed'
-import { Button } from '../ui'
+import type { LoadState } from '../../lib/loadable'
+import { Button, ErrorState } from '../ui'
 
 interface Passkey {
   id: number
@@ -27,9 +28,16 @@ export default function SignInTab(props: { webauthnAvailable: boolean }) {
   // confirm()/prompt() native → dialoguri proprii (vezi lib/confirm.tsx: de ce)
   const { confirm, promptText } = useConfirm()
   const [passkeys, setPasskeys] = useState<Passkey[]>([])
+  // U03: „Niciun passkey înregistrat" pe un fetch PICAT linişteşte exact omul care verifică dacă
+  // are o a doua cale de intrare. Încărcarea are stările ei: loading / ok / error (+ Reîncearcă).
+  const [pkState, setPkState] = useState<LoadState>({ status: 'loading' })
   // erori per secțiune, afișate lângă butonul care le-a produs — modalul e lung
   // și scrollabil, o singură eroare la fund ar fi de multe ori în afara ecranului
   const [securityErr, setSecurityErr] = useState('')
+  const [pkMsg, setPkMsg] = useState('')
+  const [removingPk, setRemovingPk] = useState<number | null>(null)
+  // erorile 2FA lângă secţiunea 2FA (înainte apăreau sub butonul „Adaugă passkey")
+  const [totpErr, setTotpErr] = useState('')
   const [busy, setBusy] = useState(false)
 
   // Dispozitivele conectate. Lipsea calea de mijloc între „schimb parola" (omoară tot,
@@ -43,6 +51,26 @@ export default function SignInTab(props: { webauthnAvailable: boolean }) {
   const loadDevices = () => api<WebSess[]>('/api/account/sessions')
     .then((r) => { setDevicesErr(null); setDevices(r) })
     .catch((e) => { setDevicesErr(errText(e, t)); setDevices([]) })
+  // Revocările (U03): înainte eroarea era înghiţită — o deconectare EŞUATĂ arăta exact ca una reuşită
+  // (lista se reîncărca, dispozitivul rămânea, nimeni nu spunea de ce). Acum: buton ocupat pe rând,
+  // eroarea într-o regiune `alert` permanentă, confirmarea DOAR după răspunsul reuşit al serverului.
+  const [revoking, setRevoking] = useState<number | 'others' | null>(null)
+  const [devMsg, setDevMsg] = useState('')
+  const [devErr, setDevErr] = useState('')
+  async function revokeDevice(target: number | 'others') {
+    if (revoking !== null) return
+    setRevoking(target); setDevMsg(''); setDevErr('')
+    try {
+      if (target === 'others') await api('/api/account/sessions/revoke-others', { method: 'POST' })
+      else await api(`/api/account/sessions/${target}`, { method: 'DELETE' })
+      setDevMsg(target === 'others' ? t('settings.devicesRevokedOthers') : t('settings.deviceRevoked'))
+    } catch (e) {
+      setDevErr(errText(e, t) || t('settings.deviceRevokeFailed'))
+    } finally {
+      setRevoking(null)
+      loadDevices()
+    }
+  }
 
   // 2FA (TOTP)
   const [totpEnabled, setTotpEnabled] = useState(false)
@@ -60,16 +88,21 @@ export default function SignInTab(props: { webauthnAvailable: boolean }) {
   // există un passkey înrolat. Ieşirea rămâne `app.admin` de pe server — un lucru pe care
   // vrei să-l afli înainte, nu în seara în care s-a întâmplat.
   const [lockoutRisk, setLockoutRisk] = useState(false)
+  // starea 2FA necunoscută ≠ „2FA dezactivat": pe un fetch picat NU oferim „Activează 2FA"
+  const [totpState, setTotpState] = useState<LoadState>({ status: 'loading' })
   const loadTotp = () =>
     api<{ enabled: boolean; recovery_remaining: number; single_passkey_risk?: boolean }>('/api/totp/status')
       .then((s) => {
         setTotpEnabled(s.enabled); setRecoveryLeft(s.recovery_remaining)
         setLockoutRisk(!!s.single_passkey_risk)
+        setTotpState({ status: 'ok' })
       })
-      .catch(() => {})
+      .catch((e) => setTotpState({ status: 'error', error: errText(e, t) }))
 
   const load = () =>
-    api<Passkey[]>('/api/webauthn/credentials').then(setPasskeys).catch(() => {})
+    api<Passkey[]>('/api/webauthn/credentials')
+      .then((r) => { setPasskeys(r); setPkState({ status: 'ok' }) })
+      .catch((e) => setPkState({ status: 'error', error: errText(e, t) }))
 
   // tot ce ţine de autentificare se încarcă la montarea tab-ului (= la deschiderea secţiunii)
   useEffect(() => {
@@ -80,7 +113,7 @@ export default function SignInTab(props: { webauthnAvailable: boolean }) {
   }, [])
 
   async function startEnroll() {
-    setSecurityErr('')
+    setTotpErr('')
     setRecoveryCodes(null)
     // M1: înrolarea 2FA e schimbare de credențiale — cere parola (ca un cookie furat să nu
     // poată înrola un TOTP atacator). O ținem pentru pasul de activare din acelaşi flux.
@@ -94,12 +127,12 @@ export default function SignInTab(props: { webauthnAvailable: boolean }) {
       setEnrollPw(password)
       setEnroll({ secret: r.secret, uri: r.otpauth_uri })
     } catch (err) {
-      setSecurityErr(errText(err, t) || t('settings.error'))
+      setTotpErr(errText(err, t) || t('settings.error'))
     }
   }
 
   async function confirmEnroll() {
-    setSecurityErr('')
+    setTotpErr('')
     setBusy(true)
     try {
       const r = await api<{ recovery_codes: string[] }>('/api/totp/activate', {
@@ -112,14 +145,14 @@ export default function SignInTab(props: { webauthnAvailable: boolean }) {
       setEnrollPw('')
       await loadTotp()
     } catch (err) {
-      setSecurityErr(errText(err, t) || t('settings.error'))
+      setTotpErr(errText(err, t) || t('settings.error'))
     } finally {
       setBusy(false)
     }
   }
 
   async function runPendingAction() {
-    setSecurityErr('')
+    setTotpErr('')
     setBusy(true)
     try {
       // Ambele cer al doilea factor (second_gate): dezactivarea 2FA şi regenerarea codurilor de
@@ -141,7 +174,7 @@ export default function SignInTab(props: { webauthnAvailable: boolean }) {
       setActionPw('')
       await loadTotp()
     } catch (err) {
-      setSecurityErr(errText(err, t) || t('settings.error'))
+      setTotpErr(errText(err, t) || t('settings.error'))
     } finally {
       setBusy(false)
     }
@@ -155,7 +188,7 @@ export default function SignInTab(props: { webauthnAvailable: boolean }) {
   }
 
   async function addPasskey() {
-    setSecurityErr('')
+    setSecurityErr(''); setPkMsg('')
     // numele se cere ÎNAINTE de ceremonia WebAuthn: după ce credentialul e
     // creat, Cancel la prompt nu mai poate anula nimic — ajungea înregistrat
     // cu numele generic „passkey"
@@ -176,6 +209,7 @@ export default function SignInTab(props: { webauthnAvailable: boolean }) {
         method: 'POST',
         body: JSON.stringify({ credential, name: name.trim() || 'passkey', password, ...extra }),
       }))
+      setPkMsg(t('settings.passkeyAdded'))
       load()
     } catch (err) {
       if (err instanceof Error && err.name !== 'NotAllowedError') setSecurityErr(err.message)
@@ -199,8 +233,10 @@ export default function SignInTab(props: { webauthnAvailable: boolean }) {
         danger: true, confirmLabel: t('settings.delete'),
       }))) return
     } else if (passkeys.length === 2) {
-      const hosts = await api<Host[]>('/api/hosts').catch(() => [] as Host[])
-      if (hosts.some((h) => h.require_2fa) && !(await confirm({
+      // fail-SAFE: dacă lista de hosturi nu se poate încărca, NU presupunem „niciun host cu 2FA"
+      // (înainte, o eroare devenea listă goală şi sărea avertismentul de blocare exact când nu ştiam) — îl arătăm
+      const hosts = await api<Host[]>('/api/hosts').catch(() => null)
+      if ((hosts === null || hosts.some((h) => h.require_2fa)) && !(await confirm({
         title: t('settings.lastPasskeyTitle'), message: t('settings.singlePasskeyWarning'),
         danger: true, confirmLabel: t('settings.delete'),
       }))) return
@@ -208,13 +244,17 @@ export default function SignInTab(props: { webauthnAvailable: boolean }) {
     // M1: scoaterea unui factor rezistent la phishing e schimbare de credențiale — cere parola.
     const password = await askSecret(t('settings.passkeyRemovePrompt'))
     if (password === null) return
+    setSecurityErr(''); setPkMsg(''); setRemovingPk(id)
     try {
       await withSecondFactor((extra) => api(`/api/webauthn/credentials/${id}`, {
         method: 'DELETE',
         body: JSON.stringify({ password, ...extra }),
       }))
+      setPkMsg(t('settings.passkeyRemoved'))   // DOAR după răspunsul reuşit
     } catch (err) {
       setSecurityErr(errText(err, t) || t('settings.deleteFailed'))
+    } finally {
+      setRemovingPk(null)
     }
     load()
   }
@@ -257,31 +297,32 @@ export default function SignInTab(props: { webauthnAvailable: boolean }) {
                   </div>
                 </div>
                 {!d.current && (
-                  <button
-                    onClick={async () => {
-                      await api(`/api/account/sessions/${d.id}`, { method: 'DELETE' }).catch(() => {})
-                      loadDevices()
-                    }}
-                    className="wt-danger shrink-0 rounded-md px-2 py-1 text-xs ring-1 ring-ink-700 hover:bg-ink-800"
-                  >{t('settings.deviceRevoke')}</button>
+                  <Button variant="secondary" size="sm" type="button" className="shrink-0"
+                    loading={revoking === d.id} disabled={revoking !== null}
+                    aria-label={t('settings.deviceRevokeAria', { device: d.label })}
+                    onClick={() => { void revokeDevice(d.id) }}
+                  >{t('settings.deviceRevoke')}</Button>
                 )}
               </div>
             ))}
           </div>
         )}
-        {devices && devices.length > 1 && (
-          <button
+        {devices && devicesErr === null && devices.length > 1 && (
+          <Button variant="secondary" type="button" className="mt-2"
+            loading={revoking === 'others'} disabled={revoking !== null}
             onClick={async () => {
               if (!(await confirm({
                 title: t('security.signOutOthersTitle'), message: t('settings.devicesRevokeOthersConfirm'),
                 danger: true, confirmLabel: t('security.signOut'),
               }))) return
-              await api('/api/account/sessions/revoke-others', { method: 'POST' }).catch(() => {})
-              loadDevices()
+              await revokeDevice('others')
             }}
-            className="mt-2 rounded-md px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800"
-          >{t('settings.devicesRevokeOthers')}</button>
+          >{t('settings.devicesRevokeOthers')}</Button>
         )}
+        {/* regiuni live montate permanent: confirmarea `status`, eroarea `alert` (rămâne până la
+            următoarea acţiune — nu un toast care dispare înainte să-l citeşti) */}
+        <p role="status" className={devMsg ? 'mt-2 text-sm wt-good' : 'sr-only'}>{devMsg}</p>
+        <p role="alert" className={devErr ? 'mt-2 text-sm wt-danger' : 'sr-only'}>{devErr}</p>
       </section>
 
       <section data-setting-id="passkeys">
@@ -293,17 +334,29 @@ export default function SignInTab(props: { webauthnAvailable: boolean }) {
             : t('settings.passkeysUnavailable')}
         </p>
         <div className="mt-2 space-y-1">
-          {passkeys.map((p) => (
+          {pkState.status === 'loading' && passkeys.length === 0 && (
+            <div className="text-xs text-slate-500">{t('settings.loading')}</div>
+          )}
+          {pkState.status === 'error' && (
+            <div className="rounded-md ring-1 ring-ink-700">
+              <ErrorState compact title={t('settings.passkeysLoadFailed')} message={pkState.error}
+                onRetry={() => { setPkState({ status: 'loading' }); load() }} />
+            </div>
+          )}
+          {pkState.status !== 'error' && passkeys.map((p) => (
             <div key={p.id} className="flex items-center justify-between rounded-md bg-ink-800 px-3 py-2 text-sm">
               <span className="inline-flex items-center gap-2">
                 <KeyIcon /> {p.name}
               </span>
-              <button onClick={() => remove(p.id)} className="text-xs wt-danger hover:underline">
+              <Button variant="secondary" size="sm" type="button"
+                loading={removingPk === p.id} disabled={removingPk !== null || busy}
+                aria-label={t('settings.passkeyDeleteAria', { name: p.name })}
+                onClick={() => { void remove(p.id) }}>
                 {t('settings.delete')}
-              </button>
+              </Button>
             </div>
           ))}
-          {passkeys.length === 0 && <div className="text-xs text-slate-500">{t('settings.noPasskeys')}</div>}
+          {pkState.status === 'ok' && passkeys.length === 0 && <div className="text-xs text-slate-500">{t('settings.noPasskeys')}</div>}
           {lockoutRisk && (
             <div className="rounded-md bg-amber-500/10 p-2.5 text-xs wt-warn ring-1 ring-amber-500/25">
               {t('settings.singlePasskeyWarning')}
@@ -315,7 +368,8 @@ export default function SignInTab(props: { webauthnAvailable: boolean }) {
           disabled={busy || !props.webauthnAvailable || !window.PublicKeyCredential} className="mt-3">
           {t('settings.addPasskey')}
         </Button>
-        {securityErr && <div className="mt-2 text-sm wt-danger">{securityErr}</div>}
+        <p role="status" className={pkMsg ? 'mt-2 text-sm wt-good' : 'sr-only'}>{pkMsg}</p>
+        <p role="alert" className={securityErr ? 'mt-2 text-sm wt-danger' : 'sr-only'}>{securityErr}</p>
       </section>
 
       <section data-setting-id="totp">
@@ -324,8 +378,17 @@ export default function SignInTab(props: { webauthnAvailable: boolean }) {
         <p className="mt-1 text-xs text-slate-500">
           {t('settings.totp.hint')}
         </p>
+        {totpState.status === 'loading' && !recoveryCodes && (
+          <div className="mt-2 text-xs text-slate-500">{t('settings.loading')}</div>
+        )}
+        {totpState.status === 'error' && (
+          <div className="mt-2 rounded-md ring-1 ring-ink-700">
+            <ErrorState compact title={t('settings.totp.loadFailed')} message={totpState.error}
+              onRetry={() => { setTotpState({ status: 'loading' }); loadTotp() }} />
+          </div>
+        )}
 
-        {totpEnabled && !recoveryCodes && pendingAction === null && (
+        {totpState.status === 'ok' && totpEnabled && !recoveryCodes && pendingAction === null && (
           <div className="mt-2 space-y-2">
             <div className="flex items-center gap-2 text-sm">
               <span className="wt-good">{t('settings.totp.active')}</span>
@@ -388,7 +451,7 @@ export default function SignInTab(props: { webauthnAvailable: boolean }) {
           </div>
         )}
 
-        {!totpEnabled && !enroll && !recoveryCodes && (
+        {totpState.status === 'ok' && !totpEnabled && !enroll && !recoveryCodes && (
           <Button variant="primary"
             onClick={startEnroll} className="mt-2">
             {t('settings.totp.enable')}
@@ -476,6 +539,7 @@ export default function SignInTab(props: { webauthnAvailable: boolean }) {
             </div>
           </div>
         )}
+        <p role="alert" className={totpErr ? 'mt-2 text-sm wt-danger' : 'sr-only'}>{totpErr}</p>
       </section>
     </div>
   )

@@ -206,6 +206,34 @@ async function auditDevice(cfg) {
     await check('dashboard')
     reached.add('dashboard')
 
+    // ── walkthrough-ul de bun venit (U12, 3.6.1): încape la 320px, fără 7 ţinte-punct de 44px ──
+    // Îl deschidem prin evenimentul folosit de Setări → Preferinţe (pe telefon nu există `?`).
+    await page.evaluate(() => window.dispatchEvent(new Event('wt-open-walkthrough')))
+    const wt = page.locator('[data-testid="walkthrough"]')
+    if (await wt.waitFor({ state: 'visible', timeout: 5000 }).then(() => true).catch(() => false)) {
+      await page.waitForTimeout(400)
+      await shot('02b-walkthrough')
+      await check('walkthrough')
+      const w = await page.evaluate(() => {
+        const card = document.querySelector('[data-testid="walkthrough"]')
+        const r = card.getBoundingClientRect()
+        return {
+          fits: r.top >= -0.5 && r.left >= -0.5 && r.bottom <= innerHeight + 0.5 && r.right <= innerWidth + 0.5,
+          hScroll: card.scrollWidth > card.clientWidth + 1,
+          dots: card.querySelectorAll('button[aria-label^="Step "]').length,
+          step: card.querySelector('[data-testid="walkthrough-step"]')?.textContent ?? '',
+        }
+      })
+      if (!w.fits) note(cfg.name, 'walkthrough', 'bug', 'cardul walkthrough-ului iese din ecran')
+      if (w.hScroll) note(cfg.name, 'walkthrough', 'bug', 'cardul walkthrough-ului are scroll orizontal')
+      if (w.dots) note(cfg.name, 'walkthrough', 'bug', `${w.dots} butoane-punct de pas (trebuie „Step k of n")`)
+      if (!/^Step 1 of \d+$/.test(w.step)) note(cfg.name, 'walkthrough', 'bug', `progresul nu e „Step 1 of N": „${w.step}"`)
+      await page.keyboard.press('Escape')
+      await wt.waitFor({ state: 'detached', timeout: 5000 }).catch(() => {})
+    } else {
+      note(cfg.name, 'walkthrough', 'bug', 'walkthrough-ul nu s-a deschis (evenimentul wt-open-walkthrough)')
+    }
+
     // sidebar (drawer pe mobil — pe tablete e permanent vizibil)
     const menu = page.locator('button[aria-label^="Open host list"]').first()
     if (await menu.isVisible().catch(() => false)) {
@@ -213,6 +241,22 @@ async function auditDevice(cfg) {
       await page.waitForTimeout(700)
       await shot('03-sidebar')
       await check('sidebar')
+      // U11 (3.6.1): în sertarul de 288px antetul ţine DOAR Adaugă host + Închide; restul sunt
+      // rânduri jos. Înainte, şase butoane de 44px nu încăpeau şi `overflow-hidden` tăia „Sign out".
+      const drawer = await page.evaluate(() => {
+        const head = document.querySelector('.wt-drawer .wt-sbhead')
+        const hr = head?.getBoundingClientRect()
+        const clipped = hr ? [...head.querySelectorAll('button')].filter((b) => {
+          const r = b.getBoundingClientRect()
+          return r.width > 0 && (r.right > hr.right + 0.5 || r.left < hr.left - 0.5)
+        }).map((b) => b.getAttribute('aria-label') || b.textContent?.trim()) : ['(antet absent)']
+        const rows = document.querySelector('.wt-drawer [data-testid="drawer-actions"]')
+        const signOut = rows && [...rows.querySelectorAll('button')].find((b) => /Sign out/.test(b.textContent || ''))
+        const so = signOut?.getBoundingClientRect()
+        return { clipped, signOut: !!so && so.height >= 44 && so.bottom <= innerHeight + 0.5 && so.right <= innerWidth + 0.5 }
+      })
+      if (drawer.clipped.length) note(cfg.name, 'sidebar', 'bug', `butoane tăiate în antetul sertarului: ${drawer.clipped.join(', ')}`)
+      if (!drawer.signOut) note(cfg.name, 'sidebar', 'bug', 'rândul „Sign out" lipseşte din sertar, e sub 44px sau iese din ecran')
       await page.keyboard.press('Escape').catch(() => {})
       // sertarul (w-72) stă în STÂNGA: un click în colţul (5,5) cădea pe el, nu pe scrim, deci
       // sertarul rămânea deschis peste dashboard. Până în 3.5.15 pasul ăsta nici nu rula pe

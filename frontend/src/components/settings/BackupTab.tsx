@@ -6,6 +6,8 @@ import { fmtTs } from '../../lib/tz'
 import { copyText } from '../../lib/clipboard'
 import { downloadBlob, field, heading } from './ui'
 import { Button } from '../ui'
+import { canSave, type LoadState } from '../../lib/loadable'
+import NotLoaded from './NotLoaded'
 import { useConfirm } from '../../lib/confirm'
 import { askSecret } from '../../lib/secretPrompt'
 import HelpTip from '../HelpTip'
@@ -58,9 +60,13 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
   const [probeInfo, setProbeInfo] = useState<{ fingerprint: string; type: string; hostkey: string } | null>(null)
   const isDirect = cloudForm.provider === 'sftp' || cloudForm.provider === 'ftps'
 
-  const loadCloud = () =>
-    api<CloudStatus>('/api/backup/cloud').then((s) => {
+  // U04: o stare necunoscută nu e „neconfigurat" — formularele nu se trimit peste valori implicite
+  const [cloudState, setCloudState] = useState<LoadState>({ status: 'loading' })
+  const loadCloud = (quiet = true) => {
+    if (!quiet) setCloudState({ status: 'loading' })
+    return api<CloudStatus>('/api/backup/cloud').then((s) => {
       setCloud(s)
+      setCloudState({ status: 'ok' })
       setCloudForm((f) => ({
         ...f, provider: s.provider || f.provider, keep: s.keep || f.keep,
         include_transcripts: s.include_transcripts,
@@ -76,7 +82,8 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
           keep: s.keep || f.keep, include_transcripts: s.include_transcripts,
         }))
       }
-    }).catch(() => {})
+    }).catch((e) => setCloudState({ status: 'error', error: errText(e, t) }))
+  }
 
   // SFTP TOFU: testează conexiunea şi întoarce amprenta host-key-ului de confirmat vizual.
   async function probeHost() {
@@ -101,6 +108,7 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
 
   async function saveDirect(e: FormEvent) {
     e.preventDefault()
+    if (!canSave(cloudState)) { setCloudErr(t('settings.notLoadedNoSave')); return }
     setCloudErr(''); setCloudMsg(''); setCloudBusy(true)
     try {
       const s = await api<CloudStatus>('/api/backup/cloud/direct',
@@ -127,6 +135,7 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
 
   async function saveCloud(e: FormEvent) {
     e.preventDefault()
+    if (!canSave(cloudState)) { setCloudErr(t('settings.notLoadedNoSave')); return }
     setCloudErr(''); setCloudMsg(''); setCloudBusy(true)
     try {
       const s = await api<CloudStatus>('/api/backup/cloud/config',
@@ -200,8 +209,15 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
   const [restoreFile, setRestoreFile] = useState<File | null>(null)
   const [restorePass, setRestorePass] = useState('')
 
-  const loadBackup = () =>
-    api<BackupStatus>('/api/backup/status').then(setBkStatus).catch(() => {})
+  // U04: fără stare încărcată, „Oprit" evidenţiat era o minciună, iar un clic pe programare
+  // trimitea `include_transcripts: false` peste setarea reală
+  const [bkState, setBkState] = useState<LoadState>({ status: 'loading' })
+  const loadBackup = (quiet = true) => {
+    if (!quiet) setBkState({ status: 'loading' })
+    return api<BackupStatus>('/api/backup/status')
+      .then((s) => { setBkStatus(s); setBkState({ status: 'ok' }) })
+      .catch((e) => setBkState({ status: 'error', error: errText(e, t) }))
+  }
 
   async function downloadBackupNow() {
     setBkMsg(''); setBkErr('')
@@ -255,6 +271,7 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
   }
 
   async function saveSchedule(schedule: 'off' | 'daily' | 'weekly') {
+    if (!canSave(bkState)) return
     setBkErr(''); setBkMsg('')
     try {
       const s = await api<BackupStatus>('/api/backup/schedule', {
@@ -268,7 +285,7 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
   }
 
   async function toggleScheduleTx(include: boolean) {
-    if (!bkStatus) return
+    if (!bkStatus || !canSave(bkState)) return
     try {
       const s = await api<BackupStatus>('/api/backup/schedule', {
         method: 'POST', body: JSON.stringify({ schedule: bkStatus.schedule, include_transcripts: include }),
@@ -363,9 +380,10 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
         <p className="mt-1 text-xs text-slate-500">
           {t('settings.backup.autoHintA')}{bkStatus ? ' ' + t('settings.backup.autoHintRetention', { days: bkStatus.retention_days }) : ''}{t('settings.backup.autoHintB')}
         </p>
+        <NotLoaded state={bkState} onRetry={() => { void loadBackup(false) }} />
         <div className="mt-2 flex gap-2">
           {([['off', t('settings.backup.off')], ['daily', t('settings.backup.daily')], ['weekly', t('settings.backup.weekly')]] as const).map(([val, label]) => (
-            <button key={val} onClick={() => saveSchedule(val)}
+            <button key={val} onClick={() => saveSchedule(val)} disabled={!canSave(bkState)}
               className={`rounded-md px-3 py-1.5 text-sm ring-1 ${
                 (bkStatus?.schedule ?? 'off') === val
                   ? 'bg-sky-600 text-white ring-sky-600'
@@ -439,6 +457,7 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
         {/* ── Copie off-host în cloud (Google Drive / Dropbox) ── */}
         <h3 className={heading}>{t('settings.cloud.title')}</h3>
         <p className="mt-1 text-xs text-slate-500">{t('settings.cloud.hint')}</p>
+        <NotLoaded state={cloudState} onRetry={() => { void loadCloud(false) }} />
 
         {/* stare curentă: prima linie pe care o citește omul când deschide secțiunea */}
         <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
@@ -571,7 +590,7 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
                 {t('settings.cloud.disconnect')}
               </button>
             )}
-            <button type="button" onClick={loadCloud} className="text-xs wt-link hover:underline">
+            <button type="button" onClick={() => { void loadCloud() }} className="text-xs wt-link hover:underline">
               {t('settings.cloud.refresh')}
             </button>
           </div>
@@ -695,7 +714,7 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
                 {t('settings.direct.remove')}
               </button>
             )}
-            <button type="button" onClick={loadCloud} className="text-xs wt-link hover:underline">
+            <button type="button" onClick={() => { void loadCloud() }} className="text-xs wt-link hover:underline">
               {t('settings.cloud.refresh')}
             </button>
           </div>

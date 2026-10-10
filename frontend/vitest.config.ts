@@ -7,5 +7,8 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: ['src/**/*.test.ts'],
+    // fără asta vitest întoarce CSS-ul ca şir GOL, chiar şi cu `?raw` — garda de audit UI
+    // (src/uiaudit.guard.test.ts) verifică tokenii de culoare din index.css
+    css: { include: [/index\.css/] },
   },
 })

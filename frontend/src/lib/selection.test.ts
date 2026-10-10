@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  EMPTY_SELECTION, Selection, allState, previewNames, prune, rangeTo, toggleAll, toggleKey, visibleSelected,
+  EMPTY_SELECTION, Selection, allState, isListKeyTarget, previewNames, prune, rangeTo, toggleAll, toggleKey, visibleSelected,
 } from './selection'
 
 const order = ['a', 'b', 'c', 'd', 'e']
@@ -97,5 +97,17 @@ describe('re-listare + previzualizare', () => {
   it('previewNames: primele n + câte mai sunt', () => {
     expect(previewNames(['a', 'b', 'c'], 5)).toEqual({ shown: ['a', 'b', 'c'], more: 0 })
     expect(previewNames(['a', 'b', 'c', 'd', 'e', 'f', 'g'], 5)).toEqual({ shown: ['a', 'b', 'c', 'd', 'e'], more: 2 })
+  })
+})
+
+describe('isListKeyTarget (U09)', () => {
+  it('tastele de navigare se aplică doar de pe containerul listei, nu de pe un descendent focalizat', () => {
+    const list = { id: 'list' }
+    const deleteBtn = { id: 'delete' }
+    const checkbox = { id: 'checkbox' }
+    expect(isListKeyTarget(list, list)).toBe(true)
+    // Enter pe „Şterge" / Space pe bifă: le tratează controlul, nu lista (nu deschide view[sel])
+    expect(isListKeyTarget(deleteBtn, list)).toBe(false)
+    expect(isListKeyTarget(checkbox, list)).toBe(false)
   })
 })

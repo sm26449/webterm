@@ -1,4 +1,5 @@
 import { RefObject, useEffect, useRef } from 'react'
+import { focusPlace } from './focusRecovery'
 
 /** Accessible modal behaviour for a dialog container: trap Tab focus inside it,
    close on Escape, move focus in on open and restore it to the trigger on close.
@@ -36,15 +37,46 @@ export function useFocusTrap(ref: RefObject<HTMLElement>, onClose: () => void): 
     if (first) first.focus()
     else { el.setAttribute('tabindex', '-1'); el.focus() }
 
+    const isTop = () => openTraps[openTraps.length - 1] === el
+    // Recuperarea focusului (3.6.1, U13) doar pentru dialogurile MODALE: un panou ne-modal care
+    // foloseşte capcana (dacă apare vreunul) nu are voie să tragă focusul din restul paginii.
+    const modal = el.getAttribute('aria-modal') === 'true'
+    // ultimul element focalizat ÎN dialog — acolo ne întoarcem când focusul a evadat
+    let lastInside: HTMLElement | null = null
+    const recover = (backwards = false) => {
+      const f = focusables()
+      const back = lastInside && el.contains(lastInside) && f.includes(lastInside) ? lastInside : null
+      const target = back ?? (backwards ? f[f.length - 1] : f[0])
+      if (target) target.focus()
+      else { el.setAttribute('tabindex', '-1'); el.focus() }
+    }
+
     // Escape la nivel de DOCUMENT: modalul se închide chiar dacă focusul a ieșit
     // din dialog (ex. butonul focusat s-a demontat după o acțiune async — cazul
     // grilei de rulare pe flotă). Tab-trapping rămâne pe dialog.
     const onEsc = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
-      if (openTraps[openTraps.length - 1] !== el) return    // un dialog deschis peste noi îl ia
+      if (!isTop()) return    // un dialog deschis peste noi îl ia
       e.preventDefault()
       e.stopPropagation()
       onCloseRef.current()
+    }
+    // Tab cu focusul PIERDUT (pe <body>: butonul focalizat a dispărut la o schimbare de fază).
+    // Fără asta, Tab-ul pornea din capul paginii din SPATELE modalului.
+    const onDocTab = (e: KeyboardEvent) => {
+      if (e.key !== 'Tab' || e.defaultPrevented || !modal || !isTop()) return
+      if (focusPlace(document.activeElement, el, document.body) !== 'lost') return
+      e.preventDefault()
+      recover(e.shiftKey)
+    }
+    // Focus care a ajuns în pagina din spate (un `.focus()` programatic, un clic pe ceva rămas
+    // focalizabil): îl aducem înapoi. Popup-urile portalate legitim (Monaco, HelpTip, un
+    // ConfirmModal deasupra) sunt lăsate în pace — vezi lib/focusRecovery.ts.
+    const onFocusIn = (e: FocusEvent) => {
+      const target = e.target as HTMLElement | null
+      if (target && el.contains(target)) { lastInside = target; return }
+      if (!modal || !isTop()) return
+      if (focusPlace(target, el, document.body) === 'escaped') recover()
     }
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Tab') return
@@ -70,10 +102,14 @@ export function useFocusTrap(ref: RefObject<HTMLElement>, onClose: () => void): 
 
     el.addEventListener('keydown', onKey)
     document.addEventListener('keydown', onEsc)
+    document.addEventListener('keydown', onDocTab)
+    document.addEventListener('focusin', onFocusIn)
     openTraps.push(el)
     return () => {
       el.removeEventListener('keydown', onKey)
       document.removeEventListener('keydown', onEsc)
+      document.removeEventListener('keydown', onDocTab)
+      document.removeEventListener('focusin', onFocusIn)
       const i = openTraps.lastIndexOf(el)
       if (i >= 0) openTraps.splice(i, 1)
       // restore focus to whatever opened the dialog — dacă mai e în pagină: butonul care a

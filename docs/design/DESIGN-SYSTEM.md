@@ -108,6 +108,34 @@ Two rules that keep the components honest:
   button, and migrating existing buttons must not change what Enter does in a form. In new code,
   write `type="button"` or `type="submit"`.
 
+### Loading and errors: error ≠ empty (3.6.1)
+
+A failed fetch tells you nothing about the server, so the UI must not say anything about it
+either. "No passkeys", "no sessions", "no results" and a form showing defaults are all claims
+about server state; after a failed request they are lies, and the external UI audit found them in
+a dozen places (some of them on security settings). The contract:
+
+- **Every load has three states:** loading, loaded, failed. `lib/loadable.ts` holds them
+  (`Load<T>` for lists bound to a key, `LoadState` for forms). Never `.catch(() => {})` on a load
+  and never turn a failure into `[]` — `src/uiaudit.guard.test.ts` fails the build if the files it
+  lists do.
+- **Failed first load → `ErrorState` with Retry**, never the empty state. A failed *refresh* may
+  keep the last good data for the **same** key (host, query, filter), labelled as stale ("Couldn't
+  refresh — showing the last loaded list."). Data of another key is never shown, not even stale:
+  bind loaded data to the identity it was fetched for and ignore late responses for an old key
+  (`settleLoad`, `loadFor`).
+- **Forms save only over loaded values.** While a Settings section is loading or failed, its form
+  is not shown (`settings/NotLoaded.tsx`) and its save path refuses (`canSave`). Defaults such as
+  90/90/90 thresholds, an empty SMTP host or "no guardrail rules" would otherwise overwrite the
+  real configuration.
+- **Action errors go to a persistent `role="alert"` region** next to the control, mounted all the
+  time (`className={err ? '…' : 'sr-only'}`) so the change is announced; the success text appears
+  only after a successful response, in a `role="status"` region. Toasts disappear before they are
+  read and are not a substitute.
+- **Actions with side effects are re-entrancy safe:** a ref set synchronously on the first
+  activation (`exclusive()` in `lib/guard.ts`) plus `Button loading` for the visual state. A React
+  state flag alone lets two activations in the same tick through.
+
 ## Icons
 
 All icons are inline SVG in `components/Icons.tsx`: 24×24 viewBox, `stroke="currentColor"`,

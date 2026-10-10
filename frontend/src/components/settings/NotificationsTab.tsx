@@ -6,8 +6,10 @@ import { useSectionVisible } from '../../lib/perms'
 import { field, heading } from './ui'
 import { Button, ErrorState } from '../ui'
 import { fmtTs } from '../../lib/tz'
+import { canSave, type LoadState } from '../../lib/loadable'
 import { AlertPref, applyPref, groupPrefs } from '../../lib/alerts'
 import HelpTip from '../HelpTip'
+import NotLoaded from './NotLoaded'
 
 // Notificări: domeniul de port-forwarding, alerte pe email (SMTP) + webhook, praguri de resurse.
 // Extras din SettingsModal ca tab de sine stătător (îşi ţine starea, se încarcă la montare).
@@ -30,12 +32,22 @@ export default function NotificationsTab() {
   const [busy, setBusy] = useState(false)
 
   // praguri de alertă pe resurse
+  // U04 — contractul „eroare ≠ gol" pe formulare: valorile de mai jos sunt doar IMPLICITE. Dacă
+  // încărcarea pică, ele NU sunt setările de pe server — afişate ca atare păreau salvate, iar un
+  // Save le scria peste configuraţia reală (praguri 90/90/90, SMTP gol = alerte pe email oprite).
+  // Fiecare secţiune are starea ei; Save e blocat până când secţiunea s-a încărcat.
   const [thresholds, setThresholds] = useState({ cpu: 90, mem: 90, disk: 90 })
+  const [thrState, setThrState] = useState<LoadState>({ status: 'loading' })
   const [alertMsg, setAlertMsg] = useState('')
   const [alertErr, setAlertErr] = useState('')
-  const loadThresholds = () =>
-    api<{ cpu: number; mem: number; disk: number }>('/api/settings/alerts').then(setThresholds).catch(() => {})
+  const loadThresholds = () => {
+    setThrState({ status: 'loading' })
+    return api<{ cpu: number; mem: number; disk: number }>('/api/settings/alerts')
+      .then((r) => { setThresholds(r); setThrState({ status: 'ok' }) })
+      .catch((e) => setThrState({ status: 'error', error: errText(e, t) }))
+  }
   async function saveThresholds() {
+    if (!canSave(thrState)) return
     // eroarea lângă butonul ei: setSmtpErr o afişa cu DOUĂ secţiuni mai sus, lângă butoanele
     // SMTP — apăsai „salvează praguri" şi eroarea apărea în altă parte (sau în afara ecranului)
     setAlertMsg(''); setAlertErr(''); setBusy(true)
@@ -56,18 +68,25 @@ export default function NotificationsTab() {
   const [smtpErr, setSmtpErr] = useState('')
   const [smtpTesting, setSmtpTesting] = useState(false)
   const [alertStatus, setAlertStatus] = useState<AlertStatus | null>(null)
-  const loadSmtp = () =>
-    api<{ host?: string; port?: number; user?: string; from_addr?: string; to_addr?: string
+  const [smtpState, setSmtpState] = useState<LoadState>({ status: 'loading' })
+  // `quiet`: reîncărcarea de după un save reuşit nu ascunde formularul cât aşteaptă
+  const loadSmtp = (quiet = false) => {
+    if (!quiet) setSmtpState({ status: 'loading' })
+    return api<{ host?: string; port?: number; user?: string; from_addr?: string; to_addr?: string
           starttls: boolean; webhook?: string; has_password: boolean; status?: AlertStatus }>('/api/settings/smtp').then((c) => {
       setSmtp({ host: c.host || '', port: c.port || 587, user: c.user || '', password: '',
         from_addr: c.from_addr || '', to_addr: c.to_addr || '', starttls: c.starttls, webhook: c.webhook || '' })
       setSmtpHasPw(c.has_password)
       setAlertStatus(c.status ?? null)
-    }).catch(() => {})
+      setSmtpState({ status: 'ok' })
+    }).catch((e) => setSmtpState({ status: 'error', error: errText(e, t) }))
+  }
   // Orice schimbare SMTP/webhook cere parola contului (vezi save_smtp în gateway — SMTP-ul
   // poartă codurile de email, deci e destinaţie de exfiltrare). Încercăm întâi fără: o salvare
   // fără schimbări trece tăcut; la 401 cerem parola şi repetăm o dată.
   async function postSmtp() {
+    // peste un formular neîncărcat (valori implicite) NU trimitem nimic — ar şterge SMTP-ul real
+    if (!canSave(smtpState)) throw new Error(t('settings.notLoadedNoSave'))
     try {
       await api('/api/settings/smtp', { method: 'POST', body: JSON.stringify(smtp) })
     } catch (err) {
@@ -83,7 +102,7 @@ export default function NotificationsTab() {
     try {
       await postSmtp()
       setSmtp((s) => ({ ...s, password: '' }))
-      await loadSmtp()
+      await loadSmtp(true)
       setSmtpMsg(t('settings.smtp.saved'))
     } catch (err) {
       setSmtpErr(errText(err, t) || t('settings.error'))
@@ -96,7 +115,7 @@ export default function NotificationsTab() {
       // natural „completez → testez" testează altceva
       await postSmtp()
       setSmtp((s) => ({ ...s, password: '' }))
-      await loadSmtp()
+      await loadSmtp(true)
       await api('/api/settings/smtp/test', { method: 'POST' })
       setSmtpMsg(t('settings.smtp.testSent'))
     } catch (err) {
@@ -111,7 +130,7 @@ export default function NotificationsTab() {
     try {
       await postSmtp()
       setSmtp((s) => ({ ...s, password: '' }))
-      await loadSmtp()
+      await loadSmtp(true)
       await api('/api/settings/webhook/test', { method: 'POST' })
       setSmtpMsg(t('settings.smtp.webhookTestSent'))
     } catch (err) {
@@ -125,9 +144,15 @@ export default function NotificationsTab() {
   const [fwdMsg, setFwdMsg] = useState('')
   const [fwdErr, setFwdErr] = useState('')
   const [fwdBusy, setFwdBusy] = useState(false)
-  const loadFwd = () =>
-    api<FwdCfg>('/api/settings/forward').then((c) => { setFwd(c); setFwdDomain(c.domain) }).catch(() => {})
+  const [fwdState, setFwdState] = useState<LoadState>({ status: 'loading' })
+  const loadFwd = (quiet = false) => {
+    if (!quiet) setFwdState({ status: 'loading' })
+    return api<FwdCfg>('/api/settings/forward')
+      .then((c) => { setFwd(c); setFwdDomain(c.domain); setFwdState({ status: 'ok' }) })
+      .catch((e) => setFwdState({ status: 'error', error: errText(e, t) }))
+  }
   async function saveFwd() {
+    if (!canSave(fwdState)) return
     setFwdBusy(true); setFwdMsg(''); setFwdErr('')
     try {
       const c = await api<FwdCfg>('/api/settings/forward', {
@@ -175,7 +200,8 @@ export default function NotificationsTab() {
         <p className="mt-1 text-xs text-slate-500">
           {t('settings.forward.hintA')} <span className="font-mono">{t('settings.forward.subdomain')}</span>{t('settings.forward.hintB')} <span className="font-mono">{t('settings.forward.exampleDomain')}</span>{t('settings.forward.hintC')} <span className="font-mono">.env</span>{t('settings.forward.hintD')}
         </p>
-        <div className="mt-2 flex flex-col gap-2">
+        <NotLoaded state={fwdState} onRetry={() => { void loadFwd() }} />
+        {canSave(fwdState) && (<div className="mt-2 flex flex-col gap-2">
           <div className="flex gap-2">
             <input value={fwdDomain} onChange={(e) => setFwdDomain(e.target.value)}
               placeholder={t('settings.forward.inputPlaceholder')} aria-label={t('settings.forward.ariaLabel')} spellCheck={false}
@@ -184,7 +210,7 @@ export default function NotificationsTab() {
             <Button variant="primary" disabled={fwdBusy} onClick={saveFwd} className="shrink-0">
               {t('settings.save')}
             </Button>
-            <Button variant="secondary" disabled={fwdBusy} onClick={() => { setFwdMsg(''); setFwdErr(''); loadFwd() }} className="shrink-0">
+            <Button variant="secondary" disabled={fwdBusy} onClick={() => { setFwdMsg(''); setFwdErr(''); loadFwd(true) }} className="shrink-0">
               {t('settings.recheck')}
             </Button>
           </div>
@@ -215,14 +241,15 @@ export default function NotificationsTab() {
               </ol>
             </div>
           )}
-        </div>
+        </div>)}
       </section>
 
       <section data-setting-id="smtp" hidden={!vis('smtp')}>
         {/* ── Alerte pe email (SMTP) ── */}
         <h3 className={heading + ' flex items-center gap-2'}>{t('settings.smtp.title')}<HelpTip id="smtp" /></h3>
         <p className="mt-1 text-xs text-slate-500">{t('settings.smtp.hint')}</p>
-        <div className="mt-2 flex flex-col gap-2">
+        <NotLoaded state={smtpState} onRetry={() => { void loadSmtp() }} />
+        {canSave(smtpState) && (<div className="mt-2 flex flex-col gap-2">
           <div className="flex gap-2">
             <input value={smtp.host} onChange={(e) => setSmtp({ ...smtp, host: e.target.value })}
               placeholder={t('settings.smtp.hostPlaceholder')} aria-label={t('settings.smtp.host')}
@@ -293,14 +320,15 @@ export default function NotificationsTab() {
                 })}
             </div>
           )}
-        </div>
+        </div>)}
       </section>
 
       <section data-setting-id="resourceAlerts" hidden={!vis('resourceAlerts')}>
         {/* ── Alerte pe resurse ── */}
         <h3 className={heading + ' flex items-center gap-2'}>{t('settings.alerts.title')}<HelpTip id="resourceAlerts" /></h3>
         <p className="mt-1 text-xs text-slate-500">{t('settings.alerts.hint')}</p>
-        <div className="mt-2 flex flex-wrap items-center gap-3">
+        <NotLoaded state={thrState} onRetry={() => { void loadThresholds() }} />
+        {canSave(thrState) && (<div className="mt-2 flex flex-wrap items-center gap-3">
           {([['cpu', 'CPU'], ['mem', 'RAM'], ['disk', t('settings.alerts.disk')]] as const).map(([k, label]) => (
             <label key={k} className="flex items-center gap-2 text-sm text-slate-300">
               <span className="w-10 text-slate-400">{label}</span>
@@ -316,7 +344,7 @@ export default function NotificationsTab() {
           </Button>
           <span role="status" className={alertMsg ? 'text-sm wt-good' : 'sr-only'}>{alertMsg}</span>
           <span role="alert" className={alertErr ? 'text-sm wt-danger' : 'sr-only'}>{alertErr}</span>
-        </div>
+        </div>)}
       </section>
 
       <section data-setting-id="alertPrefs">

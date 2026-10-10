@@ -590,6 +590,34 @@ try {
       await page.waitForTimeout(400)
       await page.screenshot({ path: `${OUT}/${theme}-15-fleetrun.png` })
       await scan(page, `${theme} run on hosts modal`)
+      // 3.6.1 (U06/U13): faza de confirmare — CTA-ul primar trece contrastul (scan/axe), iar la
+      // schimbarea fazei focusul ajunge DELIBERAT pe titlul fazei noi, nu pe <body>; Tab rămâne
+      // în dialog. Doar cu un host online (altfel faza „alegi" n-are ce selecta).
+      const fleet = page.locator('[role=dialog][aria-label="Run on hosts"]')
+      const selAll = fleet.getByRole('button', { name: /^Select all/ })
+      if (await selAll.count()) {
+        await selAll.click()
+        await fleet.locator('textarea[aria-label="Command"]').fill('true')
+        await fleet.getByRole('button', { name: /Continue/ }).click()
+        await page.waitForTimeout(250)
+        const where = () => page.evaluate(() => {
+          const d = document.querySelector('[role=dialog][aria-label="Run on hosts"]')
+          const a = document.activeElement
+          return { inside: !!(d && a && d.contains(a)), tag: a?.tagName ?? '' }
+        })
+        const afterContinue = await where()
+        check(`run on hosts: după Continuă focusul e pe titlul fazei (${afterContinue.tag})`,
+          afterContinue.inside && afterContinue.tag === 'H2')
+        await page.screenshot({ path: `${OUT}/${theme}-15b-fleetrun-confirm.png` })
+        await scan(page, `${theme} run on hosts confirm`)
+        for (let i = 0; i < 4; i++) await page.keyboard.press('Tab')
+        check('run on hosts: Tab rămâne în dialog în faza de confirmare', (await where()).inside)
+        await fleet.getByRole('button', { name: 'Back', exact: true }).click()
+        await page.waitForTimeout(250)
+        const afterBack = await where()
+        check(`run on hosts: după Înapoi focusul e pe titlul fazei (${afterBack.tag})`,
+          afterBack.inside && afterBack.tag === 'H2')
+      }
       await escapeRestores(page, 'button[aria-label="Run on hosts"]', 'FleetRun')
     }, page)
 
@@ -613,6 +641,12 @@ try {
       await page.waitForTimeout(300)
       await page.screenshot({ path: `${OUT}/${theme}-16b-walkthrough.png` })
       await scan(page, `${theme} walkthrough`)
+      // 3.6.1 (U12): progresul e text („Step 1 of 7"), nu 7 butoane-punct de 44px
+      check('walkthrough: progres „Step 1 of N", fără butoane-punct', await page.evaluate(() => {
+        const card = document.querySelector('[data-testid="walkthrough"]')
+        return /^Step 1 of \d+$/.test(card?.querySelector('[data-testid="walkthrough-step"]')?.textContent ?? '')
+          && card.querySelectorAll('button[aria-label^="Step "]').length === 0
+      }))
       check('walkthrough: → avansează la tastatură', await (async () => {
         const before = await page.locator('[data-testid="walkthrough"] h2').textContent()
         await page.keyboard.press('ArrowRight')
@@ -640,6 +674,16 @@ try {
       await page.keyboard.press('ArrowUp')
       const up1 = await selIdx()
       check(`paleta: ↓↓ selectează al 3-lea rezultat, ↑ revine la al 2-lea (${down2} → ${up1})`, down2 === '2' && up1 === '1')
+      // 3.6.1 (U10): opţiunea activă e ANUNŢATĂ — aria-activedescendant al câmpului indică opţiunea
+      // cu aria-selected=true, adică exact rândul evidenţiat
+      const ad = await page.evaluate(() => {
+        const inp = document.activeElement
+        const id = inp?.getAttribute('aria-activedescendant')
+        const opt = id ? document.getElementById(id) : null
+        return { role: inp?.getAttribute('role'), sel: opt?.getAttribute('aria-selected'), idx: opt?.getAttribute('data-idx') }
+      })
+      check(`paleta: combobox cu aria-activedescendant pe opţiunea selectată (${JSON.stringify(ad)})`,
+        ad.role === 'combobox' && ad.sel === 'true' && ad.idx === up1)
       await page.keyboard.type('Status')
       await page.waitForTimeout(300)
       for (let i = 0; i < 3; i++) await page.keyboard.press('ArrowUp')   // sigur pe primul rezultat

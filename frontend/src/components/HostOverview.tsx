@@ -11,7 +11,8 @@ import { hostHistory } from '../lib/metrics'
 import { pressureColor, pressureTextColor } from '../lib/thresholds'
 import { updatesSignal, useUpdatesPref } from '../lib/updatesPref'
 import { ArrowRightIcon, ArrowUpIcon, ArrowUpRightIcon, DockerIcon, DownloadIcon, EyeIcon, FilesIcon, ForwardIcon, LinkIcon, MenuIcon, NoteIcon, PencilIcon, PlayIcon, PlugIcon, PlusIcon, PopoutIcon, RefreshIcon, ServerIcon, ServicesIcon, ShieldIcon, SparkleIcon, SplitIcon, StethoscopeIcon, TerminalPromptIcon, ToolboxIcon, TrashIcon } from './Icons'
-import { Badge, Button, Card, EmptyState, IconButton, cardClass, iconButtonClass } from './ui'
+import { Badge, Button, Card, EmptyState, ErrorState, IconButton, cardClass, iconButtonClass } from './ui'
+import { type Load, loadFor, reloadLoad, settleLoad, startLoad } from '../lib/loadable'
 import { MenuUnreadBadge, useUnreadAlerts } from './AlertsPanel'
 import { menuLabel } from '../lib/alerts'
 import SessionPreview from './SessionPreview'
@@ -85,15 +86,32 @@ export default function HostOverview(props: {
 
   // complete per-host history (not limited by the global recent-closed window),
   // fetched on host change + refreshed, merged with the fresh 5s global poll
-  const [hostSessions, setHostSessions] = useState<Session[]>([])
+  // U01: datele sunt LEGATE de hostul pentru care au fost cerute (lib/loadable.ts). La A→B starea
+  // se resetează (fără sesiunile lui A pe pagina lui B, nici măcar până soseşte răspunsul lui B),
+  // un răspuns întârziat pentru A e ignorat, iar un eşec e o stare proprie cu Reîncearcă — nu
+  // „nicio sesiune". Un refresh picat păstrează ultima listă bună a ACELUIAŞI host, marcată veche.
+  const hostKey = String(host.id)
+  const [sessLoad, setSessLoad] = useState<Load<Session[]>>(() => startLoad(hostKey))
+  const [sessReload, setSessReload] = useState(0)
   useEffect(() => {
     let alive = true
-    const load = () => api<Session[]>(`/api/hosts/${host.id}/sessions`)
-      .then((r) => { if (alive) setHostSessions(r) }).catch(() => {})
+    setSessLoad((cur) => (cur.key === hostKey ? reloadLoad(cur) : startLoad(hostKey)))
+    const load = () => api<Session[]>(`/api/hosts/${hostKey}/sessions`)
+      .then((r) => { if (alive) setSessLoad((cur) => settleLoad(cur, hostKey, { ok: true, data: r })) })
+      .catch((e) => {
+        if (alive) setSessLoad((cur) => settleLoad(cur, hostKey, { ok: false, error: errText(e, t) || t('common.loadFailed') }))
+      })
     load()
-    const t = setInterval(() => { if (!document.hidden) load() }, 6000)
-    return () => { alive = false; clearInterval(t) }
-  }, [host.id])
+    const iv = setInterval(() => { if (!document.hidden) load() }, 6000)
+    return () => { alive = false; clearInterval(iv) }
+  }, [hostKey, sessReload, t])
+  const sessState = loadFor(sessLoad, hostKey)
+  // filtrul pe host_id: a doua plasă, ca o listă a altui host să nu poată ajunge aici în niciun caz
+  const hostSessions = useMemo(
+    () => (sessState.data ?? []).filter((s) => s.host_id === host.id), [sessState.data, host.id])
+  const sessError = sessState.status === 'error' ? sessState.error : null
+  const sessLoading = sessState.status === 'loading' && sessState.data === undefined
+  const retrySessions = () => setSessReload((n) => n + 1)
   // ștergerile optimiste: fără setul ăsta, sesiunea „ștearsă imediat" din
   // hostSessions ar fi re-adăugată instant din props.sessions (poll-ul global)
   const [deletedIds, setDeletedIds] = useState<Set<string>>(new Set())
@@ -111,6 +129,9 @@ export default function HostOverview(props: {
 
   const [selected, setSelected] = useState<string | null>(null)
   const [playing, setPlaying] = useState<Session | null>(null)
+  // altă identitate de host = selecţie şi player resetate (U01): previzualizarea unei sesiuni a lui A
+  // nu are ce căuta pe pagina lui B. Declarat ÎNAINTEA preselecţiei, deci aceea porneşte de la gol.
+  useEffect(() => { setSelected(null); setPlaying(null) }, [host.id])
   // preselectează prima sesiune activă (sau prima închisă) când se schimbă hostul
   useEffect(() => {
     setSelected((cur) => {
@@ -312,7 +333,16 @@ export default function HostOverview(props: {
               )}
 
               {/* stare goală: fără sesiuni active, nu lăsăm un ecran pustiu — un îndemn clar */}
-              {active.length === 0 && (
+              {/* eroare ≠ gol (U01): fără listă de la server nu spunem „nicio sesiune activă" */}
+              {active.length === 0 && sessLoading && (
+                <p role="status" className="text-sm text-slate-500">{t('host.sessionsLoading')}</p>
+              )}
+              {active.length === 0 && !sessLoading && sessError !== null && hostSessions.length === 0 && (
+                <div className="rounded-xl ring-1 ring-ink-700">
+                  <ErrorState title={t('host.sessionsLoadFailed')} message={sessError} onRetry={retrySessions} />
+                </div>
+              )}
+              {active.length === 0 && !sessLoading && !(sessError !== null && hostSessions.length === 0) && (
                 <EmptyState framed tone="neutral"
                   icon={<TerminalPromptIcon />}
                   title={t('host.noActiveSessions')}
@@ -342,7 +372,18 @@ export default function HostOverview(props: {
               <div className="px-3 pb-1 pt-3 text-2xs font-semibold uppercase tracking-wide text-slate-500">
                 {t('host.active')} {active.length > 0 && <span className="text-slate-600">· {active.length}</span>}
               </div>
-              {active.length === 0
+              {sessError !== null && hostSessions.length > 0 && (
+                // refresh picat: lista e cea de la ultima încărcare reuşită — o spunem
+                <div role="status" className="mx-3 mb-2 flex flex-wrap items-center gap-2 rounded-md bg-ink-800/60 px-2 py-1 text-2xs text-slate-400">
+                  <span>{t('host.sessionsStale')}</span>
+                  <button type="button" onClick={retrySessions} className="wt-link min-h-6 hover:underline">{t('common.retry')}</button>
+                </div>
+              )}
+              {sessError !== null && hostSessions.length === 0 && active.length === 0 ? (
+                <ErrorState compact title={t('host.sessionsLoadFailed')} message={sessError} onRetry={retrySessions} />
+              ) : sessLoading && active.length === 0 ? (
+                <p role="status" className="px-3 pb-2 text-xs text-slate-500">{t('host.sessionsLoading')}</p>
+              ) : active.length === 0
                 ? <p className="px-3 pb-2 text-xs text-slate-600">{t('host.noActiveSessions')}</p>
                 : active.map(row)}
               {closed.length > 0 && (
@@ -393,6 +434,11 @@ export default function HostOverview(props: {
                     <SessionPreview key={sel.id} sid={sel.id} live={selLive} />
                   </div>
                 </>
+              ) : sessLoading || (sessError !== null && hostSessions.length === 0) ? (
+                // fără listă (încă / deloc): nu afirmăm „nicio sesiune" — starea e în coloana din stânga
+                <div className="flex h-full items-center justify-center text-sm text-slate-500">
+                  {sessLoading ? t('host.sessionsLoading') : null}
+                </div>
               ) : (
                 <EmptyState className="h-full" title={t('host.noSessionsYet')}
                   action={(

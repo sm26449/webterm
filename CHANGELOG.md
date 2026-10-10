@@ -9,6 +9,73 @@ back.
 
 ## [Unreleased]
 
+UI correctness and trust fixes from an external UI audit (U01–U18). No new features; behaviour,
+feedback, contrast and accessibility. No agent change.
+
+### Fixed
+- **Host page showed the previous host's sessions** (U01). Switching host A → B kept A's session
+  list on B's page until B's request answered, or for good if it failed, and a late answer for A
+  could land on B. Loaded data is now bound to the host it was fetched for, reset on every host
+  change, late answers for another host are ignored, and the selection/preview reset with it. A
+  failed load shows an error with Retry instead of "no sessions"; a failed refresh keeps the last
+  list, labelled as not refreshed.
+- **Run on hosts could dispatch a command twice** (U02). Continue/Run had no busy state, so a
+  double activation while the guardrail and 2FA checks were running started two runs on every
+  host. The run is now guarded by a flag set synchronously on the first activation, the button
+  shows *Checking targets and authentication…*, and closing the console during those checks no
+  longer starts the run afterwards.
+- **Closing Run on hosts mid-run lost the results silently** (U05): it now asks first, saying that
+  started commands keep running, queued hosts will not start and the results will be lost.
+- **Stop** is now *Stop dispatching*, with a permanent hint that commands already started keep
+  running (U16) — it never could cancel a request already sent.
+- **Sign-in & 2FA hid failures** (U03). A failed load of passkeys looked like "No passkeys
+  registered", a failed 2FA status offered *Enable 2FA*, and a failed device sign-out looked like a
+  successful one. Each section now has its own loading/error state with Retry, sign-outs and
+  passkey removals show a busy state on the row, errors stay in an alert region, and the success
+  text appears only after the server confirms. Removing your second-to-last passkey now shows the
+  lock-out warning when the host list cannot be loaded, instead of skipping it.
+- **Settings forms could overwrite real configuration with defaults** (U04). When a section failed
+  to load, its defaults (alert thresholds 90/90/90, an empty SMTP server, the watermark *off*, no
+  guardrail rules, the deploy-key policy off, the backup schedule *off*) looked saved, and saving
+  wrote them over the server's values — on the guardrail, that deleted every rule. These sections
+  now show *Couldn't load the current settings* with Retry, hide the form and refuse to save until
+  they are loaded. Same contract for automation tokens, group enrolment tokens, the signing-key
+  status, users, and the update check.
+- **Failed loads shown as empty lists** (U17/U18): session-history search in the sidebar, the
+  Services panel (it showed both the error and "no services"), the snippets menu, and the CSV
+  import preview (which marked every row as new when the host list failed). Renaming a folder now
+  reports the hosts it could not move instead of silently half-renaming it. The Services filter
+  has a permanent accessible name and action errors are announced.
+- **Enter on a file row's Download/Delete button opened the selected file** (U09): the file list
+  handled Enter/Space for every control inside it. List navigation now applies only when the list
+  itself has focus.
+- **Focus could escape a modal** (U13). When the focused button disappeared on a phase change
+  (Run on hosts: pick → confirm → results), focus fell to the page and Tab left the dialog. Run on
+  hosts now moves focus to the new phase's heading, and every modal recovers focus that left it,
+  without taking it from legitimate popups (Monaco widgets, help tips, a confirmation on top).
+- **Phone drawer clipped Sign out** (U11): the 288px drawer header held the logo and five 44px
+  actions. It now keeps *Add host* and *Close*; Run on hosts, Status, Settings and Sign out are
+  labelled rows at the bottom of the drawer.
+- **Welcome walkthrough at 320px** (U12): seven 44px step dots did not fit and the card had no
+  maximum height. It shows *Step 2 of 7* with a progress bar, scrolls inside the screen and stacks
+  its buttons on narrow screens.
+- **Live share risk was only in a tooltip** (U14): choosing *allow writing* now says inline that
+  anyone with the link can run commands with the host user's rights, and an active link's expiry is
+  shown on every screen width (it was hidden on phones).
+
+### Accessibility
+- Command palette uses the combobox/listbox pattern with `aria-activedescendant` and announces the
+  number of results; the file list announces the current row; both have a visible focus ring
+  (U10).
+- *Run on hosts* confirm button is the primary button (the amber CTA was 1.88:1 on Aurora); the
+  warning stays as separate warning-coloured text (U06). Saved-command hover uses the link colour
+  instead of white (1.14:1 on Aurora) (U07).
+- `--viz-warn` on Aurora is `#b45309` (was `#d97706`, 2.80:1 on hover surfaces), in the root
+  palette and the host-page override; Midnight unchanged (U08).
+
+### Docs
+- DESIGN-SYSTEM.md: the load/error contract ("error ≠ empty"), `lib/loadable.ts`, `lib/guard.ts`.
+
 ## [3.6.0] — 2026-10-10 · agent (58)
 
 > **Upgrading to the 3.6 roles:** a single-user install sees no change. Every existing account

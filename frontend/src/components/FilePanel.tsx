@@ -12,7 +12,7 @@ import { isActive, sizeKnown, uploadStore } from '../lib/uploadStore'
 import { fmtBytes } from '../lib/uploads'
 import { uiLocale } from '../lib/tz'
 import {
-  EMPTY_SELECTION, Selection, allState, previewNames, prune, rangeTo, toggleAll, toggleKey, visibleSelected,
+  EMPTY_SELECTION, Selection, allState, isListKeyTarget, previewNames, prune, rangeTo, toggleAll, toggleKey, visibleSelected,
 } from '../lib/selection'
 import { ArrowsLeftRightIcon, CheckIcon, ChevronDownIcon, ChevronUpIcon, CloseIcon, CopyIcon, DownloadIcon, FileIcon, FilePlusIcon, FolderIcon, LevelUpIcon, LinkIcon, PencilIcon, PlusIcon, RefreshIcon, RenameIcon, TrashIcon, UploadIcon } from './Icons'
 import CopyToHostDialog, { CopyItem } from './CopyToHostDialog'
@@ -131,6 +131,7 @@ export default function FilePanel(props: {
   const [showHidden, setShowHidden] = useState(false)
   const [sort, setSort] = useState<{ key: SortKey; asc: boolean }>({ key: 'name', asc: true })
   const [sel, setSel] = useState(0)                 // index selectat (tastatură)
+  const [listFocused, setListFocused] = useState(false)   // anunţul rândului curent (U10)
   const [renaming, setRenaming] = useState<string | null>(null)
   const [newFolder, setNewFolder] = useState<string | null>(null)
   const [newFile, setNewFile] = useState<string | null>(null)
@@ -549,6 +550,9 @@ export default function FilePanel(props: {
     // Escape cu o selecţie = goleşte selecţia (al doilea Escape închide panoul, ca înainte)
     if (ev.key === 'Escape' && selection.keys.size) { ev.preventDefault(); ev.stopPropagation(); setSelection(EMPTY_SELECTION); return }
     if (editing || renaming || newFolder !== null || newFile !== null || confirmDel || confirmBulk) return
+    // navigarea listei DOAR de pe containerul ei: Enter/Space pe un buton/bifă din rând îl
+    // activează pe acela, nu deschide fişierul selectat (lib/selection.ts, U09)
+    if (!isListKeyTarget(ev.target, ev.currentTarget)) return
     // Shift+săgeţi: extinde selecţia de la ancoră (sau de la rândul curent, dacă nu e ancoră)
     if (ev.shiftKey && (ev.key === 'ArrowDown' || ev.key === 'ArrowUp')) {
       ev.preventDefault()
@@ -706,8 +710,18 @@ export default function FilePanel(props: {
 
         {error && <div className="border-b border-ink-800 bg-ink-800 px-3 py-1.5 text-2xs wt-danger">{error}</div>}
 
-        <div ref={listRef} tabIndex={0} onKeyDown={onKeyDown}
-          className={`relative min-h-0 flex-1 overflow-y-auto outline-none ${drag ? 'ring-2 ring-inset ring-sky-500' : ''}`}>
+        {/* rândul curent, anunţat cât lista are focusul (U10): săgeţile mutau doar un fundal —
+            cititorul de ecran nu spunea nimic. Rândurile conţin butoane şi bife, deci nu pot fi
+            `option`-uri într-un listbox; anunţul live e tiparul corect aici. */}
+        <span className="sr-only" aria-live="polite" data-testid="wt-files-current">
+          {listFocused && view[sel] ? t('files.rowAnnounce', {
+            name: view[sel].name + (view[sel].dir ? '/' : ''), k: sel + 1, n: view.length,
+          }) + (selection.keys.has(view[sel].name) ? ` · ${t('files.rowSelected')}` : '') : ''}
+        </span>
+        <div ref={listRef} tabIndex={0} onKeyDown={onKeyDown} role="group" aria-label={t('files.listAria')}
+          onFocus={(ev) => { if (ev.target === ev.currentTarget) setListFocused(true) }}
+          onBlur={(ev) => { if (ev.target === ev.currentTarget) setListFocused(false) }}
+          className={`relative min-h-0 flex-1 overflow-y-auto outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[rgb(var(--focus))] ${drag ? 'ring-2 ring-inset ring-sky-500' : ''}`}>
           {/* peste un rând de director nu întunecăm lista (inelul rândului trebuie să se vadă);
               spunem jos, într-o linie, unde va ateriza */}
           {drag && !dropRow && (

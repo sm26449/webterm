@@ -11,6 +11,7 @@ import { useFocusTrap } from '../lib/useFocusTrap'
 import { useConfirm } from '../lib/confirm'
 import { notifyError } from '../lib/notify'
 import { copyText } from '../lib/clipboard'
+import { exclusive } from '../lib/guard'
 import { Button, IconButton } from './ui'
 import { BanIcon, CheckIcon, CloseIcon, DotIcon, PencilIcon, WarningIcon } from './Icons'
 
@@ -144,7 +145,45 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
   const [expanded, setExpanded] = useState<number | null>(null)
   const [copied, setCopied] = useState(false)
   const dialogRef = useRef<HTMLDivElement>(null)
-  useFocusTrap(dialogRef, props.onClose)
+  // Re-intrare (U02): steagul e un REF, setat sincron la prima activare a lui „Rulează" — două
+  // activări în acelaşi tick (dublu-clic, Enter + clic) treceau amândouă de o stare React şi
+  // trimiteau comanda de DOUĂ ori pe fiecare host. `checking` e doar partea vizuală.
+  const runFlag = useRef(false)
+  const [checking, setChecking] = useState(false)
+  // modalul închis în timpul verificărilor (guardrail / step-up): nu mai trimitem nimic — altfel
+  // rularea pornea DUPĂ închidere, fără nicio grilă care s-o arate
+  const closedRef = useRef(false)
+  useEffect(() => {
+    closedRef.current = false
+    // la închidere: hosturile încă în coadă NU mai pornesc (cele pornite îşi termină comanda)
+    return () => { closedRef.current = true; stopRef.current = true }
+  }, [])
+  // Focus deliberat pe titlul fazei noi (U13): butonul focalizat (Continuă / Rulează / Rulare nouă)
+  // dispare la schimbarea fazei, iar focusul cădea pe <body> — de unde Tab pleca din modal.
+  const phaseHeadingRef = useRef<HTMLHeadingElement>(null)
+  const shownPhase = useRef(phase)
+  useEffect(() => {
+    if (shownPhase.current === phase) return     // la deschidere: autoFocus-ul câmpului de comandă
+    shownPhase.current = phase
+    phaseHeadingRef.current?.focus()
+  }, [phase])
+  // Închiderea cu comenzi în curs (U05): rezultatele trăiesc doar în acest panou — spunem ce se
+  // pierde ÎNAINTE, nu după. Comenzile deja pornite continuă pe hosturi; coada nu mai porneşte.
+  const closingRef = useRef(false)
+  const requestClose = async () => {
+    const inFlight = checking || Object.values(results).some((r) => r.status === 'running' || r.status === 'queued')
+    if (inFlight) {
+      if (closingRef.current) return       // un singur dialog de confirmare, nu câte unul la fiecare Escape
+      closingRef.current = true
+      const ok = await confirm({
+        title: t('fleet.closeRunningTitle'), message: t('fleet.closeRunningMsg'),
+        danger: true, confirmLabel: t('fleet.closeRunningConfirm'),
+      }).finally(() => { closingRef.current = false })
+      if (!ok) return
+    }
+    props.onClose()
+  }
+  useFocusTrap(dialogRef, () => { void requestClose() })
 
   const chosen = runnable.filter((h) => selected.has(h.id))
   const toggle = (id: number) =>
@@ -164,7 +203,11 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
       || snippetTags(s).some((x) => x.includes(fq)))
     : sortedSnips
 
-  async function run() {
+  // „Rulează": o singură rulare odată, indiferent câte activări sosesc (lib/guard.ts)
+  const run = () => exclusive(runFlag, dispatch, setChecking)
+    .catch((e) => notifyError(t('fleet.error'), errText(e, t)))
+
+  async function dispatch() {
     // Guardrail: serverul aplică regulile şi pe `/run` — `block` refuză, `confirm` cere un DA
     // explicit. Îl întrebăm pe om AICI, o singură dată pentru toată flota. `confirmed: true` pleacă
     // DOAR dacă omul chiar a confirmat o regulă potrivită — înainte, un fetch eşuat al regulilor
@@ -203,8 +246,11 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
       if (!(await ensureStepup(h.id))) skipped[h.id] = true
     }
     const queue = chosen.filter((h) => !skipped[h.id])
+    // închis în timpul verificărilor (sau între timp a plecat consola): nimic nu porneşte
+    if (closedRef.current) return
     stopRef.current = false
     setStopping(false)
+    setChecking(false)
     setPhase('running')
     setResults(Object.fromEntries(chosen.map((h) => [h.id,
       skipped[h.id] ? { status: 'error', error: t('fleet.stepupSkipped') } as RunResult
@@ -314,13 +360,14 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
               {summary.cancelled > 0 && <span className="inline-flex items-center gap-0.5 text-slate-400"><BanIcon />{summary.cancelled}</span>}
             </span>
           )}
-          <button onClick={props.onClose} aria-label={t('fleet.close')}
+          <button onClick={() => { void requestClose() }} aria-label={t('fleet.close')}
             className="ml-auto rounded-md px-2 py-1 text-slate-500 hover:bg-ink-800 hover:text-slate-300"><CloseIcon size={14} /></button>
         </header>
 
         {/* ── faza „alegi" ── */}
         {phase === 'pick' && (
           <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4">
+            <h2 ref={phaseHeadingRef} tabIndex={-1} className="sr-only">{t('fleet.phasePick')}</h2>
             {runnable.length === 0 ? (
               <p className="text-sm text-slate-500">{t('fleet.noAgentHosts')}</p>
             ) : (
@@ -382,7 +429,7 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
                         <span key={s.id} className="inline-flex items-center gap-0.5 rounded-md bg-ink-800 pl-1.5 text-2xs text-slate-300 ring-1 ring-ink-700">
                           <button type="button" onClick={() => pickSaved(s)} title={s.body}
                             aria-label={t('fleet.pickSaved', { name: s.title })}
-                            className="inline-flex min-h-6 items-center gap-1 hover:text-white">
+                            className="inline-flex min-h-6 items-center gap-1 hover:text-link">
                             <span>{s.title}</span>
                             {snippetParams(s.body).length > 0 && (
                               <span aria-hidden="true" className="font-mono text-2xs text-slate-500">{'{…}'}</span>
@@ -464,7 +511,7 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
         {/* ── faza „confirmi" (pas deliberat) ── */}
         {phase === 'confirm' && (
           <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4">
-            <div className="wt-warn flex items-center gap-2 font-medium"><WarningIcon /> {t('fleet.youRunOn')} {t('fleet.hostCount', { count: chosen.length })}</div>
+            <h2 ref={phaseHeadingRef} tabIndex={-1} className="wt-warn flex items-center gap-2 font-medium"><WarningIcon /> {t('fleet.youRunOn')} {t('fleet.hostCount', { count: chosen.length })}</h2>
             <div className="rounded-md bg-ink-800/60 px-3 py-2 font-mono text-sm text-slate-200">$ {command.trim()}</div>
             <div className="text-xs text-slate-500">{t('fleet.timeoutSummary', { n: timeoutSec })}</div>
             <div className="flex flex-wrap gap-1.5">
@@ -476,6 +523,7 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
         {/* ── faza „grila" ── */}
         {phase === 'running' && (
           <div className="min-h-0 flex-1 overflow-y-auto">
+            <h2 ref={phaseHeadingRef} tabIndex={-1} className="sr-only">{t('fleet.phaseResults')}</h2>
             <div className="border-b border-ink-800 bg-ink-800/40 px-4 py-2 font-mono text-compact text-slate-300">$ {command.trim()}</div>
             {chosen.map((h) => {
               const r = results[h.id]; const st = rowState(r); const isOpen = expanded === h.id
@@ -502,7 +550,7 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
           </div>
         )}
 
-        <footer className="flex items-center gap-2 border-t border-ink-800 px-4 py-3">
+        <footer className="flex flex-wrap items-center gap-2 border-t border-ink-800 px-4 py-3">
           {phase === 'pick' && (
             <Button variant="primary" disabled={chosen.length === 0 || !effective.trim() || !timeoutOk || paramsMissing}
               onClick={() => {
@@ -515,11 +563,13 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
           )}
           {phase === 'confirm' && (
             <>
-              <button onClick={run}
-                className="rounded-md bg-amber-500 px-4 py-1.5 text-sm font-semibold text-ink-950 hover:bg-amber-400">
+              {/* CTA-ul primar al design system-ului (U06): amber-500 + text ink-950 dădea 1,88:1 pe
+                  Aurora. Avertismentul rămâne separat, în culoarea de avertizare (titlul fazei). */}
+              <Button variant="primary" type="button" loading={checking} onClick={() => { void run() }}>
                 {t('fleet.runOn')} {t('fleet.hostCount', { count: chosen.length })}
-              </button>
-              <button onClick={() => setPhase('pick')} className="rounded-md px-3 py-1.5 text-sm text-slate-400 hover:bg-ink-800">{t('fleet.back')}</button>
+              </Button>
+              <Button variant="ghost" type="button" disabled={checking} onClick={() => setPhase('pick')}>{t('fleet.back')}</Button>
+              <span role="status" className="ml-auto text-xs text-slate-500">{checking ? t('fleet.checking') : ''}</span>
             </>
           )}
           {phase === 'running' && (
@@ -533,9 +583,14 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
               {summary.running > 0 && (
                 <button disabled={stopping}
                   onClick={() => { stopRef.current = true; setStopping(true) }}
+                  aria-describedby="fleet-stop-hint"
                   className="rounded-md px-3 py-1.5 text-sm wt-danger ring-1 ring-ink-700 hover:bg-ink-800 disabled:opacity-60">
                   {stopping ? t('fleet.stopping') : t('fleet.stop')}
                 </button>
+              )}
+              {/* Stop opreşte TRIMITEREA, nu comenzile (U16): spus permanent, nu doar după clic */}
+              {summary.running > 0 && (
+                <span id="fleet-stop-hint" className="text-2xs text-slate-500">{t('fleet.stopHint')}</span>
               )}
               <span role="status" className="ml-auto text-xs text-slate-500">
                 {summary.running > 0 ? (stopping ? t('fleet.stoppingHint') : t('fleet.running')) : t('fleet.done')}

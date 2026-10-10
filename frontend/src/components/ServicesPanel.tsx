@@ -5,6 +5,7 @@ import { useI18n } from '../lib/i18n'
 import { SHEET_CLS } from '../lib/sheet'
 import { useDrawer } from '../lib/useDrawer'
 import SheetBar from './SheetBar'
+import { ErrorState } from './ui'
 import { CloseIcon, PlayIcon, RefreshIcon, SquareIcon } from './Icons'
 
 // Panou Servicii systemd: listă (nume/stare/descriere) + start/stop/restart. TOTUL prin op-ul
@@ -36,16 +37,25 @@ export default function ServicesPanel(props: {
     + (props.overlay ? '' : ' sm:static sm:z-auto sm:w-96 sm:max-w-none sm:shrink-0 sm:shadow-none')
   const scrimCls = props.embed ? 'hidden' : 'fixed inset-0 z-30 bg-black/60' + (props.overlay ? '' : ' sm:hidden')
 
+  // U18 — eroare ≠ gol: o încărcare picată arăta ŞI eroarea, ŞI „niciun serviciu". Acum: prima
+  // încărcare picată = ErrorState cu Reîncearcă; un refresh picat păstrează ultima listă bună
+  // (a aceluiaşi host + filtru), marcată veche. Erorile de ACŢIUNE (start/stop) sunt separate, `alert`.
+  const viewKey = `${props.host.id}:${failedOnly ? 'f' : 'a'}`
+  const [loadErr, setLoadErr] = useState('')
+  const [rowsKey, setRowsKey] = useState('')
+  const loadSeq = useRef(0)
   const load = useCallback(async () => {
-    setError(''); setRows(null)
+    const my = ++loadSeq.current
+    setLoadErr('')
     try {
       const r = await api<{ rows: Svc[] }>(`/api/hosts/${props.host.id}/services${failedOnly ? '?failed=1' : ''}`)
-      setRows(r.rows)
+      if (my !== loadSeq.current) return            // răspuns întârziat (alt host / alt filtru)
+      setRows(r.rows); setRowsKey(viewKey)
     } catch (e) {
-      setError(errText(e, t) || (e instanceof ApiError ? e.message : t('services.error')))
-      setRows([])
+      if (my !== loadSeq.current) return
+      setLoadErr(errText(e, t) || (e instanceof ApiError ? e.message : t('services.error')))
     }
-  }, [props.host.id, failedOnly, t])
+  }, [props.host.id, failedOnly, viewKey, t])
 
   useEffect(() => { load() }, [load])
 
@@ -70,7 +80,10 @@ export default function ServicesPanel(props: {
     } finally { setBusy('') }
   }
 
-  const view = (rows || []).filter((s) => !filter || s.unit.includes(filter) || s.desc.toLowerCase().includes(filter.toLowerCase()))
+  // lista arătată e DOAR a vederii curente (host + filtru); a altei vederi nu se arată nici veche
+  const shown = rowsKey === viewKey ? rows : null
+  const stale = shown !== null && loadErr !== ''
+  const view = (shown || []).filter((s) => !filter || s.unit.includes(filter) || s.desc.toLowerCase().includes(filter.toLowerCase()))
   const dot = (s: Svc) => s.active === 'active' ? 'bg-emerald-400'
     : s.active === 'failed' ? 'bg-rose-400' : 'bg-slate-500'
 
@@ -92,16 +105,27 @@ export default function ServicesPanel(props: {
         <div className="flex items-center gap-2 border-b border-ink-800 px-3 py-1.5">
           <input value={filter} onChange={(e) => setFilter(e.target.value)}
             placeholder={t('services.filterPh')}
+            // nume accesibil PERMANENT (U18): placeholder-ul dispare la tastare
+            aria-label={t('services.filterAria')}
             className="min-w-0 flex-1 rounded-md bg-ink-800/60 px-2 py-1 text-xs text-slate-300 ring-1 ring-ink-700 focus:ring-sky-500" />
           <button onClick={() => setFailedOnly((v) => !v)} aria-pressed={failedOnly}
             className={`shrink-0 rounded-md px-2 py-1 text-2xs font-medium ${failedOnly
               ? 'bg-rose-500/20 wt-danger' : 'text-slate-400 hover:bg-ink-800'}`}
             title={t('services.failedOnly')}>{t('services.failed')}</button>
         </div>
-        {error && <div className="border-b border-ink-800 bg-ink-800 px-3 py-1.5 text-2xs wt-danger">{error}</div>}
+        {/* eroarea de ACŢIUNE: regiune `alert` montată permanent */}
+        <div role="alert" className={error ? 'border-b border-ink-800 bg-ink-800 px-3 py-1.5 text-2xs wt-danger' : 'sr-only'}>{error}</div>
         {note && !error && <div role="status" className="border-b border-ink-800 bg-ink-800/60 px-3 py-1.5 text-2xs text-slate-400">{note}</div>}
+        {stale && (
+          <div role="status" className="flex flex-wrap items-center gap-2 border-b border-ink-800 bg-ink-800/60 px-3 py-1.5 text-2xs text-slate-400">
+            <span>{t('services.stale')}</span>
+            <button type="button" onClick={load} className="wt-link min-h-6 hover:underline">{t('common.retry')}</button>
+          </div>
+        )}
         <div className="min-h-0 flex-1 overflow-y-auto p-3">
-          {rows === null ? (
+          {shown === null && loadErr ? (
+            <ErrorState title={t('services.loadFailed')} message={loadErr} onRetry={load} />
+          ) : shown === null ? (
             <div className="p-4 text-center text-xs text-slate-500">{t('services.loading')}</div>
           ) : view.length === 0 ? (
             <div className="p-4 text-center text-xs text-slate-500">{t('services.empty')}</div>

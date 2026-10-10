@@ -209,7 +209,9 @@ export default function Walkthrough(props: { auto: boolean; onClose: () => void 
         aria-modal="true"
         aria-labelledby={titleId}
         data-testid="walkthrough"
-        className="glass wt-step-anim flex w-full max-w-md flex-col rounded-2xl p-6"
+        // max-h + scroll propriu (U12): pe un ecran scund (320×568, telefon în landscape) cardul
+        // ieşea din ecran şi butoanele de jos nu se mai vedeau
+        className="glass wt-step-anim flex max-h-[calc(100dvh-2rem)] w-full max-w-md flex-col overflow-y-auto rounded-2xl p-5 sm:p-6"
       >
         {/* anunţ pentru cititoare de ecran: titlul pasului curent, la fiecare schimbare */}
         <div aria-live="polite" className="sr-only">{t(`walkthrough.step${step + 1}.title`)}</div>
@@ -226,22 +228,16 @@ export default function Walkthrough(props: { auto: boolean; onClose: () => void 
           {t(`walkthrough.step${step + 1}.body`)}
         </p>
 
-        {/* dots de progres: butoane reale (jump la pas), cu aria-label „Step k of N" */}
-        <div className="mt-4 flex items-center justify-center gap-2" role="group" aria-label={t('walkthrough.progress')}>
-          {Array.from({ length: total }, (_, i) => (
-            <button
-              key={i}
-              type="button"
-              onClick={() => go(i)}
-              aria-current={i === step ? 'step' : undefined}
-              aria-label={t('walkthrough.dotLabel', { k: i + 1, n: total })}
-              className={`wt-touch grid place-items-center rounded-full p-2 ${
-                i === step ? 'wt-accent' : 'text-slate-500 hover:text-slate-300'
-              }`}
-            >
-              <span className={`block h-2 w-2 rounded-full ${i === step ? 'bg-current' : 'bg-current opacity-40'}`} />
-            </button>
-          ))}
+        {/* progres: „Pasul 2 din 7" + o bară decorativă (U12). Erau 7 butoane-punct de 44px pe
+            telefon — 308px de ţinte care nu încăpeau la 320px; navigarea rămâne Înapoi/Înainte şi ←/→. */}
+        <div className="mt-4 flex items-center gap-3">
+          <span data-testid="walkthrough-step" className="shrink-0 text-xs font-medium text-slate-400">
+            {t('walkthrough.dotLabel', { k: step + 1, n: total })}
+          </span>
+          <div aria-hidden="true" className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-ink-700">
+            <div className="h-full rounded-full bg-sky-500 transition-[width]"
+              style={{ width: `${((step + 1) / total) * 100}%` }} />
+          </div>
         </div>
 
         <label className="mt-4 flex cursor-pointer items-center gap-2.5 text-sm text-slate-300">
@@ -254,7 +250,9 @@ export default function Walkthrough(props: { auto: boolean; onClose: () => void 
           <span>{t('walkthrough.dontShow')}</span>
         </label>
 
-        <div className="mt-5 flex items-center justify-between gap-2">
+        {/* subsol adaptiv (U12): pe telefon Înapoi/Înainte pe un rând întreg, „Sari" dedesubt —
+            trei butoane de 44px nu încăpeau pe un rând la 320px */}
+        <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:items-center sm:justify-between">
           <button
             type="button"
             onClick={() => close('skip')}
@@ -262,7 +260,7 @@ export default function Walkthrough(props: { auto: boolean; onClose: () => void 
           >
             {t('walkthrough.skip')}
           </button>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 [&>*]:flex-1 sm:[&>*]:flex-none">
             <button
               type="button"
               onClick={() => go(step - 1)}
