@@ -1797,9 +1797,12 @@ try {
   await walk.locator('button:has-text("Next")').click()
   check('walkthrough: Next avansează la pasul 2 (Add a host)',
     ((await walk.textContent()) ?? '').includes('Add a host'))
-  await walk.locator('button[aria-label="Step 7 of 7"]').click()
-  check('walkthrough: dot-ul sare la ultimul pas (You\'re all set)',
-    ((await walk.textContent()) ?? '').includes("You're all set"))
+  // 3.6.1 (U12): punctele-buton au devenit „Step k of N" + bară decorativă; la ultimul pas ajungi
+  // cu Next (5 paşi de la pasul 2), iar progresul spune „Step 7 of 7"
+  for (let i = 0; i < 5; i++) await walk.locator('button:has-text("Next")').click()
+  check('walkthrough: Next ajunge la ultimul pas (Step 7 of 7 · You\'re all set)',
+    ((await walk.textContent()) ?? '').includes("You're all set")
+    && (await walk.getByTestId('walkthrough-step').textContent()) === 'Step 7 of 7')
   await walk.locator('input[type=checkbox]').check()
   await walk.locator('button:has-text("Skip for now")').click()
   check('walkthrough: turul se închide după Skip', await hidden(walk))
