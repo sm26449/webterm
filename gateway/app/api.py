@@ -33,7 +33,7 @@ from .errors import ApiError
 from . import webauthn_api
 from . import fscopy
 from . import (alert_history, audit, authz, backup, cloudbackup, config, core, db, email_alerts,
-               health, replay, security, signing, totp, updatecheck)
+               health, replay, security, signing, ssomap, totp, updatecheck)
 
 log = logging.getLogger("webterm")
 # Garda de la nivel de router (3.6, fail-closed): o rută care nu-şi declară permisiunea
@@ -782,6 +782,7 @@ class UserIn(BaseModel):
     stepup_grant: str = ""         # conturi SSO: grant passkey account-scope (host_id=0)
     # rolul iniţial (opţional): gol = fără acces încă (implicit, NICIODATĂ Owner din oficiu)
     role: str = ""
+    role_id: int = 0               # 3.6.2: orice rol (şi custom) după id
     scope_kind: str = "folder"
     scope_value: str = ""
 
@@ -794,7 +795,8 @@ class ReauthOnly(BaseModel):
 
 
 class BindingIn(BaseModel):
-    role: str
+    role: str = ""                 # rol predefinit după cheie…
+    role_id: int = 0               # …sau orice rol (şi custom, 3.6.2) după id
     scope_kind: str = "all"
     scope_value: str = ""
     current_password: str = ""
@@ -881,25 +883,57 @@ def _scope_label(kind: str, value: str) -> str:
     return "all hosts" if kind == "all" else "%s %s" % (kind, value)
 
 
-async def _recheck_granter(user, role, kind, value, target_uid, removing=False) -> None:
-    """Regulile de acordare, din nou, pe drepturile CURENTE ale celui care acordă (fără cache:
-    epoca s-a putut schimba chiar acum). Chemată sub `authz._lock`, imediat înainte de scriere."""
+def _role_label(role) -> str:
+    """Cheia unui rol predefinit (ca în 3.6.0), numele unuia custom."""
+    return role.key or role.name
+
+
+# un rol dispărut (n-ar trebui: un rol legat nu se poate şterge) e tratat ca „toate
+# permisiunile" — deci doar cine le are pe toate (un Owner) mai poate atinge legătura (fail-closed)
+_UNKNOWN_ROLE = authz.RoleInfo(0, "", "?", authz.HOST_PERMS | authz.GLOBAL_PERMS, False)
+
+
+async def _fresh_grants(user, perm: str):
+    """Drepturile CURENTE ale contului (fără cache: epoca s-a putut schimba chiar acum). Pentru
+    re-verificarea de sub `authz._lock`, imediat înainte de scriere (tiparul cursei din 3.6.0)."""
     authz._cache.pop(user["id"], None)
     g = await authz.grants_for_user(user["id"])
-    if not g.has_global("users.manage"):
-        raise ApiError(403, "authz.denied", "your role does not allow this here (users.manage)",
-                       vars={"perm": "users.manage"})
-    if target_uid is not None and await authz.is_owner_user(target_uid) and not g.is_owner():
-        raise ApiError(403, "authz.ownerOnly", "only an Owner can change an Owner's access")
-    await authz.check_can_grant(g, role, kind, value, removing=removing)
+    if not g.has_global(perm):
+        raise ApiError(403, "authz.denied", "your role does not allow this here (%s)" % perm,
+                       vars={"perm": perm})
+    return g
+
+
+async def _recheck_granter(user, role, kind, value, target_uid, removing=False):
+    """Regulile de acordare, din nou, pe drepturile CURENTE ale celui care acordă ŞI pe definiţia
+    CURENTĂ a rolului (un rol custom s-a putut edita între timp). Chemată sub `authz._lock`,
+    imediat înainte de scriere. → rolul proaspăt citit."""
+    g = await _fresh_grants(user, "users.manage")
+    if target_uid is not None:
+        await authz.check_target(g, target_uid)
+    fresh = (await authz.role_by_id(role.id)) if role.id else role
+    if fresh is None:
+        raise ApiError(409, "role.gone", "that role was deleted meanwhile")
+    await authz.check_can_grant(g, fresh, kind, value, removing=removing)
+    return fresh
+
+
+async def _check_can_strip(g, uid: int) -> None:
+    """Ştergerea unui cont = scoaterea TUTUROR legăturilor lui: o poţi face doar dacă ai putea
+    scoate fiecare legătură (3.6.2 — cu rolurile custom, „doar Owner atinge Owner" nu mai ajunge)."""
+    await authz.check_target(g, uid)
+    for b in await authz._load_bindings(uid):
+        info = (await authz.role_by_id(b.role_id)) or _UNKNOWN_ROLE
+        await authz.check_can_grant(g, info, b.scope_kind, b.scope_value, removing=True)
 
 
 @router.post("/api/users")
 async def create_user(body: UserIn, request: Request, user=Depends(authz.perm('users.manage'))):
     grants = authz.grants_of(request)
-    role = (body.role or "").strip().lower()
+    role = None
     kind = value = None
-    if role:
+    if (body.role or "").strip() or body.role_id:
+        role = await authz.resolve_role(body.role, body.role_id)
         kind, value = authz.normalize_scope(body.scope_kind, body.scope_value)
         # anti-escaladare ÎNAINTE de orice efect (şi înainte de a consuma al doilea factor)
         await authz.check_can_grant(grants, role, kind, value)
@@ -913,7 +947,7 @@ async def create_user(body: UserIn, request: Request, user=Depends(authz.perm('u
     pw = await security.hash_password_async(body.password)
     async with authz._lock:
         if role:
-            await _recheck_granter(user, role, kind, value, None)
+            role = await _recheck_granter(user, role, kind, value, None)
         uid = await db.execute("INSERT INTO users(id, email, password_hash, created)"
                                " VALUES(" + db.NEXT_USER_ID_SQL + ",?,?,?)",
                                email, pw, time.time())
@@ -921,12 +955,12 @@ async def create_user(body: UserIn, request: Request, user=Depends(authz.perm('u
             await db.execute(
                 "INSERT INTO role_bindings(user_id, role_id, scope_kind, scope_value, source,"
                 " created, created_by_id) VALUES(?,?,?,?,'manual',?,?)",
-                uid, await authz.role_id(role), kind, value, time.time(), user["id"])
+                uid, role.id, kind, value, time.time(), user["id"])
         authz.bump_epoch()
     log.info("new account created: %s (by %s, role %s)", email, user["email"],
-             ("%s @ %s" % (role, _scope_label(kind, value))) if role else "none")
+             ("%s @ %s" % (_role_label(role), _scope_label(kind, value))) if role else "none")
     audit.detail(request, "account %s created, role %s" % (
-        email, ("%s @ %s" % (role, _scope_label(kind, value))) if role else "none"))
+        email, ("%s @ %s" % (_role_label(role), _scope_label(kind, value))) if role else "none"))
     # un cont nou: cel mai valoros eveniment de securitate. Ajunge pe email ŞI webhook (via
     # _fire) şi în istoricul celor cu security.view, ca oricare schimbare de credenţiale.
     email_alerts.notify_security_change("a new WebTerm account was created (%s)" % email,
@@ -951,6 +985,7 @@ async def delete_user(uid: int, body: ReauthOnly, request: Request,
     # Admin nu atinge Owner-ii (§A.5): ştergerea unui Owner e preluarea instanţei.
     if await authz.is_owner_user(uid) and not grants.is_owner():
         raise ApiError(403, "authz.ownerOnly", "only an Owner can delete an Owner")
+    await _check_can_strip(grants, uid)
     await _reauth_for_access_change(user, request, body, "delete a WebTerm account")
     async with authz._lock:
         # drepturile celui care şterge, pe starea de ACUM (o retrogradare concurentă contează)
@@ -961,6 +996,7 @@ async def delete_user(uid: int, body: ReauthOnly, request: Request,
                            vars={"perm": "users.manage"})
         if await authz.is_owner_user(uid) and not g.is_owner():
             raise ApiError(403, "authz.ownerOnly", "only an Owner can delete an Owner")
+        await _check_can_strip(g, uid)
         # verificările care contează pentru blocare se refac SUB lock (check-then-act atomic)
         n = (await db.fetchone("SELECT COUNT(*) AS c FROM users"))["c"]
         if n <= 1:
@@ -990,7 +1026,8 @@ async def delete_user(uid: int, body: ReauthOnly, request: Request,
                     "UPDATE sessions SET created_by_id=? WHERE created_by_id=?",
                     "UPDATE sessions SET share_by_id=? WHERE share_by_id=?",
                     "UPDATE command_history SET user_id=? WHERE user_id=?",
-                    "UPDATE role_bindings SET created_by_id=? WHERE created_by_id=?"):
+                    "UPDATE role_bindings SET created_by_id=? WHERE created_by_id=?",
+                    "UPDATE oidc_group_roles SET created_by_id=? WHERE created_by_id=?"):
             await db.execute(sql, -uid, uid)
         authz.bump_epoch()
     # …„tot" trebuia să însemne şi asta. Token-urile de automatizare emise de contul şters îi
@@ -1035,25 +1072,34 @@ async def add_binding(uid: int, body: BindingIn, request: Request,
     target = await db.fetchone("SELECT email FROM users WHERE id=?", uid)
     if not target:
         raise ApiError(404, "user.missing", "no such account")
-    role = (body.role or "").strip().lower()
+    role = await authz.resolve_role(body.role, body.role_id)
     kind, value = authz.normalize_scope(body.scope_kind, body.scope_value)
-    if await authz.is_owner_user(uid) and not grants.is_owner():
-        raise ApiError(403, "authz.ownerOnly", "only an Owner can change an Owner's access")
+    await authz.check_target(grants, uid)
     await authz.check_can_grant(grants, role, kind, value)
     await _reauth_for_access_change(user, request, body, "change a WebTerm account's access")
     async with authz._lock:
         # 3.6 (cursă): între verificare şi scriere au trecut re-auth-ul şi al doilea factor — un
         # Admin retrogradat între timp nu are voie să-şi vadă acordarea aterizând. Re-verificăm
-        # SUB lock, pe drepturile de ACUM.
-        await _recheck_granter(user, role, kind, value, uid)
-        try:
-            await db.execute(
-                "INSERT INTO role_bindings(user_id, role_id, scope_kind, scope_value, source,"
-                " created, created_by_id) VALUES(?,?,?,?,'manual',?,?)",
-                uid, await authz.role_id(role), kind, value, time.time(), user["id"])
-        except sqlite3.IntegrityError:
-            raise ApiError(409, "authz.bindingExists", "that account already has this role here")
+        # SUB lock, pe drepturile de ACUM (şi pe definiţia de ACUM a rolului).
+        role = await _recheck_granter(user, role, kind, value, uid)
+        dup = await db.fetchone(
+            "SELECT id, source FROM role_bindings WHERE user_id=? AND role_id=? AND scope_kind=?"
+            " AND scope_value=?", uid, role.id, kind, value)
+        if dup and dup["source"] == "sso":
+            # 3.6.2: aceeaşi legătură venită din SSO devine MANUALĂ (nu mai pleacă la următoarea
+            # sincronizare) — exact ce a cerut cel care acordă, cu aceleaşi verificări trecute
+            await db.execute("UPDATE role_bindings SET source='manual', created_by_id=?"
+                             " WHERE id=?", user["id"], dup["id"])
+        else:
+            try:
+                await db.execute(
+                    "INSERT INTO role_bindings(user_id, role_id, scope_kind, scope_value, source,"
+                    " created, created_by_id) VALUES(?,?,?,?,'manual',?,?)",
+                    uid, role.id, kind, value, time.time(), user["id"])
+            except sqlite3.IntegrityError:
+                raise ApiError(409, "authz.bindingExists", "that account already has this role here")
         await _after_access_change(uid)
+    role = _role_label(role)
     what = "%s granted %s @ %s" % (target["email"], role, _scope_label(kind, value))
     audit.detail(request, "role " + what)
     log.warning("role binding added: %s (by %s)", what, user["email"])
@@ -1077,28 +1123,29 @@ async def remove_binding(uid: int, bid: int, body: ReauthOnly, request: Request,
     if uid == user["id"]:
         raise ApiError(403, "authz.selfBinding", "you cannot change your own access")
     row = await db.fetchone(
-        "SELECT b.id, b.scope_kind, b.scope_value, r.key AS role_key, u.email"
-        " FROM role_bindings b JOIN roles r ON r.id=b.role_id JOIN users u ON u.id=b.user_id"
-        " WHERE b.id=? AND b.user_id=?", bid, uid)
+        "SELECT b.id, b.role_id, b.scope_kind, b.scope_value, r.key AS role_key,"
+        " r.name AS role_name, u.email FROM role_bindings b JOIN roles r ON r.id=b.role_id"
+        " JOIN users u ON u.id=b.user_id WHERE b.id=? AND b.user_id=?", bid, uid)
     if not row:
         raise ApiError(404, "authz.bindingMissing", "no such role binding")
     if (row["role_key"] == "owner" or await authz.is_owner_user(uid)) and not grants.is_owner():
         raise ApiError(403, "authz.ownerOnly", "only an Owner can change an Owner's access")
-    # a scoate un rol e tot o schimbare de acces asupra cuiva — doar în interiorul scope-ului tău
-    if row["role_key"] in authz.BUILTIN_ROLES:
-        await authz.check_can_grant(grants, row["role_key"], row["scope_kind"], row["scope_value"],
-                                    removing=True)
+    await authz.check_target(grants, uid)
+    # a scoate un rol e tot o schimbare de acces asupra cuiva — doar în interiorul scope-ului tău.
+    # 3.6.2: şi pentru rolurile custom (înainte erau sărite: nu existau)
+    info = (await authz.role_by_id(row["role_id"])) or _UNKNOWN_ROLE
+    await authz.check_can_grant(grants, info, row["scope_kind"], row["scope_value"], removing=True)
     await _reauth_for_access_change(user, request, body, "change a WebTerm account's access")
     async with authz._lock:
-        if row["role_key"] in authz.BUILTIN_ROLES:
-            await _recheck_granter(user, row["role_key"], row["scope_kind"], row["scope_value"],
-                                   uid, removing=True)
+        await _recheck_granter(user, info, row["scope_kind"], row["scope_value"], uid,
+                               removing=True)
         if (row["role_key"] == "owner" and row["scope_kind"] == "all"
                 and await authz.owner_count(exclude_binding=bid) < 1):
             raise ApiError(400, "authz.lastOwner", "you cannot remove the last Owner")
         await db.execute("DELETE FROM role_bindings WHERE id=? AND user_id=?", bid, uid)
         await _after_access_change(uid)
-    what = "%s lost %s @ %s" % (row["email"], row["role_key"],
+    rlabel = row["role_key"] or row["role_name"]
+    what = "%s lost %s @ %s" % (row["email"], rlabel,
                                 _scope_label(row["scope_kind"], row["scope_value"]))
     audit.detail(request, "role " + what)
     log.warning("role binding removed: %s (by %s)", what, user["email"])
@@ -1107,18 +1154,330 @@ async def remove_binding(uid: int, bid: int, body: ReauthOnly, request: Request,
     email_alerts.notify_security_change("role removed: " + what, ip, user["email"], fleet=True,
                                         what_key="role_removed",
                                         what_params={"account": row["email"],
-                                                     "role": row["role_key"], "scope": scope})
+                                                     "role": rlabel, "scope": scope})
     email_alerts.notify_security_change("your access changed: " + what, ip, row["email"],
                                         user_id=uid, what_key="access_changed",
-                                        what_params={"role": row["role_key"], "scope": scope})
+                                        what_params={"role": rlabel, "scope": scope})
     return {"bindings": await _user_bindings(uid)}
 
 
 @router.get("/api/roles")
-async def list_roles(user=Depends(authz.perm('users.manage'))):
-    """Catalogul de permisiuni (cu ⚑ = echivalent cu un shell) + rolurile predefinite.
-    Rolurile custom vin în 3.6.1; până atunci lista e fixă."""
-    return authz.catalogue_json()
+async def list_roles(request: Request,
+                     user=Depends(authz.perm(('users.manage', 'roles.manage')))):
+    """Catalogul de permisiuni (cu ⚑ = echivalent cu un shell) + rolurile predefinite (cu id)
+    + rolurile custom (3.6.2), cu cât sunt folosite. `users.manage` are nevoie de listă ca să
+    acorde, `roles.manage` ca să editeze."""
+    return await authz.roles_json(authz.grants_of(request))
+
+
+# ── Roluri custom (3.6.2; design „3.6.1", §A.6.6 regula 5) ───────────────────────────────
+# Un rol custom = un set de permisiuni din catalog. Reguli, toate pe server:
+#   * rolurile predefinite sunt IMUABILE (codul e sursa lor de adevăr, re-scrise la boot);
+#   * anti-escaladare: orice permisiune din rol (setul VECHI şi cel NOU, la editare) trebuie
+#     s-o ai tu peste toată instanţa (globale + cele de host de la o legătură `all`);
+#   * editarea unui rol FOLOSIT (legături sau mapări SSO) schimbă accesul altora: cere şi
+#     `users.manage`, şi aceeaşi regulă de ţintă ca la legături (doar un Owner atinge un rol pe
+#     care-l are un Owner; nimeni nu atinge contul cuiva care are mai mult decât el);
+#   * ştergerea unui rol folosit e REFUZATĂ (409 cu numărători) — întâi scoţi legăturile şi
+#     mapările. Alegerea mai sigură: nicio revocare în masă tăcută dintr-un singur click;
+#   * re-auth + al doilea factor, ca la legături; verificările se refac SUB `authz._lock`
+#     imediat înainte de scriere; epoca creşte imediat (socket-urile re-verifică ACUM).
+
+class RoleIn(BaseModel):
+    name: str = ""
+    description: str = ""
+    perms: list[str] = []
+    current_password: str = ""
+    totp_code: str = ""
+    email_code: str = ""
+    stepup_grant: str = ""
+
+
+async def _role_name_free(name: str, rid: Optional[int]) -> None:
+    low = name.lower()
+    clash = await db.fetchone(
+        "SELECT 1 FROM roles WHERE (lower(name)=? OR lower(COALESCE(key,''))=?) AND id<>?",
+        low, low, rid or 0)
+    if clash or low in authz.BUILTIN_ROLES:
+        raise ApiError(409, "role.nameTaken", "a role with that name already exists")
+
+
+async def _custom_role(rid: int) -> "authz.RoleInfo":
+    role = await authz.role_by_id(rid)
+    if role is None:
+        raise ApiError(404, "role.missing", "no such role")
+    if role.builtin:
+        raise ApiError(403, "role.builtin", "built-in roles cannot be changed")
+    return role
+
+
+async def _role_users(rid: int) -> list:
+    return [r["user_id"] for r in await db.fetchall(
+        "SELECT DISTINCT user_id FROM role_bindings WHERE role_id=?", rid)]
+
+
+async def _check_role_targets(g, rid: int) -> list:
+    """Cine primeşte efectul unei editări. Un rol folosit = schimbare de acces asupra altora."""
+    uids = await _role_users(rid)
+    maps = (await db.fetchone("SELECT COUNT(*) AS c FROM oidc_group_roles WHERE role_id=?",
+                              rid))["c"]
+    if (uids or maps) and not g.has_global("users.manage"):
+        raise ApiError(403, "authz.denied", "your role does not allow this here (users.manage)",
+                       vars={"perm": "users.manage"})
+    for uid in uids:
+        await authz.check_target(g, uid)
+    return uids
+
+
+async def _role_in_use(rid: int) -> dict:
+    b = (await db.fetchone("SELECT COUNT(*) AS c FROM role_bindings WHERE role_id=?", rid))["c"]
+    m = (await db.fetchone("SELECT COUNT(*) AS c FROM oidc_group_roles WHERE role_id=?", rid))["c"]
+    t = (await db.fetchone("SELECT COUNT(*) AS c FROM api_tokens WHERE role_id=?", rid))["c"]
+    return {"bindings": b, "mappings": m, "tokens": t}
+
+
+@router.post("/api/roles")
+async def create_role(body: RoleIn, request: Request, user=Depends(authz.perm('roles.manage'))):
+    grants = authz.grants_of(request)
+    name, desc, perms = authz.validate_role_fields(body.name, body.description, body.perms)
+    authz.check_can_define(grants, perms)
+    await _role_name_free(name, None)
+    await _reauth_for_access_change(user, request, body, "create a role")
+    async with authz._lock:
+        g = await _fresh_grants(user, "roles.manage")
+        authz.check_can_define(g, perms)
+        await _role_name_free(name, None)
+        n = (await db.fetchone("SELECT COUNT(*) AS c FROM roles WHERE builtin=0"))["c"]
+        if n >= authz.CUSTOM_ROLES_MAX:
+            raise ApiError(400, "role.tooMany", "too many custom roles (%d)" % authz.CUSTOM_ROLES_MAX,
+                           vars={"max": authz.CUSTOM_ROLES_MAX})
+        now = time.time()
+        rid = await db.execute(
+            "INSERT INTO roles(key, name, description, perms, builtin, created, updated)"
+            " VALUES(NULL,?,?,?,0,?,?)", name, desc, json.dumps(sorted(perms)), now, now)
+        authz.bump_epoch()
+    shell = sorted(perms & authz.SHELL_PERMS)
+    what = "role '%s' created: %s" % (name, ", ".join(sorted(perms)))
+    audit.detail(request, what + (" (shell-equivalent: %s)" % ", ".join(shell) if shell else ""))
+    log.warning("%s (by %s)", what, user["email"])
+    email_alerts.notify_security_change(what, security.client_ip(request), user["email"],
+                                        fleet=True, what_key="role_created",
+                                        what_params={"role": name, "perms": ", ".join(sorted(perms))})
+    out = await authz.roles_json(g)
+    out["id"] = rid
+    return out
+
+
+@router.patch("/api/roles/{rid}")
+async def edit_role(rid: int, body: RoleIn, request: Request,
+                    user=Depends(authz.perm('roles.manage'))):
+    grants = authz.grants_of(request)
+    role = await _custom_role(rid)
+    name, desc, perms = authz.validate_role_fields(body.name, body.description, body.perms)
+    # §A.6.6 regula 5: un rol care are (sau ar avea) o permisiune pe care n-o ai nu-l editezi
+    authz.check_can_define(grants, role.perms | perms)
+    await _check_role_targets(grants, rid)
+    await _role_name_free(name, rid)
+    await _reauth_for_access_change(user, request, body, "change a role")
+    async with authz._lock:
+        g = await _fresh_grants(user, "roles.manage")
+        role = await _custom_role(rid)                 # definiţia de ACUM, nu cea de mai sus
+        authz.check_can_define(g, role.perms | perms)
+        uids = await _check_role_targets(g, rid)
+        await _role_name_free(name, rid)
+        await db.execute("UPDATE roles SET name=?, description=?, perms=?, updated=?"
+                         " WHERE id=? AND builtin=0", name, desc, json.dumps(sorted(perms)),
+                         time.time(), rid)
+        # efect IMEDIAT: cache-ul moare, socket-urile lungi re-verifică acum (un terminal deschis
+        # trece pe doar-citire sau se închide), biletele de forward mor, accesul derivat pe care
+        # cei afectaţi nu-l mai pot acorda (share live / replay) se retrage
+        authz.bump_epoch()
+        for uid in uids:
+            security.bump_forward_epoch(uid)
+            await _revoke_unauthorized_derived(uid)
+    added, removed = sorted(perms - role.perms), sorted(role.perms - perms)
+    what = "role '%s' changed: +%s -%s" % (name, ",".join(added) or "none",
+                                           ",".join(removed) or "none")
+    if name != role.name:
+        what += " (renamed from '%s')" % role.name
+    audit.detail(request, "%s; %d account(s) affected" % (what, len(uids)))
+    log.warning("%s (by %s, %d account(s) affected)", what, user["email"], len(uids))
+    ip = security.client_ip(request)
+    email_alerts.notify_security_change(what, ip, user["email"], fleet=True, what_key="role_changed",
+                                        what_params={"role": name, "added": ", ".join(added) or "—",
+                                                     "removed": ", ".join(removed) or "—",
+                                                     "n": len(uids)})
+    if added or removed:
+        for uid in uids[:50]:          # plafon: un rol legat de sute de conturi nu inundă alertele
+            row = await db.fetchone("SELECT email FROM users WHERE id=?", uid)
+            if row:
+                email_alerts.notify_security_change(
+                    "your access changed: " + what, ip, row["email"], user_id=uid,
+                    what_key="role_changed_you", what_params={"role": name})
+    return await authz.roles_json(g)
+
+
+@router.post("/api/roles/{rid}/delete")
+async def delete_role(rid: int, body: ReauthOnly, request: Request,
+                      user=Depends(authz.perm('roles.manage'))):
+    grants = authz.grants_of(request)
+    role = await _custom_role(rid)
+    authz.check_can_define(grants, role.perms)
+
+    async def _refuse_if_used():
+        use = await _role_in_use(rid)
+        if any(use.values()):
+            raise ApiError(409, "role.inUse",
+                           "the role is still in use (%(bindings)d binding(s), %(mappings)d SSO "
+                           "mapping(s), %(tokens)d token(s)) — remove those first" % use, vars=use)
+    await _refuse_if_used()
+    await _reauth_for_access_change(user, request, body, "delete a role")
+    async with authz._lock:
+        g = await _fresh_grants(user, "roles.manage")
+        role = await _custom_role(rid)
+        authz.check_can_define(g, role.perms)
+        await _refuse_if_used()
+        await db.execute("DELETE FROM roles WHERE id=? AND builtin=0", rid)
+        authz.bump_epoch()
+    what = "role '%s' deleted" % role.name
+    audit.detail(request, what)
+    log.warning("%s (by %s)", what, user["email"])
+    email_alerts.notify_security_change(what, security.client_ip(request), user["email"],
+                                        fleet=True, what_key="role_deleted",
+                                        what_params={"role": role.name})
+    return await authz.roles_json(g)
+
+
+# ── Maparea grupurilor SSO → roluri (3.6.2; design „3.6.1", §A.7; logica în ssomap.py) ────
+# Cine mapează un grup la un rol îl ACORDĂ (la următorul login SSO) oricui e în grup: aceleaşi
+# reguli ca o legătură — users.manage, anti-escaladare peste scope, doar un Owner mapează la
+# Owner — plus re-auth + al doilea factor, audit, alertă. O mapare NOUĂ are efect la următorul
+# login / step-up SSO al fiecăruia; una ŞTEARSĂ retrage imediat legăturile derivate.
+
+class OidcRoleIn(BaseModel):
+    group: str = ""
+    role: str = ""
+    role_id: int = 0
+    scope_kind: str = "all"
+    scope_value: str = ""
+    current_password: str = ""
+    totp_code: str = ""
+    email_code: str = ""
+    stepup_grant: str = ""
+
+
+async def _oidc_roles_json() -> dict:
+    rows = await db.fetchall(
+        "SELECT m.id, m.grp, m.role_id, m.scope_kind, m.scope_value, m.created,"
+        " r.key AS role_key, r.name AS role_name FROM oidc_group_roles m"
+        " LEFT JOIN roles r ON r.id=m.role_id ORDER BY m.grp, m.id")
+    users = {}
+    for r in await db.fetchall(
+            "SELECT role_id, scope_kind, scope_value, COUNT(*) AS c FROM role_bindings"
+            " WHERE source='sso' GROUP BY role_id, scope_kind, scope_value"):
+        users[(r["role_id"], r["scope_kind"], r["scope_value"])] = r["c"]
+    return {"enabled": config.OIDC_ENABLED, "claim": "groups", "wildcard": ssomap.WILDCARD,
+            "max": ssomap.MAPPINGS_MAX,
+            "mappings": [{"id": r["id"], "group": r["grp"], "role": r["role_key"] or "",
+                          "role_id": r["role_id"], "role_name": r["role_name"] or "?",
+                          "scope_kind": r["scope_kind"], "scope_value": r["scope_value"] or "",
+                          "created": r["created"],
+                          "sso_bindings": users.get((r["role_id"], r["scope_kind"],
+                                                     r["scope_value"] or ""), 0)}
+                         for r in rows]}
+
+
+@router.get("/api/settings/oidc-roles")
+async def list_oidc_roles(user=Depends(authz.perm('users.manage'))):
+    return await _oidc_roles_json()
+
+
+@router.post("/api/settings/oidc-roles")
+async def add_oidc_role(body: OidcRoleIn, request: Request,
+                        user=Depends(authz.perm('users.manage'))):
+    grants = authz.grants_of(request)
+    grp = ssomap.normalize_group(body.group)
+    if grp is None:
+        raise ApiError(400, "ssoMap.badGroup",
+                       "give the exact group name from the IdP (1–256 printable characters), "
+                       "or * for every SSO user")
+    role = await authz.resolve_role(body.role, body.role_id)
+    kind, value = authz.normalize_scope(body.scope_kind, body.scope_value)
+    # o mapare acordă rolul fiecărui membru al grupului: exact regulile unei legături
+    await authz.check_can_grant(grants, role, kind, value)
+    await _reauth_for_access_change(user, request, body, "map an SSO group to a role")
+    async with authz._lock:
+        g = await _fresh_grants(user, "users.manage")
+        fresh = await authz.role_by_id(role.id)
+        if fresh is None:
+            raise ApiError(409, "role.gone", "that role was deleted meanwhile")
+        await authz.check_can_grant(g, fresh, kind, value)
+        n = (await db.fetchone("SELECT COUNT(*) AS c FROM oidc_group_roles"))["c"]
+        if n >= ssomap.MAPPINGS_MAX:
+            raise ApiError(400, "ssoMap.tooMany", "too many SSO mappings (%d)" % ssomap.MAPPINGS_MAX,
+                           vars={"max": ssomap.MAPPINGS_MAX})
+        try:
+            await db.execute(
+                "INSERT INTO oidc_group_roles(grp, role_id, scope_kind, scope_value, created,"
+                " created_by_id) VALUES(?,?,?,?,?,?)", grp, fresh.id, kind, value, time.time(),
+                user["id"])
+        except sqlite3.IntegrityError:
+            raise ApiError(409, "ssoMap.exists", "that group already maps to this role there")
+        authz.bump_epoch()
+    what = "SSO group '%s' mapped to %s @ %s" % (grp, _role_label(fresh), _scope_label(kind, value))
+    audit.detail(request, what)
+    log.warning("%s (by %s)", what, user["email"])
+    email_alerts.notify_security_change(what, security.client_ip(request), user["email"],
+                                        fleet=True, what_key="sso_mapping_added",
+                                        what_params={"group": grp, "role": _role_label(fresh),
+                                                     "scope": _scope_label(kind, value)})
+    return await _oidc_roles_json()
+
+
+@router.post("/api/settings/oidc-roles/{mid}/delete")
+async def delete_oidc_role(mid: int, body: ReauthOnly, request: Request,
+                           user=Depends(authz.perm('users.manage'))):
+    grants = authz.grants_of(request)
+    row = await db.fetchone("SELECT * FROM oidc_group_roles WHERE id=?", mid)
+    if not row:
+        raise ApiError(404, "ssoMap.missing", "no such SSO mapping")
+    info = (await authz.role_by_id(row["role_id"])) or _UNKNOWN_ROLE
+    # retragerea unei mapări scoate legături de la alţii: doar în interiorul a ce poţi acorda
+    await authz.check_can_grant(grants, info, row["scope_kind"], row["scope_value"], removing=True)
+    await _reauth_for_access_change(user, request, body, "remove an SSO group mapping")
+    async with authz._lock:
+        g = await _fresh_grants(user, "users.manage")
+        row = await db.fetchone("SELECT * FROM oidc_group_roles WHERE id=?", mid)
+        if not row:
+            raise ApiError(404, "ssoMap.missing", "no such SSO mapping")
+        info = (await authz.role_by_id(row["role_id"])) or _UNKNOWN_ROLE
+        await authz.check_can_grant(g, info, row["scope_kind"], row["scope_value"], removing=True)
+        await db.execute("DELETE FROM oidc_group_roles WHERE id=?", mid)
+        # IMEDIAT, nu la următorul login: legăturile pe care nicio mapare rămasă nu le mai
+        # justifică (după grupurile văzute la ultima sincronizare) pleacă acum. Doar retragere.
+        changed = await ssomap.prune_locked()
+        authz.bump_epoch()
+    what = "SSO group '%s' no longer maps to %s @ %s" % (
+        row["grp"], _role_label(info), _scope_label(row["scope_kind"], row["scope_value"]))
+    removed = sum(len(r["removed"]) for _u, _e, r in changed)
+    audit.detail(request, "%s; %d SSO binding(s) removed" % (what, removed))
+    log.warning("%s (by %s; %d SSO binding(s) removed)", what, user["email"], removed)
+    ip = security.client_ip(request)
+    email_alerts.notify_security_change(what, ip, user["email"], fleet=True,
+                                        what_key="sso_mapping_removed",
+                                        what_params={"group": row["grp"], "role": _role_label(info),
+                                                     "scope": _scope_label(row["scope_kind"],
+                                                                           row["scope_value"]),
+                                                     "n": removed})
+    for uid, email, res in changed[:50]:
+        if res["removed"]:
+            email_alerts.notify_security_change(
+                "your access changed: " + ", ".join(res["removed"]) + " removed", ip, email,
+                user_id=uid, what_key="sso_access_changed",
+                what_params={"account": email, "added": "—", "removed": ", ".join(res["removed"])})
+        if res["kept_last_owner"]:
+            ssomap.report_last_owner(uid, email, ip, res["kept_last_owner"])
+    return await _oidc_roles_json()
 
 
 @router.get("/api/me/permissions")

@@ -63,12 +63,15 @@ async def _revoke_everything(user_id: int, why: str) -> None:
 
 async def _bindings_text(user_id: int) -> str:
     rows = await db.fetchall(
-        "SELECT r.key, b.scope_kind, b.scope_value FROM role_bindings b JOIN roles r"
-        " ON r.id=b.role_id WHERE b.user_id=? ORDER BY b.id", user_id)
+        "SELECT r.key, r.name, b.scope_kind, b.scope_value, b.source FROM role_bindings b"
+        " JOIN roles r ON r.id=b.role_id WHERE b.user_id=? ORDER BY b.id", user_id)
     if not rows:
         return "(no access)"
-    return ", ".join("%s@%s" % (r["key"], r["scope_kind"] if r["scope_kind"] == "all"
-                                else "%s:%s" % (r["scope_kind"], r["scope_value"])) for r in rows)
+    # rolurile custom (3.6.2) n-au cheie: numele lor, între ghilimele; legăturile SSO marcate
+    return ", ".join("%s@%s%s" % (r["key"] or repr(r["name"]),
+                                  r["scope_kind"] if r["scope_kind"] == "all"
+                                  else "%s:%s" % (r["scope_kind"], r["scope_value"]),
+                                  " (sso)" if r["source"] == "sso" else "") for r in rows)
 
 
 async def _bump_authz_epoch() -> None:

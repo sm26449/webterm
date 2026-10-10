@@ -5,10 +5,10 @@ Trei rute PUBLICE (nu există sesiune încă la login):
   · GET /api/oidc/login    — porneşte flow-ul (redirect la IdP); intent=login|stepup
   · GET /api/oidc/callback — întoarcere de la IdP: validează, provizionează, emite sesiunea
 
-Adminul local rămâne break-glass (parolă/passkey). De la 3.6 un cont SSO NOU nu primeşte niciun
-rol automat („fără acces încă", până îi acordă un Owner/Admin unul) — maparea grupuri → roluri
-vine în 3.6.1 (tabela `oidc_group_roles` există deja ca punct de extensie). Conturile existente
-la upgrade au devenit Owner @ all. „Cine ajunge aici" se decide în IdP + prin
+Adminul local rămâne break-glass (parolă/passkey). Un cont SSO NOU nu primeşte niciun rol din
+oficiu; de la 3.6.2 primeşte ce îi dau grupurile lui prin maparea grup → rol (ssomap.py),
+re-sincronizată la FIECARE login şi step-up SSO (legăturile `source='sso'`; cele manuale nu se
+ating). Fără niciun grup mapat: „fără acces încă". „Cine ajunge aici" se decide în IdP + prin
 `OIDC_ALLOWED_GROUPS`.
 """
 import time
@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, urlparse
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import RedirectResponse
 
-from . import audit, authz, config, db, oidc, security
+from . import audit, authz, config, db, oidc, security, ssomap
 
 router = APIRouter(prefix="/api/oidc", dependencies=[Depends(authz.declared)])
 
@@ -94,6 +94,12 @@ async def callback(request: Request, code: str = "", state: str = ""):
             await audit.record(time.time(), email or "sso", ip, "GET", "/api/oidc/callback", 403,
                                "step-up SSO: identitate nepotrivită cu sesiunea")
             return _redirect_err("stepup_mismatch")
+        # 3.6.2 (§A.7, Q8 b): step-up-ul SSO aduce un id_token PROASPĂT, cu grupurile de acum —
+        # momentele sensibile primesc date de grup proaspete. Sincronizăm ÎNAINTE de verificarea
+        # host.view de mai jos, ca un grup scos în IdP să nu mai deschidă fereastra.
+        await ssomap.sync_user(cur["id"], cur["email"],
+                               info["groups"] if info.get("groups_present") else None,
+                               ip=ip, via="step-up")
         # host_id=0 (sau lipsă) = re-auth account-scope: schimbarea emailului/parolei unui cont SSO
         # (fix 7), unde parola locală e un hash aleator. Altfel, fereastră per-host ca până acum.
         hid = info["host_id"] or 0
@@ -153,6 +159,10 @@ async def callback(request: Request, code: str = "", state: str = ""):
             await audit.record(time.time(), email, ip, "GET", "/api/oidc/callback", 201,
                                "cont nou provizionat prin SSO")
 
+    # 3.6.2: legăturile SSO după grupurile de ACUM, înainte de a emite sesiunea
+    await ssomap.sync_user(user["id"], user["email"],
+                           info["groups"] if info.get("groups_present") else None,
+                           ip=ip, via="login")
     new_device = await security.note_new_login(user, ip, request.headers.get("user-agent", ""))
     token = await security.create_web_session(
         user["id"], request.headers.get("user-agent", ""), new_device)

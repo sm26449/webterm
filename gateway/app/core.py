@@ -3058,6 +3058,10 @@ async def purge_host(host_id: int, *, _depth: int = 0) -> None:
                      str(host_id))
     await db.execute("DELETE FROM api_tokens WHERE scope_kind='host' AND scope_value=?",
                      str(host_id))
+    # 3.6.2: şi o mapare SSO pe `host:<id>` — altfel următorul login SSO ar re-crea legătura
+    # pe hostul NOU cu acelaşi id
+    await db.execute("DELETE FROM oidc_group_roles WHERE scope_kind='host' AND scope_value=?",
+                     str(host_id))
     await db.execute("UPDATE audit_log SET host_id=? WHERE host_id=?", -host_id, host_id)
     await db.execute("DELETE FROM hosts WHERE id=?", host_id)
     from . import authz

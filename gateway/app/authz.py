@@ -209,6 +209,7 @@ class Binding:
     scope_value: str
     source: str
     expires: Optional[float]
+    role_id: int = 0
 
     def matches(self, h: HostRef) -> bool:
         k, v = self.scope_kind, self.scope_value
@@ -286,7 +287,7 @@ class TokenGrants(Grants):
 async def _load_bindings(user_id: int) -> list:
     now = time.time()
     rows = await db.fetchall(
-        "SELECT b.id, b.scope_kind, b.scope_value, b.source, b.expires,"
+        "SELECT b.id, b.scope_kind, b.scope_value, b.source, b.expires, b.role_id,"
         " r.key AS role_key, r.name AS role_name, r.perms AS role_perms, r.builtin"
         " FROM role_bindings b JOIN roles r ON r.id = b.role_id WHERE b.user_id=?", user_id)
     out = []
@@ -304,7 +305,7 @@ async def _load_bindings(user_id: int) -> list:
                 perms = frozenset()        # unreadable custom role = no permissions
         out.append(Binding(r["id"], r["role_key"] or "", r["role_name"] or "", perms,
                            r["scope_kind"], r["scope_value"] or "", r["source"] or "manual",
-                           r["expires"]))
+                           r["expires"], r["role_id"]))
     return out
 
 
@@ -918,15 +919,140 @@ def _scope_perms(grants: Grants, kind: str, value: str, ref: Optional[HostRef]) 
     return frozenset(out)
 
 
-async def check_can_grant(granter: Grants, role_key: str, kind: str, value: str,
+# ── custom roles (3.6.2) ─────────────────────────────────────────────────────────────────────
+@dataclass(frozen=True)
+class RoleInfo:
+    """A role as the grant rules see it. Built-in perms always come from the code (§A.3)."""
+    id: int
+    key: str                  # owner|admin|operator|viewer for built-ins; '' for a custom role
+    name: str
+    perms: frozenset
+    builtin: bool
+    description: str = ""
+
+
+ROLE_NAME_MAX = 60
+ROLE_DESC_MAX = 300
+CUSTOM_ROLES_MAX = 200        # a bound on the table (the editor is an admin, still: no unbounded rows)
+
+
+def _row_role(r) -> RoleInfo:
+    if r["builtin"] and r["key"] in BUILTIN_ROLES:
+        perms = BUILTIN_ROLES[r["key"]]["perms"]
+    else:
+        try:
+            perms = frozenset(p for p in json.loads(r["perms"] or "[]") if p in PERMS)
+        except (TypeError, ValueError):
+            perms = frozenset()            # unreadable = no permissions (fail-closed)
+    return RoleInfo(r["id"], r["key"] or "", r["name"] or "", perms,
+                    bool(r["builtin"]) and (r["key"] in BUILTIN_ROLES),
+                    r["description"] or "")
+
+
+async def role_by_id(rid) -> Optional[RoleInfo]:
+    try:
+        rid = int(rid)
+    except (TypeError, ValueError):
+        return None
+    r = await db.fetchone("SELECT id, key, name, description, perms, builtin FROM roles WHERE id=?",
+                          rid)
+    return _row_role(r) if r else None
+
+
+async def resolve_role(key: str = "", rid=0) -> RoleInfo:
+    """The role a request names: a built-in `key`, or any role by `role_id`. Unknown → 400."""
+    key = (key or "").strip().lower()
+    info = None
+    if rid:
+        info = await role_by_id(rid)
+        if info is not None and key and info.key != key:
+            info = None                    # contradictory request: refuse, do not guess
+    elif key in BUILTIN_ROLES:
+        r = await db.fetchone(
+            "SELECT id, key, name, description, perms, builtin FROM roles WHERE key=?", key)
+        info = _row_role(r) if r else None
+    if info is None:
+        raise ApiError(400, "authz.badRole", "unknown role")
+    return info
+
+
+def _as_role(role) -> RoleInfo:
+    if isinstance(role, RoleInfo):
+        return role
+    if role not in BUILTIN_ROLES:
+        raise ApiError(400, "authz.badRole", "unknown role")
+    return RoleInfo(0, role, BUILTIN_ROLES[role]["name"], BUILTIN_ROLES[role]["perms"], True)
+
+
+def validate_role_fields(name, description, perms) -> tuple[str, str, frozenset]:
+    """Name (1–60 printable chars), description (≤ 300), perms (non-empty, every id in the
+    catalogue). Anything unknown is refused, never silently dropped: a typo must not save a
+    role that differs from what the editor meant."""
+    name = " ".join(str(name or "").split())
+    if not name or len(name) > ROLE_NAME_MAX or not name.isprintable():
+        raise ApiError(400, "role.badName", "give the role a name (1–60 printable characters)")
+    description = str(description or "").strip()
+    if len(description) > ROLE_DESC_MAX or not description.replace("\n", " ").isprintable():
+        raise ApiError(400, "role.badDescription", "the description is too long (300 characters)")
+    if not isinstance(perms, (list, tuple, set, frozenset)):
+        raise ApiError(400, "role.badPerm", "permissions must be a list")
+    out = set()
+    for p in perms:
+        if not isinstance(p, str) or p not in PERMS:
+            raise ApiError(400, "role.badPerm", "unknown permission",
+                           vars={"perm": str(p)[:40]})
+        out.add(p)
+    if not out:
+        raise ApiError(400, "role.noPerms", "a role needs at least one permission")
+    return name, description, frozenset(out)
+
+
+def held_everywhere(g: Grants) -> frozenset:
+    """What a principal holds over the WHOLE instance: global perms + host perms at scope all.
+    A role definition has no scope, so this is the ceiling for editing one (§A.6.6 rule 5)."""
+    return g.global_perms | g.all_host_perms
+
+
+def check_can_define(editor: Grants, perms) -> None:
+    """No-escalation for role definitions: every permission in the role (old AND new set when
+    editing) must be one the editor holds over all hosts / the instance."""
+    missing = frozenset(perms) - held_everywhere(editor)
+    if missing:
+        raise ApiError(403, "authz.escalation", "you cannot grant permissions you do not hold",
+                       vars={"perm": sorted(missing)[0]})
+
+
+def outranked_by(target: Grants, granter: Grants) -> Optional[str]:
+    """First permission the TARGET account holds over the whole instance that the granter does
+    not. Generalises "only an Owner touches an Owner" to custom roles: you cannot change the
+    access of an account that holds more than you (otherwise a custom role with, say,
+    backups.manage could be stripped by anyone with users.manage)."""
+    missing = held_everywhere(target) - held_everywhere(granter)
+    return sorted(missing)[0] if missing else None
+
+
+async def check_target(granter: Grants, target_uid: int) -> None:
+    """Shared target rule for binding changes, account deletion and role edits."""
+    _cache.pop(target_uid, None)
+    tg = await grants_for_user(target_uid)
+    if tg.is_owner() and not granter.is_owner():
+        raise ApiError(403, "authz.ownerOnly", "only an Owner can change an Owner's access")
+    p = outranked_by(tg, granter)
+    if p:
+        raise ApiError(403, "authz.outranked",
+                       "that account holds permissions you do not (%s)" % p, vars={"perm": p})
+
+
+async def check_can_grant(granter: Grants, role, kind: str, value: str,
                           removing: bool = False) -> None:
     """No-escalation (§A.6.6 rule 1–2): the role's permissions must be within the granter's own,
     over the whole scope; only an Owner can hand out Owner. `removing=True`: the same rule for
     taking a binding away, except that a binding left on a host that no longer exists can be
-    removed by whoever holds the role's permissions on every host."""
-    if role_key not in BUILTIN_ROLES:
-        raise ApiError(400, "authz.badRole", "unknown role")
-    rperms = BUILTIN_ROLES[role_key]["perms"]
+    removed by whoever holds the role's permissions on every host. `role` is a built-in key or
+    a RoleInfo (custom roles, 3.6.2) — the same rule for both."""
+    info = _as_role(role)
+    role_key = info.key
+    rperms = info.perms
     if role_key == "owner" and not granter.is_owner():
         raise ApiError(403, "authz.ownerOnly", "only an Owner can grant the Owner role")
     ref = None
@@ -950,7 +1076,7 @@ async def check_can_grant(granter: Grants, role_key: str, kind: str, value: str,
 
 
 def binding_json(b: Binding) -> dict:
-    return {"id": b.id, "role": b.role_key, "role_name": b.role_name,
+    return {"id": b.id, "role": b.role_key, "role_id": b.role_id, "role_name": b.role_name,
             "scope_kind": b.scope_kind, "scope_value": b.scope_value, "source": b.source,
             "expires": b.expires}
 
@@ -966,6 +1092,35 @@ def me_json(grants: Grants, host_refs_: dict) -> dict:
     return {"global": sorted(grants.global_perms), "all_hosts": sorted(grants.all_host_perms),
             "hosts": hosts, "bindings": [binding_json(b) for b in grants.bindings],
             "owner": grants.is_owner(), "epoch": _epoch}
+
+
+async def roles_json(viewer: Grants) -> dict:
+    """GET /api/roles: the catalogue, the built-ins (now with their ids, so a binding can name
+    any role by id) and the custom roles with how much they are used. `editable` is the
+    no-escalation verdict for THIS viewer (cosmetic; the server re-checks on every write)."""
+    out = catalogue_json()
+    ids = {r["key"]: r["id"] for r in await db.fetchall("SELECT id, key FROM roles WHERE builtin=1")}
+    for r in out["roles"]:
+        r["id"] = ids.get(r["key"])
+    nb = {r["role_id"]: (r["c"], r["s"] or 0) for r in await db.fetchall(
+        "SELECT role_id, COUNT(*) AS c, SUM(source='sso') AS s FROM role_bindings GROUP BY role_id")}
+    nm = {r["role_id"]: r["c"] for r in await db.fetchall(
+        "SELECT role_id, COUNT(*) AS c FROM oidc_group_roles GROUP BY role_id")}
+    held = held_everywhere(viewer)
+    custom = []
+    for r in await db.fetchall("SELECT id, key, name, description, perms, builtin, created, updated"
+                               " FROM roles WHERE builtin=0 ORDER BY name COLLATE NOCASE, id"):
+        info = _row_role(r)
+        custom.append({"id": info.id, "name": info.name, "description": info.description,
+                       "perms": sorted(info.perms), "shell": bool(info.perms & SHELL_PERMS),
+                       "global_perms": sorted(info.perms & GLOBAL_PERMS),
+                       "bindings": nb.get(info.id, (0, 0))[0],
+                       "sso_bindings": nb.get(info.id, (0, 0))[1],
+                       "mappings": nm.get(info.id, 0),
+                       "editable": info.perms <= held,
+                       "updated": r["updated"]})
+    out["custom"] = custom
+    return out
 
 
 def catalogue_json() -> dict:

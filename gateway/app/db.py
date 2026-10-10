@@ -369,7 +369,7 @@ CREATE TABLE IF NOT EXISTS role_bindings (
     role_id INTEGER NOT NULL,
     scope_kind TEXT NOT NULL,               -- all | folder | tag | host
     scope_value TEXT NOT NULL DEFAULT '',   -- '' pt. all; numele folderului; tag (lowercase); id host
-    source TEXT NOT NULL DEFAULT 'manual',  -- manual | oidc | migration
+    source TEXT NOT NULL DEFAULT 'manual',  -- manual | sso | migration
     expires REAL,                           -- NULL = permanentă; rezervat (legături temporare, 3.6.2)
     created REAL NOT NULL,
     created_by_id INTEGER,
@@ -384,8 +384,9 @@ CREATE TABLE IF NOT EXISTS deleted_accounts (
     email TEXT DEFAULT '',
     deleted REAL NOT NULL
 );
--- grup OIDC → (rol, scope): punct de extensie pentru 3.6.1 (maparea SSO). În 3.6.0 tabela există
--- dar nu e citită de nimic — un login SSO nu primeşte legături automat.
+-- grup OIDC → (rol, scope) (3.6.2, ssomap.py): la fiecare login / step-up SSO legăturile cu
+-- source='sso' ale contului se re-sincronizează după grupurile din id_token. Coloanele
+-- created/created_by_id vin din MIGRATIONS (tabela exista deja în 3.6.0).
 CREATE TABLE IF NOT EXISTS oidc_group_roles (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     grp TEXT NOT NULL,
@@ -532,6 +533,15 @@ MIGRATIONS = [
     "ALTER TABLE hosts ADD COLUMN crown_jewel INTEGER DEFAULT 0",   # rezervat (§A.11, 3.6.2)
     "CREATE INDEX IF NOT EXISTS idx_audit_host ON audit_log(host_id, ts)",
     "CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_log(actor_id, ts)",
+    # 3.6.2 — roluri custom + maparea grupurilor SSO (design „3.6.1", §A.7). Tabelele `roles` şi
+    # `oidc_group_roles` există din 3.6.0; aici doar atribuirea maparelor şi grupurile văzute la
+    # ultima sincronizare SSO (DOAR cele mapate — necesare ca ştergerea unei mapări să retragă
+    # imediat legăturile derivate; nu ţinem lista completă de grupuri a IdP-ului).
+    "ALTER TABLE oidc_group_roles ADD COLUMN created REAL DEFAULT 0",
+    "ALTER TABLE oidc_group_roles ADD COLUMN created_by_id INTEGER",
+    "ALTER TABLE users ADD COLUMN sso_groups TEXT",
+    "ALTER TABLE users ADD COLUMN sso_synced REAL",
+    "CREATE INDEX IF NOT EXISTS idx_rb_role ON role_bindings(role_id)",
 ]
 
 # tabele adăugate ulterior (executeScript de mai sus le creează pe DB-uri noi;

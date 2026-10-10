@@ -2,7 +2,7 @@
 
 Login federat OPŢIONAL: activ doar când issuer+client_id+client_secret sunt setate (vezi
 `config.OIDC_ENABLED`). Adminul local rămâne break-glass; userii SSO sunt provizionaţi la
-primul login şi sunt admin complet pe această instanţă (WebTerm n-are RBAC intern).
+primul login; rolurile lor vin din legături (3.6) şi, de la 3.6.2, din maparea grup → rol (ssomap.py).
 
 Alegeri de securitate, deliberate:
   · `state`  — anti-CSRF pe callback (single-use, TTL scurt, server-side).
@@ -230,5 +230,8 @@ def complete(state: str, code: str) -> dict:
     email_verified = claims.get("email_verified")
     if not sub:
         raise OidcError("no subject in id_token")
+    # 3.6.2 (maparea grup → rol): claim ABSENT ≠ claim gol. Absent = IdP-ul nu-l trimite deloc
+    # (scope/mapare lipsă) → legăturile SSO NU se ating; prezent dar gol → „niciun grup" → se scot.
     return {"sub": str(sub), "email": email, "email_verified": email_verified,
-            "groups": groups, "intent": txn["intent"], "host_id": txn["host_id"]}
+            "groups": groups, "groups_present": "groups" in claims,
+            "intent": txn["intent"], "host_id": txn["host_id"]}
