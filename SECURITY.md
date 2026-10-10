@@ -70,7 +70,7 @@ please report it.
 
 ## Supported versions
 
-*Policy last reviewed: 2026-10-07 (3.6.0).*
+*Policy last reviewed: 2026-10-07 (3.6.1).*
 
 Actively developed; security fixes go into the latest version (`main` / the latest `vX.Y.Z` tag).
 Run the most recent official image or build from `main`.

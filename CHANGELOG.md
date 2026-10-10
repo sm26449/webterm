@@ -9,6 +9,8 @@ back.
 
 ## [Unreleased]
 
+## [3.6.1] — 2026-10-10 · agent (58)
+
 UI correctness and trust fixes from an external UI audit (U01–U18). No new features; behaviour,
 feedback, contrast and accessibility. No agent change.
 
