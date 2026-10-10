@@ -248,6 +248,10 @@ export default function CommandPalette(props: {
         aria-modal="true"
         aria-label={t('palette.dialogAria')}
       >
+        {/* câmpul + rezultatele într-o SINGURĂ zonă de scroll, câmpul lipit sus: zona de scroll are
+            astfel un descendent tabulabil (axe scrollable-region-focusable), iar opţiunile rămân în
+            afara ordinii Tab (focusul stă în câmp, aria-activedescendant). #151b29 = fundalul .wt-command */}
+        <div className="max-h-[calc(52vh+3.75rem)] overflow-y-auto">
         <input
           ref={inputRef}
           value={query}
@@ -261,7 +265,7 @@ export default function CommandPalette(props: {
           aria-activedescendant={results[sel] ? optId(sel) : undefined}
           autoComplete="off"
           spellCheck={false}
-          className="w-full bg-transparent px-5 py-4 text-base placeholder-slate-500 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[rgb(var(--focus))]"
+          className="sticky top-0 z-10 w-full bg-[#151b29] px-5 py-4 text-base placeholder-slate-500 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[rgb(var(--focus))]"
           onKeyDown={(e) => {
             if (e.key === 'ArrowDown') { e.preventDefault(); setSel((s) => Math.min(results.length - 1, s + 1)) }
             else if (e.key === 'ArrowUp') { e.preventDefault(); setSel((s) => Math.max(0, s - 1)) }
@@ -271,7 +275,7 @@ export default function CommandPalette(props: {
         />
         {/* numărul de rezultate, anunţat la tastare (lista însăşi nu e „live") */}
         <span role="status" className="sr-only">{t('palette.resultsCount', { n: results.length })}</span>
-        <div ref={listRef} className="max-h-[52vh] overflow-y-auto border-t border-white/5 py-1.5">
+        <div ref={listRef} className="border-t border-white/5 py-1.5">
           {results.length === 0 && (
             <div className="px-5 py-6 text-center text-sm text-slate-500">{t('palette.noResults', { query })}</div>
           )}
@@ -290,7 +294,8 @@ export default function CommandPalette(props: {
               // mousedown: focusul nu pleacă din câmp până la alegere
               onMouseDown={(e) => e.preventDefault()}
               onClick={() => pick(i)}
-              className={`flex w-full cursor-pointer items-center gap-3 px-4 py-2 text-left ${
+              // scroll-mt: la ↑ opţiunea derulată în vedere nu ajunge sub câmpul lipit sus
+              className={`flex w-full scroll-mt-16 cursor-pointer items-center gap-3 px-4 py-2 text-left ${
                 i === sel ? 'bg-sky-500/15' : ''
               }`}
             >
@@ -308,6 +313,7 @@ export default function CommandPalette(props: {
           ))}
           </div>
           )}
+        </div>
         </div>
         <div className="flex items-center gap-3 border-t border-white/5 px-4 py-2 text-2xs text-slate-400">
           <span><kbd className="rounded-md bg-white/10 px-1 text-slate-300">↑</kbd><kbd className="ml-0.5 rounded-md bg-white/10 px-1 text-slate-300">↓</kbd> {t('palette.footNavigate')}</span>
