@@ -72,11 +72,20 @@ export function useFocusTrap(ref: RefObject<HTMLElement>, onClose: () => void): 
     // Focus care a ajuns în pagina din spate (un `.focus()` programatic, un clic pe ceva rămas
     // focalizabil): îl aducem înapoi. Popup-urile portalate legitim (Monaco, HelpTip, un
     // ConfirmModal deasupra) sunt lăsate în pace — vezi lib/focusRecovery.ts.
+    // Verificarea e AMÂNATĂ un tick: un dialog care tocmai se închide (ConfirmModal rezolvat, apoi
+    // apelantul focalizează terminalul) e încă „în vârf" în microtask-ul acela — fără amânare l-am
+    // fi tras înapoi într-un dialog pe cale să dispară. După tick, re-verificăm totul.
+    let pending = 0
+    let disposed = false
     const onFocusIn = (e: FocusEvent) => {
       const target = e.target as HTMLElement | null
       if (target && el.contains(target)) { lastInside = target; return }
-      if (!modal || !isTop()) return
-      if (focusPlace(target, el, document.body) === 'escaped') recover()
+      if (!modal || !isTop() || pending) return
+      pending = window.setTimeout(() => {
+        pending = 0
+        if (disposed || !isTop() || !document.contains(el)) return
+        if (focusPlace(document.activeElement, el, document.body) === 'escaped') recover()
+      }, 0)
     }
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Tab') return
@@ -106,6 +115,8 @@ export function useFocusTrap(ref: RefObject<HTMLElement>, onClose: () => void): 
     document.addEventListener('focusin', onFocusIn)
     openTraps.push(el)
     return () => {
+      disposed = true
+      if (pending) window.clearTimeout(pending)
       el.removeEventListener('keydown', onKey)
       document.removeEventListener('keydown', onEsc)
       document.removeEventListener('keydown', onDocTab)
