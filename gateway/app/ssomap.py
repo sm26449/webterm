@@ -15,9 +15,16 @@ Fail-closed choices (each one documented in docs/ROLES.md):
   * groups claim ABSENT from the id_token → nothing changes (a misconfigured IdP scope must not
     strip everyone's access on the next login), logged as a warning; PRESENT but empty, or of a
     type we cannot read → treated as "no groups": sso bindings are removed;
-  * group names: compared EXACTLY (case-sensitive) after trimming outer whitespace and Unicode
-    NFC — two IdP groups that differ only by case are two groups, an alias must not be created by
-    normalisation; names longer than 256 characters or with control characters never match;
+  * group names: compared EXACTLY, byte for byte, with the raw claim string (no trimming, no
+    Unicode normalisation, case-sensitive) — normalising the claim would alias distinct IdP groups
+    (`wt-owners ` vs `wt-owners`, NFD vs NFC). A mapping name that normalisation would change, or
+    that has control/format characters, is refused when the mapping is created;
+  * the groups claim must be a list of strings; anything else (a bare string, an object, items
+    that are not strings) is "unreadable": treated as no groups and audited;
+  * an account with a usable LOCAL PASSWORD never RECEIVES roles from groups (removals still
+    apply): otherwise whoever set that password (an Admin creating the account before the real
+    person's first SSO sign-in adopts it by email) would inherit what the person's groups grant.
+    The person removes the local password (Settings → Users & roles) to enable group roles;
   * huge claims: only the first 5000 entries are read (a truncated list can only GRANT LESS);
   * `*` = any authenticated SSO user (design §A.7, Warpgate's wildcard);
   * removing a MAPPING removes the derived bindings immediately for the users that got them
@@ -46,19 +53,26 @@ WILDCARD = "*"
 _last_owner_alerted: dict[int, float] = {}
 
 
+def _clean_name(s: str) -> bool:
+    return (0 < len(s) <= GROUP_MAX_LEN and s.isprintable()
+            and not any(unicodedata.category(ch) == "Cf" for ch in s))
+
+
 def normalize_group(g) -> Optional[str]:
-    """One group name as both the mapping editor and the claim are compared: NFC, outer
-    whitespace trimmed, case kept. None = cannot match anything."""
-    if isinstance(g, bool) or not isinstance(g, (str, int)):
+    """Validates a group name typed into the MAPPING editor. It is never rewritten: a name that
+    trimming or NFC would change is refused (None), so what is stored is exactly what the IdP
+    must send. `*` = every SSO user."""
+    if not isinstance(g, str):
         return None
-    s = unicodedata.normalize("NFC", str(g)).strip()
-    if not s or len(s) > GROUP_MAX_LEN or not s.isprintable():
+    if g != g.strip() or unicodedata.normalize("NFC", g) != g or not _clean_name(g):
         return None
-    return s
+    return g
 
 
 def claim_groups(groups) -> set:
-    """The normalised set from the claim's list (already str-coerced by oidc._claims_groups)."""
+    """The claim's names, RAW (exact match; oidc._claims_groups already kept only strings). A
+    name that could never be a valid mapping (too long, control/format characters) is dropped —
+    it cannot match anything anyway."""
     out = set()
     lst = list(groups or [])
     if len(lst) > GROUPS_MAX:
@@ -66,9 +80,8 @@ def claim_groups(groups) -> set:
                     len(lst), GROUPS_MAX)
         lst = lst[:GROUPS_MAX]
     for g in lst:
-        n = normalize_group(g)
-        if n:
-            out.add(n)
+        if isinstance(g, str) and g != WILDCARD and _clean_name(g):
+            out.add(g)
     return out
 
 
@@ -76,11 +89,12 @@ def _label(role_name: str, kind: str, value: str) -> str:
     return "%s @ %s" % (role_name, "all hosts" if kind == "all" else "%s %s" % (kind, value))
 
 
-async def _desired(groups: set) -> tuple[set, set]:
-    """→ ({(role_id, kind, value)}, {matched group names}) from the CURRENT mappings."""
+async def _desired(groups: set, exclude_mid: Optional[int] = None) -> tuple[set, set]:
+    """→ ({(role_id, kind, value)}, {matched group names}) from the CURRENT mappings (minus
+    `exclude_mid`, for planning a removal)."""
     maps = await db.fetchall(
         "SELECT m.grp, m.role_id, m.scope_kind, m.scope_value FROM oidc_group_roles m"
-        " JOIN roles r ON r.id = m.role_id")
+        " JOIN roles r ON r.id = m.role_id WHERE m.id<>?", exclude_mid or 0)
     hosts = {r["id"] for r in await db.fetchall("SELECT id FROM hosts")}
     desired, matched = set(), set()
     for m in maps:
@@ -152,8 +166,23 @@ async def _apply_locked(uid: int, desired: set, *, remove_only: bool,
             "kept_last_owner": [lab(t) for t in kept], "skipped": False}
 
 
-async def sync_user(uid: int, email: str, groups, *, ip: str, via: str) -> dict:
-    """Re-sync one account at an SSO login / step-up. `groups=None` = the claim was ABSENT."""
+async def has_local_password(uid: int) -> bool:
+    """True unless the account was provisioned by SSO or its owner removed the local password.
+    Unknown / NULL = True (fail-closed: pre-3.6.2 accounts count as having one)."""
+    r = await db.fetchone("SELECT local_password FROM users WHERE id=?", uid)
+    return r is None or r["local_password"] is None or bool(r["local_password"])
+
+
+async def sync_user(uid: int, email: str, groups, *, ip: str, via: str,
+                    readable: bool = True) -> dict:
+    """Re-sync one account at an SSO login / step-up. `groups=None` = the claim was ABSENT.
+    `readable=False` = the claim was there but not a list of strings (treated as no groups)."""
+    if not readable:
+        log.warning("SSO: the groups claim for %s is not a list of strings — treated as NO "
+                    "groups (its SSO-derived roles are removed)", email)
+        await audit.record(time.time(), email, ip, "GET", "/api/oidc/callback", 200,
+                           "SSO groups claim unreadable (%s): treated as no groups" % via,
+                           actor_id=uid)
     if groups is None:
         log.warning("SSO: the id_token for %s has no `groups` claim — its SSO-derived roles are "
                     "left unchanged. Make the IdP send `groups` (Authentik: the 'profile' scope "
@@ -164,7 +193,22 @@ async def sync_user(uid: int, email: str, groups, *, ip: str, via: str) -> dict:
     gs = claim_groups(groups)
     async with authz._lock:
         desired, matched = await _desired(gs)
-        res = await _apply_locked(uid, desired, remove_only=False, store_groups=matched)
+        local_pw = await has_local_password(uid)
+        if local_pw:
+            have = {(r["role_id"], r["scope_kind"], r["scope_value"] or "") for r in await db.fetchall(
+                "SELECT role_id, scope_kind, scope_value FROM role_bindings WHERE user_id=?", uid)}
+            skipped = desired - have
+        res = await _apply_locked(uid, desired, remove_only=local_pw, store_groups=matched)
+    if local_pw and skipped:
+        names = await _role_names()
+        labs = [_label(names.get(t[0], ("", "?"))[1], t[1], t[2]) for t in sorted(skipped)]
+        res["skipped_local_password"] = labs
+        log.warning("sso.sync.skippedLocalPassword: %s has a local password, so its groups give "
+                    "it no roles (would have added: %s). It can remove the local password in "
+                    "Settings → Users & roles to receive them.", email, ", ".join(labs))
+        await audit.record(time.time(), email, ip, "GET", "/api/oidc/callback", 200,
+                           ("sso.sync.skippedLocalPassword (%s): not added %s" % (via, labs))[:480],
+                           actor_id=uid)
     _report(uid, email, ip, via, res)
     if res["added"] or res["removed"] or res["kept_last_owner"]:
         await audit.record(time.time(), email, ip, "GET", "/api/oidc/callback", 200,
@@ -175,20 +219,39 @@ async def sync_user(uid: int, email: str, groups, *, ip: str, via: str) -> dict:
     return res
 
 
+async def _sso_users():
+    return await db.fetchall(
+        "SELECT DISTINCT u.id, u.email, u.sso_groups FROM users u JOIN role_bindings b"
+        " ON b.user_id = u.id WHERE b.source='sso'")
+
+
+def _stored(u) -> set:
+    try:
+        return {g for g in json.loads(u["sso_groups"] or "[]") if isinstance(g, str)}
+    except (TypeError, ValueError):
+        return set()                       # unreadable = no groups (removal only, fail-closed)
+
+
+async def prune_plan(exclude_mid: int) -> list:
+    """Dry run of prune_locked() as if mapping `exclude_mid` were gone: [uid] of the accounts
+    that would lose a binding. Caller holds authz._lock. Nothing is written."""
+    out = []
+    for u in await _sso_users():
+        desired, _m = await _desired(_stored(u), exclude_mid)
+        rows = await db.fetchall("SELECT role_id, scope_kind, scope_value FROM role_bindings"
+                                 " WHERE user_id=? AND source='sso'", u["id"])
+        if any((r["role_id"], r["scope_kind"], r["scope_value"] or "") not in desired for r in rows):
+            out.append(u["id"])
+    return out
+
+
 async def prune_locked() -> list:
     """After a mapping was removed: drop, for every account holding sso bindings, those no
     remaining mapping still justifies (from the groups recorded at its last sync). Removal only.
     Caller holds authz._lock. → [(uid, email, result)] for the accounts that changed."""
     out = []
-    users = await db.fetchall(
-        "SELECT DISTINCT u.id, u.email, u.sso_groups FROM users u JOIN role_bindings b"
-        " ON b.user_id = u.id WHERE b.source='sso'")
-    for u in users:
-        try:
-            stored = {g for g in json.loads(u["sso_groups"] or "[]") if isinstance(g, str)}
-        except (TypeError, ValueError):
-            stored = set()                 # unreadable = no groups (removal only, fail-closed)
-        desired, _m = await _desired(stored)
+    for u in await _sso_users():
+        desired, _m = await _desired(_stored(u))
         res = await _apply_locked(u["id"], desired, remove_only=True)
         if res["removed"] or res["kept_last_owner"]:
             out.append((u["id"], u["email"], res))

@@ -99,7 +99,7 @@ async def callback(request: Request, code: str = "", state: str = ""):
         # host.view de mai jos, ca un grup scos în IdP să nu mai deschidă fereastra.
         await ssomap.sync_user(cur["id"], cur["email"],
                                info["groups"] if info.get("groups_present") else None,
-                               ip=ip, via="step-up")
+                               ip=ip, via="step-up", readable=info.get("groups_readable", True))
         # host_id=0 (sau lipsă) = re-auth account-scope: schimbarea emailului/parolei unui cont SSO
         # (fix 7), unde parola locală e un hash aleator. Altfel, fereastră per-host ca până acum.
         hid = info["host_id"] or 0
@@ -141,6 +141,10 @@ async def callback(request: Request, code: str = "", state: str = ""):
                                    "SSO: adopţie refuzată — email neverificat de IdP")
                 return _redirect_err("email_unverified")
             # (Vrei adminul imun la SSO? dă-i un email inexistent în IdP.)
+            # 3.6.2 (revizuirea de securitate): contul adoptat ÎŞI PĂSTREAZĂ parola locală (şi
+            # passkey-urile, TOTP-ul) — dar cu o parolă locală, grupurile SSO nu-i mai dau NICIUN
+            # rol (ssomap.sync_user). Altfel cine a pus parola (un Admin care a creat contul
+            # înaintea primului login SSO al omului) ar moşteni ce îi dau omului grupurile.
             await db.execute("UPDATE users SET sso_subject=? WHERE id=?", sub, existing["id"])
             user = await db.fetchone("SELECT * FROM users WHERE id=?", existing["id"])
             await audit.record(time.time(), email, ip, "GET", "/api/oidc/callback", 200,
@@ -152,8 +156,8 @@ async def callback(request: Request, code: str = "", state: str = ""):
             # nimeni nu-l ştie → login-ul local nu poate reuşi vreodată pentru ei.
             locked = await security.hash_password_async(security.new_token())
             await db.execute(
-                "INSERT INTO users(id, email, password_hash, created, sso_subject)"
-                " VALUES(" + db.NEXT_USER_ID_SQL + ",?,?,?,?)",
+                "INSERT INTO users(id, email, password_hash, created, sso_subject, local_password)"
+                " VALUES(" + db.NEXT_USER_ID_SQL + ",?,?,?,?,0)",
                 email, locked, time.time(), sub)
             user = await db.fetchone("SELECT * FROM users WHERE sso_subject=?", sub)
             await audit.record(time.time(), email, ip, "GET", "/api/oidc/callback", 201,
@@ -162,7 +166,7 @@ async def callback(request: Request, code: str = "", state: str = ""):
     # 3.6.2: legăturile SSO după grupurile de ACUM, înainte de a emite sesiunea
     await ssomap.sync_user(user["id"], user["email"],
                            info["groups"] if info.get("groups_present") else None,
-                           ip=ip, via="login")
+                           ip=ip, via="login", readable=info.get("groups_readable", True))
     new_device = await security.note_new_login(user, ip, request.headers.get("user-agent", ""))
     token = await security.create_web_session(
         user["id"], request.headers.get("user-agent", ""), new_device)

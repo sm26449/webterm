@@ -139,7 +139,17 @@ async def cmd_passwd(args) -> None:
     # ÎN imagine şi nu într-un script de pe host: parametrii se pot schimba, iar un hash generat
     # cu altă configuraţie ar fi respins la login fără niciun mesaj util.
     pw_hash = security.hash_password(_read_new_password())
-    await db.execute("UPDATE users SET password_hash=? WHERE id=?", pw_hash, user["id"])
+    await db.execute("UPDATE users SET password_hash=?, local_password=1 WHERE id=?",
+                     pw_hash, user["id"])
+    # 3.6.2: cu o parolă locală, rolurile venite din grupuri SSO pleacă (cine ştie parola nu
+    # trebuie să moştenească ce dau grupurile omului) — acelaşi lucru ca în /api/account
+    n = (await db.fetchone("SELECT COUNT(*) AS c FROM role_bindings WHERE user_id=? AND source='sso'",
+                           user["id"]))["c"]
+    if n:
+        await db.execute("DELETE FROM role_bindings WHERE user_id=? AND source='sso'", user["id"])
+        await _bump_authz_epoch()
+        print("· %d SSO-derived role binding(s) removed (an account with a local password gets no "
+              "roles from groups)" % n)
     print("✓ password changed for %s" % user["email"])
     await _revoke_everything(user["id"], "password rotated")
 

@@ -166,10 +166,22 @@ def _check_stepup_auth_time(auth_time, requested_at: float) -> None:
 
 
 def _claims_groups(claims: dict) -> list:
+    """Grupurile din claim: DOAR o listă, şi din ea DOAR string-urile, exact cum au venit (fără
+    str() pe altceva — un `True` nu devine grupul „True", o listă imbricată nu devine un nume).
+    Orice altă formă (un string gol, un obiect, un număr) = necitibil → listă goală (revizuirea
+    3.6.2; vezi `_groups_readable` pentru semnalarea lui)."""
     g = claims.get("groups")
-    if isinstance(g, str):
-        return [g]
-    return [str(x) for x in g] if isinstance(g, list) else []
+    if not isinstance(g, list):
+        return []
+    return [x for x in g if isinstance(x, str)]
+
+
+def _groups_readable(claims: dict) -> bool:
+    """False când claim-ul EXISTĂ dar nu e o listă (sau conţine non-string-uri ignorate)."""
+    if "groups" not in claims:
+        return True
+    g = claims["groups"]
+    return isinstance(g, list) and all(isinstance(x, str) for x in g)
 
 
 def complete(state: str, code: str) -> dict:
@@ -234,4 +246,5 @@ def complete(state: str, code: str) -> dict:
     # (scope/mapare lipsă) → legăturile SSO NU se ating; prezent dar gol → „niciun grup" → se scot.
     return {"sub": str(sub), "email": email, "email_verified": email_verified,
             "groups": groups, "groups_present": "groups" in claims,
+            "groups_readable": _groups_readable(claims),
             "intent": txn["intent"], "host_id": txn["host_id"]}

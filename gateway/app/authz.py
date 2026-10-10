@@ -28,6 +28,7 @@ import asyncio
 import json
 import logging
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional
 
@@ -982,6 +983,55 @@ def _as_role(role) -> RoleInfo:
     if role not in BUILTIN_ROLES:
         raise ApiError(400, "authz.badRole", "unknown role")
     return RoleInfo(0, role, BUILTIN_ROLES[role]["name"], BUILTIN_ROLES[role]["perms"], True)
+
+
+# Confusabile (revizuirea 3.6.2): „Оwner" cu O chirilic arăta în UI exact ca rolul predefinit.
+# Un schelet mic, deliberat: literele chirilice/greceşti care arată ca latine → latină. Nu e
+# tabelul Unicode complet (UTS #39), dar acoperă alfabetele în care există sosii plauzibile
+# pentru numele noastre; un nume cu litere din MAI MULTE scripturi e refuzat oricum.
+_CONFUSABLE = str.maketrans({
+    # chirilic
+    "а": "a", "в": "b", "с": "c", "е": "e", "һ": "h", "і": "i", "ј": "j", "к": "k", "м": "m",
+    "н": "h", "о": "o", "р": "p", "ѕ": "s", "т": "t", "у": "y", "х": "x", "ԁ": "d", "ԛ": "q",
+    "ԝ": "w", "ӏ": "l", "ь": "b", "г": "r", "п": "n",
+    # grecesc
+    "α": "a", "β": "b", "ε": "e", "η": "n", "ι": "i", "κ": "k", "ν": "v", "ο": "o", "ρ": "p",
+    "τ": "t", "υ": "u", "χ": "x", "ω": "w", "μ": "u", "ζ": "z",
+    # cifre / latine care se confundă
+    "0": "o", "1": "l", "ı": "i",
+})
+
+
+def role_name_skeleton(name: str) -> str:
+    """Scheletul unui nume de rol: fără caractere de format (zero-width…), NFKC, casefold,
+    confusabilele de mai sus → latină, fără spaţii. Două nume cu acelaşi schelet se confundă."""
+    s = "".join(ch for ch in str(name) if unicodedata.category(ch) != "Cf")
+    s = unicodedata.normalize("NFKC", s).casefold()
+    s = unicodedata.normalize("NFKC", s.translate(_CONFUSABLE))
+    return "".join(s.split())
+
+
+def _scripts(name: str) -> set:
+    out = set()
+    for ch in name:
+        if ch.isalpha():
+            n = unicodedata.name(ch, "")
+            out.add(n.split(" ", 1)[0] if n else "?")
+    return out
+
+
+def check_role_name_confusable(name: str, others) -> None:
+    """400 `role.nameConfusable`: litere din mai multe scripturi, sau un schelet egal cu al unui
+    rol predefinit (cheie sau nume) ori al altui rol existent (`others` = numele lor)."""
+    if len(_scripts(name)) > 1:
+        raise ApiError(400, "role.nameConfusable",
+                       "the name mixes letters from several alphabets")
+    sk = role_name_skeleton(name)
+    reserved = {role_name_skeleton(k) for k in BUILTIN_ROLES} | {
+        role_name_skeleton(r["name"]) for r in BUILTIN_ROLES.values()}
+    if sk in reserved or sk in {role_name_skeleton(o) for o in others}:
+        raise ApiError(400, "role.nameConfusable",
+                       "the name looks like the name of another role")
 
 
 def validate_role_fields(name, description, perms) -> tuple[str, str, frozenset]:

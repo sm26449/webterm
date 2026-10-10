@@ -110,6 +110,16 @@ async def main():
         r = await owner.post("/api/roles", json=body)
         check("creare refuzată: %s → %d %s" % (label, st, cd), r.status_code == st and U.code(r) == cd,
               "%s %s" % (r.status_code, r.text[:120]))
+    # revizuirea de securitate 3.6.2 (E4): nume care ARATĂ ca altul (confusabile)
+    for nm, label in (("\u041ewner", "„Оwner\" cu O chirilic"), ("0wner", "„0wner\" (cifra 0)"),
+                      ("ΑDMIN", "„ΑDMIN\" cu Alfa grecesc"), ("Ops\u0430", "scripturi amestecate"),
+                      ("Files-onIy", "„Files-onIy\" ≠ dar arată ca un rol existent? (nu: I ≠ l)"),
+                      ("Fi\u217ces-only", "„Fiⅼes-only\" (ⅼ = numeral roman, NFKC → l)")):
+        r = await adm.post("/api/roles", json=rp(["host.view"], nm))
+        want = 200 if nm == "Files-onIy" else 400
+        check("E4: Admin creează rolul %s → %d" % (label, want), r.status_code == want
+              and (want == 200 or U.code(r) == "role.nameConfusable"), r.text[:120])
+    await db.execute("DELETE FROM roles WHERE name='Files-onIy'")
     n = (await db.fetchone("SELECT COUNT(*) AS c FROM roles WHERE builtin=0"))["c"]
     check("…niciun rol creat de cererile refuzate", n == 2, str(n))
 

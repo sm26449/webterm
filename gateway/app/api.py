@@ -497,6 +497,8 @@ async def login(request: Request, response: Response):
     ok = did_verify and await security.verify_password_async(creds.password, user["password_hash"])
     if not did_verify:
         await security.dummy_verify_async()
+    if ok and "local_password" in user.keys() and user["local_password"] == 0:
+        ok = False      # 3.6.2: contul n-are parolă locală (SSO-only) — nicio parolă nu-l deschide
     if not ok:
         security.record_login_failure(ip)
         raise ApiError(401, "auth.badCredentials", "wrong email or password")
@@ -616,6 +618,11 @@ class AccountUpdate(BaseModel):
     email_code: str = ""        # confirmarea cerută când sesiunea vine de pe un dispozitiv nou
     totp_code: str = ""         # al doilea factor (webauthn_api.second_gate) cu TOTP activ
     stepup_grant: str = ""      # fix 7: re-auth account-scope cu passkey (host_id=0) pt. conturi SSO
+    # 3.6.2: un cont legat de SSO îşi scoate parola LOCALĂ (devine SSO-only) — abia atunci
+    # grupurile SSO îi pot da roluri. Scoate ŞI passkey-urile, TOTP-ul, codurile de recuperare şi
+    # celelalte sesiuni: oricine a ştiut parola (ex. cine a creat contul) şi-a putut lăsa acolo un
+    # passkey care ar fi moştenit rolurile din grupuri.
+    remove_password: bool = False
 
 
 async def _verify_reauth_password(user, password: str) -> bool:
@@ -681,8 +688,18 @@ async def update_account(body: AccountUpdate, request: Request, user=Depends(sec
     # vechi: cod pe email, DOAR de pe un dispozitiv nestabilit — escaladăm, nu refuzăm („de pe
     # un loc necunoscut nu se poate schimba parola" sună bine până eşti în tren cu parola
     # tocmai scursă; codul îl trece pe cel legitim în 30 de secunde şi pe atacator deloc).
-    if body.new_password or (body.email and body.email.strip().lower() != user["email"]):
-        what = "change your WebTerm password" if body.new_password else "change your WebTerm email"
+    if body.remove_password:
+        if not (user["sso_subject"] and config.OIDC_ENABLED):
+            raise ApiError(400, "account.passwordRequired",
+                           "only an account linked to SSO can remove its local password")
+        if body.new_password:
+            raise ApiError(400, "account.passwordRequired",
+                           "set a new password or remove it, not both")
+    if body.new_password or body.remove_password \
+            or (body.email and body.email.strip().lower() != user["email"]):
+        what = ("remove your local WebTerm password" if body.remove_password
+                else "change your WebTerm password" if body.new_password
+                else "change your WebTerm email")
         await webauthn_api.second_gate(user, request, body, what)
     email = user["email"]
     if body.email and body.email.strip().lower() != email:
@@ -694,11 +711,53 @@ async def update_account(body: AccountUpdate, request: Request, user=Depends(sec
                              email, user["id"]):
             raise ApiError(409, "account.emailTaken", "an account with that email already exists")
     pw_hash = user["password_hash"]
+    local_pw = user["local_password"] if "local_password" in user.keys() else 1
     if body.new_password:
         _check_password(body.new_password, "new password")
         pw_hash = await security.hash_password_async(body.new_password)
-    await db.execute("UPDATE users SET email=?, password_hash=? WHERE id=?",
-                     email, pw_hash, user["id"])
+        local_pw = 1
+    if body.remove_password:
+        pw_hash = await security.hash_password_async(security.new_token())   # nimeni n-o ştie
+        local_pw = 0
+    await db.execute("UPDATE users SET email=?, password_hash=?, local_password=? WHERE id=?",
+                     email, pw_hash, local_pw, user["id"])
+    if body.new_password:
+        # 3.6.2: o parolă locală nouă = rolurile din grupuri SSO pleacă ACUM (cine ştie parola nu
+        # moşteneşte ce dau grupurile); legăturile manuale rămân
+        async with authz._lock:
+            n = 0
+            for b in await db.fetchall(
+                    "SELECT b.id, b.scope_kind, r.key FROM role_bindings b JOIN roles r"
+                    " ON r.id=b.role_id WHERE b.user_id=? AND b.source='sso'", user["id"]):
+                if (b["key"] == "owner" and b["scope_kind"] == "all"
+                        and await authz.owner_count(exclude_binding=b["id"]) < 1):
+                    # ultimul Owner: instanţa nu se blochează (aceeaşi regulă ca la sincronizare)
+                    log.error("local password set on %s, the LAST Owner: its SSO Owner binding "
+                              "is kept", user["email"])
+                    continue
+                await db.execute("DELETE FROM role_bindings WHERE id=?", b["id"])
+                n += 1
+            if n:
+                await _after_access_change(user["id"])
+        if n:
+            audit.detail(request, "local password set: %d SSO-derived role binding(s) removed" % n)
+    if body.remove_password:
+        current = request.cookies.get(security.COOKIE_NAME)
+        for sql in ("DELETE FROM webauthn_credentials WHERE user_id=?",
+                    "DELETE FROM recovery_codes WHERE user_id=?",
+                    "UPDATE users SET totp_enabled=0, totp_secret_encrypted=NULL,"
+                    " totp_last_counter=NULL WHERE id=?"):
+            await db.execute(sql, user["id"])
+        await db.execute("DELETE FROM web_sessions WHERE user_id=? AND token_hash!=?",
+                         user["id"], security.sha256_hex(current) if current else "")
+        security.clear_stepup_for(user["id"])
+        security.bump_forward_epoch(user["id"])
+        audit.detail(request, "local password removed (SSO-only from now on; passkeys, 2FA and "
+                              "other sessions revoked)")
+        email_alerts.notify_security_change(
+            "local password removed; the account signs in with SSO only", security.client_ip(request),
+            user["email"], user_id=user["id"], what_key="local_password_removed")
+        return {"ok": True, "email": email}
     # dacă s-a schimbat parola, invalidează celelalte sesiuni web (nu pe cea curentă)
     if body.new_password:
         current = request.cookies.get(security.COOKIE_NAME)
@@ -828,7 +887,7 @@ async def _user_bindings(uid: int) -> list:
 async def _users_json(user, grants) -> list:
     manage = grants.has_global("users.manage")
     rows = await db.fetchall(
-        "SELECT u.id, u.email, u.created, u.totp_enabled, u.sso_subject,"
+        "SELECT u.id, u.email, u.created, u.totp_enabled, u.sso_subject, u.local_password,"
         " (SELECT COUNT(*) FROM webauthn_credentials c WHERE c.user_id=u.id) AS passkeys"
         " FROM users u ORDER BY u.created")
     out = []
@@ -838,6 +897,8 @@ async def _users_json(user, grants) -> list:
         out.append({"id": r["id"], "email": r["email"], "created": r["created"],
                     "totp": bool(r["totp_enabled"]), "passkeys": r["passkeys"],
                     "sso": bool(r["sso_subject"]),
+                    # 3.6.2: cu parolă locală, grupurile SSO nu-i dau roluri (ssomap)
+                    "local_password": r["local_password"] is None or bool(r["local_password"]),
                     "is_self": r["id"] == user["id"],
                     "bindings": await _user_bindings(r["id"])})
     return out
@@ -1200,6 +1261,10 @@ async def _role_name_free(name: str, rid: Optional[int]) -> None:
         low, low, rid or 0)
     if clash or low in authz.BUILTIN_ROLES:
         raise ApiError(409, "role.nameTaken", "a role with that name already exists")
+    # revizuirea 3.6.2: „Оwner" (O chirilic) nu e „Owner" pentru SQL, dar e pentru ochi
+    others = [r["name"] for r in await db.fetchall(
+        "SELECT name FROM roles WHERE builtin=0 AND id<>?", rid or 0)]
+    authz.check_role_name_confusable(name, others)
 
 
 async def _custom_role(rid: int) -> "authz.RoleInfo":
@@ -1366,6 +1431,17 @@ class OidcRoleIn(BaseModel):
     stepup_grant: str = ""
 
 
+def _check_wildcard(g, grp: str, role, kind: str) -> None:
+    """`*` = fiecare cont SSO al IdP-ului. Cu o permisiune de instanţă, una ⚑ (shell) sau pe
+    toată flota, maparea (şi scoaterea ei) e doar a unui Owner (revizuirea 3.6.2)."""
+    if grp != ssomap.WILDCARD or g.is_owner():
+        return
+    if kind == "all" or role.perms & authz.GLOBAL_PERMS or role.perms & authz.SHELL_PERMS:
+        raise ApiError(403, "authz.ownerOnly",
+                       "only an Owner can map every SSO user (*) to a role with instance or "
+                       "shell-equivalent permissions, or over all hosts")
+
+
 async def _oidc_roles_json() -> dict:
     rows = await db.fetchall(
         "SELECT m.id, m.grp, m.role_id, m.scope_kind, m.scope_value, m.created,"
@@ -1376,7 +1452,11 @@ async def _oidc_roles_json() -> dict:
             "SELECT role_id, scope_kind, scope_value, COUNT(*) AS c FROM role_bindings"
             " WHERE source='sso' GROUP BY role_id, scope_kind, scope_value"):
         users[(r["role_id"], r["scope_kind"], r["scope_value"])] = r["c"]
+    # conturile SSO care încă au parolă locală: grupurile nu le dau roluri (le arătăm în UI)
+    lp = (await db.fetchone("SELECT COUNT(*) AS c FROM users WHERE sso_subject IS NOT NULL"
+                            " AND COALESCE(local_password, 1)<>0"))["c"]
     return {"enabled": config.OIDC_ENABLED, "claim": "groups", "wildcard": ssomap.WILDCARD,
+            "local_password_accounts": lp,
             "max": ssomap.MAPPINGS_MAX,
             "mappings": [{"id": r["id"], "group": r["grp"], "role": r["role_key"] or "",
                           "role_id": r["role_id"], "role_name": r["role_name"] or "?",
@@ -1405,6 +1485,7 @@ async def add_oidc_role(body: OidcRoleIn, request: Request,
     kind, value = authz.normalize_scope(body.scope_kind, body.scope_value)
     # o mapare acordă rolul fiecărui membru al grupului: exact regulile unei legături
     await authz.check_can_grant(grants, role, kind, value)
+    _check_wildcard(grants, grp, role, kind)
     await _reauth_for_access_change(user, request, body, "map an SSO group to a role")
     async with authz._lock:
         g = await _fresh_grants(user, "users.manage")
@@ -1412,6 +1493,7 @@ async def add_oidc_role(body: OidcRoleIn, request: Request,
         if fresh is None:
             raise ApiError(409, "role.gone", "that role was deleted meanwhile")
         await authz.check_can_grant(g, fresh, kind, value)
+        _check_wildcard(g, grp, fresh, kind)
         n = (await db.fetchone("SELECT COUNT(*) AS c FROM oidc_group_roles"))["c"]
         if n >= ssomap.MAPPINGS_MAX:
             raise ApiError(400, "ssoMap.tooMany", "too many SSO mappings (%d)" % ssomap.MAPPINGS_MAX,
@@ -1427,8 +1509,10 @@ async def add_oidc_role(body: OidcRoleIn, request: Request,
     what = "SSO group '%s' mapped to %s @ %s" % (grp, _role_label(fresh), _scope_label(kind, value))
     audit.detail(request, what)
     log.warning("%s (by %s)", what, user["email"])
+    # `*` = FIECARE cont SSO: întotdeauna alertă critică, oricât de mic e rolul
     email_alerts.notify_security_change(what, security.client_ip(request), user["email"],
                                         fleet=True, what_key="sso_mapping_added",
+                                        severity="critical" if grp == ssomap.WILDCARD else "warning",
                                         what_params={"group": grp, "role": _role_label(fresh),
                                                      "scope": _scope_label(kind, value)})
     return await _oidc_roles_json()
@@ -1444,6 +1528,7 @@ async def delete_oidc_role(mid: int, body: ReauthOnly, request: Request,
     info = (await authz.role_by_id(row["role_id"])) or _UNKNOWN_ROLE
     # retragerea unei mapări scoate legături de la alţii: doar în interiorul a ce poţi acorda
     await authz.check_can_grant(grants, info, row["scope_kind"], row["scope_value"], removing=True)
+    _check_wildcard(grants, row["grp"], info, row["scope_kind"])
     await _reauth_for_access_change(user, request, body, "remove an SSO group mapping")
     async with authz._lock:
         g = await _fresh_grants(user, "users.manage")
@@ -1452,6 +1537,19 @@ async def delete_oidc_role(mid: int, body: ReauthOnly, request: Request,
             raise ApiError(404, "ssoMap.missing", "no such SSO mapping")
         info = (await authz.role_by_id(row["role_id"])) or _UNKNOWN_ROLE
         await authz.check_can_grant(g, info, row["scope_kind"], row["scope_value"], removing=True)
+        _check_wildcard(g, row["grp"], info, row["scope_kind"])
+        # revizuirea 3.6.2: ştergerea mapării ar scoate legături de la conturi care au MAI MULT
+        # decât tine — exact ce /bindings/{bid}/delete refuză. Refuzăm tot, nu scoatem nimic.
+        outr = []
+        for uid in await ssomap.prune_plan(mid):
+            tg = await authz.grants_for_user(uid)
+            if (tg.is_owner() and not g.is_owner()) or authz.outranked_by(tg, g):
+                outr.append(uid)
+        if outr:
+            raise ApiError(403, "authz.outranked",
+                           "removing this mapping would change the access of %d account(s) that "
+                           "hold permissions you do not" % len(outr),
+                           vars={"perm": "users.manage", "n": len(outr)})
         await db.execute("DELETE FROM oidc_group_roles WHERE id=?", mid)
         # IMEDIAT, nu la următorul login: legăturile pe care nicio mapare rămasă nu le mai
         # justifică (după grupurile văzute la ultima sincronizare) pleacă acum. Doar retragere.

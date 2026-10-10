@@ -7,13 +7,20 @@ id_token-ului are suitele ei: oidc_test, pentest_oidc_alg):
   * sincronizarea la login ŞI la step-up: adaugă ce lipseşte, scoate legăturile `sso` al căror
     grup a dispărut, NU atinge legăturile manuale;
   * claim `groups` ABSENT → nimic nu se schimbă; PREZENT dar gol → legăturile sso pleacă;
-  * nume de grup: exacte (case-sensitive), spaţiile exterioare ignorate; `*` = orice cont SSO;
+  * nume de grup: EXACTE, octet cu octet (fără trim / NFC — altfel ar crea alias-uri); un nume pe
+    care normalizarea l-ar schimba e refuzat la crearea mapării; `*` = orice cont SSO;
     o listă uriaşă e citită doar până la plafon (poate doar să acorde MAI PUŢIN);
   * o mapare nouă NU acordă nimic până la următorul login; una ştearsă retrage imediat;
   * ultimul Owner nu e scos niciodată de o sincronizare (păstrat + jurnal);
   * o legătură manuală identică cu una sso o „adoptă" (nu mai pleacă la sincronizare);
   * ştergerea unui host ia cu ea maparea pe `host:<id>`;
-  * migrarea pe o copie cu schema 3.6.0 (construită aici, niciodată prod) e idempotentă.
+  * migrarea pe o copie cu schema 3.6.0 (construită aici, niciodată prod) e idempotentă;
+  * revizuirea de securitate 3.6.2 (fiecare exploit al ei trebuie să EŞUEZE acum): un cont cu
+    parolă locală nu primeşte roluri din grupuri (Admin → Owner prin cont plantat + adopţie SSO,
+    şi varianta „şterge şi replantează"); scoaterea parolei revocă passkey-urile plantate;
+    setarea unei parole scoate rolurile din grupuri; ştergerea unei mapări nu atinge conturi
+    care au mai mult decât tine; claim-ul trebuie să fie o listă de string-uri; `*` cu putere =
+    doar Owner.
 """
 import asyncio
 import os
@@ -39,6 +46,7 @@ def idp(sub, email, groups=_ABSENT, intent="login", host_id=None):
         return {"sub": sub, "email": email, "email_verified": True,
                 "groups": oidc._claims_groups({} if groups is _ABSENT else {"groups": groups}),
                 "groups_present": groups is not _ABSENT,
+                "groups_readable": oidc._groups_readable({} if groups is _ABSENT else {"groups": groups}),
                 "intent": intent, "host_id": host_id}
     oidc.complete = complete
 
@@ -85,6 +93,158 @@ async def map_id(group):
     return r["id"] if r else None
 
 
+async def account_post(c, uid, body):
+    """POST /api/account ca un cont SSO: fereastra account-scope e deschisă de un step-up SSO,
+    iar sesiunea e marcată „dispozitiv cunoscut" (altfel al doilea factor cere un cod pe email)."""
+    await db.execute("UPDATE web_sessions SET device_new=0 WHERE user_id=?", uid)
+    return await c.post("/api/account", json=body)
+
+
+async def review_regressions(owner, adm, a, b):
+    """Exploit-urile revizuirii de securitate 3.6.2 — fiecare trebuie să EŞUEZE."""
+    OPW = U.OWNER_PW
+    # ── E1: Admin → Owner prin cont local plantat + adopţie SSO + mapare ──────────────────
+    check("E1 setup: maparea wt-owners → Owner există (făcută de Owner)", await map_id("wt-owners"))
+    r = await adm.post("/api/users", json={"email": "ceo@corp.co", "password": "AdminKnows-123!",
+                                           "current_password": PW})
+    check("E1 setup: Admin creează un cont local fără rol cu emailul CEO-ului", r.status_code == 200)
+    ceo = await sso_login("sub-ceo", "ceo@corp.co", ["wt-owners"])
+    uid_ceo = (await db.fetchone("SELECT id FROM users WHERE email='ceo@corp.co'"))["id"]
+    check("E1: adopţia SSO a contului cu parolă locală NU primeşte Owner din grup",
+          ("owner", "all", "", "sso") not in await sso_set("ceo@corp.co"),
+          str(await sso_set("ceo@corp.co")))
+    check("E1: …auditat ca sso.sync.skippedLocalPassword", (await db.fetchone(
+        "SELECT COUNT(*) AS c FROM audit_log WHERE detail LIKE 'sso.sync.skippedLocalPassword%'"))["c"] >= 1)
+    c = U.client()
+    r = await c.post("/api/login", json={"email": "ceo@corp.co", "password": "AdminKnows-123!"})
+    me = (await c.get("/api/me/permissions")).json() if r.status_code == 200 else {}
+    check("E1: login cu parola plantată nu dă Owner", not me.get("owner") and me.get("bindings") == [],
+          "%s %s" % (r.status_code, me))
+    await c.aclose()
+    row = next(u for u in (await owner.get("/api/users")).json() if u["email"] == "ceo@corp.co")
+    check("E1: lista de conturi arată că are parolă locală", row.get("local_password") is True
+          and row.get("sso") is True, str(row))
+    # (a) Admin nu poate pune/reseta parola unui alt cont: nicio rută nu o face, iar crearea
+    # unui cont cu un email existent e refuzată
+    r = await adm.post("/api/users", json={"email": "ceo@corp.co", "password": "AltaParola-123!",
+                                           "current_password": PW})
+    check("(a) Admin nu poate re-crea / suprascrie contul (409)", r.status_code == 409)
+    adm_id = (await db.fetchone("SELECT id FROM users WHERE email='adm@x.co'"))["id"]
+    await db.execute("UPDATE web_sessions SET device_new=0 WHERE user_id=?", adm_id)
+    h0 = (await db.fetchone("SELECT password_hash FROM users WHERE id=?", uid_ceo))["password_hash"]
+    r = await adm.post("/api/account", json={"current_password": PW, "new_password": "AdminNou-1234!"})
+    h1 = (await db.fetchone("SELECT password_hash FROM users WHERE id=?", uid_ceo))["password_hash"]
+    check("(a) /api/account schimbă doar contul propriu (parola CEO-ului neatinsă)",
+          r.status_code == 200 and h0 == h1, r.text[:120])
+    await db.execute("UPDATE users SET password_hash=? WHERE id=?", security.hash_password(PW), adm_id)
+    # passkey „plantat" de cine ştia parola
+    await db.execute("INSERT INTO webauthn_credentials(user_id, credential_id, public_key, created)"
+                     " VALUES(?,?,?,?)", uid_ceo, b"planted", b"pk", 1.0)
+    # omul îşi scoate parola locală (SSO-only) → abia atunci primeşte rolurile din grupuri
+    r = await account_post(ceo, uid_ceo, {"remove_password": True})
+    check("scoaterea parolei cere re-auth SSO (403 account.ssoReauth fără fereastră)",
+          r.status_code == 403 and U.code(r) == "account.ssoReauth", r.text[:120])
+    await sso_stepup(ceo, "sub-ceo", "ceo@corp.co", ["wt-owners"])
+    r = await account_post(ceo, uid_ceo, {"remove_password": True})
+    check("cu fereastra SSO: parola locală scoasă", r.status_code == 200, r.text[:120])
+    check("…passkey-ul plantat e revocat odată cu ea", not await db.fetchone(
+        "SELECT 1 FROM webauthn_credentials WHERE user_id=?", uid_ceo))
+    c = U.client()
+    r = await c.post("/api/login", json={"email": "ceo@corp.co", "password": "AdminKnows-123!"})
+    check("…parola plantată nu mai deschide contul", r.status_code == 401, str(r.status_code))
+    await c.aclose()
+    await sso_login("sub-ceo", "ceo@corp.co", ["wt-owners"])
+    check("SSO-only: acum grupul îi dă Owner", ("owner", "all", "", "sso") in await sso_set("ceo@corp.co"))
+    # (b) setarea unei parole locale scoate IMEDIAT rolurile din grupuri
+    ceo = await sso_login("sub-ceo", "ceo@corp.co", ["wt-owners"])
+    await sso_stepup(ceo, "sub-ceo", "ceo@corp.co", ["wt-owners"])
+    ep = authz.epoch()
+    r = await account_post(ceo, uid_ceo, {"new_password": "CeoNoua-12345!"})
+    check("(b) parolă locală nouă: rolurile din grupuri pleacă imediat (+ epoch)",
+          r.status_code == 200 and ("owner", "all", "", "sso") not in await sso_set("ceo@corp.co")
+          and authz.epoch() > ep, "%s %s" % (r.status_code, r.text[:120]))
+    await sso_login("sub-ceo", "ceo@corp.co", ["wt-owners"])
+    check("(b) …şi nu revin la următorul login SSO", ("owner", "all", "", "sso")
+          not in await sso_set("ceo@corp.co"))
+    await ceo.aclose()
+    # (c) şterge-şi-replantează
+    r = await add_map(adm, "wt-ops2", "operator", "folder", "prod")
+    await sso_login("sub-dana", "dana@x.co", ["wt-ops2"])
+    uid_dana = (await db.fetchone("SELECT id FROM users WHERE email='dana@x.co'"))["id"]
+    check("(c) setup: dana (SSO) are Operator din grup",
+          ("operator", "folder", "prod", "sso") in await sso_set("dana@x.co"))
+    r = await adm.post("/api/users/%d/delete" % uid_dana, json={"current_password": PW})
+    r2 = await adm.post("/api/users", json={"email": "dana@x.co", "password": "AdminKnows-123!",
+                                            "current_password": PW})
+    check("(c) setup: Admin şterge şi replantează contul", r.status_code == 200 and r2.status_code == 200)
+    await sso_login("sub-dana", "dana@x.co", ["wt-ops2"])
+    check("(c) contul replantat (parolă locală) NU primeşte rolul din grup",
+          await sso_set("dana@x.co") == set(), str(await sso_set("dana@x.co")))
+
+    # ── E2: ştergerea unei mapări nu atinge conturi care au mai mult decât tine ─────────
+    vault = await db.execute(
+        "INSERT INTO roles(key, name, description, perms, builtin, created, updated)"
+        " VALUES(NULL,'Vault2','','[\"backups.manage\",\"host.view\"]',0,0,0)")
+    vid = await U.add_user("vaultkeeper@x.co")
+    await db.execute("INSERT INTO role_bindings(user_id, role_id, scope_kind, scope_value, source,"
+                     " created) VALUES(?,?,'all','','manual',0)", vid, vault)
+    await db.execute("UPDATE users SET sso_subject='sub-vk', local_password=0 WHERE id=?", vid)
+    authz.bump_epoch()
+    await sso_login("sub-vk", "vaultkeeper@x.co", ["wt-ops2"])
+    check("E2 setup: vaultkeeper are Operator sso", ("operator", "folder", "prod", "sso")
+          in await sso_set("vaultkeeper@x.co"))
+    mid = await map_id("wt-ops2")
+    r = await adm.post("/api/settings/oidc-roles/%d/delete" % mid, json={"current_password": PW})
+    check("E2: Admin NU poate şterge maparea (ar scoate rolul unui cont care îl depăşeşte)",
+          r.status_code == 403 and U.code(r) == "authz.outranked"
+          and (r.json().get("vars") or {}).get("n") == 1, r.text[:160])
+    check("E2: …nimic nu s-a schimbat (maparea şi legătura rămân)", await map_id("wt-ops2") == mid
+          and ("operator", "folder", "prod", "sso") in await sso_set("vaultkeeper@x.co"))
+    r = await owner.post("/api/settings/oidc-roles/%d/delete" % mid, json={"current_password": OPW})
+    check("E2: un Owner o poate şterge (şi legătura pleacă)", r.status_code == 200
+          and ("operator", "folder", "prod", "sso") not in await sso_set("vaultkeeper@x.co"))
+
+    # ── E3: fără alias-uri prin normalizare (claim-ul se compară brut) ───────────────────
+    await sso_login("sub-bob", "bob@x.co", ["wt-owners "])
+    check("E3: claim `wt-owners ` (spaţiu final) NU e `wt-owners`",
+          ("owner", "all", "", "sso") not in await sso_set("bob@x.co"))
+    r = await add_map(owner, "café", "viewer", "host", str(b), pw=OPW)
+    await sso_login("sub-bob", "bob@x.co", ["cafe\u0301"])
+    check("E3: claim NFD `cafe\u0301` NU e maparea NFC `café`",
+          ("viewer", "host", str(b), "sso") not in await sso_set("bob@x.co"))
+    await sso_login("sub-bob", "bob@x.co", ["café"])
+    check("E3: …forma exactă se potriveşte", ("viewer", "host", str(b), "sso") in await sso_set("bob@x.co"))
+    check("E3: [True, 5] → niciun grup (nu str())", oidc._claims_groups({"groups": [True, 5]}) == []
+          and not oidc._groups_readable({"groups": [True, 5]}))
+    check("E3: string simplu → necitibil, niciun grup", oidc._claims_groups({"groups": "wt-owners"}) == []
+          and not oidc._groups_readable({"groups": "wt-owners"}))
+    check("E3: listă imbricată → niciun grup", oidc._claims_groups({"groups": [["wt-owners"]]}) == [])
+    check("E3: claim absent → citibil (fără schimbare)", oidc._groups_readable({}))
+
+    # ── E5: `*` cu putere = doar Owner ──────────────────────────────────────────────────
+    for label, body, st in (
+            ("* → admin@all", mp("*", "admin"), 403),
+            ("* → operator@folder (⚑)", mp("*", "operator", "folder", "prod"), 403),
+            ("* → viewer@all (toată flota)", mp("*", "viewer"), 403)):
+        r = await adm.post("/api/settings/oidc-roles", json=body)
+        check("E5: Admin %s → %d ownerOnly" % (label, st), r.status_code == st
+              and U.code(r) == "authz.ownerOnly", r.text[:120])
+    await sso_login("sub-rand", "rand@x.co", [])
+    check("E5: un SSO oarecare fără grupuri nu devine nimic", await sso_set("rand@x.co") == set())
+    n0 = (await db.fetchone("SELECT COUNT(*) AS c FROM alerts WHERE severity='critical'"))["c"]
+    r = await add_map(owner, "*", "viewer", pw=OPW)
+    await asyncio.sleep(0.3)
+    n1 = (await db.fetchone("SELECT COUNT(*) AS c FROM alerts WHERE severity='critical'"))["c"]
+    check("E5: Owner poate mapa * → viewer@all, cu alertă CRITICĂ", r.status_code == 200 and n1 > n0,
+          "%s %s→%s" % (r.status_code, n0, n1))
+    r = await adm.post("/api/settings/oidc-roles/%d/delete" % await map_id("*"),
+                       json={"current_password": PW})
+    check("E5: …şi doar un Owner o scoate", r.status_code == 403 and U.code(r) == "authz.ownerOnly")
+    r = await owner.post("/api/settings/oidc-roles/%d/delete" % await map_id("*"),
+                         json={"current_password": OPW})
+    check("E5: Owner o scoate", r.status_code == 200, r.text[:120])
+
+
 async def main():
     check("SSO activ în test (configuraţia de env)", config.OIDC_ENABLED)
     await U.boot()
@@ -115,7 +275,11 @@ async def main():
         ("Admin → grup de 300 de caractere", adm, mp("g" * 300, "viewer"), 400, "ssoMap.badGroup"),
         ("Admin → rol necunoscut", adm, mp("g4", "superuser"), 400, "authz.badRole"),
         ("Admin → parolă greşită", adm, mp("g5", "viewer", pw="gresit"), 401, "auth.wrongPassword"),
-        ("Admin → operator@folder prod", adm, mp(" ops ", "operator", "folder", "prod"), 200, ""),
+        ("Admin → grup cu spaţii exterioare (normalizarea l-ar schimba)", adm,
+         mp(" ops ", "operator", "folder", "prod"), 400, "ssoMap.badGroup"),
+        ("Admin → grup în forma NFD", adm, mp("cafe\u0301", "viewer"), 400, "ssoMap.badGroup"),
+        ("Admin → grup cu zero-width", adm, mp("o\u200bps", "viewer"), 400, "ssoMap.badGroup"),
+        ("Admin → operator@folder prod", adm, mp("ops", "operator", "folder", "prod"), 200, ""),
         ("Admin → duplicat", adm, mp("ops", "operator", "folder", "prod"), 409, "ssoMap.exists"),
         ("Owner → owner@all", owner, mp("wt-owners", "owner", pw=OPW), 200, ""),
     ]
@@ -123,7 +287,7 @@ async def main():
         r = await c.post("/api/settings/oidc-roles", json=body)
         check("mapare: %s → %d" % (label, st), r.status_code == st and (not cd or U.code(r) == cd),
               "%s %s" % (r.status_code, r.text[:140]))
-    check("grupul mapat e normalizat (spaţiile exterioare scoase), nu altfel",
+    check("grupul mapat e stocat exact, fără variante normalizate",
           await map_id("ops") is not None and await map_id(" ops ") is None)
     vault = await db.execute(
         "INSERT INTO roles(key, name, description, perms, builtin, created, updated)"
@@ -159,16 +323,21 @@ async def main():
           ("operator", "folder", "prod", "sso") not in await sso_set("alice@x.co"))
     check("…legătura MANUALĂ rămâne", ("viewer", "host", str(b), "manual") in await sso_set("alice@x.co"))
     check("…epoca a crescut (terminalele deschise re-verifică acum)", authz.epoch() > ep)
+    await sso_login("sub-alice", "alice@x.co", ["ops"])
     await sso_login("sub-alice", "alice@x.co", ["  ops\t"])
-    check("spaţii exterioare în claim: se potriveşte", ("operator", "folder", "prod", "sso")
-          in await sso_set("alice@x.co"))
+    check("spaţii exterioare în claim: NU se potriveşte (exact, fără alias)",
+          ("operator", "folder", "prod", "sso") not in await sso_set("alice@x.co"))
     await sso_login("sub-alice", "alice@x.co", [])
     check("claim PREZENT dar gol → legăturile sso pleacă, cea manuală rămâne",
           await sso_set("alice@x.co") == {("viewer", "host", str(b), "manual")},
           str(await sso_set("alice@x.co")))
-    await sso_login("sub-alice", "alice@x.co", {"weird": "type"})
-    check("claim de tip necitibil = niciun grup (fail-closed)",
-          await sso_set("alice@x.co") == {("viewer", "host", str(b), "manual")})
+    for bad in ({"weird": "type"}, "ops", 5):
+        await sso_login("sub-alice", "alice@x.co", ["ops"])
+        await sso_login("sub-alice", "alice@x.co", bad)
+        check("claim de tip necitibil (%s) = niciun grup (fail-closed)" % type(bad).__name__,
+              await sso_set("alice@x.co") == {("viewer", "host", str(b), "manual")})
+    check("…şi e auditat", (await db.fetchone(
+        "SELECT COUNT(*) AS c FROM audit_log WHERE detail LIKE 'SSO groups claim unreadable%'"))["c"] >= 3)
     big = ["g%05d" % i for i in range(6000)]
     big[5500] = "ops"
     await sso_login("sub-alice", "alice@x.co", big)
@@ -270,6 +439,8 @@ async def main():
     check("…ştergerea hostului reuşeşte", r.status_code == 200, "%s %s" % (r.status_code, r.text[:120]))
     check("…şi ia maparea cu ea (un id refolosit nu moşteneşte accesul)", await map_id("gamma-team") is None)
 
+    await review_regressions(owner, adm, a, b)
+
     for c in (owner, adm, sadm, vw, alice, bob):
         await c.aclose()
     await db.close()
@@ -285,6 +456,7 @@ async def main():
         con.executescript("""
             ALTER TABLE users DROP COLUMN sso_groups;
             ALTER TABLE users DROP COLUMN sso_synced;
+            ALTER TABLE users DROP COLUMN local_password;
             DROP INDEX IF EXISTS idx_rb_role;
             DROP TABLE oidc_group_roles;
             CREATE TABLE oidc_group_roles (
@@ -301,7 +473,7 @@ async def main():
         await db.connect()
         ucols = {r["name"] for r in await db.fetchall("PRAGMA table_info(users)")}
         mcols = {r["name"] for r in await db.fetchall("PRAGMA table_info(oidc_group_roles)")}
-        check("upgrade: coloanele noi apar", {"sso_groups", "sso_synced"} <= ucols
+        check("upgrade: coloanele noi apar", {"sso_groups", "sso_synced", "local_password"} <= ucols
               and {"created", "created_by_id"} <= mcols, "%s %s" % (ucols, mcols))
         row = await db.fetchone("SELECT grp, created FROM oidc_group_roles")
         check("…maparea veche e păstrată", row and row["grp"] == "legacy" and row["created"] == 0)

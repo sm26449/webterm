@@ -542,6 +542,11 @@ MIGRATIONS = [
     "ALTER TABLE users ADD COLUMN sso_groups TEXT",
     "ALTER TABLE users ADD COLUMN sso_synced REAL",
     "CREATE INDEX IF NOT EXISTS idx_rb_role ON role_bindings(role_id)",
+    # revizuirea 3.6.2: are contul o parolă LOCALĂ utilizabilă? 1 = da (implicit, inclusiv TOATE
+    # conturile de dinainte — fail-closed: nu ştim care cont SSO a fost provizionat şi care
+    # adoptat). Doar provizionarea SSO şi „scoate parola locală" pun 0. Cu 1, maparea grupurilor
+    # SSO nu-i ADAUGĂ niciun rol (ssomap.sync_user).
+    "ALTER TABLE users ADD COLUMN local_password INTEGER DEFAULT 1",
 ]
 
 # tabele adăugate ulterior (executeScript de mai sus le creează pe DB-uri noi;
