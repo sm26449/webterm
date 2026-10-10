@@ -245,7 +245,7 @@ export default function Walkthrough(props: { auto: boolean; onClose: () => void 
             type="checkbox"
             checked={dontShow}
             onChange={(e) => setDontShow(e.target.checked)}
-            className="h-4 w-4 rounded-md accent-sky-600"
+            className="h-4 w-4 rounded-md accent-sky-600 [@media(pointer:coarse)]:h-6 [@media(pointer:coarse)]:w-6"
           />
           <span>{t('walkthrough.dontShow')}</span>
         </label>
