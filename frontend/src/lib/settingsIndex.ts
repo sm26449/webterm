@@ -83,8 +83,11 @@ export const SETTINGS_INDEX: readonly SettingSection[] = [
   // ── Aspect ──
   { id: 'language', cat: 'aspect', titleKey: 'settings.language', hintKey: 'settings.languageHint',
     keywords: 'language english romanian locale limba engleza romana' },
-  { id: 'theme', cat: 'aspect', titleKey: 'settings.theme',
-    keywords: 'theme dark light mode midnight aurora tema intunecat luminos' },
+  { id: 'theme', cat: 'aspect', titleKey: 'settings.theme', hintKey: 'theme.styleHint',
+    keywords: 'theme style look appearance midnight aurora macos mac apple windows win11 fluent mica '
+      + 'gnome adwaita libadwaita linux ubuntu vibrancy tema stil aspect' },
+  { id: 'themeMode', cat: 'aspect', titleKey: 'theme.mode',
+    keywords: 'dark light mode auto system night day appearance mod intunecat luminos noapte zi sistem' },
   { id: 'termColors', cat: 'aspect', titleKey: 'settings.termColors',
     keywords: 'terminal colors color scheme palette iterm vscode import culori schema paleta' },
   { id: 'watermark', cat: 'aspect', titleKey: 'settings.watermark', hintKey: 'settings.watermarkHint',

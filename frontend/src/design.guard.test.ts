@@ -34,6 +34,7 @@ const ALLOW: Record<string, { match: string; why: string }[]> = {
     { match: '↑', why: 'tastă: legenda de tastatură din subsolul paletei (<kbd>↑</kbd>)' },
     { match: '↓', why: 'tastă: legenda de tastatură din subsolul paletei (<kbd>↓</kbd>)' },
     { match: '↵', why: 'tastă: legenda de tastatură din subsolul paletei (<kbd>↵</kbd>)' },
+    { match: '→', why: 'notaţie în subtitlul comutării de temă („Midnight → Aurora"), nu pictogramă' },
   ],
   './components/KeyboardHelp.tsx': [
     { match: '←', why: 'tastă: combinaţia Alt+Shift+←/→ din lista de scurtături' },
@@ -165,6 +166,22 @@ describe('design system: garda de regresie', () => {
   it('primitivele (Button/IconButton/Badge) primesc în className doar clase de aşezare (U24)', () => {
     const hits = Object.entries(files).flatMap(([f, s]) => primitiveClassHits(f, s))
     expect(fmt(hits)).toBe('')
+  })
+  // 5. (3.6.4) temele: „e deschisă?" se întreabă prin isLight(), nu prin id-ul Aurora. Un
+  // `theme === 'macos'` nou ar trata macOS/Windows/GNOME light ca teme întunecate (editor negru,
+  // watermark alb pe alb). La fel în CSS: regulile „doar pe deschis" stau pe [data-mode='light'].
+  it('fără teste pe id-uri de temă în afara lib/theme*.ts (foloseşte isLight)', () => {
+    const THEME_ID_CMP = /(?:\btheme\w*|currentTheme\(\))\s*[!=]==?\s*['"](?:macos|dark|light|(?:mac|win|gnome)-(?:light|dark))['"]|[!=]==?\s*['"]macos['"]/
+    const hits = Object.entries(files)
+      .filter(([f]) => !/^\.\/lib\/theme(Model)?\.ts$/.test(f))
+      .flatMap(([f, s]) => s.split('\n').map((l, i) => ({ file: f, line: i + 1, text: l.trim() }))
+        .filter((x) => THEME_ID_CMP.test(x.text)))
+    expect(fmt(hits)).toBe('')
+  })
+  it("index.css: [data-theme='macos'] doar pentru tokenii Aurora (restul pe [data-mode])", () => {
+    const css = (import.meta.glob('./index.css', { query: '?raw', import: 'default', eager: true }) as Record<string, string>)['./index.css']
+    const sel = [...css.matchAll(/:root\[data-theme='macos'\]([^,{]*)[,{]/g)].map((m) => m[1].trim())
+    expect(sel.filter((s) => s !== '' && s !== '.wt-workspace .wt-canvas')).toEqual([])
   })
   it('garda de primitive prinde ce trebuie (auto-test)', () => {
     const probe = primitiveClassHits('./probe.tsx',

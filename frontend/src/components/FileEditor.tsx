@@ -5,7 +5,7 @@ import { errText, api, ensureStepup } from '../lib/api'
 import { detectLanguage } from '../lib/editorLang'
 import { useI18n } from '../lib/i18n'
 import { useFocusTrap } from '../lib/useFocusTrap'
-import { useTheme } from '../lib/theme'
+import { isLight, useTheme } from '../lib/theme'
 import { fmtBytes } from '../lib/uploads'
 import { notifyToast } from '../lib/notify'
 import ConfirmModal from './ConfirmModal'
@@ -72,10 +72,10 @@ export default function FileEditor(props: {
     return () => window.removeEventListener('beforeunload', onUnload)
   }, [dirty])
 
-  // Tema Monaco urmează tema aplicației (Aurora/macos = deschisă). setTheme e global pentru
+  // Tema Monaco urmează tema aplicației (orice variantă deschisă → 'vs', vezi isLight). setTheme e global pentru
   // toate instanțele, deci schimbarea din Settings se vede imediat, fără a re-crea editorul
   // (re-crearea ar pierde textul nesalvat) — de aceea tema inițială vine dintr-un ref.
-  const monacoTheme = theme === 'macos' ? 'vs' : 'vs-dark'
+  const monacoTheme = isLight(theme) ? 'vs' : 'vs-dark'
   const themeRef = useRef(monacoTheme)
   themeRef.current = monacoTheme
   useEffect(() => { monaco.editor.setTheme(monacoTheme) }, [monacoTheme])

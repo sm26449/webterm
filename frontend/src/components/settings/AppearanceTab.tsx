@@ -4,9 +4,10 @@ import { useI18n } from '../../lib/i18n'
 import { useSectionVisible } from '../../lib/perms'
 import { LANGS, LANG_ORDER } from '../../lang'
 import { useTheme } from '../../lib/theme'
+import { FAMILIES, VARIANTS, type Swatch, type ThemeMode } from '../../lib/themeModel'
 import {
-  allSchemes, clearCustomTheme, COLOR_KEYS, currentTermScheme,
-  customTheme, parseThemeFile, saveCustomTheme, setTermScheme, termTheme,
+  allSchemes, clearCustomTheme, COLOR_KEYS, currentTermScheme, explicitTermScheme, FAMILY_SCHEME,
+  customTheme, followThemeTermScheme, parseThemeFile, saveCustomTheme, setTermScheme, termTheme,
 } from '../../lib/termtheme'
 import { heading } from './ui'
 import { Button } from '../ui'
@@ -18,8 +19,14 @@ import NotLoaded from './NotLoaded'
 export default function AppearanceTab(props: { onAccountChanged: () => void }) {
   const { t, lang, setLang } = useI18n()
   const vis = useSectionVisible()   // 3.6: secţiunile fără permisiunea globală nu apar
-  const [themePrefValue, , setTheme] = useTheme()
+  const [pref, , setTheme] = useTheme()
   const [scheme, setScheme] = useState(currentTermScheme())
+  // „Potrivit cu tema" (fără alegere explicită): schema terminalului urmează familia temei
+  const [schemeAuto, setSchemeAuto] = useState(explicitTermScheme() === null)
+  const pickScheme = (id: string) => { setTermScheme(id); setScheme(id); setSchemeAuto(false) }
+  const followTheme = () => { followThemeTermScheme(); setSchemeAuto(true); setScheme(FAMILY_SCHEME[pref.family]) }
+  // altă familie de temă → altă schemă implicită (contează pentru editorul de schemă proprie)
+  useEffect(() => { if (schemeAuto) setScheme(FAMILY_SCHEME[pref.family]) }, [schemeAuto, pref.family])
   const [editing, setEditing] = useState(false)     // editorul de schemă proprie
   const [draft, setDraft] = useState<Record<string, string>>({})
   const [importErr, setImportErr] = useState('')
@@ -65,16 +72,14 @@ export default function AppearanceTab(props: { onAccountChanged: () => void }) {
     setDraft(next)
     // preview LIVE în toate terminalele deschise (mecanismul wt-termscheme)
     saveCustomTheme({ ...next, cursorAccent: next.background })
-    setTermScheme('custom')
-    setScheme('custom')
+    pickScheme('custom')
   }
   const importTheme = async (file: File) => {
     setImportErr('')
     try {
       const theme = parseThemeFile(file.name, await file.text())
       saveCustomTheme(theme)
-      setTermScheme('custom')
-      setScheme('custom')
+      pickScheme('custom')
       setDraft(Object.fromEntries(COLOR_KEYS.map((k) => [k, (theme as Record<string, string>)[k] ?? '#000000'])))
       setEditing(true)
     } catch (e) {
@@ -102,18 +107,49 @@ export default function AppearanceTab(props: { onAccountChanged: () => void }) {
       </section>
 
       <section data-setting-id="theme">
-        {/* ── Temă ── */}
-        <h3 className={heading}>{t('settings.theme')}</h3>
-        <div className="mt-2 flex gap-2">
-          {([['macos', 'Aurora'], ['dark', 'Midnight'], ['auto', t('settings.themeAuto')]] as const).map(([value, label]) => (
-            <button key={value} onClick={() => setTheme(value)} aria-pressed={themePrefValue === value}
-              className={`rounded-md px-3 py-1.5 text-sm ring-1 ${
-                themePrefValue === value
-                  ? 'bg-sky-600 text-white ring-sky-600'
-                  : 'bg-ink-800 text-slate-300 ring-ink-700 hover:bg-ink-700'}`}>
-              {label}
-            </button>
-          ))}
+        {/* ── Temă: familia (stilul) ── */}
+        <h3 className={heading} id="theme-style-h">{t('settings.theme')}</h3>
+        <p className="mt-1 text-xs text-slate-500">{t('theme.styleHint')}</p>
+        <div role="group" aria-labelledby="theme-style-h" className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
+          {FAMILIES.map((f) => {
+            const on = pref.family === f.id
+            return (
+              <button key={f.id} onClick={() => setTheme({ family: f.id, mode: pref.mode })} aria-pressed={on}
+                data-theme-family={f.id}
+                className={`flex flex-col gap-2 rounded-xl p-2 text-left ring-1 transition ${
+                  on ? 'bg-ink-800 ring-2 ring-sky-500' : 'bg-ink-900 ring-ink-700 hover:bg-ink-800'}`}>
+                <span className="flex h-12 w-full overflow-hidden rounded-md ring-1 ring-ink-700" aria-hidden="true">
+                  <ThemePreview s={VARIANTS[f.light].swatch} />
+                  <ThemePreview s={VARIANTS[f.dark].swatch} />
+                </span>
+                <span className="block px-0.5">
+                  <span className="block text-sm font-medium text-slate-200">{t(`theme.family.${f.id}`)}</span>
+                  <span className="block text-xs text-slate-500">{t(`theme.familySub.${f.id}`)}</span>
+                </span>
+              </button>
+            )
+          })}
+        </div>
+      </section>
+
+      <section data-setting-id="themeMode">
+        {/* ── Temă: modul (deschis / închis / după sistem), în familia aleasă ── */}
+        <h4 id="theme-mode-h" className="mt-4 text-sm font-medium text-slate-300">{t('theme.mode')}</h4>
+        <div role="group" aria-labelledby="theme-mode-h" className="mt-2 flex flex-wrap gap-2">
+          {(['light', 'dark', 'auto'] as const satisfies readonly ThemeMode[]).map((mode) => {
+            const label = mode === 'auto' ? t('settings.themeAuto') : t(`theme.mode.${mode}`)
+            // pe WebTerm modurile au nume proprii (Aurora / Midnight) — rămân vizibile
+            const proper = pref.family === 'webterm' && mode !== 'auto' ? (mode === 'light' ? 'Aurora' : 'Midnight') : ''
+            return (
+              <button key={mode} onClick={() => setTheme({ family: pref.family, mode })} aria-pressed={pref.mode === mode}
+                className={`rounded-md px-3 py-1.5 text-sm ring-1 ${
+                  pref.mode === mode
+                    ? 'bg-sky-600 text-white ring-sky-600'
+                    : 'bg-ink-800 text-slate-300 ring-ink-700 hover:bg-ink-700'}`}>
+                {label}{proper && <span> · {proper}</span>}
+              </button>
+            )
+          })}
         </div>
       </section>
 
@@ -121,10 +157,17 @@ export default function AppearanceTab(props: { onAccountChanged: () => void }) {
         {/* ── Schema de culori a terminalului ── */}
         <h3 className={heading}>{t('settings.termColors')}</h3>
         <div className="mt-2 flex flex-wrap gap-2">
+          <button onClick={followTheme} aria-pressed={schemeAuto} title={t('settings.termMatchThemeTitle')}
+            className={`flex items-center gap-2 rounded-md px-3 py-1.5 text-sm ring-1 ${
+              schemeAuto
+                ? 'bg-sky-600 text-white ring-sky-600'
+                : 'bg-ink-800 text-slate-300 ring-ink-700 hover:bg-ink-700'}`}>
+            {t('settings.termMatchTheme')}
+          </button>
           {allSchemes().map((s) => (
-            <button key={s.id} onClick={() => { setTermScheme(s.id); setScheme(s.id) }} aria-pressed={scheme === s.id}
+            <button key={s.id} onClick={() => pickScheme(s.id)} aria-pressed={!schemeAuto && scheme === s.id}
               className={`flex items-center gap-2 rounded-md px-3 py-1.5 text-sm ring-1 ${
-                scheme === s.id
+                !schemeAuto && scheme === s.id
                   ? 'bg-sky-600 text-white ring-sky-600'
                   : 'bg-ink-800 text-slate-300 ring-ink-700 hover:bg-ink-700'}`}>
               <span className="flex gap-0.5" aria-hidden="true">
@@ -151,7 +194,7 @@ export default function AppearanceTab(props: { onAccountChanged: () => void }) {
           <input ref={fileRef} type="file" accept=".itermcolors,.json,application/json,text/xml" className="hidden"
             onChange={(e) => e.target.files?.[0] && importTheme(e.target.files[0])} />
           {customTheme() && (
-            <button onClick={() => { clearCustomTheme(); setTermScheme('webterm-dark'); setScheme('webterm-dark'); setEditing(false) }}
+            <button onClick={() => { clearCustomTheme(); followTheme(); setEditing(false) }}
               className="rounded-md px-2 py-1.5 text-xs wt-danger hover:bg-ink-800">
               {t('settings.deleteMyScheme')}
             </button>
@@ -243,5 +286,19 @@ export default function AppearanceTab(props: { onAccountChanged: () => void }) {
         </>)}
       </section>
     </div>
+  )
+}
+
+/** Miniatura unei variante în cardul de familie: sidebar + suprafaţă + accent (decorativ, aria-hidden). */
+function ThemePreview({ s }: { s: Swatch }) {
+  return (
+    <span className="flex flex-1" style={{ background: s.bg }}>
+      <span className="w-1/4" style={{ background: s.side, borderRight: `1px solid ${s.line}` }} />
+      <span className="flex flex-1 flex-col justify-center gap-1 px-1.5">
+        <span className="block h-1.5 w-3/4 rounded-full" style={{ background: s.text, opacity: 0.7 }} />
+        <span className="block h-3 rounded-md" style={{ background: s.surface, border: `1px solid ${s.line}` }} />
+        <span className="block h-1.5 w-1/3 rounded-full" style={{ background: s.accent }} />
+      </span>
+    </span>
   )
 }

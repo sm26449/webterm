@@ -1,53 +1,74 @@
 import { useEffect, useState } from 'react'
 import { lsGet, lsSet } from './storage'
+import {
+  isLight, parseThemePref, resolveVariant, serializeThemePref, THEME_KEY, VARIANTS,
+  type ThemePref, type ThemeVariant,
+} from './themeModel'
 
-export type Theme = 'dark' | 'macos'
-/** ce a ales utilizatorul: o temă fixă sau „auto" (după setarea sistemului) */
-export type ThemePref = Theme | 'auto'
+/* Aplicarea temei pe <html> (modelul — familie × mod — e în themeModel.ts).
+   `data-theme` = varianta (tokenii din index.css), `data-family` = familia (raze, crom, efecte),
+   `data-mode` = light/dark efectiv (regulile care depind doar de „deschis vs închis"). */
 
-const systemTheme = (): Theme =>
-  window.matchMedia?.('(prefers-color-scheme: light)').matches ? 'macos' : 'dark'
+export type { ThemeFamily, ThemeMode, ThemePref, ThemeVariant } from './themeModel'
+export { isLight } from './themeModel'
+/** compat: „tema efectivă" = varianta */
+export type Theme = ThemeVariant
+
+const hasWindow = typeof window !== 'undefined'
+const mq = hasWindow && typeof window.matchMedia === 'function'
+  ? window.matchMedia('(prefers-color-scheme: light)') : null
+const systemLight = (): boolean => !!mq?.matches
 
 export function themePref(): ThemePref {
-  const v = lsGet('wt_theme')
-  return v === 'macos' || v === 'dark' || v === 'auto' ? v : 'dark'
+  return parseThemePref(lsGet(THEME_KEY))
 }
 
-export function currentTheme(): Theme {
-  // Midnight (dark) e tema implicită — o singură paletă întunecată coerentă,
-  // rail + workspace din aceeași familie. „auto" urmează sistemul.
-  const p = themePref()
-  return p === 'auto' ? systemTheme() : p
+export function currentTheme(): ThemeVariant {
+  // Midnight (WebTerm dark) e tema implicită. „auto" urmează sistemul, în familia aleasă.
+  return resolveVariant(themePref(), systemLight())
 }
 
-/** Aplică preferința (fixă sau „auto") și o persistă. */
-export function applyTheme(pref: ThemePref): void {
-  lsSet('wt_theme', pref)
-  paintTheme(pref === 'auto' ? systemTheme() : pref)
+function paintTheme(v: ThemeVariant): void {
+  const root = document.documentElement
+  root.dataset.theme = v
+  root.dataset.family = VARIANTS[v].family
+  root.dataset.mode = isLight(v) ? 'light' : 'dark'
+  // bara de titlu a ferestrei PWA / cromul browserului mobil urmează varianta — altfel rămâne
+  // neagră (valoarea statică din index.html) peste un UI deschis
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', VARIANTS[v].themeColor)
+}
+
+function notify(): void {
   window.dispatchEvent(new Event('wt-theme'))
+  // schema de terminal implicită urmează familia (termtheme.ts) → terminalele deschise se repictează
+  window.dispatchEvent(new Event('wt-termscheme'))
 }
 
-function paintTheme(theme: Theme): void {
-  document.documentElement.dataset.theme = theme
-  // bara de titlu a ferestrei PWA / cromul browserului mobil urmează tema —
-  // altfel rămâne neagră (valoarea statică din index.html) peste UI-ul alb Aurora
-  document
-    .querySelector('meta[name="theme-color"]')
-    ?.setAttribute('content', theme === 'macos' ? '#edf0f7' : '#0b0e14')
+/** La pornire: pictează preferinţa salvată FĂRĂ s-o rescrie. (Până în 3.6.3 pornirea scria tema
+    efectivă înapoi în storage, deci „auto" devenea „dark"/„macos" la primul reload.) */
+export function initTheme(): void {
+  paintTheme(currentTheme())
+}
+
+/** Aplică preferinţa (familie + mod) şi o persistă. */
+export function applyTheme(pref: ThemePref): void {
+  lsSet(THEME_KEY, serializeThemePref(pref))
+  paintTheme(resolveVariant(pref, systemLight()))
+  notify()
 }
 
 // „auto": urmărește schimbarea setării de sistem cât timp e activă preferința
-window.matchMedia?.('(prefers-color-scheme: light)').addEventListener?.('change', () => {
-  if (themePref() === 'auto') {
-    paintTheme(systemTheme())
-    window.dispatchEvent(new Event('wt-theme'))
+mq?.addEventListener?.('change', () => {
+  if (themePref().mode === 'auto') {
+    paintTheme(currentTheme())
+    notify()
   }
 })
 
-/** [preferința aleasă, tema efectivă, setter] */
-export function useTheme(): [ThemePref, Theme, (t: ThemePref) => void] {
+/** [preferința aleasă, varianta efectivă, setter] */
+export function useTheme(): [ThemePref, ThemeVariant, (p: ThemePref) => void] {
   const [pref, setPref] = useState<ThemePref>(themePref)
-  const [theme, setTheme] = useState<Theme>(currentTheme)
+  const [theme, setTheme] = useState<ThemeVariant>(currentTheme)
   useEffect(() => {
     const onChange = () => { setPref(themePref()); setTheme(currentTheme()) }
     window.addEventListener('wt-theme', onChange)

@@ -71,7 +71,8 @@ describe('audit UI 3.6.1 — contrast şi siguranţă', () => {
   it('U08: --viz-warn Aurora = #b45309 în :root ŞI în suprascrierea .wt-canvas; Midnight neschimbat', () => {
     const css = file('./index.css')
     const warn = [...css.matchAll(/--viz-warn:\s*([\d ]+);/g)].map((m) => m[1].trim())
-    expect(warn.filter((v) => v === '180 83 9')).toHaveLength(2)
+    // Aurora × 2 (:root + .wt-canvas) + variantele deschise macOS/Windows 11/GNOME (3.6.4, câte un bloc)
+    expect(warn.filter((v) => v === '180 83 9')).toHaveLength(5)
     expect(warn).not.toContain('217 119 6')
     expect(warn.filter((v) => v === '251 191 36').length).toBeGreaterThanOrEqual(2)
   })

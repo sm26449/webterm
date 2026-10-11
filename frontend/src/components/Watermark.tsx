@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { WatermarkConfig } from '../lib/api'
-import { currentTheme } from '../lib/theme'
+import { currentTheme, isLight } from '../lib/theme'
 import { fmtTs, fmtTime } from '../lib/tz'
 
 /** ${email} ${host} ${date} ${time} → text; time/date sunt „live" (refresh 60s). */
@@ -20,7 +20,7 @@ function resolveTemplate(tpl: string, vars: { email?: string; host?: string }): 
 /** Un singur tile canvas (text rotit) → dataURL; overlay-ul îl repetă pe tot viewportul. */
 function makeTile(text: string, cfg: WatermarkConfig): string {
   const dpr = Math.min(2, window.devicePixelRatio || 1)   // claritate pe retina/mobil, plafonat
-  const dark = currentTheme() === 'dark'
+  const dark = !isLight(currentTheme())
   const color = dark ? `rgba(255,255,255,${cfg.opacity})` : `rgba(15,23,42,${cfg.opacity})`
   const font = `${cfg.fontSize}px ui-sans-serif, system-ui, -apple-system, sans-serif`
 

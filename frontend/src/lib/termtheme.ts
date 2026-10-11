@@ -1,11 +1,15 @@
 import type { ITheme } from '@xterm/xterm'
 import { lsGet, lsRemove, lsSet } from './storage'
+import { themePref } from './theme'
+import type { ThemeFamily } from './themeModel'
 
 /** Terminal color schemes. The 16 ANSI colors are what an operator actually sees
    99% of the time (errors, `git diff`, `ls`, vim, prompts) — xterm's built-in
    defaults are not calibrated for a near-black background, so we ship a proper
    palette. Selectable independently of the UI theme, persisted in localStorage. */
-export type TermSchemeId = 'webterm-dark' | 'gruvbox-dark' | 'catppuccin-mocha'
+export type TermSchemeId =
+  | 'webterm-dark' | 'gruvbox-dark' | 'catppuccin-mocha'
+  | 'macos-terminal' | 'campbell' | 'tango-dark'
 
 export const TERM_SCHEMES: { id: TermSchemeId; name: string; theme: ITheme }[] = [
   {
@@ -47,9 +51,62 @@ export const TERM_SCHEMES: { id: TermSchemeId; name: string; theme: ITheme }[] =
       brightBlue: '#89b4fa', brightMagenta: '#f5c2e7', brightCyan: '#94e2d5', brightWhite: '#a6adc8',
     },
   },
+  // ── 3.6.4: paletele familiilor de temă (schema implicită când alegi familia, vezi FAMILY_SCHEME).
+  // Culorile ANSI sunt cele publice ale fiecărui terminal; fundalul rămâne închis, ca toată zona
+  // de terminal (DESIGN-SYSTEM.md → Themes). Numele descriu stilul, nu sunt mărci.
+  {
+    // Terminal.app (culorile ANSI ale profilului implicit), pe fundalul închis al modului dark
+    id: 'macos-terminal',
+    name: 'macOS Terminal style',
+    theme: {
+      background: '#1e1e1e', foreground: '#e5e5e5',
+      cursor: '#a5a5a5', cursorAccent: '#1e1e1e',
+      selectionBackground: '#3f638b', selectionForeground: '#ffffff',
+      black: '#000000', red: '#c23621', green: '#25bc24', yellow: '#adad27',
+      blue: '#492ee1', magenta: '#d338d3', cyan: '#33bbc8', white: '#cbcccd',
+      brightBlack: '#818383', brightRed: '#fc391f', brightGreen: '#31e722', brightYellow: '#eaec23',
+      brightBlue: '#5833ff', brightMagenta: '#f935f8', brightCyan: '#14f0f0', brightWhite: '#e9ebeb',
+    },
+  },
+  {
+    // Windows Terminal — „Campbell", schema implicită
+    id: 'campbell',
+    name: 'Campbell',
+    theme: {
+      background: '#0c0c0c', foreground: '#cccccc',
+      cursor: '#ffffff', cursorAccent: '#0c0c0c',
+      selectionBackground: '#3a3a3a', selectionForeground: '#ffffff',
+      black: '#0c0c0c', red: '#c50f1f', green: '#13a10e', yellow: '#c19c00',
+      blue: '#0037da', magenta: '#881798', cyan: '#3a96dd', white: '#cccccc',
+      brightBlack: '#767676', brightRed: '#e74856', brightGreen: '#16c60c', brightYellow: '#f9f1a5',
+      brightBlue: '#3b78ff', brightMagenta: '#b4009e', brightCyan: '#61d6d6', brightWhite: '#f2f2f2',
+    },
+  },
+  {
+    // paleta Tango (GNOME Terminal), pe fundalul închis libadwaita
+    id: 'tango-dark',
+    name: 'Tango',
+    theme: {
+      background: '#1d1d20', foreground: '#deddda',
+      cursor: '#deddda', cursorAccent: '#1d1d20',
+      selectionBackground: '#3d4d66', selectionForeground: '#ffffff',
+      black: '#2e3436', red: '#cc0000', green: '#4e9a06', yellow: '#c4a000',
+      blue: '#3465a4', magenta: '#75507b', cyan: '#06989a', white: '#d3d7cf',
+      brightBlack: '#555753', brightRed: '#ef2929', brightGreen: '#8ae234', brightYellow: '#fce94f',
+      brightBlue: '#729fcf', brightMagenta: '#ad7fa8', brightCyan: '#34e2e2', brightWhite: '#eeeeec',
+    },
+  },
 ]
 
-const DEFAULT: TermSchemeId = 'webterm-dark'
+/** Schema implicită a fiecărei familii de temă: fără o alegere explicită (`wt_term_scheme` lipsă),
+    terminalul urmează familia. WebTerm → `webterm-dark`, deci cine n-a ales nimic vede exact ce
+    vedea înainte de 3.6.4. */
+export const FAMILY_SCHEME: Record<ThemeFamily, TermSchemeId> = {
+  webterm: 'webterm-dark',
+  mac: 'macos-terminal',
+  win: 'campbell',
+  gnome: 'tango-dark',
+}
 
 // ── schemă proprie (editabilă din Setări / importată din iTerm2 sau VS Code) ──
 
@@ -100,13 +157,24 @@ export function allSchemes(): { id: string; name: string; theme: ITheme }[] {
     : TERM_SCHEMES
 }
 
-export function currentTermScheme(): string {
+/** Schema aleasă EXPLICIT (null = urmează familia temei). */
+export function explicitTermScheme(): string | null {
   const v = lsGet('wt_term_scheme')
-  return v && allSchemes().some((s) => s.id === v) ? v : DEFAULT
+  return v && allSchemes().some((s) => s.id === v) ? v : null
+}
+
+export function currentTermScheme(): string {
+  return explicitTermScheme() ?? FAMILY_SCHEME[themePref().family] ?? 'webterm-dark'
 }
 
 export function setTermScheme(id: string): void {
   lsSet('wt_term_scheme', id)
+  window.dispatchEvent(new Event('wt-termscheme'))
+}
+
+/** „Potrivit cu tema": şterge alegerea explicită → schema familiei temei. */
+export function followThemeTermScheme(): void {
+  lsRemove('wt_term_scheme')
   window.dispatchEvent(new Event('wt-termscheme'))
 }
 

@@ -7,7 +7,7 @@ import '@fontsource/jetbrains-mono/700.css'
 import App from './App'
 import TooltipLayer from './components/TooltipLayer'
 import './index.css'
-import { applyTheme, currentTheme } from './lib/theme'
+import { initTheme } from './lib/theme'
 import { showFailsafe } from './lib/failsafe'
 import { I18nProvider } from './lib/i18n'
 import { ConfirmProvider } from './lib/confirm'
@@ -26,7 +26,7 @@ window.addEventListener('error', (e) => {
   }
 }, true)
 
-applyTheme(currentTheme())
+initTheme()
 
 // După un deploy, hash-urile chunk-urilor lazy se schimbă: un tab lăsat deschis
 // (WebTerm ţine sesiunile în tmux, aşa că oamenii chiar fac asta) încearcă apoi

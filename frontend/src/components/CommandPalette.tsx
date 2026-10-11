@@ -1,7 +1,8 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { api, isEphemeralHost, AppLink, Host, Session, Snippet } from '../lib/api'
 import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
-import { applyTheme, currentTheme } from '../lib/theme'
+import { applyTheme, currentTheme, themePref } from '../lib/theme'
+import { resolveVariant, toggledPref, variantName } from '../lib/themeModel'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { useI18n } from '../lib/i18n'
 import { ExternalLinkIcon, FilesIcon, PlusIcon, ServerIcon, TerminalPromptIcon } from './Icons'
@@ -175,10 +176,11 @@ export default function CommandPalette(props: {
     })
     out.push({
       key: 'a:theme', kind: 'action', label: t('palette.toggleTheme'),
-      sub: currentTheme() === 'dark' ? 'Midnight → Aurora' : 'Aurora → Midnight',
+      // în familia aleasă: modul afişat → cel opus (Midnight ↔ Aurora pe WebTerm)
+      sub: `${variantName(currentTheme(), t)} → ${variantName(resolveVariant(toggledPref(themePref(), currentTheme()), false), t)}`,
       color: '#818cf8', hint: t('palette.hintAction'),
-      text: 'toggle theme aurora midnight dark light appearance',
-      run: () => applyTheme(currentTheme() === 'dark' ? 'macos' : 'dark'),
+      text: 'toggle theme aurora midnight dark light appearance macos windows gnome',
+      run: () => applyTheme(toggledPref(themePref(), currentTheme())),
     })
     out.push({
       key: 'a:settings', kind: 'action', label: t('palette.settings'), sub: t('palette.settingsSub'),

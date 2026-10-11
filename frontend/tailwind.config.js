@@ -12,9 +12,11 @@ export default {
     // `rounded-3xl` nu mai generează nimic. Garda (src/design.guard.test.ts) le prinde înainte.
     borderRadius: {
       none: '0',
-      md: '6px',
-      xl: '12px',
-      '2xl': '16px',
+      // valorile vin din tokenii familiei de temă (index.css: --r-md/--r-xl/--r-2xl; WebTerm =
+      // 6/12/16, macOS mai rotund, Windows 11 mai drept) — TREPTELE rămân aceleaşi trei
+      md: 'var(--r-md)',
+      xl: 'var(--r-xl)',
+      '2xl': 'var(--r-2xl)',
       full: '9999px',
     },
     // ── Scara tipografică (design system 3.5.7, docs/design/DESIGN-SYSTEM.md) ───────────────
@@ -87,15 +89,19 @@ export default {
         // mai distinctiv decât albastrul de sistem. Numele `sky` rămâne (îl
         // folosesc sute de clase), doar valorile trec pe indigo.
         sky: {
-          200: '#c7d2fe',
-          300: '#a5b4fc',
-          400: '#818cf8',
-          500: '#6366f1',
-          600: '#4f46e5', // alb pe el trece WCAG AA (~6.6:1)
-          700: '#4338ca',
-          800: '#312e81',
-          900: '#1e1b4b',
-          950: '#171449',
+          // 3.6.4: scara vine din familia de temă (index.css, --sky-*): WebTerm = indigo (valorile
+          // de mai jos), macOS/Windows 11/GNOME = albastrul de sistem al fiecăruia, cu ACEEAŞI
+          // luminanţă relativă pe fiecare treaptă — deci contrastele măsurate pe indigo rămân valabile
+          // (alb pe sky-600 ≈ 6,3:1 în toate familiile).
+          200: v('sky-200'),   // #c7d2fe
+          300: v('sky-300'),   // #a5b4fc
+          400: v('sky-400'),   // #818cf8
+          500: v('sky-500'),   // #6366f1
+          600: v('sky-600'),   // #4f46e5 — alb pe el trece WCAG AA (~6.6:1)
+          700: v('sky-700'),   // #4338ca
+          800: v('sky-800'),   // #312e81
+          900: v('sky-900'),   // #1e1b4b
+          950: v('sky-950'),   // #171449
         },
       },
     },
