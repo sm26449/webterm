@@ -154,6 +154,52 @@ OIDC_ENABLED = bool(OIDC_ISSUER and OIDC_CLIENT_ID and OIDC_CLIENT_SECRET)
 OIDC_REQUIRE_AUTH_TIME = _str("WEBTERM_OIDC_REQUIRE_AUTH_TIME", "1").lower() not in ("0", "false", "no")
 # redirect_uri fix, derivat din PUBLIC_URL — niciodată din input de request (anti open-redirect)
 OIDC_REDIRECT_URI = PUBLIC_URL + "/api/oidc/callback"
+# 3.6.5 — „grupuri SSO din cutie". Maparea grup → rol din .env: intrări `grup=rol@scope`,
+# separate prin virgulă sau rând nou. Citită (şi reconciliată cu maparea din DB, source='config')
+# DOAR la pornire, de ssomap.reconcile_config(); parsarea şi refuzurile (Owner, sintaxă, rol
+# necunoscut) sunt acolo. Brut aici: nu are default şi nu se normalizează.
+OIDC_ROLE_MAP = os.environ.get("WEBTERM_OIDC_ROLE_MAP") or ""
+
+
+def _flag_fail_closed(name: str) -> bool:
+    """Comutator de SECURITATE: 1/true/yes = pornit, 0/false/no/gol = oprit; ORICE altceva (un
+    typo) = PORNIT, cu eroare în jurnal — un buton de securitate scris greşit nu are voie să lase
+    instanţa mai deschisă decât a cerut operatorul."""
+    raw = (os.environ.get(name) or "").strip().lower()
+    if raw in ("", "0", "false", "no", "off"):
+        return False
+    if raw not in ("1", "true", "yes", "on"):
+        log.error("%s=%r is not 0/1 — treating it as ON (fail closed)", name, raw)
+    return True
+
+
+def _hours_fail_closed(name: str, fallback: float) -> float:
+    """Ore (>0) sau 0/gol = oprit. O valoare invalidă (text, negativă, nan/inf, peste un an) NU
+    opreşte limita: se foloseşte `fallback`, cu eroare în jurnal (fail closed)."""
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return 0.0
+    try:
+        v = float(raw)
+    except ValueError:
+        v = float("nan")
+    if v == 0:
+        return 0.0
+    if not (0 < v <= 24 * 366):            # nan pică şi el aici
+        log.error("%s=%r is not a number of hours in (0, 8784] — using %s h (fail closed)",
+                  name, raw, fallback)
+        return fallback
+    return v
+
+
+# Conturile SSO-only (fără parolă locală) intră DOAR prin SSO: login-ul cu passkey ca prim factor
+# e refuzat, deci fiecare intrare re-sincronizează grupurile (revocare rapidă). Passkey-urile
+# rămân al doilea factor / step-up, după regulile existente. Implicit oprit (comportamentul vechi).
+OIDC_SSO_ONLY = _flag_fail_closed("WEBTERM_OIDC_SSO_ONLY")
+# Vârsta ABSOLUTĂ maximă a unei sesiuni web a unui cont legat de SSO (`sso_subject`); după ea
+# trebuie un login SSO proaspăt (→ re-sincronizarea grupurilor). 0/gol = fără limită în plus
+# (rămân TTL-ul şi idle-ul obişnuite). provision.py recomandă 12.
+OIDC_SESSION_MAX_HOURS = _hours_fail_closed("WEBTERM_OIDC_SESSION_MAX_HOURS", 12.0)
 
 AGENT_FILE = Path(os.environ.get(
     "WEBTERM_AGENT_FILE",

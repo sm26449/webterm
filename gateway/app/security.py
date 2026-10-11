@@ -331,14 +331,37 @@ def client_ip_ws(ws) -> str:
     return ws.client.host if ws.client else "?"
 
 
+def _sso_max_age() -> float:
+    """3.6.5: vârsta absolută maximă (secunde) a sesiunii unui cont legat de SSO; 0 = fără."""
+    return float(config.OIDC_SESSION_MAX_HOURS or 0) * 3600
+
+
+def _sso_session_too_old(user, created, now: float) -> bool:
+    """WEBTERM_OIDC_SESSION_MAX_HOURS: sesiunea unui cont legat de SSO (`sso_subject`) mai veche
+    decât limita nu mai e valabilă — trebuie un login SSO proaspăt, care re-sincronizează
+    grupurile. `created` lipsă/necitibil = prea veche (fail closed)."""
+    lim = _sso_max_age()
+    if not lim or user is None or not user["sso_subject"]:
+        return False
+    try:
+        return now - float(created) > lim
+    except (TypeError, ValueError):
+        return True
+
+
 async def create_web_session(user_id: int, user_agent: str = "",
                              device_new: bool = False) -> str:
     token = new_token()
     now = time.time()
+    expires = now + WEB_SESSION_TTL
+    if _sso_max_age():
+        u = await db.fetchone("SELECT sso_subject FROM users WHERE id=?", user_id)
+        if u is not None and u["sso_subject"]:
+            expires = min(expires, now + _sso_max_age())
     await db.execute(
         "INSERT INTO web_sessions(token_hash, user_id, created, expires, user_agent, last_seen,"
         " device_new) VALUES(?,?,?,?,?,?,?)",
-        sha256_hex(token), user_id, now, now + WEB_SESSION_TTL, user_agent[:200], now,
+        sha256_hex(token), user_id, now, expires, user_agent[:200], now,
         1 if device_new else 0)
     return token
 
@@ -401,8 +424,8 @@ async def user_for_token(token: Optional[str]):
     now = time.time()
     th = sha256_hex(token)
     ws = await db.fetchone(
-        "SELECT user_id, expires, last_seen FROM web_sessions WHERE token_hash=? AND expires > ?",
-        th, now)
+        "SELECT user_id, created, expires, last_seen FROM web_sessions WHERE token_hash=?"
+        " AND expires > ?", th, now)
     if not ws:
         return None
     # L2: idle-expiry. last_seen NULL = sesiune dinainte de migrație → o tratăm ca proaspătă
@@ -411,9 +434,14 @@ async def user_for_token(token: Optional[str]):
     if last is not None and now - last > WEB_SESSION_IDLE:
         await db.execute("DELETE FROM web_sessions WHERE token_hash=?", th)
         return None
+    user = await db.fetchone("SELECT * FROM users WHERE id=?", ws["user_id"])
+    # 3.6.5: şi sesiunile create ÎNAINTE de setarea limitei (expires-ul lor e cel vechi)
+    if _sso_session_too_old(user, ws["created"], now):
+        await db.execute("DELETE FROM web_sessions WHERE token_hash=?", th)
+        return None
     if last is None or now - last > _SLIDE_INTERVAL:      # slide throttled (nu un write/cerere)
         await db.execute("UPDATE web_sessions SET last_seen=? WHERE token_hash=?", now, th)
-    return await db.fetchone("SELECT * FROM users WHERE id=?", ws["user_id"])
+    return user
 
 
 async def session_valid(token: Optional[str]) -> bool:
@@ -425,12 +453,15 @@ async def session_valid(token: Optional[str]) -> bool:
         return False
     now = time.time()
     ws = await db.fetchone(
-        "SELECT last_seen FROM web_sessions WHERE token_hash=? AND expires > ?",
+        "SELECT w.last_seen, w.created, u.sso_subject FROM web_sessions w"
+        " LEFT JOIN users u ON u.id = w.user_id WHERE w.token_hash=? AND w.expires > ?",
         sha256_hex(token), now)
     if not ws:
         return False
     last = ws["last_seen"]
     if last is not None and now - last > WEB_SESSION_IDLE:
+        return False
+    if _sso_session_too_old(ws, ws["created"], now):      # 3.6.5: WEBTERM_OIDC_SESSION_MAX_HOURS
         return False
     return True
 

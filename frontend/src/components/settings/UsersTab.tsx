@@ -30,6 +30,8 @@ type UserRow = {
 type SsoMapping = {
   id: number; group: string; role: string; role_id: number; role_name: string
   scope_kind: ScopeKind; scope_value: string; sso_bindings: number
+  /** 3.6.5: 'config' = din WEBTERM_OIDC_ROLE_MAP (.env) — doar citire în UI */
+  source?: 'ui' | 'config'
 }
 
 /** scope-ul implicit al unui rol: Operator/Viewer (şi rolurile custom) au sens DOAR restrânse (§A.5) */
@@ -338,6 +340,9 @@ function SsoSection(props: {
       <p className="mt-1 text-xs text-slate-400" data-sso-localpw-note>
         {t('roles.sso.localPwNote', { n: props.localPwAccounts })}
       </p>
+      {props.mappings.some((m) => m.source === 'config') && (
+        <p className="mt-1 text-xs text-slate-400" data-sso-config-note>{t('roles.sso.configNote')}</p>
+      )}
       <ul className="mt-2 flex flex-col gap-1" data-sso-mappings>
         {props.mappings.length === 0 && <li className="text-sm text-slate-400">{t('roles.sso.none')}</li>}
         {props.mappings.map((m) => (
@@ -345,8 +350,13 @@ function SsoSection(props: {
             <span className="min-w-0 flex-1 break-all text-slate-200">
               {t('roles.sso.mapping', { group: m.group, binding: label(m) })}
             </span>
+            {m.source === 'config' && (
+              <Badge title={t('roles.sso.fromConfigTitle')}>
+                <span data-sso-from-config>{t('roles.sso.fromConfig')}</span>
+              </Badge>
+            )}
             {m.sso_bindings > 0 && <Badge>{t('roles.sso.active', { n: m.sso_bindings })}</Badge>}
-            {(props.isOwner || m.role !== 'owner') && (
+            {m.source !== 'config' && (props.isOwner || m.role !== 'owner') && (
               <IconButton label={t('roles.sso.remove', { group: m.group, binding: label(m) })} onClick={() => remove(m)}>
                 <CloseIcon size={12} />
               </IconButton>

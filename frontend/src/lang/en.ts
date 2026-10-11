@@ -1046,6 +1046,15 @@ const en: Lang = {
     'host.credEphemeral': "Ephemeral (bootstrap only)",
     'host.credStored': "Stored, encrypted",
     'host.credNone': "None",
+    // 3.6.5 — SSO groups out of the box
+    'roles.sso.fromConfig': "from configuration",
+    'roles.sso.fromConfigTitle': "Set by WEBTERM_OIDC_ROLE_MAP in the server's .env. Change it there and restart WebTerm; it cannot be removed here.",
+    'roles.sso.configNote': "Mappings marked “from configuration” come from WEBTERM_OIDC_ROLE_MAP in the server's .env and are applied when WebTerm starts. Change or remove them there, then restart; mappings added here are separate and never touched by it.",
+    'err.ssoMap.fromConfig': "This mapping comes from WEBTERM_OIDC_ROLE_MAP in the server's .env. Change it there and restart WebTerm.",
+    'err.auth.ssoOnly': "This account signs in with SSO only. Use the SSO button.",
+    'alertmsg.what.sso_config_mappings_changed': "SSO mappings from the configuration changed: added {added}, removed {removed} ({n} role(s) removed)",
+    'alertmsg.what.sso_config_owner_refused': "WEBTERM_OIDC_ROLE_MAP tried to grant Owner ({entries}); refused — Owner is never granted from the configuration",
+    'alertmsg.what.sso_config_invalid': "{n} WEBTERM_OIDC_ROLE_MAP entries were skipped as invalid (see the gateway log)",
     // 3.6.4 — theme families (style × mode)
     'theme.styleHint': "Inspired by each desktop's look, using your system fonts — no OS fonts, logos or assets are bundled.",
     'theme.family.webterm': "WebTerm",

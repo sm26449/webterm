@@ -18,10 +18,16 @@ proces se spune explicit, în loc să se pretindă făcut.
     docker exec -it webterm-app-1 python3 -m app.admin logout-all you@example.com
     docker exec -it webterm-app-1 python3 -m app.admin roles you@example.com
     docker exec -it webterm-app-1 python3 -m app.admin promote you@example.com
+    docker exec -it webterm-app-1 python3 -m app.admin sso-only someone@example.com [--force]
 
 `promote` (3.6) e calea break-glass a rolurilor: face contul Owner peste toată flota. Cine are
 shell pe server are deja DB-ul şi cheia seifului, deci comanda nu acordă nimic nou — doar
 repară corect o instalare în care nimeni nu mai e Owner (ex. un restore parţial).
+
+`sso-only` (3.6.5) face din server exact ce face „Scoate parola locală" din Setări: contul nu mai
+are parolă locală, passkey-uri, TOTP, coduri de recuperare şi sesiuni — intră doar prin SSO, iar
+grupurile lui din IdP încep să-i dea roluri. Refuzat pentru un cont nelegat de SSO şi pentru
+ultimul Owner care încă are parolă locală (contul break-glass), în afară de `--force`.
 """
 import argparse
 import asyncio
@@ -29,7 +35,7 @@ import getpass
 import sys
 import time
 
-from . import db, security
+from . import config, db, security
 
 
 async def _find(email: str):
@@ -154,6 +160,59 @@ async def cmd_passwd(args) -> None:
     await _revoke_everything(user["id"], "password rotated")
 
 
+async def _owner_ids() -> set:
+    return {r["user_id"] for r in await db.fetchall(
+        "SELECT DISTINCT b.user_id FROM role_bindings b JOIN roles r ON r.id=b.role_id"
+        " WHERE r.key='owner' AND b.scope_kind='all' AND (b.expires IS NULL OR b.expires > ?)",
+        time.time())}
+
+
+async def cmd_sso_only(args) -> None:
+    """Acelaşi efect ca „Scoate parola locală" (api.update_account, remove_password), de pe
+    server: parola devine un hash aleator (local_password=0), passkey-urile, TOTP-ul, codurile de
+    recuperare şi sesiunile pleacă, epoca de autorizare creşte."""
+    user = await _find(args.email)
+    if not user["sso_subject"]:
+        print("%s is not linked to SSO (it has never signed in with SSO): removing its local "
+              "password would lock it out. Nothing changed." % user["email"], file=sys.stderr)
+        raise SystemExit(2)
+    if not config.OIDC_ENABLED and not args.force:
+        print("SSO is not configured on this instance (WEBTERM_OIDC_*): an SSO-only account could "
+              "not sign in at all. Nothing changed (use --force to do it anyway).", file=sys.stderr)
+        raise SystemExit(2)
+    owners = await _owner_ids()
+    if user["id"] in owners:
+        with_pw = 0
+        for o in owners - {user["id"]}:
+            r = await db.fetchone("SELECT COALESCE(local_password, 1) AS lp FROM users WHERE id=?", o)
+            if r is not None and r["lp"]:
+                with_pw += 1
+        if not with_pw and not args.force:
+            print("%s is the last Owner with a local password (the break-glass account). Without "
+                  "it, an IdP outage locks every Owner out. Make another account Owner with a "
+                  "local password first, or pass --force. Nothing changed." % user["email"],
+                  file=sys.stderr)
+            raise SystemExit(3)
+    locked = security.hash_password(security.new_token())    # nimeni nu-l ştie
+    await db.execute(
+        "UPDATE users SET password_hash=?, local_password=0, totp_enabled=0,"
+        " totp_secret_encrypted=NULL, totp_last_counter=NULL WHERE id=?", locked, user["id"])
+    for sql in ("DELETE FROM webauthn_credentials WHERE user_id=?",
+                "DELETE FROM recovery_codes WHERE user_id=?",
+                "DELETE FROM email_challenges WHERE user_id=?"):
+        await db.execute(sql, user["id"])
+    await db.execute(
+        "INSERT INTO audit_log(ts, actor, ip, method, path, status, detail, actor_id, via)"
+        " VALUES(?,?,?,?,?,?,?,?,?)", time.time(), "admin-cli", "-", "CLI", "/admin/sso-only", 200,
+        "%s made SSO-only from the server%s: local password, passkeys, 2FA, recovery codes and "
+        "sessions removed" % (user["email"], " (--force)" if args.force else ""), user["id"], "cli")
+    await _bump_authz_epoch()
+    print("✓ %s now signs in with SSO only (local password, passkeys, 2FA and recovery codes "
+          "removed)" % user["email"])
+    print("· its SSO groups give it roles from its next SSO sign-in")
+    await _revoke_everything(user["id"], "account made SSO-only")
+
+
 async def cmd_disable_2fa(args) -> None:
     user = await _find(args.email)
     await db.execute(
@@ -189,13 +248,19 @@ async def main() -> None:
     p.add_argument("email")
     p = sub.add_parser("promote", help="make the account Owner over all hosts (break-glass)")
     p.add_argument("email")
+    p = sub.add_parser("sso-only", help="remove the local password, passkeys and 2FA of an SSO "
+                                        "account: it signs in with SSO only")
+    p.add_argument("email")
+    p.add_argument("--force", action="store_true",
+                   help="also for the last Owner with a local password, or with SSO not configured")
     args = ap.parse_args()
 
     await db.connect()
     try:
         await {"list": cmd_list, "passwd": cmd_passwd,
                "disable-2fa": cmd_disable_2fa, "logout-all": cmd_logout_all,
-               "roles": cmd_roles, "promote": cmd_promote}[args.cmd](args)
+               "roles": cmd_roles, "promote": cmd_promote,
+               "sso-only": cmd_sso_only}[args.cmd](args)
     finally:
         await db.close()
 

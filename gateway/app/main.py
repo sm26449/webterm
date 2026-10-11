@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .errors import ApiError
 from . import (api, audit, authz, backup, config, core, db, email_alerts, health,
-               oidc_api, security, signing, webauthn_api)
+               oidc_api, security, signing, ssomap, webauthn_api)
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -280,6 +280,16 @@ async def lifespan(app: FastAPI):
     await api.load_forward_domain()            # domeniul de forward configurabil din Settings
     await api.seed_default_snippets()          # snippet-uri de transfer gata făcute (o singură dată)
     await core.reconcile_telnet_on_start()     # sesiunile telnet nu supraviețuiesc restartului → lost
+    # 3.6.5: mapările SSO din WEBTERM_OIDC_ROLE_MAP (source='config') = exact ce scrie în .env,
+    # DOAR la pornire. Nu aruncă: o intrare greşită e sărită (nu acordă nimic), cu jurnal + audit.
+    if config.OIDC_ROLE_MAP.strip() or await db.fetchone(
+            "SELECT 1 FROM oidc_group_roles WHERE source='config' LIMIT 1"):
+        await ssomap.reconcile_config()
+    if config.OIDC_SSO_ONLY:
+        log.info("WEBTERM_OIDC_SSO_ONLY=1: SSO-only accounts sign in through SSO only")
+    if config.OIDC_SESSION_MAX_HOURS:
+        log.info("WEBTERM_OIDC_SESSION_MAX_HOURS=%g: web sessions of SSO accounts end after "
+                 "%g h", config.OIDC_SESSION_MAX_HOURS, config.OIDC_SESSION_MAX_HOURS)
     janitor = asyncio.create_task(_janitor())
     reaper = asyncio.create_task(_session_reaper())   # reconciliere liveness sesiuni 'live'
     idlelock = asyncio.create_task(_idle_lock_sweep())  # blocare terminal idle pe host 2FA

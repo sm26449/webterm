@@ -1061,6 +1061,15 @@ const ro: Lang = {
     'host.credEphemeral': "Efemere (doar bootstrap)",
     'host.credStored': "Salvate, criptate",
     'host.credNone': "Niciuna",
+    // 3.6.5 — grupuri SSO din cutie
+    'roles.sso.fromConfig': "din configuraţie",
+    'roles.sso.fromConfigTitle': "Setată de WEBTERM_OIDC_ROLE_MAP din .env-ul serverului. Schimb-o acolo şi reporneşte WebTerm; nu se poate şterge de aici.",
+    'roles.sso.configNote': "Mapările marcate „din configuraţie” vin din WEBTERM_OIDC_ROLE_MAP din .env-ul serverului şi se aplică la pornirea WebTerm. Schimbă-le sau scoate-le acolo, apoi reporneşte; mapările adăugate aici sunt separate şi nu sunt atinse de ea.",
+    'err.ssoMap.fromConfig': "Maparea vine din WEBTERM_OIDC_ROLE_MAP din .env-ul serverului. Schimb-o acolo şi reporneşte WebTerm.",
+    'err.auth.ssoOnly': "Contul acesta intră doar prin SSO. Foloseşte butonul SSO.",
+    'alertmsg.what.sso_config_mappings_changed': "Mapările SSO din configuraţie s-au schimbat: adăugate {added}, scoase {removed} ({n} rol(uri) retrase)",
+    'alertmsg.what.sso_config_owner_refused': "WEBTERM_OIDC_ROLE_MAP a încercat să dea Owner ({entries}); refuzat — Owner nu se acordă niciodată din configuraţie",
+    'alertmsg.what.sso_config_invalid': "{n} intrări din WEBTERM_OIDC_ROLE_MAP au fost sărite ca invalide (vezi jurnalul gateway-ului)",
     // 3.6.4 — familii de temă (stil × mod)
     'theme.styleHint': "Inspirate din aspectul fiecărui desktop, cu fonturile sistemului tău — nu includem fonturi, sigle sau resurse ale vreunui sistem de operare.",
     'theme.family.webterm': "WebTerm",

@@ -17,7 +17,7 @@ from webauthn.helpers.structs import (AuthenticatorSelectionCriteria,
                                       ResidentKeyRequirement,
                                       UserVerificationRequirement)
 
-from . import authz, config, db, email_alerts, security
+from . import audit, authz, config, db, email_alerts, security
 from .errors import ApiError
 
 router = APIRouter(prefix="/api/webauthn", dependencies=[Depends(authz.declared)])
@@ -241,8 +241,17 @@ async def login_verify(body: CredentialBody, request: Request, response: Respons
         raise ApiError(401, "passkey.authFailed", "authentication failed: %s" % e)
     await db.execute("UPDATE webauthn_credentials SET sign_count=? WHERE id=?",
                      result.new_sign_count, row["id"])
-    security.record_login_success(ip)
     user = await db.fetchone("SELECT * FROM users WHERE id=?", row["user_id"])
+    # 3.6.5 (WEBTERM_OIDC_SSO_ONLY): un cont SSO-only (fără parolă locală) intră DOAR prin SSO,
+    # ca fiecare intrare să re-citească grupurile din IdP (revocare rapidă). Passkey-ul rămâne
+    # al doilea factor / step-up. Verificat DUPĂ semnătură: un credential_id nu trebuie să afle
+    # nimic despre cont fără cheia privată.
+    if config.OIDC_SSO_ONLY and (user is None or user["local_password"] == 0):
+        audit.actor(request, user["email"] if user else "")
+        audit.detail(request, "passkey sign-in refused: the account signs in with SSO only "
+                              "(WEBTERM_OIDC_SSO_ONLY)")
+        raise ApiError(403, "auth.ssoOnly", "this account signs in with SSO only")
+    security.record_login_success(ip)
     new_device = False
     if user:
         new_device = await security.note_new_login(

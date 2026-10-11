@@ -93,13 +93,18 @@ async def _desired(groups: set, exclude_mid: Optional[int] = None) -> tuple[set,
     """→ ({(role_id, kind, value)}, {matched group names}) from the CURRENT mappings (minus
     `exclude_mid`, for planning a removal)."""
     maps = await db.fetchall(
-        "SELECT m.grp, m.role_id, m.scope_kind, m.scope_value FROM oidc_group_roles m"
+        "SELECT m.grp, m.role_id, m.scope_kind, m.scope_value, COALESCE(m.source, 'ui') AS source,"
+        " r.id, r.key, r.name, r.description, r.perms, r.builtin FROM oidc_group_roles m"
         " JOIN roles r ON r.id = m.role_id WHERE m.id<>?", exclude_mid or 0)
     hosts = {r["id"] for r in await db.fetchall("SELECT id FROM hosts")}
     desired, matched = set(), set()
     for m in maps:
         g = m["grp"]
         if g != WILDCARD and g not in groups:
+            continue
+        # 3.6.5, apărare în adâncime: o mapare din configuraţie nu acordă NICIODATĂ Owner (nici
+        # un rol custom cu permisiuni doar-de-Owner), chiar dacă rândul a ajuns cumva în DB.
+        if m["source"] == "config" and not config_role_allowed(authz._row_role(m)):
             continue
         kind, value = m["scope_kind"], m["scope_value"] or ""
         if kind not in authz.SCOPE_KINDS:
@@ -287,3 +292,257 @@ def report_last_owner(uid: int, email: str, ip: str, kept: list) -> None:
         "the last Owner (%s) lost its SSO Owner group; the binding was kept" % email, ip, email,
         fleet=True, severity="critical", what_key="sso_last_owner_kept",
         what_params={"account": email, "binding": ", ".join(kept)})
+
+
+# ── 3.6.5: maparea din configuraţie (WEBTERM_OIDC_ROLE_MAP) ─────────────────────────────────
+# Intrări `grup=rol@scope`, separate prin virgulă sau rând nou; scope = all | folder:<nume> |
+# tag:<nume> | host:<nume>; rol = cheie predefinită (admin/operator/viewer) sau NUMELE unui rol
+# custom existent. Reconciliate DOAR la pornire cu rândurile `source='config'`: ce lipseşte se
+# adaugă, ce nu mai e listat se scoate (cu retragerea imediată a legăturilor derivate, ca la
+# ştergerea din UI); mapările făcute din UI (`source='ui'`) nu se ating niciodată.
+#
+# Încrederea: .env-ul e al administratorului SERVERULUI (care are oricum DB-ul şi cheia
+# seifului) — totuşi, fail-closed:
+#   * Owner NU se acordă niciodată din configuraţie (nici printr-un rol custom cu permisiuni pe
+#     care doar Owner le are): intrarea e refuzată, jurnal + audit + alertă critică;
+#   * `*` (orice cont SSO) nu se acceptă din configuraţie — e o decizie de luat în UI, unde e
+#     doar a unui Owner şi alertată;
+#   * o intrare greşită (sintaxă, rol necunoscut/ambiguu, nume de grup pe care normalizarea l-ar
+#     schimba, caractere de control, scope invalid) e SĂRITĂ: nu acordă nimic, nu opreşte
+#     pornirea, e scrisă în jurnal ca eroare şi auditată;
+#   * `host:<nume>` care nu există (încă) → sărită cu avertisment; ambiguu (două hosturi cu
+#     acelaşi nume) → sărită cu eroare.
+CONFIG_ACTOR = "config:WEBTERM_OIDC_ROLE_MAP"
+_CONFIG_PATH = "/config/oidc-role-map"
+_ROLE_MAP_MAX_LEN = 64 * 1024
+_OWNER_ONLY = authz.BUILTIN_ROLES["owner"]["perms"] - authz.BUILTIN_ROLES["admin"]["perms"]
+
+
+def config_role_allowed(role) -> bool:
+    """Un rol pe care configuraţia are voie să-l dea: nu Owner, şi nicio permisiune doar-de-Owner
+    (copiile custom ale Owner-ului sunt Owner sub alt nume)."""
+    return role is not None and role.key != "owner" and not (role.perms & _OWNER_ONLY)
+
+
+def _printable(s: str) -> bool:
+    return s.isprintable() and not any(unicodedata.category(ch) == "Cf" for ch in s)
+
+
+def parse_role_map(raw: str) -> tuple[list, list]:
+    """Doar SINTAXA (fără DB). → ([(entry, group, role_token, kind, value)], [(entry, motiv)]).
+    Nicio intrare respinsă nu ajunge în prima listă."""
+    ok, bad = [], []
+    raw = raw or ""
+    if len(raw) > _ROLE_MAP_MAX_LEN:
+        return [], [(raw[:60] + "…", "the value is longer than %d characters" % _ROLE_MAP_MAX_LEN)]
+    for line in raw.replace("\r\n", "\n").split("\n"):
+        for part in line.split(","):
+            entry = part.strip(" \t")
+            if not entry:
+                continue
+            shown = entry[:120]
+            if not _printable(entry):
+                bad.append((repr(shown), "control or invisible characters"))
+                continue
+            grp, eq, rest = entry.partition("=")
+            if not eq:
+                bad.append((shown, "expected group=role@scope"))
+                continue
+            role_tok, at, scope = rest.partition("@")
+            role_tok, scope = role_tok.strip(), scope.strip()
+            if not at or not role_tok or not scope:
+                bad.append((shown, "expected group=role@scope (scope: all, folder:<name>, "
+                                   "tag:<name> or host:<name>)"))
+                continue
+            if grp == WILDCARD:
+                bad.append((shown, "'*' (every SSO user) cannot be mapped from the configuration "
+                                   "— an Owner can map it in Settings → Users & roles"))
+                continue
+            if normalize_group(grp) is None:
+                bad.append((shown, "the group name has surrounding spaces, is not in Unicode NFC "
+                                   "form, is empty or longer than %d characters" % GROUP_MAX_LEN))
+                continue
+            if scope.lower() == "all":
+                kind, value = "all", ""
+            else:
+                kind, colon, value = scope.partition(":")
+                kind, value = kind.strip().lower(), value.strip()
+                if not colon or kind not in ("folder", "tag", "host") or not value:
+                    bad.append((shown, "the scope must be all, folder:<name>, tag:<name> or "
+                                       "host:<name>"))
+                    continue
+            ok.append((shown, grp, role_tok, kind, value))
+    return ok, bad
+
+
+async def _resolve_role_token(tok: str):
+    """→ (RoleInfo | None, motiv). Cheie predefinită, altfel numele EXACT (fără diferenţă de
+    majuscule) al unui singur rol custom."""
+    key = tok.lower()
+    if key in authz.BUILTIN_ROLES:
+        r = await db.fetchone(
+            "SELECT id, key, name, description, perms, builtin FROM roles WHERE key=?", key)
+        return (authz._row_role(r) if r else None), "built-in role missing"
+    rows = await db.fetchall(
+        "SELECT id, key, name, description, perms, builtin FROM roles WHERE builtin=0"
+        " AND lower(name)=lower(?)", tok)
+    if len(rows) != 1:
+        return None, ("no role with that key or name" if not rows else "ambiguous role name")
+    return authz._row_role(rows[0]), ""
+
+
+async def _resolve_entries(raw: str):
+    """→ ({(grp, role_id, kind, value): etichetă}, erori [(intrare, motiv)], avertismente
+    [(intrare, motiv)], [intrări cu Owner refuzat] — acestea apar şi în erori)."""
+    parsed, errors = parse_role_map(raw)
+    warnings, owner_refused = [], []
+    desired = {}
+    for entry, grp, role_tok, kind, value in parsed:
+        role, why = await _resolve_role_token(role_tok)
+        if role is None:
+            errors.append((entry, "unknown role %r (%s): use admin, operator, viewer or the name "
+                                  "of an existing custom role" % (role_tok[:60], why)))
+            continue
+        if not config_role_allowed(role):
+            owner_refused.append(entry)
+            errors.append((entry, "Owner is never granted from the configuration (role %r)"
+                           % role.name))
+            continue
+        if kind == "host":
+            rows = await db.fetchall(
+                "SELECT id FROM hosts WHERE name=? AND COALESCE(ephemeral, 0)=0", value)
+            if not rows:
+                warnings.append((entry, "no host named %r (yet) — skipped" % value[:60]))
+                continue
+            if len(rows) > 1:
+                errors.append((entry, "%d hosts are named %r — ambiguous, skipped"
+                               % (len(rows), value[:60])))
+                continue
+            value = str(rows[0]["id"])
+        else:
+            limit = {"tag": 32, "folder": 120}.get(kind)
+            if limit and len(value) > limit:
+                errors.append((entry, "the %s name is longer than %d characters" % (kind, limit)))
+                continue
+            try:
+                kind, value = authz.normalize_scope(kind, value)
+            except Exception as e:          # noqa: BLE001 — ApiError: scope invalid
+                errors.append((entry, "invalid scope: %s" % getattr(e, "message", e)))
+                continue
+        desired[(grp, role.id, kind, value)] = "%s=%s" % (grp, _label(role.name, kind, value))
+    return desired, errors, warnings, owner_refused
+
+
+async def _cfg_audit(status: int, text: str) -> None:
+    await audit.record(time.time(), CONFIG_ACTOR, "-", "BOOT", _CONFIG_PATH, status, text[:480],
+                       via="config")
+
+
+async def reconcile_config(raw: Optional[str] = None) -> dict:
+    """La PORNIRE (şi numai atunci): mapările `source='config'` devin exact cele din
+    WEBTERM_OIDC_ROLE_MAP. Nu ridică excepţii spre apelant (pornirea nu are voie să cadă din
+    cauza unui .env greşit): o eroare neaşteptată e jurnalizată şi NU acordă nimic (scrierile
+    în DB sunt doar ADĂUGĂRI de mapări valide deja verificate şi ŞTERGERI)."""
+    from . import config
+    raw = config.OIDC_ROLE_MAP if raw is None else raw
+    out = {"added": [], "removed": [], "kept_ui": [], "errors": [], "warnings": [],
+           "owner_refused": [], "pruned": 0}
+    changed = []
+    try:
+        desired, errors, warnings, owner_refused = await _resolve_entries(raw)
+        out["errors"], out["warnings"], out["owner_refused"] = errors, warnings, owner_refused
+        async with authz._lock:
+            rows = await db.fetchall(
+                "SELECT id, grp, role_id, scope_kind, scope_value, COALESCE(source, 'ui') AS source"
+                " FROM oidc_group_roles")
+            have_cfg = {(r["grp"], r["role_id"], r["scope_kind"], r["scope_value"] or ""): r["id"]
+                        for r in rows if r["source"] == "config"}
+            have_ui = {(r["grp"], r["role_id"], r["scope_kind"], r["scope_value"] or "")
+                       for r in rows if r["source"] != "config"}
+            names = await _role_names()
+
+            def lab(t):
+                return "%s=%s" % (t[0], _label(names.get(t[1], ("", "?"))[1], t[2], t[3]))
+            # întâi scoaterile (eliberează locuri sub plafon), apoi adăugările
+            for t, mid in sorted(have_cfg.items()):
+                if t not in desired:
+                    await db.execute("DELETE FROM oidc_group_roles WHERE id=? AND source='config'",
+                                     mid)
+                    out["removed"].append(lab(t))
+            n = (await db.fetchone("SELECT COUNT(*) AS c FROM oidc_group_roles"))["c"]
+            for t in sorted(desired):
+                if t in have_cfg:
+                    continue
+                if t in have_ui:
+                    out["kept_ui"].append(desired[t])   # există deja din UI: rămâne a UI-ului
+                    continue
+                if n >= MAPPINGS_MAX:
+                    errors.append((desired[t], "too many SSO mappings (%d) — skipped"
+                                   % MAPPINGS_MAX))
+                    continue
+                await db.execute(
+                    "INSERT OR IGNORE INTO oidc_group_roles(grp, role_id, scope_kind, scope_value,"
+                    " created, created_by_id, source) VALUES(?,?,?,?,?,NULL,'config')",
+                    t[0], t[1], t[2], t[3], time.time())
+                n += 1
+                out["added"].append(desired[t])
+            if out["removed"]:
+                # ca la ştergerea din UI: legăturile pe care nicio mapare rămasă nu le mai
+                # justifică pleacă ACUM (ultimul Owner e păstrat de _apply_locked)
+                changed = await prune_locked()
+                out["pruned"] = sum(len(r["removed"]) for _u, _e, r in changed)
+            if out["added"] or out["removed"]:
+                authz.bump_epoch()
+    except Exception as e:                  # noqa: BLE001 — pornirea nu cade din cauza .env-ului
+        log.exception("WEBTERM_OIDC_ROLE_MAP: reconciling the SSO mappings from the "
+                      "configuration failed")
+        out["errors"].append(("*", "internal error: %s" % type(e).__name__))
+        try:
+            await _cfg_audit(500, "WEBTERM_OIDC_ROLE_MAP reconcile failed: %s" % type(e).__name__)
+        except Exception:                   # noqa: BLE001
+            pass
+        return out
+    await _report_config(out, changed)
+    return out
+
+
+async def _report_config(out: dict, changed: list) -> None:
+    for entry, why in out["errors"]:
+        log.error("WEBTERM_OIDC_ROLE_MAP: entry %s SKIPPED — %s (it grants nothing)", entry, why)
+        await _cfg_audit(400, "WEBTERM_OIDC_ROLE_MAP entry %s skipped: %s" % (entry, why))
+    for entry, why in out["warnings"]:
+        log.warning("WEBTERM_OIDC_ROLE_MAP: entry %s: %s", entry, why)
+        await _cfg_audit(200, "WEBTERM_OIDC_ROLE_MAP entry %s: %s" % (entry, why))
+    for entry in out["kept_ui"]:
+        log.info("WEBTERM_OIDC_ROLE_MAP: %s already exists as a mapping made in the UI — left "
+                 "as it is (remove it in the UI to let the configuration own it)", entry)
+    if out["owner_refused"]:
+        what = "Owner refused in WEBTERM_OIDC_ROLE_MAP: %s" % ", ".join(out["owner_refused"])
+        email_alerts.notify_security_change(
+            what[:400], "-", CONFIG_ACTOR, fleet=True, severity="critical",
+            what_key="sso_config_owner_refused",
+            what_params={"entries": ", ".join(out["owner_refused"])[:400]})
+    n_invalid = len(out["errors"]) - len(out["owner_refused"])
+    if n_invalid > 0:
+        email_alerts.notify_security_change(
+            "%d WEBTERM_OIDC_ROLE_MAP entries skipped as invalid" % n_invalid, "-",
+            CONFIG_ACTOR, fleet=True, what_key="sso_config_invalid", what_params={"n": n_invalid})
+    if out["added"] or out["removed"]:
+        what = ("SSO mappings from the configuration: added %s, removed %s (%d SSO binding(s) "
+                "removed)" % (", ".join(out["added"]) or "none",
+                              ", ".join(out["removed"]) or "none", out["pruned"]))
+        log.warning(what)
+        await _cfg_audit(200, what)
+        email_alerts.notify_security_change(
+            what[:400], "-", CONFIG_ACTOR, fleet=True, what_key="sso_config_mappings_changed",
+            what_params={"added": (", ".join(out["added"]) or "—")[:300],
+                         "removed": (", ".join(out["removed"]) or "—")[:300],
+                         "n": out["pruned"]})
+    for uid, email, res in changed[:50]:
+        if res["removed"]:
+            email_alerts.notify_security_change(
+                "your access changed: " + ", ".join(res["removed"]) + " removed", "-", email,
+                user_id=uid, what_key="sso_access_changed",
+                what_params={"account": email, "added": "—", "removed": ", ".join(res["removed"])})
+        if res["kept_last_owner"]:
+            report_last_owner(uid, email, "-", res["kept_last_owner"])

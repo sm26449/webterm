@@ -1445,6 +1445,7 @@ def _check_wildcard(g, grp: str, role, kind: str) -> None:
 async def _oidc_roles_json() -> dict:
     rows = await db.fetchall(
         "SELECT m.id, m.grp, m.role_id, m.scope_kind, m.scope_value, m.created,"
+        " COALESCE(m.source, 'ui') AS source,"
         " r.key AS role_key, r.name AS role_name FROM oidc_group_roles m"
         " LEFT JOIN roles r ON r.id=m.role_id ORDER BY m.grp, m.id")
     users = {}
@@ -1462,9 +1463,20 @@ async def _oidc_roles_json() -> dict:
                           "role_id": r["role_id"], "role_name": r["role_name"] or "?",
                           "scope_kind": r["scope_kind"], "scope_value": r["scope_value"] or "",
                           "created": r["created"],
+                          # 3.6.5: 'config' = din WEBTERM_OIDC_ROLE_MAP (doar citire în UI)
+                          "source": "config" if r["source"] == "config" else "ui",
                           "sso_bindings": users.get((r["role_id"], r["scope_kind"],
                                                      r["scope_value"] or ""), 0)}
                          for r in rows]}
+
+
+def _check_not_config(row) -> None:
+    """3.6.5: o mapare din WEBTERM_OIDC_ROLE_MAP aparţine .env-ului: din UI nu se şterge (ar
+    reveni la următoarea pornire, iar până atunci UI-ul ar minţi despre ce e configurat)."""
+    if "source" in row.keys() and row["source"] == "config":
+        raise ApiError(409, "ssoMap.fromConfig",
+                       "this mapping comes from WEBTERM_OIDC_ROLE_MAP in the server's .env; "
+                       "change it there and restart WebTerm")
 
 
 @router.get("/api/settings/oidc-roles")
@@ -1525,6 +1537,7 @@ async def delete_oidc_role(mid: int, body: ReauthOnly, request: Request,
     row = await db.fetchone("SELECT * FROM oidc_group_roles WHERE id=?", mid)
     if not row:
         raise ApiError(404, "ssoMap.missing", "no such SSO mapping")
+    _check_not_config(row)
     info = (await authz.role_by_id(row["role_id"])) or _UNKNOWN_ROLE
     # retragerea unei mapări scoate legături de la alţii: doar în interiorul a ce poţi acorda
     await authz.check_can_grant(grants, info, row["scope_kind"], row["scope_value"], removing=True)
@@ -1535,6 +1548,7 @@ async def delete_oidc_role(mid: int, body: ReauthOnly, request: Request,
         row = await db.fetchone("SELECT * FROM oidc_group_roles WHERE id=?", mid)
         if not row:
             raise ApiError(404, "ssoMap.missing", "no such SSO mapping")
+        _check_not_config(row)
         info = (await authz.role_by_id(row["role_id"])) or _UNKNOWN_ROLE
         await authz.check_can_grant(g, info, row["scope_kind"], row["scope_value"], removing=True)
         _check_wildcard(g, row["grp"], info, row["scope_kind"])

@@ -547,6 +547,9 @@ MIGRATIONS = [
     # adoptat). Doar provizionarea SSO şi „scoate parola locală" pun 0. Cu 1, maparea grupurilor
     # SSO nu-i ADAUGĂ niciun rol (ssomap.sync_user).
     "ALTER TABLE users ADD COLUMN local_password INTEGER DEFAULT 1",
+    # 3.6.5 — de unde vine o mapare SSO: 'ui' (Setări, implicit — inclusiv toate cele vechi) sau
+    # 'config' (WEBTERM_OIDC_ROLE_MAP, reconciliată la pornire; neştearsă/needitabilă din UI).
+    "ALTER TABLE oidc_group_roles ADD COLUMN source TEXT DEFAULT 'ui'",
 ]
 
 # tabele adăugate ulterior (executeScript de mai sus le creează pe DB-uri noi;
