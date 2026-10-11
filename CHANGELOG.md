@@ -9,6 +9,8 @@ back.
 
 ## [Unreleased]
 
+## [3.6.3] — 2026-10-11 · agent (58)
+
 3.6.3 — UI finishing: the rest of the October external UI audit (U19–U25) and the last places
 where a failed request still looked like success or like "nothing here". No agent change, no API
 change.

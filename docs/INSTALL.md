@@ -64,7 +64,7 @@ the same script, only one you can read first and pin to a release.
 ```sh
 git clone https://github.com/sm26449/webterm.git
 cd webterm
-git checkout v3.6.2           # the release tag (see the version badge); a tag cannot move under you, a branch can
+git checkout v3.6.3           # the release tag (see the version badge); a tag cannot move under you, a branch can
 less install.sh              # it is meant to be read
 sudo ./install.sh --domain term.example.com --email you@example.com
 ```
@@ -150,7 +150,7 @@ moves any value it still finds in `.env` into its file.
 Update with `./upgrade.sh` — it takes a backup, syncs the host-side scripts and hands off to
 `deploy.sh`. (`make pull` exists for a quick image swap, but it bypasses `deploy.sh`, so it
 records no rollback point and runs no health gate.) Deploy a specific version
-with a recorded rollback point: `./deploy.sh v3.6.2` (or a digest:
+with a recorded rollback point: `./deploy.sh v3.6.3` (or a digest:
 `./deploy.sh ghcr.io/sm26449/webterm@sha256:…`) — if the new container does
 not become healthy, the script rolls back automatically; any time afterwards,
 `./rollback.sh` returns you to the previous image with a single command.
@@ -230,7 +230,7 @@ setup token (printed by `install.sh`/`deploy.sh`), *then* the SSO button shows. 
 want to a **`wt-access` group** in Authentik, click **Sign in with Authentik**, authenticate — you
 land back provisioned on that instance — with **no access** until an Owner or Admin gives the
 account a role in Settings → Users & roles, or one of its Authentik groups is mapped to a role
-there (SSO group mapping, 3.6.2). If the
+there (SSO group mapping, 3.6.3). If the
 button is missing, the account
 isn't created yet or SSO env isn't set; if the IdP shows "access denied", that user isn't in
 `wt-access`.
