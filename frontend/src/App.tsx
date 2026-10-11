@@ -1358,8 +1358,11 @@ function MainApp() {
     }
   }
 
-  async function deleteSession(sid: string) {
-    await api(`/api/sessions/${sid}`, { method: 'DELETE' }).catch(() => {})
+  // eroare ≠ succes (3.6.3): un DELETE picat (403, reţea, sesiune încă vie) era înghiţit, tab-ul se
+  // închidea şi rândul dispărea ca şi cum ştergerea reuşise. Acum eşecul urcă la apelant (HostOverview
+  // îl arată lângă buton şi readuce rândul); tab-ul se închide DOAR după un răspuns reuşit.
+  async function deleteSession(sid: string): Promise<void> {
+    await api(`/api/sessions/${sid}`, { method: 'DELETE' })
     closeTab(sid)
     refresh()
   }

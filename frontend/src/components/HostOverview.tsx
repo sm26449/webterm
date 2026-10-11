@@ -45,7 +45,8 @@ export default function HostOverview(props: {
   onNewSession: (host: Host) => void
   onSplit: (sid: string) => void
   onPopout: (sid: string) => void
-  onDeleteSession: (sid: string) => void
+  /** respinge la eşec — apelantul arată eroarea şi readuce rândul (3.6.3) */
+  onDeleteSession: (sid: string) => Promise<void>
   onMenu: () => void
   sidebarCollapsed?: boolean
   // acţiuni de host care deschid o sesiune de terminal (prin App)
@@ -115,7 +116,9 @@ export default function HostOverview(props: {
   // ștergerile optimiste: fără setul ăsta, sesiunea „ștearsă imediat" din
   // hostSessions ar fi re-adăugată instant din props.sessions (poll-ul global)
   const [deletedIds, setDeletedIds] = useState<Set<string>>(new Set())
-  useEffect(() => { setDeletedIds(new Set()) }, [host.id])
+  // ştergerea picată (3.6.3): eroarea stă lângă listă, într-o regiune `alert` montată permanent
+  const [delErr, setDelErr] = useState('')
+  useEffect(() => { setDeletedIds(new Set()); setDelErr('') }, [host.id])
   const allSessions = useMemo(() => {
     const byId = new Map<string, Session>()
     for (const s of hostSessions) byId.set(s.id, s)
@@ -372,6 +375,10 @@ export default function HostOverview(props: {
               <div className="px-3 pb-1 pt-3 text-2xs font-semibold uppercase tracking-wide text-slate-500">
                 {t('host.active')} {active.length > 0 && <span className="text-slate-600">· {active.length}</span>}
               </div>
+              <div role="alert" data-testid="session-delete-error"
+                className={delErr ? 'mx-3 mb-2 rounded-md bg-rose-500/10 px-2 py-1 text-2xs wt-danger ring-1 ring-rose-500/20' : 'sr-only'}>
+                {delErr ? `${t('session.deleteFailedTitle')}: ${delErr}` : ''}
+              </div>
               {sessError !== null && hostSessions.length > 0 && (
                 // refresh picat: lista e cea de la ultima încărcare reuşită — o spunem
                 <div role="status" className="mx-3 mb-2 flex flex-wrap items-center gap-2 rounded-md bg-ink-800/60 px-2 py-1 text-2xs text-slate-400">
@@ -422,8 +429,17 @@ export default function HostOverview(props: {
                             title: t('host.deleteTitle'), message: t('session.confirmDelete'),
                             danger: true, confirmLabel: t('session.delete'),
                           }))) return
-                          setDeletedIds((prev) => new Set(prev).add(sel.id))
-                          props.onDeleteSession(sel.id); setSelected(null)
+                          const sid = sel.id
+                          setDelErr('')
+                          setDeletedIds((prev) => new Set(prev).add(sid))
+                          try {
+                            await props.onDeleteSession(sid)
+                            setSelected((cur) => (cur === sid ? null : cur))
+                          } catch (e) {
+                            // rândul revine: nu pretindem că s-a şters ceva ce e încă pe server
+                            setDeletedIds((prev) => { const n = new Set(prev); n.delete(sid); return n })
+                            setDelErr(errText(e, t) || t('session.deleteFailed'))
+                          }
                         }} label={t('host.deleteTitle')}><TrashIcon /></IconButton>
                     )}
                     <Button variant="primary" onClick={() => props.onOpenSession(sel.id)} className="wt-touch ml-1">

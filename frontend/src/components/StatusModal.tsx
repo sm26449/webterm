@@ -1,5 +1,5 @@
-import { ReactNode, useEffect, useRef, useState } from 'react'
-import { api } from '../lib/api'
+import { ReactNode, useCallback, useEffect, useRef, useState } from 'react'
+import { api, errText } from '../lib/api'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { tStatic, useI18n } from '../lib/i18n'
 import UpdateCommand from './UpdateCommand'
@@ -72,15 +72,24 @@ export default function StatusModal(props: { onClose: () => void }) {
   const [s, setS] = useState<Status | null>(null)
   const [err, setErr] = useState(false)
   const [ver, setVer] = useState<VersionInfo | null>(null)
+  // eroare ≠ gol (3.6.3): un /api/version picat lăsa rândul de versiune fără nicio insignă — adică
+  // exact cum arată „am verificat, nimic nou". Acum eşecul are textul lui şi Reîncearcă.
+  const [verErr, setVerErr] = useState<string | null>(null)
+  const loadVer = useCallback(() => {
+    setVerErr(null)
+    api<VersionInfo>('/api/version').then(setVer)
+      .catch((e) => setVerErr(errText(e, t) || t('status.versionLoadFailed')))
+  }, [t])
 
   useEffect(() => {
-    const load = () => api<Status>('/api/status').then(setS).catch(() => setErr(true))
+    // un refresh reuşit şterge eroarea (înainte rămânea „n-am putut încărca" lângă date proaspete)
+    const load = () => api<Status>('/api/status').then((v) => { setS(v); setErr(false) }).catch(() => setErr(true))
     load()
-    const t = setInterval(() => { if (!document.hidden) load() }, 5000)
-    // verificarea de versiune e cache-uită server-side (1h) — o cerem o dată
-    api<VersionInfo>('/api/version').then(setVer).catch(() => {})
-    return () => clearInterval(t)
+    const iv = setInterval(() => { if (!document.hidden) load() }, 5000)
+    return () => clearInterval(iv)
   }, [])
+  // verificarea de versiune e cache-uită server-side (1h) — o cerem o dată (+ Reîncearcă)
+  useEffect(() => { loadVer() }, [loadVer])
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={props.onClose}>
@@ -99,7 +108,10 @@ export default function StatusModal(props: { onClose: () => void }) {
           </button>
         </div>
 
-        {err && <p className="mt-4 text-sm wt-danger">{t('status.loadError')}</p>}
+        {/* `alert` montat permanent; cu date vechi pe ecran spunem că SUNT vechi, nu că lipsesc */}
+        <p role="alert" className={err ? 'mt-4 text-sm wt-danger' : 'sr-only'}>
+          {err ? (s ? t('status.staleRefresh') : t('status.loadError')) : ''}
+        </p>
         {!s && !err && <p className="mt-4 text-sm text-slate-500">{t('status.loading')}</p>}
 
         {s && (
@@ -160,6 +172,12 @@ export default function StatusModal(props: { onClose: () => void }) {
                         iar cauza (repo privat fără token, GitHub inaccesibil) era adusă în
                         `error` şi nu afişată nicăieri. Găsit pe o instanţă vie, unde 2.0.3 era
                         publicat şi UI-ul nu spunea nimic. */}
+                    {verErr !== null && (
+                      <span role="alert" className="flex items-center gap-1.5 text-xs wt-danger">
+                        <span title={verErr}>{t('status.versionLoadFailed')}</span>
+                        <button type="button" onClick={loadVer} className="wt-link min-h-6 hover:underline">{t('common.retry')}</button>
+                      </span>
+                    )}
                     {ver?.enabled && ver.error && (
                       <span title={ver.error}
                         className="cursor-help text-xs text-slate-500 underline decoration-dotted underline-offset-2">

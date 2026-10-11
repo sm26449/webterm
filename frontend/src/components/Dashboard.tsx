@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { isEphemeralHost, isSessionLive, api, AppLink, Host, Session, timeAgo } from '../lib/api'
+import { useCallback, useEffect, useState } from 'react'
+import { errText, isEphemeralHost, isSessionLive, api, AppLink, Host, Session, timeAgo } from '../lib/api'
 import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
 import { useI18n } from '../lib/i18n'
 import { can, usePerms } from '../lib/perms'
@@ -10,7 +10,7 @@ import SecurityCard, { SecurityTarget } from './SecurityCard'
 import type { SettingsTarget } from '../lib/settingsIndex'
 import SharesModal from './SharesModal'
 import { fmt } from '../lib/shortcuts'
-import { Badge, Button, EmptyState, eyebrow } from './ui'
+import { Badge, Button, EmptyState, ErrorState, eyebrow } from './ui'
 import { MenuUnreadBadge, useUnreadAlerts } from './AlertsPanel'
 import { menuLabel } from '../lib/alerts'
 
@@ -53,8 +53,21 @@ export default function Dashboard(props: {
   }
   const byId = new Map(props.hosts.map((h) => [h.id, h]))
   // apps (forward-uri promovate) agregate din toată flota — strip-ul „one pane of glass"
-  const [apps, setApps] = useState<AppLink[]>([])
-  useEffect(() => { api<AppLink[]>('/api/apps').then(setApps).catch(() => {}) }, [])
+  // eroare ≠ gol (3.6.3): un /api/apps picat ascundea secţiunea ca şi cum n-ai avea nicio aplicaţie.
+  // null = încă se încarcă; un eşec are mesajul lui şi Reîncearcă
+  const [apps, setApps] = useState<AppLink[] | null>(null)
+  const [appsErr, setAppsErr] = useState<string | null>(null)
+  const loadApps = useCallback(() => {
+    setAppsErr(null)
+    api<AppLink[]>('/api/apps')
+      .then((a) => { setApps(a); setAppsErr(null) })
+      .catch((e) => setAppsErr(errText(e, t) || t('common.loadFailed')))
+  }, [t])
+  useEffect(() => { loadApps() }, [loadApps])
+  // „Reia o sesiune": ultima activitate nu există pe client (ar cere date noi de la agent), deci
+  // ordinea rămâne „cea mai nouă întâi". Lista NU mai e tăiată la 12 fără cale de acces (U20):
+  // „Vezi toate cele N sesiuni" o desface pe loc — merge şi pe telefon, unde nu există ⌘K.
+  const [showAllActive, setShowAllActive] = useState(false)
   const active = props.sessions
     .filter((s) => isSessionLive(s, props.hosts))
     .sort((a, b) => (b.created) - (a.created))
@@ -128,9 +141,24 @@ export default function Dashboard(props: {
         )}
 
         {/* Apps: forward-urile promovate, un click din „acasă" — nu mai ieşi din WebTerm */}
-        {apps.length > 0 && (
+        {apps === null && appsErr !== null && (
+          <section className="mt-7" aria-labelledby="dash-apps-err">
+            <h2 id="dash-apps-err" className={`mb-2.5 ${eyebrow}`}>{t('dashboard.apps')}</h2>
+            <div className="rounded-xl ring-1 ring-ink-700">
+              <ErrorState compact title={t('dashboard.appsLoadFailed')} message={appsErr} onRetry={loadApps} />
+            </div>
+          </section>
+        )}
+        {apps !== null && apps.length > 0 && (
           <section className="mt-7">
             <h2 className={`mb-2.5 ${eyebrow}`}>{t('dashboard.apps')}</h2>
+            {appsErr !== null && (
+              // refresh picat: lista e cea de la ultima încărcare reuşită — o spunem
+              <div role="status" className="mb-2 flex flex-wrap items-center gap-2 text-2xs text-slate-400">
+                <span>{t('dashboard.appsStale')}</span>
+                <button type="button" onClick={loadApps} className="wt-link min-h-6 hover:underline">{t('common.retry')}</button>
+              </div>
+            )}
             <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
               {apps.map((a) => {
                 const color = APP_COLOR[a.app_type] || '#34d399'
@@ -164,8 +192,8 @@ export default function Dashboard(props: {
               <span className="hidden sm:inline"> {t('dashboard.orWith')} <kbd className="rounded-md bg-ink-700 px-1 text-slate-300">{fmt('Mod+K')}</kbd></span>.
             </p>
           ) : (
-            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-              {active.slice(0, 12).map((s) => {
+            <div id="dash-active-sessions" className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+              {(showAllActive ? active : active.slice(0, 12)).map((s) => {
                 const h = byId.get(s.host_id)
                 const color = h ? hostColor(h) : '#64748b'
                 return (
@@ -195,7 +223,14 @@ export default function Dashboard(props: {
               })}
             </div>
           )}
-          {active.length > 12 && <p className="wt-muted mt-2 text-xs">{t('dashboard.moreActiveSessions', { key: fmt('Mod+K'), count: active.length - 12 })}</p>}
+          {active.length > 12 && (
+            <Button variant="secondary" size="md" type="button" className="wt-touch mt-2"
+              aria-expanded={showAllActive} aria-controls="dash-active-sessions"
+              data-testid="dash-all-sessions"
+              onClick={() => setShowAllActive((v) => !v)}>
+              {showAllActive ? t('dashboard.showFewerSessions') : t('dashboard.viewAllSessions', { count: active.length })}
+            </Button>
+          )}
         </section>
 
         {/* închise recent — istoricul persistent e feature-ul central; fără
