@@ -14,14 +14,23 @@ const TONE: Record<BadgeTone, string> = {
   accent: 'wt-chip-accent',
 }
 
-export function badgeClass(tone: BadgeTone = 'neutral'): string {
-  return `inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 text-2xs font-semibold ${TONE[tone]}`
+/** `sm` = contor/etichetă inline (implicit); `md` = pilulă de sine stătătoare (rol, „doar citire"),
+    cu puţin aer vertical. Mărimea textului rămâne text-2xs — insigna repetă o stare, nu e corp de text. */
+export type BadgeSize = 'sm' | 'md'
+const SIZE: Record<BadgeSize, string> = { sm: 'px-1.5', md: 'px-2 py-0.5' }
+
+/** `caps`: majuscule spaţiate, pentru tipuri scurte („SSH", „ACTUALIZARE") — nu pentru propoziţii */
+export function badgeClass(tone: BadgeTone = 'neutral', size: BadgeSize = 'sm', caps = false): string {
+  return `inline-flex shrink-0 items-center gap-1 rounded-full text-2xs font-semibold ${SIZE[size]}`
+    + `${caps ? ' uppercase tracking-wide' : ''} ${TONE[tone]}`
 }
 
-export default function Badge(props: HTMLAttributes<HTMLSpanElement> & { tone?: BadgeTone; children: ReactNode }) {
-  const { tone, className, children, ...rest } = props
+export default function Badge(props: HTMLAttributes<HTMLSpanElement> & {
+  tone?: BadgeTone; size?: BadgeSize; caps?: boolean; children: ReactNode
+}) {
+  const { tone, size, caps, className, children, ...rest } = props
   return (
-    <span {...rest} className={`${badgeClass(tone)}${className ? ` ${className}` : ''}`}>
+    <span {...rest} className={`${badgeClass(tone, size, caps)}${className ? ` ${className}` : ''}`}>
       {children}
     </span>
   )

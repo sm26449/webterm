@@ -18,8 +18,9 @@ export default {
       full: '9999px',
     },
     // ── Scara tipografică (design system 3.5.7, docs/design/DESIGN-SYSTEM.md) ───────────────
-    // `text-2xs` (11px) e CEA MAI MICĂ mărime permisă pentru text: HIG cere ≥11pt, iar sub 11px
-    // CSS etichetele devin ilizibile pe ecrane 1×. `compact` (13px) e treapta dintre xs şi sm,
+    // `text-2xs` (11px) e CEA MAI MICĂ mărime permisă pentru text: sub 11px CSS etichetele devin
+    // ilizibile pe ecrane 1×. E un PRAG, nu o mărime implicită — informaţia operaţională (stări,
+    // erori, rezultate) stă pe `text-xs` sau mai mare (3.6.3; vezi DESIGN-SYSTEM.md: 11pt ≠ 11px). `compact` (13px) e treapta dintre xs şi sm,
     // folosită de rândurile dense, proza din modale şi liniile de comandă monospace. Mărimile
     // arbitrare `text-[Npx]` sunt interzise de garda din src/design.guard.test.ts (vitest).
     fontSize: {

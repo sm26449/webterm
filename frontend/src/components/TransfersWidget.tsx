@@ -137,8 +137,8 @@ export default function TransfersWidget(props: { hosts: Host[]; insertSid?: stri
               <button type="button" onClick={clearFinished} className={`${BTN} ml-auto text-slate-300`}
                 aria-label={t('transfers.clearFinished')}>{t('transfers.clearFinished')}</button>
             )}
-            <IconButton type="button" onClick={toggle} label={t('transfers.minimize')}
-              className={`hover:bg-ink-700 ${canClear ? '' : 'ml-auto'}`}>
+            <IconButton type="button" variant="ghostRaised" onClick={toggle} label={t('transfers.minimize')}
+              className={canClear ? undefined : 'ml-auto'}>
               {/* „–" = minimizează la pilulă (aria-label poartă sensul) */}
               <MinusIcon />
             </IconButton>

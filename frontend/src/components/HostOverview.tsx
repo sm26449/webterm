@@ -224,7 +224,7 @@ export default function HostOverview(props: {
           <div className="flex items-center gap-2">
             <h1 className="truncate text-lg font-semibold text-slate-100">{host.name}</h1>
             {host.connection_type && host.connection_type !== 'agent' && (
-              <Badge tone="accent" className="py-0.5 uppercase tracking-wide">
+              <Badge tone="accent" size="md" caps>
                 {host.connection_type}
               </Badge>
             )}
@@ -890,7 +890,7 @@ function Row(props: { k: string; v: string; mono?: boolean; tone?: 'good'; badge
         <span className="min-w-0 truncate">
           {props.v}
           {props.badge && (
-            <Badge tone="warn" className="ml-2 py-0.5 align-middle uppercase tracking-wide">{props.badge}</Badge>
+            <Badge tone="warn" size="md" caps className="ml-2 align-middle">{props.badge}</Badge>
           )}
         </span>
         {props.action && <span className="shrink-0">{props.action}</span>}

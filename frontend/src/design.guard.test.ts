@@ -10,6 +10,12 @@
       pe fiecare OS şi lipsesc pe unele Android-uri şi în Chromium headless. Pictogramele sunt în
       components/Icons.tsx. Conţinutul (textele traduse din lang/) nu e verificat aici.
 
+   4. (3.6.3, U24) clase de PREZENTARE în `className` pe primitive (`Button`, `IconButton`, `Badge`):
+      culori, fundal, mărime/greutate de font, padding, contur, rază. `className` e doar pentru aşezare
+      (margini, lăţime, flex, vizibilitate) — Tailwind nu rezolvă conflictele după ordinea din atribut,
+      deci `className="text-sm bg-ink-700"` peste varianta componentei e o loterie. Starea activă/
+      selectată e `IconButton active`, mărimea şi majusculele unei insigne sunt `Badge size`/`caps`.
+
    Excepţiile sunt în ALLOW, fiecare cu motiv. Se scanează doar string-urile (literali, template-uri,
    text JSX) — comentariile pot vorbi liber despre ✕ şi `text-[10px]`. */
 import ts from 'typescript'
@@ -98,6 +104,46 @@ function scan() {
   return { sizes, radii, glyphs }
 }
 
+/* ── 4. clase de prezentare pe primitive ─────────────────────────────────────────────────────── */
+const PRIMITIVES = new Set(['Button', 'IconButton', 'Badge'])
+// fără prefixe (`hover:`, `sm:`) — `hover:bg-ink-700` e la fel de prezentaţional ca `bg-ink-700`
+const PRESENTATIONAL = new RegExp('^(?:[\\w-]+:)*!?(?:'
+  + 'text-(?!(?:left|center|right|justify|start|end|wrap|nowrap|balance|pretty|ellipsis|clip)$)\\S+'
+  + '|bg-\\S+|font-\\S+|uppercase|lowercase|capitalize|normal-case|tracking-\\S+|leading-\\S+'
+  + '|p[xytrblse]?-\\S+|ring(?:-\\S+)?|border(?:-\\S+)?|rounded(?:-\\S+)?|shadow(?:-\\S+)?'
+  + '|wt-(?:good|warn|danger|info|accent|link|muted|chip-accent)'
+  + ')$')
+
+function primitiveClassHits(file: string, src: string): Hit[] {
+  if (!file.endsWith('.tsx')) return []
+  const sf = ts.createSourceFile(file, src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+  const out: Hit[] = []
+  const visit = (n: ts.Node) => {
+    if ((ts.isJsxOpeningElement(n) || ts.isJsxSelfClosingElement(n)) && PRIMITIVES.has(n.tagName.getText(sf))) {
+      for (const a of n.attributes.properties) {
+        if (!ts.isJsxAttribute(a) || a.name.getText(sf) !== 'className' || !a.initializer) continue
+        const pieces: { text: string; line: number }[] = []
+        const grab = (x: ts.Node) => {
+          if (ts.isStringLiteral(x) || ts.isNoSubstitutionTemplateLiteral(x) || ts.isTemplateHead(x)
+              || ts.isTemplateMiddle(x) || ts.isTemplateTail(x)) {
+            pieces.push({ text: x.text, line: sf.getLineAndCharacterOfPosition(x.getStart(sf)).line + 1 })
+          }
+          x.forEachChild(grab)
+        }
+        grab(a.initializer)
+        for (const p of pieces) {
+          for (const cls of p.text.split(/\s+/).filter(Boolean)) {
+            if (PRESENTATIONAL.test(cls)) out.push({ file, line: p.line, text: `<${n.tagName.getText(sf)} className="${cls}">` })
+          }
+        }
+      }
+    }
+    n.forEachChild(visit)
+  }
+  visit(sf)
+  return out
+}
+
 const fmt = (h: Hit[]) => h.map((x) => `${x.file}:${x.line}  ${x.text}`).join('\n')
 
 describe('design system: garda de regresie', () => {
@@ -115,5 +161,19 @@ describe('design system: garda de regresie', () => {
   })
   it('fără emoji/glife ca pictograme în .tsx (foloseşte components/Icons.tsx)', () => {
     expect(fmt(r.glyphs)).toBe('')
+  })
+  it('primitivele (Button/IconButton/Badge) primesc în className doar clase de aşezare (U24)', () => {
+    const hits = Object.entries(files).flatMap(([f, s]) => primitiveClassHits(f, s))
+    expect(fmt(hits)).toBe('')
+  })
+  it('garda de primitive prinde ce trebuie (auto-test)', () => {
+    const probe = primitiveClassHits('./probe.tsx',
+      'const a = <IconButton label="x" className={`ml-auto ${on ? "wt-accent bg-ink-700" : ""}`}>i</IconButton>\n'
+      + 'const b = <Badge className="hover:text-slate-100 px-2 mr-1">b</Badge>\n'
+      + 'const c = <Button className="wt-touch hidden sm:inline-flex gap-2 text-left">c</Button>\n')
+    expect(probe.map((h) => h.text)).toEqual([
+      '<IconButton className="wt-accent">', '<IconButton className="bg-ink-700">',
+      '<Badge className="hover:text-slate-100">', '<Badge className="px-2">',
+    ])
   })
 })

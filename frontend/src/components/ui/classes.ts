@@ -45,7 +45,7 @@ export const btn = {
 } as const
 
 export type IconButtonSize = 'sm' | 'md'
-export type IconButtonVariant = 'ghost' | 'subtle' | 'danger'
+export type IconButtonVariant = 'ghost' | 'ghostRaised' | 'subtle' | 'danger' | 'link'
 
 const ICON_SIZE: Record<IconButtonSize, string> = {
   // min-w (nu w fix): pătrat cu o pictogramă, se lăţeşte pentru un glif + contor („❯12", „A+")
@@ -55,14 +55,24 @@ const ICON_SIZE: Record<IconButtonSize, string> = {
 
 const ICON_VARIANT: Record<IconButtonVariant, string> = {
   ghost: 'text-slate-400 hover:bg-ink-800 hover:text-slate-200',
+  // ghost pe o suprafaţă deja ridicată (bg-ink-800: widgetul de transferuri, carduri) — acolo un
+  // hover pe ink-800 nu s-ar vedea deloc
+  ghostRaised: 'text-slate-400 hover:bg-ink-700 hover:text-slate-200',
+  // acţiunea principală dintr-o bară de pictograme (ex. „Încarcă aici" în Fişiere): culoarea de link
+  link: 'wt-link hover:bg-ink-800',
   subtle: 'bg-ink-800 text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700 hover:text-slate-100',
   // distructiv: neutru în repaus (nu strigă pe fiecare rând), roşu la hover/focus
   danger: 'text-slate-400 hover:bg-ink-800 hover:text-danger focus-visible:text-danger',
 }
 
-export function iconButtonClass(variant: IconButtonVariant = 'ghost', size: IconButtonSize = 'sm', touch = true): string {
+/** starea ACTIVĂ / SELECTATĂ (panoul e deschis, comutatorul e pornit, meniul e desfăcut): accent pe
+    fundal ridicat. Înlocuieşte culoarea variantei (nu se adaugă peste ea — Tailwind n-ar şti care
+    câştigă). Semantica o pune locul: `aria-pressed` pe un comutator, `aria-expanded` pe un meniu. */
+const ICON_ACTIVE = 'wt-accent bg-ink-700 hover:bg-ink-700'
+
+export function iconButtonClass(variant: IconButtonVariant = 'ghost', size: IconButtonSize = 'sm', touch = true, active = false): string {
   return `${touch ? 'wt-touch ' : ''}grid shrink-0 place-items-center rounded-md transition-colors ` +
-    `disabled:cursor-not-allowed disabled:opacity-40 ${ICON_SIZE[size]} ${ICON_VARIANT[variant]}`
+    `disabled:cursor-not-allowed disabled:opacity-40 ${ICON_SIZE[size]} ${active ? ICON_ACTIVE : ICON_VARIANT[variant]}`
 }
 
 /** acţiune text COMPACTĂ în rânduri dense (rândurile de transfer: Retry · Pause · Cancel…): 24px,

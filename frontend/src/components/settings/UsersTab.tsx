@@ -523,7 +523,7 @@ export default function UsersTab() {
           {mine.length === 0
             ? <span className="text-sm text-slate-400">{t('roles.myNone')}</span>
             : mine.map((b) => (
-              <Badge key={b.id} tone={b.role === 'owner' ? 'accent' : 'neutral'} className="px-2 py-0.5"
+              <Badge key={b.id} tone={b.role === 'owner' ? 'accent' : 'neutral'} size="md"
                 title={sourceTitle(b)}>{chip(b)}</Badge>
             ))}
         </div>
@@ -574,7 +574,7 @@ export default function UsersTab() {
                   <Badge tone="warn">{t('roles.noRole')}</Badge>
                 )}
                 {(u.bindings ?? []).map((b) => (
-                  <Badge key={b.id} tone={b.role === 'owner' ? 'accent' : 'neutral'} className="py-0.5 pl-2"
+                  <Badge key={b.id} tone={b.role === 'owner' ? 'accent' : 'neutral'} size="md"
                     title={sourceTitle(b)}>
                     {chip(b)}
                     {!u.is_self && (isOwner || b.role !== 'owner') && (

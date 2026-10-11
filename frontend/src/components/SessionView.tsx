@@ -1884,7 +1884,7 @@ export default function SessionView(props: {
                           : <span className={`shrink-0 text-2xs ${c.writable ? 'wt-warn' : 'text-slate-500'}`}>{c.writable ? t('session.canWrite') : t('session.canView')}</span>}
                         {!c.owner && (
                           <IconButton touch={false} onClick={() => { void kick(c) }} label={t('session.removeFromSession')}
-                            className="wt-danger"><CloseIcon size={14} /></IconButton>
+                            variant="danger"><CloseIcon size={14} /></IconButton>
                         )}
                         </div>
                         {/* De unde e ataşat. Fără asta „mai e cineva conectat" nu-ţi spunea
@@ -1908,13 +1908,13 @@ export default function SessionView(props: {
           {/* Pe mobil ține DOAR esențialul în bară (căutare + paste); restul
               intră în meniul ⋯. Pe iPhone SE, cinci butoane + badge + titlu
               împingeau toolbarul afară din ecran. */}
-          <ToolButton title={t('session.searchScrollback', { shortcut: shortcutFor('search') })} active={showSearch} onClick={() => setShowSearch(!showSearch)}><SearchIcon /></ToolButton>
+          <ToolButton title={t('session.searchScrollback', { shortcut: shortcutFor('search') })} active={showSearch} toggle onClick={() => setShowSearch(!showSearch)}><SearchIcon /></ToolButton>
           {/* comenzi (OSC 133): navighezi între ele cu Alt+↑/↓. Eticheta era „⌘N" — tasta Cmd de
               pe Mac, fără sens pe Linux/Windows; „❯" e promptul, neutru pe orice platformă. */}
           <span className="hidden sm:contents">
             <ToolButton
               title={commands.length ? t('session.commandsCount', { count: commands.length }) : t('session.commandsActivate')}
-              active={showCommands}
+              active={showCommands} toggle
               onClick={toggleCommands}
             >
               <span className="inline-flex items-center font-mono text-xs"><ChevronIcon size={14} />{commands.length > 0 ? commands.length : ''}</span>
@@ -1922,19 +1922,19 @@ export default function SessionView(props: {
           </span>
           {/* fișiere: navighezi/editezi/transferi; urmărește cwd-ul din terminal */}
           <span className="hidden sm:contents">
-            <ToolButton title={t('session.filesTooltip')} active={showFiles} onClick={toggleFiles}>
+            <ToolButton title={t('session.filesTooltip')} active={showFiles} toggle onClick={toggleFiles}>
               <FilesIcon />
             </ToolButton>
           </span>
           {/* git: status/diff/stage/commit pe repo-ul din cwd-ul terminalului */}
           <span className="hidden sm:contents">
-            <ToolButton title={t('session.gitTooltip')} active={showGit} onClick={toggleGit}>
+            <ToolButton title={t('session.gitTooltip')} active={showGit} toggle onClick={toggleGit}>
               <GitBranchIcon />
             </ToolButton>
           </span>
           {/* port forwards: expune servicii web de pe host prin browser */}
           <span className="hidden sm:contents">
-            <ToolButton title={t('session.forwardsTooltip')} active={showForwards} onClick={toggleForwards}>
+            <ToolButton title={t('session.forwardsTooltip')} active={showForwards} toggle onClick={toggleForwards}>
               <ForwardIcon />
             </ToolButton>
           </span>
@@ -1942,7 +1942,7 @@ export default function SessionView(props: {
               agent (docker CLI e local pe host; SSH/telnet n-au op-ul `run`). */}
           {agentHost && (
             <span className="hidden sm:contents">
-              <ToolButton title={t('session.dockerTooltip')} active={showDocker} onClick={toggleDocker}>
+              <ToolButton title={t('session.dockerTooltip')} active={showDocker} toggle onClick={toggleDocker}>
                 <DockerIcon />
               </ToolButton>
             </span>
@@ -1951,7 +1951,7 @@ export default function SessionView(props: {
               local pe host, prin op-ul `run` — ca Docker). */}
           {agentHost && (
             <span className="hidden sm:contents">
-              <ToolButton title={t('session.servicesTooltip')} active={showServices} onClick={toggleServices}>
+              <ToolButton title={t('session.servicesTooltip')} active={showServices} toggle onClick={toggleServices}>
                 <ServicesIcon />
               </ToolButton>
             </span>
@@ -1959,7 +1959,7 @@ export default function SessionView(props: {
           {/* Toolbox: lansatoare de conexiuni DB. Doar host-uri de agent (CLI-ul rulează pe host). */}
           {agentHost && (
             <span className="hidden sm:contents">
-              <ToolButton title={t('session.toolboxTooltip')} active={showToolbox} onClick={toggleToolbox}>
+              <ToolButton title={t('session.toolboxTooltip')} active={showToolbox} toggle onClick={toggleToolbox}>
                 <ToolboxIcon />
               </ToolButton>
             </span>
@@ -1983,10 +1983,10 @@ export default function SessionView(props: {
           <div className="hidden items-center gap-0.5 lg:flex">
             <span className="mx-0.5 h-4 w-px bg-ink-700" aria-hidden="true" />
             <ToolButton title={t('session.linksTooltip')} active={linksOpen} onClick={openLinks}><ExternalLinkIcon /></ToolButton>
-            <ToolButton title={t('session.note')} active={showNote} onClick={() => setShowNote(!showNote)}><NoteIcon /></ToolButton>
+            <ToolButton title={t('session.note')} active={showNote} toggle onClick={() => setShowNote(!showNote)}><NoteIcon /></ToolButton>
             <ToolButton title={t('session.copySelection')} onClick={copySelection}>{copied ? <CheckIcon size={16} /> : <CopyIcon />}</ToolButton>
-            <ToolButton title={t('session.fontSmaller')} onClick={() => setPreferredFont(fontSize - 1)}>A−</ToolButton>
-            <ToolButton title={t('session.fontLarger')} onClick={() => setPreferredFont(fontSize + 1)}>A+</ToolButton>
+            <ToolButton title={t('session.fontSmaller')} onClick={() => setPreferredFont(fontSize - 1)}><span className="text-sm">A−</span></ToolButton>
+            <ToolButton title={t('session.fontLarger')} onClick={() => setPreferredFont(fontSize + 1)}><span className="text-sm">A+</span></ToolButton>
             {!props.popout && (
               <ToolButton title={t('session.shareLinkTooltip')} active={!!shareUrl || !!shareActive || shareOpen} onClick={share}><ShareIcon /></ToolButton>
             )}
@@ -2224,7 +2224,7 @@ export default function SessionView(props: {
       {readOnly && !exited && (
         <div role="status" aria-live="polite" data-readonly-pill
           className="flex items-center gap-2 border-b border-ink-800 bg-ink-900/80 px-4 py-1.5 text-sm">
-          <Badge tone="info" className="px-2 py-0.5"><EyeIcon size={12} /> {t('term.readonlyPill')}</Badge>
+          <Badge tone="info" size="md"><EyeIcon size={12} /> {t('term.readonlyPill')}</Badge>
           <span className="min-w-0 truncate text-xs text-slate-400">{t('term.readonlyBody')}</span>
         </div>
       )}
@@ -2710,16 +2710,21 @@ function LinksDialog(props: { links: string[]; onClose: () => void; onCopy: (u: 
 function ToolButton(props: {
   title: string
   active?: boolean
+  /** comutator (panou deschis/închis): `aria-pressed` = `active` */
+  toggle?: boolean
   onClick: () => void
   children: React.ReactNode
 }) {
-  // IconButton-ul design system-ului (label = aria-label + title); starea „activ" = fundal + accent
+  // IconButton-ul design system-ului (label = aria-label + title); starea „activ" = varianta
+  // `active` a primitivei (3.6.3, U24), nu clase de culoare suprapuse peste ghost
   return (
     <IconButton
+      type="button"
       label={props.title}
+      active={!!props.active}
+      aria-pressed={props.toggle ? !!props.active : undefined}
       onMouseDown={(e) => e.preventDefault()} // păstrează focusul (și selecția) în terminal
       onClick={props.onClick}
-      className={`text-sm ${props.active ? 'wt-accent bg-ink-700' : ''}`}
     >
       {props.children}
     </IconButton>

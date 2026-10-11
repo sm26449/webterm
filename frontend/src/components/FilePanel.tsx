@@ -665,7 +665,7 @@ export default function FilePanel(props: {
               iar un input montat SUB overlay i-ar fura focusul (tastezi într-un câmp invizibil) */}
           <IconButton onClick={() => { setNewFileErr(''); setNewFolder(null); setRenaming(null); setConfirmDel(null); setNewFile('') }} disabled={!listing} label={t('files.newFile')}><FilePlusIcon /></IconButton>
           <IconButton onClick={() => { setNewFile(null); setNewFileErr(''); setNewFolder('') }} label={t('files.newDir')}><PlusIcon /></IconButton>
-          <IconButton onClick={() => fileInput.current?.click()} disabled={busy || !listing} label={t('files.uploadHere')} className="wt-link"><UploadIcon /></IconButton>
+          <IconButton onClick={() => fileInput.current?.click()} disabled={busy || !listing} label={t('files.uploadHere')} variant="link"><UploadIcon /></IconButton>
           <input ref={fileInput} type="file" multiple className="hidden" onChange={(e) => { if (e.target.files) pickFiles(e.target.files); e.target.value = '' }} />
         </div>
 
