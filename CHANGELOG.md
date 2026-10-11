@@ -9,7 +9,8 @@ back.
 
 ## [Unreleased]
 
-3.6.4 — OS-style themes. Frontend only: no agent change, no API change.
+3.6.4 — OS-style themes, plus the fixes from an independent functional UI audit of 3.6.3. No
+agent change; one small server change (forward links keep the gateway's public port).
 
 ### Added
 - **Theme styles: macOS, Windows 11 and GNOME, each light and dark.** Settings → Appearance now
@@ -45,6 +46,49 @@ back.
   into storage, so `auto` became `dark` or `macos` after the first refresh. Startup now only
   paints the stored preference.
 
+### Fixed (functional UI audit of 3.6.3)
+- **A failed session list no longer looks like an empty fleet.** Hosts and sessions are loaded
+  independently: if `/api/sessions` fails, the Dashboard and sidebar keep the hosts and say that
+  sessions could not be refreshed (with Retry), instead of the first-run "No hosts yet / Add a
+  host" and "0/0 hosts online". The empty state only appears after a successful host list.
+- **Settings opened from a deep link kept its header.** Jumping to a section (Dashboard → "Alert
+  channels", Alerts → "Notification settings") scrolled the whole dialog, hiding the title, the
+  search and ×; only the content panel scrolls now.
+- **Settings search no longer finds "SSO group mapping" when SSO is off** (the tab does not show
+  it, so Enter went nowhere).
+- **Service and Docker failures show the host's reason** ("systemctl rejected the command on the
+  host: Failed to stop cron.service: Access denied"), and a successful action says so in a toast.
+- **Split view: pane toolbars fold by pane width**, not window width. In a 2×2 split at 1440px,
+  Fullscreen and Stop were clipped out of reach; narrow panes now use the ⋯ menu.
+- **Closing the file editor returns focus to the file's row**, not to the page body (the row's
+  Edit button is hidden when the pointer is elsewhere).
+- **Default session titles are translated** ("Sesiune 3" in Romanian); the server still stores
+  "Session N", and titles you set yourself are shown as written.
+- **Ctrl+S in the file editor saves and stays open**, with a "Saved" confirmation and the file's new
+  modification time (no false conflict on the next save); the editor gets focus when it opens.
+- Coach tips appear once in a split (only in the active pane) and "Got it" closes every copy.
+- Focus no longer drops to the page after Share → "Generate link" (moves to Copy) or Users & roles
+  → "New role" (moves to the name field). Dialogs honour their chosen first field (Add host starts
+  on Name), and one Escape closes Add host together with its tip.
+- Diagnostics refresh on open when the host is online and the snapshot is older than a minute;
+  the "collected … ago" text keeps moving. The offline overlay's duration ticks every second.
+- Files: "Show hidden files" is remembered; the date column no longer wraps.
+- The Settings button tooltip no longer says "Settings (passkeys)" by default.
+- **Port-forwarding domain moved to Settings → Infrastructure & tokens** (from Notifications);
+  search and deep links still find it.
+- Forward form fields have accessible names; **forward links keep the gateway's port** when
+  `PUBLIC_URL` uses a non-default one (`https://app.example.com:8443` → `https://slug.<domain>:8443`).
+  Subdomain routing and the forward Origin check already ignored the port, so they accept exactly
+  the same requests as before.
+- Proper plurals for custom-role permission/usage counts; Romanian uses "hosturi" consistently.
+- Error ≠ empty: the SSO mapping section shows its load error instead of vanishing; Run on hosts
+  shows only the error, not also "No saved commands yet"; Files, Forwards and Docker list errors
+  have Retry.
+- AI tools: each directory is listed once per load (it used to be fetched two or three times), and
+  missing folders such as `~/.claude/agents` are skipped instead of failing with a 400.
+- Phones: the Settings help "?" buttons keep a small circle with a 44px touch area, and the SMTP
+  host field no longer clips its placeholder.
+
 ### Compatibility
 - `wt_theme` values from earlier versions (`dark`, `macos`, `auto`) keep exactly the same look and
   are still written in that format for the WebTerm style, so a rollback to 3.6.3 reads them. New
@@ -59,6 +103,11 @@ back.
   workspace and chrome per family).
 - Design guard: no theme-id comparisons outside `lib/theme*.ts`, no new `[data-theme='macos']`
   rules beyond Aurora's tokens.
+- Audit regressions: `lib/auditFixes.test.ts` (fleet load: error ≠ empty; `{detail}` in service/
+  Docker errors, EN + RO), settings search with SSO off, the forward URL port and Origin check
+  (`forward_proxy_headers_test.py`); e2e: the editor stays open after Save, a second Ctrl+S has no
+  false conflict, focus returns to the file row; ui_review: sessions 500 ≠ empty fleet, deep-linked
+  Settings keep their header, SSO mapping not found with SSO off, Add host starts on Name.
 - a11y gate (`tests/ui_review.mjs`): login, dashboard, session, Settings → Appearance, file
   browser and the Add host dialog, plus Escape/focus checks and the painted `data-theme` /
   `theme-color`, on each of the six new variants (112 scans in total). `mobile-audit.mjs` runs
