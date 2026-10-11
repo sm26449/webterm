@@ -14,12 +14,38 @@ version: 1
 metadata:
   name: webterm-sso
 entries:
-  # grupul de acces la WebTerm (gate per-instanţă)
+  # 3.6.5 — cele cinci grupuri implicite (ca provision.py): wt-access = doar login; wt-admins →
+  # admin @ all; wt-readonly → viewer @ all; wt-db → operator @ tag:db; wt-network → operator @
+  # tag:network (rolurile vin din WEBTERM_OIDC_ROLE_MAP în WebTerm, nu din Authentik).
   - model: authentik_core.group
     identifiers:
       name: wt-access
     attrs:
       name: wt-access
+
+  - model: authentik_core.group
+    identifiers:
+      name: wt-admins
+    attrs:
+      name: wt-admins
+
+  - model: authentik_core.group
+    identifiers:
+      name: wt-readonly
+    attrs:
+      name: wt-readonly
+
+  - model: authentik_core.group
+    identifiers:
+      name: wt-db
+    attrs:
+      name: wt-db
+
+  - model: authentik_core.group
+    identifiers:
+      name: wt-network
+    attrs:
+      name: wt-network
 
   # providerul OIDC (client confidenţial, PKCE acceptat)
   - model: authentik_providers_oauth2.oauth2provider
@@ -68,13 +94,43 @@ entries:
       slug: webterm
       provider:
         !Find [authentik_providers_oauth2.oauth2provider, [name, webterm]]
+      policy_engine_mode: any
 
-  # bind: doar membrii `wt-access` pot folosi aplicaţia (gate în IdP, dublat de WebTerm)
+  # bind: membrii ORICĂRUIA dintre cele cinci grupuri pot folosi aplicaţia (policy_engine_mode
+  # `any` — implicit pe aplicaţii; un singur grup per om ajunge). Gate în IdP, dublat de WebTerm.
   - model: authentik_policies.policybinding
     identifiers:
       target: !Find [authentik_core.application, [slug, webterm]]
       group: !Find [authentik_core.group, [name, wt-access]]
       order: 0
+    attrs:
+      enabled: true
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !Find [authentik_core.application, [slug, webterm]]
+      group: !Find [authentik_core.group, [name, wt-admins]]
+      order: 1
+    attrs:
+      enabled: true
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !Find [authentik_core.application, [slug, webterm]]
+      group: !Find [authentik_core.group, [name, wt-readonly]]
+      order: 2
+    attrs:
+      enabled: true
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !Find [authentik_core.application, [slug, webterm]]
+      group: !Find [authentik_core.group, [name, wt-db]]
+      order: 3
+    attrs:
+      enabled: true
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !Find [authentik_core.application, [slug, webterm]]
+      group: !Find [authentik_core.group, [name, wt-network]]
+      order: 4
     attrs:
       enabled: true
 
