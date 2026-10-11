@@ -29,15 +29,16 @@ mkdirSync(OUT, { recursive: true })
 // portret și peisaj pentru cele mai relevante
 const MATRIX = [
   { name: 'iphone-se', device: devices['iPhone SE'], engine: 'webkit' },
-  { name: 'iphone-13', device: devices['iPhone 13'], engine: 'webkit' },
+  // 3.6.4: câte o variantă din fiecare familie de temă nouă, pe un device existent (`theme` = wt_theme)
+  { name: 'iphone-13', device: devices['iPhone 13'], engine: 'webkit', theme: 'mac:light' },
   { name: 'iphone-15-max', device: devices['iPhone 15 Pro Max'], engine: 'webkit' },
   { name: 'iphone-13-landscape', device: devices['iPhone 13 landscape'], engine: 'webkit' },
   { name: 'ipad-mini', device: devices['iPad Mini'], engine: 'webkit' },
   { name: 'ipad-pro-11', device: devices['iPad Pro 11'], engine: 'webkit' },
   { name: 'ipad-pro-11-landscape', device: devices['iPad Pro 11 landscape'], engine: 'webkit' },
   { name: 'galaxy-s9', device: devices['Galaxy S9+'], engine: 'chromium' },
-  { name: 'pixel-7', device: devices['Pixel 7'], engine: 'chromium' },
-  { name: 'galaxy-tab-s4', device: devices['Galaxy Tab S4'], engine: 'chromium' },
+  { name: 'pixel-7', device: devices['Pixel 7'], engine: 'chromium', theme: 'gnome:dark' },
+  { name: 'galaxy-tab-s4', device: devices['Galaxy Tab S4'], engine: 'chromium', theme: 'win:light' },
   // WCAG 1.4.10 Reflow: la 320 px CSS conţinutul trebuie să încapă fără scroll orizontal.
   // Nu e un device real din presetări — e lăţimea de referinţă a criteriului (echivalentul
   // unui desktop la zoom 400%). Trece prin acelaşi flux, deci `overflowX` → `bug` blochează.
@@ -170,6 +171,8 @@ async function auditDevice(cfg) {
   const ctx = await browser.newContext({ ...cfg.device, locale: 'en-US', serviceWorkers: 'block' })   // UI i18n → limbă RO fixă
   const page = await ctx.newPage()
   await page.addInitScript(() => { try { for (const k of ['wt_walkthrough_done','wt_tip_addhost_agent','wt_tip_addhost_ssh','wt_tip_terminal_paste','wt_tip_toolbar']) localStorage.setItem(k, '1') } catch { /**/ } })  // walkthrough de primă rulare OFF: nu bloca fluxul de test
+  // tema (3.6.4): fără `theme` → default-ul aplicaţiei (Midnight), ca înainte
+  if (cfg.theme) await page.addInitScript((th) => { try { localStorage.setItem('wt_theme', th) } catch { /**/ } }, cfg.theme)
   const errors = []
   const reached = new Set()
   // telefon în portret (sub `sm`): aici foaia, lista de taburi şi keybar-ul pe 2 rânduri sunt

@@ -15,7 +15,11 @@
    WT_AGENT=1) — toate în AMBELE teme (`wt_theme`: `dark` = Midnight, `macos` = Aurora/light;
    theme.ts scrie valoarea în `data-theme`); plus teste de tastatură (ordinea Tab, Escape +
    restaurarea focusului, ciclul Tab în ConfirmModal, paleta cu săgeţi+Enter, reordonarea
-   tab-urilor cu Alt+Shift+←/→). */
+   tab-urilor cu Alt+Shift+←/→).
+
+   3.6.4: şi pe cele 6 variante noi (`wt_theme` = `mac|win|gnome` : `light|dark`), un subset
+   reprezentativ pe fiecare (login, dashboard, sesiune, Setări → Appearance, file browser, dialogul
+   Add host) + Escape/focus şi verificarea că `data-theme`/`theme-color` sunt aplicate. */
 import { chromium, devices } from 'playwright'
 import { AxeBuilder } from '@axe-core/playwright'
 
@@ -58,7 +62,15 @@ const TAGS = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa', 'best-prac
 // (+ Monaco cu WT_AGENT=1).
 // Mobil: sesiune dark + light.
 const PER_THEME = 37 + (HAS_AGENT ? 1 : 0)
-const EXPECTED_SCANS = 2 * PER_THEME + 2
+// 3.6.4: variantele noi (familie × mod), fiecare cu subsetul reprezentativ: login, dashboard,
+// sesiune, Setări → Appearance, file browser, dialogul Add host = 6 scanări pe variantă.
+const NEW_VARIANTS = [
+  ['mac:light', 'mac-light'], ['mac:dark', 'mac-dark'],
+  ['win:light', 'win-light'], ['win:dark', 'win-dark'],
+  ['gnome:light', 'gnome-light'], ['gnome:dark', 'gnome-dark'],
+]
+const PER_VARIANT = 6
+const EXPECTED_SCANS = 2 * PER_THEME + 2 + NEW_VARIANTS.length * PER_VARIANT
 
 /** Pas tolerant: dacă un selector a derapat, notăm şi mergem mai departe.
     Un instrument de recenzie care moare la primul buton mutat nu recenzează nimic. */
@@ -796,6 +808,77 @@ try {
         closed && (f.zone === 'hostlist' || f.zone === 'sidebar'), { note: JSON.stringify(f) })
       const still = await api(page, '/api/hosts')
       check('Escape = anulare: hostul NU a fost şters', (still.body ?? []).some((h) => h.name === OFFLINE_HOST))
+    }, page)
+
+    await ctx.close()
+  }
+
+  // ---- 3.6.4: familiile de temă noi (macOS / Windows 11 / GNOME × light / dark) ----
+  // Setul complet de mai sus rulează pe Midnight şi Aurora; aici, pe fiecare din cele 6 variante noi,
+  // un subset REPREZENTATIV (login, dashboard, sesiune, Setări → Appearance, file browser, un dialog)
+  // + verificări de tastatură — ca timpul porţii să rămână mărginit. Contrastul tuturor tokenilor
+  // pe toate variantele e verificat static de frontend/src/themeContrast.test.ts.
+  for (const [pref, variant] of NEW_VARIANTS) {
+    console.log(`\n--- tema ${variant} (wt_theme=${pref}, subset) ---`)
+    const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1, locale: 'en-US' })
+    const page = await ctx.newPage()
+    page.on('dialog', (d) => d.accept())
+    await page.addInitScript((th) => { try {
+      for (const k of ['wt_walkthrough_done','wt_tip_addhost_agent','wt_tip_addhost_ssh','wt_tip_terminal_paste','wt_tip_toolbar']) localStorage.setItem(k, '1')
+      localStorage.setItem('wt_theme', th)
+    } catch { /**/ } }, pref)
+    await page.goto(BASE)
+    await page.waitForSelector('input[type=email]')
+    const painted = await page.evaluate(() => ({ ...document.documentElement.dataset,
+      meta: document.querySelector('meta[name="theme-color"]')?.getAttribute('content') }))
+    check(`${variant}: data-theme/data-mode aplicate şi theme-color sincronizat (${JSON.stringify(painted)})`,
+      painted.theme === variant && painted.mode === (variant.endsWith('-light') ? 'light' : 'dark')
+        && /^#[0-9a-f]{6}$/.test(painted.meta ?? '') && painted.meta !== '#0b0e14')
+    await page.screenshot({ path: `${OUT}/${variant}-01-login.png` })
+    await scan(page, `${variant} login`)
+
+    await login(page)
+    await page.waitForTimeout(600)
+    await page.screenshot({ path: `${OUT}/${variant}-02-dashboard.png` })
+    await scan(page, `${variant} dashboard`)
+
+    await step(`${variant}: sesiune`, async () => {
+      await openSession(page)
+      await page.keyboard.type('ls -la /etc | head -20\n')
+      await page.waitForTimeout(800)
+      await page.screenshot({ path: `${OUT}/${variant}-03-session.png` })
+      await scan(page, `${variant} session view`)
+      await page.evaluate(() => { window.location.hash = '' })
+      await page.waitForTimeout(400)
+    }, page)
+
+    await step(`${variant}: setări (Appearance)`, async () => {
+      await openSettings(page)
+      await settingsTab(page, 'Appearance')
+      const fam = pref.split(':')[0]
+      check(`${variant}: cardul familiei e marcat ales (aria-pressed)`,
+        await page.locator(`button[data-theme-family="${fam}"][aria-pressed="true"]`).count() === 1)
+      await page.screenshot({ path: `${OUT}/${variant}-05-settings-appearance.png` })
+      await scan(page, `${variant} settings: appearance`)
+      await escapeRestores(page, 'button[aria-label="Settings"]', `Settings (${variant})`)
+    }, page)
+
+    await step(`${variant}: manager de fişiere`, async () => {
+      await hostMenu(page, HOST).click()
+      await page.locator('button[role="menuitem"]', { hasText: 'Files' }).first().click()
+      await page.waitForSelector('text=Upload to:')
+      await page.waitForTimeout(800)
+      await page.screenshot({ path: `${OUT}/${variant}-06-files.png` })
+      await scan(page, `${variant} file browser`)
+      await page.locator('.fixed.z-50 button[aria-label="Close"]').first().click()
+    }, page)
+
+    await step(`${variant}: dialog (adaugă host)`, async () => {
+      await page.click('button[aria-label="Add host"]')
+      await page.waitForSelector('text=Add a host')
+      await page.screenshot({ path: `${OUT}/${variant}-07-addhost.png` })
+      await scan(page, `${variant} add host dialog`)
+      await escapeRestores(page, 'button[aria-label="Add host"]', `Add host (${variant})`)
     }, page)
 
     await ctx.close()

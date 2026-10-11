@@ -64,7 +64,10 @@ async function newPage(browser, opts) {
 async function setTheme(page, theme) {
   await page.evaluate((t) => {
     localStorage.setItem('wt_theme', t)
+    // same three attributes as lib/theme.ts (3.6.4): the light-only rules hang off data-mode
     document.documentElement.dataset.theme = t
+    document.documentElement.dataset.family = 'webterm'
+    document.documentElement.dataset.mode = t === 'macos' ? 'light' : 'dark'
     window.dispatchEvent(new Event('wt-theme'))
   }, theme)
   await page.waitForTimeout(500)
