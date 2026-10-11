@@ -48,7 +48,7 @@ const ALLOW: Record<string, { match: string; why: string }[]> = {
   './components/LoginPage.tsx': [
     { match: '©', why: 'conţinut: menţiunea de copyright din subsolul ecranului de login' },
   ],
-  './components/settings/NotificationsTab.tsx': [
+  './components/settings/ForwardDomainSection.tsx': [   // mutat din NotificationsTab în 3.6.4
     { match: '→', why: 'notaţie DNS în text („*.domeniu → IP"), nu pictogramă' },
   ],
   './components/ForwardsPanel.tsx': [

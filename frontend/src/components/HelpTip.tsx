@@ -80,9 +80,12 @@ export default function HelpTip(props: { id: HelpId; className?: string }) {
         aria-label={t('help.aria', { topic: title })}
         aria-expanded={open}
         aria-controls={open ? popId : undefined}
-        className={`wt-touch inline-grid h-5 w-5 shrink-0 place-items-center rounded-full border border-ink-700 align-middle text-2xs font-semibold leading-none text-slate-400 hover:border-sky-500/60 hover:text-link ${props.className ?? ''}`}
+        // ţinta tactilă de 44px e zona butonului (transparentă, cu margini negative ca să nu umfle
+        // rândul titlului); cercul VIZIBIL rămâne de 20px. Înainte cercul însuşi creştea la 44px pe
+        // telefon — bule mari, nealiniate cu titlurile secţiunilor (audit 3.6.3)
+        className={`wt-touch group/help inline-grid h-5 w-5 shrink-0 place-items-center align-middle [@media(pointer:coarse)]:-my-3 [@media(pointer:coarse)]:-mx-3 ${props.className ?? ''}`}
       >
-        ?
+        <span aria-hidden="true" className="grid h-5 w-5 place-items-center rounded-full border border-ink-700 text-2xs font-semibold leading-none text-slate-400 group-hover/help:border-sky-500/60 group-hover/help:text-link">?</span>
       </button>
       {open && createPortal(
         <div

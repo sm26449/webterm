@@ -47,6 +47,7 @@ export default function AiToolsPanel(props: {
   const [project, setProject] = useState(initialProj)
   const [projInput, setProjInput] = useState(initialProj)
   const [home, setHome] = useState<string | null>(null)
+  const homeRef = useRef<string | null>(null)   // citit de load() fără să-l re-creeze (o singură încărcare)
   const [data, setData] = useState<Data | null>(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -69,20 +70,35 @@ export default function AiToolsPanel(props: {
   const load = useCallback(async () => {
     if (!isAgent) return
     setError(''); setData(null)
+    // audit 3.6.3: fiecare director se lista de 2–3 ori pe încărcare (CLAUDE.md şi AGENTS.md în
+    // acelaşi dosar, plus o a doua încărcare completă după ce `home` intra în state), iar dosarele
+    // care nu există încă (~/.claude/agents) dădeau câte un 400 în consolă. Acum: o listare per
+    // cale şi per încărcare, iar un subdosar se listează doar dacă părintele chiar îl conţine.
+    const cache = new Map<string, Promise<Entry[] | null>>()
+    const list = (path: string) => {
+      let pr = cache.get(path)
+      if (!pr) { pr = listDir(path); cache.set(path, pr) }
+      return pr
+    }
+    const listIfExists = async (path: string) => {
+      const slash = path.lastIndexOf('/')
+      const parent = await list(path.slice(0, slash) || '/')
+      return parent?.some((e) => e.dir && e.name === path.slice(slash + 1)) ? list(path) : null
+    }
     try {
-      const h = home ?? await resolveHome(hid)
-      if (!home) setHome(h)
+      const h = homeRef.current ?? await resolveHome(hid)
+      if (!homeRef.current) { homeRef.current = h; setHome(h) }
       const b: AiBases = { home: h, project: project || null }
       if (scope === 'project' && !project) { setData({ claudeMd: null, agentsMd: null, agents: [], skills: [] }); return }
       const has = async (p: string | null) => {
         if (!p) return null
         const slash = p.lastIndexOf('/')
-        const entries = await listDir(p.slice(0, slash) || '/')
+        const entries = await list(p.slice(0, slash) || '/')
         return entries?.some((e) => !e.dir && e.name === p.slice(slash + 1)) ? p : null
       }
       const coll = async (kind: Coll): Promise<Item[]> => {
         const dir = collectionDir(kind, scope, b)!
-        const entries = (await listDir(dir)) || []
+        const entries = (await listIfExists(dir)) || []
         const items = entries.map((e) => itemName(kind, e)).filter((n): n is string => !!n)
           .sort().map((name) => ({ name, path: itemPath(kind, dir, name), desc: null as string | null }))
         // descrierile din frontmatter, în paralel, best-effort (un fişier stricat nu strică lista)
@@ -102,7 +118,7 @@ export default function AiToolsPanel(props: {
       setError(failMsg(e)); setData({ claudeMd: null, agentsMd: null, agents: [], skills: [] })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hid, isAgent, scope, project, home, listDir, failMsg])
+  }, [hid, isAgent, scope, project, listDir, failMsg])
 
   useEffect(() => { load() }, [load])
 

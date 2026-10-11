@@ -14,6 +14,8 @@ import { extractUrls } from '../lib/urls'
 import { useI18n } from '../lib/i18n'
 import { fmtTs } from '../lib/tz'
 import { hostScheme, termTheme } from '../lib/termtheme'
+import { useElementWidth } from '../lib/useElementWidth'
+import { sessionTitle } from '../lib/sessionTitle'
 import CommandsPanel from './CommandsPanel'
 import HostLoadRing from './HostLoadRing'
 import FilePanel from './FilePanel'
@@ -263,7 +265,8 @@ export default function SessionView(props: {
   const [unlockCode, setUnlockCode] = useState('')   // acelaşi cod, pentru eticheta butonului
   const unlockBtnRef = useRef<HTMLButtonElement>(null)
   const [reconnecting, setReconnecting] = useState(false)
-  const [title, setTitle] = useState(session.title)
+  // titlul implicit «Session N» se arată tradus; se salvează doar dacă omul îl schimbă
+  const [title, setTitle] = useState(() => sessionTitle(session.title, t))
   const [note, setNote] = useState(session.note)
   const [showNote, setShowNote] = useState(!!session.note)
   const [showSearch, setShowSearch] = useState(false)
@@ -424,6 +427,14 @@ export default function SessionView(props: {
   const [fontSize, setFontSize] = useState(preferredFont)
   const [copied, setCopied] = useState(false)
   const [shareUrl, setShareUrl] = useState<string | null>(null)
+  // după „Generate link" butonul apăsat dispare odată cu formularul → focusul cădea pe <body>.
+  // Îl mutăm pe primul buton al barei cu linkul generat (Copy) — audit funcţional 3.6.3
+  const shareBarRef = useRef<HTMLDivElement>(null)
+  const shareUrlSeen = useRef<string | null>(null)
+  useEffect(() => {
+    if (shareUrl && shareUrl !== shareUrlSeen.current) shareBarRef.current?.querySelector<HTMLElement>('button')?.focus()
+    shareUrlSeen.current = shareUrl
+  }, [shareUrl])
   const [shareOpen, setShareOpen] = useState(false)          // panoul de opțiuni
   const [shareWritable, setShareWritable] = useState(false)  // opțiune: writable?
   const [shareExpiry, setShareExpiry] = useState(1440)       // opțiune: minute
@@ -466,6 +477,13 @@ export default function SessionView(props: {
     return () => clearTimeout(t)
   }, [replaying])
   const [moreOpen, setMoreOpen] = useState(false)
+  // Bara de unelte se pliază după LĂŢIMEA PANOULUI, nu a ferestrei (audit funcţional 3.6.3, #5):
+  // într-un split 2×2 la 1440px fiecare panou are ~570px, dar `lg:`/`sm:` vedeau 1440 — Fullscreen
+  // şi Stop ieşeau din panou, de neatins. Pragurile sunt cele de dinainte (sm 640 / lg 1024).
+  const headerRef = useRef<HTMLElement>(null)
+  const paneW = useElementWidth(headerRef)
+  const roomy = paneW >= 640    // uneltele principale (Files, Git, Docker…) în bară
+  const wide = paneW >= 1024    // şi cele secundare (Note, Share, Fullscreen…) — altfel în ⋯
   // „Mai multe" = disclosure (3.6.3, U23): trigger cu aria-expanded/aria-controls; Escape (şi din
   // afara panoului, cât e deschis) închide şi întoarce focusul pe trigger
   const moreId = `session-more-${session.id}`
@@ -542,6 +560,8 @@ export default function SessionView(props: {
   // apoi, DUPĂ ce acela e închis, toolbar-ul — ca două callout-uri să nu apară simultan.
   const [showPasteTip, setShowPasteTip] = useState(false)
   const [showToolbarTip, setShowToolbarTip] = useState(false)
+  // într-un split sfaturile apar doar în panoul ACTIV — nu câte o copie în fiecare panou
+  const tipPane = !props.inSplit || !!props.activeInSplit
   useEffect(() => {
     if (!isLive) return
     let cancelled = false
@@ -1822,7 +1842,7 @@ export default function SessionView(props: {
       {/* header (titlebar în tema macOS) */}
       {/* min-w-0 + gap mai mic pe mobil: fără ele, badge-ul hostului și butoanele
           împing toolbarul în afara ecranului (iPhone SE / Galaxy S9) */}
-      <header className="flex min-w-0 items-center gap-1 border-b border-ink-800 bg-ink-900 px-2 py-2 md:gap-2 md:px-3">
+      <header ref={headerRef} className="flex min-w-0 items-center gap-1 border-b border-ink-800 bg-ink-900 px-2 py-2 md:gap-2 md:px-3">
         <IconButton size="md" onClick={props.onMenu} label={menuLabel(t('session.openHostList'), unreadAlerts, t)}
           className={`relative ${props.sidebarCollapsed ? '' : 'md:hidden'}`}>
           <MenuIcon />
@@ -1854,7 +1874,7 @@ export default function SessionView(props: {
             title={t('session.clickToRename')}
             placeholder={t('session.sessionPlaceholder')}
             onChange={(e) => setTitle(e.target.value)}
-            onBlur={() => title !== session.title && saveMeta({ title })}
+            onBlur={() => title !== session.title && title !== sessionTitle(session.title, t) && saveMeta({ title })}
             onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
             className="wt-ghost min-w-0 flex-1 truncate rounded-md bg-transparent py-1 pl-2 pr-7 text-sm font-medium ring-1 ring-transparent hover:bg-ink-800 hover:ring-ink-700 focus:bg-ink-800 focus:ring-transparent"
           />
@@ -1933,7 +1953,7 @@ export default function SessionView(props: {
           <ToolButton title={t('session.searchScrollback', { shortcut: shortcutFor('search') })} active={showSearch} toggle onClick={() => setShowSearch(!showSearch)}><SearchIcon /></ToolButton>
           {/* comenzi (OSC 133): navighezi între ele cu Alt+↑/↓. Eticheta era „⌘N" — tasta Cmd de
               pe Mac, fără sens pe Linux/Windows; „❯" e promptul, neutru pe orice platformă. */}
-          <span className="hidden sm:contents">
+          <span className={roomy ? 'contents' : 'hidden'}>
             <ToolButton
               title={commands.length ? t('session.commandsCount', { count: commands.length }) : t('session.commandsActivate')}
               active={showCommands} toggle
@@ -1943,19 +1963,19 @@ export default function SessionView(props: {
             </ToolButton>
           </span>
           {/* fișiere: navighezi/editezi/transferi; urmărește cwd-ul din terminal */}
-          <span className="hidden sm:contents">
+          <span className={roomy ? 'contents' : 'hidden'}>
             <ToolButton title={t('session.filesTooltip')} active={showFiles} toggle onClick={toggleFiles}>
               <FilesIcon />
             </ToolButton>
           </span>
           {/* git: status/diff/stage/commit pe repo-ul din cwd-ul terminalului */}
-          <span className="hidden sm:contents">
+          <span className={roomy ? 'contents' : 'hidden'}>
             <ToolButton title={t('session.gitTooltip')} active={showGit} toggle onClick={toggleGit}>
               <GitBranchIcon />
             </ToolButton>
           </span>
           {/* port forwards: expune servicii web de pe host prin browser */}
-          <span className="hidden sm:contents">
+          <span className={roomy ? 'contents' : 'hidden'}>
             <ToolButton title={t('session.forwardsTooltip')} active={showForwards} toggle onClick={toggleForwards}>
               <ForwardIcon />
             </ToolButton>
@@ -1963,7 +1983,7 @@ export default function SessionView(props: {
           {/* docker: containere/imagini/volume/reţele + shell în container. Doar host-uri de
               agent (docker CLI e local pe host; SSH/telnet n-au op-ul `run`). */}
           {agentHost && (
-            <span className="hidden sm:contents">
+            <span className={roomy ? 'contents' : 'hidden'}>
               <ToolButton title={t('session.dockerTooltip')} active={showDocker} toggle onClick={toggleDocker}>
                 <DockerIcon />
               </ToolButton>
@@ -1972,7 +1992,7 @@ export default function SessionView(props: {
           {/* servicii systemd: listă + start/stop/restart. Doar host-uri de agent (systemctl e
               local pe host, prin op-ul `run` — ca Docker). */}
           {agentHost && (
-            <span className="hidden sm:contents">
+            <span className={roomy ? 'contents' : 'hidden'}>
               <ToolButton title={t('session.servicesTooltip')} active={showServices} toggle onClick={toggleServices}>
                 <ServicesIcon />
               </ToolButton>
@@ -1980,7 +2000,7 @@ export default function SessionView(props: {
           )}
           {/* Toolbox: lansatoare de conexiuni DB. Doar host-uri de agent (CLI-ul rulează pe host). */}
           {agentHost && (
-            <span className="hidden sm:contents">
+            <span className={roomy ? 'contents' : 'hidden'}>
               <ToolButton title={t('session.toolboxTooltip')} active={showToolbox} toggle onClick={toggleToolbox}>
                 <ToolboxIcon />
               </ToolButton>
@@ -1993,7 +2013,7 @@ export default function SessionView(props: {
             <SnippetsMenu
               open={snippetsOpen}
               onOpenChange={setSnippetsOpen}
-              triggerClassName="hidden sm:grid"
+              triggerClassName={roomy ? 'grid' : 'hidden'}
               onInsert={(b) => { send(b); termRef.current?.focus() }}
             />
           )}
@@ -2002,7 +2022,7 @@ export default function SessionView(props: {
 
           {/* Secundar: inline doar pe ecrane mari. Pe tablete (iPad Mini/Pro),
               zece butoane × 44px (ținte tactile) depășeau lățimea — trec în ⋯. */}
-          <div className="hidden items-center gap-0.5 lg:flex">
+          <div className={`${wide ? 'flex' : 'hidden'} items-center gap-0.5`}>
             <span className="mx-0.5 h-4 w-px bg-ink-700" aria-hidden="true" />
             <ToolButton title={t('session.linksTooltip')} active={linksOpen} onClick={openLinks}><ExternalLinkIcon /></ToolButton>
             <ToolButton title={t('session.note')} active={showNote} toggle onClick={() => setShowNote(!showNote)}><NoteIcon /></ToolButton>
@@ -2028,7 +2048,7 @@ export default function SessionView(props: {
           </div>
 
           {/* overflow: mobil ȘI tablete */}
-          <div className="relative lg:hidden">
+          <div className={wide ? 'hidden' : 'relative'}>
             <ToolButton ref={moreBtnRef} title={t('session.more')} active={moreOpen} onClick={() => setMoreOpen((v) => !v)}
               aria-expanded={moreOpen} aria-controls={moreId}><MoreIcon /></ToolButton>
             {moreOpen && (
@@ -2041,7 +2061,7 @@ export default function SessionView(props: {
                   className="wt-sheet-bottom fixed inset-x-0 bottom-0 z-40 max-h-[70dvh] overflow-y-auto rounded-t-2xl border-t border-ink-700 bg-ink-900 p-2 shadow-2xl sm:absolute sm:inset-x-auto sm:bottom-auto sm:right-0 sm:mt-1 sm:max-h-[calc(100dvh-5rem)] sm:w-56 sm:rounded-xl sm:border sm:p-1">
                   {/* acțiunile scoase din bară pe ecrane înguste — ACELEAŞI reguli de
                       disponibilitate ca butoanele din bară (Docker/Servicii/Toolbox: doar agent) */}
-                  <span className="sm:hidden">
+                  <span className={roomy ? 'hidden' : ''}>
                     <MoreItem onClick={() => { if (!showCommands) toggleCommands(); setMoreOpen(false) }}>
                       <ChevronIcon size={16} /> {t('session.commands')}{commands.length ? ` (${commands.length})` : ''}
                     </MoreItem>
@@ -2169,7 +2189,7 @@ export default function SessionView(props: {
 
       {/* Link generat */}
       {(shareUrl || shareActive) && (
-        <div className="flex flex-wrap items-center gap-2 border-b border-ink-800 bg-ink-900/70 px-3 py-2 text-sm">
+        <div ref={shareBarRef} className="flex flex-wrap items-center gap-2 border-b border-ink-800 bg-ink-900/70 px-3 py-2 text-sm">
           <span className={`shrink-0 rounded-md px-1.5 py-0.5 text-2xs ${shareActive?.writable ? 'wt-warn bg-amber-500/15' : 'bg-ink-800 text-slate-400'}`}>
             {shareActive?.writable ? t('session.shareWritable') : t('session.shareReadOnly')}
           </span>
@@ -2379,7 +2399,7 @@ export default function SessionView(props: {
         {canTransfer && (
           <CoachTip
             tipKey={TIP_TERMINAL_PASTE}
-            show={showPasteTip}
+            show={showPasteTip && tipPane}
             onDismiss={onPasteTipDismiss}
             icon={<PasteIcon />}
             title={t('tips.terminal.paste.title')}
@@ -2389,7 +2409,7 @@ export default function SessionView(props: {
         )}
         <CoachTip
           tipKey={TIP_TOOLBAR}
-          show={showToolbarTip}
+          show={showToolbarTip && tipPane}
           icon={<ToolboxIcon />}
           title={t('tips.toolbar.title')}
           body={t('tips.toolbar.body')}

@@ -1,4 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
+import { sessionTitle } from '../lib/sessionTitle'
 import { errText, isSessionLive, api, AppLink, Host, HostSupervision, Session, timeAgo, withStepup } from '../lib/api'
 import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
 import { useI18n } from '../lib/i18n'
@@ -166,7 +167,7 @@ export default function HostOverview(props: {
         <span aria-hidden="true" className={`h-2 w-2 shrink-0 ${s.state === 'lost' ? 'rounded-md' : 'rounded-full'} ${
           live ? 'bg-emerald-400 dot-live' : s.state === 'lost' ? 'bg-rose-500' : 'bg-slate-600'}`} />
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-sm text-slate-200">{s.title || t('host.sessionFallback')}</span>
+          <span className="block truncate text-sm text-slate-200">{sessionTitle(s.title, t) || t('host.sessionFallback')}</span>
           <span className="block truncate text-2xs text-slate-600">
             {live ? t('host.stateActive') : s.state === 'lost' ? t('host.stateLost') : t('host.stateClosed')}
             {s.exit_status != null ? ` · exit ${s.exit_status}` : ''} · {timeAgo(s.closed_at || s.created, t)}
@@ -177,7 +178,7 @@ export default function HostOverview(props: {
       <button
         type="button"
         onClick={() => props.onOpenSession(s.id)}
-        aria-label={t('host.rowOpenAria', { name: s.title || t('host.sessionFallback') })}
+        aria-label={t('host.rowOpenAria', { name: sessionTitle(s.title, t) || t('host.sessionFallback') })}
         className="wt-link mr-2 shrink-0 rounded-md px-2 py-1 text-xs font-medium ring-1 ring-ink-700 hover:bg-ink-700"
       >{t('host.rowOpen')}</button>
       </div>
@@ -572,7 +573,7 @@ function SessionThumb(props: {
   return (
     <div className="group relative overflow-hidden rounded-xl bg-ink-900 ring-1 ring-ink-700 transition hover:ring-sky-500/60">
       <button onClick={props.onOpen} className="block w-full text-left"
-        title={t('host.openTerminal')} aria-label={`${s.title || t('host.sessionFallback')} — ${t('host.openTerminal')}`}>
+        title={t('host.openTerminal')} aria-label={`${sessionTitle(s.title, t) || t('host.sessionFallback')} — ${t('host.openTerminal')}`}>
         {/* fereastra de preview: snapshot text al transcriptului (fiabil la orice dimensiune) */}
         <div className="wt-workspace relative h-[132px] w-full overflow-hidden">
           <ThumbPreview sid={s.id} live />
@@ -583,7 +584,7 @@ function SessionThumb(props: {
         </div>
         <div className="flex items-center gap-2 px-3 py-2">
           <span className="h-2 w-2 shrink-0 rounded-full bg-emerald-400 dot-live" />
-          <span className="min-w-0 flex-1 truncate text-sm text-slate-200">{s.title || t('host.sessionFallback')}</span>
+          <span className="min-w-0 flex-1 truncate text-sm text-slate-200">{sessionTitle(s.title, t) || t('host.sessionFallback')}</span>
           {s.connected_clients > 0 && <span className="flex shrink-0 items-center gap-1 text-2xs text-slate-500"><EyeIcon /> {s.connected_clients}</span>}
         </div>
       </button>

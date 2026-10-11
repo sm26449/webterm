@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { sessionTitle } from '../lib/sessionTitle'
 import { errText, isEphemeralHost, isSessionLive, api, AppLink, Host, Session, timeAgo } from '../lib/api'
 import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
 import { useI18n } from '../lib/i18n'
@@ -11,6 +12,8 @@ import type { SettingsTarget } from '../lib/settingsIndex'
 import SharesModal from './SharesModal'
 import { fmt } from '../lib/shortcuts'
 import { Badge, Button, EmptyState, ErrorState, eyebrow } from './ui'
+import { Spinner } from './ui/Spinner'
+import type { FleetStatus } from '../lib/fleetLoad'
 import { MenuUnreadBadge, useUnreadAlerts } from './AlertsPanel'
 import { menuLabel } from '../lib/alerts'
 
@@ -40,6 +43,9 @@ export default function Dashboard(props: {
   /** cardul Securitate duce la locul unde se repară: Setări pe tab-ul potrivit / Status */
   onOpenSettings: (target: SettingsTarget) => void
   onOpenStatus: () => void
+  /** starea încărcării flotei (eroare ≠ gol); lipsă = considerată încărcată */
+  fleet?: FleetStatus
+  onRetryFleet?: () => void
 }) {
   const { t } = useI18n()
   const unreadAlerts = useUnreadAlerts()
@@ -86,6 +92,18 @@ export default function Dashboard(props: {
   // 3.6: o flotă goală pentru cine NU poate adăuga hosturi = „fără acces încă" — îi spunem să
   // întrebe un administrator (fără nume: serverul nu mai dezvăluie cine sunt), în loc să-l
   // invităm la un „Adaugă host" care ar da 403
+  // eroare ≠ gol (audit funcţional 3.6.3, #1): până la PRIMA listă de hosturi reuşită nu spunem
+  // niciodată „nu ai niciun host" — fie se încarcă, fie a picat (cu motivul şi Reîncearcă)
+  if (props.fleet && !props.fleet.hostsLoaded) {
+    return (
+      <div data-testid="dashboard-loading" className="wt-canvas flex h-full items-center justify-center p-6">
+        {props.fleet.hostsErr
+          ? <ErrorState title={t('dashboard.hostsLoadFailed')} message={props.fleet.hostsErr} onRetry={props.onRetryFleet} />
+          : <p role="status" className="flex items-center gap-2 text-sm text-slate-400"><Spinner /> {t('dashboard.loadingHosts')}</p>}
+      </div>
+    )
+  }
+
   if (hosts.length === 0 && !can(perms, 'hosts.create')) {
     return (
       <EmptyState size="page" titleAs="h1" className="wt-canvas h-full" tone="neutral"
@@ -133,6 +151,19 @@ export default function Dashboard(props: {
             {t('dashboard.jumpTo')} <kbd className="hidden rounded-md bg-ink-700 px-1.5 text-xs text-slate-200 sm:inline">{fmt('Mod+K')}</kbd>
           </Button>
         </div>
+        {/* o parte a flotei n-a putut fi reîmprospătată: arătăm ultima listă reuşită şi O SPUNEM */}
+        {(props.fleet?.hostsErr || props.fleet?.sessionsErr) && (
+          <div role="alert" data-testid="dash-fleet-stale"
+            className="mt-3 flex flex-wrap items-center gap-2 rounded-md bg-danger/10 px-3 py-2 text-xs ring-1 ring-danger/30">
+            <span className="wt-danger font-medium">
+              {props.fleet.sessionsErr ? t('dashboard.sessionsStale') : t('dashboard.hostsStale')}
+            </span>
+            <span className="min-w-0 break-words text-slate-400">{props.fleet.sessionsErr ?? props.fleet.hostsErr}</span>
+            {props.onRetryFleet && (
+              <button type="button" onClick={props.onRetryFleet} className="wt-link min-h-6 hover:underline">{t('common.retry')}</button>
+            )}
+          </div>
+        )}
 
         {/* Securitate: „e totul în regulă acum?" la o privire (3.5.4) */}
         <SecurityCard onNavigate={navigateSecurity} refreshSignal={secRefresh} />
@@ -207,7 +238,7 @@ export default function Dashboard(props: {
                       <TerminalPromptIcon />
                     </span>
                     <span className="min-w-0 flex-1">
-                      <span className="block truncate text-sm font-medium text-slate-100">{s.title || t('dashboard.session')}</span>
+                      <span className="block truncate text-sm font-medium text-slate-100">{sessionTitle(s.title, t) || t('dashboard.session')}</span>
                       <span className="wt-hostlabel block truncate text-xs" style={{ color }}>{h?.name ?? t('dashboard.host')}</span>
                     </span>
                     <span className="shrink-0 text-right text-2xs text-slate-500">
@@ -253,7 +284,7 @@ export default function Dashboard(props: {
                       <TerminalPromptIcon />
                     </span>
                     <span className="min-w-0 flex-1">
-                      <span className="block truncate text-sm text-slate-300">{s.title || t('dashboard.session')}</span>
+                      <span className="block truncate text-sm text-slate-300">{sessionTitle(s.title, t) || t('dashboard.session')}</span>
                       <span className="block truncate text-xs text-slate-500">{h?.name ?? t('dashboard.host')}</span>
                     </span>
                     <span className="shrink-0 text-right text-2xs text-slate-500">

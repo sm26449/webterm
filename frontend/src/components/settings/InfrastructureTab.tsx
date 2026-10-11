@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useRef, useState } from 'react'
+import ForwardDomainSection from './ForwardDomainSection'
 import { errText, api, CommandGuard, DeployKeyPolicy, withSecondFactor as withSecondFactorT } from '../../lib/api'
 import { useI18n } from '../../lib/i18n'
 import { useSectionVisible } from '../../lib/perms'
@@ -527,6 +528,10 @@ export default function InfrastructureTab(props: { onAccountChanged: () => void 
         </label>
         {dkPolicyMsg && <div className="mt-1 text-xs text-slate-500">{dkPolicyMsg}</div>}
         </>)}
+      </section>
+
+      <section data-setting-id="forwardDomain" hidden={!vis('forwardDomain')}>
+        <ForwardDomainSection />
       </section>
 
       <section data-setting-id="guardrail" hidden={!vis('guardrail')}>

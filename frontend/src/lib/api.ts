@@ -319,7 +319,9 @@ export function errText(e: unknown, t: (k: string, v?: Record<string, string | n
                         vars?: Record<string, string | number>): string {
   if (!(e instanceof ApiError)) return e instanceof Error ? e.message : String(e)
   if (e.code) {
-    const translated = t('err.' + e.code, vars)
+    // {detail} = mesajul serverului, la îndemâna oricărei traduceri care vrea să-l arate (ex.
+    // „systemctl rejected the command on the host: Access denied") — audit funcţional 3.6.3, #4
+    const translated = t('err.' + e.code, { detail: e.message, ...vars })
     if (translated !== 'err.' + e.code) return translated     // `t` întoarce cheia dacă lipseşte
   }
   return e.message

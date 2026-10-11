@@ -4,6 +4,7 @@ import { errText, isSessionLive, api, ApiError, getBootVersion, Host, SearchHit,
 import { notify, notifyError } from '../lib/notify'
 import { fmtTs } from '../lib/tz'
 import type { SettingsTarget } from '../lib/settingsIndex'
+import type { FleetStatus } from '../lib/fleetLoad'
 import { useI18n } from '../lib/i18n'
 import { anyHost, can, canOn, usePerms } from '../lib/perms'
 import { useConfirm } from '../lib/confirm'
@@ -51,6 +52,9 @@ const stateDot: Record<Session['state'], string> = {
 export default function Sidebar(props: {
   hosts: Host[]
   sessions: Session[]
+  /** eroare ≠ gol: lista goală de hosturi înseamnă „niciun host" doar după prima încărcare reuşită */
+  fleet?: FleetStatus
+  onRetryFleet?: () => void
   selectedHost: number | null
   open: boolean
   addHostSignal: number
@@ -750,7 +754,7 @@ export default function Sidebar(props: {
             title={props.signingLocked
               ? t('sidebar.settingsSigningLocked')
               : props.signingMissing ? t('sidebar.settingsSigningMissing')
-                : props.backupReady ? t('sidebar.settingsBackupReady') : t('sidebar.settingsPasskeys')}
+                : props.backupReady ? t('sidebar.settingsBackupReady') : t('settings.title')}
             onClick={() => { setSettingsCat(undefined); setShowSettings(true) }}
             label={t('settings.title')}
             className="relative"
@@ -823,7 +827,12 @@ export default function Sidebar(props: {
       )}
 
       <div className="flex-1 overflow-y-auto">
-        {props.hosts.length === 0 && (
+        {props.fleet && !props.fleet.hostsLoaded && (
+          props.fleet.hostsErr
+            ? <ErrorState compact title={t('dashboard.hostsLoadFailed')} message={props.fleet.hostsErr} onRetry={props.onRetryFleet} />
+            : <p role="status" className="p-4 text-sm text-slate-500">{t('dashboard.loadingHosts')}</p>
+        )}
+        {props.hosts.length === 0 && (!props.fleet || props.fleet.hostsLoaded) && (
           <div className="space-y-3 p-4 text-sm text-slate-500">
             <p>{mayAddHost ? t('sidebar.noHostsYet') : t('noaccess.title')}</p>
             {/* CTA vizibil: butonul din header e doar un „+" fără text, uşor de ratat */}
@@ -989,7 +998,7 @@ export default function Sidebar(props: {
             : hostsOnline === props.hosts.length ? 'bg-emerald-500'
               : hostsOnline === 0 ? 'bg-rose-500' : 'bg-amber-500'}`} />
         <span className="tabular-nums">
-          {hostsOnline}/{props.hosts.length} {t('nav.statusBarHosts')}
+          {props.fleet && !props.fleet.hostsLoaded ? t('dashboard.loadingHosts') : `${hostsOnline}/${props.hosts.length} ${t('nav.statusBarHosts')}`}
         </span>
         {newVersion && (
           // textul spune CE e (nu doar un număr de versiune lângă alt număr de versiune);

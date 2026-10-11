@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { sessionTitle } from '../lib/sessionTitle'
 import { WatermarkConfig } from '../lib/api'
 import { useI18n } from '../lib/i18n'
 import { replayHeaders } from '../lib/replay'
@@ -58,7 +59,7 @@ export default function ReplayView(props: { token: string }) {
       .then((m: Meta) => {
         if (!alive) return
         setMetaState(m)
-        document.title = t('replay.docTitle', { title: m.title || t('transcript.sessionFallback') })
+        document.title = t('replay.docTitle', { title: sessionTitle(m.title, t) || t('transcript.sessionFallback') })
       })
       .catch((e: { status?: number }) => {
         if (!alive) return
@@ -94,7 +95,7 @@ export default function ReplayView(props: { token: string }) {
       <header className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-ink-800 bg-ink-900 px-4 py-2">
         <LogoMark size={20} />
         <h1 className="min-w-0 truncate text-sm font-medium text-slate-200">
-          {meta ? (meta.title || t('transcript.sessionFallback')) : t('replay.loading')}
+          {meta ? (sessionTitle(meta.title, t) || t('transcript.sessionFallback')) : t('replay.loading')}
         </h1>
         <span className="shrink-0 rounded-md bg-ink-800 px-2 py-0.5 text-2xs text-slate-300">{t('replay.publicBadge')}</span>
         {meta?.label && <span className="min-w-0 truncate text-xs text-slate-400">{meta.label}</span>}

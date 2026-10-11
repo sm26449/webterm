@@ -41,6 +41,11 @@ export default function FileEditor(props: {
   const [pv, setPv] = useState<Preview | null>(null)
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
+  // Salvarea NU mai închide editorul (audit 3.6.3): Ctrl+S = salvează şi rămâi, ca în orice editor.
+  // `savedFlash` = confirmarea „Salvat" din antet; `mtimeRef` = mtime-ul curent al fişierului pe
+  // host, reîmprospătat după fiecare salvare — altfel a doua salvare ar fi luată drept conflict.
+  const [savedFlash, setSavedFlash] = useState(false)
+  const mtimeRef = useRef<number | null>(null)
   const [conflict, setConflict] = useState(false)
   // dirty = conținutul diferă de ce s-a încărcat (versiunea „alternativă" a modelului Monaco:
   // undo până la original = din nou curat). Ref-ul e pentru handlerele care nu se re-creează
@@ -88,6 +93,7 @@ export default function FileEditor(props: {
     api<Preview>(`/api/hosts/${props.hostId}/fs/preview?path=${encodeURIComponent(props.path)}`)
       .then((p) => {
         if (!alive) return
+        mtimeRef.current = p.mtime
         setPv(p)
         if (p.truncated && !truncToastRef.current) {
           truncToastRef.current = true
@@ -117,6 +123,8 @@ export default function FileEditor(props: {
       tabSize: 2,
     })
     editor.current = ed
+    // focusul iniţial în editor (nu pe „Close"): deschizi un fişier ca să scrii în el
+    ed.focus()
     // Ctrl/Cmd+S din interiorul editorului (Monaco prinde tastatura când are focus)
     ed.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => saveRef.current(false))
     // Alt+Z ca în VS Code: încadrarea rândurilor lungi (loguri, config-uri cu linii lungi) —
@@ -156,7 +164,7 @@ export default function FileEditor(props: {
     setError('')
     const body = new TextEncoder().encode(editor.current.getValue())
     // if_mtime = protecție contra suprascrierii unei modificări concurente; la „suprascrie oricum" o omitem
-    const q = force ? '' : `&if_mtime=${pv.mtime}`
+    const q = force ? '' : `&if_mtime=${mtimeRef.current ?? pv.mtime}`
     try {
       const url = `/api/hosts/${props.hostId}/fs/upload?path=${encodeURIComponent(props.path)}${q}`
       const send = () => fetch(url, { method: 'POST', body, credentials: 'same-origin' })
@@ -169,7 +177,15 @@ export default function FileEditor(props: {
       dirtyRef.current = false
       setDirty(false)
       props.onSaved()
-      props.onClose()
+      // noul mtime ÎNAINTE de a elibera garda: o salvare imediat următoare compară cu el
+      try {
+        const fresh = await api<Preview>(`/api/hosts/${props.hostId}/fs/preview?path=${encodeURIComponent(props.path)}`)
+        mtimeRef.current = fresh.mtime
+      } catch { mtimeRef.current = null }   // necunoscut → se compară cu mtime-ul de la deschidere: cel mult un conflict fals, niciodată o suprascriere
+      setSavedFlash(true)
+      window.setTimeout(() => setSavedFlash(false), 2000)
+      savingRef.current = false
+      setSaving(false)
     } catch (e) {
       setError(errText(e, t) || t('files.genericErr'))
       savingRef.current = false
@@ -225,6 +241,9 @@ export default function FileEditor(props: {
                 {saving ? t('files.saving') : t('files.save')}
               </Button>
             )}
+            <span role="status" className={savedFlash ? 'self-center text-xs wt-good' : 'sr-only'} data-testid="editor-saved">
+              {savedFlash ? t('settings.saved') : ''}
+            </span>
             <button onClick={requestClose} className="rounded-md px-3 py-1 text-sm text-slate-400 hover:bg-ink-800">{t('files.close')}</button>
           </div>
         </div>

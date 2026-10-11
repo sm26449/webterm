@@ -20,6 +20,7 @@ export default function ForwardsPanel(props: {
   const isAgent = !props.host.connection_type || props.host.connection_type === 'agent'
   const [forwards, setForwards] = useState<PortForward[] | null>(null)
   const [error, setError] = useState('')
+  const [loadFailed, setLoadFailed] = useState(false)   // eroarea e a LISTEI → Retry (audit 3.6.3)
   const [probes, setProbes] = useState<Record<number, ProbeState>>({})
   const [adding, setAdding] = useState(false)
   const [editing, setEditing] = useState<PortForward | null>(null)
@@ -53,7 +54,7 @@ export default function ForwardsPanel(props: {
   }, [])
 
   const load = useCallback(async () => {
-    setError('')
+    setError(''); setLoadFailed(false)
     try {
       // listarea e gardată de step-up pe host 2FA (F-06): fără `withStepup` panoul rămânea
       // pe un 403 sec în loc să ceară passkey-ul
@@ -63,6 +64,7 @@ export default function ForwardsPanel(props: {
       list.filter((f) => f.enabled).forEach(probe)
     } catch (e) {
       setError(errText(e, t) || t('forwards.error.generic'))
+      setLoadFailed(true)
     }
   }, [props.host.id, probe, t])
 
@@ -281,6 +283,7 @@ export default function ForwardsPanel(props: {
           <div className="flex flex-col gap-2 border-b border-ink-800 bg-ink-800/40 px-3 py-3 text-xs"
             onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); closeForm() } }}>
             <input autoFocus value={fLabel} onChange={(e) => setFLabel(e.target.value)} placeholder={t('forwards.namePlaceholder')}
+              aria-label={t('forwards.nameLabel')}
               className="rounded-md bg-ink-800 px-2 py-1 text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500" />
             {fScheme === 'telnet' ? (
               <div className="text-2xs leading-snug text-slate-500">
@@ -295,9 +298,9 @@ export default function ForwardsPanel(props: {
               </div>
             )}
             <div className="flex gap-2">
-              <input value={fHost} onChange={(e) => setFHost(e.target.value)} placeholder="127.0.0.1"
+              <input value={fHost} onChange={(e) => setFHost(e.target.value)} placeholder="127.0.0.1" aria-label={t('forwards.hostLabel')}
                 className="min-w-0 flex-1 rounded-md bg-ink-800 px-2 py-1 font-mono text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500" />
-              <input value={fPort} onChange={(e) => setFPort(e.target.value.replace(/\D/g, ''))} placeholder={t('forwards.portPlaceholder')} inputMode="numeric"
+              <input value={fPort} onChange={(e) => setFPort(e.target.value.replace(/\D/g, ''))} placeholder={t('forwards.portPlaceholder')} inputMode="numeric" aria-label={t('forwards.portLabel')}
                 className="w-16 rounded-md bg-ink-800 px-2 py-1 font-mono text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500" />
               <select value={fScheme} aria-label={t('forwards.scheme')} onChange={(e) => {
                 const v = e.target.value as 'http' | 'https' | 'telnet'
@@ -310,6 +313,7 @@ export default function ForwardsPanel(props: {
               </select>
             </div>
             <input value={fDesc} onChange={(e) => setFDesc(e.target.value)} placeholder={t('forwards.descPlaceholder')}
+              aria-label={t('forwards.descLabel')}
               className="rounded-md bg-ink-800 px-2 py-1 text-slate-300 ring-1 ring-ink-700 focus:ring-sky-500" />
             {/* indiciu SSO onest: outcome-ul „un singur login" vine din config-ul APP-ului,
                 nu din WebTerm. Doar arătăm ce/unde, fără să pretindem că provisionăm noi ceva. */}
@@ -330,7 +334,8 @@ export default function ForwardsPanel(props: {
           </div>
         )}
 
-        {error && <div className="border-b border-ink-800 bg-ink-800 px-3 py-1.5 text-2xs wt-danger">{error}</div>}
+        {error && <div role="alert" className="border-b border-ink-800 bg-ink-800 px-3 py-1.5 text-2xs wt-danger">{error}
+          {loadFailed && <button type="button" onClick={() => { void load() }} className="wt-link ml-2 min-h-6 hover:underline">{t('common.retry')}</button>}</div>}
 
         {!isAgent && (
           <div className="border-b border-ink-800 bg-ink-800/40 px-3 py-2 text-2xs leading-relaxed text-slate-400">

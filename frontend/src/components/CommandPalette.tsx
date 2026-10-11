@@ -1,4 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import { sessionTitle } from '../lib/sessionTitle'
 import { api, isEphemeralHost, AppLink, Host, Session, Snippet } from '../lib/api'
 import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
 import { applyTheme, currentTheme, themePref } from '../lib/theme'
@@ -111,7 +112,7 @@ export default function CommandPalette(props: {
       out.push({
         key: `s:${s.id}`,
         kind: 'session',
-        label: s.title || t('palette.sessionFallback'),
+        label: sessionTitle(s.title, t) || t('palette.sessionFallback'),
         sub: hn,
         color: h ? hostColor(h) : '#64748b',
         hint: props.openTabs.includes(s.id) ? t('palette.hintOpen') : t('palette.hintActive'),

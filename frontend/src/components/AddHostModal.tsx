@@ -510,6 +510,7 @@ export default function AddHostModal(props: {
             {coachAllowed && connType === 'agent' && (
               <CoachTip
                 tipKey={TIP_ADDHOST_AGENT}
+                passEscape
                 show
                 icon={<ServerIcon />}
                 title={t('tips.addhost.agent.title')}
@@ -520,6 +521,7 @@ export default function AddHostModal(props: {
             {coachAllowed && connType !== 'agent' && (
               <CoachTip
                 tipKey={TIP_ADDHOST_SSH}
+                passEscape
                 show
                 icon={<KeyIcon />}
                 title={t('tips.addhost.ssh.title')}

@@ -36,7 +36,16 @@ export function isTipDismissed(key: string): boolean {
     sfatul pur şi simplu nu se persistă şi ar putea reapărea — acceptabil pentru un hint. */
 export function dismissTip(key: string): void {
   lsSet(key, '1')
+  // anunţă celelalte instanţe ale ACELUIAŞI sfat (ex. câte unul în fiecare panou de split): fiecare
+  // citea storage-ul o singură dată, la montare, deci „Got it" într-un panou le lăsa pe celelalte
+  // deschise (audit funcţional 3.6.3)
+  if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+    window.dispatchEvent(new CustomEvent(TIP_DISMISSED_EVENT, { detail: key }))
+  }
 }
+
+/** Evenimentul (pe window) emis de dismissTip, cu cheia în `detail`. */
+export const TIP_DISMISSED_EVENT = 'wt-tip-dismissed'
 
 /** „Arată din nou sfaturile" din Setări: şterge TOATE cheile de sfat. Întâi lista cunoscută
     (mereu curăţată, chiar fără enumerare), apoi, best-effort, orice cheie `wt_tip_*` rămasă

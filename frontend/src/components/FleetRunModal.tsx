@@ -410,7 +410,8 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
                   {snips === null ? (
                     <p className="text-2xs text-slate-500">{t('toolbox.loading')}</p>
                   ) : snips.length === 0 ? (
-                    <p className="text-2xs text-slate-500">{t('fleet.savedEmpty')}</p>
+                    // încărcare picată → doar eroarea (mai jos), nu şi „încă n-ai comenzi salvate" (audit 3.6.3)
+                    snipErr ? null : <p className="text-2xs text-slate-500">{t('fleet.savedEmpty')}</p>
                   ) : (
                     <div className="flex max-h-28 flex-wrap items-center gap-1 overflow-y-auto">
                       {visibleSnips.map((s) => renaming?.id === s.id ? (

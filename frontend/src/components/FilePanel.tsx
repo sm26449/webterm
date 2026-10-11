@@ -1,3 +1,4 @@
+import { lsGet, lsSet } from '../lib/storage'
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { errText, api, Host } from '../lib/api'
 import { copyText, readText } from '../lib/clipboard'
@@ -111,6 +112,7 @@ export default function FilePanel(props: {
   const [listing, setListing] = useState<Listing | null>(null)
   const [path, setPath] = useState('~')
   const [error, setError] = useState('')
+  const [failedPath, setFailedPath] = useState<string | null>(null)   // listarea a picat → Retry
   const [busy, setBusy] = useState(false)
   // starea upload-urilor stă în uploadStore (nivel de modul), NU în componentă: transferul
   // supravieţuieşte închiderii panoului, iar redeschiderea îl arată în mers, cu cancel funcţional
@@ -128,7 +130,9 @@ export default function FilePanel(props: {
   // poți explora în altă parte fără să fii „tras” înapoi la fiecare comandă.
   const [follow, setFollow] = useState(true)
   const [filter, setFilter] = useState('')
-  const [showHidden, setShowHidden] = useState(false)
+  // persistat (audit 3.6.3): cine lucrează cu dotfile-uri nu mai reapasă „.*" la fiecare deschidere
+  const [showHidden, setShowHiddenRaw] = useState(() => lsGet('wt_files_hidden') === '1')
+  const setShowHidden = (f: (v: boolean) => boolean) => setShowHiddenRaw((v) => { const n = f(v); lsSet('wt_files_hidden', n ? '1' : '0'); return n })
   const [sort, setSort] = useState<{ key: SortKey; asc: boolean }>({ key: 'name', asc: true })
   const [sel, setSel] = useState(0)                 // index selectat (tastatură)
   const [listFocused, setListFocused] = useState(false)   // anunţul rândului curent (U10)
@@ -158,6 +162,7 @@ export default function FilePanel(props: {
     // ulterioare (upload/delete) ar ținti calea greșită.
     const my = ++loadSeq.current
     setError('')
+    setFailedPath(null)
     try {
       const l = await api<Listing>(`/api/hosts/${props.host.id}/fs?path=${encodeURIComponent(p)}`)
       if (my !== loadSeq.current) return          // un load mai nou a pornit între timp
@@ -173,6 +178,7 @@ export default function FilePanel(props: {
     } catch (e) {
       if (my !== loadSeq.current) return
       setError(errText(e, t) || t('files.genericErr'))
+      setFailedPath(p)   // „Reîncearcă" lângă eroare (audit 3.6.3)
       // Listarea VECHE rămânea afişată sub eroare, iar calea din input devenea deja cea
       // nouă: vizual, fişierele din /root păreau să fie în directorul inexistent, iar
       // „Upload to:" arăta încă directorul anterior — deci un upload ar fi plecat altundeva
@@ -708,7 +714,8 @@ export default function FilePanel(props: {
           ))}
         </div>
 
-        {error && <div className="border-b border-ink-800 bg-ink-800 px-3 py-1.5 text-2xs wt-danger">{error}</div>}
+        {error && <div role="alert" className="border-b border-ink-800 bg-ink-800 px-3 py-1.5 text-2xs wt-danger">{error}
+          {failedPath !== null && <button type="button" onClick={() => load(failedPath)} className="wt-link ml-2 min-h-6 hover:underline">{t('common.retry')}</button>}</div>}
 
         {/* rândul curent, anunţat cât lista are focusul (U10): săgeţile mutau doar un fundal —
             cititorul de ecran nu spunea nimic. Rândurile conţin butoane şi bife, deci nu pot fi
@@ -819,7 +826,7 @@ export default function FilePanel(props: {
                   onBlur={(ev) => doRename(e, ev.target.value)}
                   className="min-w-0 flex-1 rounded-md bg-ink-800 px-1 py-0.5 font-mono text-2xs text-slate-100 ring-1 ring-sky-500" />
               ) : (
-                <button onClick={(ev) => {
+                <button data-fname={e.name} onClick={(ev) => {
                     // click de selecţie (modificator / după long-press / tap în modul selecţie pe touch):
                     // rândul l-a tratat deja — nu navigăm, nu copiem numele
                     if (ev.shiftKey || ev.ctrlKey || ev.metaKey) return
@@ -839,7 +846,7 @@ export default function FilePanel(props: {
               <span className="shrink-0 items-center gap-2 font-mono text-2xs tabular-nums text-slate-600 hidden sm:flex group-hover:sm:hidden group-focus-within:sm:hidden">
                 <span>{fmtMode(e.mode)}</span>
                 {!e.dir && <span className="w-10 text-right text-slate-500">{fmtSize(e.size)}</span>}
-                <span className="w-12 text-right">{fmtMtime(e.mtime)}</span>
+                <span className="min-w-[3rem] whitespace-nowrap text-right">{fmtMtime(e.mtime)}</span>
               </span>
               {/* acțiuni la hover (mouse), la focus în rând (tastatură — `hidden` le scotea din
                   fluxul de Tab, deci de la tastatură NU puteai şterge/redenumi) / mereu (touch).
@@ -984,7 +991,18 @@ export default function FilePanel(props: {
             hostId={props.host.id}
             path={editing.path}
             name={editing.name}
-            onClose={() => setEditing(null)}
+            onClose={() => {
+              // focusul se întorcea pe butonul „Edit" al rândului — ascuns (display:none) când mouse-ul
+              // nu e pe rând, deci ajungea pe <body>. Cădem pe numele fişierului (audit 3.6.3, #6).
+              const name = editing.name
+              setEditing(null)
+              requestAnimationFrame(() => {
+                const a = document.activeElement
+                if (a && a !== document.body && (a as HTMLElement).offsetParent !== null) return
+                const root: ParentNode = asideRef.current ?? document
+                root.querySelector<HTMLElement>(`[data-fname="${CSS.escape(name)}"]`)?.focus()
+              })
+            }}
             onSaved={() => load(listing!.path)}
           />
         </Suspense>

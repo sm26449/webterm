@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from 'react'
+import { FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import { api, ApiError, errText, Host, withSecondFactor as withSecondFactorT } from '../../lib/api'
 import { useConfirm } from '../../lib/confirm'
 import { ssoStepupRedirect } from '../../lib/stepup'
@@ -7,7 +7,7 @@ import { useI18n } from '../../lib/i18n'
 import { Binding, groupPerms, heldEverywhere, loadPerms, ROLE_KEYS, ROLE_PRESETS, roleBody, roleLabel, RoleRow,
   RolesCatalogue, roleValue, ScopeKind, SCOPE_KINDS, scopeLabel, SHELL_ROLES, usePerms, can } from '../../lib/perms'
 import { field, heading } from './ui'
-import { Badge, Button, IconButton } from '../ui'
+import { Badge, Button, ErrorState, IconButton } from '../ui'
 import { CloseIcon } from '../Icons'
 import HelpTip from '../HelpTip'
 import { canSave, type LoadState } from '../../lib/loadable'
@@ -99,6 +99,9 @@ function RoleEditor(props: {
 }) {
   const { t } = useI18n()
   const { draft, held } = props
+  // „New role" dispare când se deschide editorul → focusul pe primul câmp, nu pe <body> (audit 3.6.3)
+  const nameRef = useRef<HTMLInputElement>(null)
+  useEffect(() => { nameRef.current?.focus() }, [])
   const groups = useMemo(() => groupPerms(props.catalogue.perms), [props.catalogue.perms])
   const shellIds = useMemo(() => new Set(props.catalogue.perms.filter((p) => p.shell).map((p) => p.id)), [props.catalogue.perms])
   const anyShell = [...draft.perms].some((p) => shellIds.has(p))
@@ -116,7 +119,7 @@ function RoleEditor(props: {
         {draft.id == null ? t('roles.custom.formTitleNew') : t('roles.custom.formTitleEdit', { name: draft.name })}
       </div>
       <div className="flex flex-col gap-2 sm:flex-row">
-        <input type="text" value={draft.name} maxLength={60} autoComplete="off" aria-label={t('roles.custom.name')}
+        <input ref={nameRef} type="text" value={draft.name} maxLength={60} autoComplete="off" aria-label={t('roles.custom.name')}
           placeholder={t('roles.custom.name')} className={field + ' sm:w-56'}
           onChange={(e) => props.onChange({ ...draft, name: e.target.value })} />
         <input type="text" value={draft.description} maxLength={300} autoComplete="off"
@@ -229,7 +232,7 @@ function RolesSection(props: {
           <li key={r.key} className="flex flex-wrap items-center gap-2 rounded-md px-3 py-1.5 text-sm ring-1 ring-ink-700">
             <span className="font-semibold text-slate-200">{t('roles.role.' + r.key)}</span>
             <Badge>{t('roles.custom.builtin')}</Badge>
-            <span className="text-xs text-slate-400">{t('roles.custom.permCount', { n: r.perms.length })}</span>
+            <span className="text-xs text-slate-400">{t('roles.custom.permCount', { count: r.perms.length })}</span>
           </li>
         ))}
         {cat && cat.custom.length === 0 && (
@@ -256,8 +259,8 @@ function RolesSection(props: {
             </div>
             {r.description && <p className="text-xs text-slate-400">{r.description}</p>}
             <p className="text-xs text-slate-400">
-              {t('roles.custom.permCount', { n: r.perms.length })} · {(r.bindings || r.mappings)
-                ? t('roles.custom.used', { bindings: r.bindings ?? 0, mappings: r.mappings ?? 0 })
+              {t('roles.custom.permCount', { count: r.perms.length })} · {(r.bindings || r.mappings)
+                ? t('roles.custom.used', { bindings: t('roles.custom.usedBindings', { count: r.bindings ?? 0 }), mappings: t('roles.custom.usedMappings', { count: r.mappings ?? 0 }) })
                 : t('roles.custom.unused')}
             </p>
           </li>
@@ -402,9 +405,11 @@ export default function UsersTab() {
     .catch((e) => setUsersState({ status: 'error', error: errText(e, t) }))
   const loadCatalogue = () => api<RolesCatalogue>('/api/roles').then(setCatalogue)
     .catch((e) => setErr(t('common.loadFailed') + ' ' + errText(e, t)))
+  // eroare ≠ gol (audit 3.6.3): un fetch picat ascundea toată secţiunea, ca şi cum SSO n-ar exista
+  const [ssoErr, setSsoErr] = useState('')
   const loadSso = () => api<{ enabled: boolean; mappings: SsoMapping[]; local_password_accounts?: number }>(
-    '/api/settings/oidc-roles').then(setSso)
-    .catch(() => setSso(null))
+    '/api/settings/oidc-roles').then((r) => { setSso(r); setSsoErr('') })
+    .catch((e) => { setSso(null); setSsoErr(errText(e, t) || t('common.loadFailed')) })
   useEffect(() => {
     loadUsers()
     api<Host[]>('/api/hosts').then(setHosts).catch((e) => setErr(t('common.loadFailed') + ' ' + errText(e, t)))
@@ -654,7 +659,13 @@ export default function UsersTab() {
         {status('roles')}
       </section>
 
-      <section data-setting-id="ssoMapping" hidden={!manage || !sso?.enabled}>
+      <section data-setting-id="ssoMapping" hidden={!manage || (!sso?.enabled && !ssoErr)}>
+        {manage && ssoErr && (
+          <>
+            <h3 className={heading}>{t('roles.sso.title')}</h3>
+            <ErrorState compact title={t('roles.sso.loadFailed')} message={ssoErr} onRetry={() => { void loadSso() }} />
+          </>
+        )}
         {manage && sso?.enabled && (
           <SsoSection catalogue={catalogue} hosts={hosts} isOwner={isOwner} mappings={sso.mappings}
             localPwAccounts={sso.local_password_accounts ?? 0}

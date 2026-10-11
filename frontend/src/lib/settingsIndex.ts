@@ -41,7 +41,15 @@ export interface SettingSection {
   /** permisiunea GLOBALĂ fără de care secţiunea e ascunsă (3.6, roluri; cosmetic — serverul
       refuză oricum). Lipsă = secţiune self-service, vizibilă oricui. */
   perm?: string
+  /** condiţia de RUNTIME fără de care tab-ul nu randează secţiunea (ex. maparea SSO doar cu SSO
+      activ). Căutarea n-are voie să găsească o secţiune pe care tab-ul o ascunde — Enter nu ducea
+      nicăieri (audit funcţional 3.6.3, #3). */
+  requires?: RuntimeFlag
 }
+
+/** Stări ale instanţei cunoscute abia la rulare; `false` = sigur oprit, lipsă = necunoscut (vizibil). */
+export type RuntimeFlag = 'sso'
+export type RuntimeFlags = Partial<Record<RuntimeFlag, boolean>>
 
 export const SETTINGS_INDEX: readonly SettingSection[] = [
   // ── Cont ──
@@ -58,7 +66,7 @@ export const SETTINGS_INDEX: readonly SettingSection[] = [
     perm: 'roles.manage' },
   { id: 'ssoMapping', cat: 'utilizatori', titleKey: 'roles.sso.title', hintKey: 'roles.sso.hint',
     keywords: 'sso oidc authentik groups claim mapping group role idp grupuri mapare grup',
-    perm: 'users.manage' },
+    perm: 'users.manage', requires: 'sso' },
   // ── Autentificare şi 2FA ──
   { id: 'devices', cat: 'autentificare', titleKey: 'settings.devices', hintKey: 'settings.devicesHint',
     keywords: 'devices sessions browsers sign out logout revoke dispozitive sesiuni deconectare' },
@@ -75,6 +83,8 @@ export const SETTINGS_INDEX: readonly SettingSection[] = [
     keywords: 'bulk enrollment group token onboarding fleet many machines inrolare masa grup flota', perm: 'hosts.create' },
   { id: 'deployKeyPolicy', cat: 'infrastructura', titleKey: 'settings.dkpolicy.title', hintKey: 'settings.dkpolicy.hint',
     keywords: 'deploy key ssh policy restrict host to host chei politica', perm: 'settings.manage' },
+  { id: 'forwardDomain', cat: 'infrastructura', titleKey: 'settings.forward.title',
+    keywords: 'port forwarding domain dns wildcard certificate tls subdomain domeniu certificat', perm: 'settings.manage' },
   { id: 'guardrail', cat: 'infrastructura', titleKey: 'settings.guardrail', hintKey: 'settings.guardrailHint',
     keywords: 'guardrail dangerous commands block confirm regex rm -rf rules comenzi periculoase reguli blocare', perm: 'settings.manage' },
   // ── Audit ──
@@ -93,8 +103,6 @@ export const SETTINGS_INDEX: readonly SettingSection[] = [
   { id: 'watermark', cat: 'aspect', titleKey: 'settings.watermark', hintKey: 'settings.watermarkHint',
     keywords: 'watermark screenshot traceability filigran captura', perm: 'settings.manage' },
   // ── Notificări ──
-  { id: 'forwardDomain', cat: 'notificari', titleKey: 'settings.forward.title',
-    keywords: 'port forwarding domain dns wildcard certificate tls subdomain domeniu certificat', perm: 'settings.manage' },
   { id: 'smtp', cat: 'notificari', titleKey: 'settings.smtp.title', hintKey: 'settings.smtp.hint',
     keywords: 'smtp email mail alert notification alerte notificari', perm: 'settings.manage' },
   { id: 'webhook', cat: 'notificari', titleKey: 'settings.smtp.webhook', hintKey: 'settings.smtp.webhookHint',
@@ -134,8 +142,9 @@ export const SETTINGS_INDEX: readonly SettingSection[] = [
 const BY_ID = new Map(SETTINGS_INDEX.map((s) => [s.id, s]))
 
 /** Secţiunea e vizibilă contului? `has` = verificarea permisiunii globale (lib/perms `can`). */
-export function sectionVisible(id: string, has: (perm: string) => boolean): boolean {
+export function sectionVisible(id: string, has: (perm: string) => boolean, runtime: RuntimeFlags = {}): boolean {
   const s = BY_ID.get(id)
+  if (s?.requires && runtime[s.requires] === false) return false
   return !s?.perm || has(s.perm)
 }
 

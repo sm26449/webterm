@@ -1,7 +1,8 @@
 import { KeyboardEvent, ReactNode, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useI18n } from '../lib/i18n'
 import { useFocusTrap } from '../lib/useFocusTrap'
-import { catOfSection, groupHits, searchSettings, sectionVisible, SETTINGS_CATS, SettingsCat, visibleCats } from '../lib/settingsIndex'
+import { catOfSection, groupHits, searchSettings, sectionVisible, SETTINGS_CATS, SettingsCat, visibleCats, type RuntimeFlags } from '../lib/settingsIndex'
+import { api } from '../lib/api'
 import { can, usePerms } from '../lib/perms'
 import AccountTab from './settings/AccountTab'
 import UsersTab from './settings/UsersTab'
@@ -25,8 +26,18 @@ const prefersReducedMotion = () =>
 /** Derulează secţiunea în vedere, îi mută focusul (cititorul de ecran ajunge unde a ajuns şi ochiul)
     şi o încadrează scurt (.wt-setting-flash, index.css: conturul se stinge; fără animaţie la
     prefers-reduced-motion, doar dispare după câteva secunde). */
+/** Derulează DOAR panoul de conţinut până la secţiune. `scrollIntoView` derula şi strămoşii —
+    inclusiv cadrul dialogului (overflow-hidden, dar tot derulabil programatic): deschis dintr-un
+    link adânc (Dashboard → „Alert channels", Alerte → „Notification settings"), antetul cu căutarea
+    şi × ieşeau din ecran (scrollTop≈57). Audit funcţional 3.6.3, #2. */
+export function scrollWithin(container: HTMLElement, el: HTMLElement, smooth: boolean): void {
+  const top = container.scrollTop + el.getBoundingClientRect().top - container.getBoundingClientRect().top - 12
+  if (typeof container.scrollTo === 'function') container.scrollTo({ top: Math.max(0, top), behavior: smooth ? 'smooth' : 'auto' })
+  else container.scrollTop = Math.max(0, top)
+}
+
 function flashSection(el: HTMLElement, container: HTMLElement | null) {
-  el.scrollIntoView({ block: 'start', behavior: prefersReducedMotion() ? 'auto' : 'smooth' })
+  if (container) scrollWithin(container, el, !prefersReducedMotion())
   if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '-1')
   el.focus({ preventScroll: true })
   el.classList.remove('wt-setting-flash')
@@ -38,7 +49,7 @@ function flashSection(el: HTMLElement, container: HTMLElement | null) {
   window.setTimeout(() => {
     if (!container || !el.isConnected) return
     const off = el.getBoundingClientRect().top - container.getBoundingClientRect().top
-    if (Math.abs(off) > 32) el.scrollIntoView({ block: 'start' })
+    if (Math.abs(off) > 32) scrollWithin(container, el, false)
   }, 450)
 }
 
@@ -80,8 +91,17 @@ export default function SettingsModal(props: {
   const [query, setQuery] = useState('')
   const [active, setActive] = useState(0)
   const searching = query.trim() !== ''
-  const hits = useMemo(() => searchSettings(query, t).filter((h) => sectionVisible(h.section.id, (p) => can(perms, p))),
-    [query, t, perms])
+  // condiţiile de runtime ale secţiunilor (lib/settingsIndex `requires`): maparea SSO există doar cu
+  // SSO activ. Necunoscut (încă se încarcă / a picat) = vizibilă — tab-ul îşi arată atunci eroarea.
+  const [runtime, setRuntime] = useState<RuntimeFlags>({})
+  const canUsers = has('users.manage')
+  useEffect(() => {
+    if (!canUsers) return
+    api<{ enabled: boolean }>('/api/settings/oidc-roles')
+      .then((r) => setRuntime((x) => ({ ...x, sso: !!r.enabled }))).catch(() => { /* necunoscut */ })
+  }, [canUsers])
+  const hits = useMemo(() => searchSettings(query, t).filter((h) => sectionVisible(h.section.id, (p) => can(perms, p), runtime)),
+    [query, t, perms, runtime])
   const groups = useMemo(() => groupHits(hits), [hits])
   const flat = useMemo(() => groups.flatMap((g) => g.hits), [groups])   // ordinea afişată = ordinea tastelor
   const listId = useId()

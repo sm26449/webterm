@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { sessionTitle } from '../lib/sessionTitle'
 import { startAuthentication } from '@simplewebauthn/browser'
 import { api, AppState, CommandGuard, Host, Session, setStepupHandler } from '../lib/api'
 import { hostAt } from '../lib/host'
@@ -53,7 +54,7 @@ export default function PopoutView(props: { sid: string }) {
         setSession(s)
         setHost(h)
         setViaHost(h?.via_host_id ? hosts.find((x) => x.id === h.via_host_id) : undefined)
-        document.title = `${s.title || t('app.sessionFallback')}${h ? ' · ' + hostAt(h) : ''} · WebTerm`
+        document.title = `${sessionTitle(s.title, t) || t('app.sessionFallback')}${h ? ' · ' + hostAt(h) : ''} · WebTerm`
       } catch {
         /* retry on next tick */
       }

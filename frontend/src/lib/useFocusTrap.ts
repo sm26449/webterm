@@ -32,10 +32,15 @@ export function useFocusTrap(ref: RefObject<HTMLElement>, onClose: () => void): 
         'a[href],button:not([disabled]),textarea:not([disabled]),input:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])',
       )).filter((x) => x.offsetParent !== null || x === document.activeElement)
 
-    // move focus into the dialog (first field, else the container itself)
-    const first = focusables()[0]
-    if (first) first.focus()
-    else { el.setAttribute('tabindex', '-1'); el.focus() }
+    // move focus into the dialog (first field, else the container itself) — DOAR dacă nu e deja
+    // înăuntru: un `autoFocus` (aplicat la commit, înaintea efectelor) alege deliberat câmpul de
+    // pornire. Înainte îl suprascriam cu primul focusabil din DOM — în Add host, comutatorul
+    // Agent/SSH sau butonul sfatului în loc de câmpul Name (audit funcţional 3.6.3).
+    if (!el.contains(document.activeElement)) {
+      const first = focusables()[0]
+      if (first) first.focus()
+      else { el.setAttribute('tabindex', '-1'); el.focus() }
+    }
 
     const isTop = () => openTraps[openTraps.length - 1] === el
     // Recuperarea focusului (3.6.1, U13) doar pentru dialogurile MODALE: un panou ne-modal care

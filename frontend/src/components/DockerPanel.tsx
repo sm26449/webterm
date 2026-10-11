@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { notifyToast } from '../lib/notify'
 import { errText, api, ApiError, Host, withGuardConfirm, withStepup } from '../lib/api'
 import { useConfirm } from '../lib/confirm'
 import { useI18n } from '../lib/i18n'
@@ -31,6 +32,7 @@ export default function DockerPanel(props: {
   const [kind, setKind] = useState<Kind>('containers')
   const [rows, setRows] = useState<Row[] | null>(null)
   const [error, setError] = useState('')
+  const [loadFailed, setLoadFailed] = useState(false)   // eroarea e a LISTEI → Retry (audit 3.6.3)
   const [note, setNote] = useState('')   // notă neutră (guardrail anulat) — nu eroare
   const [denied, setDenied] = useState(false)   // userul agentului nu e în grupul docker → card de remediere
   const [copied, setCopied] = useState('')      // care din comenzile de remediere tocmai s-a copiat
@@ -48,14 +50,14 @@ export default function DockerPanel(props: {
   const scrimCls = props.embed ? 'hidden' : 'fixed inset-0 z-30 bg-black/60' + (props.overlay ? '' : ' sm:hidden')
 
   const load = useCallback(async (k: Kind) => {
-    setError(''); setDenied(false); setRows(null)
+    setError(''); setDenied(false); setRows(null); setLoadFailed(false)
     try {
       const r = await api<{ rows: Row[] }>(`/api/hosts/${props.host.id}/docker?kind=${k}`)
       setRows(r.rows)
     } catch (e) {
       // docker.denied → card de remediere dedicat (comanda de fix); restul → mesaj simplu
       if (e instanceof ApiError && e.code === 'docker.denied') setDenied(true)
-      else setError(errText(e, t) || (e instanceof ApiError ? e.message : t('docker.error')))
+      else { setError(errText(e, t) || (e instanceof ApiError ? e.message : t('docker.error'))); setLoadFailed(true) }
       setRows([])
     }
   }, [props.host.id, t])
@@ -95,6 +97,7 @@ export default function DockerPanel(props: {
         (confirmed) => api(`/api/hosts/${props.host.id}/docker/action`,
           { method: 'POST', body: JSON.stringify({ container: id, action: act, confirmed }) })))
       if (r === null) { setNote(t('guard.cancelled')); return }
+      notifyToast(t('common.actionDone', { action: t('docker.' + act), target: name || id.slice(0, 12) }))
       await load(kind)
     } catch (e) {
       setError(errText(e, t) || t('docker.error'))
@@ -194,7 +197,8 @@ export default function DockerPanel(props: {
       {header}
       {tabs}
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
-        {error && <div className="mb-2 rounded-md bg-ink-800 px-3 py-2 text-xs wt-warn">{error}</div>}
+        {error && <div role="alert" className="mb-2 rounded-md bg-ink-800 px-3 py-2 text-xs wt-warn">{error}
+          {loadFailed && <button type="button" onClick={() => { void load(kind) }} className="wt-link ml-2 min-h-6 hover:underline">{t('common.retry')}</button>}</div>}
         {note && !error && <div role="status" className="mb-2 rounded-md bg-ink-800/60 px-3 py-2 text-xs text-slate-400">{note}</div>}
 
         {/* userul agentului nu e în grupul docker → remediere clară, nu un mesaj mort.

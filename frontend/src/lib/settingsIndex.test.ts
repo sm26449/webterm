@@ -156,6 +156,10 @@ describe('settings index: roluri (3.6) — ce vede un cont fără permisiuni glo
     expect(sectionVisible('users', none)).toBe(false)
     expect(sectionVisible('smtp', none)).toBe(false)
     expect(sectionVisible('alertPrefs', none)).toBe(true)
+    // audit 3.6.3 #3: maparea SSO nu apare în căutare cu SSO oprit (tab-ul n-o randează)
+    expect(sectionVisible('ssoMapping', all, { sso: false })).toBe(false)
+    expect(sectionVisible('ssoMapping', all, { sso: true })).toBe(true)
+    expect(sectionVisible('ssoMapping', all)).toBe(true)   // necunoscut → vizibilă (tab-ul arată eroarea)
   })
   it('secţiunile cu permisiune folosesc doar id-uri din catalogul global', () => {
     const GLOBAL = ['hosts.create', 'hosts.export', 'settings.manage', 'users.manage', 'roles.manage', 'tokens.create',

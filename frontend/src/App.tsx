@@ -1,4 +1,5 @@
 import { startAuthentication } from '@simplewebauthn/browser'
+import { sessionTitle } from './lib/sessionTitle'
 import { lazy, ReactNode, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import CommandPalette from './components/CommandPalette'
 import CredentialModal, { CredField } from './components/CredentialModal'
@@ -24,6 +25,7 @@ import TabBar from './components/TabBar'
 import TransfersWidget from './components/TransfersWidget'
 import Toasts, { ToastItem } from './components/Toasts'
 import CopyToast from './components/CopyToast'
+import { initialFleet, settleFleet, type FleetState, type FleetStatus } from './lib/fleetLoad'
 import { errText, api, ApiError, AppState, Host, isSessionLive, Session, Snippet, SplitView, setStepupHandler, withStepup } from './lib/api'
 import { hostAt, hostColor } from './lib/host'
 import type { SettingsTarget } from './lib/settingsIndex'
@@ -214,6 +216,9 @@ function MainApp() {
   const { confirm } = useConfirm()
   const [hosts, setHosts] = useState<Host[]>([])
   const [sessions, setSessions] = useState<Session[]>([])
+  // eroare ≠ gol (audit funcţional 3.6.3, #1): ce parte a flotei a venit măcar o dată / a picat acum
+  const fleetRef = useRef<FleetState<Host, Session>>(initialFleet())
+  const [fleet, setFleet] = useState<FleetStatus>({ hostsLoaded: false, hostsErr: null, sessionsErr: null })
   const [route, navigate, navigateHost] = useRoute()
   const selectedSid = route.primary
   const [filesHost, setFilesHost] = useState<Host | null>(null)
@@ -454,11 +459,22 @@ function MainApp() {
     // ca o schimbare de rol să se vadă fără reload; un eşec lasă starea veche
     loadPerms()
     try {
-      const [h, s, sv] = await Promise.all([
-        api<Host[]>('/api/hosts'),
-        api<Session[]>('/api/sessions'),
+      const [hr, sr, sv] = await Promise.all([
+        api<Host[]>('/api/hosts').then((v) => ({ status: 'fulfilled', value: v }) as const,
+          (e: unknown) => ({ status: 'rejected', reason: e }) as const),
+        api<Session[]>('/api/sessions').then((v) => ({ status: 'fulfilled', value: v }) as const,
+          (e: unknown) => ({ status: 'rejected', reason: e }) as const),
         api<{ split_views: SplitView[] }>('/api/split-views').catch(() => ({ split_views: [] })),
       ])
+      // fiecare parte se decide singură: un /api/sessions picat nu mai goleşte lista de hosturi
+      const f = settleFleet(fleetRef.current, hr, sr, (e) => errText(e, t) || t('common.loadFailed'))
+      fleetRef.current = f
+      setFleet((p) => (p.hostsLoaded === f.hostsLoaded && p.hostsErr === f.hostsErr && p.sessionsErr === f.sessionsErr
+        ? p : { hostsLoaded: f.hostsLoaded, hostsErr: f.hostsErr, sessionsErr: f.sessionsErr }))
+      // amândouă picate = gateway-ul nu răspunde → acelaşi traseu ca înainte (banner + verificarea sesiunii)
+      if (hr.status === 'rejected' && sr.status === 'rejected') throw hr.reason
+      const h = f.hosts
+      const s = f.sessions
       const prev = onlineRef.current
       const next = new Map(h.map((host) => [host.id, host.online]))
       if (prev) {
@@ -474,8 +490,9 @@ function MainApp() {
       if (hj !== lastHostsRef.current) { lastHostsRef.current = hj; setHosts(h) }
       const sj = JSON.stringify(s)
       if (sj !== lastSessionsRef.current) { lastSessionsRef.current = sj; setSessions(s) }
-      // drop tabs whose session was deleted (reconcile against fresh data)
-      setOpenTabs((prev) => {
+      // drop tabs whose session was deleted (reconcile against fresh data) — doar pe date PROASPETE:
+      // o listă de sesiuni veche (încărcarea a picat) n-are voie să închidă tab-uri
+      if (sr.status === 'fulfilled') setOpenTabs((prev) => {
         const valid = prev.filter((sid) => s.some((x) => x.id === sid))
         return valid.length === prev.length ? prev : valid
       })
@@ -624,12 +641,12 @@ function MainApp() {
     const s = sessions.find((x) => x.id === selectedSid)
     if (s) {
       const h = hosts.find((x) => x.id === s.host_id)
-      document.title = `${s.title || t('app.sessionFallback')}${h ? ' · ' + hostAt(h) : ''} · WebTerm`
+      document.title = `${sessionTitle(s.title, t) || t('app.sessionFallback')}${h ? ' · ' + hostAt(h) : ''} · WebTerm`
       // Efectul se re-execută când sesiunea trece pe `lost`, iar anunţul spunea tot
       // „is active" — un utilizator de screen reader primea exact informaţia inversă,
       // în timp ce panoul vizibil arăta „Session lost". Anunţăm starea reală.
       setSrAnnounce(t(s.state === 'live' ? 'app.srSessionActive' : 'app.srSessionEnded', {
-        title: s.title || t('app.untitledSession'),
+        title: sessionTitle(s.title, t) || t('app.untitledSession'),
         on: h ? t('app.srOnHost', { host: h.name }) : '',
       }))
     } else {
@@ -1374,6 +1391,8 @@ function MainApp() {
       <Sidebar
         hosts={hosts}
         sessions={sessions}
+        fleet={fleet}
+        onRetryFleet={refresh}
         selectedHost={route.host}
         open={sidebarOpen}
         addHostSignal={addHostSignal}
@@ -1539,6 +1558,8 @@ function MainApp() {
           <Dashboard
             hosts={hosts}
             sessions={sessions}
+            fleet={fleet}
+            onRetryFleet={refresh}
             onOpenSession={selectSession}
             onSelectHost={selectHost}
             onNewSession={connectHost}
@@ -1692,7 +1713,7 @@ function MainApp() {
                     <input type="checkbox" checked={checked} disabled={atCap} onChange={() => toggleWizardPick(sid)}
                       className="h-4 w-4 shrink-0 accent-sky-500" />
                     <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: h ? hostColor(h) : '#64748b' }} />
-                    <span className="min-w-0 flex-1 truncate text-sm text-slate-200">{s.title}</span>
+                    <span className="min-w-0 flex-1 truncate text-sm text-slate-200">{sessionTitle(s.title, t)}</span>
                     <span className="shrink-0 truncate font-mono text-2xs text-slate-500">{h?.name}</span>
                   </label>
                 )

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
+import { sessionTitle } from '../lib/sessionTitle'
 import { createPortal } from 'react-dom'
 import { api, errText, ReplayLinkCreated, ReplayLinkRow, withStepup } from '../lib/api'
 import { copyText } from '../lib/clipboard'
@@ -98,7 +99,7 @@ export default function ReplayLinkDialog(props: { sid: string; hostId: number; t
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
-          <p className="truncate text-xs text-slate-400">{t('replay.dialogFor', { title: props.title || t('transcript.sessionFallback') })}</p>
+          <p className="truncate text-xs text-slate-400">{t('replay.dialogFor', { title: sessionTitle(props.title, t) || t('transcript.sessionFallback') })}</p>
           <div id={`${uid}-w`} role="note"
             className="mt-3 flex gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs wt-warn">
             <span className="mt-0.5 shrink-0"><WarningIcon /></span>
@@ -191,7 +192,7 @@ export function ReplayLinkItem(props: { link: ReplayLinkRow; busy?: boolean; onR
       className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md bg-ink-800/60 px-3 py-2 text-sm ring-1 ring-ink-700">
       <span className="min-w-0 flex-1">
         <span className="block truncate font-medium text-slate-200">
-          {props.showSession ? `${l.title || t('dashboard.session')} · ${name}` : name}
+          {props.showSession ? `${sessionTitle(l.title, t) || t('dashboard.session')} · ${name}` : name}
         </span>
         <span className="block truncate text-xs text-slate-400">
           {props.showSession && l.host_name ? `${l.host_name} · ` : ''}

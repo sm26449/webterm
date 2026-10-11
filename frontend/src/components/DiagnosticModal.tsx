@@ -189,6 +189,21 @@ export default function DiagnosticModal(props: { host: Host; onClose: () => void
       .finally(() => setRefreshing(false))
   }
 
+  // audit 3.6.3: snapshot-ul putea avea ore — la deschidere, cu hostul online şi o captură mai
+  // veche de un minut, cerem una proaspătă (o singură dată); vârsta afişată avansează singură.
+  const autoRefreshed = useRef(false)
+  useEffect(() => {
+    if (!diag || autoRefreshed.current || !diag.online) return
+    autoRefreshed.current = true
+    const age = diag.diagnostics_at ? Date.now() / 1000 - diag.diagnostics_at : Infinity
+    if (age > 60) refresh()
+  }, [diag])   // eslint-disable-line react-hooks/exhaustive-deps
+  const [, setTick] = useState(0)
+  useEffect(() => {
+    const id = window.setInterval(() => setTick((n) => n + 1), 15000)
+    return () => window.clearInterval(id)
+  }, [])
+
   const now = Date.now() / 1000
   const hbAge = diag?.last_heartbeat ? now - diag.last_heartbeat : null
   const snap = diag?.diagnostics || null

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { sessionTitle } from '../lib/sessionTitle'
 import { createPortal } from 'react-dom'
 import { isSessionLive, Host, Session } from '../lib/api'
 import { hostColor } from '../lib/host'
@@ -200,7 +201,7 @@ export default function TabBar(props: {
                 tabIndex={idx === focusIdx ? 0 : -1}
                 onKeyDown={(e) => onTabKey(e, s.id)}
                 onClick={() => props.onSelect(s.id)}
-                title={`${s.title || t('tabbar.session')}${host ? ` · ${host.name}` : ''}${hasActivity ? ` · ${t('tabbar.newOutput')}` : ''}${failed ? ` · exit ${s.exit_status}` : ''}`}
+                title={`${sessionTitle(s.title, t) || t('tabbar.session')}${host ? ` · ${host.name}` : ''}${hasActivity ? ` · ${t('tabbar.newOutput')}` : ''}${failed ? ` · exit ${s.exit_status}` : ''}`}
                 className="flex min-w-0 flex-col justify-center py-1 pl-2 pr-1 text-left"
               >
                 <span className="flex items-center gap-1.5 text-sm leading-tight">
@@ -217,7 +218,7 @@ export default function TabBar(props: {
                       : s.state === 'lost' ? t('host.stateLost')
                       : live ? t('host.stateActive') : t('host.stateClosed')}{' — '}
                   </span>
-                  <span className="max-w-[148px] truncate">{s.title || t('tabbar.session')}</span>
+                  <span className="max-w-[148px] truncate">{sessionTitle(s.title, t) || t('tabbar.session')}</span>
                   {/* output sosit cât tab-ul era în fundal (ambră ≠ culorile de host) */}
                   {hasActivity && (
                     <span data-activity className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400"
@@ -404,7 +405,7 @@ function AllTabsMenu(props: {
             const color = host ? hostColor(host) : '#64748b'
             const st = tabState(s, live)
             const hasActivity = !active && props.activity.has(s.id)
-            const title = s.title || t('tabbar.session')
+            const title = sessionTitle(s.title, t) || t('tabbar.session')
             const stateText = st === 'live' ? t('host.stateActive') : st === 'lost' ? t('host.stateLost')
               : st === 'failed' ? t('tabbar.closedWithExit', { code: s.exit_status ?? '' }) : t('host.stateClosed')
             return (

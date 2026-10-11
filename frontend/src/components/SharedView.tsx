@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { sessionTitle } from '../lib/sessionTitle'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { Terminal } from '@xterm/xterm'
@@ -57,7 +58,7 @@ export default function SharedView(props: { token: string }) {
       .then((m) => {
         setTitle(m.title)
         setWatermark(m.watermark ?? null)   // ${email}/${host} deja rezolvate server-side
-        document.title = t('share.docTitle', { title: m.title || t('app.sessionFallback') })
+        document.title = t('share.docTitle', { title: sessionTitle(m.title, t) || t('app.sessionFallback') })
       })
       // 429 (3.5.15: limită per IP pe link-urile publice) ≠ link invalid: spunem cât să aştepte
       .catch((e) => setError(e instanceof ApiError && e.code === 'share.rateLimited'

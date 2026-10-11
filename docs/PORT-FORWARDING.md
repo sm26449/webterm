@@ -165,7 +165,7 @@ Origin rejected). The panel also has a UI test in `scripts/e2e-session.mjs`.
 
 ## Configurable domain (Settings)
 
-The forward domain can be changed under **Settings → Port forwarding — domain**
+The forward domain can be changed under **Settings → Infrastructure & tokens → Port forwarding — domain**
 (default = the application's domain). The application uses it immediately for URLs
 and Host matching; the panel shows live status (does the wildcard DNS resolve? is
 the certificate issued?). To use a domain different from the application's, you

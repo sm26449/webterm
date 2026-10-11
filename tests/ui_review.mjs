@@ -285,6 +285,50 @@ try {
       await page.waitForSelector('button[title="Host actions"]', { timeout: 8000 })
     }, page)
 
+    // ── 3.6.4 (audit funcţional 3.6.3): eroare ≠ gol pentru flotă + link adânc în Setări ──
+    if (theme === 'dark') await step('flotă: /api/sessions picat ≠ „No hosts yet"', async () => {
+      await page.route((u) => u.pathname === '/api/sessions',
+        (r) => r.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: 'mock: sessions down' }) }))
+      await page.evaluate(() => { window.location.hash = '' })
+      await page.reload()
+      await page.waitForSelector('[data-testid="dashboard"]', { timeout: 10000 })
+      await page.waitForSelector('[data-testid="dash-fleet-stale"]', { timeout: 10000 })
+      check('#1 sesiuni picate: dashboard-ul arată hosturile + avertismentul, nu ecranul de primă rulare',
+        await page.locator('[data-testid="dash-fleet-stale"]').isVisible()
+        && (await page.getByText('No hosts yet').count()) === 0
+        && (await page.locator('.wt-sidebar button[title="Host actions"]').count()) > 0)
+      await page.unrouteAll({ behavior: 'ignoreErrors' })
+      await page.reload()
+      await page.waitForSelector('button[title="Host actions"]', { timeout: 8000 })
+    }, page)
+    if (theme === 'dark') await step('Setări din link adânc: cadrul nu se derulează', async () => {
+      let row = page.locator('[data-testid="security-card"] [data-check="alerts"] button')
+      if (!(await row.count())) {
+        await page.locator('[data-testid="security-card"] button[aria-expanded]').first().click()
+        row = page.locator('[data-testid="security-card"] [data-check="alerts"] button')
+      }
+      await row.click()
+      await page.waitForSelector('[role=dialog][aria-modal="true"] [data-setting-id="smtp"]', { timeout: 8000 })
+      await page.waitForTimeout(900)
+      const frame = await page.evaluate(() => {
+        const d = document.querySelector('[role=dialog][aria-modal="true"][aria-label="Settings"]')
+        const search = d?.querySelector('[role=search] input')
+        const r = search?.getBoundingClientRect()
+        const dr = d?.getBoundingClientRect()
+        return { scrollTop: d?.scrollTop ?? -1, searchInView: !!(r && dr && r.top >= dr.top - 1) }
+      })
+      check(`#2 Setări deschise din „Alert channels": antetul + căutarea rămân vizibile (${JSON.stringify(frame)})`,
+        frame.scrollTop === 0 && frame.searchInView)
+      // #3: cu SSO oprit (CI), căutarea nu găseşte secţiunea pe care tab-ul n-o randează
+      await page.fill('[role=search] input', 'sso group mapping')
+      await page.waitForTimeout(400)
+      check('#3 căutarea nu întoarce „SSO group mapping" când SSO e oprit',
+        (await page.locator('[role=listbox] [role=option]', { hasText: 'SSO group mapping' }).count()) === 0)
+      await page.fill('[role=search] input', '')
+      await page.keyboard.press('Escape')
+      await page.waitForTimeout(300)
+    }, page)
+
     await step('deschide sesiune', async () => {
       await openSession(page)
       await page.keyboard.type('ls -la /etc | head -20\n')
@@ -651,6 +695,11 @@ try {
     await step('adaugă host', async () => {
       await page.click('button[aria-label="Add host"]')
       await page.waitForSelector('text=Add a host')
+      if (theme === 'dark') {
+        await page.waitForTimeout(200)
+        const ph = await page.evaluate(() => document.activeElement?.closest('label')?.textContent?.trim().slice(0, 20) ?? document.activeElement?.tagName)
+        check(`Add host: focusul iniţial e pe câmpul Name (${ph})`, /^Name/.test(ph ?? ''))
+      }
       await page.screenshot({ path: `${OUT}/${theme}-07-addhost.png` })
       await scan(page, `${theme} add host: agent form`)
       await page.getByRole('button', { name: 'SSH', exact: true }).click()

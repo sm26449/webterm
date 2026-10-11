@@ -95,10 +95,10 @@ export default function HostOfflineOverlay(props: {
     return () => { alive = false }
   }, [needEvents, targetId, observedAt])
 
-  // durata curge; 10s: în primul minut afişăm secunde (un „0s" îngheţat 30s arăta a defect)
+  // durata curge: tic la 1s (era 10s — în primul minut „12s" stătea îngheţat zece secunde, audit 3.6.3)
   useEffect(() => {
     if (!mode) return
-    const iv = window.setInterval(() => tick((n) => n + 1), 10000)
+    const iv = window.setInterval(() => tick((n) => n + 1), 1000)
     return () => clearInterval(iv)
   }, [mode])
 

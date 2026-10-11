@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { sessionTitle } from '../lib/sessionTitle'
 import { FitAddon } from '@xterm/addon-fit'
 import { Terminal } from '@xterm/xterm'
 import { CommandTracker } from '../lib/commands'
@@ -285,7 +286,7 @@ export default function TranscriptPlayer(props: {
       >
         <header className="flex items-center gap-3 border-b border-ink-800 px-4 py-2.5">
           <span className="flex min-w-0 items-center gap-1.5 truncate text-sm font-medium text-slate-200">
-            <PlayIcon size={11} /> {props.title || t('transcript.sessionFallback')}
+            <PlayIcon size={11} /> {sessionTitle(props.title, t) || t('transcript.sessionFallback')}
           </span>
           <span className="shrink-0 rounded-md bg-ink-800 px-2 py-0.5 text-2xs text-slate-400">{t('transcript.badge')}</span>
           {/* redare = fidel; text = citibil și căutabil (esențial după aplicații pe tot ecranul) */}

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { notifyToast } from '../lib/notify'
 import { errText, api, ApiError, Host, withGuardConfirm, withStepup } from '../lib/api'
 import { useConfirm } from '../lib/confirm'
 import { useI18n } from '../lib/i18n'
@@ -80,6 +81,8 @@ export default function ServicesPanel(props: {
         (confirmed) => api(`/api/hosts/${props.host.id}/services/action`,
           { method: 'POST', body: JSON.stringify({ unit, action, confirmed }) })))
       if (r === null) { setNote(t('guard.cancelled')); return }
+      // succesul se spune (audit 3.6.3): până acum singurul semnal era punctul de stare din listă
+      notifyToast(t('common.actionDone', { action: t('services.' + action), target: unit }))
       await load()
     } catch (e) {
       setError(errText(e, t) || (e instanceof ApiError ? e.message : t('services.error')))

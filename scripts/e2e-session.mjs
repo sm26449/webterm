@@ -785,7 +785,25 @@ try {
   await page.keyboard.press('Control+End')
   await page.keyboard.type('linia3noua')
   await page.locator('button:has-text("Save")').click()
-  await page.waitForTimeout(1200)
+  // 3.6.4 (audit): salvarea NU închide editorul — confirmă „Saved" şi rămâi; o a doua salvare
+  // (Ctrl+S) foloseşte mtime-ul reîmprospătat, deci nu dă un conflict fals
+  const savedFlash = page.locator('[data-testid="editor-saved"]', { hasText: 'Saved' })
+  const stayed = await savedFlash.waitFor({ state: 'visible', timeout: 8000 }).then(() => true, () => false)
+  check('editor: Save scrie şi editorul rămâne deschis, cu confirmarea „Saved"', stayed && await cm.isVisible())
+  await page.waitForTimeout(2200)                       // confirmarea se stinge
+  await cm.click()
+  await page.keyboard.press('Control+End')
+  await page.keyboard.type('X')
+  await page.keyboard.press('Control+s')
+  const saved2 = await savedFlash.waitFor({ state: 'visible', timeout: 8000 }).then(() => true, () => false)
+  check('editor: a doua salvare (Ctrl+S) reuşeşte fără conflict fals de mtime',
+    saved2 && (await page.locator('[role=alertdialog]#editor-conflict, [aria-labelledby="editor-conflict-msg"]').count()) === 0)
+  await page.locator('[role=dialog][aria-label^="Edit"] button:has-text("Close")').click()
+  await page.waitForTimeout(400)
+  const afterClose = await page.evaluate(() => ({ body: document.activeElement === document.body,
+    name: document.activeElement?.getAttribute('data-fname') ?? '' }))
+  check(`editor: la închidere focusul revine pe rândul fişierului, nu pe <body> (${JSON.stringify(afterClose)})`,
+    !afterClose.body)
   await activePane.locator('.xterm-screen').click()
   await page.keyboard.type('cat /tmp/wt_edit.txt\n')
   check('salvarea din editor a scris pe host', await waitScreen('linia3noua'))

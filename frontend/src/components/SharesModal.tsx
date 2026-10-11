@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { sessionTitle } from '../lib/sessionTitle'
 import { api, errText, ReplayLinkRow, ShareRow, withSecondFactor, withStepup } from '../lib/api'
 import { useConfirm } from '../lib/confirm'
 import { useI18n } from '../lib/i18n'
@@ -79,7 +80,7 @@ export default function SharesModal(props: { onClose: () => void; onChanged: () 
   async function revokeOne(s: ShareRow) {
     if (!(await confirm({
       title: t('session.revokeShareTitle'),
-      message: t('shares.revokeOneConfirm', { title: s.title || t('dashboard.session'), host: s.host_name }),
+      message: t('shares.revokeOneConfirm', { title: sessionTitle(s.title, t) || t('dashboard.session'), host: s.host_name }),
       danger: true, confirmLabel: t('session.revoke'),
     }))) return
     setBusy(true)
@@ -166,7 +167,7 @@ export default function SharesModal(props: { onClose: () => void; onChanged: () 
                     <li key={s.sid} data-share={s.sid}
                       className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md bg-ink-800/60 px-3 py-2 text-sm ring-1 ring-ink-700">
                       <span className="min-w-0 flex-1">
-                        <span className="block truncate font-medium text-slate-200">{s.title || t('dashboard.session')}</span>
+                        <span className="block truncate font-medium text-slate-200">{sessionTitle(s.title, t) || t('dashboard.session')}</span>
                         <span className="block truncate text-xs text-slate-400">
                           {s.host_name || t('dashboard.host')}
                           {s.by ? ` · ${t('shares.by', { email: s.by })}` : ''}
@@ -183,7 +184,7 @@ export default function SharesModal(props: { onClose: () => void; onChanged: () 
                         <EyeIcon /> {s.viewers}
                       </span>
                       <button type="button" onClick={() => revokeOne(s)} disabled={busy}
-                        aria-label={t('shares.revokeOneAria', { title: s.title || t('dashboard.session') })}
+                        aria-label={t('shares.revokeOneAria', { title: sessionTitle(s.title, t) || t('dashboard.session') })}
                         className="shrink-0 rounded-md px-2 py-1 text-xs wt-danger ring-1 ring-ink-700 hover:bg-ink-800 disabled:opacity-50">
                         {t('session.revoke')}
                       </button>

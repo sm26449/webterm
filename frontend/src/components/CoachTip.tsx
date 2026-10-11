@@ -1,7 +1,7 @@
 import { ReactNode, useEffect, useState } from 'react'
 import { useI18n } from '../lib/i18n'
 import { CloseIcon } from './Icons'
-import { dismissTip, isTipDismissed } from '../lib/coachtips'
+import { dismissTip, isTipDismissed, TIP_DISMISSED_EVENT } from '../lib/coachtips'
 import { Button } from './ui'
 
 /* Sfat contextual: un callout MIC, NON-MODAL, ancorat lângă un element relevant, arătat o
@@ -31,11 +31,20 @@ export default function CoachTip(props: {
   /** notifică părintele la închidere — ex. ca să declanşeze următorul sfat SCALONAT (toolbar
       după paste), astfel încât două callout-uri să nu apară niciodată simultan */
   onDismiss?: () => void
+  /** Escape închide sfatul ŞI lasă tasta să ajungă mai departe (ex. la dialogul pe care stă) —
+      un sfat peste un formular nu trebuie să ceară două Escape ca să ieşi (audit 3.6.3) */
+  passEscape?: boolean
 }) {
   const { t } = useI18n()
   // starea „închis" se citeşte o dată, din localStorage: dacă a mai fost văzut, nu reapare.
   const [dismissed, setDismissed] = useState(() => isTipDismissed(props.tipKey))
   const visible = props.show && !dismissed
+  // închis în ALTĂ instanţă (alt panou de split) → se închide şi aici
+  useEffect(() => {
+    const onDismissed = (e: Event) => { if ((e as CustomEvent<string>).detail === props.tipKey) setDismissed(true) }
+    window.addEventListener(TIP_DISMISSED_EVENT, onDismissed)
+    return () => window.removeEventListener(TIP_DISMISSED_EVENT, onDismissed)
+  }, [props.tipKey])
 
   const close = () => {
     dismissTip(props.tipKey)
@@ -52,7 +61,7 @@ export default function CoachTip(props: {
     if (!visible) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
-      e.stopPropagation()
+      if (!props.passEscape) e.stopPropagation()
       close()
     }
     document.addEventListener('keydown', onKey, true)
