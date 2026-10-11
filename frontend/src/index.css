@@ -391,8 +391,8 @@ body {
    urmează tot pe cea a familiei WebTerm, ca textul din crom să păstreze ≥4,5:1. */
 :root[data-family='mac'] {
   --term-bg: #1e1e1e;
-  --chrome-bg: #262628;
-  --chrome-elev: #333336;
+  --chrome-bg: #141416;
+  --chrome-elev: #1c1c1e;
   --chrome-line: rgba(255, 255, 255, 0.08);
   --chrome-tx: #dcdce0;
   --chrome-tx-dim: #9e9ea5;
@@ -417,8 +417,8 @@ body {
 }
 :root[data-family='win'] {
   --term-bg: #0c0c0c;
-  --chrome-bg: #1c1c1c;
-  --chrome-elev: #2d2d2d;
+  --chrome-bg: #141414;
+  --chrome-elev: #1c1c1c;
   --chrome-line: rgba(255, 255, 255, 0.08);
   --chrome-tx: #e4e4e4;
   --chrome-tx-dim: #9d9d9d;
@@ -443,8 +443,8 @@ body {
 }
 :root[data-family='gnome'] {
   --term-bg: #1d1d20;
-  --chrome-bg: #2e2e32;
-  --chrome-elev: #3a3a3e;
+  --chrome-bg: #141417;
+  --chrome-elev: #1c1c20;
   --chrome-line: rgba(255, 255, 255, 0.08);
   --chrome-tx: #e8e8ea;
   --chrome-tx-dim: #a4a4a9;
@@ -927,7 +927,10 @@ textarea {
    şi pe icon; textul trece pe tokenul secundar (AA). `!important`: bate `style={{ color }}`. */
 /* Aceeaşi regulă pentru monogramele de app (PVE/PTN…, culoarea app-ului): din 3.5.7 pagina hostului
    şi panourile ei sunt şi ele pe .wt-canvas, deci pe Aurora textul pastel cădea sub AA acolo. */
-:root[data-mode='light'] .wt-canvas .wt-hostlabel { color: rgb(var(--tx-400)) !important; }
+/* 3.6.4: şi pe variantele închise ale familiilor noi — Dashboard-ul lor are suprafeţe mai deschise decât
+   navy-ul Midnight (pe GNOME dark culoarea hostului cădea sub 4,5:1 pe cardurile ink-900) */
+:root[data-mode='light'] .wt-canvas .wt-hostlabel,
+:root:is([data-family='mac'], [data-family='win'], [data-family='gnome']) .wt-canvas .wt-hostlabel { color: rgb(var(--tx-400)) !important; }
 
 /* editorul de fișiere: conținutul e pe fundal de terminal (întunecat fix),
    deci tokenii de text trebuie să fie mereu varianta deschisă — pe Aurora,

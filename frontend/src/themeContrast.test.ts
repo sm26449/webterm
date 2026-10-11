@@ -84,7 +84,25 @@ for (const f of FAMILIES.map((x) => x.id)) {
   need(where, 'tx-500 on command palette', rgb(ws['tx-500']), rgb(t['command-bg']), 4.5)
 }
 
+// Numele hostului pe tab-ul activ e scris în culoarea hostului (paleta pastel din lib/host.ts) peste
+// `color-mix(culoare 18%, --chrome-elev)` (TabBar). Paleta e calibrată pe cromul navy WebTerm, deci
+// o familie nouă nu are voie să coboare sub cel mai slab contrast al WebTerm (prins de axe în gate).
+const hostSrc = (import.meta.glob('./lib/host.ts', { query: '?raw', import: 'default', eager: true }) as Record<string, string>)['./lib/host.ts']
+const HOST_PALETTE = [...hostSrc.slice(hostSrc.indexOf('HOST_PALETTE'), hostSrc.indexOf(']', hostSrc.indexOf('HOST_PALETTE')))
+  .matchAll(/'(#[0-9a-f]{6})'/gi)].map((m) => rgb(m[1]))
+const tabWorst = (f: ThemeFamily) => {
+  const elev = rgb(familyTokens(f)['chrome-elev'])
+  return Math.min(...HOST_PALETTE.map((c) => ratio(c, [0, 1, 2].map((i) => c[i]! * 0.18 + elev[i]! * 0.82) as RGB)))
+}
+
 describe('contrastul variantelor de temă (tokeni din index.css)', () => {
+  it('culorile de host pe tab-ul activ: nicio familie sub WebTerm', () => {
+    expect(HOST_PALETTE.length).toBeGreaterThanOrEqual(10)
+    const ref = tabWorst('webterm')
+    const worse = FAMILIES.map((f) => f.id).filter((f) => tabWorst(f) + 1e-9 < ref)
+      .map((f) => `${f}: ${tabWorst(f).toFixed(2)} < ${ref.toFixed(2)}`)
+    expect(worse).toEqual([])
+  })
   if (import.meta.env.VITE_CONTRAST_REPORT) {
     const worst = new Map<string, Pair>()
     for (const p of pairs) {

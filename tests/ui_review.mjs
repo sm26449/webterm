@@ -848,6 +848,11 @@ try {
       await page.waitForTimeout(800)
       await page.screenshot({ path: `${OUT}/${variant}-03-session.png` })
       await scan(page, `${variant} session view`)
+      // închidem shell-ul: hostul are un plafon de 32 de sesiuni (MAX_SESSIONS) — 6 sesiuni în plus
+      // lăsate vii aici umpleau plafonul, iar auditul mobil de după nu mai putea deschide una
+      await page.locator('.xterm-screen').first().click()
+      await page.keyboard.type('exit\n')
+      await page.waitForTimeout(1000)
       await page.evaluate(() => { window.location.hash = '' })
       await page.waitForTimeout(400)
     }, page)
