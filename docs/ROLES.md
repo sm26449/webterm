@@ -194,7 +194,7 @@ quick-revocation settings: [SSO.md → Groups out of the box](SSO.md#groups-out-
 
 | Team | Hosts tagged | Group → role | They can |
 |---|---|---|---|
-| Database team | `db` | `wt-db` → Operator · tag `db` | shell, files, run, Docker/services on the DB hosts; only *see* nothing else |
+| Database team | `db` | `wt-db` → Operator · tag `db` | shell, files, run, Docker/services on the DB hosts; nothing on the other hosts |
 | Network team | `network` | `wt-network` → Operator · tag `network` | the same, on routers/firewalls/VPN hosts |
 | Auditors / on-call | — | `wt-readonly` → Viewer · all hosts | watch live sessions and recordings everywhere, no shell, no files |
 
