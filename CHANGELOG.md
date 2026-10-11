@@ -9,6 +9,8 @@ back.
 
 ## [Unreleased]
 
+## [3.6.4] — 2026-10-11 · agent (58)
+
 3.6.4 — OS-style themes, plus the fixes from an independent functional UI audit of 3.6.3. No
 agent change; one small server change (forward links keep the gateway's public port).
 
