@@ -1066,6 +1066,7 @@ const ro: Lang = {
     'roles.sso.fromConfigTitle': "Setată de WEBTERM_OIDC_ROLE_MAP din .env-ul serverului. Schimb-o acolo şi reporneşte WebTerm; nu se poate şterge de aici.",
     'roles.sso.configNote': "Mapările marcate „din configuraţie” vin din WEBTERM_OIDC_ROLE_MAP din .env-ul serverului şi se aplică la pornirea WebTerm. Schimbă-le sau scoate-le acolo, apoi reporneşte; mapările adăugate aici sunt separate şi nu sunt atinse de ea.",
     'err.ssoMap.fromConfig': "Maparea vine din WEBTERM_OIDC_ROLE_MAP din .env-ul serverului. Schimb-o acolo şi reporneşte WebTerm.",
+    'err.role.usedByConfigMap': "Rolul e folosit de WEBTERM_OIDC_ROLE_MAP din .env-ul serverului, care nu acordă niciodată permisiuni doar-de-Owner. Scoate-l întâi din WEBTERM_OIDC_ROLE_MAP şi reporneşte WebTerm.",
     'err.auth.ssoOnly': "Contul acesta intră doar prin SSO. Foloseşte butonul SSO.",
     'alertmsg.what.sso_config_mappings_changed': "Mapările SSO din configuraţie s-au schimbat: adăugate {added}, scoase {removed} ({n} rol(uri) retrase)",
     'alertmsg.what.sso_config_owner_refused': "WEBTERM_OIDC_ROLE_MAP a încercat să dea Owner ({entries}); refuzat — Owner nu se acordă niciodată din configuraţie",

@@ -3060,6 +3060,8 @@ async def purge_host(host_id: int, *, _depth: int = 0) -> None:
                      str(host_id))
     # 3.6.2: şi o mapare SSO pe `host:<id>` — altfel următorul login SSO ar re-crea legătura
     # pe hostul NOU cu acelaşi id
+    from . import ssomap
+    await ssomap.note_config_host_change(host_id, "deleted")
     await db.execute("DELETE FROM oidc_group_roles WHERE scope_kind='host' AND scope_value=?",
                      str(host_id))
     await db.execute("UPDATE audit_log SET host_id=? WHERE host_id=?", -host_id, host_id)

@@ -1051,6 +1051,7 @@ const en: Lang = {
     'roles.sso.fromConfigTitle': "Set by WEBTERM_OIDC_ROLE_MAP in the server's .env. Change it there and restart WebTerm; it cannot be removed here.",
     'roles.sso.configNote': "Mappings marked “from configuration” come from WEBTERM_OIDC_ROLE_MAP in the server's .env and are applied when WebTerm starts. Change or remove them there, then restart; mappings added here are separate and never touched by it.",
     'err.ssoMap.fromConfig': "This mapping comes from WEBTERM_OIDC_ROLE_MAP in the server's .env. Change it there and restart WebTerm.",
+    'err.role.usedByConfigMap': "This role is used by WEBTERM_OIDC_ROLE_MAP in the server's .env, which never grants Owner-only permissions. Remove it from WEBTERM_OIDC_ROLE_MAP and restart WebTerm first.",
     'err.auth.ssoOnly': "This account signs in with SSO only. Use the SSO button.",
     'alertmsg.what.sso_config_mappings_changed': "SSO mappings from the configuration changed: added {added}, removed {removed} ({n} role(s) removed)",
     'alertmsg.what.sso_config_owner_refused': "WEBTERM_OIDC_ROLE_MAP tried to grant Owner ({entries}); refused — Owner is never granted from the configuration",

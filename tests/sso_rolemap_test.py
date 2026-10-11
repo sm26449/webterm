@@ -263,6 +263,119 @@ async def test_api(owner):
     del vw
 
 
+# ── revizuirea de securitate 3.6.5: fiecare exploit trebuie să EŞUEZE acum ───────────────────
+async def global_perms(email):
+    uid = await uid_of(email)
+    authz._cache.pop(uid, None)
+    return (await authz.grants_for_user(uid)).global_perms
+
+
+async def test_secreview(owner):
+    print("── revizuire 3.6.5: P1 rol custom mapat din .env nu primeşte permisiuni doar-de-Owner")
+    r = await owner.post("/api/roles", json={"name": "Auditors365", "perms": ["audit.view", "host.view"],
+                                             "current_password": U.OWNER_PW})
+    check("Owner creează rolul custom Auditors365", r.status_code == 200, r.text[:160])
+    out = await ssomap.reconcile_config("wt-audit=Auditors365@all")
+    check("…mapat din .env (wt-audit=Auditors365@all)", out["added"], str(out))
+    await sso_login("sub-aud", "aud@x.co", ["wt-audit"])
+    check("…un cont SSO primeşte audit.view prin el", "audit.view" in await global_perms("aud@x.co"))
+    rid = (await db.fetchone("SELECT id FROM roles WHERE name='Auditors365'"))["id"]
+    for extra in ("backups.manage", "signing.manage", "history.clear"):
+        r = await owner.patch("/api/roles/%d" % rid, json={
+            "name": "Auditors365", "perms": ["audit.view", "host.view", extra],
+            "current_password": U.OWNER_PW})
+        check("P1: Owner adaugă %s → 409 role.usedByConfigMap" % extra,
+              r.status_code == 409 and U.code(r) == "role.usedByConfigMap",
+              "%s %s" % (r.status_code, r.text[:160]))
+    r = await owner.patch("/api/roles/%d" % rid, json={
+        "name": "Auditors365", "perms": ["audit.view", "host.view", "backups.manage"]})
+    check("P1: refuzul vine înaintea re-autentificării (fără oracle de parolă)",
+          r.status_code == 409 and U.code(r) == "role.usedByConfigMap", str(r.status_code))
+    row = await db.fetchone("SELECT perms FROM roles WHERE id=?", rid)
+    check("P1: permisiunile rolului au rămas neschimbate", "backups.manage" not in row["perms"], row["perms"])
+    check("P1: contul SSO NU are backups.manage", "backups.manage" not in await global_perms("aud@x.co"))
+    r = await owner.patch("/api/roles/%d" % rid, json={
+        "name": "Auditors365", "perms": ["audit.view", "host.view", "session.watch"],
+        "current_password": U.OWNER_PW})
+    check("o editare fără permisiuni doar-de-Owner merge în continuare", r.status_code == 200,
+          "%s %s" % (r.status_code, r.text[:160]))
+    # defence in depth: un rând modificat direct în DB nu dă nimic la sync
+    import json as _json
+    await db.execute("UPDATE roles SET perms=? WHERE id=?",
+                     _json.dumps(["audit.view", "host.view", "backups.manage"]), rid)
+    authz.bump_epoch()
+    await sso_login("sub-aud", "aud@x.co", ["wt-audit"])
+    check("filtrul de la sync rămâne: rolul devenit Owner-equivalent nu mai e dat din config",
+          "backups.manage" not in await global_perms("aud@x.co")
+          and "audit.view" not in await global_perms("aud@x.co"))
+    await db.execute("UPDATE roles SET perms=? WHERE id=?", _json.dumps(["audit.view", "host.view"]), rid)
+    authz.bump_epoch()
+
+    print("── revizuire 3.6.5: P4 redenumirea rolului / hostului numit de .env e semnalată")
+    r = await owner.patch("/api/roles/%d" % rid, json={
+        "name": "Auditors-renamed", "perms": ["audit.view", "host.view"], "current_password": U.OWNER_PW})
+    check("redenumirea rolului reuşeşte", r.status_code == 200, r.text[:160])
+    row = await db.fetchone("SELECT detail FROM audit_log WHERE path=? ORDER BY id DESC LIMIT 1",
+                            "/api/roles/%d" % rid)
+    check("…şi auditul spune că WEBTERM_OIDC_ROLE_MAP încă îl numeşte după numele vechi",
+          row and "WEBTERM_OIDC_ROLE_MAP still names it 'Auditors365'" in row["detail"],
+          row["detail"] if row else "-")
+    hid = await U.add_host(owner, "cfg-host", folder="prod")
+    await ssomap.reconcile_config("wt-audit=Auditors-renamed@all,wt-h=viewer@host:cfg-host")
+    r = await owner.patch("/api/hosts/%d" % hid, json={"name": "cfg-host-2"})
+    check("redenumirea hostului reuşeşte", r.status_code == 200, r.text[:160])
+    rows = await audit_rows(200)
+    check("…avertisment auditat: hostul numit de .env a fost redenumit",
+          any("host %d" % hid in d and "renamed" in d for _s, d in rows), str(rows[-2:]))
+    r = await owner.delete("/api/hosts/%d" % hid)
+    check("ştergerea hostului reuşeşte", r.status_code == 200, r.text[:160])
+    rows = await audit_rows(200)
+    check("…avertisment auditat: hostul numit de .env a fost şters",
+          any("host %d" % hid in d and "deleted" in d for _s, d in rows), str(rows[-2:]))
+    check("…şi maparea pe host a plecat cu el",
+          not await db.fetchone("SELECT 1 FROM oidc_group_roles WHERE scope_kind='host' AND scope_value=?",
+                                str(hid)))
+
+    print("── revizuire 3.6.5: P3 biletele de forward nu trăiesc mai mult decât sesiunea SSO")
+    fh = await U.add_host(owner, "fwd-host", folder="prod")
+    await U.add_forward(fh, "graf365")
+    await ssomap.reconcile_config("wt-view=viewer@all")
+    try:
+        config.OIDC_SESSION_MAX_HOURS = 12
+        tok = await sso_login("sub-fwd", "fwd@x.co", ["wt-view"])
+        # sesiunea are deja 11.5 h: biletul trebuie să expire în cel mult ~30 min, nu în 12 h
+        await db.execute("UPDATE web_sessions SET created=created-41400, expires=expires-41400 WHERE"
+                         " token_hash=?", security.sha256_hex(tok))
+        c = U.client(cookies={security.COOKIE_NAME: tok})
+        r = await c.get("/__wtfwd/auth", params={"slug": "graf365"}, follow_redirects=False)
+        loc = r.headers.get("location", "")
+        import re as _re
+        m = _re.search(r"[?&]t=(\d+)\.(\d+)\.", loc)
+        left = int(m.group(1)) - time.time() if m else None
+        check("P3: biletul unui cont SSO expiră odată cu sesiunea (≤ 30 min rămase)",
+              m is not None and 0 < left <= 1800 + 5, "%s %s" % (r.status_code, loc[:160]))
+        lt_email = "fwd-local@x.co"
+        await U.add_user(lt_email, bindings=[("viewer", "all", "")])
+        lc = await U.login(lt_email)
+        await db.execute("UPDATE web_sessions SET created=created-41400 WHERE user_id=?",
+                         await uid_of(lt_email))
+        r2 = await lc.get("/__wtfwd/auth", params={"slug": "graf365"}, follow_redirects=False)
+        m2 = _re.search(r"[?&]t=(\d+)\.", r2.headers.get("location", ""))
+        check("…un cont local păstrează TTL-ul obişnuit (12 h)",
+              m2 is not None and int(m2.group(1)) - time.time() > 11 * 3600, r2.headers.get("location", "")[:160])
+        check("P3: sesiune negăsită → 0 s (fail closed)",
+              await security.sso_session_seconds_left("nope",
+                                                      await db.fetchone("SELECT * FROM users WHERE email='fwd@x.co'")) == 0)
+        config.OIDC_SESSION_MAX_HOURS = 0
+        r3 = await c.get("/__wtfwd/auth", params={"slug": "graf365"}, follow_redirects=False)
+        m3 = _re.search(r"[?&]t=(\d+)\.", r3.headers.get("location", ""))
+        check("setarea oprită: TTL-ul obişnuit", m3 is not None and int(m3.group(1)) - time.time() > 11 * 3600)
+        await c.aclose()
+        await lc.aclose()
+    finally:
+        config.OIDC_SESSION_MAX_HOURS = 0
+
+
 class _Verified:
     new_sign_count = 7
 
@@ -451,6 +564,7 @@ async def main():
     await test_reconcile(owner)
     await test_last_owner(owner)
     await test_api(owner)
+    await test_secreview(owner)
     await test_sso_only()
     await test_session_max()
     await test_admin_cli()

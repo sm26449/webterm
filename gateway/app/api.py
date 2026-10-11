@@ -1333,6 +1333,26 @@ async def create_role(body: RoleIn, request: Request, user=Depends(authz.perm('r
     return out
 
 
+async def _config_maps_of_role(rid: int) -> list:
+    return [r["grp"] for r in await db.fetchall(
+        "SELECT grp FROM oidc_group_roles WHERE role_id=? AND source='config' ORDER BY grp", rid)]
+
+
+async def _check_config_map_role(rid: int, perms) -> None:
+    """3.6.5 (revizuirea de securitate): configuraţia nu acordă niciodată Owner — deci un rol
+    folosit de o mapare din WEBTERM_OIDC_ROLE_MAP nu poate primi o permisiune doar-de-Owner:
+    legăturile deja derivate din ea ar purta-o până la următorul login SSO al fiecăruia."""
+    if not (frozenset(perms) & ssomap._OWNER_ONLY):
+        return
+    maps = await _config_maps_of_role(rid)
+    if maps:
+        raise ApiError(409, "role.usedByConfigMap",
+                       "this role is mapped from WEBTERM_OIDC_ROLE_MAP (%s), which never grants "
+                       "Owner-only permissions; remove it from WEBTERM_OIDC_ROLE_MAP and restart "
+                       "WebTerm first" % ", ".join(maps)[:200],
+                       vars={"groups": ", ".join(maps)[:200]})
+
+
 @router.patch("/api/roles/{rid}")
 async def edit_role(rid: int, body: RoleIn, request: Request,
                     user=Depends(authz.perm('roles.manage'))):
@@ -1343,6 +1363,7 @@ async def edit_role(rid: int, body: RoleIn, request: Request,
     authz.check_can_define(grants, role.perms | perms)
     await _check_role_targets(grants, rid)
     await _role_name_free(name, rid)
+    await _check_config_map_role(rid, perms)
     await _reauth_for_access_change(user, request, body, "change a role")
     async with authz._lock:
         g = await _fresh_grants(user, "roles.manage")
@@ -1350,6 +1371,8 @@ async def edit_role(rid: int, body: RoleIn, request: Request,
         authz.check_can_define(g, role.perms | perms)
         uids = await _check_role_targets(g, rid)
         await _role_name_free(name, rid)
+        await _check_config_map_role(rid, perms)
+        cfg_maps = await _config_maps_of_role(rid)
         await db.execute("UPDATE roles SET name=?, description=?, perms=?, updated=?"
                          " WHERE id=? AND builtin=0", name, desc, json.dumps(sorted(perms)),
                          time.time(), rid)
@@ -1367,6 +1390,15 @@ async def edit_role(rid: int, body: RoleIn, request: Request,
         what += " (renamed from '%s')" % role.name
     audit.detail(request, "%s; %d account(s) affected" % (what, len(uids)))
     log.warning("%s (by %s, %d account(s) affected)", what, user["email"], len(uids))
+    if name != role.name and cfg_maps:
+        # 3.6.5: WEBTERM_OIDC_ROLE_MAP numeşte rolul după NUME şi e citită doar la pornire —
+        # maparea rămâne (pe id) până la următoarea pornire, apoi „<nume vechi>" nu mai există
+        log.warning("role '%s' was renamed to '%s', but WEBTERM_OIDC_ROLE_MAP refers to it by name "
+                    "(%s): update .env, otherwise the next restart skips the entry and removes the "
+                    "mapping", role.name, name, ", ".join(cfg_maps))
+        audit.detail(request, "%s; %d account(s) affected; WEBTERM_OIDC_ROLE_MAP still names it "
+                              "'%s' (%s) — update .env before the next restart"
+                     % (what, len(uids), role.name, ", ".join(cfg_maps)))
     ip = security.client_ip(request)
     email_alerts.notify_security_change(what, ip, user["email"], fleet=True, what_key="role_changed",
                                         what_params={"role": name, "added": ", ".join(added) or "—",
@@ -6316,6 +6348,11 @@ async def forward_auth(request: Request, slug: str, next: str = "/"):
     # handshake-ul singur, deci pentru om e o redirectare, nu o eroare.
     ttl = (security.STEPUP_WINDOW_MAX if (host and host["require_2fa"])
            else security.FORWARD_TOKEN_TTL)
+    # 3.6.5 (WEBTERM_OIDC_SESSION_MAX_HOURS): biletul unui cont SSO nu trăieşte mai mult decât
+    # sesiunea care l-a emis — altfel un tunel de 12 h ocolea limita de vârstă a sesiunii
+    left = await security.sso_session_seconds_left(request.cookies.get(security.COOKIE_NAME), user)
+    if left is not None:
+        ttl = max(1, min(ttl, int(left)))
     token = security.make_forward_token(slug, user["id"], ttl)
     loc = "%s/__wtfwd/set?t=%s&next=%s" % (_fwd_base(slug), token, quote(next, safe=""))
     return RedirectResponse(loc, status_code=302)
@@ -6915,6 +6952,11 @@ async def update_host(host_id: int, host: HostPatch, request: Request,
         return {"ok": True, "changed": False}
     vals.append(host_id)
     await db.execute("UPDATE hosts SET %s WHERE id=?" % ", ".join(sets), *vals)
+    if "name" in given and isinstance(given["name"], str) \
+            and given["name"].strip() != (row["name"] or ""):
+        # 3.6.5: WEBTERM_OIDC_ROLE_MAP numeşte hostul după NUME, rezolvat doar la pornire
+        await ssomap.note_config_host_change(host_id, "renamed from '%s' to '%s'" % (
+            (row["name"] or "")[:80], given["name"].strip()[:80]))
     if scope_moved or "via_host_id" in given or "connection_type" in given:
         authz.bump_epoch()          # cine vede hostul s-a putut schimba: socket-urile re-verifică
 

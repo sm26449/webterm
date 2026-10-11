@@ -349,6 +349,32 @@ def _sso_session_too_old(user, created, now: float) -> bool:
         return True
 
 
+async def sso_session_seconds_left(token: Optional[str], user) -> Optional[float]:
+    """Cât mai are de trăit sesiunea (cookie `token`) a unui cont legat de SSO sub
+    WEBTERM_OIDC_SESSION_MAX_HOURS; None = limita nu se aplică. Folosit ca plafon pentru
+    biletele derivate din sesiune (forward). Sesiune negăsită = 0 (fail closed).
+
+    Deliberat FĂRĂ bump de epocă de forward când sesiunea expiră: biletele ei mor singure la
+    plafon, iar un bump per cont ar omorî şi biletele emise din sesiunea NOUĂ a omului (un tab
+    vechi care tot loveşte cu cookie-ul expirat le-ar invalida la nesfârşit). Biletele emise
+    înainte ca limita să fie pornită nu supravieţuiesc: setarea cere restart, iar epoca de
+    forward e per proces."""
+    lim = _sso_max_age()
+    if not lim or user is None or not user["sso_subject"]:
+        return None
+    if not token:
+        return 0.0
+    row = await db.fetchone("SELECT created, expires FROM web_sessions WHERE token_hash=?",
+                            sha256_hex(token))
+    if not row:
+        return 0.0
+    try:
+        end = min(float(row["expires"]), float(row["created"]) + lim)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, end - time.time())
+
+
 async def create_web_session(user_id: int, user_agent: str = "",
                              device_new: bool = False) -> str:
     token = new_token()

@@ -433,6 +433,26 @@ async def _resolve_entries(raw: str):
     return desired, errors, warnings, owner_refused
 
 
+async def note_config_host_change(host_id: int, what: str) -> None:
+    """Un host numit de WEBTERM_OIDC_ROLE_MAP (`host:<nume>`, rezolvat la id DOAR la pornire)
+    e redenumit sau şters: maparea urmează id-ul până la următoarea pornire (ştergerea o ia cu
+    ea), apoi numele din .env e rezolvat din nou. Avertisment + audit, ca nimeni să nu fie
+    surprins la restart."""
+    try:
+        rows = await db.fetchall(
+            "SELECT grp FROM oidc_group_roles WHERE source='config' AND scope_kind='host'"
+            " AND scope_value=? ORDER BY grp", str(host_id))
+        if not rows:
+            return
+        groups = ", ".join(r["grp"] for r in rows)
+        text = ("host %d, used by WEBTERM_OIDC_ROLE_MAP (%s), was %s; the configuration names hosts "
+                "and is resolved again only at the next restart — update .env" % (host_id, groups, what))
+        log.warning(text)
+        await _cfg_audit(200, text)
+    except Exception:                       # noqa: BLE001 — un avertisment nu blochează operaţia
+        log.exception("could not check WEBTERM_OIDC_ROLE_MAP for host %s", host_id)
+
+
 async def _cfg_audit(status: int, text: str) -> None:
     await audit.record(time.time(), CONFIG_ACTOR, "-", "BOOT", _CONFIG_PATH, status, text[:480],
                        via="config")
