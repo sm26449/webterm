@@ -44,8 +44,14 @@ Roles (3.6) have **no environment variables**: they live in the database and are
 Settings → Users & roles, or with `python3 -m app.admin roles|promote` from the server
 ([ROLES.md](ROLES.md)). SSO group → role mappings (3.6.2) live in the database too and are edited
 in the UI ([ROLES.md → SSO group mapping](ROLES.md#sso-group-mapping)); a new SSO account with no
-mapped group starts with no access. `WEBTERM_OIDC_ROLE_MAP` (an env bootstrap of the mappings) is
-not implemented and is not read.
+mapped group starts with no access. Since 3.6.5 three optional variables add to that
+([SSO.md → Groups out of the box](SSO.md#groups-out-of-the-box-365)):
+
+| Variable | Role |
+|---|---|
+| `WEBTERM_OIDC_ROLE_MAP` | group → role mappings, `group=role@scope` separated by commas or newlines (scope `all`, `folder:<name>`, `tag:<name>`, `host:<name>`; role `admin`/`operator`/`viewer` or a custom role's name). Applied **at startup only**; shown in the UI as "from configuration" and not removable there. `owner` and `*` are refused; bad entries are skipped (logged + audited), never granted |
+| `WEBTERM_OIDC_SSO_ONLY` | `1` = accounts without a local password sign in only through SSO (a passkey is refused as the first factor), so every sign-in re-reads their groups. Anything other than empty/`0`/`no`/`false` counts as on |
+| `WEBTERM_OIDC_SESSION_MAX_HOURS` | absolute maximum age of a web session of an SSO-linked account, in hours (e.g. `12`); empty/`0` = off; an invalid value means 12 |
 
 <a id="security-and-sessions"></a>
 ### Sign-in, sessions, audit

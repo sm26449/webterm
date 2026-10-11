@@ -9,6 +9,39 @@ back.
 
 ## [Unreleased]
 
+3.6.5 — SSO groups out of the box. No agent change.
+
+### Added
+- **Default Authentik groups with their roles.** `deploy/authentik/provision.py` creates
+  `wt-access` (sign-in only), `wt-admins` (Admin · all hosts), `wt-readonly` (Viewer · all
+  hosts), `wt-db` (Operator · tag `db`) and `wt-network` (Operator · tag `network`), binds the
+  WebTerm application to all of them (`policy_engine_mode=any` — one group per person is enough)
+  and prints the matching `.env` block. `WT_GROUP_PREFIX` (e.g. `wt-prod`) gives each instance
+  sharing one Authentik its own groups. Why: until now every instance had to map groups by hand
+  in the UI before SSO users could do anything. Owner is never given by a group — it stays the
+  local break-glass account.
+- **`WEBTERM_OIDC_ROLE_MAP`**: group → role mappings from `.env` (`group=role@scope`), reconciled
+  at startup with the mappings it owns (added / removed, with the roles a removed mapping alone
+  gave taken away at once, the last Owner kept). Mappings created in the UI are never touched.
+  Settings shows these mappings with a **from configuration** badge and they cannot be removed
+  there (409 `ssoMap.fromConfig`). `owner`, `*` and malformed entries are refused without
+  stopping the boot: logged, audited, and `owner` raises a critical alert.
+- **Quick revocation for SSO accounts.** `WEBTERM_OIDC_SSO_ONLY=1`: accounts without a local
+  password cannot use a passkey as the first factor (`auth.ssoOnly`), so every sign-in goes
+  through the IdP and re-reads the groups. `WEBTERM_OIDC_SESSION_MAX_HOURS`: an absolute session
+  age for SSO-linked accounts (provision recommends 12), applied to already-open sessions too;
+  their terminals follow the normal session expiry. Both default to the old behaviour; an invalid
+  value fails closed. Why: a person removed from a group kept their roles until their next SSO
+  sign-in, which a passkey sign-in could postpone indefinitely. SCIM is planned for later.
+- **`python3 -m app.admin sso-only <email> [--force]`**: the server-side twin of "remove local
+  password" (password, passkeys, TOTP, recovery codes and sessions gone; audited). Refused for an
+  account never linked to SSO and for the last Owner that still has a local password.
+
+### Fixed
+- `provision.py` printed `WEBTERM_OIDC_ALLOWED_GROUPS` nowhere and gated the app on `wt-access`
+  only; it now lists all five groups, so someone only in `wt-db` is not refused by WebTerm after
+  Authentik let them in.
+
 ## [3.6.4] — 2026-10-11 · agent (58)
 
 3.6.4 — OS-style themes, plus the fixes from an independent functional UI audit of 3.6.3. No

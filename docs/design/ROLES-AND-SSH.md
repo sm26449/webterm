@@ -1359,6 +1359,48 @@ two sync calls in `oidc_api.callback`, and `UsersTab.tsx`. Tests: `rbac_roles_te
 - **Not built:** the explain-access endpoint, the `WEBTERM_OIDC_ROLE_MAP` env bootstrap, and the
   design's 3.6.2 items (expiring bindings, crown-jewel warnings, deploy-key scope warnings).
   Passkey sign-in of an SSO account does not re-sync (documented in ROLES.md and THREAT-MODEL).
+  *(3.6.5 built the env bootstrap and the quick-revocation settings — §7.2.)*
+
+### 7.2 Implementation notes (SSO groups out of the box, 3.6.5)
+
+Code: `ssomap.parse_role_map` / `reconcile_config` (called once from `main.lifespan`),
+`oidc_group_roles.source` (`'ui'` default, `'config'`), `api._check_not_config`,
+`webauthn_api.login_verify`, `security.user_for_token` / `session_valid` /
+`create_web_session`, `admin.cmd_sso_only`, `deploy/authentik/provision.py`. Tests:
+`sso_rolemap_test`, `authentik_provision_test`. Decisions (each the safer of the options):
+
+- **Env map = server-admin trust, still fail-closed.** The `.env` writer already holds the DB and
+  the vault key, so the map skips the UI's "who may grant" checks — but Owner is refused (also any
+  custom role holding an Owner-only permission: `backups.manage`, `signing.manage`,
+  `history.clear`), `*` is refused (UI-only, Owner-only there), and every malformed entry is
+  skipped (logged as an error, audited) without granting anything or stopping the boot. `_desired`
+  additionally ignores a `source='config'` row whose role is Owner-equivalent (defence in depth
+  against a hand-edited DB). Explicit `@scope` is mandatory (no implicit `all`).
+- **Reconcile only at startup**, only `source='config'` rows: removals first, then additions
+  (bounded by the 500-mapping cap); removals run the same `prune_locked()` as a UI removal (the
+  last Owner is kept). An entry equal to an existing UI mapping is left to the UI (no duplicate,
+  no conversion). `host:<name>` resolves to a non-ephemeral host id at startup; missing → warning,
+  ambiguous → error. A config mapping on a host is still deleted with the host and comes back at
+  the next start only if a host with that name exists.
+- **UI/API:** config mappings carry `source: "config"`; deleting one is 409 `ssoMap.fromConfig`,
+  checked before the reauth (no password oracle) and again under the lock.
+- **`WEBTERM_OIDC_SSO_ONLY`** refuses `POST /api/webauthn/login/verify` for `local_password=0`
+  accounts (403 `auth.ssoOnly`) *after* the signature check and before any session is created.
+  Step-up with a passkey is unchanged. A value that is not 0/1 counts as on.
+- **`WEBTERM_OIDC_SESSION_MAX_HOURS`** applies to accounts with `sso_subject` (adopted accounts
+  with a local password too — stricter): new sessions get `expires = min(TTL, max)`; older
+  sessions are refused by `user_for_token` (and deleted) and by `session_valid` (long-lived
+  sockets) once `now - created` exceeds the limit. An invalid value means 12 h, not "off".
+- **`admin sso-only`** mirrors self-service password removal from the server (all sessions, not
+  "all but the current"); refused for accounts without `sso_subject`, with SSO not configured, or
+  for the last Owner that still has a local password, unless `--force`.
+- **Provision:** five groups (`<prefix>-access|admins|readonly|db|network`, `WT_GROUP_PREFIX`,
+  default `wt`), one policy binding per group at free orders, application
+  `policy_engine_mode=any`; prints `ALLOWED_GROUPS` with all five, the role map, `SSO_ONLY=1`,
+  `SESSION_MAX_HOURS=12`. `install.sh` / `deploy.sh` auto-provisioning still writes only the
+  issuer, client and provider name — the role map is a decision the operator copies in.
+- **Not built:** SCIM (push de-provisioning). Automation tokens of an SSO user keep the user's
+  current bindings, which change only at an SSO sign-in/step-up or by hand.
 
 ---
 

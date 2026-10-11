@@ -248,6 +248,16 @@ See [design/ARCHITECTURE.md](design/ARCHITECTURE.md) for the agent's resilience
    A `*` mapping with real power is Owner-only and always raises a critical alert. SSO-derived bindings are re-checked at every SSO login and SSO
    step-up; an SSO account that signs in with a **passkey** instead keeps its SSO-derived roles
    until its next SSO sign-in or step-up (remove the mapping or the binding to revoke at once).
+   Since 3.6.5, `WEBTERM_OIDC_SSO_ONLY=1` refuses the passkey as first factor for SSO-only
+   accounts and `WEBTERM_OIDC_SESSION_MAX_HOURS` bounds a session's absolute age, so the groups
+   are re-read at least that often; automation tokens and already-open forward tickets are not
+   bound by either (revoke them by hand; SCIM push de-provisioning is future work).
+   **`WEBTERM_OIDC_ROLE_MAP`** (3.6.5) maps groups to roles from `.env`: whoever can write the
+   server's `.env` already holds the database and the vault key, so it is trusted like the server
+   admin — but **Owner is never granted from it** (nor a custom role with Owner-only
+   permissions, nor `*`), a malformed entry is skipped and grants nothing, and every refusal is
+   logged and audited (Owner: critical alert). The default map gives **Admin over all hosts** to
+   the IdP group `wt-admins`: whoever administers that group in the IdP administers WebTerm.
    So the IdP's own security is in scope: its MFA, its
    session/consent settings, and **which users you put in the `wt-access` group** and in every
    mapped group.

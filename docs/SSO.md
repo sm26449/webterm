@@ -46,6 +46,100 @@ extra is needed as long as `WEBTERM_OIDC_SCOPES` includes `profile` (it does by 
 gateway logs `the id_token for … has no groups claim`, the IdP is not sending it: the mapping
 then changes nothing for that sign-in.
 
+## Groups out of the box (3.6.5)
+
+`deploy/authentik/provision.sh` (or `provision.py`) creates five groups in Authentik, binds the
+WebTerm application to **all five** (being in **one** of them is enough to sign in) and prints the
+`.env` block, including the group → role map. Nothing to click in WebTerm's mapping editor.
+
+| Authentik group | What it gives in WebTerm |
+|---|---|
+| `wt-access` | sign-in only — **no role** (give access by hand in WebTerm) |
+| `wt-admins` | Admin @ all hosts |
+| `wt-readonly` | Viewer @ all hosts |
+| `wt-db` | Operator @ hosts tagged `db` |
+| `wt-network` | Operator @ hosts tagged `network` |
+
+**Owner is never granted by a group.** The Owner stays the local break-glass account; WebTerm
+refuses `owner` (and any custom role with Owner-only permissions) in the configured map.
+
+**Day to day:**
+
+1. In Authentik, create the user (Directory → Users) and put them in **one** group, e.g. `wt-db`.
+2. They click **Sign in with Authentik** in WebTerm. The first SSO sign-in creates the account and
+   gives it the group's role (here: Operator on every host tagged `db`).
+3. Moving them to another group changes the role at their next SSO sign-in; removing them from the
+   group removes it then. To revoke **now**, see *Quick revocation* below.
+
+**Extra access for one person** is given by hand in WebTerm (Settings → Users & roles) and is
+**independent and additive**: a role bound by hand is never removed by a group sync, and a group
+never removes it.
+
+**The block provision prints** (paste it into WebTerm's `.env`, then restart the app):
+
+```
+WEBTERM_OIDC_ISSUER=https://auth.example.com/application/o/webterm/
+WEBTERM_OIDC_CLIENT_ID=…
+WEBTERM_OIDC_CLIENT_SECRET=…          # or secrets/webterm_oidc_client_secret
+WEBTERM_OIDC_PROVIDER_NAME=Authentik
+WEBTERM_OIDC_ALLOWED_GROUPS=wt-access,wt-admins,wt-readonly,wt-db,wt-network
+WEBTERM_OIDC_ROLE_MAP=wt-admins=admin@all,wt-readonly=viewer@all,wt-db=operator@tag:db,wt-network=operator@tag:network
+WEBTERM_OIDC_SSO_ONLY=1
+WEBTERM_OIDC_SESSION_MAX_HOURS=12
+```
+
+`WEBTERM_OIDC_ALLOWED_GROUPS` must list **all five**: with only `wt-access` there, someone who is
+only in `wt-db` would pass Authentik and then be refused by WebTerm.
+
+**`WEBTERM_OIDC_ROLE_MAP`** — comma- or newline-separated `group=role@scope` entries:
+
+- *role* — `admin`, `operator`, `viewer`, or the name of an existing custom role (not case
+  sensitive). `owner` is refused.
+- *scope* — `all`, `folder:<name>`, `tag:<name>` or `host:<name>` (a host name; a host that does
+  not exist yet is skipped with a warning, two hosts with the same name are skipped as ambiguous).
+- *group* — the exact name the IdP sends (case-sensitive; no surrounding spaces). `*` (every SSO
+  user) is not accepted here — an Owner maps it in the UI. A group name containing `,` or `=`
+  cannot be written here; map it in the UI.
+
+It is applied **when WebTerm starts, and only then**: the mappings it created (shown in the UI with
+a **from configuration** badge, not removable there) are made to match the variable exactly —
+missing ones are added, ones no longer listed are removed together with the roles they alone gave
+(at once, like removing a mapping in the UI). Mappings created in the UI are never touched. A bad
+entry (syntax, unknown role, `owner`, control characters, a group name with surrounding spaces) is
+**skipped**: it grants nothing, WebTerm still starts, and the gateway log shows
+`WEBTERM_OIDC_ROLE_MAP: entry … SKIPPED — <reason>`; every skipped entry is audited, and `owner`
+also raises a critical alert. The rules of [ROLES.md → SSO group mapping](ROLES.md#sso-group-mapping)
+(only SSO-only accounts receive group roles, absent claim, last Owner) apply unchanged.
+
+**Several instances on one Authentik:** set `WT_GROUP_PREFIX` in Authentik's `.env` before running
+provision (e.g. `WT_GROUP_PREFIX=wt-prod`): the groups become `wt-prod-access`, `wt-prod-admins`, …
+and the printed `ALLOWED_GROUPS` / `ROLE_MAP` use the same names, so an Admin of `prod` is not an
+Admin of `dev`.
+
+### Quick revocation
+
+Groups are read at each **SSO** sign-in and step-up. Two settings make sure that happens often:
+
+| Variable | Effect |
+|---|---|
+| `WEBTERM_OIDC_SSO_ONLY=1` | SSO-only accounts (no local password) can sign in **only through SSO**: a passkey is refused as the *first* factor (`auth.ssoOnly`), so every sign-in re-reads the groups. Passkeys still work as a second factor / step-up. Local accounts (the break-glass Owner) are not affected. A value that is neither 0 nor 1 counts as **on**. |
+| `WEBTERM_OIDC_SESSION_MAX_HOURS=12` | A web session of an account linked to SSO ends after this many hours, however active, forcing a fresh SSO sign-in (→ group re-sync). Open terminals of that session follow the usual session-expiry behaviour (they close at the next check). Applies to sessions already open when you set it. Empty/0 = off; an invalid value means 12. |
+
+To cut someone off **immediately**, without waiting for either: remove them from the group in
+Authentik **and** remove their role bindings by hand in Settings → Users & roles (takes effect at
+once: open terminals go read-only or close; the next SSO sign-in does not add them back, because
+the group is gone), or run `python3 -m app.admin logout-all <email>` on the server to end their
+sessions.
+Automation tokens an SSO user created are capped by that user's roles as they stand in WebTerm,
+which change only at an SSO sign-in — revoke the tokens too when it matters. SCIM provisioning
+(the IdP pushing removals to WebTerm at once) is planned, not in this release.
+
+`python3 -m app.admin sso-only <email>` does from the server what *remove local password* does in
+Settings: the account loses its local password, passkeys, 2FA, recovery codes and sessions, and
+signs in with SSO only from then on — so its groups start giving it roles. It is refused for an
+account that never signed in with SSO, and for the last Owner that still has a local password (the
+break-glass account) unless you pass `--force`.
+
 ## Topology: one IdP, many WebTerm instances
 
 Authentik (or your IdP) runs **once, centrally**. Each WebTerm deployment is registered as its
@@ -69,7 +163,7 @@ The reliable path is the IdP's UI (blueprints are convenient but version-sensiti
 
 ## Configure WebTerm
 
-Set these in `.env` (all six pass through `docker-compose`):
+Set these in `.env` (all of them pass through `docker-compose`):
 
 | Variable | Meaning |
 |---|---|
@@ -79,6 +173,9 @@ Set these in `.env` (all six pass through `docker-compose`):
 | `WEBTERM_OIDC_PROVIDER_NAME` | Button label, e.g. `Authentik` |
 | `WEBTERM_OIDC_SCOPES` | Default `openid email profile` is fine |
 | `WEBTERM_OIDC_ALLOWED_GROUPS` | Optional, comma-separated; if set, the token must carry one |
+| `WEBTERM_OIDC_ROLE_MAP` | Optional (3.6.5): group → role mappings applied at startup — [Groups out of the box](#groups-out-of-the-box-365) |
+| `WEBTERM_OIDC_SSO_ONLY` | Optional (3.6.5): `1` = SSO-only accounts sign in only through SSO — [Quick revocation](#quick-revocation) |
+| `WEBTERM_OIDC_SESSION_MAX_HOURS` | Optional (3.6.5): absolute session age for SSO accounts — [Quick revocation](#quick-revocation) |
 
 SSO turns on only when issuer + client_id + client_secret are all set. The redirect URI is
 derived from `WEBTERM_PUBLIC_URL` — it is never taken from a request (anti open-redirect).

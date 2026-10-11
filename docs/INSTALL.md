@@ -214,9 +214,17 @@ cd /opt/webterm/deploy/authentik
 AUTHENTIK_DOMAIN=auth.yourcompany.com WEBTERM_DOMAIN=term.example.com \
   AUTHENTIK_API_TOKEN=<an Authentik API token> python3 provision.py
 #   → prints WEBTERM_OIDC_* ; paste into /opt/webterm/.env, then: ./deploy.sh
+#   (WT_GROUP_PREFIX=wt-prod … to give this instance its own wt-prod-* groups)
 ```
 
-Set `WEBTERM_OIDC_ISSUER`, `_CLIENT_ID`, `_CLIENT_SECRET`, `_PROVIDER_NAME` in `.env` and
+Since 3.6.5 the provisioner also creates five groups — `wt-access` (sign-in only), `wt-admins`
+(Admin), `wt-readonly` (Viewer), `wt-db` (Operator on hosts tagged `db`), `wt-network` (Operator
+on hosts tagged `network`) — and prints `WEBTERM_OIDC_ALLOWED_GROUPS`, `WEBTERM_OIDC_ROLE_MAP`,
+`WEBTERM_OIDC_SSO_ONLY=1` and `WEBTERM_OIDC_SESSION_MAX_HOURS=12`. Copy those too if you want
+people to get their role from their group ([SSO.md → Groups out of the box](SSO.md#groups-out-of-the-box-365)).
+
+Set `WEBTERM_OIDC_ISSUER`, `_CLIENT_ID`, `_CLIENT_SECRET`, `_PROVIDER_NAME` (and, for roles from
+groups, `_ALLOWED_GROUPS`, `_ROLE_MAP`, `_SSO_ONLY`, `_SESSION_MAX_HOURS`) in `.env` and
 `./deploy.sh`. Leave `COMPOSE_PROFILES` empty — you are not running the bundled Authentik.
 
 **C) Central Authentik, many WebTerms (production topology).** Run Authentik once as its own stack
@@ -230,7 +238,8 @@ setup token (printed by `install.sh`/`deploy.sh`), *then* the SSO button shows. 
 want to a **`wt-access` group** in Authentik, click **Sign in with Authentik**, authenticate — you
 land back provisioned on that instance — with **no access** until an Owner or Admin gives the
 account a role in Settings → Users & roles, or one of its Authentik groups is mapped to a role
-there (SSO group mapping, 3.6.4). If the
+(SSO group mapping; with the provisioner's `WEBTERM_OIDC_ROLE_MAP`, putting the person in
+`wt-admins`, `wt-readonly`, `wt-db` or `wt-network` instead of `wt-access` is enough). If the
 button is missing, the account
 isn't created yet or SSO env isn't set; if the IdP shows "access denied", that user isn't in
 `wt-access`.

@@ -182,6 +182,29 @@ Settings → Users & roles → **SSO group mapping** (shown only when SSO is ena
 `*` means *every authenticated SSO user*. Authentik sends the `groups` claim through the default
 `profile` scope mapping.
 
+**Out of the box (3.6.5).** You do not have to build the mappings by hand: with
+`WEBTERM_OIDC_ROLE_MAP` in `.env` (printed by Authentik's `provision.py`) WebTerm creates them at
+startup — `wt-admins` → Admin · all hosts, `wt-readonly` → Viewer · all hosts, `wt-db` → Operator ·
+tag `db`, `wt-network` → Operator · tag `network` (`wt-access` gives sign-in only). They appear in
+the list with a **from configuration** badge and cannot be removed in the UI (`ssoMap.fromConfig`):
+change `.env` and restart. Owner is never accepted there. Walkthrough, syntax and the
+quick-revocation settings: [SSO.md → Groups out of the box](SSO.md#groups-out-of-the-box-365).
+
+**Team examples.** Tag the hosts, then put people in one group each:
+
+| Team | Hosts tagged | Group → role | They can |
+|---|---|---|---|
+| Database team | `db` | `wt-db` → Operator · tag `db` | shell, files, run, Docker/services on the DB hosts; only *see* nothing else |
+| Network team | `network` | `wt-network` → Operator · tag `network` | the same, on routers/firewalls/VPN hosts |
+| Auditors / on-call | — | `wt-readonly` → Viewer · all hosts | watch live sessions and recordings everywhere, no shell, no files |
+
+A host with both tags is reachable by both teams. **Viewer can open forwarded apps**
+(`forward.use`) — a web UI behind a forward (Grafana, a router admin page) may itself allow
+changes. For a strictly read-only group, create a custom role without `forward.use` (e.g. from
+the **Auditor** preset: `host.view`, `recording.view`, `audit.view`, plus `session.watch` if they
+should watch live sessions) and map the group to it — in the UI, or in `.env` as
+`wt-readonly=<role name>@all`.
+
 **When it applies.**
 
 - At every **SSO sign-in** and every **SSO step-up**, the account's SSO-derived bindings
@@ -241,7 +264,12 @@ holders.
   audited and alerted as critical. Make another account Owner, then fix the group.
 - **Signing in with a passkey** instead of SSO does not re-sync: an SSO account keeps its
   SSO-derived roles until its next SSO sign-in or step-up. To revoke at once, remove the mapping
-  (immediate) or the binding.
+  (immediate) or the binding. Since 3.6.5, `WEBTERM_OIDC_SSO_ONLY=1` refuses the passkey as the
+  first factor for SSO-only accounts and `WEBTERM_OIDC_SESSION_MAX_HOURS` bounds how long one
+  sign-in lasts, so the groups are re-read at least that often
+  ([SSO.md → Quick revocation](SSO.md#quick-revocation)).
+- A mapping from `WEBTERM_OIDC_ROLE_MAP` that is no longer listed is removed at the next start,
+  with the roles it alone gave — the same as removing it in the UI.
 - A mapping on a single host is deleted together with the host.
 
 ## Read-only terminals
