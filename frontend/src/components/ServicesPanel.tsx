@@ -2,10 +2,11 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { errText, api, ApiError, Host, withGuardConfirm, withStepup } from '../lib/api'
 import { useConfirm } from '../lib/confirm'
 import { useI18n } from '../lib/i18n'
-import { SHEET_CLS } from '../lib/sheet'
+import { SHEET_CLS, useMediaQuery } from '../lib/sheet'
+import { useFocusTrap } from '../lib/useFocusTrap'
 import { useDrawer } from '../lib/useDrawer'
 import SheetBar from './SheetBar'
-import { ErrorState } from './ui'
+import { Button, ErrorState } from './ui'
 import { CloseIcon, PlayIcon, RefreshIcon, SquareIcon } from './Icons'
 
 // Panou Servicii systemd: listă (nume/stare/descriere) + start/stop/restart. TOTUL prin op-ul
@@ -30,6 +31,11 @@ export default function ServicesPanel(props: {
   const [busy, setBusy] = useState('')          // unitatea pe care rulează o acţiune
   const [filter, setFilter] = useState('')
   const [failedOnly, setFailedOnly] = useState(false)   // triaj „ce e stricat pe hostul ăsta"
+  // U25 (3.6.3): pe touch, start/stop/restart ca trei pictograme de 24px una lângă alta erau uşor
+  // de confundat la 3 noaptea. Sub pointer grosier: UN buton „Acţiuni" de 44px, cu numele unităţii,
+  // care deschide o foaie cu acţiunile etichetate. Pe desktop rămân pictogramele compacte.
+  const coarse = useMediaQuery('(pointer: coarse)')
+  const [sheetUnit, setSheetUnit] = useState<string | null>(null)
 
   const asideCls = drawer.sheet ? SHEET_CLS : props.embed
     ? 'flex h-full w-full min-h-0 flex-col bg-ink-900'
@@ -153,6 +159,14 @@ export default function ServicesPanel(props: {
                           {t('services.logs')}
                         </button>
                       )}
+                      {coarse ? (
+                        <Button variant="secondary" size="md" type="button" className="wt-touch ml-auto"
+                          disabled={busy === s.unit} onClick={() => setSheetUnit(s.unit)}
+                          aria-haspopup="dialog" aria-label={t('services.actionsFor', { unit: s.unit })}
+                          data-testid="svc-actions">
+                          {t('services.actions')}
+                        </Button>
+                      ) : (
                       <span className="ml-auto flex items-center gap-0.5">
                         {(['start', 'stop', 'restart'] as Action[]).map((a) => (
                           <button key={a} onClick={() => act(s.unit, a)} disabled={busy === s.unit}
@@ -162,6 +176,7 @@ export default function ServicesPanel(props: {
                           </button>
                         ))}
                       </span>
+                      )}
                     </div>
                   </div>
                 )
@@ -170,6 +185,47 @@ export default function ServicesPanel(props: {
           )}
         </div>
       </aside>
+      {sheetUnit !== null && (
+        <ServiceActionsSheet unit={sheetUnit} onClose={() => setSheetUnit(null)}
+          onAction={(a) => {
+            const unit = sheetUnit
+            setSheetUnit(null)
+            // după ce foaia s-a închis şi focusul s-a întors pe „Acţiuni": abia atunci confirmarea
+            // (stop/restart), cu ACEEAŞI semantică ca pe desktop — act() decide, nu foaia
+            setTimeout(() => { void act(unit, a) }, 0)
+          }} />
+      )}
     </>
+  )
+}
+
+/** Foaia de acţiuni a unui serviciu (touch): dialog modal jos pe ecran, acţiuni etichetate de
+    44px, numele unităţii în titlu. Escape / fundalul / „Anulează" închid; focusul revine pe
+    butonul „Acţiuni" (useFocusTrap). Stop/Restart cer în continuare confirmarea din act(). */
+function ServiceActionsSheet(props: { unit: string; onClose: () => void; onAction: (a: Action) => void }) {
+  const { t } = useI18n()
+  const ref = useRef<HTMLDivElement>(null)
+  useFocusTrap(ref, props.onClose)
+  const icon = (a: Action) => a === 'start' ? <PlayIcon size={14} /> : a === 'stop' ? <SquareIcon size={14} /> : <RefreshIcon size={16} />
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/50" onClick={props.onClose}>
+      {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-noninteractive-element-interactions -- doar opreşte clicul să ajungă la fundal; Escape e în useFocusTrap */}
+      <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="svc-sheet-title" data-testid="svc-sheet"
+        onClick={(e) => e.stopPropagation()}
+        className="wt-sheet-bottom w-full max-w-md rounded-t-2xl border-t border-ink-700 bg-ink-900 p-3 shadow-2xl">
+        <h2 id="svc-sheet-title" className="mb-2 truncate px-1 font-mono text-sm font-semibold text-slate-200">{props.unit}</h2>
+        <div className="flex flex-col gap-1.5">
+          {(['start', 'stop', 'restart'] as Action[]).map((a) => (
+            <Button key={a} type="button" variant="secondary" size="lg"
+              className="wt-touch w-full justify-start" onClick={() => props.onAction(a)}>
+              {icon(a)} {t('services.' + a)}
+            </Button>
+          ))}
+          <Button type="button" variant="ghost" size="lg" className="wt-touch w-full" onClick={props.onClose}>
+            {t('common.cancel')}
+          </Button>
+        </div>
+      </div>
+    </div>
   )
 }

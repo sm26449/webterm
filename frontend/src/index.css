@@ -434,6 +434,13 @@ textarea {
 .wt-sheet * {
   overscroll-behavior: contain;
 }
+/* Foaie de jos cu acţiuni (3.6.3: „Mai multe" din sesiune, acţiunile unui serviciu pe touch):
+   ultimul buton nu stă sub bara de gesturi / home indicator. Doar unde e chiar foaie (sub `sm`
+   sau pointer grosier — vezi clasele `sm:` ale fiecărui loc). */
+.wt-sheet-bottom {
+  padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
+  overscroll-behavior: contain;
+}
 
 /* Drawer-ul de sidebar pe mobil: fundal OPAC. Sticla mată arată bine peste
    gradientul aplicației, dar peste conținut (dashboard) lasă textul să

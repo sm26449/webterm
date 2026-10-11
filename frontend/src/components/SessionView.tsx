@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
+import { forwardRef, lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { startAuthentication } from '@simplewebauthn/browser'
 import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
@@ -466,6 +466,28 @@ export default function SessionView(props: {
     return () => clearTimeout(t)
   }, [replaying])
   const [moreOpen, setMoreOpen] = useState(false)
+  // „Mai multe" = disclosure (3.6.3, U23): trigger cu aria-expanded/aria-controls; Escape (şi din
+  // afara panoului, cât e deschis) închide şi întoarce focusul pe trigger
+  const moreId = `session-more-${session.id}`
+  const moreBtnRef = useRef<HTMLButtonElement>(null)
+  const morePanelRef = useRef<HTMLDivElement>(null)
+  const closeMore = useCallback((restore: boolean) => {
+    setMoreOpen(false)
+    if (restore) requestAnimationFrame(() => moreBtnRef.current?.focus())
+  }, [])
+  useEffect(() => {
+    if (!moreOpen) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      const a = document.activeElement
+      // focusul e pe trigger / în panou → închidem şi îl lăsăm pe trigger; din terminal (focusul
+      // rămâne acolo la clic, onMouseDown preventDefault) doar închidem, fără să-l furăm
+      const ours = a === moreBtnRef.current || !!morePanelRef.current?.contains(a)
+      closeMore(ours)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [moreOpen, closeMore])
   // paste picker: history-ul de clipboard GLOBAL, comun tuturor terminalelor (Cmd+Shift+V) — vezi
   // lib/cliphistory. Eticheta sursei = titlul sesiunii sau numele hostului, ţinută la zi aici.
   const [pasteItems, setPasteItems] = useState<ClipEntry[] | null>(null)
@@ -2007,11 +2029,16 @@ export default function SessionView(props: {
 
           {/* overflow: mobil ȘI tablete */}
           <div className="relative lg:hidden">
-            <ToolButton title={t('session.more')} active={moreOpen} onClick={() => setMoreOpen((v) => !v)}><MoreIcon /></ToolButton>
+            <ToolButton ref={moreBtnRef} title={t('session.more')} active={moreOpen} onClick={() => setMoreOpen((v) => !v)}
+              aria-expanded={moreOpen} aria-controls={moreId}><MoreIcon /></ToolButton>
             {moreOpen && (
               <>
-                <div className="fixed inset-0 z-30" onClick={() => setMoreOpen(false)} />
-                <div className="absolute right-0 z-40 mt-1 max-h-[calc(100dvh-5rem)] w-56 overflow-y-auto rounded-xl border border-ink-700 bg-ink-900 p-1 shadow-2xl">
+                <div className="fixed inset-0 z-30 bg-black/40 sm:bg-transparent" aria-hidden="true" onClick={() => setMoreOpen(false)} />
+                {/* disclosure (U23): telefon = foaie de jos, lată, cu acţiuni etichetate de 44px;
+                    tabletă = panou sub buton. Escape închide şi întoarce focusul pe „Mai multe". */}
+                <div id={moreId} ref={morePanelRef} data-testid="session-more"
+                  role="group" aria-label={t('session.more')}
+                  className="wt-sheet-bottom fixed inset-x-0 bottom-0 z-40 max-h-[70dvh] overflow-y-auto rounded-t-2xl border-t border-ink-700 bg-ink-900 p-2 shadow-2xl sm:absolute sm:inset-x-auto sm:bottom-auto sm:right-0 sm:mt-1 sm:max-h-[calc(100dvh-5rem)] sm:w-56 sm:rounded-xl sm:border sm:p-1">
                   {/* acțiunile scoase din bară pe ecrane înguste — ACELEAŞI reguli de
                       disponibilitate ca butoanele din bară (Docker/Servicii/Toolbox: doar agent) */}
                   <span className="sm:hidden">
@@ -2707,38 +2734,45 @@ function LinksDialog(props: { links: string[]; onClose: () => void; onCopy: (u: 
   )
 }
 
-function ToolButton(props: {
+const ToolButton = forwardRef<HTMLButtonElement, {
   title: string
   active?: boolean
   /** comutator (panou deschis/închis): `aria-pressed` = `active` */
   toggle?: boolean
   onClick: () => void
   children: React.ReactNode
-}) {
-  // IconButton-ul design system-ului (label = aria-label + title); starea „activ" = varianta
-  // `active` a primitivei (3.6.3, U24), nu clase de culoare suprapuse peste ghost
-  return (
-    <IconButton
-      type="button"
-      label={props.title}
-      active={!!props.active}
-      aria-pressed={props.toggle ? !!props.active : undefined}
-      onMouseDown={(e) => e.preventDefault()} // păstrează focusul (și selecția) în terminal
-      onClick={props.onClick}
-    >
-      {props.children}
-    </IconButton>
-  )
-}
+} & Pick<React.ButtonHTMLAttributes<HTMLButtonElement>, 'aria-expanded' | 'aria-controls' | 'aria-haspopup'>>(
+  function ToolButton({ title, active, toggle, onClick, children, ...aria }, ref) {
+    // IconButton-ul design system-ului (label = aria-label + title); starea „activ" = varianta
+    // `active` a primitivei (3.6.3, U24), nu clase de culoare suprapuse peste ghost
+    return (
+      <IconButton
+        ref={ref}
+        type="button"
+        label={title}
+        active={!!active}
+        aria-pressed={toggle ? !!active : undefined}
+        {...aria}
+        onMouseDown={(e) => e.preventDefault()} // păstrează focusul (și selecția) în terminal
+        onClick={onClick}
+      >
+        {children}
+      </IconButton>
+    )
+  })
 
+/** Un rând din dezvăluirea „Mai multe" (3.6.3, U23): buton SIMPLU — nu `menuitem`. Panoul e un
+    disclosure (trigger cu aria-expanded/aria-controls, Tab între butoane, Escape închide şi întoarce
+    focusul pe trigger), deci n-are voie să promită comportamentul de meniu ARIA (săgeţi, roving).
+    `wt-touch`: 44px sub pointer grosier — pe telefon panoul e o foaie cu acţiuni etichetate. */
 function MoreItem(props: { onClick: () => void; disabled?: boolean; children: React.ReactNode }) {
   return (
     <button
-      role="menuitem"
+      type="button"
       onMouseDown={(e) => e.preventDefault()}
       onClick={props.onClick}
       disabled={props.disabled}
-      className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-slate-300 hover:bg-ink-800 disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent"
+      className="wt-touch flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-slate-300 hover:bg-ink-800 disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent"
     >
       {props.children}
     </button>
