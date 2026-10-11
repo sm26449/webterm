@@ -786,7 +786,7 @@ export default function Sidebar(props: {
           onChange={(e) => setQuery(e.target.value)}
           aria-label={t('sidebar.searchAria')}
           placeholder={t('sidebar.searchPlaceholder')}
-          className="w-full rounded-md bg-ink-800 py-1.5 pl-8 pr-7 text-sm placeholder-slate-600 ring-1 ring-ink-700 focus:ring-sky-600"
+          className="w-full rounded-md bg-ink-800 py-1.5 pl-8 pr-7 text-base sm:text-sm placeholder-slate-600 ring-1 ring-ink-700 focus:ring-sky-600"
         />
         {query ? (
           <IconButton touch={false}
@@ -1047,6 +1047,7 @@ export default function Sidebar(props: {
             tagSuggestions={allTags}
             onSaved={props.onChanged}
             onExportCsv={() => { setShowAdd(false); setExportCsv({}) }}
+            onOpenSession={(h) => { setShowAdd(false); props.onChanged(); props.onNewSession(h) }}
             onClose={() => {
               setShowAdd(false)
               props.onChanged()

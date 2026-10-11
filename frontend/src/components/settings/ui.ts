@@ -5,7 +5,7 @@ import { ApiError } from '../../lib/api'
 export const field =
   // ring pe `--field-border` (nu ink-700): conturul câmpului trebuie să treacă 3:1 (WCAG 1.4.11);
   // ink-700 dădea 1,2–1,3:1 pe ambele teme — câmpul se distingea doar prin fundal
-  'w-full rounded-md bg-ink-800 px-3 py-2 text-sm text-slate-200 placeholder-slate-500 ring-1 ring-[rgb(var(--field-border))] focus:ring-sky-500'
+  'w-full rounded-md bg-ink-800 px-3 py-2 text-base sm:text-sm text-slate-200 placeholder-slate-500 ring-1 ring-[rgb(var(--field-border))] focus:ring-sky-500'
 export const heading = 'mt-6 text-compact font-semibold uppercase tracking-wide text-slate-400'
 
 // Butoane: patru intenţii, o singură sursă — mutate în design system (components/ui/classes.ts,

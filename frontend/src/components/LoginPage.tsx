@@ -95,6 +95,8 @@ export default function LoginPage(props: {
     'ring-1 ring-[rgb(var(--field-border))] transition focus:ring-2 focus:ring-sky-500'
   // eroarea e una singură şi generică (serverul nu spune CARE câmp e greşit — deliberat, la
   // login), deci o legăm de toate câmpurile completate: oricare ar fi focalizat, e citită
+  // eticheta persistentă (U22): mică, dar nu estompată — e numele câmpului, nu un comentariu
+  const labelClass = 'mb-1 block px-1 text-xs font-medium text-slate-400'
   const invalid = error ? { 'aria-invalid': true as const, 'aria-describedby': 'login-error' } : {}
 
   const version = getBootVersion()
@@ -120,35 +122,43 @@ export default function LoginPage(props: {
         </div>
 
         <form onSubmit={submit} className="mt-7 flex flex-col gap-3">
-          <input
-            ref={emailRef}
-            type="email"
-            required
-            placeholder={t('login.email')}
-            aria-label={t('login.email')}
-            autoComplete="username"
-            {...invalid}
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            className={inputClass}
-          />
-          <input
-            type="password"
-            required
-            aria-label={t('login.password')}
-            placeholder={props.setupRequired ? t('login.passwordNew') : t('login.password')}
-            autoComplete={props.setupRequired ? 'new-password' : 'current-password'}
-            {...invalid}
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            className={inputClass}
-          />
+          {/* U22 (3.6.3): etichete VIZIBILE şi persistente, legate de câmp (htmlFor/id). Placeholder-ul
+              dispărea la prima literă — după completare nu mai ştiai ce câmp e care (WCAG 3.3.2). */}
+          <div>
+            <label htmlFor="login-email" className={labelClass}>{t('login.email')}</label>
+            <input
+              id="login-email"
+              ref={emailRef}
+              type="email"
+              required
+              autoComplete="username"
+              {...invalid}
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className={inputClass}
+            />
+          </div>
+          <div>
+            <label htmlFor="login-password" className={labelClass}>
+              {props.setupRequired ? t('login.passwordNew') : t('login.password')}
+            </label>
+            <input
+              id="login-password"
+              type="password"
+              required
+              autoComplete={props.setupRequired ? 'new-password' : 'current-password'}
+              {...invalid}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className={inputClass}
+            />
+          </div>
           {props.setupRequired && (
             <div>
+              <label htmlFor="login-setup-token" className={labelClass}>{t('login.setupToken')}</label>
               <input
+                id="login-setup-token"
                 required
-                placeholder={t('login.setupToken')}
-                aria-label={t('login.setupToken')}
                 {...invalid}
                 value={setupToken}
                 onChange={(e) => setSetupToken(e.target.value)}
@@ -165,15 +175,15 @@ export default function LoginPage(props: {
           <p role="status" className="sr-only">{totpRequired ? t('login.totpStep') : ''}</p>
           {totpRequired && (
             <div>
+              <label htmlFor="login-totp" className={labelClass}>{t('login.totp')}</label>
               <input
+                id="login-totp"
                 ref={totpRef}
                 required
                 autoFocus
                 inputMode="numeric"
                 pattern="[0-9]*"
                 autoComplete="one-time-code"
-                placeholder={t('login.totp')}
-                aria-label={t('login.totp')}
                 {...invalid}
                 value={totpCode}
                 onChange={(e) => setTotpCode(e.target.value)}

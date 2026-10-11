@@ -36,6 +36,11 @@ export default function AddHostModal(props: {
   onConnect?: (host: Host) => void
   /** „Exportă hosturi…" din modul Import CSV: părintele închide modalul şi deschide exportul */
   onExportCsv?: () => void
+  /** U19 (3.6.3): după înrolare, CTA-ul principal deschide PRIMUL terminal pe hostul creat (agent
+      conectat) sau „Conectează-te acum" (SSH/Telnet). Părintele închide modalul şi trece prin
+      fluxul obişnuit de conectare (step-up 2FA, cererea de credenţiale la politica „ask") —
+      serverul decide, ca la orice sesiune nouă. Fără prop, rămâne „Gata". */
+  onOpenSession?: (host: Host) => void
 }) {
   const { t } = useI18n()
   const edit = props.host
@@ -825,10 +830,22 @@ export default function AddHostModal(props: {
               {t('addhost.otherIntro')}{created.connection_type === 'ssh' ? t('addhost.sshFingerprint') : ''}.
               {created.connection_type === 'ssh' ? t('addhost.sshInstallLater') : ''}
             </p>
-            <div className="mt-4 flex justify-end">
-              <Button variant="primary" size="lg" onClick={props.onClose}>
-                {t('addhost.done')}
-              </Button>
+            <div className="mt-4 flex justify-end gap-2">
+              {props.onOpenSession ? (
+                <>
+                  <Button variant="ghost" size="lg" type="button" onClick={props.onClose}>
+                    {t('common.close')}
+                  </Button>
+                  <Button variant="primary" size="lg" type="button" data-testid="addhost-connect-now"
+                    onClick={() => props.onOpenSession?.(created)}>
+                    {t('addhost.connectNow')}
+                  </Button>
+                </>
+              ) : (
+                <Button variant="primary" size="lg" type="button" onClick={props.onClose}>
+                  {t('addhost.done')}
+                </Button>
+              )}
             </div>
           </div>
         ) : (
@@ -853,9 +870,22 @@ export default function AddHostModal(props: {
                   </span>
                 )}
               </div>
-              <Button variant={online ? 'primary' : 'ghost'} size="lg" onClick={props.onClose}>
-                {online ? t('addhost.done') : t('addhost.closeInstallLater')}
-              </Button>
+              {online && props.onOpenSession ? (
+                // succesul înrolării e primul shell, nu închiderea formularului
+                <span className="flex gap-2">
+                  <Button variant="ghost" size="lg" type="button" onClick={props.onClose}>
+                    {t('common.close')}
+                  </Button>
+                  <Button variant="primary" size="lg" type="button" data-testid="addhost-open-terminal"
+                    onClick={() => props.onOpenSession?.({ ...created, online: true })}>
+                    {t('addhost.openFirstTerminal')}
+                  </Button>
+                </span>
+              ) : (
+                <Button variant={online ? 'primary' : 'ghost'} size="lg" type="button" onClick={props.onClose}>
+                  {online ? t('addhost.done') : t('addhost.closeInstallLater')}
+                </Button>
+              )}
             </div>
             {stuck && !online && (
               <section className="mt-4 rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs" aria-labelledby="addhost-stuck-title">

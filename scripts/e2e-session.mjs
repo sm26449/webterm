@@ -1632,7 +1632,12 @@ try {
   const saveVerified = addHostDlg.locator('button:has-text("Save (verified)")')
   check('hosttest: după test butonul devine „Save (verified)"', await visible(saveVerified))
   await saveVerified.click()
-  await addHostDlg.locator('button:has-text("Done")').click()
+  // U19 (3.6.3): succesul înrolării duce spre primul shell — „Connect now" principal, „Close" secundar
+  const connectNow = addHostDlg.locator('[data-testid="addhost-connect-now"]')
+  check('U19: după salvarea unui host SSH, CTA-ul principal e „Connect now", secundar „Close"',
+    await visible(connectNow) && ((await connectNow.textContent()) ?? '').trim() === 'Connect now'
+    && await addHostDlg.getByRole('button', { name: 'Close', exact: true }).isVisible())
+  await addHostDlg.getByRole('button', { name: 'Close', exact: true }).click()
   const sshHosts = await (await fetch(`${BASE}/api/hosts`, { headers: { Cookie: cookie } })).json()
   const tested = sshHosts.find((h) => h.name === 'e2e-ssh-tested')
   const hk = tested ? await (await fetch(`${BASE}/api/hosts/${tested.id}/hostkey`, { headers: { Cookie: cookie } })).json() : {}
@@ -1650,7 +1655,7 @@ try {
   await addHostDlg.locator('[data-testid="hosttest-run"]').click()
   await visible(testResult.locator('text=Connection verified'), 15000)
   await addHostDlg.locator('button:has-text("Save (verified)")').click()
-  await addHostDlg.locator('button:has-text("Done")').click()
+  await addHostDlg.getByRole('button', { name: 'Close', exact: true }).click()
   const genHost = (await (await fetch(`${BASE}/api/hosts`, { headers: { Cookie: cookie } })).json())
     .find((h) => h.name === 'e2e-ssh-genkey')
   check('hosttest: one-liner rulat pe ţintă → test reuşit cu cheia, salvată ca auth key',
