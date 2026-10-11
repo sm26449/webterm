@@ -244,8 +244,8 @@ button is missing, the account
 isn't created yet or SSO env isn't set; if the IdP shows "access denied", that user isn't in
 `wt-access`.
 
-Whichever you pick: the provisioner gates the app on a `wt-access` group (a user reaches the
-instance only once you add them to it), the local admin stays a **break-glass** account that can
+Whichever you pick: the provisioner gates the app on its groups (`wt-access` and, since 3.6.5, the four role groups; a user reaches the
+instance only once you add them to one of them), the local admin stays a **break-glass** account that can
 always log in even if Authentik is down, and what each person can do once in is decided by
 their role ([ROLES.md](ROLES.md)); separate instances remain the stronger split. To evaluate the whole
 flow on one laptop first (localhost, no domain), use `deploy/authentik/docker-compose.yml` (see the

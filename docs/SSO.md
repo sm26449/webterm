@@ -48,9 +48,13 @@ then changes nothing for that sign-in.
 
 ## Groups out of the box (3.6.5)
 
-`deploy/authentik/provision.sh` (or `provision.py`) creates five groups in Authentik, binds the
-WebTerm application to **all five** (being in **one** of them is enough to sign in) and prints the
-`.env` block, including the group → role map. Nothing to click in WebTerm's mapping editor.
+`deploy/authentik/provision.sh` (or `provision.py`) creates five groups in Authentik and binds the
+WebTerm application to one expression policy, `wt-groups`, that passes for a member of **any** of
+the five (being in **one** of them is enough to sign in). It never changes the application's
+policy engine mode or its other bindings — an MFA or network policy you bound stays mandatory —
+and it lists them at the end so you see what else the application requires. An older install's
+direct `wt-access` binding is replaced by the policy. Then it prints the `.env` block, including
+the group → role map. Nothing to click in WebTerm's mapping editor.
 
 | Authentik group | What it gives in WebTerm |
 |---|---|
@@ -101,7 +105,12 @@ only in `wt-db` would pass Authentik and then be refused by WebTerm.
   user) is not accepted here — an Owner maps it in the UI. A group name containing `,` or `=`
   cannot be written here; map it in the UI.
 
-It is applied **when WebTerm starts, and only then**: the mappings it created (shown in the UI with
+It is applied **when WebTerm starts, and only then**. Host and custom-role **names** are resolved
+then: renaming or deleting a host it names, or renaming a custom role it names, keeps the mapping
+on the same host/role until the next restart (a deleted host takes its mapping with it), logs a
+warning and is audited — update `.env` before restarting, or the entry is skipped. A custom role
+it uses cannot gain an Owner-only permission (`role.usedByConfigMap`); remove it from the map
+first. At each start the mappings it created (shown in the UI with
 a **from configuration** badge, not removable there) are made to match the variable exactly —
 missing ones are added, ones no longer listed are removed together with the roles they alone gave
 (at once, like removing a mapping in the UI). Mappings created in the UI are never touched. A bad
@@ -123,7 +132,7 @@ Groups are read at each **SSO** sign-in and step-up. Two settings make sure that
 | Variable | Effect |
 |---|---|
 | `WEBTERM_OIDC_SSO_ONLY=1` | SSO-only accounts (no local password) can sign in **only through SSO**: a passkey is refused as the *first* factor (`auth.ssoOnly`), so every sign-in re-reads the groups. Passkeys still work as a second factor / step-up. Local accounts (the break-glass Owner) are not affected. A value that is neither 0 nor 1 counts as **on**. |
-| `WEBTERM_OIDC_SESSION_MAX_HOURS=12` | A web session of an account linked to SSO ends after this many hours, however active, forcing a fresh SSO sign-in (→ group re-sync). Open terminals of that session follow the usual session-expiry behaviour (they close at the next check). Applies to sessions already open when you set it. Empty/0 = off; an invalid value means 12. |
+| `WEBTERM_OIDC_SESSION_MAX_HOURS=12` | A web session of an account linked to SSO ends after this many hours, however active, forcing a fresh SSO sign-in (→ group re-sync). Open terminals of that session follow the usual session-expiry behaviour (they close at the next check). Applies to sessions already open when you set it. Forwarded-app tickets issued from such a session expire with it. Empty/0 = off; an invalid value means 12. |
 
 To cut someone off **immediately**, without waiting for either: remove them from the group in
 Authentik **and** remove their role bindings by hand in Settings → Users & roles (takes effect at

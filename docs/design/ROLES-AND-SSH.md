@@ -1395,10 +1395,22 @@ Code: `ssomap.parse_role_map` / `reconcile_config` (called once from `main.lifes
   "all but the current"); refused for accounts without `sso_subject`, with SSO not configured, or
   for the last Owner that still has a local password, unless `--force`.
 - **Provision:** five groups (`<prefix>-access|admins|readonly|db|network`, `WT_GROUP_PREFIX`,
-  default `wt`), one policy binding per group at free orders, application
-  `policy_engine_mode=any`; prints `ALLOWED_GROUPS` with all five, the role map, `SSO_ONLY=1`,
+  default `wt`) and one expression policy `<prefix>-groups` (passes if the user is in any of the
+  five, via `ak_is_group_member`) bound to the application at a free order. The application's
+  `policy_engine_mode` and its other bindings are **never changed** (security review: forcing
+  `any` would have made an existing MFA/expression/user binding optional); the old direct
+  `<prefix>-access` group binding is removed only after the policy is bound (it is a subset of the
+  policy, so this never widens beyond the five groups), and a summary of the app's bindings and
+  mode is printed. Prints `ALLOWED_GROUPS` with all five, the role map, `SSO_ONLY=1`,
   `SESSION_MAX_HOURS=12`. `install.sh` / `deploy.sh` auto-provisioning still writes only the
   issuer, client and provider name — the role map is a decision the operator copies in.
+- **Security review fixes (before release):** editing a custom role used by a config mapping to
+  add an Owner-only permission is refused (409 `role.usedByConfigMap`; the `_desired` filter
+  stays as defence in depth); forward tickets of SSO accounts are capped at the remaining life of
+  the issuing session under `SESSION_MAX_HOURS` (no per-account epoch bump on expiry — it would
+  also kill tickets of the person's newer session); renaming or deleting a host that a config
+  mapping names, or renaming a custom role it names, logs a warning and is audited (names are
+  resolved again only at the next restart).
 - **Not built:** SCIM (push de-provisioning). Automation tokens of an SSO user keep the user's
   current bindings, which change only at an SSO sign-in/step-up or by hand.
 

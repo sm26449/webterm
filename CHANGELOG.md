@@ -15,8 +15,8 @@ back.
 - **Default Authentik groups with their roles.** `deploy/authentik/provision.py` creates
   `wt-access` (sign-in only), `wt-admins` (Admin · all hosts), `wt-readonly` (Viewer · all
   hosts), `wt-db` (Operator · tag `db`) and `wt-network` (Operator · tag `network`), binds the
-  WebTerm application to all of them (`policy_engine_mode=any` — one group per person is enough)
-  and prints the matching `.env` block. `WT_GROUP_PREFIX` (e.g. `wt-prod`) gives each instance
+  WebTerm application to an expression policy `wt-groups` that passes for a member of any of them
+  (one group per person is enough) and prints the matching `.env` block. `WT_GROUP_PREFIX` (e.g. `wt-prod`) gives each instance
   sharing one Authentik its own groups. Why: until now every instance had to map groups by hand
   in the UI before SSO users could do anything. Owner is never given by a group — it stays the
   local break-glass account.
@@ -36,6 +36,17 @@ back.
 - **`python3 -m app.admin sso-only <email> [--force]`**: the server-side twin of "remove local
   password" (password, passkeys, TOTP, recovery codes and sessions gone; audited). Refused for an
   account never linked to SSO and for the last Owner that still has a local password.
+
+### Security (independent review before release)
+- A custom role used by a `WEBTERM_OIDC_ROLE_MAP` mapping can no longer be edited to include an
+  Owner-only permission (409 `role.usedByConfigMap`): the bindings already derived from it would
+  have carried that permission until each person's next SSO sign-in.
+- Provision never changes the application's policy engine mode: forcing `any` on an existing
+  Authentik application would have made other bindings (an MFA or geo policy) optional. Group
+  access is one expression policy instead; the other bindings are left alone and listed.
+- Forward tickets of SSO accounts no longer outlive `WEBTERM_OIDC_SESSION_MAX_HOURS`.
+- Renaming or deleting a host, or renaming a custom role, named by `WEBTERM_OIDC_ROLE_MAP` is
+  logged and audited, since the map is resolved again only at the next restart.
 
 ### Fixed
 - `provision.py` printed `WEBTERM_OIDC_ALLOWED_GROUPS` nowhere and gated the app on `wt-access`
