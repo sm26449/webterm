@@ -9,6 +9,61 @@ back.
 
 ## [Unreleased]
 
+3.6.4 — OS-style themes. Frontend only: no agent change, no API change.
+
+### Added
+- **Theme styles: macOS, Windows 11 and GNOME, each light and dark.** Settings → Appearance now
+  has a style picker (cards with a light/dark preview) and a separate Light / Dark / Auto mode;
+  Auto follows the system inside the chosen style. macOS style: translucent sidebar with a solid
+  fallback, rounder corners, system blue. Windows 11 style: Mica-like tinted base, white cards,
+  subtle strokes, 4/8px corners. GNOME style: the libadwaita palette, an opaque sidebar with a
+  header-bar strip, accent #3584e4. Fonts are the system's own stacks (SF via `system-ui`,
+  Segoe UI Variable, Adwaita Sans/Cantarell/Ubuntu); no OS fonts, logos or assets are shipped and
+  the styles carry descriptive names only. Why: people asked for WebTerm to look at home next to
+  their other windows; Midnight and Aurora stay exactly as they were (they are the "WebTerm" style).
+- **Terminal colours follow the style** unless you chose a scheme yourself: "macOS Terminal
+  style", Campbell (Windows Terminal) and Tango (GNOME) are new schemes, and "Match theme" in
+  Settings → Appearance returns to the style's default. Anyone who never picked a scheme keeps
+  WebTerm Dark on the WebTerm style.
+- Settings search finds the style and the mode ("windows", "gnome", "adwaita", "mod întunecat"…);
+  the command palette's "Toggle theme" flips light/dark inside the current style.
+
+### Changed
+- **Theme architecture.** A theme is family × mode; `<html>` carries `data-theme` (variant),
+  `data-family` and `data-mode`. The accent scale (`sky-*`), the radii and the dark workspace
+  chrome are now per-family CSS tokens; each family's accent has the same luminance as WebTerm's
+  indigo on every step, so measured contrasts carry over. Rules that only depend on "light or
+  dark" (input borders, mobile drawer, accent chip, host labels) moved from
+  `[data-theme='macos']` to `[data-mode='light']`, and code asks `isLight()` instead of comparing
+  with `'macos'` — the Monaco editor, the watermark ink and the palette toggle are correct on every
+  light variant. Details and "how to add a family" (KDE next) in DESIGN-SYSTEM.md → Themes.
+- With `prefers-reduced-transparency: reduce`, or without `backdrop-filter`, the sidebar, dialogs
+  and login card are opaque (all themes).
+
+### Fixed
+- **"Auto" theme survived only until the next reload.** Startup wrote the resolved theme back
+  into storage, so `auto` became `dark` or `macos` after the first refresh. Startup now only
+  paints the stored preference.
+
+### Compatibility
+- `wt_theme` values from earlier versions (`dark`, `macos`, `auto`) keep exactly the same look and
+  are still written in that format for the WebTerm style, so a rollback to 3.6.3 reads them. New
+  styles are stored as `<style>:<mode>` (`win:dark`); 3.6.3 does not know them and falls back to
+  Midnight. Unknown values fall back to the default.
+
+### Tests
+- `themeModel.test.ts`: migration and parsing of `wt_theme`, auto resolution, `isLight`, the
+  theme-color per variant, and that every variant/family defines its full token set.
+- `themeContrast.test.ts`: static WCAG check of every variant (text 4.5:1 on all surfaces and the
+  sidebar glass, field border / focus / chart colours 3:1, white on the primary button, the dark
+  workspace and chrome per family).
+- Design guard: no theme-id comparisons outside `lib/theme*.ts`, no new `[data-theme='macos']`
+  rules beyond Aurora's tokens.
+- a11y gate (`tests/ui_review.mjs`): login, dashboard, session, Settings → Appearance, file
+  browser and the Add host dialog, plus Escape/focus checks and the painted `data-theme` /
+  `theme-color`, on each of the six new variants (112 scans in total). `mobile-audit.mjs` runs
+  iPhone 13 on macOS light, Pixel 7 on GNOME dark and Galaxy Tab S4 on Windows 11 light.
+
 ## [3.6.3] — 2026-10-11 · agent (58)
 
 3.6.3 — UI finishing: the rest of the October external UI audit (U19–U25) and the last places

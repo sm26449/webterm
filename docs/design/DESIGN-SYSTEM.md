@@ -51,11 +51,14 @@ Section titles ("eyebrows") have one treatment: `eyebrow` from `components/ui`
 
 Three steps, plus `full` for shapes that are round by nature (dots, pills, avatars) and `none`.
 
-| Class | Value | Use for |
-|---|---|---|
-| `rounded-md` | 6px | controls: buttons, inputs, chips, badges, menu items |
-| `rounded-xl` | 12px | cards, popovers, menus, panels |
-| `rounded-2xl` | 16px | dialogs, sheets, the login card |
+| Class | WebTerm | macOS style | Windows 11 style | GNOME style | Use for |
+|---|---|---|---|---|---|
+| `rounded-md` | 6px | 8px | 4px | 6px | controls: buttons, inputs, chips, badges, menu items |
+| `rounded-xl` | 12px | 14px | 8px | 12px | cards, popovers, menus, panels |
+| `rounded-2xl` | 16px | 20px | 8px | 14px | dialogs, sheets, the login card |
+
+The steps are fixed; their values come from the theme family (`--r-md` / `--r-xl` / `--r-2xl`,
+see Themes), so a component picks a *role*, never a pixel value.
 
 The scale replaces Tailwind's: `rounded`, `rounded-sm`, `rounded-lg` and `rounded-3xl` produce no
 CSS at all, which is why the guard below fails on them instead of letting them silently vanish.
@@ -76,7 +79,7 @@ Surfaces and text keep the existing theme variables (`--ink-*`, `--tx-*`, expose
 | `--viz-ok/warn/danger` | `stroke`/`fill` via `lib/thresholds` | — | chart strokes (gauges, sparklines, load ring) |
 | — | `bg-surface`, `bg-surface-raised`, `bg-surface-sunken`, `border-surface-line` | `ink-900/800/950/700` | surfaces by role |
 
-Every status token has a value for **both** themes and is re-declared in the zones that carry
+Every status token has a value for **every** theme variant and is re-declared in the zones that carry
 their own palette (`.wt-workspace`, `.wt-command`, `.wt-transfers-widget`, `.wt-canvas`), so
 `text-ok` is always the AA-passing green for the surface it sits on. Text tokens pass 4.5:1 on
 the weakest surface of their theme; the `--viz-*` chart colours target the 3:1 that WCAG 1.4.11
@@ -194,20 +197,104 @@ this rule.
 
 ## Themes
 
-**Midnight** (dark) and **Aurora** (light) are token overrides on `:root[data-theme]`; there are no
-`dark:` classes. In Aurora, the sidebar, the Dashboard, the host page (including its embedded
+### Model: family × mode (3.6.4)
+
+A theme is a **family** (the look) times a **mode** (`light` / `dark` / `auto`; auto follows
+`prefers-color-scheme` *inside* the chosen family). Each pair resolves to one **variant**:
+
+| Family | Light variant | Dark variant | Character |
+|---|---|---|---|
+| WebTerm | `macos` = **Aurora** | `dark` = **Midnight** (default) | the original themes, unchanged |
+| macOS style | `mac-light` | `mac-dark` | translucent ("vibrancy") sidebar, rounder corners, system blue |
+| Windows 11 style | `win-light` | `win-dark` | Mica-like tinted base, white cards, subtle 1px strokes, 4/8px corners |
+| GNOME style | `gnome-light` | `gnome-dark` | libadwaita palette, opaque sidebar, header-bar strip, accent #3584e4 |
+
+The WebTerm variants keep their historical ids — `macos` is **Aurora**, not the macOS family.
+
+The model is pure code in `lib/themeModel.ts` (tested in `themeModel.test.ts`); `lib/theme.ts`
+paints it on `<html>`:
+
+- `data-theme` = the variant → the full token set (`--ink-*`, `--tx-*`, status, `--viz-*`, glass,
+  shadows, `--app-gradient`, `--font-ui`);
+- `data-family` = the family → family tokens: the accent scale `--sky-200…950`, the radii
+  `--r-md/xl/2xl`, the always-dark workspace (`--ws-950…600`, `--term-bg`, `--chrome-*`,
+  `--command-bg`) and family effects (macOS sidebar blur, GNOME header bar, Windows strokes);
+- `data-mode` = `light` / `dark` → rules that only depend on brightness (input borders, the mobile
+  drawer background, the accent chip, host-colour labels on the canvas).
+
+**Storage** (`localStorage.wt_theme`): the WebTerm family is written in the pre-3.6.4 format
+(`dark` / `macos` / `auto`), so existing values keep exactly the same look and a downgrade still
+reads them; the other families are `<family>:<mode>` (`win:dark`). Anything unknown falls back to
+Midnight. Startup paints the stored preference without rewriting it (before 3.6.4, `auto` was
+replaced by the resolved theme on the first reload). The PWA `theme-color` meta follows the variant
+(`VARIANTS[v].themeColor`). Every page — login, the app, shared sessions, the public replay page —
+is the same bundle, so all of them honour the theme.
+
+**In code**, ask `isLight(variant)` — never compare with `'macos'` or `'dark'` (the guard fails on
+it). Monaco (`vs` / `vs-dark`), the watermark ink and the command-palette toggle use it.
+
+**Fonts are system stacks only**: `-apple-system`/`system-ui` (SF on a Mac), `'Segoe UI Variable'`
+/ `'Segoe UI'`, `'Adwaita Sans'` / Cantarell / Ubuntu. No OS font, logo, icon or wallpaper is
+bundled, and the families are named as styles ("macOS style"), never with trademark logos. On a
+machine without the font the family still renders with that system's own UI font.
+
+**Accent.** Components keep using `sky-*` (it is the accent name, not the colour). Each family's
+scale is its system blue with **the same relative luminance as WebTerm's indigo on every step**, so
+every contrast measured on indigo still holds (white on `sky-600` ≈ 6.3:1 everywhere).
+
+**Terminal colours** follow the family unless the user picked a scheme explicitly
+(`wt_term_scheme` set): WebTerm → WebTerm Dark, macOS → "macOS Terminal style", Windows → Campbell,
+GNOME → Tango. "Match theme" in Settings → Appearance clears the explicit choice. The ANSI colours
+are each terminal's published palette; like Gruvbox and Catppuccin they are the user's content
+colours and are not bound by the UI contrast rules.
+
+### Where the light themes stop
+
+In a light variant, the sidebar, the Dashboard, the host page (including its embedded
 Files/Forwards/Services/Docker/Databases/AI panels), dialogs and Settings follow the light theme.
 
-The **terminal area stays dark in both themes, deliberately**: the tab strip, the session header
+The **terminal area stays dark in every variant, deliberately**: the tab strip, the session header
 and toolbar, the terminal, the status bar, the session drawers, the transcript player, the file
 editor surface, the command palette and the floating Transfers widget. A terminal is a dark
 surface (its colour scheme is the user's terminal theme, not the app's), and the chrome around it
 matches it, the way Terminal.app looks in a light macOS window. The palette stays dark because
 the hosts' identity colours are calibrated for a dark background. These zones re-declare the dark
-token set (`.wt-workspace`, `.wt-command`, `.wt-editor`, `.wt-transfers-widget`), so components
-inside them need nothing special. A themed page that lives inside the workspace opts back out with
-`.wt-canvas` (Dashboard, host page); a terminal preview on a themed page opts back in with
-`.wt-workspace`.
+token set (`.wt-workspace`, `.wt-command`, `.wt-editor`, `.wt-transfers-widget`) from the
+family's `--ws-*` scale (navy for WebTerm, neutral greys for the others, matched step by step to
+WebTerm's luminance), so components inside them need nothing special. A themed page that lives
+inside the workspace opts back out with `.wt-canvas` (Dashboard, host page) — each variant's token
+block lists `.wt-workspace .wt-canvas` in its selector; a terminal preview on a themed page opts
+back in with `.wt-workspace`.
+
+### Contrast
+
+Every variant meets the same rules as Midnight and Aurora: text tokens and status colours ≥ 4.5:1
+on `ink-950`, `ink-900`, `ink-800` and on the sidebar glass over the page; field border, focus ring
+and `--viz-*` ≥ 3:1; workspace text and chrome text ≥ 4.5:1 on the family's workspace surfaces.
+`src/themeContrast.test.ts` checks all of it statically on every `vitest run`
+(`VITE_CONTRAST_REPORT=1` prints the weakest pair per variant), and the a11y gate
+(`tests/ui_review.mjs`) runs axe on the full surface set in Midnight and Aurora and on a
+representative subset — login, dashboard, session, Settings → Appearance, file browser, a dialog —
+in each of the six new variants. Glass needs an opaque fallback: without `backdrop-filter`, or with
+`prefers-reduced-transparency: reduce`, the sidebar, dialogs and login card become solid
+`ink-900`.
+
+### Adding a family (e.g. KDE Breeze)
+
+1. `lib/themeModel.ts`: add the id to `ThemeFamily`, two variants to `ThemeVariant` and
+   `VARIANTS` (family, `light`, `themeColor`, preview swatch) and a row to `FAMILIES`. Parsing,
+   storage (`kde:dark`), `auto`, `isLight` and the Settings cards follow from that.
+2. `index.css`: one block per variant —
+   `:root[data-theme='kde-light'], :root[data-theme='kde-light'] .wt-workspace .wt-canvas { … }`
+   with the full token set (copy the closest variant; `themeModel.test.ts` fails on a missing
+   token) — and one `:root[data-family='kde'] { … }` block with `--sky-*` (generate the scale at
+   the indigo luminances), `--r-*`, `--ws-*`, `--term-bg`, `--chrome-*`, `--command-bg`. Add the
+   family to the `:is([data-family=…])` canvas rule.
+3. `lib/termtheme.ts`: the family's terminal scheme in `TERM_SCHEMES` and `FAMILY_SCHEME`.
+4. `lang/*.ts`: `theme.family.kde` and `theme.familySub.kde`; `settingsIndex.ts` keywords.
+5. Run `vitest` (contrast + model), then add the two variants to `NEW_VARIANTS` in
+   `tests/ui_review.mjs` (and bump the expected scan count in CONTRIBUTING.md) and one device in
+   `scripts/mobile-audit.mjs`.
 
 ## Guardrails
 
@@ -224,6 +311,10 @@ and fails on:
    `rounded`, `shadow` and the semantic colour classes (`wt-accent`, `wt-danger`, …), with or
    without a variant prefix (`hover:`, `sm:`). Layout (margins, width, flex, gap, `hidden`,
    opacity for reveal-on-hover, `wt-touch`) stays allowed.
+5. (3.6.4) a theme-id comparison outside `lib/theme.ts` / `lib/themeModel.ts`
+   (`theme === 'macos'`, `currentTheme() === 'dark'`, …) — use `isLight()`; and a
+   `:root[data-theme='macos'] …` CSS rule other than Aurora's own token blocks — brightness-only
+   rules go on `[data-mode='light']` so every light variant gets them.
 
 Intentional exceptions live in the `ALLOW` table at the top of the file, each with its reason.
 To list everything the guard sees (for an audit):
