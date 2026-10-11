@@ -4,8 +4,10 @@
 Descoperă singur flow-urile, cheia de semnare şi scope mappings — nu depinde de ID-uri fixe.
 Creează: un scope mapping `groups`, cele CINCI grupuri implicite (3.6.5, „grupuri SSO din
 cutie"), providerul OAuth2 confidenţial cu redirect URI-ul corect, aplicaţia legată de FIECARE
-grup (apartenenţa la ORICARE dintre ele dă voie la login — un singur grup per om ajunge). La
-final tipăreşte blocul WEBTERM_OIDC_* de pus în .env-ul WebTerm, cu maparea grup → rol.
+grup printr-o politică de expresie `<prefix>-groups` (apartenenţa la ORICARE dintre ele dă voie
+la login — un singur grup per om ajunge; modul politicilor aplicaţiei şi celelalte binding-uri
+NU se ating). La final tipăreşte blocul WEBTERM_OIDC_* de pus în .env-ul WebTerm, cu maparea
+grup → rol.
 
 Grupurile implicite (prefixul `wt` se schimbă cu WT_GROUP_PREFIX, ex. `wt-prod` → `wt-prod-admins`,
 ca mai multe instanţe să împartă acelaşi Authentik fără să-şi împartă oamenii):
@@ -60,6 +62,17 @@ def group_names(prefix):
         fail("WT_GROUP_PREFIX=%r: use letters, digits, '.', '_' or '-' (1-64, no leading or "
              "trailing punctuation)" % prefix)
     return [("%s-%s" % (prefix, suffix), role) for suffix, role in DEFAULT_GROUPS]
+
+
+def policy_expression(names):
+    """Politica de expresie Authentik: trece dacă userul e în ORICARE dintre grupuri. Nume
+    validate de group_names (fără ghilimele/backslash), puse ca literali Python."""
+    lines = ["# WebTerm (provision.py): membru al ORICĂRUIA dintre grupurile WebTerm",
+             "for name in (%s,):" % ", ".join(repr(n) for n in names),
+             "    if ak_is_group_member(request.user, name=name):",
+             "        return True",
+             "return False"]
+    return "\n".join(lines) + "\n"
 
 
 def role_map(groups):
@@ -196,13 +209,15 @@ def provision(call, *, ak, wt_domain, provider_name="Authentik", prefix="wt", ou
     client_secret = prov.get("client_secret")
 
     # --- aplicaţia + gate pe grupuri -----------------------------------------------------------
-    # policy_engine_mode=any: ORICARE binding de grup trecut dă voie (un singur grup per om
-    # ajunge). Cu `all`, un om ar trebui să fie în TOATE grupurile — nimeni n-ar mai intra.
+    # Modul motorului de politici al aplicaţiei (`policy_engine_mode`) NU se atinge: într-un
+    # Authentik existent el decide dacă ALTE binding-uri (MFA, politici de expresie, geo, useri)
+    # sunt obligatorii. O singură politică de expresie trece dacă userul e în ORICARE dintre
+    # cele cinci grupuri; legată de aplicaţie, merge la fel sub `any` şi sub `all`.
     app_body = {"name": "WebTerm", "slug": "webterm", "provider": provider_pk,
-                "meta_launch_url": "https://%s/" % wt_domain, "policy_engine_mode": "any"}
+                "meta_launch_url": "https://%s/" % wt_domain}
     if one("/api/v3/core/applications/?slug=webterm", "slug", "webterm"):
         call("PATCH", "/api/v3/core/applications/webterm/", app_body)
-        out("aplicaţia webterm: actualizată")
+        out("aplicaţia webterm: actualizată (modul politicilor neschimbat)")
     else:
         s, d = call("POST", "/api/v3/core/applications/", app_body)
         out("aplicaţia webterm: creată" if s == 201 else "aplicaţia webterm: %s %s" % (s, d))
@@ -211,19 +226,63 @@ def provision(call, *, ak, wt_domain, provider_name="Authentik", prefix="wt", ou
     if s != 200 or not appobj.get("pk"):
         fail("aplicaţia webterm nu poate fi citită: %s %s" % (s, appobj))
     app_pk = appobj["pk"]
+
+    policy_name = "%s-groups" % groups[0][0].rsplit("-", 1)[0]
+    expr = policy_expression([g for g, _r in groups])
+    pol = one("/api/v3/policies/expression/?name=%s" % urllib.parse.quote(policy_name),
+              "name", policy_name)
+    if pol:
+        policy_pk = pol["pk"]
+        if pol.get("expression") != expr:
+            s, d = call("PATCH", "/api/v3/policies/expression/%s/" % policy_pk, {"expression": expr})
+            if s != 200:
+                fail("actualizarea politicii %s a eşuat: %s %s" % (policy_name, s, d))
+            out("politica %s: actualizată" % policy_name)
+        else:
+            out("politica %s: există" % policy_name)
+    else:
+        s, d = call("POST", "/api/v3/policies/expression/", {
+            "name": policy_name, "expression": expr, "execution_logging": False})
+        if s != 201 or not d.get("pk"):
+            fail("crearea politicii %s a eşuat: %s %s" % (policy_name, s, d))
+        policy_pk = d["pk"]
+        out("politica %s: creată" % policy_name)
+
     existing = results("/api/v3/policies/bindings/?target=%s" % app_pk)
-    bound = {b.get("group") for b in existing}
-    order = max([int(b.get("order") or 0) for b in existing] or [-1]) + 1
-    for name, _role in groups:
-        if group_pk[name] in bound:
-            out("binding %s → app: există" % name)
-            continue
+    if any(b.get("policy") == policy_pk for b in existing):
+        out("binding %s → app: există" % policy_name)
+    else:
+        order = max([int(b.get("order") or 0) for b in existing] or [-1]) + 1
         s, d = call("POST", "/api/v3/policies/bindings/", {
-            "target": app_pk, "group": group_pk[name], "order": order, "enabled": True})
+            "target": app_pk, "policy": policy_pk, "order": order, "enabled": True})
         if s != 201:
-            fail("binding %s → app a eşuat: %s %s" % (name, s, d))
-        order += 1
-        out("binding %s → app: creat" % name)
+            fail("binding %s → app a eşuat: %s %s" % (policy_name, s, d))
+        out("binding %s → app: creat" % policy_name)
+    # Binding-ul DIRECT pe `<prefix>-access` (pus de provision înainte de 3.6.5) e cuprins acum în
+    # politică. Sub modul `all` ar cere în continuare `<prefix>-access` şi ar refuza un om aflat
+    # doar în `<prefix>-db`; îl scoatem — DUPĂ ce politica e legată, deci aplicaţia nu rămâne
+    # niciodată fără binding (fără binding, Authentik lasă pe oricine). Alte binding-uri: neatinse.
+    access_pk = group_pk[groups[0][0]]
+    for b in existing:
+        if b.get("group") == access_pk and not b.get("policy") and not b.get("user"):
+            s, d = call("DELETE", "/api/v3/policies/bindings/%s/" % b["pk"])
+            if s not in (200, 204):
+                fail("scoaterea binding-ului direct %s a eşuat: %s %s" % (groups[0][0], s, d))
+            out("binding direct %s → app: scos (cuprins în %s)" % (groups[0][0], policy_name))
+
+    # rezumat: operatorul vede ce ALTE condiţii are aplicaţia (rămân cum le-a pus el)
+    mode = appobj.get("policy_engine_mode") or "any"
+    out("binding-urile aplicaţiei webterm (modul %s — %s):" % (
+        mode, "TOATE trebuie să treacă" if mode == "all" else "ajunge UNUL"))
+    for b in sorted(results("/api/v3/policies/bindings/?target=%s" % app_pk),
+                    key=lambda b: int(b.get("order") or 0)):
+        if b.get("policy"):
+            what = "politica %s" % ((b.get("policy_obj") or {}).get("name") or b["policy"])
+        elif b.get("group"):
+            what = "grupul %s" % ((b.get("group_obj") or {}).get("name") or b["group"])
+        else:
+            what = "userul %s" % ((b.get("user_obj") or {}).get("username") or b.get("user"))
+        out("  %3s  %s%s" % (b.get("order"), what, "" if b.get("enabled", True) else " (oprit)"))
 
     names = [g for g, _r in groups]
     env = {

@@ -82,8 +82,8 @@ entries:
         # NOTĂ: pentru claimul `groups` (necesar dacă vrei WEBTERM_OIDC_ALLOWED_GROUPS enforce-uit
         # ŞI în WebTerm) adaugă un scope mapping propriu care întoarce
         # `[g.name for g in request.user.ak_groups.all()]` pe cheia `groups`, apoi leagă-l aici.
-        # În stack-ul de referinţă gating-ul se face prin policybinding-ul de mai jos (grupul
-        # `wt-access`), iar WEBTERM_OIDC_ALLOWED_GROUPS e gol — deci merge fără claimul groups.
+        # În stack-ul de referinţă gating-ul se face prin politica `wt-groups` de mai jos (oricare
+        # dintre cele cinci grupuri), iar WEBTERM_OIDC_ALLOWED_GROUPS e gol — merge fără claimul groups.
 
   # aplicaţia, legată de provider
   - model: authentik_core.application
@@ -94,43 +94,31 @@ entries:
       slug: webterm
       provider:
         !Find [authentik_providers_oauth2.oauth2provider, [name, webterm]]
-      policy_engine_mode: any
 
-  # bind: membrii ORICĂRUIA dintre cele cinci grupuri pot folosi aplicaţia (policy_engine_mode
-  # `any` — implicit pe aplicaţii; un singur grup per om ajunge). Gate în IdP, dublat de WebTerm.
-  - model: authentik_policies.policybinding
+  # 3.6.5: o politică de expresie `wt-groups` trece dacă userul e în ORICARE dintre cele cinci
+  # grupuri; e legată de aplicaţie. Modul politicilor aplicaţiei NU e setat aici (implicit `any`
+  # la o aplicaţie nouă) — într-un Authentik existent el decide ce alte binding-uri sunt
+  # obligatorii. Aceeaşi logică ca provision.py.
+  - model: authentik_policies_expression.expressionpolicy
     identifiers:
-      target: !Find [authentik_core.application, [slug, webterm]]
-      group: !Find [authentik_core.group, [name, wt-access]]
-      order: 0
+      name: wt-groups
     attrs:
-      enabled: true
+      name: wt-groups
+      execution_logging: false
+      expression: |
+        # WebTerm: membru al ORICĂRUIA dintre grupurile WebTerm
+        for name in ('wt-access', 'wt-admins', 'wt-readonly', 'wt-db', 'wt-network',):
+            if ak_is_group_member(request.user, name=name):
+                return True
+        return False
+
   - model: authentik_policies.policybinding
     identifiers:
       target: !Find [authentik_core.application, [slug, webterm]]
-      group: !Find [authentik_core.group, [name, wt-admins]]
+      policy: !Find [authentik_policies_expression.expressionpolicy, [name, wt-groups]]
+      # 1, nu 0: un stack de referinţă mai vechi are deja binding-ul direct pe wt-access la 0
+      # (un blueprint nu şterge intrările scoase; sub `any` cel vechi e oricum cuprins aici)
       order: 1
-    attrs:
-      enabled: true
-  - model: authentik_policies.policybinding
-    identifiers:
-      target: !Find [authentik_core.application, [slug, webterm]]
-      group: !Find [authentik_core.group, [name, wt-readonly]]
-      order: 2
-    attrs:
-      enabled: true
-  - model: authentik_policies.policybinding
-    identifiers:
-      target: !Find [authentik_core.application, [slug, webterm]]
-      group: !Find [authentik_core.group, [name, wt-db]]
-      order: 3
-    attrs:
-      enabled: true
-  - model: authentik_policies.policybinding
-    identifiers:
-      target: !Find [authentik_core.application, [slug, webterm]]
-      group: !Find [authentik_core.group, [name, wt-network]]
-      order: 4
     attrs:
       enabled: true
 
