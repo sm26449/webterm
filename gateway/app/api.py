@@ -3981,6 +3981,31 @@ async def forward_probe(fid: int, stepup_grant: str = "", stepup_password: str =
 # rutare) se aliniază prin FORWARD_DOMAIN în .env — vezi verificarea de readiness.
 _FWD_DEFAULT_DOMAIN = os.environ.get("WEBTERM_FORWARD_DOMAIN") or urlparse(config.PUBLIC_URL).hostname or "localhost"
 _FWD_SCHEME = urlparse(config.PUBLIC_URL).scheme or "https"   # https în prod; http la test
+
+
+def _fwd_port_suffix(public_url: str) -> str:
+    """`:PORT` din PUBLIC_URL când e explicit şi nu e portul implicit al schemei, altfel "".
+    Linkurile forward-urilor (`slug.<domeniu>`) pierdeau portul gateway-ului: pe o instanţă
+    publicată pe :8443, „Open" ducea pe :443, unde nu ascultă nimeni (audit funcţional 3.6.3).
+    Rutarea pe subdomeniu şi verificarea Origin-ului (`_fwd_origin_for_target`) ignoră deja
+    portul (compară schema + numele de host), deci acceptă exact aceleaşi cereri ca înainte."""
+    try:
+        p = urlparse(public_url or "")
+        port = p.port
+    except ValueError:
+        return ""
+    scheme = (p.scheme or "https").lower()
+    if port is None or port == {"http": 80, "https": 443}.get(scheme):
+        return ""
+    return ":%d" % port
+
+
+_FWD_PORT = _fwd_port_suffix(config.PUBLIC_URL)
+
+
+def _fwd_base(slug: str) -> str:
+    """Originea publică a unui forward: schema PUBLIC_URL + subdomeniu + (portul, dacă nu e implicit)."""
+    return "%s://%s.%s%s" % (_FWD_SCHEME, slug, forward_domain(), _FWD_PORT)
 _fwd_domain_cache = _FWD_DEFAULT_DOMAIN
 
 
@@ -5717,7 +5742,7 @@ def _forward_json(row) -> dict:
         "created": row["created"],
         "app_type": (row["app_type"] if "app_type" in row.keys() else "") or "",
         # subdomeniul pe care se accesează (izolare de origin)
-        "url": "%s://%s.%s" % (_FWD_SCHEME, row["slug"], forward_domain()),
+        "url": _fwd_base(row["slug"]),
     }
 
 
@@ -5755,7 +5780,7 @@ async def list_apps(request: Request, user=Depends(authz.perm('forward.use', lis
     return [{
         "id": r["id"], "label": r["label"], "app_type": r["app_type"],
         "host_id": r["host_id"], "host_name": r["host_name"], "enabled": bool(r["enabled"]),
-        "url": "%s://%s.%s" % (_FWD_SCHEME, r["slug"], forward_domain()),
+        "url": _fwd_base(r["slug"]),
     } for r in rows]
 
 
@@ -6228,7 +6253,7 @@ async def _forward_set_cookie(request: Request, slug: str):
     nxt = _safe_next(request.query_params.get("next", "/"))   # anti open-redirect: doar căi relative
     if not security.verify_forward_token(token, slug):
         return PlainTextResponse("invalid or expired token", status_code=403)
-    resp = RedirectResponse("%s://%s.%s%s" % (_FWD_SCHEME, slug, forward_domain(), nxt), status_code=302)
+    resp = RedirectResponse(_fwd_base(slug) + nxt, status_code=302)
     resp.set_cookie(FWD_COOKIE, token, max_age=security.FORWARD_TOKEN_TTL,
                     httponly=True, secure=config.PUBLIC_URL.startswith("https://"),
                     samesite="lax", path="/")
@@ -6278,7 +6303,7 @@ async def forward_auth(request: Request, slug: str, next: str = "/"):
     ttl = (security.STEPUP_WINDOW_MAX if (host and host["require_2fa"])
            else security.FORWARD_TOKEN_TTL)
     token = security.make_forward_token(slug, user["id"], ttl)
-    loc = "%s://%s.%s/__wtfwd/set?t=%s&next=%s" % (_FWD_SCHEME, slug, forward_domain(), token, quote(next, safe=""))
+    loc = "%s/__wtfwd/set?t=%s&next=%s" % (_fwd_base(slug), token, quote(next, safe=""))
     return RedirectResponse(loc, status_code=302)
 
 

@@ -217,7 +217,8 @@ async def main():
             r = await sub.get(f"/__wtfwd/set?t={ticket}&next=//evil.example/x", headers={"host": fwd_host})
             loc = r.headers.get("location", "")
             check("/__wtfwd/set cu next=//evil → rădăcina subdomeniului",
-                  r.status_code == 302 and loc == f"http://{fwd_host}/", loc)
+                  # 3.6.4: cu portul PUBLIC_URL (:8000) — linkurile forward nu-l mai pierd; tot rădăcina, fără evil
+                  r.status_code == 302 and loc == f"http://{fwd_host}:8000/", loc)
 
         # pe domeniul principal: `next` absolut e aruncat şi când fereastra e deschisă (biletul se
         # emite cu next=/), şi când e închisă (ocolul prin SPA nu cară URL-ul străin)

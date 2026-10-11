@@ -142,6 +142,25 @@ async def main():
     finally:
         api._ensure_forward_source = orig
 
+    # 3.6.4 (audit funcţional): linkul forward-ului păstrează portul public al gateway-ului
+    check("port: implicit https → fără sufix", api._fwd_port_suffix("https://wt.example.com") == "")
+    check("port: :443 explicit pe https → fără sufix", api._fwd_port_suffix("https://wt.example.com:443") == "")
+    check("port: :80 pe http → fără sufix", api._fwd_port_suffix("http://wt.test:80") == "")
+    check("port: :8443 pe https → :8443", api._fwd_port_suffix("https://wt.example.com:8443") == ":8443")
+    check("port: PUBLIC_URL invalid → fără sufix (nu aruncă)", api._fwd_port_suffix("http://x:notaport") == "")
+    base = api._fwd_base("graf")
+    check("URL-ul forward-ului include portul PUBLIC_URL (http://localhost:8000)",
+          base == "http://graf.%s:8000" % api.forward_domain(), base)
+    # Origin-ul de pe subdomeniu CU port trece la fel ca fără (rutarea/verificarea ignoră portul)
+    fhost = "graf.%s:8000" % api.forward_domain()
+    check("Origin cu portul public → acceptat, rescris la ţintă",
+          api._fwd_origin_for_target(base, fhost, "http", "127.0.0.1", 3000) == "http://127.0.0.1:3000")
+    try:
+        api._fwd_origin_for_target("http://evil.%s:8000" % api.forward_domain(), fhost, "http", "127.0.0.1", 3000)
+        check("Origin străin (alt subdomeniu) → tot refuzat", False)
+    except api.ApiError:
+        check("Origin străin (alt subdomeniu) → tot refuzat", True)
+
     print(f"\n{ok}/{total} passed")
     return ok == total
 
