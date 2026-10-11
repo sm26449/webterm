@@ -164,7 +164,10 @@ const MEASURE = () => {
 async function auditDevice(cfg) {
   const browserType = cfg.engine === 'webkit' ? webkit : chromium
   const browser = await browserType.launch()
-  const ctx = await browser.newContext({ ...cfg.device, locale: 'en-US' })   // UI i18n → limbă RO fixă
+  // `serviceWorkers: 'block'`: sw.js are handler de `fetch`, iar în WebKit cererile trecute prin
+  // service worker NU ajung la page.route — mock-ul de servicii (U25) nu prindea nimic pe iOS.
+  // Auditul e de layout; cache-ul offline al SW-ului nu e obiectul lui.
+  const ctx = await browser.newContext({ ...cfg.device, locale: 'en-US', serviceWorkers: 'block' })   // UI i18n → limbă RO fixă
   const page = await ctx.newPage()
   await page.addInitScript(() => { try { for (const k of ['wt_walkthrough_done','wt_tip_addhost_agent','wt_tip_addhost_ssh','wt_tip_terminal_paste','wt_tip_toolbar']) localStorage.setItem(k, '1') } catch { /**/ } })  // walkthrough de primă rulare OFF: nu bloca fluxul de test
   const errors = []
@@ -189,6 +192,60 @@ async function auditDevice(cfg) {
     return m
   }
 
+  /* U25 (3.6.3): pe pointer grosier, fiecare serviciu are UN buton „Actions" de 44px care deschide o
+     foaie cu Start/Stop/Restart etichetate; pe mouse rămân pictogramele compacte. API mock-uit: în
+     containerul de CI agentul n-are systemd. Escape închide foaia şi întoarce focusul pe buton. */
+  async function auditServicesSheet() {
+    const tab = page.locator('nav[aria-label="Host sections"] button', { hasText: 'Services' }).first()
+    if (!(await tab.isVisible().catch(() => false))) {
+      note(cfg.name, 'servicii-actiuni', 'info', 'SKIP: tabul Services nu e vizibil pe pagina hostului')
+      return
+    }
+    const svcUrl = (u) => /\/api\/hosts\/\d+\/services$/.test(u.pathname)
+    await page.route(svcUrl, (route) => route.fulfill({
+      status: 200, contentType: 'application/json',
+      body: JSON.stringify({ rows: [
+        { unit: 'nginx.service', load: 'loaded', active: 'active', sub: 'running', desc: 'A high performance web server' },
+        { unit: 'mock-failed.service', load: 'loaded', active: 'failed', sub: 'failed', desc: 'Mock unit' },
+      ] }),
+    }))
+    try {
+      await tab.click()
+      const coarse = await page.evaluate(() => matchMedia('(pointer: coarse)').matches)
+      const actions = page.locator('[data-testid="svc-actions"]:visible')
+      await actions.first().waitFor({ state: 'visible', timeout: 6000 }).catch(() => {})
+      if (!coarse) {
+        note(cfg.name, 'servicii-actiuni', 'info', 'pointer fin: pictogramele compacte rămân (corect)')
+      } else if ((await actions.count()) === 0) {
+        note(cfg.name, 'servicii-actiuni', 'bug', 'pe touch, serviciile n-au butonul „Actions" (U25)')
+      } else {
+        const h = (await actions.first().boundingBox())?.height ?? 0
+        if (h < 44) note(cfg.name, 'servicii-actiuni', 'bug', `butonul „Actions" are ${Math.round(h)}px (< 44px)`)
+        await actions.first().click()
+        const sheet = page.locator('[data-testid="svc-sheet"]')
+        await sheet.waitFor({ state: 'visible', timeout: 4000 })
+        await shot('04b-servicii-actiuni')
+        await check('servicii-actiuni')
+        const labels = await sheet.locator('button').evaluateAll((bs) =>
+          bs.map((b) => ({ t: (b.textContent || '').trim(), h: b.getBoundingClientRect().height })))
+        for (const want of ['Start', 'Stop', 'Restart']) {
+          const b = labels.find((x) => x.t === want)
+          if (!b) note(cfg.name, 'servicii-actiuni', 'bug', `foaia de acţiuni n-are butonul etichetat „${want}"`)
+          else if (b.h < 44) note(cfg.name, 'servicii-actiuni', 'bug', `„${want}" are ${Math.round(b.h)}px (< 44px)`)
+        }
+        await page.keyboard.press('Escape')
+        await sheet.waitFor({ state: 'detached', timeout: 3000 }).catch(() => {})
+        if (await sheet.isVisible().catch(() => false)) note(cfg.name, 'servicii-actiuni', 'bug', 'Escape nu închide foaia de acţiuni')
+        const back = await page.evaluate(() => document.activeElement?.getAttribute('data-testid'))
+        if (back !== 'svc-actions') note(cfg.name, 'servicii-actiuni', 'bug', `după Escape focusul e pe „${back}", nu pe „Actions"`)
+      }
+    } finally {
+      await page.unroute(svcUrl).catch(() => {})
+      await page.locator('nav[aria-label="Host sections"] button', { hasText: 'Overview' }).first().click().catch(() => {})
+      await page.waitForTimeout(500)
+    }
+  }
+
   try {
     // login
     await page.goto(BASE)
@@ -196,6 +253,18 @@ async function auditDevice(cfg) {
     await page.fill('input[type=password]', PASSWORD)
     await shot('01-login')
     await check('login')
+    {
+      const lf = await page.evaluate(() => ['login-email', 'login-password'].map((id) => {
+        const inp = document.getElementById(id)
+        const lab = document.querySelector(`label[for="${id}"]`)
+        const r = lab?.getBoundingClientRect()
+        return { id, label: !!lab && !!r && r.width > 0 && r.height > 0, font: inp ? parseFloat(getComputedStyle(inp).fontSize) : 0 }
+      }))
+      for (const f of lf) {
+        if (!f.label) note(cfg.name, 'login', 'bug', `câmpul ${f.id} n-are <label> vizibil legat de el (U22)`)
+        if (f.font < 16) note(cfg.name, 'login', 'bug', `câmpul ${f.id} are ${f.font}px (< 16px → zoom la focus pe iOS)`)
+      }
+    }
     reached.add('login')
     await page.click('button:has-text("Sign in")')
     await page.waitForSelector('[data-testid="dashboard"]', { timeout: 15000 })
@@ -310,6 +379,7 @@ async function auditDevice(cfg) {
       await shot('04-pagina-host')
       await check('pagina-host')
       reached.add('pagina-host')
+      await auditServicesSheet()
     }
 
     const newSession = page.locator('button:has-text("New session"):visible').first()
@@ -410,10 +480,46 @@ async function auditDevice(cfg) {
           if (wide) await page.locator('button[aria-label="Files (browse, edit, transfer)"]:visible').first().click({ timeout: 10000 })
           else {
             await page.locator('button[aria-label="More"]:visible').first().click()
-            await page.locator('[role="menuitem"]:has-text("Files"):visible').first().click({ timeout: 10000 })
+            await page.locator('[data-testid="session-more"] button:has-text("Files"):visible').first().click({ timeout: 10000 })
           }
           await filesAside.waitFor({ state: 'visible', timeout: 8000 })
           await page.waitForTimeout(400)
+        }
+        // U23 (3.6.3): „More" e un disclosure — trigger cu aria-expanded/aria-controls, butoane
+        // simple (nu menuitem), ţinte de 44px; Escape îl închide şi întoarce focusul pe trigger
+        if (!(await page.evaluate(() => matchMedia('(min-width: 640px)').matches))) {
+          const more = page.locator('button[aria-label="More"]:visible').first()
+          await more.click()
+          const panel = page.locator('[data-testid="session-more"]')
+          await panel.waitFor({ state: 'visible', timeout: 4000 })
+          await shot('07b-mai-multe')
+          await check('mai-multe')
+          const d = await page.evaluate(() => {
+            const btn = [...document.querySelectorAll('button[aria-label="More"]')].find((b) => b.offsetParent)
+            const p = document.querySelector('[data-testid="session-more"]')
+            const r = p?.getBoundingClientRect()
+            return {
+              expanded: btn?.getAttribute('aria-expanded'), controls: btn?.getAttribute('aria-controls') === p?.id,
+              menuitems: p?.querySelectorAll('[role=menuitem]').length ?? -1,
+              fits: !!r && r.left >= 0 && r.right <= innerWidth + 1 && r.bottom <= innerHeight + 1,
+              small: [...(p?.querySelectorAll('button') ?? [])].filter((b) => b.offsetParent && b.getBoundingClientRect().height < 44).length,
+            }
+          })
+          if (d.expanded !== 'true' || !d.controls) note(cfg.name, 'mai-multe', 'bug', `trigger-ul „More" n-are aria-expanded=true + aria-controls (${JSON.stringify(d)})`)
+          if (d.menuitems !== 0) note(cfg.name, 'mai-multe', 'bug', `panoul „More" are ${d.menuitems} role=menuitem fără să fie un meniu ARIA`)
+          if (!d.fits) note(cfg.name, 'mai-multe', 'bug', 'foaia „More" iese din ecran')
+          if (d.small) note(cfg.name, 'mai-multe', 'bug', `${d.small} acţiuni din „More" sub 44px`)
+          await more.focus()
+          await page.keyboard.press('Escape')
+          await panel.waitFor({ state: 'detached', timeout: 3000 }).catch(() => {})
+          const after = await page.evaluate(() => ({
+            open: !!document.querySelector('[data-testid="session-more"]'),
+            focus: document.activeElement?.getAttribute('aria-label'),
+            expanded: document.activeElement?.getAttribute('aria-expanded'),
+          }))
+          if (after.open || after.focus !== 'More' || after.expanded !== 'false') {
+            note(cfg.name, 'mai-multe', 'bug', `Escape: panoul rămâne deschis sau focusul nu revine pe „More" (${JSON.stringify(after)})`)
+          }
         }
         await openFiles()
         await shot('08-foaie-fisiere')

@@ -9,6 +9,44 @@ back.
 
 ## [Unreleased]
 
+3.6.3 — UI finishing: the rest of the October external UI audit (U19–U25) and the last places
+where a failed request still looked like success or like "nothing here". No agent change, no API
+change.
+
+### Changed
+- **Adding a host ends at the first shell.** When the agent of a new host connects, the main
+  button is now "Open first terminal" (with "Close" next to it); for a new SSH/Telnet host it is
+  "Connect now". It goes through the normal connect flow — 2FA step-up and the credential prompt
+  still apply. Why: the task people came for is a shell, not closing a form.
+- **Dashboard: "View all N sessions".** The "+N more — search with ⌘K" line could not be tapped
+  and pointed phone users at a shortcut they don't have; it is now a button that expands the list
+  in place. (Ordering stays newest first: last activity is not known to the browser.)
+- **Session "More" is a disclosure, a bottom sheet on phones.** Its items are plain buttons with
+  44px targets; the trigger reports expanded/collapsed and Escape closes it and returns focus to
+  it. It used to announce itself as a menu without behaving like one.
+- **Service actions on touch.** On touch screens each service has one labelled "Actions" button
+  that opens a sheet with Start / Stop / Restart; Stop and Restart still ask for confirmation.
+  The compact icons stay on desktop.
+- **Login and form fields.** The login form has visible labels that stay after you type; text
+  inputs in Settings and the sidebar search are 16px on phones, so iOS no longer zooms in on focus.
+- **Design system.** `IconButton` has an `active` state and `ghostRaised`/`link` variants, `Badge`
+  has `size` and `caps`; the toolbar and host page use them instead of overriding colours, and
+  the design guard now fails on colour/size/padding classes passed to these components.
+  DESIGN-SYSTEM.md corrects the reasoning behind the 11px floor (11pt is not 11px; the floor is a
+  minimum, not the size for operational information) and records why buttons still don't default
+  `type`.
+
+### Fixed
+- **Deleting a session that the server refused** no longer closes its tab and hides it as if it
+  had worked: the row comes back and the error is shown next to the list.
+- **Dashboard apps** that failed to load showed no section at all (as if you had none); now the
+  error and Retry are shown. A failed refresh keeps the last list, labelled as such.
+- **Status → version check**: a failed request left the version row blank, which reads like "up
+  to date"; it now says it couldn't check, with Retry. A status refresh that succeeds after a
+  failure clears the error, and a failed refresh over loaded data says the data is stale.
+- **Services → Logs** was a 20px target (below the 24px WCAG minimum); it is 24px, 44px on touch.
+  The mobile audit now loads a mocked service list, so this surface is measured on every device.
+
 ## [3.6.2] — 2026-10-11 · agent (58)
 
 Custom roles and SSO group → role mapping — the design's "3.6.1" milestone

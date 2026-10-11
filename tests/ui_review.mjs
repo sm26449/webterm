@@ -219,6 +219,11 @@ try {
     await page.waitForSelector('input[type=email]')
     await page.screenshot({ path: `${OUT}/${theme}-01-login.png` })
     await scan(page, `${theme} login`)
+    if (theme === 'dark') {
+      check('U22: login — etichete <label> vizibile legate de Email şi Password',
+        await page.getByLabel('Email', { exact: true }).isVisible()
+        && await page.locator('label[for="login-email"]').isVisible() && await page.locator('label[for="login-password"]').isVisible())
+    }
 
     await login(page)
     await page.screenshot({ path: `${OUT}/${theme}-02-empty.png` })
@@ -234,6 +239,38 @@ try {
         await loadHosts(page)
       }
       await page.waitForSelector(`.wt-sidebar button:has-text("${OFFLINE_HOST}")`, { timeout: 8000 })
+    }, page)
+
+    // ── 3.6.3: „View all N sessions" (U20) şi eroare ≠ gol pentru aplicaţiile de pe dashboard.
+    // API mock-uit DOAR în browser: 14 sesiuni vii pe hostul de test şi un /api/apps picat.
+    // O singură temă: e comportament, nu culoare.
+    if (theme === 'dark') await step('dashboard: toate sesiunile + aplicaţii picate', async () => {
+      const hid = hostIds[HOST]
+      if (!hid) throw new Error(`hostul ${HOST} lipseşte`)
+      const now = Math.floor(Date.now() / 1000)
+      const fake = Array.from({ length: 14 }, (_, i) => ({
+        id: `mock-${i}`, host_id: hid, title: `mock ${i}`, note: '', state: 'live', created: now - i * 60,
+        closed_at: null, exit_status: null, close_reason: null, rows: 24, cols: 80, connected_clients: 0, out_offset: 0,
+      }))
+      const json = (body, status = 200) => ({ status, contentType: 'application/json', body: JSON.stringify(body) })
+      await page.route((u) => u.pathname === '/api/sessions', (r) => r.fulfill(json(fake)))
+      await page.route((u) => u.pathname === '/api/apps', (r) => r.fulfill(json({ detail: 'mock: apps down' }, 503)))
+      await page.evaluate(() => { window.location.hash = '' })
+      await page.reload()
+      await page.waitForSelector('[data-testid="dashboard"]', { timeout: 8000 })
+      const all = page.locator('[data-testid="dash-all-sessions"]')
+      await all.waitFor({ state: 'visible', timeout: 8000 })
+      check('U20: dashboard-ul are acţiunea „View all 14 sessions" (nu text neinteractiv)',
+        ((await all.textContent()) ?? '').trim() === 'View all 14 sessions' && await all.getAttribute('aria-expanded') === 'false')
+      await all.click()
+      check('U20: „View all" desface lista pe loc (14 carduri, aria-expanded=true)',
+        await page.locator('#dash-active-sessions > button').count() === 14 && await all.getAttribute('aria-expanded') === 'true')
+      const appsErr = page.locator('[data-testid="dashboard"] [role=alert]', { hasText: "Couldn't load your apps." })
+      check('eroare ≠ gol: /api/apps picat → mesaj + Retry pe dashboard, nu o secţiune lipsă',
+        await appsErr.isVisible() && await appsErr.getByRole('button', { name: 'Retry' }).isVisible())
+      await page.unrouteAll({ behavior: 'ignoreErrors' })
+      await page.reload()
+      await page.waitForSelector('button[title="Host actions"]', { timeout: 8000 })
     }, page)
 
     await step('deschide sesiune', async () => {
