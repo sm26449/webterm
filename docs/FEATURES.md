@@ -338,7 +338,8 @@ Press `?` for the cheatsheet.
 
 - **Roles** (3.6): Owner, Admin, Operator and Viewer, each bound to **all hosts, a folder, a tag or
   one host** — so several people can share an instance, each limited to the hosts they look
-  after. Settings → **Users & roles** shows every account with its bindings and adds or removes
+  after. Settings → **Users & roles** (sub-tabs Accounts · Roles · SSO groups, with search and
+  filters for large teams) shows every account with its bindings and adds or removes
   them (password + second factor, audited, alerted). [the guide](ROLES.md)
 - What they enforce, honestly: **which hosts** you can see at all (an out-of-scope host looks
   exactly like a missing one; lists, search, history, audit and alerts are filtered) and

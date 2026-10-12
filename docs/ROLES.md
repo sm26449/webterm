@@ -88,12 +88,17 @@ inherits the scope of the agent it goes through.
 
 ## Giving someone access
 
-Open **Settings → Users & roles**.
+Open **Settings → Users & roles → Accounts**. Since 3.6.6 the page has three sub-tabs —
+**Accounts**, **Roles** and **SSO groups** (each with a count; you only see the ones your
+permissions let you use) — under a short **Your access** summary that everyone sees. The last
+sub-tab you opened is remembered in this browser, and Settings search lands on the right one.
 
-1. **Add account**, choose a role and a scope in the same dialog. The default is *no access yet*:
-   a new account is never an Owner by default.
-2. To change access later, add or remove **bindings** on the account (shown as chips such as
-   "Operator · folder prod").
+1. **Add account** opens the form: choose a role and a scope in the same form. The default is
+   *no access yet*: a new account is never an Owner by default.
+2. To change access later, click the account to expand it, then add or remove **bindings** there
+   (shown as chips such as "Operator · folder prod"). The list has a search box (email) and
+   filters for role, sign-in type (local password / SSO only) and *no role*; accounts without a
+   role are flagged, with a shortcut to list only them.
 
 These changes are treated like credential changes: they ask for your password (or a fresh SSO /
 passkey confirmation) and your second factor, they are written to the audit log, and both the
@@ -123,7 +128,9 @@ a binding. Accounts that existed before the 3.6 upgrade (including SSO accounts)
 
 ## Custom roles
 
-Settings → Users & roles → **Roles** (needs **Custom roles**, `roles.manage`). Role names that
+Settings → Users & roles → **Roles** (editing needs **Custom roles**, `roles.manage`; with only
+`users.manage` the sub-tab is read-only). The same sub-tab lists the built-in roles with what
+they allow and how many bindings / SSO mappings use each role. Role names that
 only *look* like another role's — letters from another alphabet such as a Cyrillic `О` in
 `Оwner`, or a name mixing alphabets — are refused (`role.nameConfusable`). A custom role is a
 named set of permissions from the [catalogue](#permission-reference); where it applies is still
@@ -166,8 +173,9 @@ role.
 
 ## SSO group mapping
 
-Settings → Users & roles → **SSO group mapping** (shown only when SSO is enabled; needs
-`users.manage`). Map a group name from the id_token's `groups` claim to a role and a scope.
+Settings → Users & roles → **SSO groups** (shown only when SSO is enabled; needs
+`users.manage`). Mappings are grouped by group name; the ones from `WEBTERM_OIDC_ROLE_MAP` carry a
+**from configuration** badge and cannot be removed there. Map a group name from the id_token's `groups` claim to a role and a scope.
 
 **Example with Authentik.** Create the groups in Authentik (Directory → Groups) and add people:
 

@@ -11,7 +11,7 @@ a **break-glass** account — password + optional passkey, always able to log in
 is down. Everyone else clicks **"Sign in with <provider>"** and is provisioned on first login.
 SSO controls *who gets in*; **roles** ([ROLES.md](ROLES.md), 3.6) control *what they can do once
 in*. A newly provisioned SSO account starts with **no access** unless one of its IdP groups is
-mapped to a role (Settings → Users & roles → **SSO group mapping**, 3.6.2 — see
+mapped to a role (Settings → Users & roles → **SSO groups**, 3.6.2 — see
 [ROLES.md](ROLES.md#sso-group-mapping)); otherwise an Owner or Admin binds it by hand. Accounts
 that already existed when you upgraded to 3.6 became Owners.
 
@@ -31,7 +31,7 @@ that already existed when you upgraded to 3.6 became Owners.
 ## Groups → roles (3.6.2)
 
 WebTerm reads the id_token's **`groups`** claim — the same claim `WEBTERM_OIDC_ALLOWED_GROUPS`
-checks. In Settings → Users & roles → **SSO group mapping**, map a group name to a role and a
+checks. In Settings → Users & roles → **SSO groups**, map a group name to a role and a
 scope. At every SSO sign-in and every SSO step-up WebTerm re-syncs the account's SSO-derived
 roles to the groups the IdP just sent: missing ones are added, ones whose group is gone are
 removed at once. Roles given by hand are never touched. **Only SSO-only accounts

@@ -9,6 +9,31 @@ back.
 
 ## [Unreleased]
 
+### Changed
+- **Settings → Users & roles is organised in sub-tabs: Accounts · Roles · SSO groups.** Why: it was
+  one page with every account, every binding, the custom roles and the SSO mappings stacked one
+  under the other, plus two forms always open; with a few dozen accounts it became an endless
+  scroll and the section you wanted was off-screen. Now:
+  - a compact **Your access** summary stays on top (everyone sees it; an admin needs their own
+    scope while giving access to others), and the sub-tabs below are a real ARIA tablist (arrow
+    keys, Home/End, roving tabindex) with a count on each; only the sub-tabs your permissions let
+    you use are shown (the same rules as before; nothing moved to the client). The last one you
+    opened is remembered in this browser, and Settings search lands on the right sub-tab;
+  - **Accounts**: search by email, filters for role, sign-in type (local password / SSO only) and
+    *no role*; compact rows with the sign-in type and role chips that expand into the bindings and
+    the actions; **Add account** opens its form on demand. Accounts without a role are flagged
+    (the same case the server warns about), with a shortcut to list only them; long lists page by 50;
+  - **Roles**: the built-in roles read-only with what they allow and where they are used (bindings
+    and SSO mappings, from data the page already had), then the custom roles and their editor;
+  - **SSO groups**: mappings grouped by group name, the ones from `WEBTERM_OIDC_ROLE_MAP` marked
+    **from configuration** without a remove button; when nothing is mapped, the empty state
+    explains the default Authentik groups (`wt-access`, `wt-admins`, `wt-readonly`, `wt-db`,
+    `wt-network`) and `WEBTERM_OIDC_ROLE_MAP`, with a link to docs/SSO.md.
+
+  UI only: every action keeps its API call, its password prompt and second factor, and its
+  confirmation. `UsersTab.tsx` (688 lines) is split into `settings/users/*` (Accounts, Roles, SSO,
+  sub-tabs, shared pieces) with the filtering logic in `lib/usersAdmin.ts` (unit-tested).
+
 ## [3.6.5] — 2026-10-12 · agent (58)
 
 3.6.5 — SSO groups out of the box. No agent change.
