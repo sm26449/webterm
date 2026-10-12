@@ -58,10 +58,11 @@ const TAGS = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa', 'best-prac
 // (Overview, Sessions) = 2, toast de eroare, Settings × 7, file browser, Status, Add host × 3,
 // FleetRun, `?`, walkthrough, paleta, ConfirmModal, panoul de alerte, dialogul „link de replay"
 // + pagina PUBLICĂ de replay + dialogul „Copy to host" (3.5.18) + Settings → Users & roles (3.6)
-// + editorul de roluri custom ŞI maparea grupurilor SSO deschise (3.6.2) = 37
+// + editorul de roluri custom ŞI maparea grupurilor SSO deschise (3.6.2) — din 3.6.6 pe sub-tab-uri
+// separate: un cont desfăcut (Accounts), editorul (Roles), maparea (SSO groups) = 39
 // (+ Monaco cu WT_AGENT=1).
 // Mobil: sesiune dark + light.
-const PER_THEME = 37 + (HAS_AGENT ? 1 : 0)
+const PER_THEME = 39 + (HAS_AGENT ? 1 : 0)
 // 3.6.4: variantele noi (familie × mod), fiecare cu subsetul reprezentativ: login, dashboard,
 // sesiune, Setări → Appearance, file browser, dialogul Add host = 6 scanări pe variantă.
 const NEW_VARIANTS = [
@@ -551,8 +552,10 @@ try {
 
     // 3.6.2: editorul de roluri custom (formularul deschis, cu grupele de permisiuni şi ⚑) şi
     // secţiunea de mapare SSO. SSO nu e activ în containerul de CI, deci răspunsul mapărilor e
-    // completat aici cu `enabled: true` + o mapare de exemplu — secţiunea apare ca la o instanţă
-    // cu SSO, iar axe o vede. Nimic nu se salvează (formularul e doar deschis, apoi anulat).
+    // completat aici cu `enabled: true` + mapări de exemplu (una din WEBTERM_OIDC_ROLE_MAP) — sub-tab-ul
+    // apare ca la o instanţă cu SSO, iar axe îl vede. Nimic nu se salvează (formularul e doar deschis,
+    // apoi anulat). 3.6.6: Accounts | Roles | SSO groups sunt sub-tab-uri (WAI-ARIA tabs) — verificăm
+    // şi tastatura, şi că un rezultat al căutării din Setări aterizează pe sub-tab-ul lui.
     await step('roluri custom + mapare SSO', async () => {
       await page.route('**/api/settings/oidc-roles', async (route) => {
         if (route.request().method() !== 'GET') return route.continue()
@@ -560,21 +563,67 @@ try {
         const body = await r.json()
         await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
           ...body, enabled: true,
-          mappings: [{ id: 990001, group: 'wt-ops', role: 'operator', role_id: 0, role_name: 'Operator',
-            scope_kind: 'folder', scope_value: 'prod', sso_bindings: 2 }],
+          mappings: [
+            { id: 990001, group: 'wt-ops', role: 'operator', role_id: 0, role_name: 'Operator',
+              scope_kind: 'folder', scope_value: 'prod', sso_bindings: 2, source: 'ui' },
+            { id: 990002, group: 'wt-admins', role: 'admin', role_id: 0, role_name: 'Admin',
+              scope_kind: 'all', scope_value: '', sso_bindings: 0, source: 'config' },
+          ],
         }) })
       })
       await openSettings(page)
       await settingsTab(page, 'Users & roles')
+      const selected = () => page.locator('[data-users-subtabs] [role=tab][aria-selected="true"]').getAttribute('data-subtab')
+      // tastatura: focus pe tab-ul activ, End → ultimul, Home → primul, → → al doilea (roving tabindex)
+      await page.locator('[data-subtab="accounts"]').click()
+      await page.keyboard.press('End')
+      const atEnd = await selected()
+      await page.keyboard.press('Home')
+      const atHome = await selected()
+      await page.keyboard.press('ArrowRight')
+      const atNext = await selected()
+      const focused = await page.evaluate(() => document.activeElement?.getAttribute('data-subtab'))
+      check(`${theme}: Users & roles — sub-tab-uri din tastatură (End/Home/→, focusul urmează)`,
+        atEnd === 'sso' && atHome === 'accounts' && atNext === 'roles' && focused === 'roles',
+        { note: `${atEnd}/${atHome}/${atNext}/${focused}` })
+      check(`${theme}: Users & roles — un singur tab în ordinea Tab (roving tabindex)`,
+        (await page.locator('[data-users-subtabs] [role=tab][tabindex="0"]').count()) === 1)
+
+      // Accounts: rândul se desface (legături + acţiuni), nu mai stă totul inline
+      await page.locator('[data-subtab="accounts"]').click()
+      await page.locator('[data-users-list] li button[aria-expanded]').first().click()
+      await page.waitForSelector('[data-account-details]')
+      await page.screenshot({ path: `${OUT}/${theme}-05-settings-accounts.png` })
+      await scan(page, `${theme} settings: accounts (row expanded)`)
+
+      await page.locator('[data-subtab="roles"]').click()
       await page.click('[data-new-role]')
       await page.waitForSelector('[data-role-editor]')
-      await page.waitForSelector('[data-sso-mappings]')
       await page.locator('[data-role-editor] input[type=checkbox]').nth(4).check()   // session.open → bannerul ⚑
-      await page.screenshot({ path: `${OUT}/${theme}-05-settings-roles-sso.png`, fullPage: true })
-      await scan(page, `${theme} settings: custom roles editor + SSO mapping`)
+      await page.screenshot({ path: `${OUT}/${theme}-05-settings-roles.png`, fullPage: true })
+      await scan(page, `${theme} settings: custom roles editor`)
       check(`${theme}: editorul de roluri are grupele de permisiuni (fieldset)`,
         await page.locator('[data-role-editor] fieldset').count() >= 5)
       await page.locator('[data-role-editor] button', { hasText: 'Cancel' }).click()
+
+      await page.locator('[data-subtab="sso"]').click()
+      await page.waitForSelector('[data-sso-mappings] [data-sso-group]')
+      await page.screenshot({ path: `${OUT}/${theme}-05-settings-sso.png` })
+      await scan(page, `${theme} settings: SSO group mapping`)
+      check(`${theme}: SSO groups — maparea din configuraţie are insigna şi n-are ×`,
+        (await page.locator('[data-sso-group="wt-admins"] [data-sso-from-config]').count()) === 1
+        && (await page.locator('[data-sso-group="wt-admins"] button').count()) === 0)
+
+      // căutarea din Setări aterizează pe sub-tab-ul secţiunii (aici: de pe SSO groups pe Roles)
+      await page.fill('[role=dialog] [role=search] input', 'custom roles')
+      await page.locator('[role=listbox] [role=option]').first().waitFor({ state: 'visible', timeout: 5000 })
+      await page.keyboard.press('Enter')
+      const landed = await page.waitForFunction(() => {
+        const el = document.querySelector('[data-setting-id="roles"]')
+        const tab = document.querySelector('[data-subtab="roles"]')
+        return !!el && el.offsetParent !== null && tab?.getAttribute('aria-selected') === 'true'
+      }, null, { timeout: 5000 }).then(() => true, () => false)
+      check(`${theme}: căutarea „custom roles" → Users & roles, sub-tab-ul Roles`, landed)
       await page.unroute('**/api/settings/oidc-roles')
       await page.keyboard.press('Escape')
       await page.waitForTimeout(300)

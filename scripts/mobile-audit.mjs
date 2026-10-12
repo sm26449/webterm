@@ -52,7 +52,7 @@ const note = (dev, screen, severity, msg, extra) =>
 
 // Etapele pe care auditul TREBUIE să le atingă pe fiecare device. Fără asta, orice selector
 // derapat transformă poarta într-un no-op verde: nu se măsoară nimic şi nimeni nu află.
-const REQUIRED = ['login', 'dashboard', 'setari-cautare', 'pagina-host', 'session', 'tastare']
+const REQUIRED = ['login', 'dashboard', 'setari-cautare', 'setari-utilizatori', 'pagina-host', 'session', 'tastare']
 
 /** Măsurători în pagină: overflow, elemente în afara viewportului, ținte mici. */
 const MEASURE = () => {
@@ -363,6 +363,42 @@ async function auditDevice(cfg) {
       if (w.input < 160) note(cfg.name, 'setari-cautare', 'bug', `câmpul de căutare din Setări e prea îngust (${Math.round(w.input)}px)`)
       else if (w.option < 200) note(cfg.name, 'setari-cautare', 'bug', `rezultatele căutării sunt prea înguste (${Math.round(w.option)}px)`)
       else if (tab === 'Sign-in & 2FA') reached.add('setari-cautare')
+      // 3.6.6: Users & roles pe sub-tab-uri. Căutarea „accounts" aterizează pe sub-tab-ul Accounts;
+      // un cont desfăcut (legături + acţiuni) nu iese din dialog, panoul nu derulează pe orizontală,
+      // iar tablist-ul sub-tab-urilor derulează în el însuşi dacă nu încape.
+      await search.fill('accounts')
+      await page.locator('[role=listbox] [role=option]').first().waitFor({ state: 'visible', timeout: 5000 })
+      await page.keyboard.press('Enter')
+      const onAccounts = await page.waitForFunction(() =>
+        document.querySelector('[data-subtab="accounts"]')?.getAttribute('aria-selected') === 'true'
+        && document.querySelector('[data-setting-id="users"]')?.offsetParent != null, null, { timeout: 5000 }).then(() => true, () => false)
+      if (!onAccounts) {
+        note(cfg.name, 'setari-utilizatori', 'bug', 'căutarea „accounts" n-a deschis Users & roles → Accounts')
+      } else {
+        await page.locator('[data-users-list] li button[aria-expanded]').first().click()
+        await page.waitForSelector('[data-account-details]', { timeout: 5000 })
+        await page.waitForTimeout(300)
+        await shot('03c-setari-utilizatori')
+        await check('setari-utilizatori')
+        const u = await page.evaluate(() => {
+          const dlg = document.querySelector('[role=dialog][aria-modal="true"]')?.getBoundingClientRect()
+          const sec = document.querySelector('[data-setting-id="users"]')
+          const tabs = document.querySelector('[data-users-subtabs]')
+          if (!dlg || !sec) return { wide: ['(lipseşte)'], paneX: 0, tabsX: '' }
+          const wide = [...sec.querySelectorAll('*')].filter((e) => {
+            if (tabs?.contains(e)) return false
+            const r = e.getBoundingClientRect()
+            return r.width > 1 && r.right > dlg.right + 0.5
+          }).slice(0, 3).map((e) => e.tagName.toLowerCase() + (e.getAttribute('data-account') ? `[${e.getAttribute('data-account')}]` : ''))
+          let pane = sec.parentElement
+          while (pane && getComputedStyle(pane).overflowY !== 'auto') pane = pane.parentElement
+          return { wide, paneX: pane ? pane.scrollWidth - pane.clientWidth : 0, tabsX: tabs ? getComputedStyle(tabs).overflowX : '' }
+        })
+        if (u.wide.length) note(cfg.name, 'setari-utilizatori', 'bug', `elemente din Accounts ies din dialog: ${u.wide.join(', ')}`)
+        if (u.paneX > 1) note(cfg.name, 'setari-utilizatori', 'bug', `panoul Setărilor derulează orizontal pe Accounts (${u.paneX}px)`)
+        if (u.tabsX !== 'auto') note(cfg.name, 'setari-utilizatori', 'bug', 'sub-tab-urile nu derulează în ele însele când nu încap')
+        if (!u.wide.length && u.paneX <= 1 && u.tabsX === 'auto') reached.add('setari-utilizatori')
+      }
       // primul Escape goleşte căutarea, al doilea închide Setările
       await page.keyboard.press('Escape')
       await page.keyboard.press('Escape')
