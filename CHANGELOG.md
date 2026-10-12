@@ -9,6 +9,10 @@ back.
 
 ## [Unreleased]
 
+## [3.6.6] — 2026-10-12 · agent (58)
+
+3.6.6 — Users & roles in sub-tabs (Accounts · Roles · SSO groups). UI only; no agent change.
+
 ### Changed
 - **Settings → Users & roles is organised in sub-tabs: Accounts · Roles · SSO groups.** Why: it was
   one page with every account, every binding, the custom roles and the SSO mappings stacked one

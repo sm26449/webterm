@@ -47,7 +47,7 @@ def _secret(name, default=""):
     return default
 
 
-GATEWAY_VERSION = "3.6.5"
+GATEWAY_VERSION = "3.6.6"
 
 # Referința imaginii care rulează (setată la deploy prin compose), afișată în UI
 # ca să știi mereu ce versiune e live. Gol în dev (rulare din surse).
@@ -154,7 +154,7 @@ OIDC_ENABLED = bool(OIDC_ISSUER and OIDC_CLIENT_ID and OIDC_CLIENT_SECRET)
 OIDC_REQUIRE_AUTH_TIME = _str("WEBTERM_OIDC_REQUIRE_AUTH_TIME", "1").lower() not in ("0", "false", "no")
 # redirect_uri fix, derivat din PUBLIC_URL — niciodată din input de request (anti open-redirect)
 OIDC_REDIRECT_URI = PUBLIC_URL + "/api/oidc/callback"
-# 3.6.5 — „grupuri SSO din cutie". Maparea grup → rol din .env: intrări `grup=rol@scope`,
+# 3.6.6 — „grupuri SSO din cutie". Maparea grup → rol din .env: intrări `grup=rol@scope`,
 # separate prin virgulă sau rând nou. Citită (şi reconciliată cu maparea din DB, source='config')
 # DOAR la pornire, de ssomap.reconcile_config(); parsarea şi refuzurile (Owner, sintaxă, rol
 # necunoscut) sunt acolo. Brut aici: nu are default şi nu se normalizează.

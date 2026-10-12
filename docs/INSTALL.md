@@ -64,7 +64,7 @@ the same script, only one you can read first and pin to a release.
 ```sh
 git clone https://github.com/sm26449/webterm.git
 cd webterm
-git checkout v3.6.5           # the release tag (see the version badge); a tag cannot move under you, a branch can
+git checkout v3.6.6           # the release tag (see the version badge); a tag cannot move under you, a branch can
 less install.sh              # it is meant to be read
 sudo ./install.sh --domain term.example.com --email you@example.com
 ```
@@ -150,7 +150,7 @@ moves any value it still finds in `.env` into its file.
 Update with `./upgrade.sh` — it takes a backup, syncs the host-side scripts and hands off to
 `deploy.sh`. (`make pull` exists for a quick image swap, but it bypasses `deploy.sh`, so it
 records no rollback point and runs no health gate.) Deploy a specific version
-with a recorded rollback point: `./deploy.sh v3.6.5` (or a digest:
+with a recorded rollback point: `./deploy.sh v3.6.6` (or a digest:
 `./deploy.sh ghcr.io/sm26449/webterm@sha256:…`) — if the new container does
 not become healthy, the script rolls back automatically; any time afterwards,
 `./rollback.sh` returns you to the previous image with a single command.
@@ -217,7 +217,7 @@ AUTHENTIK_DOMAIN=auth.yourcompany.com WEBTERM_DOMAIN=term.example.com \
 #   (WT_GROUP_PREFIX=wt-prod … to give this instance its own wt-prod-* groups)
 ```
 
-Since 3.6.5 the provisioner also creates five groups — `wt-access` (sign-in only), `wt-admins`
+Since 3.6.6 the provisioner also creates five groups — `wt-access` (sign-in only), `wt-admins`
 (Admin), `wt-readonly` (Viewer), `wt-db` (Operator on hosts tagged `db`), `wt-network` (Operator
 on hosts tagged `network`) — and prints `WEBTERM_OIDC_ALLOWED_GROUPS`, `WEBTERM_OIDC_ROLE_MAP`,
 `WEBTERM_OIDC_SSO_ONLY=1` and `WEBTERM_OIDC_SESSION_MAX_HOURS=12`. Copy those too if you want
@@ -244,7 +244,7 @@ button is missing, the account
 isn't created yet or SSO env isn't set; if the IdP shows "access denied", that user isn't in
 `wt-access`.
 
-Whichever you pick: the provisioner gates the app on its groups (`wt-access` and, since 3.6.5, the four role groups; a user reaches the
+Whichever you pick: the provisioner gates the app on its groups (`wt-access` and, since 3.6.6, the four role groups; a user reaches the
 instance only once you add them to one of them), the local admin stays a **break-glass** account that can
 always log in even if Authentik is down, and what each person can do once in is decided by
 their role ([ROLES.md](ROLES.md)); separate instances remain the stronger split. To evaluate the whole
