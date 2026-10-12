@@ -294,7 +294,8 @@ export default function SettingsModal(props: {
 
         {pane('cont', <AccountTab email={props.email} onAccountChanged={props.onAccountChanged} />)}
 
-        {pane('utilizatori', <UsersTab />)}
+        {/* `jump`: sub-tab-ul secţiunii căutate (Accounts / Roles / SSO groups) se deschide înainte de salt */}
+        {pane('utilizatori', <UsersTab jump={jump} />)}
 
         {pane('preferinte', <PreferencesTab />)}
 

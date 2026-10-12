@@ -31,3 +31,14 @@ export function menuNav(key: string, i: number, n: number): number | null {
   if (key === 'End') return n - 1
   return null
 }
+
+/** Navigarea din tastatură într-un tablist ORIZONTAL (WAI-ARIA tabs): ←/→ cu wrap, Home/End la
+    capete. Întoarce indexul nou, sau null pentru o tastă care nu mută focusul. */
+export function tabListNav(key: string, i: number, n: number): number | null {
+  if (n <= 0) return null
+  if (key === 'ArrowRight') return (i + 1) % n
+  if (key === 'ArrowLeft') return (i - 1 + n) % n
+  if (key === 'Home') return 0
+  if (key === 'End') return n - 1
+  return null
+}
