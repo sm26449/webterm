@@ -39,8 +39,9 @@ export interface SettingSection {
   /** sinonime EN + RO, separate prin spaţiu; se caută împreună cu titlul şi textul tradus */
   keywords: string
   /** permisiunea GLOBALĂ fără de care secţiunea e ascunsă (3.6, roluri; cosmetic — serverul
-      refuză oricum). Lipsă = secţiune self-service, vizibilă oricui. */
-  perm?: string
+      refuză oricum). Lipsă = secţiune self-service, vizibilă oricui. Listă = ajunge ORICARE
+      (ex. rolurile custom: tab-ul Roles se vede şi doar cu `users.manage`, citire). */
+  perm?: string | string[]
   /** condiţia de RUNTIME fără de care tab-ul nu randează secţiunea (ex. maparea SSO doar cu SSO
       activ). Căutarea n-are voie să găsească o secţiune pe care tab-ul o ascunde — Enter nu ducea
       nicăieri (audit funcţional 3.6.3, #3). */
@@ -63,7 +64,7 @@ export const SETTINGS_INDEX: readonly SettingSection[] = [
     perm: 'users.manage' },
   { id: 'roles', cat: 'utilizatori', titleKey: 'roles.custom.title', hintKey: 'roles.custom.hint',
     keywords: 'custom roles permissions editor role create edit auditor files-only roluri custom permisiuni editor',
-    perm: 'roles.manage' },
+    perm: ['roles.manage', 'users.manage'] },
   { id: 'ssoMapping', cat: 'utilizatori', titleKey: 'roles.sso.title', hintKey: 'roles.sso.hint',
     keywords: 'sso oidc authentik groups claim mapping group role idp grupuri mapare grup',
     perm: 'users.manage', requires: 'sso' },
@@ -145,7 +146,8 @@ const BY_ID = new Map(SETTINGS_INDEX.map((s) => [s.id, s]))
 export function sectionVisible(id: string, has: (perm: string) => boolean, runtime: RuntimeFlags = {}): boolean {
   const s = BY_ID.get(id)
   if (s?.requires && runtime[s.requires] === false) return false
-  return !s?.perm || has(s.perm)
+  if (!s?.perm) return true
+  return (Array.isArray(s.perm) ? s.perm : [s.perm]).some(has)
 }
 
 /** Tab-urile cu MĂCAR o secţiune vizibilă (un tab gol nu apare în rail). */

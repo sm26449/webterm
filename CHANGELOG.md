@@ -34,6 +34,12 @@ back.
   confirmation. `UsersTab.tsx` (688 lines) is split into `settings/users/*` (Accounts, Roles, SSO,
   sub-tabs, shared pieces) with the filtering logic in `lib/usersAdmin.ts` (unit-tested).
 
+### Fixed
+- Settings search finds the custom-roles section for an account with `users.manage` only, which
+  now sees the Roles sub-tab read-only; before, the tab was visible but search could not reach it.
+- Romanian UI text uses the correct comma-below ș/ț everywhere (126 strings still had the
+  cedilla ş/ţ forms, which some fonts render differently).
+
 ## [3.6.5] — 2026-10-12 · agent (58)
 
 3.6.5 — SSO groups out of the box. No agent change.

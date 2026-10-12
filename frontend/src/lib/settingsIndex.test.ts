@@ -156,6 +156,10 @@ describe('settings index: roluri (3.6) — ce vede un cont fără permisiuni glo
     expect(sectionVisible('users', none)).toBe(false)
     expect(sectionVisible('smtp', none)).toBe(false)
     expect(sectionVisible('alertPrefs', none)).toBe(true)
+    // 3.6.6: tab-ul Roles se vede şi doar cu users.manage (citire) — căutarea trebuie să-l găsească
+    expect(sectionVisible('roles', (p) => p === 'users.manage')).toBe(true)
+    expect(sectionVisible('roles', (p) => p === 'roles.manage')).toBe(true)
+    expect(sectionVisible('roles', none)).toBe(false)
     // audit 3.6.3 #3: maparea SSO nu apare în căutare cu SSO oprit (tab-ul n-o randează)
     expect(sectionVisible('ssoMapping', all, { sso: false })).toBe(false)
     expect(sectionVisible('ssoMapping', all, { sso: true })).toBe(true)
@@ -165,7 +169,7 @@ describe('settings index: roluri (3.6) — ce vede un cont fără permisiuni glo
     const GLOBAL = ['hosts.create', 'hosts.export', 'settings.manage', 'users.manage', 'roles.manage', 'tokens.create',
       'tokens.manage', 'shares.manage', 'snippets.manage', 'history.clear', 'audit.view', 'security.view',
       'backups.manage', 'signing.manage']
-    for (const s of SETTINGS_INDEX) if (s.perm) expect(GLOBAL, s.id).toContain(s.perm)
+    for (const s of SETTINGS_INDEX) if (s.perm) for (const p of [s.perm].flat()) expect(GLOBAL, s.id).toContain(p)
   })
   it('„Users & roles" e găsit după rol / permisiune', () => {
     expect(ids('roles')).toContain('myAccess')
