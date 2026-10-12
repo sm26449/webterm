@@ -44,6 +44,10 @@ back.
 - Provision never changes the application's policy engine mode: forcing `any` on an existing
   Authentik application would have made other bindings (an MFA or geo policy) optional. Group
   access is one expression policy instead; the other bindings are left alone and listed.
+- Provision counts its policy binding only when it is enabled and not negated (a disabled one is
+  re-enabled) and removes the old direct `wt-access` binding only after re-reading that the policy
+  binding is active and only on the WebTerm application. Before, a binding disabled by an admin
+  plus a re-run could leave the app with no active binding, which Authentik treats as open to all.
 - Forward tickets of SSO accounts no longer outlive `WEBTERM_OIDC_SESSION_MAX_HOURS`.
 - Renaming or deleting a host, or renaming a custom role, named by `WEBTERM_OIDC_ROLE_MAP` is
   logged and audited, since the map is resolved again only at the next restart.

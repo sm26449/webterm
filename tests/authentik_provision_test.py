@@ -61,6 +61,7 @@ class FakeAuthentik:
     def allowed(self, user, groups, mfa=True):
         app = self.apps["webterm"]
         bs = [b for b in self.bindings if b["target"] == app["pk"] and b.get("enabled", True)]
+        neg = {id(b) for b in bs if b.get("negate")}
         if not bs:
             return True                     # fără binding Authentik lasă pe oricine
         res = []
@@ -78,6 +79,8 @@ class FakeAuthentik:
                     names = re.findall(r"'([^']+)'", pol["expression"].split("for name in", 1)[1]
                                        .split(":", 1)[0])
                     res.append(any(n in groups for n in names))
+            if id(b) in neg:
+                res[-1] = not res[-1]
         mode = app.get("policy_engine_mode", "any")
         return all(res) if mode == "all" else any(res)
 
@@ -156,6 +159,13 @@ class FakeAuthentik:
             b = dict(body, pk=self._pk("bind"))
             self.bindings.append(b)
             return 201, b
+        if base.startswith("/api/v3/policies/bindings/") and method == "PATCH":
+            pk = base.rstrip("/").rsplit("/", 1)[1]
+            for b in self.bindings:
+                if b["pk"] == pk:
+                    b.update(body)
+                    return 200, dict(b)
+            return 404, {}
         if base.startswith("/api/v3/policies/bindings/") and method == "DELETE":
             pk = base.rstrip("/").rsplit("/", 1)[1]
             self.bindings = [b for b in self.bindings if b["pk"] != pk]
@@ -255,6 +265,36 @@ def main():
             old.writes.index(("DELETE", "/api/v3/policies/bindings/b0/"))
         check("[%s] politica e legată ÎNAINTE de scoaterea binding-ului vechi (niciodată zero binding-uri)"
               % mode, ok_order, str(old.writes))
+
+    for flag in ("enabled", "negate"):
+        print("── binding-ul politicii %s de un admin, apoi re-rulare" % ("oprit" if flag == "enabled" else "negat"))
+        dis = FakeAuthentik()
+        run(dis)
+        app_pk = dis.apps["webterm"]["pk"]
+        grp = dis.groups["wt-access"]["pk"]
+        pb = next(b for b in dis.bindings if b.get("policy"))
+        pb[flag] = flag != "enabled"
+        dis.bindings.append({"pk": "bd", "target": app_pk, "group": grp, "order": 9, "enabled": True})
+        run(dis)
+        check("[%s] binding-ul politicii e reactivat" % flag,
+              pb.get("enabled", True) and not pb.get("negate"), str(pb))
+        check("[%s] niciun grup → refuzat (aplicaţia nu rămâne deschisă)" % flag,
+              not dis.allowed("u", {"other-team"}))
+        check("[%s] wt-db intră" % flag, dis.allowed("u", {"wt-db"}))
+
+    print("── binding direct al ALTEI aplicaţii (răspuns nefiltrat) nu e atins")
+    oth = FakeAuthentik()
+    run(oth)
+    grp = oth.groups["wt-access"]["pk"]
+    oth.bindings.append({"pk": "bx", "target": "app-other", "group": grp, "order": 0, "enabled": True})
+    real_call = oth.__call__
+    def leaky(method, path, body=None):
+        if method == "GET" and path.startswith("/api/v3/policies/bindings/"):
+            return 200, {"results": [dict(b) for b in oth.bindings]}
+        return real_call(method, path, body)
+    P.provision(leaky, ak="https://auth.example.test", wt_domain="term.example.test",
+                prefix="wt", out=lambda *_: None)
+    check("binding-ul altei aplicaţii rămâne", any(b["pk"] == "bx" for b in oth.bindings))
 
     print("── aplicaţie cu o politică MFA obligatorie (mod all) şi un binding de user")
     mfa = FakeAuthentik()

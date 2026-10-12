@@ -248,9 +248,23 @@ def provision(call, *, ak, wt_domain, provider_name="Authentik", prefix="wt", ou
         policy_pk = d["pk"]
         out("politica %s: creată" % policy_name)
 
-    existing = results("/api/v3/policies/bindings/?target=%s" % app_pk)
-    if any(b.get("policy") == policy_pk for b in existing):
+    def active(b):
+        # un binding oprit sau negat NU contează: cu el, aplicaţia poate rămâne fără niciun
+        # binding activ, iar Authentik lasă atunci pe oricine
+        return (b.get("target") == app_pk and b.get("policy") == policy_pk
+                and b.get("enabled", True) and not b.get("negate"))
+
+    existing = [b for b in results("/api/v3/policies/bindings/?target=%s" % app_pk)
+                if b.get("target") == app_pk]
+    mine = [b for b in existing if b.get("policy") == policy_pk]
+    if any(active(b) for b in mine):
         out("binding %s → app: există" % policy_name)
+    elif mine:
+        s, d = call("PATCH", "/api/v3/policies/bindings/%s/" % mine[0]["pk"],
+                    {"enabled": True, "negate": False})
+        if s != 200:
+            fail("reactivarea binding-ului %s a eşuat: %s %s" % (policy_name, s, d))
+        out("binding %s → app: era oprit/negat — reactivat" % policy_name)
     else:
         order = max([int(b.get("order") or 0) for b in existing] or [-1]) + 1
         s, d = call("POST", "/api/v3/policies/bindings/", {
@@ -263,8 +277,13 @@ def provision(call, *, ak, wt_domain, provider_name="Authentik", prefix="wt", ou
     # doar în `<prefix>-db`; îl scoatem — DUPĂ ce politica e legată, deci aplicaţia nu rămâne
     # niciodată fără binding (fără binding, Authentik lasă pe oricine). Alte binding-uri: neatinse.
     access_pk = group_pk[groups[0][0]]
+    # recitim: binding-ul direct se scoate DOAR dacă politica e legată, activă şi ne-negată
+    if not any(active(b) for b in results("/api/v3/policies/bindings/?target=%s" % app_pk)):
+        fail("binding-ul %s → app nu e activ după provision; binding-ul direct %s rămâne"
+             % (policy_name, groups[0][0]))
     for b in existing:
-        if b.get("group") == access_pk and not b.get("policy") and not b.get("user"):
+        if (b.get("target") == app_pk and b.get("group") == access_pk
+                and not b.get("policy") and not b.get("user")):
             s, d = call("DELETE", "/api/v3/policies/bindings/%s/" % b["pk"])
             if s not in (200, 204):
                 fail("scoaterea binding-ului direct %s a eşuat: %s %s" % (groups[0][0], s, d))
