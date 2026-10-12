@@ -9,6 +9,8 @@ back.
 
 ## [Unreleased]
 
+## [3.6.5] — 2026-10-12 · agent (58)
+
 3.6.5 — SSO groups out of the box. No agent change.
 
 ### Added
