@@ -413,19 +413,37 @@ report it — that would need an agent change.) The folder gets a lock in the pa
 of the page session, and the panel offers three ways out:
 
 1. **Upload and move as root.** The file goes to the agent's inbox (`~/.webterm/inbox/`, as the
-   agent's user, with a name WebTerm generates), then WebTerm **types** — never runs — a command
-   into **your current terminal** for that host:
+   agent's user, with a name WebTerm generates). While the bytes stream through the gateway it
+   computes their SHA-256. Then WebTerm **types** — never runs — a command into **your current
+   terminal** for that host (shortened here; the script is a fixed text, the values are its
+   arguments):
 
    ```
-   sudo install -m 0644 -- /home/webterm/.webterm/inbox/2026-10-13_14-03-22_root-move_1a2b3c4d '/srv/bin/lists/list.txt' && rm -f -- /home/webterm/.webterm/inbox/2026-10-13_14-03-22_root-move_1a2b3c4d
+   sudo sh -c 'u=$1 d=$2; shift 2; … sudo -u "$u" -- head -c "$z" -- "$s" >"$t" && x=$(sha256sum <"$t") && [ "${x%% *}" = "$h" ] && chmod 0644 -- "$t" && mv -f -T -- "$t" "$f"; …' webterm-move webterm /srv/bin/lists /home/webterm/.webterm/inbox/2026-10-13_14-03-22_root-move_1a2b3c4d 1832 5f2c…e91a /srv/bin/lists/list.txt
    ```
 
-   No newline is sent: you read it and press Enter (edit `0644` first if it must be executable).
-   The gateway builds the text from validated values only — an absolute, normalised folder, plain
-   file names, no control/bidi characters (refused, not stripped), every token `shlex`-quoted and
-   checked to parse back to exactly the intended arguments. The browser types it through the same
-   path as a keystroke, so a read-only or shared view types nothing (the command is then copied
-   for you instead). Opened from a host page with no terminal, the command is shown to copy.
+   For each file it: reads the staged file **as the agent's user** (`sudo -u webterm`), at most the
+   uploaded size; writes it to a root-owned temp file (`mktemp`) in the target folder; checks its
+   SHA-256 against what you uploaded; only then sets mode `0644` and renames it into place
+   (`mv -T`: atomic, never into a directory); and finally removes the staged file, again as the
+   agent's user. The inbox belongs to the agent's user, so between the upload and your Enter that
+   user (or anyone who may upload to the host) could swap the staged file — for other content, a
+   symlink or hardlink to `/etc/shadow`, `/dev/zero`. Any such swap fails the read or the hash:
+   the command prints `webterm: NOT installed: …`, removes its temp file and stops, and nothing
+   lands. This matters most when you paste the command into an SSH or console root shell.
+
+   No newline is sent: you read it and press Enter (`chmod` the file afterwards if it must be
+   executable). The gateway builds the text from validated values only — an absolute, normalised
+   folder, plain file names, a plain user name, no control/bidi characters (refused, not
+   stripped), every token `shlex`-quoted and checked to parse back to exactly the intended
+   arguments — and only after every upload committed with all of its bytes hashed by the gateway
+   (a gateway restart or a second upload into the same staged file means: upload again). While
+   the plan is open, only you can upload into its staged files. The browser types it through the
+   same path as a keystroke, as a **bracketed paste**, and only when the program in front asked for
+   bracketed paste (bash, zsh, fish and other readline prompts do; mc, vim's normal mode, less and
+   htop are not prompts): otherwise, or in a read-only or shared view, nothing is typed and the
+   command is shown to copy, with the reason. Opened from a host page with no terminal, the command
+   is shown to copy. The same rule applies to typing an uploaded file's path ("Insert path").
    Dropping or pasting a file onto a root shell whose folder refuses it offers the same thing.
    sudo on the host is the real gate; anyone who may upload files and type in that session (Owner,
    Admin, Operator on that host) can use it, and every use is in the audit log.

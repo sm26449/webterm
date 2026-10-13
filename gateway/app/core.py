@@ -9,6 +9,7 @@ Data flow:
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import math
@@ -5000,6 +5001,7 @@ async def fs_write_stream(host_id: int, path: str, source, if_mtime=None) -> int
     important pentru config-uri (un `sshd_config` corupt te blochează afară).
     `if_mtime` (opțional): commit-ul refuză dacă ținta s-a schimbat între timp."""
     conn = _agent_or_raise(host_id)
+    _stage_break(host_id, path)          # a staged "move as root" file is only hashed via chunks
     # sufix aleator: două upload-uri simultane pe aceeași cale nu se mai calcă pe
     # același temp (conținut amestecat), iar numele nu mai e predictibil (un
     # proces local nu poate pre-crea un symlink cu numele temp-ului)
@@ -5209,23 +5211,109 @@ async def fs_upload_status(host_id: int, path: str, upload_id: str) -> dict:
     return out
 
 
-async def _drain_window(conn, tmp, key, win) -> None:
+# ── SHA-256 of staged "move as root" uploads (3.6.9 review M1, rootmove.py) ───────────────
+# The `sudo` command that installs a staged inbox file checks it against the SHA-256 of the bytes
+# that passed through THIS gateway — not of what is on the host when the command runs (the inbox
+# belongs to the agent's user, who can swap it). The hash is built in `_drain_window`, where the
+# blocks go to the agent strictly in offset order, so it covers exactly the bytes written. Fail
+# closed: a block at an unexpected offset (a resync after someone else grew the temp file, a
+# resume after a gateway restart), a second upload_id into the same path, or a one-shot write
+# breaks the entry, and no command can be built from it.
+STAGE_TTL = 24 * 3600
+_STAGE_MAX = 4096
+
+
+class _Stage:
+    __slots__ = ("h", "off", "uid", "ok", "digest", "size", "at")
+
+    def __init__(self):
+        self.h = hashlib.sha256()
+        self.off = 0
+        self.uid = None
+        self.ok = True
+        self.digest = None
+        self.size = None
+        self.at = time.time()
+
+
+_stages: dict = {}                                  # (host_id, path) -> _Stage
+
+
+def stage_track(host_id: int, path: str) -> None:
+    """Start hashing what is uploaded into `path` (a staged inbox file) from offset 0."""
+    now = time.time()
+    if len(_stages) >= _STAGE_MAX:
+        for k, st in list(_stages.items()):
+            if now - st.at > STAGE_TTL:
+                del _stages[k]
+        while len(_stages) >= _STAGE_MAX:
+            _stages.pop(next(iter(_stages)), None)
+    _stages[(host_id, path)] = _Stage()
+
+
+def stage_forget(host_id: int, path: str) -> None:
+    _stages.pop((host_id, path), None)
+
+
+def stage_result(host_id: int, path: str) -> Optional[tuple]:
+    """(sha256 hex, size) of a staged upload that COMMITTED with every byte hashed here; else None."""
+    st = _stages.get((host_id, path))
+    if st is None or not st.ok or st.digest is None or time.time() - st.at > STAGE_TTL:
+        return None
+    return st.digest, st.size
+
+
+def _stage_restart(host_id: int, path: str) -> None:
+    """An aborted staged upload starts over (the client retries with a fresh temp)."""
+    if (host_id, path) in _stages:
+        _stages[(host_id, path)] = _Stage()
+
+
+def _stage_break(host_id: int, path: str) -> None:
+    st = _stages.get((host_id, path))
+    if st is not None:
+        st.ok = False
+
+
+async def _stage_feed(st: "_Stage", base: int, blk: bytes) -> None:
+    if not st.ok or st.digest is not None:
+        st.ok = False
+        return
+    if base != st.off:
+        st.ok = False
+        return
+    if len(blk) > 65536:
+        await asyncio.to_thread(st.h.update, blk)    # hashlib releases the GIL: off the event loop
+    else:
+        st.h.update(blk)
+    st.off += len(blk)
+
+
+async def _drain_window(conn, tmp, key, win, stage=None) -> None:
     """Scrie la agent, STRICT în ordinea offset-ului, toate feliile pending CONTIGUE începând de la
     `win.offset`; avansează `win.offset` şi trezeşte waiterii la final. Chemat ţinând `win.cond`.
     Un bloc se re-taie în sub-blocuri de FS_CHUNK (1 MiB) exact ca înainte — agentul vede aceeaşi
-    secvenţă de fs_write ca la un upload secvenţial, deci CRC-ul lui incremental rămâne corect."""
+    secvenţă de fs_write ca la un upload secvenţial, deci CRC-ul lui incremental rămâne corect.
+    `stage` (upload „move as root"): octeţii scrişi intră, în ordine, în SHA-256-ul lui."""
     while win.offset in win.pending:
         blk = win.pending.pop(win.offset)
         win.buffered -= len(blk)
         base = win.offset
-        if not blk:
-            await _write_block(conn, tmp, base, b"", key=key)   # felie goală: creează temp-ul gol
-        else:
-            i = 0
-            while i < len(blk):
-                sub = blk[i:i + FS_CHUNK]
-                await _write_block(conn, tmp, base + i, sub, key=key)
-                i += len(sub)
+        try:
+            if not blk:
+                await _write_block(conn, tmp, base, b"", key=key)   # felie goală: creează temp-ul gol
+            else:
+                i = 0
+                while i < len(blk):
+                    sub = blk[i:i + FS_CHUNK]
+                    await _write_block(conn, tmp, base + i, sub, key=key)
+                    i += len(sub)
+        except BaseException:
+            if stage is not None:
+                stage.ok = False      # what landed is unknown: no command from this upload
+            raise
+        if stage is not None:
+            await _stage_feed(stage, base, blk)
         win.offset = base + len(blk)
         _remember_offset(key, win.offset)
     win.cond.notify_all()
@@ -5245,6 +5333,13 @@ async def fs_upload_chunk(host_id: int, path: str, upload_id: str, offset: int, 
     # browser→gateway — în afara secţiunii critice, K felii urcă în paralel (ascund RTT-ul), iar
     # serializarea de mai jos atinge doar aplicarea la agent (rapidă, blocuri de 1 MiB).
     block = b"".join([part async for part in source])
+    stage = _stages.get((host_id, path))
+    if stage is not None:
+        if stage.uid is None:
+            stage.uid = upload_id
+        elif stage.uid != upload_id:          # a second upload into the same staged file
+            stage.ok = False
+            stage = None
     win = _upload_window(key)
     end = offset + len(block)
     async with win.cond:
@@ -5256,7 +5351,7 @@ async def fs_upload_chunk(host_id: int, path: str, upload_id: str, offset: int, 
         if len(block) == 0:
             if offset == 0 and cur == 0 and 0 not in win.pending:
                 win.pending[0] = b""
-                await _drain_window(conn, tmp, key, win)
+                await _drain_window(conn, tmp, key, win, stage)
             return win.offset
         if end <= cur:
             return win.offset                  # felie DEJA aterizată integral (retry după ack pierdut)
@@ -5271,7 +5366,7 @@ async def fs_upload_chunk(host_id: int, path: str, upload_id: str, offset: int, 
         win.pending[offset] = block
         win.buffered += len(block)
         try:
-            await _drain_window(conn, tmp, key, win)
+            await _drain_window(conn, tmp, key, win, stage)
             # Aşteptăm ca felia noastră să fie scrisă (gap-ul dinaintea ei umplut de altă cerere).
             # `wait_for` eliberează lock-ul cât aşteaptă → felia care umple gap-ul poate rula.
             try:
@@ -5332,12 +5427,21 @@ async def fs_upload_commit(host_id: int, path: str, upload_id: str, if_mtime=Non
                     pass
                 _upload_forget(key)
                 raise FileError("integrity check failed: CRC mismatch (got %d, expected %d)" % (got, crc32))
+        stage = _stages.get((host_id, path))
         resp = await conn.request("fs_rename", path=tmp, to=path,
                                   overwrite=True, if_mtime=if_mtime, timeout=60)
         if not resp.get("ok"):
+            if stage is not None:
+                stage.ok = False
             if resp.get("code") == "conflict":
                 raise FileConflict(resp.get("msg", "the file changed"))
             raise FileError(resp.get("msg", "eroare"))
+        if stage is not None:
+            # every committed byte went through _stage_feed, in order, for THIS upload — or no hash
+            if stage.ok and stage.uid == upload_id and stage.digest is None and stage.off == int(total or 0):
+                stage.digest, stage.size = stage.h.hexdigest(), stage.off
+            else:
+                stage.ok = False
         _upload_forget(key)
     _upload_locks.pop(key, None)          # abia după eliberare (vezi _upload_forget)
     return int(total or 0)
@@ -5349,6 +5453,7 @@ async def fs_upload_abort(host_id: int, path: str, upload_id: str) -> None:
     key = (host_id, upload_id)
     async with _upload_lock(key):
         _upload_forget(key)
+        _stage_restart(host_id, path)
         try:
             await _agent_or_raise(host_id).request("fs_delete", path=_upload_tmp(path, upload_id), timeout=15)
         except Exception:

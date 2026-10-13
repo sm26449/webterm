@@ -1668,7 +1668,8 @@ middleware plus ASGI WS middleware in `main.py`) and the SPA/asset catch-all. Li
 | `/api/hosts/{host_id}/fs/upload/status` (2671) | GET | `files.write` | H(host_id) | su | |
 | `/api/hosts/{host_id}/fs/upload/commit` (2688) | POST | `files.write` | H(host_id) | su | |
 | `/api/hosts/{host_id}/fs/upload` (2709) | DELETE | `files.write` | H(host_id) | su | |
-| `/api/hosts/{host_id}/fs/root-move` (3.6.9) | POST | `files.write` | H(host_id) | su | plans "upload and move as root": stages into the agent's inbox, returns a command the CLIENT types (never runs) into the person's own terminal — typing = the session's normal input gate |
+| `/api/hosts/{host_id}/fs/root-move` (3.6.9) | POST | `files.write` | H(host_id) | su | plans "upload and move as root": names staging files in the agent's inbox; only the planner may upload into them while the plan lives; the gateway hashes the bytes on the way |
+| `/api/hosts/{host_id}/fs/root-move/{plan_id}/command` (3.6.9) | POST | `files.write` | H(host_id) | su | planner only; returns the command the CLIENT types (never runs) into the person's own terminal — reads the staged file as the agent's user, installs only on a SHA-256 match; typing = the session's normal input gate |
 | `/api/hosts/{host_id}/fs/mkdir` (5641) | POST | `files.write` | H(host_id) | su | |
 | `/api/hosts/{host_id}/fs/rename` (5653) | POST | `files.write` | H(host_id) | su | (rename over an existing file = delete → also `files.delete` when `overwrite`) |
 | `/api/hosts/{host_id}/fs/delete` (5667) | POST | `files.delete` | H(host_id) | su | |

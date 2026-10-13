@@ -6,26 +6,40 @@ whoever the terminal has become with sudo. An Owner in a root shell in `/srv/bin
 the host" — true, by design, and useless. Two things live here, both without an agent change:
 
   * `reason()` — the agent's strerror, sanitised, for errors we have no specific text for;
-  * "Upload and move as root": the file goes to the agent's inbox (`~/.webterm/inbox`, written as
-    the agent's user, like paste-to-inbox), then WebTerm TYPES — never runs — a command into the
-    person's own terminal that installs it into the target folder with sudo:
+  * "Upload and move as root", in two steps:
+      1. `new_plan()` — WebTerm names the staging files in the agent's inbox (`~/.webterm/inbox`,
+         written as the agent's user U, like paste-to-inbox). While the bytes stream through the
+         gateway into each staged file, the gateway hashes them (SHA-256, core.stage_*);
+      2. after the uploads, `command()` builds the command that WebTerm TYPES — never runs — into
+         the person's own terminal, or offers to copy:
 
-        sudo install -m 0644 -- '<inbox file>' '<dir>/<name>' && rm -f -- '<inbox file>'
+        sudo sh -c '<MOVE_SCRIPT>' webterm-move <U> <dir> [<staged> <size> <sha256> <dir>/<name>]...
+
+    The inbox belongs to U. Between the upload and the person pressing Enter, U can swap a staged
+    file for a symlink or hardlink to e.g. /etc/shadow, for a FIFO or /dev/zero, and anyone with
+    `files.write` on the host can upload over it. Typed into U's own tmux that would add nothing
+    (U can already type there), but the Copy fallback is pasted into SSH/console root shells too.
+    So the command never trusts the inbox:
+      - it reads each staged file AS U (`sudo -u U -- head -c <size>`): a link to a file U cannot
+        read fails, and at most <size> bytes are read (no /dev/zero disk fill);
+      - it writes them into a root-owned `mktemp` file IN the target folder, checks the SHA-256
+        the gateway recorded while the bytes passed through it, and only then does `chmod 0644`
+        and `mv -T` into place (same file system → atomic; never into a directory). A mismatch
+        or any error: the temp file is removed, nothing lands, the command stops;
+      - the staged file is removed as U, never as root.
+    The script is a constant (nothing is interpolated into it); every value is a positional
+    argument.
 
     The command text is security critical (it lands in what is often a root shell), so it is built
     here and nowhere else, the way healthcmd.py builds the System health commands:
       - every value is validated: the folder is an absolute, normalised path, the names are plain
-        file names, and none of them may contain control, format (bidi) or line-separator
-        characters — rejected, not stripped: a name that needs stripping is not the name the
-        person meant;
+        file names, U is a plain POSIX user name, and none of them may contain control, format
+        (bidi) or line-separator characters — rejected, not stripped: a name that needs stripping
+        is not the name the person meant;
       - the inbox file name is GENERATED here (timestamp + random), never taken from the client;
       - every token goes through `shlex.quote`, and the text must round-trip through `shlex.split`
         to exactly the argv we meant, or there is no command at all (`MoveError`, fail closed).
-
-    Reading the inbox file as root (sudo install) is not a new privilege for the agent's user:
-    that user owns the inbox, but it also owns the tmux server the root shell runs in, so it can
-    already type into that shell. sudo on the host stays the real gate, and the person presses
-    Enter after reading the command.
+    sudo on the host stays the real gate, and the person presses Enter after reading the command.
 """
 
 from __future__ import annotations
@@ -50,6 +64,11 @@ REASON_MAX = 120
 # the person reads) or garbage — refused.
 _BAD_CATEGORIES = {"Cc", "Cf", "Zl", "Zp", "Cs", "Co"}
 _INBOX_NAME_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}_root-move_[0-9a-f]{8}$")
+# A plain POSIX user name, as `useradd` accepts it by default: no leading `-` (an option), no
+# `#uid` (sudo syntax), no `$`, nothing a shell would treat specially.
+_USER_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+MAX_SIZE = 1 << 50
 
 
 class MoveError(ValueError):
@@ -109,6 +128,14 @@ def check_name(n) -> str:
     return n
 
 
+def check_user(u) -> str:
+    """The agent's user (reported by the agent, stored in hosts.agent_user). Unknown or odd → no
+    command at all: we would not know as whom to read the staged files."""
+    if not isinstance(u, str) or not _USER_RE.match(u) or shlex.split(shlex.quote(u)) != [u]:
+        raise MoveError("the agent's user is unknown or not a plain user name")
+    return u
+
+
 def inbox_name(now: float | None = None) -> str:
     """WebTerm's own name for the staged file — never derived from what the client sent."""
     stamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.gmtime(now if now is not None else time.time()))
@@ -127,35 +154,141 @@ def check_inbox(inbox: str) -> str:
     return inbox
 
 
-def build(inbox: str, target_dir: str, names: list, now: float | None = None) -> dict:
-    """→ {"uploads": [{"name", "upload_path"}], "command": str}. Raises MoveError."""
+def check_staged(inbox: str, path) -> str:
+    """A staged path WebTerm generated — <inbox>/<inbox_name()> — and nothing else."""
     inbox = check_inbox(inbox)
-    target_dir = check_dir(target_dir)
+    if (not isinstance(path, str) or not path.startswith(inbox + "/")
+            or not _INBOX_NAME_RE.match(path[len(inbox) + 1:])):
+        raise MoveError("internal: not a staged path")
+    return path
+
+
+def staged_paths(inbox: str, names: list, now: float | None = None) -> list:
+    """→ [{"name", "upload_path"}]: one generated staging file per validated name."""
+    inbox = check_inbox(inbox)
     if not isinstance(names, list) or not 1 <= len(names) <= MAX_FILES:
         raise MoveError("between 1 and %d files" % MAX_FILES)
     names = [check_name(n) for n in names]
     if len(set(names)) != len(names):
         raise MoveError("duplicate file names")
-    uploads, segments, srcs = [], [], []
+    uploads: list = []
     for n in names:
         staged = inbox_name(now)
         while any(u["upload_path"].endswith("/" + staged) for u in uploads):
             staged = inbox_name(now)                      # same second, same 32 random bits: retry
-        if not _INBOX_NAME_RE.match(staged):
-            raise MoveError("internal: bad inbox name")
-        src = inbox + "/" + staged
-        dst = (target_dir.rstrip("/") or "") + "/" + n
-        uploads.append({"name": n, "upload_path": src})
-        srcs.append(src)
-        segments.append(["sudo", "install", "-m", "0644", "--", src, dst])
-    segments.append(["rm", "-f", "--"] + srcs)
-    text = " && ".join(" ".join(shlex.quote(t) for t in seg) for seg in segments)
-    want: list = []
-    for i, seg in enumerate(segments):
-        if i:
-            want.append("&&")
-        want.extend(seg)
-    if (shlex.split(text) != want or has_bad_chars(text) or "\n" in text
+        uploads.append({"name": n, "upload_path": check_staged(inbox, inbox + "/" + staged)})
+    return uploads
+
+
+# Run by `sudo sh -c` with positional args: $1 = the agent's user, $2 = the target folder, then
+# per file: staged path, size, SHA-256, destination. A CONSTANT: nothing is ever interpolated into
+# it. No single quote (it is single-quoted on the command line) and no newline (it is typed).
+# `c` removes the temp file on any exit; INT/HUP/TERM go through `exit`, so the EXIT trap runs
+# (Ctrl-C on a FIFO someone left in the inbox leaves nothing behind).
+MOVE_SCRIPT = (
+    'u=$1 d=$2; shift 2; t=; '
+    'c() { [ -z "$t" ] || rm -f -- "$t"; t=; }; '
+    'trap c EXIT; trap "exit 130" HUP INT TERM; '
+    'while [ $# -ge 4 ]; do '
+    's=$1 z=$2 h=$3 f=$4; shift 4; '
+    't=$(mktemp -- "$d/.webterm-move.XXXXXX") || exit 1; '
+    'if sudo -u "$u" -- head -c "$z" -- "$s" >"$t" && x=$(sha256sum <"$t") && [ "${x%% *}" = "$h" ] '
+    '&& chmod 0644 -- "$t" && mv -f -T -- "$t" "$f"; '
+    'then t=; echo "webterm: installed $f"; sudo -u "$u" -- rm -f -- "$s" || :; '
+    'else echo "webterm: NOT installed: $f - the uploaded file was changed or replaced, '
+    'or $u could not read it (SHA-256 check); nothing was moved" >&2; exit 1; fi; '
+    'done'
+)
+SCRIPT_NAME = "webterm-move"
+
+
+def command(agent_user: str, inbox: str, target_dir: str, items: list) -> str:
+    """The command to type or copy. `items`: [{"name", "upload_path", "size", "sha256"}], size and
+    hash being what the GATEWAY streamed into the staged file (core.stage_result). Raises
+    MoveError — then there is no command."""
+    u = check_user(agent_user)
+    target_dir = check_dir(target_dir)
+    if not isinstance(items, list) or not 1 <= len(items) <= MAX_FILES:
+        raise MoveError("between 1 and %d files" % MAX_FILES)
+    argv = ["sudo", "sh", "-c", MOVE_SCRIPT, SCRIPT_NAME, u, target_dir]
+    seen: set = set()
+    for it in items:
+        name = check_name(it.get("name"))
+        if name in seen:
+            raise MoveError("duplicate file names")
+        seen.add(name)
+        src = check_staged(inbox, it.get("upload_path"))
+        size, sha = it.get("size"), it.get("sha256")
+        if not isinstance(size, int) or isinstance(size, bool) or not 0 <= size < MAX_SIZE:
+            raise MoveError("internal: bad size")
+        if not isinstance(sha, str) or not _SHA_RE.match(sha):
+            raise MoveError("internal: bad hash")
+        argv += [src, str(size), sha, target_dir.rstrip("/") + "/" + name]
+    text = " ".join(shlex.quote(t) for t in argv)
+    if (shlex.split(text) != argv or has_bad_chars(text) or "\n" in text
             or len(text) > MAX_COMMAND):
         raise MoveError("the command did not round-trip")
-    return {"uploads": uploads, "command": text}
+    return text
+
+
+# ── plans: the staged paths handed out, until their command is built ─────────────────────────
+# In memory: a gateway restart forgets them, and the person uploads again (fail closed — the
+# hashes were in memory too). The index (host, staged path) → plan lets the upload routes refuse
+# anyone else writing into a staged file while its plan is live; the hash check would refuse the
+# result anyway, this keeps the error early and clear.
+PLAN_TTL = 24 * 3600
+MAX_PLANS = 512
+_plans: dict = {}          # plan_id -> {"plan_id","host_id","user_id","dir","inbox","uploads","at"}
+_staged: dict = {}         # (host_id, upload_path) -> plan_id
+
+
+def _expire(now: float) -> list:
+    """Drop plans older than PLAN_TTL, then the oldest beyond MAX_PLANS - 1. → the dropped plans."""
+    gone = [pid for pid, p in _plans.items() if now - p["at"] > PLAN_TTL]
+    over = len(_plans) - len(gone) - MAX_PLANS + 1
+    if over > 0:
+        gone += [pid for pid in _plans if pid not in gone][:over]
+    return [p for p in (drop_plan(pid) for pid in gone) if p]
+
+
+def new_plan(host_id: int, user_id: int, inbox: str, target_dir: str, names: list,
+             now: float | None = None) -> tuple:
+    """→ (plan, dropped): the new plan (`plan_id`, `uploads`, …) and the older plans it evicted
+    (the caller forgets their stage hashes)."""
+    now = time.time() if now is None else now
+    target_dir = check_dir(target_dir)
+    uploads = staged_paths(inbox, names, now)
+    dropped = _expire(now)
+    pid = secrets.token_hex(16)
+    plan = {"plan_id": pid, "host_id": host_id, "user_id": user_id, "dir": target_dir,
+            "inbox": inbox, "uploads": uploads, "at": now}
+    _plans[pid] = plan
+    for u in uploads:
+        _staged[(host_id, u["upload_path"])] = pid
+    return plan, dropped
+
+
+def get_plan(plan_id, now: float | None = None):
+    if not isinstance(plan_id, str):
+        return None
+    now = time.time() if now is None else now
+    p = _plans.get(plan_id)
+    if p is None or now - p["at"] > PLAN_TTL:
+        return None
+    return p
+
+
+def drop_plan(plan_id: str):
+    p = _plans.pop(plan_id, None)
+    if p:
+        for u in p["uploads"]:
+            if _staged.get((p["host_id"], u["upload_path"])) == plan_id:
+                del _staged[(p["host_id"], u["upload_path"])]
+    return p
+
+
+def staged_owner(host_id: int, path) -> int | None:
+    """The user whose live plan staged `path` on this host, or None."""
+    pid = _staged.get((host_id, path)) if isinstance(path, str) else None
+    p = _plans.get(pid) if pid else None
+    return p["user_id"] if p else None

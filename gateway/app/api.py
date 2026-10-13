@@ -3578,6 +3578,7 @@ async def fs_upload(host_id: int, request: Request, path: str,
     verificare de conflict — refuză (409) dacă ținta s-a schimbat de când ai deschis-o."""
     audit.detail(request, path)
     await _require_host_stepup(host_id, user)   # H1
+    _check_staged_owner(host_id, path, user)    # a staged "move as root" file: its planner only
     if upload_id:
         _check_upload_id(upload_id)              # validează ÎNAINTE de log (anti log-injection) + core
         _log_chunk_start(host_id, upload_id, offset)
@@ -3610,6 +3611,7 @@ async def fs_upload_status(host_id: int, path: str, upload_id: str,
     verificarea de integritate şi după un resume, nu doar pe upload-urile din offset 0."""
     await _require_host_stepup(host_id, user)
     _check_upload_id(upload_id)
+    _check_staged_owner(host_id, path, user)
     try:
         st = await core.fs_upload_status(host_id, path, upload_id)
     except core.AgentGone:
@@ -3629,6 +3631,7 @@ async def fs_upload_commit(host_id: int, request: Request, path: str, upload_id:
     audit.detail(request, path)
     await _require_host_stepup(host_id, user)
     _check_upload_id(upload_id)
+    _check_staged_owner(host_id, path, user)
     try:
         written = await core.fs_upload_commit(host_id, path, upload_id, if_mtime=if_mtime, crc32=crc32)
     except core.AgentGone:
@@ -3646,6 +3649,7 @@ async def fs_upload_abort(host_id: int, path: str, upload_id: str,
     """Anulează un upload resumabil şi şterge temp-ul de pe host."""
     await _require_host_stepup(host_id, user)
     _check_upload_id(upload_id)
+    _check_staged_owner(host_id, path, user)
     await core.fs_upload_abort(host_id, path, upload_id)
     return {"ok": True}
 
@@ -3653,23 +3657,47 @@ async def fs_upload_abort(host_id: int, path: str, upload_id: str,
 # ── Upload and move as root (3.6.9, rootmove.py) ────────────────────────────────────────
 # Files writes as the agent's user. For a folder that user cannot write (root-owned
 # /srv/bin/lists), the file is staged in the agent's inbox and the client TYPES — never runs — a
-# `sudo install` command into the person's own terminal. This route only builds that command and
-# names the staging files; the bytes go through the normal upload route (same `files.write`, same
-# step-up), and the typing goes through the terminal's normal input path (same read-only checks as
-# a keystroke). Nothing here runs anything on the host besides `mkdir -p ~/.webterm/inbox`.
+# `sudo` command into the person's own terminal. Two steps:
+#   1. POST …/fs/root-move names the staging files (a plan). The bytes go through the normal
+#      upload route (same `files.write`, same step-up); the gateway hashes them on the way
+#      (core.stage_*), and only the planner may upload into a staged path while the plan lives;
+#   2. POST …/fs/root-move/{plan_id}/command, after the uploads: the command. It reads each staged
+#      file AS the agent's user and installs it only if its SHA-256 matches what passed through
+#      here (the inbox belongs to that user, who could swap the file in between).
+# The typing goes through the terminal's normal input path (same read-only checks as a
+# keystroke). Nothing here runs anything on the host besides `mkdir -p ~/.webterm/inbox`.
 class RootMoveIn(BaseModel):
     dir: str = Field(..., max_length=rootmove.MAX_PATH)
     names: list = Field(default_factory=list, max_length=rootmove.MAX_FILES)
 
 
+async def _agent_user_of(host_id: int) -> str:
+    """The agent's user as a validated plain user name, or 409 (fail closed: without it the
+    command cannot read the staged files as that user)."""
+    row = await db.fetchone("SELECT agent_user FROM hosts WHERE id=?", host_id)
+    try:
+        return rootmove.check_user((row["agent_user"] if row else None) or "")
+    except rootmove.MoveError:
+        raise ApiError(409, "files.rootMoveNoUser",
+                       "the agent's user is unknown or not a plain user name")
+
+
+def _check_staged_owner(host_id: int, path: str, user) -> None:
+    """A staged "move as root" file takes uploads only from the user who planned it."""
+    owner = rootmove.staged_owner(host_id, path)
+    if owner is not None and owner != user["id"]:
+        raise ApiError(403, "files.rootMoveForeign", "this file is staged by another user")
+
+
 @router.post("/api/hosts/{host_id}/fs/root-move")
 async def fs_root_move(host_id: int, body: RootMoveIn, request: Request,
                        user=Depends(authz.perm('files.write', host='host_id'))):
-    """Plan an "upload and move as root": → {uploads: [{name, upload_path}], command}.
+    """Plan an "upload and move as root": → {plan_id, uploads: [{name, upload_path}], inbox}.
     Gates: `files.write` on the host (as for any upload; tokens never) → step-up (H1) → strict
-    validation of the folder and names (rootmove.check_*; 400 `files.rootMoveBad`) → the agent
-    creates its inbox and reports its absolute path, which is validated too. The command is built
-    from those validated values only and must round-trip through shlex (fail closed)."""
+    validation of the folder and names (rootmove.check_*; 400 `files.rootMoveBad`) → the agent's
+    user must be a known plain user name (409 `files.rootMoveNoUser`) → the agent creates its
+    inbox and reports its absolute path, which is validated too. No command yet: it needs the
+    hashes of the uploaded bytes (…/command)."""
     await _require_host_stepup(host_id, user)
     try:
         rootmove.check_dir(body.dir)
@@ -3678,6 +3706,7 @@ async def fs_root_move(host_id: int, body: RootMoveIn, request: Request,
             raise rootmove.MoveError("no files")
     except rootmove.MoveError as e:
         raise ApiError(400, "files.rootMoveBad", str(e))
+    await _agent_user_of(host_id)
     try:
         inbox = await core.fs_mkdir(host_id, rootmove.INBOX_REL, True)
     except core.AgentGone:
@@ -3685,14 +3714,51 @@ async def fs_root_move(host_id: int, body: RootMoveIn, request: Request,
     except (core.FileError, TimeoutError) as e:
         raise _file_api_error(e)
     try:
-        plan = rootmove.build(inbox or "", body.dir, names)
+        plan, dropped = rootmove.new_plan(host_id, user["id"], inbox or "", body.dir, names)
     except rootmove.MoveError as e:
         raise ApiError(400, "files.rootMoveBad", str(e))
-    audit.detail(request, "upload and move as root: %d file(s) into %s (command typed, not run)"
+    for old in dropped:
+        for u in old["uploads"]:
+            core.stage_forget(old["host_id"], u["upload_path"])
+    for u in plan["uploads"]:
+        core.stage_track(host_id, u["upload_path"])
+    audit.detail(request, "upload and move as root: %d file(s) into %s (planned)"
                  % (len(names), _show_path(body.dir)))
     log.info("upload-and-move-as-root planned on host #%d: %d file(s) into %s",
              host_id, len(names), _show_path(body.dir))
-    return {"ok": True, "inbox": inbox, **plan}
+    return {"ok": True, "plan_id": plan["plan_id"], "inbox": inbox, "uploads": plan["uploads"]}
+
+
+@router.post("/api/hosts/{host_id}/fs/root-move/{plan_id}/command")
+async def fs_root_move_command(host_id: int, plan_id: str, request: Request,
+                               user=Depends(authz.perm('files.write', host='host_id'))):
+    """→ {command}: the command for a plan whose files were all uploaded. Same gates as the plan;
+    only its planner, on its host; every staged file must have committed with all of its bytes
+    hashed by this gateway (409 `files.rootMoveNotStaged` otherwise: upload again). The plan is
+    used up — one command per plan. The command is built from validated values only and must
+    round-trip through shlex (fail closed)."""
+    await _require_host_stepup(host_id, user)
+    plan = rootmove.get_plan(plan_id)
+    if not plan or plan["host_id"] != host_id or plan["user_id"] != user["id"]:
+        raise ApiError(404, "files.rootMoveGone", "no such upload plan (expired, used, or not yours)")
+    agent_user = await _agent_user_of(host_id)
+    items = []
+    for u in plan["uploads"]:
+        got = core.stage_result(host_id, u["upload_path"])
+        if not got:
+            raise ApiError(409, "files.rootMoveNotStaged",
+                           "a staged file was not uploaded completely through this gateway")
+        items.append({**u, "sha256": got[0], "size": got[1]})
+    try:
+        cmd = rootmove.command(agent_user, plan["inbox"], plan["dir"], items)
+    except rootmove.MoveError as e:
+        raise ApiError(400, "files.rootMoveBad", str(e))
+    rootmove.drop_plan(plan_id)
+    for u in plan["uploads"]:
+        core.stage_forget(host_id, u["upload_path"])
+    audit.detail(request, "upload and move as root: %d file(s) into %s (command typed or copied, not run)"
+                 % (len(items), _show_path(plan["dir"])))
+    return {"ok": True, "command": cmd}
 
 
 # ── Copiere host → host, pe server (3.5.5) ───────────────────────────────────────────────

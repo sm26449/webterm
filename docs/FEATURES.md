@@ -163,7 +163,7 @@ Press `?` for the cheatsheet.
   highlighting only, no language-service autocompletion. Files acts as the **agent's user**, not
   as your terminal's sudo: a folder it cannot write (a root-owned `/srv/bin/lists`) says exactly
   that — "the agent runs as `webterm` and cannot write in /srv/bin/lists (mode 755)" — and offers
-  **Upload and move as root** (staged in the agent's inbox, then a `sudo install …` command typed,
+  **Upload and move as root** (staged in the agent's inbox, then a hash-checked `sudo` command typed,
   never run, into your terminal), a `setfacl` command to copy, or the agent's home
   ([why and how](TRANSFERS.md#why-cant-i-upload-into-a-root-owned-folder-369))
 - **Transfers** — [details](TRANSFERS.md): progress lives in **one floating widget in the
