@@ -9,6 +9,10 @@ back.
 
 ## [Unreleased]
 
+## [3.6.8] — 2026-10-13 · agent (58)
+
+3.6.8 — System health: everything that can fail quietly is detected, explained and alerted, with the exact fix command (typed, never run, Owner-only for root). Plus the Authentik upgrade runbook and helper. No agent change.
+
 ### Added
 - **System health (Settings → System health).** Why: a read-only audit of 3.6.7 found a whole
   class of failures that only ever reached a log nobody reads: the host backup and certificate
@@ -98,6 +102,7 @@ back.
   or others (sticky parents allowed) — root runs `docker compose` on that file, so whoever could
   write it could run anything. A health mute now takes the same lock as a check run, so a
   running check cannot overwrite it.
+
 ## [3.6.7] — 2026-10-13 · agent (58)
 
 3.6.7 — TLS certificate monitoring with alerts, and Owner-only renewal in a terminal (typed, not run). No agent change.
