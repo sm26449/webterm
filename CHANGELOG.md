@@ -51,6 +51,11 @@ Uploads into root-owned folders explain why and offer a verified "upload and mov
   installer at a Python you installed yourself). The agent token is passed to curl/wget in a 0600
   config file, never on a command line.
 ### Fixed
+- **`cert-renew.sh` backups taken within one second kept a stale one as "newest".** Why: after
+  retention removed `acme-<stamp>`, the next backup in that second re-used the freed name, which
+  sorts first — so retention deleted it and "latest" (and `--restore` suggestions) pointed at an
+  older store. Numbering now continues after the highest `-NN` used that second. This was the
+  "intermittent" CI failure of the 3.6.7 tag; the diagnostics added then showed the cause.
 - **upgrade.sh now hands over to the release's own upgrade.sh before syncing anything.** Why: it
   replaced itself only at the very end ("active from the next run"), so the 3.6.8 upgrade on prod
   ran with the 3.6.7 script, which synced only the kit files it knew — `host-health.sh`,

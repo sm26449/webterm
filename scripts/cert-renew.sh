@@ -498,10 +498,17 @@ backup() {
   fi
   stamp=$(date -u +%Y%m%dT%H%M%SZ)
   dst="$BACKUP_ROOT/acme-$stamp"
-  local i=1
-  while [ -e "$dst" ]; do               # same second: -02, -03… (still sorts oldest → newest)
-    i=$((i + 1)); dst=$(printf '%s/acme-%s-%02d' "$BACKUP_ROOT" "$stamp" "$i")
+  # same second: -02, -03… after the HIGHEST number already used this second, never a free lower
+  # one — retention may have removed `acme-<stamp>` itself, and re-using it would sort the newest
+  # backup first (then retention deletes it and "latest" is a stale one)
+  local i=0 k d
+  for d in "$dst" "$dst"-[0-9][0-9]; do
+    [ -e "$d" ] || continue
+    case "$d" in *-[0-9][0-9]) k=$((10#${d##*-})) ;; *) k=1 ;; esac
+    [ "$k" -gt "$i" ] && i=$k
   done
+  if [ "$i" -ge 99 ]; then die "more than 99 backups within one second — refusing"; fi
+  if [ "$i" -gt 0 ]; then dst=$(printf '%s/acme-%s-%02d' "$BACKUP_ROOT" "$stamp" "$((i + 1))"); fi
   mkdir -m 700 "$dst"
   for f in "$ACME_DIR"/*.json; do
     [ -f "$f" ] || continue

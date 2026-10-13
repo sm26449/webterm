@@ -407,6 +407,24 @@ def main():
         newest = os.path.join(backups, names[-1])
         check("the newest backup is the current store", open(os.path.join(newest, "acme.json"), "rb").read()
               == open(os.path.join(acme, "acme.json"), "rb").read(), "%s ;; %s" % (names, " ;; ".join(outs)))
+        # all in ONE second (a fixed `date`): after retention removed `acme-<stamp>`, a new backup
+        # must not re-use that free lower name — it would sort first (CI: 3.6.7, 3.6.9 tags)
+        fdate = os.path.join(base, "fixed-date")
+        os.makedirs(fdate, exist_ok=True)
+        with open(os.path.join(fdate, "date"), "w") as f:
+            f.write('#!/bin/sh\ncase "$*" in *%Y%m%dT*) echo 20300101T000000Z ;; *) exec /bin/date "$@" ;; esac\n')
+        os.chmod(fdate, 0o755)
+        os.chmod(os.path.join(fdate, "date"), 0o755)
+        for i in range(8):
+            write_json(os.path.join(acme, "acme.json"), store("le", [entry("auth.example.com", [], 90 + i)]))
+            rc, out = run(inst, fake, extra_env={"PATH": fdate + ":" + os.environ.get("PATH", "/usr/bin:/bin")})
+        same = sorted(os.listdir(backups))
+        check("same second: still the newest 5, numbered upward", len(same) == 5
+              and same == ["acme-20300101T000000Z-%02d" % n for n in range(4, 9)], same)
+        check("same second: the newest backup is the current store",
+              open(os.path.join(backups, same[-1], "acme.json"), "rb").read()
+              == open(os.path.join(acme, "acme.json"), "rb").read(), same)
+        names = same
         oldest = os.path.join(backups, names[0])
         rc, out = run(inst, fake, "--restore", "/etc", "--yes")
         check("--restore outside acme-backups → rc 2", rc == 2, out[-200:])
