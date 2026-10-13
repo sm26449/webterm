@@ -110,14 +110,17 @@ MESSAGES = {
     "host_backup_failed": "The host backup failed: {message}",
     "host_backup_stale": "The last host backup report is {age} old",
     "host_backup_missing": "The backup timer is enabled but has never reported",
+    "host_backup_pending": "The host backup has not run since the host scripts were updated — next run in {next}",
     "host_backup_ok": "Host backup OK ({age} ago)",
     "cert_check_failed": "The host certificate check failed: {message}",
     "cert_check_stale": "The host certificate check last reported {age} ago",
     "cert_check_missing": "The certificate check timer is enabled but has never reported",
+    "cert_check_pending": "The certificate check has not run since the host scripts were updated — next run in {next}",
     "cert_check_ok": "Host certificate check OK",
     "cleanup_failed": "The Docker cleanup failed: {message}",
     "cleanup_stale": "The Docker cleanup last reported {age} ago",
     "cleanup_missing": "The Docker cleanup timer is enabled but has never reported",
+    "cleanup_pending": "The Docker cleanup has not run since the host scripts were updated — next run in {next}",
     "cleanup_ok": "Docker cleanup OK ({pct}% free after it)",
     "cf_token_invalid": "The Cloudflare DNS token is {status}",
     "cf_token_expiring": "The Cloudflare DNS token expires on {expires}",
@@ -223,6 +226,7 @@ WHY = {
 RECS = {
     "install_helper": "Install it on the gateway host: it adds an hourly systemd timer and changes nothing else.",
     "check_timer": "Look at the unit's journal, then start it once by hand to see it succeed.",
+    "timer_pending": "Nothing is wrong: the timer has not fired since the update. To see it work now, start it once.",
     "run_upgrade": "Your host scripts predate 3.6.8 — run upgrade.sh to refresh them.",
     "cf_token": "Create a new token (Zone:DNS:Edit on the zone) in the Cloudflare dashboard, put it in secrets/cf_dns_api_token, then recreate Traefik.",
     "authentik_steps": "Step through the minor releases, never skip one (2026.5.x must go straight to 2026.8.3 or later), with a database backup first — follow docs/AUTHENTIK-UPGRADE.md, or use scripts/authentik-upgrade.sh.",
@@ -349,6 +353,35 @@ async def c_host_helper() -> Optional[Result]:
     return Result("ok", "helper_ok")
 
 
+PENDING_GRACE = 6 * 3600          # a daily timer that has not fired 30 h after an update is late
+_KIT_KEY = {"backup": "backup", "cert-check": "cert_check", "docker-cleanup": "cleanup"}
+
+
+def _never_reported(sid: str, unit: str, k_missing: str, k_pending: str,
+                    now: Optional[float] = None) -> Result:
+    """The timer is enabled but its status file does not exist. Three different situations
+    (3.6.9 — right after an upgrade every daily timer looked broken):
+      * the script cannot report (it predates 3.6.8) → warning, run upgrade.sh;
+      * current script, installed/updated less than one interval (+ grace) ago → INFO: it has
+        simply not fired yet; when it will, and how to run it now;
+      * current script for longer than that → warning: the timer really is not running it.
+    The kit report comes from host-health.sh ≥ 3.6.9; without it we keep the old wording."""
+    now = time.time() if now is None else now
+    hh = ((_HOST.get("host-health") or {}).get("data") or {})
+    k = _KIT_KEY.get(sid, "")
+    reports = hh.get("kit_" + k)
+    if reports is None or reports is False:
+        return Result("warning", k_missing, rec="run_upgrade", commands=_unit_cmds(unit))
+    since = hh.get("since_" + k) or 0
+    nxt = hh.get("next_" + k) or 0
+    interval = hoststatus.IDS.get(sid) or 86400
+    if since and now - since < interval + PENDING_GRACE:
+        eta = nxt - now if nxt > now else max(60, since + interval - now)
+        return Result("info", k_pending, {"next": _age(eta)}, rec="timer_pending",
+                      commands=[{"t": "unit_start", "p": {"unit": unit}}])
+    return Result("warning", k_missing, rec="check_timer", commands=_unit_cmds(unit))
+
+
 def _status_check(sid: str, unit: str, timer: str, keys: tuple, fail_sev: str = "warning",
                   ok_params=None):
     """Shared shape for a timer that reports through a status file: failed / stale / never
@@ -358,7 +391,7 @@ def _status_check(sid: str, unit: str, timer: str, keys: tuple, fail_sev: str = 
         k_failed, k_stale, k_missing, k_ok = keys
         if st.get("state") != "ok":
             if st.get("state") == "missing" and _timer(timer) == "enabled":
-                return Result("warning", k_missing, rec="run_upgrade", commands=_unit_cmds(unit))
+                return _never_reported(sid, unit, k_missing, k_missing.replace("_missing", "_pending"))
             return None                 # not installed here (or refused: host.helper says why)
         if st["status"] in ("error", "warn"):
             # `warn` = it ran but part of it failed (e.g. the off-host copy, one prune step)

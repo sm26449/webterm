@@ -49,6 +49,7 @@ IDS = {
 }
 STATUSES = ("ok", "warn", "error", "skipped")
 TIMER_STATES = ("enabled", "disabled", "missing")
+KIT_KEYS = ("backup", "cert_check", "cleanup")          # host-health.sh's kit report (3.6.9)
 TIMERS = ("webterm-backup.timer", "webterm-cert-check.timer", "webterm-host-health.timer",
           "webterm-docker-cleanup.timer")
 _VERSION_RE = re.compile(r"^[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,3}$")
@@ -117,6 +118,13 @@ def _data(sid: str, raw) -> dict:
         if isinstance(raw.get("legacy_cron"), bool):
             out["legacy_cron"] = raw["legacy_cron"]
         put("script_version", _int(raw.get("script_version"), 0, 10000))
+        # 3.6.9 kit report: does each timer's script support reporting, since when is it
+        # installed, when does the timer fire next (epoch seconds; 0 = unknown)
+        for k in KIT_KEYS:
+            if isinstance(raw.get("kit_" + k), bool):
+                out["kit_" + k] = raw["kit_" + k]
+            put("since_" + k, _int(raw.get("since_" + k), 0, 2 ** 40))
+            put("next_" + k, _int(raw.get("next_" + k), 0, 2 ** 40))
     elif sid == "cloudflare-token":
         put("token_status", _enum(raw.get("token_status"),
                                   ("active", "expired", "disabled", "invalid", "unknown")))

@@ -90,6 +90,7 @@ esac
 
 FAKE_SYSTEMCTL = r"""#!/bin/sh
 echo "$*" >> "$FAKE_DIR/systemctl"
+if [ "$1" = show ] && [ -s "$FAKE_DIR/next" ]; then echo "@$(cat "$FAKE_DIR/next")"; exit 0; fi
 if [ "$1" = is-enabled ]; then
   if grep -qx "$2" "$FAKE_DIR/enabled" 2>/dev/null; then echo enabled; exit 0; fi
   echo disabled; exit 1
@@ -382,6 +383,25 @@ def main():
         st = status(base, "host-health")
         check("all timers enabled → ok", st and st["status"] == "ok"
               and set(st["data"]["timers"].values()) == {"enabled"}, st)
+        # 3.6.9 kit report: which scripts can report, since when, next run
+        kd = st["data"] if st else {}
+        check("kit: docker-cleanup.sh (current) can report, backup.sh (absent) cannot",
+              kd.get("kit_cleanup") is True and kd.get("kit_backup") is False and kd.get("script_version") == 2, kd)
+        check("kit: install time = newest of script / timer mtime",
+              kd.get("since_cleanup", 0) >= int(os.stat(os.path.join(sysd, "webterm-docker-cleanup.timer")).st_mtime) - 1, kd)
+        open(os.path.join(inst, "scripts", "backup.sh"), "w").write("#!/bin/sh\n# 3.6.7: no status reporting\n")
+        open(os.path.join(fake, "next"), "w").write("1893456000")
+        run(base, inst, fake, "host-health.sh", extra_env=api)
+        kd = (status(base, "host-health") or {}).get("data", {})
+        check("kit: an old backup.sh without --record → kit_backup false; next run from systemctl show",
+              kd.get("kit_backup") is False and kd.get("next_backup") == 1893456000, kd)
+        open(os.path.join(inst, "scripts", "backup.sh"), "w").write(
+            '#!/bin/sh\n"$BK_SELF_DIR/host-health.sh" --record backup ok done\n')
+        os.unlink(os.path.join(fake, "next"))
+        run(base, inst, fake, "host-health.sh", extra_env=api)
+        kd = (status(base, "host-health") or {}).get("data", {})
+        check("kit: a current backup.sh → kit_backup true; next unknown → 0",
+              kd.get("kit_backup") is True and kd.get("next_backup") == 0, kd)
         other = os.path.join(sysd, "webterm-docker-cleanup.service")
         open(other, "w").write("[Service]\nWorkingDirectory=/opt/other\n")
         rc, out = run(base, inst, fake, "host-health.sh", "--install")

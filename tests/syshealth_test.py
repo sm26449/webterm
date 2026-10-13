@@ -390,6 +390,31 @@ async def test_checks(owner_uid):
     r = await run_check("host.backup")
     check("backup timer enabled but never reported → warning", r and r["severity"] == "warning"
           and r["message_key"] == "host_backup_missing", r)
+    # 3.6.9: the kit report (host-health.sh ≥ 3.6.9) tells "outdated script" from "not run yet"
+    now = time.time()
+    kit = dict(timers=timers, kit_backup=True, since_backup=int(now - 3600), next_backup=int(now + 5.5 * 3600))
+    write_status(hs, "host-health", status_doc("host-health", data=kit))
+    r = await run_check("host.backup")
+    check("current script, updated 1 h ago, timer not fired yet → INFO 'pending' with the next run",
+          r and r["severity"] == "info" and r["message_key"] == "host_backup_pending"
+          and "5 h" in r["params"] and "unit_start" in r["commands"] and r["recommendation_key"] == "timer_pending", r)
+    kit.update(next_backup=0)
+    write_status(hs, "host-health", status_doc("host-health", data=kit))
+    r = await run_check("host.backup")
+    check("…next run unknown → estimated from install time + interval",
+          r and r["severity"] == "info" and ("22 h" in r["params"] or "23 h" in r["params"]), r)
+    kit.update(since_backup=int(now - 31 * 3600))
+    write_status(hs, "host-health", status_doc("host-health", data=kit))
+    r = await run_check("host.backup")
+    check("current script but > interval + grace without a report → warning, check the timer (not 'upgrade')",
+          r and r["severity"] == "warning" and r["message_key"] == "host_backup_missing"
+          and r["recommendation_key"] == "check_timer", r)
+    kit.update(kit_backup=False, since_backup=int(now - 3600))
+    write_status(hs, "host-health", status_doc("host-health", data=kit))
+    r = await run_check("host.backup")
+    check("script cannot report (predates 3.6.8) → warning, run upgrade.sh",
+          r and r["severity"] == "warning" and r["recommendation_key"] == "run_upgrade", r)
+    write_status(hs, "host-health", status_doc("host-health", data={"timers": timers}))
     write_status(hs, "backup", status_doc("backup", status="error", message="REFUSING: volume missing"))
     r = await run_check("host.backup")
     check("host backup failed → CRITICAL, the message shown, journal + start commands",

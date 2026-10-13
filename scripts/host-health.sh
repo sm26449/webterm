@@ -403,6 +403,33 @@ legacy=false
 if [ -f "$CRON_DIR/webterm-docker-cleanup" ] && grep -q '/usr/local/bin/webterm-docker-cleanup' "$CRON_DIR/webterm-docker-cleanup" 2>/dev/null; then
   legacy=true
 fi
+# 3.6.9 — the kit report: for each timer that reports through a status file, does ITS script
+# support reporting (`--record <id>`, 3.6.8+), when were the script / timer last installed or
+# updated, and when does the timer fire next. Without it the gateway could not tell "your scripts
+# predate 3.6.8" from "current scripts, the timer simply has not fired since the update" — and
+# warned about the latter right after every upgrade.
+mtime() { stat -c %Y "$1" 2>/dev/null || echo 0; }
+next_run() {   # epoch seconds of the timer's next elapse, 0 when unknown
+  [ "$have_systemd" = 1 ] || { echo 0; return; }
+  v=$(timeout 10 "$SYSTEMCTL" show -P NextElapseUSecRealtime --timestamp=unix "$1" 2>/dev/null || true)
+  v=${v#@}
+  case "$v" in ''|*[!0-9]*)
+    v=$(timeout 10 "$SYSTEMCTL" show -P NextElapseUSecRealtime "$1" 2>/dev/null || true)
+    # `date -d ""` is today's midnight, not an error: only parse a real timestamp
+    case "$v" in ''|n/a|0) v=0 ;; *) v=$(date -d "$v" +%s 2>/dev/null || echo 0) ;; esac ;;
+  esac
+  case "$v" in ''|*[!0-9]*) echo 0 ;; *) echo "$v" ;; esac
+}
+kit_json=""
+for pair in backup:backup cert_check:cert-check cleanup:docker-cleanup; do
+  key=${pair%%:*} sid=${pair#*:}
+  script="$ROOT/scripts/$sid.sh" timer="webterm-$sid.timer"
+  reports=false
+  [ -f "$script" ] && grep -q -- "--record $sid" "$script" 2>/dev/null && reports=true
+  since=$(mtime "$script"); t_since=$(mtime "$SYSTEMD_DIR/$timer")
+  [ "$t_since" -gt "$since" ] 2>/dev/null && since=$t_since
+  kit_json="$kit_json,\"kit_$key\":$reports,\"since_$key\":$since,\"next_$key\":$(next_run "$timer")"
+done
 if [ "$have_systemd" = 1 ]; then
   timers_json="" bad=""
   for t in $TIMERS; do
@@ -413,7 +440,7 @@ if [ "$have_systemd" = 1 ]; then
     [ "$st" = enabled ] || bad="$bad ${t%.timer}"
     timers_json="$timers_json${timers_json:+,}\"$t\":\"$st\""
   done
-  data="{\"timers\":{$timers_json},\"legacy_cron\":$legacy,\"script_version\":1}"
+  data="{\"timers\":{$timers_json},\"legacy_cron\":$legacy,\"script_version\":2$kit_json}"
   if [ -n "$bad" ]; then
     record host-health warn "timers not active:$bad" "$data" || rc=1
   else
@@ -421,7 +448,7 @@ if [ "$have_systemd" = 1 ]; then
   fi
 else
   record host-health ok "host checks ran (no systemd: timers not checked)" \
-    "{\"timers\":{},\"legacy_cron\":$legacy,\"script_version\":1}" || rc=1
+    "{\"timers\":{},\"legacy_cron\":$legacy,\"script_version\":2$kit_json}" || rc=1
 fi
 
 # 2. the Cloudflare DNS token (DNS-01 certificates)
