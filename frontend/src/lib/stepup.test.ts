@@ -1,6 +1,20 @@
 import { describe, expect, it } from 'vitest'
-import { lockTextKeys, stepupPrompt, totpCred, unlockLabelKey, wsUnlockMessage } from './stepup'
+import { lockTextKeys, stepupPrompt, stepupSucceeded, totpCred, unlockLabelKey, wsUnlockMessage } from './stepup'
 import en from '../lang/en'
+
+describe('/stepup result (3.6.7 follow-up 4)', () => {
+  it('a no-op is not a success: nothing opened and no window', () => {
+    expect(stepupSucceeded({ ok: true, opened: false, window: 0 })).toBe(false)
+  })
+  it('a window that opened, or one still open, is', () => {
+    expect(stepupSucceeded({ ok: true, opened: true, window: 300 })).toBe(true)
+    expect(stepupSucceeded({ ok: true, opened: false, window: 120 })).toBe(true)
+  })
+  it('an older gateway (no `opened`) keeps the old meaning of ok', () => {
+    expect(stepupSucceeded({ ok: true, window: 300 })).toBe(true)
+    expect(stepupSucceeded(null)).toBe(false)
+  })
+})
 
 describe('step-up credential field names (3.6.7 review F5.1)', () => {
   it('a TOTP code travels as `stepup_totp`, the field every HTTP route reads (never `totp`)', () => {

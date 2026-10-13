@@ -29,7 +29,7 @@ import { initialFleet, settleFleet, type FleetState, type FleetStatus } from './
 import { errText, api, ApiError, AppState, Host, isSessionLive, Session, Snippet, SplitView, setStepupHandler, withStepup } from './lib/api'
 import { hostAt, hostColor } from './lib/host'
 import type { SettingsTarget } from './lib/settingsIndex'
-import { stepupPrompt, totpCred, type StepupCred } from './lib/stepup'
+import { stepupPrompt, stepupSucceeded, totpCred, type StepupCred, type StepupResult } from './lib/stepup'
 import { useI18n } from './lib/i18n'
 import { useConfirm } from './lib/confirm'
 import { useFocusTrap } from './lib/useFocusTrap'
@@ -952,8 +952,8 @@ function MainApp() {
       const cred = await stepupCredential(hostId, code)
       if (!cred) return false
       try {
-        await api(`/api/hosts/${hostId}/stepup`, { method: 'POST', body: JSON.stringify(cred) })
-        return true
+        return stepupSucceeded(await api<StepupResult>(`/api/hosts/${hostId}/stepup`,
+          { method: 'POST', body: JSON.stringify(cred) }))
       } catch {
         return false
       }
@@ -979,7 +979,8 @@ function MainApp() {
       const cred = await stepupCredential(hostId)
       if (cancelled || !cred) return
       try {
-        await api(`/api/hosts/${hostId}/stepup`, { method: 'POST', body: JSON.stringify(cred) })
+        const r = await api<StepupResult>(`/api/hosts/${hostId}/stepup`, { method: 'POST', body: JSON.stringify(cred) })
+        if (!stepupSucceeded(r)) return
       } catch {
         return                                  // step-up refuzat → rămâi pe pagina hostului
       }

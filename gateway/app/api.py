@@ -4289,8 +4289,11 @@ async def cert_renew_session(host_id: int, body: CertRenewIn, request: Request,
     await _require_fresh_factor(host_id, user, body.stepup_grant, body.stepup_password,
                                 body.stepup_totp)
     try:
+        # creator + origin go into the INSERT itself (no separate stamp afterwards): the row is
+        # never visible as "everyone's" or as a plain web session, not even while 'creating'
         result = await core.create_session(host_id, "TLS renew: %s" % domain[:60], body.rows,
-                                           body.cols, body.tz, certmon.typed_session_cmd(command))
+                                           body.cols, body.tz, certmon.typed_session_cmd(command),
+                                           created_by_id=user["id"], origin=CERT_RENEW_ORIGIN)
     except core.AgentGone:
         raise ApiError(409, "host.offline", "the host is offline (the agent is not connected)")
     except core.SessionLimitReached:
@@ -4299,7 +4302,6 @@ async def cert_renew_session(host_id: int, body: CertRenewIn, request: Request,
                        vars={"limit": core.MAX_SESSIONS_HINT})
     except RuntimeError as e:
         raise _runtime_api_error(e, "session.createFailed")
-    await _stamp_session(result, user, origin=CERT_RENEW_ORIGIN)
     audit.detail(request, "certificate renewal terminal for %s (command typed, not run)" % domain)
     log.warning("certificate renewal terminal opened on host #%d for %s by %s",
                 host_id, domain, user["email"] if not isinstance(user, dict) else user.get("email"))
@@ -7779,6 +7781,7 @@ async def host_stepup(host_id: int, body: SessionIn, request: Request,
                       user=Depends(authz.perm('host.view', host='host_id'))):
     """Deschide fereastra de step-up pe un host cu 2FA (din passkey grant sau parolă), ca
     frontend-ul să deblocheze file-browser-ul / fleet-run înainte de acțiuni. Idempotent."""
+    t_call = time.time()
     was_open = security.stepup_window_ok(user["id"], host_id)
     await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password,
                               body.stepup_totp)
@@ -7807,7 +7810,14 @@ async def host_stepup(host_id: int, body: SessionIn, request: Request,
     if not was_open and row and row["require_2fa"]:
         email_alerts.notify_host_unlocked(row["name"], security.client_ip(request), user["email"],
                                           host_id=host_id, user_id=user["id"])
-    return {"ok": True, "window": security.STEPUP_WINDOW}
+    # Say what happened (3.6.7 follow-up): it answered `window: 300` even when NOTHING opened (a
+    # body without a factor on a host without 2FA), which reads as "you are stepped up".
+    # `opened` = this call opened/refreshed the window; `window` = seconds left on it now (0 = none).
+    rec = security._stepup_windows.get((user["id"], host_id))
+    now = time.time()
+    opened = bool(rec and rec[0] >= t_call)
+    left = int(rec[1] - now) if rec and rec[1] > now else 0
+    return {"ok": True, "opened": opened, "window": max(0, left)}
 
 
 @router.post("/api/hosts/{host_id}/ssh-key/generate")

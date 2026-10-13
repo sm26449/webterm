@@ -229,9 +229,16 @@ you read it and press Enter, and `sudo` on the host decides whether you may. The
 can type into that terminal and it cannot be shared. Without a picked host it shows the command
 to copy.
 
-The script refuses to run unless the install directory, `scripts/` and the script itself (and
-`acme-backups/`) belong to root and are not writable by group or others, and it ignores the
-environment overrides its test suite uses.
+The script refuses to run unless the install directory, every directory above it (sticky ones
+like `/tmp` excepted), `scripts/`, the script itself, `acme-backups/`, `.env` and
+`docker-compose.prod.yml` belong to root and are not writable by group or others (`.env` as
+`install.sh` writes it: 0600, or 0640 with group root). The environment overrides its test suite
+uses are never honoured for root.
+
+One limit to know: the terminal is a tmux session of the agent's Unix user. Anyone with a shell
+as that same user on the gateway host can attach to it outside WebTerm. Because the command is
+`sudo -k`, they gain nothing from that without the sudo password: no cached credentials are left
+behind.
 
 The case this was built for (2026-10-12): a wildcard that ended up in the HTTP-01 store
 (`le`). HTTP-01 cannot renew it, so Traefik logged *"Error renewing ACME certificate … could

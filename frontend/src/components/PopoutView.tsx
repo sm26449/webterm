@@ -6,7 +6,7 @@ import { hostAt } from '../lib/host'
 import { useI18n } from '../lib/i18n'
 import { notifyError, registerToast } from '../lib/notify'
 import { askSecret, registerSecretPrompt, SecretAsk } from '../lib/secretPrompt'
-import { StepupMethod, stepupPrompt, totpCred, type StepupCred } from '../lib/stepup'
+import { StepupMethod, stepupPrompt, stepupSucceeded, totpCred, type StepupCred, type StepupResult } from '../lib/stepup'
 import SecretPromptModal from './SecretPromptModal'
 import SessionView from './SessionView'
 import Toasts, { ToastItem } from './Toasts'
@@ -134,8 +134,8 @@ export default function PopoutView(props: { sid: string }) {
       const cred = await stepupCredential(hostId, code)
       if (!cred) return false
       try {
-        await api(`/api/hosts/${hostId}/stepup`, { method: 'POST', body: JSON.stringify(cred) })
-        return true
+        return stepupSucceeded(await api<StepupResult>(`/api/hosts/${hostId}/stepup`,
+          { method: 'POST', body: JSON.stringify(cred) }))
       } catch {
         return false
       }

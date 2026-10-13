@@ -487,11 +487,13 @@ async def test_routes():
     certmon.targets = lambda fwd="": T
     created = []
 
-    async def fake_create(host_id, title, rows=24, cols=80, tz=None, cmd=None, pw=None):
-        created.append({"host_id": host_id, "title": title, "cmd": cmd})
+    async def fake_create(host_id, title, rows=24, cols=80, tz=None, cmd=None, pw=None,
+                          created_by_id=None, origin=None):
+        created.append({"host_id": host_id, "title": title, "cmd": cmd, "by": created_by_id, "origin": origin})
         sid = "s-cert-%d" % len(created)
-        await db.execute("INSERT INTO sessions(id, host_id, title, state, created) VALUES(?,?,?,?,?)",
-                         sid, host_id, title, "live", time.time())
+        await db.execute("INSERT INTO sessions(id, host_id, title, state, created, created_by_id, origin)"
+                         " VALUES(?,?,?,?,?,?,?)", sid, host_id, title, "live", time.time(),
+                         created_by_id, origin or "web")
         return {"id": sid, "host_id": host_id, "title": title}
 
     core.create_session = fake_create
@@ -537,9 +539,12 @@ async def test_routes():
         from app import security, totp as totp_mod
         security._stepup_windows.clear()
         n = len(created)
+        r = await owner.post("/api/hosts/%d/stepup" % hid, json={})
+        check("follow-up 4: a /stepup that opens nothing says so: {ok, opened: false, window: 0}",
+              r.status_code == 200 and r.json() == {"ok": True, "opened": False, "window": 0}, r.text[:200])
         r = await owner.post("/api/hosts/%d/stepup" % hid, json={"stepup_password": U.OWNER_PW})
-        check("password-only account: /stepup with the password still opens the window", r.status_code == 200,
-              r.text[:200])
+        check("password-only account: /stepup with the password still opens the window", r.status_code == 200
+              and r.json().get("opened") is True and r.json().get("window", 0) > 290, r.text[:200])
         r = await owner.post(url, json={"domain": "wt.example.com"})
         check("…and the fresh-factor gate accepts it (unchanged behaviour)", r.status_code == 200
               and len(created) == n + 1, r.text[:200])
@@ -588,6 +593,37 @@ async def test_routes():
         check("a Bearer token cannot open it", r.status_code in (401, 403), r.status_code)
     finally:
         certmon.targets, core.create_session = orig_targets, orig_create
+
+    # ── follow-up 3: creator + origin are in the row from its very first SELECT (real core) ──
+    from app import api as api_mod, security as sec
+    admin_uid = (await db.fetchone("SELECT id FROM users WHERE email='admin@x.co'"))["id"]
+    seen = {}
+
+    class FirstLook:
+        epoch = 0
+
+        async def create(self, sid, rows, cols, term, tz, cmd, pw):
+            # called right after the INSERT, before anything else touches the row
+            row = await db.fetchone("SELECT * FROM sessions WHERE id=?", sid)
+            seen.update(state=row["state"], by=row["created_by_id"], origin=row["origin"],
+                        admin=await api_mod._ws_access(admin_uid, row),
+                        owner=await api_mod._ws_access(owner_uid, row))
+            return {"ok": False, "code": "test-stop"}
+
+    certmon.targets = lambda fwd="": T
+    core.sources[hid] = FirstLook()
+    try:
+        sec._stepup_windows.clear()
+        r = await owner.put("/api/certs/renew-host", json={"host_id": hid})
+        r = await owner.post(url, json={"domain": "wt.example.com", "stepup_password": U.OWNER_PW})
+        check("real core.create_session: at the first SELECT the row is 'creating', owned by the Owner,"
+              " origin=cert-renew", seen.get("state") == "creating" and seen.get("by") == owner_uid
+              and seen.get("origin") == "cert-renew", "%s %s" % (seen, r.text[:200]))
+        check("…read-write only for its opener from that moment (Admin: ro, Owner: rw)",
+              seen.get("admin") == "ro" and seen.get("owner") == "rw", seen)
+    finally:
+        core.sources.pop(hid, None)
+        certmon.targets = orig_targets
     r = await owner.put("/api/certs/renew-host", json={"host_id": 0})
     check("the pick can be cleared", r.status_code == 200 and r.json()["renew_host"] is None)
     return owner_uid

@@ -3293,15 +3293,20 @@ def search_transcripts(rows, query: str):
 
 async def create_session(host_id: int, title: str, rows: int = 24, cols: int = 80,
                          tz: Optional[str] = None, cmd: Optional[str] = None,
-                         pw: Optional[str] = None) -> dict:
+                         pw: Optional[str] = None, created_by_id: Optional[int] = None,
+                         origin: Optional[str] = None) -> dict:
     source = source_for(host_id)
     if source is None:
         raise AgentGone("host offline")
     sid = new_sid()
+    # `created_by_id`/`origin` (3.6.7): when given, they go in WITH the row, so it is never
+    # visible — not even while 'creating' — as "everyone's" (created_by_id NULL) or as a plain
+    # web session. The certificate-renewal terminal depends on that (only its opener types).
     await db.execute(
-        "INSERT INTO sessions(id, host_id, title, state, created, rows, cols, agent_epoch)"
-        " VALUES(?,?,?,?,?,?,?,?)",
-        sid, host_id, title, "creating", time.time(), rows, cols, source.epoch)
+        "INSERT INTO sessions(id, host_id, title, state, created, rows, cols, agent_epoch,"
+        " created_by_id, origin) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        sid, host_id, title, "creating", time.time(), rows, cols, source.epoch,
+        created_by_id, origin or "web")
     try:
         # `cmd` (opţional): sesiunea rulează comanda asta în loc de shell-ul de login — folosit
         # pentru „shell în container" (docker exec). Agentul o rulează ÎN tmux, deci persistă şi

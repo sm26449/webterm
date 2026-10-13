@@ -74,6 +74,17 @@ export function totpCred(code: string): StepupCred {
   return { stepup_totp: code.trim() }
 }
 
+/** POST /api/hosts/{id}/stepup answers `{ok, opened, window}` (3.6.7): `opened` = this call
+    opened the window, `window` = seconds left on it (0 = none). A no-op (no factor in the body,
+    host without 2FA) is `{ok: true, opened: false, window: 0}` — not a success to retry on. */
+export type StepupResult = { ok?: boolean; opened?: boolean; window?: number }
+
+export function stepupSucceeded(r: StepupResult | null | undefined): boolean {
+  if (!r) return false
+  if (r.opened === undefined) return r.ok !== false          // an older gateway: ok was the signal
+  return r.opened || (r.window ?? 0) > 0
+}
+
 /** The terminal's WebSocket unlock message keeps its own field names (`grant`/`password`/`totp`). */
 export function wsUnlockMessage(cred: StepupCred): { type: 'unlock'; grant: string; password: string; totp: string } {
   return { type: 'unlock', grant: cred.stepup_grant ?? '', password: cred.stepup_password ?? '',

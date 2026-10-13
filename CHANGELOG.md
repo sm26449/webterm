@@ -61,12 +61,16 @@ back.
   authenticator app could not unlock a 2FA host from the web. The terminal's own unlock message
   keeps `totp`.
 - From the independent review of this release, before it shipped: `cert-renew.sh` runs from `/`
-  with an isolated python (a `json.py` planted in the caller's directory ran as root), refuses a
-  directory or script that is not root-owned or is group/world-writable, and ignores its
-  test-only overrides under sudo; the typed command is `sudo -k …` (no cached credentials left
-  behind); only the opener may type into a renewal terminal, and it cannot be shared; the gateway
-  dials the public name only for the main domain, with one total deadline per handshake and a
-  pool of 4 threads.
+  with an isolated python (a `json.py` planted in the caller's directory ran as root), refuses an
+  install tree (every parent up to `/`, sticky ones excepted), script, `.env` or compose file
+  that is not root-owned or is group/world-writable, and never honours its test-only overrides
+  for root; the typed command is `sudo -k …` (no cached credentials left behind); a renewal
+  terminal is created already owned by its opener (only they may type) and cannot be shared;
+  the gateway dials the public name only for the main domain, with one total deadline per
+  handshake and a pool of 4 threads.
+- `/api/hosts/{id}/stepup` says what it did: `{ok, opened, window}`. Why: a call that opened
+  nothing answered `window: 300`, which reads as "stepped up". The browser no longer retries an
+  action after a step-up that opened nothing.
 
 ## [3.6.6] — 2026-10-12 · agent (58)
 
