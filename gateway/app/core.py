@@ -2040,6 +2040,8 @@ class AgentConnection(SessionSource):
                                          detail="snapshot refused; the last good one is kept")
             return
         self.diagnostics = diag
+        if note_agent_os(self.host_id, diag):
+            self._spawn(self._probe_python())
         if clock:                       # a `stale` reply is an OLD snapshot: its time says nothing
             _note_agent_clock(self.host_id, diag.get("collected_at"))
         summary = updates_summary(diag)
@@ -2050,6 +2052,17 @@ class AgentConnection(SessionSource):
             blob, diag.get("collected_at") or time.time(),
             json.dumps(summary) if summary else "",
             json.dumps(sup) if sup else "", self.host_id)
+
+    async def _probe_python(self) -> None:
+        """3.6.9: the OS suggests a Python < 3.6 — one cheap `fs_list ~` decides. An internal
+        '__enter__' error marks it `confirmed` (in _on_ctrl); a good listing proves os.scandir works
+        as a context manager (3.6+: a newer or portable Python), so the warning goes away."""
+        try:
+            resp = await self.request("fs_list", path="~", timeout=15)
+        except Exception:                 # noqa: BLE001 — offline/timeout: stays `likely`
+            return
+        if resp.get("ok"):
+            note_fs_ok(self.host_id)
 
     async def get_diagnostics(self) -> dict:
         """Snapshot proaspăt, on-demand (butonul Refresh). Îl şi persistăm, ca ultimul cunoscut."""
@@ -2242,6 +2255,8 @@ class AgentConnection(SessionSource):
         self._reconcile_latest = msg
         if msg.get("event") == "hello":
             self._reconcile_saw_hello = True
+            # a (re)connect may be a new agent or a new interpreter: re-learn (3.6.9)
+            agent_python_old.pop(self.host_id, None)
         if not self._reconcile_running:
             self._reconcile_running = True
             self._spawn(self._reconcile_runner())
@@ -2284,6 +2299,14 @@ class AgentConnection(SessionSource):
         if "id" in msg and "op" not in msg:
             fut = self._pending.get(msg["id"])
             if fut and not fut.done():
+                if msg.get("ok") is False and msg.get("code") == "internal":
+                    # 3.6.9: an exception the agent did not expect (its generic handler). Its text
+                    # alone ("'__enter__'") reads like nothing; tag it so the file routes can say
+                    # "the agent hit an internal error", and learn a too-old Python from it.
+                    raw = msg.get("msg")
+                    raw = raw if isinstance(raw, str) else ""
+                    note_agent_internal(self.host_id, raw)
+                    msg = dict(msg, msg="agent internal error: " + (raw[:300] or "unknown"))
                 fut.set_result(msg)
             return
         event = msg.get("event")
@@ -2565,6 +2588,54 @@ async def force_update_agent(host_id: int) -> dict:
 def _clip(v, limit: int = 255):
     """Şir raportat de agent, mărginit. `None` rămâne `None` (COALESCE păstrează valoarea)."""
     return v[:limit] if isinstance(v, str) else None
+
+
+# ── Agents on a Python older than 3.6 (3.6.9) ──────────────────────────────────────────────
+# ptyd.py is "Python 3.6+" but has no runtime check, and it does NOT report its Python version
+# (hello/diagnostics carry the OS, not the interpreter — a v59 item). On 3.5 (Ubuntu 16.04,
+# Debian 9) it connects and runs terminals, but `with os.scandir(...)` raises AttributeError
+# '__enter__' — so every file listing, and with it every upload, fails with an internal error.
+# Two signals, no agent change:
+#   * confirmed — the agent answered an op with exactly that internal error (the fingerprint);
+#   * likely    — its diagnostics report an OS whose python3 is < 3.6 by default.
+# Memory only: diagnostics are pushed at every connect, and the fingerprint recurs on first use.
+_PY_OLD_OS = re.compile(r"^(?:Ubuntu 1[0-6]\.(?:04|10)|Debian GNU/Linux [5-9](?:\.|\s|$)"
+                        r"|Raspbian GNU/Linux [5-9](?:\.|\s|$)|CentOS (?:Linux )?release [56]\b"
+                        r"|Red Hat Enterprise Linux (?:Server )?release [56]\b)")
+agent_python_old: Dict[int, str] = {}           # host_id → "confirmed" | "likely" | "fine"
+
+
+def os_has_old_python(os_name) -> bool:
+    return isinstance(os_name, str) and bool(_PY_OLD_OS.match(os_name.strip()))
+
+
+def note_agent_internal(host_id: int, msg: str) -> None:
+    # CPython < 3.11 looks up __exit__ first, so 3.5 says "__exit__"; newer wording "__enter__"
+    if (msg or "").strip().strip("'\"") in ("__enter__", "__exit__"):
+        if agent_python_old.get(host_id) != "confirmed":
+            log.warning("host #%s: the agent cannot use os.scandir as a context manager — its "
+                        "Python is older than 3.6 (file operations fail)", host_id)
+        agent_python_old[host_id] = "confirmed"
+
+
+def note_fs_ok(host_id: int) -> None:
+    """A file listing worked: the interpreter is 3.6+ whatever the OS ships ("fine" = known good,
+    so a later diagnostics push does not re-raise the OS-based suspicion)."""
+    agent_python_old[host_id] = "fine"
+
+
+def note_agent_os(host_id: int, diag) -> bool:
+    """→ True when the OS suggests a Python < 3.6 and nothing has settled it yet (the caller then
+    probes once with fs_list)."""
+    sysd = diag.get("system") if isinstance(diag, dict) else None
+    os_name = sysd.get("os") if isinstance(sysd, dict) else None
+    if agent_python_old.get(host_id) in ("confirmed", "fine"):
+        return False
+    if os_has_old_python(os_name):
+        agent_python_old[host_id] = "likely"
+        return True
+    agent_python_old.pop(host_id, None)
+    return False
 
 
 DIAG_MAX_BYTES = 256 * 1024   # plafon pe snapshot-ul de diagnostic serializat (S-03)
@@ -4745,6 +4816,8 @@ async def fs_list(host_id: int, path: str) -> dict:
     resp = await _agent_or_raise(host_id).request("fs_list", path=path or "~")
     if not resp.get("ok"):
         raise FileError(resp.get("msg", "eroare"))
+    if agent_python_old.get(host_id) not in (None, "fine"):
+        note_fs_ok(host_id)            # 3.6.9: a working listing settles the Python question
     return resp
 
 
@@ -5306,10 +5379,14 @@ async def session_cwd(host_id: int, sid: str) -> str:
     return resp.get("cwd") or "~"
 
 
-async def fs_mkdir(host_id: int, path: str, parents: bool = False) -> None:
+async def fs_mkdir(host_id: int, path: str, parents: bool = False) -> Optional[str]:
+    """→ the ABSOLUTE path the agent created (it expands `~`), or None from an agent that does not
+    report it."""
     resp = await _agent_or_raise(host_id).request("fs_mkdir", path=path, parents=parents)
     if not resp.get("ok"):
         raise FileError(resp.get("msg", "eroare"))
+    p = resp.get("path")
+    return p if isinstance(p, str) else None
 
 
 async def _fs_write_block(conn, path, offset, block) -> None:

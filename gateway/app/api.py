@@ -33,8 +33,9 @@ from .errors import ApiError
 from . import webauthn_api
 from . import fscopy
 from . import (alert_history, audit, authz, backup, certmon, cloudbackup, config, core, db,
-               email_alerts, health, healthcmd, replay, security, signing, ssomap, syshealth,
-               totp, updatecheck)
+               email_alerts, health, healthcmd, pyruntime, replay, rootmove, security, signing,
+               ssomap,
+               syshealth, totp, updatecheck)
 
 log = logging.getLogger("webterm")
 # Garda de la nivel de router (3.6, fail-closed): o rută care nu-şi declară permisiunea
@@ -356,10 +357,77 @@ def _file_api_error(e: Exception, status: int = 400) -> ApiError:
         return ApiError(status, "files.timeout", "the host did not answer in time")
     msg = str(e) or "file operation failed"
     low = msg.lower()
+    if low.startswith("agent internal error:"):
+        # 3.6.9: an exception the agent did not expect (core tags code `internal`). Show its own
+        # text (sanitised) and say where to look — never just "the operation failed". On a
+        # Python < 3.6 agent this is "'__enter__'" (os.scandir), see core.agent_python_old.
+        why = rootmove.clean_text(msg[len("agent internal error:"):].strip())
+        return ApiError(status, "files.agentInternal", msg, vars={"reason": why or "unknown"})
     for needle, code in _FILE_ERROR_CODES:
         if needle in low:
             return ApiError(status, code, msg)
+    # 3.6.9: no specific text for this one — the generic message plus the agent's own reason
+    # (strerror, sanitised and truncated; the path is dropped, the UI already shows it)
+    why = rootmove.reason(msg) if msg != "eroare" else ""     # "eroare" = core's "agent sent no msg"
+    if why:
+        return ApiError(status, "files.failedReason", msg, vars={"reason": why})
     return ApiError(status, "files.failed", msg)
+
+
+# 3.6.9 — write errors that name WHO cannot write WHERE. The file APIs act as the agent's user
+# (often an unprivileged `webterm`), not as the terminal's sudo user; "Permission denied" alone
+# told the Owner nothing they could act on. These codes carry {user, dir[, mode]} so the UI can
+# say "the agent runs as webterm and cannot write in /srv/bin/lists (mode 755)" and offer the
+# three ways out (grant access, upload and move as root, upload to the agent's home). The owner of
+# the folder is NOT known: fs_list/fs_stat report the mode but no uid (agent v58), and changing
+# the agent forces a fleet update — so we say what we know, and nothing we would have to guess.
+_WRITE_CODES = {
+    "files.permissionDenied": ("files.writeDenied", "files.writeDeniedMode"),
+    "files.readOnly": ("files.readOnlyAt", None),
+    "files.noSpace": ("files.noSpaceAt", None),
+    "files.notFound": ("files.dirMissing", None),
+}
+
+
+def _show_path(p: str) -> str:
+    """A path for a message: control/format characters out, length capped (it is displayed,
+    never typed — the typed command is rootmove's job)."""
+    p = "".join("?" if rootmove.has_bad_chars(ch) else ch for ch in (p or ""))
+    return p if len(p) <= 300 else "…" + p[-299:]
+
+
+async def _fs_write_error(host_id: int, e: Exception, path: str, status: int = 400,
+                          missing_is_dir: bool = True) -> ApiError:
+    """`_file_api_error` for an operation that WRITES into `dirname(path)`, enriched with the
+    agent's user and that folder (+ its mode on permission denied, best effort, 3 s). Never
+    raises: any failure while enriching returns the plain error. `missing_is_dir=False` where
+    "No such file" may be about the file itself (delete, commit), not the folder."""
+    base = _file_api_error(e, status)
+    spec = _WRITE_CODES.get(base.code)
+    if base.code == "files.notFound" and not missing_is_dir:
+        return base
+    if not spec or not isinstance(path, str) or not path.startswith("/"):
+        return base
+    d = os.path.dirname(path.rstrip("/")) or "/"
+    try:
+        row = await db.fetchone("SELECT agent_user FROM hosts WHERE id=?", host_id)
+        user = _show_path((row["agent_user"] if row else "") or "")[:64]
+    except Exception:
+        user = ""
+    if not user:
+        return base
+    vars = {"user": user, "dir": _show_path(d)}
+    code = spec[0]
+    if spec[1]:
+        try:
+            resp = await core._agent_or_raise(host_id).request("fs_stat", path=d, timeout=3)
+            mode = resp.get("mode") if resp.get("ok") and resp.get("exists") else None
+            if isinstance(mode, int) and not isinstance(mode, bool) and 0 <= mode <= 0o777:
+                vars["mode"] = "%03o" % mode
+                code = spec[1]
+        except Exception:
+            pass
+    return ApiError(base.status_code, code, base.detail, vars=vars)
 
 
 def _runtime_api_error(e: Exception, default_code: str, status: int = 502) -> ApiError:
@@ -2719,6 +2787,11 @@ def _host_json(row) -> dict:
                              if "tags" in row.keys() and row["tags"] else [])],
         "updates": _host_updates(row),
         "supervision": _host_supervision(row) if is_agent else None,
+        # 3.6.9: the agent's Python is (likely / confirmed) older than its 3.6 minimum — file
+        # operations fail there. None = no sign of it (the agent does not report its version).
+        "agent_python_old": (core.agent_python_old.get(row["id"])
+                             if is_agent and core.agent_python_old.get(row["id"]) in ("likely", "confirmed")
+                             else None),
         "conflict": core.host_conflict(row["id"]),
         # Agentul a fost scos de pe host. Hostul rămâne până când cineva confirmă în UI —
         # poate nu vrei să-l ştergi, ci doar să-l reinstalezi, caz în care marcajul dispare
@@ -3524,7 +3597,7 @@ async def fs_upload(host_id: int, request: Request, path: str,
     except core.FileConflict as e:
         raise _file_api_error(e)
     except (core.FileError, TimeoutError) as e:
-        raise _file_api_error(e)
+        raise await _fs_write_error(host_id, e, path)
 
 
 @router.get("/api/hosts/{host_id}/fs/upload/status")
@@ -3561,7 +3634,7 @@ async def fs_upload_commit(host_id: int, request: Request, path: str, upload_id:
     except core.FileConflict as e:
         raise _file_api_error(e)
     except (core.FileError, TimeoutError) as e:
-        raise _file_api_error(e)
+        raise await _fs_write_error(host_id, e, path, missing_is_dir=False)
     return {"ok": True, "written": written, "path": path}
 
 
@@ -3573,6 +3646,51 @@ async def fs_upload_abort(host_id: int, path: str, upload_id: str,
     _check_upload_id(upload_id)
     await core.fs_upload_abort(host_id, path, upload_id)
     return {"ok": True}
+
+
+# ── Upload and move as root (3.6.9, rootmove.py) ────────────────────────────────────────
+# Files writes as the agent's user. For a folder that user cannot write (root-owned
+# /srv/bin/lists), the file is staged in the agent's inbox and the client TYPES — never runs — a
+# `sudo install` command into the person's own terminal. This route only builds that command and
+# names the staging files; the bytes go through the normal upload route (same `files.write`, same
+# step-up), and the typing goes through the terminal's normal input path (same read-only checks as
+# a keystroke). Nothing here runs anything on the host besides `mkdir -p ~/.webterm/inbox`.
+class RootMoveIn(BaseModel):
+    dir: str = Field(..., max_length=rootmove.MAX_PATH)
+    names: list = Field(default_factory=list, max_length=rootmove.MAX_FILES)
+
+
+@router.post("/api/hosts/{host_id}/fs/root-move")
+async def fs_root_move(host_id: int, body: RootMoveIn, request: Request,
+                       user=Depends(authz.perm('files.write', host='host_id'))):
+    """Plan an "upload and move as root": → {uploads: [{name, upload_path}], command}.
+    Gates: `files.write` on the host (as for any upload; tokens never) → step-up (H1) → strict
+    validation of the folder and names (rootmove.check_*; 400 `files.rootMoveBad`) → the agent
+    creates its inbox and reports its absolute path, which is validated too. The command is built
+    from those validated values only and must round-trip through shlex (fail closed)."""
+    await _require_host_stepup(host_id, user)
+    try:
+        rootmove.check_dir(body.dir)
+        names = [rootmove.check_name(n) for n in body.names]
+        if not names:
+            raise rootmove.MoveError("no files")
+    except rootmove.MoveError as e:
+        raise ApiError(400, "files.rootMoveBad", str(e))
+    try:
+        inbox = await core.fs_mkdir(host_id, rootmove.INBOX_REL, True)
+    except core.AgentGone:
+        raise ApiError(409, "host.offline", "the host is offline")
+    except (core.FileError, TimeoutError) as e:
+        raise _file_api_error(e)
+    try:
+        plan = rootmove.build(inbox or "", body.dir, names)
+    except rootmove.MoveError as e:
+        raise ApiError(400, "files.rootMoveBad", str(e))
+    audit.detail(request, "upload and move as root: %d file(s) into %s (command typed, not run)"
+                 % (len(names), _show_path(body.dir)))
+    log.info("upload-and-move-as-root planned on host #%d: %d file(s) into %s",
+             host_id, len(names), _show_path(body.dir))
+    return {"ok": True, "inbox": inbox, **plan}
 
 
 # ── Copiere host → host, pe server (3.5.5) ───────────────────────────────────────────────
@@ -3605,7 +3723,9 @@ async def _copy_host(host_id: int, what: str):
 
 
 def _copy_code_of(msg: str) -> str:
-    return _file_api_error(core.FileError(msg)).code
+    code = _file_api_error(core.FileError(msg)).code
+    # copy rows carry a code but no vars: for texts that need {reason}, the raw message is better
+    return "files.failed" if code in ("files.failedReason", "files.agentInternal") else code
 
 
 @router.post("/api/fs/copy")
@@ -7047,7 +7167,7 @@ async def fs_mkdir(host_id: int, body: FsPath, user=Depends(authz.perm('files.wr
     except core.AgentGone:
         raise ApiError(409, "host.offline", "the host is offline")
     except (core.FileError, TimeoutError) as e:
-        raise _file_api_error(e)
+        raise await _fs_write_error(host_id, e, body.path)
     return {"ok": True}
 
 
@@ -7059,7 +7179,11 @@ async def fs_rename(host_id: int, body: FsRename, user=Depends(authz.perm('files
     except core.AgentGone:
         raise ApiError(409, "host.offline", "the host is offline")
     except (core.FileError, TimeoutError) as e:
-        raise _file_api_error(e)
+        # a rename writes into BOTH parents; name the folder only when it is one and the same
+        same = os.path.dirname(body.path.rstrip("/")) == os.path.dirname(body.to.rstrip("/"))
+        if not same:
+            raise _file_api_error(e)
+        raise await _fs_write_error(host_id, e, body.to, missing_is_dir=False)
     return {"ok": True}
 
 
@@ -7075,7 +7199,9 @@ async def fs_delete(host_id: int, body: FsDelete, request: Request,
     except core.AgentGone:
         raise ApiError(409, "host.offline", "the host is offline")
     except (core.FileError, TimeoutError) as e:
-        raise _file_api_error(e)
+        if body.recursive:              # the denial may be deep inside the tree, not here
+            raise _file_api_error(e)
+        raise await _fs_write_error(host_id, e, body.path, missing_is_dir=False)
     return {"ok": True}
 
 
@@ -10030,12 +10156,88 @@ else
   exit 1
 fi
 
-command -v python3 >/dev/null 2>&1 || {{
-  echo "ERROR: python3 is missing on this server."
-  echo "       The agent is a single Python file with no dependencies — but it needs python3:"
-  echo "          apt install python3 / yum install python3 / apk add python3"
+# ── Python (3.6.9) ──────────────────────────────────────────────────────────────────────────
+# The agent needs Python 3.6+. On 3.5 (Ubuntu 16.04, Debian 9) it would connect and run terminals,
+# but every file operation — the Files panel, uploads, downloads — fails. A host whose python3 is
+# missing or too old gets a PORTABLE Python (python-build-standalone {pyrt_python}, pinned by
+# SHA-256, served by the gateway) in ~/.webterm/python/, owned by this user; the system python3 is
+# left alone. Choices:
+#   WEBTERM_PYTHON=/path/to/python3.x  use that interpreter (must be 3.6+)
+#   --portable-python  (… | sh -s -- --portable-python)  or WEBTERM_PORTABLE_PYTHON=1: always portable
+#   WEBTERM_ALLOW_OLD_PYTHON=1  keep an old python3 when no portable build fits (terminals only)
+PORTABLE=0
+[ "${{WEBTERM_PORTABLE_PYTHON:-0}}" = "1" ] && PORTABLE=1
+for a in "$@"; do [ "$a" = "--portable-python" ] && PORTABLE=1; done
+PYRT_DIR="$HOME/.webterm/python"
+PY="${{WEBTERM_PYTHON:-$(command -v python3 2>/dev/null || true)}}"
+py_ok() {{ [ -n "$1" ] && [ -x "$1" ] && "$1" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 6) else 1)' >/dev/null 2>&1; }}
+PYV="none"
+[ -n "$PY" ] && [ -x "$PY" ] && PYV=$("$PY" -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>/dev/null || echo unknown)
+if [ -n "${{WEBTERM_PYTHON:-}}" ] && ! py_ok "$PY"; then
+  echo "ERROR: WEBTERM_PYTHON=$WEBTERM_PYTHON is not a Python 3.6+ interpreter (found: $PYV)."
+  echo "       Nothing was installed."
   exit 1
-}}
+fi
+NEED_PORTABLE=0
+if [ "$PORTABLE" = 1 ] || ! py_ok "$PY"; then NEED_PORTABLE=1; fi
+
+# The pinned builds: target → file + SHA-256 (from the gateway's pyruntime.json)
+pyrt_file() {{ case "$1" in
+{pyrt_files}
+  *) return 1 ;; esac; }}
+pyrt_sha() {{ case "$1" in
+{pyrt_shas}
+  *) return 1 ;; esac; }}
+
+PYRT_TARGET=""
+if [ "$NEED_PORTABLE" = 1 ]; then
+  M=$(uname -m 2>/dev/null || echo unknown)
+  LIBC=gnu
+  if ldd --version 2>&1 | grep -qi musl || ls /lib/ld-musl-* >/dev/null 2>&1; then LIBC=musl; fi
+  case "$M" in
+    x86_64|amd64) A=x86_64 ;;
+    aarch64|arm64) A=aarch64 ;;
+    armv7l|armv7|armv7hl) A=armv7 ;;
+    *) A="" ;;
+  esac
+  case "$A-$LIBC" in
+    x86_64-gnu|aarch64-gnu|x86_64-musl|aarch64-musl) PYRT_TARGET="$A-$LIBC" ;;
+    armv7-gnu) PYRT_TARGET="armv7-gnueabihf" ;;
+  esac
+  WHY="python3 is missing"
+  [ "$PYV" != "none" ] && WHY="python3 is $PYV (the agent needs 3.6+)"
+  [ "$PORTABLE" = 1 ] && WHY="--portable-python was asked for"
+  REFUSE=""
+  if [ -z "$PYRT_TARGET" ]; then
+    REFUSE="there is no portable Python for this machine ($M, $LIBC libc)"
+  elif [ "$LIBC" = gnu ]; then
+    GLIBC=$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{{print $2}}')
+    [ -n "$GLIBC" ] || GLIBC=$(ldd --version 2>/dev/null | head -n1 | awk '{{print $NF}}')
+    if ! printf '%s\n' "$GLIBC" | awk -F. '{{ exit !(($1 > 2) || ($1 == 2 && $2 >= {pyrt_glibc_minor})) }}'; then
+      REFUSE="glibc ${{GLIBC:-unknown}} is older than {pyrt_glibc} (the portable Python's minimum)"
+    fi
+  fi
+  if [ -n "$REFUSE" ]; then
+    if py_ok "$PY"; then
+      echo "NOTE: --portable-python: $REFUSE — using $PY (Python $PYV) instead."
+      NEED_PORTABLE=0
+    elif [ "$PYV" != "none" ] && [ "${{WEBTERM_ALLOW_OLD_PYTHON:-0}}" = "1" ]; then
+      echo "WARNING: $WHY and $REFUSE. Continuing with Python $PYV (WEBTERM_ALLOW_OLD_PYTHON=1):"
+      echo "         terminals will work, the Files panel and uploads will NOT."
+      NEED_PORTABLE=0
+    else
+      echo "ERROR: $WHY, and $REFUSE."
+      echo "       Install Python 3.6 or newer next to the system one, then re-run the install command"
+      echo "       with it:   ... | WEBTERM_PYTHON=/path/to/python3.x sh"
+      [ "$PYV" != "none" ] && echo "       Terminals only, knowingly:  ... | WEBTERM_ALLOW_OLD_PYTHON=1 sh"
+      echo "       Details: {docs_hosts}"
+      echo "       Nothing was installed."
+      exit 1
+    fi
+  else
+    echo "Python: $WHY → installing a portable Python {pyrt_python} ($PYRT_TARGET) in $PYRT_DIR"
+  fi
+fi
 
 # The agent runs with the rights of whoever installs it: it never asks for root and never
 # escalates. Installed as root, WebTerm becomes a root shell on this host — convenient, but a
@@ -10045,6 +10247,71 @@ command -v python3 >/dev/null 2>&1 || {{
 command -v tmux >/dev/null 2>&1 || echo "WARNING: tmux is missing — sessions will not survive an agent restart. Install it (apt install tmux / yum install tmux)."
 
 mkdir -p "$HOME/.webterm" && chmod 700 "$HOME/.webterm"
+
+if [ "$NEED_PORTABLE" = 1 ]; then
+  # Fetched from the gateway with this host's token, checked against the SHA-256 pinned in this
+  # script, listed BEFORE extraction (no absolute paths, no `..`, every symlink stays inside the
+  # tree), extracted into a fresh temp dir and moved into place. Nothing runs as root.
+  PYRT_FILE=$(pyrt_file "$PYRT_TARGET"); PYRT_SHA=$(pyrt_sha "$PYRT_TARGET")
+  T=$(mktemp -d "$HOME/.webterm/.pyrt.XXXXXX") || {{ echo "ERROR: cannot create a temp dir in ~/.webterm"; exit 1; }}
+  trap 'rm -rf "$T"' EXIT
+  umask 077
+  printf 'header = "Authorization: Bearer %s"\n' "$TOKEN" > "$T/curlrc"
+  printf 'header = Authorization: Bearer %s\n' "$TOKEN" > "$T/wgetrc"
+  umask 022
+  if command -v curl >/dev/null 2>&1; then
+    $CURL -K "$T/curlrc" "$GW/agent/python/$PYRT_TARGET.tar.gz" -o "$T/py.tgz"
+  else
+    WGETRC="$T/wgetrc" $CURL "$GW/agent/python/$PYRT_TARGET.tar.gz" -O "$T/py.tgz"
+  fi || {{ echo "ERROR: the portable Python could not be downloaded from the gateway (see its log)."; exit 1; }}
+  rm -f "$T/curlrc" "$T/wgetrc"
+  GOT=$(sha256sum "$T/py.tgz" 2>/dev/null | cut -d" " -f1)
+  [ -n "$GOT" ] || GOT=$(shasum -a 256 "$T/py.tgz" 2>/dev/null | cut -d" " -f1)
+  if [ "$GOT" != "$PYRT_SHA" ]; then
+    echo "ERROR: the portable Python does not match its pinned SHA-256 — refused, nothing installed." >&2
+    echo "  expected $PYRT_SHA" >&2
+    echo "  got      ${{GOT:-<no sha256sum/shasum on this host>}}" >&2
+    exit 1
+  fi
+  # names: all under python/, none absolute, no `..` component
+  tar tzf "$T/py.tgz" > "$T/names" || {{ echo "ERROR: the portable Python archive cannot be read."; exit 1; }}
+  if grep -v '^python/' "$T/names" | grep -q . || grep -Eq '(^|/)\.\.(/|$)' "$T/names"; then
+    echo "ERROR: the portable Python archive has entries outside python/ — refused." >&2; exit 1
+  fi
+  # entry types: files, dirs, symlinks only; every symlink target resolves inside python/
+  tar tzvf "$T/py.tgz" > "$T/long" || exit 1
+  if ! awk '
+    {{ t = substr($1, 1, 1) }}
+    t != "-" && t != "d" && t != "l" {{ print "unexpected entry type: " $0; bad = 1; next }}
+    t == "l" {{
+      i = index($0, " -> "); if (!i) {{ print "unparsable link: " $0; bad = 1; next }}
+      tgt = substr($0, i + 4); pre = substr($0, 1, i - 1); n = split(pre, w, " "); name = w[n]
+      if (substr(tgt, 1, 1) == "/") {{ print "absolute link: " name; bad = 1; next }}
+      k = split(name, p, "/"); depth = 0
+      for (j = 1; j < k; j++) if (p[j] != "" && p[j] != ".") st[++depth] = p[j]
+      m = split(tgt, q, "/")
+      for (j = 1; j <= m; j++) {{
+        if (q[j] == "" || q[j] == ".") continue
+        if (q[j] == "..") {{ if (depth <= 1) {{ print "link escapes: " name " -> " tgt; bad = 1; break }} depth-- }}
+        else st[++depth] = q[j]
+      }}
+    }}
+    END {{ exit bad }}' "$T/long"; then
+    echo "ERROR: the portable Python archive has unsafe entries — refused." >&2; exit 1
+  fi
+  mkdir "$T/x" && (cd "$T/x" && tar xzf ../py.tgz) || {{ echo "ERROR: extracting the portable Python failed."; exit 1; }}
+  if ! py_ok "$T/x/python/bin/python3"; then
+    echo "ERROR: the portable Python does not run on this machine (libc/CPU?) — nothing installed."; exit 1
+  fi
+  rm -rf "$PYRT_DIR.old"
+  [ -e "$PYRT_DIR" ] && mv "$PYRT_DIR" "$PYRT_DIR.old"
+  mv "$T/x/python" "$PYRT_DIR" && rm -rf "$PYRT_DIR.old"
+  rm -rf "$T"; trap - EXIT
+  PY="$PYRT_DIR/bin/python3"
+  echo "Python: installed $("$PY" -c 'import sys; print(sys.version.split()[0])') in $PYRT_DIR (sha256 verified: $PYRT_SHA);"
+  echo "        the agent will run with $PY. The system python3 was not touched."
+fi
+
 $CURL "$GW/agent/ptyd.py" $FETCH_OUT "$HOME/.webterm/ptyd.py"
 chmod 700 "$HOME/.webterm/ptyd.py"
 
@@ -10073,7 +10340,6 @@ cat > "$HOME/.webterm/agent.json" <<EOF
 EOF
 chmod 600 "$HOME/.webterm/agent.json"
 
-PY=$(command -v python3)
 AGENT="$HOME/.webterm/ptyd.py"
 "$PY" "$AGENT" stop >/dev/null 2>&1 || true
 
@@ -10221,6 +10487,25 @@ fi
 """
 
 
+def _pyrt_script_fields() -> dict:
+    """The portable-Python part of the install script, from the pinned manifest (pyruntime.json):
+    shell `case` arms target → file / SHA-256. Every value passed the manifest's strict regexes
+    (pyruntime.load_manifest), so nothing here needs shell quoting beyond the double quotes."""
+    m = pyruntime.MANIFEST
+    tg = m["targets"]
+    files = "\n".join('  %s) echo "%s" ;;' % (k, t["file"]) for k, t in sorted(tg.items()))
+    shas = "\n".join('  %s) echo "%s" ;;' % (k, t["sha256"]) for k, t in sorted(tg.items()))
+    g = str(m.get("min_glibc") or "2.17")
+    minor = g.split(".")[1] if re.match(r"^2\.[0-9]{1,3}$", g) else "17"
+    return {"pyrt_files": files or "  none) return 1 ;;", "pyrt_shas": shas or "  none) return 1 ;;",
+            "pyrt_python": re.sub(r"[^0-9.]", "", str(m.get("python") or "")) or "3",
+            "pyrt_glibc": "2." + minor, "pyrt_glibc_minor": minor,
+            "docs_hosts": DOCS_SUPPORTED_HOSTS}
+
+
+DOCS_SUPPORTED_HOSTS = "https://github.com/sm26449/webterm/blob/main/docs/INSTALL.md#supported-hosts"
+
+
 def _install_script_for(token: str) -> str:
     """Corpul scriptului de instalare pentru un token de agent permanent (comun între enroll-ul
     per-host şi cel de grup)."""
@@ -10229,6 +10514,7 @@ def _install_script_for(token: str) -> str:
         token=token, insecure="true" if config.AGENT_INSECURE else "false",
         public_url_docs="https://github.com/sm26449/webterm#provisioning-a-server",
         integration_sha256=_shell_integration_digest(),
+        **_pyrt_script_fields(),
         agent_sha256=_agent_digest(),
         ssl_ctx="ssl._create_unverified_context()" if config.AGENT_INSECURE else "None")
 
@@ -10348,6 +10634,32 @@ async def agent_uninstalled(request: Request):
     log.warning("agent uninstalled itself on host=%s(%s) — the host is kept until confirmed",
                 row["name"], row["id"])
     return {"ok": True, "host_kept": True}
+
+
+@router.get("/agent/python/{target}")
+async def agent_python_runtime(target: str, request: Request):
+    """The pinned portable Python (pyruntime.py) for a host whose python3 is missing or < 3.6.
+    Credential: the HOST's agent token (`Authorization: Bearer`), which the install script
+    carries — not public, so the gateway is no anonymous download proxy. `target` is a key of the
+    pinned manifest (`x86_64-gnu.tar.gz`…), never a name or URL. The file is fetched from the pinned
+    release URL on first use, verified against its pinned SHA-256 and only then cached and served."""
+    auth = request.headers.get("authorization", "")
+    token = auth[7:] if auth.lower().startswith("bearer ") else ""
+    row = await db.fetchone("SELECT id FROM hosts WHERE token_hash=?",
+                            security.sha256_hex(token)) if token else None
+    if not row:
+        raise HTTPException(401, "invalid agent token")
+    key = target[:-7] if target.endswith(".tar.gz") else target
+    if not pyruntime.target(key):
+        raise ApiError(404, "pyruntime.unknownTarget", "no portable Python for that target")
+    try:
+        path, t = await pyruntime.get(key)
+    except pyruntime.RuntimeUnavailable as e:
+        log.warning("portable python for host #%d (%s) unavailable: %s", row["id"], key, e)
+        raise ApiError(503, e.code, "the portable Python is not available: %s" % e)
+    log.info("portable python %s served to host #%d", t["file"], row["id"])
+    return FileResponse(path, media_type="application/gzip", filename=t["file"],
+                        headers={"X-Checksum-Sha256": t["sha256"]})
 
 
 @router.get("/agent/ptyd.py", response_class=PlainTextResponse)

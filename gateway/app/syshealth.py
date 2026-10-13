@@ -58,7 +58,8 @@ PERSIST_EVERY = 600.0            # unchanged results: refresh checked_at in the 
 SESSION_WARN = 28                # of core.MAX_SESSIONS_HINT (32)
 MAX_HOSTS_IN_RESULT = 50
 DOCS = {"authentik_upgrade": "docs/AUTHENTIK-UPGRADE.md", "heartbeat": "docs/INSTALL.md#dead-man-switch",
-        "host_health": "docs/INSTALL.md#system-health"}
+        "host_health": "docs/INSTALL.md#system-health",
+        "host_requirements": "docs/INSTALL.md#supported-hosts"}
 K_LAST_RUN = "health_last_run"
 K_BEHIND = "health_agent_behind_since"
 K_JANITOR = "janitor_state"
@@ -139,6 +140,9 @@ MESSAGES = {
     "agents_current": "Every connected agent is on v{version}",
     "agents_no_autostart": "{count} agent(s) will not start again after a reboot",
     "agents_autostart_ok": "Every agent that reports it starts at boot",
+    "agents_python_old": "{count} agent(s) run on a Python older than 3.6 (the agent's minimum): file operations fail there",
+    "agents_python_likely": "{count} agent(s) run on an OS whose Python is older than 3.6 (the agent's minimum): file operations will fail there",
+    "agents_python_ok": "No agent shows signs of a Python older than 3.6",
     "agents_update_blocked": "{count} agent(s) refuse the signed update",
     "agents_update_ok": "No agent refuses updates",
     "agents_clock_skew": "{count} agent(s) have a clock off by up to {skew} s",
@@ -196,6 +200,7 @@ WHY = {
     "alerts.channel": "Without email or a webhook, alerts only reach people who open WebTerm.",
     "agents.outdated": "An agent defers its update while sessions are open; a session that never closes keeps it on old code forever.",
     "agents.autostart": "After a reboot such a host stays offline until someone starts the agent by hand.",
+    "agents.python": "The agent needs Python 3.6+. On 3.5 it connects and runs terminals, but every file listing — and so every upload — fails with an internal error.",
     "agents.update_blocked": "A host that refuses updates stays without the fixes shipped since.",
     "agents.clock": "A wrong clock breaks TOTP codes, SSO tokens and the order of audit entries.",
     "sessions.cap": "At the limit, new terminals on that host are refused.",
@@ -226,6 +231,7 @@ RECS = {
     "add_channel": "Add an SMTP server or a webhook in Settings → Notifications.",
     "force_update": "Update the agent now from its host card (sessions survive the restart).",
     "enable_autostart": "Turn on “starts at boot” for these hosts.",
+    "python_side_by_side": "Install Python 3.6 or newer next to the system one and run the agent with it (see “Supported hosts” in the install guide). Terminals keep working meanwhile.",
     "reinstall_agent": "Reinstall the agent on these hosts (they were enrolled before the signing key existed).",
     "fix_agent_clock": "Enable time sync (NTP) on these hosts.",
     "close_sessions": "Close sessions you no longer need on these hosts.",
@@ -524,6 +530,27 @@ async def c_agents_autostart() -> Optional[Result]:
         return Result("warning", "agents_no_autostart", {"count": len(off)},
                       rec="enable_autostart", action="autostart", hosts=off[:MAX_HOSTS_IN_RESULT])
     return Result("ok", "agents_autostart_ok") if known else None
+
+
+async def c_agents_python() -> Optional[Result]:
+    """3.6.9: agents on Python < 3.6. The agent does not report its interpreter (a v59 item), so
+    the signal is core.agent_python_old: `confirmed` from the os.scandir fingerprint of a failed
+    file operation, `likely` from an OS whose python3 is older (Ubuntu 16.04, Debian 9…)."""
+    from . import core
+    ids = {r["id"] for r in await _agent_rows()}
+    seen = {h: v for h, v in list(core.agent_python_old.items()) if h in ids}
+    confirmed = sorted(h for h, v in seen.items() if v == "confirmed")
+    likely = sorted(h for h, v in seen.items() if v == "likely")
+    if confirmed:
+        return Result("critical", "agents_python_old", {"count": len(confirmed)},
+                      rec="python_side_by_side", doc="host_requirements",
+                      hosts=(confirmed + likely)[:MAX_HOSTS_IN_RESULT])
+    if likely:
+        # not proven yet (the gateway probes once with fs_list as soon as the OS is reported)
+        return Result("warning", "agents_python_likely", {"count": len(likely)},
+                      rec="python_side_by_side", doc="host_requirements",
+                      hosts=likely[:MAX_HOSTS_IN_RESULT])
+    return Result("ok", "agents_python_ok") if ids else None
 
 
 async def c_agents_blocked() -> Optional[Result]:
@@ -862,6 +889,7 @@ CHECKS: list = [
     Check("alerts.channel", "fast", c_channel, alert="none"),
     Check("agents.outdated", "fast", c_agents_outdated),
     Check("agents.autostart", "fast", c_agents_autostart),
+    Check("agents.python", "fast", c_agents_python, critical=True),
     Check("agents.update_blocked", "fast", c_agents_blocked, alert="none"),   # update_refused alerts
     Check("agents.clock", "fast", c_agents_clock),
     Check("sessions.cap", "fast", c_sessions_cap),

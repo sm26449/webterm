@@ -661,6 +661,9 @@ PUBLIC: dict[str, str] = {
     "/agent/uninstalled": ("the agent reports it was removed; authenticated with ITS token, "
                            "never a user session. Deletes nothing — only marks"),
     "/agent/ptyd.py": "agent source: public by construction, verified by signature",
+    "/agent/python/{target}": ("portable Python for old hosts (3.6.9): authenticated with the "
+                               "HOST's agent token in the handler; pinned files only, SHA-256 "
+                               "verified before caching and again on the host"),
     "/agent/shell-integration.sh": "idem; integrity is checked by sha256, not by auth",
     "/install/{enroll_token}": "the enroll token IS the credential; expires in 24h, single-use",
     "/install/group/{group_token}": ("the group token IS the credential; opt-in, expiring, "

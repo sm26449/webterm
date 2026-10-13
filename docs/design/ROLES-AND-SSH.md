@@ -1460,6 +1460,7 @@ middleware plus ASGI WS middleware in `main.py`) and the SPA/asset catch-all. Li
 | `/install/group/{group_token}` (8666) | GET | — | P | auto-created host lands in the group's folder → in scope for that folder's bindings |
 | `/agent/uninstalled` (8715) | POST | — | P | host token |
 | `/agent/ptyd.py` (8749) | GET | — | P | |
+| `/agent/python/{target}` (3.6.9) | GET | — | P | host token (portable Python; pinned + SHA-256-verified tarballs only) |
 | `/agent/shell-integration.sh` (8798) | GET | — | P | |
 | `/__wtfwd/auth` (5325) | GET | — (handler checks `forward.use`) | P + H(slug→host) | PUBLIC route (the session cookie is validated in the handler); 3.6.0 checks `forward.use` on the forward's host before issuing the ticket: invisible host → the same 404 as a missing forward |
 | `/api/webauthn/login/options` (wa:205) | POST | — | P | |
@@ -1667,6 +1668,7 @@ middleware plus ASGI WS middleware in `main.py`) and the SPA/asset catch-all. Li
 | `/api/hosts/{host_id}/fs/upload/status` (2671) | GET | `files.write` | H(host_id) | su | |
 | `/api/hosts/{host_id}/fs/upload/commit` (2688) | POST | `files.write` | H(host_id) | su | |
 | `/api/hosts/{host_id}/fs/upload` (2709) | DELETE | `files.write` | H(host_id) | su | |
+| `/api/hosts/{host_id}/fs/root-move` (3.6.9) | POST | `files.write` | H(host_id) | su | plans "upload and move as root": stages into the agent's inbox, returns a command the CLIENT types (never runs) into the person's own terminal — typing = the session's normal input gate |
 | `/api/hosts/{host_id}/fs/mkdir` (5641) | POST | `files.write` | H(host_id) | su | |
 | `/api/hosts/{host_id}/fs/rename` (5653) | POST | `files.write` | H(host_id) | su | (rename over an existing file = delete → also `files.delete` when `overwrite`) |
 | `/api/hosts/{host_id}/fs/delete` (5667) | POST | `files.delete` | H(host_id) | su | |

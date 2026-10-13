@@ -883,7 +883,8 @@ async def test_routes(owner_uid):
     check("every check function that can return critical is declared critical-capable", not unflagged_crit, unflagged_crit)
     check("…the declared set (host.backup via fail_sev, certs.* via _CERT_SEV)", {
         "host.backup", "host.cloudflare", "gateway.disk", "alerts.delivery", "signing.state", "oidc.sso",
-        "config.forwards_http", "certs.main", "certs.forward", "certs.authentik", "clock.gateway"} == flagged, flagged)
+        "config.forwards_http", "certs.main", "certs.forward", "certs.authentik", "clock.gateway",
+        "agents.python"} == flagged, flagged)
 
     print("── the health terminal")
     hid = await U.add_host(owner, "gw-host")
