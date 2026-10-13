@@ -84,6 +84,9 @@ export const SETTINGS_INDEX: readonly SettingSection[] = [
     keywords: 'bulk enrollment group token onboarding fleet many machines inrolare masa grup flota', perm: 'hosts.create' },
   { id: 'deployKeyPolicy', cat: 'infrastructura', titleKey: 'settings.dkpolicy.title', hintKey: 'settings.dkpolicy.hint',
     keywords: 'deploy key ssh policy restrict host to host chei politica', perm: 'settings.manage' },
+  { id: 'certificates', cat: 'infrastructura', titleKey: 'settings.certs.title',
+    keywords: 'tls ssl https certificate certificates cert expiry expires renew renewal lets encrypt acme traefik wildcard dns-01 http-01 '
+      + 'certificat certificate expirare expira reinnoire reinnoieste', perm: 'settings.manage' },
   { id: 'forwardDomain', cat: 'infrastructura', titleKey: 'settings.forward.title',
     keywords: 'port forwarding domain dns wildcard certificate tls subdomain domeniu certificat', perm: 'settings.manage' },
   { id: 'guardrail', cat: 'infrastructura', titleKey: 'settings.guardrail', hintKey: 'settings.guardrailHint',

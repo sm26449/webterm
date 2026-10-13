@@ -936,6 +936,17 @@ function MainApp() {
     window.addEventListener('wt-open-walkthrough', onOpen)
     return () => window.removeEventListener('wt-open-walkthrough', onOpen)
   }, [])
+  // 3.6.7: a session created from deep inside Settings (Certificates → Renew in a terminal) is
+  // opened here, like any other: tab + navigation. The ref is filled after openTab is defined.
+  const openSessionRef = useRef<(sid: string) => void>(() => {})
+  useEffect(() => {
+    const onOpen = (e: Event) => {
+      const sid = (e as CustomEvent<{ sid: string }>).detail?.sid
+      if (sid) openSessionRef.current(sid)
+    }
+    window.addEventListener('wt-open-session', onOpen)
+    return () => window.removeEventListener('wt-open-session', onOpen)
+  }, [])
   useEffect(() => {
     setStepupHandler(async (hostId, code) => {
       const cred = await stepupCredential(hostId, code)
@@ -1062,6 +1073,7 @@ function MainApp() {
 
   const openTab = (sid: string) =>
     setOpenTabs((prev) => (prev.includes(sid) ? prev : [...prev, sid]))
+  openSessionRef.current = (sid: string) => { void refresh(); openTab(sid); navigate(sid) }
 
   // închide tab-ul (detach — sesiunea rămâne activă); activează un vecin
   const closeTab = (sid: string) => {

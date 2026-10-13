@@ -160,6 +160,12 @@ export default function Sidebar(props: {
     window.addEventListener('wt-focus-search', onFocusSearch)
     return () => window.removeEventListener('wt-focus-search', onFocusSearch)
   }, [])
+  // 3.6.7: Settings opened a terminal (Certificates → Renew) — get out of the way so it is seen
+  useEffect(() => {
+    const onOpenSession = () => setShowSettings(false)
+    window.addEventListener('wt-open-session', onOpenSession)
+    return () => window.removeEventListener('wt-open-session', onOpenSession)
+  }, [])
 
   // căutare în istoric (server-side), debounced. Numărul de secvenţă + AbortController: un
   // răspuns LENT la „pro" nu are voie să suprascrie rezultatele deja afişate pentru „prod" —
