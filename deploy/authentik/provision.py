@@ -215,7 +215,11 @@ def provision(call, *, ak, wt_domain, provider_name="Authentik", prefix="wt", ou
     # cele cinci grupuri; legată de aplicaţie, merge la fel sub `any` şi sub `all`.
     app_body = {"name": "WebTerm", "slug": "webterm", "provider": provider_pk,
                 "meta_launch_url": "https://%s/" % wt_domain}
-    if one("/api/v3/core/applications/?slug=webterm", "slug", "webterm"):
+    # `superuser_full_list=true`: fără el, lista de aplicaţii e FILTRATĂ prin politicile fiecărei
+    # aplicaţii pentru userul tokenului — akadmin, care nu e în niciun grup wt-*, nu vede
+    # aplicaţia deja legată de politică, iar re-rularea încerca POST → 400 „slug already exists"
+    # (găsit la repetiţia upgrade-ului Authentik, docs/AUTHENTIK-UPGRADE.md).
+    if one("/api/v3/core/applications/?slug=webterm&superuser_full_list=true", "slug", "webterm"):
         call("PATCH", "/api/v3/core/applications/webterm/", app_body)
         out("aplicaţia webterm: actualizată (modul politicilor neschimbat)")
     else:
