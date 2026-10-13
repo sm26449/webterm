@@ -9,7 +9,7 @@ import {
   actionTarget, checkText, docUrl, fixMode, MUTE_MODES, needsAttention, optText, severityTone, splitChecks,
   type HealthCheck, type HealthStatus, type MuteMode,
 } from '../../lib/health'
-import { field, heading } from './ui'
+import { heading } from './ui'
 import { Badge, Button } from '../ui'
 import type { LoadState } from '../../lib/loadable'
 import NotLoaded from './NotLoaded'
@@ -191,7 +191,7 @@ export default function HealthTab(props: { onJump?: (cat: string, section?: stri
             {st?.can_manage && c.severity !== 'ok' && (
               <select aria-label={t('health.muteLabel')} value=""
                 onChange={(e) => { const v = e.target.value as MuteMode; if (v) void mute(c, v) }}
-                className={`${field} w-auto py-1 text-xs sm:text-xs`}>
+                className="rounded-md bg-ink-800 px-2 py-1 text-xs text-slate-200 ring-1 ring-[rgb(var(--field-border))] focus:ring-sky-500">
                 <option value="">{c.muted ? t('health.mutedShort') : t('health.mute')}</option>
                 {MUTE_MODES.map((m) => <option key={m} value={m}>{t('health.mute.' + m)}</option>)}
                 {c.muted && <option value="off">{t('health.mute.off')}</option>}
