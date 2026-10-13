@@ -8,6 +8,7 @@
 #   scripts/authentik-upgrade.sh [options] backup
 #   scripts/authentik-upgrade.sh [options] upgrade <tag>       e.g. 2026.8.3
 #   scripts/authentik-upgrade.sh [options] restore <backup-dir>
+#   scripts/authentik-upgrade.sh [--unlisted-minor] check-hop <from> <to>   only say if a hop is allowed
 #
 # Options:
 #   --dir DIR          directory holding the compose file and its .env   (default /opt/authentik)
@@ -70,6 +71,46 @@ done
 CMD=${1:-}; shift || true
 [ -n "$CMD" ] || usage 1
 
+minor() { echo "$1" | cut -d. -f1,2; }
+patch() { echo "$1" | cut -d. -f3; }
+idx() { local i=0 m; for m in $KNOWN_MINORS; do [ "$m" = "$1" ] && { echo "$i"; return; }; i=$((i + 1)); done; echo -1; }
+VER_RE='^20[0-9]{2}\.[0-9]{1,2}\.[0-9]+$'
+
+# Is cur → target ONE allowed step? Prints why not and returns 1. Pure: no Docker, no files.
+check_hop() {
+  local cur=$1 target=$2 cm tm ci ti cy cn ty tn last
+  [[ "$cur" =~ $VER_RE ]] || { echo "current version must look like 2026.8.3 (got '$cur')"; return 1; }
+  [[ "$target" =~ $VER_RE ]] || { echo "target must look like 2026.8.3 (got '$target')"; return 1; }
+  [ "$cur" != "$target" ] || { echo "already on $target"; return 1; }
+  cm=$(minor "$cur"); tm=$(minor "$target"); ci=$(idx "$cm"); ti=$(idx "$tm")
+  last=$(( $(echo "$KNOWN_MINORS" | wc -w) - 1 ))
+  if [ "$cm" = "$tm" ]; then
+    [ "$(patch "$target")" -gt "$(patch "$cur")" ] || { echo "$target is older than $cur — Authentik has no downgrade; use 'restore'"; return 1; }
+    echo "patch upgrade inside $cm"
+  elif [ "$ci" -ge 0 ] && [ "$ti" -ge 0 ]; then
+    [ "$ti" -gt "$ci" ] || { echo "$target is older than $cur — Authentik has no downgrade; use 'restore'"; return 1; }
+    [ "$ti" -eq $((ci + 1)) ] || { echo "skipping minors is not supported: from $cm the next step is $(echo "$KNOWN_MINORS" | tr ' ' '\n' | sed -n "$((ci + 2))p").x"; return 1; }
+    echo "minor upgrade $cm → $tm (the next one in sequence) — read its release notes first"
+  elif [ "$ti" -lt 0 ] && [ "$ci" -eq "$last" ] && [ "$UNLISTED" = 1 ]; then
+    # security review 3.6.8 (L3): an unlisted minor must be NEWER — (year, minor) compared as
+    # numbers. Before, `--unlisted-minor` from the last known minor accepted any unknown one,
+    # 2025.9.0 included: a downgrade, which Authentik cannot do (one-way migrations).
+    cy=${cm%%.*}; cn=${cm#*.}; ty=${tm%%.*}; tn=${tm#*.}
+    if [ "$((10#$ty))" -lt "$((10#$cy))" ] || { [ "$((10#$ty))" -eq "$((10#$cy))" ] && [ "$((10#$tn))" -le "$((10#$cn))" ]; }; then
+      echo "$target is older than $cur — Authentik has no downgrade; use 'restore'"; return 1
+    fi
+    echo "minor $tm is newer than this script knows; --unlisted-minor given"
+  else
+    echo "cannot verify that $cm → $tm is a single step (known: $KNOWN_MINORS). If $tm is the release right after $cm, re-run with --unlisted-minor"
+    return 1
+  fi
+}
+
+if [ "$CMD" = check-hop ]; then
+  [ $# -eq 2 ] || die "usage: check-hop <from> <to>"
+  if out=$(check_hop "$1" "$2"); then ok "$out"; exit 0; else die "$out"; fi
+fi
+
 [ -d "$DIR" ] || die "no such directory: $DIR"
 DIR=$(cd "$DIR" && pwd)
 if [ -z "$FILE" ]; then
@@ -105,10 +146,6 @@ file_tags() { grep -E "^[[:space:]]*image:[[:space:]]*\"?${IMAGE_REPO}:" "$CF" \
   | sed -E "s|.*${IMAGE_REPO}:([^\" ]+).*|\1|" | sort -u; }
 pg_major() { dc exec -T "$PG" psql -U authentik -d authentik -Atc 'show server_version' 2>/dev/null \
   | cut -d. -f1 | tr -d '\r'; }
-minor() { echo "$1" | cut -d. -f1,2; }
-patch() { echo "$1" | cut -d. -f3; }
-idx() { local i=0 m; for m in $KNOWN_MINORS; do [ "$m" = "$1" ] && { echo "$i"; return; }; i=$((i + 1)); done; echo -1; }
-
 # Python inside the server image (no curl/wget there): readiness + every discovery document.
 probe() {
   dc exec -T "$SRV" python - <<'EOF'
@@ -209,8 +246,8 @@ wait_healthy() {
 }
 
 do_upgrade() {
-  local target=${1:-} cur ft cm tm ci ti
-  [[ "$target" =~ ^20[0-9]{2}\.[0-9]{1,2}\.[0-9]+$ ]] || die "target must look like 2026.8.3 (got '$target')"
+  local target=${1:-} cur ft hop
+  [[ "$target" =~ $VER_RE ]] || die "target must look like 2026.8.3 (got '$target')"
   status
   say "Pre-checks"
   cur=$(running_tag); ft=$(file_tags)
@@ -219,20 +256,8 @@ do_upgrade() {
     || die "compose file tag(s) [$ft] differ from the running tag [$cur] — reconcile first"
   [ "$(health "$SRV")" = healthy ] && [ "$(health "$WRK")" = healthy ] && [ "$(health "$PG")" = healthy ] \
     || die "stack is not fully healthy — do not upgrade a sick IdP"
-  [ "$cur" != "$target" ] || die "already on $target"
-  cm=$(minor "$cur"); tm=$(minor "$target"); ci=$(idx "$cm"); ti=$(idx "$tm")
-  if [ "$cm" = "$tm" ]; then
-    [ "$(patch "$target")" -gt "$(patch "$cur")" ] || die "$target is older than $cur — Authentik has no downgrade; use 'restore'"
-    ok "patch upgrade inside $cm"
-  elif [ "$ci" -ge 0 ] && [ "$ti" -ge 0 ]; then
-    [ "$ti" -gt "$ci" ] || die "$target is older than $cur — Authentik has no downgrade; use 'restore'"
-    [ "$ti" -eq $((ci + 1)) ] || die "skipping minors is not supported: from $cm the next step is $(echo "$KNOWN_MINORS" | tr ' ' '\n' | sed -n "$((ci + 2))p").x"
-    ok "minor upgrade $cm → $tm (the next one in sequence) — read its release notes first"
-  elif [ "$ti" -lt 0 ] && [ "$ci" -eq "$(( $(echo "$KNOWN_MINORS" | wc -w) - 1 ))" ] && [ "$UNLISTED" = 1 ]; then
-    ok "minor $tm is newer than this script knows; --unlisted-minor given"
-  else
-    die "cannot verify that $cm → $tm is a single step (known: $KNOWN_MINORS). If $tm is the release right after $cm, re-run with --unlisted-minor"
-  fi
+  hop=$(check_hop "$cur" "$target") || die "$hop"
+  ok "$hop"
   local pgm; pgm=$(pg_major); ok "postgres major $pgm"
   [ "${pgm:-0}" -ge 14 ] || die "Postgres $pgm is too old for current Authentik — upgrade Postgres first (runbook §PG)"
   local fg; fg=$(free_gb); [ "$fg" -ge "$MIN_FREE_GB" ] || die "only ${fg} GB free (< $MIN_FREE_GB)"; ok "$fg GB free"

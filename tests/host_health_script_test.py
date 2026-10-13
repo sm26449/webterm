@@ -29,6 +29,7 @@ import http.server
 import json
 import os
 import pwd
+import re
 import shutil
 import stat
 import subprocess
@@ -61,12 +62,15 @@ case "$1" in
   ps)
     case "$*" in
       *service=app*) [ -f "$FAKE_DIR/app_cid" ] && cat "$FAKE_DIR/app_cid" ;;
+      *-aq*) [ -f "$FAKE_DIR/all_cids" ] && cat "$FAKE_DIR/all_cids" ;;
+      *compose.project=*) [ -f "$FAKE_DIR/ak_project" ] && cat "$FAKE_DIR/ak_project" ;;
       *Image*) [ -f "$FAKE_DIR/ak_ps" ] && cat "$FAKE_DIR/ak_ps" ;;
     esac ;;
   inspect) echo sha256:running ;;
   images)
     case "$*" in
       *dangling*) echo d1; echo d2 ;;
+      *--no-trunc*) [ -f "$FAKE_DIR/images" ] && cat "$FAKE_DIR/images" ;;
       *) [ -f "$FAKE_DIR/tags" ] && cat "$FAKE_DIR/tags" ;;
     esac ;;
   image)
@@ -74,6 +78,7 @@ case "$1" in
       inspect)
         case "$*" in
           *RepoDigests*) : ;;
+          *Labels*) ref=$(echo "$*" | awk '{print $NF}'); grep "^$ref " "$FAKE_DIR/labels" 2>/dev/null | awk '{print $2}' ;;
           *) ref=$(echo "$*" | awk '{print $NF}'); grep "^$ref " "$FAKE_DIR/ids" 2>/dev/null | awk '{print $2}' ;;
         esac ;;
       prune|rm) : ;;
@@ -404,6 +409,33 @@ def main():
         open(os.path.join(fake, "ids"), "w").write("".join("%s %s\n" % kv for kv in ids.items()))
         open(os.path.join(inst, ".prev-image"), "w").write("prevref\n")
         open(os.path.join(fake, "app_cid"), "w").write("cid-app\n")
+        # the other images (review L2): what must survive and what may go
+        tool = "python:3.12-alpine@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df"
+        ids.update({tool: "sha256:tool", "ghcr.io/goauthentik/server:2026.8.3": "sha256:akcur",
+                    "docker.io/library/postgres:16.15-alpine": "sha256:pgpin",
+                    "docker.io/library/postgres:16-alpine": "sha256:sepdb"})
+        open(os.path.join(fake, "ids"), "w").write("".join("%s %s\n" % kv for kv in ids.items()))
+        OLD, NOW = "2025-01-01 10:00:00 +0000 UTC", time.strftime("%Y-%m-%d %H:%M:%S +0000 UTC", time.gmtime())
+        imgs = [("sha256:tool", "python", "<none>", OLD),                    # backup.sh's tool image (digest)
+                ("sha256:akcur", "ghcr.io/goauthentik/server", "2026.8.3", OLD),   # pinned + running
+                ("sha256:akprev", "ghcr.io/goauthentik/server", "2026.8.2", OLD),  # the rollback target
+                ("sha256:akold", "ghcr.io/goauthentik/server", "2026.5.4", OLD),   # two steps back: may go
+                ("sha256:pgpin", "docker.io/library/postgres", "16.15-alpine", OLD),   # this install's compose
+                ("sha256:sepdb", "docker.io/library/postgres", "16-alpine", OLD),      # the separate Authentik project
+                ("sha256:localwt", "webterm-app", "latest", OLD),             # a local WebTerm build
+                ("sha256:wtlabel", "someorg/thing", "1", OLD),               # labelled as WebTerm
+                ("sha256:running", "nginx", "1", OLD),                       # a container uses it
+                ("sha256:junk", "busybox", "1.36", OLD),                     # unused and old: goes
+                ("sha256:fresh", "alpine", "3.20", NOW),                     # unused but young: stays
+                ("sha256:dang", "<none>", "<none>", NOW)]                    # dangling: goes
+        open(os.path.join(fake, "images"), "w").write("".join("|".join(i) + "\n" for i in imgs))
+        open(os.path.join(fake, "labels"), "w").write("sha256:wtlabel webterm\nsha256:junk <no value>\n")
+        open(os.path.join(fake, "all_cids"), "w").write("c1\nc2\n")
+        open(os.path.join(fake, "ak_ps"), "w").write(
+            "ghcr.io/goauthentik/server:2026.8.3|authentik|server|/opt/authentik\n"
+            "ghcr.io/goauthentik/server:2026.8.3|authentik|worker|/opt/authentik\n")
+        open(os.path.join(fake, "ak_project"), "w").write(
+            "ghcr.io/goauthentik/server:2026.8.3\ndocker.io/library/postgres:16-alpine\n")
         give(base)
         calls = os.path.join(fake, "calls")
         open(calls, "w").write("")
@@ -411,34 +443,100 @@ def main():
         c = open(calls).read()
         check("--dry-run removes nothing", rc == 0 and " rm " not in c and "prune" not in c, c)
         check("…and lists the old versions it would remove", "would remove ghcr.io/sm26449/webterm:v3.3.0" in out, out[-500:])
+        check("…and the other images it would remove", "would remove busybox:1.36" in out
+              and "would remove sha256:dang (dangling)" in out, out[-800:])
         open(calls, "w").write("")
         old = status(base, "docker-cleanup")
         rc, out = run(base, inst, fake, "docker-cleanup.sh")
         c = open(calls).read().splitlines()
-        check("dangling prune", "image prune -f" in c, c)
-        check("-a prune with the age window AND the WebTerm label exclusion",
-              "image prune -a -f --filter until=336h --filter label!=org.opencontainers.image.title=webterm" in c, c)
+        check("no blanket image prune at all (review L2: images are removed one by one)",
+              not any(l.startswith("image prune") for l in c), c)
         removed = sorted(l.split()[2] for l in c if l.startswith("image rm "))
         check("keeps the newest 7 + the running + the rollback target; removes the rest",
-              removed == ["ghcr.io/sm26449/webterm:v3.3.0"], removed)
+              "ghcr.io/sm26449/webterm:v3.3.0" in removed
+              and not any(r.startswith("ghcr.io/sm26449/webterm:") and r != "ghcr.io/sm26449/webterm:v3.3.0"
+                          for r in removed), removed)
+        check("other images: only the old unused one, the dangling one and the Authentik two versions back",
+              sorted(r for r in removed if "sm26449" not in r)
+              == ["busybox:1.36", "ghcr.io/goauthentik/server:2026.5.4", "sha256:dang"], removed)
+        for what, ref in (("the python tool image backup.sh needs (by digest)", "sha256:tool"),
+                          ("the previous Authentik image (rollback target)", "2026.8.2"),
+                          ("the running / pinned Authentik image", "2026.8.3"),
+                          ("an image this install's compose pins", "16.15-alpine"),
+                          ("an image of the separate Authentik project", "16-alpine"),
+                          ("a locally built WebTerm image", "webterm-app"),
+                          ("an image labelled as WebTerm", "someorg/thing"),
+                          ("an image a container uses", "nginx"),
+                          ("a young unused image", "alpine:3.20")):
+            check("preserved: %s" % what, not any(ref in r for r in removed), removed)
+        check("image rm never forced (-f): an in-use image is refused by docker",
+              not any(l.startswith("image rm") and " -f" in l for l in c), c)
         check("build-cache prune with its own window", "builder prune -f --filter until=72h" in c, c)
         check("never volumes, system prune or containers", not any(
             l.split()[0] in ("volume", "system", "container", "rm", "stop", "kill") or "volume" in l for l in c), c)
         st = status(base, "docker-cleanup")
         check("status recorded (images_removed, disk_free_pct)", st and st != old and st["status"] == "ok"
-              and st["data"]["images_removed"] == 1 and isinstance(st["data"]["disk_free_pct"], (int, float)), st)
+              and st["data"]["images_removed"] == 4 and isinstance(st["data"]["disk_free_pct"], (int, float)), st)
+        # review L5: df fails → `"disk_free_pct":0`, never `"disk_free_pct":,` (refused as invalid JSON)
+        dfp = os.path.join(fake, "bin", "df")
+        open(dfp, "w").write("#!/bin/sh\nexit 1\n")
+        os.chmod(dfp, 0o755)
+        give(base)
+        time.sleep(1.1)
+        before = status(base, "docker-cleanup")
+        rc, out = run(base, inst, fake, "docker-cleanup.sh")
+        st = status(base, "docker-cleanup")
+        check("df failing → the status is still recorded, with disk_free_pct 0", rc == 0 and st and st != before
+              and st["data"].get("disk_free_pct") == 0, (st, out[-300:]))
+        os.remove(dfp)
+        tool_refs = {}
+        for f in ("backup.sh", "restore.sh", "host-health.sh", "docker-cleanup.sh"):
+            m = re.search(r"python:3\.12-alpine@sha256:[0-9a-f]{64}", open(os.path.join(ROOT, "scripts", f)).read())
+            tool_refs[f] = m.group(0) if m else None
+        check("the tool image digest docker-cleanup preserves is the one backup/restore/host-health run",
+              len(set(tool_refs.values())) == 1 and None not in tool_refs.values(), tool_refs)
         rc, out = run(base, inst, fake, "docker-cleanup.sh", extra_env={"RETENTION": "1d;rm"})
         check("a bad RETENTION is refused", rc == 2 and "RETENTION" in out, out[-200:])
         rc, out = run(base, inst, fake, "docker-cleanup.sh", test_mode=False)
         check("not root, no test mode → refused", rc != 0 and "must run as root" in out, out[-200:])
+
+        print("── authentik-upgrade.sh: the hop rule (review L3)")
+        AU = os.path.join(ROOT, "scripts", "authentik-upgrade.sh")
+
+        def hop(cur, target, unlisted=True):
+            argv = ["bash", AU] + (["--unlisted-minor"] if unlisted else []) + ["check-hop", cur, target]
+            p = subprocess.run(argv, capture_output=True, text=True, timeout=30, cwd="/",
+                               env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")})
+            return p.returncode, p.stdout + p.stderr
+        for cur, target, allowed, why in (
+                ("2026.8.3", "2025.9.0", False, "--unlisted-minor: an OLDER unknown minor is a downgrade"),
+                ("2026.8.3", "2026.7.0", False, "--unlisted-minor: same year, lower minor"),
+                ("2026.8.3", "2026.8.0", False, "a lower patch"),
+                ("2026.5.4", "2026.2.1", False, "an older known minor"),
+                ("2026.5.4", "2026.11.0", False, "skipping a known minor"),
+                ("2026.8.3", "2026.8.3", False, "the same version"),
+                ("2026.8.3", "bogus", False, "a malformed target"),
+                ("2026.8.2", "2026.8.3", True, "a patch step"),
+                ("2026.5.4", "2026.8.3", True, "the next known minor"),
+                ("2026.8.3", "2026.11.0", True, "--unlisted-minor: a newer unknown minor"),
+                ("2026.8.3", "2027.1.0", True, "--unlisted-minor: the next year")):
+            rc, out = hop(cur, target)
+            check("check-hop %s → %s %s (%s)" % (cur, target, "allowed" if allowed else "refused", why),
+                  (rc == 0) == allowed, out[-300:])
+        rc, out = hop("2026.8.3", "2025.9.0")
+        check("…the downgrade says why", "no downgrade" in out, out)
+        rc, out = hop("2026.8.3", "2026.11.0", unlisted=False)
+        check("an unknown minor without --unlisted-minor → refused", rc != 0 and "--unlisted-minor" in out, out)
 
         print("── shellcheck")
         sc = shutil.which("shellcheck")
         if not sc:
             print("  SKIP: shellcheck not installed (CI's lint job runs it)")
         else:
-            p = subprocess.run([sc, HH, DC], capture_output=True, text=True)
-            check("host-health.sh + docker-cleanup.sh are shellcheck-clean", p.returncode == 0, p.stdout[-500:])
+            p = subprocess.run([sc, HH, DC, os.path.join(ROOT, "scripts", "authentik-upgrade.sh")],
+                               capture_output=True, text=True)
+            check("host-health.sh + docker-cleanup.sh + authentik-upgrade.sh are shellcheck-clean",
+                  p.returncode == 0, p.stdout[-500:])
     finally:
         shutil.rmtree(base, ignore_errors=True)
 
