@@ -201,15 +201,20 @@ def write_json(path, data):
     os.chmod(path, 0o600)
 
 
-def run(inst, fake, *args, probe_port=1, extra_env=None, script=None):
+def run(inst, fake, *args, probe_port=1, extra_env=None, script=None, test_mode=True, cwd=None):
     env = dict(os.environ)
-    env.update({"DOCKER": os.path.join(fake, "bin", "docker"), "FAKE_DIR": fake,
+    env.update({"DOCKER_TEST_BIN": os.path.join(fake, "bin", "docker"), "FAKE_DIR": fake,
                 "WEBTERM_CERT_PROBE": "127.0.0.1:%d" % probe_port, "WEBTERM_RENEW_POLL": "1"})
-    env.pop("WEBTERM_ACME_DIR", None)
-    env.pop("WEBTERM_TRAEFIK_CONTAINER", None)
+    if test_mode:
+        env["WEBTERM_CERT_RENEW_TEST"] = "1"      # the explicit, test-only switch
+    else:
+        env.pop("WEBTERM_CERT_RENEW_TEST", None)
+    for k in ("WEBTERM_ACME_DIR", "WEBTERM_TRAEFIK_CONTAINER", "SUDO_USER", "DOCKER"):
+        env.pop(k, None)
     env.update(extra_env or {})
     p = subprocess.run(["bash", script or os.path.join(inst, "scripts", "cert-renew.sh"), *args],
-                       stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env, timeout=60)
+                       stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env, timeout=60,
+                       cwd=cwd)
     return p.returncode, p.stdout + p.stderr
 
 
@@ -389,6 +394,46 @@ def main():
         check("…through a stop/start of Traefik, store 0600",
               [ln.split()[0] for ln in calls(fake).splitlines() if ln.split()[0] in ("stop", "start")] == ["stop", "start"]
               and stat.S_IMODE(os.stat(os.path.join(acme, "acme.json")).st_mode) == 0o600)
+
+        print("── review F1: no module shadowing (the script runs as root from the caller's cwd)")
+        plant = os.path.join(base, "plant")
+        os.makedirs(plant)
+        marker = os.path.join(base, "PWNED")
+        for mod in ("json", "calendar", "re", "ssl", "tempfile", "base64"):
+            open(os.path.join(plant, mod + ".py"), "w").write(
+                "open(%r, 'a').write(%r)\nraise SystemExit('planted %s imported')\n" % (marker, mod + "\n", mod))
+        # the trap is real: a plain `python3 -` from that directory DOES import the planted json.py
+        subprocess.run(["python3", "-"], input="import json\n", text=True, cwd=plant, capture_output=True)
+        check("(sanity) a plain `python3 -` from that cwd imports the planted json.py", os.path.exists(marker))
+        if os.path.exists(marker):
+            os.unlink(marker)
+        rc, out = run(inst, fake, "--report", cwd=plant, extra_env={"PYTHONPATH": plant, "PYTHONSTARTUP": os.path.join(plant, "json.py")})
+        check("--report from a cwd with json.py / calendar.py / re.py planted: works", rc == 0 and "Store le" in out, out[-300:])
+        check("…and imported none of them (cd / + python3 -I)", not os.path.exists(marker),
+              open(marker).read() if os.path.exists(marker) else "")
+
+        print("── hardening: env overrides only in test mode, never under sudo; root-owned paths")
+        reset_calls(fake)
+        os.chmod(inst, 0o775)                         # group-writable install dir
+        rc, out = run(inst, fake, "--report", test_mode=False)
+        check("outside test mode: a group-writable install dir → refused (rc 2)", rc == 2
+              and "must be owned by root and not writable" in out, out[-300:])
+        check("…and the DOCKER_TEST_BIN / WEBTERM_* overrides were not used", calls(fake) == "", calls(fake))
+        shim = os.path.join(base, "shim")
+        os.makedirs(shim)
+        open(os.path.join(shim, "id"), "w").write('#!/bin/sh\n[ "$1" = "-u" ] && { echo 0; exit 0; }\nexec /usr/bin/id "$@"\n')
+        os.chmod(os.path.join(shim, "id"), 0o755)
+        rc, out = run(inst, fake, "--report", extra_env={"SUDO_USER": "alice",
+                                                          "PATH": shim + ":" + os.environ.get("PATH", "")})
+        check("root via sudo: the test switch is ignored (and said so)", "ignored under sudo" in out
+              and rc == 2 and "must be owned by root" in out, out[-300:])
+        check("…so no override was honoured", calls(fake) == "", calls(fake))
+        os.chmod(inst, 0o755)
+        os.chmod(os.path.join(inst, "scripts", "cert-renew.sh"), 0o777)
+        rc, out = run(inst, fake, "--report", test_mode=False)
+        check("outside test mode: a world-writable script → refused (or a non-root owner)", rc == 2
+              and "must be owned by root" in out, out[-300:])
+        os.chmod(os.path.join(inst, "scripts", "cert-renew.sh"), 0o755)
 
         print("── no Traefik container")
         open(os.path.join(fake, "no-traefik"), "w").close()

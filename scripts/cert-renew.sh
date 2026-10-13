@@ -34,17 +34,45 @@
 set -eu
 umask 077
 
-usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,13p' "$SELF" | sed 's/^# \{0,1\}//'; }
 die() { printf 'cert-renew: %s\n' "$*" >&2; exit "${RC:-1}"; }
 say() { printf '%s\n' "$*"; }
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd -P)
+SELF="$SCRIPT_DIR/$(basename "$0")"
 ROOT=$(cd "$SCRIPT_DIR/.." && pwd -P)
-DOCKER="${DOCKER:-docker}"
-PROBE="${WEBTERM_CERT_PROBE:-127.0.0.1:443}"
+# Run from `/`, never from the caller's directory. Under `sudo` the cwd is kept, and a python
+# started there would put that directory first on sys.path: a `json.py` planted in the agent
+# user's home would then run as ROOT the moment an Owner presses Enter (security review F1).
+# Python is also started isolated (`-I`), below. ORIG_PWD only resolves a relative --restore.
+ORIG_PWD=$PWD
+cd /
+
+# Test mode. The variables below exist so the test suite can point the script at fake stores, a
+# fake docker and a local TLS server. They are honoured ONLY with WEBTERM_CERT_RENEW_TEST=1, and
+# NEVER when we run as root through sudo — the path the UI types. Otherwise whoever can shape the
+# environment of the sudo call could swap `docker` or the store directory for something of theirs.
+TEST_MODE=0
+if [ "${WEBTERM_CERT_RENEW_TEST:-}" = 1 ]; then
+  if [ "$(id -u)" = 0 ] && [ -n "${SUDO_USER:-}" ]; then
+    printf 'cert-renew: WEBTERM_CERT_RENEW_TEST is ignored under sudo\n' >&2
+  else
+    TEST_MODE=1
+  fi
+fi
+DOCKER=docker
+PROBE=127.0.0.1:443
+TOOL_IMAGE="python:3.12-alpine@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df"
+ENV_ACME_DIR="" ENV_CID=""
+if [ "$TEST_MODE" = 1 ]; then
+  DOCKER="${DOCKER_TEST_BIN:-docker}"
+  PROBE="${WEBTERM_CERT_PROBE:-$PROBE}"
+  TOOL_IMAGE="${WEBTERM_TOOL_IMAGE:-$TOOL_IMAGE}"
+  ENV_ACME_DIR="${WEBTERM_ACME_DIR:-}"
+  ENV_CID="${WEBTERM_TRAEFIK_CONTAINER:-}"
+fi
 POLL_EVERY="${WEBTERM_RENEW_POLL:-5}"
 KEEP=5
-TOOL_IMAGE="${WEBTERM_TOOL_IMAGE:-python:3.12-alpine@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df}"
 
 MODE=list DOMAIN="" STORE="" YES=0 TIMEOUT=180 RESTORE=""
 while [ $# -gt 0 ]; do
@@ -81,12 +109,29 @@ if ! { [ -f "$ROOT/docker-compose.prod.yml" ] && [ -f "$ROOT/.env" ] \
   RC=2 die "$ROOT is not a WebTerm install directory (no docker-compose.prod.yml with Traefik resolvers + .env)"
 fi
 
+# The script runs as root and trusts its own directory (the install dir, its scripts, the backups
+# it may restore from). Each must be root-owned and not writable by group or others; otherwise a
+# non-root user could swap the script between the Owner reading the command and pressing Enter, or
+# plant a "backup" for --restore. Skipped only in test mode (a CI runner is not root).
+safe_path() {   # safe_path PATH → 0 when owned by root and not group/world-writable
+  local owner mode
+  owner=$(stat -Lc '%u' -- "$1" 2>/dev/null) || return 1
+  mode=$(stat -Lc '%a' -- "$1" 2>/dev/null) || return 1
+  [ "$owner" = 0 ] && [ $(( 0$mode & 022 )) -eq 0 ]
+}
+if [ "$TEST_MODE" != 1 ]; then
+  for p in "$ROOT" "$SCRIPT_DIR" "$SELF" "$ROOT/acme-backups"; do
+    [ -e "$p" ] || continue
+    safe_path "$p" || RC=2 die "refusing: $p must be owned by root and not writable by group/others"
+  done
+fi
+
 WORK=$(mktemp -d)
 cleanup() { rm -rf "$WORK"; }
 trap cleanup EXIT
 
 # ── where Traefik and its stores are ─────────────────────────────────────────
-CID="${WEBTERM_TRAEFIK_CONTAINER:-}"
+CID="$ENV_CID"
 if [ -z "$CID" ]; then
   CID=$("$DOCKER" ps -q --filter "label=com.docker.compose.service=traefik" \
           --filter "label=com.docker.compose.project.working_dir=$ROOT" 2>/dev/null | head -n1 || true)
@@ -99,7 +144,7 @@ if [ -z "$CID" ]; then
   CID=$("$DOCKER" ps -q --filter "label=com.docker.compose.service=traefik" \
           --filter "label=com.docker.compose.project=$PROJECT" 2>/dev/null | head -n1 || true)
 fi
-ACME_DIR="${WEBTERM_ACME_DIR:-}"
+ACME_DIR="$ENV_ACME_DIR"
 if [ -z "$ACME_DIR" ] && [ -n "$CID" ]; then
   ACME_DIR=$("$DOCKER" inspect -f '{{range .Mounts}}{{if eq .Destination "/letsencrypt"}}{{.Source}}{{end}}{{end}}' \
              "$CID" 2>/dev/null || true)
@@ -132,12 +177,12 @@ fi
 run_py() {   # run_py RW|RO <args…>   (program on stdin)
   local rw="$1"; shift
   if command -v python3 >/dev/null 2>&1; then
-    ACME_DIR="$ACME_DIR" WORK="$WORK" LABELS_OK="$LABELS_OK" python3 - "$@"
+    ACME_DIR="$ACME_DIR" WORK="$WORK" LABELS_OK="$LABELS_OK" python3 -I - "$@"
   else
     local mode=ro; [ "$rw" = RW ] && mode=rw
     "$DOCKER" run --rm -i --network none --entrypoint python3 \
       -e ACME_DIR="$ACME_DIR" -e WORK="$WORK" -e LABELS_OK="$LABELS_OK" \
-      -v "$ACME_DIR:$ACME_DIR:$mode" -v "$WORK:$WORK" "$TOOL_IMAGE" - "$@"
+      -w / -v "$ACME_DIR:$ACME_DIR:$mode" -v "$WORK:$WORK" "$TOOL_IMAGE" -I - "$@"
   fi
 }
 
@@ -527,7 +572,7 @@ case "$MODE" in
     say "NOT YET: after ${TIMEOUT}s Traefik serves: $PROBE_WHY."
     say "  Look at: docker logs --since 10m $CID 2>&1 | grep -i acme"
     say "  (DNS-01 needs the Cloudflare token with Zone:DNS:Edit rights — and not expired.)"
-    say "  To undo: $0 --restore $LAST_BACKUP"
+    say "  To undo: $SELF --restore $LAST_BACKUP"
     exit 1 ;;
   prune)
     if [ "$YES" = 1 ]; then
@@ -547,6 +592,7 @@ case "$MODE" in
       say "(dry run — nothing changed; add --yes to remove these)"
     fi ;;
   restore)
+    case "$RESTORE" in /*) ;; *) RESTORE="$ORIG_PWD/$RESTORE" ;; esac
     src=$(cd "$RESTORE" 2>/dev/null && pwd -P) || RC=2 die "no such backup: $RESTORE"
     case "$src" in "$(cd "$ROOT" && pwd -P)/acme-backups/acme-"*) ;; *) RC=2 die "--restore takes a directory from $BACKUP_ROOT" ;; esac
     ls "$src"/*.json >/dev/null 2>&1 || RC=2 die "$src holds no store files"
