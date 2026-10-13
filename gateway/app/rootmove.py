@@ -228,13 +228,14 @@ MOVE_SCRIPT = (
     's=$1 z=$2 h=$3 f=$4; shift 4; n=${f##*/}; '
     't=$(mktemp -d -- ./.webterm-move.XXXXXX) || exit 1; '
     'if ( cd -P -- "$t" && [ "$(pwd -P)" = "${d%/}/${t#./}" ] '
-    '&& [ "$(find . -prune -user "$(id -u)" -perm 700)" = . ] || exit 1; '
+    '&& chmod g-s . && [ "$(find . -prune -user "$(id -u)" -perm 700)" = . ] || exit 1; '
     'trap "rm -f f" EXIT; trap "exit 130" HUP INT TERM; '
     '{ sudo -u "$u" -- head -c "$z" -- "$s"; } >f && x=$(sha256sum <f) && [ "${x%% *}" = "$h" ] '
     '&& chmod 0644 f && mv -f -T -- f "../$n" ); '
     'then c; m "installed $f"; sudo -u "$u" -- rm -f -- "$s" || :; '
     'else m "NOT installed: $f - the uploaded file was changed or replaced, '
-    'or $u could not read it (SHA-256 check); nothing was moved" >&2; exit 1; fi; '
+    '$u could not read it (SHA-256 check), or the private temp folder check failed; '
+    'nothing was moved" >&2; exit 1; fi; '
     'done'
 )
 SCRIPT_NAME = "webterm-move"
@@ -320,11 +321,15 @@ def new_plan(host_id: int, user_id: int, inbox: str, target_dir: str, names: lis
     now = time.time() if now is None else now
     target_dir = check_dir(target_dir)
     uploads = staged_paths(inbox, names, now)
-    dropped = _expire(now, user_id)
-    if sum(1 for p in _plans.values() if p["host_id"] == host_id) >= MAX_PLANS_PER_HOST:
+    dropped = _expire(now, None)                 # expired plans only
+    mine = [p for p in _plans.values() if p["user_id"] == user_id]
+    over = mine[:max(0, len(mine) - MAX_PLANS_PER_USER + 1)]   # this user's oldest, to replace
+    on_host = sum(1 for p in _plans.values() if p["host_id"] == host_id)
+    if on_host - sum(1 for p in over if p["host_id"] == host_id) >= MAX_PLANS_PER_HOST:
         raise MoveBusy("too many open move-as-root uploads on this host", dropped)
-    if len(_plans) >= MAX_PLANS:
+    if len(_plans) - len(over) >= MAX_PLANS:
         raise MoveBusy("too many open move-as-root uploads", dropped)
+    dropped += _expire(now, user_id)             # only now: a refused request costs no plan
     pid = secrets.token_hex(16)
     plan = {"plan_id": pid, "host_id": host_id, "user_id": user_id, "dir": target_dir,
             "inbox": inbox, "uploads": uploads, "at": now}
@@ -354,7 +359,14 @@ def drop_plan(plan_id: str):
 
 
 def staged_owner(host_id: int, path) -> int | None:
-    """The user whose live plan staged `path` on this host, or None."""
-    pid = _staged.get((host_id, path)) if isinstance(path, str) else None
-    p = _plans.get(pid) if pid else None
-    return p["user_id"] if p else None
+    """The user whose live plan staged `path` on this host, or None. `path` is also matched in
+    its normal spelling (`//`, `/./`, `x/..` collapsed), so another spelling of a staged path
+    is not a way around the planner-only rule."""
+    if not isinstance(path, str):
+        return None
+    for q in (path, posixpath.normpath(re.sub(r"/+", "/", path))):
+        pid = _staged.get((host_id, q))
+        p = _plans.get(pid) if pid else None
+        if p:
+            return p["user_id"]
+    return None

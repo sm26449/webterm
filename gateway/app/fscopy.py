@@ -45,7 +45,7 @@ import uuid
 import zlib
 from typing import Optional
 
-from . import core
+from . import core, rootmove
 
 COPY_MAX_FILES = 1000                # fişiere per job (inclusiv cele din foldere)
 COPY_MAX_DIRS = 1000                 # directoare per job (foldere copiate, v58)
@@ -508,6 +508,9 @@ async def _copy_file(job: CopyJob, f: CopyFile) -> None:
     if not await _resolve_dst(job, f):
         f.state = "skipped"
         return
+    owner = rootmove.staged_owner(job.dst_host, f.dst)
+    if owner is not None and owner != job.user_id:
+        raise core.FileError("this file is staged by another user (move as root)")
     f.state = "running"
     uid = uuid.uuid4().hex                     # 32 hex: tiparul `_UPLOAD_UID` + `_upload_gc`
     src_conn = core._agent_or_raise(job.src_host)

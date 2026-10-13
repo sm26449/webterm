@@ -170,6 +170,11 @@ def pure_checks():
     check("plan: found while live, gone after the TTL",
           rootmove.get_plan(p["plan_id"], now=1001.0) is p
           and rootmove.get_plan(p["plan_id"], now=1000.0 + rootmove.PLAN_TTL + 1) is None)
+    sp = p["uploads"][0]["upload_path"]
+    check("plan: another spelling of a staged path (//, /./, x/..) is still the planner's",
+          all(rootmove.staged_owner(7, q) == 1 for q in (
+              sp.replace("/inbox/", "/inbox//"), sp.replace("/inbox/", "/inbox/./"),
+              sp.replace("/inbox/", "/inbox/x/../"), "/" + sp)))
     rootmove.drop_plan(p["plan_id"])
     check("plan: dropped → its staged paths are free", rootmove.staged_owner(7, p["uploads"][0]["upload_path"]) is None)
     saved = (rootmove.MAX_PLANS, rootmove.MAX_PLANS_PER_HOST, rootmove.MAX_PLANS_PER_USER)
@@ -205,6 +210,14 @@ def pure_checks():
             check("L3: …the full gateway refuses even a user under their own cap", False)
         except rootmove.MoveBusy:
             check("L3: …the full gateway refuses even a user under their own cap", True)
+        rootmove.MAX_PLANS_PER_USER = 1
+        try:
+            rootmove.new_plan(7, 3, INBOX, "/srv", ["a"], now=2006.5)
+            check("L3: a refused plan costs the user none of their own plans", False)
+        except rootmove.MoveBusy as e:
+            check("L3: a refused plan costs the user none of their own plans",
+                  e.dropped == [] and rootmove.get_plan(r1["plan_id"], now=2006.5) is r1)
+        rootmove.MAX_PLANS_PER_USER = 2
         p4, dropped = rootmove.new_plan(9, 4, INBOX, "/srv", ["a"], now=2001.0 + rootmove.PLAN_TTL + 1)
         live.append(p4)
         check("L3: expired plans free their room (and are reported)",
@@ -317,6 +330,18 @@ def shell_checks():
               r.stdout.splitlines() == want_out, r.stdout[-300:])
         for n in NASTY:
             os.unlink(os.path.join(target, n))
+
+        # a setgid target folder (shared web/project folders): mktemp -d inherits g+s there
+        sg = os.path.join(base, "srv", "setgid")
+        os.makedirs(sg)
+        os.chmod(sg, 0o2775)
+        it = stage(["sg.txt"], [b"setgid\n"])
+        r = run(it, folder=sg)
+        f_sg = os.path.join(sg, "sg.txt")
+        check("shell: a setgid target folder works (temp folder's g+s cleared, still 0700)",
+              r.returncode == 0 and os.path.exists(f_sg) and open(f_sg, "rb").read() == b"setgid\n"
+              and oct(os.stat(f_sg).st_mode & 0o777) == "0o644" and os.listdir(sg) == ["sg.txt"],
+              (r.returncode, r.stderr[-300:], os.listdir(sg)))
 
         # ── tampering after staging: each must be refused, nothing lands, no temp left ──
         secret = os.path.join(base, "secret")
@@ -955,6 +980,34 @@ async def python_checks(owner):
     core.agent_python_old.clear()
 
 
+async def fscopy_checks():
+    """An fscopy job may not write into another user's staged move-as-root file."""
+    print("── fscopy: staged files of another user")
+    from types import SimpleNamespace
+    from app import fscopy
+    p, _ = rootmove.new_plan(71, 1, INBOX, "/srv", ["a"])
+    sp = p["uploads"][0]["upload_path"]
+    saved = fscopy._resolve_dst
+
+    async def resolved(job, f):
+        return True
+    fscopy._resolve_dst = resolved
+    try:
+        for who, spell in ((2, sp), (2, sp.replace("/inbox/", "/inbox//"))):
+            f = SimpleNamespace(dst=spell, state="pending")
+            try:
+                await fscopy._copy_file(SimpleNamespace(dst_host=71, src_host=72, user_id=who), f)
+                ok = False
+            except core.FileError as e:
+                ok = "staged by another user" in str(e) and f.state == "pending"
+            except Exception:                    # noqa: BLE001 — reached the agent: not refused
+                ok = False
+            check("fscopy: another user's copy into a staged file is refused (%s)" % spell[-24:], ok)
+    finally:
+        fscopy._resolve_dst = saved
+        rootmove.drop_plan(p["plan_id"])
+
+
 async def main():
     pure_checks()
     shell_checks()
@@ -963,6 +1016,7 @@ async def main():
     await route_checks(owner, hid)
     await window_checks(owner, hid)
     await python_checks(owner)
+    await fscopy_checks()
     await db.close()
     return check.summary()
 

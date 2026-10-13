@@ -66,7 +66,7 @@ export function inboxName(file: { name: string; type: string }, when: Date, n = 
     Backslash-ul NU e inert în fish (3.6.9 re-review M2): acolo `\'` şi `\\` sunt escape-uri şi
     ÎN apostrof, deci `'a\'` nu se închide, iar un nume `a\` + `x;id>pwn;#` ar ieşi din citare
     şi ar rula. Îl scriem deci ÎN AFARA apostrofului, ca `\\` — un backslash literal în sh, bash,
-    zsh, fish (şi csh): `a\b` → `'a'\\'b'`. Niciun backslash nu rămâne între apostrofuri. */
+    zsh, fish (nu csh/tcsh: acolo `!` se expandează şi între apostrofuri): `a\b` → `'a'\\'b'`. Niciun backslash nu rămâne între apostrofuri. */
 export function shellQuote(p: string): string {
   // Scoatem întâi octeţii de control (`\x00-\x1f \x7f`, adică `\r \n \x1b \x00` …): apostroful
   // inertizează `$`/`` ` ``/`!` pentru PARSER-ul shell-ului, dar octeţii de control ajung
