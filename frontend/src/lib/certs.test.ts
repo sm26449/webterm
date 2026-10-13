@@ -6,7 +6,7 @@ import ro from '../lang/ro'
 
 const item = (over: Partial<CertItem> = {}): CertItem => ({
   name: 'wt.example.com', role: 'main', state: 'ok', level: 0, days_left: 62.4,
-  renew_domain: 'wt.example.com', renew_command: 'sudo /opt/webterm/scripts/cert-renew.sh --domain wt.example.com',
+  renew_domain: 'wt.example.com', renew_command: 'sudo -k /opt/webterm/scripts/cert-renew.sh --domain wt.example.com',
   ...over,
 })
 const owner = { can_renew: true, renew_host: { id: 3, name: 'gw' } }

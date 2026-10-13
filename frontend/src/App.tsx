@@ -29,7 +29,7 @@ import { initialFleet, settleFleet, type FleetState, type FleetStatus } from './
 import { errText, api, ApiError, AppState, Host, isSessionLive, Session, Snippet, SplitView, setStepupHandler, withStepup } from './lib/api'
 import { hostAt, hostColor } from './lib/host'
 import type { SettingsTarget } from './lib/settingsIndex'
-import { stepupPrompt } from './lib/stepup'
+import { stepupPrompt, totpCred, type StepupCred } from './lib/stepup'
 import { useI18n } from './lib/i18n'
 import { useConfirm } from './lib/confirm'
 import { useFocusTrap } from './lib/useFocusTrap'
@@ -843,7 +843,7 @@ function MainApp() {
   const stepupCredential = useCallback(async (
     hostId: number,
     code?: string,
-  ): Promise<{ stepup_grant?: string; stepup_password?: string; totp?: string } | null> => {
+  ): Promise<StepupCred | null> => {
     const kind = stepupPrompt(code, appState?.stepup_method, !!appState?.webauthn_available)
     if (kind === 'needsFactor') {
       await promptNeedsFactor()
@@ -875,7 +875,7 @@ function MainApp() {
         masked: false, otp: true, label: t('stepup.totpLabel'), hint: t('stepup.totpHint'),
       })
       if (otp === null) return null
-      return { totp: otp.trim() }
+      return totpCred(otp)
     }
     // `password`: re-AUTENTIFICARE cu parola contului (ţintă fără 2FA), nu un al doilea factor
     const v = await askCreds({

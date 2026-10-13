@@ -50,7 +50,7 @@ import { baseName, looksLikePath, resolveTermPath } from '../lib/termpath'
 import CoachTip from './CoachTip'
 import { TIP_TERMINAL_PASTE, TIP_TOOLBAR, isTipDismissed } from '../lib/coachtips'
 import { isWalkthroughDone } from '../lib/walkthrough'
-import { lockTextKeys, ssoStepupRedirect, stepupPrompt, unlockLabelKey, type StepupMethod } from '../lib/stepup'
+import { lockTextKeys, ssoStepupRedirect, stepupPrompt, unlockLabelKey, wsUnlockMessage, type StepupCred, type StepupMethod } from '../lib/stepup'
 
 // FileEditor (Monaco) e greu → lazy, exact ca-n FilePanel: intră în bundle doar când deschizi
 // o cale-fişier din meniul contextual. Refolosim ACEEAŞI componentă (siguranţa la fişiere mari gratis).
@@ -117,7 +117,7 @@ export default function SessionView(props: {
       unde e definită o singură dată — SessionView avea o a doua implementare, care ştia
       DOAR de passkey: pe o instalare pe IP gol (fără WebAuthn) sesiunea blocată devenea
       irecuperabilă, fiindcă nu exista nicio cale de deblocare. */
-  stepupCredential?: (hostId: number, code?: string) => Promise<{ stepup_grant?: string; stepup_password?: string; totp?: string } | null>
+  stepupCredential?: (hostId: number, code?: string) => Promise<StepupCred | null>
   /** factorul contului (`/api/state.stepup_method`) + dacă WebAuthn e disponibil: eticheta
       butonului de deblocare spune ce se va cere (passkey / cod / SSO), nu mereu „passkey" */
   stepupMethod?: StepupMethod | null
@@ -1572,13 +1572,11 @@ export default function SessionView(props: {
             const r = await api<{ grant: string }>('/api/webauthn/stepup/verify', {
               method: 'POST', body: JSON.stringify({ host_id: session.host_id, credential }),
             })
-            return { stepup_grant: r.grant, stepup_password: undefined }
+            return { stepup_grant: r.grant } as StepupCred
           })()
       if (!cred) { setUnlocking(false); return }        // anulat de utilizator
-      wsRef.current?.send(JSON.stringify({
-        type: 'unlock', grant: cred.stepup_grant ?? '', password: cred.stepup_password ?? '',
-        totp: ('totp' in cred ? cred.totp : '') ?? '',
-      }))
+      // the HTTP credential (`stepup_totp`) mapped onto the WS unlock fields (`totp`)
+      wsRef.current?.send(JSON.stringify(wsUnlockMessage(cred)))
       // 'unlocked' de la server curăţă `locked`/`unlocking`
     } catch (e) {
       setUnlocking(false)

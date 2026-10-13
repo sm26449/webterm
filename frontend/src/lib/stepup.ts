@@ -63,3 +63,19 @@ export function ssoStepupRedirect(hostId: number): void {
   try { sessionStorage.setItem('wt_stepup_return', window.location.hash) } catch { /* */ }
   window.location.href = '/api/oidc/login?intent=stepup&host_id=' + hostId
 }
+
+/** The credential a step-up ceremony produces, named EXACTLY as the HTTP routes read it
+    (`SessionIn.stepup_grant` / `stepup_password` / `stepup_totp`). It used to carry the code as
+    `totp`, which every HTTP route ignored — so an account with only an authenticator app could
+    not step up from the web on a 2FA host (security review of 3.6.7, F5.1). */
+export type StepupCred = { stepup_grant?: string; stepup_password?: string; stepup_totp?: string }
+
+export function totpCred(code: string): StepupCred {
+  return { stepup_totp: code.trim() }
+}
+
+/** The terminal's WebSocket unlock message keeps its own field names (`grant`/`password`/`totp`). */
+export function wsUnlockMessage(cred: StepupCred): { type: 'unlock'; grant: string; password: string; totp: string } {
+  return { type: 'unlock', grant: cred.stepup_grant ?? '', password: cred.stepup_password ?? '',
+    totp: cred.stepup_totp ?? '' }
+}

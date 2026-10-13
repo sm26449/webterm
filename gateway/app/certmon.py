@@ -9,7 +9,7 @@ the main domain too. Nobody saw any of it until users did.
 
 What this module does — and, deliberately, what it does NOT:
   * it opens a TLS handshake to Traefik (inside the compose network; the public name as a
-    fallback) with the SNI of each name we care about and reads the LEAF the server sends. The
+    fallback for the main domain only) with the SNI of each name we care about and reads the LEAF the server sends. The
     chain is NOT validated: the whole point is to see an expired or a default certificate too;
   * it raises an alert through the existing alert path (in-app history + email/webhook) at < 14
     days left and again at < 3 days, critical when expired, when Traefik's self-signed default is
@@ -24,11 +24,13 @@ What this module does — and, deliberately, what it does NOT:
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import hashlib
 import ipaddress
 import json
 import logging
 import re
+import select
 import shlex
 import socket
 import ssl
@@ -79,7 +81,7 @@ def valid_hostname(name: str) -> bool:
 
 
 def renew_command(domain: str, install_dir: Optional[str] = None) -> str:
-    """The exact command line the UI shows / types: `sudo <dir>/scripts/cert-renew.sh --domain X`.
+    """The exact command line the UI shows / types: `sudo -k <dir>/scripts/cert-renew.sh --domain X`.
 
     Built ONLY from validated pieces — the name must match RENEW_NAME_RE (exact match, no
     normalisation that could smuggle anything in) and the directory _DIR_RE. A wildcard is quoted
@@ -90,9 +92,12 @@ def renew_command(domain: str, install_dir: Optional[str] = None) -> str:
     d = install_dir if install_dir is not None else config.INSTALL_DIR
     if not isinstance(d, str) or not _DIR_RE.match(d) or "/../" in d + "/" or "/./" in d + "/":
         raise ValueError("invalid install directory")
-    cmd = "sudo %s/scripts/cert-renew.sh --domain %s" % (d, shlex.quote(domain))
+    # `sudo -k`: ignore AND do not refresh sudo's cached credentials (security review F4). Without
+    # it, the password typed here leaves a sudo timestamp on this tty that anyone else who can type
+    # into the terminal could use for the next minutes.
+    cmd = "sudo -k %s/scripts/cert-renew.sh --domain %s" % (d, shlex.quote(domain))
     # belt and braces: the result must be a plain token list identical to what we meant
-    if shlex.split(cmd) != ["sudo", d + "/scripts/cert-renew.sh", "--domain", domain]:
+    if shlex.split(cmd) != ["sudo", "-k", d + "/scripts/cert-renew.sh", "--domain", domain]:
         raise ValueError("command did not round-trip")
     return cmd
 
@@ -173,9 +178,30 @@ def fetch_leaf(host: str, port: int, sni: str, timeout: float = CONNECT_TIMEOUT)
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
-    with socket.create_connection((host, int(port)), timeout=timeout) as raw:
-        raw.settimeout(timeout)
-        with ctx.wrap_socket(raw, server_hostname=sni) as tls:
+    # ONE deadline for the whole attempt (security review): a per-operation timeout lets a peer
+    # that trickles a byte every few seconds hold the thread indefinitely. Connect gets what is
+    # left, then the handshake runs non-blocking against the same deadline.
+    deadline = time.monotonic() + timeout
+
+    def left() -> float:
+        r = deadline - time.monotonic()
+        if r <= 0:
+            raise TimeoutError("TLS handshake timed out")
+        return r
+
+    with socket.create_connection((host, int(port)), timeout=left()) as raw:
+        with ctx.wrap_socket(raw, server_hostname=sni, do_handshake_on_connect=False) as tls:
+            tls.setblocking(False)
+            while True:
+                try:
+                    tls.do_handshake()
+                    break
+                except ssl.SSLWantReadError:
+                    ready = select.select([tls], [], [], left())[0]
+                except ssl.SSLWantWriteError:
+                    ready = select.select([], [tls], [], left())[1]
+                if not ready:
+                    raise TimeoutError("TLS handshake timed out")
             der = tls.getpeercert(binary_form=True)
     if not der:
         raise ssl.SSLError("the server sent no certificate")
@@ -273,7 +299,14 @@ def probe(t: dict) -> dict:
     Traefik cannot be reached at all (not when it answers with something we do not like)."""
     host, port = _split_target(config.CERT_CHECK_TARGET)
     errors = []
-    for via, h, p in (("traefik", host, port), ("public", t["name"], t.get("public_port") or 443)):
+    attempts = [("traefik", host, port)]
+    # The public fallback only for the MAIN domain (it comes from WEBTERM_PUBLIC_URL, set by the
+    # operator). `cert-check.<forward domain>` and the Authentik name are not dialled directly:
+    # the forward domain is editable in Settings, and dialling it would let a settings.manage
+    # holder point the gateway's outbound connections anywhere (security review: SSRF).
+    if t.get("role") == "main":
+        attempts.append(("public", t["name"], t.get("public_port") or 443))
+    for via, h, p in attempts:
         try:
             der = fetch_leaf(h, p, t["name"])
         except (OSError, ssl.SSLError, ValueError) as e:
@@ -291,6 +324,10 @@ def probe(t: dict) -> dict:
 # ── state ────────────────────────────────────────────────────────────────────────────────────
 _status: dict = {"checked_at": None, "items": {}}
 _lock = asyncio.Lock()
+# A pool of its own, small and bounded: the probes never compete with (or exhaust) the default
+# executor that file transfers and backups use, and at most MAX_NAMES sockets are ever open.
+_pool = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_NAMES, thread_name_prefix="certmon")
+_inflight: set = set()
 _last_manual = 0.0
 
 
@@ -371,13 +408,20 @@ async def check_all(forward_domain: str = "") -> dict:
         now = time.time()
         results = []
         if ts:
-            tasks = [asyncio.create_task(asyncio.to_thread(probe, t)) for t in ts]
-            done, pending = await asyncio.wait(tasks, timeout=TOTAL_BUDGET)
-            for task in pending:
-                task.cancel()               # the thread finishes on its own socket timeout
-            for t, task in zip(ts, tasks):
-                if task in done and not task.cancelled() and task.exception() is None:
-                    results.append((t, task.result()))
+            _inflight.difference_update({f for f in _inflight if f.done()})
+            if _inflight:
+                # probes of an earlier check are still stuck in their threads: do not pile more
+                # on top (each is bounded by its own deadline, so this clears by itself)
+                log.warning("certmon: %d earlier probe(s) still running — this check is skipped",
+                            len(_inflight))
+                return status()
+            loop = asyncio.get_running_loop()
+            futs = [loop.run_in_executor(_pool, probe, t) for t in ts]
+            _inflight.update(futs)
+            done, _pending = await asyncio.wait(futs, timeout=TOTAL_BUDGET)
+            for t, fut in zip(ts, futs):
+                if fut in done and not fut.cancelled() and fut.exception() is None:
+                    results.append((t, fut.result()))
                 else:
                     results.append((t, {"error": "timed out"}))
         old = _status["items"]
@@ -429,6 +473,7 @@ def reset_for_tests() -> None:
     _status["checked_at"] = None
     _status["items"] = {}
     _last_manual = 0.0
+    _inflight.clear()
 
 
 async def loop(forward_domain_fn) -> None:

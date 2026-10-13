@@ -149,16 +149,20 @@ def test_probe():
     old_target = config.CERT_CHECK_TARGET
     try:
         config.CERT_CHECK_TARGET = "127.0.0.1:%d" % srv.port
-        r = certmon.probe({"name": "localhost", "public_port": 1})
+        r = certmon.probe({"name": "localhost", "role": "main", "public_port": 1})
         check("Traefik reachable → read there (via=traefik)", r.get("via") == "traefik", r)
         dead = socket.socket()
         dead.bind(("127.0.0.1", 0))
         dead_port = dead.getsockname()[1]
         dead.close()                                     # a port nobody listens on → refused
         config.CERT_CHECK_TARGET = "127.0.0.1:%d" % dead_port
-        r = certmon.probe({"name": "localhost", "public_port": srv.port})
-        check("Traefik unreachable → the public name (via=public)", r.get("via") == "public", r)
-        r = certmon.probe({"name": "localhost", "public_port": dead_port})
+        r = certmon.probe({"name": "localhost", "role": "main", "public_port": srv.port})
+        check("Traefik unreachable → the public name for the MAIN domain (via=public)", r.get("via") == "public", r)
+        for role in ("forward", "authentik"):
+            r = certmon.probe({"name": "localhost", "role": role, "public_port": srv.port})
+            check("…but never for the %s name (no direct dial of an editable domain: SSRF)" % role,
+                  "error" in r and "public:" not in r["error"] and r.get("via") is None, r)
+        r = certmon.probe({"name": "localhost", "role": "main", "public_port": dead_port})
         check("both unreachable → an error, not an exception", "error" in r and "traefik:" in r["error"], r)
     finally:
         config.CERT_CHECK_TARGET = old_target
@@ -176,6 +180,48 @@ def test_probe():
               "%s %.1fs" % (res, took))
     finally:
         hung.close()
+    # a peer that TRICKLES bytes (one every 0.3 s) used to reset a per-operation timeout forever
+    trickle = socket.socket()
+    trickle.bind(("127.0.0.1", 0))
+    trickle.listen(4)
+    tport = trickle.getsockname()[1]
+    stop = threading.Event()
+
+    def _trickle():
+        trickle.settimeout(0.2)
+        while not stop.is_set():
+            try:
+                c, _ = trickle.accept()
+            except OSError:
+                continue
+            def drip(c=c):
+                try:
+                    c.recv(4096)
+                    for _ in range(100):
+                        if stop.is_set():
+                            break
+                        c.send(b"\x16")       # a TLS record header byte, never a full record
+                        time.sleep(0.3)
+                except OSError:
+                    pass
+                finally:
+                    c.close()
+            threading.Thread(target=drip, daemon=True).start()
+    threading.Thread(target=_trickle, daemon=True).start()
+    try:
+        t0 = time.time()
+        try:
+            certmon.fetch_leaf("127.0.0.1", tport, "x.example.com", timeout=1.5)
+            res = "no error"
+        except (OSError, ssl.SSLError) as e:
+            res = type(e).__name__
+        took = time.time() - t0
+        check("a peer that trickles bytes is cut at ONE total deadline (≤ timeout + slack)",
+              took < 2.5 and res != "no error", "%s %.1fs" % (res, took))
+    finally:
+        stop.set()
+        trickle.close()
+    check("probes run in a dedicated pool of at most 4 threads", certmon._pool._max_workers == 4)
 
 
 def test_targets():
@@ -216,14 +262,14 @@ def test_targets():
 def test_command_builder():
     print("── the renewal command: validated names only")
     good = {
-        "wt.example.com": "sudo /opt/webterm/scripts/cert-renew.sh --domain wt.example.com",
-        "*.wt.example.com": "sudo /opt/webterm/scripts/cert-renew.sh --domain '*.wt.example.com'",
-        "auth.x-y.example.co": "sudo /opt/webterm/scripts/cert-renew.sh --domain auth.x-y.example.co",
+        "wt.example.com": "sudo -k /opt/webterm/scripts/cert-renew.sh --domain wt.example.com",
+        "*.wt.example.com": "sudo -k /opt/webterm/scripts/cert-renew.sh --domain '*.wt.example.com'",
+        "auth.x-y.example.co": "sudo -k /opt/webterm/scripts/cert-renew.sh --domain auth.x-y.example.co",
     }
     for d, want in good.items():
         got = certmon.renew_command(d, "/opt/webterm")
         check("%s → %s" % (d, want), got == want, got)
-        check("…round-trips to exactly four argv tokens", shlex.split(got) == ["sudo", "/opt/webterm/scripts/cert-renew.sh",
+        check("…round-trips to exactly five argv tokens", shlex.split(got) == ["sudo", "-k", "/opt/webterm/scripts/cert-renew.sh",
                                                                               "--domain", d])
     bad = ["wt.example.com;id", "$(id).example.com", "`id`.example.com", "wt.example.com && rm -rf /",
            "wt.example.com\nid", "-rf.example.com", "--yes", "localhost", "*.*.example.com", "*example.com",
@@ -291,7 +337,7 @@ def test_typed_cmd():
               and "TYPED, NOT RUN" in text, text[-400:])
         args = open(marker).read().split("\n") if os.path.exists(marker) else []
         check("Enter runs exactly the validated argv (the wildcard reaches sudo unexpanded)",
-              args[:3] == ["/opt/webterm/scripts/cert-renew.sh", "--domain", "*.wt.example.com"], args)
+              args[:4] == ["-k", "/opt/webterm/scripts/cert-renew.sh", "--domain", "*.wt.example.com"], args)
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -322,6 +368,15 @@ async def test_dedup(owner_uid):
 
     orig_targets, orig_probe = certmon.targets, certmon.probe
     certmon.targets = lambda fwd="": T
+    certmon.probe = fake_probe
+    stuck = asyncio.get_running_loop().create_future()          # an earlier probe still running
+    certmon._inflight.add(stuck)
+    calls_before = []
+    certmon.probe = lambda t: calls_before.append(t) or {"error": "x"}
+    await certmon.check_all("")
+    check("a check is skipped while earlier probes are still running", calls_before == [])
+    stuck.cancel()
+    certmon._inflight.clear()
     certmon.probe = fake_probe
     try:
         seq = [
@@ -434,7 +489,10 @@ async def test_routes():
 
     async def fake_create(host_id, title, rows=24, cols=80, tz=None, cmd=None, pw=None):
         created.append({"host_id": host_id, "title": title, "cmd": cmd})
-        return {"id": "s-cert-1", "host_id": host_id, "title": title}
+        sid = "s-cert-%d" % len(created)
+        await db.execute("INSERT INTO sessions(id, host_id, title, state, created) VALUES(?,?,?,?,?)",
+                         sid, host_id, title, "live", time.time())
+        return {"id": sid, "host_id": host_id, "title": title}
 
     core.create_session = fake_create
     try:
@@ -467,14 +525,64 @@ async def test_routes():
         check("Owner + picked host + monitored name + fresh factor → the session", r.status_code == 200
               and r.json()["id"] == "s-cert-1", r.text[:200])
         check("…returns the exact command", r.json().get("command")
-              == "sudo /opt/webterm/scripts/cert-renew.sh --domain '*.wt.example.com'", r.json())
+              == "sudo -k /opt/webterm/scripts/cert-renew.sh --domain '*.wt.example.com'", r.json())
         cmd = created[0]["cmd"] if created else ""
         check("…the session command TYPES it (read -e -i), passed as an argument",
-              "read -r -e -i" in cmd and shlex.quote("sudo /opt/webterm/scripts/cert-renew.sh --domain '*.wt.example.com'") in cmd,
+              "read -r -e -i" in cmd and shlex.quote("sudo -k /opt/webterm/scripts/cert-renew.sh --domain '*.wt.example.com'") in cmd,
               cmd[-300:])
         check("…on the picked host only", created and created[0]["host_id"] == hid)
         aud = await db.fetchone("SELECT detail FROM audit_log WHERE path=? ORDER BY id DESC LIMIT 1", url)
         check("…audited (command typed, not run)", aud and "typed, not run" in aud["detail"], aud and aud["detail"])
+        # ── review F2: the fresh-factor window opened by /stepup on a host WITHOUT require_2fa ──
+        from app import security, totp as totp_mod
+        security._stepup_windows.clear()
+        n = len(created)
+        r = await owner.post("/api/hosts/%d/stepup" % hid, json={"stepup_password": U.OWNER_PW})
+        check("password-only account: /stepup with the password still opens the window", r.status_code == 200,
+              r.text[:200])
+        r = await owner.post(url, json={"domain": "wt.example.com"})
+        check("…and the fresh-factor gate accepts it (unchanged behaviour)", r.status_code == 200
+              and len(created) == n + 1, r.text[:200])
+        secret = totp_mod.new_secret()
+        await db.execute("UPDATE users SET totp_enabled=1, totp_secret_encrypted=?, totp_last_counter=0 WHERE id=?",
+                         security.encrypt_secret(secret), owner_uid)
+        security._stepup_windows.clear()
+        n = len(created)
+        r = await owner.post("/api/hosts/%d/stepup" % hid, json={"stepup_password": U.OWNER_PW})
+        check("TOTP account, host without 2FA: password-only /stepup → 403 stepup.totp",
+              r.status_code == 403 and U.code(r) == "stepup.totp", "%s %s" % (r.status_code, r.text[:200]))
+        r = await owner.post(url, json={"domain": "wt.example.com"})
+        check("…and the fresh-factor gate stays closed (nothing created)", r.status_code == 403
+              and U.code(r) == "stepup.totp" and len(created) == n, r.text[:200])
+        r = await owner.post("/api/hosts/%d/stepup" % hid, json={"stepup_totp": totp_mod.generate(secret)})
+        check("…a TOTP code on /stepup opens it (it used to be silently ignored there)", r.status_code == 200,
+              r.text[:200])
+        r = await owner.post(url, json={"domain": "wt.example.com"})
+        check("…then the renew terminal opens", r.status_code == 200 and len(created) == n + 1, r.text[:200])
+        await db.execute("UPDATE users SET totp_enabled=0, totp_secret_encrypted=NULL WHERE id=?", owner_uid)
+
+        # ── review F4: nobody but the opener types into a renew terminal; it cannot be shared ──
+        await db.execute("INSERT INTO sessions(id, host_id, title, state, created, created_by_id, origin)"
+                         " VALUES(?,?,?,?,?,?,?)", "s-renew-x", hid, "TLS renew", "live", time.time(),
+                         owner_uid, "cert-renew")
+        await db.execute("INSERT INTO sessions(id, host_id, title, state, created, created_by_id, origin)"
+                         " VALUES(?,?,?,?,?,?,?)", "s-plain-x", hid, "plain", "live", time.time(),
+                         owner_uid, "web")
+        from app import api as api_mod
+        admin_uid = (await db.fetchone("SELECT id FROM users WHERE email='admin@x.co'"))["id"]
+        rr = await db.fetchone("SELECT * FROM sessions WHERE id='s-renew-x'")
+        rp = await db.fetchone("SELECT * FROM sessions WHERE id='s-plain-x'")
+        check("Admin (session.manage) may type into the Owner's ordinary session (unchanged)",
+              await api_mod._ws_access(admin_uid, rp) == "rw")
+        check("…but only WATCH the Owner's certificate-renewal terminal", await api_mod._ws_access(admin_uid, rr) == "ro")
+        check("…the Owner still types into it", await api_mod._ws_access(owner_uid, rr) == "rw")
+        r = await owner.post("/api/sessions/s-renew-x/share", json={"writable": False})
+        check("a renewal terminal cannot be shared (403 certs.renewSessionPrivate)", r.status_code == 403
+              and U.code(r) == "certs.renewSessionPrivate", r.text[:200])
+        st = await db.fetchone("SELECT origin, created_by_id FROM sessions WHERE id=?", "s-cert-1")
+        check("sessions opened by the renew route are stamped origin=cert-renew, owned by the Owner",
+              st is not None and st["origin"] == "cert-renew" and st["created_by_id"] == owner_uid, st and dict(st))
+
         tok = U.client(headers={"authorization": "Bearer wt_nope"})
         r = await tok.post(url, json={"domain": "wt.example.com"})
         check("a Bearer token cannot open it", r.status_code in (401, 403), r.status_code)

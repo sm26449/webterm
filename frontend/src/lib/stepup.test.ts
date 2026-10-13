@@ -1,6 +1,19 @@
 import { describe, expect, it } from 'vitest'
-import { lockTextKeys, stepupPrompt, unlockLabelKey } from './stepup'
+import { lockTextKeys, stepupPrompt, totpCred, unlockLabelKey, wsUnlockMessage } from './stepup'
 import en from '../lang/en'
+
+describe('step-up credential field names (3.6.7 review F5.1)', () => {
+  it('a TOTP code travels as `stepup_totp`, the field every HTTP route reads (never `totp`)', () => {
+    const c = totpCred(' 123456 ')
+    expect(c).toEqual({ stepup_totp: '123456' })
+    expect(Object.keys(c)).not.toContain('totp')
+  })
+  it('the terminal WebSocket unlock maps it onto its own `totp` field', () => {
+    expect(wsUnlockMessage(totpCred('654321'))).toEqual({ type: 'unlock', grant: '', password: '', totp: '654321' })
+    expect(wsUnlockMessage({ stepup_grant: 'g' })).toEqual({ type: 'unlock', grant: 'g', password: '', totp: '' })
+    expect(wsUnlockMessage({ stepup_password: 'p' }).password).toBe('p')
+  })
+})
 import ro from '../lang/ro'
 
 describe('stepupPrompt', () => {

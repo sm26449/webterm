@@ -206,6 +206,7 @@ const en: Lang = {
     'err.certs.noRenewHost': "Pick the gateway host first (Settings → Infrastructure → Certificates).",
     'err.certs.wrongRenewHost': "This is not the host picked for certificate renewals.",
     'err.certs.badDomain': "That is not a certificate name WebTerm monitors.",
+    'err.certs.renewSessionPrivate': "A certificate renewal terminal cannot be shared.",
     'err.settings.forwardDomainContainsApp': "The WebTerm domain would become a forward subdomain — pick a domain that does not contain it.",
     'err.host.missing': "That host no longer exists.",
     'err.host.credentialsRequired': "This host asks for credentials every time — enter them to connect.",

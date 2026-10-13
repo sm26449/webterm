@@ -4152,7 +4152,7 @@ async def save_forward_settings(body: ForwardDomainIn,
 # a HOST action the gateway cannot perform — and must not be able to: the app container gets no
 # ACME volume and no docker-socket write. What it can do, for an Owner (`certs.renew`) with a fresh
 # second factor, is open a terminal on the gateway host the Owner picked, with
-# `sudo <dir>/scripts/cert-renew.sh --domain <name>` TYPED but not run — the same "your terminal,
+# `sudo -k <dir>/scripts/cert-renew.sh --domain <name>` TYPED but not run — the same "your terminal,
 # your permissions" model as "OS upgrade in a terminal" (2.6.0). The person reads it and presses
 # Enter; sudo on the host decides whether they may.
 K_CERT_RENEW_HOST = "cert_renew_host_id"
@@ -4299,7 +4299,7 @@ async def cert_renew_session(host_id: int, body: CertRenewIn, request: Request,
                        vars={"limit": core.MAX_SESSIONS_HINT})
     except RuntimeError as e:
         raise _runtime_api_error(e, "session.createFailed")
-    await _stamp_session(result, user)
+    await _stamp_session(result, user, origin=CERT_RENEW_ORIGIN)
     audit.detail(request, "certificate renewal terminal for %s (command typed, not run)" % domain)
     log.warning("certificate renewal terminal opened on host #%d for %s by %s",
                 host_id, domain, user["email"] if not isinstance(user, dict) else user.get("email"))
@@ -7787,18 +7787,21 @@ async def host_stepup(host_id: int, body: SessionIn, request: Request,
     # gate-ul de „factor proaspăt" (deploy-key, H-3) consultă fereastra şi pe astfel de
     # hosturi. Dacă clientul chiar a prezentat un factor valid, îl onorăm şi aici, ca
     # ceremonia din client (403 stepup.* → passkey/parolă → retry) să funcţioneze identic
-    # indiferent de flag-ul 2FA al ţintei. Fereastra asta nu deblochează nimic în plus:
-    # _require_host_stepup nici n-o consultă pe hosturi non-2FA.
+    # indiferent de flag-ul 2FA al ţintei.
+    #
+    # NB (3.6.7, security review F2): fereastra deschisă aici CONTEAZĂ — `_require_fresh_factor`
+    # (deploy keys H-3, reînnoirea certificatelor) o acceptă. Ramura asta deschidea fereastra cu
+    # PAROLA singură chiar pentru conturile cu passkey/TOTP, şi ignora tăcut un cod TOTP trimis.
+    # Acum foloseşte aceeaşi scară ca restul (passkey → SSO → TOTP cu lockout → parolă), deci
+    # un cont cu al doilea factor trebuie să-l dea şi aici. Un corp fără niciun factor rămâne
+    # un no-op idempotent (nu deschide nimic).
     if row and not row["require_2fa"]:
         if body.stepup_grant and security.consume_stepup_grant(
                 body.stepup_grant, user["id"], host_id):
             security.open_stepup_window(user["id"], host_id)
-        elif body.stepup_password:
-            # o parolă GREŞITĂ e o eroare, nu un 200 tăcut: altfel clientul crede că step-up-ul
-            # a reuşit, iar deploy-ul următor eşuează inexplicabil. (audit v54)
-            if not await _verify_reauth_password(user, body.stepup_password):
-                raise ApiError(401, "auth.wrongCurrentPassword", "wrong account password")
-            security.open_stepup_window(user["id"], host_id)
+        elif body.stepup_password or body.stepup_totp:
+            await _stepup_consume_factor(host_id, user, "", body.stepup_password,
+                                         body.stepup_totp, host_2fa=False)
     # deblocare PROASPĂTĂ (nu re-apel idempotent cât fereastra e deschisă) a unui host marcat 2FA
     # = un host protejat tocmai a fost accesat: notificăm (email + webhook), throttle-uit per host.
     if not was_open and row and row["require_2fa"]:
@@ -9105,9 +9108,13 @@ async def create_share(sid: str, request: Request, body: ShareIn = ShareIn(),
     """Link public, temporizat, către o sesiune. `writable` lasă vizitatorul să și
     TASTEZE (lărgește suprafața de încredere — opt-in per share); altfel doar vizualizare."""
     audit.detail(request, "writable" if body.writable else "read-only")
-    row = await db.fetchone("SELECT id, host_id FROM sessions WHERE id=?", sid)
+    row = await db.fetchone("SELECT id, host_id, origin FROM sessions WHERE id=?", sid)
     if not row:
         raise ApiError(404, "session.missing", "no such session")
+    # 3.6.7 (review F4): a certificate-renewal terminal (sudo on the gateway host) is never shared
+    if _origin(row) == CERT_RENEW_ORIGIN:
+        raise ApiError(403, "certs.renewSessionPrivate",
+                       "a certificate renewal terminal cannot be shared")
     # 3.6: link-ul public e o extensie a sesiunii — doar pe a TA (sau pre-3.6, sau cu
     # session.manage); altfel un Operator ar putea expune / înlocui link-ul altcuiva
     await _require_session_control(request, sid, user)
@@ -10503,6 +10510,13 @@ async def _fresh_user(user):
     return (await db.fetchone("SELECT * FROM users WHERE id=?", user["id"])) or user
 
 
+CERT_RENEW_ORIGIN = "cert-renew"
+
+
+def _origin(row) -> str:
+    return (row["origin"] if "origin" in row.keys() else "") or ""
+
+
 async def _ws_access(user_id: int, row) -> str:
     """Ce poate contul pe sesiunea asta (3.6, §A.6.4 + Q5): 'rw' | 'ro' | 'replay' | 'none' |
     'hidden'. `hidden` = hostul nu e vizibil (răspunsul e identic cu o sesiune inexistentă).
@@ -10514,6 +10528,13 @@ async def _ws_access(user_id: int, row) -> str:
         return "hidden"
     live = row["state"] in ("creating", "live")
     mine = row["created_by_id"] is None or row["created_by_id"] == user_id
+    # 3.6.7 (security review F4): a certificate-renewal terminal runs `sudo` on the gateway host.
+    # Only the Owner who opened it may type there — not an Admin with session.manage, who could
+    # otherwise type into it right after the Owner entered the sudo password. Others may watch.
+    if live and _origin(row) == CERT_RENEW_ORIGIN and row["created_by_id"] != user_id:
+        if "session.watch" in have or "session.open" in have:
+            return "ro"
+        return "none"
     if live:
         if "session.open" in have and (mine or "session.manage" in have):
             return "rw"

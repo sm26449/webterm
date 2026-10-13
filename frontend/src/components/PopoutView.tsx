@@ -6,7 +6,7 @@ import { hostAt } from '../lib/host'
 import { useI18n } from '../lib/i18n'
 import { notifyError, registerToast } from '../lib/notify'
 import { askSecret, registerSecretPrompt, SecretAsk } from '../lib/secretPrompt'
-import { StepupMethod, stepupPrompt } from '../lib/stepup'
+import { StepupMethod, stepupPrompt, totpCred, type StepupCred } from '../lib/stepup'
 import SecretPromptModal from './SecretPromptModal'
 import SessionView from './SessionView'
 import Toasts, { ToastItem } from './Toasts'
@@ -97,7 +97,7 @@ export default function PopoutView(props: { sid: string }) {
   // hash-ul (#/popout/<sid>). Fără niciun factor (3.5.13): mesajul, fără Setări (nu există aici).
   const stepupCredential = useCallback(async (
     hostId: number, code?: string,
-  ): Promise<{ stepup_grant?: string; stepup_password?: string; totp?: string } | null> => {
+  ): Promise<StepupCred | null> => {
     const kind = stepupPrompt(code, stepupMethod, webauthn)
     if (kind === 'needsFactor') {
       notifyError(t('stepup.needsFactorTitle'), t('err.stepup.needsFactor'))
@@ -122,7 +122,7 @@ export default function PopoutView(props: { sid: string }) {
       const otp = await askSecret(t('stepup.totpTitle'), {
         masked: false, otp: true, label: t('stepup.totpLabel'), hint: t('stepup.totpHint'),
       })
-      return otp === null ? null : { totp: otp.trim() }
+      return otp === null ? null : totpCred(otp)
     }
     const pw = await askSecret(t('app.reauth'), { label: t('app.accountPassword'), hint: t('app.reauthSubtitle') })
     return pw === null ? null : { stepup_password: pw }

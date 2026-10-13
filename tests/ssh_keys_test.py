@@ -314,8 +314,10 @@ async def main():
         # /stepup cu parolă GREŞITĂ pe host non-2FA → 401, nu 200 tăcut (audit v54 #2)
         await db.execute("UPDATE hosts SET require_2fa=0 WHERE id=?", ids["third"])
         r = await c.post(f"/api/hosts/{ids['third']}/stepup", json={"stepup_password": "gresita"})
-        check("/stepup parolă greşită pe host non-2FA → 401 (nu 200 tăcut)",
-              r.status_code == 401, r.text)
+        # 3.6.7 (review F2): the same factor ladder as everywhere → 403 stepup.password (still a
+        # refusal, never a silent 200; was a hand-rolled 401 that skipped passkey/TOTP accounts)
+        check("/stepup parolă greşită pe host non-2FA → refuz stepup.password (nu 200 tăcut)",
+              r.status_code == 403 and r.headers.get("x-webterm-error") == "stepup.password", r.text)
 
         # ── agent offline: deploy → 409, nimic scris, nimic în evidenţă ──────
         saved = core.sources.pop(ids["third"])

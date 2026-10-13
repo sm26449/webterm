@@ -204,6 +204,7 @@ const ro: Lang = {
     'err.certs.noRenewHost': "Alege întâi hostul gateway-ului (Setări → Infrastructură → Certificate).",
     'err.certs.wrongRenewHost': "Acesta nu e hostul ales pentru reînnoirea certificatelor.",
     'err.certs.badDomain': "Nu e un nume de certificat monitorizat de WebTerm.",
+    'err.certs.renewSessionPrivate': "Un terminal de reînnoire a certificatelor nu poate fi partajat.",
     'err.settings.forwardDomainContainsApp': "Domeniul WebTerm ar deveni un subdomeniu de forward — alege un domeniu care nu îl conține.",
     'err.host.missing': "Hostul acela nu mai există.",
     'err.host.credentialsRequired': "Acest host cere credențialele la fiecare conectare — introdu-le ca să te conectezi.",
