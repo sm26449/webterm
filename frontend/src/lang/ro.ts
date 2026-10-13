@@ -934,7 +934,7 @@ const ro: Lang = {
     'files.denied.typed': "Tastată în terminalul tău — verific-o și apasă Enter.",
     'files.denied.typedToast': "Comanda e tastată în terminal — nu a rulat încă nimic. Verific-o și apasă Enter.",
     'files.denied.copyThis': "Rulează asta într-un shell root pe host. Verifică SHA-256-ul fiecărui fișier față de ce ai urcat și refuză un fișier schimbat sau înlocuit în inbox:",
-    'files.denied.notPrompt': "Netastată: terminalul nu e la un prompt de shell (în față e un program ca mc, vim sau less, care ar lua literele drept comenzile lui). Copiază comanda.",
+    'files.denied.notPrompt': "Netastată: WebTerm nu vede un prompt de shell în acest terminal (în față poate fi un program ca mc, vim sau less, care ar lua literele drept comenzile lui; sub tmux e nevoie de shell integration). Copiază comanda.",
     'files.denied.inboxFailed': "Neurcate în inbox: {names} — nu s-a tastat nimic.",
     'files.denied.optAcl': "Dă-i lui {user} acces la acest dosar",
     'files.denied.optAclHelp': "Rulează o dată, ca root, pe host (WebTerm nu o rulează niciodată):",

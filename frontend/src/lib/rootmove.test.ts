@@ -3,6 +3,8 @@ import { ApiError, apiErrorFrom, errText, scalarVars } from './api'
 import { clearDenied, errIsWriteDenied, isDenied, isSafeToType, isWriteDenied, markDenied, setfaclCommand, typeCommandInto, typeCommandOutcome } from './rootmove'
 import { insertPathInto, registerInsertTarget, typeIntoOutcome } from './transfers'
 import { isDefinitiveError } from './uploads'
+import { CommandTracker } from './commands'
+import type { Terminal } from '@xterm/xterm'
 
 const tr = (k: string, v?: Record<string, string | number>) => {
   const cat: Record<string, string> = {
@@ -104,6 +106,33 @@ describe('typing the move-as-root command (bracketed paste, prompts only)', () =
     expect(insertPathInto('raw', '/home/webterm/x.png')).toBe(false)
     expect(typed).toEqual([])
     registerInsertTarget('raw', null)
+  })
+  it('under tmux (no DECSET 2004 reaches xterm) the shell-integration prompt state allows plain typing', () => {
+    const typed: string[] = []
+    registerInsertTarget('tmux', { ...target(typed, false), atPrompt: () => true })
+    expect(typeCommandInto('tmux', cmd)).toBe(true)
+    expect(typed).toEqual([cmd])
+    registerInsertTarget('tmux', { ...target(typed, false), atPrompt: () => false })
+    expect(typeCommandOutcome('tmux', cmd)).toBe('notPrompt')
+    expect(typed).toEqual([cmd])
+    registerInsertTarget('tmux', null)
+  })
+  it('CommandTracker.atPrompt: true after B, false once a command started (C) or on the alternate screen', () => {
+    const buf = { type: 'normal', baseY: 0, cursorY: 0, cursorX: 2, getLine: () => ({ length: 80, translateToString: () => 'mc' }) }
+    const fake = { buffer: { active: buf }, registerMarker: () => ({ dispose() {} }) }
+    const tr = new CommandTracker(fake as unknown as Terminal)
+    expect(tr.atPrompt()).toBe(false)              // no shell integration seen yet
+    tr.handle('A'); tr.handle('B')
+    expect(tr.atPrompt()).toBe(true)
+    buf.type = 'alternate'
+    expect(tr.atPrompt()).toBe(false)
+    buf.type = 'normal'
+    tr.handle('E;mc'); tr.handle('C')
+    expect(tr.atPrompt()).toBe(false)              // mc (or vim, less, sudo -i) is running
+    tr.handle('D;0')
+    expect(tr.atPrompt()).toBe(false)              // until the next prompt
+    tr.handle('A'); tr.handle('B')
+    expect(tr.atPrompt()).toBe(true)
   })
   it('foreground unknown (the mode cannot be read) → nothing typed', () => {
     const typed: string[] = []

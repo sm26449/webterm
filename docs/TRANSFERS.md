@@ -439,10 +439,12 @@ of the page session, and the panel offers three ways out:
    arguments — and only after every upload committed with all of its bytes hashed by the gateway
    (a gateway restart or a second upload into the same staged file means: upload again). While
    the plan is open, only you can upload into its staged files. The browser types it through the
-   same path as a keystroke, as a **bracketed paste**, and only when the program in front asked for
-   bracketed paste (bash, zsh, fish and other readline prompts do; mc, vim's normal mode, less and
-   htop are not prompts): otherwise, or in a read-only or shared view, nothing is typed and the
-   command is shown to copy, with the reason. Opened from a host page with no terminal, the command
+   same path as a keystroke, and only at a **shell prompt**: either the program in front asked for
+   bracketed paste (bash, zsh, fish and readline do; the text is then sent as a bracketed paste),
+   or — under tmux, which does not pass that mode on to the browser — shell integration (OSC 133)
+   shows the shell waiting at its prompt with no command started. mc, vim, less, htop or a
+   `sudo -i` shell without shell integration are not prompts: then, or in a read-only or shared
+   view, nothing is typed and the command is shown to copy, with the reason. Opened from a host page with no terminal, the command
    is shown to copy. The same rule applies to typing an uploaded file's path ("Insert path").
    Dropping or pasting a file onto a root shell whose folder refuses it offers the same thing.
    sudo on the host is the real gate; anyone who may upload files and type in that session (Owner,

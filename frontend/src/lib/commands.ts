@@ -93,6 +93,14 @@ export class CommandTracker {
     this.current.captured = cur + chunk
   }
 
+  /** Shell-ul aşteaptă la prompt, după marcajele shell integration: B (sfârşit de prompt) văzut,
+      nicio comandă pornită de atunci (C), ecranul principal. Un program pornit din shell (mc, vim,
+      less, `sudo -i`) emite C înainte să ruleze, deci nu mai suntem „la prompt" până la D + B.
+      Fără shell integration: mereu false. */
+  atPrompt(): boolean {
+    return this.promptRow !== null && this.current === null && this.term.buffer.active.type !== 'alternate'
+  }
+
   /** rulează o comandă acum? (SessionView evită decodarea inutilă a fluxului) */
   get running(): boolean {
     return this.current !== null

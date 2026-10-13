@@ -1161,7 +1161,19 @@ try {
     else await page.waitForTimeout(200)
   }
   check('paste de imagine: toastul explică salvarea şi inserarea căii', pasteToast)
-  check('paste de imagine: calea din inbox e tastată la prompt', await waitScreen('/.webterm/inbox/', 15000))
+  const pasteTyped = await waitScreen('/.webterm/inbox/', 15000)
+  if (!pasteTyped) {
+    // calea se tastează doar ca bracketed paste, când shell-ul l-a cerut (DECSET 2004): diagnostic
+    console.log('  [diag] insert:', await page.evaluate(() => {
+      const sid = location.hash.replace('#/s/', '')
+      const term = window.__wtTerms?.get(sid)
+      const s = window.__wtTransfers?.store
+      const jobs = s?.snapshot ? [...s.snapshot().values()].filter((j) => (j.dest || '').includes('/inbox/')) : []
+      return JSON.stringify({ sid, modes: term?.modes, terms: [...(window.__wtTerms?.keys() ?? [])],
+        jobs: jobs.map((j) => ({ state: j.state, inserted: j.inserted, sid: j.sid })) })
+    }))
+  }
+  check('paste de imagine: calea din inbox e tastată la prompt', pasteTyped)
   await page.keyboard.type('&& echo PASTE_OK\n')
   check('fişierul lipit există pe host (4 octeţi)', await waitScreen('PASTE_OK', 8000))
 

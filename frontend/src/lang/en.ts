@@ -918,7 +918,7 @@ const en: Lang = {
     'files.denied.typed': "Typed into your terminal — review it and press Enter.",
     'files.denied.typedToast': "Command typed into your terminal — nothing has run yet. Review it and press Enter.",
     'files.denied.copyThis': "Run this in a root shell on the host. It checks each file's SHA-256 against what you uploaded and refuses a file that was changed or replaced in the inbox:",
-    'files.denied.notPrompt': "Not typed: the terminal is not at a shell prompt (a program such as mc, vim or less is in front, and it would take the letters as its own commands). Copy the command instead.",
+    'files.denied.notPrompt': "Not typed: WebTerm cannot see a shell prompt in this terminal (a program such as mc, vim or less may be in front and would take the letters as its own commands; under tmux this needs shell integration). Copy the command instead.",
     'files.denied.inboxFailed': "Not uploaded to the inbox: {names} — nothing was typed.",
     'files.denied.optAcl': "Grant {user} access to this folder",
     'files.denied.optAclHelp': "Run it once, as root, on the host (WebTerm never runs it):",

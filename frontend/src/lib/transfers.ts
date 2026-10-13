@@ -155,6 +155,8 @@ export interface InsertTarget {
   send: (text: string) => boolean | void
   /** aplicaţia din prim-plan a cerut bracketed paste (DECSET 2004) — xterm `modes.bracketedPasteMode` */
   bracketedPaste: () => boolean
+  /** shell integration (OSC 133) spune că shell-ul aşteaptă la prompt (CommandTracker.atPrompt) */
+  atPrompt?: () => boolean
 }
 const targets = new Map<string, InsertTarget>()
 export function registerInsertTarget(sid: string, target: InsertTarget | null): void {
@@ -175,19 +177,25 @@ const PASTE_END = '\x1b[201~'
 /** Tastează `text` (FĂRĂ Enter) în terminalul `sid` prin ACELAŞI drum ca o tastă — deci aceleaşi
     porţi (doar-citire, mut, accesul la sesiune verificat din nou pe server).
 
-    Doar ca BRACKETED PASTE, şi doar când programul din prim-plan l-a cerut (3.6.9 review L2).
-    Ca taste simple, într-un program în mod raw (mc, vim, less, htop) fiecare literă ar fi o
-    comandă a lui. bash, zsh, fish şi readline activează bracketed paste implicit, deci regula
-    limitează tastarea la prompturi; în rest → 'notPrompt' şi apelantul oferă „Copy". Textul nu are
+    Doar la un PROMPT (3.6.9 review L2): ca taste simple, într-un program în mod raw (mc, vim,
+    less, htop) fiecare literă ar fi o comandă a lui. Ştim că suntem la un prompt dacă:
+      - programul din prim-plan a cerut bracketed paste (DECSET 2004 — bash, zsh, fish, readline
+        o fac implicit): atunci tastăm ÎMPACHETAT în ESC[200~ … ESC[201~;
+      - sau shell integration (OSC 133) arată shell-ul la prompt, fără comandă pornită (sub tmux
+        DECSET 2004 nu ajunge la xterm, marcajele OSC 133 da): atunci tastăm textul simplu, ca o
+        tastare la prompt.
+    Altfel (program necunoscut în prim-plan) → 'notPrompt' şi apelantul oferă „Copy". Textul nu are
     caractere de control (deci nici ESC): nu poate închide parantezele mai devreme. */
 export function typeIntoOutcome(sid: string | undefined, text: string): TypeOutcome {
   const t = sid ? targets.get(sid) : undefined
   if (!t) return 'noTarget'
   if (!isSafeToType(text)) return 'unsafe'
   let bracketed = false
+  let prompt = false
   try { bracketed = t.bracketedPaste() === true } catch { bracketed = false }
-  if (!bracketed) return 'notPrompt'
-  return t.send(PASTE_START + text + PASTE_END) === false ? 'refused' : 'typed'
+  try { prompt = t.atPrompt?.() === true } catch { prompt = false }
+  if (!bracketed && !prompt) return 'notPrompt'
+  return t.send(bracketed ? PASTE_START + text + PASTE_END : text) === false ? 'refused' : 'typed'
 }
 export const typeInto = (sid: string | undefined, text: string): boolean => typeIntoOutcome(sid, text) === 'typed'
 /** tastează `<cale citată> ` (spaţiu, FĂRĂ Enter) în terminalul `sid`; false dacă n-a tastat */

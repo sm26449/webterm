@@ -90,9 +90,11 @@ Fixes from an independent review of this release's changes, before it shipped.
   removed as the agent's user. The agent's user must be a plain user name, or there is no command.
 - **Typed text only goes to a prompt (low).** Why: typed as keystrokes, the command or a path ran
   as commands of whatever had the foreground — mc, vim, less, htop. The move-as-root command and
-  "Insert path" are now typed only as a bracketed paste, and only when the foreground program asked
-  for bracketed paste (bash, zsh, fish, readline do); otherwise nothing is typed and the UI offers
-  Copy with the reason.
+  "Insert path" are now typed only at a shell prompt: when the foreground program asked for
+  bracketed paste (bash, zsh, fish, readline do; sent wrapped in `ESC[200~ … ESC[201~`), or, under
+  tmux (which does not pass that mode on), when shell integration (OSC 133) shows the shell at its
+  prompt with no command started. Otherwise nothing is typed and the UI offers Copy with the
+  reason.
 - **Portable Python extracted as root kept the archive's owners and modes (low).** GNU tar as root
   defaults to `--same-owner`. Now `tar xzof`, `chmod -R go-w`, and `chown -hR root:root` when
   installing as root.
