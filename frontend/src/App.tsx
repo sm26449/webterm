@@ -381,6 +381,17 @@ function MainApp() {
     window.addEventListener('wt-unauth', onUnauth)
     return () => window.removeEventListener('wt-unauth', onUnauth)
   }, [])
+  // 3.6.8: contorul System health de pe rotiţă se reîmprospătează la 5 min (verificările rulează
+  // pe server la 30 s; /api/state îl citeşte din memorie, deci e ieftin). Doar câmpul ăsta.
+  const authed = !!appState?.authenticated
+  useEffect(() => {
+    if (!authed) return
+    const id = window.setInterval(() => {
+      api<AppState>('/api/state').then((s) => setAppState((prev) => (prev && s.authenticated
+        ? { ...prev, health_attention: s.health_attention ?? null } : prev))).catch(() => {})
+    }, 5 * 60_000)
+    return () => window.clearInterval(id)
+  }, [authed])
   // deploy nou detectat din headerul X-Webterm-Version (vezi lib/api.ts)
   const [newVersion, setNewVersion] = useState<string | null>(null)
   useEffect(() => {
@@ -1430,6 +1441,7 @@ function MainApp() {
         backupReady={appState.backup_ready}
         signingMissing={appState.signing_missing}
         signingLocked={appState.signing_locked}
+        healthAttention={appState.health_attention ?? null}
         onLogout={() => setShowLogoutConfirm(true)}
       />
       <div className="wt-workspace flex min-w-0 flex-1 flex-col">

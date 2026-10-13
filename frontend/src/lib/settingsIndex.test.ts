@@ -15,7 +15,7 @@ const sources = import.meta.glob('../components/settings/*Tab.tsx', {
   query: '?raw', import: 'default', eager: true,
 }) as Record<string, string>
 const TAB_FILE: Record<SettingsCat, string> = {
-  cont: 'AccountTab', utilizatori: 'UsersTab', autentificare: 'SignInTab', infrastructura: 'InfrastructureTab', audit: 'AuditTab',
+  cont: 'AccountTab', sanatate: 'HealthTab', utilizatori: 'UsersTab', autentificare: 'SignInTab', infrastructura: 'InfrastructureTab', audit: 'AuditTab',
   aspect: 'AppearanceTab', notificari: 'NotificationsTab', backup: 'BackupTab', preferinte: 'PreferencesTab',
 }
 const renderedIds = (file: string) => {

@@ -13,11 +13,13 @@
 /** id-urile tab-urilor din modalul de Setări (rămân în română, ca înainte de 3.5.9).
     `securitate` a fost spart în `autentificare` + `infrastructura`. */
 export type SettingsCat =
-  | 'cont' | 'utilizatori' | 'autentificare' | 'infrastructura' | 'audit' | 'aspect' | 'notificari' | 'backup' | 'preferinte'
+  | 'cont' | 'sanatate' | 'utilizatori' | 'autentificare' | 'infrastructura' | 'audit' | 'aspect' | 'notificari' | 'backup' | 'preferinte'
 
 /** ordinea din rail-ul modalului */
 export const SETTINGS_CATS: readonly { id: SettingsCat; labelKey: string }[] = [
   { id: 'cont', labelKey: 'settings.cat.account' },
+  // 3.6.8: System health — tot ce poate cădea în tăcere, cu motiv, recomandare şi comanda exactă
+  { id: 'sanatate', labelKey: 'settings.cat.health' },
   { id: 'utilizatori', labelKey: 'settings.cat.users' },
   { id: 'autentificare', labelKey: 'settings.cat.signin' },
   { id: 'infrastructura', labelKey: 'settings.cat.infra' },
@@ -56,6 +58,11 @@ export const SETTINGS_INDEX: readonly SettingSection[] = [
   // ── Cont ──
   { id: 'account', cat: 'cont', titleKey: 'settings.account',
     keywords: 'email password change parola schimba profile profil' },
+  // ── Sănătatea sistemului (3.6.8) ──
+  { id: 'systemHealth', cat: 'sanatate', titleKey: 'health.title', hintKey: 'health.hint',
+    keywords: 'system health status problems attention checks alerts timer backup cloudflare token authentik disk '
+      + 'sso clock heartbeat dead man switch cleanup docker janitor database vacuum '
+      + 'sanatate sistem probleme verificari atentie ceas disc curatare baza de date', perm: 'security.view' },
   // ── Utilizatori şi roluri (3.6) ──
   { id: 'myAccess', cat: 'utilizatori', titleKey: 'roles.myAccess', hintKey: 'roles.myAccessHint',
     keywords: 'role roles access permissions owner admin operator viewer scope rol roluri acces permisiuni' },

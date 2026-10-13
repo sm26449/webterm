@@ -81,8 +81,20 @@ export default function Sidebar(props: {
   backupReady?: boolean
   signingMissing?: boolean
   signingLocked?: boolean
+  /** 3.6.8: System health — „N items need attention" (warning/critical, nemutate) */
+  healthAttention?: { count: number; severity: string } | null
 }) {
   const { t } = useI18n()
+  // punctul de pe rotiţă (3.6.8: şi System health). Prioritatea titlului: cheia de semnare blocată
+  // → sănătatea sistemului → cheia lipsă → backup gata. Culoarea: roşu = blocat/critic.
+  const health = props.healthAttention && props.healthAttention.count > 0 ? props.healthAttention : null
+  const gearDot = !!(props.backupReady || props.signingMissing || props.signingLocked || health)
+  const gearDotColor = props.signingLocked || health?.severity === 'critical' ? 'bg-rose-500'
+    : props.signingMissing || health ? 'bg-amber-400' : 'bg-sky-400'
+  const gearTitle = props.signingLocked ? t('sidebar.settingsSigningLocked')
+    : health ? t('sidebar.settingsHealth', { count: health.count })
+      : props.signingMissing ? t('sidebar.settingsSigningMissing')
+        : props.backupReady ? t('sidebar.settingsBackupReady') : t('settings.title')
   // 3.6: „Adaugă host" doar cu `hosts.create`; consola de flotă doar dacă poţi rula undeva
   const perms = usePerms()
   const mayAddHost = can(perms, 'hosts.create')
@@ -757,22 +769,18 @@ export default function Sidebar(props: {
             <ActivityIcon />
           </IconButton>
           <IconButton size="md"
-            title={props.signingLocked
-              ? t('sidebar.settingsSigningLocked')
-              : props.signingMissing ? t('sidebar.settingsSigningMissing')
-                : props.backupReady ? t('sidebar.settingsBackupReady') : t('settings.title')}
+            title={gearTitle}
             onClick={() => { setSettingsCat(undefined); setShowSettings(true) }}
             label={t('settings.title')}
             className="relative"
           >
             <GearIcon />
-            {(props.backupReady || props.signingMissing || props.signingLocked) && (
+            {gearDot && (
               // decorativ: starea e deja în title-ul TRADUS al butonului părinte; aria-label pe
               // un span non-interactiv e oricum ignorat de cititoare (şi era hard-codat, cu
               // engleza şi româna amestecate — scăpa testului i18n, care prinde doar literali)
-              <span aria-hidden="true"
-                className={`absolute right-1 top-1 h-2 w-2 rounded-full ring-2 ring-ink-900 ${
-                  props.signingLocked ? 'bg-rose-500' : props.signingMissing ? 'bg-amber-400' : 'bg-sky-400'}`} />
+              <span aria-hidden="true" data-testid="gear-dot"
+                className={`absolute right-1 top-1 h-2 w-2 rounded-full ring-2 ring-ink-900 ${gearDotColor}`} />
             )}
           </IconButton>
           <IconButton size="md" label={t('sidebar.signOut')} onClick={props.onLogout}>
@@ -974,13 +982,9 @@ export default function Sidebar(props: {
           </button>
           <button type="button" onClick={() => { setSettingsCat(undefined); setShowSettings(true) }} className={drawerRow}>
             <GearIcon /><span>{t('settings.title')}</span>
-            {(props.backupReady || props.signingMissing || props.signingLocked) && (<>
-              <span aria-hidden="true" className={`ml-auto h-2 w-2 shrink-0 rounded-full ${
-                props.signingLocked ? 'bg-rose-500' : props.signingMissing ? 'bg-amber-400' : 'bg-sky-400'}`} />
-              <span className="sr-only">
-                {props.signingLocked ? t('sidebar.settingsSigningLocked')
-                  : props.signingMissing ? t('sidebar.settingsSigningMissing') : t('sidebar.settingsBackupReady')}
-              </span>
+            {gearDot && (<>
+              <span aria-hidden="true" className={`ml-auto h-2 w-2 shrink-0 rounded-full ${gearDotColor}`} />
+              <span className="sr-only">{gearTitle}</span>
             </>)}
           </button>
           <button type="button" onClick={props.onLogout} className={drawerRow}>
@@ -1095,8 +1099,10 @@ export default function Sidebar(props: {
             webauthnAvailable={props.webauthnAvailable}
             // fără ţintă explicită, punctul de pe rotiţă alege: cheia de semnare (lipsă sau blocată —
             // acelaşi lucru îl spune şi title-ul rotiţei) → backup gata → Cont
-            initialCat={settingsCat?.cat ?? (props.signingMissing || props.signingLocked ? 'infrastructura' : props.backupReady ? 'backup' : undefined)}
-            initialSection={settingsCat?.section ?? (props.signingMissing || props.signingLocked ? 'signingKey' : undefined)}
+            initialCat={settingsCat?.cat ?? (props.signingLocked ? 'infrastructura' : health ? 'sanatate'
+              : props.signingMissing ? 'infrastructura' : props.backupReady ? 'backup' : undefined)}
+            initialSection={settingsCat?.section ?? (props.signingLocked || (!health && props.signingMissing) ? 'signingKey' : undefined)}
+            healthAttention={health?.count ?? 0}
             onAccountChanged={props.onAccountChanged}
             onClose={() => setShowSettings(false)}
           />
