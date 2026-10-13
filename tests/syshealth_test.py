@@ -236,6 +236,130 @@ async def run_check(cid):
     return syshealth._rows.get(cid)
 
 
+def _http_err(code, body):
+    import io
+    import urllib.error
+    return urllib.error.HTTPError("http://idp/token", code, "x", {}, io.BytesIO(body))
+
+
+async def test_sso_review_m1():
+    """Security review 3.6.8 (M1): an anonymous caller must not be able to raise "SSO broken"
+    (critical with WEBTERM_OIDC_SSO_ONLY=1) with bogus callbacks, nor hide a real one."""
+    import urllib.error
+    from app import oidc_api
+    print("── SSO: bogus callbacks are not an outage (review M1)")
+    cl = oidc._classify_token_error
+    check("400 invalid_grant (a bogus code) → user",
+          cl(_http_err(400, b'{"error":"invalid_grant"}')) == "user")
+    check("400 whose DESCRIPTION echoes 'invalid_client' (attacker-chosen code) → still user",
+          cl(_http_err(400, b'{"error":"invalid_grant","error_description":"code invalid_client"}')) == "user")
+    check("400 with a non-JSON body that mentions invalid_client → user",
+          cl(_http_err(400, b"invalid_client")) == "user")
+    check("413 / 429 / other 4xx → user", cl(_http_err(413, b"")) == "user" and cl(_http_err(429, b"")) == "user")
+    check("400 error=invalid_client → invalid_client", cl(_http_err(400, b'{"error":"invalid_client"}')) == "invalid_client")
+    check("401 → invalid_client", cl(_http_err(401, b"")) == "invalid_client")
+    check("500 / 503 → token_endpoint", cl(_http_err(500, b"")) == "token_endpoint"
+          and cl(_http_err(503, b"")) == "token_endpoint")
+    check("connection refused → token_endpoint", cl(urllib.error.URLError("refused")) == "token_endpoint")
+
+    # end to end: /login hands out a valid state; /callback?code=bogus → the IdP says invalid_grant
+    saved_disco, saved_http = oidc._disco, oidc._http_json
+    answer = {"err": (400, b'{"error":"invalid_grant","error_description":"invalid_client?"}')}
+
+    def fake_http(url, data=None, headers=None):
+        raise _http_err(*answer["err"])
+    oidc._disco = {"issuer": "http://idp", "authorization_endpoint": "http://idp/authorize",
+                   "token_endpoint": "http://idp/token", "jwks_uri": "http://idp/jwks"}
+    oidc._http_json = fake_http
+    import httpx
+    from urllib.parse import parse_qs, urlparse
+    clients = {}
+
+    def anon_from(ip):
+        # a distinct client address per caller (the socket peer: no proxy header is trusted here)
+        if ip not in clients:
+            clients[ip] = httpx.AsyncClient(transport=httpx.ASGITransport(app=U.app, client=(ip, 40000)),
+                                            base_url="http://t")
+        return clients[ip]
+
+    async def bogus_callback(ip="203.0.113.7"):
+        c = anon_from(ip)
+        r = await c.get("/api/oidc/login")
+        state = parse_qs(urlparse(r.headers.get("location", "")).query).get("state", [""])[0]
+        c.cookies.set(oidc_api.STATE_COOKIE, state)
+        return await c.get("/api/oidc/callback", params={"code": "bogus", "state": state})
+    try:
+        oidc.reset_failures()
+        r = None
+        for _ in range(12):
+            r = await bogus_callback()
+        check("…the callback refuses ('denied', not 'unavailable')", r is not None and r.status_code == 303
+              and "sso_error=denied" in r.headers.get("location", ""), r and r.headers.get("location"))
+        st = oidc.failure_stats()
+        check("12 bogus-code callbacks → no SYSTEM failure counted", st["count"] == 0, st)
+        r = await run_check("oidc.sso")
+        check("…and System health stays 'SSO works' (no sso_broken)", r["severity"] == "ok"
+              and r["message_key"] == "sso_ok", r)
+        # a REAL invalid_client (the IdP rejects our client credentials) still raises it at once
+        answer["err"] = (401, b'{"error":"invalid_client"}')
+        await bogus_callback()
+        r = await run_check("oidc.sso")
+        check("a real invalid_client still raises sso_broken (critical with SSO_ONLY)",
+              r["severity"] == "critical" and r["message_key"] == "sso_broken" and "invalid_client" in r["params"], r)
+        # eviction: a flood of user failures must not push the system failure out of the window
+        answer["err"] = (400, b'{"error":"invalid_grant"}')
+        for _ in range(300):
+            oidc.note_failure("user", "198.51.100.1")
+        st = oidc.failure_stats()
+        check("300 user failures after it do not evict the system failure", st["kinds"].get("invalid_client") == 1, st)
+        r = await run_check("oidc.sso")
+        check("…sso_broken still shown", r["message_key"] == "sso_broken" and r["severity"] == "critical", r)
+
+        # unconfirmed: 5xx from the token endpoint, all from ONE caller → a warning, not critical
+        oidc.reset_failures()
+        answer["err"] = (502, b"bad gateway")
+        for _ in range(4):
+            await bogus_callback("203.0.113.9")
+        st = oidc.failure_stats()
+        check("5xx failures from one source are counted but not confirmed", st["count"] == 4
+              and st["sources"] == 1 and not st["confirmed"], st)
+        r = await run_check("oidc.sso")
+        check("…sso_broken only as a WARNING with SSO_ONLY (needs confirmation for critical)",
+              r["message_key"] == "sso_broken" and r["severity"] == "warning", r)
+        oidc._probe.update(ts=0.0)
+        syshealth._probe_kick.update(at=0.0, task=None)
+        saved_probe = oidc.probe
+        probed = []
+        oidc.probe = lambda: (probed.append(1), oidc._probe.update(ts=time.time(), ok=False, kind="discovery",
+                                                                    error="connection refused"))[1]
+        try:
+            await run_check("oidc.sso")
+            t = syshealth._probe_kick.get("task")
+            if t:
+                await t
+            check("…and it asks the IdP probe to run now", probed == [1], probed)
+            r = await run_check("oidc.sso")
+            check("the probe confirms the outage → full severity (critical)", r["severity"] == "critical"
+                  and r["message_key"] == "sso_probe_failed", r)
+            await run_check("oidc.sso")
+            check("the probe is not re-kicked within 5 minutes", probed == [1], probed)
+        finally:
+            oidc.probe = saved_probe
+            oidc._probe.update(ts=time.time(), ok=True, kind="", error="")
+        oidc.reset_failures()
+        await bogus_callback("203.0.113.9")
+        await bogus_callback("203.0.113.10")
+        await bogus_callback("203.0.113.11")
+        r = await run_check("oidc.sso")
+        check("5xx failures from several sources → confirmed → critical", r["severity"] == "critical"
+              and r["message_key"] == "sso_broken", r)
+    finally:
+        oidc._disco, oidc._http_json = saved_disco, saved_http
+        oidc.reset_failures()
+        for c in clients.values():
+            await c.aclose()
+
+
 async def test_checks(owner_uid):
     print("── checks: host helpers")
     hs = _hs_dir()
@@ -401,14 +525,15 @@ async def test_checks(owner_uid):
         config.OIDC_SSO_ONLY = True
         r = await run_check("oidc.sso")
         check("…CRITICAL with WEBTERM_OIDC_SSO_ONLY=1", r["severity"] == "critical", r)
-        oidc._probe.update(ok=True, kind="", error="")
-        oidc._failures.clear()
+        # a recent probe: c_sso must not kick a real one at the (unset) issuer during the test
+        oidc._probe.update(ts=time.time(), ok=True, kind="", error="")
+        oidc.reset_failures()
         for _ in range(3):
             oidc.note_failure("clock_skew")
         r = await run_check("oidc.sso")
         check("3 classified failures, no success since → sso_broken (kind clock_skew) + clock command",
               r["severity"] == "critical" and '"clock_skew"' in r["params"] and "ntp_status" in r["commands"], r)
-        oidc._failures.clear()
+        oidc.reset_failures()
         for _ in range(5):
             oidc.note_failure("user")
         r = await run_check("oidc.sso")
@@ -416,7 +541,8 @@ async def test_checks(owner_uid):
         oidc.note_failure("invalid_client")
         r = await run_check("oidc.sso")
         check("one invalid_client (a config error) is enough", r["severity"] == "critical", r)
-        oidc._failures.clear()
+        oidc.reset_failures()
+        await test_sso_review_m1()
         config.OIDC_ALLOWED_GROUPS = []
         r = await run_check("config.sso_ungated")
         check("SSO without ALLOWED_GROUPS → warning", r["severity"] == "warning", r)
@@ -547,7 +673,7 @@ async def test_alerting(owner_uid):
     syshealth._rows["host.backup"]["alerted_at"] = 0
     await run_check("host.backup")
     n = len(await _alerts("health"))
-    await syshealth.mute("host.backup", "change", "owner@x.co")
+    await syshealth.mute("host.backup", "change", "owner@x.co", owner=True)
     syshealth._rows["host.backup"].update(alerted_severity=None, alerted_at=0)
     await run_check("host.backup")
     check("muted 'until it changes' → no alert while the result is the same", len(await _alerts("health")) == n)
@@ -558,7 +684,7 @@ async def test_alerting(owner_uid):
     row = syshealth._rows["host.backup"]
     check("a different result lifts the mute (and alerts)", float(row.get("muted_until") or 0) == 0
           and len(await _alerts("health")) == n + 1, (row.get("muted_until"), n))
-    await syshealth.mute("host.backup", "7d", "owner@x.co")
+    await syshealth.mute("host.backup", "7d", "owner@x.co", owner=True)
     row = syshealth._rows["host.backup"]
     check("mute 7 d → muted_until about a week ahead", 6.9 * 86400 < float(row["muted_until"]) - time.time() < 7.1 * 86400)
     db_row = await db.fetchone("SELECT muted_until, muted_by FROM health_checks WHERE id='host.backup'")
@@ -566,7 +692,7 @@ async def test_alerting(owner_uid):
     row["muted_until"] = time.time() - 1
     await run_check("host.backup")
     check("an expired mute is lifted at the next run", float(syshealth._rows["host.backup"]["muted_until"] or 0) == 0)
-    await syshealth.mute("host.backup", "off", "owner@x.co")
+    await syshealth.mute("host.backup", "off", "owner@x.co", owner=True)
 
     print("── the alert-delivery check: in-app only, never a loop")
     await db.execute("DELETE FROM alerts")
@@ -705,6 +831,60 @@ async def test_routes(owner_uid):
     check("…audited", aud and "host.helper" in aud["detail"] and "change" in aud["detail"], aud and dict(aud))
     await admin.post("/api/health/host.helper/mute", json={"mode": "off"})
 
+    print("── mute: critical-capable checks are the Owner's (review L1)")
+    await _settle()
+    owner_row = await db.fetchone("SELECT id FROM users WHERE email=?", U.OWNER_EMAIL)
+    al = await db.fetchall("SELECT kind, msg_key, msg_params, user_id FROM alerts WHERE msg_key='health_muted'")
+    check("an Admin's mute → an in-app alert (admin_change) for the Owner (security.view)",
+          any(a["kind"] == "admin_change" and a["user_id"] == owner_row["id"]
+              and json.loads(a["msg_params"]).get("check") == "host.helper"
+              and json.loads(a["msg_params"]).get("email") == "admin@x.co" for a in al), [dict(a) for a in al])
+    viewer_row = await db.fetchone("SELECT id FROM users WHERE email='view@x.co'")
+    check("…not for a Viewer (no security.view)", not any(a["user_id"] == viewer_row["id"] for a in al))
+    n_alerts = len(al)
+    r = await admin.post("/api/health/gateway.disk/mute", json={"mode": "30d"})
+    check("Admin cannot mute a critical-capable check (gateway.disk) → 403 health.muteOwnerOnly",
+          r.status_code == 403 and U.code(r) == "health.muteOwnerOnly", r.text[:200])
+    for mode in ("7d", "change"):
+        r = await admin.post("/api/health/oidc.sso/mute", json={"mode": mode})
+        check("…nor pre-emptively (%s), whatever the mode" % mode, r.status_code in (403, 404), r.status_code)
+    check("…and nothing was muted", not syshealth._is_muted(syshealth._rows["gateway.disk"], time.time()))
+    r = await admin.get("/api/health")
+    j = r.json()
+    gd = next(c for c in j["checks"] if c["id"] == "gateway.disk")
+    check("view(): mute_owner_only on a critical-capable check; Admin: can_mute_critical false",
+          gd["mute_owner_only"] is True and j["can_mute_critical"] is False, (gd.get("mute_owner_only"), j.get("can_mute_critical")))
+    ch = next((c for c in j["checks"] if c["id"] == "alerts.channel"), None)
+    check("…false on one that cannot become critical", ch is None or ch["mute_owner_only"] is False, ch)
+    r = await owner.post("/api/health/gateway.disk/mute", json={"mode": "7d"})
+    gd = next((c for c in r.json()["checks"] if c["id"] == "gateway.disk"), {}) if r.status_code == 200 else {}
+    check("the Owner may mute it; view() shows muted_by + muted_until", r.status_code == 200 and gd.get("muted")
+          and gd.get("muted_by") == U.OWNER_EMAIL and gd.get("muted_until", 0) > time.time() + 6 * 86400, gd)
+    check("…and an Owner's mute raises no 'muted' alert", len(await db.fetchall(
+        "SELECT id FROM alerts WHERE msg_key='health_muted'")) == n_alerts)
+    r = await admin.post("/api/health/gateway.disk/mute", json={"mode": "off"})
+    check("an Admin may LIFT a mute (it hides nothing)", r.status_code == 200
+          and not next(c for c in r.json()["checks"] if c["id"] == "gateway.disk")["muted"], r.text[:200])
+    # a check NOT declared critical-capable that is critical right now: Owner only as well…
+    if "alerts.channel" in syshealth._rows:
+        syshealth._rows["alerts.channel"]["severity"] = "critical"
+        r = await admin.post("/api/health/alerts.channel/mute", json={"mode": "7d"})
+        check("a check that IS critical now → Owner only", r.status_code == 403, r.status_code)
+        # …and the safety net: an Admin's earlier mute never hides a critical of such a check
+        syshealth._rows["alerts.channel"].update(severity="info", muted_until=time.time() + 3600, muted_by="admin@x.co")
+        syshealth._rows["alerts.channel"]["severity"] = "critical"
+        check("an undeclared check turning critical is not hidden by a mute",
+              not syshealth._is_muted(syshealth._rows["alerts.channel"], time.time()))
+        syshealth._rows["alerts.channel"].update(severity="info", muted_until=0, muted_by=None)
+    flagged = {c.id for c in syshealth.CHECKS if c.critical}
+    import inspect
+    unflagged_crit = [c.id for c in syshealth.CHECKS if not c.critical and c.fn.__name__.startswith("c_")
+                      and re.search(r'"critical"|\bsev\b', inspect.getsource(c.fn))]
+    check("every check function that can return critical is declared critical-capable", not unflagged_crit, unflagged_crit)
+    check("…the declared set (host.backup via fail_sev, certs.* via _CERT_SEV)", {
+        "host.backup", "host.cloudflare", "gateway.disk", "alerts.delivery", "signing.state", "oidc.sso",
+        "config.forwards_http", "certs.main", "certs.forward", "certs.authentik", "clock.gateway"} == flagged, flagged)
+
     print("── the health terminal")
     hid = await U.add_host(owner, "gw-host")
     for f in os.listdir(_hs_dir()):
@@ -794,7 +974,8 @@ async def test_routes(owner_uid):
     r = await owner.post("/api/backup/stored/broken.wtsnap/verify")
     check("a corrupt snapshot → 400", r.status_code == 400, r.text[:200])
     r = await owner.post("/api/backup/stored/..%2F..%2Fwebterm.db/verify")
-    check("a path in the name → refused", r.status_code in (400, 404))
+    # 405 when the SPA catch-all exists (a built frontend/dist): refused either way
+    check("a path in the name → refused", r.status_code in (400, 404, 405), r.status_code)
     blob = await asyncio.to_thread(backup_mod.encrypt_stored, name, "a-good-passphrase")
     r = await owner.post("/api/backup/verify", content=blob, headers={"X-Restore-Pass": "a-good-passphrase",
                                                                       "content-type": "application/octet-stream"})

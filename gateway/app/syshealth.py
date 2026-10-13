@@ -91,6 +91,10 @@ class Check:
     alert: str = "transition"     # transition | none | inapp | version
     kind: str = "health"          # alert_history kind (preferences)
     timeout: float = CHECK_TIMEOUT
+    # can this check ever return `critical`? Muting such a check needs certs.renew (the Owner):
+    # security review 3.6.8 (L1) — an Admin must not silence, even pre-emptively, a check that
+    # can turn critical and so hide it from the Owner. tests/syshealth_test.py keeps it honest.
+    critical: bool = False
 
 
 # ── English text (emails, webhook, the admin CLI). The UI uses en.ts / ro.ts with the SAME keys
@@ -602,10 +606,41 @@ async def c_sso() -> Optional[Result]:
                                     and st["last_success"] < st["first_ts"])):
         kind = max(st["kinds"], key=st["kinds"].get)
         cmds = [{"t": "ntp_status", "p": {}}] if kind == "clock_skew" else []
-        return Result(sev, "sso_broken", {"kind": kind, "count": st["count"],
-                                          "sso_only": config.OIDC_SSO_ONLY},
+        # Security review 3.6.8 (M1): full severity (critical with SSO_ONLY) only when CONFIRMED
+        # — a kind only the IdP can produce, or failures from two or more client addresses.
+        # Unconfirmed (e.g. 5xx/network errors all from one caller) stays a warning and asks the
+        # IdP probe to run now: if the IdP really is down, the probe fails and `sso_probe_failed`
+        # above raises the full severity at the next tick.
+        confirmed = bool(st.get("confirmed"))
+        if not confirmed:
+            _kick_probe()
+        return Result(sev if confirmed else "warning", "sso_broken",
+                      {"kind": kind, "count": st["count"], "sso_only": config.OIDC_SSO_ONLY,
+                       "confirmed": confirmed},
                       rec="sso_check", commands=cmds)
     return Result("ok", "sso_ok")
+
+
+PROBE_KICK_MIN = 300.0           # an unconfirmed "SSO broken" re-probes the IdP at most every 5 min
+_probe_kick = {"at": 0.0, "task": None}
+
+
+def _kick_probe(now: Optional[float] = None) -> bool:
+    """Run the IdP probe now (in the background) unless it ran, or was asked for, recently.
+    Bounded: one outbound discovery+JWKS fetch to the CONFIGURED issuer per 5 minutes at most."""
+    from . import oidc
+    now = time.time() if now is None else now
+    if now - _probe_kick["at"] < PROBE_KICK_MIN:
+        return False
+    if now - float(oidc.probe_status().get("ts") or 0) < PROBE_KICK_MIN:
+        return False
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    _probe_kick["at"] = now
+    _probe_kick["task"] = loop.create_task(jobs_hourly())   # keep a reference (no early GC)
+    return True
 
 
 async def c_forwards_http() -> Optional[Result]:
@@ -815,24 +850,24 @@ async def c_forward_dns() -> Optional[Result]:
 
 CHECKS: list = [
     Check("host.helper", "fast", c_host_helper, source="host_helper"),
-    Check("host.backup", "fast", c_host_backup, source="host_helper"),
+    Check("host.backup", "fast", c_host_backup, source="host_helper", critical=True),
     Check("host.cert_check", "fast", c_host_cert_check, source="host_helper"),
     Check("host.docker_cleanup", "fast", c_host_cleanup, source="host_helper"),
-    Check("host.cloudflare", "fast", c_host_cloudflare, source="host_helper"),
+    Check("host.cloudflare", "fast", c_host_cloudflare, source="host_helper", critical=True),
     Check("host.authentik", "fast", c_host_authentik, source="host_helper"),
     # the 3.6.7 disk alert, now with an early warning; same alert kind (preferences carry over)
-    Check("gateway.disk", "fast", c_disk, kind="gateway_disk"),
+    Check("gateway.disk", "fast", c_disk, kind="gateway_disk", critical=True),
     # in-app ONLY: must not go out through the channel that is failing (no loop)
-    Check("alerts.delivery", "fast", c_delivery, alert="inapp", kind="alert_delivery"),
+    Check("alerts.delivery", "fast", c_delivery, alert="inapp", kind="alert_delivery", critical=True),
     Check("alerts.channel", "fast", c_channel, alert="none"),
     Check("agents.outdated", "fast", c_agents_outdated),
     Check("agents.autostart", "fast", c_agents_autostart),
     Check("agents.update_blocked", "fast", c_agents_blocked, alert="none"),   # update_refused alerts
     Check("agents.clock", "fast", c_agents_clock),
     Check("sessions.cap", "fast", c_sessions_cap),
-    Check("signing.state", "fast", c_signing, alert="none"),                   # signing_locked alerts
-    Check("oidc.sso", "fast", c_sso),
-    Check("config.forwards_http", "fast", c_forwards_http),
+    Check("signing.state", "fast", c_signing, alert="none", critical=True),  # signing_locked alerts
+    Check("oidc.sso", "fast", c_sso, critical=True),
+    Check("config.forwards_http", "fast", c_forwards_http, critical=True),
     Check("config.sso_ungated", "fast", c_sso_ungated),
     Check("janitor", "fast", c_janitor),
     Check("db.size", "hourly", c_db_size, alert="none"),
@@ -840,12 +875,12 @@ CHECKS: list = [
     Check("backup.offhost", "fast", c_backup_offhost),
     Check("backup.restore", "fast", c_backup_restore, alert="none"),
     Check("backup.inapp", "fast", c_backup_inapp, alert="none"),               # backup_failed alerts
-    Check("certs.main", "fast", _cert_check("main"), alert="none"),            # certmon alerts
-    Check("certs.forward", "fast", _cert_check("forward"), alert="none"),
-    Check("certs.authentik", "fast", _cert_check("authentik"), alert="none"),
+    Check("certs.main", "fast", _cert_check("main"), alert="none", critical=True),  # certmon alerts
+    Check("certs.forward", "fast", _cert_check("forward"), alert="none", critical=True),
+    Check("certs.authentik", "fast", _cert_check("authentik"), alert="none", critical=True),
     Check("heartbeat", "fast", c_heartbeat),
     Check("update.available", "fast", c_update, alert="version"),
-    Check("clock.gateway", "fast", c_clock),
+    Check("clock.gateway", "fast", c_clock, critical=True),
     Check("forward.dns", "daily", c_forward_dns, timeout=NETWORK_TIMEOUT),
 ]
 BY_ID = {c.id: c for c in CHECKS}
@@ -887,6 +922,10 @@ async def _persist(row: dict) -> None:
 
 
 def _is_muted(row: dict, now: float) -> bool:
+    # safety net (security review 3.6.8, L1): a check not declared critical-capable may be muted
+    # by an Admin; should it ever return critical anyway, the mute does not hide it
+    if row.get("severity") == "critical" and not getattr(BY_ID.get(row.get("id")), "critical", False):
+        return False
     mu = float(row.get("muted_until") or 0)
     if mu == -1:
         return row.get("muted_sig") == row.get("sig")
@@ -1142,11 +1181,30 @@ async def janitor_report(errors: list) -> None:
 MUTE_MODES = {"7d": 7 * 86400, "30d": 30 * 86400, "change": -1, "off": 0}
 
 
-async def mute(check_id: str, mode: str, who: str) -> dict:
+class MuteDenied(Exception):
+    """Muting this check needs certs.renew (the Owner)."""
+
+
+def mute_needs_owner(check_id: str, row: Optional[dict] = None) -> bool:
+    """Security review 3.6.8 (L1). Before, settings.manage (an Admin) could mute ANY check for
+    30 days, even pre-emptively while it was ok, and so hide a future critical from the Owner.
+    Now a check that is critical NOW or CAN become critical is muted by the Owner only.
+    Why not "an Admin may use `change` only": that mode stays on for as long as the result does
+    not change, and a critical that stays the same (an expired certificate, a broken SSO) would be
+    hidden just as long. Lifting a mute (`off`) is never restricted: it hides nothing."""
+    c = BY_ID.get(check_id)
+    if c is None or c.critical:
+        return True
+    return bool(row and row.get("severity") == "critical")
+
+
+async def mute(check_id: str, mode: str, who: str, owner: bool = False) -> dict:
     await _load()
     row = _rows.get(check_id)
     if row is None or mode not in MUTE_MODES:
         raise KeyError(check_id)
+    if MUTE_MODES[mode] != 0 and not owner and mute_needs_owner(check_id, row):
+        raise MuteDenied(check_id)
     d = MUTE_MODES[mode]
     if d == 0:
         row.update(muted_until=0, muted_sig=None, muted_by=None)
@@ -1156,6 +1214,24 @@ async def mute(check_id: str, mode: str, who: str) -> dict:
         row.update(muted_until=time.time() + d, muted_sig=None, muted_by=who[:200])
     await _persist(row)
     return row
+
+
+def notify_muted(check_id: str, mode: str, who: str, row: Optional[dict] = None) -> None:
+    """A mute by someone other than the Owner → an in-app alert for everyone with security.view
+    (kind admin_change: a security kind, always shown in the app, never switchable off). In-app
+    only: a mute is not worth an email, but it must not be invisible to the Owner (L1)."""
+    from . import email_alerts
+    until = float((row or {}).get("muted_until") or 0)
+    when = ("until it changes" if until == -1 else
+            time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(until)) if until > 0 else "?")
+    params = {"check": check_id, "mode": mode, "email": who or "?",
+              "until": int(until) if until > 0 else 0}
+    title = "System health: %s muted the check %s (%s)" % (who or "?", check_id, mode)
+    body = ("%s muted the System health check %s until %s. Muted checks raise no alert and are "
+            "left out of the attention badge. Settings → System health shows it, and an Owner "
+            "can unmute it." % (who or "?", check_id, when))
+    email_alerts.record_inapp_only("admin_change", "warning", title, body, key="health_muted",
+                                   params=params)
 
 
 # ── views ────────────────────────────────────────────────────────────────────────────────────
@@ -1188,7 +1264,10 @@ def view(row: dict, now: Optional[float] = None, host_names: Optional[dict] = No
         "checked_at": row.get("checked_at"), "first_failed_at": row.get("first_failed_at"),
         "changed_at": row.get("changed_at"),
         "muted": _is_muted(row, now),
+        # -1 = "until it changes"; who muted it is shown to everyone who sees the list (L1)
         "muted_until": row.get("muted_until") or 0,
+        "muted_by": (row.get("muted_by") or "") if _is_muted(row, now) else "",
+        "mute_owner_only": mute_needs_owner(cid, row),
         "message": render_text(row.get("message_key") or "", _loads(row.get("params"), {})),
     }
 
@@ -1218,3 +1297,4 @@ def reset_for_tests() -> None:
     _last_manual = 0.0
     _HOST = {}
     _hb.update(last_ok=0.0, last_error="", last_try=0.0)
+    _probe_kick.update(at=0.0, task=None)

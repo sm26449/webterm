@@ -153,14 +153,28 @@ KINDS = ("discovery", "token_endpoint", "invalid_client", "clock_skew", "token_i
          "idp_config", "user", "other")
 SYSTEM_KINDS = frozenset(KINDS) - {"user"}
 
-# Ferestre de eşecuri, în memorie (un singur proces): (ts, kind). Mărginită — /callback e public.
-_failures: deque = deque(maxlen=200)
+# Failure windows, in memory (one process), bounded: /login and /callback are public.
+# Security review 3.6.8 (M1): SYSTEM failures live in their OWN deque. Before, one shared
+# deque(maxlen=200) held both, so a flood of user failures (anyone can produce them: a bogus
+# `code` on the callback) evicted the real system failures and hid an outage.
+_failures: deque = deque(maxlen=200)          # user failures — kept for debugging only
+_sys_failures: deque = deque(maxlen=200)      # (ts, kind, source): what "SSO broken" counts
 _last_success = 0.0
 _probe: dict = {"ts": 0.0, "ok": None, "kind": "", "error": ""}
+# Kinds only the IdP's own answer to OUR authenticated request can produce, so an outsider
+# cannot cause them: invalid_client (the IdP's structured `error` rejecting OUR credentials),
+# idp_config / clock_skew / token_invalid (they need a token the IdP itself issued). The others
+# (token_endpoint, discovery, other: network errors and 5xx) might be steered by an anonymous
+# caller, so they need a CONFIRMATION before "SSO broken" is raised at full severity — see
+# failure_stats()["confirmed"] and syshealth.c_sso.
+TRUSTED_KINDS = frozenset({"invalid_client", "idp_config", "clock_skew", "token_invalid"})
+_SOURCE_MAX = 64
 
 
-def note_failure(kind: str) -> None:
-    _failures.append((time.time(), kind if kind in KINDS else "other"))
+def note_failure(kind: str, source: str = "") -> None:
+    kind = kind if kind in KINDS else "other"
+    entry = (time.time(), kind, str(source or "")[:_SOURCE_MAX])
+    (_sys_failures if kind in SYSTEM_KINDS else _failures).append(entry)
 
 
 def note_success() -> None:
@@ -169,17 +183,29 @@ def note_success() -> None:
 
 
 def failure_stats(window: float = 3600.0, now: Optional[float] = None) -> dict:
-    """{count, kinds: {kind: n}, last_success, first_ts} — only SYSTEM failures in the window."""
+    """{count, kinds: {kind: n}, last_success, first_ts, sources, confirmed} — SYSTEM failures in
+    the window only. `confirmed`: at least one failure of a TRUSTED kind, or failures from at
+    least two different sources (client addresses) — one caller replaying callbacks is one."""
     now = time.time() if now is None else now
     kinds: dict = {}
+    sources = set()
     first = 0.0
-    for ts, k in list(_failures):
-        if now - ts > window or k not in SYSTEM_KINDS:
+    for ts, k, src in list(_sys_failures):
+        if now - ts > window:
             continue
         kinds[k] = kinds.get(k, 0) + 1
+        sources.add(src)
         first = ts if not first else min(first, ts)
+    confirmed = bool(set(kinds) & TRUSTED_KINDS) or len(sources) >= 2
     return {"count": sum(kinds.values()), "kinds": kinds, "last_success": _last_success,
-            "first_ts": first}
+            "first_ts": first, "sources": len(sources), "confirmed": confirmed}
+
+
+def reset_failures() -> None:
+    global _last_success
+    _failures.clear()
+    _sys_failures.clear()
+    _last_success = 0.0
 
 
 def probe() -> dict:
@@ -206,17 +232,36 @@ def probe_status() -> dict:
     return dict(_probe)
 
 
+def _oauth_error_code(body: bytes) -> str:
+    """The RFC 6749 §5.2 `error` field of a token-endpoint error body, or "". Parsed, never
+    substring-matched: an IdP may echo the submitted `code` in `error_description`, and a bogus
+    code that merely SAYS "invalid_client" must not count as one."""
+    try:
+        doc = json.loads(body.decode("utf-8", "replace"))
+    except ValueError:
+        return ""
+    err = doc.get("error") if isinstance(doc, dict) else None
+    return err if isinstance(err, str) else ""
+
+
 def _classify_token_error(e: Exception) -> str:
+    """Security review 3.6.8 (M1): anyone can GET /api/oidc/login for a valid state and send it
+    back with `code=bogus`; the IdP answers 400 invalid_grant. Before, every non-401 error was the
+    SYSTEM kind `token_endpoint`, so three such requests raised "SSO is broken" (critical with
+    WEBTERM_OIDC_SSO_ONLY=1). Now:
+      * 401, or a 4xx whose `error` is invalid_client → invalid_client (our credentials: system);
+      * any other 4xx (invalid_grant, invalid_request, a code that is too long…) → user;
+      * 5xx, or no HTTP answer at all (refused, timeout, TLS) → token_endpoint (system)."""
     if isinstance(e, urllib.error.HTTPError):
         body = b""
         try:
-            body = e.read(2048) or b""
+            body = e.read(4096) or b""
         except Exception:                           # noqa: BLE001
             pass
-        if e.code in (400, 401) and b"invalid_client" in body:
+        if e.code == 401 or (400 <= e.code < 500 and _oauth_error_code(body) == "invalid_client"):
             return "invalid_client"
-        if e.code == 401:
-            return "invalid_client"
+        if 400 <= e.code < 500:
+            return "user"
         return "token_endpoint"
     return "token_endpoint"
 

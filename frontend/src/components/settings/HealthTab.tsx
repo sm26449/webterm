@@ -6,7 +6,7 @@ import { fmtTs, getTimezone } from '../../lib/tz'
 import { copyText } from '../../lib/clipboard'
 import { askSecret } from '../../lib/secretPrompt'
 import {
-  actionTarget, checkText, docUrl, fixMode, MUTE_MODES, needsAttention, optText, severityTone, splitChecks,
+  actionTarget, canMute, checkText, docUrl, fixMode, MUTE_MODES, needsAttention, optText, severityTone, splitChecks,
   type HealthCheck, type HealthStatus, type MuteMode,
 } from '../../lib/health'
 import { heading } from './ui'
@@ -125,8 +125,9 @@ export default function HealthTab(props: { onJump?: (cat: string, section?: stri
         <div className="flex flex-wrap items-start gap-2">
           <Badge tone={tone} size="md">{t('health.sev.' + c.severity)}</Badge>
           <span className="min-w-0 flex-1 break-words text-sm text-slate-200">{checkText(c, t)}</span>
-          {c.muted && <Badge tone="neutral">{c.muted_until === -1 ? t('health.mutedUntilChange')
-            : t('health.mutedUntil', { when: fmtTs(c.muted_until) })}</Badge>}
+          {c.muted && <Badge tone="neutral">{(c.muted_until === -1 ? t('health.mutedUntilChange')
+            : t('health.mutedUntil', { when: fmtTs(c.muted_until) }))
+            + (c.muted_by ? ' · ' + t('health.mutedBy', { who: c.muted_by }) : '')}</Badge>}
         </div>
         <div className="mt-1 text-2xs text-slate-500">
           {optText('health.check.', c.id.replace('.', '_'), t) || c.id}
@@ -188,14 +189,17 @@ export default function HealthTab(props: { onJump?: (cat: string, section?: stri
                 {t('health.readDoc', { doc: c.doc.replace(/#.*$/, '') })}
               </a>
             )}
-            {st?.can_manage && c.severity !== 'ok' && (
+            {st?.can_manage && c.severity !== 'ok' && (canMute(c, st) || c.muted) && (
               <select aria-label={t('health.muteLabel')} value=""
                 onChange={(e) => { const v = e.target.value as MuteMode; if (v) void mute(c, v) }}
                 className="rounded-md bg-ink-800 px-2 py-1 text-xs text-slate-200 ring-1 ring-[rgb(var(--field-border))] focus:ring-sky-500">
                 <option value="">{c.muted ? t('health.mutedShort') : t('health.mute')}</option>
-                {MUTE_MODES.map((m) => <option key={m} value={m}>{t('health.mute.' + m)}</option>)}
+                {canMute(c, st) && MUTE_MODES.map((m) => <option key={m} value={m}>{t('health.mute.' + m)}</option>)}
                 {c.muted && <option value="off">{t('health.mute.off')}</option>}
               </select>
+            )}
+            {st?.can_manage && c.severity !== 'ok' && !canMute(c, st) && (
+              <span className="text-2xs text-slate-500">{t('health.muteOwnerOnly')}</span>
             )}
           </div>
         )}

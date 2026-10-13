@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  actionTarget, checkText, docUrl, fixMode, needsAttention, optText, severityTone, sortChecks, splitChecks,
+  actionTarget, canMute, checkText, docUrl, fixMode, needsAttention, optText, severityTone, sortChecks, splitChecks,
   type HealthCheck,
 } from './health'
 import en from '../lang/en'
@@ -77,6 +77,15 @@ describe('health: text', () => {
 })
 
 describe('health: actions', () => {
+  it('mute: settings.manage; a critical-capable check only for the Owner (review L1)', () => {
+    const owner = { can_manage: true, can_mute_critical: true }
+    const admin = { can_manage: true, can_mute_critical: false }
+    const viewer = { can_manage: false, can_mute_critical: false }
+    expect(canMute(mk({ mute_owner_only: true }), owner)).toBe(true)
+    expect(canMute(mk({ mute_owner_only: true }), admin)).toBe(false)
+    expect(canMute(mk({ mute_owner_only: false }), admin)).toBe(true)
+    expect(canMute(mk({}), viewer)).toBe(false)
+  })
   it('terminal only for an Owner with a gateway host picked', () => {
     expect(fixMode({ can_terminal: true, terminal_host: { id: 1, name: 'gw' } })).toBe('terminal')
     expect(fixMode({ can_terminal: true, terminal_host: null })).toBe('pick')

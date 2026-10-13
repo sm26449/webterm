@@ -57,7 +57,7 @@ async def login(request: Request, intent: str = "login", host_id: int = 0):
     except oidc.OidcError as e:
         # 3.6.8: the IdP's discovery document is unreachable — before, a raw exception → 500.
         # Counted (System health "SSO is broken"), and the person gets the login page back.
-        oidc.note_failure(e.kind)
+        oidc.note_failure(e.kind, security.client_ip(request))
         log.warning("SSO login could not start (%s): %s", e.kind, str(e)[:200])
         return _redirect_err("unavailable")
     state = parse_qs(urlparse(url).query).get("state", [""])[0]
@@ -91,7 +91,7 @@ async def callback(request: Request, code: str = "", state: str = ""):
     except oidc.OidcError as e:
         # refuz (grup lipsă, token invalid, state expirat) — auditat, ca să poţi face debug.
         # 3.6.8: clasificat (e.kind) şi numărat — un IdP căzut nu mai arată ca o zi liniştită.
-        oidc.note_failure(e.kind)
+        oidc.note_failure(e.kind, security.client_ip(request))
         await audit.record(time.time(), "sso", ip, "GET", "/api/oidc/callback", 403,
                            "SSO refuzat (%s): %s" % (e.kind, str(e)[:120]))
         return _redirect_err("unavailable" if e.kind in ("discovery", "token_endpoint")

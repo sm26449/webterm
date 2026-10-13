@@ -4373,7 +4373,7 @@ async def _health_json(request: Request) -> dict:
         last = 0.0
     return {"checks": checks, "attention": syshealth.attention(rows, now),
             "checked_at": last or None, "can_manage": can_manage, "can_terminal": can_terminal,
-            "terminal_host": host, "retry_after": syshealth.manual_retry_after()}
+            "can_mute_critical": can_manage and can_terminal, "terminal_host": host, "retry_after": syshealth.manual_retry_after()}
 
 
 @router.get("/api/health")
@@ -4412,11 +4412,24 @@ async def health_mute(check_id: str, body: HealthMuteIn, request: Request,
                       user=Depends(authz.perm('settings.manage'))):
     if not _CHECK_ID_RE.match(check_id or "") or body.mode not in syshealth.MUTE_MODES:
         raise ApiError(400, "health.badMute", "unknown check or mute mode")
+    grants = getattr(request.state, "grants", None)
+    owner = bool(grants and grants.has_global("certs.renew"))
+    who = (user.get("email") if isinstance(user, dict) else user["email"]) or ""
     try:
-        await syshealth.mute(check_id, body.mode, user["email"] if isinstance(user, dict) else "")
+        row = await syshealth.mute(check_id, body.mode, who, owner=owner)
     except KeyError:
         raise ApiError(404, "health.missing", "no such check")
+    except syshealth.MuteDenied:
+        # security review 3.6.8 (L1): a check that is, or can become, critical is muted by the
+        # Owner only — an Admin cannot hide it from the Owner
+        audit.detail(request, "system health check %s: mute %s REFUSED (critical-capable)"
+                     % (check_id, body.mode))
+        raise ApiError(403, "health.muteOwnerOnly",
+                       "only the Owner can mute a check that can become critical")
     audit.detail(request, "system health check %s: mute %s" % (check_id, body.mode))
+    if not owner and syshealth.MUTE_MODES[body.mode] != 0:
+        # …and every mute by someone else is told to everyone with security.view (in-app only)
+        syshealth.notify_muted(check_id, body.mode, who, row)
     return await _health_json(request)
 
 
@@ -4478,7 +4491,7 @@ async def health_terminal(host_id: int, body: HealthTerminalIn, request: Request
     audit.detail(request, "system health terminal for %s: %s (command typed, not run)"
                  % (cid, command[:200]))
     log.warning("system health terminal opened on host #%d for %s by %s", host_id, cid,
-                user.get("email") if isinstance(user, dict) else "?")
+                (user.get("email") if isinstance(user, dict) else user["email"]) or "?")
     return dict(result, command=command)
 
 

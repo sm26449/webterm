@@ -33,6 +33,10 @@ export interface HealthCheck {
   changed_at: number | null
   muted: boolean
   muted_until: number
+  /** who muted it (shown while it is muted) */
+  muted_by?: string
+  /** true: only the Owner may mute it — it is, or can become, critical (security review 3.6.8) */
+  mute_owner_only?: boolean
   message: string
 }
 
@@ -42,6 +46,8 @@ export interface HealthStatus {
   checked_at: number | null
   can_manage: boolean
   can_terminal: boolean
+  /** the viewer may mute checks that can become critical (certs.renew, the Owner) */
+  can_mute_critical?: boolean
   terminal_host: { id: number; name: string } | null
   retry_after: number
 }
@@ -53,6 +59,14 @@ export type Tone = 'ok' | 'info' | 'warn' | 'danger' | 'neutral'
 export function severityTone(s: Severity, muted = false): Tone {
   if (muted) return 'neutral'
   return s === 'critical' ? 'danger' : s === 'warning' ? 'warn' : s === 'info' ? 'info' : 'ok'
+}
+
+/** May this viewer mute (not only unmute) this check? Mirrors the server rule: settings.manage, and
+    for a check that is or can become critical, the Owner. The server enforces it either way. */
+export function canMute(c: Pick<HealthCheck, 'mute_owner_only'>,
+  st: Pick<HealthStatus, 'can_manage' | 'can_mute_critical'>): boolean {
+  if (!st.can_manage) return false
+  return !c.mute_owner_only || !!st.can_mute_critical
 }
 
 /** Needs attention = warning/critical and not muted (the badge counts exactly these). */
