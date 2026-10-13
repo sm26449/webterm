@@ -160,7 +160,12 @@ Press `?` for the cheatsheet.
   Dockerfile, nginx, Python, JS/TS, SQL, XML/HTML, CSS, Markdown, Go, Rust, PHP, Ruby, Lua, Perl,
   PowerShell, C/C++, Java, HCL), find/replace, folding, multi-cursor, `Alt+Z` word wrap, large
   files opened view-only (partial-read), atomic save with conflict detection. It is a slim build:
-  highlighting only, no language-service autocompletion
+  highlighting only, no language-service autocompletion. Files acts as the **agent's user**, not
+  as your terminal's sudo: a folder it cannot write (a root-owned `/srv/bin/lists`) says exactly
+  that — "the agent runs as `webterm` and cannot write in /srv/bin/lists (mode 755)" — and offers
+  **Upload and move as root** (staged in the agent's inbox, then a `sudo install …` command typed,
+  never run, into your terminal), a `setfacl` command to copy, or the agent's home
+  ([why and how](TRANSFERS.md#why-cant-i-upload-into-a-root-owned-folder-369))
 - **Transfers** — [details](TRANSFERS.md): progress lives in **one floating widget in the
   bottom-right corner** — a compact pill (`file 63%`, `N transfers · 63%`) that expands into a
   card with every job and its actions, and opens by itself when a job needs a decision (stalled,

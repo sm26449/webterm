@@ -403,14 +403,106 @@ automatic restart (systemd `--user` with Restart=always, otherwise cron `@reboot
 + watchdog). It also **appends one line to `~/.bashrc` and `~/.zshrc`** so shell integration
 (OSC 133) works — the commands panel, per-command exit codes and `cd` tracking depend on it.
 Set `WEBTERM_NO_SHELL_INTEGRATION=1` before running the command to skip that; everything else
-works without it. Requires python3 ≥ 3.6; **`tmux` is what makes sessions persistent** — without it
-the agent runs on a plain PTY and sessions die with it.
+works without it. Requires **Python ≥ 3.6** — a host whose `python3` is missing or older gets a
+portable Python automatically (see [Supported hosts](#supported-hosts)); **`tmux` is what makes
+sessions persistent** — without it the agent runs on a plain PTY and sessions die with it.
 On-server diagnostics: `python3 ~/.webterm/ptyd.py info`.
 
+### Supported hosts
+
+What a host needs to run the agent, and what happens when it has less:
+
+| | Requirement | When it is missing or too old |
+|---|---|---|
+| OS | Linux (any distribution) | Windows/macOS hosts: not supported — use SSH to a Linux jump host |
+| **Python** | **3.6 or newer** (the agent is one stdlib-only file) | missing or **< 3.6** → the installer puts a **portable Python 3.12** in `~/.webterm/python/` (below) and leaves the system one alone |
+| C library (portable Python only) | glibc **≥ 2.17**, or musl (Alpine) | older glibc (CentOS 6) → the installer refuses with a clear message; install Python 3.6+ yourself and pass `WEBTERM_PYTHON=` |
+| CPU (portable Python only) | x86_64, aarch64 (glibc or musl), armv7 hard-float (glibc) | anything else → refused with a clear message; same way out |
+| tmux | optional, **strongly recommended** | sessions run on a plain PTY and end when the agent restarts |
+| Shell | `/bin/sh` for the installer; any login shell for sessions | shell integration (OSC 133) is wired for **bash** and **zsh** |
+| Fetching | `curl` or `wget`, `sha256sum` or `shasum`, `tar` | the installer says which one is missing |
+
+Known to work: Debian 10–13, Ubuntu 18.04–24.04, RHEL/Rocky/Alma 8–9, Fedora, openSUSE, Arch,
+Alpine — with their own python3. **Ubuntu 16.04, Debian 9, Ubuntu 14.04, Debian 8, CentOS 7
+without python3** work with the portable Python.
+
+**Why 3.6, and what breaks below it.** On Python 3.5 (Ubuntu 16.04, Debian 9) the agent starts,
+connects and runs terminals, but every **file listing fails** (`os.scandir` is used as a context
+manager, 3.6+) — and with it the Files panel, uploads and downloads; WebTerm shows "Agent error:
+'__exit__'" and marks the host **Python < 3.6** (host card + System health). On 3.4 (Ubuntu 14.04,
+Debian 8) the agent does not start at all (`subprocess.run`, `os.set_blocking`). Rather than keep a
+second agent compatible with old interpreters, such hosts run the agent on the portable Python.
+
+**The portable Python.** [python-build-standalone](https://github.com/astral-sh/python-build-standalone)
+CPython **3.12.15**, release `20261009`, `install_only_stripped` builds. The exact file names and
+**SHA-256** of each build are pinned in `gateway/app/pyruntime.json`. The **gateway** downloads a
+build from that pinned URL the first time a host asks, checks the SHA-256 **before** caching it
+under its data volume (`pyruntime/`, ~25–35 MB per architecture) and serves it to installing hosts
+— so hosts without internet access work. The **install script** checks the same SHA-256 again,
+refuses archive entries outside `python/`, absolute paths, `..` and links pointing outside, extracts
+into a fresh temp directory and moves it into `~/.webterm/python/`, as the installing user (nothing
+runs as root). The agent then runs with `~/.webterm/python/bin/python3`; the systemd unit / cron
+lines, its self-update and its restarts all keep using that interpreter (`sys.executable`).
+
+Installer switches (put them after `| `, e.g. `… | WEBTERM_PYTHON=/opt/python3.8/bin/python3 sh`):
+
+| Switch | Effect |
+|---|---|
+| `WEBTERM_PYTHON=/path/to/python3.x` | use that interpreter (it must be 3.6+, or nothing is installed) |
+| `sh -s -- --portable-python` or `WEBTERM_PORTABLE_PYTHON=1` | always use the portable Python, even when python3 is new enough |
+| `WEBTERM_ALLOW_OLD_PYTHON=1` | no portable build fits (arch/glibc): keep the old python3 anyway — terminals only, Files will not work |
+
+#### Offline / by hand: portable Python on an existing install
+
+For a host that cannot reach the gateway's download, or an agent **already installed** with an old
+system python3 (example: Ubuntu 16.04, Python 3.5.2, x86_64, agent user `webterm`). On a machine
+with internet access:
+
+```sh
+F='cpython-3.12.15+20261009-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz'
+curl -fL -o "$F" 'https://github.com/astral-sh/python-build-standalone/releases/download/20261009/cpython-3.12.15%2B20261009-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz'
+echo "ffa8f85f1b56e88b687f08d743d817015524b86a9365fd921243132b80f1a36d  $F" | sha256sum -c -
+scp "$F" mailer:/tmp/
+```
+
+On the host, **as the agent's user** (`sudo -iu webterm`):
+
+```sh
+F='/tmp/cpython-3.12.15+20261009-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz'
+echo "ffa8f85f1b56e88b687f08d743d817015524b86a9365fd921243132b80f1a36d  $F" | sha256sum -c -   # must print OK
+T=$(mktemp -d ~/.webterm/.pyrt.XXXXXX)
+tar xzf "$F" -C "$T"
+"$T/python/bin/python3" --version                     # Python 3.12.15
+rm -rf ~/.webterm/python && mv "$T/python" ~/.webterm/python && rmdir "$T" && rm -f "$F"
+
+# switch the running agent over (sessions survive: tmux keeps them)
+python3 ~/.webterm/ptyd.py info | grep -i -A2 supervision   # systemd or cron?
+python3 ~/.webterm/ptyd.py stop
+```
+
+Then, **systemd** (`webterm-agent.service`, the installer's default):
+
+```sh
+export XDG_RUNTIME_DIR=/run/user/$(id -u)              # needed after sudo -iu
+sed -i "s#^ExecStart=[^ ]*#ExecStart=$HOME/.webterm/python/bin/python3#" ~/.config/systemd/user/webterm-agent.service
+systemctl --user daemon-reload && systemctl --user restart webterm-agent
+```
+
+or **cron** (no systemd --user):
+
+```sh
+crontab -l | sed "s#^\(@reboot\|\* \* \* \* \*\) [^ ]*python3[^ ]* #\1 $HOME/.webterm/python/bin/python3 #" | crontab -
+~/.webterm/python/bin/python3 ~/.webterm/ptyd.py start
+```
+
+Check: `~/.webterm/python/bin/python3 ~/.webterm/ptyd.py status`. In WebTerm the Files panel lists
+again, and the **Python < 3.6** mark disappears at the agent's next connect. Re-running a fresh
+install command from the host card with `sh -s -- --portable-python` does all of the above by
+itself (it downloads through the gateway and rewrites the unit or cron lines).
+
 **Agent OS support.** The agent is Linux-first: the core (sessions, files, port-forwards, serial)
-runs on any Linux with **python3 ≥ 3.6** and **tmux** — the installer checks for python3 and stops
-with a clear message if it is missing. Everything else **degrades cleanly** by capability rather
-than failing:
+runs on any Linux with **Python ≥ 3.6** (system or portable) and **tmux**. Everything else
+**degrades cleanly** by capability rather than failing:
 
 | Feature | Needs | Elsewhere |
 |---|---|---|

@@ -9,6 +9,48 @@ back.
 
 ## [Unreleased]
 
+No agent change (agent stays 58).
+
+### Added
+- **Uploads into folders the agent cannot write say why — and offer a way in.** Why: an Owner in a
+  root shell in `/srv/bin/lists` (`drwxr-xr-x root root`) uploaded there through Files and got
+  only "The file operation failed on the host". Files acts as the agent's user (here `webterm`),
+  not as the terminal's sudo — by design, but nothing said so. Now: "The agent runs as webterm and
+  cannot write in /srv/bin/lists (mode 755)" (the owner is not shown: the agent does not report
+  it), a lock on that folder, and three ways out: **Upload and move as root** (the file goes to the
+  agent's inbox, then `sudo install -m 0644 -- <inbox file> <dir>/<name> && rm -f -- <inbox file>`
+  is TYPED — never run, no newline — into your current terminal; built server-side from validated,
+  shlex-quoted values that must round-trip, typed through the same input path as a keystroke so a
+  read-only view types nothing; audited), a `setfacl` command to copy, or the agent's home. Drop
+  and paste onto a root shell offer the same. Read-only file systems, a full disk and a missing
+  folder are named too, and such definitive refusals are no longer retried 8 times (a minute)
+  before the error shows.
+- **Agent errors are shown, not hidden.** Why: on the owner's `mailer` (Ubuntu 16.04, Python
+  3.5.2) the real cause was not permissions: `with os.scandir(…)` needs Python 3.6, the agent's
+  generic handler answered `internal "'__exit__'"`, and the gateway turned that into the same
+  generic sentence. An `internal` reply is now "Agent error: '__exit__' — see its log on the host";
+  any other unknown file error shows the agent's strerror (sanitised, truncated).
+- **Agents on Python < 3.6 are detected** (no agent change: the agent does not report its
+  interpreter). Confirmed by that error's fingerprint, suspected from the OS in diagnostics
+  (Ubuntu ≤ 16.04, Debian ≤ 9, CentOS/RHEL ≤ 6) and then settled by one `fs_list` probe. Shown as
+  a **Python < 3.6** badge on the host card and a System health check (critical when confirmed).
+- **Portable Python for old hosts.** Why: some hosts cannot be upgraded, and a second agent kept
+  compatible with 3.5/3.4 would be a permanent tax. The install script now detects python3 and the
+  machine (`uname -m`, glibc vs musl, glibc ≥ 2.17) and, when python3 is missing or < 3.6 (or with
+  `--portable-python`), installs python-build-standalone CPython 3.12.15 into `~/.webterm/python/`
+  as the agent's user and runs the agent with it; the system python3 is untouched. The builds
+  (5 targets) are pinned by name and SHA-256 in `gateway/app/pyruntime.json`; the gateway serves
+  them (`GET /agent/python/<target>.tar.gz`, the host's agent token required) so offline hosts
+  work, downloading from the pinned URL once and caching only after the SHA-256 matches (bounded:
+  one download per target, two overall, a deadline, a free-space check). The host checks the hash
+  again and refuses archive entries with absolute paths, `..` or links leaving the tree. An
+  unsupported CPU or a too-old glibc is refused with a clear message (`WEBTERM_PYTHON=` points the
+  installer at a Python you installed yourself). The agent token is passed to curl/wget in a 0600
+  config file, never on a command line.
+- **Docs:** "Supported hosts" in INSTALL.md (Python, tmux, shells, known OSes, what breaks below
+  3.6, the portable runtime, an offline/scp procedure for switching an existing install) and
+  "Why can't I upload into a root-owned folder?" in TRANSFERS.md.
+
 ## [3.6.8] — 2026-10-13 · agent (58)
 
 3.6.8 — System health: everything that can fail quietly is detected, explained and alerted, with the exact fix command (typed, never run, Owner-only for root). Plus the Authentik upgrade runbook and helper. No agent change.

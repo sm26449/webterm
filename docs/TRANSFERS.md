@@ -395,6 +395,49 @@ $ claude
 The same works for `aider --read <path>`, `cat`, `python -c 'open(...)'`, or any command that
 takes a filename — paste first, then finish the line.
 
+## Why can't I upload into a root-owned folder? (3.6.9)
+
+Files, uploads, drag-and-drop and paste act as **the agent's user** — the account the agent was
+installed as, often an unprivileged `webterm` — never as whoever your terminal has become with
+`sudo -i`. That is deliberate: the browser never gets more rights on the host than the agent has.
+So in a root shell in `/srv/bin/lists` (`drwxr-xr-x root root`) an upload there is refused, even
+though *you* could write there.
+
+What you see instead of "the file operation failed":
+
+> **Files can't write in this folder** — The agent runs as `webterm` and cannot write in
+> `/srv/bin/lists` (mode 755).
+
+(The mode comes from the agent; the folder's **owner** is not shown because the agent does not
+report it — that would need an agent change.) The folder gets a lock in the path bar for the rest
+of the page session, and the panel offers three ways out:
+
+1. **Upload and move as root.** The file goes to the agent's inbox (`~/.webterm/inbox/`, as the
+   agent's user, with a name WebTerm generates), then WebTerm **types** — never runs — a command
+   into **your current terminal** for that host:
+
+   ```
+   sudo install -m 0644 -- /home/webterm/.webterm/inbox/2026-10-13_14-03-22_root-move_1a2b3c4d '/srv/bin/lists/list.txt' && rm -f -- /home/webterm/.webterm/inbox/2026-10-13_14-03-22_root-move_1a2b3c4d
+   ```
+
+   No newline is sent: you read it and press Enter (edit `0644` first if it must be executable).
+   The gateway builds the text from validated values only — an absolute, normalised folder, plain
+   file names, no control/bidi characters (refused, not stripped), every token `shlex`-quoted and
+   checked to parse back to exactly the intended arguments. The browser types it through the same
+   path as a keystroke, so a read-only or shared view types nothing (the command is then copied
+   for you instead). Opened from a host page with no terminal, the command is shown to copy.
+   Dropping or pasting a file onto a root shell whose folder refuses it offers the same thing.
+   sudo on the host is the real gate; anyone who may upload files and type in that session (Owner,
+   Admin, Operator on that host) can use it, and every use is in the audit log.
+2. **Grant access** — a command to copy and run once as root, e.g.
+   `sudo setfacl -m u:webterm:rwx -- /srv/bin/lists`. WebTerm never runs it.
+3. **Upload to the agent's home instead** — then move it yourself.
+
+Other write errors are named too: a read-only file system, a full disk or a missing folder say so
+with the folder, and an error the agent did not expect shows the agent's own message ("Agent
+error: …") plus where its log is, instead of a generic sentence. Such definitive refusals are no
+longer retried eight times before the error appears.
+
 ## Keys and storage
 
 | Where | Key | Meaning |
