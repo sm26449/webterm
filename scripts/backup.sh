@@ -18,6 +18,29 @@
 #     WEBTERM_BACKUP_REMOTE=remote:path       any rclone backend (S3, B2, GDrive…); + _REMOTE_KEEP_DAYS=N
 set -euo pipefail
 
+# 3.6.8: the outcome also lands in Settings → System health (a status file in the data volume,
+# written by host-health.sh --record). A nightly backup that failed only in journald was invisible
+# until the day it was needed. Best effort: never changes this script's exit code; no secrets in it.
+BK_SELF_DIR=$(cd "$(dirname "$0")" && pwd -P)
+BK_REASON="" BK_ARCHIVE="" BK_ENCRYPTED=false BK_OFFHOST=none
+# shellcheck disable=SC2329  # invoked through the EXIT trap
+_bk_status() {
+  local rc=$? st=ok msg
+  [ -x "$BK_SELF_DIR/host-health.sh" ] || return 0
+  if [ "$rc" != 0 ]; then
+    st=error; msg="${BK_REASON:-the backup failed (exit code $rc)}"
+  else
+    msg="archive ${BK_ARCHIVE:-?}"
+    [ "$BK_ENCRYPTED" = true ] || msg="$msg (NOT encrypted)"
+    msg="$msg, off-host $BK_OFFHOST"
+    [ "$BK_OFFHOST" = failed ] && st=warn
+  fi
+  "$BK_SELF_DIR/host-health.sh" --record backup "$st" "$msg" \
+    "{\"archive\":\"${BK_ARCHIVE}\",\"encrypted\":$BK_ENCRYPTED,\"offhost\":\"$BK_OFFHOST\"}" \
+    >/dev/null 2>&1 || true
+}
+trap _bk_status EXIT
+
 VOLUME="${WEBTERM_VOLUME:-webterm_webterm-data}"
 OUT="${WEBTERM_BACKUP_DIR:-/var/backups/webterm}"
 KEEP="${WEBTERM_BACKUP_KEEP:-14}"
@@ -59,6 +82,7 @@ chmod 700 "$OUT" 2>/dev/null || true      # arhivele conțin cheia seifului: dir
 # în cazul timer-ului nocturn fără ca cineva să afle. Un backup care nu se face tăcut e mai rău
 # decât unul care nu există: crezi că-l ai.
 docker image inspect "$IMAGE" >/dev/null 2>&1 || docker pull -q "$IMAGE" >/dev/null 2>&1 || {
+  BK_REASON="the helper image is not available (no registry access?)"
   echo "REFUSING: cannot get the helper image '$IMAGE' (no registry access?)." >&2
   echo "         It is only used to run python3 against the data volume. Either pre-pull it" >&2
   echo "         once while you have network:   docker pull $IMAGE" >&2
@@ -67,11 +91,13 @@ docker image inspect "$IMAGE" >/dev/null 2>&1 || docker pull -q "$IMAGE" >/dev/n
 }
 
 docker volume inspect "$VOLUME" >/dev/null 2>&1 || {
+  BK_REASON="the data volume $VOLUME does not exist"
   echo "REFUSING: volume '$VOLUME' does not exist — refusing to write an empty backup." >&2
   echo "         Check WEBTERM_VOLUME (see /etc/default/webterm-backup); 'docker volume ls' lists them." >&2
   exit 1
 }
 
+BK_REASON="the snapshot of the data volume failed"
 docker run --rm -i --entrypoint python3 \
   -v "$VOLUME":/data -v "$OUT":/out -e STAMP="$STAMP" "$IMAGE" - <<'PY'
 import sqlite3, sys, tarfile, os
@@ -102,6 +128,8 @@ print("backup:", out)
 PY
 
 ARCHIVE="$OUT/webterm-$STAMP.tar.gz"
+BK_REASON=""
+BK_ARCHIVE=$(basename "$ARCHIVE")
 chmod 600 "$ARCHIVE" 2>/dev/null || true
 
 # Criptare (recomandat): arhiva conține cheia seifului. Cu o parolă → openssl AES-256;
@@ -120,6 +148,7 @@ if [ -n "${WEBTERM_BACKUP_PASSPHRASE:-}" ]; then
     rm -f "$ARCHIVE"
     chmod 600 "$ARCHIVE.enc" 2>/dev/null || true
     ARCHIVE="$ARCHIVE.enc"
+    BK_ARCHIVE=$(basename "$ARCHIVE") BK_ENCRYPTED=true
     echo "ENCRYPTED backup: $ARCHIVE"
   else
     echo "WARNING: openssl is missing — the archive stays UNENCRYPTED (it holds the vault key)."
@@ -134,6 +163,7 @@ else
   # SSH — iar /var/backups ajunge des în rsync-uri şi în snapshot-uri. Refuzăm.
   # Semnalat de auditul extern, 2026-08-06.
   rm -f "$ARCHIVE"
+  BK_REASON="refused: no WEBTERM_BACKUP_PASSPHRASE for an automated backup"
   echo "REFUSING: an automated backup without WEBTERM_BACKUP_PASSPHRASE." >&2
   echo "       The archive would hold the vault key in cleartext; it has been deleted." >&2
   echo "       Put the passphrase in /etc/default/webterm-backup, or, if you really want cleartext," >&2
@@ -149,13 +179,18 @@ fi
 #   WEBTERM_BACKUP_REMOTE_KEEP_DAYS=30   (opțional: șterge copiile mai vechi de-atât)
 if [ -n "${WEBTERM_BACKUP_REMOTE:-}" ]; then
   if [ "${ARCHIVE##*.}" != "enc" ]; then
+    BK_REASON="refused the off-host copy of an UNENCRYPTED archive"
     echo "REFUSING the off-host upload: the archive is UNENCRYPTED (it holds the vault key)." >&2
     echo "                  Set WEBTERM_BACKUP_PASSPHRASE and run it again." >&2
     exit 1
   elif ! command -v rclone >/dev/null 2>&1; then
     echo "WARNING: WEBTERM_BACKUP_REMOTE is set but rclone is missing — the archive stays local only."
+    BK_OFFHOST=failed
   else
+    BK_REASON="the off-host upload (rclone) failed"
     rclone copy "$ARCHIVE" "$WEBTERM_BACKUP_REMOTE" --no-traverse
+    BK_REASON=""
+    [ "$BK_OFFHOST" = failed ] || BK_OFFHOST=ok
     echo "backup uploaded: $WEBTERM_BACKUP_REMOTE/$(basename "$ARCHIVE")"
     if [ -n "${WEBTERM_BACKUP_REMOTE_KEEP_DAYS:-}" ]; then
       rclone delete "$WEBTERM_BACKUP_REMOTE" --min-age "${WEBTERM_BACKUP_REMOTE_KEEP_DAYS}d" \
@@ -170,14 +205,19 @@ fi
 #   WEBTERM_BACKUP_RSYNC_KEEP_DAYS=30               (opţional: şterge pe remote mai vechi de-atât)
 if [ -n "${WEBTERM_BACKUP_RSYNC:-}" ]; then
   if [ "${ARCHIVE##*.}" != "enc" ]; then
+    BK_REASON="refused the off-host copy of an UNENCRYPTED archive"
     echo "REFUSING the rsync off-host copy: the archive is UNENCRYPTED (it holds the vault key)." >&2
     echo "                  Set WEBTERM_BACKUP_PASSPHRASE and run it again." >&2
     exit 1
   elif ! command -v rsync >/dev/null 2>&1; then
     echo "WARNING: WEBTERM_BACKUP_RSYNC is set but rsync is missing — the archive stays local only."
+    BK_OFFHOST=failed
   else
     # BatchMode: fără prompt de parolă (doar cheie); accept-new: TOFU, dar respinge o cheie SCHIMBATĂ.
+    BK_REASON="the off-host copy (rsync) failed"
     rsync -a -e "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new" "$ARCHIVE" "$WEBTERM_BACKUP_RSYNC"
+    BK_REASON=""
+    [ "$BK_OFFHOST" = failed ] || BK_OFFHOST=ok
     echo "backup rsync'd: ${WEBTERM_BACKUP_RSYNC%/}/$(basename "$ARCHIVE")"
     if [ -n "${WEBTERM_BACKUP_RSYNC_KEEP_DAYS:-}" ]; then
       _rh=${WEBTERM_BACKUP_RSYNC%%:*}; _rp=${WEBTERM_BACKUP_RSYNC#*:}
@@ -193,17 +233,21 @@ fi
 #   WEBTERM_BACKUP_FTPS=ftp://nas.local/backups/    WEBTERM_BACKUP_FTPS_USER=u  WEBTERM_BACKUP_FTPS_PASSWORD=p
 if [ -n "${WEBTERM_BACKUP_FTPS:-}" ]; then
   if [ "${ARCHIVE##*.}" != "enc" ]; then
+    BK_REASON="refused the off-host copy of an UNENCRYPTED archive"
     echo "REFUSING the FTPS off-host copy: the archive is UNENCRYPTED (it holds the vault key)." >&2
     exit 1
   elif ! command -v curl >/dev/null 2>&1; then
     echo "WARNING: WEBTERM_BACKUP_FTPS is set but curl is missing — the archive stays local only."
+    BK_OFFHOST=failed
   else
     _furl="${WEBTERM_BACKUP_FTPS%/}/$(basename "$ARCHIVE")"
     if curl -fsS --ssl-reqd --ftp-create-dirs -T "$ARCHIVE" "$_furl" \
          ${WEBTERM_BACKUP_FTPS_USER:+--user "$WEBTERM_BACKUP_FTPS_USER:${WEBTERM_BACKUP_FTPS_PASSWORD:-}"}; then
       echo "backup uploaded (FTPS): $_furl"
+      [ "$BK_OFFHOST" = failed ] || BK_OFFHOST=ok
     else
       echo "WARNING: FTPS upload failed (server without TLS, or wrong credentials/path)." >&2
+      BK_OFFHOST=failed
     fi
   fi
 fi

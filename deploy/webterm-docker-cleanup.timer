@@ -1,0 +1,11 @@
+[Unit]
+Description=WebTerm — daily Docker cleanup
+
+[Timer]
+OnCalendar=*-*-* 04:17:00
+# systemd NU suportă comentarii pe aceeaşi linie cu o valoare (vezi webterm-backup.timer).
+Persistent=true
+RandomizedDelaySec=10min
+
+[Install]
+WantedBy=timers.target

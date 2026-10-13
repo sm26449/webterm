@@ -1,0 +1,12 @@
+[Unit]
+Description=WebTerm — reclaim old Docker images and build cache (never volumes)
+Wants=webterm-docker-cleanup.timer
+
+[Service]
+Type=oneshot
+# ajustează calea dacă instalarea nu e în /opt/webterm
+WorkingDirectory=/opt/webterm
+ExecStart=/opt/webterm/scripts/docker-cleanup.sh
+TimeoutStartSec=1800
+# opţional: RETENTION / BUILD_RETENTION / WEBTERM_KEEP_IMAGES
+EnvironmentFile=-/etc/default/webterm-docker-cleanup

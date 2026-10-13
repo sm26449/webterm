@@ -1,0 +1,12 @@
+[Unit]
+Description=WebTerm — hourly host health checks
+
+[Timer]
+OnBootSec=5min
+OnCalendar=hourly
+# systemd NU suportă comentarii pe aceeaşi linie cu o valoare (vezi webterm-backup.timer).
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target
