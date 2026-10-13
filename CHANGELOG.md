@@ -73,6 +73,27 @@ back.
   token's user, and akadmin is in no `wt-*` group, so the gated app was invisible.
   `superuser_full_list=true` fixes the lookup.
 
+### Security
+- **Independent review of System health, all findings fixed before release.** (M1) Anyone could
+  raise a false "SSO is broken" — critical with `WEBTERM_OIDC_SSO_ONLY=1` — by sending three
+  `/api/oidc/callback` requests with a valid state and `code=bogus`: the IdP's `400 invalid_grant`
+  counted as a system failure. Now any 4xx except `invalid_client` (read from the parsed `error`
+  field, never a substring) is a user error; system failures have their own window, so a flood of
+  user failures cannot evict them; and critical needs confirmation (a kind only the IdP can cause,
+  failures from two or more addresses, or a failed IdP probe, which an unconfirmed failure now
+  triggers). (L1) An Admin could mute any check for 30 days, even before it failed, and hide it
+  from the Owner: a check that is or can become critical is now muted by the Owner only, every
+  other mute raises an in-app alert for `security.view`, and the list shows who muted it and until
+  when. (L2) The nightly Docker cleanup's `image prune -a` deleted the digest-pinned python image
+  `backup.sh` runs, the previous Authentik image a rollback needs, and local WebTerm builds; it now
+  builds a preserve set and removes other images one by one. (L3) `authentik-upgrade.sh
+  --unlisted-minor` accepted a downgrade (2026.8.3 → 2025.9.0); it now requires a newer
+  `(year, minor)`, and `check-hop` tests a hop without Docker. (L4) The Authentik runbook ran
+  `provision.py` as root from a user-writable checkout; it now runs the root-owned copy with
+  `python3 -I` from `/`, and `authentik-upgrade.sh` ships in the install directory too. (L5) A
+  failing `df` made the cleanup write invalid JSON (`"disk_free_pct":,`) and look silent.
+  The host-status trust model is documented in docs/INSTALL.md.
+
 ## [3.6.7] — 2026-10-13 · agent (58)
 
 3.6.7 — TLS certificate monitoring with alerts, and Owner-only renewal in a terminal (typed, not run). No agent change.

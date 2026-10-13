@@ -4,7 +4,7 @@ How to upgrade the Authentik that WebTerm uses for SSO without losing users, pas
 setup, and how to get back if it goes wrong. Rehearsed end to end on a disposable copy on
 2026-10-13 (see [the rehearsal log](#appendix-b--rehearsal-log-2026-10-13)).
 
-> **Production today (checked 2026-10-13, read-only):** `auth.safegrid.net` runs **2026.8.2** as a
+> **The reference production (checked 2026-10-13, read-only; `auth.example.com` below):** it runs **2026.8.2** as a
 > *separate stack* in `/opt/authentik` (compose project `authentik`, containers
 > `authentik-{server,worker,postgresql,redis}-1`, volumes `authentik_pg` and `authentik_redis`,
 > `postgres:16-alpine`, `redis:7-alpine`), behind the WebTerm Traefik on `webterm_webterm`. It was
@@ -50,7 +50,7 @@ one minor behind the new pin: Authentik either refuses to start or, worse, migra
 case:
 
 1. Before `./upgrade.sh`, bring Authentik up to one minor below the new pin, one step at a time,
-   with `scripts/authentik-upgrade.sh --dir /opt/webterm --file docker-compose.prod.yml upgrade <tag>`.
+   with `sudo /opt/webterm/scripts/authentik-upgrade.sh --dir /opt/webterm --file docker-compose.prod.yml upgrade <tag>`.
 2. Then run `./upgrade.sh`. It does the last step to the pin, so take a backup right before it
    (`… backup`).
 
@@ -80,7 +80,7 @@ Also check the OAuth2 provider before you re-run `provision.py` after the upgrad
 ([§7](#7-post-checks)). `provision.py` **overwrites** these fields, and a change of `sub_mode`
 would change every user's `sub`. To see them: Authentik admin → Applications → Providers →
 `webterm`. Expected values: Subject mode *Based on the User's hashed ID*, one redirect URI
-`https://wt.safegrid.net/api/oidc/callback` (Strict), signing key set.
+`https://wt.example.com/api/oidc/callback` (Strict), signing key set.
 
 Pick a quiet moment. During the downtime window, **new** SSO logins fail. Existing WebTerm
 sessions keep working, and so does local break-glass login.
@@ -90,9 +90,14 @@ sessions keep working, and so does local break-glass login.
 The helper script makes one backup directory per step and verifies it:
 
 ```bash
-cd /home/stefanm/webterm          # any checkout of this branch
-sudo scripts/authentik-upgrade.sh --dir /opt/authentik backup
+sudo /opt/webterm/scripts/authentik-upgrade.sh --dir /opt/authentik backup
 ```
+
+Run the **root-owned copy** in the WebTerm install directory (`install.sh` and `upgrade.sh` put it
+in `/opt/webterm/scripts/` from 3.6.8 on), never `sudo` a script in a checkout your own user can
+write: whoever can edit that file would get root. Check it first:
+`stat -c '%U %a %n' /opt/webterm /opt/webterm/scripts /opt/webterm/scripts/authentik-upgrade.sh`
+must show `root` and no group/other write bit.
 
 It writes `/var/backups/authentik-upgrade/authentik-<tag>-<timestamp>/` (directory `0700`, files
 `0600`, root):
@@ -136,9 +141,8 @@ running and is a second, independent copy.
 ### With the helper script (recommended)
 
 ```bash
-cd /home/stefanm/webterm
-sudo scripts/authentik-upgrade.sh --dir /opt/authentik status
-sudo scripts/authentik-upgrade.sh --dir /opt/authentik upgrade 2026.8.3
+sudo /opt/webterm/scripts/authentik-upgrade.sh --dir /opt/authentik status
+sudo /opt/webterm/scripts/authentik-upgrade.sh --dir /opt/authentik upgrade 2026.8.3
 ```
 
 The script prints the plan and waits for you to type `yes`. Then it:
@@ -171,7 +175,7 @@ docker compose up -d --no-deps server worker                          # downtime
 watch -n2 docker compose ps                                           # until both are (healthy), ~35 s
 docker compose exec -T server python -c 'import authentik; print(authentik.VERSION)'      # 2026.8.3
 docker compose exec -T worker ak showmigrations --plan | grep -c '^\[ \]'                 # 0
-curl -fsS https://auth.safegrid.net/application/o/webterm/.well-known/openid-configuration | head -c 200
+curl -fsS https://auth.example.com/application/o/webterm/.well-known/openid-configuration | head -c 200
 ```
 
 Migrations run automatically when the new containers start, so there is no separate migrate
@@ -189,7 +193,7 @@ change, on a working Authentik:
 
 ```bash
 cd /opt/authentik
-sudo scripts/authentik-upgrade.sh --dir /opt/authentik backup        # B=… (the printed path)
+sudo /opt/webterm/scripts/authentik-upgrade.sh --dir /opt/authentik backup   # B=… (the printed path)
 docker compose stop server worker                                     # downtime starts
 docker compose exec -T postgresql pg_dump -U authentik -d authentik -Fc > /root/ak-pgmajor.dump
 docker compose stop postgresql
@@ -206,7 +210,7 @@ Rollback: put the old image and the old volume name back, then `docker compose u
 
 1. **Health:** `docker compose ps` shows 4 containers (healthy) and the discovery URL from §5
    answers.
-2. **WebTerm SSO login:** in a private window, open `https://wt.safegrid.net`, click
+2. **WebTerm SSO login:** in a private window, open `https://wt.example.com`, click
    **Sign in with Authentik**, log in as a normal (non-akadmin) user and land in WebTerm.
 3. **The groups claim:** WebTerm logs `SSO roles synced for <email>: …` for that login
    (`docker logs webterm-app-1 2>&1 | grep 'SSO roles'`). Settings → Users & roles → Your access
@@ -219,11 +223,18 @@ Rollback: put the old image and the old volume name back, then `docker compose u
 5. **Re-run `provision.py` in 3.6.5 mode** (five groups and the `wt-groups` policy). This also
    migrates production away from the pre-3.6.5 direct `wt-access` binding if it still has it:
 
+   Root reads the token (only root can read `/opt/authentik/.env`), and it runs the
+   **root-owned** copy of `provision.py` in the install directory (`upgrade.sh` refreshes it) with
+   `python3 -I` from `/`: no `PYTHON*` variables, no user site-packages, and no module picked up
+   from the current directory. Never run `provision.py` as root from a checkout your user can
+   write. Check the copy first:
+   `stat -c '%U %a %n' /opt/webterm/deploy/authentik /opt/webterm/deploy/authentik/provision.py`
+   must show `root` and no group/other write bit.
+
    ```bash
-   cd /home/stefanm/webterm/deploy/authentik
-   sudo sh -c 'AUTHENTIK_DOMAIN=auth.safegrid.net WEBTERM_DOMAIN=wt.safegrid.net \
+   sudo sh -c 'cd / && AUTHENTIK_DOMAIN=auth.example.com WEBTERM_DOMAIN=wt.example.com \
      AUTHENTIK_API_TOKEN=$(sed -n "s/^AUTHENTIK_BOOTSTRAP_TOKEN=//p" /opt/authentik/.env) \
-     python3 provision.py'
+     exec python3 -I /opt/webterm/deploy/authentik/provision.py'
    ```
 
    Expected: `grup wt-access: există`, four groups created, `provider webterm: actualizat`,
@@ -250,7 +261,7 @@ Across a minor it will not, and you cannot tell in advance. The supported way ba
 the dump taken before the step, into the old version:
 
 ```bash
-sudo scripts/authentik-upgrade.sh --dir /opt/authentik restore /var/backups/authentik-upgrade/authentik-2026.8.2-<ts>
+sudo /opt/webterm/scripts/authentik-upgrade.sh --dir /opt/authentik restore /var/backups/authentik-upgrade/authentik-2026.8.2-<ts>
 ```
 
 It checks the checksums, asks for `yes`, stops server and worker, runs `DROP DATABASE authentik
@@ -324,7 +335,8 @@ The same cleanup applies to `deploy/authentik/docker-compose*.yml` and the `auth
    §7.
 3. `scripts/authentik-upgrade.sh` knows minors up to 2026.8. For a newer minor, update
    `KNOWN_MINORS` in the script. Or, after you have checked that it really is the *next* release,
-   pass `--unlisted-minor`.
+   pass `--unlisted-minor` (it still refuses a version older than the running one).
+   `authentik-upgrade.sh check-hop <from> <to>` answers whether a hop is allowed, without Docker.
 4. Bump the pin in `docker-compose.prod.yml` and `deploy/authentik/*.yml` in the same WebTerm
    release, and note it in the CHANGELOG. Bundled-profile installs follow it through
    `./upgrade.sh` (§2).

@@ -306,7 +306,7 @@ if docker run --rm --entrypoint sh "$IMAGE" -c 'cd /srv/webterm/deploy-kit && ta
   CHANGED=0
   for f in docker-compose.prod.yml deploy.sh rollback.sh remove.sh \
            scripts/backup.sh scripts/restore.sh scripts/cert-check.sh scripts/cert-renew.sh \
-           scripts/host-health.sh scripts/docker-cleanup.sh \
+           scripts/host-health.sh scripts/docker-cleanup.sh scripts/authentik-upgrade.sh \
            deploy/authentik/docker-compose.prod.yml deploy/authentik/docker-compose.yml \
            deploy/authentik/.env.prod.example deploy/authentik/.env.example \
            deploy/authentik/provision.py deploy/authentik/provision.sh \

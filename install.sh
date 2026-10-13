@@ -223,7 +223,8 @@ if [ "$FILES_SRC" != "$INSTALL_DIR" ]; then
   install -d "$INSTALL_DIR/scripts" "$INSTALL_DIR/deploy"
   install -m 0755 "$FILES_SRC/scripts/backup.sh" "$FILES_SRC/scripts/restore.sh" \
     "$FILES_SRC/scripts/cert-check.sh" "$FILES_SRC/scripts/cert-renew.sh" \
-    "$FILES_SRC/scripts/host-health.sh" "$FILES_SRC/scripts/docker-cleanup.sh" "$INSTALL_DIR/scripts/"
+    "$FILES_SRC/scripts/host-health.sh" "$FILES_SRC/scripts/docker-cleanup.sh" \
+    "$FILES_SRC/scripts/authentik-upgrade.sh" "$INSTALL_DIR/scripts/"
   install -m 0644 "$FILES_SRC/deploy/webterm-backup.service" "$FILES_SRC/deploy/webterm-backup.timer" \
     "$FILES_SRC/deploy/webterm-cert-check.service" "$FILES_SRC/deploy/webterm-cert-check.timer" \
     "$FILES_SRC/deploy/webterm-host-health.service" "$FILES_SRC/deploy/webterm-host-health.timer" \

@@ -266,14 +266,18 @@ default 20 %, critical at `WEBTERM_DISK_CRIT_PCT`, default 10 %), alert delivery
 never through the failing channel), whether any alert channel exists, agents behind for more than
 `WEBTERM_AGENT_OUTDATED_DAYS` (default 7) days, agents that do not start at boot, agents that
 refuse updates, agent and gateway clocks, hosts near the 32-session limit, the agent signing key,
-SSO (classified failures plus an hourly probe of the IdP; critical with `WEBTERM_OIDC_SSO_ONLY=1`),
+SSO (classified failures plus an hourly probe of the IdP; critical with `WEBTERM_OIDC_SSO_ONLY=1`
+once confirmed — a failure only the IdP can cause, failures from two or more addresses, or a failed
+probe; a rejected login code is a user error and never counts),
 risky configuration (forwards on http://, SSO without a group gate), the daily cleanup, database
 size, backup coverage / off-host copy / last verification, the TLS certificates, the dead-man
 switch, a new WebTerm version, and the forward-domain DNS (daily).
 
 Warnings and critical items alert once per transition (email/webhook and the in-app history,
 kind "System health"), and once more when they are resolved. Any item can be muted for 7 days,
-30 days, or until it changes.
+30 days, or until it changes. An item that is, or can become, critical can be muted only by an
+Owner (`certs.renew`); when anyone else mutes an item, everyone with `security.view` gets an in-app
+alert, and the list shows who muted it and until when.
 
 **The host helper.** Facts only root on the host can see come from `scripts/host-health.sh`, an
 hourly systemd timer (`webterm-host-health.timer`) that install.sh and upgrade.sh install
@@ -283,6 +287,14 @@ It writes small JSON status files into the data volume (`host-status/`) and noth
 gateway gets no new privilege and treats those files as untrusted (fixed names, size cap, schema
 check, never executed, never a source of commands). The Cloudflare token is checked against
 `/user/tokens/verify` without ever appearing on a command line or in a log.
+
+*Trust model of `host-status/`.* The directory lives in the data volume, which the container user
+owns, so a compromised gateway can write a fake "ok" there. That is accepted on purpose: the
+gateway is the only reader of these files, and a gateway that is already compromised can show
+whatever it likes in its own UI anyway. The other direction is what matters, and it holds: root on
+the host only **writes** there (atomically, refusing a symlinked directory and replacing a planted
+symlinked file) and never reads anything back from it, so nothing the container writes can steer
+what root does.
 
 **Commands.** Every command shown comes from a fixed server-side list of templates with validated
 parameters; nothing typed by a client ever reaches it. An Owner who picked the gateway host
