@@ -27,6 +27,7 @@ holds the user-facing guides and the internal architecture notes.
 - [SSH-JUMP](SSH-JUMP.md) — SSH-jump and Telnet-jump targets reached through an agent, nesting under the agent, "Connect once", the host-key-change alarm
 - [ROLES](ROLES.md) — roles and scoped access (Owner / Admin / Operator / Viewer over all hosts, a folder, a tag or one host): what they enforce and what they cannot
 - [SSO](SSO.md) — OIDC single sign-on (Authentik), step-up and break-glass
+- [AUTHENTIK-UPGRADE](AUTHENTIK-UPGRADE.md) — upgrading the Authentik behind SSO: one minor at a time, verified backup, rollback by restore
 - [SECURITY-SUMMARY](SECURITY-SUMMARY.md) — the Dashboard's Security card (what each check means) and the share-links inventory with Revoke all
 - [THREAT-MODEL](THREAT-MODEL.md) — what the security model defends, and what it does not
 
