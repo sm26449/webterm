@@ -64,6 +64,40 @@ describe('citare shell pentru calea inserată', () => {
   it("apostroful din interior devine '\\''", () => {
     expect(shellQuote("/tmp/it's.txt")).toBe(`'/tmp/it'\\''s.txt'`)
   })
+  // 3.6.9 re-review M2: în fish `\'` şi `\\` sunt escape-uri şi ÎN apostrof — `'a\'` nu se închide,
+  // deci un nume `a\` + `x;id>pwn;#` ar ieşi din citare. Backslash-ul se scrie în AFARA citării.
+  it('backslash-ul iese din apostrof ca \\\\ (inert şi în fish)', () => {
+    expect(shellQuote('/tmp/a\\b')).toBe(`'/tmp/a'\\\\'b'`)
+    expect(shellQuote("/tmp/a\\'b")).toBe(`'/tmp/a'\\\\''\\''b'`)
+  })
+  // Un parser minimal al citării (un cuvânt, fără expansiuni): sh/bash/zsh — totul literal în
+  // apostrof; fish — în apostrof `\'` şi `\\` sunt escape-uri. În afară, `\x` → x în ambele.
+  const unquote = (q: string, fish: boolean): string | null => {
+    let out = ''
+    let inQ = false
+    for (let i = 0; i < q.length; i++) {
+      const c = q[i]
+      if (inQ) {
+        if (c === "'") { inQ = false; continue }
+        if (fish && c === '\\' && (q[i + 1] === "'" || q[i + 1] === '\\')) { out += q[++i]; continue }
+        out += c
+        continue
+      }
+      if (c === "'") { inQ = true; continue }
+      if (c === '\\') { if (i + 1 >= q.length) return null; out += q[++i]; continue }
+      if (/[\s;&|<>()$`"#*?!{}[\]]/.test(c)) return null      // metacaracter neprotejat
+      out += c
+    }
+    return inQ ? null : out
+  }
+  it('fiecare cale ostilă se citeşte înapoi EXACT, în sh şi în fish', () => {
+    for (const p of ['/tmp/a\\', '/tmp/a\\x;id>pwn;#', "/tmp/a\\'x;id;#", "/tmp/it's", "/tmp/\\\\'", '/tmp/a b\\',
+      '/tmp/$(id)`id`', '/tmp/x;rm -rf ~', '/tmp/a"b\\"c', '/tmp/\\']) {
+      const q = shellQuote(p)
+      expect(unquote(q, false)).toBe(p)
+      expect(unquote(q, true)).toBe(p)
+    }
+  })
   it('calea goală se citează (nu dispare)', () => {
     expect(shellQuote('')).toBe("''")
   })

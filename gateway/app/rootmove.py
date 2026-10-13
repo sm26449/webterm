@@ -35,7 +35,9 @@ the host" — true, by design, and useless. Two things live here, both without a
       - every value is validated: the folder is an absolute, normalised path, the names are plain
         file names, U is a plain POSIX user name, and none of them may contain control, format
         (bidi) or line-separator characters — rejected, not stripped: a name that needs stripping
-        is not the name the person meant;
+        is not the name the person meant — nor a backslash: in fish a backslash inside '…' still
+        escapes the quote, so shlex.quote's output is only inert there without one (the command
+        text, script included, has no backslash at all);
       - the inbox file name is GENERATED here (timestamp + random), never taken from the client;
       - every token goes through `shlex.quote`, and the text must round-trip through `shlex.split`
         to exactly the argv we meant, or there is no command at all (`MoveError`, fail closed).
@@ -75,6 +77,11 @@ class MoveError(ValueError):
     pass
 
 
+class MoveBackslash(MoveError):
+    """A backslash in the folder or a name (re-review M2): refused, see `check_dir`."""
+    pass
+
+
 def has_bad_chars(s: str) -> bool:
     return any(unicodedata.category(ch) in _BAD_CATEGORIES for ch in s)
 
@@ -108,6 +115,12 @@ def check_dir(d) -> str:
         raise MoveError("the folder path is too long")
     if has_bad_chars(d):
         raise MoveError("the folder path contains control characters")
+    if "\\" in d:
+        # fish: inside '…' a backslash still escapes a quote (and itself), so shlex.quote's output
+        # is not inert there — a name `a<backslash>` then `x;id;#` would leave the quotes and run.
+        # The command is typed into whatever shell the person uses (fish included): refused, not
+        # escaped (re-review M2).
+        raise MoveBackslash("the folder path contains a backslash")
     if not d.startswith("/") or d.startswith("//"):
         raise MoveError("the folder must be an absolute path")
     if posixpath.normpath(d) != d:
@@ -125,6 +138,8 @@ def check_name(n) -> str:
         raise MoveError("the file name is too long")
     if has_bad_chars(n):
         raise MoveError("the file name contains control characters")
+    if "\\" in n:
+        raise MoveBackslash("the file name contains a backslash")     # fish, see check_dir
     return n
 
 
@@ -224,9 +239,12 @@ def command(agent_user: str, inbox: str, target_dir: str, items: list) -> str:
         if not isinstance(sha, str) or not _SHA_RE.match(sha):
             raise MoveError("internal: bad hash")
         argv += [src, str(size), sha, target_dir.rstrip("/") + "/" + name]
-    text = " ".join(shlex.quote(t) for t in argv)
-    if (shlex.split(text) != argv or has_bad_chars(text) or "\n" in text
-            or len(text) > MAX_COMMAND):
+    quoted = [shlex.quote(t) for t in argv]
+    text = " ".join(quoted)
+    # fish: no backslash anywhere (see check_dir), and no bare token starting with `%` (fish
+    # expands `%self`) or `~` — every value token starts with `/`, a digit or a hex digit anyway
+    if (shlex.split(text) != argv or has_bad_chars(text) or "\n" in text or "\\" in text
+            or any(q[:1] in ("%", "~") for q in quoted) or len(text) > MAX_COMMAND):
         raise MoveError("the command did not round-trip")
     return text
 

@@ -35,7 +35,7 @@ from app import api, core, db, rootmove, syshealth  # noqa: E402
 check = U.Checker()
 INBOX = "/home/webterm/.webterm/inbox"
 NASTY = ["it's", "$(touch PWNED1)", "`touch PWNED2`", "a b", "-rf", "--", "&&", "ș file.txt",
-         "x;touch PWNED3", "\\", "*", "~root", "!!", "a\"b"]
+         "x;touch PWNED3", "*", "~root", "!!", "a\"b", "%self", "{a,b}", "a#b"]
 
 
 # ── pure: rootmove ───────────────────────────────────────────────────────────────────────────
@@ -73,6 +73,19 @@ def pure_checks():
             rej += 1
     check("check_name: rejects empty/./../paths/control/bidi/NUL/>255 bytes", rej == len(bad_names), rej)
 
+    # re-review M2: fish reads a backslash inside '…' as an escape → refused everywhere
+    bs = 0
+    for fn, v in ((rootmove.check_name, "a\\"), (rootmove.check_name, "a\\x;id>pwn;#"),
+                  (rootmove.check_name, "\\"), (rootmove.check_dir, "/srv/a\\"), (rootmove.check_dir, "/srv/a\\b/c")):
+        try:
+            fn(v)
+        except rootmove.MoveBackslash:
+            bs += 1
+        except rootmove.MoveError:
+            pass
+    check("M2: a backslash in a name or the folder → MoveBackslash (a MoveError)",
+          bs == 5 and issubclass(rootmove.MoveBackslash, rootmove.MoveError), bs)
+
     n1 = rootmove.inbox_name(0)
     check("inbox_name: generated (stamp + random), safe charset",
           rootmove._INBOX_NAME_RE.match(n1) is not None and n1.startswith("1970-01-01_00-00-00_root-move_"), n1)
@@ -93,6 +106,10 @@ def pure_checks():
     check("command: parses to EXACTLY the intended argv (script constant, values positional)", argv == want)
     check("command: no newline / control characters in the command",
           "\n" not in cmd and not rootmove.has_bad_chars(cmd))
+    check("M2: no backslash anywhere in the command (fish), script included",
+          "\\" not in cmd and "\\" not in rootmove.MOVE_SCRIPT)
+    check("M2: no bare token starts with % or ~ (fish expands %self)",
+          not any(t[:1] in ("%", "~") for t in cmd.split(" ")))
     check("command: the script is a constant without single quotes or newlines",
           "'" not in rootmove.MOVE_SCRIPT and "\n" not in rootmove.MOVE_SCRIPT)
     check("command: reads as the agent's user, checks the SHA-256, mv -T, removes the temp on failure",
@@ -583,6 +600,12 @@ async def route_checks(owner, hid):
             r = await owner.post(url, json=body)
             check("refused: " + what + " → 400 files.rootMoveBad",
                   r.status_code == 400 and r.json().get("code") == "files.rootMoveBad", (r.status_code, r.text[:120]))
+        for body, what in (({"dir": "/srv/x", "names": ["a\\"]}, "name ending in a backslash"),
+                           ({"dir": "/srv/x", "names": ["a\\x;id>pwn;#"]}, "backslash + injection"),
+                           ({"dir": "/srv/a\\b", "names": ["a"]}, "backslash in the folder")):
+            r = await owner.post(url, json=body)
+            check("M2 refused: " + what + " → 400 files.rootMoveBackslash",
+                  r.status_code == 400 and r.json().get("code") == "files.rootMoveBackslash", (r.status_code, r.text[:120]))
         r = await owner.post(url, json={"dir": "/srv/x", "names": ["f%d" % i for i in range(21)]})
         check("more than 20 names → 422", r.status_code == 422, r.status_code)
         fake.inbox = "/tmp/evil"

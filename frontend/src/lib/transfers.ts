@@ -61,17 +61,22 @@ export function inboxName(file: { name: string; type: string }, when: Date, n = 
 
 // ── citare shell ──────────────────────────────────────────────────────────────────────────
 /** Calea se tastează la prompt ca argument: citată DOAR dacă e nevoie (altfel `ls /tmp/a`
-    ar apărea ca `ls '/tmp/a'`, urât şi inutil). Apostrof simplu — singura citare în care
-    `$`, `` ` ``, `\` şi `!` sunt complet inerte în sh/bash/zsh/fish; apostroful din interior
-    devine `'\''`. */
+    ar apărea ca `ls '/tmp/a'`, urât şi inutil). Apostrof simplu — `$`, `` ` `` şi `!` sunt inerte
+    în el în sh/bash/zsh/fish; apostroful din interior devine `'\''`.
+    Backslash-ul NU e inert în fish (3.6.9 re-review M2): acolo `\'` şi `\\` sunt escape-uri şi
+    ÎN apostrof, deci `'a\'` nu se închide, iar un nume `a\` + `x;id>pwn;#` ar ieşi din citare
+    şi ar rula. Îl scriem deci ÎN AFARA apostrofului, ca `\\` — un backslash literal în sh, bash,
+    zsh, fish (şi csh): `a\b` → `'a'\\'b'`. Niciun backslash nu rămâne între apostrofuri. */
 export function shellQuote(p: string): string {
   // Scoatem întâi octeţii de control (`\x00-\x1f \x7f`, adică `\r \n \x1b \x00` …): apostroful
-  // inertizează `$`/`` ` ``/`\`/`!` pentru PARSER-ul shell-ului, dar octeţii de control ajung
+  // inertizează `$`/`` ` ``/`!` pentru PARSER-ul shell-ului, dar octeţii de control ajung
   // nefiltraţi la LINE DISCIPLINE-ul PTY-ului — un `\r` trimite linia (execuţie fără Enter de la
   // om), `\x1b` deschide o secvenţă escape. O cale inserată nu are motiv legitim să-i conţină.
   const safe = p.replace(/[\x00-\x1f\x7f]/g, '')
   if (safe && /^[A-Za-z0-9_\-./~:@%+=,]+$/.test(safe)) return safe
-  return `'${safe.replace(/'/g, `'\\''`)}'`
+  // o singură trecere: `'` → `'\''`, `\` → `'\\'` (închide citarea, pune caracterul escape-uit ÎN
+  // AFARA ei, o redeschide); ce introduce o înlocuire nu mai e atins de cealaltă
+  return `'${safe.replace(/['\\]/g, (ch) => (ch === "'" ? `'\\''` : `'\\\\'`))}'`
 }
 
 // ── retenţie ──────────────────────────────────────────────────────────────────────────────

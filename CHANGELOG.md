@@ -96,6 +96,14 @@ Fixes from an independent review of this release's changes, before it shipped.
   and into the SHA-256 of a staged move-as-root file. Now the state is keyed by host, path and
   `upload_id`, and a live upload belongs to the user who started it: another user's chunk,
   status, commit or abort for it is refused (409 `files.uploadForeign`).
+- **No backslash in a move-as-root command; "Insert path" quotes it for fish (medium,
+  re-review).** Why: in fish a backslash inside `'…'` still escapes the quote, so `shlex.quote`'s
+  output is not inert there — a file named `a\` followed by one named `x;id>pwn;#` left the quotes
+  and ran as root. Folder and file names with a backslash are now refused for move as root
+  (400 `files.rootMoveBackslash`; the command text, script included, never contains one, and no
+  bare word starts with `%`, which fish expands), and the path typed by "Insert path" (and the
+  `setfacl` command) writes a backslash outside the quotes as `\\`, literal in sh, bash, zsh and
+  fish alike (checked against a real fish).
 - **Typed text only goes to a prompt (low).** Why: typed as keystrokes, the command or a path ran
   as commands of whatever had the foreground — mc, vim, less, htop. The move-as-root command and
   "Insert path" are now typed only at a shell prompt: when the foreground program asked for

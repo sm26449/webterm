@@ -434,8 +434,9 @@ of the page session, and the panel offers three ways out:
 
    No newline is sent: you read it and press Enter (`chmod` the file afterwards if it must be
    executable). The gateway builds the text from validated values only — an absolute, normalised
-   folder, plain file names, a plain user name, no control/bidi characters (refused, not
-   stripped), every token `shlex`-quoted and checked to parse back to exactly the intended
+   folder, plain file names, a plain user name, no control/bidi characters and no backslash
+   (refused, not stripped: in fish a backslash inside `'…'` still escapes the quote), every token
+   `shlex`-quoted and checked to parse back to exactly the intended
    arguments — and only after every upload committed with all of its bytes hashed by the gateway
    (a gateway restart or a second upload into the same staged file means: upload again). While
    the plan is open, only you can upload into its staged files. The browser types it through the

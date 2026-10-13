@@ -3700,7 +3700,8 @@ async def fs_root_move(host_id: int, body: RootMoveIn, request: Request,
                        user=Depends(authz.perm('files.write', host='host_id'))):
     """Plan an "upload and move as root": → {plan_id, uploads: [{name, upload_path}], inbox}.
     Gates: `files.write` on the host (as for any upload; tokens never) → step-up (H1) → strict
-    validation of the folder and names (rootmove.check_*; 400 `files.rootMoveBad`) → the agent's
+    validation of the folder and names (rootmove.check_*; 400 `files.rootMoveBad`, or
+    `files.rootMoveBackslash` for a backslash) → the agent's
     user must be a known plain user name (409 `files.rootMoveNoUser`) → the agent creates its
     inbox and reports its absolute path, which is validated too. No command yet: it needs the
     hashes of the uploaded bytes (…/command)."""
@@ -3710,6 +3711,8 @@ async def fs_root_move(host_id: int, body: RootMoveIn, request: Request,
         names = [rootmove.check_name(n) for n in body.names]
         if not names:
             raise rootmove.MoveError("no files")
+    except rootmove.MoveBackslash as e:
+        raise ApiError(400, "files.rootMoveBackslash", str(e))
     except rootmove.MoveError as e:
         raise ApiError(400, "files.rootMoveBad", str(e))
     await _agent_user_of(host_id)
