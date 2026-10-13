@@ -199,18 +199,21 @@ def staged_paths(inbox: str, names: list, now: float | None = None) -> list:
 # per file: staged path, size, SHA-256, destination. A CONSTANT: nothing is ever interpolated into
 # it. No single quote (it is single-quoted on the command line) and no newline (it is typed).
 # `c` removes the temp file on any exit; INT/HUP/TERM go through `exit`, so the EXIT trap runs
-# (Ctrl-C on a FIFO someone left in the inbox leaves nothing behind).
+# (Ctrl-C on a FIFO someone left in the inbox leaves nothing behind). Messages go through `m`
+# (printf "%s"), never `echo`: dash's echo interprets backslash escapes in its arguments, so a
+# value in an echo could emit terminal escapes (re-review L2).
 MOVE_SCRIPT = (
     'u=$1 d=$2; shift 2; t=; '
-    'c() { [ -z "$t" ] || rm -f -- "$t"; t=; }; '
+    'm() { printf "webterm: %s" "$1"; echo; }; '
+    'c(){ [ -z "$t" ] || rm -f -- "$t"; t=; }; '
     'trap c EXIT; trap "exit 130" HUP INT TERM; '
     'while [ $# -ge 4 ]; do '
     's=$1 z=$2 h=$3 f=$4; shift 4; '
     't=$(mktemp -- "$d/.webterm-move.XXXXXX") || exit 1; '
     'if { sudo -u "$u" -- head -c "$z" -- "$s"; } >"$t" && x=$(sha256sum <"$t") && [ "${x%% *}" = "$h" ] '
     '&& chmod 0644 -- "$t" && mv -f -T -- "$t" "$f"; '
-    'then t=; echo "webterm: installed $f"; sudo -u "$u" -- rm -f -- "$s" || :; '
-    'else echo "webterm: NOT installed: $f - the uploaded file was changed or replaced, '
+    'then t=; m "installed $f"; sudo -u "$u" -- rm -f -- "$s" || :; '
+    'else m "NOT installed: $f -the uploaded file was changed or replaced, '
     'or $u could not read it (SHA-256 check); nothing was moved" >&2; exit 1; fi; '
     'done'
 )

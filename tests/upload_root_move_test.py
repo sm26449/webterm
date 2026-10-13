@@ -35,7 +35,7 @@ from app import api, core, db, rootmove, syshealth  # noqa: E402
 check = U.Checker()
 INBOX = "/home/webterm/.webterm/inbox"
 NASTY = ["it's", "$(touch PWNED1)", "`touch PWNED2`", "a b", "-rf", "--", "&&", "ș file.txt",
-         "x;touch PWNED3", "*", "~root", "!!", "a\"b", "%self", "{a,b}", "a#b"]
+         "x;touch PWNED3", "*", "~root", "!!", "a\"b", "%self", "{a,b}", "a#b", "a%sb%n"]
 
 
 # ── pure: rootmove ───────────────────────────────────────────────────────────────────────────
@@ -109,13 +109,18 @@ def pure_checks():
     check("M2: no backslash anywhere in the command (fish), script included",
           "\\" not in cmd and "\\" not in rootmove.MOVE_SCRIPT)
     check("M2: no bare token starts with % or ~ (fish expands %self)",
-          not any(t[:1] in ("%", "~") for t in cmd.split(" ")))
+          not any(shlex.quote(t)[:1] in ("%", "~") for t in shlex.split(cmd))
+          and " ".join(shlex.quote(t) for t in shlex.split(cmd)) == cmd)
     check("command: the script is a constant without single quotes or newlines",
           "'" not in rootmove.MOVE_SCRIPT and "\n" not in rootmove.MOVE_SCRIPT)
     check("command: reads as the agent's user, checks the SHA-256, mv -T, removes the temp on failure",
           'sudo -u "$u" -- head -c "$z" -- "$s"' in rootmove.MOVE_SCRIPT
           and '[ "${x%% *}" = "$h" ]' in rootmove.MOVE_SCRIPT and "mv -f -T --" in rootmove.MOVE_SCRIPT
           and "trap c EXIT" in rootmove.MOVE_SCRIPT and "sudo install" not in rootmove.MOVE_SCRIPT)
+    check("L2: messages via printf \"%s\", no echo with an argument (dash's echo reads escapes)",
+          'printf "webterm: %s" "$1"' in rootmove.MOVE_SCRIPT
+          and not any(w.startswith('"') or w.startswith("$") for w in
+                      [p.split("echo", 1)[1].strip()[:1] for p in rootmove.MOVE_SCRIPT.split(";") if "echo" in p] if w))
     one = rootmove.staged_paths(INBOX, ["a"])
     one_cmd = rootmove.command("webterm", INBOX, "/", [dict(one[0], size=1, sha256="0" * 64)])
     check("command: root folder → /<name>", shlex.split(one_cmd)[-1] == "/a")
@@ -259,6 +264,9 @@ def shell_checks():
               all(os.stat(os.path.join(target, n)).st_uid == os.geteuid() for n in NASTY))
         check("shell: the staged inbox files were removed", os.listdir(inbox) == [])
         check("shell: no temp file left behind", temps() == [])
+        want_out = ["webterm: installed %s/%s" % (target, n) for n in NASTY]
+        check("L2: each message printed literally (printf %s, a % in a name stays a %)",
+              r.stdout.splitlines() == want_out, r.stdout[-300:])
         for n in NASTY:
             os.unlink(os.path.join(target, n))
 

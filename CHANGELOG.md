@@ -104,6 +104,9 @@ Fixes from an independent review of this release's changes, before it shipped.
   bare word starts with `%`, which fish expands), and the path typed by "Insert path" (and the
   `setfacl` command) writes a backslash outside the quotes as `\\`, literal in sh, bash, zsh and
   fish alike (checked against a real fish).
+- **Move-as-root messages via `printf "%s"` (low, re-review).** dash's `echo` interprets
+  backslash escapes in its arguments, so a value echoed by the script could write terminal escape
+  sequences; every message is now `printf "webterm: %s" …`.
 - **Typed text only goes to a prompt (low).** Why: typed as keystrokes, the command or a path ran
   as commands of whatever had the foreground — mc, vim, less, htop. The move-as-root command and
   "Insert path" are now typed only at a shell prompt: when the foreground program asked for
