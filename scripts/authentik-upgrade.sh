@@ -121,6 +121,36 @@ fi
 [ -n "$FILE" ] && [ -f "$DIR/$FILE" ] || die "no compose file in $DIR (use --file)"
 CF="$DIR/$FILE"
 
+# As root, everything this script trusts must be root's: the script itself, the compose dir and
+# file (root runs `docker compose` on it), the .env next to it, and every parent up to `/` (whoever
+# can write a parent can swap the tree). Sticky parents (/tmp) are the one exception. Same rule as
+# cert-renew.sh / host-health.sh.
+safe_path() {   # 0 when owned by root and not group/world-writable
+  local owner mode
+  owner=$(stat -Lc '%u' -- "$1" 2>/dev/null) || return 1
+  mode=$(stat -Lc '%a' -- "$1" 2>/dev/null) || return 1
+  [ "$owner" = 0 ] && [ $(( 0$mode & 022 )) -eq 0 ]
+}
+safe_chain() {  # the path and every non-sticky parent
+  local d=$1 mode
+  safe_path "$d" || die "refusing: $d must be owned by root and not writable by group/others"
+  while [ "$d" != / ]; do
+    d=$(dirname "$d")
+    mode=$(stat -Lc '%a' -- "$d" 2>/dev/null) || die "refusing: cannot stat $d"
+    [ $(( 0$mode & 01000 )) -ne 0 ] && continue
+    safe_path "$d" || die "refusing: parent $d must be owned by root and not writable by group/others"
+  done
+}
+if [ "${EUID:-$(id -u)}" = 0 ]; then
+  SELF=$(readlink -f -- "$0")
+  safe_chain "$SELF"
+  safe_chain "$DIR"
+  safe_path "$CF" || die "refusing: $CF must be owned by root and not writable by group/others"
+  if [ -e "$DIR/.env" ]; then
+    safe_path "$DIR/.env" || die "refusing: $DIR/.env must be owned by root and not writable by group/others"
+  fi
+fi
+
 dc() {
   if [ -n "$PROJECT" ]; then
     docker compose --project-directory "$DIR" -f "$CF" -p "$PROJECT" "$@"

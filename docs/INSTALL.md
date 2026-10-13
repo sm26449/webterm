@@ -283,6 +283,11 @@ alert, and the list shows who muted it and until when.
 hourly systemd timer (`webterm-host-health.timer`) that install.sh and upgrade.sh install
 (`sudo ./scripts/host-health.sh --install` does it by hand; it also installs the nightly
 `webterm-docker-cleanup.timer`, which replaces a hand-made `/etc/cron.d/webterm-docker-cleanup`).
+The nightly cleanup never touches volumes or containers and keeps every image a container uses,
+the tool image, the Authentik images and the WebTerm rollback images; it does remove **other**
+unused images created more than 14 days ago (`RETENTION` in `scripts/docker-cleanup.sh`; creation time, not
+pull time), so keep an image you need by running a container from it or by tagging it into a
+compose file.
 It writes small JSON status files into the data volume (`host-status/`) and nothing else; the
 gateway gets no new privilege and treats those files as untrusted (fixed names, size cap, schema
 check, never executed, never a source of commands). The Cloudflare token is checked against

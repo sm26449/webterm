@@ -93,7 +93,11 @@ back.
   `python3 -I` from `/`, and `authentik-upgrade.sh` ships in the install directory too. (L5) A
   failing `df` made the cleanup write invalid JSON (`"disk_free_pct":,`) and look silent.
   The host-status trust model is documented in docs/INSTALL.md.
-
+- `scripts/authentik-upgrade.sh` refuses to run as root unless it, every parent directory, the
+  compose directory, the compose file and its `.env` are owned by root and not writable by group
+  or others (sticky parents allowed) — root runs `docker compose` on that file, so whoever could
+  write it could run anything. A health mute now takes the same lock as a check run, so a
+  running check cannot overwrite it.
 ## [3.6.7] — 2026-10-13 · agent (58)
 
 3.6.7 — TLS certificate monitoring with alerts, and Owner-only renewal in a terminal (typed, not run). No agent change.

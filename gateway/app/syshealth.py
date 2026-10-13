@@ -1200,20 +1200,23 @@ def mute_needs_owner(check_id: str, row: Optional[dict] = None) -> bool:
 
 async def mute(check_id: str, mode: str, who: str, owner: bool = False) -> dict:
     await _load()
-    row = _rows.get(check_id)
-    if row is None or mode not in MUTE_MODES:
-        raise KeyError(check_id)
-    if MUTE_MODES[mode] != 0 and not owner and mute_needs_owner(check_id, row):
-        raise MuteDenied(check_id)
-    d = MUTE_MODES[mode]
-    if d == 0:
-        row.update(muted_until=0, muted_sig=None, muted_by=None)
-    elif d == -1:
-        row.update(muted_until=-1, muted_sig=row.get("sig"), muted_by=who[:200])
-    else:
-        row.update(muted_until=time.time() + d, muted_sig=None, muted_by=who[:200])
-    await _persist(row)
-    return row
+    # under the same lock as a check run: otherwise a run that copied the row before the mute
+    # could store it back afterwards and silently drop the mute (review 3.6.8, INFO)
+    async with _lock:
+        row = _rows.get(check_id)
+        if row is None or mode not in MUTE_MODES:
+            raise KeyError(check_id)
+        if MUTE_MODES[mode] != 0 and not owner and mute_needs_owner(check_id, row):
+            raise MuteDenied(check_id)
+        d = MUTE_MODES[mode]
+        if d == 0:
+            row.update(muted_until=0, muted_sig=None, muted_by=None)
+        elif d == -1:
+            row.update(muted_until=-1, muted_sig=row.get("sig"), muted_by=who[:200])
+        else:
+            row.update(muted_until=time.time() + d, muted_sig=None, muted_by=who[:200])
+        await _persist(row)
+        return row
 
 
 def notify_muted(check_id: str, mode: str, who: str, row: Optional[dict] = None) -> None:

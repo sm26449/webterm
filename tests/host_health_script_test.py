@@ -528,6 +528,61 @@ def main():
         rc, out = hop("2026.8.3", "2026.11.0", unlisted=False)
         check("an unknown minor without --unlisted-minor → refused", rc != 0 and "--unlisted-minor" in out, out)
 
+        print("── authentik-upgrade.sh: as root, everything it trusts must be root's")
+        if IS_ROOT:
+            # a root-owned tree under a private (0700) dir: bin/ for the script, ak/ for the stack
+            ak_base = tempfile.mkdtemp()
+            os.chmod(ak_base, 0o700)
+            for d in ("bin", "ak"):
+                os.mkdir(os.path.join(ak_base, d), 0o755)
+            ak_script = os.path.join(ak_base, "bin", "authentik-upgrade.sh")
+            shutil.copy(AU, ak_script)
+            os.chmod(ak_script, 0o755)
+            ak_dir = os.path.join(ak_base, "ak")
+            ak_cf = os.path.join(ak_dir, "docker-compose.yml")
+            with open(ak_cf, "w") as f:
+                f.write("services:\n  server:\n    image: ghcr.io/goauthentik/server:2026.8.2\n")
+            os.chmod(ak_cf, 0o644)
+
+            ak_fakebin = os.path.join(ak_base, "fakebin")
+            os.mkdir(ak_fakebin, 0o755)
+            with open(os.path.join(ak_fakebin, "docker"), "w") as f:   # never the real docker
+                f.write("#!/bin/sh\necho fake-docker >&2\nexit 1\n")
+            os.chmod(os.path.join(ak_fakebin, "docker"), 0o755)
+
+            def au(script=ak_script):
+                p = subprocess.run(["bash", script, "--dir", ak_dir, "status"], capture_output=True,
+                                   text=True, timeout=60, cwd="/",
+                                   env={"PATH": ak_fakebin + ":/usr/sbin:/usr/bin:/sbin:/bin"})
+                return p.returncode, p.stdout + p.stderr
+            rc, out = au()
+            check("root-owned tree → passes the ownership checks", "refusing" not in out, out[-300:])
+            os.chmod(ak_cf, 0o664)
+            rc, out = au()
+            check("group-writable compose file → refused", rc != 0 and "refusing: " + ak_cf in out, out[-300:])
+            os.chmod(ak_cf, 0o644)
+            os.chown(ak_dir, 1, 0)
+            rc, out = au()
+            check("compose dir not owned by root → refused", rc != 0 and "refusing: " + ak_dir in out, out[-300:])
+            os.chown(ak_dir, 0, 0)
+            env_f = os.path.join(ak_dir, ".env")
+            open(env_f, "w").close()
+            os.chown(env_f, 1, 0)
+            rc, out = au()
+            check(".env not owned by root → refused", rc != 0 and "refusing: " + env_f in out, out[-300:])
+            os.unlink(env_f)
+            os.chmod(os.path.join(ak_base, "bin"), 0o757)
+            rc, out = au()
+            check("script in a world-writable dir → refused", rc != 0 and "refusing: parent" in out, out[-300:])
+            os.chmod(os.path.join(ak_base, "bin"), 0o755)
+            rc, out = au(script=AU)
+            _r = os.path.realpath(ROOT)
+            if not all(os.stat(d).st_uid == 0 for d in (_r, os.path.dirname(_r))):
+                check("run from a checkout a user owns → refused", rc != 0 and "refusing" in out, out[-300:])
+            shutil.rmtree(ak_base, ignore_errors=True)
+        else:
+            print("  (skipped: not root)")
+
         print("── shellcheck")
         sc = shutil.which("shellcheck")
         if not sc:
