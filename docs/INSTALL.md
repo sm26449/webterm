@@ -224,8 +224,14 @@ waits up to 3 minutes for a valid certificate. It asks before changing anything 
 the question). In Settings, an **Owner** gets a **Renew** button next to an expiring
 certificate: after you pick the gateway host (the enrolled host WebTerm itself runs on), it
 asks for your second factor and opens a terminal there with the command **typed, not run**:
-you read it and press Enter, and `sudo` on the host decides whether you may. Without a picked
-host it shows the command to copy.
+you read it and press Enter, and `sudo` on the host decides whether you may. The command is
+`sudo -k …`, so the password you type there leaves no cached sudo credentials behind; only you
+can type into that terminal and it cannot be shared. Without a picked host it shows the command
+to copy.
+
+The script refuses to run unless the install directory, `scripts/` and the script itself (and
+`acme-backups/`) belong to root and are not writable by group or others, and it ignores the
+environment overrides its test suite uses.
 
 The case this was built for (2026-10-12): a wildcard that ended up in the HTTP-01 store
 (`le`). HTTP-01 cannot renew it, so Traefik logged *"Error renewing ACME certificate … could

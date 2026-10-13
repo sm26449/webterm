@@ -36,7 +36,7 @@ back.
   `--prune-unrouted` lists (and with `--yes` removes) entries no router asks for; `--restore`
   puts a backup back. In Settings an **Owner** (new Owner-only permission `certs.renew`) gets
   **Renew** next to an expiring certificate: after a fresh second factor it opens a terminal on
-  the gateway host they picked once, with `sudo /opt/webterm/scripts/cert-renew.sh --domain
+  the gateway host they picked once, with `sudo -k /opt/webterm/scripts/cert-renew.sh --domain
   <name>` **typed, not run** — the same "your terminal, your permissions" model as *OS upgrade in
   a terminal*. Why this way: editing Traefik's store and restarting it from the app would mean
   mounting the ACME volume and widening the Docker proxy for the process exposed to the
@@ -47,6 +47,26 @@ back.
 - **`upgrade.sh` reports the certificate stores** after every upgrade (`cert-renew.sh --report`,
   read-only) and warns about a certificate expiring within 14 days, a wildcard sitting in an
   HTTP-01 store, or entries no router uses. It never changes them.
+
+### Security
+- **Step-up on a host without 2FA uses the real factor ladder.** Why: `/api/hosts/{id}/stepup`
+  on such a host opened the step-up window with the account password alone, even for accounts
+  with a passkey or an authenticator app, and silently ignored a TOTP code. That window is what
+  the "fresh second factor" gate of deploy keys and certificate renewal accepts, so for those
+  accounts the gate was password-only. It now asks for the same factor as everywhere else
+  (passkey → SSO → TOTP with lockout → password). A wrong password answers 403 `stepup.password`
+  instead of 401.
+- **Authenticator-app step-up from the web works.** Why: the browser sent the code as `totp`,
+  while every HTTP route reads `stepup_totp`, so an account whose only second factor is an
+  authenticator app could not unlock a 2FA host from the web. The terminal's own unlock message
+  keeps `totp`.
+- From the independent review of this release, before it shipped: `cert-renew.sh` runs from `/`
+  with an isolated python (a `json.py` planted in the caller's directory ran as root), refuses a
+  directory or script that is not root-owned or is group/world-writable, and ignores its
+  test-only overrides under sudo; the typed command is `sudo -k …` (no cached credentials left
+  behind); only the opener may type into a renewal terminal, and it cannot be shared; the gateway
+  dials the public name only for the main domain, with one total deadline per handshake and a
+  pool of 4 threads.
 
 ## [3.6.6] — 2026-10-12 · agent (58)
 

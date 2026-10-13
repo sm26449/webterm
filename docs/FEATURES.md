@@ -378,7 +378,7 @@ Press `?` for the cheatsheet.
   serves for the app, the forward wildcard and Authentik, shows days left / issuer / names, and
   alerts at under 14 and 3 days (critical when expired or when Traefik's default certificate is
   served), one alert per threshold. An Owner can **Renew**: a terminal on the gateway host opens
-  with `sudo …/scripts/cert-renew.sh --domain <name>` typed, not run. The app itself never touches
+  with `sudo -k …/scripts/cert-renew.sh --domain <name>` typed, not run. The app itself never touches
   the certificate store. [how renewal works](INSTALL.md#tls-certificates-monitoring-and-renewal)
 - **Clean uninstall**: `./remove.sh` (or `make remove`) takes the gateway back off the
   machine and asks before anything irreversible — it tells you exactly which volumes

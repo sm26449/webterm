@@ -58,7 +58,13 @@ Notes:
   hands out the vault key, and the signing key signs agent updates for the whole fleet, so both
   stay with Owners. Renewing a TLS certificate from Settings (`certs.renew`, 3.6.7) is Owner-only
   too: it types a `sudo` command that edits Traefik's certificate store on the gateway host. An
-  Admin still sees the certificate status. An Admin cannot create, change or delete an Owner.
+  Admin still sees the certificate status. Only the Owner who opened a renewal terminal can type
+  into it (others, an Admin with `session.manage` included, can only watch), and it cannot be
+  shared. An Admin cannot create, change or delete an Owner.
+- **"Fresh second factor" is per account and host, not per action.** Deploy keys and certificate
+  renewal require a factor presented within the last 2 minutes. That freshness belongs to the
+  pair (you, that host): a factor you gave for one of these actions also satisfies another one on
+  the same host during those 2 minutes. It never carries over to another host or another account.
 - An Admin is still a **co-admin for sessions and tokens**: with `session.manage` it can kill,
   rename, share or type into any session — an Owner's included — and with `tokens.manage` /
   `shares.manage` it can see and revoke everyone's tokens and links. Give Admin only to people
