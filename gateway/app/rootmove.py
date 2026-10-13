@@ -192,7 +192,7 @@ MOVE_SCRIPT = (
     'while [ $# -ge 4 ]; do '
     's=$1 z=$2 h=$3 f=$4; shift 4; '
     't=$(mktemp -- "$d/.webterm-move.XXXXXX") || exit 1; '
-    'if sudo -u "$u" -- head -c "$z" -- "$s" >"$t" && x=$(sha256sum <"$t") && [ "${x%% *}" = "$h" ] '
+    'if { sudo -u "$u" -- head -c "$z" -- "$s"; } >"$t" && x=$(sha256sum <"$t") && [ "${x%% *}" = "$h" ] '
     '&& chmod 0644 -- "$t" && mv -f -T -- "$t" "$f"; '
     'then t=; echo "webterm: installed $f"; sudo -u "$u" -- rm -f -- "$s" || :; '
     'else echo "webterm: NOT installed: $f - the uploaded file was changed or replaced, '

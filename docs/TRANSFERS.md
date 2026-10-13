@@ -419,7 +419,7 @@ of the page session, and the panel offers three ways out:
    arguments):
 
    ```
-   sudo sh -c 'u=$1 d=$2; shift 2; … sudo -u "$u" -- head -c "$z" -- "$s" >"$t" && x=$(sha256sum <"$t") && [ "${x%% *}" = "$h" ] && chmod 0644 -- "$t" && mv -f -T -- "$t" "$f"; …' webterm-move webterm /srv/bin/lists /home/webterm/.webterm/inbox/2026-10-13_14-03-22_root-move_1a2b3c4d 1832 5f2c…e91a /srv/bin/lists/list.txt
+   sudo sh -c 'u=$1 d=$2; shift 2; … { sudo -u "$u" -- head -c "$z" -- "$s"; } >"$t" && x=$(sha256sum <"$t") && [ "${x%% *}" = "$h" ] && chmod 0644 -- "$t" && mv -f -T -- "$t" "$f"; …' webterm-move webterm /srv/bin/lists /home/webterm/.webterm/inbox/2026-10-13_14-03-22_root-move_1a2b3c4d 1832 5f2c…e91a /srv/bin/lists/list.txt
    ```
 
    For each file it: reads the staged file **as the agent's user** (`sudo -u webterm`), at most the
