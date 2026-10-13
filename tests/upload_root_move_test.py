@@ -217,6 +217,9 @@ async def mapping_checks():
         await db.execute("UPDATE hosts SET agent_user=NULL WHERE id=?", hid)
         e = await api._fs_write_error(hid, core.FileError("/srv/bin/lists/a: Permission denied"), "/srv/bin/lists/a")
         check("agent user unknown → plain files.permissionDenied", e.code == "files.permissionDenied")
+        e = await api._fs_write_error(hid, core.FileError("/sys/a: Read-only file system"), "/sys/a")
+        check("agent user unknown → read-only still names the folder (no user needed)",
+              e.code == "files.readOnlyAt" and e.vars == {"dir": "/sys"}, (e.code, e.vars))
         await db.execute("UPDATE hosts SET agent_user='webterm' WHERE id=?", hid)
 
         # the upload route end to end: body carries code + vars

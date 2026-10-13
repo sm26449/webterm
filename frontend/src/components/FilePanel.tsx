@@ -482,14 +482,16 @@ export default function FilePanel(props: {
         refusedMsg ||= j.error ?? ''
       } else if (j?.state === 'err' && j.error) otherErr ||= `${it.rel}: ${j.error}`
     }
-    // 3.6.9: eroarea unui upload apărea DOAR în widgetul de transferuri; o arătăm şi aici
-    if (otherErr) setError(otherErr)
+
     setBusy(false)
     if (refused.length) {
       markDenied(props.host.id, base)
       setDenied({ dir: base, message: refusedMsg, pending: refused })
     } else if (anyOk) clearDenied(props.host.id, base)
-    load(listing.path)
+    await load(listing.path)
+    // 3.6.9: eroarea unui upload apărea DOAR în widgetul de transferuri; o arătăm şi aici — DUPĂ
+    // re-listare, care goleşte linia de eroare
+    if (otherErr) setError(otherErr)
   }
 
   /** O operaţie de scriere refuzată în dosarul curent → bannerul (în loc de linia roşie scurtă). */

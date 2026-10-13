@@ -414,9 +414,11 @@ async def _fs_write_error(host_id: int, e: Exception, path: str, status: int = 4
         user = _show_path((row["agent_user"] if row else "") or "")[:64]
     except Exception:
         user = ""
-    if not user:
+    if spec[1] and not user:          # "the agent runs as …" needs the user; the others do not
         return base
-    vars = {"user": user, "dir": _show_path(d)}
+    vars = {"dir": _show_path(d)}
+    if spec[1]:
+        vars["user"] = user
     code = spec[0]
     if spec[1]:
         try:
