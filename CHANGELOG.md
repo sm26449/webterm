@@ -18,10 +18,11 @@ No agent change (agent stays 58).
   not as the terminal's sudo — by design, but nothing said so. Now: "The agent runs as webterm and
   cannot write in /srv/bin/lists (mode 755)" (the owner is not shown: the agent does not report
   it), a lock on that folder, and three ways out: **Upload and move as root** (the file goes to the
-  agent's inbox, then `sudo install -m 0644 -- <inbox file> <dir>/<name> && rm -f -- <inbox file>`
-  is TYPED — never run, no newline — into your current terminal; built server-side from validated,
-  shlex-quoted values that must round-trip, typed through the same input path as a keystroke so a
-  read-only view types nothing; audited), a `setfacl` command to copy, or the agent's home. Drop
+  agent's inbox, then a `sudo sh -c '…' webterm-move …` command that installs it only if its
+  SHA-256 matches the upload — see Security — is TYPED, never run, no newline, into your current
+  terminal; built server-side from validated, shlex-quoted values that must round-trip, typed
+  through the same input path as a keystroke so a read-only view types nothing; audited), a
+  `setfacl` command to copy, or the agent's home. Drop
   and paste onto a root shell offer the same. Read-only file systems, a full disk and a missing
   folder are named too, and such definitive refusals are no longer retried 8 times (a minute)
   before the error shows.
@@ -70,6 +71,41 @@ No agent change (agent stays 58).
 - **Docs:** "Supported hosts" in INSTALL.md (Python, tmux, shells, known OSes, what breaks below
   3.6, the portable runtime, an offline/scp procedure for switching an existing install) and
   "Why can't I upload into a root-owned folder?" in TRANSFERS.md.
+
+### Security
+Fixes from an independent review of this release's changes, before it shipped.
+- **Move as root no longer trusts the inbox (medium).** Why: the staged file belongs to the
+  agent's user, who could swap it between the upload and Enter — for a symlink or hardlink to
+  `/etc/shadow` (root's `install` followed it and published it 0644), `/dev/zero` (disk fill), a
+  FIFO (hang) — and anyone with `files.write` could upload over it, e.g. into `/etc/cron.d`. That
+  added nothing when typed into the agent user's own tmux, but the Copy fallback goes into SSH and
+  console root shells too. Now the gateway hashes (SHA-256) the bytes it streams into each staged
+  file and builds the command only after every upload committed with all of its bytes hashed (a
+  second upload id, a one-shot write, a resume after a restart: no command — upload again); while
+  the plan is open only its planner may upload into it. The command,
+  `sudo sh -c '<fixed script>' webterm-move <agent user> <dir> [<staged> <size> <sha256> <dest>]…`,
+  reads each staged file **as the agent's user** (`sudo -u <user> -- head -c <size>`), into a
+  root-owned `mktemp` file in the target folder, checks the SHA-256, then `chmod 0644` and
+  `mv -T` into place; any failure removes the temp file and nothing lands. The staged file is
+  removed as the agent's user. The agent's user must be a plain user name, or there is no command.
+- **Typed text only goes to a prompt (low).** Why: typed as keystrokes, the command or a path ran
+  as commands of whatever had the foreground — mc, vim, less, htop. The move-as-root command and
+  "Insert path" are now typed only as a bracketed paste, and only when the foreground program asked
+  for bracketed paste (bash, zsh, fish, readline do); otherwise nothing is typed and the UI offers
+  Copy with the reason.
+- **Portable Python extracted as root kept the archive's owners and modes (low).** GNU tar as root
+  defaults to `--same-owner`. Now `tar xzof`, `chmod -R go-w`, and `chown -hR root:root` when
+  installing as root.
+- **Portable Python download robustness (low).** The temp file comes from `mkstemp`; the worker
+  thread enforces the total deadline between reads (a slow drip included), stops when the caller
+  gives up, and timeouts answer 503 `pyruntime.timeout` instead of 500; a cached file is served
+  without re-hashing only while its size, inode and mtime match what was verified.
+- **BusyBox wget (low).** It ignores `WGETRC`, so the token could only go on its command line
+  (readable in `/proc`). Without curl or GNU wget the installer now stops and asks for curl.
+- **Unknown `/agent/*` paths are a 404 (low),** never the SPA's index.html, like `/api/*`.
+- **`WEBTERM_PYTHON` under a root install (low).** The interpreter and agent paths are quoted in
+  the systemd unit and the crontab and must be plain absolute paths; installing as root, an
+  interpreter (or any folder above it) not owned by root or writable by group/others is refused.
 
 ## [3.6.8] — 2026-10-13 · agent (58)
 
