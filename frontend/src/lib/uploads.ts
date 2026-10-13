@@ -15,7 +15,7 @@
    limitate cu backoff, `Retry` manual care reintră de la offset-ul real, reluare automată la
    `online`/`visibilitychange`, metadate în localStorage ca un reload să arate job-ul ca „orfan"
    (re-tragi fişierul şi continuă), şi o bară globală (JobsBar) vizibilă pe orice ecran. */
-import { api, ApiError, errText, withStepup } from './api'
+import { api, ApiError, apiErrorFrom, errText, withStepup } from './api'
 import { tStatic } from './i18n'
 import { lsGet, lsRemove, lsSet } from './storage'
 import { insertPathInto } from './transfers'
@@ -296,6 +296,15 @@ function publish(c: Ctl, p: Partial<UploadJob>) {
   })
 }
 
+/** Coduri de eroare pe care o reîncercare NU le schimbă (gateway: _file_api_error/_fs_write_error). */
+export const DEFINITIVE_CODES = new Set([
+  'files.writeDenied', 'files.writeDeniedMode', 'files.permissionDenied', 'files.readOnly',
+  'files.readOnlyAt', 'files.noSpace', 'files.noSpaceAt', 'files.dirMissing', 'files.notFound',
+  'files.isDirectory', 'files.notDirectory', 'files.agentInternal', 'files.notRegular',
+])
+export const isDefinitiveError = (e: unknown): boolean =>
+  e instanceof ApiError && e.status >= 400 && e.status < 500 && DEFINITIVE_CODES.has(e.code)
+
 const isAuthErr = (e: unknown) => e instanceof AuthLost || (e instanceof ApiError && e.status === 401)
 
 function errorText(e: unknown): string {
@@ -394,7 +403,10 @@ async function runLoop(c: Ctl): Promise<void> {
           } catch (e) { reject(e) }
           return
         }
-        reject(new Error(String(xhr.status)))
+        // corp JSON cu cod (gateway/app/errors.py): eroarea reală, tradusă — „agentul rulează ca
+        // webterm şi nu poate scrie în /srv/bin/lists" —, nu „Server answered 400" (3.6.9)
+        const ae = apiErrorFrom(xhr.status, xhr.responseText || '', xhr.getResponseHeader('X-WebTerm-Error'))
+        reject(ae.code ? ae : new Error(String(xhr.status)))
       }
       xhr.onerror = () => { done(); reject(new Error('network')) }
       xhr.ontimeout = () => { done(); reject(new Error('timeout')) }
@@ -425,6 +437,10 @@ async function runLoop(c: Ctl): Promise<void> {
       catch (e) {
         if (c.cancelled || c.paused) throw e
         if (isAuthErr(e) || e instanceof ResyncSignal) throw e
+        // refuz DEFINITIV de pe host (permisiuni, FS doar-citire, disc plin, dosar inexistent): o
+        // reîncercare dă acelaşi răspuns — 8 încercări cu backoff însemnau un minut de „retrying"
+        // înainte de eroare. Ieşim imediat, cu mesajul clar.
+        if (isDefinitiveError(e)) throw e
         unstable = true
         if (e instanceof BusySignal) {   // backpressure: aşteptăm scurt, NU numărăm ca eşec dur
           await new Promise((r) => setTimeout(r, 500))
@@ -545,7 +561,9 @@ async function runLoop(c: Ctl): Promise<void> {
     }
     // temp-ul RĂMÂNE pe host, File-ul rămâne în controler → Retry reia de la offset-ul real
     c.authLost = isAuthErr(e)
-    publish(c, { pos: lastPos, state: 'err', error: errorText(e), bytesPerSec: 0, etaSec: null })
+    publish(c, { pos: lastPos, state: 'err', error: errorText(e), bytesPerSec: 0, etaSec: null,
+                 errorCode: e instanceof ApiError ? e.code : undefined,
+                 errorVars: e instanceof ApiError ? e.vars : undefined })
   } finally {
     c.running = false
     c.xhrs.clear()

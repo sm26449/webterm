@@ -232,6 +232,13 @@ export default function HostOverview(props: {
                 {host.connection_type}
               </Badge>
             )}
+            {/* 3.6.9: agentul rulează pe un Python < 3.6 (sigur) sau OS-ul o sugerează (probabil) */}
+            {host.agent_python_old && (
+              <Badge tone={host.agent_python_old === 'confirmed' ? 'danger' : 'warn'} size="md" data-testid="wt-host-python-old"
+                title={t(host.agent_python_old === 'confirmed' ? 'host.pythonOldConfirmed' : 'host.pythonOldLikely')}>
+                {t('host.pythonOldBadge')}
+              </Badge>
+            )}
           </div>
           <div className="mt-0.5 truncate text-sm text-slate-500">
             <span className="font-mono">{host.hostname ? `${host.ssh_username || host.agent_user || ''}@${host.hostname}` : t('host.notConfigured')}</span>

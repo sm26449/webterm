@@ -1165,6 +1165,28 @@ try {
   await page.keyboard.type('&& echo PASTE_OK\n')
   check('fişierul lipit există pe host (4 octeţi)', await waitScreen('PASTE_OK', 8000))
 
+  // ── 3.6.9: o scriere refuzată de host spune DE CE, cu dosarul — şi imediat ──
+  // /sys e montat doar-citire în container (agentul de aici e root, deci permisiunile nu-l opresc;
+  // un FS read-only da). Înainte: „Server answered 400" abia după 8 reîncercări (~1 min).
+  const fpRo = filePanel.locator('input[title*="Type a path"]')
+  await fpRo.fill('/sys')
+  await fpRo.press('Enter')
+  await pollValue(() => fpRo.inputValue(), (v) => v === '/sys')
+  const roT0 = Date.now()
+  await filePanel.locator('input[type=file]').first().setInputFiles({
+    name: 'wt_ro.txt', mimeType: 'text/plain', buffer: Buffer.from('nope'),
+  })
+  const roText = await pollValue(() => filePanel.textContent().then((t) => t ?? ''),
+    (t) => /read-only file system/i.test(t), 12000)
+  check('upload pe un FS doar-citire: mesaj clar cu dosarul, fără reîncercări (sub 12 s)',
+    /\/sys is on a read-only file system/i.test(roText) && Date.now() - roT0 < 12000,
+    roText.match(/[^.]{0,60}read-only[^.]{0,40}/i)?.[0] ?? roText.slice(0, 120))
+  await page.evaluate(() => {
+    const s = window.__wtTransfers?.store
+    if (!s?.snapshot) return
+    for (const j of s.snapshot().values()) if ((j.name || '').includes('wt_ro')) s.remove(j.id)
+  })
+
   // ── Test #2: nume cu spații/paranteze/diacritice (encoding pe tot lanțul) ──
   const SPECIAL = 'raport ședință (2).txt'
   await activePane.locator('.xterm-screen').click()

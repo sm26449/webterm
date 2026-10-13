@@ -36,6 +36,10 @@ export interface UploadJob {
   etaSec: number | null   // null = necunoscut (încă fără viteză)
   state: JobState
   error?: string          // text deja tradus, pentru `err`
+  /** 3.6.9: codul stabil al erorii (ex. `files.writeDenied`) + valorile lui ({user, dir, mode}) —
+      panoul de fişiere oferă pe baza lor „Upload and move as root" / setfacl / home */
+  errorCode?: string
+  errorVars?: Record<string, string | number>
   /** încercarea curentă pe felia curentă (1 = prima); se resetează la fiecare felie */
   attempts: number
   /** drop pe terminal / paste: după commit calea se tastează în terminalul `sid` */

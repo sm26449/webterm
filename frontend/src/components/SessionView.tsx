@@ -42,7 +42,8 @@ import PastePicker from './PastePicker'
 import { notify, notifyError, notifyToast } from '../lib/notify'
 import { useConfirm } from '../lib/confirm'
 import { useFocusTrap } from '../lib/useFocusTrap'
-import { startUpload } from '../lib/uploads'
+import { dismissUpload, startUpload } from '../lib/uploads'
+import { isWriteDenied, uploadAndMoveAsRoot } from '../lib/rootmove'
 import { uploadStore } from '../lib/uploadStore'
 import { ensureInbox, inboxName, isGenericName, markPasteHintSeen, pasteDest, pasteHintSeen, pasteSubject, pasteSubjectText, pasteToastKey, pruneInbox, registerInsertTarget, resolveHome } from '../lib/transfers'
 import type { PasteDest } from '../lib/transfers'
@@ -371,6 +372,32 @@ export default function SessionView(props: {
     if (kind === 'screenshot' && !pasteHintSeen()) { msg += ' ' + t('transfers.pasteFirstHint'); markPasteHintSeen() }
     notifyToast(msg, 'info')
   }
+  // 3.6.9: drop/paste în cwd-ul unui shell root (dosar al lui root) — userul agentului nu poate scrie
+  // acolo. În loc de doar o eroare: oferim „urcă în inbox + tastează comanda `sudo install`" (nu o
+  // rulează nimeni; Enter îl apasă omul). true = am tratat refuzul (oferit sau anulat).
+  const offerRootMove = async (ids: string[], dir: string, items: { file: File; name: string }[]): Promise<boolean> => {
+    const host = props.host!
+    const refused = ids.map((id) => uploadStore.get(id))
+      .filter((j) => j && j.state === 'err' && isWriteDenied(j.errorCode))
+    if (!refused.length) return false
+    const names = new Set(refused.map((j) => (j!.dest.split('/').pop() ?? '')))
+    const files = items.filter((it) => names.has(it.name))
+    const ok = await confirm({
+      title: t('transfers.rootMoveTitle'),
+      message: `${refused[0]!.error ?? ''} ${t('transfers.rootMoveAsk', { user: host.agent_user || '?' })}`,
+      confirmLabel: t('files.denied.optRoot'),
+    })
+    if (!ok) { notifyError(t('transfers.uploadFailedTitle'), refused[0]!.error || t('files.genericErr')); return true }
+    for (const j of refused) dismissUpload(j!.id)
+    try {
+      const r = await uploadAndMoveAsRoot({ hostId: host.id, hostName: host.name, dir, files, sid: session.id })
+      if (r.failed.length) notifyError(t('transfers.uploadFailedTitle'), t('files.denied.inboxFailed', { names: r.failed.slice(0, 3).join(', ') }))
+      else if (r.typed) notifyToast(t('files.denied.typedToast'), 'info')
+      else if (await copyText(r.command)) notifyToast(t('transfers.rootMoveCopied'), 'warn')
+      else notifyError(t('transfers.uploadFailedTitle'), t('transfers.rootMoveNotTyped'))
+    } catch (e) { notifyError(t('transfers.uploadFailedTitle'), errText(e, t) || t('files.genericErr')) }
+    return true
+  }
   const onTermDrop = async (files: File[]) => {
     const subj = pasteSubject(files)
     const subject = pasteSubjectText(subj, t)
@@ -378,7 +405,9 @@ export default function SessionView(props: {
     notifyToast(t(pasteToastKey('start', 'cwd', subj.kind), { subject }), 'info')
     try {
       const dir = await sessionDir()
-      const ids = await uploadFiles(dir, files.map((f) => ({ file: f, name: f.name })))
+      const items = files.map((f) => ({ file: f, name: f.name }))
+      const ids = await uploadFiles(dir, items)
+      if (await offerRootMove(ids, dir, items)) return
       finishPaste(ids, 'cwd', subject, subj.kind)
     } catch (e) { notifyError(t('transfers.uploadFailedTitle'), errText(e, t) || t('files.genericErr')) }
   }
@@ -400,6 +429,7 @@ export default function SessionView(props: {
       const items = files.map((f) => ({ file: f, name: inboxName(f, when, isGenericName(f.name) ? ++generic : 1) }))
       // retenţia inbox-ului rulează după un upload reuşit, niciodată peste fişierul tocmai urcat
       const ids = await uploadFiles(dir, items, toInbox ? (name) => { void pruneInbox(host.id, dir, name) } : undefined)
+      if (!toInbox && await offerRootMove(ids, dir, items)) return
       finishPaste(ids, dest, subject, subj.kind)
     } catch (e) { notifyError(t('transfers.uploadFailedTitle'), errText(e, t) || t('files.genericErr')) }
   }
@@ -927,7 +957,11 @@ export default function SessionView(props: {
     // text, deci testele (și tu, la debug) îl citesc din buffer prin instanța asta
     ;((window as unknown as { __wtTerms?: Map<string, Terminal> }).__wtTerms ??= new Map()).set(session.id, term)
     // ţintă pentru „insert path" (motorul de upload tastează calea aici după commit)
-    registerInsertTarget(session.id, (text) => { send(text); term.focus() })
+    // false = n-am tastat (doar-citire / mut / socket închis): apelantul oferă „Copy" în loc
+    registerInsertTarget(session.id, (text) => {
+      if (muteRef.current || readOnlyRef.current || wsRef.current?.readyState !== WebSocket.OPEN) return false
+      send(text); term.focus(); return true
+    })
     // Paste cu FIŞIERE (captură, înaintea handler-ului xterm de pe textarea): preluăm doar când
     // clipboardul aduce fişiere/imagini; textul simplu nu trece pe aici — xterm îl lipeşte ca
     // până acum (bracketed paste) — cu excepţia unui text multi-linie care atinge guardrail-ul.

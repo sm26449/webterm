@@ -150,17 +150,22 @@ export const markPasteHintSeen = (): void => lsSet(PASTE_HINT_KEY, '1')
 // Job-ul trăieşte în motor, nu în componentă: când se termină, tab-ul care l-a pornit poate
 // fi închis. Atunci NU tastăm nicăieri (ar ateriza în alt terminal, poate pe alt host) — rândul
 // oferă „Copy path" în loc. SessionView se înscrie la montare şi se retrage la demontare.
-const targets = new Map<string, (text: string) => void>()
-export function registerInsertTarget(sid: string, fn: ((text: string) => void) | null): void {
+/** Ţinta întoarce false când NU a tastat nimic (sesiune doar-citire / mută / socket închis). */
+const targets = new Map<string, (text: string) => boolean | void>()
+export function registerInsertTarget(sid: string, fn: ((text: string) => boolean | void) | null): void {
   if (fn) targets.set(sid, fn); else targets.delete(sid)
 }
 export const hasInsertTarget = (sid: string | undefined): boolean => !!sid && targets.has(sid)
-/** tastează `<cale citată> ` (spaţiu, FĂRĂ Enter) în terminalul `sid`; false dacă nu mai există */
-export function insertPathInto(sid: string | undefined, path: string): boolean {
+/** Tastează `text` (FĂRĂ Enter) în terminalul `sid` prin ACELAŞI drum ca o tastă — deci aceleaşi
+    porţi (doar-citire, mut, accesul la sesiune verificat din nou pe server). false = n-a tastat. */
+export function typeInto(sid: string | undefined, text: string): boolean {
   const fn = sid ? targets.get(sid) : undefined
   if (!fn) return false
-  fn(shellQuote(path) + ' ')
-  return true
+  return fn(text) !== false
+}
+/** tastează `<cale citată> ` (spaţiu, FĂRĂ Enter) în terminalul `sid`; false dacă nu mai există */
+export function insertPathInto(sid: string | undefined, path: string): boolean {
+  return typeInto(sid, shellQuote(path) + ' ')
 }
 
 // ── home-ul şi inbox-ul hostului ──────────────────────────────────────────────────────────

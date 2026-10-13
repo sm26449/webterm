@@ -94,6 +94,9 @@ Fictional demo fleet, captured on v3.5.8 with
   re-adopted by name.
 - **Nothing to expose on your servers.** The agent is one stdlib-only Python file that dials out
   over WebSocket with a token bound to that machine; the gateway stores no login for it.
+  It needs Linux and **Python 3.6+** — on hosts with an older or no python3 (Ubuntu 16.04,
+  Debian 9) the installer adds a pinned, checksum-verified **portable Python 3.12** for the agent
+  alone; tmux is recommended. [Supported hosts](docs/INSTALL.md#supported-hosts).
 - **SSH and telnet when you cannot install anything** — a switch, a customer's box — with the
   honest trade that those sessions live in the gateway and end when it restarts.
 - **More than a shell:** files, an editor, Docker, systemd, database consoles, port forwards,
@@ -279,7 +282,7 @@ make test-local   # + the suites that need a real tmux/agent (sandboxed from pro
 
 Before an image is published, CI runs the unit suite, ruff, gitleaks and `pip-audit`, verifies
 the agent signature, boots the image, and drives it in a browser: an E2E run with a **real agent
-on tmux** (`scripts/e2e-session.mjs`, 191 checks), file and port-forward tests, a mobile audit on
+on tmux** (`scripts/e2e-session.mjs`, 192 checks), file and port-forward tests, a mobile audit on
 10 devices and an accessibility gate. Building from source, the test layout and the full chain:
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). How to contribute — including re-signing the agent
 and regenerating these screenshots — is in [CONTRIBUTING.md](CONTRIBUTING.md).

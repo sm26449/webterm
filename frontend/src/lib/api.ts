@@ -110,6 +110,8 @@ export interface Host {
   online: boolean
   hostname: string | null
   agent_user: string | null
+  /** 3.6.9: Python-ul agentului e (probabil / sigur) sub minimul 3.6 — operaţiile pe fişiere cad */
+  agent_python_old?: 'likely' | 'confirmed' | null
   agent_version: number | null
   agent_latest: number | null
   update_pending: boolean
@@ -303,11 +305,43 @@ export class ApiError extends Error {
   /** Cod stabil trimis de server în antetul `X-WebTerm-Error` (vezi gateway/app/errors.py).
       Gol pentru erorile încă neconvertite — atunci rămâne mesajul englezesc. */
   code: string
-  constructor(status: number, detail: string, code = '') {
+  /** Valorile mesajului (`vars` din corpul erorii: host, limită, utilizatorul agentului, dosarul…),
+      doar scalari — interpolate în traducerea codului de `errText`. */
+  vars: Record<string, string | number>
+  constructor(status: number, detail: string, code = '', vars?: Record<string, string | number>) {
     super(detail)
     this.status = status
     this.code = code
+    this.vars = vars ?? {}
   }
+}
+
+/** `vars` dintr-un corp de eroare JSON: doar chei simple cu valori string/număr (orice altceva
+    cade). Textul ajunge doar ca TEXT în React — nu HTML — dar tot nu lăsăm structuri să treacă. */
+export function scalarVars(v: unknown): Record<string, string | number> {
+  const out: Record<string, string | number> = {}
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return out
+  for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+    if (!/^[a-z][a-zA-Z0-9_]{0,31}$/.test(k)) continue
+    if (typeof x === 'string') out[k] = x.slice(0, 500)
+    else if (typeof x === 'number' && Number.isFinite(x)) out[k] = x
+  }
+  return out
+}
+
+/** ApiError dintr-un răspuns HTTP citit altfel decât prin `api()` (XHR-ul de upload): codul din
+    antet sau din corp, `detail` şi `vars` din corpul JSON. */
+export function apiErrorFrom(status: number, body: string, headerCode?: string | null): ApiError {
+  let detail = String(status), code = headerCode ?? '', vars: Record<string, string | number> = {}
+  try {
+    const j = JSON.parse(body)
+    if (j && typeof j === 'object') {
+      if (typeof j.detail === 'string') detail = j.detail
+      if (!code && typeof j.code === 'string') code = j.code
+      vars = scalarVars(j.vars)
+    }
+  } catch { /* corp ne-JSON */ }
+  return new ApiError(status, detail, code, vars)
 }
 
 /* Textul de arătat omului pentru o eroare de API.
@@ -323,7 +357,7 @@ export function errText(e: unknown, t: (k: string, v?: Record<string, string | n
   if (e.code) {
     // {detail} = mesajul serverului, la îndemâna oricărei traduceri care vrea să-l arate (ex.
     // „systemctl rejected the command on the host: Access denied") — audit funcţional 3.6.3, #4
-    const translated = t('err.' + e.code, { detail: e.message, ...vars })
+    const translated = t('err.' + e.code, { detail: e.message, ...e.vars, ...vars })
     if (translated !== 'err.' + e.code) return translated     // `t` întoarce cheia dacă lipseşte
   }
   return e.message
@@ -455,9 +489,13 @@ export async function api<T>(path: string, options: RequestInit = {}, _retried =
   checkGatewayVersion(res)
   if (!res.ok) {
     let detail = res.statusText
-    const code = res.headers.get('X-WebTerm-Error') ?? ''
+    let code = res.headers.get('X-WebTerm-Error') ?? ''
+    let errVars: Record<string, string | number> = {}
     try {
-      detail = (await res.json()).detail ?? detail
+      const j = await res.json()
+      detail = j.detail ?? detail
+      if (!code && typeof j.code === 'string') code = j.code
+      errVars = scalarVars(j.vars)
     } catch {
       /* non-JSON error body */
     }
@@ -494,7 +532,7 @@ export async function api<T>(path: string, options: RequestInit = {}, _retried =
         return api<T>(path, options, true)
       }
     }
-    throw new ApiError(res.status, detail, code)
+    throw new ApiError(res.status, detail, code, errVars)
   }
   return res.json()
 }

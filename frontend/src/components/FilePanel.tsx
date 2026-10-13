@@ -15,8 +15,11 @@ import { uiLocale } from '../lib/tz'
 import {
   EMPTY_SELECTION, Selection, allState, isListKeyTarget, previewNames, prune, rangeTo, toggleAll, toggleKey, visibleSelected,
 } from '../lib/selection'
-import { ArrowsLeftRightIcon, CheckIcon, ChevronDownIcon, ChevronUpIcon, CloseIcon, CopyIcon, DownloadIcon, FileIcon, FilePlusIcon, FolderIcon, LevelUpIcon, LinkIcon, PencilIcon, PlusIcon, RefreshIcon, RenameIcon, TrashIcon, UploadIcon } from './Icons'
+import { ArrowsLeftRightIcon, CheckIcon, LockIcon, ChevronDownIcon, ChevronUpIcon, CloseIcon, CopyIcon, DownloadIcon, FileIcon, FilePlusIcon, FolderIcon, LevelUpIcon, LinkIcon, PencilIcon, PlusIcon, RefreshIcon, RenameIcon, TrashIcon, UploadIcon } from './Icons'
 import CopyToHostDialog, { CopyItem } from './CopyToHostDialog'
+import WriteDeniedBanner, { PendingFile } from './WriteDeniedBanner'
+import { clearDenied, deniedStore, errIsWriteDenied, isDenied, isWriteDenied, markDenied } from '../lib/rootmove'
+import { resolveHome } from '../lib/transfers'
 import { Button, IconButton } from './ui'
 
 // CodeMirror e greu → lazy: intră doar când deschizi un fișier
@@ -122,6 +125,9 @@ export default function FilePanel(props: {
     () => [...uploadsAll.values()].filter((j) => j.hostId === props.host.id && j.state !== 'orphan'),
     [uploadsAll, props.host.id])
   const [overwrite, setOverwrite] = useState<{ items: UpItem[]; count: number } | null>(null)
+  // 3.6.9: o scriere refuzată (userul agentului nu poate scrie aici) → bannerul cu cele trei ieşiri
+  const [denied, setDenied] = useState<{ dir: string; message: string; pending: PendingFile[] } | null>(null)
+  useSyncExternalStore(deniedStore.subscribe, deniedStore.snapshot)
   const [drag, setDrag] = useState(false)
   // drop ţintit pe un RÂND de director: fişierele intră acolo, nu în directorul afişat
   const [dropRow, setDropRow] = useState<string | null>(null)
@@ -465,9 +471,41 @@ export default function FilePanel(props: {
     for (const d of [...dirs].sort()) {
       try { await api(`/api/hosts/${props.host.id}/fs/mkdir`, { method: 'POST', body: JSON.stringify({ path: join(base, d), parents: true }) }) } catch { /* există deja */ }
     }
-    for (const it of items) await uploadOne(join(base, it.rel), it.rel, it.file)
+    const refused: PendingFile[] = []
+    let refusedMsg = '', otherErr = '', anyOk = false
+    for (const it of items) {
+      const id = await uploadOne(join(base, it.rel), it.rel, it.file)
+      const j = uploadStore.get(id)
+      if (j?.state === 'done') anyOk = true
+      else if (j?.state === 'err' && isWriteDenied(j.errorCode) && !it.rel.includes('/')) {
+        refused.push({ file: it.file, name: it.rel })
+        refusedMsg ||= j.error ?? ''
+      } else if (j?.state === 'err' && j.error) otherErr ||= `${it.rel}: ${j.error}`
+    }
+    // 3.6.9: eroarea unui upload apărea DOAR în widgetul de transferuri; o arătăm şi aici
+    if (otherErr) setError(otherErr)
     setBusy(false)
+    if (refused.length) {
+      markDenied(props.host.id, base)
+      setDenied({ dir: base, message: refusedMsg, pending: refused })
+    } else if (anyOk) clearDenied(props.host.id, base)
     load(listing.path)
+  }
+
+  /** O operaţie de scriere refuzată în dosarul curent → bannerul (în loc de linia roşie scurtă). */
+  function writeFailed(e: unknown, dir: string): void {
+    if (errIsWriteDenied(e)) {
+      markDenied(props.host.id, dir)
+      setDenied({ dir, message: errText(e, t), pending: [] })
+    } else setError(errText(e, t) || t('files.genericErr'))
+  }
+
+  async function uploadHome(files: PendingFile[]) {
+    let home: string
+    try { home = await resolveHome(props.host.id) } catch (e) { setError(errText(e, t) || t('files.genericErr')); return }
+    setDenied(null)
+    if (files.length) await reallyUpload(files.map((f) => ({ file: f.file, rel: f.name })), home)
+    navigate(home)
   }
 
   function pickFiles(files: FileList | File[]) {
@@ -481,7 +519,7 @@ export default function FilePanel(props: {
     try {
       await api(`/api/hosts/${props.host.id}/fs/mkdir`, { method: 'POST', body: JSON.stringify({ path: join(listing.path, n) }) })
       load(listing.path)
-    } catch (e) { setError(errText(e, t) || t('files.genericErr')) }
+    } catch (e) { writeFailed(e, listing.path) }
   }
 
   // fişier nou: îl creăm pe host printr-un upload one-shot — corp gol ("empty") sau conţinutul din
@@ -515,7 +553,7 @@ export default function FilePanel(props: {
         { method: 'POST', body })
       await load(dir)
       setEditing({ path, name: n })                     // deschide editorul pe fişierul nou
-    } catch (e) { setError(errText(e, t) || t('files.genericErr')) }
+    } catch (e) { writeFailed(e, dir) }
   }
 
   // dublu-click pe un fişier copiază numele, triplu-click copiază calea completă (ca-n terminal:
@@ -534,7 +572,7 @@ export default function FilePanel(props: {
         method: 'POST', body: JSON.stringify({ path: join(listing.path, e.name), to: join(listing.path, n) }),
       })
       load(listing.path)
-    } catch (err) { setError(errText(err, t) || t('files.genericErr')) }
+    } catch (err) { writeFailed(err, listing.path) }
   }
 
   async function doDelete(e: Entry) {
@@ -545,7 +583,7 @@ export default function FilePanel(props: {
         method: 'POST', body: JSON.stringify({ path: join(listing.path, e.name), recursive: e.dir }),
       })
       load(listing.path)
-    } catch (err) { setError(errText(err, t) || t('files.genericErr')) }
+    } catch (err) { writeFailed(err, listing.path) }
   }
 
   function onKeyDown(ev: React.KeyboardEvent) {
@@ -600,6 +638,13 @@ export default function FilePanel(props: {
     const el = listRef.current?.querySelector(`[data-idx="${sel}"]`)
     el?.scrollIntoView({ block: 'nearest' })
   }, [sel])
+
+  const deniedHere = !!listing && isDenied(props.host.id, listing.path)
+  const deniedView = !listing ? null
+    : denied && denied.dir === listing.path ? denied
+    : deniedHere ? { dir: listing.path, pending: [] as PendingFile[],
+                     message: t('files.denied.explain', { user: props.host.agent_user || '?', dir: listing.path }) }
+    : null
 
   const header = props.embed ? null : (
     <header className="flex items-center gap-2 border-b border-ink-800 px-3 py-2">
@@ -666,12 +711,19 @@ export default function FilePanel(props: {
             className="min-w-0 flex-1 rounded-md bg-ink-800 px-2 py-1 font-mono text-2xs text-slate-300 ring-1 ring-ink-700 focus:ring-sky-500"
             title={t('files.pathHint')}
           />
+          {deniedHere && (
+            <span className="shrink-0 wt-warn" title={t('files.denied.badge', { user: props.host.agent_user || '?' })}
+              data-testid="wt-files-lock">
+              <LockIcon size={13} /><span className="sr-only">{t('files.denied.badge', { user: props.host.agent_user || '?' })}</span>
+            </span>
+          )}
           <IconButton onClick={() => load(listing?.path ?? path)} label={t('files.reload')}><RefreshIcon /></IconButton>
           {/* deschiderea unuia închide restul: toolbar-ul rămâne interactiv deasupra modalului,
               iar un input montat SUB overlay i-ar fura focusul (tastezi într-un câmp invizibil) */}
           <IconButton onClick={() => { setNewFileErr(''); setNewFolder(null); setRenaming(null); setConfirmDel(null); setNewFile('') }} disabled={!listing} label={t('files.newFile')}><FilePlusIcon /></IconButton>
           <IconButton onClick={() => { setNewFile(null); setNewFileErr(''); setNewFolder('') }} label={t('files.newDir')}><PlusIcon /></IconButton>
-          <IconButton onClick={() => fileInput.current?.click()} disabled={busy || !listing} label={t('files.uploadHere')} variant="link"><UploadIcon /></IconButton>
+          <IconButton onClick={() => fileInput.current?.click()} disabled={busy || !listing} label={t('files.uploadHere')}
+            title={deniedHere ? t('files.denied.uploadHint', { user: props.host.agent_user || '?' }) : undefined} variant="link"><UploadIcon /></IconButton>
           <input ref={fileInput} type="file" multiple className="hidden" onChange={(e) => { if (e.target.files) pickFiles(e.target.files); e.target.value = '' }} />
         </div>
 
@@ -714,6 +766,12 @@ export default function FilePanel(props: {
           ))}
         </div>
 
+        {deniedView && (
+          <WriteDeniedBanner host={props.host} dir={deniedView.dir} message={deniedView.message}
+            sessionId={props.sessionId} pending={deniedView.pending}
+            onUploadHome={(fs) => void uploadHome(fs)}
+            onDismiss={() => { clearDenied(props.host.id, deniedView.dir); setDenied(null) }} />
+        )}
         {error && <div role="alert" className="border-b border-ink-800 bg-ink-800 px-3 py-1.5 text-2xs wt-danger">{error}
           {failedPath !== null && <button type="button" onClick={() => load(failedPath)} className="wt-link ml-2 min-h-6 hover:underline">{t('common.retry')}</button>}</div>}
 
