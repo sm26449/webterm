@@ -421,6 +421,7 @@ What a host needs to run the agent, and what happens when it has less:
 | tmux | optional, **strongly recommended** | sessions run on a plain PTY and end when the agent restarts |
 | Shell | `/bin/sh` for the installer; any login shell for sessions | shell integration (OSC 133) is wired for **bash** and **zsh** |
 | Fetching | `curl` or `wget`, `sha256sum` or `shasum`, `tar` | the installer says which one is missing |
+| Fetching the portable Python | `curl`, or GNU `wget` | BusyBox `wget` (minimal Alpine) can send the host's token only on its command line, which other users can read in `/proc` — the installer stops and asks for `apk add curl` |
 
 Known to work: Debian 10–13, Ubuntu 18.04–24.04, RHEL/Rocky/Alma 8–9, Fedora, openSUSE, Arch,
 Alpine — with their own python3. **Ubuntu 16.04, Debian 9, Ubuntu 14.04, Debian 8, CentOS 7
@@ -440,15 +441,17 @@ build from that pinned URL the first time a host asks, checks the SHA-256 **befo
 under its data volume (`pyruntime/`, ~25–35 MB per architecture) and serves it to installing hosts
 — so hosts without internet access work. The **install script** checks the same SHA-256 again,
 refuses archive entries outside `python/`, absolute paths, `..` and links pointing outside, extracts
-into a fresh temp directory and moves it into `~/.webterm/python/`, as the installing user (nothing
-runs as root). The agent then runs with `~/.webterm/python/bin/python3`; the systemd unit / cron
+into a fresh temp directory without the archive's owners (`tar -o`), removes group/world write
+permission everywhere (and, when installing as root, gives the whole tree to `root:root`), and moves
+it into `~/.webterm/python/`, as the installing user (nothing is escalated). The agent then runs
+with `~/.webterm/python/bin/python3`; the systemd unit / cron
 lines, its self-update and its restarts all keep using that interpreter (`sys.executable`).
 
 Installer switches (put them after `| `, e.g. `… | WEBTERM_PYTHON=/opt/python3.8/bin/python3 sh`):
 
 | Switch | Effect |
 |---|---|
-| `WEBTERM_PYTHON=/path/to/python3.x` | use that interpreter (it must be 3.6+, or nothing is installed) |
+| `WEBTERM_PYTHON=/path/to/python3.x` | use that interpreter (it must be 3.6+, or nothing is installed). An absolute path of plain characters (letters, digits, space, `._/+@=:,-`): it is written, quoted, into the systemd unit and the crontab. **Installing as root**, the interpreter, its resolved path and every folder above them must be owned by root and not group/world-writable (a sticky `/tmp`-style folder above is fine) — otherwise the installer refuses: whoever can write it would get root through the agent |
 | `sh -s -- --portable-python` or `WEBTERM_PORTABLE_PYTHON=1` | always use the portable Python, even when python3 is new enough |
 | `WEBTERM_ALLOW_OLD_PYTHON=1` | no portable build fits (arch/glibc): keep the old python3 anyway — terminals only, Files will not work |
 

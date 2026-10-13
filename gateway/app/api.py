@@ -10246,6 +10246,61 @@ if [ -n "${{WEBTERM_PYTHON:-}}" ] && ! py_ok "$PY"; then
   echo "       Nothing was installed."
   exit 1
 fi
+
+# The interpreter and agent paths go into the systemd unit and the crontab: absolute, and only
+# characters that need no escaping there (no quotes, backslash, `$`, `%`, control characters).
+path_ok() {{
+  case "$1" in /*) ;; *) return 1 ;; esac
+  case "$1" in *[!A-Za-z0-9._/+@=:,\ -]*) return 1 ;; esac
+  return 0
+}}
+# Installed as ROOT, the agent runs the interpreter as root at every start: whoever can write it,
+# or any folder above it, gets root. Every component (the path as given AND as resolved) must be
+# owned by root and not group/world-writable. Prints why not; 2 = cannot check (no stat -c).
+root_chain_ok() {{
+  p=$1
+  while :; do
+    st=$(stat -c '%u %a %F' -- "$p" 2>/dev/null) || {{ command -v stat >/dev/null 2>&1 || return 2; echo "$p cannot be inspected"; return 1; }}
+    o=${{st%% *}}; r=${{st#* }}; m=${{r%% *}}; ft=${{r#* }}
+    [ "$o" = 0 ] || {{ echo "$p is owned by uid $o, not root"; return 1; }}
+    # a sticky folder above (/tmp, 1777) is fine: nobody else may rename or delete the root-owned
+    # entry in it, and that entry is checked on the previous round
+    if [ "$ft" != "symbolic link" ] && [ $(( 0$m & 022 )) -ne 0 ] \
+       && ! {{ [ "$ft" = directory ] && [ "$p" != "$1" ] && [ $(( 0$m & 01000 )) -ne 0 ]; }}; then
+      echo "$p is group- or world-writable (mode $m)"; return 1
+    fi
+    [ "$p" = / ] && return 0
+    p=${{p%/*}}; [ -n "$p" ] || p=/
+  done
+}}
+check_root_python() {{
+  [ "$(id -u)" = 0 ] || return 0
+  RP=$(readlink -f -- "$1" 2>/dev/null || true)
+  for c in "$1" "$RP"; do
+    [ -n "$c" ] || continue
+    if WHYNOT=$(root_chain_ok "$c"); then rc=0; else rc=$?; fi
+    if [ "$rc" = 2 ]; then
+      echo "WARNING: installing as ROOT, and this host has no 'stat -c' to check that $1 and its folders"
+      echo "         are owned by root and not writable by others. Check it yourself: whoever can write"
+      echo "         the interpreter or a folder above it gets root through the agent."
+      return 0
+    elif [ "$rc" != 0 ]; then
+      echo "ERROR: installing as ROOT, but the interpreter $1 is not safe to run as root: $WHYNOT."
+      echo "       Whoever can write it (or a folder above it) would get root through the agent."
+      echo "       Use a root-owned interpreter (e.g. /usr/bin/python3) or install as a dedicated user."
+      echo "       Nothing was installed."
+      exit 1
+    fi
+  done
+}}
+if [ -n "${{WEBTERM_PYTHON:-}}" ]; then
+  if ! path_ok "$PY"; then
+    echo "ERROR: WEBTERM_PYTHON must be an absolute path made of plain characters (letters, digits,"
+    echo "       space and ._/+@=:,-): it is written into the service file and the crontab. Got: $PY"
+    echo "       Nothing was installed."
+    exit 1
+  fi
+fi
 NEED_PORTABLE=0
 if [ "$PORTABLE" = 1 ] || ! py_ok "$PY"; then NEED_PORTABLE=1; fi
 
@@ -10314,6 +10369,20 @@ fi
 [ "$(id -u)" = 0 ] && echo "WARNING: you are installing the agent as ROOT — it will have root on this host. Prefer a dedicated user."
 command -v tmux >/dev/null 2>&1 || echo "WARNING: tmux is missing — sessions will not survive an agent restart. Install it (apt install tmux / yum install tmux)."
 
+if ! path_ok "$HOME/.webterm/ptyd.py"; then
+  echo "ERROR: the home folder $HOME has characters that cannot be written safely into the service"
+  echo "       file and the crontab (quotes, backslash, \$, %, control characters). Nothing was installed."
+  exit 1
+fi
+if [ "$NEED_PORTABLE" = 0 ]; then
+  if ! path_ok "$PY"; then
+    echo "ERROR: the interpreter path $PY has characters that cannot be written safely into the service"
+    echo "       file and the crontab. Point WEBTERM_PYTHON at a plain path. Nothing was installed."
+    exit 1
+  fi
+  check_root_python "$PY"
+fi
+
 mkdir -p "$HOME/.webterm" && chmod 700 "$HOME/.webterm"
 
 if [ "$NEED_PORTABLE" = 1 ]; then
@@ -10327,7 +10396,23 @@ if [ "$NEED_PORTABLE" = 1 ]; then
   printf 'header = "Authorization: Bearer %s"\n' "$TOKEN" > "$T/curlrc"
   printf 'header = Authorization: Bearer %s\n' "$TOKEN" > "$T/wgetrc"
   umask 022
+  # The token goes in a 0600 file, never on the command line (/proc/*/cmdline is readable by every
+  # user). curl reads it with -K, GNU wget from WGETRC. BusyBox wget (minimal Alpine) ignores
+  # WGETRC and only takes --header on argv — so without curl or GNU wget we stop and say so.
   if command -v curl >/dev/null 2>&1; then
+    PYRT_GET=curl
+  elif wget --version 2>/dev/null | grep -q "GNU Wget"; then
+    PYRT_GET=wget
+  else
+    echo "ERROR: downloading the portable Python needs curl (or GNU wget). This wget (BusyBox?) can"
+    echo "       send the host's token only on its command line, where other users of this machine"
+    echo "       could read it. Install curl and run the install command again:"
+    echo "          apk add curl        (Alpine)"
+    echo "          apt install curl    (Debian/Ubuntu)"
+    echo "       Nothing was installed."
+    exit 1
+  fi
+  if [ "$PYRT_GET" = curl ]; then
     $CURL -K "$T/curlrc" "$GW/agent/python/$PYRT_TARGET.tar.gz" -o "$T/py.tgz"
   else
     WGETRC="$T/wgetrc" $CURL "$GW/agent/python/$PYRT_TARGET.tar.gz" -O "$T/py.tgz"
@@ -10367,7 +10452,14 @@ if [ "$NEED_PORTABLE" = 1 ]; then
     END {{ exit bad }}' "$T/long"; then
     echo "ERROR: the portable Python archive has unsafe entries — refused." >&2; exit 1
   fi
-  mkdir "$T/x" && (cd "$T/x" && tar xzf ../py.tgz) || {{ echo "ERROR: extracting the portable Python failed."; exit 1; }}
+  # -o (--no-same-owner): as root, GNU tar would otherwise keep the archive's owners (uids of
+  # the build machine) and modes; then nothing in the tree may be writable by group/others, and
+  # as root it all belongs to root (the agent runs this interpreter as root at every start).
+  mkdir "$T/x" && (cd "$T/x" && tar xzof ../py.tgz) || {{ echo "ERROR: extracting the portable Python failed."; exit 1; }}
+  if [ "$(id -u)" = 0 ]; then
+    chown -hR 0:0 "$T/x/python" || {{ echo "ERROR: cannot give the portable Python to root."; exit 1; }}
+  fi
+  chmod -R go-w "$T/x/python" || {{ echo "ERROR: cannot tighten the portable Python's permissions."; exit 1; }}
   if ! py_ok "$T/x/python/bin/python3"; then
     echo "ERROR: the portable Python does not run on this machine (libc/CPU?) — nothing installed."; exit 1
   fi
@@ -10376,6 +10468,10 @@ if [ "$NEED_PORTABLE" = 1 ]; then
   mv "$T/x/python" "$PYRT_DIR" && rm -rf "$PYRT_DIR.old"
   rm -rf "$T"; trap - EXIT
   PY="$PYRT_DIR/bin/python3"
+  if ! path_ok "$PY"; then
+    echo "ERROR: the portable Python's path $PY cannot be written safely into the service file."; exit 1
+  fi
+  check_root_python "$PY"
   echo "Python: installed $("$PY" -c 'import sys; print(sys.version.split()[0])') in $PYRT_DIR"
   echo "        from $PYRT_FILE (sha256 verified: $PYRT_SHA);"
   echo "        the agent will run with $PY. The system python3 was not touched."
@@ -10465,7 +10561,7 @@ After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$PY $AGENT run
+ExecStart="$PY" "$AGENT" run
 Restart=always
 RestartSec=3
 # KillMode=process: the tmux server that HOLDS the sessions is started by a child of the agent,
@@ -10503,8 +10599,8 @@ if [ -z "$SUP" ] && command -v crontab >/dev/null 2>&1; then
   # @reboot starts it at boot; the watchdog restarts it if the process dies
   # (aceleaşi linii şi în agent: agent/ptyd.py `_cron_lines`, pentru comutarea din UI)
   ( crontab -l 2>/dev/null | grep -v 'webterm/ptyd.py' | grep -v 'webterm-watchdog' ; \
-    echo "@reboot $PY $AGENT start # webterm" ; \
-    echo "* * * * * $PY $AGENT start # webterm-watchdog" ) | crontab - && SUP="cron"
+    echo "@reboot '$PY' '$AGENT' start # webterm" ; \
+    echo "* * * * * '$PY' '$AGENT' start # webterm-watchdog" ) | crontab - && SUP="cron"
   "$PY" "$AGENT" start
 fi
 
