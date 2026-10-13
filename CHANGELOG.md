@@ -9,7 +9,9 @@ back.
 
 ## [Unreleased]
 
-No agent change (agent stays 58).
+## [3.6.9] — 2026-10-13 · agent (58)
+
+Uploads into root-owned folders explain why and offer a verified "upload and move as root"; agent errors shown; Python < 3.6 detected; a portable Python for old hosts; upgrade.sh runs the release's own script first. No agent change (agent stays 58).
 
 ### Added
 - **Uploads into folders the agent cannot write say why — and offer a way in.** Why: an Owner in a
