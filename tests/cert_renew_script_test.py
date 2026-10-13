@@ -397,14 +397,16 @@ def main():
         check("idempotent: a second run has nothing to prune", rc == 0 and "Nothing to prune" in out, out[-200:])
 
         print("── backup retention + restore")
+        outs = []
         for i in range(6):
             write_json(os.path.join(acme, "acme.json"), store("le", [entry("auth.example.com", [], 60 + i)]))
             rc, out = run(inst, fake)
+            outs.append("rc=%s %s" % (rc, " | ".join(l for l in out.splitlines() if "Backup" in l or "rror" in l)))
         names = sorted(os.listdir(backups))
         check("keeps the newest 5 backups", len(names) == 5, names)
         newest = os.path.join(backups, names[-1])
         check("the newest backup is the current store", open(os.path.join(newest, "acme.json"), "rb").read()
-              == open(os.path.join(acme, "acme.json"), "rb").read())
+              == open(os.path.join(acme, "acme.json"), "rb").read(), "%s ;; %s" % (names, " ;; ".join(outs)))
         oldest = os.path.join(backups, names[0])
         rc, out = run(inst, fake, "--restore", "/etc", "--yes")
         check("--restore outside acme-backups → rc 2", rc == 2, out[-200:])
