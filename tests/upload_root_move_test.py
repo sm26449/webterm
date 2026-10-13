@@ -343,11 +343,13 @@ class FakeAgent(core.AgentConnection):
         self.deny = set(deny)
         self.inbox = inbox
         self.calls = []
+        self.sizes = {}          # temp files written through fs_write_bin -> size (for upload/status)
 
     async def fs_write_bin(self, path, offset, block, timeout=60.0):
         d = os.path.dirname(path)
         if d in self.deny:
             return {"ok": False, "id": 1, "code": "fs_error", "msg": "%s: Permission denied" % path}
+        self.sizes[path] = offset + len(block)
         return {"ok": True, "written": len(block), "offset": offset + len(block), "crc32": None}
 
     async def request(self, op, timeout=20.0, **kw):
@@ -359,9 +361,13 @@ class FakeAgent(core.AgentConnection):
                 return {"ok": False, "code": "fs_error", "msg": "%s: Permission denied" % kw["path"]}
             return {"ok": True, "path": kw["path"]}
         if op == "fs_stat":
+            if kw["path"] in self.sizes:
+                return {"ok": True, "exists": True, "size": self.sizes[kw["path"]], "dir": False}
             if kw["path"] in self.deny:
                 return {"ok": True, "exists": True, "size": 4096, "dir": True, "mode": 0o755}
             return {"ok": True, "exists": False, "size": 0}
+        if op in ("fs_rename", "fs_delete"):
+            self.sizes.pop(kw["path"], None)
         if op == "fs_list":
             return {"ok": True, "path": kw.get("path"), "parent": "/", "entries": [], "truncated": False}
         return {"ok": True}
@@ -589,6 +595,96 @@ async def route_checks(owner, hid):
         core.sources.pop(hid, None)
 
 
+async def window_checks(owner, hid):
+    """Re-review M1: the upload state (offset, CRC, lock, reorder window) is keyed by host, path AND
+    upload_id, and a live upload belongs to the user who started it."""
+    print("── upload state bound to the path and the user (re-review M1)")
+    url = "/api/hosts/%d/fs/root-move" % hid
+    fake = FakeAgent(hid, deny={"/srv/bin/lists"})
+    core.sources[hid] = fake
+    saved_wait = core.WINDOW_WAIT
+    core.WINDOW_WAIT = 0.5
+    up = "/api/hosts/%d/fs/upload" % hid
+    try:
+        await U.add_user("op-m1@x.co", bindings=[("operator", "all", "")])
+        op = await U.login("op-m1@x.co")
+        r = await owner.post(url, json={"dir": "/srv/bin/lists", "names": ["m1.conf"]})
+        p = r.json()
+        path = p["uploads"][0]["upload_path"]
+        uid = "f" * 32
+        data = b"planner bytes 0123456789\n"
+        r = await owner.post("%s?path=%s&upload_id=%s&offset=0" % (up, path, uid), content=data[:7])
+        check("M1: the planner's first chunk lands", r.status_code == 200, r.text[:120])
+
+        # the attacker read the id from `<staged>.wtpart.<id>` in the inbox and sends a block AHEAD
+        # of the planner's offset, for ANOTHER path: before the fix it sat in the planner's window
+        # and was written into the staged file (and its hash) when the gap filled
+        async def attack():
+            return await op.post("%s?path=%s&upload_id=%s&offset=7" % (up, "/tmp/x", uid), content=b"EVIL BYTES")
+        task = asyncio.ensure_future(attack())
+        await asyncio.sleep(0.1)
+        r1 = await owner.post("%s?path=%s&upload_id=%s&offset=7" % (up, path, uid), content=data[7:])
+        r2 = await owner.post("%s/commit?path=%s&upload_id=%s" % (up, path, uid))
+        ra = await task
+        check("M1: same upload_id, another path → its block never joins the planner's upload (409)",
+              ra.status_code == 409, (ra.status_code, ra.text[:120]))
+        check("M1: the planner's upload completes", r1.status_code == 200 and r2.status_code == 200
+              and r2.json().get("written") == len(data), (r1.text[:120], r2.text[:120]))
+        r = await owner.post("%s/%s/command" % (url, p["plan_id"]))
+        argv = shlex.split(r.json().get("command", ""))
+        check("M1: the command carries the hash of the planner's bytes only",
+              r.status_code == 200 and hashlib.sha256(data).hexdigest() in argv
+              and str(len(data)) in argv, (r.status_code, argv[7:]))
+        check("M1: the other path's state is separate from the staged file's",
+              core._upload_key(hid, "/tmp/x", uid) != core._upload_key(hid, path, uid))
+
+        # the same user, the same upload_id, two paths: two independent uploads
+        ida = "8" * 32
+        ra = await owner.post("%s?path=%s&upload_id=%s&offset=0" % (up, "/home/webterm/a.bin", ida), content=b"aaa")
+        rb = await owner.post("%s?path=%s&upload_id=%s&offset=0" % (up, "/home/webterm/b.bin", ida), content=b"bbbb")
+        ca = await owner.post("%s/commit?path=%s&upload_id=%s" % (up, "/home/webterm/a.bin", ida))
+        cb = await owner.post("%s/commit?path=%s&upload_id=%s" % (up, "/home/webterm/b.bin", ida))
+        check("M1: one upload_id on two paths → two separate uploads, each with its own bytes",
+              ra.status_code == rb.status_code == 200 and ca.json().get("written") == 3
+              and cb.json().get("written") == 4, (ra.text[:80], rb.text[:80], ca.text[:80], cb.text[:80]))
+
+        # same path + same upload_id, another user: every step refused while the upload lives
+        shared, uid2 = "/home/webterm/shared.bin", "9" * 32
+        r = await owner.post("%s?path=%s&upload_id=%s&offset=0" % (up, shared, uid2), content=b"abc")
+        check("M1: owner starts an upload", r.status_code == 200, r.text[:120])
+        r = await op.post("%s?path=%s&upload_id=%s&offset=3" % (up, shared, uid2), content=b"EVIL")
+        check("M1: another user's chunk into it → 409 files.uploadForeign",
+              r.status_code == 409 and r.json().get("code") == "files.uploadForeign", (r.status_code, r.text[:120]))
+        r = await op.post("%s?path=%s&upload_id=%s&offset=0" % (up, shared, uid2), content=b"abc")
+        check("M1: …also at the current offset", r.status_code == 409 and r.json().get("code") == "files.uploadForeign",
+              (r.status_code, r.text[:120]))
+        r = await op.get("%s/status?path=%s&upload_id=%s" % (up, shared, uid2))
+        check("M1: another user's status → 409 files.uploadForeign",
+              r.status_code == 409 and r.json().get("code") == "files.uploadForeign", (r.status_code, r.text[:120]))
+        r = await op.post("%s/commit?path=%s&upload_id=%s" % (up, shared, uid2))
+        check("M1: another user's commit → 409", r.status_code == 409 and r.json().get("code") == "files.uploadForeign",
+              (r.status_code, r.text[:120]))
+        r = await op.delete("%s?path=%s&upload_id=%s" % (up, shared, uid2))
+        check("M1: another user's abort → 409", r.status_code == 409 and r.json().get("code") == "files.uploadForeign",
+              (r.status_code, r.text[:120]))
+        check("M1: nothing of theirs landed", fake.sizes.get(core._upload_tmp(shared, uid2)) == 3, fake.sizes)
+
+        # the owner resumes: status (the landed offset), the next chunk, commit
+        r = await owner.get("%s/status?path=%s&upload_id=%s" % (up, shared, uid2))
+        check("M1: same user, same path: status resumes at the landed offset",
+              r.status_code == 200 and r.json().get("offset") == 3, r.text[:120])
+        r = await owner.post("%s?path=%s&upload_id=%s&offset=3" % (up, shared, uid2), content=b"def")
+        r2 = await owner.post("%s/commit?path=%s&upload_id=%s" % (up, shared, uid2))
+        check("M1: same user resumes and commits", r.status_code == 200 and r2.status_code == 200
+              and r2.json().get("written") == 6, (r.text[:120], r2.text[:120]))
+        r = await op.post("%s?path=%s&upload_id=%s&offset=0" % (up, shared, uid2), content=b"new")
+        check("M1: after the commit the id is free again (the state is gone)", r.status_code == 200, r.text[:120])
+        await op.delete("%s?path=%s&upload_id=%s" % (up, shared, uid2))
+    finally:
+        core.WINDOW_WAIT = saved_wait
+        core.sources.pop(hid, None)
+
+
 async def python_checks(owner):
     print("── agents on Python < 3.6")
     hid = await U.add_host(owner, "mailer")
@@ -652,6 +748,7 @@ async def main():
     await U.boot()
     owner, hid = await mapping_checks()
     await route_checks(owner, hid)
+    await window_checks(owner, hid)
     await python_checks(owner)
     await db.close()
     return check.summary()

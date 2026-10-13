@@ -60,8 +60,8 @@ class FakeAgent(core.AgentConnection):
         return {"ok": True}
 
 
-def _cleanup(hid, uid):
-    key = (hid, uid)
+def _cleanup(hid, uid, dest):
+    key = core._upload_key(hid, dest, uid)
     core.sources.pop(hid, None)
     core._upload_offset.pop(key, None)
     core._upload_crc.pop(key, None)
@@ -90,9 +90,9 @@ async def t_in_order():
         check("secvenţial: toate feliile aplicate în ordine, octeţi corecţi", landed == payload, len(landed))
         check("secvenţial: offset final == dimensiunea fişierului", off == len(payload), off)
         check("secvenţial: CRC incremental de pe gateway == zlib al întregului fişier",
-              core._upload_crc.get((hid, uid)) == zlib.crc32(payload) & 0xffffffff)
+              core._upload_crc.get(core._upload_key(hid, dest, uid)) == zlib.crc32(payload) & 0xffffffff)
     finally:
-        _cleanup(hid, uid)
+        _cleanup(hid, uid, dest)
 
 
 async def t_out_of_order():
@@ -110,10 +110,10 @@ async def t_out_of_order():
         # îi dăm timp să depună în pending şi să intre în aşteptare
         for _ in range(50):
             await asyncio.sleep(0.005)
-            win = core._upload_windows.get((hid, uid))
+            win = core._upload_windows.get(core._upload_key(hid, dest, uid))
             if win and C in win.pending:
                 break
-        win = core._upload_windows.get((hid, uid))
+        win = core._upload_windows.get(core._upload_key(hid, dest, uid))
         held = bool(win and C in win.pending) and bytes(fake.files.get(tmp, b"")) == b""
         check("dezordonat: felia sosită înaintea rândului e ŢINUTĂ în buffer, nescrisă încă", held,
               "pending=%s files=%d" % (list(win.pending) if win else None, len(fake.files.get(tmp, b""))))
@@ -126,10 +126,10 @@ async def t_out_of_order():
         check("dezordonat: ambele cereri raportează offset-ul final", off0 == len(payload) and off_b == len(payload),
               "off0=%s off_b=%s" % (off0, off_b))
         check("dezordonat: CRC incremental corect (octeţii au ajuns la agent în ordine)",
-              core._upload_crc.get((hid, uid)) == zlib.crc32(payload) & 0xffffffff)
-        check("dezordonat: bufferul s-a golit la zero după flush", core._upload_windows[(hid, uid)].buffered == 0)
+              core._upload_crc.get(core._upload_key(hid, dest, uid)) == zlib.crc32(payload) & 0xffffffff)
+        check("dezordonat: bufferul s-a golit la zero după flush", core._upload_windows[core._upload_key(hid, dest, uid)].buffered == 0)
     finally:
-        _cleanup(hid, uid)
+        _cleanup(hid, uid, dest)
 
 
 async def t_bounded_buffer():
@@ -144,7 +144,7 @@ async def t_bounded_buffer():
         task = asyncio.create_task(one_chunk(hid, dest, uid, 500, b"x" * 100))
         for _ in range(50):
             await asyncio.sleep(0.005)
-            win = core._upload_windows.get((hid, uid))
+            win = core._upload_windows.get(core._upload_key(hid, dest, uid))
             if win and 500 in win.pending:
                 break
         # a doua felie dezordonată (încă 100) ar depăşi 150 → UploadBusy
@@ -155,7 +155,7 @@ async def t_bounded_buffer():
             busy = True
         check("plafon: a doua felie peste prag → UploadBusy (429)", busy)
         # curăţăm task-ul parcat (altfel atârnă până la WINDOW_WAIT)
-        win = core._upload_windows.get((hid, uid))
+        win = core._upload_windows.get(core._upload_key(hid, dest, uid))
         if win:
             win.pending.pop(500, None)
             async with win.cond:
@@ -167,7 +167,7 @@ async def t_bounded_buffer():
             pass
     finally:
         core.UPLOAD_WINDOW_MAX = saved
-        _cleanup(hid, uid)
+        _cleanup(hid, uid, dest)
 
 
 async def t_idempotent_dup():
@@ -180,14 +180,14 @@ async def t_idempotent_dup():
     data = b"felia-unu-" * 50
     try:
         off1 = await one_chunk(hid, dest, uid, 0, data)
-        crc1 = core._upload_crc.get((hid, uid))
+        crc1 = core._upload_crc.get(core._upload_key(hid, dest, uid))
         off2 = await one_chunk(hid, dest, uid, 0, data)      # EXACT aceeaşi felie, din nou
         check("idempotent: retry-ul feliei aterizate întoarce acelaşi offset", off1 == off2 == len(data),
               "%s %s" % (off1, off2))
         check("idempotent: temp-ul NU s-a dublat", bytes(fake.files[tmp]) == data, len(fake.files[tmp]))
-        check("idempotent: CRC neschimbat după retry", core._upload_crc.get((hid, uid)) == crc1)
+        check("idempotent: CRC neschimbat după retry", core._upload_crc.get(core._upload_key(hid, dest, uid)) == crc1)
     finally:
-        _cleanup(hid, uid)
+        _cleanup(hid, uid, dest)
 
 
 async def main():

@@ -4839,7 +4839,7 @@ async def fs_crc32(host_id: int, path: str, seed: bool = False) -> int:
 # CRC-ul clientului FĂRĂ a re-citi tot fişierul (fs_crc32 pe un temp de 17 GB = minute de stall, exact
 # ce voiam să scoatem). Dacă agentul întoarce crc32=None (resume la rece, înainte de seed) uităm
 # intrarea → commit-ul cade pe re-citirea completă (corect, doar lent — caz rar).
-_upload_crc: dict = {}                             # (host_id, upload_id) -> crc32 curent (int) sau absent
+_upload_crc: dict = {}                             # _upload_key(...) -> crc32 curent (int) sau absent
 
 
 def _remember_crc(key, crc) -> None:
@@ -5046,8 +5046,20 @@ async def fs_write_stream(host_id: int, path: str, source, if_mtime=None) -> int
 _UPLOAD_UID = re.compile(r"^[0-9a-f]{16,64}$")     # id hex, lungime mărginită (anti path-trick)
 _UPLOAD_STALE = 24 * 3600                          # temp-uri abandonate mai vechi → GC oportunist
 _UPLOAD_TRACK_MAX = 4096                           # plafon pe dict-urile in-memory (anti creştere nemărginită)
-_upload_offset: dict = {}                          # (host_id, upload_id) -> octeţi scrişi (fast-path)
-_upload_locks: dict = {}                           # (host_id, upload_id) -> asyncio.Lock (serializează chunk-urile)
+_upload_offset: dict = {}                          # _upload_key(...) -> octeţi scrişi (fast-path)
+_upload_locks: dict = {}                           # _upload_key(...) -> asyncio.Lock (serializează chunk-urile)
+
+
+def _upload_key(host_id: int, path: str, upload_id: str) -> tuple:
+    """The key of ALL in-memory upload state (offset, CRC, lock, reorder window): host, target
+    path AND upload_id (3.6.9 re-review M1). Keyed by (host, upload_id) alone, a request for
+    ANOTHER path that reused a visible id (`<path>.wtpart.<id>` is listed in the folder) shared
+    the window of the original upload: its out-of-order block was written into the original's
+    temp file — and into the SHA-256 of a staged "move as root" file. With the path in the key,
+    a request only ever reaches the state of the temp file it names itself."""
+    return (host_id, path, upload_id)
+
+
 
 # ── Fereastră de reordonare pentru upload PIPELINED (transfers phase 2) ───────
 # Clientul poate trimite până la WINDOW_K felii CONCURENT peste HTTP, ca să ascundă RTT-ul pe
@@ -5074,19 +5086,30 @@ class _UploadWindow:
     """Starea de reordonare a unui singur upload. `cond` e UN SINGUR obiect per upload (altfel
     notify_all n-ar trezi waiterii altei cereri) şi împarte lock-ul cu `_upload_lock(key)`, ca
     felia (prin cond) şi commit/abort/status (prin lock) să se excludă reciproc pe acelaşi upload."""
-    __slots__ = ("cond", "offset", "pending", "buffered")
+    __slots__ = ("cond", "offset", "pending", "buffered", "user")
 
-    def __init__(self, key):
+    def __init__(self, key, user=None):
         self.cond = asyncio.Condition(_upload_lock(key))
+        self.user = user                       # who started it (re-review M1): nobody else may feed it
         self.offset = None                     # offset-ul aterizat (None = încă neconstatat de pe host)
         self.pending = {}                      # offset -> octeţii feliei dezordonate care aşteaptă
         self.buffered = 0                      # suma octeţilor din pending (plafon UPLOAD_WINDOW_MAX)
 
 
-_upload_windows: dict = {}                          # (host_id, upload_id) -> _UploadWindow
+_upload_windows: dict = {}                          # _upload_key(...) -> _UploadWindow
 
 
-def _upload_window(key) -> "_UploadWindow":
+def _upload_check_user(key, user) -> None:
+    """A live upload belongs to the user who started it: another user's chunk, status, commit or
+    abort for the same (host, path, upload_id) is refused (UploadForeign → 409), fail closed. Not
+    keyed by user: two users' windows would then write the SAME temp file in parallel."""
+    win = _upload_windows.get(key)
+    if win is not None and win.user != user:
+        raise UploadForeign("this upload was started by another user")
+
+
+def _upload_window(key, user=None) -> "_UploadWindow":
+    _upload_check_user(key, user)
     win = _upload_windows.get(key)
     if win is None:
         # acelaşi plafon-cu-evicţie ca restul dict-urilor: scoatem o fereastră INACTIVĂ (fără felii
@@ -5096,7 +5119,7 @@ def _upload_window(key) -> "_UploadWindow":
                 if not w.pending:
                     del _upload_windows[k]
                     break
-        win = _upload_windows[key] = _UploadWindow(key)
+        win = _upload_windows[key] = _UploadWindow(key, user)
     return win
 
 
@@ -5187,20 +5210,21 @@ async def _upload_gc(host_id: int, path: str, keep: str) -> None:
         pass
 
 
-async def fs_upload_status(host_id: int, path: str, upload_id: str) -> dict:
+async def fs_upload_status(host_id: int, path: str, upload_id: str, user=None) -> dict:
     """Câţi octeţi au aterizat pentru acest upload — de unde reia clientul. Agent v55: întoarce şi
     `crc32`, CRC-ul octeţilor DEJA pe disc, ca la un resume clientul să continue acumularea CRC-ului
     din offset-ul real (pe v54 clientul renunţa la verificare după un resume). CRC-ul se calculează pe
     un worker (fs_crc32 seed=True), care seed-uieşte şi starea agentului pentru FRAME_FSWRITE-urile de
     după; îl memorăm şi noi, ca `_upload_crc`, pentru compararea la commit fără re-citire."""
     conn = _agent_or_raise(host_id)
-    key = (host_id, upload_id)
+    key = _upload_key(host_id, path, upload_id)
+    _upload_check_user(key, user)
     n = await _upload_landed(host_id, path, upload_id)
     _remember_offset(key, n)
     # Resincronizăm şi fereastra de reordonare la adevărul de pe host: status e chemat la
     # resume/resync, când clientul a oprit trimiterea (nicio felie în zbor), deci e sigur să
     # re-ancorăm offset-ul (o felie dezordonată parcată şi-a atins oricum WINDOW_WAIT şi a căzut).
-    _upload_window(key).offset = n
+    _upload_window(key, user).offset = n
     out = {"offset": n}
     if n > 0 and (conn.agent_version or 0) >= AGENT_PROTO_BIN_FSWRITE:
         tmp = _upload_tmp(path, upload_id)
@@ -5319,7 +5343,7 @@ async def _drain_window(conn, tmp, key, win, stage=None) -> None:
     win.cond.notify_all()
 
 
-async def fs_upload_chunk(host_id: int, path: str, upload_id: str, offset: int, source) -> int:
+async def fs_upload_chunk(host_id: int, path: str, upload_id: str, offset: int, source, user=None) -> int:
     """Adaugă o felie la temp. Clientul poate trimite până la WINDOW_K felii CONCURENT (pipelining);
     gateway-ul le aplică la agent STRICT în ordinea offset-ului (vezi _UploadWindow). O felie sosită
     înaintea rândului ei îşi ţine octeţii într-un buffer mărginit şi aşteaptă să i se umple gap-ul;
@@ -5328,11 +5352,13 @@ async def fs_upload_chunk(host_id: int, path: str, upload_id: str, offset: int, 
     Întoarce offset-ul aterizat (≥ sfârşitul feliei acesteia la succes)."""
     conn = _agent_or_raise(host_id)
     tmp = _upload_tmp(path, upload_id)
-    key = (host_id, upload_id)
+    key = _upload_key(host_id, path, upload_id)
+    _upload_check_user(key, user)              # before reading the body: refused early, fail closed
     # Citim TOT corpul feliei în memorie ÎNAINTE de a prelua lock-ul. Aici se petrece urcarea
     # browser→gateway — în afara secţiunii critice, K felii urcă în paralel (ascund RTT-ul), iar
     # serializarea de mai jos atinge doar aplicarea la agent (rapidă, blocuri de 1 MiB).
     block = b"".join([part async for part in source])
+    win = _upload_window(key, user)            # re-checked: the body read awaited
     stage = _stages.get((host_id, path))
     if stage is not None:
         if stage.uid is None:
@@ -5340,7 +5366,6 @@ async def fs_upload_chunk(host_id: int, path: str, upload_id: str, offset: int, 
         elif stage.uid != upload_id:          # a second upload into the same staged file
             stage.ok = False
             stage = None
-    win = _upload_window(key)
     end = offset + len(block)
     async with win.cond:
         if win.offset is None:
@@ -5396,17 +5421,20 @@ async def fs_upload_chunk(host_id: int, path: str, upload_id: str, offset: int, 
         return win.offset
 
 
-async def fs_upload_commit(host_id: int, path: str, upload_id: str, if_mtime=None, crc32=None) -> int:
+async def fs_upload_commit(host_id: int, path: str, upload_id: str, if_mtime=None, crc32=None,
+                           user=None) -> int:
     """Commit atomic: rename temp → ţintă (acelaşi mecanism ca fs_write_stream). Dacă clientul dă un
     `crc32`, verificăm integritatea temp-ului ÎNAINTE de rename — un fişier corupt nu ajunge niciodată
     la ţintă (îl ştergem şi eşuăm)."""
     conn = _agent_or_raise(host_id)
     tmp = _upload_tmp(path, upload_id)
-    key = (host_id, upload_id)
+    key = _upload_key(host_id, path, upload_id)
+    _upload_check_user(key, user)
     # Sub acelaşi lock ca şi chunk-urile: altfel (două tab-uri pe acelaşi fişier) commit-ul putea
     # rula CRC + rename în timp ce un chunk al celuilalt tab era în mijlocul unui append — un bloc
     # aterizat între stat şi rename intra tăcut în fişierul comis.
     async with _upload_lock(key):
+        _upload_check_user(key, user)
         total = _upload_offset.get(key)
         if total is None:
             total = await _upload_landed(host_id, path, upload_id)
@@ -5447,11 +5475,13 @@ async def fs_upload_commit(host_id: int, path: str, upload_id: str, if_mtime=Non
     return int(total or 0)
 
 
-async def fs_upload_abort(host_id: int, path: str, upload_id: str) -> None:
+async def fs_upload_abort(host_id: int, path: str, upload_id: str, user=None) -> None:
     """Anulare: şterge temp-ul, best-effort. Sub lock, ca şi commit-ul (un chunk concurent
     ar putea altfel re-crea temp-ul imediat după delete)."""
-    key = (host_id, upload_id)
+    key = _upload_key(host_id, path, upload_id)
+    _upload_check_user(key, user)
     async with _upload_lock(key):
+        _upload_check_user(key, user)
         _upload_forget(key)
         _stage_restart(host_id, path)
         try:
@@ -5512,6 +5542,11 @@ class FileError(Exception):
 
 class FileConflict(FileError):
     """Ținta s-a schimbat între citire și salvare — nu suprascriem orbește."""
+    pass
+
+
+class UploadForeign(FileConflict):
+    """Another user's live upload (same host, path and upload_id): refused, 409 (re-review M1)."""
     pass
 
 

@@ -231,6 +231,7 @@ const en: Lang = {
     'err.files.crcMismatch': "Integrity check failed — the uploaded data does not match. Retry the upload.",
     'err.files.badUpload': "This upload is no longer resumable — start it again.",
     'err.files.uploadBusy': "The upload is sending too fast — it will ease off and continue.",
+    'err.files.uploadForeign': "This upload was started by another user — it cannot be continued from here.",
     'err.files.rangeNotSatisfiable': "The requested part of the file is out of range.",
     'err.files.timeout': "The host did not answer in time.",
     'err.files.rootRefused': "Archiving the file-system root is refused.",

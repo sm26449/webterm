@@ -234,9 +234,9 @@ async def _gw_scenario(ver):
         return fake, off, landed, written, committed
     finally:
         core.sources.pop(hid, None)
-        core._upload_offset.pop((hid, uid), None)
-        core._upload_crc.pop((hid, uid), None)
-        core._upload_locks.pop((hid, uid), None)
+        core._upload_offset.pop(core._upload_key(hid, dest, uid), None)
+        core._upload_crc.pop(core._upload_key(hid, dest, uid), None)
+        core._upload_locks.pop(core._upload_key(hid, dest, uid), None)
 
 
 async def _gw_mismatch(ver):
@@ -260,9 +260,9 @@ async def _gw_mismatch(ver):
         return failed, tmp_gone, committed
     finally:
         core.sources.pop(hid, None)
-        core._upload_offset.pop((hid, uid), None)
-        core._upload_crc.pop((hid, uid), None)
-        core._upload_locks.pop((hid, uid), None)
+        core._upload_offset.pop(core._upload_key(hid, dest, uid), None)
+        core._upload_crc.pop(core._upload_key(hid, dest, uid), None)
+        core._upload_locks.pop(core._upload_key(hid, dest, uid), None)
 
 
 async def _gw_tests():

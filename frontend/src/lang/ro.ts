@@ -229,6 +229,7 @@ const ro: Lang = {
     'err.files.crcMismatch': "Verificarea de integritate a eșuat — datele încărcate nu se potrivesc. Reia încărcarea.",
     'err.files.badUpload': "Această încărcare nu mai poate fi reluată — pornește-o din nou.",
     'err.files.uploadBusy': "Încărcarea trimite prea repede — va încetini și va continua.",
+    'err.files.uploadForeign': "Această încărcare a fost pornită de alt utilizator — nu poate fi continuată de aici.",
     'err.files.rangeNotSatisfiable': "Partea cerută din fișier e în afara intervalului.",
     'err.files.timeout': "Hostul nu a răspuns la timp.",
     'err.files.rootRefused': "Arhivarea rădăcinii sistemului de fișiere e refuzată.",

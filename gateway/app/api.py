@@ -351,6 +351,8 @@ _FILE_ERROR_CODES = (
 def _file_api_error(e: Exception, status: int = 400) -> ApiError:
     """FileError/FileConflict/TimeoutError de la operaţiile fs → ApiError cu cod stabil.
     Statusul HTTP rămâne cel al rutei (400, sau 504 unde era deja)."""
+    if isinstance(e, core.UploadForeign):
+        return ApiError(409, "files.uploadForeign", str(e) or "this upload was started by another user")
     if isinstance(e, core.FileConflict):
         return ApiError(409, "files.conflict", str(e) or "the file changed on the host")
     if isinstance(e, (TimeoutError, asyncio.TimeoutError)):
@@ -3587,7 +3589,7 @@ async def fs_upload(host_id: int, request: Request, path: str,
             yield chunk
     try:
         if upload_id:
-            total = await core.fs_upload_chunk(host_id, path, upload_id, offset, source())
+            total = await core.fs_upload_chunk(host_id, path, upload_id, offset, source(), user=user["id"])
             return {"ok": True, "offset": total}
         written = await core.fs_write_stream(host_id, path, source(), if_mtime=if_mtime)
         return {"ok": True, "written": written, "path": path}
@@ -3613,7 +3615,7 @@ async def fs_upload_status(host_id: int, path: str, upload_id: str,
     _check_upload_id(upload_id)
     _check_staged_owner(host_id, path, user)
     try:
-        st = await core.fs_upload_status(host_id, path, upload_id)
+        st = await core.fs_upload_status(host_id, path, upload_id, user=user["id"])
     except core.AgentGone:
         raise ApiError(409, "host.offline", "the host is offline")
     except (core.FileError, TimeoutError) as e:
@@ -3633,7 +3635,8 @@ async def fs_upload_commit(host_id: int, request: Request, path: str, upload_id:
     _check_upload_id(upload_id)
     _check_staged_owner(host_id, path, user)
     try:
-        written = await core.fs_upload_commit(host_id, path, upload_id, if_mtime=if_mtime, crc32=crc32)
+        written = await core.fs_upload_commit(host_id, path, upload_id, if_mtime=if_mtime, crc32=crc32,
+                                              user=user["id"])
     except core.AgentGone:
         raise ApiError(409, "host.offline", "the host is offline")
     except core.FileConflict as e:
@@ -3650,7 +3653,10 @@ async def fs_upload_abort(host_id: int, path: str, upload_id: str,
     await _require_host_stepup(host_id, user)
     _check_upload_id(upload_id)
     _check_staged_owner(host_id, path, user)
-    await core.fs_upload_abort(host_id, path, upload_id)
+    try:
+        await core.fs_upload_abort(host_id, path, upload_id, user=user["id"])
+    except core.UploadForeign as e:
+        raise _file_api_error(e)
     return {"ok": True}
 
 

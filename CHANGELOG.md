@@ -88,6 +88,14 @@ Fixes from an independent review of this release's changes, before it shipped.
   root-owned `mktemp` file in the target folder, checks the SHA-256, then `chmod 0644` and
   `mv -T` into place; any failure removes the temp file and nothing lands. The staged file is
   removed as the agent's user. The agent's user must be a plain user name, or there is no command.
+- **One upload can no longer be fed by another request (medium, re-review).** Why: the in-memory
+  state of a chunked upload (offset, CRC, lock, reorder window) was keyed by host + `upload_id`
+  only, and the id is visible in the temp file's name (`<file>.wtpart.<id>`, e.g. in the inbox).
+  A user with `files.write` could send a block for ANOTHER path with that id, ahead of the
+  current offset; it waited in the original upload's window and was written into ITS temp file —
+  and into the SHA-256 of a staged move-as-root file. Now the state is keyed by host, path and
+  `upload_id`, and a live upload belongs to the user who started it: another user's chunk,
+  status, commit or abort for it is refused (409 `files.uploadForeign`).
 - **Typed text only goes to a prompt (low).** Why: typed as keystrokes, the command or a path ran
   as commands of whatever had the foreground — mc, vim, less, htop. The move-as-root command and
   "Insert path" are now typed only at a shell prompt: when the foreground program asked for
