@@ -9,6 +9,10 @@ back.
 
 ## [Unreleased]
 
+## [3.6.7] — 2026-10-13 · agent (58)
+
+3.6.7 — TLS certificate monitoring with alerts, and Owner-only renewal in a terminal (typed, not run). No agent change.
+
 ### Added
 - **TLS certificate monitoring (Settings → Infrastructure → Certificates).** Why: on 2026-10-12
   the wildcard `*.wt.safegrid.net` expired. It was stored in Traefik's HTTP-01 resolver (`le`,
