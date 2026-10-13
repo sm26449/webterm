@@ -772,7 +772,9 @@ export default function FilePanel(props: {
           <WriteDeniedBanner host={props.host} dir={deniedView.dir} message={deniedView.message}
             sessionId={props.sessionId} pending={deniedView.pending}
             onUploadHome={(fs) => void uploadHome(fs)}
-            onDismiss={() => { clearDenied(props.host.id, deniedView.dir); setDenied(null) }} />
+            onDismiss={() => { clearDenied(props.host.id, deniedView.dir); setDenied(null) }}
+            onMoved={() => uploads.filter((u) => u.state === 'err' && isWriteDenied(u.errorCode)
+              && u.dest.slice(0, u.dest.lastIndexOf('/')) === deniedView.dir).forEach((u) => dismissUpload(u.id))} />
         )}
         {error && <div role="alert" className="border-b border-ink-800 bg-ink-800 px-3 py-1.5 text-2xs wt-danger">{error}
           {failedPath !== null && <button type="button" onClick={() => load(failedPath)} className="wt-link ml-2 min-h-6 hover:underline">{t('common.retry')}</button>}</div>}

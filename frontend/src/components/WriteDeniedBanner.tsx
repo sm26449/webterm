@@ -37,6 +37,8 @@ export default function WriteDeniedBanner(props: {
   pending: PendingFile[]
   onUploadHome: (files: PendingFile[]) => void
   onDismiss: () => void
+  /** după „move as root" reuşit: rândurile refuzate din Transferuri pot dispărea */
+  onMoved?: () => void
 }) {
   const { t } = useI18n()
   const user = props.host.agent_user || ''
@@ -54,6 +56,7 @@ export default function WriteDeniedBanner(props: {
                                             files, sid: props.sessionId || undefined })
       if (r.failed.length) { setErr(t('files.denied.inboxFailed', { names: r.failed.slice(0, 3).join(', ') })); return }
       setResult({ command: r.command, typed: r.typed })
+      props.onMoved?.()
       if (r.typed) notifyToast(t('files.denied.typedToast'), 'info')
     } catch (e) {
       setErr(errText(e, t) || t('files.genericErr'))
