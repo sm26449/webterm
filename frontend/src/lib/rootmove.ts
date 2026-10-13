@@ -4,17 +4,21 @@
    became with sudo — by design. When a write is refused, the person gets three ways out:
      1. grant access — a `setfacl` command to COPY (never run by us);
      2. "Upload and move as root" — the file goes to the agent's inbox (written as the agent's user),
-        then a `sudo install …` command is TYPED, not run, into their own terminal for that host;
+        then a `sudo sh -c …` command is TYPED, not run, into their own terminal for that host. It
+        reads the staged file as the agent's user and installs it only if its SHA-256 matches the
+        bytes uploaded through the gateway (the inbox belongs to that user, who could swap it);
      3. upload to the agent's home instead.
    The command text comes from the gateway (gateway/app/rootmove.py: validated values, shlex-quoted,
-   round-trip checked). Typing it reuses the terminal's insert path (lib/transfers.ts) — the same
-   one that types an uploaded file's path — so it passes the same gates as a keystroke: a read-only
-   or muted session types nothing, and the server enforces the session's write access again. No
-   newline is ever sent: the person reads the command and presses Enter. */
+   round-trip checked), AFTER the uploads (it carries their hashes). Typing it reuses the terminal's
+   insert path (lib/transfers.ts) — the same one that types an uploaded file's path — so it passes
+   the same gates as a keystroke: a read-only or muted session types nothing, and the server
+   enforces the session's write access again. It is typed only as a bracketed paste at a prompt
+   (never as keystrokes into mc/vim/less), and no newline is ever sent: the person reads the
+   command and presses Enter. */
 import { api, ApiError } from './api'
 import { startUpload } from './uploads'
 import { uploadStore } from './uploadStore'
-import { shellQuote, typeInto } from './transfers'
+import { isSafeToType, shellQuote, typeIntoOutcome, type TypeOutcome } from './transfers'
 
 /** Codurile de refuz care înseamnă „userul agentului nu poate scrie aici" (gateway: _fs_write_error). */
 export const WRITE_DENIED = new Set(['files.writeDenied', 'files.writeDeniedMode', 'files.permissionDenied'])
@@ -53,19 +57,17 @@ export function setfaclCommand(user: string | null | undefined, dir: string): st
   return `sudo setfacl -m u:${user}:rwx -- ${shellQuote(dir)}`
 }
 
-/** Caractere care n-au ce căuta într-un text TASTAT în terminal: C0/C1, DEL, separatori de
-    linie/paragraf, controale bidi şi zero-width. Serverul le refuză deja; aici e a doua barieră. */
-const UNSAFE_TYPED = new RegExp('[\\x00-\\x1f\\x7f-\\x9f\\u2028\\u2029\\u200b-\\u200f\\u202a-\\u202e\\u2066-\\u2069\\ufeff]')
-export const isSafeToType = (cmd: string): boolean => !!cmd && cmd.length <= 32768 && !UNSAFE_TYPED.test(cmd)
 
-/** Tastează comanda în terminalul `sid` FĂRĂ Enter. false = nimic tastat (sesiune închisă, doar
-    citire, comandă refuzată de verificare) — apelantul oferă atunci „Copy". */
-export function typeCommandInto(sid: string | undefined, cmd: string): boolean {
-  if (!isSafeToType(cmd)) return false
-  return typeInto(sid, cmd)
+export { isSafeToType }
+
+/** Tastează comanda în terminalul `sid` FĂRĂ Enter, ca bracketed paste şi doar la un prompt
+    (lib/transfers.ts typeIntoOutcome). Altceva decât 'typed' = nimic tastat → „Copy". */
+export function typeCommandOutcome(sid: string | undefined, cmd: string): TypeOutcome {
+  return typeIntoOutcome(sid, cmd)
 }
+export const typeCommandInto = (sid: string | undefined, cmd: string): boolean => typeCommandOutcome(sid, cmd) === 'typed'
 
-export interface RootMovePlan { uploads: { name: string; upload_path: string }[]; command: string; inbox: string }
+export interface RootMovePlan { plan_id: string; uploads: { name: string; upload_path: string }[]; inbox: string }
 
 export async function planRootMove(hostId: number, dir: string, names: string[]): Promise<RootMovePlan> {
   return api<RootMovePlan>(`/api/hosts/${hostId}/fs/root-move`, {
@@ -73,16 +75,26 @@ export async function planRootMove(hostId: number, dir: string, names: string[])
   })
 }
 
+/** Comanda, DUPĂ upload: gateway-ul o construieşte cu SHA-256-ul octeţilor care au trecut prin el. */
+export async function rootMoveCommand(hostId: number, planId: string): Promise<string> {
+  const r = await api<{ command: string }>(`/api/hosts/${hostId}/fs/root-move/${encodeURIComponent(planId)}/command`,
+    { method: 'POST' })
+  return r.command
+}
+
 export interface RootMoveResult {
   command: string
   /** comanda a fost tastată în terminalul curent (altfel: de copiat) */
   typed: boolean
-  /** fişierele care n-au ajuns în inbox (atunci nu tastăm nimic) */
+  /** de ce NU a fost tastată: 'notPrompt' = în prim-plan rulează un program (mc, vim, less…), nu un shell */
+  outcome: TypeOutcome | 'none'
+  /** fişierele care n-au ajuns în inbox (atunci nu există comandă) */
   failed: string[]
 }
 
-/** Upload în inbox-ul agentului + comanda `sudo install` tastată (nu rulată) în terminalul `sid`.
-    Comanda se tastează DOAR dacă toate fişierele au ajuns în inbox — altfel ar instala ceva lipsă. */
+/** Upload în inbox-ul agentului + comanda `sudo` tastată (nu rulată) în terminalul `sid`.
+    Comanda există DOAR dacă toate fişierele au ajuns în inbox: gateway-ul o construieşte cu hash-ul
+    fiecăruia, iar comanda refuză un fişier schimbat între timp. */
 export async function uploadAndMoveAsRoot(o: {
   hostId: number; hostName: string; dir: string; files: { file: File; name: string }[]; sid?: string
 }): Promise<RootMoveResult> {
@@ -95,6 +107,8 @@ export async function uploadAndMoveAsRoot(o: {
     const id = await startUpload({ hostId: o.hostId, hostName: o.hostName, dest: u.upload_path, name: u.name, file })
     if (uploadStore.get(id)?.state !== 'done') failed.push(u.name)
   }
-  if (failed.length) return { command: plan.command, typed: false, failed }
-  return { command: plan.command, typed: typeCommandInto(o.sid, plan.command), failed }
+  if (failed.length) return { command: '', typed: false, outcome: 'none', failed }
+  const command = await rootMoveCommand(o.hostId, plan.plan_id)
+  const outcome = typeCommandOutcome(o.sid, command)
+  return { command, typed: outcome === 'typed', outcome, failed }
 }

@@ -1,6 +1,7 @@
 import type { Host } from '../lib/api'
 import { copyText } from '../lib/clipboard'
 import { useI18n } from '../lib/i18n'
+import { notifyToast } from '../lib/notify'
 import { insertPathInto } from '../lib/transfers'
 import { cancelUpload, dirName, discardUpload, dismissUpload, fmtBytes, fmtEta, fmtRate, openFilesAt, pauseUpload, resumeUpload, retryUpload } from '../lib/uploads'
 import { cancelDownload, discardDownload, dismissDownload, pauseDownload, restartDownload, resumeDownload, resumeInterrupted, retryDownload } from '../lib/downloads'
@@ -175,7 +176,13 @@ export function JobRow(props: { job: UploadJob; hostName: string; insertSid?: st
           aider) ea E rezultatul. Copiere mereu; inserare doar în sesiunea activă a aceluiaşi host.
           done download: fişierul e deja salvat, nu e nimic de copiat/inserat. */}
       {j.state === 'done' && canInsert && (
-        <button type="button" onClick={() => insertPathInto(props.insertSid, j.dest)} className={`${BTN} wt-info`}
+        <button type="button" className={`${BTN} wt-info`}
+          onClick={() => {
+            // tastăm doar la un prompt de shell (bracketed paste); altfel copiem şi spunem de ce
+            if (!insertPathInto(props.insertSid, j.dest)) {
+              void copyText(j.dest).then((ok) => { if (ok) notifyToast(t('transfers.insertNotTyped'), 'warn') })
+            }
+          }}
           aria-label={`${t('transfers.insertPath')} ${j.name}`}>{t('transfers.insertPath')}</button>
       )}
       {j.state === 'done' && !down && !copy && (

@@ -958,9 +958,14 @@ export default function SessionView(props: {
     ;((window as unknown as { __wtTerms?: Map<string, Terminal> }).__wtTerms ??= new Map()).set(session.id, term)
     // ţintă pentru „insert path" (motorul de upload tastează calea aici după commit)
     // false = n-am tastat (doar-citire / mut / socket închis): apelantul oferă „Copy" în loc
-    registerInsertTarget(session.id, (text) => {
-      if (muteRef.current || readOnlyRef.current || wsRef.current?.readyState !== WebSocket.OPEN) return false
-      send(text); term.focus(); return true
+    // Tastăm doar ca bracketed paste, când programul din prim-plan l-a cerut (shell/readline) —
+    // altfel literele ar fi comenzi în mc/vim/less/htop (lib/transfers.ts typeIntoOutcome).
+    registerInsertTarget(session.id, {
+      send: (text) => {
+        if (muteRef.current || readOnlyRef.current || wsRef.current?.readyState !== WebSocket.OPEN) return false
+        send(text); term.focus(); return true
+      },
+      bracketedPaste: () => term.modes.bracketedPasteMode === true,
     })
     // Paste cu FIŞIERE (captură, înaintea handler-ului xterm de pe textarea): preluăm doar când
     // clipboardul aduce fişiere/imagini; textul simplu nu trece pe aici — xterm îl lipeşte ca

@@ -44,7 +44,7 @@ export default function WriteDeniedBanner(props: {
   const user = props.host.agent_user || ''
   const acl = setfaclCommand(user, props.dir)
   const [busy, setBusy] = useState(false)
-  const [result, setResult] = useState<{ command: string; typed: boolean } | null>(null)
+  const [result, setResult] = useState<{ command: string; typed: boolean; notPrompt: boolean } | null>(null)
   const [err, setErr] = useState('')
   const pick = useRef<HTMLInputElement>(null)
 
@@ -55,7 +55,7 @@ export default function WriteDeniedBanner(props: {
       const r = await uploadAndMoveAsRoot({ hostId: props.host.id, hostName: props.host.name, dir: props.dir,
                                             files, sid: props.sessionId || undefined })
       if (r.failed.length) { setErr(t('files.denied.inboxFailed', { names: r.failed.slice(0, 3).join(', ') })); return }
-      setResult({ command: r.command, typed: r.typed })
+      setResult({ command: r.command, typed: r.typed, notPrompt: r.outcome === 'notPrompt' })
       props.onMoved?.()
       if (r.typed) notifyToast(t('files.denied.typedToast'), 'info')
     } catch (e) {
@@ -104,6 +104,7 @@ export default function WriteDeniedBanner(props: {
           {result && (result.typed
             ? <p className="mt-1 wt-good" role="status" data-testid="wt-files-root-typed">{t('files.denied.typed')}</p>
             : <div className="mt-1" role="status">
+                {result.notPrompt && <p className="wt-warn" data-testid="wt-files-root-not-prompt">{t('files.denied.notPrompt')}</p>}
                 <p className="text-slate-300">{t('files.denied.copyThis')}</p>
                 <CmdBox cmd={result.command} label={t('files.denied.optRoot')} testid="wt-files-root-cmd" />
               </div>)}

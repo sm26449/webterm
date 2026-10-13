@@ -150,20 +150,47 @@ export const markPasteHintSeen = (): void => lsSet(PASTE_HINT_KEY, '1')
 // Job-ul trăieşte în motor, nu în componentă: când se termină, tab-ul care l-a pornit poate
 // fi închis. Atunci NU tastăm nicăieri (ar ateriza în alt terminal, poate pe alt host) — rândul
 // oferă „Copy path" în loc. SessionView se înscrie la montare şi se retrage la demontare.
-/** Ţinta întoarce false când NU a tastat nimic (sesiune doar-citire / mută / socket închis). */
-const targets = new Map<string, (text: string) => boolean | void>()
-export function registerInsertTarget(sid: string, fn: ((text: string) => boolean | void) | null): void {
-  if (fn) targets.set(sid, fn); else targets.delete(sid)
+export interface InsertTarget {
+  /** trimite textul pe drumul unei taste; false = n-a trimis (doar-citire / mut / socket închis) */
+  send: (text: string) => boolean | void
+  /** aplicaţia din prim-plan a cerut bracketed paste (DECSET 2004) — xterm `modes.bracketedPasteMode` */
+  bracketedPaste: () => boolean
+}
+const targets = new Map<string, InsertTarget>()
+export function registerInsertTarget(sid: string, target: InsertTarget | null): void {
+  if (target) targets.set(sid, target); else targets.delete(sid)
 }
 export const hasInsertTarget = (sid: string | undefined): boolean => !!sid && targets.has(sid)
+
+/** Caractere care n-au ce căuta într-un text TASTAT în terminal: C0/C1, DEL, separatori de
+    linie/paragraf, controale bidi şi zero-width. ESC lipseşte deci şi el: textul nu poate ieşi
+    din parantezele de bracketed paste (`ESC[201~`). */
+const UNSAFE_TYPED = new RegExp('[\\x00-\\x1f\\x7f-\\x9f\\u2028\\u2029\\u200b-\\u200f\\u202a-\\u202e\\u2066-\\u2069\\ufeff]')
+export const isSafeToType = (text: string): boolean => !!text && text.length <= 32768 && !UNSAFE_TYPED.test(text)
+
+export type TypeOutcome = 'typed' | 'noTarget' | 'unsafe' | 'notPrompt' | 'refused'
+const PASTE_START = '\x1b[200~'
+const PASTE_END = '\x1b[201~'
+
 /** Tastează `text` (FĂRĂ Enter) în terminalul `sid` prin ACELAŞI drum ca o tastă — deci aceleaşi
-    porţi (doar-citire, mut, accesul la sesiune verificat din nou pe server). false = n-a tastat. */
-export function typeInto(sid: string | undefined, text: string): boolean {
-  const fn = sid ? targets.get(sid) : undefined
-  if (!fn) return false
-  return fn(text) !== false
+    porţi (doar-citire, mut, accesul la sesiune verificat din nou pe server).
+
+    Doar ca BRACKETED PASTE, şi doar când programul din prim-plan l-a cerut (3.6.9 review L2).
+    Ca taste simple, într-un program în mod raw (mc, vim, less, htop) fiecare literă ar fi o
+    comandă a lui. bash, zsh, fish şi readline activează bracketed paste implicit, deci regula
+    limitează tastarea la prompturi; în rest → 'notPrompt' şi apelantul oferă „Copy". Textul nu are
+    caractere de control (deci nici ESC): nu poate închide parantezele mai devreme. */
+export function typeIntoOutcome(sid: string | undefined, text: string): TypeOutcome {
+  const t = sid ? targets.get(sid) : undefined
+  if (!t) return 'noTarget'
+  if (!isSafeToType(text)) return 'unsafe'
+  let bracketed = false
+  try { bracketed = t.bracketedPaste() === true } catch { bracketed = false }
+  if (!bracketed) return 'notPrompt'
+  return t.send(PASTE_START + text + PASTE_END) === false ? 'refused' : 'typed'
 }
-/** tastează `<cale citată> ` (spaţiu, FĂRĂ Enter) în terminalul `sid`; false dacă nu mai există */
+export const typeInto = (sid: string | undefined, text: string): boolean => typeIntoOutcome(sid, text) === 'typed'
+/** tastează `<cale citată> ` (spaţiu, FĂRĂ Enter) în terminalul `sid`; false dacă n-a tastat */
 export function insertPathInto(sid: string | undefined, path: string): boolean {
   return typeInto(sid, shellQuote(path) + ' ')
 }

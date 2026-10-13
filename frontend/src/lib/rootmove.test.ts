@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { ApiError, apiErrorFrom, errText, scalarVars } from './api'
-import { clearDenied, errIsWriteDenied, isDenied, isSafeToType, isWriteDenied, markDenied, setfaclCommand, typeCommandInto } from './rootmove'
-import { registerInsertTarget } from './transfers'
+import { clearDenied, errIsWriteDenied, isDenied, isSafeToType, isWriteDenied, markDenied, setfaclCommand, typeCommandInto, typeCommandOutcome } from './rootmove'
+import { insertPathInto, registerInsertTarget, typeIntoOutcome } from './transfers'
 import { isDefinitiveError } from './uploads'
 
 const tr = (k: string, v?: Record<string, string | number>) => {
@@ -82,30 +82,62 @@ describe('setfacl command (copy only)', () => {
   })
 })
 
-describe('typing the move-as-root command', () => {
-  const cmd = "sudo install -m 0644 -- /home/webterm/.webterm/inbox/x '/srv/bin/lists/a b' && rm -f -- /home/webterm/.webterm/inbox/x"
-  it('types exactly the command, never a newline, through the registered terminal', () => {
+describe('typing the move-as-root command (bracketed paste, prompts only)', () => {
+  const cmd = "sudo sh -c 'u=$1 d=$2; shift 2' webterm-move webterm /srv/bin/lists /home/webterm/.webterm/inbox/x 4 " + 'a'.repeat(64) + " '/srv/bin/lists/a b'"
+  const target = (typed: string[], bracketed: boolean | (() => boolean), ok = true) => ({
+    send: (t: string) => { typed.push(t); return ok },
+    bracketedPaste: typeof bracketed === 'function' ? bracketed : () => bracketed,
+  })
+  it('at a prompt that asked for bracketed paste: the command, wrapped in ESC[200~ … ESC[201~, no newline', () => {
     const typed: string[] = []
-    registerInsertTarget('sid1', (t) => { typed.push(t); return true })
+    registerInsertTarget('sid1', target(typed, true))
     expect(typeCommandInto('sid1', cmd)).toBe(true)
-    expect(typed).toEqual([cmd])
+    expect(typed).toEqual(['\x1b[200~' + cmd + '\x1b[201~'])
     expect(typed[0]).not.toMatch(/[\r\n]/)
     registerInsertTarget('sid1', null)
   })
+  it('bracketed paste OFF (mc, less, htop, a raw-mode program) → nothing typed, outcome notPrompt', () => {
+    const typed: string[] = []
+    registerInsertTarget('raw', target(typed, false))
+    expect(typeCommandOutcome('raw', cmd)).toBe('notPrompt')
+    expect(typeCommandInto('raw', cmd)).toBe(false)
+    expect(insertPathInto('raw', '/home/webterm/x.png')).toBe(false)
+    expect(typed).toEqual([])
+    registerInsertTarget('raw', null)
+  })
+  it('foreground unknown (the mode cannot be read) → nothing typed', () => {
+    const typed: string[] = []
+    registerInsertTarget('unk', target(typed, () => { throw new Error('disposed') }))
+    expect(typeIntoOutcome('unk', cmd)).toBe('notPrompt')
+    expect(typed).toEqual([])
+    registerInsertTarget('unk', null)
+  })
+  it('the path insert follows the same rule: wrapped at a prompt', () => {
+    const typed: string[] = []
+    registerInsertTarget('p', target(typed, true))
+    expect(insertPathInto('p', "/home/webterm/it's.png")).toBe(true)
+    expect(typed).toEqual(["\x1b[200~'/home/webterm/it'\\''s.png' \x1b[201~"])
+    registerInsertTarget('p', null)
+  })
   it('refuses control characters, ESC (bracketed-paste breakout), bidi and separators', () => {
-    for (const bad of [cmd + '\r', cmd + '\n', cmd + '\x1b[201~', 'a‮b', 'a b', 'a\x00b', 'a\x9bb', ''])
+    for (const bad of [cmd + '\r', cmd + '\n', cmd + '\x1b[201~', 'a\u202eb', 'a\u2028b', 'a\x00b', 'a\x9bb', ''])
       expect(isSafeToType(bad)).toBe(false)
     const typed: string[] = []
-    registerInsertTarget('sid2', (t) => { typed.push(t); return true })
+    registerInsertTarget('sid2', target(typed, true))
+    expect(typeCommandOutcome('sid2', cmd + '\x1b[201~; id')).toBe('unsafe')
     expect(typeCommandInto('sid2', cmd + '\n')).toBe(false)
     expect(typed).toEqual([])
+    // a path: shellQuote already strips control bytes, so the only ESCs typed are the brackets
+    expect(insertPathInto('sid2', '/tmp/a\x1b[201~b')).toBe(true)
+    expect(typed).toEqual(["\x1b[200~'/tmp/a[201~b' \x1b[201~"])
     registerInsertTarget('sid2', null)
   })
   it('a read-only / closed terminal types nothing (the target says no) → false', () => {
-    registerInsertTarget('ro', () => false)
+    registerInsertTarget('ro', target([], true, false))
+    expect(typeCommandOutcome('ro', cmd)).toBe('refused')
     expect(typeCommandInto('ro', cmd)).toBe(false)
     registerInsertTarget('ro', null)
-    expect(typeCommandInto('gone', cmd)).toBe(false)
+    expect(typeCommandOutcome('gone', cmd)).toBe('noTarget')
     expect(typeCommandInto(undefined, cmd)).toBe(false)
   })
 })
