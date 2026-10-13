@@ -11,6 +11,7 @@ re-sincronizată la FIECARE login şi step-up SSO (legăturile `source='sso'`; c
 ating). Fără niciun grup mapat: „fără acces încă". „Cine ajunge aici" se decide în IdP + prin
 `OIDC_ALLOWED_GROUPS`.
 """
+import logging
 import time
 from urllib.parse import parse_qs, urlparse
 
@@ -20,6 +21,7 @@ from fastapi.responses import RedirectResponse
 from . import audit, authz, config, db, oidc, security, ssomap
 
 router = APIRouter(prefix="/api/oidc", dependencies=[Depends(authz.declared)])
+log = logging.getLogger("webterm")
 
 # Cookie care leagă `state` de BROWSERUL care a pornit login-ul (anti login-CSRF / fixare de
 # sesiune): fără el, cineva ar putea captura un code+state valid pentru contul LUI şi păcăli
@@ -50,7 +52,14 @@ async def login(request: Request, intent: str = "login", host_id: int = 0):
     if not config.OIDC_ENABLED:
         return RedirectResponse("/?sso=disabled", status_code=303)
     intent = "stepup" if intent == "stepup" else "login"
-    url = oidc.begin(intent=intent, host_id=host_id or None)
+    try:
+        url = oidc.begin(intent=intent, host_id=host_id or None)
+    except oidc.OidcError as e:
+        # 3.6.8: the IdP's discovery document is unreachable — before, a raw exception → 500.
+        # Counted (System health "SSO is broken"), and the person gets the login page back.
+        oidc.note_failure(e.kind)
+        log.warning("SSO login could not start (%s): %s", e.kind, str(e)[:200])
+        return _redirect_err("unavailable")
     state = parse_qs(urlparse(url).query).get("state", [""])[0]
     resp = RedirectResponse(url, status_code=303)
     _set_state_cookie(resp, state)   # legăm state-ul de acest browser (verificat la callback)
@@ -80,10 +89,14 @@ async def callback(request: Request, code: str = "", state: str = ""):
     try:
         info = oidc.complete(state, code)
     except oidc.OidcError as e:
-        # refuz (grup lipsă, token invalid, state expirat) — auditat, ca să poţi face debug
+        # refuz (grup lipsă, token invalid, state expirat) — auditat, ca să poţi face debug.
+        # 3.6.8: clasificat (e.kind) şi numărat — un IdP căzut nu mai arată ca o zi liniştită.
+        oidc.note_failure(e.kind)
         await audit.record(time.time(), "sso", ip, "GET", "/api/oidc/callback", 403,
-                           "SSO refuzat: %s" % str(e)[:120])
-        return _redirect_err("denied")
+                           "SSO refuzat (%s): %s" % (e.kind, str(e)[:120]))
+        return _redirect_err("unavailable" if e.kind in ("discovery", "token_endpoint")
+                             else "denied")
+    oidc.note_success()
 
     sub, email = info["sub"], info["email"]
 

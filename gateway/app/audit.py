@@ -133,8 +133,12 @@ async def prune() -> None:
         await db.execute(
             "DELETE FROM audit_log WHERE id NOT IN"
             " (SELECT id FROM audit_log ORDER BY ts DESC LIMIT ?)", MAX_ROWS)
-    except Exception:                       # noqa: BLE001
-        pass
+    except Exception:
+        # 3.6.8: this used to be `pass` — a retention that silently stopped (disk full, DB locked,
+        # a corrupt index) let the table grow forever with nobody told. The janitor records the
+        # failure and System health shows it (syshealth "janitor").
+        log.exception("audit: retention prune failed")
+        raise
 
 
 _HOST_IN_PATH = re.compile(r"^/(?:api/hosts|ws/hosts)/(\d+)(?:/|$)")

@@ -789,3 +789,27 @@ def notify_cert(item: dict, recovered: bool = False) -> None:
     sev = {"expiring": "warning", "expiring_soon": "warning", "ok": "ok"}.get(state, "critical")
     _fire(title.format(**params), body.format(**params), kind="tls_cert", severity=sev,
           key=_CERT_TEXT[state]["key"], params=params)
+
+
+# ── System health (3.6.8, syshealth.py) ───────────────────────────────────────
+# The transition logic (dedup, escalation, recovery, mute) lives in syshealth._maybe_alert;
+# here we only send. `kind` is the check's alert kind ("health", or "gateway_disk" for the disk
+# check so the preference people already set for it still applies).
+def notify_health(kind: str, severity: str, title: str, body: str, key: str, params: dict) -> None:
+    _fire(title, body, kind=kind, severity=severity, key=key, params=params)
+
+
+def record_inapp_only(kind: str, severity: str, title: str, body: str, key: str,
+                      params: dict) -> None:
+    """In-app history ONLY — no email, no webhook. For the alert-delivery check: an alert about a
+    failing channel must not be sent through that channel (it would fail again and update the very
+    status the check reads — a loop), and nothing here can ever reach `_send_blocking`."""
+    async def _run():
+        try:
+            await alert_history.record(kind, severity, title, body, key=key, params=params)
+        except Exception as e:              # noqa: BLE001 — best-effort, like _fire
+            log.warning("in-app alert not recorded (%s): %s", kind, e)
+    try:
+        asyncio.get_running_loop().create_task(_run())
+    except RuntimeError:
+        pass

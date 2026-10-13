@@ -2017,7 +2017,7 @@ class AgentConnection(SessionSource):
             raise ForwardError(resp.get("msg") or resp.get("code") or "get_log failed")
         return resp.get("log", "")
 
-    async def _store_diagnostics(self, diag) -> None:
+    async def _store_diagnostics(self, diag, clock: bool = True) -> None:
         """Cache live + persist ultimul snapshot (folosit şi din push, şi din refresh on-demand).
         MĂRGINIT (audit 2026-10-04, S-03): `metrics` şi `hostname` erau deja plafonate, dar
         diagnosticele intrau în DB aşa cum veneau — un agent compromis putea trimite 15 MB la
@@ -2040,6 +2040,8 @@ class AgentConnection(SessionSource):
                                          detail="snapshot refused; the last good one is kept")
             return
         self.diagnostics = diag
+        if clock:                       # a `stale` reply is an OLD snapshot: its time says nothing
+            _note_agent_clock(self.host_id, diag.get("collected_at"))
         summary = updates_summary(diag)
         sup = supervision_summary(diag)
         await db.execute(
@@ -2055,7 +2057,7 @@ class AgentConnection(SessionSource):
         if not resp.get("ok"):
             raise ForwardError(resp.get("msg") or resp.get("code") or "diagnostics failed")
         diag = resp.get("diag") or {}
-        await self._store_diagnostics(diag)
+        await self._store_diagnostics(diag, clock=not resp.get("stale"))
         return diag
 
     async def open_serial(self, device: str, baud: int, bits: int, parity: str,
@@ -2599,6 +2601,26 @@ def updates_summary(diag) -> Optional[dict]:
     return {"count": u["count"],
             "security": sec if isinstance(sec, int) and not isinstance(sec, bool) else None,
             "manager": _clip(u.get("manager"), 32)}
+
+
+# 3.6.8 (System health): the agent's clock, WITHOUT an agent change — every diagnostics snapshot
+# already carries `collected_at` (the agent's time.time() when it collected it), and it is sent
+# right after collection. host_id → (skew seconds, agent ahead > 0; received at). In memory only:
+# it is refreshed hourly per host and means nothing after a restart.
+agent_clock: dict = {}
+AGENT_CLOCK_MAX_HOSTS = 10000
+
+
+def _note_agent_clock(host_id, collected_at) -> None:
+    if isinstance(collected_at, bool) or not isinstance(collected_at, (int, float)):
+        return
+    now = time.time()
+    skew = float(collected_at) - now
+    if skew != skew or abs(skew) > 10 * 365 * 86400:      # NaN / absurd → ignore
+        return
+    if host_id not in agent_clock and len(agent_clock) >= AGENT_CLOCK_MAX_HOSTS:
+        return
+    agent_clock[host_id] = (round(skew, 1), now)
 
 
 SUPERVISION_MODES = ("systemd", "cron", "none")

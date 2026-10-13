@@ -33,7 +33,8 @@ from .errors import ApiError
 from . import webauthn_api
 from . import fscopy
 from . import (alert_history, audit, authz, backup, certmon, cloudbackup, config, core, db,
-               email_alerts, health, replay, security, signing, ssomap, totp, updatecheck)
+               email_alerts, health, healthcmd, replay, security, signing, ssomap, syshealth,
+               totp, updatecheck)
 
 log = logging.getLogger("webterm")
 # Garda de la nivel de router (3.6, fail-closed): o rută care nu-şi declară permisiunea
@@ -163,6 +164,7 @@ async def app_state(request: Request):
     backup_ready = False
     signing_missing = False
     signing_locked = False
+    health_attention = None
     hostkey_changed = []
     if user is not None:
         # 3.6: totul de mai jos e filtrat pe rolul contului — alarmele doar pe hosturile pe care
@@ -188,6 +190,10 @@ async def app_state(request: Request):
             signing_missing = not signing.key_exists()
             signing_locked = (signing.key_exists() and signing.is_encrypted()
                               and not signing.is_loaded())
+        # 3.6.8: „N items need attention" (System health) — warning/critical, not muted. From
+        # memory (the last run), so /api/state stays cheap.
+        if grants.has_global("security.view"):
+            health_attention = syshealth.attention(await syshealth.rows())
     return {"setup_required": not has_user,
             "authenticated": user is not None,
             "email": user["email"] if user else None,
@@ -201,6 +207,7 @@ async def app_state(request: Request):
             "backup_ready": backup_ready,
             "signing_missing": signing_missing,
             "signing_locked": signing_locked,
+            "health_attention": health_attention,
             # overlay-ul de identitate; clientul rezolvă ${email}/${host}/${time}
             "watermark": (await _load_watermark()) if user is not None else None,
             # guardrail de comenzi (verificat client-side la Enter, via OSC 133)
@@ -4281,6 +4288,25 @@ async def cert_renew_session(host_id: int, body: CertRenewIn, request: Request,
         command = certmon.renew_command(domain)
     except ValueError:
         raise ApiError(400, "certs.badDomain", "not a certificate name WebTerm monitors")
+    result = await _open_gateway_terminal(
+        host_id, user, body, command, "TLS renew: %s" % domain[:60], CERT_RENEW_ORIGIN,
+        certmon.HEADER_CERT)
+    audit.detail(request, "certificate renewal terminal for %s (command typed, not run)" % domain)
+    log.warning("certificate renewal terminal opened on host #%d for %s by %s",
+                host_id, domain, user["email"] if not isinstance(user, dict) else user.get("email"))
+    return dict(result, command=command)
+
+
+async def _open_gateway_terminal(host_id: int, user, body, command: str, title: str,
+                                 origin: str, header: str) -> dict:
+    """The ONE path that types a root command into a terminal on the gateway host (3.6.7 cert
+    renewal, generalised in 3.6.8 for System health). The caller has already checked its own
+    permission (`certs.renew`, Owner-only), `session.open` on the host, that the host is the one
+    the Owner designated, and built `command` from a server-side allow-list (certmon.renew_command
+    / healthcmd.render). Here: an agent host only → a FRESH second factor (also without
+    require_2fa; tokens never) → the session, created already owned by this Owner with an origin
+    that makes it private (read-only for everyone else, never shareable). The command is TYPED by
+    a readline prompt, never run by us (certmon.typed_session_cmd)."""
     row = await db.fetchone("SELECT * FROM hosts WHERE id=?", host_id)
     if not row:
         raise ApiError(404, "host.missing", "no such host")
@@ -4291,9 +4317,9 @@ async def cert_renew_session(host_id: int, body: CertRenewIn, request: Request,
     try:
         # creator + origin go into the INSERT itself (no separate stamp afterwards): the row is
         # never visible as "everyone's" or as a plain web session, not even while 'creating'
-        result = await core.create_session(host_id, "TLS renew: %s" % domain[:60], body.rows,
-                                           body.cols, body.tz, certmon.typed_session_cmd(command),
-                                           created_by_id=user["id"], origin=CERT_RENEW_ORIGIN)
+        return await core.create_session(host_id, title, body.rows, body.cols, body.tz,
+                                         certmon.typed_session_cmd(command, header),
+                                         created_by_id=user["id"], origin=origin)
     except core.AgentGone:
         raise ApiError(409, "host.offline", "the host is offline (the agent is not connected)")
     except core.SessionLimitReached:
@@ -4302,9 +4328,157 @@ async def cert_renew_session(host_id: int, body: CertRenewIn, request: Request,
                        vars={"limit": core.MAX_SESSIONS_HINT})
     except RuntimeError as e:
         raise _runtime_api_error(e, "session.createFailed")
-    audit.detail(request, "certificate renewal terminal for %s (command typed, not run)" % domain)
-    log.warning("certificate renewal terminal opened on host #%d for %s by %s",
-                host_id, domain, user["email"] if not isinstance(user, dict) else user.get("email"))
+
+
+# ── System health (3.6.8, syshealth.py) ──────────────────────────────────────
+# One list of everything that can fail silently, with why it matters, what to do, and — when the
+# fix needs root on the gateway host — the exact command (copy, or for an Owner: typed, not run,
+# into a terminal there; the same gates as the certificate renewal above).
+async def _health_json(request: Request) -> dict:
+    grants = getattr(request.state, "grants", None)
+    can_manage = bool(grants and grants.has_global("settings.manage"))
+    can_terminal = bool(grants and grants.has_global("certs.renew"))
+    rows = await syshealth.rows()
+    # host ids → names, ONLY for hosts this principal may see (the rest are counted, not named)
+    ids = set()
+    for r in rows:
+        try:
+            ids.update(h for h in json.loads(r.get("hosts") or "[]") if isinstance(h, int))
+        except ValueError:
+            pass
+    names = {}
+    if ids:
+        vis = await authz.visible_hosts(grants, "host.view") if grants else set()
+        for h in await db.fetchall("SELECT id, name FROM hosts WHERE id IN (%s)"
+                                   % ",".join("?" * len(ids)), *sorted(ids)):
+            if authz.in_visible(vis, h["id"]):
+                names[h["id"]] = h["name"]
+    now = time.time()
+    checks = [syshealth.view(r, now, names) for r in rows]
+    checks.sort(key=lambda c: (c["muted"], -syshealth.RANK.get(c["severity"], 0), c["id"]))
+    if not can_manage:
+        # commands are for the people who can act on them; a viewer sees what and why
+        for c in checks:
+            c["commands"] = []
+    host = None
+    if can_terminal:
+        hid = await _cert_renew_host_id()
+        if hid:
+            row = await db.fetchone("SELECT id, name FROM hosts WHERE id=?", hid)
+            if row:
+                host = {"id": row["id"], "name": row["name"]}
+    try:
+        last = float(await _get_setting(syshealth.K_LAST_RUN, "0") or 0)
+    except ValueError:
+        last = 0.0
+    return {"checks": checks, "attention": syshealth.attention(rows, now),
+            "checked_at": last or None, "can_manage": can_manage, "can_terminal": can_terminal,
+            "terminal_host": host, "retry_after": syshealth.manual_retry_after()}
+
+
+@router.get("/api/health")
+async def health_status(request: Request, user=Depends(authz.perm('security.view'))):
+    # cookie only: the automation-token allow-list stays exactly what it was (route_auth_test)
+    return await _health_json(request)
+
+
+HEALTH_RECHECK_BUDGET = 45.0
+
+
+@router.post("/api/health/check")
+async def health_recheck(request: Request, user=Depends(authz.perm('settings.manage'))):
+    """"Re-check now": every tier, rate-limited instance-wide (it opens outbound connections)."""
+    retry = syshealth.manual_retry_after()
+    if retry:
+        raise ApiError(429, "health.rateLimited", "a check just ran; retry in %ds" % retry,
+                       headers={"Retry-After": str(retry)}, vars={"retry": retry})
+    syshealth.mark_manual()
+    try:
+        await asyncio.wait_for(syshealth.run_all(), timeout=HEALTH_RECHECK_BUDGET)
+    except asyncio.TimeoutError:
+        log.warning("system health: the manual re-check exceeded %.0f s", HEALTH_RECHECK_BUDGET)
+    return await _health_json(request)
+
+
+_CHECK_ID_RE = re.compile(r"^[a-z_]{1,24}(?:\.[a-z_]{1,24})?$")
+
+
+class HealthMuteIn(BaseModel):
+    mode: str = Field(..., max_length=8)        # 7d | 30d | change | off
+
+
+@router.post("/api/health/{check_id}/mute")
+async def health_mute(check_id: str, body: HealthMuteIn, request: Request,
+                      user=Depends(authz.perm('settings.manage'))):
+    if not _CHECK_ID_RE.match(check_id or "") or body.mode not in syshealth.MUTE_MODES:
+        raise ApiError(400, "health.badMute", "unknown check or mute mode")
+    try:
+        await syshealth.mute(check_id, body.mode, user["email"] if isinstance(user, dict) else "")
+    except KeyError:
+        raise ApiError(404, "health.missing", "no such check")
+    audit.detail(request, "system health check %s: mute %s" % (check_id, body.mode))
+    return await _health_json(request)
+
+
+HEALTH_FIX_ORIGIN = "health-fix"
+
+
+class HealthTerminalIn(BaseModel):
+    check_id: str = Field("", max_length=50)
+    index: int = Field(0, ge=0, le=healthcmd.MAX_COMMANDS - 1)
+    rows: int = Field(24, ge=2, le=500)
+    cols: int = Field(80, ge=2, le=1000)
+    tz: str = None
+    stepup_grant: str = ""
+    stepup_password: str = ""
+    stepup_totp: str = ""
+
+
+@router.post("/api/hosts/{host_id}/health-terminal")
+async def health_terminal(host_id: int, body: HealthTerminalIn, request: Request,
+                          user=Depends(authz.perm('certs.renew'))):
+    """Open a terminal on the gateway host with a System health fix TYPED, not run.
+
+    The client names a CHECK and which of its commands (index) — never a command, a template or a
+    parameter. The command is the one the server derived for that check's CURRENT result,
+    re-rendered from the allow-list now (healthcmd.render). Gates, in order, like the certificate
+    renewal: `certs.renew` (Owner-only) → `session.open` on the host → it is the designated
+    gateway host → the check exists and has that command (a certificate name must still be one
+    WebTerm monitors) → a fresh second factor → a private session (origin `health-fix`)."""
+    await authz.require_on(request, host_id, "session.open")
+    want = await _cert_renew_host_id()
+    if not want:
+        raise ApiError(409, "certs.noRenewHost",
+                       "pick the gateway host first (Settings → Infrastructure → Certificates)")
+    if want != host_id:
+        raise ApiError(409, "certs.wrongRenewHost", "this is not the host picked for renewals")
+    cid = body.check_id or ""
+    row = None
+    if _CHECK_ID_RE.match(cid):
+        row = next((r for r in await syshealth.rows() if r.get("id") == cid), None)
+    if row is None:
+        raise ApiError(404, "health.missing", "no such check")
+    try:
+        stored = json.loads(row.get("commands") or "[]")
+    except ValueError:
+        stored = []
+    if (not isinstance(stored, list) or body.index >= len(stored)
+            or not isinstance(stored[body.index], dict)):
+        raise ApiError(400, "health.noCommand", "this check has no such command")
+    spec = stored[body.index]
+    if spec.get("t") == "cert_renew" and (spec.get("p") or {}).get("domain") not in \
+            certmon.renew_domains(forward_domain()):
+        raise ApiError(400, "certs.badDomain", "not a certificate name WebTerm monitors")
+    try:
+        command = healthcmd.render(spec.get("t"), spec.get("p") or {})["text"]
+    except healthcmd.CommandError:
+        raise ApiError(400, "health.noCommand", "this check has no such command")
+    result = await _open_gateway_terminal(host_id, user, body, command, "Health fix: %s" % cid,
+                                          HEALTH_FIX_ORIGIN, certmon.HEADER_HEALTH)
+    audit.detail(request, "system health terminal for %s: %s (command typed, not run)"
+                 % (cid, command[:200]))
+    log.warning("system health terminal opened on host #%d for %s by %s", host_id, cid,
+                user.get("email") if isinstance(user, dict) else "?")
     return dict(result, command=command)
 
 
@@ -4418,6 +4592,7 @@ async def backup_status(user=Depends(authz.perm('backups.manage'))):
         "next_due": backup.next_due(sched, last),
         "backups": backup.list_backups(),
         "retention_days": backup.RETENTION_DAYS,
+        "restore_verified_at": float(await _get_setting(syshealth.K_RESTORE_VERIFIED, "0") or 0) or None,
     }
 
 
@@ -4482,6 +4657,48 @@ async def backup_restore(request: Request, user=Depends(authz.perm('backups.mana
         os._exit(0)
     asyncio.create_task(_restart_soon())
     return {"ok": True, "restarting": True, **info}
+
+
+async def _restore_verified(request: Request, what: str) -> None:
+    """3.6.8: a backup that was never restored is a hope, not a backup. A successful verification
+    is recorded (System health → "backup.restore") and audited."""
+    await _set_setting(syshealth.K_RESTORE_VERIFIED, str(time.time()))
+    audit.detail(request, "backup verified (decrypted, unpacked, database integrity OK): %s" % what)
+
+
+@router.post("/api/backup/stored/{name}/verify")
+async def backup_verify_stored(name: str, request: Request,
+                               user=Depends(authz.perm('backups.manage'))):
+    """Verify a stored scheduled snapshot: unpack + `PRAGMA integrity_check` + the vault key is
+    there. Nothing is restored, nothing leaves the server."""
+    try:
+        info = await asyncio.to_thread(backup.verify_stored, name)
+    except FileNotFoundError:
+        raise ApiError(404, "backup.missing", "no such backup")
+    except ValueError as e:
+        raise _backup_value_error(e)
+    await _restore_verified(request, name[:80])
+    return {"ok": True, **info}
+
+
+@router.post("/api/backup/verify")
+async def backup_verify_upload(request: Request, user=Depends(authz.perm('backups.manage'))):
+    """Verify a downloaded .wtbk (the file in the body, the passphrase in X-Restore-Pass, like
+    restore): decrypt + unpack + integrity check, WITHOUT staging anything."""
+    passphrase = urllib.parse.unquote(request.headers.get("X-Restore-Pass", ""))
+    if not passphrase:
+        raise ApiError(400, "backup.passphraseMissing", "the backup passphrase is missing")
+    data = await request.body()
+    if len(data) > 512 * 1024 * 1024:
+        raise ApiError(413, "backup.tooLarge", "file too large")
+    if not data:
+        raise ApiError(400, "backup.emptyFile", "empty file")
+    try:
+        info = await asyncio.to_thread(backup.verify_restorable, data, passphrase)
+    except ValueError as e:
+        raise _backup_value_error(e)
+    await _restore_verified(request, "uploaded file")
+    return {"ok": True, **info}
 
 
 @router.post("/api/backup/schedule")
@@ -9122,7 +9339,7 @@ async def create_share(sid: str, request: Request, body: ShareIn = ShareIn(),
     if not row:
         raise ApiError(404, "session.missing", "no such session")
     # 3.6.7 (review F4): a certificate-renewal terminal (sudo on the gateway host) is never shared
-    if _origin(row) == CERT_RENEW_ORIGIN:
+    if _origin(row) in ROOT_TERMINAL_ORIGINS:
         raise ApiError(403, "certs.renewSessionPrivate",
                        "a certificate renewal terminal cannot be shared")
     # 3.6: link-ul public e o extensie a sesiunii — doar pe a TA (sau pre-3.6, sau cu
@@ -10521,6 +10738,9 @@ async def _fresh_user(user):
 
 
 CERT_RENEW_ORIGIN = "cert-renew"
+# 3.6.8: every session that types a ROOT command on the gateway host (cert renewal, System health
+# fixes) is private: only its Owner types, others may watch, nobody can share it.
+ROOT_TERMINAL_ORIGINS = frozenset({CERT_RENEW_ORIGIN, "health-fix"})
 
 
 def _origin(row) -> str:
@@ -10541,7 +10761,7 @@ async def _ws_access(user_id: int, row) -> str:
     # 3.6.7 (security review F4): a certificate-renewal terminal runs `sudo` on the gateway host.
     # Only the Owner who opened it may type there — not an Admin with session.manage, who could
     # otherwise type into it right after the Owner entered the sudo password. Others may watch.
-    if live and _origin(row) == CERT_RENEW_ORIGIN and row["created_by_id"] != user_id:
+    if live and _origin(row) in ROOT_TERMINAL_ORIGINS and row["created_by_id"] != user_id:
         if "session.watch" in have or "session.open" in have:
             return "ro"
         return "none"

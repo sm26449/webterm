@@ -21,7 +21,9 @@ import json
 import logging
 import os
 import time
+import urllib.error
 import urllib.request
+from collections import deque
 from typing import Optional
 from urllib.parse import urlencode
 
@@ -57,18 +59,30 @@ def _http_json(url: str, data: Optional[bytes] = None, headers: Optional[dict] =
         return json.loads(r.read().decode("utf-8"))
 
 
+def _fetch_discovery() -> dict:
+    try:
+        doc = _http_json(config.OIDC_ISSUER + "/.well-known/openid-configuration")
+    except Exception as e:                          # noqa: BLE001 — reţea / TLS / JSON
+        raise OidcError("discovery unreachable: %s" % (str(e)[:160] or e.__class__.__name__),
+                        kind="discovery")
+    if not isinstance(doc, dict):
+        raise OidcError("discovery document is not an object", kind="discovery")
+    # OIDC cere ca `issuer` din discovery să fie EXACT cel configurat. Verificăm (normalizând
+    # slash-ul final) — altfel validarea `iss` a tokenului s-ar face contra unei valori luate
+    # din acelaşi document (circular), iar un endpoint greşit/ostil ar putea muta ancora.
+    iss = str(doc.get("issuer", "")).rstrip("/")
+    if iss != config.OIDC_ISSUER:
+        raise OidcError("discovery issuer mismatch: %r != %r" % (iss, config.OIDC_ISSUER),
+                        kind="discovery")
+    return doc
+
+
 def discovery() -> dict:
-    """Documentul OIDC al IdP-ului, cache-uit pe viaţa procesului."""
+    """Documentul OIDC al IdP-ului, cache-uit pe viaţa procesului. 3.6.8: un eşec ridică
+    `OidcError(kind="discovery")` (înainte, excepţia brută urca până la un 500 pe /login)."""
     global _disco
     if _disco is None:
-        doc = _http_json(config.OIDC_ISSUER + "/.well-known/openid-configuration")
-        # OIDC cere ca `issuer` din discovery să fie EXACT cel configurat. Verificăm (normalizând
-        # slash-ul final) — altfel validarea `iss` a tokenului s-ar face contra unei valori luate
-        # din acelaşi document (circular), iar un endpoint greşit/ostil ar putea muta ancora.
-        iss = str(doc.get("issuer", "")).rstrip("/")
-        if iss != config.OIDC_ISSUER:
-            raise OidcError("discovery issuer mismatch: %r != %r" % (iss, config.OIDC_ISSUER))
-        _disco = doc
+        _disco = _fetch_discovery()
     return _disco
 
 
@@ -124,7 +138,96 @@ def begin(intent: str = "login", host_id: Optional[int] = None) -> str:
 
 
 class OidcError(Exception):
-    pass
+    """`kind` (3.6.8, System health): WHY a login failed, so "SSO is broken for everyone" can be
+    told apart from "this person is not in the group". Before, every failure collapsed into
+    `?sso_error=denied` and an IdP that had been unreachable for a day looked exactly like a
+    quiet day. System kinds (counted as "SSO broken"): discovery, token_endpoint, invalid_client,
+    clock_skew, token_invalid, idp_config. Everything else is `user` (state, nonce, group…)."""
+
+    def __init__(self, msg: str = "", kind: str = "user"):
+        super().__init__(msg)
+        self.kind = kind if kind in KINDS else "other"
+
+
+KINDS = ("discovery", "token_endpoint", "invalid_client", "clock_skew", "token_invalid",
+         "idp_config", "user", "other")
+SYSTEM_KINDS = frozenset(KINDS) - {"user"}
+
+# Ferestre de eşecuri, în memorie (un singur proces): (ts, kind). Mărginită — /callback e public.
+_failures: deque = deque(maxlen=200)
+_last_success = 0.0
+_probe: dict = {"ts": 0.0, "ok": None, "kind": "", "error": ""}
+
+
+def note_failure(kind: str) -> None:
+    _failures.append((time.time(), kind if kind in KINDS else "other"))
+
+
+def note_success() -> None:
+    global _last_success
+    _last_success = time.time()
+
+
+def failure_stats(window: float = 3600.0, now: Optional[float] = None) -> dict:
+    """{count, kinds: {kind: n}, last_success, first_ts} — only SYSTEM failures in the window."""
+    now = time.time() if now is None else now
+    kinds: dict = {}
+    first = 0.0
+    for ts, k in list(_failures):
+        if now - ts > window or k not in SYSTEM_KINDS:
+            continue
+        kinds[k] = kinds.get(k, 0) + 1
+        first = ts if not first else min(first, ts)
+    return {"count": sum(kinds.values()), "kinds": kinds, "last_success": _last_success,
+            "first_ts": first}
+
+
+def probe() -> dict:
+    """Blocking (run in a thread): fetch discovery FRESH (not the cache) and the JWKS. Hourly
+    from syshealth, so an IdP that went away is noticed before the next person tries to log in."""
+    global _jwks_client
+    out = {"ts": time.time(), "ok": False, "kind": "", "error": ""}
+    try:
+        doc = _fetch_discovery()
+        jwks = _http_json(str(doc.get("jwks_uri") or ""))
+        if not isinstance(jwks, dict) or not isinstance(jwks.get("keys"), list) or not jwks["keys"]:
+            raise OidcError("the JWKS has no keys", kind="discovery")
+        out["ok"] = True
+    except OidcError as e:
+        out.update(kind=e.kind, error=str(e)[:200])
+    except Exception as e:                          # noqa: BLE001 — jwks_uri unreachable etc.
+        out.update(kind="discovery", error=(str(e)[:200] or e.__class__.__name__))
+    _probe.clear()
+    _probe.update(out)
+    return dict(out)
+
+
+def probe_status() -> dict:
+    return dict(_probe)
+
+
+def _classify_token_error(e: Exception) -> str:
+    if isinstance(e, urllib.error.HTTPError):
+        body = b""
+        try:
+            body = e.read(2048) or b""
+        except Exception:                           # noqa: BLE001
+            pass
+        if e.code in (400, 401) and b"invalid_client" in body:
+            return "invalid_client"
+        if e.code == 401:
+            return "invalid_client"
+        return "token_endpoint"
+    return "token_endpoint"
+
+
+def _classify_jwt_error(e: Exception) -> str:
+    if isinstance(e, (jwt.ImmatureSignatureError, jwt.ExpiredSignatureError,
+                      jwt.InvalidIssuedAtError)):
+        return "clock_skew"
+    if isinstance(e, (jwt.PyJWKClientError, urllib.error.URLError, OSError)):
+        return "discovery"
+    return "token_invalid"
 
 
 _AUTH_TIME_LEEWAY = 30          # acelaşi ceas-leeway ca la exp/iat
@@ -151,7 +254,7 @@ def _check_stepup_auth_time(auth_time, requested_at: float) -> None:
                             "to emit the auth_time claim in the id_token, or set "
                             "WEBTERM_OIDC_REQUIRE_AUTH_TIME=0 to accept prompt=login alone")
             raise OidcError("step-up without auth_time (configure the IdP to emit auth_time, "
-                            "or set WEBTERM_OIDC_REQUIRE_AUTH_TIME=0)")
+                            "or set WEBTERM_OIDC_REQUIRE_AUTH_TIME=0)", kind="idp_config")
         if not _auth_time_missing_logged:
             _auth_time_missing_logged = True
             log.warning("SSO step-up: the IdP did not return `auth_time` although max_age=0 was "
@@ -207,10 +310,10 @@ def complete(state: str, code: str) -> dict:
                          headers={"Content-Type": "application/x-www-form-urlencoded",
                                   "Accept": "application/json"})
     except Exception as e:                          # noqa: BLE001 — orice eșec de rețea/IdP
-        raise OidcError("token exchange failed: %s" % e)
+        raise OidcError("token exchange failed: %s" % e, kind=_classify_token_error(e))
     id_token = tok.get("id_token")
     if not id_token:
-        raise OidcError("no id_token in token response")
+        raise OidcError("no id_token in token response", kind="token_invalid")
 
     try:
         signing_key = _jwks().get_signing_key_from_jwt(id_token)
@@ -223,7 +326,7 @@ def complete(state: str, code: str) -> dict:
             options={"require": ["exp", "iat", "iss", "aud"]},
         )
     except Exception as e:                          # noqa: BLE001 — semnătură/claim invalid
-        raise OidcError("id_token validation failed: %s" % e)
+        raise OidcError("id_token validation failed: %s" % e, kind=_classify_jwt_error(e))
 
     if claims.get("nonce") != txn["nonce"]:
         raise OidcError("nonce mismatch")
@@ -241,7 +344,7 @@ def complete(state: str, code: str) -> dict:
     # PĂSTRĂM valoarea exactă (True/False/None): None = claim absent, decizia o ia apelantul.
     email_verified = claims.get("email_verified")
     if not sub:
-        raise OidcError("no subject in id_token")
+        raise OidcError("no subject in id_token", kind="token_invalid")
     # 3.6.2 (maparea grup → rol): claim ABSENT ≠ claim gol. Absent = IdP-ul nu-l trimite deloc
     # (scope/mapare lipsă) → legăturile SSO NU se ating; prezent dar gol → „niciun grup" → se scot.
     return {"sub": str(sub), "email": email, "email_verified": email_verified,

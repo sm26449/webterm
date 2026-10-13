@@ -32,6 +32,22 @@ _SEMVER = re.compile(r"v?(\d+)\.(\d+)\.(\d+)$")
 _TTL_OK = 86400        # o dată pe zi
 _TTL_ERR = 3600        # reîncercare mai devreme dacă GitHub n-a răspuns
 _cache = {"at": 0.0, "data": None, "ttl": _TTL_OK}
+# 3.6.8 (System health): the gateway's clock against GitHub's `Date` header, measured on the
+# daily call we already make — no extra request. {skew, uncertainty, at}; skew > 0 = we are ahead.
+clock = {"skew": None, "uncertainty": None, "at": 0.0}
+
+
+def _note_clock(date_header, t0: float, t1: float) -> None:
+    import email.utils
+    try:
+        dt = email.utils.parsedate_to_datetime(date_header or "")
+    except (TypeError, ValueError, IndexError):
+        return
+    if dt is None or dt.tzinfo is None:
+        return
+    mid = (t0 + t1) / 2.0
+    clock.update(skew=round(mid - dt.timestamp(), 1),
+                 uncertainty=round((t1 - t0) / 2.0 + 1.0, 1), at=t1)
 
 
 def _parse(s: str):
@@ -52,7 +68,10 @@ def _fetch_latest_tag() -> str:
     if not url.lower().startswith("https://"):   # doar HTTPS spre API-ul de release (anti-SSRF)
         raise ValueError("update-check URL must be https")
     req = urllib.request.Request(url, headers=headers)  # noqa: S310 — schemă validată mai sus
+    t0 = time.time()
     with urllib.request.urlopen(req, timeout=10) as r:  # noqa: S310
+        hdrs = getattr(r, "headers", None)
+        _note_clock(hdrs.get("Date") if hdrs is not None else None, t0, time.time())
         tags = json.load(r)
     versions = [(_parse(t.get("name", "")), t.get("name")) for t in tags]
     versions = sorted((v for v in versions if v[0]), reverse=True)

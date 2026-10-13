@@ -19,6 +19,8 @@ proces se spune explicit, în loc să se pretindă făcut.
     docker exec -it webterm-app-1 python3 -m app.admin roles you@example.com
     docker exec -it webterm-app-1 python3 -m app.admin promote you@example.com
     docker exec -it webterm-app-1 python3 -m app.admin sso-only someone@example.com [--force]
+    docker exec webterm-app-1 python3 -m app.admin health [--json] [--all] [--wait S --newer-than T]
+    docker exec -u webterm webterm-app-1 python3 -m app.admin vacuum
 
 `promote` (3.6) e calea break-glass a rolurilor: face contul Owner peste toată flota. Cine are
 shell pe server are deja DB-ul şi cheia seifului, deci comanda nu acordă nimic nou — doar
@@ -232,6 +234,84 @@ async def cmd_logout_all(args) -> None:
     print("✓ every session and derived link for %s is gone" % user["email"])
 
 
+def cmd_health(args) -> int:
+    """`python3 -m app.admin health` (3.6.8): the System health list as the gateway last stored
+    it — the SAME rows Settings → System health shows (one source of truth; upgrade.sh prints
+    this). Read-only: the DB is opened `mode=ro`, no migrations, nothing written."""
+    import json
+    import sqlite3
+    from . import syshealth
+    deadline = time.time() + max(0, args.wait)
+
+    def load():
+        try:
+            con = sqlite3.connect("file:%s?mode=ro" % config.DB_PATH, uri=True, timeout=5)
+        except sqlite3.Error:
+            return None, []
+        try:
+            con.row_factory = sqlite3.Row
+            last = con.execute("SELECT value FROM app_settings WHERE key=?",
+                               (syshealth.K_LAST_RUN,)).fetchone()
+            rows = [dict(r) for r in con.execute("SELECT * FROM health_checks")]
+            return float(last[0]) if last and last[0] else None, rows
+        except (sqlite3.Error, ValueError):
+            return None, []
+        finally:
+            con.close()
+
+    last, rows = load()
+    while (last is None or last < args.newer_than) and time.time() < deadline:
+        time.sleep(2)
+        last, rows = load()
+    now = time.time()
+    views = [syshealth.view(r, now) for r in rows]
+    if args.json:
+        print(json.dumps({"checked_at": last, "checks": views}, indent=1))
+        return 0
+    if last is None or not rows:
+        print("not checked yet (the gateway runs the checks ~20 s after it starts)")
+        return 0
+    if args.newer_than and last < args.newer_than:
+        print("(results from %d s before this run — the gateway has not re-checked yet)"
+              % int(args.newer_than - last))
+    shown = [v for v in views if syshealth.RANK.get(v["severity"], 0) >= syshealth.RANK["info"]
+             and (args.all or not v["muted"])]
+    shown.sort(key=lambda v: (-syshealth.RANK.get(v["severity"], 0), v["id"]))
+    if not shown:
+        print("all %d checks OK" % len(views))
+        return 0
+    for v in shown:
+        print("[%s] %s%s" % (v["severity"].upper(), v["message"], " (muted)" if v["muted"] else ""))
+        why = syshealth.WHY.get(v["why_key"], "")
+        if why:
+            print("    why: %s" % why)
+        rec = syshealth.RECS.get(v["recommendation_key"], "")
+        if rec:
+            print("    fix: %s" % rec)
+        for c in v["commands"]:
+            print("    $ %s" % c["text"])
+        if v["doc"]:
+            print("    see: %s" % v["doc"])
+    hidden = len([v for v in views if v["muted"]]) if not args.all else 0
+    if hidden:
+        print("(%d muted — `health --all` shows them)" % hidden)
+    return 0
+
+
+async def cmd_vacuum(_args) -> None:
+    """`python3 -m app.admin vacuum` (3.6.8): compact the database (System health "db.size").
+    VACUUM takes an exclusive lock while it runs — seconds on a typical instance — so the gateway
+    may answer slowly meanwhile; it is never run automatically."""
+    row = await db.fetchone("PRAGMA page_count")
+    size = await db.fetchone("PRAGMA page_size")
+    before = int(row[0]) * int(size[0])
+    print("compacting %s (%.1f MB)…" % (config.DB_PATH, before / 1024 ** 2))
+    await db.execute("VACUUM")
+    row = await db.fetchone("PRAGMA page_count")
+    after = int(row[0]) * int(size[0])
+    print("✓ %.1f MB → %.1f MB" % (before / 1024 ** 2, after / 1024 ** 2))
+
+
 async def main() -> None:
     ap = argparse.ArgumentParser(
         prog="python3 -m app.admin",
@@ -253,14 +333,23 @@ async def main() -> None:
     p.add_argument("email")
     p.add_argument("--force", action="store_true",
                    help="also for the last Owner with a local password, or with SSO not configured")
+    p = sub.add_parser("health", help="the System health list, as Settings shows it (read-only)")
+    p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.add_argument("--all", action="store_true", help="include muted checks")
+    p.add_argument("--wait", type=float, default=0, help="seconds to wait for a fresh run")
+    p.add_argument("--newer-than", type=float, default=0, dest="newer_than",
+                   help="wait (up to --wait) for a run after this epoch time")
+    sub.add_parser("vacuum", help="compact the database (locks it for the duration)")
     args = ap.parse_args()
 
+    if args.cmd == "health":
+        raise SystemExit(cmd_health(args))
     await db.connect()
     try:
         await {"list": cmd_list, "passwd": cmd_passwd,
                "disable-2fa": cmd_disable_2fa, "logout-all": cmd_logout_all,
                "roles": cmd_roles, "promote": cmd_promote,
-               "sso-only": cmd_sso_only}[args.cmd](args)
+               "sso-only": cmd_sso_only, "vacuum": cmd_vacuum}[args.cmd](args)
     finally:
         await db.close()
 

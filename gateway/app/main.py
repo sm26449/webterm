@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -16,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .errors import ApiError
 from . import (api, audit, authz, backup, certmon, config, core, db, email_alerts, health,
-               oidc_api, security, signing, ssomap, webauthn_api)
+               oidc_api, security, signing, ssomap, syshealth, webauthn_api)
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -25,9 +24,6 @@ log = logging.getLogger("webterm")
 _JANITOR_INTERVAL = 24 * 3600      # curățare arhivă o dată pe zi
 
 
-# Sub pragul ăsta, discul gateway-ului e o problemă operaţională, nu o curiozitate:
-# SQLite şi transcripturile devin nescriibile, iar produsul pare sănătos până la primul login.
-_DISK_WARN_PCT = 10.0
 
 
 async def _warn_if_insecure_forwards() -> None:
@@ -58,28 +54,6 @@ async def _warn_if_sso_ungated() -> None:
             "WEBTERM_OIDC_ALLOWED_GROUPS — otherwise anyone the IdP admits becomes a full admin.")
 
 
-async def _warn_if_disk_low() -> None:
-    """Alertă când discul gateway-ului se umple.
-
-    Rulează din bucla reaper-ului (60s), nu din janitor (24h): un disc se umple în minute
-    sub un `yes`, iar o fereastră de o zi înseamnă că afli după ce s-a rupt. Folosim direct
-    `statvfs`, nu `storage_stats` — acela parcurge directoarele de transcripturi şi ar fi
-    prea scump pe minut; aici avem nevoie doar de spaţiul liber."""
-    try:
-        st = await asyncio.to_thread(os.statvfs, config.DATA_DIR)
-    except OSError:
-        return
-    free, total = st.f_bavail * st.f_frsize, st.f_blocks * st.f_frsize
-    # `not free` era adevărat şi pentru 0 — adică alerta tăcea exact pe discul COMPLET plin,
-    # starea cea mai gravă. Comparăm explicit.
-    if total <= 0:
-        return
-    pct = free * 100.0 / total
-    if pct < _DISK_WARN_PCT:
-        log.warning("gateway disk low: %.1f%% free (%d of %d bytes)", pct, free, total)
-        email_alerts.notify_disk_low(free, total, pct)
-
-
 async def _warn_if_signing_locked() -> None:
     """Cheie de semnare blocată + agenţi în urmă → alertă (throttled la 12h).
 
@@ -101,22 +75,42 @@ async def _warn_if_signing_locked() -> None:
 async def _janitor() -> None:
     """Șterge periodic transcripturile arhivate mai vechi de retenție."""
     while True:
-        try:
-            archived = await core.archive_closed_transcripts()
-            removed = await asyncio.to_thread(core.purge_archive)
-            await audit.prune()             # aceeași fereastră de retenție ca arhiva
-            await _warn_if_signing_locked()
-            await _warn_if_insecure_forwards()
-            await _warn_if_sso_ungated()
-            if archived:
-                log.info("janitor: archived %d transcripts of sessions closed >%d days ago",
-                         archived, config.CLOSED_ARCHIVE_DAYS)
-            if removed:
-                log.info("janitor: deleted %d archived transcripts (>%d days)",
-                         removed, config.ARCHIVE_RETENTION_DAYS)
-        except Exception:
-            log.exception("the janitor failed")
+        await _janitor_once()
         await asyncio.sleep(_JANITOR_INTERVAL)
+
+
+async def _janitor_once() -> list:
+    """One janitor pass. 3.6.8: each step on its own — one failing step no longer skips the
+    others (an exception in the archive step used to skip the audit retention too) — and the
+    outcome is RECORDED (`syshealth.janitor_report`): System health shows a janitor that fails or
+    stopped running, where before there was only a log line nobody read."""
+    errors = []
+
+    async def step(name, coro_fn):
+        try:
+            return await coro_fn()
+        except Exception:
+            log.exception("the janitor failed at %s", name)
+            errors.append(name)
+            return None
+
+    archived = await step("archive", core.archive_closed_transcripts)
+    removed = await step("purge", lambda: asyncio.to_thread(core.purge_archive))
+    await step("audit", audit.prune)             # aceeași fereastră de retenție ca arhiva
+    await step("signing", _warn_if_signing_locked)
+    await step("forwards", _warn_if_insecure_forwards)
+    await step("sso", _warn_if_sso_ungated)
+    if archived:
+        log.info("janitor: archived %d transcripts of sessions closed >%d days ago",
+                 archived, config.CLOSED_ARCHIVE_DAYS)
+    if removed:
+        log.info("janitor: deleted %d archived transcripts (>%d days)",
+                 removed, config.ARCHIVE_RETENTION_DAYS)
+    try:
+        await syshealth.janitor_report(errors)
+    except Exception:
+        log.exception("the janitor could not record its outcome")
+    return errors
 
 
 _REAPER_INTERVAL = 60.0        # cât de des verificăm liveness-ul sesiunilor
@@ -137,7 +131,8 @@ async def _session_reaper() -> None:
             await core.prune_agent_events()      # retenţie 7 zile pe jurnalul de conexiune agent
             await core.purge_pending_ssh_keys()  # chei generate în Add host şi nefolosite (~1h)
             await core.sweep_hosts_offline()     # alertă la host căzut / revenit
-            await _warn_if_disk_low()
+            # 3.6.8: discul gateway-ului e acum check-ul `gateway.disk` din System health (la 30 s,
+            # avertisment la WEBTERM_DISK_WARN_PCT, critic la WEBTERM_DISK_CRIT_PCT)
             await authz.poll_external_epoch()    # legături schimbate din `python3 -m app.admin`
         except Exception:
             log.exception("the session reaper failed")
@@ -297,7 +292,12 @@ async def lifespan(app: FastAPI):
     backupt = asyncio.create_task(_scheduled_backup())        # backup-uri programate (off/daily/weekly)
     # 3.6.7: the TLS certificate Traefik serves (read-only handshake; alerts before expiry)
     certt = asyncio.create_task(certmon.loop(api.forward_domain))
+    # 3.6.8: System health (every check, alerting on transitions) + the optional dead-man switch
+    healtht = asyncio.create_task(syshealth.loop())
+    heartbeatt = asyncio.create_task(syshealth.heartbeat_loop())
     yield
+    healtht.cancel()
+    heartbeatt.cancel()
     certt.cancel()
     janitor.cancel()
     reaper.cancel()
