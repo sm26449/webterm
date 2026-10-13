@@ -247,6 +247,7 @@ const en: Lang = {
     'err.files.dirMissing': "The folder {dir} does not exist on the host.",
     'err.files.rootMoveBad': "That folder or file name cannot be put in a command: {detail}",
     'err.files.rootMoveBackslash': "A folder or file name with a backslash (\\) cannot be put in a move command safely (some shells, such as fish, read it as an escape). Rename the file, or upload it into the agent's home and move it yourself.",
+    'err.files.rootMoveBusy': "Too many \"move as root\" uploads are open on this host right now — finish or wait for the others (they expire after 24 hours), then try again.",
     'err.files.rootMoveNoUser': "WebTerm does not know the agent's user on this host (or it is not a plain user name), so it cannot build a safe move command.",
     'err.files.rootMoveForeign': "This file is being staged by another user's \"move as root\".",
     'err.files.rootMoveGone': "That move-as-root upload expired or was already used — upload again.",

@@ -113,6 +113,13 @@ Fixes from an independent review of this release's changes, before it shipped.
   renames that to `../<name>`. Cleanup is `rm -f f` inside the checked folder and an `rmdir`,
   never `rm -rf` as root. Shellcheck-clean (POSIX sh, 0.9 and 0.11); run as root on dash/GNU and
   BusyBox, including swaps of the temp folder and of the target folder.
+- **Move-as-root plans no longer evict other users' plans (low, re-review).** Why: plans (512)
+  and their hash states (4096 — fewer than 512 plans × 20 files) were capped globally with
+  oldest-first eviction, so one user planning repeatedly could drop everyone else's open moves.
+  Now a user keeps at most 8 open plans (their own oldest makes room); a host (64) or the gateway
+  (512) at its cap refuses a new plan with 429 `files.rootMoveBusy` instead of evicting anyone;
+  the hash states have room for every file of every open plan and only expired ones are ever
+  evicted (no room → the plan is refused).
 - **Move-as-root messages via `printf "%s"` (low, re-review).** dash's `echo` interprets
   backslash escapes in its arguments, so a value echoed by the script could write terminal escape
   sequences; every message is now `printf "webterm: %s" …`.

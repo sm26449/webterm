@@ -5244,7 +5244,7 @@ async def fs_upload_status(host_id: int, path: str, upload_id: str, user=None) -
 # resume after a gateway restart), a second upload_id into the same path, or a one-shot write
 # breaks the entry, and no command can be built from it.
 STAGE_TTL = 24 * 3600
-_STAGE_MAX = 4096
+_STAGE_MAX = 512 * 20 + 256                       # ≥ rootmove.MAX_PLANS × MAX_FILES (+ slack), see stage_track
 
 
 class _Stage:
@@ -5263,16 +5263,21 @@ class _Stage:
 _stages: dict = {}                                  # (host_id, path) -> _Stage
 
 
-def stage_track(host_id: int, path: str) -> None:
-    """Start hashing what is uploaded into `path` (a staged inbox file) from offset 0."""
+def stage_track(host_id: int, path: str) -> bool:
+    """Start hashing what is uploaded into `path` (a staged inbox file) from offset 0. False when
+    there is no room: only EXPIRED entries are evicted, never a live one (re-review L3: another
+    user's plan would lose its hash) — the caller then refuses the plan (fail closed). With
+    _STAGE_MAX ≥ rootmove.MAX_PLANS × rootmove.MAX_FILES that cannot happen while every entry
+    belongs to a live plan."""
     now = time.time()
-    if len(_stages) >= _STAGE_MAX:
+    if (host_id, path) not in _stages and len(_stages) >= _STAGE_MAX:
         for k, st in list(_stages.items()):
             if now - st.at > STAGE_TTL:
                 del _stages[k]
-        while len(_stages) >= _STAGE_MAX:
-            _stages.pop(next(iter(_stages)), None)
+        if len(_stages) >= _STAGE_MAX:
+            return False
     _stages[(host_id, path)] = _Stage()
+    return True
 
 
 def stage_forget(host_id: int, path: str) -> None:

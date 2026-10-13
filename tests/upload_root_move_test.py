@@ -172,19 +172,64 @@ def pure_checks():
           and rootmove.get_plan(p["plan_id"], now=1000.0 + rootmove.PLAN_TTL + 1) is None)
     rootmove.drop_plan(p["plan_id"])
     check("plan: dropped → its staged paths are free", rootmove.staged_owner(7, p["uploads"][0]["upload_path"]) is None)
-    saved = rootmove.MAX_PLANS
-    rootmove.MAX_PLANS = 2
+    saved = (rootmove.MAX_PLANS, rootmove.MAX_PLANS_PER_HOST, rootmove.MAX_PLANS_PER_USER)
+    rootmove.MAX_PLANS, rootmove.MAX_PLANS_PER_HOST, rootmove.MAX_PLANS_PER_USER = 4, 3, 2
+    live = []
     try:
         p1, _ = rootmove.new_plan(7, 1, INBOX, "/srv", ["a"], now=2000.0)
         p2, _ = rootmove.new_plan(7, 1, INBOX, "/srv", ["a"], now=2001.0)
         p3, dropped = rootmove.new_plan(7, 1, INBOX, "/srv", ["a"], now=2002.0)
-        check("plan: beyond MAX_PLANS the oldest is evicted (and reported)",
+        live += [p2, p3]
+        check("L3: beyond MAX_PLANS_PER_USER the user's OWN oldest plan makes room (and is reported)",
               [d["plan_id"] for d in dropped] == [p1["plan_id"]] and rootmove.get_plan(p1["plan_id"], now=2003.0) is None
               and rootmove.get_plan(p3["plan_id"], now=2003.0) is p3)
-        for q in (p2, p3):
-            rootmove.drop_plan(q["plan_id"])
+        q1, dropped = rootmove.new_plan(7, 2, INBOX, "/srv", ["a"], now=2003.0)
+        live.append(q1)
+        check("L3: another user's plan evicts nothing", dropped == [])
+        try:
+            rootmove.new_plan(7, 3, INBOX, "/srv", ["a"], now=2004.0)
+            check("L3: a host at MAX_PLANS_PER_HOST refuses a new plan (MoveBusy)", False)
+        except rootmove.MoveBusy:
+            check("L3: a host at MAX_PLANS_PER_HOST refuses a new plan (MoveBusy)",
+                  all(rootmove.get_plan(p["plan_id"], now=2004.0) is p for p in live))
+        r1, _ = rootmove.new_plan(8, 3, INBOX, "/srv", ["a"], now=2005.0)
+        live.append(r1)
+        try:
+            rootmove.new_plan(9, 4, INBOX, "/srv", ["a"], now=2006.0)
+            check("L3: the gateway at MAX_PLANS refuses a new plan, nobody's plan evicted", False)
+        except rootmove.MoveBusy as e:
+            check("L3: the gateway at MAX_PLANS refuses a new plan, nobody's plan evicted",
+                  e.dropped == [] and all(rootmove.get_plan(p["plan_id"], now=2006.0) is p for p in live))
+        try:
+            rootmove.new_plan(10, 5, INBOX, "/srv", ["a"], now=2007.0)
+            check("L3: …the full gateway refuses even a user under their own cap", False)
+        except rootmove.MoveBusy:
+            check("L3: …the full gateway refuses even a user under their own cap", True)
+        p4, dropped = rootmove.new_plan(9, 4, INBOX, "/srv", ["a"], now=2001.0 + rootmove.PLAN_TTL + 1)
+        live.append(p4)
+        check("L3: expired plans free their room (and are reported)",
+              {d["plan_id"] for d in dropped} >= {p2["plan_id"]}, [d["plan_id"] for d in dropped])
     finally:
-        rootmove.MAX_PLANS = saved
+        for q in live:
+            rootmove.drop_plan(q["plan_id"])
+        rootmove.MAX_PLANS, rootmove.MAX_PLANS_PER_HOST, rootmove.MAX_PLANS_PER_USER = saved
+    check("L3: room for the hash of every staged file of every live plan",
+          core._STAGE_MAX >= rootmove.MAX_PLANS * rootmove.MAX_FILES)
+    saved_stage = core._STAGE_MAX
+    core._STAGE_MAX = 2
+    try:
+        ok1, ok2 = core.stage_track(70, "/s/1"), core.stage_track(70, "/s/2")
+        ok3 = core.stage_track(70, "/s/3")
+        check("L3: stages full → refused, the live ones kept (no eviction)",
+              ok1 and ok2 and not ok3 and core.stage_result(70, "/s/1") is None and (70, "/s/1") in core._stages
+              and (70, "/s/3") not in core._stages)
+        check("L3: re-tracking an existing path needs no room", core.stage_track(70, "/s/2"))
+        core._stages[(70, "/s/1")].at -= core.STAGE_TTL + 1
+        check("L3: an expired stage makes room", core.stage_track(70, "/s/3") and (70, "/s/1") not in core._stages)
+    finally:
+        core._STAGE_MAX = saved_stage
+        for k in [(70, "/s/1"), (70, "/s/2"), (70, "/s/3")]:
+            core.stage_forget(*k)
 
 
 def _sha(b: bytes) -> str:
@@ -732,6 +777,27 @@ async def route_checks(owner, hid):
                   r.status_code == 400 and r.json().get("code") == "files.rootMoveBackslash", (r.status_code, r.text[:120]))
         r = await owner.post(url, json={"dir": "/srv/x", "names": ["f%d" % i for i in range(21)]})
         check("more than 20 names → 422", r.status_code == 422, r.status_code)
+        saved = rootmove.MAX_PLANS_PER_HOST
+        rootmove.MAX_PLANS_PER_HOST = sum(1 for p in rootmove._plans.values() if p["host_id"] == hid)
+        try:
+            n_before = len(rootmove._plans)
+            r = await owner.post(url, json={"dir": "/srv/x", "names": ["a"]})
+            check("L3: host at its plan cap → 429 files.rootMoveBusy, no plan added",
+                  r.status_code == 429 and r.json().get("code") == "files.rootMoveBusy"
+                  and len(rootmove._plans) <= n_before, (r.status_code, r.text[:120]))
+        finally:
+            rootmove.MAX_PLANS_PER_HOST = saved
+        saved = core._STAGE_MAX
+        core._STAGE_MAX = len(core._stages)
+        try:
+            n_before, s_before = len(rootmove._plans), dict(core._stages)
+            r = await op.post(url, json={"dir": "/srv/x", "names": ["a"]})
+            check("L3: no room for the hashes → 429, no plan, no live stage evicted",
+                  r.status_code == 429 and r.json().get("code") == "files.rootMoveBusy"
+                  and len(rootmove._plans) <= n_before and all(k in core._stages for k in s_before),
+                  (r.status_code, r.text[:120]))
+        finally:
+            core._STAGE_MAX = saved
         fake.inbox = "/tmp/evil"
         r = await owner.post(url, json={"dir": "/srv/x", "names": ["a"]})
         check("an unexpected inbox path from the agent → refused (no plan)",

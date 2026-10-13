@@ -277,29 +277,54 @@ def command(agent_user: str, inbox: str, target_dir: str, items: list) -> str:
 # hashes were in memory too). The index (host, staged path) → plan lets the upload routes refuse
 # anyone else writing into a staged file while its plan is live; the hash check would refuse the
 # result anyway, this keeps the error early and clear.
+#
+# Caps (re-review L3): a user's own live plans are capped (MAX_PLANS_PER_USER — the oldest of
+# THEIR plans makes room, an abandoned attempt never locks them out), and so are a host's and the
+# gateway's (MAX_PLANS_PER_HOST, MAX_PLANS): those REFUSE a new plan (MoveBusy → 429) instead of
+# evicting anybody else's live plan — before, one user could evict every other user's plans (and
+# with them the stage hashes) by planning 512 times. core._STAGE_MAX ≥ MAX_PLANS × MAX_FILES, so
+# every staged file of every live plan has its hash state.
 PLAN_TTL = 24 * 3600
 MAX_PLANS = 512
+MAX_PLANS_PER_HOST = 64
+MAX_PLANS_PER_USER = 8
 _plans: dict = {}          # plan_id -> {"plan_id","host_id","user_id","dir","inbox","uploads","at"}
 _staged: dict = {}         # (host_id, upload_path) -> plan_id
 
 
-def _expire(now: float) -> list:
-    """Drop plans older than PLAN_TTL, then the oldest beyond MAX_PLANS - 1. → the dropped plans."""
+class MoveBusy(MoveError):
+    """Too many live plans on this host or gateway (re-review L3): refused, nobody evicted.
+    `dropped` = plans that expired meanwhile (the caller forgets their stage hashes)."""
+
+    def __init__(self, msg: str, dropped: list):
+        super().__init__(msg)
+        self.dropped = dropped
+
+
+def _expire(now: float, user_id) -> list:
+    """Drop plans older than PLAN_TTL, then this USER's oldest beyond MAX_PLANS_PER_USER - 1 —
+    never another user's live plan. → the dropped plans."""
     gone = [pid for pid, p in _plans.items() if now - p["at"] > PLAN_TTL]
-    over = len(_plans) - len(gone) - MAX_PLANS + 1
+    mine = [pid for pid, p in _plans.items() if p["user_id"] == user_id and pid not in gone]
+    over = len(mine) - MAX_PLANS_PER_USER + 1
     if over > 0:
-        gone += [pid for pid in _plans if pid not in gone][:over]
+        gone += mine[:over]                      # insertion order = oldest first
     return [p for p in (drop_plan(pid) for pid in gone) if p]
 
 
 def new_plan(host_id: int, user_id: int, inbox: str, target_dir: str, names: list,
              now: float | None = None) -> tuple:
-    """→ (plan, dropped): the new plan (`plan_id`, `uploads`, …) and the older plans it evicted
-    (the caller forgets their stage hashes)."""
+    """→ (plan, dropped): the new plan (`plan_id`, `uploads`, …) and the plans that expired or
+    were this user's oldest beyond their cap (the caller forgets their stage hashes). MoveBusy
+    when the host or the gateway already holds its maximum of live plans."""
     now = time.time() if now is None else now
     target_dir = check_dir(target_dir)
     uploads = staged_paths(inbox, names, now)
-    dropped = _expire(now)
+    dropped = _expire(now, user_id)
+    if sum(1 for p in _plans.values() if p["host_id"] == host_id) >= MAX_PLANS_PER_HOST:
+        raise MoveBusy("too many open move-as-root uploads on this host", dropped)
+    if len(_plans) >= MAX_PLANS:
+        raise MoveBusy("too many open move-as-root uploads", dropped)
     pid = secrets.token_hex(16)
     plan = {"plan_id": pid, "host_id": host_id, "user_id": user_id, "dir": target_dir,
             "inbox": inbox, "uploads": uploads, "at": now}

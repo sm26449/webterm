@@ -3688,6 +3688,13 @@ async def _agent_user_of(host_id: int) -> str:
                        "the agent's user is unknown or not a plain user name")
 
 
+def _forget_plans(plans: list) -> None:
+    """The stage hashes of plans that are gone (expired, evicted, used or refused)."""
+    for old in plans:
+        for u in old["uploads"]:
+            core.stage_forget(old["host_id"], u["upload_path"])
+
+
 def _check_staged_owner(host_id: int, path: str, user) -> None:
     """A staged "move as root" file takes uploads only from the user who planned it."""
     owner = rootmove.staged_owner(host_id, path)
@@ -3724,13 +3731,17 @@ async def fs_root_move(host_id: int, body: RootMoveIn, request: Request,
         raise _file_api_error(e)
     try:
         plan, dropped = rootmove.new_plan(host_id, user["id"], inbox or "", body.dir, names)
+    except rootmove.MoveBusy as e:
+        _forget_plans(e.dropped)
+        raise ApiError(429, "files.rootMoveBusy", str(e))
     except rootmove.MoveError as e:
         raise ApiError(400, "files.rootMoveBad", str(e))
-    for old in dropped:
-        for u in old["uploads"]:
-            core.stage_forget(old["host_id"], u["upload_path"])
-    for u in plan["uploads"]:
-        core.stage_track(host_id, u["upload_path"])
+    _forget_plans(dropped)
+    if not all([core.stage_track(host_id, u["upload_path"]) for u in plan["uploads"]]):
+        # no room for the hash state without evicting a live one (re-review L3): no plan at all
+        rootmove.drop_plan(plan["plan_id"])
+        _forget_plans([plan])
+        raise ApiError(429, "files.rootMoveBusy", "too many open move-as-root uploads")
     audit.detail(request, "upload and move as root: %d file(s) into %s (planned)"
                  % (len(names), _show_path(body.dir)))
     log.info("upload-and-move-as-root planned on host #%d: %d file(s) into %s",

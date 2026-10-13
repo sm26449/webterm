@@ -245,6 +245,7 @@ const ro: Lang = {
     'err.files.dirMissing': "Dosarul {dir} nu există pe host.",
     'err.files.rootMoveBad': "Dosarul sau numele de fișier nu poate intra într-o comandă: {detail}",
     'err.files.rootMoveBackslash': "Un dosar sau un nume de fișier cu backslash (\\) nu poate fi pus în siguranță într-o comandă de mutare (unele shell-uri, ca fish, îl citesc drept escape). Redenumește fișierul sau încarcă-l în home-ul agentului și mută-l tu.",
+    'err.files.rootMoveBusy': "Sunt prea multe încărcări „mută ca root” deschise acum pe acest host — termină-le sau așteaptă-le pe celelalte (expiră după 24 de ore), apoi încearcă din nou.",
     'err.files.rootMoveNoUser': "WebTerm nu știe userul agentului pe acest host (sau nu e un nume de user simplu), deci nu poate construi o comandă de mutare sigură.",
     'err.files.rootMoveForeign': "Fișierul e pregătit de „mută ca root” al altui utilizator.",
     'err.files.rootMoveGone': "Upload-ul pentru „mută ca root” a expirat sau a fost deja folosit — urcă din nou.",
