@@ -9,6 +9,57 @@ back.
 
 ## [Unreleased]
 
+### Added
+- **System health (Settings → System health).** Why: a read-only audit of 3.6.7 found a whole
+  class of failures that only ever reached a log nobody reads: the host backup and certificate
+  timers reported only to journald; a revoked or expiring Cloudflare DNS token would surface only
+  when the wildcard expired; SMTP/webhook failures were visible only inside the Notifications tab
+  (so every other alert was silently lost too); the in-app backup was off by default with no
+  off-host copy and no restore ever verified; an agent update could stay deferred forever by a
+  session nobody closes; agents without autostart stayed offline after a reboot; every SSO
+  failure collapsed into `denied`, so an IdP outage looked like a quiet day; Authentik drifted
+  away from the pinned version; the Docker cleanup cron lived only on the host; the disk alert
+  fired only at 10 % free; startup warnings (http + forwards, SSO without a group gate) went to
+  the log; the audit retention swallowed its own exceptions. The principle now: whatever WebTerm
+  cannot fix from the UI it detects, notifies, explains and recommends, with the exact command.
+  One list (30 checks), sorted by severity, each with why it matters and what to do; alerts on
+  transitions only (and "resolved"), mute for 7 / 30 days or until it changes (audited), a
+  "N items need attention" dot on the gear, a settings search entry, English and Romanian.
+  `python3 -m app.admin health` prints the same rows, and `upgrade.sh` shows them at the end.
+- **Commands from an allow-list only** (`healthcmd.py`): a check stores template ids and
+  validated parameters, never a command string; the text is rendered (and re-validated) when shown
+  or typed. An Owner can have one typed — not run — into a terminal on the gateway host, through
+  the same gates as the 3.6.7 certificate renewal, now one shared path (fresh second factor,
+  private `health-fix` session). The client names a check and an index, never a command.
+- **Host helper `scripts/host-health.sh`** (hourly systemd timer, installed by install.sh /
+  upgrade.sh): checks the timers, the Cloudflare token (`/user/tokens/verify`, the token never on
+  a command line or in output) and the Authentik image against the version WebTerm pins — the
+  `authentik` profile of this install or a separate stack such as `/opt/authentik`, told apart by
+  the compose project label. It and the host timers write small status files into the data
+  volume; the gateway reads them as untrusted input (fixed names, O_NOFOLLOW, 4 KiB cap, strict
+  schema, never executed, never a source of commands). The gateway gets no new privilege.
+- **`scripts/docker-cleanup.sh`** + `webterm-docker-cleanup.timer` bring the hand-made host cron
+  into the repo: dangling images, unused non-WebTerm images past the retention, WebTerm images
+  beyond the last 7 versions (the running one and the rollback target always kept, the same rule
+  as upgrade.sh), old build cache. Never volumes, never containers. The old cron file is disabled
+  by `host-health.sh --install`.
+- **Backup verification**: Settings → Backup → *Verify* (unpack + database integrity check +
+  vault key present, nothing restored) and `scripts/restore.sh --verify` on the host; both are
+  recorded, so System health can say when a backup was last proven restorable.
+- **Dead-man switch**: `WEBTERM_HEARTBEAT_URL` (+ `_MINUTES`) pings an outside monitor while the
+  gateway is healthy — the one failure no in-app check can report.
+- Configurable disk thresholds `WEBTERM_DISK_WARN_PCT` (early warning, default 20 %) and
+  `WEBTERM_DISK_CRIT_PCT` (default 10 %); `WEBTERM_AGENT_OUTDATED_DAYS` (default 7).
+
+### Changed
+- SSO failures are classified (discovery, token endpoint, invalid_client, clock skew, invalid
+  token, IdP config, user) and counted; an unreachable IdP at login now returns to the login page
+  instead of a 500, and the IdP is probed hourly.
+- The janitor runs each step on its own and records failures; `audit.prune` no longer swallows
+  exceptions.
+- The alert-delivery problem is reported in the app only (never through the failing channel).
+- No agent change (agent stays v58).
+
 ## [3.6.7] — 2026-10-13 · agent (58)
 
 3.6.7 — TLS certificate monitoring with alerts, and Owner-only renewal in a terminal (typed, not run). No agent change.
