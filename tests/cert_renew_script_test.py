@@ -195,13 +195,30 @@ def setup(base):
     return inst, acme, fake
 
 
+IS_ROOT = os.geteuid() == 0
+NOBODY = 65534        # test mode is refused to root, so as root the suite runs the script as nobody
+
+
+def give_away(path):
+    """As root: hand the fixture tree to `nobody`, who runs the script in test mode."""
+    if not IS_ROOT:
+        return
+    for dp, dns, fns in os.walk(path):
+        os.chown(dp, NOBODY, NOBODY)
+        for n in fns:
+            os.chown(os.path.join(dp, n), NOBODY, NOBODY)
+
+
 def write_json(path, data):
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
     os.chmod(path, 0o600)
+    if IS_ROOT:
+        os.chown(path, NOBODY, NOBODY)
 
 
-def run(inst, fake, *args, probe_port=1, extra_env=None, script=None, test_mode=True, cwd=None):
+def run(inst, fake, *args, probe_port=1, extra_env=None, script=None, test_mode=True, cwd=None,
+        as_root=False):
     env = dict(os.environ)
     env.update({"DOCKER_TEST_BIN": os.path.join(fake, "bin", "docker"), "FAKE_DIR": fake,
                 "WEBTERM_CERT_PROBE": "127.0.0.1:%d" % probe_port, "WEBTERM_RENEW_POLL": "1"})
@@ -212,9 +229,11 @@ def run(inst, fake, *args, probe_port=1, extra_env=None, script=None, test_mode=
     for k in ("WEBTERM_ACME_DIR", "WEBTERM_TRAEFIK_CONTAINER", "SUDO_USER", "DOCKER"):
         env.pop(k, None)
     env.update(extra_env or {})
-    p = subprocess.run(["bash", script or os.path.join(inst, "scripts", "cert-renew.sh"), *args],
-                       stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env, timeout=60,
-                       cwd=cwd)
+    argv = ["bash", script or os.path.join(inst, "scripts", "cert-renew.sh"), *args]
+    if IS_ROOT and test_mode and not as_root:
+        argv = ["setpriv", "--reuid=%d" % NOBODY, "--regid=%d" % NOBODY, "--clear-groups", "--"] + argv
+    p = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env,
+                       timeout=60, cwd=cwd)
     return p.returncode, p.stdout + p.stderr
 
 
@@ -246,11 +265,15 @@ def main():
     try:
         inst, acme, fake = setup(base)
         backups = os.path.join(inst, "acme-backups")
-
-        print("── where it runs")
         stray = os.path.join(base, "stray", "scripts")
         os.makedirs(stray)
         shutil.copy(SCRIPT, stray)
+        os.makedirs(os.path.join(base, "plant"))
+        os.makedirs(os.path.join(base, "shim"))
+        os.chmod(base, 0o755)
+        give_away(base)
+
+        print("── where it runs")
         rc, out = run(inst, fake, "--report", script=os.path.join(stray, "cert-renew.sh"))
         check("refuses outside a WebTerm install dir (rc 2)", rc == 2 and "not a WebTerm install" in out, out[-300:])
 
@@ -397,7 +420,6 @@ def main():
 
         print("── review F1: no module shadowing (the script runs as root from the caller's cwd)")
         plant = os.path.join(base, "plant")
-        os.makedirs(plant)
         marker = os.path.join(base, "PWNED")
         for mod in ("json", "calendar", "re", "ssl", "tempfile", "base64"):
             open(os.path.join(plant, mod + ".py"), "w").write(
@@ -419,21 +441,101 @@ def main():
         check("outside test mode: a group-writable install dir → refused (rc 2)", rc == 2
               and "must be owned by root and not writable" in out, out[-300:])
         check("…and the DOCKER_TEST_BIN / WEBTERM_* overrides were not used", calls(fake) == "", calls(fake))
-        shim = os.path.join(base, "shim")
-        os.makedirs(shim)
-        open(os.path.join(shim, "id"), "w").write('#!/bin/sh\n[ "$1" = "-u" ] && { echo 0; exit 0; }\nexec /usr/bin/id "$@"\n')
-        os.chmod(os.path.join(shim, "id"), 0o755)
-        rc, out = run(inst, fake, "--report", extra_env={"SUDO_USER": "alice",
-                                                          "PATH": shim + ":" + os.environ.get("PATH", "")})
-        check("root via sudo: the test switch is ignored (and said so)", "ignored under sudo" in out
-              and rc == 2 and "must be owned by root" in out, out[-300:])
-        check("…so no override was honoured", calls(fake) == "", calls(fake))
+        # follow-up 1: ROOT never gets test mode — not with SUDO_USER blanked, not without sudo
+        # (cron, a root shell). As root we run it for real; otherwise in a user namespace where
+        # we are uid 0 (`unshare -r`), when the runner allows one.
+        for label, env_extra in (("SUDO_USER blanked", {"SUDO_USER": ""}), ("no sudo at all (cron, root shell)", {}),
+                                 ("SUDO_USER=alice", {"SUDO_USER": "alice"})):
+            reset_calls(fake)
+            if IS_ROOT:
+                rc, out = run(inst, fake, "--report", extra_env=env_extra, as_root=True)
+                ran = True
+            else:
+                envr = dict(os.environ, WEBTERM_CERT_RENEW_TEST="1", FAKE_DIR=fake,
+                            DOCKER_TEST_BIN=os.path.join(fake, "bin", "docker"), **env_extra)
+                envr.pop("SUDO_USER", None) if "SUDO_USER" not in env_extra else None
+                try:
+                    p_ = subprocess.run(["unshare", "-r", "bash", os.path.join(inst, "scripts", "cert-renew.sh"),
+                                         "--report"], env=envr, capture_output=True, text=True, timeout=60,
+                                        stdin=subprocess.DEVNULL)
+                    rc, out = p_.returncode, p_.stdout + p_.stderr
+                    ran = "unshare:" not in out
+                except FileNotFoundError:
+                    ran = False
+            if not ran:
+                print("  SKIP root test mode (%s): not root and no user namespaces here" % label)
+                continue
+            check("as root (%s): the test switch is refused, and said so" % label,
+                  "ignored when running as root" in out and rc == 2, out[-300:])
+            check("…so no override was honoured (%s)" % label, calls(fake) == "", calls(fake))
         os.chmod(inst, 0o755)
         os.chmod(os.path.join(inst, "scripts", "cert-renew.sh"), 0o777)
         rc, out = run(inst, fake, "--report", test_mode=False)
         check("outside test mode: a world-writable script → refused (or a non-root owner)", rc == 2
               and "must be owned by root" in out, out[-300:])
         os.chmod(os.path.join(inst, "scripts", "cert-renew.sh"), 0o755)
+
+        print("── follow-up 2: every parent up to /, .env and the compose file must be root's")
+        if not IS_ROOT:
+            print("  SKIP: needs root (a non-root runner cannot own a root-owned tree)")
+        else:
+            tree = tempfile.mkdtemp(prefix="cert-renew-tree-")          # root, 0700, under sticky /tmp
+            mid = os.path.join(tree, "srv")
+            inst2 = os.path.join(mid, "webterm")
+            os.makedirs(os.path.join(inst2, "scripts"))
+            os.chmod(tree, 0o755)
+            os.chmod(mid, 0o755)
+            os.chmod(inst2, 0o755)
+            shutil.copy(os.path.join(ROOT, "docker-compose.prod.yml"), inst2)
+            os.chmod(os.path.join(inst2, "docker-compose.prod.yml"), 0o644)
+            envf = os.path.join(inst2, ".env")
+            open(envf, "w").write("WEBTERM_DOMAIN=wt.example.com\n")
+            os.chmod(envf, 0o600)
+            shutil.copy(SCRIPT, os.path.join(inst2, "scripts", "cert-renew.sh"))
+            os.chmod(os.path.join(inst2, "scripts", "cert-renew.sh"), 0o755)
+            fk = os.path.join(tree, "fake")                            # a `docker` on PATH that sees no Traefik
+            os.makedirs(os.path.join(fk, "bin"))
+            open(os.path.join(fk, "no-traefik"), "w").close()
+            open(os.path.join(fk, "bin", "docker"), "w").write(FAKE_DOCKER)
+            os.chmod(os.path.join(fk, "bin", "docker"), 0o755)
+            env2 = {"PATH": os.path.join(fk, "bin") + ":" + os.environ.get("PATH", ""), "FAKE_DIR": fk}
+
+            def run2():
+                return run(inst2, fk, "--report", test_mode=False, extra_env=env2, as_root=True)
+            rc, out = run2()
+            check("a root-owned tree (sticky /tmp above it, .env 0600) passes the checks",
+                  "refusing" not in out and "cannot find the ACME store" in out, out[-300:])
+            os.chmod(mid, 0o775)
+            rc, out = run2()
+            check("a group-writable PARENT → refused, named", rc == 2 and ("parent %s must be owned" % mid) in out, out[-300:])
+            os.chmod(mid, 0o1777)
+            rc, out = run2()
+            check("…a sticky one (like /tmp) is allowed", "refusing" not in out, out[-300:])
+            os.chmod(mid, 0o755)
+            os.chown(mid, NOBODY, 0)
+            rc, out = run2()
+            check("a parent owned by someone else → refused", rc == 2 and "parent %s" % mid in out, out[-300:])
+            os.chown(mid, 0, 0)
+            os.chmod(envf, 0o640)
+            rc, out = run2()
+            check(".env 0640 with group root → accepted", "refusing" not in out, out[-300:])
+            os.chown(envf, 0, NOBODY)
+            rc, out = run2()
+            check(".env 0640 with a non-root group → refused", rc == 2 and "readable by a non-root group" in out, out[-300:])
+            os.chown(envf, 0, 0)
+            os.chmod(envf, 0o660)
+            rc, out = run2()
+            check(".env group-writable → refused", rc == 2 and ".env must be owned by root" in out, out[-300:])
+            os.chmod(envf, 0o600)
+            os.chown(envf, NOBODY, NOBODY)
+            rc, out = run2()
+            check(".env not owned by root → refused", rc == 2 and ".env must be owned by root" in out, out[-300:])
+            os.chown(envf, 0, 0)
+            os.chmod(os.path.join(inst2, "docker-compose.prod.yml"), 0o666)
+            rc, out = run2()
+            check("docker-compose.prod.yml world-writable → refused", rc == 2
+                  and "docker-compose.prod.yml must be owned by root" in out, out[-300:])
+            shutil.rmtree(tree, ignore_errors=True)
 
         print("── no Traefik container")
         open(os.path.join(fake, "no-traefik"), "w").close()

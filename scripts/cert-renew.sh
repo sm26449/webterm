@@ -52,10 +52,13 @@ cd /
 # fake docker and a local TLS server. They are honoured ONLY with WEBTERM_CERT_RENEW_TEST=1, and
 # NEVER when we run as root through sudo — the path the UI types. Otherwise whoever can shape the
 # environment of the sudo call could swap `docker` or the store directory for something of theirs.
+# Root NEVER gets test mode, whatever SUDO_USER says (it can be blanked through sudo's SETENV or
+# the command line, and cron or a root shell has none). EUID is bash's own variable, not `id`
+# found on a PATH someone else may have shaped.
 TEST_MODE=0
 if [ "${WEBTERM_CERT_RENEW_TEST:-}" = 1 ]; then
-  if [ "$(id -u)" = 0 ] && [ -n "${SUDO_USER:-}" ]; then
-    printf 'cert-renew: WEBTERM_CERT_RENEW_TEST is ignored under sudo\n' >&2
+  if [ "${EUID:-0}" = 0 ]; then
+    printf 'cert-renew: WEBTERM_CERT_RENEW_TEST is ignored when running as root\n' >&2
   else
     TEST_MODE=1
   fi
@@ -120,9 +123,28 @@ safe_path() {   # safe_path PATH → 0 when owned by root and not group/world-wr
   [ "$owner" = 0 ] && [ $(( 0$mode & 022 )) -eq 0 ]
 }
 if [ "$TEST_MODE" != 1 ]; then
-  for p in "$ROOT" "$SCRIPT_DIR" "$SELF" "$ROOT/acme-backups"; do
+  for p in "$ROOT" "$SCRIPT_DIR" "$SELF" "$ROOT/acme-backups" "$ROOT/docker-compose.prod.yml"; do
     [ -e "$p" ] || continue
     safe_path "$p" || RC=2 die "refusing: $p must be owned by root and not writable by group/others"
+  done
+  # .env feeds the project name and is read as root. install.sh/deploy.sh write it 0600 (root);
+  # 0640 is accepted only with group root.
+  envf="$ROOT/.env"
+  safe_path "$envf" || RC=2 die "refusing: $envf must be owned by root and not writable by group/others"
+  if [ $(( 0$(stat -Lc '%a' -- "$envf") & 077 )) -ne 0 ] && [ "$(stat -Lc '%g' -- "$envf")" != 0 ]; then
+    RC=2 die "refusing: $envf is readable by a non-root group (use 0600, or 0640 with group root)"
+  fi
+  # Every parent up to `/`: whoever can write a parent can rename $ROOT away and put a tree of
+  # their own in its place. Sticky directories (/tmp) are the one exception: there a non-owner
+  # cannot rename or delete what is not theirs.
+  d=$(dirname "$ROOT")
+  while :; do
+    mode=$(stat -Lc '%a' -- "$d" 2>/dev/null) || RC=2 die "refusing: cannot stat $d"
+    if [ $(( 0$mode & 01000 )) -eq 0 ]; then
+      safe_path "$d" || RC=2 die "refusing: parent $d must be owned by root and not writable by group/others"
+    fi
+    [ "$d" = / ] && break
+    d=$(dirname "$d")
   done
 fi
 
