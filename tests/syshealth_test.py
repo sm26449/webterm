@@ -364,6 +364,29 @@ async def test_checks(owner_uid):
     finally:
         core.sources.pop(h2, None)
         core.agent_clock.clear()
+    import socket
+    r = await run_check("forward.dns")
+    check("no forwards → forward DNS not applicable", r is None, r)
+    await U.add_forward(h2, "grafana")
+    saved_fwd = api._fwd_domain_cache
+    api._fwd_domain_cache = "apps.example.com"
+    orig_ghbn, asked = socket.gethostbyname, []
+
+    def fake_ghbn(name):
+        asked.append(name)
+        raise socket.gaierror("NXDOMAIN")
+    socket.gethostbyname = fake_ghbn
+    try:
+        r = await run_check("forward.dns")
+        check("forward DNS missing → warning (DNS only, the wtcheck.<domain> name)", r["severity"] == "warning"
+              and asked and asked[0].startswith("wtcheck."), (r, asked))
+        socket.gethostbyname = lambda name: "203.0.113.7"
+        r = await run_check("forward.dns")
+        check("forward DNS answers → ok", r["severity"] == "ok", r)
+    finally:
+        socket.gethostbyname = orig_ghbn
+        api._fwd_domain_cache = saved_fwd
+        await db.execute("DELETE FROM port_forwards")
     core._note_agent_clock(h2, float("nan"))
     core._note_agent_clock(h2, "soon")
     check("agent clock: junk collected_at values are ignored", h2 not in core.agent_clock, core.agent_clock)

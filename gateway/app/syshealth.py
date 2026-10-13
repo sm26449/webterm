@@ -791,15 +791,23 @@ async def c_clock() -> Optional[Result]:
 
 async def c_forward_dns() -> Optional[Result]:
     from . import api
-    from urllib.parse import urlparse
     if not await db.fetchone("SELECT 1 FROM port_forwards WHERE enabled=1 LIMIT 1"):
         return None
     domain = api.forward_domain()
     if not domain:
         return None
-    app_domain = urlparse(config.PUBLIC_URL).hostname or ""
-    st = await asyncio.to_thread(api._readiness_blocking, app_domain, domain)
-    if not st.get("dns_ok"):
+    if not api._valid_domain(domain):
+        return None
+    # DNS only (the same `wtcheck.<domain>` name the on-demand probe in Settings resolves) — no
+    # outbound TCP/TLS from a background task to a name a settings.manage holder can edit
+    import socket
+
+    def resolve() -> bool:
+        try:
+            return bool(socket.gethostbyname("wtcheck." + domain))
+        except OSError:
+            return False
+    if not await asyncio.to_thread(resolve):
         return Result("warning", "forward_dns_missing", {"domain": domain}, rec="forward_dns",
                       action="settings:forward")
     return Result("ok", "forward_dns_ok", {"domain": domain})
