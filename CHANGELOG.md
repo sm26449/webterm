@@ -47,6 +47,26 @@ No agent change (agent stays 58).
   unsupported CPU or a too-old glibc is refused with a clear message (`WEBTERM_PYTHON=` points the
   installer at a Python you installed yourself). The agent token is passed to curl/wget in a 0600
   config file, never on a command line.
+### Fixed
+- **upgrade.sh now hands over to the release's own upgrade.sh before syncing anything.** Why: it
+  replaced itself only at the very end ("active from the next run"), so the 3.6.8 upgrade on prod
+  ran with the 3.6.7 script, which synced only the kit files it knew — `host-health.sh`,
+  `docker-cleanup.sh` and `authentik-upgrade.sh` never arrived, the host-health timers were not
+  installed, no System health list was printed, and the owner got "command not found". Now, when
+  the image (digest-pinned, signature-checked when configured) ships a different upgrade.sh, it is
+  syntax-checked, the old one kept as `upgrade.sh.bak`, and the new one `exec`'d with the same
+  arguments and the resolved tag; `WEBTERM_UPGRADE_REEXEC=1` makes a second switch impossible,
+  the backup is not repeated and the image must be the same digest. The final report lists every
+  kit file installed or updated in the run. (A host still on 3.6.8's script switches on its next
+  upgrade; the first one behaves as before.)
+- **System health no longer says "your host scripts predate 3.6.8" right after updating them.**
+  Why: a freshly updated backup / certificate check / Docker cleanup timer simply had not fired
+  yet (next run hours away), and "never reported" was read as "outdated scripts". host-health.sh
+  now reports, per timer, whether its script can report status, since when the script/timer is
+  installed, and the next run (`systemctl show NextElapseUSecRealtime`). Outdated script →
+  warning "run upgrade.sh"; current but installed less than one interval + 6 h ago → **info**
+  "has not run since the update — next run in N h" with a "start it once" command; longer than
+  that → warning "check the timer".
 - **Docs:** "Supported hosts" in INSTALL.md (Python, tmux, shells, known OSes, what breaks below
   3.6, the portable runtime, an offline/scp procedure for switching an existing install) and
   "Why can't I upload into a root-owned folder?" in TRANSFERS.md.

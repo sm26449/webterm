@@ -10310,7 +10310,8 @@ if [ "$NEED_PORTABLE" = 1 ]; then
   mv "$T/x/python" "$PYRT_DIR" && rm -rf "$PYRT_DIR.old"
   rm -rf "$T"; trap - EXIT
   PY="$PYRT_DIR/bin/python3"
-  echo "Python: installed $("$PY" -c 'import sys; print(sys.version.split()[0])') in $PYRT_DIR (sha256 verified: $PYRT_SHA);"
+  echo "Python: installed $("$PY" -c 'import sys; print(sys.version.split()[0])') in $PYRT_DIR"
+  echo "        from $PYRT_FILE (sha256 verified: $PYRT_SHA);"
   echo "        the agent will run with $PY. The system python3 was not touched."
 fi
 
