@@ -50,12 +50,15 @@ such a host.
 | Own automation tokens | ✓ | ✓ | ✓ | — |
 | Clear the global command history | ✓ | — | — | — |
 | Backups and the agent signing key | ✓ | — | — | — |
+| Renew TLS certificates from Settings (terminal on the gateway host) | ✓ | — | — | — |
 
 Notes:
 
 - **Admin** is "everything except taking over the instance". Downloading or restoring a backup
   hands out the vault key, and the signing key signs agent updates for the whole fleet, so both
-  stay with Owners. An Admin cannot create, change or delete an Owner.
+  stay with Owners. Renewing a TLS certificate from Settings (`certs.renew`, 3.6.7) is Owner-only
+  too: it types a `sudo` command that edits Traefik's certificate store on the gateway host. An
+  Admin still sees the certificate status. An Admin cannot create, change or delete an Owner.
 - An Admin is still a **co-admin for sessions and tokens**: with `session.manage` it can kill,
   rename, share or type into any session — an Owner's included — and with `tokens.manage` /
   `shares.manage` it can see and revoke everyone's tokens and links. Give Admin only to people
@@ -371,4 +374,4 @@ Host permissions (granted per host through bindings):
 Instance permissions (only from a binding over all hosts): `hosts.create`, `hosts.export`,
 `settings.manage`, `users.manage`, `roles.manage`, `tokens.create`, `tokens.manage`,
 `shares.manage`, `snippets.manage`, `history.clear`, `audit.view`, `security.view`,
-`backups.manage`, `signing.manage`.
+`backups.manage`, `signing.manage`, `certs.renew`.

@@ -30,7 +30,11 @@ is the full reference.
 | `WEBTERM_UPDATE_REPO` | the GitHub `owner/repo` the version check asks (default `sm26449/webterm`) — set it on a fork |
 | `WEBTERM_SIGNING_AUTOGEN` | `1` (default) \| `0` = don't generate an agent signing key on the first boot of a new install — for an offline, build-time key (see [Signed agent updates](SECURITY-FEATURES.md#signed-agent-updates)) |
 | `WEBTERM_CERT_MIN_DAYS` | how many days before expiry the `webterm-cert-check` timer starts warning (default 15). **Not read from `.env`** — the timer reads `/etc/default/webterm-cert-check`, which `install.sh` writes |
-| `WEBTERM_CERT_RESOLVER` | `le` (HTTP-01, needs port 80 reachable) or `ledns` (DNS-01 via Cloudflare). Written by `install.sh`/`deploy.sh` from whether you gave a Cloudflare token — see the note under `CF_DNS_API_TOKEN` |
+| `WEBTERM_CERT_RESOLVER` | `le` (HTTP-01, needs port 80 reachable) or `ledns` (DNS-01 via Cloudflare). Written by `install.sh`/`deploy.sh` from whether you gave a Cloudflare token — see the note under `CF_DNS_API_TOKEN`. The app reads it too (3.6.7): only on `ledns` is the forward wildcard checked |
+| `WEBTERM_CERT_CHECK` | `1` (default) \| `0` = turn off the gateway's TLS certificate check (Settings → Infrastructure → Certificates; alerts at < 14 and < 3 days, critical when expired or when Traefik serves its default certificate) |
+| `WEBTERM_CERT_CHECK_TARGET` | where the check reaches Traefik inside the compose network (default `traefik:443`); when it is unreachable the public name is used |
+| `WEBTERM_CERT_CHECK_FORWARD` | `1` / `0` forces checking the forward wildcard (`cert-check.<forward domain>`) on or off; empty = only with `WEBTERM_CERT_RESOLVER=ledns` |
+| `WEBTERM_INSTALL_DIR` | the install directory on the host (default `/opt/webterm`, written by `install.sh`); the app only uses it to **print** `sudo <dir>/scripts/cert-renew.sh --domain …` |
 | `WEBTERM_OIDC_ISSUER` | SSO issuer URL, e.g. `https://auth.example.com/application/o/webterm/`. **Optional** — SSO is off until issuer + client id + secret are all set |
 | `WEBTERM_OIDC_CLIENT_ID` / `WEBTERM_OIDC_CLIENT_SECRET` | the OIDC client credentials from your IdP (`provision.py` prints them for Authentik) |
 | `WEBTERM_OIDC_PROVIDER_NAME` | the button label, e.g. `Authentik` (default `SSO`) |

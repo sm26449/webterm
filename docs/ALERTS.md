@@ -90,6 +90,7 @@ key, so a gateway restart resets them.
 | Agent: update REFUSED (code) | An agent refused a signed update, or the gateway refused to push one because `ptyd.py.sig` is missing. | 1 per host / 6 h |
 | Off-host backup is FAILING (provider) | The scheduled upload to the off-host destination failed **2 or more times in a row**. | 1 / 12 h |
 | Scheduled backup is FAILING | The scheduled local snapshot itself failed (disk full, DB locked, read-only volume). | 1 / 12 h |
+| TLS certificate for NAME expires in N days / has EXPIRED / Traefik serves its DEFAULT certificate / does not cover that name | The certificate Traefik serves for the app domain, the forward wildcard or Authentik (checked daily and on **Check now**, Settings → Infrastructure → Certificates): under 14 days (warning), under 3 days (warning), expired, default or wrong certificate (critical). See [TLS certificates](INSTALL.md#tls-certificates-monitoring-and-renewal). | 1 per threshold per certificate (persisted across restarts), plus one "OK again" |
 
 The offline sweep runs every 60 s from the session reaper, which waits ~3 minutes after
 gateway start so reconnecting agents are not reported as down. Only **agent** hosts are

@@ -374,6 +374,12 @@ Press `?` for the cheatsheet.
 - **Certificate expiry watch**: the installer sets up a `webterm-cert-check` timer that
   warns before the certificate runs out, so a renewal that quietly stopped working is
   noticed while there is still time (`WEBTERM_CERT_MIN_DAYS`, default 15)
+- **TLS certificates in Settings** (3.6.7): the gateway reads the certificate Traefik actually
+  serves for the app, the forward wildcard and Authentik, shows days left / issuer / names, and
+  alerts at under 14 and 3 days (critical when expired or when Traefik's default certificate is
+  served), one alert per threshold. An Owner can **Renew**: a terminal on the gateway host opens
+  with `sudo …/scripts/cert-renew.sh --domain <name>` typed, not run. The app itself never touches
+  the certificate store. [how renewal works](INSTALL.md#tls-certificates-monitoring-and-renewal)
 - **Clean uninstall**: `./remove.sh` (or `make remove`) takes the gateway back off the
   machine and asks before anything irreversible — it tells you exactly which volumes
   hold your data and refuses to guess on your behalf

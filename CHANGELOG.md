@@ -9,6 +9,45 @@ back.
 
 ## [Unreleased]
 
+### Added
+- **TLS certificate monitoring (Settings → Infrastructure → Certificates).** Why: on 2026-10-12
+  the wildcard `*.wt.safegrid.net` expired. It was stored in Traefik's HTTP-01 resolver (`le`,
+  acme.json), and HTTP-01 cannot renew a wildcard, so Traefik logged *"Error renewing ACME
+  certificate … could not determine solvers"* every day since September. The routers ask for it
+  through DNS-01 (`ledns`), but Traefik never requested it there because a certificate for the
+  name already existed in `le`. Browsers then coalesced the expired wildcard onto the main domain,
+  so users saw an expired certificate on WebTerm itself. Nobody had seen the log. Now the
+  gateway reads the certificate Traefik actually **serves** (a TLS handshake to `traefik:443` with
+  each name as SNI, the public name as a fallback; the chain is deliberately not validated, so an
+  expired or default certificate is seen as such), daily and a minute after start, for the app
+  domain, the forward wildcard (DNS-01 installs) and Authentik (on the same stack). It alerts
+  through the existing alert path (in-app history, email, webhook; new event type *TLS
+  certificate*) at under 14 days, again at under 3, and critically when the certificate has
+  expired, when Traefik serves its self-signed default, or when the certificate does not cover
+  the name. One alert per threshold per certificate (persisted, so a restart does not repeat
+  them), one "OK again" after the fix, every alert in the audit log. Settings shows days left,
+  issuer, names, the last error and **Check now** (rate-limited instance-wide). The app gets no
+  new privilege for this: no ACME volume, no Docker access.
+- **Renew from the UI, without giving the gateway the keys.** `scripts/cert-renew.sh` (installed
+  and synced by `install.sh` / `upgrade.sh`) backs up the ACME stores (timestamped, 0600, last 5
+  kept), lists which store holds which domain and when it expires (never keys), and with
+  `--domain <name>` removes only that name's entries (refusing a name that matches nothing or an
+  ambiguous store), stops and starts only Traefik, and waits for a valid certificate;
+  `--prune-unrouted` lists (and with `--yes` removes) entries no router asks for; `--restore`
+  puts a backup back. In Settings an **Owner** (new Owner-only permission `certs.renew`) gets
+  **Renew** next to an expiring certificate: after a fresh second factor it opens a terminal on
+  the gateway host they picked once, with `sudo /opt/webterm/scripts/cert-renew.sh --domain
+  <name>` **typed, not run** — the same "your terminal, your permissions" model as *OS upgrade in
+  a terminal*. Why this way: editing Traefik's store and restarting it from the app would mean
+  mounting the ACME volume and widening the Docker proxy for the process exposed to the
+  internet. The command is built only from names WebTerm monitors, checked against a strict
+  hostname rule, and passed to the session as an argument. Without a picked host the UI shows the
+  command to copy. When a wildcard is involved, the UI says that a wildcard can only renew via
+  DNS-01.
+- **`upgrade.sh` reports the certificate stores** after every upgrade (`cert-renew.sh --report`,
+  read-only) and warns about a certificate expiring within 14 days, a wildcard sitting in an
+  HTTP-01 store, or entries no router uses. It never changes them.
+
 ## [3.6.6] — 2026-10-12 · agent (58)
 
 3.6.6 — Users & roles in sub-tabs (Accounts · Roles · SSO groups). UI only; no agent change.
