@@ -129,6 +129,13 @@ Fixes from an independent review of this release's changes, before it shipped.
   `cd -P`, refuses unless its physical path is exactly the folder named, and works relative to it
   from then on. A folder reached through a symlink (e.g. `/var/run`) is therefore refused: open it
   in Files by its real path.
+- **Final review (low, all fail closed).** Move as root into a **setgid** folder (shared web or
+  project folders) always failed: the temp folder inherited `g+s` and failed the 0700 check; the
+  script now clears it inside the checked folder first, and the error names that check too.
+  Another spelling of a staged path (`//`, `/./`, `x/..`) and an fscopy job aimed at it no longer
+  get past the planner-only rule (they could only break the move: the hash check refused it). A
+  plan refused with 429 no longer costs the user their own oldest plan. "Insert path" is for sh,
+  bash, zsh and fish — csh/tcsh expand `!` even inside quotes.
 - **Typed text only goes to a prompt (low).** Why: typed as keystrokes, the command or a path ran
   as commands of whatever had the foreground — mc, vim, less, htop. The move-as-root command and
   "Insert path" are now typed only at a shell prompt: when the foreground program asked for
