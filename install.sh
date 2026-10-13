@@ -219,7 +219,7 @@ if [ "$FILES_SRC" != "$INSTALL_DIR" ]; then
     "$FILES_SRC/upgrade.sh" "$FILES_SRC/remove.sh" "$INSTALL_DIR/"
   install -d "$INSTALL_DIR/scripts" "$INSTALL_DIR/deploy"
   install -m 0755 "$FILES_SRC/scripts/backup.sh" "$FILES_SRC/scripts/restore.sh" \
-    "$FILES_SRC/scripts/cert-check.sh" "$INSTALL_DIR/scripts/"
+    "$FILES_SRC/scripts/cert-check.sh" "$FILES_SRC/scripts/cert-renew.sh" "$INSTALL_DIR/scripts/"
   install -m 0644 "$FILES_SRC/deploy/webterm-backup.service" "$FILES_SRC/deploy/webterm-backup.timer" \
     "$FILES_SRC/deploy/webterm-cert-check.service" "$FILES_SRC/deploy/webterm-cert-check.timer" \
     "$INSTALL_DIR/deploy/"
@@ -359,6 +359,9 @@ else
 fi
 set_env WEBTERM_IMAGE "$IMAGE"
 set_env GHCR_USER "$GHCR_USER"
+# where this kit lives on the host: the app only PRINTS it (`sudo <dir>/scripts/cert-renew.sh …`
+# in Settings → Infrastructure → Certificates), it never reaches it
+set_env WEBTERM_INSTALL_DIR "$INSTALL_DIR"
 # The setup token is kept if it already exists: regenerating it on every run would
 # invalidate the instructions you wrote down and confuse you at the first login.
 # It lives in secrets/webterm_setup_token; a value still in .env (older install) moves there.

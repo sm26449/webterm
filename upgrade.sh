@@ -305,7 +305,7 @@ if docker run --rm --entrypoint sh "$IMAGE" -c 'cd /srv/webterm/deploy-kit && ta
    | tar xf - -C "$KIT" 2>/dev/null && [ -f "$KIT/docker-compose.prod.yml" ]; then
   CHANGED=0
   for f in docker-compose.prod.yml deploy.sh rollback.sh remove.sh \
-           scripts/backup.sh scripts/restore.sh scripts/cert-check.sh \
+           scripts/backup.sh scripts/restore.sh scripts/cert-check.sh scripts/cert-renew.sh \
            deploy/authentik/docker-compose.prod.yml deploy/authentik/docker-compose.yml \
            deploy/authentik/.env.prod.example deploy/authentik/.env.example \
            deploy/authentik/provision.py deploy/authentik/provision.sh \
@@ -504,6 +504,26 @@ if [ -n "${BEHIND:-}" ] && [ "$BEHIND" != "?" ] && [ "$BEHIND" != "0" ]; then
   TODO=$((TODO + 1))
 elif [ "${BEHIND:-}" = "0" ]; then
   echo "  all agents are up to date (v$NEW_AGENT)"
+fi
+
+# TLS certificates (3.6.7). Incident 2026-10-12: a wildcard sat in the HTTP-01 store, which can
+# never renew it, and Traefik logged the failure daily for weeks while every upgrade said "✓".
+# READ-ONLY here (`--report` writes nothing, not even a backup): we only say it out loud. Fixing
+# is a deliberate `cert-renew.sh --domain …` / `--prune-unrouted --yes` by a human.
+if [ -x scripts/cert-renew.sh ]; then
+  CERT_REPORT=$(timeout 60 scripts/cert-renew.sh --report 2>&1) || true
+  if printf '%s\n' "$CERT_REPORT" | grep -q '^WARN: '; then
+    printf '%s\n' "$CERT_REPORT" | sed -n 's/^WARN: //p' | while IFS= read -r w; do
+      warn "certificate: $w"
+    done
+    echo "    Details: $ROOT/scripts/cert-renew.sh --report  ·  fix: --domain <name> or --prune-unrouted"
+    echo "    (docs/INSTALL.md, \"TLS certificates\"). Nothing was changed."
+    TODO=$((TODO + 1))
+  elif printf '%s\n' "$CERT_REPORT" | grep -q '^OK: '; then
+    echo "  certificates: $(printf '%s\n' "$CERT_REPORT" | sed -n 's/^OK: //p' | head -n1)"
+  else
+    warn "certificate report unavailable: $(printf '%s\n' "$CERT_REPORT" | tail -n1)"
+  fi
 fi
 
 if [ "$TODO" = 0 ]; then

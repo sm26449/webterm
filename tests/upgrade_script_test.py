@@ -493,6 +493,33 @@ def main():
               rn3.returncode != 0 and "cannot confirm" in outn3, outn3[-400:])
         check("refuzul nu şterge nimic", "down" not in callsn3 and "volume rm" not in callsn3, callsn3)
 
+        # 3.6.7: after the upgrade, the ACME stores are REPORTED (read-only), never modified.
+        # Incident 2026-10-12: a wildcard in the HTTP-01 store failed renewal for weeks while every
+        # upgrade ended in "✓".
+        dc = sandbox(tempfile.mkdtemp(dir=tmp))
+        cr = dc / "scripts" / "cert-renew.sh"
+        cr.write_text('#!/bin/sh\necho "cert-renew.sh $*" >> "$CALLS"\n'
+                      'echo "Store le (HTTP-01) acme.json: 1 certificate(s)"\n'
+                      'echo "WARN: store le holds the wildcard *.wt.example.com, but it uses HTTP-01"\n')
+        os.chmod(cr, 0o755)
+        rc_, callsc = run(dc, ["-y"])
+        outc = rc_.stdout + rc_.stderr
+        check("upgrade runs the certificate report", "cert-renew.sh --report" in callsc, callsc[-300:])
+        check("…ONLY the read-only report (no --domain / --prune / --yes)",
+              [ln for ln in callsc.splitlines() if ln.startswith("cert-renew.sh")] == ["cert-renew.sh --report"],
+              callsc)
+        check("…and turns its WARN lines into warnings + a to-do", "certificate: store le holds the wildcard" in outc
+              and "Nothing was changed" in outc and "nothing — the system is fully up to date" not in outc,
+              outc[-600:])
+        dc = sandbox(tempfile.mkdtemp(dir=tmp))          # upgrade.sh replaced itself in the last one
+        cr = dc / "scripts" / "cert-renew.sh"
+        cr.write_text('#!/bin/sh\necho "OK: no certificate expires within 14 days."\n')
+        os.chmod(cr, 0o755)
+        rc_, callsc = run(dc, ["-y"])
+        outc = rc_.stdout + rc_.stderr
+        check("a clean report is one quiet line", "certificates: no certificate expires within 14 days." in outc,
+              outc[-400:])
+
     print(f"\n{ok}/{total} passed")
     return ok == total
 
