@@ -197,6 +197,8 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
     next_due: number | null
     backups: StoredBackup[]
     retention_days: number
+    /** 3.6.8: când a fost VERIFICAT ultima dată un backup (decriptat, despachetat, integritatea DB-ului) */
+    restore_verified_at?: number | null
   }
   const [bkStatus, setBkStatus] = useState<BackupStatus | null>(null)
   const [bkPass, setBkPass] = useState('')
@@ -250,6 +252,19 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
       await markBackupSeen()
     } catch (e) {
       setBkErr(errText(e, t) || t('settings.downloadFailed'))
+    } finally { setBkBusy(false) }
+  }
+
+  // 3.6.8: un backup care n-a fost niciodată restaurat e o speranţă. „Verifică" îl despachetează şi
+  // rulează integrity_check pe DB-ul din el (cu cheia seifului prezentă) — nu restaurează nimic.
+  async function verifyStored(name: string) {
+    setBkErr(''); setBkMsg(''); setBkBusy(true)
+    try {
+      await api(`/api/backup/stored/${encodeURIComponent(name)}/verify`, { method: 'POST' })
+      setBkMsg(t('settings.backup.verified', { name }))
+      await loadBackup()
+    } catch (e) {
+      setBkErr(errText(e, t))
     } finally { setBkBusy(false) }
   }
 
@@ -439,12 +454,19 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
         {bkStatus && bkStatus.backups.length > 0 && (
           <div className="mt-3 space-y-1">
             <div className="text-xs text-slate-500">{t('settings.backup.storedLabel', { days: bkStatus.retention_days })}</div>
+            <div className="text-xs text-slate-500" data-testid="restore-verified">
+              {bkStatus.restore_verified_at
+                ? t('settings.backup.lastVerified', { when: fmtTs(bkStatus.restore_verified_at) })
+                : t('settings.backup.neverVerified')}
+            </div>
             {bkStatus.backups.map((b) => (
               <div key={b.name} className="flex items-center justify-between gap-2 rounded-md bg-ink-800 px-3 py-2 text-sm">
                 <span className="min-w-0 flex-1 truncate font-mono text-xs text-slate-300" title={b.name}>
                   {b.name}
                   <span className="ml-2 text-slate-500">{(b.size / 1024).toFixed(0)} KB</span>
                 </span>
+                <button onClick={() => verifyStored(b.name)} disabled={bkBusy}
+                  className="shrink-0 text-xs wt-link hover:underline">{t('settings.backup.verify')}</button>
                 <button onClick={() => downloadStored(b.name)} className="shrink-0 text-xs wt-link hover:underline">{t('settings.download')}</button>
                 <button onClick={() => deleteStored(b.name)} className="shrink-0 text-xs wt-danger hover:underline">{t('settings.delete')}</button>
               </div>

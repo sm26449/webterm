@@ -253,6 +253,56 @@ backs up the current files, puts those back (0600) and restarts Traefik. By hand
 volume (`docker volume inspect webterm_traefik-acme` shows the path), `chmod 600` it, start
 Traefik again.
 
+### System health
+
+**Settings → System health** (Owner/Admin, `security.view`) lists everything that can fail
+quietly, with why it matters, what to do and — when the fix needs root on the gateway host — the
+exact command. The gear icon shows a dot and "N items need attention" for unmuted warnings and
+critical items. `python3 -m app.admin health` prints the same list (upgrade.sh runs it at the end).
+
+What is checked: the host timers (backup, certificate check, Docker cleanup), the Cloudflare DNS
+token, the Authentik version against the pin, gateway disk (warning at `WEBTERM_DISK_WARN_PCT`,
+default 20 %, critical at `WEBTERM_DISK_CRIT_PCT`, default 10 %), alert delivery (in the app only —
+never through the failing channel), whether any alert channel exists, agents behind for more than
+`WEBTERM_AGENT_OUTDATED_DAYS` (default 7) days, agents that do not start at boot, agents that
+refuse updates, agent and gateway clocks, hosts near the 32-session limit, the agent signing key,
+SSO (classified failures plus an hourly probe of the IdP; critical with `WEBTERM_OIDC_SSO_ONLY=1`),
+risky configuration (forwards on http://, SSO without a group gate), the daily cleanup, database
+size, backup coverage / off-host copy / last verification, the TLS certificates, the dead-man
+switch, a new WebTerm version, and the forward-domain DNS (daily).
+
+Warnings and critical items alert once per transition (email/webhook and the in-app history,
+kind "System health"), and once more when they are resolved. Any item can be muted for 7 days,
+30 days, or until it changes.
+
+**The host helper.** Facts only root on the host can see come from `scripts/host-health.sh`, an
+hourly systemd timer (`webterm-host-health.timer`) that install.sh and upgrade.sh install
+(`sudo ./scripts/host-health.sh --install` does it by hand; it also installs the nightly
+`webterm-docker-cleanup.timer`, which replaces a hand-made `/etc/cron.d/webterm-docker-cleanup`).
+It writes small JSON status files into the data volume (`host-status/`) and nothing else; the
+gateway gets no new privilege and treats those files as untrusted (fixed names, size cap, schema
+check, never executed, never a source of commands). The Cloudflare token is checked against
+`/user/tokens/verify` without ever appearing on a command line or in a log.
+
+**Commands.** Every command shown comes from a fixed server-side list of templates with validated
+parameters; nothing typed by a client ever reaches it. An Owner who picked the gateway host
+(Settings → Infrastructure → Certificates) can have a command typed — not run — into a terminal
+there, after a fresh second factor; the terminal is private to that Owner.
+
+**Verifying a backup.** Settings → Backup → *Verify* unpacks a stored snapshot and runs an
+integrity check on the database inside (nothing is restored). On the host:
+`sudo ./scripts/restore.sh --verify /var/backups/webterm/<archive>` does the same for a host
+archive without touching the app or the volume. Both record the verification for System health.
+
+#### Dead-man switch
+
+Nothing inside WebTerm can report that WebTerm itself is down. Set `WEBTERM_HEARTBEAT_URL` in
+`.env` to a ping URL of an outside monitor (healthchecks.io, Uptime Kuma "push", …) and the
+gateway sends a GET every `WEBTERM_HEARTBEAT_MINUTES` (default 5) while it is healthy (event
+loop and database answer). When the pings stop, the monitor alerts you. The URL is treated as a
+secret (`WEBTERM_HEARTBEAT_URL_FILE` works too) and never shown or logged. Apply with
+`docker compose -f docker-compose.prod.yml up -d app`.
+
 ### Optional: single sign-on with Authentik
 
 WebTerm ships **standalone by default** — nothing above mentions an identity provider, and the

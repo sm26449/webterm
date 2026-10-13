@@ -14,10 +14,27 @@ set -euo pipefail
 
 DOMAIN="${WEBTERM_DOMAIN:-}"
 MIN_DAYS="${WEBTERM_CERT_MIN_DAYS:-15}"
-[ -n "$DOMAIN" ] || { echo "WEBTERM_DOMAIN is not set." >&2; exit 2; }
+
+# 3.6.8: the result also lands in Settings → System health (host-health.sh --record). Best effort:
+# never changes the exit code.
+CC_SELF_DIR=$(cd "$(dirname "$0")" && pwd -P)
+CC_MSG="" CC_DAYS=""
+# shellcheck disable=SC2329  # invoked through the EXIT trap
+_cc_status() {
+  local rc=$? st=ok msg data="{}"
+  [ -x "$CC_SELF_DIR/host-health.sh" ] || return 0
+  [ "$rc" = 0 ] || st=error
+  msg="${CC_MSG:-the certificate check failed (exit code $rc)}"
+  case "$CC_DAYS" in ''|*[!0-9-]*) ;; *) data="{\"days_left\":$CC_DAYS}" ;; esac
+  "$CC_SELF_DIR/host-health.sh" --record cert-check "$st" "$msg" "$data" >/dev/null 2>&1 || true
+}
+trap _cc_status EXIT
+
+[ -n "$DOMAIN" ] || { CC_MSG="WEBTERM_DOMAIN is not set"; echo "WEBTERM_DOMAIN is not set." >&2; exit 2; }
 
 alert() {
   local msg="WebTerm/$DOMAIN: $1"
+  CC_MSG="$1"
   echo "$msg" >&2
   command -v logger >/dev/null && logger -t webterm-cert -p daemon.err "$msg" || true
   if [ -n "${WEBTERM_ALERT_URL:-}" ]; then
@@ -40,6 +57,8 @@ esac
 
 END=$(echo "$CERT" | sed -n 's/^notAfter=//p')
 LEFT=$(( ( $(date -d "$END" +%s) - $(date +%s) ) / 86400 ))
+CC_DAYS="$LEFT"
+CC_MSG="Let's Encrypt certificate valid for another $LEFT days"
 [ "$LEFT" -ge "$MIN_DAYS" ] || alert "the certificate expires in $LEFT days ($END) — automatic renewal did not succeed."
 
 echo "OK: Let's Encrypt certificate valid for another $LEFT days (expires $END)."

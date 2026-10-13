@@ -297,6 +297,32 @@ def verify(blob: bytes, passphrase: str) -> dict:
     return _inspect(decrypt(blob, passphrase))
 
 
+def verify_restorable(blob: bytes, passphrase: str) -> dict:
+    """3.6.8: a real restore test without restoring — decrypt, unpack (bounded), integrity-check
+    the database, and require the vault key (a backup without it restores nothing usable)."""
+    info = verify(blob, passphrase)
+    if not info["has_secret"]:
+        raise ValueError("backup without the vault key — a restore would leave the credentials "
+                         "undecryptable")
+    return info
+
+
+def verify_stored(name: str) -> dict:
+    """The same check on a stored scheduled snapshot (`data/backups/*.wtsnap`, unencrypted)."""
+    if "/" in name or "\\" in name or not name.endswith(".wtsnap"):
+        raise ValueError("invalid name")
+    path = _backup_dir() / name
+    if not path.is_file() or path.is_symlink():
+        raise FileNotFoundError(name)
+    if path.stat().st_size > RESTORE_MAX_UNCOMPRESSED:
+        raise ValueError("backup too large")
+    info = _inspect(path.read_bytes())
+    if not info["has_secret"]:
+        raise ValueError("backup without the vault key — a restore would leave the credentials "
+                         "undecryptable")
+    return info
+
+
 def stage_restore(blob: bytes, passphrase: str) -> dict:
     """Decriptează + validează + extrage în restore-pending/ + scrie markerul. Aplicarea
     reală se face la următorul boot (apply_pending_restore), după un restart."""

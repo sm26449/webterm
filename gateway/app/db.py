@@ -395,6 +395,33 @@ CREATE TABLE IF NOT EXISTS oidc_group_roles (
     scope_value TEXT NOT NULL DEFAULT '',
     UNIQUE(grp, role_id, scope_kind, scope_value)
 );
+-- System health (3.6.8, syshealth.py): the last result of each check. NO command strings: only
+-- template ids + parameters (`commands`, JSON), rendered by healthcmd.py when shown or typed.
+-- `alerted_severity` = what was last alerted (dedup across restarts); `muted_until`: 0 = not
+-- muted, >0 = until that time, -1 = until the result changes (`muted_sig` = the result then).
+CREATE TABLE IF NOT EXISTS health_checks (
+    id TEXT PRIMARY KEY,
+    severity TEXT NOT NULL,
+    message_key TEXT NOT NULL DEFAULT '',
+    params TEXT,
+    recommendation_key TEXT DEFAULT '',
+    commands TEXT,
+    command_where TEXT DEFAULT '',
+    requires_root INTEGER DEFAULT 0,
+    action TEXT DEFAULT '',
+    source TEXT DEFAULT 'gateway',
+    hosts TEXT,
+    doc TEXT DEFAULT '',
+    checked_at REAL,
+    first_failed_at REAL,
+    changed_at REAL,
+    sig TEXT,
+    alerted_severity TEXT,
+    alerted_at REAL,
+    muted_until REAL DEFAULT 0,
+    muted_sig TEXT,
+    muted_by TEXT
+);
 """
 
 # additive migrations for DBs created by an older version

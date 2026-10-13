@@ -296,6 +296,20 @@ COMPOSE_PROFILES = [p.strip() for p in _str("WEBTERM_COMPOSE_PROFILES", "").spli
 # the install directory ON THE HOST (only used to print `sudo <dir>/scripts/cert-renew.sh`)
 INSTALL_DIR = _str("WEBTERM_INSTALL_DIR", "/opt/webterm").rstrip("/") or "/opt/webterm"
 
+# ── System health (3.6.8, syshealth.py) ─────────────────────────────────────────────────────
+# Free space on the data volume: an early warning, then critical. Until 3.6.7 there was only the
+# critical alert at 10 % — by then a busy instance is hours from "database or disk is full".
+DISK_WARN_PCT = min(90.0, max(1.0, _num("WEBTERM_DISK_WARN_PCT", 20.0, float)))
+DISK_CRIT_PCT = min(DISK_WARN_PCT, max(0.5, _num("WEBTERM_DISK_CRIT_PCT", 10.0, float)))
+# An agent may defer its update while sessions are open; after this many days behind it is a
+# warning (the open sessions may never close on their own).
+AGENT_OUTDATED_DAYS = max(1, _num("WEBTERM_AGENT_OUTDATED_DAYS", 7))
+# Dead-man switch: an outbound GET every N minutes to a monitor (healthchecks.io, Uptime Kuma
+# push, …). When the gateway dies, the PINGS stop and the monitor alerts — the one failure no
+# in-app check can report. The URL usually embeds a secret id → `_FILE` accepted, never shown.
+HEARTBEAT_URL = _secret("WEBTERM_HEARTBEAT_URL")
+HEARTBEAT_MINUTES = min(60, max(1, _num("WEBTERM_HEARTBEAT_MINUTES", 5)))
+
 
 def email_alerts_enabled() -> bool:
     return bool(SMTP_HOST and ALERT_TO and ALERT_FROM)

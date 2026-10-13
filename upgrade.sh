@@ -306,12 +306,15 @@ if docker run --rm --entrypoint sh "$IMAGE" -c 'cd /srv/webterm/deploy-kit && ta
   CHANGED=0
   for f in docker-compose.prod.yml deploy.sh rollback.sh remove.sh \
            scripts/backup.sh scripts/restore.sh scripts/cert-check.sh scripts/cert-renew.sh \
+           scripts/host-health.sh scripts/docker-cleanup.sh \
            deploy/authentik/docker-compose.prod.yml deploy/authentik/docker-compose.yml \
            deploy/authentik/.env.prod.example deploy/authentik/.env.example \
            deploy/authentik/provision.py deploy/authentik/provision.sh \
            deploy/authentik/blueprints/webterm.yaml \
            deploy/webterm-backup.service deploy/webterm-backup.timer \
-           deploy/webterm-cert-check.service deploy/webterm-cert-check.timer; do
+           deploy/webterm-cert-check.service deploy/webterm-cert-check.timer \
+           deploy/webterm-host-health.service deploy/webterm-host-health.timer \
+           deploy/webterm-docker-cleanup.service deploy/webterm-docker-cleanup.timer; do
     [ -f "$KIT/$f" ] || continue
     if [ -f "$f" ] && cmp -s "$KIT/$f" "$f"; then continue; fi
     mkdir -p "$(dirname "$f")"
@@ -442,6 +445,19 @@ say "Pruning old images (keeping the last $KEEP)"
   if [ "$removed" = 0 ]; then echo "  nothing to prune (≤ $KEEP versions on disk)"; fi
 } || warn "image prune skipped (non-fatal)"
 
+# ── 7c. host health (3.6.8): the hourly root check + the daily Docker cleanup ─────────────────
+# host-health.sh owns its units (install.sh calls the same --install): it renders them for THIS
+# directory, leaves another install's units alone and retires the old hand-made cron job. Then one
+# run now, so Settings → System health (and the list below) starts from fresh host data.
+say "Host health"
+HH_T=$(date +%s)
+if [ -x scripts/host-health.sh ]; then
+  scripts/host-health.sh --install || warn "host-health --install failed (non-fatal) — run: sudo $ROOT/scripts/host-health.sh --install"
+  scripts/host-health.sh || warn "the host-health run reported a problem (non-fatal) — see Settings → System health"
+else
+  warn "scripts/host-health.sh missing — host checks not installed"
+fi
+
 if [ -f /etc/default/webterm-backup ] && grep -q '^WEBTERM_BACKUP_PASSPHRASE=.' /etc/default/webterm-backup; then
   echo "  backup: encrypted (passphrase in /etc/default/webterm-backup)"
 else
@@ -524,6 +540,18 @@ if [ -x scripts/cert-renew.sh ]; then
   else
     warn "certificate report unavailable: $(printf '%s\n' "$CERT_REPORT" | tail -n1)"
   fi
+fi
+
+# System health (3.6.8): the SAME list as Settings → System health, read from the running gateway
+# (one source of truth). It waits up to 45 s for a check pass newer than the host-health run above.
+say "System health"
+if HEALTH=$(docker exec "${APP_CID:-nimic}" python3 -m app.admin health --wait 45 \
+              --newer-than "${HH_T:-0}" 2>/dev/null); then
+  printf '%s\n' "$HEALTH" | sed 's/^/  /'
+  HN=$(printf '%s\n' "$HEALTH" | grep -cE '^\[(CRITICAL|WARNING)\]' || true)
+  TODO=$((TODO + ${HN:-0}))
+else
+  warn "health report unavailable (docker exec ${APP_CID:-<container>} python3 -m app.admin health)"
 fi
 
 if [ "$TODO" = 0 ]; then

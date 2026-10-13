@@ -100,6 +100,12 @@ services:
       WEBTERM_AUTHENTIK_DOMAIN: ${AUTHENTIK_DOMAIN:-}
       WEBTERM_COMPOSE_PROFILES: ${COMPOSE_PROFILES:-}
       WEBTERM_INSTALL_DIR: ${WEBTERM_INSTALL_DIR:-}
+      # System health (3.6.8): disk thresholds, agent-behind days, the dead-man switch
+      WEBTERM_DISK_WARN_PCT: ${WEBTERM_DISK_WARN_PCT:-}
+      WEBTERM_DISK_CRIT_PCT: ${WEBTERM_DISK_CRIT_PCT:-}
+      WEBTERM_AGENT_OUTDATED_DAYS: ${WEBTERM_AGENT_OUTDATED_DAYS:-}
+      WEBTERM_HEARTBEAT_URL: ${WEBTERM_HEARTBEAT_URL:-}
+      WEBTERM_HEARTBEAT_MINUTES: ${WEBTERM_HEARTBEAT_MINUTES:-}
     volumes:
       - webterm-data:/data
     networks: [webterm]

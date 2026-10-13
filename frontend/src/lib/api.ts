@@ -31,6 +31,8 @@ export interface AppState {
   backup_ready?: boolean
   signing_missing?: boolean
   signing_locked?: boolean
+  /** 3.6.8: System health — verificările warning/critical nemutate (doar cu `security.view`) */
+  health_attention?: { count: number; severity: 'ok' | 'info' | 'warning' | 'critical' } | null
   watermark?: WatermarkConfig | null
   command_guard?: CommandGuard | null
   /** Pragul de idle-lock (secunde) pe hosturile cu 2FA; 0 = oprit. Cronometrul e PER sesiune

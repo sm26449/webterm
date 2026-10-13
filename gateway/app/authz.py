@@ -88,6 +88,8 @@ _CATALOGUE = (
     ("signing.manage", "global", False),
     # 3.6.7: open a terminal on the gateway host with the TLS renewal command typed (it runs
     # `sudo …/cert-renew.sh`, which edits the ACME store and restarts Traefik). Owner only.
+    # 3.6.8: the same permission types a System health fix (healthcmd.py allow-list) there —
+    # one Owner-only door for "a root command typed on the gateway host", not two.
     ("certs.renew", "global", False),
 )
 

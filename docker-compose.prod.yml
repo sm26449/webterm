@@ -245,6 +245,12 @@ services:
       # where the host kit lives, only to PRINT `sudo <dir>/scripts/cert-renew.sh …` (install.sh
       # writes it when --dir is not /opt/webterm)
       WEBTERM_INSTALL_DIR: ${WEBTERM_INSTALL_DIR:-/opt/webterm}
+      # System health (3.6.8): disk thresholds, agent-behind days, the dead-man switch
+      WEBTERM_DISK_WARN_PCT: ${WEBTERM_DISK_WARN_PCT:-}
+      WEBTERM_DISK_CRIT_PCT: ${WEBTERM_DISK_CRIT_PCT:-}
+      WEBTERM_AGENT_OUTDATED_DAYS: ${WEBTERM_AGENT_OUTDATED_DAYS:-}
+      WEBTERM_HEARTBEAT_URL: ${WEBTERM_HEARTBEAT_URL:-}
+      WEBTERM_HEARTBEAT_MINUTES: ${WEBTERM_HEARTBEAT_MINUTES:-}
     # Fişierele din ./secrets/ montate la /run/secrets/<nume> (bind read-only; compose ignoră
     # uid/mode la secretele din fişier — verificat pe Compose v5 — deci drepturile de pe host
     # contează: fişier 0644 într-un director 0700, ca userul `webterm` (10001) să-l poată citi

@@ -68,6 +68,12 @@ KINDS: dict = {
     "backup_failed":    {"group": "gateway", "scope": "fleet", "security": False},
     # 3.6.7: the TLS certificate Traefik serves is expiring / expired / the default one
     "tls_cert":         {"group": "gateway", "scope": "fleet", "security": False},
+    # 3.6.8: System health — a check went to warning/critical (or recovered)
+    "health":           {"group": "gateway", "scope": "fleet", "security": False},
+    # 3.6.8: alerts cannot leave (SMTP/webhook failing). In-app ONLY by construction
+    # (email_alerts.record_inapp_only) and always recorded: hidden from the preferences, since the
+    # one place that can still show it must not be switchable off.
+    "alert_delivery":   {"group": "gateway", "scope": "fleet", "security": False, "hidden": True},
     # rezervă pentru apeluri `_fire` fără tip (teste, cod vechi) — nu apare în Setări
     "system":           {"group": "gateway", "scope": "fleet", "security": False, "hidden": True},
 }

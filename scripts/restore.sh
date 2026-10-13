@@ -11,9 +11,16 @@
 #   WEBTERM_BACKUP_PASSPHRASE   required if the archive is encrypted (.enc from backup.sh)
 #   WEBTERM_RESTORE_MAX_BYTES   decompressed-size cap, anti compression-bomb (default 2 GiB)
 #   WEBTERM_RESTORE_MAX_MEMBERS max number of entries in the archive       (default 20000)
+#
+#   ./restore.sh --verify <archive>   (3.6.8) a restore TEST: decrypt + unpack (bounded) + SQLite
+#                                     integrity check in a throw-away container with no network;
+#                                     the app and the data volume are NOT touched. The result is
+#                                     recorded for Settings → System health ("restore verified").
 set -euo pipefail
 
-ARCHIVE="${1:?usage: ./restore.sh <archive.tar.gz|.enc>}"
+VERIFY=0
+if [ "${1:-}" = "--verify" ]; then VERIFY=1; shift; fi
+ARCHIVE="${1:?usage: ./restore.sh [--verify] <archive.tar.gz|.enc>}"
 SRC_NAME="$ARCHIVE"      # numele TASTAT de om; `$ARCHIVE` devine un mktemp după decriptare
 [ -f "$ARCHIVE" ] || { echo "not found: $ARCHIVE"; exit 1; }
 VOLUME="${WEBTERM_VOLUME:-webterm_webterm-data}"
@@ -54,6 +61,69 @@ case "$ARCHIVE" in
     ARCHIVE="$DECTMP"
     ;;
 esac
+# ── --verify: a restore test that touches nothing ────────────────────────────
+if [ "$VERIFY" = 1 ]; then
+  RV_SELF_DIR=$(cd "$(dirname "$0")" && pwd -P)
+  RV_NAME=$(basename "$SRC_NAME")
+  rv_record() {   # rv_record ok|error MESSAGE
+    if [ -x "$RV_SELF_DIR/host-health.sh" ]; then
+      "$RV_SELF_DIR/host-health.sh" --record restore-verify "$1" "$2" \
+        "$(printf '{"archive":"%s"}' "$(printf '%s' "$RV_NAME" | tr -cd 'A-Za-z0-9._-' | cut -c1-128)")" \
+        >/dev/null 2>&1 || true
+    fi
+  }
+  docker image inspect "$IMAGE" >/dev/null 2>&1 || docker pull -q "$IMAGE" >/dev/null 2>&1 || {
+    echo "REFUSING: cannot get the helper image '$IMAGE' (no registry access?)." >&2
+    rv_record error "restore test not run: the helper image is not available"
+    exit 1
+  }
+  VDIR="$(cd "$(dirname "$ARCHIVE")" && pwd)"; VBASE="$(basename "$ARCHIVE")"
+  if RV_OUT=$(docker run --rm -i --network none --entrypoint python3 \
+       -v "$VDIR":/in:ro -e ABASE="$VBASE" -e MAXB="$RESTORE_MAX_BYTES" -e MAXM="$RESTORE_MAX_MEMBERS" \
+       "$IMAGE" -I - 2>&1 <<'PY'
+import gzip, io, os, sqlite3, sys, tarfile, tempfile
+maxb, maxm = int(os.environ["MAXB"]), int(os.environ["MAXM"])
+flat, read = io.BytesIO(), 0
+try:
+    with gzip.open("/in/" + os.environ["ABASE"], "rb") as g:
+        while True:
+            chunk = g.read(1 << 20)
+            if not chunk:
+                break
+            read += len(chunk)
+            if read > maxb:
+                sys.exit("archive unpacks beyond %d bytes (possible compression bomb)" % maxb)
+            flat.write(chunk)
+except (OSError, EOFError) as e:
+    sys.exit("corrupt archive, or not a WebTerm backup: %s" % e)
+flat.seek(0)
+with tarfile.open(fileobj=flat, mode="r:") as t:
+    members = t.getmembers()
+    if len(members) > maxm:
+        sys.exit("archive has %d entries (> %d)" % (len(members), maxm))
+    names = [m.name for m in members]
+    if "webterm.db" not in names:
+        sys.exit("archive without webterm.db")
+    if "secret" not in names:
+        sys.exit("archive without the vault key (secret)")
+    td = tempfile.mkdtemp()
+    t.extract(t.getmember("webterm.db"), td, filter="data")
+integ = sqlite3.connect(os.path.join(td, "webterm.db")).execute("PRAGMA integrity_check").fetchone()[0]
+if integ != "ok":
+    sys.exit("integrity FAILED: " + integ[:120])
+print("restore test OK: the archive unpacks, has the vault key, and its database passes integrity_check")
+PY
+  ); then
+    echo "$RV_OUT"
+    rv_record ok "restore test passed for $RV_NAME"
+    exit 0
+  else
+    echo "$RV_OUT" >&2
+    rv_record error "restore test FAILED for $RV_NAME: $(printf '%s' "$RV_OUT" | tail -n1 | cut -c1-120)"
+    exit 1
+  fi
+fi
+
 # auto-detectează compose-ul: prod are docker-compose.prod.yml, nu docker-compose.yml.
 # Default-ul greșit făcea `stop app` să eșueze tăcut → wipe cu SQLite VIU (corupere).
 FILE="${COMPOSE_FILE:-}"

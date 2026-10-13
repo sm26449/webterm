@@ -1,0 +1,10 @@
+[Unit]
+Description=WebTerm — host health checks (Settings → System health)
+Wants=webterm-host-health.timer
+
+[Service]
+Type=oneshot
+# ajustează calea dacă instalarea nu e în /opt/webterm
+WorkingDirectory=/opt/webterm
+ExecStart=/opt/webterm/scripts/host-health.sh
+TimeoutStartSec=120

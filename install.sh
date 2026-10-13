@@ -63,6 +63,7 @@ DOMAIN="" EMAIL="" CF_TOKEN="" GHCR_USER=sm26449 GHCR_TOKEN="" IMAGE=""
 WITH_AUTHENTIK="" AUTHENTIK_DOMAIN=""
 DO_PORTCHECK=1
 DO_CERTCHECK=1
+DO_HOSTHEALTH=1
 DO_UFW=1 DO_BACKUP=1 NONINTERACTIVE=0
 
 usage() {
@@ -86,6 +87,7 @@ Options:
   --no-backup           do not install the daily backup timer
   --skip-port-check     do not refuse when 80/443 are taken (you front WebTerm yourself)
   --no-cert-check       do not install the daily certificate-expiry timer
+  --no-host-health      do not install the host-health + docker-cleanup timers
   --non-interactive     ask nothing (fails if a value is missing)
   -h | --help           this message
 EOF
@@ -110,6 +112,7 @@ while [ $# -gt 0 ]; do
     --no-backup) DO_BACKUP=0; shift ;;
     --skip-port-check) DO_PORTCHECK=0; shift ;;
     --no-cert-check) DO_CERTCHECK=0; shift ;;
+    --no-host-health) DO_HOSTHEALTH=0; shift ;;
     --non-interactive) NONINTERACTIVE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) err "Unknown option: $1"; usage; exit 1 ;;
@@ -219,9 +222,12 @@ if [ "$FILES_SRC" != "$INSTALL_DIR" ]; then
     "$FILES_SRC/upgrade.sh" "$FILES_SRC/remove.sh" "$INSTALL_DIR/"
   install -d "$INSTALL_DIR/scripts" "$INSTALL_DIR/deploy"
   install -m 0755 "$FILES_SRC/scripts/backup.sh" "$FILES_SRC/scripts/restore.sh" \
-    "$FILES_SRC/scripts/cert-check.sh" "$FILES_SRC/scripts/cert-renew.sh" "$INSTALL_DIR/scripts/"
+    "$FILES_SRC/scripts/cert-check.sh" "$FILES_SRC/scripts/cert-renew.sh" \
+    "$FILES_SRC/scripts/host-health.sh" "$FILES_SRC/scripts/docker-cleanup.sh" "$INSTALL_DIR/scripts/"
   install -m 0644 "$FILES_SRC/deploy/webterm-backup.service" "$FILES_SRC/deploy/webterm-backup.timer" \
     "$FILES_SRC/deploy/webterm-cert-check.service" "$FILES_SRC/deploy/webterm-cert-check.timer" \
+    "$FILES_SRC/deploy/webterm-host-health.service" "$FILES_SRC/deploy/webterm-host-health.timer" \
+    "$FILES_SRC/deploy/webterm-docker-cleanup.service" "$FILES_SRC/deploy/webterm-docker-cleanup.timer" \
     "$INSTALL_DIR/deploy/"
   # Trusa Authentik (SSO opţional) — provision.py/sh, compose-ul separat, blueprint.
   install -d "$INSTALL_DIR/deploy/authentik/blueprints"
@@ -583,6 +589,16 @@ elif [ "$DO_CERTCHECK" = 1 ] && [ -d /run/systemd/system ]; then
   systemctl enable --now webterm-cert-check.timer >/dev/null
 fi
 
+# Host health (3.6.8): an hourly root check (timers, the Cloudflare token, the Authentik image) and
+# the daily Docker cleanup, both reporting into Settings → System health through status files in
+# the data volume. host-health.sh owns the unit install (upgrade.sh calls the same --install).
+if [ "$DO_HOSTHEALTH" = 1 ] && [ -d /run/systemd/system ] && [ -x scripts/host-health.sh ]; then
+  say "  Installing the hourly host-health check and the daily Docker cleanup (04:17)…"
+  scripts/host-health.sh --install || warn "  host-health --install failed (non-fatal) — run it by hand later"
+elif [ "$DO_HOSTHEALTH" = 1 ]; then
+  warn "  Skipping the host-health / docker-cleanup timers (no systemd)."
+fi
+
 # ── 7) health check ───────────────────────────────────────────────────────
 say "[7/7] Waiting for the app…"
 APP_OK=""
@@ -638,6 +654,11 @@ if [ -n "$PUBIP" ] && [ -n "$MYIP" ] && [ "$PUBIP" != "$MYIP" ]; then
 fi
 
 echo
+# the first host-health run, now that the app (and so its data volume) exists
+if [ "$DO_HOSTHEALTH" = 1 ] && [ -x scripts/host-health.sh ]; then
+  scripts/host-health.sh >/dev/null 2>&1 || warn "  the first host-health run reported a problem — see Settings → System health"
+fi
+
 say "── Done ──"
 echo "  URL:               https://$DOMAIN"
 echo "  Setup token:       $SETUP_TOKEN"

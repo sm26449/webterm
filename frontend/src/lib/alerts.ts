@@ -107,6 +107,13 @@ export function localizeAlert(a: AlertItem, t: TFn): { title: string; details: s
   if (typeof raw.age_key === 'string') p.age = tr('alertmsg.age.' + raw.age_key, p) ?? ''
   if ('session' in raw && !raw.session) p.session = tr('alertmsg.untitled') ?? ''
   if ('browser' in raw && !raw.browser) p.browser = '?'
+  // 3.6.8 System health: `msg` = cheia mesajului verificării (health.msg.<cheie>), tradus cu
+  // aceiaşi parametri; necunoscut → titlul englezesc stocat (alertmsg.health.title îl cere ca {text})
+  if (typeof raw.msg === 'string') {
+    const txt = tr('health.msg.' + raw.msg, p)
+    if (txt == null) return stored
+    p.text = txt
+  }
   const title = tr(base + '.title', p)
   if (title == null) return stored
   return { title, details: tr(base + '.details', p) ?? a.details }

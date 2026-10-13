@@ -107,7 +107,7 @@ def renew_command(domain: str, install_dir: Optional[str] = None) -> str:
 # Ctrl+C out. The command travels as a positional ARGUMENT ($1), never spliced into the script, so
 # even a hypothetical bad value would be data, not code (it is validated anyway, see above).
 _PROMPT_SH = r"""
-printf '\n[WebTerm] TLS certificate renewal on this host.\n'
+printf '\n[WebTerm] %s\n' "$2"
 printf '[WebTerm] The command below is TYPED, NOT RUN. Read it, then press Enter to run it,\n'
 printf '[WebTerm] edit it first, or press Ctrl+C to cancel (that closes this terminal).\n\n'
 if IFS= read -r -e -i "$1" -p '$ ' line; then
@@ -119,11 +119,17 @@ fi
 """
 
 
-def typed_session_cmd(command: str) -> str:
+# 3.6.8: System health types its fixes through the SAME prompt; only the header line differs.
+# Headers are server constants (never request data), passed as $2 — data, not code — anyway.
+HEADER_CERT = "TLS certificate renewal on this host."
+HEADER_HEALTH = "System health: a fix on this host."
+
+
+def typed_session_cmd(command: str, header: str = HEADER_CERT) -> str:
     q = shlex.quote(command)
-    return ("if command -v bash >/dev/null 2>&1; then exec bash -c %s webterm-cert-renew %s; "
+    return ("if command -v bash >/dev/null 2>&1; then exec bash -c %s webterm-cert-renew %s %s; "
             "else printf '%%s\\n' 'bash not found; run this yourself:' %s; "
-            "exec \"${SHELL:-/bin/sh}\"; fi" % (shlex.quote(_PROMPT_SH), q, q))
+            "exec \"${SHELL:-/bin/sh}\"; fi" % (shlex.quote(_PROMPT_SH), q, shlex.quote(header), q))
 
 
 # ── what to check ────────────────────────────────────────────────────────────────────────────

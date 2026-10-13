@@ -13,6 +13,7 @@ import AppearanceTab from './settings/AppearanceTab'
 import NotificationsTab from './settings/NotificationsTab'
 import BackupTab from './settings/BackupTab'
 import PreferencesTab from './settings/PreferencesTab'
+import HealthTab from './settings/HealthTab'
 import { EmptyState, eyebrow, IconButton } from './ui'
 import { CloseIcon, SearchIcon } from './Icons'
 
@@ -65,6 +66,8 @@ export default function SettingsModal(props: {
   initialSection?: string
   onClose: () => void
   onAccountChanged: () => void   // refetch /api/state (refolosit și după salvarea watermark-ului)
+  /** 3.6.8: câte verificări din System health cer atenţie (contorul de pe rail) */
+  healthAttention?: number
 }) {
   const { t } = useI18n()
   // 3.6: tab-urile/secţiunile pentru care contul n-are permisiunea globală nu apar (cosmetic —
@@ -229,6 +232,13 @@ export default function SettingsModal(props: {
                 }`}
               >
                 {t(c.labelKey)}
+                {c.id === 'sanatate' && !!props.healthAttention && (
+                  <span className={`ml-1.5 rounded-full px-1.5 text-2xs font-semibold ${
+                    !searching && cat === c.id ? 'bg-white/20 text-white' : 'bg-warn/10 text-warn'}`}>
+                    <span aria-hidden="true">{props.healthAttention}</span>
+                    <span className="sr-only">{t('health.attention', { count: props.healthAttention })}</span>
+                  </span>
+                )}
               </button>
             ))}
           </nav>
@@ -293,6 +303,13 @@ export default function SettingsModal(props: {
             <div hidden={searching} className={cat === 'audit' || cat === 'backup' ? '' : 'max-w-3xl'}>
 
         {pane('cont', <AccountTab email={props.email} onAccountChanged={props.onAccountChanged} />)}
+
+        {/* 3.6.8: un rând de System health poate trimite la secţiunea care îl rezolvă */}
+        {pane('sanatate', <HealthTab onJump={(c, section) => {
+          if (!SETTINGS_CATS.some((x) => x.id === c)) return
+          setCat(c as SettingsCat)
+          if (section) setJump((j) => ({ id: section, n: (j?.n ?? 0) + 1 }))
+        }} />)}
 
         {/* `jump`: sub-tab-ul secţiunii căutate (Accounts / Roles / SSO groups) se deschide înainte de salt */}
         {pane('utilizatori', <UsersTab jump={jump} />)}

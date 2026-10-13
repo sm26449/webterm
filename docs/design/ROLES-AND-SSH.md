@@ -311,7 +311,7 @@ Derived capabilities, which deliberately have **no bit of their own**:
 | `security.view` | The instance security summary, plus instance-level security alerts (new account, token created, signing key, …). |
 | `backups.manage` | Backup download, restore, schedule, cloud. **Owner only**: a backup contains the vault key, so it is the whole instance. |
 | `signing.manage` | Agent signing key: generate, import, unlock, lock, backup. **Owner only.** |
-| `certs.renew` | Open a terminal on the gateway host with `cert-renew.sh --domain <name>` typed (3.6.7). **Owner only**: the command edits the ACME store and restarts Traefik under sudo. |
+| `certs.renew` | Open a terminal on the gateway host with `cert-renew.sh --domain <name>` typed (3.6.7), or — since 3.6.8 — a System health fix from the server-side allow-list (healthcmd.py). **Owner only**: these commands run under sudo on the gateway host. |
 
 **Self-service** (any authenticated user, no permission needed): own account, password, TOTP,
 passkeys, web sessions, alert preferences, split views, own alerts, version and changelog, the
@@ -1558,6 +1558,11 @@ middleware plus ASGI WS middleware in `main.py`) and the SPA/asset catch-all. Li
 | `/api/backup/schedule` (3408) | POST | `backups.manage` | G | |
 | `/api/backup/stored/{name}` (3417) | DELETE | `backups.manage` | G | |
 | `/api/backup/seen` (3429) | POST | `backups.manage` | G | |
+| `/api/backup/stored/{name}/verify` (3.6.8) | POST | `backups.manage` | G | | unpack + integrity check, nothing restored; records `restore_verified_at` |
+| `/api/backup/verify` (3.6.8) | POST | `backups.manage` | G | | an uploaded .wtbk, decrypted + checked in memory, nothing staged |
+| `/api/health` (3.6.8) | GET | `security.view` | G | | System health (cookie only); host names only for hosts with `host.view`; commands only with `settings.manage`; `can_terminal` = `certs.renew` |
+| `/api/health/check` (3.6.8) | POST | `settings.manage` | G | | "Re-check now", rate-limited instance-wide (30 s) |
+| `/api/health/{check_id}/mute` (3.6.8) | POST | `settings.manage` | G | | 7 d / 30 d / until it changes / off; audited |
 | `/api/backup/cloud` (3477) | GET | `backups.manage` | G | |
 | `/api/backup/cloud/config` (3482) | POST | `backups.manage` | G | |
 | `/api/backup/cloud/probe` (3496) | POST | `backups.manage` | G | |
@@ -1633,6 +1638,7 @@ middleware plus ASGI WS middleware in `main.py`) and the SPA/asset catch-all. Li
 | `/api/hosts/{host_id}/sessions` (6404) | GET | `session.watch` ∪ `recording.view` | H(host_id) | su | | |
 | `/api/hosts/{host_id}/sessions` (7559) | POST | `session.open` | H(host_id) | su | | a body `cmd` (docker exec / upgrade / toolbox) is still `session.open`; Toolbox launches also need `toolbox.use` |
 | `/api/hosts/{host_id}/cert-renew` (3.6.7) | POST | `certs.renew` | G + `session.open` on host_id | ff | | Owner-only; the picked host only, an allow-listed name; the command is typed, not run |
+| `/api/hosts/{host_id}/health-terminal` (3.6.8) | POST | `certs.renew` | G + `session.open` on host_id | ff | | Owner-only; the picked host only; the client names a check + command index, the server re-renders the command from its allow-list (healthcmd.py); typed, not run; private session `health-fix` |
 | `/api/sessions/{sid}` (7707) | PATCH | `session.open` (own) / `session.manage` | H(sid) | | | rename/note |
 | `/api/sessions/{sid}/reconnect` (7723) | POST | `session.open` | H(sid) | su | | |
 | `/api/sessions/{sid}/kill` (7743) | POST | `session.open` (own) / `session.manage` | H(sid) | su | | |
