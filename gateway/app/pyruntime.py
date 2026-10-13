@@ -12,10 +12,14 @@ The gateway serves the tarball, so hosts without internet access work:
     download hosts), streams it to a temp file under the data volume while hashing it, refuses
     anything larger than the pinned size, and moves it into the cache ONLY if the SHA-256 matches.
     A mismatch is never cached and never served;
-  * bounded: one download per target at a time, at most MAX_PARALLEL overall, a total deadline,
-    and a free-space check (pinned size + FREE_MARGIN) before downloading;
-  * a cached file is re-hashed once per gateway process before it is first served (a file changed
-    on disk is deleted and fetched again), then streamed;
+  * bounded: one download per target at a time, at most MAX_PARALLEL overall, a free-space check
+    (pinned size + FREE_MARGIN) before downloading, and limits enforced INSIDE the worker thread:
+    a socket timeout per operation, a total deadline checked between reads (a slow drip
+    included), and a stop event the awaiting side sets when it gives up. Every timeout is a
+    RuntimeUnavailable (503), never a 500. The temp file comes from `mkstemp`;
+  * a cached file is re-hashed before this process first serves it, and again whenever its size,
+    inode or mtime differ from what was verified (a file changed on disk is deleted and fetched
+    again), then streamed;
   * the route needs the HOST's agent token (`Authorization: Bearer`) — the credential the install
     script already carries — so the gateway is not an anonymous download proxy.
 The host verifies the same SHA-256 again (embedded in the install script), so a wrong file is
@@ -31,7 +35,10 @@ import logging
 import os
 import re
 import shutil
+import socket
 import ssl
+import tempfile
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -46,6 +53,7 @@ ALLOWED_HOSTS = ("github.com", "objects.githubusercontent.com", "release-assets.
 MAX_PARALLEL = 2
 DOWNLOAD_DEADLINE = 600.0          # seconds, whole download
 READ_TIMEOUT = 30.0                # per socket operation
+OUTER_SLACK = 30.0                 # the awaiting side gives up this long after the worker should have
 FREE_MARGIN = 512 * 1024 * 1024    # keep this much free on the data volume after the download
 CHUNK = 1024 * 1024
 _TARGET_RE = re.compile(r"^[a-z0-9_]+-[a-z0-9]+$")
@@ -95,7 +103,17 @@ def cache_dir() -> Path:
 
 _locks: dict = {}
 _sem: Optional[asyncio.Semaphore] = None
-_verified: set = set()             # cached files hashed OK by this process
+# cached files hashed OK by this process → the (dev, inode, size, mtime_ns) they had then. Served
+# without re-hashing only while the file on disk still has exactly that identity.
+_verified: dict = {}
+
+
+def _sig(p: Path) -> Optional[tuple]:
+    try:
+        st = os.stat(p)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
 
 
 def _sem_get() -> asyncio.Semaphore:
@@ -129,43 +147,71 @@ def _opener():
     return urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx), _PinnedRedirects())
 
 
+def _read_some(r, n: int) -> bytes:
+    """One socket read's worth (at most `n` bytes): `read1` returns as soon as ANY bytes arrive, so
+    the deadline below is checked between reads even when the server drips a byte at a time
+    (`read(n)` would loop inside until it had all n bytes, each recv under its own timeout)."""
+    read1 = getattr(r, "read1", None)
+    return read1(n) if read1 is not None else r.read(n)
+
+
 def download_verified(url: str, dest: Path, sha256: str, size: int, opener=None,
-                      deadline: float = DOWNLOAD_DEADLINE) -> None:
-    """Blocking (runs in a thread). Streams `url` into a temp file next to `dest`, hashing as it
-    goes; more bytes than `size`, a wrong total or a wrong hash → the temp file is deleted and
-    RuntimeUnavailable is raised. Only a verified file is renamed into place."""
+                      deadline: float = DOWNLOAD_DEADLINE, stop: Optional[threading.Event] = None) -> None:
+    """Blocking (runs in a thread). Streams `url` into a fresh `mkstemp` file next to `dest`,
+    hashing as it goes; more bytes than `size`, a wrong total or a wrong hash → the temp file is
+    deleted and RuntimeUnavailable is raised. Only a verified file is renamed into place.
+    Bounded INSIDE the thread: every socket operation times out after READ_TIMEOUT, the whole
+    download after `deadline` (checked between reads, slow-drip included), and `stop` (set by the
+    caller when it gives up) ends it at the next read — the thread never outlives its caller by
+    more than one READ_TIMEOUT, and never renames a file into place after the caller gave up."""
     if not url.startswith("https://"):
         raise RuntimeUnavailable("pyruntime.badUrl", "only https downloads")
     dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_name(".%s.part.%d" % (dest.name, os.getpid()))
+    fd, tmpname = tempfile.mkstemp(prefix=".%s.part." % dest.name, dir=str(dest.parent))
+    tmp = Path(tmpname)
     h = hashlib.sha256()
     n = 0
     end = time.monotonic() + deadline
+
+    def check_time():
+        if stop is not None and stop.is_set():
+            raise RuntimeUnavailable("pyruntime.timeout", "download abandoned")
+        if time.monotonic() > end:
+            raise RuntimeUnavailable("pyruntime.timeout", "download took too long")
+
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "webterm-gateway"})
-        with (opener or _opener()).open(req, timeout=READ_TIMEOUT) as r, open(tmp, "wb") as out:
-            while True:
-                if time.monotonic() > end:
-                    raise RuntimeUnavailable("pyruntime.timeout", "download took too long")
-                b = r.read(CHUNK)
-                if not b:
-                    break
-                n += len(b)
-                if n > size:
-                    raise RuntimeUnavailable("pyruntime.badSize", "larger than the pinned size")
-                h.update(b)
-                out.write(b)
+        with os.fdopen(fd, "wb") as out:
+            fd = -1
+            req = urllib.request.Request(url, headers={"User-Agent": "webterm-gateway"})
+            with (opener or _opener()).open(req, timeout=READ_TIMEOUT) as r:
+                while True:
+                    check_time()
+                    b = _read_some(r, CHUNK)
+                    if not b:
+                        break
+                    n += len(b)
+                    if n > size:
+                        raise RuntimeUnavailable("pyruntime.badSize", "larger than the pinned size")
+                    h.update(b)
+                    out.write(b)
         if n != size:
             raise RuntimeUnavailable("pyruntime.badSize", "got %d bytes, pinned %d" % (n, size))
         if h.hexdigest() != sha256:
             raise RuntimeUnavailable("pyruntime.badHash", "SHA-256 mismatch — not cached, not served")
+        check_time()
         os.chmod(tmp, 0o644)
         os.replace(tmp, dest)
     except RuntimeUnavailable:
         raise
+    except (socket.timeout, TimeoutError) as e:
+        raise RuntimeUnavailable("pyruntime.timeout", "%s" % (e.__class__.__name__,))
     except Exception as e:             # noqa: BLE001 — network/disk: a stable code, no partial file
+        if isinstance(getattr(e, "reason", None), (socket.timeout, TimeoutError)):
+            raise RuntimeUnavailable("pyruntime.timeout", "connect timed out")
         raise RuntimeUnavailable("pyruntime.downloadFailed", "%s" % (e.__class__.__name__,))
     finally:
+        if fd >= 0:
+            os.close(fd)
         try:
             tmp.unlink()
         except FileNotFoundError:
@@ -186,12 +232,15 @@ async def get(key: str, *, opener=None) -> tuple:
     dest = d / t["file"]
     lock = _locks.setdefault(key, asyncio.Lock())
     async with lock:
-        if dest.exists():
-            if str(dest) in _verified:
+        sig = _sig(dest)
+        if sig is not None:
+            if _verified.get(str(dest)) == sig and sig[2] == t["size"]:
                 return dest, t
+            # never verified by this process, or changed since (size, inode or mtime): hash again
+            _verified.pop(str(dest), None)
             got = await asyncio.to_thread(sha256_file, dest)
-            if got == t["sha256"]:
-                _verified.add(str(dest))
+            if got == t["sha256"] and _sig(dest) == sig:
+                _verified[str(dest)] = sig
                 return dest, t
             log.warning("portable python: cached %s does not match its pinned hash — deleted", dest.name)
             dest.unlink(missing_ok=True)
@@ -201,10 +250,20 @@ async def get(key: str, *, opener=None) -> tuple:
         async with _sem_get():
             log.info("portable python: downloading %s (%d bytes)", t["file"], t["size"])
             url = MANIFEST["base_url"] + t["file"].replace("+", "%2B")
-            await asyncio.wait_for(
-                asyncio.to_thread(download_verified, url, dest, t["sha256"], t["size"], opener),
-                timeout=DOWNLOAD_DEADLINE + 60)
-        _verified.add(str(dest))
+            stop = threading.Event()
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(download_verified, url, dest, t["sha256"], t["size"], opener,
+                                      DOWNLOAD_DEADLINE, stop),
+                    timeout=DOWNLOAD_DEADLINE + READ_TIMEOUT + OUTER_SLACK)
+            except asyncio.TimeoutError:
+                raise RuntimeUnavailable("pyruntime.timeout", "download took too long")
+            finally:
+                stop.set()                # the worker stops at its next read (it checks the event)
+        sig = _sig(dest)
+        if sig is None:
+            raise RuntimeUnavailable("pyruntime.downloadFailed", "the verified file vanished")
+        _verified[str(dest)] = sig
         _prune(d)
         return dest, t
 

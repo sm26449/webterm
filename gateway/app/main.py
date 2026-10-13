@@ -552,6 +552,14 @@ app.include_router(api.router)
 app.include_router(webauthn_api.router)
 app.include_router(oidc_api.router)
 
+def spa_reserved(path: str) -> bool:
+    """Prefixes that belong to the API and the agent endpoints: an unknown path under them is a 404,
+    never the SPA page with 200 (clients, install scripts and tests would mistake HTML for an
+    answer — e.g. `/agent/python/../../etc/passwd` used to get index.html when the UI was built)."""
+    p = path.lstrip("/")
+    return any(p == pre or p.startswith(pre + "/") for pre in ("api", "agent"))
+
+
 if FRONTEND_DIST.exists():
     app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="assets")
     _DIST = FRONTEND_DIST.resolve()
@@ -560,9 +568,9 @@ if FRONTEND_DIST.exists():
     async def spa(path: str):
         # resolve and contain: '..' segments must not escape the dist dir
         # (raw ASGI clients don't normalize the path for us)
-        # an unknown /api/* route is a 404, not the SPA page with 200 (clients and tests would
-        # mistake HTML for a response)
-        if path == "api" or path.startswith("api/"):
+        # an unknown /api/* or /agent/* route is a 404, not the SPA page with 200 (clients and
+        # tests would mistake HTML for a response)
+        if spa_reserved(path):
             raise HTTPException(404, "Not Found")
         target = (_DIST / path).resolve()
         if path and target.is_file() and target.is_relative_to(_DIST):
