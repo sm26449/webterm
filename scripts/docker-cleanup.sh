@@ -107,7 +107,7 @@ free_pct() { df -P / 2>/dev/null | awk 'NR==2 { gsub("%","",$5); printf "%.1f", 
 REMOVED=0
 OTHER_REMOVED=0
 FAILED=""
-# shellcheck disable=SC2329  # invoked through the EXIT trap below
+# shellcheck disable=SC2317,SC2329  # invoked through the EXIT trap below (2317: shellcheck ≤0.9, 2329: ≥0.10)
 record_status() {
   local rc=$? st=ok msg pct
   if [ "$DRY" = 1 ]; then return; fi

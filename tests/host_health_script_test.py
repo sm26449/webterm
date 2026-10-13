@@ -588,7 +588,10 @@ def main():
         if not sc:
             print("  SKIP: shellcheck not installed (CI's lint job runs it)")
         else:
-            p = subprocess.run([sc, HH, DC, os.path.join(ROOT, "scripts", "authentik-upgrade.sh")],
+            # -S warning: the gate is warnings and errors. Info notes (SC2015 `A && B || die`, a
+            # deliberate idiom here) differ between shellcheck versions — the runner's 0.9 reported
+            # them while 0.10 did not, and that alone failed a release run.
+            p = subprocess.run([sc, "-S", "warning", HH, DC, os.path.join(ROOT, "scripts", "authentik-upgrade.sh")],
                                capture_output=True, text=True)
             check("host-health.sh + docker-cleanup.sh + authentik-upgrade.sh are shellcheck-clean",
                   p.returncode == 0, p.stdout[-500:])
