@@ -128,7 +128,9 @@ def sandbox(tmp, with_token=False, with_cosign=False, env_extra=""):
     # şi un upgrade.sh diferit (trebuie pus deoparte ca .new, nu peste cel care rulează)
     (d / "kit" / "docker-compose.prod.yml").write_text("services: {app: {}}   # nou\n")
     (d / "kit" / "scripts" / "backup.sh").write_text("#!/bin/sh\n# backup nou\n")
-    (d / "kit" / "upgrade.sh").write_text("#!/usr/bin/env bash\n# upgrade nou\n")
+    # the release ships the SAME upgrade.sh by default (no switch); the 3.6.9 re-exec tests below
+    # build an "old" running script that lacks a kit file
+    shutil.copy(ROOT / "upgrade.sh", d / "kit" / "upgrade.sh")
 
     # `id` stubuit: `remove.sh` cere root (atinge /etc/systemd şi /var/backups), iar runner-ul
     # de CI nu e root — deci testele gărzii de FLOTĂ picau acolo şi treceau local, unde rulăm
@@ -218,9 +220,12 @@ def main():
               (d / "docker-compose.prod.yml.bak").exists())
         check("backup.sh e sincronizat şi el",
               "# backup nou" in (d / "scripts" / "backup.sh").read_text())
-        check("upgrade.sh se înlocuieşte pe sine DOAR la final (nu în timpul rulării)",
-              "# upgrade nou" in (d / "upgrade.sh").read_text()
-              and not (d / "upgrade.sh.new").exists())
+        check("same upgrade.sh in the release → no switch, no leftovers",
+              "switching to it now" not in out and not (d / "upgrade.sh.new").exists()
+              and not (d / "upgrade.sh.bak").exists())
+        check("the banner lists the kit files this run changed",
+              "host kit files changed in this run:" in out and "updated: docker-compose.prod.yml" in out
+              and "updated: scripts/backup.sh" in out, out[-900:])
         check("raportează versiunile din imaginea nouă", "9.9.9" in out and "99" in out, out[:200])
         check("verifică semnătura agentului din imagine ÎNAINTE de deploy",
               "agent signature: valid" in out
@@ -520,8 +525,65 @@ def main():
         check("a clean report is one quiet line", "certificates: no certificate expires within 14 days." in outc,
               outc[-400:])
 
+        reexec_checks(tmp)
+
     print(f"\n{ok}/{total} passed")
     return ok == total
+
+
+def reexec_checks(tmp):
+    """3.6.9: the 3.6.8 upgrade ran with the OLD script (it replaced itself only at the end), which
+    synced only the scripts it knew — host-health.sh & co never reached prod. Now the release's
+    upgrade.sh takes over BEFORE the sync, exactly once."""
+    print("── re-exec into the release's upgrade.sh")
+    d = sandbox(tempfile.mkdtemp(dir=tmp))
+    real = (ROOT / "upgrade.sh").read_text()
+    old = real.replace("scripts/host-health.sh ", "", 1)          # the old script does not know X
+    assert old != real
+    (d / "upgrade.sh").write_text(old)
+    os.chmod(d / "upgrade.sh", 0o755)
+    (d / "kit" / "scripts" / "host-health.sh").write_text("#!/bin/sh\necho host-health \"$@\" >> \"$CALLS\"\n")
+    r, calls = run(d, ["-y"])
+    out = r.stdout + r.stderr
+    check("re-exec: the run completes", r.returncode == 0, out[-600:])
+    check("re-exec: it switched to the release's upgrade.sh before syncing",
+          "switching to it now" in out and out.index("switching to it now") < out.index("installed: scripts/host-health.sh"),
+          out[-1200:])
+    check("re-exec: script X (host-health.sh), unknown to the old upgrade.sh, is installed in ONE run",
+          (d / "scripts" / "host-health.sh").exists(), out[-600:])
+    check("re-exec: upgrade.sh is now the release's, the old one kept as .bak",
+          (d / "upgrade.sh").read_text() == real and (d / "upgrade.sh.bak").read_text() == old)
+    check("re-exec: the backup ran once, deploy ran once",
+          calls.count("backup.sh") == 1 and calls.count("deploy.sh") == 1, calls)
+    check("re-exec: the second script says the backup was already done",
+          "already done by the previous upgrade.sh" in out, out[-1500:])
+    check("re-exec: the banner says it switched and lists the installed script",
+          "switched to the release's own upgrade.sh" in out and "installed: scripts/host-health.sh" in out, out[-700:])
+    check("re-exec: no temp/.new files left", not (d / "upgrade.sh.new").exists())
+
+    # the guard: already re-executed + the release's script still differs → no second switch
+    d2 = sandbox(tempfile.mkdtemp(dir=tmp))
+    (d2 / "kit" / "upgrade.sh").write_text(real + "\n# differs again\n")
+    r2, calls2 = run(d2, ["-y"], WEBTERM_UPGRADE_REEXEC="1", WEBTERM_UPGRADE_PINNED=PINNED)
+    out2 = r2.stdout + r2.stderr
+    check("guard: with WEBTERM_UPGRADE_REEXEC=1 it never switches again (no loop)",
+          r2.returncode == 0 and "not switching again" in out2 and "switching to it now" not in out2
+          and (d2 / "upgrade.sh").read_text() == real and calls2.count("deploy.sh") == 1, out2[-600:])
+    # the pinned image must be the one the first script resolved
+    d3 = sandbox(tempfile.mkdtemp(dir=tmp))
+    r3, calls3 = run(d3, ["-y"], WEBTERM_UPGRADE_REEXEC="1",
+                     WEBTERM_UPGRADE_PINNED="ghcr.io/x/webterm@sha256:" + "b" * 64)
+    out3 = r3.stdout + r3.stderr
+    check("guard: a different digest after the switch → refused, nothing deployed",
+          r3.returncode != 0 and "image changed between the two upgrade.sh runs" in out3
+          and "deploy.sh" not in calls3, out3[-400:])
+    # a release upgrade.sh that does not parse is not switched to
+    d4 = sandbox(tempfile.mkdtemp(dir=tmp))
+    (d4 / "kit" / "upgrade.sh").write_text("#!/usr/bin/env bash\nif then fi (\n")
+    r4, calls4 = run(d4, ["-y"])
+    out4 = r4.stdout + r4.stderr
+    check("a release upgrade.sh that does not parse → not switched to, run continues",
+          r4.returncode == 0 and "does not parse" in out4 and (d4 / "upgrade.sh").read_text() == real, out4[-400:])
 
 
 if __name__ == "__main__":

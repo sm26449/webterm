@@ -225,6 +225,12 @@ else
   if command -v cosign >/dev/null 2>&1; then REASON="WEBTERM_COSIGN_IDENTITY not set in .env"; else REASON="cosign is not installed"; fi
   warn "signature verification SKIPPED ($REASON) — the digest pin keeps these exact bytes, but says nothing about who built them"
 fi
+# 3.6.9: after a re-exec into the release's own upgrade.sh, the image must be EXACTLY the one the
+# previous script resolved and checked (a tag re-pointed in between is refused, not followed).
+if [ "${WEBTERM_UPGRADE_REEXEC:-0}" = 1 ] && [ -n "${WEBTERM_UPGRADE_PINNED:-}" ] \
+   && [ "$WEBTERM_UPGRADE_PINNED" != "$PINNED" ]; then
+  die "the image changed between the two upgrade.sh runs ($WEBTERM_UPGRADE_PINNED → $PINNED) — not deploying; run ./upgrade.sh again"
+fi
 IMAGE="$PINNED"
 if [ "$CURRENT" = "$IMAGE" ]; then
   warn "already the installed digest — continuing (useful for re-syncing the host files)"
@@ -263,7 +269,12 @@ case "$SIGCHK" in
 esac
 
 # ── 4. backup BEFORE the change ──────────────────────────────────────────────
-if [ "$DO_BACKUP" = 1 ]; then
+BACKUP_DONE=0
+if [ "$DO_BACKUP" = 1 ] && [ "${WEBTERM_UPGRADE_REEXEC:-0}" = 1 ] && [ "${WEBTERM_UPGRADE_BACKUP_DONE:-0}" = 1 ]; then
+  say "Backup before upgrading"
+  echo "  already done by the previous upgrade.sh in this run — not repeated"
+  BACKUP_DONE=1
+elif [ "$DO_BACKUP" = 1 ]; then
   say "Backup before upgrading"
   if [ -x scripts/backup.sh ]; then
     # The backup passphrase lives in /etc/default/webterm-backup — the same file the systemd
@@ -276,6 +287,7 @@ if [ "$DO_BACKUP" = 1 ]; then
     fi
     if scripts/backup.sh; then
       echo "  backup done"
+      BACKUP_DONE=1
     else
       warn "the backup failed"
       # `-y` înseamnă „nu mă întreba", nu „treci peste o plasă de siguranţă lipsă". `ask`
@@ -303,7 +315,33 @@ KIT=$(mktemp -d)
 trap 'rm -rf "$KIT"' EXIT
 if docker run --rm --entrypoint sh "$IMAGE" -c 'cd /srv/webterm/deploy-kit && tar cf - .' 2>/dev/null \
    | tar xf - -C "$KIT" 2>/dev/null && [ -f "$KIT/docker-compose.prod.yml" ]; then
+  # 3.6.9: the release's OWN upgrade.sh does the rest. It used to replace this file only at the
+  # very end ("active from the next run"), so 3.6.8 was installed by the 3.6.7 script — which
+  # synced only the scripts IT knew: host-health.sh, docker-cleanup.sh and authentik-upgrade.sh
+  # never reached prod, no timers, no health list, "command not found". Now: same source as every
+  # other kit file (the digest-pinned image, signature-checked above when configured), a syntax
+  # check, a .bak, then `exec` with the same arguments (+ the resolved tag) and a guard that makes
+  # a second switch impossible. Steps already done (pull, digest, backup) are not repeated: the
+  # backup is skipped as done, and the digest must match the one resolved here.
+  if [ -f "$KIT/upgrade.sh" ] && ! cmp -s "$KIT/upgrade.sh" upgrade.sh; then
+    if [ "${WEBTERM_UPGRADE_REEXEC:-0}" = 1 ]; then
+      warn "the release's upgrade.sh still differs after switching to it once — not switching again (continuing)"
+    elif ! bash -n "$KIT/upgrade.sh" 2>/dev/null; then
+      warn "the release's upgrade.sh does not parse — continuing with this one"
+    else
+      cp -p upgrade.sh upgrade.sh.bak
+      cp "$KIT/upgrade.sh" upgrade.sh.new && chmod +x upgrade.sh.new && mv upgrade.sh.new upgrade.sh
+      echo "  upgrade.sh: the release ships a newer one — switching to it now (old → upgrade.sh.bak)"
+      rm -rf "$KIT"
+      trap - EXIT
+      REEXEC_TAG=""
+      case "$TARGET" in v[0-9]*.[0-9]*.[0-9]*) REEXEC_TAG="$TARGET" ;; esac
+      export WEBTERM_UPGRADE_REEXEC=1 WEBTERM_UPGRADE_PINNED="$IMAGE" WEBTERM_UPGRADE_BACKUP_DONE="$BACKUP_DONE"
+      exec bash ./upgrade.sh "$@" ${REEXEC_TAG:+"$REEXEC_TAG"}
+    fi
+  fi
   CHANGED=0
+  KIT_DONE=""
   for f in docker-compose.prod.yml deploy.sh rollback.sh remove.sh \
            scripts/backup.sh scripts/restore.sh scripts/cert-check.sh scripts/cert-renew.sh \
            scripts/host-health.sh scripts/docker-cleanup.sh scripts/authentik-upgrade.sh \
@@ -318,18 +356,15 @@ if docker run --rm --entrypoint sh "$IMAGE" -c 'cd /srv/webterm/deploy-kit && ta
     [ -f "$KIT/$f" ] || continue
     if [ -f "$f" ] && cmp -s "$KIT/$f" "$f"; then continue; fi
     mkdir -p "$(dirname "$f")"
-    [ -f "$f" ] && cp -p "$f" "$f.bak"
+    WHAT="updated"
+    if [ -f "$f" ]; then cp -p "$f" "$f.bak"; else WHAT="installed"; fi
     cp "$KIT/$f" "$f"
     case "$f" in *.sh) chmod +x "$f" ;; esac
-    echo "  actualizat: $f$([ -f "$f.bak" ] && echo ' (vechiul → .bak)')"
+    echo "  $WHAT: $f$([ "$WHAT" = updated ] && echo ' (old → .bak)')"
+    KIT_DONE="$KIT_DONE
+    $WHAT: $f"
     CHANGED=$((CHANGED + 1))
   done
-  # upgrade.sh replaces itself LAST: the shell reads the script as it runs, and rewriting it
-  # now would execute half of the new version.
-  if [ -f "$KIT/upgrade.sh" ] && ! cmp -s "$KIT/upgrade.sh" upgrade.sh; then
-    cp "$KIT/upgrade.sh" upgrade.sh.new
-    SELF_UPDATE=1
-  fi
   [ "$CHANGED" = 0 ] && echo "  host files were already up to date"
 else
   warn "the image has no deploy kit (version < 2.0.0) — host files left as they are"
@@ -558,13 +593,14 @@ if [ "$TODO" = 0 ]; then
   echo "  nothing — the system is fully up to date"
 fi
 
-if [ "${SELF_UPDATE:-0}" = 1 ]; then
-  # `.bak` şi pentru el însuşi: linia de mai sus promite „we keep a .bak for every file we
-  # change", iar singurul fişier exceptat era chiar cel care face schimbarea — adică exact cel
-  # de care ai nevoie ca să te întorci dacă noul upgrade.sh e stricat.
-  cp upgrade.sh upgrade.sh.bak 2>/dev/null || true
-  mv upgrade.sh.new upgrade.sh && chmod +x upgrade.sh
-  echo "  upgrade.sh updated itself (vechiul → upgrade.sh.bak; activ de la următoarea rulare)"
+# 3.6.9: which kit files this run installed or updated (the banner used to say nothing about it)
+if [ "${WEBTERM_UPGRADE_REEXEC:-0}" = 1 ]; then
+  echo "  upgrade.sh: this run switched to the release's own upgrade.sh (old → upgrade.sh.bak)"
+fi
+if [ -n "${KIT_DONE:-}" ]; then
+  echo "  host kit files changed in this run:$KIT_DONE"
+else
+  echo "  host kit files: none changed in this run"
 fi
 
 # Bannerul raporta ŢINTA, nu realitatea. `deploy.sh` face `exec ./rollback.sh` când imaginea
