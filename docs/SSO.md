@@ -289,6 +289,13 @@ installed elsewhere, set `WEBTERM_TRAEFIK_NETWORK` in `.env` (find it with
 **One Authentik, many WebTerms.** For the Nth instance, repeat only steps 3–4 from that instance's
 directory (a second application, its own redirect URI, its own group) against the same Authentik.
 
+### Upgrade Authentik
+
+One minor at a time, a verified backup first, and a restore as the only way back: see
+[AUTHENTIK-UPGRADE.md](AUTHENTIK-UPGRADE.md) and `scripts/authentik-upgrade.sh`. With the bundled
+profile, `./upgrade.sh` moves Authentik straight to the new pin. Read §2 there first if your
+Authentik is more than one minor behind it.
+
 ### Back up Authentik
 
 Authentik holds your users, their passkeys, the OIDC config and the signing key — a dependency

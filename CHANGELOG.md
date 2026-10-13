@@ -9,6 +9,21 @@ back.
 
 ## [Unreleased]
 
+### Added
+- **Authentik upgrade runbook and helper** ([docs/AUTHENTIK-UPGRADE.md](docs/AUTHENTIK-UPGRADE.md),
+  `scripts/authentik-upgrade.sh`). Authentik has no downgrade and refuses skipped minors, and
+  `./upgrade.sh` moves a bundled Authentik straight to the new pin. The script does one step at a
+  time: it checks the hop, takes a verified `pg_dump -Fc`, pulls before the downtime, waits for
+  healthy containers and the OIDC discovery documents, and `restore` is the rollback. Rehearsed on
+  a disposable copy, including a real WebTerm SSO login. The rehearsal found that 2026.5.7 →
+  2026.8.2 crash-loops on a migration-order bug, so go to 2026.8.3 or later.
+
+### Fixed
+- **`provision.py` re-run printed `aplicaţia webterm: 400 … slug already exists`** and skipped the
+  application update. The applications list is filtered through each app's policies for the
+  token's user, and akadmin is in no `wt-*` group, so the gated app was invisible.
+  `superuser_full_list=true` fixes the lookup.
+
 ## [3.6.6] — 2026-10-12 · agent (58)
 
 3.6.6 — Users & roles in sub-tabs (Accounts · Roles · SSO groups). UI only; no agent change.
