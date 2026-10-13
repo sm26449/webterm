@@ -62,7 +62,7 @@ CI_TESTS="agent_hardening agent_reliability agent_tmux_hygiene ed25519_kat
           sec_stepup_cap sec_stepup_factor
           snippet_targets host_test_connection hosts_csv alert_history replay_links share_ratelimit
           changelog_section rbac_matrix rbac_filter rbac_escalation rbac_ws rbac_migration rbac_secreview
-          rbac_roles rbac_oidc sso_rolemap authentik_provision cert_renew_script"
+          rbac_roles rbac_oidc sso_rolemap authentik_provision certmon cert_renew_script"
 
 # security_test e ultimul: îşi porneşte singur un uvicorn efemer şi verifică auth obligatoriu
 # pe fs, CSWSH, lockout 429, headere, traversare, gating enroll/share — regresii pe care

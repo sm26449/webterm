@@ -228,6 +228,23 @@ services:
       # the domain forwards are opened on (defaults to the app's domain);
       # it can be overridden in Settings, and the infra (Traefik) follows via FORWARD_DOMAIN
       WEBTERM_FORWARD_DOMAIN: ${FORWARD_DOMAIN:-${WEBTERM_DOMAIN}}
+      # ── TLS certificate monitoring (3.6.7, certmon.py) ─────────────────────────────────
+      # Incident 2026-10-12: the forward wildcard expired after weeks of a renewal error only
+      # Traefik's log knew about. The app reads the certificate Traefik SERVES (a TLS handshake to
+      # `traefik:443` with each SNI) and alerts at <14 and <3 days. Read-only by design: the app
+      # gets NO acme volume and NO docker access — renewal is `scripts/cert-renew.sh` on the host.
+      WEBTERM_CERT_CHECK: ${WEBTERM_CERT_CHECK:-1}
+      WEBTERM_CERT_CHECK_TARGET: ${WEBTERM_CERT_CHECK_TARGET:-traefik:443}
+      WEBTERM_CERT_CHECK_FORWARD: ${WEBTERM_CERT_CHECK_FORWARD:-}
+      # which resolver the routers use (le = HTTP-01, ledns = DNS-01): decides whether the forward
+      # wildcard exists at all, so whether it is checked
+      WEBTERM_CERT_RESOLVER: ${WEBTERM_CERT_RESOLVER:-le}
+      # Authentik on this same Traefik (profile `authentik`) → its certificate is checked too
+      WEBTERM_AUTHENTIK_DOMAIN: ${AUTHENTIK_DOMAIN:-}
+      WEBTERM_COMPOSE_PROFILES: ${COMPOSE_PROFILES:-}
+      # where the host kit lives, only to PRINT `sudo <dir>/scripts/cert-renew.sh …` (install.sh
+      # writes it when --dir is not /opt/webterm)
+      WEBTERM_INSTALL_DIR: ${WEBTERM_INSTALL_DIR:-/opt/webterm}
     # Fişierele din ./secrets/ montate la /run/secrets/<nume> (bind read-only; compose ignoră
     # uid/mode la secretele din fişier — verificat pe Compose v5 — deci drepturile de pe host
     # contează: fişier 0644 într-un director 0700, ca userul `webterm` (10001) să-l poată citi

@@ -729,3 +729,63 @@ def notify_local_backup_failed(error: str, last_ok_ts: float) -> None:
           key="backup_local_failed",
           params={"error": error, "age_key": "local_last" if last_ok_ts else "local_never",
                   "days": "%.1f" % ((time.time() - last_ok_ts) / 86400) if last_ok_ts else ""})
+
+
+# ── TLS certificates (3.6.7, certmon.py) ──────────────────────────────────────
+# Incident 2026-10-12: the forward wildcard expired after weeks of a renewal error that only
+# Traefik's log knew about. The dedup (one alert per threshold per certificate, persisted) lives
+# in certmon._maybe_alert — here we only compose and send.
+_CERT_TEXT = {
+    "expiring": dict(key="cert_expiring", text=("TLS certificate for {name} expires in {days} days",
+                 "The certificate served for {name} expires in {days} days ({when}).\n"
+                 "Issuer: {issuer}.\n\n"
+                 "Traefik renews Let's Encrypt certificates about 30 days before expiry, so a "
+                 "certificate this close to the end means the automatic renewal is failing. Look "
+                 "at `docker compose logs traefik | grep -i acme`.\n"
+                 "A wildcard can only renew via DNS-01 (the `ledns` resolver, a Cloudflare token "
+                 "with DNS edit rights). Settings → Infrastructure → Certificates shows the "
+                 "renewal command.")),
+    "expiring_soon": dict(key="cert_expiring_soon", text=("TLS certificate for {name} expires in {days} days — renewal is failing",
+                      "The certificate served for {name} expires in {days} days ({when}).\n"
+                      "Issuer: {issuer}.\n\n"
+                      "Automatic renewal has not happened. After expiry browsers refuse the site. "
+                      "Settings → Infrastructure → Certificates shows the renewal command "
+                      "(scripts/cert-renew.sh on the gateway host).")),
+    "expired": dict(key="cert_expired", text=("TLS certificate for {name} has EXPIRED",
+                "The certificate served for {name} expired on {when}. Browsers refuse the site.\n"
+                "Issuer: {issuer}.\n\n"
+                "Renew it from Settings → Infrastructure → Certificates, or on the gateway host "
+                "with scripts/cert-renew.sh --domain <name>.")),
+    "default": dict(key="cert_default", text=("Traefik serves its DEFAULT certificate for {name}",
+                "Traefik answers {name} with its self-signed \"TRAEFIK DEFAULT CERT\": Let's "
+                "Encrypt has not issued a certificate for this name. Browsers show a warning.\n\n"
+                "Check `docker compose logs traefik | grep -i acme` (the DNS record, port 80 for "
+                "HTTP-01, the Cloudflare token for DNS-01).")),
+    "mismatch": dict(key="cert_mismatch", text=("TLS certificate served for {name} does not cover that name",
+                 "The certificate served for {name} is for {sans}, so browsers refuse it.\n"
+                 "Issuer: {issuer}; expires {when}.\n\n"
+                 "Usually a stale entry in the ACME store shadows the right one. "
+                 "Settings → Infrastructure → Certificates shows the renewal command.")),
+    "ok": dict(key="cert_ok", text=("TLS certificate for {name} is OK again",
+           "The certificate served for {name} is valid again: {days} days left ({when}), "
+           "issuer {issuer}.")),
+}
+
+
+def notify_cert(item: dict, recovered: bool = False) -> None:
+    """Compose + send one certificate alert (the caller already decided it is due)."""
+    import datetime as _dt
+    state = "ok" if recovered else item.get("state", "")
+    if state not in _CERT_TEXT:
+        return
+    na = item.get("not_after")
+    when = (_dt.datetime.fromtimestamp(na, _dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            if na else "?")
+    params = {"name": item.get("name", "?"),
+              "days": "%.0f" % max(0.0, item.get("days_left") or 0),
+              "when": when, "issuer": item.get("issuer") or "?",
+              "sans": ", ".join((item.get("sans") or [])[:5]) or "?"}
+    title, body = _CERT_TEXT[state]["text"]
+    sev = {"expiring": "warning", "expiring_soon": "warning", "ok": "ok"}.get(state, "critical")
+    _fire(title.format(**params), body.format(**params), kind="tls_cert", severity=sev,
+          key=_CERT_TEXT[state]["key"], params=params)

@@ -66,6 +66,8 @@ KINDS: dict = {
     "gateway_disk":     {"group": "gateway", "scope": "fleet", "security": False},
     "signing_locked":   {"group": "gateway", "scope": "fleet", "security": False},
     "backup_failed":    {"group": "gateway", "scope": "fleet", "security": False},
+    # 3.6.7: the TLS certificate Traefik serves is expiring / expired / the default one
+    "tls_cert":         {"group": "gateway", "scope": "fleet", "security": False},
     # rezervă pentru apeluri `_fire` fără tip (teste, cod vechi) — nu apare în Setări
     "system":           {"group": "gateway", "scope": "fleet", "security": False, "hidden": True},
 }

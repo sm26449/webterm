@@ -91,6 +91,15 @@ services:
       WEBTERM_TRANSCRIPT_MAX_BYTES: ${WEBTERM_TRANSCRIPT_MAX_BYTES:-}
       WEBTERM_TRANSCRIPT_KEEP_BYTES: ${WEBTERM_TRANSCRIPT_KEEP_BYTES:-}
       WEBTERM_FORWARD_DOMAIN: ${FORWARD_DOMAIN:-${WEBTERM_DOMAIN}}
+      # TLS certificate monitoring (certmon.py): with Caddy there is no `traefik` service, so the
+      # check reads the certificate from the public name. 0 turns it off.
+      WEBTERM_CERT_CHECK: ${WEBTERM_CERT_CHECK:-1}
+      WEBTERM_CERT_CHECK_TARGET: ${WEBTERM_CERT_CHECK_TARGET:-}
+      WEBTERM_CERT_CHECK_FORWARD: ${WEBTERM_CERT_CHECK_FORWARD:-0}
+      WEBTERM_CERT_RESOLVER: ${WEBTERM_CERT_RESOLVER:-}
+      WEBTERM_AUTHENTIK_DOMAIN: ${AUTHENTIK_DOMAIN:-}
+      WEBTERM_COMPOSE_PROFILES: ${COMPOSE_PROFILES:-}
+      WEBTERM_INSTALL_DIR: ${WEBTERM_INSTALL_DIR:-}
     volumes:
       - webterm-data:/data
     networks: [webterm]

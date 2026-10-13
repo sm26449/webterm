@@ -15,7 +15,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .errors import ApiError
-from . import (api, audit, authz, backup, config, core, db, email_alerts, health,
+from . import (api, audit, authz, backup, certmon, config, core, db, email_alerts, health,
                oidc_api, security, signing, ssomap, webauthn_api)
 
 logging.basicConfig(level=logging.INFO,
@@ -295,7 +295,10 @@ async def lifespan(app: FastAPI):
     idlelock = asyncio.create_task(_idle_lock_sweep())  # blocare terminal idle pe host 2FA
     lagmon = asyncio.create_task(health.loop_lag_monitor())   # sănătatea gateway-ului
     backupt = asyncio.create_task(_scheduled_backup())        # backup-uri programate (off/daily/weekly)
+    # 3.6.7: the TLS certificate Traefik serves (read-only handshake; alerts before expiry)
+    certt = asyncio.create_task(certmon.loop(api.forward_domain))
     yield
+    certt.cancel()
     janitor.cancel()
     reaper.cancel()
     idlelock.cancel()

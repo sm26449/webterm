@@ -86,6 +86,9 @@ _CATALOGUE = (
     ("security.view", "global", False),
     ("backups.manage", "global", False),
     ("signing.manage", "global", False),
+    # 3.6.7: open a terminal on the gateway host with the TLS renewal command typed (it runs
+    # `sudo …/cert-renew.sh`, which edits the ACME store and restarts Traefik). Owner only.
+    ("certs.renew", "global", False),
 )
 
 
@@ -111,7 +114,7 @@ _OPERATOR = _VIEWER | frozenset({
 _OWNER = HOST_PERMS | GLOBAL_PERMS
 # Admin = everything except taking over the instance: backup download/restore carries the vault
 # key, the signing key is fleet code-signing, and the global history wipe destroys evidence.
-_ADMIN = _OWNER - {"history.clear", "backups.manage", "signing.manage"}
+_ADMIN = _OWNER - {"history.clear", "backups.manage", "signing.manage", "certs.renew"}
 
 BUILTIN_ROLES: dict[str, dict] = {
     "owner": {"name": "Owner", "perms": _OWNER,

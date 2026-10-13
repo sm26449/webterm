@@ -311,6 +311,7 @@ Derived capabilities, which deliberately have **no bit of their own**:
 | `security.view` | The instance security summary, plus instance-level security alerts (new account, token created, signing key, …). |
 | `backups.manage` | Backup download, restore, schedule, cloud. **Owner only**: a backup contains the vault key, so it is the whole instance. |
 | `signing.manage` | Agent signing key: generate, import, unlock, lock, backup. **Owner only.** |
+| `certs.renew` | Open a terminal on the gateway host with `cert-renew.sh --domain <name>` typed (3.6.7). **Owner only**: the command edits the ACME store and restarts Traefik under sudo. |
 
 **Self-service** (any authenticated user, no permission needed): own account, password, TOTP,
 passkeys, web sessions, alert preferences, split views, own alerts, version and changelog, the
@@ -345,7 +346,7 @@ shell-integration command, own SSH keys (3.7), and `/api/me/permissions`.
 | Global: tokens.manage, shares.manage, snippets.manage | ✓ | ✓ | — | — |
 | Global: audit.view, security.view | ✓ | ✓ | — | — |
 | Global: history.clear | ✓ | — | — | — |
-| Global: backups.manage, signing.manage | ✓ | — | — | — |
+| Global: backups.manage, signing.manage, certs.renew | ✓ | — | — | — |
 
 Notes:
 
@@ -1543,6 +1544,9 @@ middleware plus ASGI WS middleware in `main.py`) and the SPA/asset catch-all. Li
 | `/api/settings/alerts` (1529) | POST | `settings.manage` | G | |
 | `/api/settings/forward` (3200) | GET | `settings.manage` | G | |
 | `/api/settings/forward` (3205) | POST | `settings.manage` | G | |
+| `/api/certs` (3.6.7) | GET | `settings.manage` | G | | read-only TLS status; `can_renew` = `certs.renew` |
+| `/api/certs/check` (3.6.7) | POST | `settings.manage` | G | | rate-limited instance-wide (30 s) |
+| `/api/certs/renew-host` (3.6.7) | PUT | `certs.renew` | G | | the picked host must be an agent host where the Owner has `session.open` |
 | `/api/settings/deploy-key-policy` (7088) | GET | `settings.manage` | G | |
 | `/api/settings/deploy-key-policy` (7093) | POST | `settings.manage` | G | |
 | `/api/version/check` (2064) | POST | `settings.manage` | G | |
@@ -1628,6 +1632,7 @@ middleware plus ASGI WS middleware in `main.py`) and the SPA/asset catch-all. Li
 |---|---|---|---|---|---|---|
 | `/api/hosts/{host_id}/sessions` (6404) | GET | `session.watch` ∪ `recording.view` | H(host_id) | su | | |
 | `/api/hosts/{host_id}/sessions` (7559) | POST | `session.open` | H(host_id) | su | | a body `cmd` (docker exec / upgrade / toolbox) is still `session.open`; Toolbox launches also need `toolbox.use` |
+| `/api/hosts/{host_id}/cert-renew` (3.6.7) | POST | `certs.renew` | G + `session.open` on host_id | ff | | Owner-only; the picked host only, an allow-listed name; the command is typed, not run |
 | `/api/sessions/{sid}` (7707) | PATCH | `session.open` (own) / `session.manage` | H(sid) | | | rename/note |
 | `/api/sessions/{sid}/reconnect` (7723) | POST | `session.open` | H(sid) | su | | |
 | `/api/sessions/{sid}/kill` (7743) | POST | `session.open` (own) / `session.manage` | H(sid) | su | | |

@@ -276,6 +276,26 @@ ALERT_TO = os.environ.get("WEBTERM_ALERT_TO", "")
 # URL-ul de webhook E un secret (Slack/Discord îl tratează ca token) → acceptă şi `_FILE`.
 ALERT_WEBHOOK = _secret("WEBTERM_ALERT_WEBHOOK")
 
+# ── TLS certificate monitoring (3.6.7, certmon.py) ─────────────────────────────────────────
+# Incident 2026-10-12: the forward wildcard expired while Traefik logged a renewal error every day
+# for weeks and nobody looked. The gateway now reads the certificate Traefik actually SERVES and
+# alerts before it expires. Read-only: it opens a TLS handshake, nothing more — no ACME store, no
+# docker socket. 0 disables the check entirely.
+CERT_CHECK = _str("WEBTERM_CERT_CHECK", "1") != "0"
+# where Traefik answers inside the compose network (service name:port); when it does not resolve
+# or refuses (dev stack with Caddy, a proxy outside compose) the check falls back to the public name
+CERT_CHECK_TARGET = _str("WEBTERM_CERT_CHECK_TARGET", "traefik:443")
+# `le` (HTTP-01) / `ledns` (DNS-01): written to .env by install.sh/deploy.sh. Forwards on
+# subdomains only get a certificate with DNS-01, so the forward name is checked only there
+# (WEBTERM_CERT_CHECK_FORWARD=1/0 overrides that guess).
+CERT_RESOLVER = _str("WEBTERM_CERT_RESOLVER", "")
+CERT_CHECK_FORWARD = _str("WEBTERM_CERT_CHECK_FORWARD", "")
+# Authentik on the SAME Traefik (compose profile `authentik`): its domain is checked too.
+AUTHENTIK_DOMAIN = _str("WEBTERM_AUTHENTIK_DOMAIN", "").lower().rstrip(".")
+COMPOSE_PROFILES = [p.strip() for p in _str("WEBTERM_COMPOSE_PROFILES", "").split(",") if p.strip()]
+# the install directory ON THE HOST (only used to print `sudo <dir>/scripts/cert-renew.sh`)
+INSTALL_DIR = _str("WEBTERM_INSTALL_DIR", "/opt/webterm").rstrip("/") or "/opt/webterm"
+
 
 def email_alerts_enabled() -> bool:
     return bool(SMTP_HOST and ALERT_TO and ALERT_FROM)

@@ -53,7 +53,7 @@ describe('prefs', () => {
   it('every kind and group the gateway knows has a label in en and ro', () => {
     const kinds = ['new_login', 'session_attach', 'account_change', 'host_unlocked', 'admin_change', 'ssh_key',
       'host_key_changed', 'agent_relocation', 'host_enrolled', 'lockout', 'host_offline', 'resource',
-      'agent_ip_change', 'update_refused', 'gateway_disk', 'signing_locked', 'backup_failed']
+      'agent_ip_change', 'update_refused', 'gateway_disk', 'signing_locked', 'backup_failed', 'tls_cert']
     for (const lang of [en.strings, ro.strings]) {
       for (const k of kinds) expect(lang[`alerts.kind.${k}`], k).toBeTruthy()
       for (const g of ['account', 'security', 'hosts', 'gateway']) expect(lang[`alerts.group.${g}`], g).toBeTruthy()
@@ -124,7 +124,8 @@ describe('localizeAlert (3.5.15)', () => {
     const keys = ['lockout', 'agent_relocation', 'agent_ip_change', 'new_login', 'session_attach', 'security_change',
       'host_key_changed', 'ssh_key_deployed', 'ssh_key_revoked', 'host_enrolled', 'host_unlocked', 'replay_created',
       'replay_created_label', 'replay_opened', 'resource_high', 'resource_ok', 'host_offline', 'host_offline_uninstall',
-      'host_online', 'gateway_disk', 'signing_locked', 'update_refused', 'backup_failed', 'backup_local_failed']
+      'host_online', 'gateway_disk', 'signing_locked', 'update_refused', 'backup_failed', 'backup_local_failed',
+      'cert_expiring', 'cert_expiring_soon', 'cert_expired', 'cert_default', 'cert_mismatch', 'cert_ok']
     for (const lang of [en.strings, ro.strings]) {
       for (const k of keys) {
         expect(lang[`alertmsg.${k}.title`], k).toBeTruthy()

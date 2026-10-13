@@ -32,8 +32,8 @@ from email.utils import formatdate
 from .errors import ApiError
 from . import webauthn_api
 from . import fscopy
-from . import (alert_history, audit, authz, backup, cloudbackup, config, core, db, email_alerts,
-               health, replay, security, signing, ssomap, totp, updatecheck)
+from . import (alert_history, audit, authz, backup, certmon, cloudbackup, config, core, db,
+               email_alerts, health, replay, security, signing, ssomap, totp, updatecheck)
 
 log = logging.getLogger("webterm")
 # Garda de la nivel de router (3.6, fail-closed): o rută care nu-şi declară permisiunea
@@ -4145,6 +4145,165 @@ async def save_forward_settings(body: ForwardDomainIn,
     await _set_setting("forward_domain", d)
     await load_forward_domain()
     return await _forward_settings_json()
+
+
+# ── TLS certificates (3.6.7) ─────────────────────────────────────────────────
+# Monitoring is read-only (certmon.py: a TLS handshake to Traefik, the leaf it serves). Renewal is
+# a HOST action the gateway cannot perform — and must not be able to: the app container gets no
+# ACME volume and no docker-socket write. What it can do, for an Owner (`certs.renew`) with a fresh
+# second factor, is open a terminal on the gateway host the Owner picked, with
+# `sudo <dir>/scripts/cert-renew.sh --domain <name>` TYPED but not run — the same "your terminal,
+# your permissions" model as "OS upgrade in a terminal" (2.6.0). The person reads it and presses
+# Enter; sudo on the host decides whether they may.
+K_CERT_RENEW_HOST = "cert_renew_host_id"
+
+
+async def _cert_renew_host_id() -> Optional[int]:
+    v = await _get_setting(K_CERT_RENEW_HOST)
+    try:
+        return int(v) if v else None
+    except ValueError:
+        return None
+
+
+async def _certs_json(request: Request) -> dict:
+    grants = getattr(request.state, "grants", None)
+    can_renew = bool(grants and grants.has_global("certs.renew"))
+    st = certmon.status()
+    fwd = forward_domain()
+    allowed = certmon.renew_domains(fwd)
+    items = []
+    for it in st["items"]:
+        it = dict(it)
+        cmd = ""
+        if it.get("renew_domain") in allowed:
+            try:
+                cmd = certmon.renew_command(it["renew_domain"])
+            except ValueError:
+                cmd = ""                    # fail closed: no command rather than a wrong one
+        it["renew_command"] = cmd
+        # the exact incident: a wildcard Traefik keeps serving although it is not renewing, or a
+        # wildcard on an HTTP-01 install. A HINT only — the ACME store is not ours to read; the
+        # host script (`cert-renew.sh --report`) is what sees which store holds it.
+        it["wildcard_hint"] = bool(it.get("wildcard")) and (
+            it.get("level", 0) > 0 or config.CERT_RESOLVER == "le")
+        items.append(it)
+    host_id = await _cert_renew_host_id()
+    host = None
+    if host_id:
+        row = await db.fetchone("SELECT id, name, connection_type FROM hosts WHERE id=?", host_id)
+        if row:
+            host = {"id": row["id"], "name": row["name"]}
+    return {
+        "enabled": bool(certmon.targets(fwd)),
+        "checked_at": st["checked_at"], "running": st["running"], "items": items,
+        "warn_days": certmon.WARN_DAYS, "crit_days": certmon.CRIT_DAYS,
+        "resolver": config.CERT_RESOLVER, "can_renew": can_renew,
+        "renew_host": host if can_renew else None,
+        "retry_after": certmon.manual_retry_after(),
+    }
+
+
+@router.get("/api/certs")
+async def certs_status(request: Request, user=Depends(authz.perm('settings.manage'))):
+    return await _certs_json(request)
+
+
+@router.post("/api/certs/check")
+async def certs_check(request: Request, user=Depends(authz.perm('settings.manage'))):
+    """"Check now". Rate-limited instance-wide (it opens outbound TLS connections)."""
+    retry = certmon.manual_retry_after()
+    if retry:
+        raise ApiError(429, "certs.rateLimited", "a check just ran; retry in %ds" % retry,
+                       headers={"Retry-After": str(retry)}, vars={"retry": retry})
+    certmon.mark_manual()
+    await certmon.check_all(forward_domain())
+    return await _certs_json(request)
+
+
+class CertRenewHostIn(BaseModel):
+    host_id: int = 0                # 0 = forget the choice
+
+
+@router.put("/api/certs/renew-host")
+async def certs_renew_host(body: CertRenewHostIn, request: Request,
+                           user=Depends(authz.perm('certs.renew'))):
+    """Which enrolled host IS the gateway host (picked once by an Owner). Opening the terminal
+    there still needs `session.open` on it and a fresh factor, checked at use time."""
+    if body.host_id:
+        row = await db.fetchone("SELECT id, name, connection_type FROM hosts WHERE id=?",
+                                body.host_id)
+        if not row:
+            raise ApiError(404, "host.missing", "no such host")
+        if (row["connection_type"] or "agent") != "agent":
+            raise ApiError(400, "certs.renewAgentOnly", "pick an agent host (the gateway host itself)")
+        await authz.require_on(request, body.host_id, "session.open")
+        await _set_setting(K_CERT_RENEW_HOST, str(row["id"]))
+        audit.detail(request, "certificate renewal host set to %s (#%d)" % (row["name"], row["id"]))
+    else:
+        await db.execute("DELETE FROM app_settings WHERE key=?", K_CERT_RENEW_HOST)
+        audit.detail(request, "certificate renewal host cleared")
+    return await _certs_json(request)
+
+
+class CertRenewIn(BaseModel):
+    domain: str = Field("", max_length=260)
+    rows: int = Field(24, ge=2, le=500)
+    cols: int = Field(80, ge=2, le=1000)
+    tz: str = None
+    stepup_grant: str = ""
+    stepup_password: str = ""
+    stepup_totp: str = ""
+
+
+@router.post("/api/hosts/{host_id}/cert-renew")
+async def cert_renew_session(host_id: int, body: CertRenewIn, request: Request,
+                             user=Depends(authz.perm('certs.renew'))):
+    """Open a terminal on the gateway host with the renewal command typed, NOT executed.
+
+    Gates, in order (fail closed at each): `certs.renew` (Owner-only, the route's declared
+    permission) → `session.open` on that host (404 when it is not visible, like any host route)
+    → the host is the one the Owner designated → the name is one WebTerm monitors (an allow-list,
+    then the strict regex inside `renew_command`) → a FRESH second factor, also on hosts without
+    require_2fa (`_require_fresh_factor`, the deploy-key gate). Tokens never pass (`perm` without
+    `tokens=`, and the fresh-factor gate refuses them again)."""
+    await authz.require_on(request, host_id, "session.open")
+    want = await _cert_renew_host_id()
+    if not want:
+        raise ApiError(409, "certs.noRenewHost",
+                       "pick the gateway host first (Settings → Infrastructure → Certificates)")
+    if want != host_id:
+        raise ApiError(409, "certs.wrongRenewHost", "this is not the host picked for renewals")
+    domain = (body.domain or "").strip()
+    if domain not in certmon.renew_domains(forward_domain()):
+        raise ApiError(400, "certs.badDomain", "not a certificate name WebTerm monitors")
+    try:
+        command = certmon.renew_command(domain)
+    except ValueError:
+        raise ApiError(400, "certs.badDomain", "not a certificate name WebTerm monitors")
+    row = await db.fetchone("SELECT * FROM hosts WHERE id=?", host_id)
+    if not row:
+        raise ApiError(404, "host.missing", "no such host")
+    if (row["connection_type"] or "agent") != "agent":
+        raise ApiError(400, "certs.renewAgentOnly", "pick an agent host (the gateway host itself)")
+    await _require_fresh_factor(host_id, user, body.stepup_grant, body.stepup_password,
+                                body.stepup_totp)
+    try:
+        result = await core.create_session(host_id, "TLS renew: %s" % domain[:60], body.rows,
+                                           body.cols, body.tz, certmon.typed_session_cmd(command))
+    except core.AgentGone:
+        raise ApiError(409, "host.offline", "the host is offline (the agent is not connected)")
+    except core.SessionLimitReached:
+        raise ApiError(409, "session.limit",
+                       f"the host reached its limit of {core.MAX_SESSIONS_HINT} sessions — close one first",
+                       vars={"limit": core.MAX_SESSIONS_HINT})
+    except RuntimeError as e:
+        raise _runtime_api_error(e, "session.createFailed")
+    await _stamp_session(result, user)
+    audit.detail(request, "certificate renewal terminal for %s (command typed, not run)" % domain)
+    log.warning("certificate renewal terminal opened on host #%d for %s by %s",
+                host_id, domain, user["email"] if not isinstance(user, dict) else user.get("email"))
+    return dict(result, command=command)
 
 
 # ── Backup / restore (din Settings) ──────────────────────────────────────────
