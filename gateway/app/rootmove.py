@@ -22,7 +22,8 @@ the host" — true, by design, and useless. Two things live here, both without a
     So the command never trusts the inbox:
       - it reads each staged file AS U (`sudo -u U -- head -c <size>`): a link to a file U cannot
         read fails, and at most <size> bytes are read (no /dev/zero disk fill);
-      - it writes them into a root-owned `mktemp` file IN the target folder, checks the SHA-256
+      - it writes them into a fixed name inside a root-only `mktemp -d` folder IN the target
+        folder (checked after entering it: see MOVE_SCRIPT), checks the SHA-256
         the gateway recorded while the bytes passed through it, and only then does `chmod 0644`
         and `mv -T` into place (same file system → atomic; never into a directory). A mismatch
         or any error: the temp file is removed, nothing lands, the command stops;
@@ -200,7 +201,15 @@ def staged_paths(inbox: str, names: list, now: float | None = None) -> list:
 # Run by `sudo sh -c` with positional args: $1 = the agent's user, $2 = the target folder, then
 # per file: staged path, size, SHA-256, destination. A CONSTANT: nothing is ever interpolated into
 # it. No single quote (it is single-quoted on the command line) and no newline (it is typed).
-# `c` removes the temp file on any exit; INT/HUP/TERM go through `exit`, so the EXIT trap runs
+# The bytes go into a fixed name `f` inside a root-owned 0700 `mktemp -d` folder, never into a
+# file whose path is re-resolved (re-review L1: with a temp FILE, whoever can write the target
+# folder could swap it for a symlink between `>`, `sha256sum` and `chmod` — root would truncate or
+# chmod any file). A subshell enters the temp folder with `cd -P` and checks it is ours: at
+# exactly the path mktemp made, owned by root with mode 0700 (`find . -prune -user -perm`: POSIX,
+# unlike `test -O`) — a folder swapped in while it was still empty fails one of them. From then
+# on `f` and `../<name>` are relative to that inode, which no one else can write, rename or
+# remove. The subshell's EXIT trap removes `f`; the main shell's `c` only `rmdir`s the (then
+# empty) temp folder: no `rm -rf` as root. INT/HUP/TERM go through `exit`, so the EXIT traps run
 # (Ctrl-C on a FIFO someone left in the inbox leaves nothing behind). Messages go through `m`
 # (printf "%s"), never `echo`: dash's echo interprets backslash escapes in its arguments, so a
 # value in an echo could emit terminal escapes (re-review L2).
@@ -211,17 +220,20 @@ def staged_paths(inbox: str, names: list, now: float | None = None) -> list:
 MOVE_SCRIPT = (
     'u=$1 d=$2; shift 2; t=; '
     'm() { printf "webterm: %s" "$1"; echo; }; '
-    'c(){ [ -z "$t" ] || rm -f -- "$t"; t=; }; '
+    'c() { [ -z "$t" ] || rmdir -- "$t" 2>/dev/null; t=; }; '
     'trap c EXIT; trap "exit 130" HUP INT TERM; '
     'cd -P -- "$d" && [ "$(pwd -P)" = "$d" ] || { m "NOT installed: $d is not that folder any more '
     '(a symlink in its path, or it is gone); nothing was moved" >&2; exit 1; }; '
     'while [ $# -ge 4 ]; do '
     's=$1 z=$2 h=$3 f=$4; shift 4; n=${f##*/}; '
-    't=$(mktemp -- ./.webterm-move.XXXXXX) || exit 1; '
-    'if { sudo -u "$u" -- head -c "$z" -- "$s"; } >"$t" && x=$(sha256sum <"$t") && [ "${x%% *}" = "$h" ] '
-    '&& chmod 0644 -- "$t" && mv -f -T -- "$t" "./$n"; '
-    'then t=; m "installed $f"; sudo -u "$u" -- rm -f -- "$s" || :; '
-    'else m "NOT installed: $f -the uploaded file was changed or replaced, '
+    't=$(mktemp -d -- ./.webterm-move.XXXXXX) || exit 1; '
+    'if ( cd -P -- "$t" && [ "$(pwd -P)" = "${d%/}/${t#./}" ] '
+    '&& [ "$(find . -prune -user "$(id -u)" -perm 700)" = . ] || exit 1; '
+    'trap "rm -f f" EXIT; trap "exit 130" HUP INT TERM; '
+    '{ sudo -u "$u" -- head -c "$z" -- "$s"; } >f && x=$(sha256sum <f) && [ "${x%% *}" = "$h" ] '
+    '&& chmod 0644 f && mv -f -T -- f "../$n" ); '
+    'then c; m "installed $f"; sudo -u "$u" -- rm -f -- "$s" || :; '
+    'else m "NOT installed: $f - the uploaded file was changed or replaced, '
     'or $u could not read it (SHA-256 check); nothing was moved" >&2; exit 1; fi; '
     'done'
 )

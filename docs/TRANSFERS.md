@@ -419,14 +419,19 @@ of the page session, and the panel offers three ways out:
    arguments):
 
    ```
-   sudo sh -c 'u=$1 d=$2; shift 2; … { sudo -u "$u" -- head -c "$z" -- "$s"; } >"$t" && x=$(sha256sum <"$t") && [ "${x%% *}" = "$h" ] && chmod 0644 -- "$t" && mv -f -T -- "$t" "$f"; …' webterm-move webterm /srv/bin/lists /home/webterm/.webterm/inbox/2026-10-13_14-03-22_root-move_1a2b3c4d 1832 5f2c…e91a /srv/bin/lists/list.txt
+   sudo sh -c 'u=$1 d=$2; … cd -P -- "$d" && [ "$(pwd -P)" = "$d" ] || …; … t=$(mktemp -d -- ./.webterm-move.XXXXXX) …; if ( cd -P -- "$t" && … ; { sudo -u "$u" -- head -c "$z" -- "$s"; } >f && x=$(sha256sum <f) && [ "${x%% *}" = "$h" ] && chmod 0644 f && mv -f -T -- f "../$n" ); …' webterm-move webterm /srv/bin/lists /home/webterm/.webterm/inbox/2026-10-13_14-03-22_root-move_1a2b3c4d 1832 5f2c…e91a /srv/bin/lists/list.txt
    ```
 
-   For each file it: reads the staged file **as the agent's user** (`sudo -u webterm`), at most the
-   uploaded size; writes it to a root-owned temp file (`mktemp`) in the target folder; checks its
+   It first enters the target folder once (`cd -P`) and stops unless its real path is exactly the
+   folder shown — a folder reached through a symlink (say `/var/run`) is refused: open it in Files
+   by its real path. Then, for each file, it reads the staged file **as the agent's user**
+   (`sudo -u webterm`), at most the uploaded size, into a root-only (0700) temp folder
+   (`mktemp -d`) inside the target folder, after checking that folder is really its own; checks the
    SHA-256 against what you uploaded; only then sets mode `0644` and renames it into place
    (`mv -T`: atomic, never into a directory); and finally removes the staged file, again as the
-   agent's user. The inbox belongs to the agent's user, so between the upload and your Enter that
+   agent's user. Every path after the first `cd` is relative to the folder it checked, so nobody
+   who can write the target folder (or a folder above it) can redirect a write, a `chmod` or the
+   rename while the command runs. Messages are printed with `printf "%s"`, never `echo`. The inbox belongs to the agent's user, so between the upload and your Enter that
    user (or anyone who may upload to the host) could swap the staged file — for other content, a
    symlink or hardlink to `/etc/shadow`, `/dev/zero`. Any such swap fails the read or the hash:
    the command prints `webterm: NOT installed: …`, removes its temp file and stops, and nothing

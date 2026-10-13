@@ -85,7 +85,7 @@ Fixes from an independent review of this release's changes, before it shipped.
   the plan is open only its planner may upload into it. The command,
   `sudo sh -c '<fixed script>' webterm-move <agent user> <dir> [<staged> <size> <sha256> <dest>]…`,
   reads each staged file **as the agent's user** (`sudo -u <user> -- head -c <size>`), into a
-  root-owned `mktemp` file in the target folder, checks the SHA-256, then `chmod 0644` and
+  root-only `mktemp -d` folder in the target folder, checks the SHA-256, then `chmod 0644` and
   `mv -T` into place; any failure removes the temp file and nothing lands. The staged file is
   removed as the agent's user. The agent's user must be a plain user name, or there is no command.
 - **One upload can no longer be fed by another request (medium, re-review).** Why: the in-memory
@@ -104,6 +104,15 @@ Fixes from an independent review of this release's changes, before it shipped.
   bare word starts with `%`, which fish expands), and the path typed by "Insert path" (and the
   `setfacl` command) writes a backslash outside the quotes as `\\`, literal in sh, bash, zsh and
   fish alike (checked against a real fish).
+- **Move as root writes into a root-only temp folder, not a temp file (low, re-review).** Why:
+  `>"$t"`, `sha256sum <"$t"` and `chmod 0644 -- "$t"` each re-resolved the temp file's path, so
+  whoever could write the target folder could swap it for a symlink in between — root would then
+  truncate or chmod any file. Now `mktemp -d` makes a 0700 folder; a subshell enters it with
+  `cd -P`, checks it is still the one created (its exact path, owned by root, mode 0700 — a
+  folder swapped in while empty fails), writes, hashes and chmods a fixed name inside it and
+  renames that to `../<name>`. Cleanup is `rm -f f` inside the checked folder and an `rmdir`,
+  never `rm -rf` as root. Shellcheck-clean (POSIX sh, 0.9 and 0.11); run as root on dash/GNU and
+  BusyBox, including swaps of the temp folder and of the target folder.
 - **Move-as-root messages via `printf "%s"` (low, re-review).** dash's `echo` interprets
   backslash escapes in its arguments, so a value echoed by the script could write terminal escape
   sequences; every message is now `printf "webterm: %s" …`.

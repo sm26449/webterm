@@ -24,9 +24,11 @@ import hashlib
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rbac_util as U  # noqa: E402  (sets the env before `app` is imported)
@@ -219,6 +221,7 @@ def shell_checks():
         with open(os.path.join(bindir, "sudo"), "w") as f:
             f.write('#!/bin/sh\n'
                     'if [ "$1" = -u ]; then u=$2; shift 2; [ "$1" = -- ] && shift\n'
+                    '  if [ "$1" = head ] && [ -n "${WT_CWDLOG:-}" ]; then stat -c "%u %a" . >>"$WT_CWDLOG"; fi\n'
                     '  if [ -n "${WT_SETPRIV:-}" ]; then\n'
                     '    exec setpriv --reuid="$(id -u "$u")" --regid="$(id -g "$u")" --clear-groups -- "$@"\n'
                     '  fi\n'
@@ -357,6 +360,80 @@ def shell_checks():
         for n in os.listdir(inbox):
             os.unlink(os.path.join(inbox, n))
 
+        # L1: the bytes are written inside a root-owned 0700 temp FOLDER (the read as the agent's
+        # user runs with that folder as its working directory)
+        cwdlog = os.path.join(base, "cwd.log")
+        it = stage(["l1.conf"], [b"l1\n"])
+        r = subprocess.run(["/bin/sh", "-c", rootmove.command(agent_user, inbox, target, it)], cwd=base,
+                           env=dict(env, WT_CWDLOG=cwdlog), capture_output=True, text=True, timeout=30)
+        log_l1 = open(cwdlog).read().split() if os.path.exists(cwdlog) else []
+        check("L1: written in a 0700 temp folder owned by the user running the command",
+              r.returncode == 0 and log_l1 == [str(os.geteuid()), "700"], (r.stderr[-200:], log_l1))
+        os.unlink(os.path.join(target, "l1.conf"))
+
+        # L1: the temp folder swapped while still empty (whoever can write the target folder):
+        # for a symlink to another folder, or (as root) for a folder of the agent's user —
+        # refused, nothing written there, nothing lands, no temp left
+        victim = os.path.join(base, "victim")
+        os.makedirs(victim)
+        with open(os.path.join(victim, "f"), "wb") as fh:
+            fh.write(b"precious\n")
+        os.chmod(os.path.join(victim, "f"), 0o600)
+        swapbin = os.path.join(base, "swapbin")
+        os.makedirs(swapbin)
+        with open(os.path.join(swapbin, "mktemp"), "w") as fh:
+            fh.write('#!/bin/sh\n'
+                     't=$("$WT_REAL_MKTEMP" "$@") || exit 1\n'
+                     'case "$WT_SWAP" in\n'
+                     '  symlink) rmdir -- "$t" && ln -s -- "$WT_VICTIM" "$t" ;;\n'
+                     '  owned) rmdir -- "$t" && mkdir -- "$t" && chown "$WT_OWNER" "$t" && chmod 0777 "$t" ;;\n'
+                     'esac\n'
+                     'printf "%s\\n" "$t"\n')
+        os.chmod(os.path.join(swapbin, "mktemp"), 0o755)
+        swaps = ["symlink"] + (["owned"] if as_root else [])
+        for how in swaps:
+            it = stage(["l1swap.conf"], [b"swapped\n"])
+            senv = dict(env, PATH=swapbin + ":" + env["PATH"], WT_REAL_MKTEMP=shutil.which("mktemp"),
+                        WT_SWAP=how, WT_VICTIM=victim, WT_OWNER=str(nobody.pw_uid) if nobody else "0")
+            r = subprocess.run(["/bin/sh", "-c", rootmove.command(agent_user, inbox, target, it)], cwd=base,
+                               env=senv, capture_output=True, text=True, timeout=30)
+            vf = os.path.join(victim, "f")
+            check("L1: temp folder swapped for %s → refused, the other folder untouched, nothing lands"
+                  % ("a symlink" if how == "symlink" else "a folder of the agent's user"),
+                  r.returncode != 0 and "NOT installed" in r.stderr and open(vf, "rb").read() == b"precious\n"
+                  and oct(os.stat(vf).st_mode & 0o777) == "0o600" and sorted(os.listdir(victim)) == ["f"]
+                  and not os.path.lexists(os.path.join(target, "l1swap.conf")),
+                  (how, r.returncode, r.stderr[-200:], os.listdir(victim)))
+            for n in os.listdir(target):           # the attacker's leftovers (a symlink / their folder)
+                p = os.path.join(target, n)
+                if os.path.islink(p):
+                    os.unlink(p)
+                else:
+                    shutil.rmtree(p)
+            for n in os.listdir(inbox):
+                os.unlink(os.path.join(inbox, n))
+
+        # Ctrl-C while the read blocks (a FIFO left in the inbox): nothing lands, no temp left
+        it = stage(["fifo.conf"], [b"x\n"])
+        os.unlink(it[0]["upload_path"])
+        os.mkfifo(it[0]["upload_path"])
+        if as_root:
+            os.chown(it[0]["upload_path"], nobody.pw_uid, nobody.pw_gid)
+        pr = subprocess.Popen(["/bin/sh", "-c", rootmove.command(agent_user, inbox, target, it)], cwd=base,
+                              env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        time.sleep(1.0)
+        os.killpg(pr.pid, signal.SIGINT)
+        try:
+            pr.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            os.killpg(pr.pid, signal.SIGKILL)
+            pr.wait()
+        check("Ctrl-C on a FIFO → the command stops, nothing lands, no temp left",
+              pr.returncode != 0 and temps() == [] and not os.path.lexists(os.path.join(target, "fifo.conf")),
+              (pr.returncode, os.listdir(target)))
+        for n in os.listdir(inbox):
+            os.unlink(os.path.join(inbox, n))
+
         # L4: the folder is resolved once (`cd -P`) and must physically BE the folder named —
         # a symlink anywhere in its path (now, or swapped in after staging) → refused, nothing lands
         elsewhere = os.path.join(base, "elsewhere")
@@ -384,6 +461,18 @@ def shell_checks():
         for _root, _dirs, files in os.walk(base):
             pwned += [f for f in files if f.startswith("PWNED")]
         check("shell: nothing in a name or the folder was executed", not pwned, pwned)
+
+        sc = shutil.which("shellcheck")
+        if not sc:
+            print("  SKIP: shellcheck not installed (CI's runner has it)")
+        else:
+            # -S warning, as for the host scripts (info notes differ between versions); `-s sh`:
+            # POSIX — e.g. `test -O` is not (SC3067), hence `find -prune -user -perm`
+            scf = os.path.join(base, "move.sh")
+            with open(scf, "w") as fh:
+                fh.write("#!/bin/sh\n" + rootmove.MOVE_SCRIPT + "\n")
+            p = subprocess.run([sc, "-S", "warning", "-s", "sh", scf], capture_output=True, text=True)
+            check("MOVE_SCRIPT is shellcheck-clean (POSIX sh)", p.returncode == 0, p.stdout[-500:])
     finally:
         shutil.rmtree(base, ignore_errors=True)
 
