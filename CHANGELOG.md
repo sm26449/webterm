@@ -107,6 +107,12 @@ Fixes from an independent review of this release's changes, before it shipped.
 - **Move-as-root messages via `printf "%s"` (low, re-review).** dash's `echo` interprets
   backslash escapes in its arguments, so a value echoed by the script could write terminal escape
   sequences; every message is now `printf "webterm: %s" …`.
+- **Move as root resolves the target folder once (low, re-review).** Why: the temp file and the
+  final rename went through the full folder path, so whoever could write a folder above it could
+  swap that folder for a symlink while the command ran. The script now enters the folder with
+  `cd -P`, refuses unless its physical path is exactly the folder named, and works relative to it
+  from then on. A folder reached through a symlink (e.g. `/var/run`) is therefore refused: open it
+  in Files by its real path.
 - **Typed text only goes to a prompt (low).** Why: typed as keystrokes, the command or a path ran
   as commands of whatever had the foreground — mc, vim, less, htop. The move-as-root command and
   "Insert path" are now typed only at a shell prompt: when the foreground program asked for

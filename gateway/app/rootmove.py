@@ -26,7 +26,9 @@ the host" — true, by design, and useless. Two things live here, both without a
         the gateway recorded while the bytes passed through it, and only then does `chmod 0644`
         and `mv -T` into place (same file system → atomic; never into a directory). A mismatch
         or any error: the temp file is removed, nothing lands, the command stops;
-      - the staged file is removed as U, never as root.
+      - the staged file is removed as U, never as root;
+      - the target folder is entered once with `cd -P` and must physically be the folder named (no
+        symlink in its path); everything after that is relative to it.
     The script is a constant (nothing is interpolated into it); every value is a positional
     argument.
 
@@ -202,16 +204,22 @@ def staged_paths(inbox: str, names: list, now: float | None = None) -> list:
 # (Ctrl-C on a FIFO someone left in the inbox leaves nothing behind). Messages go through `m`
 # (printf "%s"), never `echo`: dash's echo interprets backslash escapes in its arguments, so a
 # value in an echo could emit terminal escapes (re-review L2).
+# The target folder is resolved ONCE: `cd -P` into it, and its physical path must be exactly the
+# folder named (re-review L4) — a symlink anywhere in it, now or swapped in after staging, is
+# refused. From there on every path in the folder is relative to that working directory (the
+# inode we checked), so swapping a folder above it during the loop changes nothing.
 MOVE_SCRIPT = (
     'u=$1 d=$2; shift 2; t=; '
     'm() { printf "webterm: %s" "$1"; echo; }; '
     'c(){ [ -z "$t" ] || rm -f -- "$t"; t=; }; '
     'trap c EXIT; trap "exit 130" HUP INT TERM; '
+    'cd -P -- "$d" && [ "$(pwd -P)" = "$d" ] || { m "NOT installed: $d is not that folder any more '
+    '(a symlink in its path, or it is gone); nothing was moved" >&2; exit 1; }; '
     'while [ $# -ge 4 ]; do '
-    's=$1 z=$2 h=$3 f=$4; shift 4; '
-    't=$(mktemp -- "$d/.webterm-move.XXXXXX") || exit 1; '
+    's=$1 z=$2 h=$3 f=$4; shift 4; n=${f##*/}; '
+    't=$(mktemp -- ./.webterm-move.XXXXXX) || exit 1; '
     'if { sudo -u "$u" -- head -c "$z" -- "$s"; } >"$t" && x=$(sha256sum <"$t") && [ "${x%% *}" = "$h" ] '
-    '&& chmod 0644 -- "$t" && mv -f -T -- "$t" "$f"; '
+    '&& chmod 0644 -- "$t" && mv -f -T -- "$t" "./$n"; '
     'then t=; m "installed $f"; sudo -u "$u" -- rm -f -- "$s" || :; '
     'else m "NOT installed: $f -the uploaded file was changed or replaced, '
     'or $u could not read it (SHA-256 check); nothing was moved" >&2; exit 1; fi; '

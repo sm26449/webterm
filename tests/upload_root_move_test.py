@@ -241,8 +241,8 @@ def shell_checks():
                 items.append(dict(u, size=len(c), sha256=_sha(c)))
             return items
 
-        def run(items, timeout=30):
-            cmd = rootmove.command(agent_user, inbox, target, items)
+        def run(items, timeout=30, folder=None):
+            cmd = rootmove.command(agent_user, inbox, folder or target, items)
             return subprocess.run(["/bin/sh", "-c", cmd], cwd=base, env=env,
                                   capture_output=True, text=True, timeout=timeout)
 
@@ -352,6 +352,33 @@ def shell_checks():
         check("two files, the second swapped → first installed, second refused, exit != 0",
               r.returncode != 0 and open(os.path.join(target, "one.txt"), "rb").read() == b"1"
               and not os.path.exists(os.path.join(target, "two.txt")) and temps() == [], r.stderr[-200:])
+        for n in os.listdir(target):
+            os.unlink(os.path.join(target, n))
+        for n in os.listdir(inbox):
+            os.unlink(os.path.join(inbox, n))
+
+        # L4: the folder is resolved once (`cd -P`) and must physically BE the folder named —
+        # a symlink anywhere in its path (now, or swapped in after staging) → refused, nothing lands
+        elsewhere = os.path.join(base, "elsewhere")
+        os.makedirs(os.path.join(elsewhere, "q"))
+        link = os.path.join(base, "srv-link")
+        os.symlink(elsewhere, link)
+        it = stage(["l4.conf"], [b"x\n"])
+        r = run(it, folder=os.path.join(link, "q"))
+        check("L4: a folder reached through a symlink → refused, nothing lands there",
+              r.returncode != 0 and "NOT installed" in r.stderr and os.listdir(os.path.join(elsewhere, "q")) == [],
+              (r.returncode, r.stderr[-200:]))
+        real = os.path.join(base, "p", "q")
+        os.makedirs(real)
+        it = stage(["l4b.conf"], [b"y\n"])
+        os.rename(os.path.join(base, "p"), os.path.join(base, "p-old"))      # swapped after staging
+        os.symlink(elsewhere, os.path.join(base, "p"))
+        r = run(it, folder=real)
+        check("L4: a parent folder swapped for a symlink after staging → refused, nothing lands",
+              r.returncode != 0 and "NOT installed" in r.stderr and os.listdir(os.path.join(elsewhere, "q")) == []
+              and os.listdir(os.path.join(base, "p-old", "q")) == [], (r.returncode, r.stderr[-200:]))
+        for n in os.listdir(inbox):
+            os.unlink(os.path.join(inbox, n))
 
         pwned = []
         for _root, _dirs, files in os.walk(base):
