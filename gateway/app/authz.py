@@ -392,7 +392,10 @@ async def grants_for_user(user_id: Optional[int]) -> Grants:
     if (hit and hit[0] == _epoch and now - hit[1] < _CACHE_TTL
             and (hit[2] is None or time.time() < hit[2])):
         return hit[3]
-    bindings = await _load_bindings(user_id)
+    # 3.6.11: un cont DEZACTIVAT (SCIM) nu are niciun drept — legăturile rămân (pentru o
+    # reactivare), dar nu se citesc. Necunoscut/lipsă = cont şters: tot nimic (fail-closed).
+    row = await db.fetchone("SELECT COALESCE(disabled, 0) AS d FROM users WHERE id=?", user_id)
+    bindings = [] if row is None or row["d"] else await _load_bindings(user_id)
     g = Grants.from_bindings(user_id, bindings)
     ends = earliest_expiry(bindings)
     _cache[user_id] = (_epoch, now, ends, g)
@@ -405,8 +408,9 @@ async def grants_for_token(tok: dict) -> TokenGrants:
     if not creator_id and tok.get("created_by"):
         row = await db.fetchone("SELECT id FROM users WHERE email=?", tok["created_by"])
         creator_id = row["id"] if row else None
-    if not creator_id or not await db.fetchone("SELECT 1 FROM users WHERE id=?", creator_id):
-        return TokenGrants(None)           # creator gone → the token can do nothing
+    if not creator_id or not await db.fetchone(
+            "SELECT 1 FROM users WHERE id=? AND COALESCE(disabled, 0)=0", creator_id):
+        return TokenGrants(None)           # creator gone or disabled (3.6.11) → nothing
     creator = await grants_for_user(creator_id)
     ceiling = set()
     for s in security.token_scopes(tok):
@@ -797,13 +801,22 @@ SELF: dict[tuple, str] = {
 }
 
 
+# 3.6.11: the SCIM provisioning endpoints (scim.py). Their principal is the SCIM bearer token,
+# never a session or an automation token; the guard below accepts it ONLY under this prefix, so a
+# SCIM token can never reach any other route even if a dependency were added there by mistake.
+SCIM_PREFIX = "/scim/v2/"
+SCIM_REASON = ("SCIM provisioning (3.6.11): the IdP's SCIM bearer token only (Owner-managed, "
+               "hashed, rate-limited); users and SSO group membership, nothing else")
+
+
 def _route_methods(route) -> tuple:
     m = getattr(route, "methods", None)
     return tuple(sorted(m)) if m else ("WS",)
 
 
 def route_spec(route) -> tuple[str, Any]:
-    """('perm', RouteSpec) | ('public', reason) | ('self', reason) | ('none', None)."""
+    """('perm', RouteSpec) | ('public', reason) | ('self', reason) | ('scim', reason)
+    | ('none', None)."""
     ep = getattr(route, "endpoint", None)
     s = spec_of(ep)
     if s is not None:
@@ -819,6 +832,11 @@ def route_spec(route) -> tuple[str, Any]:
             s = spec_of(d.call)
             if s is not None:
                 found.append(s)
+    # 3.6.11: SCIM routes authenticate the IdP's SCIM token (scim.require_scim), never a user —
+    # a route cannot be both (that would be ambiguous: "multi", refused)
+    scim = any(getattr(c, "__scim__", False) for c in _dep_calls(dependant))
+    if scim:
+        return ("multi", found) if found else ("scim", SCIM_REASON)
     if len(found) == 1:
         return "perm", found[0]
     if len(found) > 1:
@@ -853,6 +871,8 @@ def has_auth_dep(route) -> bool:
     for call in _dep_calls(getattr(route, "dependant", None)):
         if spec_of(call) is not None or getattr(call, "__name__", "") in _AUTH_DEPS:
             return True
+        if getattr(call, "__scim__", False):
+            return True
     return False
 
 
@@ -871,7 +891,8 @@ async def declared(request: HTTPConnection):
         kind, _ = route_spec(route)
         # SELF = „doar datele proprii" — dar tot AUTENTIFICAT: o rută SELF fără dependenţă de
         # autentificare e la fel de nedeclarată ca una fără nimic (fail-closed)
-        ok = kind == "public" or (kind in ("perm", "self") and has_auth_dep(route))
+        ok = kind == "public" or (kind in ("perm", "self") and has_auth_dep(route)) or (
+            kind == "scim" and (getattr(route, "path", "") or "").startswith(SCIM_PREFIX))
         _declared_ok[key] = ok
         if not ok:
             log.error("authz: route %s %s declares no permission — refused (fail-closed)",
@@ -992,7 +1013,9 @@ async def owner_count(exclude_binding: Optional[int] = None,
     permanent Owner next to a 4-hour one would lock the instance out when the 4 hours end."""
     sql = ("SELECT COUNT(DISTINCT b.user_id) AS c FROM role_bindings b JOIN roles r ON r.id=b.role_id"
            " JOIN users u ON u.id=b.user_id"
-           " WHERE r.key='owner' AND b.scope_kind='all' AND b.expires IS NULL")
+           " WHERE r.key='owner' AND b.scope_kind='all' AND b.expires IS NULL"
+           # 3.6.11: un Owner dezactivat nu poate administra nimic — nu e „încă un Owner"
+           " AND COALESCE(u.disabled, 0)=0")
     args: list = []
     if exclude_binding is not None:
         sql += " AND b.id<>?"

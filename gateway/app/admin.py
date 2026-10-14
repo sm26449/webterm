@@ -19,6 +19,7 @@ proces se spune explicit, în loc să se pretindă făcut.
     docker exec -it webterm-app-1 python3 -m app.admin roles you@example.com
     docker exec -it webterm-app-1 python3 -m app.admin promote you@example.com
     docker exec -it webterm-app-1 python3 -m app.admin sso-only someone@example.com [--force]
+    docker exec -it webterm-app-1 python3 -m app.admin enable someone@example.com
     docker exec webterm-app-1 python3 -m app.admin health [--json] [--all] [--wait S --newer-than T]
     docker exec -u webterm webterm-app-1 python3 -m app.admin vacuum
 
@@ -99,7 +100,8 @@ async def _bump_authz_epoch() -> None:
 
 async def cmd_list(_args) -> None:
     rows = await db.fetchall(
-        "SELECT u.id, u.email, u.created, u.totp_enabled,"
+        "SELECT u.id, u.email, u.created, u.totp_enabled, COALESCE(u.disabled, 0) AS disabled,"
+        " COALESCE(u.scim_managed, 0) AS scim,"
         " (SELECT COUNT(*) FROM webauthn_credentials c WHERE c.user_id=u.id) AS passkeys,"
         " (SELECT COUNT(*) FROM web_sessions w WHERE w.user_id=u.id AND w.expires > ?) AS live"
         " FROM users u ORDER BY u.created", time.time())
@@ -108,9 +110,10 @@ async def cmd_list(_args) -> None:
         return
     print("%-34s %-6s %-9s %-14s %s" % ("EMAIL", "2FA", "PASSKEYS", "LIVE SESSIONS", "ROLES"))
     for r in rows:
-        print("%-34s %-6s %-9d %-14d %s" % (r["email"], "on" if r["totp_enabled"] else "off",
-                                            r["passkeys"], r["live"],
-                                            await _bindings_text(r["id"])))
+        flags = "".join((" [DISABLED]" if r["disabled"] else "", " [SCIM]" if r["scim"] else ""))
+        print("%-34s %-6s %-9d %-14d %s%s" % (r["email"], "on" if r["totp_enabled"] else "off",
+                                              r["passkeys"], r["live"],
+                                              await _bindings_text(r["id"]), flags))
 
 
 async def cmd_roles(args) -> None:
@@ -139,6 +142,9 @@ async def cmd_promote(args) -> None:
         "promoted %s to Owner @ all hosts (break-glass)" % user["email"], user["id"], "cli")
     await _bump_authz_epoch()
     print("✓ %s is now Owner over all hosts (%s)" % (user["email"], await _bindings_text(user["id"])))
+    if user["disabled"]:
+        print("· the account is DISABLED (SCIM): it cannot sign in until `enable %s`"
+              % user["email"])
     print("· the running gateway picks this up within about a minute")
 
 
@@ -228,6 +234,27 @@ async def cmd_sso_only(args) -> None:
           "removed)" % user["email"])
     print("· its SSO groups give it roles from its next SSO sign-in")
     await _revoke_everything(user["id"], "account made SSO-only")
+
+
+async def cmd_enable(args) -> None:
+    """3.6.11: re-enable an account the identity provider disabled through SCIM — the break-glass
+    twin of the Owner's "Re-enable" in Settings. If the IdP still says the person is inactive, its
+    next SCIM sync disables the account again: fix it in the IdP too."""
+    user = await _find(args.email)
+    if not user["disabled"]:
+        print("%s is not disabled — nothing to do" % user["email"])
+        return
+    await db.execute("UPDATE users SET disabled=0, disabled_at=NULL, disabled_by=NULL WHERE id=?",
+                     user["id"])
+    await db.execute(
+        "INSERT INTO audit_log(ts, actor, ip, method, path, status, detail, actor_id, via)"
+        " VALUES(?,?,?,?,?,?,?,?,?)", time.time(), "admin-cli", "-", "CLI", "/admin/enable", 200,
+        "re-enabled %s from the server (break-glass)" % user["email"], user["id"], "cli")
+    await _bump_authz_epoch()
+    print("✓ %s is enabled again (%s)" % (user["email"], await _bindings_text(user["id"])))
+    if user["scim_managed"]:
+        print("· it is managed by SCIM: if the identity provider still has it inactive, the next "
+              "sync disables it again — re-activate it there too")
 
 
 async def cmd_disable_2fa(args) -> None:
@@ -348,6 +375,8 @@ async def main() -> None:
     p.add_argument("email")
     p.add_argument("--force", action="store_true",
                    help="also for the last Owner with a local password, or with SSO not configured")
+    p = sub.add_parser("enable", help="re-enable an account disabled by SCIM (break-glass)")
+    p.add_argument("email")
     p = sub.add_parser("health", help="the System health list, as Settings shows it (read-only)")
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.add_argument("--all", action="store_true", help="include muted checks")
@@ -364,7 +393,8 @@ async def main() -> None:
         await {"list": cmd_list, "passwd": cmd_passwd,
                "disable-2fa": cmd_disable_2fa, "logout-all": cmd_logout_all,
                "roles": cmd_roles, "promote": cmd_promote,
-               "sso-only": cmd_sso_only, "vacuum": cmd_vacuum}[args.cmd](args)
+               "sso-only": cmd_sso_only, "enable": cmd_enable,
+               "vacuum": cmd_vacuum}[args.cmd](args)
     finally:
         await db.close()
 

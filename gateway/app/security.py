@@ -383,6 +383,12 @@ async def create_web_session(user_id: int, user_agent: str = "",
     """A new web session (cookie). `method` = how the person just signed in (one of
     LOGIN_METHODS): stamped on the account as its last sign-in (3.6.10, Settings → Users &
     roles). Empty = not a sign-in (tests, internal sessions): nothing is stamped."""
+    # 3.6.11: un cont dezactivat (SCIM) nu primeşte nicio sesiune, indiferent pe ce cale de login
+    # a ajuns aici — apărare în adâncime; fiecare cale refuză oricum înainte, cu mesajul ei.
+    u0 = await db.fetchone("SELECT COALESCE(disabled, 0) AS d FROM users WHERE id=?", user_id)
+    if u0 is None or u0["d"]:
+        raise ApiError(403, "auth.accountDisabled",
+                       "this account is disabled; an Owner can re-enable it")
     token = new_token()
     now = time.time()
     expires = now + WEB_SESSION_TTL
@@ -470,6 +476,10 @@ async def user_for_token(token: Optional[str]):
         await db.execute("DELETE FROM web_sessions WHERE token_hash=?", th)
         return None
     user = await db.fetchone("SELECT * FROM users WHERE id=?", ws["user_id"])
+    # 3.6.11: contul dezactivat (sau dispărut) — sesiunea nu mai deschide nimic
+    if user is None or user["disabled"]:
+        await db.execute("DELETE FROM web_sessions WHERE token_hash=?", th)
+        return None
     # 3.6.5: şi sesiunile create ÎNAINTE de setarea limitei (expires-ul lor e cel vechi)
     if _sso_session_too_old(user, ws["created"], now):
         await db.execute("DELETE FROM web_sessions WHERE token_hash=?", th)
@@ -488,10 +498,12 @@ async def session_valid(token: Optional[str]) -> bool:
         return False
     now = time.time()
     ws = await db.fetchone(
-        "SELECT w.last_seen, w.created, u.sso_subject FROM web_sessions w"
+        "SELECT w.last_seen, w.created, u.sso_subject, u.id AS uid, u.disabled FROM web_sessions w"
         " LEFT JOIN users u ON u.id = w.user_id WHERE w.token_hash=? AND w.expires > ?",
         sha256_hex(token), now)
     if not ws:
+        return False
+    if ws["uid"] is None or ws["disabled"]:                  # 3.6.11: cont dezactivat / şters
         return False
     last = ws["last_seen"]
     if last is not None and now - last > WEB_SESSION_IDLE:
@@ -526,6 +538,11 @@ async def api_token_principal(request: Request):
         return None
     row = await db.fetchone("SELECT * FROM api_tokens WHERE token_hash=?", sha256_hex(raw))
     if not row or row["expires"] < time.time():
+        return None
+    # 3.6.11: tokenul unui cont dezactivat nu mai e un principal (authz îl golea oricum de drepturi;
+    # aici nici nu mai trece de autentificare — şi nu-i mai actualizăm `last_used`)
+    if row["created_by_id"] and await db.fetchone(
+            "SELECT 1 FROM users WHERE id=? AND COALESCE(disabled, 0)<>0", row["created_by_id"]):
         return None
     # `last_used` e util la audit („tokenul ăsta mai e folosit?"), dar nu merită o scriere la
     # fiecare cerere: îl actualizăm cel mult o dată pe minut.

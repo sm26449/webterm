@@ -246,6 +246,12 @@ async def login_verify(body: CredentialBody, request: Request, response: Respons
     # ca fiecare intrare să re-citească grupurile din IdP (revocare rapidă). Passkey-ul rămâne
     # al doilea factor / step-up. Verificat DUPĂ semnătură: un credential_id nu trebuie să afle
     # nimic despre cont fără cheia privată.
+    # 3.6.11: contul dezactivat (SCIM): verificat tot DUPĂ semnătură
+    if user is None or user["disabled"]:
+        audit.actor(request, user["email"] if user else "")
+        audit.detail(request, "passkey sign-in refused: the account is disabled")
+        raise ApiError(403, "auth.accountDisabled",
+                       "this account is disabled; an Owner can re-enable it")
     if config.OIDC_SSO_ONLY and (user is None or user["local_password"] == 0):
         audit.actor(request, user["email"] if user else "")
         audit.detail(request, "passkey sign-in refused: the account signs in with SSO only "

@@ -399,6 +399,22 @@ CREATE TABLE IF NOT EXISTS oidc_group_roles (
 -- template ids + parameters (`commands`, JSON), rendered by healthcmd.py when shown or typed.
 -- `alerted_severity` = what was last alerted (dedup across restarts); `muted_until`: 0 = not
 -- muted, >0 = until that time, -1 = until the result changes (`muted_sig` = the result then).
+-- SCIM 2.0 (3.6.11, scim.py): grupurile împinse de IdP şi membrii lor (DOAR conturi SCIM).
+-- `display_name` = EXACT numele pe care îl trimite şi claim-ul OIDC `groups` (comparat octet cu
+-- octet de maparea grup → rol, ca la login). Apartenenţa re-sincronizează imediat legăturile SSO.
+CREATE TABLE IF NOT EXISTS scim_groups (
+    id TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    external_id TEXT,
+    created REAL NOT NULL,
+    updated REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS scim_group_members (
+    group_id TEXT NOT NULL,
+    user_id INTEGER NOT NULL,
+    PRIMARY KEY (group_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_scim_members_user ON scim_group_members(user_id);
 CREATE TABLE IF NOT EXISTS health_checks (
     id TEXT PRIMARY KEY,
     severity TEXT NOT NULL,
@@ -582,6 +598,25 @@ MIGRATIONS = [
     # Accounts). Conturile de dinainte rămân NULL: „neînregistrat încă", nu „niciodată".
     "ALTER TABLE users ADD COLUMN last_login REAL",
     "ALTER TABLE users ADD COLUMN last_login_method TEXT",
+    # 3.6.11 — conturi DEZACTIVATE (SCIM `active:false` / DELETE): contul rămâne (istoricul de
+    # audit, legăturile, passkey-urile), dar nu se mai poate autentifica şi nu mai are niciun drept
+    # (authz.grants_for_user → gol). `disabled_by`: 'scim' (active:false) | 'scim-delete'.
+    # Îl reactivează un Owner din Setări (auditat) sau SCIM cu active:true (doar conturile SCIM).
+    "ALTER TABLE users ADD COLUMN disabled INTEGER DEFAULT 0",
+    "ALTER TABLE users ADD COLUMN disabled_at REAL",
+    "ALTER TABLE users ADD COLUMN disabled_by TEXT",
+    # 3.6.11 — SCIM: contul e administrat de IdP (`scim_managed=1`, rămâne şi după un DELETE SCIM);
+    # `scim_id` = id-ul resursei SCIM (al nostru, uuid; NULL după DELETE), `scim_external_id` =
+    # externalId-ul IdP-ului (Authentik: uid-ul userului = `sub`-ul OIDC implicit, hashed_user_id).
+    "ALTER TABLE users ADD COLUMN scim_managed INTEGER DEFAULT 0",
+    "ALTER TABLE users ADD COLUMN scim_id TEXT",
+    "ALTER TABLE users ADD COLUMN scim_external_id TEXT",
+    "ALTER TABLE users ADD COLUMN scim_user_name TEXT",
+    "ALTER TABLE users ADD COLUMN scim_display_name TEXT",
+    "ALTER TABLE users ADD COLUMN scim_updated REAL",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_scim_id ON users(scim_id) WHERE scim_id IS NOT NULL",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_scim_ext ON users(scim_external_id)"
+    " WHERE scim_external_id IS NOT NULL",
 ]
 
 # tabele adăugate ulterior (executeScript de mai sus le creează pe DB-uri noi;
