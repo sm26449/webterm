@@ -2,13 +2,14 @@ import { describe, expect, it } from 'vitest'
 import type { CommandGuard } from './api'
 import type { Terminal } from '@xterm/xterm'
 import { CommandTracker } from './commands'
-import { isBareEnter, judgePeers, PeerState, runDecision, splitLines, stripControls, submitsLine, unbracket } from './broadcastGuard'
+import { hitsKey, isBareEnter, judgePeers, opaqueInput, PeerState, runDecision, splitLines, stripControls, submitsLine, unbracket } from './broadcastGuard'
 
 // review independent 3.6.12 (M1): un Enter difuzat verifică linia din FIECARE panou-ţintă, iar un
 // panou a cărui linie nu poate fi crezută (pauză / fără ecou încă) cere confirmare — fail-closed.
 const guard: CommandGuard = { enabled: true, rules: [{ pattern: 'rm\\s+-rf', action: 'confirm' }] }
+let nextId = 0
 const peer = (o: Partial<PeerState> = {}): PeerState =>
-  ({ inert: false, live: true, atPrompt: true, echoed: true, pending: null, known: true, ...o })
+  ({ inert: false, live: true, atPrompt: true, echoed: true, pending: null, known: true, id: o.label ?? `p${++nextId}`, ...o })
 
 describe('judgePeers', () => {
   it('fără guardrail activ: nimic de verificat', () => {
@@ -106,27 +107,27 @@ describe('broadcast: confirm în origine nu ascunde celelalte panouri', () => {
     expect(seen.kind).toBe('rule')
     if (seen.kind !== 'rule') return
     // acelaşi set → trimite
-    expect(runDecision(judgePeers([origin(), peer({ label: 'db1', pending: 'ls' })], g, true), seen.hits, false)).toBe('send')
+    expect(runDecision(judgePeers([origin(), peer({ label: 'db1', pending: 'ls' })], g, true), seen.hits, null)).toBe('send')
     // db1 a rechemat între timp `shutdown` → alt set de confirmări → escaladare
     const now = judgePeers([origin(), peer({ label: 'db1', pending: 'shutdown' })], g, true)
-    expect(runDecision(now, seen.hits, false)).toBe('escalate')
+    expect(runDecision(now, seen.hits, null)).toBe('escalate')
     // db1 a rechemat `rm -rf` → block → escaladare
-    expect(runDecision(judgePeers([origin(), peer({ label: 'db1', pending: 'rm -rf ~' })], g, true), seen.hits, false)).toBe('escalate')
+    expect(runDecision(judgePeers([origin(), peer({ label: 'db1', pending: 'rm -rf ~' })], g, true), seen.hits, null)).toBe('escalate')
     // db1 a intrat pe pauză → unknown → escaladare (dialogul de regulă nu acceptă panouri neverificabile)
-    expect(runDecision(judgePeers([origin(), peer({ label: 'db1', live: false })], g, true), seen.hits, false)).toBe('escalate')
+    expect(runDecision(judgePeers([origin(), peer({ label: 'db1', live: false })], g, true), seen.hits, null)).toBe('escalate')
     // linia originii a fost ştearsă → ok → trimite
-    expect(runDecision(judgePeers([origin({ pending: null }), peer({ label: 'db1' })], g, true), seen.hits, false)).toBe('send')
+    expect(runDecision(judgePeers([origin({ pending: null }), peer({ label: 'db1' })], g, true), seen.hits, null)).toBe('send')
   })
 
   it('„Rulează" pe dialogul „nu pot verifica": acelaşi unknown → trimite; o regulă apărută → escaladare', () => {
     const seen = judgePeers([origin(), peer({ label: 'db1', live: false })], g, true)
     expect(seen.kind).toBe('unknown')
     if (seen.kind !== 'unknown') return
-    expect(runDecision(judgePeers([origin(), peer({ label: 'db1', live: false })], g, true), seen.hits, true)).toBe('send')
-    expect(runDecision(judgePeers([origin(), peer({ label: 'db1', live: false, pending: 'shutdown' })], g, true), seen.hits, true)).toBe('escalate')
-    expect(runDecision(judgePeers([origin(), peer({ label: 'db1', pending: 'rm -rf /' })], g, true), seen.hits, true)).toBe('escalate')
+    expect(runDecision(judgePeers([origin(), peer({ label: 'db1', live: false })], g, true), seen.hits, seen.unreadable)).toBe('send')
+    expect(runDecision(judgePeers([origin(), peer({ label: 'db1', live: false, pending: 'shutdown' })], g, true), seen.hits, seen.unreadable)).toBe('escalate')
+    expect(runDecision(judgePeers([origin(), peer({ label: 'db1', pending: 'rm -rf /' })], g, true), seen.hits, seen.unreadable)).toBe('escalate')
     // panoul a revenit, linie inofensivă: acelaşi set de confirmări (al originii) → trimite
-    expect(runDecision(judgePeers([origin(), peer({ label: 'db1', pending: 'ls' })], g, true), seen.hits, true)).toBe('send')
+    expect(runDecision(judgePeers([origin(), peer({ label: 'db1', pending: 'ls' })], g, true), seen.hits, seen.unreadable)).toBe('send')
   })
 
   it('fără broadcast (un singur panou, viu): confirm → dialogul regulii, ca înainte', () => {
@@ -179,7 +180,7 @@ function fakeTerm(): { term: Terminal; type: (s: string) => void; alt: (on: bool
 
 // starea unui panou, construită EXACT ca în SessionView.paneState
 const stateOf = (tr: CommandTracker, o: Partial<PeerState> = {}): PeerState => ({
-  inert: false, live: true, echoed: true,
+  inert: false, live: true, echoed: true, id: 'tr',
   atPrompt: tr.atPrompt(), pending: tr.pendingCommand(), known: tr.lineKnown(), ...o,
 })
 
@@ -266,18 +267,20 @@ describe('CommandTracker: integrare doar cu B; replay oprit într-o comandă', (
     expect(judgePeers([stateOf(tr)], guard, true).kind).toBe('ok')
   })
 
-  it('ultimul marcaj rejucat e C fără D (ssh / sudo -i / REPL) → comandă în curs, linia cunoscută', () => {
-    const { term } = fakeTerm()
+  // verificare 3.6.12 (F1): tail-ul rejucat omite octeţii ne-scrişi încă pe disc (~2,5 s), deci D/A/B-ul
+  // unei comenzi tocmai terminate pot lipsi — „C la final" NU dovedeşte că rulează ceva. Logica din
+  // e2de5c4 zicea „rulează" (ok) → o comandă rechemată la promptul real pleca neverificată.
+  it('ultimul marcaj rejucat e C fără D → tot necunoscut (D/A/B pot lipsi din tail)', () => {
+    const { term, type } = fakeTerm()
     const tr = new CommandTracker(term)
     tr.reset()
-    tr.noteReplayedMark('A'); tr.noteReplayedMark('B'); tr.noteReplayedMark('E;ssh db1'); tr.noteReplayedMark('C')
-    // logica veche: stale → unknown la fiecare Enter difuzat, cât timp ţine sesiunea ssh
-    expect(tr.lineKnown()).toBe(true)
-    expect(judgePeers([stateOf(tr)], guard, true).kind).toBe('ok')
-    // comanda se termină LIVE: până la următorul B linia e din nou necunoscută (fail-closed)
-    tr.handle('D;0')
+    tr.noteReplayedMark('A'); tr.noteReplayedMark('B'); tr.noteReplayedMark('E;make'); tr.noteReplayedMark('C')
+    type('rm -rf /srv')              // de fapt: promptul real, cu o comandă rechemată (D/A/B nerejucate)
     expect(tr.lineKnown()).toBe(false)
-    tr.handle('A'); tr.handle('B')
+    expect(judgePeers([stateOf(tr)], guard, false).kind).toBe('wait')
+    expect(judgePeers([stateOf(tr)], guard, true).kind).toBe('unknown')
+    // primul prompt LIVE: linia se vede din nou
+    tr.handle('D;0'); tr.handle('A'); tr.handle('B')
     expect(tr.lineKnown()).toBe(true)
   })
 
@@ -290,6 +293,75 @@ describe('CommandTracker: integrare doar cu B; replay oprit într-o comandă', (
       expect(tr.lineKnown()).toBe(false)
       expect(judgePeers([stateOf(tr)], guard, true).kind).toBe('unknown')
     }
+  })
+})
+
+// verificare 3.6.12 (F2, F3, F4, F5)
+describe('verificare 3.6.12: dialog fără broadcast, id-uri, taste de editare, panouri neverificabile noi', () => {
+  const g: CommandGuard = { enabled: true, rules: [{ pattern: 'reboot', action: 'confirm' }, { pattern: 'rm\\s+-rf', action: 'confirm' }] }
+
+  it('F2: dialog deschis fără broadcast (fără re-verificare) → „Rulează" trimite doar local', () => {
+    // logica veche: `!v` → sendAll, deci un broadcast pornit între timp trimitea Enter neverificat
+    expect(runDecision(null, [], null)).toBe('local')
+    expect(runDecision(null, [], [])).toBe('local')
+  })
+
+  it('F3: două panouri fără titlu pe acelaşi host → chei distincte (id), etichete dezambiguizate', () => {
+    const a = peer({ id: 'aaaaaaaa-1111', label: 'web1', pending: 'sudo reboot' })
+    const b = peer({ id: 'bbbbbbbb-2222', label: 'web1', pending: 'sudo reboot' })
+    const c = peer({ id: 'cccccccc-3333', label: 'web1', pending: 'ls' })
+    const both = judgePeers([a, b], g, true)
+    expect(both.kind).toBe('rule')
+    if (both.kind !== 'rule') return
+    // logica veche deduplica după etichetă: un singur „web1"
+    expect(both.hits[0].panes).toEqual(['aaaaaaaa-1111', 'bbbbbbbb-2222'])
+    expect(both.hits[0].labels).toEqual(['web1 · aaaaaa', 'web1 · bbbbbb'])
+    // dialogul a arătat linia în panoul a; acum e în panoul b (aceeaşi etichetă) → escaladare
+    const seen = judgePeers([a, c], g, true)
+    const now = judgePeers([{ ...a, pending: 'ls' }, { ...c, pending: 'sudo reboot' }], g, true)
+    if (seen.kind !== 'rule' || now.kind !== 'rule') throw new Error('rule expected')
+    expect(hitsKey(now.hits)).not.toBe(hitsKey(seen.hits))
+    expect(runDecision(now, seen.hits, null)).toBe('escalate')
+    // etichete unice rămân neschimbate
+    expect(judgePeers([peer({ id: 'x', label: 'db1', pending: 'reboot' })], g, true)).toMatchObject({ hits: [{ labels: ['db1'] }] })
+  })
+
+  it('F4: TAB / VT / FF devin spaţiu în linia verificată (rm\\t-rf atinge rm\\s+-rf)', () => {
+    // logica veche ştergea TAB-ul: `rm-rf` nu se potrivea
+    expect(stripControls('rm\t-rf /')).toBe('rm -rf /')
+    expect(judgePeers([peer({ pending: 'rm\t-rf /' })], g, true).kind).toBe('rule')
+  })
+
+  it('F4: un chunk cu taste de editare readline e opac; TAB, CR/LF, bracketed paste, Alt+Enter nu', () => {
+    for (const d of ['\x15rm -rf /\r', 'ls\x7f\r', '\x10\r', '\x19\r', '\x16\x0d\r', '\x1b.\r', 'ls\x1b[D\r', '\x0crm\r', 'a\x9bb\r', '\x1b\x1b\r']) {
+      expect(opaqueInput(d), JSON.stringify(d)).toBe(true)
+    }
+    for (const d of ['ls\r', 'a\tb\r', '\x1b\r', 'ls\x1b\r', '\x1b[200~ls\r\x1b[201~', 'a\r\nb\n', 'café\r']) {
+      expect(opaqueInput(d), JSON.stringify(d)).toBe(false)
+    }
+    // logica veche verifica `rm -rf /` scos din `\x15…` / linia fără DEL — alt text decât cel rulat
+    const v = judgePeers([peer({ id: 'o', pending: 'ls' }), peer({ id: 'p' })], g, true, (p) => p, [], true)
+    expect(v).toMatchObject({ kind: 'unknown', unreadable: ['o', 'p'] })
+    // un block cunoscut câştigă totuşi
+    const blk: CommandGuard = { enabled: true, rules: [{ pattern: 'mkfs', action: 'block' }] }
+    expect(judgePeers([peer({ pending: 'mkfs /dev/sda' })], blk, true, (p) => p, [], true).kind).toBe('rule')
+    // fără guardrail activ: nimic de verificat
+    expect(judgePeers([peer()], null, true, (p) => p, [], true).kind).toBe('ok')
+  })
+
+  it('F5: „Rulează" pe „nu pot verifica" escaladează dacă a devenit neverificabil un panou NOU', () => {
+    const seen = judgePeers([peer({ id: 'o' }), peer({ id: 'db1', live: false }), peer({ id: 'db2' })], g, true)
+    expect(seen).toMatchObject({ kind: 'unknown', hits: [], unreadable: ['db1'] })
+    if (seen.kind !== 'unknown') return
+    // acelaşi panou neverificabil → trimite
+    expect(runDecision(judgePeers([peer({ id: 'o' }), peer({ id: 'db1', live: false }), peer({ id: 'db2' })], g, true), seen.hits, seen.unreadable)).toBe('send')
+    // db2 a intrat pe pauză (sau linia lui a devenit necunoscută) → escaladare; logica veche: send
+    const now = judgePeers([peer({ id: 'o' }), peer({ id: 'db1', live: false }), peer({ id: 'db2', live: false })], g, true)
+    expect(runDecision(now, seen.hits, seen.unreadable)).toBe('escalate')
+    const now2 = judgePeers([peer({ id: 'o' }), peer({ id: 'db1', live: false }), peer({ id: 'db2', known: false })], g, true)
+    expect(runDecision(now2, seen.hits, seen.unreadable)).toBe('escalate')
+    // db1 a revenit (mai puţine panouri neverificabile) → ok
+    expect(runDecision(judgePeers([peer({ id: 'o' }), peer({ id: 'db1' }), peer({ id: 'db2' })], g, true), seen.hits, seen.unreadable)).toBe('send')
   })
 })
 

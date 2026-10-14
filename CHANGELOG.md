@@ -108,7 +108,13 @@ none of it reconnects a terminal. No agent change (agent stays 58).
   fresh dialog. To keep the guardrail from nagging: a shell counts as integrated only once it
   printed a prompt-end mark, and a pane whose replayed history ends inside a running command (ssh,
   `sudo -i`, a REPL) is treated as running it, while an idle prompt after a replay still asks.
-  `Alt+Enter` is checked as Enter on the typed line, not "line + ESC".
+  `Alt+Enter` is checked as Enter on the typed line, not "line + ESC". Verification: a replayed
+  history that ends inside a command no longer counts as "running" (the tail can miss the command's
+  end, so the pane may really sit at a prompt; ssh / `sudo -i` panes ask after a reattach until
+  3.6.13), a dialog opened without broadcast runs only in its own pane, panes are keyed by session
+  id (two untitled panes on one host no longer merge), `rm<Tab>-rf` matches `rm\s+-rf`, a pasted
+  chunk with editing keys (`Ctrl+U`, Backspace …) asks "Can't check this input", and "Run" escalates
+  when another pane became unreadable meanwhile.
 
 ## [3.6.11] — 2026-10-14 · agent (58)
 

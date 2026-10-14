@@ -205,13 +205,14 @@ closed (review of 3.6.12, `lib/broadcastGuard.ts`), when guardrail rules are act
   command and is on the main screen, but is stale or not at a prompt, counts as **unknown**: Enter waits up to 150 ms, then asks for the same
   confirmation. The first confirmed Enter makes the shell print a live prompt and the pane is
   checked normally again. A pane that never showed a `B` mark (no shell integration) is passed as
-  before — nothing can be read there, exactly like the origin pane without integration. If the
-  **last replayed mark is `C` with no `D` after it**, the pane was running a command when the
-  history was captured (ssh, `sudo -i`, a REPL started before the replay): Enter goes to that
-  program, so the pane counts as running (known) — otherwise it would prompt forever, since such a
-  program never prints our shell's prompt. The next live mark ends that assumption (a live `D`
-  makes the line unknown again until the `B`). An idle prompt after a replay (last replayed mark
-  `A`/`B`/`D`) stays unknown — fail closed;
+  before — nothing can be read there, exactly like the origin pane without integration. The
+  **last replayed mark proves nothing** (verification of 3.6.12): the attach / reconnect tail
+  (`read_tail`) leaves out the bytes not yet flushed to the transcript (up to ~2.5 s), so a replay
+  that ends in `C` may simply be missing the `D`/`A`/`B` of a command that just finished — the pane
+  is really at a prompt with an unseen line. The browser can't tell a gap-free resync
+  (resume/unlock, flushed up to a cutoff) from one with a gap (attach, slow client): the `resync`
+  message doesn't say. So every replayed state stays unknown until a live `B` — fail closed (see
+  the residual below for ssh / `sudo -i` / REPL panes);
 - a target pane at a shell prompt whose last keys have **not echoed back yet** (latency: `↑` may
   have recalled a command nobody has seen) makes Enter wait up to **150 ms** for the echo, then
   decide; still no echo → the same confirmation. Keys typed during the wait are queued and sent
@@ -238,8 +239,13 @@ closed (review of 3.6.12, `lib/broadcastGuard.ts`), when guardrail rules are act
   and sends only if the result is ok or exactly the confirm set the user saw (for "Can't check",
   also an unknown with that same set — the user accepted the unreadable panes). Anything else
   escalates: a block → the block notice, a different confirm set (a pane's line changed) → a new
-  dialog, a pane that became unreadable → "Can't check every pane". Without broadcast the
-  single-pane dialog is unchanged;
+  dialog, a pane that became unreadable → "Can't check every pane". The "Can't check" verdict
+  carries the **ids of the unreadable panes**; "Run" sends only if no pane outside that accepted
+  set became unreadable. Panes are keyed by their **session id**, not their label (two untitled
+  panes on the same host share a label; colliding labels get a short id suffix in the dialog).
+  A dialog opened **without** broadcast stays local: its "Run" (or "Cancel & clear") reaches only
+  its own pane even if broadcast was turned on while it was open — its line was never judged in the
+  other panes;
 - panes whose keys don't reach the host at all (watch-only, ended, socket closed) are not targets.
 
 Every path that can submit a line goes through the same check: the keyboard Enter / `Ctrl+J`, a
@@ -247,7 +253,11 @@ bare Enter that arrives without a keydown (mobile IME, keybar), any other input 
 a line break (an IME commit such as `ls⏎`, `Alt+Enter`, a pasted text — each line checked, the
 first one appended to what is already typed in each pane; control characters and ESC sequences are
 stripped from the checked lines, so `Alt+Enter` (`\x1b\r`) is Enter on the typed line, not
-"line + ESC"), "Paste & run" from the paste history
+"line + ESC"; TAB / VT / FF become a space, so `rm\t-rf` still matches `rm\s+-rf`. A chunk that
+also carries **readline editing keys** — any C0 / DEL / C1 character or ESC other than TAB, CR/LF,
+the bracketed-paste markers and the lone ESC of `Alt+Enter` (e.g. `Ctrl+U`, Backspace, `Ctrl+Y`,
+`Ctrl+V`, `ESC .`) — runs a line that differs from the text we could check, so it asks "Can't
+check this input" (with and without broadcast; a known block still wins)), "Paste & run" from the paste history
 (its Enter takes the same queued path as a typed Enter, so it never starts a second wait), and snippets / palette inserts (typed into every
 pane when broadcasting; one containing a line break is checked line by line — the first line
 appended to what is already typed — and not typed at all if a line matches). "Run again" types the
@@ -260,6 +270,15 @@ pane whose shell does have integration looks like a pane without it after a reco
 is passed unchecked until the shell's next live prompt. The fix is a gateway-side flag: the hub
 scans the session's output for `]133;` and sends "integration seen" in the `init` message, so the
 tracker knows it before the replay. Not done in 3.6.12 (it touches the gateway protocol).
+
+**Known residual, planned for 3.6.13:** after a reattach / reconnect, a pane that is inside ssh,
+`sudo -i` or a REPL started before the replay counts as **unknown** (its replayed history may end
+in `C`, but that can't be trusted — see above), so a broadcast Enter asks "Can't check every pane".
+It usually asks once: the confirmed Enter makes the inner shell print a live prompt, and if that
+shell has integration the pane is checked normally again; an inner program without integration
+keeps asking until it exits. The fix is a hub flag: the hub records the kind of the last **live**
+OSC 133 mark (`C` = a command is running) and sends it in `init`, so the tracker knows it without
+trusting the replay tail.
 
 ## Data model (DB)
 

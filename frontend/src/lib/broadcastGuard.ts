@@ -33,27 +33,33 @@ export interface PeerState {
       Enter şi următorul prompt. Atunci „nu e la prompt" NU înseamnă „fără shell integration":
       linia poate fi o comandă rechemată pe care n-o vedem (re-review 3.6.12, M1). */
   known: boolean
-  /** numele panoului, arătat în dialogul regulii (titlul sesiunii / hostul) */
+  /** id-ul stabil al panoului (id-ul sesiunii): cheia de deduplicare şi de comparaţie la „Rulează"
+      (verificare 3.6.12, F3 — două panouri fără titlu pe acelaşi host au aceeaşi etichetă) */
+  id: string
+  /** numele panoului, DOAR pentru afişare în dialog (titlul sesiunii / hostul) */
   label?: string
 }
 
 /** O linie care atinge o regulă, cu panourile în care s-ar rula (aceeaşi linie în mai multe panouri
-    apare o singură dată). */
+    apare o singură dată). `panes` = id-uri (cheia), `labels` = aceleaşi panouri, de afişat. */
 export interface RuleHit {
   rule: CommandRule
   cmd: string
   panes: string[]
+  labels: string[]
 }
 
 /** `rule` = cel puţin o linie atinge o regulă şi TOATE panourile-ţintă sunt verificabile:
       `rule`/`cmd` = linia principală (un block dacă există — atunci `hits` = doar blocurile),
       altfel `hits` = TOATE liniile cu `confirm` (dialogul le arată pe toate);
-    `wait` / `unknown` poartă confirmările găsite deja (dialogul „nu pot verifica" le arată). */
+    `wait` / `unknown` poartă confirmările găsite deja (dialogul „nu pot verifica" le arată) şi
+    id-urile panourilor neverificabile (`unreadable`, verificare 3.6.12 F5: un panou devenit
+    neverificabil după deschiderea dialogului escaladează la „Rulează"). */
 export type PeerVerdict =
   | { kind: 'ok' }
   | { kind: 'rule'; rule: CommandRule; cmd: string; hits: RuleHit[] }
-  | { kind: 'wait'; hits: RuleHit[] }
-  | { kind: 'unknown'; hits: RuleHit[] }
+  | { kind: 'wait'; hits: RuleHit[]; unreadable: string[] }
+  | { kind: 'unknown'; hits: RuleHit[]; unreadable: string[] }
 
 /** cât aşteptăm ecoul tastelor în panourile-ţintă înainte să cerem confirmare (ms) */
 export const ECHO_GRACE_MS = 150
@@ -67,43 +73,62 @@ export function guardActive(guard: CommandGuard | null | undefined): boolean {
     panou înainte de verificare (ex. un snippet inserat: linia existentă + prima linie a snippetului);
     `extra` = liniile următoare ale unui paste / snippet multi-linie, identice în toate panourile.
     `final` = aşteptarea ecoului s-a terminat: un panou încă fără ecou devine `unknown`.
+    `opaque` = input-ul conţine taste de editare (vezi `opaqueInput`): textul verificat nu e cel care
+    rulează → `unknown` pentru toate ţintele (după block-uri), ca la un panou neverificabil.
 
     Ordinea (review final 3.6.12, M): se scanează TOATE ţintele — un `block` oriunde câştigă; o
     confirmare NU ascunde nimic: dacă vreun panou e pe pauză / cu linia necunoscută / fără ecou,
     verdictul e wait → unknown, cu confirmările ataşate. Altfel un `confirm` în origine ar fi trimis
     Enter şi într-un panou al cărui `rm -rf` (block) sau linie veche nu l-am văzut. */
 export function judgePeers(peers: PeerState[], guard: CommandGuard | null | undefined, final: boolean,
-  lineOf: (pending: string | null) => string | null = (p) => p, extra: string[] = []): PeerVerdict {
+  lineOf: (pending: string | null) => string | null = (p) => p, extra: string[] = [], opaque = false): PeerVerdict {
   if (!guardActive(guard)) return { kind: 'ok' }
   const targets = peers.filter((p) => !p.inert)
+  const labels = paneLabels(targets)
   const blocks: RuleHit[] = []
   const confirms: RuleHit[] = []
-  const add = (list: RuleHit[], rule: CommandRule, cmd: string, pane: string) => {
+  const add = (list: RuleHit[], rule: CommandRule, cmd: string, p: PeerState) => {
     const h = list.find((x) => x.cmd === cmd && x.rule.pattern === rule.pattern)
-    if (!h) list.push({ rule, cmd, panes: [pane] })
-    else if (!h.panes.includes(pane)) h.panes.push(pane)
+    if (!h) list.push({ rule, cmd, panes: [p.id], labels: [labels.get(p.id) ?? p.id] })
+    else if (!h.panes.includes(p.id)) { h.panes.push(p.id); h.labels.push(labels.get(p.id) ?? p.id) }
   }
-  targets.forEach((p, i) => {
-    const pane = p.label ?? String(i + 1)
+  for (const p of targets) {
     const first = lineOf(p.pending)
     for (const raw of [first, ...extra]) {
       const line = raw ? stripControls(raw).trim() : ''
       const rule = line ? matchCommandRule(line, guard) : null
-      if (rule) add(rule.action === 'block' ? blocks : confirms, rule, line, pane)
+      if (rule) add(rule.action === 'block' ? blocks : confirms, rule, line, p)
     }
-  })
+  }
   if (blocks.length) return { kind: 'rule', rule: blocks[0].rule, cmd: blocks[0].cmd, hits: blocks }
-  if (targets.some((p) => !p.live)) return { kind: 'unknown', hits: confirms }
+  if (opaque) return { kind: 'unknown', hits: confirms, unreadable: targets.map((p) => p.id) }
   // linie necunoscută (după replay / înainte de prompt) sau taste fără ecou: aşteptăm puţin un
   // prompt / ecou live, apoi confirmare. NU „fără shell integration → ok": vezi PeerState.known.
-  if (targets.some((p) => !p.known || (p.atPrompt && !p.echoed))) {
-    return final ? { kind: 'unknown', hits: confirms } : { kind: 'wait', hits: confirms }
+  const unseen = targets.filter((p) => !p.live || !p.known || (p.atPrompt && !p.echoed)).map((p) => p.id)
+  // un panou pe pauză nu se schimbă aşteptând: unknown imediat, cu TOATE panourile neverificabile (F5)
+  if (targets.some((p) => !p.live)) return { kind: 'unknown', hits: confirms, unreadable: unseen }
+  if (unseen.length) {
+    return final ? { kind: 'unknown', hits: confirms, unreadable: unseen } : { kind: 'wait', hits: confirms, unreadable: unseen }
   }
   if (confirms.length) return { kind: 'rule', rule: confirms[0].rule, cmd: confirms[0].cmd, hits: confirms }
   return { kind: 'ok' }
 }
 
-/** Cheia setului de reguli văzut de utilizator într-un dialog (linie + regulă + panouri). */
+/** Etichetele de afişat: o etichetă purtată de mai multe panouri (două sesiuni fără titlu pe acelaşi
+    host) primeşte un sufix scurt din id (verificare 3.6.12, F3). */
+export function paneLabels(peers: PeerState[]): Map<string, string> {
+  const base = (p: PeerState) => p.label || p.id.slice(0, 8)
+  const count = new Map<string, number>()
+  for (const p of peers) count.set(base(p), (count.get(base(p)) ?? 0) + 1)
+  const out = new Map<string, string>()
+  for (const p of peers) {
+    const b = base(p)
+    out.set(p.id, (count.get(b) ?? 0) > 1 ? `${b} · ${p.id.slice(0, 6)}` : b)
+  }
+  return out
+}
+
+/** Cheia setului de reguli văzut de utilizator într-un dialog (linie + regulă + id-urile panourilor). */
 export function hitsKey(hits: RuleHit[]): string {
   return hits.map((h) => `${h.rule.action}\u0000${h.rule.pattern}\u0000${h.cmd}\u0000${[...h.panes].sort().join('\u0001')}`)
     .sort().join('\u0002')
@@ -111,22 +136,40 @@ export function hitsKey(hits: RuleHit[]): string {
 
 /** „Rulează" dintr-un dialog (regulă SAU „nu pot verifica"): verdictul se reface ACUM, iar Enter-ul
     pleacă doar dacă nu s-a schimbat nimic din ce a văzut utilizatorul (review final 3.6.12, M).
-    `seen` = confirmările arătate; `acceptedUnknown` = dialogul era „nu pot verifica" (utilizatorul a
-    acceptat explicit panourile neverificabile). Altfel: escaladare (block / dialog nou / unknown). */
-export function runDecision(now: PeerVerdict, seen: RuleHit[], acceptedUnknown: boolean): 'send' | 'escalate' {
+    `seen` = confirmările arătate; `acceptedUnknown` = id-urile panourilor neverificabile pe care
+    utilizatorul le-a acceptat explicit în dialogul „nu pot verifica" (null = dialog de regulă). Un
+    unknown trece doar cu aceleaşi confirmări ŞI fără panou neverificabil nou (F5).
+    `now` = null: dialogul s-a deschis FĂRĂ broadcast (nicio re-verificare a celorlalte panouri) →
+    `local` — Enter-ul pleacă doar în panoul ăsta, chiar dacă între timp broadcast-ul a pornit (F2).
+    Altfel: escaladare (block / dialog nou / unknown). */
+export function runDecision(now: PeerVerdict | null, seen: RuleHit[], acceptedUnknown: string[] | null): 'send' | 'local' | 'escalate' {
+  if (now === null) return 'local'
   if (now.kind === 'ok') return 'send'
   if (now.kind === 'wait') return 'escalate'   // nu se întâmplă cu final=true; defensiv
   if (now.kind === 'rule') {
     if (now.rule.action === 'block') return 'escalate'
     return hitsKey(now.hits) === hitsKey(seen) ? 'send' : 'escalate'
   }
-  return acceptedUnknown && hitsKey(now.hits) === hitsKey(seen) ? 'send' : 'escalate'
+  if (!acceptedUnknown || hitsKey(now.hits) !== hitsKey(seen)) return 'escalate'
+  return now.unreadable.every((id) => acceptedUnknown.includes(id)) ? 'send' : 'escalate'
 }
 
 /** Linia de VERIFICAT fără caractere de control: Alt+Enter (`\x1b\r`) e Enter pe linia curentă, nu
-    „linie + ESC" (review final 3.6.12, L). Secvenţele ESC (săgeţi, Alt+literă) şi C0/DEL dispar. */
+    „linie + ESC" (review final 3.6.12, L). Secvenţele ESC (săgeţi, Alt+literă) şi C0/DEL dispar.
+    TAB / VT / FF devin spaţiu, nu dispar: `rm\t-rf` trebuie să atingă `rm\s+-rf` (F4). */
 export function stripControls(s: string): string {
-  return s.replace(/\x1b(?:\[[0-9;?]*[ -/]*[@-~]|O[\s\S]|[\s\S])?/g, '').replace(/[\x00-\x1f\x7f]/g, '')
+  return s.replace(/[\t\v\f]/g, ' ')
+    .replace(/\x1b(?:\[[0-9;?]*[ -/]*[@-~]|O[\s\S]|[\s\S])?/g, '').replace(/[\x00-\x1f\x7f]/g, '')
+}
+
+/** Un chunk care TRIMITE o linie dar conţine şi taste de editare readline (Ctrl+U `\x15`, DEL `\x7f`,
+    Ctrl+P `\x10`, Ctrl+Y `\x19`, Ctrl+V `\x16`, ESC-. …): linia pe care o rulează shell-ul nu e
+    textul pe care l-am verifica, deci verdictul e „nu pot verifica" (fail-closed, verificare 3.6.12
+    F4). Permise: TAB, CR/LF, marcajele bracketed paste şi ESC-ul singur dinaintea unui Enter
+    (Alt+Enter). Tot restul C0, DEL, C1 şi orice alt ESC = opac. */
+export function opaqueInput(d: string): boolean {
+  const rest = d.replace(/\x1b\[20[01]~/g, '').replace(/\x1b(?=[\r\n])/g, '')
+  return /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/.test(rest)
 }
 
 /** Liniile unui text care conţine Enter-uri (CR, LF sau CRLF — un paste „cmd\r" execută şi el). */
