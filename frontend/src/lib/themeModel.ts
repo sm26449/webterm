@@ -3,7 +3,8 @@
 
    O temă = FAMILIE × MOD:
      - familia: `webterm` (Midnight + Aurora, temele istorice), `mac` (stil macOS),
-       `win` (stil Windows 11 / Fluent), `gnome` (stil GNOME / libadwaita);
+       `win` (stil Windows 11 / Fluent), `gnome` (stil GNOME / libadwaita), `kde` (stil KDE
+       Plasma / Breeze, 3.6.11);
      - modul: `light` / `dark` / `auto` (auto = urmează prefers-color-scheme ÎN familia aleasă).
    Rezultatul e o VARIANTĂ concretă, scrisă în `data-theme` pe <html>; index.css are un bloc de
    tokeni pentru fiecare variantă. Variantele WebTerm îşi păstrează id-urile istorice (`dark` =
@@ -17,13 +18,14 @@
        Midnight, adică pe default, fără să strice nimic;
      - orice valoare necunoscută → default (WebTerm, dark = Midnight). */
 
-export type ThemeFamily = 'webterm' | 'mac' | 'win' | 'gnome'
+export type ThemeFamily = 'webterm' | 'mac' | 'win' | 'gnome' | 'kde'
 export type ThemeMode = 'light' | 'dark' | 'auto'
 export type ThemeVariant =
   | 'dark' | 'macos'                 // WebTerm: Midnight, Aurora (id-uri istorice)
   | 'mac-light' | 'mac-dark'
   | 'win-light' | 'win-dark'
   | 'gnome-light' | 'gnome-dark'
+  | 'kde-light' | 'kde-dark'
 
 export interface ThemePref { family: ThemeFamily; mode: ThemeMode }
 
@@ -58,6 +60,11 @@ export const VARIANTS: Record<ThemeVariant, VariantInfo> = {
     swatch: { bg: '#fafafb', side: '#ebebed', surface: '#ffffff', line: '#dedee2', accent: '#185fb4', text: '#2e2e33' } },
   'gnome-dark': { family: 'gnome', light: false, themeColor: '#222226',
     swatch: { bg: '#222226', side: '#2e2e32', surface: '#38383c', line: '#48484d', accent: '#185fb4', text: '#eeeef0' } },
+  // 3.6.11 — KDE Plasma / Breeze: fereastră #eff0f1, vedere #fcfcfc, highlight #3daee9 (Breeze Dark: #202326)
+  'kde-light': { family: 'kde', light: true, themeColor: '#eff0f1',
+    swatch: { bg: '#eff0f1', side: '#e3e5e7', surface: '#fcfcfc', line: '#dcdee0', accent: '#3daee9', text: '#232629' } },
+  'kde-dark': { family: 'kde', light: false, themeColor: '#202326',
+    swatch: { bg: '#202326', side: '#292c30', surface: '#31363b', line: '#40464c', accent: '#3daee9', text: '#fcfcfc' } },
 }
 
 /** Ordinea din Setări; `light`/`dark` = varianta fiecărui mod. */
@@ -66,6 +73,7 @@ export const FAMILIES: readonly { id: ThemeFamily; light: ThemeVariant; dark: Th
   { id: 'mac', light: 'mac-light', dark: 'mac-dark' },
   { id: 'win', light: 'win-light', dark: 'win-dark' },
   { id: 'gnome', light: 'gnome-light', dark: 'gnome-dark' },
+  { id: 'kde', light: 'kde-light', dark: 'kde-dark' },
 ]
 
 const FAMILY_IDS = new Set<string>(FAMILIES.map((f) => f.id))

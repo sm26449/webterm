@@ -331,6 +331,78 @@
   --headerbar-bg: #2e2e32;
 }
 
+/* KDE Plasma style — light (3.6.11; paleta Breeze: fereastră #eff0f1, vedere #fcfcfc, text #232629,
+   highlight #3daee9). Highlight-ul Breeze e prea deschis pentru text/contur pe fundal deschis
+   (2,2:1), deci linkul şi inelul de focus folosesc albastrul Breeze închis (#2980b9 / scara sky). */
+:root[data-theme='kde-light'],
+:root[data-theme='kde-light'] .wt-workspace .wt-canvas {
+  --ink-950: 239 240 241;  /* Window */
+  --ink-900: 252 252 252;  /* View */
+  --ink-800: 243 244 245;
+  --ink-700: 220 222 224;
+  --ink-600: 189 195 199;  /* #bdc3c7 */
+  --tx-100: 35 38 41;      /* #232629 */
+  --tx-200: 35 38 41;
+  --tx-300: 49 54 59;      /* #31363b */
+  --tx-400: 64 70 76;
+  --tx-500: 80 86 92;
+  --tx-600: 94 100 106;
+  --link: 19 103 144;
+  --focus: 41 128 185;     /* #2980b9 — Breeze focus/link (≥3:1; #3daee9 dădea 2,2:1) */
+  --field-border: 122 128 134;
+  --ok: 6 95 70;
+  --warn: 146 64 14;
+  --danger: 185 28 28;
+  --info: 7 89 133;
+  --accent: 17 84 120;
+  --viz-ok: 5 150 105;
+  --viz-warn: 180 83 9;
+  --viz-danger: 225 29 72;
+  /* Breeze nu are sticlă: sidebar-ul (ca panoul Places din Dolphin) e o suprafaţă plină */
+  --glass-bg: rgba(227, 229, 231, 0.97);
+  --glass-hairline: rgba(35, 38, 41, 0.14);
+  --glass-shadow: 0 2px 12px rgba(35, 38, 41, 0.14), 0 0 0 1px rgba(35, 38, 41, 0.08);
+  --window-shadow: 0 8px 30px rgba(35, 38, 41, 0.22), 0 2px 8px rgba(35, 38, 41, 0.14), 0 0 0 1px rgba(35, 38, 41, 0.12);
+  --app-gradient: #eff0f1;
+  --font-ui: 'Noto Sans', 'Noto Sans UI', 'Oxygen', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --scrollbar: rgba(35, 38, 41, 0.3);
+  --drawer-bg: #e3e5e7;
+}
+
+/* KDE Plasma style — dark (Breeze Dark, Plasma 6: fereastră #202326, butoane #292c30) */
+:root[data-theme='kde-dark'],
+:root[data-theme='kde-dark'] .wt-workspace .wt-canvas {
+  --ink-950: 32 35 38;     /* Window #202326 */
+  --ink-900: 41 44 48;     /* Button #292c30 */
+  --ink-800: 49 54 59;     /* #31363b */
+  --ink-700: 64 70 76;
+  --ink-600: 88 95 102;
+  --tx-100: 252 252 252;   /* #fcfcfc */
+  --tx-200: 239 240 241;
+  --tx-300: 214 216 218;
+  --tx-400: 185 189 193;
+  --tx-500: 170 175 180;
+  --tx-600: 166 171 176;
+  --link: 61 174 233;      /* highlight #3daee9 */
+  --focus: 61 174 233;
+  --field-border: 128 134 140;
+  --ok: 52 211 153;
+  --warn: 251 191 36;
+  --danger: 255 154 148;   /* #f87171 dădea 4,3:1 pe #31363b */
+  --info: 125 211 252;
+  --accent: 147 206 240;
+  --viz-ok: 52 211 153;
+  --viz-warn: 251 191 36;
+  --viz-danger: 248 113 113;
+  --glass-bg: rgba(41, 44, 48, 0.97);
+  --glass-hairline: rgba(255, 255, 255, 0.08);
+  --glass-shadow: 0 2px 12px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(0, 0, 0, 0.3);
+  --window-shadow: 0 8px 30px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(255, 255, 255, 0.07);
+  --app-gradient: #202326;
+  --font-ui: 'Noto Sans', 'Noto Sans UI', 'Oxygen', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --scrollbar: rgba(255, 255, 255, 0.3);
+}
+
 html,
 body,
 #root {
@@ -467,10 +539,39 @@ body {
   --sky-900: 11 34 62;
   --sky-950: 9 28 52;
 }
+/* 3.6.11 — KDE Plasma / Breeze: highlight-ul #3daee9 adus la luminanţele indigo-ului WebTerm (deci
+   sky-600 ≈ albastrul închis Breeze), raze moderate (3/4 px, ca butoanele şi cadrele Breeze),
+   cromul terminalului pe fundalul schemei Konsole „Breeze" (#232627). */
+:root[data-family='kde'] {
+  --term-bg: #232627;
+  --chrome-bg: #131517;
+  --chrome-elev: #1a1c1e;
+  --chrome-line: rgba(255, 255, 255, 0.08);
+  --chrome-tx: #e6e8ea;
+  --chrome-tx-dim: #a2a8ae;
+  --ws-950: 10 11 12;
+  --ws-900: 19 21 23;
+  --ws-800: 29 31 34;
+  --ws-700: 50 53 56;
+  --ws-600: 72 76 80;
+  --command-bg: #1b1e20;
+  --r-md: 3px;
+  --r-xl: 4px;
+  --r-2xl: 6px;
+  --sky-200: 168 218 244;
+  --sky-300: 109 194 236;
+  --sky-400: 30 158 223;
+  --sky-500: 24 127 178;
+  --sky-600: 19 102 143;
+  --sky-700: 17 86 121;
+  --sky-800: 15 61 85;
+  --sky-900: 9 37 50;
+  --sky-950: 7 30 42;
+}
 
 /* Dashboard-ul şi pagina hostului pe familiile noi: tokenii variantei vin din blocul ei (selectorul
    include `.wt-workspace .wt-canvas`); aici doar culoarea de bază şi fundalul, ca la Aurora. */
-:root:is([data-family='mac'], [data-family='win'], [data-family='gnome']) .wt-workspace .wt-canvas {
+:root:is([data-family='mac'], [data-family='win'], [data-family='gnome'], [data-family='kde']) .wt-workspace .wt-canvas {
   color: rgb(var(--tx-200));
   background: var(--app-gradient);
   background-attachment: fixed;
@@ -490,6 +591,13 @@ body {
 /* Windows 11: conturul subtil al suprafeţelor (Fluent card stroke) */
 :root[data-family='win'] .wt-sidebar {
   border-right: 1px solid var(--glass-hairline);
+}
+/* KDE Breeze: cadrul subţire al panourilor (ca Places în Dolphin) şi o linie sub antetul sidebar-ului */
+:root[data-family='kde'] .wt-sidebar {
+  border-right: 1px solid var(--glass-hairline);
+}
+:root[data-family='kde'] .wt-sbhead {
+  border-bottom-color: var(--glass-hairline);
 }
 
 /* ── Chrome-ul aplicației ─────────────────────────────────────── */
@@ -930,7 +1038,7 @@ textarea {
 /* 3.6.4: şi pe variantele închise ale familiilor noi — Dashboard-ul lor are suprafeţe mai deschise decât
    navy-ul Midnight (pe GNOME dark culoarea hostului cădea sub 4,5:1 pe cardurile ink-900) */
 :root[data-mode='light'] .wt-canvas .wt-hostlabel,
-:root:is([data-family='mac'], [data-family='win'], [data-family='gnome']) .wt-canvas .wt-hostlabel { color: rgb(var(--tx-400)) !important; }
+:root:is([data-family='mac'], [data-family='win'], [data-family='gnome'], [data-family='kde']) .wt-canvas .wt-hostlabel { color: rgb(var(--tx-400)) !important; }
 
 /* editorul de fișiere: conținutul e pe fundal de terminal (întunecat fix),
    deci tokenii de text trebuie să fie mereu varianta deschisă — pe Aurora,

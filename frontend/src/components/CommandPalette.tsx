@@ -180,7 +180,7 @@ export default function CommandPalette(props: {
       // în familia aleasă: modul afişat → cel opus (Midnight ↔ Aurora pe WebTerm)
       sub: `${variantName(currentTheme(), t)} → ${variantName(resolveVariant(toggledPref(themePref(), currentTheme()), false), t)}`,
       color: '#818cf8', hint: t('palette.hintAction'),
-      text: 'toggle theme aurora midnight dark light appearance macos windows gnome',
+      text: 'toggle theme aurora midnight dark light appearance macos windows gnome kde plasma breeze',
       run: () => applyTheme(toggledPref(themePref(), currentTheme())),
     })
     out.push({

@@ -9,7 +9,7 @@ import type { ThemeFamily } from './themeModel'
    palette. Selectable independently of the UI theme, persisted in localStorage. */
 export type TermSchemeId =
   | 'webterm-dark' | 'gruvbox-dark' | 'catppuccin-mocha'
-  | 'macos-terminal' | 'campbell' | 'tango-dark'
+  | 'macos-terminal' | 'campbell' | 'tango-dark' | 'breeze-konsole'
 
 export const TERM_SCHEMES: { id: TermSchemeId; name: string; theme: ITheme }[] = [
   {
@@ -96,6 +96,20 @@ export const TERM_SCHEMES: { id: TermSchemeId; name: string; theme: ITheme }[] =
       brightBlue: '#729fcf', brightMagenta: '#ad7fa8', brightCyan: '#34e2e2', brightWhite: '#eeeeec',
     },
   },
+  {
+    // 3.6.11: schema „Breeze" a Konsole (KDE Plasma), pe fundalul ei #232627
+    id: 'breeze-konsole',
+    name: 'Breeze (Konsole style)',
+    theme: {
+      background: '#232627', foreground: '#fcfcfc',
+      cursor: '#fcfcfc', cursorAccent: '#232627',
+      selectionBackground: '#2980b9', selectionForeground: '#ffffff',
+      black: '#232627', red: '#ed1515', green: '#11d116', yellow: '#f67400',
+      blue: '#1d99f3', magenta: '#9b59b6', cyan: '#1abc9c', white: '#fcfcfc',
+      brightBlack: '#7f8c8d', brightRed: '#c0392b', brightGreen: '#1cdc9a', brightYellow: '#fdbc4b',
+      brightBlue: '#3daee9', brightMagenta: '#8e44ad', brightCyan: '#16a085', brightWhite: '#ffffff',
+    },
+  },
 ]
 
 /** Schema implicită a fiecărei familii de temă: fără o alegere explicită (`wt_term_scheme` lipsă),
@@ -106,6 +120,7 @@ export const FAMILY_SCHEME: Record<ThemeFamily, TermSchemeId> = {
   mac: 'macos-terminal',
   win: 'campbell',
   gnome: 'tango-dark',
+  kde: 'breeze-konsole',
 }
 
 // ── schemă proprie (editabilă din Setări / importată din iTerm2 sau VS Code) ──

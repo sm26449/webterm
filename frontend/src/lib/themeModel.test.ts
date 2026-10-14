@@ -18,7 +18,7 @@ describe('migrarea `wt_theme` (valorile ≤ 3.6.3 arată EXACT la fel)', () => {
   })
 
   it('lipsă / necunoscut / stricat → default (Midnight), fără excepţii', () => {
-    for (const raw of [null, undefined, '', 'light', 'Dark', 'aurora', 'kde:dark', 'mac:sepia', 'mac', ':dark',
+    for (const raw of [null, undefined, '', 'light', 'Dark', 'aurora', 'kde:sepia', 'cde:dark', 'mac:sepia', 'mac', ':dark',
       'mac:dark:x', '{"family":"mac"}', ' '.repeat(3)]) {
       expect(parseThemePref(raw)).toEqual(DEFAULT_PREF)
     }
@@ -26,12 +26,15 @@ describe('migrarea `wt_theme` (valorile ≤ 3.6.3 arată EXACT la fel)', () => {
   })
 
   it('familiile noi: `<familie>:<mod>`, dus-întors', () => {
-    const fams: ThemeFamily[] = ['webterm', 'mac', 'win', 'gnome']
+    const fams: ThemeFamily[] = ['webterm', 'mac', 'win', 'gnome', 'kde']
     const modes: ThemeMode[] = ['light', 'dark', 'auto']
     for (const family of fams) for (const mode of modes) {
       expect(parseThemePref(serializeThemePref({ family, mode }))).toEqual({ family, mode })
     }
     expect(parseThemePref(' win:dark ')).toEqual({ family: 'win', mode: 'dark' })
+    // 3.6.11: KDE Plasma / Breeze
+    expect(parseThemePref('kde:dark')).toEqual({ family: 'kde', mode: 'dark' })
+    expect(serializeThemePref({ family: 'kde', mode: 'auto' })).toBe('kde:auto')
   })
 
   it('WebTerm se scrie în formatul vechi (un downgrade la 3.6.3 citeşte aceeaşi temă)', () => {
@@ -48,11 +51,13 @@ describe('variante', () => {
     expect(resolveVariant({ family: 'mac', mode: 'auto' }, false)).toBe('mac-dark')
     expect(resolveVariant({ family: 'win', mode: 'light' }, false)).toBe('win-light')
     expect(resolveVariant({ family: 'gnome', mode: 'dark' }, true)).toBe('gnome-dark')
+    expect(resolveVariant({ family: 'kde', mode: 'auto' }, true)).toBe('kde-light')
+    expect(resolveVariant({ family: 'kde', mode: 'auto' }, false)).toBe('kde-dark')
   })
 
   it('isLight: toate variantele deschise (nu doar `macos`)', () => {
     const light = (Object.keys(VARIANTS) as ThemeVariant[]).filter(isLight).sort()
-    expect(light).toEqual(['gnome-light', 'mac-light', 'macos', 'win-light'])
+    expect(light).toEqual(['gnome-light', 'kde-light', 'mac-light', 'macos', 'win-light'])
     for (const f of FAMILIES) {
       expect(isLight(f.light)).toBe(true)
       expect(isLight(f.dark)).toBe(false)
@@ -71,6 +76,7 @@ describe('variante', () => {
     expect(variantName('dark', t)).toBe('Midnight')
     expect(variantName('macos', t)).toBe('Aurora')
     expect(variantName('gnome-dark', t)).toBe('theme.family.gnome · theme.mode.dark')
+    expect(variantName('kde-light', t)).toBe('theme.family.kde · theme.mode.light')
   })
 
   it('theme-color PWA: un hex valid pentru fiecare variantă; Midnight/Aurora neschimbate', () => {

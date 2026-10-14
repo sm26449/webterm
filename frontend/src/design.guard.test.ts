@@ -171,7 +171,7 @@ describe('design system: garda de regresie', () => {
   // `theme === 'macos'` nou ar trata macOS/Windows/GNOME light ca teme întunecate (editor negru,
   // watermark alb pe alb). La fel în CSS: regulile „doar pe deschis" stau pe [data-mode='light'].
   it('fără teste pe id-uri de temă în afara lib/theme*.ts (foloseşte isLight)', () => {
-    const THEME_ID_CMP = /(?:\btheme\w*|currentTheme\(\))\s*[!=]==?\s*['"](?:macos|dark|light|(?:mac|win|gnome)-(?:light|dark))['"]|[!=]==?\s*['"]macos['"]/
+    const THEME_ID_CMP = /(?:\btheme\w*|currentTheme\(\))\s*[!=]==?\s*['"](?:macos|dark|light|(?:mac|win|gnome|kde)-(?:light|dark))['"]|[!=]==?\s*['"]macos['"]/
     const hits = Object.entries(files)
       .filter(([f]) => !/^\.\/lib\/theme(Model)?\.ts$/.test(f))
       .flatMap(([f, s]) => s.split('\n').map((l, i) => ({ file: f, line: i + 1, text: l.trim() }))

@@ -106,7 +106,7 @@ export const SETTINGS_INDEX: readonly SettingSection[] = [
     keywords: 'language english romanian locale limba engleza romana' },
   { id: 'theme', cat: 'aspect', titleKey: 'settings.theme', hintKey: 'theme.styleHint',
     keywords: 'theme style look appearance midnight aurora macos mac apple windows win11 fluent mica '
-      + 'gnome adwaita libadwaita linux ubuntu vibrancy tema stil aspect' },
+      + 'gnome adwaita libadwaita linux ubuntu vibrancy kde plasma breeze kubuntu tema stil aspect' },
   { id: 'themeMode', cat: 'aspect', titleKey: 'theme.mode',
     keywords: 'dark light mode auto system night day appearance mod intunecat luminos noapte zi sistem' },
   { id: 'termColors', cat: 'aspect', titleKey: 'settings.termColors',
