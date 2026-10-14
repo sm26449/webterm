@@ -17,7 +17,7 @@
    restaurarea focusului, ciclul Tab în ConfirmModal, paleta cu săgeţi+Enter, reordonarea
    tab-urilor cu Alt+Shift+←/→).
 
-   3.6.4: şi pe cele 6 variante noi (`wt_theme` = `mac|win|gnome` : `light|dark`), un subset
+   3.6.4: şi pe variantele familiilor de sistem (`wt_theme` = `mac|win|gnome|kde` : `light|dark`; kde din 3.6.11), un subset
    reprezentativ pe fiecare (login, dashboard, sesiune, Setări → Appearance, file browser, dialogul
    Add host) + Escape/focus şi verificarea că `data-theme`/`theme-color` sunt aplicate. */
 import { chromium, devices } from 'playwright'
@@ -69,6 +69,7 @@ const NEW_VARIANTS = [
   ['mac:light', 'mac-light'], ['mac:dark', 'mac-dark'],
   ['win:light', 'win-light'], ['win:dark', 'win-dark'],
   ['gnome:light', 'gnome-light'], ['gnome:dark', 'gnome-dark'],
+  ['kde:light', 'kde-light'], ['kde:dark', 'kde-dark'],          // 3.6.11
 ]
 const PER_VARIANT = 6
 const EXPECTED_SCANS = 2 * PER_THEME + 2 + NEW_VARIANTS.length * PER_VARIANT
@@ -911,8 +912,8 @@ try {
     await ctx.close()
   }
 
-  // ---- 3.6.4: familiile de temă noi (macOS / Windows 11 / GNOME × light / dark) ----
-  // Setul complet de mai sus rulează pe Midnight şi Aurora; aici, pe fiecare din cele 6 variante noi,
+  // ---- 3.6.4: familiile de temă noi (macOS / Windows 11 / GNOME; KDE Plasma din 3.6.11 × light / dark) ----
+  // Setul complet de mai sus rulează pe Midnight şi Aurora; aici, pe fiecare din cele 8 variante noi,
   // un subset REPREZENTATIV (login, dashboard, sesiune, Setări → Appearance, file browser, un dialog)
   // + verificări de tastatură — ca timpul porţii să rămână mărginit. Contrastul tuturor tokenilor
   // pe toate variantele e verificat static de frontend/src/themeContrast.test.ts.

@@ -45,11 +45,11 @@ scripts/ci-local.sh e2e a11y   # or a subset, in CI order
 ```
 
 The accessibility gate (`tests/ui_review.mjs`, step `a11y`) runs axe-core with the
-`wcag2a/2aa/21a/21aa/22aa` + `best-practice` tags over ~112 scans (every surface in both
+`wcag2a/2aa/21a/21aa/22aa` + `best-practice` tags over ~124 scans (every surface in both
 WebTerm themes, Midnight and Aurora: dashboard, session, host page with all its tabs, Toolbox,
 Settings × 7, Add host × 3, FleetRun, `?`, command palette, ConfirmModal, error toast, mobile;
 Monaco only with `WT_AGENT=1`; plus a representative subset — login, dashboard, session,
-Settings → Appearance, file browser, Add host — on each of the six macOS / Windows 11 / GNOME
+Settings → Appearance, file browser, Add host — on each of the eight macOS / Windows 11 / GNOME / KDE Plasma
 style variants). The contrast of every theme token, on every variant, is also checked statically
 by `frontend/src/themeContrast.test.ts` (vitest). It fails on any serious/critical violation (`A11Y_MAX_SERIOUS=0`), on **any**
 `target-size` or `color-contrast` hit regardless of impact, on a skipped/errored scan or a

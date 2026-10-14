@@ -29,14 +29,14 @@ mkdirSync(OUT, { recursive: true })
 // portret și peisaj pentru cele mai relevante
 const MATRIX = [
   { name: 'iphone-se', device: devices['iPhone SE'], engine: 'webkit' },
-  // 3.6.4: câte o variantă din fiecare familie de temă nouă, pe un device existent (`theme` = wt_theme)
+  // 3.6.4: câte o variantă din fiecare familie de temă nouă (KDE din 3.6.11), pe un device existent (`theme` = wt_theme)
   { name: 'iphone-13', device: devices['iPhone 13'], engine: 'webkit', theme: 'mac:light' },
   { name: 'iphone-15-max', device: devices['iPhone 15 Pro Max'], engine: 'webkit' },
   { name: 'iphone-13-landscape', device: devices['iPhone 13 landscape'], engine: 'webkit' },
   { name: 'ipad-mini', device: devices['iPad Mini'], engine: 'webkit' },
   { name: 'ipad-pro-11', device: devices['iPad Pro 11'], engine: 'webkit' },
   { name: 'ipad-pro-11-landscape', device: devices['iPad Pro 11 landscape'], engine: 'webkit' },
-  { name: 'galaxy-s9', device: devices['Galaxy S9+'], engine: 'chromium' },
+  { name: 'galaxy-s9', device: devices['Galaxy S9+'], engine: 'chromium', theme: 'kde:light' },   // 3.6.11
   { name: 'pixel-7', device: devices['Pixel 7'], engine: 'chromium', theme: 'gnome:dark' },
   { name: 'galaxy-tab-s4', device: devices['Galaxy Tab S4'], engine: 'chromium', theme: 'win:light' },
   // WCAG 1.4.10 Reflow: la 320 px CSS conţinutul trebuie să încapă fără scroll orizontal.

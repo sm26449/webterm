@@ -315,8 +315,8 @@ Press `?` for the cheatsheet.
 ### Appearance & accessibility
 
 - UI themes as **style × mode**: WebTerm (Midnight dark / Aurora light), **macOS style**,
-  **Windows 11 style** and **GNOME style**, each in light, dark or Auto (follows the system) —
-  system fonts only, matching terminal palette (Terminal.app-like, Campbell, Tango) unless you
+  **Windows 11 style**, **GNOME style** and **KDE Plasma style** (Breeze), each in light, dark or Auto (follows the system) —
+  system fonts only, matching terminal palette (Terminal.app-like, Campbell, Tango, Breeze) unless you
   pick another; **installable PWA**
   (add to home screen on mobile, install on desktop) with a network-first service worker that
   bypasses every live path, so terminals always reach the network and a deploy never serves stale

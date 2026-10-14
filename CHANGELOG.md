@@ -10,7 +10,7 @@ back.
 ## [Unreleased]
 
 SCIM provisioning: the identity provider pushes account creation, deactivation, deletion and group
-membership to WebTerm at once. No agent change (agent stays 58).
+membership to WebTerm at once; plus a KDE Plasma (Breeze) theme style. No agent change (agent stays 58).
 
 ### Added
 - **SCIM 2.0 provisioning (`/scim/v2`).** Why: with SSO alone WebTerm learned about a person only
@@ -35,6 +35,18 @@ membership to WebTerm at once. No agent change (agent stays 58).
   **Disabled** and **SCIM** badges; an Owner can **Re-enable** (password + second factor), the IdP
   can reactivate a SCIM account, and `python3 -m app.admin enable <email>` is the break-glass path.
   Everything is audited (`via = scim`) and alerted to the `security.view` holders.
+- **Theme style: KDE Plasma (Breeze), light and dark.** Why: 3.6.4 brought macOS, Windows 11 and
+  GNOME styles, and KDE users asked for theirs — the design system already named it as the next
+  family. Settings → Appearance has a fifth style card: the Breeze palette (window #eff0f1, view
+  #fcfcfc, text #232629; Breeze Dark window #202326), an opaque sidebar with a thin panel frame,
+  compact 3/4/6px corners and the Breeze highlight #3daee9 as the accent scale. On the light
+  variant links and the focus ring use the darker Breeze blue (#2980b9), because #3daee9 on the
+  light window colour is 2.2:1 — below the 3:1 a focus ring needs. Font: `Noto Sans` (Plasma's
+  default) then the system stack; nothing is downloaded. The terminal follows with a new
+  "Breeze (Konsole style)" scheme unless you chose one. Contrast is checked statically for both
+  variants (vitest) and by axe in the a11y gate (login, dashboard, session, Appearance, file
+  browser, Add host on each); the mobile audit runs a Galaxy S9+ on KDE light. Settings search
+  and the command palette find it ("kde", "plasma", "breeze").
 
 ### Security
 - The SCIM token is a credential of its own: not an automation token, not a session (cookies are

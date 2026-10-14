@@ -51,11 +51,11 @@ Section titles ("eyebrows") have one treatment: `eyebrow` from `components/ui`
 
 Three steps, plus `full` for shapes that are round by nature (dots, pills, avatars) and `none`.
 
-| Class | WebTerm | macOS style | Windows 11 style | GNOME style | Use for |
-|---|---|---|---|---|---|
-| `rounded-md` | 6px | 8px | 4px | 6px | controls: buttons, inputs, chips, badges, menu items |
-| `rounded-xl` | 12px | 14px | 8px | 12px | cards, popovers, menus, panels |
-| `rounded-2xl` | 16px | 20px | 8px | 14px | dialogs, sheets, the login card |
+| Class | WebTerm | macOS style | Windows 11 style | GNOME style | KDE Plasma style | Use for |
+|---|---|---|---|---|---|---|
+| `rounded-md` | 6px | 8px | 4px | 6px | 3px | controls: buttons, inputs, chips, badges, menu items |
+| `rounded-xl` | 12px | 14px | 8px | 12px | 4px | cards, popovers, menus, panels |
+| `rounded-2xl` | 16px | 20px | 8px | 14px | 6px | dialogs, sheets, the login card |
 
 The steps are fixed; their values come from the theme family (`--r-md` / `--r-xl` / `--r-2xl`,
 see Themes), so a component picks a *role*, never a pixel value.
@@ -208,6 +208,7 @@ A theme is a **family** (the look) times a **mode** (`light` / `dark` / `auto`; 
 | macOS style | `mac-light` | `mac-dark` | translucent ("vibrancy") sidebar, rounder corners, system blue |
 | Windows 11 style | `win-light` | `win-dark` | Mica-like tinted base, white cards, subtle 1px strokes, 4/8px corners |
 | GNOME style | `gnome-light` | `gnome-dark` | libadwaita palette, opaque sidebar, header-bar strip, accent #3584e4 |
+| KDE Plasma style (3.6.11) | `kde-light` | `kde-dark` | Breeze palette (window #eff0f1, view #fcfcfc; Breeze Dark window #202326), opaque sidebar with a 1px frame, compact 3/4/6px corners, highlight #3daee9 |
 
 The WebTerm variants keep their historical ids — `macos` is **Aurora**, not the macOS family.
 
@@ -218,7 +219,8 @@ paints it on `<html>`:
   shadows, `--app-gradient`, `--font-ui`);
 - `data-family` = the family → family tokens: the accent scale `--sky-200…950`, the radii
   `--r-md/xl/2xl`, the always-dark workspace (`--ws-950…600`, `--term-bg`, `--chrome-*`,
-  `--command-bg`) and family effects (macOS sidebar blur, GNOME header bar, Windows strokes);
+  `--command-bg`) and family effects (macOS sidebar blur, GNOME header bar, Windows strokes, KDE
+  panel frame);
 - `data-mode` = `light` / `dark` → rules that only depend on brightness (input borders, the mobile
   drawer background, the accent chip, host-colour labels on the canvas).
 
@@ -234,17 +236,20 @@ is the same bundle, so all of them honour the theme.
 it). Monaco (`vs` / `vs-dark`), the watermark ink and the command-palette toggle use it.
 
 **Fonts are system stacks only**: `-apple-system`/`system-ui` (SF on a Mac), `'Segoe UI Variable'`
-/ `'Segoe UI'`, `'Adwaita Sans'` / Cantarell / Ubuntu. No OS font, logo, icon or wallpaper is
+/ `'Segoe UI'`, `'Adwaita Sans'` / Cantarell / Ubuntu, `'Noto Sans'` (Plasma's default). No OS font, logo, icon or wallpaper is
 bundled, and the families are named as styles ("macOS style"), never with trademark logos. On a
 machine without the font the family still renders with that system's own UI font.
 
 **Accent.** Components keep using `sky-*` (it is the accent name, not the colour). Each family's
 scale is its system blue with **the same relative luminance as WebTerm's indigo on every step**, so
-every contrast measured on indigo still holds (white on `sky-600` ≈ 6.3:1 everywhere).
+every contrast measured on indigo still holds (white on `sky-600` ≈ 6.3:1 everywhere). Breeze's
+highlight #3daee9 is too light for text or a focus ring on its light window colour (2.2:1), so
+KDE light uses the darker Breeze blue (#2980b9, the scale's lower steps) for links and focus, the
+way Breeze itself does for links; KDE dark keeps #3daee9.
 
 **Terminal colours** follow the family unless the user picked a scheme explicitly
 (`wt_term_scheme` set): WebTerm → WebTerm Dark, macOS → "macOS Terminal style", Windows → Campbell,
-GNOME → Tango. "Match theme" in Settings → Appearance clears the explicit choice. The ANSI colours
+GNOME → Tango, KDE Plasma → "Breeze (Konsole style)". "Match theme" in Settings → Appearance clears the explicit choice. The ANSI colours
 are each terminal's published palette; like Gruvbox and Catppuccin they are the user's content
 colours and are not bound by the UI contrast rules.
 
@@ -275,11 +280,11 @@ and `--viz-*` ≥ 3:1; workspace text and chrome text ≥ 4.5:1 on the family's 
 (`VITE_CONTRAST_REPORT=1` prints the weakest pair per variant), and the a11y gate
 (`tests/ui_review.mjs`) runs axe on the full surface set in Midnight and Aurora and on a
 representative subset — login, dashboard, session, Settings → Appearance, file browser, a dialog —
-in each of the six new variants. Glass needs an opaque fallback: without `backdrop-filter`, or with
+in each of the eight system-style variants. Glass needs an opaque fallback: without `backdrop-filter`, or with
 `prefers-reduced-transparency: reduce`, the sidebar, dialogs and login card become solid
 `ink-900`.
 
-### Adding a family (e.g. KDE Breeze)
+### Adding a family (the procedure KDE Plasma followed in 3.6.11)
 
 1. `lib/themeModel.ts`: add the id to `ThemeFamily`, two variants to `ThemeVariant` and
    `VARIANTS` (family, `light`, `themeColor`, preview swatch) and a row to `FAMILIES`. Parsing,
