@@ -9,6 +9,12 @@ Panel-local keys and mouse/touch gestures (below) are listed there too, since 3.
 
 `Mod` = **⌘** on macOS, **Ctrl** everywhere else.
 
+**Split views — the rule:** tab-level navigation (clicking a tab, `Alt+1…9`, `Alt+0`, picking a
+session in the sidebar or palette) leaves the split view; pane-level navigation stays in it
+(`Alt+←/→` between panes, `Alt+M`, `Alt+X`, clicking or tabbing into a pane). Its chip stays in the
+tab bar, so you can always return. `Alt+M` and `Alt+X` only act inside a split view; elsewhere the
+key goes to the shell untouched.
+
 ## Navigation
 
 | Shortcut | Action |
@@ -16,11 +22,11 @@ Panel-local keys and mouse/touch gestures (below) are listed there too, since 3.
 | `Mod+K` | Command palette (sessions, hosts, actions, snippets) |
 | `Mod+Shift+K` | Palette — universal escape hatch, works from the terminal too |
 | `Alt+1..9` | Jump to tab N |
-| `Alt+←` / `Alt+→` | Previous / next tab |
-| `Alt+W` | Close the tab (the session stays active) |
+| `Alt+←` / `Alt+→` | Previous / next tab — inside a split view: previous / next **pane** |
+| `Alt+W` | Close the tab (the session stays active); does nothing inside a split view |
 | `Alt+T` | Reopen the last closed tab |
 | `Alt+Shift+←` / `Alt+Shift+→` | Move the focused tab left / right (keyboard alternative to drag; `←`/`→`/`Home`/`End` move focus between tabs first) |
-| `Alt+0` | Home (dashboard) |
+| `Alt+0` | Home (dashboard) — leaves a split view |
 | `/` | Search host / session / history (sidebar) |
 | `?` | This cheatsheet (outside the terminal and text fields) |
 
@@ -30,7 +36,9 @@ Panel-local keys and mouse/touch gestures (below) are listed there too, since 3.
 |---|---|
 | `Mod+Shift+F` | Search the session history (scrollback) |
 | `Alt+↑` / `Alt+↓` | Jump to the previous / next command (requires [shell integration](SHELL-INTEGRATION.md)) |
-| `Alt+D` | Split: open the session side by side |
+| `Alt+D` | Split: open the session side by side (reuses a split view with the same two sessions) |
+| `Alt+M` | Split view: swap the focused pane with the next one |
+| `Alt+X` | Split view: maximize / restore the focused pane |
 | `Alt+P` | Detach the session into a window |
 | `Alt+S` | Saved commands (snippets) |
 | `Alt++` / `Alt+−` | Larger / smaller font |
@@ -55,7 +63,7 @@ it is cleared on idle-lock and on logout. A popped-out session window has its ow
 | `F1` | File editor: command palette (every editor command, with its shortcut) |
 | `Mod+Enter` | Git panel: commit (from the message field) |
 | `Shift+Enter` | Scrollback search: previous match (`Enter` = next) |
-| `←` / `→` on the split divider | Resize the split; double-click the divider resets it to 50/50 |
+| `←` / `→` (`↑` / `↓` on a horizontal one), `Home` / `End` on a split divider | Resize the panes; Home / End go to the edge; double-click the divider evens the panes out |
 
 ## Mouse and touch
 
@@ -63,6 +71,9 @@ it is cleared on idle-lock and on logout. A popped-out session window has its ow
 |---|---|
 | Right-click / long-press in a terminal | Terminal menu: open the selected path in Files (when the selection looks like a path), upload into the session's folder, new file/folder here, clear the terminal |
 | Double-click a session in Host overview | Open it |
+| Drag a split pane's title bar onto another pane | Swap the two panes (or use the pane's **Move to…** menu) |
+| Drag a tab onto a split pane | Show that session in the pane (if it is already another pane, the two swap) |
+| Double-click a split pane's title bar | Maximize the pane; again to restore |
 | Tap the tab-count button at the end of the tab bar (phones, or whenever tabs don't fit) | List of **all** open tabs: host, live / closed / lost, new-output dot; tap to switch, ✕ closes the tab (the session keeps running). `↑`/`↓`/`Home`/`End` move, `Esc` closes |
 | Back button / swipe-back while a panel is open on a phone | Closes the panel (Files, Git, Forwards, Docker, Services, Toolbox, AI tools, Commands) and returns to the terminal, instead of leaving the app |
 

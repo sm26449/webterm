@@ -21,90 +21,190 @@ land in?" ambiguity), and nothing you could name, keep, or have more than one of
 A **split-view** is a named, saved layout of 2–4 **distinct** sessions:
 
 ```
-{ id, name, panes: string[]  (2–4 distinct session ids), ratio, broadcast }
+{ id, name, panes: string[]  (2–4 distinct session ids), layout, sizes, ratio, broadcast, position, hidden }
 ```
 
 Split-views live in the tab bar **alongside** the physical session tabs (which are
 unchanged — still one session each). You can have several, each named. The three
 old mechanisms collapse into this one: creating a split-view replaces "open grid"
-and "Alt+D"; the two ratio values become one `ratio` per split-view.
+and "Alt+D"; the two ratio values become the per-view `sizes`.
+
+### Layouts and sizes (3.6.12)
+
+| `layout` | panes | `sizes` (groups, each sums to 1) |
+|---|---|---|
+| `cols2` | 2 | `[col0, col1]` |
+| `cols3` | 3 | `[col0, col1, col2]` — three equal columns by default |
+| `main-left` | 3 | `[col0, col1, row0, row1]` — one big pane left, two stacked right (rows of the stack) |
+| `main-top` | 3 | `[row0, row1, col0, col1]` — one big pane on top, two below (columns of the bottom row) |
+| `grid` | 4 | `[col0, col1, row0, row1]` — 2 × 2 |
+
+The defaults are `cols2` / `main-left` / `grid` for 2 / 3 / 4 panes; there is no 3-in-a-2×2 grid
+any more (it left an unlabeled empty cell). The table lives in two places on purpose —
+`gateway/app/api.py` (`SPLIT_LAYOUTS`, validation) and `frontend/src/lib/splitLayout.ts`
+(geometry) — change both together. `ratio` stays for old clients: on `cols2` it is `sizes[0]`, and
+a `ratio` PATCH from an old bundle becomes `sizes = [r, 1-r]`.
+
+The server validates: `layout` is in the enum and fits the pane count (`splitview.badLayout`);
+`sizes` has exactly the number of entries the layout needs, every entry is a finite fraction in
+(0, 1), and each group sums to 1 ± 0.02 (`splitview.badSizes`); then each entry is clamped to
+0.1–0.9 and the group renormalized. A pane-count change resets the layout and sizes to the default.
 
 ## The one invariant that makes it safe
 
-**Only the active view is mounted** — a physical tab *or* one split-view, never
-both, exactly like tabs today. That single rule dissolves every hazard:
+**One session = one terminal in the document.** The same `session.id` mounted twice in one
+document is the thing that is *not* safe: `window.__wtTerms`, the broadcast handle map and React
+keys are all keyed by session id and would collide, and two WebSockets on one PTY start a tmux
+detach war. Within a split-view the panes are **distinct** sessions (enforced by the server and,
+before every optimistic update, by `isDistinct` / `applyPaneMove` in `lib/splitLayout.ts`).
 
-- The gateway already fans one session out to N clients (multi-device), and the
-  agent keeps exactly one tmux client per session (`tmux … -D`), so resize is
-  reconciled at the gateway (one shared size, last-writer-wins with an idle/active
-  gate) — never in tmux.
-- The frontier that is *not* safe is the same `session.id` mounted **twice in one
-  document**: `window.__wtTerms`, the broadcast `sendMap`, and React `key={s.id}`
-  are all keyed by session id and would collide. The "only the active view is
-  mounted" rule means this never happens — and within a split-view the panes are
-  **distinct** sessions, so no collision there either.
-- When you switch between a physical tab and a split-view that share a session, the
-  session simply re-attaches at the new pane's size — the exact path grid↔tab
-  already uses.
+Since 3.6.12 the guarantee comes from **one keyed list** instead of "only the active view is
+mounted": `mountedSids` in `App.tsx` = the keep-alive stack ∪ the active split's panes,
+deduplicated, each rendered as `<div key={sid}>`. Without a split the stack is the familiar overlay
+(only the selected tab visible). With a split the same container becomes a CSS grid: the panes get
+a `grid-area`, the rest of the stack stays mounted but hidden. Consequences:
 
-So the active view's sessions are **excluded from the keep-alive stack** (the same
-trick the old `secondSid` used at `App.tsx:600`), and a split-view **takes over**
-the main area like the grid does today.
+- entering or leaving a split, changing its layout, swapping or maximizing panes **never remounts
+  or reconnects** a terminal (the e2e checks the `__wtTerms` instances and counts session
+  WebSockets across a swap and an exit/re-entry);
+- the panes of the active split count as "recently used", so after you leave the split they stay
+  in the keep-alive stack;
+- every pane wrapper keeps the same tree shape in both modes (bar slot · content · drop overlay),
+  because React reconciles by position — an extra node would remount the terminal.
+
+The gateway already fans one session out to N clients and the agent keeps one tmux client per
+session, so resize is reconciled at the gateway (one shared size, last-writer-wins with an
+idle/active gate) — never in tmux.
+
+## Selection and focus
+
+The route (`#/s/<sid>`) is the **selected pane**, inside a split too, so the TabBar highlight, the
+keyboard focus and the action target (search, font, snippets) always agree:
+
+- **Entering** a split (chip, Alt+D, wizard, reload with `wt_active_split`) selects the pane that
+  was last focused in that split (`wt_split_focus`, per browser), else the first, and focuses its
+  terminal. Clicking the chip of the split you are already in re-focuses the selected pane.
+- **Inside** a split, a click or a focus (Tab) in a pane selects it, via `history.replaceState`
+  (pane clicks do not fill the Back history). A pane that only *receives* focus from a button in its
+  own bar does not get the focus pulled back into the terminal.
+- **Rule for navigation** (also in docs/SHORTCUTS.md): tab-level navigation (a tab click, Alt+1…9,
+  Alt+0 / Home, a session from the sidebar or palette, a host page) leaves the split; pane-level
+  navigation stays — inside a split `Alt+←/→` go to the previous / next pane, `Alt+M` swaps the
+  focused pane with the next one and `Alt+X` maximizes / restores it. `Alt+W` does nothing inside
+  a split (the pane's tab would come straight back). A navigation to a session outside the split
+  (Back, a link) leaves it.
+- Only the selected pane takes the focus when it mounts; the others mount without stealing it.
+
+## Resizing
+
+Dividers sit in the 6 px grid gap. While you drag, only CSS variables on the grid change (in
+`requestAnimationFrame`, with pointer capture and `touch-action: none`), so React does not re-render
+and xterm does not refit on every frame; the panes' `ResizeObserver` is debounced (~100 ms). On
+release the sizes are committed and PATCHed once. From the keyboard a divider is a WAI-ARIA window
+splitter: arrows move it 2 %, `Home` / `End` go to the edge, `aria-valuetext` says both sides
+("40% / 60%"); the PATCH is debounced. Double-click evens the panes out.
+
+When a split mounts, its layout changes or a divider is released, **every visible pane** sends its
+size as the active device (`active: true`). Before, only the focused pane did, and the gateway could
+drop the passive resize of the others, leaving them clipped at another client's size. "Visible" and
+"focused" are separate props (`paneVisible`, `paneActive`): a visible but unfocused pane still
+rebuilds its WebGL renderer when the browser tab comes back.
+
+## Moving panes
+
+- drag a pane's **title bar** onto another pane → the two swap;
+- drag a **tab** from the tab bar onto a pane → that session takes the pane; if it is already
+  another pane of the split, the two swap (never the same session twice);
+- each pane bar has a **Move to…** menu (swap with a named position) and `Alt+M`;
+- **maximize** a pane temporarily with a double-click on its title, its maximize button or `Alt+X`
+  (not persisted; the other panes keep streaming so restoring is instant).
+
+The drags use private MIME types (`application/x-wt-pane`, `application/x-wt-session`) — never
+`text/plain`, which xterm's textarea would type into the shell — and are caught in the capture
+phase on the pane wrapper, so a *file* dragged onto a terminal still goes to the upload path.
+
+## Phones (< 768 px)
+
+One pane at a time, with a pane switcher above it; the hidden panes stay mounted and pause their
+stream. Dividers and drag-to-swap are off; Move to… is off too (the switcher is the way to change
+panes), maximize stays.
 
 ## Persistence — definitions server-side, selection per-device
 
-- **Definitions** (`split_views` table, per user) are **server-side**, so a layout
-  you build on the desktop is there on the phone. They reference session ids, which
-  are themselves server-side and shared across devices.
-- **The active selection** (which view is open) stays **per-browser** in
-  localStorage — device A can be on a split-view while device B is on a tab.
+- **Definitions** (`split_views` table, per user) are **server-side**, so a layout you build on the
+  desktop is there on the phone. They reference session ids, which are themselves server-side and
+  shared across devices.
+- **The active selection** (which view is open) and the last focused pane of each view stay
+  **per-browser** in localStorage — device A can be on a split-view while device B is on a tab.
 
-A split-view holds **no secret** — it is layout metadata that references sessions
-which are independently gated at attach time. So its CRUD needs only
-`require_user`; unlike stored DB connections, it does **not** cost a step-up factor.
+A split-view holds **no secret** — it is layout metadata that references sessions which are
+independently gated at attach time. So its CRUD needs only `require_user`; it does **not** cost a
+step-up factor.
 
-## Reconciliation & edge cases
+## Reconciliation, visibility & limits
 
-- On read, panes are filtered to sessions that still exist; a split-view that drops
-  below 2 live panes is pruned.
-- A session may appear in a physical tab **and** in one or more split-views at once
-  — never mounted simultaneously, only when its view is active.
-- Same session twice inside one split-view is rejected (it would be two tmux clients
-  at two sizes — a resize war), mirroring the old `primary ≠ second` guard.
-- Broadcast is a per-split-view property (persisted), with the existing amber-band
-  warning and guard.
+- **GET never writes** (3.6.12). It queries only the sessions the user's layouts reference, and
+  returns only the panes the caller can see **now**: the role gives `session.watch` or
+  `session.open` on the host, and on a `require_2fa` host the step-up window is open — the same rule
+  as `/api/sessions` (read passively: GET does not slide the window). The other live panes are
+  **hidden, not deleted** (`hidden: n`, ids not returned), so the layout comes back whole after the
+  unlock or the role change.
+- While a pane is hidden the **shape** (panes, layout, sizes, ratio) cannot be changed — the server
+  answers `409 splitview.hiddenPanes`, because a client that only sees part of a layout would
+  otherwise rewrite it without the hidden panes. Rename, broadcast and position still work. The UI
+  shows the visible panes in a default layout (not persisted) with a notice, and turns off
+  rearranging.
+- Panes whose session no longer exists are pruned by `core.prune_split_views`: in the session
+  reaper (every minute) and right after a session or host delete; a layout that drops below 2 live
+  panes is deleted. GET just leaves those out in the meantime.
+- If the active split has fewer than 2 panes you can see, the UI leaves it with a toast instead of
+  showing an empty main area. A failed GET keeps the previous state (it used to close the split).
+- A pane needs `session.watch` or `session.open`; `recording.view` alone (replays of closed
+  sessions) is not enough for a live pane.
+- At most **50** split-views per account (`400 splitview.tooMany`); `position` is clamped to
+  0–1000; chips can be reordered by drag or `Alt+Shift+←/→`, and only the moved positions are
+  PATCHed. Alt+D reuses an existing split with the same two sessions, and new splits get the first
+  unused "Split N" name.
+
+## Broadcast
+
+Broadcast is a per-split-view property (persisted), with the amber band in every pane; the focused
+pane keeps a thicker ring so you still see where search / font / Ctrl+W go. The command guardrail
+checks **every target pane**: on Enter it looks at the typed command (OSC 133) of the origin and of
+each other pane, and the outcome — block (clear the line), cancel (clear) or confirmed run — is
+sent to all of them, not only to the pane you typed in.
 
 ## Data model (DB)
 
-`split_views`: `id`, `user_id`, `name`, `panes` (JSON array of session ids),
-`ratio` (float), `broadcast` (int), `position` (order in the tab bar), `created`,
-`updated`. Added idempotently, like `connections`.
+`split_views`: `id`, `user_id`, `name`, `panes` (JSON array of session ids), `ratio` (float,
+compat), `layout` (text, `''` = default for the pane count), `sizes` (JSON fractions, `''` =
+default), `broadcast` (int), `position` (order in the tab bar), `created`, `updated`. `layout` and
+`sizes` came in 3.6.12 through the additive ALTER list.
 
 ## API
 
 All `Depends(security.require_user)`, no step-up:
 
-- `GET    /api/split-views` — the user's split-views (dead panes filtered).
-- `POST   /api/split-views` — create (2–4 distinct, existing sessions).
-- `PATCH  /api/split-views/{id}` — rename / re-pane / ratio / broadcast / position.
+- `GET    /api/split-views` — the user's split-views (visible panes only, `hidden` count, no writes).
+- `POST   /api/split-views` — create (2–4 distinct sessions the caller can see; optional
+  `layout`, `sizes`, `position`; cap 50).
+- `PATCH  /api/split-views/{id}` — rename / re-pane / layout / sizes / ratio / broadcast / position
+  (shape changes refused while a pane is hidden).
 - `DELETE /api/split-views/{id}`.
-
-## Frontend state
-
-`splitViews[]` (from the API) + `activeSplitId` (local) replace `gridSids`,
-`secondSid`, `splitPct`, `splitRatio`. `activeSplitId != null` is the old
-`gridActive`. Rendering reuses the existing 2-pane (draggable divider) and 3–4-pane
-(2×2) renderers, with `ratio`/`broadcast` read from the active split-view.
 
 ## Entry points & visuals
 
-Three ways to create one: the **"+ Split view"** button in the tab bar (accent-coloured,
-labelled on first use), **right-click a terminal → Add to split view**, and **Alt+D** (quick
-2-pane). Every pane in a split carries a border so the boundary is visible; the focused pane gets
-an **accent** border (amber when broadcast is on), and the 2-pane divider has a grip. Clicking a
-session tab (or Home) leaves the active split — its chip stays in the bar, so you return anytime.
+Three ways to create one: the **"+ Split view"** button in the tab bar (accent-coloured, labelled on
+first use), **right-click a terminal → Add to split view**, and **Alt+D** (quick 2-pane). The wizard
+lists the existing panes first (even without a tab) and the order you tick them is the order of the
+panes. Every pane has a slim title bar (number, title · host, Move to…, maximize) and a border; the
+focused pane gets an **accent** bar and ring (amber when broadcast is on). The active split's chip
+row also has a **layout picker** when the pane count allows more than one layout (3 panes). Each
+pane is a `role="group"` labelled "Pane i of n: title", and moving between panes is announced
+("Pane 2 of 3 — htop on db-01").
 
-One xterm 5.x caveat lives in `main.tsx`: disposing a terminal during the split↔tab transition can
-let a deferred `Viewport.syncScrollArea` fire on the torn-down terminal (`reading 'dimensions'`). A
+One xterm 5.x caveat lives in `main.tsx`: disposing a terminal during a transition can let a
+deferred `Viewport.syncScrollArea` fire on the torn-down terminal (`reading 'dimensions'`). A
 `safeFit()` guard, disposing the renderer before `term.dispose()`, and a tightly-scoped `error`
-handler that swallows only that exact benign error keep it from surfacing.
+handler that swallows only that exact benign error keep it from surfacing. `__wtTerms` entries are
+removed only by the terminal instance that owns them.

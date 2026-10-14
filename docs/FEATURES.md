@@ -57,7 +57,7 @@ what it does not cover, is in [Security](SECURITY-FEATURES.md) and
   switching is just a visibility change. The stream flows **only** on visible
   panes; background tabs are paused at the gateway and re-sync on return if they
   missed anything
-- Named **split views** (2–4 sessions, saved server-side — see Fleet), popout into
+- Named **split views** (2–4 sessions in five layouts, draggable dividers, saved server-side — see Fleet), popout into
   its own window, layout restored on reload
 - **History replay**: closed sessions can be replayed in the UI (play/pause,
   seek, 1×/2×/4×), not just downloaded (`.cast`)
@@ -255,15 +255,23 @@ Press `?` for the cheatsheet.
   optionally with **target tags** that preselect the matching hosts.
   "Copy report" as markdown. [details](FLEET.md)
 - **Split views — named, saved, several of them**: a "+ Split view" button (or **right-click a
-  terminal → Add to split view**) turns 2–4 open sessions into a layout you **name** (2 = a
-  resizable split with a draggable divider + grip, 3–4 = a **2×2 grid**, all live at once). Each
-  pane is bordered — the focused one gets an accent border so it's clear where your keys go — and
-  each split view rides in the tab bar as its own **chip** next to the session tabs: click to
-  switch between layouts and single sessions like tabs (clicking a tab leaves the split, its chip
-  stays so you return anytime). A session can appear in a tab **and** in split views at once; only
-  the view you're on is live (so a session never fights itself for size). Definitions are **saved
-  server-side** (they follow you across devices) and the active one is restored on reload. Toggle
-  **broadcast** to type into every pane simultaneously (an amber band marks each pane) —
+  terminal → Add to split view**, or **Alt+D**) turns 2–4 sessions into a layout you **name**, all
+  live at once. **Layouts**: two columns; for three panes **three equal columns**, **one big left +
+  two stacked right** or **one big on top + two below** (layout picker next to the chip); a **2×2
+  grid** for four. **Every divider drags** (mouse, touch or keyboard — arrows, Home/End) and the
+  sizes are saved. **Rearrange** by dragging a pane's title bar onto another pane (swap), dragging a
+  tab onto a pane (that session takes the pane), the pane's **Move to…** menu or `Alt+M`;
+  **maximize** a pane for a moment with a double-click on its title or `Alt+X`. None of this
+  reconnects a terminal — a swap, a layout change or leaving and re-entering the split keeps every
+  pane's session attached. Each pane has a title bar and a border; the focused one gets an accent,
+  and entering a split selects and focuses a pane (the last one you used there), so the tab bar,
+  your keyboard and the action target always agree. Each split view rides in the tab bar as its
+  own **chip** (drag or `Alt+Shift+←/→` to reorder): clicking a tab leaves the split, its chip stays
+  so you return anytime. Definitions are **saved server-side** (they follow you across devices) and
+  the active one is restored on reload; a pane you can't see right now (your role changed, or its
+  2FA host is locked) is hidden — never deleted — until it's back. On a phone you see one pane at a
+  time with a pane switcher. Toggle **broadcast** to type into every pane simultaneously (an amber
+  band marks each pane; the command guardrail checks every pane before Enter goes out) —
   interactive fleet ops, not just one-shot commands. [details](design/SPLIT-VIEWS.md)
 - **Bulk enrollment**: a reusable **group enrollment token** — one install
   one-liner run on many machines, each auto-registering as its own host with its own

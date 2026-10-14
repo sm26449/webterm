@@ -9,6 +9,73 @@ back.
 
 ## [Unreleased]
 
+Split views, improved: more layouts, every divider draggable, panes you can move and maximize — and
+none of it reconnects a terminal. No agent change (agent stays 58).
+
+### Added
+- **Layouts for three panes and draggable dividers everywhere.** Why: three sessions used to land
+  in a 2 × 2 grid with an empty cell, and only the 2-pane split could be resized. Three panes now
+  come as three equal columns, one big pane left + two stacked right (the default), or one big on
+  top + two below, picked from a layout button next to the active chip; two columns and the 2 × 2
+  grid stay. Every divider drags (mouse, touch with pointer capture, or keyboard: arrows,
+  Home/End, `aria-valuetext` "40% / 60%"), and the layout and sizes are saved per split view
+  (`layout` + `sizes` columns; the server checks the layout fits the pane count, the number of
+  sizes, that each group adds up to 1, and clamps each to 10–90 %; `ratio` stays for older clients).
+- **Move, swap and maximize panes.** Why: changing which session sat where meant rebuilding the
+  split in the wizard. Drag a pane's title bar onto another pane to swap them, drag a tab onto a
+  pane to show that session there (if it is already a pane, the two swap — never the same session
+  twice), use the pane's Move to… menu or `Alt+M`; double-click a title or press `Alt+X` to
+  maximize a pane for a moment. Inside a split `Alt+←/→` go between panes. Chips reorder by drag or
+  `Alt+Shift+←/→`, and the order is saved.
+- **Split views on phones**: one pane at a time with a pane switcher above it.
+
+### Fixed
+- **Entering a split view now selects and focuses a pane.** Why: switching from a normal tab to a
+  split chip left the tab bar highlighting the tab you came from, and the keyboard and the action
+  target (search, font, Ctrl+W) only moved into the split after a click in a terminal. Entering —
+  from the chip, Alt+D, the wizard or a reload — selects the pane you last used in that split (else
+  the first) and focuses its terminal; tabbing into a pane selects it too.
+- **No more reconnects when the layout changes.** Why: the split had its own renderer, so entering
+  or leaving a split remounted every terminal (new WebSockets, replay curtains), and the two panes
+  of a 2-pane split weren't keyed by session, so a swap reconnected both. All terminals now live in
+  one list keyed by session; a split only gives its panes a grid area.
+- **A failed load no longer kicks you out of a split**, and a split with fewer than 2 sessions you
+  can see now leaves with a message instead of an empty screen. Why: a failed `GET /api/split-views`
+  was treated as "no split views", and a split whose sessions were hidden (2FA host locked) showed
+  nothing at all.
+- **Broadcast respects the command guardrail on every pane.** Why: with broadcast on, only the pane
+  you typed in was checked; a block or a cancelled confirmation cleared the line only there,
+  leaving the dangerous command typed in the other panes, and a confirmed run executed in just one
+  of them. The guardrail now checks the typed command of every target
+  pane, and block / cancel / run apply to all of them. The focused pane keeps a thicker ring while
+  broadcasting.
+- **The wizard keeps the panes you didn't touch.** Why: editing a split dropped any pane whose tab
+  was closed and reordered the rest by tab order. It now lists the existing panes first, and the
+  order you tick is the order of the panes.
+- **Resize storms and clipped panes.** Why: dragging a divider re-rendered the app and resized
+  every terminal on every frame, and unfocused panes sent their size as passive, so another client
+  could keep them clipped. Dragging now only moves CSS variables, the terminals' resize observer is
+  debounced, and every visible pane claims its size when a split mounts, changes layout or a divider
+  is released. Unfocused but visible panes also rebuild their renderer when the browser tab comes
+  back (they could stay blank).
+- **Alt+D reuses an identical split view** instead of creating a duplicate, and new split views get
+  the first unused "Split N" name.
+- Restoring a split on reload no longer connects a terminal twice; pane clicks no longer fill the
+  Back history; panes are announced to screen readers as "Pane 2 of 3 — …".
+
+### Security
+- **Split views hide panes you can't see right now, without deleting them.** Why: `GET
+  /api/split-views` returned the session ids of every pane regardless of the caller's current
+  access, and wrote to the database on every poll. It now returns only panes the caller can see —
+  the role gives `session.watch` or `session.open` on the host, and on a `require_2fa` host the
+  step-up window is open (read passively, like `/api/sessions`) — with a `hidden` count; the layout
+  comes back whole after an unlock. While a pane is hidden, changing the panes, layout or sizes is
+  refused (`409 splitview.hiddenPanes`) so a partial view can't drop it. GET no longer writes and
+  queries only the referenced sessions; dead panes are pruned in the session reaper and right
+  after a session or host delete. A pane now needs `session.watch` or `session.open`
+  (`recording.view` alone no longer suffices), there is a cap of 50 split views per account
+  (`splitview.tooMany`), and `position` is clamped.
+
 ## [3.6.11] — 2026-10-14 · agent (58)
 
 SCIM provisioning: the identity provider pushes account creation, deactivation, deletion and group
