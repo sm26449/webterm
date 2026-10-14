@@ -16,6 +16,7 @@ import AccountsPanel from './users/AccountsPanel'
 import RolesPanel from './users/RolesPanel'
 import SsoPanel from './users/SsoPanel'
 import { ActionStatus } from './users/shared'
+import ExplainAccess from './users/ExplainAccess'
 
 /* Settings → Users & roles (3.6). Conturile şi LEGĂTURILE lor de rol (rol @ scope — docs/ROLES.md),
    rolurile custom (3.6.2) şi maparea grupurilor SSO (3.6.2). Fără `users.manage` vezi doar propriul
@@ -142,6 +143,15 @@ export default function UsersTab(props: { jump?: { id: string; n: number } | nul
             ))}
         </div>
         <p className="mt-2 text-xs text-slate-500">{t('roles.myAccessHint')}</p>
+        {/* 3.6.10: „de ce pot / nu pot…" pe un host anume — aceeaşi explicaţie ca pentru un admin */}
+        {self && hosts.length > 0 && (
+          <details className="mt-2" data-explain-self>
+            <summary className="cursor-pointer text-xs wt-link">{t('explain.titleSelf')}</summary>
+            <div className="mt-2">
+              <ExplainAccess userId={self.id} email={self.email} self hosts={hosts} />
+            </div>
+          </details>
+        )}
         {self?.sso && self.local_password && (
           <div className="mt-3 flex flex-col items-start gap-2 rounded-md bg-warn/10 px-3 py-2" data-localpw-self>
             <p className="text-xs text-warn">{t('roles.localPw.mine')}</p>

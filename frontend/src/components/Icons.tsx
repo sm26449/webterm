@@ -619,3 +619,10 @@ export const ShieldSmallIcon = ({ size = 12 }: { size?: number }) => (
     <path d="M12 3 5 6v5c0 4.6 3 7.6 7 9 4-1.4 7-4.4 7-9V6l-7-3Z" />
   </Icon>
 )
+
+/** 3.6.10: host „crown jewel" (rulează gateway-ul / ţine backup-urile) — o coroană simplă */
+export const CrownIcon = ({ size = 12 }: { size?: number }) => (
+  <Icon size={size}>
+    <path d="m3 8 4.5 4L12 5l4.5 7L21 8l-2 11H5L3 8Z" />
+  </Icon>
+)

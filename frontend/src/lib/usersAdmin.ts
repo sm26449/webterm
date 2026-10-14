@@ -11,7 +11,14 @@ import { lsGet, lsSet } from './storage'
 export type UserRow = {
   id: number; email: string; created: number; totp: boolean; passkeys: number; sso?: boolean
   is_self: boolean; bindings?: Binding[]; local_password?: boolean
+  /** 3.6.10 — doar cu users.manage: ultima autentificare reuşită şi cum */
+  last_login?: number | null
+  last_login_method?: LoginMethod | null
+  /** de când înregistrează serverul (un cont mai vechi fără ştampilă = „neînregistrat") */
+  last_login_tracked_since?: number | null
 }
+
+export type LoginMethod = 'password' | 'password_2fa' | 'passkey' | 'sso'
 
 export type SsoMapping = {
   id: number; group: string; role: string; role_id: number; role_name: string
@@ -135,3 +142,97 @@ export const DEFAULT_SSO_GROUPS: readonly { group: string; key: string }[] = [
   { group: 'wt-db', key: 'db' },
   { group: 'wt-network', key: 'network' },
 ]
+
+// ── 3.6.10: ultima autentificare ─────────────────────────────────────────────────────────────
+export type LastSignIn =
+  | { state: 'at'; at: number; method: LoginMethod | null }
+  | { state: 'never' }
+  | { state: 'untracked'; since: number }
+  | { state: 'hidden' }
+
+/** Ce spunem despre ultima autentificare. `hidden` = serverul nu a trimis câmpul (fără
+    users.manage); `untracked` = cont mai vechi decât înregistrarea, fără ştampilă — NU „niciodată". */
+export function lastSignIn(u: Pick<UserRow, 'created' | 'last_login' | 'last_login_method' | 'last_login_tracked_since'>): LastSignIn {
+  if (u.last_login === undefined) return { state: 'hidden' }
+  if (u.last_login) return { state: 'at', at: u.last_login, method: u.last_login_method ?? null }
+  const since = u.last_login_tracked_since
+  if (since && u.created < since) return { state: 'untracked', since }
+  return { state: 'never' }
+}
+
+// ── 3.6.10: legături temporare ───────────────────────────────────────────────────────────────
+export type ExpiryChoice = 'permanent' | '4h' | '1d' | '7d' | 'custom'
+export const EXPIRY_CHOICES: readonly ExpiryChoice[] = ['permanent', '4h', '1d', '7d', 'custom']
+const PRESET_SECONDS: Record<string, number> = { '4h': 4 * 3600, '1d': 86400, '7d': 7 * 86400 }
+/** aceeaşi limită ca serverul (authz.BINDING_MAX_DAYS) — o verificare de comoditate */
+export const EXPIRY_MAX_DAYS = 366
+
+/** → secunde epoch (sfârşitul), `null` = permanentă, `'invalid'` = data custom lipsă / în trecut /
+    prea departe. `custom` = valoarea unui <input type="datetime-local"> (ora locală). */
+export function expiryFrom(choice: ExpiryChoice, custom: string, nowMs: number): number | null | 'invalid' {
+  if (choice === 'permanent') return null
+  const now = nowMs / 1000
+  if (choice !== 'custom') return Math.round(now + PRESET_SECONDS[choice])
+  if (!custom) return 'invalid'
+  const ms = new Date(custom).getTime()
+  if (!Number.isFinite(ms)) return 'invalid'
+  const ts = Math.round(ms / 1000)
+  if (ts < now + 120 || ts > now + EXPIRY_MAX_DAYS * 86400) return 'invalid'
+  return ts
+}
+
+/** cât mai e până la sfârşit, compact: {n, unit} cu unit m | h | d (rotunjit în sus la minute,
+    în jos la ore/zile — „expiră în 3 h" nu trebuie să mintă în sus). `null` = a expirat. */
+export function expiresIn(expires: number, nowMs: number): { n: number; unit: 'm' | 'h' | 'd' } | null {
+  const left = expires - nowMs / 1000
+  if (left <= 0) return null
+  if (left < 3600) return { n: Math.max(1, Math.ceil(left / 60)), unit: 'm' }
+  if (left < 2 * 86400) return { n: Math.floor(left / 3600), unit: 'h' }
+  return { n: Math.floor(left / 86400), unit: 'd' }
+}
+
+// ── 3.6.10: explain access ───────────────────────────────────────────────────────────────────
+export type ExplainBinding = Binding & {
+  perms: string[]; expired: boolean; shell: boolean; ignored_global: string[]; sso_groups?: string[]
+}
+export type ExplainNote = { code: string; binding?: number; n?: number }
+export type Explain = {
+  user: { id: number; email: string; self: boolean }
+  host: { id: number; name: string; folder: string; tags: string[]; crown_jewel: boolean; require_2fa: boolean }
+  bindings: ExplainBinding[]
+  effective: string[]
+  shell: boolean
+  notes: ExplainNote[]
+}
+
+/** Ce poate face, în cuvinte (cheile `explain.can.*`), în ordinea în care întreabă omul:
+    terminal, fişiere, comenzi, apoi restul. Doar din setul EFECTIV trimis de server. */
+const CAPABILITIES: readonly [string, string][] = [
+  ['session.open', 'terminal'], ['files.write', 'filesWrite'], ['files.read', 'filesRead'],
+  ['run', 'run'], ['docker.act', 'docker'], ['session.watch', 'watch'],
+  ['recording.view', 'recordings'], ['host.admin', 'admin'],
+]
+export function capabilities(effective: readonly string[]): string[] {
+  const has = new Set(effective)
+  const out = CAPABILITIES.filter(([p]) => has.has(p)).map(([, k]) => k)
+  // „modifică fişiere" include „deschide": nu le spunem pe amândouă
+  if (out.includes('filesWrite')) return out.filter((k) => k !== 'filesRead')
+  if (!out.length && has.has('host.view')) return ['view']
+  return out
+}
+
+// ── 3.6.10: tokenuri cu rol + scope ──────────────────────────────────────────────────────────
+export type TokenRow = {
+  id: number; name: string; scopes: string; created: number; created_by: string; expires: number
+  last_used: number | null; expired: boolean
+  role?: string; role_id?: number | null; role_name?: string
+  scope_kind?: ScopeKind; scope_value?: string
+}
+
+/** null = token vechi (fără plafon de rol: doar scope-urile read/run ∩ creatorul) */
+export function tokenCap(tk: Pick<TokenRow, 'role' | 'role_id' | 'role_name' | 'scope_kind' | 'scope_value'>):
+  { role: string; role_name: string; scope_kind: ScopeKind; scope_value: string } | null {
+  if (!tk.role_id) return null
+  return { role: tk.role || '', role_name: tk.role_name || tk.role || '?',
+    scope_kind: tk.scope_kind ?? 'all', scope_value: tk.scope_value ?? '' }
+}

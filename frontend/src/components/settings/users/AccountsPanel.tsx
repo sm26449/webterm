@@ -4,11 +4,38 @@ import { askSecret } from '../../../lib/secretPrompt'
 import { useI18n } from '../../../lib/i18n'
 import { Binding, roleBody, roleLabel, RolesCatalogue, roleValue, ROLE_KEYS, ScopeKind, scopeLabel } from '../../../lib/perms'
 import { fmtTs } from '../../../lib/tz'
-import { EMPTY_FILTER, filterAccounts, filterActive, hasNoRole, signInOf, type AccountFilter, type UserRow } from '../../../lib/usersAdmin'
+import { EMPTY_FILTER, expiryFrom, filterAccounts, filterActive, hasNoRole, lastSignIn, signInOf,
+  type AccountFilter, type ExpiryChoice, type UserRow } from '../../../lib/usersAdmin'
+import { crownDialog, withCrownConfirm } from '../../../lib/crown'
+import { useConfirm } from '../../../lib/confirm'
 import { field } from '../ui'
 import { Badge, Button, IconButton } from '../../ui'
 import { ChevronIcon, CloseIcon, SearchIcon, WarningIcon } from '../../Icons'
-import { defaultScope, RoleOptions, ScopePicker, scopeOk, shellOf, useRoleName } from './shared'
+import { defaultScope, ExpiryPicker, RoleOptions, ScopePicker, scopeOk, shellOf, useExpiryText, useRoleName } from './shared'
+import ExplainAccess from './ExplainAccess'
+
+/** 3.6.10: textul ultimei autentificări (lung în detalii, scurt în rând); '' = nu e de arătat */
+function useLastSignIn() {
+  const { t } = useI18n()
+  const method = (m: string | null) => t('settings.users.loginMethod.' + (m || 'unknown'))
+  return (u: UserRow, short = false): string => {
+    const s = lastSignIn(u)
+    if (s.state === 'hidden') return ''
+    if (s.state === 'at') {
+      return short ? t('settings.users.lastSignIn.short', { date: fmtTs(s.at, 'date') })
+        : t('settings.users.lastSignIn.at', { date: fmtTs(s.at, 'datetime'), method: method(s.method) })
+    }
+    if (s.state === 'untracked') return short ? '' : t('settings.users.lastSignIn.untracked', { date: fmtTs(s.since, 'date') })
+    return short ? t('settings.users.lastSignIn.shortNever') : t('settings.users.lastSignIn.never')
+  }
+}
+
+/** 3.6.10: confirmarea blocantă „shell pe un host crown-jewel" (serverul o cere cu 409) */
+function useCrownAsk() {
+  const { t } = useI18n()
+  const { confirm } = useConfirm()
+  return (e: Parameters<typeof crownDialog>[0]) => confirm(crownDialog(e, t))
+}
 
 /* Sub-tab-ul „Accounts" (3.6.6). Înainte: o listă cu TOATE conturile, fiecare cu toate legăturile şi
    butoanele inline, plus două formulare mereu deschise dedesubt — la 100+ conturi, o pagină fără
@@ -44,6 +71,7 @@ function AddAccountForm(props: {
   const [newUser, setNewUser] = useState({ email: '', password: '', current_password: '',
     role: '', scope_kind: 'folder' as ScopeKind, scope_value: '' })
   const withSecondFactor = <T,>(send: (extra: object) => Promise<T>) => withSecondFactorT(t, send)
+  const crownAsk = useCrownAsk()
 
   async function addUser(e: FormEvent) {
     e.preventDefault()
@@ -51,8 +79,9 @@ function AddAccountForm(props: {
     try {
       const { role, ...rest } = newUser
       const body = { ...rest, ...(role ? roleBody(role) : {}), scope_value: role ? newUser.scope_value.trim() : '' }
-      const users = await withSecondFactor((extra) => api<UserRow[]>('/api/users',
-        { method: 'POST', body: JSON.stringify({ ...body, ...extra }) }))
+      const users = await withCrownConfirm((crown) => withSecondFactor((extra) => api<UserRow[]>('/api/users',
+        { method: 'POST', body: JSON.stringify({ ...body, ...crown, ...extra }) })), crownAsk)
+      if (!users) { setBusy(false); return }
       setNewUser({ email: '', password: '', current_password: '', role: '', scope_kind: 'folder', scope_value: '' })
       props.onDone(users)
     } catch (x) { props.fail(x) }
@@ -110,28 +139,53 @@ function AccountDetails(props: {
   const { hostName, chip } = useChip(props.hosts)
   const roleName = useRoleName(props.catalogue)
   const [busy, setBusy] = useState(false)
-  const [grant, setGrant] = useState({ role: 'viewer', scope_kind: 'folder' as ScopeKind, scope_value: '' })
+  const [grant, setGrant] = useState({ role: 'viewer', scope_kind: 'folder' as ScopeKind, scope_value: '',
+    expiry: 'permanent' as ExpiryChoice, custom: '' })
+  const [explain, setExplain] = useState(false)
   const withSecondFactor = <T,>(send: (extra: object) => Promise<T>) => withSecondFactorT(t, send)
+  const crownAsk = useCrownAsk()
+  const expiryText = useExpiryText()
+  const signIn = useLastSignIn()
   const sourceTitle = (b: Binding) => (b.source === 'migration' ? t('roles.sourceMigration')
     : b.source === 'sso' ? t('roles.sourceSso') : undefined)
+  const expires = expiryFrom(grant.expiry, grant.custom, Date.now())
 
   async function addBinding(e: FormEvent) {
     e.preventDefault()
+    const until = expiryFrom(grant.expiry, grant.custom, Date.now())
+    if (until === 'invalid') { props.fail(new Error(t('roles.expiry.invalid'))); return }
     const label = t('roles.chip', { role: roleName(grant.role),
       scope: scopeLabel({ scope_kind: grant.scope_kind, scope_value: grant.scope_value.trim() }, hostName, t) })
-    const pw = await askSecret(t('roles.bindings.addConfirm', { email: u.email, binding: label }))
+    const pw = await askSecret(until
+      ? t('roles.bindings.addConfirmUntil', { email: u.email, binding: label, date: fmtTs(until, 'datetime') })
+      : t('roles.bindings.addConfirm', { email: u.email, binding: label }))
     if (!pw) return
     setBusy(true)
     try {
-      await withSecondFactor((extra) => api(`/api/users/${u.id}/bindings`, {
+      const r = await withCrownConfirm((crown) => withSecondFactor((extra) => api(`/api/users/${u.id}/bindings`, {
         method: 'POST',
         body: JSON.stringify({ ...roleBody(grant.role), scope_kind: grant.scope_kind,
-          scope_value: grant.scope_kind === 'all' ? '' : grant.scope_value.trim(), current_password: pw, ...extra }),
-      }))
-      await props.reload()
-      props.done(t('roles.bindings.added'))
+          scope_value: grant.scope_kind === 'all' ? '' : grant.scope_value.trim(), expires: until,
+          current_password: pw, ...crown, ...extra }),
+      })), crownAsk)
+      if (r !== null) {
+        await props.reload()
+        props.done(t('roles.bindings.added'))
+      }
     } catch (x) { props.fail(x) }
     setBusy(false)
+  }
+
+  // 3.6.10: o legătură temporară devine permanentă (serverul aplică regulile de acordare)
+  async function makePermanent(b: Binding) {
+    const pw = await askSecret(t('roles.expiry.permanentConfirm', { email: u.email, binding: chip(b) }))
+    if (!pw) return
+    try {
+      await withSecondFactor((extra) => api(`/api/users/${u.id}/bindings/${b.id}/expiry`,
+        { method: 'POST', body: JSON.stringify({ expires: null, current_password: pw, ...extra }) }))
+      await props.reload()
+      props.done(t('roles.expiry.madePermanent'))
+    } catch (x) { props.fail(x) }
   }
 
   async function removeBinding(b: Binding) {
@@ -165,6 +219,12 @@ function AccountDetails(props: {
         <dd className="text-slate-300">{t('settings.users.signInLong.' + signInOf(u))}</dd>
         <dt className="text-slate-500">{t('settings.users.col.created')}</dt>
         <dd className="text-slate-300">{fmtTs(u.created, 'date')}</dd>
+        {signIn(u) && (
+          <>
+            <dt className="text-slate-500">{t('settings.users.col.lastSignIn')}</dt>
+            <dd className="text-slate-300" data-last-signin>{signIn(u)}</dd>
+          </>
+        )}
         <dt className="text-slate-500">{t('settings.users.col.security')}</dt>
         <dd className="text-slate-300">
           {u.totp ? t('settings.users.totpOn') : t('settings.users.totpOff')}
@@ -180,17 +240,38 @@ function AccountDetails(props: {
         <div className="mt-1.5 flex flex-wrap items-center gap-1.5" data-account-bindings>
           {bindings.length === 0 && <Badge tone="warn" size="md">{t('roles.noRole')}</Badge>}
           {bindings.map((b) => (
-            <Badge key={b.id} tone={b.role === 'owner' ? 'accent' : 'neutral'} size="md" title={sourceTitle(b)}>
-              {chip(b)}
-              {!u.is_self && (props.isOwner || b.role !== 'owner') && (
-                <IconButton label={t('roles.bindings.remove', { binding: chip(b) })} touch={false}
-                  onClick={() => removeBinding(b)}>
-                  <CloseIcon size={10} />
-                </IconButton>
+            <span key={b.id} className="inline-flex items-center gap-1">
+              <Badge tone={b.role === 'owner' ? 'accent' : 'neutral'} size="md" title={sourceTitle(b)}>
+                {chip(b)}
+                {b.expires ? <span className="text-warn" data-binding-expiry>{' · ' + expiryText(b.expires)}</span> : null}
+                {!u.is_self && (props.isOwner || b.role !== 'owner') && (
+                  <IconButton label={t('roles.bindings.remove', { binding: chip(b) })} touch={false}
+                    onClick={() => removeBinding(b)}>
+                    <CloseIcon size={10} />
+                  </IconButton>
+                )}
+              </Badge>
+              {b.expires && b.source !== 'sso' && !u.is_self && (props.isOwner || b.role !== 'owner') && (
+                <Button type="button" size="sm" variant="ghost" onClick={() => makePermanent(b)}
+                  aria-label={t('roles.expiry.makePermanentAria', { binding: chip(b) })}>
+                  {t('roles.expiry.makePermanent')}
+                </Button>
               )}
-            </Badge>
+            </span>
           ))}
         </div>
+      </div>
+
+      <div>
+        <Button type="button" size="sm" variant="secondary" aria-expanded={explain} data-explain-open
+          onClick={() => setExplain((v) => !v)}>
+          {t('explain.button')}
+        </Button>
+        {explain && (
+          <div className="mt-2">
+            <ExplainAccess userId={u.id} email={u.email} self={u.is_self} hosts={props.hosts} />
+          </div>
+        )}
       </div>
 
       {u.is_self ? (
@@ -208,9 +289,13 @@ function AccountDetails(props: {
                 onChange={(k, v) => setGrant({ ...grant, scope_kind: k, scope_value: v })} />
             </div>
           </div>
+          <ExpiryPicker idPrefix={`grant-${u.id}`} choice={grant.expiry} custom={grant.custom}
+            onChange={(expiry, custom) => setGrant({ ...grant, expiry, custom })} />
+          {grant.expiry !== 'permanent' && <p className="text-xs text-slate-500">{t('roles.expiry.hint')}</p>}
           {shellOf(props.catalogue, grant.role) && <p className="text-xs text-slate-500">{t('roles.shellHint')}</p>}
           <div>
-            <Button type="submit" variant="primary" size="sm" loading={busy} disabled={!scopeOk(grant.scope_kind, grant.scope_value)}>
+            <Button type="submit" variant="primary" size="sm" loading={busy}
+              disabled={!scopeOk(grant.scope_kind, grant.scope_value) || expires === 'invalid'}>
               {t('roles.bindings.addButton')}
             </Button>
           </div>
@@ -236,6 +321,7 @@ export default function AccountsPanel(props: {
 }) {
   const { t } = useI18n()
   const { chip } = useChip(props.hosts)
+  const signIn = useLastSignIn()
   const [filter, setFilter] = useState<AccountFilter>(EMPTY_FILTER)
   const [limit, setLimit] = useState(PAGE)
   const [openId, setOpenId] = useState<number | null>(null)
@@ -359,7 +445,9 @@ export default function AccountsPanel(props: {
                       {bindings.length > 2 && <Badge>{t('settings.users.moreRoles', { n: bindings.length - 2 })}</Badge>}
                     </span>
                   </span>
-                  <span className="hidden shrink-0 text-2xs text-slate-500 md:inline">{fmtTs(u.created, 'date')}</span>
+                  <span className="hidden shrink-0 text-2xs text-slate-500 md:inline" data-last-signin-short>
+                    {signIn(u, true) || fmtTs(u.created, 'date')}
+                  </span>
                 </button>
                 {open && (
                   <AccountDetails u={u} id={detailsId} labelledBy={headId}

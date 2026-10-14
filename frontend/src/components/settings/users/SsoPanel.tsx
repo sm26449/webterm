@@ -1,6 +1,8 @@
 import { FormEvent, useId, useMemo, useRef, useState } from 'react'
 import { api, Host, withSecondFactor as withSecondFactorT } from '../../../lib/api'
 import { askSecret } from '../../../lib/secretPrompt'
+import { useConfirm } from '../../../lib/confirm'
+import { crownDialog, withCrownConfirm } from '../../../lib/crown'
 import { useI18n } from '../../../lib/i18n'
 import { docsUrl } from '../../../lib/help'
 import { roleBody, roleLabel, RolesCatalogue, ScopeKind, scopeLabel } from '../../../lib/perms'
@@ -35,6 +37,7 @@ export default function SsoPanel(props: {
   const addBtnRef = useRef<HTMLButtonElement>(null)
   const formId = useId()
   const withSecondFactor = <T,>(send: (extra: object) => Promise<T>) => withSecondFactorT(t, send)
+  const { confirm } = useConfirm()
   const hostName = (id: number) => props.hosts.find((h) => h.id === id)?.name
   const roleName = useRoleName(props.catalogue)
   const label = (m: SsoMapping) => t('roles.chip', {
@@ -61,11 +64,14 @@ export default function SsoPanel(props: {
     if (!pw) return
     setBusy(true)
     try {
-      await withSecondFactor((extra) => api('/api/settings/oidc-roles', {
+      // 3.6.10: ⚑ peste un host crown-jewel → serverul cere confirmare explicită (409)
+      const r = await withCrownConfirm((crown) => withSecondFactor((extra) => api('/api/settings/oidc-roles', {
         method: 'POST',
         body: JSON.stringify({ group, ...roleBody(form.role), scope_kind: form.scope_kind,
-          scope_value: form.scope_kind === 'all' ? '' : form.scope_value.trim(), current_password: pw, ...extra }),
-      }))
+          scope_value: form.scope_kind === 'all' ? '' : form.scope_value.trim(), current_password: pw,
+          ...crown, ...extra }),
+      })), (e) => confirm(crownDialog(e, t)))
+      if (r === null) { setBusy(false); return }
       await props.reload()
       setForm({ ...form, group: '' })
       props.done(t('roles.sso.added'))

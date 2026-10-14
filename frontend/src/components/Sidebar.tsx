@@ -1,6 +1,8 @@
 import { Fragment, lazy, Suspense, useEffect, useRef, useState, PointerEvent as ReactPointerEvent } from 'react'
 import { lsGet } from '../lib/storage'
-import { errText, isSessionLive, api, ApiError, getBootVersion, Host, SearchHit, Session, timeAgo, withStepup } from '../lib/api'
+import { errText, isSessionLive, api, ApiError, getBootVersion, Host, SearchHit, Session, timeAgo, withSecondFactor, withStepup } from '../lib/api'
+import { askSecret } from '../lib/secretPrompt'
+import { crownDialog, withCrownConfirm } from '../lib/crown'
 import { notify, notifyError } from '../lib/notify'
 import { fmtTs } from '../lib/tz'
 import type { SettingsTarget } from '../lib/settingsIndex'
@@ -15,7 +17,7 @@ import { canWake } from '../lib/hostOffline'
 import { wakeHost as wakeShared } from '../lib/wake'
 import { allSchemes, hostSchemeRaw, setHostScheme } from '../lib/termtheme'
 import { AlertsBell } from './AlertsPanel'
-import { ActivityIcon, ArrowUpIcon, BanIcon, BellIcon, BellOffIcon, ChevronIcon, CloseIcon, CollapseIcon, DownloadIcon, FilesIcon, FolderMoveIcon, GearIcon, KeyIcon, LinkIcon, LogoMark, MoreIcon, NoteIcon, PaletteIcon, PencilIcon, PlugIcon, PlusIcon, PowerIcon, RefreshIcon, SearchIcon, ServerIcon, ShieldSmallIcon, StethoscopeIcon, SubItemIcon, TerminalPromptIcon, WarningIcon } from './Icons'
+import { ActivityIcon, ArrowUpIcon, BanIcon, BellIcon, BellOffIcon, ChevronIcon, CloseIcon, CollapseIcon, CrownIcon, DownloadIcon, FilesIcon, FolderMoveIcon, GearIcon, KeyIcon, LinkIcon, LogoMark, MoreIcon, NoteIcon, PaletteIcon, PencilIcon, PlugIcon, PlusIcon, PowerIcon, RefreshIcon, SearchIcon, ServerIcon, ShieldSmallIcon, StethoscopeIcon, SubItemIcon, TerminalPromptIcon, WarningIcon } from './Icons'
 import { fmt } from '../lib/shortcuts'
 import { setHostMuted, updatesSignal, useUpdatesPref } from '../lib/updatesPref'
 import { Badge, Button, ErrorState, IconButton } from './ui'
@@ -279,10 +281,36 @@ export default function Sidebar(props: {
       label: t('sidebar.folderLabel'), defaultValue: host.folder ?? '',
     })
     if (folder === null) return
-    await api(`/api/hosts/${host.id}`, {
+    // 3.6.10: un host crown-jewel mutat sub legături ⚑ noi cere confirmare (serverul o cere cu 409)
+    await withCrownConfirm((crown) => api(`/api/hosts/${host.id}`, {
       method: 'PATCH',
-      body: JSON.stringify({ name: host.name, note: host.note, folder: folder.trim() }),
-    }).catch(fail)
+      body: JSON.stringify({ name: host.name, note: host.note, folder: folder.trim(), ...crown }),
+    }), (e) => confirm(crownDialog(e, t))).catch(fail)
+    props.onChanged()
+  }
+
+  // 3.6.10: marcajul crown-jewel (doar Owner — serverul verifică). Marcarea întăreşte (fără
+  // parolă); scoaterea slăbeşte, deci cere parola + al doilea factor, ca orice schimbare de acces.
+  async function toggleCrown(host: Host) {
+    try {
+      if (host.crown_jewel) {
+        const pw = await askSecret(t('crown.unmarkConfirm', { name: host.name }))
+        if (!pw) return
+        await withSecondFactor(t, (extra) => api(`/api/hosts/${host.id}/crown-jewel`, {
+          method: 'POST', body: JSON.stringify({ enabled: false, current_password: pw, ...extra }),
+        }))
+        notify(t('crown.unmarked', { name: host.name }), '', 'info')
+      } else {
+        const r = await api<{ exposure: { who: string; role: string }[] }>(`/api/hosts/${host.id}/crown-jewel`, {
+          method: 'POST', body: JSON.stringify({ enabled: true }),
+        })
+        if (r.exposure.length) {
+          notify(t('crown.marked', { name: host.name }), t('crown.exposure', {
+            name: host.name, list: r.exposure.map((e) => `${e.who} (${e.role})`).join(', '),
+          }), 'warn')
+        } else notify(t('crown.marked', { name: host.name }), '', 'info')
+      }
+    } catch (e) { fail(e) }
     props.onChanged()
   }
 
@@ -335,10 +363,10 @@ export default function Sidebar(props: {
     const inGroup = props.hosts.filter((h) => (h.folder || '') === folder)
     // U17: un PATCH eşuat (ex. rol fără `hosts.edit` pe unul dintre hosturi) era înghiţit — grupul
     // părea redenumit pe jumătate fără nicio explicaţie. Spunem câte au eşuat şi de ce.
-    const results = await Promise.allSettled(inGroup.map((h) => api(`/api/hosts/${h.id}`, {
+    const results = await Promise.allSettled(inGroup.map((h) => withCrownConfirm((crown) => api(`/api/hosts/${h.id}`, {
       method: 'PATCH',
-      body: JSON.stringify({ name: h.name, note: h.note, folder: name }),
-    })))
+      body: JSON.stringify({ name: h.name, note: h.note, folder: name, ...crown }),
+    }), (e) => confirm(crownDialog(e, t)))))
     const failed = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected')
     if (failed.length) {
       notifyError(t('sidebar.renameGroupFailed', { n: failed.length, total: inGroup.length }),
@@ -479,6 +507,13 @@ export default function Sidebar(props: {
                   aria-label={t('sidebar.require2faBadgeAria', { name: host.name })}
                   className="wt-good shrink-0 leading-none opacity-80">
                   <ShieldSmallIcon />
+                </span>
+              )}
+              {/* 3.6.10: host crown-jewel (rulează WebTerm / îi ţine backup-urile) */}
+              {!!host.crown_jewel && (
+                <span role="img" title={t('crown.badge')} aria-label={t('crown.badgeAria', { name: host.name })}
+                  data-crown className="shrink-0 leading-none text-warn">
+                  <CrownIcon />
                 </span>
               )}
               {liveCount > 0 && (
@@ -664,6 +699,8 @@ export default function Sidebar(props: {
               onReinstall={() => reinstall(host)}
               onProvision={() => provision(host)}
               onToggle2fa={() => toggle2fa(host)}
+              crown={perms?.owner ? { on: !!host.crown_jewel, hint: host.crown_hint === 'gateway' } : null}
+              onToggleCrown={() => toggleCrown(host)}
               updatesMuted={updPref.muted.has(host.id)}
               onToggleUpdatesMute={() => setHostMuted(host.id, !updPref.muted.has(host.id))}
               onUninstall={() => uninstallHost(host)}
@@ -1205,6 +1242,9 @@ function HostMenu(props: {
   onReinstall: () => void
   onProvision: () => void
   onToggle2fa: () => void
+  /** 3.6.10: doar pentru un Owner (null = ascuns); `hint` = pare hostul gateway-ului */
+  crown: { on: boolean; hint: boolean } | null
+  onToggleCrown: () => void
   updatesMuted: boolean
   onToggleUpdatesMute: () => void
   onUninstall: () => void
@@ -1306,6 +1346,13 @@ function HostMenu(props: {
             <button role="menuitem" className={`${item} text-slate-200`} onClick={act(props.onToggle2fa)}>
               <KeyIcon /> {props.require2fa ? t('sidebar.require2faOn') : t('sidebar.require2faOff')}
             </button>
+            {props.crown && (
+              <button role="menuitem" className={`${item} ${props.crown.hint ? 'text-warn' : 'text-slate-200'}`}
+                title={props.crown.hint ? t('crown.hintGateway') : t('crown.badge')} data-crown-toggle
+                onClick={act(props.onToggleCrown)}>
+                <CrownIcon size={16} /> {props.crown.on ? t('crown.unmark') : t('crown.mark')}
+              </button>
+            )}
             {/* mascarea per host a semnalului de update-uri OS (preferinţă locală, lib/updatesPref):
                 pentru hostul pe care-l actualizezi oricum pe alt drum şi nu vrei badge-ul în listă */}
             <button role="menuitem" className={`${item} text-slate-200`} onClick={act(props.onToggleUpdatesMute)}>

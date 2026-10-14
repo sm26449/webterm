@@ -2,6 +2,8 @@ import { FormEvent, useEffect, useRef, useState } from 'react'
 import { errText, api, ApiError, Host, withStepup } from '../lib/api'
 import { copyText } from '../lib/clipboard'
 import { useI18n } from '../lib/i18n'
+import { useConfirm } from '../lib/confirm'
+import { crownDialog, withCrownConfirm } from '../lib/crown'
 import InstallCommand, { AGENT_PYTHON_MIN } from './InstallCommand'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { Button } from './ui'
@@ -43,6 +45,7 @@ export default function AddHostModal(props: {
   onOpenSession?: (host: Host) => void
 }) {
   const { t } = useI18n()
+  const { confirm } = useConfirm()
   const edit = props.host
   const pj = props.presetJump
   const dialogRef = useRef<HTMLDivElement>(null)
@@ -264,7 +267,10 @@ export default function AddHostModal(props: {
     setBusy(true)
     try {
       if (edit) {
-        await api(`/api/hosts/${edit.id}`, { method: 'PATCH', body: JSON.stringify(body) })
+        // 3.6.10: un host crown-jewel mutat (folder/tag) sub legături ⚑ noi cere confirmare (409)
+        const r = await withCrownConfirm((crown) => api(`/api/hosts/${edit.id}`,
+          { method: 'PATCH', body: JSON.stringify({ ...body, ...crown }) }), (e) => confirm(crownDialog(e, t)))
+        if (r === null) return
         props.onSaved?.()
         props.onClose()
       } else {

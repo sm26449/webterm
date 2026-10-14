@@ -2,6 +2,7 @@ import { useMemo } from 'react'
 import type { Host } from '../../../lib/api'
 import { useI18n } from '../../../lib/i18n'
 import { ROLE_KEYS, RolesCatalogue, roleValue, ScopeKind, SCOPE_KINDS, SHELL_ROLES } from '../../../lib/perms'
+import { EXPIRY_CHOICES, expiresIn, expiryFrom, type ExpiryChoice } from '../../../lib/usersAdmin'
 import { field } from '../ui'
 
 /* Piese comune sub-tab-urilor din Users & roles (3.6.6; mutate din UsersTab.tsx fără schimbări de
@@ -47,6 +48,42 @@ export function ScopePicker(props: {
       )}
     </div>
   )
+}
+
+/** 3.6.10: durata unei legături noi — permanentă / 4 h / 1 zi / 7 zile / până la o dată. Valoarea
+    finală (secunde epoch | null | 'invalid') o calculează `expiryFrom`, la trimitere. */
+export function ExpiryPicker(props: {
+  choice: ExpiryChoice; custom: string; idPrefix: string
+  onChange: (choice: ExpiryChoice, custom: string) => void
+}) {
+  const { t } = useI18n()
+  const invalid = props.choice === 'custom' && expiryFrom('custom', props.custom, Date.now()) === 'invalid'
+  return (
+    <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+      <select value={props.choice} aria-label={t('roles.expiry.label')} className={field + ' sm:w-48'}
+        data-expiry-choice onChange={(e) => props.onChange(e.target.value as ExpiryChoice, props.custom)}>
+        {EXPIRY_CHOICES.map((c) => <option key={c} value={c}>{t('roles.expiry.' + c)}</option>)}
+      </select>
+      {props.choice === 'custom' && (
+        <input type="datetime-local" value={props.custom} aria-label={t('roles.expiry.customLabel')}
+          aria-invalid={invalid || undefined} aria-describedby={invalid ? `${props.idPrefix}-exp-err` : undefined}
+          onChange={(e) => props.onChange('custom', e.target.value)} className={field + ' sm:w-56'} />
+      )}
+      {invalid && props.custom && (
+        <span id={`${props.idPrefix}-exp-err`} className="text-xs text-warn">{t('roles.expiry.invalid')}</span>
+      )}
+    </div>
+  )
+}
+
+/** „expiră în 3h" pentru o legătură temporară (nimic pentru una permanentă) */
+export function useExpiryText() {
+  const { t } = useI18n()
+  return (expires: number | null | undefined): string => {
+    if (!expires) return ''
+    const left = expiresIn(expires, Date.now())
+    return left ? t('roles.expiry.in', { time: `${left.n}${t('time.' + left.unit)}` }) : t('explain.expired')
+  }
 }
 
 /** <option>-urile de rol: predefinitele (fără Owner pentru un ne-Owner), apoi cele custom. */

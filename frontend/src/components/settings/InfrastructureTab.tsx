@@ -1,9 +1,11 @@
 import { FormEvent, useEffect, useRef, useState } from 'react'
 import ForwardDomainSection from './ForwardDomainSection'
 import CertificatesSection from './CertificatesSection'
-import { errText, api, CommandGuard, DeployKeyPolicy, withSecondFactor as withSecondFactorT } from '../../lib/api'
+import { errText, api, CommandGuard, DeployKeyPolicy, Host, withSecondFactor as withSecondFactorT } from '../../lib/api'
 import { useI18n } from '../../lib/i18n'
-import { useSectionVisible } from '../../lib/perms'
+import { roleBody, roleLabel, ROLE_KEYS, RolesCatalogue, roleValue, ScopeKind, scopeLabel, useSectionVisible } from '../../lib/perms'
+import { tokenCap, type TokenRow } from '../../lib/usersAdmin'
+import { ScopePicker, scopeOk } from './users/shared'
 import { useConfirm } from '../../lib/confirm'
 import { fmtTs } from '../../lib/tz'
 import { ArrowRightIcon, CloseIcon } from '../Icons'
@@ -82,16 +84,28 @@ export default function InfrastructureTab(props: { onAccountChanged: () => void 
   }
 
   // ── Token-uri de automatizare (cron/CI/monitorizare) ──
-  type TokenRow = { id: number; name: string; scopes: string; created: number
-    expires: number; last_used: number | null; created_by: string; expired: boolean }
+  // 3.6.10: plafon de rol + scope. Implicit cel mai mic: Viewer peste toate hosturile (fără `run`).
+  // Rolurile custom apar doar dacă le poţi citi (/api/roles cere users.manage sau roles.manage).
+  const emptyTok = { name: '', read: true, run: false, days: 90, current_password: '',
+    role: 'viewer', scope_kind: 'all' as ScopeKind, scope_value: '' }
   const [tokens, setTokens] = useState<TokenRow[]>([])
-  const [newTok, setNewTok] = useState({ name: '', read: true, run: false, days: 90, current_password: '' })
+  const [newTok, setNewTok] = useState(emptyTok)
+  const [tokHosts, setTokHosts] = useState<Host[]>([])
+  const [tokRoles, setTokRoles] = useState<RolesCatalogue | null>(null)
+  const tokHostName = (id: number) => tokHosts.find((h) => h.id === id)?.name
+  const roleRuns = (v: string): boolean => {
+    if (!v) return true                                    // fără plafon: doar scope-urile decid
+    if (!v.startsWith('id:')) return v !== 'viewer'
+    return !!tokRoles?.custom.find((r) => roleValue(r) === v)?.perms.includes('run')
+  }
   const [tokPlain, setTokPlain] = useState('')     // valoarea în clar, arătată O SINGURĂ dată
   const [tokCopied, setTokCopied] = useState(false)
   const [tokErr, setTokErr] = useState('')
   // U04: „niciun token" pe un fetch picat ar ascunde exact credenţiala pe care o cauţi
   const [tokState, setTokState] = useState<LoadState>({ status: 'loading' })
   const loadTokens = () => {
+    api<Host[]>('/api/hosts').then(setTokHosts).catch(() => setTokHosts([]))
+    api<RolesCatalogue>('/api/roles').then(setTokRoles).catch(() => setTokRoles(null))
     setTokState({ status: 'loading' })
     api<TokenRow[]>('/api/tokens')
       .then((r) => { setTokens(r); setTokState({ status: 'ok' }) })
@@ -108,10 +122,12 @@ export default function InfrastructureTab(props: { onAccountChanged: () => void 
       const r = await withSecondFactor((extra) => api<{ token: string; tokens: TokenRow[] }>('/api/tokens', {
         method: 'POST',
         body: JSON.stringify({ name: newTok.name, scopes, days: newTok.days,
+                               ...(newTok.role ? { ...roleBody(newTok.role), scope_kind: newTok.scope_kind,
+                                 scope_value: newTok.scope_kind === 'all' ? '' : newTok.scope_value.trim() } : {}),
                                current_password: newTok.current_password, ...extra }),
       }))
       setTokens(r.tokens); setTokPlain(r.token)
-      setNewTok({ name: '', read: true, run: false, days: 90, current_password: '' })
+      setNewTok(emptyTok)
     } catch (e) {
       setTokErr(errText(e, t) || String(e))
     }
@@ -419,6 +435,15 @@ export default function InfrastructureTab(props: { onAccountChanged: () => void 
             <li key={tk.id} className="flex items-center gap-2 rounded-md bg-ink-800/60 px-3 py-2 text-sm ring-1 ring-ink-700">
               <span className="min-w-0 flex-1 truncate text-slate-200">{tk.name}</span>
               <span className="shrink-0 font-mono text-2xs text-slate-500">{tk.scopes}</span>
+              {(() => {
+                const cap = tokenCap(tk)
+                return (
+                  <span className="hidden shrink-0 text-2xs text-slate-400 sm:inline" data-token-cap>
+                    {cap ? t('roles.chip', { role: roleLabel({ role: cap.role, role_name: cap.role_name }, t),
+                      scope: scopeLabel(cap, tokHostName, t) }) : t('settings.tokens.noCap')}
+                  </span>
+                )
+              })()}
               <span className={`shrink-0 text-2xs ${tk.expired ? 'wt-danger' : 'text-slate-500'}`}>
                 {tk.expired ? t('settings.tokens.expired')
                   : t('settings.tokens.expires', { date: fmtTs(tk.expires, 'date') })}
@@ -456,11 +481,30 @@ export default function InfrastructureTab(props: { onAccountChanged: () => void 
               {t('settings.tokens.scopeRun')}
             </label>
           </div>
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <select value={newTok.role} aria-label={t('settings.tokens.role')} className={field + ' sm:w-56'} data-token-role
+              onChange={(e) => setNewTok({ ...newTok, role: e.target.value })}>
+              {ROLE_KEYS.filter((k) => k !== 'owner').map((k) => <option key={k} value={k}>{t('roles.role.' + k)}</option>)}
+              {(tokRoles?.custom ?? []).map((r) => <option key={r.id} value={roleValue(r)}>{r.name}</option>)}
+              <option value="">{t('settings.tokens.roleNone')}</option>
+            </select>
+            {newTok.role && (
+              <div className="min-w-0 flex-1">
+                <ScopePicker idPrefix="token" kind={newTok.scope_kind} value={newTok.scope_value} hosts={tokHosts}
+                  onChange={(k, v) => setNewTok({ ...newTok, scope_kind: k, scope_value: v })} />
+              </div>
+            )}
+          </div>
+          <p className="text-xs text-slate-500">{t('settings.tokens.roleHint')}</p>
+          {newTok.run && !roleRuns(newTok.role) && (
+            <p className="text-xs text-warn" data-token-run-warning>{t('settings.tokens.runNeedsRole')}</p>
+          )}
           <input type="password" value={newTok.current_password} autoComplete="current-password"
             onChange={(e) => setNewTok({ ...newTok, current_password: e.target.value })}
             placeholder={t('settings.currentPasswordConfirm')} aria-label={t('settings.currentPassword')} className={field} />
           <div className="flex items-center gap-3">
-            <Button variant="primary" type="submit" disabled={busy || !newTok.current_password || !newTok.name}>
+            <Button variant="primary" type="submit"
+              disabled={busy || !newTok.current_password || !newTok.name || (!!newTok.role && !scopeOk(newTok.scope_kind, newTok.scope_value))}>
               {t('settings.tokens.create')}
             </Button>
             {tokErr && <span className="text-sm wt-danger">{tokErr}</span>}

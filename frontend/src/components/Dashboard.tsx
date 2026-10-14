@@ -5,7 +5,7 @@ import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
 import { useI18n } from '../lib/i18n'
 import { can, usePerms } from '../lib/perms'
 import { hostHistory } from '../lib/metrics'
-import { ArrowUpRightIcon, DiamondIcon, EyeIcon, LockIcon, MenuIcon, PlusIcon, ServerIcon, TerminalPromptIcon } from './Icons'
+import { ArrowUpRightIcon, CrownIcon, DiamondIcon, EyeIcon, LockIcon, MenuIcon, PlusIcon, ServerIcon, TerminalPromptIcon } from './Icons'
 import Sparkline from './Sparkline'
 import SecurityCard, { SecurityTarget } from './SecurityCard'
 import type { SettingsTarget } from '../lib/settingsIndex'
@@ -357,7 +357,14 @@ export default function Dashboard(props: {
                             >
                               {h.name}
                             </button>
-                            <span className="block truncate font-mono text-2xs text-slate-500">{protoLabel(h)} · {hostAt(h)}</span>
+                            <span className="flex min-w-0 items-center gap-1 font-mono text-2xs text-slate-500">
+                              {/* 3.6.10: host crown-jewel — un shell aici = Owner */}
+                              {h.crown_jewel && (
+                                <span role="img" title={t('crown.badge')} aria-label={t('crown.badgeAria', { name: h.name })}
+                                  data-crown className="shrink-0 text-warn"><CrownIcon size={11} /></span>
+                              )}
+                              <span className="min-w-0 truncate">{protoLabel(h)} · {hostAt(h)}</span>
+                            </span>
                             {health && (
                               <span className="flex items-center gap-1.5">
                                 <span className="min-w-0 flex-1 truncate font-mono text-2xs tabular-nums text-slate-500">

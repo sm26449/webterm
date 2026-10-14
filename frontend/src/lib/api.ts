@@ -104,7 +104,11 @@ export interface Host {
   name: string
   note: string
   alerts_muted?: boolean
-  updates?: { count: number; security: number | null; manager: string | null } | null
+  /** 3.6.10: rulează gateway-ul / îi ţine backup-urile — un shell aici = Owner (insignă coroană) */
+  crown_jewel?: boolean
+  /** 3.6.10, doar pentru Owner: pare hostul gateway-ului (ales pentru reînnoirea certificatelor) */
+  crown_hint?: 'gateway' | null
+  updates?:{ count: number; security: number | null; manager: string | null } | null
   /** pornirea agentului la boot (agent v57+); null = necunoscut (agent mai vechi / ne-agent) */
   supervision?: HostSupervision | null
   online: boolean
