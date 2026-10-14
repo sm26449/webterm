@@ -334,6 +334,12 @@ async def test_last_owner(owner, c):
     await db.execute("UPDATE role_bindings SET expires=? WHERE user_id=?", time.time() + 7200, oid)
     authz.bump_epoch()
     check("pregătire: boss e singurul Owner permanent", await authz.owner_count() == 1)
+    r = await c.patch("/scim/v2/Users/" + sid_boss, json={"Operations": [
+        {"op": "replace", "path": "displayName", "value": "Renamed Boss"},
+        {"op": "replace", "path": "active", "value": False}]})
+    row = await db.fetchone("SELECT scim_display_name FROM users WHERE id=?", boss)
+    check("refuzul e ATOMIC: nicio altă schimbare din aceeaşi cerere nu e scrisă", r.status_code == 403
+          and row["scim_display_name"] != "Renamed Boss", str(row["scim_display_name"]))
     r = await c.patch("/scim/v2/Users/" + sid_boss, json=deactivate())
     j = r.json()
     check("active:false pe ultimul Owner permanent → 403 SCIM", r.status_code == 403

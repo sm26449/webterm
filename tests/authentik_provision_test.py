@@ -406,7 +406,7 @@ def main():
           and "raise SkipObject" in uf.get("expression", ""))
     check("…filtrul trece DOAR membrii celor cinci grupuri",
           all(repr(n) in uf.get("expression", "") for n in NAMES)
-          and "ak_is_group_member(request.user, name=name)" in uf.get("expression", ""))
+          and "ak_is_group_member(user, name=name)" in uf.get("expression", ""))
     check("grupuri: maparea implicită + doar wt-*", "sm-group" in pr.get("property_mappings_group", [])
           and "startswith('wt-')" in gf.get("expression", "") and "raise SkipObject" in gf.get("expression", ""))
     check("backchannel pe aplicaţia webterm, cel existent păstrat",

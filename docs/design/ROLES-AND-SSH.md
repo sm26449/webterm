@@ -1507,6 +1507,14 @@ User guide: [docs/SSO.md → SCIM provisioning](../SSO.md#scim-provisioning-3611
   keeps them (Authentik PUTs then PATCHes members; clearing in between would flap roles and close
   terminals). SCIM writes are serialised by `scim._lock` (taken before `authz._lock`, never the
   other way round).
+- **Security review fixes (before release):** `externalId` write-once (`scimType: mutability`);
+  no SCIM email change on an account with `sso_subject IS NULL` that holds a non-sso binding; the
+  OIDC `externalId == sub` link also requires the account email; `/api/account` refuses a new
+  password or email on a `scim_managed` account (`account.scimManaged`), `app.admin passwd`
+  detaches it from SCIM; SCIM queries also require `local_password=0`; the last-Owner check runs
+  before any write; `admin._owner_ids` and the boot permanent-Owner count ignore disabled
+  accounts. Accepted and documented: the token can reach every mapped non-Owner role through a
+  self-provisioned account (it is the IdP's credential).
 - **Audit.** Every change the IdP makes (and every refused write) is an `audit_log` row with
   `actor = scim`, `via = scim`; no-op re-syncs (Authentik's periodic full sync) write nothing.
   The status panel reads `scim_last_request` (throttled, 30 s) and `scim_last_error`.

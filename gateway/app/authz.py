@@ -978,7 +978,7 @@ async def seed(conn) -> None:
         cur = await conn.execute(
             "SELECT COUNT(*) FROM users u WHERE EXISTS (SELECT 1 FROM role_bindings b JOIN roles r"
             " ON r.id=b.role_id WHERE b.user_id=u.id AND r.key='owner' AND b.scope_kind='all'"
-            " AND b.expires IS NULL)")
+            " AND b.expires IS NULL) AND COALESCE(u.disabled, 0)=0")
         permanent_owners = (await cur.fetchone())[0]
         await cur.close()
         cur = await conn.execute("SELECT COUNT(*) FROM users")

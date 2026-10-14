@@ -143,9 +143,12 @@ async def callback(request: Request, code: str = "", state: str = ""):
         # implicit EXACT `sub`-ul OIDC (hashed_user_id = uid-ul userului). Aceeaşi identitate,
         # spusă de acelaşi IdP pe două canale autentificate: legăm direct. Doar un cont SCIM fără
         # parolă locală şi încă nelegat; altfel cade pe calea obişnuită (email + email_verified).
+        # (revizuirea 3.6.11: ŞI acelaşi email — externalId-ul e scris de tokenul SCIM; fără
+        # potrivirea emailului, cine ţine tokenul ar putea lega propriul `sub` de contul altcuiva)
         linked = await db.fetchone(
             "SELECT * FROM users WHERE scim_external_id=? AND COALESCE(scim_managed, 0)=1"
-            " AND sso_subject IS NULL AND COALESCE(local_password, 1)=0", sub)
+            " AND sso_subject IS NULL AND COALESCE(local_password, 1)=0 AND email=?",
+            sub, email or "\x00")
         if linked is not None:
             await db.execute("UPDATE users SET sso_subject=? WHERE id=? AND sso_subject IS NULL",
                              sub, linked["id"])

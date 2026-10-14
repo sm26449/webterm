@@ -366,6 +366,12 @@ async def test_users(owner, tok):
     check("PATCH userName + emails[...].value (atribut necunoscut ignorat)", r.status_code == 200
           and r.json()["userName"] == "ana.pop" and r.json()["emails"][0]["value"] == "ana.pop@x.co", r.text[:200])
     r = await c.patch("/scim/v2/Users/" + ana_id, json={"Operations": [
+        {"op": "replace", "path": "externalId", "value": "someone-else"}]})
+    check("externalId e scris o singură dată (PATCH → 409 mutability)", is_scim_error(r, 409)
+          and r.json().get("scimType") == "mutability", r.text[:160])
+    r = await c.get("/scim/v2/Users", params={"startIndex": 10 ** 30})
+    check("startIndex uriaş → listă goală, nu 500", r.status_code == 200 and r.json()["Resources"] == [])
+    r = await c.patch("/scim/v2/Users/" + ana_id, json={"Operations": [
         {"op": "replace", "value": {"displayName": "A. Pop", "active": "False"}}]})
     check("PATCH fără path (obiect) + active \"False\" ca TEXT (Entra) → dezactivat",
           r.status_code == 200 and r.json()["active"] is False and r.json()["displayName"] == "A. Pop", r.text[:200])
@@ -435,6 +441,26 @@ async def test_break_glass_and_adoption(owner, tok):
     row = await db.fetchone("SELECT sso_subject FROM users WHERE id=?", cid)
     check("contul SCIM se leagă la primul login SSO prin externalId = sub (fără email_verified)",
           "sso_error" not in loc and row["sso_subject"] == "sub-cara", loc)
+    # revizuirea de securitate 3.6.11: tokenul SCIM nu poate re-ţinti identitatea unui cont nelegat
+    r = await c.post("/scim/v2/Users", json=ak_user("zoe", "zoe@x.co", ext="sub-zoe"))
+    zid, zuid = r.json()["id"], await uid_of("zoe@x.co")
+    await U.bind(zuid, "admin", "all", "")                      # rol dat DE MÂNĂ înainte de primul login
+    r = await c.patch("/scim/v2/Users/" + zid, json={"Operations": [
+        {"op": "replace", "path": "emails", "value": [{"value": "mallory@x.co", "primary": True}]}]})
+    check("cont nelegat cu rol manual: SCIM NU-i poate schimba emailul (409)", is_scim_error(r, 409)
+          and r.json().get("scimType") == "mutability", r.text[:160])
+    r = await c.patch("/scim/v2/Users/" + zid, json={"Operations": [
+        {"op": "replace", "path": "externalId", "value": "sub-mallory"}]})
+    check("…nici externalId-ul (409)", is_scim_error(r, 409))
+    loc = await sso_login("sub-zoe", "mallory@x.co", groups=[])
+    row = await db.fetchone("SELECT sso_subject FROM users WHERE id=?", zuid)
+    check("externalId = sub dar ALT email → nu se leagă de contul lui zoe", row["sso_subject"] is None
+          and await uid_of("mallory@x.co") != zuid, loc)
+    zc = await U.login("zoe@x.co")
+    r = await zc.post("/api/account", json={"new_password": "parolanoua123", "current_password": "x"})
+    check("contul SCIM nu-şi poate pune parolă locală (409 account.scimManaged)", r.status_code == 409
+          and U.code(r) == "account.scimManaged", "%s %s" % (r.status_code, r.text[:120]))
+    await zc.aclose()
     r = await c.post("/scim/v2/Users", json=ak_user("dan", "dan@x.co", ext="ext-dan"))
     loc = await sso_login("sub-dan", "dan@x.co", groups=[], verified=False)
     check("externalId ≠ sub şi email neverificat → adopţia prin email refuzată (regula veche)",

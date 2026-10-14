@@ -1126,6 +1126,7 @@ const ro: Lang = {
     'err.role.usedByConfigMap': "Rolul e folosit de WEBTERM_OIDC_ROLE_MAP din .env-ul serverului, care nu acordă niciodată permisiuni doar-de-Owner. Scoate-l întâi din WEBTERM_OIDC_ROLE_MAP și repornește WebTerm.",
     'err.auth.ssoOnly': "Contul acesta intră doar prin SSO. Folosește butonul SSO.",
     'err.auth.accountDisabled': "Contul acesta e dezactivat. Un Owner îl poate reactiva.",
+    'err.account.scimManaged': "Contul acesta e administrat de furnizorul de identitate (SCIM). Schimbă-l acolo.",
     'err.scim.noToken': "Creează întâi un token SCIM.",
     'err.account.notDisabled': "Contul acesta nu e dezactivat.",
     'alertmsg.what.sso_config_mappings_changed': "Mapările SSO din configurație s-au schimbat: adăugate {added}, scoase {removed} ({n} rol(uri) retrase)",

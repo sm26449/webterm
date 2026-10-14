@@ -167,6 +167,18 @@ async def cmd_passwd(args) -> None:
     pw_hash = security.hash_password(_read_new_password())
     await db.execute("UPDATE users SET password_hash=?, local_password=1 WHERE id=?",
                      pw_hash, user["id"])
+    # 3.6.11: o parolă locală = cont break-glass, pe care SCIM nu-l mai atinge niciodată. Îl
+    # desprindem EXPLICIT de SCIM (altfel IdP-ul ar mai putea să-l dezactiveze / redenumească),
+    # cu audit — e o decizie a celui cu shell pe server.
+    if user["scim_managed"]:
+        await db.execute("UPDATE users SET scim_managed=0, scim_id=NULL WHERE id=?", user["id"])
+        await db.execute("DELETE FROM scim_group_members WHERE user_id=?", user["id"])
+        await db.execute(
+            "INSERT INTO audit_log(ts, actor, ip, method, path, status, detail, actor_id, via)"
+            " VALUES(?,?,?,?,?,?,?,?,?)", time.time(), "admin-cli", "-", "CLI", "/admin/passwd",
+            200, "%s detached from SCIM (local password set from the server)" % user["email"],
+            user["id"], "cli")
+        print("· %s is no longer managed by SCIM (it has a local password now)" % user["email"])
     # 3.6.2: cu o parolă locală, rolurile venite din grupuri SSO pleacă (cine ştie parola nu
     # trebuie să moştenească ce dau grupurile omului) — acelaşi lucru ca în /api/account
     n = (await db.fetchone("SELECT COUNT(*) AS c FROM role_bindings WHERE user_id=? AND source='sso'",
@@ -185,6 +197,7 @@ async def _owner_ids(permanent: bool = False) -> set:
     (revizuirea 3.6.10: un Owner TEMPORAR nu e un cont break-glass — expiră)."""
     return {r["user_id"] for r in await db.fetchall(
         "SELECT DISTINCT b.user_id FROM role_bindings b JOIN roles r ON r.id=b.role_id"
+        " JOIN users u ON u.id=b.user_id AND COALESCE(u.disabled, 0)=0"   # 3.6.11
         " WHERE r.key='owner' AND b.scope_kind='all' AND (b.expires IS NULL OR b.expires > ?)"
         + (" AND b.expires IS NULL" if permanent else ""), time.time())}
 

@@ -42,6 +42,17 @@ async def is_permanent_owner(uid: int) -> bool:
     return row is not None
 
 
+async def report_last_owner_refused(email: str, *, actor: str, ip: str, reason: str) -> None:
+    log.error("%s: refused to disable %s — it is the last permanent Owner (%s)", actor, email, reason)
+    await audit.record(time.time(), actor, ip, "SCIM", "/scim/v2/Users", 403,
+                       "refused to disable %s: the last permanent Owner (%s)" % (email, reason),
+                       actor_id=None, via="scim")
+    email_alerts.notify_security_change(
+        "the identity provider tried to disable the last Owner (%s); refused" % email,
+        ip, actor, fleet=True, severity="critical", what_key="scim_last_owner_refused",
+        what_params={"account": email})
+
+
 async def disable(uid: int, *, by: str, actor: str, ip: str, reason: str) -> Optional[dict]:
     """Disable account `uid` (idempotent: an already disabled account → None, nothing done).
     `by` = 'scim' | 'scim-delete'. Raises LastOwner (nothing changed, audited, alerted).
@@ -57,17 +68,8 @@ async def disable(uid: int, *, by: str, actor: str, ip: str, reason: str) -> Opt
             return None
         # check-then-act under the bindings lock: a concurrent grant/removal cannot slip between
         if await is_permanent_owner(uid) and await authz.owner_count(exclude_user=uid) < 1:
-            email = row["email"]
-            log.error("%s: refused to disable %s — it is the last permanent Owner (%s)",
-                      actor, email, reason)
-            await audit.record(time.time(), actor, ip, "SCIM", "/scim/v2/Users", 403,
-                               "refused to disable %s: the last permanent Owner (%s)"
-                               % (email, reason), actor_id=None, via="scim")
-            email_alerts.notify_security_change(
-                "the identity provider tried to disable the last Owner (%s); refused" % email,
-                ip, actor, fleet=True, severity="critical", what_key="scim_last_owner_refused",
-                what_params={"account": email})
-            raise LastOwner(email)
+            await report_last_owner_refused(row["email"], actor=actor, ip=ip, reason=reason)
+            raise LastOwner(row["email"])
         now = time.time()
         await db.execute("UPDATE users SET disabled=1, disabled_at=?, disabled_by=? WHERE id=?",
                          now, by, uid)

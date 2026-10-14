@@ -220,8 +220,9 @@ async def sync_user(uid: int, email: str, groups, *, ip: str, via: str,
                            "SSO roles NOT synced (%s): no groups claim" % via, actor_id=uid)
         return {"added": [], "removed": [], "kept_last_owner": [], "skipped": True}
     gs = claim_groups(groups)
-    add_roles = await scim_grantable_roles() if scim else None
     async with authz._lock:
+        # sub lock: o editare de rol concurentă nu poate strecura o permisiune doar-de-Owner
+        add_roles = await scim_grantable_roles() if scim else None
         desired, matched = await _desired(gs)
         local_pw = await has_local_password(uid)
         if local_pw:

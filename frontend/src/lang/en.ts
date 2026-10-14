@@ -1109,6 +1109,7 @@ const en: Lang = {
     'err.role.usedByConfigMap': "This role is used by WEBTERM_OIDC_ROLE_MAP in the server's .env, which never grants Owner-only permissions. Remove it from WEBTERM_OIDC_ROLE_MAP and restart WebTerm first.",
     'err.auth.ssoOnly': "This account signs in with SSO only. Use the SSO button.",
     'err.auth.accountDisabled': "This account is disabled. An Owner can re-enable it.",
+    'err.account.scimManaged': "This account is managed by your identity provider (SCIM). Change it there.",
     'err.scim.noToken': "Create a SCIM token first.",
     'err.account.notDisabled': "This account is not disabled.",
     'alertmsg.what.sso_config_mappings_changed': "SSO mappings from the configuration changed: added {added}, removed {removed} ({n} role(s) removed)",

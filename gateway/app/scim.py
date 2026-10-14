@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import sqlite3
 import json
 import logging
 import re
@@ -422,7 +423,7 @@ def _filter(raw: Optional[str], allowed: dict) -> Optional[tuple]:
 def _page(request: Request) -> tuple[int, int]:
     q = request.query_params
     try:
-        start = max(1, int(q.get("startIndex") or 1))
+        start = min(10 ** 9, max(1, int(q.get("startIndex") or 1)))
         count = int(q.get("count") or 100)
     except ValueError:
         raise ScimError(400, "startIndex and count must be integers", "invalidValue")
@@ -447,7 +448,7 @@ _USER_FILTERS = {"username": ("scim_user_name", True), "externalid": ("scim_exte
                  "id": ("scim_id", False), "emails": ("email", True),
                  "emails.value": ("email", True)}
 _USER_COLS = ("id, email, created, disabled, scim_id, scim_external_id, scim_user_name,"
-              " scim_display_name, scim_updated")
+              " scim_display_name, scim_updated, sso_subject")
 
 
 async def _user_json(u) -> dict:
@@ -472,7 +473,8 @@ async def _user_json(u) -> dict:
 
 async def _user(scim_id: str):
     u = await db.fetchone("SELECT " + _USER_COLS + " FROM users WHERE scim_id=?"
-                          " AND COALESCE(scim_managed, 0)=1", scim_id)
+                          " AND COALESCE(scim_managed, 0)=1 AND COALESCE(local_password, 1)=0",
+                          scim_id)
     if u is None:
         raise ScimError(404, "no such user")
     return u
@@ -482,7 +484,8 @@ async def _user(scim_id: str):
 async def list_users(request: Request, _p=Depends(require_scim)):
     f = _filter(request.query_params.get("filter"), _USER_FILTERS)
     start, count = _page(request)
-    where = " WHERE scim_id IS NOT NULL AND COALESCE(scim_managed, 0)=1"
+    where = (" WHERE scim_id IS NOT NULL AND COALESCE(scim_managed, 0)=1"
+             " AND COALESCE(local_password, 1)=0")
     args: list = []
     if f:
         col, value, ci = f
@@ -525,6 +528,38 @@ async def _ext_free(ext: Optional[str], uid: Optional[int]) -> None:
         raise ScimError(409, "another WebTerm account already has this externalId", "uniqueness")
 
 
+async def _guard_identity(u, f: dict) -> None:
+    """Security review 3.6.11 — the SCIM token must not be able to re-point an identity:
+      * `externalId` is write-once (it is what links the account to the OIDC `sub`);
+      * an account not yet linked to SSO (`sso_subject` NULL) that holds a role given BY HAND
+        cannot have its email changed by SCIM: the next SSO sign-in with that email would adopt
+        it, roles included. Once the person has signed in (linked), the email may follow the IdP."""
+    ext = f.get("externalId")
+    if ext and u["scim_external_id"] and ext != u["scim_external_id"]:
+        raise ScimError(409, "externalId cannot change once set", "mutability")
+    if f.get("email") and f["email"] != u["email"] and not u["sso_subject"]:
+        manual = await db.fetchone("SELECT 1 FROM role_bindings WHERE user_id=? AND source<>'sso'",
+                                   u["id"])
+        if manual:
+            raise ScimError(409, "the email of an account that has not signed in with SSO yet and "
+                                 "holds roles given by hand cannot be changed by SCIM",
+                            "mutability")
+
+
+async def _owner_precheck(uid: int, active, ip: str = "-") -> None:
+    """Refuse a deactivation of the last permanent Owner BEFORE any other write (atomicity);
+    accounts.disable re-checks under the bindings lock."""
+    if active is False:
+        row = await db.fetchone("SELECT email, COALESCE(disabled, 0) AS d FROM users WHERE id=?",
+                                uid)
+        if row is not None and not row["d"] and await accounts.is_permanent_owner(uid) \
+                and await authz.owner_count(exclude_user=uid) < 1:
+            await accounts.report_last_owner_refused(row["email"], actor=ACTOR, ip=ip,
+                                                     reason="SCIM active=false")
+            raise ScimError(403, "this account is the last permanent Owner of WebTerm and cannot "
+                                 "be disabled; make another account a permanent Owner first")
+
+
 async def _set_active(p: dict, uid: int, active: bool, path: str) -> None:
     if active:
         await accounts.enable(uid, actor=ACTOR, ip=p["ip"], how="identity provider, SCIM",
@@ -540,6 +575,8 @@ async def _set_active(p: dict, uid: int, active: bool, path: str) -> None:
 
 async def _apply_user(p: dict, u, f: dict, path: str, method: str) -> bool:
     """Write the changed attributes of SCIM account `u` (a row). → True if anything changed."""
+    await _guard_identity(u, f)
+    await _owner_precheck(u["id"], f.get("active"), p["ip"])
     sets, args, what = [], [], []
     if f.get("email") and f["email"] != u["email"]:
         await _email_free(f["email"], u["id"])
@@ -604,11 +641,14 @@ async def create_user(request: Request, p=Depends(require_scim)):
                                     "uniqueness")
                 if target["scim_id"]:
                     raise ScimError(409, "this user is already provisioned", "uniqueness")
+                await _guard_identity(target, f)
+                await _owner_precheck(target["id"], f.get("active"), p["ip"])
                 sid = str(uuid.uuid4())
                 await _email_free(email, target["id"])
                 await _ext_free(ext, target["id"])
                 await db.execute(
-                    "UPDATE users SET scim_managed=1, scim_id=?, scim_external_id=?,"
+                    "UPDATE users SET scim_managed=1, scim_id=?,"
+                    " scim_external_id=COALESCE(?, scim_external_id),"
                     " scim_user_name=?, scim_display_name=?, email=?, scim_updated=? WHERE id=?",
                     sid, ext, user_name, f.get("displayName"), email, time.time(), target["id"])
                 uid = target["id"]
@@ -622,11 +662,16 @@ async def create_user(request: Request, p=Depends(require_scim)):
                 sid = str(uuid.uuid4())
                 locked = await security.hash_password_async(security.new_token())
                 now = time.time()
-                await db.execute(
-                    "INSERT INTO users(id, email, password_hash, created, local_password,"
-                    " scim_managed, scim_id, scim_external_id, scim_user_name, scim_display_name,"
-                    " scim_updated) VALUES(" + db.NEXT_USER_ID_SQL + ",?,?,?,0,1,?,?,?,?,?)",
-                    email, locked, now, sid, ext, user_name, f.get("displayName"), now)
+                try:
+                    await db.execute(
+                        "INSERT INTO users(id, email, password_hash, created, local_password,"
+                        " scim_managed, scim_id, scim_external_id, scim_user_name,"
+                        " scim_display_name, scim_updated) VALUES(" + db.NEXT_USER_ID_SQL
+                        + ",?,?,?,0,1,?,?,?,?,?)",
+                        email, locked, now, sid, ext, user_name, f.get("displayName"), now)
+                except sqlite3.IntegrityError:
+                    # an SSO sign-in created the same email at this very moment
+                    raise ScimError(409, "this user was created meanwhile", "uniqueness")
                 uid = (await db.fetchone("SELECT id FROM users WHERE scim_id=?", sid))["id"]
                 await _audit(p, "POST", path, 201, "SCIM created the account %s (SSO sign-in only, "
                              "no role until a mapped group gives one)" % email, actor_id=uid)
@@ -853,7 +898,8 @@ async def _member_ids(value) -> set:
     for i in range(0, len(lst), 500):
         chunk = lst[i:i + 500]
         rows = await db.fetchall(
-            "SELECT id FROM users WHERE COALESCE(scim_managed, 0)=1 AND scim_id IN (%s)"
+            "SELECT id FROM users WHERE COALESCE(scim_managed, 0)=1"
+            " AND COALESCE(local_password, 1)=0 AND scim_id IN (%s)"
             % ",".join("?" * len(chunk)), *chunk)
         out |= {r["id"] for r in rows}
     return out

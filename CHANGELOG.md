@@ -48,6 +48,24 @@ membership to WebTerm at once. No agent change (agent stays 58).
   an Owner), and a push never **adds** Owner or a role with Owner-only permissions (added only at an
   interactive SSO sign-in; removals apply at once). The 3.6.2 rule stays: a local password means
   no roles from groups.
+- **Fixes from an independent security review before release:**
+  - *The SCIM token could re-point an account's identity.* Why: changing the `externalId` or the
+    email of a SCIM account that had not signed in yet would let the token holder's own IdP login
+    adopt it at the next sign-in — with any role an Owner had given it by hand. `externalId` is
+    now write-once, SCIM cannot change the email of a not-yet-linked account that holds manual
+    roles, and the `externalId == sub` link also needs the same email.
+  - *A local password let a SCIM account escape offboarding.* Why: SCIM never touches accounts
+    with a local password, so setting one in Settings detached the account from the IdP. It is now
+    refused (`account.scimManaged`); `app.admin passwd` detaches explicitly, audited. A disabled
+    Owner no longer counts as a break-glass Owner in `app.admin sso-only` or the boot check.
+  - *A refused deactivation of the last Owner still wrote the rest of the request.* Why: the
+    Owner check ran after the other changes. It now runs first; nothing is written.
+  - Smaller: `startIndex` is bounded (no 500 on a huge value), a create racing an SSO sign-in
+    answers 409 instead of 500, the grantable-role check runs under the bindings lock, and
+    provision's user filter evaluates the synced `user` object.
+- The SCIM token is powerful — documented: its holder can create an account bound to their own IdP
+  identity and put it in any pushed group, reaching every mapped role except Owner. Keep it in the
+  IdP only and rotate it like an Admin password.
 - Gaps, documented in docs/SSO.md: no Bulk, ETag or sort; only `eq` filters; SCIM membership is
   direct (nested groups are not expanded, so map the groups people are directly in); SCIM needs
   OIDC configured.

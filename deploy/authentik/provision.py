@@ -98,7 +98,7 @@ def scim_user_filter(names):
     Întoarce {} (nu schimbă nimic din maparea implicită). Nume validate de group_names."""
     lines = ["# WebTerm (provision.py): doar membrii grupurilor WebTerm ajung în WebTerm",
              "for name in (%s,):" % ", ".join(repr(n) for n in names),
-             "    if ak_is_group_member(request.user, name=name):",
+             "    if ak_is_group_member(user, name=name):",
              "        return {}",
              "raise SkipObject"]
     return "\n".join(lines) + "\n"

@@ -742,6 +742,13 @@ async def _verify_reauth_password(user, password: str) -> bool:
 async def update_account(body: AccountUpdate, request: Request, user=Depends(security.require_user)):
     """Change email and/or password. Requires the current password — plus, when the session
     was opened from a device never seen before, a code mailed to the account address."""
+    # 3.6.11 (revizuirea de securitate): un cont administrat prin SCIM e al IdP-ului — o parolă
+    # locală l-ar scoate de sub dezactivarea din IdP (SCIM nu atinge conturile cu parolă locală),
+    # iar emailul îl schimbă IdP-ul. Break-glass: `python3 -m app.admin passwd` îl desprinde.
+    if (body.new_password or (body.email and body.email.strip().lower() != user["email"])) \
+            and user["scim_managed"]:
+        raise ApiError(409, "account.scimManaged",
+                       "this account is managed by your identity provider (SCIM): change it there")
     # fix 7: parola locală a unui cont SSO e un hash pe un secret aleator — `current_password` NU
     # poate trece NICIODATĂ, deci userii SSO nu-şi puteau schimba emailul deloc. Pentru ei acceptăm
     # re-auth-ul lor real: un grant passkey account-scope (host_id=0, din ceremonia

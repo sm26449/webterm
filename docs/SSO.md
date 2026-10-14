@@ -225,7 +225,7 @@ rotation, run it again with the new token. With `WT_GROUP_PREFIX=wt-prod` the pr
    `WebTerm SCIM: users`, expression (list your WebTerm groups):
    ```python
    for name in ("wt-access", "wt-admins", "wt-readonly", "wt-db", "wt-network"):
-       if ak_is_group_member(request.user, name=name):
+       if ak_is_group_member(user, name=name):
            return {}
    raise SkipObject
    ```
@@ -277,7 +277,22 @@ panel; each is audited and alerted. **Pause** stops provisioning without revokin
 (resuming asks for your password again). Wrong tokens are rate-limited per IP (10 failures in
 15 minutes lock that IP out for 15 minutes), authenticated traffic is capped at 1200 requests a
 minute, bodies at 1 MiB. Cookies are ignored on `/scim/v2` — a browser session can never act
-through SCIM.
+through SCIM. The lockout is per client IP: if the IdP reaches WebTerm through the same proxy
+address as untrusted traffic, set `WEBTERM_TRUSTED_PROXY_CIDRS` so WebTerm sees the real address.
+
+**Treat the token like an Admin's password.** Whoever holds it can create an account whose
+`externalId` is their own IdP identity and put it in any group SCIM pushes — so it can reach every
+role a group is mapped to, except Owner (never added by a push). Keep it in the IdP and nowhere
+else, rotate it when someone who could read it leaves, and map powerful roles only to groups you
+watch. Two guards limit what it can do to *existing* accounts: an account's `externalId` cannot
+change once set, and an account that has not signed in with SSO yet and holds a role given by
+hand cannot have its email changed by SCIM (otherwise the next sign-in with that email would adopt
+it). The `externalId == sub` link at sign-in also requires the same email.
+
+A SCIM account cannot set a local password from Settings (`account.scimManaged`): with one, SCIM
+would no longer manage it and it would escape deactivation in the IdP. On the server,
+`python3 -m app.admin passwd <email>` still works for break-glass — it detaches the account from
+SCIM (audited).
 
 ### SCIM troubleshooting
 
