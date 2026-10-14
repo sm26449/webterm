@@ -1449,7 +1449,8 @@ Code: `ssomap.parse_role_map` / `reconcile_config` (called once from `main.lifes
   names is visible to the granter) and again under the lock; `crown_risky` = not Owner and any
   host permission in `SHELL_PERMS`. `crown_exposure(ref, before=old_ref)` drives both the "already
   exposed" list returned when marking and the folder/tag move check in `PATCH /api/hosts/{id}`.
-  Who sees the mark (review fix): `_host_json(row, crown)` includes `crown_jewel` only when
+  An extension (`…/expiry` to a later end or permanent) runs `check_crown` too, before re-auth
+  and under the lock (review fix). Who sees the mark (review fix): `_host_json(row, crown)` includes `crown_jewel` only when
   `_sees_crown` (a cookie user who is Owner or holds `users.manage`), and `authz.explain(…,
   crown=…)` leaves out `host.crown_jewel` and the `crownJewel` note otherwise; tokens never.
   The only detection hint is the host designated for certificate renewals (`cert_renew_host_id`):

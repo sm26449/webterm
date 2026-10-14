@@ -189,8 +189,10 @@ host is the one picked as the gateway host for certificate renewals, the menu su
 - From then on, giving a **non-Owner** role that has any ⚑ permission over a scope that includes
   the host — a binding, the role of a new account, an SSO group mapping — needs an explicit
   confirmation in a blocking dialog (the API answers `409 authz.crownJewel` with the hosts until
-  the request carries `confirm_crown_jewel: true`). The same applies when you move a crown-jewel
-  host into a folder or give it a tag over which such roles exist (`409 authz.crownJewelMove`).
+  the request carries `confirm_crown_jewel: true`). Extending a time-bound role — **Make
+  permanent** or any later end — is a grant too and asks the same. The same applies when you move
+  a crown-jewel host into a folder or give it a tag over which such roles exist
+  (`409 authz.crownJewelMove`).
   The confirmed change is written to the audit log as such.
 - Viewer-like roles (no ⚑ permission) and Owner need no confirmation.
 - A crown badge shows next to the host for Owners and for accounts with `users.manage` (the people
@@ -203,8 +205,7 @@ What the confirmation does **not** cover, deliberately or for now:
 - mappings from `WEBTERM_OIDC_ROLE_MAP` in the server's `.env` (the Owner's own decision on the
   host; they can never grant Owner anyway);
 - a custom role that is edited to add a ⚑ permission while it is already bound over a crown jewel
-  (the role editor already requires `roles.manage` and no-escalation);
-- making an existing time-bound role permanent.
+  (the role editor already requires `roles.manage` and no-escalation).
 
 Agents do not report which containers or volumes run on a host, so WebTerm cannot detect a
 crown jewel by itself beyond the gateway-host hint.

@@ -955,6 +955,8 @@ class BindingIn(BaseModel):
 class BindingExpiryIn(BaseModel):
     """3.6.10: schimbă sfârşitul unei legături existente (None = devine permanentă)."""
     expires: Optional[float] = None
+    # o prelungire e o acordare: ⚑ peste un host crown-jewel cere confirmare (revizuirea 3.6.10)
+    confirm_crown_jewel: bool = False
     current_password: str = ""
     totp_code: str = ""
     email_code: str = ""
@@ -1429,8 +1431,10 @@ async def set_binding_expiry(uid: int, bid: int, body: BindingExpiryIn, request:
     await authz.check_can_grant(grants, info, row["scope_kind"], row["scope_value"],
                                 removing=shorter)
     if not shorter:
-        # mai lung (sau permanent) = o acordare: nu peste sfârşitul propriului tău drept
+        # mai lung (sau permanent) = o acordare: nu peste sfârşitul propriului tău drept, şi ⚑ peste
+        # un host crown-jewel cere confirmarea explicită, ca la o legătură nouă (înainte de re-auth)
         await authz.check_grant_lifetime(grants, info, row["scope_kind"], row["scope_value"], new)
+        await authz.check_crown(info, row["scope_kind"], row["scope_value"], body.confirm_crown_jewel)
     await _reauth_for_access_change(user, request, body, "change a WebTerm account's access")
     async with authz._lock:
         # revizuirea 3.6.10: re-auth-ul a fost un punct de suspendare — legătura s-a putut schimba
@@ -1445,6 +1449,8 @@ async def set_binding_expiry(uid: int, bid: int, body: BindingExpiryIn, request:
         info = await _recheck_granter(user, info, row["scope_kind"], row["scope_value"], uid,
                                       removing=shorter,
                                       **({} if shorter else {"expires": new}))
+        crown = [] if shorter else await authz.check_crown(info, row["scope_kind"], row["scope_value"],
+                                                           body.confirm_crown_jewel)
         if old is None and new is not None:
             await authz.check_owner_expiry(info, row["scope_kind"], new, uid, exclude_binding=bid)
         # gardă de concurenţă pe valoarea citită (toate scrierile de legături ţin lock-ul, deci
@@ -1459,7 +1465,7 @@ async def set_binding_expiry(uid: int, bid: int, body: BindingExpiryIn, request:
     scope = _scope_label(row["scope_kind"], row["scope_value"])
     what = "%s: %s @ %s now %s" % (row["email"], rlabel, scope,
                                    "permanent" if new is None else "ends" + _expiry_label(new))
-    audit.detail(request, "role " + what)
+    audit.detail(request, "role " + what + _crown_note(crown))
     log.warning("role binding expiry changed: %s (by %s)", what, user["email"])
     email_alerts.notify_security_change("your access changed: " + what, security.client_ip(request),
                                         row["email"], user_id=uid, what_key="access_changed",

@@ -186,13 +186,15 @@ function AccountDetails(props: {
     setBusy(false)
   }
 
-  // 3.6.10: o legătură temporară devine permanentă (serverul aplică regulile de acordare)
+  // 3.6.10: o legătură temporară devine permanentă (serverul aplică regulile de acordare — inclusiv
+  // confirmarea blocantă pentru ⚑ peste un host crown-jewel, ca la o legătură nouă)
   async function makePermanent(b: Binding) {
     const pw = await askSecret(t('roles.expiry.permanentConfirm', { email: u.email, binding: chip(b) }))
     if (!pw) return
     try {
-      await withSecondFactor((extra) => api(`/api/users/${u.id}/bindings/${b.id}/expiry`,
-        { method: 'POST', body: JSON.stringify({ expires: null, current_password: pw, ...extra }) }))
+      const r = await withCrownConfirm((crown) => withSecondFactor((extra) => api(`/api/users/${u.id}/bindings/${b.id}/expiry`,
+        { method: 'POST', body: JSON.stringify({ expires: null, current_password: pw, ...crown, ...extra }) })), crownAsk)
+      if (r === null) return
       await props.reload()
       props.done(t('roles.expiry.madePermanent'))
     } catch (x) { props.fail(x) }

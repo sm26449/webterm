@@ -14,6 +14,7 @@ ESTE instanţa — un shell acolo citeşte DB-ul şi cheia seifului.
     token — revizuirea 3.6.10); indiciul „gateway" doar pentru Owner.
 """
 import asyncio
+import time
 
 import rbac_util as U
 from app import api, authz, db
@@ -173,6 +174,31 @@ async def main():
                                              "confirm_crown_jewel": True})
     check("…confirmat → 200 + audit CONFIRMED", r.status_code == 200
           and "CONFIRMED" in await last_audit("%account new@x.co created%"), r.text[:120])
+
+    # prelungirea unei legături temporare = o acordare (revizuirea 3.6.10)
+    ext_id = await U.add_user("ext@x.co")
+    ext_bid = await U.bind(ext_id, "operator", "folder", "infra")
+    soon = time.time() + 3600
+    await db.execute("UPDATE role_bindings SET expires=? WHERE id=?", soon, ext_bid)
+    authz.bump_epoch()
+
+    async def ext_exp():
+        return (await db.fetchone("SELECT expires FROM role_bindings WHERE id=?", ext_bid))["expires"]
+    url = "/api/users/%d/bindings/%d/expiry" % (ext_id, ext_bid)
+    r = await owner.post(url, json={"expires": None, "current_password": U.OWNER_PW})
+    check("„fă permanentă\" Operator @ infra (crown-jewel) → 409 authz.crownJewel",
+          r.status_code == 409 and U.code(r) == "authz.crownJewel" and abs(await ext_exp() - soon) < 1,
+          r.text[:160])
+    r = await owner.post(url, json={"expires": soon + 86400, "current_password": U.OWNER_PW})
+    check("…orice sfârşit MAI TÂRZIU → 409", r.status_code == 409 and U.code(r) == "authz.crownJewel")
+    r = await owner.post(url, json={"expires": soon - 600, "current_password": U.OWNER_PW})
+    check("…scurtarea nu cere confirmare → 200", r.status_code == 200, r.text[:160])
+    r = await owner.post(url, json={"expires": None, "current_password": U.OWNER_PW,
+                                    "confirm_crown_jewel": True})
+    check("…confirmată → 200, permanentă, audit CONFIRMED", r.status_code == 200
+          and await ext_exp() is None and "CONFIRMED" in await last_audit("%ext@x.co: operator%"),
+          r.text[:160])
+    await U.unbind_all(ext_id)
 
     # mapare SSO
     m = {"group": "wt-ops", "role": "operator", "scope_kind": "folder", "scope_value": "infra",
