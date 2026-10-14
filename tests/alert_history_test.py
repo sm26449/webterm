@@ -303,7 +303,7 @@ async def main():
     msg_keys = set(re.findall(r'\bkey="([a-z0-9_]+)"', ea))
     msg_keys |= {k for pair in re.findall(r'key="([a-z0-9_]+)" if [^\n]+ else "([a-z0-9_]+)"', ea) for k in pair}
     what_keys = set()
-    for fn in ("api.py", "webauthn_api.py"):
+    for fn in ("api.py", "webauthn_api.py", "accounts.py", "scim.py"):   # 3.6.11: + SCIM
         src = open(os.path.join(app_dir, fn), encoding="utf-8").read()
         what_keys |= set(re.findall(r'"((?:[a-z0-9]+_)+[a-z0-9]+)"', " ".join(
             re.findall(r'what_key=\(?([^,)]+(?:\n[^,)]+)*)', src))))
