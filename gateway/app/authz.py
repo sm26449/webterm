@@ -1521,13 +1521,14 @@ async def crown_exposure(ref: HostRef, before: Optional[HostRef] = None) -> list
 
 
 # ── explain access (3.6.10, §A.9) ───────────────────────────────────────────────────────────
-async def explain(target_uid: int, host_id: int, ref: HostRef) -> dict:
+async def explain(target_uid: int, host_id: int, ref: HostRef, crown: bool = False) -> dict:
     """Why the account has (or lacks) what it has on ONE host. The CALLER's authorization (self,
     or users.manage + the host visible to the caller) is the route's job; this only reads.
 
     Only bindings that MATCH the host are listed (a binding over another folder says nothing
     about this host, and could name scopes the caller cannot see). Expired bindings that match
-    are listed as ignored, so "it expired" is an answer, not a mystery."""
+    are listed as ignored, so "it expired" is an answer, not a mystery. `crown`: whether the
+    CALLER may learn the crown-jewel mark (Owner or users.manage); otherwise it is left out."""
     now = time.time()
     rows = await db.fetchall(
         "SELECT b.id AS bid, b.scope_kind, b.scope_value, b.source, b.expires,"
@@ -1576,7 +1577,7 @@ async def explain(target_uid: int, host_id: int, ref: HostRef) -> dict:
         notes.append({"code": "noAccess"})
     h = await db.fetchone("SELECT name, COALESCE(require_2fa, 0) AS r2, COALESCE(crown_jewel, 0)"
                           " AS cj FROM hosts WHERE id=?", host_id)
-    if h and h["cj"]:
+    if crown and h and h["cj"]:
         notes.append({"code": "crownJewel"})
     if h and h["r2"] and effective:
         notes.append({"code": "stepUp"})
@@ -1586,8 +1587,9 @@ async def explain(target_uid: int, host_id: int, ref: HostRef) -> dict:
                               " AND expires > ?", target_uid, now))["c"]
     if ntok:
         notes.append({"code": "tokensCapped", "n": ntok})
-    return {"host": {"id": host_id, "name": h["name"] if h else "",
-                     "folder": ref.folder, "tags": sorted(ref.tags),
-                     "crown_jewel": bool(h and h["cj"]), "require_2fa": bool(h and h["r2"])},
-            "bindings": bindings, "effective": effective,
+    host = {"id": host_id, "name": h["name"] if h else "", "folder": ref.folder,
+            "tags": sorted(ref.tags), "require_2fa": bool(h and h["r2"])}
+    if crown:
+        host["crown_jewel"] = bool(h and h["cj"])
+    return {"host": host, "bindings": bindings, "effective": effective,
             "shell": bool(set(effective) & SHELL_PERMS), "notes": notes}

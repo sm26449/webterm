@@ -10,7 +10,8 @@ ESTE instanţa — un shell acolo citeşte DB-ul şi cheia seifului.
     cer confirmare; un scope care nu include hostul nici atât;
   * aceeaşi regulă la crearea unui cont cu rol, la o mapare SSO şi la mutarea hostului
     (folder/tag) într-un scope peste care există deja legături ⚑;
-  * /api/hosts: `crown_jewel` pentru oricine vede hostul; indiciul „gateway" doar pentru Owner.
+  * /api/hosts şi explain: `crown_jewel` doar pentru Owner şi users.manage (niciodată Viewer sau
+    token — revizuirea 3.6.10); indiciul „gateway" doar pentru Owner.
 """
 import asyncio
 
@@ -62,9 +63,40 @@ async def main():
           == [("binding", "adm@x.co", "admin"), ("binding", "ana@x.co", "operator")],
           str(j["exposure"]))
     check("…auditat", "gw01 marked as a crown jewel" in await last_audit("%crown jewel%"))
-    hosts = {h["id"]: h for h in (await vw.get("/api/hosts")).json()}
-    check("/api/hosts: crown_jewel vizibil oricui vede hostul", hosts[gw]["crown_jewel"] is True
+    # revizuirea 3.6.10: marcajul spune „aici rulează WebTerm" — doar Owner şi users.manage îl văd
+    hosts = {h["id"]: h for h in (await owner.get("/api/hosts")).json()}
+    check("/api/hosts: Owner vede crown_jewel", hosts[gw]["crown_jewel"] is True
           and hosts[web]["crown_jewel"] is False)
+    hosts = {h["id"]: h for h in (await adm.get("/api/hosts")).json()}
+    check("…users.manage (Admin) îl vede", hosts[gw].get("crown_jewel") is True)
+    um_id = await U.add_user("um@x.co")
+    r = await owner.post("/api/roles", json={"name": "People", "perms": ["users.manage", "host.view"],
+                                             "current_password": U.OWNER_PW})
+    await U.bind(um_id, "viewer", "folder", "zzz")
+    await db.execute("INSERT INTO role_bindings(user_id, role_id, scope_kind, scope_value, source,"
+                     " created) VALUES(?,?,'all','','manual',0)", um_id, r.json()["id"])
+    authz.bump_epoch()
+    um = await U.login("um@x.co")
+    hosts = {h["id"]: h for h in (await um.get("/api/hosts")).json()}
+    check("…un rol custom cu users.manage îl vede", hosts.get(gw, {}).get("crown_jewel") is True,
+          str(hosts.get(gw))[:120])
+    await um.aclose()
+    hosts = {h["id"]: h for h in (await vw.get("/api/hosts")).json()}
+    check("…un Viewer (vede hostul) NU primeşte câmpul", gw in hosts and "crown_jewel" not in hosts[gw]
+          and "crown_jewel" not in hosts[web])
+    r = await owner.post("/api/tokens", json={"name": "mon", "scopes": ["read"], "days": 1,
+                                              "current_password": U.OWNER_PW})
+    tc = U.client(headers={"authorization": "Bearer " + r.json()["token"]})
+    th = {h["id"]: h for h in (await tc.get("/api/hosts")).json()}
+    check("…un token read (al Owner-ului) NU primeşte câmpul", gw in th and "crown_jewel" not in th[gw])
+    await tc.aclose()
+    vw_id = (await db.fetchone("SELECT id FROM users WHERE email='vw@x.co'"))["id"]
+    ex = (await vw.get("/api/authz/explain?user=%d&host=%d" % (vw_id, gw))).json()
+    check("…explain (Viewer despre el însuşi): fără crown_jewel şi fără nota crownJewel",
+          "crown_jewel" not in ex["host"] and all(n["code"] != "crownJewel" for n in ex["notes"]), str(ex)[:200])
+    ex = (await owner.get("/api/authz/explain?user=%d&host=%d" % (vw_id, gw))).json()
+    check("…explain (Owner): crown_jewel + nota", ex["host"].get("crown_jewel") is True
+          and any(n["code"] == "crownJewel" for n in ex["notes"]), str(ex)[:200])
     r = await owner.post("/api/hosts/%d/crown-jewel" % gw, json={"enabled": False})
     check("scoaterea fără parolă → 401", r.status_code == 401 and U.code(r) == "auth.wrongPassword", r.text[:120])
     r = await owner.post("/api/hosts/%d/crown-jewel" % gw,

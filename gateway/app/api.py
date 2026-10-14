@@ -1493,7 +1493,9 @@ async def explain_access(request: Request, user_id: int = Query(..., alias="user
         email = target["email"]
     else:
         email = user["email"]
-    out = await authz.explain(user_id, host_id, ref)
+    # 3.6.10 (review): the crown-jewel mark only for an Owner or users.manage (as in /api/hosts)
+    out = await authz.explain(user_id, host_id, ref,
+                              crown=grants.is_owner() or grants.has_global("users.manage"))
     out["user"] = {"id": user_id, "email": email, "self": user_id == user["id"]}
     return out
 
@@ -3001,16 +3003,25 @@ def _host_online(row) -> bool:
     return False
 
 
-def _host_json(row) -> dict:
+def _sees_crown(request) -> bool:
+    """3.6.10 (review): the crown-jewel flag says "this host runs WebTerm / holds its backups" —
+    a map for an attacker. Only an Owner or a holder of users.manage (who decides who gets a shell
+    where) sees it; never an automation token, never a plain host viewer."""
+    p = getattr(request.state, "principal", None)
+    if p is None or p.kind != "user":
+        return False
+    g = authz.grants_of(request)
+    return g.is_owner() or g.has_global("users.manage")
+
+
+def _host_json(row, crown: bool = False) -> dict:
     conn = core.sources.get(row["id"])
     ctype = row["connection_type"] or "agent"
     is_agent = ctype == "agent"
     expected = core.agent_expected()["version"]
-    return {
+    out = {
         "id": row["id"], "name": row["name"], "note": row["note"],
         "alerts_muted": bool(row["alerts_muted"]) if "alerts_muted" in row.keys() else False,
-        # 3.6.10: runs the gateway / holds its backups — a shell there equals Owner (badge in the UI)
-        "crown_jewel": bool(row["crown_jewel"]) if "crown_jewel" in row.keys() else False,
         "online": _host_online(row), "hostname": row["hostname"],
         "agent_user": row["agent_user"], "agent_version": row["agent_version"],
         "backend": row["backend"], "last_heartbeat": row["last_heartbeat"],
@@ -3065,6 +3076,11 @@ def _host_json(row) -> dict:
         # cât e setată, conectarea e refuzată (ssh.hostKeyChanged) fără dial
         "hostkey_alarm": _hostkey_alarm(row),
     }
+    if crown:
+        # 3.6.10: runs the gateway / holds its backups — a shell there equals Owner (badge in the
+        # UI). Only for an Owner or users.manage (`_sees_crown`); absent for everyone else.
+        out["crown_jewel"] = bool(row["crown_jewel"]) if "crown_jewel" in row.keys() else False
+    return out
 
 
 AGENT_USER = "webterm"          # userul dedicat propus în varianta cu privilegii minime
@@ -3228,18 +3244,19 @@ async def list_hosts(request: Request,
     vis = await authz.visible_hosts(authz.grants_of(request), "host.view")
     rows = await db.fetchall("SELECT * FROM hosts ORDER BY name")
     gw_host = (await _cert_renew_host_id()) if authz.grants_of(request).is_owner() else None
+    crown = _sees_crown(request)
     out = []
     for r in rows:
         if not authz.in_visible(vis, r["id"]):
             continue
-        j = _host_json(r)
+        j = _host_json(r, crown)
         # o ţintă jump vizibilă al cărei agent `via` NU e vizibil: nu-i dăm id-ul agentului
         # (oracol de existenţă); UI-ul o afişează atunci la nivelul de sus, nu sub părinte
         if j.get("via_host_id") and not authz.in_visible(vis, j["via_host_id"]):
             j["via_host_id"] = None
         # 3.6.10: a hint for the Owner, never for others (it says which host runs the gateway):
         # the host picked as the gateway host for certificate renewals is a crown jewel
-        if gw_host and r["id"] == gw_host and not j["crown_jewel"]:
+        if gw_host and r["id"] == gw_host and not j.get("crown_jewel"):
             j["crown_hint"] = "gateway"
         out.append(j)
     return out
@@ -3332,7 +3349,7 @@ async def _insert_host(host: HostIn, user, v: dict):
 async def create_host(host: HostIn, request: Request, user=Depends(authz.perm('hosts.create'))):
     v = await _validate_host(host, user, authz.grants_of(request))
     row, enroll, pw = await _insert_host(host, user, v)
-    return dict(_host_json(row), install_command=_install_command(enroll, pw),
+    return dict(_host_json(row, _sees_crown(request)), install_command=_install_command(enroll, pw),
                 install_command_dedicated=_install_command_dedicated(enroll, pw),
                 enroll_expires=row["enroll_expires"])
 

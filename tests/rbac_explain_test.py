@@ -161,10 +161,15 @@ async def main():
                      "ana@x.co", ana_id, time.time() + 3600)
     j = (await ex(ana, ana_id, a)).json()
     codes = {n["code"] for n in j["notes"]}
-    check("note: crownJewel + stepUp + tokensCapped", {"crownJewel", "stepUp", "tokensCapped"} <= codes,
-          str(codes))
-    check("…şi hostul spune crown_jewel/require_2fa", j["host"]["crown_jewel"] and j["host"]["require_2fa"])
+    # revizuirea 3.6.10: marcajul crown-jewel doar pentru Owner / users.manage — Ana nu-l află
+    check("note (Ana despre ea): stepUp + tokensCapped, FĂRĂ crownJewel",
+          {"stepUp", "tokensCapped"} <= codes and "crownJewel" not in codes, str(codes))
+    check("…hostul spune require_2fa, fără crown_jewel", j["host"]["require_2fa"]
+          and "crown_jewel" not in j["host"])
     check("self: user.self = true", j["user"]["self"] is True)
+    j = (await ex(owner, ana_id, a)).json()
+    check("Owner despre Ana: nota crownJewel + host.crown_jewel",
+          any(n["code"] == "crownJewel" for n in j["notes"]) and j["host"].get("crown_jewel") is True)
     # niciun acces pe un host pe care îl vede cine întreabă
     j = (await ex(owner, nobody_id, b)).json()
     check("cont fără legături: listă goală + nota noAccess",

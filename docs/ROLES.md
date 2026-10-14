@@ -193,7 +193,10 @@ host is the one picked as the gateway host for certificate renewals, the menu su
   host into a folder or give it a tag over which such roles exist (`409 authz.crownJewelMove`).
   The confirmed change is written to the audit log as such.
 - Viewer-like roles (no ⚑ permission) and Owner need no confirmation.
-- A crown badge shows next to the host for everyone who can see it.
+- A crown badge shows next to the host for Owners and for accounts with `users.manage` (the people
+  who decide who gets a shell where). Nobody else learns which host is a crown jewel: the API
+  (`/api/hosts`, **Explain access**) leaves the mark out for other accounts and for every
+  automation token, because "this host runs WebTerm" is a map for an attacker.
 
 What the confirmation does **not** cover, deliberately or for now:
 

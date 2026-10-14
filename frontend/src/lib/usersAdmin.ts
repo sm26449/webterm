@@ -198,7 +198,8 @@ export type ExplainBinding = Binding & {
 export type ExplainNote = { code: string; binding?: number; n?: number }
 export type Explain = {
   user: { id: number; email: string; self: boolean }
-  host: { id: number; name: string; folder: string; tags: string[]; crown_jewel: boolean; require_2fa: boolean }
+  /** `crown_jewel`: only for an Owner or users.manage (3.6.10 review) */
+  host: { id: number; name: string; folder: string; tags: string[]; crown_jewel?: boolean; require_2fa: boolean }
   bindings: ExplainBinding[]
   effective: string[]
   shell: boolean

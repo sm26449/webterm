@@ -104,7 +104,8 @@ export interface Host {
   name: string
   note: string
   alerts_muted?: boolean
-  /** 3.6.10: rulează gateway-ul / îi ţine backup-urile — un shell aici = Owner (insignă coroană) */
+  /** 3.6.10: rulează gateway-ul / îi ţine backup-urile — un shell aici = Owner (insignă coroană).
+      Trimis DOAR unui Owner sau cuiva cu users.manage (revizuirea 3.6.10); absent pentru restul. */
   crown_jewel?: boolean
   /** 3.6.10, doar pentru Owner: pare hostul gateway-ului (ales pentru reînnoirea certificatelor) */
   crown_hint?: 'gateway' | null
