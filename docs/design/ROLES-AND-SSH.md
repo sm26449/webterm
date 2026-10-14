@@ -1576,6 +1576,13 @@ User guide: [docs/SSO.md → SCIM provisioning](../SSO.md#scim-provisioning-3611
   /api/enroll-groups` (a badge in Settings → Infrastructure & tokens) and by the System health
   check `tokens.enroll_orphans` (warning, recommendation, jump to the list) — never revoked
   automatically.
+- **Verification fixes (before release):** a user create is **never** a 409 any more, not even
+  "already provisioned" under the same userName: Authentik 2026.8.2 `users.py` reads `resources`
+  from the search response without lower-casing it and then calls `lower_case_keys` on a list, so
+  it cannot resolve any user 409 and the page aborts. "Already provisioned" → 400 `invalidValue`
+  (Authentik's discovery, on by default, re-links its own accounts); the group-name 409 on create
+  stays (`groups.py` reads the response correctly). The `_refuse` audit throttle key now includes
+  the body's first email, so one userName refused for two accounts leaves a row for each.
 - **Final re-review fixes (before release):** "already provisioned" is a 409 only when the
   matched row's `scim_user_name` equals the incoming `userName` (case-insensitive) AND the row is
   listable by `list_users` (`scim._LISTABLE_SQL` / `_listable`, one predicate) — i.e. exactly when
@@ -1589,7 +1596,7 @@ User guide: [docs/SSO.md → SCIM provisioning](../SSO.md#scim-provisioning-3611
   with that email + `active:true` then re-enabled it under SCIM — knowing only the `sub` was
   enough): after the local-password, Owner-level and last-Owner checks the row is disabled IN
   PLACE (`accounts.disable(by='scim-identity')`; no `scim_managed` / `scim_id` / `externalId`
-  change), the answer is 400 `invalidValue` with no resource and no email, audit + warning alert
+  change), the answer is 400 `invalidValue` with no resource and no email, audit + critical alert
   (`scim_disabled_unlinked`) once an hour per account. `scim-identity` is not `scim*`:
   `_enable_check` refuses it (only an Owner re-enables, Settings or `app.admin enable`), and
   `accounts.disable` never moves it back (it may move `scim`/`scim-delete` → `scim-identity`, never

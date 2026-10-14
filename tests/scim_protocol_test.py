@@ -319,7 +319,11 @@ async def test_users(owner, tok):
     check("…nicio parolă nu-l deschide", r.status_code == 401)
     await lc.aclose()
     r = await c.post("/scim/v2/Users", json=ak_user("ana", "ana@x.co", ext="ext-ana"))
-    check("POST duplicat → 409 uniqueness", is_scim_error(r, 409) and r.json().get("scimType") == "uniqueness")
+    # verificarea 3.6.11: niciodată 409 la crearea unui user — Authentik 2026.8.2 nu-l poate rezolva
+    # (citeşte `resources` fără lower-case, apoi lower_case_keys pe o listă) şi abandonează pagina
+    check("POST duplicat → 400 invalidValue „already provisioned” (nu 409)", is_scim_error(r, 400)
+          and r.json().get("scimType") == "invalidValue"
+          and "already provisioned" in r.json().get("detail", ""), "%s %s" % (r.status_code, r.text[:160]))
     # re-revizuirea finală 3.6.11 (MEDIUM 1): 409 DOAR când căutarea Authentik de după el
     # (`userName eq "<userName primit>"`) găseşte contul; altfel Authentik abandonează restul paginii
     n_au = await db.fetchone("SELECT COUNT(*) AS c FROM audit_log WHERE detail LIKE '%already linked%'")

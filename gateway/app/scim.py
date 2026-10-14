@@ -579,6 +579,16 @@ async def _audit(p: dict, method: str, path: str, status: int, text: str,
                        actor_id=actor_id, via="scim")
 
 
+def _who_email(body) -> str:
+    """The first email of a POST body, lower-cased and bounded (throttle key only)."""
+    b = _lower(body) if isinstance(body, dict) else {}
+    emails = b.get("emails")
+    for e in (emails if isinstance(emails, list) else [])[:10]:
+        if isinstance(e, dict) and isinstance(e.get("value"), str):
+            return e["value"].lower()[:STR_MAX]
+    return ""
+
+
 def _who(body, *keys) -> str:
     """Who a POST is about (for `_refuse`'s throttle key): the first of `keys` present in the raw
     body, lower-cased, bounded. Never trusted for anything else."""
@@ -852,7 +862,7 @@ async def _disable_unlinked(p: dict, target, path: str) -> ScimError:
             "the identity provider deactivated a user whose SSO identity matches %s but whose "
             "email differs; WebTerm disabled the account without letting SCIM manage it — only "
             "an Owner can re-enable it" % target["email"], p["ip"], ACTOR, fleet=True,
-            what_key="scim_disabled_unlinked", what_params={"account": target["email"]})
+            severity="critical", what_key="scim_disabled_unlinked", what_params={"account": target["email"]})
     return ScimError(400, _UNLINKED_DETAIL, "invalidValue")
 
 
@@ -898,13 +908,16 @@ async def create_user(request: Request, p=Depends(require_scim)):
                     await _alert_local_refused(target["email"], p["ip"])
                     raise ScimError(403, _LOCAL_PW_DETAIL)
                 if target["scim_id"]:
-                    # final re-review 3.6.11: 409 only when Authentik's follow-up search
-                    # (`userName eq "<incoming userName>"`, exactly list_users' predicate) FINDS
-                    # this account — otherwise the empty search aborts the rest of the sync page
-                    # (two IdP users sharing an email; a renamed userName with a lost link)
+                    # verification 3.6.11: NEVER 409 on a user create. Authentik 2026.8.2 cannot
+                    # resolve it (users.py reads `resources` without lower-casing the response,
+                    # then calls lower_case_keys on a list → AttributeError), and the uncaught
+                    # error aborts the rest of the sync page. A 400 is a per-object warning;
+                    # Authentik's discovery re-links an existing account by username/email.
                     if _listable(target) and (target["scim_user_name"] or "").lower() \
                             == user_name.lower():
-                        raise ScimError(409, "this user is already provisioned", "uniqueness")
+                        raise ScimError(400, "this user is already provisioned (id %s); "
+                                             "re-link it with the provider's discovery"
+                                        % target["scim_id"], "invalidValue")
                     raise ScimError(400, "this WebTerm account is already linked to another "
                                          "identity-provider user", "invalidValue")
                 # review 3.6.11 — taking over an account SCIM did not create:
@@ -1007,7 +1020,10 @@ async def create_user(request: Request, p=Depends(require_scim)):
         await _note_error(400, "POST %s: %s" % (path, e.detail))
         raise
     except ScimError as e:
-        await _refuse(p, "POST", path, e, _who(body, "externalId", "userName"))
+        # the throttle key carries the email too: one userName refused for two different
+        # accounts must leave an audit row for each
+        await _refuse(p, "POST", path, e, "%s|%s" % (_who(body, "externalId", "userName"),
+                                                      _who_email(body)))
         raise
     return _json(await _user_json(u), 201)
 

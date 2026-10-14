@@ -153,20 +153,21 @@ membership to WebTerm at once; plus a KDE Plasma (Breeze) theme style. No agent 
 - **Final re-review of SCIM: no page-aborting 409 is left, and the SCIM token cannot take over an
   account it only knows the SSO identity of.**
   - *Two IdP users sharing an email (or a renamed userName whose link Authentik lost) still got a
-    409 "already provisioned"* — Authentik's follow-up search by the new userName found nothing
-    and aborted the sync page. 409 now only when that search finds the account; otherwise 400
-    "already linked to another identity-provider user", a per-user warning. The rare create race
-    with an SSO sign-in is a 503 + `Retry-After` (Authentik retries at its next sync) instead of
-    a 409.
+    409 "already provisioned"*, and Authentik 2026.8.2 cannot read the result of the search it runs
+    after a user 409 at all, so any such 409 aborted the rest of the sync page. A user create is
+    now never a 409: "already provisioned" and "already linked to another identity-provider user"
+    are 400s, per-user warnings, and Authentik's discovery (on by default) re-links its own
+    accounts. The rare create race with an SSO sign-in is a 503 + `Retry-After` (Authentik retries
+    at its next sync). A group name that already exists is still a 409; Authentik resolves that one.
   - *Whoever held the SCIM token and knew only a person's SSO `sub` could take over their
     account.* A create with that `sub`, another email and `active:false` adopted the account,
     answered with its real email, and a second request with that email and `active:true`
     re-enabled it under SCIM. Now such an account is disabled where it is — never linked to SCIM —
     and the answer is a 400 that names no email. Only an Owner can re-enable it (Settings → Users
-    & roles shows why it was disabled); the IdP cannot, whatever it sends later. Audited and
-    alerted (warning) once an hour.
-  - *Each refused SCIM request wrote an audit row at every sync.* Now once an hour per user and
-    reason.
+    & roles shows why it was disabled); the IdP cannot, whatever it sends later. Audited, and a
+    critical alert once an hour.
+  - *Each refused SCIM request wrote an audit row at every sync.* Now once an hour per user, email
+    and reason.
   - provision's SCIM user filter starts with the `wt-scim-exclude` group, so re-running provision
     keeps it. docs/SSO.md: put only accounts SCIM must never manage there — an already linked user
     in it no longer has their deactivation pushed.

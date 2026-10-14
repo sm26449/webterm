@@ -207,10 +207,12 @@ What SCIM **never** does — these are refused, audited and shown as the *last e
 **per-object warning** in the provider's sync status and carries on with the next user. A 409
 means "it already exists, find it": Authentik then searches `filter=userName eq "…"`, and when
 the account is not a SCIM account (a break-glass or an Owner it may not manage) the search finds
-nothing and Authentik **aborts the rest of that sync page** (up to 100 users). WebTerm therefore
-answers 409 only where the search resolves it: a user that is already provisioned **under the
-same userName** (otherwise 400 "already linked to another identity-provider user") and a group
-name that already exists (on create). A user an SSO sign-in created in the very same instant is a
+nothing and Authentik **aborts the rest of that sync page** (up to 100 users). Authentik 2026.8.2 cannot even read
+the search result for users, so WebTerm **never answers 409 to a user create**: an account that
+is already provisioned is a 400 "already provisioned" (Authentik's *discovery*, on by default,
+re-links it by username or email at the next full sync), and one linked under another userName
+is a 400 "already linked to another identity-provider user". The only 409 left is a group name
+that already exists on create — Authentik's group search resolves it. A user an SSO sign-in created in the very same instant is a
 **503** with `Retry-After` (transient: a warning, the next sync adopts it). WebTerm audits a
 repeated refusal once an hour per user and reason; the SCIM panel's *last error* shows every one.
 
@@ -367,7 +369,7 @@ SCIM (audited).
 | Authentik: `403 … SSO (OIDC) is not configured` | set the `WEBTERM_OIDC_*` variables first |
 | Authentik: per-object warning `403 … local password` | a local (break-glass) account has that email: SCIM never manages it. Keep that IdP user out of the provider's scope (`wt-scim-exclude`, above), use another email in the IdP, or remove that account's local password (it becomes SSO-only and can then be adopted) |
 | Authentik: per-object warning `403 … Owner-level role given in WebTerm` | the person holds Owner (or an Owner-only permission) granted by hand: only an Owner manages that account. Put the IdP user in `wt-scim-exclude`, or give the role through an SSO group instead |
-| Authentik: `409 … already provisioned` | Authentik lost its link; it searches with `filter=userName eq "…"` and re-links by itself |
+| Authentik: per-object warning `400 … already provisioned` | Authentik lost its link to an account it created; keep *discovery* on in the SCIM provider (the default) and the next full sync re-links it by username or email |
 | Authentik: per-object warning `400 … already linked to another identity-provider user` | the WebTerm account matching that user (by email or SSO identity) is already managed by SCIM under another userName: two IdP users share an email, or the user was renamed after Authentik lost its link. Give each IdP user its own email, or delete the stale WebTerm account (Settings → Users & roles) so the next sync provisions it again |
 | Authentik: per-object warning `503`, `Retry-After` | the user signed in with SSO at the very moment SCIM created them; the next sync adopts the account — nothing to do |
 | Authentik: per-object warning `400 … has a different email … WebTerm disabled that account` | the IdP deactivated a user whose SSO identity matches a WebTerm account with another email; WebTerm disabled that account without linking it to SCIM. If it is the same person, fix the email (IdP or WebTerm) and have an Owner re-enable the account in Settings → Users & roles |

@@ -660,7 +660,7 @@ async def test_rereview2(owner, c):
     check("…auditat şi avertizat O DATĂ pe oră (scim_disabled_unlinked), nu la fiecare sincronizare",
           n_au == 0 and await audit_n("%matched g@x.co by externalId only%") == 1
           and await n_alerts("scim_disabled_unlinked", "g@x.co") == 1
-          and await alert_of("scim_disabled_unlinked", "warning") is not None)
+          and await alert_of("scim_disabled_unlinked", "critical") is not None)
     leak = [await c.get("/scim/v2/Users", params={"filter": q}) for q in
             ('externalId eq "sub-g"', 'emails eq "g@x.co"', 'userName eq "g"')]
     st = (await owner.get("/api/settings/scim")).json()
