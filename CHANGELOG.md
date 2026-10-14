@@ -9,6 +9,65 @@ back.
 
 ## [Unreleased]
 
+Roles, part 2: last sign-in per account, "Explain access", time-bound roles, crown-jewel hosts, automation tokens with a role and a scope. No agent change (agent stays 58).
+
+### Added
+- **Last sign-in on every account.** Why: with several people on one instance, an Owner had no way
+  to see which accounts are actually used — the first question of any access review. Settings →
+  Users & roles → Accounts now shows when each account last signed in and how (password,
+  password + 2FA, passkey, SSO), "never", or "not recorded" for accounts older than this release
+  (the gateway did not record it before; it now stamps every successful sign-in). Only accounts
+  with `users.manage` see it.
+- **Explain access.** Why: "why can Ana open files on web01?" (and "why can't I?") had no answer
+  short of reading every binding by hand, and SSO mappings made it worse. `GET
+  /api/authz/explain?user=&host=` lists the bindings that apply to that host — direct or from
+  an SSO group (with the group), role, scope, expiry — what each one allows, the effective set, and
+  notes (an expired binding that is ignored, a crown-jewel host, 2FA, capped tokens). The account
+  drawer has an **Explain access** panel; every account can ask about itself under **Your
+  access**. Asking about someone else needs `users.manage`; the host must be one you can see
+  (otherwise 404, the same answer as a host that does not exist), so a scoped admin learns
+  nothing about hosts outside their scope.
+- **Time-bound roles.** Why: "Operator on prod for the afternoon" used to mean remembering to take
+  it away. A new binding can be permanent or last 4 hours, 1 day, 7 days or until a date (at most
+  366 days); chips say "expires in …" and offer **Make permanent**
+  (`POST /api/users/{uid}/bindings/{bid}/expiry`; making it last longer follows the granting
+  rules, ending it sooner the removal rules). Access ends at the second it expires — enforced
+  when permissions are read, not by a timer — and the janitor then deletes the row, wakes open
+  terminals, revokes live shares and replay links the person can no longer create, writes
+  "role binding expired" to the audit log and tells the person. **The last permanent Owner can
+  never be made time-bound, removed or deleted** (a time-bound Owner no longer counts as "another
+  Owner"), and `python3 -m app.admin promote` turns a time-bound Owner binding into a permanent
+  one. SSO-derived bindings stay permanent (they follow the group).
+- **Crown-jewel hosts.** Why: the host that runs WebTerm (or holds its backups) is the instance —
+  a shell there reads the database and the vault key — yet nothing stopped an Admin from handing
+  an Operator role over the folder it sits in. An Owner can now mark a host as a crown jewel (host
+  menu; unmarking asks for the password and second factor; both audited and alerted). The mark
+  answers with the non-Owner roles that already give a shell there, for review. From then on,
+  granting a non-Owner role with any ⚑ permission over a scope that includes it — a binding, a new
+  account's role, an SSO group mapping — or moving it into a folder/tag that already has such
+  grants is refused (409 `authz.crownJewel` / `authz.crownJewelMove`, naming the hosts) until
+  the person confirms in a blocking dialog; the confirmed grant is audited as such. A crown badge
+  shows on the host in the sidebar and on dashboard cards for everyone who can see it. The host
+  picked as the gateway host for certificate renewals gets a "mark it?" hint (Owners only).
+- **Automation tokens with a role and a scope.** Why: a token could only be "read" or "run" over
+  everything its creator could reach. Creating a token now picks a role (built-in or custom;
+  default Viewer — the least) and a scope (all / folder / tag / host); the list shows both. A
+  token can do the intersection of its read/run scopes, its role, its scope and what its creator
+  can do *now* — demote the creator and the token shrinks on the next request.
+
+### Security
+- Tokens can never hold administration or Owner-only permissions, whatever their role: an
+  explicit deny-list (`authz.TOKEN_NEVER`: users, roles, settings, tokens, shares, snippets,
+  history wipe, backups, signing, certificates, adding/exporting hosts, the audit log, and the host
+  permissions that hand out access — deploy keys, writable shares, forwards, host admin/edit,
+  other people's sessions, saved connections). The Owner role is refused as a token role. Token
+  routes are unchanged (status, hosts, sessions, run), tokens still never pass a 2FA step-up, and
+  tokens created before this release behave exactly as before.
+- Not covered by the crown-jewel confirmation, documented in docs/ROLES.md: mappings from
+  `WEBTERM_OIDC_ROLE_MAP` (the server's `.env` — the Owner's own decision on the host), roles
+  edited to add a ⚑ permission while already bound over a crown jewel, and hosts newly enrolled
+  into a folder (they are never crown jewels until marked).
+
 ## [3.6.9] — 2026-10-13 · agent (58)
 
 Uploads into root-owned folders explain why and offer a verified "upload and move as root"; agent errors shown; Python < 3.6 detected; a portable Python for old hosts; upgrade.sh runs the release's own script first. No agent change (agent stays 58).

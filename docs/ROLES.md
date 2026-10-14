@@ -28,7 +28,8 @@ are marked ⚑ (shell-equivalent) in the reference below and in the app.
 
 One more sharp edge: **a host that runs WebTerm itself** (or holds its backups) is equivalent to
 Owner. Anyone with a shell there can read the database and the vault key. Only bind Owners over
-such a host.
+such a host — and mark it as a [crown jewel](#crown-jewel-hosts) so WebTerm asks before anyone
+else gets a shell there.
 
 ## Built-in roles
 
@@ -118,7 +119,76 @@ The rules the server enforces:
 - you can only grant what you hold yourself, over a scope you hold it on;
 - only an Owner can grant, change or remove the Owner role;
 - you cannot change your own access;
-- the last Owner cannot be removed or deleted.
+- the last **permanent** Owner cannot be removed, deleted or made time-bound (a time-bound Owner
+  does not count: when it ends, someone must still own the instance).
+
+Each account in the list shows when it **last signed in** and how (password, password + 2FA,
+passkey or SSO), or "never". Accounts created before 3.6.10 show "not recorded" until their next
+sign-in: earlier releases did not record it. Only accounts with `users.manage` see this.
+
+## Time-bound roles
+
+When you give a role, pick how long it lasts: **Permanent**, **4 hours**, **1 day**, **7 days** or
+**until a date** (at most 366 days). A time-bound role shows "expires in …" on its chip.
+
+- Access ends at the second it expires. This is enforced every time permissions are read, not by a
+  timer, so a late or stopped background job cannot extend it.
+- About a minute later the gateway removes the binding, re-checks open terminals (they switch to
+  read-only or close), revokes live shares and replay links the person can no longer create,
+  writes `role binding expired` to the audit log and tells the person.
+- **Make permanent** turns a time-bound role into a permanent one. It follows the same rules as
+  giving the role. (The API, `POST /api/users/{uid}/bindings/{bid}/expiry`, can also move the end
+  earlier; that follows the rules for removing a role.)
+- The last permanent Owner can never be made time-bound. A time-bound Owner is still a full Owner
+  while it lasts — only give one to someone you would trust permanently.
+- Roles that come from an SSO group stay permanent: they follow the group. Change the mapping
+  instead. A time-bound role over the same role and scope as an SSO-derived one is refused.
+- Break-glass `python3 -m app.admin promote` always leaves a permanent Owner binding.
+
+## Explain access
+
+"Why can Ana open files on web01?" — open the account in **Accounts** and use **Explain access**,
+then pick a host. You get one sentence ("Ana can open terminals, open and change files on web01
+because of: Operator · tag db (SSO group wt-db)") and, for each role that applies there: where it
+comes from (given directly, an SSO group, the 3.6 upgrade), its scope, when it expires, and what it
+allows. Notes explain the rest: a time-bound role that expired and no longer counts, instance
+permissions that are ignored because the binding is not over all hosts, a crown-jewel host, 2FA,
+automation tokens that are capped by this access.
+
+Everyone can ask about themselves under **Your access → Why can (or can't) I…?**. Asking about
+another account needs `users.manage`, and the host must be one *you* can see: a host outside your
+scope answers exactly like a host that does not exist, so the tool reveals nothing new
+(`GET /api/authz/explain?user=<id>&host=<id>`).
+
+## Crown-jewel hosts
+
+A host that runs the WebTerm gateway or holds its backups is a **crown jewel**: a shell there is
+the same as being Owner. An Owner marks it from the host's ⋯ menu (**Mark as crown jewel**). If the
+host is the one picked as the gateway host for certificate renewals, the menu suggests it.
+
+- Only an Owner can mark or unmark a host. Unmarking asks for your password and second factor.
+  Both are audited and alerted.
+- Marking answers with the roles (bindings and SSO mappings) that already give a non-Owner a shell
+  there — review them; the mark does not remove anything.
+- From then on, giving a **non-Owner** role that has any ⚑ permission over a scope that includes
+  the host — a binding, the role of a new account, an SSO group mapping — needs an explicit
+  confirmation in a blocking dialog (the API answers `409 authz.crownJewel` with the hosts until
+  the request carries `confirm_crown_jewel: true`). The same applies when you move a crown-jewel
+  host into a folder or give it a tag over which such roles exist (`409 authz.crownJewelMove`).
+  The confirmed change is written to the audit log as such.
+- Viewer-like roles (no ⚑ permission) and Owner need no confirmation.
+- A crown badge shows next to the host for everyone who can see it.
+
+What the confirmation does **not** cover, deliberately or for now:
+
+- mappings from `WEBTERM_OIDC_ROLE_MAP` in the server's `.env` (the Owner's own decision on the
+  host; they can never grant Owner anyway);
+- a custom role that is edited to add a ⚑ permission while it is already bound over a crown jewel
+  (the role editor already requires `roles.manage` and no-escalation);
+- making an existing time-bound role permanent.
+
+Agents do not report which containers or volumes run on a host, so WebTerm cannot detect a
+crown jewel by itself beyond the gateway-host hint.
 
 When a binding is removed, its effect is immediate: open terminals of that person switch to
 read-only or close, their forwarded-app tickets stop working on the next request, and any live
@@ -317,10 +387,20 @@ Automation tokens keep their `read` / `run` scopes and are additionally capped:
 
 - a token can never do more than **its creator can do now**. Demote the creator and the token
   shrinks; delete the creator and the token stops working;
-- when you create a token you can narrow it further with a role and a scope (for example
-  "Viewer on host web01");
+- when you create a token (Settings → Infrastructure) you pick a **role** and a **scope** (for
+  example "Viewer on host web01"). The default is Viewer over all hosts — the least. Built-in
+  roles except Owner and, if you can read them, custom roles are offered; "No role cap" creates a
+  token like before 3.6.10 (only its read/run scopes and its creator limit it). The list shows each
+  token's role and scope;
+- what a token can do = its read/run scopes ∩ its role ∩ its scope ∩ what its creator can do now;
+- a token never gets administration or Owner-only permissions, whatever its role: `users.manage`,
+  `roles.manage`, `settings.manage`, `tokens.*`, `shares.manage`, `snippets.manage`,
+  `history.clear`, `backups.manage`, `signing.manage`, `certs.renew`, `hosts.create`,
+  `hosts.export`, `audit.view`, and on hosts `host.admin`, `host.edit`, `deploykey.manage`,
+  `share.live_write`, `session.manage`, `forward.manage`, `toolbox.manage` (`authz.TOKEN_NEVER`);
+  the Owner role is refused;
 - tokens are still accepted only on the status, host list, session list and run endpoints, and
-  still cannot reach hosts that require 2FA.
+  still cannot reach hosts that require 2FA (a token cannot present a second factor).
 
 ## Upgrading from 3.5
 

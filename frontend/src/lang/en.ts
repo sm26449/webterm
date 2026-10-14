@@ -1394,7 +1394,7 @@ const en: Lang = {
     'term.readonlyPill': "watching (read-only)",
     'term.readonlyBody': "Your role lets you watch this session, not type into it.",
     'help.roles.title': "Roles and scopes",
-    'help.roles.body': "Each account gets roles over a scope: all hosts, a folder, a tag or a single host. Owners and Admins grant them here. You can only grant what you hold yourself, only an Owner hands out Owner, and the last Owner cannot be removed. Changes apply immediately and are audited.",
+    'help.roles.body': "Each account gets roles over a scope: all hosts, a folder, a tag or a single host. Owners and Admins grant them here. You can only grant what you hold yourself, only an Owner hands out Owner, and the last permanent Owner cannot be removed. A role can be permanent or time-bound (4 hours, 1 day, 7 days, a date). \"Explain access\" shows why an account can or cannot act on a host. Changes apply immediately and are audited.",
     'err.authz.denied': "Your role does not allow this here.",
     'err.authz.ownerOnly': "Only an Owner can do that to an Owner (or grant the Owner role).",
     'err.authz.selfBinding': "You cannot change your own access. Ask another Owner or Admin.",

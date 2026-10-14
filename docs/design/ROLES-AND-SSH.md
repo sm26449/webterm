@@ -618,7 +618,7 @@ which hosts exist and are 2FA.
 
 - **Time-bound bindings.** `role_bindings.expires` exists from day one. The janitor deletes
   expired rows and bumps the epoch. The UI offers "for 4h / 1d / 7d". This is cheap and useful,
-  so it is targeted at 3.6.2.
+  so it is targeted at 3.6.2. *(Shipped in 3.6.10, §7.3.)*
 - **Access requests (just-in-time).** In the style of Teleport and Warpgate 0.29:
   - a user requests (role, scope, duration, reason);
   - approvers (holders of `users.manage` over that scope, never the requester) approve in the UI
@@ -1414,6 +1414,38 @@ Code: `ssomap.parse_role_map` / `reconcile_config` (called once from `main.lifes
   resolved again only at the next restart).
 - **Not built:** SCIM (push de-provisioning). Automation tokens of an SSO user keep the user's
   current bindings, which change only at an SSO sign-in/step-up or by hand.
+
+### 7.3 Implementation notes (roles, part 2, 3.6.10)
+
+- **Last sign-in:** `users.last_login` / `last_login_method` (`password`, `password_2fa`,
+  `passkey`, `sso`), stamped by `security.create_web_session(method=…)` on the four real sign-in
+  paths (setup, password, passkey, OIDC callback); internal sessions pass no method and stamp
+  nothing. `app_settings.last_login_since` (written once) lets the UI say "not recorded" instead of
+  "never" for older accounts. In `GET /api/users` only for `users.manage`.
+- **Explain (§A.9, §A.11.9):** `GET /api/authz/explain?user=&host=` is a SELF route; the handler
+  answers 403 for another account without `users.manage` *before* looking the account up (no
+  id oracle), then 404 `host.missing` (the authz body) when the host is not visible to the caller.
+  Only bindings that match the host are returned (a binding over another folder could name a scope
+  the caller cannot see). `authz.explain` re-derives the effective set from the non-expired
+  matching bindings with the same `Grants` code the checks use.
+- **Time-bound bindings (§A.10):** read-time enforcement (`_load_bindings`) is the boundary; the
+  reaper (60 s) calls `api.sweep_expired_bindings` → `authz.sweep_expired_bindings` under the
+  binding lock, then per account `bump_forward_epoch` + `_revoke_unauthorized_derived`, an audit
+  row (`/janitor/binding-expired`, actor `system`) and an `access_expired` alert.
+  `owner_count` now counts permanent Owners @ all only; that single change makes binding removal,
+  account deletion, SSO re-sync and the local-password path refuse to remove the last permanent
+  Owner. `check_owner_expiry` refuses a time-bound Owner @ all unless another permanent Owner
+  exists. Expiry bounds: ≥ 60 s ahead, ≤ 366 days.
+- **Crown jewels (§A.11.2):** `authz.check_crown` runs after `check_can_grant` (so every host it
+  names is visible to the granter) and again under the lock; `crown_risky` = not Owner and any
+  host permission in `SHELL_PERMS`. `crown_exposure(ref, before=old_ref)` drives both the "already
+  exposed" list returned when marking and the folder/tag move check in `PATCH /api/hosts/{id}`.
+  The only detection hint is the host designated for certificate renewals (`cert_renew_host_id`):
+  agents do not report containers or volumes, and adding that would be an agent change.
+- **Tokens (§A.6.5):** creation resolves any role (`role` key or `role_id`), refuses Owner, and
+  applies `check_can_grant` over the token's scope. `grants_for_token` subtracts
+  `TOKEN_NEVER` from the ceiling; legacy (`role_id IS NULL`) tokens keep the read/run ceiling,
+  which never intersected `TOKEN_NEVER` except `security.view`, deliberately kept.
 
 ---
 

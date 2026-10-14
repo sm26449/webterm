@@ -1416,7 +1416,7 @@ const ro: Lang = {
     'term.readonlyPill': "urmărești (doar-citire)",
     'term.readonlyBody': "Rolul tău te lasă să urmărești sesiunea, nu să tastezi în ea.",
     'help.roles.title': "Roluri și scope-uri",
-    'help.roles.body': "Fiecare cont primește roluri peste un scope: toate hosturile, un folder, un tag sau un singur host. Owner-ii și Admin-ii le dau de aici. Poți da doar ce ai tu, doar un Owner dă rolul Owner, iar ultimul Owner nu poate fi scos. Schimbările se aplică imediat și sunt auditate.",
+    'help.roles.body': "Fiecare cont primește roluri peste un scope: toate hosturile, un folder, un tag sau un singur host. Owner-ii și Admin-ii le dau de aici. Poți da doar ce ai tu, doar un Owner dă rolul Owner, iar ultimul Owner permanent nu poate fi scos. Un rol poate fi permanent sau temporar (4 ore, 1 zi, 7 zile, o dată). „Explică accesul” arată de ce un cont poate sau nu poate acționa pe un host. Schimbările se aplică imediat și sunt auditate.",
     'err.authz.denied': "Rolul tău nu permite asta aici.",
     'err.authz.ownerOnly': "Doar un Owner poate face asta unui Owner (sau poate da rolul Owner).",
     'err.authz.selfBinding': "Nu-ți poți schimba singur accesul. Cere altui Owner sau Admin.",
