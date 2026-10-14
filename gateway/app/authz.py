@@ -950,6 +950,25 @@ async def seed(conn) -> None:
                     "role", len(legacy_owner), ", ".join(
                         "#%d %r" % (i, (n or "")[:60]) for i, n in legacy_owner[:20])
                     + (" …" if len(legacy_owner) > 20 else ""))
+    # 3.6.10 (re-review): before 3.6.10 a time-bound Owner counted as "another Owner", so an
+    # instance may hold none that is permanent; time-bound Owners cannot repair that (they cannot
+    # grant beyond their own end) — say it at every boot, with the way out
+    try:
+        cur = await conn.execute(
+            "SELECT COUNT(*) FROM users u WHERE EXISTS (SELECT 1 FROM role_bindings b JOIN roles r"
+            " ON r.id=b.role_id WHERE b.user_id=u.id AND r.key='owner' AND b.scope_kind='all'"
+            " AND b.expires IS NULL)")
+        permanent_owners = (await cur.fetchone())[0]
+        await cur.close()
+        cur = await conn.execute("SELECT COUNT(*) FROM users")
+        n_users = (await cur.fetchone())[0]
+        await cur.close()
+    except Exception:                      # noqa: BLE001 — a warning must never stop the boot
+        permanent_owners, n_users = 1, 0
+    if n_users and not permanent_owners:
+        log.warning("roles: no account holds a PERMANENT Owner role over all hosts — when the "
+                    "time-bound ones end, nobody can administer this instance; fix: "
+                    "python3 -m app.admin promote <email>")
     cur = await conn.execute(
         "SELECT email FROM users u WHERE NOT EXISTS"
         " (SELECT 1 FROM role_bindings b WHERE b.user_id=u.id)")

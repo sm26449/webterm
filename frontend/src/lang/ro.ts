@@ -1466,6 +1466,7 @@ const ro: Lang = {
     'err.authz.bindingChanged': "Rolul a fost schimbat între timp. Reîncarcă și încearcă din nou.",
     'err.authz.granterExpires': "Dreptul tău de a acorda asta se termină la {until}, deci ce acorzi nu poate dura mai mult. Alege un sfârșit până atunci sau cere cuiva cu acces permanent (maparea unui grup SSO și permisiunile noi într-un rol folosit contează ca permanente).",
     'err.authz.crownJewel': "Asta dă un shell pe un host crown-jewel ({hosts}). Confirmă ca să-l acorzi.",
+    'err.host.moveNeedsOwner': "Această schimbare de folder sau etichetă cere un Owner sau pe cineva care administrează conturile.",
     'err.authz.crownJewelMove': "Mutarea lui {host} dă un shell pe el încă {n} rol(uri). Confirmă ca să-l muți.",
     'err.host.crownEphemeral': "O țintă „conectează o dată” nu poate fi crown jewel.",
     'err.token.roleNotAllowed': "Un token de automatizare nu poate avea rolul Owner. Alege unul mai restrâns.",

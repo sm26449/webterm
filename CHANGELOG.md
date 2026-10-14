@@ -96,6 +96,12 @@ Roles, part 2: last sign-in per account, "Explain access", time-bound roles, cro
   - *Tokens could share sessions, create replay links, use serial consoles and wake hosts.* Why:
     the first two hand access to outsiders; none of it is automation's business. Added to
     `authz.TOKEN_NEVER`. No existing token ever had these.
+- **Re-review of those fixes (low).** Moving a crown-jewel host by someone who cannot see the mark
+  answered with its name and the exposed bindings — the mark the host list hides from them; now a
+  generic `403 host.moveNeedsOwner`. A custom role used only by automation tokens counted as
+  unused, so a time-bound editor could widen those tokens' cap for good; token use now counts.
+  Boot warns when no account holds a permanent Owner role (possible on instances upgraded from
+  3.6.2–3.6.9, where a time-bound Owner counted), pointing to `admin promote`.
 
 ## [3.6.9] — 2026-10-13 · agent (58)
 

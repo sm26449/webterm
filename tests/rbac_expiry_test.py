@@ -260,6 +260,16 @@ async def main():
     r = await ta.patch("/api/roles/%d" % used_rid, json={"name": "Used2", "perms": ["host.view"],
                                                          "current_password": PW})
     check("…redenumirea fără permisiuni noi merge", r.status_code == 200, r.text[:160])
+    # re-revizuire: un rol folosit DOAR de un token e tot „folosit" (plafonul tokenului e acces)
+    rr = await owner.post("/api/roles", json={"name": "TokOnly", "perms": ["host.view"],
+                                              "current_password": U.OWNER_PW})
+    tok_rid = rr.json()["id"]
+    await db.execute("INSERT INTO api_tokens(name, token_hash, scopes, created, expires, role_id)"
+                     " VALUES('t-only', 'x' || hex(randomblob(16)), 'read', 0, ?, ?)", time.time() + 3600, tok_rid)
+    r = await ta.patch("/api/roles/%d" % tok_rid, json={"name": "TokOnly", "perms": ["host.view", "run"],
+                                                        "current_password": PW})
+    check("Admin temporar adaugă o permisiune unui rol folosit DOAR de un token → 403 authz.granterExpires",
+          r.status_code == 403 and U.code(r) == "authz.granterExpires", r.text[:160])
     # Owner temporar: aceeaşi regulă
     to_id, to_bid, to = await temp_user("towner@x.co", "owner")
     r = await to.post("/api/users/%d/bindings" % vic, json=bb("viewer", "folder", "lab", pw=PW))

@@ -250,6 +250,25 @@ async def main():
     check("editare fără schimbare de folder/tag → fără confirmare", r.status_code == 200, r.text[:120])
     r = await owner.patch("/api/hosts/%d" % web, json={"folder": "lab"})
     check("un host OBIŞNUIT mutat în lab → 200 (regula e doar pentru crown-jewel)", r.status_code == 200)
+    # re-revizuire: cine NU vede steagul (hosts.create + host.edit, fără users.manage) nu-l află
+    # din 409 — primeşte un refuz generic, fără nume de host sau număr
+    mv_id = await U.add_user("mover@x.co")
+    r = await owner.post("/api/roles", json={"name": "Mover", "perms": ["hosts.create", "host.edit",
+                                             "host.view"], "current_password": U.OWNER_PW})
+    await db.execute("INSERT INTO role_bindings(user_id, role_id, scope_kind, scope_value, source,"
+                     " created) VALUES(?,?,'all','','manual',0)", mv_id, r.json()["id"])
+    authz.bump_epoch()
+    mv = await U.login("mover@x.co")
+    r = await mv.patch("/api/hosts/%d" % gw, json={"folder": "lab", "confirm_crown_jewel": True})
+    check("fără users.manage: mutarea crown-jewel expusă → 403 host.moveNeedsOwner, fără nume/număr",
+          r.status_code == 403 and U.code(r) == "host.moveNeedsOwner" and "gw01" not in r.text
+          and "crown" not in r.text.lower(), r.text[:160])
+    check("…folderul neschimbat",
+          (await db.fetchone("SELECT folder FROM hosts WHERE id=?", gw))["folder"] == "empty")
+    r = await mv.patch("/api/hosts/%d" % gw, json={"folder": "empty2"})
+    check("…o mutare care nu expune pe nimeni merge şi pentru el → 200", r.status_code == 200, r.text[:120])
+    await owner.patch("/api/hosts/%d" % gw, json={"folder": "empty"})
+    await mv.aclose()
 
     # ── indiciul „gateway" ───────────────────────────────────────────────────────────────
     await db.execute("INSERT INTO app_settings(key, value) VALUES('cert_renew_host_id', ?)"

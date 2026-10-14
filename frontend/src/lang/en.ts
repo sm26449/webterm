@@ -1444,6 +1444,7 @@ const en: Lang = {
     'err.authz.bindingChanged': "This role was changed meanwhile. Reload and try again.",
     'err.authz.granterExpires': "Your own right to grant this ends at {until}, so what you grant cannot last longer. Pick an end on or before then, or ask someone with permanent access (SSO group mappings and new permissions in a role in use count as permanent).",
     'err.authz.crownJewel': "This gives a shell on a crown-jewel host ({hosts}). Confirm to grant it.",
+    'err.host.moveNeedsOwner': "This folder or tag change needs an Owner or someone who manages accounts.",
     'err.authz.crownJewelMove': "Moving {host} gives a shell on it to {n} more role(s). Confirm to move it.",
     'err.host.crownEphemeral': "A connect-once target cannot be a crown jewel.",
     'err.token.roleNotAllowed': "An automation token cannot have the Owner role. Pick a narrower one.",

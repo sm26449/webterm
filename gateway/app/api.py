@@ -1581,7 +1581,7 @@ async def _check_role_targets(g, rid: int) -> list:
 async def _role_used(rid: int) -> bool:
     """Legat de cineva sau mapat unui grup SSO (o editare schimbă accesul altora)."""
     use = await _role_in_use(rid)
-    return bool(use["bindings"] or use["mappings"])
+    return bool(use["bindings"] or use["mappings"] or use["tokens"])   # a token's cap is access too
 
 
 async def _role_in_use(rid: int) -> dict:
@@ -7664,6 +7664,10 @@ async def update_host(host_id: int, host: HostPatch, request: Request,
             (given["folder"] or "").strip() if "folder" in given else (row["folder"] or ""),
             authz._tags(_norm_tags(given["tags"] or "")) if "tags" in given else old_ref.tags)
         crown_moved = await authz.crown_exposure(new_ref, before=old_ref)
+        if crown_moved and not _sees_crown(request):
+            # who cannot see the crown flag must not learn it from this answer either
+            raise ApiError(403, "host.moveNeedsOwner",
+                           "this folder/tag change needs an Owner or an account manager")
         if crown_moved and not host.confirm_crown_jewel:
             raise ApiError(409, "authz.crownJewelMove",
                            "moving this crown-jewel host gives a shell on it to %d more role "
@@ -7843,6 +7847,9 @@ async def update_host(host_id: int, host: HostPatch, request: Request,
                     (given["folder"] or "").strip() if "folder" in given else (cur["folder"] or ""),
                     authz._tags(_norm_tags(given["tags"] or "")) if "tags" in given else old_ref.tags)
                 crown_moved = await authz.crown_exposure(new_ref, before=old_ref)
+                if crown_moved and not _sees_crown(request):
+                    raise ApiError(403, "host.moveNeedsOwner",
+                                   "this folder/tag change needs an Owner or an account manager")
                 if crown_moved and not host.confirm_crown_jewel:
                     raise ApiError(409, "authz.crownJewelMove",
                                    "moving this crown-jewel host gives a shell on it to %d more role "
