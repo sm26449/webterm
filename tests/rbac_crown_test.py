@@ -15,7 +15,7 @@ ESTE instanţa — un shell acolo citeşte DB-ul şi cheia seifului.
 import asyncio
 
 import rbac_util as U
-from app import api, db
+from app import api, authz, db
 
 check = U.Checker()
 PW = "parolabuna1"
@@ -163,6 +163,31 @@ async def main():
           and "lab@x.co" in await last_audit("%crown-jewel host gw01 moved%"), r.text[:160])
     r = await owner.patch("/api/hosts/%d" % gw, json={"folder": "empty"})
     check("mutat într-un folder fără legături ⚑ → 200 fără confirmare", r.status_code == 200, r.text[:120])
+    # cursă (revizuirea 3.6.10): o legătură ⚑ peste folderul ţintă apare între verificarea de sus
+    # şi scriere — verificarea se repetă sub lock, pe starea de ACUM
+    real_exposure = authz.crown_exposure
+    calls = []
+
+    async def exposure_then_grant(ref, before=None):
+        out = await real_exposure(ref, before=before)
+        if not calls:
+            await U.bind(ana_id, "operator", "folder", "late")
+        calls.append(len(out))
+        return out
+    authz.crown_exposure = exposure_then_grant
+    try:
+        r = await owner.patch("/api/hosts/%d" % gw, json={"folder": "late"})
+    finally:
+        authz.crown_exposure = real_exposure
+    check("legătură ⚑ acordată între verificare şi scriere → 409 authz.crownJewelMove (re-verificat sub lock)",
+          r.status_code == 409 and U.code(r) == "authz.crownJewelMove" and calls[:1] == [0],
+          "%s %s %s" % (r.status_code, r.text[:120], calls))
+    check("…folderul neschimbat",
+          (await db.fetchone("SELECT folder FROM hosts WHERE id=?", gw))["folder"] == "empty")
+    r = await owner.patch("/api/hosts/%d" % gw, json={"folder": "late", "confirm_crown_jewel": True})
+    check("…confirmat → 200; auditul numeşte lista FINALĂ (ana@x.co @ folder late)", r.status_code == 200
+          and "folder late" in await last_audit("%crown-jewel host gw01 moved%"), r.text[:160])
+    r = await owner.patch("/api/hosts/%d" % gw, json={"folder": "empty"})
     r = await owner.patch("/api/hosts/%d" % gw, json={"name": "gw01", "note": "n"})
     check("editare fără schimbare de folder/tag → fără confirmare", r.status_code == 200, r.text[:120])
     r = await owner.patch("/api/hosts/%d" % web, json={"folder": "lab"})

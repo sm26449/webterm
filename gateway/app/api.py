@@ -7770,14 +7770,38 @@ async def update_host(host_id: int, host: HostPatch, request: Request,
         sets.append("hostkey_alarm=NULL")      # pin nou = alarma veche nu mai are obiect
     elif new_pin and not row["known_hosts"]:
         sets.append("known_hosts=?"); vals.append(new_pin)
-    if pend_given:
-        # ultima, după toate validările: revendicarea şterge rândul în aşteptare
-        sets.append("credential_encrypted=?")
-        vals.append(await _claim_pending_key(user["id"], pend_given))
-    if not sets:
+    if not sets and not pend_given:
         return {"ok": True, "changed": False}
-    vals.append(host_id)
-    await db.execute("UPDATE hosts SET %s WHERE id=?" % ", ".join(sets), *vals)
+    async with authz._lock:
+        if scope_moved:
+            # revizuirea 3.6.10: între verificarea de sus şi scriere au trecut step-up-ul şi alte
+            # aşteptări — cineva a putut marca hostul crown-jewel, mutat folderul/etichetele sau
+            # acorda o legătură ⚑ între timp. Expunerea se recalculează pe starea de ACUM, sub
+            # lock-ul legăturilor (acordările îl ţin şi ele), imediat înainte de UPDATE.
+            cur = await db.fetchone("SELECT name, folder, tags, COALESCE(crown_jewel, 0) AS cj,"
+                                    " COALESCE(ephemeral, 0) AS eph FROM hosts WHERE id=?", host_id)
+            if not cur:
+                raise ApiError(404, "host.missing", "no such host")
+            crown_moved = []
+            if cur["cj"] and not cur["eph"]:
+                old_ref = authz.HostRef(host_id, cur["folder"] or "", authz._tags(cur["tags"]))
+                new_ref = authz.HostRef(
+                    host_id,
+                    (given["folder"] or "").strip() if "folder" in given else (cur["folder"] or ""),
+                    authz._tags(_norm_tags(given["tags"] or "")) if "tags" in given else old_ref.tags)
+                crown_moved = await authz.crown_exposure(new_ref, before=old_ref)
+                if crown_moved and not host.confirm_crown_jewel:
+                    raise ApiError(409, "authz.crownJewelMove",
+                                   "moving this crown-jewel host gives a shell on it to %d more role "
+                                   "binding(s) or SSO mapping(s); confirm to move it anyway"
+                                   % len(crown_moved),
+                                   vars={"host": cur["name"] or "", "n": len(crown_moved)})
+        if pend_given:
+            # ultima, după toate validările: revendicarea şterge rândul în aşteptare
+            sets.append("credential_encrypted=?")
+            vals.append(await _claim_pending_key(user["id"], pend_given))
+        vals.append(host_id)
+        await db.execute("UPDATE hosts SET %s WHERE id=?" % ", ".join(sets), *vals)
     if "name" in given and isinstance(given["name"], str) \
             and given["name"].strip() != (row["name"] or ""):
         # 3.6.5: WEBTERM_OIDC_ROLE_MAP numeşte hostul după NUME, rezolvat doar la pornire
