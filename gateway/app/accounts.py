@@ -107,10 +107,12 @@ async def disable(uid: int, *, by: str, actor: str, ip: str, reason: str) -> Opt
     email = row["email"]
     security.clear_stepup_for(uid)
     security.bump_forward_epoch(uid)
+    # by creator ID only (second re-review 3.6.11): the email may since belong to someone else's
+    # tokens' `created_by` text; tokens from before the id were backfilled once (authz.seed) and
+    # one without an id is already dead (grants_for_token)
     ntok = (await db.fetchone(
-        "SELECT COUNT(*) AS c FROM api_tokens WHERE created_by_id=? OR created_by=?",
-        uid, email))["c"]
-    await db.execute("DELETE FROM api_tokens WHERE created_by_id=? OR created_by=?", uid, email)
+        "SELECT COUNT(*) AS c FROM api_tokens WHERE created_by_id=?", uid))["c"]
+    await db.execute("DELETE FROM api_tokens WHERE created_by_id=?", uid)
     ngrp = await revoke_enroll_groups(uid, email)
     from . import api                       # late: api imports this module
     nshare = await api._revoke_all_shares(email, uid)

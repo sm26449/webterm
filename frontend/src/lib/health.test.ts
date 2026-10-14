@@ -94,7 +94,7 @@ describe('health: actions', () => {
   it('every Settings jump lands on a real tab', () => {
     const cats = new Set(SETTINGS_CATS.map((c) => c.id as string))
     for (const a of ['settings:notifications', 'settings:backup', 'settings:signing', 'settings:certificates',
-      'settings:forward', 'about:update']) {
+      'settings:forward', 'about:update', 'settings:enroll']) {
       const tgt = actionTarget(a)
       expect(tgt, a).not.toBeNull()
       expect(cats.has(tgt!.cat), a).toBe(true)

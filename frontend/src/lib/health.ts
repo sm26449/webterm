@@ -128,6 +128,7 @@ export function actionTarget(action: string): { cat: string; section?: string } 
     case 'settings:signing': return { cat: 'infrastructura', section: 'signingKey' }
     case 'settings:certificates': return { cat: 'infrastructura', section: 'certificates' }
     case 'settings:forward': return { cat: 'infrastructura', section: 'forwardDomain' }
+    case 'settings:enroll': return { cat: 'infrastructura', section: 'enrollGroups' }
     case 'about:update': return { cat: 'preferinte', section: 'appUpdate' }
     default: return null
   }

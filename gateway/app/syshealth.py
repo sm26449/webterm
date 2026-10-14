@@ -80,7 +80,8 @@ class Result:
 
 
 ACTIONS = ("settings:notifications", "settings:backup", "settings:signing", "settings:certificates",
-           "settings:sso", "agent_update", "autostart", "settings:forward", "about:update")
+           "settings:sso", "agent_update", "autostart", "settings:forward", "about:update",
+           "settings:enroll")
 
 
 @dataclass
@@ -160,6 +161,8 @@ MESSAGES = {
     "sso_ok": "SSO works",
     "insecure_forwards": "Port forwarding is on while WebTerm runs on plain http://",
     "sso_ungated": "SSO is on without WEBTERM_OIDC_ALLOWED_GROUPS",
+    "enroll_orphans": "{count} live group enrollment token(s) have no creator account: {names}",
+    "enroll_ok": "Every live group enrollment token has a creator account",
     "janitor_failed": "The daily cleanup failed: {steps}",
     "janitor_stale": "The daily cleanup last ran {age} ago",
     "janitor_ok": "The daily cleanup runs",
@@ -211,6 +214,7 @@ WHY = {
     "oidc.sso": "When SSO fails, every SSO account is locked out; with WEBTERM_OIDC_SSO_ONLY=1 there is no other way in.",
     "config.forwards_http": "Without https the session cookie loses its __Host- prefix, so a forwarded page can plant a session cookie (session fixation).",
     "config.sso_ungated": "WebTerm does not re-check the group, so who gets in is decided entirely by the identity provider.",
+    "tokens.enroll_orphans": "A group enrollment token adds machines to the fleet. Offboarding revokes the tokens a person created — one whose creator account is gone (created before 3.6.11) is revoked by nobody until it expires.",
     "janitor": "It applies retention (transcripts, audit log); when it stops, the disk fills slowly and old data is kept longer than promised.",
     "db.size": "Deleted rows leave free pages; compacting returns the space.",
     "backup.coverage": "Without an automatic backup, a lost disk loses every host, credential and recording.",
@@ -243,6 +247,7 @@ RECS = {
     "sso_check": "Check the IdP is up and reachable from the gateway, the client secret, and the clock; local accounts and passkeys still work.",
     "use_https": "Serve WebTerm over https, or turn port forwarding off.",
     "sso_groups": "Bind the WebTerm application to a group in the IdP, or set WEBTERM_OIDC_ALLOWED_GROUPS. If the IdP already gates it, mute this.",
+    "revoke_orphan_enroll": "Settings → Infrastructure & tokens → Bulk enrollment marks them “creator gone”: revoke the ones nobody needs any more (machines already enrolled keep working). If one is still in use, mute this.",
     "janitor_logs": "Look at the gateway log for “janitor”; the next run retries.",
     "compact_db": "Compacting locks the database for a moment: run it in a quiet minute.",
     "enable_backup": "Turn on the scheduled backup in Settings → Backup, or install the host backup timer.",
@@ -720,6 +725,23 @@ async def c_sso_ungated() -> Optional[Result]:
 JANITOR_STALE = 2 * 86400 + 3600
 
 
+async def c_enroll_orphans() -> Optional[Result]:
+    """Live group enrollment tokens without a creator account (second re-review 3.6.11). Detect
+    and recommend only — never revoked automatically (an enrollment in progress would break)."""
+    now = time.time()
+    rows = await db.fetchall(
+        "SELECT g.id, g.name FROM enroll_groups g WHERE g.revoked=0 AND g.expires>?"
+        " AND NOT EXISTS (SELECT 1 FROM users u WHERE u.id=g.created_by_id) ORDER BY g.id", now)
+    if rows:
+        names = ", ".join(str(r["name"])[:40] for r in rows[:5]) + (" …" if len(rows) > 5 else "")
+        return Result("warning", "enroll_orphans", {"count": len(rows), "names": names},
+                      rec="revoke_orphan_enroll", action="settings:enroll")
+    if not await db.fetchone("SELECT 1 FROM enroll_groups WHERE revoked=0 AND expires>? LIMIT 1",
+                             now):
+        return None
+    return Result("ok", "enroll_ok")
+
+
 async def c_janitor() -> Optional[Result]:
     st = await _get_json(K_JANITOR)
     now = time.time()
@@ -930,6 +952,7 @@ CHECKS: list = [
     Check("oidc.sso", "fast", c_sso, critical=True),
     Check("config.forwards_http", "fast", c_forwards_http, critical=True),
     Check("config.sso_ungated", "fast", c_sso_ungated),
+    Check("tokens.enroll_orphans", "fast", c_enroll_orphans),
     Check("janitor", "fast", c_janitor),
     Check("db.size", "hourly", c_db_size, alert="none"),
     Check("backup.coverage", "fast", c_backup_coverage),

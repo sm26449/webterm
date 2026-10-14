@@ -18,7 +18,7 @@ la conflict). Ce se verifică:
     refuzate, paginare, PUT/PATCH (inclusiv forma Entra „False" ca text), re-sincronizare
     idempotentă (nicio scriere / niciun rând de audit la un PUT identic);
   * conturile cu parolă LOCALĂ (break-glass): invizibile pentru SCIM, crearea cu aceeaşi identitate
-    → 409, nimic atins; un cont SSO-only existent e ADOPTAT (acelaşi id), nu dublat;
+    → 403, nimic atins; un cont SSO-only existent e ADOPTAT (acelaşi id), nu dublat;
   * legarea la OIDC: externalId == sub leagă contul SCIM la primul login SSO fără email_verified;
   * Groups: membrii re-rulează maparea grup → rol imediat (adăugare / scoatere / înlocuire /
     redenumire / ştergere), PUT fără `members` nu atinge membrii, numele EXACT (fără trim), grupuri
@@ -375,9 +375,12 @@ async def test_users(owner, tok):
     check("PUT IDENTIC (re-sincronizare orară): nicio scriere, niciun rând de audit, nicio epocă",
           r.status_code == 200 and await scim_audit_rows() == n and authz.epoch() == epoch)
     r = await c.put("/scim/v2/Users/" + ana_id, json=dict(body, emails=[{"value": "p1@x.co", "primary": True}]))
-    check("PUT cu emailul ALTUI cont → 409", is_scim_error(r, 409))
+    # a doua re-revizuire 3.6.11: un refuz permanent NU e 409 (Authentik îl caută prin filtru, nu
+    # găseşte nimic şi abandonează restul paginii de sincronizare) — 400/403 = avertisment per obiect
+    check("PUT cu emailul ALTUI cont → 400 invalidValue (nu 409)", is_scim_error(r, 400)
+          and r.json().get("scimType") == "invalidValue", r.text[:160])
     r = await c.put("/scim/v2/Users/" + ana_id, json=dict(body, externalId="ext-p2"))
-    check("PUT cu externalId-ul altui cont → 409", is_scim_error(r, 409))
+    check("PUT cu externalId-ul altui cont → 400 (nu 409)", is_scim_error(r, 400))
     r = await c.patch("/scim/v2/Users/" + ana_id, json={"schemas": [scim.S_PATCH], "Operations": [
         {"op": "replace", "path": "userName", "value": "ana.pop"},
         {"op": "Replace", "path": 'emails[type eq "work"].value', "value": "ana.pop@x.co"},
@@ -386,8 +389,9 @@ async def test_users(owner, tok):
           and r.json()["userName"] == "ana.pop" and r.json()["emails"][0]["value"] == "ana.pop@x.co", r.text[:200])
     r = await c.patch("/scim/v2/Users/" + ana_id, json={"Operations": [
         {"op": "replace", "path": "externalId", "value": "someone-else"}]})
-    check("externalId e scris o singură dată (PATCH → 409 mutability)", is_scim_error(r, 409)
-          and r.json().get("scimType") == "mutability", r.text[:160])
+    check("externalId e scris o singură dată (PATCH → 400 mutability, explicat)", is_scim_error(r, 400)
+          and r.json().get("scimType") == "mutability" and "re-activation" in r.json().get("detail", ""),
+          r.text[:240])
     r = await c.get("/scim/v2/Users", params={"startIndex": 10 ** 30})
     check("startIndex uriaş → listă goală, nu 500", r.status_code == 200 and r.json()["Resources"] == [])
     r = await c.patch("/scim/v2/Users/" + ana_id, json={"Operations": [
@@ -457,7 +461,7 @@ async def test_break_glass_and_adoption(owner, tok):
     before = dict(await db.fetchone("SELECT * FROM users WHERE email=?", U.OWNER_EMAIL))
     n = await scim_audit_rows()
     r = await c.post("/scim/v2/Users", json=ak_user("boss", U.OWNER_EMAIL, ext="ext-boss", active=False))
-    check("POST cu emailul Owner-ului break-glass → 409, explicat", is_scim_error(r, 409)
+    check("POST cu emailul Owner-ului break-glass → 403, explicat", is_scim_error(r, 403)
           and "local password" in r.json()["detail"], r.text[:200])
     after = dict(await db.fetchone("SELECT * FROM users WHERE email=?", U.OWNER_EMAIL))
     check("…contul Owner NEATINS (nici dezactivat, nici legat)", before == after)
@@ -471,14 +475,14 @@ async def test_break_glass_and_adoption(owner, tok):
           and al["severity"] == "critical")
     check("…refuzul e auditat", await scim_audit_rows() == n + 1)
     st = (await owner.get("/api/settings/scim")).json()
-    check("…şi apare ca ultima eroare în starea SCIM", st["last_error"] and st["last_error"]["status"] == 409
+    check("…şi apare ca ultima eroare în starea SCIM", st["last_error"] and st["last_error"]["status"] == 403
           and "local password" in st["last_error"]["detail"], str(st["last_error"]))
     r = await c.get("/scim/v2/Users", params={"filter": 'emails eq "%s"' % U.OWNER_EMAIL})
     check("contul break-glass e INVIZIBIL pentru SCIM (filtrul nu-l întoarce)", r.json()["totalResults"] == 0)
     oid = await uid_of(U.OWNER_EMAIL)
     await db.execute("UPDATE users SET sso_subject='sub-boss' WHERE id=?", oid)
     r = await c.post("/scim/v2/Users", json=ak_user("boss2", "other-boss@x.co", ext="sub-boss"))
-    check("POST cu externalId = sub-ul Owner-ului break-glass → 409 (nimic atins)", is_scim_error(r, 409)
+    check("POST cu externalId = sub-ul Owner-ului break-glass → 403 (nimic atins)", is_scim_error(r, 403)
           and (await uid_of("other-boss@x.co")) is None)
     await db.execute("UPDATE users SET sso_subject=NULL WHERE id=?", oid)
     # adopţia unui cont SSO-only creat de un login OIDC
@@ -491,7 +495,7 @@ async def test_break_glass_and_adoption(owner, tok):
           and (await db.fetchone("SELECT COUNT(*) AS c FROM users WHERE email='bob@x.co'"))["c"] == 1)
     r = await c.post("/scim/v2/Users", json=ak_user("x", "bob-other@x.co", ext="sub-bob-x"))
     r2 = await c.put("/scim/v2/Users/" + r.json()["id"], json=ak_user("x", "bob@x.co", ext="sub-bob-x"))
-    check("schimbarea emailului pe al unui cont adoptat → 409", is_scim_error(r2, 409))
+    check("schimbarea emailului pe al unui cont adoptat → 400", is_scim_error(r2, 400))
     # externalId == sub leagă la primul login, chiar fără email_verified
     r = await c.post("/scim/v2/Users", json=ak_user("cara", "cara@x.co", ext="sub-cara"))
     cid = await uid_of("cara@x.co")
@@ -505,11 +509,11 @@ async def test_break_glass_and_adoption(owner, tok):
     await U.bind(zuid, "admin", "all", "")                      # rol dat DE MÂNĂ înainte de primul login
     r = await c.patch("/scim/v2/Users/" + zid, json={"Operations": [
         {"op": "replace", "path": "emails", "value": [{"value": "mallory@x.co", "primary": True}]}]})
-    check("cont nelegat cu rol manual: SCIM NU-i poate schimba emailul (409)", is_scim_error(r, 409)
+    check("cont nelegat cu rol manual: SCIM NU-i poate schimba emailul (400)", is_scim_error(r, 400)
           and r.json().get("scimType") == "mutability", r.text[:160])
     r = await c.patch("/scim/v2/Users/" + zid, json={"Operations": [
         {"op": "replace", "path": "externalId", "value": "sub-mallory"}]})
-    check("…nici externalId-ul (409)", is_scim_error(r, 409))
+    check("…nici externalId-ul (400)", is_scim_error(r, 400))
     loc = await sso_login("sub-zoe", "mallory@x.co", groups=[])
     row = await db.fetchone("SELECT sso_subject FROM users WHERE id=?", zuid)
     check("externalId = sub dar ALT email → nu se leagă de contul lui zoe", row["sso_subject"] is None
@@ -633,6 +637,10 @@ async def test_groups(owner, tok):
     check("„wt-net ” (cu spaţiu) e alt grup: acceptat exact, NU mapează la wt-net",
           r.status_code == 201 and r.json()["displayName"] == "wt-net "
           and ("viewer", "all", "", "sso") not in await bindings("gina@x.co"))
+    r = await c.patch("/scim/v2/Groups/" + r.json()["id"], json={"Operations": [
+        {"op": "replace", "path": "displayName", "value": "wt-db"}]})
+    check("redenumire pe numele altui grup → 400 invalidValue (nu 409: Authentik ar abandona pagina)",
+          is_scim_error(r, 400) and r.json().get("scimType") == "invalidValue", r.text[:160])
     for bad in ("", "a\nb", "x" * 300, "zero​width", 7):
         r = await c.post("/scim/v2/Groups", json={"displayName": bad})
         check("displayName invalid %r → 400" % (bad if not isinstance(bad, str) else bad[:12]),

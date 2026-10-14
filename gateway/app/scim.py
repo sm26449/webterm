@@ -20,7 +20,7 @@ Liberal in what we accept, strict in what we grant:
     maintain group membership. It can never reach another route (the router-level guard refuses a
     SCIM principal anywhere outside `/scim/v2/`), never touch settings, roles, mappings or hosts,
     never manage an account that has a LOCAL PASSWORD (the break-glass accounts: invisible to
-    SCIM, refused with 409 when the IdP tries to create one with the same identity), never disable
+    SCIM, refused with 403 when the IdP tries to create one with the same identity), never disable
     the last permanent Owner (403, audited, critical alert), and never GRANT an Owner-level role:
     group membership re-runs the SSO group → role mapping exactly as a sign-in would (ssomap),
     except that Owner-equivalent roles are only kept, never added, by a push.
@@ -37,6 +37,14 @@ Liberal in what we accept, strict in what we grant:
     effective groups = (groups recorded at the last SSO sign-in that SCIM does not manage) ∪ (SCIM
     groups the user is a member of). Nested (parent) groups are not expanded: SCIM membership is
     direct membership.
+  * REFUSALS — second re-review 3.6.11: a refusal that stays true until a person changes something
+    (a policy or identity rule) is a 400 `invalidValue` / `mutability`, or a 403 when the IdP is not
+    allowed to touch that account — NEVER a 409. Authentik answers a 409 on a create by searching
+    `GET /Users?filter=userName eq "…"`, and when that finds nothing (the account is not a SCIM
+    account, so it is not listed) it aborts the rest of the sync page; a 409 on PUT/PATCH aborts it
+    too. A 400/403 is a per-object warning in Authentik and the sync carries on. 409 is kept only
+    where the search resolves it: "already provisioned" on a create, a duplicate group name on a
+    group create, and the create race with an SSO sign-in (the next sync adopts the account).
 """
 from __future__ import annotations
 
@@ -594,7 +602,9 @@ async def _alert_local_refused(email: str, ip: str) -> None:
 async def _email_free(email: str, uid: Optional[int]) -> None:
     row = await db.fetchone("SELECT id FROM users WHERE email=?", email)
     if row is not None and row["id"] != uid:
-        raise ScimError(409, "another WebTerm account already uses %s" % email, "uniqueness")
+        raise ScimError(400, "another WebTerm account already uses %s; WebTerm keeps one account "
+                             "per email — change it in the identity provider or in WebTerm"
+                        % email, "invalidValue")
 
 
 async def _ext_free(ext: Optional[str], uid: Optional[int]) -> None:
@@ -602,7 +612,8 @@ async def _ext_free(ext: Optional[str], uid: Optional[int]) -> None:
         return
     row = await db.fetchone("SELECT id FROM users WHERE scim_external_id=?", ext)
     if row is not None and row["id"] != uid:
-        raise ScimError(409, "another WebTerm account already has this externalId", "uniqueness")
+        raise ScimError(400, "another WebTerm account already has this externalId",
+                        "invalidValue")
 
 
 async def _guard_identity(u, f: dict) -> None:
@@ -613,22 +624,26 @@ async def _guard_identity(u, f: dict) -> None:
         it, roles included. Once the person has signed in (linked), the email may follow the IdP."""
     ext = f.get("externalId")
     if ext and u["scim_external_id"] and ext != u["scim_external_id"]:
-        raise ScimError(409, "externalId cannot change once set", "mutability")
+        raise ScimError(400, "externalId cannot change once set: it links the WebTerm account to "
+                             "the SSO identity. The whole request is refused, re-activation "
+                             "included — if the person was re-created in the identity provider, "
+                             "delete the old WebTerm account (Settings → Users & roles) so the new "
+                             "one can be provisioned", "mutability")
     if f.get("email") and f["email"] != u["email"]:
         # review 3.6.11: SCIM changes the email only of accounts it CREATED — never of an
         # existing account it adopted, and never of one holding an Owner-level role given in
         # WebTerm (the address is the recovery and sign-in channel)
         if not u["scim_created"]:
-            raise ScimError(409, "this account existed before SCIM took it over: its email can "
+            raise ScimError(400, "this account existed before SCIM took it over: its email can "
                                  "only be changed in WebTerm", "mutability")
         if await authz.owner_level_given_in_webterm(u["id"]):
-            raise ScimError(409, "this account holds an Owner-level role given in WebTerm: its "
-                                 "email cannot be changed by SCIM", "mutability")
+            raise ScimError(403, "this account holds an Owner-level role given in WebTerm: its "
+                                 "email cannot be changed by SCIM")
     if f.get("email") and f["email"] != u["email"] and not u["sso_subject"]:
         manual = await db.fetchone("SELECT 1 FROM role_bindings WHERE user_id=? AND source<>'sso'",
                                    u["id"])
         if manual:
-            raise ScimError(409, "the email of an account that has not signed in with SSO yet and "
+            raise ScimError(400, "the email of an account that has not signed in with SSO yet and "
                                  "holds roles given by hand cannot be changed by SCIM",
                             "mutability")
 
@@ -714,7 +729,7 @@ async def _guard_identity_or_drop(u, f: dict) -> Optional[ScimError]:
     active:false — so a 409 there would leave the person enabled until a DELETE). When the request
     deactivates, the identity attributes (email, externalId) are DROPPED from `f` and the refusal
     is returned for `_identity_dropped`; everything else still applies. When it does not
-    deactivate, the refusal stands (409): it would keep the account working under a re-pointed
+    deactivate, the refusal stands (400/403): it would keep the account working under a re-pointed
     identity."""
     try:
         await _guard_identity(u, f)
@@ -728,11 +743,13 @@ async def _guard_identity_or_drop(u, f: dict) -> Optional[ScimError]:
 
 
 async def _identity_dropped(p: dict, u, e: ScimError, method: str, path: str) -> None:
-    """Audit (every time — it is the IdP asking) + warning alert (once an hour per account)."""
-    await _audit(p, method, path, 200, "SCIM deactivating %s: ignored the identity change WebTerm "
-                 "refuses (%s)" % (u["email"], e.detail), actor_id=u["id"])
+    """Audit + warning alert, both once an hour per account (second re-review 3.6.11: WebTerm
+    keeps answering with the old identity, so Authentik re-sends the change at EVERY full sync —
+    one audit row per sync would bury the audit log)."""
     log.warning("SCIM: deactivating %s, ignored a refused identity change: %s", u["email"], e.detail)
     if _first_this_hour("identity", u["id"]):
+        await _audit(p, method, path, 200, "SCIM deactivating %s: ignored the identity change "
+                     "WebTerm refuses (%s)" % (u["email"], e.detail), actor_id=u["id"])
         email_alerts.notify_security_change(
             "the identity provider deactivated %s and asked for an identity change WebTerm refuses "
             "(%s); the account was deactivated, the change ignored" % (u["email"], e.detail),
@@ -773,6 +790,11 @@ async def _apply_user(p: dict, u, f: dict, path: str, method: str) -> bool:
     return changed
 
 
+_LOCAL_PW_DETAIL = ("a WebTerm account with this identity has a local password (a break-glass "
+                    "account); SCIM never manages it — keep it out of the SCIM provider's scope "
+                    "in the identity provider")
+
+
 @router.post("/Users")
 async def create_user(request: Request, p=Depends(require_scim)):
     body = await _body(request)
@@ -801,15 +823,14 @@ async def create_user(request: Request, p=Depends(require_scim)):
             if r is not None:
                 cands[r["id"]] = r
             if len(cands) > 1:
-                raise ScimError(409, "the externalId and the email belong to different WebTerm "
-                                     "accounts", "uniqueness")
+                raise ScimError(400, "the externalId and the email belong to different WebTerm "
+                                     "accounts; fix the email in the identity provider or in "
+                                     "WebTerm", "invalidValue")
             target = next(iter(cands.values()), None)
             if target is not None:
                 if await ssomap.has_local_password(target["id"]):
                     await _alert_local_refused(target["email"], p["ip"])
-                    raise ScimError(409, "a WebTerm account with this identity has a local password "
-                                         "(a break-glass account); SCIM never manages it",
-                                    "uniqueness")
+                    raise ScimError(403, _LOCAL_PW_DETAIL)
                 if target["scim_id"]:
                     raise ScimError(409, "this user is already provisioned", "uniqueness")
                 # review 3.6.11 — taking over an account SCIM did not create:
@@ -817,17 +838,30 @@ async def create_user(request: Request, p=Depends(require_scim)):
                 #    token holder would otherwise pick any SSO account and re-point its email);
                 #  * never one holding an Owner-level role given in WebTerm (§A.5: only an Owner
                 #    disables or deletes an Owner — SCIM could do both once it manages it).
-                if not target["scim_created"] and target["email"] != email:
-                    raise ScimError(409, "an existing WebTerm account matches this externalId but "
-                                         "has a different email; SCIM takes over an existing "
-                                         "account only when its email matches too", "uniqueness")
                 if await authz.owner_level_given_in_webterm(target["id"]):
                     await _owner_level_refused(target["id"], "take over", p["ip"])
-                    raise ScimError(409, "the existing WebTerm account %s holds an Owner-level role "
-                                         "given in WebTerm; SCIM never takes it over (an Owner can "
-                                         "give that role through an SSO group instead)" % email,
-                                    "uniqueness")
-                dropped = await _guard_identity_or_drop(target, f)
+                    # no email in the detail: the match may be by `sub` alone, and the token
+                    # holder must not learn the address of an Owner account that way
+                    raise ScimError(403, "the existing WebTerm account matching this user holds an "
+                                         "Owner-level role given in WebTerm; SCIM never takes it "
+                                         "over (an Owner can give that role through an SSO group "
+                                         "instead)")
+                dropped = None
+                if not target["scim_created"] and target["email"] != email:
+                    mismatch = ScimError(400, "an existing WebTerm account matches this externalId "
+                                              "but has a different email; SCIM takes over an "
+                                              "existing account only when its email matches too",
+                                         "invalidValue")
+                    if f.get("active") is not False:
+                        raise mismatch
+                    # second re-review 3.6.11: the IdP renamed the email AND deactivates the
+                    # person — adopt under the account's own email (and externalId), disable it,
+                    # warn; refusing would leave the person enabled (as _guard_identity_or_drop)
+                    dropped = mismatch
+                    f.pop("externalId", None)
+                    email = f["email"] = target["email"]
+                    ext = None
+                dropped = await _guard_identity_or_drop(target, f) or dropped
                 if dropped is not None:     # deactivating: adopt under the identity it has
                     email = f["email"] = target["email"]
                     ext = None
@@ -843,9 +877,7 @@ async def create_user(request: Request, p=Depends(require_scim)):
                     " AND COALESCE(local_password, 1)=0 RETURNING id",
                     sid, ext, user_name, f.get("displayName"), email, time.time(), target["id"])
                 if done is None:
-                    raise ScimError(409, "a WebTerm account with this identity has a local "
-                                         "password (a break-glass account); SCIM never manages it",
-                                    "uniqueness")
+                    raise ScimError(403, _LOCAL_PW_DETAIL)
                 uid = target["id"]
                 await _audit(p, "POST", path, 201,
                              "SCIM took over the existing SSO account %s%s" % (
@@ -1193,7 +1225,11 @@ async def _members(gid: str) -> set:
 async def _name_free(name: str, gid: Optional[str]) -> None:
     row = await db.fetchone("SELECT id FROM scim_groups WHERE display_name=?", name)
     if row is not None and row["id"] != gid:
-        raise ScimError(409, "a group named %s already exists" % name[:80], "uniqueness")
+        # a create → 409 (Authentik resolves it with `filter=displayName eq`); a rename → 400
+        # (second re-review 3.6.11: a 409 on PUT/PATCH aborts Authentik's sync page)
+        if gid is None:
+            raise ScimError(409, "a group named %s already exists" % name[:80], "uniqueness")
+        raise ScimError(400, "another group is already named %s" % name[:80], "invalidValue")
 
 
 async def _resync(uids: set, ip: str, extra_known=()) -> None:

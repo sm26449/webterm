@@ -149,7 +149,7 @@ export default function InfrastructureTab(props: { onAccountChanged: () => void 
   // ── Token-uri de înrolare DE GRUP (onboarding la scară de flotă) ──
   type GroupRow = { id: number; name: string; created: number; expires: number
     max_uses: number; uses: number; folder: string; require_2fa: boolean
-    revoked: boolean; expired: boolean }
+    revoked: boolean; expired: boolean; creator_gone?: boolean }
   // Crearea token-urilor de grup s-a mutat în fluxul de onboarding (AddHostModal → „Mai multe
   // maşini"); aici rămâne doar GESTIUNEA credenţialei: listare + revocare.
   const [groups, setGroups] = useState<GroupRow[]>([])
@@ -532,6 +532,11 @@ export default function InfrastructureTab(props: { onAccountChanged: () => void 
                 {g.require_2fa ? (
                   <span className="wt-warn ml-1 text-2xs" title={t('settings.enrollGroups.require2fa')}>
                     2FA<span className="sr-only"> — {t('settings.enrollGroups.require2fa')}</span>
+                  </span>
+                ) : null}
+                {g.creator_gone && !g.revoked && !g.expired ? (
+                  <span className="wt-warn ml-1 text-2xs" title={t('settings.enrollGroups.creatorGoneHint')}>
+                    {t('settings.enrollGroups.creatorGone')}<span className="sr-only"> — {t('settings.enrollGroups.creatorGoneHint')}</span>
                   </span>
                 ) : null}
               </span>

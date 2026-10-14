@@ -1268,14 +1268,13 @@ async def delete_user(uid: int, body: ReauthOnly, request: Request,
     # cont ca să funcţioneze — sunt credenţiale de sine stătătoare — deci ştergerea contului
     # arăta ca o revocare completă fără să fie una. Le numărăm ca să apară în jurnal: cine
     # şterge un cont trebuie să vadă ce automatizări a oprit odată cu el.
-    # `created_by_id` ESTE cheia; `created_by` rămâne ca rezervă pentru tokenurile emise
-    # înainte de migrare, care n-au id. Fără id-ul ăsta, o simplă schimbare de email lăsa
-    # tokenul în viaţă după ştergerea contului — până la un an.
+    # `created_by_id` ESTE cheia — şi singura (a doua re-revizuire 3.6.11): tokenurile de dinainte
+    # de migrare au primit id-ul o dată, din email (authz.seed, la pornire); unul rămas fără id e
+    # deja mort (grants_for_token). După email NU mai ştergem: adresa poate fi acum în
+    # `created_by` la tokenurile ALTUI cont (email refolosit) — le-am fi revocat din greşeală.
     ntok = (await db.fetchone(
-        "SELECT COUNT(*) AS c FROM api_tokens WHERE created_by_id=? OR created_by=?",
-        uid, row["email"]))["c"]
-    await db.execute("DELETE FROM api_tokens WHERE created_by_id=? OR created_by=?",
-                     uid, row["email"])
+        "SELECT COUNT(*) AS c FROM api_tokens WHERE created_by_id=?", uid))["c"]
+    await db.execute("DELETE FROM api_tokens WHERE created_by_id=?", uid)
     await accounts.revoke_enroll_groups(uid, row["email"])   # revizuirea 3.6.11: şi tokenurile de grup
     security.clear_stepup_for(uid)
     security.bump_forward_epoch(uid)      # şi biletele lui de port-forward, ca la logout
@@ -2138,7 +2137,11 @@ def _enroll_group_row(r) -> dict:
     return {"id": r["id"], "name": r["name"], "created": r["created"], "created_by": r["created_by"],
             "expires": r["expires"], "max_uses": r["max_uses"], "uses": r["uses"],
             "folder": r["folder"], "require_2fa": bool(r["require_2fa"]),
-            "revoked": bool(r["revoked"]), "expired": r["expires"] < time.time()}
+            "revoked": bool(r["revoked"]), "expired": r["expires"] < time.time(),
+            # second re-review 3.6.11: no account behind it (pre-3.6.11 token whose creator was
+            # gone at the one-time backfill) — no offboarding will ever revoke it; shown, not
+            # auto-revoked (System health warns too)
+            "creator_gone": not r["creator_ok"]}
 
 
 # ── Dispozitivele conectate (sesiuni web) ────────────────────────────────────
@@ -2293,7 +2296,9 @@ async def revoke_token(tid: int, request: Request, user=Depends(authz.perm('toke
 
 @router.get("/api/enroll-groups")
 async def list_enroll_groups(user=Depends(authz.perm('hosts.create'))):
-    rows = await db.fetchall("SELECT * FROM enroll_groups ORDER BY created DESC")
+    rows = await db.fetchall(
+        "SELECT g.*, (SELECT 1 FROM users u WHERE u.id=g.created_by_id) AS creator_ok"
+        " FROM enroll_groups g ORDER BY g.created DESC")
     return [_enroll_group_row(r) for r in rows]
 
 
