@@ -110,7 +110,7 @@ export default function AppearanceTab(props: { onAccountChanged: () => void }) {
         {/* ── Temă: familia (stilul) ── */}
         <h3 className={heading} id="theme-style-h">{t('settings.theme')}</h3>
         <p className="mt-1 text-xs text-slate-500">{t('theme.styleHint')}</p>
-        <div role="group" aria-labelledby="theme-style-h" className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
+        <div role="group" aria-labelledby="theme-style-h" className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
           {FAMILIES.map((f) => {
             const on = pref.family === f.id
             return (
