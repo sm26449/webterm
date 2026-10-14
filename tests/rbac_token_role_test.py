@@ -120,6 +120,13 @@ async def main():
         g = await authz.grants_for_token(fake)
         bad = (g.ceiling | g.global_perms) & authz.TOKEN_NEVER
         check("rol %s: nimic din TOKEN_NEVER (users/roles/settings/tokens/…)" % role, not bad, str(bad))
+        if role == "operator":
+            sh = {"share.live", "share.replay", "serial.use", "host.wake"}
+            check("…Operator (care le are): niciun token nu primeşte share.live/share.replay/"
+                  "serial.use/host.wake", not (g.ceiling & sh) and sh <= authz.TOKEN_NEVER, str(g.ceiling))
+    legacy_all = authz.TOKEN_SCOPE_PERMS["read"] | authz.TOKEN_SCOPE_PERMS["run"]
+    check("lista neagră nu atinge plafoanele vechi read/run (comportamentul vechi neschimbat)",
+          not (legacy_all & authz.TOKEN_NEVER), str(legacy_all & authz.TOKEN_NEVER))
     owner_rid = await authz.role_id("owner")
     await db.execute("INSERT INTO api_tokens(name, token_hash, scopes, created, created_by,"
                      " created_by_id, expires, role_id) VALUES('forged', ?, 'read,run', ?, ?, 1, ?, ?)",

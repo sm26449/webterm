@@ -413,7 +413,8 @@ Automation tokens keep their `read` / `run` scopes and are additionally capped:
   `roles.manage`, `settings.manage`, `tokens.*`, `shares.manage`, `snippets.manage`,
   `history.clear`, `backups.manage`, `signing.manage`, `certs.renew`, `hosts.create`,
   `hosts.export`, `audit.view`, and on hosts `host.admin`, `host.edit`, `deploykey.manage`,
-  `share.live_write`, `session.manage`, `forward.manage`, `toolbox.manage` (`authz.TOKEN_NEVER`);
+  `share.live_write`, `share.live`, `share.replay`, `session.manage`, `forward.manage`,
+  `toolbox.manage`, `serial.use`, `host.wake` (`authz.TOKEN_NEVER`);
   the Owner role is refused for new tokens. A token that was created with the Owner role before
   3.6.10 keeps working exactly as before, as if it had no role cap (its read/run scopes, the list
   above and its creator still limit it); at every start the gateway logs a warning with the ids and

@@ -153,6 +153,10 @@ TOKEN_NEVER = frozenset({
     "certs.renew", "hosts.create", "hosts.export", "audit.view",
     "host.admin", "host.edit", "deploykey.manage", "share.live_write", "session.manage",
     "forward.manage", "toolbox.manage",
+    # 3.6.10 review: a share link or a replay link hands access to OUTSIDERS, a serial console is
+    # a shell by another door, and Wake-on-LAN sends packets from a neighbour host — none of it is
+    # automation's business. No legacy read/run ceiling ever included them.
+    "share.live", "share.replay", "serial.use", "host.wake",
 })
 # A token is never "the owner": the Owner role is refused as a token role at creation (400). A
 # token row that ALREADY names it (created through the API before 3.6.10) keeps working exactly as
