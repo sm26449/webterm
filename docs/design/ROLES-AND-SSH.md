@@ -1454,7 +1454,9 @@ Code: `ssomap.parse_role_map` / `reconcile_config` (called once from `main.lifes
 - **Tokens (§A.6.5):** creation resolves any role (`role` key or `role_id`), refuses Owner, and
   applies `check_can_grant` over the token's scope. `grants_for_token` subtracts
   `TOKEN_NEVER` from the ceiling; legacy (`role_id IS NULL`) tokens keep the read/run ceiling,
-  which never intersected `TOKEN_NEVER` except `security.view`, deliberately kept.
+  which never intersected `TOKEN_NEVER` except `security.view`, deliberately kept. A row whose
+  role is the built-in Owner (created before 3.6.10) is read as "no role cap", exactly as before;
+  `authz.seed` logs their ids and names at boot. A row whose role no longer exists gets nothing.
 
 ---
 

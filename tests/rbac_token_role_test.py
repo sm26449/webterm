@@ -10,11 +10,13 @@ tokenului ∩ ce poate creatorul ACUM (re-evaluat la fiecare cerere). Se verific
   * creatorul retrogradat → tokenul se micşorează pe loc; creator fără legături → nimic;
   * tokenurile vechi (role_id NULL) se comportă EXACT ca înainte;
   * lista neagră (`authz.TOKEN_NEVER`): niciun token nu ajunge la users/roles/settings/…, oricare
-    ar fi rolul; un rând cu rolul Owner (doar prin DB) nu poate nimic;
+    ar fi rolul; un rând cu rolul Owner (creat înainte de 3.6.10) merge ca înainte — fără plafon
+    de rol, dar tot read/run ∩ creator − TOKEN_NEVER — şi e semnalat la pornire;
   * hosturile cu 2FA rămân închise oricărui token (step-up imposibil) — şi cu rol;
   * rutele care acceptă tokenuri rămân EXACT cele patru (route_auth_test o verifică şi el).
 """
 import asyncio
+import logging
 import time
 
 import rbac_util as U
@@ -124,11 +126,36 @@ async def main():
                      security.sha256_hex(security.TOKEN_PREFIX + "forged-owner-token-value"),
                      time.time(), U.OWNER_EMAIL, time.time() + 3600, owner_rid)
     c = bearer(security.TOKEN_PREFIX + "forged-owner-token-value")
-    check("rând cu rolul Owner (doar prin DB): nu vede nimic", await visible(c) == set())
-    check("…şi nu rulează nicăieri (404)", (await run(c, a)).status_code == 404)
+    # revizuirea 3.6.10: un token creat cu rolul Owner ÎNAINTE de 3.6.10 merge exact ca înainte
+    # (rolul Owner nu era un plafon) — fără plafon de rol, dar tot read/run, TOKEN_NEVER şi creatorul
+    check("token cu rolul Owner de dinainte de 3.6.10: exact ca un token vechi (vede tot, rulează)",
+          await visible(c) == {a, b, c2fa} and U.code(await run(c, a)) == "host.offline")
+    otok = await db.fetchone("SELECT * FROM api_tokens WHERE name='forged'")
+    g = await authz.grants_for_token(dict(otok))
+    check("…plafonul = scope-urile vechi, nimic din TOKEN_NEVER",
+          g.ceiling == (authz.TOKEN_SCOPE_PERMS["read"] | authz.TOKEN_SCOPE_PERMS["run"]) - authz.TOKEN_NEVER
+          and not (g.ceiling | g.global_perms) & authz.TOKEN_NEVER, str(g.ceiling))
     r = await c.get("/api/users")
     check("…/api/users nu acceptă tokenuri (401)", r.status_code == 401)
     await c.aclose()
+    gone = dict(otok, role_id=987654)
+    check("…un rând cu un rol care nu (mai) există: nimic", not (await authz.grants_for_token(gone)).ceiling)
+    seen = []
+
+    class _H(logging.Handler):
+        def emit(self, rec):
+            seen.append(rec.getMessage())
+    h = _H()
+    logging.getLogger("webterm").addHandler(h)
+    try:
+        await db.close()
+        await db.connect()                 # o pornire nouă: authz.seed avertizează
+    finally:
+        logging.getLogger("webterm").removeHandler(h)
+    warn = [m for m in seen if "Owner role from before 3.6.10" in m]
+    check("…la pornire: un avertisment cu id-ul şi numele tokenului, fără secret",
+          len(warn) == 1 and "'forged'" in warn[0] and "#%d" % otok["id"] in warn[0]
+          and otok["token_hash"] not in warn[0], str(seen)[:300])
 
     # ── creatorul ACUM ───────────────────────────────────────────────────────────────────
     # tokens.create e GLOBAL (doar de la o legătură @ all): un rol custom care dă doar asta

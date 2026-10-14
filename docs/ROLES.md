@@ -414,7 +414,10 @@ Automation tokens keep their `read` / `run` scopes and are additionally capped:
   `history.clear`, `backups.manage`, `signing.manage`, `certs.renew`, `hosts.create`,
   `hosts.export`, `audit.view`, and on hosts `host.admin`, `host.edit`, `deploykey.manage`,
   `share.live_write`, `session.manage`, `forward.manage`, `toolbox.manage` (`authz.TOKEN_NEVER`);
-  the Owner role is refused;
+  the Owner role is refused for new tokens. A token that was created with the Owner role before
+  3.6.10 keeps working exactly as before, as if it had no role cap (its read/run scopes, the list
+  above and its creator still limit it); at every start the gateway logs a warning with the ids and
+  names of such tokens so you can recreate them with a narrower role;
 - tokens are still accepted only on the status, host list, session list and run endpoints, and
   still cannot reach hosts that require 2FA (a token cannot present a second factor).
 

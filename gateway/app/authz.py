@@ -154,8 +154,10 @@ TOKEN_NEVER = frozenset({
     "host.admin", "host.edit", "deploykey.manage", "share.live_write", "session.manage",
     "forward.manage", "toolbox.manage",
 })
-# A token is never "the owner": the Owner role is refused as a token role (400 at creation, and a
-# token row that names it anyway can do nothing).
+# A token is never "the owner": the Owner role is refused as a token role at creation (400). A
+# token row that ALREADY names it (created through the API before 3.6.10) keeps working exactly as
+# before — the Owner role was no cap at all — so it is read as "no role cap": still bounded by its
+# legacy read/run ceiling, TOKEN_NEVER and its creator. The boot logs a warning listing them.
 TOKEN_ROLE_REFUSED = frozenset({"owner"})
 
 # ── epoch + cache ────────────────────────────────────────────────────────────────────────────
@@ -408,8 +410,10 @@ async def grants_for_token(tok: dict) -> TokenGrants:
     role_id = tok.get("role_id")
     if role_id:
         r = await db.fetchone("SELECT key, perms, builtin FROM roles WHERE id=?", role_id)
-        if not r or (r["key"] or "") in TOKEN_ROLE_REFUSED:
-            ceiling = set()
+        if not r:
+            ceiling = set()                # the role is gone: nothing (fail-closed)
+        elif r["builtin"] and (r["key"] or "") in TOKEN_ROLE_REFUSED:
+            pass                           # pre-3.6.10 Owner-role token: no role cap (see above)
         elif r["builtin"] and r["key"] in BUILTIN_ROLES:
             ceiling &= BUILTIN_ROLES[r["key"]]["perms"]
         else:
@@ -925,6 +929,23 @@ async def seed(conn) -> None:
         if uids:
             log.warning("roles: seeded %d existing account(s) as Owner over all hosts "
                         "(3.6 upgrade — nothing changes for them)", len(uids))
+    # 3.6.10 (review): tokens created with the Owner role before it was refused keep working as
+    # before (no role cap); say so once per boot so the Owner can recreate them narrower
+    try:
+        cur = await conn.execute(
+            "SELECT t.id, t.name FROM api_tokens t JOIN roles r ON r.id=t.role_id"
+            " WHERE r.key='owner' AND r.builtin=1 AND t.expires > ? ORDER BY t.id", (now,))
+        legacy_owner = [(r[0], r[1]) for r in await cur.fetchall()]
+        await cur.close()
+    except Exception:                      # noqa: BLE001 — a warning must never stop the boot
+        legacy_owner = []
+    if legacy_owner:
+        log.warning("tokens: %d automation token(s) carry the Owner role from before 3.6.10 (%s); "
+                    "they work as before (no role cap: read/run scopes and their creator still "
+                    "bound them), but new tokens cannot have it — recreate them with a narrower "
+                    "role", len(legacy_owner), ", ".join(
+                        "#%d %r" % (i, (n or "")[:60]) for i, n in legacy_owner[:20])
+                    + (" …" if len(legacy_owner) > 20 else ""))
     cur = await conn.execute(
         "SELECT email FROM users u WHERE NOT EXISTS"
         " (SELECT 1 FROM role_bindings b WHERE b.user_id=u.id)")
