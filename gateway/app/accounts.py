@@ -62,10 +62,12 @@ async def report_last_owner_refused(email: str, *, actor: str, ip: str, reason: 
 async def revoke_enroll_groups(uid: int, email: str) -> int:
     """Revoke the live group enrollment tokens this account created (review 3.6.11: they enrol
     hosts into the fleet — offboarding must not leave one behind). Revoked, not deleted: the
-    record of who could enrol stays. Tokens from before `created_by_id` match by email."""
+    record of who could enrol stays. By creator ID only (re-review 3.6.11): tokens from before
+    `created_by_id` got it once from their email (`authz.seed`); one whose creator could not be
+    resolved then has no creator account to offboard — it keeps working until it expires or an
+    Owner revokes it, and the boot log lists it. `email` is for the log line."""
     rows = await db.fetchall(
-        "SELECT id FROM enroll_groups WHERE revoked=0 AND (created_by_id=?"
-        " OR (created_by_id IS NULL AND created_by=?))", uid, email)
+        "SELECT id FROM enroll_groups WHERE revoked=0 AND created_by_id=?", uid)
     for r in rows:
         await db.execute("UPDATE enroll_groups SET revoked=1 WHERE id=?", r["id"])
     if rows:
@@ -83,8 +85,11 @@ async def disable(uid: int, *, by: str, actor: str, ip: str, reason: str) -> Opt
         if row is None:
             return None
         if row["d"]:
-            # already disabled: only the reason may move (active:false → DELETE)
-            await db.execute("UPDATE users SET disabled_by=? WHERE id=?", by, uid)
+            # already disabled: only the reason may move (active:false → DELETE), and only between
+            # the IdP's own reasons — re-review 3.6.11: a disable done in WebTerm (or of unknown
+            # origin) must not become 'scim*', which SCIM `active:true` could then undo
+            await db.execute("UPDATE users SET disabled_by=? WHERE id=?"
+                             " AND disabled_by IN ('scim', 'scim-delete')", by, uid)
             return None
         # check-then-act under the bindings lock: a concurrent grant/removal cannot slip between.
         # Review 3.6.11: an Owner-level role given in WebTerm (not by an SSO group) = only an

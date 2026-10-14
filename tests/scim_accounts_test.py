@@ -482,9 +482,13 @@ async def test_review_tokens(owner, c):
                          " expires) VALUES(?,?,?,?,?,?)", name, security.sha256_hex(name), time.time(),
                          "eg@x.co", by_id, time.time() + 3600)
     await c.patch("/scim/v2/Users/" + sid_eg, json=deactivate())
-    rows = await db.fetchall("SELECT revoked FROM enroll_groups WHERE name LIKE 'eg-%'")
-    check("dezactivarea revocă tokenurile de grup ale contului (după id şi, vechi, după email)",
-          len(rows) == 2 and all(x["revoked"] == 1 for x in rows), str([dict(x) for x in rows]))
+    rows = {x["name"]: x["revoked"] for x in await db.fetchall(
+        "SELECT name, revoked FROM enroll_groups WHERE name LIKE 'eg-%'")}
+    check("dezactivarea revocă tokenurile de grup ale contului (după id)", rows.get("eg-new") == 1,
+          str(rows))
+    # re-review 3.6.11 (LOW-2): fără id, emailul NU mai e creator (backfill-ul o dată, la pornire)
+    check("…NU şi pe unul fără creator cu acelaşi email (doar după id, niciodată după email)",
+          rows.get("eg-legacy") == 0, str(rows))
     lu = await U.add_user("lu@x.co")
     await db.execute("INSERT INTO enroll_groups(name, token_hash, created, created_by, created_by_id,"
                      " expires) VALUES('lu-grp',?,?,?,?,?)", security.sha256_hex("lu-grp"), time.time(),
@@ -507,6 +511,116 @@ async def test_review_tokens(owner, c):
     await tc.aclose()
 
 
+async def n_alerts(key, account):
+    await asyncio.sleep(0.3)              # alertele se scriu dintr-un task
+    row = await db.fetchone("SELECT COUNT(DISTINCT ts) AS c FROM alerts WHERE msg_params LIKE ?"
+                            " AND msg_params LIKE ?", "%%%s%%" % key, "%%%s%%" % account)
+    return row["c"]
+
+
+async def test_rereview(owner, c):
+    """Re-review-ul fixurilor SCIM (3.6.11)."""
+    print("── re-review 3.6.11: active:false nu e blocat de identitate; alerte rărite; disabled_by")
+    # MEDIUM-1: cont ADOPTAT, emailul redenumit în IdP + active:false (Authentik trimite tot) →
+    # se dezactivează, emailul NU se schimbă
+    await sso_login("sub-ren", "ren@x.co")
+    ren = await uid_of("ren@x.co")
+    await U.bind(ren, "operator", "all")
+    r = await c.post("/scim/v2/Users", json=ak_user("ren", "ren@x.co", ext="sub-ren"))
+    sid_ren = r.json()["id"]
+    r = await c.put("/scim/v2/Users/" + sid_ren, json=ak_user("ren", "ren.new@x.co", ext="sub-ren"))
+    check("PUT cu email redenumit, fără active:false → tot 409 (nimic nu se schimbă)",
+          r.status_code == 409 and await uid_of("ren@x.co") == ren, r.text[:160])
+    r = await c.put("/scim/v2/Users/" + sid_ren,
+                    json=ak_user("ren", "ren.new@x.co", ext="sub-ren", active=False))
+    row = await db.fetchone("SELECT email, disabled, disabled_by FROM users WHERE id=?", ren)
+    check("PUT {email redenumit, active:false} pe un cont adoptat → 200, DEZACTIVAT, email neschimbat",
+          r.status_code == 200 and r.json().get("active") is False and row["disabled"] == 1
+          and row["email"] == "ren@x.co" and row["disabled_by"] == "scim", "%s %s %s" % (
+              r.status_code, r.text[:160], dict(row)))
+    au = await db.fetchone("SELECT detail FROM audit_log WHERE detail LIKE ? ORDER BY id DESC",
+                           "%ren@x.co: ignored the identity change%")
+    check("…schimbarea de identitate ignorată e auditată", au is not None)
+    check("…şi alertată (avertisment, scim_identity_ignored)",
+          await alert_of("scim_identity_ignored", "warning") is not None)
+    r = await c.put("/scim/v2/Users/" + sid_ren,
+                    json=ak_user("ren", "ren.new@x.co", ext="sub-ren", active=False))
+    check("…sincronizarea următoare: 200 din nou, fără a doua alertă în aceeaşi oră",
+          r.status_code == 200 and await n_alerts("scim_identity_ignored", "ren@x.co") == 1,
+          r.text[:160])
+    # PATCH cu ambele operaţii
+    await sso_login("sub-rex", "rex@x.co")
+    rex = await uid_of("rex@x.co")
+    r = await c.post("/scim/v2/Users", json=ak_user("rex", "rex@x.co", ext="sub-rex"))
+    sid_rex = r.json()["id"]
+    r = await c.patch("/scim/v2/Users/" + sid_rex, json={"schemas": [scim.S_PATCH], "Operations": [
+        {"op": "replace", "path": 'emails[type eq "work"].value', "value": "rex.new@x.co"},
+        {"op": "replace", "path": "active", "value": False}]})
+    row = await db.fetchone("SELECT email, disabled FROM users WHERE id=?", rex)
+    check("PATCH {email redenumit + active:false} → 200, dezactivat, email neschimbat",
+          r.status_code == 200 and row["disabled"] == 1 and row["email"] == "rex@x.co",
+          "%s %s" % (r.status_code, r.text[:160]))
+    # cont creat de SCIM, încă nelegat de SSO, cu un rol dat de mână (a doua gardă)
+    r = await c.post("/scim/v2/Users", json=ak_user("una", "una@x.co", ext="sub-una"))
+    sid_una, una = r.json()["id"], await uid_of("una@x.co")
+    await U.bind(una, "viewer", "all")
+    r = await c.patch("/scim/v2/Users/" + sid_una, json={"Operations": [
+        {"op": "replace", "value": {"emails": [{"value": "una.new@x.co", "primary": True}],
+                                    "active": False}}]})
+    row = await db.fetchone("SELECT email, disabled FROM users WHERE id=?", una)
+    check("…la fel pe un cont nelegat cu roluri date de mână (PATCH fără path)",
+          r.status_code == 200 and row["disabled"] == 1 and row["email"] == "una@x.co",
+          "%s %s" % (r.status_code, r.text[:160]))
+    # POST (re-provizionare după DELETE) cu email redenumit + active:false: readoptat sub
+    # emailul lui, dezactivat — nu 409
+    r = await c.post("/scim/v2/Users", json=ak_user("uma", "uma@x.co", ext="sub-uma"))
+    sid_uma, uma = r.json()["id"], await uid_of("uma@x.co")
+    await U.bind(uma, "viewer", "all")
+    await c.delete("/scim/v2/Users/" + sid_uma)
+    r = await c.post("/scim/v2/Users", json=ak_user("uma", "uma.new@x.co", ext="sub-uma",
+                                                     active=False))
+    row = await db.fetchone("SELECT email, disabled, scim_id FROM users WHERE id=?", uma)
+    check("POST {email redenumit, active:false} pe un cont scos → 201, rămâne dezactivat, email neschimbat",
+          r.status_code == 201 and row["disabled"] == 1 and row["email"] == "uma@x.co"
+          and row["scim_id"] == r.json().get("id"), "%s %s %s" % (r.status_code, r.text[:160],
+                                                                   dict(row)))
+    # LOW-1: refuzul unui Owner dat în WebTerm: o alertă critică pe oră, nu una pe sincronizare
+    for _ in range(4):
+        r = await c.post("/scim/v2/Users", json=ak_user("o2", "o2@x.co", ext="sub-o2"))
+    check("refuzuri repetate pe acelaşi Owner → tot 409, dar O SINGURĂ alertă critică pe oră",
+          r.status_code == 409 and await n_alerts("scim_owner_refused", "o2@x.co") == 1,
+          str(await n_alerts("scim_owner_refused", "o2@x.co")))
+    # LOW-3: un cont dezactivat ÎN WebTerm rămâne „al WebTerm”, orice ar face SCIM
+    r = await c.post("/scim/v2/Users", json=ak_user("wd", "wd@x.co", ext="sub-wd"))
+    sid_wd, wd = r.json()["id"], await uid_of("wd@x.co")
+    await db.execute("UPDATE users SET disabled=1, disabled_at=?, disabled_by='owner' WHERE id=?",
+                     time.time(), wd)
+    await c.patch("/scim/v2/Users/" + sid_wd, json=deactivate())
+    r = await c.delete("/scim/v2/Users/" + sid_wd)
+    row = await db.fetchone("SELECT disabled, disabled_by FROM users WHERE id=?", wd)
+    check("SCIM active:false + DELETE pe un cont dezactivat în WebTerm: disabled_by rămâne 'owner'",
+          r.status_code == 204 and row["disabled"] == 1 and row["disabled_by"] == "owner",
+          "%s %s" % (r.status_code, dict(row)))
+    r = await c.post("/scim/v2/Users", json=ak_user("wd", "wd@x.co", ext="sub-wd"))
+    row = await db.fetchone("SELECT disabled FROM users WHERE id=?", wd)
+    check("…iar re-provizionarea lui NU-l reactivează (403, rămâne dezactivat)",
+          r.status_code == 403 and row["disabled"] == 1, "%s %s" % (r.status_code, r.text[:160]))
+    # NOTE L3: un utilizator INACTIV în IdP, fără cont în WebTerm → nimic creat, 400, fără alertă
+    for _ in range(3):
+        r = await c.post("/scim/v2/Users", json=ak_user("ina", "ina@x.co", ext="sub-ina",
+                                                         active=False))
+    au = await db.fetchone("SELECT COUNT(*) AS n FROM audit_log WHERE detail LIKE ?",
+                           "%inactive in the identity provider%ina@x.co%")
+    check("POST active:false pentru o identitate nouă → 400 invalidValue, NICIUN cont creat",
+          r.status_code == 400 and r.json().get("scimType") == "invalidValue"
+          and await uid_of("ina@x.co") is None, "%s %s" % (r.status_code, r.text[:160]))
+    check("…fără alertă de cont nou; auditat o dată pe oră (nu la fiecare sincronizare)",
+          await n_alerts("scim_account_created", "ina@x.co") == 0 and au["n"] == 1, str(au["n"]))
+    r = await c.post("/scim/v2/Users", json=ak_user("ina", "ina@x.co", ext="sub-ina"))
+    check("…activat în IdP → creat (201)", r.status_code == 201 and await uid_of("ina@x.co"),
+          r.text[:160])
+
+
 async def main():
     await U.boot()
     owner = await U.owner_client()
@@ -520,6 +634,7 @@ async def main():
     await test_last_owner(owner, c)
     await test_review_owner_level(owner, c)
     await test_review_tokens(owner, c)
+    await test_rereview(owner, c)
     await c.aclose()
     await owner.aclose()
     await db.close()

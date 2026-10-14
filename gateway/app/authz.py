@@ -967,6 +967,32 @@ async def seed(conn) -> None:
             " WHERE u.email=api_tokens.created_by) WHERE created_by_id IS NULL")
         await conn.execute("INSERT INTO app_settings(key, value) VALUES('tokens_creator_backfilled', ?)"
                            " ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(int(now)),))
+    # 3.6.11 (re-review): the same for group enrollment tokens — offboarding revokes them by
+    # creator ID only. Frozen ONCE from the email of today; never re-run (a later account with
+    # that email must not become their creator). Unresolved = no creator account left: they keep
+    # working until they expire or an Owner revokes them — listed at every boot.
+    cur = await conn.execute("SELECT value FROM app_settings WHERE key='enroll_creator_backfilled'")
+    done = await cur.fetchone()
+    await cur.close()
+    if not done:
+        await conn.execute(
+            "UPDATE enroll_groups SET created_by_id=(SELECT u.id FROM users u"
+            " WHERE u.email=enroll_groups.created_by) WHERE created_by_id IS NULL")
+        await conn.execute("INSERT INTO app_settings(key, value) VALUES('enroll_creator_backfilled', ?)"
+                           " ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(int(now)),))
+    try:
+        cur = await conn.execute(
+            "SELECT id, name FROM enroll_groups WHERE created_by_id IS NULL AND revoked=0"
+            " AND expires > ? ORDER BY id", (now,))
+        orphans = [(r[0], r[1]) for r in await cur.fetchall()]
+        await cur.close()
+    except Exception:                      # noqa: BLE001 — a warning must never stop the boot
+        orphans = []
+    if orphans:
+        log.warning("group enrollment: %d live token(s) without a creator account (from before "
+                    "3.6.11, creator gone): %s — no offboarding revokes them; revoke them in "
+                    "Settings → Infrastructure & tokens if they are not needed", len(orphans),
+                    ", ".join("#%d %s" % o for o in orphans[:10]))
     # 3.6.10 (review): tokens created with the Owner role before it was refused keep working as
     # before (no role cap); say so once per boot so the Owner can recreate them narrower
     try:

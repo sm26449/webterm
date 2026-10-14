@@ -54,6 +54,10 @@ def build_35_db(path):
         con.execute("INSERT INTO api_tokens(name, token_hash, scopes, created, created_by, expires)"
                     " VALUES(?,?,?,?,?,?)", (name, security.sha256_hex(name), "read", now, by,
                                              now + 86400))
+    # tokenuri de grup de dinainte de `created_by_id` (re-review 3.6.11)
+    for name, by in (("eg-ana", "ana@x.co"), ("eg-ghost", "ghost@x.co")):
+        con.execute("INSERT INTO enroll_groups(name, token_hash, created, created_by, expires)"
+                    " VALUES(?,?,?,?,?)", (name, security.sha256_hex(name), now, by, now + 86400))
     con.commit()
     con.close()
 
@@ -125,6 +129,19 @@ async def main():
     g = await authz.grants_for_token(dict(row))
     check("…un cont creat DUPĂ cu acel email NU moşteneşte tokenul (nici la o repornire)",
           row["created_by_id"] is None and g.user_id is None, str(dict(row)))
+    # re-review 3.6.11 (LOW-2): la fel pentru tokenurile de grup — revocate la scoatere DOAR după id
+    eg = {r["name"]: r["created_by_id"] for r in await db.fetchall(
+        "SELECT name, created_by_id FROM enroll_groups WHERE name LIKE 'eg-%'")}
+    check("token de grup fără created_by_id: completat o dată după emailul de ACUM (ana → 1)",
+          eg == {"eg-ana": 1, "eg-ghost": None}, str(eg))
+    ghost = (await db.fetchone("SELECT id FROM users WHERE email='ghost@x.co'"))["id"]
+    from app import accounts
+    n_ghost = await accounts.revoke_enroll_groups(ghost, "ghost@x.co")
+    n_ana = await accounts.revoke_enroll_groups(1, "ana@x.co")
+    rev = {r["name"]: r["revoked"] for r in await db.fetchall(
+        "SELECT name, revoked FROM enroll_groups WHERE name LIKE 'eg-%'")}
+    check("…scoaterea contului care ia ACUM acel email nu-l atinge; a creatorului (după id) îl revocă",
+          n_ghost == 0 and n_ana == 1 and rev == {"eg-ana": 1, "eg-ghost": 0}, str(rev))
     await db.execute("DELETE FROM users WHERE email='ghost@x.co'")
     await db.close()
 

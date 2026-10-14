@@ -102,6 +102,17 @@ class ScimError(HTTPException):
         self.scim_type = scim_type
 
 
+class _InactiveCreate(ScimError):
+    """POST of a user the IdP itself marks inactive, matching no WebTerm account: nothing is
+    created (re-review 3.6.11). Quiet: audited once an hour per email, no alert."""
+
+    def __init__(self, email: str):
+        super().__init__(400, "WebTerm does not create an account for a user who is inactive in "
+                              "the identity provider (active=false); it is created when the user "
+                              "is activated", "invalidValue")
+        self.email = email
+
+
 def error_response(exc: ScimError) -> JSONResponse:
     body = {"schemas": [S_ERROR], "status": str(exc.status_code), "detail": exc.detail}
     if exc.scim_type:
@@ -273,7 +284,7 @@ def reset_limits() -> None:
     _hits.clear()
     _lockout_rows.clear()
     _lockout_suppressed = 0
-    _local_alerted.clear()
+    _alerted.clear()
 
 
 async def require_scim(request: Request) -> dict:
@@ -550,19 +561,29 @@ async def _refuse(p: dict, method: str, path: str, exc: ScimError) -> None:
     await _note_error(exc.status_code, "%s %s: %s" % (method, path, exc.detail), force=True)
 
 
-_local_alerted: dict[str, float] = {}
+_alerted: dict[tuple, float] = {}
+_ALERTED_MAX = 1000
+
+
+def _first_this_hour(*key) -> bool:
+    """True once an hour per `key` (re-review 3.6.11: the IdP repeats a refused request at every
+    sync — one alert per account and kind an hour, not one per sync). Bounded: past
+    `_ALERTED_MAX` keys the table starts over (worst case: one extra alert)."""
+    now = time.time()
+    if now - _alerted.get(key, 0) < 3600:
+        return False
+    if len(_alerted) >= _ALERTED_MAX:
+        _alerted.clear()
+    _alerted[key] = now
+    return True
 
 
 async def _alert_local_refused(email: str, ip: str) -> None:
     """The IdP asked for an account that has a LOCAL password (a break-glass account): refused —
     and that is worth a critical alert (review 3.6.11: someone may be aiming SCIM at it). Once an
     hour per account: the IdP retries on every sync."""
-    now = time.time()
-    if now - _local_alerted.get(email, 0) < 3600:
+    if not _first_this_hour("local", email):
         return
-    if len(_local_alerted) > 1000:
-        _local_alerted.clear()
-    _local_alerted[email] = now
     log.error("SCIM: refused to manage %s — it has a local password (break-glass)", email)
     email_alerts.notify_security_change(
         "the identity provider tried to take over %s, an account with a local password "
@@ -617,13 +638,16 @@ _OWNER_LEVEL_DETAIL = ("this account holds an Owner-level role given in WebTerm 
 
 
 async def _owner_level_refused(uid: int, what: str, ip: str) -> ScimError:
+    """The refusal for an account holding an Owner-level role given in WebTerm. Critical alert
+    once an hour per (account, action) — re-review 3.6.11: the IdP retries at every sync."""
     row = await db.fetchone("SELECT email FROM users WHERE id=?", uid)
     email = row["email"] if row else "#%d" % uid
     log.error("SCIM: refused to %s %s — it holds an Owner-level role given in WebTerm", what, email)
-    email_alerts.notify_security_change(
-        "the identity provider tried to %s %s, which holds an Owner-level role given in WebTerm; "
-        "refused" % (what, email), ip, ACTOR, fleet=True, severity="critical",
-        what_key="scim_owner_refused", what_params={"account": email, "action": what})
+    if _first_this_hour("owner", uid, what):
+        email_alerts.notify_security_change(
+            "the identity provider tried to %s %s, which holds an Owner-level role given in "
+            "WebTerm; refused" % (what, email), ip, ACTOR, fleet=True, severity="critical",
+            what_key="scim_owner_refused", what_params={"account": email, "action": what})
     return ScimError(403, _OWNER_LEVEL_DETAIL % what)
 
 
@@ -684,10 +708,45 @@ async def _set_active(p: dict, uid: int, active: bool, path: str) -> None:
         raise await _owner_level_refused(uid, "disable", p["ip"])
 
 
+async def _guard_identity_or_drop(u, f: dict) -> Optional[ScimError]:
+    """`_guard_identity`, except that an identity refusal never blocks `active:false`
+    (re-review 3.6.11: Authentik sends the whole user — a renamed email together with
+    active:false — so a 409 there would leave the person enabled until a DELETE). When the request
+    deactivates, the identity attributes (email, externalId) are DROPPED from `f` and the refusal
+    is returned for `_identity_dropped`; everything else still applies. When it does not
+    deactivate, the refusal stands (409): it would keep the account working under a re-pointed
+    identity."""
+    try:
+        await _guard_identity(u, f)
+        return None
+    except ScimError as e:
+        if f.get("active") is not False:
+            raise
+        for k in ("email", "externalId"):
+            f.pop(k, None)
+        return e
+
+
+async def _identity_dropped(p: dict, u, e: ScimError, method: str, path: str) -> None:
+    """Audit (every time — it is the IdP asking) + warning alert (once an hour per account)."""
+    await _audit(p, method, path, 200, "SCIM deactivating %s: ignored the identity change WebTerm "
+                 "refuses (%s)" % (u["email"], e.detail), actor_id=u["id"])
+    log.warning("SCIM: deactivating %s, ignored a refused identity change: %s", u["email"], e.detail)
+    if _first_this_hour("identity", u["id"]):
+        email_alerts.notify_security_change(
+            "the identity provider deactivated %s and asked for an identity change WebTerm refuses "
+            "(%s); the account was deactivated, the change ignored" % (u["email"], e.detail),
+            p["ip"], ACTOR, fleet=True, what_key="scim_identity_ignored",
+            what_params={"account": u["email"]})
+
+
 async def _apply_user(p: dict, u, f: dict, path: str, method: str) -> bool:
     """Write the changed attributes of SCIM account `u` (a row). → True if anything changed."""
-    await _guard_identity(u, f)
+    f = dict(f)
+    dropped = await _guard_identity_or_drop(u, f)
     await _active_precheck(u["id"], f.get("active"), p["ip"])
+    if dropped is not None:
+        await _identity_dropped(p, u, dropped, method, path)
     sets, args, what = [], [], []
     if f.get("email") and f["email"] != u["email"]:
         await _email_free(f["email"], u["id"])
@@ -768,7 +827,10 @@ async def create_user(request: Request, p=Depends(require_scim)):
                                          "given in WebTerm; SCIM never takes it over (an Owner can "
                                          "give that role through an SSO group instead)" % email,
                                     "uniqueness")
-                await _guard_identity(target, f)
+                dropped = await _guard_identity_or_drop(target, f)
+                if dropped is not None:     # deactivating: adopt under the identity it has
+                    email = f["email"] = target["email"]
+                    ext = None
                 await _active_precheck(target["id"], f.get("active"), p["ip"])
                 sid = str(uuid.uuid4())
                 await _email_free(email, target["id"])
@@ -797,6 +859,13 @@ async def create_user(request: Request, p=Depends(require_scim)):
                         "it can now disable it and its groups give its roles" % email,
                         p["ip"], ACTOR, fleet=True, severity="critical",
                         what_key="scim_account_adopted", what_params={"account": email})
+                if dropped is not None:
+                    await _identity_dropped(p, target, dropped, "POST", path)
+            elif f.get("active") is False:
+                # re-review 3.6.11: a person inactive in the IdP gets NO new account (fail closed;
+                # an IdP that pushes its inactive users would otherwise fill WebTerm with disabled
+                # accounts and "new account" alerts). 400, audited once an hour per email
+                raise _InactiveCreate(email)
             else:
                 sid = str(uuid.uuid4())
                 locked = await security.hash_password_async(security.new_token())
@@ -824,6 +893,11 @@ async def create_user(request: Request, p=Depends(require_scim)):
             elif f.get("active") is True:
                 await _set_active(p, uid, True, path)
             u = await db.fetchone("SELECT " + _USER_COLS + " FROM users WHERE id=?", uid)
+    except _InactiveCreate as e:
+        if _first_this_hour("inactive", e.email):
+            await _audit(p, "POST", path, 400, "SCIM refused: %s (%s)" % (e.detail, e.email))
+        await _note_error(400, "POST %s: %s" % (path, e.detail))
+        raise
     except ScimError as e:
         await _refuse(p, "POST", path, e)
         raise
@@ -1007,8 +1081,10 @@ async def delete_user(scim_id: str, p=Depends(require_scim)):
             gids = [r["group_id"] for r in await db.fetchall(
                 "SELECT group_id FROM scim_group_members WHERE user_id=?", u["id"])]
             await db.execute("DELETE FROM scim_group_members WHERE user_id=?", u["id"])
-            await db.execute("UPDATE users SET scim_id=NULL, disabled_by='scim-delete',"
-                             " scim_updated=? WHERE id=?", time.time(), u["id"])
+            # `disabled_by` was set (or moved from 'scim') by accounts.disable — never over a
+            # disable done in WebTerm (re-review 3.6.11)
+            await db.execute("UPDATE users SET scim_id=NULL, scim_updated=? WHERE id=?",
+                             time.time(), u["id"])
             await _audit(p, "DELETE", path, 204, "SCIM deleted %s: account disabled and unlinked "
                          "(kept for its history)" % u["email"], actor_id=u["id"])
             if gids:
