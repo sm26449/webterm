@@ -26,6 +26,16 @@ const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigat
 const mod = (e: KeyboardEvent) => (isMac ? e.metaKey : e.ctrlKey)
 const noAlt = (e: KeyboardEvent) => !e.altKey
 const altOnly = (e: KeyboardEvent) => e.altKey && !e.metaKey && !e.ctrlKey
+/** Alt+<literă> care NU înghite un caracter tastat (review 3.6.12, L8). Pe macOS Option+M / Option+X
+    TASTEAZĂ „µ" / „≈" (şi alte caractere pe alte layout-uri) — scurtătura le-ar fi furat din shell.
+    Acolo legăm doar când tasta produce chiar litera simplă (Option setat ca Meta / layout fără
+    caracter pe combinaţie); altfel caracterul ajunge în terminal, iar acţiunea rămâne pe butoanele
+    din bara panoului. În rest identificarea rămâne pe `code` (layout-uri non-latine). */
+export function altLetter(e: Pick<KeyboardEvent, 'code' | 'key' | 'altKey' | 'metaKey' | 'ctrlKey' | 'shiftKey'>,
+  letter: string, mac: boolean = isMac): boolean {
+  if (e.code !== 'Key' + letter.toUpperCase() || !e.altKey || e.metaKey || e.ctrlKey || e.shiftKey) return false
+  return !mac || e.key.toLowerCase() === letter.toLowerCase()
+}
 
 export const SHORTCUTS: Shortcut[] = [
   { id: 'palette', keys: 'Mod+K', group: 'app',
@@ -55,9 +65,9 @@ export const SHORTCUTS: Shortcut[] = [
   // în shell neatinsă): Alt+M = panoul focalizat schimbă locul cu următorul, Alt+X = maximizează /
   // restaurează panoul. NU Alt+Z: e „word wrap" în editorul de fişiere.
   { id: 'movePane', keys: 'Alt+M', group: 'session',
-    match: (e) => e.code === 'KeyM' && altOnly(e) && !e.shiftKey },
+    match: (e) => altLetter(e, 'm') },
   { id: 'maximizePane', keys: 'Alt+X', group: 'session',
-    match: (e) => e.code === 'KeyX' && altOnly(e) && !e.shiftKey },
+    match: (e) => altLetter(e, 'x') },
   { id: 'popout', keys: 'Alt+P', group: 'session',
     match: (e) => e.code === 'KeyP' && altOnly(e) },
   { id: 'fontUp', keys: 'Alt++', group: 'session',

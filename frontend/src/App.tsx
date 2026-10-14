@@ -56,6 +56,8 @@ import { menuNav } from './lib/tablist'
 import { createPortal } from 'react-dom'
 import { shouldAutoOpen } from './lib/walkthrough'
 import { fmtTs, getTimezone } from './lib/tz'
+import { acceptDrop, beginDrag, endDrag, ownDragKind } from './lib/dragState'
+import type { PeerState } from './lib/broadcastGuard'
 
 /* localStorage „sigur": Safari cu „Block all cookies" / iframe sandbox aruncă SecurityError chiar la
    getItem (= cădere înainte de primul render), iar QuotaExceededError într-un useEffect ajungea în
@@ -368,10 +370,12 @@ function MainApp() {
     if (!broadcastRef.current) return
     paneHandles.current.forEach((h, osid) => { if (osid !== sid) h.send(d) })
   }, [])
-  const peerCommands = useCallback((sid: string) => {
+  // starea fiecărui panou-ţintă (linia tastată + dacă o putem crede: flux viu, ecou primit) —
+  // guardrail-ul unui Enter difuzat cere confirmare când un panou nu poate fi verificat (M1)
+  const peerStates = useCallback((sid: string) => {
     if (!broadcastRef.current) return []
-    const out: (string | null)[] = []
-    paneHandles.current.forEach((h, osid) => { if (osid !== sid) out.push(h.pendingCommand()) })
+    const out: PeerState[] = []
+    paneHandles.current.forEach((h, osid) => { if (osid !== sid) out.push(h.state()) })
     return out
   }, [])
   // selecţie ÎN split: înlocuieşte intrarea din istoric (click-urile pe panouri nu umplu „Back")
@@ -1257,7 +1261,7 @@ function MainApp() {
       commandGuard={appState.command_guard}
       registerSend={o.grid ? registerSend : undefined}
       onUserData={o.grid ? handleUserData : undefined}
-      peerCommands={o.grid ? peerCommands : undefined}
+      peerStates={o.grid ? peerStates : undefined}
       broadcasting={o.grid ? broadcast : undefined}
       // căutarea din rezultate globale merge DOAR la panoul activ — panourile ţinute în cache
       // nu trebuie să (re)pornească o căutare veche când redevin vizibile
@@ -1509,9 +1513,12 @@ function MainApp() {
   // proprii — fişierele trase peste terminal (upload) trec neatinse spre SessionView.
   const PANE_MIME = 'application/x-wt-pane'
   const TAB_MIME = 'application/x-wt-session'
+  // doar drag-uri pornite în ACEASTĂ pagină (lib/dragState): tipurile noastre pot fi puse pe un
+  // drag de orice altă pagină / alt tab WebTerm, cu un sid ales de ea (review 3.6.12, L3)
   const dragKind = (e: React.DragEvent) => {
     const ty = Array.from(e.dataTransfer.types)
-    return ty.includes(PANE_MIME) ? 'pane' : ty.includes(TAB_MIME) ? 'tab' : null
+    const k = ty.includes(PANE_MIME) ? 'pane' : ty.includes(TAB_MIME) ? 'tab' : null
+    return k && ownDragKind() === k ? k : null
   }
   const onPaneDragOver = (sid: string, e: React.DragEvent) => {
     if (splitDegraded || !dragKind(e)) return
@@ -1525,10 +1532,12 @@ function MainApp() {
     e.preventDefault(); e.stopPropagation()
     setDropPane(null)
     if (kind === 'pane') {
-      const from = e.dataTransfer.getData(PANE_MIME)
+      const from = acceptDrop('pane', e.dataTransfer.getData(PANE_MIME))
+      endDrag()
       if (from && from !== sid) applyMove({ kind: 'swap', from, to: sid })
     } else {
-      const w = e.dataTransfer.getData(TAB_MIME)
+      const w = acceptDrop('tab', e.dataTransfer.getData(TAB_MIME))
+      endDrag()
       if (w && sessions.some((s) => s.id === w)) applyMove({ kind: 'replace', target: sid, with: w })
     }
   }
@@ -1554,8 +1563,8 @@ function MainApp() {
     const posKeys = positionKeys(splitLayout)
     return (
       <div draggable={canMove}
-        onDragStart={(e) => { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData(PANE_MIME, s.id) }}
-        onDragEnd={() => setDropPane(null)}
+        onDragStart={(e) => { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData(PANE_MIME, s.id); beginDrag('pane', s.id) }}
+        onDragEnd={() => { endDrag(); setDropPane(null) }}
         onDoubleClick={(e) => { if (!(e.target as HTMLElement).closest('button')) toggleMax(s.id) }}
         title={canMove ? t('split.dragHint') : undefined}
         className={`relative flex h-7 shrink-0 select-none items-center gap-1.5 border-b px-1.5 text-2xs ${canMove ? 'cursor-grab' : ''} ${
@@ -1978,8 +1987,10 @@ function MainApp() {
                       grid,
                       visible,
                       // pe telefon panourile ascunse se pun pe pauză (trafic); pe desktop toate
-                      // panourile split-ului curg (şi cele ascunse de un maximize: revenire instant)
-                      stream: grid ? (narrowSplit ? visible : true) : visible,
+                      // panourile split-ului curg (şi cele ascunse de un maximize: revenire instant).
+                      // Cu BROADCAST pornit curg toate şi pe telefon: un panou ascuns primeşte tastele,
+                      // deci guardrail-ul are nevoie de linia lui la zi (review 3.6.12, M1)
+                      stream: grid ? (narrowSplit && !broadcast ? visible : true) : visible,
                     })}</PaneErrorBoundary>
                   </div>
                   {grid && dropPane === sid && (

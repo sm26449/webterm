@@ -90,7 +90,9 @@ keyboard focus and the action target (search, font, snippets) always agree:
 - **Rule for navigation** (also in docs/SHORTCUTS.md): tab-level navigation (a tab click, Alt+1…9,
   Alt+0 / Home, a session from the sidebar or palette, a host page) leaves the split; pane-level
   navigation stays — inside a split `Alt+←/→` go to the previous / next pane, `Alt+M` swaps the
-  focused pane with the next one and `Alt+X` maximizes / restores it. `Alt+W` does nothing inside
+  focused pane with the next one and `Alt+X` maximizes / restores it (on macOS only when the key
+  gives the plain letter — `Option+M`/`Option+X` that type `µ`/`≈` go to the shell; use the pane
+  bar buttons there, see `altLetter` in lib/shortcuts.ts). `Alt+W` does nothing inside
   a split (the pane's tab would come straight back). A navigation to a session outside the split
   (Back, a link) leaves it.
 - Only the selected pane takes the focus when it mounts; the others mount without stealing it.
@@ -122,11 +124,15 @@ rebuilds its WebGL renderer when the browser tab comes back.
 The drags use private MIME types (`application/x-wt-pane`, `application/x-wt-session`) — never
 `text/plain`, which xterm's textarea would type into the shell — and are caught in the capture
 phase on the pane wrapper, so a *file* dragged onto a terminal still goes to the upload path.
+Any page (or another WebTerm tab) can put the same types on a drag, with a session id of its
+choosing, so a drop is accepted only when the drag **started in this page**: the pane bar and the
+tab record what they drag (`lib/dragState.ts`) and the drop must carry exactly that id.
 
 ## Phones (< 768 px)
 
 One pane at a time, with a pane switcher above it; the hidden panes stay mounted and pause their
-stream. Dividers and drag-to-swap are off; Move to… is off too (the switcher is the way to change
+stream — except while **broadcast** is on: then every pane keeps streaming, because a hidden pane
+still receives your keys and the guardrail needs its current line (see Broadcast). Dividers and drag-to-swap are off; Move to… is off too (the switcher is the way to change
 panes), maximize stays.
 
 ## Persistence — definitions server-side, selection per-device
@@ -154,6 +160,10 @@ step-up factor.
   otherwise rewrite it without the hidden panes. Rename, broadcast and position still work. The UI
   shows the visible panes in a default layout (not persisted) with a notice, and turns off
   rearranging.
+- What the `hidden` count and the `409 splitview.hiddenPanes` reveal: only that a session **you
+  yourself put** into this layout still exists (it was not deleted; dead panes are pruned). Never
+  its id, host, title or state, and nothing about sessions you never referenced — the layout is
+  yours, so this is at most "the thing I added earlier is still there".
 - Panes whose session no longer exists are pruned by `core.prune_split_views`: in the session
   reaper (every minute) and right after a session or host delete; a layout that drops below 2 live
   panes is deleted. GET just leaves those out in the meantime.
@@ -161,7 +171,11 @@ step-up factor.
   showing an empty main area. A failed GET keeps the previous state (it used to close the split).
 - A pane needs `session.watch` or `session.open`; `recording.view` alone (replays of closed
   sessions) is not enough for a live pane.
-- At most **50** split-views per account (`400 splitview.tooMany`); `position` is clamped to
+- At most **50** split-views per account (`400 splitview.tooMany`), enforced inside the INSERT
+  (`INSERT … SELECT … WHERE COUNT(*) < 50`), so concurrent POSTs cannot overshoot it. The prune
+  writes compare-and-swap on the `panes` it read (`UPDATE/DELETE … WHERE id=? AND panes IS ?`): a
+  PATCH that lands between its read and its write is not overwritten — the reaper retries next
+  cycle. A PATCH racing a delete answers 404, not 500. `position` is clamped to
   0–1000; chips can be reordered by drag or `Alt+Shift+←/→`, and only the moved positions are
   PATCHed. Alt+D reuses an existing split with the same two sessions, and new splits get the first
   unused "Split N" name.
@@ -173,6 +187,27 @@ pane keeps a thicker ring so you still see where search / font / Ctrl+W go. The 
 checks **every target pane**: on Enter it looks at the typed command (OSC 133) of the origin and of
 each other pane, and the outcome — block (clear the line), cancel (clear) or confirmed run — is
 sent to all of them, not only to the pane you typed in.
+
+The typed command of a pane is read from what its shell has **echoed**, so it can be stale. Fail
+closed (review of 3.6.12, `lib/broadcastGuard.ts`), when guardrail rules are active:
+
+- a target pane that is **not receiving output** (paused stream, history replay in progress) forces
+  a "Can't check every pane" confirmation — its line is unknown. While broadcast is on, phones keep
+  every pane streaming so this is the exception (reconnects), not the rule;
+- a target pane at a shell prompt whose last keys have **not echoed back yet** (latency: `↑` may
+  have recalled a command nobody has seen) makes Enter wait up to **150 ms** for the echo, then
+  decide; still no echo → the same confirmation. Keys typed during the wait are queued and sent
+  after the Enter, in order;
+- a rule that matches any pane's line still wins (block / confirm, as before);
+- panes whose keys don't reach the host at all (watch-only, ended, socket closed) are not targets.
+
+Every path that can submit a line goes through the same check: the keyboard Enter / `Ctrl+J`, a
+bare Enter that arrives without a keydown (mobile IME, keybar), "Paste & run" from the paste history
+(its Enter goes to every pane, after the check), and snippets / palette inserts (typed into every
+pane when broadcasting; one containing a line break is checked line by line — the first line
+appended to what is already typed — and not typed at all if a line matches). "Run again" types the
+command into every pane without Enter. A pasted text whose line ends with a bare CR (`cmd\r`) hits
+the multi-line paste guard like LF. A watch-only pane broadcasts nothing (its keys go nowhere).
 
 ## Data model (DB)
 

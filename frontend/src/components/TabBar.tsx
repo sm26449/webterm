@@ -9,6 +9,7 @@ import { isOverflowing, menuNav, showAllTabsButton, tabState } from '../lib/tabl
 import { CloseIcon, HomeIcon, KeyboardIcon, PencilIcon, PlusIcon } from './Icons'
 import { LAYOUT_LABEL, LayoutIcon } from './SplitLayoutIcon'
 import type { SplitLayout } from '../lib/splitLayout'
+import { beginDrag, endDrag } from '../lib/dragState'
 
 /** Sesiunile deschise ca tab-uri (setul de lucru), pe cromul întunecat.
    Fiecare tab arată host-ul (nume + culoare stabilă) ca să distingi instant
@@ -201,13 +202,14 @@ export default function TabBar(props: {
               draggable
               onDragStart={(e) => {
                 setDrag(s.id); e.dataTransfer.effectAllowed = 'move'
+                beginDrag('tab', s.id)   // doar drag-urile pornite aici sunt acceptate de panouri (L3)
                 // tip PROPRIU (nu text/plain): un tab lăsat peste un panou de split îl înlocuieşte
                 // (3.6.12); text/plain ar fi fost lipit în textarea terminalului ca sid brut
                 try { e.dataTransfer.setData('application/x-wt-session', s.id) } catch { /* */ }
               }}
               onDragOver={(e) => { if (!drag) return; e.preventDefault(); e.dataTransfer.dropEffect = 'move'; if (over !== s.id) setOver(s.id) }}
               onDrop={(e) => { e.preventDefault(); drop() }}
-              onDragEnd={drop}
+              onDragEnd={() => { endDrag(); drop() }}
               style={active ? { background: `color-mix(in srgb, ${color} 18%, var(--chrome-elev))` } : undefined}
               className={`wt-tab group mb-1.5 flex shrink-0 items-stretch rounded-md ${active ? 'is-active' : ''} ${
                 drag === s.id ? 'opacity-40' : ''} ${

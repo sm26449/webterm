@@ -13,7 +13,10 @@ Panel-local keys and mouse/touch gestures (below) are listed there too, since 3.
 session in the sidebar or palette) leaves the split view; pane-level navigation stays in it
 (`Alt+←/→` between panes, `Alt+M`, `Alt+X`, clicking or tabbing into a pane). Its chip stays in the
 tab bar, so you can always return. `Alt+M` and `Alt+X` only act inside a split view; elsewhere the
-key goes to the shell untouched.
+key goes to the shell untouched. On **macOS**, `Option+M` / `Option+X` normally type `µ` / `≈`: there
+the shortcut fires only when the key produces the plain letter (e.g. Option set to act as Meta in a
+custom layout) — otherwise the character goes to the terminal and you use the pane bar's **Move to…**
+and maximize buttons (or double-click the pane title).
 
 ## Navigation
 
@@ -37,8 +40,8 @@ key goes to the shell untouched.
 | `Mod+Shift+F` | Search the session history (scrollback) |
 | `Alt+↑` / `Alt+↓` | Jump to the previous / next command (requires [shell integration](SHELL-INTEGRATION.md)) |
 | `Alt+D` | Split: open the session side by side (reuses a split view with the same two sessions) |
-| `Alt+M` | Split view: swap the focused pane with the next one |
-| `Alt+X` | Split view: maximize / restore the focused pane |
+| `Alt+M` | Split view: swap the focused pane with the next one (macOS: see the note above) |
+| `Alt+X` | Split view: maximize / restore the focused pane (macOS: see the note above) |
 | `Alt+P` | Detach the session into a window |
 | `Alt+S` | Saved commands (snippets) |
 | `Alt++` / `Alt+−` | Larger / smaller font |

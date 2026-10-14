@@ -75,6 +75,21 @@ none of it reconnects a terminal. No agent change (agent stays 58).
   after a session or host delete. A pane now needs `session.watch` or `session.open`
   (`recording.view` alone no longer suffices), there is a cap of 50 split views per account
   (`splitview.tooMany`), and `position` is clamped.
+- **Independent review of split views: broadcast can't run an unseen command, and four races and
+  leaks closed.** Why: on phones the hidden panes of a split paused their stream but still received
+  broadcast keys, so the guardrail read a stale line there and a dangerous recalled command (`↑`)
+  could run unseen; even on desktop a pane's line lags its keys by the round trip. With broadcast on
+  every pane now streams, and Enter waits up to 150 ms for each pane's echo — a pane that is paused
+  or still hasn't echoed asks "Can't check every pane — run in all panes anyway?". The same check
+  covers a bare Enter from a mobile keyboard (IME) or the keybar, "Paste & run" from the paste
+  history (whose Enter reached only one pane), and snippets / palette inserts, which are now typed
+  into every pane and refused if a line would match a rule. A pasted `cmd\r` (CR only) hits the
+  multi-line paste guard like `\n`, and typing in a watch-only pane no longer broadcasts to the
+  others. Server: the 50-per-account cap is atomic (concurrent POSTs created 60 of 50), the dead-pane
+  prune no longer overwrites a PATCH that lands mid-prune (compare-and-swap on the panes), and a
+  PATCH racing a delete answers 404 instead of 500. Drag and drop onto a pane accepts only drags
+  started in this page (another site could drop its own session id). On macOS `Alt+M` / `Alt+X` no
+  longer swallow `µ` / `≈` typed with Option; they act only when the key gives the plain letter.
 
 ## [3.6.11] — 2026-10-14 · agent (58)
 
