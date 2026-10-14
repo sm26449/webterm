@@ -1473,21 +1473,60 @@ try {
   await page.locator('button:has-text("Show side by side")').click()
   await page.waitForTimeout(1200)
   check('split: se randează split-ul de 2 panouri (divider prezent)',
-    (await page.locator('[aria-label^="Resize the split"]').count()) >= 1)
+    (await page.locator('[aria-label^="Resize the panes"]').count()) >= 1)
   check('split: chip-ul denumit apare în bara de taburi',
     (await page.locator('button:has-text("e2e-split")').count()) >= 1)
 
-  // navigare liberă: click pe un tab de sesiune IESE din split, dar chip-ul RĂMÂNE (revii oricând)
-  await page.locator('button[data-tab]').first().evaluate((el) => el.click())
+  // ── 3.6.12: intrarea într-un split SELECTEAZĂ + FOCALIZEAZĂ un panou ──────────────────
+  // Bug raportat 2026-10-14: de pe un tab normal, click pe chip → TabBar-ul rămânea pe tabul
+  // părăsit, iar tastatura/ţinta acţiunilor nu erau în split până la un click în terminal.
+  // „De acord" = panoul selectat (accent) == hash-ul == tabul marcat în TabBar == focusul (în xterm).
+  const splitState = () => page.evaluate(() => {
+    const ae = document.activeElement
+    return {
+      inXterm: !!ae?.closest?.('.xterm'),
+      focusPane: ae?.closest?.('[data-split-pane]')?.getAttribute('data-split-pane') ?? null,
+      sel: document.querySelector('[data-split-pane][data-selected="true"]')?.getAttribute('data-split-pane') ?? null,
+      cur: document.querySelector('button[data-tab][aria-current="page"]')?.getAttribute('data-tab') ?? null,
+      hash: location.hash.replace('#/s/', ''),
+      layout: document.querySelector('[data-split-layout]')?.getAttribute('data-split-layout') ?? null,
+      panes: [...document.querySelectorAll('[data-split-pane]')].map((e) => e.getAttribute('data-split-pane')),
+    }
+  })
+  // capturi pentru documentaţie / recenzie (în $OUT, ca agent-token-ul); fără /out → sărite tăcut
+  const shot = async (n) => { try { await page.screenshot({ path: `/out/split-${n}.png` }) } catch { /* */ } }
+  await shot('cols2-dark')
+  const agree = (s) => !!s.sel && s.inXterm && s.focusPane === s.sel && s.hash === s.sel && s.cur === s.sel
+  const pollAgree = async (ms = 5000) => {
+    const t0 = Date.now()
+    let s = await splitState()
+    while (!agree(s) && Date.now() - t0 < ms) { await page.waitForTimeout(250); s = await splitState() }
+    if (!agree(s)) console.error('  [diag] split state', JSON.stringify(s))
+    return agree(s)
+  }
+  const splitsApi = () => page.evaluate(async () => (await (await fetch('/api/split-views', { credentials: 'same-origin' })).json()).split_views)
+  const mine = async () => (await splitsApi()).find((v) => v.name === 'e2e-split')
+  // WS-urile de sesiune deschise de aici încolo: un swap / o intrare în split NU trebuie să reconecteze
+  let sessWs = 0
+  page.on('websocket', (w) => { if (w.url().includes('/ws/sessions/')) sessWs++ })
+
+  // navigare liberă: click pe un tab de sesiune IESE din split, dar chip-ul RĂMÂNE (revii oricând).
+  // Alegem un tab care NU e în split — exact scenariul bug-ului de mai sus.
+  const panes0 = (await mine())?.panes ?? []
+  const outside = await page.evaluate((p) => [...document.querySelectorAll('button[data-tab]')]
+    .map((b) => b.getAttribute('data-tab')).find((s) => !p.includes(s)) ?? null, panes0)
+  await page.locator(outside ? `button[data-tab="${outside}"]` : 'button[data-tab]').first().evaluate((el) => el.click())
   await page.waitForTimeout(600)
   check('split: click pe un tab de sesiune iese din split (divider dispare)',
-    (await page.locator('[aria-label^="Resize the split"]').count()) === 0)
+    (await page.locator('[aria-label^="Resize the panes"]').count()) === 0)
   check('split: chip-ul rămâne în bară după ce ieşi (revii oricând)',
     (await page.locator('button:has-text("e2e-split")').count()) >= 1)
   await page.locator('button:has-text("e2e-split")').first().click()
   await page.waitForTimeout(800)
   check('split: revin la split din chip (divider reapare)',
-    (await page.locator('[aria-label^="Resize the split"]').count()) >= 1)
+    (await page.locator('[aria-label^="Resize the panes"]').count()) >= 1)
+  check('split: intrarea din chip (de pe alt tab) selectează + focalizează un panou (TabBar, focus, ţintă de acord)',
+    await pollAgree())
 
   // REGRESIE: în split activ, click pe un host din sidebar trebuie să IASĂ din split şi să
   // arate pagina hostului. Înainte `splitActive` avea prioritate de render peste pagina
@@ -1496,7 +1535,7 @@ try {
   await page.locator('.wt-sidebar button:has-text("ci-local")').first().click()
   await page.waitForTimeout(600)
   check('split: click pe un host din sidebar iese din split (divider dispare)',
-    (await page.locator('[aria-label^="Resize the split"]').count()) === 0)
+    (await page.locator('[aria-label^="Resize the panes"]').count()) === 0)
   // revin pe o SESIUNE (nu pe pagina hostului) înainte de a reintra în split: paşii de după
   // (reload, apoi Toolbox din bara sesiunii) cer o sesiune selectată, nu ruta /h/<id>.
   await page.locator('button[data-tab]').first().evaluate((el) => el.click())
@@ -1505,14 +1544,105 @@ try {
   await page.locator('button:has-text("e2e-split")').first().click()
   await page.waitForTimeout(800)
   check('split: revin iar la split din chip după navigarea pe host',
-    (await page.locator('[aria-label^="Resize the split"]').count()) >= 1)
+    (await page.locator('[aria-label^="Resize the panes"]').count()) >= 1)
+
+  // divider din tastatură: → creşte panoul stâng, valoarea se salvează (PATCH amânat)
+  const div0 = page.locator('[role="separator"][data-divider="0"]')
+  const v0 = Number(await div0.getAttribute('aria-valuenow'))
+  await div0.focus()
+  for (let i = 0; i < 3; i++) await page.keyboard.press('ArrowRight')
+  await page.waitForTimeout(1200)
+  const v1 = Number(await div0.getAttribute('aria-valuenow'))
+  const savedSizes = (await mine())?.sizes ?? []
+  check('split: divider din tastatură (→ ×3) mută graniţa şi o salvează pe server',
+    v1 >= v0 + 5 && Math.abs((savedSizes[0] ?? 0) * 100 - v1) <= 1)
+
+  // swap prin „Move to…" — ACELEAŞI terminale (fără remontare), niciun WS nou
+  const pBefore = (await mine())?.panes ?? []
+  await page.evaluate(() => { window.__e2eTerms = new Map(window.__wtTerms) })
+  const ws0 = sessWs
+  await page.locator(`[data-split-pane="${pBefore[0]}"] [data-testid="pane-move"]`).click()
+  await page.locator('[data-testid="pane-move-menu"] [role="menuitem"]').first().click()
+  await page.waitForTimeout(1200)
+  const pAfter = (await mine())?.panes ?? []
+  const sameTerms = () => page.evaluate((sids) => sids.length > 1
+    && sids.every((s) => window.__wtTerms?.get(s) && window.__wtTerms.get(s) === window.__e2eTerms?.get(s)), pBefore)
+  check('split: „Move to…" schimbă panourile între ele (salvat pe server)',
+    pBefore.length === 2 && pAfter[0] === pBefore[1] && pAfter[1] === pBefore[0])
+  check('split: swap fără remontare / reconectare (aceleaşi terminale, niciun WS nou)',
+    (await sameTerms()) && sessWs === ws0)
+
+  // ieşire (tab al unui panou) + reintrare din chip: panourile stau în stiva keep-alive → aceleaşi terminale
+  await page.locator(`button[data-tab="${pBefore[0]}"]`).evaluate((el) => el.click())
+  await page.waitForTimeout(600)
+  await page.locator('button:has-text("e2e-split")').first().click()
+  await page.waitForTimeout(900)
+  check('split: ieşirea + reintrarea în split nu remontează / reconectează panourile',
+    (await sameTerms()) && sessWs === ws0)
+
+  // 3 panouri: Edit → încă o sesiune → implicit „1 mare stânga + 2 dreapta"; apoi picker-ul de aranjare
+  await page.locator('div.wt-tab:has-text("e2e-split") button[aria-label="Edit split view"]').click()
+  await page.waitForSelector('[aria-labelledby="wt-split-wizard-title"]', { timeout: 5000 })
+  const eboxes = page.locator('[aria-labelledby="wt-split-wizard-title"] input[type="checkbox"]:visible')
+  for (let i = 0; i < await eboxes.count(); i++) { if (!(await eboxes.nth(i).isChecked())) { await eboxes.nth(i).click(); break } }
+  await page.locator('[aria-labelledby="wt-split-wizard-title"] button:has-text("Save")').click()
+  await page.waitForTimeout(1500)
+  let st3 = await splitState()
+  check('split: 3 panouri → aranjarea „mare stânga + 2 dreapta" (3 panouri, 2 dividere)',
+    st3.layout === 'main-left' && st3.panes.length >= 3
+    && (await page.locator('[data-split-pane][role="group"]').count()) === 3
+    && (await page.locator('[role="separator"][data-divider]').count()) === 2)
+  await shot('main-left-dark')
+  await page.locator('[data-testid="split-layout"]').click()
+  await page.waitForTimeout(300)
+  await shot('layout-picker-dark')
+  await page.locator('[data-testid="split-layout-menu"] [data-layout="cols3"]').click()
+  await page.waitForTimeout(1200)
+  st3 = await splitState()
+  check('split: picker-ul de aranjare → 3 coloane egale (salvat pe server)',
+    st3.layout === 'cols3' && (await mine())?.layout === 'cols3'
+    && ((await mine())?.sizes ?? []).every((x) => Math.abs(x - 1 / 3) < 0.01))
+
+  await shot('cols3-dark')
+  // „mare sus + 2 jos" doar pentru captură (dark + light), apoi înapoi la 3 coloane
+  try {
+    await page.locator('[data-testid="split-layout"]').click()
+    await page.locator('[data-testid="split-layout-menu"] [data-layout="main-top"]').click()
+    await page.waitForTimeout(1000)
+    await shot('main-top-dark')
+    await page.evaluate(() => { const r = document.documentElement; r.dataset.e2eTheme = r.dataset.theme; r.dataset.theme = 'macos'; r.dataset.mode = 'light' })
+    await page.waitForTimeout(300)
+    await shot('main-top-light')
+    await page.evaluate(() => { const r = document.documentElement; r.dataset.theme = r.dataset.e2eTheme; r.dataset.mode = 'dark' })
+    await page.locator('[data-testid="split-layout"]').click()
+    await page.locator('[data-testid="split-layout-menu"] [data-layout="cols3"]').click()
+    await page.waitForTimeout(1000)
+  } catch (e) { console.error('  [diag] captura main-top:', String(e).slice(0, 120)) }
+  // maximizare temporară: dublu-click pe titlul panoului → doar el vizibil; Alt+X → revine
+  const selPane = (await splitState()).sel
+  await page.locator(`[data-split-pane="${selPane}"] > div`).first().dblclick()
+  await page.waitForTimeout(600)
+  const visiblePanes = () => page.locator('[data-split-pane][role="group"]:not([aria-hidden="true"])').count()
+  check('split: dublu-click pe titlu maximizează panoul (un singur panou vizibil, fără dividere)',
+    (await visiblePanes()) === 1 && (await page.locator('[role="separator"][data-divider]').count()) === 0)
+  await page.locator(`[data-split-pane="${selPane}"] .xterm-screen`).click()
+  await page.keyboard.press('Alt+x')
+  await page.waitForTimeout(600)
+  check('split: Alt+X restaurează aranjarea (3 panouri vizibile)', (await visiblePanes()) === 3)
+  // telefon: un panou o dată + comutatorul de panouri (doar captură)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.waitForTimeout(900)
+  await shot('mobile-dark')
+  await page.setViewportSize({ width: 1440, height: 860 })
+  await page.waitForTimeout(600)
 
   // reload → definiţia vine din server (cross-device), selecţia activă din localStorage
   await page.reload()
-  await page.waitForTimeout(2000)
+  await page.waitForTimeout(2500)
   check('split: persistă la reload (definiţie server-side + selecţie locală)',
     (await page.locator('button:has-text("e2e-split")').count()) >= 1
-    && (await page.locator('[aria-label^="Resize the split"]').count()) >= 1)
+    && (await page.locator('[aria-label^="Resize the panes"]').count()) >= 1)
+  check('split: după reload un panou e selectat + focalizat (TabBar, focus, ţintă de acord)', await pollAgree(8000))
 
   // ştergere din chip → dispare
   await page.locator('div.wt-tab:has-text("e2e-split") button[aria-label="Delete split view"]').click()
@@ -1530,7 +1660,9 @@ try {
   const ciHost = hostsNow.find((h) => h.name === 'ci-local')
   // în starea de aici există o sesiune activă → deschidem Toolbox din bara sesiunii (butonul de
   // pe pagina hostului apare doar când nicio sesiune nu e selectată)
-  await page.locator('button[title="Toolbox — database connections"]').last().click()
+  // `vis()` = fereastra VIZIBILĂ: ordinea în DOM a terminalelor ascunse (keep-alive) e un detaliu de
+  // implementare — din 3.6.12 panourile unui split rămân montate după ieşire, deci `.last()` nu mai e ea
+  await vis().locator('button[title="Toolbox — database connections"]').click()
   const tbx = page.locator('aside[aria-label="Toolbox"]').last()
   await tbx.locator('button:has-text("SSH keys")').click()
   await page.waitForTimeout(600)
@@ -1580,7 +1712,7 @@ try {
     method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie, Origin: BASE },
     body: JSON.stringify({ command, timeout: 30 }),
   })).json())
-  await page.locator('.xterm-screen').last().click({ button: 'right' })
+  await vis().locator('.xterm-screen').click({ button: 'right' })
   await page.locator('[role=menu][aria-label="Terminal actions"] button:has-text("AI tools")').click()
   const ai = page.locator('aside[aria-label="AI tools"]').last()
   check('ai: panoul AI tools se deschide din meniul contextual', await visible(ai, 8000))

@@ -59,10 +59,10 @@ const TAGS = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa', 'best-prac
 // FleetRun, `?`, walkthrough, paleta, ConfirmModal, panoul de alerte, dialogul „link de replay"
 // + pagina PUBLICĂ de replay + dialogul „Copy to host" (3.5.18) + Settings → Users & roles (3.6)
 // + editorul de roluri custom ŞI maparea grupurilor SSO deschise (3.6.2) — din 3.6.6 pe sub-tab-uri
-// separate: un cont desfăcut (Accounts), editorul (Roles), maparea (SSO groups) = 39
-// (+ Monaco cu WT_AGENT=1).
+// separate: un cont desfăcut (Accounts), editorul (Roles), maparea (SSO groups) + split view cu 3
+// panouri (3.6.12) = 40 (+ Monaco cu WT_AGENT=1).
 // Mobil: sesiune dark + light.
-const PER_THEME = 39 + (HAS_AGENT ? 1 : 0)
+const PER_THEME = 40 + (HAS_AGENT ? 1 : 0)
 // 3.6.4: variantele noi (familie × mod), fiecare cu subsetul reprezentativ: login, dashboard,
 // sesiune, Setări → Appearance, file browser, dialogul Add host = 6 scanări pe variantă.
 const NEW_VARIANTS = [
@@ -409,6 +409,40 @@ try {
         await page.keyboard.press('Alt+Shift+ArrowRight')     // revenim la ordinea iniţială
         await page.waitForTimeout(200)
       }
+    }, page)
+
+    // ── 3.6.12: split view cu 3 panouri (bara fiecărui panou, dividere, picker de aranjare) ──
+    await step('split view (3 panouri)', async () => {
+      await openSession(page)                    // a treia sesiune
+      await page.waitForTimeout(600)
+      const sids = await page.locator('nav[aria-label="Open sessions"] button[data-tab]').evaluateAll(
+        (els) => els.map((e) => e.getAttribute('data-tab')))
+      if (sids.length < 3) throw new Error(`doar ${sids.length} taburi deschise`)
+      const name = `a11y-split-${theme}`
+      const r = await api(page, '/api/split-views', { method: 'POST', body: JSON.stringify({ name, panes: sids.slice(-3) }) })
+      if (!r.ok) throw new Error(`POST /api/split-views → ${r.status}`)
+      await page.reload()
+      await page.waitForSelector('.xterm-screen', { timeout: 10000 })
+      await page.locator(`button[data-split-chip]:has-text("${name}")`).click()
+      await page.waitForSelector('[data-split-layout="main-left"]', { timeout: 8000 })
+      await page.waitForTimeout(1200)
+      await page.screenshot({ path: `${OUT}/${theme}-05-split.png` })
+      await scan(page, `${theme} split view (3 panes)`)
+      // separatorul e un „window splitter" din tastatură: săgeata îl mută, Home îl duce la capăt
+      const sep = page.locator('[role="separator"][data-divider="0"]')
+      const v0 = Number(await sep.getAttribute('aria-valuenow'))
+      await sep.focus()
+      await page.keyboard.press('ArrowRight')
+      await page.waitForTimeout(150)
+      const v1 = Number(await sep.getAttribute('aria-valuenow'))
+      await page.keyboard.press('Home')
+      await page.waitForTimeout(150)
+      const v2 = Number(await sep.getAttribute('aria-valuenow'))
+      check(`split: divider din tastatură (→ apoi Home: ${v0} → ${v1} → ${v2})`, v1 > v0 && v2 === 10)
+      await page.locator('button[aria-label="Exit split view"]').click()
+      const list = (await api(page, '/api/split-views')).body || {}
+      const mine = (list.split_views || []).find((v) => v.name === name)
+      if (mine) await api(page, `/api/split-views/${mine.id}`, { method: 'DELETE' })
     }, page)
 
     // ── pagina hostului ONLINE: Overview, Sessions, apoi tab-urile care cer agent ──
