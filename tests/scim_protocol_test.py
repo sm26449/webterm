@@ -38,7 +38,7 @@ os.environ.pop("WEBTERM_OIDC_ROLE_MAP", None)
 os.environ.pop("WEBTERM_OIDC_SSO_ONLY", None)
 
 import rbac_util as U  # noqa: E402
-from app import authz, config, db, oidc, oidc_api, scim, security  # noqa: E402
+from app import authz, config, db, oidc, oidc_api, scim, security, webauthn_api  # noqa: E402
 
 check = U.Checker()
 PW = U.OWNER_PW
@@ -229,6 +229,25 @@ async def test_auth_matrix(owner, tok):
           is_scim_error(r, 429) and r.headers.get("retry-after"), "%s %s" % (r.status_code, r.text[:100]))
     lock = await db.fetchone("SELECT COUNT(*) AS c FROM audit_log WHERE status=429 AND via='scim'")
     check("…blocarea e auditată o dată", lock["c"] == 1, str(lock["c"]))
+    row = await db.fetchone("SELECT actor FROM audit_log WHERE status=429 AND via='scim'")
+    check("…cu actorul `unauthenticated` (nimeni n-a dovedit că e IdP-ul), nu `scim`",
+          row["actor"] == "unauthenticated", row["actor"])
+    # revizuirea 3.6.11: un spray din multe IP-uri nu inundă jurnalul de audit
+    fn = getattr(scim, "_audit_lockout", None)
+    check("plafon global pentru rândurile de audit ale blocărilor (există)", fn is not None)
+    if fn is not None:
+        import time as _t
+        t0 = _t.time()
+        n0 = (await db.fetchone("SELECT COUNT(*) AS c FROM audit_log WHERE status=429"))["c"]
+        for i in range(30):
+            await fn(t0, "198.51.100.%d" % i, "/scim/v2/Users")
+        n1 = (await db.fetchone("SELECT COUNT(*) AS c FROM audit_log WHERE status=429"))["c"]
+        check("30 blocări din 30 de IP-uri → cel mult 20 de rânduri pe oră (total)",
+              n1 - n0 == scim._LOCKOUT_AUDIT_MAX - 1, str(n1 - n0))
+        await fn(t0 + 3700, "198.51.100.99", "/scim/v2/Users")
+        last = await db.fetchone("SELECT detail FROM audit_log WHERE status=429 ORDER BY id DESC LIMIT 1")
+        check("…după o oră, rândul următor spune câte n-au fost scrise",
+              "11 earlier lockout(s) not recorded" in last["detail"], last["detail"])
     scim.reset_limits()
     check("după resetare, tokenul bun trece", (await good.get("/scim/v2/Users")).status_code == 200)
     # plafonul de cereri
@@ -398,6 +417,37 @@ async def test_users(owner, tok):
     r = await c.patch("/scim/v2/Users/" + ana_id, json={"Operations": [{"op": "replace", "path": "active",
                                                                         "value": True}] * (scim.OPS_MAX + 1)})
     check("PATCH cu prea multe operaţii → 400", is_scim_error(r, 400))
+    # revizuirea 3.6.11: căile complet calificate se aplică; cele necunoscute → 400 (fail closed)
+    urn_active = scim.S_USER + ":active"
+    r = await c.patch("/scim/v2/Users/" + ana_id, json={"Operations": [
+        {"op": "replace", "path": urn_active, "value": False}]})
+    check("PATCH path urn:…:User:active=false → APLICAT (dezactivat)", r.status_code == 200
+          and r.json()["active"] is False, r.text[:160])
+    r = await c.patch("/scim/v2/Users/" + ana_id, json={"Operations": [
+        {"op": "replace", "value": {urn_active: True}}]})
+    check("PATCH fără path cu cheia urn:…:User:active → APLICAT (reactivat)", r.status_code == 200
+          and r.json()["active"] is True, r.text[:160])
+    before = (await c.get("/scim/v2/Users/" + ana_id)).json()
+    for what, op, code in (
+            ("cale necunoscută", {"op": "replace", "path": "activ", "value": False}, "invalidPath"),
+            ("atribut extern (urn:…:Group:active)", {"op": "replace", "path": scim.S_GROUP + ":active",
+                                                     "value": False}, "invalidPath"),
+            ("groups (readOnly)", {"op": "add", "path": "groups", "value": [{"value": "x"}]}, "mutability"),
+            ("cheie necunoscută fără path", {"op": "replace", "value": {"activ": False}}, "invalidPath"),
+            ("remove fără path", {"op": "remove"}, "noTarget")):
+        r = await c.patch("/scim/v2/Users/" + ana_id, json={"Operations": [
+            {"op": "replace", "path": "displayName", "value": "SHOULD-NOT-LAND"}, op]})
+        check("PATCH %s → 400 %s, nimic aplicat" % (what, code), is_scim_error(r, 400)
+              and r.json().get("scimType") == code
+              and (await c.get("/scim/v2/Users/" + ana_id)).json() == before, r.text[:160])
+    r = await c.patch("/scim/v2/Users/" + ana_id, json={"Operations": [
+        {"op": "replace", "path": "name.givenName", "value": "Ana"},
+        {"op": "replace", "path": "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:department",
+         "value": "Ops"},
+        {"op": "replace", "path": 'phoneNumbers[type eq "work"].value', "value": "123"},
+        {"op": "replace", "value": {"schemas": [scim.S_USER], "name": {"givenName": "A"}, "locale": "ro"}}]})
+    check("atribute standard nepăstrate (name.*, extensie enterprise, phoneNumbers, locale) → 200",
+          r.status_code == 200, r.text[:160])
     await c.aclose()
 
 
@@ -411,6 +461,14 @@ async def test_break_glass_and_adoption(owner, tok):
           and "local password" in r.json()["detail"], r.text[:200])
     after = dict(await db.fetchone("SELECT * FROM users WHERE email=?", U.OWNER_EMAIL))
     check("…contul Owner NEATINS (nici dezactivat, nici legat)", before == after)
+    al = None
+    for _ in range(50):
+        al = await db.fetchone("SELECT severity FROM alerts WHERE msg_params LIKE '%scim_local_refused%'")
+        if al:
+            break
+        await asyncio.sleep(0.02)
+    check("…alertă CRITICĂ (SCIM a ţintit un cont break-glass)", al is not None
+          and al["severity"] == "critical")
     check("…refuzul e auditat", await scim_audit_rows() == n + 1)
     st = (await owner.get("/api/settings/scim")).json()
     check("…şi apare ca ultima eroare în starea SCIM", st["last_error"] and st["last_error"]["status"] == 409
@@ -461,6 +519,27 @@ async def test_break_glass_and_adoption(owner, tok):
     check("contul SCIM nu-şi poate pune parolă locală (409 account.scimManaged)", r.status_code == 409
           and U.code(r) == "account.scimManaged", "%s %s" % (r.status_code, r.text[:120]))
     await zc.aclose()
+    # revizuirea 3.6.11 (cursă): SCIM adoptă contul cât timp utilizatorul trece de al doilea factor
+    await U.add_user("racer@x.co")
+    rc = await U.login("racer@x.co")
+    rid = await uid_of("racer@x.co")
+    orig_gate = webauthn_api.second_gate
+
+    async def gate_then_adopt(*a, **kw):
+        await orig_gate(*a, **kw)
+        await db.execute("UPDATE users SET scim_managed=1 WHERE id=?", rid)
+    webauthn_api.second_gate = gate_then_adopt
+    try:
+        r = await rc.post("/api/account", json={"new_password": "parolanoua123",
+                                                "current_password": "parolabuna1"})
+    finally:
+        webauthn_api.second_gate = orig_gate
+    row = await db.fetchone("SELECT password_hash FROM users WHERE id=?", rid)
+    check("parolă locală setată în timp ce SCIM adoptă contul → 409 account.scimManaged, nescrisă",
+          r.status_code == 409 and U.code(r) == "account.scimManaged"
+          and security.verify_password("parolabuna1", row["password_hash"]),
+          "%s %s" % (r.status_code, r.text[:120]))
+    await rc.aclose()
     r = await c.post("/scim/v2/Users", json=ak_user("dan", "dan@x.co", ext="ext-dan"))
     loc = await sso_login("sub-dan", "dan@x.co", groups=[], verified=False)
     check("externalId ≠ sub şi email neverificat → adopţia prin email refuzată (regula veche)",
@@ -531,6 +610,22 @@ async def test_groups(owner, tok):
     await c.patch("/scim/v2/Groups/" + gdb, json={"Operations": [
         {"op": "replace", "path": "displayName", "value": "wt-db"}]})
     check("…redenumit înapoi → rolul revine", ("operator", "tag", "db", "sso") in await bindings("hugo@x.co"))
+    # revizuirea 3.6.11: căi de grup calificate se aplică; necunoscute → 400 (nimic aplicat)
+    r = await c.patch("/scim/v2/Groups/" + gdb, json={"Operations": [
+        {"op": "remove", "path": scim.S_GROUP + ":members", "value": [{"value": users["hugo"]}]}]})
+    check("PATCH path urn:…:Group:members remove → APLICAT (hugo pierde rolul)", r.status_code == 200
+          and ("operator", "tag", "db", "sso") not in await bindings("hugo@x.co"), r.text[:160])
+    await c.patch("/scim/v2/Groups/" + gdb, json={"Operations": [
+        {"op": "add", "path": "members", "value": [{"value": users["hugo"]}]}]})
+    for what, op in (("cale necunoscută", {"op": "add", "path": "owners", "value": [{"value": users["gina"]}]}),
+                     ("members[value eq …] cu add", {"op": "add", "path": 'members[value eq "%s"]' % users["gina"],
+                                                    "value": [{"value": users["gina"]}]}),
+                     ("cheie necunoscută fără path", {"op": "replace", "value": {"owners": []}}),
+                     ("id (readOnly)", {"op": "replace", "path": "id", "value": "x"})):
+        r = await c.patch("/scim/v2/Groups/" + gdb, json={"Operations": [
+            {"op": "remove", "path": "members", "value": [{"value": users["hugo"]}]}, op]})
+        check("PATCH grup %s → 400, nimic aplicat" % what, is_scim_error(r, 400)
+              and ("operator", "tag", "db", "sso") in await bindings("hugo@x.co"), r.text[:160])
     r = await c.get("/scim/v2/Groups/" + gdb, params={"excludedAttributes": "members"})
     check("excludedAttributes=members", r.status_code == 200 and "members" not in r.json())
     # nume exact: spaţiul final contează

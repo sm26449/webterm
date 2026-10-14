@@ -407,6 +407,35 @@ def main():
     check("…filtrul trece DOAR membrii celor cinci grupuri",
           all(repr(n) in uf.get("expression", "") for n in NAMES)
           and "ak_is_group_member(user, name=name)" in uf.get("expression", ""))
+    # revizuirea 3.6.11: expresia rulată ca în Authentik (corpul unei funcţii, contextul ca globale)
+    class SkipObject(Exception):
+        pass
+
+    class FakeUser:
+        def __init__(self, groups, active=True):
+            self.groups, self.is_active = set(groups), active
+
+    def run_filter(user, **ctx):
+        code = "def handler():\n" + "".join("    " + ln + "\n" for ln in uf.get("expression", "").splitlines())
+        g = {"SkipObject": SkipObject, "user": user,
+             "ak_is_group_member": lambda u, name: name in u.groups}
+        g.update(ctx)
+        exec(code, g)
+        try:
+            return g["handler"]()
+        except SkipObject:
+            return "skip"
+
+    member, outsider = FakeUser([NAMES[0]]), FakeUser([])
+    check("filtru: membru activ → trimis; necunoscut activ → sărit",
+          run_filter(member, connection=None) == {} and run_filter(outsider, connection=None) == "skip")
+    check("filtru: un user DEJA trimis, scos din grupuri → tot trimis (dezactivarea lui ajunge)",
+          run_filter(FakeUser([]), connection=object()) == {}
+          and run_filter(FakeUser([], active=False), connection=object()) == {})
+    check("filtru: inactiv, niciodată trimis → sărit (nu se creează conturi degeaba)",
+          run_filter(FakeUser([], active=False), connection=None) == "skip")
+    check("filtru fără `connection` în context (Authentik vechi): un user INACTIV trece mereu",
+          run_filter(FakeUser([], active=False)) == {} and run_filter(outsider) == "skip")
     check("grupuri: maparea implicită + doar wt-*", "sm-group" in pr.get("property_mappings_group", [])
           and "startswith('wt-')" in gf.get("expression", "") and "raise SkipObject" in gf.get("expression", ""))
     check("backchannel pe aplicaţia webterm, cel existent păstrat",

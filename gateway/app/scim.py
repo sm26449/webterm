@@ -240,13 +240,40 @@ def _rate_ok(now: float) -> bool:
     return True
 
 
+_LOCKOUT_AUDIT_MAX = 20                 # lockout rows per hour, all IPs together
+_lockout_rows: deque = deque()
+_lockout_suppressed = 0
+
+
+async def _audit_lockout(now: float, ip: str, path: str) -> None:
+    """A lockout is audited — but a spray from many addresses must not flood the audit log
+    (review 3.6.11): at most 20 rows an hour in total; the ones held back are counted in the
+    next row written. The actor is `unauthenticated` (nobody proved to be the IdP)."""
+    global _lockout_suppressed
+    while _lockout_rows and now - _lockout_rows[0] > 3600:
+        _lockout_rows.popleft()
+    if len(_lockout_rows) >= _LOCKOUT_AUDIT_MAX:
+        _lockout_suppressed += 1
+        return
+    _lockout_rows.append(now)
+    extra = (" (%d earlier lockout(s) not recorded: more than %d an hour)"
+             % (_lockout_suppressed, _LOCKOUT_AUDIT_MAX)) if _lockout_suppressed else ""
+    _lockout_suppressed = 0
+    await audit.record(now, "unauthenticated", ip, "SCIM", path, 429,
+                       ("SCIM: %d failed authentications from %s — locked out for 15 min%s"
+                        % (_FAIL_MAX, ip, extra))[:480], via="scim")
+
+
 def reset_limits() -> None:
     """Tests only."""
-    global _seen_at, _touch_at
+    global _seen_at, _touch_at, _lockout_suppressed
     _seen_at = _touch_at = 0.0
     _fails.clear()
     _locked.clear()
     _hits.clear()
+    _lockout_rows.clear()
+    _lockout_suppressed = 0
+    _local_alerted.clear()
 
 
 async def require_scim(request: Request) -> dict:
@@ -279,9 +306,7 @@ async def require_scim(request: Request) -> dict:
             await _note_error(401, "authentication failed from %s (missing or wrong SCIM token)"
                               % ip)
         if tripped:
-            await audit.record(now, ACTOR, ip, "SCIM", request.url.path[:200], 429,
-                               "SCIM: %d failed authentications from %s — locked out for 15 min"
-                               % (_FAIL_MAX, ip), via="scim")
+            await _audit_lockout(now, ip, request.url.path[:200])
         raise ScimError(401, "missing or invalid SCIM bearer token",
                         headers={"WWW-Authenticate": 'Bearer realm="WebTerm SCIM"'})
     if st.get("scim_enabled") != "1":
@@ -333,6 +358,15 @@ def _lower(d: dict) -> dict:
     return {str(k).lower(): v for k, v in d.items()} if isinstance(d, dict) else {}
 
 
+def _lower_core(d: dict, schema: str) -> dict:
+    """`_lower`, and a fully qualified core attribute name (`urn:…:core:2.0:User:active`) counts
+    as the attribute itself (review 3.6.11)."""
+    out = {}
+    for k, v in (d.items() if isinstance(d, dict) else ()):
+        out.setdefault(_strip_schema(str(k), schema).lower(), v)
+    return out
+
+
 def _text(v, what: str, required: bool = False) -> Optional[str]:
     if v is None or v == "":
         if required:
@@ -377,8 +411,9 @@ def _truthy(v) -> bool:
 
 
 def _user_fields(body: dict) -> dict:
-    """The attributes WebTerm keeps, from a User body. Unknown attributes are ignored."""
-    b = _lower(body)
+    """The attributes WebTerm keeps, from a User body (POST / PUT: a full resource). Other
+    attributes are ignored there; a PATCH path is strict (`_user_path`)."""
+    b = _lower_core(body, S_USER)
     out = {}
     if "username" in b:
         out["userName"] = _text(b["username"], "userName")
@@ -448,7 +483,8 @@ _USER_FILTERS = {"username": ("scim_user_name", True), "externalid": ("scim_exte
                  "id": ("scim_id", False), "emails": ("email", True),
                  "emails.value": ("email", True)}
 _USER_COLS = ("id, email, created, disabled, scim_id, scim_external_id, scim_user_name,"
-              " scim_display_name, scim_updated, sso_subject")
+              " scim_display_name, scim_updated, sso_subject, COALESCE(scim_created, 0) AS"
+              " scim_created")
 
 
 async def _user_json(u) -> dict:
@@ -514,6 +550,26 @@ async def _refuse(p: dict, method: str, path: str, exc: ScimError) -> None:
     await _note_error(exc.status_code, "%s %s: %s" % (method, path, exc.detail), force=True)
 
 
+_local_alerted: dict[str, float] = {}
+
+
+async def _alert_local_refused(email: str, ip: str) -> None:
+    """The IdP asked for an account that has a LOCAL password (a break-glass account): refused —
+    and that is worth a critical alert (review 3.6.11: someone may be aiming SCIM at it). Once an
+    hour per account: the IdP retries on every sync."""
+    now = time.time()
+    if now - _local_alerted.get(email, 0) < 3600:
+        return
+    if len(_local_alerted) > 1000:
+        _local_alerted.clear()
+    _local_alerted[email] = now
+    log.error("SCIM: refused to manage %s — it has a local password (break-glass)", email)
+    email_alerts.notify_security_change(
+        "the identity provider tried to take over %s, an account with a local password "
+        "(break-glass); refused" % email, ip, ACTOR, fleet=True, severity="critical",
+        what_key="scim_local_refused", what_params={"account": email})
+
+
 async def _email_free(email: str, uid: Optional[int]) -> None:
     row = await db.fetchone("SELECT id FROM users WHERE email=?", email)
     if row is not None and row["id"] != uid:
@@ -537,6 +593,16 @@ async def _guard_identity(u, f: dict) -> None:
     ext = f.get("externalId")
     if ext and u["scim_external_id"] and ext != u["scim_external_id"]:
         raise ScimError(409, "externalId cannot change once set", "mutability")
+    if f.get("email") and f["email"] != u["email"]:
+        # review 3.6.11: SCIM changes the email only of accounts it CREATED — never of an
+        # existing account it adopted, and never of one holding an Owner-level role given in
+        # WebTerm (the address is the recovery and sign-in channel)
+        if not u["scim_created"]:
+            raise ScimError(409, "this account existed before SCIM took it over: its email can "
+                                 "only be changed in WebTerm", "mutability")
+        if await authz.owner_level_given_in_webterm(u["id"]):
+            raise ScimError(409, "this account holds an Owner-level role given in WebTerm: its "
+                                 "email cannot be changed by SCIM", "mutability")
     if f.get("email") and f["email"] != u["email"] and not u["sso_subject"]:
         manual = await db.fetchone("SELECT 1 FROM role_bindings WHERE user_id=? AND source<>'sso'",
                                    u["id"])
@@ -546,24 +612,67 @@ async def _guard_identity(u, f: dict) -> None:
                             "mutability")
 
 
-async def _owner_precheck(uid: int, active, ip: str = "-") -> None:
-    """Refuse a deactivation of the last permanent Owner BEFORE any other write (atomicity);
-    accounts.disable re-checks under the bindings lock."""
-    if active is False:
-        row = await db.fetchone("SELECT email, COALESCE(disabled, 0) AS d FROM users WHERE id=?",
-                                uid)
-        if row is not None and not row["d"] and await accounts.is_permanent_owner(uid) \
+_OWNER_LEVEL_DETAIL = ("this account holds an Owner-level role given in WebTerm (not by an SSO "
+                       "group): only an Owner can %s it, in WebTerm (Settings → Users & roles)")
+
+
+async def _owner_level_refused(uid: int, what: str, ip: str) -> ScimError:
+    row = await db.fetchone("SELECT email FROM users WHERE id=?", uid)
+    email = row["email"] if row else "#%d" % uid
+    log.error("SCIM: refused to %s %s — it holds an Owner-level role given in WebTerm", what, email)
+    email_alerts.notify_security_change(
+        "the identity provider tried to %s %s, which holds an Owner-level role given in WebTerm; "
+        "refused" % (what, email), ip, ACTOR, fleet=True, severity="critical",
+        what_key="scim_owner_refused", what_params={"account": email, "action": what})
+    return ScimError(403, _OWNER_LEVEL_DETAIL % what)
+
+
+async def _active_precheck(uid: int, active, ip: str = "-") -> None:
+    """Refuse BEFORE any other write (atomicity) — accounts.disable / enable re-check under the
+    bindings lock:
+      * active:false on the last permanent Owner;
+      * active:false or true on an account holding an Owner-level role given in WebTerm (review
+        3.6.11: §A.5 "only an Owner can delete an Owner" — and re-enabling it would hand back an
+        Owner role without the Owner gate the UI's re-enable has);
+      * active:true on an account WebTerm itself disabled (anything but SCIM)."""
+    if active is None:
+        return
+    row = await db.fetchone("SELECT email, COALESCE(disabled, 0) AS d, disabled_by FROM users"
+                            " WHERE id=?", uid)
+    if row is None:
+        return
+    if active is False and not row["d"]:
+        if await authz.owner_level_given_in_webterm(uid):
+            raise await _owner_level_refused(uid, "disable", ip)
+        if await accounts.is_permanent_owner(uid) \
                 and await authz.owner_count(exclude_user=uid) < 1:
             await accounts.report_last_owner_refused(row["email"], actor=ACTOR, ip=ip,
                                                      reason="SCIM active=false")
             raise ScimError(403, "this account is the last permanent Owner of WebTerm and cannot "
                                  "be disabled; make another account a permanent Owner first")
+    if active is True and row["d"]:
+        await _enable_check(uid, ip)
+
+
+async def _enable_check(uid: int, ip: str) -> None:
+    """May SCIM re-enable `uid`? (also run under the bindings lock, by accounts.enable)"""
+    row = await db.fetchone("SELECT COALESCE(disabled, 0) AS d, disabled_by FROM users WHERE id=?",
+                            uid)
+    if row is None or not row["d"]:
+        return
+    if (row["disabled_by"] or "") not in ("scim", "scim-delete"):
+        raise ScimError(403, "this account was disabled in WebTerm, not by the identity provider: "
+                             "only an Owner can re-enable it (Settings → Users & roles)")
+    if await authz.owner_level_given_in_webterm(uid):
+        raise await _owner_level_refused(uid, "re-enable", ip)
 
 
 async def _set_active(p: dict, uid: int, active: bool, path: str) -> None:
     if active:
+        async def recheck():
+            await _enable_check(uid, p["ip"])
         await accounts.enable(uid, actor=ACTOR, ip=p["ip"], how="identity provider, SCIM",
-                              path=path)
+                              path=path, recheck=recheck)
         return
     try:
         await accounts.disable(uid, by="scim", actor=ACTOR, ip=p["ip"],
@@ -571,12 +680,14 @@ async def _set_active(p: dict, uid: int, active: bool, path: str) -> None:
     except accounts.LastOwner:
         raise ScimError(403, "this account is the last permanent Owner of WebTerm and cannot be "
                              "disabled; make another account a permanent Owner first")
+    except accounts.OwnerLevel:
+        raise await _owner_level_refused(uid, "disable", p["ip"])
 
 
 async def _apply_user(p: dict, u, f: dict, path: str, method: str) -> bool:
     """Write the changed attributes of SCIM account `u` (a row). → True if anything changed."""
     await _guard_identity(u, f)
-    await _owner_precheck(u["id"], f.get("active"), p["ip"])
+    await _active_precheck(u["id"], f.get("active"), p["ip"])
     sets, args, what = [], [], []
     if f.get("email") and f["email"] != u["email"]:
         await _email_free(f["email"], u["id"])
@@ -636,21 +747,43 @@ async def create_user(request: Request, p=Depends(require_scim)):
             target = next(iter(cands.values()), None)
             if target is not None:
                 if await ssomap.has_local_password(target["id"]):
+                    await _alert_local_refused(target["email"], p["ip"])
                     raise ScimError(409, "a WebTerm account with this identity has a local password "
                                          "(a break-glass account); SCIM never manages it",
                                     "uniqueness")
                 if target["scim_id"]:
                     raise ScimError(409, "this user is already provisioned", "uniqueness")
+                # review 3.6.11 — taking over an account SCIM did not create:
+                #  * only with ITS email (an externalId equal to its OIDC `sub` is not enough: the
+                #    token holder would otherwise pick any SSO account and re-point its email);
+                #  * never one holding an Owner-level role given in WebTerm (§A.5: only an Owner
+                #    disables or deletes an Owner — SCIM could do both once it manages it).
+                if not target["scim_created"] and target["email"] != email:
+                    raise ScimError(409, "an existing WebTerm account matches this externalId but "
+                                         "has a different email; SCIM takes over an existing "
+                                         "account only when its email matches too", "uniqueness")
+                if await authz.owner_level_given_in_webterm(target["id"]):
+                    await _owner_level_refused(target["id"], "take over", p["ip"])
+                    raise ScimError(409, "the existing WebTerm account %s holds an Owner-level role "
+                                         "given in WebTerm; SCIM never takes it over (an Owner can "
+                                         "give that role through an SSO group instead)" % email,
+                                    "uniqueness")
                 await _guard_identity(target, f)
-                await _owner_precheck(target["id"], f.get("active"), p["ip"])
+                await _active_precheck(target["id"], f.get("active"), p["ip"])
                 sid = str(uuid.uuid4())
                 await _email_free(email, target["id"])
                 await _ext_free(ext, target["id"])
-                await db.execute(
+                # local_password re-checked IN the write: a password set meanwhile wins
+                done = await db.execute_returning(
                     "UPDATE users SET scim_managed=1, scim_id=?,"
                     " scim_external_id=COALESCE(?, scim_external_id),"
-                    " scim_user_name=?, scim_display_name=?, email=?, scim_updated=? WHERE id=?",
+                    " scim_user_name=?, scim_display_name=?, email=?, scim_updated=? WHERE id=?"
+                    " AND COALESCE(local_password, 1)=0 RETURNING id",
                     sid, ext, user_name, f.get("displayName"), email, time.time(), target["id"])
+                if done is None:
+                    raise ScimError(409, "a WebTerm account with this identity has a local "
+                                         "password (a break-glass account); SCIM never manages it",
+                                    "uniqueness")
                 uid = target["id"]
                 await _audit(p, "POST", path, 201,
                              "SCIM took over the existing SSO account %s%s" % (
@@ -658,6 +791,12 @@ async def create_user(request: Request, p=Depends(require_scim)):
                                  else " (was %s)" % target["email"]), actor_id=uid)
                 log.warning("SCIM: the existing SSO account %s is now managed by the identity "
                             "provider", email)
+                if not target["scim_created"]:
+                    email_alerts.notify_security_change(
+                        "the identity provider took over the existing WebTerm account %s (SCIM): "
+                        "it can now disable it and its groups give its roles" % email,
+                        p["ip"], ACTOR, fleet=True, severity="critical",
+                        what_key="scim_account_adopted", what_params={"account": email})
             else:
                 sid = str(uuid.uuid4())
                 locked = await security.hash_password_async(security.new_token())
@@ -665,9 +804,9 @@ async def create_user(request: Request, p=Depends(require_scim)):
                 try:
                     await db.execute(
                         "INSERT INTO users(id, email, password_hash, created, local_password,"
-                        " scim_managed, scim_id, scim_external_id, scim_user_name,"
+                        " scim_managed, scim_created, scim_id, scim_external_id, scim_user_name,"
                         " scim_display_name, scim_updated) VALUES(" + db.NEXT_USER_ID_SQL
-                        + ",?,?,?,0,1,?,?,?,?,?)",
+                        + ",?,?,?,0,1,1,?,?,?,?,?)",
                         email, locked, now, sid, ext, user_name, f.get("displayName"), now)
                 except sqlite3.IntegrityError:
                     # an SSO sign-in created the same email at this very moment
@@ -719,38 +858,99 @@ async def put_user(scim_id: str, request: Request, p=Depends(require_scim)):
 
 
 _EMAIL_PATH = re.compile(r'^emails(\[[^\]]*\])?(\.value)?$', re.I)
+_EXT_PREFIX = "urn:ietf:params:scim:schemas:extension:"
+_PATH_BASE = re.compile(r'^([a-z][a-z0-9_$-]*)(\[[^\]]*\])?(\.[a-z][a-z0-9_$-]*)?$', re.I)
+# standard User attributes WebTerm does not keep: accepted and ignored (an IdP sends them)
+_USER_IGNORED = {"name", "nickname", "profileurl", "title", "usertype", "preferredlanguage",
+                 "locale", "timezone", "password", "phonenumbers", "ims", "photos", "addresses",
+                 "entitlements", "roles", "x509certificates", "emails"}
+_READONLY = {"id", "meta", "groups", "schemas"}
+# in a PATCH without a path these may ride along in the value object: readOnly → ignored
+# (RFC 7644 §3.5.1), never applied
+_VALUE_SKIP = {"id", "meta", "groups", "schemas"}
+
+
+def _strip_schema(path: str, schema: str) -> str:
+    """`urn:ietf:params:scim:schemas:core:2.0:User:active` → `active` (RFC 7644 §3.10: a fully
+    qualified attribute name). Case of the rest is kept (a member filter value is case-exact)."""
+    p = path.strip()
+    pre = schema + ":"
+    if p[:len(pre)].lower() == pre.lower():
+        p = p[len(pre):].strip()
+    return p
+
+
+def _user_path(path: str) -> str:
+    """What a User PATCH path targets. → 'active' | 'username' | 'displayname' |
+    'name.formatted' | 'externalid' | 'email' | 'ignore'. Fail closed (review 3.6.11): a path
+    WebTerm does not recognise is a 400 invalidPath — never silently ignored (an IdP's
+    `urn:…:User:active=false` must not answer 200 and leave the account active)."""
+    p = _strip_schema(path, S_USER)
+    if p.lower().startswith(_EXT_PREFIX):
+        return "ignore"                     # enterprise / custom extension: not kept
+    if _EMAIL_PATH.match(p):
+        return "email"
+    lp = p.lower()
+    if lp in ("active", "username", "displayname", "externalid", "name.formatted"):
+        return lp
+    m = _PATH_BASE.match(p)
+    base = m.group(1).lower() if m else ""
+    if base in _READONLY:
+        raise ScimError(400, "%s is read-only" % p[:80], "mutability")
+    if base in _USER_IGNORED:
+        return "ignore"
+    raise ScimError(400, "unknown attribute path %r" % path[:80], "invalidPath")
+
+
+def _set_user_attr(f: dict, kind: str, value) -> None:
+    if kind == "active":
+        f["active"] = _bool(value, "active")
+    elif kind == "username":
+        f["userName"] = _text(value, "userName")
+    elif kind == "displayname":
+        f["displayName"] = _text(value, "displayName")
+    elif kind == "name.formatted":
+        if isinstance(value, str) and value.strip():
+            f.setdefault("displayName", _text(value.strip()[:STR_MAX], "name.formatted"))
+    elif kind == "externalid":
+        f["externalId"] = _text(value, "externalId")
+    elif kind == "email":
+        if isinstance(value, (str, list)):
+            f["email"] = _email_of(value)
+        elif isinstance(value, dict):
+            f["email"] = _email_of([value])
+        elif value is not None:
+            raise ScimError(400, "emails must be a list", "invalidValue")
 
 
 def _patch_user_fields(body: dict) -> dict:
     ops = _ops(body)
     f: dict = {}
     for op, path, value in ops:
-        if op == "remove":
-            continue                        # removing a WebTerm-kept attribute: nothing to do
         if not path:
+            if op == "remove":
+                raise ScimError(400, "a remove operation needs a path", "noTarget")
             if not isinstance(value, dict):
                 raise ScimError(400, "an operation without a path needs an object value",
                                 "invalidValue")
-            f.update(_user_fields(value))
+            for k, v in value.items():
+                key = _strip_schema(str(k), S_USER)
+                if key.lower() in _VALUE_SKIP:
+                    continue
+                if key.lower() == S_USER.lower() and isinstance(v, dict):
+                    raise ScimError(400, "nest the attributes directly in the value",
+                                    "invalidValue")
+                kind = _user_path(key)
+                if kind == "ignore":
+                    if key.lower() == "name" and isinstance(v, dict):
+                        _set_user_attr(f, "name.formatted", _lower(v).get("formatted"))
+                    continue
+                _set_user_attr(f, kind, v)
             continue
-        lp = path.lower()
-        if lp == "active":
-            f["active"] = _bool(value, "active")
-        elif lp == "username":
-            f["userName"] = _text(value, "userName")
-        elif lp == "displayname":
-            f["displayName"] = _text(value, "displayName")
-        elif lp == "name.formatted":
-            if isinstance(value, str) and value.strip():
-                f.setdefault("displayName", _text(value.strip()[:STR_MAX], "name.formatted"))
-        elif lp == "externalid":
-            f["externalId"] = _text(value, "externalId")
-        elif _EMAIL_PATH.match(path):
-            if isinstance(value, (str, list)):
-                f["email"] = _email_of(value)
-            elif isinstance(value, dict):
-                f["email"] = _email_of([value])
-        # any other attribute (name.*, title, phoneNumbers, enterprise extension…) is ignored
+        kind = _user_path(path)             # validated for every op, remove included
+        if op == "remove" or kind == "ignore":
+            continue                        # removing a WebTerm-kept attribute: nothing to do
+        _set_user_attr(f, kind, value)
     return f
 
 
@@ -793,6 +993,8 @@ async def delete_user(scim_id: str, p=Depends(require_scim)):
     try:
         async with _lock:
             u = await _user(scim_id)
+            if await authz.owner_level_given_in_webterm(u["id"]):
+                raise await _owner_level_refused(u["id"], "delete", p["ip"])
             try:
                 await accounts.disable(u["id"], by="scim-delete", actor=ACTOR, ip=p["ip"],
                                        reason="SCIM delete")
@@ -800,6 +1002,8 @@ async def delete_user(scim_id: str, p=Depends(require_scim)):
                 raise ScimError(403, "this account is the last permanent Owner of WebTerm and "
                                      "cannot be removed; make another account a permanent Owner "
                                      "first")
+            except accounts.OwnerLevel:
+                raise await _owner_level_refused(u["id"], "delete", p["ip"])
             gids = [r["group_id"] for r in await db.fetchall(
                 "SELECT group_id FROM scim_group_members WHERE user_id=?", u["id"])]
             await db.execute("DELETE FROM scim_group_members WHERE user_id=?", u["id"])
@@ -1060,12 +1264,20 @@ async def patch_group(gid: str, request: Request, p=Depends(require_scim)):
             name, ext, members = None, _KEEP, None
             add, rem = set(), set()
             for op, opath, value in _ops(body):
+                opath = _strip_schema(opath, S_GROUP)
                 lp = opath.lower()
                 if not opath:
+                    if op == "remove":
+                        raise ScimError(400, "a remove operation needs a path", "noTarget")
                     if not isinstance(value, dict):
                         raise ScimError(400, "an operation without a path needs an object value",
                                         "invalidValue")
-                    v = _lower(value)
+                    v = _lower_core(value, S_GROUP)
+                    unknown = sorted(set(v) - {"displayname", "externalid", "members"}
+                                     - _VALUE_SKIP)
+                    if unknown:
+                        raise ScimError(400, "unknown attribute %r" % unknown[0][:80],
+                                        "invalidPath")
                     if "displayname" in v:
                         name = _group_name(v["displayname"])
                     if "externalid" in v:
@@ -1099,7 +1311,14 @@ async def patch_group(gid: str, request: Request, p=Depends(require_scim)):
                     ids = await _member_ids([{"value": sid}])
                     rem |= ids
                     add -= ids
-                # other paths are ignored (liberal), nothing else of a group is kept
+                elif _PATH_BASE.match(opath) and _PATH_BASE.match(opath).group(1).lower() in (
+                        "id", "meta", "schemas"):
+                    raise ScimError(400, "%s is read-only" % opath[:80], "mutability")
+                else:
+                    # fail closed (review 3.6.11): an unrecognised path is an error, never a
+                    # silent 200 (e.g. `members[value eq "x"]` with op add/replace)
+                    raise ScimError(400, "unsupported attribute path %r" % opath[:80],
+                                    "invalidPath")
             if members is not None:
                 members = (members | add) - rem
                 add, rem = set(), set()

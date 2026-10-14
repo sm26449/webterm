@@ -49,6 +49,11 @@ def build_35_db(path):
                 " created_by_id, expires) VALUES(?,?,?,?,?,?,?)",
                 ("legacy", security.sha256_hex("wt_legacytoken000000000000000000"), "read,run",
                  now, "bob@x.co", 2, now + 86400))
+    # tokenuri de dinainte de `created_by_id` (rezolvate după email la fiecare folosire)
+    for name, by in (("pre-id-ana", "ana@x.co"), ("pre-id-ghost", "ghost@x.co")):
+        con.execute("INSERT INTO api_tokens(name, token_hash, scopes, created, created_by, expires)"
+                    " VALUES(?,?,?,?,?,?)", (name, security.sha256_hex(name), "read", now, by,
+                                             now + 86400))
     con.commit()
     con.close()
 
@@ -104,6 +109,23 @@ async def main():
     check("…şi `run` (trece de autorizare; host offline → 409)", r.status_code == 409,
           "%s %s" % (r.status_code, r.text[:80]))
     await tok.aclose()
+    # revizuirea 3.6.11: rezolvarea după email e îngheţată O SINGURĂ DATĂ, apoi fără id = mort
+    t = {r["name"]: r["created_by_id"] for r in await db.fetchall(
+        "SELECT name, created_by_id FROM api_tokens WHERE name LIKE 'pre-id-%'")}
+    check("token fără created_by_id: completat o dată după emailul de ACUM (ana → 1)",
+          t == {"pre-id-ana": 1, "pre-id-ghost": None}, str(t))
+    await db.close()
+    con = sqlite3.connect(path)
+    con.execute("INSERT INTO users(email, password_hash, created) VALUES('ghost@x.co','x',?)",
+                (time.time(),))
+    con.commit()
+    con.close()
+    await db.connect()
+    row = await db.fetchone("SELECT * FROM api_tokens WHERE name='pre-id-ghost'")
+    g = await authz.grants_for_token(dict(row))
+    check("…un cont creat DUPĂ cu acel email NU moşteneşte tokenul (nici la o repornire)",
+          row["created_by_id"] is None and g.user_id is None, str(dict(row)))
+    await db.execute("DELETE FROM users WHERE email='ghost@x.co'")
     await db.close()
 
     # idempotent

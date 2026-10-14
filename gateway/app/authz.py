@@ -404,10 +404,10 @@ async def grants_for_user(user_id: Optional[int]) -> Grants:
 
 
 async def grants_for_token(tok: dict) -> TokenGrants:
+    # review 3.6.11: the creator is the id, never the email — a token without one (pre-id, not
+    # resolvable by the one-time backfill in `seed`) is dead: resolving it by email would hand it
+    # to whoever holds that address NOW (e.g. an account the IdP just created with it)
     creator_id = tok.get("created_by_id")
-    if not creator_id and tok.get("created_by"):
-        row = await db.fetchone("SELECT id FROM users WHERE email=?", tok["created_by"])
-        creator_id = row["id"] if row else None
     if not creator_id or not await db.fetchone(
             "SELECT 1 FROM users WHERE id=? AND COALESCE(disabled, 0)=0", creator_id):
         return TokenGrants(None)           # creator gone or disabled (3.6.11) → nothing
@@ -954,6 +954,19 @@ async def seed(conn) -> None:
         if uids:
             log.warning("roles: seeded %d existing account(s) as Owner over all hosts "
                         "(3.6 upgrade — nothing changes for them)", len(uids))
+    # 3.6.11 (review): automation tokens from before `created_by_id` were resolved by email at
+    # every use — freeze that resolution ONCE (same result as today), after which a token
+    # without a creator id is dead (grants_for_token). Never re-run: a later account with that
+    # email must not inherit a token.
+    cur = await conn.execute("SELECT value FROM app_settings WHERE key='tokens_creator_backfilled'")
+    done = await cur.fetchone()
+    await cur.close()
+    if not done:
+        await conn.execute(
+            "UPDATE api_tokens SET created_by_id=(SELECT u.id FROM users u"
+            " WHERE u.email=api_tokens.created_by) WHERE created_by_id IS NULL")
+        await conn.execute("INSERT INTO app_settings(key, value) VALUES('tokens_creator_backfilled', ?)"
+                           " ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(int(now)),))
     # 3.6.10 (review): tokens created with the Owner role before it was refused keep working as
     # before (no role cap); say so once per boot so the Owner can recreate them narrower
     try:
@@ -1027,8 +1040,33 @@ async def owner_count(exclude_binding: Optional[int] = None,
     return int(row["c"]) if row else 0
 
 
+async def target_grants(user_id: int) -> Grants:
+    """What account `user_id` HOLDS — its bindings, read even when it is DISABLED (no cache).
+    For the target rules ("only an Owner touches an Owner", "outranked"): a disabled Owner is
+    still an Owner as far as who may change its access is concerned (review 3.6.11 — otherwise an
+    Admin could edit the bindings of, or delete, an Owner the IdP disabled). Never use it for what
+    the account itself may DO: that is `grants_for_user` (empty while disabled)."""
+    return Grants.from_bindings(user_id, await _load_bindings(user_id))
+
+
 async def is_owner_user(user_id: int) -> bool:
-    return (await grants_for_user(user_id)).is_owner()
+    """The account holds Owner @ all — disabled or not (target rule, see `target_grants`)."""
+    return (await target_grants(user_id)).is_owner()
+
+
+OWNER_ONLY_PERMS = BUILTIN_ROLES["owner"]["perms"] - BUILTIN_ROLES["admin"]["perms"]
+
+
+def owner_level(b: Binding) -> bool:
+    """Owner, or a role carrying a permission only the Owner role has (a custom Owner copy)."""
+    return b.role_key == "owner" or bool(b.perms & OWNER_ONLY_PERMS)
+
+
+async def owner_level_given_in_webterm(user_id: int) -> bool:
+    """The account holds an Owner-level binding that did NOT come from an SSO group (manual,
+    migration, CLI…): the identity provider (SCIM) must not adopt, disable, delete or re-enable
+    it — only an Owner, in WebTerm, can (§A.5)."""
+    return any(owner_level(b) and b.source != "sso" for b in await _load_bindings(user_id))
 
 
 def normalize_scope(kind: str, value) -> tuple[str, str]:
@@ -1231,8 +1269,7 @@ def outranked_by(target: Grants, granter: Grants) -> Optional[str]:
 
 async def check_target(granter: Grants, target_uid: int) -> None:
     """Shared target rule for binding changes, account deletion and role edits."""
-    _cache.pop(target_uid, None)
-    tg = await grants_for_user(target_uid)
+    tg = await target_grants(target_uid)      # disabled or not (review 3.6.11)
     if tg.is_owner() and not granter.is_owner():
         raise ApiError(403, "authz.ownerOnly", "only an Owner can change an Owner's access")
     p = outranked_by(tg, granter)

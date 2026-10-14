@@ -617,6 +617,11 @@ MIGRATIONS = [
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_scim_id ON users(scim_id) WHERE scim_id IS NOT NULL",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_scim_ext ON users(scim_external_id)"
     " WHERE scim_external_id IS NOT NULL",
+    # 3.6.11 (revizuirea independentă) — contul a fost CREAT de SCIM (1), nu adoptat (0): SCIM
+    # poate schimba emailul doar conturilor create de el. Cele de dinainte: 0 (fail-closed).
+    "ALTER TABLE users ADD COLUMN scim_created INTEGER DEFAULT 0",
+    # cine a creat un token de grup (id, nu doar email): revocat la dezactivarea/ştergerea contului
+    "ALTER TABLE enroll_groups ADD COLUMN created_by_id INTEGER",
 ]
 
 # tabele adăugate ulterior (executeScript de mai sus le creează pe DB-uri noi;

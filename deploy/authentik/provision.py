@@ -95,8 +95,21 @@ SCIM_TOKEN_PREFIX = "wtscim_"
 def scim_user_filter(names):
     """Maparea SCIM pentru useri: trimite DOAR membrii grupurilor WebTerm (`raise SkipObject`
     pentru restul — altfel providerul SCIM ar împinge în WebTerm TOŢI userii din Authentik).
-    Întoarce {} (nu schimbă nimic din maparea implicită). Nume validate de group_names."""
-    lines = ["# WebTerm (provision.py): doar membrii grupurilor WebTerm ajung în WebTerm",
+    Întoarce {} (nu schimbă nimic din maparea implicită). Nume validate de group_names.
+
+    Revizuirea 3.6.11: un user DEJA trimis în WebTerm (`connection` = legătura providerului SCIM
+    cu el) trece mereu, chiar scos din grupuri — altfel dezactivarea lui nu mai ajungea în WebTerm
+    (SkipObject = nicio actualizare). Unde contextul nu are `connection` (versiuni vechi),
+    trece orice user INACTIV: dezactivarea ajunge oricum (în WebTerm, un cont nou inactiv nu poate
+    face nimic)."""
+    lines = ["# WebTerm (provision.py): doar membrii grupurilor WebTerm ajung în WebTerm — dar un",
+             "# user deja trimis (sau dezactivat) trece mereu, ca dezactivarea să ajungă în WebTerm",
+             "try:",
+             "    synced = connection is not None",
+             "except NameError:",
+             "    synced = not user.is_active",
+             "if synced:",
+             "    return {}",
              "for name in (%s,):" % ", ".join(repr(n) for n in names),
              "    if ak_is_group_member(user, name=name):",
              "        return {}",

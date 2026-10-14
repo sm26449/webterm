@@ -812,8 +812,16 @@ async def update_account(body: AccountUpdate, request: Request, user=Depends(sec
     if body.remove_password:
         pw_hash = await security.hash_password_async(security.new_token())   # nimeni n-o ştie
         local_pw = 0
-    await db.execute("UPDATE users SET email=?, password_hash=?, local_password=? WHERE id=?",
-                     email, pw_hash, local_pw, user["id"])
+    # revizuirea 3.6.11 (cursă): între verificarea `scim_managed` de sus şi scriere a trecut al
+    # doilea factor — SCIM a putut adopta contul între timp. Re-verificat ÎN scriere (atomic).
+    guarded = bool(body.new_password) or email != user["email"]
+    done = await db.execute_returning(
+        "UPDATE users SET email=?, password_hash=?, local_password=? WHERE id=?"
+        + (" AND COALESCE(scim_managed, 0)=0" if guarded else "") + " RETURNING id",
+        email, pw_hash, local_pw, user["id"])
+    if done is None:
+        raise ApiError(409, "account.scimManaged",
+                       "this account is managed by your identity provider (SCIM): change it there")
     if body.new_password:
         # 3.6.2: o parolă locală nouă = rolurile din grupuri SSO pleacă ACUM (cine ştie parola nu
         # moşteneşte ce dau grupurile); legăturile manuale rămân
@@ -1223,7 +1231,10 @@ async def delete_user(uid: int, body: ReauthOnly, request: Request,
         n = (await db.fetchone("SELECT COUNT(*) AS c FROM users"))["c"]
         if n <= 1:
             raise ApiError(400, "account.deleteLast", "you cannot delete the last account")
-        if await authz.is_owner_user(uid) and await authz.owner_count(exclude_user=uid) < 1:
+        # „ultimul Owner" = ultimul ACTIV (un Owner dezactivat nu numără — owner_count): un cont
+        # dezactivat se poate şterge fără să conteze ca ultimul (is_owner_user îl vede ca Owner)
+        if (await authz.grants_for_user(uid)).is_owner() \
+                and await authz.owner_count(exclude_user=uid) < 1:
             raise ApiError(400, "authz.lastOwner", "you cannot remove the last Owner")
         # tot ce ţinea de el moare odată cu el: sesiuni web, passkey-uri, coduri de recuperare,
         # IP-uri cunoscute, legături de rol. Altfel un cookie al contului şters ar rămâne valid.
@@ -1265,6 +1276,7 @@ async def delete_user(uid: int, body: ReauthOnly, request: Request,
         uid, row["email"]))["c"]
     await db.execute("DELETE FROM api_tokens WHERE created_by_id=? OR created_by=?",
                      uid, row["email"])
+    await accounts.revoke_enroll_groups(uid, row["email"])   # revizuirea 3.6.11: şi tokenurile de grup
     security.clear_stepup_for(uid)
     security.bump_forward_epoch(uid)      # şi biletele lui de port-forward, ca la logout
     await _revoke_all_shares(row["email"], uid)
@@ -1909,7 +1921,7 @@ async def delete_oidc_role(mid: int, body: ReauthOnly, request: Request,
         # decât tine — exact ce /bindings/{bid}/delete refuză. Refuzăm tot, nu scoatem nimic.
         outr = []
         for uid in await ssomap.prune_plan(mid):
-            tg = await authz.grants_for_user(uid)
+            tg = await authz.target_grants(uid)      # şi un cont dezactivat (revizuirea 3.6.11)
             if (tg.is_owner() and not g.is_owner()) or authz.outranked_by(tg, g):
                 outr.append(uid)
         if outr:
@@ -2318,9 +2330,10 @@ async def create_enroll_group(body: EnrollGroupIn, request: Request,
     pw = _clean_enroll_pass(body.enroll_password)
     pass_hash = await security.hash_password_async(pw) if pw else None
     await db.execute(
-        "INSERT INTO enroll_groups(name, token_hash, created, created_by, expires,"
-        " max_uses, folder, require_2fa, pass_hash) VALUES(?,?,?,?,?,?,?,?,?)",
-        name, security.sha256_hex(raw), time.time(), user["email"], time.time() + days * 86400,
+        "INSERT INTO enroll_groups(name, token_hash, created, created_by, created_by_id, expires,"
+        " max_uses, folder, require_2fa, pass_hash) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        name, security.sha256_hex(raw), time.time(), user["email"], user["id"],
+        time.time() + days * 86400,
         max_uses, body.folder.strip(), int(body.require_2fa), pass_hash)
     log.info("group enroll token created: %s (max_uses=%d, %dd, 2fa=%s, pass=%s) by %s",
              name, max_uses, days, bool(body.require_2fa), bool(pw), user["email"])

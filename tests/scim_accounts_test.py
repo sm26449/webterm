@@ -328,7 +328,10 @@ async def test_last_owner(owner, c):
     r = await c.post("/scim/v2/Users", json=ak_user("boss", "boss@x.co", ext="sub-boss"))
     sid_boss = r.json()["id"]
     check("contul SSO-only boss e adoptat de SCIM", r.status_code == 201 and await uid_of("boss@x.co") == boss)
+    # Owner dat de un GRUP SSO (source=sso): un Owner dat DE MÂNĂ nu e niciodată atins de SCIM
+    # (revizuirea independentă 3.6.11 — vezi test_review_owner_level)
     await U.bind(boss, "owner", "all", "")
+    await db.execute("UPDATE role_bindings SET source='sso' WHERE user_id=?", boss)
     oid = await uid_of(U.OWNER_EMAIL)
     # boss devine SINGURUL Owner permanent: Owner-ul local e retrogradat la unul temporar
     await db.execute("UPDATE role_bindings SET expires=? WHERE user_id=?", time.time() + 7200, oid)
@@ -366,6 +369,144 @@ async def test_last_owner(owner, c):
           "%s %s" % (r.status_code, r.text[:120]))
 
 
+async def alert_of(key, severity="critical"):
+    for _ in range(50):                   # alertele se scriu dintr-un task
+        row = await db.fetchone("SELECT severity FROM alerts WHERE msg_params LIKE ? AND severity=?",
+                                "%%%s%%" % key, severity)
+        if row is not None:
+            return row
+        await asyncio.sleep(0.02)
+    return None
+
+
+async def test_review_owner_level(owner, c):
+    """Revizuirea independentă a SCIM (3.6.11): tokenul SCIM nu poate prelua / scoate un Owner."""
+    print("── revizuirea 3.6.11: adopţia, Owner-ii daţi în WebTerm, reactivarea, Admin vs Owner dezactivat")
+    # M1: un Owner SSO-only, dat DE MÂNĂ, nu se adoptă — nici prin externalId = sub cu alt email
+    await sso_login("sub-o2", "o2@x.co")
+    o2 = await uid_of("o2@x.co")
+    await U.bind(o2, "owner", "all", "")
+    before = dict(await db.fetchone("SELECT * FROM users WHERE id=?", o2))
+    r = await c.post("/scim/v2/Users", json=ak_user("x", "attacker@evil.co", ext="sub-o2"))
+    after = dict(await db.fetchone("SELECT * FROM users WHERE id=?", o2))
+    check("adopţie prin externalId = sub dar ALT email → 409, contul neatins", r.status_code == 409
+          and r.json().get("scimType") == "uniqueness" and before == after, r.text[:200])
+    r = await c.post("/scim/v2/Users", json=ak_user("o2", "o2@x.co", ext="sub-o2"))
+    after = dict(await db.fetchone("SELECT * FROM users WHERE id=?", o2))
+    check("adopţia unui cont cu Owner dat în WebTerm → 409 (chiar cu emailul lui), neatins",
+          r.status_code == 409 and "Owner-level" in r.json().get("detail", "") and before == after,
+          r.text[:200])
+    check("…alertă CRITICĂ (scim_owner_refused)", await alert_of("scim_owner_refused") is not None)
+    # un rol custom cu o permisiune doar-de-Owner = Owner sub alt nume
+    await sso_login("sub-o3", "o3@x.co")
+    o3 = await uid_of("o3@x.co")
+    perms = sorted(authz.BUILTIN_ROLES["owner"]["perms"] - authz.BUILTIN_ROLES["admin"]["perms"])[:1]
+    rid = await db.execute("INSERT INTO roles(key, name, description, perms, builtin, created, updated)"
+                           " VALUES(NULL, 'Shadow', '', ?, 0, ?, ?)", json.dumps(perms), time.time(),
+                           time.time())
+    await db.execute("INSERT INTO role_bindings(user_id, role_id, scope_kind, scope_value, source,"
+                     " created) VALUES(?,?,'all','','manual',?)", o3, rid, time.time())
+    authz.bump_epoch()
+    r = await c.post("/scim/v2/Users", json=ak_user("o3", "o3@x.co", ext="sub-o3"))
+    check("…la fel pentru un rol custom cu o permisiune doar-de-Owner (%s)" % perms, r.status_code == 409,
+          r.text[:160])
+    # adopţia unui cont SSO-only obişnuit: merge, dar e alertată CRITIC şi emailul nu se mai schimbă
+    await sso_login("sub-pia", "pia@x.co")
+    pia = await uid_of("pia@x.co")
+    r = await c.post("/scim/v2/Users", json=ak_user("pia", "pia@x.co", ext="sub-pia"))
+    sid_pia = r.json().get("id")
+    check("adopţia unui cont SSO-only fără rol de Owner → 201, acelaşi cont", r.status_code == 201
+          and await uid_of("pia@x.co") == pia, r.text[:160])
+    check("…alertă CRITICĂ (scim_account_adopted)", await alert_of("scim_account_adopted") is not None)
+    r = await c.patch("/scim/v2/Users/" + sid_pia, json={"Operations": [
+        {"op": "replace", "path": "emails", "value": [{"value": "pia2@x.co", "primary": True}]}]})
+    check("…SCIM nu schimbă emailul unui cont pe care nu l-a creat (409 mutability)",
+          r.status_code == 409 and r.json().get("scimType") == "mutability"
+          and await uid_of("pia@x.co") == pia, r.text[:160])
+    # Owner dat de mână unui cont CREAT de SCIM: SCIM nu-l mai dezactivează / şterge / re-emailează
+    r = await c.post("/scim/v2/Users", json=ak_user("mo", "mo@x.co", ext="sub-mo"))
+    sid_mo, mo = r.json()["id"], await uid_of("mo@x.co")
+    await U.bind(mo, "owner", "all", "")
+    r = await c.patch("/scim/v2/Users/" + sid_mo, json=deactivate())
+    row = await db.fetchone("SELECT disabled FROM users WHERE id=?", mo)
+    check("active:false pe un cont cu Owner dat în WebTerm → 403, nedezactivat", r.status_code == 403
+          and row["disabled"] == 0, r.text[:200])
+    r = await c.delete("/scim/v2/Users/" + sid_mo)
+    row = await db.fetchone("SELECT disabled, scim_id FROM users WHERE id=?", mo)
+    check("DELETE pe el → 403, rămâne activ şi legat", r.status_code == 403 and row["disabled"] == 0
+          and row["scim_id"] == sid_mo, r.text[:200])
+    r = await c.patch("/scim/v2/Users/" + sid_mo, json={"Operations": [
+        {"op": "replace", "path": "emails", "value": [{"value": "mo2@x.co", "primary": True}]}]})
+    check("…nici emailul nu i-l schimbă (409)", r.status_code == 409 and await uid_of("mo@x.co") == mo)
+    # L1: reactivarea prin SCIM nu redă un Owner dat de mână; nici un cont dezactivat de WebTerm
+    r = await c.post("/scim/v2/Users", json=ak_user("re", "re@x.co", ext="sub-re"))
+    sid_re, re_ = r.json()["id"], await uid_of("re@x.co")
+    r = await c.patch("/scim/v2/Users/" + sid_re, json=deactivate())
+    check("pregătire: re dezactivat de SCIM", r.status_code == 200 and r.json()["active"] is False)
+    await U.bind(re_, "owner", "all", "")          # dat de un Owner cât e dezactivat
+    r = await c.patch("/scim/v2/Users/" + sid_re, json=deactivate(True))
+    row = await db.fetchone("SELECT disabled FROM users WHERE id=?", re_)
+    check("SCIM active:true pe un cont cu Owner dat în WebTerm → 403, rămâne dezactivat",
+          r.status_code == 403 and row["disabled"] == 1, r.text[:200])
+    r = await c.post("/scim/v2/Users", json=ak_user("cli", "cli@x.co", ext="sub-cli"))
+    sid_cli, cli = r.json()["id"], await uid_of("cli@x.co")
+    await db.execute("UPDATE users SET disabled=1, disabled_at=?, disabled_by='owner' WHERE id=?",
+                     time.time(), cli)
+    r = await c.patch("/scim/v2/Users/" + sid_cli, json=deactivate(True))
+    row = await db.fetchone("SELECT disabled FROM users WHERE id=?", cli)
+    check("SCIM active:true pe un cont dezactivat de altcineva decât SCIM → 403", r.status_code == 403
+          and row["disabled"] == 1, r.text[:200])
+    # L2: un Admin nu atinge un Owner DEZACTIVAT (re: Owner, dezactivat)
+    adm = await U.login("adm@x.co")
+    check("is_owner_user vede Owner-ul dezactivat; owner_count nu-l numără",
+          await authz.is_owner_user(re_) and not (await authz.grants_for_user(re_)).is_owner())
+    r = await adm.post("/api/users/%d/bindings" % re_, json={"role": "viewer", "scope_kind": "all",
+                                                           "current_password": "parolabuna1"})
+    check("Admin adaugă un rol unui Owner DEZACTIVAT → 403 authz.ownerOnly", r.status_code == 403
+          and U.code(r) == "authz.ownerOnly", "%s %s" % (r.status_code, r.text[:120]))
+    r = await adm.post("/api/users/%d/delete" % re_, json={"current_password": "parolabuna1"})
+    check("Admin şterge un Owner DEZACTIVAT → 403", r.status_code == 403
+          and await uid_of("re@x.co") == re_, r.text[:120])
+    r = await owner.post("/api/users/%d/delete" % re_, json={"current_password": PW})
+    check("…un Owner îl poate şterge (un Owner dezactivat nu e „ultimul Owner”)",
+          r.status_code == 200 and await uid_of("re@x.co") is None, r.text[:160])
+    await adm.aclose()
+
+
+async def test_review_tokens(owner, c):
+    print("── revizuirea 3.6.11: tokenurile de grup ale unui cont scos; tokenuri fără creator")
+    r = await c.post("/scim/v2/Users", json=ak_user("eg", "eg@x.co", ext="sub-eg"))
+    sid_eg, eg = r.json()["id"], await uid_of("eg@x.co")
+    for name, by_id in (("eg-new", eg), ("eg-legacy", None)):
+        await db.execute("INSERT INTO enroll_groups(name, token_hash, created, created_by, created_by_id,"
+                         " expires) VALUES(?,?,?,?,?,?)", name, security.sha256_hex(name), time.time(),
+                         "eg@x.co", by_id, time.time() + 3600)
+    await c.patch("/scim/v2/Users/" + sid_eg, json=deactivate())
+    rows = await db.fetchall("SELECT revoked FROM enroll_groups WHERE name LIKE 'eg-%'")
+    check("dezactivarea revocă tokenurile de grup ale contului (după id şi, vechi, după email)",
+          len(rows) == 2 and all(x["revoked"] == 1 for x in rows), str([dict(x) for x in rows]))
+    lu = await U.add_user("lu@x.co")
+    await db.execute("INSERT INTO enroll_groups(name, token_hash, created, created_by, created_by_id,"
+                     " expires) VALUES('lu-grp',?,?,?,?,?)", security.sha256_hex("lu-grp"), time.time(),
+                     "lu@x.co", lu, time.time() + 3600)
+    r = await owner.post("/api/users/%d/delete" % lu, json={"current_password": PW})
+    row = await db.fetchone("SELECT revoked FROM enroll_groups WHERE name='lu-grp'")
+    check("ştergerea contului revocă tokenurile lui de grup", r.status_code == 200 and row["revoked"] == 1,
+          r.text[:120])
+    raw = "wt_" + security.new_token()
+    await db.execute("INSERT INTO api_tokens(name, token_hash, scopes, created, created_by, expires)"
+                     " VALUES('orphan', ?, 'read', ?, 'ghost@x.co', ?)", security.sha256_hex(raw),
+                     time.time(), time.time() + 3600)
+    await U.add_user("ghost@x.co", bindings=[("admin", "all", "")])
+    tc = U.client(headers={"authorization": "Bearer " + raw})
+    r = await tc.get("/api/hosts")
+    g = await authz.grants_for_token(dict(await db.fetchone("SELECT * FROM api_tokens WHERE name='orphan'")))
+    check("un token fără creator (id) NU e moştenit de contul care ia acum acel email (nu vede nimic)",
+          r.status_code in (200, 401) and (r.status_code == 401 or r.json() == []) and g.user_id is None
+          and not g.global_perms, "%s %s" % (r.status_code, r.text[:80]))
+    await tc.aclose()
+
+
 async def main():
     await U.boot()
     owner = await U.owner_client()
@@ -377,6 +518,8 @@ async def main():
     await test_reenable(owner, c, op, sid_op, host)
     sid_op = await test_delete(owner, c, op, sid_op)
     await test_last_owner(owner, c)
+    await test_review_owner_level(owner, c)
+    await test_review_tokens(owner, c)
     await c.aclose()
     await owner.aclose()
     await db.close()

@@ -12,8 +12,10 @@ can bring it back as it was. While disabled the account can do nothing:
   * `authz.grants_for_user` returns nothing for it (bindings are kept, not read), so anything
     still holding its id — a cached grant, a forward re-check — finds no permission;
   * its automation tokens are REVOKED (deleted, like on account deletion — offboarding must not
-    leave a credential that would come back with a re-enable), its live shares and replay links
-    are revoked;
+    leave a credential that would come back with a re-enable), so are the group enrollment tokens
+    it created, its live shares and replay links;
+  * an account holding an Owner-level role given in WebTerm (not by an SSO group) is never
+    disabled by the IdP (`OwnerLevel`): only an Owner takes an Owner out (§A.5);
   * the last PERMANENT Owner can never be disabled (a disabled Owner does not count as one): the
     instance must not lock itself out because an IdP said so.
 
@@ -35,6 +37,10 @@ class LastOwner(Exception):
     """Disabling this account would leave no permanent Owner."""
 
 
+class OwnerLevel(Exception):
+    """The account holds an Owner-level role given in WebTerm: the IdP cannot disable it."""
+
+
 async def is_permanent_owner(uid: int) -> bool:
     row = await db.fetchone(
         "SELECT 1 FROM role_bindings b JOIN roles r ON r.id=b.role_id WHERE b.user_id=?"
@@ -53,6 +59,20 @@ async def report_last_owner_refused(email: str, *, actor: str, ip: str, reason: 
         what_params={"account": email})
 
 
+async def revoke_enroll_groups(uid: int, email: str) -> int:
+    """Revoke the live group enrollment tokens this account created (review 3.6.11: they enrol
+    hosts into the fleet — offboarding must not leave one behind). Revoked, not deleted: the
+    record of who could enrol stays. Tokens from before `created_by_id` match by email."""
+    rows = await db.fetchall(
+        "SELECT id FROM enroll_groups WHERE revoked=0 AND (created_by_id=?"
+        " OR (created_by_id IS NULL AND created_by=?))", uid, email)
+    for r in rows:
+        await db.execute("UPDATE enroll_groups SET revoked=1 WHERE id=?", r["id"])
+    if rows:
+        log.warning("revoked %d group enrollment token(s) created by %s", len(rows), email)
+    return len(rows)
+
+
 async def disable(uid: int, *, by: str, actor: str, ip: str, reason: str) -> Optional[dict]:
     """Disable account `uid` (idempotent: an already disabled account → None, nothing done).
     `by` = 'scim' | 'scim-delete'. Raises LastOwner (nothing changed, audited, alerted).
@@ -66,7 +86,11 @@ async def disable(uid: int, *, by: str, actor: str, ip: str, reason: str) -> Opt
             # already disabled: only the reason may move (active:false → DELETE)
             await db.execute("UPDATE users SET disabled_by=? WHERE id=?", by, uid)
             return None
-        # check-then-act under the bindings lock: a concurrent grant/removal cannot slip between
+        # check-then-act under the bindings lock: a concurrent grant/removal cannot slip between.
+        # Review 3.6.11: an Owner-level role given in WebTerm (not by an SSO group) = only an
+        # Owner, in WebTerm, can take the account out (§A.5) — never the IdP
+        if await authz.owner_level_given_in_webterm(uid):
+            raise OwnerLevel(row["email"])
         if await is_permanent_owner(uid) and await authz.owner_count(exclude_user=uid) < 1:
             await report_last_owner_refused(row["email"], actor=actor, ip=ip, reason=reason)
             raise LastOwner(row["email"])
@@ -82,19 +106,21 @@ async def disable(uid: int, *, by: str, actor: str, ip: str, reason: str) -> Opt
         "SELECT COUNT(*) AS c FROM api_tokens WHERE created_by_id=? OR created_by=?",
         uid, email))["c"]
     await db.execute("DELETE FROM api_tokens WHERE created_by_id=? OR created_by=?", uid, email)
+    ngrp = await revoke_enroll_groups(uid, email)
     from . import api                       # late: api imports this module
     nshare = await api._revoke_all_shares(email, uid)
     nlinks = await api._revoke_replay_links(uid)
     what = ("account %s disabled by the identity provider (%s): sessions ended, %d automation "
-            "token(s), %d share(s) and %d replay link(s) revoked" % (email, reason, ntok, nshare,
-                                                                      nlinks))
+            "token(s), %d group enrollment token(s), %d share(s) and %d replay link(s) revoked"
+            % (email, reason, ntok, ngrp, nshare, nlinks))
     log.warning(what)
     await audit.record(time.time(), actor, ip, "SCIM", "/scim/v2/Users", 200, what[:480],
                        actor_id=None, via="scim")
     email_alerts.notify_security_change(
         "account %s was disabled by the identity provider (SCIM)" % email, ip, actor, fleet=True,
         what_key="scim_account_disabled", what_params={"account": email})
-    return {"email": email, "tokens": ntok, "shares": nshare, "replay_links": nlinks}
+    return {"email": email, "tokens": ntok, "enroll_groups": ngrp, "shares": nshare,
+            "replay_links": nlinks}
 
 
 async def enable(uid: int, *, actor: str, ip: str, how: str, actor_id: Optional[int] = None,
