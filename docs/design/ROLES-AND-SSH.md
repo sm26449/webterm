@@ -1515,6 +1515,28 @@ User guide: [docs/SSO.md → SCIM provisioning](../SSO.md#scim-provisioning-3611
   before any write; `admin._owner_ids` and the boot permanent-Owner count ignore disabled
   accounts. Accepted and documented: the token can reach every mapped non-Owner role through a
   self-provisioned account (it is the IdP's credential).
+- **Independent review fixes (before release):** adoption of an existing account (one SCIM did
+  not create — `users.scim_created=0`) needs its email to match, never happens for an account
+  holding an Owner-level binding with `source<>'sso'` (`authz.owner_level_given_in_webterm`: Owner
+  or a role with an Owner-only permission, any scope), and raises a critical alert; the adoption
+  `UPDATE` re-checks `local_password=0` in the statement, and `/api/account`'s `UPDATE` re-checks
+  `scim_managed=0` (the second factor is a suspension point). SCIM changes the email only of rows
+  it created and never of an Owner-level account. SCIM never disables, deletes or re-enables an
+  account with an Owner-level binding given in WebTerm (403 + critical alert; `accounts.disable`
+  re-checks under `authz._lock`, `accounts.enable` through `recheck`), nor re-enables an account
+  whose `disabled_by` is not `scim`/`scim-delete`. Target rules read `authz.target_grants`
+  (bindings even while disabled): an Admin cannot edit or delete a disabled Owner; "last Owner"
+  checks keep counting active Owners only. PATCH paths are strict: `urn:…:core:2.0:User:` /
+  `…:Group:` prefixes are stripped (paths and no-path value keys), standard attributes WebTerm
+  does not keep are ignored, anything else → 400 `invalidPath` (readOnly → `mutability`, remove
+  without path → `noTarget`). A SCIM refusal on a local-password identity raises a critical alert
+  (once an hour per account). Lockout audit rows: actor `unauthenticated`, at most 20 an hour in
+  total, the next row counts the suppressed ones. Group enrollment tokens (`enroll_groups`, new
+  `created_by_id`) are revoked when their creator is disabled or deleted. Automation tokens
+  without `created_by_id` were resolved by email at each use: `authz.seed` freezes that resolution
+  once (`tokens_creator_backfilled`); afterwards a token without a creator id is dead.
+  provision's user filter passes a user already pushed (`connection`) or, where the context has
+  no `connection`, any inactive user, so a deactivation is always pushed.
 - **Audit.** Every change the IdP makes (and every refused write) is an `audit_log` row with
   `actor = scim`, `via = scim`; no-op re-syncs (Authentik's periodic full sync) write nothing.
   The status panel reads `scim_last_request` (throttled, 30 s) and `scim_last_error`.
@@ -1859,11 +1881,11 @@ a SCIM and a `perm()` dependency is refused as ambiguous. What the token can do 
 | `/scim/v2/ResourceTypes` | GET | — | SCIM | discovery |
 | `/scim/v2/Schemas` | GET | — | SCIM | discovery |
 | `/scim/v2/Users` | GET | — | SCIM | SCIM-managed accounts only; `filter=<attr> eq "<v>"` + pagination |
-| `/scim/v2/Users` | POST | — | SCIM | create an SSO-only account, or adopt an SSO-only one with the same identity; a local-password account → 409 |
+| `/scim/v2/Users` | POST | — | SCIM | create an SSO-only account, or adopt an SSO-only one with the same identity **and email** (critical alert); a local-password account or one with an Owner-level role given in WebTerm → 409 |
 | `/scim/v2/Users/{scim_id}` | GET | — | SCIM | |
 | `/scim/v2/Users/{scim_id}` | PUT | — | SCIM | email / userName / displayName / externalId / `active` |
 | `/scim/v2/Users/{scim_id}` | PATCH | — | SCIM | idem, PatchOp |
-| `/scim/v2/Users/{scim_id}` | DELETE | — | SCIM | disable + unlink (kept for its history); the last permanent Owner → 403 |
+| `/scim/v2/Users/{scim_id}` | DELETE | — | SCIM | disable + unlink (kept for its history); the last permanent Owner, or an account with an Owner-level role given in WebTerm → 403 |
 | `/scim/v2/Groups` | GET | — | SCIM | `filter=displayName eq "<v>"` + pagination |
 | `/scim/v2/Groups` | POST | — | SCIM | members → SSO group → role re-sync (never adds an Owner-level role) |
 | `/scim/v2/Groups/{gid}` | GET | — | SCIM | |

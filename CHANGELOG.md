@@ -63,6 +63,35 @@ membership to WebTerm at once. No agent change (agent stays 58).
   - Smaller: `startIndex` is bounded (no 500 on a huge value), a create racing an SSO sign-in
     answers 409 instead of 500, the grantable-role check runs under the bindings lock, and
     provision's user filter evaluates the synced `user` object.
+- **Independent review of SCIM: the token can no longer take over, disable or re-enable an Owner,
+  and nothing it sends is silently ignored.**
+  - *SCIM could adopt any SSO-only account, Owners included.* Why: a create whose `externalId`
+    equalled an account's OIDC `sub` adopted it without checking the email, rewrote the email,
+    and a following `active:false` disabled it. Adopting an existing account now needs its own
+    email, is refused (409) for an account holding an Owner-level role given in WebTerm (Owner or
+    a role with an Owner-only permission, not from an SSO group), and raises a critical alert
+    every time. SCIM changes the email only of accounts it created, and never disables, deletes
+    or re-enables an account with an Owner-level role given in WebTerm (403, critical alert) —
+    only an Owner takes an Owner out.
+  - *SCIM `active:true` restored an Owner without the Owner gate.* Why: the UI's re-enable is
+    Owner-only because a re-enable gives back every role. SCIM now re-enables only accounts it
+    disabled itself, and never one with an Owner-level role given in WebTerm.
+  - *Unknown PATCH paths answered 200 and did nothing.* Why: `urn:…:core:2.0:User:active=false`
+    left the account active while the IdP believed it disabled. Fully qualified names now apply;
+    any path WebTerm does not recognise is a 400 `invalidPath` (standard attributes it does not
+    keep, such as `name.*` or the enterprise extension, are still accepted and ignored).
+  - *An Admin could edit or delete an Owner the IdP had disabled.* Why: a disabled account's
+    roles read as empty, so it no longer looked like an Owner. Who-may-change-it checks now read
+    its roles even while disabled; "the last Owner" still counts active Owners only.
+  - *provision's user filter never pushed the deactivation of someone removed from the WebTerm
+    groups.* It now always passes a user already pushed (or, on Authentik versions without that
+    context, any inactive user). docs/SSO.md: with an older filter, deactivate first.
+  - Smaller: a SCIM attempt on a local-password account raises a critical alert; setting a local
+    password while SCIM adopts the account is re-checked in the write (409 `account.scimManaged`);
+    lockout audit rows are capped at 20 an hour in total with actor `unauthenticated`; group
+    enrollment tokens are revoked when their creator is disabled or deleted; automation tokens
+    from before creator ids were resolved by email at every use — that resolution is frozen once
+    at boot, and a token without a creator id no longer works.
 - The SCIM token is powerful — documented: its holder can create an account bound to their own IdP
   identity and put it in any pushed group, reaching every mapped role except Owner. Keep it in the
   IdP only and rotate it like an Admin password.

@@ -168,10 +168,10 @@ without OIDC WebTerm refuses SCIM requests (403).
 
 | The IdP does | WebTerm does |
 |---|---|
-| creates a user | creates an **SSO-only** account (no local password; no role until a mapped group gives one). An existing SSO-only account with the same email, or whose SSO `sub` equals the IdP's `externalId`, is **adopted** instead of duplicated. |
-| changes email / username / name | updates the account (an email another account already uses → refused, 409) |
+| creates a user | creates an **SSO-only** account (no local password; no role until a mapped group gives one). An existing SSO-only account with the same email (and, if it is already linked to SSO, whose `sub` equals the IdP's `externalId`) is **adopted** instead of duplicated — a critical alert says so. An `externalId` that matches an account's `sub` but comes with another email is refused (409). |
+| changes email / username / name | updates the account. The **email** only of accounts SCIM *created* — never of an account it adopted, nor of one holding an Owner-level role given in WebTerm (409 `mutability`); an email another account already uses → 409 |
 | deactivates a user (`active: false`) | **disables** the account at once: web sessions deleted, open terminals and forwards closed, automation tokens **revoked**, live shares and replay links revoked, no permission left. Nothing is deleted: audit history, role bindings and passkeys stay for a re-enable. |
-| reactivates a user (`active: true`) | re-enables a SCIM-managed account; it gets back the roles it had |
+| reactivates a user (`active: true`) | re-enables a SCIM-managed account that SCIM disabled; it gets back the roles it had. Not an account WebTerm itself disabled, nor one holding an Owner-level role given in WebTerm (403: an Owner re-enables those) |
 | deletes a user | disables the account **and** unlinks it from SCIM (it stays, disabled, for its history). If the IdP provisions the same person again, the account is adopted and re-enabled. |
 | adds / removes group members, renames or deletes a group | re-runs the [SSO group → role mapping](ROLES.md#sso-group-mapping) for those accounts **immediately**, with the rules of an SSO sign-in |
 
@@ -183,10 +183,16 @@ adoption, which requires `email_verified`.
 What SCIM **never** does — these are refused, audited and shown as the *last error* in WebTerm:
 
 - **touch an account with a local password** (the break-glass Owner, or any local account): such
-  accounts are invisible to SCIM; creating a user with the same email or identity answers **409**.
+  accounts are invisible to SCIM; creating a user with the same email or identity answers **409**
+  and raises a critical alert (at most once an hour per account).
   The 3.6.2 rule still holds — an account with a local password never receives roles from groups.
+- **take over, disable, delete or re-enable an account holding an Owner-level role given in
+  WebTerm** — Owner, or a custom role with an Owner-only permission, granted by hand (not by an SSO
+  group): only an Owner can take an Owner out (§A.5). Adopting it answers 409, the rest 403; each
+  attempt raises a critical alert. Give Owner through an SSO group if the IdP should manage it.
 - **disable or delete the last permanent Owner** (403, plus a critical alert). A disabled Owner no
-  longer counts as an Owner anywhere.
+  longer counts towards "the last Owner", but it is still an Owner for who may change its access:
+  an Admin cannot edit or delete a disabled Owner.
 - **grant Owner**: a group mapped to Owner (or to a custom role with Owner-only permissions) is
   kept if the person already has it but never *added* by a push; it is added at the person's next
   interactive SSO sign-in, as before. Removing someone from that group through SCIM removes it at
@@ -224,11 +230,21 @@ rotation, run it again with the new token. With `WT_GROUP_PREFIX=wt-prod` the pr
 1. *Customization → Property Mappings → Create → SCIM Provider Mapping*, name
    `WebTerm SCIM: users`, expression (list your WebTerm groups):
    ```python
+   # a user already pushed (or deactivated) always passes, so its deactivation reaches WebTerm
+   try:
+       synced = connection is not None
+   except NameError:
+       synced = not user.is_active
+   if synced:
+       return {}
    for name in ("wt-access", "wt-admins", "wt-readonly", "wt-db", "wt-network"):
        if ak_is_group_member(user, name=name):
            return {}
    raise SkipObject
    ```
+   A filter that only checks group membership (the one before this review) skips a user once they
+   leave the WebTerm groups — and then never pushes their deactivation. With such a filter,
+   **deactivate the user first**, then remove them from the groups.
    and a second one, `WebTerm SCIM: groups`:
    ```python
    if not group.name.startswith("wt-"):
@@ -261,7 +277,8 @@ sign-in.
 
 ### Re-enabling a disabled account
 
-- From the IdP: reactivate the user (SCIM-managed accounts only).
+- From the IdP: reactivate the user (SCIM-managed accounts that SCIM disabled, without an
+  Owner-level role given in WebTerm).
 - In WebTerm: an **Owner** opens the account (Settings → Users & roles → Accounts, marked
   **Disabled**) → **Re-enable** (password + second factor). If the IdP still has the person
   inactive, its next sync disables the account again — fix it there too.
@@ -276,7 +293,8 @@ Owner-only: create, **rotate** (the old token stops working at once) and **revok
 panel; each is audited and alerted. **Pause** stops provisioning without revoking the token
 (resuming asks for your password again). Wrong tokens are rate-limited per IP (10 failures in
 15 minutes lock that IP out for 15 minutes), authenticated traffic is capped at 1200 requests a
-minute, bodies at 1 MiB. Cookies are ignored on `/scim/v2` — a browser session can never act
+minute, bodies at 1 MiB. Lockouts are audited (actor `unauthenticated`), at most 20 rows an
+hour in total — the next row says how many were held back. Cookies are ignored on `/scim/v2` — a browser session can never act
 through SCIM. The lockout is per client IP: if the IdP reaches WebTerm through the same proxy
 address as untrusted traffic, set `WEBTERM_TRUSTED_PROXY_CIDRS` so WebTerm sees the real address.
 
@@ -284,10 +302,15 @@ address as untrusted traffic, set `WEBTERM_TRUSTED_PROXY_CIDRS` so WebTerm sees 
 `externalId` is their own IdP identity and put it in any group SCIM pushes — so it can reach every
 role a group is mapped to, except Owner (never added by a push). Keep it in the IdP and nowhere
 else, rotate it when someone who could read it leaves, and map powerful roles only to groups you
-watch. Two guards limit what it can do to *existing* accounts: an account's `externalId` cannot
-change once set, and an account that has not signed in with SSO yet and holds a role given by
-hand cannot have its email changed by SCIM (otherwise the next sign-in with that email would adopt
-it). The `externalId == sub` link at sign-in also requires the same email.
+watch. Guards limit what it can do to *existing* accounts: it adopts one only with that account's own
+email (alerted, critical), never one holding an Owner-level role given in WebTerm; it changes the
+email only of accounts it created; an account's `externalId` cannot change once set; an account
+that has not signed in with SSO yet and holds a role given by hand cannot have its email changed
+by SCIM (otherwise the next sign-in with that email would adopt it). The `externalId == sub` link
+at sign-in also requires the same email. A PATCH path WebTerm does not recognise is refused (400
+`invalidPath`), never silently ignored; fully qualified names (`urn:…:core:2.0:User:active`)
+are understood, standard attributes WebTerm does not keep (`name.*`, `phoneNumbers`, the
+enterprise extension…) are accepted and ignored.
 
 A SCIM account cannot set a local password from Settings (`account.scimManaged`): with one, SCIM
 would no longer manage it and it would escape deactivation in the IdP. On the server,
