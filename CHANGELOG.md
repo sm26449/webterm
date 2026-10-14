@@ -9,6 +9,8 @@ back.
 
 ## [Unreleased]
 
+## [3.6.11] — 2026-10-14 · agent (58)
+
 SCIM provisioning: the identity provider pushes account creation, deactivation, deletion and group
 membership to WebTerm at once; plus a KDE Plasma (Breeze) theme style. No agent change (agent stays 58).
 
