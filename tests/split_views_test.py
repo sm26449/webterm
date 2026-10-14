@@ -12,7 +12,9 @@ independent la attach. Deci CRUD = doar require_user, fără step-up. Ce verific
   * 3.6.12: un panou se pune doar cu `session.watch`/`session.open` (nu `recording.view` singur);
     un panou pe care contul nu-l mai poate vedea (rol / 2FA fără step-up) e ASCUNS, nu şters, iar
     forma nu se poate rescrie cât e ascuns (409 splitview.hiddenPanes);
-  * plafon per cont (splitview.tooMany) + clamp pe `position`.
+  * plafon per cont (splitview.tooMany) + clamp pe `position`;
+  * review 3.6.12: plafonul ţine sub POST-uri concurente (INSERT…SELECT…WHERE COUNT<50) şi
+    prune-ul nu pierde un PATCH concurent (compare-and-swap pe `panes`, şi la UPDATE şi la DELETE).
 """
 import asyncio
 import json
@@ -240,6 +242,69 @@ async def main():
         check("peste plafon (50) → 400 splitview.tooMany",
               r.status_code == 400 and hdr(r) == "splitview.tooMany", r.text)
         await db.execute("DELETE FROM split_views WHERE user_id=? AND name LIKE 'bulk%'", uid)
+        # review 3.6.12 (L1): COUNT-ul şi INSERT-ul erau separate de await-uri (validarea panourilor)
+        # → POST-uri concurente treceau toate de plafon. Acum plafonul e în INSERT (atomic).
+        have = (await db.fetchone("SELECT COUNT(*) AS n FROM split_views WHERE user_id=?", uid))["n"]
+        for i in range(api.SPLIT_MAX_PER_USER - have - 2):
+            await db.execute(
+                "INSERT INTO split_views(user_id, name, panes, ratio, broadcast, position, created, updated)"
+                " VALUES(?,?,?,?,?,?,?,?)", uid, f"bulk{i}", '["s1","s2"]', 0.5, 0, 0, time.time(), time.time())
+        rs = await asyncio.gather(*[c.post("/api/split-views", json={"name": f"race{i}", "panes": ["s1", "s2"]})
+                                    for i in range(12)])
+        n_after = (await db.fetchone("SELECT COUNT(*) AS n FROM split_views WHERE user_id=?", uid))["n"]
+        check("12 POST-uri concurente cu 2 locuri libere → exact 2 create, plafonul (50) ţine",
+              sum(r.status_code == 200 for r in rs) == 2 and n_after == api.SPLIT_MAX_PER_USER,
+              f"created={sum(r.status_code == 200 for r in rs)} rows={n_after}")
+        check("… restul → 400 splitview.tooMany",
+              all(hdr(r) == "splitview.tooMany" for r in rs if r.status_code != 200),
+              str([r.status_code for r in rs]))
+        await db.execute("DELETE FROM split_views WHERE user_id=? AND (name LIKE 'bulk%' OR name LIKE 'race%')", uid)
+
+        # review 3.6.12 (L2): prune citea panourile, apoi scria lista filtrată — un PATCH venit între
+        # citire şi scriere era suprascris (lost update). Acum scrierea e compare-and-swap pe `panes`.
+        r = await c.post("/api/split-views", json={"name": "cas", "panes": ["s1", "s2"]})
+        cas = r.json()["id"]
+        await db.execute("UPDATE split_views SET panes=? WHERE id=?", '["s1","s2","gone-sid"]', cas)
+        orig_fetchall = db.fetchall
+
+        slowed = []
+
+        async def slow_fetchall(q, *a):
+            res = await orig_fetchall(q, *a)
+            if "FROM sessions WHERE id IN" in q and not slowed:   # doar citirea prune-ului
+                slowed.append(1)
+                await asyncio.sleep(0.2)          # fereastra dintre citire şi scriere, lărgită
+            return res
+
+        async def patch_meanwhile():
+            await asyncio.sleep(0.05)
+            return await c.patch(f"/api/split-views/{cas}", json={"panes": ["s5", "s1"], "sizes": [0.3, 0.7]})
+
+        db.fetchall = slow_fetchall
+        try:
+            _, pr = await asyncio.gather(core.prune_split_views(), patch_meanwhile())
+        finally:
+            db.fetchall = orig_fetchall
+        row = await db.fetchone("SELECT panes, sizes FROM split_views WHERE id=?", cas)
+        check("prune concurent cu PATCH: PATCH-ul nu e pierdut (CAS pe panes)",
+              pr.status_code == 200 and row is not None and json.loads(row["panes"]) == ["s5", "s1"]
+              and _near(json.loads(row["sizes"] or "[]"), [0.3, 0.7]), f"{pr.status_code} {dict(row) if row else None}")
+        await db.execute("UPDATE split_views SET panes=? WHERE id=?", '["s1","gone-sid"]', cas)
+
+        async def patch_meanwhile2():
+            await asyncio.sleep(0.05)
+            return await c.patch(f"/api/split-views/{cas}", json={"panes": ["s5", "s2"]})
+
+        slowed.clear()
+        db.fetchall = slow_fetchall
+        try:
+            await asyncio.gather(core.prune_split_views(), patch_meanwhile2())
+        finally:
+            db.fetchall = orig_fetchall
+        row = await db.fetchone("SELECT panes FROM split_views WHERE id=?", cas)
+        check("prune concurent cu PATCH: layout-ul reparat de PATCH NU e şters (CAS şi pe DELETE)",
+              row is not None and json.loads(row["panes"]) == ["s5", "s2"], str(dict(row) if row else None))
+        await c.request("DELETE", f"/api/split-views/{cas}")
 
         # ── delete ────────────────────────────────────────────────────────────
         r = await c.request("DELETE", f"/api/split-views/{sv2_id}")

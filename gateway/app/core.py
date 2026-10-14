@@ -3202,12 +3202,18 @@ async def prune_split_views() -> int:
         keep = [s for s in p if s in alive]
         if len(keep) == len(p) and len(p) >= 2:
             continue
-        changed += 1
+        # Compare-and-swap pe `panes` citit mai sus: un PATCH concurent (utilizatorul a mutat /
+        # înlocuit panouri între scanare şi scriere) NU e suprascris cu lista veche, filtrată, şi
+        # nici layout-ul lui nou nu e şters. Rândul schimbat e reluat la următorul ciclu al reaper-ului.
         if len(keep) < 2:
-            await db.execute("DELETE FROM split_views WHERE id=?", r["id"])
+            hit = await db.execute_returning(
+                "DELETE FROM split_views WHERE id=? AND panes IS ? RETURNING id", r["id"], r["panes"])
         else:
-            await db.execute("UPDATE split_views SET panes=?, layout='', sizes='', updated=? WHERE id=?",
-                             json.dumps(keep), time.time(), r["id"])
+            hit = await db.execute_returning(
+                "UPDATE split_views SET panes=?, layout='', sizes='', updated=? WHERE id=? AND panes IS ?"
+                " RETURNING id", json.dumps(keep), time.time(), r["id"], r["panes"])
+        if hit:
+            changed += 1
     return changed
 
 

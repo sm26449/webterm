@@ -6560,6 +6560,8 @@ async def create_split_view(body: SplitViewIn, user=Depends(security.require_use
     name = (body.name or "").strip()[:80]
     if not name:
         raise ApiError(400, "splitview.noName", "a split view needs a name")
+    # Verificare rapidă (răspuns clar fără validarea panourilor); plafonul REAL e atomic, în
+    # INSERT-ul de mai jos — două POST-uri concurente nu mai trec amândouă de COUNT (review 3.6.12).
     n = await db.fetchone("SELECT COUNT(*) AS n FROM split_views WHERE user_id=?", user["id"])
     if n and n["n"] >= SPLIT_MAX_PER_USER:
         raise ApiError(400, "splitview.tooMany", "too many split views — delete one first")
@@ -6574,11 +6576,18 @@ async def create_split_view(body: SplitViewIn, user=Depends(security.require_use
         elif sizes is not None:
             ratio = _split_ratio(sizes[0])
     now = time.time()
-    new_id = await db.execute(
+    # INSERT…SELECT…WHERE COUNT < plafon: o singură instrucţiune serializată de SQLite, deci
+    # plafonul ţine şi sub POST-uri concurente (fără RETURNING → niciun rând inserat → refuz).
+    ins = await db.execute_returning(
         "INSERT INTO split_views(user_id, name, panes, ratio, layout, sizes, broadcast, position,"
-        " created, updated) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        " created, updated) SELECT ?,?,?,?,?,?,?,?,?,?"
+        " WHERE (SELECT COUNT(*) FROM split_views WHERE user_id=?) < ? RETURNING id",
         user["id"], name, json.dumps(panes), ratio, layout, json.dumps(sizes) if sizes else "",
-        1 if body.broadcast else 0, _split_position(body.position or 0), now, now)
+        1 if body.broadcast else 0, _split_position(body.position or 0), now, now,
+        user["id"], SPLIT_MAX_PER_USER)
+    if not ins:
+        raise ApiError(400, "splitview.tooMany", "too many split views — delete one first")
+    new_id = ins["id"]
     return await _split_view_out(user, await db.fetchone("SELECT * FROM split_views WHERE id=?", new_id))
 
 
@@ -6635,7 +6644,10 @@ async def update_split_view(sv_id: int, body: SplitViewIn, user=Depends(security
     if sets:
         sets.append("updated=?"); vals.append(time.time())
         await db.execute("UPDATE split_views SET %s WHERE id=?" % ", ".join(sets), *vals, sv_id)
-    return await _split_view_out(user, await db.fetchone("SELECT * FROM split_views WHERE id=?", sv_id))
+    row = await db.fetchone("SELECT * FROM split_views WHERE id=? AND user_id=?", sv_id, user["id"])
+    if not row:     # şters între timp (DELETE concurent / prune) → 404, nu 500
+        raise ApiError(404, "splitview.missing", "no such split view")
+    return await _split_view_out(user, row)
 
 
 @router.delete("/api/split-views/{sv_id}")
