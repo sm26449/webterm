@@ -57,11 +57,17 @@ export class CommandTracker {
   private promptCol = 0
   private pendingText: string | null = null  // textul comenzii, dacă shell-ul ni-l trimite (E)
   private current: Command | null = null
-  /** shell integration văzută vreodată în panoul ăsta (orice marcaj OSC 133, live SAU rejucat);
-      supravieţuieşte lui reset() — un panou nu-şi pierde shell integration la o reconectare */
+  /** shell integration văzută în panoul ăsta: un marcaj B (sfârşit de prompt), live SAU rejucat.
+      Doar B contează (review final 3.6.12): o integrare care emite numai A/C/D nu ne arată niciodată
+      linia tastată, deci n-ar ieşi din „linie necunoscută" — dialog la fiecare Enter difuzat.
+      Supravieţuieşte lui reset() — un panou nu-şi pierde shell integration la o reconectare. */
   private integratedFlag = false
   /** după reset() (replay de istoric) nu ştim linia tastată până la următorul B live */
   private staleFlag = false
+  /** ultimul marcaj (A/B/C/D) din istoricul rejucat de la ultimul reset(); null după un marcaj live.
+      C fără D după el = la momentul replay-ului rula o comandă (ssh, `sudo -i`, un REPL): Enter-ul
+      merge la acel program, nu la prompt — linia e „cunoscută" (review final 3.6.12). */
+  private replayLast: string | null = null
   commands: Command[] = []
   onChange?: () => void
   /** fire-uit o dată per comandă finalizată (pt. istoricul global) */
@@ -86,17 +92,20 @@ export class CommandTracker {
     this.promptCol = 0
     this.pendingText = null
     this.staleFlag = true
+    this.replayLast = null
     this.onChange?.()
   }
 
   /** Un marcaj OSC 133 din istoricul REJUCAT: nu e activitate live (îl ignorăm), dar dovedeşte că
       shell-ul are integration — deci „nu sunt la prompt" după replay înseamnă „nu ştiu", nu „fără
       integration" (re-review 3.6.12, M1). */
-  noteReplayedMark(): void {
-    this.integratedFlag = true
+  noteReplayedMark(data: string): void {
+    const kind = data.split(';')[0]
+    if (kind === 'B') this.integratedFlag = true
+    if (kind === 'A' || kind === 'B' || kind === 'C' || kind === 'D') this.replayLast = kind
   }
 
-  /** shell integration văzută (live sau în replay) */
+  /** shell integration văzută (un B, live sau în replay) */
   get integrated(): boolean {
     return this.integratedFlag
   }
@@ -114,6 +123,10 @@ export class CommandTracker {
     if (!this.integratedFlag) return true
     if (this.current !== null) return true                    // rulează ceva: Enter-ul merge la program
     if (this.term.buffer.active.type === 'alternate') return true   // TUI: Enter-ul nu e o linie de shell
+    // replay-ul s-a oprit într-o comandă pornită (C fără D): ssh / `sudo -i` / REPL pornite înainte
+    // de replay nu emit prompturi ale shell-ului nostru — fără asta ar cere confirmare la nesfârşit.
+    // Un prompt inactiv după replay (ultimul marcaj A/B/D) rămâne necunoscut: fail-closed.
+    if (this.staleFlag && this.replayLast === 'C') return true
     return !this.staleFlag && this.promptRow !== null
   }
 
@@ -177,10 +190,13 @@ export class CommandTracker {
     // deci markerele ar fi invalide, iar „cursorul" nu are legătură cu istoricul.
     // Ignorăm complet — comanda care a pornit TUI-ul se închide normal la D,
     // pentru că D vine după ce shell-ul a revenit pe ecranul principal.
-    this.integratedFlag = true
+    const [kind, ...rest] = data.split(';')
+    if (kind === 'B') this.integratedFlag = true
+    // un marcaj LIVE: starea de după replay nu mai e ultimul cuvânt (ex. D live după C rejucat →
+    // linia redevine necunoscută până la B)
+    this.replayLast = null
     if (this.term.buffer.active.type === 'alternate') return
 
-    const [kind, ...rest] = data.split(';')
     switch (kind) {
       case 'A':                    // început de prompt
         break

@@ -8,7 +8,7 @@ import { modeRestoreSeq } from '../lib/termmodes'
 import { errText, api, CommandGuard, CommandRule, Host, Session, withStepup } from '../lib/api'
 import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
 import { Command, CommandTracker, cmdDuration, matchCommandRule } from '../lib/commands'
-import { ECHO_GRACE_MS, PeerState, PeerVerdict, isBareEnter, judgePeers, splitLines, submitsLine, unbracket } from '../lib/broadcastGuard'
+import { ECHO_GRACE_MS, PeerState, PeerVerdict, RuleHit, isBareEnter, judgePeers, runDecision, splitLines, stripControls, submitsLine, unbracket } from '../lib/broadcastGuard'
 import { clearCwd, parseOsc7, setCwd } from '../lib/cwd'
 import { FONT_STORAGE_KEY, preferredFont, setPreferredFont } from '../lib/font'
 import { extractUrls } from '../lib/urls'
@@ -324,11 +324,15 @@ export default function SessionView(props: {
   // deci mereu proaspăt, fără să atingem ciclul de viaţă al terminalului.
   const tRef = useRef(t)
   tRef.current = t
+  // numele panoului în dialogul guardrail-ului broadcast (ce panou ar rula linia)
+  const paneLabelRef = useRef('')
+  paneLabelRef.current = title || props.host?.name || ''
   // `unknown` = broadcast cu un panou-ţintă neverificabil (pauză / fără ecou încă) — nu o regulă;
   // `run` = ce pleacă la „Rulează" (implicit Enter; un snippet multi-linie îşi trimite textul)
-  // `recheck` (doar la `unknown`) = verdictul refăcut la click: o linie care între timp atinge o
-  // regulă trece în dialogul regulii, nu rulează (re-review 3.6.12, L-e)
-  const [cmdConfirm, setCmdConfirm] = useState<{ cmd: string; pattern: string; unknown?: boolean; run?: string; recheck?: () => PeerVerdict } | null>(null)
+  // `hits` (broadcast) = TOATE liniile care ating o regulă, cu panourile lor — dialogul le arată pe toate;
+  // `recheck` (broadcast) = verdictul refăcut la „Rulează", pe ORICE dialog: Enter-ul pleacă doar dacă
+  // e ok sau acelaşi set de confirmări văzut, altfel escaladează (review final 3.6.12, M; L-e)
+  const [cmdConfirm, setCmdConfirm] = useState<{ cmd: string; pattern: string; unknown?: boolean; run?: string; hits?: RuleHit[]; recheck?: () => PeerVerdict } | null>(null)
   const [guardMsg, setGuardMsg] = useState<string | null>(null)
   // confirm()/alert() native → dialoguri proprii + toast-uri (vezi lib/confirm.tsx: de ce)
   const { confirm } = useConfirm()
@@ -807,28 +811,30 @@ export default function SessionView(props: {
       // după un replay (ataşare / reconectare / reluare) linia unui shell cu integration e
       // necunoscută până la următorul prompt live (re-review 3.6.12, M1)
       known: tr ? tr.lineKnown() : true,
+      label: paneLabelRef.current || session.id.slice(0, 8),
     }
-  }, [])
+  }, [session.id])
   /** regula atinsă: block → Ctrl+U în toate panourile-ţintă + mesaj; confirm → dialog */
-  const applyRule = (rule: CommandRule, cmd: string, run?: string) => {
+  const applyRule = (rule: CommandRule, cmd: string, run?: string, hits?: RuleHit[], recheck?: () => PeerVerdict) => {
     if (rule.action === 'block') {
       if (!run) sendAll('\x15')   // un text reţinut n-a fost tastat: nu e nimic de şters
       setGuardMsg(tRef.current('session.blockedByGuardrail', { cmd: cmd.slice(0, 70), pattern: rule.pattern }))
       window.setTimeout(() => setGuardMsg((m) => (m && m.includes(cmd.slice(0, 70)) ? null : m)), 4000)
     } else {
-      setCmdConfirm({ cmd, pattern: rule.pattern, run })
+      setCmdConfirm({ cmd, pattern: rule.pattern, run, hits, recheck })
     }
   }
   /** Panourile-ţintă ale unui broadcast (inclusiv originea): true = trimite acum; false = reţinut
       (regulă / dialog „nu pot verifica" / aşteptăm ecoul — atunci `onOk` rulează singur dacă
       verificarea trece). Apelantul a verificat deja că NU e o aşteptare în curs. */
   const checkPeers = (lineOf: ((p: string | null) => string | null) | undefined, onOk: () => void,
-    originCmd: string, run?: string): boolean => {
+    originCmd: string, run?: string, extra: string[] = []): boolean => {
     const verdict = (final: boolean) =>
-      judgePeers([paneState(), ...(peerStatesRef.current?.(session.id) ?? [])], commandGuardRef.current, final, lineOf)
+      judgePeers([paneState(), ...(peerStatesRef.current?.(session.id) ?? [])], commandGuardRef.current, final, lineOf, extra)
+    const recheck = () => verdict(true)
     const settle = (v: PeerVerdict, queued: (string | Uint8Array)[] = []) => {
-      if (v.kind === 'rule') applyRule(v.rule, v.cmd, run)
-      else if (v.kind === 'unknown') setCmdConfirm({ cmd: originCmd, pattern: '', unknown: true, run, recheck: () => verdict(true) })
+      if (v.kind === 'rule') applyRule(v.rule, v.cmd, run, v.hits, recheck)
+      else if (v.kind === 'unknown') setCmdConfirm({ cmd: originCmd, pattern: '', unknown: true, run, hits: v.hits, recheck })
       // tastele de după Enter nu mai pleacă orbeşte (dialog / blocare) — dar nici în tăcere
       if (queued.length) {
         setInputNotice(tRef.current('session.queuedNotSent', { count: queued.length }))
@@ -862,8 +868,11 @@ export default function SessionView(props: {
     if (submitWaitRef.current) { submitWaitRef.current.push(seq); return false }
     const cmd = trackerRef.current?.pendingCommand() ?? null
     const rule = cmd ? matchCommandRule(cmd, commandGuardRef.current) : null
-    if (rule && cmd) { applyRule(rule, cmd); return false }
-    if (!broadcastingRef.current || readOnlyRef.current) return true
+    const bc = broadcastingRef.current && !readOnlyRef.current
+    // broadcast: doar un BLOCK local scurtcircuitează; un confirm local trece prin judgePeers (originea
+    // e şi ea ţintă), ca dialogul să nu ascundă un block / o linie neverificabilă din alt panou
+    if (rule && cmd && (!bc || rule.action === 'block')) { applyRule(rule, cmd); return false }
+    if (!bc) return true
     return checkPeers(undefined, () => sendAll(seq), cmd ?? '')
   }
   /** Un chunk de input care conţine Enter-uri dar NU e un Enter gol: commit IME („ls\r"), paste,
@@ -871,16 +880,19 @@ export default function SessionView(props: {
       broadcast, în fiecare panou (prima linie lipită de linia LUI). Un chunk reţinut nu e tastat
       deloc; „Rulează" din dialog îl trimite întreg (re-review 3.6.12, L-d). true = poate pleca. */
   const submitChunk = (d: string): boolean => {
-    const lines = splitLines(unbracket(d))
+    // fără caractere de control: Alt+Enter (`\x1b\r`) = Enter pe linia curentă (review final 3.6.12, L)
+    const lines = splitLines(unbracket(d)).map(stripControls)
     const cur = trackerRef.current?.pendingCommand() ?? ''
     const checked = [cur + lines[0], ...lines.slice(1)]
+    const bc = broadcastingRef.current && !readOnlyRef.current
     for (const raw of checked) {
       const line = raw.trim()
       const rule = line ? matchCommandRule(line, commandGuardRef.current) : null
-      if (rule) { applyRule(rule, line, d); return false }
+      // broadcast: doar un BLOCK scurtcircuitează (vezi checkSubmit); confirmările le adună judgePeers
+      if (rule && (!bc || rule.action === 'block')) { applyRule(rule, line, d); return false }
     }
-    if (!broadcastingRef.current || readOnlyRef.current) return true
-    return checkPeers((p) => ((p ?? '') + lines[0]) || null, () => sendAll(d), cur + lines[0], d)
+    if (!bc) return true
+    return checkPeers((p) => ((p ?? '') + lines[0]) || null, () => sendAll(d), cur + lines[0], d, lines.slice(1))
   }
   /** Input-ul utilizatorului (tastatură via onData, keybar, rejucarea celui reţinut): local +
       broadcast. Un Enter „gol" care NU a trecut prin keydown (IME pe mobil, keybar) trece şi el
@@ -912,7 +924,7 @@ export default function SessionView(props: {
         return
       }
       if (broadcastingRef.current && !readOnlyRef.current
-        && !checkPeers((p) => ((p ?? '') + lines[0]) || null, () => sendAll(body), cur + lines[0], body)) return
+        && !checkPeers((p) => ((p ?? '') + lines[0]) || null, () => sendAll(body), cur + lines[0], body, lines.slice(1))) return
     }
     send(body)
     broadcastOut(body)
@@ -1127,7 +1139,7 @@ export default function SessionView(props: {
       // istoricul rejucat nu e activitate live — dar dovedeşte shell integration: după replay,
       // „nu e la prompt" = linie necunoscută, nu „fără integration" (re-review 3.6.12, M1)
       if (!replayRef.current) tracker.handle(data)
-      else tracker.noteReplayedMark()
+      else tracker.noteReplayedMark(data)
       return true
     })
     // OSC 7: directorul curent raportat de shell la fiecare prompt. Îl ținem în
@@ -2736,7 +2748,7 @@ export default function SessionView(props: {
             <div className="w-full max-w-md rounded-xl bg-ink-900 p-4 ring-1 ring-ink-700 shadow-2xl">
               <div id="wt-guard-title" className="wt-warn flex items-center gap-2 text-sm font-semibold"><ShieldIcon />
                 {' '}{cmdConfirm.unknown ? t('session.peerUnknownTitle') : t('session.dangerousCommand')}</div>
-              {cmdConfirm.cmd && (
+              {cmdConfirm.cmd && !cmdConfirm.hits?.length && (
                 <div className="mt-2 rounded-md bg-ink-950 px-3 py-2 font-mono text-compact text-slate-200 break-all ring-1 ring-ink-800">
                   {cmdConfirm.cmd}
                 </div>
@@ -2744,9 +2756,25 @@ export default function SessionView(props: {
               {/* regula care a prins comanda — fleet şi panourile o arătau deja; fără ea nu ştiai
                   DE CE e „periculoasă" şi nici ce regulă să ajustezi în Setări → Securitate */}
               <div id="wt-guard-desc" className="mt-2 text-xs text-slate-400">
-                {cmdConfirm.unknown ? t('session.peerUnknownDesc') : (<>
+                {cmdConfirm.unknown ? t('session.peerUnknownDesc') : cmdConfirm.hits?.length ? t('session.guardLinesIntro') : (<>
                   <span className="break-all font-mono text-slate-300">{t('session.guardRule', { pattern: cmdConfirm.pattern })}</span>
                   {' · '}{t('session.sureToRun')}
+                </>)}
+                {/* broadcast: FIECARE linie distinctă care atinge o regulă, cu panourile ei (review final 3.6.12) */}
+                {!!cmdConfirm.hits?.length && (<>
+                  {cmdConfirm.unknown && <div className="mt-2">{t('session.guardLinesIntro')}</div>}
+                  <ul className="mt-2 max-h-48 space-y-1.5 overflow-y-auto">
+                    {cmdConfirm.hits.map((h) => (
+                      <li key={`${h.rule.pattern}\u0000${h.cmd}`} className="rounded-md bg-ink-950 px-3 py-2 ring-1 ring-ink-800">
+                        <div className="font-mono text-compact text-slate-200 break-all">{h.cmd}</div>
+                        <div className="mt-0.5 break-all">
+                          <span className="font-mono text-slate-300">{t('session.guardRule', { pattern: h.rule.pattern })}</span>
+                          {' · '}{t('session.guardInPanes', { panes: h.panes.join(', ') })}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                  {!cmdConfirm.unknown && <div className="mt-2">{t('session.sureToRunAll')}</div>}
                 </>)}
               </div>
               <div className="mt-4 flex justify-end gap-2">
@@ -2763,12 +2791,15 @@ export default function SessionView(props: {
                 >{cmdConfirm.unknown || cmdConfirm.run ? t('common.cancel') : t('session.cancelClear')}</button>
                 <Button variant="danger"
                   onClick={() => {
-                    // „nu pot verifica": verdictul se reface ACUM — o linie care între timp a primit
-                    // ecou şi atinge o regulă trece în dialogul / blocarea regulii (re-review, L-e)
-                    const v = cmdConfirm.unknown ? cmdConfirm.recheck?.() : undefined
+                    // broadcast, ORICE dialog: verdictul se reface ACUM; Enter-ul pleacă doar dacă e ok
+                    // sau exact setul de confirmări văzut. Altfel escaladare: block → blocare, alt set →
+                    // dialog nou, panou neverificabil → „nu pot verifica" (review final 3.6.12, M; L-e)
+                    const c = cmdConfirm
+                    const v = c.recheck?.()
                     setCmdConfirm(null)
-                    if (v?.kind === 'rule') applyRule(v.rule, v.cmd, cmdConfirm.run)
-                    else sendAll(cmdConfirm.run ?? '\r')
+                    if (!v || runDecision(v, c.hits ?? [], !!c.unknown) === 'send') sendAll(c.run ?? '\r')
+                    else if (v.kind === 'rule') applyRule(v.rule, v.cmd, c.run, v.hits, c.recheck)
+                    else setCmdConfirm({ cmd: c.cmd, pattern: '', unknown: true, run: c.run, hits: v.kind === 'ok' ? [] : v.hits, recheck: c.recheck })
                     termRef.current?.focus()
                   }}>
                   {cmdConfirm.unknown ? t('session.runInAllPanes') : t('session.run')}</Button>

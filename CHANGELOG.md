@@ -99,7 +99,16 @@ none of it reconnects a terminal. No agent change (agent stays 58).
   multi-line paste is checked line by line in every pane, "Paste & run" no longer starts a second
   wait on top of a running one, keys typed during a wait that ends in a dialog are reported instead
   of dropped silently, the wait timer is cleared when a pane closes, and a pane drag left open by a
-  vanished source expires.
+  vanished source expires. Final review: a "confirm" rule on your own line no longer hides the other
+  panes — with `sudo reboot` recalled here and `rm -rf …` (block) or an unseen line in another pane,
+  "Run" used to send Enter everywhere. Every pane is now judged first: a block anywhere wins, an
+  unreadable pane turns the dialog into "Can't check every pane" (showing the rule hits), and the
+  dialog lists every line that matches a rule with the panes it would run in. "Run" on any broadcast
+  dialog judges the panes again and runs only if nothing changed; otherwise you get the block or a
+  fresh dialog. To keep the guardrail from nagging: a shell counts as integrated only once it
+  printed a prompt-end mark, and a pane whose replayed history ends inside a running command (ssh,
+  `sudo -i`, a REPL) is treated as running it, while an idle prompt after a replay still asks.
+  `Alt+Enter` is checked as Enter on the typed line, not "line + ESC".
 
 ## [3.6.11] — 2026-10-14 · agent (58)
 

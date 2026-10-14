@@ -199,12 +199,19 @@ closed (review of 3.6.12, `lib/broadcastGuard.ts`), when guardrail rules are act
 - after **any history replay** (attach, reconnect, a phone pane resumed when broadcast turns on) the
   OSC 133 tracker starts over and the replayed marks are ignored, so a pane's typed line is unknown
   until its shell prints the next **live** prompt — a command recalled with `↑` before the
-  reconnect is on that line, unseen. A pane whose shell has integration (any OSC 133 mark seen, live
-  or replayed — the flag survives the reset), runs no command and is on the main screen, but is
-  stale or not at a prompt, counts as **unknown**: Enter waits up to 150 ms, then asks for the same
+  reconnect is on that line, unseen. A pane whose shell has integration (a `B` prompt-end mark
+  seen, live or replayed — the flag survives the reset; an integration that only emits `A`/`C`/`D`
+  never shows the typed line and is treated as none, so it can't cause a permanent dialog), runs no
+  command and is on the main screen, but is stale or not at a prompt, counts as **unknown**: Enter waits up to 150 ms, then asks for the same
   confirmation. The first confirmed Enter makes the shell print a live prompt and the pane is
-  checked normally again. A pane that never showed a mark (no shell integration) is passed as
-  before — nothing can be read there, exactly like the origin pane without integration;
+  checked normally again. A pane that never showed a `B` mark (no shell integration) is passed as
+  before — nothing can be read there, exactly like the origin pane without integration. If the
+  **last replayed mark is `C` with no `D` after it**, the pane was running a command when the
+  history was captured (ssh, `sudo -i`, a REPL started before the replay): Enter goes to that
+  program, so the pane counts as running (known) — otherwise it would prompt forever, since such a
+  program never prints our shell's prompt. The next live mark ends that assumption (a live `D`
+  makes the line unknown again until the `B`). An idle prompt after a replay (last replayed mark
+  `A`/`B`/`D`) stays unknown — fail closed;
 - a target pane at a shell prompt whose last keys have **not echoed back yet** (latency: `↑` may
   have recalled a command nobody has seen) makes Enter wait up to **150 ms** for the echo, then
   decide; still no echo → the same confirmation. Keys typed during the wait are queued and sent
@@ -217,20 +224,42 @@ closed (review of 3.6.12, `lib/broadcastGuard.ts`), when guardrail rules are act
   shortens the wait — the line that is then judged is still the one the tracker reads from the
   screen — and a pane whose line can't be read at all is handled by the "unknown" rule above, not
   by the echo test;
-- a rule that matches any pane's line still wins (block / confirm, as before). The "Run in all
-  panes" button of the "Can't check" dialog judges every pane again at click time: a line that
-  echoed in the meantime and matches a rule switches to that rule's dialog (or block);
+- **every target is judged before anything is decided** (final review of 3.6.12): while
+  broadcasting, only a **block** rule on the origin's own line short-circuits; a confirm rule there
+  goes through the same judgement as the other panes. Then: a **block** in any pane wins (the line
+  is cleared everywhere); otherwise any paused / unknown / un-echoed pane → wait, then "Can't check
+  every pane", **carrying the confirm hits** so the dialog shows them too; only when every pane is
+  readable does a confirm hit give the rule dialog. Before this, a confirm on the origin's line
+  (`sudo reboot`) was answered on its own and "Run" sent Enter to a pane whose line was `rm -rf …`
+  (block) or unseen. The rule dialog lists **every distinct line** that matches a rule, with the
+  panes it would run in (the following lines of a multi-line paste / snippet are judged in every
+  pane too);
+- **"Run" on any broadcast dialog** (rule or "Can't check") judges every pane again at click time
+  and sends only if the result is ok or exactly the confirm set the user saw (for "Can't check",
+  also an unknown with that same set — the user accepted the unreadable panes). Anything else
+  escalates: a block → the block notice, a different confirm set (a pane's line changed) → a new
+  dialog, a pane that became unreadable → "Can't check every pane". Without broadcast the
+  single-pane dialog is unchanged;
 - panes whose keys don't reach the host at all (watch-only, ended, socket closed) are not targets.
 
 Every path that can submit a line goes through the same check: the keyboard Enter / `Ctrl+J`, a
 bare Enter that arrives without a keydown (mobile IME, keybar), any other input chunk that contains
 a line break (an IME commit such as `ls⏎`, `Alt+Enter`, a pasted text — each line checked, the
-first one appended to what is already typed in each pane), "Paste & run" from the paste history
+first one appended to what is already typed in each pane; control characters and ESC sequences are
+stripped from the checked lines, so `Alt+Enter` (`\x1b\r`) is Enter on the typed line, not
+"line + ESC"), "Paste & run" from the paste history
 (its Enter takes the same queued path as a typed Enter, so it never starts a second wait), and snippets / palette inserts (typed into every
 pane when broadcasting; one containing a line break is checked line by line — the first line
 appended to what is already typed — and not typed at all if a line matches). "Run again" types the
 command into every pane without Enter. A pasted text whose line ends with a bare CR (`cmd\r`) hits
 the multi-line paste guard like LF. A watch-only pane broadcasts nothing (its keys go nowhere).
+
+**Known residual, planned for 3.6.13:** the replay tail is a byte window of the pane's history. If
+that window holds **no OSC 133 mark at all** (a long command output pushed every mark out of it), a
+pane whose shell does have integration looks like a pane without it after a reconnect, and its line
+is passed unchecked until the shell's next live prompt. The fix is a gateway-side flag: the hub
+scans the session's output for `]133;` and sends "integration seen" in the `init` message, so the
+tracker knows it before the replay. Not done in 3.6.12 (it touches the gateway protocol).
 
 ## Data model (DB)
 
