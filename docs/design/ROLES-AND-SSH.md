@@ -1493,8 +1493,8 @@ User guide: [docs/SSO.md → SCIM provisioning](../SSO.md#scim-provisioning-3611
   `scim_external_id` (unique), `scim_user_name`, `scim_display_name`. A create matches an existing
   row by `scim_external_id`, by `sso_subject == externalId`, and by email; more than one distinct
   row → 400 `invalidValue`; a row with a local password (`ssomap.has_local_password`) → 403
-  (break-glass, never managed); a row already linked → 409 (the IdP then finds it with
-  `filter=userName eq`). New rows:
+  (break-glass, never managed); a row already linked → 409 only when the IdP's
+  `filter=userName eq` search then finds it, else 400 (final re-review, below). New rows:
   random argon2 hash, `local_password=0`. The OIDC callback links an unlinked SCIM row whose
   `scim_external_id` equals `sub` before the email-adoption path (which still needs
   `email_verified`).
@@ -1565,8 +1565,8 @@ User guide: [docs/SSO.md → SCIM provisioning](../SSO.md#scim-provisioning-3611
   `externalId` refusal detail says the whole request is refused, re-activation included (a person
   re-created in the IdP stays disabled until an Owner deletes the old account — fail closed, not
   loosened). A POST whose `externalId` matches a row's `sso_subject` but with another email,
-  with `active:false`, now adopts the row under its own email and `externalId`, disables it and
-  warns (as `_guard_identity_or_drop`) — after the local-password, already-provisioned and
+  with `active:false`, now disables the row and warns (second re-review: by adopting it under its
+  own email; final re-review: in place, never adopted — below) — after the local-password, already-provisioned and
   Owner-level checks (the Owner-level check now runs before the email check) and the last-Owner
   precheck. The dropped-identity audit row is throttled with the alert (once an hour per account:
   WebTerm answers with the old identity, so Authentik re-sends the change at every full sync).
@@ -1576,6 +1576,29 @@ User guide: [docs/SSO.md → SCIM provisioning](../SSO.md#scim-provisioning-3611
   /api/enroll-groups` (a badge in Settings → Infrastructure & tokens) and by the System health
   check `tokens.enroll_orphans` (warning, recommendation, jump to the list) — never revoked
   automatically.
+- **Final re-review fixes (before release):** "already provisioned" is a 409 only when the
+  matched row's `scim_user_name` equals the incoming `userName` (case-insensitive) AND the row is
+  listable by `list_users` (`scim._LISTABLE_SQL` / `_listable`, one predicate) — i.e. exactly when
+  Authentik's follow-up `userName eq "<incoming>"` search finds it; a row matched by email or
+  `sso_subject` under another userName (two IdP users sharing an email, a renamed userName with a
+  lost link) → 400 `invalidValue` "already linked to another identity-provider user". The create
+  race with an SSO sign-in (`IntegrityError`) → 503 + `Retry-After: 30` (Authentik: transient,
+  per-object warning; the next sync adopts the row) — the SSO row is not listable, so a 409 would
+  abort the page. A POST with `active:false` whose `externalId` matches a row SCIM did not create
+  but whose email differs no longer ADOPTS it (the response carried the account's email, and a PUT
+  with that email + `active:true` then re-enabled it under SCIM — knowing only the `sub` was
+  enough): after the local-password, Owner-level and last-Owner checks the row is disabled IN
+  PLACE (`accounts.disable(by='scim-identity')`; no `scim_managed` / `scim_id` / `externalId`
+  change), the answer is 400 `invalidValue` with no resource and no email, audit + warning alert
+  (`scim_disabled_unlinked`) once an hour per account. `scim-identity` is not `scim*`:
+  `_enable_check` refuses it (only an Owner re-enables, Settings or `app.admin enable`), and
+  `accounts.disable` never moves it back (it may move `scim`/`scim-delete` → `scim-identity`, never
+  the reverse). Group member lists use the same listable predicate. `_refuse` writes its audit row
+  once an hour per (method, resource or POSTed identity, status, detail) — Authentik retries a
+  permanent refusal at every sync (the status panel's last error is still updated each time).
+  provision's user filter now starts with `wt-scim-exclude` (`raise SkipObject`; harmless when the
+  group does not exist), so a re-run keeps it. System health's `tokens.enroll_orphans` shows a
+  count only (no token names — `/api/health` readers may not see enrollment tokens).
 - **Audit.** Every change the IdP makes (and every refused write) is an `audit_log` row with
   `actor = scim`, `via = scim`; no-op re-syncs (Authentik's periodic full sync) write nothing.
   The status panel reads `scim_last_request` (throttled, 30 s) and `scim_last_error`.

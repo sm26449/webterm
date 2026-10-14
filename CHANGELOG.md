@@ -137,9 +137,9 @@ membership to WebTerm at once; plus a KDE Plasma (Breeze) theme style. No agent 
     docs/SSO.md: how to keep break-glass and Owner accounts out of the provider's scope.
   - *A person deactivated in the IdP stayed enabled when their email had also been renamed there
     and SCIM had never linked their account.* Why: the first push matched the account by its SSO
-    identity, saw another email and refused it all. With `active:false` the account is now taken
-    over under its own email, disabled and a warning goes out; the Owner, break-glass and
-    last-Owner checks still run first.
+    identity, saw another email and refused it all. With `active:false` the account is now
+    disabled (in place, not handed to SCIM — see the final re-review below) and a warning goes
+    out; the Owner, break-glass and last-Owner checks still run first.
   - *A refused identity change wrote an audit row at every full sync.* Now once an hour per
     account, like its alert.
   - *Deleting or disabling an account revoked automation tokens by email too* — including another
@@ -150,6 +150,27 @@ membership to WebTerm at once; plus a KDE Plasma (Breeze) theme style. No agent 
   - A person re-created in the IdP (new `externalId`) stays disabled in WebTerm until an Owner
     deletes the old account — on purpose (fail closed); the error now says so, and docs/SSO.md
     explains it.
+- **Final re-review of SCIM: no page-aborting 409 is left, and the SCIM token cannot take over an
+  account it only knows the SSO identity of.**
+  - *Two IdP users sharing an email (or a renamed userName whose link Authentik lost) still got a
+    409 "already provisioned"* — Authentik's follow-up search by the new userName found nothing
+    and aborted the sync page. 409 now only when that search finds the account; otherwise 400
+    "already linked to another identity-provider user", a per-user warning. The rare create race
+    with an SSO sign-in is a 503 + `Retry-After` (Authentik retries at its next sync) instead of
+    a 409.
+  - *Whoever held the SCIM token and knew only a person's SSO `sub` could take over their
+    account.* A create with that `sub`, another email and `active:false` adopted the account,
+    answered with its real email, and a second request with that email and `active:true`
+    re-enabled it under SCIM. Now such an account is disabled where it is — never linked to SCIM —
+    and the answer is a 400 that names no email. Only an Owner can re-enable it (Settings → Users
+    & roles shows why it was disabled); the IdP cannot, whatever it sends later. Audited and
+    alerted (warning) once an hour.
+  - *Each refused SCIM request wrote an audit row at every sync.* Now once an hour per user and
+    reason.
+  - provision's SCIM user filter starts with the `wt-scim-exclude` group, so re-running provision
+    keeps it. docs/SSO.md: put only accounts SCIM must never manage there — an already linked user
+    in it no longer has their deactivation pushed.
+  - System health's "enrollment tokens without a creator" shows how many, no longer their names.
 - The SCIM token is powerful — documented: its holder can create an account bound to their own IdP
   identity and put it in any pushed group, reaching every mapped role except Owner. Keep it in the
   IdP only and rotate it like an Admin password.
