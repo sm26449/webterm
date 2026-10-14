@@ -168,9 +168,9 @@ without OIDC WebTerm refuses SCIM requests (403).
 
 | The IdP does | WebTerm does |
 |---|---|
-| creates a user | creates an **SSO-only** account (no local password; no role until a mapped group gives one). An existing SSO-only account with the same email (and, if it is already linked to SSO, whose `sub` equals the IdP's `externalId`) is **adopted** instead of duplicated — a critical alert says so. An `externalId` that matches an account's `sub` but comes with another email is refused (409). |
+| creates a user | creates an **SSO-only** account (no local password; no role until a mapped group gives one). An existing SSO-only account with the same email (and, if it is already linked to SSO, whose `sub` equals the IdP's `externalId`) is **adopted** instead of duplicated — a critical alert says so. An `externalId` that matches an account's `sub` but comes with another email is refused (409). A user the IdP sends as **inactive** (`active: false`) that matches no WebTerm account is **not created** (400 `invalidValue`, audited at most once an hour per email, no alert) — it is created when the IdP activates it. |
 | changes email / username / name | updates the account. The **email** only of accounts SCIM *created* — never of an account it adopted, nor of one holding an Owner-level role given in WebTerm (409 `mutability`); an email another account already uses → 409 |
-| deactivates a user (`active: false`) | **disables** the account at once: web sessions deleted, open terminals and forwards closed, automation tokens **revoked**, live shares and replay links revoked, no permission left. Nothing is deleted: audit history, role bindings and passkeys stay for a re-enable. |
+| deactivates a user (`active: false`) | **disables** the account at once: web sessions deleted, open terminals and forwards closed, automation tokens **revoked**, live shares and replay links revoked, no permission left. Nothing is deleted: audit history, role bindings and passkeys stay for a re-enable. A refused email / `externalId` change never blocks a deactivation: when the same request carries both (Authentik sends the whole user), the account is disabled, the identity change is ignored, audited and alerted (warning, once an hour per account). Without `active: false` the refused change stays a 409. |
 | reactivates a user (`active: true`) | re-enables a SCIM-managed account that SCIM disabled; it gets back the roles it had. Not an account WebTerm itself disabled, nor one holding an Owner-level role given in WebTerm (403: an Owner re-enables those) |
 | deletes a user | disables the account **and** unlinks it from SCIM (it stays, disabled, for its history). If the IdP provisions the same person again, the account is adopted and re-enabled. |
 | adds / removes group members, renames or deletes a group | re-runs the [SSO group → role mapping](ROLES.md#sso-group-mapping) for those accounts **immediately**, with the rules of an SSO sign-in |
@@ -188,8 +188,9 @@ What SCIM **never** does — these are refused, audited and shown as the *last e
   The 3.6.2 rule still holds — an account with a local password never receives roles from groups.
 - **take over, disable, delete or re-enable an account holding an Owner-level role given in
   WebTerm** — Owner, or a custom role with an Owner-only permission, granted by hand (not by an SSO
-  group): only an Owner can take an Owner out (§A.5). Adopting it answers 409, the rest 403; each
-  attempt raises a critical alert. Give Owner through an SSO group if the IdP should manage it.
+  group): only an Owner can take an Owner out (§A.5). Adopting it answers 409, the rest 403; a
+  critical alert goes out (at most once an hour per account and action — the IdP retries at every
+  sync). Give Owner through an SSO group if the IdP should manage it.
 - **disable or delete the last permanent Owner** (403, plus a critical alert). A disabled Owner no
   longer counts towards "the last Owner", but it is still an Owner for who may change its access:
   an Admin cannot edit or delete a disabled Owner.
@@ -278,7 +279,8 @@ sign-in.
 ### Re-enabling a disabled account
 
 - From the IdP: reactivate the user (SCIM-managed accounts that SCIM disabled, without an
-  Owner-level role given in WebTerm).
+  Owner-level role given in WebTerm). An account disabled in WebTerm stays WebTerm's: a SCIM
+  `active:false` or DELETE afterwards does not make it SCIM's to re-enable.
 - In WebTerm: an **Owner** opens the account (Settings → Users & roles → Accounts, marked
   **Disabled**) → **Re-enable** (password + second factor). If the IdP still has the person
   inactive, its next sync disables the account again — fix it there too.
@@ -328,7 +330,8 @@ SCIM (audited).
 | Authentik: `409 … already provisioned` | Authentik lost its link; it searches with `filter=userName eq "…"` and re-links by itself |
 | Authentik: `403 … last permanent Owner` | make another account a permanent Owner first |
 | `429` | too many failed authentications from that IP (wait 15 min) or too many requests |
-| a user is not created | not in a WebTerm group (provision's filter), a service account, or no valid email in the IdP |
+| a user is not created | not in a WebTerm group (provision's filter), a service account, no valid email in the IdP, or inactive in the IdP (Authentik: `400 … inactive in the identity provider` — expected; it is created once activated) |
+| Authentik: `409 … email can only be changed in WebTerm` | the IdP renamed the email of an account SCIM adopted (or one that holds a role given by hand and never signed in with SSO): change it in WebTerm (Settings → Users & roles) or in the IdP back. A deactivation is never blocked by this |
 | roles do not appear | the group name differs from the mapping (exact match), the group is not pushed (filter), the account has a local password, or the role is Owner (granted at the next SSO sign-in only) |
 | where to look | the SCIM panel (last request / last error), the audit log (`via = scim`), gateway logs (`SCIM:`), Authentik's provider sync status |
 

@@ -92,6 +92,27 @@ membership to WebTerm at once. No agent change (agent stays 58).
     enrollment tokens are revoked when their creator is disabled or deleted; automation tokens
     from before creator ids were resolved by email at every use — that resolution is frozen once
     at boot, and a token without a creator id no longer works.
+- **Re-review of the SCIM fixes: a deactivation always goes through, and a sync no longer floods
+  the alerts.**
+  - *An adopted account whose email was renamed in the IdP could never be deactivated by SCIM.*
+    Why: Authentik sends the whole user, so `{new email, active:false}` hit the "email cannot
+    change" refusal first and nothing applied — the person stayed enabled until a DELETE. A
+    refused email / `externalId` change no longer blocks `active:false` (PUT, PATCH or a
+    re-provisioning POST): the account is disabled, the identity change is ignored, audited and
+    alerted. Without a deactivation the refusal stays a 409.
+  - *Disabling an account in WebTerm could be undone by the IdP.* Why: a SCIM `active:false` or
+    DELETE rewrote `disabled_by` to SCIM's own, after which SCIM could re-enable it. The reason now
+    moves only between SCIM's own (`scim` → `scim-delete`).
+  - *A refusal on an Owner-level account raised a critical alert at every sync.* Now once an hour
+    per account and action.
+  - *A group enrollment token from before creator ids was revoked by its creator's email* — so
+    offboarding whoever holds that email now revoked someone else's token. Their creator is
+    resolved once at boot; afterwards only the creator's id revokes them. Tokens whose creator is
+    gone keep working until they expire or an Owner revokes them; the boot log lists them.
+  - *A user inactive in the IdP was created as a (disabled) account*, with a "new account" alert
+    at each one — possible when provision's filter falls back to passing inactive users. Nothing
+    is created now (400, audited at most once an hour); the account appears once the IdP
+    activates the user.
 - The SCIM token is powerful — documented: its holder can create an account bound to their own IdP
   identity and put it in any pushed group, reaching every mapped role except Owner. Keep it in the
   IdP only and rotate it like an Admin password.

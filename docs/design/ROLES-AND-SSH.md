@@ -1537,6 +1537,19 @@ User guide: [docs/SSO.md → SCIM provisioning](../SSO.md#scim-provisioning-3611
   once (`tokens_creator_backfilled`); afterwards a token without a creator id is dead.
   provision's user filter passes a user already pushed (`connection`) or, where the context has
   no `connection`, any inactive user, so a deactivation is always pushed.
+- **Re-review fixes (before release):** an identity refusal (`scim._guard_identity`: email or
+  `externalId` change) never blocks `active:false` — when the request (PUT, PATCH, or the POST
+  of a re-provisioned row) deactivates, the identity attributes are dropped, the rest applies,
+  the drop is audited and alerted (`scim_identity_ignored`, warning, once an hour per account);
+  without `active:false` the 409 stands. A POST with `active:false` matching no row creates
+  nothing: 400 `invalidValue`, audited once an hour per email, no alert. SCIM refusals on
+  Owner-level accounts alert once an hour per (account, action) (`scim._first_this_hour`, bounded
+  table shared with the local-password alert). `accounts.disable` moves `disabled_by` only between
+  `scim` and `scim-delete`, and a SCIM DELETE no longer writes it — a disable done in WebTerm (or of
+  unknown origin) never becomes SCIM's to undo. Group enrollment tokens are revoked by creator id
+  only: `authz.seed` resolves the creator of pre-`created_by_id` rows once from their email
+  (`enroll_creator_backfilled`); an unresolved row (creator gone) keeps working until it expires or
+  an Owner revokes it, and every boot logs it.
 - **Audit.** Every change the IdP makes (and every refused write) is an `audit_log` row with
   `actor = scim`, `via = scim`; no-op re-syncs (Authentik's periodic full sync) write nothing.
   The status panel reads `scim_last_request` (throttled, 30 s) and `scim_last_error`.

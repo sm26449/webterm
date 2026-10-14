@@ -1368,6 +1368,7 @@ const en: Lang = {
     'alertmsg.what.scim_account_adopted': "the identity provider took over the existing account {account} (SCIM): it can now disable it and its groups give its roles",
     'alertmsg.what.scim_owner_refused': "the identity provider tried to {action} {account}, which holds an Owner-level role given in WebTerm; refused",
     'alertmsg.what.scim_local_refused': "the identity provider tried to take over {account}, an account with a local password (break-glass); refused",
+    'alertmsg.what.scim_identity_ignored': "the identity provider deactivated {account} and asked for an identity change WebTerm refuses; the account was deactivated, the change ignored",
     'alertmsg.what.account_reenabled': "account {account} re-enabled ({how})",
     'alertmsg.what.scim_token_created': "SCIM provisioning token created",
     'alertmsg.what.scim_token_rotated': "SCIM provisioning token rotated (the old one stopped working)",

@@ -1390,6 +1390,7 @@ const ro: Lang = {
     'alertmsg.what.scim_account_adopted': "furnizorul de identitate a preluat contul existent {account} (SCIM): acum îl poate dezactiva, iar grupurile lui îi dau rolurile",
     'alertmsg.what.scim_owner_refused': "furnizorul de identitate a încercat să acționeze ({action}) asupra contului {account}, care are un rol de nivel Owner dat în WebTerm; refuzat",
     'alertmsg.what.scim_local_refused': "furnizorul de identitate a încercat să preia {account}, un cont cu parolă locală (break-glass); refuzat",
+    'alertmsg.what.scim_identity_ignored': "furnizorul de identitate a dezactivat {account} și a cerut o schimbare de identitate pe care WebTerm o refuză; contul a fost dezactivat, schimbarea ignorată",
     'alertmsg.what.account_reenabled': "contul {account} a fost reactivat ({how})",
     'alertmsg.what.scim_token_created': "token de provizionare SCIM creat",
     'alertmsg.what.scim_token_rotated': "token de provizionare SCIM rotit (cel vechi nu mai funcționează)",
