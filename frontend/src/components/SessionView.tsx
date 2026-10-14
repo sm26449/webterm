@@ -26,7 +26,7 @@ import ServicesPanel from './ServicesPanel'
 // AI tools se deschide rar (din meniul contextual) → bundle separat, ca FileEditor
 const AiToolsPanel = lazy(() => import('./AiToolsPanel'))
 import ToolboxPanel from './ToolboxPanel'
-import { ArrowDownIcon, ArrowUpIcon, CheckIcon, ChevronIcon, ClockIcon, CloseIcon, CollapseLeftIcon, CopyIcon, DockerIcon, DownloadIcon, ExternalLinkIcon, EyeIcon, FileIcon, FilesIcon, FolderIcon, ForwardIcon, FullscreenIcon, GitBranchIcon, KeyIcon, KeyboardIcon, LockIcon, MenuIcon, MoreIcon, NoteIcon, PasteIcon, PencilIcon, PlayIcon, PopoutIcon, RefreshIcon, SearchIcon, ServicesIcon, ShareIcon, ShieldIcon, SparkleIcon, StopIcon, TerminalPromptIcon, ToolboxIcon, TrashIcon, UploadIcon, WarningIcon } from './Icons'
+import { ArrowDownIcon, ArrowUpIcon, CheckIcon, ChevronIcon, ClockIcon, CloseIcon, CopyIcon, DockerIcon, DownloadIcon, ExternalLinkIcon, EyeIcon, FileIcon, FilesIcon, FolderIcon, ForwardIcon, FullscreenIcon, GitBranchIcon, KeyIcon, KeyboardIcon, LockIcon, MenuIcon, MoreIcon, NoteIcon, PasteIcon, PencilIcon, PlayIcon, PopoutIcon, RefreshIcon, SearchIcon, ServicesIcon, ShareIcon, ShieldIcon, SparkleIcon, StopIcon, TerminalPromptIcon, ToolboxIcon, TrashIcon, UploadIcon, WarningIcon } from './Icons'
 import { Badge, Button, IconButton } from './ui'
 import { MenuUnreadBadge, useUnreadAlerts } from './AlertsPanel'
 import { menuLabel } from '../lib/alerts'
@@ -100,6 +100,12 @@ const SCROLLBACK = (() => {
 })()
 
 
+/** Ce înregistrează un panou de split în App: trimiterea + comanda tastată acum (guardrail). */
+export interface PaneHandle {
+  send: (d: string | Uint8Array) => void
+  pendingCommand: () => string | null
+}
+
 export default function SessionView(props: {
   session: Session
   host?: Host
@@ -110,6 +116,15 @@ export default function SessionView(props: {
   activeInSplit?: boolean         // e panoul ACTIV din split → border-accent
   onSplitView?: () => void        // right-click „Add to split view" (deschide wizard-ul)
   paneActive?: boolean
+  /** panoul se VEDE (în split: toate panourile afişate, nu doar cel focalizat). Lipsă = paneActive.
+      Decide recuperarea rendererului la revenirea tabului — un panou vizibil dar nefocalizat
+      rămânea alb după ce browserul elibera contextul WebGL (3.6.12). */
+  paneVisible?: boolean
+  /** creşte → terminalul primeşte focusul tastaturii (intrarea într-un split, Alt+←/→ între panouri) */
+  focusNonce?: number
+  /** creşte → panoul îşi reclamă dimensiunea ca dispozitiv ACTIV (split montat, formă schimbată,
+      divider eliberat): toate panourile vizibile ale split-ului, nu doar cel focalizat */
+  layoutNonce?: number
   actionTarget?: boolean          // ținta acțiunilor de sesiune (în split = panoul focusat)
   /** false = tab montat dar invizibil: serverul pune fluxul pe pauză
       (economie de trafic); la revenire se face resync automat */
@@ -126,7 +141,6 @@ export default function SessionView(props: {
   onMenu: () => void
   sidebarCollapsed?: boolean
   onPopout?: () => void
-  onSplitClosed?: () => void
   onChanged: () => void
   onDeleted: () => void
   /** hostul-părinte (`via_host_id`) al unei ţinte SSH/telnet-jump — overlay-ul „host offline"
@@ -148,9 +162,12 @@ export default function SessionView(props: {
   commandGuard?: CommandGuard | null
   /** broadcast (grid): înregistrează funcţia de trimitere a acestui panou sus, ca App să poată
       difuza tastele către toate panourile; raportează tastele locale; afişează indicatorul */
-  registerSend?: (sid: string, fn: ((d: string | Uint8Array) => void) | null) => void
+  registerSend?: (sid: string, handle: PaneHandle | null) => void
   onUserData?: (sid: string, d: string | Uint8Array) => void
   broadcasting?: boolean
+  /** broadcast: comenzile tastate (OSC 133) în CELELALTE panouri ale split-ului — guardrail-ul
+      verifică fiecare panou-ţintă, nu doar originea (3.6.12) */
+  peerCommands?: (sid: string) => (string | null)[]
 }) {
   const { session } = props
   const { t } = useI18n()
@@ -217,7 +234,13 @@ export default function SessionView(props: {
   // keep-alive (tab-uri ținute montate): la comutare, terminalul rămas ascuns
   // ar păstra focusul tastaturii — refocalizăm explicit pe cel devenit vizibil
   useEffect(() => {
-    if (props.paneActive) termRef.current?.focus()
+    if (!props.paneActive) return
+    // într-un split, selecţia poate veni din focusul pus de user pe un buton al ACESTUI panou
+    // (Tab până la bara lui / header): nu-i furăm focusul înapoi în terminal (3.6.12)
+    const ae = document.activeElement as HTMLElement | null
+    const pane = rootRef.current?.closest('[data-split-pane]')
+    if (pane && ae && ae !== document.body && pane.contains(ae) && !ae.closest('.xterm')) return
+    termRef.current?.focus()
   }, [props.paneActive])
 
 
@@ -723,6 +746,20 @@ export default function SessionView(props: {
     clearTimeout(flashTimerRef.current)
     flashTimerRef.current = setTimeout(() => setInputFlash(false), 250)
   }, [])
+  // onUserData / peerCommands prin ref: handlerele terminalului sunt capturate la montare, iar un
+  // panou trece din stiva keep-alive în split (şi înapoi) FĂRĂ remontare (3.6.12)
+  const onUserDataRef = useRef(props.onUserData)
+  onUserDataRef.current = props.onUserData
+  const peerCommandsRef = useRef(props.peerCommands)
+  peerCommandsRef.current = props.peerCommands
+  const broadcastingRef = useRef(!!props.broadcasting)
+  broadcastingRef.current = !!props.broadcasting
+  /** trimite LOCAL + (cu broadcast activ) către celelalte panouri — rezultatul guardrail-ului
+      (golirea liniei / rularea confirmată) trebuie să ajungă în TOATE panourile-ţintă */
+  const sendAll = useCallback((d: string) => {
+    send(d)
+    onUserDataRef.current?.(session.id, d)
+  }, [send, session.id])
 
   // Guardrail, Escape = anulează (şterge linia), prins la nivel de document în CAPTURE: nu ajunge
   // nici la xterm, nici la scurtăturile globale. Enter nu poate scăpa — focusul e pe buton (vezi
@@ -732,11 +769,11 @@ export default function SessionView(props: {
     const onEsc = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
       e.preventDefault(); e.stopPropagation()
-      send('\x15'); setCmdConfirm(null); termRef.current?.focus()
+      sendAll('\x15'); setCmdConfirm(null); termRef.current?.focus()
     }
     document.addEventListener('keydown', onEsc, true)
     return () => document.removeEventListener('keydown', onEsc, true)
-  }, [cmdConfirm, send])
+  }, [cmdConfirm, sendAll])
 
   // broadcast: înregistrează `send`-ul acestui panou în harta din App (sid → send), ca tastele
   // dintr-un panou să poată fi difuzate în toate. `send` e stabil (useCallback []), deci se
@@ -744,7 +781,7 @@ export default function SessionView(props: {
   const registerSend = props.registerSend
   const bcastSid = session.id
   useEffect(() => {
-    registerSend?.(bcastSid, send)
+    registerSend?.(bcastSid, { send, pendingCommand: () => trackerRef.current?.pendingCommand() ?? null })
     return () => registerSend?.(bcastSid, null)
   }, [registerSend, bcastSid, send])
 
@@ -793,22 +830,42 @@ export default function SessionView(props: {
   // s-a redimensionat cât eram pe alt tab/app), TUI-urile (Claude Code) se strică
   // și doar A−/A+ manual repara. ResizeObserver-ul prinde doar schimbările de
   // container, nu și cazul „am revenit și xterm-ul e la altă dimensiune".
+  // 3.6.12: VIZIBIL ≠ FOCALIZAT. Într-un split toate panourile se văd, dar doar unul e focalizat:
+  // cele nefocalizate tot trebuie să-şi recreeze rendererul la revenirea tabului (altfel rămâneau
+  // albe), doar că se re-potrivesc PASIV (nu reclamă dimensiunea la fiecare focus de fereastră).
+  const paneVisible = props.paneVisible ?? props.paneActive
+  const paneFocused = props.paneActive !== false
   useEffect(() => {
-    if (props.paneActive === false) return
-    const activate = () => refit(true)        // devenim dispozitivul activ → reclamăm dimensiunea
+    if (paneVisible === false) return
+    const activate = () => refit(paneFocused)  // focalizat: devenim dispozitivul activ → reclamăm dimensiunea
     activate()                                // la (re)activarea pane-ului
     // Tab revenit vizibil: recreează rendererul WebGL. Browserul poate elibera contextul GPU
     // al unui tab din fundal (fără a emite mereu `contextlost`) → la revenire ecranul e ALB deşi
     // bufferul xterm are tot textul; `refresh()` nu ajută (contextul GL e mort). Reload-ul îl
     // recreează şi repaintează din buffer — cauza „b" din analiza de resync (renderer, nu date).
     const onVis = () => { if (!document.hidden) { reloadRendererRef.current?.(); activate() } }
-    window.addEventListener('focus', activate)
+    const onFocus = () => { if (paneFocused) activate() }
+    window.addEventListener('focus', onFocus)
     document.addEventListener('visibilitychange', onVis)
     return () => {
-      window.removeEventListener('focus', activate)
+      window.removeEventListener('focus', onFocus)
       document.removeEventListener('visibilitychange', onVis)
     }
-  }, [props.paneActive, refit])
+  }, [paneVisible, paneFocused, refit])
+
+  // focus cerut explicit (intrarea într-un split, Alt+←/→ între panouri): terminalul existent
+  // primeşte tastatura; unul abia montat o primeşte la creare (paneActive)
+  useEffect(() => {
+    if (props.focusNonce && props.paneActive) termRef.current?.focus()
+  }, [props.focusNonce]) // eslint-disable-line react-hooks/exhaustive-deps
+  // split montat / formă schimbată / divider eliberat: TOATE panourile vizibile reclamă dimensiunea
+  // (active=true). Altfel serverul putea ignora resize-ul pasiv al unui panou nefocalizat, iar
+  // PTY-ul rămânea la dimensiunea altui client (telefonul) — panoul arăta tăiat.
+  useEffect(() => {
+    if (!props.layoutNonce || paneVisible === false) return
+    const id = requestAnimationFrame(() => refit(true))
+    return () => cancelAnimationFrame(id)
+  }, [props.layoutNonce]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // acțiunile de sesiune venite din scurtături / paletă (App emite, panoul
   // ACTIV răspunde — altfel toate tab-urile montate ar reacționa deodată). În split,
@@ -1006,13 +1063,13 @@ export default function SessionView(props: {
       send(d)
       // broadcast: App difuzează aceleaşi taste către CELELALTE panouri din grilă (originea a
       // trimis deja local, mai sus). Fără broadcast activ, App ignoră.
-      props.onUserData?.(session.id, d)
+      onUserDataRef.current?.(session.id, d)
     })
     const onBinary = term.onBinary((d) => {
       const bytes = new Uint8Array(d.length)
       for (let i = 0; i < d.length; i++) bytes[i] = d.charCodeAt(i) & 0xff
       send(bytes)
-      props.onUserData?.(session.id, bytes)   // difuzează şi input-ul binar (mouse-report etc.)
+      onUserDataRef.current?.(session.id, bytes)   // difuzează şi input-ul binar (mouse-report etc.)
     })
     // mouse-selection copy (tmux → OSC 52) is a pointer gesture; count it too
     const markInput = () => {
@@ -1047,11 +1104,21 @@ export default function SessionView(props: {
       const submits = (e.key === 'Enter' && !e.altKey && !e.metaKey)
         || (e.ctrlKey && e.code === 'KeyJ' && !e.shiftKey && !e.altKey && !e.metaKey)
       if (submits) {
-        const cmd = trackerRef.current?.pendingCommand()
-        const rule = cmd ? matchCommandRule(cmd, commandGuardRef.current) : null
+        let cmd = trackerRef.current?.pendingCommand() ?? null
+        let rule = cmd ? matchCommandRule(cmd, commandGuardRef.current) : null
+        // broadcast: Enter-ul pleacă în TOATE panourile, deci verificăm comanda din fiecare —
+        // istoricul / completarea pot face ca acelaşi text tastat să fie altă comandă în alt shell
+        if (!rule && broadcastingRef.current) {
+          for (const pc of peerCommandsRef.current?.(session.id) ?? []) {
+            const r = pc ? matchCommandRule(pc, commandGuardRef.current) : null
+            if (r && pc) { rule = r; cmd = pc; break }
+          }
+        }
         if (rule && cmd) {
           if (rule.action === 'block') {
-            send('\x15')   // Ctrl+U: șterge linia periculoasă din shell
+            // Ctrl+U: șterge linia periculoasă din shell — în toate panourile-ţintă la broadcast
+            send('\x15')
+            if (broadcastingRef.current) onUserDataRef.current?.(session.id, '\x15')
             setGuardMsg(tRef.current('session.blockedByGuardrail', { cmd: cmd.slice(0, 70), pattern: rule.pattern }))
             window.setTimeout(() => setGuardMsg((m) => (m && m.includes(cmd.slice(0, 70)) ? null : m)), 4000)
           } else {
@@ -1147,9 +1214,16 @@ export default function SessionView(props: {
     containerRef.current!.addEventListener('touchend', onTouchEnd, { passive: true })
     containerRef.current!.addEventListener('touchcancel', onTouchEnd, { passive: true })
 
+    // debounce ~100 ms: un drag de divider / o schimbare de formă schimbă containerul la fiecare
+    // cadru; fiecare `fit` + `resize` trimis ar face o furtună de SIGWINCH în TUI-uri (3.6.12)
+    let roTimer: ReturnType<typeof setTimeout> | 0 = 0
     const observer = new ResizeObserver(() => {
-      if (!safeFit()) return   // demontare/teardown (split→tab): sări, următorul fit corectează
-      sendResize()
+      if (roTimer) clearTimeout(roTimer)
+      roTimer = setTimeout(() => {
+        roTimer = 0
+        if (!safeFit()) return   // demontare/teardown (split→tab): sări, următorul fit corectează
+        sendResize()
+      }, 100)
     })
     observer.observe(containerRef.current!)
 
@@ -1198,11 +1272,12 @@ export default function SessionView(props: {
       }
       if (termRef.current === term) connect()
     })()
-    term.focus()
+    if (paneActiveRef.current !== false) term.focus()
 
     const container = containerRef.current
     return () => {
       observer.disconnect()
+      if (roTimer) clearTimeout(roTimer)
       // dispune rendererul WebGL/Canvas ÎNAINTE de term.dispose(): altfel bucla lui de randare
       // (requestAnimationFrame) mai poate trage un cadru pe terminalul demontat (split→tab), iar
       // `_renderService` deja nul → „undefined (reading 'dimensions')". Oprim bucla întâi.
@@ -1231,7 +1306,10 @@ export default function SessionView(props: {
       trackerRef.current?.dispose()
       trackerRef.current = undefined
       clearCwd(session.id)
-      ;(window as unknown as { __wtTerms?: Map<string, Terminal> }).__wtTerms?.delete(session.id)
+      // doar dacă intrarea e încă A NOASTRĂ: la o remontare cu acelaşi sid (cheie stabilă) noul
+      // terminal se poate înregistra înaintea curăţării vechiului
+      const terms = (window as unknown as { __wtTerms?: Map<string, Terminal> }).__wtTerms
+      if (terms?.get(session.id) === term) terms.delete(session.id)
       term.dispose()
       termRef.current = undefined
     }
@@ -1865,7 +1943,9 @@ export default function SessionView(props: {
     <div ref={rootRef} className={`wt-window flex h-full flex-col ${
       // delimitarea panourilor de split: broadcast = ambră; panoul ACTIV = accent albastru clar;
       // orice alt panou de split = border subtil (înainte inactivele n-aveau niciun contur → graniţă invizibilă)
-      props.broadcasting ? 'ring-2 ring-inset ring-amber-500'
+      // broadcast: TOATE panourile în ambră, dar cel focalizat mai gros — altfel nu mai vedeai unde
+      // e focusul (ţinta căutării / fontului / Ctrl+W) cât broadcast-ul era pornit (3.6.12)
+      props.broadcasting ? (props.activeInSplit ? 'ring-[3px] ring-inset ring-amber-300' : 'ring-1 ring-inset ring-amber-500/70')
         : props.activeInSplit ? 'ring-2 ring-inset ring-sky-500'
         : props.inSplit ? 'ring-1 ring-inset ring-ink-600'
         : ''}`}>
@@ -2073,9 +2153,6 @@ export default function SessionView(props: {
             )}
             {props.onPopout && !props.popout && (
               <ToolButton title={t('session.detachWindow', { shortcut: shortcutFor('popout') })} onClick={props.onPopout}><PopoutIcon /></ToolButton>
-            )}
-            {props.onSplitClosed && (
-              <ToolButton title={t('session.closeSplit')} onClick={props.onSplitClosed}><CollapseLeftIcon /></ToolButton>
             )}
             <ToolButton
               title={t('session.fullscreen')}
@@ -2509,11 +2586,11 @@ export default function SessionView(props: {
                     de comandă periculoasă (acelaşi tipar ca ConfirmModal cu `danger`) */}
                 <button
                   ref={cmdCancelBtnRef}
-                  onClick={() => { send('\x15'); setCmdConfirm(null); termRef.current?.focus() }}
+                  onClick={() => { sendAll('\x15'); setCmdConfirm(null); termRef.current?.focus() }}
                   className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700"
                 >{t('session.cancelClear')}</button>
                 <Button variant="danger"
-                  onClick={() => { send('\r'); setCmdConfirm(null); termRef.current?.focus() }}>{t('session.run')}</Button>
+                  onClick={() => { sendAll('\r'); setCmdConfirm(null); termRef.current?.focus() }}>{t('session.run')}</Button>
               </div>
             </div>
           </div>

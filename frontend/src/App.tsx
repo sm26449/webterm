@@ -20,7 +20,13 @@ import SharedView from './components/SharedView'
 import ReplayView from './components/ReplayView'
 import { replayTokenFromHash } from './lib/replay'
 import Sidebar from './components/Sidebar'
-import SessionView from './components/SessionView'
+import SessionView, { type PaneHandle } from './components/SessionView'
+import {
+  applyPaneMove, dividers, dividerStyle, effectiveLayout, entryPane, equalSizes, findSameSet, GAP, gridSpec,
+  isDistinct, layoutsFor, movePaneBy, nextDefaultName, normalizeSizes, nudge, pointerToCum, positionKeys,
+  reorderPositions, setBoundary, sizeVars, type DividerSpec, type PaneMove, type SplitLayout,
+} from './lib/splitLayout'
+import { useMediaQuery } from './lib/sheet'
 import TabBar from './components/TabBar'
 import TransfersWidget from './components/TransfersWidget'
 import Toasts, { ToastItem } from './components/Toasts'
@@ -34,7 +40,7 @@ import { useI18n } from './lib/i18n'
 import { useConfirm } from './lib/confirm'
 import { useFocusTrap } from './lib/useFocusTrap'
 import { copyText } from './lib/clipboard'
-import { CloseIcon, CopyIcon, LockIcon, ShieldIcon } from './components/Icons'
+import { ArrowsLeftRightIcon, CloseIcon, CopyIcon, FullscreenIcon, LockIcon, ShieldIcon } from './components/Icons'
 import { EmptyState } from './components/ui'
 import { loadPerms } from './lib/perms'
 import { ensureNotificationPermission, notify, notifyError, registerToast } from './lib/notify'
@@ -45,7 +51,9 @@ import { askSecret, registerSecretPrompt, SecretAsk } from './lib/secretPrompt'
 import SecretPromptModal from './components/SecretPromptModal'
 import { markBooted } from './lib/failsafe'
 import { useMetricsTick } from './lib/metrics'
-import { matchShortcut, ShortcutId } from './lib/shortcuts'
+import { matchShortcut, shortcutFor, ShortcutId } from './lib/shortcuts'
+import { menuNav } from './lib/tablist'
+import { createPortal } from 'react-dom'
 import { shouldAutoOpen } from './lib/walkthrough'
 import { fmtTs, getTimezone } from './lib/tz'
 
@@ -75,6 +83,53 @@ function TrapDialog(props: {
       className={props.className}>
       {props.children}
     </div>
+  )
+}
+
+/** „Move to…" al unui panou de split: meniu WAI-ARIA (↑/↓/Home/End, Escape întoarce focusul pe
+    buton, Tab închide), portat în <body> — panoul are `overflow:hidden` şi l-ar tăia. Se ancorează
+    sub butonul care l-a deschis (`aria-expanded="true"`). */
+function PaneMoveMenu(props: { label: string; items: { key: string; label: string }[]; onPick: (key: string) => void; onClose: () => void }) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [anchor] = useState(() => document.querySelector<HTMLElement>('[data-testid="pane-move"][aria-expanded="true"]'))
+  const close = (refocus: boolean) => { props.onClose(); if (refocus) requestAnimationFrame(() => anchor?.focus()) }
+  useEffect(() => {
+    ref.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus()
+    const onDown = (e: PointerEvent) => {
+      if (!ref.current?.contains(e.target as Node) && !anchor?.contains(e.target as Node)) props.onClose()
+    }
+    window.addEventListener('pointerdown', onDown, true)
+    return () => window.removeEventListener('pointerdown', onDown, true)
+  }, [])   // eslint-disable-line react-hooks/exhaustive-deps
+  const r = anchor?.getBoundingClientRect()
+  const style = r
+    ? { top: r.bottom + 4, left: Math.max(8, Math.min(r.right - 288, window.innerWidth - 296)) }
+    : { top: 80, left: 8 }
+  return createPortal(
+    // eslint-disable-next-line jsx-a11y/no-static-element-interactions -- navigarea meniului e pe container
+    <div ref={ref} style={style} data-testid="pane-move-menu"
+      onKeyDown={(e) => {
+        if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(true); return }
+        if (e.key === 'Tab') { e.preventDefault(); close(true); return }
+        const list = Array.from(ref.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])
+        const next = menuNav(e.key, list.indexOf(document.activeElement as HTMLElement), list.length)
+        if (next === null) return
+        e.preventDefault()
+        list[next]?.focus()
+      }}
+      className="fixed z-50 w-72 max-w-[calc(100vw-16px)] rounded-xl border border-ink-700 bg-ink-900 p-1 shadow-2xl">
+      <div role="menu" aria-label={props.label}>
+        {props.items.map((it) => (
+          <button key={it.key} type="button" role="menuitem" tabIndex={-1} data-move-to={it.key}
+            onClick={() => { close(true); props.onPick(it.key) }}
+            className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-slate-200 hover:bg-ink-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400">
+            <ArrowsLeftRightIcon size={13} />
+            <span className="min-w-0 flex-1 truncate">{it.label}</span>
+          </button>
+        ))}
+      </div>
+    </div>,
+    document.body,
   )
 }
 
@@ -232,6 +287,14 @@ function MainApp() {
   // aceeaşi sesiune nu ajunge niciodată de două ori în acelaşi document (vezi keep-alive).
   // Colapsează fostele gridSids/secondSid/splitPct/splitRatio. Vezi docs/design/SPLIT-VIEWS.md.
   const [splitViews, setSplitViews] = useState<SplitView[]>([])
+  const splitViewsRef = useRef<SplitView[]>([])
+  splitViewsRef.current = splitViews
+  // prima încărcare a definiţiilor: până atunci, un split restaurat la reload (wt_active_split) nu
+  // montează nimic — altfel stiva keep-alive conecta un terminal pe care split-ul îl muta imediat
+  // (dublă conectare, P2 #14). Un GET picat deblochează randarea normală (`splitsFailed`).
+  const [splitsLoaded, setSplitsLoaded] = useState(false)
+  const [splitsFailed, setSplitsFailed] = useState(false)
+  const sessionsLoadedRef = useRef(false)
   const [activeSplitId, setActiveSplitId] = useState<number | null>(() => {
     try { const v = Number(localStorage.getItem('wt_active_split')); return v > 0 ? v : null } catch { return null }
   })
@@ -242,19 +305,37 @@ function MainApp() {
     } catch { /* */ }
   }, [activeSplitId])
   const GRID_MAX = 4
-  // wizard-ul „+ Split view": creare (fără id) sau editare (cu id) — nume + sesiunile bifate (2–4)
-  type SplitWizard = { id?: number; name: string; sel: string[] }
+  // wizard-ul „+ Split view": creare (fără id) sau editare (cu id) — nume + sesiunile bifate (2–4),
+  // în ORDINEA bifării (= ordinea panourilor); `list` = ce se poate bifa (panourile existente întâi,
+  // chiar dacă nu mai au tab — înainte se pierdeau tăcut la salvare)
+  type SplitWizard = { id?: number; name: string; sel: string[]; list: string[] }
   const [wizard, setWizard] = useState<SplitWizard | null>(null)
   const toggleWizardPick = (sid: string) => setWizard((w) => (w ? {
     ...w,
     sel: w.sel.includes(sid) ? w.sel.filter((s) => s !== sid)
       : w.sel.length >= GRID_MAX ? w.sel : [...w.sel, sid],
   } : w))
-  const splitRef = useRef<HTMLDivElement>(null)
+  const gridRef = useRef<HTMLDivElement>(null)
   // migrare unică: fostul split (wt_layout) + procentul de grilă (wt_split_pct) nu mai sunt citite
   useEffect(() => {
     try { localStorage.removeItem('wt_layout'); localStorage.removeItem('wt_split_pct') } catch { /* */ }
   }, [])
+  // pe telefon (<768px) un split arată UN panou o dată + un comutator de panouri (3.6.12)
+  const narrowSplit = useMediaQuery('(max-width: 767.98px)')
+  // panoul maximizat temporar (Alt+X / dublu-click pe titlu) — local, nepersistat
+  const [maxPane, setMaxPane] = useState<string | null>(null)
+  // cresc → panoul selectat primeşte focusul / panourile vizibile îşi reclamă dimensiunea
+  const [paneFocusNonce, setPaneFocusNonce] = useState(0)
+  const [layoutNonce, setLayoutNonce] = useState(0)
+  // ultimul panou focalizat al fiecărui split (per browser), ca intrarea să revină acolo
+  const lastFocusRef = useRef<Record<string, string>>((() => {
+    try { const v = JSON.parse(localStorage.getItem('wt_split_focus') || '{}'); return v && typeof v === 'object' ? v : {} } catch { return {} }
+  })())
+  // ţinta unui drag peste un panou (titlul altui panou sau un tab) — evidenţiere
+  const [dropPane, setDropPane] = useState<string | null>(null)
+  const [moveMenu, setMoveMenu] = useState<string | null>(null)
+  // PATCH-ul de dimensiuni din tastatură e amânat (~400 ms): o apăsare lungă de săgeată = un PATCH
+  const sizeTimer = useRef<ReturnType<typeof setTimeout> | 0>(0)
 
   // derivate din view-ul activ (folosite de keep-alive, broadcast, randare)
   const activeSplit = activeSplitId ? (splitViews.find((v) => v.id === activeSplitId) ?? null) : null
@@ -262,24 +343,43 @@ function MainApp() {
     ? (activeSplit.panes.map((sid) => sessions.find((s) => s.id === sid)).filter(Boolean) as Session[])
     : []
   const splitActive = !!activeSplit && splitPanes.length >= 2
-  const broadcast = !!activeSplit?.broadcast
-  const splitRatio = activeSplit ? Math.min(0.85, Math.max(0.15, activeSplit.ratio)) : 0.5
-  const splitPaneSids = activeSplit ? activeSplit.panes : []
+  const broadcast = !!activeSplit?.broadcast && splitActive
+  const splitPaneSids = splitActive ? splitPanes.map((s) => s.id) : []
   const splitPaneKey = splitPaneSids.join(',')   // dep stabil (array-ul se recreează la fiecare render)
-  // send-ul fiecărui panou montat, indexat pe sid — SessionView îl înregistrează singur
-  const sendMap = useRef(new Map<string, (d: string | Uint8Array) => void>())
+  // panouri ascunse (rol / 2FA) sau încă neîncărcate: forma stocată e pentru alt număr de panouri →
+  // randăm implicitul pentru ce vedem, FĂRĂ s-o persistăm, iar rearanjarea e oprită (serverul ar
+  // refuza-o oricum cu 409 splitview.hiddenPanes)
+  const splitDegraded = !!activeSplit && ((activeSplit.hidden ?? 0) > 0 || splitPanes.length !== activeSplit.panes.length)
+  const splitLayout: SplitLayout = effectiveLayout(splitDegraded ? null : activeSplit?.layout, splitPanes.length)
+  const splitSizes = splitDegraded || !activeSplit ? equalSizes(splitLayout)
+    : activeSplit.sizes ? normalizeSizes(splitLayout, activeSplit.sizes)
+      : splitLayout === 'cols2' ? normalizeSizes('cols2', [activeSplit.ratio, 1 - activeSplit.ratio]) : equalSizes(splitLayout)
+  // fiecare panou montat, indexat pe sid — SessionView îşi înregistrează singur trimiterea + comanda
+  // tastată (guardrail-ul verifică TOATE panourile-ţintă la broadcast)
+  const paneHandles = useRef(new Map<string, PaneHandle>())
   const broadcastRef = useRef(false)
   useEffect(() => { broadcastRef.current = broadcast }, [broadcast])
-  const registerSend = useCallback((sid: string, fn: ((d: string | Uint8Array) => void) | null) => {
-    if (fn) sendMap.current.set(sid, fn)
-    else sendMap.current.delete(sid)
+  const registerSend = useCallback((sid: string, h: PaneHandle | null) => {
+    if (h) paneHandles.current.set(sid, h)
+    else paneHandles.current.delete(sid)
   }, [])
   // o tastă dintr-un panou → difuzată către CELELALTE (originea a trimis deja local)
   const handleUserData = useCallback((sid: string, d: string | Uint8Array) => {
     if (!broadcastRef.current) return
-    sendMap.current.forEach((fn, osid) => { if (osid !== sid) fn(d) })
+    paneHandles.current.forEach((h, osid) => { if (osid !== sid) h.send(d) })
   }, [])
-
+  const peerCommands = useCallback((sid: string) => {
+    if (!broadcastRef.current) return []
+    const out: (string | null)[] = []
+    paneHandles.current.forEach((h, osid) => { if (osid !== sid) out.push(h.pendingCommand()) })
+    return out
+  }, [])
+  // selecţie ÎN split: înlocuieşte intrarea din istoric (click-urile pe panouri nu umplu „Back")
+  const replaceRoute = useCallback((sid: string | null) => {
+    const url = window.location.pathname + window.location.search + (sid ? `#/s/${sid}` : '')
+    try { window.history.replaceState(window.history.state, '', url) } catch { window.location.hash = sid ? `/s/${sid}` : ''; return }
+    window.dispatchEvent(new HashChangeEvent('hashchange'))
+  }, [])
   const [sidebarOpen, setSidebarOpen] = useState(false)
   // Plierea sidebarului e o preferinţă de spaţiu, nu o stare de sesiune: cine lucrează pe
   // un laptop mic o vrea din prima, la fiecare deschidere. Citită sincron la montare, ca
@@ -353,7 +453,16 @@ function MainApp() {
   // detach — sesiunea trăiește mai departe, deci redeschiderea e gratuită)
   const closedTabsRef = useRef<string[]>([])
   // pasul între tab-uri (Alt+←/→), circular
+  // REGULA (3.6.12, documentată în docs/SHORTCUTS.md): navigarea între TABURI (click pe tab, Alt+1…9,
+  // Alt+0 / Acasă) iese din split; navigarea între PANOURI rămâne în el — într-un split, Alt+←/→
+  // trec la panoul anterior/următor (în ordinea panourilor), nu la alt tab ascuns în spatele lui.
   const stepTab = (dir: 1 | -1) => {
+    if (splitActive) {
+      const i = selectedSid ? splitPaneSids.indexOf(selectedSid) : -1
+      const next = splitPaneSids[(Math.max(0, i) + (i < 0 ? 0 : dir) + splitPaneSids.length) % splitPaneSids.length]
+      if (next) { replaceRoute(next); setMaxPane((m) => (m ? next : m)); setPaneFocusNonce((n) => n + 1) }
+      return
+    }
     if (openTabs.length < 2 || !selectedSid) return
     const i = openTabs.indexOf(selectedSid)
     if (i === -1) return
@@ -475,7 +584,10 @@ function MainApp() {
           (e: unknown) => ({ status: 'rejected', reason: e }) as const),
         api<Session[]>('/api/sessions').then((v) => ({ status: 'fulfilled', value: v }) as const,
           (e: unknown) => ({ status: 'rejected', reason: e }) as const),
-        api<{ split_views: SplitView[] }>('/api/split-views').catch(() => ({ split_views: [] })),
+        // eşec ≠ listă goală (P1 #3): un GET picat lăsa `split_views: []` → split-ul activ era
+        // închis şi chip-urile dispăreau până la următorul poll. Acum păstrăm starea anterioară.
+        api<{ split_views: SplitView[] }>('/api/split-views').then((v) => ({ status: 'fulfilled', value: v }) as const,
+          (e: unknown) => ({ status: 'rejected', reason: e }) as const),
       ])
       // fiecare parte se decide singură: un /api/sessions picat nu mai goleşte lista de hosturi
       const f = settleFleet(fleetRef.current, hr, sr, (e) => errText(e, t) || t('common.loadFailed'))
@@ -507,11 +619,20 @@ function MainApp() {
         const valid = prev.filter((sid) => s.some((x) => x.id === sid))
         return valid.length === prev.length ? prev : valid
       })
-      // split-views: server-ul deja curăţă panourile moarte + face prune la <2 la GET.
-      // Aici doar sincronizăm starea locală şi dezactivăm view-ul activ dacă a dispărut.
-      const svj = JSON.stringify(sv.split_views)
-      if (svj !== lastSplitViewsRef.current) { lastSplitViewsRef.current = svj; setSplitViews(sv.split_views) }
-      setActiveSplitId((prev) => (prev && !sv.split_views.some((v) => v.id === prev) ? null : prev))
+      if (sr.status === 'fulfilled') sessionsLoadedRef.current = true
+      // split-views: serverul arată doar panourile vizibile acum (cele ascunse sunt numărate în
+      // `hidden`) şi nu listează layout-urile cu <2 sesiuni vii. Aici sincronizăm starea locală şi
+      // dezactivăm view-ul activ dacă a dispărut — DOAR pe date proaspete.
+      if (sv.status === 'fulfilled') {
+        const list = sv.value.split_views
+        const svj = JSON.stringify(list)
+        if (svj !== lastSplitViewsRef.current) { lastSplitViewsRef.current = svj; setSplitViews(list) }
+        setActiveSplitId((prev) => (prev && !list.some((v) => v.id === prev) ? null : prev))
+        setSplitsLoaded(true)
+        setSplitsFailed(false)
+      } else {
+        setSplitsFailed(true)
+      }
       setGwFails(0)
     } catch {
       setGwFails((n) => n + 1)
@@ -656,7 +777,14 @@ function MainApp() {
       // Efectul se re-execută când sesiunea trece pe `lost`, iar anunţul spunea tot
       // „is active" — un utilizator de screen reader primea exact informaţia inversă,
       // în timp ce panoul vizibil arăta „Session lost". Anunţăm starea reală.
-      setSrAnnounce(t(s.state === 'live' ? 'app.srSessionActive' : 'app.srSessionEnded', {
+      // într-un split: „Panoul 2 din 3 — titlu pe host" (3.6.12) — altfel trecerea între panouri
+      // suna identic cu o schimbare de tab
+      const pi = splitPaneSids.indexOf(s.id)
+      setSrAnnounce(pi >= 0 ? t('split.srPane', {
+        i: pi + 1, n: splitPaneSids.length,
+        title: sessionTitle(s.title, t) || t('app.untitledSession'),
+        on: h ? t('app.srOnHost', { host: h.name }) : '',
+      }) : t(s.state === 'live' ? 'app.srSessionActive' : 'app.srSessionEnded', {
         title: sessionTitle(s.title, t) || t('app.untitledSession'),
         on: h ? t('app.srOnHost', { host: h.name }) : '',
       }))
@@ -664,7 +792,7 @@ function MainApp() {
       document.title = 'WebTerm'
       setSrAnnounce(t('app.srMainPanel'))
     }
-  }, [selectedSid, sessions, hosts, t])
+  }, [selectedSid, sessions, hosts, t, splitPaneKey])   // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!appState?.authenticated) return
@@ -709,12 +837,14 @@ function MainApp() {
   const shortcutActions: Partial<Record<ShortcutId, () => void>> = {
     palette: () => setPaletteOpen((v) => !v),
     help: () => setHelpOpen((v) => !v),
-    home: () => navigate(null),
+    home: () => { setActiveSplitId(null); navigate(null) },
     focusSidebar: () => {
       setSidebarOpen(true)
       setTimeout(() => window.dispatchEvent(new Event('wt-focus-search')), 50)
     },
-    closeTab: () => { if (selectedSid) closeTab(selectedSid) },
+    // într-un split Alt+W nu face nimic (tasta trece mai departe): tabul panoului selectat s-ar
+    // redeschide singur, iar „închide panoul" nu e o operaţie — panourile se schimbă din Edit
+    closeTab: splitActive ? undefined : () => { if (selectedSid) closeTab(selectedSid) },
     reopenTab: () => {
       const sid = closedTabsRef.current.pop()
       if (sid && sessions.some((s) => s.id === sid)) selectSession(sid)
@@ -727,8 +857,15 @@ function MainApp() {
     snippets: () => window.dispatchEvent(new Event('wt-session-snippets')),
     fontUp: () => window.dispatchEvent(new CustomEvent('wt-session-font', { detail: 1 })),
     fontDown: () => window.dispatchEvent(new CustomEvent('wt-session-font', { detail: -1 })),
+    // doar într-un split (altfel tasta ajunge în shell neatinsă)
+    movePane: splitActive && !splitDegraded ? () => { if (selectedSid) movePane(selectedSid, 1) } : undefined,
+    maximizePane: splitActive ? () => { if (selectedSid) toggleMax(selectedSid) } : undefined,
   }
 
+  // acţiunile citite prin ref: handlerul de mai jos se înregistrează O DATĂ, iar acţiunile văd
+  // mereu starea curentă (înainte, Alt+D folosea o listă de split-uri veche — nume duplicate)
+  const shortcutActionsRef = useRef(shortcutActions)
+  shortcutActionsRef.current = shortcutActions
   // scurtături globale (capture: înaintea xterm). Toate vin din registrul unic
   // lib/shortcuts.ts — o scurtătură nouă se adaugă ACOLO, ca să apară automat
   // și în cheatsheet-ul „?" (altfel ecranul de ajutor minte).
@@ -757,7 +894,7 @@ function MainApp() {
       // Ctrl+K în terminal rămâne kill-line al shell-ului (pe mac ⌘K e liber)
       if (id === 'palette' && inTerminal && e.ctrlKey && !e.metaKey) return
 
-      const act = shortcutActions[id]
+      const act = shortcutActionsRef.current[id]
       if (!act) return
       e.preventDefault()
       // `preventDefault()` opreşte acţiunea implicită a BROWSERULUI, nu propagarea. Handlerul
@@ -773,8 +910,7 @@ function MainApp() {
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [openTabs, selectedSid, splitPaneKey, sessions])
+  }, [])
 
   // Escape închide overlay-urile globale indiferent unde e focusul. Focus trap-ul
   // din dialog acoperă cazul normal, dar dacă focusul a rămas în terminal (sau
@@ -801,6 +937,7 @@ function MainApp() {
       if (openTabs[idx]) {
         e.preventDefault()
         e.stopPropagation()          // vezi nota de la handlerul de scurtături: altfel
+        setActiveSplitId(null)       // navigare pe TAB → iese din split (regula de la stepTab)
         window.location.hash = `/s/${openTabs[idx]}`   // readline primeşte digit-argument
       }
     }
@@ -816,22 +953,83 @@ function MainApp() {
   // ATENȚIE: hook-urile stau ÎNAINTEA return-urilor timpurii de mai jos
   // (Rules of Hooks) — mutate după ele, prima randare post-login crapă cu #310.
   const [mru, setMru] = useState<string[]>([])
+  // panourile split-ului activ contează toate ca „folosite": la ieşirea din split rămân în stivă
+  // (montate, ascunse) şi o reintrare nu le reconectează
   useEffect(() => {
     if (!selectedSid) return
-    setMru((prev) => [selectedSid, ...prev.filter((x) => x !== selectedSid)].slice(0, 12))
-  }, [selectedSid])
-  const keepAlive = useMemo(() => {
+    setMru((prev) => {
+      const head = [selectedSid, ...splitPaneSids.filter((x) => x !== selectedSid)]
+      const next = [...head, ...prev.filter((x) => !head.includes(x))].slice(0, 12)
+      return next.length === prev.length && next.every((x, i) => x === prev[i]) ? prev : next
+    })
+  }, [selectedSid, splitPaneKey])   // eslint-disable-line react-hooks/exhaustive-deps
+  // 3.6.12: O SINGURĂ listă de terminale montate, cheiată pe sid: stiva keep-alive + panourile
+  // split-ului activ. Split-ul nu mai are un renderer separat (ternarul vechi remonta TOATE
+  // terminalele la intrarea/ieşirea din split, iar panourile de 2 nu erau cheiate → un swap
+  // reconecta). Acum un panou doar îşi schimbă `grid-area`; aceeaşi sesiune nu apare de două ori
+  // (lista e deduplicată), deci invariantul „o sesiune = un terminal în document" rămâne.
+  const mountedSids = useMemo(() => {
+    // reload cu un split restaurat: aşteptăm definiţiile (altfel stiva conecta un terminal pe care
+    // split-ul îl muta imediat — dublă conectare). Un GET picat deblochează randarea normală.
+    if (activeSplitId && !splitsLoaded && !splitsFailed) return []
     const alive: string[] = []
     for (const sid of [selectedSid, ...mru]) {
-      // sesiunile view-ului activ de split sunt montate ACOLO — exclude-le din stivă ca să nu
-      // se monteze de două ori (două WS pe acelaşi PTY = război de detach tmux)
-      if (!sid || alive.includes(sid) || splitPaneSids.includes(sid)) continue
+      if (!sid || alive.includes(sid)) continue
       if (sid !== selectedSid && !openTabs.includes(sid)) continue
       alive.push(sid)
       if (alive.length >= KEEP_ALIVE) break
     }
+    for (const sid of splitPaneSids) if (!alive.includes(sid)) alive.push(sid)
     return alive
-  }, [selectedSid, mru, openTabs, splitPaneKey])   // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selectedSid, mru, openTabs, splitPaneKey, activeSplitId, splitsLoaded, splitsFailed])   // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── ciclul de viaţă al split-ului activ ─────────────────────────────────────
+  // Intrarea (chip, Alt+D, reload cu wt_active_split, wizard): SELECTEAZĂ şi FOCALIZEAZĂ un panou
+  // — ultimul focalizat al acestui split, altfel primul — ca TabBar-ul, tastatura şi ţinta
+  // acţiunilor (căutare / font / Ctrl+W) să fie de acord (bug raportat 2026-10-14: TabBar-ul
+  // rămânea pe tabul părăsit până dădeai click într-un terminal). Odată intrat, o navigare spre o
+  // sesiune din afara split-ului (Back, link) iese din split.
+  const enteredRef = useRef<number | null>(null)
+  const prevPanesRef = useRef<string[]>([])
+  useEffect(() => {
+    const prev = prevPanesRef.current
+    prevPanesRef.current = splitPaneSids
+    if (!activeSplitId) { enteredRef.current = null; setMaxPane(null); return }
+    if (!splitActive) return
+    const panes = splitPaneSids
+    if (enteredRef.current !== activeSplitId) {
+      enteredRef.current = activeSplitId
+      setMaxPane(null)
+      const target = entryPane(panes, lastFocusRef.current[String(activeSplitId)])
+      if (target && target !== selectedSid) replaceRoute(target)
+      setPaneFocusNonce((n) => n + 1)
+      setLayoutNonce((n) => n + 1)
+      return
+    }
+    if (selectedSid && panes.includes(selectedSid)) return
+    // panoul selectat a dispărut din split (editat pe alt dispozitiv / sesiune ştearsă) → altul;
+    // altfel userul a navigat în afara split-ului → ieşim (chip-ul rămâne în bară)
+    if (selectedSid && prev.includes(selectedSid)) { const t0 = panes[0]; if (t0) replaceRoute(t0); return }
+    setActiveSplitId(null)
+  }, [activeSplitId, splitActive, splitPaneKey, selectedSid])   // eslint-disable-line react-hooks/exhaustive-deps
+  // ţine minte panoul focalizat (per split, per browser)
+  useEffect(() => {
+    if (!splitActive || !activeSplitId || !selectedSid || !splitPaneSids.includes(selectedSid)) return
+    if (lastFocusRef.current[String(activeSplitId)] === selectedSid) return
+    lastFocusRef.current = { ...lastFocusRef.current, [String(activeSplitId)]: selectedSid }
+    lsSet('wt_split_focus', JSON.stringify(lastFocusRef.current))
+  }, [splitActive, activeSplitId, selectedSid, splitPaneKey])   // eslint-disable-line react-hooks/exhaustive-deps
+  // un split cu <2 panouri pe care le vezi ACUM (2FA blocat, rol schimbat, sesiuni ascunse) nu mai
+  // lasă un ecran gol (P1 #4): ieşim cu o explicaţie. Doar după ce sesiunile au venit măcar o dată.
+  useEffect(() => {
+    if (!activeSplit || splitActive || !splitsLoaded || !sessionsLoadedRef.current) return
+    notify(t('split.title'), t('split.notEnoughPanes', { name: activeSplit.name }), 'warn')
+    setActiveSplitId(null)
+  }, [activeSplit, splitActive, splitsLoaded, sessions, t])
+  // forma s-a schimbat / un panou a fost (de)maximizat: panourile vizibile îşi reclamă dimensiunea
+  useEffect(() => {
+    if (splitActive) setLayoutNonce((n) => n + 1)
+  }, [splitLayout, maxPane, narrowSplit, splitPaneKey])   // eslint-disable-line react-hooks/exhaustive-deps
 
   // 3.5.13: contul n-are niciun factor real (fără passkey, fără TOTP, fără SSO) — parola singură
   // nu mai deschide un host 2FA. Explicăm şi oferim drumul direct la Setări → Autentificare & 2FA.
@@ -1043,9 +1241,12 @@ function MainApp() {
     const via = hosts.find((h) => h.id === hostId)?.via_host_id
     return via ? hosts.find((h) => h.id === via) : undefined
   }
-  const renderPane = (s: Session, isActive: boolean, grid?: boolean) => (
+  /** Un terminal montat: tab din stiva keep-alive sau panou al split-ului activ (`grid`). În split
+      toate panourile vizibile stream-uiesc; `selected` = panoul selectat (ţinta snippet/font/căutare
+      + inelul accent). `visible` ≠ `selected`: un panou vizibil dar nefocalizat tot îşi recuperează
+      rendererul (3.6.12). */
+  const renderPane = (s: Session, o: { selected: boolean; grid: boolean; visible: boolean; stream: boolean }) => (
     <SessionView
-      key={s.id}
       session={s}
       stepupCredential={stepupCredential}
       stepupMethod={appState.stepup_method ?? null}
@@ -1054,22 +1255,26 @@ function MainApp() {
       viaHost={viaHostOf(s.host_id)}
       onOpenHost={selectHost}
       commandGuard={appState.command_guard}
-      registerSend={grid ? registerSend : undefined}
-      onUserData={grid ? handleUserData : undefined}
-      broadcasting={grid ? broadcast : undefined}
+      registerSend={o.grid ? registerSend : undefined}
+      onUserData={o.grid ? handleUserData : undefined}
+      peerCommands={o.grid ? peerCommands : undefined}
+      broadcasting={o.grid ? broadcast : undefined}
       // căutarea din rezultate globale merge DOAR la panoul activ — panourile ţinute în cache
       // nu trebuie să (re)pornească o căutare veche când redevin vizibile
-      initialSearch={!isActive ? null : (pendingSearch?.term ?? null)}
-      searchNonce={!isActive ? 0 : (pendingSearch?.n ?? 0)}
-      paneActive={isActive}
-      streamActive={grid || isActive}
+      initialSearch={!o.selected ? null : (pendingSearch?.term ?? null)}
+      searchNonce={!o.selected ? 0 : (pendingSearch?.n ?? 0)}
+      paneActive={o.selected}
+      paneVisible={o.visible}
+      focusNonce={paneFocusNonce}
+      layoutNonce={o.grid ? layoutNonce : 0}
+      streamActive={o.stream}
       // delimitare: orice panou de split are border; cel selectat = accent (activeInSplit)
-      inSplit={!!grid}
-      activeInSplit={grid ? isActive : false}
-      actionTarget={isActive}
+      inSplit={o.grid}
+      activeInSplit={o.grid && o.selected}
+      actionTarget={o.selected}
       // right-click „Add to split view" (alternativă la butonul din bară) → deschide wizard-ul.
       // Doar pe taburi normale (nu din interiorul unui split) şi doar dacă ai ≥2 taburi de combinat.
-      onSplitView={!grid && openTabs.length >= 2 ? openWizardCreate : undefined}
+      onSplitView={!o.grid && openTabs.length >= 2 ? openWizardCreate : undefined}
       onMenu={() => { setSidebarCollapsed(false); lsSet('wt-sidebar-collapsed', '0'); setSidebarOpen(true) }}
       sidebarCollapsed={sidebarCollapsed}
       onPopout={() => popout(s.id)}
@@ -1118,43 +1323,72 @@ function MainApp() {
   }
 
   // ── operaţii pe split-views (server-side, optimist) ──────────────────────────
+  const splitErr = (e: unknown) => notify(t('split.title'), errText(e, t) || t('toolbox.error'), 'warn')
+  const defaultSplitName = () => nextDefaultName(splitViewsRef.current.map((v) => v.name), (n) => t('split.defaultName', { n }))
   const patchSplit = async (id: number, changes: Partial<SplitView>) => {
+    // aceeaşi sesiune de două ori = două terminale pe acelaşi PTY (război de detach tmux): o listă
+    // nevalidă e refuzată ÎNAINTE de actualizarea optimistă, nu după răspunsul serverului
+    if (changes.panes && (changes.panes.length < 2 || !isDistinct(changes.panes))) return
+    // panoul selectat a ieşit din split → selecţia trece pe primul (altfel efectul de ciclu de
+    // viaţă ar crede că am navigat în afară şi ar închide split-ul)
+    if (changes.panes && id === activeSplitId && selectedSid && !changes.panes.includes(selectedSid)) {
+      replaceRoute(changes.panes[0])
+    }
     setSplitViews((prev) => prev.map((v) => (v.id === id ? { ...v, ...changes } : v)))   // optimist
     try { await api(`/api/split-views/${id}`, { method: 'PATCH', body: JSON.stringify(changes) }) }
-    catch { refresh() }   // dezacord cu serverul → resincronizează
+    catch (e) { splitErr(e); refresh() }   // dezacord cu serverul → explică + resincronizează
   }
   const createSplit = async (panes: string[], name?: string) => {
     const uniq = [...new Set(panes)].slice(0, GRID_MAX)   // distincte, ordine păstrată
     if (uniq.length < 2) return
+    const position = Math.min(1000, splitViewsRef.current.reduce((m, v) => Math.max(m, v.position + 1), 0))
     try {
       const sv = await api<SplitView>('/api/split-views', {
         method: 'POST',
-        body: JSON.stringify({ name: (name || '').trim() || t('split.defaultName', { n: splitViews.length + 1 }),
-                               panes: uniq, ratio: 0.5, broadcast: false }),
+        body: JSON.stringify({ name: (name || '').trim() || defaultSplitName(), panes: uniq, broadcast: false, position }),
       })
       setSplitViews((prev) => [...prev, sv])
-      setActiveSplitId(sv.id)
-    } catch (e) { notify(t('split.title'), errText(e, t) || t('toolbox.error'), 'warn') }
+      enterSplit(sv.id)
+    } catch (e) { splitErr(e) }
   }
-  // deschide o sesiune alături (Alt+D / pagina hostului): creează un split-view de 2 panouri
+  // intrarea într-un split (chip, Alt+D, wizard): efectul de ciclu de viaţă selectează + focalizează
+  // panoul; un click pe chip-ul split-ului DEJA activ doar readuce focusul în panoul selectat
+  const enterSplit = (id: number) => {
+    setPendingSearch(null)
+    if (id === activeSplitId) { setPaneFocusNonce((n) => n + 1); return }
+    setActiveSplitId(id)
+  }
+  // deschide o sesiune alături (Alt+D / pagina hostului): un split-view de 2 panouri. Dacă există
+  // deja unul cu EXACT aceleaşi sesiuni, îl refolosim (înainte, fiecare Alt+D crea un duplicat).
   const splitSession = (sid: string) => {
     openTab(sid)
     const other = (selectedSid && selectedSid !== sid) ? selectedSid : openTabs.find((tb) => tb !== sid)
     if (!other) { navigate(sid); return }   // nimic cu care să facem split
+    const same = findSameSet(splitViewsRef.current, [other, sid])
+    if (same) { enterSplit(same.id); return }
     createSplit([other, sid])
   }
-  // wizard: creare (nume implicit + primele taburi) sau editare (nume + panouri existente)
-  const openWizardCreate = () => setWizard({ name: t('split.defaultName', { n: splitViews.length + 1 }), sel: openTabs.slice(0, GRID_MAX) })
-  const openWizardEdit = (v: SplitView) => setWizard({ id: v.id, name: v.name, sel: v.panes })
+  // wizard: creare (nume implicit + primele taburi) sau editare (nume + panourile existente, ÎN
+  // ordinea lor, inclusiv cele care nu mai au tab)
+  const openWizardCreate = () => setWizard({ name: defaultSplitName(), sel: openTabs.slice(0, GRID_MAX), list: openTabs })
+  const openWizardEdit = (v: SplitView) => {
+    if (v.hidden) { notify(t('split.title'), t('split.hiddenNotice'), 'warn'); return }
+    setWizard({ id: v.id, name: v.name, sel: [...v.panes], list: [...v.panes, ...openTabs.filter((s) => !v.panes.includes(s))] })
+  }
   const saveWizard = async () => {
     if (!wizard) return
-    const panes = openTabs.filter((sid) => wizard.sel.includes(sid))   // păstrează ordinea din taburi
-    if (panes.length < 2) return
-    const name = wizard.name.trim() || t('split.defaultName', { n: splitViews.length + 1 })
+    const panes = wizard.sel.filter((sid) => sessions.some((s) => s.id === sid))   // ordinea bifării = ordinea panourilor
+    if (panes.length < 2 || !isDistinct(panes)) return
+    const name = wizard.name.trim() || defaultSplitName()
     const id = wizard.id
     setWizard(null)
-    if (id) await patchSplit(id, { name, panes })
-    else await createSplit(panes, name)
+    if (id) {
+      const v = splitViews.find((x) => x.id === id)
+      // alt număr de panouri → forma revine la implicit (serverul face la fel)
+      const reshaped = !!v && v.panes.length !== panes.length
+      await patchSplit(id, reshaped ? { name, panes, layout: undefined, sizes: undefined } : { name, panes })
+      if (id !== activeSplitId) enterSplit(id)
+    } else await createSplit(panes, name)
   }
   const deleteSplit = async (id: number) => {
     const v = splitViews.find((x) => x.id === id)
@@ -1166,21 +1400,204 @@ function MainApp() {
     if (activeSplitId === id) setActiveSplitId(null)
     try { await api(`/api/split-views/${id}`, { method: 'DELETE' }) } catch { refresh() }
   }
-  // divider draggable (2 panouri): actualizare optimistă locală în timpul drag-ului, PATCH la release
-  const dragSplit = (e: React.PointerEvent) => {
+  // reordonarea chip-urilor: optimist + PATCH `position` doar pentru cele mutate
+  const reorderSplits = (from: number, to: number) => {
+    const { order, changed } = reorderPositions(splitViews, from, to)
+    if (!changed.length) return
+    setSplitViews(order)
+    for (const c of changed) {
+      api(`/api/split-views/${c.id}`, { method: 'PATCH', body: JSON.stringify({ position: c.position }) }).catch(() => refresh())
+    }
+  }
+  const pickLayout = (l: SplitLayout) => {
+    if (!activeSplit || splitDegraded) return
+    patchSplit(activeSplit.id, { layout: l, sizes: equalSizes(l) })
+  }
+  const paneTitle = (sid: string) => {
+    const s = sessions.find((x) => x.id === sid)
+    return s ? (sessionTitle(s.title, t) || t('app.untitledSession')) : sid.slice(0, 6)
+  }
+  // mutări de panouri (swap prin drag de titlu / „Move to…" / Alt+M; înlocuire prin drag de tab)
+  const applyMove = (m: PaneMove) => {
+    if (!activeSplit || splitDegraded) return
+    const next = applyPaneMove(activeSplit.panes, m)
+    if (!next) return
+    if (m.kind === 'replace' && selectedSid === m.target && !activeSplit.panes.includes(m.with)) replaceRoute(m.with)
+    const moved = m.kind === 'swap' ? m.from : m.with
+    patchSplit(activeSplit.id, { panes: next })
+    setSrAnnounce(t('split.paneMoved', { title: paneTitle(moved), pos: t('split.pos.' + positionKeys(splitLayout)[next.indexOf(moved)]) }))
+  }
+  const movePane = (sid: string, dir: 1 | -1) => {
+    if (!activeSplit) return
+    // aceeaşi regulă ca movePaneBy (lib/splitLayout): schimb cu vecinul, circular
+    const p = activeSplit.panes
+    const i = p.indexOf(sid)
+    if (i < 0 || p.length < 2 || !movePaneBy(p, sid, dir)) return
+    applyMove({ kind: 'swap', from: sid, to: p[(i + dir + p.length) % p.length] })
+  }
+  const selectPane = (sid: string) => {
+    if (sid !== selectedSid) replaceRoute(sid)
+  }
+  const toggleMax = (sid: string) => {
+    selectPane(sid)
+    setMaxPane((m) => (m === sid ? null : sid))
+    setPaneFocusNonce((n) => n + 1)
+  }
+  // dimensiuni: actualizare optimistă + PATCH (imediat la eliberarea dividerului, amânat din tastatură)
+  const commitSizes = (id: number, sizes: number[], debounce: boolean) => {
+    const layout = splitLayout
+    const changes: Partial<SplitView> = layout === 'cols2' ? { sizes, layout, ratio: sizes[0] } : { sizes, layout }
+    setSplitViews((prev) => prev.map((v) => (v.id === id ? { ...v, ...changes } : v)))
+    if (sizeTimer.current) clearTimeout(sizeTimer.current)
+    const send = () => {
+      sizeTimer.current = 0
+      api(`/api/split-views/${id}`, { method: 'PATCH', body: JSON.stringify({ layout, sizes }) })
+        .catch((e) => { splitErr(e); refresh() })
+      setLayoutNonce((n) => n + 1)     // divider eliberat: panourile îşi reclamă dimensiunea
+    }
+    if (debounce) sizeTimer.current = setTimeout(send, 400)
+    else send()
+  }
+  // drag de divider: în timpul tragerii se schimbă DOAR variabilele CSS ale grilei (rAF, fără
+  // re-randare React şi fără resize-uri — ResizeObserver-ul panourilor are debounce); commit la
+  // eliberare. Pointer capture: tragerea nu se pierde când cursorul trece peste un iframe/terminal.
+  const startDrag = (d: DividerSpec, e: React.PointerEvent<HTMLDivElement>) => {
+    const el = gridRef.current
+    if (!el || !activeSplit || e.button !== 0) return
     e.preventDefault()
-    const el = splitRef.current
-    if (!el || !activeSplit) return
+    const target = e.currentTarget
+    try { target.setPointerCapture(e.pointerId) } catch { /* */ }
     const id = activeSplit.id
+    const layout = splitLayout
+    const vertical = d.orientation === 'vertical'
     const rect = el.getBoundingClientRect()
-    const clamp = (v: number) => Math.min(0.85, Math.max(0.15, v))
-    const at = (x: number) => clamp((x - rect.left) / rect.width)
-    const move = (ev: PointerEvent) =>
-      setSplitViews((prev) => prev.map((v) => (v.id === id ? { ...v, ratio: at(ev.clientX) } : v)))
-    const up = (ev: PointerEvent) => { detach(); patchSplit(id, { ratio: at(ev.clientX) }) }
-    const detach = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up) }
-    window.addEventListener('pointermove', move)
-    window.addEventListener('pointerup', up)
+    let cur = splitSizes
+    let raf = 0
+    let last = vertical ? e.clientX : e.clientY
+    const paint = () => {
+      raf = 0
+      cur = setBoundary(layout, cur, d, pointerToCum(d, vertical ? rect.left : rect.top, vertical ? rect.width : rect.height, last))
+      for (const [k, v] of Object.entries(sizeVars(layout, cur))) el.style.setProperty(k, v)
+      target.setAttribute('aria-valuenow', String(Math.round(cur[d.a] * 100)))
+      target.setAttribute('aria-valuetext', t('split.dividerValue', { a: Math.round(cur[d.a] * 100), b: Math.round(cur[d.b] * 100) }))
+    }
+    const move = (ev: PointerEvent) => {
+      last = vertical ? ev.clientX : ev.clientY
+      if (!raf) raf = requestAnimationFrame(paint)
+    }
+    const up = () => {
+      target.removeEventListener('pointermove', move)
+      target.removeEventListener('pointerup', up)
+      target.removeEventListener('pointercancel', up)
+      if (raf) { cancelAnimationFrame(raf); paint() }
+      commitSizes(id, cur, false)
+    }
+    target.addEventListener('pointermove', move)
+    target.addEventListener('pointerup', up)
+    target.addEventListener('pointercancel', up)
+  }
+  const dividerKey = (d: DividerSpec, e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!activeSplit) return
+    const v = d.orientation === 'vertical'
+    const key = e.key === 'Home' ? 'min' : e.key === 'End' ? 'max'
+      : e.key === (v ? 'ArrowLeft' : 'ArrowUp') ? 'dec' : e.key === (v ? 'ArrowRight' : 'ArrowDown') ? 'inc' : null
+    if (!key) return
+    e.preventDefault()
+    commitSizes(activeSplit.id, nudge(splitLayout, splitSizes, d, key), true)
+  }
+  // drag & drop peste un panou: titlul altui panou (swap) sau un tab din bară (înlocuire). Tipuri
+  // proprii — fişierele trase peste terminal (upload) trec neatinse spre SessionView.
+  const PANE_MIME = 'application/x-wt-pane'
+  const TAB_MIME = 'application/x-wt-session'
+  const dragKind = (e: React.DragEvent) => {
+    const ty = Array.from(e.dataTransfer.types)
+    return ty.includes(PANE_MIME) ? 'pane' : ty.includes(TAB_MIME) ? 'tab' : null
+  }
+  const onPaneDragOver = (sid: string, e: React.DragEvent) => {
+    if (splitDegraded || !dragKind(e)) return
+    e.preventDefault(); e.stopPropagation()
+    e.dataTransfer.dropEffect = 'move'
+    if (dropPane !== sid) setDropPane(sid)
+  }
+  const onPaneDrop = (sid: string, e: React.DragEvent) => {
+    const kind = dragKind(e)
+    if (!kind) return
+    e.preventDefault(); e.stopPropagation()
+    setDropPane(null)
+    if (kind === 'pane') {
+      const from = e.dataTransfer.getData(PANE_MIME)
+      if (from && from !== sid) applyMove({ kind: 'swap', from, to: sid })
+    } else {
+      const w = e.dataTransfer.getData(TAB_MIME)
+      if (w && sessions.some((s) => s.id === w)) applyMove({ kind: 'replace', target: sid, with: w })
+    }
+  }
+  // panoul afişat când se vede unul singur (telefon / maximizat)
+  const shownPane = maxPane && splitPaneSids.includes(maxPane) ? maxPane
+    : (selectedSid && splitPaneSids.includes(selectedSid) ? selectedSid : splitPaneSids[0])
+  const gridStyle: React.CSSProperties | undefined = !splitActive ? undefined
+    : (narrowSplit || maxPane)
+      ? { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gridTemplateRows: 'minmax(0, 1fr)' }
+      : {
+          display: 'grid', gap: `${GAP}px`,
+          gridTemplateColumns: gridSpec(splitLayout).columns, gridTemplateRows: gridSpec(splitLayout).rows,
+          gridTemplateAreas: gridSpec(splitLayout).template,
+          ...(sizeVars(splitLayout, splitSizes) as React.CSSProperties),
+        }
+  const maxShortcut = shortcutFor('maximizePane')
+  // bara de titlu a unui panou de split: mâner de drag (swap), numărul + titlul, „Move to…", maximizare
+  const renderPaneBar = (s: Session, idx: number, selected: boolean) => {
+    const h = hosts.find((x) => x.id === s.host_id)
+    const title = sessionTitle(s.title, t) || t('app.untitledSession')
+    const maxed = maxPane === s.id
+    const canMove = !splitDegraded && !narrowSplit
+    const posKeys = positionKeys(splitLayout)
+    return (
+      <div draggable={canMove}
+        onDragStart={(e) => { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData(PANE_MIME, s.id) }}
+        onDragEnd={() => setDropPane(null)}
+        onDoubleClick={(e) => { if (!(e.target as HTMLElement).closest('button')) toggleMax(s.id) }}
+        title={canMove ? t('split.dragHint') : undefined}
+        className={`relative flex h-7 shrink-0 select-none items-center gap-1.5 border-b px-1.5 text-2xs ${canMove ? 'cursor-grab' : ''} ${
+          selected ? 'border-sky-500/40 bg-sky-500/15 text-slate-100' : 'border-ink-800 bg-ink-900 text-slate-400'}`}>
+        {canMove && (
+          <svg width="8" height="12" viewBox="0 0 8 12" fill="currentColor" aria-hidden="true" className="shrink-0 opacity-60">
+            <circle cx="2" cy="2" r="1" /><circle cx="6" cy="2" r="1" /><circle cx="2" cy="6" r="1" />
+            <circle cx="6" cy="6" r="1" /><circle cx="2" cy="10" r="1" /><circle cx="6" cy="10" r="1" />
+          </svg>
+        )}
+        <span className="shrink-0 font-semibold tabular-nums" aria-hidden="true">{idx + 1}</span>
+        <span className="min-w-0 flex-1 truncate">
+          {title}{h && <span className="font-medium" style={{ color: hostColor(h) }}> · {h.name}</span>}
+        </span>
+        {canMove && splitPaneSids.length > 1 && (
+          <button type="button" data-testid="pane-move" aria-haspopup="menu" aria-expanded={moveMenu === s.id}
+            onClick={() => setMoveMenu((m) => (m === s.id ? null : s.id))}
+            aria-label={`${t('split.moveMenu')} — ${title}`} title={t('split.moveMenu')}
+            className="grid h-6 w-6 shrink-0 place-items-center rounded-md hover:bg-ink-700 hover:text-slate-100">
+            <ArrowsLeftRightIcon size={12} />
+          </button>
+        )}
+        <button type="button" data-testid="pane-max" aria-pressed={maxed}
+          onClick={() => toggleMax(s.id)}
+          aria-label={`${maxed ? t('split.restore', { shortcut: maxShortcut }) : t('split.maximize', { shortcut: maxShortcut })} — ${title}`}
+          title={maxed ? t('split.restore', { shortcut: maxShortcut }) : t('split.maximize', { shortcut: maxShortcut })}
+          className={`grid h-6 w-6 shrink-0 place-items-center rounded-md hover:bg-ink-700 hover:text-slate-100 ${maxed ? 'text-sky-300' : ''}`}>
+          <FullscreenIcon size={12} />
+        </button>
+        {moveMenu === s.id && (
+          <PaneMoveMenu
+            label={`${t('split.moveMenu')} — ${title}`}
+            items={splitPaneSids.map((o, j) => ({ sid: o, j })).filter((x) => x.sid !== s.id).map((x) => ({
+              key: x.sid,
+              label: t('split.moveItem', { pos: t('split.pos.' + posKeys[x.j]), title: paneTitle(x.sid) }),
+            }))}
+            onPick={(to) => { setMoveMenu(null); applyMove({ kind: 'swap', from: s.id, to }) }}
+            onClose={() => setMoveMenu(null)}
+          />
+        )}
+      </div>
+    )
   }
   const routeHost = route.host != null ? hosts.find((h) => h.id === route.host) ?? null : null
 
@@ -1474,10 +1891,14 @@ function MainApp() {
             /* split view: intrarea + controalele stau în bara de taburi (fosta bandă dedicată
                mânca o linie de ecran ori de câte ori aveai ≥2 taburi, chiar nefolosită) */
             split={{
-              views: splitViews.map((v) => ({ id: v.id, name: v.name })),
+              views: splitViews.map((v) => ({ id: v.id, name: v.name, layout: effectiveLayout(v.layout, v.panes.length + (v.hidden ?? 0)), hidden: v.hidden })),
               activeId: activeSplitId,
               broadcast,
-              onSelect: (id) => setActiveSplitId(id),
+              onSelect: enterSplit,
+              layouts: splitActive ? {
+                current: splitLayout, options: layoutsFor(splitPanes.length), onPick: pickLayout, disabled: splitDegraded,
+              } : undefined,
+              onReorder: reorderSplits,
               onCreate: openWizardCreate,
               onEdit: (id) => { const v = splitViews.find((x) => x.id === id); if (v) openWizardEdit(v) },
               onDelete: deleteSplit,
@@ -1488,73 +1909,115 @@ function MainApp() {
           />
         )}
       <main className="wt-main flex min-h-0 min-w-0 flex-1">
-        {/* GRILĂ multi-terminal: ia locul stack-ului keep-alive şi al split-ului (altfel o
-            sesiune s-ar monta de două ori → două WS pe acelaşi PTY, războiul de detach tmux).
-            2 panouri = o linie; 3–4 = 2×2. Fiecare panou e o sesiune completă, vie. */}
-        {splitActive && splitPanes.length === 2 ? (
-          /* SPLIT de 2: două panouri vii cu divider draggable între ele. Click pe un panou îl
-             face „activ" (ţinta acţiunilor de sesiune); broadcast-ul merge oricum per-panou. */
-          <div ref={splitRef} className="flex min-h-0 min-w-0 flex-1 bg-ink-800">
-            <div className="relative min-h-0 min-w-0 overflow-hidden bg-ink-900"
-              style={{ width: `${splitRatio * 100}%` }}
-              onMouseDownCapture={() => { if (splitPanes[0].id !== selectedSid) navigate(splitPanes[0].id) }}>
-              <PaneErrorBoundary>{renderPane(splitPanes[0], splitPanes[0].id === selectedSid, true)}</PaneErrorBoundary>
+        {/* 3.6.12: UN singur strat de terminale montate, cheiat pe sid (vezi `mountedSids`). Fără
+            split: stiva keep-alive suprapusă, doar tabul selectat vizibil — `visibility` (nu
+            display:none), ca cele ascunse să-şi păstreze dimensiunile. Cu split: containerul devine
+            grilă CSS, panourile split-ului îşi iau `grid-area`, restul stivei rămâne montat dar
+            ascuns — intrarea/ieşirea din split, schimbarea formei şi un swap NU mai remontează (nici
+            nu reconectează) niciun terminal. Fără terminal activ (dashboard/pagina hostului)
+            stratul rămâne montat dar ascuns — sesiunile supraviețuiesc navigării. */}
+        <div className={splitActive || primary ? 'flex min-h-0 min-w-0 flex-1 flex-col' : 'hidden'}>
+          {splitActive && splitDegraded && (activeSplit?.hidden ?? 0) > 0 && (
+            <div role="status" className="wt-warn shrink-0 border-b border-amber-500/30 bg-amber-500/10 px-3 py-1 text-xs">
+              {t('split.hiddenNotice')}
             </div>
-            <div
-              role="separator" aria-orientation="vertical" tabIndex={0}
-              aria-label={t('split.dividerAria')}
-              aria-valuenow={Math.round(splitRatio * 100)} aria-valuemin={15} aria-valuemax={85}
-              onPointerDown={dragSplit}
-              onDoubleClick={() => { if (activeSplit) patchSplit(activeSplit.id, { ratio: 0.5 }) }}
-              onKeyDown={(e) => {
-                const d = e.key === 'ArrowLeft' ? -0.02 : e.key === 'ArrowRight' ? 0.02 : 0
-                if (!d || !activeSplit) return
-                e.preventDefault()
-                patchSplit(activeSplit.id, { ratio: Math.min(0.85, Math.max(0.15, splitRatio + d)) })
-              }}
-              className="group/divider relative w-1.5 shrink-0 cursor-col-resize bg-ink-600 outline-none transition-colors hover:bg-sky-500 focus-visible:bg-sky-500"
-            >
-              {/* grip: 3 puncte centrate — semnalează că e trăgabil (înainte era o linie de 1px abia vizibilă) */}
-              <span className="pointer-events-none absolute left-1/2 top-1/2 flex -translate-x-1/2 -translate-y-1/2 flex-col gap-[3px] opacity-50 transition-opacity group-hover/divider:opacity-90">
-                <span className="h-[3px] w-[3px] rounded-full bg-slate-300" />
-                <span className="h-[3px] w-[3px] rounded-full bg-slate-300" />
-                <span className="h-[3px] w-[3px] rounded-full bg-slate-300" />
-              </span>
+          )}
+          {splitActive && narrowSplit && (
+            /* telefon: un panou o dată + comutator (panourile ascunse rămân montate) */
+            <div role="toolbar" aria-label={t('split.paneSwitcher')} data-testid="split-switcher"
+              className="flex shrink-0 gap-1 overflow-x-auto border-b border-ink-800 bg-ink-900 px-2 py-1">
+              {splitPanes.map((s, i) => (
+                <button key={s.id} aria-pressed={s.id === shownPane}
+                  onClick={() => { selectPane(s.id); setPaneFocusNonce((n) => n + 1) }}
+                  className={`wt-touch flex min-h-[36px] min-w-0 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-xs ${
+                    s.id === shownPane ? 'bg-sky-600 text-white' : 'text-slate-300 ring-1 ring-ink-700'}`}>
+                  <span className="font-semibold tabular-nums">{i + 1}</span>
+                  <span className="max-w-[110px] truncate">{sessionTitle(s.title, t) || t('app.untitledSession')}</span>
+                </button>
+              ))}
             </div>
-            <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden bg-ink-900"
-              onMouseDownCapture={() => { if (splitPanes[1].id !== selectedSid) navigate(splitPanes[1].id) }}>
-              <PaneErrorBoundary>{renderPane(splitPanes[1], splitPanes[1].id === selectedSid, true)}</PaneErrorBoundary>
-            </div>
+          )}
+          <div ref={gridRef} data-split-layout={splitActive ? splitLayout : undefined}
+            className={`relative min-h-0 min-w-0 flex-1 ${splitActive ? 'bg-ink-800' : ''}`}
+            style={gridStyle}>
+            {mountedSids.map((sid) => {
+              const s = sessions.find((x) => x.id === sid)
+              if (!s) return null
+              const idx = splitActive ? splitPaneSids.indexOf(sid) : -1
+              const grid = idx >= 0
+              const selected = sid === selectedSid
+              const single = narrowSplit || !!maxPane
+              const visible = grid ? (single ? sid === shownPane : true) : (!splitActive && selected)
+              const title = sessionTitle(s.title, t) || t('app.untitledSession')
+              // ACEEAŞI formă a arborelui în ambele moduri (bară? · conţinut · overlay?): React
+              // reconciliază după poziţie, deci un nod în plus/minus ar remonta terminalul
+              return (
+                <div key={sid}
+                  data-split-pane={grid ? sid : undefined}
+                  data-selected={grid && selected ? 'true' : undefined}
+                  role={grid ? 'group' : undefined}
+                  aria-label={grid ? t('split.paneAria', { i: idx + 1, n: splitPaneSids.length, title }) : undefined}
+                  aria-hidden={!visible || undefined}
+                  className={visible && grid
+                    ? 'relative flex min-h-0 min-w-0 flex-col overflow-hidden bg-ink-900'
+                    : `absolute inset-0 flex flex-col ${visible ? 'visible' : 'invisible'}`}
+                  style={visible && grid ? { gridArea: single ? '1 / 1' : gridSpec(splitLayout).areas[idx] } : undefined}
+                  // click / focus (Tab) într-un panou îl SELECTEAZĂ: TabBar, ţinta acţiunilor şi
+                  // focusul tastaturii rămân de acord (înainte, Tab-ul în alt panou nu-l selecta)
+                  onMouseDownCapture={grid ? () => selectPane(sid) : undefined}
+                  onFocusCapture={grid ? () => selectPane(sid) : undefined}
+                  onDragOverCapture={grid ? (e) => onPaneDragOver(sid, e) : undefined}
+                  onDragLeave={grid ? (e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setDropPane((p) => (p === sid ? null : p)) } : undefined}
+                  onDropCapture={grid ? (e) => onPaneDrop(sid, e) : undefined}>
+                  {grid && renderPaneBar(s, idx, selected)}
+                  {/* aria-hidden şi aici: e părintele direct al .wt-window (selectoarele de test şi
+                      cititoarele de ecran se uită la el) */}
+                  <div className="relative min-h-0 min-w-0 flex-1" aria-hidden={!visible || undefined}>
+                    <PaneErrorBoundary>{renderPane(s, {
+                      selected: grid ? selected : (!splitActive && selected),
+                      grid,
+                      visible,
+                      // pe telefon panourile ascunse se pun pe pauză (trafic); pe desktop toate
+                      // panourile split-ului curg (şi cele ascunse de un maximize: revenire instant)
+                      stream: grid ? (narrowSplit ? visible : true) : visible,
+                    })}</PaneErrorBoundary>
+                  </div>
+                  {grid && dropPane === sid && (
+                    <div className="pointer-events-none absolute inset-0 z-30 grid place-items-center bg-sky-500/15 ring-2 ring-inset ring-sky-400">
+                      <span className="rounded-md bg-ink-900/90 px-2 py-1 text-xs text-slate-100">{t('split.dropHere')}</span>
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+            {splitActive && !narrowSplit && !maxPane && !splitDegraded && dividers(splitLayout).map((d, i) => {
+              const a = Math.round(splitSizes[d.a] * 100)
+              const b = Math.round(splitSizes[d.b] * 100)
+              return (
+                // separator focalizabil = „window splitter" WAI-ARIA: săgeţile îl mută, Home/End la capete
+                // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/no-noninteractive-tabindex
+                <div key={`${splitLayout}-${i}`} role="separator" tabIndex={0}
+                  aria-orientation={d.orientation} aria-label={t('split.dividerAria')}
+                  aria-valuenow={a} aria-valuemin={10} aria-valuemax={Math.max(10, a + b - 10)}
+                  aria-valuetext={t('split.dividerValue', { a, b })}
+                  data-divider={i}
+                  onPointerDown={(e) => startDrag(d, e)}
+                  onKeyDown={(e) => dividerKey(d, e)}
+                  onDoubleClick={() => { if (activeSplit) commitSizes(activeSplit.id, equalSizes(splitLayout), false) }}
+                  style={{ position: 'absolute', ...dividerStyle(d), touchAction: 'none' }}
+                  className={`group/divider z-20 ${d.orientation === 'vertical' ? 'cursor-col-resize' : 'cursor-row-resize'} bg-ink-600 outline-none transition-colors hover:bg-sky-500 focus-visible:bg-sky-500`}>
+                  {/* grip: 3 puncte centrate — semnalează că e trăgabil */}
+                  <span className={`pointer-events-none absolute left-1/2 top-1/2 flex -translate-x-1/2 -translate-y-1/2 gap-[3px] opacity-50 transition-opacity group-hover/divider:opacity-90 ${
+                    d.orientation === 'vertical' ? 'flex-col' : 'flex-row'}`}>
+                    <span className="h-[3px] w-[3px] rounded-full bg-slate-300" />
+                    <span className="h-[3px] w-[3px] rounded-full bg-slate-300" />
+                    <span className="h-[3px] w-[3px] rounded-full bg-slate-300" />
+                  </span>
+                </div>
+              )
+            })}
           </div>
-        ) : splitActive ? (
-          <div className="grid min-h-0 min-w-0 flex-1 grid-cols-2 grid-rows-2 gap-px bg-ink-800">
-            {splitPanes.map((s) => (
-              // click pe un panou îl face „activ" (ţinta acţiunilor de sesiune: snippet/font/
-              // căutare); tastarea/broadcast-ul merg oricum per-panou, asta doar retarghetează
-              <div key={s.id} className="relative min-h-0 min-w-0 overflow-hidden bg-ink-900"
-                onMouseDownCapture={() => { if (s.id !== selectedSid) navigate(s.id) }}>
-                <PaneErrorBoundary>{renderPane(s, s.id === selectedSid, true)}</PaneErrorBoundary>
-              </div>
-            ))}
-          </div>
-        ) : (
-        /* stack-ul keep-alive: toate tab-urile recente stau montate, suprapuse; doar cel activ e
-           vizibil. `visibility` (nu display:none) ca hidden-ele să-și păstreze dimensiunile prin
-           ResizeObserver. Fără terminal activ (dashboard/pagina hostului) stack-ul rămâne montat
-           dar ascuns — sesiunile supraviețuiesc navigării. */
-        <div className={primary ? 'relative min-w-0 flex-1' : 'hidden'}>
-          {keepAlive.map((sid) => {
-            const s = sessions.find((x) => x.id === sid)
-            if (!s) return null
-            const active = sid === selectedSid
-            return (
-              <div key={sid} aria-hidden={!active} className={`absolute inset-0 ${active ? 'visible' : 'invisible'}`}>
-                <PaneErrorBoundary>{renderPane(s, active)}</PaneErrorBoundary>
-              </div>
-            )
-          })}
         </div>
-        )}
         {!splitActive && !primary && (<PaneErrorBoundary>{!routeHost && route.host != null && lastHostsRef.current !== '' ? (
           // link adânc spre un host pe care nu-l (mai) vezi: DELIBERAT ambiguu — „nu există" şi
           // „nu ai acces" arată la fel, exact ca răspunsul serverului (404, fără oracol)
@@ -1726,11 +2189,12 @@ function MainApp() {
               </label>
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
-              {openTabs.map((sid) => {
+              {wizard.list.map((sid) => {
                 const s = sessions.find((x) => x.id === sid)
                 if (!s) return null
                 const h = hosts.find((x) => x.id === s.host_id)
                 const checked = wizard.sel.includes(sid)
+                const order = wizard.sel.indexOf(sid)
                 const atCap = !checked && wizard.sel.length >= GRID_MAX
                 return (
                   <label key={sid}
@@ -1740,6 +2204,9 @@ function MainApp() {
                     <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: h ? hostColor(h) : '#64748b' }} />
                     <span className="min-w-0 flex-1 truncate text-sm text-slate-200">{sessionTitle(s.title, t)}</span>
                     <span className="shrink-0 truncate font-mono text-2xs text-slate-500">{h?.name}</span>
+                    {/* poziţia în split = ordinea bifării */}
+                    <span aria-hidden="true" className={`grid h-5 w-5 shrink-0 place-items-center rounded-full text-2xs font-semibold tabular-nums ${
+                      order >= 0 ? 'bg-sky-600 text-white' : 'text-transparent'}`}>{order >= 0 ? order + 1 : ''}</span>
                   </label>
                 )
               })}

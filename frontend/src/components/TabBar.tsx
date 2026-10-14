@@ -7,6 +7,8 @@ import { useI18n } from '../lib/i18n'
 import { PHONE_QUERY, useMediaQuery } from '../lib/sheet'
 import { isOverflowing, menuNav, showAllTabsButton, tabState } from '../lib/tablist'
 import { CloseIcon, HomeIcon, KeyboardIcon, PencilIcon, PlusIcon } from './Icons'
+import { LAYOUT_LABEL, LayoutIcon } from './SplitLayoutIcon'
+import type { SplitLayout } from '../lib/splitLayout'
 
 /** Sesiunile deschise ca tab-uri (setul de lucru), pe cromul întunecat.
    Fiecare tab arată host-ul (nume + culoare stabilă) ca să distingi instant
@@ -26,7 +28,7 @@ export default function TabBar(props: {
   /** split-views: chip-uri denumite lângă taburi + „+" (creare) şi, când unul e activ,
       controalele compacte (broadcast / ieşire). Chip-urile sunt „taburi" pentru layout-uri. */
   split?: {
-    views: { id: number; name: string }[]
+    views: { id: number; name: string; layout?: string; hidden?: number }[]
     activeId: number | null
     broadcast: boolean
     onSelect: (id: number) => void
@@ -35,6 +37,10 @@ export default function TabBar(props: {
     onDelete: (id: number) => void
     onBroadcast: () => void
     onExit: () => void
+    /** 3.6.12: picker-ul de aranjare al view-ului activ (doar când există >1 formă: 3 panouri) */
+    layouts?: { current: SplitLayout; options: SplitLayout[]; onPick: (l: SplitLayout) => void; disabled?: boolean }
+    /** 3.6.12: reordonarea chip-urilor (drag & drop sau Alt+Shift+←/→), persistată ca `position` */
+    onReorder?: (from: number, to: number) => void
   }
 }) {
   const { t } = useI18n()
@@ -109,6 +115,19 @@ export default function TabBar(props: {
     if (refocus) requestAnimationFrame(() => listBtnRef.current?.focus())
   }
 
+  // chip-urile de split: aceeaşi mecanică de drag & drop, pe tipul lor propriu
+  const [chipDrag, setChipDrag] = useState<number | null>(null)
+  const [chipOver, setChipOver] = useState<number | null>(null)
+  const dropChip = () => {
+    const sp = props.split
+    if (sp?.onReorder && chipDrag != null && chipOver != null && chipDrag !== chipOver) {
+      const ids = sp.views.map((v) => v.id)
+      sp.onReorder(ids.indexOf(chipDrag), ids.indexOf(chipOver))
+    }
+    setChipDrag(null)
+    setChipOver(null)
+  }
+
   const drop = () => {
     if (drag && over && drag !== over) {
       const order = props.tabs.map((s) => s.id)
@@ -177,8 +196,13 @@ export default function TabBar(props: {
             <div
               key={s.id}
               draggable
-              onDragStart={(e) => { setDrag(s.id); e.dataTransfer.effectAllowed = 'move' }}
-              onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; if (over !== s.id) setOver(s.id) }}
+              onDragStart={(e) => {
+                setDrag(s.id); e.dataTransfer.effectAllowed = 'move'
+                // tip PROPRIU (nu text/plain): un tab lăsat peste un panou de split îl înlocuieşte
+                // (3.6.12); text/plain ar fi fost lipit în textarea terminalului ca sid brut
+                try { e.dataTransfer.setData('application/x-wt-session', s.id) } catch { /* */ }
+              }}
+              onDragOver={(e) => { if (!drag) return; e.preventDefault(); e.dataTransfer.dropEffect = 'move'; if (over !== s.id) setOver(s.id) }}
               onDrop={(e) => { e.preventDefault(); drop() }}
               onDragEnd={drop}
               style={active ? { background: `color-mix(in srgb, ${color} 18%, var(--chrome-elev))` } : undefined}
@@ -252,18 +276,37 @@ export default function TabBar(props: {
         const sp = props.split
         return (
         <div className="ml-auto flex shrink-0 items-center gap-0.5 pl-1">
-          {sp.views.map((v) => {
+          <span id="wt-split-reorder-hint" className="sr-only">{t('split.reorderHint')}</span>
+          {sp.views.map((v, vi) => {
             const active = v.id === sp.activeId
             return (
               <div key={v.id}
-                className={`wt-tab group mb-1.5 flex shrink-0 items-stretch rounded-md ${active ? 'is-active' : ''}`}>
+                draggable={!!sp.onReorder}
+                onDragStart={(e) => {
+                  setChipDrag(v.id); e.dataTransfer.effectAllowed = 'move'
+                  try { e.dataTransfer.setData('application/x-wt-splitchip', String(v.id)) } catch { /* */ }
+                }}
+                onDragOver={(e) => { if (chipDrag == null) return; e.preventDefault(); if (chipOver !== v.id) setChipOver(v.id) }}
+                onDrop={(e) => { e.preventDefault(); dropChip() }}
+                onDragEnd={dropChip}
+                className={`wt-tab group mb-1.5 flex shrink-0 items-stretch rounded-md ${active ? 'is-active' : ''} ${
+                  chipDrag === v.id ? 'opacity-40' : ''} ${chipOver === v.id && chipDrag != null && chipDrag !== v.id ? 'ring-2 ring-sky-400/70' : ''}`}>
                 <button onClick={() => sp.onSelect(v.id)} aria-pressed={active}
+                  data-split-chip={v.id}
+                  aria-describedby={sp.onReorder ? 'wt-split-reorder-hint' : undefined}
+                  onKeyDown={(e) => {
+                    const dir = e.key === 'ArrowLeft' ? -1 : e.key === 'ArrowRight' ? 1 : 0
+                    if (!dir || !e.altKey || !e.shiftKey || e.ctrlKey || e.metaKey || !sp.onReorder) return
+                    e.preventDefault(); e.stopPropagation()
+                    const to = vi + dir
+                    if (to < 0 || to >= sp.views.length) return
+                    sp.onReorder(vi, to)
+                    setAnnounce(t('tabbar.moved', { n: to + 1, total: sp.views.length }))
+                    requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(`button[data-split-chip="${v.id}"]`)?.focus())
+                  }}
                   title={t('split.switchTo', { name: v.name })}
                   className={`flex min-w-0 items-center gap-1.5 py-1.5 pl-2 pr-1 text-sm ${active ? '' : 'text-slate-400'}`}>
-                  <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor"
-                    strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
-                    <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" /><path d="M8 2.5v11" />
-                  </svg>
+                  <LayoutIcon layout={v.layout} />
                   <span className="max-w-[120px] truncate">{v.name}</span>
                 </button>
                 <button onClick={() => sp.onEdit(v.id)} title={t('split.edit')} aria-label={t('split.edit')}
@@ -287,6 +330,7 @@ export default function TabBar(props: {
           )}
           {sp.activeId != null && (
             <>
+              {sp.layouts && sp.layouts.options.length > 1 && <LayoutPicker {...sp.layouts} />}
               <button onClick={sp.onBroadcast}
                 title={sp.broadcast ? t('grid.broadcastOnBtn') : t('grid.broadcastOff')}
                 aria-label={sp.broadcast ? t('grid.broadcastOnBtn') : t('grid.broadcastOff')}
@@ -455,5 +499,65 @@ function AllTabsMenu(props: {
       </div>
     </>,
     document.body,
+  )
+}
+
+/** Picker-ul de aranjare al split-ului activ: buton + meniu (menuitemradio, ↑/↓/Home/End, Escape). */
+function LayoutPicker(props: { current: SplitLayout; options: SplitLayout[]; onPick: (l: SplitLayout) => void; disabled?: boolean }) {
+  const { t } = useI18n()
+  const [open, setOpen] = useState(false)
+  const btnRef = useRef<HTMLButtonElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!open) return
+    menuRef.current?.querySelector<HTMLElement>('[aria-checked="true"]')?.focus()
+    const onDown = (e: PointerEvent) => {
+      if (!menuRef.current?.contains(e.target as Node) && !btnRef.current?.contains(e.target as Node)) setOpen(false)
+    }
+    window.addEventListener('pointerdown', onDown, true)
+    return () => window.removeEventListener('pointerdown', onDown, true)
+  }, [open])
+  const close = (refocus: boolean) => { setOpen(false); if (refocus) requestAnimationFrame(() => btnRef.current?.focus()) }
+  const a = open ? btnRef.current?.getBoundingClientRect() : null
+  return (
+    <>
+      <button ref={btnRef} onClick={() => setOpen((v) => !v)} disabled={props.disabled}
+        aria-haspopup="menu" aria-expanded={open} data-testid="split-layout"
+        title={`${t('split.layout')}: ${t(LAYOUT_LABEL[props.current])}`}
+        aria-label={`${t('split.layoutMenu')} — ${t(LAYOUT_LABEL[props.current])}`}
+        className="wt-touch wt-tabbtn mb-1.5 flex shrink-0 items-center justify-center rounded-md px-2 py-1.5 disabled:opacity-40">
+        <LayoutIcon layout={props.current} size={15} />
+      </button>
+      {open && a && createPortal(
+        // eslint-disable-next-line jsx-a11y/no-static-element-interactions -- navigarea meniului (↑/↓/Escape) e pe container
+        <div ref={menuRef} data-testid="split-layout-menu"
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(true); return }
+            if (e.key === 'Tab') { e.preventDefault(); close(true); return }
+            const items = Array.from(menuRef.current?.querySelectorAll<HTMLElement>('[role="menuitemradio"]') ?? [])
+            const next = menuNav(e.key, items.indexOf(document.activeElement as HTMLElement), items.length)
+            if (next === null) return
+            e.preventDefault()
+            items[next]?.focus()
+          }}
+          style={{ top: a.bottom + 4, right: Math.max(8, window.innerWidth - a.right) }}
+          className="fixed z-50 w-72 max-w-[calc(100vw-16px)] rounded-xl border border-ink-700 bg-ink-900 p-1 shadow-2xl">
+          <p id="wt-split-layout-title" className="px-2.5 py-1.5 text-xs font-semibold uppercase tracking-wide text-slate-400">{t('split.layout')}</p>
+          <div role="menu" aria-labelledby="wt-split-layout-title">
+            {props.options.map((l) => (
+              <button key={l} role="menuitemradio" aria-checked={l === props.current} tabIndex={-1}
+                data-layout={l}
+                onClick={() => { close(true); if (l !== props.current) props.onPick(l) }}
+                className={`flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm text-slate-200 hover:bg-ink-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400 ${
+                  l === props.current ? 'bg-ink-800 ring-1 ring-sky-500/50' : ''}`}>
+                <LayoutIcon layout={l} size={18} />
+                <span className="min-w-0 flex-1">{t(LAYOUT_LABEL[l])}</span>
+              </button>
+            ))}
+          </div>
+        </div>,
+        document.body,
+      )}
+    </>
   )
 }

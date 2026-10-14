@@ -37,6 +37,7 @@ const EXTRA: Record<string, { labelKey: string; keys: string }[]> = {
     { labelKey: 'shortcuts.editorCommands', keys: 'F1' },
     { labelKey: 'shortcuts.gitCommit', keys: 'Mod+Enter' },
     { labelKey: 'shortcuts.splitDivider', keys: 'shortcuts.kDivider' },
+    { labelKey: 'shortcuts.splitDrag', keys: 'shortcuts.kDrag' },
     { labelKey: 'shortcuts.openSessionRow', keys: 'shortcuts.kDblClick' },
   ],
 }

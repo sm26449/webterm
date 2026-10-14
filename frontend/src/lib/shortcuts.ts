@@ -12,6 +12,7 @@ export type ShortcutId =
   | 'palette' | 'help' | 'search' | 'closeTab' | 'reopenTab'
   | 'nextTab' | 'prevTab' | 'split' | 'popout'
   | 'fontUp' | 'fontDown' | 'snippets' | 'focusSidebar' | 'home' | 'pastePicker'
+  | 'movePane' | 'maximizePane'
 
 export interface Shortcut {
   id: ShortcutId
@@ -50,6 +51,13 @@ export const SHORTCUTS: Shortcut[] = [
     match: (e) => e.code === 'ArrowLeft' && altOnly(e) },
   { id: 'split', keys: 'Alt+D', group: 'session',
     match: (e) => e.code === 'KeyD' && altOnly(e) },
+  // 3.6.12, DOAR într-un split (în afara lui App nu le înregistrează acţiunea, deci tasta ajunge
+  // în shell neatinsă): Alt+M = panoul focalizat schimbă locul cu următorul, Alt+X = maximizează /
+  // restaurează panoul. NU Alt+Z: e „word wrap" în editorul de fişiere.
+  { id: 'movePane', keys: 'Alt+M', group: 'session',
+    match: (e) => e.code === 'KeyM' && altOnly(e) && !e.shiftKey },
+  { id: 'maximizePane', keys: 'Alt+X', group: 'session',
+    match: (e) => e.code === 'KeyX' && altOnly(e) && !e.shiftKey },
   { id: 'popout', keys: 'Alt+P', group: 'session',
     match: (e) => e.code === 'KeyP' && altOnly(e) },
   { id: 'fontUp', keys: 'Alt++', group: 'session',

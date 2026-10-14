@@ -81,8 +81,14 @@ export interface Connection {
 export interface SplitView {
   id: number
   name: string
-  panes: string[]       // 2-4 sid-uri distincte
-  ratio: number         // divider pt. 2 panouri, fracţie 0.15..0.85
+  panes: string[]       // 2-4 sid-uri distincte — DOAR cele pe care contul le vede acum
+  ratio: number         // divider pt. 2 panouri, fracţie 0.15..0.85 (compat; 3.6.12: `sizes`)
+  /** 3.6.12: forma (`cols2` | `cols3` | `main-left` | `main-top` | `grid`) + fracţiile pe grupuri
+      (vezi lib/splitLayout.ts). Lipsesc pe un gateway mai vechi → implicitul pe numărul de panouri. */
+  layout?: string
+  sizes?: number[]
+  /** câte panouri vii sunt ascunse acum (rol / host 2FA fără step-up) — nu se pot rearanja până revin */
+  hidden?: number
   broadcast: boolean
   position: number
 }
