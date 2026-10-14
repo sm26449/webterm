@@ -7,15 +7,37 @@
 export type DragKind = 'pane' | 'tab'
 
 let current: { kind: DragKind; sid: string } | null = null
+let timer: ReturnType<typeof setTimeout> | null = null
+
+/** plasă de siguranţă: un drag „uitat" (sursa demontată în timpul drag-ului, deci fără onDragEnd)
+    nu rămâne valabil la nesfârşit — după atât, o lăsare e refuzată (fail-closed) */
+export const DRAG_MAX_MS = 60_000
+
+// sfârşitul drag-ului văzut la nivel de fereastră (bubbling, deci DUPĂ handler-ele React ale
+// ţintei, care apelează acceptDrop): dragend-ul sursei urcă până aici chiar dacă sursa a fost
+// mutată în DOM, iar un drop oriunde închide drag-ul (re-review 3.6.12, INFO)
+const onWindowEnd = () => endDrag()
+function listen(on: boolean): void {
+  if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return
+  for (const type of ['dragend', 'drop']) {
+    if (on) window.addEventListener(type, onWindowEnd)
+    else window.removeEventListener(type, onWindowEnd)
+  }
+}
 
 /** apelat din onDragStart-ul sursei (titlul panoului / tabul) */
 export function beginDrag(kind: DragKind, sid: string): void {
+  endDrag()
   current = { kind, sid }
+  timer = setTimeout(endDrag, DRAG_MAX_MS)
+  listen(true)
 }
 
 /** apelat din onDragEnd-ul sursei (şi după o lăsare) */
 export function endDrag(): void {
   current = null
+  if (timer) { clearTimeout(timer); timer = null }
+  listen(false)
 }
 
 /** Ce drag din pagina asta e în curs (pentru dragover: tipurile se văd, payload-ul nu). */

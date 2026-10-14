@@ -3036,6 +3036,8 @@ const en: Lang = {
     'session.peerUnknownTitle': "Can't check every pane",
     'session.peerUnknownDesc': "Broadcast is on and at least one pane can't show what this would run there (paused, still loading, or your keys haven't echoed back yet). Run it in all panes anyway?",
     'session.insertGuarded': "Not typed — a line would match the guardrail rule /{pattern}/: {cmd}",
+    'session.queuedNotSent.one': "{count} key typed while the panes were being checked was not sent.",
+    'session.queuedNotSent.other': "{count} keys typed while the panes were being checked were not sent.",
     'session.lockedTitle': "Session locked due to inactivity",
     'session.lockedDesc': "The host requires 2FA. The terminal keeps running — confirm your second factor again to resume access.",
     'session.verifying': "Verifying…",

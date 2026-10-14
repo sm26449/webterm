@@ -27,6 +27,12 @@ export interface PeerState {
   echoed: boolean
   /** comanda tastată acum (OSC 133) sau null */
   pending: string | null
+  /** `atPrompt` / `pending` sunt de crezut (CommandTracker.lineKnown). false = panou CU shell
+      integration, fără comandă în curs, pe ecranul principal, dar după un replay de istoric
+      (ataşare, reconectare, reluarea unui panou de telefon) fără prompt live de atunci — sau între
+      Enter şi următorul prompt. Atunci „nu e la prompt" NU înseamnă „fără shell integration":
+      linia poate fi o comandă rechemată pe care n-o vedem (re-review 3.6.12, M1). */
+  known: boolean
 }
 
 export type PeerVerdict =
@@ -42,7 +48,8 @@ export function guardActive(guard: CommandGuard | null | undefined): boolean {
   return !!guard?.enabled && Array.isArray(guard.rules) && guard.rules.length > 0
 }
 
-/** Verdictul pentru un Enter difuzat. `prefixFor` transformă linia unui panou înainte de
+/** Verdictul pentru un Enter difuzat. Panoul de ORIGINE e şi el o ţintă (re-review 3.6.12, L-b):
+    linia lui se re-citeşte după aşteptarea ecoului, ca a celorlalte. `lineOf` transformă linia unui panou înainte de
     verificare (ex. un snippet inserat: linia existentă + prima linie a snippetului).
     `final` = aşteptarea ecoului s-a terminat: un panou încă fără ecou devine `unknown`. */
 export function judgePeers(peers: PeerState[], guard: CommandGuard | null | undefined, final: boolean,
@@ -56,7 +63,9 @@ export function judgePeers(peers: PeerState[], guard: CommandGuard | null | unde
     if (rule && line) return { kind: 'rule', rule, cmd: line }
   }
   if (targets.some((p) => !p.live)) return { kind: 'unknown' }
-  if (targets.some((p) => p.atPrompt && !p.echoed)) return final ? { kind: 'unknown' } : { kind: 'wait' }
+  // linie necunoscută (după replay / înainte de prompt) sau taste fără ecou: aşteptăm puţin un
+  // prompt / ecou live, apoi confirmare. NU „fără shell integration → ok": vezi PeerState.known.
+  if (targets.some((p) => !p.known || (p.atPrompt && !p.echoed))) return final ? { kind: 'unknown' } : { kind: 'wait' }
   return { kind: 'ok' }
 }
 
@@ -73,4 +82,11 @@ export function submitsLine(text: string): boolean {
 /** Un Enter „gol" venit prin onData (IME mobil, keybar, Enter sintetizat), nu prin keydown. */
 export function isBareEnter(d: string): boolean {
   return d === '\r' || d === '\n' || d === '\r\n'
+}
+
+/** Textul unui chunk de input fără marcajele bracketed paste — doar pentru VERIFICARE (ce se trimite
+    rămâne neatins). Un payload care îşi închide singur paste-ul (`\x1b[201~`) ar executa liniile de
+    după, deci nu tratăm bracketed paste ca „inert": fail-closed, verificăm toate liniile. */
+export function unbracket(d: string): string {
+  return d.replace(/\x1b\[20[01]~/g, '')
 }

@@ -90,6 +90,16 @@ none of it reconnects a terminal. No agent change (agent stays 58).
   PATCH racing a delete answers 404 instead of 500. Drag and drop onto a pane accepts only drags
   started in this page (another site could drop its own session id). On macOS `Alt+M` / `Alt+X` no
   longer swallow `µ` / `≈` typed with Option; they act only when the key gives the plain letter.
+  Re-review: after any history replay (attach, reconnect, a phone pane resumed when broadcast turns
+  on) a pane's typed line is unknown until its shell prints a live prompt — the old check read that
+  as "no shell integration" and let a command recalled before the reconnect run unchecked; a pane
+  whose shell has integration now asks "Can't check every pane" in that state. The origin pane is
+  re-read after the echo wait like the others, "Run in all panes" judges every pane again at click
+  time (a line that now matches a rule gets the rule's dialog), an IME commit such as `ls⏎` or a
+  multi-line paste is checked line by line in every pane, "Paste & run" no longer starts a second
+  wait on top of a running one, keys typed during a wait that ends in a dialog are reported instead
+  of dropped silently, the wait timer is cleared when a pane closes, and a pane drag left open by a
+  vanished source expires.
 
 ## [3.6.11] — 2026-10-14 · agent (58)
 

@@ -57,6 +57,11 @@ export class CommandTracker {
   private promptCol = 0
   private pendingText: string | null = null  // textul comenzii, dacă shell-ul ni-l trimite (E)
   private current: Command | null = null
+  /** shell integration văzută vreodată în panoul ăsta (orice marcaj OSC 133, live SAU rejucat);
+      supravieţuieşte lui reset() — un panou nu-şi pierde shell integration la o reconectare */
+  private integratedFlag = false
+  /** după reset() (replay de istoric) nu ştim linia tastată până la următorul B live */
+  private staleFlag = false
   commands: Command[] = []
   onChange?: () => void
   /** fire-uit o dată per comandă finalizată (pt. istoricul global) */
@@ -80,7 +85,36 @@ export class CommandTracker {
     this.promptRow = null
     this.promptCol = 0
     this.pendingText = null
+    this.staleFlag = true
     this.onChange?.()
+  }
+
+  /** Un marcaj OSC 133 din istoricul REJUCAT: nu e activitate live (îl ignorăm), dar dovedeşte că
+      shell-ul are integration — deci „nu sunt la prompt" după replay înseamnă „nu ştiu", nu „fără
+      integration" (re-review 3.6.12, M1). */
+  noteReplayedMark(): void {
+    this.integratedFlag = true
+  }
+
+  /** shell integration văzută (live sau în replay) */
+  get integrated(): boolean {
+    return this.integratedFlag
+  }
+
+  /** linia tastată e necunoscută: reset() (replay) fără un B live de atunci */
+  get stale(): boolean {
+    return this.staleFlag
+  }
+
+  /** Putem crede `atPrompt()` / `pendingCommand()`? false = panou cu shell integration, pe ecranul
+      principal, fără comandă în curs, dar fie după un replay fără prompt live de atunci, fie
+      (încă) fără B — linia tastată acolo poate fi orice (ex. o comandă rechemată cu ↑ înainte de
+      reconectare). Fără shell integration: true (degradare ca înainte — nu putem citi nimic). */
+  lineKnown(): boolean {
+    if (!this.integratedFlag) return true
+    if (this.current !== null) return true                    // rulează ceva: Enter-ul merge la program
+    if (this.term.buffer.active.type === 'alternate') return true   // TUI: Enter-ul nu e o linie de shell
+    return !this.staleFlag && this.promptRow !== null
   }
 
   /** Octeţii care curg spre terminal, daţi de SessionView cât rulează o comandă.
@@ -143,6 +177,7 @@ export class CommandTracker {
     // deci markerele ar fi invalide, iar „cursorul" nu are legătură cu istoricul.
     // Ignorăm complet — comanda care a pornit TUI-ul se închide normal la D,
     // pentru că D vine după ce shell-ul a revenit pe ecranul principal.
+    this.integratedFlag = true
     if (this.term.buffer.active.type === 'alternate') return
 
     const [kind, ...rest] = data.split(';')
@@ -154,6 +189,7 @@ export class CommandTracker {
           const c = this.absCursor()
           this.promptRow = c.row
           this.promptCol = c.col
+          this.staleFlag = false    // un prompt LIVE: linia de aici încolo o vedem
         }
         break
       case 'E':                    // textul EXACT al comenzii, trimis de shell

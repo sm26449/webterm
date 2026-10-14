@@ -191,19 +191,42 @@ sent to all of them, not only to the pane you typed in.
 The typed command of a pane is read from what its shell has **echoed**, so it can be stale. Fail
 closed (review of 3.6.12, `lib/broadcastGuard.ts`), when guardrail rules are active:
 
+- the **origin pane is a target too**: its line is re-read after the echo wait like the others,
+  not only at the keydown;
 - a target pane that is **not receiving output** (paused stream, history replay in progress) forces
   a "Can't check every pane" confirmation — its line is unknown. While broadcast is on, phones keep
-  every pane streaming so this is the exception (reconnects), not the rule;
+  every pane streaming, so a paused pane is the exception, not the rule;
+- after **any history replay** (attach, reconnect, a phone pane resumed when broadcast turns on) the
+  OSC 133 tracker starts over and the replayed marks are ignored, so a pane's typed line is unknown
+  until its shell prints the next **live** prompt — a command recalled with `↑` before the
+  reconnect is on that line, unseen. A pane whose shell has integration (any OSC 133 mark seen, live
+  or replayed — the flag survives the reset), runs no command and is on the main screen, but is
+  stale or not at a prompt, counts as **unknown**: Enter waits up to 150 ms, then asks for the same
+  confirmation. The first confirmed Enter makes the shell print a live prompt and the pane is
+  checked normally again. A pane that never showed a mark (no shell integration) is passed as
+  before — nothing can be read there, exactly like the origin pane without integration;
 - a target pane at a shell prompt whose last keys have **not echoed back yet** (latency: `↑` may
   have recalled a command nobody has seen) makes Enter wait up to **150 ms** for the echo, then
   decide; still no echo → the same confirmation. Keys typed during the wait are queued and sent
-  after the Enter, in order;
-- a rule that matches any pane's line still wins (block / confirm, as before);
+  after the Enter, in order (a queued Enter is checked again). When the wait ends in a dialog or a
+  block, the queued keys are dropped **with a notice** ("N keys typed while the panes were being
+  checked were not sent"), never silently;
+- the echo test is **coarse** on purpose: a pane counts as echoed when *any* output arrived after
+  the last keys sent to it (a sequence counter, marked once xterm has parsed that output). Unrelated
+  output (a clock in the prompt, a background job) can therefore count as the echo. That only
+  shortens the wait — the line that is then judged is still the one the tracker reads from the
+  screen — and a pane whose line can't be read at all is handled by the "unknown" rule above, not
+  by the echo test;
+- a rule that matches any pane's line still wins (block / confirm, as before). The "Run in all
+  panes" button of the "Can't check" dialog judges every pane again at click time: a line that
+  echoed in the meantime and matches a rule switches to that rule's dialog (or block);
 - panes whose keys don't reach the host at all (watch-only, ended, socket closed) are not targets.
 
 Every path that can submit a line goes through the same check: the keyboard Enter / `Ctrl+J`, a
-bare Enter that arrives without a keydown (mobile IME, keybar), "Paste & run" from the paste history
-(its Enter goes to every pane, after the check), and snippets / palette inserts (typed into every
+bare Enter that arrives without a keydown (mobile IME, keybar), any other input chunk that contains
+a line break (an IME commit such as `ls⏎`, `Alt+Enter`, a pasted text — each line checked, the
+first one appended to what is already typed in each pane), "Paste & run" from the paste history
+(its Enter takes the same queued path as a typed Enter, so it never starts a second wait), and snippets / palette inserts (typed into every
 pane when broadcasting; one containing a line break is checked line by line — the first line
 appended to what is already typed — and not typed at all if a line matches). "Run again" types the
 command into every pane without Enter. A pasted text whose line ends with a bare CR (`cmd\r`) hits
