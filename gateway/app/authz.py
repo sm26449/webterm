@@ -1206,6 +1206,85 @@ async def check_can_grant(granter: Grants, role, kind: str, value: str,
                        vars={"perm": sorted(missing)[0]})
 
 
+# ── a grant never outlives the granter's authority (3.6.10 review) ───────────────────────────
+# Without this, a time-bound Admin could create a PERMANENT Admin (or two time-bound Admins could
+# make each other permanent): "4 hours of Admin" became forever. The rule, fail-closed: when the
+# authority for a grant (users.manage at scope all + the granting check above, Owner included)
+# holds only thanks to time-bound bindings, the grant may not end later than the moment that
+# authority ends — and "permanent" (incl. an SSO group mapping, always permanent) is refused.
+def _grant_ok(g: Grants, info: "RoleInfo", kind: str, value: str, ref: Optional[HostRef]) -> bool:
+    """`check_can_grant` + users.manage, as a yes/no on a given Grants (no I/O)."""
+    if "users.manage" not in g.global_perms:
+        return False
+    if info.key == "owner" and not g.is_owner():
+        return False
+    if kind == "host":
+        seen = g.all_host_perms if ref is None else g.on(ref)
+        if "host.view" not in seen:
+            return False
+    if kind == "all" and not (info.perms & GLOBAL_PERMS) <= g.global_perms:
+        return False
+    return (info.perms & HOST_PERMS) <= _scope_perms(g, kind, value, ref)
+
+
+def _alive_until(g: Grants, t: Optional[float]) -> Grants:
+    """The granter's grants counting only bindings that last at least until `t` (None =
+    permanent ones only)."""
+    return Grants.from_bindings(g.user_id, [b for b in g.bindings if b.expires is None
+                                            or (t is not None and b.expires >= t)])
+
+
+async def grant_authority_until(granter: Grants, role, kind: str, value: str) -> Optional[float]:
+    """None = the granter's authority for this grant does not depend on a time-bound binding.
+    Otherwise the latest moment until which it still holds (the end of the shortest-lived
+    binding it needs). Call after `check_can_grant` passed on the same grants."""
+    info = _as_role(role)
+    ends = sorted({b.expires for b in granter.bindings if b.expires is not None}, reverse=True)
+    if not ends:
+        return None
+    ref = await host_ref(value) if kind == "host" else None
+    if _grant_ok(_alive_until(granter, None), info, kind, value, ref):
+        return None
+    for t in ends:
+        if _grant_ok(_alive_until(granter, t), info, kind, value, ref):
+            return t
+    return ends[-1]                        # cannot happen after check_can_grant; fail closed
+
+
+def _utc(ts: float) -> str:
+    return time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(ts))
+
+
+def granter_expires_error(until: float) -> ApiError:
+    return ApiError(403, "authz.granterExpires",
+                    "your own right to grant this ends at %s; what you grant cannot outlast it "
+                    "(SSO group mappings and role edits are permanent) — pick an end on or "
+                    "before that, or ask someone with permanent access" % _utc(until),
+                    vars={"until": _utc(until)})
+
+
+async def check_grant_lifetime(granter: Grants, role, kind: str, value: str,
+                               expires: Optional[float]) -> None:
+    """403 `authz.granterExpires` when a grant (`expires`: its end, None = permanent) would
+    outlast the granter's own authority to make it."""
+    until = await grant_authority_until(granter, role, kind, value)
+    if until is not None and (expires is None or expires > until):
+        raise granter_expires_error(until)
+
+
+def check_define_lifetime(editor: Grants, perms, used: bool) -> None:
+    """Role editing: adding `perms` to a role that is IN USE grants them to its holders for as
+    long as their bindings last, so the editor's authority for that (roles.manage, the perms over
+    the whole instance, users.manage) must not hang on a time-bound binding. 403 otherwise."""
+    if not used or not perms:
+        return
+    need = frozenset(perms) | {"roles.manage", "users.manage"}
+    if need <= held_everywhere(_alive_until(editor, None)):
+        return
+    ends = [b.expires for b in editor.bindings if b.expires is not None]
+    raise granter_expires_error(min(ends) if ends else time.time())
+
+
 def binding_json(b: Binding) -> dict:
     return {"id": b.id, "role": b.role_key, "role_id": b.role_id, "role_name": b.role_name,
             "scope_kind": b.scope_kind, "scope_value": b.scope_value, "source": b.source,

@@ -924,6 +924,9 @@ class UserIn(BaseModel):
     role_id: int = 0               # 3.6.2: orice rol (şi custom) după id
     scope_kind: str = "folder"
     scope_value: str = ""
+    # 3.6.10: rolul iniţial poate fi temporar (None = permanent) — şi TREBUIE să fie, cel mult până
+    # la sfârşitul dreptului tău, dacă tu însuţi ai acces temporar (revizuirea 3.6.10)
+    expires: Optional[float] = None
     # 3.6.10: un rol cu ⚑ peste un scope cu un host „crown jewel" se acordă doar confirmat
     confirm_crown_jewel: bool = False
 
@@ -1087,10 +1090,15 @@ async def _fresh_grants(user, perm: str):
     return g
 
 
-async def _recheck_granter(user, role, kind, value, target_uid, removing=False):
+_NOT_A_GRANT = object()
+
+
+async def _recheck_granter(user, role, kind, value, target_uid, removing=False,
+                           expires=_NOT_A_GRANT):
     """Regulile de acordare, din nou, pe drepturile CURENTE ale celui care acordă ŞI pe definiţia
     CURENTĂ a rolului (un rol custom s-a putut edita între timp). Chemată sub `authz._lock`,
-    imediat înainte de scriere. → rolul proaspăt citit."""
+    imediat înainte de scriere. `expires` (sfârşitul acordării, None = permanentă): şi regula
+    „nu acorzi mai mult decât ţine propriul tău drept" (revizuirea 3.6.10). → rolul proaspăt."""
     g = await _fresh_grants(user, "users.manage")
     if target_uid is not None:
         await authz.check_target(g, target_uid)
@@ -1098,6 +1106,8 @@ async def _recheck_granter(user, role, kind, value, target_uid, removing=False):
     if fresh is None:
         raise ApiError(409, "role.gone", "that role was deleted meanwhile")
     await authz.check_can_grant(g, fresh, kind, value, removing=removing)
+    if expires is not _NOT_A_GRANT:
+        await authz.check_grant_lifetime(g, fresh, kind, value, expires)
     return fresh
 
 
@@ -1114,12 +1124,14 @@ async def _check_can_strip(g, uid: int) -> None:
 async def create_user(body: UserIn, request: Request, user=Depends(authz.perm('users.manage'))):
     grants = authz.grants_of(request)
     role = None
-    kind = value = None
+    kind = value = expires = None
     if (body.role or "").strip() or body.role_id:
         role = await authz.resolve_role(body.role, body.role_id)
         kind, value = authz.normalize_scope(body.scope_kind, body.scope_value)
+        expires = authz.normalize_expiry(body.expires)
         # anti-escaladare ÎNAINTE de orice efect (şi înainte de a consuma al doilea factor)
         await authz.check_can_grant(grants, role, kind, value)
+        await authz.check_grant_lifetime(grants, role, kind, value, expires)
         await authz.check_crown(role, kind, value, body.confirm_crown_jewel)
     await _reauth_for_access_change(user, request, body, "create a new WebTerm account")
     email = body.email.strip().lower()
@@ -1132,22 +1144,22 @@ async def create_user(body: UserIn, request: Request, user=Depends(authz.perm('u
     crown = []
     async with authz._lock:
         if role:
-            role = await _recheck_granter(user, role, kind, value, None)
+            role = await _recheck_granter(user, role, kind, value, None, expires=expires)
             crown = await authz.check_crown(role, kind, value, body.confirm_crown_jewel)
+            await authz.check_owner_expiry(role, kind, expires, 0)
         uid = await db.execute("INSERT INTO users(id, email, password_hash, created)"
                                " VALUES(" + db.NEXT_USER_ID_SQL + ",?,?,?)",
                                email, pw, time.time())
         if role:
             await db.execute(
                 "INSERT INTO role_bindings(user_id, role_id, scope_kind, scope_value, source,"
-                " created, created_by_id) VALUES(?,?,?,?,'manual',?,?)",
-                uid, role.id, kind, value, time.time(), user["id"])
+                " expires, created, created_by_id) VALUES(?,?,?,?,'manual',?,?,?)",
+                uid, role.id, kind, value, expires, time.time(), user["id"])
         authz.bump_epoch()
-    log.info("new account created: %s (by %s, role %s)", email, user["email"],
-             ("%s @ %s" % (_role_label(role), _scope_label(kind, value))) if role else "none")
-    audit.detail(request, "account %s created, role %s%s" % (
-        email, ("%s @ %s" % (_role_label(role), _scope_label(kind, value))) if role else "none",
-        _crown_note(crown)))
+    rdesc = ("%s @ %s%s" % (_role_label(role), _scope_label(kind, value), _expiry_label(expires))
+             if role else "none")
+    log.info("new account created: %s (by %s, role %s)", email, user["email"], rdesc)
+    audit.detail(request, "account %s created, role %s%s" % (email, rdesc, _crown_note(crown)))
     # un cont nou: cel mai valoros eveniment de securitate. Ajunge pe email ŞI webhook (via
     # _fire) şi în istoricul celor cu security.view, ca oricare schimbare de credenţiale.
     email_alerts.notify_security_change("a new WebTerm account was created (%s)" % email,
@@ -1264,6 +1276,7 @@ async def add_binding(uid: int, body: BindingIn, request: Request,
     expires = authz.normalize_expiry(body.expires)
     await authz.check_target(grants, uid)
     await authz.check_can_grant(grants, role, kind, value)
+    await authz.check_grant_lifetime(grants, role, kind, value, expires)
     # 3.6.10: ⚑ peste un host crown-jewel — refuzat fără confirmare, ÎNAINTE de re-auth (al doilea
     # factor nu se consumă pe o cerere care oricum se întoarce cu 409)
     await authz.check_crown(role, kind, value, body.confirm_crown_jewel)
@@ -1272,7 +1285,7 @@ async def add_binding(uid: int, body: BindingIn, request: Request,
         # 3.6 (cursă): între verificare şi scriere au trecut re-auth-ul şi al doilea factor — un
         # Admin retrogradat între timp nu are voie să-şi vadă acordarea aterizând. Re-verificăm
         # SUB lock, pe drepturile de ACUM (şi pe definiţia de ACUM a rolului).
-        role = await _recheck_granter(user, role, kind, value, uid)
+        role = await _recheck_granter(user, role, kind, value, uid, expires=expires)
         crown = await authz.check_crown(role, kind, value, body.confirm_crown_jewel)
         await authz.check_owner_expiry(role, kind, expires, uid)
         dup = await db.fetchone(
@@ -1415,6 +1428,9 @@ async def set_binding_expiry(uid: int, bid: int, body: BindingExpiryIn, request:
     info = (await authz.role_by_id(row["role_id"])) or _UNKNOWN_ROLE
     await authz.check_can_grant(grants, info, row["scope_kind"], row["scope_value"],
                                 removing=shorter)
+    if not shorter:
+        # mai lung (sau permanent) = o acordare: nu peste sfârşitul propriului tău drept
+        await authz.check_grant_lifetime(grants, info, row["scope_kind"], row["scope_value"], new)
     await _reauth_for_access_change(user, request, body, "change a WebTerm account's access")
     async with authz._lock:
         # revizuirea 3.6.10: re-auth-ul a fost un punct de suspendare — legătura s-a putut schimba
@@ -1427,7 +1443,8 @@ async def set_binding_expiry(uid: int, bid: int, body: BindingExpiryIn, request:
                            "this role binding was changed meanwhile; reload and try again")
         info = (await authz.role_by_id(row["role_id"])) or _UNKNOWN_ROLE
         info = await _recheck_granter(user, info, row["scope_kind"], row["scope_value"], uid,
-                                      removing=shorter)
+                                      removing=shorter,
+                                      **({} if shorter else {"expires": new}))
         if old is None and new is not None:
             await authz.check_owner_expiry(info, row["scope_kind"], new, uid, exclude_binding=bid)
         # gardă de concurenţă pe valoarea citită (toate scrierile de legături ţin lock-ul, deci
@@ -1553,6 +1570,12 @@ async def _check_role_targets(g, rid: int) -> list:
     return uids
 
 
+async def _role_used(rid: int) -> bool:
+    """Legat de cineva sau mapat unui grup SSO (o editare schimbă accesul altora)."""
+    use = await _role_in_use(rid)
+    return bool(use["bindings"] or use["mappings"])
+
+
 async def _role_in_use(rid: int) -> dict:
     b = (await db.fetchone("SELECT COUNT(*) AS c FROM role_bindings WHERE role_id=?", rid))["c"]
     m = (await db.fetchone("SELECT COUNT(*) AS c FROM oidc_group_roles WHERE role_id=?", rid))["c"]
@@ -1621,6 +1644,9 @@ async def edit_role(rid: int, body: RoleIn, request: Request,
     # §A.6.6 regula 5: un rol care are (sau ar avea) o permisiune pe care n-o ai nu-l editezi
     authz.check_can_define(grants, role.perms | perms)
     await _check_role_targets(grants, rid)
+    # revizuirea 3.6.10: a adăuga permisiuni unui rol FOLOSIT le acordă deţinătorilor lui — nu pe
+    # baza unui drept temporar (altfel „Admin 4 ore" lărgea pe termen nelimitat un rol permanent)
+    authz.check_define_lifetime(grants, perms - role.perms, await _role_used(rid))
     await _role_name_free(name, rid)
     await _check_config_map_role(rid, perms)
     await _reauth_for_access_change(user, request, body, "change a role")
@@ -1629,6 +1655,7 @@ async def edit_role(rid: int, body: RoleIn, request: Request,
         role = await _custom_role(rid)                 # definiţia de ACUM, nu cea de mai sus
         authz.check_can_define(g, role.perms | perms)
         uids = await _check_role_targets(g, rid)
+        authz.check_define_lifetime(g, perms - role.perms, await _role_used(rid))
         await _role_name_free(name, rid)
         await _check_config_map_role(rid, perms)
         cfg_maps = await _config_maps_of_role(rid)
@@ -1789,6 +1816,8 @@ async def add_oidc_role(body: OidcRoleIn, request: Request,
     kind, value = authz.normalize_scope(body.scope_kind, body.scope_value)
     # o mapare acordă rolul fiecărui membru al grupului: exact regulile unei legături
     await authz.check_can_grant(grants, role, kind, value)
+    # o mapare e PERMANENTĂ (dă rolul la fiecare login): cere un drept de acordare permanent
+    await authz.check_grant_lifetime(grants, role, kind, value, None)
     _check_wildcard(grants, grp, role, kind)
     await authz.check_crown(role, kind, value, body.confirm_crown_jewel)
     await _reauth_for_access_change(user, request, body, "map an SSO group to a role")
@@ -1798,6 +1827,7 @@ async def add_oidc_role(body: OidcRoleIn, request: Request,
         if fresh is None:
             raise ApiError(409, "role.gone", "that role was deleted meanwhile")
         await authz.check_can_grant(g, fresh, kind, value)
+        await authz.check_grant_lifetime(g, fresh, kind, value, None)
         _check_wildcard(g, grp, fresh, kind)
         crown = await authz.check_crown(fresh, kind, value, body.confirm_crown_jewel)
         n = (await db.fetchone("SELECT COUNT(*) AS c FROM oidc_group_roles"))["c"]

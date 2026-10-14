@@ -1438,7 +1438,13 @@ Code: `ssomap.parse_role_map` / `reconcile_config` (called once from `main.lifes
   `owner_count` now counts permanent Owners @ all only; that single change makes binding removal,
   account deletion, SSO re-sync and the local-password path refuse to remove the last permanent
   Owner. `check_owner_expiry` refuses a time-bound Owner @ all unless another permanent Owner
-  exists. Expiry bounds: ≥ 60 s ahead, ≤ 366 days.
+  exists. Expiry bounds: ≥ 60 s ahead, ≤ 366 days. A grant never outlasts the granter
+  (review fix): `authz.grant_authority_until` re-runs the granting check (users.manage +
+  `check_can_grant`, Owner included) on the granter's permanent bindings, then on the bindings
+  alive until each later end time; `check_grant_lifetime` refuses (`403 authz.granterExpires`)
+  a permanent grant or a later end. It runs before re-auth and again under the lock in
+  `_recheck_granter(expires=…)` for new bindings, extensions, a new account's first role and
+  SSO mappings (always permanent); `check_define_lifetime` covers new permissions in a role in use.
 - **Crown jewels (§A.11.2):** `authz.check_crown` runs after `check_can_grant` (so every host it
   names is visible to the granter) and again under the lock; `crown_risky` = not Owner and any
   host permission in `SHELL_PERMS`. `crown_exposure(ref, before=old_ref)` drives both the "already

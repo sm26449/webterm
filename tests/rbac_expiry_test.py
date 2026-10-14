@@ -12,6 +12,12 @@
   * o legătură temporară peste una venită din SSO e refuzată (ar scurta accesul dat de grup);
   * break-glass `python3 -m app.admin promote` lasă un Owner PERMANENT chiar dacă avea unul
     temporar.
+
+Revizuirea 3.6.10: expirarea nu aşteaptă cache-ul de 30 s (nici pentru tokenul creatorului), iar
+socket-urile deschise sunt trezite la sfârşit; ruta de sfârşit decide pe rândul de sub lock (409
+dacă s-a schimbat); o acordare (legătură, prelungire, cont nou cu rol, mapare SSO, permisiune nouă
+într-un rol folosit) nu trăieşte mai mult decât dreptul celui care o face (403
+`authz.granterExpires`) — şi pentru un Owner temporar.
 """
 import argparse
 import asyncio
@@ -193,6 +199,89 @@ async def main():
           r.status_code == 404 and await exp_of(race) == "gone", "%s %s" % (r.status_code, r.text[:120]))
     authz.bump_epoch()
 
+    # ── o acordare nu trăieşte mai mult decât dreptul celui care o face (revizuirea 3.6.10) ──
+    t_end = time.time() + 3600
+
+    async def temp_user(email, role, kind="all", value=""):
+        uid_ = await U.add_user(email)
+        b = await U.bind(uid_, role, kind, value)
+        await db.execute("UPDATE role_bindings SET expires=? WHERE id=?", t_end, b)
+        authz.bump_epoch()
+        return uid_, b, await U.login(email)
+
+    ta_id, ta_bid, ta = await temp_user("tadm@x.co", "admin")          # Admin @ all, 1 oră
+    tb_id, tb_bid, tb = await temp_user("tadm2@x.co", "admin")         # încă unul, tot 1 oră
+    vic = await U.add_user("victim@x.co")
+    r = await ta.post("/api/users/%d/bindings" % vic, json=bb("admin", pw=PW))
+    check("Admin temporar dă Admin PERMANENT → 403 authz.granterExpires",
+          r.status_code == 403 and U.code(r) == "authz.granterExpires", "%s %s" % (r.status_code, r.text[:160]))
+    check("…mesajul spune până când ţine dreptul lui", "until" in (r.json().get("vars") or {})
+          or "UTC" in r.text, r.text[:200])
+    r = await ta.post("/api/users/%d/bindings" % vic, json=bb("admin", expires=t_end + 3600, pw=PW))
+    check("…şi un sfârşit DUPĂ al lui → 403", r.status_code == 403 and U.code(r) == "authz.granterExpires")
+    check("…nimic scris", await bindings(vic) == [])
+    r = await ta.post("/api/users/%d/bindings" % vic, json=bb("operator", "folder", "prod",
+                                                              expires=t_end - 600, pw=PW))
+    check("…un sfârşit înainte de al lui → 200", r.status_code == 200, r.text[:160])
+    r = await ta.post("/api/users/%d/bindings/%d/expiry" % (tb_id, tb_bid), json=xb(None, PW))
+    check("doi Admini temporari: unul îl face pe celălalt permanent → 403 authz.granterExpires",
+          r.status_code == 403 and U.code(r) == "authz.granterExpires", r.text[:160])
+    r = await ta.post("/api/users/%d/bindings/%d/expiry" % (tb_id, tb_bid), json=xb(t_end + 86400, PW))
+    check("…nici o prelungire peste sfârşitul lui", r.status_code == 403 and U.code(r) == "authz.granterExpires")
+    check("…legătura celuilalt neschimbată",
+          abs((await db.fetchone("SELECT expires FROM role_bindings WHERE id=?", tb_bid))["expires"] - t_end) < 1)
+    r = await ta.post("/api/users/%d/bindings/%d/expiry" % (tb_id, tb_bid), json=xb(t_end - 900, PW))
+    check("…scurtarea (reguli de scoatere) merge", r.status_code == 200, r.text[:160])
+    newu = {"email": "fresh@x.co", "password": "parolabuna1", "current_password": PW,
+            "role": "admin", "scope_kind": "all", "scope_value": ""}
+    r = await ta.post("/api/users", json=newu)
+    check("cont nou cu rol PERMANENT de la un Admin temporar → 403, contul nu e creat",
+          r.status_code == 403 and U.code(r) == "authz.granterExpires"
+          and not await db.fetchone("SELECT 1 FROM users WHERE email='fresh@x.co'"), r.text[:160])
+    r = await ta.post("/api/users", json=dict(newu, expires=t_end - 60))
+    fresh = await db.fetchone("SELECT id FROM users WHERE email='fresh@x.co'")
+    rows_f = await bindings(fresh["id"]) if fresh else []
+    check("…cu sfârşit înainte de al lui → 200, legătura iniţială e temporară",
+          r.status_code == 200 and len(rows_f) == 1 and abs(rows_f[0]["expires"] - (t_end - 60)) < 1,
+          r.text[:160])
+    r = await ta.post("/api/settings/oidc-roles", json={"group": "g-tmp", "role": "viewer",
+                                                       "scope_kind": "all", "current_password": PW})
+    check("mapare SSO (mereu permanentă) de la un Admin temporar → 403 authz.granterExpires",
+          r.status_code == 403 and U.code(r) == "authz.granterExpires", r.text[:160])
+    rr = await owner.post("/api/roles", json={"name": "Used", "perms": ["host.view"],
+                                              "current_password": U.OWNER_PW})
+    used_rid = rr.json()["id"]
+    await owner.post("/api/users/%d/bindings" % vic, json={"role_id": used_rid, "scope_kind": "all",
+                                                          "current_password": U.OWNER_PW})
+    r = await ta.patch("/api/roles/%d" % used_rid, json={"name": "Used", "perms": ["host.view", "run"],
+                                                         "current_password": PW})
+    check("Admin temporar adaugă o permisiune unui rol FOLOSIT → 403 authz.granterExpires",
+          r.status_code == 403 and U.code(r) == "authz.granterExpires", r.text[:160])
+    r = await ta.patch("/api/roles/%d" % used_rid, json={"name": "Used2", "perms": ["host.view"],
+                                                         "current_password": PW})
+    check("…redenumirea fără permisiuni noi merge", r.status_code == 200, r.text[:160])
+    # Owner temporar: aceeaşi regulă
+    to_id, to_bid, to = await temp_user("towner@x.co", "owner")
+    r = await to.post("/api/users/%d/bindings" % vic, json=bb("viewer", "folder", "lab", pw=PW))
+    check("Owner TEMPORAR dă un rol permanent → 403 authz.granterExpires",
+          r.status_code == 403 and U.code(r) == "authz.granterExpires", r.text[:160])
+    # drept permanent din altă legătură: fără plafon
+    pa_id = await U.add_user("padm@x.co", bindings=[("admin", "all", "")])
+    pb = await U.bind(pa_id, "owner", "all", "")
+    await db.execute("UPDATE role_bindings SET expires=? WHERE id=?", t_end, pb)
+    authz.bump_epoch()
+    pa = await U.login("padm@x.co")
+    r = await pa.post("/api/users/%d/bindings" % vic, json=bb("viewer", "folder", "lab", pw=PW))
+    check("Admin PERMANENT (+ Owner temporar) dă un rol permanent → 200 (dreptul nu depinde "
+          "de legătura temporară)", r.status_code == 200, r.text[:160])
+    r = await pa.post("/api/users/%d/bindings" % vic, json=bb("owner", pw=PW))
+    check("…dar Owner permanent cere Owner-ul lui (temporar) → 403", r.status_code == 403
+          and U.code(r) == "authz.granterExpires", r.text[:160])
+    for c in (ta, tb, to, pa):
+        await c.aclose()
+    for u_ in (ta_id, tb_id, to_id, pa_id):
+        await U.unbind_all(u_)
+
     # ── ultimul Owner PERMANENT ────────────────────────────────────────────────────────
     o2_id = await U.add_user("o2@x.co", bindings=[("owner", "all", "")])
     o2 = await U.login("o2@x.co")
@@ -223,8 +312,9 @@ async def main():
     check("Owner temporar NOU fără niciun Owner permanent → 400 authz.lastOwner",
           r.status_code == 400 and U.code(r) == "authz.lastOwner", r.text[:120])
     r = await o2.post("/api/users/%d/bindings/%d/expiry" % (owner_id, own_bid), json=xb(None, PW))
-    check("…dar a face permanent un Owner temporar merge (repară starea)", r.status_code == 200
-          and (await db.fetchone("SELECT expires FROM role_bindings WHERE id=?", own_bid))["expires"] is None,
+    check("…un Owner TEMPORAR nu poate face pe altul permanent (403 authz.granterExpires); "
+          "repararea = `admin promote`", r.status_code == 403 and U.code(r) == "authz.granterExpires"
+          and (await db.fetchone("SELECT expires FROM role_bindings WHERE id=?", own_bid))["expires"] is not None,
           r.text[:120])
     # Admin nu atinge un Owner
     adm_id = await U.add_user("adm@x.co", bindings=[("admin", "all", "")])

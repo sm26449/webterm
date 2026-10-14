@@ -120,7 +120,9 @@ The rules the server enforces:
 - only an Owner can grant, change or remove the Owner role;
 - you cannot change your own access;
 - the last **permanent** Owner cannot be removed, deleted or made time-bound (a time-bound Owner
-  does not count: when it ends, someone must still own the instance).
+  does not count: when it ends, someone must still own the instance);
+- what you grant cannot outlast your own right to grant it (see [Time-bound
+  roles](#time-bound-roles)).
 
 Each account in the list shows when it **last signed in** and how (password, password + 2FA,
 passkey or SSO), or "never". Accounts created before 3.6.10 show "not recorded" until their next
@@ -141,8 +143,20 @@ When you give a role, pick how long it lasts: **Permanent**, **4 hours**, **1 da
 - **Make permanent** turns a time-bound role into a permanent one. It follows the same rules as
   giving the role. (The API, `POST /api/users/{uid}/bindings/{bid}/expiry`, can also move the end
   earlier; that follows the rules for removing a role.)
-- The last permanent Owner can never be made time-bound. A time-bound Owner is still a full Owner
-  while it lasts — only give one to someone you would trust permanently.
+- **A grant never outlasts the granter.** When your right to grant something (`users.manage` over
+  all hosts, plus the role's permissions over the scope, plus Owner for the Owner role) comes only
+  from time-bound roles, anything you grant must end no later than that right does. The server
+  refuses the rest with `403 authz.granterExpires`, naming the end: a permanent role, an end
+  date after yours, **Make permanent**, a later end on someone else's role, a new account whose
+  first role is permanent (the add-account form has the same duration picker), an SSO group
+  mapping (mappings are always permanent), and adding permissions to a custom role that is in use.
+  Nothing is capped silently. This covers a time-bound Owner too. If no permanent Owner is left,
+  the way back is `python3 -m app.admin promote` on the server.
+- The last permanent Owner can never be made time-bound. A time-bound Owner, or any time-bound
+  role with `users.manage` (Admin, or a custom role), still has its full power while it lasts. It
+  can remove other people's access, create accounts, read the audit log, and do everything else
+  the role allows; only the *lifetime* of what it grants is capped. Only give one to someone you
+  would trust permanently.
 - Roles that come from an SSO group stay permanent: they follow the group. Change the mapping
   instead. A time-bound role over the same role and scope as an SSO-derived one is refused.
 - Break-glass `python3 -m app.admin promote` always leaves a permanent Owner binding.

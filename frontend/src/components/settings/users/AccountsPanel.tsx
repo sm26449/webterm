@@ -69,20 +69,25 @@ function AddAccountForm(props: {
   const { t } = useI18n()
   const [busy, setBusy] = useState(false)
   const [newUser, setNewUser] = useState({ email: '', password: '', current_password: '',
-    role: '', scope_kind: 'folder' as ScopeKind, scope_value: '' })
+    role: '', scope_kind: 'folder' as ScopeKind, scope_value: '', expiry: 'permanent' as ExpiryChoice, custom: '' })
   const withSecondFactor = <T,>(send: (extra: object) => Promise<T>) => withSecondFactorT(t, send)
   const crownAsk = useCrownAsk()
 
   async function addUser(e: FormEvent) {
     e.preventDefault()
+    // 3.6.10: rolul iniţial poate fi temporar (cine are el însuşi acces temporar TREBUIE să-l limiteze)
+    const until = newUser.role ? expiryFrom(newUser.expiry, newUser.custom, Date.now()) : null
+    if (until === 'invalid') { props.fail(new Error(t('roles.expiry.invalid'))); return }
     setBusy(true)
     try {
-      const { role, ...rest } = newUser
-      const body = { ...rest, ...(role ? roleBody(role) : {}), scope_value: role ? newUser.scope_value.trim() : '' }
+      const { role, expiry: _e, custom: _c, ...rest } = newUser
+      const body = { ...rest, ...(role ? roleBody(role) : {}), scope_value: role ? newUser.scope_value.trim() : '',
+        expires: until }
       const users = await withCrownConfirm((crown) => withSecondFactor((extra) => api<UserRow[]>('/api/users',
         { method: 'POST', body: JSON.stringify({ ...body, ...crown, ...extra }) })), crownAsk)
       if (!users) { setBusy(false); return }
-      setNewUser({ email: '', password: '', current_password: '', role: '', scope_kind: 'folder', scope_value: '' })
+      setNewUser({ email: '', password: '', current_password: '', role: '', scope_kind: 'folder', scope_value: '',
+        expiry: 'permanent', custom: '' })
       props.onDone(users)
     } catch (x) { props.fail(x) }
     setBusy(false)
@@ -113,12 +118,17 @@ function AddAccountForm(props: {
         <ScopePicker idPrefix="newuser" kind={newUser.scope_kind} value={newUser.scope_value} hosts={props.hosts}
           onChange={(k, v) => setNewUser({ ...newUser, scope_kind: k, scope_value: v })} />
       )}
+      {newUser.role && (
+        <ExpiryPicker idPrefix="newuser" choice={newUser.expiry} custom={newUser.custom}
+          onChange={(expiry, custom) => setNewUser({ ...newUser, expiry, custom })} />
+      )}
       <input type="password" value={newUser.current_password} autoComplete="current-password"
         onChange={(e) => setNewUser({ ...newUser, current_password: e.target.value })}
         placeholder={t('settings.currentPasswordConfirm')} aria-label={t('settings.currentPassword')} className={field} />
       <div className="flex flex-wrap items-center gap-2">
         <Button variant="primary" type="submit" loading={busy}
-          disabled={!newUser.current_password || (!!newUser.role && !scopeOk(newUser.scope_kind, newUser.scope_value))}>
+          disabled={!newUser.current_password || (!!newUser.role && (!scopeOk(newUser.scope_kind, newUser.scope_value)
+            || expiryFrom(newUser.expiry, newUser.custom, Date.now()) === 'invalid'))}>
           {t('settings.users.add')}
         </Button>
         <Button type="button" onClick={props.onCancel}>{t('roles.custom.cancel')}</Button>
