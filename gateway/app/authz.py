@@ -165,7 +165,10 @@ TOKEN_ROLE_REFUSED = frozenset({"owner"})
 _epoch = 0
 _external_epoch = ""
 _CACHE_TTL = 30.0
-_cache: dict[int, tuple[int, float, "Grants"]] = {}
+# user id → (epoch, monotonic load time, the earliest `expires` among the bindings it used or
+# None, Grants). 3.6.10 (review): a cached entry is stale the second its earliest binding ends —
+# without that, an expired binding kept working for up to _CACHE_TTL.
+_cache: dict[int, tuple[int, float, Optional[float], "Grants"]] = {}
 _waiters: set = set()                  # asyncio.Event per live WebSocket / forward socket
 _lock = asyncio.Lock()                 # serialises binding mutations (check-then-act)
 
@@ -334,15 +337,60 @@ async def _load_bindings(user_id: int) -> list:
     return out
 
 
+def earliest_expiry(bindings: Iterable) -> Optional[float]:
+    ends = [b.expires for b in bindings if b.expires is not None]
+    return min(ends) if ends else None
+
+
+# 3.6.10 (review): live sockets (terminals, forwards) re-check on an epoch bump or every
+# WS_REVALIDATE_SECS. So that a time-bound binding ends for them at the second too, not up to a
+# minute later, loading grants with a time-bound binding arms one timer per end time that wakes
+# every socket right after it; the re-check then reloads (the cache entry is stale by then).
+_EXPIRY_TIMERS_MAX = 2048
+_expiry_timers: dict[float, tuple] = {}
+
+
+def _wake_waiters(ts: float) -> None:
+    _expiry_timers.pop(ts, None)
+    for ev in list(_waiters):
+        ev.set()
+
+
+def _arm_expiry_wake(ts: Optional[float]) -> None:
+    if ts is None:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    old = _expiry_timers.get(ts)
+    if old is not None and old[0] is loop and not loop.is_closed():
+        return
+    if len(_expiry_timers) >= _EXPIRY_TIMERS_MAX:
+        # bounded; past the bound the 60 s re-check (and the stale cache entry) still apply
+        for k, (lp, h) in list(_expiry_timers.items()):
+            if lp.is_closed() or k <= time.time():
+                h.cancel()
+                _expiry_timers.pop(k, None)
+        if len(_expiry_timers) >= _EXPIRY_TIMERS_MAX:
+            return
+    delay = max(0.0, ts - time.time()) + 0.05
+    _expiry_timers[ts] = (loop, loop.call_later(delay, _wake_waiters, ts))
+
+
 async def grants_for_user(user_id: Optional[int]) -> Grants:
     if not user_id:
         return Grants(None)
     hit = _cache.get(user_id)
     now = time.monotonic()
-    if hit and hit[0] == _epoch and now - hit[1] < _CACHE_TTL:
-        return hit[2]
-    g = Grants.from_bindings(user_id, await _load_bindings(user_id))
-    _cache[user_id] = (_epoch, now, g)
+    if (hit and hit[0] == _epoch and now - hit[1] < _CACHE_TTL
+            and (hit[2] is None or time.time() < hit[2])):
+        return hit[3]
+    bindings = await _load_bindings(user_id)
+    g = Grants.from_bindings(user_id, bindings)
+    ends = earliest_expiry(bindings)
+    _cache[user_id] = (_epoch, now, ends, g)
+    _arm_expiry_wake(ends)
     return g
 
 
@@ -1216,9 +1264,11 @@ def catalogue_json() -> dict:
 
 # ── time-bound bindings (3.6.10, §A.10) ─────────────────────────────────────────────────────
 # `role_bindings.expires` (NULL = permanent) is honoured at READ time (`_load_bindings` skips an
-# expired row), so access ends on the second even if the janitor is late or stopped. The janitor
-# (`sweep_expired_bindings`, from main._session_reaper) only tidies: it deletes the rows, bumps
-# the epoch (live sockets re-check now) and leaves an audit row per binding.
+# expired row; a cached grant is stale from its earliest binding end), so HTTP access ends on the
+# second even if the janitor is late or stopped, and a timer armed at load time wakes open
+# terminals and forward sockets right then (`_arm_expiry_wake`). The janitor
+# (`sweep_expired_bindings`, from main._session_reaper, every minute) tidies: it deletes the rows,
+# bumps the epoch, revokes the derived access (live shares, replay links) and audits each one.
 BINDING_MIN_SECONDS = 60
 BINDING_MAX_DAYS = 366
 

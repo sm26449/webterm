@@ -131,10 +131,12 @@ sign-in: earlier releases did not record it. Only accounts with `users.manage` s
 When you give a role, pick how long it lasts: **Permanent**, **4 hours**, **1 day**, **7 days** or
 **until a date** (at most 366 days). A time-bound role shows "expires in …" on its chip.
 
-- Access ends at the second it expires. This is enforced every time permissions are read, not by a
-  timer, so a late or stopped background job cannot extend it.
-- About a minute later the gateway removes the binding, re-checks open terminals (they switch to
-  read-only or close), revokes live shares and replay links the person can no longer create,
+- Access ends at the second it expires. Every request checks the end time (cached permissions
+  are dropped at the earliest end among them), so a late or stopped background job cannot extend
+  it. Open terminals and forwarded-app connections of that person are re-checked at that moment
+  too: they switch to read-only or close.
+- Within about a minute the gateway removes the binding, revokes live shares and replay links the
+  person can no longer create (until then, someone who already opened such a link keeps watching),
   writes `role binding expired` to the audit log and tells the person.
 - **Make permanent** turns a time-bound role into a permanent one. It follows the same rules as
   giving the role. (The API, `POST /api/users/{uid}/bindings/{bid}/expiry`, can also move the end

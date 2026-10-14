@@ -64,10 +64,26 @@ async def main():
     check("…auditat cu sfârşitul („until … UTC\")", audit is not None and "until" in audit["detail"],
           str(audit and audit["detail"]))
 
-    # ── aplicată la citire, fără janitor ──────────────────────────────────────────────
+    # ── aplicată la citire, fără janitor ŞI fără să golim cache-ul (revizuirea 3.6.10) ──
     bid = rows[0]["id"]
-    await db.execute("UPDATE role_bindings SET expires=? WHERE id=?", time.time() - 1, bid)
-    authz._cache.clear()               # ca şi cum ar fi trecut cele 30 s de cache (TTL-ul lui)
+    end = time.time() + 1.5
+    await db.execute("UPDATE role_bindings SET expires=? WHERE id=?", end, bid)
+    authz.bump_epoch()                 # ca după o acordare: cache-ul se reumple la cererea următoare
+    wake = authz.subscribe()           # ca un terminal deschis
+    check("înainte de sfârşit: alpha vizibilă (cache-ul se umple)",
+          any(h["id"] == a for h in (await ana.get("/api/hosts")).json()))
+    check("…intrarea din cache ţine minte sfârşitul cel mai apropiat",
+          (authz._cache.get(ana_id) or (0, 0, None))[2] == end, str(authz._cache.get(ana_id)))
+    tok = {"id": 1, "name": "t", "scopes": "read", "created_by_id": ana_id}
+    alpha_ref = await authz.host_ref(a)
+    check("…un token al Anei (read) vede alpha cât ţine legătura",
+          "host.view" in (await authz.grants_for_token(tok)).on(alpha_ref))
+    await asyncio.sleep(max(0.0, end - time.time()) + 0.2)
+    check("…după sfârşit tokenul (creator ∩) nu mai vede nimic, tot fără golirea cache-ului",
+          not (await authz.grants_for_token(tok)).on(alpha_ref))
+    check("…la sfârşit, socket-urile deschise sunt trezite (fără epocă, fără janitor)", wake.is_set())
+    authz.unsubscribe(wake)
+    check("…cache-ul NU a fost golit manual (epoca e aceeaşi)", ana_id in authz._cache)
     hosts = (await ana.get("/api/hosts")).json()
     check("expirată (janitorul n-a rulat): alpha dispare din listă", all(h["id"] != a for h in hosts),
           str(hosts)[:120])

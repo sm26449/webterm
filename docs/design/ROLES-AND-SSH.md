@@ -1428,7 +1428,10 @@ Code: `ssomap.parse_role_map` / `reconcile_config` (called once from `main.lifes
   Only bindings that match the host are returned (a binding over another folder could name a scope
   the caller cannot see). `authz.explain` re-derives the effective set from the non-expired
   matching bindings with the same `Grants` code the checks use.
-- **Time-bound bindings (§A.10):** read-time enforcement (`_load_bindings`) is the boundary; the
+- **Time-bound bindings (§A.10):** read-time enforcement (`_load_bindings`) is the boundary. The
+  grant cache entry carries the earliest `expires` of the bindings it holds and is stale from
+  that second (not after the 30 s TTL), and `_arm_expiry_wake` sets one loop timer per end time
+  that wakes every live socket, so terminals and forwards re-check at the end too. The
   reaper (60 s) calls `api.sweep_expired_bindings` → `authz.sweep_expired_bindings` under the
   binding lock, then per account `bump_forward_epoch` + `_revoke_unauthorized_derived`, an audit
   row (`/janitor/binding-expired`, actor `system`) and an `access_expired` alert.
