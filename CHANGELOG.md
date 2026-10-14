@@ -32,9 +32,10 @@ Roles, part 2: last sign-in per account, "Explain access", time-bound roles, cro
   366 days); chips say "expires in …" and offer **Make permanent**
   (`POST /api/users/{uid}/bindings/{bid}/expiry`; making it last longer follows the granting
   rules, ending it sooner the removal rules). Access ends at the second it expires — enforced
-  when permissions are read, not by a timer — and the janitor then deletes the row, wakes open
-  terminals, revokes live shares and replay links the person can no longer create, writes
-  "role binding expired" to the audit log and tells the person. **The last permanent Owner can
+  when permissions are read, and open terminals and forwards are re-checked at that moment — and
+  within a minute the janitor deletes the row, revokes live shares and replay links the person
+  can no longer create, writes "role binding expired" to the audit log and tells the person. What
+  you grant cannot outlast your own time-bound right to grant it (see Security). **The last permanent Owner can
   never be made time-bound, removed or deleted** (a time-bound Owner no longer counts as "another
   Owner"), and `python3 -m app.admin promote` turns a time-bound Owner binding into a permanent
   one. SSO-derived bindings stay permanent (they follow the group).
@@ -47,7 +48,8 @@ Roles, part 2: last sign-in per account, "Explain access", time-bound roles, cro
   account's role, an SSO group mapping — or moving it into a folder/tag that already has such
   grants is refused (409 `authz.crownJewel` / `authz.crownJewelMove`, naming the hosts) until
   the person confirms in a blocking dialog; the confirmed grant is audited as such. A crown badge
-  shows on the host in the sidebar and on dashboard cards for everyone who can see it. The host
+  shows on the host in the sidebar and on dashboard cards for Owners and holders of
+  `users.manage` (nobody else, and no token, is told which host is a crown jewel). The host
   picked as the gateway host for certificate renewals gets a "mark it?" hint (Owners only).
 - **Automation tokens with a role and a scope.** Why: a token could only be "read" or "run" over
   everything its creator could reach. Creating a token now picks a role (built-in or custom;
@@ -59,14 +61,41 @@ Roles, part 2: last sign-in per account, "Explain access", time-bound roles, cro
 - Tokens can never hold administration or Owner-only permissions, whatever their role: an
   explicit deny-list (`authz.TOKEN_NEVER`: users, roles, settings, tokens, shares, snippets,
   history wipe, backups, signing, certificates, adding/exporting hosts, the audit log, and the host
-  permissions that hand out access — deploy keys, writable shares, forwards, host admin/edit,
-  other people's sessions, saved connections). The Owner role is refused as a token role. Token
-  routes are unchanged (status, hosts, sessions, run), tokens still never pass a 2FA step-up, and
-  tokens created before this release behave exactly as before.
+  permissions that hand out access — deploy keys, live and replay shares, forwards, host
+  admin/edit, other people's sessions, saved connections, serial consoles, Wake-on-LAN). The Owner
+  role is refused for new tokens. Token routes are unchanged (status, hosts, sessions, run), tokens
+  still never pass a 2FA step-up, and tokens created before this release behave exactly as before
+  (one created with the Owner role is read as "no role cap", and the boot log lists such tokens).
 - Not covered by the crown-jewel confirmation, documented in docs/ROLES.md: mappings from
   `WEBTERM_OIDC_ROLE_MAP` (the server's `.env` — the Owner's own decision on the host), roles
   edited to add a ⚑ permission while already bound over a crown jewel, and hosts newly enrolled
   into a folder (they are never crown jewels until marked).
+- **Fixes from two independent reviews before release:**
+  - *A time-bound role ended up to 30 s late.* Why: permissions are cached for 30 s, and open
+    terminals re-checked only every 60 s. The cache entry now expires at the earliest end of the
+    roles it holds, and a timer wakes open terminals and forwards right then.
+  - *A grant could outlast the granter.* Why: a time-bound Admin could create a permanent Admin, or
+    two time-bound Admins could make each other permanent. When your right to grant comes only
+    from time-bound roles (time-bound Owners included), a permanent grant or a later end is
+    refused (`403 authz.granterExpires`, naming the end): new roles, Make permanent, a new
+    account's first role (the add-account form now has a duration), SSO mappings, and new
+    permissions in a custom role that is in use.
+  - *Extending a role skipped the crown-jewel confirmation.* Why: Make permanent (or any later end)
+    is a grant; it now asks the same blocking question.
+  - *Two check-then-write races.* Why: the expiry route and a crown-jewel host move decided on data
+    read before re-auth / step-up. Both now re-read under the lock right before writing; a changed
+    binding answers `409 authz.bindingChanged`, and the move audits the final exposure list.
+  - *The crown-jewel mark was visible to every host viewer and to read tokens.* Why: it names the
+    host that runs WebTerm. Only Owners and `users.manage` see it now, in the host list and in
+    Explain access.
+  - *`admin sso-only` counted a time-bound Owner as a break-glass account.* Why: when it ends, the
+    instance would have no Owner with a local password. Only permanent Owners count.
+  - *Tokens created with the Owner role before this release stopped working.* Why: they got an
+    empty ceiling, contrary to "older tokens behave as before". They work as before now (see
+    above).
+  - *Tokens could share sessions, create replay links, use serial consoles and wake hosts.* Why:
+    the first two hand access to outsiders; none of it is automation's business. Added to
+    `authz.TOKEN_NEVER`. No existing token ever had these.
 
 ## [3.6.9] — 2026-10-13 · agent (58)
 
