@@ -35,7 +35,8 @@ export default function LoginPage(props: {
     // eroare venită din redirect-ul de callback (?sso_error=...): o arătăm, nu o înghiţim
     const p = new URLSearchParams(window.location.search)
     if (p.get('sso_error') || p.get('sso') === 'disabled') {
-      setError(t('login.ssoError'))
+      // 3.6.11: contul e dezactivat (SCIM) — spus pe nume, altfel omul reîncearcă la nesfârşit
+      setError(t(p.get('sso_error') === 'disabled' ? 'login.ssoDisabled' : 'login.ssoError'))
       window.history.replaceState(null, '', window.location.pathname)
     }
   }, [t])

@@ -73,7 +73,7 @@ export const SETTINGS_INDEX: readonly SettingSection[] = [
     keywords: 'custom roles permissions editor role create edit auditor files-only roluri custom permisiuni editor',
     perm: ['roles.manage', 'users.manage'] },
   { id: 'ssoMapping', cat: 'utilizatori', titleKey: 'roles.sso.title', hintKey: 'roles.sso.hint',
-    keywords: 'sso oidc authentik groups claim mapping group role idp grupuri mapare grup',
+    keywords: 'sso oidc authentik groups claim mapping group role idp grupuri mapare grup scim provisioning deprovisioning provizionare token',
     perm: 'users.manage', requires: 'sso' },
   // ── Autentificare şi 2FA ──
   { id: 'devices', cat: 'autentificare', titleKey: 'settings.devices', hintKey: 'settings.devicesHint',

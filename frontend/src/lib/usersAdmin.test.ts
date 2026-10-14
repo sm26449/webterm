@@ -37,6 +37,9 @@ describe('signInOf', () => {
     expect(signInOf({})).toBe('local')
     expect(signInOf({ sso: true, local_password: false })).toBe('sso')
     expect(signInOf({ sso: true, local_password: true })).toBe('both')
+    // 3.6.11: creat de SCIM, încă nelegat la SSO → tot „doar SSO"
+    expect(signInOf({ sso: false, local_password: false })).toBe('sso')
+    expect(signInOf({ sso: false, local_password: true })).toBe('local')
   })
 })
 

@@ -40,6 +40,7 @@ export const HELP = {
   roles: { doc: 'docs/ROLES.md#giving-someone-access' },
   customRoles: { doc: 'docs/ROLES.md#custom-roles' },
   ssoMapping: { doc: 'docs/ROLES.md#sso-group-mapping' },
+  scim: { doc: 'docs/SSO.md#scim-provisioning-3611' },
 } satisfies Record<string, { doc: string; example?: (origin: string) => string }>
 
 export type HelpId = keyof typeof HELP

@@ -16,6 +16,33 @@ export type UserRow = {
   last_login_method?: LoginMethod | null
   /** de când înregistrează serverul (un cont mai vechi fără ştampilă = „neînregistrat") */
   last_login_tracked_since?: number | null
+  /** 3.6.11 — dezactivat de IdP prin SCIM (`active:false` = 'scim', DELETE = 'scim-delete') */
+  disabled?: boolean
+  disabled_at?: number | null
+  disabled_by?: 'scim' | 'scim-delete' | null
+  /** 3.6.11 — administrat de IdP prin SCIM; `scim_linked` = încă o resursă SCIM (nu ştearsă) */
+  scim?: boolean
+  scim_linked?: boolean
+  display_name?: string | null
+}
+
+/** 3.6.11: starea SCIM din Settings → Users & roles → SSO groups (GET /api/settings/scim) */
+export type ScimStatus = {
+  configured: boolean; enabled: boolean; oidc_enabled: boolean; url: string
+  token_created: number | null; token_created_by: string | null
+  last_request: number | null
+  last_error: { ts: number; status: number; detail: string } | null
+  managed_accounts: number; disabled_accounts: number; groups: number
+  /** doar în răspunsul la creare / rotire — arătat O SINGURĂ DATĂ */
+  token?: string
+}
+
+/** ce arată panoul SCIM: neconfigurat / oprit / pornit dar fără SSO / pornit */
+export type ScimState = 'off' | 'paused' | 'noSso' | 'on'
+export function scimState(s: Pick<ScimStatus, 'configured' | 'enabled' | 'oidc_enabled'>): ScimState {
+  if (!s.configured) return 'off'
+  if (!s.enabled) return 'paused'
+  return s.oidc_enabled ? 'on' : 'noSso'
 }
 
 export type LoginMethod = 'password' | 'password_2fa' | 'passkey' | 'sso'
@@ -69,7 +96,9 @@ export const saveSubTab = (tab: UsersSubTab): void => lsSet(TAB_KEY, tab)
     dau roluri până nu-şi scoate parola — 3.6.2). */
 export type SignIn = 'local' | 'sso' | 'both'
 export function signInOf(u: Pick<UserRow, 'sso' | 'local_password'>): SignIn {
-  if (!u.sso) return 'local'
+  // 3.6.11: un cont creat de SCIM, încă nelegat (n-a intrat încă prin SSO), n-are parolă locală:
+  // e tot „doar SSO". Fără câmp (rânduri vechi) = parolă locală, ca înainte.
+  if (!u.sso) return u.local_password === false ? 'sso' : 'local'
   return u.local_password ? 'both' : 'sso'
 }
 

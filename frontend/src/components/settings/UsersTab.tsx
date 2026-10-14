@@ -15,6 +15,7 @@ import SubTabs from './users/SubTabs'
 import AccountsPanel from './users/AccountsPanel'
 import RolesPanel from './users/RolesPanel'
 import SsoPanel from './users/SsoPanel'
+import ScimPanel from './users/ScimPanel'
 import { ActionStatus } from './users/shared'
 import ExplainAccess from './users/ExplainAccess'
 
@@ -224,6 +225,8 @@ export default function UsersTab(props: { jump?: { id: string; n: number } | nul
                     localPwAccounts={sso.local_password_accounts ?? 0}
                     reload={reloadSso} done={doneAt('sso')} fail={failAt('sso')} />
                 )}
+                {/* 3.6.11: SCIM — starea pentru users.manage, acţiunile doar pentru un Owner */}
+                {sso?.enabled && <ScimPanel isOwner={isOwner} done={(x) => { doneAt('sso')(x); void loadUsers() }} fail={failAt('sso')} />}
                 {status('sso')}
               </>
             )}

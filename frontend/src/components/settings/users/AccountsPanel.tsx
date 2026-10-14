@@ -211,6 +211,17 @@ function AccountDetails(props: {
     } catch (x) { props.fail(x) }
   }
 
+  // 3.6.11: un cont dezactivat (SCIM) — doar un Owner îl reactivează (îşi recapătă TOATE rolurile)
+  async function reenable() {
+    const pw = await askSecret(t('settings.users.reenableConfirm', { email: u.email }))
+    if (!pw) return
+    try {
+      props.setUsers(await withSecondFactor((extra) => api<UserRow[]>(`/api/users/${u.id}/enable`,
+        { method: 'POST', body: JSON.stringify({ current_password: pw, ...extra }) })))
+      props.done(t('settings.users.reenabled'))
+    } catch (x) { props.fail(x) }
+  }
+
   async function removeUser() {
     // askSecret, nu window.prompt: aici se tastează parola TA — mascată, ca peste tot
     const pw = await askSecret(t('settings.users.deleteConfirm', { email: u.email }))
@@ -245,6 +256,22 @@ function AccountDetails(props: {
       </dl>
       {u.sso && u.local_password && (
         <p className="rounded-md bg-warn/10 px-2 py-1.5 text-xs text-warn">{t('roles.localPw.badgeHint')}</p>
+      )}
+      {u.disabled && (
+        <div className="flex flex-wrap items-center gap-2 rounded-md bg-danger/10 px-2 py-1.5" data-account-disabled>
+          <p className="min-w-0 flex-1 text-xs wt-danger">
+            {t(u.disabled_by === 'scim-delete' ? 'settings.users.disabledBy.scimDelete'
+              : u.disabled_by === 'scim' ? 'settings.users.disabledBy.scim' : 'settings.users.disabledBy.manual',
+            { date: u.disabled_at ? fmtTs(u.disabled_at, 'datetime') : '—' })}
+          </p>
+          {props.isOwner
+            ? <Button type="button" size="sm" variant="primary" onClick={reenable} data-reenable
+              aria-label={t('settings.users.reenableAria', { email: u.email })}>{t('settings.users.reenable')}</Button>
+            : <span className="text-xs text-slate-400">{t('settings.users.reenableOwnerOnly')}</span>}
+        </div>
+      )}
+      {u.scim && (
+        <p className="rounded-md bg-info/10 px-2 py-1.5 text-xs text-info" data-account-scim>{t('settings.users.scimManaged')}</p>
       )}
 
       <div>
@@ -437,7 +464,7 @@ export default function AccountsPanel(props: {
             const detailsId = `${uid}-acc-${u.id}-details`
             return (
               <li key={u.id} data-account={u.email}
-                className={`rounded-md bg-ink-800/60 text-sm ring-1 ${hasNoRole(u) ? 'ring-warn/40' : 'ring-ink-700'}`}>
+                className={`rounded-md bg-ink-800/60 text-sm ring-1 ${u.disabled ? 'ring-danger/40' : hasNoRole(u) ? 'ring-warn/40' : 'ring-ink-700'}`}>
                 <button type="button" id={headId} aria-expanded={open} aria-controls={detailsId}
                   onClick={() => setOpenId(open ? null : u.id)}
                   className="wt-touch flex w-full min-w-0 items-center gap-2 rounded-md px-3 py-2 text-left hover:bg-ink-800">
@@ -448,7 +475,9 @@ export default function AccountsPanel(props: {
                       {u.is_self && <Badge tone="accent">{t('settings.users.you')}</Badge>}
                     </span>
                     <span className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
+                      {u.disabled && <Badge tone="danger" data-badge-disabled>{t('settings.users.disabledBadge')}</Badge>}
                       <SignInBadge u={u} />
+                      {u.scim && <Badge tone="info" title={t('settings.users.scimBadgeHint')} data-badge-scim>{t('settings.users.scimBadge')}</Badge>}
                       {bindings.length === 0
                         ? <Badge tone="warn"><WarningIcon size={10} />{t('roles.noRole')}</Badge>
                         : bindings.slice(0, 2).map((b) => (
