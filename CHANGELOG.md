@@ -9,6 +9,8 @@ back.
 
 ## [Unreleased]
 
+## [3.6.10] — 2026-10-14 · agent (58)
+
 Roles, part 2: last sign-in per account, "Explain access", time-bound roles, crown-jewel hosts, automation tokens with a role and a scope. No agent change (agent stays 58).
 
 ### Added
