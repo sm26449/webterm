@@ -26,6 +26,16 @@ Config din mediu (provision.sh le încarcă din .env):
   AUTHENTIK_API_TOKEN sau AUTHENTIK_BOOTSTRAP_TOKEN       — obligatoriu (token de API)
   WEBTERM_OIDC_PROVIDER_NAME (default: Authentik)
   WT_GROUP_PREFIX            (default: wt)
+
+SCIM (3.6.11, opţional) — Authentik împinge creările/dezactivările/grupurile în WebTerm pe loc:
+  WEBTERM_SCIM_TOKEN_FILE    fişierul cu tokenul SCIM creat de un Owner în WebTerm (Settings →
+                             Users & roles → SSO groups → SCIM provisioning → Create token)
+  WEBTERM_SCIM_TOKEN         sau tokenul însuşi, în mediu (NICIODATĂ pe linia de comandă: argv
+                             se vede în `ps` şi în istoricul shell-ului)
+  WEBTERM_SCIM_URL           opţional; implicit https://<WEBTERM_DOMAIN>/scim/v2
+Cu unul dintre ele setat, provision creează/actualizează providerul SCIM `<prefix>-scim` (filtrat:
+doar membrii grupurilor WebTerm şi doar grupurile `<prefix>-*` sunt trimise) şi îl pune ca
+backchannel pe aplicaţia WebTerm. Idempotent, ca restul.
 """
 import json
 import os
@@ -79,6 +89,122 @@ def role_map(groups):
     return ",".join("%s=%s" % (g, r) for g, r in groups if r)
 
 
+SCIM_TOKEN_PREFIX = "wtscim_"
+
+
+def scim_user_filter(names):
+    """Maparea SCIM pentru useri: trimite DOAR membrii grupurilor WebTerm (`raise SkipObject`
+    pentru restul — altfel providerul SCIM ar împinge în WebTerm TOŢI userii din Authentik).
+    Întoarce {} (nu schimbă nimic din maparea implicită). Nume validate de group_names."""
+    lines = ["# WebTerm (provision.py): doar membrii grupurilor WebTerm ajung în WebTerm",
+             "for name in (%s,):" % ", ".join(repr(n) for n in names),
+             "    if ak_is_group_member(request.user, name=name):",
+             "        return {}",
+             "raise SkipObject"]
+    return "\n".join(lines) + "\n"
+
+
+def scim_group_filter(prefix):
+    """Maparea SCIM pentru grupuri: doar grupurile `<prefix>-*` (numele lor sunt exact cele din
+    claim-ul OIDC `groups`, deci maparea grup → rol din WebTerm se potriveşte octet cu octet)."""
+    return ("# WebTerm (provision.py): doar grupurile %s-* ajung în WebTerm\n"
+            "if not group.name.startswith(%r):\n"
+            "    raise SkipObject\n"
+            "return {}\n" % (prefix, prefix + "-"))
+
+
+def read_scim_token(env=None):
+    """Tokenul SCIM din WEBTERM_SCIM_TOKEN_FILE sau WEBTERM_SCIM_TOKEN (niciodată din argv).
+    → None dacă niciunul nu e setat. Un fişier ilizibil / un token cu altă formă → oprire."""
+    env = os.environ if env is None else env
+    path = (env.get("WEBTERM_SCIM_TOKEN_FILE") or "").strip()
+    raw = env.get("WEBTERM_SCIM_TOKEN") or ""
+    if path:
+        try:
+            with open(path, encoding="utf-8") as f:
+                raw = f.read()
+        except OSError as e:
+            fail("WEBTERM_SCIM_TOKEN_FILE=%s: %s" % (path, e.strerror or e))
+    raw = raw.strip()
+    if not raw:
+        return None
+    if not raw.startswith(SCIM_TOKEN_PREFIX) or len(raw) < 40 or any(c.isspace() for c in raw):
+        fail("the SCIM token does not look like one WebTerm creates (wtscim_…): create it in "
+             "WebTerm → Settings → Users & roles → SSO groups → SCIM provisioning")
+    return raw
+
+
+def provision_scim(call, *, wt_domain, prefix, names, token, app_pk, scim_url="", out=print):
+    """Providerul SCIM `<prefix>-scim` + backchannel pe aplicaţia webterm. Idempotent."""
+    url = (scim_url or "https://%s/scim/v2" % wt_domain).rstrip("/")
+    name = "%s-scim" % prefix
+
+    def results(path):
+        s, d = call("GET", path)
+        return d.get("results", []) if isinstance(d, dict) else []
+
+    def managed(m):
+        r = results("/api/v3/propertymappings/provider/scim/?managed=%s" % urllib.parse.quote(m))
+        r = [x for x in r if x.get("managed") == m]
+        if not r:
+            fail("the default SCIM property mapping %s is missing in Authentik" % m)
+        return r[0]["pk"]
+
+    user_default = managed("goauthentik.io/providers/scim/user")
+    group_default = managed("goauthentik.io/providers/scim/group")
+
+    def mapping(mname, expr):
+        found = [m for m in results("/api/v3/propertymappings/provider/scim/?name=%s"
+                                    % urllib.parse.quote(mname)) if m.get("name") == mname]
+        if found:
+            if found[0].get("expression") != expr:
+                s, d = call("PATCH", "/api/v3/propertymappings/provider/scim/%s/" % found[0]["pk"],
+                            {"expression": expr})
+                if s != 200:
+                    fail("updating the SCIM mapping %s failed: %s %s" % (mname, s, d))
+                out("mapare SCIM %s: actualizată" % mname)
+            else:
+                out("mapare SCIM %s: există" % mname)
+            return found[0]["pk"]
+        s, d = call("POST", "/api/v3/propertymappings/provider/scim/", {"name": mname, "expression": expr})
+        if s != 201 or not d.get("pk"):
+            fail("creating the SCIM mapping %s failed: %s %s" % (mname, s, d))
+        out("mapare SCIM %s: creată" % mname)
+        return d["pk"]
+
+    user_filter = mapping("WebTerm SCIM: %s users only" % prefix, scim_user_filter(names))
+    group_filter = mapping("WebTerm SCIM: %s-* groups only" % prefix, scim_group_filter(prefix))
+    body = {"name": name, "url": url, "token": token, "auth_mode": "token",
+            "verify_certificates": True, "exclude_users_service_account": True,
+            "property_mappings": [user_default, user_filter],
+            "property_mappings_group": [group_default, group_filter]}
+    prov = [p for p in results("/api/v3/providers/scim/?name=%s" % urllib.parse.quote(name))
+            if p.get("name") == name]
+    if prov:
+        pk = prov[0]["pk"]
+        s, d = call("PATCH", "/api/v3/providers/scim/%s/" % pk, body)
+        if s != 200:
+            fail("updating the SCIM provider %s failed: %s %s" % (name, s, d))
+        out("provider SCIM %s: actualizat (%s)" % (name, url))
+    else:
+        s, d = call("POST", "/api/v3/providers/scim/", body)
+        if s != 201 or not d.get("pk"):
+            fail("creating the SCIM provider %s failed: %s %s" % (name, s, d))
+        pk = d["pk"]
+        out("provider SCIM %s: creat (%s)" % (name, url))
+    s, appobj = call("GET", "/api/v3/core/applications/webterm/")
+    have = list(appobj.get("backchannel_providers") or []) if s == 200 else []
+    if pk in have:
+        out("backchannel %s → aplicaţia webterm: există" % name)
+    else:
+        s, d = call("PATCH", "/api/v3/core/applications/webterm/",
+                    {"backchannel_providers": have + [pk]})
+        if s != 200:
+            fail("adding %s as a backchannel provider of webterm failed: %s %s" % (name, s, d))
+        out("backchannel %s → aplicaţia webterm: adăugat" % name)
+    return {"provider": pk, "url": url}
+
+
 class Api:
     """Clientul HTTP real (urllib). Testele îl înlocuiesc cu un Authentik fals."""
 
@@ -102,9 +228,10 @@ class Api:
                 return e.code, {"_raw": raw}
 
 
-def provision(call, *, ak, wt_domain, provider_name="Authentik", prefix="wt", out=print):
+def provision(call, *, ak, wt_domain, provider_name="Authentik", prefix="wt", out=print,
+              scim_token=None, scim_url=""):
     """Idempotent. `call(method, path, body)` → (status, json). Întoarce dict-ul cu ce s-a
-    tipărit în blocul .env (pentru teste)."""
+    tipărit în blocul .env (pentru teste). `scim_token` (3.6.11): şi providerul SCIM."""
     groups = group_names(prefix)
     redirect = "https://%s/api/oidc/callback" % wt_domain
 
@@ -308,6 +435,11 @@ def provision(call, *, ak, wt_domain, provider_name="Authentik", prefix="wt", ou
         out("  %3s  %s%s" % (b.get("order"), what, "" if b.get("enabled", True) else " (oprit)"))
 
     names = [g for g, _r in groups]
+    scim = None
+    if scim_token:
+        scim = provision_scim(call, wt_domain=wt_domain, prefix=(prefix or "wt").strip(),
+                              names=names, token=scim_token, app_pk=app_pk, scim_url=scim_url,
+                              out=out)
     env = {
         "WEBTERM_OIDC_ISSUER": "%s/application/o/webterm/" % ak,
         "WEBTERM_OIDC_CLIENT_ID": client_id,
@@ -328,7 +460,11 @@ def provision(call, *, ak, wt_domain, provider_name="Authentik", prefix="wt", ou
     for name, role in groups:
         out("#   %-24s %s" % (name, ("→ " + role) if role else "doar login, fără rol (dai acces de mână în WebTerm)"))
     out("# Owner nu se dă niciodată din grupuri: rămâne contul local (break-glass).")
-    return {"env": env, "groups": names}
+    if scim:
+        out("# SCIM: %s → Authentik face acum o sincronizare completă (apoi orar + la fiecare "
+            "schimbare). În WebTerm, Settings → Users & roles → SSO groups → SCIM provisioning "
+            "arată ultima cerere şi ultima eroare." % scim["url"])
+    return {"env": env, "groups": names, "scim": scim}
 
 
 def main():
@@ -344,7 +480,8 @@ def main():
         sys.exit("lipsesc (AUTHENTIK_URL|AUTHENTIK_DOMAIN) / WEBTERM_DOMAIN / "
                  "(AUTHENTIK_API_TOKEN|AUTHENTIK_BOOTSTRAP_TOKEN)")
     provision(Api(ak, token), ak=ak, wt_domain=wt_domain, provider_name=provider_name,
-              prefix=os.environ.get("WT_GROUP_PREFIX", "wt"))
+              prefix=os.environ.get("WT_GROUP_PREFIX", "wt"), scim_token=read_scim_token(),
+              scim_url=os.environ.get("WEBTERM_SCIM_URL", "").strip())
 
 
 if __name__ == "__main__":

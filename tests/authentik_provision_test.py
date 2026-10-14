@@ -13,7 +13,12 @@ verifice cine poate intra, nu doar ce obiecte există. Se verifică:
   * idempotenţa: a doua rulare nu creează nimic şi nu schimbă cine intră;
   * blocul .env tipărit: ALLOWED_GROUPS cu TOATE cele cinci grupuri, ROLE_MAP cu prefixul aplicat
     şi fără Owner, SSO_ONLY=1, SESSION_MAX_HOURS=12 — şi WebTerm îl parsează fără erori;
-  * un prefix invalid e refuzat înainte de orice scriere; un token invalid opreşte totul.
+  * un prefix invalid e refuzat înainte de orice scriere; un token invalid opreşte totul;
+  * SCIM (3.6.11, opţional): providerul `<prefix>-scim` spre <public URL>/scim/v2 cu tokenul din
+    fişier/mediu (niciodată argv), filtrat la membrii grupurilor WebTerm şi la grupurile
+    `<prefix>-*`, pus ca backchannel pe aplicaţie fără să scoată alte backchannel-uri;
+    idempotent (a doua rulare nu creează nimic); fără token nu se atinge nimic SCIM; un token
+    cu altă formă / un fişier ilizibil opresc rularea.
 """
 import importlib.util
 import os
@@ -50,6 +55,11 @@ class FakeAuthentik:
                            {"pk": "m-email", "scope_name": "email"},
                            {"pk": "m-profile", "scope_name": "profile"}]
         self.writes = []
+        self.scim_providers = {}
+        self.scim_maps = [{"pk": "sm-user", "managed": "goauthentik.io/providers/scim/user",
+                           "name": "authentik default SCIM Mapping: User"},
+                          {"pk": "sm-group", "managed": "goauthentik.io/providers/scim/group",
+                           "name": "authentik default SCIM Mapping: Group"}]
         self.app_bodies = []        # corpurile POST/PATCH pe aplicaţie (modul nu are voie să apară)
         self.n = 0
 
@@ -137,6 +147,36 @@ class FakeAuthentik:
             if method == "PATCH":
                 self.providers[pk].update(body)
             return 200, self.providers[pk]
+        if base == "/api/v3/propertymappings/provider/scim/":
+            if method == "GET":
+                res = self.scim_maps
+                if "managed" in qs:
+                    res = [m for m in res if m.get("managed") == qs["managed"]]
+                if "name" in qs:
+                    res = [m for m in res if qs["name"] in m.get("name", "")]
+                return 200, {"results": [dict(m) for m in res]}
+            m = dict(body, pk=self._pk("smap"))
+            self.scim_maps.append(m)
+            return 201, m
+        if base.startswith("/api/v3/propertymappings/provider/scim/") and method == "PATCH":
+            pk = base.rstrip("/").rsplit("/", 1)[1]
+            for m in self.scim_maps:
+                if m["pk"] == pk:
+                    m.update(body)
+                    return 200, dict(m)
+            return 404, {}
+        if base == "/api/v3/providers/scim/":
+            if method == "GET":
+                name = qs.get("name", "")
+                return 200, {"results": [dict(p) for p in self.scim_providers.values()
+                                         if not name or name in p["name"]]}
+            pr = dict(body, pk=self._pk("scim"))
+            self.scim_providers[pr["pk"]] = pr
+            return 201, pr
+        if base.startswith("/api/v3/providers/scim/") and method == "PATCH":
+            pk = base.rstrip("/").rsplit("/", 1)[1]
+            self.scim_providers[pk].update(body)
+            return 200, dict(self.scim_providers[pk])
         if base.startswith("/api/v3/core/applications/") and method in ("POST", "PATCH"):
             self.app_bodies.append(dict(body or {}))
         if base == "/api/v3/core/applications/":
@@ -340,6 +380,84 @@ def main():
             refused = True
         check("prefix %r refuzat înainte de orice scriere" % badp[:20], refused and not ak4.writes,
               str(ak4.writes[:3]))
+
+    print("── SCIM (3.6.11): provider + backchannel, idempotent, token din fişier/mediu")
+    tok = "wtscim_" + "A" * 43
+    ak5 = FakeAuthentik()
+    run(ak5)
+    check("fără token SCIM: nimic SCIM creat", not ak5.scim_providers
+          and not any("/scim/" in w[1] for w in ak5.writes))
+    ak5.apps["webterm"]["backchannel_providers"] = ["other-bc"]
+    lines = []
+    res5 = P.provision(ak5, ak="https://auth.example.test", wt_domain="term.example.test",
+                       prefix="wt", out=lines.append, scim_token=tok)
+    provs = list(ak5.scim_providers.values())
+    check("un provider SCIM wt-scim", len(provs) == 1 and provs[0]["name"] == "wt-scim", str(provs))
+    pr = provs[0] if provs else {}
+    check("URL-ul = https://<WEBTERM_DOMAIN>/scim/v2 şi tokenul dat", pr.get("url") ==
+          "https://term.example.test/scim/v2" and pr.get("token") == tok)
+    check("certificate verificate, conturile de serviciu excluse",
+          pr.get("verify_certificates") is True and pr.get("exclude_users_service_account") is True)
+    umaps = [m for m in ak5.scim_maps if m["pk"] in pr.get("property_mappings", [])]
+    gmaps = [m for m in ak5.scim_maps if m["pk"] in pr.get("property_mappings_group", [])]
+    uf = next((m for m in umaps if "expression" in m), {})
+    gf = next((m for m in gmaps if "expression" in m), {})
+    check("useri: maparea implicită + filtrul WebTerm", "sm-user" in pr.get("property_mappings", [])
+          and "raise SkipObject" in uf.get("expression", ""))
+    check("…filtrul trece DOAR membrii celor cinci grupuri",
+          all(repr(n) in uf.get("expression", "") for n in NAMES)
+          and "ak_is_group_member(request.user, name=name)" in uf.get("expression", ""))
+    check("grupuri: maparea implicită + doar wt-*", "sm-group" in pr.get("property_mappings_group", [])
+          and "startswith('wt-')" in gf.get("expression", "") and "raise SkipObject" in gf.get("expression", ""))
+    check("backchannel pe aplicaţia webterm, cel existent păstrat",
+          ak5.apps["webterm"].get("backchannel_providers") == ["other-bc", pr.get("pk")],
+          str(ak5.apps["webterm"].get("backchannel_providers")))
+    check("modul politicilor tot neatins", all("policy_engine_mode" not in b for b in ak5.app_bodies))
+    check("tokenul NU apare în ce se tipăreşte", not any(tok in ln for ln in lines))
+    check("rezultatul spune URL-ul SCIM", res5["scim"]["url"] == "https://term.example.test/scim/v2")
+    n = len([w for w in ak5.writes if w[0] in ("POST", "DELETE")])
+    P.provision(ak5, ak="https://auth.example.test", wt_domain="term.example.test", prefix="wt",
+                out=lambda *_: None, scim_token=tok)
+    check("a doua rulare: nicio creare (idempotent)", len([w for w in ak5.writes if w[0] in ("POST", "DELETE")]) == n
+          and len(ak5.scim_providers) == 1
+          and ak5.apps["webterm"]["backchannel_providers"].count(pr.get("pk")) == 1)
+    tok2 = "wtscim_" + "B" * 43
+    P.provision(ak5, ak="https://auth.example.test", wt_domain="term.example.test", prefix="wt",
+                out=lambda *_: None, scim_token=tok2, scim_url="https://wt.internal:8443/scim/v2/")
+    check("token rotit + URL explicit → providerul actualizat (PATCH)",
+          pr["pk"] in ak5.scim_providers and ak5.scim_providers[pr["pk"]]["token"] == tok2
+          and ak5.scim_providers[pr["pk"]]["url"] == "https://wt.internal:8443/scim/v2")
+    ak6 = FakeAuthentik()
+    P.provision(ak6, ak="https://auth.example.test", wt_domain="term.example.test", prefix="wt-prod",
+                out=lambda *_: None, scim_token=tok)
+    p6 = next(iter(ak6.scim_providers.values()))
+    g6 = next(m for m in ak6.scim_maps if m["pk"] in p6["property_mappings_group"] and "expression" in m)
+    check("prefix wt-prod: providerul wt-prod-scim, doar grupurile wt-prod-*",
+          p6["name"] == "wt-prod-scim" and "startswith('wt-prod-')" in g6["expression"])
+    import tempfile
+    d = tempfile.mkdtemp()
+    fpath = os.path.join(d, "scim-token")
+    with open(fpath, "w") as f:
+        f.write(tok + "\n")
+    check("tokenul din WEBTERM_SCIM_TOKEN_FILE (rândul nou final tăiat)",
+          P.read_scim_token({"WEBTERM_SCIM_TOKEN_FILE": fpath}) == tok)
+    check("…sau din WEBTERM_SCIM_TOKEN", P.read_scim_token({"WEBTERM_SCIM_TOKEN": tok}) == tok)
+    check("niciunul setat → fără SCIM", P.read_scim_token({}) is None)
+    for what, env in (("fişier inexistent", {"WEBTERM_SCIM_TOKEN_FILE": fpath + ".nope"}),
+                      ("token de automatizare (wt_…)", {"WEBTERM_SCIM_TOKEN": "wt_" + "x" * 43}),
+                      ("token scurt", {"WEBTERM_SCIM_TOKEN": "wtscim_x"}),
+                      ("token cu spaţii", {"WEBTERM_SCIM_TOKEN": "wtscim_" + "a" * 20 + " " + "b" * 20})):
+        try:
+            P.read_scim_token(env)
+            stopped = False
+        except SystemExit:
+            stopped = True
+        check("SCIM: %s → oprire" % what, stopped)
+    os.remove(fpath)
+    os.rmdir(d)
+    src = open(os.path.join(HERE, "..", "deploy", "authentik", "provision.py"), encoding="utf-8").read()
+    check("main() citeşte tokenul doar din mediu/fişier (argv neatins)",
+          "sys.argv" not in src and "read_scim_token()" in src)
 
     print("── un token invalid opreşte totul")
     try:

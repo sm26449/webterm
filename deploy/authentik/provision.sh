@@ -5,7 +5,8 @@
 #   ./provision.sh
 #
 # Citeşte .env (AUTHENTIK_DOMAIN, WEBTERM_DOMAIN, WEBTERM_OIDC_PROVIDER_NAME, şi opţional
-# AUTHENTIK_BOOTSTRAP_TOKEN, WT_GROUP_PREFIX — prefixul celor cinci grupuri, implicit `wt`). Dacă
+# AUTHENTIK_BOOTSTRAP_TOKEN, WT_GROUP_PREFIX — prefixul celor cinci grupuri, implicit `wt`; şi
+# WEBTERM_SCIM_TOKEN_FILE — fişierul cu tokenul SCIM din WebTerm, pentru providerul SCIM, 3.6.11). Dacă
 # nu are un token de API valid, generează unul prin `ak shell`
 # în container. La final tipăreşte blocul WEBTERM_OIDC_* pentru .env-ul WebTerm.
 set -euo pipefail
