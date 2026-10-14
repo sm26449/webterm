@@ -32,9 +32,9 @@ from email.utils import formatdate
 from .errors import ApiError
 from . import webauthn_api
 from . import fscopy
-from . import (alert_history, audit, authz, backup, certmon, cloudbackup, config, core, db,
-               email_alerts, health, healthcmd, pyruntime, replay, rootmove, security, signing,
-               ssomap,
+from . import (accounts, alert_history, audit, authz, backup, certmon, cloudbackup, config, core,
+               db, email_alerts, health, healthcmd, pyruntime, replay, rootmove, scim, security,
+               signing, ssomap,
                syshealth, totp, updatecheck)
 
 log = logging.getLogger("webterm")
@@ -581,6 +581,12 @@ async def login(request: Request, response: Response):
     if not ok:
         security.record_login_failure(ip)
         raise ApiError(401, "auth.badCredentials", "wrong email or password")
+    # 3.6.11: contul dezactivat (SCIM) — spus DOAR după parola corectă (altfel ar fi un oracol
+    # de existenţă), auditat; nicio sesiune, niciun al doilea factor cerut
+    if user["disabled"]:
+        audit.detail(request, "sign-in refused: the account is disabled")
+        raise ApiError(403, "auth.accountDisabled",
+                       "this account is disabled; an Owner can re-enable it")
     # parola e corectă — dacă 2FA e activ, cere al doilea factor
     if user["totp_enabled"]:
         if not creds.totp_code:
@@ -987,7 +993,8 @@ async def _users_json(user, grants) -> list:
     manage = grants.has_global("users.manage")
     rows = await db.fetchall(
         "SELECT u.id, u.email, u.created, u.totp_enabled, u.sso_subject, u.local_password,"
-        " u.last_login, u.last_login_method,"
+        " u.last_login, u.last_login_method, u.disabled, u.disabled_at, u.disabled_by,"
+        " u.scim_managed, u.scim_id, u.scim_display_name,"
         " (SELECT COUNT(*) FROM webauthn_credentials c WHERE c.user_id=u.id) AS passkeys"
         " FROM users u ORDER BY u.created")
     since = None
@@ -1007,7 +1014,14 @@ async def _users_json(user, grants) -> list:
                # 3.6.2: cu parolă locală, grupurile SSO nu-i dau roluri (ssomap)
                "local_password": r["local_password"] is None or bool(r["local_password"]),
                "is_self": r["id"] == user["id"],
-               "bindings": await _user_bindings(r["id"])}
+               "bindings": await _user_bindings(r["id"]),
+               # 3.6.11: dezactivat (SCIM) + administrat de IdP prin SCIM
+               "disabled": bool(r["disabled"]),
+               "disabled_at": r["disabled_at"] if r["disabled"] else None,
+               "disabled_by": (r["disabled_by"] or None) if r["disabled"] else None,
+               "scim": bool(r["scim_managed"]),
+               "scim_linked": bool(r["scim_id"]),
+               "display_name": r["scim_display_name"] or None}
         if manage:
             # 3.6.10: ultima autentificare şi cum — doar pentru users.manage (cine administrează
             # conturile vede conturile nefolosite). `tracked_since`: un cont mai vechi decât
@@ -1922,6 +1936,103 @@ async def delete_oidc_role(mid: int, body: ReauthOnly, request: Request,
         if res["kept_last_owner"]:
             ssomap.report_last_owner(uid, email, ip, res["kept_last_owner"])
     return await _oidc_roles_json()
+
+
+# ── SCIM provisioning (3.6.11, scim.py) ─────────────────────────────────────────────────────
+# Starea o vede oricine administrează conturile (users.manage — vede oricum conturile „gestionate
+# de SCIM"); tokenul îl creează / roteşte / revocă şi provizionarea o porneşte DOAR un Owner, cu
+# parola contului + al doilea factor: tokenul SCIM creează conturi şi le dezactivează. Oprirea
+# (fără revocare) nu cere re-autentificare — reduce doar accesul, şi trebuie să fie rapidă.
+class ScimEnabledIn(ReauthOnly):
+    enabled: bool = False
+
+
+def _owner_only(grants, what: str) -> None:
+    if not grants.is_owner():
+        raise ApiError(403, "authz.ownerOnly", "only an Owner can %s" % what)
+
+
+@router.get("/api/settings/scim")
+async def scim_status(user=Depends(authz.perm('users.manage'))):
+    return await scim.status_json()
+
+
+@router.post("/api/settings/scim/token")
+async def scim_token(body: ReauthOnly, request: Request, user=Depends(authz.perm('users.manage'))):
+    """Creează sau ROTEŞTE tokenul SCIM (cel vechi moare pe loc). Arătat O SINGURĂ DATĂ."""
+    _owner_only(authz.grants_of(request), "manage SCIM provisioning")
+    await _reauth_for_access_change(user, request, body, "create a SCIM provisioning token")
+    async with authz._lock:
+        _owner_only(await _fresh_grants(user, "users.manage"), "manage SCIM provisioning")
+        rotated = (await scim.status_json())["configured"]
+        raw = scim.new_token()
+        await scim.set_token(raw, user["email"])
+    what = "SCIM provisioning token %s" % ("rotated (the old one stopped working)" if rotated
+                                           else "created")
+    audit.detail(request, what)
+    log.warning("%s by %s", what, user["email"])
+    email_alerts.notify_security_change(what, security.client_ip(request), user["email"],
+                                        fleet=True, severity="critical",
+                                        what_key="scim_token_rotated" if rotated
+                                        else "scim_token_created")
+    return dict(await scim.status_json(), token=raw)
+
+
+@router.post("/api/settings/scim/revoke")
+async def scim_revoke(body: ReauthOnly, request: Request, user=Depends(authz.perm('users.manage'))):
+    _owner_only(authz.grants_of(request), "manage SCIM provisioning")
+    await _reauth_for_access_change(user, request, body, "revoke the SCIM provisioning token")
+    async with authz._lock:
+        _owner_only(await _fresh_grants(user, "users.manage"), "manage SCIM provisioning")
+        await scim.revoke_token()
+    audit.detail(request, "SCIM provisioning token revoked")
+    log.warning("SCIM provisioning token revoked by %s", user["email"])
+    email_alerts.notify_security_change("SCIM provisioning token revoked",
+                                        security.client_ip(request), user["email"], fleet=True,
+                                        what_key="scim_token_revoked")
+    return await scim.status_json()
+
+
+@router.post("/api/settings/scim/enabled")
+async def scim_enabled(body: ScimEnabledIn, request: Request,
+                       user=Depends(authz.perm('users.manage'))):
+    _owner_only(authz.grants_of(request), "manage SCIM provisioning")
+    if body.enabled:
+        if not (await scim.status_json())["configured"]:
+            raise ApiError(409, "scim.noToken", "create a SCIM token first")
+        await _reauth_for_access_change(user, request, body, "turn SCIM provisioning on")
+    async with authz._lock:
+        _owner_only(await _fresh_grants(user, "users.manage"), "manage SCIM provisioning")
+        await scim.set_enabled(body.enabled)
+    what = "SCIM provisioning turned %s" % ("on" if body.enabled else "off")
+    audit.detail(request, what)
+    log.warning("%s by %s", what, user["email"])
+    email_alerts.notify_security_change(what, security.client_ip(request), user["email"],
+                                        fleet=True, what_key="scim_enabled" if body.enabled
+                                        else "scim_disabled")
+    return await scim.status_json()
+
+
+@router.post("/api/users/{uid}/enable")
+async def enable_user(uid: int, body: ReauthOnly, request: Request,
+                      user=Depends(authz.perm('users.manage'))):
+    """Reactivează un cont dezactivat (de SCIM). Doar un Owner: un cont reactivat îşi recapătă
+    TOATE legăturile, deci e o acordare la fel de mare ca cea mai mare dintre ele."""
+    _owner_only(authz.grants_of(request), "re-enable a disabled account")
+    row = await db.fetchone("SELECT email, COALESCE(disabled, 0) AS d FROM users WHERE id=?", uid)
+    if not row:
+        raise ApiError(404, "user.missing", "no such account")
+    if not row["d"]:
+        raise ApiError(409, "account.notDisabled", "this account is not disabled")
+    await _reauth_for_access_change(user, request, body, "re-enable a disabled account")
+    async def recheck():
+        _owner_only(await _fresh_grants(user, "users.manage"), "re-enable a disabled account")
+    email = await accounts.enable(uid, actor=user["email"], ip=security.client_ip(request),
+                                  how="by an Owner in Settings", actor_id=user["id"],
+                                  path="/api/users/%d/enable" % uid, recheck=recheck)
+    if email:
+        audit.detail(request, "account %s re-enabled" % email)
+    return await _users_json(user, authz.grants_of(request))
 
 
 @router.get("/api/me/permissions")

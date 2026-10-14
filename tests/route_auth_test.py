@@ -23,7 +23,7 @@ import tempfile
 os.environ.setdefault("WEBTERM_DATA_DIR", tempfile.mkdtemp())
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "gateway"))
 
-from app import api, authz, oidc_api, webauthn_api  # noqa: E402
+from app import api, authz, oidc_api, scim, webauthn_api  # noqa: E402
 
 ok = 0
 total = 0
@@ -39,7 +39,8 @@ def check(name, cond, detail=""):
 # TOATE routerele montate în `main.py`, nu doar `api`. Prima versiune a testului enumera
 # doar `api.router` şi rata complet `webauthn_api.router` — adică exact suprafaţa care
 # manevrează passkey-urile şi step-up-ul 2FA, unde costul unei omisiuni e cel mai mare.
-ROUTERS = {"api": api.router, "webauthn_api": webauthn_api.router, "oidc_api": oidc_api.router}
+ROUTERS = {"api": api.router, "webauthn_api": webauthn_api.router, "oidc_api": oidc_api.router,
+           "scim": scim.router}
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
@@ -192,7 +193,7 @@ def main():
                 mism.append("%s %s: lipseşte din Anexa A" % (m, r.path))
                 continue
             dash, dperm = want
-            if kind in ("public", "self"):
+            if kind in ("public", "self", "scim"):
                 good = dash               # fără permisiune în cod ⇔ `—` în document
             elif spec.list:
                 good = dperm == spec.perm[0]      # listă: „— / perm" sau „perm", filtrată

@@ -1200,7 +1200,7 @@ These are candidates for after 3.7, listed so they are not forgotten. None is pr
   approvals and the authz cache are in memory. Any HA story (active/passive with shared storage)
   must start from that fact; nothing here makes it harder, and the SSH server makes it no worse.
 - **SCIM** user provisioning from the IdP, so deprovisioning works without waiting for a login.
-  Only relevant for larger installs.
+  Only relevant for larger installs. *Built in 3.6.11 — see §7.4.*
 - **Session moderation / four-eyes** (Teleport-style required observers) for crown-jewel hosts.
 
 ---
@@ -1412,7 +1412,7 @@ Code: `ssomap.parse_role_map` / `reconcile_config` (called once from `main.lifes
   also kill tickets of the person's newer session); renaming or deleting a host that a config
   mapping names, or renaming a custom role it names, logs a warning and is audited (names are
   resolved again only at the next restart).
-- **Not built:** SCIM (push de-provisioning). Automation tokens of an SSO user keep the user's
+- **Not built (until 3.6.11, §7.4):** SCIM (push de-provisioning). Automation tokens of an SSO user keep the user's
   current bindings, which change only at an SSO sign-in/step-up or by hand.
 
 ### 7.3 Implementation notes (roles, part 2, 3.6.10)
@@ -1461,6 +1461,62 @@ Code: `ssomap.parse_role_map` / `reconcile_config` (called once from `main.lifes
   which never intersected `TOKEN_NEVER` except `security.view`, deliberately kept. A row whose
   role is the built-in Owner (created before 3.6.10) is read as "no role cap", exactly as before;
   `authz.seed` logs their ids and names at boot. A row whose role no longer exists gets nothing.
+
+### 7.4 Implementation notes (SCIM provisioning, 3.6.11)
+
+User guide: [docs/SSO.md → SCIM provisioning](../SSO.md#scim-provisioning-3611).
+
+- **Principal.** `scim.require_scim`: `Authorization: Bearer wtscim_…` only (cookies ignored,
+  `wt_` automation tokens never match), SHA-256 of the token compared with `hmac.compare_digest`
+  against `app_settings.scim_token_hash`; per-IP failure lockout (10 / 15 min → 15 min, the trip
+  audited once), 1200 authenticated requests a minute, 1 MiB bodies. Then the Owner's pause switch
+  (`scim_enabled`) and OIDC configured — otherwise 403. The token is created / rotated / revoked
+  by an Owner only (`users.manage` + `is_owner()` in the handler, re-checked under the bindings
+  lock; reauth + second gate), shown once, audited and alerted (critical).
+- **Route guard.** `authz.route_spec` classifies a route whose dependency tree contains a
+  callable marked `__scim__` as `scim` (`multi` if it also has a `perm()`); `authz.declared`
+  accepts `scim` only under `/scim/v2/`. `route_auth_test` covers the router (mounted-routers
+  check) and Appendix A §A.11b; `scim_protocol_test` proves an `/api/` route with the SCIM
+  dependency answers 500 `authz.undeclared`.
+- **Disabled state** (`users.disabled/_at/_by`, `accounts.py`). `authz.grants_for_user` returns no
+  grants for a disabled account (bindings kept); `grants_for_token` and `api_token_principal`
+  refuse a disabled creator's token; `user_for_token` deletes a disabled account's session row and
+  returns None; `session_valid` is false (live sockets close at the next re-check, which the epoch
+  bump triggers at once); `create_web_session` raises `auth.accountDisabled` as a backstop; the
+  password, passkey and OIDC paths refuse explicitly (after verifying the credential, so it is no
+  existence oracle). `owner_count` ignores disabled accounts. `accounts.disable` runs the last-Owner
+  check and the state change under `authz._lock`, then clears step-up windows, bumps the forward
+  epoch, deletes the account's automation tokens and revokes its shares and replay links (the
+  account-deletion path, minus the deletion). Re-enable: SCIM `active:true` (SCIM accounts),
+  `POST /api/users/{uid}/enable` (Owner), `python3 -m app.admin enable`.
+- **Accounts.** `scim_managed`, `scim_id` (ours, uuid; NULL after a SCIM DELETE),
+  `scim_external_id` (unique), `scim_user_name`, `scim_display_name`. A create matches an existing
+  row by `scim_external_id`, by `sso_subject == externalId`, and by email; more than one distinct
+  row → 409; a row with a local password (`ssomap.has_local_password`) → 409 (break-glass, never
+  managed); a row already linked → 409 (the IdP then finds it with `filter=userName eq`). New rows:
+  random argon2 hash, `local_password=0`. The OIDC callback links an unlinked SCIM row whose
+  `scim_external_id` equals `sub` before the email-adoption path (which still needs
+  `email_verified`).
+- **Groups.** `scim_groups` / `scim_group_members` (SCIM accounts only). After any membership or
+  name change the touched accounts are re-synced through `ssomap.sync_user(…, scim=True)`:
+  effective groups = (`users.sso_groups` − names SCIM manages, plus the old name on a rename /
+  delete) ∪ SCIM memberships, so SCIM is authoritative only for the groups it pushes. `scim=True`
+  restricts ADDITIONS to `ssomap.scim_grantable_roles()` (not Owner, no Owner-only permission —
+  the `WEBTERM_OIDC_ROLE_MAP` rule); everything else (removals, the last-Owner keep, the
+  local-password rule, audit, alerts) is the sign-in path unchanged. A group PUT without `members`
+  keeps them (Authentik PUTs then PATCHes members; clearing in between would flap roles and close
+  terminals). SCIM writes are serialised by `scim._lock` (taken before `authz._lock`, never the
+  other way round).
+- **Audit.** Every change the IdP makes (and every refused write) is an `audit_log` row with
+  `actor = scim`, `via = scim`; no-op re-syncs (Authentik's periodic full sync) write nothing.
+  The status panel reads `scim_last_request` (throttled, 30 s) and `scim_last_error`.
+- **provision.py** (`WEBTERM_SCIM_TOKEN_FILE` / `WEBTERM_SCIM_TOKEN`, never argv): SCIM provider
+  `<prefix>-scim`, default user/group SCIM mappings plus two `raise SkipObject` filters (members of
+  the WebTerm groups; `<prefix>-*` groups), backchannel on the `webterm` application (existing
+  backchannels kept). Tested against the fake Authentik in `authentik_provision_test`.
+- **Not built:** Bulk, ETag, sort, filters beyond `attr eq "value"`, nested-group expansion
+  (SCIM membership is direct), password sync, SCIM without OIDC. An Owner cannot disable an
+  account by hand (only the IdP does); deleting it stays the manual path.
 
 ---
 
@@ -1570,6 +1626,11 @@ middleware plus ASGI WS middleware in `main.py`) and the SPA/asset catch-all. Li
 | `/api/settings/oidc-roles` | GET | `users.manage` | G | SSO group → role mappings (3.6.2) |
 | `/api/settings/oidc-roles` | POST | `users.manage` | G | add a mapping: same grant rules as a binding (Owner only for Owner); reauth + second gate (3.6.2) |
 | `/api/settings/oidc-roles/{mid}/delete` | POST | `users.manage` | G | remove a mapping; derived SSO bindings removed at once (3.6.2) |
+| `/api/settings/scim` | GET | `users.manage` | G | SCIM status (3.6.11): configured, on/off, last request, last error, counts — never the token |
+| `/api/settings/scim/token` | POST | `users.manage` | G | **Owner only** (handler): create / rotate the SCIM token, shown once; reauth + second gate (3.6.11) |
+| `/api/settings/scim/revoke` | POST | `users.manage` | G | **Owner only** (handler): revoke the SCIM token; reauth + second gate (3.6.11) |
+| `/api/settings/scim/enabled` | POST | `users.manage` | G | **Owner only** (handler): turn SCIM on (reauth + second gate) / off (no reauth: it only reduces access) (3.6.11) |
+| `/api/users/{uid}/enable` | POST | `users.manage` | G | **Owner only** (handler): re-enable an account SCIM disabled; reauth + second gate (3.6.11) |
 | `/api/tokens` (987) | GET | `tokens.create` | S / G | own; all with `tokens.manage` ⚠ |
 | `/api/tokens` (993) | POST | `tokens.create` | G | role ⊆ creator |
 | `/api/tokens/{tid}/revoke` (1026) | POST | `tokens.create` | S / G | own, or any with `tokens.manage` |
@@ -1775,6 +1836,32 @@ All of these use `deploykey.manage`. Deploy, deploy-batch and rotate need the pe
 | `/api/hosts/{host_id}/deploy-key/test` (7417) | POST | `deploykey.manage` | H(host_id) + target | su | |
 | `/api/hosts/{host_id}/deploy-key/ssh-config` (7438) | POST | `deploykey.manage` | H(host_id) + target | su | |
 | `/api/hosts/{host_id}/deploy-key/rotate` (7470) | POST | `deploykey.manage` | H(host_id) + all targets | ff | |
+
+### A.11b SCIM provisioning (3.6.11)
+
+Principal: the IdP's **SCIM bearer token** (`scim.require_scim`; Owner-managed, SHA-256 at rest,
+constant-time compare, per-IP failure lockout, request cap). Never a session cookie, never an
+automation token. `authz.declared` accepts a SCIM route only under `/scim/v2/`; a route with both
+a SCIM and a `perm()` dependency is refused as ambiguous. What the token can do is in
+[docs/SSO.md → SCIM provisioning](../SSO.md#scim-provisioning-3611).
+
+| Route | Method | Perm | Scope | Notes |
+|---|---|---|---|---|
+| `/scim/v2/ServiceProviderConfig` | GET | — | SCIM | discovery |
+| `/scim/v2/ResourceTypes` | GET | — | SCIM | discovery |
+| `/scim/v2/Schemas` | GET | — | SCIM | discovery |
+| `/scim/v2/Users` | GET | — | SCIM | SCIM-managed accounts only; `filter=<attr> eq "<v>"` + pagination |
+| `/scim/v2/Users` | POST | — | SCIM | create an SSO-only account, or adopt an SSO-only one with the same identity; a local-password account → 409 |
+| `/scim/v2/Users/{scim_id}` | GET | — | SCIM | |
+| `/scim/v2/Users/{scim_id}` | PUT | — | SCIM | email / userName / displayName / externalId / `active` |
+| `/scim/v2/Users/{scim_id}` | PATCH | — | SCIM | idem, PatchOp |
+| `/scim/v2/Users/{scim_id}` | DELETE | — | SCIM | disable + unlink (kept for its history); the last permanent Owner → 403 |
+| `/scim/v2/Groups` | GET | — | SCIM | `filter=displayName eq "<v>"` + pagination |
+| `/scim/v2/Groups` | POST | — | SCIM | members → SSO group → role re-sync (never adds an Owner-level role) |
+| `/scim/v2/Groups/{gid}` | GET | — | SCIM | |
+| `/scim/v2/Groups/{gid}` | PUT | — | SCIM | without `members` the members are kept |
+| `/scim/v2/Groups/{gid}` | PATCH | — | SCIM | add / remove / replace members, rename |
+| `/scim/v2/Groups/{gid}` | DELETE | — | SCIM | members re-synced without the group |
 
 ### A.12 Not routes, but in scope
 

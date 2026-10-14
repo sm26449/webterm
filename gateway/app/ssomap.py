@@ -127,9 +127,12 @@ async def _role_names() -> dict:
 
 
 async def _apply_locked(uid: int, desired: set, *, remove_only: bool,
-                        store_groups: Optional[set] = None) -> dict:
+                        store_groups: Optional[set] = None,
+                        add_roles: Optional[set] = None) -> dict:
     """Make the user's sso bindings equal `desired` (or only remove, `remove_only`). Caller
-    holds authz._lock. Manual/migration bindings are read only to avoid duplicates."""
+    holds authz._lock. Manual/migration bindings are read only to avoid duplicates.
+    `add_roles` (3.6.11, SCIM): only these role ids may be ADDED; the rest of `desired` is still
+    kept (never removed), just not granted from here."""
     rows = await db.fetchall(
         "SELECT id, role_id, scope_kind, scope_value, source FROM role_bindings WHERE user_id=?",
         uid)
@@ -141,8 +144,12 @@ async def _apply_locked(uid: int, desired: set, *, remove_only: bool,
     owner_rid = next((rid for rid, (k, _n) in names.items() if k == "owner"), None)
     added, removed, kept = [], [], []
     now = time.time()
+    held_back = []
     if not remove_only:
         for t in sorted(desired - set(sso) - other):
+            if add_roles is not None and t[0] not in add_roles:
+                held_back.append(t)
+                continue
             await db.execute(
                 "INSERT OR IGNORE INTO role_bindings(user_id, role_id, scope_kind, scope_value,"
                 " source, created) VALUES(?,?,?,?,'sso',?)", uid, t[0], t[1], t[2], now)
@@ -167,8 +174,11 @@ async def _apply_locked(uid: int, desired: set, *, remove_only: bool,
 
     def lab(t):
         return _label(names.get(t[0], ("", "?"))[1], t[1], t[2])
-    return {"added": [lab(t) for t in added], "removed": [lab(t) for t in removed],
-            "kept_last_owner": [lab(t) for t in kept], "skipped": False}
+    out = {"added": [lab(t) for t in added], "removed": [lab(t) for t in removed],
+           "kept_last_owner": [lab(t) for t in kept], "skipped": False}
+    if held_back:
+        out["held_back"] = [lab(t) for t in held_back]
+    return out
 
 
 async def has_local_password(uid: int) -> bool:
@@ -178,14 +188,28 @@ async def has_local_password(uid: int) -> bool:
     return r is None or r["local_password"] is None or bool(r["local_password"])
 
 
+async def scim_grantable_roles() -> set:
+    """3.6.11: the role ids a SCIM push may ADD — every role except Owner and any role with an
+    Owner-only permission (the same rule as WEBTERM_OIDC_ROLE_MAP). Owner from a group mapping is
+    given only at an interactive SSO sign-in, never by a background push."""
+    out = set()
+    for r in await db.fetchall("SELECT id, key, name, description, perms, builtin FROM roles"):
+        if config_role_allowed(authz._row_role(r)):
+            out.add(r["id"])
+    return out
+
+
 async def sync_user(uid: int, email: str, groups, *, ip: str, via: str,
-                    readable: bool = True) -> dict:
+                    readable: bool = True, path: str = "/api/oidc/callback",
+                    scim: bool = False) -> dict:
     """Re-sync one account at an SSO login / step-up. `groups=None` = the claim was ABSENT.
-    `readable=False` = the claim was there but not a list of strings (treated as no groups)."""
+    `readable=False` = the claim was there but not a list of strings (treated as no groups).
+    `scim=True` (3.6.11): the groups come from a SCIM push — same rules, except that nothing
+    Owner-equivalent is ADDED (kept if already there; added at the next SSO sign-in)."""
     if not readable:
         log.warning("SSO: the groups claim for %s is not a list of strings — treated as NO "
                     "groups (its SSO-derived roles are removed)", email)
-        await audit.record(time.time(), email, ip, "GET", "/api/oidc/callback", 200,
+        await audit.record(time.time(), email, ip, "GET", path, 200,
                            "SSO groups claim unreadable (%s): treated as no groups" % via,
                            actor_id=uid)
     if groups is None:
@@ -196,6 +220,7 @@ async def sync_user(uid: int, email: str, groups, *, ip: str, via: str,
                            "SSO roles NOT synced (%s): no groups claim" % via, actor_id=uid)
         return {"added": [], "removed": [], "kept_last_owner": [], "skipped": True}
     gs = claim_groups(groups)
+    add_roles = await scim_grantable_roles() if scim else None
     async with authz._lock:
         desired, matched = await _desired(gs)
         local_pw = await has_local_password(uid)
@@ -203,7 +228,15 @@ async def sync_user(uid: int, email: str, groups, *, ip: str, via: str,
             have = {(r["role_id"], r["scope_kind"], r["scope_value"] or "") for r in await db.fetchall(
                 "SELECT role_id, scope_kind, scope_value FROM role_bindings WHERE user_id=?", uid)}
             skipped = desired - have
-        res = await _apply_locked(uid, desired, remove_only=local_pw, store_groups=matched)
+        res = await _apply_locked(uid, desired, remove_only=local_pw, store_groups=matched,
+                                  add_roles=add_roles)
+    if res.get("held_back"):
+        log.warning("SCIM: %s is in a group mapped to an Owner-level role (%s); a SCIM push never "
+                    "grants it — it is added at the person's next SSO sign-in",
+                    email, ", ".join(res["held_back"]))
+        await audit.record(time.time(), email, ip, "SCIM", path, 200,
+                           ("SCIM: Owner-level role not granted by a push (added at the next SSO "
+                            "sign-in): %s" % res["held_back"])[:480], actor_id=uid, via="scim")
     if local_pw and skipped:
         names = await _role_names()
         labs = [_label(names.get(t[0], ("", "?"))[1], t[1], t[2]) for t in sorted(skipped)]
@@ -211,16 +244,17 @@ async def sync_user(uid: int, email: str, groups, *, ip: str, via: str,
         log.warning("sso.sync.skippedLocalPassword: %s has a local password, so its groups give "
                     "it no roles (would have added: %s). It can remove the local password in "
                     "Settings → Users & roles to receive them.", email, ", ".join(labs))
-        await audit.record(time.time(), email, ip, "GET", "/api/oidc/callback", 200,
+        await audit.record(time.time(), email, ip, "GET", path, 200,
                            ("sso.sync.skippedLocalPassword (%s): not added %s" % (via, labs))[:480],
                            actor_id=uid)
     _report(uid, email, ip, via, res)
     if res["added"] or res["removed"] or res["kept_last_owner"]:
-        await audit.record(time.time(), email, ip, "GET", "/api/oidc/callback", 200,
+        await audit.record(time.time(), email, ip, "SCIM" if scim else "GET", path, 200,
                            ("SSO roles synced (%s): +%s -%s%s" % (
                                via, res["added"] or "[]", res["removed"] or "[]",
                                (" KEPT last Owner %s" % res["kept_last_owner"])
-                               if res["kept_last_owner"] else ""))[:480], actor_id=uid)
+                               if res["kept_last_owner"] else ""))[:480], actor_id=uid,
+                           via="scim" if scim else "")
     return res
 
 
@@ -272,7 +306,9 @@ def _report(uid: int, email: str, ip: str, via: str, res: dict) -> None:
                   "removed": ", ".join(res["removed"]) or "—"}
         email_alerts.notify_security_change(what, ip, email, fleet=True,
                                             what_key="sso_roles_synced", what_params=params)
-        email_alerts.notify_security_change("your access changed after an SSO sign-in", ip, email,
+        email_alerts.notify_security_change(
+            "your access changed after an SSO sign-in" if via != "scim"
+            else "your access changed after a change in your identity provider", ip, email,
                                             user_id=uid, what_key="sso_access_changed",
                                             what_params=params)
     if res["kept_last_owner"]:

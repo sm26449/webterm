@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .errors import ApiError
 from . import (api, audit, authz, backup, certmon, config, core, db, email_alerts, health,
-               oidc_api, security, signing, ssomap, syshealth, webauthn_api)
+               oidc_api, scim, security, signing, ssomap, syshealth, webauthn_api)
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -330,6 +330,12 @@ async def _api_error_handler(request: Request, exc: ApiError):
     return JSONResponse(body, status_code=exc.status_code, headers=exc.headers)
 
 
+@app.exception_handler(scim.ScimError)
+async def _scim_error_handler(request: Request, exc: scim.ScimError):
+    # 3.6.11: SCIM clients (the IdP) expect the SCIM error schema, not our {detail, code}
+    return scim.error_response(exc)
+
+
 _AUDIT_METHODS = ("POST", "PUT", "PATCH", "DELETE")
 
 
@@ -554,13 +560,14 @@ app.add_middleware(ForwardWSMiddleware)
 app.include_router(api.router)
 app.include_router(webauthn_api.router)
 app.include_router(oidc_api.router)
+app.include_router(scim.router)
 
 def spa_reserved(path: str) -> bool:
     """Prefixes that belong to the API and the agent endpoints: an unknown path under them is a 404,
     never the SPA page with 200 (clients, install scripts and tests would mistake HTML for an
     answer — e.g. `/agent/python/../../etc/passwd` used to get index.html when the UI was built)."""
     p = path.lstrip("/")
-    return any(p == pre or p.startswith(pre + "/") for pre in ("api", "agent"))
+    return any(p == pre or p.startswith(pre + "/") for pre in ("api", "agent", "scim"))
 
 
 if FRONTEND_DIST.exists():

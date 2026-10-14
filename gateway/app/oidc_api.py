@@ -139,6 +139,21 @@ async def callback(request: Request, code: str = "", state: str = ""):
     # --- login: provizionare / potrivire cont, apoi sesiune ---
     user = await db.fetchone("SELECT * FROM users WHERE sso_subject=?", sub)
     if user is None:
+        # 3.6.11 (SCIM): contul creat de IdP prin SCIM poartă externalId-ul lui — cu Authentik
+        # implicit EXACT `sub`-ul OIDC (hashed_user_id = uid-ul userului). Aceeaşi identitate,
+        # spusă de acelaşi IdP pe două canale autentificate: legăm direct. Doar un cont SCIM fără
+        # parolă locală şi încă nelegat; altfel cade pe calea obişnuită (email + email_verified).
+        linked = await db.fetchone(
+            "SELECT * FROM users WHERE scim_external_id=? AND COALESCE(scim_managed, 0)=1"
+            " AND sso_subject IS NULL AND COALESCE(local_password, 1)=0", sub)
+        if linked is not None:
+            await db.execute("UPDATE users SET sso_subject=? WHERE id=? AND sso_subject IS NULL",
+                             sub, linked["id"])
+            user = await db.fetchone("SELECT * FROM users WHERE sso_subject=?", sub)
+            await audit.record(time.time(), linked["email"], ip, "GET", "/api/oidc/callback", 200,
+                               "SSO linked to the SCIM-provisioned account (externalId = sub)",
+                               actor_id=linked["id"])
+    if user is None:
         existing = await db.fetchone("SELECT * FROM users WHERE email=?", email) if email else None
         if existing is not None:
             if existing["sso_subject"] and existing["sso_subject"] != sub:
@@ -175,6 +190,16 @@ async def callback(request: Request, code: str = "", state: str = ""):
             user = await db.fetchone("SELECT * FROM users WHERE sso_subject=?", sub)
             await audit.record(time.time(), email, ip, "GET", "/api/oidc/callback", 201,
                                "cont nou provizionat prin SSO")
+
+    # 3.6.11: contul dezactivat (SCIM active:false / DELETE) nu intră — nici prin SSO. Înainte de
+    # sincronizarea grupurilor şi de orice sesiune.
+    if user is None or user["disabled"]:
+        await audit.record(time.time(), email or "sso", ip, "GET", "/api/oidc/callback", 403,
+                           "SSO sign-in refused: the account is disabled",
+                           actor_id=user["id"] if user else None)
+        resp = _redirect_err("disabled")
+        _clear_state_cookie(resp)
+        return resp
 
     # 3.6.2: legăturile SSO după grupurile de ACUM, înainte de a emite sesiunea
     await ssomap.sync_user(user["id"], user["email"],
