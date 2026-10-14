@@ -9,6 +9,8 @@ back.
 
 ## [Unreleased]
 
+## [3.6.12] — 2026-10-15 · agent (58)
+
 Split views, improved: more layouts, every divider draggable, panes you can move and maximize — and
 none of it reconnects a terminal. No agent change (agent stays 58).
 
