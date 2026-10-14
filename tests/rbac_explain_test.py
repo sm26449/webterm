@@ -107,12 +107,21 @@ async def main():
           & authz.HOST_PERMS, str(j["effective"]))
     check("…utilizatorul şi hostul descrise", j["user"]["email"] == "ana@x.co"
           and j["host"]["name"] == "alpha" and j["host"]["folder"] == "prod")
+    check("Operator predefinit pe folder: FĂRĂ nota globalNeedsAll (tokens.create e documentat)",
+          not any(n["code"] == "globalNeedsAll" for n in j["notes"]), str(j["notes"]))
     j = (await ex(owner, ana_id, b)).json()
     check("pe beta: Viewer @ folder lab, fără ⚑", [x["role"] for x in j["bindings"]] == ["viewer"]
           and j["shell"] is False and "files.read" not in j["effective"], str(j)[:200])
 
     # expirată = ignorată
-    bid = await U.bind(ana_id, "admin", "tag", "db")
+    # rol CUSTOM cu o permisiune de instanţă, legat pe un tag (Operator-ul predefinit, cu
+    # tokens.create pe folder, nu primeşte nota: e comportament documentat, nu o greşeală)
+    cr = await db.execute(
+        "INSERT INTO roles(key, name, description, perms, builtin, created, updated)"
+        " VALUES(NULL,'HostAdmin','',?,0,?,?)", json.dumps(["host.admin", "audit.view"]),
+        time.time(), time.time())
+    bid = await db.execute("INSERT INTO role_bindings(user_id, role_id, scope_kind, scope_value,"
+                           " source, created) VALUES(?,?,'tag','db','manual',?)", ana_id, cr, time.time())
     await db.execute("UPDATE role_bindings SET expires=? WHERE id=?", time.time() - 5, bid)
     authz.bump_epoch()
     j = (await ex(owner, ana_id, a)).json()
@@ -126,7 +135,7 @@ async def main():
     await db.execute("UPDATE role_bindings SET expires=? WHERE id=?", time.time() + 3600, bid)
     authz.bump_epoch()
     j = (await ex(owner, ana_id, a)).json()
-    check("aceeaşi legătură, încă valabilă: contribuie + nota globalNeedsAll (Admin pe un tag)",
+    check("aceeaşi legătură, încă valabilă: contribuie + nota globalNeedsAll (rol custom pe un tag)",
           "host.admin" in j["effective"]
           and {"code": "globalNeedsAll", "binding": bid} in j["notes"], str(j["notes"]))
     await db.execute("DELETE FROM role_bindings WHERE id=?", bid)

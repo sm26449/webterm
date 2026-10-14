@@ -1401,8 +1401,11 @@ async def explain(target_uid: int, host_id: int, ref: HostRef) -> dict:
         expired = r["expires"] is not None and r["expires"] <= now
         item = dict(binding_json(b), perms=sorted(info.perms & HOST_PERMS), expired=expired,
                     shell=bool(info.perms & SHELL_PERMS & HOST_PERMS),
+                    # a CUSTOM role with instance permissions bound below `all` is a likely
+                    # mistake worth a note; the built-ins (Operator's tokens.create, an Admin over
+                    # a folder) are documented behaviour, and the note would only be noise
                     ignored_global=(sorted(info.perms & GLOBAL_PERMS)
-                                    if b.scope_kind != "all" else []))
+                                    if b.scope_kind != "all" and not info.builtin else []))
         if b.source == "sso":
             item["sso_groups"] = sorted(
                 g for g in maps.get((info.id, b.scope_kind, b.scope_value), [])
