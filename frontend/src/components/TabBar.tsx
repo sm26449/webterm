@@ -176,6 +176,9 @@ export default function TabBar(props: {
       <span className="mx-1 my-2 w-px shrink-0 bg-white/10" aria-hidden="true" />
       {/* instrucţiunea de reordonare, o singură dată, referită de fiecare tab prin aria-describedby */}
       <span id="wt-tab-reorder-hint" className="sr-only">{t('tabbar.reorderHint')}</span>
+      {/* sr-only (absolut) AICI, la începutul barei: pus lângă chip-uri, în zona derulantă din dreapta,
+          poziţia lui statică (x ≈ 450 px) lărgea documentul pe telefon — scroll orizontal */}
+      <span id="wt-split-reorder-hint" className="sr-only">{t('split.reorderHint')}</span>
       <span aria-live="polite" className="sr-only">{announce}</span>
       {/* `toolbar`, nu `tablist`: ARIA cere ca un tablist să conţină DOAR `tab`-uri, iar aici fiecare
           tab vine cu butonul lui de închidere ca frate (axe: aria-required-children, critic, pe
@@ -276,7 +279,6 @@ export default function TabBar(props: {
         const sp = props.split
         return (
         <div className="ml-auto flex shrink-0 items-center gap-0.5 pl-1">
-          <span id="wt-split-reorder-hint" className="sr-only">{t('split.reorderHint')}</span>
           {sp.views.map((v, vi) => {
             const active = v.id === sp.activeId
             return (
