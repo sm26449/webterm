@@ -174,11 +174,13 @@ async def cmd_passwd(args) -> None:
     await _revoke_everything(user["id"], "password rotated")
 
 
-async def _owner_ids() -> set:
+async def _owner_ids(permanent: bool = False) -> set:
+    """Owner @ all (încă valabil). `permanent=True`: doar cei care vor mai fi Owner şi mâine
+    (revizuirea 3.6.10: un Owner TEMPORAR nu e un cont break-glass — expiră)."""
     return {r["user_id"] for r in await db.fetchall(
         "SELECT DISTINCT b.user_id FROM role_bindings b JOIN roles r ON r.id=b.role_id"
-        " WHERE r.key='owner' AND b.scope_kind='all' AND (b.expires IS NULL OR b.expires > ?)",
-        time.time())}
+        " WHERE r.key='owner' AND b.scope_kind='all' AND (b.expires IS NULL OR b.expires > ?)"
+        + (" AND b.expires IS NULL" if permanent else ""), time.time())}
 
 
 async def cmd_sso_only(args) -> None:
@@ -197,14 +199,15 @@ async def cmd_sso_only(args) -> None:
     owners = await _owner_ids()
     if user["id"] in owners:
         with_pw = 0
-        for o in owners - {user["id"]}:
+        for o in await _owner_ids(permanent=True) - {user["id"]}:
             r = await db.fetchone("SELECT COALESCE(local_password, 1) AS lp FROM users WHERE id=?", o)
             if r is not None and r["lp"]:
                 with_pw += 1
         if not with_pw and not args.force:
             print("%s is the last Owner with a local password (the break-glass account). Without "
-                  "it, an IdP outage locks every Owner out. Make another account Owner with a "
-                  "local password first, or pass --force. Nothing changed." % user["email"],
+                  "it, an IdP outage locks every Owner out. Make another account a PERMANENT Owner "
+                  "with a local password first (a time-bound Owner does not count), or pass "
+                  "--force. Nothing changed." % user["email"],
                   file=sys.stderr)
             raise SystemExit(3)
     locked = security.hash_password(security.new_token())    # nimeni nu-l ştie

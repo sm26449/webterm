@@ -530,7 +530,11 @@ async def test_admin_cli():
     await U.bind(fid, "owner")
     check("al doilea Owner fără parolă locală nu ajunge → tot refuzat", await run_admin(U.OWNER_EMAIL) == 3)
     gid = await U.add_user("grace@x.co", bindings=[("owner", "all", "")])
-    check("cu încă un Owner care ARE parolă locală → acceptat", await run_admin(U.OWNER_EMAIL) == 0)
+    # revizuirea 3.6.10: un Owner TEMPORAR cu parolă locală nu e break-glass (expiră)
+    await db.execute("UPDATE role_bindings SET expires=? WHERE user_id=?", time.time() + 3600, gid)
+    check("încă un Owner cu parolă locală, dar TEMPORAR → tot refuzat", await run_admin(U.OWNER_EMAIL) == 3)
+    await db.execute("UPDATE role_bindings SET expires=NULL WHERE user_id=?", gid)
+    check("cu încă un Owner PERMANENT care ARE parolă locală → acceptat", await run_admin(U.OWNER_EMAIL) == 0)
     check("…contul a devenit SSO-only",
           (await db.fetchone("SELECT local_password FROM users WHERE id=?", owner_uid))["local_password"] == 0)
     await db.execute("UPDATE users SET sso_subject='sub-grace' WHERE id=?", gid)

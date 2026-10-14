@@ -147,7 +147,8 @@ which change only at an SSO sign-in — revoke the tokens too when it matters. S
 Settings: the account loses its local password, passkeys, 2FA, recovery codes and sessions, and
 signs in with SSO only from then on — so its groups start giving it roles. It is refused for an
 account that never signed in with SSO, and for the last Owner that still has a local password (the
-break-glass account) unless you pass `--force`.
+break-glass account) unless you pass `--force`. Only a **permanent** Owner with a local password
+counts as another break-glass account; a time-bound Owner does not.
 
 ## Topology: one IdP, many WebTerm instances
 
