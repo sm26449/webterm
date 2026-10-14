@@ -320,6 +320,35 @@ async def test_users(owner, tok):
     await lc.aclose()
     r = await c.post("/scim/v2/Users", json=ak_user("ana", "ana@x.co", ext="ext-ana"))
     check("POST duplicat → 409 uniqueness", is_scim_error(r, 409) and r.json().get("scimType") == "uniqueness")
+    # re-revizuirea finală 3.6.11 (MEDIUM 1): 409 DOAR când căutarea Authentik de după el
+    # (`userName eq "<userName primit>"`) găseşte contul; altfel Authentik abandonează restul paginii
+    n_au = await db.fetchone("SELECT COUNT(*) AS c FROM audit_log WHERE detail LIKE '%already linked%'")
+    for body_, why in ((ak_user("ana-admin", "ana@x.co", ext="ext-ana2"), "alt user IdP, acelaşi email"),
+                       (ak_user("ana2", "ana@x.co", ext="ext-ana"), "userName redenumit, legătură pierdută")):
+        for _ in range(3):
+            r = await c.post("/scim/v2/Users", json=body_)
+        s_ = await c.get("/scim/v2/Users", params={"filter": 'userName eq "%s"' % body_["userName"]})
+        check("POST pe un cont deja legat (%s) → 400 invalidValue „already linked” (nu 409: căutarea "
+              "lui Authentik dă 0)" % why, is_scim_error(r, 400) and r.json().get("scimType") == "invalidValue"
+              and "already linked to another identity-provider user" in r.json().get("detail", "")
+              and s_.json()["totalResults"] == 0, "%s %s" % (r.status_code, r.text[:160]))
+    n_au2 = await db.fetchone("SELECT COUNT(*) AS c FROM audit_log WHERE detail LIKE '%already linked%'")
+    check("…refuzul repetat la fiecare sincronizare: auditat o dată pe oră per identitate (2, nu 6)",
+          n_au2["c"] - n_au["c"] == 2, str(n_au2["c"] - n_au["c"]))
+    # cursa cu o autentificare SSO (IntegrityError la INSERT) → 503 + Retry-After, nu 409
+    real_exec = scim.db.execute
+
+    async def racing(sql, *a):
+        if sql.startswith("INSERT INTO users("):
+            raise scim.sqlite3.IntegrityError("UNIQUE constraint failed: users.email")
+        return await real_exec(sql, *a)
+    scim.db.execute = racing
+    try:
+        r = await c.post("/scim/v2/Users", json=ak_user("race", "race@x.co", ext="ext-race"))
+    finally:
+        scim.db.execute = real_exec
+    check("creare în cursă cu un login SSO → 503 + Retry-After (tranzitoriu), corp de eroare SCIM",
+          is_scim_error(r, 503) and r.headers.get("retry-after") == "30", "%s %s" % (r.status_code, r.text[:160]))
     r = await c.get("/scim/v2/Users", params={"filter": 'userName eq "ANA"'})
     check("…filtrul Authentik `userName eq` (fără majuscule) o găseşte",
           r.status_code == 200 and r.json()["totalResults"] == 1 and r.json()["Resources"][0]["id"] == ana_id,

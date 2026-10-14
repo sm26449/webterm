@@ -261,7 +261,8 @@ function AccountDetails(props: {
         <div className="flex flex-wrap items-center gap-2 rounded-md bg-danger/10 px-2 py-1.5" data-account-disabled>
           <p className="min-w-0 flex-1 text-xs wt-danger">
             {t(u.disabled_by === 'scim-delete' ? 'settings.users.disabledBy.scimDelete'
-              : u.disabled_by === 'scim' ? 'settings.users.disabledBy.scim' : 'settings.users.disabledBy.manual',
+              : u.disabled_by === 'scim' ? 'settings.users.disabledBy.scim'
+              : u.disabled_by === 'scim-identity' ? 'settings.users.disabledBy.scimIdentity' : 'settings.users.disabledBy.manual',
             { date: u.disabled_at ? fmtTs(u.disabled_at, 'datetime') : '—' })}
           </p>
           {props.isOwner

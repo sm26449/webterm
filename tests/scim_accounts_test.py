@@ -642,15 +642,52 @@ async def test_rereview2(owner, c):
     check("POST ext=sub, alt email, ACTIV → 400 invalidValue (nu 409), contul neatins",
           r.status_code == 400 and r.json().get("scimType") == "invalidValue"
           and row == {"email": "g@x.co", "disabled": 0, "scim_id": None}, "%s %s" % (r.status_code, r.text[:160]))
-    r = await c.post("/scim/v2/Users", json=ak_user("g", "g.new@x.co", ext="sub-g", active=False))
-    row = dict(await db.fetchone("SELECT email, disabled, disabled_by, scim_id, scim_external_id"
-                                 " FROM users WHERE id=?", g))
-    check("POST ext=sub, alt email, active:false → 201, ADOPTAT sub emailul lui şi DEZACTIVAT",
-          r.status_code == 201 and r.json().get("active") is False and row["disabled"] == 1
-          and row["disabled_by"] == "scim" and row["email"] == "g@x.co"
-          and row["scim_id"] == r.json().get("id") and row["scim_external_id"] is None,
-          "%s %s %s" % (r.status_code, r.text[:160], row))
-    check("…avertizat (scim_identity_ignored)", await n_alerts("scim_identity_ignored", "g@x.co") == 1)
+    # re-revizuirea finală 3.6.11 (MEDIUM 2): cine are tokenul SCIM şi ştie DOAR `sub`-ul nu
+    # adoptă contul cu active:false (răspunsul i-ar da emailul, iar un PUT cu el + active:true l-ar
+    # reactiva sub SCIM) — contul e dezactivat PE LOC, nelegat, 'scim-identity', 400 fără resursă
+    n_au = await audit_n("%matched g@x.co by externalId only%")
+    for _ in range(3):
+        r = await c.post("/scim/v2/Users", json=ak_user("g", "g.new@x.co", ext="sub-g", active=False))
+    row = dict(await db.fetchone("SELECT email, disabled, disabled_by, scim_id, scim_managed,"
+                                 " scim_external_id FROM users WHERE id=?", g))
+    check("POST ext=sub, alt email, active:false → 400 invalidValue FĂRĂ resursă şi fără email; "
+          "contul dezactivat pe loc ('scim-identity'), NELEGAT de SCIM",
+          r.status_code == 400 and r.json().get("scimType") == "invalidValue"
+          and "g@x.co" not in r.text and "emails" not in r.json() and "id" not in r.json()
+          and row == {"email": "g@x.co", "disabled": 1, "disabled_by": "scim-identity",
+                      "scim_id": None, "scim_managed": 0, "scim_external_id": None},
+          "%s %s %s" % (r.status_code, r.text[:200], row))
+    check("…auditat şi avertizat O DATĂ pe oră (scim_disabled_unlinked), nu la fiecare sincronizare",
+          n_au == 0 and await audit_n("%matched g@x.co by externalId only%") == 1
+          and await n_alerts("scim_disabled_unlinked", "g@x.co") == 1
+          and await alert_of("scim_disabled_unlinked", "warning") is not None)
+    leak = [await c.get("/scim/v2/Users", params={"filter": q}) for q in
+            ('externalId eq "sub-g"', 'emails eq "g@x.co"', 'userName eq "g"')]
+    st = (await owner.get("/api/settings/scim")).json()
+    check("…nici filtrele GET, nici ultima eroare nu dau emailul contului ne-SCIM",
+          all(x.status_code == 200 and x.json()["totalResults"] == 0 for x in leak)
+          and "g@x.co" not in json.dumps(st.get("last_error")), str(st.get("last_error")))
+    r = await c.post("/scim/v2/Users", json=ak_user("g", "g@x.co", ext="sub-g", active=True))
+    row = dict(await db.fetchone("SELECT disabled, disabled_by, scim_id FROM users WHERE id=?", g))
+    check("…apoi POST cu emailul LUI şi active:true → 403, rămâne dezactivat, neadoptat",
+          r.status_code == 403 and row == {"disabled": 1, "disabled_by": "scim-identity",
+                                           "scim_id": None}, "%s %s %s" % (r.status_code, r.text[:160], row))
+    r = await c.post("/scim/v2/Users", json=ak_user("g", "g@x.co", ext="sub-g", active=False))
+    sid_g = r.json().get("id")
+    r2 = await c.put("/scim/v2/Users/%s" % sid_g, json=ak_user("g", "g@x.co", ext="sub-g"))
+    r3 = await c.delete("/scim/v2/Users/%s" % sid_g)
+    row = dict(await db.fetchone("SELECT disabled, disabled_by FROM users WHERE id=?", g))
+    check("…adoptat mai târziu cu emailul lui (active:false): SCIM tot nu-l reactivează, iar "
+          "active:false / DELETE nu mută 'scim-identity' înapoi în 'scim*'",
+          r.status_code == 201 and r2.status_code == 403 and r3.status_code == 204
+          and row == {"disabled": 1, "disabled_by": "scim-identity"},
+          "%s %s %s %s" % (r.status_code, r2.status_code, r3.status_code, row))
+    lst = {x["email"]: x for x in (await owner.get("/api/users")).json()}
+    r = await owner.post("/api/users/%d/enable" % g, json={"current_password": PW})
+    row = dict(await db.fetchone("SELECT disabled, disabled_by FROM users WHERE id=?", g))
+    check("…lista conturilor arată 'scim-identity'; un Owner îl reactivează din Setări",
+          lst["g@x.co"]["disabled_by"] == "scim-identity" and r.status_code == 200
+          and row == {"disabled": 0, "disabled_by": None}, "%s %s" % (r.status_code, row))
     # Owner dat în WebTerm: verificarea Owner rulează ÎNAINTE, chiar cu active:false
     await sso_login("sub-og", "og@x.co")
     og = await uid_of("og@x.co")
@@ -675,12 +712,12 @@ async def test_rereview2(owner, c):
           and row["disabled"] == 1, r.text[:240])
     # auditul unei schimbări de identitate ignorate: o dată pe oră pe cont (Authentik re-trimite la
     # FIECARE sincronizare completă)
-    like = "%g@x.co: ignored the identity change%"
+    like = "%ren@x.co: ignored the identity change%"
     n0 = await audit_n(like)
-    sid_g = (await db.fetchone("SELECT scim_id FROM users WHERE id=?", g))["scim_id"]
+    sid_ren = (await db.fetchone("SELECT scim_id FROM users WHERE email='ren@x.co'"))["scim_id"]
     for _ in range(3):
-        r = await c.put("/scim/v2/Users/" + sid_g, json=ak_user("g", "g.new@x.co", ext="sub-g",
-                                                                 active=False))
+        r = await c.put("/scim/v2/Users/" + sid_ren, json=ak_user("ren", "ren.new@x.co", ext="sub-ren",
+                                                                   active=False))
     check("PUT-uri repetate cu identitatea refuzată → 200, auditul NU creşte la fiecare sincronizare",
           r.status_code == 200 and n0 == 1 and await audit_n(like) == 1, "%s %s" % (n0, await audit_n(like)))
     # HARDENING: tokenurile de automatizare revocate DOAR după id-ul creatorului
@@ -726,9 +763,9 @@ async def test_rereview2(owner, c):
           lst["orph-gone"]["creator_gone"] is True and lst["eg-legacy"]["creator_gone"] is True
           and lst["eg-new"]["creator_gone"] is False, str({k: v.get("creator_gone") for k, v in lst.items()}))
     res = await syshealth.c_enroll_orphans()
-    check("System health: AVERTISMENT cu numărul şi numele, recomandare, salt în Setări",
+    check("System health: AVERTISMENT doar cu numărul (fără nume de tokenuri), recomandare, salt în Setări",
           res is not None and res.severity == "warning" and res.key == "enroll_orphans"
-          and res.params["count"] == 2 and "orph-gone" in res.params["names"]
+          and res.params["count"] == 2 and "names" not in res.params
           and res.action == "settings:enroll" and res.rec == "revoke_orphan_enroll", str(res))
     row = await db.fetchone("SELECT revoked FROM enroll_groups WHERE name='orph-gone'")
     check("…fără revocare automată", row["revoked"] == 0)

@@ -19,7 +19,7 @@ export type UserRow = {
   /** 3.6.11 — dezactivat de IdP prin SCIM (`active:false` = 'scim', DELETE = 'scim-delete') */
   disabled?: boolean
   disabled_at?: number | null
-  disabled_by?: 'scim' | 'scim-delete' | null
+  disabled_by?: 'scim' | 'scim-delete' | 'scim-identity' | null
   /** 3.6.11 — administrat de IdP prin SCIM; `scim_linked` = încă o resursă SCIM (nu ştearsă) */
   scim?: boolean
   scim_linked?: boolean

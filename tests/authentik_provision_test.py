@@ -435,7 +435,13 @@ def main():
     check("filtru: inactiv, niciodată trimis → sărit (nu se creează conturi degeaba)",
           run_filter(FakeUser([], active=False), connection=None) == "skip")
     check("filtru fără `connection` în context (Authentik vechi): un user INACTIV trece mereu",
-          run_filter(FakeUser([], active=False)) == {} and run_filter(outsider) == "skip")
+          run_filter(FakeUser([], active=False)) == {} and run_filter(outsider) == "skip"
+          # re-revizuirea finală 3.6.11: wt-scim-exclude e PRIMUL test, generat de provision (o
+          # re-rulare nu-l mai pierde) — exclus chiar membru WebTerm sau deja trimis
+          and uf.get("expression", "").find("wt-scim-exclude") != -1
+          and uf.get("expression", "").find("wt-scim-exclude") < uf.get("expression", "").find("synced")
+          and run_filter(FakeUser([NAMES[0], "wt-scim-exclude"]), connection=None) == "skip"
+          and run_filter(FakeUser(["wt-scim-exclude"]), connection=object()) == "skip")
     check("grupuri: maparea implicită + doar wt-*", "sm-group" in pr.get("property_mappings_group", [])
           and "startswith('wt-')" in gf.get("expression", "") and "raise SkipObject" in gf.get("expression", ""))
     check("backchannel pe aplicaţia webterm, cel existent păstrat",

@@ -161,7 +161,7 @@ MESSAGES = {
     "sso_ok": "SSO works",
     "insecure_forwards": "Port forwarding is on while WebTerm runs on plain http://",
     "sso_ungated": "SSO is on without WEBTERM_OIDC_ALLOWED_GROUPS",
-    "enroll_orphans": "{count} live group enrollment token(s) have no creator account: {names}",
+    "enroll_orphans": "{count} live group enrollment token(s) have no creator account",
     "enroll_ok": "Every live group enrollment token has a creator account",
     "janitor_failed": "The daily cleanup failed: {steps}",
     "janitor_stale": "The daily cleanup last ran {age} ago",
@@ -733,8 +733,9 @@ async def c_enroll_orphans() -> Optional[Result]:
         "SELECT g.id, g.name FROM enroll_groups g WHERE g.revoked=0 AND g.expires>?"
         " AND NOT EXISTS (SELECT 1 FROM users u WHERE u.id=g.created_by_id) ORDER BY g.id", now)
     if rows:
-        names = ", ".join(str(r["name"])[:40] for r in rows[:5]) + (" …" if len(rows) > 5 else "")
-        return Result("warning", "enroll_orphans", {"count": len(rows), "names": names},
+        # a count only (final re-review 3.6.11): /api/health is read by viewers who may not see
+        # enrollment tokens; the action opens the list, where hosts.create holders see the names
+        return Result("warning", "enroll_orphans", {"count": len(rows)},
                       rec="revoke_orphan_enroll", action="settings:enroll")
     if not await db.fetchone("SELECT 1 FROM enroll_groups WHERE revoked=0 AND expires>? LIMIT 1",
                              now):

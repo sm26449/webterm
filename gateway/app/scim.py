@@ -43,8 +43,15 @@ Liberal in what we accept, strict in what we grant:
     `GET /Users?filter=userName eq "…"`, and when that finds nothing (the account is not a SCIM
     account, so it is not listed) it aborts the rest of the sync page; a 409 on PUT/PATCH aborts it
     too. A 400/403 is a per-object warning in Authentik and the sync carries on. 409 is kept only
-    where the search resolves it: "already provisioned" on a create, a duplicate group name on a
-    group create, and the create race with an SSO sign-in (the next sync adopts the account).
+    where the search resolves it: "already provisioned" on a create — only when the account's
+    stored userName equals the incoming one and GET /Users lists it (final re-review: otherwise
+    400 "already linked to another identity-provider user") — and a duplicate group name on a
+    group create. The create race with an SSO sign-in is a 503 + Retry-After (transient; the next
+    sync adopts the account). Refusals are audited once an hour per (resource, refusal).
+  * UNLINKED DEACTIVATION — final re-review 3.6.11: `active:false` for an existing account that
+    matches only by `sub` (its email differs) does NOT adopt it: it is disabled in place
+    (`disabled_by='scim-identity'`, only an Owner re-enables it) and the answer is a 400 without
+    a resource — the token holder never learns that account's email.
 """
 from __future__ import annotations
 
@@ -535,12 +542,21 @@ async def _user(scim_id: str):
     return u
 
 
+_LISTABLE_SQL = ("scim_id IS NOT NULL AND COALESCE(scim_managed, 0)=1"
+                 " AND COALESCE(local_password, 1)=0")
+
+
+def _listable(u) -> bool:
+    """Python twin of `_LISTABLE_SQL` (what GET /Users can return) for a full `users` row."""
+    return bool(u["scim_id"]) and (u["scim_managed"] or 0) == 1 \
+        and (1 if u["local_password"] is None else u["local_password"]) == 0
+
+
 @router.get("/Users")
 async def list_users(request: Request, _p=Depends(require_scim)):
     f = _filter(request.query_params.get("filter"), _USER_FILTERS)
     start, count = _page(request)
-    where = (" WHERE scim_id IS NOT NULL AND COALESCE(scim_managed, 0)=1"
-             " AND COALESCE(local_password, 1)=0")
+    where = " WHERE " + _LISTABLE_SQL
     args: list = []
     if f:
         col, value, ci = f
@@ -563,9 +579,24 @@ async def _audit(p: dict, method: str, path: str, status: int, text: str,
                        actor_id=actor_id, via="scim")
 
 
-async def _refuse(p: dict, method: str, path: str, exc: ScimError) -> None:
-    """A refused write: audited (it is the IdP asking for something), shown in the status panel."""
-    await _audit(p, method, path, exc.status_code, "SCIM refused: %s" % exc.detail)
+def _who(body, *keys) -> str:
+    """Who a POST is about (for `_refuse`'s throttle key): the first of `keys` present in the raw
+    body, lower-cased, bounded. Never trusted for anything else."""
+    b = _lower(body) if isinstance(body, dict) else {}
+    for k in keys:
+        v = b.get(k.lower())
+        if isinstance(v, str) and v:
+            return v.lower()[:STR_MAX]
+    return ""
+
+
+async def _refuse(p: dict, method: str, path: str, exc: ScimError, who: str = "") -> None:
+    """A refused write: audited (it is the IdP asking for something), shown in the status panel.
+    Final re-review 3.6.11: the audit row is written once an hour per (resource or identity,
+    refusal) — Authentik retries a permanent refusal at every sync. `who` names the identity of a
+    POST (its path is the collection); otherwise the resource path does."""
+    if _first_this_hour("refuse", method, path, who, exc.status_code, exc.detail):
+        await _audit(p, method, path, exc.status_code, "SCIM refused: %s" % exc.detail)
     await _note_error(exc.status_code, "%s %s: %s" % (method, path, exc.detail), force=True)
 
 
@@ -790,6 +821,41 @@ async def _apply_user(p: dict, u, f: dict, path: str, method: str) -> bool:
     return changed
 
 
+_UNLINKED_DETAIL = ("an existing WebTerm account matches this user's SSO identity (externalId) but "
+                    "has a different email: SCIM does not take it over. Because the user is "
+                    "inactive, WebTerm disabled that account without linking it to SCIM; only an "
+                    "Owner can re-enable it (Settings → Users & roles)")
+
+
+async def _disable_unlinked(p: dict, target, path: str) -> ScimError:
+    """`active:false` for an account that matches only by `sub` (email mismatch): disable it in
+    place — no scim_managed / scim_id / externalId change — with disabled_by='scim-identity',
+    which `_enable_check` refuses and `accounts.disable` never turns back into 'scim*'. Audit +
+    warning alert once an hour per account. → the 400 to raise (no email: the token holder may
+    know only the `sub`)."""
+    try:
+        await accounts.disable(target["id"], by="scim-identity", actor=ACTOR, ip=p["ip"],
+                               reason="SCIM active=false for a user matching only by externalId, "
+                                      "email differs; not linked to SCIM")
+    except accounts.LastOwner:
+        raise ScimError(403, "this account is the last permanent Owner of WebTerm and cannot be "
+                             "disabled; make another account a permanent Owner first")
+    except accounts.OwnerLevel:
+        raise await _owner_level_refused(target["id"], "disable", p["ip"])
+    log.warning("SCIM: disabled %s in place (active=false matched by externalId only, email "
+                "differs); not linked to SCIM", target["email"])
+    if _first_this_hour("unlinked", target["id"]):
+        await _audit(p, "POST", path, 400, "SCIM active=false matched %s by externalId only "
+                     "(email differs): disabled in place, NOT linked to SCIM; only an Owner can "
+                     "re-enable it" % target["email"], actor_id=target["id"])
+        email_alerts.notify_security_change(
+            "the identity provider deactivated a user whose SSO identity matches %s but whose "
+            "email differs; WebTerm disabled the account without letting SCIM manage it — only "
+            "an Owner can re-enable it" % target["email"], p["ip"], ACTOR, fleet=True,
+            what_key="scim_disabled_unlinked", what_params={"account": target["email"]})
+    return ScimError(400, _UNLINKED_DETAIL, "invalidValue")
+
+
 _LOCAL_PW_DETAIL = ("a WebTerm account with this identity has a local password (a break-glass "
                     "account); SCIM never manages it — keep it out of the SCIM provider's scope "
                     "in the identity provider")
@@ -832,7 +898,15 @@ async def create_user(request: Request, p=Depends(require_scim)):
                     await _alert_local_refused(target["email"], p["ip"])
                     raise ScimError(403, _LOCAL_PW_DETAIL)
                 if target["scim_id"]:
-                    raise ScimError(409, "this user is already provisioned", "uniqueness")
+                    # final re-review 3.6.11: 409 only when Authentik's follow-up search
+                    # (`userName eq "<incoming userName>"`, exactly list_users' predicate) FINDS
+                    # this account — otherwise the empty search aborts the rest of the sync page
+                    # (two IdP users sharing an email; a renamed userName with a lost link)
+                    if _listable(target) and (target["scim_user_name"] or "").lower() \
+                            == user_name.lower():
+                        raise ScimError(409, "this user is already provisioned", "uniqueness")
+                    raise ScimError(400, "this WebTerm account is already linked to another "
+                                         "identity-provider user", "invalidValue")
                 # review 3.6.11 — taking over an account SCIM did not create:
                 #  * only with ITS email (an externalId equal to its OIDC `sub` is not enough: the
                 #    token holder would otherwise pick any SSO account and re-point its email);
@@ -846,22 +920,20 @@ async def create_user(request: Request, p=Depends(require_scim)):
                                          "Owner-level role given in WebTerm; SCIM never takes it "
                                          "over (an Owner can give that role through an SSO group "
                                          "instead)")
-                dropped = None
                 if not target["scim_created"] and target["email"] != email:
-                    mismatch = ScimError(400, "an existing WebTerm account matches this externalId "
-                                              "but has a different email; SCIM takes over an "
-                                              "existing account only when its email matches too",
-                                         "invalidValue")
                     if f.get("active") is not False:
-                        raise mismatch
-                    # second re-review 3.6.11: the IdP renamed the email AND deactivates the
-                    # person — adopt under the account's own email (and externalId), disable it,
-                    # warn; refusing would leave the person enabled (as _guard_identity_or_drop)
-                    dropped = mismatch
-                    f.pop("externalId", None)
-                    email = f["email"] = target["email"]
-                    ext = None
-                dropped = await _guard_identity_or_drop(target, f) or dropped
+                        raise ScimError(400, "an existing WebTerm account matches this externalId "
+                                             "but has a different email; SCIM takes over an "
+                                             "existing account only when its email matches too",
+                                        "invalidValue")
+                    # final re-review 3.6.11: the IdP deactivates a person whose WebTerm account
+                    # matches only by `sub` (the IdP renamed the email, or the token holder knows
+                    # just the `sub`). NOT adopted (adopting would hand SCIM the account and answer
+                    # with its email): disabled IN PLACE under its own identity, 'scim-identity'
+                    # (only an Owner re-enables it), 400 without a resource or an email
+                    await _active_precheck(target["id"], False, p["ip"])
+                    raise await _disable_unlinked(p, target, path)
+                dropped = await _guard_identity_or_drop(target, f)
                 if dropped is not None:     # deactivating: adopt under the identity it has
                     email = f["email"] = target["email"]
                     ext = None
@@ -910,8 +982,12 @@ async def create_user(request: Request, p=Depends(require_scim)):
                         + ",?,?,?,0,1,1,?,?,?,?,?)",
                         email, locked, now, sid, ext, user_name, f.get("displayName"), now)
                 except sqlite3.IntegrityError:
-                    # an SSO sign-in created the same email at this very moment
-                    raise ScimError(409, "this user was created meanwhile", "uniqueness")
+                    # an SSO sign-in created the same email at this very moment. Not 409 (final
+                    # re-review 3.6.11): the SSO account is not SCIM-listed, so Authentik's search
+                    # would find nothing and abort the page. 503 = transient: Authentik warns,
+                    # carries on, and its next sync adopts the account
+                    raise ScimError(503, "the account was created by an SSO sign-in at this very "
+                                         "moment; retry", headers={"Retry-After": "30"})
                 uid = (await db.fetchone("SELECT id FROM users WHERE scim_id=?", sid))["id"]
                 await _audit(p, "POST", path, 201, "SCIM created the account %s (SSO sign-in only, "
                              "no role until a mapped group gives one)" % email, actor_id=uid)
@@ -931,7 +1007,7 @@ async def create_user(request: Request, p=Depends(require_scim)):
         await _note_error(400, "POST %s: %s" % (path, e.detail))
         raise
     except ScimError as e:
-        await _refuse(p, "POST", path, e)
+        await _refuse(p, "POST", path, e, _who(body, "externalId", "userName"))
         raise
     return _json(await _user_json(u), 201)
 
@@ -1149,7 +1225,10 @@ async def _group_json(g, members: bool = True) -> dict:
     if members:
         rows = await db.fetchall(
             "SELECT u.scim_id, u.email FROM scim_group_members m JOIN users u ON u.id=m.user_id"
-            " WHERE m.group_id=? AND u.scim_id IS NOT NULL ORDER BY u.id", g["id"])
+            " WHERE m.group_id=? AND u.scim_id IS NOT NULL AND COALESCE(u.scim_managed, 0)=1"
+            " AND COALESCE(u.local_password, 1)=0 ORDER BY u.id", g["id"])
+        # (final re-review 3.6.11: the same predicate as GET /Users — a member's email is shown
+        # only for an account SCIM manages)
         out["members"] = [{"value": r["scim_id"], "display": r["email"],
                            "$ref": _loc("Users", r["scim_id"])} for r in rows]
     return out
@@ -1288,7 +1367,7 @@ async def create_group(request: Request, p=Depends(require_scim)):
             await _resync(want, p["ip"])
             g = await _group(gid)
     except ScimError as e:
-        await _refuse(p, "POST", path, e)
+        await _refuse(p, "POST", path, e, _who(body, "externalId", "displayName"))
         raise
     return _json(await _group_json(g), 201)
 

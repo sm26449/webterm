@@ -77,7 +77,9 @@ async def revoke_enroll_groups(uid: int, email: str) -> int:
 
 async def disable(uid: int, *, by: str, actor: str, ip: str, reason: str) -> Optional[dict]:
     """Disable account `uid` (idempotent: an already disabled account → None, nothing done).
-    `by` = 'scim' | 'scim-delete'. Raises LastOwner (nothing changed, audited, alerted).
+    `by` = 'scim' | 'scim-delete' | 'scim-identity' (final re-review 3.6.11: an account the IdP
+    deactivated by its `sub` alone, never linked to SCIM — SCIM can never re-enable it, and it is
+    never turned back into 'scim*'). Raises LastOwner (nothing changed, audited, alerted).
     → {"email", "tokens", "shares", "replay_links"} of what was revoked."""
     async with authz._lock:
         row = await db.fetchone("SELECT id, email, COALESCE(disabled, 0) AS d FROM users WHERE id=?",
@@ -87,7 +89,8 @@ async def disable(uid: int, *, by: str, actor: str, ip: str, reason: str) -> Opt
         if row["d"]:
             # already disabled: only the reason may move (active:false → DELETE), and only between
             # the IdP's own reasons — re-review 3.6.11: a disable done in WebTerm (or of unknown
-            # origin) must not become 'scim*', which SCIM `active:true` could then undo
+            # origin) must not become 'scim*', which SCIM `active:true` could then undo; a
+            # 'scim'/'scim-delete' one may become the stricter 'scim-identity', never the reverse
             await db.execute("UPDATE users SET disabled_by=? WHERE id=?"
                              " AND disabled_by IN ('scim', 'scim-delete')", by, uid)
             return None

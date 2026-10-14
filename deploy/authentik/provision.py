@@ -90,6 +90,7 @@ def role_map(groups):
 
 
 SCIM_TOKEN_PREFIX = "wtscim_"
+SCIM_EXCLUDE_GROUP = "wt-scim-exclude"     # docs/SSO.md: conturile pe care SCIM nu le atinge
 
 
 def scim_user_filter(names):
@@ -101,8 +102,17 @@ def scim_user_filter(names):
     cu el) trece mereu, chiar scos din grupuri — altfel dezactivarea lui nu mai ajungea în WebTerm
     (SkipObject = nicio actualizare). Unde contextul nu are `connection` (versiuni vechi),
     trece orice user INACTIV: dezactivarea ajunge oricum (în WebTerm, un cont nou inactiv nu poate
-    face nimic)."""
-    lines = ["# WebTerm (provision.py): doar membrii grupurilor WebTerm ajung în WebTerm — dar un",
+    face nimic).
+
+    Re-revizuirea finală 3.6.11: PRIMUL test e grupul SCIM_EXCLUDE_GROUP (`wt-scim-exclude`): cine e
+    în el nu e trimis niciodată (break-glass, Owneri daţi în WebTerm). Generat de provision, ca o
+    re-rulare să nu-l şteargă; dacă grupul nu există, testul e fals şi nu schimbă nimic. Atenţie:
+    un user DEJA legat pus în grup nu-şi mai trimite nici dezactivarea."""
+    lines = ["# WebTerm (provision.py): cine e în %s nu ajunge NICIODATĂ în WebTerm" % SCIM_EXCLUDE_GROUP,
+             "# (break-glass, Owneri daţi în WebTerm) — nici dezactivarea lui",
+             "if ak_is_group_member(user, name=%r):" % SCIM_EXCLUDE_GROUP,
+             "    raise SkipObject",
+             "# doar membrii grupurilor WebTerm ajung în WebTerm — dar un",
              "# user deja trimis (sau dezactivat) trece mereu, ca dezactivarea să ajungă în WebTerm",
              "try:",
              "    synced = connection is not None",

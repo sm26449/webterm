@@ -600,7 +600,9 @@ MIGRATIONS = [
     "ALTER TABLE users ADD COLUMN last_login_method TEXT",
     # 3.6.11 — conturi DEZACTIVATE (SCIM `active:false` / DELETE): contul rămâne (istoricul de
     # audit, legăturile, passkey-urile), dar nu se mai poate autentifica şi nu mai are niciun drept
-    # (authz.grants_for_user → gol). `disabled_by`: 'scim' (active:false) | 'scim-delete'.
+    # (authz.grants_for_user → gol). `disabled_by`: 'scim' (active:false) | 'scim-delete'
+    # | 'scim-identity' (active:false potrivit doar după `sub`, cont nelegat de SCIM: doar un Owner îl
+    # reactivează).
     # Îl reactivează un Owner din Setări (auditat) sau SCIM cu active:true (doar conturile SCIM).
     "ALTER TABLE users ADD COLUMN disabled INTEGER DEFAULT 0",
     "ALTER TABLE users ADD COLUMN disabled_at REAL",
