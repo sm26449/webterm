@@ -142,6 +142,57 @@ async def main():
     check("…permanentă peste una SSO: adoptată ca manuală (ca în 3.6.2)", r.status_code == 200
           and src == "manual", r.text[:120])
 
+    # ── cursă (revizuirea 3.6.10): legătura se schimbă în timpul re-auth-ului ──────────
+    race = await U.bind(ana_id, "viewer", "folder", "race")
+    await db.execute("UPDATE role_bindings SET expires=? WHERE id=?", time.time() + 7200, race)
+    authz.bump_epoch()
+    meanwhile = time.time() + 600
+
+    async def exp_of(b):
+        r = await db.fetchone("SELECT expires FROM role_bindings WHERE id=?", b)
+        return r["expires"] if r else "gone"
+
+    orig_reauth, orig_recheck = api._reauth_for_access_change, api._recheck_granter
+
+    async def reauth_then_shorten(*a, **k):
+        await orig_reauth(*a, **k)
+        await db.execute("UPDATE role_bindings SET expires=? WHERE id=?", meanwhile, race)
+    api._reauth_for_access_change = reauth_then_shorten
+    try:
+        # cererea: 2 h → 1 h („mai scurt", reguli de scoatere); între timp a devenit 10 min, deci
+        # aceeaşi cerere ar fi devenit o EXTINDERE — decisă pe rândul vechi, ar fi ocolit acordarea
+        r = await owner.post("/api/users/%d/bindings/%d/expiry" % (ana_id, race), json=xb(time.time() + 3600))
+    finally:
+        api._reauth_for_access_change = orig_reauth
+    check("sfârşitul schimbat în timpul re-auth-ului → 409 authz.bindingChanged",
+          r.status_code == 409 and U.code(r) == "authz.bindingChanged", "%s %s" % (r.status_code, r.text[:120]))
+    check("…rândul păstrează valoarea de între timp", abs((await exp_of(race)) - meanwhile) < 1)
+
+    async def recheck_then_change(*a, **k):
+        out = await orig_recheck(*a, **k)
+        await db.execute("UPDATE role_bindings SET expires=? WHERE id=?", meanwhile + 60, race)
+        return out
+    api._recheck_granter = recheck_then_change
+    try:
+        r = await owner.post("/api/users/%d/bindings/%d/expiry" % (ana_id, race), json=xb(None))
+    finally:
+        api._recheck_granter = orig_recheck
+    check("…schimbat chiar înainte de UPDATE: gardă `expires IS <vechi>` → 409, nimic scris",
+          r.status_code == 409 and U.code(r) == "authz.bindingChanged"
+          and abs((await exp_of(race)) - (meanwhile + 60)) < 1, "%s %s" % (r.status_code, r.text[:120]))
+
+    async def reauth_then_delete(*a, **k):
+        await orig_reauth(*a, **k)
+        await db.execute("DELETE FROM role_bindings WHERE id=?", race)
+    api._reauth_for_access_change = reauth_then_delete
+    try:
+        r = await owner.post("/api/users/%d/bindings/%d/expiry" % (ana_id, race), json=xb(None))
+    finally:
+        api._reauth_for_access_change = orig_reauth
+    check("…scoasă în timpul re-auth-ului → 404, nimic re-creat",
+          r.status_code == 404 and await exp_of(race) == "gone", "%s %s" % (r.status_code, r.text[:120]))
+    authz.bump_epoch()
+
     # ── ultimul Owner PERMANENT ────────────────────────────────────────────────────────
     o2_id = await U.add_user("o2@x.co", bindings=[("owner", "all", "")])
     o2 = await U.login("o2@x.co")

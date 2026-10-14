@@ -1463,6 +1463,7 @@ const ro: Lang = {
     'err.authz.badExpiry': "Alege un sfârșit în viitor (cel puțin un minut de acum).",
     'err.authz.expiryTooFar': "Un rol temporar durează cel mult {days} de zile.",
     'err.authz.ssoBinding': "Rolul vine dintr-un grup SSO. Schimbă maparea grupului.",
+    'err.authz.bindingChanged': "Rolul a fost schimbat între timp. Reîncarcă și încearcă din nou.",
     'err.authz.crownJewel': "Asta dă un shell pe un host crown-jewel ({hosts}). Confirmă ca să-l acorzi.",
     'err.authz.crownJewelMove': "Mutarea lui {host} dă un shell pe el încă {n} rol(uri). Confirmă ca să-l muți.",
     'err.host.crownEphemeral': "O țintă „conectează o dată” nu poate fi crown jewel.",

@@ -1393,18 +1393,22 @@ async def set_binding_expiry(uid: int, bid: int, body: BindingExpiryIn, request:
     if uid == user["id"]:
         raise ApiError(403, "authz.selfBinding", "you cannot change your own access")
     new = authz.normalize_expiry(body.expires)
-    row = await db.fetchone(
-        "SELECT b.id, b.role_id, b.scope_kind, b.scope_value, b.source, b.expires,"
-        " r.key AS role_key, r.name AS role_name, u.email FROM role_bindings b"
-        " JOIN roles r ON r.id=b.role_id JOIN users u ON u.id=b.user_id"
-        " WHERE b.id=? AND b.user_id=?", bid, uid)
-    if not row or (row["expires"] is not None and row["expires"] <= time.time()):
-        raise ApiError(404, "authz.bindingMissing", "no such role binding")
-    if (row["source"] or "") == "sso":
-        raise ApiError(409, "authz.ssoBinding",
-                       "this role comes from an SSO group; change the group mapping instead")
-    old = row["expires"]
-    shorter = new is not None and (old is None or new < old)
+
+    async def _current():
+        row = await db.fetchone(
+            "SELECT b.id, b.role_id, b.scope_kind, b.scope_value, b.source, b.expires,"
+            " r.key AS role_key, r.name AS role_name, u.email FROM role_bindings b"
+            " JOIN roles r ON r.id=b.role_id JOIN users u ON u.id=b.user_id"
+            " WHERE b.id=? AND b.user_id=?", bid, uid)
+        if not row or (row["expires"] is not None and row["expires"] <= time.time()):
+            raise ApiError(404, "authz.bindingMissing", "no such role binding")
+        if (row["source"] or "") == "sso":
+            raise ApiError(409, "authz.ssoBinding",
+                           "this role comes from an SSO group; change the group mapping instead")
+        old = row["expires"]
+        return row, old, new is not None and (old is None or new < old)
+
+    row, old, shorter = await _current()
     if (row["role_key"] == "owner" or await authz.is_owner_user(uid)) and not grants.is_owner():
         raise ApiError(403, "authz.ownerOnly", "only an Owner can change an Owner's access")
     await authz.check_target(grants, uid)
@@ -1413,11 +1417,26 @@ async def set_binding_expiry(uid: int, bid: int, body: BindingExpiryIn, request:
                                 removing=shorter)
     await _reauth_for_access_change(user, request, body, "change a WebTerm account's access")
     async with authz._lock:
+        # revizuirea 3.6.10: re-auth-ul a fost un punct de suspendare — legătura s-a putut schimba
+        # (alt sfârşit, scoasă, expirată). Totul se decide din nou pe rândul de ACUM: „mai scurt"
+        # (reguli de scoatere) sau „mai lung" (reguli de acordare) se recalculează aici.
+        before = old
+        row, old, shorter = await _current()
+        if old != before:
+            raise ApiError(409, "authz.bindingChanged",
+                           "this role binding was changed meanwhile; reload and try again")
+        info = (await authz.role_by_id(row["role_id"])) or _UNKNOWN_ROLE
         info = await _recheck_granter(user, info, row["scope_kind"], row["scope_value"], uid,
                                       removing=shorter)
         if old is None and new is not None:
             await authz.check_owner_expiry(info, row["scope_kind"], new, uid, exclude_binding=bid)
-        await db.execute("UPDATE role_bindings SET expires=? WHERE id=? AND user_id=?", new, bid, uid)
+        # gardă de concurenţă pe valoarea citită (toate scrierile de legături ţin lock-ul, deci
+        # n-ar trebui să se întâmple — dar dacă se întâmplă, refuzăm în loc să scriem pe ghicite)
+        if not await db.execute_returning(
+                "UPDATE role_bindings SET expires=? WHERE id=? AND user_id=? AND expires IS ?"
+                " RETURNING id", new, bid, uid, old):
+            raise ApiError(409, "authz.bindingChanged",
+                           "this role binding was changed meanwhile; reload and try again")
         await _after_access_change(uid)
     rlabel = row["role_key"] or row["role_name"]
     scope = _scope_label(row["scope_kind"], row["scope_value"])

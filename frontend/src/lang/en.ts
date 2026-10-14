@@ -1441,6 +1441,7 @@ const en: Lang = {
     'err.authz.badExpiry': "Pick an end in the future (at least a minute from now).",
     'err.authz.expiryTooFar': "A time-bound role lasts at most {days} days.",
     'err.authz.ssoBinding': "This role comes from an SSO group. Change the group mapping instead.",
+    'err.authz.bindingChanged': "This role was changed meanwhile. Reload and try again.",
     'err.authz.crownJewel': "This gives a shell on a crown-jewel host ({hosts}). Confirm to grant it.",
     'err.authz.crownJewelMove': "Moving {host} gives a shell on it to {n} more role(s). Confirm to move it.",
     'err.host.crownEphemeral': "A connect-once target cannot be a crown jewel.",
