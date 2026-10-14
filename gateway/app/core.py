@@ -3114,6 +3114,7 @@ async def purge_host(host_id: int, *, _depth: int = 0) -> None:
         except ValueError:          # sid invalid în DB (nu se poate forma o cale) — nimic de mutat
             pass
     await db.execute("DELETE FROM sessions WHERE host_id=?", host_id)
+    await prune_split_views()        # panourile de split ale sesiunilor şterse (3.6.12)
 
     # forward-uri: tunelurile vii cad odată cu sursa (apelantul o deconectează); biletele sunt
     # semnate pe slug, iar slug-ul se poate recicla → bumpăm epoca, exact ca la delete_forward.
@@ -3169,6 +3170,45 @@ async def purge_host(host_id: int, *, _depth: int = 0) -> None:
     replacements.pop(host_id, None)
     _dial_locks.pop(host_id, None)
     _offline_alerted_ram.discard(host_id)
+
+
+async def prune_split_views() -> int:
+    """Split-views (3.6.12): scoate din panouri sesiunile care nu mai există; sub 2 panouri →
+    layout-ul dispare. Înainte o făcea GET /api/split-views la fiecare poll (scrieri într-un GET,
+    N+1 interogări); acum rulează în reaper şi imediat după ştergerea unei sesiuni / a unui host.
+    O singură scanare (tabela e mică: ≤50 rânduri per cont) + interogări IN pe sid-urile referite.
+    Când numărul de panouri se schimbă, forma şi dimensiunile revin la implicit (`''`)."""
+    rows = await db.fetchall("SELECT id, panes FROM split_views")
+    if not rows:
+        return 0
+    parsed, want = {}, set()
+    for r in rows:
+        try:
+            p = json.loads(r["panes"] or "[]")
+        except (TypeError, ValueError):
+            p = []
+        p = [s for s in p if isinstance(s, str)] if isinstance(p, list) else []
+        parsed[r["id"]] = p
+        want.update(p)
+    alive: Set[str] = set()
+    lst = sorted(want)
+    for i in range(0, len(lst), 500):
+        chunk = lst[i:i + 500]
+        alive.update(x["id"] for x in await db.fetchall(
+            "SELECT id FROM sessions WHERE id IN (%s)" % ",".join("?" * len(chunk)), *chunk))
+    changed = 0
+    for r in rows:
+        p = parsed[r["id"]]
+        keep = [s for s in p if s in alive]
+        if len(keep) == len(p) and len(p) >= 2:
+            continue
+        changed += 1
+        if len(keep) < 2:
+            await db.execute("DELETE FROM split_views WHERE id=?", r["id"])
+        else:
+            await db.execute("UPDATE split_views SET panes=?, layout='', sizes='', updated=? WHERE id=?",
+                             json.dumps(keep), time.time(), r["id"])
+    return changed
 
 
 async def sweep_ephemeral_hosts() -> None:

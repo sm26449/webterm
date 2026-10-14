@@ -128,6 +128,7 @@ async def _session_reaper() -> None:
         try:
             await core.sweep_stale_sessions()
             await core.sweep_ephemeral_hosts()   # „conectează o dată": şterge ţintele moarte
+            await core.prune_split_views()       # 3.6.12: panourile sesiunilor dispărute (GET nu mai scrie)
             await core.prune_agent_events()      # retenţie 7 zile pe jurnalul de conexiune agent
             await core.purge_pending_ssh_keys()  # chei generate în Add host şi nefolosite (~1h)
             await core.sweep_hosts_offline()     # alertă la host căzut / revenit

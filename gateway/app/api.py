@@ -8,6 +8,7 @@ import html
 import io
 import json
 import logging
+import math
 import os
 import re
 import shlex
@@ -6340,6 +6341,26 @@ async def delete_connection(host_id: int, conn_id: int, stepup_grant: str = "",
 # gated independent la attach. Deci CRUD = doar require_user, FĂRĂ step-up (spre
 # deosebire de conexiunile `stored`). Vezi docs/design/SPLIT-VIEWS.md.
 SPLIT_RATIO_MIN, SPLIT_RATIO_MAX = 0.15, 0.85
+# 3.6.12: forma layout-ului → (număr de panouri, grupurile de dimensiuni). Fiecare grup = fracţii
+# care însumează 1: coloanele, apoi (unde există) rândurile. `main-left` = 1 mare stânga + 2
+# stivuite dreapta [col0, col1, rând0, rând1 (ale stivei)], `main-top` = 1 mare sus + 2 jos
+# [rând0, rând1, col0, col1 (ale rândului de jos)], `grid` = 2×2 [col0, col1, rând0, rând1].
+# Aceeaşi tabelă e în frontend/src/lib/splitLayout.ts — o schimbare se face în ambele locuri.
+SPLIT_LAYOUTS = {
+    "cols2": (2, (2,)),
+    "cols3": (3, (3,)),
+    "main-left": (3, (2, 2)),
+    "main-top": (3, (2, 2)),
+    "grid": (4, (2, 2)),
+}
+SPLIT_DEFAULT_LAYOUT = {2: "cols2", 3: "main-left", 4: "grid"}
+SPLIT_SIZE_MIN, SPLIT_SIZE_MAX = 0.1, 0.9
+SPLIT_SUM_TOLERANCE = 0.02
+SPLIT_MAX_PER_USER = 50
+SPLIT_POSITION_MAX = 1000
+# ce înseamnă „poţi pune sesiunea într-un panou": s-o urmăreşti sau s-o deschizi. `recording.view`
+# singur (doar replay-ul unei sesiuni închise) NU mai ajunge din 3.6.12 — un panou e un terminal viu.
+_SPLIT_PANE_PERMS = frozenset({"session.watch", "session.open"})
 
 
 def _split_ratio(v) -> float:
@@ -6349,34 +6370,150 @@ def _split_ratio(v) -> float:
         return 0.5
 
 
-def _split_view_json(row, panes=None):
+def _split_panes_of(row) -> list:
     try:
-        p = panes if panes is not None else json.loads(row["panes"] or "[]")
+        p = json.loads(row["panes"] or "[]")
     except (TypeError, ValueError):
-        p = []
+        return []
+    return [s for s in p if isinstance(s, str)] if isinstance(p, list) else []
+
+
+def _split_equal(layout: str) -> list:
+    out = []
+    for n in SPLIT_LAYOUTS[layout][1]:
+        out += [round(1.0 / n, 4)] * n
+    return out
+
+
+def _split_fit_group(vals: list) -> list:
+    """Clamp fiecare fracţie în [MIN, MAX] şi renormalizează grupul la suma 1. Iterativ: o
+    renormalizare poate împinge din nou o valoare sub MIN (ex. [0.05, 0.05, 0.9])."""
+    v = list(vals)
+    for _ in range(12):
+        v = [min(SPLIT_SIZE_MAX, max(SPLIT_SIZE_MIN, x)) for x in v]
+        tot = sum(v)
+        v = [x / tot for x in v]
+        if all(SPLIT_SIZE_MIN - 1e-9 <= x <= SPLIT_SIZE_MAX + 1e-9 for x in v):
+            break
+    return [round(x, 4) for x in v]
+
+
+def _split_sizes(layout: str, sizes) -> list:
+    """Validează dimensiunile pentru `layout`: exact câte cere forma, numere finite în (0, 1), fiecare
+    grup cu suma ≈ 1 (±SPLIT_SUM_TOLERANCE). Apoi clamp + renormalizare pe grup. Altfel 400."""
+    groups = SPLIT_LAYOUTS[layout][1]
+    if not isinstance(sizes, list) or len(sizes) != sum(groups):
+        raise ApiError(400, "splitview.badSizes", "pane sizes do not match the layout")
+    vals = []
+    for x in sizes:
+        if isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) or not (0 < x < 1):
+            raise ApiError(400, "splitview.badSizes", "pane sizes must be fractions between 0 and 1")
+        vals.append(float(x))
+    out, i = [], 0
+    for n in groups:
+        g = vals[i:i + n]
+        i += n
+        if abs(sum(g) - 1.0) > SPLIT_SUM_TOLERANCE:
+            raise ApiError(400, "splitview.badSizes", "pane sizes must add up to 1")
+        out += _split_fit_group(g)
+    return out
+
+
+def _split_layout_of(row, count: int) -> tuple:
+    """(layout, sizes) EFECTIVE ale unui rând: cele stocate dacă se potrivesc cu numărul de
+    panouri, altfel implicitul (un rând dinainte de 3.6.12 are doar `ratio`)."""
+    layout = row["layout"] or ""
+    stored = None
+    if layout not in SPLIT_LAYOUTS or SPLIT_LAYOUTS[layout][0] != count:
+        layout = SPLIT_DEFAULT_LAYOUT.get(count, "cols2")
+    else:
+        try:
+            stored = json.loads(row["sizes"] or "null")
+        except (TypeError, ValueError):
+            stored = None
+    sizes = None
+    if stored is not None:
+        try:
+            sizes = _split_sizes(layout, stored)
+        except ApiError:
+            sizes = None
+    if sizes is None:
+        if layout == "cols2" and row["ratio"] is not None:
+            r = _split_ratio(row["ratio"])
+            sizes = [round(r, 4), round(1 - r, 4)]
+        else:
+            sizes = _split_equal(layout)
+    return layout, sizes
+
+
+def _split_view_json(row, panes=None, hidden=0):
+    p = panes if panes is not None else _split_panes_of(row)
+    # forma se alege după numărul TOTAL de panouri vii (inclusiv cele ascunse acum): UI-ul care
+    # vede mai puţine (hidden > 0) randează local o formă implicită, fără s-o persiste
+    layout, sizes = _split_layout_of(row, len(p) + hidden)
     return {"id": row["id"], "name": row["name"] or "", "panes": p,
             "ratio": row["ratio"] if row["ratio"] is not None else 0.5,
+            "layout": layout, "sizes": sizes, "hidden": hidden,
             "broadcast": bool(row["broadcast"]), "position": row["position"] or 0}
 
 
-async def _validate_split_panes(panes, user=None) -> list:
-    """2-4 sid-uri DISTINCTE, fiecare o sesiune existentă. Aceeaşi sesiune de două ori =
-    doi clienţi tmux la două dimensiuni (război de resize) → respins, ca invariantul primary≠second."""
+async def _split_pane_access(user, sids) -> dict:
+    """sid → vizibil ACUM pentru cont: sesiunea există, rolul dă `session.watch`/`session.open` pe
+    hostul ei şi — pe un host `require_2fa` — fereastra de step-up e deschisă (aceeaşi regulă ca
+    /api/sessions: metadata unei sesiuni 2FA cere step-up). Un sid absent din dict = inexistent.
+    Citire PASIVĂ (`stepup_window_is_open` nu glisează fereastra); interogăm doar sid-urile cerute."""
+    sids = sorted({s for s in sids if isinstance(s, str)})
+    if not sids:
+        return {}
+    rows = []
+    for i in range(0, len(sids), 500):
+        chunk = sids[i:i + 500]
+        rows += await db.fetchall("SELECT id, host_id FROM sessions WHERE id IN (%s)"
+                                  % ",".join("?" * len(chunk)), *chunk)
+    hosts = sorted({r["host_id"] for r in rows})
+    gated = set()
+    if hosts:
+        gated = {r["id"] for r in await db.fetchall(
+            "SELECT id FROM hosts WHERE require_2fa=1 AND id IN (%s)" % ",".join("?" * len(hosts)), *hosts)}
+    grants = await authz.grants_for_user(user["id"])
+    ok_host = {}
+    for h in hosts:
+        vis = bool(await authz.perms_on(grants, h) & _SPLIT_PANE_PERMS)
+        if vis and h in gated:
+            vis = security.stepup_window_is_open(user["id"], h)
+        ok_host[h] = vis
+    return {r["id"]: ok_host[r["host_id"]] for r in rows}
+
+
+async def _validate_split_panes(panes, user) -> list:
+    """2-4 sid-uri DISTINCTE, fiecare o sesiune pe care contul o vede ACUM. Aceeaşi sesiune de
+    două ori = doi clienţi tmux la două dimensiuni (război de resize) → respins, ca invariantul
+    primary≠second. Inexistentă / fără drept / 2FA blocat = acelaşi 400 (fără oracol)."""
     if not isinstance(panes, list) or not (2 <= len(panes) <= 4):
         raise ApiError(400, "splitview.badCount", "a split view needs 2 to 4 sessions")
     if any(not isinstance(s, str) for s in panes):
         raise ApiError(400, "splitview.badPane", "invalid session id")
     if len(set(panes)) != len(panes):
         raise ApiError(400, "splitview.dupPane", "the same session cannot appear twice")
-    grants = await authz.grants_for_user(user["id"]) if user is not None else None
-    for sid in panes:
-        row = await db.fetchone("SELECT id, host_id FROM sessions WHERE id=?", sid)
-        # 3.6: o sesiune pe care contul n-o poate vedea = una necunoscută (acelaşi 400)
-        if not row or grants is None or not (
-                await authz.perms_on(grants, row["host_id"])
-                & {"session.watch", "recording.view", "session.open"}):
-            raise ApiError(400, "splitview.badPane", "unknown session in split view")
+    access = await _split_pane_access(user, panes)
+    if not all(access.get(sid) for sid in panes):
+        raise ApiError(400, "splitview.badPane", "unknown session in split view")
     return panes
+
+
+def _split_layout_arg(layout, count: int) -> str:
+    if not isinstance(layout, str) or layout not in SPLIT_LAYOUTS:
+        raise ApiError(400, "splitview.badLayout", "unknown split layout")
+    if SPLIT_LAYOUTS[layout][0] != count:
+        raise ApiError(400, "splitview.badLayout", "that layout does not fit this number of panes")
+    return layout
+
+
+def _split_position(v) -> int:
+    try:
+        return max(0, min(SPLIT_POSITION_MAX, int(v)))
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 
 class SplitViewIn(BaseModel):
@@ -6384,28 +6521,37 @@ class SplitViewIn(BaseModel):
     name: Optional[str] = None
     panes: Optional[list[str]] = None
     ratio: Optional[float] = None
+    layout: Optional[str] = None
+    sizes: Optional[list[float]] = None
     broadcast: Optional[bool] = None
     position: Optional[int] = None
 
 
+async def _split_view_out(user, row) -> dict:
+    cur = _split_panes_of(row)
+    access = await _split_pane_access(user, cur)
+    alive = [s for s in cur if s in access]
+    visible = [s for s in alive if access[s]]
+    return _split_view_json(row, visible, len(alive) - len(visible))
+
+
 @router.get("/api/split-views")
 async def list_split_views(user=Depends(security.require_user)):
+    # 3.6.12: GET nu mai SCRIE (curăţarea panourilor moarte e în reaper şi la ştergerea unei
+    # sesiuni/host — core.prune_split_views) şi interoghează doar sesiunile referite. Un panou pe
+    # care contul nu-l poate vedea ACUM (rol schimbat, host 2FA fără step-up) e ASCUNS, nu şters:
+    # layout-ul revine întreg după deblocare. `hidden` = câte panouri vii lipsesc din listă.
     rows = await db.fetchall(
         "SELECT * FROM split_views WHERE user_id=? ORDER BY position, id", user["id"])
-    live = {r["id"] for r in await db.fetchall("SELECT id FROM sessions")}
+    panes_of = {r["id"]: _split_panes_of(r) for r in rows}
+    access = await _split_pane_access(user, [s for p in panes_of.values() for s in p])
     out = []
     for r in rows:
-        try:
-            panes = [s for s in json.loads(r["panes"] or "[]") if s in live]
-        except (TypeError, ValueError):
-            panes = []
-        if len(panes) < 2:
-            # o sesiune s-a închis şi au rămas <2 panouri → layout-ul nu mai are sens
-            await db.execute("DELETE FROM split_views WHERE id=?", r["id"])
-            continue
-        if len(panes) != len(json.loads(r["panes"] or "[]")):
-            await db.execute("UPDATE split_views SET panes=? WHERE id=?", json.dumps(panes), r["id"])
-        out.append(_split_view_json(r, panes))
+        alive = [s for s in panes_of[r["id"]] if s in access]
+        if len(alive) < 2:
+            continue                     # <2 sesiuni vii: îl şterge reaper-ul; aici doar nu-l arătăm
+        visible = [s for s in alive if access[s]]
+        out.append(_split_view_json(r, visible, len(alive) - len(visible)))
     return {"split_views": out}
 
 
@@ -6414,14 +6560,26 @@ async def create_split_view(body: SplitViewIn, user=Depends(security.require_use
     name = (body.name or "").strip()[:80]
     if not name:
         raise ApiError(400, "splitview.noName", "a split view needs a name")
+    n = await db.fetchone("SELECT COUNT(*) AS n FROM split_views WHERE user_id=?", user["id"])
+    if n and n["n"] >= SPLIT_MAX_PER_USER:
+        raise ApiError(400, "splitview.tooMany", "too many split views — delete one first")
     panes = await _validate_split_panes(body.panes or [], user)
+    layout = (_split_layout_arg(body.layout, len(panes)) if body.layout is not None
+              else SPLIT_DEFAULT_LAYOUT[len(panes)])
+    sizes = _split_sizes(layout, body.sizes) if body.sizes is not None else None
+    ratio = _split_ratio(body.ratio if body.ratio is not None else 0.5)
+    if layout == "cols2":
+        if sizes is None and body.ratio is not None:
+            sizes = [round(ratio, 4), round(1 - ratio, 4)]
+        elif sizes is not None:
+            ratio = _split_ratio(sizes[0])
     now = time.time()
-    sid = await db.execute(
-        "INSERT INTO split_views(user_id, name, panes, ratio, broadcast, position, created, updated)"
-        " VALUES(?,?,?,?,?,?,?,?)",
-        user["id"], name, json.dumps(panes), _split_ratio(body.ratio if body.ratio is not None else 0.5),
-        1 if body.broadcast else 0, int(body.position or 0), now, now)
-    return _split_view_json(await db.fetchone("SELECT * FROM split_views WHERE id=?", sid))
+    new_id = await db.execute(
+        "INSERT INTO split_views(user_id, name, panes, ratio, layout, sizes, broadcast, position,"
+        " created, updated) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        user["id"], name, json.dumps(panes), ratio, layout, json.dumps(sizes) if sizes else "",
+        1 if body.broadcast else 0, _split_position(body.position or 0), now, now)
+    return await _split_view_out(user, await db.fetchone("SELECT * FROM split_views WHERE id=?", new_id))
 
 
 @router.patch("/api/split-views/{sv_id}")
@@ -6435,19 +6593,49 @@ async def update_split_view(sv_id: int, body: SplitViewIn, user=Depends(security
         if not name:
             raise ApiError(400, "splitview.noName", "a split view needs a name")
         sets.append("name=?"); vals.append(name)
-    if body.panes is not None:
-        panes = await _validate_split_panes(body.panes, user)
-        sets.append("panes=?"); vals.append(json.dumps(panes))
-    if body.ratio is not None:
-        sets.append("ratio=?"); vals.append(_split_ratio(body.ratio))
+    if (body.panes is not None or body.layout is not None or body.sizes is not None
+            or body.ratio is not None):
+        # Un client care NU vede toate panourile (2FA fără step-up, rol restrâns) ar rescrie
+        # layout-ul doar cu ce vede şi ar pierde tăcut panourile ascunse → refuzat până la deblocare.
+        cur = _split_panes_of(row)
+        access = await _split_pane_access(user, cur)
+        alive = [s for s in cur if s in access]
+        if any(not access[s] for s in alive):
+            raise ApiError(409, "splitview.hiddenPanes",
+                           "some sessions of this split view are hidden right now — unlock them first")
+        panes = await _validate_split_panes(body.panes, user) if body.panes is not None else alive
+        if len(panes) < 2:
+            raise ApiError(400, "splitview.badCount", "a split view needs 2 to 4 sessions")
+        count_changed = len(panes) != len(alive)
+        if body.panes is not None or len(alive) != len(cur):
+            sets.append("panes=?"); vals.append(json.dumps(panes))
+        cur_layout, cur_sizes = _split_layout_of(row, len(alive))
+        if body.layout is not None:
+            layout = _split_layout_arg(body.layout, len(panes))
+        elif count_changed:
+            layout = SPLIT_DEFAULT_LAYOUT[len(panes)]
+        else:
+            layout = cur_layout
+        if body.sizes is not None:
+            sizes = _split_sizes(layout, body.sizes)
+        elif body.ratio is not None and layout == "cols2":
+            r = _split_ratio(body.ratio)
+            sizes = [round(r, 4), round(1 - r, 4)]
+        elif layout == cur_layout and not count_changed:
+            sizes = cur_sizes
+        else:
+            sizes = _split_equal(layout)
+        sets += ["layout=?", "sizes=?"]; vals += [layout, json.dumps(sizes)]
+        if layout == "cols2":
+            sets.append("ratio=?"); vals.append(_split_ratio(sizes[0]))
     if body.broadcast is not None:
         sets.append("broadcast=?"); vals.append(1 if body.broadcast else 0)
     if body.position is not None:
-        sets.append("position=?"); vals.append(int(body.position))
+        sets.append("position=?"); vals.append(_split_position(body.position))
     if sets:
         sets.append("updated=?"); vals.append(time.time())
         await db.execute("UPDATE split_views SET %s WHERE id=?" % ", ".join(sets), *vals, sv_id)
-    return _split_view_json(await db.fetchone("SELECT * FROM split_views WHERE id=?", sv_id))
+    return await _split_view_out(user, await db.fetchone("SELECT * FROM split_views WHERE id=?", sv_id))
 
 
 @router.delete("/api/split-views/{sv_id}")
@@ -10040,6 +10228,7 @@ async def delete_session(sid: str, request: Request,
         raise ApiError(409, "session.live", "the session is live; close it first")
     await db.execute("DELETE FROM sessions WHERE id=?", sid)
     await _delete_replay_links(" WHERE sid=?", sid)     # înregistrarea nu mai e de partajat
+    await core.prune_split_views()                      # split-urile care o refereau (3.6.12)
     # nu ștergem transcriptul pe loc: îl arhivăm (recuperabil ~120 zile), apoi
     # janitor-ul îl curăță definitiv după retenție
     core.archive_transcript(sid)

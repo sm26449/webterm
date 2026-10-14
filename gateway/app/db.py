@@ -233,7 +233,7 @@ CREATE TABLE IF NOT EXISTS split_views (
     user_id INTEGER NOT NULL,                -- proprietarul layout-ului (izolare multi-account)
     name TEXT NOT NULL,
     panes TEXT NOT NULL DEFAULT '[]',        -- JSON: 2-4 sid-uri DISTINCTE (sessions.id e TEXT)
-    ratio REAL DEFAULT 0.5,                  -- divider pt. 2 panouri (0.15..0.85)
+    ratio REAL DEFAULT 0.5,                  -- divider pt. 2 panouri (0.15..0.85); compat (3.6.12: + layout/sizes, vezi MIGRATIONS)
     broadcast INTEGER DEFAULT 0,             -- tastare difuzată în toate panourile
     position INTEGER DEFAULT 0,              -- ordinea în bara de taburi
     created REAL NOT NULL,
@@ -624,6 +624,11 @@ MIGRATIONS = [
     "ALTER TABLE users ADD COLUMN scim_created INTEGER DEFAULT 0",
     # cine a creat un token de grup (id, nu doar email): revocat la dezactivarea/ştergerea contului
     "ALTER TABLE enroll_groups ADD COLUMN created_by_id INTEGER",
+    # 3.6.12 — split-views: forma layout-ului (`cols2` | `cols3` | `main-left` | `main-top` | `grid`;
+    # gol = implicitul pentru numărul de panouri) şi dimensiunile (JSON: fracţii, pe grupuri care
+    # însumează 1 — vezi api._SPLIT_LAYOUTS). `ratio` rămâne pentru clienţii vechi (= sizes[0] la cols2).
+    "ALTER TABLE split_views ADD COLUMN layout TEXT DEFAULT ''",
+    "ALTER TABLE split_views ADD COLUMN sizes TEXT DEFAULT ''",
 ]
 
 # tabele adăugate ulterior (executeScript de mai sus le creează pe DB-uri noi;
