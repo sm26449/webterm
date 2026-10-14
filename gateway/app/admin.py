@@ -71,15 +71,22 @@ async def _revoke_everything(user_id: int, why: str) -> None:
 
 async def _bindings_text(user_id: int) -> str:
     rows = await db.fetchall(
-        "SELECT r.key, r.name, b.scope_kind, b.scope_value, b.source FROM role_bindings b"
+        "SELECT r.key, r.name, b.scope_kind, b.scope_value, b.source, b.expires FROM role_bindings b"
         " JOIN roles r ON r.id=b.role_id WHERE b.user_id=? ORDER BY b.id", user_id)
     if not rows:
         return "(no access)"
     # rolurile custom (3.6.2) n-au cheie: numele lor, între ghilimele; legăturile SSO marcate
-    return ", ".join("%s@%s%s" % (r["key"] or repr(r["name"]),
-                                  r["scope_kind"] if r["scope_kind"] == "all"
-                                  else "%s:%s" % (r["scope_kind"], r["scope_value"]),
-                                  " (sso)" if r["source"] == "sso" else "") for r in rows)
+    # 3.6.10: legăturile temporare cu sfârşitul lor (UTC); una expirată nu mai dă nimic
+    def until(r):
+        if r["expires"] is None:
+            return ""
+        when = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(r["expires"]))
+        return " (EXPIRED %s)" % when if r["expires"] <= time.time() else " (until %s)" % when
+    return ", ".join("%s@%s%s%s" % (r["key"] or repr(r["name"]),
+                                    r["scope_kind"] if r["scope_kind"] == "all"
+                                    else "%s:%s" % (r["scope_kind"], r["scope_value"]),
+                                    " (sso)" if r["source"] == "sso" else "", until(r))
+                     for r in rows)
 
 
 async def _bump_authz_epoch() -> None:
@@ -121,6 +128,11 @@ async def cmd_promote(args) -> None:
     await db.execute(
         "INSERT OR IGNORE INTO role_bindings(user_id, role_id, scope_kind, scope_value, source,"
         " created) VALUES(?,?,'all','','manual',?)", user["id"], role["id"], time.time())
+    # 3.6.10: an existing TIME-BOUND Owner @ all made the insert above a no-op — break-glass
+    # must leave a permanent Owner, never one that lapses in an hour
+    await db.execute(
+        "UPDATE role_bindings SET expires=NULL, source='manual' WHERE user_id=? AND role_id=?"
+        " AND scope_kind='all' AND scope_value=''", user["id"], role["id"])
     await db.execute(
         "INSERT INTO audit_log(ts, actor, ip, method, path, status, detail, actor_id, via)"
         " VALUES(?,?,?,?,?,?,?,?,?)", time.time(), "admin-cli", "-", "CLI", "/admin/promote", 200,

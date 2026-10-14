@@ -139,6 +139,25 @@ TOKEN_SCOPE_PERMS = {
     "run": frozenset({"host.view", "run"}),
 }
 
+# 3.6.10 — what an automation token can NEVER hold, whatever role it is given and whoever created
+# it. Today the legacy ceiling above already excludes all of it (a token only reaches the four
+# token routes); this list makes the rule explicit and keeps it true if a later release widens a
+# ceiling: administering people, roles, settings, tokens, shares, backups, signing, certificates,
+# the history wipe and new hosts, plus the host permissions that hand out access or change who
+# can reach a host (deploy keys, writable shares, forwards, the 2FA flag/provisioning, other
+# people's sessions). `security.view` stays reachable: the legacy `read` scope has always carried
+# it (status details), and removing it would silently empty existing monitoring tokens.
+TOKEN_NEVER = frozenset({
+    "users.manage", "roles.manage", "settings.manage", "tokens.create", "tokens.manage",
+    "shares.manage", "snippets.manage", "history.clear", "backups.manage", "signing.manage",
+    "certs.renew", "hosts.create", "hosts.export", "audit.view",
+    "host.admin", "host.edit", "deploykey.manage", "share.live_write", "session.manage",
+    "forward.manage", "toolbox.manage",
+})
+# A token is never "the owner": the Owner role is refused as a token role (400 at creation, and a
+# token row that names it anyway can do nothing).
+TOKEN_ROLE_REFUSED = frozenset({"owner"})
+
 # ── epoch + cache ────────────────────────────────────────────────────────────────────────────
 # Single uvicorn process (Dockerfile CMD, no --workers): an in-memory epoch is coherent. The
 # admin CLI runs in another process; it writes `app_settings['authz_epoch']`, which the reaper
@@ -341,7 +360,7 @@ async def grants_for_token(tok: dict) -> TokenGrants:
     role_id = tok.get("role_id")
     if role_id:
         r = await db.fetchone("SELECT key, perms, builtin FROM roles WHERE id=?", role_id)
-        if not r:
+        if not r or (r["key"] or "") in TOKEN_ROLE_REFUSED:
             ceiling = set()
         elif r["builtin"] and r["key"] in BUILTIN_ROLES:
             ceiling &= BUILTIN_ROLES[r["key"]]["perms"]
@@ -350,7 +369,7 @@ async def grants_for_token(tok: dict) -> TokenGrants:
                 ceiling &= {p for p in json.loads(r["perms"] or "[]") if p in PERMS}
             except (TypeError, ValueError):
                 ceiling = set()
-    ceiling = frozenset(ceiling)
+    ceiling = frozenset(ceiling) - TOKEN_NEVER
     kind = tok.get("scope_kind") or "all"
     if kind not in SCOPE_KINDS:
         ceiling = frozenset()
@@ -712,6 +731,9 @@ SELF: dict[tuple, str] = {
     ("DELETE", "/api/fs/copy/{job_id}"): "own copy job",
     ("POST", "/api/fs/copy/{job_id}/retry"): "own copy job; BOTH hosts re-checked in the handler",
     ("GET", "/api/me/permissions"): "own effective permissions (UI gating)",
+    ("GET", "/api/authz/explain"): ("own access on a host you can see (3.6.10); another account's "
+                                    "only with users.manage, checked in the handler; a host the "
+                                    "caller cannot see is 404"),
     ("POST", "/api/webauthn/register/options"): "own passkey enrolment",
     ("POST", "/api/webauthn/register/verify"): "own passkey enrolment (second gate)",
     ("GET", "/api/webauthn/credentials"): "own passkeys",
@@ -872,11 +894,14 @@ async def role_id(key: str) -> Optional[int]:
 
 async def owner_count(exclude_binding: Optional[int] = None,
                       exclude_user: Optional[int] = None) -> int:
-    """Accounts that hold Owner @ all (the only Owner that can administer the instance)."""
+    """Accounts that hold a PERMANENT Owner @ all (the only Owner that can administer the
+    instance). 3.6.10: a time-bound Owner binding does not count — "the last Owner cannot be
+    removed" means the last one that will still be there tomorrow; otherwise removing the only
+    permanent Owner next to a 4-hour one would lock the instance out when the 4 hours end."""
     sql = ("SELECT COUNT(DISTINCT b.user_id) AS c FROM role_bindings b JOIN roles r ON r.id=b.role_id"
            " JOIN users u ON u.id=b.user_id"
-           " WHERE r.key='owner' AND b.scope_kind='all' AND (b.expires IS NULL OR b.expires > ?)")
-    args: list = [time.time()]
+           " WHERE r.key='owner' AND b.scope_kind='all' AND b.expires IS NULL")
+    args: list = []
     if exclude_binding is not None:
         sql += " AND b.id<>?"
         args.append(exclude_binding)
@@ -1187,3 +1212,225 @@ def catalogue_json() -> dict:
                        "perms": sorted(BUILTIN_ROLES[k]["perms"]),
                        "shell": bool(BUILTIN_ROLES[k]["perms"] & SHELL_PERMS)} for k in ROLE_ORDER],
             "scopes": list(SCOPE_KINDS)}
+
+
+# ── time-bound bindings (3.6.10, §A.10) ─────────────────────────────────────────────────────
+# `role_bindings.expires` (NULL = permanent) is honoured at READ time (`_load_bindings` skips an
+# expired row), so access ends on the second even if the janitor is late or stopped. The janitor
+# (`sweep_expired_bindings`, from main._session_reaper) only tidies: it deletes the rows, bumps
+# the epoch (live sockets re-check now) and leaves an audit row per binding.
+BINDING_MIN_SECONDS = 60
+BINDING_MAX_DAYS = 366
+
+
+def normalize_expiry(v) -> Optional[float]:
+    """None/0/'' = permanent; otherwise an epoch timestamp at least a minute ahead and at most
+    BINDING_MAX_DAYS away (a "temporary" grant for ten years is a permanent one in disguise)."""
+    if v in (None, "", 0):
+        return None
+    try:
+        ts = float(v)
+    except (TypeError, ValueError):
+        raise ApiError(400, "authz.badExpiry", "the end of a time-bound role must be a date")
+    now = time.time()
+    if ts != ts or ts in (float("inf"), float("-inf")) or ts < now + BINDING_MIN_SECONDS:
+        raise ApiError(400, "authz.badExpiry", "the end of a time-bound role must be in the future")
+    if ts > now + BINDING_MAX_DAYS * 86400:
+        raise ApiError(400, "authz.expiryTooFar",
+                       "a time-bound role lasts at most %d days" % BINDING_MAX_DAYS,
+                       vars={"days": BINDING_MAX_DAYS})
+    return ts
+
+
+async def check_owner_expiry(role, kind: str, expires: Optional[float], target_uid: int,
+                             exclude_binding: Optional[int] = None) -> None:
+    """The system must never lock itself out: an EXPIRING Owner @ all is allowed only while
+    another account keeps a PERMANENT Owner @ all. `exclude_binding` = an existing binding that
+    is being made time-bound (otherwise: a new binding for `target_uid`). Call under `_lock`."""
+    info = _as_role(role)
+    if info.key != "owner" or kind != "all" or expires is None:
+        return
+    if exclude_binding is not None:
+        left = await owner_count(exclude_binding=exclude_binding)
+    else:
+        left = await owner_count(exclude_user=target_uid)
+    if left < 1:
+        raise ApiError(400, "authz.lastOwner",
+                       "the last permanent Owner cannot be made time-bound")
+
+
+async def sweep_expired_bindings() -> list:
+    """Delete expired bindings → [{user_id, email, role, scope_kind, scope_value, source,
+    expires}] (the caller audits and revokes derived access). Bumps the epoch when any went."""
+    now = time.time()
+    out = []
+    async with _lock:
+        rows = await db.fetchall(
+            "SELECT b.id, b.user_id, b.scope_kind, b.scope_value, b.source, b.expires,"
+            " r.key AS role_key, r.name AS role_name, u.email FROM role_bindings b"
+            " LEFT JOIN roles r ON r.id=b.role_id LEFT JOIN users u ON u.id=b.user_id"
+            " WHERE b.expires IS NOT NULL AND b.expires <= ?", now)
+        for r in rows:
+            await db.execute("DELETE FROM role_bindings WHERE id=? AND expires IS NOT NULL"
+                             " AND expires <= ?", r["id"], now)
+            out.append({"user_id": r["user_id"], "email": r["email"] or "",
+                        "role": r["role_key"] or r["role_name"] or "?",
+                        "scope_kind": r["scope_kind"], "scope_value": r["scope_value"] or "",
+                        "source": r["source"] or "manual", "expires": r["expires"]})
+        if out:
+            bump_epoch()
+    return out
+
+
+# ── crown-jewel hosts (3.6.10, §A.11.2) ─────────────────────────────────────────────────────
+# A host that runs the gateway or holds its backups IS the instance: a shell there reads the
+# database and the vault key. `hosts.crown_jewel` (Owner-only to set/clear) does not change what
+# anyone can do; it makes handing out a shell there a deliberate act: binding a non-Owner role
+# with any ⚑ permission over a scope that includes such a host is refused (409
+# `authz.crownJewel`) unless the request says `confirm_crown_jewel: true`, and the confirmed
+# grant is audited as such.
+CROWN_LIST_MAX = 10
+
+
+def crown_risky(role) -> bool:
+    """A grant that matters for a crown-jewel host: not Owner (that is already "everything"), and
+    at least one shell-equivalent host permission."""
+    info = _as_role(role)
+    return info.key != "owner" and bool(info.perms & SHELL_PERMS & HOST_PERMS)
+
+
+async def crown_hosts() -> list:
+    """[(id, name, HostRef)] of the crown-jewel hosts (ephemeral rows never carry the flag)."""
+    rows = await db.fetchall("SELECT id, name FROM hosts WHERE COALESCE(crown_jewel, 0)=1"
+                             " AND COALESCE(ephemeral, 0)=0 ORDER BY name")
+    if not rows:
+        return []
+    refs = await host_refs()
+    return [(r["id"], r["name"], refs[r["id"]]) for r in rows if r["id"] in refs]
+
+
+async def crown_hosts_in_scope(kind: str, value: str) -> list:
+    probe = Binding(0, "", "", frozenset(), kind, value, "", None)
+    return [(hid, name) for hid, name, ref in await crown_hosts() if probe.matches(ref)]
+
+
+def crown_error(names: list) -> ApiError:
+    shown = ", ".join(names[:CROWN_LIST_MAX]) + (" …" if len(names) > CROWN_LIST_MAX else "")
+    return ApiError(409, "authz.crownJewel",
+                    "this gives a shell on a crown-jewel host (%s); anyone with a shell there "
+                    "can take over WebTerm. Confirm to grant it anyway" % shown,
+                    vars={"hosts": shown, "n": len(names)})
+
+
+async def check_crown(role, kind: str, value: str, confirm: bool) -> list:
+    """→ the names of the crown-jewel hosts this grant covers (for the audit line) when
+    confirmed; 409 when it covers any and `confirm` is not set. Call AFTER `check_can_grant`,
+    which already proved the granter sees every host of the scope — the names are no oracle."""
+    if not crown_risky(role):
+        return []
+    names = [n for _i, n in await crown_hosts_in_scope(kind, value)]
+    if names and not confirm:
+        raise crown_error(names)
+    return names
+
+
+async def crown_exposure(ref: HostRef, before: Optional[HostRef] = None) -> list:
+    """Bindings and SSO mappings that give a NON-Owner a shell on the host `ref` describes:
+    [{kind: 'binding'|'mapping', who, role, scope_kind, scope_value}]. With `before`, only those
+    that did NOT already match it there (a crown-jewel host moved into a new folder/tag)."""
+    out = []
+    now = time.time()
+
+    def hits(info, kind, value) -> bool:
+        b = Binding(0, info.key, info.name, info.perms, kind, value or "", "", None)
+        return crown_risky(info) and b.matches(ref) and not (before is not None and b.matches(before))
+
+    for r in await db.fetchall(
+            "SELECT b.scope_kind, b.scope_value, b.expires, u.email, r.id, r.key, r.name,"
+            " r.description, r.perms, r.builtin FROM role_bindings b JOIN roles r ON r.id=b.role_id"
+            " JOIN users u ON u.id=b.user_id ORDER BY u.email"):
+        if r["expires"] is not None and r["expires"] <= now:
+            continue
+        info = _row_role(r)
+        if hits(info, r["scope_kind"], r["scope_value"]):
+            out.append({"kind": "binding", "who": r["email"], "role": info.key or info.name,
+                        "scope_kind": r["scope_kind"], "scope_value": r["scope_value"] or ""})
+    for r in await db.fetchall(
+            "SELECT m.grp, m.scope_kind, m.scope_value, r.id, r.key, r.name, r.description,"
+            " r.perms, r.builtin FROM oidc_group_roles m JOIN roles r ON r.id=m.role_id"
+            " ORDER BY m.grp"):
+        info = _row_role(r)
+        if hits(info, r["scope_kind"], r["scope_value"]):
+            out.append({"kind": "mapping", "who": r["grp"], "role": info.key or info.name,
+                        "scope_kind": r["scope_kind"], "scope_value": r["scope_value"] or ""})
+    return out
+
+
+# ── explain access (3.6.10, §A.9) ───────────────────────────────────────────────────────────
+async def explain(target_uid: int, host_id: int, ref: HostRef) -> dict:
+    """Why the account has (or lacks) what it has on ONE host. The CALLER's authorization (self,
+    or users.manage + the host visible to the caller) is the route's job; this only reads.
+
+    Only bindings that MATCH the host are listed (a binding over another folder says nothing
+    about this host, and could name scopes the caller cannot see). Expired bindings that match
+    are listed as ignored, so "it expired" is an answer, not a mystery."""
+    now = time.time()
+    rows = await db.fetchall(
+        "SELECT b.id AS bid, b.scope_kind, b.scope_value, b.source, b.expires,"
+        " r.id AS id, r.key, r.name, r.description, r.perms, r.builtin FROM role_bindings b"
+        " JOIN roles r ON r.id = b.role_id WHERE b.user_id=? ORDER BY b.id", target_uid)
+    u = await db.fetchone("SELECT sso_subject, sso_groups, COALESCE(local_password, 1) AS lp"
+                          " FROM users WHERE id=?", target_uid)
+    try:
+        groups = {g for g in json.loads((u["sso_groups"] if u else None) or "[]")
+                  if isinstance(g, str)}
+    except (TypeError, ValueError):
+        groups = set()
+    maps: dict = {}
+    for m in await db.fetchall("SELECT grp, role_id, scope_kind, scope_value FROM oidc_group_roles"):
+        maps.setdefault((m["role_id"], m["scope_kind"], m["scope_value"] or ""), []).append(m["grp"])
+    bindings, notes, live = [], [], []
+    for r in rows:
+        if r["scope_kind"] not in SCOPE_KINDS:
+            continue
+        info = _row_role(r)
+        b = Binding(r["bid"], info.key, info.name, info.perms, r["scope_kind"],
+                    r["scope_value"] or "", r["source"] or "manual", r["expires"], info.id)
+        if not b.matches(ref):
+            continue
+        expired = r["expires"] is not None and r["expires"] <= now
+        item = dict(binding_json(b), perms=sorted(info.perms & HOST_PERMS), expired=expired,
+                    shell=bool(info.perms & SHELL_PERMS & HOST_PERMS),
+                    ignored_global=(sorted(info.perms & GLOBAL_PERMS)
+                                    if b.scope_kind != "all" else []))
+        if b.source == "sso":
+            item["sso_groups"] = sorted(
+                g for g in maps.get((info.id, b.scope_kind, b.scope_value), [])
+                if g == "*" or g in groups)
+        bindings.append(item)
+        if expired:
+            notes.append({"code": "expiredIgnored", "binding": b.id})
+            continue
+        live.append(b)
+        if item["ignored_global"]:
+            notes.append({"code": "globalNeedsAll", "binding": b.id})
+    effective = sorted(Grants.from_bindings(target_uid, live).on(ref))
+    if not effective:
+        notes.append({"code": "noAccess"})
+    h = await db.fetchone("SELECT name, COALESCE(require_2fa, 0) AS r2, COALESCE(crown_jewel, 0)"
+                          " AS cj FROM hosts WHERE id=?", host_id)
+    if h and h["cj"]:
+        notes.append({"code": "crownJewel"})
+    if h and h["r2"] and effective:
+        notes.append({"code": "stepUp"})
+    if u and u["sso_subject"] and u["lp"]:
+        notes.append({"code": "ssoLocalPassword"})
+    ntok = (await db.fetchone("SELECT COUNT(*) AS c FROM api_tokens WHERE created_by_id=?"
+                              " AND expires > ?", target_uid, now))["c"]
+    if ntok:
+        notes.append({"code": "tokensCapped", "n": ntok})
+    return {"host": {"id": host_id, "name": h["name"] if h else "",
+                     "folder": ref.folder, "tags": sorted(ref.tags),
+                     "crown_jewel": bool(h and h["cj"]), "require_2fa": bool(h and h["r2"])},
+            "bindings": bindings, "effective": effective,
+            "shell": bool(set(effective) & SHELL_PERMS), "notes": notes}

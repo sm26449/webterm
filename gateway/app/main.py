@@ -134,6 +134,9 @@ async def _session_reaper() -> None:
             # 3.6.8: discul gateway-ului e acum check-ul `gateway.disk` din System health (la 30 s,
             # avertisment la WEBTERM_DISK_WARN_PCT, critic la WEBTERM_DISK_CRIT_PCT)
             await authz.poll_external_epoch()    # legături schimbate din `python3 -m app.admin`
+            # 3.6.10: legăturile temporare expirate — accesul s-a terminat deja la citire; aici
+            # doar le ştergem, cu audit, epocă nouă şi retragerea accesului derivat
+            await api.sweep_expired_bindings()
         except Exception:
             log.exception("the session reaper failed")
         await asyncio.sleep(_REAPER_INTERVAL)

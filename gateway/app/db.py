@@ -577,6 +577,11 @@ MIGRATIONS = [
     # 3.6.5 — de unde vine o mapare SSO: 'ui' (Setări, implicit — inclusiv toate cele vechi) sau
     # 'config' (WEBTERM_OIDC_ROLE_MAP, reconciliată la pornire; neştearsă/needitabilă din UI).
     "ALTER TABLE oidc_group_roles ADD COLUMN source TEXT DEFAULT 'ui'",
+    # 3.6.10 — ultima autentificare reuşită a contului şi CUM (password | password_2fa | passkey
+    # | sso), ştampilate de security.create_web_session. Doar pentru cine are users.manage (UI-ul
+    # Accounts). Conturile de dinainte rămân NULL: „neînregistrat încă", nu „niciodată".
+    "ALTER TABLE users ADD COLUMN last_login REAL",
+    "ALTER TABLE users ADD COLUMN last_login_method TEXT",
 ]
 
 # tabele adăugate ulterior (executeScript de mai sus le creează pe DB-uri noi;
@@ -650,6 +655,10 @@ async def connect() -> None:
         await _conn.close()
         _conn = None
         raise MigrationError("role seeding: %s: %s" % (type(e).__name__, e)) from e
+    # 3.6.10: de când se înregistrează ultima autentificare (o singură dată; un cont creat ÎNAINTE
+    # şi fără ştampilă = „neînregistrat de la <data asta>", nu „niciodată")
+    await _conn.execute("INSERT OR IGNORE INTO app_settings(key, value) VALUES('last_login_since', ?)",
+                        (str(int(now())),))
     # curăță sesiunile web expirate (altfel tabelul crește la nesfârșit)
     await _conn.execute("DELETE FROM web_sessions WHERE expires < ?", (now(),))
     await _conn.commit()

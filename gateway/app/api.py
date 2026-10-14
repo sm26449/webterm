@@ -20,7 +20,7 @@ import urllib.parse
 
 import asyncssh
 
-from fastapi import (APIRouter, Depends, HTTPException, Request, Response,
+from fastapi import (APIRouter, Depends, HTTPException, Query, Request, Response,
                      WebSocket, WebSocketDisconnect)
 from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse
 from pydantic import BaseModel, Field, ValidationError
@@ -284,7 +284,7 @@ async def setup(creds: Credentials, request: Request, response: Response):
     # să nu zăbovească pe disc după ce şi-a făcut treaba.
     _clear_setup_token_file()
     security.record_login_success(ip)
-    await _issue_cookie(response, row["id"], request)
+    await _issue_cookie(response, row["id"], request, method="password")
     return {"ok": True}
 
 
@@ -591,14 +591,15 @@ async def login(request: Request, response: Response):
             raise ApiError(401, "auth.bad2fa", "wrong 2FA code")
     security.record_login_success(ip)
     new_device = await security.note_new_login(user, ip, request.headers.get("user-agent", ""))
-    await _issue_cookie(response, user["id"], request, new_device)
+    await _issue_cookie(response, user["id"], request, new_device,
+                        method="password_2fa" if user["totp_enabled"] else "password")
     return {"ok": True}
 
 
 async def _issue_cookie(response: Response, user_id: int, request: Request,
-                        device_new: bool = False) -> None:
+                        device_new: bool = False, method: str = "") -> None:
     token = await security.create_web_session(
-        user_id, request.headers.get("user-agent", ""), device_new)
+        user_id, request.headers.get("user-agent", ""), device_new, method=method)
     security.set_session_cookie(response, token)
 
 
@@ -923,6 +924,8 @@ class UserIn(BaseModel):
     role_id: int = 0               # 3.6.2: orice rol (şi custom) după id
     scope_kind: str = "folder"
     scope_value: str = ""
+    # 3.6.10: un rol cu ⚑ peste un scope cu un host „crown jewel" se acordă doar confirmat
+    confirm_crown_jewel: bool = False
 
 
 class ReauthOnly(BaseModel):
@@ -937,6 +940,18 @@ class BindingIn(BaseModel):
     role_id: int = 0               # …sau orice rol (şi custom, 3.6.2) după id
     scope_kind: str = "all"
     scope_value: str = ""
+    # 3.6.10: legătură temporară — momentul (epoch) la care expiră; None = permanentă
+    expires: Optional[float] = None
+    confirm_crown_jewel: bool = False
+    current_password: str = ""
+    totp_code: str = ""
+    email_code: str = ""
+    stepup_grant: str = ""
+
+
+class BindingExpiryIn(BaseModel):
+    """3.6.10: schimbă sfârşitul unei legături existente (None = devine permanentă)."""
+    expires: Optional[float] = None
     current_password: str = ""
     totp_code: str = ""
     email_code: str = ""
@@ -967,19 +982,35 @@ async def _users_json(user, grants) -> list:
     manage = grants.has_global("users.manage")
     rows = await db.fetchall(
         "SELECT u.id, u.email, u.created, u.totp_enabled, u.sso_subject, u.local_password,"
+        " u.last_login, u.last_login_method,"
         " (SELECT COUNT(*) FROM webauthn_credentials c WHERE c.user_id=u.id) AS passkeys"
         " FROM users u ORDER BY u.created")
+    since = None
+    if manage:
+        s = await db.fetchone("SELECT value FROM app_settings WHERE key='last_login_since'")
+        try:
+            since = float(s["value"]) if s else None
+        except (TypeError, ValueError):
+            since = None
     out = []
     for r in rows:
         if not manage and r["id"] != user["id"]:
             continue                   # fără users.manage: doar propriul rând (§A.6.3)
-        out.append({"id": r["id"], "email": r["email"], "created": r["created"],
-                    "totp": bool(r["totp_enabled"]), "passkeys": r["passkeys"],
-                    "sso": bool(r["sso_subject"]),
-                    # 3.6.2: cu parolă locală, grupurile SSO nu-i dau roluri (ssomap)
-                    "local_password": r["local_password"] is None or bool(r["local_password"]),
-                    "is_self": r["id"] == user["id"],
-                    "bindings": await _user_bindings(r["id"])})
+        row = {"id": r["id"], "email": r["email"], "created": r["created"],
+               "totp": bool(r["totp_enabled"]), "passkeys": r["passkeys"],
+               "sso": bool(r["sso_subject"]),
+               # 3.6.2: cu parolă locală, grupurile SSO nu-i dau roluri (ssomap)
+               "local_password": r["local_password"] is None or bool(r["local_password"]),
+               "is_self": r["id"] == user["id"],
+               "bindings": await _user_bindings(r["id"])}
+        if manage:
+            # 3.6.10: ultima autentificare şi cum — doar pentru users.manage (cine administrează
+            # conturile vede conturile nefolosite). `tracked_since`: un cont mai vechi decât
+            # înregistrarea, fără ştampilă, e „neînregistrat", nu „niciodată".
+            row["last_login"] = r["last_login"]
+            row["last_login_method"] = r["last_login_method"] or None
+            row["last_login_tracked_since"] = since
+        out.append(row)
     return out
 
 
@@ -1026,6 +1057,18 @@ def _scope_label(kind: str, value: str) -> str:
 def _role_label(role) -> str:
     """Cheia unui rol predefinit (ca în 3.6.0), numele unuia custom."""
     return role.key or role.name
+
+
+def _crown_note(names: list) -> str:
+    """3.6.10: sufixul de audit al unei acordări CONFIRMATE peste hosturi crown-jewel."""
+    if not names:
+        return ""
+    return " — CONFIRMED over crown-jewel host(s): %s" % ", ".join(names[:authz.CROWN_LIST_MAX])
+
+
+def _expiry_label(expires) -> str:
+    return "" if expires is None else " until %s" % time.strftime(
+        "%Y-%m-%d %H:%M UTC", time.gmtime(expires))
 
 
 # un rol dispărut (n-ar trebui: un rol legat nu se poate şterge) e tratat ca „toate
@@ -1077,6 +1120,7 @@ async def create_user(body: UserIn, request: Request, user=Depends(authz.perm('u
         kind, value = authz.normalize_scope(body.scope_kind, body.scope_value)
         # anti-escaladare ÎNAINTE de orice efect (şi înainte de a consuma al doilea factor)
         await authz.check_can_grant(grants, role, kind, value)
+        await authz.check_crown(role, kind, value, body.confirm_crown_jewel)
     await _reauth_for_access_change(user, request, body, "create a new WebTerm account")
     email = body.email.strip().lower()
     if not security.valid_email(email):
@@ -1085,9 +1129,11 @@ async def create_user(body: UserIn, request: Request, user=Depends(authz.perm('u
     if await db.fetchone("SELECT id FROM users WHERE email=?", email):
         raise ApiError(409, "account.emailTaken", "an account with that email already exists")
     pw = await security.hash_password_async(body.password)
+    crown = []
     async with authz._lock:
         if role:
             role = await _recheck_granter(user, role, kind, value, None)
+            crown = await authz.check_crown(role, kind, value, body.confirm_crown_jewel)
         uid = await db.execute("INSERT INTO users(id, email, password_hash, created)"
                                " VALUES(" + db.NEXT_USER_ID_SQL + ",?,?,?)",
                                email, pw, time.time())
@@ -1099,8 +1145,9 @@ async def create_user(body: UserIn, request: Request, user=Depends(authz.perm('u
         authz.bump_epoch()
     log.info("new account created: %s (by %s, role %s)", email, user["email"],
              ("%s @ %s" % (_role_label(role), _scope_label(kind, value))) if role else "none")
-    audit.detail(request, "account %s created, role %s" % (
-        email, ("%s @ %s" % (_role_label(role), _scope_label(kind, value))) if role else "none"))
+    audit.detail(request, "account %s created, role %s%s" % (
+        email, ("%s @ %s" % (_role_label(role), _scope_label(kind, value))) if role else "none",
+        _crown_note(crown)))
     # un cont nou: cel mai valoros eveniment de securitate. Ajunge pe email ŞI webhook (via
     # _fire) şi în istoricul celor cu security.view, ca oricare schimbare de credenţiale.
     email_alerts.notify_security_change("a new WebTerm account was created (%s)" % email,
@@ -1214,34 +1261,45 @@ async def add_binding(uid: int, body: BindingIn, request: Request,
         raise ApiError(404, "user.missing", "no such account")
     role = await authz.resolve_role(body.role, body.role_id)
     kind, value = authz.normalize_scope(body.scope_kind, body.scope_value)
+    expires = authz.normalize_expiry(body.expires)
     await authz.check_target(grants, uid)
     await authz.check_can_grant(grants, role, kind, value)
+    # 3.6.10: ⚑ peste un host crown-jewel — refuzat fără confirmare, ÎNAINTE de re-auth (al doilea
+    # factor nu se consumă pe o cerere care oricum se întoarce cu 409)
+    await authz.check_crown(role, kind, value, body.confirm_crown_jewel)
     await _reauth_for_access_change(user, request, body, "change a WebTerm account's access")
     async with authz._lock:
         # 3.6 (cursă): între verificare şi scriere au trecut re-auth-ul şi al doilea factor — un
         # Admin retrogradat între timp nu are voie să-şi vadă acordarea aterizând. Re-verificăm
         # SUB lock, pe drepturile de ACUM (şi pe definiţia de ACUM a rolului).
         role = await _recheck_granter(user, role, kind, value, uid)
+        crown = await authz.check_crown(role, kind, value, body.confirm_crown_jewel)
+        await authz.check_owner_expiry(role, kind, expires, uid)
         dup = await db.fetchone(
             "SELECT id, source FROM role_bindings WHERE user_id=? AND role_id=? AND scope_kind=?"
             " AND scope_value=?", uid, role.id, kind, value)
-        if dup and dup["source"] == "sso":
+        if dup and dup["source"] == "sso" and expires is None:
             # 3.6.2: aceeaşi legătură venită din SSO devine MANUALĂ (nu mai pleacă la următoarea
             # sincronizare) — exact ce a cerut cel care acordă, cu aceleaşi verificări trecute
             await db.execute("UPDATE role_bindings SET source='manual', created_by_id=?"
                              " WHERE id=?", user["id"], dup["id"])
+        elif dup:
+            # 3.6.10: o legătură temporară peste una SSO ar SCURTA accesul dat de grup (la expirare
+            # pleacă amândouă) — refuzăm, în loc să schimbăm tăcut sensul legăturii existente
+            raise ApiError(409, "authz.bindingExists", "that account already has this role here")
         else:
             try:
                 await db.execute(
                     "INSERT INTO role_bindings(user_id, role_id, scope_kind, scope_value, source,"
-                    " created, created_by_id) VALUES(?,?,?,?,'manual',?,?)",
-                    uid, role.id, kind, value, time.time(), user["id"])
+                    " expires, created, created_by_id) VALUES(?,?,?,?,'manual',?,?,?)",
+                    uid, role.id, kind, value, expires, time.time(), user["id"])
             except sqlite3.IntegrityError:
                 raise ApiError(409, "authz.bindingExists", "that account already has this role here")
         await _after_access_change(uid)
     role = _role_label(role)
-    what = "%s granted %s @ %s" % (target["email"], role, _scope_label(kind, value))
-    audit.detail(request, "role " + what)
+    what = "%s granted %s @ %s%s" % (target["email"], role, _scope_label(kind, value),
+                                     _expiry_label(expires))
+    audit.detail(request, "role " + what + _crown_note(crown))
     log.warning("role binding added: %s (by %s)", what, user["email"])
     ip = security.client_ip(request)
     email_alerts.notify_security_change("role granted: " + what, ip, user["email"], fleet=True,
@@ -1299,6 +1357,109 @@ async def remove_binding(uid: int, bid: int, body: ReauthOnly, request: Request,
                                         user_id=uid, what_key="access_changed",
                                         what_params={"role": rlabel, "scope": scope})
     return {"bindings": await _user_bindings(uid)}
+
+
+async def sweep_expired_bindings() -> int:
+    """3.6.10, from the reaper (main._session_reaper, every minute): delete the bindings whose
+    time is up. Access already ended at read time (authz._load_bindings) — this tidies the rows,
+    wakes live sockets (epoch), revokes derived access (live shares, replay links) the account
+    can no longer create, leaves one audit row per binding and tells the person."""
+    gone = await authz.sweep_expired_bindings()
+    for uid in {g["user_id"] for g in gone}:
+        security.bump_forward_epoch(uid)
+        await _revoke_unauthorized_derived(uid)
+    for g in gone:
+        scope = _scope_label(g["scope_kind"], g["scope_value"])
+        what = "role binding expired: %s lost %s @ %s" % (g["email"] or "#%s" % g["user_id"],
+                                                          g["role"], scope)
+        await audit.record(time.time(), "system", "-", "SYSTEM", "/janitor/binding-expired", 200,
+                           what, actor_id=None, via="janitor")
+        log.warning(what)
+        if g["email"]:
+            email_alerts.notify_security_change(
+                "your access changed: " + what, "-", g["email"], user_id=g["user_id"],
+                what_key="access_expired", what_params={"role": g["role"], "scope": scope})
+    return len(gone)
+
+
+@router.post("/api/users/{uid}/bindings/{bid}/expiry")
+async def set_binding_expiry(uid: int, bid: int, body: BindingExpiryIn, request: Request,
+                             user=Depends(authz.perm('users.manage'))):
+    """3.6.10: change when a binding ends — `expires: null` makes it permanent. Making it last
+    LONGER (or forever) is a grant: the granting rules apply. Making it end SOONER is a removal:
+    the removal rules apply, plus the last permanent Owner can never be made time-bound. SSO
+    bindings follow their group (change the mapping instead); an expired binding is gone."""
+    grants = authz.grants_of(request)
+    if uid == user["id"]:
+        raise ApiError(403, "authz.selfBinding", "you cannot change your own access")
+    new = authz.normalize_expiry(body.expires)
+    row = await db.fetchone(
+        "SELECT b.id, b.role_id, b.scope_kind, b.scope_value, b.source, b.expires,"
+        " r.key AS role_key, r.name AS role_name, u.email FROM role_bindings b"
+        " JOIN roles r ON r.id=b.role_id JOIN users u ON u.id=b.user_id"
+        " WHERE b.id=? AND b.user_id=?", bid, uid)
+    if not row or (row["expires"] is not None and row["expires"] <= time.time()):
+        raise ApiError(404, "authz.bindingMissing", "no such role binding")
+    if (row["source"] or "") == "sso":
+        raise ApiError(409, "authz.ssoBinding",
+                       "this role comes from an SSO group; change the group mapping instead")
+    old = row["expires"]
+    shorter = new is not None and (old is None or new < old)
+    if (row["role_key"] == "owner" or await authz.is_owner_user(uid)) and not grants.is_owner():
+        raise ApiError(403, "authz.ownerOnly", "only an Owner can change an Owner's access")
+    await authz.check_target(grants, uid)
+    info = (await authz.role_by_id(row["role_id"])) or _UNKNOWN_ROLE
+    await authz.check_can_grant(grants, info, row["scope_kind"], row["scope_value"],
+                                removing=shorter)
+    await _reauth_for_access_change(user, request, body, "change a WebTerm account's access")
+    async with authz._lock:
+        info = await _recheck_granter(user, info, row["scope_kind"], row["scope_value"], uid,
+                                      removing=shorter)
+        if old is None and new is not None:
+            await authz.check_owner_expiry(info, row["scope_kind"], new, uid, exclude_binding=bid)
+        await db.execute("UPDATE role_bindings SET expires=? WHERE id=? AND user_id=?", new, bid, uid)
+        await _after_access_change(uid)
+    rlabel = row["role_key"] or row["role_name"]
+    scope = _scope_label(row["scope_kind"], row["scope_value"])
+    what = "%s: %s @ %s now %s" % (row["email"], rlabel, scope,
+                                   "permanent" if new is None else "ends" + _expiry_label(new))
+    audit.detail(request, "role " + what)
+    log.warning("role binding expiry changed: %s (by %s)", what, user["email"])
+    email_alerts.notify_security_change("your access changed: " + what, security.client_ip(request),
+                                        row["email"], user_id=uid, what_key="access_changed",
+                                        what_params={"role": rlabel, "scope": scope})
+    return {"bindings": await _user_bindings(uid)}
+
+
+@router.get("/api/authz/explain")
+async def explain_access(request: Request, user_id: int = Query(..., alias="user"),
+                         host_id: int = Query(..., alias="host"),
+                         user=Depends(security.require_user)):
+    """3.6.10 (§A.9, §A.11.9): why an account can — or cannot — do things on one host.
+
+    Who may ask: anyone about THEMSELVES; about someone else only with `users.manage`. Either
+    way the host must be visible to the CALLER (404, the same body as a host that does not exist
+    — a scoped admin learns nothing about hosts outside their scope, and a 403 is never given
+    for a host the caller cannot see). The target account is looked up only after the caller
+    proved users.manage, so a plain user cannot probe which account ids exist."""
+    grants = await authz.grants_for_user(user["id"])
+    if user_id != user["id"]:
+        if not grants.has_global("users.manage"):
+            raise ApiError(403, "authz.denied", "your role does not allow this here (users.manage)",
+                           vars={"perm": "users.manage"})
+    ref = await authz.host_ref(host_id)
+    if ref is None or "host.view" not in grants.on(ref):
+        raise authz.not_found("host_id")
+    if user_id != user["id"]:
+        target = await db.fetchone("SELECT id, email FROM users WHERE id=?", user_id)
+        if not target:
+            raise ApiError(404, "user.missing", "no such account")
+        email = target["email"]
+    else:
+        email = user["email"]
+    out = await authz.explain(user_id, host_id, ref)
+    out["user"] = {"id": user_id, "email": email, "self": user_id == user["id"]}
+    return out
 
 
 @router.get("/api/roles")
@@ -1536,6 +1697,7 @@ class OidcRoleIn(BaseModel):
     role_id: int = 0
     scope_kind: str = "all"
     scope_value: str = ""
+    confirm_crown_jewel: bool = False      # 3.6.10: ⚑ peste un host crown-jewel = confirmare explicită
     current_password: str = ""
     totp_code: str = ""
     email_code: str = ""
@@ -1609,6 +1771,7 @@ async def add_oidc_role(body: OidcRoleIn, request: Request,
     # o mapare acordă rolul fiecărui membru al grupului: exact regulile unei legături
     await authz.check_can_grant(grants, role, kind, value)
     _check_wildcard(grants, grp, role, kind)
+    await authz.check_crown(role, kind, value, body.confirm_crown_jewel)
     await _reauth_for_access_change(user, request, body, "map an SSO group to a role")
     async with authz._lock:
         g = await _fresh_grants(user, "users.manage")
@@ -1617,6 +1780,7 @@ async def add_oidc_role(body: OidcRoleIn, request: Request,
             raise ApiError(409, "role.gone", "that role was deleted meanwhile")
         await authz.check_can_grant(g, fresh, kind, value)
         _check_wildcard(g, grp, fresh, kind)
+        crown = await authz.check_crown(fresh, kind, value, body.confirm_crown_jewel)
         n = (await db.fetchone("SELECT COUNT(*) AS c FROM oidc_group_roles"))["c"]
         if n >= ssomap.MAPPINGS_MAX:
             raise ApiError(400, "ssoMap.tooMany", "too many SSO mappings (%d)" % ssomap.MAPPINGS_MAX,
@@ -1630,7 +1794,7 @@ async def add_oidc_role(body: OidcRoleIn, request: Request,
             raise ApiError(409, "ssoMap.exists", "that group already maps to this role there")
         authz.bump_epoch()
     what = "SSO group '%s' mapped to %s @ %s" % (grp, _role_label(fresh), _scope_label(kind, value))
-    audit.detail(request, what)
+    audit.detail(request, what + _crown_note(crown))
     log.warning("%s (by %s)", what, user["email"])
     # `*` = FIECARE cont SSO: întotdeauna alertă critică, oricât de mic e rolul
     email_alerts.notify_security_change(what, security.client_ip(request), user["email"],
@@ -1736,6 +1900,7 @@ class TokenIn(BaseModel):
     # 3.6: plafon opţional de rol + scope. Efectivul tokenului = scopes ∩ rol ∩ ce poate
     # creatorul ACUM (authz.grants_for_token) — deci nu poate depăşi niciodată contul care l-a emis.
     role: str = ""
+    role_id: int = 0               # 3.6.10: orice rol (şi custom) după id; Owner refuzat
     scope_kind: str = "all"
     scope_value: str = ""
 
@@ -1746,13 +1911,17 @@ def _token_row(r) -> dict:
             "created_by": r["created_by"], "expires": r["expires"], "last_used": r["last_used"],
             "expired": r["expires"] < time.time(),
             "role": (r["role_key"] if "role_key" in keys else None) or "",
+            # 3.6.10: rolul plafonului (şi custom: după nume); null = token vechi, fără plafon de rol
+            "role_id": (r["role_id"] if "role_id" in keys else None) or None,
+            "role_name": (r["role_name"] if "role_name" in keys else None) or "",
             "scope_kind": (r["scope_kind"] if "scope_kind" in keys else None) or "all",
             "scope_value": (r["scope_value"] if "scope_value" in keys else None) or ""}
 
 
 async def _tokens_json(user, grants) -> list:
     """Tokenurile PROPRII; toate, doar cu `tokens.manage` (§A.6.3)."""
-    sql = ("SELECT t.*, r.key AS role_key FROM api_tokens t LEFT JOIN roles r ON r.id=t.role_id")
+    sql = ("SELECT t.*, r.key AS role_key, r.name AS role_name FROM api_tokens t"
+           " LEFT JOIN roles r ON r.id=t.role_id")
     if grants.has_global("tokens.manage"):
         rows = await db.fetchall(sql + " ORDER BY t.created DESC")
     else:
@@ -1872,9 +2041,14 @@ async def list_tokens(request: Request, user=Depends(authz.perm('tokens.create')
 @router.post("/api/tokens")
 async def create_token(body: TokenIn, request: Request, user=Depends(authz.perm('tokens.create'))):
     grants = authz.grants_of(request)
-    role = (body.role or "").strip().lower()
+    role = None
     tkind, tvalue = authz.normalize_scope(body.scope_kind, body.scope_value)
-    if role:
+    if (body.role or "").strip() or body.role_id:
+        role = await authz.resolve_role(body.role, body.role_id)
+        # 3.6.10: un token nu e niciodată „proprietarul instanţei"
+        if role.key in authz.TOKEN_ROLE_REFUSED:
+            raise ApiError(400, "token.roleNotAllowed",
+                           "an automation token cannot have the Owner role; pick a narrower one")
         # rolul plafonului nu poate depăşi ce ai tu peste scope-ul tokenului (anti-escaladare);
         # oricum efectivul e intersectat cu creatorul la FIECARE cerere
         await authz.check_can_grant(grants, role, tkind, tvalue)
@@ -1902,9 +2076,12 @@ async def create_token(body: TokenIn, request: Request, user=Depends(authz.perm(
         " created_by_id, expires, role_id, scope_kind, scope_value) VALUES(?,?,?,?,?,?,?,?,?,?)",
         name, security.sha256_hex(raw), ",".join(scopes), time.time(), user["email"],
         user["id"], time.time() + days * 86400,
-        (await authz.role_id(role)) if role else None, tkind, tvalue)
-    log.info("automation token created: %s (%s, %dd) by %s", name, ",".join(scopes), days,
-             user["email"])
+        role.id if role else None, tkind, tvalue)
+    cap = "%s @ %s" % (_role_label(role), _scope_label(tkind, tvalue)) if role else "no role cap"
+    log.info("automation token created: %s (%s, %dd, %s) by %s", name, ",".join(scopes), days,
+             cap, user["email"])
+    audit.detail(request, "automation token %s created (%s; %s; %d days)" % (
+        name, ",".join(scopes), cap, days))
     # un token nou = o credenţială de automatizare care poate citi/rula fără browser: notificăm
     # (email + webhook), la fel ca un passkey nou sau un cont nou.
     email_alerts.notify_security_change(
@@ -2783,6 +2960,8 @@ def _host_json(row) -> dict:
     return {
         "id": row["id"], "name": row["name"], "note": row["note"],
         "alerts_muted": bool(row["alerts_muted"]) if "alerts_muted" in row.keys() else False,
+        # 3.6.10: runs the gateway / holds its backups — a shell there equals Owner (badge in the UI)
+        "crown_jewel": bool(row["crown_jewel"]) if "crown_jewel" in row.keys() else False,
         "online": _host_online(row), "hostname": row["hostname"],
         "agent_user": row["agent_user"], "agent_version": row["agent_version"],
         "backend": row["backend"], "last_heartbeat": row["last_heartbeat"],
@@ -2999,6 +3178,7 @@ async def list_hosts(request: Request,
                      user=Depends(authz.perm('host.view', list=True, tokens='read'))):
     vis = await authz.visible_hosts(authz.grants_of(request), "host.view")
     rows = await db.fetchall("SELECT * FROM hosts ORDER BY name")
+    gw_host = (await _cert_renew_host_id()) if authz.grants_of(request).is_owner() else None
     out = []
     for r in rows:
         if not authz.in_visible(vis, r["id"]):
@@ -3008,6 +3188,10 @@ async def list_hosts(request: Request,
         # (oracol de existenţă); UI-ul o afişează atunci la nivelul de sus, nu sub părinte
         if j.get("via_host_id") and not authz.in_visible(vis, j["via_host_id"]):
             j["via_host_id"] = None
+        # 3.6.10: a hint for the Owner, never for others (it says which host runs the gateway):
+        # the host picked as the gateway host for certificate renewals is a crown jewel
+        if gw_host and r["id"] == gw_host and not j["crown_jewel"]:
+            j["crown_hint"] = "gateway"
         out.append(j)
     return out
 
@@ -7371,6 +7555,8 @@ class HostPatch(BaseModel):
     alerts_muted: Optional[bool] = None   # opreşte alertele de host-offline pentru acest host
     pin_hostkey: Optional[str] = None     # vezi HostIn: doar cheia văzută de testul de conexiune
     pending_key_id: Optional[str] = None  # vezi HostIn: cheia generată în formular devine credenţialul
+    # 3.6.10: mutarea unui host crown-jewel într-un folder/tag cu legături ⚑ cere confirmare
+    confirm_crown_jewel: bool = False
     stepup_grant: str = ""
     stepup_password: str = ""
     stepup_totp: str = ""       # 2FA: cod TOTP/recovery (conturi cu TOTP fără passkey)
@@ -7395,6 +7581,22 @@ async def update_host(host_id: int, host: HostPatch, request: Request,
                    or ("tags" in given and _norm_tags(given["tags"] or "") != (row["tags"] or "")))
     if scope_moved:
         authz.require_global(grants, "hosts.create")
+    crown_moved = []
+    if scope_moved and (row["crown_jewel"] or 0) and not (row["ephemeral"] or 0):
+        # 3.6.10 (§A.11.2): mutat într-un folder/tag peste care cineva (ne-Owner) are un rol ⚑,
+        # hostul crown-jewel îi dă acelui cont un shell pe instanţă. Aceeaşi confirmare ca la o
+        # legătură nouă; doar legăturile/mapările care NU-l acopereau deja contează.
+        old_ref = authz.HostRef(host_id, row["folder"] or "", authz._tags(row["tags"]))
+        new_ref = authz.HostRef(
+            host_id,
+            (given["folder"] or "").strip() if "folder" in given else (row["folder"] or ""),
+            authz._tags(_norm_tags(given["tags"] or "")) if "tags" in given else old_ref.tags)
+        crown_moved = await authz.crown_exposure(new_ref, before=old_ref)
+        if crown_moved and not host.confirm_crown_jewel:
+            raise ApiError(409, "authz.crownJewelMove",
+                           "moving this crown-jewel host gives a shell on it to %d more role "
+                           "binding(s) or SSO mapping(s); confirm to move it anyway"
+                           % len(crown_moved), vars={"host": row["name"] or "", "n": len(crown_moved)})
     # …iar o ţintă jump deschide TCP DIN hostul `via` (§A.11.4): orice atingere a ţintei (adresă,
     # port, tip, via — schimbată SAU doar retrimisă) cere `forward.manage` pe via-ul EFECTIV, ca la
     # creare şi la /api/hosts/test. Altfel `host.edit` pe jump ar re-ţinti pivotul oriunde.
@@ -7564,6 +7766,14 @@ async def update_host(host_id: int, host: HostPatch, request: Request,
             (row["name"] or "")[:80], given["name"].strip()[:80]))
     if scope_moved or "via_host_id" in given or "connection_type" in given:
         authz.bump_epoch()          # cine vede hostul s-a putut schimba: socket-urile re-verifică
+    if crown_moved:
+        what = "crown-jewel host %s moved (folder/tags) — CONFIRMED: now also reachable with a " \
+               "shell through %s" % (row["name"], "; ".join(
+                   "%s %s (%s @ %s)" % (e["kind"], e["who"], e["role"],
+                                        _scope_label(e["scope_kind"], e["scope_value"]))
+                   for e in crown_moved[:authz.CROWN_LIST_MAX]))
+        audit.detail(request, what)
+        log.warning("%s (by %s)", what, user["email"])
 
     # O conexiune vie ține parametrii VECHI: fără demontare, editarea pare fără efect până
     # la următoarea deconectare accidentală.
@@ -7613,6 +7823,55 @@ async def set_require_2fa(host_id: int, body: Toggle2fa, user=Depends(authz.perm
         if not await _user_has_stepup_factor(user):
             return {"ok": True, "warning": "stepup.needsFactor"}
     return {"ok": True}
+
+
+class CrownJewelIn(BaseModel):
+    enabled: bool
+    current_password: str = ""     # doar la SCOATEREA marcajului (reduce o protecţie)
+    totp_code: str = ""
+    email_code: str = ""
+    stepup_grant: str = ""
+
+
+@router.post("/api/hosts/{host_id}/crown-jewel")
+async def set_crown_jewel(host_id: int, body: CrownJewelIn, request: Request,
+                          user=Depends(authz.perm('host.admin', host='host_id'))):
+    """3.6.10 (§A.11.2): mark a host as a crown jewel — it runs the gateway or holds its backups,
+    so a shell there IS Owner. Owner-only both ways (the route's `host.admin` + Owner @ all in the
+    handler). Marking tightens (no re-auth); clearing loosens, so it takes the password (or SSO /
+    passkey re-auth) and the second factor, like any access change. Audited and alerted. The
+    answer lists the non-Owner role bindings and SSO mappings that already give a shell there —
+    the flag guards FUTURE grants; existing ones are for the Owner to review."""
+    grants = authz.grants_of(request)
+    if not grants.is_owner():
+        raise ApiError(403, "authz.ownerOnly", "only an Owner can mark or unmark a crown-jewel host")
+    row = await db.fetchone("SELECT id, name, COALESCE(crown_jewel, 0) AS cj,"
+                            " COALESCE(ephemeral, 0) AS eph FROM hosts WHERE id=?", host_id)
+    if not row:
+        raise ApiError(404, "host.missing", "no such host")
+    if row["eph"]:
+        raise ApiError(400, "host.crownEphemeral", "a connect-once target cannot be a crown jewel")
+    want = bool(body.enabled)
+    if bool(row["cj"]) == want:
+        return {"ok": True, "crown_jewel": want, "changed": False,
+                "exposure": await authz.crown_exposure(await authz.host_ref(host_id)) if want else []}
+    if not want:
+        await _reauth_for_access_change(user, request, body, "remove the crown-jewel mark")
+    async with authz._lock:
+        authz._cache.pop(user["id"], None)      # re-auth was a suspension point: re-check NOW
+        if not (await authz.grants_for_user(user["id"])).is_owner():
+            raise ApiError(403, "authz.ownerOnly", "only an Owner can mark or unmark a crown-jewel host")
+        await db.execute("UPDATE hosts SET crown_jewel=? WHERE id=?", 1 if want else 0, host_id)
+    exposure = await authz.crown_exposure(await authz.host_ref(host_id)) if want else []
+    what = "host %s %s a crown jewel" % (row["name"], "marked as" if want else "is no longer")
+    audit.detail(request, what + (" (%d non-Owner shell grant(s) already cover it)" % len(exposure)
+                                  if exposure else ""))
+    log.warning("%s (by %s)", what, user["email"])
+    email_alerts.notify_security_change(what, security.client_ip(request), user["email"],
+                                        fleet=True, what_key="crown_jewel_changed",
+                                        what_params={"host": row["name"] or "",
+                                                     "state": "on" if want else "off"})
+    return {"ok": True, "crown_jewel": want, "changed": True, "exposure": exposure}
 
 
 @router.post("/api/hosts/{host_id}/provision")

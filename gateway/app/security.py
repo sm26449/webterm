@@ -375,8 +375,14 @@ async def sso_session_seconds_left(token: Optional[str], user) -> Optional[float
     return max(0.0, end - time.time())
 
 
+LOGIN_METHODS = ("password", "password_2fa", "passkey", "sso")
+
+
 async def create_web_session(user_id: int, user_agent: str = "",
-                             device_new: bool = False) -> str:
+                             device_new: bool = False, method: str = "") -> str:
+    """A new web session (cookie). `method` = how the person just signed in (one of
+    LOGIN_METHODS): stamped on the account as its last sign-in (3.6.10, Settings → Users &
+    roles). Empty = not a sign-in (tests, internal sessions): nothing is stamped."""
     token = new_token()
     now = time.time()
     expires = now + WEB_SESSION_TTL
@@ -389,6 +395,9 @@ async def create_web_session(user_id: int, user_agent: str = "",
         " device_new) VALUES(?,?,?,?,?,?,?)",
         sha256_hex(token), user_id, now, expires, user_agent[:200], now,
         1 if device_new else 0)
+    if method in LOGIN_METHODS:
+        await db.execute("UPDATE users SET last_login=?, last_login_method=? WHERE id=?",
+                         now, method, user_id)
     return token
 
 

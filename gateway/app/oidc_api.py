@@ -182,7 +182,7 @@ async def callback(request: Request, code: str = "", state: str = ""):
                            ip=ip, via="login", readable=info.get("groups_readable", True))
     new_device = await security.note_new_login(user, ip, request.headers.get("user-agent", ""))
     token = await security.create_web_session(
-        user["id"], request.headers.get("user-agent", ""), new_device)
+        user["id"], request.headers.get("user-agent", ""), new_device, method="sso")
     resp = RedirectResponse("/", status_code=303)
     security.set_session_cookie(resp, token)
     _clear_state_cookie(resp)   # state consumat — nu-l mai lăsăm în browser

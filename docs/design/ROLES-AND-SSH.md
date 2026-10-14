@@ -1518,7 +1518,8 @@ middleware plus ASGI WS middleware in `main.py`) and the SPA/asset catch-all. Li
 | `/api/roles` | POST | `roles.manage` | G | create a custom role (3.6.2): perms ⊆ yours over the whole instance; reauth + second gate |
 | `/api/roles/{rid}` | PATCH | `roles.manage` | G | edit (3.6.2): old ∪ new perms ⊆ yours; a role in use also needs `users.manage` + the target rule for every bound account; built-ins 403 |
 | `/api/roles/{rid}/delete` | POST | `roles.manage` | G | delete (3.6.2): refused (409) while bound, mapped or used by a token; reauth body |
-| *new* `/api/authz/explain` | GET | `users.manage` (or self) | G | not built yet |
+| `/api/users/{uid}/bindings/{bid}/expiry` | POST | `users.manage` | G | change when a binding ends (3.6.10): longer/permanent = grant rules, sooner = removal rules; the last permanent Owner is never made time-bound; SSO bindings refused; reauth + second gate |
+| `/api/authz/explain` | GET | — | S | `?user=&host=` (3.6.10): self, or another account with `users.manage` (handler, 403 before any lookup); the host must be visible to the caller (404 otherwise, §A.11.9) |
 | `/api/settings/oidc-roles` | GET | `users.manage` | G | SSO group → role mappings (3.6.2) |
 | `/api/settings/oidc-roles` | POST | `users.manage` | G | add a mapping: same grant rules as a binding (Owner only for Owner); reauth + second gate (3.6.2) |
 | `/api/settings/oidc-roles/{mid}/delete` | POST | `users.manage` | G | remove a mapping; derived SSO bindings removed at once (3.6.2) |
@@ -1615,6 +1616,7 @@ middleware plus ASGI WS middleware in `main.py`) and the SPA/asset catch-all. Li
 | `/api/hosts/{host_id}` (6194) | DELETE | `host.admin` | H(host_id) | su | |
 | `/api/hosts/{host_id}/enroll` (2405) | POST | `host.admin` | H(host_id) | su | |
 | `/api/hosts/{host_id}/require-2fa` (5948) | POST | `host.admin` | H(host_id) | su | turning 2FA off is a downgrade → security alert |
+| `/api/hosts/{host_id}/crown-jewel` | POST | `host.admin` | H(host_id) | | Owner @ all only (handler); clearing the mark = reauth + second gate; audited + alerted (3.6.10, §A.11.2) |
 | `/api/hosts/{host_id}/provision` (5969) | POST | `host.admin` | H(host_id) | su | ⚑ |
 | `/api/hosts/{host_id}/forget-credentials` (6047) | POST | `host.admin` | H(host_id) | su | |
 | `/api/hosts/{host_id}/update` (5681) | POST | `host.admin` | H(host_id) | su | agent update |

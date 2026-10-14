@@ -257,7 +257,7 @@ async def login_verify(body: CredentialBody, request: Request, response: Respons
         new_device = await security.note_new_login(
             user, ip, request.headers.get("user-agent", ""))
     token = await security.create_web_session(
-        row["user_id"], request.headers.get("user-agent", ""), new_device)
+        row["user_id"], request.headers.get("user-agent", ""), new_device, method="passkey")
     security.set_session_cookie(response, token)
     return {"ok": True}
 
