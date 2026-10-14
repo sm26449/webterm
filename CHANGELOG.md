@@ -9,6 +9,49 @@ back.
 
 ## [Unreleased]
 
+SCIM provisioning: the identity provider pushes account creation, deactivation, deletion and group
+membership to WebTerm at once. No agent change (agent stays 58).
+
+### Added
+- **SCIM 2.0 provisioning (`/scim/v2`).** Why: with SSO alone WebTerm learned about a person only
+  at their next sign-in — someone deactivated in Authentik kept their WebTerm sessions, open
+  terminals and automation tokens until they expired, and a group change waited for the next SSO
+  sign-in. The IdP now pushes users and groups (the RFC 7643/7644 subset Authentik's SCIM provider
+  uses: Users and Groups with GET/POST/PUT/PATCH/DELETE, `filter=<attr> eq "<value>"`, pagination,
+  ServiceProviderConfig, ResourceTypes, Schemas, SCIM errors). A new user becomes an SSO-only
+  account (no password), linked to its OIDC identity at the first sign-in by `externalId = sub`
+  (Authentik's default), otherwise by the usual verified-email adoption; an existing SSO-only
+  account with the same identity is adopted, not duplicated. Group membership re-runs the SSO
+  group → role mapping **immediately**, with the sign-in rules. Set it up in Settings → Users &
+  roles → SSO groups → **SCIM provisioning** (Owner: create the token, shown once) and in Authentik
+  — `provision.sh` with `WEBTERM_SCIM_TOKEN_FILE` creates the SCIM provider, filtered to the WebTerm
+  groups and their members, as a backchannel of the WebTerm application. docs/SSO.md has the
+  step-by-step setup, what syncs and what never does, and troubleshooting.
+- **Disabled accounts.** Why: deprovisioning must cut access without destroying the audit trail.
+  SCIM `active: false` or DELETE disables the account: its web sessions are deleted, open terminals
+  and forwards close at once, its automation tokens, live shares and replay links are revoked, and
+  it has no permission left, while its bindings, history and passkeys stay. It cannot sign in by
+  password, passkey or SSO (`auth.accountDisabled`, `sso_error=disabled`). Accounts shows
+  **Disabled** and **SCIM** badges; an Owner can **Re-enable** (password + second factor), the IdP
+  can reactivate a SCIM account, and `python3 -m app.admin enable <email>` is the break-glass path.
+  Everything is audited (`via = scim`) and alerted to the `security.view` holders.
+
+### Security
+- The SCIM token is a credential of its own: not an automation token, not a session (cookies are
+  ignored on `/scim/v2`), created, rotated and revoked by an **Owner** only with re-authentication,
+  stored as a SHA-256 hash, compared in constant time, rate-limited per IP (10 failures → 15 min
+  lockout), capped at 1200 requests a minute and 1 MiB bodies, and pausable. The router guard
+  accepts the SCIM principal only under `/scim/v2/`, so it can never reach another route.
+- Strict in what it grants: SCIM never touches an account with a **local password** (break-glass
+  accounts are invisible to it; a create with the same identity answers 409), never disables or
+  deletes the **last permanent Owner** (403, critical alert; a disabled Owner no longer counts as
+  an Owner), and a push never **adds** Owner or a role with Owner-only permissions (added only at an
+  interactive SSO sign-in; removals apply at once). The 3.6.2 rule stays: a local password means
+  no roles from groups.
+- Gaps, documented in docs/SSO.md: no Bulk, ETag or sort; only `eq` filters; SCIM membership is
+  direct (nested groups are not expanded, so map the groups people are directly in); SCIM needs
+  OIDC configured.
+
 ## [3.6.10] — 2026-10-14 · agent (58)
 
 Roles, part 2: last sign-in per account, "Explain access", time-bound roles, crown-jewel hosts, automation tokens with a role and a scope. No agent change (agent stays 58).

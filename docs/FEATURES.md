@@ -352,6 +352,11 @@ Press `?` for the cheatsheet.
 - **Watching (read-only)** terminals for Viewers, and for Operators on someone else's session;
   input is dropped server-side, and a demotion takes effect on the open terminal immediately
 - **No access yet** state for new accounts and new SSO users, telling them to ask an administrator
+- **SCIM provisioning** (3.6.11): the identity provider (Authentik's SCIM provider) pushes new
+  accounts, deactivations, deletions and group membership at once — a deactivated person's
+  sessions, open terminals and tokens end immediately, and group changes re-sync roles without
+  waiting for a sign-in. Owner-managed token; break-glass accounts and the last Owner are never
+  touched, and a push never grants Owner. [docs/SSO.md](SSO.md#scim-provisioning-3611)
 - Automation tokens are capped by what their creator can do now; the last Owner cannot be removed;
   `python3 -m app.admin promote` is the break-glass path
 - Upgrading changes nothing: every existing account becomes Owner over all hosts

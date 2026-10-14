@@ -140,8 +140,10 @@ once: open terminals go read-only or close; the next SSO sign-in does not add th
 the group is gone), or run `python3 -m app.admin logout-all <email>` on the server to end their
 sessions.
 Automation tokens an SSO user created are capped by that user's roles as they stand in WebTerm,
-which change only at an SSO sign-in — revoke the tokens too when it matters. SCIM provisioning
-(the IdP pushing removals to WebTerm at once) is planned, not in this release.
+which change only at an SSO sign-in — revoke the tokens too when it matters. With **SCIM
+provisioning** (3.6.11, [below](#scim-provisioning-3611)) the IdP pushes these changes at once:
+deactivating the person in Authentik disables the WebTerm account, ends its sessions and terminals
+and revokes its tokens, and a group change re-syncs its roles immediately.
 
 `python3 -m app.admin sso-only <email>` does from the server what *remove local password* does in
 Settings: the account loses its local password, passkeys, 2FA, recovery codes and sessions, and
@@ -149,6 +151,152 @@ signs in with SSO only from then on — so its groups start giving it roles. It 
 account that never signed in with SSO, and for the last Owner that still has a local password (the
 break-glass account) unless you pass `--force`. Only a **permanent** Owner with a local password
 counts as another break-glass account; a time-bound Owner does not.
+
+## SCIM provisioning (3.6.11)
+
+With SSO alone, WebTerm learns about a person only when they sign in: a deactivated or deleted
+IdP user keeps their WebTerm sessions, open terminals and automation tokens until those expire,
+and a group change waits for the next SSO sign-in. **SCIM** turns that around: the IdP *pushes*
+user creation, deactivation, deletion and group membership to WebTerm the moment they happen.
+WebTerm implements the part of SCIM 2.0 (RFC 7643/7644) that IdP provisioning clients use —
+Authentik's SCIM provider is the reference — at `<WEBTERM_PUBLIC_URL>/scim/v2`.
+
+SCIM needs SSO (OIDC) configured: an account SCIM creates can only ever sign in through SSO, so
+without OIDC WebTerm refuses SCIM requests (403).
+
+### What syncs, and what never does
+
+| The IdP does | WebTerm does |
+|---|---|
+| creates a user | creates an **SSO-only** account (no local password; no role until a mapped group gives one). An existing SSO-only account with the same email, or whose SSO `sub` equals the IdP's `externalId`, is **adopted** instead of duplicated. |
+| changes email / username / name | updates the account (an email another account already uses → refused, 409) |
+| deactivates a user (`active: false`) | **disables** the account at once: web sessions deleted, open terminals and forwards closed, automation tokens **revoked**, live shares and replay links revoked, no permission left. Nothing is deleted: audit history, role bindings and passkeys stay for a re-enable. |
+| reactivates a user (`active: true`) | re-enables a SCIM-managed account; it gets back the roles it had |
+| deletes a user | disables the account **and** unlinks it from SCIM (it stays, disabled, for its history). If the IdP provisions the same person again, the account is adopted and re-enabled. |
+| adds / removes group members, renames or deletes a group | re-runs the [SSO group → role mapping](ROLES.md#sso-group-mapping) for those accounts **immediately**, with the rules of an SSO sign-in |
+
+A SCIM account signs in with SSO. At its first SSO sign-in it is linked to the OIDC identity by
+`externalId == sub` — Authentik's SCIM `externalId` and its OIDC `sub` (`sub_mode =
+hashed_user_id`, which provision sets) are the same value — and otherwise by the usual email
+adoption, which requires `email_verified`.
+
+What SCIM **never** does — these are refused, audited and shown as the *last error* in WebTerm:
+
+- **touch an account with a local password** (the break-glass Owner, or any local account): such
+  accounts are invisible to SCIM; creating a user with the same email or identity answers **409**.
+  The 3.6.2 rule still holds — an account with a local password never receives roles from groups.
+- **disable or delete the last permanent Owner** (403, plus a critical alert). A disabled Owner no
+  longer counts as an Owner anywhere.
+- **grant Owner**: a group mapped to Owner (or to a custom role with Owner-only permissions) is
+  kept if the person already has it but never *added* by a push; it is added at the person's next
+  interactive SSO sign-in, as before. Removing someone from that group through SCIM removes it at
+  once (removing access is always allowed; the last Owner is kept, as for a sign-in).
+- reach any other part of WebTerm: the SCIM token is not an automation token and not a session;
+  settings, roles, mappings, hosts and every `/api/` route refuse it.
+
+### Set it up with Authentik
+
+**1. Create the SCIM token in WebTerm.** As an **Owner**: Settings → Users & roles → **SSO groups**
+→ *SCIM provisioning* → **Create token** (your password, and your second factor if you have one).
+The token (`wtscim_…`) is shown **once**; WebTerm stores only its SHA-256 hash. The panel also
+shows the URL to use, the last request the IdP made, and the last error.
+
+**2a. Let provision do the Authentik side** (recommended). Save the token in a file only you can
+read and point provision at it — never put it on the command line (argv shows up in `ps` and in
+the shell history):
+
+```bash
+install -m 600 /dev/null /root/webterm-scim-token && nano /root/webterm-scim-token   # paste the token
+cd deploy/authentik
+WEBTERM_SCIM_TOKEN_FILE=/root/webterm-scim-token ./provision.sh     # or put it in .env
+```
+
+It creates (or updates) the SCIM provider **`wt-scim`** pointing at
+`https://<WEBTERM_DOMAIN>/scim/v2` (`WEBTERM_SCIM_URL` overrides it), with two filters so that only
+**members of the five WebTerm groups** and only the **`wt-*` groups** are pushed (otherwise
+Authentik would push *every* user it knows), and adds it as a **backchannel provider** of the
+WebTerm application (other backchannel providers are kept). Re-running it is safe; after a token
+rotation, run it again with the new token. With `WT_GROUP_PREFIX=wt-prod` the provider is
+`wt-prod-scim` and only `wt-prod-*` groups are pushed.
+
+**2b. Or by hand in Authentik:**
+
+1. *Customization → Property Mappings → Create → SCIM Provider Mapping*, name
+   `WebTerm SCIM: users`, expression (list your WebTerm groups):
+   ```python
+   for name in ("wt-access", "wt-admins", "wt-readonly", "wt-db", "wt-network"):
+       if ak_is_group_member(request.user, name=name):
+           return {}
+   raise SkipObject
+   ```
+   and a second one, `WebTerm SCIM: groups`:
+   ```python
+   if not group.name.startswith("wt-"):
+       raise SkipObject
+   return {}
+   ```
+2. *Applications → Providers → Create → SCIM Provider*: **URL** `https://<your-webterm>/scim/v2`,
+   **Token** the one from step 1, *Verify certificates* on, *Exclude service accounts* on.
+   User property mappings: `authentik default SCIM Mapping: User` + `WebTerm SCIM: users`; group
+   property mappings: `authentik default SCIM Mapping: Group` + `WebTerm SCIM: groups`.
+3. *Applications → WebTerm → Edit → Backchannel Providers*: add the SCIM provider.
+
+**3. Check.** Authentik runs a full sync when the provider is saved, then periodically and on every
+change (*Applications → Providers → the SCIM provider* shows the sync status). In WebTerm the SCIM
+panel shows the last request; Settings → Users & roles → Accounts marks the accounts it manages
+with **SCIM**.
+
+**Group names must match the `groups` claim exactly.** The group → role mapping compares names
+byte for byte, so the name SCIM pushes (`displayName`, in Authentik the group's name) must be the
+name the OIDC `groups` claim carries — with Authentik both are the group's name, so nothing extra
+is needed. SCIM sends **direct** membership: a person who is only in a *child* group is not a
+member of the parent as far as SCIM is concerned, while a `groups` claim built from `all_groups()`
+includes the parents. Map the groups people are directly in (provision's groups are flat), or a
+parent's role may come and go between a sign-in and the next push.
+
+SCIM manages only the groups it pushes: for each account, WebTerm keeps the groups recorded at
+its last SSO sign-in that SCIM does not push, and takes the pushed ones from SCIM. Filtering
+groups out of SCIM therefore never strips roles; it only leaves those groups to the next SSO
+sign-in.
+
+### Re-enabling a disabled account
+
+- From the IdP: reactivate the user (SCIM-managed accounts only).
+- In WebTerm: an **Owner** opens the account (Settings → Users & roles → Accounts, marked
+  **Disabled**) → **Re-enable** (password + second factor). If the IdP still has the person
+  inactive, its next sync disables the account again — fix it there too.
+- From the server, break-glass: `python3 -m app.admin enable <email>`.
+
+Every disable and re-enable is in the audit log (`via = scim` for the IdP's) and in the in-app
+alert history of everyone with `security.view`.
+
+### The SCIM token
+
+Owner-only: create, **rotate** (the old token stops working at once) and **revoke** in the SCIM
+panel; each is audited and alerted. **Pause** stops provisioning without revoking the token
+(resuming asks for your password again). Wrong tokens are rate-limited per IP (10 failures in
+15 minutes lock that IP out for 15 minutes), authenticated traffic is capped at 1200 requests a
+minute, bodies at 1 MiB. Cookies are ignored on `/scim/v2` — a browser session can never act
+through SCIM.
+
+### SCIM troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| Authentik: `401` | wrong or rotated token — paste the current one into the provider (or re-run provision with it) |
+| Authentik: `403 … turned off` | SCIM is paused in WebTerm — *Resume* in the SCIM panel |
+| Authentik: `403 … SSO (OIDC) is not configured` | set the `WEBTERM_OIDC_*` variables first |
+| Authentik: `409 … local password` | a local (break-glass) account has that email: SCIM never manages it. Use another email in the IdP, or remove that account's local password (it becomes SSO-only and can then be adopted) |
+| Authentik: `409 … already provisioned` | Authentik lost its link; it searches with `filter=userName eq "…"` and re-links by itself |
+| Authentik: `403 … last permanent Owner` | make another account a permanent Owner first |
+| `429` | too many failed authentications from that IP (wait 15 min) or too many requests |
+| a user is not created | not in a WebTerm group (provision's filter), a service account, or no valid email in the IdP |
+| roles do not appear | the group name differs from the mapping (exact match), the group is not pushed (filter), the account has a local password, or the role is Owner (granted at the next SSO sign-in only) |
+| where to look | the SCIM panel (last request / last error), the audit log (`via = scim`), gateway logs (`SCIM:`), Authentik's provider sync status |
+
+**Not supported (by design or not yet):** SCIM Bulk, ETags, sorting, filters other than
+`<attribute> eq "<value>"` (on `userName`, `externalId`, `emails`, `id`; `displayName` for groups),
+password sync (SCIM accounts have no password), SCIM without OIDC, and nested-group expansion.
 
 ## Topology: one IdP, many WebTerm instances
 
@@ -186,6 +334,9 @@ Set these in `.env` (all of them pass through `docker-compose`):
 | `WEBTERM_OIDC_ROLE_MAP` | Optional (3.6.5): group → role mappings applied at startup — [Groups out of the box](#groups-out-of-the-box-365) |
 | `WEBTERM_OIDC_SSO_ONLY` | Optional (3.6.5): `1` = SSO-only accounts sign in only through SSO — [Quick revocation](#quick-revocation) |
 | `WEBTERM_OIDC_SESSION_MAX_HOURS` | Optional (3.6.5): absolute session age for SSO accounts — [Quick revocation](#quick-revocation) |
+
+SCIM provisioning (3.6.11) has no environment variable: an Owner turns it on in Settings —
+[SCIM provisioning](#scim-provisioning-3611).
 
 SSO turns on only when issuer + client_id + client_secret are all set. The redirect URI is
 derived from `WEBTERM_PUBLIC_URL` — it is never taken from a request (anti open-redirect).

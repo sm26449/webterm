@@ -231,6 +231,17 @@ A new SSO user gets the roles its IdP groups are mapped to ([SSO group
 mapping](#sso-group-mapping)); with no mapped group it has no access until an Owner or Admin adds
 a binding. Accounts that existed before the 3.6 upgrade (including SSO accounts) became Owners.
 
+## Disabled accounts
+
+An account the identity provider deactivates or deletes through [SCIM](SSO.md#scim-provisioning-3611)
+(3.6.11) is **disabled**, not deleted: it keeps its bindings, audit history and passkeys, but has
+**no permission at all** and cannot sign in (password, passkey or SSO). Disabling it ends its web
+sessions, closes its open terminals and forwards, **revokes its automation tokens** and its live
+shares and replay links. Accounts shows it as **Disabled**; an **Owner** can **Re-enable** it
+(password + second factor) and it gets back the roles it had — or the IdP reactivates it. The
+**last permanent Owner** can never be disabled, and a disabled Owner does not count as one.
+Accounts with a local password are never touched by SCIM.
+
 ## Custom roles
 
 Settings → Users & roles → **Roles** (editing needs **Custom roles**, `roles.manage`; with only
@@ -294,6 +305,12 @@ Settings → Users & roles → **SSO groups** (shown only when SSO is enabled; n
 
 `*` means *every authenticated SSO user*. Authentik sends the `groups` claim through the default
 `profile` scope mapping.
+
+**Pushed by the IdP (SCIM, 3.6.11).** With [SCIM provisioning](SSO.md#scim-provisioning-3611) on,
+a membership change in the IdP re-runs this mapping for that account **at once**, with the same
+rules — except that a push never *adds* Owner (or a custom role with Owner-only permissions):
+that one is added at the person's next SSO sign-in, and removed by a push like any other.
+Deactivating or deleting the person in the IdP **disables** the account (see below).
 
 **Out of the box (3.6.5).** You do not have to build the mappings by hand: with
 `WEBTERM_OIDC_ROLE_MAP` in `.env` (printed by Authentik's `provision.py`) WebTerm creates them at
