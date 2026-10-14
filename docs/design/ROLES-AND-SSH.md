@@ -1492,8 +1492,9 @@ User guide: [docs/SSO.md → SCIM provisioning](../SSO.md#scim-provisioning-3611
 - **Accounts.** `scim_managed`, `scim_id` (ours, uuid; NULL after a SCIM DELETE),
   `scim_external_id` (unique), `scim_user_name`, `scim_display_name`. A create matches an existing
   row by `scim_external_id`, by `sso_subject == externalId`, and by email; more than one distinct
-  row → 409; a row with a local password (`ssomap.has_local_password`) → 409 (break-glass, never
-  managed); a row already linked → 409 (the IdP then finds it with `filter=userName eq`). New rows:
+  row → 400 `invalidValue`; a row with a local password (`ssomap.has_local_password`) → 403
+  (break-glass, never managed); a row already linked → 409 (the IdP then finds it with
+  `filter=userName eq`). New rows:
   random argon2 hash, `local_password=0`. The OIDC callback links an unlinked SCIM row whose
   `scim_external_id` equals `sub` before the email-adoption path (which still needs
   `email_verified`).
@@ -1550,6 +1551,31 @@ User guide: [docs/SSO.md → SCIM provisioning](../SSO.md#scim-provisioning-3611
   only: `authz.seed` resolves the creator of pre-`created_by_id` rows once from their email
   (`enroll_creator_backfilled`); an unresolved row (creator gone) keeps working until it expires or
   an Owner revokes it, and every boot logs it.
+- **Second re-review fixes (before release):** no permanent refusal is a 409 any more. Authentik
+  2026.8 (`providers/scim/clients/users.py`, `lib/sync/outgoing/tasks.py`) answers a 409 on a
+  create by searching `filter=userName eq`; when that finds nothing (`list_users` lists only
+  `scim_id IS NOT NULL` rows) it raises `ObjectExistsSyncException`, which is not caught per object
+  and aborts the rest of the sync page (100 users); a 409 on PUT/PATCH escapes the same way. A
+  400/403 is a `TransientSyncException` → per-object warning, the sync continues. So: identity
+  rules (`_guard_identity`, `_email_free`, `_ext_free`, two rows matching, email mismatch on
+  adoption) → 400 `invalidValue` / `mutability`; local password, Owner-level (take over, email
+  change) → 403; a group rename onto an existing name → 400. 409 stays only where the search
+  resolves it: "already provisioned", a duplicate group name on create (`filter=displayName eq`),
+  and the create race with an SSO sign-in (`IntegrityError`; the next sync adopts the row). The
+  `externalId` refusal detail says the whole request is refused, re-activation included (a person
+  re-created in the IdP stays disabled until an Owner deletes the old account — fail closed, not
+  loosened). A POST whose `externalId` matches a row's `sso_subject` but with another email,
+  with `active:false`, now adopts the row under its own email and `externalId`, disables it and
+  warns (as `_guard_identity_or_drop`) — after the local-password, already-provisioned and
+  Owner-level checks (the Owner-level check now runs before the email check) and the last-Owner
+  precheck. The dropped-identity audit row is throttled with the alert (once an hour per account:
+  WebTerm answers with the old identity, so Authentik re-sends the change at every full sync).
+  Automation tokens are revoked on disable / delete by `created_by_id` only (never by the
+  `created_by` text, which may name an address another account now uses). Live group enrollment
+  tokens without an existing creator account are flagged `creator_gone` in `GET
+  /api/enroll-groups` (a badge in Settings → Infrastructure & tokens) and by the System health
+  check `tokens.enroll_orphans` (warning, recommendation, jump to the list) — never revoked
+  automatically.
 - **Audit.** Every change the IdP makes (and every refused write) is an `audit_log` row with
   `actor = scim`, `via = scim`; no-op re-syncs (Authentik's periodic full sync) write nothing.
   The status panel reads `scim_last_request` (throttled, 30 s) and `scim_last_error`.
@@ -1894,7 +1920,7 @@ a SCIM and a `perm()` dependency is refused as ambiguous. What the token can do 
 | `/scim/v2/ResourceTypes` | GET | — | SCIM | discovery |
 | `/scim/v2/Schemas` | GET | — | SCIM | discovery |
 | `/scim/v2/Users` | GET | — | SCIM | SCIM-managed accounts only; `filter=<attr> eq "<v>"` + pagination |
-| `/scim/v2/Users` | POST | — | SCIM | create an SSO-only account, or adopt an SSO-only one with the same identity **and email** (critical alert); a local-password account or one with an Owner-level role given in WebTerm → 409 |
+| `/scim/v2/Users` | POST | — | SCIM | create an SSO-only account, or adopt an SSO-only one with the same identity **and email** (critical alert); a local-password account or one with an Owner-level role given in WebTerm → 403 (permanent refusals are never 409: Authentik would abort the sync page) |
 | `/scim/v2/Users/{scim_id}` | GET | — | SCIM | |
 | `/scim/v2/Users/{scim_id}` | PUT | — | SCIM | email / userName / displayName / externalId / `active` |
 | `/scim/v2/Users/{scim_id}` | PATCH | — | SCIM | idem, PatchOp |

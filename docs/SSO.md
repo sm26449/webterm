@@ -168,9 +168,9 @@ without OIDC WebTerm refuses SCIM requests (403).
 
 | The IdP does | WebTerm does |
 |---|---|
-| creates a user | creates an **SSO-only** account (no local password; no role until a mapped group gives one). An existing SSO-only account with the same email (and, if it is already linked to SSO, whose `sub` equals the IdP's `externalId`) is **adopted** instead of duplicated — a critical alert says so. An `externalId` that matches an account's `sub` but comes with another email is refused (409). A user the IdP sends as **inactive** (`active: false`) that matches no WebTerm account is **not created** (400 `invalidValue`, audited at most once an hour per email, no alert) — it is created when the IdP activates it. |
-| changes email / username / name | updates the account. The **email** only of accounts SCIM *created* — never of an account it adopted, nor of one holding an Owner-level role given in WebTerm (409 `mutability`); an email another account already uses → 409 |
-| deactivates a user (`active: false`) | **disables** the account at once: web sessions deleted, open terminals and forwards closed, automation tokens **revoked**, live shares and replay links revoked, no permission left. Nothing is deleted: audit history, role bindings and passkeys stay for a re-enable. A refused email / `externalId` change never blocks a deactivation: when the same request carries both (Authentik sends the whole user), the account is disabled, the identity change is ignored, audited and alerted (warning, once an hour per account). Without `active: false` the refused change stays a 409. |
+| creates a user | creates an **SSO-only** account (no local password; no role until a mapped group gives one). An existing SSO-only account with the same email (and, if it is already linked to SSO, whose `sub` equals the IdP's `externalId`) is **adopted** instead of duplicated — a critical alert says so. An `externalId` that matches an account's `sub` but comes with another email is refused (400 `invalidValue`) — unless the same request deactivates the person (`active: false`): then the account is adopted under its **own** email, disabled, and a warning goes out (once an hour per account). A user the IdP sends as **inactive** (`active: false`) that matches no WebTerm account is **not created** (400 `invalidValue`, audited at most once an hour per email, no alert) — it is created when the IdP activates it. |
+| changes email / username / name | updates the account. The **email** only of accounts SCIM *created* — never of an account it adopted, nor of one holding an Owner-level role given in WebTerm (400 `mutability`, 403 for the Owner-level one); an email another account already uses → 400 `invalidValue` |
+| deactivates a user (`active: false`) | **disables** the account at once: web sessions deleted, open terminals and forwards closed, automation tokens **revoked**, live shares and replay links revoked, no permission left. Nothing is deleted: audit history, role bindings and passkeys stay for a re-enable. A refused email / `externalId` change never blocks a deactivation: when the same request carries both (Authentik sends the whole user), the account is disabled, the identity change is ignored, audited and alerted (warning, once an hour per account). Without `active: false` the refused change stays refused (400). |
 | reactivates a user (`active: true`) | re-enables a SCIM-managed account that SCIM disabled; it gets back the roles it had. Not an account WebTerm itself disabled, nor one holding an Owner-level role given in WebTerm (403: an Owner re-enables those) |
 | deletes a user | disables the account **and** unlinks it from SCIM (it stays, disabled, for its history). If the IdP provisions the same person again, the account is adopted and re-enabled. |
 | adds / removes group members, renames or deletes a group | re-runs the [SSO group → role mapping](ROLES.md#sso-group-mapping) for those accounts **immediately**, with the rules of an SSO sign-in |
@@ -183,12 +183,12 @@ adoption, which requires `email_verified`.
 What SCIM **never** does — these are refused, audited and shown as the *last error* in WebTerm:
 
 - **touch an account with a local password** (the break-glass Owner, or any local account): such
-  accounts are invisible to SCIM; creating a user with the same email or identity answers **409**
+  accounts are invisible to SCIM; creating a user with the same email or identity answers **403**
   and raises a critical alert (at most once an hour per account).
   The 3.6.2 rule still holds — an account with a local password never receives roles from groups.
 - **take over, disable, delete or re-enable an account holding an Owner-level role given in
   WebTerm** — Owner, or a custom role with an Owner-only permission, granted by hand (not by an SSO
-  group): only an Owner can take an Owner out (§A.5). Adopting it answers 409, the rest 403; a
+  group): only an Owner can take an Owner out (§A.5). Every one of these answers 403; a
   critical alert goes out (at most once an hour per account and action — the IdP retries at every
   sync). Give Owner through an SSO group if the IdP should manage it.
 - **disable or delete the last permanent Owner** (403, plus a critical alert). A disabled Owner no
@@ -200,6 +200,31 @@ What SCIM **never** does — these are refused, audited and shown as the *last e
   once (removing access is always allowed; the last Owner is kept, as for a sign-in).
 - reach any other part of WebTerm: the SCIM token is not an automation token and not a session;
   settings, roles, mappings, hosts and every `/api/` route refuse it.
+
+**How refusals look in Authentik.** A refusal that stays true until someone changes something
+(a policy or identity rule above) is answered **400** (`invalidValue` / `mutability`) or **403**
+(the IdP may not touch that account) — never **409**. Authentik shows a 400/403 as a
+**per-object warning** in the provider's sync status and carries on with the next user. A 409
+means "it already exists, find it": Authentik then searches `filter=userName eq "…"`, and when
+the account is not a SCIM account (a break-glass or an Owner it may not manage) the search finds
+nothing and Authentik **aborts the rest of that sync page** (up to 100 users). WebTerm therefore
+answers 409 only where the search resolves it: a user that is already provisioned, a group name
+that already exists (on create), and a user an SSO sign-in created in the very same instant (the
+next sync adopts it).
+
+**Keep break-glass and Owner accounts out of the provider's scope.** The refusals are safe, but
+each sync repeats them (a warning in Authentik; in WebTerm an audit row and an alert, at most once
+an hour per account). Better not to push those people at all: create an Authentik group, e.g.
+`wt-scim-exclude`, put in it every IdP user whose email is a WebTerm break-glass (local-password)
+account and every person who holds an Owner-level role given **in WebTerm**, and make it the
+first test of the users filter (step 2b.1 below):
+
+```python
+if ak_is_group_member(user, name="wt-scim-exclude"):
+    raise SkipObject          # managed in WebTerm by an Owner, never by the IdP
+```
+
+Owners that should follow the IdP get Owner through an SSO group instead — those SCIM may manage.
 
 ### Set it up with Authentik
 
@@ -326,12 +351,15 @@ SCIM (audited).
 | Authentik: `401` | wrong or rotated token — paste the current one into the provider (or re-run provision with it) |
 | Authentik: `403 … turned off` | SCIM is paused in WebTerm — *Resume* in the SCIM panel |
 | Authentik: `403 … SSO (OIDC) is not configured` | set the `WEBTERM_OIDC_*` variables first |
-| Authentik: `409 … local password` | a local (break-glass) account has that email: SCIM never manages it. Use another email in the IdP, or remove that account's local password (it becomes SSO-only and can then be adopted) |
+| Authentik: per-object warning `403 … local password` | a local (break-glass) account has that email: SCIM never manages it. Keep that IdP user out of the provider's scope (`wt-scim-exclude`, above), use another email in the IdP, or remove that account's local password (it becomes SSO-only and can then be adopted) |
+| Authentik: per-object warning `403 … Owner-level role given in WebTerm` | the person holds Owner (or an Owner-only permission) granted by hand: only an Owner manages that account. Put the IdP user in `wt-scim-exclude`, or give the role through an SSO group instead |
 | Authentik: `409 … already provisioned` | Authentik lost its link; it searches with `filter=userName eq "…"` and re-links by itself |
 | Authentik: `403 … last permanent Owner` | make another account a permanent Owner first |
 | `429` | too many failed authentications from that IP (wait 15 min) or too many requests |
 | a user is not created | not in a WebTerm group (provision's filter), a service account, no valid email in the IdP, or inactive in the IdP (Authentik: `400 … inactive in the identity provider` — expected; it is created once activated) |
-| Authentik: `409 … email can only be changed in WebTerm` | the IdP renamed the email of an account SCIM adopted (or one that holds a role given by hand and never signed in with SSO): change it in WebTerm (Settings → Users & roles) or in the IdP back. A deactivation is never blocked by this |
+| Authentik: `400 … email can only be changed in WebTerm` | the IdP renamed the email of an account SCIM adopted (or one that holds a role given by hand and never signed in with SSO): change it in WebTerm (Settings → Users & roles) or in the IdP back. A deactivation is never blocked by this |
+| Authentik: `400 … externalId cannot change once set`, and the user stays disabled after being reactivated in the IdP | the person was deleted and re-created in the IdP (new `externalId`) while WebTerm still has the old account. The deactivation went through (the new `externalId` was ignored), but WebTerm never re-links an account to a different identity, so it refuses the whole request — re-activation included (fail closed). Delete the old account in WebTerm (Settings → Users & roles → Accounts) and let the next sync provision the new one, or re-enable it there as an Owner if it really is the same person |
+| Authentik: `400 … externalId and the email belong to different WebTerm accounts` | two WebTerm accounts claim that person (one by `sub`, one by email): fix or delete the wrong one in WebTerm |
 | roles do not appear | the group name differs from the mapping (exact match), the group is not pushed (filter), the account has a local password, or the role is Owner (granted at the next SSO sign-in only) |
 | where to look | the SCIM panel (last request / last error), the audit log (`via = scim`), gateway logs (`SCIM:`), Authentik's provider sync status |
 

@@ -125,6 +125,31 @@ membership to WebTerm at once; plus a KDE Plasma (Breeze) theme style. No agent 
     at each one — possible when provision's filter falls back to passing inactive users. Nothing
     is created now (400, audited at most once an hour); the account appears once the IdP
     activates the user.
+- **Second re-review of SCIM: a refusal no longer stops Authentik's sync, and a deactivation goes
+  through on the first push too.**
+  - *One refused user could stop the sync of up to 100 others.* Why: WebTerm answered permanent
+    refusals (a break-glass or Owner-level account, an email that does not match, an `externalId`
+    that cannot change) with 409. Authentik reads 409 as "already exists", searches for the user,
+    finds nothing (WebTerm does not list accounts it will not manage) and aborts the rest of that
+    sync page; on PUT/PATCH a 409 aborts it too. These are now 400 (`invalidValue` /
+    `mutability`) or 403 (an account the IdP may not touch), which Authentik shows as a warning on
+    that one user before moving on. 409 is kept only where Authentik's search resolves it.
+    docs/SSO.md: how to keep break-glass and Owner accounts out of the provider's scope.
+  - *A person deactivated in the IdP stayed enabled when their email had also been renamed there
+    and SCIM had never linked their account.* Why: the first push matched the account by its SSO
+    identity, saw another email and refused it all. With `active:false` the account is now taken
+    over under its own email, disabled and a warning goes out; the Owner, break-glass and
+    last-Owner checks still run first.
+  - *A refused identity change wrote an audit row at every full sync.* Now once an hour per
+    account, like its alert.
+  - *Deleting or disabling an account revoked automation tokens by email too* — including another
+    account's tokens whose creator text still showed that address. Now by creator id only.
+  - *Group enrollment tokens whose creator account is gone were only in the boot log.* The
+    enrollment token list marks them "creator gone", and System health warns about them (with a
+    link to the list). They are not revoked automatically.
+  - A person re-created in the IdP (new `externalId`) stays disabled in WebTerm until an Owner
+    deletes the old account — on purpose (fail closed); the error now says so, and docs/SSO.md
+    explains it.
 - The SCIM token is powerful — documented: its holder can create an account bound to their own IdP
   identity and put it in any pushed group, reaching every mapped role except Owner. Keep it in the
   IdP only and rotate it like an Admin password.
