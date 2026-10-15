@@ -279,7 +279,10 @@ closed (review of 3.6.12, `lib/broadcastGuard.ts`), when guardrail rules are act
   so such text might never match). A **blind** Enter (sent with no readable line — a command
   running, or right after a reload until the first live prompt) and everything before it leave the
   queue when a readable line appears. The quiet-window candidate is also checked at each output, not
-  only at the next Enter. Matching ignores whitespace (a soft-wrapped row is joined without a space
+  only at the next Enter. Typed text also counts as echoed when the text ending at the cursor (the
+  cursor row and the two before it) ends with the reference's last 40 characters next to the cursor
+  plus the typed text — anchored, so text already on the screen never counts — which does not depend
+  on the stale prompt row. Matching ignores whitespace (a soft-wrapped row is joined without a space
   now, and tmux / readline redraws at the margin can add or drop one; a run of only spaces is never
   confirmed on its own). Past 64 un-echoed sends, only runs of plain text are merged (a merged run
   is confirmed only whole and keeps its text, so the single-pane check appends it instead of
