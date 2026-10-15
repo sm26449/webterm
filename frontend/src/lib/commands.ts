@@ -127,6 +127,10 @@ export class CommandTracker {
     if (this.promptMarker === null) return null
     const row = this.promptRow
     if (row === null) return 'marker-gone'
+    // citirea conservatoare (B-ul original) e mereu judecată: dacă marcajul ei a dispărut (scrollback
+    // tăiat) cât poziţia de citire e încă vie, nu mai avem ce judeca conservator → necunoscut
+    const o = this.origMarker
+    if (o !== null && (o.isDisposed || typeof o.line !== 'number' || o.line < 0)) return 'orig-gone'
     const cur = this.absCursor().row
     if (row > cur) return `below-cursor ${row}>${cur}`
     // contiguitate măsurată în celule (nu lungimea textului: spaţii finale, caractere late)
@@ -163,17 +167,25 @@ export class CommandTracker {
       // pe acelaşi rând, cu cursorul la STÂNGA lui B: B e dincolo de conţinut — mutarea începutului
       // spre stânga doar ADAUGĂ text citit
       const leftOfB = cur.row === row && cur.col < this.promptCol
-      if (leftOfB || (cur.row > row && this.hasGap(row, cur.row) && !this.restoredText(row, this.promptCol, cur))) {
+      // începutul blocului de rânduri al liniei curente (rânduri care se continuă până la cursor)
+      let first = cur.row
+      while (first > row + 1 && this.rowContinues(first - 1)) first--
+      // testul de „linie restaurată": cu B la coloana 0 pe un rând de deasupra, rândurile promptului
+      // însuşi (un prompt pe două rânduri cu `%`/`>` urmat de text pe primul) nu sunt text tastat —
+      // testăm doar blocul cursorului; cu B în interiorul rândului, textul de după B contează
+      const restored = this.promptCol === 0
+        ? this.restoredText(first, 0, cur)
+        : this.restoredText(row, this.promptCol, cur)
+      if (leftOfB || (cur.row > row && this.hasGap(row, cur.row) && !restored)) {
         const m = this.term.registerMarker(0)
         if (m) {
           if (!leftOfB) {
             // B era pe ALT rând (despărţit de linia de acum printr-un rând care nu o continuă): citirea
-            // conservatoare porneşte de la începutul blocului de rânduri al liniei curente (coloana 0 —
-            // cu tot promptul, netăiat), nu din rândurile vechi: o comandă anterioară (`rm -rf …`
-            // confirmat) sau output-ul ei nu sunt textul care rulează acum şi ar cere dialoguri false
-            let first = cur.row
-            while (first > row + 1 && this.rowContinues(first - 1)) first--
-            const cm = this.term.registerMarker(first - cur.row)
+            // conservatoare porneşte la rândul de DUPĂ marcajul vechi, coloana 0 (netăiat, cu tot
+            // promptul): un buffer restaurat pe mai multe rânduri (`rm -rf …` pe primul, cu un prompt
+            // fără terminator) e judecat întreg, nu doar blocul cursorului. Poate doar ADĂUGA
+            // confirmări (o comandă/un output vechi citit în plus), niciodată nu scoate text.
+            const cm = this.term.registerMarker(row + 1 - cur.row)
             if (cm) {
               this.origMarker?.dispose()
               this.origMarker = cm

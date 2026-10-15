@@ -528,3 +528,95 @@ describe('CommandTracker: B vechi pe rândul comenzii anterioare (tmux)', () => 
     expect(tr.pendingVariants()).toContain('root@h:~# ls')
   })
 })
+
+// verificarea lui 1a3d058: citirea conservatoare după re-ancorarea pe gol, prompturi pe două rânduri,
+// marcajul original dispărut
+describe('CommandTracker: re-ancorarea pe gol (verificarea lui 1a3d058)', () => {
+  function offTerm(rows: string[], cursor: { row: number; col: number }) {
+    const buffer = {
+      type: 'normal', baseY: 0,
+      get cursorY() { return cursor.row }, get cursorX() { return cursor.col },
+      getLine: (r: number) => (rows[r] === undefined ? undefined : {
+        length: 80, isWrapped: false,
+        translateToString: (trim: boolean, from = 0, to?: number) => {
+          const s = rows[r].padEnd(80).slice(from, to)
+          return trim ? s.replace(/\s+$/, '') : s
+        },
+        getCell: (x: number) => ({ getChars: () => (rows[r][x] ?? '').trim(), getWidth: () => 1 }),
+      }),
+    }
+    const markers: { line: number; isDisposed: boolean; dispose(): void }[] = []
+    const term = { cols: 80, buffer: { active: buffer },
+      registerMarker: (off = 0) => {
+        const m = { line: cursor.row + off, isDisposed: false, dispose() { m.isDisposed = true; m.line = -1 } }
+        markers.push(m)
+        return m
+      } } as unknown as Terminal
+    return { term, markers }
+  }
+  const g: CommandGuard = { enabled: true, rules: [{ pattern: 'rm\\s+-rf\\s+/srv', action: 'block' }] }
+  const judge = (tr: CommandTracker) => judgeLocal({ atPrompt: true, echoed: true, pending: tr.pendingCommand(),
+    pendingAlts: tr.pendingVariants(), unechoed: [], lineLost: tr.promptLost }, g, true).kind
+
+  it('M1: buffer restaurat pe două rânduri, prompt fără terminator → regula prinde comanda de pe primul rând', () => {
+    const rows = ['root@h:~# echo X', '', '']
+    const cursor = { row: 0, col: 16 }
+    const { term } = offTerm(rows, cursor)
+    const tr = new CommandTracker(term)
+    tr.handle('B')                                   // B vechi, pe rândul comenzii anterioare
+    rows[1] = '➜  ~ rm -rf /srv'                // prompt fără terminator ($ # % > ❯) + rândul 1
+    rows[2] = 'echo done'; cursor.row = 2; cursor.col = 9
+    tr.notePromptPainted(true)                       // re-ancorat la cursor (gol, fără text restaurat)
+    // logica din 1a3d058: citirea conservatoare pornea de la blocul cursorului → doar „echo done"
+    expect(tr.pendingVariants().some((v) => v.includes('rm -rf /srv'))).toBe(true)
+    expect(judge(tr)).toBe('rule')
+  })
+
+  it('LOW-1: prompt pe două rânduri cu `%` şi `>` urmate de text pe primul rând → re-ancorat, nu „nu pot verifica"', () => {
+    const rows = ['', '']
+    const cursor = { row: 0, col: 0 }
+    const { term } = offTerm(rows, cursor)
+    const tr = new CommandTracker(term)
+    tr.handle('B')                                   // sub tmux: B la coloana 0, înaintea textului pictat
+    rows[0] = 'stefan@h % ~/src > main'
+    rows[1] = '❯ '; cursor.row = 1; cursor.col = 2
+    tr.notePromptPainted(true)
+    expect(tr.promptLost).toBe(false)
+    rows[1] = '❯ rm -rf /srv'; cursor.col = 13
+    expect(tr.promptLost).toBe(false)
+    expect(tr.pendingCommand()).toBe('rm -rf /srv')
+    expect(judge(tr)).toBe('rule')
+    // citirea conservatoare (de la rândul de după B, netăiată) rămâne printre variante
+    expect(tr.pendingVariants()).toContain('❯ rm -rf /srv')
+  })
+
+  it('LOW-1: cu B la coloana 0, textul restaurat în blocul cursorului tot opreşte re-ancorarea (fail-closed)', () => {
+    const rows = ['', '']
+    const cursor = { row: 0, col: 0 }
+    const { term } = offTerm(rows, cursor)
+    const tr = new CommandTracker(term)
+    tr.handle('B')
+    rows[0] = 'stefan@h ~/src'
+    rows[1] = '% rm -rf /srv'; cursor.row = 1; cursor.col = 13
+    tr.notePromptPainted(true)
+    expect(tr.promptLost).toBe(true)
+    expect(judge(tr)).not.toBe('ok')
+  })
+
+  it('LOW-2: marcajul citirii conservatoare dispărut, poziţia de citire vie → pierdut („nu pot verifica")', () => {
+    const rows = ['root@h:~# echo X', 'X', 'root@h:~# ']
+    const cursor = { row: 0, col: 16 }
+    const { term, markers } = offTerm(rows, cursor)
+    const tr = new CommandTracker(term)
+    tr.handle('B')
+    cursor.row = 2; cursor.col = 10
+    tr.notePromptPainted(true)
+    rows[2] = 'root@h:~# ls'; cursor.col = 12
+    expect(tr.promptLost).toBe(false)
+    const orig = markers.find((m) => !m.isDisposed && m.line === 1)
+    expect(orig).toBeDefined()
+    orig!.isDisposed = true                          // scrollback tăiat sub rândul conservator
+    expect(tr.promptLostReason()).toBe('orig-gone')
+    expect(judge(tr)).not.toBe('ok')
+  })
+})

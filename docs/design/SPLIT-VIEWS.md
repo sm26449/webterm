@@ -323,12 +323,16 @@ closed (review of 3.6.12, `lib/broadcastGuard.ts`), when guardrail rules are act
     row, separated from the current line by a row that doesn't continue it (under tmux `B` arrives
     before the painted text, on the previous command's row), with no prompt terminator followed by
     more text between it and the cursor (zsh push-line / `print -z` / fzf widgets and redrawn
-    typeahead restore text after the prompt — that is not skipped), or on the same row with the
+    typeahead restore text after the prompt — that is not skipped; with `B` at column 0 on a row
+    above, only the cursor's block of rows is tested, so a two-line prompt whose first line holds
+    `%` / `>` followed by text is not mistaken for restored text), or on the same row with the
     cursor left of `B` (moving the start left only adds text). When `B` was on another row, the
-    conservative reading starts at column 0 of the current line's first row (the whole prompt row,
-    uncut) instead of the stale rows — a previous command (`rm -rf …` already confirmed) or its
-    output is not what runs now and would only cause false dialogs. Otherwise a non-contiguous line
-    stays lost (fail closed).
+    conservative reading starts at column 0 of the row right after the stale mark (uncut, every row
+    down to the end of the logical line) — a multi-line restored buffer whose first row follows a
+    prompt without a terminator (`➜  ~ rm -rf /srv`) is judged whole; the stale row itself (a
+    previous command already confirmed) is not. If the conservative reading's mark disappears
+    (scrollback trimmed) while the reading position is still alive, the line is lost (fail
+    closed). Otherwise a non-contiguous line stays lost (fail closed).
   - **Text after the cursor runs as well**: `↑` recalls `rm -rf /srv/data`, then `Home` or `←` and
     `sudo ` — read only up to the cursor the guard saw `sudo `. The readings judged: up to the cursor,
     to the **end of the logical line** (the cursor row and the rows that continue it) from the reading
