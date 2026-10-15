@@ -207,6 +207,8 @@ try {
   // Le citeşte verificarea editorului Monaco (workerul trebuie să pornească sub CSP-ul real).
   const cspErrors = []
   page.on('console', (m) => {
+    // diagnoza guardrail-ului: de ce o linie tastată n-a fost confirmată (lib/echo.ts debug())
+    if (m.text().startsWith('[wt-echo]')) console.log('     [diag] ' + m.text().slice(0, 900))
     if (m.type() === 'error' && /Content Security Policy|Refused to (create|load|execute)/i.test(m.text())) cspErrors.push(m.text())
   })
   // Presetăm `wt_walkthrough_done`: altfel walkthrough-ul de primă rulare s-ar deschide singur

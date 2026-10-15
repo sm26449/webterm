@@ -778,7 +778,8 @@ export default function SessionView(props: {
       // rapoartele terminalului (mouse, focus, CPR, DA…) nu sunt taste: nu aşteaptă ecou (review 3.6.13, M2)
       if (reportOnly(data, report, pastingRef.current, cprRef.current > 0)) return
       const { seq, needBase } = echoRef.current.sent(typeof data === 'string' && plainText(data) ? data : null,
-        performance.now(), typeof data === 'string' && isBareEnter(data))
+        performance.now(), typeof data === 'string' && isBareEnter(data),
+        typeof data === 'string' ? data : `<${data.length} bytes>`)
       // referinţa liniei: după ce xterm a parsat tot ce sosise ÎNAINTE de trimitere (write gol, în ordine)
       if (needBase) termRef.current?.write('', () => echoRef.current.setBase(seq, lineKeyRef.current()))
       return
@@ -924,6 +925,8 @@ export default function SessionView(props: {
         // „Rulează" re-judecă linia ACUM (review 3.6.13, L4): între timp ecoul a sosit, iar o regulă
         // care atinge linia devenită vizibilă nu trebuie ocolită
         setCmdConfirm({ cmd: (lineOf(trackerRef.current?.pendingCommand() ?? null) ?? '').trim(), pattern: '', unknown: true, run, echo: true, localRecheck: () => verdict(true) })
+        // diagnoză (fără conţinutul tastelor): de ce linia n-a fost confirmată
+        console.warn('[wt-echo] ' + JSON.stringify({ now: Math.round(performance.now()), rtt: rttRef.current, ...echoRef.current.debug() }))
       }
       noticeQueued(queued)
     }

@@ -36,6 +36,8 @@ interface Entry {
       tastat după el: >64 de taste → intrare comprimată fără text → „Încă nu pot verifica" la o
       comandă tastată normal (e2e 3.6.13) */
   submit?: boolean
+  /** pentru diagnoză: o tastă ne-text, scurtată (secvenţe de control, nu text tastat) */
+  raw?: string
   /** >ECHO_PENDING_MAX trimiteri fără ecou, comprimate (host care nu ţine pasul) */
   lump?: boolean
   lumpAt?: number
@@ -86,11 +88,12 @@ export class EchoTracker {
   /** O tastă (sau un text) a plecat spre host. `text` = textul ei dacă e text simplu, altfel null.
       `needBase` = nu aştepta nimic înainte: apelantul ia instantaneul liniei DUPĂ ce xterm a parsat
       tot ce sosise deja (un write gol) şi cheamă setBase(seq, …). */
-  sent(text: string | null, now: number, submit = false): { seq: number; needBase: boolean } {
+  sent(text: string | null, now: number, submit = false, raw?: string): { seq: number; needBase: boolean } {
     const seq = ++this.inputSeq
     const needBase = this.pending.length === 0
     if (needBase) this.base = undefined
-    this.pending.push({ seq, at: now, text, blind: this.base === null, submit })
+    this.pending.push({ seq, at: now, text, blind: this.base === null, submit,
+      raw: text === null && raw ? JSON.stringify(raw.slice(0, 16)) : undefined })
     if (this.pending.length > ECHO_PENDING_MAX) {
       // host care nu ţine pasul: comprimăm într-o singură intrare, eliberată doar când hub-ul a
       // ajuns din urmă (vezi output) sau la replay — fail-closed între timp
@@ -236,6 +239,20 @@ export class EchoTracker {
     }
     if (upto) this.drop((e) => e.seq <= upto)
     this.base = this.pending.length ? keyNow : undefined
+  }
+
+  /** starea, pentru diagnoză (consolă la dialogul „încă nu pot verifica"; fără conţinutul tastelor —
+      doar lungimi şi tipuri, ca jurnalul să nu conţină ce s-a tastat) */
+  debug(): Record<string, unknown> {
+    return {
+      inputSeq: this.inputSeq, coarseSeq: this.coarseSeq, inFlight: this.inFlight,
+      base: this.base === undefined ? 'undef' : this.base === null ? 'null' : { len: this.base.line.length },
+      cand: this.cand ? { seq: this.cand.seq, at: this.cand.at, lines: this.cand.lines.length } : null,
+      lastOutAt: this.lastOutAt, lastSentAt: this.lastSentAt,
+      pending: this.pending.slice(0, 8).map((e) => ({ seq: e.seq, at: e.at,
+        t: e.text === null ? (e.raw ?? 'null') : e.text.length, b: !!e.blind, s: !!e.submit, l: !!e.lump })),
+      pendingN: this.pending.length,
+    }
   }
 
   /** mai aşteaptă vreo trimitere ecoul? */
