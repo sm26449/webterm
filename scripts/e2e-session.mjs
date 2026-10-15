@@ -607,7 +607,11 @@ try {
   await okCmd.hover()
   await okCmd.getByRole('button', { name: 'output', exact: true }).click()
   const clip = await clipboardUntil(page, (c) => c.includes('OSC_OK'))
-  check('clipboardul conține output-ul comenzii', clip.includes('OSC_OK'))
+  // la eşec: ce era în clipboard + toasturile (un `null` din outputOf = toast „cannot extract";
+  // un output gol = nicio scriere, deci clipboardul rămâne cu conţinutul anterior) + rândul din panou
+  check('clipboardul conține output-ul comenzii', clip.includes('OSC_OK'), clip.includes('OSC_OK') ? '' :
+    `clip=${JSON.stringify(clip).slice(0, 120)} · toasturi=${JSON.stringify((await page.locator('.wt-toast').allTextContents().catch(() => [])).join(' | ')).slice(0, 160)}`
+    + ` · rând=${JSON.stringify(((await okCmd.textContent().catch(() => '')) ?? '').slice(0, 80))}`)
   const clipClean = !/[$#]\s*$/m.test(clip) && !clip.includes('echo OSC_OK')
   // la eşec, tipărim CE a ajuns în clipboard: verificarea a picat de două ori în CI cu
   // cauze diferite (prompt repictat vs. ecou), iar fără conţinut diagnosticul e ghicit
@@ -993,9 +997,15 @@ try {
     cardText.includes('wt_edit.txt') && cardText.includes('Done') && (await card.locator('button[aria-label^="Copy path"]').count()) >= 1)
   await card.locator('button[aria-label="Minimize"]').click().catch(() => {})
   check('minimize re-pliază widgetul la pilulă', (await hidden(card)) && (await visible(pill)))
-  // curăţenie pentru secţiunile următoare: re-extinde şi aruncă rândul terminat
-  await pill.click()
-  await card.locator('button[aria-label^="Dismiss"]').first().click().catch(() => {})
+  // curăţenie pentru secţiunile următoare: aruncăm rândul terminat FĂRĂ a re-extinde widgetul.
+  // Înainte: pill.click() + Dismiss — dar extinderea e o PREFERINŢĂ persistată, deci widgetul rămânea
+  // extins pentru tot restul rulării; cardul creştea cu fiecare download şi, după câte rânduri „Done"
+  // mai lâncezeau (20 s), acoperea rândul folderului şi bara de selecţie a panoului de fişiere
+  // („folder download" + click de 30 s pe „Copy to host" — reprodus local la o re-rulare).
+  await page.evaluate(() => {
+    const s = window.__wtTransfers?.store
+    if (s?.snapshot) for (const j of s.snapshot().values()) if (j.name === 'wt_edit.txt' && j.state === 'done') s.remove(j.id)
+  })
 
   // ── Transfers phase 2: DOWNLOAD prin acelaşi motor (job ↓ în widget, progres, Done) ──
   // Download-ul unui fişier trece acum prin motorul de transfer, nu printr-un `<a download>` oarbă:
@@ -1076,7 +1086,9 @@ try {
     })
     if (arState !== 'done') await page.waitForTimeout(250)
   }
-  check('folder download: rând de arhivă în Transferuri care se termină (Done)', arState === 'done')
+  check('folder download: rând de arhivă în Transferuri care se termină (Done)', arState === 'done',
+    await page.evaluate(() => JSON.stringify([...(window.__wtTransfers?.store?.snapshot?.()?.values?.() ?? [])]
+      .map((j) => ({ kind: j.kind, dir: j.dir, dest: j.dest, state: j.state, err: j.error })))))
   check('folder download: arhiva .tgz chiar se descarcă', dls.includes('wt_seldir.tgz'))
   page.off('download', onDl)
 
@@ -1497,7 +1509,11 @@ try {
   // La punctul ăsta sunt ≥2 taburi (X1, X2 + sesiunile anterioare), deci „+ Split view" apare.
   // Confirmările App/Sidebar/SessionView NU mai sunt window.confirm (dialog propriu, role=alertdialog);
   // handlerul nativ rămâne doar pentru panourile încă neconvertite (ex. Toolbox → SSH keys, mai jos).
-  page.on('dialog', (d) => d.accept())
+  page.on('dialog', (d) => {
+    // un `beforeunload` (transfer activ / editor nesalvat) la un reload e un semnal: îl notăm
+    if (d.type() === 'beforeunload') console.log('  [diag] dialog beforeunload la navigare (acceptat)')
+    return d.accept()
+  })
   const confirmInApp = async () => {
     const dlg = page.locator('[role="alertdialog"]').last()
     await dlg.waitFor({ timeout: 5000 })

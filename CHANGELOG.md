@@ -27,8 +27,11 @@ back.
   previous attempt's, offline. That is the "pause / URL / sshkeys" failures seen on the 3.6.11 tag
   CI and locally (a leftover split view did the same to the split checks). The file list now
   carries `data-path` (the listed folder, the upload target) and the test waits for it; per-run
-  names and the host id make the retry honest; a `page.reload` aborted by an in-page navigation is
-  repeated once and logged instead of killing the run; a failed check prints what it saw. `scripts/ci-local.sh` serializes container gates with a lock: a second gate (another
+  names and the host id make the retry honest; the test no longer leaves the transfers widget
+  expanded (a persisted preference: the growing card covered the file panel's folder row and
+  selection bar, failing "folder download" / "Copy to host"); a `page.reload` aborted by an
+  in-page navigation is repeated once and logged instead of killing the run; a failed check
+  prints what it saw. `scripts/ci-local.sh` serializes container gates with a lock: a second gate (another
   worktree) used to delete the first one's `wtci-*` containers mid-run.
 
 ## [3.6.12] — 2026-10-15 · agent (58)
