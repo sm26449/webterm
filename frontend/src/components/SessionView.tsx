@@ -336,8 +336,6 @@ export default function SessionView(props: {
   // numele panoului în dialogul guardrail-ului broadcast (ce panou ar rula linia)
   const paneLabelRef = useRef('')
   paneLabelRef.current = title || props.host?.name || ''
-  // ultimul rând al ecranului poate fi bara de stare tmux (CommandTracker.pendingBelow)
-  if (trackerRef.current) trackerRef.current.tmuxBacked = props.host?.backend === 'tmux'
   // `unknown` = broadcast cu un panou-ţintă neverificabil (pauză / fără ecou încă) — nu o regulă;
   // `run` = ce pleacă la „Rulează" (implicit Enter; un snippet multi-linie îşi trimite textul)
   // `hits` (broadcast) = TOATE liniile care ating o regulă, cu panourile lor — dialogul le arată pe toate;
@@ -358,6 +356,8 @@ export default function SessionView(props: {
   useEffect(() => { if (cmdConfirm) cmdCancelBtnRef.current?.focus() }, [cmdConfirm])
   // comenzi (OSC 133) — apar doar cu shell integration activă pe host
   const trackerRef = useRef<CommandTracker>()
+  // ultimul rând al ecranului poate fi bara de stare tmux (CommandTracker.pendingBelow)
+  if (trackerRef.current) trackerRef.current.tmuxBacked = props.host?.backend === 'tmux'
   const cwdRef = useRef<string | null>(null)   // cwd curent, pt. raportarea în istoric (fără stale closure)
   const decorationsRef = useRef<IDisposable[]>([])
   const [commands, setCommands] = useState<Command[]>([])
