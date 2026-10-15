@@ -787,7 +787,10 @@ export default function FilePanel(props: {
             name: view[sel].name + (view[sel].dir ? '/' : ''), k: sel + 1, n: view.length,
           }) + (selection.keys.has(view[sel].name) ? ` · ${t('files.rowSelected')}` : '') : ''}
         </span>
+        {/* `data-path` = directorul LISTAT (ţinta upload-urilor), nu textul din câmpul de cale —
+            acela se schimbă la tastare, înainte ca listarea să se întoarcă */}
         <div ref={listRef} tabIndex={0} onKeyDown={onKeyDown} role="group" aria-label={t('files.listAria')}
+          data-path={listing?.path ?? ''}
           onFocus={(ev) => { if (ev.target === ev.currentTarget) setListFocused(true) }}
           onBlur={(ev) => { if (ev.target === ev.currentTarget) setListFocused(false) }}
           className={`relative min-h-0 flex-1 overflow-y-auto outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[rgb(var(--focus))] ${drag ? 'ring-2 ring-inset ring-sky-500' : ''}`}>

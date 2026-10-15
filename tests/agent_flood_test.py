@@ -128,6 +128,32 @@ async def main():
         "SELECT COUNT(*) AS c FROM sessions WHERE host_id=?", hid))["c"]
     check("adopţia normală (3 sesiuni) nu e afectată de plafon", n3 == 3, str(n3))
 
+    # ── un sid care e deja al ALTUI host (aceeaşi maşină înrolată de două ori, tmux comun) ──
+    # Înainte: IntegrityError pe cheia primară, care rupea tot ciclul de reconciliere, la fiecare
+    # heartbeat. Acum: sid-ul străin nu se adoptă (rămâne al hostului lui), restul merge.
+    await db.execute(
+        "INSERT INTO hosts(name, token_hash, token_encrypted, connection_type, created)"
+        " VALUES(?,?,?,?,?)",
+        "vechi", "h2", security.encrypt_secret("t"), "agent", 0)
+    old_hid = (await db.fetchone("SELECT id FROM hosts WHERE name='vechi'"))["id"]
+    foreign = uuid.uuid4().hex
+    await db.execute(
+        "INSERT INTO sessions(id, host_id, title, state, created, rows, cols) VALUES(?,?,?,?,?,?,?)",
+        foreign, old_hid, "s", "live", 0, 24, 80)
+    fresh = uuid.uuid4().hex
+    raised = None
+    try:
+        await core.reconcile(conn, {"event": "heartbeat", "epoch": "e1", "agent_version": 38,
+                                    "sessions": [{"sid": foreign, "alive": True, "rows": 24, "cols": 80},
+                                                 {"sid": fresh, "alive": True, "rows": 24, "cols": 80}]})
+    except Exception as e:                       # noqa: BLE001 — exact ce verificăm
+        raised = e
+    check("un sid al altui host nu rupe reconcilierea", raised is None, repr(raised))
+    owner = (await db.fetchone("SELECT host_id FROM sessions WHERE id=?", foreign))["host_id"]
+    check("sid-ul străin rămâne al hostului lui (nu trece la alt host)", owner == old_hid, str(owner))
+    got = await db.fetchone("SELECT host_id FROM sessions WHERE id=?", fresh)
+    check("sesiunea nouă de după el e adoptată normal", bool(got) and got["host_id"] == hid, str(got))
+
     # ── câmpurile raportate de agent sunt mărginite ──
     await core.reconcile(conn, {
         "event": "heartbeat", "epoch": "e1", "sessions": [],

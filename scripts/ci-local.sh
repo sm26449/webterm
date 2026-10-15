@@ -64,8 +64,22 @@ cleanup() {
 # invocare — şi `ci-local.sh lint unit` (static, fără containere) ştergea cu `docker rm -f`
 # containerele wtci-* ale unei porţi complete pornite în paralel din alt worktree. Rezultatul
 # arăta ca un „flake" de mobile/e2e (ERR_CONNECTION_REFUSED la jumătatea auditului).
+# Şi tot de aici: o a doua poartă cu containere, pornită cât prima rula (alt worktree, alt agent),
+# ştergea containerele primei pe două căi — `exit 2` la „portul 8000 e ocupat" declanşa trap-ul
+# `cleanup`, iar dacă prima era încă la `docker build` (porturi libere), `boot` făcea `docker rm -f`
+# pe aceleaşi nume wtci-*. Prima vedea agentul „offline" / ERR_CONNECTION_REFUSED la jumătatea
+# E2E-ului. Numele şi porturile sunt fixe (vezi nota de sus), deci porţile cu containere se
+# SERIALIZEAZĂ: un lock pe host, luat ÎNAINTE de trap; a doua iese fără să atingă nimic.
 case " $ONLY " in
   *" all "*|*" smoke "*|*" e2e "*|*" a11y "*|*" fs "*|*" fwd "*|*" mobile "*|*" sso "*|*" backup "*|*" features "*|*" jump "*)
+    LOCK=${WTCI_LOCK:-/tmp/wtci-gate.lock}
+    if command -v flock >/dev/null 2>&1 && { : >>"$LOCK"; } 2>/dev/null; then
+      exec 9>>"$LOCK"
+      flock -n 9 || {
+        echo "altă poartă ci-local cu containere rulează deja (lock $LOCK) — aşteaptă să se termine;" \
+             "containerele wtci-* şi porturile 8000-8006 sunt comune" >&2
+        exit 2; }
+    fi
     trap cleanup EXIT ;;
 esac
 
