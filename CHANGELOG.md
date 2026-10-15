@@ -66,6 +66,15 @@ frontend only — no agent change (agent stays 58).
   replies — exact shapes only, never with a line break, never from a paste) don't count as keys:
   they no longer make a pane "un-echoed" (with tmux mouse and focus events on, clicking a pane and
   pressing Enter used to ask "Can't check"), and they never skip the guardrail.
+- **"Copy output" stops at the command's end.** Why: output was handed to the command tracker as it
+  ARRIVED, with the tracker's state at that moment, while xterm parses asynchronously — a command's
+  `C` and its output arriving before `C` was parsed were never captured, and the fallback (reading
+  screen rows) ran to the cursor, copying later prompts and commands into the clipboard. Output is
+  now split after each OSC 133 mark and handed over in parse order (the rest of the chunk holding
+  `D` still goes to the finished command, as before); the screen fallback never runs to the cursor
+  when later commands exist; a line ending in CRLF is no longer dropped from the copied text.
+- **A long command line that wraps is read without a stray space at the wrap.** Why: soft-wrapped
+  rows were joined with a space, so `rm -rf /tm` + `p` on the next row read as `rm -rf /tm p`.
 - **A session id that already belongs to another host no longer breaks that agent's reconcile.**
   Why: when the same machine is enrolled twice (a second host record, the tmux server survives),
   the new agent reports the old host's sessions. Adopting them hit the `sessions` primary key, and

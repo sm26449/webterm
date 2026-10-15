@@ -269,9 +269,25 @@ closed (review of 3.6.12, `lib/broadcastGuard.ts`), when guardrail rules are act
   is also F3 with modifiers (2–8, and 9–16 with Meta/Super) — unless the output has asked for the
   cursor position (`CSI 6 n` / `CSI ? 6 n`, counted per pane and consumed by each reply; a request
   split across chunks is missed → key, fail closed): then a row-1 reply (nushell, some zsh themes
-  after `clear`) is a report. Other rows are always reports.
-  Residual: a background job that prints while the keys are in flight still moves the cursor and
-  counts as the earliest key's echo;
+  after `clear`) is a report. Other rows are always reports. Replies tmux asks the outer terminal
+  for at `refresh-client` (XTVERSION, XTGETTCAP, colour-scheme and kitty-keyboard reports) are
+  reports too.
+  Found by the e2e gate on the merged branch (ordinary typing must never ask): **Enter** is
+  confirmed by the first line change in output that arrived after it, and everything queued before
+  it leaves the queue with it (that line was already submitted; under tmux a long line at the bottom
+  of the screen scrolls inside tmux's scroll region and the prompt row the tracker reads goes stale,
+  so such text might never match). A **blind** Enter (sent with no readable line — a command
+  running, or right after a reload until the first live prompt) and everything before it leave the
+  queue when a readable line appears. The quiet-window candidate is also checked at each output, not
+  only at the next Enter. Matching ignores whitespace (a soft-wrapped row is joined without a space
+  now, and tmux / readline redraws at the margin can add or drop one; a run of only spaces is never
+  confirmed on its own). Past 64 un-echoed sends, only runs of plain text are merged (a merged run
+  is confirmed only whole and keeps its text, so the single-pane check appends it instead of
+  asking); Enter, non-text and blind keys stay separate, and only past 64 of those does everything
+  collapse into one text-less entry. When the guard holds Enter, the `keypress` xterm
+  would still turn into a second `\r` is swallowed (before, that duplicate was queued and sent after
+  the held Enter). Residual: a background job that prints while the keys are in flight still moves
+  the cursor and counts as the earliest key's echo;
 - **a single pane (no broadcast) waits for the echo too** (3.6.13): with rules active, Enter /
   `Ctrl+J` and a chunk ending in a line break wait up to 150 ms; then, if keys are still un-echoed
   and they were all plain text (a slow link while typing), the line on the screen **and** the line

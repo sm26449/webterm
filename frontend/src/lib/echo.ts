@@ -62,6 +62,19 @@ export function echoQuietMs(rtt: number | null | undefined): number {
   return Math.min(50, Math.max(20, rtt / 2))
 }
 
+/** Comprimă seriile consecutive de text simplu (ne-orb, ne-Enter) în câte o singură intrare. */
+function compactText(list: Entry[]): Entry[] {
+  const out: Entry[] = []
+  for (const e of list) {
+    const prev = out[out.length - 1]
+    const plain = (x: Entry) => x.text !== null && !x.blind && !x.submit && !x.lump
+    if (prev && plain(prev) && plain(e)) {
+      out[out.length - 1] = { ...prev, seq: e.seq, text: (prev.text ?? '') + (e.text ?? '') }
+    } else out.push({ ...e })
+  }
+  return out
+}
+
 export class EchoTracker {
   /** trimiteri cu ecou aşteptat (contor) */
   inputSeq = 0
@@ -95,13 +108,16 @@ export class EchoTracker {
     this.pending.push({ seq, at: now, text, blind: this.base === null, submit,
       raw: text === null && raw ? JSON.stringify(raw.slice(0, 16)) : undefined })
     if (this.pending.length > ECHO_PENDING_MAX) {
-      // host care nu ţine pasul: comprimăm într-o singură intrare, eliberată doar când hub-ul a
-      // ajuns din urmă (vezi output) sau la replay — fail-closed între timp
-      // textul rămâne dacă TOATE erau text simplu (tastare rapidă pe o legătură lentă): verificarea
-      // locală îl lipeşte de linie în loc să ceară „nu pot verifica" (3.6.13, e2e)
-      const all = this.pending.every((e) => e.text !== null)
-      const text = all ? this.pending.map((e) => e.text).join('') : null
-      this.pending = [{ seq, at: now, text, lump: true, lumpAt: now }]
+      // Prea multe trimiteri fără ecou. Întâi comprimăm doar serii de TEXT simplu (aceeaşi semantică:
+      // textul rămâne, verificarea locală îl lipeşte de linie; o serie se confirmă doar întreagă).
+      // Tastele ne-text, Enter-urile şi cele „oarbe" rămân separate — nu ascundem un Enter sau un ↑
+      // într-o intrare fără text (e2e 3.6.13: o intrare comprimată fără text = „nu pot verifica").
+      this.pending = compactText(this.pending)
+      if (this.pending.length > ECHO_PENDING_MAX) {
+        // host care nu răspunde deloc (sute de taste ne-text): o singură intrare fără text, eliberată
+        // doar când hostul a ajuns din urmă (vezi output) sau la replay — fail-closed între timp
+        this.pending = [{ seq, at: now, text: null, lump: true, lumpAt: now }]
+      }
     }
     this.lastSentAt = now
     return { seq, needBase }
