@@ -441,7 +441,10 @@ def osc133_parser_tests():
     sc = _scan(B + b"ls\x1b]133;E;ls\x07\x1b]133;C\x1b\\out")
     check("B → E;cmd → C (terminat cu ST) → C", sc.last == "C")
     sc = _scan(B + b"ls\x1b]133;C\x07")
-    check("B → C → C", sc.last == "C")
+    check("B → text → C fără E → necunoscut (hub-ul nu citeşte ecranul; review 3.6.13 LOW-1a)", sc.last is None)
+    sc = _scan(B + b"\x1b[0m\x1b]133;C\x07")
+    check("B → doar secvenţe de escape → C (prompt gol, job în fundal) → necunoscut", sc.last is None)
+    BE = B + b"x\x1b]133;E;x\x07"
     sc = _scan(B + "\u009d133;D;0\u009c".encode())
     check("C1 OSC / ST codate UTF-8 (\\xc2\\x9d … \\xc2\\x9c) → D", sc.last == "D", sc.last)
     sc = _scan(b"\x1b]133;B\x1bX")
@@ -479,17 +482,17 @@ def osc133_parser_tests():
           (whole.last, whole.last_start, bytewise.last, bytewise.last_start))
     sc = _scan(B + b"\x1b]0;titlu \xc2\xb0C\x07\x1b]7;file://h/tmp\x07\x1b]1330;C\x07\x1b]13a3;C\x07")
     check("titlu (cu °) / cwd / alt id / id ne-numeric ASCII NU sunt 133 → rămâne B", sc.last == "B", sc.last)
-    sc = _scan(B + b"x\x1b]0133;C\x07")
+    sc = _scan(BE + b"\x1b]0133;C\x07")
     check("zerourile din faţa id-ului contează ca la xterm (0133 = 133)", sc.last == "C")
-    sc = _scan(B + b"x\x1b]13\x003;\x01C\x07")
+    sc = _scan(BE + b"\x1b]13\x003;\x01C\x07")
     check("C0-urile din payload sunt ignorate, ca la xterm (13\\x003;\\x01C = 133;C)", sc.last == "C", sc.last)
-    sc = _scan(B + b"x\x1b\x00\x7f]133;C\x07")
+    sc = _scan(BE + b"\x1b\x00\x7f]133;C\x07")
     check("C0 / DEL între ESC şi ] nu întrerup secvenţa (xterm: rămâne în ESCAPE)", sc.last == "C")
     sc = _scan(b"\x1b ]133;B\x07")
     check("ESC <intermediar> ] nu e OSC", sc.last is None and not sc.integrated)
     sc = _scan(B + b"\x1b]133;C\xc2\x9d133;D;1\x07")
     check("U+009D în OSC porneşte unul nou → D", sc.last == "D")
-    sc = _scan(B + b"x\x1b]133;C;x\xc2\xa0y\x07")
+    sc = _scan(BE + b"\x1b]133;C;x\xc2\xa0y\x07")
     check("un caracter U+00A0 în payload nu termină OSC-ul", sc.last == "C")
     # fail-closed: un 133 abandonat / nelămurit face ultimul marcaj necunoscut
     for tail, why in ((b"\x1b]133;C\x18", "abandonat cu CAN"),
@@ -558,6 +561,40 @@ def osc133_parser_tests():
         rate = len(load) / 1e6 / (time.perf_counter() - t0)
         # prag generos (CI partajat); local: 100–350 MB/s
         check("scanare %s: %.0f MB/s (≥ 20)" % (name, rate), rate >= 20, rate)
+    # review 3.6.13 (MEDIUM-1): fluxuri construite din secvenţe de interes — bugetul per chunk le
+    # mărgineşte (local: 75–180 MB/s, ~0,1–0,2 ms / 16 KiB). Prag generos pentru CI: ≤ 2 ms / 16 KiB.
+    floods = {
+        "osc-nondigit": b"\x1b]x\x07", "osc-empty": b"\x1b]\x07", "c1-osc-bel": b"\xc2\x9d\x07",
+        "esc-c0": b"\x1b\x01", "esc-high": b"\x1b\x80", "osc-0133": b"\x1b]0133;A\x07", "ris": b"\x1bc",
+        "alt1049": b"\x1b[?1049h", "133-marks": b"\x1b]133;A\x07", "clear2J": b"\x1b[2J",
+        "osc133-c0": b"\x1b]133;\x01A\x07", "c1-in-133": b"\x1b]133;" + b"\xc2\x85" * 50 + b"\x07",
+    }
+    for name, unit in floods.items():
+        load = unit * (4_000_000 // len(unit))
+        sc = osc133.Osc133Scanner()
+        t0 = time.perf_counter()
+        for i in range(0, len(load), 16384):
+            sc.feed(load[i:i + 16384], i)
+        per = (time.perf_counter() - t0) / (len(load) / 16384) * 1000
+        check("inundaţie %s: %.2f ms / 16 KiB (≤ 2)" % (name, per), per <= 2, per)
+    # semantica inundaţiei: necunoscut, nesincronizabil, ecran necunoscut, reluare corectă după
+    sc = osc133.Osc133Scanner()
+    sc.feed(B, 0)
+    flood = b"\x1b]x\x07" * 4000 + b"\x1b]133;B\x07"
+    sc.feed(flood, len(B))
+    check("după o inundaţie: ultimul marcaj din coada reluată, dar ecran necunoscut şi nesincronizabil",
+          sc.last == "B" and sc.last_alt and sc.strip_end == len(B) + len(flood), (sc.last, sc.last_alt, sc.strip_end))
+    sc2 = osc133.Osc133Scanner()
+    sc2.feed(b"\x1b]x\x07" * 4000 + b"\x1b]133;B\x07" + b"\x1b]x\x07" * 100, 0)
+    check("inundaţie cu B în mijloc → integrat (doar adaugă necunoscut), ultimul marcaj None",
+          sc2.integrated and sc2.last is None, (sc2.integrated, sc2.last))
+    sc.feed(b"\x1b[?1049l" + B, 10 ** 6)
+    check("o comutare explicită de ecran după inundaţie → ecranul e iar cunoscut", sc.last == "B" and not sc.last_alt)
+    sc = osc133.Osc133Scanner()
+    sc.feed(b"\x1b]x\x07" * 4000 + b"\x1b]133", 0)
+    sc.feed(b";B\x07", 4 * 4000 + 7)
+    check("inundaţie care se termină într-un OSC început → OSC-ul se reia în chunk-ul următor",
+          sc.last == "B", sc.last)
 
 
 async def osc133_hub_tests():
@@ -634,7 +671,7 @@ async def osc133_hub_tests():
               osc and osc[-1] == {"type": "osc133", "integrated": True, "last": "B", "synced": False}, osc)
 
         # ssh / sudo -i: ultimul marcaj live e C → îl trimitem (browserul ştie că rulează ceva)
-        await hub._process_output(b"\r\n\x1b]133;C\x07Last login: ...\r\nroot@db:~# ")
+        await hub._process_output(b"\x1b]133;E;ssh db\x07\r\n\x1b]133;C\x07Last login: ...\r\nroot@db:~# ")
         check("C live → last=C", hub.osc133_state(None)["last"] == "C")
         # gol în flux (agent repornit): ultimul marcaj nu mai e de încredere
         hub._write_gap_marker()
@@ -668,6 +705,37 @@ async def osc133_hub_tests():
         # L1: un C care nu urmează unui prompt (job în fundal) → None, nu „rulează"
         await hub._process_output(b"\x1b]133;D;0\x07\x1b]133;C\x07")
         check("C fără B înainte → last=None", hub.osc133_state(None)["last"] is None)
+        # LOW-2: SSH — tmux doar dacă sonda l-a găsit pe remote
+        class _Ssh:
+            backend = "ssh"
+
+            def __init__(self, ok):
+                self.ok = ok
+
+            def tmux_for(self, sid):
+                return self.ok
+        await hub._process_output(b"\x1b[?1049h\x1b]133;A\x07$ \x1b]133;B\x07")
+        hub._source = lambda: _Ssh(True)
+        check("SSH cu tmux pe remote → comutarea de ecran e a clientului tmux", hub.osc133_state(None)["last"] == "B")
+        hub._source = lambda: _Ssh(False)
+        check("SSH fără tmux (shell simplu) → ecranul alternativ contează → None", hub.osc133_state(None)["last"] is None)
+        hub._source = lambda: type("S", (), {"backend": "ssh"})()
+        check("SSH fără sondă → None (necunoscut = fără tmux)", hub.osc133_state(None)["last"] is None)
+        hub._source = real_source
+        await hub._process_output(b"\x1b[?1049l")
+
+        class _Conn:
+            def __init__(self, out=None, exc=None):
+                self.out, self.exc = out, exc
+
+            async def run(self, cmd, check=False):
+                if self.exc:
+                    raise self.exc
+                return type("R", (), {"stdout": self.out})()
+        for conn, want, why in ((_Conn("wt-tmux-ok\n"), True, "tmux găsit"), (_Conn(""), False, "fără tmux"),
+                                (_Conn(exc=OSError("x")), False, "sonda a eşuat"), (_Conn(b"wt-tmux-ok"), True, "octeţi")):
+            src = core.SshSource(1, conn)
+            check("SshSource._probe_tmux: %s → %s" % (why, want), await src._probe_tmux() is want)
         hub.clients.discard(client)
     finally:
         hub.teardown()

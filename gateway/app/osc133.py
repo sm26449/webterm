@@ -42,6 +42,10 @@ from typing import Optional
 HEAD_MAX = 64                 # octeţi utili păstraţi dintr-un OSC (id + felul marcajului)
 PAYLOAD_LIMIT = 10_000_000    # ca xterm.js (Constants.PAYLOAD_LIMIT; acolo în unităţi UTF-16)
 CARRY_MAX = 4096              # prefix de secvenţă reţinut între chunk-uri
+# buget de evenimente (paşi Python) per chunk: max(32, 1 la 512 octeţi). Peste el → _flood
+EVENT_BUDGET_MIN = 32
+EVENT_BUDGET_BYTES = 512
+TAIL_MAX = 4096               # cât reluăm după o inundaţie
 KINDS = ("A", "B", "C", "D")
 
 # C0 care NU scot xterm din ESCAPE (EXECUTE / IGNORE), plus octeţi ≥0x80 (decodorul UTF-8 al lui xterm
@@ -98,7 +102,7 @@ class Osc133Scanner:
     secvenţe pe care read_tail o scoate din replay."""
 
     __slots__ = ("integrated", "last", "last_start", "last_alt", "strip_end", "alt",
-                 "_phase", "_b_end", "_in_osc", "_start", "_head", "_size", "_taint", "_carry", "_carry_pos")
+                 "_phase", "alt_unknown", "_in_osc", "_start", "_head", "_size", "_taint", "_carry", "_carry_pos")
 
     def __init__(self) -> None:
         self.integrated = False
@@ -108,7 +112,7 @@ class Osc133Scanner:
         self.strip_end: Optional[int] = None
         self.alt = False
         self._phase: Optional[str] = None     # 'B' / 'BE' = un C acum ar porni o comandă
-        self._b_end = 0                       # unde s-a terminat B-ul (offset, fără ST-ul ESC \\)
+        self.alt_unknown = False              # după o inundaţie: nu ştim pe ce ecran suntem
         self._in_osc = False
         self._start: Optional[int] = None
         self._head = bytearray()
@@ -225,17 +229,17 @@ class Osc133Scanner:
         if k == "B":
             self.integrated = True
         if k == "C":
-            # ca xterm: o comandă porneşte doar dintr-un C după prompt, cu text — E;<cmd> (integrarea
-            # noastră îl trimite mereu pentru o comandă) sau măcar octeţi tastaţi între B şi C
-            typed = start is not None and start > self._b_end
-            ok = self._phase == "BE" or (self._phase == "B" and typed)
+            # xterm porneşte o comandă doar dintr-un C după prompt, cu text tastat. Hub-ul nu citeşte
+            # ecranul, deci cere dovada explicită: B → E;<cmd> → C (integrarea noastră trimite E pentru
+            # orice comandă nevidă). Octeţii dintre B şi C nu dovedesc nimic (review 3.6.13, LOW-1a:
+            # `\e[0m\e]133;C` la un prompt gol). O integrare fără E = None (necunoscut), ca în 3.6.12.
+            ok = self._phase == "BE"
             self._phase = None
             if not ok:
                 self._unknown()                # C fără prompt înainte: xterm nu porneşte o comandă
                 return
         elif k == "B":
             self._phase = "B"
-            self._b_end = osc_end
         elif k == "E":
             self._phase = "BE" if self._phase == "B" and has_text else None
             self.last = None                   # E nu e o stare în sine; C-ul care urmează decide
@@ -249,12 +253,13 @@ class Osc133Scanner:
             return
         self.last = k
         self.last_start = start
-        self.last_alt = self.alt
+        self.last_alt = self.alt or self.alt_unknown
 
     def _mode(self, params: bytes, set_: bool) -> None:
         ps = params.split(b";")
         if any(p in _ALT_MODES for p in ps):
             self.alt = set_
+            self.alt_unknown = False
 
     def feed(self, data: bytes, pos: int) -> None:
         """`data` = octeţii unui chunk, `pos` = offsetul absolut al primului octet."""
@@ -265,7 +270,12 @@ class Osc133Scanner:
         n = len(data)
         i = 0
         nxt = [-2] * (len(_NEEDLES) + 1)       # -2 = de calculat, -1 = nu mai apare în chunk
+        budget = max(EVENT_BUDGET_MIN, n // EVENT_BUDGET_BYTES)
         while i < n:
+            budget -= 1
+            if budget < 0:
+                self._flood(data, pos)
+                return
             if self._in_osc:
                 i = self._osc_step(data, i, pos)
                 if i < 0:
@@ -320,6 +330,7 @@ class Osc133Scanner:
                 i = j + 4
             elif which == 5:                                 # RIS: ecranul principal
                 self.alt = False
+                self.alt_unknown = False
                 self.strip_end = pos + j + 2
                 i = j + 2
             else:                                            # ESC <C0/DEL/≥0x80> …
@@ -345,6 +356,38 @@ class Osc133Scanner:
                 self._unknown()
                 return
             self._carry, self._carry_pos = data[start:], pos + start
+
+    def _flood(self, data: bytes, pos: int) -> None:
+        """Prea multe secvenţe de interes într-un chunk (review 3.6.13, MEDIUM-1: un flux construit —
+        `ESC ] x BEL`, `ESC [?1049h`, `ESC ]133;A BEL` repetate — ar ţine loop-ul gateway-ului partajat câte
+        milisecunde pe chunk). Nu-l mai parcurgem: starea devine NECUNOSCUTĂ (fail-closed), iar parserul
+        se reaşază ieftin. ESC şi orice C1 duc xterm într-o stare cunoscută din ORICE stare, deci
+        reluăm parsarea doar de la ultimul ESC / C1 din ultimii TAIL_MAX octeţi (după el nu mai e
+        niciunul — cost mărginit); fără niciunul acolo, GROUND (până la următorul ESC / C1, care
+        resincronizează ambele parsere la fel)."""
+        n = len(data)
+        self._unknown()
+        self.strip_end = pos + n                   # nimic de dinainte nu mai poate fi „sincronizat"
+        self.alt_unknown = True                    # nu ştim ce comutări de ecran au trecut
+        if data.find(b"133;B") >= 0:
+            self.integrated = True                 # doar adaugă rezultate „necunoscut"
+        self._carry = b""
+        self._in_osc = False
+        self._start = None
+        self._head.clear()
+        self._taint = False
+        lo = max(0, n - TAIL_MAX)
+        start = data.rfind(b"\x1b", lo)
+        k = n
+        while True:                                # ultimul C1 (`\xc2` + 0x80–0x9F) din fereastră
+            k = data.rfind(b"\xc2", lo, k)
+            if k < 0 or k <= start:
+                break
+            if k + 1 < n and 0x80 <= data[k + 1] <= 0x9F:
+                start = k
+                break
+        if start >= 0:
+            self.feed(data[start:], pos + start)   # un singur ESC / C1: câteva evenimente, nu o inundaţie
 
     def _osc_step(self, data: bytes, i: int, pos: int) -> int:
         """Un pas în OSC: până la terminator. Întoarce indexul de continuare, sau -1 = chunk consumat."""

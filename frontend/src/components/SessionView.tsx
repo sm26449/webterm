@@ -8,7 +8,7 @@ import { modeRestoreSeq } from '../lib/termmodes'
 import { errText, api, CommandGuard, CommandRule, Host, Session, withStepup } from '../lib/api'
 import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
 import { Command, CommandTracker, cmdDuration, matchCommandRule } from '../lib/commands'
-import { EchoTracker, LineKey, isTerminalReport } from '../lib/echo'
+import { EchoTracker, LineKey, reportOnly } from '../lib/echo'
 import { ECHO_GRACE_MS, LocalVerdict, localRunDecision, PeerState, PeerVerdict, RuleHit, guardActive, isBareEnter, judgeLocal, judgePeers, opaqueInput, plainText, runDecision, splitLines, stripControls, submitsLine, unbracket } from '../lib/broadcastGuard'
 import { clearCwd, parseOsc7, setCwd } from '../lib/cwd'
 import { FONT_STORAGE_KEY, preferredFont, setPreferredFont } from '../lib/font'
@@ -236,6 +236,8 @@ export default function SessionView(props: {
   // ecou (guardrail, review 3.6.12 M1; strâns + per trimitere în 3.6.13): câte trimiteri au plecat spre
   // host şi care au primit ecou — vezi lib/echo.ts
   const echoRef = useRef(new EchoTracker())
+  // un paste e în curs (handler-ul de captură → xterm.paste → onData, sincron): datele lui nu sunt rapoarte
+  const pastingRef = useRef(false)
   const rttRef = useRef<number | null>(null)
   const streamDecoderRef = useRef(new TextDecoder('utf-8'))   // pt. captura output-ului
   // termen de căutare care așteaptă finalizarea replay-ului de istoric
@@ -772,7 +774,7 @@ export default function SessionView(props: {
     if (ws?.readyState === WebSocket.OPEN) {
       ws.send(typeof data === 'string' ? new TextEncoder().encode(data) : data)
       // rapoartele terminalului (mouse, focus, CPR, DA…) nu sunt taste: nu aşteaptă ecou (review 3.6.13, M2)
-      if (report || (typeof data === 'string' && isTerminalReport(data))) return
+      if (reportOnly(data, report, pastingRef.current)) return
       const { seq, needBase } = echoRef.current.sent(typeof data === 'string' && plainText(data) ? data : null, performance.now())
       // referinţa liniei: după ce xterm a parsat tot ce sosise ÎNAINTE de trimitere (write gol, în ordine)
       if (needBase) termRef.current?.write('', () => echoRef.current.setBase(seq, lineKeyRef.current()))
@@ -974,9 +976,11 @@ export default function SessionView(props: {
       broadcast. Un Enter „gol" care NU a trecut prin keydown (IME pe mobil, keybar) trece şi el
       prin guardrail (review 3.6.12, L6), la fel un chunk cu Enter în el (re-review, L-d). */
   const userInput = (d: string | Uint8Array, report = false) => {
-    // rapoartele terminalului (mouse, focus, CPR…) nu sunt taste: nu trec prin guardrail, nu aşteaptă
-    // în coada unei verificări şi nu aşteaptă ecou (review 3.6.13, M2)
-    if (report || (typeof d === 'string' && isTerminalReport(d))) {
+    // rapoartele terminalului (mouse, focus, CPR…) nu sunt taste: nu aşteaptă în coada unei verificări
+    // şi nu aşteaptă ecou (review 3.6.13, M2). DAR clasificarea nu ocoleşte niciodată guardrail-ul
+    // (HIGH-1): un chunk care conţine CR/LF trece mereu pe calea normală, iar datele unui paste nu
+    // sunt niciodată rapoarte (un text lipit poate avea exact forma unui răspuns OSC)
+    if (reportOnly(d, report, pastingRef.current)) {
       send(d, true)
       broadcastOut(d)
       return
@@ -1298,6 +1302,10 @@ export default function SessionView(props: {
     // clipboardul aduce fişiere/imagini; textul simplu nu trece pe aici — xterm îl lipeşte ca
     // până acum (bracketed paste) — cu excepţia unui text multi-linie care atinge guardrail-ul.
     const onPasteFiles = (e: ClipboardEvent) => {
+      // datele pe care xterm le emite din acest paste (sincron, din handler-ul lui de pe textarea)
+      // nu sunt rapoarte de terminal, oricum ar arăta (review 3.6.13, HIGH-1)
+      pastingRef.current = true
+      window.setTimeout(() => { pastingRef.current = false }, 0)
       const cd = e.clipboardData
       if (!cd) return
       // fişierele merg doar prin agent; guardrail-ul pe textul lipit se aplică oriunde
@@ -1870,8 +1878,8 @@ export default function SessionView(props: {
         // (3.6.13): doar dacă a schimbat linia / cursorul faţă de instantaneul de la trimitere
         const echo = echoRef.current
         const seq = echo.inputSeq
-        if (seq > echo.coarseSeq || seq > echo.echoedSeq) {
-          term.write(bytes, () => echo.output(seq, lineKeyRef.current))
+        if (seq > echo.coarseSeq || echo.waiting) {
+          term.write(bytes, () => echo.output(seq, lineKeyRef.current, performance.now(), rttRef.current))
         } else term.write(bytes)
       }
     }

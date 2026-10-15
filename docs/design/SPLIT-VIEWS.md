@@ -235,12 +235,24 @@ closed (review of 3.6.12, `lib/broadcastGuard.ts`), when guardrail rules are act
   **settle** after max(1 s, 4 × measured RTT), capped at 5 s — but for a broadcast target only if
   *some* output arrived after them (the 3.6.12 coarse rule): a stalled host that sends nothing never
   counts as echoed. Every state the new test calls echoed was also echoed under the 3.6.12 rule, so
-  it is never looser. More than 64 un-echoed sends collapse into one entry that only a replay or the
-  time net can clear. Without shell integration (no readable line) it falls back to the coarse rule
-  — the guardrail doesn't wait for the echo there anyway. **Terminal-generated reports** (mouse —
-  SGR, urxvt, X10 via `onBinary` — focus `CSI I`/`CSI O`, CPR, DA1/2/3, DSR, DECRPM, window-op and
-  OSC colour replies, DECRQSS) are not keys: they don't count as sends, don't wait in a check's
-  queue and never make a pane "un-echoed" (`CSI 1;2..8 R` stays a key: it is also modified F3).
+  it is never looser. More than 64 un-echoed sends collapse into one entry; it is released once the
+  host has demonstrably caught up — output arrived after its last key, the line changed since it
+  formed, and the time net has passed since its last key — or by a replay (before 3.6.13's second
+  review it stayed until a reconnect, so a few seconds of lag made every later Enter ask). Keys sent
+  while **no line was readable** (typeahead during a running command) are "blind": the line going
+  away doesn't confirm them, and when the next prompt appears they are confirmed only if the line
+  actually shows them — until then the single-pane check appends them to the line and judges that
+  (`rm -rf /srv` typed during a build is caught even if Enter comes before readline redraws it).
+  Blind keys older than the time net were consumed by the program (vim, a REPL) and are dropped.
+  When the line disappears (Enter → the command runs), the keys sent while it was readable are
+  confirmed — the 3.6.12 coarse rule. **Terminal-generated reports** (mouse — SGR, urxvt, X10 via
+  `onBinary` — focus `CSI I`/`CSI O`, CPR, DA1/2/3, DSR, DECRPM, window-op replies, colour replies
+  `OSC 4/1x;rgb:…`, DECRQSS) are not tracked as keys and don't wait in a check's queue. Only the
+  exact reply shapes count, with **no C0 — and so no CR/LF — in any body**; a chunk that contains a
+  line break is never a report and always goes through the guardrail, and data from a paste is
+  never a report (a capture-phase paste listener marks it). Before the second review a pasted
+  `ESC]0;x⏎rm -rf /srv⏎BEL` (shell without bracketed paste) was classified as a report and sent
+  unchecked to every pane. `CSI 1;2..8 R` stays a key: it is also modified F3.
   Residual: a background job that prints while the keys are in flight still moves the cursor and
   counts as the earliest key's echo;
 - **a single pane (no broadcast) waits for the echo too** (3.6.13): with rules active, Enter /
@@ -324,18 +336,22 @@ and `]` or in the identifier, an identifier or kind cut by the 64-byte window, a
 10 000 000 bytes, a 133 aborted by CAN / SUB / C1, an `E`, an empty or unknown kind, a partial
 sequence over the carry cap) makes `last` **`None`** instead of leaving an older mark in place.
 - **`C` (L1):** xterm's tracker only starts a "running command" from a `C` that follows a prompt
-  with something typed. The hub reports `C` only after `B` → `E;<cmd>` (our integration always
-  sends it) or `B` → typed bytes → `C`; a bare `C` (no `B` since the last `C`/`D`, right after an
-  `A`, after an empty `E`, or straight after `B` with nothing typed — e.g. a background job printing
-  `ESC]133;C` at an idle prompt) is `None`.
+  with something typed. The hub doesn't read the screen, so it needs explicit proof: it reports
+  `C` only after `B` → `E;<cmd>` (non-empty) → `C` — our integration sends `E` for every non-empty
+  command. Anything else is `None`: no `B` since the last `C`/`D`, after `A`, after an empty `E`,
+  and `B` → bytes → `C` without `E` (bytes prove nothing: `\e[0m\e]133;C` at an empty prompt is a
+  background job, not a command). An integration that never sends `E` gets no `C` seed — its panes
+  stay unknown after a reattach, as in 3.6.12.
 - **Alternate screen (L3):** DECSET / DECRST 47 / 1047 / 1049 (also inside a multi-parameter
   `CSI ? 1;1049 h`) and RIS are tracked; a mark emitted on the alternate screen is reported as
   `None` on a non-tmux stream (pty / telnet / serial — e.g. tmux or screen run inside a plain pty,
   whose inner shell's marks reach us while the outer screen is alternate; `read_tail` strips the
   switch, so the replay would show that `B` on the main screen). On a tmux-backed stream (agent tmux
   backend, SSH with tmux on the remote) the outer tmux client sits on the alternate screen for as
-  long as it is attached, so the switch is an artefact there and is ignored; an unknown source
-  counts as non-tmux (fail closed).
+  long as it is attached, so the switch is an artefact there and is ignored. For SSH, tmux counts
+  only if a probe (`command -v tmux` on the remote, 10 s timeout, run when the session is created)
+  found it — the session command falls back to a plain login shell otherwise; any other or unknown
+  source, or a failed probe, counts as non-tmux (fail closed).
 - **Stripped sequences (L3):** `read_tail` removes 47/1047/1048/1049 h/l, `ESC[2J`, `ESC[3J` and
   RIS from every replay. If one of them lies after the last mark, `synced` is false: the replayed
   screen isn't the live one (`Ctrl+L` at the prompt, a repaint), and removing it could splice a mark
@@ -346,13 +362,22 @@ sequence over the carry cap) makes `last` **`None`** instead of leaving an older
   (run by `re` in C) jump straight to `ESC ]` — skipping, inside the regex, any OSC with a clean
   non-133 identifier (titles, cwd, hyperlinks), which xterm handles identically — `U+009D`, an
   alternate-screen DECSET, `ESC[2J`/`ESC[3J`, RIS and `ESC` + C0/high byte; inside an OSC, straight
-  to its terminator; a complete clean `ESC]133;…` is read with one regex. Measured on 16 KiB chunks:
-  plain text ~300 MB/s, SGR-dense (`\e[0m` repeated) ~120–160, `°`-dense ~300, OSC title full of
-  `°` ~290, dense short titles ~120, `ls --color` ~160–220, an unterminated 10 MB OSC ~110.
-  Pathological floods still cost more: `ESC` repeated ~50 MB/s, alternate-screen DECSET spam
-  ~55 MB/s, and a stream of nothing but complete 133 marks ~5 MB/s (each mark is a state change;
-  ~3 ms per 16 KiB of pure marks). For comparison, writing the same chunk to the `.cast` file
-  (`json.dumps`) runs at ~260 MB/s.
+  to its terminator; a complete clean `ESC]133;…` is read with one regex. Every remaining Python
+  step is an **event**, and a chunk gets a budget of max(32, 1 per 512 bytes) events. A chunk that
+  exceeds it (crafted floods: `\e]x\a`, `\e]\a`, `\e]0133;A\a`, `\e]133;A\a`, `\e[?1049h`,
+  `\e[2J`, `\ec`, `\e\x01`, `\e\x80`, `\u009d\a`… repeated) is not parsed any further: `last` becomes
+  `None`, `strip_end` moves to the end of the chunk (nothing before it can be synced), the screen
+  becomes "unknown" (later marks count as alternate-screen until an explicit 47/1047/1049 switch or
+  RIS), `integrated` is set if `133;B` appears in it (only adds unknowns), and the parser restarts
+  from the last `ESC` / C1 in the chunk's final 4 KiB — `ESC` and C1 put xterm into a known state
+  from any state, and nothing after that point can trigger another event, so the restart is
+  bounded. Measured on this host, 16 KiB chunks: plain ~280 MB/s, SGR-dense ~120, `°`-dense
+  ~290, OSC title full of `°` ~220, `ls --color` ~175, Cyrillic ~265; floods: `\e]x\a` 88,
+  `\e]\a` 85, `\u009d\a` 179, `\e\x01` 109, `\e\x80` 110, `\e]0133;A\a` 105, `\ec` 74,
+  `\e[?1049h` 101, `\e]133;A\a` 107, `\e[2J` 98, C1 inside a 133 payload 111 (all ≤ 0.22 ms per
+  16 KiB); `ESC` repeated ~45. For comparison, writing the chunk to the `.cast` file
+  (`json.dumps`) runs at ~260 MB/s. The budget is per chunk; a stream of tiny chunks pays the
+  hub's per-chunk costs (file writes, `.cast` JSON) long before the scanner matters.
 
 **Protocol.** The hub takes a snapshot **synchronously** with the moment live output starts flowing
 to that client — `hub.clients.add(client)` on attach, the queue drain in `BrowserClient._resync`
@@ -387,8 +412,8 @@ any program running in the pane can print a fake `B` or `C`. That was already tr
 — the browser's tracker trusts live marks the same way — and the guardrail is a safety net against
 mistakes, not a boundary against a hostile program on the host (which could simply run the command
 itself). The hub only reports what the live tracker would also have believed: a `C` counts only
-where xterm's tracker would start a command (after a prompt, with something typed — a program that
-prints `B`, some text and `C` fakes it live just the same), a `B` only places the line start, read
+after `B` → `E;<cmd>`, where xterm's tracker would start a command too (a program that prints `B`,
+`E;x` and `C` fakes it live just the same), a `B` only places the line start, read
 from the browser's own replayed screen exactly as a live fake `B` would, and only when the replay
 provably equals the live screen (no stripped sequence after it). Where the hub's byte parser and
 xterm's decoder could disagree, the hub reports `None`. Browser input never feeds the scanner, and

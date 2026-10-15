@@ -28,10 +28,12 @@ frontend only — no agent change (agent stays 58).
   `B` + `synced` + its own last replayed mark also `B` → the typed line is read from that `B`, as a
   live prompt would; anything else stays unknown until the next live prompt. Fail closed wherever
   the hub's byte parser and xterm could disagree: invalid UTF-8 that xterm drops, identifiers or
-  kinds cut by the 64-byte window, oversized or aborted 133 sequences, a bare `C` that doesn't
-  follow a prompt, marks emitted on the alternate screen of a non-tmux stream — all report "unknown".
-  The scanner jumps between sequences with C-level searches (≥ 110 MB/s on plain, SGR-dense,
-  `°`-dense and OSC-title-heavy output), so it doesn't stall the shared gateway loop.
+  kinds cut by the 64-byte window, oversized or aborted 133 sequences, a `C` without the prompt →
+  `E;<cmd>` before it, marks emitted on the alternate screen of a non-tmux stream (SSH counts as tmux
+  only if a probe found tmux on the remote) — all report "unknown". The scanner jumps between
+  sequences with C-level searches (≥ 100 MB/s on plain, SGR-dense, `°`-dense and OSC-title-heavy
+  output) and has a per-chunk event budget: crafted floods of escape sequences make the state
+  "unknown" instead of stalling the shared gateway loop (≤ 0.22 ms per 16 KiB on every flood tried).
 - **`Tab` in a chunk that submits a line makes the line unknown.** Why: outside a bracketed paste
   `Tab` is readline completion — `rm -rf /tm⇥⏎` ran `rm -rf /tmp/` but was checked as
   `rm -rf /tm `. It is literal only between `ESC[200~` / `ESC[201~`, and only when every target
@@ -54,9 +56,13 @@ frontend only — no agent change (agent stays 58).
   un-echoed key (or a run of plain text the line now shows). Keys with no visible effect (`Tab`
   with no completion = a bell) settle after max(1 s, 4 × RTT), capped at 5 s; broadcast targets
   additionally need *some* output after the keys, so a stalled host never counts as echoed — never
-  looser than 3.6.12. Reports the terminal sends by itself (mouse, focus in/out, cursor-position
-  and device-attribute replies) are not keys: they no longer make a pane "un-echoed" (with tmux
-  mouse and focus events on, clicking a pane and pressing Enter used to ask "Can't check").
+  looser than 3.6.12. A burst of more than 64 keys without echo is released once the host has
+  caught up (not only at a reconnect). Typeahead sent while a command runs is confirmed only when
+  the next prompt shows it — until then the check judges the line with it appended. Reports the
+  terminal sends by itself (mouse, focus in/out, cursor-position, device-attribute and colour
+  replies — exact shapes only, never with a line break, never from a paste) don't count as keys:
+  they no longer make a pane "un-echoed" (with tmux mouse and focus events on, clicking a pane and
+  pressing Enter used to ask "Can't check"), and they never skip the guardrail.
 
 ## [3.6.12] — 2026-10-15 · agent (58)
 

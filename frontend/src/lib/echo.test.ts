@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { CommandGuard } from './api'
-import { EchoTracker, isTerminalReport, LineKey, ECHO_PENDING_MAX } from './echo'
+import { EchoTracker, isTerminalReport, LineKey, ECHO_PENDING_MAX, reportOnly } from './echo'
 import { echoSettleMs, judgeLocal, localRunDecision, plainText } from './broadcastGuard'
 
 // Un „shell" minimal: linia tastată + cursorul la capăt, cu istoric pentru ↑.
@@ -47,7 +47,7 @@ describe('3.6.13 (review M1): ecoul unei taste vechi nu confirmă tasta nouă', 
     p.arrive(1)                      // primul ↑ → „ls" pe ecran
     expect(p.sh.line).toBe('ls')
     // logica veche: instantaneu doar pentru ultima trimitere → „ls" ≠ linia goală → echoed, ok pe „ls"
-    expect(p.echo.echoedSeq).toBe(1)
+    expect(p.echo.unechoed()).toEqual([null])
     expect(p.echo.echoed(false, 0, null)).toBe(false)
     expect(judgeLocal(p.local(), g, false).kind).toBe('wait')
     expect(judgeLocal(p.local(), g, true).kind).toBe('unknown')
@@ -60,7 +60,7 @@ describe('3.6.13 (review M1): ecoul unei taste vechi nu confirmă tasta nouă', 
     const p = pane(['rm -rf /srv', 'ls'])
     p.send('\x1b[A'); p.send('\x1b[A')
     p.arrive(2)
-    expect(p.echo.echoedSeq).toBe(1)
+    expect(p.echo.unechoed()).toEqual([null])
     expect(p.echo.echoed(false, 0, null)).toBe(false)
   })
 
@@ -84,28 +84,102 @@ describe('3.6.13 (review M1): ecoul unei taste vechi nu confirmă tasta nouă', 
     const p = pane()
     p.send('x')
     p.echo.output(p.echo.inputSeq, p.sh.key)     // un repaint: linia identică
-    expect(p.echo.echoedSeq).toBe(0)
+    expect(p.echo.unechoed()).toEqual(['x'])
     expect(p.echo.coarseSeq).toBe(1)
     p.arrive(1)
-    expect(p.echo.echoedSeq).toBe(1)
+    expect(p.echo.unechoed()).toEqual([])
   })
 
-  it('fără linie citibilă (fără shell integration): regula grosieră din 3.6.12', () => {
-    const echo = new EchoTracker()
-    const { seq } = echo.sent(null, 0)
-    echo.setBase(seq, null)
-    echo.output(seq, () => null)
-    expect(echo.echoed(true, 0, null)).toBe(true)
+  it('linia dispare (Enter → comanda rulează): tastele de dinainte au primit ecou (regula grosieră)', () => {
+    const p = pane()
+    p.send('l'); p.send('\x1b[D')
+    p.echo.output(p.echo.inputSeq, () => null)
+    expect(p.echo.echoed(true, 0, null)).toBe(true)
   })
 
-  it('replay complet → totul confirmat; rafală fără ecou peste plafon → niciodată „confirmată" de o schimbare', () => {
+  it('replay complet → totul confirmat', () => {
+    const p = pane()
+    for (let i = 0; i < 5; i++) p.send('\x10')
+    p.echo.replayed()
+    expect(p.echo.echoed(true, 0, null)).toBe(true)
+  })
+
+  // review 3.6.13 (MEDIUM-2): rafala comprimată nu mai blochează până la reconectare
+  it('rafală peste plafon: eliberată când hostul a ajuns din urmă (output, linie schimbată, plasa de timp)', () => {
     const p = pane()
     for (let i = 0; i < ECHO_PENDING_MAX + 1; i++) p.send('\x10')
     expect(p.echo.unechoed()).toEqual([null])
-    p.sh.apply('x'); p.echo.output(p.echo.inputSeq, p.sh.key)
-    expect(p.echo.echoed(true, 0, null)).toBe(false)
-    p.echo.replayed()
-    expect(p.echo.echoed(true, 0, null)).toBe(true)
+    const tag = p.echo.inputSeq
+    p.echo.output(tag, p.sh.key, 0, null)                      // referinţa rafalei
+    p.sh.apply('x'); p.echo.output(tag, p.sh.key, 500, null)   // linia s-a schimbat, dar prea devreme
+    expect(p.echo.echoed(true, 500, null)).toBe(false)
+    p.sh.apply('y'); p.echo.output(tag, p.sh.key, 1500, null)  // după plasa de timp
+    expect(p.echo.unechoed()).toEqual([])
+    // tastele de după sunt urmărite normal
+    p.send('z'); p.arrive(1)
+    expect(p.echo.echoed(false, 1500, null)).toBe(true)
+  })
+})
+
+// review 3.6.13 (LOW-1b): typeahead tastat cât rula o comandă
+describe('3.6.13: typeahead „orb"', () => {
+  function busyPane() {
+    let line: string | null = null                 // null = nicio linie citibilă (comandă în curs)
+    const echo = new EchoTracker()
+    const key = (): LineKey | null => (line === null ? null : { k: `n\u00000\u0000${line.length}\u0000${line}`, line })
+    const send = (d: string, t = 0) => {
+      const { seq, needBase } = echo.sent(plainText(d) ? d : null, t)
+      if (needBase) echo.setBase(seq, key())
+    }
+    return { echo, key, send, set: (l: string | null) => { line = l } }
+  }
+  it('promptul apare fără typeahead pe ecran → NU e ecou; verificarea lipeşte textul (regula prinde)', () => {
+    const b = busyPane()
+    for (const c of 'rm -rf /srv') b.send(c)
+    b.set('')                                     // promptul nou, linie goală (typeahead încă neafişat)
+    b.echo.output(b.echo.inputSeq, b.key, 10, null)
+    expect(b.echo.echoed(false, 10, null)).toBe(false)
+    // logica de dinainte: credit strict la prima linie citibilă → Enter citea linia goală, shell-ul rula typeahead-ul
+    expect(judgeLocal({ atPrompt: true, echoed: false, pending: null, unechoed: b.echo.unechoed() }, g, true))
+      .toMatchObject({ kind: 'rule', cmd: 'rm -rf /srv' })
+    b.set('rm -rf /srv')                          // readline afişează typeahead-ul
+    b.echo.output(b.echo.inputSeq, b.key, 20, null)
+    expect(b.echo.echoed(false, 20, null)).toBe(true)
+  })
+  it('promptul apare cu typeahead-ul deja afişat → confirmat', () => {
+    const b = busyPane()
+    for (const c of 'ls') b.send(c)
+    b.set('ls')
+    b.echo.output(b.echo.inputSeq, b.key, 10, null)
+    expect(b.echo.unechoed()).toEqual([])
+  })
+  it('taste consumate de un program (vim) mai vechi decât plasa de timp → nu blochează promptul de după', () => {
+    const b = busyPane()
+    for (const c of ':wq') b.send(c, 0)
+    b.set('')
+    b.echo.output(b.echo.inputSeq, b.key, 3000, null)
+    expect(b.echo.unechoed()).toEqual([])
+  })
+})
+
+describe('3.6.13 (review HIGH-1): un text lipit în forma unui raport NU ocoleşte guardrail-ul', () => {
+  it('chunk cu CR/LF → niciodată raport, trece prin guardrail', () => {
+    for (const d of ['\x1b]0;x\rrm -rf /srv\r\x07', '\x1b]11;rgb:0/0/0\x07\r', '\x1b[I\r', '\x1bP1$rx\rrm -rf /\r\x1b\\']) {
+      expect(isTerminalReport(d), JSON.stringify(d)).toBe(false)
+      expect(reportOnly(d, false, false), JSON.stringify(d)).toBe(false)
+      expect(reportOnly(d, true, false), JSON.stringify(d)).toBe(false)   // nici marcat explicit
+    }
+    expect(reportOnly(new Uint8Array([0x1b, 0x5b, 0x4d, 0x20, 0x0d, 0x21]), true, false)).toBe(false)
+  })
+  it('datele unui paste nu sunt niciodată rapoarte', () => {
+    expect(reportOnly('\x1b[I', false, true)).toBe(false)
+    expect(reportOnly('\x1b[I', false, false)).toBe(true)
+  })
+  it('OSC: doar răspunsurile de culoare; un titlu sau alt OSC nu e raport', () => {
+    expect(isTerminalReport('\x1b]0;x\x07')).toBe(false)
+    expect(isTerminalReport('\x1b]52;c;cm0gLXJmIC8=\x07')).toBe(false)
+    expect(isTerminalReport('\x1b]4;1;rgb:cd/00/00\x1b\\')).toBe(true)
+    expect(isTerminalReport('\x1b]11;rgb:0000/0000/0000\x07')).toBe(true)
   })
 })
 

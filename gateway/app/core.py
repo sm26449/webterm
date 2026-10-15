@@ -1371,10 +1371,17 @@ class SessionHub:
             self.agent_epoch, self.agent_offset, self.sid)
 
     def _tmux_backed(self) -> bool:
-        """Fluxul vine de la un client tmux (agent tmux / SSH cu tmux pe remote). Sursă necunoscută → False."""
+        """Fluxul vine de la un client tmux: agent cu backend tmux, sau SSH unde tmux CHIAR a pornit
+        (review 3.6.13, LOW-2: fără tmux pe remote, SshSource cade pe un shell simplu). Orice altceva,
+        sau necunoscut → False (fail-closed: comutările de ecran contează)."""
         src = self._source()
-        return src is not None and getattr(src, "backend", None) not in (
-            None, "pty", "telnet", "telnet-fwd", "serial-fwd")
+        backend = getattr(src, "backend", None) if src is not None else None
+        if backend == "tmux":
+            return True
+        if backend == "ssh":
+            probe = getattr(src, "tmux_for", None)
+            return bool(probe(self.sid)) if callable(probe) else False
+        return False
 
     def osc133_state(self, replay: Optional[dict] = None) -> dict:
         """Starea OSC 133 de trimis unui client în punctul în care fluxul LIVE începe să curgă spre el
@@ -4183,9 +4190,30 @@ class SshSource(SessionSource):
         self._tasks: Dict[str, asyncio.Task] = {}
         self._forwards: Set["SshForwardStream"] = set()   # forward-uri active (țin conexiunea vie)
         self._idle_task: Optional[asyncio.Task] = None
+        # sesiunile în care tmux există pe remote (sonda de la create). Lipsă = nu ştim → fără tmux
+        self._tmux: Dict[str, bool] = {}
+
+    def tmux_for(self, sid: str) -> bool:
+        """tmux a fost găsit pe remote la crearea sesiunii (vezi SessionHub._tmux_backed)."""
+        return self._tmux.get(sid, False)
+
+    async def _probe_tmux(self) -> bool:
+        """`command -v tmux` pe remote, cu timeout. Orice eşec = False (fail-closed)."""
+        try:
+            r = await asyncio.wait_for(
+                self._conn.run("command -v tmux >/dev/null 2>&1 && echo wt-tmux-ok", check=False), 10)
+        except Exception:                  # noqa: BLE001 — sonda nu blochează crearea sesiunii
+            return False
+        out = r.stdout if r is not None else None
+        if isinstance(out, bytes):
+            out = out.decode("utf-8", "replace")
+        return isinstance(out, str) and "wt-tmux-ok" in out
 
     async def create(self, sid, rows, cols, term, tz=None, cmd=None, pw=None) -> dict:  # cmd/pw: doar agentul le foloseşte
         tmux = "wt-" + sid[:16]
+        # sonda o face separat: comanda de mai jos are fallback pe shell simplu, iar fluxul unui shell
+        # simplu NU e unul tmux (ecranul alternativ contează pentru starea OSC 133)
+        has_tmux = await self._probe_tmux()
         # tmux dacă există (persistență la re-conectare), altfel shell de login
         cmd = ("command -v tmux >/dev/null && exec tmux new -A -s %s "
                "|| exec ${SHELL:-/bin/bash} -l" % shlex.quote(tmux))
@@ -4199,6 +4227,7 @@ class SshSource(SessionSource):
             log.warning("ssh create %s: %s", sid, e)
             return {"ok": False, "code": str(e)}
         self._procs[sid] = proc
+        self._tmux[sid] = has_tmux
         self._tasks[sid] = asyncio.create_task(self._pump(sid, proc))
         return {"ok": True}
 
@@ -4216,6 +4245,7 @@ class SshSource(SessionSource):
         finally:
             self._procs.pop(sid, None)
             self._tasks.pop(sid, None)
+            self._tmux.pop(sid, None)
             hub = hubs.get(sid)
             if hub:
                 status = proc.exit_status if isinstance(proc.exit_status, int) else 0
