@@ -61,8 +61,15 @@ export class CommandTracker {
   private promptMarker: IMarker | null = null
   /** textul rândului promptului la prima tastă de după B (vezi notePromptPainted) */
   private promptSnap: string | null = null
-  /** textul din dreapta cursorului pe rândul promptului la prima tastă (RPROMPT) */
-  private rightPrompt: string | null = null
+  /** textul din dreapta cursorului pe rândul promptului la prima tastă (RPROMPT), cu poziţia lui */
+  private rightPrompt: { text: string; marker: IMarker; col: number } | null = null
+  /** poziţia ORIGINALĂ a lui B (nu se re-ancorează niciodată): citirea conservatoare porneşte de aici
+      (review 3.6.13: o euristică nu are voie să SCOATĂ text din ce judecă guardrail-ul — doar să
+      adauge variante) */
+  private origMarker: IMarker | null = null
+  private origCol = 0
+  /** re-ancorarea s-a încercat deja pentru acest B (cel mult o dată per B) */
+  private anchorTried = false
   /** ştergere de ecran / RIS / regiune de scroll după B (vezi noteScreenReset) */
   private screenSuspect = false
   private promptCol = 0
@@ -141,22 +148,45 @@ export class CommandTracker {
       redesenat (care poate fi şters apoi). Ce e la dreapta cursorului la acel moment pe rândul
       promptului e un prompt din dreapta: îl ştim, ca citirea până la capătul liniei să-l scoată. */
   notePromptPainted(reanchor = false): void {
-    if (this.promptSnap !== null || this.promptMarker === null) return
+    if (this.promptMarker === null) return
     let row = this.promptRow
     if (row === null) return
     const cur = this.absCursor()
-    // `reanchor` (nimic tastat încă după B — fără typeahead în aşteptare): începutul liniei e AICI, la
-    // cursor. Sub tmux B soseşte înaintea textului pictat, deci poziţia lui poate fi pe rândul
-    // comenzii anterioare; cursorul de la prima tastă e începutul real al liniei (e2e 3.6.13: cu
-    // verificarea de contiguitate, poziţia veche făcea linia „pierdută" după fiecare comandă)
-    if (reanchor && cur.row >= row && this.term.buffer.active.type !== 'alternate') {
-      const m = this.term.registerMarker(0)
-      if (m) {
-        this.setPrompt(m, cur.col)
-        row = this.promptRow
-        if (row === null) return
+    // Re-ancorare (review 3.6.13): cel mult o dată per B şi DOAR când poziţia lui B e demonstrabil
+    // veche — între ea şi cursor e un rând care nu continuă linia (sub tmux B soseşte înaintea
+    // textului pictat, pe rândul comenzii anterioare), iar între ea şi cursor nu e un terminator de
+    // prompt urmat de mai mult text (zsh push-line / print -z / fzf, typeahead redesenat: textul de
+    // după prompt e o linie restaurată, nu se sare). Citirea de la B-ul ORIGINAL rămâne mereu printre
+    // variantele judecate (pendingVariants), deci re-ancorarea poate doar ADĂUGA o citire.
+    if (reanchor && !this.anchorTried && this.term.buffer.active.type !== 'alternate') {
+      this.anchorTried = true
+      // pe acelaşi rând, cu cursorul la STÂNGA lui B: B e dincolo de conţinut — mutarea începutului
+      // spre stânga doar ADAUGĂ text citit
+      const leftOfB = cur.row === row && cur.col < this.promptCol
+      if (leftOfB || (cur.row > row && this.hasGap(row, cur.row) && !this.restoredText(row, this.promptCol, cur))) {
+        const m = this.term.registerMarker(0)
+        if (m) {
+          if (!leftOfB) {
+            // B era pe ALT rând (despărţit de linia de acum printr-un rând care nu o continuă): citirea
+            // conservatoare porneşte de la începutul blocului de rânduri al liniei curente (coloana 0 —
+            // cu tot promptul, netăiat), nu din rândurile vechi: o comandă anterioară (`rm -rf …`
+            // confirmat) sau output-ul ei nu sunt textul care rulează acum şi ar cere dialoguri false
+            let first = cur.row
+            while (first > row + 1 && this.rowContinues(first - 1)) first--
+            const cm = this.term.registerMarker(first - cur.row)
+            if (cm) {
+              this.origMarker?.dispose()
+              this.origMarker = cm
+              this.origCol = 0
+            }
+          }
+          this.reanchorAt(m, cur.col)
+          row = this.promptRow
+          if (row === null) return
+        }
       }
     }
+    if (this.promptSnap !== null) return
     const line = this.term.buffer.active.getLine(row)
     if (!line) return
     const full = line.translateToString(false)
@@ -168,10 +198,32 @@ export class CommandTracker {
       snap = m ? m[1] : before
     }
     if (snap.trim()) this.promptSnap = snap
-    if (cur.row === row) {
-      const right = full.slice(cur.col).trim()
-      this.rightPrompt = right || null
+    if (cur.row === row && this.rightPrompt === null) {
+      // textul din dreapta cursorului, ÎNCEPÂND după un şir de spaţii (un prompt din dreapta e separat
+      // de cursor prin spaţii; textul lipit de cursor e text tastat, nu RPROMPT)
+      const rest = full.slice(cur.col)
+      const m = /^(\s{2,})(\S.*?)\s*$/u.exec(rest)
+      const mk = m ? this.term.registerMarker(0) : undefined
+      if (m && mk) this.rightPrompt = { text: m[2], marker: mk, col: cur.col + m[1].length }
     }
+  }
+
+  /** între rândurile from..to e un rând care nu continuă linia */
+  private hasGap(from: number, to: number): boolean {
+    for (let r = from; r < to; r++) if (!this.rowContinues(r)) return true
+    return false
+  }
+
+  /** între (row, col) şi cursor e un terminator de prompt urmat de text: o linie restaurată */
+  private restoredText(row: number, col: number, cur: { row: number; col: number }): boolean {
+    const b = this.term.buffer.active
+    let text = ''
+    for (let r = row; r <= cur.row; r++) {
+      const l = b.getLine(r)
+      if (!l) continue
+      text += l.translateToString(false, r === row ? col : 0, r === cur.row ? cur.col : undefined) + '\n'
+    }
+    return /[$#%>\u276f] +[^\s]/u.test(text)
   }
 
   /** Rândul continuă pe următorul: următorul e marcat wrap, sau rândul e plin până la ultima celulă. */
@@ -188,18 +240,34 @@ export class CommandTracker {
     if (this.promptMarker !== null) this.screenSuspect = true
   }
 
+  /** un B nou (sau seed-ul de la hub): poziţia originală ŞI cea de citire */
   private setPrompt(marker: IMarker | null, col: number): void {
-    if (this.promptMarker && this.promptMarker !== marker) this.promptMarker.dispose()
+    this.clearPrompt()
     this.promptMarker = marker
-    this.promptSnap = null
-    this.rightPrompt = null
-    this.screenSuspect = false
+    this.origMarker = marker
+    this.origCol = col
     this.promptCol = col
   }
 
+  /** re-ancorarea: doar poziţia de citire se mută; cea originală rămâne (citirea conservatoare) */
+  private reanchorAt(marker: IMarker, col: number): void {
+    if (this.promptMarker && this.promptMarker !== this.origMarker && !this.promptMarker.isDisposed) this.promptMarker.dispose()
+    this.promptMarker = marker
+    this.promptCol = col
+    this.promptSnap = null
+    this.screenSuspect = false
+  }
+
   private clearPrompt(): void {
-    this.promptMarker?.dispose()
+    if (this.promptMarker && this.promptMarker !== this.origMarker) this.promptMarker.dispose()
+    this.origMarker?.dispose()
+    this.rightPrompt?.marker.dispose()
     this.promptMarker = null
+    this.origMarker = null
+    this.rightPrompt = null
+    this.promptSnap = null
+    this.screenSuspect = false
+    this.anchorTried = false
   }
 
   /** comanda tocmai încheiată de un D din chunk-ul care se parsează acum: restul chunk-ului îi
@@ -419,37 +487,57 @@ export class CommandTracker {
     const alt = this.pendingAlt()
     if (alt) out.add(alt)
     for (const withSpace of [false, true]) {
-      const full = this.readToEnd(withSpace)
-      if (full) out.add(full)
+      // CONSERVATOR: de la B-ul ORIGINAL până la capătul liniei, netăiat — mereu judecat
+      const o = this.origMarker
+      const oRow = o && !o.isDisposed && typeof o.line === 'number' && o.line >= 0 ? o.line : null
+      if (oRow !== null) {
+        const full = this.readToEnd(oRow, this.origCol, withSpace, false)
+        if (full) out.add(full)
+      }
+      // de la poziţia de citire (eventual re-ancorată), netăiat şi — doar ca variantă în plus — fără RPROMPT
+      const row = this.promptRow
+      if (row !== null) {
+        const full = this.readToEnd(row, this.promptCol, withSpace, false)
+        if (full) out.add(full)
+        const cut = this.readToEnd(row, this.promptCol, withSpace, true)
+        if (cut) out.add(cut)
+      }
     }
     if (base) out.delete(base)
     return [...out]
   }
 
-  /** De la B până la capătul liniei logice care conţine cursorul (rândurile care o continuă). */
-  private readToEnd(spaceOnAmbiguous: boolean): string | null {
+  /** De la (start, col) până la capătul liniei logice care conţine cursorul (rândurile care o
+      continuă). `cutRight`: fără promptul din dreapta — doar dacă rândul şi coloana lui înregistrate
+      îl ţin EXACT şi niciun text tastat nu ajunge în dreptul lui (e doar o variantă în plus). */
+  private readToEnd(start: number, startCol: number, spaceOnAmbiguous: boolean, cutRight: boolean): string | null {
     const b = this.term.buffer.active
-    const start = this.promptRow
-    if (start == null) return null
-    const cur = this.absCursor().row
-    let last = cur
+    const cur = this.absCursor()
+    let last = cur.row
     for (let n = 0; n < 50 && this.rowContinues(last) && b.getLine(last + 1); n++) last++
+    const rp = this.rightPrompt
+    let rpRow = -1
+    if (cutRight) {
+      if (!rp || rp.marker.isDisposed || typeof rp.marker.line !== 'number') return null
+      rpRow = rp.marker.line
+      const l = b.getLine(rpRow)
+      if (!l || l.translateToString(false, rp.col, rp.col + rp.text.length) !== rp.text) return null
+      // textul tastat (până la cursor) nu ajunge la el, iar între cursor şi el sunt doar spaţii
+      if (cur.row === rpRow && cur.col >= rp.col) return null
+      if (cur.row === rpRow && l.translateToString(false, cur.col, rp.col).trim()) return null
+    }
     let out = ''
     for (let row = start; row <= last; row++) {
       const line = b.getLine(row)
       if (!line) continue
-      out += line.translateToString(row === last, row === start ? this.promptCol : 0)
+      const to = cutRight && row === rpRow ? rp!.col : undefined
+      out += line.translateToString(row === last && to === undefined, row === start ? startCol : 0, to)
       if (row !== last) {
         const wrapped = !!b.getLine(row + 1)?.isWrapped
         if (!wrapped && (!reachesLastCell(line, this.term.cols) || spaceOnAmbiguous)) out += ' '
       }
     }
     out = out.trim()
-    const rp = this.rightPrompt
-    if (rp && out.endsWith(rp)) {
-      const cut = out.slice(0, out.length - rp.length)
-      if (/\s$/.test(cut) || !cut) out = cut.trim()
-    }
     return out || null
   }
 

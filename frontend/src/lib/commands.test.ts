@@ -285,7 +285,8 @@ describe('CommandTracker: linia până la capăt, RPROMPT, prefixul promptului',
     tr.notePromptPainted()
     st.t = '$ ls -la' + ' '.repeat(54) + '10:42'; st.col = 8
     expect(tr.promptLost).toBe(false)
-    expect(tr.pendingVariants()).toEqual([])           // capătul liniei = linia până la cursor, fără RPROMPT
+    // citirea conservatoare (netăiată) e judecată mereu; RPROMPT-ul nu atinge regula → fără dialog
+    expect(tr.pendingVariants().some((v) => v.startsWith('ls -la') && v.endsWith('10:42'))).toBe(true)
     expect(judge(tr)).toBe('ok')
   })
 
@@ -386,5 +387,144 @@ describe('CommandTracker.notePromptPainted(reanchor)', () => {
     cursor.row = 2; cursor.col = 16
     tr.notePromptPainted(false)
     expect(tr.promptLost).toBe(true)
+  })
+})
+
+// verificarea lui dcbf298: nicio euristică nu scoate text din ce se judecă — doar adaugă variante
+describe('CommandTracker: citirea conservatoare (de la B-ul original, netăiată) e judecată mereu', () => {
+  function rowsTerm(rows: string[], cursor: { row: number; col: number }) {
+    const buffer = {
+      type: 'normal', baseY: 0,
+      get cursorY() { return cursor.row }, get cursorX() { return cursor.col },
+      getLine: (r: number) => (rows[r] === undefined ? undefined : {
+        length: 80, isWrapped: false,
+        translateToString: (trim: boolean, from = 0, to?: number) => {
+          const s = rows[r].padEnd(80).slice(from, to)
+          return trim ? s.replace(/\s+$/, '') : s
+        },
+        getCell: (x: number) => ({ getChars: () => (rows[r][x] ?? '').trim(), getWidth: () => 1 }),
+      }),
+    }
+    const markers: { line: number }[] = []
+    return {
+      cols: 80, buffer: { active: buffer },
+      registerMarker: () => { const m = { line: cursor.row, isDisposed: false, dispose() {} }; markers.push(m); return m },
+    } as unknown as Terminal
+  }
+  const g: CommandGuard = { enabled: true, rules: [{ pattern: 'rm\\s+-rf\\s+/srv', action: 'block' }] }
+  const judge = (tr: CommandTracker) => judgeLocal({ atPrompt: true, echoed: true, pending: tr.pendingCommand(),
+    pendingAlts: tr.pendingVariants(), unechoed: [], lineLost: tr.promptLost }, g, true).kind
+
+  it('zsh push-line / print -z: linia restaurată după prompt, cursorul la capăt → fără re-ancorare, regula prinde', () => {
+    const rows = ['% rm -rf /srv']
+    const cursor = { row: 0, col: 2 }
+    const term = rowsTerm(rows, cursor)
+    const tr = new CommandTracker(term)
+    tr.handle('B')                                   // B după „% "
+    cursor.col = 13                                  // linia restaurată, cursorul la capăt
+    tr.notePromptPainted(true)                       // prima tastă, nimic în aşteptare
+    // logica din be5f68b: re-ancorat după „/srv" → linie goală → Enter neverificat
+    expect(tr.pendingCommand()).toBe('rm -rf /srv')
+    expect(judge(tr)).toBe('rule')
+  })
+
+  it('sub tmux: linie restaurată după un B vechi (terminator + text) → fără re-ancorare (pierdut → „nu pot verifica")', () => {
+    const rows = ['root@h:~# ls', 'a b', 'root@h:~# rm -rf /srv']
+    const cursor = { row: 0, col: 12 }
+    const term = rowsTerm(rows, cursor)
+    const tr = new CommandTracker(term)
+    tr.handle('B')                                   // B vechi, pe rândul comenzii anterioare
+    cursor.row = 2; cursor.col = 21
+    tr.notePromptPainted(true)
+    expect(tr.promptLost).toBe(true)
+    expect(judge(tr)).not.toBe('ok')
+  })
+
+  it('re-ancorarea legitimă (tmux, B vechi, prompt gol) păstrează citirea de la B-ul original printre variante', () => {
+    const rows = ['root@h:~# echo X', 'X', 'root@h:~# ']
+    const cursor = { row: 0, col: 16 }
+    const term = rowsTerm(rows, cursor)
+    const tr = new CommandTracker(term)
+    tr.handle('B')
+    cursor.row = 2; cursor.col = 10
+    tr.notePromptPainted(true)
+    rows[2] = 'root@h:~# rm -rf /srv'; cursor.col = 21
+    expect(tr.promptLost).toBe(false)
+    expect(tr.pendingCommand()).toBe('rm -rf /srv')
+    expect(judge(tr)).toBe('rule')
+  })
+
+  it('cel mult o re-ancorare per B: snapshot gol la prima tastă, a doua tastă nu mai re-ancorează după „r"', () => {
+    const rows = ['', '', '']
+    const cursor = { row: 0, col: 0 }
+    const term = rowsTerm(rows, cursor)
+    const tr = new CommandTracker(term)
+    tr.handle('B')
+    cursor.row = 2; cursor.col = 0                   // PS1 terminat cu \n: rânduri goale, nimic de reţinut
+    tr.notePromptPainted(true)
+    rows[2] = 'r'; cursor.col = 1
+    tr.notePromptPainted(true)                       // a doua tastă
+    rows[2] = 'rm -rf /srv'; cursor.col = 11
+    // logica din be5f68b: re-ancorat după „r" → „m -rf /srv"
+    expect(tr.pendingCommand()).toBe('rm -rf /srv')
+    expect(judge(tr)).toBe('rule')
+  })
+
+  it('RPROMPT=%~ (/srv/data), ↑ `rm -rf /srv/data`, Home, `sudo ` → citirea netăiată prinde regula', () => {
+    const rows = ['% ' + ' '.repeat(60) + '/srv/data']
+    const cursor = { row: 0, col: 2 }
+    const term = rowsTerm(rows, cursor)
+    const tr = new CommandTracker(term)
+    tr.handle('B')
+    tr.notePromptPainted(true)                        // RPROMPT „/srv/data" reţinut la coloana 62
+    // zsh ascunde RPROMPT-ul cât linia e lungă; ↑ + Home + „sudo "
+    rows[0] = '% sudo rm -rf /srv/data'; cursor.col = 7
+    const v = tr.pendingVariants()
+    // logica din dcbf298: capătul „/srv/data" era tăiat ca RPROMPT → „sudo rm -rf" → regula rata
+    expect(v).toContain('sudo rm -rf /srv/data')
+    expect(judge(tr)).toBe('rule')
+  })
+
+  it('text tastat lipit de cursor la prima tastă nu e luat drept RPROMPT', () => {
+    const rows = ['$ ls -la']
+    const cursor = { row: 0, col: 2 }
+    const term = rowsTerm(rows, cursor)
+    const tr = new CommandTracker(term)
+    tr.handle('B')
+    cursor.col = 4                                    // cursorul la mijlocul unui text existent
+    tr.notePromptPainted(true)
+    rows[0] = '$ ls -la /srv'; cursor.col = 13
+    expect(tr.pendingVariants().concat(tr.pendingCommand() ?? '')).toContain('ls -la /srv')
+  })
+})
+
+describe('CommandTracker: B vechi pe rândul comenzii anterioare (tmux)', () => {
+  it('comanda anterioară `rm -rf /srv/old` NU intră în citirea conservatoare a comenzii următoare', () => {
+    const rows = ['root@h:~# rm -rf /srv/old', '', 'root@h:~# ']
+    const cursor = { row: 0, col: 25 }
+    const buffer = {
+      type: 'normal', baseY: 0,
+      get cursorY() { return cursor.row }, get cursorX() { return cursor.col },
+      getLine: (r: number) => (rows[r] === undefined ? undefined : {
+        length: 80, isWrapped: false,
+        translateToString: (trim: boolean, from = 0, to?: number) => {
+          const s = rows[r].padEnd(80).slice(from, to)
+          return trim ? s.replace(/\s+$/, '') : s
+        },
+        getCell: (x: number) => ({ getChars: () => (rows[r][x] ?? '').trim(), getWidth: () => 1 }),
+      }),
+    }
+    const term = { cols: 80, buffer: { active: buffer },
+      registerMarker: (off = 0) => ({ line: cursor.row + off, isDisposed: false, dispose() {} }) } as unknown as Terminal
+    const tr = new CommandTracker(term)
+    tr.handle('B')                                   // B vechi: pe rândul comenzii deja rulate
+    cursor.row = 2; cursor.col = 10
+    tr.notePromptPainted(true)
+    rows[2] = 'root@h:~# ls'; cursor.col = 12
+    const g: CommandGuard = { enabled: true, rules: [{ pattern: 'rm\\s+-rf\\s+/', action: 'confirm' }] }
+    const v = judgeLocal({ atPrompt: true, echoed: true, pending: tr.pendingCommand(), pendingAlts: tr.pendingVariants(), unechoed: [], lineLost: tr.promptLost }, g, true)
+    expect(v.kind).toBe('ok')
+    // citirea conservatoare a liniei curente: tot rândul ei, cu promptul, netăiat
+    expect(tr.pendingVariants()).toContain('root@h:~# ls')
   })
 })

@@ -311,17 +311,33 @@ closed (review of 3.6.12, `lib/broadcastGuard.ts`), when guardrail rules are act
   column; under tmux `B` can land at column 0, then up to the cursor, cut after the last prompt
   terminator `$ # % > ❯` + space — never a right prompt or typeahead), and when an ED2 / ED3 / RIS /
   scroll region with top > 1 went through the output after `B` with nothing to verify yet (a
-  sequence split across output chunks is caught too). Under tmux `B` arrives before the painted
-  text, so its position can be on the previous command's row; at the **first key after `B`**, when
-  nothing is pending (no typeahead), the line start is re-anchored at the cursor — the real start of
-  the input. With typeahead pending the `B` position stays, and a line that then isn't contiguous is
-  lost (fail closed).
-  **Text after the cursor runs as well**: `↑` recalls `rm -rf /srv/data`, then `Home` or `←` and
-  `sudo ` — read only up to the cursor the guard saw `sudo `. Besides the line up to the cursor the
-  guard judges the line read to the **end of its logical line** (the cursor row and the rows that
-  continue it) and the ambiguous joins; the strictest verdict wins. A right prompt seen on the prompt
-  row at the first key is cut from the end; ghost text (zsh autosuggestions) can only add
-  confirmations, never "Can't check".
+  sequence split across output chunks is caught too).
+  **Principle (verification of dcbf298): no heuristic ever removes text from what the guard judges —
+  heuristics may only add readings.** The guard always judges the **conservative reading**: from the
+  original `B` position to the end of the logical line, uncut; every other reading is an extra
+  variant and the strictest verdict wins. Prompt text in the conservative reading can only add
+  confirmations (the built-in rules don't match prompt text — `user@host:~$`, paths, clocks, git
+  branches).
+  - **Re-anchoring** (the reading start moves to the cursor): at most once per `B`, at the first key
+    after it with nothing pending, and only when `B`'s position is demonstrably stale — on another
+    row, separated from the current line by a row that doesn't continue it (under tmux `B` arrives
+    before the painted text, on the previous command's row), with no prompt terminator followed by
+    more text between it and the cursor (zsh push-line / `print -z` / fzf widgets and redrawn
+    typeahead restore text after the prompt — that is not skipped), or on the same row with the
+    cursor left of `B` (moving the start left only adds text). When `B` was on another row, the
+    conservative reading starts at column 0 of the current line's first row (the whole prompt row,
+    uncut) instead of the stale rows — a previous command (`rm -rf …` already confirmed) or its
+    output is not what runs now and would only cause false dialogs. Otherwise a non-contiguous line
+    stays lost (fail closed).
+  - **Text after the cursor runs as well**: `↑` recalls `rm -rf /srv/data`, then `Home` or `←` and
+    `sudo ` — read only up to the cursor the guard saw `sudo `. The readings judged: up to the cursor,
+    to the **end of the logical line** (the cursor row and the rows that continue it) from the reading
+    start and from the conservative start, and the ambiguous joins.
+  - **Right prompt**: text right of the cursor at the first key, separated from it by blanks, is
+    recorded with its row and column; a reading without it is only an extra variant, built only while
+    that exact text still sits at that position and no typed text reaches it (`RPROMPT='%~'` showing
+    `/srv/data`, then `sudo rm -rf /srv/data` typed: the uncut reading still catches it). Ghost text
+    (zsh autosuggestions) can only add confirmations, never "Can't check".
   Residual: a background job that prints while the keys are in flight still moves the
   cursor and counts as the earliest key's echo;
 - **a single pane (no broadcast) waits for the echo too** (3.6.13): with rules active, Enter /
