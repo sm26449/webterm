@@ -59,6 +59,10 @@ export class CommandTracker {
       se citea de pe alt rând, iar verificarea vedea doar un fragment. Markerul urmează tăierea; un
       marker dispărut (rândul promptului a ieşit din scrollback) = linie necunoscută (fail-closed). */
   private promptMarker: IMarker | null = null
+  /** textul rândului promptului la prima tastă de după B (vezi notePromptPainted) */
+  private promptSnap: string | null = null
+  /** ştergere de ecran / RIS / regiune de scroll după B (vezi noteScreenReset) */
+  private screenSuspect = false
   private promptCol = 0
   private pendingText: string | null = null  // textul comenzii, dacă shell-ul ni-l trimite (E)
   private current: Command | null = null
@@ -93,15 +97,57 @@ export class CommandTracker {
     return m.line
   }
 
-  /** a existat un prompt, dar rândul lui nu mai e în buffer (marker eliberat la tăierea
-      scrollback-ului): linia nu se mai poate citi — fail-closed (review 3.6.13, H1) */
+  /** Rândul promptului nu mai e de încredere — linia nu se poate citi, fail-closed (review 3.6.13,
+      H1 + verificare). Markerul urmează tăierea / inserarea / ştergerea de rânduri, dar NU mişcările
+      fără aceste evenimente: Ctrl+L în zsh (ED2 pe loc, promptul redesenat sus fără un B nou), o
+      regiune de scroll cu marginea de sus ≠ 1 (bara tmux sus, panoul de jos dintr-un split tmux),
+      repictarea tmux după un resize. Deci „pierdut" când:
+        • markerul a ieşit din buffer;
+        • rândul lui e SUB cursor (promptul a fost redesenat mai sus);
+        • între el şi cursor sunt mai multe rânduri decât poate ocupa linia citită;
+        • textul rândului nu mai începe cu ce era acolo la prima tastă de după B (promptul pictat);
+        • după B a trecut prin output o ştergere de ecran / RIS / regiune de scroll mutată şi nu avem
+          ce verifica (nicio tastă încă). */
   get promptLost(): boolean {
-    return this.promptMarker !== null && this.promptRow === null
+    if (this.promptMarker === null) return false
+    const row = this.promptRow
+    if (row === null) return true
+    const cur = this.absCursor().row
+    if (row > cur) return true
+    const cols = this.term.cols || 80
+    const text = this.readCommand()
+    if (cur - row > Math.ceil((this.promptCol + text.length + 1) / cols) + 1) return true
+    if (this.promptSnap !== null) {
+      const line = this.term.buffer.active.getLine(row)
+      if (!line || !line.translateToString(true).startsWith(this.promptSnap)) return true
+    } else if (this.screenSuspect) return true
+    return false
+  }
+
+  /** Prima tastă de după B: promptul e pictat — îi reţinem textul (până la coloana lui B, sau tot
+      rândul dacă B a căzut la coloana 0, ca sub tmux) ca să verificăm la Enter că rândul e tot el. */
+  notePromptPainted(): void {
+    if (this.promptSnap !== null || this.promptMarker === null) return
+    const row = this.promptRow
+    if (row === null) return
+    const line = this.term.buffer.active.getLine(row)
+    if (!line) return
+    const text = line.translateToString(true)
+    const snap = this.promptCol > 0 ? text.slice(0, this.promptCol) : text
+    if (snap.trim()) this.promptSnap = snap
+  }
+
+  /** Output-ul (în ordinea parsării) a trecut printr-o ştergere de ecran (ED2/ED3), RIS sau o regiune
+      de scroll care nu începe la rândul 1: dacă nu vine un B nou, rândul promptului e suspect. */
+  noteScreenReset(): void {
+    if (this.promptMarker !== null) this.screenSuspect = true
   }
 
   private setPrompt(marker: IMarker | null, col: number): void {
     if (this.promptMarker && this.promptMarker !== marker) this.promptMarker.dispose()
     this.promptMarker = marker
+    this.promptSnap = null
+    this.screenSuspect = false
     this.promptCol = col
   }
 
@@ -222,7 +268,7 @@ export class CommandTracker {
     // după replay: necunoscut până la un B live, CHIAR dacă replay-ul s-a oprit într-un C (vezi
     // noteReplayedMark — F1) — cu excepţia stării hub-ului (applyHubState, 3.6.13): un C LIVE
     // (runningUnseen, mai sus) sau un B live aflat în replay-ul complet (promptRow din replay)
-    return !this.staleFlag && this.promptRow !== null
+    return !this.staleFlag && this.promptRow !== null && !this.promptLost
   }
 
   /** Octeţii care curg spre terminal, daţi de SessionView cât rulează o comandă.
@@ -285,10 +331,33 @@ export class CommandTracker {
       // Sub tmux rândurile continuate sunt repictate explicit (fără isWrapped), deci şi un rând umplut
       // până la ultima coloană e o continuare — fără spaţiu (review 3.6.13, L3: comparaţia ecoului e
       // exactă, nu mai ignoră spaţiile)
-      const full = line.translateToString(true).length >= this.term.cols
-      if (row !== end.row && !b.getLine(row + 1)?.isWrapped && !full) out += ' '
+      if (row !== end.row && !b.getLine(row + 1)?.isWrapped && !reachesLastCell(line, this.term.cols)) out += ' '
     }
     return out.trim()
+  }
+
+  /** Varianta „cu spaţiu" a liniei, când un rând plin până la ultima celulă e urmat de unul care NU e
+      marcat ca wrap: poate fi o continuare (tmux repictează fără isWrapped) sau un rând nou (Ctrl+V
+      Ctrl+J, zsh multi-linie) — ambiguu, deci guardrail-ul verifică AMBELE variante (review 3.6.13,
+      L-b). null = nicio ambiguitate. */
+  pendingAlt(): string | null {
+    if (this.promptRow == null || this.term.buffer.active.type === 'alternate') return null
+    const b = this.term.buffer.active
+    const end = this.absCursor()
+    let ambiguous = false
+    let out = ''
+    for (let row = this.promptRow; row <= end.row; row++) {
+      const line = b.getLine(row)
+      if (!line) continue
+      const from = row === this.promptRow ? this.promptCol : 0
+      const to = row === end.row ? end.col : line.length
+      out += line.translateToString(false, from, to)
+      if (row !== end.row && !b.getLine(row + 1)?.isWrapped) {
+        if (reachesLastCell(line, this.term.cols)) ambiguous = true
+        out += ' '
+      }
+    }
+    return ambiguous ? (out.trim() || null) : null
   }
 
   /** Comanda TASTATĂ acum, neexecutată încă (promptRow→cursor). null dacă nu suntem
@@ -501,4 +570,34 @@ export function splitAfterMarks(b: Uint8Array): Uint8Array[] {
   }
   if (from < b.length || out.length === 0) out.push(b.subarray(from))
   return out
+}
+
+/** Rândul ajunge până în ultima CELULĂ (nu lungimea şirului: un caracter lat ocupă două celule). */
+function reachesLastCell(line: { getCell?: (x: number) => { getChars(): string; getWidth(): number } | undefined }, cols: number): boolean {
+  if (!cols || typeof line.getCell !== 'function') return false
+  const last = line.getCell(cols - 1)
+  if (!last) return false
+  if (last.getChars() !== '') return true
+  // a doua jumătate a unui caracter lat (lăţime 0) aflat pe ultimele două celule
+  const prev = cols >= 2 ? line.getCell(cols - 2) : undefined
+  return last.getWidth() === 0 && !!prev && prev.getWidth() === 2
+}
+
+/** Output-ul conţine o ştergere de ecran (ED2 / ED3), RIS sau o regiune de scroll (DECSTBM) care NU
+    începe la rândul 1 — mişcări de rânduri pe care markerele xterm nu le urmează (vezi promptLost). */
+export function screenResetIn(b: Uint8Array): boolean {
+  for (let i = b.indexOf(0x1b); i >= 0; i = b.indexOf(0x1b, i + 1)) {
+    if (b[i + 1] === 0x63) return true                                   // ESC c (RIS)
+    if (b[i + 1] !== 0x5b) continue
+    let j = i + 2
+    let p1 = ''
+    while (j < b.length && b[j] >= 0x30 && b[j] <= 0x39) p1 += String.fromCharCode(b[j++])
+    if ((p1 === '2' || p1 === '3') && b[j] === 0x4a) return true          // CSI 2 J / CSI 3 J
+    if (b[j] === 0x3b) {                                                   // CSI t ; b r
+      j++
+      while (j < b.length && b[j] >= 0x30 && b[j] <= 0x39) j++
+      if (b[j] === 0x72 && p1 !== '' && Number(p1) > 1) return true
+    }
+  }
+  return false
 }

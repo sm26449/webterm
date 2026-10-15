@@ -7,7 +7,7 @@ import { IDisposable, Terminal } from '@xterm/xterm'
 import { modeRestoreSeq } from '../lib/termmodes'
 import { errText, api, CommandGuard, CommandRule, Host, Session, withStepup } from '../lib/api'
 import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
-import { Command, CommandTracker, cmdDuration, matchCommandRule, splitAfterMarks } from '../lib/commands'
+import { Command, CommandTracker, cmdDuration, matchCommandRule, screenResetIn, splitAfterMarks } from '../lib/commands'
 import { EchoTracker, LineKey, countCprReplies, countCprRequests, reportOnly, sendIsReport } from '../lib/echo'
 import { ECHO_GRACE_MS, LocalVerdict, localRunDecision, PeerState, PeerVerdict, RuleHit, guardActive, isBareEnter, judgeLocal, judgePeers, opaqueInput, plainText, runDecision, splitLines, stripControls, submitsLine, unbracket } from '../lib/broadcastGuard'
 import { clearCwd, parseOsc7, setCwd } from '../lib/cwd'
@@ -105,7 +105,7 @@ const SCROLLBACK = (() => {
 /** Ce înregistrează un panou de split în App: trimiterea + starea lui pentru guardrail-ul unui
     Enter difuzat (linia tastată şi dacă o putem crede — vezi lib/broadcastGuard). */
 export interface PaneHandle {
-  send: (d: string | Uint8Array) => void
+  send: (d: string | Uint8Array, kind?: 'key' | 'report' | 'auto') => void
   state: () => PeerState
 }
 
@@ -166,7 +166,7 @@ export default function SessionView(props: {
   /** broadcast (grid): înregistrează funcţia de trimitere a acestui panou sus, ca App să poată
       difuza tastele către toate panourile; raportează tastele locale; afişează indicatorul */
   registerSend?: (sid: string, handle: PaneHandle | null) => void
-  onUserData?: (sid: string, d: string | Uint8Array) => void
+  onUserData?: (sid: string, d: string | Uint8Array, kind?: 'key' | 'report') => void
   broadcasting?: boolean
   /** broadcast: starea CELORLALTE panouri ale split-ului (linia tastată via OSC 133 + flux viu +
       ecou primit) — guardrail-ul verifică fiecare panou-ţintă, nu doar originea (3.6.12) */
@@ -782,6 +782,8 @@ export default function SessionView(props: {
       ws.send(typeof data === 'string' ? new TextEncoder().encode(data) : data)
       // rapoartele terminalului (mouse, focus, CPR, DA…) nu sunt taste: nu aşteaptă ecou (review 3.6.13, M2)
       if (sendIsReport(kind, data, pastingRef.current, cprRef.current > 0)) return
+      // prima tastă de după B: promptul e pictat — rândul lui se verifică la Enter (review 3.6.13, H1)
+      trackerRef.current?.notePromptPainted()
       const { seq, needBase } = echoRef.current.sent(typeof data === 'string' && plainText(data) ? data : null,
         performance.now(), typeof data === 'string' && isBareEnter(data),
         typeof data === 'string' ? data : `<${data.length} bytes>`)
@@ -807,9 +809,9 @@ export default function SessionView(props: {
   broadcastingRef.current = !!props.broadcasting
   /** difuzarea către CELELALTE panouri (App o ignoră fără broadcast). Un panou doar-vizualizare
       (sau în replay) nu trimite nimic nici local — deci nici în panourile vecine (review 3.6.12, L7). */
-  const broadcastOut = useCallback((d: string | Uint8Array) => {
+  const broadcastOut = useCallback((d: string | Uint8Array, kind: 'key' | 'report' = 'key') => {
     if (readOnlyRef.current || muteRef.current) return
-    onUserDataRef.current?.(session.id, d)
+    onUserDataRef.current?.(session.id, d, kind)
   }, [session.id])
   /** trimite LOCAL + (cu broadcast activ) către celelalte panouri — rezultatul guardrail-ului
       (golirea liniei / rularea confirmată) trebuie să ajungă în TOATE panourile-ţintă */
@@ -844,6 +846,7 @@ export default function SessionView(props: {
       atPrompt: tr?.atPrompt() === true,
       echoed: echoedNow(true),
       pending: tr?.pendingCommand() ?? null,
+      pendingAlt: tr?.pendingAlt() ?? null,
       // după un replay (ataşare / reconectare / reluare) linia unui shell cu integration e
       // necunoscută până la următorul prompt live (re-review 3.6.12, M1)
       known: tr ? tr.lineKnown() : true,
@@ -920,6 +923,7 @@ export default function SessionView(props: {
         atPrompt: tr?.atPrompt() === true,
         echoed: echoedNow(false),
         pending: tr?.pendingCommand() ?? null,
+        pendingAlt: tr?.pendingAlt() ?? null,
         unechoed: echoRef.current.unechoed(),
         lineLost: tr?.promptLost === true,
       }, commandGuardRef.current, final, lineOf, extra)
@@ -995,7 +999,7 @@ export default function SessionView(props: {
     if (reportOnly(d, report, pastingRef.current, cprRef.current > 0)) {
       if (typeof d === 'string') cprRef.current = Math.max(0, cprRef.current - countCprReplies(d))
       send(d, 'report')
-      broadcastOut(d)
+      broadcastOut(d, 'report')   // panourile-ţintă primesc clasificarea originii (review 3.6.13, L-a)
       return
     }
     if (submitWaitRef.current) { submitWaitRef.current.push(d); return }
@@ -1060,14 +1064,12 @@ export default function SessionView(props: {
   // broadcast: înregistrează `send`-ul acestui panou în harta din App (sid → send), ca tastele
   // dintr-un panou să poată fi difuzate în toate. `send` e stabil (useCallback []), deci se
   // înregistrează o dată şi se curăţă la demontare.
-  // datele difuzate din alt panou: clasificate aici după formă (rapoartele lui nu sunt taste)
-  const sendFromPeer = useCallback((d: string | Uint8Array) => send(d, 'auto'), [send])
   const registerSend = props.registerSend
   const bcastSid = session.id
   useEffect(() => {
-    registerSend?.(bcastSid, { send: sendFromPeer, state: paneState })
+    registerSend?.(bcastSid, { send, state: paneState })
     return () => registerSend?.(bcastSid, null)
-  }, [registerSend, bcastSid, sendFromPeer, paneState])
+  }, [registerSend, bcastSid, send, paneState])
 
   // `active` = acest client tocmai a devenit dispozitivul folosit (focus/click/tastare).
   // Serverul onorează un resize activ chiar dacă n-am mai interacționat de mult; fără
@@ -1915,6 +1917,8 @@ export default function SessionView(props: {
         const tracked = seq > echo.coarseSeq || echo.waiting
         parts.forEach((part, i) => {
           term.write('', () => {
+            // ştergere de ecran / RIS / regiune de scroll mutată: rândul promptului devine suspect
+            if (tr && screenResetIn(part)) tr.noteScreenReset()
             const text = streamDecoderRef.current.decode(part, { stream: true })
             if (tr?.capturing) tr.feed(text)
           })

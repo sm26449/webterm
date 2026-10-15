@@ -366,9 +366,10 @@ function MainApp() {
     else paneHandles.current.delete(sid)
   }, [])
   // o tastă dintr-un panou → difuzată către CELELALTE (originea a trimis deja local)
-  const handleUserData = useCallback((sid: string, d: string | Uint8Array) => {
+  const handleUserData = useCallback((sid: string, d: string | Uint8Array, kind: 'key' | 'report' = 'key') => {
     if (!broadcastRef.current) return
-    paneHandles.current.forEach((h, osid) => { if (osid !== sid) h.send(d) })
+    // clasificarea originii (tastă / raport de terminal) merge cu datele (review 3.6.13, L-a)
+    paneHandles.current.forEach((h, osid) => { if (osid !== sid) h.send(d, kind) })
   }, [])
   // starea fiecărui panou-ţintă (linia tastată + dacă o putem crede: flux viu, ecou primit) —
   // guardrail-ul unui Enter difuzat cere confirmare când un panou nu poate fi verificat (M1)

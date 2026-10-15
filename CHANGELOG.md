@@ -78,8 +78,10 @@ frontend only — no agent change (agent stays 58).
 - **The typed line is read from the right row in long sessions.** Why: the prompt position was an
   absolute buffer row; once the scrollback is full, every scroll trims the top row and shifts all
   rows by one, so at the bottom of the screen the guardrail read the line from the wrong row and saw
-  only a fragment. It is now an xterm marker that follows the trimming; if the prompt row leaves the
-  buffer the line counts as unknown ("Can't check").
+  only a fragment. It is now an xterm marker that follows the trimming. The line counts as unknown
+  ("Can't check") when the prompt row left the buffer, or moved in a way markers don't follow —
+  zsh `Ctrl+L`, a tmux scroll region not starting at row 1, a repaint: the row is below the cursor,
+  too far above it, or no longer holds the prompt text it had at the first key.
 - **A session id that already belongs to another host no longer breaks that agent's reconcile.**
   Why: when the same machine is enrolled twice (a second host record, the tmux server survives),
   the new agent reports the old host's sessions. Adopting them hit the `sessions` primary key, and

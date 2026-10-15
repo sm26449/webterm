@@ -273,7 +273,8 @@ closed (review of 3.6.12, `lib/broadcastGuard.ts`), when guardrail rules are act
   for at `refresh-client` (XTVERSION, XTGETTCAP, colour-scheme and kitty-keyboard reports) are
   reports too. Only input from the terminal itself (`onData` / `onBinary`) or broadcast from
   another pane is classified by shape; text the app inserts (snippets, palette, "Run again") is
-  always a key. Diagnostics (the console line logged with the "Can't check this line yet" dialog)
+  always a key, and a broadcast carries the origin's classification to the other panes (a pane
+  never re-classifies broadcast data by shape). Diagnostics (the console line logged with the "Can't check this line yet" dialog)
   show non-text keys only by shape — printable characters are masked.
   Found by the e2e gate on the merged branch (ordinary typing must never ask): **Enter** is
   confirmed by the first line change in output that arrived after it, and everything queued before
@@ -285,8 +286,11 @@ closed (review of 3.6.12, `lib/broadcastGuard.ts`), when guardrail rules are act
   live prompt) and everything before it leave the queue when a readable line appears. The
   quiet-window candidate is also checked at each output, not only at the next Enter. Matching is
   **exact** — the line read from the prompt must equal the reference plus the typed text; a
-  soft-wrapped row (or, under tmux, a row filled to the last column) is joined without a space, so
-  a long line still matches; anything that doesn't match stays un-echoed (fail closed). Past 64
+  soft-wrapped row (or a row whose last cell is filled — measured in cells, so wide characters
+  count) is joined without a space, so a long line still matches. A full row followed by a row not
+  marked as wrapped is ambiguous (tmux repaints continuation rows without the wrap flag, but it can
+  also be a real line break: `Ctrl+V Ctrl+J`, zsh multi-line): the guardrail checks the rules
+  against both joins and the stricter verdict wins; anything that doesn't match stays un-echoed (fail closed). Past 64
   un-echoed sends, only runs of plain text are merged (a merged run is confirmed only whole and
   keeps its text, so the single-pane check appends it instead of asking); Enter, non-text and blind
   keys stay separate, and only past 64 of those does everything collapse into one text-less entry.
@@ -297,9 +301,15 @@ closed (review of 3.6.12, `lib/broadcastGuard.ts`), when guardrail rules are act
   by one (xterm no longer moves `ybase`) — a long session at the bottom of the screen read the line
   from the wrong row, and the guard saw only a fragment. The marker follows the trimming; if the
   prompt row leaves the buffer entirely the line is **lost**: unknown for broadcast, and "Can't check
-  this line yet" in a single pane. Not done: checking at Enter that the row still holds what it held
-  at `B` — under tmux the marks arrive before the prompt is painted, so there is nothing reliable to
-  compare at `B`. Residual: a background job that prints while the keys are in flight still moves the
+  this line yet" in a single pane. The marker follows trims, inserts and deletes, but not rows that
+  move without them — zsh's `Ctrl+L` (ED2 in place, prompt redrawn at the top, no new `B`), a scroll
+  region whose top isn't row 1 (tmux status line at the top, the lower pane of a tmux split), a tmux
+  repaint after a resize. So the line is also **lost** when the marker's row is below the cursor,
+  when more rows separate it from the cursor than the line read could fill, when the row no longer
+  starts with the text it held at the first key sent after `B` (the prompt is painted by then; under
+  tmux `B` can land at column 0, so the whole row at that moment is kept), and when an ED2 / ED3 /
+  RIS / scroll region with top > 1 went through the output after `B` with nothing to verify yet.
+  Residual: a background job that prints while the keys are in flight still moves the
   cursor and counts as the earliest key's echo;
 - **a single pane (no broadcast) waits for the echo too** (3.6.13): with rules active, Enter /
   `Ctrl+J` and a chunk ending in a line break wait up to 150 ms; then, if keys are still un-echoed

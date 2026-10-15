@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import type { Terminal } from '@xterm/xterm'
-import { CommandTracker, splitAfterMarks } from './commands'
+import { CommandTracker, screenResetIn, splitAfterMarks } from './commands'
+import type { CommandGuard } from './api'
+import { judgeLocal } from './broadcastGuard'
 
 const enc = new TextEncoder()
 const dec = (b: Uint8Array) => new TextDecoder().decode(b)
@@ -108,5 +110,132 @@ describe('CommandTracker: rândul promptului urmează tăierea scrollback-ului',
     expect(tr.promptLost).toBe(true)
     expect(tr.pendingCommand()).toBeNull()
     expect(tr.lineKnown()).toBe(false)
+  })
+})
+
+// verificarea lui 222eae0 (H1 rezidual): rândul promptului mutat FĂRĂ evenimente de marker
+describe('CommandTracker.promptLost: rânduri mutate fără evenimente de marker', () => {
+  function screen(rowsInit: string[], cursor: { row: number; col: number }) {
+    const rows = rowsInit.map((t) => ({ t, w: false }))
+    const buffer = {
+      type: 'normal', baseY: 0,
+      get cursorY() { return cursor.row }, get cursorX() { return cursor.col },
+      getLine: (r: number) => (rows[r] !== undefined
+        ? { length: 80, isWrapped: rows[r].w, translateToString: (trim: boolean, from = 0, to?: number) => {
+            const s = rows[r].t.slice(from, to)
+            return trim ? s.replace(/\s+$/, '') : s
+          } }
+        : undefined),
+    }
+    const term = {
+      cols: 80, buffer: { active: buffer },
+      registerMarker: () => ({ line: cursor.row, isDisposed: false, dispose() {} }),
+    } as unknown as Terminal
+    return { term, rows, cursor }
+  }
+  const block: CommandGuard = { enabled: true, rules: [{ pattern: 'rm\\s+-rf', action: 'block' }] }
+
+  it('prompt normal: tastare pe acelaşi rând → nu e pierdut, regula prinde', () => {
+    const { term, rows, cursor } = screen(['out', 'out', '% '], { row: 2, col: 2 })
+    const tr = new CommandTracker(term)
+    tr.handle('B')
+    tr.notePromptPainted()
+    rows[2].t = '% rm -rf /'; cursor.col = 10
+    expect(tr.promptLost).toBe(false)
+    expect(tr.lineKnown()).toBe(true)
+    expect(tr.pendingCommand()).toBe('rm -rf /')
+    expect(judgeLocal({ atPrompt: true, echoed: true, pending: tr.pendingCommand(), unechoed: [], lineLost: tr.promptLost }, block, true).kind).toBe('rule')
+  })
+
+  it('zsh Ctrl+L: ecranul şters pe loc, promptul redesenat SUS fără B nou → pierdut, „nu pot verifica"', () => {
+    const { term, rows, cursor } = screen(['a', 'b', 'c', 'd', 'e', '% '], { row: 5, col: 2 })
+    const tr = new CommandTracker(term)
+    tr.handle('B')
+    tr.notePromptPainted()
+    // ED2 + redesenare: rândurile rescrise pe loc (markerul rămâne pe rândul 5), cursorul sus
+    for (const r of rows) r.t = ''
+    rows[0].t = '% rm -rf /'; cursor.row = 0; cursor.col = 10
+    // logica din 222eae0: promptRow (5) > cursor (0) → linie goală → Enter neverificat
+    expect(tr.promptLost).toBe(true)
+    expect(tr.lineKnown()).toBe(false)
+    expect(judgeLocal({ atPrompt: true, echoed: true, pending: tr.pendingCommand(), unechoed: [], lineLost: tr.promptLost }, block, true).kind).toBe('unknown')
+  })
+
+  it('regiune de scroll cu marginea de sus ≠ 1: conţinutul urcă, markerul nu → textul rândului s-a schimbat → pierdut', () => {
+    const { term, rows, cursor } = screen(['status', 'x', '$ ', ''], { row: 2, col: 2 })
+    const tr = new CommandTracker(term)
+    tr.handle('B')
+    tr.notePromptPainted()                          // „$ " reţinut
+    rows[2].t = '$ rm -rf /srv/da'; rows[3] = { t: 'ta/old', w: true }; cursor.row = 3; cursor.col = 6
+    expect(tr.promptLost).toBe(false)
+    // derulare în regiune: rândul 2 primeşte continuarea, promptul urcă pe rândul 1 (fără evenimente)
+    rows[1] = { t: '$ rm -rf /srv/da', w: false }; rows[2] = { t: 'ta/old', w: true }; rows[3] = { t: '', w: false }
+    cursor.row = 2
+    expect(tr.promptLost).toBe(true)
+    expect(tr.lineKnown()).toBe(false)
+  })
+
+  it('ştergere de ecran / RIS în output după B, fără nicio tastă de verificat → pierdut; după B nou → bine', () => {
+    const { term, cursor } = screen(['$ '], { row: 0, col: 2 })
+    const tr = new CommandTracker(term)
+    tr.handle('B')
+    tr.noteScreenReset()
+    expect(tr.promptLost).toBe(true)
+    tr.handle('A'); cursor.col = 2; tr.handle('B')
+    expect(tr.promptLost).toBe(false)
+  })
+
+  it('screenResetIn: ED2, ED3, RIS, DECSTBM cu marginea de sus > 1; nu SGR / DECSTBM 1;n', () => {
+    const e = (s: string) => new TextEncoder().encode(s)
+    for (const s of ['\x1b[2J', 'x\x1b[3J', '\x1bc', '\x1b[3;24r']) expect(screenResetIn(e(s)), JSON.stringify(s)).toBe(true)
+    for (const s of ['\x1b[0m', '\x1b[1;23r', '\x1b[J', '\x1b[1J', 'plain', '\x1b[r']) expect(screenResetIn(e(s)), JSON.stringify(s)).toBe(false)
+  })
+})
+
+// verificare 222eae0, L-b: rând plin urmat de un rând fără wrap — ambiguu, ambele variante verificate
+describe('CommandTracker.pendingAlt: lipirea rândurilor', () => {
+  function cellTerm(rowTexts: string[], wrapped: boolean[], cols: number, wide = false) {
+    const buffer = {
+      type: 'normal', baseY: 0, cursorY: rowTexts.length - 1,
+      // la B (rândul 0) cursorul e la coloana 0; după, la capătul ultimului rând
+      get cursorX() { return this.cursorY === 0 ? 0 : rowTexts[rowTexts.length - 1].length },
+      getLine: (r: number) => (rowTexts[r] === undefined ? undefined : {
+        length: cols, isWrapped: wrapped[r],
+        translateToString: (_t: boolean, from = 0, to?: number) => rowTexts[r].slice(from, to),
+        getCell: (x: number) => {
+          if (wide && r === 0 && x >= cols - 2) return { getChars: () => (x === cols - 2 ? '字' : ''), getWidth: () => (x === cols - 2 ? 2 : 0) }
+          return { getChars: () => rowTexts[r][x] ?? '', getWidth: () => 1 }
+        },
+      }),
+    }
+    let marker = 0
+    return { buffer: { active: buffer }, cols, registerMarker: () => ({ line: marker++ === 0 ? 0 : 0, isDisposed: false, dispose() {} }) } as unknown as Terminal
+  }
+  it('rând plin (ultima celulă ocupată) + rând fără wrap → linia fără spaţiu ŞI varianta cu spaţiu', () => {
+    const term = cellTerm(['aaaaaaaaaa', 'rm -rf /'], [false, false], 10)
+    ;(term.buffer.active as unknown as { cursorY: number }).cursorY = 0
+    const tr = new CommandTracker(term)
+    tr.handle('B')
+    ;(term.buffer.active as unknown as { cursorY: number }).cursorY = 1
+    expect(tr.pendingCommand()).toBe('aaaaaaaaaarm -rf /')
+    expect(tr.pendingAlt()).toBe('aaaaaaaaaa rm -rf /')
+    const g: CommandGuard = { enabled: true, rules: [{ pattern: '\\brm\\s+-rf', action: 'block' }] }
+    // doar varianta lipită ar rata `\brm`; verificarea ia verdictul mai strict
+    expect(judgeLocal({ atPrompt: true, echoed: true, pending: tr.pendingCommand(), pendingAlt: tr.pendingAlt(), unechoed: [] }, g, true).kind).toBe('rule')
+  })
+  it('rând marcat isWrapped → fără ambiguitate; caracter lat pe ultimele celule = rând plin', () => {
+    const t1 = cellTerm(['aaaaaaaaaa', 'bb'], [false, true], 10)
+    ;(t1.buffer.active as unknown as { cursorY: number }).cursorY = 0
+    const tr1 = new CommandTracker(t1)
+    tr1.handle('B')
+    ;(t1.buffer.active as unknown as { cursorY: number }).cursorY = 1
+    expect(tr1.pendingAlt()).toBeNull()
+    expect(tr1.pendingCommand()).toBe('aaaaaaaaaabb')
+    const t2 = cellTerm(['aaaa字', 'x'], [false, false], 6, true)
+    ;(t2.buffer.active as unknown as { cursorY: number }).cursorY = 0
+    const tr2 = new CommandTracker(t2)
+    tr2.handle('B')
+    ;(t2.buffer.active as unknown as { cursorY: number }).cursorY = 1
+    expect(tr2.pendingAlt()).toBe('aaaa字 x')
   })
 })
