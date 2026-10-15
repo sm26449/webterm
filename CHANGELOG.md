@@ -123,6 +123,20 @@ frontend only — no agent change (agent stays 58).
   exists on the docker daemon (names are daemon-global: other clones, other users;
   `WTCI_CLEAN_STALE=1` removes leftovers), refuse when the lock cannot be taken, and set the
   cleanup trap only after every refusal.
+- **Buttons whose visible text was missing from their accessible name (WCAG 2.5.3, label in
+  name).** Why: axe-core 4.14.0, published the day of the 3.6.13 tag, enabled
+  `label-content-name-mismatch` and the blocking accessibility step installed axe unpinned, so the
+  tag CI went red while the local gate (still on 4.13) passed. Someone using voice control says what
+  they see — "click A minus", "tap Esc" — and these names did not contain it: the terminal toolbar
+  `A−` / `A+` (now "A− Smaller font" / "A+ Larger font"; the tooltip is unchanged), the sidebar
+  `Ctrl+K` badge ("Open the command palette, Ctrl+K"), the tab-list count (`All open tabs: 3` — axe
+  ignores text in parentheses, so `(3)` did not count), the tab-order toggle ("Tab order: manual"
+  instead of "Toggle tab order"), the mobile keybar `Esc` / `PgUp` / `PgDn` ("Esc (Escape)",
+  "PgUp (Page up)", …), and the session cards on a host page: the button wrapped the terminal
+  snapshot too, so arbitrary terminal output counted as its visible text; it now holds only the
+  session title and covers the card with a pseudo-element (same click target, focus ring on the card). `@axe-core/playwright` is now pinned to exactly 4.14.0 in
+  `frontend/package.json` and in the CI install, so a new axe release is adopted deliberately in
+  both places instead of turning a release red unannounced.
 
 ## [3.6.12] — 2026-10-15 · agent (58)
 

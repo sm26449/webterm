@@ -490,7 +490,10 @@ jobs:
           # `npm install` ulterior le consideră „extraneous" şi le CURĂŢĂ. Instalat separat,
           # axe-core ştergea chiar `playwright`, iar pasul pica cu ERR_MODULE_NOT_FOUND —
           # descoperit rulând pasul local, nu citindu-l.
-          npm install --no-save --no-audit --no-fund playwright@1.63.0 @axe-core/playwright >/dev/null
+          # Versiune EXACTĂ, aceeaşi ca în frontend/package.json: nepinat, axe 4.14.0 (publicat în
+          # ziua tagului 3.6.13) a activat regula label-content-name-mismatch şi a picat
+          # release-ul fără ca local să se vadă ceva. Un axe nou se adoptă deliberat, în ambele locuri.
+          npm install --no-save --no-audit --no-fund playwright@1.63.0 @axe-core/playwright@4.14.0 >/dev/null
           # Rulează în IMAGINEA oficială Playwright (aceeaşi pe care o foloseşte scripts/ci-local.sh
           # prin `pwrun`), nu direct pe runner: poarta măsoară mărimi de ţinte (target-size) şi
           # contrast, iar ambele depind de fonturile şi de browserul instalate. Pe runner (fonturi

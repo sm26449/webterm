@@ -2505,8 +2505,8 @@ export default function SessionView(props: {
             <ToolButton title={t('session.linksTooltip')} active={linksOpen} onClick={openLinks}><ExternalLinkIcon /></ToolButton>
             <ToolButton title={t('session.note')} active={showNote} toggle onClick={() => setShowNote(!showNote)}><NoteIcon /></ToolButton>
             <ToolButton title={t('session.copySelection')} onClick={copySelection}>{copied ? <CheckIcon size={16} /> : <CopyIcon />}</ToolButton>
-            <ToolButton title={t('session.fontSmaller')} onClick={() => setPreferredFont(fontSize - 1)}><span className="text-sm">A−</span></ToolButton>
-            <ToolButton title={t('session.fontLarger')} onClick={() => setPreferredFont(fontSize + 1)}><span className="text-sm">A+</span></ToolButton>
+            <ToolButton title={t('session.fontSmaller')} name={`A− ${t('session.fontSmaller')}`} onClick={() => setPreferredFont(fontSize - 1)}><span className="text-sm">A−</span></ToolButton>
+            <ToolButton title={t('session.fontLarger')} name={`A+ ${t('session.fontLarger')}`} onClick={() => setPreferredFont(fontSize + 1)}><span className="text-sm">A+</span></ToolButton>
             {!props.popout && (
               <ToolButton title={t('session.shareLinkTooltip')} active={!!shareUrl || !!shareActive || shareOpen} onClick={share}><ShareIcon /></ToolButton>
             )}
@@ -3281,20 +3281,25 @@ function LinksDialog(props: { links: string[]; onClose: () => void; onCopy: (u: 
 
 const ToolButton = forwardRef<HTMLButtonElement, {
   title: string
+  /** numele accesibil, când butonul are text VIZIBIL (ex. „A−"): WCAG 2.5.3 (label in name) cere ca
+      numele să CONŢINĂ textul vizibil — altfel cine dă comenzi vocale („click A minus") nu-l găseşte.
+      Implicit = `title`. `title` rămâne tooltip-ul. */
+  name?: string
   active?: boolean
   /** comutator (panou deschis/închis): `aria-pressed` = `active` */
   toggle?: boolean
   onClick: () => void
   children: React.ReactNode
 } & Pick<React.ButtonHTMLAttributes<HTMLButtonElement>, 'aria-expanded' | 'aria-controls' | 'aria-haspopup'>>(
-  function ToolButton({ title, active, toggle, onClick, children, ...aria }, ref) {
+  function ToolButton({ title, name, active, toggle, onClick, children, ...aria }, ref) {
     // IconButton-ul design system-ului (label = aria-label + title); starea „activ" = varianta
     // `active` a primitivei (3.6.3, U24), nu clase de culoare suprapuse peste ghost
     return (
       <IconButton
         ref={ref}
         type="button"
-        label={title}
+        label={name ?? title}
+        title={title}
         active={!!active}
         aria-pressed={toggle ? !!active : undefined}
         {...aria}

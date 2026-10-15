@@ -155,14 +155,15 @@ export default function TabBar(props: {
       >
         <HomeIcon />
       </button>
-      {/* ordinea taburilor DESCHISE: manual (stabil) ↔ activitate (ultima folosire). Opt-in. */}
+      {/* ordinea taburilor DESCHISE: manual (stabil) ↔ activitate (ultima folosire). Opt-in.
+          Numele conţine modul VIZIBIL („manual" / „activity"), WCAG 2.5.3 (label in name). */}
       {props.tabs.length > 1 && (
         <button
           onClick={props.onToggleSort}
           title={props.sort === 'activity'
             ? t('tabbar.sortByActivityTitle')
             : t('tabbar.sortManualTitle')}
-          aria-label={t('tabbar.toggleSort')}
+          aria-label={t('tabbar.toggleSort', { mode: props.sort === 'activity' ? t('tabbar.activity') : t('tabbar.manual') })}
           aria-pressed={props.sort === 'activity'}
           className={`wt-touch wt-tabbtn mb-1.5 flex shrink-0 items-center gap-1 rounded-md px-2 py-1.5 text-2xs ${
             props.sort === 'activity' ? 'is-active' : 'text-slate-500'}`}

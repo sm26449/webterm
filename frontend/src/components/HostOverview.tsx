@@ -568,7 +568,11 @@ function ThumbPreview({ sid, live }: { sid: string; live: boolean }) {
 }
 
 /** Card-thumbnail pentru o sesiune activă: snapshot text al transcriptului + titlu + acţiuni la
-    hover (split/popout). Click pe card = deschide terminalul. Dă paginii Overview aer de dashboard. */
+    hover (split/popout). Click pe card = deschide terminalul. Dă paginii Overview aer de dashboard.
+    Butonul conţine DOAR titlul; întinderea pe tot cardul o face `::after` (absolut, inset-0). Înainte
+    butonul învelea şi snapshot-ul: textul lui (output de terminal, oricât) devenea „textul vizibil" al
+    butonului, iar numele („Session 12 — Open the terminal") nu-l conţinea — WCAG 2.5.3 (label in name),
+    axe 4.14 `label-content-name-mismatch`. Snapshot-ul e o imagine a ecranului, nu o etichetă. */
 function SessionThumb(props: {
   session: Session
   onOpen: () => void
@@ -579,22 +583,25 @@ function SessionThumb(props: {
   const s = props.session
   return (
     <div className="group relative overflow-hidden rounded-xl bg-ink-900 ring-1 ring-ink-700 transition hover:ring-sky-500/60">
-      <button onClick={props.onOpen} className="block w-full text-left"
-        title={t('host.openTerminal')} aria-label={`${sessionTitle(s.title, t) || t('host.sessionFallback')} — ${t('host.openTerminal')}`}>
-        {/* fereastra de preview: snapshot text al transcriptului (fiabil la orice dimensiune) */}
-        <div className="wt-workspace relative h-[132px] w-full overflow-hidden">
-          <ThumbPreview sid={s.id} live />
-          {/* overlay „deschide" la hover */}
-          <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/0 opacity-0 transition group-hover:bg-black/30 group-hover:opacity-100">
-            <span className="rounded-xl bg-sky-600 px-3 py-1.5 text-xs font-medium text-white shadow-lg">{t('host.openTerminal')}</span>
-          </div>
+      {/* fereastra de preview: snapshot text al transcriptului (fiabil la orice dimensiune) */}
+      <div className="wt-workspace relative h-[132px] w-full overflow-hidden">
+        <ThumbPreview sid={s.id} live />
+        {/* overlay „deschide" la hover */}
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/0 opacity-0 transition group-hover:bg-black/30 group-hover:opacity-100">
+          <span aria-hidden="true" className="rounded-xl bg-sky-600 px-3 py-1.5 text-xs font-medium text-white shadow-lg">{t('host.openTerminal')}</span>
         </div>
-        <div className="flex items-center gap-2 px-3 py-2">
-          <span className="h-2 w-2 shrink-0 rounded-full bg-emerald-400 dot-live" />
-          <span className="min-w-0 flex-1 truncate text-sm text-slate-200">{sessionTitle(s.title, t) || t('host.sessionFallback')}</span>
-          {s.connected_clients > 0 && <span className="flex shrink-0 items-center gap-1 text-2xs text-slate-500"><EyeIcon /> {s.connected_clients}</span>}
-        </div>
-      </button>
+      </div>
+      <div className="flex items-center gap-2 px-3 py-1.5">
+        <span className="h-2 w-2 shrink-0 rounded-full bg-emerald-400 dot-live" />
+        {/* `after:` = ţinta de click pe tot cardul; inelul de focus stă pe ea (cardul întreg), nu pe titlu.
+            `min-h-6`: butonul ÎNSUŞI are ≥ 24px (WCAG 2.5.8); rândul trece pe py-1.5, cardul rămâne la fel de înalt */}
+        <button onClick={props.onOpen}
+          title={t('host.openTerminal')} aria-label={`${sessionTitle(s.title, t) || t('host.sessionFallback')} — ${t('host.openTerminal')}`}
+          className="min-h-6 min-w-0 flex-1 truncate text-left text-sm text-slate-200 outline-none after:absolute after:inset-0 after:rounded-xl after:content-[''] focus-visible:after:ring-2 focus-visible:after:ring-inset focus-visible:after:ring-[rgb(var(--focus))]">
+          {sessionTitle(s.title, t) || t('host.sessionFallback')}
+        </button>
+        {s.connected_clients > 0 && <span className="flex shrink-0 items-center gap-1 text-2xs text-slate-500"><EyeIcon /> {s.connected_clients}</span>}
+      </div>
       {/* acţiuni rapide — apar la hover ŞI când focusul e înăuntru (altfel erau focusabile dar
           invizibile: focusul „dispărea" pe card), pe ecrane mari (split/popout cer spaţiu) */}
       <div className="absolute right-1.5 top-1.5 hidden gap-1 opacity-0 transition focus-within:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 lg:flex">

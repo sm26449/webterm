@@ -852,11 +852,13 @@ export default function Sidebar(props: {
             <CloseIcon size={13} />
           </IconButton>
         ) : (
-          /* badge-ul de scurtătură: doar unde EXISTĂ tastatură */
+          /* badge-ul de scurtătură: doar unde EXISTĂ tastatură. Numele conţine scurtătura vizibilă
+             (WCAG 2.5.3, label in name): „Ctrl+K" e tot ce se vede, deci e ce dictează cineva. Fără
+             paranteze în jurul ei — axe le ignoră la comparaţie. */
           <button
             onClick={props.onOpenPalette}
             title={t('sidebar.paletteTitle', { key: fmt('Mod+K') })}
-            aria-label={t('sidebar.openPalette')}
+            aria-label={t('sidebar.openPalette', { key: fmt('Mod+K') })}
             className="absolute right-0 top-1/2 hidden min-h-6 -translate-y-1/2 items-center rounded-md bg-white/5 px-1.5 text-2xs text-slate-400 hover:bg-white/10 hover:text-slate-200 [@media(hover:hover)]:inline-flex"
           >
             {fmt('Mod+K')}

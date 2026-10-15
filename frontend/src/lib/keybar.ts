@@ -8,13 +8,15 @@ const WHEEL_DOWN = '\x1b[<65;40;10M'.repeat(3) // derulează istoricul (copy-mod
 
 // `aria`: eticheta citită de cititorul de ecran — glifele (⇞ ↑ ^C |) sunt mute sau citite
 // ca „caret C". Cheie de catalog (`keybar.*`) sau text neutru (Escape/Tab/Ctrl+C sunt la fel
-// în orice limbă).
+// în orice limbă). Numele trebuie să CONŢINĂ textul vizibil (WCAG 2.5.3, label in name — axe
+// 4.14 `label-content-name-mismatch`): cine dictează „tap Esc" / „tap PgUp" trebuie să nimerească
+// butonul. Deci „Esc (Escape)", nu doar „Escape"; explicaţia stă în paranteză.
 // `wheel`: rapoarte de rotiţă pentru tmux — NU primesc modificatori (n-ar mai fi rotiţă).
 export type KeyDef = { label: string; seq: string; aria: string; wheel?: boolean }
 
 /** Rândul 1: ce-ţi trebuie mereu (Ctrl/Alt sunt randate separat, ca modificatori latch-uiţi). */
 export const ROW1: KeyDef[] = [
-  { label: 'Esc', seq: '\x1b', aria: 'Escape' },
+  { label: 'Esc', seq: '\x1b', aria: 'Esc (Escape)' },
   { label: 'Tab', seq: '\t', aria: 'Tab' },
   { label: '↑', seq: '\x1b[A', aria: 'keybar.up' },
   { label: '↓', seq: '\x1b[B', aria: 'keybar.down' },
