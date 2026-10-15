@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { CommandGuard } from './api'
-import { EchoTracker, isTerminalReport, LineKey, ECHO_PENDING_MAX, reportOnly } from './echo'
+import { countCprReplies, countCprRequests, EchoTracker, isTerminalReport, LineKey, ECHO_PENDING_MAX, reportOnly } from './echo'
 import { echoSettleMs, judgeLocal, localRunDecision, plainText } from './broadcastGuard'
 
 // Un „shell" minimal: linia tastată + cursorul la capăt, cu istoric pentru ↑.
@@ -225,7 +225,7 @@ describe('3.6.13 (review M2): rapoartele terminalului nu sunt taste', () => {
     }
   })
   it('tastele rămân taste (fail-closed): ↑, Ctrl+P, TAB, F3 cu modificatori şi Meta (= CSI 1;n R), text', () => {
-    for (const d of ['\x1b[A', '\x10', '\t', '\x1b[1;5R', '\x1b[1;2R', '\x1b[1;9R', '\x1b[1;16R', 'ls', '\x1b[I ls', '', '\x1b[200~x\x1b[201~']) {
+    for (const d of ['\x1b[A', '\x10', '\t', '\x1b[1;5R', '\x1b[1;2R', '\x1b[1;9R', '\x1b[1;16R', '\x1b[1;40R', 'ls', '\x1b[I ls', '', '\x1b[200~x\x1b[201~']) {
       expect(isTerminalReport(d), JSON.stringify(d)).toBe(false)
     }
   })
@@ -240,5 +240,58 @@ describe('3.6.13 (review L4, L6)', () => {
   it('plasa de timp a ecoului e plafonată (vârf de RTT)', () => {
     expect(echoSettleMs(30_000)).toBe(5000)
     expect(echoSettleMs(1000)).toBe(4000)
+  })
+})
+
+describe('3.6.13, verificarea finală', () => {
+  // LOW-C: output primit dar încă neparsat → nu e „linişte"
+  it('o scriere încă neparsată amână confirmarea tastei ne-text', () => {
+    const p = pane(['ls'])
+    p.send('\x1b[A')
+    p.arrive(1)
+    p.echo.writeStart()              // o scriere mare, parsată în felii — callback-ul n-a venit încă
+    p.tick(200)
+    expect(p.local().echoed).toBe(false)
+    p.echo.writeEnd()
+    p.tick(100)
+    expect(p.local().echoed).toBe(true)
+  })
+
+  // LOW-A: ↑ apoi „ -v" tastat imediat
+  it('text simplu tastat imediat după o tastă ne-text e confirmat odată cu ea (fără plasa de 1 s)', () => {
+    const p = pane(['ls'])
+    p.send('\x1b[A')
+    p.arrive(1)                      // „ls"
+    for (const c of ' -v') p.send(c)
+    p.arrive(3)                      // „ls -v": încă în aceeaşi rafală
+    p.tick(100)
+    const st = p.local()
+    expect(st.echoed).toBe(true)
+    expect(st.unechoed).toEqual([])
+    expect(st.pending).toBe('ls -v')
+  })
+  it('… dar nu dacă linia de la prima schimbare îl conţinea deja (nu e ecoul lui)', () => {
+    const p = pane([])
+    p.send('\x1b[A')
+    p.chunk('x -v')                  // linia avea deja „ -v" la prima schimbare
+    p.send(' '); p.send('-'); p.send('v')
+    p.tick(100)
+    expect(p.local().unechoed).toEqual([' ', '-', 'v'])
+  })
+
+  // LOW-B: CPR pe rândul 1 doar după o cerere din output
+  it('ESC[1;nR: raport doar după o cerere de poziţie (ESC[6n / ESC[?6n) din output', () => {
+    expect(isTerminalReport('\x1b[1;5R')).toBe(false)
+    expect(isTerminalReport('\x1b[1;5R', true)).toBe(true)
+    expect(isTerminalReport('\x1b[12;5R')).toBe(true)
+    expect(reportOnly('\x1b[1;40R', false, false, true)).toBe(true)
+    expect(reportOnly('\x1b[1;40R', false, false, false)).toBe(false)
+    // nici o cerere nu face raport un chunk cu linie sau un paste
+    expect(reportOnly('\x1b[1;40R\r', false, false, true)).toBe(false)
+    expect(reportOnly('\x1b[1;40R', false, true, true)).toBe(false)
+    const enc = new TextEncoder()
+    expect(countCprRequests(enc.encode('a\x1b[6nb\x1b[?6n\x1b[0m\x1b[6'))).toBe(2)
+    expect(countCprRequests(enc.encode('\x1b[5n\x1b[16n'))).toBe(0)
+    expect(countCprReplies('\x1b[1;5R\x1b[?3;1R')).toBe(2)
   })
 })

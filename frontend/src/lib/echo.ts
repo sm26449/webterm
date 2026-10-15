@@ -58,8 +58,15 @@ export class EchoTracker {
   /** cea mai veche tastă care NU e text simplu, a cărei linie s-a schimbat: se confirmă abia după ce
       fluxul a tăcut (quietMs) şi linia a rămas aceeaşi — o redesenare ruptă în două chunk-uri nu mai
       confirmă două taste (review 3.6.13, a treia trecere, MEDIUM-2) */
-  private cand: { seq: number; key: string; at: number } | null = null
+  private cand: { seq: number; key: string; at: number; firstLine: string } | null = null
   private lastOutAt = 0
+  /** output primit de xterm dar încă neparsat (term.write fără callback încă): cât e > 0, fluxul NU
+      e „liniştit" — o scriere mare se parsează în mai multe felii, iar linia de acum nu e finală
+      (review final 3.6.13, LOW-C). SessionView: writeStart() la term.write, writeEnd() în callback. */
+  private inFlight = 0
+
+  writeStart(): void { this.inFlight++ }
+  writeEnd(): void { if (this.inFlight > 0) this.inFlight-- }
 
   /** O tastă (sau un text) a plecat spre host. `text` = textul ei dacă e text simplu, altfel null.
       `needBase` = nu aştepta nimic înainte: apelantul ia instantaneul liniei DUPĂ ce xterm a parsat
@@ -160,7 +167,7 @@ export class EchoTracker {
       // şi abia după ce fluxul tace (vezi quiet). Încă o schimbare înainte de asta = aceeaşi rafală
       // (ex. redesenarea lui ↑ ruptă în două chunk-uri): reporneşte aşteptarea, nu confirmă alta
       if (this.cand && this.cand.seq === head.seq) { this.cand.key = cur.k; this.cand.at = nowMs }
-      else this.cand = { seq: head.seq, key: cur.k, at: nowMs }
+      else this.cand = { seq: head.seq, key: cur.k, at: nowMs, firstLine: cur.line }
     }
     // (un typeahead „orb" nu se confirmă dintr-o schimbare oarecare, doar când linia îl arată)
     this.base = this.pending.length ? cur : undefined
@@ -172,11 +179,23 @@ export class EchoTracker {
     if (!c) return
     const head = this.pending[0]
     if (!head || head.seq !== c.seq) { this.cand = null; return }
+    if (this.inFlight > 0) return                         // output încă neparsat: nu e linişte
     const q = echoQuietMs(rtt)
     if (nowMs - c.at < q || nowMs - this.lastOutAt < q) return
     if (!keyNow || keyNow.k !== c.key) return
     this.pending.shift()
     this.cand = null
+    // text simplu tastat imediat după tastă (↑ apoi „ -v"): potrivirea se oprea la tasta ne-text, iar
+    // referinţa de acum îl conţine deja — l-ar fi ţinut până la plasa de 1 s (review final, LOW-A).
+    // Îl confirmăm dacă linia de acum se termină cu el şi linia de la prima schimbare NU.
+    let acc = ''
+    let upto = 0
+    for (const e of this.pending) {
+      if (e.text === null || e.lump || e.blind) break
+      acc += e.text
+      if (keyNow.line.endsWith(acc) && !c.firstLine.endsWith(acc)) upto = e.seq
+    }
+    if (upto) this.drop((e) => e.seq <= upto)
     this.base = this.pending.length ? keyNow : undefined
   }
 
@@ -221,9 +240,12 @@ export class EchoTracker {
     Rapoarte pe care TERMINALUL le trimite singur (nu tastele utilizatorului): focus (CSI I / O), mouse
     (SGR `CSI < … M/m`, urxvt, X10 `CSI M` + 3 octeţi), CPR, DA1/DA2/DA3, DSR, DECRPM, răspunsuri la
     operaţii de fereastră, OSC de culoare, DECRQSS. Un chunk e raport doar dacă e ÎNTREG format din
-    astfel de secvenţe. Excepţie fail-closed: `CSI 1;<n> R` e şi F3 cu modificatori (Shift/Ctrl/Alt 2..8, cu Meta/Super
-    9..16 — xterm Keyboard.ts adaugă 8 pentru metaKey) — rămâne tastă. */
-const REPORT_RE = new RegExp('^(?:' + [
+    astfel de secvenţe. `CSI 1;<n> R` e şi F3 cu modificatori (Shift/Ctrl/Alt 2..8, cu Meta/Super 9..16
+    — xterm Keyboard.ts adaugă 8 pentru metaKey): e raport DOAR dacă output-ul a cerut poziţia
+    cursorului (`CSI 6 n` / `CSI ? 6 n`) de la ultimul răspuns (`cprRequested`), altfel tastă
+    (review final 3.6.13, LOW-B: un CPR real pe rândul 1 — nushell, unele teme zsh după clear —
+    ajungea tastă ne-text şi ţinea textul tastat după el). */
+const REPORT_PARTS = [
   '\\x1b\\[[IO]',
   '\\x1b\\[<\\d+;\\d+;\\d+[Mm]',
   '\\x1b\\[\\d+;\\d+;\\d+M',
@@ -237,17 +259,36 @@ const REPORT_RE = new RegExp('^(?:' + [
   '\\x1b\\[\\d+(?:;\\d+)*t',
   '\\x1b\\](?:4;\\d+|1\\d);rgb:[0-9a-fA-F/]+(?:\\x07|\\x1b\\\\)',
   '\\x1bP[01]\\$r[\\x20-\\x7e]*\\x1b\\\\',
-].join('|') + ')+$')
+]
+const REPORT_RE = new RegExp('^(?:' + REPORT_PARTS.join('|') + ')+$')
+const REPORT_CPR1_RE = new RegExp('^(?:' + [...REPORT_PARTS, '\\x1b\\[1;\\d+R'].join('|') + ')+$')
 
-export function isTerminalReport(d: string): boolean {
-  return d.length > 0 && !/[\r\n]/.test(d) && REPORT_RE.test(d)
+export function isTerminalReport(d: string, cprRequested = false): boolean {
+  return d.length > 0 && !/[\r\n]/.test(d) && (cprRequested ? REPORT_CPR1_RE : REPORT_RE).test(d)
+}
+
+/** Câte cereri de poziţie a cursorului (`CSI 6 n` / `CSI ? 6 n`) conţine un chunk de output. */
+export function countCprRequests(b: Uint8Array): number {
+  let n = 0
+  for (let i = b.indexOf(0x1b); i >= 0; i = b.indexOf(0x1b, i + 1)) {   // o cerere ruptă între chunk-uri = ratată → tastă (fail-closed)
+    if (b[i + 1] !== 0x5b) continue
+    let j = i + 2
+    if (b[j] === 0x3f) j++
+    if (b[j] === 0x36 && b[j + 1] === 0x6e) n++
+  }
+  return n
+}
+
+/** Câte răspunsuri CPR conţine un input (pentru a consuma cererile). */
+export function countCprReplies(d: string): number {
+  return (d.match(/\x1b\[\??\d+;\d+R/g) ?? []).length
 }
 
 /** Input-ul e DOAR un raport de terminal (nu tastă)? `explicit` = venit pe o cale care emite numai
     rapoarte (onBinary = mouse X10); `pasting` = în timpul unui paste. Orice chunk care trimite o
     linie (CR/LF) NU e raport — trece prin guardrail (review 3.6.13, HIGH-1); nici datele unui paste. */
-export function reportOnly(d: string | Uint8Array, explicit: boolean, pasting: boolean): boolean {
+export function reportOnly(d: string | Uint8Array, explicit: boolean, pasting: boolean, cprRequested = false): boolean {
   const submits = typeof d === 'string' ? /[\r\n]/.test(d) : d.includes(0x0d) || d.includes(0x0a)
   if (submits || pasting) return false
-  return explicit || (typeof d === 'string' && isTerminalReport(d))
+  return explicit || (typeof d === 'string' && isTerminalReport(d, cprRequested))
 }

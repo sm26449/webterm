@@ -54,8 +54,9 @@ frontend only — no agent change (agent stays 58).
   the first recalled line while the second ran). Each send is now confirmed on its own: output
   counts only if it changed the typed line or the cursor; a run of plain text is confirmed when the
   line shows it, and a non-text key (`↑`, `Ctrl+P`, `Tab`) at most one per burst of output, once the
-  stream has been quiet briefly with the line unchanged (a redisplay split across two chunks no
-  longer confirms two keys). Keys with no visible effect (`Tab`
+  stream has been quiet briefly (nothing left unparsed) with the line unchanged (a redisplay split
+  across two chunks no longer confirms two keys); plain text typed right after it is confirmed with
+  it. Keys with no visible effect (`Tab`
   with no completion = a bell) settle after max(1 s, 4 × RTT), capped at 5 s; broadcast targets
   additionally need *some* output after the keys, so a stalled host never counts as echoed — never
   looser than 3.6.12. A burst of more than 64 keys without echo is released once the host has

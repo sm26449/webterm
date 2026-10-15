@@ -228,8 +228,11 @@ closed (review of 3.6.12, `lib/broadcastGuard.ts`), when guardrail rules are act
   **changed** that state. A run of plain-text sends is confirmed when the line now shows exactly
   their text appended (fast typing echoed in one chunk). A key that is **not** plain text (`↑`,
   `Ctrl+P`, `Tab`, editing keys) is confirmed **at most one per burst of output**, and only once the
-  stream has been quiet for RTT/2 (20–50 ms; 30 ms without a measured RTT) with the line unchanged
-  since its last change — so `↑↑⏎` typed faster than the round trip can't pass on the first `↑`'s
+  stream has been quiet for RTT/2 (20–50 ms; 30 ms without a measured RTT) — with no output still
+  waiting to be parsed (writes in flight are counted; a large write is parsed in slices) — and the
+  line unchanged since its last change. Plain text typed right after such a key (`↑` then ` -v`) is
+  confirmed together with it when the line now ends with that text and the line at the key's first
+  change didn't — so `↑↑⏎` typed faster than the round trip can't pass on the first `↑`'s
   echo, not even when that `↑`'s redisplay arrives split across two chunks (third review of 3.6.13;
   before it, each half confirmed one key). Two non-text echoes in one burst leave the second
   un-echoed — fail closed (the wait, then "Can't check", or the time net). Residual: a key whose
@@ -259,7 +262,10 @@ closed (review of 3.6.12, `lib/broadcastGuard.ts`), when guardrail rules are act
   `ESC]0;x⏎rm -rf /srv⏎BEL` (shell without bracketed paste) was classified as a report and sent
   unchecked to every pane. Every `term.paste()` (Ctrl+V, the paste button and the mobile keybar's,
   the paste history) goes through one helper that sets the same flag. `CSI 1;<n> R` stays a key: it
-  is also F3 with modifiers (2–8, and 9–16 with Meta/Super).
+  is also F3 with modifiers (2–8, and 9–16 with Meta/Super) — unless the output has asked for the
+  cursor position (`CSI 6 n` / `CSI ? 6 n`, counted per pane and consumed by each reply; a request
+  split across chunks is missed → key, fail closed): then a row-1 reply (nushell, some zsh themes
+  after `clear`) is a report. Other rows are always reports.
   Residual: a background job that prints while the keys are in flight still moves the cursor and
   counts as the earliest key's echo;
 - **a single pane (no broadcast) waits for the echo too** (3.6.13): with rules active, Enter /

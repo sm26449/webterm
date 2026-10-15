@@ -8,7 +8,7 @@ import { modeRestoreSeq } from '../lib/termmodes'
 import { errText, api, CommandGuard, CommandRule, Host, Session, withStepup } from '../lib/api'
 import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
 import { Command, CommandTracker, cmdDuration, matchCommandRule } from '../lib/commands'
-import { EchoTracker, LineKey, reportOnly } from '../lib/echo'
+import { EchoTracker, LineKey, countCprReplies, countCprRequests, reportOnly } from '../lib/echo'
 import { ECHO_GRACE_MS, LocalVerdict, localRunDecision, PeerState, PeerVerdict, RuleHit, guardActive, isBareEnter, judgeLocal, judgePeers, opaqueInput, plainText, runDecision, splitLines, stripControls, submitsLine, unbracket } from '../lib/broadcastGuard'
 import { clearCwd, parseOsc7, setCwd } from '../lib/cwd'
 import { FONT_STORAGE_KEY, preferredFont, setPreferredFont } from '../lib/font'
@@ -238,6 +238,8 @@ export default function SessionView(props: {
   const echoRef = useRef(new EchoTracker())
   // un paste e în curs (handler-ul de captură → xterm.paste → onData, sincron): datele lui nu sunt rapoarte
   const pastingRef = useRef(false)
+  // cereri CPR (`CSI 6 n`) din output încă fără răspuns: doar atunci `CSI 1;n R` e un raport (LOW-B)
+  const cprRef = useRef(0)
   const rttRef = useRef<number | null>(null)
   const streamDecoderRef = useRef(new TextDecoder('utf-8'))   // pt. captura output-ului
   // termen de căutare care așteaptă finalizarea replay-ului de istoric
@@ -774,7 +776,7 @@ export default function SessionView(props: {
     if (ws?.readyState === WebSocket.OPEN) {
       ws.send(typeof data === 'string' ? new TextEncoder().encode(data) : data)
       // rapoartele terminalului (mouse, focus, CPR, DA…) nu sunt taste: nu aşteaptă ecou (review 3.6.13, M2)
-      if (reportOnly(data, report, pastingRef.current)) return
+      if (reportOnly(data, report, pastingRef.current, cprRef.current > 0)) return
       const { seq, needBase } = echoRef.current.sent(typeof data === 'string' && plainText(data) ? data : null, performance.now())
       // referinţa liniei: după ce xterm a parsat tot ce sosise ÎNAINTE de trimitere (write gol, în ordine)
       if (needBase) termRef.current?.write('', () => echoRef.current.setBase(seq, lineKeyRef.current()))
@@ -980,7 +982,8 @@ export default function SessionView(props: {
     // şi nu aşteaptă ecou (review 3.6.13, M2). DAR clasificarea nu ocoleşte niciodată guardrail-ul
     // (HIGH-1): un chunk care conţine CR/LF trece mereu pe calea normală, iar datele unui paste nu
     // sunt niciodată rapoarte (un text lipit poate avea exact forma unui răspuns OSC)
-    if (reportOnly(d, report, pastingRef.current)) {
+    if (reportOnly(d, report, pastingRef.current, cprRef.current > 0)) {
+      if (typeof d === 'string') cprRef.current = Math.max(0, cprRef.current - countCprReplies(d))
       send(d, true)
       broadcastOut(d)
       return
@@ -1851,6 +1854,7 @@ export default function SessionView(props: {
           replayRef.current = false
           // tail-ul complet = starea ecranului de după tot ce trimisesem înainte de reconectare
           echoRef.current.replayed(replaySeq)
+          cprRef.current = 0          // răspunsurile la cererile rejucate nu pleacă (muteRef)
           muteRef.current = false
           // reconciliere post-replay: dacă dimensiunile s-au schimbat cât timp
           // scriam (redimensionare de fereastră, sidebar închis), aliniem
@@ -1878,9 +1882,16 @@ export default function SessionView(props: {
         // (3.6.13): doar dacă a schimbat linia / cursorul faţă de instantaneul de la trimitere
         const echo = echoRef.current
         const seq = echo.inputSeq
+        // cereri de poziţie a cursorului: doar după una, `CSI 1;n R` e un răspuns, nu F3 (LOW-B)
+        cprRef.current += countCprRequests(bytes)
+        // scrieri încă neparsate: cât sunt, fluxul nu e „liniştit" (LOW-C)
+        echo.writeStart()
         if (seq > echo.coarseSeq || echo.waiting) {
-          term.write(bytes, () => echo.output(seq, lineKeyRef.current, performance.now(), rttRef.current))
-        } else term.write(bytes)
+          term.write(bytes, () => {
+            echo.writeEnd()
+            echo.output(seq, lineKeyRef.current, performance.now(), rttRef.current)
+          })
+        } else term.write(bytes, () => echo.writeEnd())
       }
     }
     ws.onclose = (ev) => {
