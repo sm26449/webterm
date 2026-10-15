@@ -311,7 +311,11 @@ closed (review of 3.6.12, `lib/broadcastGuard.ts`), when guardrail rules are act
   column; under tmux `B` can land at column 0, then up to the cursor, cut after the last prompt
   terminator `$ # % > ❯` + space — never a right prompt or typeahead), and when an ED2 / ED3 / RIS /
   scroll region with top > 1 went through the output after `B` with nothing to verify yet (a
-  sequence split across output chunks is caught too).
+  sequence split across output chunks is caught too). Under tmux `B` arrives before the painted
+  text, so its position can be on the previous command's row; at the **first key after `B`**, when
+  nothing is pending (no typeahead), the line start is re-anchored at the cursor — the real start of
+  the input. With typeahead pending the `B` position stays, and a line that then isn't contiguous is
+  lost (fail closed).
   **Text after the cursor runs as well**: `↑` recalls `rm -rf /srv/data`, then `Home` or `←` and
   `sudo ` — read only up to the cursor the guard saw `sudo `. Besides the line up to the cursor the
   guard judges the line read to the **end of its logical line** (the cursor row and the rows that
