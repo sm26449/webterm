@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { CommandGuard } from './api'
-import { countCprReplies, countCprRequests, echoes, EchoTracker, isTerminalReport, LineKey, ECHO_PENDING_MAX, reportOnly } from './echo'
-import { echoSettleMs, judgeLocal, localRunDecision, plainText } from './broadcastGuard'
+import { countCprReplies, countCprRequests, echoes, EchoTracker, isTerminalReport, keyShape, LineKey, ECHO_PENDING_MAX, reportOnly, sendIsReport } from './echo'
+import { echoSettleMs, judgeLocal, judgePeers, localRunDecision, plainText } from './broadcastGuard'
 
 // Un „shell" minimal: linia tastată + cursorul la capăt, cu istoric pentru ↑.
 function shell(history: string[]) {
@@ -330,12 +330,10 @@ describe('3.6.13 e2e: linie lungă tastată rapid', () => {
   const cmd = "seq -f 'WT_HIST_%g' 1 3000; yes " + 'F'.repeat(96) + ' | head -n 3500; echo WT_HIST_$((7*6))'
   const g3: CommandGuard = { enabled: true, rules: [{ pattern: 'rm\\s+-rf', action: 'block' }] }
 
-  it('ecoul unei linii care trece de lăţimea terminalului (spaţiu la graniţa rândului) e recunoscut', () => {
+  it('ecoul unei linii lungi (citită fără spaţiu la wrap — vezi readCommand) e recunoscut exact', () => {
     const echo = new EchoTracker()
     let shown = ''
-    // cum citea readCommand o linie înfăşurată: un spaţiu la fiecare 80 de coloane
-    const wrapped = (s: string) => s.replace(/(.{80})/g, '$1 ')
-    const key = (): LineKey => { const line = wrapped(shown); return { k: `n\u00000\u0000${shown.length}\u0000${line}`, line } }
+    const key = (): LineKey => ({ k: `n\u00000\u0000${shown.length}\u0000${shown}`, line: shown })
     let sentIdx = 0
     for (const c of cmd) {
       const { seq, needBase } = echo.sent(c, 0)
@@ -349,7 +347,16 @@ describe('3.6.13 e2e: linie lungă tastată rapid', () => {
     shown = cmd
     echo.output(echo.inputSeq, key, 0, null)
     expect(echo.unechoed()).toEqual([])
-    expect(echo.echoed(false, 0, null, key())).toBe(true)
+  })
+
+  it('o linie citită cu un spaţiu în plus NU confirmă tastele (comparaţie exactă — review L3)', () => {
+    const echo = new EchoTracker()
+    let line = ''
+    const key = (): LineKey => ({ k: `n\u00000\u0000${line.length}\u0000${line}`, line })
+    for (const c of 'ab') { const r = echo.sent(c, 0); if (r.needBase) echo.setBase(r.seq, key()) }
+    line = 'a b'
+    echo.output(echo.inputSeq, key, 0, null)
+    expect(echo.unechoed().join('')).toBe('ab')
   })
 
   it('peste plafonul de 64 fără ecou, dar doar text: verificarea lipeşte textul, nu cere dialog', () => {
@@ -487,16 +494,60 @@ describe('3.6.13 e2e: textul unei linii deja trimise nu blochează coada', () =>
   })
 })
 
-describe('3.6.13 e2e: ecoul recunoscut după textul de lângă cursor (rândul promptului citit greşit)', () => {
-  it('linia citită de la prompt e greşită (regiune de scroll tmux), textul de lângă cursor e bun', () => {
-    const base: LineKey = { k: 'a', line: 'garbage', tail: 'root@h:/tmp#for' }
-    expect(echoes(base, { k: 'b', line: 'other garbage', tail: 'root@h:/tmp#fori' }, 'i')).toBe(true)
-    expect(echoes(base, { k: 'b', line: 'x', tail: 'root@h:/tmp#for' }, 'i')).toBe(false)
+describe('review 3.6.13 H1: un rând de prompt citit greşit nu se confirmă niciodată', () => {
+  it('linia citită de la prompt nu arată textul tastat → rămâne fără ecou; broadcast: unknown', () => {
+    const base: LineKey = { k: 'a', line: 'rm -rf /srv/da' }
+    expect(echoes(base, { k: 'b', line: 'ta/old' }, 'ta/old')).toBe(false)     // fragment de pe alt rând
+    expect(echoes(base, { k: 'b', line: 'rm -rf /srv/data/old' }, 'ta/old')).toBe(true)
+    const g5: CommandGuard = { enabled: true, rules: [{ pattern: '^rm\\s+-rf', action: 'block' }] }
+    // panou-ţintă la broadcast cu tastele fără ecou → wait, apoi unknown (nu „ok" pe fragment)
+    expect(judgePeers([{ inert: false, live: true, atPrompt: true, echoed: false, pending: 'ta/old', known: true, id: 'p' }], g5, true).kind).toBe('unknown')
   })
-  it('ancorat: un text deja prezent pe ecran nu trece drept ecou (↑ „…/x" + „x" tastat)', () => {
-    const base: LineKey = { k: 'a', line: 'rm -rf /tmp/x', tail: '#rm-rf/tmp/x' }
-    expect(echoes(base, { k: 'b', line: 'rm -rf /tmp/x', tail: '#rm-rf/tmp/x' }, 'x')).toBe(false)
-    expect(echoes(base, { k: 'b', line: 'rm -rf /tmp/xx', tail: '#rm-rf/tmp/xx' }, 'x')).toBe(true)
-    expect(echoes(base, { k: 'b', line: 'rm -rf /tmp/x', tail: '#rm-rf/tmp/x' }, ' ')).toBe(false)
+})
+
+describe('review 3.6.13 H1: prompt pierdut → „nu pot verifica" şi într-un singur panou', () => {
+  it('judgeLocal cu lineLost → unknown (un block cunoscut câştigă)', () => {
+    const g6: CommandGuard = { enabled: true, rules: [{ pattern: 'mkfs', action: 'block' }] }
+    expect(judgeLocal({ atPrompt: false, echoed: true, pending: null, unechoed: [], lineLost: true }, g6, true).kind).toBe('unknown')
+    expect(judgeLocal({ atPrompt: true, echoed: true, pending: 'mkfs /dev/x', unechoed: [], lineLost: true }, g6, true).kind).toBe('rule')
+  })
+})
+
+// review 3.6.13 M1: typeahead după un Enter încă fără ecou
+describe('review 3.6.13 M1: tastele de după un Enter fără ecou sunt „oarbe"', () => {
+  it('make⏎rm -rf /tmp/b — linia a doua NU se confirmă la pornirea comenzii; verificarea o lipeşte', () => {
+    const echo = new EchoTracker()
+    let line: string | null = ''
+    const key = (): LineKey | null => (line === null ? null : { k: `n\u00000\u0000${line.length}\u0000${line}`, line })
+    const send = (d: string, t: number) => {
+      const r = echo.sent(plainText(d) ? d : null, t, d === '\r')
+      if (r.needBase) echo.setBase(r.seq, key())
+    }
+    for (const c of 'make') send(c, 0)
+    line = 'make'; echo.output(echo.inputSeq, key, 1, null)
+    send('\r', 2)
+    for (const c of 'rm -rf /tmp/b') send(c, 3)
+    line = null; echo.output(echo.inputSeq, key, 4, null)     // C: make rulează
+    line = ''; echo.output(echo.inputSeq, key, 5, null)       // D/A/B: prompt nou, typeahead încă neafişat
+    expect(echo.unechoed().join('')).toBe('rm -rf /tmp/b')
+    const g7: CommandGuard = { enabled: true, rules: [{ pattern: 'rm\\s+-rf', action: 'block' }] }
+    expect(judgeLocal({ atPrompt: true, echoed: echo.echoed(false, 6, null, key()), pending: null, unechoed: echo.unechoed() }, g7, true).kind).toBe('rule')
+  })
+})
+
+describe('review 3.6.13 L2: diagnoza nu conţine text tastat', () => {
+  it('keyShape păstrează doar caracterele de control', () => {
+    expect(keyShape('\x1b[200~secret-token\r')).toBe(JSON.stringify('\x1b' + '·'.repeat(15)))
+    expect(keyShape('\x10')).toBe(JSON.stringify('\x10'))
+  })
+})
+
+describe('review 3.6.13 L1: textul inserat nu e niciodată raport', () => {
+  it('un snippet în forma unui răspuns DCS (readline: ESC P = M-p) rămâne tastă', () => {
+    const dcs = '\x1bP>|xterm.js(5.5.0)\x1b\\'
+    expect(sendIsReport('key', dcs, false, false)).toBe(false)     // typeText / inserări
+    expect(sendIsReport('auto', dcs, false, false)).toBe(true)     // date difuzate: după formă
+    expect(sendIsReport('auto', dcs, true, false)).toBe(false)     // dintr-un paste: niciodată
+    expect(sendIsReport('report', '\x1b[I', false, false)).toBe(true)
   })
 })

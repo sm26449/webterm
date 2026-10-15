@@ -75,6 +75,11 @@ frontend only — no agent change (agent stays 58).
   when later commands exist; a line ending in CRLF is no longer dropped from the copied text.
 - **A long command line that wraps is read without a stray space at the wrap.** Why: soft-wrapped
   rows were joined with a space, so `rm -rf /tm` + `p` on the next row read as `rm -rf /tm p`.
+- **The typed line is read from the right row in long sessions.** Why: the prompt position was an
+  absolute buffer row; once the scrollback is full, every scroll trims the top row and shifts all
+  rows by one, so at the bottom of the screen the guardrail read the line from the wrong row and saw
+  only a fragment. It is now an xterm marker that follows the trimming; if the prompt row leaves the
+  buffer the line counts as unknown ("Can't check").
 - **A session id that already belongs to another host no longer breaks that agent's reconcile.**
   Why: when the same machine is enrolled twice (a second host record, the tmux server survives),
   the new agent reports the old host's sessions. Adopting them hit the `sessions` primary key, and

@@ -119,7 +119,7 @@ describe('typing the move-as-root command (bracketed paste, prompts only)', () =
   })
   it('CommandTracker.atPrompt: true after B, false once a command started (C) or on the alternate screen', () => {
     const buf = { type: 'normal', baseY: 0, cursorY: 0, cursorX: 2, getLine: () => ({ length: 80, translateToString: () => 'mc' }) }
-    const fake = { buffer: { active: buf }, registerMarker: () => ({ dispose() {} }) }
+    const fake = { buffer: { active: buf }, registerMarker: () => ({ line: 0, isDisposed: false, dispose() {} }) }
     const tr = new CommandTracker(fake as unknown as Terminal)
     expect(tr.atPrompt()).toBe(false)              // no shell integration seen yet
     tr.handle('A'); tr.handle('B')

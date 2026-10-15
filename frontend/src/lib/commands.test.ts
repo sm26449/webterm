@@ -60,3 +60,53 @@ describe('captura output-ului în ordinea parsării (e2e 3.6.13: „copiază out
     expect(tr.commands[0].captured).not.toContain('next chunk')
   })
 })
+
+// review 3.6.13 H1: poziţia promptului e un marker xterm, nu un rând absolut
+describe('CommandTracker: rândul promptului urmează tăierea scrollback-ului', () => {
+  function trimTerm() {
+    const rows = [{ t: '$ ls', w: false }, { t: 'out', w: false }, { t: '$ rm -rf /srv/da', w: false }, { t: 'ta/old', w: true }]
+    const markers: { line: number; isDisposed: boolean; dispose(): void }[] = []
+    const buffer = {
+      type: 'normal', baseY: 0,
+      cursorY: 2, cursorX: 2,
+      getLine: (r: number) => (rows[r] !== undefined
+        ? { length: 80, isWrapped: rows[r].w, translateToString: (_t: boolean, from = 0, to?: number) => rows[r].t.slice(from, to) }
+        : undefined),
+    }
+    const term = {
+      cols: 80, buffer: { active: buffer },
+      registerMarker: () => {
+        const m = { line: buffer.baseY + buffer.cursorY, isDisposed: false, dispose() { m.isDisposed = true } }
+        markers.push(m)
+        return m
+      },
+    } as unknown as Terminal
+    /** scrollback plin: rândul de sus e tăiat, totul urcă un rând (xterm: onTrim mută markerele) */
+    const trim = () => {
+      rows.shift()
+      for (const m of markers) { m.line -= 1; if (m.line < 0) m.isDisposed = true }
+      buffer.cursorY -= 1
+    }
+    return { term, buffer, trim }
+  }
+  it('după tăiere, linia se citeşte tot de la B (nu un fragment de pe alt rând)', () => {
+    const { term, buffer, trim } = trimTerm()
+    const tr = new CommandTracker(term)
+    tr.handle('B')                                   // B la rândul 2, coloana 2
+    buffer.cursorY = 3; buffer.cursorX = 6           // textul a trecut pe rândul următor (wrap)
+    expect(tr.pendingCommand()).toBe('rm -rf /srv/data/old')
+    trim(); trim()
+    // logica veche (rând absolut 2): rândul 2 e acum „ta/old" → fragment, regula ^rm rata
+    expect(tr.pendingCommand()).toBe('rm -rf /srv/data/old')
+  })
+  it('rândul promptului ieşit din buffer → promptLost, linia necunoscută', () => {
+    const { term, buffer, trim } = trimTerm()
+    const tr = new CommandTracker(term)
+    tr.handle('B')
+    buffer.cursorY = 3; buffer.cursorX = 6
+    trim(); trim(); trim()
+    expect(tr.promptLost).toBe(true)
+    expect(tr.pendingCommand()).toBeNull()
+    expect(tr.lineKnown()).toBe(false)
+  })
+})

@@ -271,26 +271,36 @@ closed (review of 3.6.12, `lib/broadcastGuard.ts`), when guardrail rules are act
   split across chunks is missed → key, fail closed): then a row-1 reply (nushell, some zsh themes
   after `clear`) is a report. Other rows are always reports. Replies tmux asks the outer terminal
   for at `refresh-client` (XTVERSION, XTGETTCAP, colour-scheme and kitty-keyboard reports) are
-  reports too.
+  reports too. Only input from the terminal itself (`onData` / `onBinary`) or broadcast from
+  another pane is classified by shape; text the app inserts (snippets, palette, "Run again") is
+  always a key. Diagnostics (the console line logged with the "Can't check this line yet" dialog)
+  show non-text keys only by shape — printable characters are masked.
   Found by the e2e gate on the merged branch (ordinary typing must never ask): **Enter** is
   confirmed by the first line change in output that arrived after it, and everything queued before
-  it leaves the queue with it (that line was already submitted; under tmux a long line at the bottom
-  of the screen scrolls inside tmux's scroll region and the prompt row the tracker reads goes stale,
-  so such text might never match). A **blind** Enter (sent with no readable line — a command
-  running, or right after a reload until the first live prompt) and everything before it leave the
-  queue when a readable line appears. The quiet-window candidate is also checked at each output, not
-  only at the next Enter. Typed text also counts as echoed when the text ending at the cursor (the
-  cursor row and the two before it) ends with the reference's last 40 characters next to the cursor
-  plus the typed text — anchored, so text already on the screen never counts — which does not depend
-  on the stale prompt row. Matching ignores whitespace (a soft-wrapped row is joined without a space
-  now, and tmux / readline redraws at the margin can add or drop one; a run of only spaces is never
-  confirmed on its own). Past 64 un-echoed sends, only runs of plain text are merged (a merged run
-  is confirmed only whole and keeps its text, so the single-pane check appends it instead of
-  asking); Enter, non-text and blind keys stay separate, and only past 64 of those does everything
-  collapse into one text-less entry. When the guard holds Enter, the `keypress` xterm
-  would still turn into a second `\r` is swallowed (before, that duplicate was queued and sent after
-  the held Enter). Residual: a background job that prints while the keys are in flight still moves
-  the cursor and counts as the earliest key's echo;
+  it leaves the queue with it (that line was already submitted). Keys typed while an Enter is still
+  un-echoed are **blind** (typeahead for the next line: the next prompt can appear before readline
+  redraws them), so the command starting doesn't confirm them; they are confirmed only when a
+  readable line shows them, and until then the single-pane check appends them to the line. A blind
+  Enter (sent with no readable line — a command running, or right after a reload until the first
+  live prompt) and everything before it leave the queue when a readable line appears. The
+  quiet-window candidate is also checked at each output, not only at the next Enter. Matching is
+  **exact** — the line read from the prompt must equal the reference plus the typed text; a
+  soft-wrapped row (or, under tmux, a row filled to the last column) is joined without a space, so
+  a long line still matches; anything that doesn't match stays un-echoed (fail closed). Past 64
+  un-echoed sends, only runs of plain text are merged (a merged run is confirmed only whole and
+  keeps its text, so the single-pane check appends it instead of asking); Enter, non-text and blind
+  keys stay separate, and only past 64 of those does everything collapse into one text-less entry.
+  When the guard holds Enter, the `keypress` xterm would still turn into a second `\r` is swallowed
+  (before, that duplicate was queued and sent after the held Enter).
+  **The prompt position is an xterm marker** (third review of 3.6.13, H1): it used to be an absolute
+  row, and once the scrollback is full every scroll trims the top row and shifts every absolute row
+  by one (xterm no longer moves `ybase`) — a long session at the bottom of the screen read the line
+  from the wrong row, and the guard saw only a fragment. The marker follows the trimming; if the
+  prompt row leaves the buffer entirely the line is **lost**: unknown for broadcast, and "Can't check
+  this line yet" in a single pane. Not done: checking at Enter that the row still holds what it held
+  at `B` — under tmux the marks arrive before the prompt is painted, so there is nothing reliable to
+  compare at `B`. Residual: a background job that prints while the keys are in flight still moves the
+  cursor and counts as the earliest key's echo;
 - **a single pane (no broadcast) waits for the echo too** (3.6.13): with rules active, Enter /
   `Ctrl+J` and a chunk ending in a line break wait up to 150 ms; then, if keys are still un-echoed
   and they were all plain text (a slow link while typing), the line on the screen **and** the line

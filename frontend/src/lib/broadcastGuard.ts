@@ -214,6 +214,8 @@ export interface LocalState {
   echoed: boolean
   pending: string | null
   unechoed: (string | null)[]
+  /** rândul promptului a ieşit din buffer (CommandTracker.promptLost): linia nu se poate citi */
+  lineLost?: boolean
 }
 
 export type LocalVerdict =
@@ -268,7 +270,7 @@ export function judgeLocal(s: LocalState, guard: CommandGuard | null | undefined
     if (rule?.action === 'block') return { kind: 'rule', rule, cmd: line }
     if (rule && !confirm) confirm = { rule, cmd: line }
   }
-  if (unknown) return { kind: 'unknown' }
+  if (unknown || s.lineLost) return { kind: 'unknown' }
   if (confirm) return { kind: 'rule', ...confirm }
   return { kind: 'ok' }
 }

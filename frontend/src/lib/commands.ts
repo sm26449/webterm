@@ -54,7 +54,11 @@ const CAPTURE_MAX = 256 * 1024      // per comandă; peste atât, output-ul se c
 export class CommandTracker {
   private term: Terminal
   private nextId = 1
-  private promptRow: number | null = null    // rândul absolut al lui B
+  /** poziţia lui B ca MARKER xterm (review 3.6.13, H1): un rând absolut „îmbătrâneşte" când
+      scrollback-ul e plin şi fiecare derulare taie rândul de sus (xterm nu mai mută ybase) — linia
+      se citea de pe alt rând, iar verificarea vedea doar un fragment. Markerul urmează tăierea; un
+      marker dispărut (rândul promptului a ieşit din scrollback) = linie necunoscută (fail-closed). */
+  private promptMarker: IMarker | null = null
   private promptCol = 0
   private pendingText: string | null = null  // textul comenzii, dacă shell-ul ni-l trimite (E)
   private current: Command | null = null
@@ -82,6 +86,30 @@ export class CommandTracker {
       ca să atașeze timpul din .cast la momentul potrivit (comenzile goale n-au C). */
   onStart?: (cmd: Command) => void
 
+  /** rândul absolut ACUM al lui B (din marker), sau null — inclusiv când markerul a dispărut */
+  private get promptRow(): number | null {
+    const m = this.promptMarker
+    if (!m || m.isDisposed || typeof m.line !== 'number' || m.line < 0) return null
+    return m.line
+  }
+
+  /** a existat un prompt, dar rândul lui nu mai e în buffer (marker eliberat la tăierea
+      scrollback-ului): linia nu se mai poate citi — fail-closed (review 3.6.13, H1) */
+  get promptLost(): boolean {
+    return this.promptMarker !== null && this.promptRow === null
+  }
+
+  private setPrompt(marker: IMarker | null, col: number): void {
+    if (this.promptMarker && this.promptMarker !== marker) this.promptMarker.dispose()
+    this.promptMarker = marker
+    this.promptCol = col
+  }
+
+  private clearPrompt(): void {
+    this.promptMarker?.dispose()
+    this.promptMarker = null
+  }
+
   /** comanda tocmai încheiată de un D din chunk-ul care se parsează acum: restul chunk-ului îi
       aparţine încă (sub tmux, D poate sosi înaintea ultimelor rânduri pictate) — vezi feedTail */
   private justEnded: Command | null = null
@@ -99,7 +127,7 @@ export class CommandTracker {
     this.commands = []
     this.current = null
     this.justEnded = null
-    this.promptRow = null
+    this.clearPrompt()
     this.promptCol = 0
     this.pendingText = null
     this.staleFlag = true
@@ -155,7 +183,7 @@ export class CommandTracker {
     if (!s || typeof s !== 'object') return false
     const { integrated, last, synced } = s as Record<string, unknown>
     if (integrated === true) this.integratedFlag = true
-    if (!this.staleFlag || this.current !== null || this.promptRow !== null || this.runningUnseen) return false
+    if (!this.staleFlag || this.current !== null || this.promptMarker !== null || this.runningUnseen) return false
     if (last === 'C') {
       this.runningUnseen = true
       this.onChange?.()
@@ -164,8 +192,8 @@ export class CommandTracker {
     const b = this.replayB
     if (last === 'B' && synced === true && this.replayLast === 'B' && b && !b.isDisposed && b.line >= 0
       && this.term.buffer.active.type !== 'alternate') {
-      this.promptRow = b.line
-      this.promptCol = this.replayBCol
+      this.replayB = null                     // markerul trece la prompt (nu se mai eliberează ca „rejucat")
+      this.setPrompt(b, this.replayBCol)
       this.staleFlag = false
       this.onChange?.()
       return true
@@ -254,7 +282,11 @@ export class CommandTracker {
       // un rând continuat prin wrap (linie lungă) NU e o despărţire: fără spaţiu, altfel `rm -rf /tm`
       // + `p` pe rândul următor se citea „rm -rf /tm p", iar ecoul tastelor nu se mai potrivea
       // (3.6.13, e2e: linia lungă tastată rapid rămânea „fără ecou")
-      if (row !== end.row && !b.getLine(row + 1)?.isWrapped) out += ' '
+      // Sub tmux rândurile continuate sunt repictate explicit (fără isWrapped), deci şi un rând umplut
+      // până la ultima coloană e o continuare — fără spaţiu (review 3.6.13, L3: comparaţia ecoului e
+      // exactă, nu mai ignoră spaţiile)
+      const full = line.translateToString(true).length >= this.term.cols
+      if (row !== end.row && !b.getLine(row + 1)?.isWrapped && !full) out += ' '
     }
     return out.trim()
   }
@@ -284,8 +316,7 @@ export class CommandTracker {
       case 'B':                    // promptul s-a terminat: aici începe comanda
         {
           const c = this.absCursor()
-          this.promptRow = c.row
-          this.promptCol = c.col
+          this.setPrompt(this.term.registerMarker(0) ?? null, c.col)
           this.staleFlag = false    // un prompt LIVE: linia de aici încolo o vedem
         }
         break
@@ -299,7 +330,7 @@ export class CommandTracker {
         this.justEnded = null
         const text = this.pendingText ?? this.readCommand()
         this.pendingText = null
-        if (!text) { this.promptRow = null; break }
+        if (!text) { this.clearPrompt(); break }
         // marker pe rândul curent: de aici încolo e OUTPUT-ul comenzii
         const marker = this.term.registerMarker(0)
         if (!marker) break
@@ -310,7 +341,7 @@ export class CommandTracker {
           startedAt: Date.now(),
         }
         this.onStart?.(this.current)
-        this.promptRow = null
+        this.clearPrompt()
         break
       }
       case 'D': {                  // comanda s-a terminat (cu exit code)
@@ -421,6 +452,7 @@ export class CommandTracker {
   dispose(): void {
     this.replayB?.dispose()
     this.replayB = null
+    this.clearPrompt()
     for (const c of this.commands) {
       c.startMarker.dispose()
       c.endMarker?.dispose()

@@ -8,7 +8,7 @@ import { modeRestoreSeq } from '../lib/termmodes'
 import { errText, api, CommandGuard, CommandRule, Host, Session, withStepup } from '../lib/api'
 import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
 import { Command, CommandTracker, cmdDuration, matchCommandRule, splitAfterMarks } from '../lib/commands'
-import { EchoTracker, LineKey, countCprReplies, countCprRequests, reportOnly } from '../lib/echo'
+import { EchoTracker, LineKey, countCprReplies, countCprRequests, reportOnly, sendIsReport } from '../lib/echo'
 import { ECHO_GRACE_MS, LocalVerdict, localRunDecision, PeerState, PeerVerdict, RuleHit, guardActive, isBareEnter, judgeLocal, judgePeers, opaqueInput, plainText, runDecision, splitLines, stripControls, submitsLine, unbracket } from '../lib/broadcastGuard'
 import { clearCwd, parseOsc7, setCwd } from '../lib/cwd'
 import { FONT_STORAGE_KEY, preferredFont, setPreferredFont } from '../lib/font'
@@ -765,26 +765,23 @@ export default function SessionView(props: {
     if (!term || !tr || !tr.atPrompt()) return null
     const b = term.buffer.active
     const line = tr.pendingCommand() ?? ''
-    // textul care se termină la cursor (3 rânduri), fără spaţii — vezi LineKey.tail
     const row = b.baseY + b.cursorY
-    let tail = ''
-    for (let r = Math.max(0, row - 2); r <= row; r++) {
-      const l = b.getLine(r)
-      if (l) tail += l.translateToString(true, 0, r === row ? b.cursorX : undefined)
-    }
-    tail = tail.replace(/\s+/g, '').slice(-200)
-    return { k: `${b.type}\u0000${row}\u0000${b.cursorX}\u0000${line}`, line, tail }
+    return { k: `${b.type}\u0000${row}\u0000${b.cursorX}\u0000${line}`, line }
   })
   /** ecoul ultimelor taste (vezi echoSettled): `requireOutput` la broadcast, nu într-un singur panou */
   const echoedNow = useCallback((requireOutput: boolean): boolean =>
     echoRef.current.echoed(requireOutput, performance.now(), rttRef.current, lineKeyRef.current()), [])
-  const send = useCallback((data: string | Uint8Array, report = false) => {
+  /** `kind`: 'key' = tastă (urmărită pentru ecou), 'report' = raport de terminal (neurmărit),
+      'auto' = clasificat după formă — DOAR pentru datele venite din alt panou prin broadcast (în
+      panoul de origine le-a clasificat deja userInput). Textul inserat (snippet, paletă, „rulează din
+      nou") e mereu 'key': un snippet în forma unui răspuns DCS nu sare urmărirea (review 3.6.13, L1). */
+  const send = useCallback((data: string | Uint8Array, kind: 'key' | 'report' | 'auto' = 'key') => {
     if (muteRef.current || readOnlyRef.current) return
     const ws = wsRef.current
     if (ws?.readyState === WebSocket.OPEN) {
       ws.send(typeof data === 'string' ? new TextEncoder().encode(data) : data)
       // rapoartele terminalului (mouse, focus, CPR, DA…) nu sunt taste: nu aşteaptă ecou (review 3.6.13, M2)
-      if (reportOnly(data, report, pastingRef.current, cprRef.current > 0)) return
+      if (sendIsReport(kind, data, pastingRef.current, cprRef.current > 0)) return
       const { seq, needBase } = echoRef.current.sent(typeof data === 'string' && plainText(data) ? data : null,
         performance.now(), typeof data === 'string' && isBareEnter(data),
         typeof data === 'string' ? data : `<${data.length} bytes>`)
@@ -924,6 +921,7 @@ export default function SessionView(props: {
         echoed: echoedNow(false),
         pending: tr?.pendingCommand() ?? null,
         unechoed: echoRef.current.unechoed(),
+        lineLost: tr?.promptLost === true,
       }, commandGuardRef.current, final, lineOf, extra)
     }
     const settle = (v: LocalVerdict, queued: (string | Uint8Array)[] = []) => {
@@ -996,7 +994,7 @@ export default function SessionView(props: {
     // sunt niciodată rapoarte (un text lipit poate avea exact forma unui răspuns OSC)
     if (reportOnly(d, report, pastingRef.current, cprRef.current > 0)) {
       if (typeof d === 'string') cprRef.current = Math.max(0, cprRef.current - countCprReplies(d))
-      send(d, true)
+      send(d, 'report')
       broadcastOut(d)
       return
     }
@@ -1062,12 +1060,14 @@ export default function SessionView(props: {
   // broadcast: înregistrează `send`-ul acestui panou în harta din App (sid → send), ca tastele
   // dintr-un panou să poată fi difuzate în toate. `send` e stabil (useCallback []), deci se
   // înregistrează o dată şi se curăţă la demontare.
+  // datele difuzate din alt panou: clasificate aici după formă (rapoartele lui nu sunt taste)
+  const sendFromPeer = useCallback((d: string | Uint8Array) => send(d, 'auto'), [send])
   const registerSend = props.registerSend
   const bcastSid = session.id
   useEffect(() => {
-    registerSend?.(bcastSid, { send, state: paneState })
+    registerSend?.(bcastSid, { send: sendFromPeer, state: paneState })
     return () => registerSend?.(bcastSid, null)
-  }, [registerSend, bcastSid, send, paneState])
+  }, [registerSend, bcastSid, sendFromPeer, paneState])
 
   // `active` = acest client tocmai a devenit dispozitivul folosit (focus/click/tastare).
   // Serverul onorează un resize activ chiar dacă n-am mai interacționat de mult; fără

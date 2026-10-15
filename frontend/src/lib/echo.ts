@@ -19,27 +19,16 @@ import { echoSettled, echoSettleMs } from './broadcastGuard'
 
 /** Starea liniei de comandă la un moment dat: `k` = cheia completă (ecran, cursor, linie), `line` =
     linia tastată (OSC 133, de la B la cursor). null = nicio linie de shell citibilă. */
-export interface LineKey {
-  k: string
-  line: string
-  /** textul de pe ecran care se termină la cursor (rândul cursorului + cele dinainte), fără spaţii —
-      nu depinde de rândul promptului. Sub tmux, o linie lungă la baza ecranului se derulează în
-      regiunea de scroll (bara de stare rămâne jos) şi rândul promptului citit de tracker nu mai e cel
-      bun; textul de lângă cursor rămâne corect (e2e 3.6.13) */
-  tail?: string
-}
+export interface LineKey { k: string; line: string }
 
-/** Ecoul textului `acc` faţă de referinţa `base`: linia (de la prompt) = referinţa + text, SAU textul
-    de lângă cursor se termină cu [capătul textului de lângă cursor al referinţei] + text — ancorat,
-    deci un text deja prezent pe ecran (↑ care recheamă „…/x", apoi „x" tastat) nu trece drept ecou. */
+/** Ecoul textului `acc` faţă de referinţa `base`: linia de acum e EXACT referinţa + text (review
+    3.6.13, H1 / L3: fără potriviri „aproximative" — nici după textul de lângă cursor, nici ignorând
+    spaţiile; un rând de prompt citit greşit sau un spaţiu fără ecou nu se confirmă). Un text care
+    nu se potriveşte rămâne în aşteptare: verificarea locală îl lipeşte de linie, broadcast-ul cere
+    confirmare — fail-closed. */
 export function echoes(base: LineKey, cur: LineKey, acc: string): boolean {
-  const a = sq(acc)
-  if (!a) return false
-  if (sq(cur.line) === sq(base.line + acc)) return true
-  if (base.tail === undefined || cur.tail === undefined) return false
-  return cur.tail.endsWith(base.tail.slice(-TAIL_ANCHOR) + a)
+  return acc.length > 0 && cur.line === base.line + acc
 }
-const TAIL_ANCHOR = 40
 
 interface Entry {
   seq: number
@@ -66,12 +55,12 @@ interface Entry {
 
 export const ECHO_PENDING_MAX = 64
 
-/** Linia fără spaţii albe, pentru comparaţia ecoului: o linie lungă continuată pe rândul următor,
-    sau redesenată de tmux / readline la margine, poate apărea cu un spaţiu în plus sau în minus la
-    graniţa rândului — fără asta tastarea rapidă a unei linii lungi rămânea „fără ecou" (e2e 3.6.13).
-    Un text format DOAR din spaţii nu se confirmă singur (ar potrivi oricând); îl confirmă primul
-    caracter vizibil de după el. */
-const sq = (s: string): string => s.replace(/\s+/g, '')
+/** Forma unei taste ne-text, pentru diagnoză: caracterele de control rămân (scăpate), orice caracter
+    tipăribil devine „·" — jurnalul nu conţine niciodată ce s-a tastat sau lipit (review 3.6.13, L2). */
+export function keyShape(raw: string): string {
+  return JSON.stringify(raw.slice(0, 16).replace(/[^\x00-\x1f\x7f-\x9f]/g, '·'))
+}
+
 /** câte linii distincte ţinem dintr-o rafală (pentru textul tastat după o tastă ne-text) */
 const CAND_LINES_MAX = 16
 
@@ -125,8 +114,11 @@ export class EchoTracker {
     const seq = ++this.inputSeq
     const needBase = this.pending.length === 0
     if (needBase) this.base = undefined
-    this.pending.push({ seq, at: now, text, blind: this.base === null, submit,
-      raw: text === null && raw ? JSON.stringify(raw.slice(0, 16)) : undefined })
+    // „orb" şi cât un Enter trimis n-a primit ecou (review 3.6.13, M1): ce tastezi după el e typeahead
+    // pentru linia URMĂTOARE, care poate apărea înainte ca readline să-l redeseneze
+    const blind = this.base === null || this.pending.some((e) => e.submit)
+    this.pending.push({ seq, at: now, text, blind, submit,
+      raw: text === null && raw ? keyShape(raw) : undefined })
     if (this.pending.length > ECHO_PENDING_MAX) {
       // Prea multe trimiteri fără ecou. Întâi comprimăm doar serii de TEXT simplu (aceeaşi semantică:
       // textul rămâne, verificarea locală îl lipeşte de linie; o serie se confirmă doar întreagă).
@@ -219,7 +211,7 @@ export class EchoTracker {
       for (const e of this.pending) {
         if (e.seq > tag || e.text === null || e.lump) break
         acc += e.text
-        if (sq(acc) && sq(cur.line).endsWith(sq(acc))) upto = e.seq
+        if (acc.trim() && cur.line.endsWith(acc)) upto = e.seq
       }
       if (upto) this.drop((e) => e.seq <= upto)
       this.cand = null
@@ -292,7 +284,7 @@ export class EchoTracker {
     for (const e of this.pending) {
       if (e.text === null || e.lump || e.blind) break
       acc += e.text
-      if (sq(acc) && c.lines.some((l) => sq(l + acc) === sq(keyNow.line))) upto = e.seq
+      if (c.lines.some((l) => l + acc === keyNow.line)) upto = e.seq
     }
     if (upto) this.drop((e) => e.seq <= upto)
     this.base = this.pending.length ? keyNow : undefined
@@ -411,4 +403,13 @@ export function reportOnly(d: string | Uint8Array, explicit: boolean, pasting: b
   const submits = typeof d === 'string' ? /[\r\n]/.test(d) : d.includes(0x0d) || d.includes(0x0a)
   if (submits || pasting) return false
   return explicit || (typeof d === 'string' && isTerminalReport(d, cprRequested))
+}
+
+/** Trimiterea e un raport de terminal (neurmărit pentru ecou)? `kind`: 'key' = tastă / text inserat
+    (snippet, paletă — niciodată raport, oricum ar arăta: review 3.6.13, L1), 'report' = deja
+    clasificat, 'auto' = după formă (date difuzate din alt panou). */
+export function sendIsReport(kind: 'key' | 'report' | 'auto', d: string | Uint8Array, pasting: boolean, cprRequested: boolean): boolean {
+  if (kind === 'report') return true
+  if (kind === 'key') return false
+  return reportOnly(d, false, pasting, cprRequested)
 }
