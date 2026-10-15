@@ -19,30 +19,44 @@ frontend only — no agent change (agent stays 58).
   was passed unchecked) and can miss the last ~2.5 s not yet written to disk (so the last replayed
   mark proves nothing — every pane asked "Can't check" after every reattach, and ssh / `sudo -i` /
   REPL panes on every broadcast Enter). The session hub now scans the live output stream for
-  OSC 133 marks (same rules as xterm.js: `ESC ]` or C1, BEL / ST / ESC end, CAN / SUB abort, marks
-  split across chunks, bounded buffer, nothing taken from the browser) and sends `integrated` in
-  `init`, then — exactly at the point where live output starts flowing to that client, after the
-  replay — a `osc133` message with the kind of the last **live** mark and `synced` (the replay ends
-  exactly there, with no checkpoint gap, and contains that mark). The browser trusts it narrowly:
-  last `C` → a program is running (Enter goes to it, as when the `C` is seen live); last `B` +
-  `synced` + its own last replayed mark also `B` on the main screen → the typed line is read from
-  that `B`, as a live prompt would; anything else stays unknown until the next live prompt.
+  OSC 133 marks (xterm.js rules, marks split across chunks, bounded buffer, nothing taken from the
+  browser) and — exactly at the point where live output starts flowing to a client, after its
+  replay — sends a `osc133` message: `integrated`, the kind of the last **live** mark and `synced`
+  (the replay ends exactly there, contains that mark, and nothing `read_tail` strips follows it).
+  It is never sent before the step-up / lock decision. The browser trusts it narrowly: last `C` → a
+  program started from a prompt is running (Enter goes to it, as when that `C` is seen live); last
+  `B` + `synced` + its own last replayed mark also `B` → the typed line is read from that `B`, as a
+  live prompt would; anything else stays unknown until the next live prompt. Fail closed wherever
+  the hub's byte parser and xterm could disagree: invalid UTF-8 that xterm drops, identifiers or
+  kinds cut by the 64-byte window, oversized or aborted 133 sequences, a bare `C` that doesn't
+  follow a prompt, marks emitted on the alternate screen of a non-tmux stream — all report "unknown".
+  The scanner jumps between sequences with C-level searches (≥ 110 MB/s on plain, SGR-dense,
+  `°`-dense and OSC-title-heavy output), so it doesn't stall the shared gateway loop.
 - **`Tab` in a chunk that submits a line makes the line unknown.** Why: outside a bracketed paste
   `Tab` is readline completion — `rm -rf /tm⇥⏎` ran `rm -rf /tmp/` but was checked as
   `rm -rf /tm `. It is literal only between `ESC[200~` / `ESC[201~`, and only when every target
   shell asked for bracketed paste (otherwise the markers can come from the pasted text itself).
+  Snippets, palette inserts and other inserted texts that end in Enter get the same check (they are
+  sent without bracketed paste, so a `Tab` in them is completion).
 - **Enter in a single pane waits for the echo too.** Why: without broadcast the guardrail read the
   line immediately, so `Ctrl+P` / `↑` followed by a fast Enter submitted a recalled line it had not
-  seen. With guardrail rules active, Enter (and a chunk ending in Enter) waits up to 150 ms for the
-  echo; if only plain text is still un-echoed (a slow link), the line plus that text is checked; if
-  editing keys are still un-echoed, it asks "Can't check this line yet". After the wait nothing
-  is sent to other panes, even if broadcast was turned on meanwhile.
-- **The echo test is tighter.** Why: any output after a keystroke counted as its echo, so a clock
-  in the prompt or a tmux status repaint "confirmed" keys whose echo had not arrived. Output now
-  counts only if it changed the typed line or the cursor (snapshot taken once xterm has parsed what
-  arrived before the keystroke). Keys with no visible effect (`Tab` with no completion = a bell)
-  settle after max(1 s, 4 × RTT); broadcast targets additionally need *some* output after the keys,
-  so a stalled host still never counts as echoed — never looser than 3.6.12.
+  seen. With guardrail rules active, Enter (and a chunk or inserted text ending in Enter) waits up
+  to 150 ms for the echo; if only plain text is still un-echoed (a slow link), the line plus that
+  text is checked; if editing keys are still un-echoed, it asks "Can't check this line yet". Its
+  Run judges the line again at click time, so a rule matching the line that has meanwhile appeared
+  still blocks / asks. After the wait nothing is sent to other panes, even if broadcast was turned
+  on meanwhile.
+- **The echo test is tighter, and per key.** Why: any output after a keystroke counted as its echo,
+  so a clock in the prompt or a tmux status repaint "confirmed" keys whose echo had not arrived —
+  and the echo of an earlier key confirmed the latest one (`↑↑⏎` faster than the round trip judged
+  the first recalled line while the second ran). Each send is now confirmed on its own: output
+  counts only if it changed the typed line or the cursor, and a change confirms only the earliest
+  un-echoed key (or a run of plain text the line now shows). Keys with no visible effect (`Tab`
+  with no completion = a bell) settle after max(1 s, 4 × RTT), capped at 5 s; broadcast targets
+  additionally need *some* output after the keys, so a stalled host never counts as echoed — never
+  looser than 3.6.12. Reports the terminal sends by itself (mouse, focus in/out, cursor-position
+  and device-attribute replies) are not keys: they no longer make a pane "un-echoed" (with tmux
+  mouse and focus events on, clicking a pane and pressing Enter used to ask "Can't check").
 
 ## [3.6.12] — 2026-10-15 · agent (58)
 

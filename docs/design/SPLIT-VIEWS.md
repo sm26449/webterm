@@ -221,26 +221,37 @@ closed (review of 3.6.12, `lib/broadcastGuard.ts`), when guardrail rules are act
   after the Enter, in order (a queued Enter is checked again). When the wait ends in a dialog or a
   block, the queued keys are dropped **with a notice** ("N keys typed while the panes were being
   checked were not sent"), never silently;
-- the echo test (tightened in 3.6.13): a pane counts as echoed when output parsed after the last
-  keys sent to it **changed the typed line or the cursor** (screen, absolute cursor row/column and
-  the OSC 133 line, compared with a snapshot taken right after the keys were sent, once xterm had
-  parsed everything that arrived before them). A clock in the prompt or a tmux status repaint
-  (cursor goes away and comes back) no longer counts. Keys with no visible effect (`Tab` with no
-  completion only rings the bell, `Home` at column 0 prints nothing) would never "echo", so they
-  **settle** after max(1 s, 4 × measured RTT) — but for a broadcast target only if *some* output
-  arrived after them (the 3.6.12 coarse rule): a stalled host that sends nothing never counts as
-  echoed. Every state the new test calls echoed was also echoed under the 3.6.12 rule, so it is
-  never looser. Without shell integration (no readable line) it falls back to the coarse rule — the
-  guardrail doesn't wait for the echo there anyway. Residual: a background job that prints while
-  the keys are in flight still moves the cursor and counts; the line judged is then the one on the
-  screen, as before;
+- the echo test (tightened in 3.6.13, `lib/echo.ts`): **each send is confirmed separately**. The
+  reference for the earliest un-echoed send is the line state (screen, absolute cursor row/column,
+  OSC 133 line) right after the previous echo — or, when nothing was pending, a snapshot taken once
+  xterm had parsed everything that arrived before the key. Output counts as an echo only if it
+  **changed** that state, and a change confirms **only the earliest** un-echoed send — or a run of
+  plain-text sends when the line now shows exactly their text appended (fast typing echoed in one
+  chunk). So `↑↑⏎` typed faster than the round trip can't pass on the first `↑`'s echo: the second
+  `↑` stays un-echoed until its own change arrives (review of 3.6.13, M1; two non-text echoes in one
+  chunk leave the second one un-echoed — fail closed). A clock in the prompt or a tmux status
+  repaint (cursor goes away and comes back) doesn't count. Keys with no visible effect (`Tab` with
+  no completion only rings the bell, `Home` at column 0 prints nothing) would never "echo", so they
+  **settle** after max(1 s, 4 × measured RTT), capped at 5 s — but for a broadcast target only if
+  *some* output arrived after them (the 3.6.12 coarse rule): a stalled host that sends nothing never
+  counts as echoed. Every state the new test calls echoed was also echoed under the 3.6.12 rule, so
+  it is never looser. More than 64 un-echoed sends collapse into one entry that only a replay or the
+  time net can clear. Without shell integration (no readable line) it falls back to the coarse rule
+  — the guardrail doesn't wait for the echo there anyway. **Terminal-generated reports** (mouse —
+  SGR, urxvt, X10 via `onBinary` — focus `CSI I`/`CSI O`, CPR, DA1/2/3, DSR, DECRPM, window-op and
+  OSC colour replies, DECRQSS) are not keys: they don't count as sends, don't wait in a check's
+  queue and never make a pane "un-echoed" (`CSI 1;2..8 R` stays a key: it is also modified F3).
+  Residual: a background job that prints while the keys are in flight still moves the cursor and
+  counts as the earliest key's echo;
 - **a single pane (no broadcast) waits for the echo too** (3.6.13): with rules active, Enter /
   `Ctrl+J` and a chunk ending in a line break wait up to 150 ms; then, if keys are still un-echoed
   and they were all plain text (a slow link while typing), the line on the screen **and** the line
   plus that text (merged with any part already echoed) are checked; if any un-echoed key was an
   editing / control key (`↑`, `Ctrl+P`, `Tab`, `Backspace`…) it asks **"Can't check this line
-  yet"** (a known block still wins). The held Enter is sent to this pane only. Without broadcast
-  the "unknown after replay" rule still does not apply (unchanged from 3.6.12);
+  yet"** (a known block still wins). Its **Run** judges the line again at click time: by then the
+  echo has usually arrived, and a rule matching the now-visible line escalates (block → blocked,
+  confirm → the rule dialog) instead of running. The held Enter is sent to this pane only. Without
+  broadcast the "unknown after replay" rule still does not apply (unchanged from 3.6.12);
 - **every target is judged before anything is decided** (final review of 3.6.12): while
   broadcasting, only a **block** rule on the origin's own line short-circuits; a confirm rule there
   goes through the same judgement as the other panes. Then: a **block** in any pane wins (the line
@@ -281,7 +292,10 @@ mode on (xterm's `bracketedPasteMode`); otherwise the markers could come from th
 itself and the shell would not honour them), "Paste & run" from the paste history
 (its Enter takes the same queued path as a typed Enter, so it never starts a second wait), and snippets / palette inserts (typed into every
 pane when broadcasting; one containing a line break is checked line by line — the first line
-appended to what is already typed — and not typed at all if a line matches). "Run again" types the
+appended to what is already typed — and not typed at all if a line matches; since 3.6.13 they also
+get the editing-key check — their text is sent as is, without bracketed paste, so a `Tab` in a
+snippet that ends in Enter is completion → "Can't check this input" — and the echo wait, in a single
+pane as when broadcasting). "Run again" types the
 command into every pane without Enter. A pasted text whose line ends with a bare CR (`cmd\r`) hits
 the multi-line paste guard like LF. A watch-only pane broadcasts nothing (its keys go nowhere).
 
@@ -293,60 +307,91 @@ live prompt; (2) after every reattach, panes inside ssh / `sudo -i` / a REPL sta
 replay asked "Can't check every pane" on every broadcast Enter.
 
 **Gateway (`gateway/app/osc133.py`, `SessionHub`).** The hub sees the whole output stream of a live
-session, in order, chunk by chunk, from the moment it was created. `Osc133Scanner` parses it the
-way xterm.js 5.5 does: `ESC ]` (C0 between them keeps the ESC state, as in xterm) or C1 `U+009D`;
-ends on BEL, ESC (ST) or `U+009C`; CAN / SUB / any other C1 abort; `U+009D` restarts; C0 inside
-the payload is ignored; the identifier is digits up to `;` (`0133` is 133, a non-digit aborts);
-payloads over 10 000 000 bytes are dropped. Marks split across chunks are reassembled (parser
-state carries over); only the first 64 bytes of an OSC are kept, the rest is only counted; the hot
-path jumps over plain text with `re.search`, so the per-byte cost stays in C (5 MiB of coloured
-output scans in well under a second). It keeps `integrated` (a `B` was seen — monotonic, survives
-gaps), `last` (kind of the last mark: `A`/`B`/`C`/`D`; anything else — `E`, `P`, empty, truncated
-— is `None`) and the transcript offset where that mark starts. A gap in the stream (agent restart,
-ring overrun — the same places that write the visible gap marker) resets `last` to `None`; a
-transcript rewrite (64 MiB cap) keeps `last` but drops its position. Nothing comes from the
-browser: input never reaches the scanner. The scanner state lives only in memory — after a gateway
-restart it starts empty (`integrated=false`, `last=None`) until the shell's next mark.
+session, in order, chunk by chunk, from the moment it was created. `Osc133Scanner` follows xterm.js
+5.5: `ESC ]` (C0 / DEL between them keep the ESC state) or C1 `U+009D`; ends on BEL, ESC (ST) or
+`U+009C`; CAN / SUB / any other C1 abort; `U+009D` restarts; C0 inside the payload is ignored; the
+identifier is digits up to `;` (`0133` is 133, an ASCII non-digit aborts). Marks split across
+chunks are reassembled (a partial sequence at the end of a chunk is carried, at most 4 KiB). It
+keeps `integrated` (a `B` was seen — monotonic, survives gaps), `last` (`A`/`B`/`C`/`D` or `None`),
+the transcript offset where that mark starts, whether it was emitted on the **alternate screen**,
+and where the last sequence that `read_tail` strips from replays ended. Nothing comes from the
+browser: input never reaches the scanner. The state lives only in memory — after a gateway restart
+it starts empty until the shell's next mark. Fail closed everywhere the parser can't be sure
+(review of 3.6.13, L2): xterm's UTF-8 decoder **drops** invalid bytes (lone continuation bytes, bad
+lead bytes, BOM), its payload limit counts UTF-16 units, and the hub keeps only the first 64 bytes
+of an OSC — so any OSC that *might* be 133 but can't be read for certain (a byte ≥ 0x80 between ESC
+and `]` or in the identifier, an identifier or kind cut by the 64-byte window, a payload over
+10 000 000 bytes, a 133 aborted by CAN / SUB / C1, an `E`, an empty or unknown kind, a partial
+sequence over the carry cap) makes `last` **`None`** instead of leaving an older mark in place.
+- **`C` (L1):** xterm's tracker only starts a "running command" from a `C` that follows a prompt
+  with something typed. The hub reports `C` only after `B` → `E;<cmd>` (our integration always
+  sends it) or `B` → typed bytes → `C`; a bare `C` (no `B` since the last `C`/`D`, right after an
+  `A`, after an empty `E`, or straight after `B` with nothing typed — e.g. a background job printing
+  `ESC]133;C` at an idle prompt) is `None`.
+- **Alternate screen (L3):** DECSET / DECRST 47 / 1047 / 1049 (also inside a multi-parameter
+  `CSI ? 1;1049 h`) and RIS are tracked; a mark emitted on the alternate screen is reported as
+  `None` on a non-tmux stream (pty / telnet / serial — e.g. tmux or screen run inside a plain pty,
+  whose inner shell's marks reach us while the outer screen is alternate; `read_tail` strips the
+  switch, so the replay would show that `B` on the main screen). On a tmux-backed stream (agent tmux
+  backend, SSH with tmux on the remote) the outer tmux client sits on the alternate screen for as
+  long as it is attached, so the switch is an artefact there and is ignored; an unknown source
+  counts as non-tmux (fail closed).
+- **Stripped sequences (L3):** `read_tail` removes 47/1047/1048/1049 h/l, `ESC[2J`, `ESC[3J` and
+  RIS from every replay. If one of them lies after the last mark, `synced` is false: the replayed
+  screen isn't the live one (`Ctrl+L` at the prompt, a repaint), and removing it could splice a mark
+  together in the replay that the hub never saw. Residual: under tmux, a full repaint (every
+  attach asks for one) can clear the screen, so after another client attached a `B` may only be
+  seeded again from the next live prompt.
+- **Performance (M3):** the hot path never steps through bytes in Python. Literal-prefix searches
+  (run by `re` in C) jump straight to `ESC ]` — skipping, inside the regex, any OSC with a clean
+  non-133 identifier (titles, cwd, hyperlinks), which xterm handles identically — `U+009D`, an
+  alternate-screen DECSET, `ESC[2J`/`ESC[3J`, RIS and `ESC` + C0/high byte; inside an OSC, straight
+  to its terminator; a complete clean `ESC]133;…` is read with one regex. Measured on 16 KiB chunks:
+  plain text ~300 MB/s, SGR-dense (`\e[0m` repeated) ~120–160, `°`-dense ~300, OSC title full of
+  `°` ~290, dense short titles ~120, `ls --color` ~160–220, an unterminated 10 MB OSC ~110.
+  Pathological floods still cost more: `ESC` repeated ~50 MB/s, alternate-screen DECSET spam
+  ~55 MB/s, and a stream of nothing but complete 133 marks ~5 MB/s (each mark is a state change;
+  ~3 ms per 16 KiB of pure marks). For comparison, writing the same chunk to the `.cast` file
+  (`json.dumps`) runs at ~260 MB/s.
 
-**Protocol.** `init` carries `osc133: {integrated}` (monotonic, so safe to send before the replay).
-The kind of the last mark can't go in `init`: `init` precedes the replay, and output processed in
-between would make it stale. Instead the hub takes a snapshot **synchronously** with the moment
-live output starts flowing to that client — `hub.clients.add(client)` on attach, the queue drain
-in `BrowserClient._resync` (and again at the second drain of a lossy resync, whose dropped bytes
-move the live point) — and sends `{"type": "osc133", integrated, last, synced}` right after the
-replay bytes and before any live byte (the sender task starts only afterwards; in `_resync` the
-sender is the caller). `synced` is true only when the replay this client got ends **exactly** at
-that live point and contains the last mark whole: for a full resync, the flush-bounded cutoff with
-an unchanged transcript generation; for an attach, the replay read the flushed file and nothing was
-flushed or rewritten during the read (size + generation checked before and after) **and** nothing
-unflushed is left (`end == out_f.tell()`), i.e. the session was idle for the 2.5 s checkpoint —
-the usual state of a pane parked at a prompt. A locked attach sends no replay and no `osc133`; the
-unlock resync sends its own.
+**Protocol.** The hub takes a snapshot **synchronously** with the moment live output starts flowing
+to that client — `hub.clients.add(client)` on attach, the queue drain in `BrowserClient._resync`
+(and again at the second drain of a lossy resync, whose dropped bytes move the live point) — and
+sends `{"type": "osc133", integrated, last, synced}` right after the replay bytes and before any
+live byte (the sender task starts only afterwards; in `_resync` the sender is the caller). Nothing
+goes in `init`: it is sent before the step-up / lock decision (review of 3.6.13, L7), and output
+processed between `init` and the replay would make it stale anyway. A locked attach (and a share
+guest without the owner present on a 2FA host) gets no replay and no `osc133`; the unlock resync
+sends its own. `synced` is true only when the replay this client got ends **exactly** at that live
+point, contains the last mark whole and has no stripped sequence after it: for a full resync, the
+flush-bounded cutoff with an unchanged transcript generation; for an attach, the replay read the
+flushed file and nothing was flushed or rewritten during the read (size + generation checked
+before and after) **and** nothing unflushed is left (`end == out_f.tell()`), i.e. the session was
+idle for the 2.5 s checkpoint — the usual state of a pane parked at a prompt.
 
 **Browser (`CommandTracker.applyHubState`).** Applied after xterm has parsed the replay (an empty
 `term.write` queued behind it), only if the tracker is still stale from that replay (no live mark
 since). Narrow, fail closed:
 - `integrated: true` → integrated (a `false` never clears what the browser saw itself);
-- `last: 'C'` → a program started before the replay is running: Enter goes to it, exactly as when
-  the `C` is seen live (`lineKnown()` true, `atPrompt()` false) until a live `D`. It doesn't
-  depend on the replay;
-- `last: 'B'` + `synced` + the tracker's own **last replayed mark is also `B`** (on the main screen,
-  its position kept with an xterm marker) → the line is read from that `B` to the cursor, as for a
-  live prompt. The double check means the gateway parser and xterm must agree; any disagreement
-  stays unknown;
-- anything else (`A`, `D`, `null`, not synced, a different last replayed mark, a `B` replayed on
-  the alternate screen) → unknown until the next live `B`, as in 3.6.12.
+- `last: 'C'` → a program started from a prompt before the replay is running: Enter goes to it,
+  as when that `C` is seen live (`lineKnown()` true, `atPrompt()` false) until a live `D`. It
+  doesn't depend on the replay;
+- `last: 'B'` + `synced` + the tracker's own **last replayed mark is also `B`** (its position kept
+  with an xterm marker) → the line is read from that `B` to the cursor, as for a live prompt. The
+  double check means the gateway parser and xterm must agree; any disagreement stays unknown;
+- anything else (`A`, `D`, `null`, not synced, a different last replayed mark) → unknown until the
+  next live `B`, as in 3.6.12.
 
 **What is still spoofable, and why it is not worse.** The marks are bytes in the session's output:
 any program running in the pane can print a fake `B` or `C`. That was already true of the live path
 — the browser's tracker trusts live marks the same way — and the guardrail is a safety net against
 mistakes, not a boundary against a hostile program on the host (which could simply run the command
-itself). The hub state is a summary of the same stream: a fake `C` printed after the prompt makes
-the pane look busy whether it is seen live or reported by the hub; a fake `B` only places the line
-start, read from the browser's own replayed screen, exactly as a live fake `B` would. The hub never
-reports a mark the stream didn't contain, and a parser disagreement between the hub and xterm (only
-possible with crafted malformed sequences) either keeps the line unknown (`B` double check) or
-amounts to a fake mark printed by that same program. Browser input never feeds the scanner, and
+itself). The hub only reports what the live tracker would also have believed: a `C` counts only
+where xterm's tracker would start a command (after a prompt, with something typed — a program that
+prints `B`, some text and `C` fakes it live just the same), a `B` only places the line start, read
+from the browser's own replayed screen exactly as a live fake `B` would, and only when the replay
+provably equals the live screen (no stripped sequence after it). Where the hub's byte parser and
+xterm's decoder could disagree, the hub reports `None`. Browser input never feeds the scanner, and
 `integrated` can only add unknowns. After a gateway restart the hub knows nothing until the next
 mark, so the browser falls back to the 3.6.12 behaviour (unknown, or "no integration" if the tail
 holds no `B`) — residual: a session whose marks are all outside the tail, after a gateway restart

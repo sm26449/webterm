@@ -11849,9 +11849,7 @@ async def shared_ws(ws: WebSocket, token: str):
                                    "writable": writable,
                                    # dimensiunea PTY-ului: invitatul oglindeşte EXACT grila owner-ului
                                    # (altfel fit()-ul la containerul lui împachetează output-ul greşit)
-                                   "rows": row["rows"] or 24, "cols": row["cols"] or 80,
-                                   # shell integration văzută LIVE de hub (3.6.13; vezi core.osc133_state)
-                                   "osc133": {"integrated": hub.osc.integrated} if hub else None}))
+                                   "rows": row["rows"] or 24, "cols": row["cols"] or 80}))
     # Invitatul prin share NU poate face step-up — n-are cont, are doar tokenul din URL. Deci
     # pe un host cu 2FA regula lui e: vede sesiunea DOAR cât timp owner-ul verificat e ataşat.
     # Aici era aceeaşi gaură ca în `browser_ws`: decizia se lua din `hub.last_interaction`, pe
@@ -12072,9 +12070,8 @@ async def browser_ws(ws: WebSocket, sid: str):
         "lock_at": (hub.last_interaction + hub.lock_idle) if hub and hub.lock_idle else None,
         # 3.6: „watching (read-only)" — UI-ul face tastatura inertă şi arată pastila
         "readonly": access != "rw",
-        # 3.6.13: shell integration (un B OSC 133) văzută LIVE de hub — monoton, deci sigur de trimis
-        # înaintea replay-ului; felul ultimului marcaj vine separat (`osc133`), după replay
-        "osc133": {"integrated": hub.osc.integrated} if hub else None,
+        # 3.6.13: starea OSC 133 NU pleacă aici — `init` precede verificarea de step-up / blocare
+        # (review 3.6.13, L7); vine în mesajul `osc133`, doar după un replay trimis (deblocat)
     }))
     # ATAŞAREA la o sesiune de pe un host cu 2FA cere step-up — fail-closed.
     # Aici era gaura prin care un cookie furat ajungea la un shell root: `browser_ws` cerea doar

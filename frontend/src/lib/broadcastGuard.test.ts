@@ -520,12 +520,16 @@ describe('3.6.13: CommandTracker.applyHubState', () => {
     }
   })
 
-  it('B rejucat pe ecranul alternativ → necunoscut', () => {
-    const { term, alt } = fakeTerm()
+  // review 3.6.13 (L3): read_tail scoate comutările de ecran din replay, deci în browser un B rejucat
+  // apare mereu pe ecranul principal — hub-ul e cel care urmăreşte ecranul alternativ şi trimite
+  // last=null pentru un marcaj de acolo (tests/split_views_test.py). Aici: last=null → necunoscut.
+  it('B de pe ecranul alternativ (hub: last=null) → necunoscut, deşi replay-ul arată un B', () => {
+    const { term, type } = fakeTerm()
     const tr = new CommandTracker(term)
     tr.reset()
-    alt(true); tr.noteReplayedMark('B'); alt(false)
-    tr.applyHubState({ integrated: true, last: 'B', synced: true })
+    tr.noteReplayedMark('A'); tr.noteReplayedMark('B')
+    type('rm -rf /srv')
+    expect(tr.applyHubState({ integrated: true, last: null, synced: true })).toBe(false)
     expect(tr.lineKnown()).toBe(false)
   })
 
@@ -538,14 +542,14 @@ describe('3.6.13: CommandTracker.applyHubState', () => {
     expect(tr.atPrompt()).toBe(true)
   })
 
-  it('integrated de la hub (init) fără niciun marcaj în replay → linia necunoscută, nu „fără integrare"', () => {
+  it('integrated de la hub (mesajul osc133) fără niciun marcaj în replay → linia necunoscută, nu „fără integrare"', () => {
     const { term, type } = fakeTerm()
     const tr = new CommandTracker(term)
     tr.reset()
     type('rm -rf /srv')
     // 3.6.12: fără marcaj în fereastra replay-ului = „fără shell integration" → ok, neverificat
     expect(judgePeers([stateOf(tr)], guard, true).kind).toBe('ok')
-    tr.noteIntegrated()
+    tr.applyHubState({ integrated: true, last: null, synced: false })   // mesajul `osc133`, după replay
     expect(judgePeers([stateOf(tr)], guard, true).kind).toBe('unknown')
     // `integrated: false` de la hub nu şterge ce am văzut noi
     tr.applyHubState({ integrated: false, last: null, synced: false })

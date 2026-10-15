@@ -1370,6 +1370,12 @@ class SessionHub:
             "UPDATE sessions SET agent_epoch = ?, agent_offset = ? WHERE id = ?",
             self.agent_epoch, self.agent_offset, self.sid)
 
+    def _tmux_backed(self) -> bool:
+        """Fluxul vine de la un client tmux (agent tmux / SSH cu tmux pe remote). Sursă necunoscută → False."""
+        src = self._source()
+        return src is not None and getattr(src, "backend", None) not in (
+            None, "pty", "telnet", "telnet-fwd", "serial-fwd")
+
     def osc133_state(self, replay: Optional[dict] = None) -> dict:
         """Starea OSC 133 de trimis unui client în punctul în care fluxul LIVE începe să curgă spre el
         (apelat SINCRON cu acel punct: `hub.clients.add` la ataşare, drain-ul din `_resync`).
@@ -1379,10 +1385,23 @@ class SessionHub:
         `synced` — replay-ul tocmai trimis clientului se termină EXACT în acest punct (fără gaura de
         checkpoint, fără rescriere de transcript) şi CONŢINE ultimul marcaj întreg. Doar atunci
         browserul poate găsi poziţia lui B pe ecranul rejucat (linia tastată = de la B la cursor).
-        `replay` = {"end", "limit", "gen"}: fereastra [end-limit, end) din .out, generaţia ei."""
-        st = self.osc.snapshot()
+        `replay` = {"end", "limit", "gen"}: fereastra [end-limit, end) din .out, generaţia ei.
+
+        Review 3.6.13 (L3): un marcaj emis pe ecranul ALTERNATIV (DECSET 47/1047/1049 — tmux / screen
+        imbricat într-un flux fără tmux) e raportat ca None: xterm ignoră marcajele de acolo, iar
+        replay-ul (read_tail scoate comutările) l-ar arăta pe ecranul principal. Pe un flux tmux
+        (agent tmux, SSH cu tmux pe remote) clientul tmux însuşi stă pe ecranul alternativ cât e
+        ataşat — acolo comutarea e un artefact, iar ecranul alternativ al programelor din panou nu
+        ajunge în fluxul exterior; sursă necunoscută = tratat ca flux fără tmux (fail-closed).
+        `synced` cere în plus ca după ultimul marcaj să nu fie nicio secvenţă pe care read_tail o
+        scoate (ESC[2J / ESC[3J / RIS / comutări de ecran): ecranul rejucat n-ar fi cel live (Ctrl+L la
+        prompt, un repaint), iar scoaterea ei poate lipi în replay un marcaj pe care hub-ul nu l-a văzut."""
+        osc = self.osc
+        st = osc.snapshot()
+        if st["last"] is not None and osc.last_alt and not self._tmux_backed():
+            st["last"] = None
         synced = False
-        if replay is not None and st["last"] is not None and self.osc.last_start is not None:
+        if replay is not None and st["last"] is not None and osc.last_start is not None:
             try:
                 pos = self.out_f.tell()
             except (OSError, ValueError):
@@ -1393,7 +1412,8 @@ class SessionHub:
                       and replay.get("gen") == self.out_gen
                       and isinstance(end, int) and isinstance(limit, int)
                       and end == pos                                    # nimic între replay şi live
-                      and self.osc.last_start >= end - limit)           # marcajul e în fereastră
+                      and osc.last_start >= end - limit                 # marcajul e în fereastră
+                      and (osc.strip_end is None or osc.strip_end <= osc.last_start))
         return {"integrated": st["integrated"], "last": st["last"], "synced": synced}
 
     # -- attach / output ------------------------------------------------------

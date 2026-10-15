@@ -432,24 +432,36 @@ def osc133_parser_tests():
     import random
     from app import osc133
     print("-- 3.6.13: parserul OSC 133 al hub-ului")
-    s = b"\x1b]133;A\x07user@h:~$ \x1b]133;B\x07rm -rf /srv"
+    B = b"\x1b]133;A\x07$ \x1b]133;B\x07"           # un prompt complet
+    s = B + b"rm -rf /srv"
     sc = _scan(s)
     check("A apoi B (BEL) → integrat, ultimul B, offsetul introducerii lui B",
           sc.integrated and sc.last == "B" and sc.last_start == s.index(b"\x1b]133;B"),
           (sc.integrated, sc.last, sc.last_start))
-    sc = _scan(b"\x1b]133;C\x1b\\out")
-    check("terminat cu ST (ESC \\) → C; fără B nu e integrat", sc.last == "C" and not sc.integrated)
-    sc = _scan("\u009d133;D;0\u009c".encode())
+    sc = _scan(B + b"ls\x1b]133;E;ls\x07\x1b]133;C\x1b\\out")
+    check("B → E;cmd → C (terminat cu ST) → C", sc.last == "C")
+    sc = _scan(B + b"ls\x1b]133;C\x07")
+    check("B → C → C", sc.last == "C")
+    sc = _scan(B + "\u009d133;D;0\u009c".encode())
     check("C1 OSC / ST codate UTF-8 (\\xc2\\x9d … \\xc2\\x9c) → D", sc.last == "D", sc.last)
     sc = _scan(b"\x1b]133;B\x1bX")
     check("ESC termină OSC-ul (ca xterm) → B", sc.last == "B")
+    # L1 (review 3.6.13): xterm porneşte o comandă doar dintr-un C care urmează unui prompt
+    for stream, why in ((b"\x1b]133;C\x07", "fără niciun B"),
+                        (B + b"\x1b]133;C\x07\x1b]133;D;0\x07\x1b]133;C\x07", "după D, fără B nou"),
+                        (B + b"\x1b]133;E;\x07\x1b]133;C\x07", "după un E gol"),
+                        (B + b"\x1b]133;A\x07\x1b]133;C\x07", "după A"),
+                        (B + b"\x1b]133;C\x07", "imediat după B, fără nimic tastat"),
+                        (b"\x1b]133;B\x1b\\\x1b]133;C\x1b\\", "imediat după B (ST), fără nimic tastat")):
+        sc = _scan(stream)
+        check("C %s (job în fundal care tipăreşte ESC]133;C) → necunoscut" % why, sc.last is None, sc.last)
     # rupt între chunk-uri, octet cu octet şi la întâmplare: aceeaşi stare, aceleaşi offseturi
     s = (b"\x1b[31mred\x1b[0m\r\n\x1b]133;D;0\x07\x1b]133;A\x07\xc2\xa0~$ \x1b]133;B\x07ls -la"
-         + "\u009d133;C\u009c".encode() + b"total 0\r\n" + b"\x1b]133;D;0\x1b\\\x1b]133;A\x07$ \x1b]133;B\x07")
+         + "\u009d133;C\u009c".encode() + b"total 0\r\n\x1b[?2004h" + b"\x1b]133;D;0\x1b\\\x1b]133;A\x07$ \x1b]133;B\x07")
     whole = _scan(s)
     ok_split = True
-    for _ in range(200):
-        rnd = random.Random(_)
+    for seed in range(200):
+        rnd = random.Random(seed)
         cuts = []
         left = len(s)
         while left > 0:
@@ -457,7 +469,7 @@ def osc133_parser_tests():
             cuts.append(min(n, left))
             left -= n
         sc = _scan(s, cuts)
-        if (sc.last, sc.last_start, sc.integrated) != (whole.last, whole.last_start, whole.integrated):
+        if (sc.last, sc.last_start, sc.integrated, sc.alt) != (whole.last, whole.last_start, whole.integrated, whole.alt):
             ok_split = False
             break
     bytewise = _scan(s, [1] * len(s))
@@ -465,58 +477,87 @@ def osc133_parser_tests():
           ok_split and (bytewise.last, bytewise.last_start) == (whole.last, whole.last_start)
           and whole.last == "B" and whole.last_start == s.rindex(b"\x1b]133;B"),
           (whole.last, whole.last_start, bytewise.last, bytewise.last_start))
-    sc = _scan(b"\x1b]133;B\x07\x1b]133;C\x18")
-    check("CAN abandonează OSC-ul (xterm nu-l livrează) → rămâne B", sc.last == "B")
-    sc = _scan(b"\x1b]133;B\x07\x1b]133;C\xc2\x85")
-    check("alt C1 în OSC (NEL) îl abandonează → rămâne B", sc.last == "B")
-    sc = _scan(b"\x1b]133;B\x07\x1b]0;133;C\x07\x1b]1330;C\x07\x1b]13a3;C\x07")
-    check("titlu / alt id / id ne-numeric NU sunt 133 → rămâne B", sc.last == "B")
-    sc = _scan(b"\x1b]0133;C\x07")
+    sc = _scan(B + b"\x1b]0;titlu \xc2\xb0C\x07\x1b]7;file://h/tmp\x07\x1b]1330;C\x07\x1b]13a3;C\x07")
+    check("titlu (cu °) / cwd / alt id / id ne-numeric ASCII NU sunt 133 → rămâne B", sc.last == "B", sc.last)
+    sc = _scan(B + b"x\x1b]0133;C\x07")
     check("zerourile din faţa id-ului contează ca la xterm (0133 = 133)", sc.last == "C")
-    sc = _scan(b"\x1b]13\x003;\x01C\x07")
+    sc = _scan(B + b"x\x1b]13\x003;\x01C\x07")
     check("C0-urile din payload sunt ignorate, ca la xterm (13\\x003;\\x01C = 133;C)", sc.last == "C", sc.last)
-    sc = _scan(b"\x1b\x00\x7f]133;C\x07")
+    sc = _scan(B + b"x\x1b\x00\x7f]133;C\x07")
     check("C0 / DEL între ESC şi ] nu întrerup secvenţa (xterm: rămâne în ESCAPE)", sc.last == "C")
-    sc = _scan(b"\x1b ]133;C\x07")
-    check("ESC <intermediar> ] nu e OSC", sc.last is None)
-    sc = _scan(b"\x1b]133;B\x07\x1b]133;C\xc2\x9d133;D;1\x07")
-    check("U+009D în OSC porneşte unul nou (cel vechi se aruncă) → D", sc.last == "D")
-    sc = _scan(b"\x1b]133;B\x07\x1b]133;C;x\xc2\xa0y\x07")
+    sc = _scan(b"\x1b ]133;B\x07")
+    check("ESC <intermediar> ] nu e OSC", sc.last is None and not sc.integrated)
+    sc = _scan(B + b"\x1b]133;C\xc2\x9d133;D;1\x07")
+    check("U+009D în OSC porneşte unul nou → D", sc.last == "D")
+    sc = _scan(B + b"x\x1b]133;C;x\xc2\xa0y\x07")
     check("un caracter U+00A0 în payload nu termină OSC-ul", sc.last == "C")
-    for payload, why in ((b"133;E;rm -rf /", "E"), (b"133;Bx", "fel necunoscut"), (b"133", "fără ;"),
-                         (b"133;", "fel gol")):
-        sc = _scan(b"\x1b]133;B\x07\x1b]" + payload + b"\x07")
-        check("după B, un 133 %s → ultimul marcaj necunoscut (fail-closed), integrat rămâne" % why,
-              sc.last is None and sc.integrated, (payload, sc.last))
-    # bufferul e mărginit: un OSC uriaş nu umflă memoria, iar felul trunchiat nu e ghicit
+    # fail-closed: un 133 abandonat / nelămurit face ultimul marcaj necunoscut
+    for tail, why in ((b"\x1b]133;C\x18", "abandonat cu CAN"),
+                      (b"\x1b]133;C\xc2\x85", "abandonat cu un alt C1 (NEL)"),
+                      (b"\x1b]133;E;rm -rf /\x07", "E"), (b"\x1b]133;Bx\x07", "fel necunoscut"),
+                      (b"\x1b]133\x07", "fără ;"), (b"\x1b]133;\x07", "fel gol")):
+        sc = _scan(B + tail)
+        check("după B, un 133 %s → ultimul marcaj necunoscut, integrat rămâne" % why,
+              sc.last is None and sc.integrated, (tail, sc.last))
+    # L2 (review 3.6.13): decodorul UTF-8 al lui xterm ARUNCĂ octeţii invalizi, deci `ESC \x80 ]133;B`
+    # E un marcaj pentru xterm. Nu ghicim: ultimul marcaj devine necunoscut.
+    probes = (b"\x1b\x80]133;B\x07", b"\x1b\xe2]133;B\x07", b"\x1b]1\x803;B\x07",
+              b"\x1b]1\xef\xbb\xbf33;B\x07", b"\x1b]" + b"0" * 61 + b"133;B\x07",
+              b"\x1b]" + b"0" * 70 + b"133;B\x07", b"\x1b]133;" + b"B" * 70 + b"\x07")
+    for p in probes:
+        sc = _scan(B + b"\x1b]133;C\x07" + b"\x1b]133;D;0\x07" + p)
+        check("probă %r → ultimul marcaj necunoscut (nu D-ul vechi)" % p[:24], sc.last is None, sc.last)
+    sc = _scan(B + b"\x1b\x80]0;titlu\x07")
+    check("OSC ne-133 cu ESC „murdar” → nu ştim dacă e 133 → necunoscut", sc.last is None)
+    # bufferul e mărginit: un OSC uriaş nu umflă memoria; peste PAYLOAD_LIMIT → necunoscut
     sc = osc133.Osc133Scanner()
-    sc.feed(b"\x1b]133;B", 0)
+    sc.feed(B + b"\x1b]133;D;", 0)
     big = b"x" * (1 << 20)
-    for i in range(4):
-        sc.feed(big, 8 + i * len(big))
-    bounded = len(sc._head) <= osc133.HEAD_MAX
-    sc.feed(b"\x07", 8 + 4 * len(big))
-    check("OSC uriaş: buffer ≤ HEAD_MAX, „Bxxxx…” nu devine B", bounded and sc.last is None, len(sc._head))
-    sc = osc133.Osc133Scanner()
-    sc.feed(b"\x1b]133;C;", 0)
+    off = len(B) + 9
     for _ in range(11):
-        sc.feed(b"y" * 1_000_000, 0)
-    sc.feed(b"\x07", 0)
-    check("payload peste PAYLOAD_LIMIT (xterm îl abandonează) → ignorat", sc.last is None)
-    sc = _scan(b"\x1b]133;B\x07")
+        sc.feed(big, off)
+        off += len(big)
+    bounded = len(sc._head) <= osc133.HEAD_MAX
+    sc.feed(b"\x07", off)
+    check("OSC uriaş: buffer ≤ HEAD_MAX; peste PAYLOAD_LIMIT → necunoscut", bounded and sc.last is None)
+    sc = _scan(B + b"\x1b" + b"\x00" * 5000 + b"]133;C\x07", [len(B) + 100, 2000, 2000, 2000])
+    check("ESC urmat de o rafală de C0 peste plafonul de carry → necunoscut", sc.last is None, sc.last)
+    sc = _scan(B)
     sc.gap()
     check("gol în flux → ultimul marcaj necunoscut, integrarea rămâne", sc.last is None and sc.integrated)
-    sc = _scan(b"\x1b]133;B\x07")
+    sc = _scan(B)
     sc.rebase()
     check("transcript rescris → felul rămâne, poziţia nu", sc.last == "B" and sc.last_start is None)
-    # calea fierbinte: output plin de secvenţe de culoare, fără OSC — rapid (regex în C)
-    noisy = (b"\x1b[38;5;196mERROR\x1b[0m \xc2\xb0 \x1b[1mbold\x1b[22m line\r\n") * 120_000   # ~5 MiB
-    t0 = time.perf_counter()
-    sc = osc133.Osc133Scanner()
-    for i in range(0, len(noisy), 65536):
-        sc.feed(noisy[i:i + 65536], i)
-    dt = time.perf_counter() - t0
-    check("5 MiB de output colorat scanat în < 5 s (%.2f s)" % dt, dt < 5 and sc.last is None, dt)
+    # L3 (review 3.6.13): ecranul alternativ şi secvenţele scoase din replay
+    sc = _scan(b"\x1b[?1049h" + B)
+    check("B pe ecranul alternativ → last_alt", sc.last == "B" and sc.last_alt and sc.alt)
+    sc = _scan(b"\x1b[?1049h\x1b[?1049l" + B)
+    check("înapoi pe ecranul principal → last_alt fals", sc.last == "B" and not sc.last_alt)
+    sc = _scan(b"\x1b[?47h\x1bc" + B)
+    check("RIS închide ecranul alternativ", not sc.last_alt and not sc.alt)
+    sc = _scan(b"\x1b[?1;1049h" + B)
+    check("DECSET cu mai mulţi parametri (?1;1049h) → alternativ", sc.last_alt)
+    sc = _scan(B + b"ls\x1b[H\x1b[2J$ ls")
+    check("ESC[2J după ultimul B (Ctrl+L, repaint) → strip_end după marcaj",
+          sc.strip_end is not None and sc.strip_end > sc.last_start)
+    sc = _scan(b"\x1b[2J" + B)
+    check("ESC[2J înaintea lui B → nu contează", sc.strip_end < sc.last_start)
+    # calea fierbinte (review 3.6.13, M3): fără pas Python per octet
+    loads = {
+        "plain": b"hello world\n" * 1_000_000,
+        "sgr-dense": b"\x1b[0m" * 2_500_000,
+        "c2-dense": "°".encode() * 5_000_000,
+        "osc-title-with-deg": b"\x1b]0;" + "°".encode() * 5_000_000 + b"\x07",
+        "ls-color": b"\x1b[01;34mdir\x1b[0m  \x1b[01;32mexe\x1b[0m\n" * 300_000,
+    }
+    for name, load in loads.items():
+        sc = osc133.Osc133Scanner()
+        t0 = time.perf_counter()
+        for i in range(0, len(load), 16384):
+            sc.feed(load[i:i + 16384], i)
+        rate = len(load) / 1e6 / (time.perf_counter() - t0)
+        # prag generos (CI partajat); local: 100–350 MB/s
+        check("scanare %s: %.0f MB/s (≥ 20)" % (name, rate), rate >= 20, rate)
 
 
 async def osc133_hub_tests():
@@ -600,6 +641,33 @@ async def osc133_hub_tests():
         st = hub.osc133_state(None)
         check("gap marker → last=None, integrated rămâne", st["last"] is None and st["integrated"], st)
         check("out_pos urmează şi marcajul de gol", hub.out_pos == hub.out_f.tell())
+
+        # L3 (review 3.6.13): ecranul alternativ şi secvenţele scoase din replay
+        await hub._process_output(b"\x1b[?1049h\x1b]133;A\x07$ \x1b]133;B\x07")
+        check("B pe ecranul alternativ, flux fără tmux → last=None",
+              hub.osc133_state(None)["last"] is None and hub.osc.last == "B")
+        real_source = hub._source
+        hub._source = lambda: type("S", (), {"backend": "tmux"})()
+        check("… pe un flux tmux comutarea e a clientului tmux → B",
+              hub.osc133_state(None)["last"] == "B")
+        hub._source = lambda: type("S", (), {"backend": "pty"})()
+        check("… backend pty → tot None", hub.osc133_state(None)["last"] is None)
+        hub._source = real_source
+        await hub._process_output(b"\x1b[?1049l\x1b]133;A\x07$ \x1b]133;B\x07ls")
+        hub._flush()
+        end = hub.out_f.tell()
+        span = {"end": end, "limit": 1 << 20, "gen": hub.out_gen}
+        check("înapoi pe ecranul principal → B, sincronizat", hub.osc133_state(span) ==
+              {"integrated": True, "last": "B", "synced": True}, hub.osc133_state(span))
+        await hub._process_output(b"\x1b[H\x1b[2J$ ls")     # Ctrl+L la prompt: fără B nou
+        hub._flush()
+        end = hub.out_f.tell()
+        st = hub.osc133_state({"end": end, "limit": 1 << 20, "gen": hub.out_gen})
+        check("ESC[2J după ultimul B (read_tail îl scoate din replay) → nesincronizat",
+              st["last"] == "B" and st["synced"] is False, st)
+        # L1: un C care nu urmează unui prompt (job în fundal) → None, nu „rulează"
+        await hub._process_output(b"\x1b]133;D;0\x07\x1b]133;C\x07")
+        check("C fără B înainte → last=None", hub.osc133_state(None)["last"] is None)
         hub.clients.discard(client)
     finally:
         hub.teardown()

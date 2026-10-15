@@ -127,18 +127,17 @@ export class CommandTracker {
     }
   }
 
-  /** shell integration văzută de hub în fluxul live (`init.osc133.integrated`, 3.6.13): ca un B
-      rejucat, dar fără să depindă de fereastra replay-ului (rezidualul „tail fără niciun marcaj"). */
-  noteIntegrated(): void {
-    this.integratedFlag = true
-  }
-
   /** Starea OSC 133 a hub-ului (mesajul `osc133`), aplicată DUPĂ ce xterm a parsat replay-ul şi
       ÎNAINTE de orice octet live (gateway-ul o trimite exact în punctul în care fluxul live începe
       să curgă spre noi). Fail-closed — orice nepotrivire lasă linia necunoscută:
-        • `integrated` → integrat (doar adaugă: un `false` nu şterge ce am văzut noi);
-        • `last === 'C'`: ultimul marcaj LIVE e un început de execuţie → rulează ceva (ssh, `sudo -i`,
-          un REPL): Enter-ul merge la program, ca în calea live (runningUnseen). Nu depinde de replay;
+        • `integrated` → integrat (doar adaugă: un `false` nu şterge ce am văzut noi) — rezidualul
+          „replay fără niciun marcaj": hub-ul a văzut B-ul live, deci linia e necunoscută, nu „fără
+          integrare". Vine DOAR aici, după un replay trimis, nu în `init` (review 3.6.13, L7: `init`
+          pleacă înainte de verificarea de step-up / blocare);
+        • `last === 'C'`: ultimul marcaj LIVE e un început de execuţie care urmează unui prompt (hub-ul
+          raportează C doar după B / B→E, şi nu de pe ecranul alternativ — review 3.6.13, L1) →
+          rulează ceva (ssh, `sudo -i`, un REPL): Enter-ul merge la program, ca în calea live
+          (runningUnseen). Nu depinde de replay;
         • `last === 'B'` + `synced` (replay-ul se termină exact în punctul live şi conţine marcajul)
           + ultimul marcaj REJUCAT tot B, pe ecranul principal → linia e cunoscută: de la poziţia
           acelui B la cursor, exact cum ar fi citit-o un B live;

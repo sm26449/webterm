@@ -74,8 +74,11 @@ export const ECHO_GRACE_MS = 150
     Panourile-ţintă ale unui broadcast cer în plus să fi sosit MĂCAR un output după trimitere
     (regula grosieră din 3.6.12): un host blocat (fără niciun output) rămâne „fără ecou", ca înainte. */
 export const ECHO_SETTLE_MIN_MS = 1000
+/** plafon (review 3.6.13, L6): un vârf de RTT (tab adormit, reţea blocată) nu întinde fereastra la minute */
+export const ECHO_SETTLE_MAX_MS = 5000
 export function echoSettleMs(rtt: number | null | undefined): number {
-  return Math.max(ECHO_SETTLE_MIN_MS, 4 * (typeof rtt === 'number' && Number.isFinite(rtt) && rtt > 0 ? rtt : 0))
+  const r = typeof rtt === 'number' && Number.isFinite(rtt) && rtt > 0 ? rtt : 0
+  return Math.min(ECHO_SETTLE_MAX_MS, Math.max(ECHO_SETTLE_MIN_MS, 4 * r))
 }
 
 /** Tastele trimise au primit ecou? `strict` = output care a schimbat linia după ultima trimitere;
@@ -263,6 +266,13 @@ export function judgeLocal(s: LocalState, guard: CommandGuard | null | undefined
   if (unknown) return { kind: 'unknown' }
   if (confirm) return { kind: 'rule', ...confirm }
   return { kind: 'ok' }
+}
+
+/** „Rulează" din dialogul „încă nu pot verifica linia" (un singur panou, review 3.6.13 L4): verdictul se
+    reface ACUM. ok / tot necunoscut (acceptat explicit) → trimite; o regulă care atinge linia devenită
+    vizibilă → escaladare (block = blocare, confirm = dialogul regulii). */
+export function localRunDecision(v: LocalVerdict): 'send' | 'escalate' {
+  return v.kind === 'rule' ? 'escalate' : 'send'
 }
 
 /** O trimitere de input e „text simplu" (ecoul ei doar adaugă la linie)? Fără C0 / DEL / C1 / ESC. */
