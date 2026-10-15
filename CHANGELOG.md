@@ -15,8 +15,9 @@ back.
   the new agent reports the old host's sessions. Adopting them hit the `sessions` primary key, and
   the IntegrityError aborted the whole reconcile cycle on every heartbeat — the rest of the
   adoptions and the agent update check on `hello` never ran. Such a session is now skipped and
-  stays with its own host (a session never moves between hosts); the rest of the cycle goes on.
-  Found while root-causing the E2E-sessions flake, whose retry re-enrolls the same container.
+  stays with its own host (a session never moves between hosts) and does not use up a place under
+  the adoption cap, so it cannot crowd out the new host's own sessions or log a false
+  `adoption_refused`; the rest of the cycle goes on. Found while root-causing the E2E-sessions flake, whose retry re-enrolls the same container.
 - **E2E sessions flake (transfers checks) root-caused — test harness, not product.** Why: the
   "upload onto a read-only FS" check waited for the path *field* to read `/sys`, which happens on
   typing, not for the listing to arrive; the upload went to the previously listed `/tmp` and
@@ -31,8 +32,13 @@ back.
   expanded (a persisted preference: the growing card covered the file panel's folder row and
   selection bar, failing "folder download" / "Copy to host"); a `page.reload` aborted by an
   in-page navigation is repeated once and logged instead of killing the run; a failed check
-  prints what it saw. `scripts/ci-local.sh` serializes container gates with a lock: a second gate (another
-  worktree) used to delete the first one's `wtci-*` containers mid-run.
+  prints what it saw. `scripts/ci-local.sh`: a second container gate (another worktree) used to
+  delete the first one's `wtci-*` containers mid-run. Container gates now take a lock in the
+  clone's shared git dir (every worktree of the clone sees it; owned by the repo's owner, not a
+  `/tmp` file any local user could pre-create or hold), refuse when any `wtci-*` container already
+  exists on the docker daemon (names are daemon-global: other clones, other users;
+  `WTCI_CLEAN_STALE=1` removes leftovers), refuse when the lock cannot be taken, and set the
+  cleanup trap only after every refusal.
 
 ## [3.6.12] — 2026-10-15 · agent (58)
 

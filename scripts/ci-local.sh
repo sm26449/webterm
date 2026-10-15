@@ -69,18 +69,43 @@ cleanup() {
 # `cleanup`, iar dacă prima era încă la `docker build` (porturi libere), `boot` făcea `docker rm -f`
 # pe aceleaşi nume wtci-*. Prima vedea agentul „offline" / ERR_CONNECTION_REFUSED la jumătatea
 # E2E-ului. Numele şi porturile sunt fixe (vezi nota de sus), deci porţile cu containere se
-# SERIALIZEAZĂ: un lock pe host, luat ÎNAINTE de trap; a doua iese fără să atingă nimic.
+# SERIALIZEAZĂ, iar o poartă refuzată iese ÎNAINTE de trap, fără să atingă nimic:
+#   1. lock în directorul git COMUN al clonei (`--git-common-dir`): îl împart toate worktree-urile
+#      ei (cazul real: mai mulţi agenţi pe aceeaşi clonă) şi e al proprietarului repo-ului — nu un
+#      /tmp/… pe care orice user local îl poate crea primul (lock sărit tăcut) sau ţine (gate blocat);
+#   2. numele wtci-* sunt GLOBALE pe daemonul docker (alte clone, alţi useri): dacă există deja
+#      vreun container wtci-*, refuzăm. Rămăşiţe dintr-o rulare întreruptă: le scoţi tu
+#      (`docker rm -f $(docker ps -aq --filter name=^wtci-)`) sau rulezi cu WTCI_CLEAN_STALE=1.
+# Un lock care nu poate fi luat = refuz (exit 2), nu „continuăm fără" — ar fi exact vechiul comportament.
+NEED_CLEANUP=
 case " $ONLY " in
   *" all "*|*" smoke "*|*" e2e "*|*" a11y "*|*" fs "*|*" fwd "*|*" mobile "*|*" sso "*|*" backup "*|*" features "*|*" jump "*)
-    LOCK=${WTCI_LOCK:-/tmp/wtci-gate.lock}
-    if command -v flock >/dev/null 2>&1 && { : >>"$LOCK"; } 2>/dev/null; then
-      exec 9>>"$LOCK"
-      flock -n 9 || {
-        echo "altă poartă ci-local cu containere rulează deja (lock $LOCK) — aşteaptă să se termine;" \
-             "containerele wtci-* şi porturile 8000-8006 sunt comune" >&2
-        exit 2; }
+    command -v flock >/dev/null 2>&1 || {
+      echo "flock lipseşte (util-linux) — porţile cu containere nu pot fi serializate; refuz" >&2; exit 2; }
+    GCD=$(git -C "$REPO" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || GCD=
+    { [ -n "$GCD" ] && [ -d "$GCD" ]; } || GCD=$REPO
+    LOCK=${WTCI_LOCK:-$GCD/wtci-gate.lock}
+    if ! { exec 9>>"$LOCK"; } 2>/dev/null; then
+      echo "nu pot deschide lock-ul $LOCK — refuz (fără el, o a doua poartă şterge containerele primei)" >&2
+      exit 2
     fi
-    trap cleanup EXIT ;;
+    flock -n 9 || {
+      echo "altă poartă ci-local cu containere rulează deja pe clona asta (lock $LOCK) — aşteaptă să" \
+           "se termine; containerele wtci-* şi porturile 8000-8006 sunt comune" >&2
+      exit 2; }
+    STALE=$(docker ps -aq --filter 'name=^wtci-' 2>/dev/null)
+    if [ -n "$STALE" ]; then
+      if [ "${WTCI_CLEAN_STALE:-}" = 1 ]; then
+        # shellcheck disable=SC2086  # listă de id-uri, una per cuvânt
+        docker rm -f $STALE >/dev/null 2>&1 || true
+      else
+        echo "există deja containere wtci-* pe daemonul docker (altă clonă / alt user, sau o rulare" \
+             "întreruptă): $(docker ps -a --filter 'name=^wtci-' --format '{{.Names}}' | tr '\n' ' ')— refuz." \
+             "Dacă sunt rămăşiţe, rulează cu WTCI_CLEAN_STALE=1." >&2
+        exit 2
+      fi
+    fi
+    NEED_CLEANUP=1 ;;
 esac
 
 want() { case " $ONLY " in *" all "*|*" $1 "*) return 0 ;; *) return 1 ;; esac; }
@@ -119,6 +144,8 @@ for prt in $P1 $P2 $P3 $P4 $P5 $P6 $P7; do
     fi ;;
   esac
 done
+# trap-ul abia după toate refuzurile de mai sus: o poartă care iese la preflight nu şterge nimic
+[ -n "$NEED_CLEANUP" ] && trap cleanup EXIT
 
 # ── pasul 1: semnătura agentului (identic cu poarta blocantă din CI) ─────────
 if want sig; then
