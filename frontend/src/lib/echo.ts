@@ -266,6 +266,7 @@ export class EchoTracker {
       pending: this.pending.slice(0, 8).map((e) => ({ seq: e.seq, at: e.at,
         t: e.text === null ? (e.raw ?? 'null') : e.text.length, b: !!e.blind, s: !!e.submit, l: !!e.lump })),
       pendingN: this.pending.length,
+      nulls: this.pending.filter((e) => e.text === null).slice(0, 8).map((e) => ({ seq: e.seq, raw: e.raw, b: !!e.blind, s: !!e.submit, l: !!e.lump })),
     }
   }
 
