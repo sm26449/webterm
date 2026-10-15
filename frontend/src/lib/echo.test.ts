@@ -295,3 +295,30 @@ describe('3.6.13, verificarea finală', () => {
     expect(countCprReplies('\x1b[1;5R\x1b[?3;1R')).toBe(2)
   })
 })
+
+describe('3.6.13, verificarea lui f34e5ec: text după o tastă ne-text — potrivire EXACTĂ', () => {
+  it('↑ recheamă „…/tmp/x" (redesenare ruptă), apoi „x" tastat fără ecou → x NU e confirmat', () => {
+    const p = pane([])
+    p.send('\x1b[A')
+    p.chunk('')                      // prima jumătate: linia ştearsă
+    p.tick(5)
+    p.chunk('rm -rf /tmp/x')         // restul redesenării
+    p.send('x')                      // ecoul lui x n-a sosit
+    p.tick(100)
+    const st = p.local()
+    // logica din f34e5ec („se termină cu" + prima linie „"): x confirmat → verificat „…/tmp/x", rula „…/tmp/xx"
+    expect(st.unechoed).toEqual(['x'])
+    expect(st.echoed).toBe(false)
+    const g2: CommandGuard = { enabled: true, rules: [{ pattern: 'rm -rf /tmp/xx$', action: 'block' }] }
+    expect(judgeLocal(st, g2, true).kind).toBe('rule')   // verificarea locală vede şi linia + „x"
+  })
+  it('↑ apoi „ -v" cu ecoul sosit → confirmat (linia = linia rechemată + text, exact)', () => {
+    const p = pane(['ls'])
+    p.send('\x1b[A')
+    p.arrive(1)
+    for (const c of ' -v') p.send(c)
+    p.arrive(3)
+    p.tick(100)
+    expect(p.local().unechoed).toEqual([])
+  })
+})

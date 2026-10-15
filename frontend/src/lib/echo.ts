@@ -37,6 +37,8 @@ interface Entry {
 }
 
 export const ECHO_PENDING_MAX = 64
+/** câte linii distincte ţinem dintr-o rafală (pentru textul tastat după o tastă ne-text) */
+const CAND_LINES_MAX = 16
 
 /** cât trebuie să tacă fluxul ca o schimbare de linie dintr-o tastă ne-text să fie socotită completă:
     RTT/2 între 20 şi 50 ms (30 ms fără RTT măsurat) */
@@ -58,7 +60,7 @@ export class EchoTracker {
   /** cea mai veche tastă care NU e text simplu, a cărei linie s-a schimbat: se confirmă abia după ce
       fluxul a tăcut (quietMs) şi linia a rămas aceeaşi — o redesenare ruptă în două chunk-uri nu mai
       confirmă două taste (review 3.6.13, a treia trecere, MEDIUM-2) */
-  private cand: { seq: number; key: string; at: number; firstLine: string } | null = null
+  private cand: { seq: number; key: string; at: number; lines: string[] } | null = null
   private lastOutAt = 0
   /** output primit de xterm dar încă neparsat (term.write fără callback încă): cât e > 0, fluxul NU
       e „liniştit" — o scriere mare se parsează în mai multe felii, iar linia de acum nu e finală
@@ -166,8 +168,12 @@ export class EchoTracker {
       // o schimbare care nu e text simplu (↑, Ctrl+P, TAB, o redesenare): cel mult cea mai veche tastă,
       // şi abia după ce fluxul tace (vezi quiet). Încă o schimbare înainte de asta = aceeaşi rafală
       // (ex. redesenarea lui ↑ ruptă în două chunk-uri): reporneşte aşteptarea, nu confirmă alta
-      if (this.cand && this.cand.seq === head.seq) { this.cand.key = cur.k; this.cand.at = nowMs }
-      else this.cand = { seq: head.seq, key: cur.k, at: nowMs, firstLine: cur.line }
+      if (this.cand && this.cand.seq === head.seq) {
+        this.cand.key = cur.k
+        this.cand.at = nowMs
+        const ls = this.cand.lines
+        if (ls[ls.length - 1] !== cur.line && ls.length < CAND_LINES_MAX) ls.push(cur.line)
+      } else this.cand = { seq: head.seq, key: cur.k, at: nowMs, lines: [cur.line] }
     }
     // (un typeahead „orb" nu se confirmă dintr-o schimbare oarecare, doar când linia îl arată)
     this.base = this.pending.length ? cur : undefined
@@ -187,13 +193,18 @@ export class EchoTracker {
     this.cand = null
     // text simplu tastat imediat după tastă (↑ apoi „ -v"): potrivirea se oprea la tasta ne-text, iar
     // referinţa de acum îl conţine deja — l-ar fi ţinut până la plasa de 1 s (review final, LOW-A).
-    // Îl confirmăm dacă linia de acum se termină cu el şi linia de la prima schimbare NU.
+    // Îl confirmăm DOAR dacă linia de acum e EXACT o linie văzută în rafală + textul lui. Nu „se
+    // termină cu": ↑ care recheamă „…/tmp/x" urmat de un „x" tastat ar fi confirmat x-ul înaintea
+    // ecoului său (linia rechemată se termină deja în „x"); cu text nevid, linia de acum nu se poate
+    // potrivi cu ea însăşi.
+    // Rezidual: o redesenare ruptă exact înaintea ultimelor caractere tastate apoi identic ar putea
+    // potrivi; altfel textul rămâne în aşteptare (plasa de 1 s / lipirea din verificarea locală).
     let acc = ''
     let upto = 0
     for (const e of this.pending) {
       if (e.text === null || e.lump || e.blind) break
       acc += e.text
-      if (keyNow.line.endsWith(acc) && !c.firstLine.endsWith(acc)) upto = e.seq
+      if (c.lines.some((l) => l + acc === keyNow.line)) upto = e.seq
     }
     if (upto) this.drop((e) => e.seq <= upto)
     this.base = this.pending.length ? keyNow : undefined

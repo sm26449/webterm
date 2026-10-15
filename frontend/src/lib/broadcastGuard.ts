@@ -252,8 +252,13 @@ export function judgeLocal(s: LocalState, guard: CommandGuard | null | undefined
     if (!final) return { kind: 'wait' }
     if (s.unechoed.length === 0 || s.unechoed.some((t) => t === null)) unknown = true
     else {
-      const merged = lineOf(mergeTyped(s.pending ?? '', s.unechoed.join('')))
-      if (merged) lines.push(merged)
+      // ecoul poate fi deja parţial pe ecran (suprapunere) SAU deloc (linia se termină întâmplător cu
+      // textul: ↑ „…/tmp/x" + „x" tastat) — verificăm ambele variante, fail-closed
+      const typed = s.unechoed.join('')
+      for (const cand of [mergeTyped(s.pending ?? '', typed), (s.pending ?? '') + typed]) {
+        const merged = lineOf(cand)
+        if (merged) lines.push(merged)
+      }
     }
   }
   let confirm: { rule: CommandRule; cmd: string } | null = null

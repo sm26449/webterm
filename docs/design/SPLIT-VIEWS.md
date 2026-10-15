@@ -231,8 +231,12 @@ closed (review of 3.6.12, `lib/broadcastGuard.ts`), when guardrail rules are act
   stream has been quiet for RTT/2 (20–50 ms; 30 ms without a measured RTT) — with no output still
   waiting to be parsed (writes in flight are counted; a large write is parsed in slices) — and the
   line unchanged since its last change. Plain text typed right after such a key (`↑` then ` -v`) is
-  confirmed together with it when the line now ends with that text and the line at the key's first
-  change didn't — so `↑↑⏎` typed faster than the round trip can't pass on the first `↑`'s
+  confirmed together with it only when the line now is **exactly** a line seen during that burst
+  (up to 16 kept) plus the typed text — not "ends with": `↑` recalling `…/tmp/x` followed by a typed
+  `x` would otherwise confirm the `x` before its own echo. Otherwise the text stays pending (the time
+  net; in a single pane the check also judges the line with the text appended, with and without
+  overlap). Residual: a redisplay split exactly before characters identical to the ones typed next
+  can still match — so `↑↑⏎` typed faster than the round trip can't pass on the first `↑`'s
   echo, not even when that `↑`'s redisplay arrives split across two chunks (third review of 3.6.13;
   before it, each half confirmed one key). Two non-text echoes in one burst leave the second
   un-echoed — fail closed (the wait, then "Can't check", or the time net). Residual: a key whose
