@@ -140,13 +140,25 @@ export class CommandTracker {
       textul din dreapta (RPROMPT, p10k, starship: review 3.6.13, M) şi fără un typeahead deja
       redesenat (care poate fi şters apoi). Ce e la dreapta cursorului la acel moment pe rândul
       promptului e un prompt din dreapta: îl ştim, ca citirea până la capătul liniei să-l scoată. */
-  notePromptPainted(): void {
+  notePromptPainted(reanchor = false): void {
     if (this.promptSnap !== null || this.promptMarker === null) return
-    const row = this.promptRow
+    let row = this.promptRow
     if (row === null) return
+    const cur = this.absCursor()
+    // `reanchor` (nimic tastat încă după B — fără typeahead în aşteptare): începutul liniei e AICI, la
+    // cursor. Sub tmux B soseşte înaintea textului pictat, deci poziţia lui poate fi pe rândul
+    // comenzii anterioare; cursorul de la prima tastă e începutul real al liniei (e2e 3.6.13: cu
+    // verificarea de contiguitate, poziţia veche făcea linia „pierdută" după fiecare comandă)
+    if (reanchor && cur.row >= row && this.term.buffer.active.type !== 'alternate') {
+      const m = this.term.registerMarker(0)
+      if (m) {
+        this.setPrompt(m, cur.col)
+        row = this.promptRow
+        if (row === null) return
+      }
+    }
     const line = this.term.buffer.active.getLine(row)
     if (!line) return
-    const cur = this.absCursor()
     const full = line.translateToString(false)
     let snap: string
     if (this.promptCol > 0) snap = full.slice(0, this.promptCol)

@@ -785,7 +785,8 @@ export default function SessionView(props: {
       // rapoartele terminalului (mouse, focus, CPR, DA…) nu sunt taste: nu aşteaptă ecou (review 3.6.13, M2)
       if (sendIsReport(kind, data, pastingRef.current, cprRef.current > 0)) return
       // prima tastă de după B: promptul e pictat — rândul lui se verifică la Enter (review 3.6.13, H1)
-      trackerRef.current?.notePromptPainted()
+      // fără taste în aşteptare (nimic tastat încă după B, niciun typeahead): linia începe la cursor
+      trackerRef.current?.notePromptPainted(!echoRef.current.waiting)
       const { seq, needBase } = echoRef.current.sent(typeof data === 'string' && plainText(data) ? data : null,
         performance.now(), typeof data === 'string' && isBareEnter(data),
         typeof data === 'string' ? data : `<${data.length} bytes>`)

@@ -345,3 +345,46 @@ describe('CommandTracker: linia până la capăt, RPROMPT, prefixul promptului',
     expect(r.hit).toBe(true)
   })
 })
+
+// e2e 3.6.13 (după 2872ae6): sub tmux B soseşte înaintea textului pictat — poziţia lui poate fi pe
+// rândul comenzii anterioare; prima tastă re-ancorează începutul liniei la cursor
+describe('CommandTracker.notePromptPainted(reanchor)', () => {
+  function rowsTerm(rows: string[], cursor: { row: number; col: number }) {
+    const buffer = {
+      type: 'normal', baseY: 0,
+      get cursorY() { return cursor.row }, get cursorX() { return cursor.col },
+      getLine: (r: number) => (rows[r] === undefined ? undefined : {
+        length: 80, isWrapped: false,
+        translateToString: (trim: boolean, from = 0, to?: number) => {
+          const s = rows[r].padEnd(80).slice(from, to)
+          return trim ? s.replace(/\s+$/, '') : s
+        },
+        getCell: (x: number) => ({ getChars: () => (rows[r][x] ?? '').trim(), getWidth: () => 1 }),
+      }),
+    }
+    return { cols: 80, buffer: { active: buffer }, registerMarker: () => ({ line: cursor.row, isDisposed: false, dispose() {} }) } as unknown as Terminal
+  }
+  it('B pe rândul comenzii anterioare, promptul pictat două rânduri mai jos → re-ancorat, linia citită corect', () => {
+    const rows = ['root@h:~# echo X', '', '']
+    const cursor = { row: 0, col: 16 }
+    const term = rowsTerm(rows, cursor)
+    const tr = new CommandTracker(term)
+    tr.handle('B')                                   // marcajul a sosit înaintea output-ului pictat
+    rows[1] = 'X'; rows[2] = 'root@h:~# '; cursor.row = 2; cursor.col = 10
+    expect(tr.promptLost).toBe(true)                 // fără re-ancorare: rândurile 0..2 nu sunt contigue
+    tr.notePromptPainted(true)                       // prima tastă, nimic în aşteptare
+    rows[2] = 'root@h:~# rm -rf /'; cursor.col = 18
+    expect(tr.promptLost).toBe(false)
+    expect(tr.pendingCommand()).toBe('rm -rf /')
+  })
+  it('typeahead în aşteptare → fără re-ancorare (rămâne „pierdut" → „nu pot verifica", fail-closed)', () => {
+    const rows = ['root@h:~# make', 'ok', 'root@h:~# rm -rf']
+    const cursor = { row: 0, col: 14 }
+    const term = rowsTerm(rows, cursor)
+    const tr = new CommandTracker(term)
+    tr.handle('B')
+    cursor.row = 2; cursor.col = 16
+    tr.notePromptPainted(false)
+    expect(tr.promptLost).toBe(true)
+  })
+})
