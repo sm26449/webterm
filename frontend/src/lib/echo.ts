@@ -150,6 +150,20 @@ export class EchoTracker {
       this.drop((e) => !!e.blind && nowMs - e.at >= echoSettleMs(rtt))
       if (!this.pending.length) { this.base = undefined; return }
     }
+    // Un Enter „orb" (trimis fără linie citibilă: comandă în curs, sau după un replay până la primul
+    // prompt live) a fost deja consumat de shell împreună cu tot ce s-a tastat înaintea lui — acea
+    // linie a rulat (guardrail-ul n-o mai poate opri). Când apare o linie citibilă, tot ce e până la
+    // el iese din aşteptare; doar textul de DUPĂ el e typeahead pentru linia de acum (e2e 3.6.13:
+    // după un reload, comanda tastată „orb" + Enter-ul ei blocau verificarea comenzii următoare).
+    if (cur !== null) {
+      let last = -1
+      this.pending.forEach((e, i) => { if (e.blind && e.submit && e.seq <= tag) last = i })
+      if (last >= 0) {
+        this.pending = this.pending.slice(last + 1)
+        if (this.cand && !this.pending.some((e) => e.seq === this.cand?.seq)) this.cand = null
+        if (!this.pending.length) { this.base = undefined; return }
+      }
+    }
     const head = this.pending[0]
     if (head.seq > tag) { this.base = cur; return }
     if (cur === null) {

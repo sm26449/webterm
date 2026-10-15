@@ -420,3 +420,48 @@ describe('3.6.13 e2e: Enter anterior + linie lungă', () => {
     expect(echo.unechoed()).toEqual([])
   })
 })
+
+// e2e 3.6.13 (diagnoza [wt-echo]): după un reload linia e necunoscută până la primul prompt live,
+// deci comanda tastată atunci + Enter-ul ei sunt „oarbe"; rămâneau în aşteptare şi blocau comanda
+// următoare („Încă nu pot verifica linia")
+describe('3.6.13 e2e: Enter „orb" consumat', () => {
+  it('comanda oarbă + Enter-ul ei ies din aşteptare la prima linie citibilă; textul de după se potriveşte', () => {
+    const echo = new EchoTracker()
+    let line: string | null = null                 // după reload: nicio linie citibilă
+    const key = (): LineKey | null => (line === null ? null : { k: `n\u00000\u0000${line.length}\u0000${line}`, line })
+    const send = (d: string, t: number) => {
+      const r = echo.sent(plainText(d) ? d : null, t, d === '\r')
+      if (r.needBase) echo.setBase(r.seq, key())
+    }
+    let t = 0
+    for (const c of 'echo DUPA_ISTORIC_42') send(c, t++)
+    send('\r', t++)
+    // prompt live nou, linia goală; utilizatorul tastează comanda următoare
+    line = ''
+    echo.output(echo.inputSeq, key, t, null)
+    expect(echo.unechoed()).toEqual([])
+    const next = 'sleep 2; echo WT_BG_42'
+    for (let i = 0; i < next.length; i++) {
+      send(next[i], t++)
+      line = next.slice(0, i + 1)
+      echo.output(echo.inputSeq, key, t, null)
+    }
+    expect(echo.unechoed()).toEqual([])
+    expect(echo.echoed(false, t, null, key())).toBe(true)
+  })
+  it('typeahead tastat DUPĂ Enter-ul orb rămâne (verificarea locală îl lipeşte)', () => {
+    const echo = new EchoTracker()
+    let line: string | null = null
+    const key = (): LineKey | null => (line === null ? null : { k: `n\u00000\u0000${line.length}\u0000${line}`, line })
+    const send = (d: string, t: number) => {
+      const r = echo.sent(plainText(d) ? d : null, t, d === '\r')
+      if (r.needBase) echo.setBase(r.seq, key())
+    }
+    for (const c of 'make') send(c, 0)
+    send('\r', 0)
+    for (const c of 'rm -rf /srv') send(c, 0)       // tastat cât rula make
+    line = ''                                          // promptul nou, typeahead-ul neafişat încă
+    echo.output(echo.inputSeq, key, 5, null)
+    expect(echo.unechoed().join('')).toBe('rm -rf /srv')
+  })
+})
