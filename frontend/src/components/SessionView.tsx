@@ -7,7 +7,7 @@ import { IDisposable, Terminal } from '@xterm/xterm'
 import { modeRestoreSeq } from '../lib/termmodes'
 import { errText, api, CommandGuard, CommandRule, Host, Session, withStepup } from '../lib/api'
 import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
-import { Command, CommandTracker, cmdDuration, matchCommandRule, screenResetIn, splitAfterMarks } from '../lib/commands'
+import { Command, CommandTracker, cmdDuration, matchCommandRule, screenResetScan, splitAfterMarks } from '../lib/commands'
 import { EchoTracker, LineKey, countCprReplies, countCprRequests, reportOnly, sendIsReport } from '../lib/echo'
 import { ECHO_GRACE_MS, LocalVerdict, localRunDecision, PeerState, PeerVerdict, RuleHit, guardActive, isBareEnter, judgeLocal, judgePeers, opaqueInput, plainText, runDecision, splitLines, stripControls, submitsLine, unbracket } from '../lib/broadcastGuard'
 import { clearCwd, parseOsc7, setCwd } from '../lib/cwd'
@@ -238,6 +238,8 @@ export default function SessionView(props: {
   const echoRef = useRef(new EchoTracker())
   // un paste e în curs (handler-ul de captură → xterm.paste → onData, sincron): datele lui nu sunt rapoarte
   const pastingRef = useRef(false)
+  // începutul neterminat al unei secvenţe de la capătul output-ului anterior (vezi screenResetScan)
+  const resetCarryRef = useRef<Uint8Array>(new Uint8Array(0))
   // cereri CPR (`CSI 6 n`) din output încă fără răspuns: doar atunci `CSI 1;n R` e un raport (LOW-B)
   const cprRef = useRef(0)
   const rttRef = useRef<number | null>(null)
@@ -846,7 +848,7 @@ export default function SessionView(props: {
       atPrompt: tr?.atPrompt() === true,
       echoed: echoedNow(true),
       pending: tr?.pendingCommand() ?? null,
-      pendingAlt: tr?.pendingAlt() ?? null,
+      pendingAlts: tr?.pendingVariants() ?? [],
       // după un replay (ataşare / reconectare / reluare) linia unui shell cu integration e
       // necunoscută până la următorul prompt live (re-review 3.6.12, M1)
       known: tr ? tr.lineKnown() : true,
@@ -923,7 +925,7 @@ export default function SessionView(props: {
         atPrompt: tr?.atPrompt() === true,
         echoed: echoedNow(false),
         pending: tr?.pendingCommand() ?? null,
-        pendingAlt: tr?.pendingAlt() ?? null,
+        pendingAlts: tr?.pendingVariants() ?? [],
         unechoed: echoRef.current.unechoed(),
         lineLost: tr?.promptLost === true,
       }, commandGuardRef.current, final, lineOf, extra)
@@ -1918,7 +1920,9 @@ export default function SessionView(props: {
         parts.forEach((part, i) => {
           term.write('', () => {
             // ştergere de ecran / RIS / regiune de scroll mutată: rândul promptului devine suspect
-            if (tr && screenResetIn(part)) tr.noteScreenReset()
+            const scan = screenResetScan(resetCarryRef.current, part)
+            resetCarryRef.current = scan.carry
+            if (tr && scan.hit) tr.noteScreenReset()
             const text = streamDecoderRef.current.decode(part, { stream: true })
             if (tr?.capturing) tr.feed(text)
           })

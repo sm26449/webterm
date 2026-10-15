@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Terminal } from '@xterm/xterm'
-import { CommandTracker, screenResetIn, splitAfterMarks } from './commands'
+import { CommandTracker, screenResetIn, screenResetScan, splitAfterMarks } from './commands'
 import type { CommandGuard } from './api'
 import { judgeLocal } from './broadcastGuard'
 
@@ -237,5 +237,111 @@ describe('CommandTracker.pendingAlt: lipirea rândurilor', () => {
     tr2.handle('B')
     ;(t2.buffer.active as unknown as { cursorY: number }).cursorY = 1
     expect(tr2.pendingAlt()).toBe('aaaa字 x')
+  })
+})
+
+// verificarea lui 2872ae6: textul de DUPĂ cursor, prompturi din dreapta, prefixul exact
+describe('CommandTracker: linia până la capăt, RPROMPT, prefixul promptului', () => {
+  function oneRow(initial: string, cursorCol: number, cols = 80) {
+    const st = { t: initial, col: cursorCol }
+    const buffer = {
+      type: 'normal', baseY: 0, cursorY: 0,
+      get cursorX() { return st.col },
+      getLine: (r: number) => (r === 0 ? {
+        length: cols, isWrapped: false,
+        translateToString: (trim: boolean, from = 0, to?: number) => {
+          const s = st.t.padEnd(cols).slice(from, to)
+          return trim ? s.replace(/\s+$/, '') : s
+        },
+        getCell: (x: number) => ({ getChars: () => (st.t[x] ?? '').trim(), getWidth: () => 1 }),
+      } : undefined),
+    }
+    const term = { cols, buffer: { active: buffer }, registerMarker: () => ({ line: 0, isDisposed: false, dispose() {} }) } as unknown as Terminal
+    return { term, st }
+  }
+  const g: CommandGuard = { enabled: true, rules: [{ pattern: '^(sudo )?rm\\s+-rf', action: 'block' }] }
+  const judge = (tr: CommandTracker) => judgeLocal({ atPrompt: true, echoed: true, pending: tr.pendingCommand(),
+    pendingAlts: tr.pendingVariants(), unechoed: [], lineLost: tr.promptLost }, g, true).kind
+
+  it('cursorul dus la coloana lui B (Home) după `rm -rf /x` → regula prinde (linia până la capăt)', () => {
+    const { term, st } = oneRow('$ ', 2)
+    const tr = new CommandTracker(term)
+    tr.handle('B')
+    tr.notePromptPainted()
+    st.t = '$ rm -rf /x'; st.col = 2                  // Home: cursorul înapoi la începutul liniei
+    // logica din 2872ae6: citit doar până la cursor → linie goală → Enter neverificat
+    expect(tr.pendingCommand()).toBeNull()
+    expect(tr.pendingVariants()).toContain('rm -rf /x')
+    expect(judge(tr)).toBe('rule')
+    st.t = '$ sudo rm -rf /x'; st.col = 7             // `sudo ` adăugat în faţă, cursorul la mijloc
+    expect(tr.pendingCommand()).toBe('sudo')
+    expect(judge(tr)).toBe('rule')
+  })
+
+  it('RPROMPT (zsh, ceas în dreapta): fără dialog fals, linia judecată fără el', () => {
+    const { term, st } = oneRow('$ ' + ' '.repeat(60) + '10:42', 2)
+    const tr = new CommandTracker(term)
+    tr.handle('B')
+    tr.notePromptPainted()
+    st.t = '$ ls -la' + ' '.repeat(54) + '10:42'; st.col = 8
+    expect(tr.promptLost).toBe(false)
+    expect(tr.pendingVariants()).toEqual([])           // capătul liniei = linia până la cursor, fără RPROMPT
+    expect(judge(tr)).toBe('ok')
+  })
+
+  it('sub tmux (B la coloana 0) cu RPROMPT: prefixul e doar promptul — tastarea nu-l „pierde"', () => {
+    const { term, st } = oneRow('', 0)
+    const tr = new CommandTracker(term)
+    tr.handle('B')                                     // marcajul a sosit înaintea promptului pictat
+    st.t = 'user@h:~$ ' + ' '.repeat(50) + '10:42'; st.col = 10
+    tr.notePromptPainted()
+    st.t = 'user@h:~$ make test' + ' '.repeat(41) + '10:42'; st.col = 19
+    // logica din 2872ae6: tot rândul (cu „10:42") reţinut → după tastare nu mai „începe cu" → mereu pierdut
+    expect(tr.promptLost).toBe(false)
+    expect(judge(tr)).toBe('ok')
+  })
+
+  it('sub tmux, typeahead redesenat la prima tastă apoi şters → nu e pierdut', () => {
+    const { term, st } = oneRow('', 0)
+    const tr = new CommandTracker(term)
+    tr.handle('B')
+    st.t = 'root@h:/tmp# ls'; st.col = 15               // typeahead „ls" deja pe ecran la prima tastă
+    tr.notePromptPainted()
+    st.t = 'root@h:/tmp# '; st.col = 13                 // Ctrl+U
+    expect(tr.promptLost).toBe(false)
+  })
+
+  it('prefix exact până la coloana lui B: alt prompt cu acelaşi „$" → pierdut', () => {
+    const { term, st } = oneRow('a@h:~$ ', 7)
+    const tr = new CommandTracker(term)
+    tr.handle('B')
+    tr.notePromptPainted()
+    st.t = 'b@x:/$ ls'; st.col = 9
+    expect(tr.promptLost).toBe(true)
+  })
+
+  it('spaţii finale multe pe rândul promptului nu fac linia „pierdută" (contiguitate în celule)', () => {
+    const { term, st } = oneRow('$ ', 2)
+    const tr = new CommandTracker(term)
+    tr.handle('B')
+    tr.notePromptPainted()
+    st.t = '$ echo "a          "'; st.col = 21
+    expect(tr.promptLost).toBe(false)
+  })
+
+  it('screenResetScan: o secvenţă ruptă între două bucăţi e găsită; una completă nu se numără de două ori', () => {
+    const e = (s: string) => new TextEncoder().encode(s)
+    let r = screenResetScan(new Uint8Array(0), e('out\x1b['))
+    expect(r.hit).toBe(false)
+    r = screenResetScan(r.carry, e('2Jmore'))
+    expect(r.hit).toBe(true)
+    r = screenResetScan(new Uint8Array(0), e('\x1b[2J\x1b]133;B\x07'))
+    expect(r.hit).toBe(true)
+    expect(r.carry.length).toBe(0)
+    r = screenResetScan(r.carry, e('$ '))
+    expect(r.hit).toBe(false)
+    r = screenResetScan(new Uint8Array(0), e('x\x1b'))
+    r = screenResetScan(r.carry, e('c'))
+    expect(r.hit).toBe(true)
   })
 })

@@ -61,6 +61,8 @@ export class CommandTracker {
   private promptMarker: IMarker | null = null
   /** textul rândului promptului la prima tastă de după B (vezi notePromptPainted) */
   private promptSnap: string | null = null
+  /** textul din dreapta cursorului pe rândul promptului la prima tastă (RPROMPT) */
+  private rightPrompt: string | null = null
   /** ştergere de ecran / RIS / regiune de scroll după B (vezi noteScreenReset) */
   private screenSuspect = false
   private promptCol = 0
@@ -104,7 +106,8 @@ export class CommandTracker {
       repictarea tmux după un resize. Deci „pierdut" când:
         • markerul a ieşit din buffer;
         • rândul lui e SUB cursor (promptul a fost redesenat mai sus);
-        • între el şi cursor sunt mai multe rânduri decât poate ocupa linia citită;
+        • între el şi cursor e un rând care nu continuă linia (nici wrap, nici plin până la ultima
+          celulă) — linia tastată ocupă rânduri CONTIGUE;
         • textul rândului nu mai începe cu ce era acolo la prima tastă de după B (promptul pictat);
         • după B a trecut prin output o ştergere de ecran / RIS / regiune de scroll mutată şi nu avem
           ce verifica (nicio tastă încă). */
@@ -114,27 +117,50 @@ export class CommandTracker {
     if (row === null) return true
     const cur = this.absCursor().row
     if (row > cur) return true
-    const cols = this.term.cols || 80
-    const text = this.readCommand()
-    if (cur - row > Math.ceil((this.promptCol + text.length + 1) / cols) + 1) return true
+    // contiguitate măsurată în celule (nu lungimea textului: spaţii finale, caractere late)
+    for (let r = row; r < cur; r++) if (!this.rowContinues(r)) return true
     if (this.promptSnap !== null) {
       const line = this.term.buffer.active.getLine(row)
-      if (!line || !line.translateToString(true).startsWith(this.promptSnap)) return true
+      // prefix EXACT, inclusiv spaţiile (nu „începe cu" pe textul tăiat la dreapta)
+      if (!line || line.translateToString(false, 0, this.promptSnap.length) !== this.promptSnap) return true
     } else if (this.screenSuspect) return true
     return false
   }
 
-  /** Prima tastă de după B: promptul e pictat — îi reţinem textul (până la coloana lui B, sau tot
-      rândul dacă B a căzut la coloana 0, ca sub tmux) ca să verificăm la Enter că rândul e tot el. */
+  /** Prima tastă de după B: promptul e pictat — reţinem PREFIXUL lui (exact, cu spaţii): până la
+      coloana lui B; sub tmux B poate cădea la coloana 0 (marcajele sosesc înaintea textului), atunci
+      până la cursor, tăiat după ultimul terminator de prompt ($ # % > ❯ urmat de spaţiu) — fără
+      textul din dreapta (RPROMPT, p10k, starship: review 3.6.13, M) şi fără un typeahead deja
+      redesenat (care poate fi şters apoi). Ce e la dreapta cursorului la acel moment pe rândul
+      promptului e un prompt din dreapta: îl ştim, ca citirea până la capătul liniei să-l scoată. */
   notePromptPainted(): void {
     if (this.promptSnap !== null || this.promptMarker === null) return
     const row = this.promptRow
     if (row === null) return
     const line = this.term.buffer.active.getLine(row)
     if (!line) return
-    const text = line.translateToString(true)
-    const snap = this.promptCol > 0 ? text.slice(0, this.promptCol) : text
+    const cur = this.absCursor()
+    const full = line.translateToString(false)
+    let snap: string
+    if (this.promptCol > 0) snap = full.slice(0, this.promptCol)
+    else {
+      const before = cur.row === row ? full.slice(0, cur.col) : full.trimEnd()
+      const m = /^(.*[$#%>\u276f] )/u.exec(before)
+      snap = m ? m[1] : before
+    }
     if (snap.trim()) this.promptSnap = snap
+    if (cur.row === row) {
+      const right = full.slice(cur.col).trim()
+      this.rightPrompt = right || null
+    }
+  }
+
+  /** Rândul continuă pe următorul: următorul e marcat wrap, sau rândul e plin până la ultima celulă. */
+  private rowContinues(r: number): boolean {
+    const b = this.term.buffer.active
+    const line = b.getLine(r)
+    if (!line) return false
+    return !!b.getLine(r + 1)?.isWrapped || reachesLastCell(line, this.term.cols)
   }
 
   /** Output-ul (în ordinea parsării) a trecut printr-o ştergere de ecran (ED2/ED3), RIS sau o regiune
@@ -147,6 +173,7 @@ export class CommandTracker {
     if (this.promptMarker && this.promptMarker !== marker) this.promptMarker.dispose()
     this.promptMarker = marker
     this.promptSnap = null
+    this.rightPrompt = null
     this.screenSuspect = false
     this.promptCol = col
   }
@@ -358,6 +385,53 @@ export class CommandTracker {
       }
     }
     return ambiguous ? (out.trim() || null) : null
+  }
+
+  /** Variantele liniei pe care guardrail-ul le verifică ÎN PLUS faţă de pendingCommand (până la
+      cursor), verdictul cel mai strict câştigă (review 3.6.13): lipirea ambiguă cu spaţiu (pendingAlt)
+      şi linia citită până la CAPĂTUL ei logic — textul de după cursor rulează şi el (↑ recheamă
+      `rm -rf /srv/data`, Home / ← apoi `sudo `: citit doar până la cursor se vedea „sudo "). Un prompt
+      din dreapta (RPROMPT) cunoscut de la prima tastă e scos de la coadă; un text fantomă (sugestia
+      zsh) poate doar adăuga confirmări, nu „necunoscut". */
+  pendingVariants(): string[] {
+    if (this.promptRow == null || this.term.buffer.active.type === 'alternate') return []
+    const base = this.pendingCommand()
+    const out = new Set<string>()
+    const alt = this.pendingAlt()
+    if (alt) out.add(alt)
+    for (const withSpace of [false, true]) {
+      const full = this.readToEnd(withSpace)
+      if (full) out.add(full)
+    }
+    if (base) out.delete(base)
+    return [...out]
+  }
+
+  /** De la B până la capătul liniei logice care conţine cursorul (rândurile care o continuă). */
+  private readToEnd(spaceOnAmbiguous: boolean): string | null {
+    const b = this.term.buffer.active
+    const start = this.promptRow
+    if (start == null) return null
+    const cur = this.absCursor().row
+    let last = cur
+    for (let n = 0; n < 50 && this.rowContinues(last) && b.getLine(last + 1); n++) last++
+    let out = ''
+    for (let row = start; row <= last; row++) {
+      const line = b.getLine(row)
+      if (!line) continue
+      out += line.translateToString(row === last, row === start ? this.promptCol : 0)
+      if (row !== last) {
+        const wrapped = !!b.getLine(row + 1)?.isWrapped
+        if (!wrapped && (!reachesLastCell(line, this.term.cols) || spaceOnAmbiguous)) out += ' '
+      }
+    }
+    out = out.trim()
+    const rp = this.rightPrompt
+    if (rp && out.endsWith(rp)) {
+      const cut = out.slice(0, out.length - rp.length)
+      if (/\s$/.test(cut) || !cut) out = cut.trim()
+    }
+    return out || null
   }
 
   /** Comanda TASTATĂ acum, neexecutată încă (promptRow→cursor). null dacă nu suntem
@@ -600,4 +674,32 @@ export function screenResetIn(b: Uint8Array): boolean {
     }
   }
   return false
+}
+
+/** screenResetIn peste o graniţă de chunk (review 3.6.13, LOW-3): `carry` = începutul NETERMINAT al
+    unei secvenţe de la capătul bucăţii anterioare (ESC, ESC [, ESC [ cifre / ;), cel mult 16 octeţi —
+    niciodată o secvenţă completă, ca să nu fie numărată de două ori (de ex. după un B nou). */
+export function screenResetScan(carry: Uint8Array, part: Uint8Array): { hit: boolean; carry: Uint8Array } {
+  const data = carry.length ? concatBytes(carry, part) : part
+  const hit = screenResetIn(data)
+  const tailFrom = Math.max(0, data.length - 16)
+  const e = data.lastIndexOf(0x1b)
+  let next: Uint8Array = new Uint8Array(0)
+  if (e >= tailFrom) {
+    const t = data.subarray(e)
+    let ok = true
+    for (let i = 1; i < t.length && ok; i++) {
+      const c = t[i]
+      ok = i === 1 ? c === 0x5b : (c >= 0x30 && c <= 0x39) || c === 0x3b
+    }
+    if (ok) next = t.slice()
+  }
+  return { hit, carry: next }
+}
+
+function concatBytes(a: Uint8Array, b: Uint8Array): Uint8Array {
+  const out = new Uint8Array(a.length + b.length)
+  out.set(a, 0)
+  out.set(b, a.length)
+  return out
 }

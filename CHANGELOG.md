@@ -81,7 +81,11 @@ frontend only — no agent change (agent stays 58).
   only a fragment. It is now an xterm marker that follows the trimming. The line counts as unknown
   ("Can't check") when the prompt row left the buffer, or moved in a way markers don't follow —
   zsh `Ctrl+L`, a tmux scroll region not starting at row 1, a repaint: the row is below the cursor,
-  too far above it, or no longer holds the prompt text it had at the first key.
+  not contiguous with it, or no longer holds exactly the prompt prefix it had at the first key (a
+  right prompt such as zsh RPROMPT / p10k / starship is not part of it).
+- **The guardrail also checks the text after the cursor.** Why: the line was read only up to the
+  cursor, so `↑` (`rm -rf /srv/data`) then `Home` + `sudo ` was judged as `sudo `. The line is now
+  also read to its end (a right prompt is cut off) and the strictest verdict wins.
 - **A session id that already belongs to another host no longer breaks that agent's reconcile.**
   Why: when the same machine is enrolled twice (a second host record, the tmux server survives),
   the new agent reports the old host's sessions. Adopting them hit the `sessions` primary key, and

@@ -305,10 +305,19 @@ closed (review of 3.6.12, `lib/broadcastGuard.ts`), when guardrail rules are act
   move without them — zsh's `Ctrl+L` (ED2 in place, prompt redrawn at the top, no new `B`), a scroll
   region whose top isn't row 1 (tmux status line at the top, the lower pane of a tmux split), a tmux
   repaint after a resize. So the line is also **lost** when the marker's row is below the cursor,
-  when more rows separate it from the cursor than the line read could fill, when the row no longer
-  starts with the text it held at the first key sent after `B` (the prompt is painted by then; under
-  tmux `B` can land at column 0, so the whole row at that moment is kept), and when an ED2 / ED3 /
-  RIS / scroll region with top > 1 went through the output after `B` with nothing to verify yet.
+  when a row between it and the cursor doesn't continue the line (neither wrapped nor filled to its
+  last cell — measured in cells, so trailing spaces and wide characters don't matter), when the row
+  no longer holds, exactly, the prompt prefix it held at the first key sent after `B` (up to `B`'s
+  column; under tmux `B` can land at column 0, then up to the cursor, cut after the last prompt
+  terminator `$ # % > ❯` + space — never a right prompt or typeahead), and when an ED2 / ED3 / RIS /
+  scroll region with top > 1 went through the output after `B` with nothing to verify yet (a
+  sequence split across output chunks is caught too).
+  **Text after the cursor runs as well**: `↑` recalls `rm -rf /srv/data`, then `Home` or `←` and
+  `sudo ` — read only up to the cursor the guard saw `sudo `. Besides the line up to the cursor the
+  guard judges the line read to the **end of its logical line** (the cursor row and the rows that
+  continue it) and the ambiguous joins; the strictest verdict wins. A right prompt seen on the prompt
+  row at the first key is cut from the end; ghost text (zsh autosuggestions) can only add
+  confirmations, never "Can't check".
   Residual: a background job that prints while the keys are in flight still moves the
   cursor and counts as the earliest key's echo;
 - **a single pane (no broadcast) waits for the echo too** (3.6.13): with rules active, Enter /

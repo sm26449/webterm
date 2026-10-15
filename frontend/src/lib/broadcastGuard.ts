@@ -30,6 +30,9 @@ export interface PeerState {
   /** varianta ambiguă a liniei (un rând plin urmat de unul fără wrap — vezi CommandTracker.pendingAlt):
       se verifică şi ea, verdictul cel mai strict câştigă */
   pendingAlt?: string | null
+  /** alte variante ale liniei (CommandTracker.pendingVariants: până la capătul liniei, lipiri
+      ambigue) — toate se verifică, verdictul cel mai strict câştigă; doar adaugă reguli, nu „necunoscut" */
+  pendingAlts?: string[]
   /** `atPrompt` / `pending` sunt de crezut (CommandTracker.lineKnown). false = panou CU shell
       integration, fără comandă în curs, pe ecranul principal, dar după un replay de istoric
       (ataşare, reconectare, reluarea unui panou de telefon) fără prompt live de atunci — sau între
@@ -124,8 +127,9 @@ export function judgePeers(peers: PeerState[], guard: CommandGuard | null | unde
   }
   for (const p of targets) {
     const first = lineOf(p.pending)
-    const alt = p.pendingAlt ? lineOf(p.pendingAlt) : null
-    for (const raw of [first, ...(alt && alt !== first ? [alt] : []), ...extra]) {
+    const alts = [...(p.pendingAlt ? [p.pendingAlt] : []), ...(p.pendingAlts ?? [])]
+      .map((a) => lineOf(a)).filter((a): a is string => !!a && a !== first)
+    for (const raw of [first, ...alts, ...extra]) {
       const line = raw ? stripControls(raw).trim() : ''
       const rule = line ? matchCommandRule(line, guard) : null
       if (rule) add(rule.action === 'block' ? blocks : confirms, rule, line, p)
@@ -219,6 +223,8 @@ export interface LocalState {
   pending: string | null
   /** varianta ambiguă a liniei (vezi PeerState.pendingAlt) */
   pendingAlt?: string | null
+  /** alte variante (vezi PeerState.pendingAlts) */
+  pendingAlts?: string[]
   unechoed: (string | null)[]
   /** rândul promptului a ieşit din buffer (CommandTracker.promptLost): linia nu se poate citi */
   lineLost?: boolean
@@ -254,8 +260,10 @@ export function judgeLocal(s: LocalState, guard: CommandGuard | null | undefined
   const lines: string[] = []
   const first = lineOf(s.pending)
   if (first) lines.push(first)
-  const alt = s.pendingAlt ? lineOf(s.pendingAlt) : null
-  if (alt && alt !== first) lines.push(alt)
+  for (const a of [...(s.pendingAlt ? [s.pendingAlt] : []), ...(s.pendingAlts ?? [])]) {
+    const alt = lineOf(a)
+    if (alt && alt !== first && !lines.includes(alt)) lines.push(alt)
+  }
   lines.push(...extra)
   let unknown = false
   if (s.atPrompt && !s.echoed) {
