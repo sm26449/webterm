@@ -3037,6 +3037,8 @@ const en: Lang = {
     'session.peerUnknownDesc': "Broadcast is on and at least one pane can't show what this would run there (paused, still loading, or your keys haven't echoed back yet). Run it in all panes anyway?",
     'session.guardLinesIntro': "These lines match guardrail rules:",
     'session.guardInPanes': "in {panes}",
+    'session.guardBelow': "The match is in text below the cursor: another line of a multi-line command, or leftover text on the screen (a completion list, another program's output). Check it before running — Cancel keeps your line.",
+    'session.guardBelowHit': "below the cursor",
     'session.inputUnknownTitle': "Can't check this input",
     'session.inputUnknownDesc': "The text contains editing keys (such as Ctrl+U, Backspace or Tab completion), so the line the shell would run is not the text the guardrail can check. Run it anyway?",
     'session.echoUnknownTitle': "Can't check this line yet",

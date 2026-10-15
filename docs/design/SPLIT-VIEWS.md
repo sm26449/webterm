@@ -348,9 +348,17 @@ closed (review of 3.6.12, `lib/broadcastGuard.ts`), when guardrail rules are act
     start, and the ambiguous joins. The conservative reading goes further: from `B` down to the
     **last non-blank row of the buffer** — a multi-line buffer has rows after a literal newline that
     run too (zsh `↑` recalls `cd /srv` + newline + `rm -rf /srv/data`, `↑` again moves the cursor
-    into the buffer's first row; Ctrl+V Ctrl+J; push-line). Text below the line (a completion list)
-    can only add confirmations. A logical line that continues for more than 50 rows after the
-    cursor row is not truncated: it is unknown ("Can't check").
+    into the buffer's first row; Ctrl+V Ctrl+J; push-line). Blank rows don't stop it (a buffer can
+    hold blank lines). Rows that are definitely not the buffer are left out: a tmux pane border (a
+    row of box-drawing characters with a horizontal run — the reading stops there, below is another
+    pane) and, in a tmux-backed session, the last screen row when every cell has the same
+    non-default background (a tmux status bar; WebTerm's own tmux runs with the status bar off).
+    Text below the line may still be something else — a zsh completion list, text left by
+    `tput cup` / a progress tool — so **a match found only in that below-the-cursor reading never
+    blocks and never clears the line**: it becomes a confirm dialog that says the match is in text
+    below the cursor and shows the rows it read; Cancel keeps the line. A match also present in a
+    normal reading keeps its normal verdict. A logical line that continues for more than 50 rows
+    after the cursor row is not truncated: it is unknown ("Can't check").
   - **Right prompt**: text right of the cursor at the first key, separated from it by blanks, is
     recorded with its row and column; a reading without it is only an extra variant, built only while
     that exact text still sits at that position and no typed text reaches it (`RPROMPT='%~'` showing

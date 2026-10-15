@@ -33,6 +33,9 @@ export interface PeerState {
   /** alte variante ale liniei (CommandTracker.pendingVariants: până la capătul liniei, lipiri
       ambigue) — toate se verifică, verdictul cel mai strict câştigă; doar adaugă reguli, nu „necunoscut" */
   pendingAlts?: string[]
+  /** citirea conservatoare prelungită SUB linia cursorului (CommandTracker.pendingBelow): o potrivire
+      găsită DOAR aici e o confirmare marcată `below` — niciodată block, niciun Ctrl+U */
+  pendingBelow?: string[]
   /** `atPrompt` / `pending` sunt de crezut (CommandTracker.lineKnown). false = panou CU shell
       integration, fără comandă în curs, pe ecranul principal, dar după un replay de istoric
       (ataşare, reconectare, reluarea unui panou de telefon) fără prompt live de atunci — sau între
@@ -56,6 +59,15 @@ export interface RuleHit {
   cmd: string
   panes: string[]
   labels: string[]
+  /** potrivire găsită doar în textul de SUB linia cursorului (vezi PeerState.pendingBelow): regula e
+      coborâtă la confirmare */
+  below?: boolean
+}
+
+/** Regula atinsă DOAR de textul de sub cursor: confirmare, niciodată block (verificarea lui c9321d9) —
+    acolo poate fi o listă de completare, alt text rămas pe ecran, nu neapărat bufferul. */
+export function belowRule(rule: CommandRule): CommandRule {
+  return rule.action === 'confirm' ? rule : { ...rule, action: 'confirm' }
 }
 
 /** `rule` = cel puţin o linie atinge o regulă şi TOATE panourile-ţintă sunt verificabile:
@@ -133,6 +145,20 @@ export function judgePeers(peers: PeerState[], guard: CommandGuard | null | unde
       const line = raw ? stripControls(raw).trim() : ''
       const rule = line ? matchCommandRule(line, guard) : null
       if (rule) add(rule.action === 'block' ? blocks : confirms, rule, line, p)
+    }
+  }
+  // DOAR după citirile normale: textul de sub linia cursorului adaugă doar confirmări marcate `below`
+  for (const p of targets) {
+    for (const raw of p.pendingBelow ?? []) {
+      const line = stripControls(raw).trim()
+      const rule = line ? matchCommandRule(line, guard) : null
+      if (!rule) continue
+      // aceeaşi regulă atinsă deja de o citire normală a panoului: verdictul ei rămâne
+      if ([...blocks, ...confirms].some((h) => !h.below && h.rule.pattern === rule.pattern && h.panes.includes(p.id))) continue
+      const r = belowRule(rule)
+      const before = confirms.length
+      add(confirms, r, line, p)
+      if (confirms.length > before) confirms[confirms.length - 1].below = true
     }
   }
   if (blocks.length) return { kind: 'rule', rule: blocks[0].rule, cmd: blocks[0].cmd, hits: blocks }
@@ -225,6 +251,8 @@ export interface LocalState {
   pendingAlt?: string | null
   /** alte variante (vezi PeerState.pendingAlts) */
   pendingAlts?: string[]
+  /** textul de sub linia cursorului (vezi PeerState.pendingBelow) */
+  pendingBelow?: string[]
   unechoed: (string | null)[]
   /** rândul promptului a ieşit din buffer (CommandTracker.promptLost): linia nu se poate citi */
   lineLost?: boolean
@@ -232,7 +260,7 @@ export interface LocalState {
 
 export type LocalVerdict =
   | { kind: 'ok' }
-  | { kind: 'rule'; rule: CommandRule; cmd: string }
+  | { kind: 'rule'; rule: CommandRule; cmd: string; below?: boolean }
   | { kind: 'wait' }
   | { kind: 'unknown' }
 
@@ -288,6 +316,12 @@ export function judgeLocal(s: LocalState, guard: CommandGuard | null | undefined
   }
   if (unknown || s.lineLost) return { kind: 'unknown' }
   if (confirm) return { kind: 'rule', ...confirm }
+  // doar textul de SUB linia cursorului atinge o regulă: confirmare marcată `below`, niciodată block
+  for (const raw of s.pendingBelow ?? []) {
+    const line = stripControls(raw).trim()
+    const rule = line ? matchCommandRule(line, guard) : null
+    if (rule) return { kind: 'rule', rule: belowRule(rule), cmd: line, below: true }
+  }
   return { kind: 'ok' }
 }
 

@@ -3093,6 +3093,8 @@ const ro: Lang = {
     'session.peerUnknownDesc': "Broadcast-ul e pornit și cel puțin un panou nu poate arăta ce s-ar rula acolo (pe pauză, încă se încarcă sau tastele n-au primit încă ecou). Rulezi oricum în toate panourile?",
     'session.guardLinesIntro': "Aceste linii se potrivesc regulilor de guardrail:",
     'session.guardInPanes': "în {panes}",
+    'session.guardBelow': "Potrivirea e în textul de sub cursor: alt rând al unei comenzi pe mai multe rânduri sau text rămas pe ecran (o listă de completare, output-ul altui program). Verifică-l înainte să rulezi — Anulează îți păstrează linia.",
+    'session.guardBelowHit': "sub cursor",
     'session.inputUnknownTitle': "Nu pot verifica acest text",
     'session.inputUnknownDesc': "Textul conține taste de editare (de exemplu Ctrl+U, Backspace sau completarea cu Tab), deci linia pe care ar rula-o shell-ul nu e textul pe care îl poate verifica guardrail-ul. Rulezi oricum?",
     'session.echoUnknownTitle': "Încă nu pot verifica linia",

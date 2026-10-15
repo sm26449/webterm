@@ -74,6 +74,9 @@ export class CommandTracker {
   private anchorTried = false
   /** un Enter a plecat după B şi n-a venit C (continuare PS2) — vezi noteSubmitSent */
   private submitted = false
+  /** sesiunea rulează sub tmux (hostul are backend „tmux"): ultimul rând al ecranului poate fi bara
+      de stare tmux (vezi lastNonBlank) — setat de SessionView */
+  tmuxBacked = false
   /** ştergere de ecran / RIS / regiune de scroll după B (vezi noteScreenReset) */
   private screenSuspect = false
   private promptCol = 0
@@ -252,15 +255,21 @@ export class CommandTracker {
     return { last, capped: this.rowContinues(last) && !!b.getLine(last + 1) }
   }
 
-  /** Ultimul rând nevid de la `from` în jos (cursorul e în viewport: cel mult un ecran de rânduri). */
+  /** Ultimul rând nevid de la `from` în jos (cursorul e în viewport: cel mult un ecran de rânduri).
+      NU se opreşte la un rând gol (un buffer pe mai multe rânduri poate avea rânduri goale), ci doar
+      la o margine de panou tmux (dedesubt e alt panou); bara de stare tmux nu se numără. */
   private lastNonBlank(from: number): number {
     const b = this.term.buffer.active
     const max = Math.max(this.term.rows ?? 0, 200)
+    const screenLast = typeof this.term.rows === 'number' ? b.baseY + this.term.rows - 1 : -1
     let lastRow = from
     for (let r = from + 1; r <= from + max; r++) {
       const l = b.getLine(r)
       if (!l) break
-      if (l.translateToString(true).trim()) lastRow = r
+      const text = l.translateToString(true)
+      if (isPaneBorder(text)) break
+      if (r === screenLast && this.tmuxBacked && isStatusRow(l, this.term.cols)) break
+      if (text.trim()) lastRow = r
     }
     return lastRow
   }
@@ -552,7 +561,7 @@ export class CommandTracker {
       const o = this.origMarker
       const oRow = o && !o.isDisposed && typeof o.line === 'number' && o.line >= 0 ? o.line : null
       if (oRow !== null) {
-        const full = this.readToEnd(oRow, this.origCol, withSpace, false, true)
+        const full = this.readToEnd(oRow, this.origCol, withSpace, false)
         if (full) out.add(full)
       }
       // de la poziţia de citire (eventual re-ancorată), netăiat şi — doar ca variantă în plus — fără RPROMPT
@@ -565,6 +574,28 @@ export class CommandTracker {
       }
     }
     if (base) out.delete(base)
+    return [...out]
+  }
+
+  /** Citirea conservatoare prelungită SUB linia cursorului (verificarea lui 2806021): de la B-ul original
+      până la ultimul rând nevid al bufferului — un buffer pe mai multe rânduri (zsh ↑ în interiorul
+      lui, Ctrl+V Ctrl+J, push-line) are rânduri după un newline literal care rulează şi ele, iar un
+      rând gol în mijlocul bufferului nu opreşte citirea. Doar dacă există rânduri nevide sub linie.
+      Textul de dedesubt poate fi şi altceva (o listă de completare zsh, text rămas pe ecran), deci o
+      potrivire găsită DOAR aici e doar o confirmare (vezi judgeLocal / judgePeers), niciodată un
+      block şi niciun Ctrl+U. Rândurile care sigur nu sunt ale bufferului nu intră: o margine de panou
+      tmux (citirea se opreşte acolo) şi bara de stare tmux (ultimul rând al ecranului, stilizat). */
+  pendingBelow(): string[] {
+    if (this.promptRow == null || this.term.buffer.active.type === 'alternate') return []
+    const o = this.origMarker
+    const oRow = o && !o.isDisposed && typeof o.line === 'number' && o.line >= 0 ? o.line : null
+    if (oRow === null) return []
+    if (this.lastNonBlank(this.absCursor().row) <= this.lineEnd().last) return []
+    const out = new Set<string>()
+    for (const withSpace of [false, true]) {
+      const full = this.readToEnd(oRow, this.origCol, withSpace, false, true)
+      if (full) out.add(full)
+    }
     return [...out]
   }
 
@@ -827,6 +858,30 @@ function reachesLastCell(line: { getCell?: (x: number) => { getChars(): string; 
   // a doua jumătate a unui caracter lat (lăţime 0) aflat pe ultimele două celule
   const prev = cols >= 2 ? line.getCell(cols - 2) : undefined
   return last.getWidth() === 0 && !!prev && prev.getWidth() === 2
+}
+
+/** Un rând de margine de panou tmux: doar caractere de chenar (─ │ ┌ ┐ └ ┘ ├ ┤ ┬ ┴ ┼ şi variantele
+    groase / duble) şi spaţii, cu cel puţin o linie orizontală de 3+ celule (marginea dintre două
+    panouri unul sub altul). */
+export function isPaneBorder(text: string): boolean {
+  const t = text.trim()
+  return t.length >= 3 && /^[─-╿\s]+$/u.test(t) && /[─━═]{3,}/u.test(t)
+}
+
+/** Bara de stare tmux: tot rândul (fiecare celulă, până la ultima coloană) are ACELAŞI fundal, care nu e
+    cel implicit. Un rând de text al bufferului are fundalul implicit. Fără API de celule → nu. */
+function isStatusRow(line: { getCell?: (x: number) => unknown }, cols: number): boolean {
+  if (!cols || typeof line.getCell !== 'function') return false
+  let bg: number | null = null
+  for (let x = 0; x < cols; x++) {
+    const c = line.getCell(x) as { isBgDefault?: () => boolean; getBgColor?: () => number; getBgColorMode?: () => number } | undefined
+    if (!c || typeof c.isBgDefault !== 'function' || typeof c.getBgColor !== 'function') return false
+    if (c.isBgDefault()) return false
+    const v = c.getBgColor() * 4 + (typeof c.getBgColorMode === 'function' ? c.getBgColorMode() : 0)
+    if (bg === null) bg = v
+    else if (v !== bg) return false
+  }
+  return true
 }
 
 /** Output-ul conţine o ştergere de ecran (ED2 / ED3), RIS sau o regiune de scroll (DECSTBM) care NU

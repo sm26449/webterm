@@ -597,3 +597,33 @@ describe('CommandTracker: linie înfăşurată pe mai multe rânduri', () => {
     expect(tr.pendingCommand()).toBe('echo a b')
   })
 })
+
+// verificarea lui c9321d9: textul de SUB linia cursorului (pendingBelow) doar confirmă, niciodată block
+describe('judgePeers / judgeLocal: potrivire doar sub cursor → confirmare `below`', () => {
+  const blk: CommandGuard = { enabled: true, rules: [{ pattern: 'rm\\s+-rf\\s+/srv', action: 'block' }] }
+  it('broadcast: block doar în textul de dedesubt → rule confirm, hit marcat below', () => {
+    const v = judgePeers([peer({ pending: 'ls', pendingBelow: ['ls DROP rm -rf /srv/data'] }), peer({ pending: 'ls' })], blk, true)
+    expect(v.kind).toBe('rule')
+    if (v.kind !== 'rule') return
+    expect(v.rule.action).toBe('confirm')
+    expect(v.hits).toHaveLength(1)
+    expect(v.hits[0].below).toBe(true)
+  })
+  it('broadcast: block într-o citire normală a altui panou câştigă (block)', () => {
+    const v = judgePeers([peer({ pending: 'ls', pendingBelow: ['ls rm -rf /srv/x'] }), peer({ pending: 'rm -rf /srv/y' })], blk, true)
+    expect(v.kind === 'rule' && v.rule.action).toBe('block')
+  })
+  it('broadcast: aceeaşi regulă atinsă şi în citirea normală a panoului → fără hit below în plus', () => {
+    const v = judgePeers([peer({ id: 'a', pending: 'ls', pendingAlts: ['ls rm -rf /srv/x'], pendingBelow: ['ls rm -rf /srv/x y'] })], blk, true)
+    expect(v.kind === 'rule' && v.rule.action).toBe('block')
+    expect(v.kind === 'rule' && v.hits.every((h) => !h.below)).toBe(true)
+  })
+  it('un singur panou: block doar dedesubt → confirmare below; block în linie → block', () => {
+    const base: LocalState = { atPrompt: true, echoed: true, pending: 'ls', unechoed: [] }
+    const v = judgeLocal({ ...base, pendingBelow: ['ls rm -rf /srv/data'] }, blk, true)
+    expect(v).toMatchObject({ kind: 'rule', below: true, rule: { action: 'confirm' } })
+    const v2 = judgeLocal({ ...base, pending: 'rm -rf /srv/a', pendingBelow: ['rm -rf /srv/a b'] }, blk, true)
+    expect(v2).toMatchObject({ kind: 'rule', rule: { action: 'block' } })
+    expect(v2.kind === 'rule' && v2.below).toBeFalsy()
+  })
+})

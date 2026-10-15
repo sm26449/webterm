@@ -89,7 +89,8 @@ frontend only — no agent change (agent stays 58).
   cursor, so `↑` (`rm -rf /srv/data`) then `Home` + `sudo ` was judged as `sudo `. The line is now
   also read to its end, and the guard always judges the conservative reading — from the shell's own
   prompt mark to the end of the line, uncut, including the rows below the cursor of a multi-line
-  buffer (zsh `↑` into a recalled two-line command, Ctrl+V Ctrl+J); other readings (a right prompt cut off, a line start
+  buffer (zsh `↑` into a recalled two-line command, Ctrl+V Ctrl+J) — a match only there asks for
+  confirmation (it may be a completion list), it never blocks or clears the line; other readings (a right prompt cut off, a line start
   re-anchored under tmux) are only extra variants, and the strictest verdict wins.
 - **A session id that already belongs to another host no longer breaks that agent's reconcile.**
   Why: when the same machine is enrolled twice (a second host record, the tmux server survives),

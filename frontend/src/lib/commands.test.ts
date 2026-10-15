@@ -762,7 +762,7 @@ describe('CommandTracker: rândurile de sub cursor, plafonul liniei (verificarea
   const block: CommandGuard = { enabled: true, rules: [{ pattern: 'rm\\s+-rf\\s+/srv', action: 'block' }] }
   const confirm: CommandGuard = { enabled: true, rules: [{ pattern: 'rm\\s+-rf\\s+/', action: 'confirm' }] }
   const judge = (tr: CommandTracker, g: CommandGuard) => judgeLocal({ atPrompt: true, echoed: true,
-    pending: tr.pendingCommand(), pendingAlts: tr.pendingVariants(), unechoed: [], lineLost: tr.promptLost }, g, true).kind
+    pending: tr.pendingCommand(), pendingAlts: tr.pendingVariants(), pendingBelow: tr.pendingBelow(), unechoed: [], lineLost: tr.promptLost }, g, true).kind
 
   it('zsh ↑ recheamă `cd /srv` + newline + `rm -rf /srv/data`, ↑ din nou (cursorul pe rândul 1) → regula prinde', () => {
     const rows = ['% ', '', '', '']
@@ -819,5 +819,96 @@ describe('CommandTracker: rândurile de sub cursor, plafonul liniei (verificarea
     tr.notePromptPainted(true)
     expect(tr.promptLost).toBe(false)
     expect(judge(tr, block)).toBe('rule')
+  })
+})
+
+// verificarea lui c9321d9: textul de SUB cursor doar confirmă (niciodată block / Ctrl+U); margini şi bara tmux
+describe('CommandTracker.pendingBelow: textul de sub linia cursorului (verificarea lui c9321d9)', () => {
+  function bgTerm(rows: string[], cursor: { row: number; col: number }, statusRows: number[]) {
+    const buffer = {
+      type: 'normal', baseY: 0,
+      get cursorY() { return cursor.row }, get cursorX() { return cursor.col },
+      getLine: (r: number) => (rows[r] === undefined ? undefined : {
+        length: 80, isWrapped: false,
+        translateToString: (trim: boolean, from = 0, to?: number) => {
+          const s = rows[r].padEnd(80).slice(from, to)
+          return trim ? s.replace(/\s+$/, '') : s
+        },
+        getCell: (x: number) => ({
+          getChars: () => (rows[r][x] ?? '').trim(), getWidth: () => 1,
+          isBgDefault: () => !statusRows.includes(r), getBgColor: () => (statusRows.includes(r) ? 2 : 0), getBgColorMode: () => 1,
+        }),
+      }),
+    }
+    return { cols: 80, rows: rows.length, buffer: { active: buffer },
+      registerMarker: (off = 0) => {
+        const m = { line: cursor.row + off, isDisposed: false, dispose() { m.isDisposed = true; m.line = -1 } }
+        return m
+      } } as unknown as Terminal
+  }
+  const verdict = (tr: CommandTracker, g: CommandGuard) => judgeLocal({ atPrompt: true, echoed: true,
+    pending: tr.pendingCommand(), pendingAlts: tr.pendingVariants(), pendingBelow: tr.pendingBelow(), unechoed: [],
+    lineLost: tr.promptLost }, g, true)
+  const block = (pattern: string): CommandGuard => ({ enabled: true, rules: [{ pattern, action: 'block' }] })
+  /** B după „% " pe rândul 0, prima tastă, apoi ecranul `rows` cu cursorul la capătul rândului 0 */
+  function at(rows: string[], statusRows: number[] = [], tmux = false) {
+    const cursor = { row: 0, col: 2 }
+    const shown = rows.slice()
+    rows.fill('')
+    rows[0] = '% '
+    const tr = new CommandTracker(bgTerm(rows, cursor, statusRows))
+    tr.tmuxBacked = tmux
+    tr.handle('B')
+    tr.notePromptPainted(true)
+    shown.forEach((t, i) => { rows[i] = t })
+    cursor.col = shown[0].length
+    return tr
+  }
+
+  it('lista de completare zsh sub o comandă inofensivă: o regulă BLOCK devine doar confirmare (below), fără block', () => {
+    const tr = at(['% mkdir x', 'mkfs       mkfs.ext4  mkdir      mkfifo', ''])
+    const v = verdict(tr, block('\\bmkfs\\b'))
+    expect(v.kind).toBe('rule')
+    if (v.kind !== 'rule') return
+    expect(v.rule.action).toBe('confirm')
+    expect(v.below).toBe(true)
+    expect(v.cmd).toContain('mkfs')
+  })
+
+  it('o potrivire şi în citirea normală îşi păstrează verdictul (block rămâne block)', () => {
+    const tr = at(['% mkfs /dev/sdb', 'mkfs       mkfs.ext4', ''])
+    const v = verdict(tr, block('\\bmkfs\\b'))
+    expect(v.kind === 'rule' && v.rule.action).toBe('block')
+    expect(v.kind === 'rule' && v.below).toBeFalsy()
+  })
+
+  it('buffer pe mai multe rânduri cu un rând GOL între `cd /srv` şi `rm -rf /srv/data`, cursorul pe rândul 1 → prins (confirmare)', () => {
+    const tr = at(['% cd /srv', '', 'rm -rf /srv/data', ''])
+    const v = verdict(tr, block('rm\\s+-rf\\s+/srv'))
+    expect(v.kind).toBe('rule')
+    expect(v.kind === 'rule' && v.below).toBe(true)
+  })
+
+  it('split tmux orizontal: rândurile de sub marginea panoului nu intră', () => {
+    const tr = at(['% ls', '', '─'.repeat(80), 'DROP TABLE users; rm -rf /srv/data', ''])
+    expect(tr.pendingBelow()).toEqual([])
+    expect(verdict(tr, block('rm\\s+-rf\\s+/srv')).kind).toBe('ok')
+    // margine cu joncţiune (┼) — tot margine
+    const tr2 = at(['% ls', '─'.repeat(30) + '┼' + '─'.repeat(49), 'rm -rf /srv/data'])
+    expect(verdict(tr2, block('rm\\s+-rf\\s+/srv')).kind).toBe('ok')
+  })
+
+  it('bara de stare tmux (ultimul rând, fundal uniform nedefault) nu intră — doar într-o sesiune tmux', () => {
+    const screen = ['% ls', '', '', '[0] 0:rm -rf /srv/data*                     "host" 12:00']
+    expect(verdict(at(screen.slice(), [3], true), block('rm\\s+-rf\\s+/srv')).kind).toBe('ok')
+    // fără tmux sau fără stilul barei rândul rămâne: doar o confirmare în plus
+    const v = verdict(at(screen.slice(), [3], false), block('rm\\s+-rf\\s+/srv'))
+    expect(v.kind === 'rule' && v.rule.action).toBe('confirm')
+    const v2 = verdict(at(screen.slice(), [], true), block('rm\\s+-rf\\s+/srv'))
+    expect(v2.kind === 'rule' && v2.rule.action).toBe('confirm')
+  })
+
+  it('prompt pe un rând, nimic dedesubt → fără citire de dedesubt', () => {
+    expect(at(['% ls', '', '', '']).pendingBelow()).toEqual([])
   })
 })
