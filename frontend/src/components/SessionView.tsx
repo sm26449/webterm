@@ -787,6 +787,8 @@ export default function SessionView(props: {
       // prima tastă de după B: promptul e pictat — rândul lui se verifică la Enter (review 3.6.13, H1)
       // fără taste în aşteptare (nimic tastat încă după B, niciun typeahead): linia începe la cursor
       trackerRef.current?.notePromptPainted(!echoRef.current.waiting)
+      // un terminator de linie a plecat: fără C, rândurile următoare continuă comanda (PS2)
+      if (typeof data === 'string' && submitsLine(data)) trackerRef.current?.noteSubmitSent()
       const { seq, needBase } = echoRef.current.sent(typeof data === 'string' && plainText(data) ? data : null,
         performance.now(), typeof data === 'string' && isBareEnter(data),
         typeof data === 'string' ? data : `<${data.length} bytes>`)

@@ -82,7 +82,9 @@ frontend only — no agent change (agent stays 58).
   ("Can't check") when the prompt row left the buffer, or moved in a way markers don't follow —
   zsh `Ctrl+L`, a tmux scroll region not starting at row 1, a repaint: the row is below the cursor,
   not contiguous with it, or no longer holds exactly the prompt prefix it had at the first key (a
-  right prompt such as zsh RPROMPT / p10k / starship is not part of it).
+  right prompt such as zsh RPROMPT / p10k / starship is not part of it). Continuation lines (a
+  `for` loop, a heredoc, a trailing `\`) are judged from the first prompt down, without a false
+  "Can't check".
 - **The guardrail also checks the text after the cursor.** Why: the line was read only up to the
   cursor, so `↑` (`rm -rf /srv/data`) then `Home` + `sudo ` was judged as `sudo `. The line is now
   also read to its end, and the guard always judges the conservative reading — from the shell's own

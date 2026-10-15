@@ -586,8 +586,8 @@ describe('CommandTracker: re-ancorarea pe gol (verificarea lui 1a3d058)', () => 
     expect(tr.promptLost).toBe(false)
     expect(tr.pendingCommand()).toBe('rm -rf /srv')
     expect(judge(tr)).toBe('rule')
-    // citirea conservatoare (de la rândul de după B, netăiată) rămâne printre variante
-    expect(tr.pendingVariants()).toContain('❯ rm -rf /srv')
+    // citirea conservatoare (de la B-ul original, rândul lui inclus, netăiată) rămâne printre variante
+    expect([tr.pendingCommand(), ...tr.pendingVariants()].map((v) => (v ?? '').replace(/\s+/g, ' '))).toContain('stefan@h % ~/src > main ❯ rm -rf /srv')
   })
 
   it('LOW-1: cu B la coloana 0, textul restaurat în blocul cursorului tot opreşte re-ancorarea (fail-closed)', () => {
@@ -613,10 +613,127 @@ describe('CommandTracker: re-ancorarea pe gol (verificarea lui 1a3d058)', () => 
     tr.notePromptPainted(true)
     rows[2] = 'root@h:~# ls'; cursor.col = 12
     expect(tr.promptLost).toBe(false)
-    const orig = markers.find((m) => !m.isDisposed && m.line === 1)
-    expect(orig).toBeDefined()
-    orig!.isDisposed = true                          // scrollback tăiat sub rândul conservator
+    const orig = markers[0]                          // marcajul lui B (citirea conservatoare)
+    expect(orig.line).toBe(0)
+    orig.isDisposed = true                           // scrollback tăiat sub rândul conservator
     expect(tr.promptLostReason()).toBe('orig-gone')
     expect(judge(tr)).not.toBe('ok')
+  })
+})
+
+// verificarea lui 512c42f: citirea conservatoare porneşte MEREU de la B-ul original; continuări PS2
+describe('CommandTracker: citirea conservatoare de la B, continuări PS2 (verificarea lui 512c42f)', () => {
+  function offTerm(rows: string[], cursor: { row: number; col: number }) {
+    const buffer = {
+      type: 'normal', baseY: 0,
+      get cursorY() { return cursor.row }, get cursorX() { return cursor.col },
+      getLine: (r: number) => (rows[r] === undefined ? undefined : {
+        length: 80, isWrapped: false,
+        translateToString: (trim: boolean, from = 0, to?: number) => {
+          const s = rows[r].padEnd(80).slice(from, to)
+          return trim ? s.replace(/\s+$/, '') : s
+        },
+        getCell: (x: number) => ({ getChars: () => (rows[r][x] ?? '').trim(), getWidth: () => 1 }),
+      }),
+    }
+    return { cols: 80, buffer: { active: buffer },
+      registerMarker: (off = 0) => {
+        const m = { line: cursor.row + off, isDisposed: false, dispose() { m.isDisposed = true; m.line = -1 } }
+        return m
+      } } as unknown as Terminal
+  }
+  const block: CommandGuard = { enabled: true, rules: [{ pattern: 'rm\\s+-rf\\s+/srv', action: 'block' }] }
+  const confirm: CommandGuard = { enabled: true, rules: [{ pattern: 'rm\\s+-rf\\s+/', action: 'confirm' }] }
+  const judge = (tr: CommandTracker, g: CommandGuard = block) => judgeLocal({ atPrompt: true, echoed: true,
+    pending: tr.pendingCommand(), pendingAlts: tr.pendingVariants(), unechoed: [], lineLost: tr.promptLost }, g, true).kind
+
+  it('M1: zsh — B la coloana 0 a rândului promptului, buffer restaurat pe două rânduri → regula prinde', () => {
+    const rows = ['', '']
+    const cursor = { row: 0, col: 0 }
+    const tr = new CommandTracker(offTerm(rows, cursor))
+    tr.handle('B')                                   // precmd: B la coloana 0, înaintea promptului
+    rows[0] = 'host% rm -rf /srv'                    // push-line / print -z $'rm -rf /srv\nls'
+    rows[1] = 'ls'; cursor.row = 1; cursor.col = 2   // End
+    tr.notePromptPainted(true)
+    // logica din 512c42f: re-ancorat, citirea conservatoare de la rândul 1 → „ls" / '' → Enter fără dialog
+    expect([tr.pendingCommand() ?? '', ...tr.pendingVariants()].some((v) => v.includes('rm -rf /srv'))).toBe(true)
+    expect(judge(tr)).toBe('rule')
+    expect(judge(tr, confirm)).not.toBe('ok')
+  })
+
+  it('M1: print -z — B după `host% `, buffer restaurat pe două rânduri → re-ancorat, regula prinde tot', () => {
+    const rows = ['host% ', '']
+    const cursor = { row: 0, col: 6 }
+    const tr = new CommandTracker(offTerm(rows, cursor))
+    tr.handle('B')
+    rows[0] = 'host% rm -rf /srv'
+    rows[1] = 'ls'; cursor.row = 1; cursor.col = 2
+    tr.notePromptPainted(true)
+    expect([tr.pendingCommand(), ...tr.pendingVariants()].map((v) => (v ?? '').replace(/\s+/g, ' '))).toContain('rm -rf /srv ls')
+    expect(judge(tr)).toBe('rule')
+    expect(judge(tr, confirm)).toBe('rule')
+  })
+
+  it('cazul normal: B proaspăt, corect plasat după comanda anterioară `rm -rf /srv/old` → `ls` fără dialog', () => {
+    const rows = ['root@h:~# rm -rf /srv/old', 'root@h:~# ']
+    const cursor = { row: 1, col: 10 }
+    const tr = new CommandTracker(offTerm(rows, cursor))
+    tr.handle('B')
+    tr.notePromptPainted(true)
+    rows[1] = 'root@h:~# ls'; cursor.col = 12
+    expect(tr.promptLost).toBe(false)
+    expect(judge(tr, confirm)).toBe('ok')
+  })
+
+  function ps2(lines: string[], g: CommandGuard = block) {
+    const rows = ['$ ']
+    const cursor = { row: 0, col: 2 }
+    const tr = new CommandTracker(offTerm(rows, cursor))
+    tr.handle('B')
+    tr.notePromptPainted(true)
+    rows[0] = '$ ' + lines[0]; cursor.col = rows[0].length
+    const verdicts: string[] = []
+    for (let i = 1; i < lines.length; i++) {
+      verdicts.push(judge(tr, g))                    // Enter pe rândul curent: verdictul de dinainte
+      tr.noteSubmitSent()                            // Enter-ul a plecat; shell-ul afişează PS2
+      rows[i] = '> ' + lines[i]; cursor.row = i; cursor.col = rows[i].length
+    }
+    verdicts.push(judge(tr, g))
+    return { tr, verdicts }
+  }
+
+  it('M2: buclă `for` pe 3 rânduri → nici „nu pot verifica", nici dialog', () => {
+    const { tr, verdicts } = ps2(['for i in 1 2; do', 'echo $i', 'done'], confirm)
+    expect(tr.promptLost).toBe(false)
+    expect(verdicts).toEqual(['ok', 'ok', 'ok'])
+  })
+
+  it('M2: heredoc şi continuare cu `\\` → fără dialog', () => {
+    expect(ps2(['cat <<EOF', 'hello', 'EOF'], confirm).verdicts).toEqual(['ok', 'ok', 'ok'])
+    expect(ps2(['echo a \\', 'b'], confirm).verdicts).toEqual(['ok', 'ok'])
+  })
+
+  it('M2: `rm -rf /srv` pe un rând de continuare → regula prinde (buclă, heredoc, `\\`)', () => {
+    expect(ps2(['for i in 1 2; do', 'rm -rf /srv', 'done']).verdicts.slice(1)).toEqual(['rule', 'rule'])
+    expect(ps2(['sh <<EOF', 'rm -rf /srv', 'EOF']).verdicts.slice(1)).toEqual(['rule', 'rule'])
+    expect(ps2(['echo a \\', 'rm -rf /srv']).verdicts).toEqual(['ok', 'rule'])
+  })
+
+  it('M2: fără Enter trimis, golul rămâne „pierdut"; un C + B nou şterge starea de continuare', () => {
+    const rows = ['$ ']
+    const cursor = { row: 0, col: 2 }
+    const tr = new CommandTracker(offTerm(rows, cursor))
+    tr.handle('B')
+    tr.notePromptPainted(true)
+    rows[0] = '$ for i in 1 2; do'; cursor.col = 18
+    rows[1] = '> echo $i'; cursor.row = 1; cursor.col = 9
+    expect(tr.promptLost).toBe(true)                 // nimic trimis: rândurile nu sunt ale liniei
+    tr.noteSubmitSent()
+    expect(tr.promptLost).toBe(false)
+    tr.handle('C'); tr.handle('D;0')
+    rows[2] = '1'; rows[3] = '$ '; cursor.row = 3; cursor.col = 2
+    tr.handle('B')
+    rows[4] = 'x'; cursor.row = 4; cursor.col = 1   // B nou, apoi un rând care nu continuă linia
+    expect(tr.promptLost).toBe(true)
   })
 })

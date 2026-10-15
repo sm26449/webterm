@@ -70,6 +70,8 @@ export class CommandTracker {
   private origCol = 0
   /** re-ancorarea s-a încercat deja pentru acest B (cel mult o dată per B) */
   private anchorTried = false
+  /** un Enter a plecat după B şi n-a venit C (continuare PS2) — vezi noteSubmitSent */
+  private submitted = false
   /** ştergere de ecran / RIS / regiune de scroll după B (vezi noteScreenReset) */
   private screenSuspect = false
   private promptCol = 0
@@ -133,8 +135,13 @@ export class CommandTracker {
     if (o !== null && (o.isDisposed || typeof o.line !== 'number' || o.line < 0)) return 'orig-gone'
     const cur = this.absCursor().row
     if (row > cur) return `below-cursor ${row}>${cur}`
-    // contiguitate măsurată în celule (nu lungimea textului: spaţii finale, caractere late)
-    for (let r = row; r < cur; r++) if (!this.rowContinues(r)) return `gap ${row}..${cur} @${r}`
+    // contiguitate măsurată în celule (nu lungimea textului: spaţii finale, caractere late). După un
+    // Enter trimis fără C (continuare PS2: buclă, heredoc, `\`), rândurile noi sunt ale aceleiaşi
+    // comenzi: golul e aşteptat, iar citirea conservatoare de la B până la capăt le judecă pe toate
+    // (cu prompturile PS2 — ele doar adaugă text). Celelalte verificări rămân.
+    if (!this.submitted) {
+      for (let r = row; r < cur; r++) if (!this.rowContinues(r)) return `gap ${row}..${cur} @${r}`
+    }
     if (this.promptSnap !== null) {
       const line = this.term.buffer.active.getLine(row)
       // prefix EXACT, inclusiv spaţiile (nu „începe cu" pe textul tăiat la dreapta)
@@ -170,28 +177,19 @@ export class CommandTracker {
       // începutul blocului de rânduri al liniei curente (rânduri care se continuă până la cursor)
       let first = cur.row
       while (first > row + 1 && this.rowContinues(first - 1)) first--
-      // testul de „linie restaurată": cu B la coloana 0 pe un rând de deasupra, rândurile promptului
-      // însuşi (un prompt pe două rânduri cu `%`/`>` urmat de text pe primul) nu sunt text tastat —
-      // testăm doar blocul cursorului; cu B în interiorul rândului, textul de după B contează
-      const restored = this.promptCol === 0
-        ? this.restoredText(first, 0, cur)
-        : this.restoredText(row, this.promptCol, cur)
+      // testul de „linie restaurată" porneşte de la B (rândul lui inclus: zsh emite B la coloana 0 a
+      // rândului promptului, care ţine şi primul rând al unui buffer restaurat — `host% rm -rf /srv`).
+      // Rândurile de deasupra blocului cursorului se sar DOAR când B e la coloana 0 şi blocul cursorului
+      // e numai prompt (nimic după terminatorul de prompt până la cursor): atunci ele sunt rândurile
+      // unui prompt pe mai multe rânduri (`%`/`>` urmat de text pe primul), nu text tastat.
+      const promptOnly = this.promptCol === 0 && first > row && this.onlyPrompt(first, cur)
+      const restored = promptOnly ? false : this.restoredText(row, this.promptCol, cur)
       if (leftOfB || (cur.row > row && this.hasGap(row, cur.row) && !restored)) {
         const m = this.term.registerMarker(0)
         if (m) {
-          if (!leftOfB) {
-            // B era pe ALT rând (despărţit de linia de acum printr-un rând care nu o continuă): citirea
-            // conservatoare porneşte la rândul de DUPĂ marcajul vechi, coloana 0 (netăiat, cu tot
-            // promptul): un buffer restaurat pe mai multe rânduri (`rm -rf …` pe primul, cu un prompt
-            // fără terminator) e judecat întreg, nu doar blocul cursorului. Poate doar ADĂUGA
-            // confirmări (o comandă/un output vechi citit în plus), niciodată nu scoate text.
-            const cm = this.term.registerMarker(row + 1 - cur.row)
-            if (cm) {
-              this.origMarker?.dispose()
-              this.origMarker = cm
-              this.origCol = 0
-            }
-          }
+          // Citirea conservatoare NU se mută niciodată (verificarea lui 512c42f): rămâne la B-ul original
+          // (rând, coloană), netăiată, până la capătul liniei — re-ancorarea doar ADAUGĂ o citire.
+          // Un B vechi pe un rând cu text vechi poate aduce o confirmare în plus (fail-closed).
           this.reanchorAt(m, cur.col)
           row = this.promptRow
           if (row === null) return
@@ -238,6 +236,19 @@ export class CommandTracker {
     return /[$#%>\u276f] +[^\s]/u.test(text)
   }
 
+  /** De la (row, 0) până la cursor e doar un prompt: se termină cu un terminator de prompt urmat de
+      spaţii, fără niciun alt text după el (nimic tastat / restaurat în blocul cursorului). */
+  private onlyPrompt(row: number, cur: { row: number; col: number }): boolean {
+    const b = this.term.buffer.active
+    let text = ''
+    for (let r = row; r <= cur.row; r++) {
+      const l = b.getLine(r)
+      if (!l) return false
+      text += l.translateToString(false, 0, r === cur.row ? cur.col : undefined)
+    }
+    return /[$#%>❯] +$/u.test(text)
+  }
+
   /** Rândul continuă pe următorul: următorul e marcat wrap, sau rândul e plin până la ultima celulă. */
   private rowContinues(r: number): boolean {
     const b = this.term.buffer.active
@@ -280,6 +291,15 @@ export class CommandTracker {
     this.promptSnap = null
     this.screenSuspect = false
     this.anchorTried = false
+    this.submitted = false
+  }
+
+  /** A plecat spre shell un terminator de linie (Enter, un chunk / paste cu \r sau \n) cât suntem la
+      un prompt (B văzut, fără C): dacă nu vine C, shell-ul continuă linia pe rânduri noi (PS2: `for …;
+      do`, heredoc, `\` la capăt, ghilimele deschise) — fără OSC 133 pe ele. Rândurile de la B încoace
+      sunt toate ale comenzii (vezi promptLostReason). */
+  noteSubmitSent(): void {
+    if (this.promptMarker !== null && this.current === null) this.submitted = true
   }
 
   /** comanda tocmai încheiată de un D din chunk-ul care se parsează acum: restul chunk-ului îi
