@@ -938,7 +938,8 @@ export default function SessionView(props: {
         // care atinge linia devenită vizibilă nu trebuie ocolită
         setCmdConfirm({ cmd: (lineOf(trackerRef.current?.pendingCommand() ?? null) ?? '').trim(), pattern: '', unknown: true, run, echo: true, localRecheck: () => verdict(true) })
         // diagnoză (fără conţinutul tastelor): de ce linia n-a fost confirmată
-        console.warn('[wt-echo] ' + JSON.stringify({ now: Math.round(performance.now()), rtt: rttRef.current, ...echoRef.current.debug() }))
+        console.warn('[wt-echo] ' + JSON.stringify({ now: Math.round(performance.now()), rtt: rttRef.current,
+          lost: trackerRef.current?.promptLostReason() ?? null, ...echoRef.current.debug() }))
       }
       noticeQueued(queued)
     }

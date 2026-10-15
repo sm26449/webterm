@@ -112,19 +112,26 @@ export class CommandTracker {
         • după B a trecut prin output o ştergere de ecran / RIS / regiune de scroll mutată şi nu avem
           ce verifica (nicio tastă încă). */
   get promptLost(): boolean {
-    if (this.promptMarker === null) return false
+    return this.promptLostReason() !== null
+  }
+
+  /** De ce e linia „pierdută" (null = nu e) — şi pentru diagnoză (fără text tastat: doar motivul). */
+  promptLostReason(): string | null {
+    if (this.promptMarker === null) return null
     const row = this.promptRow
-    if (row === null) return true
+    if (row === null) return 'marker-gone'
     const cur = this.absCursor().row
-    if (row > cur) return true
+    if (row > cur) return `below-cursor ${row}>${cur}`
     // contiguitate măsurată în celule (nu lungimea textului: spaţii finale, caractere late)
-    for (let r = row; r < cur; r++) if (!this.rowContinues(r)) return true
+    for (let r = row; r < cur; r++) if (!this.rowContinues(r)) return `gap ${row}..${cur} @${r}`
     if (this.promptSnap !== null) {
       const line = this.term.buffer.active.getLine(row)
       // prefix EXACT, inclusiv spaţiile (nu „începe cu" pe textul tăiat la dreapta)
-      if (!line || line.translateToString(false, 0, this.promptSnap.length) !== this.promptSnap) return true
-    } else if (this.screenSuspect) return true
-    return false
+      if (!line || line.translateToString(false, 0, this.promptSnap.length) !== this.promptSnap) {
+        return `prefix len=${this.promptSnap.length} col=${this.promptCol}`
+      }
+    } else if (this.screenSuspect) return 'screen-reset'
+    return null
   }
 
   /** Prima tastă de după B: promptul e pictat — reţinem PREFIXUL lui (exact, cu spaţii): până la
