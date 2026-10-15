@@ -367,3 +367,56 @@ describe('3.6.13 e2e: linie lungă tastată rapid', () => {
     expect(v2.kind).toBe('rule')
   })
 })
+
+// e2e 3.6.13 (cauza reală a dialogului la o comandă tastată normal): Enter-ul comenzii ANTERIOARE
+// rămânea în aşteptare (C, D şi promptul nou într-un singur chunk), iar textul tastat după el se
+// strângea până la plafon → intrare comprimată fără text → „Încă nu pot verifica linia"
+describe('3.6.13 e2e: Enter anterior + linie lungă', () => {
+  const g4: CommandGuard = { enabled: true, rules: [{ pattern: 'rm\\s+-rf', action: 'block' }] }
+  const long = "seq -f 'WT_HIST_%g' 1 3000; yes " + 'F'.repeat(96) + ' | head -n 3500; echo WT_HIST_$((7*6))'
+
+  it('Enter-ul de dinainte se confirmă la prima schimbare; textul de după se potriveşte normal', () => {
+    const echo = new EchoTracker()
+    let line = 'echo DUPA_RELOAD'
+    let row = 0
+    const key = (): LineKey => ({ k: `n\u0000${row}\u0000${line.length}\u0000${line}`, line })
+    const send = (text: string | null, t: number, submit = false) => {
+      const { seq, needBase } = echo.sent(text, t, submit)
+      if (needBase) echo.setBase(seq, key())                 // ca SessionView (write gol)
+    }
+    send(null, 0, true)                                      // Enter
+    // un singur chunk: rând nou, output, D, prompt nou (linia niciodată „necitibilă")
+    row = 2; line = ''
+    echo.output(echo.inputSeq, key, 5, null)
+    // logica din 77a945a: Enter-ul rămânea candidat până la următorul Enter
+    expect(echo.unechoed()).toEqual([])
+    let t = 10
+    for (let i = 0; i < long.length; i++) {
+      send(long[i], t)
+      if (i % 5 === 4 || i === long.length - 1) { line = long.slice(0, i + 1); echo.output(echo.inputSeq, key, t, null) }
+      t += 1
+    }
+    expect(echo.unechoed()).toEqual([])
+    expect(judgeLocal({ atPrompt: true, echoed: echo.echoed(false, t, null, key()), pending: line, unechoed: echo.unechoed() }, g4, true).kind).toBe('ok')
+  })
+
+  it('↑ apoi tastare lungă cu pauze: ↑ se confirmă la output (nu abia la Enter), fără intrare comprimată', () => {
+    const echo = new EchoTracker()
+    let line = ''
+    const key = (): LineKey => ({ k: `n\u00000\u0000${line.length}\u0000${line}`, line })
+    const { seq } = echo.sent(null, 0)                         // ↑
+    echo.setBase(seq, key())
+    line = 'ls'
+    echo.output(echo.inputSeq, key, 1, null)
+    let t = 100                                                // pauză > fereastra de linişte
+    const typed = ' ' + 'x'.repeat(90)
+    for (let i = 0; i < typed.length; i++) {
+      const r = echo.sent(typed[i], t)
+      if (r.needBase) echo.setBase(r.seq, key())
+      line = 'ls' + typed.slice(0, i + 1)
+      echo.output(echo.inputSeq, key, t + 5, null)
+      t += 100
+    }
+    expect(echo.unechoed()).toEqual([])
+  })
+})

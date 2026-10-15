@@ -777,7 +777,8 @@ export default function SessionView(props: {
       ws.send(typeof data === 'string' ? new TextEncoder().encode(data) : data)
       // rapoartele terminalului (mouse, focus, CPR, DA…) nu sunt taste: nu aşteaptă ecou (review 3.6.13, M2)
       if (reportOnly(data, report, pastingRef.current, cprRef.current > 0)) return
-      const { seq, needBase } = echoRef.current.sent(typeof data === 'string' && plainText(data) ? data : null, performance.now())
+      const { seq, needBase } = echoRef.current.sent(typeof data === 'string' && plainText(data) ? data : null,
+        performance.now(), typeof data === 'string' && isBareEnter(data))
       // referinţa liniei: după ce xterm a parsat tot ce sosise ÎNAINTE de trimitere (write gol, în ordine)
       if (needBase) termRef.current?.write('', () => echoRef.current.setBase(seq, lineKeyRef.current()))
       return

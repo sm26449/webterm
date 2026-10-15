@@ -30,6 +30,12 @@ interface Entry {
   /** trimisă cât NU era nicio linie citibilă (comandă în curs: typeahead) — ecoul ei apare abia după
       următorul prompt; o confirmă doar o linie citibilă care chiar o arată (review 3.6.13, LOW-1b) */
   blind?: boolean
+  /** Enter (CR / LF): ecoul lui e orice schimbare a liniei de după (rând nou, comanda rulează, prompt
+      nou) — se confirmă imediat, nu „la linişte". Altfel, un Enter rămas în aşteptare (C, D şi
+      promptul nou sosite în acelaşi chunk, fără nicio clipă fără linie) bloca potrivirea textului
+      tastat după el: >64 de taste → intrare comprimată fără text → „Încă nu pot verifica" la o
+      comandă tastată normal (e2e 3.6.13) */
+  submit?: boolean
   /** >ECHO_PENDING_MAX trimiteri fără ecou, comprimate (host care nu ţine pasul) */
   lump?: boolean
   lumpAt?: number
@@ -80,11 +86,11 @@ export class EchoTracker {
   /** O tastă (sau un text) a plecat spre host. `text` = textul ei dacă e text simplu, altfel null.
       `needBase` = nu aştepta nimic înainte: apelantul ia instantaneul liniei DUPĂ ce xterm a parsat
       tot ce sosise deja (un write gol) şi cheamă setBase(seq, …). */
-  sent(text: string | null, now: number): { seq: number; needBase: boolean } {
+  sent(text: string | null, now: number, submit = false): { seq: number; needBase: boolean } {
     const seq = ++this.inputSeq
     const needBase = this.pending.length === 0
     if (needBase) this.base = undefined
-    this.pending.push({ seq, at: now, text, blind: this.base === null })
+    this.pending.push({ seq, at: now, text, blind: this.base === null, submit })
     if (this.pending.length > ECHO_PENDING_MAX) {
       // host care nu ţine pasul: comprimăm într-o singură intrare, eliberată doar când hub-ul a
       // ajuns din urmă (vezi output) sau la replay — fail-closed între timp
@@ -113,6 +119,10 @@ export class EchoTracker {
       `nowMs` / `rtt` servesc doar eliberării unei intrări comprimate. */
   output(tag: number, now: () => LineKey | null, nowMs = 0, rtt: number | null = null): void {
     if (tag > this.coarseSeq) this.coarseSeq = tag
+    // tasta-candidat se poate confirma şi aici, ÎNAINTEA output-ului nou: fluxul a tăcut până acum şi
+    // linia (referinţa) n-a mişcat de la ultima ei schimbare. Altfel, cât tastezi, confirmarea ar
+    // aştepta următorul Enter, iar tastele de după ea s-ar strânge până la plafonul de 64 (e2e 3.6.13)
+    if (this.cand && this.base) this.quiet(nowMs, rtt, this.base)
     this.lastOutAt = nowMs
     const first = this.pending[0]
     if (!first || first.seq > tag || this.base === undefined) return
@@ -164,6 +174,13 @@ export class EchoTracker {
       return
     }
     if (cur.k === this.base.k) return                       // un ceas, un repaint: linia nu s-a mişcat
+    if (head.submit && !head.blind) {
+      // Enter: prima schimbare de după el îi e ecoul (rând nou / prompt nou)
+      this.drop((e) => e === head)
+      if (this.cand && this.cand.seq === head.seq) this.cand = null
+      this.base = this.pending.length ? cur : undefined
+      return
+    }
     // o serie de text simplu pe care linia o arată exact (tastare rapidă, ecouri în acelaşi chunk)
     let matched = 0
     let acc = ''
