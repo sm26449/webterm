@@ -2971,13 +2971,22 @@ async def reconcile(conn: AgentConnection, msg: dict) -> None:
         if adopted_room <= 0:
             refused += 1
             continue
-        adopted_room -= 1
+        # `known` are doar sid-urile ACESTUI host. Un sid care există deja pe ALT host (aceeaşi
+        # maşină înrolată de două ori — serverul tmux a supravieţuit, agentul nou raportează
+        # sesiunile celui vechi) dădea IntegrityError pe cheia primară: excepţia rupea TOT ciclul
+        # de reconciliere, la fiecare heartbeat (restul adopţiilor, `maybe_upgrade_agent` la
+        # hello). Nu-l adoptăm — o sesiune nu trece niciodată de la un host la altul — şi mergem
+        # mai departe. Locul din plafon se consumă DOAR de o adopţie reală: altfel sid-urile
+        # hostului vechi ar fi împins afară sesiunile noi ale acestuia (+ un `adoption_refused` fals).
         await db.execute(
-            "INSERT INTO sessions(id, host_id, title, state, created, rows, cols)"
+            "INSERT OR IGNORE INTO sessions(id, host_id, title, state, created, rows, cols)"
             " VALUES(?,?,?,?,?,?,?)",
             sid, conn.host_id, "Adopted session", "live",
             info.get("created", time.time()), info.get("rows", 24), info.get("cols", 80))
-        row = await db.fetchone("SELECT * FROM sessions WHERE id=?", sid)
+        row = await db.fetchone("SELECT * FROM sessions WHERE id=? AND host_id=?", sid, conn.host_id)
+        if row is None:
+            continue
+        adopted_room -= 1
         hub = get_or_create_hub(row)
         await hub.ensure_attached(conn)
 

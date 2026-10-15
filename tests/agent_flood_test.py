@@ -128,6 +128,57 @@ async def main():
         "SELECT COUNT(*) AS c FROM sessions WHERE host_id=?", hid))["c"]
     check("adopţia normală (3 sesiuni) nu e afectată de plafon", n3 == 3, str(n3))
 
+    # ── un sid care e deja al ALTUI host (aceeaşi maşină înrolată de două ori, tmux comun) ──
+    # Înainte: IntegrityError pe cheia primară, care rupea tot ciclul de reconciliere, la fiecare
+    # heartbeat. Acum: sid-ul străin nu se adoptă (rămâne al hostului lui), restul merge.
+    await db.execute(
+        "INSERT INTO hosts(name, token_hash, token_encrypted, connection_type, created)"
+        " VALUES(?,?,?,?,?)",
+        "vechi", "h2", security.encrypt_secret("t"), "agent", 0)
+    old_hid = (await db.fetchone("SELECT id FROM hosts WHERE name='vechi'"))["id"]
+    foreign = uuid.uuid4().hex
+    await db.execute(
+        "INSERT INTO sessions(id, host_id, title, state, created, rows, cols) VALUES(?,?,?,?,?,?,?)",
+        foreign, old_hid, "s", "live", 0, 24, 80)
+    fresh = uuid.uuid4().hex
+    raised = None
+    try:
+        await core.reconcile(conn, {"event": "heartbeat", "epoch": "e1", "agent_version": 38,
+                                    "sessions": [{"sid": foreign, "alive": True, "rows": 24, "cols": 80},
+                                                 {"sid": fresh, "alive": True, "rows": 24, "cols": 80}]})
+    except Exception as e:                       # noqa: BLE001 — exact ce verificăm
+        raised = e
+    check("un sid al altui host nu rupe reconcilierea", raised is None, repr(raised))
+    owner = (await db.fetchone("SELECT host_id FROM sessions WHERE id=?", foreign))["host_id"]
+    check("sid-ul străin rămâne al hostului lui (nu trece la alt host)", owner == old_hid, str(owner))
+    got = await db.fetchone("SELECT host_id FROM sessions WHERE id=?", fresh)
+    check("sesiunea nouă de după el e adoptată normal", bool(got) and got["host_id"] == hid, str(got))
+    check("pentru sid-ul străin nu se creează hub (deci nici fişiere de transcript)",
+          foreign not in HUBS, str(HUBS[-3:]))
+
+    # ── plafon strâmt: sid-ul străin NU consumă locul unei adopţii reale ──
+    # Un singur loc liber; raportul pune sid-ul străin ÎNAINTEA celui nou. Înainte, străinul lua
+    # locul, sesiunea nouă era refuzată şi apărea un `adoption_refused` fals.
+    live = (await db.fetchone(
+        "SELECT COUNT(*) AS c FROM sessions WHERE host_id=? AND state IN ('live','creating')", hid))["c"]
+    for _ in range(core.MAX_SESSIONS_HINT - 1 - live):
+        await db.execute(
+            "INSERT INTO sessions(id, host_id, title, state, created, rows, cols) VALUES(?,?,?,?,?,?,?)",
+            uuid.uuid4().hex, hid, "s", "live", 0, 24, 80)
+    ev_before = (await db.fetchone(
+        "SELECT COUNT(*) AS c FROM agent_events WHERE host_id=? AND event='adoption_refused'", hid))["c"]
+    tight = uuid.uuid4().hex
+    await core.reconcile(conn, {"event": "heartbeat", "epoch": "e1", "agent_version": 38,
+                                "sessions": [{"sid": foreign, "alive": True, "rows": 24, "cols": 80},
+                                             {"sid": tight, "alive": True, "rows": 24, "cols": 80}]})
+    got = await db.fetchone("SELECT host_id FROM sessions WHERE id=?", tight)
+    check("plafon strâmt: sesiunea nouă e adoptată deşi un sid străin o precede",
+          bool(got) and got["host_id"] == hid, str(got))
+    ev_after = (await db.fetchone(
+        "SELECT COUNT(*) AS c FROM agent_events WHERE host_id=? AND event='adoption_refused'", hid))["c"]
+    check("plafon strâmt: niciun `adoption_refused` fals", ev_after == ev_before, f"{ev_before} → {ev_after}")
+    check("plafon strâmt: tot fără hub pentru sid-ul străin", foreign not in HUBS, str(HUBS[-3:]))
+
     # ── câmpurile raportate de agent sunt mărginite ──
     await core.reconcile(conn, {
         "event": "heartbeat", "epoch": "e1", "sessions": [],

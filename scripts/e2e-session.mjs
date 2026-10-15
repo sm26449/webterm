@@ -20,10 +20,19 @@ const EMAIL = 'e2e@example.com'
 const PASSWORD = 'parola-e2e-123456'
 
 const results = []
-const check = (name, cond) => {
+// `detail` (opţional) se tipăreşte DOAR la FAIL, ca linie [diag]: CI-ul transformă FAIL/[diag] în
+// adnotări, iar un FAIL fără „ce s-a văzut de fapt" nu putea fi diagnosticat după rulare.
+const check = (name, cond, detail) => {
   results.push([name, !!cond])
   console.log(`  ${cond ? 'PASS' : 'FAIL'} ${name}`)
+  if (!cond && detail != null && detail !== '') console.log(`  [diag] ${name.slice(0, 40)}…: ${String(detail).slice(0, 300)}`)
 }
+/* Sufix unic per rulare. Scriptul e RE-RULAT o dată la eşec (CI + ci-local), în ACELAŞI container:
+   cont, hosturi, fişiere şi forward-uri ale primei încercări rămân. Un nume fix ciocnea cu ele —
+   `wt_pause.bin` deja existent cerea confirmarea de overwrite (upload-ul nu pornea deloc), iar
+   slug-ul `e2e-fwd` devenea `e2e-fwd-2` —, deci o reîncercare nu putea trece, oricare ar fi fost
+   cauza primului eşec, şi ascundea acea cauză sub eşecuri noi. */
+const RUN = Date.now().toString(36)
 /* Clipboard-ul se scrie ASINCRON faţă de click-ul care declanşează copierea. Aşteptările
    fixe (300-500 ms) au ţinut până când un runner încărcat a întârziat scrierea: citirea a
    prins conţinutul ANTERIOR, iar testul a picat pe un cod nemodificat — acelaşi commit a
@@ -316,6 +325,30 @@ try {
       await page.waitForTimeout(200)
     }
   }
+  /* Duce panoul de fişiere în `dir` şi aşteaptă LISTAREA lui (`data-path` = directorul listat, ţinta
+     upload-urilor). Înainte testul aştepta valoarea din câmpul de cale — care devine `dir` pe loc, la
+     `fill`, cu mult înainte ca listarea să se întoarcă de la agent. Un upload dat imediat pleca în
+     directorul ANTERIOR: „upload pe un FS doar-citire" urca liniştit în /tmp şi pica fără niciun
+     mesaj de eroare (măsurat: după Enter, /tmp rămânea listat încă ~90 ms). Întoarce directorul listat. */
+  const gotoDir = async (panel, dir) => {
+    const input = panel.locator('input[title*="Type a path"]')
+    await input.fill(dir)
+    await input.press('Enter')
+    const list = panel.locator('[role="group"][data-path]')
+    return pollValue(() => list.getAttribute('data-path').catch(() => null), (v) => v === dir)
+  }
+  /* `page.reload` a picat o dată cu `net::ERR_ABORTED; maybe frame was detached?` (split: persistă la
+     reload, 3.6.13): o navigare pornită de pagină chiar în clipa reload-ului (schimbare de hash,
+     reîncărcarea după `vite:preloadError`) îl anulează, iar excepţia oprea TOT scriptul — reîncercarea
+     pornea apoi peste starea lăsată de el. Reload-ul e ce vrea testul, deci îl mai dăm o dată; aserţiunile
+     de după verifică starea. Întreruperea se notează (`[diag]`): dacă devine regulă, e un semnal. */
+  const reloadApp = async (opts) => {
+    const before = page.url()
+    try { await page.reload(opts) } catch (e) {
+      console.log(`  [diag] reload întrerupt (${String(e?.message ?? e).split('\n')[0]}) · url înainte=${before} după=${page.url()} — îl repet`)
+      await page.reload(opts)
+    }
+  }
 
   // Ctrl/Cmd+Shift+F deschide căutarea în scrollback
   const searchBox = page.locator('input[placeholder="Search…"]')
@@ -385,7 +418,7 @@ try {
   const spark = page.locator('svg[role=img][aria-label^="CPU on"]').first()
   let sparkOk = await visible(spark, 30000)
   if (!sparkOk) {
-    await page.reload({ waitUntil: 'domcontentloaded' })
+    await reloadApp({ waitUntil: 'domcontentloaded' })
     await page.waitForSelector('[data-testid="dashboard"]', { timeout: 15000 })
     sparkOk = await visible(spark, 30000)
   }
@@ -574,7 +607,11 @@ try {
   await okCmd.hover()
   await okCmd.getByRole('button', { name: 'output', exact: true }).click()
   const clip = await clipboardUntil(page, (c) => c.includes('OSC_OK'))
-  check('clipboardul conține output-ul comenzii', clip.includes('OSC_OK'))
+  // la eşec: ce era în clipboard + toasturile (un `null` din outputOf = toast „cannot extract";
+  // un output gol = nicio scriere, deci clipboardul rămâne cu conţinutul anterior) + rândul din panou
+  check('clipboardul conține output-ul comenzii', clip.includes('OSC_OK'), clip.includes('OSC_OK') ? '' :
+    `clip=${JSON.stringify(clip).slice(0, 120)} · toasturi=${JSON.stringify((await page.locator('.wt-toast').allTextContents().catch(() => [])).join(' | ')).slice(0, 160)}`
+    + ` · rând=${JSON.stringify(((await okCmd.textContent().catch(() => '')) ?? '').slice(0, 80))}`)
   const clipClean = !/[$#]\s*$/m.test(clip) && !clip.includes('echo OSC_OK')
   // la eşec, tipărim CE a ajuns în clipboard: verificarea a picat de două ori în CI cu
   // cauze diferite (prompt repictat vs. ecou), iar fără conţinut diagnosticul e ghicit
@@ -678,7 +715,7 @@ try {
   //     se umplea cu prompturi şi bucăţi de output, din nou la fiecare reconectare (v1.0.129).
   const histBefore = await page.evaluate(async () =>
     (await (await fetch('/api/history?limit=200', { credentials: 'same-origin' })).json()).length)
-  await page.reload({ waitUntil: 'domcontentloaded' })
+  await reloadApp({ waitUntil: 'domcontentloaded' })
   await page.waitForSelector('.xterm-screen', { timeout: 20000 })
   await page.waitForTimeout(4000)          // replay-ul cozii + reataşarea
   const histAfter = await page.evaluate(async () =>
@@ -712,7 +749,7 @@ try {
   await activePane.locator('.xterm-screen').click()
   await page.keyboard.type("seq -f 'WT_HIST_%g' 1 3000; yes " + 'F'.repeat(96) + ' | head -n 3500; echo WT_HIST_$((7*6))\n')
   check('istoric: output-ul mare s-a terminat', await waitScreen('WT_HIST_42', 30000))
-  await page.reload({ waitUntil: 'domcontentloaded' })
+  await reloadApp({ waitUntil: 'domcontentloaded' })
   await page.waitForSelector('.xterm-screen', { timeout: 20000 })
   const histLines = await pollValue(
     () => screenText().then((t) => t.split('\n').filter((l) => l.trim() === 'WT_HIST_100').length),
@@ -960,9 +997,15 @@ try {
     cardText.includes('wt_edit.txt') && cardText.includes('Done') && (await card.locator('button[aria-label^="Copy path"]').count()) >= 1)
   await card.locator('button[aria-label="Minimize"]').click().catch(() => {})
   check('minimize re-pliază widgetul la pilulă', (await hidden(card)) && (await visible(pill)))
-  // curăţenie pentru secţiunile următoare: re-extinde şi aruncă rândul terminat
-  await pill.click()
-  await card.locator('button[aria-label^="Dismiss"]').first().click().catch(() => {})
+  // curăţenie pentru secţiunile următoare: aruncăm rândul terminat FĂRĂ a re-extinde widgetul.
+  // Înainte: pill.click() + Dismiss — dar extinderea e o PREFERINŢĂ persistată, deci widgetul rămânea
+  // extins pentru tot restul rulării; cardul creştea cu fiecare download şi, după câte rânduri „Done"
+  // mai lâncezeau (20 s), acoperea rândul folderului şi bara de selecţie a panoului de fişiere
+  // („folder download" + click de 30 s pe „Copy to host" — reprodus local la o re-rulare).
+  await page.evaluate(() => {
+    const s = window.__wtTransfers?.store
+    if (s?.snapshot) for (const j of s.snapshot().values()) if (j.name === 'wt_edit.txt' && j.state === 'done') s.remove(j.id)
+  })
 
   // ── Transfers phase 2: DOWNLOAD prin acelaşi motor (job ↓ în widget, progres, Done) ──
   // Download-ul unui fişier trece acum prin motorul de transfer, nu printr-un `<a download>` oarbă:
@@ -1043,7 +1086,9 @@ try {
     })
     if (arState !== 'done') await page.waitForTimeout(250)
   }
-  check('folder download: rând de arhivă în Transferuri care se termină (Done)', arState === 'done')
+  check('folder download: rând de arhivă în Transferuri care se termină (Done)', arState === 'done',
+    await page.evaluate(() => JSON.stringify([...(window.__wtTransfers?.store?.snapshot?.()?.values?.() ?? [])]
+      .map((j) => ({ kind: j.kind, dir: j.dir, dest: j.dest, state: j.state, err: j.error })))))
   check('folder download: arhiva .tgz chiar se descarcă', dls.includes('wt_seldir.tgz'))
   page.off('download', onDl)
 
@@ -1102,8 +1147,11 @@ try {
     try { await route.continue() } catch { /* felia a fost anulată de pauză */ }
   })
   const PBYTES = 24 * 1024 * 1024
+  const PNAME = `wt_pause_${RUN}.bin`            // unic per rulare: vezi RUN (reîncercarea)
+  // ţinta upload-ului = directorul LISTAT; verificarea de pe host de mai jos citeşte /tmp
+  await gotoDir(filePanel, '/tmp')
   await filePanel.locator('input[type=file]').setInputFiles({
-    name: 'wt_pause.bin', mimeType: 'application/octet-stream', buffer: Buffer.alloc(PBYTES, 7),
+    name: PNAME, mimeType: 'application/octet-stream', buffer: Buffer.alloc(PBYTES, 7),
   })
   const pwidget = page.locator('[data-testid="wt-transfers-pill"], [data-testid="wt-transfers-card"]')
   check('pause: upload-ul porneşte şi apare în widget', await visible(pwidget, 8000))
@@ -1138,8 +1186,13 @@ try {
   await page.evaluate((id) => window.__wtTransfers.resumeUpload(id), jobId)
   // se termină după reluare — verificăm pe HOST că fişierul are toţi octeţii (reluat corect, nu corupt)
   await activePane.locator('.xterm-screen').click()
-  await page.keyboard.type(`for i in $(seq 1 60); do [ -f /tmp/wt_pause.bin ] && [ $(wc -c < /tmp/wt_pause.bin) = ${PBYTES} ] && { echo PAUSE_RESUME_OK; break; }; sleep 1; done\n`)
-  check('resume: upload-ul se termină complet pe host (reluat de la offset)', await waitScreen('PAUSE_RESUME_OK', 40000))
+  await page.keyboard.type(`for i in $(seq 1 60); do [ -f /tmp/${PNAME} ] && [ $(wc -c < /tmp/${PNAME}) = ${PBYTES} ] && { echo PAUSE_RESUME_OK; break; }; sleep 1; done\n`)
+  const resumedOk = await waitScreen('PAUSE_RESUME_OK', 40000)
+  check('resume: upload-ul se termină complet pe host (reluat de la offset)', resumedOk,
+    await page.evaluate((id) => JSON.stringify(window.__wtTransfers?.store?.get?.(id) ?? null), jobId))
+  // bucla de aşteptare din shell (până la 60 s) ar rămâne să blocheze promptul, iar verificările
+  // următoare (paste, wc -c …) ar pica în cascadă: o oprim, ca primul FAIL să rămână singurul
+  if (!resumedOk) { await activePane.locator('.xterm-screen').click(); await page.keyboard.press('Control+c') }
 
   // Paste de IMAGINE în terminal → fişierul e scris în inbox-ul hostului (~/.webterm/inbox/
   // <timestamp>.png) şi calea lui, citată la nevoie, e tastată la prompt (fără Enter). Tastăm
@@ -1180,19 +1233,21 @@ try {
   // ── 3.6.9: o scriere refuzată de host spune DE CE, cu dosarul — şi imediat ──
   // /sys e montat doar-citire în container (agentul de aici e root, deci permisiunile nu-l opresc;
   // un FS read-only da). Înainte: „Server answered 400" abia după 8 reîncercări (~1 min).
-  const fpRo = filePanel.locator('input[title*="Type a path"]')
-  await fpRo.fill('/sys')
-  await fpRo.press('Enter')
-  await pollValue(() => fpRo.inputValue(), (v) => v === '/sys')
+  // `gotoDir` aşteaptă LISTAREA lui /sys, nu doar câmpul de cale (vezi helper-ul): măsurat local,
+  // chiar după Enter era încă listat /tmp, iar /sys sosea după ~90 ms.
+  const roListed = await gotoDir(filePanel, '/sys')
   const roT0 = Date.now()
   await filePanel.locator('input[type=file]').first().setInputFiles({
     name: 'wt_ro.txt', mimeType: 'text/plain', buffer: Buffer.from('nope'),
   })
   const roText = await pollValue(() => filePanel.textContent().then((t) => t ?? ''),
     (t) => /read-only file system/i.test(t), 12000)
-  check('upload pe un FS doar-citire: mesaj clar cu dosarul, fără reîncercări (sub 12 s)',
-    /\/sys is on a read-only file system/i.test(roText) && Date.now() - roT0 < 12000,
-    roText.match(/[^.]{0,60}read-only[^.]{0,40}/i)?.[0] ?? roText.slice(0, 120))
+  const roOk = /\/sys is on a read-only file system/i.test(roText) && Date.now() - roT0 < 12000
+  check('upload pe un FS doar-citire: mesaj clar cu dosarul, fără reîncercări (sub 12 s)', roOk,
+    `listat=${roListed} · ${roText.match(/[^.]{0,60}read-only[^.]{0,40}/i)?.[0] ?? roText.slice(0, 120)}`)
+  if (!roOk) console.log('  [diag] ro: joburi', await page.evaluate(() => JSON.stringify(
+    [...(window.__wtTransfers?.store?.snapshot?.()?.values?.() ?? [])].filter((j) => (j.name || '').includes('wt_ro'))
+      .map((j) => ({ dest: j.dest, state: j.state, code: j.errorCode, err: j.error, attempts: j.attempts })))))
   await page.evaluate(() => {
     const s = window.__wtTransfers?.store
     if (!s?.snapshot) return
@@ -1206,10 +1261,10 @@ try {
   await page.waitForTimeout(700)
   // Ducem panoul EXPLICIT în /tmp: după paste-ul de imagine (inbox) sau un upload lent, panoul
   // putea rămâne în alt director, iar fişierul „lipsea" din listă din motive de test, nu de produs.
+  // (gotoDir: aşteptăm LISTAREA lui /tmp — „Reload" reîncarcă directorul listat, deci un click dat
+  // cât încă era listat /sys re-lista /sys, iar fişierul „lipsea")
   const fpPathInput = filePanel.locator('input[title*="Type a path"]')
-  await fpPathInput.fill('/tmp')
-  await fpPathInput.press('Enter')
-  await pollValue(() => fpPathInput.inputValue(), (v) => v === '/tmp')
+  await gotoDir(filePanel, '/tmp')
   await filePanel.locator('button[title="Reload"]').click()
   await filePanel.locator('input[placeholder="filter…"]').fill('raport')
   // Pollăm: după Reload listarea FS se întoarce ASINCRON, iar panoul se re-randează după ea —
@@ -1259,7 +1314,9 @@ try {
   await fwdPanel.getByRole('button', { name: 'Add', exact: true }).click()
   await page.waitForTimeout(1000)
   check('forward declarat apare în listă', ((await fwdPanel.textContent()) ?? '').includes('e2e-fwd'))
-  check('adresa publică (URL) e afișată în listă', ((await fwdPanel.textContent()) ?? '').includes('e2e-fwd.127.0.0.1'))
+  // slug-ul e unic pe instanţă: la reîncercare (acelaşi container) devine `e2e-fwd-2`
+  check('adresa publică (URL) e afișată în listă', /e2e-fwd(-\d+)?\.127\.0\.0\.1/.test((await fwdPanel.textContent()) ?? ''),
+    ((await fwdPanel.textContent()) ?? '').slice(0, 200))
   // editează: schimbă portul și salvează (PATCH)
   await fwdPanel.locator('button[title="Edit"]').first().click()
   await fwdPanel.locator('input[placeholder="port"]').fill('8123')
@@ -1452,18 +1509,25 @@ try {
   // La punctul ăsta sunt ≥2 taburi (X1, X2 + sesiunile anterioare), deci „+ Split view" apare.
   // Confirmările App/Sidebar/SessionView NU mai sunt window.confirm (dialog propriu, role=alertdialog);
   // handlerul nativ rămâne doar pentru panourile încă neconvertite (ex. Toolbox → SSH keys, mai jos).
-  page.on('dialog', (d) => d.accept())
+  page.on('dialog', (d) => {
+    // un `beforeunload` (transfer activ / editor nesalvat) la un reload e un semnal: îl notăm
+    if (d.type() === 'beforeunload') console.log('  [diag] dialog beforeunload la navigare (acceptat)')
+    return d.accept()
+  })
   const confirmInApp = async () => {
     const dlg = page.locator('[role="alertdialog"]').last()
     await dlg.waitFor({ timeout: 5000 })
     // butonul de confirmare e ULTIMUL din dialog (Anulează stă primul, focusat la `danger`)
     await dlg.locator('button').last().click()
   }
+  // unic per rulare (vezi RUN): la reîncercare, split-ul încercării anterioare poate rămâne pe server,
+  // iar `.first()` / `find` pe numele fix luau chip-ul LUI ("Move to…" şi "fără remontare" picau)
+  const SPLIT = `e2e-split-${RUN}`
   await page.locator('button[aria-label="New split view"]').click()
   await page.waitForSelector('input[placeholder="e.g. prod-debug"]', { timeout: 5000 })
   check('split: wizard-ul se deschide cu câmp de nume',
     (await page.locator('input[placeholder="e.g. prod-debug"]').count()) === 1)
-  await page.locator('input[placeholder="e.g. prod-debug"]').fill('e2e-split')
+  await page.locator('input[placeholder="e.g. prod-debug"]').fill(SPLIT)
   // deterministic: wizard-ul pre-bifează primele taburi (pot fi 3–4 → grilă). Debifăm tot şi
   // alegem EXACT 2 sesiuni → un split cu divider, ca să testăm calea de 2 panouri.
   // doar bifele WIZARD-ului: panoul de fişiere deschis în spate are şi el bife (selecţie, 3.5.5)
@@ -1475,7 +1539,7 @@ try {
   check('split: se randează split-ul de 2 panouri (divider prezent)',
     (await page.locator('[aria-label^="Resize the panes"]').count()) >= 1)
   check('split: chip-ul denumit apare în bara de taburi',
-    (await page.locator('button:has-text("e2e-split")').count()) >= 1)
+    (await page.locator(`button:has-text("${SPLIT}")`).count()) >= 1)
 
   // ── 3.6.12: intrarea într-un split SELECTEAZĂ + FOCALIZEAZĂ un panou ──────────────────
   // Bug raportat 2026-10-14: de pe un tab normal, click pe chip → TabBar-ul rămânea pe tabul
@@ -1505,7 +1569,7 @@ try {
     return agree(s)
   }
   const splitsApi = () => page.evaluate(async () => (await (await fetch('/api/split-views', { credentials: 'same-origin' })).json()).split_views)
-  const mine = async () => (await splitsApi()).find((v) => v.name === 'e2e-split')
+  const mine = async () => (await splitsApi()).find((v) => v.name === SPLIT)
   // WS-urile de sesiune deschise de aici încolo: un swap / o intrare în split NU trebuie să reconecteze
   let sessWs = 0
   page.on('websocket', (w) => { if (w.url().includes('/ws/sessions/')) sessWs++ })
@@ -1520,8 +1584,8 @@ try {
   check('split: click pe un tab de sesiune iese din split (divider dispare)',
     (await page.locator('[aria-label^="Resize the panes"]').count()) === 0)
   check('split: chip-ul rămâne în bară după ce ieşi (revii oricând)',
-    (await page.locator('button:has-text("e2e-split")').count()) >= 1)
-  await page.locator('button:has-text("e2e-split")').first().click()
+    (await page.locator(`button:has-text("${SPLIT}")`).count()) >= 1)
+  await page.locator(`button:has-text("${SPLIT}")`).first().click()
   await page.waitForTimeout(800)
   check('split: revin la split din chip (divider reapare)',
     (await page.locator('[aria-label^="Resize the panes"]').count()) >= 1)
@@ -1541,7 +1605,7 @@ try {
   await page.locator('button[data-tab]').first().evaluate((el) => el.click())
   await page.waitForTimeout(400)
   // revin la split din chip → readuce selecţia în localStorage pentru testul de reload de mai jos
-  await page.locator('button:has-text("e2e-split")').first().click()
+  await page.locator(`button:has-text("${SPLIT}")`).first().click()
   await page.waitForTimeout(800)
   check('split: revin iar la split din chip după navigarea pe host',
     (await page.locator('[aria-label^="Resize the panes"]').count()) >= 1)
@@ -1575,13 +1639,13 @@ try {
   // ieşire (tab al unui panou) + reintrare din chip: panourile stau în stiva keep-alive → aceleaşi terminale
   await page.locator(`button[data-tab="${pBefore[0]}"]`).evaluate((el) => el.click())
   await page.waitForTimeout(600)
-  await page.locator('button:has-text("e2e-split")').first().click()
+  await page.locator(`button:has-text("${SPLIT}")`).first().click()
   await page.waitForTimeout(900)
   check('split: ieşirea + reintrarea în split nu remontează / reconectează panourile',
     (await sameTerms()) && sessWs === ws0)
 
   // 3 panouri: Edit → încă o sesiune → implicit „1 mare stânga + 2 dreapta"; apoi picker-ul de aranjare
-  await page.locator('div.wt-tab:has-text("e2e-split") button[aria-label="Edit split view"]').click()
+  await page.locator(`div.wt-tab:has-text("${SPLIT}") button[aria-label="Edit split view"]`).click()
   await page.waitForSelector('[aria-labelledby="wt-split-wizard-title"]', { timeout: 5000 })
   const eboxes = page.locator('[aria-labelledby="wt-split-wizard-title"] input[type="checkbox"]:visible')
   for (let i = 0; i < await eboxes.count(); i++) { if (!(await eboxes.nth(i).isChecked())) { await eboxes.nth(i).click(); break } }
@@ -1637,19 +1701,19 @@ try {
   await page.waitForTimeout(600)
 
   // reload → definiţia vine din server (cross-device), selecţia activă din localStorage
-  await page.reload()
+  await reloadApp()
   await page.waitForTimeout(2500)
   check('split: persistă la reload (definiţie server-side + selecţie locală)',
-    (await page.locator('button:has-text("e2e-split")').count()) >= 1
+    (await page.locator(`button:has-text("${SPLIT}")`).count()) >= 1
     && (await page.locator('[aria-label^="Resize the panes"]').count()) >= 1)
   check('split: după reload un panou e selectat + focalizat (TabBar, focus, ţintă de acord)', await pollAgree(8000))
 
   // ştergere din chip → dispare
-  await page.locator('div.wt-tab:has-text("e2e-split") button[aria-label="Delete split view"]').click()
+  await page.locator(`div.wt-tab:has-text("${SPLIT}") button[aria-label="Delete split view"]`).click()
   await confirmInApp()                       // ConfirmModal (danger) în locul window.confirm
   await page.waitForTimeout(800)
   check('split: ştergerea scoate chip-ul',
-    (await page.locator('button:has-text("e2e-split")').count()) === 0)
+    (await page.locator(`button:has-text("${SPLIT}")`).count()) === 0)
 
   // ── Toolbox → SSH keys (chei de deploy host→host) + engine-urile InfluxDB ──
   // Pagina hostului → Toolbox. Containerul de CI N-ARE ssh-keygen, deci întâi verificăm
@@ -1657,7 +1721,9 @@ try {
   // perechea prin op-ul `run` (fix calea de „adopţie" a fişierelor existente) şi verificăm
   // calea fericită: fingerprint SHA256 calculat de gateway, delete cu confirmare.
   const hostsNow = await (await fetch(`${BASE}/api/hosts`, { headers: { Cookie: cookie } })).json()
-  const ciHost = hostsNow.find((h) => h.name === 'ci-local')
+  // după id, nu după nume: la reîncercare există două hosturi `ci-local`, iar primul (al încercării
+  // anterioare, cu agentul oprit) dădea `host.offline` la seed
+  const ciHost = hostsNow.find((h) => h.id === host.id)
   // în starea de aici există o sesiune activă → deschidem Toolbox din bara sesiunii (butonul de
   // pe pagina hostului apare doar când nicio sesiune nu e selectată)
   // `vis()` = fereastra VIZIBILĂ: ordinea în DOM a terminalelor ascunse (keep-alive) e un detaliu de
@@ -1806,7 +1872,7 @@ try {
   await addHostDlg.locator('button:has-text("Cancel")').last().click()
   await hidden(addHostDlg)
   // ţinta reală: test reuşit → „Save (verified)" → hostul e pinat cu cheia văzută de test
-  await openAddSsh('e2e-ssh-tested', 2222)
+  await openAddSsh(`e2e-ssh-tested-${RUN}`, 2222)
   await addHostDlg.getByLabel('SSH password').fill('parola-e2e-ssh-123456')
   await addHostDlg.locator('[data-testid="hosttest-run"]').click()
   const okStages = addHostDlg.locator('[data-testid="hosttest-stages"] li[data-state="ok"]')
@@ -1823,12 +1889,12 @@ try {
     && await addHostDlg.getByRole('button', { name: 'Close', exact: true }).isVisible())
   await addHostDlg.getByRole('button', { name: 'Close', exact: true }).click()
   const sshHosts = await (await fetch(`${BASE}/api/hosts`, { headers: { Cookie: cookie } })).json()
-  const tested = sshHosts.find((h) => h.name === 'e2e-ssh-tested')
+  const tested = sshHosts.find((h) => h.name === `e2e-ssh-tested-${RUN}`)
   const hk = tested ? await (await fetch(`${BASE}/api/hosts/${tested.id}/hostkey`, { headers: { Cookie: cookie } })).json() : {}
   check('hosttest: hostul salvat e pinat de la creare cu cheia văzută de test',
     !!tested && hk.pinned === true && hk.fingerprint === sshdFp)
   // cheia generată în formular: publica + one-liner-ul; rulat pe ţintă → testul trece cu cheia
-  await openAddSsh('e2e-ssh-genkey', 2222)
+  await openAddSsh(`e2e-ssh-genkey-${RUN}`, 2222)
   await addHostDlg.locator('label:has-text("SSH key")').click()
   await addHostDlg.locator('button:has-text("Generate a key for this host")').click()
   const pendingPub = addHostDlg.locator('[data-testid="pending-key-pub"]')
@@ -1841,7 +1907,7 @@ try {
   await addHostDlg.locator('button:has-text("Save (verified)")').click()
   await addHostDlg.getByRole('button', { name: 'Close', exact: true }).click()
   const genHost = (await (await fetch(`${BASE}/api/hosts`, { headers: { Cookie: cookie } })).json())
-    .find((h) => h.name === 'e2e-ssh-genkey')
+    .find((h) => h.name === `e2e-ssh-genkey-${RUN}`)
   check('hosttest: one-liner rulat pe ţintă → test reuşit cu cheia, salvată ca auth key',
     !!genHost && genHost.auth_method === 'key' && genHost.has_credentials === true)
   // curăţenie: hosturile SSH de test nu trebuie să schimbe sidebar-ul pentru paşii următori
@@ -1873,12 +1939,16 @@ try {
     && csvText.slice(1).startsWith('name,connection_type,hostname,port,username,via_host,folder,tags,note,'
       + 'require_2fa,credential_policy,auth_method,agent_note\r\n')
     && csvText.includes('\r\nci-local,agent,'))
+  // câte `ci-local` existau ÎNAINTE de import (la reîncercare: 2) — duplicatul trebuie să rămână neatins
+  const ciLocalBefore = (await (await fetch(`${BASE}/api/hosts`, { headers: { Cookie: cookie } })).json())
+    .filter((h) => h.name === 'ci-local').length
+  const CSV_NEW = `e2e-csv-new-${RUN}`
   await page.click('button[aria-label="Add host"]')
   await addHostDlg.getByRole('button', { name: 'Import CSV', exact: true }).click()
   await addHostDlg.locator('[data-testid="csv-text"]').fill(
     'name,connection_type,hostname,port,username\r\n'
     + 'ci-local,ssh,10.77.0.1,22,e2e\r\n'
-    + 'e2e-csv-new,ssh,10.77.0.2,2200,e2e\r\n')
+    + `${CSV_NEW},ssh,10.77.0.2,2200,e2e\r\n`)
   await addHostDlg.locator('button:has-text("Preview")').click()
   const csvStatus = addHostDlg.locator('[data-testid="csv-row-status"]')
   await visible(csvStatus.first())
@@ -1893,10 +1963,10 @@ try {
   await addHostDlg.locator('button:has-text("Import (1)")').click()
   await visible(addHostDlg.locator('[data-testid="csv-import-result"]'), 10000)
   const afterCsv = await (await fetch(`${BASE}/api/hosts`, { headers: { Cookie: cookie } })).json()
-  const csvNew = afterCsv.filter((h) => h.name === 'e2e-csv-new')
+  const csvNew = afterCsv.filter((h) => h.name === CSV_NEW)
   check('csv: importul creează exact 1 host (SSH, port 2200, politica ask), duplicatul rămâne neatins',
     csvNew.length === 1 && csvNew[0].ssh_port === 2200 && csvNew[0].credential_policy === 'ask'
-    && afterCsv.filter((h) => h.name === 'ci-local').length === 1)
+    && afterCsv.filter((h) => h.name === 'ci-local').length === ciLocalBefore)
   await addHostDlg.locator('button:has-text("Done")').click()
   await hidden(addHostDlg)
   for (const h of csvNew) await fetch(`${BASE}/api/hosts/${h.id}`, { method: 'DELETE', headers: { Cookie: cookie, Origin: BASE } })
@@ -2025,7 +2095,7 @@ try {
       rq.onerror = () => rej(rq.error)
     })
   }, meUid)
-  await page.reload({ waitUntil: 'domcontentloaded' })
+  await reloadApp({ waitUntil: 'domcontentloaded' })
   const intRow = await pollValue(() => page.evaluate(() => {
     const snap = window.__wtTransfers?.store?.snapshot?.()
     const j = snap ? [...snap.values()].find((x) => x.dir === 'down' && x.dest === '/tmp/wt_dl_resume.bin') : null

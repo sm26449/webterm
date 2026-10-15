@@ -66,6 +66,35 @@ frontend only — no agent change (agent stays 58).
   replies — exact shapes only, never with a line break, never from a paste) don't count as keys:
   they no longer make a pane "un-echoed" (with tmux mouse and focus events on, clicking a pane and
   pressing Enter used to ask "Can't check"), and they never skip the guardrail.
+- **A session id that already belongs to another host no longer breaks that agent's reconcile.**
+  Why: when the same machine is enrolled twice (a second host record, the tmux server survives),
+  the new agent reports the old host's sessions. Adopting them hit the `sessions` primary key, and
+  the IntegrityError aborted the whole reconcile cycle on every heartbeat — the rest of the
+  adoptions and the agent update check on `hello` never ran. Such a session is now skipped and
+  stays with its own host (a session never moves between hosts) and does not use up a place under
+  the adoption cap, so it cannot crowd out the new host's own sessions or log a false
+  `adoption_refused`; the rest of the cycle goes on. Found while root-causing the E2E-sessions flake, whose retry re-enrolls the same container.
+- **E2E sessions flake (transfers checks) root-caused — test harness, not product.** Why: the
+  "upload onto a read-only FS" check waited for the path *field* to read `/sys`, which happens on
+  typing, not for the listing to arrive; the upload went to the previously listed `/tmp` and
+  succeeded silently (measured: `/tmp` stays listed ~90 ms after Enter, so the check passed only
+  when the file picker happened to be slower). The single retry could then never pass: it reuses
+  the container, so `wt_pause.bin` already existed (overwrite prompt, the pause upload never started),
+  the forward slug became `e2e-fwd-2`, and the SSH-key seed went to the first `ci-local` host — the
+  previous attempt's, offline. That is the "pause / URL / sshkeys" failures seen on the 3.6.11 tag
+  CI and locally (a leftover split view did the same to the split checks). The file list now
+  carries `data-path` (the listed folder, the upload target) and the test waits for it; per-run
+  names and the host id make the retry honest; the test no longer leaves the transfers widget
+  expanded (a persisted preference: the growing card covered the file panel's folder row and
+  selection bar, failing "folder download" / "Copy to host"); a `page.reload` aborted by an
+  in-page navigation is repeated once and logged instead of killing the run; a failed check
+  prints what it saw. `scripts/ci-local.sh`: a second container gate (another worktree) used to
+  delete the first one's `wtci-*` containers mid-run. Container gates now take a lock in the
+  clone's shared git dir (every worktree of the clone sees it; owned by the repo's owner, not a
+  `/tmp` file any local user could pre-create or hold), refuse when any `wtci-*` container already
+  exists on the docker daemon (names are daemon-global: other clones, other users;
+  `WTCI_CLEAN_STALE=1` removes leftovers), refuse when the lock cannot be taken, and set the
+  cleanup trap only after every refusal.
 
 ## [3.6.12] — 2026-10-15 · agent (58)
 
