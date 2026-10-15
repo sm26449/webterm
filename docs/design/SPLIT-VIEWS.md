@@ -345,7 +345,12 @@ closed (review of 3.6.12, `lib/broadcastGuard.ts`), when guardrail rules are act
   - **Text after the cursor runs as well**: `↑` recalls `rm -rf /srv/data`, then `Home` or `←` and
     `sudo ` — read only up to the cursor the guard saw `sudo `. The readings judged: up to the cursor,
     to the **end of the logical line** (the cursor row and the rows that continue it) from the reading
-    start and from the conservative start, and the ambiguous joins.
+    start, and the ambiguous joins. The conservative reading goes further: from `B` down to the
+    **last non-blank row of the buffer** — a multi-line buffer has rows after a literal newline that
+    run too (zsh `↑` recalls `cd /srv` + newline + `rm -rf /srv/data`, `↑` again moves the cursor
+    into the buffer's first row; Ctrl+V Ctrl+J; push-line). Text below the line (a completion list)
+    can only add confirmations. A logical line that continues for more than 50 rows after the
+    cursor row is not truncated: it is unknown ("Can't check").
   - **Right prompt**: text right of the cursor at the first key, separated from it by blanks, is
     recorded with its row and column; a reading without it is only an extra variant, built only while
     that exact text still sits at that position and no typed text reaches it (`RPROMPT='%~'` showing

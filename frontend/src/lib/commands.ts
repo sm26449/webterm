@@ -50,6 +50,8 @@ function plain(s: string): string {
 }
 
 const CAPTURE_MAX = 256 * 1024      // per comandă; peste atât, output-ul se citeşte de pe ecran
+/** câte rânduri de continuare (după rândul cursorului) citim din linia logică; peste = linie necunoscută */
+const LINE_ROWS_MAX = 50
 
 export class CommandTracker {
   private term: Terminal
@@ -142,6 +144,8 @@ export class CommandTracker {
     if (!this.submitted) {
       for (let r = row; r < cur; r++) if (!this.rowContinues(r)) return `gap ${row}..${cur} @${r}`
     }
+    // linia continuă după cursor peste plafonul de rânduri: n-o citim toată → necunoscut (nu tăiat)
+    if (this.lineEnd().capped) return `too-long >${LINE_ROWS_MAX}`
     if (this.promptSnap !== null) {
       const line = this.term.buffer.active.getLine(row)
       // prefix EXACT, inclusiv spaţiile (nu „începe cu" pe textul tăiat la dreapta)
@@ -234,6 +238,31 @@ export class CommandTracker {
       text += l.translateToString(false, r === row ? col : 0, r === cur.row ? cur.col : undefined) + '\n'
     }
     return /[$#%>\u276f] +[^\s]/u.test(text)
+  }
+
+  /** Capătul liniei logice a cursorului (rândurile care o continuă), cu plafon de 50 de rânduri;
+      `capped` = plafonul a fost atins şi linia continuă — n-o citim toată (vezi promptLostReason). */
+  private lineEnd(): { last: number; capped: boolean } {
+    const b = this.term.buffer.active
+    let last = this.absCursor().row
+    for (let n = 0; n < LINE_ROWS_MAX; n++) {
+      if (!this.rowContinues(last) || !b.getLine(last + 1)) return { last, capped: false }
+      last++
+    }
+    return { last, capped: this.rowContinues(last) && !!b.getLine(last + 1) }
+  }
+
+  /** Ultimul rând nevid de la `from` în jos (cursorul e în viewport: cel mult un ecran de rânduri). */
+  private lastNonBlank(from: number): number {
+    const b = this.term.buffer.active
+    const max = Math.max(this.term.rows ?? 0, 200)
+    let lastRow = from
+    for (let r = from + 1; r <= from + max; r++) {
+      const l = b.getLine(r)
+      if (!l) break
+      if (l.translateToString(true).trim()) lastRow = r
+    }
+    return lastRow
   }
 
   /** De la (row, 0) până la cursor e doar un prompt: se termină cu un terminator de prompt urmat de
@@ -523,7 +552,7 @@ export class CommandTracker {
       const o = this.origMarker
       const oRow = o && !o.isDisposed && typeof o.line === 'number' && o.line >= 0 ? o.line : null
       if (oRow !== null) {
-        const full = this.readToEnd(oRow, this.origCol, withSpace, false)
+        const full = this.readToEnd(oRow, this.origCol, withSpace, false, true)
         if (full) out.add(full)
       }
       // de la poziţia de citire (eventual re-ancorată), netăiat şi — doar ca variantă în plus — fără RPROMPT
@@ -541,12 +570,16 @@ export class CommandTracker {
 
   /** De la (start, col) până la capătul liniei logice care conţine cursorul (rândurile care o
       continuă). `cutRight`: fără promptul din dreapta — doar dacă rândul şi coloana lui înregistrate
-      îl ţin EXACT şi niciun text tastat nu ajunge în dreptul lui (e doar o variantă în plus). */
-  private readToEnd(start: number, startCol: number, spaceOnAmbiguous: boolean, cutRight: boolean): string | null {
+      îl ţin EXACT şi niciun text tastat nu ajunge în dreptul lui (e doar o variantă în plus).
+      `toBottom` (citirea conservatoare): şi toate rândurile de SUB linia cursorului, până la ultimul
+      rând nevid al bufferului — un buffer pe mai multe rânduri (zsh ↑ în interiorul lui, Ctrl+V
+      Ctrl+J, push-line) are rânduri după un newline literal care rulează şi ele; textul de dedesubt
+      (liste de completare, sugestii) poate doar adăuga confirmări. */
+  private readToEnd(start: number, startCol: number, spaceOnAmbiguous: boolean, cutRight: boolean, toBottom = false): string | null {
     const b = this.term.buffer.active
     const cur = this.absCursor()
-    let last = cur.row
-    for (let n = 0; n < 50 && this.rowContinues(last) && b.getLine(last + 1); n++) last++
+    let last = this.lineEnd().last
+    if (toBottom) last = Math.max(last, this.lastNonBlank(cur.row))
     const rp = this.rightPrompt
     let rpRow = -1
     if (cutRight) {

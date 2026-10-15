@@ -737,3 +737,87 @@ describe('CommandTracker: citirea conservatoare de la B, continuări PS2 (verifi
     expect(tr.promptLost).toBe(true)
   })
 })
+
+// verificarea lui 2806021: rândurile de SUB linia cursorului (buffer pe mai multe rânduri) şi plafonul
+describe('CommandTracker: rândurile de sub cursor, plafonul liniei (verificarea lui 2806021)', () => {
+  function offTerm(rows: string[], cursor: { row: number; col: number }) {
+    const buffer = {
+      type: 'normal', baseY: 0,
+      get cursorY() { return cursor.row }, get cursorX() { return cursor.col },
+      getLine: (r: number) => (rows[r] === undefined ? undefined : {
+        length: 80, isWrapped: false,
+        translateToString: (trim: boolean, from = 0, to?: number) => {
+          const s = rows[r].padEnd(80).slice(from, to)
+          return trim ? s.replace(/\s+$/, '') : s
+        },
+        getCell: (x: number) => ({ getChars: () => (rows[r][x] ?? '').trim(), getWidth: () => 1 }),
+      }),
+    }
+    return { cols: 80, rows: 24, buffer: { active: buffer },
+      registerMarker: (off = 0) => {
+        const m = { line: cursor.row + off, isDisposed: false, dispose() { m.isDisposed = true; m.line = -1 } }
+        return m
+      } } as unknown as Terminal
+  }
+  const block: CommandGuard = { enabled: true, rules: [{ pattern: 'rm\\s+-rf\\s+/srv', action: 'block' }] }
+  const confirm: CommandGuard = { enabled: true, rules: [{ pattern: 'rm\\s+-rf\\s+/', action: 'confirm' }] }
+  const judge = (tr: CommandTracker, g: CommandGuard) => judgeLocal({ atPrompt: true, echoed: true,
+    pending: tr.pendingCommand(), pendingAlts: tr.pendingVariants(), unechoed: [], lineLost: tr.promptLost }, g, true).kind
+
+  it('zsh ↑ recheamă `cd /srv` + newline + `rm -rf /srv/data`, ↑ din nou (cursorul pe rândul 1) → regula prinde', () => {
+    const rows = ['% ', '', '', '']
+    const cursor = { row: 0, col: 2 }
+    const tr = new CommandTracker(offTerm(rows, cursor))
+    tr.handle('B')
+    tr.notePromptPainted(true)                       // ↑
+    rows[0] = '% cd /srv'; rows[1] = 'rm -rf /srv/data'; cursor.row = 1; cursor.col = 16
+    cursor.row = 0; cursor.col = 9                   // ↑ din nou: up-line-or-history urcă în buffer
+    // logica din 2806021: toate citirile se opreau la capătul rândului cursorului → „cd /srv" → ok
+    expect(tr.promptLost).toBe(false)
+    expect(judge(tr, block)).toBe('rule')
+    expect(judge(tr, confirm)).toBe('rule')
+  })
+
+  it('buffer Ctrl+V Ctrl+J (newline literal), cursorul pe primul rând → regula prinde rândul de dedesubt', () => {
+    const rows = ['% ', '', '']
+    const cursor = { row: 0, col: 2 }
+    const tr = new CommandTracker(offTerm(rows, cursor))
+    tr.handle('B')
+    tr.notePromptPainted(true)
+    rows[0] = '% ls'; rows[1] = 'rm -rf /srv/data'; cursor.row = 0; cursor.col = 4
+    expect(judge(tr, confirm)).toBe('rule')
+  })
+
+  it('prompt normal pe un rând, rânduri goale dedesubt → fără dialog', () => {
+    const rows = ['root@h:~# rm -rf /srv/old', 'root@h:~# ', '', '', '']
+    const cursor = { row: 1, col: 10 }
+    const tr = new CommandTracker(offTerm(rows, cursor))
+    tr.handle('B')
+    tr.notePromptPainted(true)
+    rows[1] = 'root@h:~# ls -la'; cursor.col = 16
+    expect(tr.promptLost).toBe(false)
+    expect(judge(tr, confirm)).toBe('ok')
+  })
+
+  it('LOW: linia continuă peste plafonul de 50 de rânduri după cursor → necunoscut, nu tăiat', () => {
+    const full = 'a'.repeat(80)
+    const rows = ['$ ' + 'a'.repeat(78), ...Array.from({ length: 51 }, () => full), 'rm -rf /srv']
+    const cursor = { row: 0, col: 2 }
+    const tr = new CommandTracker(offTerm(rows, cursor))
+    tr.handle('B')
+    tr.notePromptPainted(true)
+    expect(tr.promptLostReason()).toMatch(/^too-long/)
+    expect(judge(tr, confirm)).not.toBe('ok')
+  })
+
+  it('LOW: sub plafon (49 de rânduri de continuare) → linia se citeşte întreagă', () => {
+    const full = 'a'.repeat(80)
+    const rows = ['$ ' + 'a'.repeat(78), ...Array.from({ length: 48 }, () => full), 'a rm -rf /srv']
+    const cursor = { row: 0, col: 2 }
+    const tr = new CommandTracker(offTerm(rows, cursor))
+    tr.handle('B')
+    tr.notePromptPainted(true)
+    expect(tr.promptLost).toBe(false)
+    expect(judge(tr, block)).toBe('rule')
+  })
+})
