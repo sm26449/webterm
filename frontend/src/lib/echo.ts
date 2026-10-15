@@ -330,6 +330,12 @@ const REPORT_PARTS = [
   '\\x1b\\[\\d+(?:;\\d+)*t',
   '\\x1b\\](?:4;\\d+|1\\d);rgb:[0-9a-fA-F/]+(?:\\x07|\\x1b\\\\)',
   '\\x1bP[01]\\$r[\\x20-\\x7e]*\\x1b\\\\',
+  // XTVERSION (`CSI > q`, cerut de tmux la refresh-client) şi XTGETTCAP: răspunsuri DCS
+  '\\x1bP>\\|[\\x20-\\x7e]*\\x1b\\\\',
+  '\\x1bP[01]\\+r[0-9A-Fa-f=;]*\\x1b\\\\',
+  // tema de culori (`CSI ? 996 n`) şi steagurile tastaturii kitty (`CSI ? u`)
+  '\\x1b\\[\\?\\d+(?:;\\d+)*n',
+  '\\x1b\\[\\?\\d+u',
 ]
 const REPORT_RE = new RegExp('^(?:' + REPORT_PARTS.join('|') + ')+$')
 const REPORT_CPR1_RE = new RegExp('^(?:' + [...REPORT_PARTS, '\\x1b\\[1;\\d+R'].join('|') + ')+$')

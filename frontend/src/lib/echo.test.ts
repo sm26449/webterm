@@ -220,7 +220,8 @@ describe('3.6.13 (review M2): rapoartele terminalului nu sunt taste', () => {
   it('focus, mouse, CPR, DA, DSR, OSC de culoare → raport', () => {
     for (const d of ['\x1b[I', '\x1b[O', '\x1b[<0;12;5M', '\x1b[<0;12;5m\x1b[<0;12;5M', '\x1b[32;10;5M',
       '\x1b[M !!', '\x1b[24;80R', '\x1b[?1;2c', '\x1b[>0;276;0c', '\x1b[0n', '\x1b[?2004;1$y',
-      '\x1b]11;rgb:0000/0000/0000\x07', '\x1b]10;rgb:ffff/ffff/ffff\x1b\\', '\x1b[8;24;80t', '\x1bP!|00000000\x1b\\']) {
+      '\x1b]11;rgb:0000/0000/0000\x07', '\x1b]10;rgb:ffff/ffff/ffff\x1b\\', '\x1b[8;24;80t', '\x1bP!|00000000\x1b\\',
+      '\x1bP>|xterm.js(5.5.0)\x1b\\', '\x1bP1+r544e=787465726d\x1b\\', '\x1b[?997;1n', '\x1b[?0u']) {
       expect(isTerminalReport(d), JSON.stringify(d)).toBe(true)
     }
   })
