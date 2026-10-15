@@ -29,7 +29,7 @@ from typing import Dict, Optional, Set
 import asyncssh
 import telnetlib3
 
-from . import config, db, email_alerts, security, signing, telnet
+from . import config, db, email_alerts, osc133, security, signing, telnet
 
 log = logging.getLogger("webterm")
 
@@ -713,13 +713,33 @@ def parse_replay_params(qp) -> tuple:
     return num("sb", HISTORY_MAX_LINES), num("rows", HISTORY_MAX_ROWS)
 
 
-async def attach_replay(sid: str, hub, scrollback: int = 0, rows: int = 0) -> bytes:
+def _flushed_size(hub) -> Optional[int]:
+    """Mărimea de pe disc a transcriptului PE CARE SCRIE hub-ul (None = nu se ştie: handle închis,
+    calea nu mai e acelaşi inode). Pe loop: un fstat + un stat, fără citire."""
+    try:
+        live = os.fstat(hub.out_f.fileno())
+        out_path, _ = transcript_paths(hub.sid)
+        disk = os.stat(out_path)
+    except (OSError, ValueError, AttributeError):
+        return None
+    if (live.st_dev, live.st_ino) != (disk.st_dev, disk.st_ino):
+        return None
+    return live.st_size
+
+
+async def attach_replay(sid: str, hub, scrollback: int = 0, rows: int = 0,
+                        span: Optional[dict] = None) -> bytes:
     """Replay-ul unei ataşări PROASPETE: [istoric tmux + îmbinare] + coada de transcript.
 
     Istoricul se cere ÎNAINTE de citirea cozii: coada rămâne cât mai aproape de momentul în care
     apelantul adaugă clientul în hub (fereastra de checkpoint documentată la `read_tail` nu creşte).
     Clientul NU e încă în `hub.clients` cât aşteptăm agentul, deci nimic din coada live nu se
-    poate intercala sau dubla. Apelantul re-verifică blocarea după (aşteptarea ţine ≤ ~4s)."""
+    poate intercala sau dubla. Apelantul re-verifică blocarea după (aşteptarea ţine ≤ ~4s).
+
+    `span` (3.6.13, OSC 133): dacă e dat, se completează cu fereastra EXACTĂ a cozii din transcript
+    (`end`, `limit`, `gen`) — doar când e sigur că `read_tail` a citit [end-limit, end): nicio
+    rescriere (`out_gen`) şi niciun flush (mărimea de pe disc) în timpul citirii. Altfel rămâne gol
+    şi `SessionHub.osc133_state` nu va spune „sincronizat"."""
     block = b""
     if hub is not None and scrollback > 0:
         raw = await fetch_tmux_history(hub._source(), sid, min(scrollback, HISTORY_MAX_LINES))
@@ -727,7 +747,12 @@ async def attach_replay(sid: str, hub, scrollback: int = 0, rows: int = 0) -> by
             block = await asyncio.to_thread(build_history_block, raw, scrollback,
                                             rows or hub.rows)
     limit = config.BROWSER_TAIL_BYTES if block else replay_tail_limit(scrollback, stream_is_plain(hub))
+    before = None
+    if span is not None and hub is not None:
+        before = (hub.out_gen, _flushed_size(hub))
     tail = await asyncio.to_thread(read_tail, sid, limit=limit)
+    if before is not None and before[1] is not None and (hub.out_gen, _flushed_size(hub)) == before:
+        span.update(end=before[1], limit=limit, gen=before[0])
     return block + tail
 
 
@@ -929,6 +954,7 @@ class BrowserClient:
         self._drain_queue()
         cutoff = None
         gen = None
+        limit = self.replay_limit if full else config.BROWSER_TAIL_BYTES
         if full and not self.hub.closed:
             try:
                 # cutoff-ul vine DOAR din out_f (`read_tail` citește .out); .cast se
@@ -944,6 +970,11 @@ class BrowserClient:
                 self.hub.cast_f.flush()
             except (OSError, ValueError):
                 pass
+        # starea OSC 133 în ACELAŞI pas sincron cu drain-ul + cutoff-ul: tot ce procesează hub-ul de
+        # acum încolo ajunge în coada noastră, deci `last` e starea exactă de la care curge fluxul
+        # live spre acest client (3.6.13)
+        osc = self.hub.osc133_state(
+            {"end": cutoff, "limit": limit, "gen": gen} if cutoff is not None else None)
         await self.send_text(json.dumps({"type": "resync"}))
         # read_tail face I/O blocant (până la 256 KB): pe thread, ca un resync
         # (posibil declanșat repetat prin pause/resume) să nu blocheze event-loop-ul.
@@ -951,7 +982,6 @@ class BrowserClient:
         # care sunt DEJA în coada noastră — fără margine ar ajunge și în tail, și din coadă.
         # Fereastra: cea de la ataşare DOAR pe full; lossy (client lent) rămâne pe cea istorică —
         # 2 MiB trimişi exact clientului care nu ţine pasul ar întreţine bucla de overflow.
-        limit = self.replay_limit if full else config.BROWSER_TAIL_BYTES
         tail = await asyncio.to_thread(read_tail, self.hub.sid, limit=limit, end=cutoff)
         # aşteptarea de mai sus (I/O pe thread) e o fereastră în care clientul/hub-ul se poate
         # BLOCA — re-verificăm garda chiar înainte de a trimite scrollback-ul (fail-closed)
@@ -971,6 +1001,12 @@ class BrowserClient:
         # de două ori; restul e gaura documentată la read_tail, nu o dublare evitată).
         if cutoff is None or gen != self.hub.out_gen:
             self._drain_queue()
+            # fluxul live spre client reîncepe ABIA de aici (ce era în coadă s-a aruncat): starea
+            # se reia în acest punct, nesincronizată cu tail-ul (care poate avea o gaură)
+            osc = self.hub.osc133_state(None)
+        # după tail, ÎNAINTE de orice octet live (sender-ul suntem chiar noi): browserul o aplică
+        # după ce a parsat tail-ul (vezi CommandTracker.applyHubState)
+        await self.send_text(json.dumps({"type": "osc133", **osc}))
         if full:
             # Tail-ul redă ce s-a TRANSMIS, nu ce e PE ECRAN: tmux trimite diff-uri, deci
             # chenarele statice ale unui TUI pot lipsi din orice fereastră de replay.
@@ -1101,6 +1137,10 @@ class SessionHub:
         # re-crescut la loc (ABA) — cazuri pe care o comparație de mărime le rata.
         self.out_gen = 0
         self.cast_f = open(cast_path, "a", encoding="utf-8")
+        # OSC 133 (3.6.13): starea shell integration din fluxul LIVE, cu offseturi în .out —
+        # `out_pos` = offsetul logic de scriere (= out_f.tell(), ţinut fără syscall pe calea fierbinte)
+        self.osc = osc133.Osc133Scanner()
+        self.out_pos = self.out_f.tell()
         if is_new:
             header = {"version": 2, "width": self.cols, "height": self.rows,
                       "timestamp": int(self.created)}
@@ -1115,7 +1155,9 @@ class SessionHub:
         self.cast_f.write(json.dumps([t, kind, text]) + "\n")
 
     def _write_gap_marker(self) -> None:
+        self.osc.gap()                        # octeţi pierduţi: ultimul marcaj nu mai e de încredere
         self.out_f.write(GAP_MARKER)
+        self.out_pos += len(GAP_MARKER)
         self._cast_event("o", GAP_MARKER)
         self._flush()
 
@@ -1264,6 +1306,8 @@ class SessionHub:
         job.out_tmp_path = None                 # a ajuns la locul lui: cleanup-ul nu-l mai şterge
         old, self.out_f = self.out_f, new_out
         self.out_gen += 1                       # offseturile s-au mutat: invalidează cutoff-urile în zbor
+        self.out_pos = new_out.tell()           # "ab": capătul fişierului nou
+        self.osc.rebase()                       # poziţia ultimului marcaj nu mai înseamnă nimic
         try:
             old.close()
         except (OSError, ValueError):
@@ -1325,6 +1369,32 @@ class SessionHub:
         await db.execute(
             "UPDATE sessions SET agent_epoch = ?, agent_offset = ? WHERE id = ?",
             self.agent_epoch, self.agent_offset, self.sid)
+
+    def osc133_state(self, replay: Optional[dict] = None) -> dict:
+        """Starea OSC 133 de trimis unui client în punctul în care fluxul LIVE începe să curgă spre el
+        (apelat SINCRON cu acel punct: `hub.clients.add` la ataşare, drain-ul din `_resync`).
+
+        `integrated` — shell-ul a emis un B de când există hub-ul (monoton, supravieţuieşte golurilor).
+        `last` — felul ultimului marcaj LIVE (A/B/C/D) sau None (necunoscut / după un gol).
+        `synced` — replay-ul tocmai trimis clientului se termină EXACT în acest punct (fără gaura de
+        checkpoint, fără rescriere de transcript) şi CONŢINE ultimul marcaj întreg. Doar atunci
+        browserul poate găsi poziţia lui B pe ecranul rejucat (linia tastată = de la B la cursor).
+        `replay` = {"end", "limit", "gen"}: fereastra [end-limit, end) din .out, generaţia ei."""
+        st = self.osc.snapshot()
+        synced = False
+        if replay is not None and st["last"] is not None and self.osc.last_start is not None:
+            try:
+                pos = self.out_f.tell()
+            except (OSError, ValueError):
+                pos = None
+            end = replay.get("end")
+            limit = replay.get("limit")
+            synced = (pos is not None and pos == self.out_pos          # contorul n-a derivat
+                      and replay.get("gen") == self.out_gen
+                      and isinstance(end, int) and isinstance(limit, int)
+                      and end == pos                                    # nimic între replay şi live
+                      and self.osc.last_start >= end - limit)           # marcajul e în fereastră
+        return {"integrated": st["integrated"], "last": st["last"], "synced": synced}
 
     # -- attach / output ------------------------------------------------------
 
@@ -1404,6 +1474,12 @@ class SessionHub:
             return
         self.agent_offset += len(data)
         self._unpersisted += len(data)
+        try:
+            self.osc.feed(data, self.out_pos)
+        except Exception:                     # noqa: BLE001 — un bug de parser nu rupe fluxul
+            log.exception("osc133 scan %s failed", self.sid)
+            self.osc.gap()                    # fail-closed: starea devine „necunoscută"
+        self.out_pos += len(data)
         self.out_f.write(data)
         self._cast_event("o", data)
         for client in self.clients:

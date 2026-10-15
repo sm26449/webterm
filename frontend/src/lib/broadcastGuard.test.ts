@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { CommandGuard } from './api'
 import type { Terminal } from '@xterm/xterm'
 import { CommandTracker } from './commands'
-import { hitsKey, isBareEnter, judgePeers, opaqueInput, PeerState, runDecision, splitLines, stripControls, submitsLine, unbracket } from './broadcastGuard'
+import { echoSettled, echoSettleMs, hitsKey, isBareEnter, judgeLocal, judgePeers, LocalState, mergeTyped, opaqueInput, PeerState, plainText, runDecision, splitLines, stripControls, submitsLine, unbracket } from './broadcastGuard'
 
 // review independent 3.6.12 (M1): un Enter difuzat verifică linia din FIECARE panou-ţintă, iar un
 // panou a cărui linie nu poate fi crezută (pauză / fără ecou încă) cere confirmare — fail-closed.
@@ -332,11 +332,11 @@ describe('verificare 3.6.12: dialog fără broadcast, id-uri, taste de editare, 
     expect(judgePeers([peer({ pending: 'rm\t-rf /' })], g, true).kind).toBe('rule')
   })
 
-  it('F4: un chunk cu taste de editare readline e opac; TAB, CR/LF, bracketed paste, Alt+Enter nu', () => {
+  it('F4: un chunk cu taste de editare readline e opac; CR/LF, bracketed paste, Alt+Enter nu', () => {
     for (const d of ['\x15rm -rf /\r', 'ls\x7f\r', '\x10\r', '\x19\r', '\x16\x0d\r', '\x1b.\r', 'ls\x1b[D\r', '\x0crm\r', 'a\x9bb\r', '\x1b\x1b\r']) {
       expect(opaqueInput(d), JSON.stringify(d)).toBe(true)
     }
-    for (const d of ['ls\r', 'a\tb\r', '\x1b\r', 'ls\x1b\r', '\x1b[200~ls\r\x1b[201~', 'a\r\nb\n', 'café\r']) {
+    for (const d of ['ls\r', '\x1b\r', 'ls\x1b\r', '\x1b[200~ls\r\x1b[201~', 'a\r\nb\n', 'café\r']) {
       expect(opaqueInput(d), JSON.stringify(d)).toBe(false)
     }
     // logica veche verifica `rm -rf /` scos din `\x15…` / linia fără DEL — alt text decât cel rulat
@@ -370,5 +370,185 @@ describe('unbracket', () => {
     expect(unbracket('\x1b[200~rm -rf /\r\x1b[201~')).toBe('rm -rf /\r')
     // un payload care îşi închide singur paste-ul: liniile de după se văd la verificare
     expect(splitLines(unbracket('\x1b[200~ls\x1b[201~\rrm -rf ~\r'))).toContain('rm -rf ~')
+  })
+})
+
+// 3.6.13 (rezidual 3.6.12): TAB într-un chunk care trimite o linie = completare readline → opac;
+// literal doar într-un bracketed paste, şi doar dacă shell-ul a cerut bracketed paste
+describe('3.6.13: TAB în chunk-uri care trimit o linie', () => {
+  it('TAB în afara unui bracketed paste → opac (completarea schimbă linia)', () => {
+    // logica veche: TAB permis → `rm -rf /tm⇥⏎` se verifica drept `rm -rf /tm `, rula `rm -rf /tmp/`
+    for (const d of ['a\tb\r', 'rm -rf /tm\t\r', '\t\r']) {
+      expect(opaqueInput(d), JSON.stringify(d)).toBe(true)
+      expect(opaqueInput(d, true), JSON.stringify(d)).toBe(true)
+    }
+  })
+  it('TAB într-un bracketed paste: literal doar cu bracketed paste cerut de shell', () => {
+    const paste = '\x1b[200~printf "a\tb"\r\x1b[201~'
+    expect(opaqueInput(paste, true)).toBe(false)
+    expect(opaqueInput(paste, false)).toBe(true)          // fără DECSET 2004: marcajele pot fi chiar din text
+    expect(opaqueInput('\x1b[200~a\tb\r', true)).toBe(false)   // paste neînchis în chunk: până la capăt
+  })
+  it('un payload care îşi închide singur paste-ul: TAB-ul de după e iar completare', () => {
+    expect(opaqueInput('\x1b[200~ls\x1b[201~rm -rf /tm\t\r', true)).toBe(true)
+    expect(opaqueInput('\x1b[200~a\tb\x1b[201~\x1b[200~c\td\r\x1b[201~', true)).toBe(false)
+    // alte taste de editare rămân opace şi într-un paste (ca în 3.6.12)
+    expect(opaqueInput('\x1b[200~ls\x7f\r\x1b[201~', true)).toBe(true)
+  })
+})
+
+// 3.6.13 (rezidual 3.6.12): Enter într-un singur panou aştepta 0 ms — Ctrl+P + Enter rapid trimitea o
+// linie pe care trackerul n-o văzuse (ecoul lui Ctrl+P încă pe drum)
+describe('3.6.13: Enter fără broadcast aşteaptă ecoul (judgeLocal)', () => {
+  const g: CommandGuard = { enabled: true, rules: [{ pattern: 'rm\\s+-rf', action: 'confirm' }, { pattern: '^reboot$', action: 'block' }] }
+  const st = (o: Partial<LocalState> = {}): LocalState => ({ atPrompt: true, echoed: true, pending: null, unechoed: [], ...o })
+
+  it('fără guardrail activ / cu ecou: ca înainte', () => {
+    expect(judgeLocal(st({ echoed: false, unechoed: [null] }), null, true).kind).toBe('ok')
+    expect(judgeLocal(st({ pending: 'ls' }), g, false).kind).toBe('ok')
+    expect(judgeLocal(st({ pending: 'rm -rf /srv' }), g, false)).toMatchObject({ kind: 'rule', cmd: 'rm -rf /srv' })
+  })
+  it('Ctrl+P fără ecou → wait, apoi „nu pot verifica" (logica veche: ok pe linia veche)', () => {
+    const s = st({ pending: 'ls', echoed: false, unechoed: [null] })
+    expect(judgeLocal(s, g, false).kind).toBe('wait')
+    expect(judgeLocal(s, g, true).kind).toBe('unknown')
+  })
+  it('doar text simplu fără ecou (legătură lentă) → linia + textul, fără dialog dacă e inofensivă', () => {
+    expect(judgeLocal(st({ pending: 'l', echoed: false, unechoed: ['s'] }), g, true).kind).toBe('ok')
+    expect(judgeLocal(st({ pending: 'rm -r', echoed: false, unechoed: ['f /srv'] }), g, true))
+      .toMatchObject({ kind: 'rule', cmd: 'rm -rf /srv' })
+    // ecou parţial: „rebo" pe ecran, „oot" trimis → reboot (block, ancorat)
+    expect(judgeLocal(st({ pending: 'rebo', echoed: false, unechoed: ['oot'] }), g, true))
+      .toMatchObject({ kind: 'rule', cmd: 'reboot', rule: { action: 'block' } })
+  })
+  it('un block cunoscut câştigă şi peste „nu pot verifica"', () => {
+    expect(judgeLocal(st({ pending: 'reboot', echoed: false, unechoed: [null] }), g, true).kind).toBe('rule')
+  })
+  it('nu la prompt (comandă în curs / fără integrare) → nu aşteaptă', () => {
+    expect(judgeLocal(st({ atPrompt: false, echoed: false, unechoed: [null] }), g, false).kind).toBe('ok')
+  })
+  it('fără nicio trimitere urmărită dar fără ecou → fail-closed', () => {
+    expect(judgeLocal(st({ pending: 'ls', echoed: false, unechoed: [] }), g, true).kind).toBe('unknown')
+  })
+  it('chunk (lineOf / extra) cu ecou lipsă: prima linie lipită de linia de după ecou', () => {
+    const v = judgeLocal(st({ pending: 'rm', echoed: false, unechoed: [' -'] }), g, true, (p) => (p ?? '') + 'rf /x', ['ls'])
+    expect(v).toMatchObject({ kind: 'rule', cmd: 'rm -rf /x' })
+  })
+  it('mergeTyped / plainText', () => {
+    expect(mergeTyped('rebo', 'oot')).toBe('reboot')
+    expect(mergeTyped('ls', ' -la')).toBe('ls -la')
+    expect(mergeTyped('', 'x')).toBe('x')
+    expect(plainText('ls -la')).toBe(true)
+    expect(plainText('\x10')).toBe(false)
+    expect(plainText('\t')).toBe(false)
+    expect(plainText('\x1b[A')).toBe(false)
+  })
+})
+
+// 3.6.13 (rezidual 3.6.12): ecoul strâns + plasa de timp
+describe('3.6.13: ecou strâns (echoSettled)', () => {
+  it('ecou strâns = gata; altfel plasa de timp (≥ 1 s, ≥ 4 × RTT)', () => {
+    expect(echoSettleMs(null)).toBe(1000)
+    expect(echoSettleMs(600)).toBe(2400)
+    expect(echoSettleMs(Number.NaN)).toBe(1000)
+    const base = { strict: false, coarse: true, rtt: 50, requireOutput: true }
+    expect(echoSettled({ ...base, strict: true, sinceSend: 0 })).toBe(true)
+    expect(echoSettled({ ...base, sinceSend: 100 })).toBe(false)   // un ceas / repaint n-a schimbat linia
+    expect(echoSettled({ ...base, sinceSend: 1500 })).toBe(true)   // TAB fără completare (doar BEL)
+  })
+  it('broadcast: host fără NICIUN output rămâne fără ecou (ca regula grosieră din 3.6.12)', () => {
+    expect(echoSettled({ strict: false, coarse: false, rtt: null, requireOutput: true, sinceSend: 60_000 })).toBe(false)
+    // un singur panou: 3.6.12 nu aştepta deloc; o tastă fără output nu cere dialog la nesfârşit
+    expect(echoSettled({ strict: false, coarse: false, rtt: null, requireOutput: false, sinceSend: 1500 })).toBe(true)
+    expect(echoSettled({ strict: false, coarse: false, rtt: null, requireOutput: false, sinceSend: 100 })).toBe(false)
+  })
+})
+
+// 3.6.13 (rezidual 3.6.12): starea OSC 133 a hub-ului după replay (mesajul `osc133`)
+describe('3.6.13: CommandTracker.applyHubState', () => {
+  it('ultimul marcaj LIVE = C (ssh / sudo -i / REPL pornit înainte de replay) → rulează: Enter-ul merge la program', () => {
+    const { term, type } = fakeTerm()
+    const tr = new CommandTracker(term)
+    tr.reset()
+    tr.noteReplayedMark('A'); tr.noteReplayedMark('B'); tr.noteReplayedMark('C')
+    type('root@db:~# ')
+    // 3.6.12: necunoscut → dialog la fiecare Enter difuzat
+    expect(tr.lineKnown()).toBe(false)
+    expect(tr.applyHubState({ integrated: true, last: 'C', synced: false })).toBe(true)
+    expect(tr.lineKnown()).toBe(true)
+    expect(tr.atPrompt()).toBe(false)
+    expect(judgePeers([stateOf(tr)], guard, true).kind).toBe('ok')
+    // D live: comanda pornită înainte de replay s-a terminat → din nou neştiut până la B
+    tr.handle('D;0')
+    expect(tr.lineKnown()).toBe(false)
+    tr.handle('A'); tr.handle('B')
+    expect(tr.lineKnown()).toBe(true)
+  })
+
+  it('B + synced + ultimul marcaj rejucat B → linia de pe ecran e cunoscută (regula prinde)', () => {
+    const { term, type } = fakeTerm()
+    const tr = new CommandTracker(term)
+    tr.reset()
+    tr.noteReplayedMark('A'); tr.noteReplayedMark('B')
+    type('rm -rf /srv')              // comandă rechemată înainte de reconectare, în replay
+    expect(tr.applyHubState({ integrated: true, last: 'B', synced: true })).toBe(true)
+    expect(tr.stale).toBe(false)
+    expect(judgePeers([stateOf(tr)], guard, true)).toMatchObject({ kind: 'rule', cmd: 'rm -rf /srv' })
+  })
+
+  it('orice nepotrivire → rămâne necunoscută (fail-closed)', () => {
+    const cases: [string[], unknown][] = [
+      [['A', 'B'], { integrated: true, last: 'B', synced: false }],      // gaura de checkpoint
+      [['A', 'B', 'C'], { integrated: true, last: 'B', synced: true }],  // replay-ul a văzut alt ultim marcaj
+      [['A'], { integrated: true, last: 'B', synced: true }],            // B-ul nu e în replay
+      [['A', 'B'], { integrated: true, last: 'A', synced: true }],
+      [['A', 'B'], { integrated: true, last: 'D', synced: true }],
+      [['A', 'B'], { integrated: true, last: null, synced: true }],
+      [['A', 'B'], { integrated: true, last: 'B', synced: 'yes' }],       // tipuri stricte
+      [['A', 'B'], null],
+      [['A', 'B'], 'B'],
+    ]
+    for (const [marks, st] of cases) {
+      const { term, type } = fakeTerm()
+      const tr = new CommandTracker(term)
+      tr.reset()
+      for (const m of marks) tr.noteReplayedMark(m)
+      type('rm -rf /srv')
+      tr.applyHubState(st)
+      expect(tr.lineKnown(), JSON.stringify([marks, st])).toBe(false)
+      expect(judgePeers([stateOf(tr)], guard, true).kind).toBe('unknown')
+    }
+  })
+
+  it('B rejucat pe ecranul alternativ → necunoscut', () => {
+    const { term, alt } = fakeTerm()
+    const tr = new CommandTracker(term)
+    tr.reset()
+    alt(true); tr.noteReplayedMark('B'); alt(false)
+    tr.applyHubState({ integrated: true, last: 'B', synced: true })
+    expect(tr.lineKnown()).toBe(false)
+  })
+
+  it('nu suprascrie o stare LIVE: aplicată doar imediat după replay', () => {
+    const { term } = fakeTerm()
+    const tr = new CommandTracker(term)
+    tr.reset()
+    tr.handle('A'); tr.handle('B')   // un prompt live a venit deja
+    expect(tr.applyHubState({ integrated: true, last: 'C', synced: false })).toBe(false)
+    expect(tr.atPrompt()).toBe(true)
+  })
+
+  it('integrated de la hub (init) fără niciun marcaj în replay → linia necunoscută, nu „fără integrare"', () => {
+    const { term, type } = fakeTerm()
+    const tr = new CommandTracker(term)
+    tr.reset()
+    type('rm -rf /srv')
+    // 3.6.12: fără marcaj în fereastra replay-ului = „fără shell integration" → ok, neverificat
+    expect(judgePeers([stateOf(tr)], guard, true).kind).toBe('ok')
+    tr.noteIntegrated()
+    expect(judgePeers([stateOf(tr)], guard, true).kind).toBe('unknown')
+    // `integrated: false` de la hub nu şterge ce am văzut noi
+    tr.applyHubState({ integrated: false, last: null, synced: false })
+    expect(tr.integrated).toBe(true)
   })
 })

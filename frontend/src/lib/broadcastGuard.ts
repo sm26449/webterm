@@ -38,6 +38,9 @@ export interface PeerState {
   id: string
   /** numele panoului, DOAR pentru afişare în dialog (titlul sesiunii / hostul) */
   label?: string
+  /** shell-ul panoului a cerut bracketed paste (DECSET 2004): un TAB între marcajele 200~/201~ e
+      text, nu completare (3.6.13). Lipsă = nu (fail-closed: TAB-ul face linia necunoscută). */
+  bracketed?: boolean
 }
 
 /** O linie care atinge o regulă, cu panourile în care s-ar rula (aceeaşi linie în mai multe panouri
@@ -63,6 +66,27 @@ export type PeerVerdict =
 
 /** cât aşteptăm ecoul tastelor în panourile-ţintă înainte să cerem confirmare (ms) */
 export const ECHO_GRACE_MS = 150
+
+/** Ecoul STRÂNS (3.6.13) cere ca output-ul de după taste să fi schimbat linia / cursorul. O tastă fără
+    efect vizibil (TAB fără completare = doar BEL, Home când cursorul e deja la început) n-ar primi
+    niciodată „ecou" → dialog la fiecare Enter. Plasă: după atâta timp de la ultima trimitere,
+    tastele sunt „aşezate" — orice ecou ar fi sosit deja (≥ 1 s şi ≥ 4 × RTT-ul măsurat).
+    Panourile-ţintă ale unui broadcast cer în plus să fi sosit MĂCAR un output după trimitere
+    (regula grosieră din 3.6.12): un host blocat (fără niciun output) rămâne „fără ecou", ca înainte. */
+export const ECHO_SETTLE_MIN_MS = 1000
+export function echoSettleMs(rtt: number | null | undefined): number {
+  return Math.max(ECHO_SETTLE_MIN_MS, 4 * (typeof rtt === 'number' && Number.isFinite(rtt) && rtt > 0 ? rtt : 0))
+}
+
+/** Tastele trimise au primit ecou? `strict` = output care a schimbat linia după ultima trimitere;
+    `coarse` = orice output după ea; `sinceSend` = ms de la ultima trimitere. `requireOutput`: la
+    broadcast (vezi ECHO_SETTLE_MIN_MS) plasa de timp cere şi un output; într-un singur panou, nu —
+    acolo 3.6.12 nu aştepta deloc ecoul, iar o tastă fără output n-ar trebui să ceară dialog. */
+export function echoSettled(o: { strict: boolean; coarse: boolean; sinceSend: number; rtt: number | null; requireOutput: boolean }): boolean {
+  if (o.strict) return true
+  if (o.requireOutput && !o.coarse) return false
+  return o.sinceSend >= echoSettleMs(o.rtt)
+}
 
 export function guardActive(guard: CommandGuard | null | undefined): boolean {
   return !!guard?.enabled && Array.isArray(guard.rules) && guard.rules.length > 0
@@ -165,11 +189,85 @@ export function stripControls(s: string): string {
 /** Un chunk care TRIMITE o linie dar conţine şi taste de editare readline (Ctrl+U `\x15`, DEL `\x7f`,
     Ctrl+P `\x10`, Ctrl+Y `\x19`, Ctrl+V `\x16`, ESC-. …): linia pe care o rulează shell-ul nu e
     textul pe care l-am verifica, deci verdictul e „nu pot verifica" (fail-closed, verificare 3.6.12
-    F4). Permise: TAB, CR/LF, marcajele bracketed paste şi ESC-ul singur dinaintea unui Enter
-    (Alt+Enter). Tot restul C0, DEL, C1 şi orice alt ESC = opac. */
-export function opaqueInput(d: string): boolean {
-  const rest = d.replace(/\x1b\[20[01]~/g, '').replace(/\x1b(?=[\r\n])/g, '')
-  return /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/.test(rest)
+    F4). Permise: CR/LF, marcajele bracketed paste şi ESC-ul singur dinaintea unui Enter (Alt+Enter).
+    TAB (3.6.13): în afara unui bracketed paste e COMPLETARE readline (schimbă linia: `rm -rf /tm⇥`
+    → `/tmp/`), deci opac; între `\x1b[200~` şi primul `\x1b[201~` care urmează (sau capătul
+    chunk-ului) e text literal — dar numai cu `bracketed` (shell-ul a cerut bracketed paste în TOATE
+    panourile-ţintă; altfel marcajele pot veni chiar din textul lipit, iar shell-ul nu le onorează).
+    Tot restul C0, DEL, C1 şi orice alt ESC = opac. */
+export function opaqueInput(d: string, bracketed = false): boolean {
+  const literalTabs = bracketed
+    ? d.replace(/\x1b\[200~[\s\S]*?(?:\x1b\[201~|$)/g, (seg) => seg.replace(/\t/g, ''))
+    : d
+  const rest = literalTabs.replace(/\x1b\[20[01]~/g, '').replace(/\x1b(?=[\r\n])/g, '')
+  return /[\x00-\x09\x0b\x0c\x0e-\x1f\x7f-\x9f]/.test(rest)
+}
+
+/** Starea panoului pentru un Enter FĂRĂ broadcast (3.6.13, rezidual 3.6.12): ce citeşte trackerul +
+    ecoul. `unechoed` = ce s-a trimis după ultimul ecou, în ordine: textul unei trimiteri doar cu
+    caractere tipăribile, sau null pentru una cu taste de editare / control (↑, Ctrl+P, TAB, DEL…). */
+export interface LocalState {
+  atPrompt: boolean
+  echoed: boolean
+  pending: string | null
+  unechoed: (string | null)[]
+}
+
+export type LocalVerdict =
+  | { kind: 'ok' }
+  | { kind: 'rule'; rule: CommandRule; cmd: string }
+  | { kind: 'wait' }
+  | { kind: 'unknown' }
+
+/** Ce s-ar vedea pe linie după ecoul textului `typed`: ecoul poate fi deja parţial pe ecran (`line` se
+    termină cu un început al lui `typed`), deci lipim doar restul. */
+export function mergeTyped(line: string, typed: string): string {
+  for (let k = Math.min(line.length, typed.length); k > 0; k--) {
+    if (line.endsWith(typed.slice(0, k))) return line + typed.slice(k)
+  }
+  return line + typed
+}
+
+/** Verdictul unui Enter într-un singur panou (fără broadcast), cu aceeaşi aşteptare a ecoului ca la
+    panourile-ţintă (3.6.13): Ctrl+P / ↑ + Enter rapid trimitea o linie pe care trackerul n-o văzuse.
+      • la prompt, fără ecou încă → `wait` (≤ ECHO_GRACE_MS), apoi:
+          – tot ce n-are ecou e text simplu → verificăm linia de pe ecran ŞI linia + textul acela (o
+            legătură lentă nu cere dialog la fiecare comandă tastată repede);
+          – altfel (taste de editare fără ecou: linia poate fi oricare) → `unknown` („nu pot verifica").
+      • altfel → linia de pe ecran, ca înainte. Un block cunoscut câştigă mereu.
+    `lineOf` / `extra` ca la judgePeers (un chunk „text⏎…": prima linie lipită de cea tastată).
+    Fără broadcast NU se cere `known` (linia necunoscută după replay) — comportamentul de dinainte. */
+export function judgeLocal(s: LocalState, guard: CommandGuard | null | undefined, final: boolean,
+  lineOf: (pending: string | null) => string | null = (p) => p, extra: string[] = []): LocalVerdict {
+  if (!guardActive(guard)) return { kind: 'ok' }
+  const lines: string[] = []
+  const first = lineOf(s.pending)
+  if (first) lines.push(first)
+  lines.push(...extra)
+  let unknown = false
+  if (s.atPrompt && !s.echoed) {
+    if (!final) return { kind: 'wait' }
+    if (s.unechoed.length === 0 || s.unechoed.some((t) => t === null)) unknown = true
+    else {
+      const merged = lineOf(mergeTyped(s.pending ?? '', s.unechoed.join('')))
+      if (merged) lines.push(merged)
+    }
+  }
+  let confirm: { rule: CommandRule; cmd: string } | null = null
+  for (const raw of lines) {
+    const line = stripControls(raw).trim()
+    const rule = line ? matchCommandRule(line, guard) : null
+    if (rule?.action === 'block') return { kind: 'rule', rule, cmd: line }
+    if (rule && !confirm) confirm = { rule, cmd: line }
+  }
+  if (unknown) return { kind: 'unknown' }
+  if (confirm) return { kind: 'rule', ...confirm }
+  return { kind: 'ok' }
+}
+
+/** O trimitere de input e „text simplu" (ecoul ei doar adaugă la linie)? Fără C0 / DEL / C1 / ESC. */
+export function plainText(d: string): boolean {
+  return !/[\x00-\x1f\x7f-\x9f]/.test(d)
 }
 
 /** Liniile unui text care conţine Enter-uri (CR, LF sau CRLF — un paste „cmd\r" execută şi el). */

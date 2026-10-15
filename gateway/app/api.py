@@ -11787,6 +11787,24 @@ def _origin_tuple(url: str):
     return scheme, host, port
 
 
+async def _send_osc133(client, hub, span: Optional[dict]) -> None:
+    """Starea OSC 133 a hub-ului, trimisă imediat după `hub.clients.add(client)` (3.6.13).
+
+    Instantaneul se ia SINCRON cu adăugarea (fără await între ele): de aici încolo tot output-ul
+    procesat de hub intră în coada clientului, deci `last` e exact starea de la care curge fluxul
+    live spre el. Mesajul pleacă înaintea oricărui octet live — sender-ul porneşte abia după.
+    `span` = None (replay netrimis / blocat): doar `integrated` + `last`, niciodată `synced`.
+    Fără replay trimis (sesiune blocată) nu trimitem nimic: deblocarea face un resync, care
+    îşi trimite propria stare (BrowserClient._resync)."""
+    if span is None:
+        return
+    state = hub.osc133_state(span or None)       # {} = fereastra cozii nu e sigură → nesincronizat
+    try:
+        await client.send_text(json.dumps({"type": "osc133", **state}))
+    except Exception:                    # noqa: BLE001 — socket închis: endpoint-ul face curăţenia
+        pass
+
+
 @router.websocket("/ws/shared/{token}")
 async def shared_ws(ws: WebSocket, token: str):
     """Vizitator prin link de share. `share_writable` → poate și TASTA (opt-in la
@@ -11831,7 +11849,9 @@ async def shared_ws(ws: WebSocket, token: str):
                                    "writable": writable,
                                    # dimensiunea PTY-ului: invitatul oglindeşte EXACT grila owner-ului
                                    # (altfel fit()-ul la containerul lui împachetează output-ul greşit)
-                                   "rows": row["rows"] or 24, "cols": row["cols"] or 80}))
+                                   "rows": row["rows"] or 24, "cols": row["cols"] or 80,
+                                   # shell integration văzută LIVE de hub (3.6.13; vezi core.osc133_state)
+                                   "osc133": {"integrated": hub.osc.integrated} if hub else None}))
     # Invitatul prin share NU poate face step-up — n-are cont, are doar tokenul din URL. Deci
     # pe un host cu 2FA regula lui e: vede sesiunea DOAR cât timp owner-ul verificat e ataşat.
     # Aici era aceeaşi gaură ca în `browser_ws`: decizia se lua din `hub.last_interaction`, pe
@@ -11856,15 +11876,19 @@ async def shared_ws(ws: WebSocket, token: str):
     if client:
         client.replay_limit = core.replay_tail_limit(sb, core.stream_is_plain(hub))
         client.replay_sb = sb             # resync-ul FULL (resume/unlock) readuce şi istoricul tmux
+    osc_span: dict = {}
+    replay_sent = False
     if not start_locked:
-        replay_bytes = await core.attach_replay(row["id"], hub, sb, sb_rows)
+        replay_bytes = await core.attach_replay(row["id"], hub, sb, sb_rows, span=osc_span)
         if hub and (hub.locked or (share_2fa and not any(
                 getattr(c, "is_owner", False) for c in hub.clients))):
             start_locked = True          # blocată / owner plecat cât aşteptam agentul → nimic scurs
         else:
             await ws.send_bytes(replay_bytes)
+            replay_sent = True
     if hub:
         hub.clients.add(client)
+        await _send_osc133(client, hub, osc_span if replay_sent else None)
         client.sender_task = asyncio.create_task(client.sender())
         conn = core.sources.get(row["host_id"])
         if conn:
@@ -12048,6 +12072,9 @@ async def browser_ws(ws: WebSocket, sid: str):
         "lock_at": (hub.last_interaction + hub.lock_idle) if hub and hub.lock_idle else None,
         # 3.6: „watching (read-only)" — UI-ul face tastatura inertă şi arată pastila
         "readonly": access != "rw",
+        # 3.6.13: shell integration (un B OSC 133) văzută LIVE de hub — monoton, deci sigur de trimis
+        # înaintea replay-ului; felul ultimului marcaj vine separat (`osc133`), după replay
+        "osc133": {"integrated": hub.osc.integrated} if hub else None,
     }))
     # ATAŞAREA la o sesiune de pe un host cu 2FA cere step-up — fail-closed.
     # Aici era gaura prin care un cookie furat ajungea la un shell root: `browser_ws` cerea doar
@@ -12090,14 +12117,17 @@ async def browser_ws(ws: WebSocket, sid: str):
     if client:
         client.replay_limit = core.replay_tail_limit(sb, core.stream_is_plain(hub))
         client.replay_sb = sb             # resync-ul FULL (resume/unlock) readuce şi istoricul tmux
+    osc_span: dict = {}
+    replay_sent = False
     if not start_locked:
-        replay = await core.attach_replay(sid, hub, sb, sb_rows)
+        replay = await core.attach_replay(sid, hub, sb, sb_rows, span=osc_span)
         if hub and hub.locked:
             # blocată (idle-lock) cât aşteptam istoricul de la agent: nu scurgem nimic; calea
             # `start_locked` de mai jos ne blochează clientul şi trimite „locked"
             start_locked = True
         else:
             await ws.send_bytes(replay)
+            replay_sent = True
     elif not hub:
         # Sesiune ÎNCHISĂ pe host 2FA fără fereastră de step-up: nu există hub care să trimită un
         # „locked" prin broadcast, deci semnalăm direct pe acest socket şi NU trimitem scrollback.
@@ -12106,6 +12136,7 @@ async def browser_ws(ws: WebSocket, sid: str):
 
     if hub:
         hub.clients.add(client)
+        await _send_osc133(client, hub, osc_span if replay_sent else None)
         client.sender_task = asyncio.create_task(client.sender())
         if not start_locked:
             # F5 / al doilea dispozitiv cu aceeași mărime: tail-ul redă doar diff-urile

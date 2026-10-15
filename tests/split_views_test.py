@@ -14,7 +14,10 @@ independent la attach. Deci CRUD = doar require_user, fără step-up. Ce verific
     forma nu se poate rescrie cât e ascuns (409 splitview.hiddenPanes);
   * plafon per cont (splitview.tooMany) + clamp pe `position`;
   * review 3.6.12: plafonul ţine sub POST-uri concurente (INSERT…SELECT…WHERE COUNT<50) şi
-    prune-ul nu pierde un PATCH concurent (compare-and-swap pe `panes`, şi la UPDATE şi la DELETE).
+    prune-ul nu pierde un PATCH concurent (compare-and-swap pe `panes`, şi la UPDATE şi la DELETE);
+  * 3.6.13: parserul OSC 133 al hub-ului (marcaje rupte între chunk-uri, C1, abandon, buffer
+    mărginit) şi starea trimisă browserului (`init.osc133`, mesajul `osc133` după replay / resync,
+    `synced` doar când replay-ul ajunge exact în punctul live şi conţine ultimul marcaj).
 """
 import asyncio
 import json
@@ -385,8 +388,221 @@ async def main():
         check("GET nu a deschis/glisat fereastra de step-up", (uid, hid2) not in security._stepup_windows)
         await db.execute("UPDATE hosts SET require_2fa=0 WHERE id=?", hid2)
 
+    osc133_parser_tests()
+    await osc133_hub_tests()
+
     print(f"\n{ok}/{total} teste trecute")
     return ok == total
+
+
+# ---------------------------------------------------------------------------
+# 3.6.13: starea OSC 133 a hub-ului (rezidualele guardrail-ului broadcast din 3.6.12)
+# ---------------------------------------------------------------------------
+
+class _FakeWs:
+    def __init__(self):
+        self.sent = []
+
+    async def send_text(self, s):
+        self.sent.append(json.loads(s))
+
+    async def send_bytes(self, b):
+        self.sent.append(bytes(b))
+
+    async def close(self, code=1000):
+        pass
+
+
+def _scan(data, chunks=None):
+    from app import osc133
+    sc = osc133.Osc133Scanner()
+    if chunks is None:
+        sc.feed(data, 0)
+    else:
+        pos = 0
+        for n in chunks:
+            sc.feed(data[pos:pos + n], pos)
+            pos += n
+        if pos < len(data):
+            sc.feed(data[pos:], pos)
+    return sc
+
+
+def osc133_parser_tests():
+    import random
+    from app import osc133
+    print("-- 3.6.13: parserul OSC 133 al hub-ului")
+    s = b"\x1b]133;A\x07user@h:~$ \x1b]133;B\x07rm -rf /srv"
+    sc = _scan(s)
+    check("A apoi B (BEL) → integrat, ultimul B, offsetul introducerii lui B",
+          sc.integrated and sc.last == "B" and sc.last_start == s.index(b"\x1b]133;B"),
+          (sc.integrated, sc.last, sc.last_start))
+    sc = _scan(b"\x1b]133;C\x1b\\out")
+    check("terminat cu ST (ESC \\) → C; fără B nu e integrat", sc.last == "C" and not sc.integrated)
+    sc = _scan("\u009d133;D;0\u009c".encode())
+    check("C1 OSC / ST codate UTF-8 (\\xc2\\x9d … \\xc2\\x9c) → D", sc.last == "D", sc.last)
+    sc = _scan(b"\x1b]133;B\x1bX")
+    check("ESC termină OSC-ul (ca xterm) → B", sc.last == "B")
+    # rupt între chunk-uri, octet cu octet şi la întâmplare: aceeaşi stare, aceleaşi offseturi
+    s = (b"\x1b[31mred\x1b[0m\r\n\x1b]133;D;0\x07\x1b]133;A\x07\xc2\xa0~$ \x1b]133;B\x07ls -la"
+         + "\u009d133;C\u009c".encode() + b"total 0\r\n" + b"\x1b]133;D;0\x1b\\\x1b]133;A\x07$ \x1b]133;B\x07")
+    whole = _scan(s)
+    ok_split = True
+    for _ in range(200):
+        rnd = random.Random(_)
+        cuts = []
+        left = len(s)
+        while left > 0:
+            n = rnd.randint(1, 7)
+            cuts.append(min(n, left))
+            left -= n
+        sc = _scan(s, cuts)
+        if (sc.last, sc.last_start, sc.integrated) != (whole.last, whole.last_start, whole.integrated):
+            ok_split = False
+            break
+    bytewise = _scan(s, [1] * len(s))
+    check("marcaje rupte între chunk-uri (octet cu octet + 200 tăieturi aleatoare) → aceeaşi stare",
+          ok_split and (bytewise.last, bytewise.last_start) == (whole.last, whole.last_start)
+          and whole.last == "B" and whole.last_start == s.rindex(b"\x1b]133;B"),
+          (whole.last, whole.last_start, bytewise.last, bytewise.last_start))
+    sc = _scan(b"\x1b]133;B\x07\x1b]133;C\x18")
+    check("CAN abandonează OSC-ul (xterm nu-l livrează) → rămâne B", sc.last == "B")
+    sc = _scan(b"\x1b]133;B\x07\x1b]133;C\xc2\x85")
+    check("alt C1 în OSC (NEL) îl abandonează → rămâne B", sc.last == "B")
+    sc = _scan(b"\x1b]133;B\x07\x1b]0;133;C\x07\x1b]1330;C\x07\x1b]13a3;C\x07")
+    check("titlu / alt id / id ne-numeric NU sunt 133 → rămâne B", sc.last == "B")
+    sc = _scan(b"\x1b]0133;C\x07")
+    check("zerourile din faţa id-ului contează ca la xterm (0133 = 133)", sc.last == "C")
+    sc = _scan(b"\x1b]13\x003;\x01C\x07")
+    check("C0-urile din payload sunt ignorate, ca la xterm (13\\x003;\\x01C = 133;C)", sc.last == "C", sc.last)
+    sc = _scan(b"\x1b\x00\x7f]133;C\x07")
+    check("C0 / DEL între ESC şi ] nu întrerup secvenţa (xterm: rămâne în ESCAPE)", sc.last == "C")
+    sc = _scan(b"\x1b ]133;C\x07")
+    check("ESC <intermediar> ] nu e OSC", sc.last is None)
+    sc = _scan(b"\x1b]133;B\x07\x1b]133;C\xc2\x9d133;D;1\x07")
+    check("U+009D în OSC porneşte unul nou (cel vechi se aruncă) → D", sc.last == "D")
+    sc = _scan(b"\x1b]133;B\x07\x1b]133;C;x\xc2\xa0y\x07")
+    check("un caracter U+00A0 în payload nu termină OSC-ul", sc.last == "C")
+    for payload, why in ((b"133;E;rm -rf /", "E"), (b"133;Bx", "fel necunoscut"), (b"133", "fără ;"),
+                         (b"133;", "fel gol")):
+        sc = _scan(b"\x1b]133;B\x07\x1b]" + payload + b"\x07")
+        check("după B, un 133 %s → ultimul marcaj necunoscut (fail-closed), integrat rămâne" % why,
+              sc.last is None and sc.integrated, (payload, sc.last))
+    # bufferul e mărginit: un OSC uriaş nu umflă memoria, iar felul trunchiat nu e ghicit
+    sc = osc133.Osc133Scanner()
+    sc.feed(b"\x1b]133;B", 0)
+    big = b"x" * (1 << 20)
+    for i in range(4):
+        sc.feed(big, 8 + i * len(big))
+    bounded = len(sc._head) <= osc133.HEAD_MAX
+    sc.feed(b"\x07", 8 + 4 * len(big))
+    check("OSC uriaş: buffer ≤ HEAD_MAX, „Bxxxx…” nu devine B", bounded and sc.last is None, len(sc._head))
+    sc = osc133.Osc133Scanner()
+    sc.feed(b"\x1b]133;C;", 0)
+    for _ in range(11):
+        sc.feed(b"y" * 1_000_000, 0)
+    sc.feed(b"\x07", 0)
+    check("payload peste PAYLOAD_LIMIT (xterm îl abandonează) → ignorat", sc.last is None)
+    sc = _scan(b"\x1b]133;B\x07")
+    sc.gap()
+    check("gol în flux → ultimul marcaj necunoscut, integrarea rămâne", sc.last is None and sc.integrated)
+    sc = _scan(b"\x1b]133;B\x07")
+    sc.rebase()
+    check("transcript rescris → felul rămâne, poziţia nu", sc.last == "B" and sc.last_start is None)
+    # calea fierbinte: output plin de secvenţe de culoare, fără OSC — rapid (regex în C)
+    noisy = (b"\x1b[38;5;196mERROR\x1b[0m \xc2\xb0 \x1b[1mbold\x1b[22m line\r\n") * 120_000   # ~5 MiB
+    t0 = time.perf_counter()
+    sc = osc133.Osc133Scanner()
+    for i in range(0, len(noisy), 65536):
+        sc.feed(noisy[i:i + 65536], i)
+    dt = time.perf_counter() - t0
+    check("5 MiB de output colorat scanat în < 5 s (%.2f s)" % dt, dt < 5 and sc.last is None, dt)
+
+
+async def osc133_hub_tests():
+    print("-- 3.6.13: starea OSC 133 în hub, init, attach, resync")
+    sid = "0133" * 8
+    row = {"id": sid, "host_id": 1, "rows": 24, "cols": 80,
+           "agent_epoch": None, "agent_offset": 0, "created": time.time()}
+    hub = core.SessionHub(row)
+    try:
+        await hub._process_output(b"hello\r\n\x1b]133;A\x07$ \x1b]133;")
+        st = hub.osc133_state(None)
+        check("B neterminat la capătul chunk-ului: încă A, neintegrat", st["last"] == "A" and not st["integrated"], st)
+        await hub._process_output(b"B\x07rm -rf /srv")
+        st = hub.osc133_state(None)
+        check("hub: B terminat în chunk-ul următor → integrat, ultimul B, nesincronizat fără replay",
+              st == {"integrated": True, "last": "B", "synced": False}, st)
+        check("out_pos = out_f.tell()", hub.out_pos == hub.out_f.tell(), (hub.out_pos, hub.out_f.tell()))
+        hub._flush()
+        end = hub.out_f.tell()
+        span = {"end": end, "limit": 4096, "gen": hub.out_gen}
+        check("replay complet până în punctul live, cu B în fereastră → synced",
+              hub.osc133_state(span)["synced"] is True)
+        check("B în afara ferestrei replay-ului → nesincronizat",
+              hub.osc133_state({"end": end, "limit": 10, "gen": hub.out_gen})["synced"] is False)
+        check("replay care se opreşte înaintea punctului live (gaura de checkpoint) → nesincronizat",
+              hub.osc133_state({"end": end - 1, "limit": 4096, "gen": hub.out_gen})["synced"] is False)
+        check("altă generaţie de transcript → nesincronizat",
+              hub.osc133_state({"end": end, "limit": 4096, "gen": hub.out_gen + 1})["synced"] is False)
+        check("span gol / invalid → nesincronizat",
+              hub.osc133_state({})["synced"] is False
+              and hub.osc133_state({"end": str(end), "limit": 4096, "gen": hub.out_gen})["synced"] is False)
+
+        # attach: span completat doar când citirea e sigură
+        span = {}
+        await core.attach_replay(sid, hub, 0, 0, span=span)
+        check("attach_replay pe un transcript flush-uit: span = [end-limit, end) din disc",
+              span.get("end") == end and span.get("gen") == hub.out_gen and span.get("limit") > 0, span)
+        check("… şi starea e sincronizată", hub.osc133_state(span)["synced"] is True)
+        await hub._process_output(b"x")             # neflush-uit: gaura de checkpoint
+        span = {}
+        await core.attach_replay(sid, hub, 0, 0, span=span)
+        check("octeţi ne-scrişi încă pe disc → replay-ul nu ajunge în punctul live → nesincronizat",
+              hub.osc133_state(span or None)["synced"] is False, (span, hub.out_pos))
+
+        # api._send_osc133: fără replay trimis nu pleacă nimic; cu span gol → nesincronizat
+        class _C:
+            def __init__(self):
+                self.sent = []
+
+            async def send_text(self, s):
+                self.sent.append(json.loads(s))
+        c = _C()
+        await api._send_osc133(c, hub, None)
+        check("fără replay trimis (sesiune blocată) nu se trimite starea", c.sent == [])
+        await api._send_osc133(c, hub, {})
+        check("replay trimis, fereastră nesigură → osc133 cu synced=false",
+              c.sent == [{"type": "osc133", "integrated": True, "last": "B", "synced": False}], c.sent)
+
+        # resync FULL (resume / unlock): tail exact până la cutoff → synced, trimis DUPĂ tail
+        ws = _FakeWs()
+        client = core.BrowserClient(ws, hub)
+        hub.clients.add(client)
+        await client._resync(full=True)
+        kinds = [x.get("type") if isinstance(x, dict) else "bytes" for x in ws.sent]
+        osc = [x for x in ws.sent if isinstance(x, dict) and x.get("type") == "osc133"]
+        check("resync full: resync → tail → osc133 (înaintea oricărui octet live)",
+              kinds[-3:] == ["resync", "bytes", "osc133"], kinds)
+        check("resync full: B în tail, fără gaură → synced", osc and osc[-1]["synced"] is True
+              and osc[-1]["last"] == "B", osc)
+        ws.sent.clear()
+        await client._resync(full=False)
+        osc = [x for x in ws.sent if isinstance(x, dict) and x.get("type") == "osc133"]
+        check("resync lossy (fără cutoff): nesincronizat, dar felul ultimului marcaj live rămâne",
+              osc and osc[-1] == {"type": "osc133", "integrated": True, "last": "B", "synced": False}, osc)
+
+        # ssh / sudo -i: ultimul marcaj live e C → îl trimitem (browserul ştie că rulează ceva)
+        await hub._process_output(b"\r\n\x1b]133;C\x07Last login: ...\r\nroot@db:~# ")
+        check("C live → last=C", hub.osc133_state(None)["last"] == "C")
+        # gol în flux (agent repornit): ultimul marcaj nu mai e de încredere
+        hub._write_gap_marker()
+        st = hub.osc133_state(None)
+        check("gap marker → last=None, integrated rămâne", st["last"] is None and st["integrated"], st)
+        check("out_pos urmează şi marcajul de gol", hub.out_pos == hub.out_f.tell())
+        hub.clients.discard(client)
+    finally:
+        hub.teardown()
 
 
 async def run():

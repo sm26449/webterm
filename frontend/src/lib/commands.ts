@@ -64,6 +64,15 @@ export class CommandTracker {
   private integratedFlag = false
   /** după reset() (replay de istoric) nu ştim linia tastată până la următorul B live */
   private staleFlag = false
+  /** 3.6.13: hub-ul spune că ultimul marcaj LIVE de dinaintea replay-ului e C — rulează ceva
+      (ssh, `sudo -i`, un REPL) pornit înainte de replay. Ca un `current` văzut live, fără captură:
+      Enter-ul merge la program. Se stinge la D (live) sau la următorul reset(). */
+  private runningUnseen = false
+  /** ultimul marcaj REJUCAT (felul lui; '?' = rejucat pe ecranul alternativ) şi, dacă e B,
+      poziţia lui (marker xterm, ca rândul să urmeze rotirea scrollback-ului) — vezi applyHubState */
+  private replayLast: string | null = null
+  private replayB: IMarker | null = null
+  private replayBCol = 0
   commands: Command[] = []
   onChange?: () => void
   /** fire-uit o dată per comandă finalizată (pt. istoricul global) */
@@ -88,6 +97,10 @@ export class CommandTracker {
     this.promptCol = 0
     this.pendingText = null
     this.staleFlag = true
+    this.runningUnseen = false
+    this.replayLast = null
+    this.replayB?.dispose()
+    this.replayB = null
     this.onChange?.()
   }
 
@@ -98,10 +111,61 @@ export class CommandTracker {
       ataşare / reconectare (read_tail) omite octeţii încă ne-scrişi pe disc (până la ~2,5 s), deci un
       C rejucat poate avea D/A/B-ul lui lipsă — panoul e de fapt la prompt, cu o linie nevăzută. Iar
       clientul nu poate deosebi un resync fără gol (resume/unlock, flush până la cutoff) de unul cu
-      gol (ataşare, client lent): mesajul `resync` nu spune. Deci linia rămâne necunoscută;
-      flag-ul hub-ului (ultimul marcaj LIVE, trimis în `init`) e planificat pentru 3.6.13. */
+      gol (ataşare, client lent): mesajul `resync` nu spune. Deci linia rămâne necunoscută — până
+      la starea hub-ului (applyHubState, 3.6.13), care ştie ce a fost LIVE şi dacă replay-ul a fost
+      complet. Aici doar ţinem minte ultimul marcaj rejucat şi, pentru B, unde a căzut pe ecran. */
   noteReplayedMark(data: string): void {
-    if (data.split(';')[0] === 'B') this.integratedFlag = true
+    const kind = data.split(';')[0]
+    if (kind === 'B') this.integratedFlag = true
+    this.replayB?.dispose()
+    this.replayB = null
+    if (this.term.buffer.active.type === 'alternate') { this.replayLast = '?'; return }
+    this.replayLast = kind
+    if (kind === 'B') {
+      this.replayB = this.term.registerMarker(0) ?? null
+      this.replayBCol = this.absCursor().col
+    }
+  }
+
+  /** shell integration văzută de hub în fluxul live (`init.osc133.integrated`, 3.6.13): ca un B
+      rejucat, dar fără să depindă de fereastra replay-ului (rezidualul „tail fără niciun marcaj"). */
+  noteIntegrated(): void {
+    this.integratedFlag = true
+  }
+
+  /** Starea OSC 133 a hub-ului (mesajul `osc133`), aplicată DUPĂ ce xterm a parsat replay-ul şi
+      ÎNAINTE de orice octet live (gateway-ul o trimite exact în punctul în care fluxul live începe
+      să curgă spre noi). Fail-closed — orice nepotrivire lasă linia necunoscută:
+        • `integrated` → integrat (doar adaugă: un `false` nu şterge ce am văzut noi);
+        • `last === 'C'`: ultimul marcaj LIVE e un început de execuţie → rulează ceva (ssh, `sudo -i`,
+          un REPL): Enter-ul merge la program, ca în calea live (runningUnseen). Nu depinde de replay;
+        • `last === 'B'` + `synced` (replay-ul se termină exact în punctul live şi conţine marcajul)
+          + ultimul marcaj REJUCAT tot B, pe ecranul principal → linia e cunoscută: de la poziţia
+          acelui B la cursor, exact cum ar fi citit-o un B live;
+        • orice altceva (A / D / null, nesincronizat, alt ultim marcaj rejucat) → rămâne necunoscută
+          până la următorul B live.
+      Se aplică doar imediat după un replay (stale, fără comandă şi fără B live de atunci).
+      Întoarce true dacă a schimbat ceva din starea liniei. */
+  applyHubState(s: unknown): boolean {
+    if (!s || typeof s !== 'object') return false
+    const { integrated, last, synced } = s as Record<string, unknown>
+    if (integrated === true) this.integratedFlag = true
+    if (!this.staleFlag || this.current !== null || this.promptRow !== null || this.runningUnseen) return false
+    if (last === 'C') {
+      this.runningUnseen = true
+      this.onChange?.()
+      return true
+    }
+    const b = this.replayB
+    if (last === 'B' && synced === true && this.replayLast === 'B' && b && !b.isDisposed && b.line >= 0
+      && this.term.buffer.active.type !== 'alternate') {
+      this.promptRow = b.line
+      this.promptCol = this.replayBCol
+      this.staleFlag = false
+      this.onChange?.()
+      return true
+    }
+    return false
   }
 
   /** shell integration văzută (un B, live sau în replay) */
@@ -120,10 +184,11 @@ export class CommandTracker {
       reconectare). Fără shell integration: true (degradare ca înainte — nu putem citi nimic). */
   lineKnown(): boolean {
     if (!this.integratedFlag) return true
-    if (this.current !== null) return true                    // rulează ceva: Enter-ul merge la program
+    if (this.current !== null || this.runningUnseen) return true   // rulează ceva: Enter-ul merge la program
     if (this.term.buffer.active.type === 'alternate') return true   // TUI: Enter-ul nu e o linie de shell
     // după replay: necunoscut până la un B live, CHIAR dacă replay-ul s-a oprit într-un C (vezi
-    // noteReplayedMark — F1); ssh / `sudo -i` / REPL pornite înainte de replay cer deci confirmare
+    // noteReplayedMark — F1) — cu excepţia stării hub-ului (applyHubState, 3.6.13): un C LIVE
+    // (runningUnseen, mai sus) sau un B live aflat în replay-ul complet (promptRow din replay)
     return !this.staleFlag && this.promptRow !== null
   }
 
@@ -142,7 +207,8 @@ export class CommandTracker {
       less, `sudo -i`) emite C înainte să ruleze, deci nu mai suntem „la prompt" până la D + B.
       Fără shell integration: mereu false. */
   atPrompt(): boolean {
-    return this.promptRow !== null && this.current === null && this.term.buffer.active.type !== 'alternate'
+    return this.promptRow !== null && this.current === null && !this.runningUnseen
+      && this.term.buffer.active.type !== 'alternate'
   }
 
   /** rulează o comandă acum? (SessionView evită decodarea inutilă a fluxului) */
@@ -226,6 +292,7 @@ export class CommandTracker {
         break
       }
       case 'D': {                  // comanda s-a terminat (cu exit code)
+        this.runningUnseen = false   // şi una pornită înainte de replay (applyHubState)
         if (!this.current) break
         const code = Number(rest[0])
         this.current.exitCode = Number.isFinite(code) ? code : undefined
@@ -326,6 +393,8 @@ export class CommandTracker {
   }
 
   dispose(): void {
+    this.replayB?.dispose()
+    this.replayB = null
     for (const c of this.commands) {
       c.startMarker.dispose()
       c.endMarker?.dispose()

@@ -8,7 +8,7 @@ import { modeRestoreSeq } from '../lib/termmodes'
 import { errText, api, CommandGuard, CommandRule, Host, Session, withStepup } from '../lib/api'
 import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
 import { Command, CommandTracker, cmdDuration, matchCommandRule } from '../lib/commands'
-import { ECHO_GRACE_MS, PeerState, PeerVerdict, RuleHit, guardActive, isBareEnter, judgePeers, opaqueInput, runDecision, splitLines, stripControls, submitsLine, unbracket } from '../lib/broadcastGuard'
+import { ECHO_GRACE_MS, LocalVerdict, echoSettled, PeerState, PeerVerdict, RuleHit, guardActive, isBareEnter, judgeLocal, judgePeers, opaqueInput, plainText, runDecision, splitLines, stripControls, submitsLine, unbracket } from '../lib/broadcastGuard'
 import { clearCwd, parseOsc7, setCwd } from '../lib/cwd'
 import { FONT_STORAGE_KEY, preferredFont, setPreferredFont } from '../lib/font'
 import { extractUrls } from '../lib/urls'
@@ -234,6 +234,17 @@ export default function SessionView(props: {
   // câta a sosit output DUPĂ ele. echoed < input = linia din tracker poate fi dinaintea ultimelor taste.
   const inputSeqRef = useRef(0)
   const echoedSeqRef = useRef(0)
+  // ecou STRÂNS (3.6.13): starea liniei (OSC 133) imediat după ultima trimitere, după ce xterm a parsat
+  // tot ce sosise înainte. Output-ul de după trimitere e ecou doar dacă a schimbat-o (linie / cursor /
+  // ecran) — un ceas în prompt sau un repaint tmux al barei de stare nu mai „confirmă" tastele.
+  const echoSnapRef = useRef<{ seq: number; key: string | null } | null>(null)
+  // ce s-a trimis după ultimul ecou: text simplu sau null (taste de editare) — vezi judgeLocal
+  const unechoedRef = useRef<{ seq: number; text: string | null }[]>([])
+  // ecoul GROSIER din 3.6.12 (orice output după trimitere), momentul ultimei trimiteri şi RTT-ul
+  // măsurat — plasa de timp a ecoului strâns (broadcastGuard.echoSettled)
+  const coarseSeqRef = useRef(0)
+  const lastSentAtRef = useRef(0)
+  const rttRef = useRef<number | null>(null)
   const streamDecoderRef = useRef(new TextDecoder('utf-8'))   // pt. captura output-ului
   // termen de căutare care așteaptă finalizarea replay-ului de istoric
   const pendingFindRef = useRef<string | null>(null)
@@ -336,7 +347,7 @@ export default function SessionView(props: {
   // dacă broadcast-ul a pornit între timp (verificare 3.6.12, F2).
   // `unreadable` = id-urile panourilor neverificabile acceptate în dialog (F5); `opaque` = input cu
   // taste de editare, textul verificat nu e cel care rulează (F4)
-  const [cmdConfirm, setCmdConfirm] = useState<{ cmd: string; pattern: string; unknown?: boolean; run?: string; hits?: RuleHit[]; recheck?: () => PeerVerdict; unreadable?: string[]; opaque?: boolean } | null>(null)
+  const [cmdConfirm, setCmdConfirm] = useState<{ cmd: string; pattern: string; unknown?: boolean; run?: string; hits?: RuleHit[]; recheck?: () => PeerVerdict; unreadable?: string[]; opaque?: boolean; echo?: boolean } | null>(null)
   const [guardMsg, setGuardMsg] = useState<string | null>(null)
   // confirm()/alert() native → dialoguri proprii + toast-uri (vezi lib/confirm.tsx: de ce)
   const { confirm } = useConfirm()
@@ -749,12 +760,58 @@ export default function SessionView(props: {
     return () => window.removeEventListener('wt-idle-ping', onPing)
   }, [isLive, locked])
 
+  /** cheia stării liniei pentru ecoul strâns (echoSnapRef): ecran, cursor absolut, linia tastată (OSC 133).
+      null = nicio linie de shell citibilă (fără shell integration, comandă în curs, TUI) → ecou grosier,
+      ca înainte: acolo guardrail-ul nu aşteaptă oricum ecoul (judgePeers: doar `atPrompt && !echoed`). */
+  const lineKeyRef = useRef((): string | null => {
+    const term = termRef.current
+    const tr = trackerRef.current
+    if (!term || !tr || !tr.atPrompt()) return null
+    const b = term.buffer.active
+    return `${b.type}\u0000${b.baseY + b.cursorY}\u0000${b.cursorX}\u0000${tr.pendingCommand() ?? ''}`
+  })
+  /** output-ul tocmai parsat (sosit după trimiterea `seq`) e ecoul ei? Grosier fără linie citibilă
+      sau când instantaneul e al altei trimiteri; altfel doar dacă linia / cursorul s-au schimbat. */
+  const echoOf = (seq: number): boolean => {
+    const snap = echoSnapRef.current
+    if (!snap || snap.seq !== seq || snap.key === null) return true
+    const now = lineKeyRef.current()
+    return now === null || now !== snap.key
+  }
+  const markEchoed = (seq: number) => {
+    if (seq > coarseSeqRef.current) coarseSeqRef.current = seq
+    if (seq <= echoedSeqRef.current) return
+    echoedSeqRef.current = seq
+    unechoedRef.current = unechoedRef.current.filter((u) => u.seq > seq)
+  }
+  /** ecoul ultimelor taste (vezi echoSettled): `requireOutput` la broadcast, nu într-un singur panou */
+  const echoedNow = useCallback((requireOutput: boolean): boolean => {
+    const seq = inputSeqRef.current
+    return echoSettled({
+      strict: echoedSeqRef.current >= seq,
+      coarse: coarseSeqRef.current >= seq,
+      sinceSend: performance.now() - lastSentAtRef.current,
+      rtt: rttRef.current,
+      requireOutput,
+    })
+  }, [])
   const send = useCallback((data: string | Uint8Array) => {
     if (muteRef.current || readOnlyRef.current) return
     const ws = wsRef.current
     if (ws?.readyState === WebSocket.OPEN) {
       ws.send(typeof data === 'string' ? new TextEncoder().encode(data) : data)
       inputSeqRef.current += 1   // ecoul (output-ul următor) îl confirmă — vezi echoedSeqRef
+      lastSentAtRef.current = performance.now()
+      const seq = inputSeqRef.current
+      const pend = unechoedRef.current
+      pend.push({ seq, text: typeof data === 'string' && plainText(data) ? data : null })
+      // plafon: o rafală fără ecou (host căzut) nu creşte la nesfârşit — se comprimă într-o trimitere
+      // „necunoscută" (fail-closed: judgeLocal o tratează ca taste de editare)
+      if (pend.length > 64) unechoedRef.current = [{ seq, text: null }]
+      // instantaneul liniei: după ce xterm a parsat tot ce sosise ÎNAINTE de trimitere (write gol, în ordine)
+      termRef.current?.write('', () => {
+        if (seq === inputSeqRef.current) echoSnapRef.current = { seq, key: lineKeyRef.current() }
+      })
       return
     }
     // socket închis/în reconectare: tasta NU pleacă (vezi droppedRef). O numărăm şi facem
@@ -810,15 +867,17 @@ export default function SessionView(props: {
       // primeşte output live: fluxul nu e pe pauză şi nu rejucăm istoric
       live: streamActiveRef.current && !replayRef.current,
       atPrompt: tr?.atPrompt() === true,
-      echoed: echoedSeqRef.current >= inputSeqRef.current,
+      echoed: echoedNow(true),
       pending: tr?.pendingCommand() ?? null,
       // după un replay (ataşare / reconectare / reluare) linia unui shell cu integration e
       // necunoscută până la următorul prompt live (re-review 3.6.12, M1)
       known: tr ? tr.lineKnown() : true,
       id: session.id,
       label: paneLabelRef.current || session.id.slice(0, 8),
+      // TAB într-un bracketed paste = text doar dacă shell-ul a cerut bracketed paste (3.6.13)
+      bracketed: termRef.current?.modes.bracketedPasteMode === true,
     }
-  }, [session.id])
+  }, [session.id, echoedNow])
   /** regula atinsă: block → Ctrl+U în toate panourile-ţintă + mesaj; confirm → dialog */
   const applyRule = (rule: CommandRule, cmd: string, run?: string, hits?: RuleHit[], recheck?: () => PeerVerdict) => {
     if (rule.action === 'block') {
@@ -840,12 +899,15 @@ export default function SessionView(props: {
     const settle = (v: PeerVerdict, queued: (string | Uint8Array)[] = []) => {
       if (v.kind === 'rule') applyRule(v.rule, v.cmd, run, v.hits, recheck)
       else if (v.kind === 'unknown') setCmdConfirm({ cmd: originCmd, pattern: '', unknown: true, run, hits: v.hits, recheck, unreadable: v.unreadable, opaque })
-      // tastele de după Enter nu mai pleacă orbeşte (dialog / blocare) — dar nici în tăcere
-      if (queued.length) {
-        setInputNotice(tRef.current('session.queuedNotSent', { count: queued.length }))
-        window.setTimeout(() => setInputNotice(null), 8000)
-      }
+      noticeQueued(queued)
     }
+    return waitVerdict(verdict, onOk, settle)
+  }
+  /** Bucla de aşteptare a ecoului (≤ ECHO_GRACE_MS), comună broadcast-ului şi panoului singur (3.6.13):
+      true = verdict ok imediat (apelantul trimite); false = reţinut — `onOk` rulează singur dacă
+      verificarea trece, altfel `settle` (dialog / blocare), cu tastele din coadă anunţate. */
+  const waitVerdict = <V extends { kind: string }>(verdict: (final: boolean) => V, onOk: () => void,
+    settle: (v: V, queued?: (string | Uint8Array)[]) => void): boolean => {
     const v = verdict(false)
     if (v.kind === 'ok') return true
     if (v.kind !== 'wait') { settle(v); return false }
@@ -866,18 +928,49 @@ export default function SessionView(props: {
     submitTimerRef.current = window.setTimeout(tick, 15)
     return false
   }
+  /** tastele de după Enter, reţinute cât aşteptam, nu mai pleacă orbeşte — dar nici în tăcere */
+  const noticeQueued = (queued: (string | Uint8Array)[]) => {
+    if (!queued.length) return
+    setInputNotice(tRef.current('session.queuedNotSent', { count: queued.length }))
+    window.setTimeout(() => setInputNotice(null), 8000)
+  }
+  /** Enter / chunk FĂRĂ broadcast, cu guardrail activ (3.6.13): aceeaşi aşteptare a ecoului ca la
+      broadcast — Ctrl+P / ↑ + Enter rapid nu mai trimite o linie nevăzută (vezi judgeLocal).
+      `lineOf` / `extra` ca la checkPeers. Trimiterea reţinută pleacă DOAR local (ca dialogul fără
+      broadcast, F2: dacă broadcast-ul porneşte cât aşteptăm, linia n-a fost verificată în rest). */
+  const checkLocal = (run: string, lineOf: (p: string | null) => string | null = (p) => p, extra: string[] = []): boolean => {
+    const verdict = (final: boolean) => {
+      const tr = trackerRef.current
+      return judgeLocal({
+        atPrompt: tr?.atPrompt() === true,
+        echoed: echoedNow(false),
+        pending: tr?.pendingCommand() ?? null,
+        unechoed: unechoedRef.current.map((u) => u.text),
+      }, commandGuardRef.current, final, lineOf, extra)
+    }
+    const settle = (v: LocalVerdict, queued: (string | Uint8Array)[] = []) => {
+      const held = isBareEnter(run) ? undefined : run
+      if (v.kind === 'rule') applyRule(v.rule, v.cmd, held)
+      else if (v.kind === 'unknown') {
+        setCmdConfirm({ cmd: (lineOf(trackerRef.current?.pendingCommand() ?? null) ?? '').trim(), pattern: '', unknown: true, run, echo: true })
+      }
+      noticeQueued(queued)
+    }
+    return waitVerdict(verdict, () => send(run), settle)
+  }
   /** Enter (CR/LF): comanda tastată aici + (broadcast) în fiecare panou-ţintă. true = poate pleca.
       Cât o verificare aşteaptă ecoul, Enter-ul intră în coadă (re-verificat la rând), nu porneşte
       a doua buclă (re-review 3.6.12, L-a). */
   const checkSubmit = (seq: string): boolean => {
     if (submitWaitRef.current) { submitWaitRef.current.push(seq); return false }
+    const bc = broadcastingRef.current && !readOnlyRef.current
+    // un singur panou: linia se citeşte DUPĂ ecoul ultimelor taste (3.6.13), ca la broadcast
+    if (!bc) return checkLocal(seq)
     const cmd = trackerRef.current?.pendingCommand() ?? null
     const rule = cmd ? matchCommandRule(cmd, commandGuardRef.current) : null
-    const bc = broadcastingRef.current && !readOnlyRef.current
     // broadcast: doar un BLOCK local scurtcircuitează; un confirm local trece prin judgePeers (originea
     // e şi ea ţintă), ca dialogul să nu ascundă un block / o linie neverificabilă din alt panou
-    if (rule && cmd && (!bc || rule.action === 'block')) { applyRule(rule, cmd); return false }
-    if (!bc) return true
+    if (rule && cmd && rule.action === 'block') { applyRule(rule, cmd); return false }
     return checkPeers(undefined, () => sendAll(seq), cmd ?? '')
   }
   /** Un chunk de input care conţine Enter-uri dar NU e un Enter gol: commit IME („ls\r"), paste,
@@ -890,9 +983,13 @@ export default function SessionView(props: {
     const cur = trackerRef.current?.pendingCommand() ?? ''
     const checked = [cur + lines[0], ...lines.slice(1)]
     const bc = broadcastingRef.current && !readOnlyRef.current
-    // taste de editare în chunk (Ctrl+U, DEL, ESC-. …): linia rulată nu e cea verificată → „nu pot
-    // verifica", aici şi la broadcast (verificare 3.6.12, F4; un block cunoscut câştigă totuşi)
-    const opaque = opaqueInput(d) && guardActive(commandGuardRef.current)
+    // taste de editare în chunk (Ctrl+U, DEL, ESC-. …, TAB în afara unui bracketed paste — 3.6.13):
+    // linia rulată nu e cea verificată → „nu pot verifica", aici şi la broadcast (verificare 3.6.12,
+    // F4; un block cunoscut câştigă totuşi). TAB-ul dintr-un paste e text doar dacă TOATE panourile-
+    // ţintă au cerut bracketed paste.
+    const bracketed = paneState().bracketed === true
+      && (!bc || (peerStatesRef.current?.(session.id) ?? []).every((p) => p.inert || p.bracketed === true))
+    const opaque = opaqueInput(d, bracketed) && guardActive(commandGuardRef.current)
     for (const raw of checked) {
       const line = raw.trim()
       const rule = line ? matchCommandRule(line, commandGuardRef.current) : null
@@ -901,7 +998,8 @@ export default function SessionView(props: {
     }
     if (!bc) {
       if (opaque) { setCmdConfirm({ cmd: (cur + lines[0]).trim(), pattern: '', unknown: true, run: d, opaque: true }); return false }
-      return true
+      // fără broadcast: aceeaşi aşteptare a ecoului ca un Enter (3.6.13)
+      return checkLocal(d, (p) => ((p ?? '') + lines[0]) || null, lines.slice(1))
     }
     return checkPeers((p) => ((p ?? '') + lines[0]) || null, () => sendAll(d), cur + lines[0], d, lines.slice(1), opaque)
   }
@@ -1638,9 +1736,13 @@ export default function SessionView(props: {
           if (t0 != null) {
             rttSentRef.current.delete(msg.n)
             setRtt(Math.round(performance.now() - t0))
+            rttRef.current = Math.round(performance.now() - t0)
           }
         } else if (msg.type === 'init' || msg.type === 'readonly') {
           if (msg.type === 'init') yourIdRef.current = msg.your_id ?? null   // ca să ne marcăm în roster
+          // shell integration văzută LIVE de hub (3.6.13): un panou integrat al cărui replay nu mai
+          // conţine niciun marcaj nu mai trece drept „fără integrare" (linie trecută neverificată)
+          if (msg.type === 'init' && msg.osc133?.integrated === true) trackerRef.current?.noteIntegrated()
           // `readonly` la init = ataşare doar-vizualizare; mesajul `readonly` = retrogradat în timp
           // ce erai conectat (rolul s-a schimbat). Nu revenim la scriere pe acelaşi socket.
           // la `init` starea vine din nou de la server (o reconectare după ce ai primit dreptul de
@@ -1721,6 +1823,14 @@ export default function SessionView(props: {
             remoteResizeReloadRef.current = null
             reloadRendererRef.current?.()
           }, 200)
+        } else if (msg.type === 'osc133') {
+          // starea OSC 133 a hub-ului în punctul în care începe fluxul live (vine după tail, înaintea
+          // oricărui octet live): aplicată după ce xterm a parsat tail-ul — un write gol, în ordine.
+          // Fără tail primit (nu ar trebui să se întâmple) o ignorăm: linia rămâne necunoscută.
+          if (!expectTailRef.current) {
+            const st: unknown = msg
+            term.write('', () => { trackerRef.current?.applyHubState(st) })
+          }
         } else if (msg.type === 'resync') {
           // NU golim ecranul aici: reset-ul se face atomic chiar înainte de a scrie tail-ul
           // (vezi ramura expectTail). Altfel, cât aşteptăm tail-ul (sau dacă e gol/întârziat),
@@ -1754,7 +1864,7 @@ export default function SessionView(props: {
         term.write(new Uint8Array(ev.data), () => {
           replayRef.current = false
           // tail-ul complet = starea ecranului de după tot ce trimisesem înainte de reconectare
-          if (replaySeq > echoedSeqRef.current) echoedSeqRef.current = replaySeq
+          markEchoed(replaySeq)
           muteRef.current = false
           // reconciliere post-replay: dacă dimensiunile s-au schimbat cât timp
           // scriam (redimensionare de fereastră, sidebar închis), aliniem
@@ -1778,10 +1888,14 @@ export default function SessionView(props: {
           trackerRef.current.feed(streamDecoderRef.current.decode(bytes, { stream: true }))
         }
         // ecou: output sosit DUPĂ ultimele taste trimise; marcat abia după ce xterm l-a parsat
-        // (trackerul OSC 133 vede atunci linia la zi) — guardrail-ul broadcast se bazează pe el
+        // (trackerul OSC 133 vede atunci linia la zi) — guardrail-ul se bazează pe el. Strâns
+        // (3.6.13): doar dacă a schimbat linia / cursorul faţă de instantaneul de la trimitere
         const seq = inputSeqRef.current
         if (seq > echoedSeqRef.current) {
-          term.write(bytes, () => { if (seq > echoedSeqRef.current) echoedSeqRef.current = seq })
+          term.write(bytes, () => {
+            if (seq > coarseSeqRef.current) coarseSeqRef.current = seq
+            if (seq > echoedSeqRef.current && echoOf(seq)) markEchoed(seq)
+          })
         } else term.write(bytes)
       }
     }
@@ -2759,7 +2873,7 @@ export default function SessionView(props: {
             className="absolute inset-0 z-30 grid place-items-center bg-ink-950/80 p-6 backdrop-blur-sm">
             <div className="w-full max-w-md rounded-xl bg-ink-900 p-4 ring-1 ring-ink-700 shadow-2xl">
               <div id="wt-guard-title" className="wt-warn flex items-center gap-2 text-sm font-semibold"><ShieldIcon />
-                {' '}{cmdConfirm.opaque ? t('session.inputUnknownTitle') : cmdConfirm.unknown ? t('session.peerUnknownTitle') : t('session.dangerousCommand')}</div>
+                {' '}{cmdConfirm.opaque ? t('session.inputUnknownTitle') : cmdConfirm.echo ? t('session.echoUnknownTitle') : cmdConfirm.unknown ? t('session.peerUnknownTitle') : t('session.dangerousCommand')}</div>
               {cmdConfirm.cmd && !cmdConfirm.hits?.length && (
                 <div className="mt-2 rounded-md bg-ink-950 px-3 py-2 font-mono text-compact text-slate-200 break-all ring-1 ring-ink-800">
                   {cmdConfirm.cmd}
@@ -2768,7 +2882,7 @@ export default function SessionView(props: {
               {/* regula care a prins comanda — fleet şi panourile o arătau deja; fără ea nu ştiai
                   DE CE e „periculoasă" şi nici ce regulă să ajustezi în Setări → Securitate */}
               <div id="wt-guard-desc" className="mt-2 text-xs text-slate-400">
-                {cmdConfirm.opaque ? t('session.inputUnknownDesc') : cmdConfirm.unknown ? t('session.peerUnknownDesc') : cmdConfirm.hits?.length ? t('session.guardLinesIntro') : (<>
+                {cmdConfirm.opaque ? t('session.inputUnknownDesc') : cmdConfirm.echo ? t('session.echoUnknownDesc') : cmdConfirm.unknown ? t('session.peerUnknownDesc') : cmdConfirm.hits?.length ? t('session.guardLinesIntro') : (<>
                   <span className="break-all font-mono text-slate-300">{t('session.guardRule', { pattern: cmdConfirm.pattern })}</span>
                   {' · '}{t('session.sureToRun')}
                 </>)}
