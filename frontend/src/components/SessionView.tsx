@@ -1377,8 +1377,18 @@ export default function SessionView(props: {
     // copiază în clipboard; fără selecție trimite ^C (SIGINT) normal.
     // Ctrl+Shift+C copiază mereu. După copiere selecția se golește, ca
     // următorul Ctrl+C să întrerupă, nu să recopieze.
+    // Enter-ul ţinut de guardrail (keydown → false): xterm ar emite totuşi '\r' din keypress-ul care
+    // urmează (Terminal._keyPress nu ştie că keydown-ul a fost refuzat), adică un AL DOILEA Enter —
+    // după aşteptarea ecoului ar fi plecat şi el, sau ar fi cerut un dialog nou (e2e 3.6.13)
+    let heldEnter = false
     term.attachCustomKeyEventHandler((e) => {
+      if (e.type === 'keypress' && heldEnter && (e.charCode === 13 || e.charCode === 10 || e.key === 'Enter')) {
+        heldEnter = false
+        return false
+      }
+      if (e.type === 'keyup' && (e.key === 'Enter' || e.code === 'KeyJ')) heldEnter = false
       if (e.type !== 'keydown') return true
+      heldEnter = false
       // Guardrail de comenzi: la Enter, verificăm comanda TASTATĂ (via OSC 133) ÎNAINTE s-o
       // trimitem. block → curăță linia; confirm → dialog. Fără shell integration (promptRow
       // lipsă) sau într-un TUI, pendingCommand e null → trece. Shift/Ctrl+Enter şi Ctrl+J
@@ -1390,7 +1400,10 @@ export default function SessionView(props: {
       // un panou-ţintă pe pauză sau fără ecou încă cere confirmare (lib/broadcastGuard, 3.6.12).
       // Cât aşteptăm ecoul, Enter-ul următor intră în coadă (onData), nu se verifică de două ori.
       if (submits && !submitWaitRef.current) {
-        if (!ioRef.current.checkSubmit(e.ctrlKey && e.code === 'KeyJ' ? '\n' : '\r')) return false   // NU trimite Enter la host
+        if (!ioRef.current.checkSubmit(e.ctrlKey && e.code === 'KeyJ' ? '\n' : '\r')) {
+          heldEnter = true
+          return false   // NU trimite Enter la host
+        }
         enterOkAtRef.current = performance.now()
       }
       // Ctrl+M: „tab focus mode" (modelul VS Code) — cât e activ, Tab NU mai
