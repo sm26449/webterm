@@ -37,6 +37,13 @@ interface Entry {
 }
 
 export const ECHO_PENDING_MAX = 64
+
+/** Linia fără spaţii albe, pentru comparaţia ecoului: o linie lungă continuată pe rândul următor,
+    sau redesenată de tmux / readline la margine, poate apărea cu un spaţiu în plus sau în minus la
+    graniţa rândului — fără asta tastarea rapidă a unei linii lungi rămânea „fără ecou" (e2e 3.6.13).
+    Un text format DOAR din spaţii nu se confirmă singur (ar potrivi oricând); îl confirmă primul
+    caracter vizibil de după el. */
+const sq = (s: string): string => s.replace(/\s+/g, '')
 /** câte linii distincte ţinem dintr-o rafală (pentru textul tastat după o tastă ne-text) */
 const CAND_LINES_MAX = 16
 
@@ -81,7 +88,11 @@ export class EchoTracker {
     if (this.pending.length > ECHO_PENDING_MAX) {
       // host care nu ţine pasul: comprimăm într-o singură intrare, eliberată doar când hub-ul a
       // ajuns din urmă (vezi output) sau la replay — fail-closed între timp
-      this.pending = [{ seq, at: now, text: null, lump: true, lumpAt: now }]
+      // textul rămâne dacă TOATE erau text simplu (tastare rapidă pe o legătură lentă): verificarea
+      // locală îl lipeşte de linie în loc să ceară „nu pot verifica" (3.6.13, e2e)
+      const all = this.pending.every((e) => e.text !== null)
+      const text = all ? this.pending.map((e) => e.text).join('') : null
+      this.pending = [{ seq, at: now, text, lump: true, lumpAt: now }]
     }
     this.lastSentAt = now
     return { seq, needBase }
@@ -145,7 +156,7 @@ export class EchoTracker {
       for (const e of this.pending) {
         if (e.seq > tag || e.text === null || e.lump) break
         acc += e.text
-        if (cur.line.endsWith(acc)) upto = e.seq
+        if (sq(acc) && sq(cur.line).endsWith(sq(acc))) upto = e.seq
       }
       if (upto) this.drop((e) => e.seq <= upto)
       this.cand = null
@@ -159,7 +170,7 @@ export class EchoTracker {
     for (const e of this.pending) {
       if (e.seq > tag || e.text === null || e.lump) break
       acc += e.text
-      if (cur.line === this.base.line + acc) matched = e.seq
+      if (sq(acc) && sq(cur.line) === sq(this.base.line + acc)) matched = e.seq
     }
     if (matched) {
       this.drop((e) => e.seq <= matched)
@@ -204,7 +215,7 @@ export class EchoTracker {
     for (const e of this.pending) {
       if (e.text === null || e.lump || e.blind) break
       acc += e.text
-      if (c.lines.some((l) => l + acc === keyNow.line)) upto = e.seq
+      if (sq(acc) && c.lines.some((l) => sq(l + acc) === sq(keyNow.line))) upto = e.seq
     }
     if (upto) this.drop((e) => e.seq <= upto)
     this.base = this.pending.length ? keyNow : undefined
@@ -239,7 +250,7 @@ export class EchoTracker {
 
   /** ce n-a primit încă ecou, în ordine: text simplu sau null (taste de editare / necunoscut) */
   unechoed(): (string | null)[] {
-    return this.pending.map((e) => (e.lump ? null : e.text))
+    return this.pending.map((e) => e.text)
   }
 }
 

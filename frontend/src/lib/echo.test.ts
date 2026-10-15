@@ -322,3 +322,48 @@ describe('3.6.13, verificarea lui f34e5ec: text după o tastă ne-text — potri
     expect(p.local().unechoed).toEqual([])
   })
 })
+
+// e2e 3.6.13: o linie lungă tastată rapid (Playwright keyboard.type, un onData per caracter) ajungea
+// la „Încă nu pot verifica linia" — fără nicio tastă ne-text
+describe('3.6.13 e2e: linie lungă tastată rapid', () => {
+  const cmd = "seq -f 'WT_HIST_%g' 1 3000; yes " + 'F'.repeat(96) + ' | head -n 3500; echo WT_HIST_$((7*6))'
+  const g3: CommandGuard = { enabled: true, rules: [{ pattern: 'rm\\s+-rf', action: 'block' }] }
+
+  it('ecoul unei linii care trece de lăţimea terminalului (spaţiu la graniţa rândului) e recunoscut', () => {
+    const echo = new EchoTracker()
+    let shown = ''
+    // cum citea readCommand o linie înfăşurată: un spaţiu la fiecare 80 de coloane
+    const wrapped = (s: string) => s.replace(/(.{80})/g, '$1 ')
+    const key = (): LineKey => { const line = wrapped(shown); return { k: `n\u00000\u0000${shown.length}\u0000${line}`, line } }
+    let sentIdx = 0
+    for (const c of cmd) {
+      const { seq, needBase } = echo.sent(c, 0)
+      if (needBase) echo.setBase(seq, key())
+      sentIdx++
+      if (sentIdx % 7 === 0) {          // ecouri sosite în rafale
+        shown = cmd.slice(0, sentIdx)
+        echo.output(echo.inputSeq, key, 0, null)
+      }
+    }
+    shown = cmd
+    echo.output(echo.inputSeq, key, 0, null)
+    expect(echo.unechoed()).toEqual([])
+    expect(echo.echoed(false, 0, null, key())).toBe(true)
+  })
+
+  it('peste plafonul de 64 fără ecou, dar doar text: verificarea lipeşte textul, nu cere dialog', () => {
+    const echo = new EchoTracker()
+    for (const c of cmd) {
+      const { seq, needBase } = echo.sent(c, 0)
+      if (needBase) echo.setBase(seq, { k: 'n\u00000\u00000\u0000', line: '' })
+    }
+    const un = echo.unechoed()
+    expect(un.every((t) => t !== null)).toBe(true)
+    const v = judgeLocal({ atPrompt: true, echoed: false, pending: null, unechoed: un }, g3, true)
+    // logica din fd208c4..77a945a: intrarea comprimată era null → „Încă nu pot verifica linia"
+    expect(v.kind).toBe('ok')
+    // o regulă tot prinde linia lipită
+    const v2 = judgeLocal({ atPrompt: true, echoed: false, pending: null, unechoed: ['rm -rf /', ...un] }, g3, true)
+    expect(v2.kind).toBe('rule')
+  })
+})

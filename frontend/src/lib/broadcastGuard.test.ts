@@ -556,3 +556,44 @@ describe('3.6.13: CommandTracker.applyHubState', () => {
     expect(tr.integrated).toBe(true)
   })
 })
+
+// e2e 3.6.13: o linie tastată care trece pe rândul următor (wrap) se citea cu un spaţiu în plus
+describe('CommandTracker: linie înfăşurată pe mai multe rânduri', () => {
+  function wrapTerm(rows: { text: string; wrapped: boolean }[]): Terminal {
+    const last = rows.length - 1
+    const buffer = {
+      type: 'normal', baseY: 0, cursorY: last,
+      get cursorX() { return rows[last].text.length },
+      getLine: (r: number) => (rows[r]
+        ? { length: rows[r].text.length, isWrapped: rows[r].wrapped,
+            translateToString: (_t: boolean, from = 0, to = rows[r].text.length) => rows[r].text.slice(from, to) }
+        : undefined),
+    }
+    return { buffer: { active: buffer }, registerMarker: () => ({ line: 0, dispose() {} }) } as unknown as Terminal
+  }
+  it('rând continuat prin wrap → fără spaţiu la graniţă (regula vede „rm -rf /tmp")', () => {
+    const rows = [{ text: '', wrapped: false }, { text: '', wrapped: true }]
+    const term = wrapTerm(rows)
+    const tr = new CommandTracker(term)
+    // B la începutul rândului 0 (cursorul acolo), apoi textul curge pe două rânduri
+    ;(term.buffer.active as unknown as { cursorY: number }).cursorY = 0
+    tr.handle('B')
+    ;(term.buffer.active as unknown as { cursorY: number }).cursorY = 1
+    rows[0].text = 'echo x; rm -rf /tm'
+    rows[1].text = 'p'
+    expect(tr.pendingCommand()).toBe('echo x; rm -rf /tmp')
+    const g: CommandGuard = { enabled: true, rules: [{ pattern: 'rm -rf /tmp$', action: 'block' }] }
+    expect(judgePeers([stateOf(tr)], g, true).kind).toBe('rule')
+  })
+  it('rând nou adevărat (fără wrap) → tot despărţit printr-un spaţiu, ca înainte', () => {
+    const rows = [{ text: '', wrapped: false }, { text: '', wrapped: false }]
+    const term = wrapTerm(rows)
+    const tr = new CommandTracker(term)
+    ;(term.buffer.active as unknown as { cursorY: number }).cursorY = 0
+    tr.handle('B')
+    ;(term.buffer.active as unknown as { cursorY: number }).cursorY = 1
+    rows[0].text = 'echo a'
+    rows[1].text = 'b'
+    expect(tr.pendingCommand()).toBe('echo a b')
+  })
+})

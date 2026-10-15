@@ -44,7 +44,8 @@ function plain(s: string): string {
   return s
     .replace(CTRL_RE, '')
     .split('\n')
-    .map((line) => line.split('\r').pop() ?? '')   // CR = rescrie rândul (bare de progres)
+    // CR = rescrie rândul (bare de progres); CR-ul final al unui CRLF (pty fără tmux) nu şterge nimic
+    .map((line) => line.replace(/\r+$/, '').split('\r').pop() ?? '')   // CR = rescrie rândul (bare de progres)
     .join('\n')
 }
 
@@ -81,6 +82,10 @@ export class CommandTracker {
       ca să atașeze timpul din .cast la momentul potrivit (comenzile goale n-au C). */
   onStart?: (cmd: Command) => void
 
+  /** comanda tocmai încheiată de un D din chunk-ul care se parsează acum: restul chunk-ului îi
+      aparţine încă (sub tmux, D poate sosi înaintea ultimelor rânduri pictate) — vezi feedTail */
+  private justEnded: Command | null = null
+
   constructor(term: Terminal) {
     this.term = term
   }
@@ -93,6 +98,7 @@ export class CommandTracker {
     for (const c of this.commands) c.startMarker.dispose()
     this.commands = []
     this.current = null
+    this.justEnded = null
     this.promptRow = null
     this.promptCol = 0
     this.pendingText = null
@@ -195,10 +201,23 @@ export class CommandTracker {
       Ecranul nu e o sursă de încredere sub tmux (marcajele vin out-of-band, panoul e
       repictat separat), deci output-ul „exact" se ia din flux, nu din rânduri. */
   feed(chunk: string): void {
-    if (!this.current) return
-    const cur = this.current.captured ?? ''
+    const cmd = this.current ?? this.justEnded
+    if (!cmd) return
+    const cur = cmd.captured ?? ''
     if (cur.length > CAPTURE_MAX) return          // plafon: o comandă vorbăreaţă nu umflă RAM-ul
-    this.current.captured = cur + chunk
+    cmd.captured = cur + chunk
+  }
+
+  /** Captura cere octeţi? (o comandă rulează, sau una tocmai s-a încheiat în chunk-ul curent) */
+  get capturing(): boolean {
+    return this.current !== null || this.justEnded !== null
+  }
+
+  /** Sfârşitul unui chunk de output: comanda încheiată în el nu mai primeşte octeţi. Comportamentul
+      de dinainte (tot chunk-ul cu D-ul intra în captură; promptul de la coadă îl taie outputOf),
+      dar în ordinea PARSĂRII, nu la sosire (e2e 3.6.13). */
+  endChunk(): void {
+    this.justEnded = null
   }
 
   /** Shell-ul aşteaptă la prompt, după marcajele shell integration: B (sfârşit de prompt) văzut,
@@ -232,7 +251,10 @@ export class CommandTracker {
       const from = row === this.promptRow ? this.promptCol : 0
       const to = row === end.row ? end.col : line.length
       out += line.translateToString(false, from, to)
-      if (row !== end.row) out += ' '
+      // un rând continuat prin wrap (linie lungă) NU e o despărţire: fără spaţiu, altfel `rm -rf /tm`
+      // + `p` pe rândul următor se citea „rm -rf /tm p", iar ecoul tastelor nu se mai potrivea
+      // (3.6.13, e2e: linia lungă tastată rapid rămânea „fără ecou")
+      if (row !== end.row && !b.getLine(row + 1)?.isWrapped) out += ' '
     }
     return out.trim()
   }
@@ -274,6 +296,7 @@ export class CommandTracker {
         this.pendingText = rest.join(';')     // comanda poate conţine ';'
         break
       case 'C': {                  // execuția începe
+        this.justEnded = null
         const text = this.pendingText ?? this.readCommand()
         this.pendingText = null
         if (!text) { this.promptRow = null; break }
@@ -304,6 +327,7 @@ export class CommandTracker {
         }
         const done = this.current
         this.current = null
+        this.justEnded = done
         this.onChange?.()
         this.onCommand?.(done)
         break
@@ -365,7 +389,10 @@ export class CommandTracker {
     const nextLine = next?.startMarker.line ?? -1
     const cursorLine = b.baseY + b.cursorY
     let to = nextLine > from ? nextLine : (cmd.endMarker?.line ?? -1)
-    if (to <= from && cmd.endedAt && cursorLine > from) to = cursorLine
+    // până la cursor DOAR pentru ultima comandă: dacă după ea mai sunt comenzi (dar marcajele lor nu
+    // ajută — sub tmux pot cădea pe acelaşi rând), cursorul ar lua prompturile şi comenzile lor, iar
+    // textul ăsta ajunge în clipboard şi, lipit, se execută (e2e 3.6.13). Mai bine „nu pot extrage".
+    if (to <= from && cmd.endedAt && cursorLine > from && !next) to = cursorLine
     if (from < 0 || to < 0 || to <= from) return null
     const lines: string[] = []
     for (let row = from; row < to; row++) {
@@ -400,6 +427,7 @@ export class CommandTracker {
     }
     this.commands = []
     this.current = null
+    this.justEnded = null
   }
 }
 
@@ -409,4 +437,36 @@ export const cmdDuration = (c: Command): string => {
   if (ms < 1000) return `${ms} ms`
   if (ms < 60000) return `${(ms / 1000).toFixed(1)} s`
   return `${Math.floor(ms / 60000)}m ${Math.round((ms % 60000) / 1000)}s`
+}
+
+/** Împarte un chunk de output DUPĂ fiecare marcaj OSC 133 (`ESC ]133;…` terminat cu BEL sau ST), ca
+    SessionView să poată da tracker-ului fiecare bucată în ORDINEA PARSĂRII: o bucată aparţine
+    comenzii care rula când a început (marcajul de la capătul ei schimbă starea abia după). Înainte,
+    octeţii se dădeau la SOSIRE, după starea de atunci — iar xterm parsează asincron: un C şi
+    output-ul lui sosite înaintea parsării lui C nu ajungeau în captură, iar „copiază output-ul" cădea
+    pe extragerea de pe ecran (e2e 3.6.13: prompturi şi comenzi ulterioare în clipboard). */
+export function splitAfterMarks(b: Uint8Array): Uint8Array[] {
+  const out: Uint8Array[] = []
+  let from = 0
+  let i = 0
+  while (true) {
+    const e = b.indexOf(0x1b, i)
+    if (e < 0) break
+    i = e + 1
+    // ESC ] 1 3 3 ;
+    if (b[e + 1] !== 0x5d || b[e + 2] !== 0x31 || b[e + 3] !== 0x33 || b[e + 4] !== 0x33 || b[e + 5] !== 0x3b) continue
+    let t = e + 6
+    let end = -1
+    while (t < b.length) {
+      if (b[t] === 0x07) { end = t + 1; break }
+      if (b[t] === 0x1b) { end = b[t + 1] === 0x5c ? t + 2 : t; break }
+      t++
+    }
+    if (end < 0) break                       // marcaj rupt la capătul chunk-ului: restul rămâne împreună
+    out.push(b.subarray(from, end))
+    from = end
+    i = end
+  }
+  if (from < b.length || out.length === 0) out.push(b.subarray(from))
+  return out
 }

@@ -7,7 +7,7 @@ import { IDisposable, Terminal } from '@xterm/xterm'
 import { modeRestoreSeq } from '../lib/termmodes'
 import { errText, api, CommandGuard, CommandRule, Host, Session, withStepup } from '../lib/api'
 import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
-import { Command, CommandTracker, cmdDuration, matchCommandRule } from '../lib/commands'
+import { Command, CommandTracker, cmdDuration, matchCommandRule, splitAfterMarks } from '../lib/commands'
 import { EchoTracker, LineKey, countCprReplies, countCprRequests, reportOnly } from '../lib/echo'
 import { ECHO_GRACE_MS, LocalVerdict, localRunDecision, PeerState, PeerVerdict, RuleHit, guardActive, isBareEnter, judgeLocal, judgePeers, opaqueInput, plainText, runDecision, splitLines, stripControls, submitsLine, unbracket } from '../lib/broadcastGuard'
 import { clearCwd, parseOsc7, setCwd } from '../lib/cwd'
@@ -1871,12 +1871,13 @@ export default function SessionView(props: {
         })
       } else {
         const bytes = new Uint8Array(ev.data)
-        // cât rulează o comandă, dăm octeţii şi tracker-ului: output-ul „exact" (clipboard,
-        // markdown) se ia din FLUX, nu de pe ecran — sub tmux panoul e repictat asincron
-        // faţă de marcaje, iar extragerea din rânduri ieşea când prea lungă, când goală.
-        if (trackerRef.current?.running) {
-          trackerRef.current.feed(streamDecoderRef.current.decode(bytes, { stream: true }))
-        }
+        // output-ul „exact" al unei comenzi (clipboard, markdown) se ia din FLUX, nu de pe ecran — sub
+        // tmux panoul e repictat asincron faţă de marcaje. Bucăţile (despărţite DUPĂ fiecare marcaj
+        // OSC 133) se dau tracker-ului în ORDINEA PARSĂRII, cu starea de la începutul fiecăreia — nu
+        // la sosire: xterm parsează asincron, iar starea de la sosire putea fi a unei comenzi vechi
+        // (e2e 3.6.13). Decodorul vede toţi octeţii, în ordine (un caracter UTF-8 rupt între chunk-uri).
+        const tr = trackerRef.current
+        const parts = splitAfterMarks(bytes)
         // ecou: output sosit DUPĂ ultimele taste trimise; marcat abia după ce xterm l-a parsat
         // (trackerul OSC 133 vede atunci linia la zi) — guardrail-ul se bazează pe el. Strâns
         // (3.6.13): doar dacă a schimbat linia / cursorul faţă de instantaneul de la trimitere
@@ -1886,12 +1887,21 @@ export default function SessionView(props: {
         cprRef.current += countCprRequests(bytes)
         // scrieri încă neparsate: cât sunt, fluxul nu e „liniştit" (LOW-C)
         echo.writeStart()
-        if (seq > echo.coarseSeq || echo.waiting) {
-          term.write(bytes, () => {
-            echo.writeEnd()
-            echo.output(seq, lineKeyRef.current, performance.now(), rttRef.current)
+        const tracked = seq > echo.coarseSeq || echo.waiting
+        parts.forEach((part, i) => {
+          term.write('', () => {
+            const text = streamDecoderRef.current.decode(part, { stream: true })
+            if (tr?.capturing) tr.feed(text)
           })
-        } else term.write(bytes, () => echo.writeEnd())
+          if (i < parts.length - 1) term.write(part)
+          else if (tracked) {
+            term.write(part, () => {
+              tr?.endChunk()
+              echo.writeEnd()
+              echo.output(seq, lineKeyRef.current, performance.now(), rttRef.current)
+            })
+          } else term.write(part, () => { tr?.endChunk(); echo.writeEnd() })
+        })
       }
     }
     ws.onclose = (ev) => {
