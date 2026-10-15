@@ -350,14 +350,17 @@ closed (review of 3.6.12, `lib/broadcastGuard.ts`), when guardrail rules are act
     run too (zsh `↑` recalls `cd /srv` + newline + `rm -rf /srv/data`, `↑` again moves the cursor
     into the buffer's first row; Ctrl+V Ctrl+J; push-line). Blank rows don't stop it (a buffer can
     hold blank lines). Rows that are definitely not the buffer are left out: a tmux pane border (a
-    row of box-drawing characters with a horizontal run — the reading stops there, below is another
-    pane) and, in a tmux-backed session, the last screen row when every cell has the same
+    row of box-drawing characters only, from column 0 across the full pane width, with a horizontal
+    run — the reading stops there, below is another pane; a shorter `────` typed into a heredoc does
+    not stop it) and, in a tmux-backed session, the last screen row when every cell has the same
     non-default background (a tmux status bar; WebTerm's own tmux runs with the status bar off).
     Text below the line may still be something else — a zsh completion list, text left by
     `tput cup` / a progress tool — so **a match found only in that below-the-cursor reading never
     blocks and never clears the line**: it becomes a confirm dialog that says the match is in text
     below the cursor and shows the rows it read; Cancel keeps the line. A match also present in a
-    normal reading keeps its normal verdict. A logical line that continues for more than 50 rows
+    normal reading keeps its normal verdict. Known (confirm only, never a block): a tmux status bar
+    with the default background, or a `pane-border-status` line with text in the border, is read
+    as text below the cursor and can add a confirm. A logical line that continues for more than 50 rows
     after the cursor row is not truncated: it is unknown ("Can't check").
   - **Right prompt**: text right of the cursor at the first key, separated from it by blanks, is
     recorded with its row and column; a reading without it is only an extra variant, built only while

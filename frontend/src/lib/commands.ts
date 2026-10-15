@@ -267,7 +267,7 @@ export class CommandTracker {
       const l = b.getLine(r)
       if (!l) break
       const text = l.translateToString(true)
-      if (isPaneBorder(text)) break
+      if (isPaneBorder(text, this.term.cols)) break
       if (r === screenLast && this.tmuxBacked && isStatusRow(l, this.term.cols)) break
       if (text.trim()) lastRow = r
     }
@@ -860,12 +860,12 @@ function reachesLastCell(line: { getCell?: (x: number) => { getChars(): string; 
   return last.getWidth() === 0 && !!prev && prev.getWidth() === 2
 }
 
-/** Un rând de margine de panou tmux: doar caractere de chenar (─ │ ┌ ┐ └ ┘ ├ ┤ ┬ ┴ ┼ şi variantele
-    groase / duble) şi spaţii, cu cel puţin o linie orizontală de 3+ celule (marginea dintre două
-    panouri unul sub altul). */
-export function isPaneBorder(text: string): boolean {
-  const t = text.trim()
-  return t.length >= 3 && /^[─-╿\s]+$/u.test(t) && /[─━═]{3,}/u.test(t)
+/** Un rând de margine de panou tmux: de la coloana 0 până la ULTIMA coloană numai caractere de chenar
+    (─ │ ┌ ┐ └ ┘ ├ ┤ ┬ ┴ ┼ şi variantele groase / duble), fără spaţii, cu o linie orizontală de 3+
+    celule — marginea dintre două panouri unul sub altul. Un `────` tastat într-un buffer (heredoc) e
+    mai scurt decât lăţimea panoului, deci NU opreşte citirea (verificarea lui 5336911, L1). */
+export function isPaneBorder(text: string, cols: number): boolean {
+  return cols > 0 && text.length === cols && /^[\u2500-\u257f]+$/u.test(text) && /[\u2500\u2501\u2550]{3,}/u.test(text)
 }
 
 /** Bara de stare tmux: tot rândul (fiecare celulă, până la ultima coloană) are ACELAŞI fundal, care nu e

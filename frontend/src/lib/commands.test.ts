@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Terminal } from '@xterm/xterm'
-import { CommandTracker, screenResetIn, screenResetScan, splitAfterMarks } from './commands'
+import { CommandTracker, isPaneBorder, screenResetIn, screenResetScan, splitAfterMarks } from './commands'
 import type { CommandGuard } from './api'
 import { judgeLocal } from './broadcastGuard'
 
@@ -906,6 +906,25 @@ describe('CommandTracker.pendingBelow: textul de sub linia cursorului (verificar
     expect(v.kind === 'rule' && v.rule.action).toBe('confirm')
     const v2 = verdict(at(screen.slice(), [], true), block('rm\\s+-rf\\s+/srv'))
     expect(v2.kind === 'rule' && v2.rule.action).toBe('confirm')
+  })
+
+  it('L1 (5336911): `────` tastat într-un heredoc (mai scurt decât panoul) NU opreşte citirea — rândul rm e prins', () => {
+    const tr = at(['% cat <<EOF', '─'.repeat(20), 'EOF', 'rm -rf /srv/data', ''])
+    const v = verdict(tr, block('rm\\s+-rf\\s+/srv'))
+    expect(v.kind).toBe('rule')
+    expect(v.kind === 'rule' && v.rule.action).toBe('confirm')
+    expect(v.kind === 'rule' && v.below).toBe(true)
+    // şi un rând de chenar care nu începe la coloana 0 (indentat) nu e margine de panou
+    const tr2 = at(['% cat <<EOF', '  ' + '─'.repeat(78), 'EOF', 'rm -rf /srv/data'])
+    expect(verdict(tr2, block('rm\\s+-rf\\s+/srv')).kind).toBe('rule')
+  })
+
+  it('isPaneBorder: doar pe toată lăţimea panoului, de la coloana 0, fără spaţii', () => {
+    expect(isPaneBorder('─'.repeat(80), 80)).toBe(true)
+    expect(isPaneBorder('─'.repeat(40) + '┬' + '─'.repeat(39), 80)).toBe(true)
+    expect(isPaneBorder('─'.repeat(79), 80)).toBe(false)
+    expect(isPaneBorder(' ' + '─'.repeat(79), 80)).toBe(false)
+    expect(isPaneBorder('─'.repeat(39) + ' ' + '─'.repeat(40), 80)).toBe(false)
   })
 
   it('prompt pe un rând, nimic dedesubt → fără citire de dedesubt', () => {
