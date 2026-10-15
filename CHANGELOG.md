@@ -29,8 +29,8 @@ frontend only — no agent change (agent stays 58).
   live prompt would; anything else stays unknown until the next live prompt. Fail closed wherever
   the hub's byte parser and xterm could disagree: invalid UTF-8 that xterm drops, identifiers or
   kinds cut by the 64-byte window, oversized or aborted 133 sequences, a `C` without the prompt →
-  `E;<cmd>` before it, marks emitted on the alternate screen of a non-tmux stream (SSH counts as tmux
-  only if a probe found tmux on the remote) — all report "unknown". The scanner jumps between
+  `E;<cmd>` before it, marks emitted on the alternate screen of a non-tmux stream (SSH counts as
+  non-tmux: finding out would need a second exec on the remote) — all report "unknown". The scanner jumps between
   sequences with C-level searches (≥ 100 MB/s on plain, SGR-dense, `°`-dense and OSC-title-heavy
   output) and has a per-chunk event budget: crafted floods of escape sequences make the state
   "unknown" instead of stalling the shared gateway loop (≤ 0.22 ms per 16 KiB on every flood tried).
@@ -52,8 +52,10 @@ frontend only — no agent change (agent stays 58).
   so a clock in the prompt or a tmux status repaint "confirmed" keys whose echo had not arrived —
   and the echo of an earlier key confirmed the latest one (`↑↑⏎` faster than the round trip judged
   the first recalled line while the second ran). Each send is now confirmed on its own: output
-  counts only if it changed the typed line or the cursor, and a change confirms only the earliest
-  un-echoed key (or a run of plain text the line now shows). Keys with no visible effect (`Tab`
+  counts only if it changed the typed line or the cursor; a run of plain text is confirmed when the
+  line shows it, and a non-text key (`↑`, `Ctrl+P`, `Tab`) at most one per burst of output, once the
+  stream has been quiet briefly with the line unchanged (a redisplay split across two chunks no
+  longer confirms two keys). Keys with no visible effect (`Tab`
   with no completion = a bell) settle after max(1 s, 4 × RTT), capped at 5 s; broadcast targets
   additionally need *some* output after the keys, so a stalled host never counts as echoed — never
   looser than 3.6.12. A burst of more than 64 keys without echo is released once the host has

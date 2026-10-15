@@ -13,7 +13,7 @@ function shell(history: string[]) {
     if (d === '\x1b[A') { hist = Math.max(0, hist - 1); line = history[hist] ?? line }
     else line += d
   }
-  return { key, apply, get line() { return line } }
+  return { key, apply, set: (l: string) => { line = l }, get line() { return line } }
 }
 
 // un panou: trimite (EchoTracker.sent + instantaneul de referinţă), iar ecoul fiecărei taste ajunge
@@ -32,10 +32,16 @@ function pane(history: string[] = []) {
   const arrive = (n: number) => {
     const tag = echo.inputSeq
     for (const d of inFlight.splice(0, n)) sh.apply(d)
-    echo.output(tag, sh.key)
+    echo.output(tag, sh.key, t, null)
   }
-  const local = () => ({ atPrompt: true, echoed: echo.echoed(false, t, null), pending: sh.line || null, unechoed: echo.unechoed() })
-  return { sh, echo, send, arrive, local, tick: (ms: number) => { t += ms } }
+  /** un chunk care pune linia pe `l` (o redesenare parţială) */
+  const chunk = (l: string) => { sh.set(l); echo.output(echo.inputSeq, sh.key, t, null) }
+  // ca în SessionView: echoed (cu starea liniei) ÎNAINTEA lui unechoed
+  const local = () => {
+    const echoed = echo.echoed(false, t, null, sh.key())
+    return { atPrompt: true, echoed, pending: sh.line || null, unechoed: echo.unechoed() }
+  }
+  return { sh, echo, send, arrive, chunk, local, tick: (ms: number) => { t += ms } }
 }
 
 const g: CommandGuard = { enabled: true, rules: [{ pattern: 'rm\\s+-rf', action: 'block' }] }
@@ -46,13 +52,14 @@ describe('3.6.13 (review M1): ecoul unei taste vechi nu confirmă tasta nouă', 
     p.send('\x1b[A'); p.send('\x1b[A')
     p.arrive(1)                      // primul ↑ → „ls" pe ecran
     expect(p.sh.line).toBe('ls')
+    expect(p.echo.unechoed()).toEqual([null, null])   // schimbarea unei taste ne-text: aşteaptă liniştea
+    p.tick(100)
     // logica veche: instantaneu doar pentru ultima trimitere → „ls" ≠ linia goală → echoed, ok pe „ls"
-    expect(p.echo.unechoed()).toEqual([null])
-    expect(p.echo.echoed(false, 0, null)).toBe(false)
     expect(judgeLocal(p.local(), g, false).kind).toBe('wait')
+    expect(p.echo.unechoed()).toEqual([null])
     expect(judgeLocal(p.local(), g, true).kind).toBe('unknown')
     p.arrive(1)                      // al doilea ↑ → rm -rf /srv
-    expect(p.echo.echoed(false, 0, null)).toBe(true)
+    p.tick(100)
     expect(judgeLocal(p.local(), g, true)).toMatchObject({ kind: 'rule', cmd: 'rm -rf /srv' })
   })
 
@@ -60,8 +67,34 @@ describe('3.6.13 (review M1): ecoul unei taste vechi nu confirmă tasta nouă', 
     const p = pane(['rm -rf /srv', 'ls'])
     p.send('\x1b[A'); p.send('\x1b[A')
     p.arrive(2)
+    p.tick(100)
+    expect(p.local().echoed).toBe(false)
     expect(p.echo.unechoed()).toEqual([null])
-    expect(p.echo.echoed(false, 0, null)).toBe(false)
+  })
+
+  // a treia trecere de review (MEDIUM-2): redesenarea UNEI taste ruptă în două chunk-uri
+  it('ecoul unui ↑ rupt în două chunk-uri NU confirmă două taste', () => {
+    const p = pane(['rm -rf /srv', 'ls -la /tmp'])
+    p.send('\x1b[A'); p.send('\x1b[A')
+    p.chunk('ls -l')                 // prima jumătate a redesenării lui ↑1
+    p.tick(5)
+    p.chunk('ls -la /tmp')           // restul ei; ↑2 n-a sosit încă
+    p.tick(100)
+    const st = p.local()
+    // logica din fd208c4: chunk 1 confirma ↑1, chunk 2 confirma ↑2 → „ls -la /tmp" citit, rm -rf rulat
+    expect(st.echoed).toBe(false)
+    expect(st.unechoed).toEqual([null])
+    expect(judgeLocal(st, g, true).kind).toBe('unknown')
+  })
+
+  it('o tastă ne-text: confirmată abia după ce fluxul tace, cu linia stabilă', () => {
+    const p = pane(['ls'])
+    p.send('\x1b[A')
+    p.arrive(1)
+    p.tick(10)
+    expect(p.local().echoed).toBe(false)        // prea devreme
+    p.tick(40)
+    expect(p.local().echoed).toBe(true)
   })
 
   it('tastare rapidă de text simplu: un chunk cu mai multe ecouri le confirmă pe toate', () => {
@@ -116,8 +149,8 @@ describe('3.6.13 (review M1): ecoul unei taste vechi nu confirmă tasta nouă', 
     p.sh.apply('y'); p.echo.output(tag, p.sh.key, 1500, null)  // după plasa de timp
     expect(p.echo.unechoed()).toEqual([])
     // tastele de după sunt urmărite normal
-    p.send('z'); p.arrive(1)
-    expect(p.echo.echoed(false, 1500, null)).toBe(true)
+    p.send('z'); p.sh.apply('z'); p.echo.output(p.echo.inputSeq, p.sh.key, 1500, null)
+    expect(p.echo.unechoed()).toEqual([])
   })
 })
 
@@ -191,8 +224,8 @@ describe('3.6.13 (review M2): rapoartele terminalului nu sunt taste', () => {
       expect(isTerminalReport(d), JSON.stringify(d)).toBe(true)
     }
   })
-  it('tastele rămân taste (fail-closed): ↑, Ctrl+P, TAB, Shift/Ctrl+F3 (= CSI 1;2..8 R), text', () => {
-    for (const d of ['\x1b[A', '\x10', '\t', '\x1b[1;5R', '\x1b[1;2R', 'ls', '\x1b[I ls', '', '\x1b[200~x\x1b[201~']) {
+  it('tastele rămân taste (fail-closed): ↑, Ctrl+P, TAB, F3 cu modificatori şi Meta (= CSI 1;n R), text', () => {
+    for (const d of ['\x1b[A', '\x10', '\t', '\x1b[1;5R', '\x1b[1;2R', '\x1b[1;9R', '\x1b[1;16R', 'ls', '\x1b[I ls', '', '\x1b[200~x\x1b[201~']) {
       expect(isTerminalReport(d), JSON.stringify(d)).toBe(false)
     }
   })

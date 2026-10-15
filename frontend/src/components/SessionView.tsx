@@ -767,7 +767,7 @@ export default function SessionView(props: {
   })
   /** ecoul ultimelor taste (vezi echoSettled): `requireOutput` la broadcast, nu într-un singur panou */
   const echoedNow = useCallback((requireOutput: boolean): boolean =>
-    echoRef.current.echoed(requireOutput, performance.now(), rttRef.current), [])
+    echoRef.current.echoed(requireOutput, performance.now(), rttRef.current, lineKeyRef.current()), [])
   const send = useCallback((data: string | Uint8Array, report = false) => {
     if (muteRef.current || readOnlyRef.current) return
     const ws = wsRef.current
@@ -2139,6 +2139,14 @@ export default function SessionView(props: {
     }
   }
 
+  /** xterm.paste() cu marcajul „paste în curs": datele emise (sincron, prin onData) nu sunt niciodată
+      rapoarte de terminal (review 3.6.13, a treia trecere, LOW-1) — singura cale către term.paste */
+  function termPaste(text: string) {
+    const prev = pastingRef.current
+    pastingRef.current = true
+    try { termRef.current?.paste(text) } finally { pastingRef.current = prev }
+  }
+
   async function paste() {
     const text = await readText()
     // Citirea nu are cale de rezervă: `execCommand('paste')` e blocat peste tot, iar
@@ -2151,7 +2159,7 @@ export default function SessionView(props: {
     // prin xterm.paste(), nu send() direct: doar așa textul e împachetat în
     // bracketed paste (\x1b[200~…) — altfel un paste multi-linie execută
     // fiecare linie imediat în shell și strică indentarea în vim/nano
-    if (text) termRef.current?.paste(text)
+    if (text) termPaste(text)
     termRef.current?.focus()
   }
 
@@ -2165,7 +2173,7 @@ export default function SessionView(props: {
     // bracketed paste (ca `paste()`): multi-linie rămâne inert. „run" adaugă Enter DUPĂ,
     // deliberat separat, ca auto-execuţia să fie o alegere, nu implicit.
     const cur = trackerRef.current?.pendingCommand() ?? ''   // ÎNAINTE de paste: linia la care se adaugă
-    termRef.current?.paste(text)
+    termPaste(text)
     // „lipeşte şi rulează" nu ocoleşte guardrail-ul: dacă o linie atinge o regulă, lipim fără
     // Enter — verificarea de la Enter (sau dialogul de confirmare) decide apoi, ca la tastare
     const hit = run ? guardedLine(cur + text) : null

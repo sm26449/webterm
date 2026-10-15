@@ -705,37 +705,32 @@ async def osc133_hub_tests():
         # L1: un C care nu urmează unui prompt (job în fundal) → None, nu „rulează"
         await hub._process_output(b"\x1b]133;D;0\x07\x1b]133;C\x07")
         check("C fără B înainte → last=None", hub.osc133_state(None)["last"] is None)
-        # LOW-2: SSH — tmux doar dacă sonda l-a găsit pe remote
-        class _Ssh:
-            backend = "ssh"
-
-            def __init__(self, ok):
-                self.ok = ok
-
-            def tmux_for(self, sid):
-                return self.ok
+        # review 3.6.13: SSH = flux fără tmux (fail-closed), FĂRĂ un al doilea exec pe remote
         await hub._process_output(b"\x1b[?1049h\x1b]133;A\x07$ \x1b]133;B\x07")
-        hub._source = lambda: _Ssh(True)
-        check("SSH cu tmux pe remote → comutarea de ecran e a clientului tmux", hub.osc133_state(None)["last"] == "B")
-        hub._source = lambda: _Ssh(False)
-        check("SSH fără tmux (shell simplu) → ecranul alternativ contează → None", hub.osc133_state(None)["last"] is None)
         hub._source = lambda: type("S", (), {"backend": "ssh"})()
-        check("SSH fără sondă → None (necunoscut = fără tmux)", hub.osc133_state(None)["last"] is None)
+        check("SSH: ecranul alternativ contează → B de pe ecranul alternativ = None",
+              hub.osc133_state(None)["last"] is None)
+        hub._source = lambda: type("S", (), {"backend": "tmux"})()
+        check("… agent tmux: comutarea e a clientului tmux → B", hub.osc133_state(None)["last"] == "B")
         hub._source = real_source
         await hub._process_output(b"\x1b[?1049l")
 
         class _Conn:
-            def __init__(self, out=None, exc=None):
-                self.out, self.exc = out, exc
+            def __init__(self):
+                self.cmds = []
 
-            async def run(self, cmd, check=False):
-                if self.exc:
-                    raise self.exc
-                return type("R", (), {"stdout": self.out})()
-        for conn, want, why in ((_Conn("wt-tmux-ok\n"), True, "tmux găsit"), (_Conn(""), False, "fără tmux"),
-                                (_Conn(exc=OSError("x")), False, "sonda a eşuat"), (_Conn(b"wt-tmux-ok"), True, "octeţi")):
-            src = core.SshSource(1, conn)
-            check("SshSource._probe_tmux: %s → %s" % (why, want), await src._probe_tmux() is want)
+            async def run(self, *a, **kw):
+                self.cmds.append(("run", a))
+                raise AssertionError("SshSource nu trebuie să ruleze comenzi suplimentare")
+
+            async def create_process(self, cmd, **kw):
+                self.cmds.append(("proc", cmd))
+                raise OSError("fără reţea în test")
+        conn = _Conn()
+        src = core.SshSource(1, conn)
+        await src.create("f" * 32, 24, 80, "xterm-256color")
+        check("SshSource.create: un singur exec pe remote (comanda sesiunii), nicio sondă",
+              [c[0] for c in conn.cmds] == ["proc"], conn.cmds)
         hub.clients.discard(client)
     finally:
         hub.teardown()

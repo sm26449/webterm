@@ -5,10 +5,14 @@ import { echoSettled, echoSettleMs } from './broadcastGuard'
     Problema (review 3.6.13, M1): un singur instantaneu „al ultimei trimiteri" credita ecoul unei
     taste MAI VECHI drept ecoul celei mai noi — ↑↑⏎ rapid: ecoul primului ↑ schimba linia, deci al
     doilea ↑ părea confirmat, iar guardrail-ul citea prima comandă rechemată în timp ce shell-ul o
-    rula pe a doua. Acum fiecare schimbare a liniei creditează DOAR prima trimitere fără ecou (sau o
-    serie de trimiteri de text simplu, dacă linia arată exact textul lor adăugat), iar referinţa
-    pentru următoarea e starea de după acest ecou. Două ecouri sosite în acelaşi chunk → al doilea
-    rămâne fără ecou (fail-closed: aşteptare / dialog / plasa de timp), niciodată invers.
+    rula pe a doua. Acum o serie de trimiteri de text simplu se confirmă când linia arată exact textul
+    lor adăugat; o tastă care NU e text (↑, Ctrl+P, TAB…) se confirmă cel mult una per rafală de
+    output, şi abia după ce fluxul a tăcut (echoQuietMs) cu linia neschimbată — o redesenare ruptă în
+    două chunk-uri nu mai confirmă două taste (a treia trecere de review). Două ecouri non-text în
+    aceeaşi rafală → al doilea rămâne fără ecou (fail-closed: aşteptare / dialog / plasa de timp).
+    Limită care rămâne: o tastă al cărei ecou soseşte în rafale despărţite de mai mult de quietMs
+    (host foarte încărcat) poate fi confirmată de prima rafală; plasa e acelaşi mecanism ca înainte —
+    linia citită e cea de pe ecran.
 
     Rapoartele generate de TERMINAL (mouse, focus, CPR, DA…; review 3.6.13, M2) nu sunt taste: nu
     aşteaptă niciun ecou, deci nici nu intră aici (vezi isTerminalReport). */
@@ -34,6 +38,13 @@ interface Entry {
 
 export const ECHO_PENDING_MAX = 64
 
+/** cât trebuie să tacă fluxul ca o schimbare de linie dintr-o tastă ne-text să fie socotită completă:
+    RTT/2 între 20 şi 50 ms (30 ms fără RTT măsurat) */
+export function echoQuietMs(rtt: number | null | undefined): number {
+  if (typeof rtt !== 'number' || !Number.isFinite(rtt) || rtt <= 0) return 30
+  return Math.min(50, Math.max(20, rtt / 2))
+}
+
 export class EchoTracker {
   /** trimiteri cu ecou aşteptat (contor) */
   inputSeq = 0
@@ -44,6 +55,11 @@ export class EchoTracker {
   /** referinţa pentru prima trimitere fără ecou: starea de după ultimul ecou creditat, sau cea de la
       trimitere când nu aştepta nimic. undefined = instantaneul încă nu s-a luat; null = fără linie. */
   private base: LineKey | null | undefined = undefined
+  /** cea mai veche tastă care NU e text simplu, a cărei linie s-a schimbat: se confirmă abia după ce
+      fluxul a tăcut (quietMs) şi linia a rămas aceeaşi — o redesenare ruptă în două chunk-uri nu mai
+      confirmă două taste (review 3.6.13, a treia trecere, MEDIUM-2) */
+  private cand: { seq: number; key: string; at: number } | null = null
+  private lastOutAt = 0
 
   /** O tastă (sau un text) a plecat spre host. `text` = textul ei dacă e text simplu, altfel null.
       `needBase` = nu aştepta nimic înainte: apelantul ia instantaneul liniei DUPĂ ce xterm a parsat
@@ -77,6 +93,7 @@ export class EchoTracker {
       `nowMs` / `rtt` servesc doar eliberării unei intrări comprimate. */
   output(tag: number, now: () => LineKey | null, nowMs = 0, rtt: number | null = null): void {
     if (tag > this.coarseSeq) this.coarseSeq = tag
+    this.lastOutAt = nowMs
     const first = this.pending[0]
     if (!first || first.seq > tag || this.base === undefined) return
     const cur = now()
@@ -88,6 +105,7 @@ export class EchoTracker {
       if (first.lumpKey === undefined) { first.lumpKey = key; return }
       if (this.coarseSeq >= first.seq && key !== first.lumpKey && nowMs - (first.lumpAt ?? 0) >= echoSettleMs(rtt)) {
         this.pending.shift()
+        this.cand = null
         for (const e of this.pending) e.blind = true          // referinţa lor nu se ştie: doar dovadă vizibilă
         this.base = this.pending.length ? cur : undefined
       }
@@ -107,6 +125,7 @@ export class EchoTracker {
       // (typeahead) rămân: ecoul lor apare abia la următorul prompt
       this.drop((e) => e.seq <= tag && !e.blind)
       for (const e of this.pending) e.blind = true
+      this.cand = null
       this.base = this.pending.length ? null : undefined
       return
     }
@@ -120,6 +139,7 @@ export class EchoTracker {
         if (cur.line.endsWith(acc)) upto = e.seq
       }
       if (upto) this.drop((e) => e.seq <= upto)
+      this.cand = null
       this.base = this.pending.length ? cur : undefined
       return
     }
@@ -132,10 +152,32 @@ export class EchoTracker {
       acc += e.text
       if (cur.line === this.base.line + acc) matched = e.seq
     }
-    if (matched) this.drop((e) => e.seq <= matched)
-    else if (!head.blind) this.drop((e) => e === head)     // o schimbare = DOAR cea mai veche tastă
+    if (matched) {
+      this.drop((e) => e.seq <= matched)
+      this.cand = null
+    } else if (!head.blind) {
+      // o schimbare care nu e text simplu (↑, Ctrl+P, TAB, o redesenare): cel mult cea mai veche tastă,
+      // şi abia după ce fluxul tace (vezi quiet). Încă o schimbare înainte de asta = aceeaşi rafală
+      // (ex. redesenarea lui ↑ ruptă în două chunk-uri): reporneşte aşteptarea, nu confirmă alta
+      if (this.cand && this.cand.seq === head.seq) { this.cand.key = cur.k; this.cand.at = nowMs }
+      else this.cand = { seq: head.seq, key: cur.k, at: nowMs }
+    }
     // (un typeahead „orb" nu se confirmă dintr-o schimbare oarecare, doar când linia îl arată)
     this.base = this.pending.length ? cur : undefined
+  }
+
+  /** Confirmă tasta-candidat dacă fluxul a tăcut destul şi linia n-a mai mişcat de atunci. */
+  private quiet(nowMs: number, rtt: number | null, keyNow: LineKey | null): void {
+    const c = this.cand
+    if (!c) return
+    const head = this.pending[0]
+    if (!head || head.seq !== c.seq) { this.cand = null; return }
+    const q = echoQuietMs(rtt)
+    if (nowMs - c.at < q || nowMs - this.lastOutAt < q) return
+    if (!keyNow || keyNow.k !== c.key) return
+    this.pending.shift()
+    this.cand = null
+    this.base = this.pending.length ? keyNow : undefined
   }
 
   /** mai aşteaptă vreo trimitere ecoul? */
@@ -148,11 +190,14 @@ export class EchoTracker {
     if (upto > this.coarseSeq) this.coarseSeq = upto
     this.drop((e) => e.seq <= upto)
     for (const e of this.pending) e.blind = true
+    this.cand = null
     this.base = this.pending.length ? null : undefined   // trimise după începutul replay-ului: grosier
   }
 
-  /** Ecoul ultimelor taste (vezi echoSettled): `requireOutput` la broadcast, nu într-un panou singur. */
-  echoed(requireOutput: boolean, nowMs: number, rtt: number | null): boolean {
+  /** Ecoul ultimelor taste (vezi echoSettled): `requireOutput` la broadcast, nu într-un panou singur.
+      `keyNow` = starea liniei acum (confirmă tasta-candidat dacă fluxul a tăcut; vezi quiet). */
+  echoed(requireOutput: boolean, nowMs: number, rtt: number | null, keyNow?: LineKey | null): boolean {
+    if (keyNow !== undefined) this.quiet(nowMs, rtt, keyNow)
     return echoSettled({
       strict: this.pending.length === 0,
       coarse: this.coarseSeq >= this.inputSeq,
@@ -176,13 +221,14 @@ export class EchoTracker {
     Rapoarte pe care TERMINALUL le trimite singur (nu tastele utilizatorului): focus (CSI I / O), mouse
     (SGR `CSI < … M/m`, urxvt, X10 `CSI M` + 3 octeţi), CPR, DA1/DA2/DA3, DSR, DECRPM, răspunsuri la
     operaţii de fereastră, OSC de culoare, DECRQSS. Un chunk e raport doar dacă e ÎNTREG format din
-    astfel de secvenţe. Excepţie fail-closed: `CSI 1;2..8 R` e şi Shift/Ctrl/Alt+F3 — rămâne tastă. */
+    astfel de secvenţe. Excepţie fail-closed: `CSI 1;<n> R` e şi F3 cu modificatori (Shift/Ctrl/Alt 2..8, cu Meta/Super
+    9..16 — xterm Keyboard.ts adaugă 8 pentru metaKey) — rămâne tastă. */
 const REPORT_RE = new RegExp('^(?:' + [
   '\\x1b\\[[IO]',
   '\\x1b\\[<\\d+;\\d+;\\d+[Mm]',
   '\\x1b\\[\\d+;\\d+;\\d+M',
   '\\x1b\\[M[\\x20-\\xff]{3}',
-  '\\x1b\\[(?!1;[2-8]R)\\d+;\\d+R',
+  '\\x1b\\[(?!1;\\d+R)\\d+;\\d+R',
   '\\x1b\\[\\?\\d+;\\d+R',
   '\\x1b\\[[?>=][\\d;]*c',
   '\\x1bP!\\|[0-9A-Fa-f]*\\x1b\\\\',

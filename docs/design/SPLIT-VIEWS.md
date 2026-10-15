@@ -225,11 +225,16 @@ closed (review of 3.6.12, `lib/broadcastGuard.ts`), when guardrail rules are act
   reference for the earliest un-echoed send is the line state (screen, absolute cursor row/column,
   OSC 133 line) right after the previous echo — or, when nothing was pending, a snapshot taken once
   xterm had parsed everything that arrived before the key. Output counts as an echo only if it
-  **changed** that state, and a change confirms **only the earliest** un-echoed send — or a run of
-  plain-text sends when the line now shows exactly their text appended (fast typing echoed in one
-  chunk). So `↑↑⏎` typed faster than the round trip can't pass on the first `↑`'s echo: the second
-  `↑` stays un-echoed until its own change arrives (review of 3.6.13, M1; two non-text echoes in one
-  chunk leave the second one un-echoed — fail closed). A clock in the prompt or a tmux status
+  **changed** that state. A run of plain-text sends is confirmed when the line now shows exactly
+  their text appended (fast typing echoed in one chunk). A key that is **not** plain text (`↑`,
+  `Ctrl+P`, `Tab`, editing keys) is confirmed **at most one per burst of output**, and only once the
+  stream has been quiet for RTT/2 (20–50 ms; 30 ms without a measured RTT) with the line unchanged
+  since its last change — so `↑↑⏎` typed faster than the round trip can't pass on the first `↑`'s
+  echo, not even when that `↑`'s redisplay arrives split across two chunks (third review of 3.6.13;
+  before it, each half confirmed one key). Two non-text echoes in one burst leave the second
+  un-echoed — fail closed (the wait, then "Can't check", or the time net). Residual: a key whose
+  echo arrives in bursts more than the quiet window apart (a heavily loaded host) can be confirmed
+  by the first burst; the line judged is then the one on the screen. A clock in the prompt or a tmux status
   repaint (cursor goes away and comes back) doesn't count. Keys with no visible effect (`Tab` with
   no completion only rings the bell, `Home` at column 0 prints nothing) would never "echo", so they
   **settle** after max(1 s, 4 × measured RTT), capped at 5 s — but for a broadcast target only if
@@ -252,7 +257,9 @@ closed (review of 3.6.12, `lib/broadcastGuard.ts`), when guardrail rules are act
   line break is never a report and always goes through the guardrail, and data from a paste is
   never a report (a capture-phase paste listener marks it). Before the second review a pasted
   `ESC]0;x⏎rm -rf /srv⏎BEL` (shell without bracketed paste) was classified as a report and sent
-  unchecked to every pane. `CSI 1;2..8 R` stays a key: it is also modified F3.
+  unchecked to every pane. Every `term.paste()` (Ctrl+V, the paste button and the mobile keybar's,
+  the paste history) goes through one helper that sets the same flag. `CSI 1;<n> R` stays a key: it
+  is also F3 with modifiers (2–8, and 9–16 with Meta/Super).
   Residual: a background job that prints while the keys are in flight still moves the cursor and
   counts as the earliest key's echo;
 - **a single pane (no broadcast) waits for the echo too** (3.6.13): with rules active, Enter /
@@ -346,12 +353,15 @@ sequence over the carry cap) makes `last` **`None`** instead of leaving an older
   `CSI ? 1;1049 h`) and RIS are tracked; a mark emitted on the alternate screen is reported as
   `None` on a non-tmux stream (pty / telnet / serial — e.g. tmux or screen run inside a plain pty,
   whose inner shell's marks reach us while the outer screen is alternate; `read_tail` strips the
-  switch, so the replay would show that `B` on the main screen). On a tmux-backed stream (agent tmux
-  backend, SSH with tmux on the remote) the outer tmux client sits on the alternate screen for as
-  long as it is attached, so the switch is an artefact there and is ignored. For SSH, tmux counts
-  only if a probe (`command -v tmux` on the remote, 10 s timeout, run when the session is created)
-  found it — the session command falls back to a plain login shell otherwise; any other or unknown
-  source, or a failed probe, counts as non-tmux (fail closed).
+  switch, so the replay would show that `B` on the main screen). On the agent's tmux backend the
+  outer tmux client sits on the alternate screen for as long as it is attached, so the switch is an
+  artefact there and is ignored. **SSH counts as non-tmux** (fail closed): its session command is
+  `tmux new -A … || exec $SHELL -l`, so a remote without tmux gives a plain shell, and finding out
+  would need a second exec on the remote — which regresses hosts with `ForceCommand` / `command=`
+  menus, appliance CLIs, a `read` in `.bashrc`, `MaxSessions` limits or bastions that audit every
+  exec (a probe tried during this review was dropped for that reason). On an SSH host with tmux the
+  marks therefore come from the alternate screen and stay unknown after a reattach, as in 3.6.12.
+  Any other or unknown source counts as non-tmux too.
 - **Stripped sequences (L3):** `read_tail` removes 47/1047/1048/1049 h/l, `ESC[2J`, `ESC[3J` and
   RIS from every replay. If one of them lies after the last mark, `synced` is false: the replayed
   screen isn't the live one (`Ctrl+L` at the prompt, a repaint), and removing it could splice a mark
