@@ -1189,7 +1189,11 @@ try {
   // se termină după reluare — verificăm pe HOST că fişierul are toţi octeţii (reluat corect, nu corupt)
   await activePane.locator('.xterm-screen').click()
   await page.keyboard.type(`for i in $(seq 1 60); do [ -f /tmp/${PNAME} ] && [ $(wc -c < /tmp/${PNAME}) = ${PBYTES} ] && { echo PAUSE_RESUME_OK; break; }; sleep 1; done\n`)
-  const resumedOk = await waitScreen('PAUSE_RESUME_OK', 40000)
+  // OUTPUT-ul buclei (un rând care e EXACT markerul), nu ecoul comenzii — comanda tastată conţine şi
+  // ea textul, deci un `waitScreen` trecea înainte ca bucla să se termine, iar paste-ul de mai jos
+  // ajungea cât shell-ul era încă ocupat (fără bracketed paste → calea nu se insera)
+  const resumedOk = await pollValue(
+    () => screenText().then((t) => t.split('\n').some((l) => l.trim() === 'PAUSE_RESUME_OK')), (v) => v, 40000)
   check('resume: upload-ul se termină complet pe host (reluat de la offset)', resumedOk,
     await page.evaluate((id) => JSON.stringify(window.__wtTransfers?.store?.get?.(id) ?? null), jobId))
   // bucla de aşteptare din shell (până la 60 s) ar rămâne să blocheze promptul, iar verificările

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { CommandGuard } from './api'
-import { countCprReplies, countCprRequests, EchoTracker, isTerminalReport, LineKey, ECHO_PENDING_MAX, reportOnly } from './echo'
+import { countCprReplies, countCprRequests, echoes, EchoTracker, isTerminalReport, LineKey, ECHO_PENDING_MAX, reportOnly } from './echo'
 import { echoSettleMs, judgeLocal, localRunDecision, plainText } from './broadcastGuard'
 
 // Un „shell" minimal: linia tastată + cursorul la capăt, cu istoric pentru ↑.
@@ -484,5 +484,19 @@ describe('3.6.13 e2e: textul unei linii deja trimise nu blochează coada', () =>
     echo.output(echo.inputSeq, key, 3, null)
     // logica din 40d5d80: textul nepotrivit + Enter-ul din spatele lui rămâneau → dialog la comanda următoare
     expect(echo.unechoed()).toEqual([])
+  })
+})
+
+describe('3.6.13 e2e: ecoul recunoscut după textul de lângă cursor (rândul promptului citit greşit)', () => {
+  it('linia citită de la prompt e greşită (regiune de scroll tmux), textul de lângă cursor e bun', () => {
+    const base: LineKey = { k: 'a', line: 'garbage', tail: 'root@h:/tmp#for' }
+    expect(echoes(base, { k: 'b', line: 'other garbage', tail: 'root@h:/tmp#fori' }, 'i')).toBe(true)
+    expect(echoes(base, { k: 'b', line: 'x', tail: 'root@h:/tmp#for' }, 'i')).toBe(false)
+  })
+  it('ancorat: un text deja prezent pe ecran nu trece drept ecou (↑ „…/x" + „x" tastat)', () => {
+    const base: LineKey = { k: 'a', line: 'rm -rf /tmp/x', tail: '#rm-rf/tmp/x' }
+    expect(echoes(base, { k: 'b', line: 'rm -rf /tmp/x', tail: '#rm-rf/tmp/x' }, 'x')).toBe(false)
+    expect(echoes(base, { k: 'b', line: 'rm -rf /tmp/xx', tail: '#rm-rf/tmp/xx' }, 'x')).toBe(true)
+    expect(echoes(base, { k: 'b', line: 'rm -rf /tmp/x', tail: '#rm-rf/tmp/x' }, ' ')).toBe(false)
   })
 })

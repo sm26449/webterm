@@ -765,7 +765,15 @@ export default function SessionView(props: {
     if (!term || !tr || !tr.atPrompt()) return null
     const b = term.buffer.active
     const line = tr.pendingCommand() ?? ''
-    return { k: `${b.type}\u0000${b.baseY + b.cursorY}\u0000${b.cursorX}\u0000${line}`, line }
+    // textul care se termină la cursor (3 rânduri), fără spaţii — vezi LineKey.tail
+    const row = b.baseY + b.cursorY
+    let tail = ''
+    for (let r = Math.max(0, row - 2); r <= row; r++) {
+      const l = b.getLine(r)
+      if (l) tail += l.translateToString(true, 0, r === row ? b.cursorX : undefined)
+    }
+    tail = tail.replace(/\s+/g, '').slice(-200)
+    return { k: `${b.type}\u0000${row}\u0000${b.cursorX}\u0000${line}`, line, tail }
   })
   /** ecoul ultimelor taste (vezi echoSettled): `requireOutput` la broadcast, nu într-un singur panou */
   const echoedNow = useCallback((requireOutput: boolean): boolean =>

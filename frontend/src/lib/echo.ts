@@ -19,7 +19,27 @@ import { echoSettled, echoSettleMs } from './broadcastGuard'
 
 /** Starea liniei de comandă la un moment dat: `k` = cheia completă (ecran, cursor, linie), `line` =
     linia tastată (OSC 133, de la B la cursor). null = nicio linie de shell citibilă. */
-export interface LineKey { k: string; line: string }
+export interface LineKey {
+  k: string
+  line: string
+  /** textul de pe ecran care se termină la cursor (rândul cursorului + cele dinainte), fără spaţii —
+      nu depinde de rândul promptului. Sub tmux, o linie lungă la baza ecranului se derulează în
+      regiunea de scroll (bara de stare rămâne jos) şi rândul promptului citit de tracker nu mai e cel
+      bun; textul de lângă cursor rămâne corect (e2e 3.6.13) */
+  tail?: string
+}
+
+/** Ecoul textului `acc` faţă de referinţa `base`: linia (de la prompt) = referinţa + text, SAU textul
+    de lângă cursor se termină cu [capătul textului de lângă cursor al referinţei] + text — ancorat,
+    deci un text deja prezent pe ecran (↑ care recheamă „…/x", apoi „x" tastat) nu trece drept ecou. */
+export function echoes(base: LineKey, cur: LineKey, acc: string): boolean {
+  const a = sq(acc)
+  if (!a) return false
+  if (sq(cur.line) === sq(base.line + acc)) return true
+  if (base.tail === undefined || cur.tail === undefined) return false
+  return cur.tail.endsWith(base.tail.slice(-TAIL_ANCHOR) + a)
+}
+const TAIL_ANCHOR = 40
 
 interface Entry {
   seq: number
@@ -227,7 +247,7 @@ export class EchoTracker {
     for (const e of this.pending) {
       if (e.seq > tag || e.text === null || e.lump) break
       acc += e.text
-      if (sq(acc) && sq(cur.line) === sq(this.base.line + acc)) matched = e.seq
+      if (echoes(this.base, cur, acc)) matched = e.seq
     }
     if (matched) {
       this.drop((e) => e.seq <= matched)
