@@ -191,10 +191,17 @@ export class EchoTracker {
       return
     }
     if (cur.k === this.base.k) return                       // un ceas, un repaint: linia nu s-a mişcat
-    if (head.submit && !head.blind) {
-      // Enter: prima schimbare de după el îi e ecoul (rând nou / prompt nou)
-      this.drop((e) => e === head)
-      if (this.cand && this.cand.seq === head.seq) this.cand = null
+    // Enter: prima schimbare din output sosit DUPĂ el îi e ecoul (rând nou / prompt nou) — şi tot ce
+    // era înaintea lui aparţine unei linii deja trimise (a rulat sau va rula oricum; verificarea unui
+    // Enter următor priveşte doar linia de după). Un text dinaintea lui care nu s-a potrivit niciodată
+    // (sub tmux, o linie lungă la baza ecranului se derulează în regiunea de scroll, iar rândul
+    // promptului citit nu mai e cel bun) nu mai blochează coada (e2e 3.6.13).
+    let lastSubmit = -1
+    this.pending.forEach((e, i) => { if (e.submit && !e.blind && e.seq <= tag) lastSubmit = i })
+    if (lastSubmit >= 0) {
+      const gone = this.pending.slice(0, lastSubmit + 1)
+      this.pending = this.pending.slice(lastSubmit + 1)
+      if (this.cand && gone.some((e) => e.seq === this.cand?.seq)) this.cand = null
       this.base = this.pending.length ? cur : undefined
       return
     }

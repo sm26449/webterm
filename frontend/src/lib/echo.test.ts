@@ -466,3 +466,23 @@ describe('3.6.13 e2e: Enter „orb" consumat', () => {
     expect(echo.unechoed().join('')).toBe('rm -rf /srv')
   })
 })
+
+describe('3.6.13 e2e: textul unei linii deja trimise nu blochează coada', () => {
+  it('text nepotrivit (linie citită greşit sub tmux) + Enter → la prima schimbare de după Enter iese tot', () => {
+    const echo = new EchoTracker()
+    let line = 'garbage'
+    const key = (): LineKey => ({ k: `n\u00000\u0000${line.length}\u0000${line}`, line })
+    const send = (d: string, t: number, submit = false) => {
+      const r = echo.sent(plainText(d) ? d : null, t, submit)
+      if (r.needBase) echo.setBase(r.seq, key())
+    }
+    for (const c of 'for i in 1 2; do echo $i; done') send(c, 0)
+    line = 'something else'                      // ecoul nu se potriveşte (rândul promptului greşit)
+    echo.output(echo.inputSeq, key, 1, null)
+    send('\r', 2, true)
+    line = ''                                    // prompt nou
+    echo.output(echo.inputSeq, key, 3, null)
+    // logica din 40d5d80: textul nepotrivit + Enter-ul din spatele lui rămâneau → dialog la comanda următoare
+    expect(echo.unechoed()).toEqual([])
+  })
+})

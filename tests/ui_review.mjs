@@ -1044,7 +1044,9 @@ try {
   await m.screenshot({ path: `${OUT}/m-03-drawer.png` })
   // scopat la drawer-ul vizibil — altfel `.last()` prinde un buton din
   // dashboard-ul din spatele scrim-ului, care interceptează click-ul
-  await m.locator('.wt-sidebar .group', { hasText: HOST }).last().locator('button[title="Host actions"] >> visible=true').last().click()
+  // hostul ONLINE: o reîncercare a E2E (după un eşec la prima încercare) înrolează un al doilea
+  // „ci-local", iar cel vechi rămâne offline în listă — meniul lui n-are „New session"
+  await m.locator('.wt-sidebar .group', { hasText: HOST, hasNotText: /offline/i }).last().locator('button[title="Host actions"] >> visible=true').last().click()
   await m.locator('.wt-sidebar button[title="New session"] >> visible=true').last().click()
   await m.waitForSelector('.xterm-screen')
   await m.waitForTimeout(1500)
