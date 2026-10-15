@@ -9,6 +9,8 @@ back.
 
 ## [Unreleased]
 
+## [3.6.13] — 2026-10-15 · agent (58)
+
 Closes the four residuals the independent reviews left on the 3.6.12 broadcast guardrail. Gateway +
 frontend only — no agent change (agent stays 58).
 
