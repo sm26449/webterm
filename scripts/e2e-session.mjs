@@ -936,10 +936,17 @@ try {
   // Ctrl+U = dialogul de upload (nu view-source), Ctrl+R = re-listarea (nu reload-ul paginii) — DOAR cu focusul în listă
   await page.evaluate(() => { window.__wtNoReload = 1 })
   const pagesBefore = page.context().pages().length
-  await fpList.focus()
-  const chooserP = page.waitForEvent('filechooser', { timeout: 4000 }).catch(() => null)
-  await page.keyboard.press('Control+u')
-  const chooser = await chooserP
+  // lăsăm re-listarea de după Backspace să se aşeze (focus + randare), apoi Ctrl+U; o a doua apăsare
+  // doar dacă prima a căzut într-o re-randare (pe runnerul încărcat), cu diagnostic
+  await page.waitForTimeout(400)
+  let chooser = null
+  for (let i = 0; i < 2 && !chooser; i++) {
+    await fpList.focus()
+    const chooserP = page.waitForEvent('filechooser', { timeout: 4000 }).catch(() => null)
+    await page.keyboard.press('Control+u')
+    chooser = await chooserP
+    if (!chooser) console.log('  [diag] Ctrl+U fără file chooser, încercarea', i + 1, '· focus în listă =', await listFocused())
+  }
   await fpList.focus()
   await page.keyboard.press('Control+r')
   await page.waitForTimeout(800)
