@@ -9,6 +9,8 @@ back.
 
 ## [Unreleased]
 
+## [3.6.15] — 2026-10-16 · agent (58)
+
 Files panel UI/UX. Frontend only — no agent change (agent stays 58), no new gateway route.
 
 ### Added
