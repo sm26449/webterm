@@ -419,26 +419,39 @@ the background, into a context you no longer control. So the paste records its c
 happens, and on commit the quoted path plus a space is typed as a paste — never Enter — only if
 **all** of these still hold:
 
-1. **Same terminal, still the active one** — the terminal that received the paste is still open
-   and was not remounted, and it is still the active pane (the visible tab; in a split, the focused
-   pane). Switching to another tab or pane in the meantime changes the context.
-2. **Quick** — the upload finished within **30 seconds** of the paste (screenshots are small).
-3. **Nothing else typed** — no key, snippet, inserted text or broadcast input was sent to that
+1. **Same terminal, still the active one, never left** — the terminal that received the paste is
+   still open and was not remounted, it is still the active pane (the visible tab; in a split, the
+   focused pane), and it was not switched away from and back in the meantime (an activation counter
+   is compared).
+2. **Keyboard still there** — the keyboard focus is still in the terminal (or nowhere in
+   particular). If you are typing in another field of the page — terminal search, the Files filter,
+   a rename box, the command palette — your keys do not reach the terminal, and a path typed into
+   the program (plus focus moved into the terminal) would send your next Enter to it.
+3. **Quick** — the upload finished within **30 seconds** of the paste (screenshots are small).
+4. **Nothing else typed** — no key, snippet, inserted text or broadcast input was sent to that
    terminal since the paste. Terminal reports (focus, mouse, cursor position) do not count. If you
    kept typing, the path would land in the middle of something else.
-4. **Guardrail not holding input** (an Enter waiting for its echo, or a guardrail dialog open) —
+5. **Same program in front** — the alternate screen, the running command and the prompt (shell
+   integration) and the bracketed-paste mode are what they were at the paste; a different program
+   taking over the terminal meanwhile (started by you, another client or a script) changes the context.
+6. **Guardrail not holding input** (an Enter waiting for its echo, or a guardrail dialog open) —
    refused, as for every typed text.
-5. **Safe text** — no control, bidi or zero-width characters (the same check as everywhere).
+7. **Safe text** — no control, bidi, zero-width or other invisible format characters (Unicode `Cf`,
+   tag characters) — the same check as everywhere.
 
 It goes in as a paste: wrapped in `ESC[200~ … ESC[201~` under tmux (tmux removes the markers when
 the program in the pane did not ask for bracketed paste — the same as for a text paste) or when the
-program asked for bracketed paste; plain text otherwise. Several files from one paste are typed one
-after another (a path typed by the paste itself does not count as "something else typed").
+program asked for bracketed paste; plain text otherwise. Several files from one paste are typed **in
+the order you selected them**, after all of the paste's uploads finished, each checked again (a path
+typed by the paste itself does not count as "something else typed"). Typing never moves the keyboard
+focus out of a field of the page you are typing in.
 
 If any condition fails, the rules above apply: typed only at a real shell prompt, otherwise the row
-offers **Type into terminal** + **Copy path**, and the row says why ("you typed in
-this terminal while the file was uploading", "you switched to another tab or pane", "the upload took
-longer than 30 seconds", "the terminal was reopened").
+offers **Type into terminal** + **Copy path**, and the row says why ("you typed in this terminal
+while the file was uploading", "you were typing in another field of the page", "you switched to
+another tab or pane", "a different program took over this terminal", "the upload took longer than
+30 seconds", "the terminal was reopened"). Retrying a failed upload of a paste later (from the
+Transfers widget) is no longer a paste: the older rules apply.
 
 Uploads that do **not** start from a paste/drop on the terminal — the Files panel, **Insert path**
 from the Transfers widget — keep the older rules. The move-as-root `sudo` command is still typed

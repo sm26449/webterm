@@ -1137,6 +1137,16 @@ body > .monaco-aria-container {
 .wt-toast {
   animation: wt-toast-in 140ms ease-out;
 }
+/* 3.6.16 (review L5): ridicată deasupra widgetului de transferuri, stiva de toast-uri putea acoperi un
+   dialog modal (confirmarea guardrail-ului, step-up, parola) — pe telefon mai ales. Cât un dialog modal
+   VIZIBIL e deschis (nu unul dintr-un panou ascuns al stivei keep-alive), toast-urile se ascund; pe
+   ecrane înguste plafonul de ridicare e mai jos. */
+body:has([aria-modal="true"]:not([aria-hidden="true"] [aria-modal="true"])) .wt-toast-stack {
+  visibility: hidden;
+}
+@media (max-width: 767px) {
+  :root { --wt-toast-cap: 30vh; }
+}
 @media (prefers-reduced-motion: reduce) {
   .wt-toast {
     animation: none;

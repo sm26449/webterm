@@ -1,7 +1,9 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import {
   RETENTION_BATCH, extFromMime, focusedTerminalRunsProgram, inboxName, registerInsertTarget, isGenericName, pasteSubject, pasteSubjectText,
   pasteToastKey, selectExpired, shellQuote, stampFor,
+  PASTE_CONTEXT_MS, capturePasteContext, insertPathOutcome, insertPathPasted, isSafeToType, pasteContextStale, pasteStaleKey,
+  typeIntoPasted, typePastedPaths, typingElsewhere,
 } from './transfers'
 
 const when = new Date(2026, 9, 4, 14, 3, 22)   // 2026-10-04 14:03:22 local
@@ -208,5 +210,200 @@ describe('retenţia inbox-ului', () => {
   it('plafon per rulare', () => {
     const many = Array.from({ length: 120 }, (_, i) => ({ name: `f${i}.png`, dir: false, mtime: now - (20 + i) * day }))
     expect(selectExpired(many, now, 7)).toHaveLength(RETENTION_BATCH)
+  })
+})
+
+// ── 3.6.16: paste / drop de fişiere = un paste în ACEL terminal ──────────────────────────────
+describe('paste context (capturePasteContext / pasteContextStale / typeIntoPasted / typePastedPaths)', () => {
+  interface Fake {
+    sent: string[]; seq: number; active: boolean; epoch: number; kbd: boolean
+    bracketed: boolean; tmux: boolean; atPrompt: boolean; alt: boolean; running: boolean; refuse: boolean
+  }
+  const mk = (o: Partial<Fake> = {}) => {
+    const f: Fake = { sent: [], seq: 0, active: true, epoch: 0, kbd: true, bracketed: false, tmux: true,
+      atPrompt: false, alt: false, running: true, refuse: false, ...o }
+    const target = {
+      // ca SessionView: o trimitere reuşită creşte contorul de input; garda reţinută → false
+      send: (x: string) => { if (f.refuse) return false; f.sent.push(x); f.seq++; return true },
+      bracketedPaste: () => f.bracketed,
+      viaTmux: () => f.tmux,
+      atPrompt: () => f.atPrompt,
+      altScreen: () => f.alt,
+      commandRunning: () => f.running,
+      inputSeq: () => f.seq,
+      isActive: () => f.active,
+      activeEpoch: () => f.epoch,
+      keyboardHere: () => f.kbd,
+    }
+    return { f, target }
+  }
+  const T0 = 1_000_000
+  const W = (s: string) => `\x1b[200~${s}\x1b[201~`
+  const done: string[] = []
+  const reg = (sid: string, t: Parameters<typeof registerInsertTarget>[1]) => { registerInsertTarget(sid, t); done.push(sid) }
+  afterEach(() => { for (const s of done.splice(0)) registerInsertTarget(s, null) })
+  const setup = (sid: string, o: Partial<Fake> = {}) => {
+    const { f, target } = mk(o); reg(sid, target)
+    return { f, target, ctx: capturePasteContext(sid, T0)! }
+  }
+
+  it('context neschimbat: tastează imediat, chiar dacă rulează un program (Claude Code sub tmux)', () => {
+    const { f, ctx } = setup('p1')
+    expect(insertPathPasted(ctx, '/home/u/.webterm/inbox/a.png', T0 + 2000)).toEqual({ outcome: 'typed', stale: null })
+    // sub tmux: împachetat (tmux scoate marcajele dacă panoul nu le-a cerut), spaţiu la final, fără Enter
+    expect(f.sent).toEqual([W('/home/u/.webterm/inbox/a.png ')])
+    expect(f.sent.join('')).not.toMatch(/[\r\n]/)
+  })
+  it('împachetarea per backend: pty fără bracketed paste → text simplu; pty cu mod cerut → împachetat', () => {
+    const a = setup('p2', { tmux: false, bracketed: false })
+    expect(insertPathPasted(a.ctx, '/x/b c.png', T0).outcome).toBe('typed')
+    expect(a.f.sent).toEqual(["'/x/b c.png' "])
+    const b = setup('p3', { tmux: false, bracketed: true })
+    expect(insertPathPasted(b.ctx, '/x/b.png', T0).outcome).toBe('typed')
+    expect(b.f.sent).toEqual([W('/x/b.png ')])
+  })
+  it('input: o tastă între paste şi commit → regulile vechi (fără prompt = notPrompt), nimic tastat', () => {
+    const { f, ctx } = setup('p4')
+    f.seq++
+    expect(pasteContextStale(ctx, T0 + 10)).toBe('input')
+    expect(insertPathPasted(ctx, '/x/a.png', T0 + 10)).toEqual({ outcome: 'notPrompt', stale: 'input' })
+    expect(f.sent).toEqual([])
+  })
+  it('input: …dar la un prompt real (OSC 133) regulile vechi tot tastează', () => {
+    const { f, ctx } = setup('p5', { atPrompt: true, running: false })
+    f.seq++
+    expect(insertPathPasted(ctx, '/x/a.png', T0 + 10)).toEqual({ outcome: 'typed', stale: 'input' })
+    expect(f.sent).toEqual([W('/x/a.png ')])
+  })
+  it('timeout: la at+30001 → stale; exact la limită (at+30000) încă tastează; ceas înapoi = stale', () => {
+    const { f, ctx } = setup('p6')
+    expect(pasteContextStale(ctx, T0 + PASTE_CONTEXT_MS + 1)).toBe('timeout')
+    expect(insertPathPasted(ctx, '/x/a.png', T0 + 30_001).outcome).toBe('notPrompt')
+    expect(f.sent).toEqual([])
+    expect(insertPathPasted(ctx, '/x/a.png', T0 + PASTE_CONTEXT_MS).outcome).toBe('typed')
+    expect(pasteContextStale(capturePasteContext('p6', T0)!, T0 - 1)).toBe('timeout')
+  })
+  it('inactive: panoul nu mai e cel activ → stale', () => {
+    const { f, ctx } = setup('p7')
+    f.active = false
+    expect(pasteContextStale(ctx, T0)).toBe('inactive')
+    expect(insertPathPasted(ctx, '/x/a.png', T0).outcome).toBe('notPrompt')
+    expect(f.sent).toEqual([])
+  })
+  it('epoca: plecat şi revenit (activ din nou) în 30 s tot e alt context (review L1)', () => {
+    const { f, ctx } = setup('p7b')
+    f.epoch++                                         // a fost reactivat
+    expect(f.active).toBe(true)
+    expect(pasteContextStale(ctx, T0)).toBe('inactive')
+    expect(insertPathPasted(ctx, '/x/a.png', T0).outcome).toBe('notPrompt')
+    expect(f.sent).toEqual([])
+  })
+  it('focus: omul scrie în alt câmp al paginii (căutare, filtru, redenumire) → stale (review M1)', () => {
+    const { f, ctx } = setup('p7c')
+    f.kbd = false
+    expect(pasteContextStale(ctx, T0)).toBe('focus')
+    expect(insertPathPasted(ctx, '/x/a.png', T0)).toEqual({ outcome: 'notPrompt', stale: 'focus' })
+    expect(f.sent).toEqual([])
+  })
+  it('mode: alt program în prim-plan (ecran alternativ / comandă / prompt / bracketed) → stale (review L2)', () => {
+    for (const k of ['alt', 'running', 'atPrompt', 'bracketed'] as const) {
+      const { f, ctx } = setup(`pm-${k}`)
+      f[k] = !f[k]
+      expect(pasteContextStale(ctx, T0)).toBe('mode')
+      expect(insertPathPasted(ctx, '/x/a.png', T0).stale).toBe('mode')
+    }
+  })
+  it('ţintă fără semnalele noi (isActive / keyboardHere lipsă) = fail-closed', () => {
+    const sent: string[] = []
+    reg('pf', { send: (x: string) => { sent.push(x); return true }, bracketedPaste: () => false, viaTmux: () => true })
+    const ctx = capturePasteContext('pf', T0)!
+    expect(pasteContextStale(ctx, T0)).toBe('inactive')
+    expect(insertPathPasted(ctx, '/x/a.png', T0).outcome).toBe('notPrompt')
+    expect(sent).toEqual([])
+  })
+  it('target: terminal remontat (alt obiect pe acelaşi sid) sau închis → nu tastează nicăieri', () => {
+    const a = setup('p8')
+    const b = mk(); reg('p8', b.target)
+    expect(pasteContextStale(a.ctx, T0)).toBe('target')
+    expect(insertPathPasted(a.ctx, '/x/a.png', T0).outcome).toBe('notPrompt')
+    expect(a.f.sent).toEqual([]); expect(b.f.sent).toEqual([])
+    registerInsertTarget('p8', null)
+    expect(insertPathPasted(a.ctx, '/x/a.png', T0).outcome).toBe('noTarget')
+    expect(capturePasteContext('nimeni', T0)).toBeUndefined()
+  })
+  it('garda reţine inputul (ecou / dialog): send refuză → refused, nimic tastat', () => {
+    const { f, ctx } = setup('p9', { refuse: true })
+    expect(insertPathPasted(ctx, '/x/a.png', T0)).toEqual({ outcome: 'refused', stale: null })
+    expect(f.sent).toEqual([])
+  })
+  it('text nesigur (control, bidi, ESC, Cf) → unsafe, niciodată trimis; \\r din cale nu duce la Enter', () => {
+    const { f, ctx } = setup('p10')
+    expect(typeIntoPasted(ctx, 'a\x1b[201~; rm -rf ~\r', T0).outcome).toBe('unsafe')
+    expect(typeIntoPasted(ctx, 'a\u202eb', T0).outcome).toBe('unsafe')
+    expect(typeIntoPasted(ctx, 'a\u2060b', T0).outcome).toBe('unsafe')
+    expect(typeIntoPasted(ctx, '', T0).outcome).toBe('unsafe')
+    expect(f.sent).toEqual([])
+    expect(insertPathPasted(ctx, '/x/a\r.png', T0).outcome).toBe('typed')
+    expect(f.sent.join('')).not.toMatch(/[\r\n]/)
+  })
+  it('typePastedPaths: în ordinea selecţiei, propria tastare nu invalidează restul, contextul se închide', () => {
+    const { f, ctx } = setup('p11')
+    const r = typePastedPaths(ctx, ['/x/1.png', '/x/2 b.png', '/x/3.png'], () => T0 + 5)
+    expect(r.map((x) => x.outcome)).toEqual(['typed', 'typed', 'typed'])
+    expect(f.sent).toEqual([W('/x/1.png '), W("'/x/2 b.png' "), W('/x/3.png ')])
+    expect(ctx.closed).toBe(true)
+  })
+  it('typePastedPaths: o cale nesigură nu le opreşte pe celelalte; o tastă a omului după paste, da', () => {
+    const a = setup('p12')
+    const r = typePastedPaths(a.ctx, ['/x/1.png', '/x/\u2066bad.png', '/x/3.png'], () => T0)
+    expect(r.map((x) => x.outcome)).toEqual(['typed', 'unsafe', 'typed'])
+    expect(a.f.sent).toEqual([W('/x/1.png '), W('/x/3.png ')])
+    // o tastă a omului după paste (înainte ca upload-urile să se termine) → toate cad pe regulile vechi
+    const b = setup('p12b')
+    b.f.seq++
+    const r2 = typePastedPaths(b.ctx, ['/x/1.png', '/x/2.png'], () => T0)
+    expect(r2).toEqual([{ outcome: 'notPrompt', stale: 'input' }, { outcome: 'notPrompt', stale: 'input' }])
+    expect(b.f.sent).toEqual([])
+  })
+  it('nu e broadcast: tastează DOAR în ţinta paste-ului, nu şi în alte terminale înregistrate', () => {
+    const a = setup('pa')
+    const b = mk(); reg('pb', b.target)
+    expect(insertPathPasted(a.ctx, '/x/a.png', T0).outcome).toBe('typed')
+    expect(a.f.sent).toHaveLength(1)
+    expect(b.f.sent).toEqual([])
+  })
+  it('fără paste (Files panel, „Insert path"): regulile vechi neschimbate — un program în faţă = notPrompt', () => {
+    const { f, target } = mk({ tmux: true, atPrompt: false, bracketed: true }); reg('p13', target)
+    expect(insertPathOutcome('p13', '/x/a.png')).toBe('notPrompt')
+    expect(f.sent).toEqual([])
+  })
+  it('pasteStaleKey: cheie i18n per motiv', () => {
+    expect(pasteStaleKey('input')).toBe('transfers.pasteStale.input')
+    expect(pasteStaleKey('focus')).toBe('transfers.pasteStale.focus')
+  })
+})
+
+describe('isSafeToType: toată categoria Cf + tag-urile (review L4)', () => {
+  it('refuză formatele invizibile', () => {
+    for (const ch of ['\u061c', '\u180e', '\u2060', '\u2061', '\u2064', '\ufff9', '\ufffb', '\xad', '\u{e0001}', '\u{e0000}', '\u{e007f}', '\u200b', '\ufeff']) {
+      expect(isSafeToType(`a${ch}b`), ch.codePointAt(0)!.toString(16)).toBe(false)
+    }
+  })
+  it('acceptă căi normale (diacritice, spaţii, emoji)', () => {
+    expect(isSafeToType('/home/u/raport ședință (2).png')).toBe(true)
+    expect(isSafeToType('/tmp/😀.png')).toBe(true)
+  })
+})
+
+describe('typingElsewhere (focusul nu e smuls dintr-un câmp al paginii — review M1)', () => {
+  const el = (tagName: string, editable = false) => ({ tagName, isContentEditable: editable }) as unknown as Element
+  it('câmpuri ale paginii → da; terminalul însuşi / nimic / buton → nu', () => {
+    const own = el('TEXTAREA')
+    expect(typingElsewhere(own, el('INPUT'))).toBe(true)
+    expect(typingElsewhere(own, el('TEXTAREA'))).toBe(true)
+    expect(typingElsewhere(own, el('DIV', true))).toBe(true)
+    expect(typingElsewhere(own, own)).toBe(false)
+    expect(typingElsewhere(own, null)).toBe(false)
+    expect(typingElsewhere(own, el('BUTTON'))).toBe(false)
   })
 })

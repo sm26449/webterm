@@ -21,9 +21,13 @@ Frontend only — no agent change (agent stays 58), no new gateway route.
   another pane, other keys). So a paste/drop now records its context, and on upload commit the
   quoted path plus a space (never Enter) goes in as a paste — wrapped in `ESC[200~ … ESC[201~` under
   tmux or when the program asked for bracketed paste, plain otherwise — only while that context is
-  unchanged: the same terminal (not closed or remounted) is still the active pane, the upload
+  unchanged: the same terminal (not closed or remounted) is still the active pane and was not left
+  and re-entered, the keyboard is still in the terminal (not in the search box, the Files filter, a
+  rename field or the palette — and typing never pulls the focus out of such a field), the upload
   finished within 30 s of the paste, nothing else was sent to that terminal since (a key typed in
-  between = a different context), the guardrail is not holding input, and the text is safe to type.
+  between = a different context), the same program is in front (alternate screen, running command,
+  prompt and bracketed-paste mode as at the paste), the guardrail is not holding input, and the text
+  is safe to type. Several files are typed in selection order once the paste's uploads finish.
   Otherwise the old rules apply (typed at a real shell prompt, else **Type into terminal** + **Copy
   path**), and the row now says *why* it was not typed. Uploads that do not start from
   a paste/drop on the terminal (Files panel, **Insert path**) keep the old rules; the move-as-root
@@ -42,7 +46,14 @@ Frontend only — no agent change (agent stays 58), no new gateway route.
   row — on a phone it covered half the screen. Toasts now take an optional key and a toast with the
   same key replaces the previous one in place (`lib/notify.ts` `upsertToast`); the paste's result
   replaces its "Uploading…" toast, and "not typed" is one line ("Saved screenshot — path not typed
-  (see Transfers)"), with the full reason only in the row.
+  (see Transfers)"), with the full reason only in the row. Toasts now sit below dialogs (z-45), hide
+  while a modal dialog is open, and rise at most 30vh above the widget on phones.
+
+### Security
+- **Typed text refuses every invisible format character.** Why: the "safe to type" check (paths,
+  `cd here`, typed commands) listed bidi and zero-width ranges by hand and missed U+061C, U+180E,
+  U+2060–2064, U+FFF9–FFFB and the tag block U+E0000–E007F; it now rejects the whole Unicode `Cf`
+  category plus the tag block.
 
 ## [3.6.15] — 2026-10-16 · agent (58)
 

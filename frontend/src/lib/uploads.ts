@@ -18,7 +18,7 @@
 import { api, ApiError, apiErrorFrom, errText, withStepup } from './api'
 import { tStatic } from './i18n'
 import { lsGet, lsRemove, lsSet } from './storage'
-import { insertPathOutcome, insertPathPasted, pasteContextStale, type PasteContext } from './transfers'
+import { insertPathOutcome, type PasteContext } from './transfers'
 import { UploadJob, isActive, uploadStore } from './uploadStore'
 
 // ── parametri ─────────────────────────────────────────────────────────────────────────────
@@ -554,17 +554,16 @@ async function runLoop(c: Ctl): Promise<void> {
     const crcQ = doCrc ? `&crc32=${crc >>> 0}` : ''
     await withStepup(hid, () => api(`/api/hosts/${hid}/fs/upload/commit?${q}${crcQ}`, { method: 'POST' }))
     if (c.lsKey) lsRemove(c.lsKey)
-    // paste / drop pe terminal (3.6.16): tastat ca un paste cât contextul gestului e acelaşi; altfel (şi
-    // pentru orice alt upload cu `then`) regulile vechi — vezi lib/transfers.ts typeIntoPasted
-    const pctx = c.then === 'insert-path' && c.pasteCtx && c.pasteCtx.sid === c.sid ? c.pasteCtx : undefined
-    const stale = pctx ? pasteContextStale(pctx) : null
-    const insertOutcome = c.then !== 'insert-path' ? undefined
-      : pctx ? insertPathPasted(pctx, c.dest) : insertPathOutcome(c.sid, c.dest)
+    // paste / drop pe terminal (3.6.16): calea NU se tastează aici — SessionView aşteaptă toate
+    // upload-urile gestului şi le tastează în ordinea selecţiei, ca un paste, cât contextul e acelaşi
+    // (lib/transfers.ts typePastedPaths). Un retry ulterior (contextul deja închis) şi orice alt upload
+    // cu `then` → regulile vechi (doar la un prompt).
+    const deferred = c.then === 'insert-path' && !!c.pasteCtx && c.pasteCtx.sid === c.sid && !c.pasteCtx.closed
+    const insertOutcome = c.then !== 'insert-path' || deferred ? undefined : insertPathOutcome(c.sid, c.dest)
     const inserted = insertOutcome === undefined ? undefined : insertOutcome === 'typed'
-    const pasteStale = insertOutcome === 'notPrompt' && stale ? stale : undefined
-    publish(c, { pos: file.size, pct: 100, bytesPerSec: 0, etaSec: 0, state: 'done', inserted, insertOutcome, pasteStale })
+    publish(c, { pos: file.size, pct: 100, bytesPerSec: 0, etaSec: 0, state: 'done', inserted, insertOutcome })
     ctls.delete(c.id)        // eliberăm File-ul; rândul rămâne în store până la dismiss/expirare
-    if (inserted !== false) lingerDone(c.id)
+    if (inserted !== false && !deferred) lingerDone(c.id)   // amânat: SessionView decide
   } catch (e) {
     if (c.cancelled) return
     if (e instanceof PausedSignal || c.paused) {
