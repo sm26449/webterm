@@ -9,6 +9,22 @@ back.
 
 ## [Unreleased]
 
+### Fixed
+- **A screenshot pasted for a CLI such as Claude Code gets its path into the prompt again — with
+  one explicit click.** Why: with a program running in the foreground, the path is typed only
+  where it is known to be safe (a shell prompt, or a program that asked for bracketed paste), so
+  letters never become commands in mc, vim or less. Under tmux the bracketed-paste mode reaches
+  the browser only when tmux's client attaches, so a reloaded or reattached page never sees it;
+  and since 3.6.13 the gateway also tells the browser after a reattach that a command is running.
+  The path was then silently not typed — while the toast still said it had been added to the
+  prompt. Now the toast says it was not typed, the Transfers widget opens, and the row offers
+  **Type into terminal** next to **Copy path**, with the line "A program is running in this
+  terminal — type the path only if it expects text (e.g. a CLI prompt)". The click types the
+  quoted path and a space (no Enter) as a bracketed paste, through the same gates as a keystroke
+  (read-only, muted or disconnected terminals and unsafe text are still refused). Nothing is ever
+  typed into an unknown program automatically, and the move-as-root `sudo` command stays
+  copy-only. Frontend only.
+
 ## [3.6.13] — 2026-10-15 · agent (58)
 
 Closes the four residuals the independent reviews left on the 3.6.12 broadcast guardrail. Gateway +

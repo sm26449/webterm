@@ -18,7 +18,7 @@
 import { api, ApiError, apiErrorFrom, errText, withStepup } from './api'
 import { tStatic } from './i18n'
 import { lsGet, lsRemove, lsSet } from './storage'
-import { insertPathInto } from './transfers'
+import { insertPathOutcome } from './transfers'
 import { UploadJob, isActive, uploadStore } from './uploadStore'
 
 // ── parametri ─────────────────────────────────────────────────────────────────────────────
@@ -543,8 +543,9 @@ async function runLoop(c: Ctl): Promise<void> {
     const crcQ = doCrc ? `&crc32=${crc >>> 0}` : ''
     await withStepup(hid, () => api(`/api/hosts/${hid}/fs/upload/commit?${q}${crcQ}`, { method: 'POST' }))
     if (c.lsKey) lsRemove(c.lsKey)
-    const inserted = c.then === 'insert-path' ? insertPathInto(c.sid, c.dest) : undefined
-    publish(c, { pos: file.size, pct: 100, bytesPerSec: 0, etaSec: 0, state: 'done', inserted })
+    const insertOutcome = c.then === 'insert-path' ? insertPathOutcome(c.sid, c.dest) : undefined
+    const inserted = insertOutcome === undefined ? undefined : insertOutcome === 'typed'
+    publish(c, { pos: file.size, pct: 100, bytesPerSec: 0, etaSec: 0, state: 'done', inserted, insertOutcome })
     ctls.delete(c.id)        // eliberăm File-ul; rândul rămâne în store până la dismiss/expirare
     if (inserted !== false) {
       window.setTimeout(() => {

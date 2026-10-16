@@ -22,9 +22,11 @@ between the gutters and sits above the key bar, so it never covers the terminal 
 - **Expanded**: a card with every job — name, size, progress, speed, ETA — and its actions:
   Retry, Pause / Resume, Cancel, Dismiss, Discard, Open folder, and for finished uploads
   **Copy path** / **Insert path** (insert types the path into the current session when it is on
-  the same host). **Clear finished** appears once everything has stopped; **–** collapses it back
+  the same host; **Type into terminal** when a running program kept the path from being typed —
+  see below). **Clear finished** appears once everything has stopped; **–** collapses it back
   to the pill.
-- When a job newly **needs a decision** — stalled, failed, or incomplete after a reload — the
+- When a job newly **needs a decision** — stalled, failed, incomplete after a reload, or a pasted
+  path that was not typed because a program is running — the
   widget expands by itself, once (it does not fight you if you collapse it again). State changes
   are announced once through a polite live region; with the tab in the background, *done* and
   *failed* also raise a browser notification.
@@ -373,6 +375,19 @@ The file is uploaded to the host's **inbox** and its path is typed at the prompt
 - If the tab that received the paste is closed by the time the upload finishes, nothing is
   typed anywhere (it could be a different host's shell); the row stays in the Transfers widget with
   **Copy path** until you dismiss it.
+- If a **program is running** in that terminal (a CLI such as Claude Code, a REPL — or mc, vim,
+  less), the path is **not typed by itself**: WebTerm cannot tell which program it is, and in mc or
+  vim the letters would be commands. This is common after a reload or a reattach under tmux: tmux
+  hands the browser its bracketed-paste mode only when its client attaches, and shell integration
+  (since 3.6.13 also restored after a reattach) correctly says a command is running. The toast
+  says so, the Transfers widget opens, and the row offers **Type into terminal** next to
+  **Copy path**, with the line "A program is running in this terminal — type the path only if it
+  expects text (e.g. a CLI prompt)". The click is the consent: the quoted path plus a space is
+  typed (no Enter) as a bracketed paste (`ESC[200~ … ESC[201~` — tmux strips the markers when the
+  program did not ask for them), through the same gates as a keystroke (refused for read-only,
+  muted or disconnected terminals, and for text with control characters). It is offered only in
+  the active session the file was pasted or dropped into. The **move-as-root** command (below) has
+  no such button — a `sudo` command typed into an unknown program is riskier than a path; copy it.
 
 **Settings → Preferences → Transfers** lets you send pasted files to the **session directory**
 instead of the inbox (same naming), and sets the **inbox retention** (default **7 days**,

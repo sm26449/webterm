@@ -419,6 +419,12 @@ export default function SessionView(props: {
     const jobs = ids.map((id) => uploadStore.get(id))
     const failed = jobs.filter((j) => !j || j.state !== 'done')
     if (failed.length) { notifyError(t('transfers.uploadFailedTitle'), failed[0]?.error || t('files.genericErr')); return }
+    // calea NETASTATĂ (un program rulează — hotfix 3.6.13): toastul nu mai spune „adăugată la prompt";
+    // rândul din Transferuri (deschis automat) oferă „Tastează în terminal" + „Copy path"
+    if (jobs.some((j) => j?.inserted === false)) {
+      notifyToast(t(jobs.some((j) => j?.insertOutcome === 'notPrompt') ? 'transfers.pasteNotTyped' : 'transfers.pasteNotTypedOther', { subject }), 'warn')
+      return
+    }
     let msg = t(pasteToastKey('done', dest, kind), { subject })
     // prima captură lipită: o propoziţie în plus despre LA CE foloseşte (o singură dată)
     if (kind === 'screenshot' && !pasteHintSeen()) { msg += ' ' + t('transfers.pasteFirstHint'); markPasteHintSeen() }

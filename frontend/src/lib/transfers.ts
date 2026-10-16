@@ -203,10 +203,31 @@ export function typeIntoOutcome(sid: string | undefined, text: string): TypeOutc
   return t.send(bracketed ? PASTE_START + text + PASTE_END : text) === false ? 'refused' : 'typed'
 }
 export const typeInto = (sid: string | undefined, text: string): boolean => typeIntoOutcome(sid, text) === 'typed'
+/** tastează `<cale citată> ` (spaţiu, FĂRĂ Enter) în terminalul `sid` — cu rezultatul (vezi typeIntoOutcome) */
+export const insertPathOutcome = (sid: string | undefined, path: string): TypeOutcome =>
+  typeIntoOutcome(sid, shellQuote(path) + ' ')
 /** tastează `<cale citată> ` (spaţiu, FĂRĂ Enter) în terminalul `sid`; false dacă n-a tastat */
 export function insertPathInto(sid: string | undefined, path: string): boolean {
-  return typeInto(sid, shellQuote(path) + ' ')
+  return insertPathOutcome(sid, path) === 'typed'
 }
+
+/** „Tastează în terminal" după 'notPrompt' (hotfix 3.6.13): CLICK-ul explicit al omului e
+    consimţământul — un program rulează în prim-plan (Claude Code, un REPL… sau mc/vim), iar noi
+    nu ştim care; după o reataşare sub tmux nici DECSET 2004 nu se vede (tmux îl trimite clientului
+    doar la attach). Deci NICIODATĂ automat, doar din butonul care spune asta. Aceleaşi porţi ca
+    typeIntoOutcome (fără ţintă, text nesigur, doar-citire / mut / socket închis), MEREU împachetat
+    în ESC[200~ … ESC[201~: un program care a cerut bracketed paste (CLI-uri, shell-uri, editoare
+    moderne) primeşte un paste, nu taste; tmux înlătură marcajele dacă panoul nu le-a cerut. Fără
+    Enter; textul nu are ESC, deci nu poate închide parantezele mai devreme. Nu întoarce 'notPrompt'. */
+export function typeIntoConfirmed(sid: string | undefined, text: string): TypeOutcome {
+  const t = sid ? targets.get(sid) : undefined
+  if (!t) return 'noTarget'
+  if (!isSafeToType(text)) return 'unsafe'
+  return t.send(PASTE_START + text + PASTE_END) === false ? 'refused' : 'typed'
+}
+/** varianta pentru o cale: `<cale citată> ` (spaţiu, FĂRĂ Enter) — vezi typeIntoConfirmed */
+export const insertPathConfirmed = (sid: string | undefined, path: string): TypeOutcome =>
+  typeIntoConfirmed(sid, shellQuote(path) + ' ')
 
 // ── home-ul şi inbox-ul hostului ──────────────────────────────────────────────────────────
 interface Listing { path: string; entries: InboxEntry[] }
