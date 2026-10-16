@@ -10,7 +10,7 @@ COPY frontend/ ./
 RUN npm run build
 
 # ---- runtime ----
-FROM python:3.12-slim@sha256:646fb0bca3dd3ea1bcc6feb72c17ed16eed6e10cffc732fcc1478bd3e7f02d7b
+FROM python:3.14-slim@sha256:a2b82f3c48559aa0a8446d9af49826b6e2b2016f4cd2afabfe6013ec53729170
 WORKDIR /srv/webterm
 
 # gosu pentru coborârea privilegiilor din entrypoint; user neprivilegiat dedicat
