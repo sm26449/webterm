@@ -166,6 +166,9 @@ export interface InsertTarget {
   hasFocus?: () => boolean
   /** ecranul alternativ e activ (nano, vim, emacs, mc, less, htop…) — 3.6.15 */
   altScreen?: () => boolean
+  /** shell integration (OSC 133) arată o comandă pornită (C fără D) — 3.6.15. Sub tmux xterm rămâne
+      pe ecranul normal (tmux ţine comutarea pentru el), deci doar asta vede un nano / emacs / mc */
+  commandRunning?: () => boolean
   /** fluxul trece printr-un client tmux (termmodes.ts pasteModeUntrusted): `bracketedPaste()` nu
       spune nimic despre programul din panou (tmux trimite ?2004h doar la attach). Atunci DOAR
       atPrompt autorizează tastarea automată, iar textul pleacă mereu împachetat — tmux scoate
@@ -190,12 +193,16 @@ export function registerInsertTarget(sid: string, target: InsertTarget | null): 
   if (target) targets.set(sid, target); else targets.delete(sid)
 }
 export const hasInsertTarget = (sid: string | undefined): boolean => !!sid && targets.has(sid)
-/** Terminalul cu focus rulează o aplicaţie pe ecranul alternativ (review 3.6.15, L4)? Atunci o
-    scurtătură globală pe Alt+literă (Alt+E) NU se declanşează: tasta e a aplicaţiei (nano M-E,
-    emacs M-e…). La promptul shell-ului (ecranul normal) scurtătura rămâne. */
-export function focusedTerminalInAltScreen(): boolean {
+/** Terminalul cu focus rulează un program în prim-plan (review 3.6.15, L4 + R1)? Atunci o
+    scurtătură globală pe Alt+literă (Alt+E) NU se declanşează: tasta e a programului (nano M-E,
+    emacs M-e, mc). Semnalele: ecranul alternativ (fără tmux) SAU o comandă pornită după shell
+    integration (OSC 133 — singurul semnal sub tmux, unde xterm rămâne pe ecranul normal). La
+    prompt, ori sub tmux fără shell integration, scurtătura rămâne (nu avem de unde şti). */
+export function focusedTerminalRunsProgram(): boolean {
   for (const tg of targets.values()) {
-    try { if (tg.hasFocus?.() && tg.altScreen?.()) return true } catch { /* terminal în demontare */ }
+    try {
+      if (tg.hasFocus?.() && (tg.altScreen?.() || tg.commandRunning?.())) return true
+    } catch { /* terminal în demontare */ }
   }
   return false
 }

@@ -915,7 +915,8 @@ export default function FilePanel(props: {
     // confirmarea simplă deschisă şi focusul înapoi în listă (review 3.6.15, M1): Enter NU confirmă —
     // userul care a dat click pe alt rând şi apasă Enter vrea să-l deschidă, nu să şteargă (recursiv)
     // dosarul de dinainte. Orice tastă din listă închide confirmarea; Enter nu face nimic.
-    if (confirmDel) {
+    // (modificatorii singuri — Shift/Ctrl/Alt/Meta apăsate înaintea altei taste — nu o închid, review R3)
+    if (confirmDel && !['Shift', 'Control', 'Alt', 'Meta', 'AltGraph', 'CapsLock'].includes(ev.key)) {
       setConfirmDel(null)
       if (ev.key === 'Enter') { ev.preventDefault(); return }
     }
@@ -1643,7 +1644,7 @@ export default function FilePanel(props: {
         <FileMenu items={menuItems(menu)} at={{ x: menu.x, y: menu.y }} sheet={menu.sheet}
           title={menu.kind === 'row' ? menu.entry.name + (menu.entry.dir ? '/' : '') : undefined}
           label={menu.kind === 'row' ? rowMenuLabel(menu.entry.name) : menu.kind === 'new' ? t('files.fabAria') : t('files.dirMenuAria')}
-          onClose={closeMenu} />
+          anchor={listRef.current} onClose={closeMenu} />
       )}
 
       {copyItems && (

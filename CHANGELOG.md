@@ -39,9 +39,11 @@ Files panel UI/UX. Frontend only — no agent change (agent stays 58), no new ga
   while the list has focus; the browser keys (`Mod+U` view-source, `Mod+R`, `Mod+L`) are taken only
   there. The global `?` and `/` leave the list alone.
 - **`Alt+E`** toggles the active session's Files panel (Option-as-Meta only on macOS; never from a
-  dialog or the editor, which lives inside the panel, and never while the focused terminal shows a
-  full-screen program on the alternate screen — nano's `M-E`, emacs' `M-e`, mc keep the key). At a
-  shell prompt it is taken: unbound in bash/zsh, fish loses "edit the line in `$EDITOR`".
+  dialog or the editor, which lives inside the panel, and never while the focused terminal runs a
+  program — nano's `M-E`, emacs' `M-e`, mc keep the key. A program is detected by the alternate
+  screen, or under tmux (which keeps that switch to itself) by shell integration showing a running
+  command; under tmux without shell integration `Alt+E` is still taken). At a shell prompt it is
+  taken: unbound in bash/zsh, fish loses "edit the line in `$EDITOR`".
 - **Touch**: size and date under the name, a floating `+` (new file / folder / upload) instead of
   three toolbar icons, the selection bar pinned at the bottom; on a phone, Back walks back through
   the folders visited and closes the panel only at the first one.

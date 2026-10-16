@@ -44,7 +44,7 @@ and maximize buttons (or double-click the pane title).
 | `Alt+X` | Split view: maximize / restore the focused pane (macOS: see the note above) |
 | `Alt+P` | Detach the session into a window |
 | `Alt+S` | Saved commands (snippets) |
-| `Alt+E` | Open / close the session's **Files** panel (inside a split view: the focused pane's). At a shell prompt it is taken: not bound in bash/zsh readline; in fish it replaces "edit the line in `$EDITOR`" — the same trade-off as `Alt+S`/`Alt+P`. While a full-screen program runs on the alternate screen (nano `M-E`, emacs `M-e`, mc, vim) the key goes to the program and the panel stays as it is. macOS: see the note above (`Option+E` is the accent dead key) |
+| `Alt+E` | Open / close the session's **Files** panel (inside a split view: the focused pane's). At a shell prompt it is taken: not bound in bash/zsh readline; in fish it replaces "edit the line in `$EDITOR`" — the same trade-off as `Alt+S`/`Alt+P`. While a program runs in the focused terminal the key goes to the program (nano `M-E`, emacs `M-e`, mc) and the panel stays as it is — detected by the alternate screen, or under tmux (which keeps the alternate-screen switch to itself) by [shell integration](SHELL-INTEGRATION.md) showing a running command. Under tmux **without** shell integration WebTerm cannot tell, and `Alt+E` is still taken. macOS: see the note above (`Option+E` is the accent dead key) |
 | `Alt++` / `Alt+−` | Larger / smaller font |
 | `Mod+Shift+V` | Paste picker — clipboard history shared by all terminals (`Shift+Enter` in the picker = paste and run) |
 

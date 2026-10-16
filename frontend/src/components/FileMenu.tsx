@@ -32,6 +32,8 @@ export default function FileMenu(props: {
   /** titlul foii (numele fişierului) — doar pe touch */
   title?: string
   label: string
+  /** elementul de care e legat meniul (lista de fişiere): doar derularea LUI (sau a paginii) îl închide */
+  anchor?: HTMLElement | null
   onClose: () => void
 }) {
   const ref = useRef<HTMLDivElement>(null)
@@ -56,15 +58,20 @@ export default function FileMenu(props: {
   // Scroll-ul (în captură: prinde şi lista derulată, nu doar fereastra) mută rândul de sub meniu.
   const onCloseRef = useRef(props.onClose)
   onCloseRef.current = props.onClose
+  const anchorRef = useRef(props.anchor ?? null)
+  anchorRef.current = props.anchor ?? null
   useEffect(() => {
     const onWin = () => onCloseRef.current()
     const t0 = Date.now()
     const onScroll = (e: Event) => {
       // scrollIntoView-ul rândului abia selectat (acelaşi click) nu e o derulare a userului
       if (Date.now() - t0 < 250) return
-      // derularea DIN meniu (foaia de jos pe un telefon mic) nu-l închide
-      if (e.target instanceof Node && ref.current?.contains(e.target)) return
-      onCloseRef.current()
+      // doar derularea paginii sau a unui element care CONŢINE ancora (lista de fişiere) mută rândul de
+      // sub meniu — un terminal care derulează singur (tail -f, un build) nu-l închide (review R2)
+      const tg = e.target
+      const anchor = anchorRef.current
+      if (tg === document || tg === window || tg === document.documentElement || tg === document.body
+        || (anchor && tg instanceof Node && tg.contains(anchor))) onCloseRef.current()
     }
     window.addEventListener('resize', onWin)
     window.addEventListener('blur', onWin)
