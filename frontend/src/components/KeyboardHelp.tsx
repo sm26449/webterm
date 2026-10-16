@@ -48,13 +48,14 @@ const GROUP_KEY: Record<string, string> = {
   nav: 'shortcuts.groupNav',
   session: 'shortcuts.groupSession',
   app: 'shortcuts.groupApp',
+  files: 'shortcuts.groupFiles',
 }
 
 export default function KeyboardHelp(props: { onClose: () => void; onReplayWalkthrough?: () => void }) {
   const { t } = useI18n()
   const dialogRef = useRef<HTMLDivElement>(null)
   useFocusTrap(dialogRef, props.onClose)
-  const groups = ['nav', 'session', 'app'] as const
+  const groups = ['nav', 'session', 'app', 'files'] as const
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={props.onClose}>

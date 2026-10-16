@@ -1185,17 +1185,21 @@ export default function SessionView(props: {
       ioRef.current.typeText((e as CustomEvent<string>).detail)   // guardrail + broadcast (L6)
       termRef.current?.focus()
     }
+    // Alt+E (3.6.14): deschide / închide panoul de fişiere — doar pe un host cu panou de fişiere
+    const onFiles = () => { if (props.host) toggleFiles() }
     window.addEventListener('wt-session-search', onSearch)
     window.addEventListener('wt-session-snippets', onSnippets)
     window.addEventListener('wt-session-font', onFont)
     window.addEventListener('wt-session-insert', onInsert)
+    window.addEventListener('wt-session-files', onFiles)
     return () => {
+      window.removeEventListener('wt-session-files', onFiles)
       window.removeEventListener('wt-session-search', onSearch)
       window.removeEventListener('wt-session-snippets', onSnippets)
       window.removeEventListener('wt-session-font', onFont)
       window.removeEventListener('wt-session-insert', onInsert)
     }
-  }, [isActionTarget, send])
+  }, [isActionTarget, send]) // eslint-disable-line react-hooks/exhaustive-deps -- toggleFiles/props.host: doar setteri de stare + hostul sesiunii (fix)
 
   // -- terminal lifecycle ----------------------------------------------------
 

@@ -333,7 +333,9 @@ try {
      directorul ANTERIOR: „upload pe un FS doar-citire" urca liniştit în /tmp şi pica fără niciun
      mesaj de eroare (măsurat: după Enter, /tmp rămânea listat încă ~90 ms). Întoarce directorul listat. */
   const gotoDir = async (panel, dir) => {
+    // 3.6.14: calea e afişată ca firimituri; câmpul editabil apare la ✎ (sau Ctrl+L / ultimul segment)
     const input = panel.locator('input[title*="Type a path"]')
+    if (!(await input.count())) await panel.locator('[data-testid="wt-files-editpath"]').click()
     await input.fill(dir)
     await input.press('Enter')
     const list = panel.locator('[role="group"][data-path]')
@@ -787,8 +789,12 @@ try {
   const filePanel = page.locator('aside[aria-label="Session files"]').last()
   check('panoul de fișiere se deschide', await visible(filePanel))
   await page.waitForTimeout(900)
-  const fpPath = await filePanel.locator('input[title*="Type a path"]').inputValue()
+  // directorul LISTAT (`data-path`; calea e afişată ca firimituri din 3.6.14, nu mai e un câmp)
+  const listedDir = (panel) => panel.locator('[role="group"][data-path]').getAttribute('data-path').catch(() => '')
+  const fpPath = await pollValue(() => listedDir(filePanel), (v) => v === '/tmp')
   check('panoul urmărește cwd-ul din terminal (OSC 7 → /tmp)', fpPath === '/tmp')
+  check('3.6.14: firimiturile arată calea (/ › tmp), ultimul segment = directorul curent',
+    (await filePanel.locator('nav[aria-label="Path"] [aria-current="location"]').textContent().catch(() => '')) === 'tmp')
 
   // director nou
   await filePanel.locator('button[title="New folder"]').click()
@@ -805,6 +811,125 @@ try {
   await filePanel.locator('button:has-text("Delete")').last().click()
   await page.waitForTimeout(1000)
   check('directorul șters dispare din listă', !((await filePanel.textContent()) ?? '').includes('wt_ui_test'))
+
+  // ── 3.6.14: lista de fişiere din TASTATURĂ (roving focus), meniul rândului, dublu-click, firimituri ──
+  await activePane.locator('.xterm-screen').click()
+  // director unic per rulare (RUN): fără `rm -rf` — guardrail-ul de comenzi periculoase l-ar opri într-un dialog
+  const KD = `/tmp/wt_kbd_${RUN}`
+  await page.keyboard.type(`mkdir -p ${KD}/sub && printf kbd > ${KD}/a_file.txt && echo WT_KBD_$((40+2))\n`)
+  const kbdReady = await waitScreen('WT_KBD_42', 10000)
+  if (!kbdReady) {
+    console.error('  [diag] wt_kbd: focus =', await page.evaluate(() => {
+      const a = document.activeElement
+      return a ? `${a.tagName}.${String(a.className).slice(0, 60)} ${a.getAttribute('aria-label') ?? ''}` : 'null'
+    }), '· ecran:', (await screenText()).split('\n').filter((l) => l.trim()).slice(-4).join(' ⏎ ').slice(-300))
+  }
+  const kbdDir = await gotoDir(filePanel, `${KD}`)
+  const fpList = filePanel.locator('[role="group"][data-files-list]')
+  const fpText = () => fpList.textContent().then((t) => t ?? '')
+  const kbdListed = await pollValue(fpText, (t) => t.includes('a_file.txt'), 8000)
+  if (!kbdListed.includes('a_file.txt')) {
+    console.error('  [diag] wt_kbd: shell gata =', kbdReady, '· listat =', kbdDir, '· listă =', kbdListed.slice(0, 200),
+      '· panou =', ((await filePanel.textContent()) ?? '').slice(0, 300))
+  }
+  const listFocused = () => page.evaluate(() => document.activeElement?.hasAttribute?.('data-files-list') === true)
+  // click pe numele unui fişier = focusul pe LISTĂ (nu pe butonul numelui, care dispare la navigare)
+  await filePanel.locator('button[data-fname="a_file.txt"]').click()
+  check('3.6.14: click pe un rând lasă focusul pe listă (tastatura merge imediat)', await listFocused())
+  // F7 = dosar nou → toast „Folder … created", focusul înapoi pe listă
+  await page.keyboard.press('F7')
+  const kNew = filePanel.locator('input[placeholder="folder name"]')
+  await kNew.fill('kbd_new')
+  await kNew.press('Enter')
+  const f7Listed = await pollValue(fpText, (t) => t.includes('kbd_new'))
+  const f7Toast = await pollValue(() => page.locator('.wt-toast').allTextContents().then((a) => a.join(' ')), (t) => t.includes('Folder kbd_new created'), 5000)
+  check('3.6.14: F7 creează un dosar (toast „Folder … created"), focusul revine pe listă',
+    f7Listed.includes('kbd_new') && f7Toast.includes('Folder kbd_new created') && await pollValue(listFocused, (v) => v, 3000),
+    `listat=${f7Listed.includes('kbd_new')} toast=${f7Toast.slice(0, 80)}`)
+  // F2 pe rândul selectat (dosarul nou) = redenumire inline
+  await page.keyboard.press('F2')
+  const kRen = filePanel.locator('input[aria-label="Rename kbd_new"]')
+  const renOpen = await visible(kRen, 3000)
+  if (renOpen) { await kRen.fill('kbd_ren'); await kRen.press('Enter') }
+  const f2Listed = await pollValue(fpText, (t) => t.includes('kbd_ren') && !t.includes('kbd_new'))
+  check('3.6.14: F2 redenumeşte rândul selectat', renOpen && f2Listed.includes('kbd_ren') && !f2Listed.includes('kbd_new'))
+  // meniul rândului: click dreapta → role=menu cu acţiunile; ↓ mută focusul; Escape îl închide şi
+  // întoarce focusul pe listă
+  await filePanel.locator('[data-row="a_file.txt"]').click({ button: 'right' })
+  const rowMenu = page.locator('[data-testid="wt-files-menu"][role="menu"]')
+  const menuShown = await visible(rowMenu, 3000)
+  const menuItems = menuShown ? await rowMenu.locator('[role="menuitem"]').allTextContents() : []
+  await page.keyboard.press('ArrowDown')
+  const menuFocusMoved = await page.evaluate(() => document.activeElement?.getAttribute('role') === 'menuitem'
+    && document.activeElement !== document.querySelector('[data-testid="wt-files-menu"] [role="menuitem"]'))
+  await page.keyboard.press('Escape')
+  check('3.6.14: click dreapta pe rând → meniul (Edit, Duplicate, Copy path, cd…), ↓ navighează, Escape închide şi revine pe listă',
+    menuShown && ['Edit', 'Duplicate', 'Copy path', 'cd here in the terminal', 'Delete'].every((x) => menuItems.some((m) => m.includes(x)))
+      && menuFocusMoved && await hidden(rowMenu, 3000) && await listFocused(),
+    JSON.stringify(menuItems))
+  // Duplicate (meniu) → /api/fs/copy pe acelaşi host, conflict = rename → „a_file (1).txt"
+  await filePanel.locator('[data-row="a_file.txt"]').click({ button: 'right' })
+  await rowMenu.locator('[role="menuitem"]', { hasText: 'Duplicate' }).click()
+  const dupListed = await pollValue(fpText, (t) => t.includes('a_file (1).txt'), 15000)
+  check('3.6.14: Duplicate creează „a_file (1).txt" lângă original', dupListed.includes('a_file (1).txt'))
+  // tastează-ca-să-sari + Delete: confirmarea are focusul pe „Delete", Enter confirmă, focusul revine pe listă
+  await fpList.focus()
+  await page.keyboard.type('kbd_r')
+  await page.keyboard.press('Delete')
+  const delDlg = filePanel.locator('[data-testid="wt-files-confirm-delete"]')
+  const delFocused = (await visible(delDlg, 3000)) && await page.evaluate(() =>
+    !!document.activeElement?.closest?.('[data-testid="wt-files-confirm-delete"]') && /Delete/.test(document.activeElement?.textContent ?? ''))
+  const delName = delFocused ? ((await delDlg.textContent()) ?? '') : ''
+  await page.keyboard.press('Enter')
+  const delListed = await pollValue(fpText, (t) => !t.includes('kbd_ren'))
+  check('3.6.14: tastează-ca-să-sari + Delete → confirmarea are focusul, Enter şterge, focusul revine pe listă',
+    delFocused && delName.includes('kbd_ren') && !delListed.includes('kbd_ren') && await pollValue(listFocused, (v) => v, 3000),
+    `focus=${delFocused} confirm=${delName.slice(0, 60)}`)
+  // dublu-click pe un fişier = editorul (până în 3.6.13 copia numele)
+  await filePanel.locator('button[data-fname="a_file.txt"]').dblclick()
+  const dblOpened = await page.locator('.monaco-editor').waitFor({ state: 'visible', timeout: 15000 }).then(() => true, () => false)
+  check('3.6.14: dublu-click pe un fişier îl deschide în editor', dblOpened)
+  if (dblOpened) await page.locator('[role=dialog][aria-label^="Edit"] button:has-text("Close")').click()
+  await page.waitForTimeout(300)
+  // Enter intră în dosar; firimitura părinte navighează; ‹ (înapoi) revine; Backspace urcă
+  await fpList.focus()
+  await page.keyboard.type('sub')
+  await page.keyboard.press('Enter')
+  const inSub = await pollValue(() => listedDir(filePanel), (v) => v === `${KD}/sub`)
+  await filePanel.locator('nav[aria-label="Path"] button', { hasText: `wt_kbd_${RUN}` }).click()
+  const viaCrumb = await pollValue(() => listedDir(filePanel), (v) => v === `${KD}`)
+  await filePanel.locator('[data-testid="wt-files-back"]').click()
+  const viaBack = await pollValue(() => listedDir(filePanel), (v) => v === `${KD}/sub`)
+  await fpList.focus()
+  await page.keyboard.press('Backspace')
+  const viaUp = await pollValue(() => listedDir(filePanel), (v) => v === `${KD}`)
+  check('3.6.14: Enter intră, firimitura navighează, ‹ revine, Backspace urcă',
+    inSub === `${KD}/sub` && viaCrumb === `${KD}` && viaBack === `${KD}/sub` && viaUp === `${KD}`,
+    `${inSub} → ${viaCrumb} → ${viaBack} → ${viaUp}`)
+  // Ctrl+U = dialogul de upload (nu view-source), Ctrl+R = re-listarea (nu reload-ul paginii) — DOAR cu focusul în listă
+  await page.evaluate(() => { window.__wtNoReload = 1 })
+  const pagesBefore = page.context().pages().length
+  await fpList.focus()
+  const chooserP = page.waitForEvent('filechooser', { timeout: 4000 }).catch(() => null)
+  await page.keyboard.press('Control+u')
+  const chooser = await chooserP
+  await fpList.focus()
+  await page.keyboard.press('Control+r')
+  await page.waitForTimeout(800)
+  const notReloaded = await page.evaluate(() => window.__wtNoReload === 1).catch(() => false)
+  check('3.6.14: Ctrl+U în listă deschide alegerea de fişiere (nu view-source), Ctrl+R re-listează (nu reîncarcă pagina)',
+    !!chooser && notReloaded && page.context().pages().length === pagesBefore,
+    `chooser=${!!chooser} noReload=${notReloaded} pages=${pagesBefore}→${page.context().pages().length}`)
+  // „cd here in the terminal" (meniul rândului): tastează `cd -- '<cale>'` la prompt, FĂRĂ Enter
+  await filePanel.locator('[data-row="sub"]').click({ button: 'right' })
+  await rowMenu.locator('[role="menuitem"]', { hasText: 'cd here in the terminal' }).click()
+  const cdTyped = await waitScreen(`cd -- '${KD}/sub'`, 8000)
+  await activePane.locator('.xterm-screen').click()
+  await page.keyboard.type(' && pwd | sed s/^/WT_PWD_/\n')
+  const cdRan = await waitScreen(`WT_PWD_${KD}/sub`, 8000)
+  check('3.6.14: „cd here" tastează cd -- \'…\' la prompt (fără Enter); Enter-ul omului îl rulează', cdTyped && cdRan)
+  await page.keyboard.type('cd /tmp\n')
+  await gotoDir(filePanel, '/tmp')
 
   // ── Faza 3 (Val 5): editor Monaco — deschide, editează, salvează pe host ──
   await activePane.locator('.xterm-screen').click()
@@ -1269,7 +1394,6 @@ try {
   // putea rămâne în alt director, iar fişierul „lipsea" din listă din motive de test, nu de produs.
   // (gotoDir: aşteptăm LISTAREA lui /tmp — „Reload" reîncarcă directorul listat, deci un click dat
   // cât încă era listat /sys re-lista /sys, iar fişierul „lipsea")
-  const fpPathInput = filePanel.locator('input[title*="Type a path"]')
   await gotoDir(filePanel, '/tmp')
   await filePanel.locator('button[title="Reload"]').click()
   await filePanel.locator('input[placeholder="filter…"]').fill('raport')
@@ -1287,7 +1411,7 @@ try {
     console.error('  [diag] ecran:', tail.slice(-300))
     console.error('  [diag] panou:', (spText.match(/raport[^\n]{0,40}/) || ['(nimic cu raport)'])[0])
   }
-  if (!spText.includes(SPECIAL)) console.error('  [diag] panoul e în', await fpPathInput.inputValue())
+  if (!spText.includes(SPECIAL)) console.error('  [diag] panoul e în', await listedDir(filePanel))
   const spRow = filePanel.locator('div.group').filter({ hasText: SPECIAL }).first()
   // Fără rândul din listă NU mai crăpăm tot scriptul (crash-ul forţa re-rularea pe un container
   // cu stare rămasă, unde picau apoi alte verificări): verificările de mai jos pică individual.
@@ -1465,7 +1589,7 @@ try {
   // lui. Un `cd` într-o sesiune NU trebuie să miște panoul altei sesiuni — la fel
   // în split (două panouri vizibile) ca și între taburi (keep-alive le ține montate).
   const vis = () => page.locator('div:not([aria-hidden="true"]) > .wt-window').last()
-  const visPath = () => vis().locator('input[title*="Type a path"]').inputValue()
+  const visPath = () => vis().locator('[role="group"][data-path]').getAttribute('data-path').catch(() => '')
   await goHome()
   await newSession(page)                     // X1 (integrată din ~/.bashrc)
   await page.waitForSelector('.xterm-screen', { timeout: 15000 })

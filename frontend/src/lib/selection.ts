@@ -75,9 +75,41 @@ export function previewNames(names: readonly string[], n = 5): { shown: string[]
   return { shown: names.slice(0, n), more: Math.max(0, names.length - n) }
 }
 
-/** Tastele de NAVIGARE ale listei (săgeţi, Enter, Space, Delete…) se aplică doar când evenimentul
-    vine chiar de pe containerul listei (3.6.1, U09). Un keydown de pe un descendent focalizat —
-    butoanele Descarcă/Şterge ale rândului, bifa, numele — urcă (bubbling) până la listă; înainte,
-    Enter pe „Şterge" deschidea fişierul selectat, iar Space pe o bifă o comuta de două ori.
-    Descendentul îşi tratează singur tasta (activarea nativă a butonului / a bifei). */
-export const isListKeyTarget = (target: unknown, container: unknown): boolean => target === container
+/** Tastele listei (săgeţi, Enter, Space, Delete, F2, tastează-ca-să-sari…) — 3.6.14, roving focus.
+    Până în 3.6.13 se aplicau DOAR când evenimentul venea chiar de pe containerul listei (U09): un
+    keydown de pe un descendent — butoanele Descarcă/Şterge ale rândului, bifa, numele — urca până la
+    listă, iar Enter pe „Şterge" deschidea fişierul selectat şi Space pe o bifă o comuta de două ori.
+    Doar că focusul ajungea des pe un descendent (click pe nume) sau pe <body> (rândul dispărea la
+    navigare), iar tastele erau moarte. Acum lista are focusul (click pe rând → container), iar de pe
+    un descendent se aplică tot, CU EXCEPŢIA:
+      - câmpurilor de text (redenumire inline, dosar nou) şi a bifelor — tastele sunt ale lor;
+      - Enter / Space pe un control real (buton, link, element de meniu) — îl activează pe EL, nu
+        deschid rândul (regula U09 rămâne). */
+export interface KeyTarget {
+  /** evenimentul vine chiar de pe containerul listei */
+  isContainer: boolean
+  /** tagName (majuscule, ca în DOM) */
+  tag: string
+  /** contenteditable */
+  editable?: boolean
+  role?: string | null
+}
+const FIELD_TAGS = new Set(['INPUT', 'TEXTAREA', 'SELECT'])
+const CONTROL_TAGS = new Set(['BUTTON', 'A', 'SUMMARY', 'LABEL'])
+const CONTROL_ROLES = new Set(['button', 'link', 'menuitem', 'checkbox', 'switch', 'option', 'tab'])
+export function isListKeyTarget(t: KeyTarget, key: string): boolean {
+  if (t.isContainer) return true
+  if (FIELD_TAGS.has(t.tag) || t.editable) return false
+  if ((key === 'Enter' || key === ' ') && (CONTROL_TAGS.has(t.tag) || (t.role != null && CONTROL_ROLES.has(t.role)))) return false
+  return true
+}
+/** Descrierea ţintei unui eveniment DOM pentru `isListKeyTarget`. */
+export function keyTargetOf(target: EventTarget | null, container: EventTarget | null): KeyTarget {
+  const el = target as HTMLElement | null
+  return {
+    isContainer: !!el && el === container,
+    tag: el?.tagName ?? '',
+    editable: !!el?.isContentEditable,
+    role: el?.getAttribute?.('role') ?? null,
+  }
+}

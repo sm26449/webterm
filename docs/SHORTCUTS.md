@@ -44,6 +44,7 @@ and maximize buttons (or double-click the pane title).
 | `Alt+X` | Split view: maximize / restore the focused pane (macOS: see the note above) |
 | `Alt+P` | Detach the session into a window |
 | `Alt+S` | Saved commands (snippets) |
+| `Alt+E` | Open / close the session's **Files** panel (inside a split view: the focused pane's). Not bound in bash/zsh readline; in fish it replaces "edit the line in `$EDITOR`" — the same trade-off as `Alt+S`/`Alt+P`. macOS: see the note above (`Option+E` is the accent dead key) |
 | `Alt++` / `Alt+−` | Larger / smaller font |
 | `Mod+Shift+V` | Paste picker — clipboard history shared by all terminals (`Shift+Enter` in the picker = paste and run) |
 
@@ -68,6 +69,41 @@ it is cleared on idle-lock and on logout. A popped-out session window has its ow
 | `Shift+Enter` | Scrollback search: previous match (`Enter` = next) |
 | `←` / `→` (`↑` / `↓` on a horizontal one), `Home` / `End` on a split divider | Resize the panes; Home / End go to the edge; double-click the divider evens the panes out |
 
+## Files list
+
+Active **only while the Files list has focus** — never in the terminal, never in a text field
+(the path, the filter, an inline rename). The list keeps the focus (roving focus): it gets it when
+the panel opens and back after navigating, renaming, creating, deleting, closing the editor, a
+dialog or the row menu; clicking a row puts it there too. Nothing here uses `Alt+←/→` — those stay
+the tab / pane keys. `Mod+U`, `Mod+R` / `F5` and `Mod+L` are taken from the browser **only** while
+the list has focus.
+
+| Shortcut | Action |
+|---|---|
+| `Enter` / double-click / double-tap | Open: enter the folder, or edit the file (a single click on a folder name enters it too) |
+| `↑` / `↓`, `Home` / `End` / `PgUp` / `PgDn` | Move the current row |
+| letters | Type a name to jump to it (prefix, ~1 s buffer; repeating one letter cycles through the names that start with it) |
+| `Backspace` / `Alt+↑` (macOS `⌘↑`) | Up one level (the folder you came from stays selected) |
+| `Mod+[` / `Mod+]`, mouse buttons 4 / 5 | Back / forward through the folders visited in this panel |
+| `Mod+L` | Edit the path (also: click the last breadcrumb, or the pencil); `Tab` completes a folder name, `Esc` cancels |
+| `/` | Filter (the filter is cleared when you change folder) |
+| `F2` | Rename (the name without its extension is pre-selected) |
+| `F7` | New folder |
+| `Alt+N` | New file (macOS: only when Option doesn't type a character) |
+| `Mod+U` | Upload files here |
+| `F5` / `Mod+R` | Reload the listing (not the page) |
+| `Mod+C` | Copy the name (with a multi-selection: the selected names, one per line); a text selection is copied normally |
+| `Mod+Shift+C` | Copy the full path |
+| `Shift+F10` / Menu key / right-click | Row actions menu: open / edit, download (`.tgz` for folders), rename, duplicate, copy name, copy path, copy to host…, **cd here in the terminal**, delete. `↑`/`↓`/`Home`/`End` move, `Esc` closes and returns to the row. Right-click on the empty part of the list: new file / folder, upload, reload, copy path, cd here |
+| `Space`, `Shift+↑`/`↓`, `Mod+A` | Select a row, extend the selection, select all visible |
+| `Delete` | Delete (the selection, or the current row). The confirmation has the focus: `Enter` deletes, `Esc` cancels |
+| `Esc` | Clear the selection; a second `Esc` closes the panel |
+
+**cd here in the terminal** (session panel only) types `cd -- '<path>'` at the prompt and does
+**not** press Enter — like *Insert path*: you see the command and run it yourself. It is refused
+with a message when WebTerm cannot see a shell prompt (a program such as `mc`, `vim` or `less`
+is in front) and for paths with control, invisible or bidirectional characters.
+
 ## Mouse and touch
 
 | Gesture | Action |
@@ -78,7 +114,8 @@ it is cleared on idle-lock and on logout. A popped-out session window has its ow
 | Drag a tab onto a split pane | Show that session in the pane (if it is already another pane, the two swap) |
 | Double-click a split pane's title bar | Maximize the pane; again to restore |
 | Tap the tab-count button at the end of the tab bar (phones, or whenever tabs don't fit) | List of **all** open tabs: host, live / closed / lost, new-output dot; tap to switch, ✕ closes the tab (the session keeps running). `↑`/`↓`/`Home`/`End` move, `Esc` closes |
-| Back button / swipe-back while a panel is open on a phone | Closes the panel (Files, Git, Forwards, Docker, Services, Toolbox, AI tools, Commands) and returns to the terminal, instead of leaving the app |
+| Back button / swipe-back while a panel is open on a phone | Closes the panel (Files, Git, Forwards, Docker, Services, Toolbox, AI tools, Commands) and returns to the terminal, instead of leaving the app. In **Files** it first goes back through the folders you visited; it closes the panel only at the first one |
+| Tap `⋯` on a file row (touch) | The row's actions as a bottom sheet (44 px targets); the floating `+` holds new file / new folder / upload. Long-press still starts a multi-selection; the selection bar sits at the bottom |
 
 ## Touch key bar (phones and tablets)
 

@@ -19,9 +19,13 @@ import { claimSheetHistory, lockBodyScroll, useSheetMode } from './sheet'
    panoul îşi pune `SHEET_CLS` + bara „← Terminal" (SheetBar). Aici, o singură dată pentru toate:
    scroll-ul paginii din spate e blocat, iar Back-ul de Android / swipe-back închide foaia (o
    intrare de istoric cu acelaşi URL) în loc să părăsească aplicaţia. Focusul şi Escape — ca mai sus. */
-export function useDrawer(ref: RefObject<HTMLElement>, onClose: () => void, active = true) {
+export function useDrawer(ref: RefObject<HTMLElement>, onClose: () => void, active = true,
+  /** 3.6.14: Back-ul (Android) în modul foaie — true = consumat în panou (ex. fişiere: directorul anterior), foaia rămâne */
+  onBack?: () => boolean) {
   const onCloseRef = useRef(onClose)
   onCloseRef.current = onClose
+  const onBackRef = useRef(onBack)
+  onBackRef.current = onBack
   const sheet = useSheetMode(active)
   // capturat în RENDER (ca în useFocusTrap): după commit, `activeElement` poate fi deja
   // un câmp cu autoFocus din panou, iar „înapoi" ar însemna „nicăieri"
@@ -41,7 +45,7 @@ export function useDrawer(ref: RefObject<HTMLElement>, onClose: () => void, acti
 
   useEffect(() => {
     if (!sheet) return
-    const release = claimSheetHistory(() => onCloseRef.current())
+    const release = claimSheetHistory(() => onCloseRef.current(), () => onBackRef.current?.() === true)
     const unlock = lockBodyScroll()
     return () => { release(); unlock() }
   }, [sheet])

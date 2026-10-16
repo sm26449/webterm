@@ -9,6 +9,63 @@ back.
 
 ## [Unreleased]
 
+Files panel UI/UX. Frontend only — no agent change (agent stays 58), no new gateway route.
+
+### Added
+- **Row actions menu** in Files: right-click, `Shift+F10` / the Menu key, or a single 44 px `⋯` per
+  row on touch (a bottom sheet). Open / edit, download (`.tgz` for a folder), rename, **duplicate**,
+  copy name, copy path, copy to host…, **cd here in the terminal** (session panel), delete; on the
+  empty part of the list: new file / folder, upload, reload, copy path, cd here. Why: half of the
+  actions (duplicate, copy path, copy to host for one row) were reachable only through multi-select
+  or a hidden gesture, and the browser's own menu appeared on right-click. Keyboard-operable
+  (WAI-ARIA menu: arrows, Home/End, Esc returns to the row).
+- **Duplicate** reuses `POST /api/fs/copy` with source = destination host and `on_conflict:
+  rename` (already allowed server-side) → `name (1).ext` / `folder (1)`, the first free name.
+- **cd here in the terminal** types `cd -- '<path>'` at the prompt through the existing
+  typed-not-run path (bracketed paste / OSC 133 prompt check) and does **not** press Enter, like
+  *Insert path*. Always single-quoted, backslash outside the quotes (fish), and refused — not
+  stripped — for control, bidi, zero-width or line-separator characters (stripping would `cd`
+  somewhere else). Refused with a message when no shell prompt is visible.
+- **Breadcrumbs** replace the path field (click a segment to go there; the last segment, the pencil
+  or `Mod+L` turn it into the field, where `Tab` completes a folder name from the parent's listing);
+  **back / forward** history per panel (‹ ›, `Mod+[` / `Mod+]`, mouse buttons 4/5 — never
+  `Alt+←/→`, which switch tabs); the desktop column is **resizable** by its left edge (remembered,
+  like the sort order). Why: the size/date columns did not fit in 320 px, and every "where was I"
+  meant retyping a path.
+- **Keyboard-first list** with a `files` group in the shortcut registry (`?` and
+  [SHORTCUTS.md](docs/SHORTCUTS.md#files-list) list it): `F2` rename, `F7` new folder, `Alt+N` new
+  file, `Mod+U` upload, `F5`/`Mod+R` reload, `Mod+L` path, `/` filter, type-to-jump, Home/End/PgUp/
+  PgDn, `Backspace`/`Alt+↑` (⌘↑) up, `Mod+C` / `Mod+Shift+C` copy name / full path. They act only
+  while the list has focus; the browser keys (`Mod+U` view-source, `Mod+R`, `Mod+L`) are taken only
+  there. The global `?` and `/` leave the list alone.
+- **`Alt+E`** toggles the active session's Files panel (Option-as-Meta only on macOS; never from a
+  dialog or the editor, which lives inside the panel).
+- **Touch**: size and date under the name, a floating `+` (new file / folder / upload) instead of
+  three toolbar icons, the selection bar pinned at the bottom; on a phone, Back walks back through
+  the folders visited and closes the panel only at the first one.
+- **Toasts** after creating a folder, renaming, deleting ("Deleted 3 items") and duplicating.
+
+### Changed
+- **Roving focus**: the list keeps the keyboard. It gets the focus when the panel opens and back
+  after navigating, rename, mkdir, delete, closing the editor, a dialog or the menu; clicking a row
+  focuses it. Why: the focus used to sit on the name button, which unmounts on navigation — focus
+  fell to `<body>` and the keys were dead after most mouse actions. Keys from a row's buttons now
+  reach the list too, except Enter/Space on a real control (it still activates that control, U09).
+- **Double-click / double-tap opens** (folder: enter, file: editor). It used to copy the name
+  (triple-click: the path), so opening a file needed the hover pencil or Enter. Copying moved to
+  the menu and `Mod+C` / `Mod+Shift+C`.
+- **Single-delete confirmation** has the focus on Delete: `Enter` confirms, `Esc` cancels, and the
+  focus returns to the list (it was not focused, and Enter was ignored while it was open).
+- **The filter is cleared on a directory change** — a filter typed in one folder silently hid most
+  of the next one.
+- The sidebar host menu / palette → **Files** opens the host page's Files tab.
+
+### Removed
+- **`FileBrowser`**, the older modal file manager behind the host menu → Files, and its strings.
+  Why: a second file UI without multi-select, copy to host, resumable transfers, the denied-write
+  help or keyboard support — two places to fix every file bug. The host page's Files tab is the
+  same panel as in a session.
+
 ## [3.6.13] — 2026-10-15 · agent (58)
 
 Closes the four residuals the independent reviews left on the 3.6.12 broadcast guardrail. Gateway +

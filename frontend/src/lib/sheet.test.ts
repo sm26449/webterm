@@ -74,6 +74,22 @@ describe('claimSheetHistory (butonul Back de Android)', () => {
     expect(hist.idx).toBe(0)
   })
 
+  it('3.6.14: Back consumat în foaie (fişiere: înapoi prin directoare) o ţine deschisă, apoi o închide la capăt', () => {
+    const close = vi.fn()
+    let steps = 2                     // panoul are două directoare în urmă
+    const release = claimSheetHistory(close, () => (steps > 0 ? (steps--, true) : false))
+    hist.back(); vi.runAllTimers()
+    expect(close).not.toHaveBeenCalled()
+    expect(hist.state).toMatchObject({ __wtSheet: true })   // re-armat: următorul Back ajunge tot aici
+    hist.back(); vi.runAllTimers()
+    expect(close).not.toHaveBeenCalled()
+    hist.back(); vi.runAllTimers()   // la începutul istoricului: închide
+    expect(close).toHaveBeenCalledTimes(1)
+    expect(hist.state).toBeNull()
+    release(); vi.runAllTimers()
+    expect(hist.backCalls).toBe(3)    // doar Back-urile userului
+  })
+
   it('închiderea din UI (← Terminal / Escape) consumă intrarea, fără să cheme close a doua oară', () => {
     const close = vi.fn()
     const release = claimSheetHistory(close)

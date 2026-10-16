@@ -12,12 +12,19 @@ export type ShortcutId =
   | 'palette' | 'help' | 'search' | 'closeTab' | 'reopenTab'
   | 'nextTab' | 'prevTab' | 'split' | 'popout'
   | 'fontUp' | 'fontDown' | 'snippets' | 'focusSidebar' | 'home' | 'pastePicker'
-  | 'movePane' | 'maximizePane'
+  | 'movePane' | 'maximizePane' | 'toggleFiles'
+  // 3.6.14: lista panoului de fişiere — DOAR cât focusul e în listă (vezi `matchFilesShortcut`)
+  | 'filesOpen' | 'filesUp' | 'filesBack' | 'filesForward' | 'filesRename' | 'filesNewFolder'
+  | 'filesNewFile' | 'filesUpload' | 'filesReload' | 'filesFocusPath' | 'filesFilter'
+  | 'filesCopyName' | 'filesCopyPath' | 'filesMenu' | 'filesSelectAll' | 'filesToggleSel'
+  | 'filesExtendSel' | 'filesEdges' | 'filesDelete' | 'filesTypeJump'
 
 export interface Shortcut {
   id: ShortcutId
   keys: string
-  group: 'nav' | 'session' | 'app'
+  /** `files` = scurtătură LOCALĂ listei de fişiere: handler-ul global o ignoră (`matchShortcut`),
+      lista o tratează prin `matchFilesShortcut`; e aici ca „?" şi docs/SHORTCUTS.md să nu mintă */
+  group: 'nav' | 'session' | 'app' | 'files'
   match: (e: KeyboardEvent) => boolean
 }
 
@@ -68,6 +75,11 @@ export const SHORTCUTS: Shortcut[] = [
     match: (e) => altLetter(e, 'm') },
   { id: 'maximizePane', keys: 'Alt+X', group: 'session',
     match: (e) => altLetter(e, 'x') },
+  // 3.6.14: deschide / închide panoul de fişiere al sesiunii active. Alt+E nu e legat în bash/zsh
+  // (readline emacs); în fish e „editează linia în $EDITOR" — acelaşi compromis ca Alt+S/P/W.
+  // Pe macOS doar cu Option ca Meta (Option+E e tasta moartă pentru accent).
+  { id: 'toggleFiles', keys: 'Alt+E', group: 'session',
+    match: (e) => altLetter(e, 'e') },
   { id: 'popout', keys: 'Alt+P', group: 'session',
     match: (e) => e.code === 'KeyP' && altOnly(e) },
   { id: 'fontUp', keys: 'Alt++', group: 'session',
@@ -86,16 +98,65 @@ export const SHORTCUTS: Shortcut[] = [
     match: (e) => e.code === 'Digit0' && altOnly(e) },
 ]
 
+/* ── Lista de fişiere (3.6.14) ──────────────────────────────────────────────────────────────
+   Active DOAR cât focusul e în lista panoului (nu în terminal, nu într-un câmp). Nimic pe Alt+←/→
+   (taburile) — înapoi/înainte stau pe Mod+[ / Mod+] (şi butoanele 4/5 ale mouse-ului). Pe macOS
+   „sus" e ⌘↑ (ca în Finder), în rest Alt+↑ (ca în Explorer). Prima potrivire câştigă
+   (Mod+Shift+C stă înaintea lui Mod+C). `mac` e parametru doar pentru teste. */
+const plain = (e: KeyboardEvent) => !e.ctrlKey && !e.metaKey && !e.altKey
+export function filesShortcuts(mac: boolean = isMac): Shortcut[] {
+  const m = (e: KeyboardEvent) => (mac ? e.metaKey : e.ctrlKey)
+  const modOnly = (e: KeyboardEvent) => m(e) && !e.altKey && !e.shiftKey && !(mac ? e.ctrlKey : e.metaKey)
+  return [
+    { id: 'filesOpen', keys: 'Enter', group: 'files', match: (e) => e.key === 'Enter' && plain(e) && !e.shiftKey },
+    { id: 'filesUp', keys: mac ? 'Backspace / Mod+↑' : 'Backspace / Alt+↑', group: 'files',
+      match: (e) => (e.key === 'Backspace' && plain(e) && !e.shiftKey)
+        || (e.key === 'ArrowUp' && !e.shiftKey && (mac ? e.metaKey && !e.altKey && !e.ctrlKey : e.altKey && !e.ctrlKey && !e.metaKey)) },
+    { id: 'filesBack', keys: 'Mod+[', group: 'files', match: (e) => e.code === 'BracketLeft' && modOnly(e) },
+    { id: 'filesForward', keys: 'Mod+]', group: 'files', match: (e) => e.code === 'BracketRight' && modOnly(e) },
+    { id: 'filesRename', keys: 'F2', group: 'files', match: (e) => e.key === 'F2' && plain(e) && !e.shiftKey },
+    { id: 'filesNewFolder', keys: 'F7', group: 'files', match: (e) => e.key === 'F7' && plain(e) && !e.shiftKey },
+    { id: 'filesNewFile', keys: 'Alt+N', group: 'files', match: (e) => altLetter(e, 'n', mac) },
+    { id: 'filesUpload', keys: 'Mod+U', group: 'files', match: (e) => e.code === 'KeyU' && modOnly(e) },
+    { id: 'filesReload', keys: 'F5 / Mod+R', group: 'files',
+      match: (e) => (e.key === 'F5' && plain(e) && !e.shiftKey) || (e.code === 'KeyR' && modOnly(e)) },
+    { id: 'filesFocusPath', keys: 'Mod+L', group: 'files', match: (e) => e.code === 'KeyL' && modOnly(e) },
+    { id: 'filesFilter', keys: '/', group: 'files', match: (e) => e.key === '/' && plain(e) },
+    { id: 'filesCopyPath', keys: 'Mod+Shift+C', group: 'files',
+      match: (e) => e.code === 'KeyC' && m(e) && e.shiftKey && !e.altKey },
+    { id: 'filesCopyName', keys: 'Mod+C', group: 'files', match: (e) => e.code === 'KeyC' && modOnly(e) },
+    { id: 'filesMenu', keys: 'Shift+F10', group: 'files',
+      match: (e) => (e.key === 'F10' && e.shiftKey && plain(e)) || (e.key === 'ContextMenu' && plain(e)) },
+    { id: 'filesSelectAll', keys: 'Mod+A', group: 'files', match: (e) => e.code === 'KeyA' && modOnly(e) },
+    { id: 'filesToggleSel', keys: 'Space', group: 'files', match: (e) => e.key === ' ' && plain(e) && !e.shiftKey },
+    { id: 'filesExtendSel', keys: 'Shift+↑ / Shift+↓', group: 'files',
+      match: (e) => (e.key === 'ArrowUp' || e.key === 'ArrowDown') && e.shiftKey && plain(e) },
+    { id: 'filesEdges', keys: 'Home / End / PgUp / PgDn', group: 'files',
+      match: (e) => ['Home', 'End', 'PageUp', 'PageDown'].includes(e.key) && plain(e) && !e.shiftKey },
+    { id: 'filesDelete', keys: 'Delete', group: 'files', match: (e) => e.key === 'Delete' && plain(e) && !e.shiftKey },
+    // doar afişare: literele = „tastează ca să sari" (tratat direct de listă, nu printr-un matcher)
+    { id: 'filesTypeJump', keys: 'a…z', group: 'files', match: () => false },
+  ]
+}
+const FILES = filesShortcuts()
+SHORTCUTS.push(...FILES)
+
+/** Scurtătura listei de fişiere care se potriveşte (sau null). Doar grupul `files`; `list` doar pentru teste. */
+export function matchFilesShortcut(e: KeyboardEvent, list: Shortcut[] = FILES): ShortcutId | null {
+  for (const s of list) if (s.match(e)) return s.id
+  return null
+}
+
 /** Eticheta pentru afișare, cu simbolurile potrivite platformei. */
 export function fmt(keys: string): string {
   return isMac
-    ? keys.replace('Mod', '⌘').replace('Alt', '⌥').replace('Shift', '⇧')
-    : keys.replace('Mod', 'Ctrl')
+    ? keys.replace(/Mod/g, '⌘').replace(/Alt/g, '⌥').replace(/Shift/g, '⇧')
+    : keys.replace(/Mod/g, 'Ctrl')
 }
 
 /** Prima scurtătură care se potrivește evenimentului (sau null). */
 export function matchShortcut(e: KeyboardEvent): ShortcutId | null {
-  for (const s of SHORTCUTS) if (s.match(e)) return s.id
+  for (const s of SHORTCUTS) if (s.group !== 'files' && s.match(e)) return s.id
   return null
 }
 

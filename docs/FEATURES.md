@@ -144,8 +144,17 @@ Press `?` for the cheatsheet.
 - **In-session file manager** (toolbar button): a side panel that **follows the
   terminal's `cd`** (OSC 7), dense listing with sort/filter/keyboard navigation,
   mkdir/rename/delete, **create a file in place** (empty, or filled straight **from
-  your clipboard** — paste a config without making a local file first), double-click
-  a file name to copy it, triple-click to copy its full path,
+  your clipboard** — paste a config without making a local file first), **clickable
+  breadcrumbs** (click the last segment or press `Ctrl+L` to type a path, `Tab` completes a
+  folder name), **back / forward** history (‹ ›, `Mod+[` / `Mod+]`, mouse buttons 4/5), a
+  **resizable** column (drag its left edge; the width and the sort order are remembered),
+  **double-click / double-tap opens** (folder: enter it, file: the editor), a **row actions
+  menu** (right-click, `Shift+F10` / the Menu key, or one 44 px `⋯` per row on touch: open, edit,
+  download, rename, **duplicate**, copy name / path, copy to host, **cd here in the terminal** —
+  typed at the prompt, never run for you — delete), **keyboard-first** list (roving focus;
+  `F2` rename, `F7` new folder, `Alt+N` new file, `Ctrl+U` upload, `F5` reload, type a name to
+  jump to it, `Ctrl+C` / `Ctrl+Shift+C` copy the name / full path — see
+  [SHORTCUTS.md](SHORTCUTS.md#files-list)), a floating `+` (new file / folder / upload) on phones,
   drag&drop upload (including **folders**) with a real progress
   bar + cancel — **resumable**: a dropped connection (or a closed laptop) keeps the
   bytes already uploaded, re-dropping the same file continues where it left off, and

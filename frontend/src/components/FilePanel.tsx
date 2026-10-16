@@ -4,7 +4,7 @@ import { errText, api, Host } from '../lib/api'
 import { copyText, readText } from '../lib/clipboard'
 import { getCwd } from '../lib/cwd'
 import { useI18n } from '../lib/i18n'
-import { SHEET_CLS } from '../lib/sheet'
+import { SHEET_CLS, useMediaQuery } from '../lib/sheet'
 import { useDrawer } from '../lib/useDrawer'
 import SheetBar from './SheetBar'
 import { cancelUpload, dismissUpload, isUploadBusy, startUpload as engineStart, takeFilesDir } from '../lib/uploads'
@@ -13,13 +13,21 @@ import { isActive, sizeKnown, uploadStore } from '../lib/uploadStore'
 import { fmtBytes } from '../lib/uploads'
 import { uiLocale } from '../lib/tz'
 import {
-  EMPTY_SELECTION, Selection, allState, isListKeyTarget, previewNames, prune, rangeTo, toggleAll, toggleKey, visibleSelected,
+  EMPTY_SELECTION, Selection, allState, isListKeyTarget, keyTargetOf, previewNames, prune, rangeTo, toggleAll, toggleKey, visibleSelected,
 } from '../lib/selection'
-import { ArrowsLeftRightIcon, CheckIcon, LockIcon, ChevronDownIcon, ChevronUpIcon, CloseIcon, CopyIcon, DownloadIcon, FileIcon, FilePlusIcon, FolderIcon, LevelUpIcon, LinkIcon, PencilIcon, PlusIcon, RefreshIcon, RenameIcon, TrashIcon, UploadIcon } from './Icons'
+import { ArrowLeftIcon, ArrowRightIcon, ArrowsLeftRightIcon, CheckIcon, ChevronIcon, LockIcon, ChevronDownIcon, ChevronUpIcon, CloseIcon, CopyIcon, DownloadIcon, FileIcon, FilePlusIcon, FolderIcon, LevelUpIcon, LinkIcon, MoreIcon, PencilIcon, PlusIcon, RefreshIcon, RenameIcon, TerminalPromptIcon, TrashIcon, UploadIcon } from './Icons'
 import CopyToHostDialog, { CopyItem } from './CopyToHostDialog'
 import WriteDeniedBanner, { PendingFile } from './WriteDeniedBanner'
+import FileMenu, { MenuItem } from './FileMenu'
 import { clearDenied, deniedStore, errIsWriteDenied, isDenied, isWriteDenied, markDenied } from '../lib/rootmove'
-import { resolveHome } from '../lib/transfers'
+import { resolveHome, typeIntoOutcome } from '../lib/transfers'
+import { startCopy } from '../lib/copyjobs'
+import { notifyToast } from '../lib/notify'
+import { fmt, matchFilesShortcut } from '../lib/shortcuts'
+import {
+  EMPTY_HISTORY, NavHistory, TYPE_JUMP_MS, baseName, canBack, canForward, cdCommand, completePath, crumbs, histPush,
+  histStep, parentOf, splitForCompletion, typeJump,
+} from '../lib/filesNav'
 import { Button, IconButton } from './ui'
 
 // CodeMirror e greu → lazy: intră doar când deschizi un fișier
@@ -41,6 +49,31 @@ interface Listing {
 }
 
 type SortKey = 'name' | 'size' | 'mtime'
+
+// sortarea aleasă se ţine minte (3.6.14): `name:1`, `mtime:0`… — orice altceva = implicit
+const SORT_KEY = 'wt_files_sort'
+function loadSort(): { key: SortKey; asc: boolean } {
+  const m = /^(name|size|mtime):([01])$/.exec(lsGet(SORT_KEY) ?? '')
+  return m ? { key: m[1] as SortKey, asc: m[2] === '1' } : { key: 'name', asc: true }
+}
+// lăţimea coloanei de pe desktop (3.6.14): trasă de marginea stângă, persistată pe dispozitiv
+const WIDTH_KEY = 'wt_files_w'
+const W_MIN = 260, W_DEF = 320, W_MAX = 900
+const clampW = (w: number) => Math.round(Math.max(W_MIN, Math.min(W_MAX,
+  typeof window !== 'undefined' ? Math.max(W_MIN, window.innerWidth - 360) : W_MAX, w)))
+function loadWidth(): number {
+  const v = Number(lsGet(WIDTH_KEY))
+  return v >= W_MIN && v <= W_MAX ? v : W_DEF
+}
+/** câmp de text (acolo tastele şi focusul sunt ale lui, nu ale listei) */
+const isTextField = (el: Element | null) =>
+  !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || (el as HTMLElement).isContentEditable)
+
+/** ţinta unui meniu: un rând, zona goală a listei (directorul curent) sau butonul flotant „+" */
+type MenuState =
+  | { kind: 'row'; entry: Entry; x: number; y: number; sheet: boolean }
+  | { kind: 'dir'; x: number; y: number; sheet: boolean }
+  | { kind: 'new'; x: number; y: number; sheet: boolean }
 
 function fmtSize(n: number): string {
   if (n < 1024) return `${n} B`
@@ -103,14 +136,25 @@ export default function FilePanel(props: {
   const { t } = useI18n()
   const isAgent = !props.host.connection_type || props.host.connection_type === 'agent'
   const asideRef = useRef<HTMLElement>(null)
-  const drawer = useDrawer(asideRef, props.onClose, !props.embed)
+  // Back-ul de Android în foaie (3.6.14): întâi înapoi prin directoarele vizitate, abia la capăt
+  // închide panoul. Prin ref: funcţia vede istoricul curent, iar useDrawer o cheamă din popstate.
+  const backRef = useRef<() => boolean>(() => false)
+  const drawer = useDrawer(asideRef, props.onClose, !props.embed, () => backRef.current())
+  // touch fără hover (telefon / tabletă): „⋯" de 44px pe rând în loc de cele patru pictograme de 24px,
+  // meniul ca foaie de jos, butonul flotant „+"
+  const touchUI = useMediaQuery('(hover: none)')
   // `embed`: panoul umple un tab din pagina hostului (full-width, fără drawer/scrim/close).
   // Altfel: pe pane-uri înguste (split pe iPad) e DRAWER peste terminal, nu coloană statică —
   // o coloană de 320px într-un pane de 240px strivește terminalul la ~0px.
+  // Coloana statică de lângă terminal (desktop) se poate lăţi trăgând de marginea stângă (3.6.14).
+  const columnMode = !drawer.sheet && !props.embed && !props.overlay
+  const [colW, setColW] = useState(loadWidth)
   const asideCls = drawer.sheet ? SHEET_CLS : props.embed
     ? 'flex h-full w-full min-h-0 flex-col bg-ink-900'
     : 'fixed inset-y-0 right-0 z-40 flex w-[90vw] max-w-sm flex-col border-l border-ink-800 bg-ink-900 shadow-2xl outline-none'
-    + (props.overlay ? '' : ' sm:static sm:z-auto sm:w-80 sm:max-w-none sm:shrink-0 sm:shadow-none')
+    + (props.overlay ? '' : ' sm:relative sm:inset-auto sm:z-auto sm:w-80 sm:max-w-none sm:shrink-0 sm:shadow-none')
+  // pe rânduri: dimensiunea şi data sub nume (foaie / drawer îngust), nu în dreapta
+  const compact = drawer.sheet || !!props.overlay
   const scrimCls = props.embed ? 'hidden' : 'fixed inset-0 z-30 bg-black/60' + (props.overlay ? '' : ' sm:hidden')
   const [listing, setListing] = useState<Listing | null>(null)
   const [path, setPath] = useState('~')
@@ -139,7 +183,41 @@ export default function FilePanel(props: {
   // persistat (audit 3.6.3): cine lucrează cu dotfile-uri nu mai reapasă „.*" la fiecare deschidere
   const [showHidden, setShowHiddenRaw] = useState(() => lsGet('wt_files_hidden') === '1')
   const setShowHidden = (f: (v: boolean) => boolean) => setShowHiddenRaw((v) => { const n = f(v); lsSet('wt_files_hidden', n ? '1' : '0'); return n })
-  const [sort, setSort] = useState<{ key: SortKey; asc: boolean }>({ key: 'name', asc: true })
+  const [sort, setSortRaw] = useState<{ key: SortKey; asc: boolean }>(loadSort)
+  const setSort = (f: (s: { key: SortKey; asc: boolean }) => { key: SortKey; asc: boolean }) =>
+    setSortRaw((s) => { const n = f(s); lsSet(SORT_KEY, `${n.key}:${n.asc ? 1 : 0}`); return n })
+  // istoricul înapoi / înainte AL ACESTUI panou (lib/filesNav.ts); `histMoveRef` = pasul cerut de
+  // ‹ / › / Back, aplicat abia când listarea ţintei reuşeşte
+  const [hist, setHist] = useState<NavHistory>(EMPTY_HISTORY)
+  const histRef = useRef(hist)
+  histRef.current = hist
+  const histMoveRef = useRef<NavHistory | null>(null)
+  // câmpul de cale apare doar la editare (click pe ultimul segment / ✎ / Ctrl+L); altfel firimituri
+  const [editPath, setEditPath] = useState(false)
+  const [pathDraft, setPathDraft] = useState('')
+  const [completion, setCompletion] = useState<{ candidates: string[]; more: number; none: boolean } | null>(null)
+  const completeCache = useRef(new Map<string, string[]>())
+  const completeSeq = useRef(0)
+  const noProgressRef = useRef<string | null>(null)
+  const [menu, setMenu] = useState<MenuState | null>(null)
+  // focusul cerut după o acţiune: pe listă, cu rândul `name` (sau indexul `idx`) selectat — aplicat
+  // după listarea cu numărul `seq` (0 = imediat). Vezi efectul de după `view`.
+  const wantFocusRef = useRef<{ name?: string; idx?: number; seq: number } | null>(null)
+  const doneSeqRef = useRef(0)
+  const [focusTick, setFocusTick] = useState(0)
+  const typeBufRef = useRef<{ s: string; t: number }>({ s: '', t: 0 })
+  // dublu-click / dublu-tap făcut de noi (click-uri pe acelaşi rând în <450 ms): merge identic cu
+  // mouse şi deget. `navGuardRef`: după ce un click a intrat într-un director, al doilea click al
+  // unui dublu-click nu mai are voie să deschidă rândul care a apărut sub cursor în listarea nouă.
+  const lastClickRef = useRef<{ name: string; t: number } | null>(null)
+  const navGuardRef = useRef(0)
+  // duplicate în zbor (rowId-ul copierii → numele + directorul), pentru toast + re-listare la final
+  const dupRef = useRef(new Map<string, { name: string; dir: string }>())
+  const filterRef = useRef<HTMLInputElement>(null)
+  const pathInputRef = useRef<HTMLInputElement>(null)
+  const crumbsRef = useRef<HTMLDivElement>(null)
+  const firstFocusRef = useRef(!props.embed && !props.initialAction)
+  const sessionPanel = !props.embed && !!props.sessionId
   const [sel, setSel] = useState(0)                 // index selectat (tastatură)
   const [listFocused, setListFocused] = useState(false)   // anunţul rândului curent (U10)
   const [renaming, setRenaming] = useState<string | null>(null)
@@ -161,17 +239,28 @@ export default function FilePanel(props: {
   const listRef = useRef<HTMLDivElement>(null)
   const loadSeq = useRef(0)
 
-  const load = useCallback(async (p: string) => {
+  /** `focus`: după listare, focusul pe listă cu rândul acela selectat (navigare / redenumire / dosar
+      nou / ştergere). Fără el (follow pe cwd, reload) focusul nu se mută. */
+  const load = useCallback(async (p: string, focus?: { name?: string; idx?: number }) => {
     // generație monotonă: dacă navighezi rapid (sau un event OSC 7 întârziat
     // sosește după un click manual), doar răspunsul CEL MAI RECENT se aplică —
     // altfel un director lent ar suprascrie unul mai nou și operațiile
     // ulterioare (upload/delete) ar ținti calea greșită.
     const my = ++loadSeq.current
+    if (focus) wantFocusRef.current = { ...focus, seq: my }
     setError('')
     setFailedPath(null)
     try {
       const l = await api<Listing>(`/api/hosts/${props.host.id}/fs?path=${encodeURIComponent(p)}`)
       if (my !== loadSeq.current) return          // un load mai nou a pornit între timp
+      doneSeqRef.current = my
+      // alt director → filtrul se goleşte (3.6.14): un „log" tastat în /var nu mai ascunde, tăcut,
+      // tot conţinutul directorului următor
+      if (pathRef.current !== l.path) setFilter('')
+      // istoricul: pasul ‹ / › cerut (dacă a ajuns chiar acolo) sau un director nou vizitat
+      const mv = histMoveRef.current
+      histMoveRef.current = null
+      setHist((h) => (mv && mv.stack[mv.idx] === l.path ? mv : histPush(h, l.path)))
       setListing(l)
       setPath(l.path)
       // alt director → selecţia se goleşte; acelaşi (reload după ştergere/rename) → doar ce mai există
@@ -183,6 +272,8 @@ export default function FilePanel(props: {
       setRenaming(null)
     } catch (e) {
       if (my !== loadSeq.current) return
+      doneSeqRef.current = my
+      histMoveRef.current = null
       setError(errText(e, t) || t('files.genericErr'))
       setFailedPath(p)   // „Reîncearcă" lângă eroare (audit 3.6.3)
       // Listarea VECHE rămânea afişată sub eroare, iar calea din input devenea deja cea
@@ -270,7 +361,30 @@ export default function FilePanel(props: {
   }, [follow, isAgent, props.sessionId, load])
 
   // navigare manuală = oprește follow (altfel te trage înapoi la cwd)
-  const navigate = (p: string) => { setFollow(false); load(p) }
+  // `select`: rândul de selectat după listare (la „sus": directorul din care ai venit)
+  const navigate = (p: string, select?: string) => { setFollow(false); setEditPath(false); void load(p, { name: select }) }
+  const goUp = () => {
+    if (!listing || listing.path === '/') return
+    navigate(listing.parent || parentOf(listing.path), baseName(listing.path))
+  }
+  /** ‹ / › (şi Mod+[ / Mod+], butoanele 4/5 ale mouse-ului, Back pe telefon). false = capătul istoricului. */
+  const goHist = (d: -1 | 1): boolean => {
+    const st = histStep(histRef.current, d)
+    if (!st) return false
+    const from = listing?.path ?? ''
+    histMoveRef.current = st.hist
+    setFollow(false)
+    setEditPath(false)
+    // înapoi într-un părinte: rândul selectat e directorul din care ai venit
+    void load(st.path, { name: from && parentOf(from) === st.path ? baseName(from) : undefined })
+    return true
+  }
+  backRef.current = () => goHist(-1)
+  /** focusul înapoi pe listă (după un dialog / meniu închis), cu rândul `name` selectat */
+  const refocus = (name?: string) => {
+    wantFocusRef.current = { name, seq: 0 }
+    setFocusTick((n) => n + 1)
+  }
   const enableFollow = () => {
     setFollow(true)
     loadSessionCwd()
@@ -298,6 +412,34 @@ export default function FilePanel(props: {
   const allSel = allState(selection, order)
   const selAllRef = useRef<HTMLInputElement>(null)
   useEffect(() => { if (selAllRef.current) selAllRef.current.indeterminate = allSel === 'some' }, [allSel])
+
+  // ── roving focus (3.6.14) ──
+  // Lista (containerul) ţine focusul: la deschidere, după navigare / redenumire / dosar nou / ştergere,
+  // după editor, dialoguri şi meniu. Înainte focusul stătea pe butonul numelui — care dispărea la
+  // navigare, deci ajungea pe <body> şi tastatura era moartă după aproape orice acţiune cu mouse-ul.
+  // Nu furăm focusul: doar dacă e pe <body>, pe panou, sau pe un control al panoului care nu e câmp
+  // de text (un câmp de redenumire cu autoFocus, terminalul sau editorul rămân neatinse).
+  const focusListIfFree = useCallback(() => {
+    const a = document.activeElement
+    const aside = asideRef.current
+    if (!a || a === document.body || (aside && aside.contains(a) && !isTextField(a)
+      && !a.closest('[role="dialog"],[role="alertdialog"]'))) {
+      listRef.current?.focus({ preventScroll: true })
+    }
+  }, [])
+  useEffect(() => {
+    if (firstFocusRef.current && listing) {
+      firstFocusRef.current = false
+      focusListIfFree()
+    }
+    const w = wantFocusRef.current
+    if (!w || w.seq > doneSeqRef.current) return
+    wantFocusRef.current = null
+    let idx = w.name != null ? view.findIndex((e) => e.name === w.name) : -1
+    if (idx < 0 && w.idx != null) idx = Math.min(w.idx, view.length - 1)
+    if (idx >= 0) setSel(idx)
+    focusListIfFree()
+  }, [view, listing, focusTick, focusListIfFree])
 
   async function download(e: Entry) {
     // Prin MOTORUL de transfer (phase 2): progres, retry, pauză şi reluare, vizibile în chip/bară —
@@ -355,10 +497,138 @@ export default function FilePanel(props: {
       }
     }
     setBusy(false)
-    await load(dir)
+    const firstIdx = view.findIndex((e) => e.name === items[0]?.name)
+    await load(dir, { idx: Math.max(0, firstIdx) })
     // ce a eşuat rămâne selectat (poţi reîncerca / vedea ce a rămas); restul a dispărut din listare
     setSelection({ keys: new Set(failedNames), anchor: null })
+    const deleted = items.length - failed.length
+    if (deleted > 0) notifyToast(deleted === 1 && items.length === 1 ? t('files.toastDeleted', { name: items[0].name })
+      : t('files.toastDeletedN', { count: deleted }))
     if (failed.length) setError(t('files.bulkDeleteFailed', { count: failed.length, total: items.length }) + ' ' + failed.slice(0, 3).join('; '))
+  }
+
+  // ── acţiunile unui RÂND (meniul contextual, tastele, „⋯") ──
+  const fullPath = (e: Entry) => join(listing!.path, e.name)
+  /** deschide: director → intră; fişier → editorul */
+  function openEntry(e: Entry) {
+    if (!listing) return
+    if (e.dir) navigate(fullPath(e)); else edit(e)
+  }
+  function startRename(name: string) {
+    setNewFolder(null); setNewFile(null); setConfirmDel(null); setRenaming(name)
+  }
+  function startNewFolder() {
+    if (!listing) return
+    setNewFile(null); setNewFileErr(''); setRenaming(null); setConfirmDel(null); setNewFolder('')
+  }
+  function startNewFile() {
+    if (!listing) return
+    setNewFileErr(''); setNewFolder(null); setRenaming(null); setConfirmDel(null); setNewFile('')
+  }
+  function pickUpload() {
+    if (!listing || busy) return
+    fileInput.current?.click()
+  }
+  /** Duplicat pe ACELAŞI host, în acelaşi director: `/api/fs/copy` cu src == dst (permis explicit pe
+      server) şi `on_conflict: rename` → „nume (1).ext" / folder „nume (1)", primul liber (fscopy.py).
+      Copierea rulează pe gateway (rând în Transferuri); la final: toast + re-listare. */
+  async function duplicate(e: Entry) {
+    if (!listing) return
+    const dir = listing.path
+    try {
+      const rowId = await startCopy({ srcHost: props.host.id, srcName: props.host.name, dstHost: props.host.id,
+        dstName: props.host.name, paths: [join(dir, e.name)], dstDir: dir, onConflict: 'rename' })
+      dupRef.current.set(rowId, { name: e.name, dir })
+    } catch (err) { writeFailed(err, dir) }
+  }
+  /** Copiază numele (sau, cu o selecţie, numele selectate, câte unul pe rând) / calea completă. */
+  function copyNames(e: Entry | undefined, full: boolean) {
+    if (!listing) return
+    const list = picked.length > 1 ? picked : e ? [e] : []
+    if (!list.length) return
+    void copyToClip(list.map((x) => (full ? join(listing.path, x.name) : x.name)).join('\n'))
+  }
+  /** „cd aici" în terminalul sesiunii: tastat prin drumul existent typed-not-run (doar la un prompt,
+      fără Enter — ca „Insert path"); refuzat cu un toast altfel. Directorul unui fişier = cel listat. */
+  function cdHere(dir: string) {
+    if (!sessionPanel) return
+    const cmd = cdCommand(dir)
+    if (!cmd) { notifyToast(t('files.cdUnsafe'), 'warn'); return }
+    const r = typeIntoOutcome(props.sessionId, cmd)
+    if (r === 'typed') {
+      notifyToast(t('files.cdTyped', { cmd }))
+      if (drawer.sheet) props.onClose()          // pe telefon foaia acoperă terminalul
+    } else if (r === 'notPrompt') notifyToast(t('files.cdNotPrompt'), 'warn')
+    else notifyToast(t('files.cdNoTarget'), 'warn')
+  }
+
+  // duplicatele terminate: toast + re-listare (dacă suntem încă în acel director); eşecul → linia roşie
+  useEffect(() => {
+    for (const [id, d] of [...dupRef.current]) {
+      const j = uploadsAll.get(id)
+      if (!j) { dupRef.current.delete(id); continue }
+      if (j.state === 'done') {
+        dupRef.current.delete(id)
+        notifyToast(t('files.toastDuplicated', { name: d.name }))
+        if (pathRef.current === d.dir) void load(d.dir)
+      } else if (j.state === 'err' || j.state === 'cancelled') {
+        dupRef.current.delete(id)
+        if (j.error) setError(`${d.name}: ${j.error}`)
+      }
+    }
+  }, [uploadsAll, load, t])
+
+  // ── meniul ──
+  function openRowMenu(e: Entry, x: number, y: number, sheet = touchUI) {
+    setMenu({ kind: 'row', entry: e, x, y, sheet })
+  }
+  /** Shift+F10 / tasta Menu: meniul rândului curent, sub el */
+  function openRowMenuAtSel() {
+    const e = view[sel]
+    if (!e) return
+    const r = listRef.current?.querySelector(`[data-idx="${sel}"]`)?.getBoundingClientRect()
+    openRowMenu(e, (r?.left ?? 0) + 32, r?.bottom ?? 0, false)
+  }
+  function closeMenu() {
+    const m = menu
+    setMenu(null)
+    refocus(m?.kind === 'row' ? m.entry.name : undefined)
+  }
+  function menuItems(m: MenuState): MenuItem[] {
+    const dirItems = (): MenuItem[] => [
+      { key: 'newfile', label: t('files.newFile'), icon: <FilePlusIcon />, onSelect: startNewFile, hint: fmt('Alt+N') },
+      { key: 'newfolder', label: t('files.newDir'), icon: <PlusIcon />, onSelect: startNewFolder, hint: 'F7' },
+      { key: 'upload', label: t('files.uploadHere'), icon: <UploadIcon />, onSelect: pickUpload, disabled: busy, hint: fmt('Mod+U') },
+    ]
+    if (m.kind === 'new') return dirItems()
+    if (m.kind === 'dir') {
+      const here = listing?.path ?? ''
+      return [
+        ...dirItems(),
+        { key: 'reload', label: t('files.reload'), icon: <RefreshIcon />, onSelect: () => void load(here), hint: 'F5', sep: true },
+        { key: 'copypath', label: t('files.copyPath'), icon: <CopyIcon />, onSelect: () => void copyToClip(here) },
+        ...(sessionPanel ? [{ key: 'cd', label: t('files.cdHere'), icon: <TerminalPromptIcon />, onSelect: () => cdHere(here) }] : []),
+      ]
+    }
+    const e = m.entry
+    const dir = listing?.path ?? ''
+    return [
+      e.dir
+        ? { key: 'open', label: t('files.open'), icon: <FolderIcon />, onSelect: () => openEntry(e), hint: 'Enter' }
+        : { key: 'edit', label: t('files.edit'), icon: <PencilIcon />, onSelect: () => edit(e), hint: 'Enter' },
+      { key: 'download', label: e.dir ? t('files.downloadTgz') : t('files.download'), icon: <DownloadIcon />,
+        onSelect: () => void (e.dir ? downloadArchive(e) : download(e)) },
+      { key: 'rename', label: t('files.rename'), icon: <RenameIcon />, onSelect: () => startRename(e.name), hint: 'F2', sep: true },
+      { key: 'duplicate', label: t('files.duplicate'), icon: <CopyIcon />, onSelect: () => void duplicate(e) },
+      { key: 'copyname', label: t('files.copyName'), icon: <CopyIcon />, onSelect: () => void copyToClip(e.name), hint: fmt('Mod+C'), sep: true },
+      { key: 'copypath', label: t('files.copyPath'), icon: <CopyIcon />, onSelect: () => void copyToClip(join(dir, e.name)), hint: fmt('Mod+Shift+C') },
+      { key: 'copyhost', label: t('copy.open'), icon: <ArrowsLeftRightIcon />,
+        onSelect: () => setCopyItems([{ name: e.name, path: join(dir, e.name), dir: e.dir, mode: e.mode }]) },
+      ...(sessionPanel ? [{ key: 'cd', label: t('files.cdHere'), icon: <TerminalPromptIcon />,
+        onSelect: () => cdHere(e.dir ? join(dir, e.name) : dir), sep: true }] : []),
+      { key: 'delete', label: t('files.delete'), icon: <TrashIcon />, danger: true, sep: !sessionPanel,
+        onSelect: () => { setConfirmBulk(null); setConfirmDel(e) }, hint: 'Del' },
+    ]
   }
 
   function openCopy() {
@@ -517,11 +787,12 @@ export default function FilePanel(props: {
   async function doMkdir(name: string) {
     const n = name.trim()
     setNewFolder(null)
-    if (!n || !listing) return
+    if (!n || !listing) { refocus(); return }
     try {
       await api(`/api/hosts/${props.host.id}/fs/mkdir`, { method: 'POST', body: JSON.stringify({ path: join(listing.path, n) }) })
-      load(listing.path)
-    } catch (e) { writeFailed(e, listing.path) }
+      notifyToast(t('files.toastMkdir', { name: n }))
+      void load(listing.path, { name: n })
+    } catch (e) { writeFailed(e, listing.path); refocus() }
   }
 
   // fişier nou: îl creăm pe host printr-un upload one-shot — corp gol ("empty") sau conţinutul din
@@ -558,9 +829,9 @@ export default function FilePanel(props: {
     } catch (e) { writeFailed(e, dir) }
   }
 
-  // dublu-click pe un fişier copiază numele, triplu-click copiază calea completă (ca-n terminal:
-  // cuvânt vs. linie). Prin `copyText` (nu navigator.clipboard direct): are rezerva execCommand
-  // pentru instalările fără TLS şi toast-ul standard de „copiat" — acelaşi feedback ca peste tot.
+  // copierea numelui / căii (meniul rândului, Ctrl+C / Ctrl+Shift+C — până în 3.6.13 dublu- /
+  // triplu-click, care acum DESCHID). Prin `copyText` (nu navigator.clipboard direct): are rezerva
+  // execCommand pentru instalările fără TLS şi toast-ul standard de „copiat" — acelaşi feedback ca peste tot.
   async function copyToClip(text: string) {
     if (!(await copyText(text))) setError(t('files.copyFailed'))
   }
@@ -568,71 +839,163 @@ export default function FilePanel(props: {
   async function doRename(e: Entry, name: string) {
     const n = name.trim()
     setRenaming(null)
-    if (!n || n === e.name || !listing) return
+    if (!n || n === e.name || !listing) { refocus(e.name); return }
     try {
       await api(`/api/hosts/${props.host.id}/fs/rename`, {
         method: 'POST', body: JSON.stringify({ path: join(listing.path, e.name), to: join(listing.path, n) }),
       })
-      load(listing.path)
-    } catch (err) { writeFailed(err, listing.path) }
+      notifyToast(t('files.toastRenamed', { from: e.name, to: n }))
+      void load(listing.path, { name: n })
+    } catch (err) { writeFailed(err, listing.path); refocus(e.name) }
   }
 
   async function doDelete(e: Entry) {
     setConfirmDel(null)
     if (!listing) return
+    const idx = view.findIndex((x) => x.name === e.name)
     try {
       await api(`/api/hosts/${props.host.id}/fs/delete`, {
         method: 'POST', body: JSON.stringify({ path: join(listing.path, e.name), recursive: e.dir }),
       })
-      load(listing.path)
-    } catch (err) { writeFailed(err, listing.path) }
+      notifyToast(t('files.toastDeleted', { name: e.name }))
+      // focusul rămâne pe aceeaşi poziţie (rândul de după cel şters)
+      void load(listing.path, { idx: Math.max(0, idx) })
+    } catch (err) { writeFailed(err, listing.path); refocus(e.name) }
+  }
+  function cancelDelete() {
+    const name = confirmDel?.name
+    setConfirmDel(null); setConfirmBulk(null)
+    refocus(name)
   }
 
-  function onKeyDown(ev: React.KeyboardEvent) {
+  /** câte rânduri încap în listă (PgUp / PgDn) */
+  const pageRows = () => {
+    const l = listRef.current
+    const row = l?.querySelector<HTMLElement>('[data-idx]')
+    return l && row && row.offsetHeight ? Math.max(1, Math.floor(l.clientHeight / row.offsetHeight) - 1) : 10
+  }
+
+  function onKeyDown(ev: React.KeyboardEvent<HTMLDivElement>) {
     // Escape cu confirmarea de ştergere deschisă = anulează confirmarea, nu închide panoul
     if (ev.key === 'Escape' && (confirmDel || confirmBulk)) {
-      ev.preventDefault(); ev.stopPropagation(); setConfirmDel(null); setConfirmBulk(null); return
+      ev.preventDefault(); ev.stopPropagation(); cancelDelete(); return
     }
     // Escape cu o selecţie = goleşte selecţia (al doilea Escape închide panoul, ca înainte)
     if (ev.key === 'Escape' && selection.keys.size) { ev.preventDefault(); ev.stopPropagation(); setSelection(EMPTY_SELECTION); return }
-    if (editing || renaming || newFolder !== null || newFile !== null || confirmDel || confirmBulk) return
-    // navigarea listei DOAR de pe containerul ei: Enter/Space pe un buton/bifă din rând îl
-    // activează pe acela, nu deschide fişierul selectat (lib/selection.ts, U09)
-    if (!isListKeyTarget(ev.target, ev.currentTarget)) return
-    // Shift+săgeţi: extinde selecţia de la ancoră (sau de la rândul curent, dacă nu e ancoră)
-    if (ev.shiftKey && (ev.key === 'ArrowDown' || ev.key === 'ArrowUp')) {
-      ev.preventDefault()
-      if (!view.length) return
-      const next = ev.key === 'ArrowDown' ? Math.min(view.length - 1, sel + 1) : Math.max(0, sel - 1)
-      const cur = view[sel]?.name ?? view[0].name
-      setSelection((s) => rangeTo(s.anchor != null && order.includes(s.anchor) ? s : { ...s, anchor: cur }, order, view[next].name))
-      setSel(next)
+    if (editing || renaming || newFolder !== null || newFile !== null || confirmBulk || menu) return
+    // tastele listei: de pe container sau de pe un descendent care nu e câmp de text; Enter/Space pe
+    // un buton real îl activează pe el (lib/selection.ts, U09 + roving focus 3.6.14)
+    if (!isListKeyTarget(keyTargetOf(ev.target, ev.currentTarget), ev.key)) return
+    // confirmarea simplă deschisă (focusul a revenit pe listă): Enter = confirmă
+    if (confirmDel) {
+      if (ev.key === 'Enter') { ev.preventDefault(); void doDelete(confirmDel) }
       return
     }
-    if (ev.key === ' ') {                 // Space: comută rândul focalizat
-      const e = view[sel]; if (!e) return
+    const cur = view[sel]
+    const now = Date.now()
+    // tastează ca să sari: literele (cu Shift = majuscule), spaţiul doar ÎN MIJLOCUL unui nume tastat
+    const buf = typeBufRef.current
+    const live = !!buf.s && now - buf.t < TYPE_JUMP_MS
+    if (ev.key.length === 1 && !ev.ctrlKey && !ev.metaKey && !ev.altKey && ev.key !== '/' && (ev.key !== ' ' || live)) {
       ev.preventDefault()
-      setSelection((s) => toggleKey(s, e.name))
+      const s = (live ? buf.s : '') + ev.key
+      typeBufRef.current = { s, t: now }
+      const i = typeJump(view.map((e) => e.name), s, sel)
+      if (i >= 0) setSel(i)
       return
     }
-    if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'a') {   // Ctrl/Cmd+A: tot ce se vede
-      ev.preventDefault()
-      setSelection((s) => toggleAll(s, order))
-      return
+    const id = matchFilesShortcut(ev.nativeEvent)
+    const stop = () => { ev.preventDefault(); ev.stopPropagation() }
+    switch (id) {
+      case 'filesOpen': if (cur) { stop(); openEntry(cur) } return
+      case 'filesUp': stop(); goUp(); return
+      case 'filesBack': stop(); goHist(-1); return
+      case 'filesForward': stop(); goHist(1); return
+      case 'filesRename': if (cur) { stop(); startRename(cur.name) } return
+      case 'filesNewFolder': stop(); startNewFolder(); return
+      case 'filesNewFile': stop(); startNewFile(); return
+      // Ctrl+U (view-source) / F5 / Ctrl+R (reload) / Ctrl+L (bara de adrese): preventDefault DOAR
+      // aici, cu focusul în listă — în rest tastele rămân ale browserului
+      case 'filesUpload': stop(); pickUpload(); return
+      case 'filesReload': stop(); if (listing) void load(listing.path); return
+      case 'filesFocusPath': stop(); startEditPath(); return
+      case 'filesFilter': stop(); filterRef.current?.focus(); return
+      case 'filesCopyPath': if (cur) { stop(); copyNames(cur, true) } return
+      case 'filesCopyName':
+        // un text selectat cu mouse-ul (ex. din mesajul de eroare) se copiază normal
+        if (window.getSelection()?.toString()) return
+        if (cur) { stop(); copyNames(cur, false) }
+        return
+      case 'filesMenu': if (cur) { stop(); openRowMenuAtSel() } return
+      case 'filesSelectAll': stop(); setSelection((s) => toggleAll(s, order)); return
+      case 'filesToggleSel': if (cur) { ev.preventDefault(); setSelection((s) => toggleKey(s, cur.name)) } return
+      case 'filesExtendSel': {
+        // Shift+săgeţi: extinde selecţia de la ancoră (sau de la rândul curent, dacă nu e ancoră)
+        ev.preventDefault()
+        if (!view.length) return
+        const next = ev.key === 'ArrowDown' ? Math.min(view.length - 1, sel + 1) : Math.max(0, sel - 1)
+        const from = cur?.name ?? view[0].name
+        setSelection((s) => rangeTo(s.anchor != null && order.includes(s.anchor) ? s : { ...s, anchor: from }, order, view[next].name))
+        setSel(next)
+        return
+      }
+      case 'filesEdges': {
+        ev.preventDefault()
+        if (!view.length) return
+        const last = view.length - 1
+        const n = ev.key === 'Home' ? 0 : ev.key === 'End' ? last
+          : ev.key === 'PageUp' ? Math.max(0, sel - pageRows()) : Math.min(last, sel + pageRows())
+        setSel(n)
+        return
+      }
+      case 'filesDelete':
+        // cu o selecţie: ştergerea în bloc (o singură confirmare); altfel rândul curent
+        if (picked.length) { ev.preventDefault(); setConfirmDel(null); setConfirmBulk(picked); return }
+        if (cur) { ev.preventDefault(); setConfirmDel(cur) }
+        return
     }
-    if (ev.key === 'ArrowDown') { ev.preventDefault(); setSel((s) => Math.min(view.length - 1, s + 1)) }
-    else if (ev.key === 'ArrowUp') { ev.preventDefault(); setSel((s) => Math.max(0, s - 1)) }
-    else if (ev.key === 'Enter') {
-      const e = view[sel]; if (!e) return
-      ev.preventDefault()
-      if (e.dir) navigate(join(listing!.path, e.name)); else edit(e)
-    } else if (ev.key === 'Backspace') {
-      ev.preventDefault(); if (listing && listing.path !== '/') navigate(listing.parent)
-    } else if (ev.key === 'Delete') {
-      // cu o selecţie: ştergerea în bloc (o singură confirmare); altfel rândul curent, ca înainte
-      if (picked.length) { ev.preventDefault(); setConfirmDel(null); setConfirmBulk(picked); return }
-      const e = view[sel]; if (e) { ev.preventDefault(); setConfirmDel(e) }
+    if (ev.key === 'ArrowDown' && !ev.altKey && !ev.ctrlKey && !ev.metaKey) { ev.preventDefault(); setSel((s) => Math.min(view.length - 1, s + 1)) }
+    else if (ev.key === 'ArrowUp' && !ev.altKey && !ev.ctrlKey && !ev.metaKey) { ev.preventDefault(); setSel((s) => Math.max(0, s - 1)) }
+  }
+
+  // ── câmpul de cale: firimituri ↔ input editabil, cu completare pe Tab ──
+  function startEditPath() {
+    setPathDraft(listing?.path ?? path)
+    setCompletion(null)
+    noProgressRef.current = null
+    completeCache.current.clear()
+    setEditPath(true)
+  }
+  function endEditPath(focusList = true) {
+    setEditPath(false)
+    setCompletion(null)
+    if (focusList) refocus()
+  }
+  /** Tab: completează ultimul segment din subdirectoarele directorului lui (listarea părintelui,
+      prin acelaşi API, memorată cât e deschis câmpul). Fără progres a doua oară → Tab-ul pleacă mai
+      departe (nu prindem tastatura în câmp). */
+  async function completeTab(ev: React.KeyboardEvent<HTMLInputElement>) {
+    const input = pathDraft
+    const base = listing?.path ?? path
+    const { dir, prefix } = splitForCompletion(input, base)
+    if (!prefix && !input.endsWith('/') && input !== '~') return     // nimic de completat: Tab normal
+    if (noProgressRef.current === input) { noProgressRef.current = null; return }
+    ev.preventDefault()
+    const my = ++completeSeq.current
+    let dirs = completeCache.current.get(dir)
+    if (!dirs) {
+      try {
+        const l = await api<Listing>(`/api/hosts/${props.host.id}/fs?path=${encodeURIComponent(dir)}`)
+        dirs = l.entries.filter((e) => e.dir || e.link).map((e) => e.name)
+        if (completeCache.current.size > 20) completeCache.current.clear()
+        completeCache.current.set(dir, dirs)
+      } catch { dirs = [] }
     }
+    if (my !== completeSeq.current) return           // între timp alt Tab / altă tastare
+    const r = completePath(input, base, dirs)
+    if (r.value !== input) { setPathDraft(r.value); noProgressRef.current = null }
+    else noProgressRef.current = input
+    setCompletion(r.candidates.length || r.value === input ? { candidates: r.candidates, more: r.more, none: !r.candidates.length } : null)
   }
 
   // menține selecția vizibilă la navigarea din tastatură
@@ -647,6 +1010,34 @@ export default function FilePanel(props: {
     : deniedHere ? { dir: listing.path, pending: [] as PendingFile[],
                      message: t('files.denied.explain', { user: props.host.agent_user || '?', dir: listing.path }) }
     : null
+
+  // firimiturile lungi derulează pe orizontală: arătăm capătul (directorul curent), nu rădăcina
+  useEffect(() => {
+    const el = crumbsRef.current
+    if (el) el.scrollLeft = el.scrollWidth
+  }, [listing?.path, editPath])
+
+  // ── lăţimea coloanei (desktop): mânerul din marginea stângă, ca splitter-ul sidebar-ului ──
+  const dragCleanup = useRef<(() => void) | null>(null)
+  useEffect(() => () => dragCleanup.current?.(), [])
+  const saveW = (w: number) => lsSet(WIDTH_KEY, String(w))
+  const dragWidth = (e: React.PointerEvent) => {
+    e.preventDefault()
+    const x0 = e.clientX
+    const w0 = asideRef.current?.getBoundingClientRect().width ?? colW
+    // panoul e lipit de dreapta: tras spre stânga = mai lat
+    const at = (ev: PointerEvent) => clampW(w0 + (x0 - ev.clientX))
+    const move = (ev: PointerEvent) => setColW(at(ev))
+    const detach = () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      dragCleanup.current = null
+    }
+    const up = (ev: PointerEvent) => { detach(); saveW(at(ev)) }
+    dragCleanup.current = detach
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+  }
 
   const header = props.embed ? null : (
     <header className="flex items-center gap-2 border-b border-ink-800 px-3 py-2">
@@ -673,15 +1064,27 @@ export default function FilePanel(props: {
     )
   }
 
+  const crumbList = crumbs(listing?.path ?? path)
+  const rowMenuLabel = (name: string) => t('files.menuAria', { name })
+
   return (
     <>
       <div className={scrimCls} onClick={props.onClose} aria-hidden="true" />
-      {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Escape pe regiunea drawer-ului (vezi useDrawer) */}
+      {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Escape pe regiunea drawer-ului (vezi useDrawer); butoanele 4/5 ale mouse-ului = înapoi / înainte în panou */}
       <aside
         ref={asideRef}
         aria-label={t('files.sessionAria')}
         className={asideCls}
+        style={columnMode ? { width: clampW(colW) } : undefined}
         onKeyDown={drawer.onKeyDown}
+        // butoanele laterale ale mouse-ului (4 = înapoi, 5 = înainte): istoricul PANOULUI, nu al paginii
+        // (care ar schimba ruta `#/s/…` şi ar ieşi din sesiune)
+        onMouseDown={(e) => { if (e.button === 3 || e.button === 4) e.preventDefault() }}
+        onMouseUp={(e) => {
+          if (e.button !== 3 && e.button !== 4) return
+          e.preventDefault()
+          goHist(e.button === 3 ? -1 : 1)
+        }}
         onDragOver={(e) => { e.preventDefault(); setDrag(true) }}
         onDragLeave={() => { setDrag(false); setDropRow(null) }}
         onDrop={async (e) => {
@@ -690,6 +1093,24 @@ export default function FilePanel(props: {
           startUpload(await collectDrop(e))
         }}
       >
+        {/* mâner de lăţime (doar coloana de pe desktop): tras cu mouse-ul, ←/→ de la tastatură,
+            dublu-click = lăţimea implicită — tiparul „window splitter" al sidebar-ului */}
+        {columnMode && (
+          <div role="separator" aria-orientation="vertical" tabIndex={0}
+            aria-label={t('files.resizeAria')} title={t('files.resizeAria')}
+            aria-valuenow={colW} aria-valuemin={W_MIN} aria-valuemax={W_MAX}
+            data-testid="wt-files-resize"
+            onPointerDown={dragWidth}
+            onDoubleClick={() => { setColW(W_DEF); saveW(W_DEF) }}
+            onKeyDown={(e) => {
+              const d = e.key === 'ArrowLeft' ? 16 : e.key === 'ArrowRight' ? -16 : 0
+              if (!d) return
+              e.preventDefault()
+              const w = clampW(colW + d)
+              setColW(w); saveW(w)
+            }}
+            className="absolute inset-y-0 -left-1 z-10 w-2 cursor-col-resize rounded-md hover:bg-sky-500/30 focus:outline-none focus-visible:bg-sky-500/50" />
+        )}
         {drawer.sheet && <SheetBar title={t('session.files')} onBack={props.onClose} />}
         {!drawer.sheet && header}
 
@@ -700,41 +1121,94 @@ export default function FilePanel(props: {
           </div>
         )}
 
-        {/* bara de cale + acțiuni pe director */}
+        {/* navigare: ‹ › ↑ + firimituri (click pe ultimul segment / ✎ / Ctrl+L = câmp editabil) */}
         <div className="flex items-center gap-1 border-b border-ink-800 px-2 py-1.5">
-          <IconButton onClick={() => listing && navigate(listing.parent)} disabled={!listing || listing.path === '/'}
+          <IconButton onClick={() => goHist(-1)} disabled={!canBack(hist)} label={t('files.back')}
+            title={`${t('files.back')} (${fmt('Mod+[')})`} data-testid="wt-files-back"><ArrowLeftIcon size={13} /></IconButton>
+          <IconButton onClick={() => goHist(1)} disabled={!canForward(hist)} label={t('files.forward')}
+            title={`${t('files.forward')} (${fmt('Mod+]')})`} data-testid="wt-files-forward"><ArrowRightIcon size={13} /></IconButton>
+          <IconButton onClick={goUp} disabled={!listing || listing.path === '/'}
             label={t('files.upLevel')}><LevelUpIcon size={14} /></IconButton>
-          <input
-            value={path}
-            aria-label={t('files.pathAria')}
-            onChange={(e) => setPath(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && navigate(path)}
-            spellCheck={false}
-            className="min-w-0 flex-1 rounded-md bg-ink-800 px-2 py-1 font-mono text-2xs text-slate-300 ring-1 ring-ink-700 focus:ring-sky-500"
-            title={t('files.pathHint')}
-          />
+          {editPath ? (
+            <div className="relative min-w-0 flex-1">
+              <input
+                ref={pathInputRef}
+                autoFocus
+                value={pathDraft}
+                aria-label={t('files.pathAria')}
+                aria-describedby={completion ? 'wt-files-complete' : undefined}
+                onChange={(e) => { setPathDraft(e.target.value); setCompletion(null); noProgressRef.current = null }}
+                onFocus={(e) => e.target.select()}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') { e.preventDefault(); navigate(pathDraft.trim() || '/') }
+                  else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); endEditPath() }
+                  else if (e.key === 'Tab' && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) void completeTab(e)
+                }}
+                onBlur={() => { if (editPath) endEditPath(false) }}
+                spellCheck={false}
+                autoCapitalize="off"
+                autoCorrect="off"
+                className="w-full rounded-md bg-ink-800 px-2 py-1 font-mono text-2xs text-slate-300 ring-1 ring-ink-700 focus:ring-sky-500"
+                title={t('files.pathHint')}
+              />
+              {completion && (
+                <div id="wt-files-complete" role="status" data-testid="wt-files-complete"
+                  className="absolute inset-x-0 top-full z-30 mt-1 rounded-md border border-ink-700 bg-ink-900 px-2 py-1 font-mono text-2xs text-slate-400 shadow-xl">
+                  {completion.none ? t('files.completeNone')
+                    : completion.candidates.join('  ') + (completion.more ? ` ${t('files.andMore', { count: completion.more })}` : '')}
+                </div>
+              )}
+            </div>
+          ) : (
+            <nav aria-label={t('files.crumbsAria')} className="flex min-w-0 flex-1">
+              <div ref={crumbsRef} className="flex min-w-0 flex-1 items-center overflow-x-auto whitespace-nowrap [scrollbar-width:none]">
+                <ol className="flex items-center">
+                  {crumbList.map((c, i) => {
+                    const last = i === crumbList.length - 1
+                    return (
+                      <li key={c.path} className="flex items-center">
+                        {/* după rădăcina „/" fără separator (arată ca o cale: /tmp › x) */}
+                        {(i > 1 || (i === 1 && crumbList[0].label !== '/')) && <span className="text-slate-600" aria-hidden="true"><ChevronIcon size={10} /></span>}
+                        <button type="button" data-crumb={c.path}
+                          aria-current={last ? 'location' : undefined}
+                          // ultimul segment (directorul curent) → câmpul editabil; restul navighează
+                          onClick={() => (last ? startEditPath() : navigate(c.path))}
+                          title={last ? t('files.pathHint') : c.path}
+                          className={`min-h-[24px] min-w-[24px] shrink-0 rounded-md px-1 py-0.5 font-mono text-2xs hover:bg-ink-800 [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11 ${
+                            last ? 'font-semibold text-slate-100' : 'text-slate-400 hover:text-slate-200'}`}>
+                          {c.label}
+                        </button>
+                      </li>
+                    )
+                  })}
+                </ol>
+              </div>
+            </nav>
+          )}
+          {!editPath && (
+            <IconButton onClick={startEditPath} label={t('files.editPath')} title={`${t('files.editPath')} (${fmt('Mod+L')})`}
+              data-testid="wt-files-editpath"><PencilIcon size={13} /></IconButton>
+          )}
           {deniedHere && (
             <span className="shrink-0 wt-warn" title={t('files.denied.badge', { user: props.host.agent_user || '?' })}
               data-testid="wt-files-lock">
               <LockIcon size={13} /><span className="sr-only">{t('files.denied.badge', { user: props.host.agent_user || '?' })}</span>
             </span>
           )}
-          <IconButton onClick={() => load(listing?.path ?? path)} label={t('files.reload')}><RefreshIcon /></IconButton>
-          {/* deschiderea unuia închide restul: toolbar-ul rămâne interactiv deasupra modalului,
-              iar un input montat SUB overlay i-ar fura focusul (tastezi într-un câmp invizibil) */}
-          <IconButton onClick={() => { setNewFileErr(''); setNewFolder(null); setRenaming(null); setConfirmDel(null); setNewFile('') }} disabled={!listing} label={t('files.newFile')}><FilePlusIcon /></IconButton>
-          <IconButton onClick={() => { setNewFile(null); setNewFileErr(''); setNewFolder('') }} label={t('files.newDir')}><PlusIcon /></IconButton>
-          <IconButton onClick={() => fileInput.current?.click()} disabled={busy || !listing} label={t('files.uploadHere')}
-            title={deniedHere ? t('files.denied.uploadHint', { user: props.host.agent_user || '?' }) : undefined} variant="link"><UploadIcon /></IconButton>
-          <input ref={fileInput} type="file" multiple className="hidden" onChange={(e) => { if (e.target.files) pickFiles(e.target.files); e.target.value = '' }} />
         </div>
 
-        {/* filtru + follow + hidden + sort */}
+        {/* filtru + follow + hidden + acţiuni pe director (pe touch: „+"-ul flotant le ţine pe ultimele trei) */}
         <div className="flex items-center gap-1 border-b border-ink-800 px-2 py-1 text-2xs">
           <input
+            ref={filterRef}
             value={filter}
             aria-label={t('files.filterAria')}
             onChange={(e) => { setFilter(e.target.value); setSel(0) }}
+            // ↓ / Enter / Escape: înapoi în listă (Escape goleşte întâi filtrul)
+            onKeyDown={(e) => {
+              if (e.key === 'ArrowDown' || e.key === 'Enter') { e.preventDefault(); listRef.current?.focus() }
+              else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); if (filter) setFilter(''); else listRef.current?.focus() }
+            }}
             placeholder={t('files.filterPh')}
             className="min-h-[28px] min-w-0 flex-1 rounded-md bg-ink-800/60 px-2 py-0.5 text-slate-300 ring-1 ring-ink-700 focus:ring-sky-500"
           />
@@ -747,6 +1221,18 @@ export default function FilePanel(props: {
           <button onClick={() => setShowHidden((v) => !v)} aria-pressed={showHidden}
             className={`min-h-[28px] min-w-[28px] shrink-0 rounded-md px-1.5 py-0.5 ${showHidden ? 'wt-link' : 'text-slate-500 hover:bg-ink-800'}`}
             title={t('files.showHidden')} aria-label={t('files.showHidden')}>.*</button>
+          <IconButton onClick={() => load(listing?.path ?? path)} label={t('files.reload')} aria-keyshortcuts="F5"
+            data-testid="wt-files-reload"><RefreshIcon /></IconButton>
+          {/* deschiderea unuia închide restul: toolbar-ul rămâne interactiv deasupra modalului,
+              iar un input montat SUB overlay i-ar fura focusul (tastezi într-un câmp invizibil) */}
+          <IconButton onClick={startNewFile} disabled={!listing} label={t('files.newFile')}
+            aria-keyshortcuts="Alt+N" className="[@media(hover:none)]:hidden"><FilePlusIcon /></IconButton>
+          <IconButton onClick={startNewFolder} disabled={!listing} label={t('files.newDir')}
+            aria-keyshortcuts="F7" className="[@media(hover:none)]:hidden"><PlusIcon /></IconButton>
+          <IconButton onClick={pickUpload} disabled={busy || !listing} label={t('files.uploadHere')}
+            title={deniedHere ? t('files.denied.uploadHint', { user: props.host.agent_user || '?' }) : undefined} aria-keyshortcuts="Control+U"
+            variant="link" className="[@media(hover:none)]:hidden"><UploadIcon /></IconButton>
+          <input ref={fileInput} type="file" multiple className="hidden" onChange={(e) => { if (e.target.files) pickFiles(e.target.files); e.target.value = ''; refocus() }} />
         </div>
         {/* sortare: ţinte de ≥24px (erau text de 10px fără padding) + direcţia anunţată, nu doar ▲/▼ */}
         <div className="flex items-center gap-1 border-b border-ink-800 px-2 text-2xs uppercase tracking-wide text-slate-600">
@@ -787,12 +1273,22 @@ export default function FilePanel(props: {
             name: view[sel].name + (view[sel].dir ? '/' : ''), k: sel + 1, n: view.length,
           }) + (selection.keys.has(view[sel].name) ? ` · ${t('files.rowSelected')}` : '') : ''}
         </span>
+        <div className="relative flex min-h-0 flex-1 flex-col">
         {/* `data-path` = directorul LISTAT (ţinta upload-urilor), nu textul din câmpul de cale —
-            acela se schimbă la tastare, înainte ca listarea să se întoarcă */}
+            acela se schimbă la tastare, înainte ca listarea să se întoarcă.
+            `data-files-list`: handler-ul global din App lasă `?` şi `/` listei (tastează-ca-să-sari / filtru). */}
+        {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- lista e ţinta roving focus-ului (role=group cu tastatura ei, vezi onKeyDown) */}
         <div ref={listRef} tabIndex={0} onKeyDown={onKeyDown} role="group" aria-label={t('files.listAria')}
-          data-path={listing?.path ?? ''}
+          aria-keyshortcuts="Enter F2 F7 Delete Shift+F10"
+          data-path={listing?.path ?? ''} data-files-list=""
           onFocus={(ev) => { if (ev.target === ev.currentTarget) setListFocused(true) }}
           onBlur={(ev) => { if (ev.target === ev.currentTarget) setListFocused(false) }}
+          // click dreapta pe zona GOALĂ a listei: meniul directorului curent (nou / încarcă / cd aici)
+          onContextMenu={(ev) => {
+            if ((ev.target as HTMLElement).closest('[data-idx]') || lastPointerRef.current === 'touch' || !listing) return
+            ev.preventDefault()
+            setMenu({ kind: 'dir', x: ev.clientX, y: ev.clientY, sheet: false })
+          }}
           className={`relative min-h-0 flex-1 overflow-y-auto outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[rgb(var(--focus))] ${drag ? 'ring-2 ring-inset ring-sky-500' : ''}`}>
           {/* peste un rând de director nu întunecăm lista (inelul rândului trebuie să se vadă);
               spunem jos, într-o linie, unde va ateriza */}
@@ -810,14 +1306,17 @@ export default function FilePanel(props: {
             <div className="flex items-center gap-2 border-b border-ink-800/60 px-3 py-1">
               <FolderIcon />
               <input autoFocus value={newFolder} onChange={(e) => setNewFolder(e.target.value)} aria-label={t('files.newDir')}
-                onKeyDown={(e) => { if (e.key === 'Enter') doMkdir(newFolder); if (e.key === 'Escape') { e.stopPropagation(); setNewFolder(null) } }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') doMkdir(newFolder)
+                  if (e.key === 'Escape') { e.stopPropagation(); setNewFolder(null); refocus() }
+                }}
                 onBlur={() => doMkdir(newFolder)} placeholder={t('files.newDirPh')}
                 className="min-w-0 flex-1 rounded-md bg-ink-800 px-1.5 py-0.5 font-mono text-2xs text-slate-200 ring-1 ring-sky-500" />
             </div>
           )}
           {newFile !== null && (
             <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/60 p-4"
-              onClick={() => setNewFile(null)}>
+              onClick={() => { setNewFile(null); refocus() }}>
               <div className="w-full max-w-xs rounded-xl bg-ink-900 p-3 shadow-xl ring-1 ring-ink-700"
                 role="dialog" aria-labelledby="wt-files-newfile-title"
                 onClick={(e) => e.stopPropagation()}>
@@ -826,12 +1325,15 @@ export default function FilePanel(props: {
                 </div>
                 <input autoFocus value={newFile} aria-label={t('files.newFilePh')}
                   onChange={(e) => { setNewFile(e.target.value); if (newFileErr) setNewFileErr('') }}
-                  onKeyDown={(e) => { if (e.key === 'Enter') doNewFile(newFile, 'empty'); if (e.key === 'Escape') { e.stopPropagation(); setNewFile(null) } }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') doNewFile(newFile, 'empty')
+                    if (e.key === 'Escape') { e.stopPropagation(); setNewFile(null); refocus() }
+                  }}
                   placeholder={t('files.newFilePh')}
                   className="w-full rounded-md bg-ink-800 px-2 py-1 font-mono text-xs text-slate-200 outline-none ring-1 ring-sky-500" />
                 {newFileErr && <div className="mt-1.5 text-2xs wt-danger">{newFileErr}</div>}
                 <div className="mt-2.5 flex justify-end gap-2 text-xs">
-                  <Button variant="ghost" size="sm" onClick={() => setNewFile(null)}>{t('files.cancel')}</Button>
+                  <Button variant="ghost" size="sm" onClick={() => { setNewFile(null); refocus() }}>{t('files.cancel')}</Button>
                   <Button variant="secondary" size="sm" onClick={() => doNewFile(newFile, 'clipboard')} disabled={!newFile.trim()}>{t('files.newFromClip')}</Button>
                   <Button variant="primary" size="sm" onClick={() => doNewFile(newFile, 'empty')} disabled={!newFile.trim()}>{t('files.newEmpty')}</Button>
                 </div>
@@ -840,25 +1342,40 @@ export default function FilePanel(props: {
           )}
           {view.map((e, i) => {
             const checked = selection.keys.has(e.name)
+            const meta = `${e.dir ? '' : fmtSize(e.size) + ' · '}${fmtMtime(e.mtime)}`
             return (
-            <div key={e.name} data-idx={i} data-selected={checked || undefined}
+            <div key={e.name} data-idx={i} data-selected={checked || undefined} data-row={e.name}
               className={`group flex items-center gap-2 py-1 pl-1 pr-3 text-xs [@media(pointer:coarse)]:select-none ${i === sel ? 'bg-ink-800' : checked ? 'bg-sky-500/10' : 'hover:bg-ink-800/60'} ${dropRow === e.name ? 'bg-sky-500/10 ring-2 ring-inset ring-sky-400' : ''}`}
               onClick={(ev) => {
                 if (suppressClickRef.current) { suppressClickRef.current = false; return }   // capătul unui long-press
+                // roving focus: un click pe rând lasă focusul pe LISTĂ (tastele merg imediat)
+                if (!(ev.target as HTMLElement).closest('input,textarea')) listRef.current?.focus({ preventScroll: true })
                 if (selectClick(ev, e, i)) return
                 // touch, în modul selecţie: un tap oriunde pe rând îl comută
-                if (lastPointerRef.current === 'touch' && selection.keys.size) setSelection((s) => toggleKey(s, e.name))
+                if (lastPointerRef.current === 'touch' && selection.keys.size) { setSelection((s) => toggleKey(s, e.name)); setSel(i); return }
                 setSel(i)
+                // dublu-click / dublu-tap = deschide (director: intră; fişier: editor)
+                const now = Date.now()
+                if (now < navGuardRef.current) return
+                const lc = lastClickRef.current
+                if (lc && lc.name === e.name && now - lc.t < 450) { lastClickRef.current = null; navGuardRef.current = now + 450; openEntry(e); return }
+                lastClickRef.current = { name: e.name, t: now }
               }}
-              // Shift+click nu trebuie să selecteze TEXT între rânduri
-              onMouseDown={(ev) => { if (ev.shiftKey) ev.preventDefault() }}
+              // Shift+click nu trebuie să selecteze TEXT între rânduri; nici dublu-click-ul (deschide)
+              onMouseDown={(ev) => { if (ev.shiftKey || ev.detail > 1) ev.preventDefault() }}
               onPointerDown={(ev) => pressStart(ev, e, i)}
               onPointerMove={pressMove}
               onPointerUp={pressCancel}
               onPointerCancel={pressCancel}
               onPointerLeave={pressCancel}
-              // long-press pe Android deschide altfel meniul de sistem (copiere text / link)
-              onContextMenu={(ev) => { if (lastPointerRef.current === 'touch') ev.preventDefault() }}
+              // long-press pe Android deschide altfel meniul de sistem (copiere text / link); cu mouse-ul:
+              // meniul rândului (3.6.14) în locul celui al browserului
+              onContextMenu={(ev) => {
+                ev.preventDefault()
+                if (lastPointerRef.current === 'touch') return
+                setSel(i)
+                openRowMenu(e, ev.clientX, ev.clientY, false)
+              }}
               // drop pe un rând de DIRECTOR → upload în el (nu în directorul afişat). stopPropagation:
               // altfel handler-ul <aside> ar urca aceleaşi fişiere încă o dată în directorul curent.
               // `aria-dropeffect` e deprecat — indiciul pentru cititoare e un text ascuns vizual.
@@ -869,10 +1386,11 @@ export default function FilePanel(props: {
                 if (!listing) return
                 startUpload(await collectDrop(ev), join(listing.path, e.name))
               } : undefined}>
-              {/* bifa: click-ul ei NU ajunge la rând (fără navigare / copiere de nume); Shift = interval */}
+              {/* bifa: click-ul ei NU ajunge la rând (fără navigare / deschidere); Shift = interval */}
               <label className="grid h-6 w-6 shrink-0 cursor-pointer place-items-center [@media(pointer:coarse)]:h-9 [@media(pointer:coarse)]:w-9"
                 onClick={(ev) => ev.stopPropagation()} onPointerDown={(ev) => ev.stopPropagation()}>
                 <input type="checkbox" checked={checked} aria-label={t('files.selectRow', { name: e.name })}
+                  tabIndex={-1}
                   onChange={() => { /* decide onClick, care vede Shift/Ctrl */ }}
                   onClick={(ev) => {
                     ev.stopPropagation()
@@ -887,38 +1405,45 @@ export default function FilePanel(props: {
               {e.dir && <span className="sr-only">{t('transfers.dropFolderHint')}</span>}
               {renaming === e.name ? (
                 <input autoFocus defaultValue={e.name} aria-label={t('files.renameAria', { name: e.name })}
-                  onKeyDown={(ev) => { if (ev.key === 'Enter') doRename(e, (ev.target as HTMLInputElement).value); if (ev.key === 'Escape') { ev.stopPropagation(); setRenaming(null) } }}
+                  // numele fără extensie selectat (ca în orice manager de fişiere): tastezi direct noul nume
+                  onFocus={(ev) => { const d = e.dir ? -1 : e.name.lastIndexOf('.'); ev.target.setSelectionRange(0, d > 0 ? d : e.name.length) }}
+                  onKeyDown={(ev) => { if (ev.key === 'Enter') doRename(e, (ev.target as HTMLInputElement).value); if (ev.key === 'Escape') { ev.stopPropagation(); setRenaming(null); refocus(e.name) } }}
                   onBlur={(ev) => doRename(e, ev.target.value)}
                   className="min-w-0 flex-1 rounded-md bg-ink-800 px-1 py-0.5 font-mono text-2xs text-slate-100 ring-1 ring-sky-500" />
               ) : (
-                <button data-fname={e.name} onClick={(ev) => {
-                    // click de selecţie (modificator / după long-press / tap în modul selecţie pe touch):
-                    // rândul l-a tratat deja — nu navigăm, nu copiem numele
-                    if (ev.shiftKey || ev.ctrlKey || ev.metaKey) return
-                    if (suppressClickRef.current) { suppressClickRef.current = false; ev.stopPropagation(); return }
-                    if (lastPointerRef.current === 'touch' && selection.keys.size) {
-                      ev.stopPropagation(); setSelection((s) => toggleKey(s, e.name)); setSel(i); return
-                    }
-                    if (e.dir) { navigate(join(listing!.path, e.name)); return }
-                    if (ev.detail >= 3) copyToClip(join(listing!.path, e.name))
-                    else if (ev.detail === 2) copyToClip(e.name)
+                // tabIndex=-1: tastatura stă pe listă (roving focus) — numele nu mai e o oprire de Tab
+                <button type="button" tabIndex={-1} data-fname={e.name} onClick={(ev) => {
+                    // un click simplu pe un DIRECTOR intră în el (ca un link); al doilea click al unui
+                    // dublu-click nu mai deschide nimic din listarea nouă (navGuard). Fişier: rândul
+                    // decide (selectează; dublu-click = editorul).
+                    if (!e.dir || ev.shiftKey || ev.ctrlKey || ev.metaKey || suppressClickRef.current) return
+                    if (lastPointerRef.current === 'touch' && selection.keys.size) return
+                    ev.stopPropagation()
+                    listRef.current?.focus({ preventScroll: true })
+                    navGuardRef.current = Date.now() + 450
+                    lastClickRef.current = null
+                    navigate(join(listing!.path, e.name))
                   }}
                   // pe deget: rândul are măcar 36px (era 18px, sub pragul WCAG 2.5.8 de 24px); cu mouse rămâne compact
-                  className={`min-w-0 flex-1 truncate text-left font-mono [@media(pointer:coarse)]:min-h-[36px] ${e.dir ? 'wt-link' : 'text-slate-200'} ${e.dir ? '' : 'select-none'}`}
-                  title={e.dir ? e.name : t('files.copyHint', { name: e.name })}>{e.name}{e.dir ? '/' : ''}</button>
+                  className={`flex min-w-0 flex-1 select-none flex-col items-start text-left font-mono [@media(pointer:coarse)]:min-h-[36px] [@media(pointer:coarse)]:justify-center ${e.dir ? 'wt-link' : 'text-slate-200'}`}
+                  title={e.name}>
+                  <span className="w-full truncate">{e.name}{e.dir ? '/' : ''}</span>
+                  {/* foaie / drawer îngust: dimensiunea şi data SUB nume (în dreapta n-ar încăpea) */}
+                  <span className={`w-full truncate text-2xs tabular-nums text-slate-500 ${compact ? '' : 'sm:hidden'}`}>{meta}</span>
+                </button>
               )}
               {/* meta pe UN rând: mode · dim · data (ascunse când apar acțiunile) */}
-              <span className="shrink-0 items-center gap-2 font-mono text-2xs tabular-nums text-slate-600 hidden sm:flex group-hover:sm:hidden group-focus-within:sm:hidden">
+              <span className={`shrink-0 items-center gap-2 font-mono text-2xs tabular-nums text-slate-600 ${compact ? 'hidden' : 'hidden sm:flex group-hover:sm:hidden group-focus-within:sm:hidden'}`}>
                 <span>{fmtMode(e.mode)}</span>
                 {!e.dir && <span className="w-10 text-right text-slate-500">{fmtSize(e.size)}</span>}
                 <span className="min-w-[3rem] whitespace-nowrap text-right">{fmtMtime(e.mtime)}</span>
               </span>
-              {/* acțiuni la hover (mouse), la focus în rând (tastatură — `hidden` le scotea din
-                  fluxul de Tab, deci de la tastatură NU puteai şterge/redenumi) / mereu (touch).
-                  Ţinte de 24px, fiecare cu etichetă care numeşte intrarea. */}
+              {/* acțiuni la hover (mouse) / la focus în rând (tastatură). Ţinte de 24px, fiecare cu
+                  etichetă care numeşte intrarea; „⋯" = meniul complet (acelaşi ca la click dreapta).
+                  Pe touch (fără hover): doar „⋯" de 44px, care deschide foaia de acţiuni. */}
               {/* stopPropagation: o acţiune pe rând (ex. Şterge) nu e şi un tap de selecţie pe touch */}
               {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions -- doar opreşte bubbling-ul spre rând; butoanele din el au tastatura lor */}
-              <div onClick={(ev) => ev.stopPropagation()} className="hidden shrink-0 items-center gap-0.5 group-hover:flex group-focus-within:flex [@media(hover:none)]:flex">
+              <div onClick={(ev) => ev.stopPropagation()} className="hidden shrink-0 items-center gap-0.5 group-hover:flex group-focus-within:flex [@media(hover:none)]:!hidden">
                 {!e.dir && (
                   <IconButton touch={false} onClick={() => edit(e)} title={t('files.edit')} label={`${t('files.edit')} ${e.name}`}><PencilIcon /></IconButton>
                 )}
@@ -930,9 +1455,20 @@ export default function FilePanel(props: {
                   <button onClick={() => downloadArchive(e)} className="grid h-6 w-6 place-items-center rounded-md text-slate-500 hover:bg-ink-700 hover:text-slate-200"
                     title={t('files.downloadArchive')} aria-label={t('files.downloadArchiveAria', { name: e.name })}><DownloadIcon /></button>
                 )}
-                <IconButton touch={false} onClick={() => setRenaming(e.name)} title={t('files.rename')} label={t('files.renameAria', { name: e.name })}><RenameIcon /></IconButton>
+                <IconButton touch={false} onClick={() => startRename(e.name)} title={t('files.rename')} label={t('files.renameAria', { name: e.name })}><RenameIcon /></IconButton>
                 <IconButton touch={false} variant="danger" onClick={() => setConfirmDel(e)} title={t('files.delete')} label={`${t('files.delete')} ${e.name}`}><TrashIcon /></IconButton>
+                <IconButton touch={false} aria-haspopup="menu" data-testid="wt-files-more"
+                  onClick={(ev) => { const r = (ev.currentTarget as HTMLElement).getBoundingClientRect(); setSel(i); openRowMenu(e, r.right - 224, r.bottom, false) }}
+                  title={t('files.moreActions')} label={t('files.more', { name: e.name })}><MoreIcon size={14} /></IconButton>
               </div>
+              {/* touch: un singur „⋯" de 44px (în locul celor patru pictograme de 24px) */}
+              <button type="button" aria-haspopup="menu" aria-label={t('files.more', { name: e.name })}
+                data-testid="wt-files-more-touch"
+                onClick={(ev) => { ev.stopPropagation(); setSel(i); openRowMenu(e, 0, 0, true) }}
+                onPointerDown={(ev) => ev.stopPropagation()}
+                className="hidden h-11 w-11 shrink-0 place-items-center rounded-md text-slate-400 hover:bg-ink-800 [@media(hover:none)]:grid">
+                <MoreIcon size={18} />
+              </button>
             </div>
             )
           })}
@@ -946,12 +1482,24 @@ export default function FilePanel(props: {
           {listing?.truncated && (
             <div className="px-3 py-2 text-center text-2xs wt-warn">{t('files.truncated')}</div>
           )}
+          {/* loc sub ultimul rând, ca butonul flotant „+" să nu-l acopere (touch) */}
+          <div className="hidden h-16 [@media(hover:none)]:block" aria-hidden="true" />
+        </div>
+        {/* „+" flotant (touch): fişier nou / dosar nou / încarcă — înlocuieşte cele trei pictograme din bară */}
+        {listing && !picked.length && (
+          <button type="button" aria-haspopup="menu" aria-label={t('files.fabAria')} data-testid="wt-files-fab"
+            onClick={(ev) => { const r = (ev.currentTarget as HTMLElement).getBoundingClientRect(); setMenu({ kind: 'new', x: r.left, y: r.top, sheet: true }) }}
+            className="absolute bottom-3 right-3 z-10 hidden h-12 w-12 place-items-center rounded-full bg-sky-600 text-white shadow-xl hover:bg-sky-500 [@media(hover:none)]:grid">
+            <PlusIcon size={20} />
+          </button>
+        )}
         </div>
 
-        {/* bara de selecţie: „N selectate · Descarcă · Şterge · Copiază pe host… · Renunţă" */}
+        {/* bara de selecţie: „N selectate · Descarcă · Şterge · Copiază pe host… · Renunţă" — lipită
+            jos (pe telefon: deasupra barei de gesturi, prin safe-area-ul foii) */}
         {picked.length > 0 && (
           <div role="toolbar" aria-label={t('files.selBarAria')} data-testid="wt-files-selbar"
-            className="flex flex-wrap items-center gap-1 border-t border-ink-800 bg-ink-800/70 px-2 py-1 text-2xs">
+            className="sticky bottom-0 z-10 flex flex-wrap items-center gap-1 border-t border-ink-800 bg-ink-800/95 px-2 py-1 text-2xs [@media(hover:none)]:py-1.5">
             <span className="mr-1 font-medium text-slate-200" aria-live="polite">{t('files.selCount', { count: picked.length })}</span>
             <Button variant="ghost" size="sm" onClick={bulkDownload} className="wt-touch">
               <DownloadIcon />{t('files.download')}</Button>
@@ -969,14 +1517,16 @@ export default function FilePanel(props: {
           const pv = previewNames(confirmBulk.map((e) => e.name))
           const nDirs = confirmBulk.filter((e) => e.dir).length
           return (
-            <div className="border-t border-ink-800 bg-ink-800/80 px-3 py-2 text-2xs" role="alertdialog" aria-label={t('files.bulkDeleteTitle')}>
+            // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Escape anulează confirmarea (nu închide panoul)
+            <div className="border-t border-ink-800 bg-ink-800/80 px-3 py-2 text-2xs" role="alertdialog" aria-label={t('files.bulkDeleteTitle')}
+              onKeyDown={(e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); cancelDelete() } }}>
               <p className="text-slate-300">{t('files.bulkDeleteConfirm', { count: confirmBulk.length })}</p>
               <p className="mt-0.5 break-all font-mono wt-danger">
                 {pv.shown.join(', ')}{pv.more ? ` ${t('files.andMore', { count: pv.more })}` : ''}
               </p>
               {nDirs > 0 && <p className="mt-0.5 wt-warn">{t('files.bulkDeleteDirs', { count: nDirs })}</p>}
               <div className="mt-1.5 flex gap-2">
-                <Button variant="ghost" size="sm" autoFocus onClick={() => setConfirmBulk(null)}>{t('files.cancel')}</Button>
+                <Button variant="ghost" size="sm" autoFocus onClick={cancelDelete}>{t('files.cancel')}</Button>
                 <Button variant="danger" size="sm" onClick={() => void doBulkDelete(confirmBulk)}>
                   {t('files.bulkDeleteGo', { count: confirmBulk.length })}</Button>
               </div>
@@ -984,16 +1534,20 @@ export default function FilePanel(props: {
           )
         })()}
 
-        {/* confirmare ștergere (inline, nu window.confirm) */}
+        {/* confirmare ștergere (inline, nu window.confirm): „Şterge" are focusul — Enter confirmă,
+            Escape anulează; focusul se întoarce pe listă */}
         {confirmDel && (
-          <div className="border-t border-ink-800 bg-ink-800/80 px-3 py-2 text-2xs">
-            <p className="mb-1.5 text-slate-300">
+          // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Escape anulează confirmarea (nu închide panoul)
+          <div className="border-t border-ink-800 bg-ink-800/80 px-3 py-2 text-2xs" role="alertdialog"
+            aria-labelledby="wt-files-del-q" data-testid="wt-files-confirm-delete"
+            onKeyDown={(e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); cancelDelete() } }}>
+            <p id="wt-files-del-q" className="mb-1.5 text-slate-300">
               {t('files.deletePrefix')} <span className="font-mono wt-danger">{confirmDel.name}</span>
               {confirmDel.dir ? t('files.deleteSuffixDir') : '?'}
             </p>
             <div className="flex gap-2">
-              <Button variant="danger" size="sm" onClick={() => doDelete(confirmDel)}>{t('files.delete')}</Button>
-              <Button variant="ghost" size="sm" onClick={() => setConfirmDel(null)}>{t('files.cancel')}</Button>
+              <Button variant="danger" size="sm" autoFocus onClick={() => doDelete(confirmDel)}>{t('files.delete')}</Button>
+              <Button variant="ghost" size="sm" onClick={cancelDelete}>{t('files.cancel')}</Button>
             </div>
           </div>
         )}
@@ -1044,8 +1598,15 @@ export default function FilePanel(props: {
         )}
       </aside>
 
+      {menu && (
+        <FileMenu items={menuItems(menu)} at={{ x: menu.x, y: menu.y }} sheet={menu.sheet}
+          title={menu.kind === 'row' ? menu.entry.name + (menu.entry.dir ? '/' : '') : undefined}
+          label={menu.kind === 'row' ? rowMenuLabel(menu.entry.name) : menu.kind === 'new' ? t('files.fabAria') : t('files.dirMenuAria')}
+          onClose={closeMenu} />
+      )}
+
       {copyItems && (
-        <CopyToHostDialog srcHost={props.host} items={copyItems} onClose={() => setCopyItems(null)}
+        <CopyToHostDialog srcHost={props.host} items={copyItems} onClose={() => { setCopyItems(null); refocus() }}
           onStarted={() => setSelection(EMPTY_SELECTION)} />
       )}
 
@@ -1057,16 +1618,11 @@ export default function FilePanel(props: {
             path={editing.path}
             name={editing.name}
             onClose={() => {
-              // focusul se întorcea pe butonul „Edit" al rândului — ascuns (display:none) când mouse-ul
-              // nu e pe rând, deci ajungea pe <body>. Cădem pe numele fişierului (audit 3.6.3, #6).
+              // la închidere focusul revine pe LISTĂ, cu rândul fişierului selectat (roving focus) —
+              // înainte cădea pe butonul „Edit" al rândului, ascuns fără hover, deci pe <body>
               const name = editing.name
               setEditing(null)
-              requestAnimationFrame(() => {
-                const a = document.activeElement
-                if (a && a !== document.body && (a as HTMLElement).offsetParent !== null) return
-                const root: ParentNode = asideRef.current ?? document
-                root.querySelector<HTMLElement>(`[data-fname="${CSS.escape(name)}"]`)?.focus()
-              })
+              refocus(name)
             }}
             onSaved={() => load(listing!.path)}
           />

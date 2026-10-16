@@ -49,6 +49,9 @@ export const useSheetMode = (enabled = true): boolean => useMediaQuery(SHEET_QUE
    back-ul asincron ar ajunge DUPĂ push-ul noului panou şi l-ar închide pe el. */
 const MARK = '__wtSheet'
 let owner: (() => void) | null = null
+/** 3.6.14: Back-ul poate fi consumat ÎN foaie (panoul de fişiere merge înapoi prin directoare); doar
+    la capătul istoricului lui închide foaia. true = tratat, foaia rămâne (re-armăm intrarea). */
+let ownerBack: (() => boolean) | null = null
 let ignorePops = 0
 let pendingBack: ReturnType<typeof setTimeout> | null = null
 let listening = false
@@ -60,15 +63,24 @@ function onPop() {
   if (ignorePops > 0) { ignorePops--; return }
   // înapoi pe o intrare fără marcaj = userul a ieşit din foaie
   if (owner && !isMarked(window.history.state)) {
+    let handled = false
+    try { handled = ownerBack?.() === true } catch { handled = false }
+    if (handled) {
+      // foaia rămâne deschisă: o nouă intrare marcată, ca următorul Back să ajungă tot la noi
+      const prev = window.history.state
+      window.history.pushState({ ...(prev && typeof prev === 'object' ? prev : {}), [MARK]: true }, '')
+      return
+    }
     const close = owner
     owner = null
+    ownerBack = null
     close()
   }
 }
 
 /** Revendică intrarea de istoric pentru foaia curentă; `close` e chemat la Back. Întoarce
     funcţia de eliberare (cleanup-ul efectului). */
-export function claimSheetHistory(close: () => void): () => void {
+export function claimSheetHistory(close: () => void, back?: () => boolean): () => void {
   if (!listening) { window.addEventListener('popstate', onPop); listening = true }
   if (pendingBack) {
     // foaia anterioară tocmai s-a închis în acelaşi commit: refolosim intrarea ei
@@ -78,9 +90,11 @@ export function claimSheetHistory(close: () => void): () => void {
     window.history.pushState({ ...(prev && typeof prev === 'object' ? prev : {}), [MARK]: true }, '')
   }
   owner = close
+  ownerBack = back ?? null
   return () => {
     if (owner !== close) return            // deja închisă prin Back, sau altă foaie a preluat-o
     owner = null
+    ownerBack = null
     if (!isMarked(window.history.state)) return   // s-a navigat între timp (hash nou): nimic de consumat
     pendingBack = setTimeout(() => {
       pendingBack = null
@@ -111,7 +125,7 @@ export function lockBodyScroll(): () => void {
 /** doar pentru teste: starea de modul înapoi la zero */
 export function _resetSheetState() {
   if (pendingBack) clearTimeout(pendingBack)
-  owner = null; ignorePops = 0; pendingBack = null; locks = 0; prevOverflow = ''
+  owner = null; ownerBack = null; ignorePops = 0; pendingBack = null; locks = 0; prevOverflow = ''
   if (listening && typeof window !== 'undefined') window.removeEventListener('popstate', onPop)
   listening = false
 }

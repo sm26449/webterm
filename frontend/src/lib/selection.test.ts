@@ -100,14 +100,31 @@ describe('re-listare + previzualizare', () => {
   })
 })
 
-describe('isListKeyTarget (U09)', () => {
-  it('tastele de navigare se aplică doar de pe containerul listei, nu de pe un descendent focalizat', () => {
-    const list = { id: 'list' }
-    const deleteBtn = { id: 'delete' }
-    const checkbox = { id: 'checkbox' }
-    expect(isListKeyTarget(list, list)).toBe(true)
-    // Enter pe „Şterge" / Space pe bifă: le tratează controlul, nu lista (nu deschide view[sel])
-    expect(isListKeyTarget(deleteBtn, list)).toBe(false)
-    expect(isListKeyTarget(checkbox, list)).toBe(false)
+describe('isListKeyTarget (U09 + roving focus 3.6.14)', () => {
+  const list = { isContainer: true, tag: 'DIV' }
+  const btn = { isContainer: false, tag: 'BUTTON' }
+  const checkbox = { isContainer: false, tag: 'INPUT' }
+  const rename = { isContainer: false, tag: 'INPUT' }
+  const row = { isContainer: false, tag: 'DIV' }
+  const menuitem = { isContainer: false, tag: 'DIV', role: 'menuitem' }
+  const editable = { isContainer: false, tag: 'DIV', editable: true }
+  it('de pe container: toate tastele', () => {
+    for (const k of ['Enter', ' ', 'ArrowDown', 'F2', 'a', 'Delete']) expect(isListKeyTarget(list, k)).toBe(true)
+  })
+  it('Enter / Space pe un control real îl activează pe EL, nu deschid rândul (U09)', () => {
+    expect(isListKeyTarget(btn, 'Enter')).toBe(false)
+    expect(isListKeyTarget(btn, ' ')).toBe(false)
+    expect(isListKeyTarget(menuitem, 'Enter')).toBe(false)
+  })
+  it('câmpurile de text şi bifele îşi păstrează toate tastele', () => {
+    for (const k of ['Enter', ' ', 'ArrowDown', 'F2', 'a', 'Delete', 'Backspace']) {
+      expect(isListKeyTarget(checkbox, k)).toBe(false)
+      expect(isListKeyTarget(rename, k)).toBe(false)
+      expect(isListKeyTarget(editable, k)).toBe(false)
+    }
+  })
+  it('de pe un buton din rând: navigarea / F2 / Delete merg (focusul nu mai omoară tastatura)', () => {
+    for (const k of ['ArrowDown', 'ArrowUp', 'F2', 'Delete', 'Home', 'x']) expect(isListKeyTarget(btn, k)).toBe(true)
+    expect(isListKeyTarget(row, 'Enter')).toBe(true)
   })
 })

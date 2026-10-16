@@ -603,6 +603,8 @@ async function auditDevice(cfg) {
         // aria-label, nu title: foaia se deschide sub cursorul parcat al lui Playwright, deci
         // TooltipLayer îi scoate input-ului `title`-ul (vezi openFiles)
         const pathInput = filesAside.locator('input[aria-label="Current directory path"]')
+        // 3.6.14: calea e afişată ca firimituri; câmpul apare la ✎ „Edit path"
+        if (!(await pathInput.count())) await filesAside.locator('[data-testid="wt-files-editpath"]').dispatchEvent('click')
         await pathInput.fill('/tmp')
         await pathInput.press('Enter')
         await page.waitForTimeout(800)
@@ -610,7 +612,26 @@ async function auditDevice(cfg) {
         if (!(await edBtn.count())) {
           note(cfg.name, 'editor-telefon', 'info', 'SKIP: /tmp/wt_hl.yaml lipseşte (rulează întâi e2e-session.mjs)')
         } else {
-          await edBtn.first().dispatchEvent('click')
+          // 3.6.14: pe touch rândul are UN „⋯" de 44px (în locul celor patru pictograme de 24px), care
+          // deschide o foaie de jos cu acţiunile (iteme de 44px) — de acolo „Edit"
+          const more = filesAside.locator('[data-row="wt_hl.yaml"] [data-testid="wt-files-more-touch"]')
+          if (await more.isVisible().catch(() => false)) {
+            const mb = await more.boundingBox()
+            if (!mb || mb.height < 44 || mb.width < 44) note(cfg.name, 'fisiere-touch', 'bug', `„⋯" al rândului are ${mb ? `${Math.round(mb.width)}×${Math.round(mb.height)}` : '?'}px (< 44px)`)
+            await more.click()
+            const sheetMenu = page.locator('[data-testid="wt-files-menu"][role="menu"]')
+            if (await sheetMenu.waitFor({ state: 'visible', timeout: 5000 }).then(() => true, () => false)) {
+              const small = await sheetMenu.locator('[role="menuitem"]').evaluateAll((els) => els.filter((e) => e.getBoundingClientRect().height < 44).length)
+              if (small) note(cfg.name, 'fisiere-touch', 'bug', `${small} acţiuni din foaia rândului sub 44px`)
+              else { reached.add('fisiere-touch'); note(cfg.name, 'fisiere-touch', 'info', 'foaia de acţiuni a rândului: iteme ≥ 44px') }
+              await sheetMenu.locator('[role="menuitem"]', { hasText: 'Edit' }).click()
+            } else {
+              note(cfg.name, 'fisiere-touch', 'bug', '„⋯" nu deschide foaia de acţiuni a rândului')
+              await edBtn.first().dispatchEvent('click')
+            }
+          } else {
+            await edBtn.first().dispatchEvent('click')
+          }
           const dlg = page.locator('[role=dialog][aria-label^="Edit"]')
           const opened = await page.locator('.monaco-editor').waitFor({ state: 'visible', timeout: 15000 }).then(() => true, () => false)
           await page.waitForTimeout(800)

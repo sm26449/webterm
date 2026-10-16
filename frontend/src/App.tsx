@@ -44,7 +44,7 @@ import { ArrowsLeftRightIcon, CloseIcon, CopyIcon, FullscreenIcon, LockIcon, Shi
 import { EmptyState } from './components/ui'
 import { loadPerms } from './lib/perms'
 import { ensureNotificationPermission, notify, notifyError, registerToast } from './lib/notify'
-import { forgetUploads, hideUploadOrphans, restoreOrphans, setUploadUser } from './lib/uploads'
+import { forgetUploads, hideUploadOrphans, openFilesAt, restoreOrphans, setUploadUser } from './lib/uploads'
 import { forgetDownloads, hideInterruptedDownloads, restoreInterruptedDownloads, setDownloadUser } from './lib/downloads'
 import { clearAll as clearClipHistory } from './lib/cliphistory'
 import { askSecret, registerSecretPrompt, SecretAsk } from './lib/secretPrompt'
@@ -197,7 +197,6 @@ function useRoute(): [Route, (sid: string | null) => void, (id: number) => void]
   return [route, navigate, navigateHost]
 }
 
-const FileBrowser = lazy(() => import('./components/FileBrowser'))
 const HistoryModal = lazy(() => import('./components/HistoryModal'))
 const AddHostModal = lazy(() => import('./components/AddHostModal'))
 
@@ -278,7 +277,6 @@ function MainApp() {
   const [fleet, setFleet] = useState<FleetStatus>({ hostsLoaded: false, hostsErr: null, sessionsErr: null })
   const [route, navigate, navigateHost] = useRoute()
   const selectedSid = route.primary
-  const [filesHost, setFilesHost] = useState<Host | null>(null)
   const [toolboxHost, setToolboxHost] = useState<Host | null>(null)   // panoul Connections, la nivel de host
   const [serialHost, setSerialHost] = useState<Host | null>(null)
   const [diagHost, setDiagHost] = useState<Host | null>(null)
@@ -865,6 +863,8 @@ function MainApp() {
     // doar într-un split (altfel tasta ajunge în shell neatinsă)
     movePane: splitActive && !splitDegraded ? () => { if (selectedSid) movePane(selectedSid, 1) } : undefined,
     maximizePane: splitActive ? () => { if (selectedSid) toggleMax(selectedSid) } : undefined,
+    // Alt+E (3.6.14): panoul de fişiere al sesiunii active / al panoului focalizat din split
+    toggleFiles: selectedSid ? () => window.dispatchEvent(new Event('wt-session-files')) : undefined,
   }
 
   // acţiunile citite prin ref: handlerul de mai jos se înregistrează O DATĂ, iar acţiunile văd
@@ -892,7 +892,12 @@ function MainApp() {
       if ((id === 'nextTab' || id === 'prevTab') && e.shiftKey) return
       // scurtăturile „simple" (?, /) nu se declanșează cât scrii într-un câmp
       // sau în terminal — acolo caracterul aparține conținutului
-      if ((id === 'help' || id === 'focusSidebar') && (inField || inTerminal)) return
+      // lista panoului de fişiere (3.6.14): acolo `/` = filtrul, iar `?` şi literele = tastează-ca-să-sari
+      const inFilesList = !!(e.target as HTMLElement)?.closest?.('[data-files-list]')
+      if ((id === 'help' || id === 'focusSidebar') && (inField || inTerminal || inFilesList)) return
+      // Alt+E nu închide panoul de sub un dialog (editorul de fişiere trăieşte ÎN panou: l-ar demonta
+      // cu tot cu modificările nesalvate) şi nu se declanşează din Monaco
+      if (id === 'toggleFiles' && (e.target as HTMLElement)?.closest?.('[role="dialog"],[role="alertdialog"],.monaco-editor')) return
       // „/" dintr-un dialog modal aparţine dialogului (Setări: căutarea, 3.5.9) — altfel ar muta
       // focusul în sidebar-ul DE SUB modal, adică în afara capcanei de focus
       if (id === 'focusSidebar' && (e.target as HTMLElement)?.closest?.('[role="dialog"][aria-modal="true"]')) return
@@ -1325,6 +1330,14 @@ function MainApp() {
     setActiveSplitId(null)
     navigateHost(id)
     setSidebarOpen(false)
+  }
+  // meniul hostului / paleta → „Files": tab-ul Files din pagina hostului (3.6.14). Până în 3.6.13
+  // deschidea un al doilea manager de fişiere, mai vechi (FileBrowser, modal) — fără selecţie,
+  // copiere, transferuri reluabile sau tastatură. Un singur panou de fişiere, acelaşi peste tot.
+  const openHostFiles = (h: Host) => {
+    setActiveSplitId(null)
+    setSidebarOpen(false)
+    openFilesAt(h.id, '~')
   }
 
   // ── operaţii pe split-views (server-side, optimist) ──────────────────────────
@@ -1856,7 +1869,7 @@ function MainApp() {
         onSelectHost={selectHost}
         onSelect={selectSession}
         onNewSession={connectHost}
-        onFiles={setFilesHost}
+        onFiles={openHostFiles}
         onSerial={setSerialHost}
         onDiagnostic={setDiagHost}
         onUpgrade={openUpgradeSession}
@@ -2072,11 +2085,6 @@ function MainApp() {
         )}</PaneErrorBoundary>)}
       </main>
       </div>
-      {filesHost && (
-        <Suspense fallback={null}>
-          <FileBrowser host={filesHost} onClose={() => setFilesHost(null)} />
-        </Suspense>
-      )}
       {toolboxHost && (
         <ToolboxPanel key={toolboxHost.id} host={toolboxHost} overlay onClose={() => setToolboxHost(null)}
           onOpen={(h, cid) => { setToolboxHost(null); openConnection(h, cid) }} />
@@ -2108,7 +2116,7 @@ function MainApp() {
           onNewSession={connectHost}
           onSelectHost={selectHost}
           onAddHost={() => setAddHostSignal((n) => n + 1)}
-          onFiles={setFilesHost}
+          onFiles={openHostFiles}
           onOpenSettings={() => { setSettingsCat(undefined); setSettingsSignal((n) => n + 1) }}
           onOpenStatus={() => setStatusSignal((n) => n + 1)}
           onOpenHistory={() => { setPaletteOpen(false); setShowHistory(true) }}

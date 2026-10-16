@@ -60,7 +60,7 @@ export default function FileEditor(props: {
   // Orice cale de închidere (Escape, scrim, Close, ✕) trece pe aici: cu modificări nesalvate
   // cerem confirmare — un Escape în plus (reflex de VS Code după ce ai închis autocomplete-ul)
   // nu mai aruncă un config editat live pe server. Cât e deschisă confirmarea, Escape-ul de
-  // document e al ei (ambele capcane îl prind — vezi FileBrowser pentru același pattern).
+  // document e al ei (ambele capcane îl prind).
   const requestClose = () => {
     if (confirmRef.current) return
     if (dirtyRef.current) setConfirmClose(true)

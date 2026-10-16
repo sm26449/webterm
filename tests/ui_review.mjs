@@ -664,16 +664,22 @@ try {
       await page.waitForTimeout(300)
     }, page)
 
-    // file browser (overlay-ul din meniul ⋯, altă suprafaţă decât tab-ul Files al hostului)
+    // meniul ⋯ al hostului → Files: din 3.6.14 deschide tab-ul Files al paginii hostului (vechiul
+    // FileBrowser modal a fost retras). Scanăm şi meniul de acţiuni al unui rând (click dreapta).
     await step('manager de fişiere', async () => {
       await hostMenu(page, HOST).click()
       await page.locator('button[role="menuitem"]', { hasText: 'Files' }).first().click()
-      await page.waitForSelector('text=Upload to:')
-      await page.waitForTimeout(800)
+      await page.waitForSelector('[role="group"][data-files-list]:not([data-path=""])', { timeout: 10000 })
+      await page.waitForTimeout(500)
       await page.screenshot({ path: `${OUT}/${theme}-06-files.png` })
       await scan(page, `${theme} file browser`)
-      // după aria-label, nu după glifă: butonul are acum o pictogramă SVG (design system 3.5.7)
-      await page.locator('.fixed.z-50 button[aria-label="Close"]').first().click()
+      // un rând dacă există (meniul rândului), altfel zona goală a listei (meniul dosarului)
+      const rows = page.locator('[role="group"][data-files-list] [data-row]')
+      if (await rows.count()) await rows.first().click({ button: 'right' })
+      else await page.locator('[role="group"][data-files-list]').click({ button: 'right', position: { x: 40, y: 40 } })
+      await page.waitForSelector('[data-testid="wt-files-menu"][role="menu"]', { timeout: 5000 })
+      await scan(page, `${theme} file row menu`)
+      await page.keyboard.press('Escape')
     }, page)
 
     // Panoul de Status: suprafaţă pe care poarta n-o atingea deloc, deşi e unde se uită
@@ -1004,11 +1010,13 @@ try {
     await step(`${variant}: manager de fişiere`, async () => {
       await hostMenu(page, HOST).click()
       await page.locator('button[role="menuitem"]', { hasText: 'Files' }).first().click()
-      await page.waitForSelector('text=Upload to:')
-      await page.waitForTimeout(800)
+      // 3.6.14: tab-ul Files al paginii hostului (FileBrowser-ul modal a fost retras)
+      await page.waitForSelector('[role="group"][data-files-list]:not([data-path=""])', { timeout: 10000 })
+      await page.waitForTimeout(500)
       await page.screenshot({ path: `${OUT}/${variant}-06-files.png` })
       await scan(page, `${variant} file browser`)
-      await page.locator('.fixed.z-50 button[aria-label="Close"]').first().click()
+      await page.evaluate(() => { window.location.hash = '' })
+      await page.waitForTimeout(300)
     }, page)
 
     await step(`${variant}: dialog (adaugă host)`, async () => {
