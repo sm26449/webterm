@@ -9,6 +9,8 @@ back.
 
 ## [Unreleased]
 
+## [3.6.14] — 2026-10-16 · agent (58)
+
 ### Fixed
 - **A screenshot pasted for a CLI such as Claude Code gets its path into the prompt again — with
   one explicit click.** Why: the path is typed by itself only where it is known to be safe (a
