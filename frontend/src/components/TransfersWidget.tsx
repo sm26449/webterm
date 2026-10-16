@@ -85,6 +85,32 @@ export default function TransfersWidget(props: { hosts: Host[]; insertSid?: stri
     if (fresh) setCollapsed(false)   // doar vizual; NU persistă (nu e alegerea userului)
   }, [jobs])
 
+  // Toast-urile stau în acelaşi colţ (jos-dreapta) şi la z-50, PESTE widget: un toast lung („calea nu
+  // a fost tastată…") acoperea exact rândul de jos al cardului — „Done" şi „Type into terminal" nu se
+  // mai vedeau (feedback 3.6.15). Publicăm distanţa de la marginea de jos a ecranului până la vârful
+  // widgetului (--wt-transfers-top), iar stiva de toast-uri (Toasts.tsx) se aşază DEASUPRA lui.
+  const regionRef = useRef<HTMLDivElement | null>(null)
+  const present = jobs.length > 0
+  useEffect(() => {
+    const root = document.documentElement
+    const el = regionRef.current
+    if (!present || !el) { root.style.removeProperty('--wt-transfers-top'); return }
+    const sync = () => {
+      const r = el.getBoundingClientRect()
+      const top = r.height > 0 ? Math.max(0, Math.round(window.innerHeight - r.top)) : 0
+      root.style.setProperty('--wt-transfers-top', `${top}px`)
+    }
+    sync()
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(sync) : null
+    ro?.observe(el)
+    window.addEventListener('resize', sync)
+    return () => {
+      ro?.disconnect()
+      window.removeEventListener('resize', sync)
+      root.style.removeProperty('--wt-transfers-top')
+    }
+  }, [present, collapsed])
+
   if (jobs.length === 0) return null
 
   // sumar general: procentul pe octeţii transferurilor VII (ca în fostul chip)
@@ -112,7 +138,7 @@ export default function TransfersWidget(props: { hosts: Host[]; insertSid?: stri
   const summary = jobs.length === 1 ? `${one.name} ${sizeKnown(one) ? `${one.pct}%` : fmtBytes(one.pos)}` : countLabel
 
   return createPortal(
-    <div role="region" aria-label={t('jobs.title')} className="wt-transfers-widget">
+    <div ref={regionRef} role="region" aria-label={t('jobs.title')} className="wt-transfers-widget">
       {/* regiune live permanentă cât există widgetul (goală când nu e nimic de spus) */}
       <div aria-live="polite" className="sr-only">{announce}</div>
       {collapsed ? (

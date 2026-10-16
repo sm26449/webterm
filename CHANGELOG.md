@@ -9,6 +9,35 @@ back.
 
 ## [Unreleased]
 
+Frontend only — no agent change (agent stays 58), no new gateway route.
+
+### Changed
+- **Pasting a screenshot (or dropping files) on a terminal types the path right away, even with a
+  program running** (Claude Code, a REPL — tmux-backed sessions included). Why: users pasted a
+  screenshot into Claude Code and then had to press **Type into terminal** every time. A Ctrl+V of
+  a file *is* a paste into that terminal — a text paste goes straight in whatever program runs — and
+  the 3.6.9 rule ("type only at a shell prompt") was protecting against something else: a path typed
+  *late*, in the background, into a context the user no longer controls (mc or vim started meanwhile,
+  another pane, other keys). So a paste/drop now records its context, and on upload commit the
+  quoted path plus a space (never Enter) goes in as a paste — wrapped in `ESC[200~ … ESC[201~` under
+  tmux or when the program asked for bracketed paste, plain otherwise — only while that context is
+  unchanged: the same terminal (not closed or remounted) is still the active pane, the upload
+  finished within 30 s of the paste, nothing else was sent to that terminal since (a key typed in
+  between = a different context), the guardrail is not holding input, and the text is safe to type.
+  Otherwise the old rules apply (typed at a real shell prompt, else **Type into terminal** + **Copy
+  path**), and the row and the toast now say *why* it was not typed. Uploads that do not start from
+  a paste/drop on the terminal (Files panel, **Insert path**) keep the old rules; the move-as-root
+  `sudo` command is still copy-only unless a real prompt is visible. The path goes only into the pane
+  that received the paste, never to broadcast peers — the file exists only on that pane's host.
+- **Transfers widget rows no longer clip their status or buttons.** Why: a finished paste showed
+  name, bar, status, size and three buttons on one line of a 26 rem card with hidden overflow — "Done"
+  and **Type into terminal** were cut off and unreadable. A row is now two lines: name (truncated with
+  an ellipsis, full name in the tooltip) + progress bar + status, always visible; then the size and
+  the actions, which wrap onto another line instead of being cut. Same on the phone sheet.
+  Toasts used to sit in the same bottom-right corner *above* the widget (z-50 over z-40), so the
+  "path was not typed" toast covered exactly the row it talked about; the toast stack now sits above
+  the widget (it publishes its height as `--wt-transfers-top`), capped at 45vh.
+
 ## [3.6.15] — 2026-10-16 · agent (58)
 
 Files panel UI/UX. Frontend only — no agent change (agent stays 58), no new gateway route.

@@ -47,7 +47,7 @@ import { useFocusTrap } from '../lib/useFocusTrap'
 import { dismissUpload, startUpload } from '../lib/uploads'
 import { isWriteDenied, uploadAndMoveAsRoot } from '../lib/rootmove'
 import { uploadStore } from '../lib/uploadStore'
-import { ensureInbox, inboxName, isGenericName, markPasteHintSeen, notTypedReasonKey, pasteDest, pasteHintSeen, pasteSubject, pasteSubjectText, pasteToastKey, pruneInbox, registerInsertTarget, resolveHome } from '../lib/transfers'
+import { capturePasteContext, ensureInbox, inboxName, isGenericName, markPasteHintSeen, notTypedReasonKey, pasteDest, pasteHintSeen, pasteSubject, pasteStaleKey, pasteSubjectText, pasteToastKey, pruneInbox, registerInsertTarget, resolveHome, type PasteContext } from '../lib/transfers'
 import type { PasteDest } from '../lib/transfers'
 import { baseName, looksLikePath, resolveTermPath } from '../lib/termpath'
 import CoachTip from './CoachTip'
@@ -409,13 +409,14 @@ export default function SessionView(props: {
       home-ul hostului (rezolvat absolut, ca inserarea să dea o cale pe care o înţelege orice CLI) */
   const sessionDir = useCallback(async (): Promise<string> =>
     cwdRef.current ?? await resolveHome(props.host!.id), [props.host])
-  const uploadFiles = useCallback((dir: string, files: { file: File; name: string }[], onDone?: (name: string) => void): Promise<string[]> => {
+  const uploadFiles = useCallback((dir: string, files: { file: File; name: string }[], onDone?: (name: string) => void,
+    pasteCtx?: PasteContext): Promise<string[]> => {
     const host = props.host!
     // întoarcem id-urile (rezolvate la finalul primei treceri): apelantul citeşte starea finală din
     // store ca să decidă toastul de „gata" vs eroare — un singur toast per paste, nu unul per fişier
     return Promise.all(files.map(({ file, name }) =>
       startUpload({ hostId: host.id, hostName: host.name, dest: `${dir.replace(/\/$/, '')}/${name}`, file,
-                    then: 'insert-path', sid: session.id })
+                    then: 'insert-path', sid: session.id, pasteCtx })
         .then((id) => { if (onDone && uploadStore.get(id)?.state === 'done') onDone(name); return id })))
   }, [props.host, session.id])
   // Toast de final (sau de eroare) după ce toate fişierele unui paste/drop au trecut. Explică
@@ -429,7 +430,8 @@ export default function SessionView(props: {
     // rândul din Transferuri (deschis automat) oferă „Tastează în terminal" + „Copy path"
     const notTyped = jobs.find((j) => j?.inserted === false)
     if (notTyped) {
-      notifyToast(`${t('transfers.pasteNotTyped', { subject })} ${t(notTypedReasonKey(notTyped.insertOutcome ?? 'refused'))}`, 'warn')
+      const why = notTyped.pasteStale ? `${t(pasteStaleKey(notTyped.pasteStale))} ` : ''
+      notifyToast(`${t('transfers.pasteNotTyped', { subject })} ${why}${t(notTypedReasonKey(notTyped.insertOutcome ?? 'refused'))}`, 'warn')
       return
     }
     let msg = t(pasteToastKey('done', dest, kind), { subject })
@@ -464,6 +466,9 @@ export default function SessionView(props: {
     return true
   }
   const onTermDrop = async (files: File[]) => {
+    // contextul gestului, ÎNAINTE de orice await (3.6.16): calea se tastează ca un paste doar cât
+    // terminalul, panoul activ şi inputul rămân cele de acum (lib/transfers.ts typeIntoPasted)
+    const ctx = capturePasteContext(session.id)
     const subj = pasteSubject(files)
     const subject = pasteSubjectText(subj, t)
     // feedback IMEDIAT (înainte de orice await): tragerea fişierelor trebuie să se simtă confirmată
@@ -471,7 +476,7 @@ export default function SessionView(props: {
     try {
       const dir = await sessionDir()
       const items = files.map((f) => ({ file: f, name: f.name }))
-      const ids = await uploadFiles(dir, items)
+      const ids = await uploadFiles(dir, items, undefined, ctx)
       if (await offerRootMove(ids, dir, items)) return
       finishPaste(ids, 'cwd', subject, subj.kind)
     } catch (e) { notifyError(t('transfers.uploadFailedTitle'), errText(e, t) || t('files.genericErr')) }
@@ -480,6 +485,7 @@ export default function SessionView(props: {
   // fişierul pe host (inbox-ul `~/.webterm/inbox`, sau cwd-ul, după preferinţă) şi calea la
   // prompt. Numele: timestamp + extensie din MIME; fişierele cu nume îl păstrează, prefixat.
   const pasteFiles = async (files: File[]) => {
+    const ctx = capturePasteContext(session.id)      // vezi onTermDrop: înainte de orice await
     const host = props.host!
     const dest: PasteDest = pasteDest()
     const toInbox = dest === 'inbox'
@@ -493,7 +499,7 @@ export default function SessionView(props: {
       let generic = 0
       const items = files.map((f) => ({ file: f, name: inboxName(f, when, isGenericName(f.name) ? ++generic : 1) }))
       // retenţia inbox-ului rulează după un upload reuşit, niciodată peste fişierul tocmai urcat
-      const ids = await uploadFiles(dir, items, toInbox ? (name) => { void pruneInbox(host.id, dir, name) } : undefined)
+      const ids = await uploadFiles(dir, items, toInbox ? (name) => { void pruneInbox(host.id, dir, name) } : undefined, ctx)
       if (!toInbox && await offerRootMove(ids, dir, items)) return
       finishPaste(ids, dest, subject, subj.kind)
     } catch (e) { notifyError(t('transfers.uploadFailedTitle'), errText(e, t) || t('files.genericErr')) }
@@ -788,6 +794,10 @@ export default function SessionView(props: {
   /** ecoul ultimelor taste (vezi echoSettled): `requireOutput` la broadcast, nu într-un singur panou */
   const echoedNow = useCallback((requireOutput: boolean): boolean =>
     echoRef.current.echoed(requireOutput, performance.now(), rttRef.current, lineKeyRef.current()), [])
+  /** inputul trimis spre terminal (fără rapoarte) — vezi InsertTarget.inputSeq (3.6.16) */
+  const inputSeqRef = useRef(0)
+  /** panoul e ţinta acţiunilor (tab activ; în split, panoul focalizat) — InsertTarget.isActive (3.6.16) */
+  const actionTargetRef = useRef<boolean | undefined>(true)
   /** `kind`: 'key' = tastă (urmărită pentru ecou), 'report' = raport de terminal (neurmărit),
       'auto' = clasificat după formă — DOAR pentru datele venite din alt panou prin broadcast (în
       panoul de origine le-a clasificat deja userInput). Textul inserat (snippet, paletă, „rulează din
@@ -799,6 +809,7 @@ export default function SessionView(props: {
       ws.send(typeof data === 'string' ? new TextEncoder().encode(data) : data)
       // rapoartele terminalului (mouse, focus, CPR, DA…) nu sunt taste: nu aşteaptă ecou (review 3.6.13, M2)
       if (sendIsReport(kind, data, pastingRef.current, cprRef.current > 0)) return
+      inputSeqRef.current += 1     // input real: contextul unui paste de fişiere în curs s-a schimbat (3.6.16)
       // prima tastă de după B: promptul e pictat — rândul lui se verifică la Enter (review 3.6.13, H1)
       // fără taste în aşteptare (nimic tastat încă după B, niciun typeahead): linia începe la cursor
       trackerRef.current?.notePromptPainted(!echoRef.current.waiting)
@@ -814,6 +825,7 @@ export default function SessionView(props: {
     // socket închis/în reconectare: tasta NU pleacă (vezi droppedRef). O numărăm şi facem
     // cortina să „clipească" — feedback imediat că n-a ajuns nicăieri, nu tăcere.
     if (exitedRef.current) return
+    inputSeqRef.current += 1       // tastă pierdută = tot o tastă: omul a continuat (3.6.16)
     droppedRef.current += 1
     setInputFlash(true)
     clearTimeout(flashTimerRef.current)
@@ -1185,6 +1197,7 @@ export default function SessionView(props: {
   // ținta e panoul FOCUSAT (actionTarget), nu ambele — un snippet trebuie să meargă
   // pe un singur host. Fallback la paneActive dacă prop-ul nu e pasat.
   const isActionTarget = props.actionTarget ?? props.paneActive
+  actionTargetRef.current = isActionTarget
   useEffect(() => {
     if (isActionTarget === false) return
     const onSearch = () => setShowSearch(true)
@@ -1353,6 +1366,9 @@ export default function SessionView(props: {
       hasFocus: () => !!term.textarea && document.activeElement === term.textarea,
       altScreen: () => term.buffer.active.type === 'alternate',
       commandRunning: () => trackerRef.current?.running === true,
+      // contextul unui paste/drop de fişiere (3.6.16, lib/transfers.ts typeIntoPasted)
+      inputSeq: () => inputSeqRef.current,
+      isActive: () => actionTargetRef.current !== false && !replayRef.current,
     })
     // Paste cu FIŞIERE (captură, înaintea handler-ului xterm de pe textarea): preluăm doar când
     // clipboardul aduce fişiere/imagini; textul simplu nu trece pe aici — xterm îl lipeşte ca

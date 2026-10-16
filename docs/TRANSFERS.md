@@ -24,7 +24,11 @@ between the gutters and sits above the key bar, so it never covers the terminal 
   **Copy path** / **Insert path** (insert types the path into the current session when it is on
   the same host; **Type into terminal** when a running program kept the path from being typed —
   see below). **Clear finished** appears once everything has stopped; **–** collapses it back
-  to the pill.
+  to the pill. Each row has two lines: the name (truncated with an ellipsis; the full name and
+  destination in its tooltip), the progress bar and the status ("63% · 4 MB/s", "Done") — always
+  visible — and below it the size and the actions, which wrap onto another line rather than being
+  cut off (desktop, narrow windows and the phone sheet alike). Notifications (toasts) stack above
+  the widget instead of covering it.
 - When a job newly **needs a decision** — stalled, failed, incomplete after a reload, or a pasted
   path that was not typed because a program is running — the
   widget expands by itself, once (it does not fight you if you collapse it again). State changes
@@ -346,7 +350,8 @@ you release:
 - otherwise the agent user's **home directory**, and the overlay says so.
 
 Each file becomes its own job (`<dir>/<name>`, existing files are overwritten), and when it
-finishes its path is **typed at the prompt** followed by a space — no Enter. Drop (or click) on
+finishes its path is **typed into that terminal** followed by a space — no Enter — as a paste
+(see [A paste is a paste](#a-paste-is-a-paste-3616) below). Drop (or click) on
 **Choose another folder…** to open the Files panel instead and pick the directory there.
 Dropping files on a **folder row** in the Files panel uploads into that folder; dropping
 anywhere else in the panel keeps the current-directory behaviour.
@@ -375,6 +380,9 @@ The file is uploaded to the host's **inbox** and its path is typed at the prompt
 - If the tab that received the paste is closed by the time the upload finishes, nothing is
   typed anywhere (it could be a different host's shell); the row stays in the Transfers widget with
   **Copy path** until you dismiss it.
+- **A paste is a paste** (3.6.16) — see the section below: as long as the paste's context is
+  unchanged, the path is typed even with a program running (Claude Code, a REPL). The rest of this
+  item is what happens when the context changed, or for uploads that did not start from a paste/drop.
 - If WebTerm **cannot see a shell prompt** in that terminal (a program is running: a CLI such as
   Claude Code, a REPL — or mc, vim, less), the path is **not typed by itself**: WebTerm cannot tell
   which program it is, and in mc or vim the letters would be commands. Under tmux (the agent's tmux
@@ -398,6 +406,45 @@ The file is uploaded to the host's **inbox** and its path is typed at the prompt
   view-only session; after a successful click the row expires like any finished upload. The
   **move-as-root** command (below) has no such button — a `sudo` command typed into an unknown
   program is riskier than a path; copy it.
+
+### A paste is a paste (3.6.16)
+
+A Ctrl/Cmd+V of a screenshot or file — or a drop of files — on a terminal is your explicit paste
+into **that** terminal, exactly like pasting text (which xterm sends at once, whatever program is
+running). The only difference is the upload in between: the path exists only after the commit. The
+older rule above ("type only at a visible shell prompt") protects against a path typed **late**, in
+the background, into a context you no longer control. So the paste records its context when it
+happens, and on commit the quoted path plus a space is typed as a paste — never Enter — only if
+**all** of these still hold:
+
+1. **Same terminal, still the active one** — the terminal that received the paste is still open
+   and was not remounted, and it is still the active pane (the visible tab; in a split, the focused
+   pane). Switching to another tab or pane in the meantime changes the context.
+2. **Quick** — the upload finished within **30 seconds** of the paste (screenshots are small).
+3. **Nothing else typed** — no key, snippet, inserted text or broadcast input was sent to that
+   terminal since the paste. Terminal reports (focus, mouse, cursor position) do not count. If you
+   kept typing, the path would land in the middle of something else.
+4. **Guardrail not holding input** (an Enter waiting for its echo, or a guardrail dialog open) —
+   refused, as for every typed text.
+5. **Safe text** — no control, bidi or zero-width characters (the same check as everywhere).
+
+It goes in as a paste: wrapped in `ESC[200~ … ESC[201~` under tmux (tmux removes the markers when
+the program in the pane did not ask for bracketed paste — the same as for a text paste) or when the
+program asked for bracketed paste; plain text otherwise. Several files from one paste are typed one
+after another (a path typed by the paste itself does not count as "something else typed").
+
+If any condition fails, the rules above apply: typed only at a real shell prompt, otherwise the row
+offers **Type into terminal** + **Copy path**, and both the toast and the row say why ("you typed in
+this terminal while the file was uploading", "you switched to another tab or pane", "the upload took
+longer than 30 seconds", "the terminal was reopened").
+
+Uploads that do **not** start from a paste/drop on the terminal — the Files panel, **Insert path**
+from the Transfers widget — keep the older rules. The move-as-root `sudo` command is still typed
+only at a real prompt (otherwise copy-only).
+
+**Split views and broadcast:** the path is typed only into the pane that received the paste, never
+broadcast to the other panes — the file exists only on that pane's host, so the path would be wrong
+(or point at a different file) anywhere else.
 
 **Settings → Preferences → Transfers** lets you send pasted files to the **session directory**
 instead of the inbox (same naming), and sets the **inbox retention** (default **7 days**,

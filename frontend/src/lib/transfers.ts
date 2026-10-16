@@ -177,6 +177,11 @@ export interface InsertTarget {
   /** se poate tasta acum (nu e doar-vizualizare / mut)? — doar pentru a ascunde oferta din UI;
       `send` rămâne poarta reală */
   canType?: () => boolean
+  /** 3.6.16: contor al inputului trimis spre terminal (taste, inserări, broadcast primit; NU rapoartele
+      terminalului — focus, mouse, CPR). Contextul unui paste de fişiere e valabil doar cât nu creşte. */
+  inputSeq?: () => number
+  /** 3.6.16: panoul e cel activ — tab-ul vizibil şi, într-un split, panoul focalizat (actionTarget) */
+  isActive?: () => boolean
 }
 const targets = new Map<string, InsertTarget>()
 /** fluxul ţintei trece prin tmux? (excepţie → da) */
@@ -272,6 +277,70 @@ export function typeIntoConfirmed(sid: string | undefined, text: string): TypeOu
   if (!wrap) { try { wrap = t.bracketedPaste() === true } catch { wrap = false } }
   return t.send(wrap ? PASTE_START + text + PASTE_END : text) === false ? 'refused' : 'typed'
 }
+
+// ── paste / drop de fişiere = un PASTE în acel terminal (3.6.16) ───────────────────────────
+// Ctrl+V cu o captură (sau un drop de fişiere) pe terminal e gestul EXPLICIT al omului de a lipi în
+// ACEL terminal — exact ca un paste de text, pe care xterm îl trimite imediat oricare program ar
+// rula (Claude Code, un REPL, vim). Diferenţa e doar că între gest şi text stă un upload: calea
+// exista abia după commit. Regula 3.6.9 L2 („doar la un prompt") protejează contra unei căi tastate
+// TÂRZIU, în fundal, într-un context pe care omul nu-l mai controlează (între timp a pornit mc, a
+// schimbat panoul, tastează altceva). Deci tastăm automat — ca un paste — doar cât contextul
+// gestului e ACELAŞI:
+//   (a) ţinta e tot cea înregistrată la paste (acelaşi terminal montat, nu unul remontat) şi panoul
+//       e încă cel activ (tab vizibil + panoul focalizat al unui split);
+//   (b) commit-ul a venit în cel mult PASTE_CONTEXT_MS de la paste (capturile sunt mici);
+//   (c) nimic n-a mai plecat spre acel terminal de la paste (o tastă, o inserare, broadcast) — omul a
+//       continuat altceva, deci calea ar ateriza în mijlocul altui input;
+//   (d) garda nu reţine inputul (ecou în aşteptare / dialog) — `send` refuză, ca până acum;
+//   (e) textul e sigur (isSafeToType).
+// Altfel → regulile vechi (typeIntoOutcome: la prompt tastează, altfel „Type into terminal" + Copy).
+// Împachetat ca un paste (typeIntoConfirmed): sub tmux mereu (tmux scoate marcajele dacă panoul nu
+// le-a cerut — la fel ca un paste de text), altfel după modul xterm. NICIODATĂ Enter. Calea pleacă
+// DOAR în panoul în care s-a lipit, nu şi în panourile unui broadcast: fişierul există numai pe
+// hostul acestui panou.
+export const PASTE_CONTEXT_MS = 30_000
+export interface PasteContext {
+  sid: string
+  /** ţinta înregistrată la paste — o remontare (alt obiect) = alt context */
+  target: InsertTarget
+  /** momentul gestului (ms, Date.now()) */
+  at: number
+  /** inputSeq() la paste; actualizat după fiecare cale tastată din ACELAŞI paste (mai multe fişiere) */
+  seq: number
+}
+/** Contextul unui paste/drop pe terminalul `sid`, capturat în handler-ul evenimentului (înainte de
+    orice await). undefined = fără ţintă (atunci uploadul urmează regulile vechi). */
+export function capturePasteContext(sid: string, now = Date.now()): PasteContext | undefined {
+  const t = targets.get(sid)
+  if (!t) return undefined
+  let seq = 0
+  try { seq = t.inputSeq?.() ?? 0 } catch { return undefined }
+  return { sid, target: t, at: now, seq }
+}
+/** de ce contextul unui paste nu mai e valabil (null = valabil) — pur, pentru teste şi diagnoză */
+export function pasteContextStale(ctx: PasteContext, now = Date.now()): 'target' | 'inactive' | 'timeout' | 'input' | null {
+  const t = targets.get(ctx.sid)
+  if (!t || t !== ctx.target) return 'target'
+  try { if (t.isActive?.() !== true) return 'inactive' } catch { return 'inactive' }
+  if (!(now - ctx.at >= 0 && now - ctx.at <= PASTE_CONTEXT_MS)) return 'timeout'
+  try { if (t.inputSeq?.() !== ctx.seq) return 'input' } catch { return 'input' }
+  return null
+}
+/** Tastează `text` ca un PASTE dacă contextul gestului e acelaşi (vezi mai sus), altfel regulile
+    vechi (typeIntoOutcome). */
+export function typeIntoPasted(ctx: PasteContext, text: string, now = Date.now()): TypeOutcome {
+  if (!isSafeToType(text)) return 'unsafe'
+  if (pasteContextStale(ctx, now) !== null) return typeIntoOutcome(ctx.sid, text)
+  const r = typeIntoConfirmed(ctx.sid, text)
+  // calea tocmai tastată e a NOASTRĂ: următorul fişier din acelaşi paste rămâne în context
+  if (r === 'typed') { try { ctx.seq = ctx.target.inputSeq?.() ?? ctx.seq } catch { /* rămâne vechiul */ } }
+  return r
+}
+/** cheia i18n care explică de ce un paste n-a mai fost tastat automat */
+export const pasteStaleKey = (why: NonNullable<ReturnType<typeof pasteContextStale>>): string => `transfers.pasteStale.${why}`
+/** varianta pentru o cale: `<cale citată> ` (spaţiu, FĂRĂ Enter) */
+export const insertPathPasted = (ctx: PasteContext, path: string, now = Date.now()): TypeOutcome =>
+  typeIntoPasted(ctx, shellQuote(path) + ' ', now)
 
 /** cheia mesajului pentru o cale NETASTATĂ, după motiv (review hotfix 3.6.13, L3) */
 export function notTypedReasonKey(o: TypeOutcome): string {

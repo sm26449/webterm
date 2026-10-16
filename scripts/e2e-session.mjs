@@ -1405,11 +1405,11 @@ try {
   await page.keyboard.type('&& echo PASTE_OK\n')
   check('fişierul lipit există pe host (4 octeţi)', await waitScreen('PASTE_OK', 8000))
 
-  // Hotfix 3.6.13: un program rulează în prim-plan (aici `cat`; în viaţa reală Claude Code) şi pagina
-  // NU a văzut DECSET 2004 — sub tmux el vine doar la attach-ul clientului tmux, deci o pagină
-  // reîncărcată nu-l are. Simulăm asta local (xterm: ?2004l). Calea NU se tastează singură (garda
-  // 3.6.9 L2 rămâne), dar rândul din Transferuri oferă „Type into terminal" + explicaţia; click-ul
-  // explicit o tastează (bracketed paste, fără Enter) — `cat` o afişează prin ecoul tty-ului.
+  // 3.6.16: un Ctrl+V de captură ESTE un paste în ACEL terminal (ca un paste de text, pe care xterm îl
+  // trimite oricare program ar rula). Un program rulează în prim-plan (aici `cat`; în viaţa reală
+  // Claude Code) şi pagina NU a văzut DECSET 2004 — sub tmux el vine doar la attach, deci o pagină
+  // reîncărcată nu-l are (simulat local: ?2004l). Calea se tastează IMEDIAT după upload, o singură
+  // dată, fără Enter (cu un \r, `cat` ar re-afişa linia: calea de DOUĂ ori pe ecran).
   const hadBracketed = await page.evaluate(() => {
     const term = window.__wtTerms?.get(location.hash.replace('#/s/', ''))
     const was = term?.modes?.bracketedPasteMode === true
@@ -1419,33 +1419,120 @@ try {
   await activePane.locator('.xterm-screen').click()
   await page.keyboard.type('cat\n')
   await page.waitForTimeout(800)
-  await activePane.locator('.xterm-helper-textarea').evaluate((ta) => {
+  const transferShots = async (tag) => {
+    const card = page.locator('[data-testid="wt-transfers-card"]')
+    const vp = page.viewportSize()
+    const setTheme = (v) => page.evaluate(([th, fam, mode]) => {
+      const r = document.documentElement
+      const prev = [r.dataset.theme, r.dataset.family, r.dataset.mode]
+      r.dataset.theme = th; r.dataset.family = fam; r.dataset.mode = mode
+      return prev
+    }, v)
+    try {
+      await page.locator('[data-testid="wt-job-type-anyway"]').last().scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => {})
+      await page.screenshot({ path: `/out/transfers-${tag}-desktop.png` })
+      await card.screenshot({ path: `/out/transfers-${tag}-card-dark.png` })
+      const prev = await setTheme(['macos', 'webterm', 'light'])
+      await card.screenshot({ path: `/out/transfers-${tag}-card-light.png` })
+      await setTheme(['win-light', 'win', 'light'])
+      await card.screenshot({ path: `/out/transfers-${tag}-card-win-light.png` })
+      await setTheme(['mac-dark', 'mac', 'dark'])
+      await card.screenshot({ path: `/out/transfers-${tag}-card-mac-dark.png` })
+      await setTheme(prev)
+      await page.setViewportSize({ width: 390, height: 844 })
+      await page.waitForTimeout(400)
+      await page.screenshot({ path: `/out/transfers-${tag}-phone.png` })
+      await page.setViewportSize({ width: 320, height: 640 })
+      await page.waitForTimeout(400)
+      await page.screenshot({ path: `/out/transfers-${tag}-phone320.png` })
+    } catch { /* capturile nu sunt o verificare */ } finally {
+      if (vp) await page.setViewportSize(vp).catch(() => {})
+      await page.waitForTimeout(400)
+    }
+  }
+  const pasteImage = () => activePane.locator('.xterm-helper-textarea').evaluate((ta) => {
     const dt = new DataTransfer()
     dt.items.add(new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], 'image.png', { type: 'image/png' }))
     ta.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }))
   })
+  const inboxJobs = () => page.evaluate(() => [...(window.__wtTransfers?.store?.snapshot?.()?.values?.() ?? [])]
+    .filter((j) => String(j.dest).includes('/.webterm/inbox/')).map((j) => ({ id: j.id, dest: j.dest, state: j.state,
+      insertOutcome: j.insertOutcome ?? null, pasteStale: j.pasteStale ?? null })))
+  const countOnScreen = async (needle) => (needle ? (await screenText()).split(needle).length - 1 : 0)
+  const seenBefore = new Set((await inboxJobs()).map((j) => j.id))
+  await pasteImage()
+  const pjob = await pollValue(async () => (await inboxJobs()).find((j) => !seenBefore.has(j.id) && j.state === 'done') ?? null,
+    (v) => !!v, 20000)
+  const pName = pjob ? String(pjob.dest).split('/').pop() : ''
+  const pTyped = !!pName && await waitScreen(pName, 8000)
+  await page.waitForTimeout(1200)
+  const pSeen = await countOnScreen(pName)
+  check('paste de captură cu un program în prim-plan (3.6.16): calea se tastează imediat, o singură dată, fără Enter',
+    pTyped && pSeen === 1 && pjob?.insertOutcome === 'typed', JSON.stringify({ pjob, pSeen }))
+  for (const j of await inboxJobs()) seenBefore.add(j.id)
+
+  // Contextul paste-ului s-a schimbat: o tastă trimisă terminalului cât urca fişierul → calea NU se
+  // mai tastează singură (garda 3.6.9 L2 rămâne), rândul oferă „Type into terminal" + explicaţia (de
+  // ce), iar click-ul explicit o tastează (bracketed paste, fără Enter). Upload-ul e ţinut 2,5 s.
+  await activePane.locator('.xterm-screen').click()
+  await page.keyboard.press('Control+u')          // linia lui `cat` goală, ca numărătoarea să fie curată
+  await page.waitForTimeout(1100)                  // alt nume în inbox (timestamp la secundă)
+  await page.route(UP_RE, async (route) => {
+    await new Promise((r) => setTimeout(r, 2500))
+    try { await route.continue() } catch { /* anulat */ }
+  })
+  await pasteImage()
+  await page.waitForTimeout(300)
+  await page.keyboard.type('x')                    // omul continuă să tasteze: alt context
   const offerBtn = page.locator('[data-testid="wt-job-type-anyway"]').last()
   const offered = await offerBtn.waitFor({ state: 'visible', timeout: 20000 }).then(() => true, () => false)
-  const npJob = await page.evaluate(() => [...(window.__wtTransfers?.store?.snapshot?.()?.values?.() ?? [])]
-    .find((j) => j.insertOutcome === 'notPrompt') ?? null)
+  await page.unroute(UP_RE)
+  const npJob = (await inboxJobs()).find((j) => !seenBefore.has(j.id) && j.insertOutcome === 'notPrompt') ?? null
   const npName = npJob ? String(npJob.dest).split('/').pop() : ''
   const notAuto = !!npName && !(await screenText()).includes(npName)
-  const hintOk = offered && await page.locator('[data-testid="wt-job-type-hint"]').last().isVisible().catch(() => false)
-  check('program în prim-plan: calea NU se tastează singură; rândul oferă „Type into terminal" + explicaţia',
-    offered && notAuto && hintOk, JSON.stringify({ offered, notAuto, hintOk, npJob }))
+  const hintTxt = offered ? await page.locator('[data-testid="wt-job-type-hint"]').last().textContent().catch(() => '') : ''
+  const hintOk = /you typed in this terminal|ai tastat/i.test(hintTxt ?? '')
+  // capturi ale rândului cu cele mai multe acţiuni (Type into terminal + Copy path + Dismiss + explicaţia),
+  // pentru recenzia layout-ului (3.6.16: nimic tăiat) — desktop, teme, telefon; fără /out → sărite tăcut
+  if (offered) await transferShots('type-anyway')
+  check('tastă între paste şi final (3.6.16): calea NU se tastează singură; rândul oferă „Type into terminal" + de ce',
+    offered && notAuto && hintOk && npJob?.pasteStale === 'input', JSON.stringify({ offered, notAuto, hintTxt, npJob }))
   if (offered) await offerBtn.click()
-  // FĂRĂ Enter, dovedit: cu un \r, `cat` ar fi re-afişat linia (calea de DOUĂ ori pe ecran)
   const typedOnce = offered && !!npName && await waitScreen(npName, 8000)
   await page.waitForTimeout(1200)
-  const seen = npName ? (await screenText()).split(npName).length - 1 : 0
+  const seen = await countOnScreen(npName)
   check('„Type into terminal": click-ul explicit tastează calea în program, o singură dată (fără Enter)',
     typedOnce && seen === 1, `apariţii=${seen}`)
+
+  // Un flux FĂRĂ paste (upload din panoul de fişiere + „Insert path" din Transferuri) păstrează
+  // regulile vechi: cu un program în prim-plan nu tastează nimic, oferă „Type into terminal".
+  await activePane.locator('.xterm-screen').click()
+  await page.keyboard.press('Control+u')
+  const NPNAME = `wt_np_${RUN}.txt`
+  await gotoDir(filePanel, '/tmp')
+  await filePanel.locator('input[type=file]').first().setInputFiles({ name: NPNAME, mimeType: 'text/plain', buffer: Buffer.from('np') })
+  const npDone = await pollValue(() => page.evaluate((n) => [...(window.__wtTransfers?.store?.snapshot?.()?.values?.() ?? [])]
+    .find((j) => j.name === n && j.state === 'done') ?? null, NPNAME), (v) => !!v, 15000)
+  const npPill = page.locator('[data-testid="wt-transfers-pill"]')
+  if (await npPill.isVisible().catch(() => false)) await npPill.click()
+  const insBtn = page.getByRole('button', { name: `Insert path ${NPNAME}`, exact: true })
+  const insVisible = await insBtn.waitFor({ state: 'visible', timeout: 8000 }).then(() => true, () => false)
+  if (insVisible) await insBtn.click()
+  await page.waitForTimeout(800)
+  if (insVisible) await transferShots('insert-path')
+  const npState = await page.evaluate((n) => [...(window.__wtTransfers?.store?.snapshot?.()?.values?.() ?? [])]
+    .find((j) => j.name === n) ?? null, NPNAME)
+  const npNotTyped = !(await screenText()).includes(`/tmp/${NPNAME}`)
+  check('flux fără paste („Insert path") cu un program în prim-plan: NU tastează, oferă „Type into terminal"',
+    !!npDone && insVisible && npNotTyped && npState?.insertOutcome === 'notPrompt'
+      && await page.locator('[data-testid="wt-job-type-anyway"]').last().isVisible().catch(() => false),
+    JSON.stringify({ npDone: !!npDone, insVisible, npNotTyped, npState }))
   await activePane.locator('.xterm-screen').click()
   await page.keyboard.press('Control+c')
-  await page.evaluate(({ was, id }) => {
+  await page.evaluate(({ was, ids }) => {
     if (was) window.__wtTerms?.get(location.hash.replace('#/s/', ''))?.write('\x1b[?2004h')
-    if (id) window.__wtTransfers?.store?.remove?.(id)
-  }, { was: hadBracketed, id: npJob?.id ?? null })
+    for (const id of ids) window.__wtTransfers?.store?.remove?.(id)
+  }, { was: hadBracketed, ids: [pjob?.id, npJob?.id, npState?.id].filter(Boolean) })
   await page.waitForTimeout(500)
 
   // ── 3.6.9: o scriere refuzată de host spune DE CE, cu dosarul — şi imediat ──

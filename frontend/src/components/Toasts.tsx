@@ -68,7 +68,11 @@ export default function Toasts(props: {
 
   return (
     <div
-      className="pointer-events-none fixed bottom-4 right-4 z-50 flex max-w-sm flex-col gap-2 pb-[env(safe-area-inset-bottom)]"
+      // deasupra widgetului de transferuri (acelaşi colţ): --wt-transfers-top = înălţimea lui de la
+      // marginea de jos a ecranului, publicată de TransfersWidget; fără widget, 1rem ca înainte. Plafon
+      // 45vh: peste un card foarte înalt toast-ul n-are voie să iasă din ecran pe sus
+      className="pointer-events-none fixed right-4 z-50 flex max-w-sm flex-col gap-2 pb-[env(safe-area-inset-bottom)]"
+      style={{ bottom: 'min(calc(var(--wt-transfers-top, 0px) + 1rem), 45vh)' }}
       onMouseEnter={() => setHeld(true)}
       onMouseLeave={() => setHeld(false)}
       onFocusCapture={() => setHeld(true)}

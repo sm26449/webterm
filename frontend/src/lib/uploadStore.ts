@@ -51,6 +51,9 @@ export interface UploadJob {
   /** de ce n-a tastat (hotfix 3.6.13): 'notPrompt' = rulează un program în prim-plan — rândul oferă
       „Tastează în terminal" (click explicit, vezi transfers.ts typeIntoConfirmed) lângă „Copy path" */
   insertOutcome?: 'typed' | 'noTarget' | 'unsafe' | 'notPrompt' | 'refused'
+  /** 3.6.16: upload pornit de un paste/drop pe terminal a cărui cale NU s-a tastat automat fiindcă
+      s-a schimbat contextul gestului (transfers.ts pasteContextStale) — rândul spune de ce */
+  pasteStale?: 'target' | 'inactive' | 'timeout' | 'input'
   /** `archive` = folder descărcat ca .tgz făcut pe host (3.5.5): mărimea e NECUNOSCUTĂ dinainte
       (`size` 0 → rândul arată octeţii primiţi, nu un %), iar o arhivă generată din mers nu se
       poate relua — fără pauză; Retry o reporneşte de la zero. */

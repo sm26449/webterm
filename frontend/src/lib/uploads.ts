@@ -18,7 +18,7 @@
 import { api, ApiError, apiErrorFrom, errText, withStepup } from './api'
 import { tStatic } from './i18n'
 import { lsGet, lsRemove, lsSet } from './storage'
-import { insertPathOutcome } from './transfers'
+import { insertPathOutcome, insertPathPasted, pasteContextStale, type PasteContext } from './transfers'
 import { UploadJob, isActive, uploadStore } from './uploadStore'
 
 // ── parametri ─────────────────────────────────────────────────────────────────────────────
@@ -261,6 +261,9 @@ interface Ctl {
       `sid`, dacă acel tab mai e deschis — vezi lib/transfers.ts */
   then?: 'insert-path'
   sid?: string
+  /** 3.6.16: upload pornit de un paste / drop pe terminal — calea se tastează ca un paste cât
+      contextul gestului e acelaşi (transfers.ts typeIntoPasted); altfel regulile vechi */
+  pasteCtx?: PasteContext
 }
 const ctls = new Map<string, Ctl>()
 
@@ -551,9 +554,15 @@ async function runLoop(c: Ctl): Promise<void> {
     const crcQ = doCrc ? `&crc32=${crc >>> 0}` : ''
     await withStepup(hid, () => api(`/api/hosts/${hid}/fs/upload/commit?${q}${crcQ}`, { method: 'POST' }))
     if (c.lsKey) lsRemove(c.lsKey)
-    const insertOutcome = c.then === 'insert-path' ? insertPathOutcome(c.sid, c.dest) : undefined
+    // paste / drop pe terminal (3.6.16): tastat ca un paste cât contextul gestului e acelaşi; altfel (şi
+    // pentru orice alt upload cu `then`) regulile vechi — vezi lib/transfers.ts typeIntoPasted
+    const pctx = c.then === 'insert-path' && c.pasteCtx && c.pasteCtx.sid === c.sid ? c.pasteCtx : undefined
+    const stale = pctx ? pasteContextStale(pctx) : null
+    const insertOutcome = c.then !== 'insert-path' ? undefined
+      : pctx ? insertPathPasted(pctx, c.dest) : insertPathOutcome(c.sid, c.dest)
     const inserted = insertOutcome === undefined ? undefined : insertOutcome === 'typed'
-    publish(c, { pos: file.size, pct: 100, bytesPerSec: 0, etaSec: 0, state: 'done', inserted, insertOutcome })
+    const pasteStale = insertOutcome === 'notPrompt' && stale ? stale : undefined
+    publish(c, { pos: file.size, pct: 100, bytesPerSec: 0, etaSec: 0, state: 'done', inserted, insertOutcome, pasteStale })
     ctls.delete(c.id)        // eliberăm File-ul; rândul rămâne în store până la dismiss/expirare
     if (inserted !== false) lingerDone(c.id)
   } catch (e) {
@@ -581,6 +590,8 @@ export interface StartUploadOpts {
   /** după commit: tastează calea în terminalul `sid` (drop pe terminal / paste de imagine) */
   then?: 'insert-path'
   sid?: string
+  /** contextul paste-ului / drop-ului pe terminal (capturePasteContext) — vezi Ctl.pasteCtx */
+  pasteCtx?: PasteContext
 }
 
 /** Un upload (cu `name` = eticheta relativă din drop). Dacă ACELAŞI fişier spre aceeaşi ţintă e
@@ -600,13 +611,13 @@ export async function startUpload(o: StartUploadOpts): Promise<string> {
   if (!c) {
     c = { id, hostId: o.hostId, hostName: o.hostName, dest: o.dest, name: o.name ?? o.file.name, lsKey, owner,
           file: o.file, xhrs: new Set(), cancelled: false, paused: false, running: false, authLost: false,
-          size: o.file.size, lastModified: o.file.lastModified, then: o.then, sid: o.sid }
+          size: o.file.size, lastModified: o.file.lastModified, then: o.then, sid: o.sid, pasteCtx: o.pasteCtx }
     ctls.set(id, c)
   } else {
     c.file = o.file                                // orfan sau err: acum avem din nou octeţii
     c.hostName = o.hostName || c.hostName
     if (o.name) c.name = o.name
-    if (o.then) { c.then = o.then; c.sid = o.sid }
+    if (o.then) { c.then = o.then; c.sid = o.sid; c.pasteCtx = o.pasteCtx }
   }
   // rândul „orphan" (dacă exista) devine rândul viu al aceluiaşi job — acelaşi id, deci acelaşi rând
   uploadStore.remove(id)
