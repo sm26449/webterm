@@ -27,3 +27,16 @@ export function modeRestoreSeq(m: IModes): string {
   }
   return s
 }
+
+/** Fluxul acestui terminal trece (sau poate trece) printr-un client tmux: agent cu backend tmux, sau
+    SSH / SSH prin bastion (comanda sesiunii e `tmux new -A … || exec $SHELL -l`). Fără host cunoscut: da (fail-closed).
+    tmux trimite clientului `ESC[?2004h` O DATĂ, la attach, şi nu-i transmite comutările panoului
+    (verificat pe tmux 3.4) — deci `bracketedPasteMode` din xterm nu spune nimic despre programul din
+    panou: nici că un shell ar trata un TAB lipit ca text, nici că în prim-plan aşteaptă un prompt. */
+export function pasteModeUntrusted(host?: { backend?: string | null; connection_type?: string | null } | null): boolean {
+  return !host || host.backend === 'tmux' || host.connection_type === 'ssh' || host.connection_type === 'ssh-jump'
+}
+
+/** bracketed paste pe care ne putem baza (guardrail: TAB într-un paste = text): modul cerut ŞI un
+    flux fără tmux. Sub tmux → false: un TAB lipit devine „nu pot verifica" (fail-closed). */
+export const trustedBracketed = (untrusted: boolean, mode: boolean): boolean => !untrusted && mode

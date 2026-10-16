@@ -1265,8 +1265,12 @@ try {
   check('program în prim-plan: calea NU se tastează singură; rândul oferă „Type into terminal" + explicaţia',
     offered && notAuto && hintOk, JSON.stringify({ offered, notAuto, hintOk, npJob }))
   if (offered) await offerBtn.click()
-  check('„Type into terminal": click-ul explicit tastează calea în program (fără Enter)',
-    offered && !!npName && await waitScreen(npName, 8000))
+  // FĂRĂ Enter, dovedit: cu un \r, `cat` ar fi re-afişat linia (calea de DOUĂ ori pe ecran)
+  const typedOnce = offered && !!npName && await waitScreen(npName, 8000)
+  await page.waitForTimeout(1200)
+  const seen = npName ? (await screenText()).split(npName).length - 1 : 0
+  check('„Type into terminal": click-ul explicit tastează calea în program, o singură dată (fără Enter)',
+    typedOnce && seen === 1, `apariţii=${seen}`)
   await activePane.locator('.xterm-screen').click()
   await page.keyboard.press('Control+c')
   await page.evaluate(({ was, id }) => {

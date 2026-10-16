@@ -162,8 +162,26 @@ export interface InsertTarget {
   bracketedPaste: () => boolean
   /** shell integration (OSC 133) spune că shell-ul aşteaptă la prompt (CommandTracker.atPrompt) */
   atPrompt?: () => boolean
+  /** fluxul trece printr-un client tmux (termmodes.ts pasteModeUntrusted): `bracketedPaste()` nu
+      spune nimic despre programul din panou (tmux trimite ?2004h doar la attach). Atunci DOAR
+      atPrompt autorizează tastarea automată, iar textul pleacă mereu împachetat — tmux scoate
+      marcajele dacă panoul nu le-a cerut. Excepţie (aruncă) → tratat ca tmux (fail-closed). */
+  viaTmux?: () => boolean
+  /** se poate tasta acum (nu e doar-vizualizare / mut)? — doar pentru a ascunde oferta din UI;
+      `send` rămâne poarta reală */
+  canType?: () => boolean
 }
 const targets = new Map<string, InsertTarget>()
+/** fluxul ţintei trece prin tmux? (excepţie → da) */
+function viaTmux(t: InsertTarget): boolean {
+  try { return t.viaTmux?.() === true } catch { return true }
+}
+/** poate oferi UI-ul tastarea în `sid`? (ţintă înscrisă şi nu doar-vizualizare / mut) */
+export function canTypeInto(sid: string | undefined): boolean {
+  const t = sid ? targets.get(sid) : undefined
+  if (!t) return false
+  try { return t.canType?.() !== false } catch { return false }
+}
 export function registerInsertTarget(sid: string, target: InsertTarget | null): void {
   if (target) targets.set(sid, target); else targets.delete(sid)
 }
@@ -185,10 +203,11 @@ const PASTE_END = '\x1b[201~'
     Doar la un PROMPT (3.6.9 review L2): ca taste simple, într-un program în mod raw (mc, vim,
     less, htop) fiecare literă ar fi o comandă a lui. Ştim că suntem la un prompt dacă:
       - programul din prim-plan a cerut bracketed paste (DECSET 2004 — bash, zsh, fish, readline
-        o fac implicit): atunci tastăm ÎMPACHETAT în ESC[200~ … ESC[201~;
-      - sau shell integration (OSC 133) arată shell-ul la prompt, fără comandă pornită (sub tmux
-        DECSET 2004 nu ajunge la xterm, marcajele OSC 133 da): atunci tastăm textul simplu, ca o
-        tastare la prompt.
+        o fac implicit): atunci tastăm ÎMPACHETAT în ESC[200~ … ESC[201~. NU şi sub tmux (viaTmux):
+        tmux trimite ?2004h clientului o dată, la attach, şi nu urmăreşte panoul — modul nu dovedeşte
+        nimic acolo;
+      - sau shell integration (OSC 133) arată shell-ul la prompt, fără comandă pornită: atunci tastăm
+        textul simplu — sub tmux împachetat (tmux scoate marcajele dacă panoul nu le-a cerut).
     Altfel (program necunoscut în prim-plan) → 'notPrompt' şi apelantul oferă „Copy". Textul nu are
     caractere de control (deci nici ESC): nu poate închide parantezele mai devreme. */
 export function typeIntoOutcome(sid: string | undefined, text: string): TypeOutcome {
@@ -197,10 +216,13 @@ export function typeIntoOutcome(sid: string | undefined, text: string): TypeOutc
   if (!isSafeToType(text)) return 'unsafe'
   let bracketed = false
   let prompt = false
-  try { bracketed = t.bracketedPaste() === true } catch { bracketed = false }
+  const tmux = viaTmux(t)
+  // sub tmux modul e lipicios (?2004h de la attach), deci nu dovedeşte un prompt — altfel tastam în
+  // mc/vim/less/htop pe o pagină care a văzut attach-ul (review hotfix 3.6.13, M2)
+  try { bracketed = !tmux && t.bracketedPaste() === true } catch { bracketed = false }
   try { prompt = t.atPrompt?.() === true } catch { prompt = false }
   if (!bracketed && !prompt) return 'notPrompt'
-  return t.send(bracketed ? PASTE_START + text + PASTE_END : text) === false ? 'refused' : 'typed'
+  return t.send(bracketed || tmux ? PASTE_START + text + PASTE_END : text) === false ? 'refused' : 'typed'
 }
 export const typeInto = (sid: string | undefined, text: string): boolean => typeIntoOutcome(sid, text) === 'typed'
 /** tastează `<cale citată> ` (spaţiu, FĂRĂ Enter) în terminalul `sid` — cu rezultatul (vezi typeIntoOutcome) */
@@ -215,15 +237,28 @@ export function insertPathInto(sid: string | undefined, path: string): boolean {
     consimţământul — un program rulează în prim-plan (Claude Code, un REPL… sau mc/vim), iar noi
     nu ştim care; după o reataşare sub tmux nici DECSET 2004 nu se vede (tmux îl trimite clientului
     doar la attach). Deci NICIODATĂ automat, doar din butonul care spune asta. Aceleaşi porţi ca
-    typeIntoOutcome (fără ţintă, text nesigur, doar-citire / mut / socket închis), MEREU împachetat
-    în ESC[200~ … ESC[201~: un program care a cerut bracketed paste (CLI-uri, shell-uri, editoare
-    moderne) primeşte un paste, nu taste; tmux înlătură marcajele dacă panoul nu le-a cerut. Fără
+    typeIntoOutcome (fără ţintă, text nesigur, doar-citire / mut / socket închis), împachetat în
+    ESC[200~ … ESC[201~ sub tmux (un program care a cerut bracketed paste primeşte un paste, nu taste;
+    tmux înlătură marcajele dacă panoul nu le-a cerut) sau când modul e cerut, altfel text simplu. Fără
     Enter; textul nu are ESC, deci nu poate închide parantezele mai devreme. Nu întoarce 'notPrompt'. */
 export function typeIntoConfirmed(sid: string | undefined, text: string): TypeOutcome {
   const t = sid ? targets.get(sid) : undefined
   if (!t) return 'noTarget'
   if (!isSafeToType(text)) return 'unsafe'
-  return t.send(PASTE_START + text + PASTE_END) === false ? 'refused' : 'typed'
+  // fără tmux modul xterm e exact: programul NU a cerut bracketed paste (altfel nu ajungeam aici), deci
+  // marcajele ar fi gunoi (`^[[200~` în cat/read, `[200~` executat de vim în normal mode) — text simplu.
+  // Sub tmux: mereu împachetat, tmux le scoate dacă panoul nu le-a cerut (review hotfix 3.6.13, L1)
+  let wrap = viaTmux(t)
+  if (!wrap) { try { wrap = t.bracketedPaste() === true } catch { wrap = false } }
+  return t.send(wrap ? PASTE_START + text + PASTE_END : text) === false ? 'refused' : 'typed'
+}
+
+/** cheia mesajului pentru o cale NETASTATĂ, după motiv (review hotfix 3.6.13, L3) */
+export function notTypedReasonKey(o: TypeOutcome): string {
+  if (o === 'unsafe') return 'transfers.whyUnsafe'
+  if (o === 'noTarget') return 'transfers.whyNoTarget'
+  if (o === 'refused') return 'transfers.whyRefused'
+  return 'transfers.whyNotPrompt'
 }
 /** varianta pentru o cale: `<cale citată> ` (spaţiu, FĂRĂ Enter) — vezi typeIntoConfirmed */
 export const insertPathConfirmed = (sid: string | undefined, path: string): TypeOutcome =>

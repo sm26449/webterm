@@ -175,7 +175,7 @@ Press `?` for the cheatsheet.
   path typed for you — AI CLIs (Claude Code, aider, …) cannot read your browser clipboard, so
   WebTerm materialises the file on the host and hands them the path. When a program is running in
   that terminal (e.g. Claude Code after a reload), the path is not typed by itself — the Transfers
-  row offers **Type into terminal** (an explicit click, typed as a bracketed paste, no Enter) next
+  row offers **Type into terminal** (an explicit click, no Enter) next
   to **Copy path**, so letters never land in mc or vim unasked. Inbox retention is a
   setting (7 days by default). Born from a real incident (a 17 GB drop that
   silently stopped at chunk 1579 while gateway and agent were healthy): a byte-level

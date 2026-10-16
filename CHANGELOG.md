@@ -11,19 +11,33 @@ back.
 
 ### Fixed
 - **A screenshot pasted for a CLI such as Claude Code gets its path into the prompt again — with
-  one explicit click.** Why: with a program running in the foreground, the path is typed only
-  where it is known to be safe (a shell prompt, or a program that asked for bracketed paste), so
-  letters never become commands in mc, vim or less. Under tmux the bracketed-paste mode reaches
-  the browser only when tmux's client attaches, so a reloaded or reattached page never sees it;
-  and since 3.6.13 the gateway also tells the browser after a reattach that a command is running.
-  The path was then silently not typed — while the toast still said it had been added to the
-  prompt. Now the toast says it was not typed, the Transfers widget opens, and the row offers
-  **Type into terminal** next to **Copy path**, with the line "A program is running in this
-  terminal — type the path only if it expects text (e.g. a CLI prompt)". The click types the
-  quoted path and a space (no Enter) as a bracketed paste, through the same gates as a keystroke
-  (read-only, muted or disconnected terminals and unsafe text are still refused). Nothing is ever
-  typed into an unknown program automatically, and the move-as-root `sudo` command stays
-  copy-only. Frontend only.
+  one explicit click.** Why: the path is typed by itself only where it is known to be safe (a
+  shell prompt), so letters never become commands in mc, vim or less. Under tmux the browser cannot
+  see that from the bracketed-paste mode: tmux sends `ESC[?2004h` to its client once, at attach,
+  and never forwards the pane's own switches (verified on tmux 3.4), so a reloaded or reattached
+  page never sees it; and since 3.6.13 the gateway also tells the browser after a reattach that a
+  command is running. The path was then silently not typed — while the toast still said it had
+  been added to the prompt. Now the toast says it was not typed and why (no prompt visible,
+  characters that cannot be typed, terminal closed, or read-only / muted / disconnected / waiting
+  for a guardrail decision), the Transfers widget opens, and the row offers **Type into terminal**
+  next to **Copy path**, with the line "WebTerm can't tell whether a shell prompt is waiting — type
+  the path only if the program expects text (e.g. a CLI prompt)". The click types the quoted path
+  and a space (no Enter) through the same gates as a keystroke — as a bracketed paste under tmux
+  (tmux strips the markers when the program did not ask for them), as plain text elsewhere, where
+  the mode is exact. It is not offered in a view-only session, and the row then expires like any
+  finished upload. Nothing is typed into an unknown program automatically, and the move-as-root
+  `sudo` command stays copy-only.
+- **Under tmux, the sticky bracketed-paste mode no longer opens two gates.** Why (same tmux
+  finding, independent review): a page that had seen tmux attach had the mode "on" for good, so (1)
+  a pasted or dropped file's path — and the move-as-root `sudo` command — was typed automatically
+  into whatever ran in the pane, mc, vim, less or htop included; and (2) the command guardrail
+  treated a `Tab` inside a paste as literal text even when the pane's shell does not do bracketed
+  paste (bash ≤ 5.0, busybox sh, zsh without `zle_bracketed_paste`, an old ssh host), where it is
+  completion — `rm -rf /tm⇥…` was judged as typed while the shell completed it. In panes behind a
+  tmux client (agent tmux backend, SSH sessions) only shell integration (OSC 133) now authorises
+  automatic typing, and a `Tab` inside a paste asks "Can't check this input" (fail closed). A path
+  is also no longer typed while the guardrail is holding input (echo wait or its dialog).
+  Frontend only.
 
 ## [3.6.13] — 2026-10-15 · agent (58)
 

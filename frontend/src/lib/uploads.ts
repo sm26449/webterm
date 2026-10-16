@@ -287,6 +287,14 @@ function writeMeta(c: Ctl, pos: number) {
   lsSet(c.lsKey, JSON.stringify(m))
 }
 
+/** un rând terminat dispare singur după DONE_LINGER_MS (dacă e tot `done`) — şi după un
+    „Type into terminal" reuşit (review hotfix 3.6.13, L4) */
+export function lingerDone(id: string): void {
+  window.setTimeout(() => {
+    if (uploadStore.get(id)?.state === 'done') uploadStore.remove(id)
+  }, DONE_LINGER_MS)
+}
+
 function publish(c: Ctl, p: Partial<UploadJob>) {
   const cur = uploadStore.get(c.id)
   if (cur) { uploadStore.patch(c.id, p); return }
@@ -547,11 +555,7 @@ async function runLoop(c: Ctl): Promise<void> {
     const inserted = insertOutcome === undefined ? undefined : insertOutcome === 'typed'
     publish(c, { pos: file.size, pct: 100, bytesPerSec: 0, etaSec: 0, state: 'done', inserted, insertOutcome })
     ctls.delete(c.id)        // eliberăm File-ul; rândul rămâne în store până la dismiss/expirare
-    if (inserted !== false) {
-      window.setTimeout(() => {
-        if (uploadStore.get(c.id)?.state === 'done') uploadStore.remove(c.id)
-      }, DONE_LINGER_MS)
-    }
+    if (inserted !== false) lingerDone(c.id)
   } catch (e) {
     if (c.cancelled) return
     if (e instanceof PausedSignal || c.paused) {

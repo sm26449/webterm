@@ -4,7 +4,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { IDisposable, Terminal } from '@xterm/xterm'
-import { modeRestoreSeq } from '../lib/termmodes'
+import { modeRestoreSeq, pasteModeUntrusted, trustedBracketed } from '../lib/termmodes'
 import { errText, api, CommandGuard, CommandRule, Host, Session, withStepup } from '../lib/api'
 import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
 import { Command, CommandTracker, cmdDuration, matchCommandRule, screenResetScan, splitAfterMarks } from '../lib/commands'
@@ -47,7 +47,7 @@ import { useFocusTrap } from '../lib/useFocusTrap'
 import { dismissUpload, startUpload } from '../lib/uploads'
 import { isWriteDenied, uploadAndMoveAsRoot } from '../lib/rootmove'
 import { uploadStore } from '../lib/uploadStore'
-import { ensureInbox, inboxName, isGenericName, markPasteHintSeen, pasteDest, pasteHintSeen, pasteSubject, pasteSubjectText, pasteToastKey, pruneInbox, registerInsertTarget, resolveHome } from '../lib/transfers'
+import { ensureInbox, inboxName, isGenericName, markPasteHintSeen, notTypedReasonKey, pasteDest, pasteHintSeen, pasteSubject, pasteSubjectText, pasteToastKey, pruneInbox, registerInsertTarget, resolveHome } from '../lib/transfers'
 import type { PasteDest } from '../lib/transfers'
 import { baseName, looksLikePath, resolveTermPath } from '../lib/termpath'
 import CoachTip from './CoachTip'
@@ -358,6 +358,12 @@ export default function SessionView(props: {
   const trackerRef = useRef<CommandTracker>()
   // ultimul rând al ecranului poate fi bara de stare tmux (CommandTracker.pendingBelow)
   if (trackerRef.current) trackerRef.current.tmuxBacked = props.host?.backend === 'tmux'
+  // sub tmux (agent tmux / SSH) `bracketedPasteMode` e lipicios — nu-l credem (termmodes.ts, hotfix 3.6.13)
+  const pasteUntrustedRef = useRef(true)
+  pasteUntrustedRef.current = pasteModeUntrusted(props.host)
+  // dialogul guardrail-ului deschis: inserarea unei căi aşteaptă (review hotfix 3.6.13, L2)
+  const cmdConfirmOpenRef = useRef(false)
+  cmdConfirmOpenRef.current = !!cmdConfirm
   const cwdRef = useRef<string | null>(null)   // cwd curent, pt. raportarea în istoric (fără stale closure)
   const decorationsRef = useRef<IDisposable[]>([])
   const [commands, setCommands] = useState<Command[]>([])
@@ -421,8 +427,9 @@ export default function SessionView(props: {
     if (failed.length) { notifyError(t('transfers.uploadFailedTitle'), failed[0]?.error || t('files.genericErr')); return }
     // calea NETASTATĂ (un program rulează — hotfix 3.6.13): toastul nu mai spune „adăugată la prompt";
     // rândul din Transferuri (deschis automat) oferă „Tastează în terminal" + „Copy path"
-    if (jobs.some((j) => j?.inserted === false)) {
-      notifyToast(t(jobs.some((j) => j?.insertOutcome === 'notPrompt') ? 'transfers.pasteNotTyped' : 'transfers.pasteNotTypedOther', { subject }), 'warn')
+    const notTyped = jobs.find((j) => j?.inserted === false)
+    if (notTyped) {
+      notifyToast(`${t('transfers.pasteNotTyped', { subject })} ${t(notTypedReasonKey(notTyped.insertOutcome ?? 'refused'))}`, 'warn')
       return
     }
     let msg = t(pasteToastKey('done', dest, kind), { subject })
@@ -867,7 +874,8 @@ export default function SessionView(props: {
       id: session.id,
       label: paneLabelRef.current || session.id.slice(0, 8),
       // TAB într-un bracketed paste = text doar dacă shell-ul a cerut bracketed paste (3.6.13)
-      bracketed: termRef.current?.modes.bracketedPasteMode === true,
+      // sub tmux modul nu e al panoului → TAB lipit = „nu pot verifica" (review hotfix 3.6.13, M1)
+      bracketed: trustedBracketed(pasteUntrustedRef.current, termRef.current?.modes.bracketedPasteMode === true),
     }
   }, [session.id, echoedNow])
   /** regula atinsă: block → Ctrl+U în toate panourile-ţintă + mesaj; confirm → dialog. `below` = potrivirea
@@ -1329,9 +1337,13 @@ export default function SessionView(props: {
     registerInsertTarget(session.id, {
       send: (text) => {
         if (muteRef.current || readOnlyRef.current || wsRef.current?.readyState !== WebSocket.OPEN) return false
+        // guardrail în aşteptare (ecou / dialog): o cale tastată acum ar ocoli reţinerea (review hotfix 3.6.13, L2)
+        if (submitWaitRef.current || cmdConfirmOpenRef.current) return false
         send(text); term.focus(); return true
       },
       bracketedPaste: () => term.modes.bracketedPasteMode === true,
+      viaTmux: () => pasteUntrustedRef.current,
+      canType: () => !readOnlyRef.current && !muteRef.current,
       // sub tmux DECSET 2004 nu ajunge la xterm; marcajele OSC 133 ale shell-ului da
       atPrompt: () => !replayRef.current && trackerRef.current?.atPrompt() === true,
     })
