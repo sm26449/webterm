@@ -334,8 +334,16 @@ try {
      mesaj de eroare (măsurat: după Enter, /tmp rămânea listat încă ~90 ms). Întoarce directorul listat. */
   const gotoDir = async (panel, dir) => {
     // 3.6.14: calea e afişată ca firimituri; câmpul editabil apare la ✎ (sau Ctrl+L / ultimul segment)
-    const input = panel.locator('input[title*="Type a path"]')
+    // aria-label, nu title: câmpul apare sub cursorul parcat pe ✎, iar TooltipLayer îi scoate `title`-ul
+    const input = panel.locator('input[aria-label="Current directory path"]')
     if (!(await input.count())) await panel.locator('[data-testid="wt-files-editpath"]').click()
+    if (!(await visible(input, 3000))) {
+      console.error('  [diag] gotoDir: câmpul de cale lipseşte după ✎ · focus =', await page.evaluate(() => {
+        const a = document.activeElement
+        return a ? `${a.tagName} ${a.getAttribute('aria-label') ?? ''} ${String(a.className).slice(0, 50)}` : 'null'
+      }), '· panou =', ((await panel.textContent().catch(() => '')) ?? '').slice(0, 200),
+      '· asides =', await page.locator('aside[aria-label="Session files"]').count())
+    }
     await input.fill(dir)
     await input.press('Enter')
     const list = panel.locator('[role="group"][data-path]')
