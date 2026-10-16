@@ -188,6 +188,13 @@ checks **every target pane**: on Enter it looks at the typed command (OSC 133) o
 each other pane, and the outcome — block (clear the line), cancel (clear) or confirmed run — is
 sent to all of them, not only to the pane you typed in.
 
+**A pasted or dropped file is not broadcast** (3.6.16, `lib/transfers.ts` `typeIntoPasted`). The
+file is uploaded to the host of the pane that received the paste and its path is typed into **that
+pane only** (through the registered insert target, not `sendAll`): on a peer the path would not
+exist, or would name a different file on another host. The paste context requires the pane to be
+the focused one (`actionTarget`) and nothing else to have been sent to it since the paste — broadcast
+input arriving from another pane counts as input, so it falls back to **Type into terminal**.
+
 The typed command of a pane is read from what its shell has **echoed**, so it can be stale. Fail
 closed (review of 3.6.12, `lib/broadcastGuard.ts`), when guardrail rules are active:
 

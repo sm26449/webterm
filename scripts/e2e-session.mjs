@@ -1937,16 +1937,18 @@ try {
     && sids.every((s) => window.__wtTerms?.get(s) && window.__wtTerms.get(s) === window.__e2eTerms?.get(s)), pBefore)
   check('split: „Move to…" schimbă panourile între ele (salvat pe server)',
     pBefore.length === 2 && pAfter[0] === pBefore[1] && pAfter[1] === pBefore[0])
+  const swapSame = await sameTerms()
   check('split: swap fără remontare / reconectare (aceleaşi terminale, niciun WS nou)',
-    (await sameTerms()) && sessWs === ws0)
+    swapSame && sessWs === ws0, JSON.stringify({ sameTerms: swapSame, newWs: sessWs - ws0 }))
 
   // ieşire (tab al unui panou) + reintrare din chip: panourile stau în stiva keep-alive → aceleaşi terminale
   await page.locator(`button[data-tab="${pBefore[0]}"]`).evaluate((el) => el.click())
   await page.waitForTimeout(600)
   await page.locator(`button:has-text("${SPLIT}")`).first().click()
   await page.waitForTimeout(900)
+  const reSame = await sameTerms()
   check('split: ieşirea + reintrarea în split nu remontează / reconectează panourile',
-    (await sameTerms()) && sessWs === ws0)
+    reSame && sessWs === ws0, JSON.stringify({ sameTerms: reSame, newWs: sessWs - ws0 }))
 
   // 3 panouri: Edit → încă o sesiune → implicit „1 mare stânga + 2 dreapta"; apoi picker-ul de aranjare
   await page.locator(`div.wt-tab:has-text("${SPLIT}") button[aria-label="Edit split view"]`).click()
