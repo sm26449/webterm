@@ -10,11 +10,13 @@
 # Env knobs:
 #   WEBTERM_IMAGE=…   image to capture (default: ghcr.io/sm26449/webterm:v<GATEWAY_VERSION>)
 #   PW_MODULES=…      a node_modules dir holding the `playwright` package (default: frontend/node_modules)
-#   ONLY=a,b          capture only these steps (dashboard,terminal,host,files,security,fleet,phone;
+#   ONLY=a,b          capture only these steps (dashboard,terminal,host,files,security,fleet,phone,
+#                     split,themes;
 #                     opt-in, never in the default run: copy — the folder-copy UI, for review)
 #   KEEP=1            leave the demo container running afterwards (iterate on shots.mjs)
 #   REUSE=1           reuse a container left by KEEP=1 instead of seeding a new one
 #   OPTIMIZE=0        skip the pngquant pass
+#   DBG=1             log page navigations and console errors (a capture that fails oddly)
 #
 # Prereq: docker plus the WebTerm image and mcr.microsoft.com/playwright:v1.63.0-noble
 # locally. No node dependency on the host beyond `npm ci` in frontend/ (for the package).
@@ -76,12 +78,12 @@ say "── account + demo fleet (seed.py in the container) ──"
 docker cp "$ROOT/scripts/screenshots/seed.py" "$APP:/tmp/seed.py"
 AGENTS=$(docker exec "$APP" python3 /tmp/seed.py "$EMAIL" "$PASSWORD" "$TOKEN")
 
-say "── host polish: tmux (persistent sessions) + an @reboot entry (\"starts at boot\") ──"
+say "── host polish: tmux (persistent sessions), procps (top/vmstat for the split view) + an @reboot entry ──"
 # Without tmux the host page shows a "sessions do not survive" banner; without a boot entry
 # every host carries a "won't come back after a reboot" warning. Both are true of this
 # throwaway container, and both would distract from what the screenshots are about.
 docker exec "$APP" sh -c 'apt-get update -qq >/dev/null 2>&1 &&
-  apt-get install -y -qq --no-install-recommends tmux >/dev/null 2>&1' \
+  apt-get install -y -qq --no-install-recommends tmux procps >/dev/null 2>&1' \
   || say "   (tmux not installed — sessions will show as not persistent)"
 # drop the package lists again, or every host gets the same "N OS updates pending" badge
 docker exec "$APP" sh -c 'rm -rf /var/lib/apt/lists/*'
@@ -113,6 +115,7 @@ while read -r _tag name tok; do
   case "$name" in
     web-01|web-02) rel="demo-api 2.14.1  deployed 2026-10-06 18:42" ;;
     db-01)         rel="postgres 16.4    schema rev 0087" ;;
+    worker-03)     rel="demo-worker 2.14.1  deployed 2026-10-06 18:44" ;;
     *)             rel="" ;;
   esac
   [ -n "$rel" ] && docker exec "$APP" sh -c "echo '$rel' > $home/RELEASE"
@@ -207,7 +210,7 @@ op.open(req, timeout=10).read()
 n = 0
 for _ in range(60):
     n = sum(1 for h in json.load(op.open(B + "/api/hosts", timeout=5)) if h.get("online"))
-    if n >= 4:
+    if n >= 5:
         break
     time.sleep(1)
 print(f"   {n} hosts online")
@@ -230,7 +233,7 @@ docker run --rm --network "$NET" \
   -v "$ROOT/scripts/screenshots:/work:ro" \
   -v "$PW_MODULES:/node_modules:ro" \
   -v "$OUT:/out" \
-  -e BASE="http://$APP:8000" -e EMAIL="$EMAIL" -e PASSWORD="$PASSWORD" -e ONLY="${ONLY:-}" \
+  -e BASE="http://$APP:8000" -e EMAIL="$EMAIL" -e PASSWORD="$PASSWORD" -e ONLY="${ONLY:-}" -e DBG="${DBG:-}" \
   "$PW_IMAGE" node /work/shots.mjs
 
 if [ "${OPTIMIZE:-1}" = 1 ]; then

@@ -66,7 +66,7 @@ flowchart TB
 
 ## Screenshots
 
-Fictional demo fleet, captured on v3.5.8 with
+Fictional demo fleet, captured on v3.6.13 with
 [`scripts/screenshots/run.sh`](scripts/screenshots/run.sh). The images follow your GitHub theme
 (dark or light); the terminal itself stays dark in both.
 
@@ -82,6 +82,8 @@ Fictional demo fleet, captured on v3.5.8 with
 | <picture><source media="(prefers-color-scheme: light)" srcset="docs/screenshots/05-host-light.png"><img alt="Host page: metrics, live session previews, security and agent status" src="docs/screenshots/05-host-dark.png"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="docs/screenshots/03-files-light.png"><img alt="Files panel next to the terminal, three files selected for a bulk action" src="docs/screenshots/03-files-dark.png"></picture> |
 | **Settings → Sign-in & 2FA** | **The editor (Monaco)** |
 | <picture><source media="(prefers-color-scheme: light)" srcset="docs/screenshots/06-security-light.png"><img alt="Settings, Sign-in &amp; 2FA tab: connected devices, passkeys, 2FA" src="docs/screenshots/06-security-dark.png"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="docs/screenshots/04-editor-light.png"><img alt="Monaco editor open on a shell script on the host" src="docs/screenshots/04-editor-dark.png"></picture> |
+| **A split view: three hosts side by side** | **OS-style themes (here: macOS style)** |
+| <picture><source media="(prefers-color-scheme: light)" srcset="docs/screenshots/09-split-light.png"><img alt="Split view with three panes: top running on web-01 in the big left pane, a deploy dry run on web-02 and memory and disk on cache-01 stacked on the right" src="docs/screenshots/09-split-dark.png"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="docs/screenshots/10-themes-light.png"><img alt="Settings, Appearance tab with the app in the macOS-style theme: WebTerm, macOS, Windows 11, GNOME and KDE Plasma styles, light, dark or auto mode, terminal color schemes" src="docs/screenshots/10-themes-dark.png"></picture> |
 
 <p align="center"><img alt="A session on a phone, with the two-row key bar" src="docs/screenshots/08-phone-dark.png" width="260"></p>
 

@@ -44,7 +44,7 @@ FLEET = [
     ("web-02", "Production", "web prod", True),
     ("db-01", "Production", "db prod", True),
     ("cache-01", "Staging", "cache", True),
-    ("worker-03", "Staging", "worker", False),
+    ("worker-03", "Staging", "worker", True),
     ("backup-01", "Infra", "backup", False),
 ]
 
