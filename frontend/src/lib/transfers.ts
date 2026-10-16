@@ -162,12 +162,25 @@ export interface InsertTarget {
   bracketedPaste: () => boolean
   /** shell integration (OSC 133) spune că shell-ul aşteaptă la prompt (CommandTracker.atPrompt) */
   atPrompt?: () => boolean
+  /** terminalul are focusul tastaturii (textarea-ul xterm) */
+  hasFocus?: () => boolean
+  /** ecranul alternativ e activ (nano, vim, emacs, mc, less, htop…) — 3.6.15 */
+  altScreen?: () => boolean
 }
 const targets = new Map<string, InsertTarget>()
 export function registerInsertTarget(sid: string, target: InsertTarget | null): void {
   if (target) targets.set(sid, target); else targets.delete(sid)
 }
 export const hasInsertTarget = (sid: string | undefined): boolean => !!sid && targets.has(sid)
+/** Terminalul cu focus rulează o aplicaţie pe ecranul alternativ (review 3.6.15, L4)? Atunci o
+    scurtătură globală pe Alt+literă (Alt+E) NU se declanşează: tasta e a aplicaţiei (nano M-E,
+    emacs M-e…). La promptul shell-ului (ecranul normal) scurtătura rămâne. */
+export function focusedTerminalInAltScreen(): boolean {
+  for (const tg of targets.values()) {
+    try { if (tg.hasFocus?.() && tg.altScreen?.()) return true } catch { /* terminal în demontare */ }
+  }
+  return false
+}
 
 /** Caractere care n-au ce căuta într-un text TASTAT în terminal: C0/C1, DEL, separatori de
     linie/paragraf, controale bidi şi zero-width. ESC lipseşte deci şi el: textul nu poate ieşi

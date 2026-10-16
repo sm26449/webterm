@@ -52,6 +52,7 @@ import SecretPromptModal from './components/SecretPromptModal'
 import { markBooted } from './lib/failsafe'
 import { useMetricsTick } from './lib/metrics'
 import { matchShortcut, shortcutFor, ShortcutId } from './lib/shortcuts'
+import { focusedTerminalInAltScreen } from './lib/transfers'
 import { menuNav } from './lib/tablist'
 import { createPortal } from 'react-dom'
 import { shouldAutoOpen } from './lib/walkthrough'
@@ -898,6 +899,8 @@ function MainApp() {
       // Alt+E nu închide panoul de sub un dialog (editorul de fişiere trăieşte ÎN panou: l-ar demonta
       // cu tot cu modificările nesalvate) şi nu se declanşează din Monaco
       if (id === 'toggleFiles' && (e.target as HTMLElement)?.closest?.('[role="dialog"],[role="alertdialog"],.monaco-editor')) return
+      // …şi nici dintr-o aplicaţie pe ecranul alternativ (nano M-E, emacs M-e, mc): tasta e a ei (review L4)
+      if (id === 'toggleFiles' && inTerminal && focusedTerminalInAltScreen()) return
       // „/" dintr-un dialog modal aparţine dialogului (Setări: căutarea, 3.5.9) — altfel ar muta
       // focusul în sidebar-ul DE SUB modal, adică în afara capcanei de focus
       if (id === 'focusSidebar' && (e.target as HTMLElement)?.closest?.('[role="dialog"][aria-modal="true"]')) return

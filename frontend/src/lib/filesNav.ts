@@ -152,6 +152,15 @@ function joinDir(dir: string, name: string): string {
   return `${dir.replace(/\/$/, '')}/${name}`
 }
 
+// ── ţinte legate de directorul în care au fost alese (review 3.6.15, M2) ──────────────────────
+/** Calea unei acţiuni pe un rând ales în directorul `at`, DOAR dacă panoul încă listează acel
+    director. Altfel null: între timp follow-cwd (OSC 7) / „deschide aici" / navigarea au schimbat
+    directorul, iar un nume reconstruit din directorul NOU ar ţinti alt fişier (acelaşi nume, alt loc). */
+export function targetPath(at: string, current: string | null | undefined, name: string): string | null {
+  if (!at || !name || current == null || current !== at) return null
+  return `${at.replace(/\/$/, '')}/${name}`
+}
+
 // ── „cd aici" în terminal ────────────────────────────────────────────────────────────────────
 /** `cd -- '<cale>'` de tastat la prompt (FĂRĂ Enter — ca „insert path" şi comanda de mutare ca
     root: omul vede comanda şi apasă el Enter). Mereu între apostrofuri (şi `~` sau `-` rămân

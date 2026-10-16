@@ -872,19 +872,38 @@ try {
   await rowMenu.locator('[role="menuitem"]', { hasText: 'Duplicate' }).click()
   const dupListed = await pollValue(fpText, (t) => t.includes('a_file (1).txt'), 15000)
   check('3.6.14: Duplicate creează „a_file (1).txt" lângă original', dupListed.includes('a_file (1).txt'))
-  // tastează-ca-să-sari + Delete: confirmarea are focusul pe „Delete", Enter confirmă, focusul revine pe listă
+  // review M1: cu confirmarea deschisă, Enter din LISTĂ nu şterge nimic (o închide)
+  const delDlg = filePanel.locator('[data-testid="wt-files-confirm-delete"]')
   await fpList.focus()
   await page.keyboard.type('kbd_r')
   await page.keyboard.press('Delete')
-  const delDlg = filePanel.locator('[data-testid="wt-files-confirm-delete"]')
+  const m1Open = await visible(delDlg, 3000)
+  await fpList.focus()
+  await page.keyboard.press('Enter')
+  await page.waitForTimeout(800)
+  check('3.6.15 M1: cu confirmarea deschisă, Enter în listă NU şterge (şi închide confirmarea)',
+    m1Open && await hidden(delDlg, 3000) && (await fpText()).includes('kbd_ren'))
+  // tastează-ca-să-sari + Delete: confirmarea arată calea completă, focusul pe „Cancel"; Tab → Delete → Enter
+  await fpList.focus()
+  await page.keyboard.type('kbd_r')
+  await page.keyboard.press('Delete')
   const delFocused = (await visible(delDlg, 3000)) && await page.evaluate(() =>
-    !!document.activeElement?.closest?.('[data-testid="wt-files-confirm-delete"]') && /Delete/.test(document.activeElement?.textContent ?? ''))
+    !!document.activeElement?.closest?.('[data-testid="wt-files-confirm-delete"]') && /Cancel/.test(document.activeElement?.textContent ?? ''))
   const delName = delFocused ? ((await delDlg.textContent()) ?? '') : ''
+  await page.keyboard.press('Tab')
   await page.keyboard.press('Enter')
   const delListed = await pollValue(fpText, (t) => !t.includes('kbd_ren'))
-  check('3.6.14: tastează-ca-să-sari + Delete → confirmarea are focusul, Enter şterge, focusul revine pe listă',
-    delFocused && delName.includes('kbd_ren') && !delListed.includes('kbd_ren') && await pollValue(listFocused, (v) => v, 3000),
-    `focus=${delFocused} confirm=${delName.slice(0, 60)}`)
+  check('3.6.14: tastează-ca-să-sari + Delete → confirmarea (calea completă, focus pe Cancel), Tab+Enter şterge, focusul revine pe listă',
+    delFocused && delName.includes(`${KD}/kbd_ren`) && !delListed.includes('kbd_ren') && await pollValue(listFocused, (v) => v, 3000),
+    `focus=${delFocused} confirm=${delName.slice(0, 80)}`)
+  // review M2: meniul rândului se închide când panoul schimbă directorul (follow cwd / „deschide aici")
+  await filePanel.locator('[data-row="a_file.txt"]').click({ button: 'right' })
+  const m2Open = await visible(rowMenu, 3000)
+  await page.evaluate(([hid, dir]) => window.dispatchEvent(new CustomEvent('wt-open-files', { detail: { hostId: hid, dir } })), [host.id, '/tmp'])
+  const m2Moved = await pollValue(() => listedDir(filePanel), (v) => v === '/tmp')
+  check('3.6.15 M2: meniul deschis pe un rând se închide când directorul se schimbă sub el',
+    m2Open && m2Moved === '/tmp' && await hidden(rowMenu, 3000))
+  await gotoDir(filePanel, KD)
   // dublu-click pe un fişier = editorul (până în 3.6.13 copia numele)
   await filePanel.locator('button[data-fname="a_file.txt"]').dblclick()
   const dblOpened = await page.locator('.monaco-editor').waitFor({ state: 'visible', timeout: 15000 }).then(() => true, () => false)
@@ -924,10 +943,20 @@ try {
   await filePanel.locator('[data-row="sub"]').click({ button: 'right' })
   await rowMenu.locator('[role="menuitem"]', { hasText: 'cd here in the terminal' }).click()
   const cdTyped = await waitScreen(`cd -- '${KD}/sub'`, 8000)
+  // fără Enter (review L6): după o pauză, rândul cursorului e TOT linia tastată (nu a apărut un prompt nou)
+  await page.waitForTimeout(1200)
+  const cursorLine = await page.evaluate(() => {
+    const term = window.__wtTerms?.get(location.hash.replace('#/s/', ''))
+    if (!term) return ''
+    const b = term.buffer.active
+    return b.getLine(b.baseY + b.cursorY)?.translateToString(true) ?? ''
+  })
+  const notRun = cursorLine.includes(`cd -- '${KD}/sub'`) && !(await screenText()).includes(`WT_PWD_${KD}`)
   await activePane.locator('.xterm-screen').click()
   await page.keyboard.type(' && pwd | sed s/^/WT_PWD_/\n')
   const cdRan = await waitScreen(`WT_PWD_${KD}/sub`, 8000)
-  check('3.6.14: „cd here" tastează cd -- \'…\' la prompt (fără Enter); Enter-ul omului îl rulează', cdTyped && cdRan)
+  check('3.6.14: „cd here" tastează cd -- \'…\' la prompt (fără Enter); Enter-ul omului îl rulează', cdTyped && notRun && cdRan,
+    `typed=${cdTyped} cursor=${cursorLine.slice(-80)} ran=${cdRan}`)
   await page.keyboard.type('cd /tmp\n')
   await gotoDir(filePanel, '/tmp')
 

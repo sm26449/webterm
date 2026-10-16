@@ -1332,6 +1332,8 @@ export default function SessionView(props: {
       bracketedPaste: () => term.modes.bracketedPasteMode === true,
       // sub tmux DECSET 2004 nu ajunge la xterm; marcajele OSC 133 ale shell-ului da
       atPrompt: () => !replayRef.current && trackerRef.current?.atPrompt() === true,
+      hasFocus: () => !!term.textarea && document.activeElement === term.textarea,
+      altScreen: () => term.buffer.active.type === 'alternate',
     })
     // Paste cu FIŞIERE (captură, înaintea handler-ului xterm de pe textarea): preluăm doar când
     // clipboardul aduce fişiere/imagini; textul simplu nu trece pe aici — xterm îl lipeşte ca

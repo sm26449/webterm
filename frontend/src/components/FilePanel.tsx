@@ -26,7 +26,7 @@ import { notifyToast } from '../lib/notify'
 import { fmt, matchFilesShortcut } from '../lib/shortcuts'
 import {
   EMPTY_HISTORY, NavHistory, TYPE_JUMP_MS, baseName, canBack, canForward, cdCommand, completePath, crumbs, histPush,
-  histStep, parentOf, splitForCompletion, typeJump,
+  histStep, parentOf, splitForCompletion, targetPath, typeJump,
 } from '../lib/filesNav'
 import { Button, IconButton } from './ui'
 
@@ -70,10 +70,14 @@ const isTextField = (el: Element | null) =>
   !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || (el as HTMLElement).isContentEditable)
 
 /** ţinta unui meniu: un rând, zona goală a listei (directorul curent) sau butonul flotant „+" */
+/** `dir` = directorul LISTAT când s-a deschis meniul: toate acţiunile pornesc de la el (review
+    3.6.15, M2), nu de la `listing.path` din clipa click-ului — follow-cwd îl poate fi schimbat. */
 type MenuState =
-  | { kind: 'row'; entry: Entry; x: number; y: number; sheet: boolean }
-  | { kind: 'dir'; x: number; y: number; sheet: boolean }
-  | { kind: 'new'; x: number; y: number; sheet: boolean }
+  | { kind: 'row'; entry: Entry; dir: string; x: number; y: number; sheet: boolean }
+  | { kind: 'dir'; dir: string; x: number; y: number; sheet: boolean }
+  | { kind: 'new'; dir: string; x: number; y: number; sheet: boolean }
+/** un rând + directorul în care a fost ales (confirmarea de ştergere, redenumirea) */
+type Target = Entry & { at: string }
 
 function fmtSize(n: number): string {
   if (n < 1024) return `${n} B`
@@ -224,7 +228,9 @@ export default function FilePanel(props: {
   const [newFolder, setNewFolder] = useState<string | null>(null)
   const [newFile, setNewFile] = useState<string | null>(null)
   const [newFileErr, setNewFileErr] = useState('')
-  const [confirmDel, setConfirmDel] = useState<Entry | null>(null)
+  const [confirmDel, setConfirmDel] = useState<Target | null>(null)
+  // directorul în care a început redenumirea inline (refuzată dacă panoul a plecat între timp)
+  const renameAtRef = useRef('')
   // Selecţie multiplă (3.5.5): bife pe rânduri, Shift/Ctrl+click, Space / Shift+săgeţi, long-press
   // pe touch. Modelul e pur (lib/selection.ts); cheile = numele din listarea curentă.
   const [selection, setSelection] = useState<Selection>(EMPTY_SELECTION)
@@ -256,7 +262,7 @@ export default function FilePanel(props: {
       doneSeqRef.current = my
       // alt director → filtrul se goleşte (3.6.14): un „log" tastat în /var nu mai ascunde, tăcut,
       // tot conţinutul directorului următor
-      if (pathRef.current !== l.path) setFilter('')
+      if (pathRef.current !== l.path) { setFilter(''); setMenu(null) }
       // istoricul: pasul ‹ / › cerut (dacă a ajuns chiar acolo) sau un director nou vizitat
       const mv = histMoveRef.current
       histMoveRef.current = null
@@ -274,6 +280,7 @@ export default function FilePanel(props: {
       if (my !== loadSeq.current) return
       doneSeqRef.current = my
       histMoveRef.current = null
+      setMenu(null)
       setError(errText(e, t) || t('files.genericErr'))
       setFailedPath(p)   // „Reîncearcă" lângă eroare (audit 3.6.3)
       // Listarea VECHE rămânea afişată sub eroare, iar calea din input devenea deja cea
@@ -362,7 +369,10 @@ export default function FilePanel(props: {
 
   // navigare manuală = oprește follow (altfel te trage înapoi la cwd)
   // `select`: rândul de selectat după listare (la „sus": directorul din care ai venit)
-  const navigate = (p: string, select?: string) => { setFollow(false); setEditPath(false); void load(p, { name: select }) }
+  const navigate = (p: string, select?: string) => {
+    setFollow(false); setEditPath(false); setConfirmDel(null)
+    void load(p, { name: select })
+  }
   const goUp = () => {
     if (!listing || listing.path === '/') return
     navigate(listing.parent || parentOf(listing.path), baseName(listing.path))
@@ -375,6 +385,7 @@ export default function FilePanel(props: {
     histMoveRef.current = st.hist
     setFollow(false)
     setEditPath(false)
+    setConfirmDel(null)
     // înapoi într-un părinte: rândul selectat e directorul din care ai venit
     void load(st.path, { name: from && parentOf(from) === st.path ? baseName(from) : undefined })
     return true
@@ -441,7 +452,7 @@ export default function FilePanel(props: {
     focusListIfFree()
   }, [view, listing, focusTick, focusListIfFree])
 
-  async function download(e: Entry) {
+  async function download(e: Entry, dir = listing!.path) {
     // Prin MOTORUL de transfer (phase 2): progres, retry, pauză şi reluare, vizibile în chip/bară —
     // nu mai e un `<a download>` oarbă care, pe un fişier de 40 GB picat la 90%, reîncepe de la zero.
     // `startDownload` cheamă selectorul de fişier (File System Access) ÎNTÂI, cât încă avem gestul
@@ -449,7 +460,7 @@ export default function FilePanel(props: {
     // Access → eroare clară (o prindem aici).
     try {
       await startDownload({ hostId: props.host.id, hostName: props.host.name,
-                            path: join(listing!.path, e.name), name: e.name, size: e.size })
+                            path: join(dir, e.name), name: e.name, size: e.size })
     } catch (err) {
       setError(errText(err, t) || t('files.genericErr'))
     }
@@ -458,10 +469,10 @@ export default function FilePanel(props: {
   // director → tar.gz făcut pe host, acum prin MOTORUL de transfer (3.5.5): rând în Transferuri cu
   // „se pregăteşte arhiva…" cât rulează tar-ul (până la 5 min), octeţii primiţi, Cancel şi eroarea
   // serverului. Nu e resumabil (arhivă generată din mers) — Retry o reporneşte.
-  async function downloadArchive(e: Entry) {
+  async function downloadArchive(e: Entry, dir = listing!.path) {
     try {
       await startArchiveDownload({ hostId: props.host.id, hostName: props.host.name,
-                                   path: join(listing!.path, e.name), name: `${e.name}.tgz` })
+                                   path: join(dir, e.name), name: `${e.name}.tgz` })
     } catch (err) {
       setError(errText(err, t) || t('files.genericErr'))
     }
@@ -508,13 +519,21 @@ export default function FilePanel(props: {
   }
 
   // ── acţiunile unui RÂND (meniul contextual, tastele, „⋯") ──
-  const fullPath = (e: Entry) => join(listing!.path, e.name)
-  /** deschide: director → intră; fişier → editorul */
-  function openEntry(e: Entry) {
-    if (!listing) return
-    if (e.dir) navigate(fullPath(e)); else edit(e)
+  /** rândul + directorul listat acum (pentru confirmarea de ştergere) */
+  const tgt = (e: Entry): Target => ({ ...e, at: listing?.path ?? '' })
+  /** directorul ales (meniu / confirmare) încă e cel listat? Altfel acţiunea e refuzată cu un mesaj. */
+  const stillHere = (dir: string): boolean => {
+    if (listing && listing.path === dir) return true
+    setError(t('files.staleTarget', { dir })); return false
   }
-  function startRename(name: string) {
+  /** deschide: director → intră; fişier → editorul */
+  function openEntry(e: Entry, dir = listing?.path ?? '') {
+    if (!listing || !stillHere(dir)) return
+    if (e.dir) navigate(join(dir, e.name)); else edit(e, dir)
+  }
+  function startRename(name: string, dir = listing?.path ?? '') {
+    if (!stillHere(dir)) return
+    renameAtRef.current = dir
     setNewFolder(null); setNewFile(null); setConfirmDel(null); setRenaming(name)
   }
   function startNewFolder() {
@@ -532,9 +551,8 @@ export default function FilePanel(props: {
   /** Duplicat pe ACELAŞI host, în acelaşi director: `/api/fs/copy` cu src == dst (permis explicit pe
       server) şi `on_conflict: rename` → „nume (1).ext" / folder „nume (1)", primul liber (fscopy.py).
       Copierea rulează pe gateway (rând în Transferuri); la final: toast + re-listare. */
-  async function duplicate(e: Entry) {
-    if (!listing) return
-    const dir = listing.path
+  async function duplicate(e: Entry, dir = listing?.path ?? '') {
+    if (!listing || !stillHere(dir)) return
     try {
       const rowId = await startCopy({ srcHost: props.host.id, srcName: props.host.name, dstHost: props.host.id,
         dstName: props.host.name, paths: [join(dir, e.name)], dstDir: dir, onConflict: 'rename' })
@@ -580,7 +598,8 @@ export default function FilePanel(props: {
 
   // ── meniul ──
   function openRowMenu(e: Entry, x: number, y: number, sheet = touchUI) {
-    setMenu({ kind: 'row', entry: e, x, y, sheet })
+    if (!listing) return
+    setMenu({ kind: 'row', entry: e, dir: listing.path, x, y, sheet })
   }
   /** Shift+F10 / tasta Menu: meniul rândului curent, sub el */
   function openRowMenuAtSel() {
@@ -602,7 +621,7 @@ export default function FilePanel(props: {
     ]
     if (m.kind === 'new') return dirItems()
     if (m.kind === 'dir') {
-      const here = listing?.path ?? ''
+      const here = m.dir
       return [
         ...dirItems(),
         { key: 'reload', label: t('files.reload'), icon: <RefreshIcon />, onSelect: () => void load(here), hint: 'F5', sep: true },
@@ -611,15 +630,15 @@ export default function FilePanel(props: {
       ]
     }
     const e = m.entry
-    const dir = listing?.path ?? ''
+    const dir = m.dir
     return [
       e.dir
-        ? { key: 'open', label: t('files.open'), icon: <FolderIcon />, onSelect: () => openEntry(e), hint: 'Enter' }
-        : { key: 'edit', label: t('files.edit'), icon: <PencilIcon />, onSelect: () => edit(e), hint: 'Enter' },
+        ? { key: 'open', label: t('files.open'), icon: <FolderIcon />, onSelect: () => openEntry(e, dir), hint: 'Enter' }
+        : { key: 'edit', label: t('files.edit'), icon: <PencilIcon />, onSelect: () => { if (stillHere(dir)) edit(e, dir) }, hint: 'Enter' },
       { key: 'download', label: e.dir ? t('files.downloadTgz') : t('files.download'), icon: <DownloadIcon />,
-        onSelect: () => void (e.dir ? downloadArchive(e) : download(e)) },
-      { key: 'rename', label: t('files.rename'), icon: <RenameIcon />, onSelect: () => startRename(e.name), hint: 'F2', sep: true },
-      { key: 'duplicate', label: t('files.duplicate'), icon: <CopyIcon />, onSelect: () => void duplicate(e) },
+        onSelect: () => { if (stillHere(dir)) void (e.dir ? downloadArchive(e, dir) : download(e, dir)) } },
+      { key: 'rename', label: t('files.rename'), icon: <RenameIcon />, onSelect: () => startRename(e.name, dir), hint: 'F2', sep: true },
+      { key: 'duplicate', label: t('files.duplicate'), icon: <CopyIcon />, onSelect: () => void duplicate(e, dir) },
       { key: 'copyname', label: t('files.copyName'), icon: <CopyIcon />, onSelect: () => void copyToClip(e.name), hint: fmt('Mod+C'), sep: true },
       { key: 'copypath', label: t('files.copyPath'), icon: <CopyIcon />, onSelect: () => void copyToClip(join(dir, e.name)), hint: fmt('Mod+Shift+C') },
       { key: 'copyhost', label: t('copy.open'), icon: <ArrowsLeftRightIcon />,
@@ -627,7 +646,7 @@ export default function FilePanel(props: {
       ...(sessionPanel ? [{ key: 'cd', label: t('files.cdHere'), icon: <TerminalPromptIcon />,
         onSelect: () => cdHere(e.dir ? join(dir, e.name) : dir), sep: true }] : []),
       { key: 'delete', label: t('files.delete'), icon: <TrashIcon />, danger: true, sep: !sessionPanel,
-        onSelect: () => { setConfirmBulk(null); setConfirmDel(e) }, hint: 'Del' },
+        onSelect: () => { if (!stillHere(dir)) return; setConfirmBulk(null); setConfirmDel({ ...e, at: dir }) }, hint: 'Del' },
     ]
   }
 
@@ -677,9 +696,9 @@ export default function FilePanel(props: {
 
   // FileEditor încarcă singur conținutul (preview cu partial-read) și decide
   // editabil / view-only / binar — aici doar deschidem modalul.
-  function edit(e: Entry) {
+  function edit(e: Entry, dir = listing!.path) {
     setError('')
-    setEditing({ path: join(listing!.path, e.name), name: e.name })
+    setEditing({ path: join(dir, e.name), name: e.name })
   }
 
   // Un fişier → motorul din lib/uploads.ts (acelaşi protocol ca înainte, acum cu watchdog,
@@ -840,22 +859,29 @@ export default function FilePanel(props: {
     const n = name.trim()
     setRenaming(null)
     if (!n || n === e.name || !listing) { refocus(e.name); return }
+    const from = targetPath(renameAtRef.current, listing.path, e.name)
+    const to = targetPath(renameAtRef.current, listing.path, n)
+    if (!from || !to) { setError(t('files.staleTarget', { dir: renameAtRef.current })); return }
     try {
       await api(`/api/hosts/${props.host.id}/fs/rename`, {
-        method: 'POST', body: JSON.stringify({ path: join(listing.path, e.name), to: join(listing.path, n) }),
+        method: 'POST', body: JSON.stringify({ path: from, to }),
       })
       notifyToast(t('files.toastRenamed', { from: e.name, to: n }))
       void load(listing.path, { name: n })
     } catch (err) { writeFailed(err, listing.path); refocus(e.name) }
   }
 
-  async function doDelete(e: Entry) {
+  async function doDelete(e: Target) {
     setConfirmDel(null)
     if (!listing) return
+    // ţinta e legată de directorul în care a fost aleasă: dacă panoul a plecat între timp (follow cwd),
+    // NU ştergem `<directorul nou>/<acelaşi nume>` (review 3.6.15, M2)
+    const path = targetPath(e.at, listing.path, e.name)
+    if (!path) { setError(t('files.staleTarget', { dir: e.at })); return }
     const idx = view.findIndex((x) => x.name === e.name)
     try {
       await api(`/api/hosts/${props.host.id}/fs/delete`, {
-        method: 'POST', body: JSON.stringify({ path: join(listing.path, e.name), recursive: e.dir }),
+        method: 'POST', body: JSON.stringify({ path, recursive: e.dir }),
       })
       notifyToast(t('files.toastDeleted', { name: e.name }))
       // focusul rămâne pe aceeaşi poziţie (rândul de după cel şters)
@@ -886,10 +912,12 @@ export default function FilePanel(props: {
     // tastele listei: de pe container sau de pe un descendent care nu e câmp de text; Enter/Space pe
     // un buton real îl activează pe el (lib/selection.ts, U09 + roving focus 3.6.14)
     if (!isListKeyTarget(keyTargetOf(ev.target, ev.currentTarget), ev.key)) return
-    // confirmarea simplă deschisă (focusul a revenit pe listă): Enter = confirmă
+    // confirmarea simplă deschisă şi focusul înapoi în listă (review 3.6.15, M1): Enter NU confirmă —
+    // userul care a dat click pe alt rând şi apasă Enter vrea să-l deschidă, nu să şteargă (recursiv)
+    // dosarul de dinainte. Orice tastă din listă închide confirmarea; Enter nu face nimic.
     if (confirmDel) {
-      if (ev.key === 'Enter') { ev.preventDefault(); void doDelete(confirmDel) }
-      return
+      setConfirmDel(null)
+      if (ev.key === 'Enter') { ev.preventDefault(); return }
     }
     const cur = view[sel]
     const now = Date.now()
@@ -906,6 +934,10 @@ export default function FilePanel(props: {
     }
     const id = matchFilesShortcut(ev.nativeEvent)
     const stop = () => { ev.preventDefault(); ev.stopPropagation() }
+    // auto-repeat (tastă ţinută apăsată) nu declanşează acţiuni distructive / deschideri în lanţ
+    if (ev.repeat && (id === 'filesDelete' || id === 'filesOpen' || id === 'filesMenu' || id === 'filesRename')) { ev.preventDefault(); return }
+    // Delete / F2 de pe un control din rând (butoanele de la hover) nu ţintesc `view[sel]` (review L1)
+    if ((id === 'filesDelete' || id === 'filesRename') && ev.target !== ev.currentTarget) return
     switch (id) {
       case 'filesOpen': if (cur) { stop(); openEntry(cur) } return
       case 'filesUp': stop(); goUp(); return
@@ -951,7 +983,7 @@ export default function FilePanel(props: {
       case 'filesDelete':
         // cu o selecţie: ştergerea în bloc (o singură confirmare); altfel rândul curent
         if (picked.length) { ev.preventDefault(); setConfirmDel(null); setConfirmBulk(picked); return }
-        if (cur) { ev.preventDefault(); setConfirmDel(cur) }
+        if (cur) { ev.preventDefault(); setConfirmDel(tgt(cur)) }
         return
     }
     if (ev.key === 'ArrowDown' && !ev.altKey && !ev.ctrlKey && !ev.metaKey) { ev.preventDefault(); setSel((s) => Math.min(view.length - 1, s + 1)) }
@@ -1137,7 +1169,8 @@ export default function FilePanel(props: {
                 value={pathDraft}
                 aria-label={t('files.pathAria')}
                 aria-describedby={completion ? 'wt-files-complete' : undefined}
-                onChange={(e) => { setPathDraft(e.target.value); setCompletion(null); noProgressRef.current = null }}
+                // o completare încă în zbor nu mai are voie să suprascrie ce tastezi (review L3)
+                onChange={(e) => { completeSeq.current++; setPathDraft(e.target.value); setCompletion(null); noProgressRef.current = null }}
                 onFocus={(e) => e.target.select()}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') { e.preventDefault(); navigate(pathDraft.trim() || '/') }
@@ -1287,7 +1320,7 @@ export default function FilePanel(props: {
           onContextMenu={(ev) => {
             if ((ev.target as HTMLElement).closest('[data-idx]') || lastPointerRef.current === 'touch' || !listing) return
             ev.preventDefault()
-            setMenu({ kind: 'dir', x: ev.clientX, y: ev.clientY, sheet: false })
+            setMenu({ kind: 'dir', dir: listing.path, x: ev.clientX, y: ev.clientY, sheet: false })
           }}
           className={`relative min-h-0 flex-1 overflow-y-auto outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[rgb(var(--focus))] ${drag ? 'ring-2 ring-inset ring-sky-500' : ''}`}>
           {/* peste un rând de director nu întunecăm lista (inelul rândului trebuie să se vadă);
@@ -1348,6 +1381,8 @@ export default function FilePanel(props: {
               className={`group flex items-center gap-2 py-1 pl-1 pr-3 text-xs [@media(pointer:coarse)]:select-none ${i === sel ? 'bg-ink-800' : checked ? 'bg-sky-500/10' : 'hover:bg-ink-800/60'} ${dropRow === e.name ? 'bg-sky-500/10 ring-2 ring-inset ring-sky-400' : ''}`}
               onClick={(ev) => {
                 if (suppressClickRef.current) { suppressClickRef.current = false; return }   // capătul unui long-press
+                // un click pe alt rând închide confirmarea de ştergere deschisă (review M1)
+                if (confirmDel) setConfirmDel(null)
                 // roving focus: un click pe rând lasă focusul pe LISTĂ (tastele merg imediat)
                 if (!(ev.target as HTMLElement).closest('input,textarea')) listRef.current?.focus({ preventScroll: true })
                 if (selectClick(ev, e, i)) return
@@ -1419,6 +1454,8 @@ export default function FilePanel(props: {
                     if (!e.dir || ev.shiftKey || ev.ctrlKey || ev.metaKey || suppressClickRef.current) return
                     if (lastPointerRef.current === 'touch' && selection.keys.size) return
                     ev.stopPropagation()
+                    // al doilea click al unui dublu-click nu coboară încă un nivel (review L2)
+                    if (Date.now() < navGuardRef.current) return
                     listRef.current?.focus({ preventScroll: true })
                     navGuardRef.current = Date.now() + 450
                     lastClickRef.current = null
@@ -1443,7 +1480,7 @@ export default function FilePanel(props: {
                   Pe touch (fără hover): doar „⋯" de 44px, care deschide foaia de acţiuni. */}
               {/* stopPropagation: o acţiune pe rând (ex. Şterge) nu e şi un tap de selecţie pe touch */}
               {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions -- doar opreşte bubbling-ul spre rând; butoanele din el au tastatura lor */}
-              <div onClick={(ev) => ev.stopPropagation()} className="hidden shrink-0 items-center gap-0.5 group-hover:flex group-focus-within:flex [@media(hover:none)]:!hidden">
+              <div onClick={(ev) => { ev.stopPropagation(); setSel(i) }} className="hidden shrink-0 items-center gap-0.5 group-hover:flex group-focus-within:flex [@media(hover:none)]:!hidden">
                 {!e.dir && (
                   <IconButton touch={false} onClick={() => edit(e)} title={t('files.edit')} label={`${t('files.edit')} ${e.name}`}><PencilIcon /></IconButton>
                 )}
@@ -1456,7 +1493,7 @@ export default function FilePanel(props: {
                     title={t('files.downloadArchive')} aria-label={t('files.downloadArchiveAria', { name: e.name })}><DownloadIcon /></button>
                 )}
                 <IconButton touch={false} onClick={() => startRename(e.name)} title={t('files.rename')} label={t('files.renameAria', { name: e.name })}><RenameIcon /></IconButton>
-                <IconButton touch={false} variant="danger" onClick={() => setConfirmDel(e)} title={t('files.delete')} label={`${t('files.delete')} ${e.name}`}><TrashIcon /></IconButton>
+                <IconButton touch={false} variant="danger" onClick={() => { if (listing) setConfirmDel({ ...e, at: listing.path }) }} title={t('files.delete')} label={`${t('files.delete')} ${e.name}`}><TrashIcon /></IconButton>
                 <IconButton touch={false} aria-haspopup="menu" data-testid="wt-files-more"
                   onClick={(ev) => { const r = (ev.currentTarget as HTMLElement).getBoundingClientRect(); setSel(i); openRowMenu(e, r.right - 224, r.bottom, false) }}
                   title={t('files.moreActions')} label={t('files.more', { name: e.name })}><MoreIcon size={14} /></IconButton>
@@ -1488,7 +1525,7 @@ export default function FilePanel(props: {
         {/* „+" flotant (touch): fişier nou / dosar nou / încarcă — înlocuieşte cele trei pictograme din bară */}
         {listing && !picked.length && (
           <button type="button" aria-haspopup="menu" aria-label={t('files.fabAria')} data-testid="wt-files-fab"
-            onClick={(ev) => { const r = (ev.currentTarget as HTMLElement).getBoundingClientRect(); setMenu({ kind: 'new', x: r.left, y: r.top, sheet: true }) }}
+            onClick={(ev) => { const r = (ev.currentTarget as HTMLElement).getBoundingClientRect(); if (listing) setMenu({ kind: 'new', dir: listing.path, x: r.left, y: r.top, sheet: true }) }}
             className="absolute bottom-3 right-3 z-10 hidden h-12 w-12 place-items-center rounded-full bg-sky-600 text-white shadow-xl hover:bg-sky-500 [@media(hover:none)]:grid">
             <PlusIcon size={20} />
           </button>
@@ -1519,6 +1556,7 @@ export default function FilePanel(props: {
           return (
             // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Escape anulează confirmarea (nu închide panoul)
             <div className="border-t border-ink-800 bg-ink-800/80 px-3 py-2 text-2xs" role="alertdialog" aria-label={t('files.bulkDeleteTitle')}
+              onKeyDownCapture={(e) => { if (e.repeat && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); e.stopPropagation() } }}
               onKeyDown={(e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); cancelDelete() } }}>
               <p className="text-slate-300">{t('files.bulkDeleteConfirm', { count: confirmBulk.length })}</p>
               <p className="mt-0.5 break-all font-mono wt-danger">
@@ -1540,14 +1578,17 @@ export default function FilePanel(props: {
           // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Escape anulează confirmarea (nu închide panoul)
           <div className="border-t border-ink-800 bg-ink-800/80 px-3 py-2 text-2xs" role="alertdialog"
             aria-labelledby="wt-files-del-q" data-testid="wt-files-confirm-delete"
+            // tasta ţinută apăsată (auto-repeat) nu activează butoanele de aici (review M1)
+            onKeyDownCapture={(e) => { if (e.repeat && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); e.stopPropagation() } }}
             onKeyDown={(e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); cancelDelete() } }}>
             <p id="wt-files-del-q" className="mb-1.5 text-slate-300">
-              {t('files.deletePrefix')} <span className="font-mono wt-danger">{confirmDel.name}</span>
+              {t('files.deletePrefix')} <span className="break-all font-mono wt-danger">{join(confirmDel.at, confirmDel.name)}</span>
               {confirmDel.dir ? t('files.deleteSuffixDir') : '?'}
             </p>
             <div className="flex gap-2">
-              <Button variant="danger" size="sm" autoFocus onClick={() => doDelete(confirmDel)}>{t('files.delete')}</Button>
-              <Button variant="ghost" size="sm" onClick={cancelDelete}>{t('files.cancel')}</Button>
+              {/* focusul pe Anulează (ca la ştergerea în bloc): un Enter rătăcit nu şterge nimic */}
+              <Button variant="ghost" size="sm" autoFocus onClick={cancelDelete}>{t('files.cancel')}</Button>
+              <Button variant="danger" size="sm" onClick={() => doDelete(confirmDel)}>{t('files.delete')}</Button>
             </div>
           </div>
         )}

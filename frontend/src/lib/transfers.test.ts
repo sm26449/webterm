@@ -1,10 +1,23 @@
 import { describe, expect, it } from 'vitest'
 import {
-  RETENTION_BATCH, extFromMime, inboxName, isGenericName, pasteSubject, pasteSubjectText,
+  RETENTION_BATCH, extFromMime, focusedTerminalInAltScreen, inboxName, registerInsertTarget, isGenericName, pasteSubject, pasteSubjectText,
   pasteToastKey, selectExpired, shellQuote, stampFor,
 } from './transfers'
 
 const when = new Date(2026, 9, 4, 14, 3, 22)   // 2026-10-04 14:03:22 local
+
+describe('focusedTerminalInAltScreen (Alt+E nu fură tasta unei aplicaţii TUI, review L4)', () => {
+  const tgt = (focus: boolean, alt: boolean) => ({ send: () => true, bracketedPaste: () => false, hasFocus: () => focus, altScreen: () => alt })
+  it('doar terminalul CU FOCUS pe ecranul alternativ contează', () => {
+    registerInsertTarget('a', tgt(true, false))
+    registerInsertTarget('b', tgt(false, true))
+    expect(focusedTerminalInAltScreen()).toBe(false)     // promptul shell-ului: scurtătura rămâne
+    registerInsertTarget('a', tgt(true, true))
+    expect(focusedTerminalInAltScreen()).toBe(true)      // nano / emacs / mc în prim-plan
+    registerInsertTarget('a', null); registerInsertTarget('b', null)
+    expect(focusedTerminalInAltScreen()).toBe(false)
+  })
+})
 
 describe('numele din inbox (timestamp + MIME)', () => {
   it('timestamp local, fără `:` (cale sigură pe orice FS)', () => {

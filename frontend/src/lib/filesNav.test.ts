@@ -1,8 +1,24 @@
 import { describe, expect, it } from 'vitest'
 import {
   EMPTY_HISTORY, HISTORY_MAX, baseName, canBack, canForward, cdCommand, commonPrefix, completePath, crumbs,
-  histPush, histStep, parentOf, splitForCompletion, typeJump,
+  histPush, histStep, parentOf, splitForCompletion, targetPath, typeJump,
 } from './filesNav'
+
+describe('targetPath (ţinte vechi după schimbarea directorului, review M2)', () => {
+  it('acelaşi director → calea completă', () => {
+    expect(targetPath('/srv/a', '/srv/a', 'x.txt')).toBe('/srv/a/x.txt')
+    expect(targetPath('/', '/', 'etc')).toBe('/etc')
+  })
+  it('directorul s-a schimbat (follow cwd / wt-open-files / navigare) → null, nu /nou/<acelaşi nume>', () => {
+    expect(targetPath('/srv/a', '/srv/b', 'x.txt')).toBeNull()
+    expect(targetPath('/srv/a', null, 'x.txt')).toBeNull()
+    expect(targetPath('/srv/a', undefined, 'x.txt')).toBeNull()
+  })
+  it('nume / director gol → null', () => {
+    expect(targetPath('', '', 'x')).toBeNull()
+    expect(targetPath('/a', '/a', '')).toBeNull()
+  })
+})
 import { filesShortcuts, matchFilesShortcut, matchShortcut } from './shortcuts'
 
 describe('crumbs (firimiturile căii)', () => {

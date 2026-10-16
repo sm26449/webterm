@@ -39,7 +39,9 @@ Files panel UI/UX. Frontend only — no agent change (agent stays 58), no new ga
   while the list has focus; the browser keys (`Mod+U` view-source, `Mod+R`, `Mod+L`) are taken only
   there. The global `?` and `/` leave the list alone.
 - **`Alt+E`** toggles the active session's Files panel (Option-as-Meta only on macOS; never from a
-  dialog or the editor, which lives inside the panel).
+  dialog or the editor, which lives inside the panel, and never while the focused terminal shows a
+  full-screen program on the alternate screen — nano's `M-E`, emacs' `M-e`, mc keep the key). At a
+  shell prompt it is taken: unbound in bash/zsh, fish loses "edit the line in `$EDITOR`".
 - **Touch**: size and date under the name, a floating `+` (new file / folder / upload) instead of
   three toolbar icons, the selection bar pinned at the bottom; on a phone, Back walks back through
   the folders visited and closes the panel only at the first one.
@@ -54,11 +56,21 @@ Files panel UI/UX. Frontend only — no agent change (agent stays 58), no new ga
 - **Double-click / double-tap opens** (folder: enter, file: editor). It used to copy the name
   (triple-click: the path), so opening a file needed the hover pencil or Enter. Copying moved to
   the menu and `Mod+C` / `Mod+Shift+C`.
-- **Single-delete confirmation** has the focus on Delete: `Enter` confirms, `Esc` cancels, and the
-  focus returns to the list (it was not focused, and Enter was ignored while it was open).
+- **Single-delete confirmation** is focused on **Cancel** (like the bulk confirmation), shows the full
+  path, `Esc` cancels and the focus returns to the list (it was not focused at all). Enter in the
+  list never confirms it: clicking another row, moving or navigating closes it, so a stray Enter to
+  open a row cannot delete (recursively) the folder chosen before. Held-down keys (auto-repeat) do
+  not activate Delete, the confirmation buttons or a menu item.
+- **Actions stay bound to the folder they were chosen in**: the row menu, the delete confirmation
+  and an inline rename remember their folder; the menu closes when the folder changes, and an action
+  whose folder is no longer listed (the panel followed the terminal's `cd`, or "open here" moved it)
+  is refused with a message instead of hitting the same name in the new folder.
 - **The filter is cleared on a directory change** — a filter typed in one folder silently hid most
   of the next one.
-- The sidebar host menu / palette → **Files** opens the host page's Files tab.
+- The sidebar host menu / palette → **Files** opens the host page's Files tab — so it now **leaves
+  the current session or split view** for the host page (the split stays in the tab bar). The tab
+  keeps its gate: with the agent offline or without `files.read` on that host, the page stays on
+  Overview with a clear message instead of opening a panel that fails.
 
 ### Removed
 - **`FileBrowser`**, the older modal file manager behind the host menu → Files, and its strings.

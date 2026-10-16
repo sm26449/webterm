@@ -52,14 +52,33 @@ export default function FileMenu(props: {
   }, [])
 
   // un click în afara meniului (sau pe scrim) îl închide; scroll / resize la fel (poziţia nu mai e bună)
+  // `onClose` prin ref: abonarea se face O DATĂ la montare, nu la fiecare randare (review L6).
+  // Scroll-ul (în captură: prinde şi lista derulată, nu doar fereastra) mută rândul de sub meniu.
+  const onCloseRef = useRef(props.onClose)
+  onCloseRef.current = props.onClose
   useEffect(() => {
-    const onWin = () => props.onClose()
+    const onWin = () => onCloseRef.current()
+    const t0 = Date.now()
+    const onScroll = (e: Event) => {
+      // scrollIntoView-ul rândului abia selectat (acelaşi click) nu e o derulare a userului
+      if (Date.now() - t0 < 250) return
+      // derularea DIN meniu (foaia de jos pe un telefon mic) nu-l închide
+      if (e.target instanceof Node && ref.current?.contains(e.target)) return
+      onCloseRef.current()
+    }
     window.addEventListener('resize', onWin)
     window.addEventListener('blur', onWin)
-    return () => { window.removeEventListener('resize', onWin); window.removeEventListener('blur', onWin) }
-  }, [props])
+    window.addEventListener('scroll', onScroll, true)
+    return () => {
+      window.removeEventListener('resize', onWin)
+      window.removeEventListener('blur', onWin)
+      window.removeEventListener('scroll', onScroll, true)
+    }
+  }, [])
 
   const onKeyDown = (e: ReactKeyboardEvent) => {
+    // auto-repeat: o tastă ţinută apăsată (Delete / Enter care a deschis meniul) nu activează un item
+    if (e.repeat && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); e.stopPropagation(); return }
     const btns = [...(ref.current?.querySelectorAll<HTMLElement>('[role="menuitem"]:not([disabled])') ?? [])]
     const i = btns.indexOf(document.activeElement as HTMLElement)
     if (e.key === 'Escape' || e.key === 'Tab') {

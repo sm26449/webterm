@@ -1,10 +1,10 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { sessionTitle } from '../lib/sessionTitle'
 import { errText, isSessionLive, api, AppLink, Host, HostSupervision, Session, timeAgo, withStepup } from '../lib/api'
 import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
 import { useI18n } from '../lib/i18n'
 import { canOn, usePerms } from '../lib/perms'
-import { peekFilesDir } from '../lib/uploads'
+import { peekFilesDir, takeFilesDir } from '../lib/uploads'
 import { useConfirm } from '../lib/confirm'
 import { notify, notifyError } from '../lib/notify'
 import { askSecret } from '../lib/secretPrompt'
@@ -77,13 +77,31 @@ export default function HostOverview(props: {
   const [tab, setTab] = useState<HubTab>('overview')
   // bara de transferuri poate cere „deschide Files în directorul X" (upload orfan): atunci
   // pornim direct pe tab-ul Files; FilePanel consumă directorul (lib/uploads.ts)
-  useEffect(() => { setTab(peekFilesDir(host.id) ? 'files' : 'overview') }, [host.id])
+  // 3.6.15 (review L5): cererea „deschide Files" (bara de transferuri, meniul hostului, paleta) respectă
+  // ACEEAŞI poartă ca tab-ul din navigaţie — agent online + `files.read`. Altfel rămânem pe Overview
+  // cu un mesaj clar (nu un panou care pică pe fiecare cerere), iar directorul cerut se consumă.
+  const filesOk = agentReady && may('files.read')
+  const filesOkRef = useRef(filesOk)
+  filesOkRef.current = filesOk
+  const [filesDenied, setFilesDenied] = useState(false)
+  const requestFiles = () => {
+    if (filesOkRef.current) { setFilesDenied(false); setTab('files'); return }
+    takeFilesDir(host.id)
+    setFilesDenied(true)
+    setTab('overview')
+  }
+  useEffect(() => {
+    setFilesDenied(false)
+    if (peekFilesDir(host.id)) requestFiles(); else setTab('overview')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [host.id])
   useEffect(() => {
     const onOpen = (e: Event) => {
-      if ((e as CustomEvent<{ hostId: number }>).detail.hostId === host.id) setTab('files')
+      if ((e as CustomEvent<{ hostId: number }>).detail.hostId === host.id) requestFiles()
     }
     window.addEventListener('wt-open-files', onOpen)
     return () => window.removeEventListener('wt-open-files', onOpen)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [host.id])
 
   // complete per-host history (not limited by the global recent-closed window),
@@ -314,6 +332,12 @@ export default function HostOverview(props: {
         {tab === 'overview' && (
           <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
             <div className="mx-auto max-w-6xl space-y-6">
+              {filesDenied && (
+                <div role="status" data-testid="wt-files-denied"
+                  className="rounded-xl border border-amber-700/40 bg-amber-950/30 px-4 py-2.5 text-sm wt-warn">
+                  {t('files.tabDenied')}
+                </div>
+              )}
               {/* banda de status — identitate + fapte-cheie, accent = culoarea hostului. Umple
                   partea de sus şi pe hosturile fără metrici (nu mai rămâne spaţiu mort). */}
               <StatusBand host={host} />
@@ -475,7 +499,7 @@ export default function HostOverview(props: {
           </div>
         )}
 
-        {tab === 'files' && (
+        {tab === 'files' && filesOk && (
           <Suspense fallback={paneFallback}>
             <FilePanel embed host={host} sessionId="" onClose={() => setTab('overview')} />
           </Suspense>

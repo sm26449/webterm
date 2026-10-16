@@ -44,7 +44,7 @@ and maximize buttons (or double-click the pane title).
 | `Alt+X` | Split view: maximize / restore the focused pane (macOS: see the note above) |
 | `Alt+P` | Detach the session into a window |
 | `Alt+S` | Saved commands (snippets) |
-| `Alt+E` | Open / close the session's **Files** panel (inside a split view: the focused pane's). Not bound in bash/zsh readline; in fish it replaces "edit the line in `$EDITOR`" — the same trade-off as `Alt+S`/`Alt+P`. macOS: see the note above (`Option+E` is the accent dead key) |
+| `Alt+E` | Open / close the session's **Files** panel (inside a split view: the focused pane's). At a shell prompt it is taken: not bound in bash/zsh readline; in fish it replaces "edit the line in `$EDITOR`" — the same trade-off as `Alt+S`/`Alt+P`. While a full-screen program runs on the alternate screen (nano `M-E`, emacs `M-e`, mc, vim) the key goes to the program and the panel stays as it is. macOS: see the note above (`Option+E` is the accent dead key) |
 | `Alt++` / `Alt+−` | Larger / smaller font |
 | `Mod+Shift+V` | Paste picker — clipboard history shared by all terminals (`Shift+Enter` in the picker = paste and run) |
 
@@ -96,7 +96,7 @@ the list has focus.
 | `Mod+Shift+C` | Copy the full path |
 | `Shift+F10` / Menu key / right-click | Row actions menu: open / edit, download (`.tgz` for folders), rename, duplicate, copy name, copy path, copy to host…, **cd here in the terminal**, delete. `↑`/`↓`/`Home`/`End` move, `Esc` closes and returns to the row. Right-click on the empty part of the list: new file / folder, upload, reload, copy path, cd here |
 | `Space`, `Shift+↑`/`↓`, `Mod+A` | Select a row, extend the selection, select all visible |
-| `Delete` | Delete (the selection, or the current row). The confirmation has the focus: `Enter` deletes, `Esc` cancels |
+| `Delete` | Delete (the selection, or the current row). The confirmation shows the full path and has the focus on **Cancel**: `Tab` to Delete, then `Enter`; `Esc` cancels. Enter in the list never confirms it — any key or click in the list closes it. A held-down key (auto-repeat) never deletes |
 | `Esc` | Clear the selection; a second `Esc` closes the panel |
 
 **cd here in the terminal** (session panel only) types `cd -- '<path>'` at the prompt and does
