@@ -72,6 +72,11 @@ Files panel UI/UX. Frontend only — no agent change (agent stays 58), no new ga
   keeps its gate: with the agent offline or without `files.read` on that host, the page stays on
   Overview with a clear message instead of opening a panel that fails.
 
+### Fixed
+- **Status → System**: the "how to update" command sat inside the `<dl>` as a `<div>` without
+  `<dt>`/`<dd>` (axe `definition-list`, serious). It only rendered when a newer release existed, so
+  the a11y gate went red as soon as one was published; it now sits below the list.
+
 ### Removed
 - **`FileBrowser`**, the older modal file manager behind the host menu → Files, and its strings.
   Why: a second file UI without multi-select, copy to host, resumable transfers, the denied-write

@@ -186,15 +186,17 @@ export default function StatusModal(props: { onClose: () => void }) {
                     )}
                   </dd>
                 </div>
-                {ver?.update_command && (
-                  <div className="py-2">
-                    <p className="text-xs text-slate-500">{t('settings.update.howTo')}</p>
-                    <UpdateCommand command={ver.update_command} />
-                  </div>
-                )}
                 {s.image && <Row k={t('status.image')} v={s.image} />}
                 <Row k={t('status.agentRecommended')} v={s.agent_latest != null ? `v${s.agent_latest}` : '—'} />
               </dl>
+              {/* comanda de update stă SUB lista de definiţii: un <div> fără <dt>/<dd> în <dl> e invalid
+                  (axe `definition-list`, serios) — apărea doar când chiar exista o versiune nouă */}
+              {ver?.update_command && (
+                <div className="py-2">
+                  <p className="text-xs text-slate-500">{t('settings.update.howTo')}</p>
+                  <UpdateCommand command={ver.update_command} />
+                </div>
+              )}
             </div>
 
             {/* sănătatea gateway-ului însuși — degradarea vizibilă înainte de cădere */}
