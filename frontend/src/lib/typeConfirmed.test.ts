@@ -131,13 +131,20 @@ describe('Type into terminal after notPrompt (hotfix 3.6.13)', () => {
 })
 
 describe('M1: TAB inside a paste under tmux is not trusted as literal (guardrail fails closed)', () => {
-  it('tmux-backed agent, SSH (tmux new -A) and an unknown host are untrusted; agent pty / telnet are not', () => {
+  it('allowlist: only agent pty and telnet are trusted; tmux, SSH, unknown backend / host are not', () => {
     expect(pasteModeUntrusted({ backend: 'tmux', connection_type: 'agent' })).toBe(true)
+    expect(pasteModeUntrusted({ backend: null, connection_type: 'agent' })).toBe(true)
+    expect(pasteModeUntrusted({ backend: 'weird', connection_type: 'agent' })).toBe(true)
+    expect(pasteModeUntrusted({ backend: null })).toBe(true)
     expect(pasteModeUntrusted({ backend: null, connection_type: 'ssh' })).toBe(true)
+    expect(pasteModeUntrusted({ backend: 'pty', connection_type: 'ssh' })).toBe(true)
     expect(pasteModeUntrusted({ backend: null, connection_type: 'ssh-jump' })).toBe(true)
     expect(pasteModeUntrusted(null)).toBe(true)
+    expect(pasteModeUntrusted(undefined)).toBe(true)
     expect(pasteModeUntrusted({ backend: 'pty', connection_type: 'agent' })).toBe(false)
+    expect(pasteModeUntrusted({ backend: 'pty' })).toBe(false)
     expect(pasteModeUntrusted({ backend: null, connection_type: 'telnet' })).toBe(false)
+    expect(pasteModeUntrusted({ backend: null, connection_type: 'telnet-jump' })).toBe(false)
   })
   it('`rm -rf /tm<TAB>…` pasted: literal only with a trusted mode', () => {
     const d = '\x1b[200~rm -rf /tm\tp/x\x1b[201~\r'

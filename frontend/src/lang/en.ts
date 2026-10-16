@@ -936,7 +936,7 @@ const en: Lang = {
     'transfers.rootMoveTitle': "The agent can't write in this folder",
     'transfers.rootMoveAsk': "Upload to {user}'s inbox and type a sudo command into this terminal for you to review? It installs the file only if its SHA-256 still matches. Nothing runs until you press Enter.",
     'transfers.rootMoveCopied': "The command could not be typed here (read-only terminal, or not at a shell prompt) — it was copied instead; paste it into a root shell. It checks each file's SHA-256 before installing.",
-    'transfers.insertNotTyped': "Not typed: the terminal is not at a shell prompt (or is read-only). The path was copied instead.",
+    'transfers.insertNotTyped': "Not typed: WebTerm can't tell whether a shell prompt is waiting in this terminal. The path was copied instead — or use “Type into terminal” if the program expects text (e.g. a CLI prompt).",
     'transfers.typeAnyway': "Type into terminal",
     'transfers.typeAnywayHint': "WebTerm can't tell whether a shell prompt is waiting — type the path only if the program expects text (e.g. a CLI prompt).",
     'transfers.pasteNotTyped': "Saved {subject}, but its path was not typed.",

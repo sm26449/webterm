@@ -34,7 +34,14 @@ export function modeRestoreSeq(m: IModes): string {
     (verificat pe tmux 3.4) — deci `bracketedPasteMode` din xterm nu spune nimic despre programul din
     panou: nici că un shell ar trata un TAB lipit ca text, nici că în prim-plan aşteaptă un prompt. */
 export function pasteModeUntrusted(host?: { backend?: string | null; connection_type?: string | null } | null): boolean {
-  return !host || host.backend === 'tmux' || host.connection_type === 'ssh' || host.connection_type === 'ssh-jump'
+  // LISTĂ ALBĂ, ca gateway-ul (core.py stream_is_plain): de încredere doar fluxurile ştiute fără tmux —
+  // agent cu backend `pty`, telnet / telnet prin bastion. Restul (tmux, SSH, backend necunoscut,
+  // host necunoscut) → nu. Limită cunoscută: un tmux pornit DE MÂNĂ într-o sesiune pty/telnet face
+  // modul la fel de lipicios şi nu se vede de aici.
+  if (!host) return true
+  const ct = host.connection_type || 'agent'
+  if (ct === 'agent') return host.backend !== 'pty'
+  return !(ct === 'telnet' || ct === 'telnet-jump')
 }
 
 /** bracketed paste pe care ne putem baza (guardrail: TAB într-un paste = text): modul cerut ŞI un

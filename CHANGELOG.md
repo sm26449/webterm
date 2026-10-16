@@ -33,8 +33,9 @@ back.
   into whatever ran in the pane, mc, vim, less or htop included; and (2) the command guardrail
   treated a `Tab` inside a paste as literal text even when the pane's shell does not do bracketed
   paste (bash ≤ 5.0, busybox sh, zsh without `zle_bracketed_paste`, an old ssh host), where it is
-  completion — `rm -rf /tm⇥…` was judged as typed while the shell completed it. In panes behind a
-  tmux client (agent tmux backend, SSH sessions) only shell integration (OSC 133) now authorises
+  completion — `rm -rf /tm⇥…` was judged as typed while the shell completed it. The mode is now
+  trusted only on an allowlist (agent with the `pty` backend, telnet); elsewhere (agent tmux backend,
+  SSH sessions, unknown backend) only shell integration (OSC 133) authorises
   automatic typing, and a `Tab` inside a paste asks "Can't check this input" (fail closed). A path
   is also no longer typed while the guardrail is holding input (echo wait or its dialog).
   Frontend only.

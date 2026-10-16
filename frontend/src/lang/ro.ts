@@ -953,7 +953,7 @@ const ro: Lang = {
     'transfers.rootMoveTitle': "Agentul nu poate scrie în acest dosar",
     'transfers.rootMoveAsk': "Urc în inbox-ul lui {user} și tastez în acest terminal o comandă sudo, ca s-o verifici? Ea instalează fișierul doar dacă SHA-256-ul lui se potrivește. Nu rulează nimic până nu apeși Enter.",
     'transfers.rootMoveCopied': "Comanda nu a putut fi tastată aici (terminal doar-citire sau nu e la un prompt de shell) — a fost copiată; lipește-o într-un shell root. Verifică SHA-256-ul fiecărui fișier înainte de instalare.",
-    'transfers.insertNotTyped': "Netastată: terminalul nu e la un prompt de shell (sau e doar-citire). Calea a fost copiată.",
+    'transfers.insertNotTyped': "Netastată: WebTerm nu poate ști dacă în acest terminal așteaptă un prompt de shell. Calea a fost copiată — sau alege „Tastează în terminal” dacă programul așteaptă text (de ex. promptul unui CLI).",
     'transfers.typeAnyway': "Tastează în terminal",
     'transfers.typeAnywayHint': "WebTerm nu poate ști dacă așteaptă un prompt de shell — tastează calea doar dacă programul așteaptă text (de ex. promptul unui CLI).",
     'transfers.pasteNotTyped': "Am salvat {subject}, dar calea nu a fost tastată.",

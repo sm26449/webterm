@@ -381,7 +381,10 @@ The file is uploaded to the host's **inbox** and its path is typed at the prompt
   backend, and SSH sessions, which start `tmux new -A` when the remote has it) only shell
   integration (OSC 133) can show a waiting prompt: tmux sends `ESC[?2004h` to its client once, at
   attach, and never forwards the pane's own bracketed-paste switches (verified on tmux 3.4), so the
-  browser's bracketed-paste mode says nothing about the program in the pane. The toast says why
+  browser's bracketed-paste mode says nothing about the program in the pane. That mode is trusted
+  only for an agent with the `pty` backend and for telnet; any other or unknown backend counts as
+  tmux. Known limit: a tmux you start by hand inside a `pty` or telnet session makes the mode just
+  as sticky, and the browser cannot detect it. The toast says why
   the path was not typed (no prompt visible; characters that cannot be typed; terminal closed;
   read-only, muted, disconnected or waiting for a guardrail decision), the Transfers widget opens,
   and the row offers **Type into terminal** next to **Copy path**, with the line "WebTerm can't
