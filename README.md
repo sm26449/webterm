@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/sm26449/webterm/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/sm26449/webterm/actions/workflows/docker-publish.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v3.6.13-blue)](https://github.com/sm26449/webterm/tags)
+[![Version](https://img.shields.io/badge/version-v3.6.14-blue)](https://github.com/sm26449/webterm/tags)
 
 **Persistent terminals for your whole infrastructure, in the browser.**
 
@@ -66,7 +66,7 @@ flowchart TB
 
 ## Screenshots
 
-Fictional demo fleet, captured on v3.6.13 with
+Fictional demo fleet, captured on v3.6.14 with
 [`scripts/screenshots/run.sh`](scripts/screenshots/run.sh). The images follow your GitHub theme
 (dark or light); the terminal itself stays dark in both.
 
@@ -125,7 +125,7 @@ On a fresh **Ubuntu/Debian** server (amd64) with a domain pointing at it and por
 ```sh
 git clone https://github.com/sm26449/webterm.git
 cd webterm
-git checkout v3.6.13          # the release tag from the version badge; a tag cannot move under you
+git checkout v3.6.14          # the release tag from the version badge; a tag cannot move under you
 less install.sh             # it is meant to be read: it runs as root
 sudo ./install.sh --domain term.example.com --email you@example.com
 ```
@@ -259,7 +259,7 @@ passphrase and `.env` are **not** in it. Backups from the UI and the scheduled t
 ## Upgrade and rollback
 
 ```sh
-cd /opt/webterm && sudo ./upgrade.sh     # latest release; or pass a tag: sudo ./upgrade.sh v3.6.13
+cd /opt/webterm && sudo ./upgrade.sh     # latest release; or pass a tag: sudo ./upgrade.sh v3.6.14
 ./rollback.sh                           # back to the previous image, any time afterwards
 ```
 
@@ -284,7 +284,7 @@ make test-local   # + the suites that need a real tmux/agent (sandboxed from pro
 
 Before an image is published, CI runs the unit suite, ruff, gitleaks and `pip-audit`, verifies
 the agent signature, boots the image, and drives it in a browser: an E2E run with a **real agent
-on tmux** (`scripts/e2e-session.mjs`, 215 checks), file and port-forward tests, a mobile audit on
+on tmux** (`scripts/e2e-session.mjs`, 217 checks), file and port-forward tests, a mobile audit on
 10 devices and an accessibility gate. Building from source, the test layout and the full chain:
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). How to contribute — including re-signing the agent
 and regenerating these screenshots — is in [CONTRIBUTING.md](CONTRIBUTING.md).

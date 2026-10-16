@@ -48,6 +48,9 @@ export interface UploadJob {
   /** rezultatul inserării (doar pentru `then`): false = tab-ul de origine nu mai era deschis,
       rândul oferă „Copy path" în loc şi nu expiră singur */
   inserted?: boolean
+  /** de ce n-a tastat (hotfix 3.6.13): 'notPrompt' = rulează un program în prim-plan — rândul oferă
+      „Tastează în terminal" (click explicit, vezi transfers.ts typeIntoConfirmed) lângă „Copy path" */
+  insertOutcome?: 'typed' | 'noTarget' | 'unsafe' | 'notPrompt' | 'refused'
   /** `archive` = folder descărcat ca .tgz făcut pe host (3.5.5): mărimea e NECUNOSCUTĂ dinainte
       (`size` 0 → rândul arată octeţii primiţi, nu un %), iar o arhivă generată din mers nu se
       poate relua — fără pauză; Retry o reporneşte de la zero. */

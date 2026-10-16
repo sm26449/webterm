@@ -2,11 +2,11 @@ import type { Host } from '../lib/api'
 import { copyText } from '../lib/clipboard'
 import { useI18n } from '../lib/i18n'
 import { notifyToast } from '../lib/notify'
-import { insertPathInto } from '../lib/transfers'
-import { cancelUpload, dirName, discardUpload, dismissUpload, fmtBytes, fmtEta, fmtRate, openFilesAt, pauseUpload, resumeUpload, retryUpload } from '../lib/uploads'
+import { canTypeInto, insertPathConfirmed, insertPathOutcome, notTypedReasonKey } from '../lib/transfers'
+import { cancelUpload, dirName, discardUpload, dismissUpload, fmtBytes, fmtEta, fmtRate, lingerDone, openFilesAt, pauseUpload, resumeUpload, retryUpload } from '../lib/uploads'
 import { cancelDownload, discardDownload, dismissDownload, pauseDownload, restartDownload, resumeDownload, resumeInterrupted, retryDownload } from '../lib/downloads'
 import { canRetryCopy, cancelCopy, dismissCopy, retryCopy } from '../lib/copyjobs'
-import { UploadJob, canPause, isActive, isCopy, isDownload, sizeKnown } from '../lib/uploadStore'
+import { UploadJob, canPause, isActive, isCopy, isDownload, sizeKnown, uploadStore } from '../lib/uploadStore'
 import { CopyIcon, DownloadIcon, UploadIcon } from './Icons'
 import { compactAction } from './ui'
 
@@ -30,8 +30,12 @@ const BAR_CLS: Record<UploadJob['state'], string> = {
   done: 'bg-emerald-500', cancelled: 'bg-slate-500', orphan: 'bg-amber-500/60',
 }
 
+/** upload terminat a cărui cale NU s-a tastat fiindcă rulează un program (hotfix 3.6.13): rândul
+    oferă „Tastează în terminal" — widgetul se deschide, altfel oferta ar sta ascunsă în pilulă */
+export const notTypedAtPrompt = (j: UploadJob) => j.state === 'done' && j.insertOutcome === 'notPrompt'
 /** stările care cer o decizie a omului — singurele care aduc bara pe ecran */
 export const needsAttention = (j: UploadJob) => j.state === 'stalled' || j.state === 'err' || j.state === 'orphan'
+  || notTypedAtPrompt(j)
 
 const BTN = compactAction   // design system (ui/classes)
 
@@ -102,6 +106,11 @@ export function JobRow(props: { job: UploadJob; hostName: string; insertSid?: st
   // copiere: hostName e deja „A → B" (scris de motor)
   const name = `${copy ? j.hostName : props.hostName} · ${j.name}`
   const canInsert = !down && !copy && !!props.insertSid && props.insertHostId === j.hostId
+  // „Tastează în terminal" (hotfix 3.6.13): doar după un 'notPrompt', doar în sesiunea ACTIVĂ — cea în
+  // care s-a lipit/tras fişierul, sau cea în care tocmai s-a apăsat „Insert path" (marcată pe job)
+  // nu şi într-o sesiune doar-vizualizare / pe mut (review hotfix 3.6.13, L4)
+  const offerType = notTypedAtPrompt(j) && canInsert && (!j.sid || j.sid === props.insertSid)
+    && canTypeInto(props.insertSid)
   const known = sizeKnown(j)
   const status = jobStatusParts(j, t)
   // Acţiunile diferă pe sens: up → uploads.ts, down → downloads.ts (fişiere + arhive), copy →
@@ -175,12 +184,30 @@ export function JobRow(props: { job: UploadJob; hostName: string; insertSid?: st
       {/* done upload: calea fişierului urcat e lucrul util — pentru un CLI care ia căi (Claude Code,
           aider) ea E rezultatul. Copiere mereu; inserare doar în sesiunea activă a aceluiaşi host.
           done download: fişierul e deja salvat, nu e nimic de copiat/inserat. */}
-      {j.state === 'done' && canInsert && (
+      {/* explicit, cu explicaţia sub rând: click-ul = consimţământul de a tasta într-un program */}
+      {offerType && (
+        <button type="button" className={`${BTN} wt-warn`} data-testid="wt-job-type-anyway"
+          aria-describedby={`wt-job-type-hint-${j.id}`}
+          onClick={() => {
+            const r = insertPathConfirmed(props.insertSid, j.dest)
+            if (r === 'typed') {
+              uploadStore.patch(j.id, { inserted: true, insertOutcome: 'typed' })
+              lingerDone(j.id)
+            } else notifyToast(t(notTypedReasonKey(r)), 'warn')
+          }}
+          aria-label={`${t('transfers.typeAnyway')} ${j.name}`}>{t('transfers.typeAnyway')}</button>
+      )}
+      {j.state === 'done' && canInsert && !offerType && (
         <button type="button" className={`${BTN} wt-info`}
           onClick={() => {
             // tastăm doar la un prompt de shell (bracketed paste); altfel copiem şi spunem de ce
-            if (!insertPathInto(props.insertSid, j.dest)) {
-              void copyText(j.dest).then((ok) => { if (ok) notifyToast(t('transfers.insertNotTyped'), 'warn') })
+            const r = insertPathOutcome(props.insertSid, j.dest)
+            if (r !== 'typed') {
+              // un program în prim-plan: rândul oferă de acum „Tastează în terminal" (în ACEASTĂ sesiune)
+              if (r === 'notPrompt') {
+                uploadStore.patch(j.id, { insertOutcome: r, sid: props.insertSid })
+                void copyText(j.dest).then((ok) => { if (ok) notifyToast(t('transfers.insertNotTyped'), 'warn') })
+              } else notifyToast(t(notTypedReasonKey(r)), 'warn')
             }
           }}
           aria-label={`${t('transfers.insertPath')} ${j.name}`}>{t('transfers.insertPath')}</button>
@@ -200,6 +227,12 @@ export function JobRow(props: { job: UploadJob; hostName: string; insertSid?: st
         <p className={`line-clamp-2 pb-0.5 pl-5 text-2xs [overflow-wrap:anywhere] ${j.state === 'err' ? 'wt-danger' : j.state === 'orphan' ? 'wt-warn' : 'text-slate-400'}`}
           title={status.extra} data-testid="wt-job-detail">
           {status.extra}
+        </p>
+      )}
+      {offerType && (
+        <p id={`wt-job-type-hint-${j.id}`} className="pb-0.5 pl-5 text-2xs wt-warn [overflow-wrap:anywhere]"
+          data-testid="wt-job-type-hint">
+          {t('transfers.typeAnywayHint')}
         </p>
       )}
     </li>

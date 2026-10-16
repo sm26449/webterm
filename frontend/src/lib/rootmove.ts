@@ -61,7 +61,10 @@ export function setfaclCommand(user: string | null | undefined, dir: string): st
 export { isSafeToType }
 
 /** Tastează comanda în terminalul `sid` FĂRĂ Enter, ca bracketed paste şi doar la un prompt
-    (lib/transfers.ts typeIntoOutcome). Altceva decât 'typed' = nimic tastat → „Copy". */
+    (lib/transfers.ts typeIntoOutcome). Altceva decât 'typed' = nimic tastat → „Copy".
+    Fără „Tastează oricum" aici (hotfix 3.6.13, decizie): pentru o CALE după 'notPrompt' există
+    typeIntoConfirmed (un CLI ca Claude Code o aşteaptă), dar o comandă `sudo install …` tastată într-un
+    program necunoscut (un REPL, un ssh spre alt host, mc) e mult mai riscantă — rămâne doar Copy. */
 export function typeCommandOutcome(sid: string | undefined, cmd: string): TypeOutcome {
   return typeIntoOutcome(sid, cmd)
 }

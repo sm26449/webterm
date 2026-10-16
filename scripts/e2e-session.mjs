@@ -1405,6 +1405,49 @@ try {
   await page.keyboard.type('&& echo PASTE_OK\n')
   check('fişierul lipit există pe host (4 octeţi)', await waitScreen('PASTE_OK', 8000))
 
+  // Hotfix 3.6.13: un program rulează în prim-plan (aici `cat`; în viaţa reală Claude Code) şi pagina
+  // NU a văzut DECSET 2004 — sub tmux el vine doar la attach-ul clientului tmux, deci o pagină
+  // reîncărcată nu-l are. Simulăm asta local (xterm: ?2004l). Calea NU se tastează singură (garda
+  // 3.6.9 L2 rămâne), dar rândul din Transferuri oferă „Type into terminal" + explicaţia; click-ul
+  // explicit o tastează (bracketed paste, fără Enter) — `cat` o afişează prin ecoul tty-ului.
+  const hadBracketed = await page.evaluate(() => {
+    const term = window.__wtTerms?.get(location.hash.replace('#/s/', ''))
+    const was = term?.modes?.bracketedPasteMode === true
+    term?.write('\x1b[?2004l')
+    return was
+  })
+  await activePane.locator('.xterm-screen').click()
+  await page.keyboard.type('cat\n')
+  await page.waitForTimeout(800)
+  await activePane.locator('.xterm-helper-textarea').evaluate((ta) => {
+    const dt = new DataTransfer()
+    dt.items.add(new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], 'image.png', { type: 'image/png' }))
+    ta.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }))
+  })
+  const offerBtn = page.locator('[data-testid="wt-job-type-anyway"]').last()
+  const offered = await offerBtn.waitFor({ state: 'visible', timeout: 20000 }).then(() => true, () => false)
+  const npJob = await page.evaluate(() => [...(window.__wtTransfers?.store?.snapshot?.()?.values?.() ?? [])]
+    .find((j) => j.insertOutcome === 'notPrompt') ?? null)
+  const npName = npJob ? String(npJob.dest).split('/').pop() : ''
+  const notAuto = !!npName && !(await screenText()).includes(npName)
+  const hintOk = offered && await page.locator('[data-testid="wt-job-type-hint"]').last().isVisible().catch(() => false)
+  check('program în prim-plan: calea NU se tastează singură; rândul oferă „Type into terminal" + explicaţia',
+    offered && notAuto && hintOk, JSON.stringify({ offered, notAuto, hintOk, npJob }))
+  if (offered) await offerBtn.click()
+  // FĂRĂ Enter, dovedit: cu un \r, `cat` ar fi re-afişat linia (calea de DOUĂ ori pe ecran)
+  const typedOnce = offered && !!npName && await waitScreen(npName, 8000)
+  await page.waitForTimeout(1200)
+  const seen = npName ? (await screenText()).split(npName).length - 1 : 0
+  check('„Type into terminal": click-ul explicit tastează calea în program, o singură dată (fără Enter)',
+    typedOnce && seen === 1, `apariţii=${seen}`)
+  await activePane.locator('.xterm-screen').click()
+  await page.keyboard.press('Control+c')
+  await page.evaluate(({ was, id }) => {
+    if (was) window.__wtTerms?.get(location.hash.replace('#/s/', ''))?.write('\x1b[?2004h')
+    if (id) window.__wtTransfers?.store?.remove?.(id)
+  }, { was: hadBracketed, id: npJob?.id ?? null })
+  await page.waitForTimeout(500)
+
   // ── 3.6.9: o scriere refuzată de host spune DE CE, cu dosarul — şi imediat ──
   // /sys e montat doar-citire în container (agentul de aici e root, deci permisiunile nu-l opresc;
   // un FS read-only da). Înainte: „Server answered 400" abia după 8 reîncercări (~1 min).

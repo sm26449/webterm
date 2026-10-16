@@ -415,7 +415,15 @@ includes **`Tab` outside a bracketed paste**: it is readline completion (`rm -rf
 `rm -rf /tmp/`). Between `ESC[200~` and the next `ESC[201~` (or the end of the chunk) a `Tab` is
 literal — but only when the shell of the origin **and of every target pane** has bracketed paste
 mode on (xterm's `bracketedPasteMode`); otherwise the markers could come from the pasted text
-itself and the shell would not honour them), "Paste & run" from the paste history
+itself and the shell would not honour them. That mode is **not trusted** in a pane whose stream
+goes through a tmux client (agent with the tmux backend, and SSH sessions, which start
+`tmux new -A` when the remote has it): tmux sends `ESC[?2004h` to its client once, at attach, and
+never forwards the pane's own toggles (verified on tmux 3.4) — so xterm says "on" while bash ≤ 5.0,
+busybox sh or a zsh without `zle_bracketed_paste` in the pane would still complete the `Tab`. There
+a `Tab` inside a paste is "Can't check this input" — fail closed, hotfix after 3.6.13. The mode is
+trusted only on an allowlist, like the gateway's plain-stream check: an agent with the `pty` backend
+and telnet; any other or unknown backend counts as tmux. Known limit: a tmux started by hand inside
+a `pty` or telnet session makes the mode just as sticky, and the browser cannot detect it), "Paste & run" from the paste history
 (its Enter takes the same queued path as a typed Enter, so it never starts a second wait), and snippets / palette inserts (typed into every
 pane when broadcasting; one containing a line break is checked line by line — the first line
 appended to what is already typed — and not typed at all if a line matches; since 3.6.13 they also

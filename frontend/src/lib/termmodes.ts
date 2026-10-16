@@ -27,3 +27,23 @@ export function modeRestoreSeq(m: IModes): string {
   }
   return s
 }
+
+/** Fluxul acestui terminal trece (sau poate trece) printr-un client tmux: agent cu backend tmux, sau
+    SSH / SSH prin bastion (comanda sesiunii e `tmux new -A … || exec $SHELL -l`). Fără host cunoscut: da (fail-closed).
+    tmux trimite clientului `ESC[?2004h` O DATĂ, la attach, şi nu-i transmite comutările panoului
+    (verificat pe tmux 3.4) — deci `bracketedPasteMode` din xterm nu spune nimic despre programul din
+    panou: nici că un shell ar trata un TAB lipit ca text, nici că în prim-plan aşteaptă un prompt. */
+export function pasteModeUntrusted(host?: { backend?: string | null; connection_type?: string | null } | null): boolean {
+  // LISTĂ ALBĂ, ca gateway-ul (core.py stream_is_plain): de încredere doar fluxurile ştiute fără tmux —
+  // agent cu backend `pty`, telnet / telnet prin bastion. Restul (tmux, SSH, backend necunoscut,
+  // host necunoscut) → nu. Limită cunoscută: un tmux pornit DE MÂNĂ într-o sesiune pty/telnet face
+  // modul la fel de lipicios şi nu se vede de aici.
+  if (!host) return true
+  const ct = host.connection_type || 'agent'
+  if (ct === 'agent') return host.backend !== 'pty'
+  return !(ct === 'telnet' || ct === 'telnet-jump')
+}
+
+/** bracketed paste pe care ne putem baza (guardrail: TAB într-un paste = text): modul cerut ŞI un
+    flux fără tmux. Sub tmux → false: un TAB lipit devine „nu pot verifica" (fail-closed). */
+export const trustedBracketed = (untrusted: boolean, mode: boolean): boolean => !untrusted && mode
