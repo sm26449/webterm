@@ -25,7 +25,7 @@ Frontend only — no agent change (agent stays 58), no new gateway route.
   finished within 30 s of the paste, nothing else was sent to that terminal since (a key typed in
   between = a different context), the guardrail is not holding input, and the text is safe to type.
   Otherwise the old rules apply (typed at a real shell prompt, else **Type into terminal** + **Copy
-  path**), and the row and the toast now say *why* it was not typed. Uploads that do not start from
+  path**), and the row now says *why* it was not typed. Uploads that do not start from
   a paste/drop on the terminal (Files panel, **Insert path**) keep the old rules; the move-as-root
   `sudo` command is still copy-only unless a real prompt is visible. The path goes only into the pane
   that received the paste, never to broadcast peers — the file exists only on that pane's host.
@@ -37,6 +37,12 @@ Frontend only — no agent change (agent stays 58), no new gateway route.
   Toasts used to sit in the same bottom-right corner *above* the widget (z-50 over z-40), so the
   "path was not typed" toast covered exactly the row it talked about; the toast stack now sits above
   the widget (it publishes its height as `--wt-transfers-top`), capped at 45vh.
+- **One paste = one short toast.** Why: a paste left two toasts stacked ("Uploading screenshot…" and
+  the result), and the "not typed" one repeated the long explanation already shown in the Transfers
+  row — on a phone it covered half the screen. Toasts now take an optional key and a toast with the
+  same key replaces the previous one in place (`lib/notify.ts` `upsertToast`); the paste's result
+  replaces its "Uploading…" toast, and "not typed" is one line ("Saved screenshot — path not typed
+  (see Transfers)"), with the full reason only in the row.
 
 ## [3.6.15] — 2026-10-16 · agent (58)
 

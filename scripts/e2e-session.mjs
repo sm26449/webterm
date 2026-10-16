@@ -1495,8 +1495,12 @@ try {
   // capturi ale rândului cu cele mai multe acţiuni (Type into terminal + Copy path + Dismiss + explicaţia),
   // pentru recenzia layout-ului (3.6.16: nimic tăiat) — desktop, teme, telefon; fără /out → sărite tăcut
   if (offered) await transferShots('type-anyway')
-  check('tastă între paste şi final (3.6.16): calea NU se tastează singură; rândul oferă „Type into terminal" + de ce',
-    offered && notAuto && hintOk && npJob?.pasteStale === 'input', JSON.stringify({ offered, notAuto, hintTxt, npJob }))
+  // un paste = UN toast: „Uploading…" e înlocuit pe loc de rezultat (scurt; motivul stă în rând)
+  const toastTxts = await page.locator('.wt-toast').allTextContents().catch(() => [])
+  const oneToast = !toastTxts.some((x) => /Uploading screenshot/i.test(x))
+    && toastTxts.filter((x) => /path not typed \(see Transfers\)/i.test(x)).length === 1
+  check('tastă între paste şi final (3.6.16): calea NU se tastează singură; rândul oferă „Type into terminal" + de ce; un singur toast',
+    offered && notAuto && hintOk && oneToast && npJob?.pasteStale === 'input', JSON.stringify({ offered, notAuto, hintTxt, toastTxts, npJob }))
   if (offered) await offerBtn.click()
   const typedOnce = offered && !!npName && await waitScreen(npName, 8000)
   await page.waitForTimeout(1200)

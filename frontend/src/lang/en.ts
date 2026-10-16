@@ -942,7 +942,7 @@ const en: Lang = {
     'transfers.pasteStale.timeout': "Not typed automatically: the upload took longer than 30 seconds.",
     'transfers.pasteStale.target': "Not typed automatically: the terminal was reopened while the file was uploading.",
     'transfers.typeAnywayHint': "WebTerm can't tell whether a shell prompt is waiting — type the path only if the program expects text (e.g. a CLI prompt).",
-    'transfers.pasteNotTyped': "Saved {subject}, but its path was not typed.",
+    'transfers.pasteNotTyped': "Saved {subject} — path not typed (see Transfers).",
     'transfers.whyNotPrompt': "WebTerm can't tell whether a shell prompt is waiting in this terminal — use “Type into terminal” in Transfers if the program expects text (e.g. a CLI prompt), or Copy path.",
     'transfers.whyUnsafe': "The path contains characters that can't be typed into a terminal — copy it instead.",
     'transfers.whyNoTarget': "That terminal is closed — copy the path instead.",

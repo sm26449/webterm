@@ -43,7 +43,7 @@ import { copyText } from './lib/clipboard'
 import { ArrowsLeftRightIcon, CloseIcon, CopyIcon, FullscreenIcon, LockIcon, ShieldIcon } from './components/Icons'
 import { EmptyState } from './components/ui'
 import { loadPerms } from './lib/perms'
-import { ensureNotificationPermission, notify, notifyError, registerToast } from './lib/notify'
+import { ensureNotificationPermission, notify, notifyError, registerToast, upsertToast } from './lib/notify'
 import { forgetUploads, hideUploadOrphans, openFilesAt, restoreOrphans, setUploadUser } from './lib/uploads'
 import { forgetDownloads, hideInterruptedDownloads, restoreInterruptedDownloads, setDownloadUser } from './lib/downloads'
 import { clearAll as clearClipHistory } from './lib/cliphistory'
@@ -544,9 +544,9 @@ function MainApp() {
     }
   }, [])
   useEffect(() => {
-    registerToast((message, kind) => {
+    registerToast((message, kind, key) => {
       const id = `${Date.now()}-${Math.random()}`
-      setToasts((t) => [...t, { id, message, kind }])
+      setToasts((t) => upsertToast(t, { id, message, kind, key }))
       // erorile stau mai mult (12s) — ai nevoie de timp să citeşti motivul; info/warn 6s
       setTimeout(() => expireToast(id), kind === 'error' ? 12000 : 6000)
     })

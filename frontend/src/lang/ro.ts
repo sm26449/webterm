@@ -959,7 +959,7 @@ const ro: Lang = {
     'transfers.pasteStale.timeout': "Netastată automat: upload-ul a durat mai mult de 30 de secunde.",
     'transfers.pasteStale.target': "Netastată automat: terminalul a fost redeschis cât se urca fișierul.",
     'transfers.typeAnywayHint': "WebTerm nu poate ști dacă așteaptă un prompt de shell — tastează calea doar dacă programul așteaptă text (de ex. promptul unui CLI).",
-    'transfers.pasteNotTyped': "Am salvat {subject}, dar calea nu a fost tastată.",
+    'transfers.pasteNotTyped': "Am salvat {subject} — calea nu a fost tastată (vezi Transferuri).",
     'transfers.whyNotPrompt': "WebTerm nu poate ști dacă în acest terminal așteaptă un prompt de shell — alege „Tastează în terminal” în Transferuri dacă programul așteaptă text (de ex. promptul unui CLI), sau Copiază calea.",
     'transfers.whyUnsafe': "Calea conține caractere care nu pot fi tastate într-un terminal — copiaz-o.",
     'transfers.whyNoTarget': "Terminalul acela e închis — copiază calea.",

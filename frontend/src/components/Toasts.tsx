@@ -7,6 +7,8 @@ export interface ToastItem {
   id: string
   message: string
   kind: ToastKind
+  /** toast-urile cu aceeaşi cheie se înlocuiesc pe loc (lib/notify.ts upsertToast) */
+  key?: string
 }
 
 /* Stiva de toast-uri. Trei lucruri pe care auditul de accesibilitate (2026-10, 2.1 şi 5.3) le-a

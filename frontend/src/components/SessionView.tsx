@@ -47,7 +47,7 @@ import { useFocusTrap } from '../lib/useFocusTrap'
 import { dismissUpload, startUpload } from '../lib/uploads'
 import { isWriteDenied, uploadAndMoveAsRoot } from '../lib/rootmove'
 import { uploadStore } from '../lib/uploadStore'
-import { capturePasteContext, ensureInbox, inboxName, isGenericName, markPasteHintSeen, notTypedReasonKey, pasteDest, pasteHintSeen, pasteSubject, pasteStaleKey, pasteSubjectText, pasteToastKey, pruneInbox, registerInsertTarget, resolveHome, type PasteContext } from '../lib/transfers'
+import { capturePasteContext, ensureInbox, inboxName, isGenericName, markPasteHintSeen, notTypedReasonKey, pasteDest, pasteHintSeen, pasteSubject, pasteSubjectText, pasteToastKey, pruneInbox, registerInsertTarget, resolveHome, type PasteContext } from '../lib/transfers'
 import type { PasteDest } from '../lib/transfers'
 import { baseName, looksLikePath, resolveTermPath } from '../lib/termpath'
 import CoachTip from './CoachTip'
@@ -422,27 +422,31 @@ export default function SessionView(props: {
   // Toast de final (sau de eroare) după ce toate fişierele unui paste/drop au trecut. Explică
   // SEMANTICA paste-ului (salvat unde + calea inserată la prompt), complementar cu widgetul de
   // transferuri (care arată job-ul). Un singur toast, indiferent câte fişiere.
-  const finishPaste = (ids: string[], dest: PasteDest, subject: string, kind: ReturnType<typeof pasteSubject>['kind']) => {
+  // `tkey`: cheia toastului paste-ului — rezultatul ÎNLOCUIEŞTE „Se încarcă…" (un paste = un toast)
+  const finishPaste = (ids: string[], dest: PasteDest, subject: string, kind: ReturnType<typeof pasteSubject>['kind'], tkey: string) => {
     const jobs = ids.map((id) => uploadStore.get(id))
     const failed = jobs.filter((j) => !j || j.state !== 'done')
-    if (failed.length) { notifyError(t('transfers.uploadFailedTitle'), failed[0]?.error || t('files.genericErr')); return }
+    if (failed.length) { notifyError(t('transfers.uploadFailedTitle'), failed[0]?.error || t('files.genericErr'), tkey); return }
     // calea NETASTATĂ (un program rulează — hotfix 3.6.13): toastul nu mai spune „adăugată la prompt";
     // rândul din Transferuri (deschis automat) oferă „Tastează în terminal" + „Copy path"
     const notTyped = jobs.find((j) => j?.inserted === false)
     if (notTyped) {
-      const why = notTyped.pasteStale ? `${t(pasteStaleKey(notTyped.pasteStale))} ` : ''
-      notifyToast(`${t('transfers.pasteNotTyped', { subject })} ${why}${t(notTypedReasonKey(notTyped.insertOutcome ?? 'refused'))}`, 'warn')
+      // 'notPrompt': rândul are deja explicaţia întreagă (de ce + ce poţi face) lângă buton — toastul
+      // rămâne O linie (pe telefon cel lung acoperea jumătate de ecran). Celelalte motive (fără ţintă,
+      // text nesigur, refuzat) n-au buton/explicaţie în rând, deci le spunem aici.
+      const why = notTyped.insertOutcome === 'notPrompt' ? '' : ` ${t(notTypedReasonKey(notTyped.insertOutcome ?? 'refused'))}`
+      notifyToast(`${t('transfers.pasteNotTyped', { subject })}${why}`, 'warn', tkey)
       return
     }
     let msg = t(pasteToastKey('done', dest, kind), { subject })
     // prima captură lipită: o propoziţie în plus despre LA CE foloseşte (o singură dată)
     if (kind === 'screenshot' && !pasteHintSeen()) { msg += ' ' + t('transfers.pasteFirstHint'); markPasteHintSeen() }
-    notifyToast(msg, 'info')
+    notifyToast(msg, 'info', tkey)
   }
   // 3.6.9: drop/paste în cwd-ul unui shell root (dosar al lui root) — userul agentului nu poate scrie
   // acolo. În loc de doar o eroare: oferim „urcă în inbox + tastează comanda `sudo install`" (nu o
   // rulează nimeni; Enter îl apasă omul). true = am tratat refuzul (oferit sau anulat).
-  const offerRootMove = async (ids: string[], dir: string, items: { file: File; name: string }[]): Promise<boolean> => {
+  const offerRootMove = async (ids: string[], dir: string, items: { file: File; name: string }[], tkey: string): Promise<boolean> => {
     const host = props.host!
     const refused = ids.map((id) => uploadStore.get(id))
       .filter((j) => j && j.state === 'err' && isWriteDenied(j.errorCode))
@@ -454,45 +458,48 @@ export default function SessionView(props: {
       message: `${refused[0]!.error ?? ''} ${t('transfers.rootMoveAsk', { user: host.agent_user || '?' })}`,
       confirmLabel: t('files.denied.optRoot'),
     })
-    if (!ok) { notifyError(t('transfers.uploadFailedTitle'), refused[0]!.error || t('files.genericErr')); return true }
+    if (!ok) { notifyError(t('transfers.uploadFailedTitle'), refused[0]!.error || t('files.genericErr'), tkey); return true }
     for (const j of refused) dismissUpload(j!.id)
     try {
       const r = await uploadAndMoveAsRoot({ hostId: host.id, hostName: host.name, dir, files, sid: session.id })
-      if (r.failed.length) notifyError(t('transfers.uploadFailedTitle'), t('files.denied.inboxFailed', { names: r.failed.slice(0, 3).join(', ') }))
-      else if (r.typed) notifyToast(t('files.denied.typedToast'), 'info')
-      else if (await copyText(r.command)) notifyToast(t('transfers.rootMoveCopied'), 'warn')
-      else notifyError(t('transfers.uploadFailedTitle'), t('transfers.rootMoveNotTyped'))
-    } catch (e) { notifyError(t('transfers.uploadFailedTitle'), errText(e, t) || t('files.genericErr')) }
+      if (r.failed.length) notifyError(t('transfers.uploadFailedTitle'), t('files.denied.inboxFailed', { names: r.failed.slice(0, 3).join(', ') }), tkey)
+      else if (r.typed) notifyToast(t('files.denied.typedToast'), 'info', tkey)
+      else if (await copyText(r.command)) notifyToast(t('transfers.rootMoveCopied'), 'warn', tkey)
+      else notifyError(t('transfers.uploadFailedTitle'), t('transfers.rootMoveNotTyped'), tkey)
+    } catch (e) { notifyError(t('transfers.uploadFailedTitle'), errText(e, t) || t('files.genericErr'), tkey) }
     return true
   }
+  const pasteSeqRef = useRef(0)
   const onTermDrop = async (files: File[]) => {
     // contextul gestului, ÎNAINTE de orice await (3.6.16): calea se tastează ca un paste doar cât
     // terminalul, panoul activ şi inputul rămân cele de acum (lib/transfers.ts typeIntoPasted)
     const ctx = capturePasteContext(session.id)
+    const tkey = `paste-${session.id}-${++pasteSeqRef.current}`   // un gest = un toast, actualizat pe loc
     const subj = pasteSubject(files)
     const subject = pasteSubjectText(subj, t)
     // feedback IMEDIAT (înainte de orice await): tragerea fişierelor trebuie să se simtă confirmată
-    notifyToast(t(pasteToastKey('start', 'cwd', subj.kind), { subject }), 'info')
+    notifyToast(t(pasteToastKey('start', 'cwd', subj.kind), { subject }), 'info', tkey)
     try {
       const dir = await sessionDir()
       const items = files.map((f) => ({ file: f, name: f.name }))
       const ids = await uploadFiles(dir, items, undefined, ctx)
-      if (await offerRootMove(ids, dir, items)) return
-      finishPaste(ids, 'cwd', subject, subj.kind)
-    } catch (e) { notifyError(t('transfers.uploadFailedTitle'), errText(e, t) || t('files.genericErr')) }
+      if (await offerRootMove(ids, dir, items, tkey)) return
+      finishPaste(ids, 'cwd', subject, subj.kind, tkey)
+    } catch (e) { notifyError(t('transfers.uploadFailedTitle'), errText(e, t) || t('files.genericErr'), tkey) }
   }
   // Paste de imagine/fişier: un CLI cu AI rulat aici NU vede clipboardul browserului — îi dăm
   // fişierul pe host (inbox-ul `~/.webterm/inbox`, sau cwd-ul, după preferinţă) şi calea la
   // prompt. Numele: timestamp + extensie din MIME; fişierele cu nume îl păstrează, prefixat.
   const pasteFiles = async (files: File[]) => {
     const ctx = capturePasteContext(session.id)      // vezi onTermDrop: înainte de orice await
+    const tkey = `paste-${session.id}-${++pasteSeqRef.current}`
     const host = props.host!
     const dest: PasteDest = pasteDest()
     const toInbox = dest === 'inbox'
     const subj = pasteSubject(files)
     const subject = pasteSubjectText(subj, t)
     // feedback IMEDIAT, înainte de ensureInbox/resolveHome (round-trip): Ctrl+V trebuie confirmat pe loc
-    notifyToast(t(pasteToastKey('start', dest, subj.kind), { subject }), 'info')
+    notifyToast(t(pasteToastKey('start', dest, subj.kind), { subject }), 'info', tkey)
     try {
       const dir = toInbox ? await ensureInbox(host.id) : await sessionDir()
       const when = new Date()
@@ -500,9 +507,9 @@ export default function SessionView(props: {
       const items = files.map((f) => ({ file: f, name: inboxName(f, when, isGenericName(f.name) ? ++generic : 1) }))
       // retenţia inbox-ului rulează după un upload reuşit, niciodată peste fişierul tocmai urcat
       const ids = await uploadFiles(dir, items, toInbox ? (name) => { void pruneInbox(host.id, dir, name) } : undefined, ctx)
-      if (!toInbox && await offerRootMove(ids, dir, items)) return
-      finishPaste(ids, dest, subject, subj.kind)
-    } catch (e) { notifyError(t('transfers.uploadFailedTitle'), errText(e, t) || t('files.genericErr')) }
+      if (!toInbox && await offerRootMove(ids, dir, items, tkey)) return
+      finishPaste(ids, dest, subject, subj.kind, tkey)
+    } catch (e) { notifyError(t('transfers.uploadFailedTitle'), errText(e, t) || t('files.genericErr'), tkey) }
   }
   const pasteFilesRef = useRef(pasteFiles)
   pasteFilesRef.current = pasteFiles

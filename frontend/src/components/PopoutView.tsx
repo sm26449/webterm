@@ -4,7 +4,7 @@ import { startAuthentication } from '@simplewebauthn/browser'
 import { api, AppState, CommandGuard, Host, Session, setStepupHandler } from '../lib/api'
 import { hostAt } from '../lib/host'
 import { useI18n } from '../lib/i18n'
-import { notifyError, registerToast } from '../lib/notify'
+import { notifyError, registerToast, upsertToast } from '../lib/notify'
 import { askSecret, registerSecretPrompt, SecretAsk } from '../lib/secretPrompt'
 import { StepupMethod, stepupPrompt, stepupSucceeded, totpCred, type StepupCred, type StepupResult } from '../lib/stepup'
 import SecretPromptModal from './SecretPromptModal'
@@ -71,9 +71,9 @@ export default function PopoutView(props: { sid: string }) {
   // toast-uri: fără gazdă, erorile acţiunilor (kill, redenumire, revocare) se pierdeau în tăcere
   const [toasts, setToasts] = useState<ToastItem[]>([])
   useEffect(() => {
-    registerToast((message, kind) => {
+    registerToast((message, kind, key) => {
       const id = `${Date.now()}-${Math.random()}`
-      setToasts((ts) => [...ts, { id, message, kind }])
+      setToasts((ts) => upsertToast(ts, { id, message, kind, key }))
       setTimeout(() => setToasts((ts) => ts.filter((x) => x.id !== id)), kind === 'error' ? 12000 : 6000)
     })
   }, [])

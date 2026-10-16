@@ -392,9 +392,11 @@ The file is uploaded to the host's **inbox** and its path is typed at the prompt
   browser's bracketed-paste mode says nothing about the program in the pane. That mode is trusted
   only for an agent with the `pty` backend and for telnet; any other or unknown backend counts as
   tmux. Known limit: a tmux you start by hand inside a `pty` or telnet session makes the mode just
-  as sticky, and the browser cannot detect it. The toast says why
-  the path was not typed (no prompt visible; characters that cannot be typed; terminal closed;
-  read-only, muted, disconnected or waiting for a guardrail decision), the Transfers widget opens,
+  as sticky, and the browser cannot detect it. The paste's single toast ("Uploading…") is replaced
+  by its result: "Saved screenshot — path not typed (see Transfers)" when a program is in front (the
+  full reason is in the Transfers row), or the reason itself when there is no button to offer
+  (characters that cannot be typed; terminal closed; read-only, muted, disconnected or waiting for a
+  guardrail decision). The Transfers widget opens,
   and the row offers **Type into terminal** next to **Copy path**, with the line "WebTerm can't
   tell whether a shell prompt is waiting — type the path only if the program expects text (e.g. a
   CLI prompt)". The click is the consent: the quoted path plus a space is typed (no Enter) through
@@ -434,7 +436,7 @@ program asked for bracketed paste; plain text otherwise. Several files from one 
 after another (a path typed by the paste itself does not count as "something else typed").
 
 If any condition fails, the rules above apply: typed only at a real shell prompt, otherwise the row
-offers **Type into terminal** + **Copy path**, and both the toast and the row say why ("you typed in
+offers **Type into terminal** + **Copy path**, and the row says why ("you typed in
 this terminal while the file was uploading", "you switched to another tab or pane", "the upload took
 longer than 30 seconds", "the terminal was reopened").
 
