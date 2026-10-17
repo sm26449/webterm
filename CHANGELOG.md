@@ -9,6 +9,8 @@ back.
 
 ## [Unreleased]
 
+## [3.6.17] — 2026-10-17 · agent (58)
+
 Audit 2026-10-17 (`docs/audit-2026-10-17/`), tranche P0. Frontend + gateway + host scripts — no agent change
 (agent stays 58). Every security entry below had two independent adversarial reviews (security + correctness
 lens) and a correction round before landing.
