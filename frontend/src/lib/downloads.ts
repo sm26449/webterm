@@ -104,8 +104,47 @@ export function _setDownloadStore(s: DlRecStore | null): void { recStore = s }
 let ckPolicy: (committed: number, written: number, sinceMs: number) => boolean = shouldCheckpoint
 export function _setCheckpointPolicy(f: typeof ckPolicy | null): void { ckPolicy = f ?? shouldCheckpoint }
 let currentUser: number | null = null
-/** App: contul autentificat (null la logout/expirare — nimic nu se mai persistă pe numele nimănui) */
-export function setDownloadUser(id: number | null): void { currentUser = id }
+/** App: contul autentificat (null la logout/expirare — nimic nu se mai persistă pe numele nimănui).
+    Rândurile din memorie ale ALTUI cont (err/done/paused/running rămase de la o sesiune expirată pe
+    acelaşi browser) se uită aici, nu doar la logout-ul explicit — altfel contul următor le vedea, cu
+    Retry/Resume care re-citeau calea lui A sub cookie-ul lui B (audit 2026-10-17, FL-06). */
+export function setDownloadUser(id: number | null): void {
+  currentUser = id
+  dropRows(id)
+}
+
+/** Scoate din memorie (controlere + rânduri `down`) descărcările care NU sunt ale contului `keep`
+    (null = toate): conexiunea în zbor se taie, writable-ul deschis se abandonează (ce era în swap
+    se pierde; ce s-a COMIS la ultimul checkpoint rămâne pe disc). NU atinge IndexedDB (înregistrarea
+    e per cont şi revine la login-ul proprietarului, ca „Întrerupt") şi NU şterge fişierul parţial. */
+function dropRows(keep: number | null): void {
+  for (const [id, c] of ctls) {
+    if (keep != null && c.owner === keep) continue
+    c.cancelled = true
+    c.abortWhy = 'cancel'
+    c.abort?.abort()
+    try { void c.writable?.abort?.() } catch { /* noop */ }
+    c.writable = null; c.parts = null
+    ctls.delete(id)
+    uploadStore.remove(id)
+  }
+  for (const [id, c] of arCtls) {
+    if (keep != null && c.owner === keep) continue
+    c.cancelled = true
+    c.abortWhy = 'cancel'
+    c.abort?.abort()                 // conexiunea închisă → gateway-ul şterge temp-ul .wtarch de pe host
+    try { void c.writable?.abort?.() } catch { /* noop */ }
+    c.writable = null; c.parts = null
+    arCtls.delete(id)
+    uploadStore.remove(id)
+  }
+  // rânduri fără controler (ex. `done` până la expirare): proprietarul e pe rând
+  for (const j of uploadStore.snapshot().values()) {
+    if (j.dir !== 'down') continue
+    if (keep != null && j.owner === keep) continue
+    uploadStore.remove(j.id)
+  }
+}
 
 async function saveRec(c: DlCtl): Promise<void> {
   if (!c.recKey || !c.handle || !c.etag || c.cancelled || c.owner == null || c.owner !== currentUser) return
@@ -127,9 +166,11 @@ function dropRec(c: DlCtl): void {
 
 function publish(c: DlCtl, p: Partial<UploadJob>) {
   if (uploadStore.get(c.id)) { uploadStore.patch(c.id, p); return }
+  // rândul a fost scos (cancel / dropRows) cât un await era în zbor: nu-l re-creăm ca „fantomă"
+  if (c.cancelled) return
   uploadStore.set({
     id: c.id, dir: 'down', hostId: c.hostId, hostName: c.hostName, dest: c.path, name: c.name, size: c.size,
-    pos: 0, pct: 0, bytesPerSec: 0, etaSec: null, state: 'running', attempts: 1, ...p,
+    pos: 0, pct: 0, bytesPerSec: 0, etaSec: null, state: 'running', attempts: 1, owner: c.owner, ...p,
   })
 }
 const pctOf = (c: DlCtl, bytes: number) => (c.size ? Math.min(100, Math.round((bytes / c.size) * 100)) : 0)
@@ -629,20 +670,20 @@ export async function restoreInterruptedDownloads(now = Date.now()): Promise<voi
   }
 }
 
-/** Sesiunea web s-a terminat (expirare): ascundem rândurile întrerupte (înregistrările rămân —
-    revin la următorul login al ACELUIAŞI cont) şi nu mai persistăm nimic. */
+/** Sesiunea web s-a terminat FĂRĂ logout explicit (expirare, 401, cont dezactivat): uităm TOATE
+    rândurile `down` din memorie — nu doar cele întrerupte; un rând err/done/paused cu handle-ul şi
+    calea de pe host în controler ar fi apărut contului următor pe acelaşi browser (audit 2026-10-17,
+    FL-06). Înregistrările din IndexedDB rămân (revin la următorul login al ACELUIAŞI cont, ca
+    „Întrerupt") şi nu mai persistăm nimic. */
 export function hideInterruptedDownloads(): void {
   currentUser = null
-  for (const [id, c] of ctls) {
-    if (!c.running && uploadStore.get(id)?.state === 'orphan') { ctls.delete(id); uploadStore.remove(id) }
-  }
+  dropRows(null)
 }
 
 /** Logout explicit: uită descărcările întrerupte ale contului (IndexedDB + rânduri). */
 export async function forgetDownloads(): Promise<void> {
   const uid = currentUser
-  hideInterruptedDownloads()
-  for (const c of ctls.values()) if (c.owner === uid) c.recKey = null
+  hideInterruptedDownloads()   // goleşte `ctls` (dropRows) — nu mai e nimic de dezlegat de IndexedDB
   if (uid != null) await forgetUser(store(), uid)
 }
 
@@ -656,6 +697,7 @@ export async function forgetDownloads(): Promise<void> {
 // spune, iar Retry o reporneşte de la zero (trunchiem destinaţia).
 interface ArCtl {
   id: string; hostId: number; hostName: string; path: string; name: string
+  owner: number | null               // contul care a pornit-o (FL-06: rândul pleacă odată cu sesiunea lui)
   handle: SaveHandle | null          // FS Access: re-deschis (trunchiat) la Retry
   writable: WritableLike | null
   parts: Uint8Array[] | null         // Blob (plafon DL_BLOB_MAX)
@@ -670,9 +712,10 @@ const arId = (hostId: number, path: string) => `ar_${hostId}_${path}`
 
 function arPublish(c: ArCtl, p: Partial<UploadJob>) {
   if (uploadStore.get(c.id)) { uploadStore.patch(c.id, p); return }
+  if (c.cancelled) return            // scos cât cererea era în zbor: fără rând-fantomă
   uploadStore.set({
     id: c.id, dir: 'down', kind: 'archive', hostId: c.hostId, hostName: c.hostName, dest: c.path, name: c.name,
-    size: 0, pos: 0, pct: 0, bytesPerSec: 0, etaSec: null, state: 'running', attempts: 1, ...p,
+    size: 0, pos: 0, pct: 0, bytesPerSec: 0, etaSec: null, state: 'running', attempts: 1, owner: c.owner, ...p,
   })
 }
 
@@ -776,7 +819,7 @@ export async function startArchiveDownload(o: StartArchiveOpts): Promise<string 
     }
   }
   const c: ArCtl = {
-    id, hostId: o.hostId, hostName: o.hostName, path: o.path, name, handle, writable,
+    id, hostId: o.hostId, hostName: o.hostName, path: o.path, name, owner: currentUser, handle, writable,
     parts: writable ? null : [], written: 0, running: false, cancelled: false, abort: null, abortWhy: null,
   }
   arCtls.set(id, c)

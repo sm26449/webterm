@@ -394,7 +394,10 @@ holders.
   audited and alerted as critical. Make another account Owner, then fix the group.
 - **Signing in with a passkey** instead of SSO does not re-sync: an SSO account keeps its
   SSO-derived roles until its next SSO sign-in or step-up. To revoke at once, remove the mapping
-  (immediate) or the binding. Since 3.6.5, `WEBTERM_OIDC_SSO_ONLY=1` refuses the passkey as the
+  (immediate) or the group membership in the identity provider. A binding an SSO group gave
+  **cannot be removed by hand**: the next SSO sign-in (or SCIM push) would add it back, so the
+  × is not shown on it and `POST /api/users/{id}/bindings/{bid}/delete` answers
+  `409 authz.ssoBinding`, exactly like changing its end. Since 3.6.5, `WEBTERM_OIDC_SSO_ONLY=1` refuses the passkey as the
   first factor for SSO-only accounts and `WEBTERM_OIDC_SESSION_MAX_HOURS` bounds how long one
   sign-in lasts, so the groups are re-read at least that often
   ([SSO.md → Quick revocation](SSO.md#quick-revocation)).
@@ -461,6 +464,14 @@ Automation tokens keep their `read` / `run` scopes and are additionally capped:
   role tables.
 
 ## Break-glass: promote from the server
+
+The break-glass account is a **permanent Owner with a local password**: the one that still
+signs in when the identity provider is down (an SSO-only Owner is locked out with it, and a
+time-bound Owner expires). WebTerm keeps one around: the last such account cannot remove its
+local password — neither from Your access → Remove local password (`409 account.lastBreakGlass`)
+nor with `python3 -m app.admin sso-only` (without `--force`) — and System health warns
+(**Break-glass Owner**, **Permanent Owner**) when none exists, with the command below printed,
+never run.
 
 If no Owner is left (for example after a partial restore), make an account Owner from the server:
 

@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { CopyStatus, cancelCopy, canRetryCopy, copyLabel, copyNotes, copyPatch, copyRowId, dismissCopy, fileErrText, retryCopy, startCopy } from './copyjobs'
+import {
+  CopyStatus, cancelCopy, canRetryCopy, copyLabel, copyNotes, copyPatch, copyRowId, dismissCopy, dropCopyRows,
+  fileErrText, retryCopy, setCopyUser, startCopy,
+} from './copyjobs'
 import { numberedName } from './downloads'
 import { canPause, isCopy, sizeKnown, uploadStore } from './uploadStore'
 
@@ -170,5 +173,28 @@ describe('motorul de copiere: POST → rând în store → polling → done / ca
     await cancelCopy(id)
     expect(calls.some((c) => c.method === 'DELETE' && c.url === '/api/fs/copy/abc')).toBe(true)
     expect(uploadStore.get(id)!.state).toBe('cancelled')
+  })
+  it('FL-06: rândul lui A dispare la setCopyUser(B) şi la pierderea sesiunii; polling-ul se opreşte, job-ul de pe server NU e anulat', async () => {
+    try {
+      setCopyUser(5)
+      const id = await startCopy({ srcHost: 1, srcName: 'a', dstHost: 2, dstName: 'b', paths: ['/s/a'], dstDir: '/in', onConflict: 'skip' })
+      expect(uploadStore.get(id)?.owner).toBe(5)
+      status = st({ job_id: 'abc', state: 'failed', files_failed: 1 })
+      await vi.advanceTimersByTimeAsync(1100)
+      expect(uploadStore.get(id)!.state).toBe('err')           // căi + eroare, cu Retry
+      const polls = calls.length
+      setCopyUser(6)                                           // B, acelaşi browser
+      expect(uploadStore.get(id)).toBeUndefined()              // ÎNAINTE: rândul rămânea în widget
+      expect(canRetryCopy(id)).toBe(false)
+      await vi.advanceTimersByTimeAsync(3000)
+      expect(calls.length).toBe(polls)                         // niciun poll, niciun DELETE
+      // sesiune pierdută (authenticated=false): tot ce e în memorie pleacă
+      setCopyUser(5)
+      status = st({ job_id: 'abc' })
+      const id2 = await startCopy({ srcHost: 1, srcName: 'a', dstHost: 2, dstName: 'b', paths: ['/s/a'], dstDir: '/in', onConflict: 'skip' })
+      dropCopyRows(null)
+      expect(uploadStore.get(id2)).toBeUndefined()
+      expect(calls.some((c) => c.method === 'DELETE')).toBe(false)
+    } finally { setCopyUser(null) }
   })
 })

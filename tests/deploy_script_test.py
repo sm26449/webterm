@@ -299,6 +299,30 @@ def main():
         check("fără `rmi -f`: o imagine încă referită de un container nu e smulsă",
               "rmi -f" not in callsr and not any("rmi -f" in l for l in code_lines))
 
+        # ── 7. FL-12 (audit 2026-10-17): deploy.sh rulat de un upgrade.sh mai vechi de 3.6.9 avertizează ──
+        # Scriptul vechi sincronizează deploy.sh din kitul nou şi îl rulează cât timp propriul înlocuitor
+        # mai aşteaptă ca upgrade.sh.new — singurul moment în care cod nou rulează în acea rundă veche.
+        src = (ROOT / "deploy.sh").read_text()
+        a = src.index("# FL-12 (audit 2026-10-17)")
+        b = src.index("\nfi\n", a) + len("\nfi\n")
+        block = src[a:b]
+        check("deploy.sh: garda FL-12 e un bloc `if … fi` de sine stătător", block.rstrip().endswith("fi") and "upgrade.sh.new" in block)
+        for label, new_present, reexec, expect in (
+                ("upgrade.sh.new prezent + upgrade.sh FĂRĂ re-exec (rundă veche) → avertisment", True, False, True),
+                ("fără upgrade.sh.new → tăcere", False, False, False),
+                ("upgrade.sh.new prezent, dar upgrade.sh e deja ≥3.6.9 (WEBTERM_UPGRADE_REEXEC) → tăcere", True, True, False)):
+            dg = pathlib.Path(tempfile.mkdtemp(dir=tmp))
+            (dg / "guard.sh").write_text(block)
+            (dg / "upgrade.sh").write_text("#!/bin/bash\n" + ("WEBTERM_UPGRADE_REEXEC=1\n" if reexec else "") + "echo old\n")
+            if new_present:
+                (dg / "upgrade.sh.new").write_text("#!/bin/bash\necho new\n")
+            rg = subprocess.run(["bash", str(dg / "guard.sh")], cwd=str(dg), capture_output=True, text=True, timeout=30)
+            warned = "run ./upgrade.sh once more" in rg.stderr and "older than 3.6.9" in rg.stderr
+            check(f"deploy.sh FL-12: {label}", rg.returncode == 0 and warned == expect, (rg.returncode, rg.stderr[-300:]))
+        check("deploy.sh FL-12: avertismentul merge pe stderr şi numeşte secţiunea din INSTALL.md",
+              ">&2" in block and "Upgrading from a version before 3.6.9" in block
+              and "Upgrading from a version before 3.6.9" in (ROOT / "docs" / "INSTALL.md").read_text())
+
     print(f"\n{ok}/{total} passed")
     return ok == total
 

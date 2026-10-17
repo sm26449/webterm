@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   BACKOFF_CAP_MS, backoffMs, classifyUpKeys, crc32, dirName, etaSec, fmtBytes, fmtEta, forgetUploads,
-  hideUploadOrphans, isLegacyUpKey, nextChunkSize, parseUpLsKey, parseUploadMeta, resolveResync,
-  restoreOrphans, setUploadUser, speedTracker, UP_CHUNK, UP_CHUNK_MAX, UP_CHUNK_MIN, upLsKey,
+  hideUploads, isLegacyUpKey, nextChunkSize, parseUpLsKey, parseUploadMeta, pauseUpload, resolveResync,
+  restoreOrphans, setUploadUser, speedTracker, startUpload, UP_CHUNK, UP_CHUNK_MAX, UP_CHUNK_MIN, upLsKey,
 } from './uploads'
 import { uploadStore } from './uploadStore'
 
@@ -49,7 +49,7 @@ describe('metadate persistate (wt_up_*)', () => {
   })
 })
 
-describe('upload-uri neterminate per cont (restoreOrphans / hideUploadOrphans / forgetUploads)', () => {
+describe('upload-uri neterminate per cont (restoreOrphans / hideUploads / forgetUploads)', () => {
   class FakeStorage {
     m = new Map<string, string>()
     get length() { return this.m.size }
@@ -103,7 +103,7 @@ describe('upload-uri neterminate per cont (restoreOrphans / hideUploadOrphans / 
     storage.setItem(k, meta(U1, 1, '/a.iso'))
     setUploadUser(5)
     restoreOrphans(5)
-    hideUploadOrphans()
+    hideUploads()
     expect(uploadStore.snapshot().size).toBe(0)
     expect(storage.getItem(k)).not.toBeNull()
     setUploadUser(5)
@@ -125,6 +125,212 @@ describe('upload-uri neterminate per cont (restoreOrphans / hideUploadOrphans / 
     expect(fetched).toEqual([`/api/hosts/1/fs/upload?path=%2Fa.iso&upload_id=${U1}`])
     restoreOrphans(5)                                          // nimic de restaurat după logout
     expect(uploadStore.snapshot().size).toBe(0)
+  })
+})
+
+// Bucla reală (startUpload → runLoop) cu un XMLHttpRequest fals: sonda de status răspunde prin
+// `fetch` (stub), felia prin FakeXHR, care răspunde cu ce îi spune testul (refuz definitiv al
+// hostului, disc plin, 2xx, sau „atârnă" până la pauză). Fără jsdom — doar globalele atinse.
+describe('refuz definitiv şi izolarea între conturi (FS-01 / FL-06, audit 2026-10-17)', () => {
+  class FakeStorage {
+    m = new Map<string, string>()
+    get length() { return this.m.size }
+    key(i: number) { return [...this.m.keys()][i] ?? null }
+    getItem(k: string) { return this.m.has(k) ? this.m.get(k)! : null }
+    setItem(k: string, v: string) { this.m.set(k, v) }
+    removeItem(k: string) { this.m.delete(k) }
+  }
+  type Reply = { status: number; body: string; code?: string } | 'hang'
+  let storage: FakeStorage
+  let reply: Reply
+  let aborted: number
+  class FakeXHR {
+    static inflight: FakeXHR[] = []
+    status = 0
+    responseText = ''
+    timeout = 0
+    upload = { onprogress: null as null | ((ev: { lengthComputable: boolean; loaded: number }) => void) }
+    onload: null | (() => void) = null
+    onerror: null | (() => void) = null
+    ontimeout: null | (() => void) = null
+    onabort: null | (() => void) = null
+    private hdr: string | null = null
+    open() { /* url-ul nu contează: un singur upload per test */ }
+    getResponseHeader() { return this.hdr }
+    send() {
+      FakeXHR.inflight.push(this)
+      if (reply === 'hang') return
+      const r = reply
+      queueMicrotask(() => {
+        this.status = r.status; this.responseText = r.body; this.hdr = r.code ?? null
+        this.onload?.()
+      })
+    }
+    abort() { aborted++; queueMicrotask(() => this.onabort?.()) }
+  }
+  const refusal = (code: string): Reply =>
+    ({ status: 400, code, body: JSON.stringify({ detail: `refused: ${code}`, code, vars: { user: 'webterm', dir: '/srv' } }) })
+  const file = (name: string, lm = 1) => new File([new Uint8Array(16)], name, { lastModified: lm })
+  const metaOf = (uid: string, dest: string, size: number, lm: number) =>
+    JSON.stringify({ uid, hostId: 1, hostName: 'nas', dest, name: dest.slice(1), size, lastModified: lm, pos: 0, updated: 1 })
+  const rows = () => [...uploadStore.snapshot().values()].filter((j) => !j.dir || j.dir === 'up')
+  const U1 = '1'.repeat(32), U2 = '2'.repeat(32)
+  beforeEach(() => {
+    storage = new FakeStorage()
+    reply = 'hang'
+    aborted = 0
+    FakeXHR.inflight = []
+    vi.stubGlobal('window', { localStorage: storage, addEventListener: () => {},
+                              setTimeout, clearTimeout, setInterval, clearInterval, dispatchEvent: () => true })
+    vi.stubGlobal('document', { addEventListener: () => {}, visibilityState: 'visible' })
+    vi.stubGlobal('navigator', { languages: ['en'], language: 'en' })
+    vi.stubGlobal('XMLHttpRequest', FakeXHR)
+    // sonda de status (offset 0, fără CRC) şi commit-ul: ambele prin fetch → 200
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response(JSON.stringify({ offset: 0 }), { status: 200 })))
+    for (const id of [...uploadStore.snapshot().keys()]) uploadStore.remove(id)
+  })
+  afterEach(() => {
+    forgetUploads()
+    for (const id of [...uploadStore.snapshot().keys()]) uploadStore.remove(id)
+    vi.unstubAllGlobals()
+  })
+
+  it('FS-01: refuz definitiv → rândul `err` rămâne (cu motivul), cheia dispare, restoreOrphans nu-l învie', async () => {
+    reply = refusal('files.writeDenied')
+    setUploadUser(5)
+    const f = file('x.bin')
+    const k = upLsKey(5, 1, '/srv/x.bin', f.size, f.lastModified)
+    const id = await startUpload({ hostId: 1, hostName: 'nas', dest: '/srv/x.bin', file: f })
+    expect(uploadStore.get(id)).toMatchObject({ state: 'err', errorCode: 'files.writeDenied', owner: 5 })
+    expect(storage.getItem(k)).toBeNull()                      // ÎNAINTE: cheia rămânea (scrisă la pornire)
+    // reload: memoria se pierde, rămâne doar localStorage → niciun „orfan 0 %"
+    hideUploads()
+    setUploadUser(5)
+    restoreOrphans(5)
+    expect(rows()).toEqual([])
+  })
+
+  it('FS-01: acelaşi fişier re-tras după refuz regăseşte ACELAŞI rând (nu un al doilea), apoi cheia revine la succes', async () => {
+    reply = refusal('files.dirMissing')
+    setUploadUser(5)
+    const f = file('y.bin')
+    const id = await startUpload({ hostId: 1, hostName: 'nas', dest: '/srv/y.bin', file: f })
+    expect(uploadStore.get(id)?.state).toBe('err')
+    reply = { status: 200, body: JSON.stringify({ offset: f.size }) }
+    const id2 = await startUpload({ hostId: 1, hostName: 'nas', dest: '/srv/y.bin', file: f })
+    expect(id2).toBe(id)
+    expect(rows().map((j) => [j.id, j.state])).toEqual([[id, 'done']])
+  })
+
+  it('FS-01: disc plin → rândul `err`, dar cheia RĂMÂNE (temp-ul parţial merită reluat)', async () => {
+    reply = refusal('files.noSpaceAt')
+    setUploadUser(5)
+    const f = file('z.bin')
+    const k = upLsKey(5, 1, '/srv/z.bin', f.size, f.lastModified)
+    const id = await startUpload({ hostId: 1, hostName: 'nas', dest: '/srv/z.bin', file: f })
+    expect(uploadStore.get(id)).toMatchObject({ state: 'err', errorCode: 'files.noSpaceAt' })
+    expect(storage.getItem(k)).not.toBeNull()
+    hideUploads()
+    setUploadUser(5)
+    restoreOrphans(5)
+    expect(rows().map((j) => [j.id, j.state])).toEqual([[id, 'orphan']])
+  })
+
+  it('FL-06: rândurile err/done/paused ale lui A dispar la setUploadUser(B); cheile lui A rămân', async () => {
+    setUploadUser(5)
+    // err (cu File în controler → ar oferi Retry)
+    reply = refusal('files.noSpaceAt')
+    const fe = file('e.bin')
+    const ke = upLsKey(5, 1, '/srv/e.bin', fe.size, fe.lastModified)
+    const idErr = await startUpload({ hostId: 1, hostName: 'nas', dest: '/srv/e.bin', file: fe })
+    // done (fără controler: File-ul e eliberat la commit; rândul zace până la expirare)
+    reply = { status: 200, body: JSON.stringify({ offset: 16 }) }
+    const idDone = await startUpload({ hostId: 1, hostName: 'nas', dest: '/srv/d.bin', file: file('d.bin') })
+    // paused (felie în zbor, pusă pe pauză) — uid cunoscut dinainte, din metadatele persistate
+    const fp = file('p.bin', 7)
+    const kp = upLsKey(5, 1, '/srv/p.bin', fp.size, 7)
+    storage.setItem(kp, metaOf(U1, '/srv/p.bin', fp.size, 7))
+    reply = 'hang'
+    const pPaused = startUpload({ hostId: 1, hostName: 'nas', dest: '/srv/p.bin', file: fp })
+    while (!FakeXHR.inflight.length) await new Promise((r) => setTimeout(r, 1))
+    pauseUpload(U1)
+    expect(await pPaused).toBe(U1)
+    expect(rows().map((j) => [j.id, j.state]).sort()).toEqual([[idErr, 'err'], [idDone, 'done'], [U1, 'paused']].sort())
+    // rând al altui modul (download), ca să vedem că nu e atins
+    uploadStore.set({ id: 'dl', dir: 'down', hostId: 1, hostName: 'nas', dest: '/x', name: 'x', size: 1, pos: 0, pct: 0,
+                      bytesPerSec: 0, etaSec: null, state: 'err', attempts: 1 })
+
+    setUploadUser(6)                                           // contul B, acelaşi browser
+    expect(rows()).toEqual([])                                 // ÎNAINTE: toate trei rămâneau, cu Retry
+    expect(uploadStore.get('dl')?.state).toBe('err')
+    expect(storage.getItem(ke)).not.toBeNull()
+    expect(storage.getItem(kp)).not.toBeNull()
+    // B nu moşteneşte nici orfanii lui A; A îi regăseşte la login-ul lui
+    restoreOrphans(6)
+    expect(rows()).toEqual([])
+    setUploadUser(5)
+    restoreOrphans(5)
+    expect(rows().map((j) => [j.id, j.state]).sort()).toEqual([[idErr, 'orphan'], [U1, 'orphan']].sort())
+  })
+
+  it('FL-06: sesiune pierdută (authenticated=false, fără logout) → rândurile cu File dispar, feliile în zbor se taie, cheile rămân', async () => {
+    setUploadUser(5)
+    const f = file('r.bin', 9)
+    const k = upLsKey(5, 1, '/srv/r.bin', f.size, 9)
+    storage.setItem(k, metaOf(U2, '/srv/r.bin', f.size, 9))
+    reply = 'hang'
+    const p = startUpload({ hostId: 1, hostName: 'nas', dest: '/srv/r.bin', file: f })
+    while (!FakeXHR.inflight.length) await new Promise((r) => setTimeout(r, 1))
+    expect(uploadStore.get(U2)?.state).toBe('running')
+    hideUploads()
+    expect(await p).toBe(U2)
+    expect(aborted).toBe(1)
+    expect(rows()).toEqual([])                                 // ÎNAINTE: doar `orphan` era scos
+    expect(storage.getItem(k)).not.toBeNull()
+    setUploadUser(5)
+    restoreOrphans(5)
+    expect(uploadStore.get(U2)?.state).toBe('orphan')
+  })
+
+  it('FL-06: contul se schimbă cât sonda de status e în zbor → nicio „fantomă" a lui A pentru B', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((r) => { release = r })
+    vi.stubGlobal('fetch', () => gate.then(() => new Response(JSON.stringify({ offset: 0 }), { status: 200 })))
+    setUploadUser(5)
+    const f = file('g.bin')
+    const p = startUpload({ hostId: 1, hostName: 'nas', dest: '/srv/g.bin', file: f })
+    await new Promise((r) => setTimeout(r, 1))                 // bucla stă în sonda de status
+    setUploadUser(6)                                           // B se autentifică (alt tab / SSO)
+    release()
+    await p
+    expect(rows()).toEqual([])                                 // ÎNAINTE: un rând `running` al lui 5 reapărea
+    expect(FakeXHR.inflight).toEqual([])                       // şi nicio felie n-a plecat sub cookie-ul lui B
+  })
+
+  it('FS-01: 403 cu alt cod (rolul a pierdut files.write) fără nimic aterizat → cheia dispare; cu temp dintr-o sesiune anterioară rămâne', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })   // backoff-ul reîncercărilor (~1 min)
+    try {
+      const denied = JSON.stringify({ detail: 'your role does not allow this here (files.write)', code: 'authz.denied' })
+      vi.stubGlobal('fetch', () => Promise.resolve(new Response(denied, { status: 403, headers: { 'X-WebTerm-Error': 'authz.denied' } })))
+      reply = { status: 403, body: denied, code: 'authz.denied' }
+      setUploadUser(5)
+      const f = file('a.bin')
+      const k = upLsKey(5, 1, '/srv/a.bin', f.size, f.lastModified)
+      const p = startUpload({ hostId: 1, hostName: 'nas', dest: '/srv/a.bin', file: f })
+      await vi.advanceTimersByTimeAsync(120_000)
+      const id = await p
+      expect(uploadStore.get(id)).toMatchObject({ state: 'err', errorCode: 'authz.denied' })
+      expect(storage.getItem(k)).toBeNull()                    // ÎNAINTE: rămânea → „orfan 0 %" după reload
+      // acelaşi refuz, dar cheia spune că o sesiune anterioară a aterizat 8 octeţi (temp pe host)
+      const f2 = file('b.bin', 3)
+      const k2 = upLsKey(5, 1, '/srv/b.bin', f2.size, 3)
+      storage.setItem(k2, JSON.stringify({ ...JSON.parse(metaOf(U2, '/srv/b.bin', f2.size, 3)), pos: 8 }))
+      const p2 = startUpload({ hostId: 1, hostName: 'nas', dest: '/srv/b.bin', file: f2 })
+      await vi.advanceTimersByTimeAsync(120_000)
+      expect(await p2).toBe(U2)
+      expect(uploadStore.get(U2)?.state).toBe('err')
+      expect(storage.getItem(k2)).not.toBeNull()
+    } finally { vi.useRealTimers() }
   })
 })
 

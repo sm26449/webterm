@@ -349,6 +349,15 @@ fi
 echo
 echo "✓ WebTerm is running at  https://$WEBTERM_DOMAIN"
 echo "  image: ${WEBTERM_IMAGE:-<from compose default>}${WEBTERM_IMAGE_TAG:+ ($WEBTERM_IMAGE_TAG)}"
+# FL-12 (audit 2026-10-17): run by an upgrade.sh older than 3.6.9? That script syncs THIS file from
+# the new kit and executes it while its own replacement still waits as upgrade.sh.new (moved into
+# place only at its very end) — the one moment new code runs inside that old run. The new upgrade.sh
+# mv's .new away before its re-exec, so a ≥3.6.9 run never has it here.
+if [ -f upgrade.sh.new ] && ! grep -q WEBTERM_UPGRADE_REEXEC upgrade.sh 2>/dev/null; then
+  echo "  ! this upgrade was run by an upgrade.sh older than 3.6.9 — the host kit (host-health, cert-renew," >&2
+  echo "  ! docker-cleanup, authentik-upgrade + timers) is NOT synced yet: run ./upgrade.sh once more after" >&2
+  echo "  ! it finishes (docs/INSTALL.md, \"Upgrading from a version before 3.6.9\")" >&2
+fi
 # Tokenul de setup se tipăreşte DOAR cât timp mai foloseşte la ceva. Odată creat contul,
 # `/api/setup` întoarce 409 şi tokenul e inert — dar afişat la fiecare upgrade arăta a
 # credenţial viu, invitând pe cineva să-l trateze ca atare (şi să-l copieze pe unde nu

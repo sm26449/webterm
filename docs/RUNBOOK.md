@@ -235,7 +235,10 @@ session survival) is unchanged. The default install stays exactly as before.
 1. Deploy with `cd /opt/webterm && sudo ./upgrade.sh vX.Y.Z` — it pins the **digest** the tag
    resolves to, verifies the signature when configured, syncs the host-side kit from that
    same digest and records the rollback point automatically. `deploy.sh` alone takes a tag or
-   a digest, but syncs nothing on the host.
+   a digest, but syncs nothing on the host. Coming from a version **before 3.6.9**, run
+   `./upgrade.sh` **twice**: the old script replaces itself only at the end, and only the
+   second run installs the host kit + timers (`systemctl list-timers 'webterm-*'` to check;
+   [docs/INSTALL.md](INSTALL.md#upgrading-pre-369)).
 2. Do not deploy from inside a WebTerm session without a backup SSH connection
    open in another terminal, at least for frontend/gateway changes.
 3. Wait for CI to go green before deploying — since v1.0.14 "green" also

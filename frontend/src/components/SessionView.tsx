@@ -8,8 +8,8 @@ import { modeRestoreSeq, pasteModeUntrusted, trustedBracketed } from '../lib/ter
 import { errText, api, CommandGuard, CommandRule, Host, Session, withStepup } from '../lib/api'
 import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
 import { Command, CommandTracker, cmdDuration, matchCommandRule, screenResetScan, splitAfterMarks } from '../lib/commands'
-import { EchoTracker, LineKey, countCprReplies, countCprRequests, reportOnly, sendIsReport } from '../lib/echo'
-import { ECHO_GRACE_MS, LocalVerdict, localRunDecision, PeerState, PeerVerdict, RuleHit, guardActive, isBareEnter, judgeLocal, judgePeers, opaqueInput, plainText, runDecision, splitLines, stripControls, submitsLine, unbracket } from '../lib/broadcastGuard'
+import { EchoTracker, LineKey, countCprReplies, countCprRequests, reportOnly, sendIsReport, sentArgs } from '../lib/echo'
+import { ACCEPT_AND_HOLD, CTRL_O, ECHO_GRACE_MS, LocalVerdict, acceptsLine, localRunDecision, PeerState, PeerVerdict, RuleHit, guardActive, isSubmitKey, judgeLocal, judgePeers, metaAccept, opaqueInput, runDecision, splitLines, stripControls, submitsLine, unbracket } from '../lib/broadcastGuard'
 import { clearCwd, parseOsc7, setCwd } from '../lib/cwd'
 import { FONT_STORAGE_KEY, preferredFont, setPreferredFont } from '../lib/font'
 import { extractUrls } from '../lib/urls'
@@ -348,7 +348,10 @@ export default function SessionView(props: {
   // dacă broadcast-ul a pornit între timp (verificare 3.6.12, F2).
   // `unreadable` = id-urile panourilor neverificabile acceptate în dialog (F5); `opaque` = input cu
   // taste de editare, textul verificat nu e cel care rulează (F4)
-  const [cmdConfirm, setCmdConfirm] = useState<{ cmd: string; pattern: string; below?: boolean; unknown?: boolean; run?: string; hits?: RuleHit[]; recheck?: () => PeerVerdict; unreadable?: string[]; opaque?: boolean; echo?: boolean; localRecheck?: () => LocalVerdict } | null>(null)
+  /** `run` = text reţinut, NEtastat (snippet, chunk de paste): „Rulează" îl trimite întreg, Anulează nu goleşte nimic;
+      `submit` = tasta de trimitere reţinută (`\r`, `\n`, `\x0f`, `ESC a` sau `a`-ul de după un Escape singur — SV-01)
+      a unei linii deja tastate: „Rulează" o trimite pe EA (semantica shell-ului rămâne: istoric / păstrare în buffer) */
+  const [cmdConfirm, setCmdConfirm] = useState<{ cmd: string; pattern: string; below?: boolean; unknown?: boolean; run?: string; submit?: string; hits?: RuleHit[]; recheck?: () => PeerVerdict; unreadable?: string[]; opaque?: boolean; echo?: boolean; localRecheck?: () => LocalVerdict } | null>(null)
   const [guardMsg, setGuardMsg] = useState<string | null>(null)
   // confirm()/alert() native → dialoguri proprii + toast-uri (vezi lib/confirm.tsx: de ce)
   const { confirm } = useConfirm()
@@ -844,6 +847,11 @@ export default function SessionView(props: {
   const actionTargetRef = useRef<boolean | undefined>(true)
   /** creşte la fiecare (re)activare a panoului — InsertTarget.activeEpoch (3.6.16, review L1) */
   const activeEpochRef = useRef(0)
+  /** ultimul chunk plecat spre host (null după un raport de terminal: şi el consumă prefixul shell-ului).
+      Un Escape singur = shell-ul aşteaptă a doua tastă a unei legături meta: `a` de după el e `ESC a`
+      (zsh accept-and-hold), iar un Ctrl+U de golire are nevoie întâi de o tastă care stinge prefixul
+      (re-review SV-01; vezi clearLineSeq) */
+  const prevKeyRef = useRef<string | null>(null)
   /** `kind`: 'key' = tastă (urmărită pentru ecou), 'report' = raport de terminal (neurmărit),
       'auto' = clasificat după formă — DOAR pentru datele venite din alt panou prin broadcast (în
       panoul de origine le-a clasificat deja userInput). Textul inserat (snippet, paletă, „rulează din
@@ -854,16 +862,20 @@ export default function SessionView(props: {
     if (ws?.readyState === WebSocket.OPEN) {
       ws.send(typeof data === 'string' ? new TextEncoder().encode(data) : data)
       // rapoartele terminalului (mouse, focus, CPR, DA…) nu sunt taste: nu aşteaptă ecou (review 3.6.13, M2)
-      if (sendIsReport(kind, data, pastingRef.current, cprRef.current > 0)) return
+      if (sendIsReport(kind, data, pastingRef.current, cprRef.current > 0)) { prevKeyRef.current = null; return }
+      const prev = prevKeyRef.current
+      prevKeyRef.current = typeof data === 'string' ? data : null
       inputSeqRef.current += 1     // input real: contextul unui paste de fişiere în curs s-a schimbat (3.6.16)
       // prima tastă de după B: promptul e pictat — rândul lui se verifică la Enter (review 3.6.13, H1)
       // fără taste în aşteptare (nimic tastat încă după B, niciun typeahead): linia începe la cursor
       trackerRef.current?.notePromptPainted(!echoRef.current.waiting)
-      // un terminator de linie a plecat: fără C, rândurile următoare continuă comanda (PS2)
-      if (typeof data === 'string' && submitsLine(data)) trackerRef.current?.noteSubmitSent()
-      const { seq, needBase } = echoRef.current.sent(typeof data === 'string' && plainText(data) ? data : null,
-        performance.now(), typeof data === 'string' && isBareEnter(data),
-        typeof data === 'string' ? data : `<${data.length} bytes>`)
+      // un accept-line adevărat a plecat (CR / LF / Ctrl+O — nu `ESC a`, vezi acceptsLine): fără C,
+      // rândurile următoare continuă comanda (PS2)
+      if (typeof data === 'string' && acceptsLine(data)) trackerRef.current?.noteSubmitSent()
+      // Enter, Ctrl+O, `ESC a` sau `a` după un Escape singur (SV-01): ecoul lui e orice schimbare a
+      // liniei, închide tot ce era înaintea lui
+      const a = sentArgs(data, prev)
+      const { seq, needBase } = echoRef.current.sent(a.text, performance.now(), a.submit, a.raw)
       // referinţa liniei: după ce xterm a parsat tot ce sosise ÎNAINTE de trimitere (write gol, în ordine)
       if (needBase) termRef.current?.write('', () => echoRef.current.setBase(seq, lineKeyRef.current()))
       return
@@ -939,27 +951,32 @@ export default function SessionView(props: {
   /** regula atinsă: block → Ctrl+U în toate panourile-ţintă + mesaj; confirm → dialog. `below` = potrivirea
       e DOAR în textul de sub linia cursorului (judgeLocal / judgePeers o coboară la confirmare): dialogul
       spune asta, iar Anulează nu goleşte linia (textul de dedesubt poate să nu fie al ei). */
-  const applyRule = (rule: CommandRule, cmd: string, run?: string, hits?: RuleHit[], recheck?: () => PeerVerdict, below = false) => {
+  /** Ctrl+U care goleşte linia şi când ultima tastă plecată a fost un Escape singur (Esc apoi Enter /
+      `a`): shell-ul e în prefix meta, iar `ESC ^U` nu e legat nici în bash, nici în zsh (emacs) — îl
+      consumă fără să golească (până acum linia rămânea). Primul ^U stinge prefixul, al doilea goleşte;
+      `ESC ESC` n-ar merge: în bash e `complete` (re-review SV-01). */
+  const clearLineSeq = useCallback(() => (prevKeyRef.current?.endsWith('\x1b') ? '\x15\x15' : '\x15'), [])
+  const applyRule = (rule: CommandRule, cmd: string, run?: string, hits?: RuleHit[], recheck?: () => PeerVerdict, below = false, submit?: string) => {
     const onlyBelow = hits?.length ? hits.every((h) => h.below) : below
     if (rule.action === 'block' && !onlyBelow) {
-      if (!run) sendAll('\x15')   // un text reţinut n-a fost tastat: nu e nimic de şters
+      if (!run) sendAll(clearLineSeq())   // un text reţinut n-a fost tastat: nu e nimic de şters
       setGuardMsg(tRef.current('session.blockedByGuardrail', { cmd: cmd.slice(0, 70), pattern: rule.pattern }))
       window.setTimeout(() => setGuardMsg((m) => (m && m.includes(cmd.slice(0, 70)) ? null : m)), 4000)
     } else {
-      setCmdConfirm({ cmd, pattern: rule.pattern, run, hits, recheck, below: onlyBelow })
+      setCmdConfirm({ cmd, pattern: rule.pattern, run, submit, hits, recheck, below: onlyBelow })
     }
   }
   /** Panourile-ţintă ale unui broadcast (inclusiv originea): true = trimite acum; false = reţinut
       (regulă / dialog „nu pot verifica" / aşteptăm ecoul — atunci `onOk` rulează singur dacă
       verificarea trece). Apelantul a verificat deja că NU e o aşteptare în curs. */
   const checkPeers = (lineOf: ((p: string | null) => string | null) | undefined, onOk: () => void,
-    originCmd: string, run?: string, extra: string[] = [], opaque = false): boolean => {
+    originCmd: string, run?: string, extra: string[] = [], opaque = false, submit?: string): boolean => {
     const verdict = (final: boolean) =>
       judgePeers([paneState(), ...(peerStatesRef.current?.(session.id) ?? [])], commandGuardRef.current, final, lineOf, extra, opaque)
     const recheck = () => verdict(true)
     const settle = (v: PeerVerdict, queued: (string | Uint8Array)[] = []) => {
-      if (v.kind === 'rule') applyRule(v.rule, v.cmd, run, v.hits, recheck)
-      else if (v.kind === 'unknown') setCmdConfirm({ cmd: originCmd, pattern: '', unknown: true, run, hits: v.hits, recheck, unreadable: v.unreadable, opaque })
+      if (v.kind === 'rule') applyRule(v.rule, v.cmd, run, v.hits, recheck, false, submit)
+      else if (v.kind === 'unknown') setCmdConfirm({ cmd: originCmd, pattern: '', unknown: true, run, submit, hits: v.hits, recheck, unreadable: v.unreadable, opaque })
       noticeQueued(queued)
     }
     return waitVerdict(verdict, onOk, settle)
@@ -999,7 +1016,7 @@ export default function SessionView(props: {
       broadcast — Ctrl+P / ↑ + Enter rapid nu mai trimite o linie nevăzută (vezi judgeLocal).
       `lineOf` / `extra` ca la checkPeers. Trimiterea reţinută pleacă DOAR local (ca dialogul fără
       broadcast, F2: dacă broadcast-ul porneşte cât aşteptăm, linia n-a fost verificată în rest). */
-  const checkLocal = (run: string, lineOf: (p: string | null) => string | null = (p) => p, extra: string[] = []): boolean => {
+  const checkLocal = (run: string, lineOf: (p: string | null) => string | null = (p) => p, extra: string[] = [], submit = false): boolean => {
     const verdict = (final: boolean) => {
       const tr = trackerRef.current
       return judgeLocal({
@@ -1013,12 +1030,15 @@ export default function SessionView(props: {
       }, commandGuardRef.current, final, lineOf, extra)
     }
     const settle = (v: LocalVerdict, queued: (string | Uint8Array)[] = []) => {
-      const held = isBareEnter(run) ? undefined : run
-      if (v.kind === 'rule') applyRule(v.rule, v.cmd, held, undefined, undefined, v.below === true)
+      // tastă de trimitere (Enter / Ctrl+O / ESC a): linia E tastată (block → Ctrl+U o şterge; „Rulează"
+      // trimite tasta originală); altfel `run` e un chunk reţinut, netastat
+      const held = submit ? undefined : run
+      const key = submit ? run : undefined
+      if (v.kind === 'rule') applyRule(v.rule, v.cmd, held, undefined, undefined, v.below === true, key)
       else if (v.kind === 'unknown') {
         // „Rulează" re-judecă linia ACUM (review 3.6.13, L4): între timp ecoul a sosit, iar o regulă
         // care atinge linia devenită vizibilă nu trebuie ocolită
-        setCmdConfirm({ cmd: (lineOf(trackerRef.current?.pendingCommand() ?? null) ?? '').trim(), pattern: '', unknown: true, run, echo: true, localRecheck: () => verdict(true) })
+        setCmdConfirm({ cmd: (lineOf(trackerRef.current?.pendingCommand() ?? null) ?? '').trim(), pattern: '', unknown: true, run: held, submit: key, echo: true, localRecheck: () => verdict(true) })
         // diagnoză (fără conţinutul tastelor): de ce linia n-a fost confirmată
         console.warn('[wt-echo] ' + JSON.stringify({ now: Math.round(performance.now()), rtt: rttRef.current,
           lost: trackerRef.current?.promptLostReason() ?? null, ...echoRef.current.debug() }))
@@ -1027,20 +1047,21 @@ export default function SessionView(props: {
     }
     return waitVerdict(verdict, () => send(run), settle)
   }
-  /** Enter (CR/LF): comanda tastată aici + (broadcast) în fiecare panou-ţintă. true = poate pleca.
+  /** O tastă de trimitere (isSubmitKey: Enter CR/LF, Ctrl+O `\x0f`, `ESC a`, sau `a` după un Escape
+      singur — SV-01): comanda tastată aici + (broadcast) în fiecare panou-ţintă. true = poate pleca.
       Cât o verificare aşteaptă ecoul, Enter-ul intră în coadă (re-verificat la rând), nu porneşte
-      a doua buclă (re-review 3.6.12, L-a). */
+      a doua buclă (re-review 3.6.12, L-a). Reţinută, „Rulează" trimite exact tasta `seq`. */
   const checkSubmit = (seq: string): boolean => {
     if (submitWaitRef.current) { submitWaitRef.current.push(seq); return false }
     const bc = broadcastingRef.current && !readOnlyRef.current
     // un singur panou: linia se citeşte DUPĂ ecoul ultimelor taste (3.6.13), ca la broadcast
-    if (!bc) return checkLocal(seq)
+    if (!bc) return checkLocal(seq, undefined, [], true)
     const cmd = trackerRef.current?.pendingCommand() ?? null
     const rule = cmd ? matchCommandRule(cmd, commandGuardRef.current) : null
     // broadcast: doar un BLOCK local scurtcircuitează; un confirm local trece prin judgePeers (originea
     // e şi ea ţintă), ca dialogul să nu ascundă un block / o linie neverificabilă din alt panou
-    if (rule && cmd && rule.action === 'block') { applyRule(rule, cmd); return false }
-    return checkPeers(undefined, () => sendAll(seq), cmd ?? '')
+    if (rule && cmd && rule.action === 'block') { applyRule(rule, cmd, undefined, undefined, undefined, false, seq); return false }
+    return checkPeers(undefined, () => sendAll(seq), cmd ?? '', undefined, [], false, seq)
   }
   /** Un chunk de input care conţine Enter-uri dar NU e un Enter gol: commit IME („ls\r"), paste,
       Alt+Enter. Fiecare linie trece prin guardrail — prima lipită de ce e deja tastat — aici şi, la
@@ -1075,7 +1096,10 @@ export default function SessionView(props: {
   }
   /** Input-ul utilizatorului (tastatură via onData, keybar, rejucarea celui reţinut): local +
       broadcast. Un Enter „gol" care NU a trecut prin keydown (IME pe mobil, keybar) trece şi el
-      prin guardrail (review 3.6.12, L6), la fel un chunk cu Enter în el (re-review, L-d). */
+      prin guardrail (review 3.6.12, L6), la fel un chunk cu Enter în el (re-review, L-d) — şi un
+      Ctrl+O (`\x0f`, audit 2026-10-17 SV-01): bash/zsh execută linia cu el exact ca la Enter; la fel
+      `a` / `A` imediat după un Escape trimis singur (zsh: tot `ESC a`, accept-and-hold — Esc de pe
+      tastatură sau de pe keybar, apoi litera; re-review SV-01). */
   const userInput = (d: string | Uint8Array, report = false) => {
     // rapoartele terminalului (mouse, focus, CPR…) nu sunt taste: nu aşteaptă în coada unei verificări
     // şi nu aşteaptă ecou (review 3.6.13, M2). DAR clasificarea nu ocoleşte niciodată guardrail-ul
@@ -1088,12 +1112,16 @@ export default function SessionView(props: {
       return
     }
     if (submitWaitRef.current) { submitWaitRef.current.push(d); return }
-    if (typeof d === 'string') {
-      if (isBareEnter(d)) {
-        const checked = performance.now() - enterOkAtRef.current < 250
-        enterOkAtRef.current = -Infinity
-        if (!checked && !checkSubmit(d)) return
-      } else if (submitsLine(d) && !submitChunk(d)) return
+    if (typeof d === 'string' && isSubmitKey(d, prevKeyRef.current)) {
+      const checked = performance.now() - enterOkAtRef.current < 250
+      enterOkAtRef.current = -Infinity
+      if (!checked && !checkSubmit(d)) return
+    } else {
+      // o tastă verificată la keydown e urmată IMEDIAT de byte-ul ei (xterm emite sincron): orice
+      // altceva stinge fereastra, ca un Enter de mai târziu să nu treacă pe „bonul" ei (re-review
+      // SV-01: pe alt layout, keydown-ul poate verifica un Ctrl+O pe care xterm îl trimite ca altă tastă)
+      enterOkAtRef.current = -Infinity
+      if (typeof d === 'string' && submitsLine(d) && !submitChunk(d)) return
     }
     send(d)
     broadcastOut(d)
@@ -1103,6 +1131,9 @@ export default function SessionView(props: {
       în panoul ăsta şi, la broadcast, în fiecare panou-ţintă. Un text reţinut nu e tastat deloc. */
   const typeText = (body: string) => {
     if (submitWaitRef.current) { submitWaitRef.current.push(body); return }
+    // un text inserat care e exact `a` / `A` imediat după un Escape plecat singur încheie un `ESC a`
+    // (zsh accept-and-hold): aceeaşi cale ca tasta (re-review SV-01)
+    if (metaAccept(prevKeyRef.current, body)) { userInput(body); return }
     if (submitsLine(body)) {
       const cur = trackerRef.current?.pendingCommand() ?? ''
       const lines = splitLines(body)
@@ -1139,12 +1170,12 @@ export default function SessionView(props: {
       e.preventDefault(); e.stopPropagation()
       // „nu pot verifica" / snippet reţinut: linia rămâne de editat; regulă pe linia tastată: o golim
       // (doar local dacă dialogul s-a deschis fără broadcast — F2)
-      if (!cmdConfirm.unknown && !cmdConfirm.run && !cmdConfirm.below) (cmdConfirm.recheck ? sendAll : send)('\x15')
+      if (!cmdConfirm.unknown && !cmdConfirm.run && !cmdConfirm.below) (cmdConfirm.recheck ? sendAll : send)(clearLineSeq())
       setCmdConfirm(null); termRef.current?.focus()
     }
     document.addEventListener('keydown', onEsc, true)
     return () => document.removeEventListener('keydown', onEsc, true)
-  }, [cmdConfirm, sendAll, send])
+  }, [cmdConfirm, sendAll, send, clearLineSeq])
 
   // broadcast: înregistrează `send`-ul acestui panou în harta din App (sid → send), ca tastele
   // dintr-un panou să poată fi difuzate în toate. `send` e stabil (useCallback []), deci se
@@ -1508,22 +1539,39 @@ export default function SessionView(props: {
         heldEnter = false
         return false
       }
-      if (e.type === 'keyup' && (e.key === 'Enter' || e.code === 'KeyJ')) heldEnter = false
+      // litera LOGICĂ (e.key), nu tasta fizică (e.code): xterm derivă byte-ul din keyCode-ul
+      // layout-ului, deci pe Dvorak tasta fizică „O" e Ctrl+R pentru shell (re-review SV-01)
+      const letter = e.key.length === 1 ? e.key.toLowerCase() : ''
+      if (e.type === 'keyup' && (e.key === 'Enter' || letter === 'j' || letter === 'o' || letter === 'a')) heldEnter = false
       if (e.type !== 'keydown') return true
       heldEnter = false
       // Guardrail de comenzi: la Enter, verificăm comanda TASTATĂ (via OSC 133) ÎNAINTE s-o
       // trimitem. block → curăță linia; confirm → dialog. Fără shell integration (promptRow
       // lipsă) sau într-un TUI, pendingCommand e null → trece. Shift/Ctrl+Enter şi Ctrl+J
-      // execută şi ele linia în shell (CR / LF) — scăpau verificării până în 3.5.2.
-      const submits = (e.key === 'Enter' && !e.altKey && !e.metaKey)
-        || (e.ctrlKey && e.code === 'KeyJ' && !e.shiftKey && !e.altKey && !e.metaKey)
+      // execută şi ele linia în shell (CR / LF) — scăpau verificării până în 3.5.2. Ctrl+O
+      // (`\x0f`: bash `operate-and-get-next`, zsh `accept-line-and-down-history`) o execută şi el
+      // — scăpa până la auditul 2026-10-17 (SV-01); trece prin EXACT aceeaşi verificare. La fel
+      // Alt+A / Alt+Shift+A (`ESC a` / `ESC A`: zsh `accept-and-hold` execută linia şi o păstrează;
+      // re-review SV-01). Pe Mac fără macOptionIsMeta, Option+A tastează „å" (e.key) şi xterm nu
+      // emite ESC a — nu se potriveşte, corect.
+      const ctrlOnly = e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey
+      const altOnly = e.altKey && !e.ctrlKey && !e.metaKey
+      const submitSeq = e.key === 'Enter' && !e.altKey && !e.metaKey ? '\r'
+        : ctrlOnly && letter === 'j' ? '\n'
+        : ctrlOnly && letter === 'o' ? CTRL_O
+        : altOnly && letter === 'a' ? ACCEPT_AND_HOLD[e.shiftKey ? 1 : 0]
+        : null
       // Broadcast: Enter-ul pleacă în TOATE panourile, deci se verifică linia din fiecare —
       // istoricul / completarea pot face ca acelaşi text tastat să fie altă comandă în alt shell;
       // un panou-ţintă pe pauză sau fără ecou încă cere confirmare (lib/broadcastGuard, 3.6.12).
       // Cât aşteptăm ecoul, Enter-ul următor intră în coadă (onData), nu se verifică de două ori.
-      if (submits && !submitWaitRef.current) {
-        if (!ioRef.current.checkSubmit(e.ctrlKey && e.code === 'KeyJ' ? '\n' : '\r')) {
+      if (submitSeq !== null && !submitWaitRef.current) {
+        if (!ioRef.current.checkSubmit(submitSeq)) {
           heldEnter = true
+          // xterm nu mai vede tasta (handler → false), deci nu o anulează el: un Ctrl+O reţinut ar
+          // deschide dialogul „Open file" al browserului, un Ctrl+J panoul de descărcări (Chrome);
+          // pentru Enter e inofensiv
+          e.preventDefault()
           return false   // NU trimite Enter la host
         }
         enterOkAtRef.current = performance.now()
@@ -3068,7 +3116,7 @@ export default function SessionView(props: {
                   ref={cmdCancelBtnRef}
                   onClick={() => {
                     // regulă pe linia tastată: o golim; „nu pot verifica" / snippet reţinut: rămâne de editat
-                    if (!cmdConfirm.unknown && !cmdConfirm.run && !cmdConfirm.below) (cmdConfirm.recheck ? sendAll : send)('\x15')
+                    if (!cmdConfirm.unknown && !cmdConfirm.run && !cmdConfirm.below) (cmdConfirm.recheck ? sendAll : send)(clearLineSeq())
                     setCmdConfirm(null); termRef.current?.focus()
                   }}
                   className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700"
@@ -3084,17 +3132,19 @@ export default function SessionView(props: {
                     if (c.localRecheck) {
                       // dialog „încă nu pot verifica" (un singur panou): linia re-judecată acum
                       const lv = c.localRecheck()
-                      if (localRunDecision(lv) === 'send') send(c.run ?? '\r')
-                      else if (lv.kind === 'rule') applyRule(lv.rule, lv.cmd, c.run && !isBareEnter(c.run) ? c.run : undefined, undefined, undefined, lv.below === true)
+                      // tasta de trimitere reţinută pleacă EA (`\x0f` aduce istoricul, `a` încheie un `ESC a`
+                      // al cărui Escape a plecat deja: un `\r` după el n-ar rula nimic — re-review SV-01)
+                      if (localRunDecision(lv) === 'send') send(c.run ?? c.submit ?? '\r')
+                      else if (lv.kind === 'rule') applyRule(lv.rule, lv.cmd, c.run, undefined, undefined, lv.below === true, c.submit)
                       termRef.current?.focus()
                       return
                     }
                     const v = c.recheck ? c.recheck() : null
                     const d = runDecision(v, c.hits ?? [], c.unknown ? (c.unreadable ?? []) : null)
-                    if (d === 'local') send(c.run ?? '\r')
-                    else if (d === 'send') sendAll(c.run ?? '\r')
-                    else if (v?.kind === 'rule') applyRule(v.rule, v.cmd, c.run, v.hits, c.recheck)
-                    else if (v && v.kind !== 'ok') setCmdConfirm({ cmd: c.cmd, pattern: '', unknown: true, run: c.run, hits: v.hits, recheck: c.recheck, unreadable: v.unreadable, opaque: c.opaque })
+                    if (d === 'local') send(c.run ?? c.submit ?? '\r')
+                    else if (d === 'send') sendAll(c.run ?? c.submit ?? '\r')
+                    else if (v?.kind === 'rule') applyRule(v.rule, v.cmd, c.run, v.hits, c.recheck, false, c.submit)
+                    else if (v && v.kind !== 'ok') setCmdConfirm({ cmd: c.cmd, pattern: '', unknown: true, run: c.run, submit: c.submit, hits: v.hits, recheck: c.recheck, unreadable: v.unreadable, opaque: c.opaque })
                     termRef.current?.focus()
                   }}>
                   {cmdConfirm.unknown && cmdConfirm.recheck ? t('session.runInAllPanes') : t('session.run')}</Button>

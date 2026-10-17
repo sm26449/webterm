@@ -131,8 +131,39 @@ export function copyLabel(paths: string[], t: T): string {
   return t('transfers.copyNFiles', { n: paths.length })
 }
 
-interface CopyCtl { opts: StartCopyOpts; jobId: string; timer: number | null; lastPos: number; lastAt: number; label: string }
+interface CopyCtl {
+  opts: StartCopyOpts; jobId: string; timer: number | null; lastPos: number; lastAt: number; label: string
+  owner: number | null                           // contul care a pornit-o (FL-06)
+}
 const ctls = new Map<string, CopyCtl>()          // rowId → controller
+
+// ── contul curent ─────────────────────────────────────────────────────────────────────────
+let currentUser: number | null = null
+/** App-ul îl setează din `/api/state.user_id` (acelaşi tipar ca setUploadUser / setDownloadUser).
+    Rândurile de copiere ale ALTUI cont rămase în memorie (căi sursă, folder destinaţie, perechea de
+    hosturi, eroarea) se uită aici — altfel contul următor pe acelaşi browser le vedea în widget
+    (audit 2026-10-17, FL-06; Retry-ul e oricum verificat pe server după proprietar). */
+export function setCopyUser(id: number | null): void {
+  currentUser = id
+  dropCopyRows(id)
+}
+
+/** Scoate din memorie rândurile `copy` (+ controlerele şi polling-ul lor) care NU sunt ale contului
+    `keep` (null = toate). Job-ul de pe server NU se anulează (nu e al sesiunii curente; îşi vede de
+    treabă şi expiră singur). */
+export function dropCopyRows(keep: number | null): void {
+  for (const [rowId, c] of ctls) {
+    if (keep != null && c.owner === keep) continue
+    if (c.timer) window.clearTimeout(c.timer)
+    ctls.delete(rowId)
+    uploadStore.remove(rowId)
+  }
+  for (const j of uploadStore.snapshot().values()) {
+    if (j.dir !== 'copy') continue
+    if (keep != null && j.owner === keep) continue
+    uploadStore.remove(j.id)
+  }
+}
 
 function poll(rowId: string): void {
   const c = ctls.get(rowId)
@@ -192,8 +223,10 @@ function track(r: { job_id: string; dst_dir: string }, o: StartCopyOpts, label: 
     id: rowId, dir: 'copy', hostId: o.srcHost, hostName: `${o.srcName} → ${o.dstName}`,
     dest: r.dst_dir, name: label, size: 0, pos: 0, pct: 0, bytesPerSec: 0, etaSec: null,
     state: 'running', attempts, detail: tr('transfers.copyFiles', { done: 0, total: o.paths.length }),
+    owner: currentUser,
   })
-  ctls.set(rowId, { opts: { ...o, dstDir: r.dst_dir }, jobId: r.job_id, timer: null, lastPos: 0, lastAt: 0, label })
+  ctls.set(rowId, { opts: { ...o, dstDir: r.dst_dir }, jobId: r.job_id, timer: null, lastPos: 0, lastAt: 0, label,
+                    owner: currentUser })
   poll(rowId)
   return rowId
 }

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { CommandGuard } from './api'
 import type { Terminal } from '@xterm/xterm'
 import { CommandTracker } from './commands'
-import { echoSettled, echoSettleMs, hitsKey, isBareEnter, judgeLocal, judgePeers, LocalState, mergeTyped, opaqueInput, PeerState, plainText, runDecision, splitLines, stripControls, submitsLine, unbracket } from './broadcastGuard'
+import { ACCEPT_AND_HOLD, CTRL_O, SUBMIT_RE, acceptsLine, echoSettled, echoSettleMs, hitsKey, isBareEnter, isSubmitKey, judgeLocal, judgePeers, LocalState, mergeTyped, metaAccept, opaqueInput, PeerState, plainText, runDecision, splitLines, stripControls, submitsLine, unbracket } from './broadcastGuard'
 
 // review independent 3.6.12 (M1): un Enter difuzat verifică linia din FIECARE panou-ţintă, iar un
 // panou a cărui linie nu poate fi crezută (pauză / fără ecou încă) cere confirmare — fail-closed.
@@ -625,5 +625,102 @@ describe('judgePeers / judgeLocal: potrivire doar sub cursor → confirmare `bel
     const v2 = judgeLocal({ ...base, pending: 'rm -rf /srv/a', pendingBelow: ['rm -rf /srv/a b'] }, blk, true)
     expect(v2).toMatchObject({ kind: 'rule', rule: { action: 'block' } })
     expect(v2.kind === 'rule' && v2.below).toBeFalsy()
+  })
+})
+
+// audit 2026-10-17 (SV-01): Ctrl+O (`\x0f`) EXECUTĂ linia în bash (operate-and-get-next) şi zsh
+// (accept-line-and-down-history), dar userInput verifica doar CR/LF — pleca direct, local şi în
+// broadcast („↑ + comandă nevăzută", scenariul închis pentru Enter în 3.6.13, rămânea deschis).
+describe('SV-01: Ctrl+O (\\x0f) e un Enter cu altă haină', () => {
+  it('tasta singură e o tastă de trimitere (onData / keybar / coada de taste reţinute), ca un Enter gol', () => {
+    expect(CTRL_O).toBe('\x0f')
+    expect(isSubmitKey('\x0f')).toBe(true)
+    expect(isSubmitKey('\r')).toBe(true)
+    expect(isSubmitKey('\n')).toBe(true)
+    expect(isSubmitKey('\r\n')).toBe(true)
+    // nu „gol": un chunk cu text / ESC înainte trece prin submitChunk (fiecare linie verificată)
+    expect(isSubmitKey('ls\x0f')).toBe(false)
+    expect(isSubmitKey('\x1b\x0f')).toBe(false)
+    expect(isSubmitKey('\x0f\x0f')).toBe(false)
+    // isBareEnter rămâne strict Enter (căile care îl mai folosesc nu se lărgesc pe tăcute)
+    expect(isBareEnter('\x0f')).toBe(false)
+  })
+
+  it('un chunk de paste care conţine \\x0f TRIMITE o linie: se judecă pe linii, ca la CR/LF', () => {
+    expect(submitsLine('rm -rf /\x0f')).toBe(true)
+    expect(submitsLine('\x0f')).toBe(true)
+    expect(submitsLine('ls -la')).toBe(false)
+    expect(splitLines('a\x0fb\rc\nd')).toEqual(['a', 'b', 'c', 'd'])
+    // linia verificată e cea pe care o execută shell-ul: textul de dinaintea lui \x0f, fără C0
+    const lines = splitLines(unbracket('rm -rf /\x0f')).map(stripControls)
+    expect(lines).toEqual(['rm -rf /', ''])
+    expect(stripControls('rm\x0f')).toBe('rm')
+    // fail-closed („only add readings"): un \x0f în mijlocul unui chunk rămâne tastă de editare
+    // (shell-ul aduce şi următoarea linie din istoric) → „nu pot verifica", nu trecere liberă
+    expect(opaqueInput('ls\x0f')).toBe(true)
+    expect(opaqueInput('ls\x0f', true)).toBe(true)
+  })
+
+  // re-review SV-01: zsh (keymap emacs) leagă `ESC a` / `ESC A` (Alt+A / Alt+Shift+A în xterm) la
+  // `accept-and-hold` — EXECUTĂ linia (şi o păstrează în buffer). Chunk-ul nu era nici plainText,
+  // nici tastă de trimitere, nici submitsLine → pleca direct, local şi în broadcast.
+  it('Alt+A (`ESC a` / `ESC A`, zsh accept-and-hold) e aceeaşi tastă de trimitere, pe toate căile', () => {
+    expect(ACCEPT_AND_HOLD).toEqual(['\x1ba', '\x1bA'])
+    expect(isSubmitKey('\x1ba')).toBe(true)
+    expect(isSubmitKey('\x1bA')).toBe(true)
+    expect(isBareEnter('\x1ba')).toBe(false)
+    // săgeţile (CSI / SS3), Alt+altă literă, ESC singur, litera singură NU trimit linia
+    for (const k of ['\x1b[A', '\x1bOA', '\x1b[a', '\x1bb', '\x1b', 'a', 'A', 'ls\x1ba', '\x1ba\x1ba']) {
+      expect(isSubmitKey(k), JSON.stringify(k)).toBe(false)
+    }
+    // chunk (paste / IME / inserare): judecat pe linii, ca la CR/LF/\x0f
+    expect(submitsLine('rm -rf /\x1ba')).toBe(true)
+    expect(submitsLine('rm -rf /\x1bA')).toBe(true)
+    expect(SUBMIT_RE.test('\x1bA')).toBe(true)
+    for (const k of ['\x1b[A', '\x1bOA', '\x1b[200~ls -la\x1b[201~', '\x1b[1;5A', 'ls -la']) {
+      expect(submitsLine(k), JSON.stringify(k)).toBe(false)
+    }
+    expect(splitLines('a\x1bAb\x1bac\x0fd\re')).toEqual(['a', 'b', 'c', 'd', 'e'])
+    expect(splitLines(unbracket('rm -rf /\x1ba')).map(stripControls)).toEqual(['rm -rf /', ''])
+    // fail-closed: un ESC a în mijlocul unui chunk rămâne „nu pot verifica", nu trecere liberă
+    expect(opaqueInput('ls\x1ba')).toBe(true)
+    expect(opaqueInput('ls\x1ba', true)).toBe(true)
+  })
+
+  // re-review SV-01 (MED): zsh asamblează `ESC a` tastă cu tastă — Escape (chunk `\x1b`, trimis ca
+  // atare) şi apoi `a` (chunk de text, trimis ca atare) e aceeaşi legătură, fără timeout. Şi de pe
+  // keybar-ul mobil (are Esc). userInput nu ţinea minte chunk-ul anterior → nicio verificare.
+  it('Escape apoi `a` / `A` (două chunk-uri) e tot accept-and-hold: tastă de trimitere DOAR după un ESC singur', () => {
+    expect(metaAccept('\x1b', 'a')).toBe(true)
+    expect(metaAccept('\x1b', 'A')).toBe(true)
+    expect(isSubmitKey('a', '\x1b')).toBe(true)
+    expect(isSubmitKey('A', '\x1b')).toBe(true)
+    // fără ESC înainte (altă tastă, nimic, un raport = null) litera e doar text
+    expect(isSubmitKey('a')).toBe(false)
+    expect(isSubmitKey('a', null)).toBe(false)
+    expect(isSubmitKey('a', 'x')).toBe(false)
+    expect(isSubmitKey('a', '\r')).toBe(false)
+    // prefixul e un chunk care se TERMINĂ cu Escape singur (`ls⎋` lipit lasă acelaşi prefix; `ESC ESC` primeşte
+    // o citire în plus — doar adaugă citiri); după o săgeată sau `Alt+Enter` shell-ul nu mai e în prefix meta
+    for (const prev of ['ls\x1b', '\x1b\x1b', 'rm -rf /\x1b']) expect(isSubmitKey('a', prev), JSON.stringify(prev)).toBe(true)
+    for (const prev of ['\x1b[A', '\x1bOA', '\x1b\r', '\x1b[200~', '\x1bx', '']) {
+      expect(isSubmitKey('a', prev), JSON.stringify(prev)).toBe(false)
+    }
+    // după ESC, doar `a` / `A` trimit linia: `b` (backward-word), `ab`, un Enter cu ESC e deja isBareEnter
+    for (const d of ['b', 'ab', 'aa', '', ' ', '\x1ba']) expect(metaAccept('\x1b', d), JSON.stringify(d)).toBe(false)
+    // Enter / Ctrl+O / ESC a singure rămân taste de trimitere indiferent de ce a fost înainte
+    for (const prev of [null, '\x1b', 'x']) {
+      for (const d of ['\r', '\n', '\r\n', CTRL_O, ...ACCEPT_AND_HOLD]) expect(isSubmitKey(d, prev)).toBe(true)
+    }
+  })
+
+  // re-review SV-01 (LOW): noteSubmitSent (sare contiguitatea rândurilor până la promptul următor, PS2)
+  // DOAR pentru accept-line-ul adevărat al shell-ului — nu pentru `ESC a` (în bash nu face nimic şi ar
+  // absorbi rânduri străine în linia judecată)
+  it('acceptsLine: CR / LF / Ctrl+O da, `ESC a` şi `a` nu', () => {
+    for (const d of ['\r', '\n', '\r\n', '\x0f', 'ls\n', 'rm -rf /\x0f']) expect(acceptsLine(d), JSON.stringify(d)).toBe(true)
+    for (const d of ['\x1ba', '\x1bA', 'a', '\x1b', 'ls -la', 'rm -rf /\x1ba']) expect(acceptsLine(d), JSON.stringify(d)).toBe(false)
+    // submitsLine rămâne mai larg: un chunk cu ESC a se judecă pe linii
+    expect(submitsLine('rm -rf /\x1ba')).toBe(true)
   })
 })

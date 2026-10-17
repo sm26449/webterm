@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { CommandGuard } from './api'
-import { countCprReplies, countCprRequests, echoes, EchoTracker, isTerminalReport, keyShape, LineKey, ECHO_PENDING_MAX, reportOnly, sendIsReport } from './echo'
+import { countCprReplies, countCprRequests, echoes, EchoTracker, isTerminalReport, keyShape, LineKey, ECHO_PENDING_MAX, reportOnly, sendIsReport, sentArgs } from './echo'
 import { echoSettleMs, judgeLocal, judgePeers, localRunDecision, plainText } from './broadcastGuard'
 
 // Un „shell" minimal: linia tastată + cursorul la capăt, cu istoric pentru ↑.
@@ -549,5 +549,85 @@ describe('review 3.6.13 L1: textul inserat nu e niciodată raport', () => {
     expect(sendIsReport('auto', dcs, false, false)).toBe(true)     // date difuzate: după formă
     expect(sendIsReport('auto', dcs, true, false)).toBe(false)     // dintr-un paste: niciodată
     expect(sendIsReport('report', '\x1b[I', false, false)).toBe(true)
+  })
+})
+
+// audit 2026-10-17 (SV-01): SessionView.send marchează Ctrl+O (`\x0f`) ca trimitere a liniei
+// (sentArgs → isSubmitKey) — ecoul lui e orice schimbare a liniei şi închide tot ce era înaintea lui,
+// ca Enter. Până atunci pleca cu submit=false: textul dinaintea lui rămânea în aşteptare şi bloca
+// verificarea comenzii următoare („Încă nu pot verifica linia").
+describe('SV-01: Ctrl+O închide tot ce era înaintea lui, ca Enter', () => {
+  // `submit` = false simulează cablajul VECHI (submit mereu false pentru o tastă care nu e Enter);
+  // altfel argumentele lui sent() sunt EXACT cele ale lui SessionView.send (sentArgs, cu chunk-ul anterior)
+  const run = (submit: boolean, ...keys: string[]) => {
+    const echo = new EchoTracker()
+    let line = ''
+    let row = 0
+    let prev: string | null = null
+    const key = (): LineKey => ({ k: `n\u0000${row}\u0000${line.length}\u0000${line}`, line })
+    const send = (d: string, t: number) => {
+      const a = sentArgs(d, prev)
+      prev = d
+      const { seq, needBase } = echo.sent(a.text, t, a.submit && submit, a.raw)
+      if (needBase) echo.setBase(seq, key())
+    }
+    for (const c of 'rm -rf /tmp/x') send(c, 1)
+    for (const k of keys.length ? keys : ['\x0f']) send(k, 2)   // Ctrl+O = operate-and-get-next
+    // un singur chunk: rând nou, comanda rulează, prompt nou cu următoarea linie din istoric
+    row = 2; line = 'echo next'
+    echo.output(echo.inputSeq, key, 5, null)
+    return echo
+  }
+  it('sentArgs (cablajul lui SessionView.send): tasta de trimitere pleacă fără text, cu submit', () => {
+    expect(sentArgs('\x0f', null)).toEqual({ text: null, submit: true, raw: '\x0f' })
+    expect(sentArgs('\r', 'x')).toEqual({ text: null, submit: true, raw: '\r' })
+    expect(sentArgs('\x1ba', null)).toEqual({ text: null, submit: true, raw: '\x1ba' })
+    // text simplu: textul lui, nu trimitere; ESC singur: fără text, nu trimitere
+    expect(sentArgs('x', null)).toEqual({ text: 'x', submit: false, raw: 'x' })
+    expect(sentArgs('\x1b', 'x')).toEqual({ text: null, submit: false, raw: '\x1b' })
+    expect(sentArgs(new Uint8Array(3), '\x1b')).toEqual({ text: null, submit: false, raw: '<3 bytes>' })
+    // re-review SV-01 (MED): `a` după un Escape trimis singur e a doua tastă a lui `ESC a` — trimitere,
+    // nu text (ecoul lui nu e un „a" pe linie); după orice alt chunk e text
+    expect(sentArgs('a', '\x1b')).toEqual({ text: null, submit: true, raw: 'a' })
+    expect(sentArgs('A', '\x1b')).toEqual({ text: null, submit: true, raw: 'A' })
+    expect(sentArgs('a', 'x')).toEqual({ text: 'a', submit: false, raw: 'a' })
+    expect(sentArgs('a', null)).toEqual({ text: 'a', submit: false, raw: 'a' })
+    expect(sentArgs('b', '\x1b')).toEqual({ text: 'b', submit: false, raw: 'b' })
+  })
+  it('cu submit (fix): nimic în aşteptare după ecoul lui', () => {
+    expect(run(true).unechoed()).toEqual([])
+  })
+  it('fără submit (comportamentul vechi): textul tastat rămâne în aşteptare → ar bloca linia următoare', () => {
+    expect(run(false).unechoed().length).toBeGreaterThan(0)
+  })
+  it('Escape apoi `a` (două chunk-uri, zsh accept-and-hold) închide tot ce era înaintea lor, ca Enter', () => {
+    expect(run(true, '\x1b', 'a').unechoed()).toEqual([])
+    expect(run(true, '\x1b', 'A').unechoed()).toEqual([])
+    expect(run(false, '\x1b', 'a').unechoed().length).toBeGreaterThan(0)
+    // `x` apoi `a`: nicio trimitere — textul rămâne în aşteptare (linia nu l-a arătat)
+    expect(run(true, 'x', 'a').unechoed().length).toBeGreaterThan(0)
+  })
+  it('\\x0f nu e niciodată raport de terminal (onData, onBinary): trece prin guardrail', () => {
+    expect(isTerminalReport('\x0f')).toBe(false)
+    expect(reportOnly('\x0f', false, false)).toBe(false)
+    expect(reportOnly('rm -rf /\x0f', false, false)).toBe(false)
+    expect(reportOnly(new Uint8Array([0x0f]), true, false)).toBe(false)
+    expect(sendIsReport('auto', 'rm -rf /\x0f', false, false)).toBe(false)
+  })
+  // re-review SV-01: `ESC a` / `ESC A` (zsh accept-and-hold) — aceeaşi tratare ca Ctrl+O
+  it('ESC a (zsh accept-and-hold) închide tot ce era înaintea lui, ca Enter, şi nu e niciodată raport', () => {
+    expect(run(true, '\x1ba').unechoed()).toEqual([])
+    expect(run(true, '\x1bA').unechoed()).toEqual([])
+    expect(run(false, '\x1ba').unechoed().length).toBeGreaterThan(0)
+    expect(isTerminalReport('\x1ba')).toBe(false)
+    expect(reportOnly('\x1ba', false, false)).toBe(false)
+    expect(reportOnly('\x1bA', true, false)).toBe(false)        // nici pe o cale „doar rapoarte"
+    expect(reportOnly('rm -rf /\x1ba', false, false)).toBe(false)
+    expect(reportOnly(new Uint8Array([0x1b, 0x61]), true, false)).toBe(false)
+    expect(reportOnly(new Uint8Array([0x1b, 0x41]), true, false)).toBe(false)
+    expect(sendIsReport('auto', 'rm -rf /\x1ba', false, false)).toBe(false)
+    // rapoartele reale rămân rapoarte (focus in, mouse X10 pe onBinary)
+    expect(reportOnly('\x1b[I', false, false)).toBe(true)
+    expect(reportOnly(new Uint8Array([0x1b, 0x5b, 0x4d, 0x20, 0x21, 0x21]), true, false)).toBe(true)
   })
 })

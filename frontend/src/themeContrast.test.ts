@@ -8,7 +8,10 @@
      - conturul câmpurilor, inelul de focus şi culorile de grafic ≥ 3:1 (WCAG 1.4.11);
      - alb pe butonul primar (sky-600) ≥ 4,5:1;
      - workspace-ul forţat întunecat: textul lui pe ws-950/900/800 şi pe paleta de comenzi,
-       textul cromului pe tab strip / suprafaţa ridicată / fundalul terminalului.
+       textul cromului pe tab strip / suprafaţa ridicată / fundalul terminalului;
+     - editorul de fişiere (`.wt-editor`): textul şi UI-ul lui pe cardul `.glass` şi pe ink-800,
+       în AMBELE contexte — din sesiune (.wt-workspace) şi de pe pagina hostului (.wt-canvas),
+       unde axe nu vede `color-mix()` (audit 2026-10-17, UI-01).
    Raport complet: VITE_CONTRAST_REPORT=1 npx vitest run src/themeContrast.test.ts */
 import { describe, expect, it } from 'vitest'
 import { FAMILIES, VARIANTS, type ThemeFamily, type ThemeVariant } from './lib/themeModel'
@@ -84,6 +87,45 @@ for (const f of FAMILIES.map((x) => x.id)) {
   need(where, 'tx-500 on command palette', rgb(ws['tx-500']), rgb(t['command-bg']), 4.5)
 }
 
+// Editorul de fişiere (`.wt-editor`, FileEditor.tsx) e o zonă forţat-întunecată care se deschide în DOUĂ
+// contexte: din sesiune (în `.wt-workspace`, tokeni întunecaţi moşteniţi) şi din pagina hostului —
+// tab-ul Files / AI tools — adică sub `.wt-canvas`, unde moşteneşte tokenii variantei DESCHISE.
+// Auditul 2026-10-17 (UI-01): `.wt-editor` redeclara doar textul (deschis), nu şi suprafaţa, deci
+// cardul `.glass` ieşea alb sub `.wt-canvas` şi textul din antet avea 1,16–1,22:1 pe toate cele
+// 5 variante deschise. axe nu prinde cazul (`color-mix()` → „incomplete"), de aceea e verificat aici:
+// tokenul EFECTIV = declaraţia zonei (cu `var(--ws-*)` rezolvat din familie), altfel moştenirea.
+const editorZone = tokens((s) => s === '.wt-editor')
+const resolveToken = (name: string, chain: Tokens[]): string => {
+  for (const t of chain) {
+    if (name in t) return t[name].replace(/var\(--([\w-]+)\)/g, (_, n: string) => resolveToken(n, chain))
+  }
+  throw new Error(`token lipsă: --${name}`)
+}
+const editorPairs: Pair[] = []
+for (const v of Object.keys(VARIANTS) as ThemeVariant[]) {
+  const vt = variantTokens(v)
+  const ft = familyTokens(VARIANTS[v].family)
+  const editorFamily = tokens((s) => s === `:root[data-family='${VARIANTS[v].family}'] .wt-editor`)
+  const contexts: Record<string, Tokens[]> = {
+    'host page (canvas)': [editorFamily, editorZone, vt, ft],
+    'session (workspace)': [editorFamily, editorZone, ws, vt, ft],
+  }
+  for (const [ctx, chain] of Object.entries(contexts)) {
+    const where = `editor/${v}/${ctx}`
+    const eff = (k: string) => rgb(resolveToken(k, chain))
+    // `.glass` = color-mix(ink-900 82 %, glass-bg), sticla compusă peste pagină (estimare
+    // conservatoare: sub editor e şi scrim-ul negru 60 %, care întunecă şi mai mult)
+    const glass = over(rgb(resolveToken('glass-bg', chain)), pageColor(vt['app-gradient']))
+    const ink900 = eff('ink-900')
+    const card = [0, 1, 2].map((i) => ink900[i]! * 0.82 + glass[i]! * 0.18) as RGB
+    const surfaces: Record<string, RGB> = { 'editor card': card, 'ink-800': eff('ink-800') }
+    for (const [sn, s] of Object.entries(surfaces)) {
+      for (const k of TEXT) editorPairs.push({ where, what: `${k} on ${sn}`, r: ratio(eff(k), s), min: 4.5 })
+      for (const k of ['field-border', 'focus']) editorPairs.push({ where, what: `${k} on ${sn}`, r: ratio(eff(k), s), min: 3 })
+    }
+  }
+}
+
 // Numele hostului pe tab-ul activ e scris în culoarea hostului (paleta pastel din lib/host.ts) peste
 // `color-mix(culoare 18%, --chrome-elev)` (TabBar). Paleta e calibrată pe cromul navy WebTerm, deci
 // o familie nouă nu are voie să coboare sub cel mai slab contrast al WebTerm (prins de axe în gate).
@@ -117,6 +159,12 @@ describe('contrastul variantelor de temă (tokeni din index.css)', () => {
   })
   it('text ≥ 4,5:1, UI şi grafice ≥ 3:1, pe toate variantele şi în workspace', () => {
     const bad = pairs.filter((p) => p.r + 1e-9 < p.min).map((p) => `${p.where}: ${p.what} = ${p.r.toFixed(2)}:1 < ${p.min}:1`)
+    expect(bad).toEqual([])
+  })
+  it('editorul de fişiere: text ≥ 4,5:1 şi UI ≥ 3:1 pe cardul lui, din sesiune ŞI din pagina hostului (UI-01)', () => {
+    expect(Object.keys(editorZone)).toContain('tx-400')
+    expect(editorPairs.length).toBe(Object.keys(VARIANTS).length * 2 * 2 * (TEXT.length + 2))
+    const bad = editorPairs.filter((p) => p.r + 1e-9 < p.min).map((p) => `${p.where}: ${p.what} = ${p.r.toFixed(2)}:1 < ${p.min}:1`)
     expect(bad).toEqual([])
   })
 })

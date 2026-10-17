@@ -59,7 +59,15 @@ SESSION_WARN = 28                # of core.MAX_SESSIONS_HINT (32)
 MAX_HOSTS_IN_RESULT = 50
 DOCS = {"authentik_upgrade": "docs/AUTHENTIK-UPGRADE.md", "heartbeat": "docs/INSTALL.md#dead-man-switch",
         "host_health": "docs/INSTALL.md#system-health",
-        "host_requirements": "docs/INSTALL.md#supported-hosts"}
+        "host_requirements": "docs/INSTALL.md#supported-hosts",
+        "break_glass": "docs/ROLES.md#break-glass-promote-from-the-server"}
+# FL-12 (audit 2026-10-17): a helper that has never reported is "not installed yet" for the
+# first minutes after the gateway starts (install.sh / upgrade.sh is still running) and a
+# warning after that — an upgrade from < 3.6.9 in one jump leaves the host kit uninstalled
+# and nothing else says so.
+HELPER_GRACE = 600.0
+_STARTED = time.time()
+OWNER_EXPIRY_SOON = 7 * 86400     # FL-14: the last (time-bound) Owner ends in under a week
 K_LAST_RUN = "health_last_run"
 K_BEHIND = "health_agent_behind_since"
 K_JANITOR = "janitor_state"
@@ -108,6 +116,13 @@ MESSAGES = {
     "helper_timers": "Host timers are not active: {timers}",
     "helper_invalid": "A host status file was refused ({file}: {error})",
     "helper_ok": "The host helper reports regularly",
+    # roles (audit 2026-10-17: RB-01, FL-14)
+    "no_owner": "No active account holds the Owner role over all hosts",
+    "no_permanent_owner": "No active account holds a PERMANENT Owner role over all hosts; the last time-bound Owner ends in {days} days",
+    "permanent_owner_expiring": "The last Owner over all hosts is time-bound and ends in {days} days; nobody holds a permanent Owner role",
+    "permanent_owner_ok": "{count} account(s) hold a permanent Owner role over all hosts",
+    "no_break_glass": "No active permanent Owner has a local password (no break-glass account)",
+    "break_glass_ok": "{count} permanent Owner(s) can sign in with a local password (break-glass)",
     "host_backup_failed": "The host backup failed: {message}",
     "host_backup_stale": "The last host backup report is {age} old",
     "host_backup_missing": "The backup timer is enabled but has never reported",
@@ -212,6 +227,8 @@ WHY = {
     "sessions.cap": "At the limit, new terminals on that host are refused.",
     "signing.state": "Agents only accept signed updates; without a usable key the fleet stays on old code.",
     "oidc.sso": "When SSO fails, every SSO account is locked out; with WEBTERM_OIDC_SSO_ONLY=1 there is no other way in.",
+    "roles.permanent_owner": "A time-bound Owner cannot grant beyond its own end: when the last one expires, nobody can administer this WebTerm from the UI.",
+    "roles.break_glass": "Owners who sign in only through SSO are locked out with the identity provider; one permanent Owner with a local password is the way back in.",
     "config.forwards_http": "Without https the session cookie loses its __Host- prefix, so a forwarded page can plant a session cookie (session fixation).",
     "config.sso_ungated": "WebTerm does not re-check the group, so who gets in is decided entirely by the identity provider.",
     "tokens.enroll_orphans": "A group enrollment token adds machines to the fleet. Offboarding revokes the tokens a person created — one whose creator account is gone (created before 3.6.11) is revoked by nobody until it expires.",
@@ -229,6 +246,9 @@ WHY = {
 }
 RECS = {
     "install_helper": "Install it on the gateway host: it adds an hourly systemd timer and changes nothing else.",
+    "helper_never_ran": "Install it on the gateway host (sudo ./scripts/host-health.sh --install): it adds an hourly systemd timer and changes nothing else. If you upgraded from a version before 3.6.9 in one jump, run ./upgrade.sh a second time: the old upgrade script does not install the host kit (host-health, cert-renew, docker-cleanup).",
+    "promote_owner": "Make another account a permanent Owner over all hosts: Settings → Users & roles → Accounts (an Owner grants Owner with no end), or on the gateway host, in the WebTerm directory: docker compose -f docker-compose.prod.yml exec -u webterm app python3 -m app.admin promote <email>. You type that command; WebTerm never runs it.",
+    "break_glass_password": "Make an account that signs in with a local password a permanent Owner (Settings → Users & roles → Accounts, or on the gateway host, in the WebTerm directory: docker compose -f docker-compose.prod.yml exec -u webterm app python3 -m app.admin promote <email>). An SSO-only Owner can get a local password with python3 -m app.admin passwd <email> — it then loses the roles its SSO groups gave. You type these commands; WebTerm never runs them.",
     "check_timer": "Look at the unit's journal, then start it once by hand to see it succeed.",
     "timer_pending": "Nothing is wrong: the timer has not fired since the update. To see it work now, start it once.",
     "run_upgrade": "Your host scripts predate 3.6.8 — run upgrade.sh to refresh them.",
@@ -345,8 +365,12 @@ async def c_host_helper() -> Optional[Result]:
                       rec="install_helper", commands=[{"t": "host_health", "p": {}}])
     hh = snap.get("host-health") or {}
     if hh.get("state") == "missing":
-        return Result("info", "helper_missing", rec="install_helper",
-                      commands=[{"t": "host_health_install", "p": {}}])
+        # FL-12: info while the gateway has just started, a warning once it has been up for
+        # HELPER_GRACE — the host kit is missing (never installed, or an upgrade from < 3.6.9
+        # whose old upgrade.sh did not install it)
+        late = time.time() - _STARTED > HELPER_GRACE
+        return Result("warning" if late else "info", "helper_missing", rec="helper_never_ran",
+                      commands=[{"t": "host_health_install", "p": {}}], doc="host_health")
     if hh.get("stale"):
         return Result("warning", "helper_stale", {"age": _age(hh.get("age", 0))}, rec="check_timer",
                       commands=_unit_cmds("webterm-host-health.service"))
@@ -725,6 +749,62 @@ async def c_sso_ungated() -> Optional[Result]:
 JANITOR_STALE = 2 * 86400 + 3600
 
 
+# ── roles: is there a way to administer this instance tomorrow, and when the IdP is down? ────
+_OWNER_ALL = ("FROM role_bindings b JOIN roles r ON r.id=b.role_id JOIN users u ON u.id=b.user_id"
+              " WHERE r.key='owner' AND b.scope_kind='all' AND COALESCE(u.disabled, 0)=0")
+
+
+async def _n_users() -> int:
+    return int((await db.fetchone("SELECT COUNT(*) AS c FROM users"))["c"])
+
+
+async def _permanent_owners(with_local_password: bool = False) -> int:
+    """Active accounts with a PERMANENT Owner @ all — authz.owner_count's definition; with
+    `with_local_password` only the break-glass ones (COALESCE(local_password, 1)=1, as
+    `admin sso-only` counts them). Read here, not through authz, so a check never depends on
+    the permission cache."""
+    row = await db.fetchone(
+        "SELECT COUNT(DISTINCT b.user_id) AS c " + _OWNER_ALL + " AND b.expires IS NULL"
+        + (" AND COALESCE(u.local_password, 1)=1" if with_local_password else ""))
+    return int(row["c"]) if row else 0
+
+
+async def c_roles_permanent_owner() -> Optional[Result]:
+    """FL-14 (audit 2026-10-17): before 3.6.10 a time-bound Owner counted as "another Owner",
+    so an instance may be left with none that is permanent; the time-bound ones cannot repair
+    that (they cannot grant beyond their own end). Boot only logged it — now it is a check:
+    warning, critical when the last Owner binding ends in under OWNER_EXPIRY_SOON, critical
+    when no Owner is left at all. The fix is typed (app.admin promote), never run."""
+    if not await _n_users():
+        return None                      # before the first account (setup)
+    n = await _permanent_owners()
+    if n:
+        return Result("ok", "permanent_owner_ok", {"count": n})
+    now = time.time()
+    row = await db.fetchone("SELECT MAX(b.expires) AS latest " + _OWNER_ALL + " AND b.expires > ?", now)
+    latest = float(row["latest"]) if row and row["latest"] else 0.0
+    if not latest:
+        return Result("critical", "no_owner", rec="promote_owner", doc="break_glass")
+    days = int((latest - now) // 86400)
+    sev = "critical" if latest - now < OWNER_EXPIRY_SOON else "warning"
+    key = "permanent_owner_expiring" if sev == "critical" else "no_permanent_owner"
+    return Result(sev, key, {"days": days}, rec="promote_owner", doc="break_glass")
+
+
+async def c_roles_break_glass() -> Optional[Result]:
+    """RB-01 (audit 2026-10-17): the break-glass account is a PERMANENT Owner WITH a local
+    password — the one that still signs in when the identity provider is down. `admin sso-only`
+    and (since this audit) the UI refuse to take the last one away; this check says when there
+    is none at all (every Owner SSO-only, or no permanent Owner). Warning, never more: the
+    permanent-Owner check carries the escalation."""
+    if not await _n_users():
+        return None
+    n = await _permanent_owners(with_local_password=True)
+    if n:
+        return Result("ok", "break_glass_ok", {"count": n})
+    return Result("warning", "no_break_glass", rec="break_glass_password", doc="break_glass")
+
+
 async def c_enroll_orphans() -> Optional[Result]:
     """Live group enrollment tokens without a creator account (second re-review 3.6.11). Detect
     and recommend only — never revoked automatically (an enrollment in progress would break)."""
@@ -951,6 +1031,8 @@ CHECKS: list = [
     Check("sessions.cap", "fast", c_sessions_cap),
     Check("signing.state", "fast", c_signing, alert="none", critical=True),  # signing_locked alerts
     Check("oidc.sso", "fast", c_sso, critical=True),
+    Check("roles.permanent_owner", "fast", c_roles_permanent_owner, critical=True),
+    Check("roles.break_glass", "fast", c_roles_break_glass),
     Check("config.forwards_http", "fast", c_forwards_http, critical=True),
     Check("config.sso_ungated", "fast", c_sso_ungated),
     Check("tokens.enroll_orphans", "fast", c_enroll_orphans),

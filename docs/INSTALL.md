@@ -175,6 +175,23 @@ prints that it skipped it (see [docs/RUNBOOK.md](RUNBOOK.md), "Verifying an imag
 recovery procedure (including when the UI is completely unreachable):
 [docs/RUNBOOK.md](RUNBOOK.md).
 
+<a id="upgrading-pre-369"></a>
+**Upgrading from a version before 3.6.9: run `./upgrade.sh` twice.** The `upgrade.sh` that
+runs is the one already on the host. Before 3.6.9 it synced only `backup.sh`, `restore.sh`,
+`cert-check.sh` and their units, and replaced itself only at the very end ("active from the next
+run") — so a single run from 3.5.x (or any 3.6.x below 3.6.9) deploys the new gateway but leaves
+the host kit out: no `scripts/host-health.sh`, `cert-renew.sh`, `docker-cleanup.sh`,
+`authentik-upgrade.sh`, no `webterm-host-health` / `webterm-docker-cleanup` timers, and
+Settings → System health shows the host checks without data. The second run is made by the
+new script: it says why (`the previous upgrade was made by an upgrade.sh older than 3.6.9`),
+installs those scripts, runs `host-health.sh --install` (the two timers) and takes the first
+host-health reading. Check with `systemctl list-timers 'webterm-*'` — the second run must have
+added `webterm-host-health` and `webterm-docker-cleanup` (plus `webterm-backup` /
+`webterm-cert-check`, unless the install opted out of them with `--no-backup` /
+`--no-cert-check`; the host kit's timers need systemd). From 3.6.9 on, `upgrade.sh` switches
+to the release's own script *before* syncing, so one run is enough; if a run ever ends with
+`HOST KIT NOT INSTALLED`, run it once more.
+
 **The three tokens, in short:**
 
 | Token | Where | Scope | Role |
@@ -271,7 +288,15 @@ once confirmed — a failure only the IdP can cause, failures from two or more a
 probe; a rejected login code is a user error and never counts),
 risky configuration (forwards on http://, SSO without a group gate), the daily cleanup, database
 size, backup coverage / off-host copy / last verification, the TLS certificates, the dead-man
-switch, a new WebTerm version, and the forward-domain DNS (daily).
+switch, a new WebTerm version, and the forward-domain DNS (daily). Two checks watch the roles:
+**Permanent Owner** (warning when only time-bound Owners are left, critical when the last one
+ends within 7 days or no Owner is left) and **Break-glass Owner** (warning when no permanent
+Owner has a local password, so an IdP outage would lock every Owner out); both print the
+`python3 -m app.admin promote <email>` command for you to type, never run. The host-helper
+check is an info item for the first 10 minutes after the gateway starts and a warning after that
+if `scripts/host-health.sh` has never reported — after an upgrade from a version before 3.6.9
+in one jump, run `./upgrade.sh` a second time: the old upgrade script does not install the
+host kit.
 
 Warnings and critical items alert once per transition (email/webhook and the in-app history,
 kind "System health"), and once more when they are resolved. Any item can be muted for 7 days,

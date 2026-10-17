@@ -269,19 +269,49 @@ def _rate_ok(now: float) -> bool:
 _LOCKOUT_AUDIT_MAX = 20                 # lockout rows per hour, all IPs together
 _lockout_rows: deque = deque()
 _lockout_suppressed = 0
+_AUTHFAIL_AUDIT_MAX = 20                # sub-lockout failure rows per hour, all IPs together
+_authfail_rows: deque = deque()
+_authfail_suppressed = 0
+# correction round (audit 2026-10-17): the state UNAUTHENTICATED requests feed lives here, apart
+# from `_alerted` (which only authenticated flows feed): one wrong token from 1000 addresses
+# must never clear the hourly throttles of the authenticated paths, nor re-arm the lockout alert
+_AUTHFAIL_SEEN_MAX = 1000               # addresses remembered per hour; past it: held back
+_authfail_seen: dict[str, float] = {}   # ip → time of its row this hour
+_lockout_alert_at = 0.0                 # the one lockout alert an hour
 
 
-async def _audit_lockout(now: float, ip: str, path: str) -> None:
+def _hour_cap(rows: deque, limit: int, now: float) -> bool:
+    """→ True when one more row fits under `limit` an hour (`rows` = the times written)."""
+    while rows and now - rows[0] > 3600:
+        rows.popleft()
+    if len(rows) >= limit:
+        return False
+    rows.append(now)
+    return True
+
+
+async def _audit_lockout(now: float, ip: str, path: str, configured: bool) -> None:
     """A lockout is audited — but a spray from many addresses must not flood the audit log
     (review 3.6.11): at most 20 rows an hour in total; the ones held back are counted in the
-    next row written. The actor is `unauthenticated` (nobody proved to be the IdP)."""
-    global _lockout_suppressed
-    while _lockout_rows and now - _lockout_rows[0] > 3600:
-        _lockout_rows.popleft()
-    if len(_lockout_rows) >= _LOCKOUT_AUDIT_MAX:
+    next row written. The actor is `unauthenticated` (nobody proved to be the IdP).
+    SC-04 (audit 2026-10-17): the FIRST lockout an hour also raises a warning alert for everyone
+    with security.view — a leaked or stale token tried from another address was invisible
+    outside the audit log. One an hour, whatever the number of addresses — and only when a SCIM
+    token is `configured` (as `_note_error` on the same path): on an instance that never set
+    SCIM up a scanner probing /scim/v2 would otherwise tell every security.view holder to
+    rotate a token that does not exist. The row is still written."""
+    global _lockout_suppressed, _lockout_alert_at
+    if configured and now - _lockout_alert_at >= 3600:
+        _lockout_alert_at = now
+        email_alerts.notify_security_change(
+            "SCIM: %d failed authentications from %s in 15 min; the address is locked out for "
+            "15 min. A wrong, stale or leaked SCIM token is being tried — if the identity "
+            "provider is not syncing, re-paste the token there; otherwise rotate it"
+            % (_FAIL_MAX, ip), ip, "unauthenticated", fleet=True, severity="warning",
+            what_key="scim_lockout", what_params={"ip": ip, "fails": _FAIL_MAX})
+    if not _hour_cap(_lockout_rows, _LOCKOUT_AUDIT_MAX, now):
         _lockout_suppressed += 1
         return
-    _lockout_rows.append(now)
     extra = (" (%d earlier lockout(s) not recorded: more than %d an hour)"
              % (_lockout_suppressed, _LOCKOUT_AUDIT_MAX)) if _lockout_suppressed else ""
     _lockout_suppressed = 0
@@ -290,15 +320,53 @@ async def _audit_lockout(now: float, ip: str, path: str) -> None:
                         % (_FAIL_MAX, ip, extra))[:480], via="scim")
 
 
+async def _audit_authfail(now: float, ip: str, path: str, why: str) -> None:
+    """SC-04 (audit 2026-10-17): a failed authentication BELOW the lockout threshold left no
+    trace in the audit log — nine wrong tokens per 15 min per address (or a rotation of
+    addresses) never showed up for security.view. One row per (address, hour), and at most 20
+    rows an hour in total (a spray from many addresses must not flood the log, as for lockouts);
+    the ones held back are counted in the next row written. Actor `unauthenticated`.
+    Nothing when no SCIM token is configured (`why`): then /scim/v2 is a closed door and a probe
+    of it is no more than any other 401 on the instance (same gate as `_note_error`).
+    The per-address memory is `_authfail_seen`, pruned by the hour and capped — an address past
+    the cap is held back (counted), never remembered in place of another, and the shared
+    `_alerted` table is never touched from here."""
+    global _authfail_suppressed
+    if why == "no token configured":
+        return
+    for k, t in list(_authfail_seen.items()):
+        if now - t >= 3600:
+            _authfail_seen.pop(k, None)
+    if ip in _authfail_seen:
+        return
+    if len(_authfail_seen) >= _AUTHFAIL_SEEN_MAX:
+        _authfail_suppressed += 1
+        return
+    _authfail_seen[ip] = now                # remembered even when its row is held back: one
+    if not _hour_cap(_authfail_rows, _AUTHFAIL_AUDIT_MAX, now):   # count per address an hour
+        _authfail_suppressed += 1
+        return
+    extra = (" (%d earlier failure(s) from unrecorded address(es): more than %d an hour)"
+             % (_authfail_suppressed, _AUTHFAIL_AUDIT_MAX)) if _authfail_suppressed else ""
+    _authfail_suppressed = 0
+    await audit.record(now, "unauthenticated", ip, "SCIM", path, 401,
+                       ("SCIM: failed authentication from %s (%s); further failures from this "
+                        "address this hour are not recorded — %d in 15 min lock it out%s"
+                        % (ip, why, _FAIL_MAX, extra))[:480], via="scim")
+
+
 def reset_limits() -> None:
     """Tests only."""
-    global _seen_at, _touch_at, _lockout_suppressed
-    _seen_at = _touch_at = 0.0
+    global _seen_at, _touch_at, _lockout_suppressed, _authfail_suppressed, _lockout_alert_at
+    _seen_at = _touch_at = _lockout_alert_at = 0.0
     _fails.clear()
     _locked.clear()
     _hits.clear()
     _lockout_rows.clear()
     _lockout_suppressed = 0
+    _authfail_rows.clear()
+    _authfail_suppressed = 0
+    _authfail_seen.clear()
     _alerted.clear()
 
 
@@ -322,17 +390,19 @@ async def require_scim(request: Request) -> dict:
             and hmac.compare_digest(security.sha256_hex(raw), want))
     if not good:
         tripped = _note_fail(ip, now)
+        why = ("no token configured" if not want else
+               "no bearer token" if not raw else "wrong token")
         if now - _warn_at > 60 or tripped:
             _warn_at = now
-            log.warning("SCIM: authentication failed from %s (%s)%s", ip,
-                        "no token configured" if not want else
-                        "no bearer token" if not raw else "wrong token",
+            log.warning("SCIM: authentication failed from %s (%s)%s", ip, why,
                         " — locked out for 15 min" if tripped else "")
         if want:
             await _note_error(401, "authentication failed from %s (missing or wrong SCIM token)"
                               % ip)
         if tripped:
-            await _audit_lockout(now, ip, request.url.path[:200])
+            await _audit_lockout(now, ip, request.url.path[:200], bool(want))
+        else:
+            await _audit_authfail(now, ip, request.url.path[:200], why)
         raise ScimError(401, "missing or invalid SCIM bearer token",
                         headers={"WWW-Authenticate": 'Bearer realm="WebTerm SCIM"'})
     if st.get("scim_enabled") != "1":
@@ -617,7 +687,9 @@ _ALERTED_MAX = 1000
 def _first_this_hour(*key) -> bool:
     """True once an hour per `key` (re-review 3.6.11: the IdP repeats a refused request at every
     sync — one alert per account and kind an hour, not one per sync). Bounded: past
-    `_ALERTED_MAX` keys the table starts over (worst case: one extra alert)."""
+    `_ALERTED_MAX` keys the table starts over (worst case: one extra alert). Only AUTHENTICATED
+    flows feed it (the failed-authentication memory is `_authfail_seen`): an outsider must not
+    be able to start it over."""
     now = time.time()
     if now - _alerted.get(key, 0) < 3600:
         return False
@@ -662,7 +734,14 @@ async def _guard_identity(u, f: dict) -> None:
       * `externalId` is write-once (it is what links the account to the OIDC `sub`);
       * an account not yet linked to SSO (`sso_subject` NULL) that holds a role given BY HAND
         cannot have its email changed by SCIM: the next SSO sign-in with that email would adopt
-        it, roles included. Once the person has signed in (linked), the email may follow the IdP."""
+        it, roles included. Once the person has signed in (linked), the email may follow the IdP;
+      * SC-01 (audit 2026-10-17): an email or externalId ANOTHER account already has
+        (`_email_free` / `_ext_free`) is refused HERE, not after the guard — so that, like every
+        other identity refusal, it never blocks a deactivation (`_guard_identity_or_drop`).
+        Authentik sends the whole user: `{email now held by another WebTerm account,
+        active:false}` left the person enabled with a 400 at every sync.
+    Every refusal here is an identity refusal: `_guard_identity_or_drop` drops the identity
+    attributes and lets `active:false` through."""
     ext = f.get("externalId")
     if ext and u["scim_external_id"] and ext != u["scim_external_id"]:
         raise ScimError(400, "externalId cannot change once set: it links the WebTerm account to "
@@ -687,6 +766,10 @@ async def _guard_identity(u, f: dict) -> None:
             raise ScimError(400, "the email of an account that has not signed in with SSO yet and "
                                  "holds roles given by hand cannot be changed by SCIM",
                             "mutability")
+    if f.get("email") and f["email"] != u["email"]:
+        await _email_free(f["email"], u["id"])
+    if ext and ext != (u["scim_external_id"] or None):
+        await _ext_free(ext, u["id"])
 
 
 _OWNER_LEVEL_DETAIL = ("this account holds an Owner-level role given in WebTerm (not by an SSO "
@@ -806,16 +889,14 @@ async def _apply_user(p: dict, u, f: dict, path: str, method: str) -> bool:
     if dropped is not None:
         await _identity_dropped(p, u, dropped, method, path)
     sets, args, what = [], [], []
+    # uniqueness (email / externalId) was checked by `_guard_identity` above (SC-01)
     if f.get("email") and f["email"] != u["email"]:
-        await _email_free(f["email"], u["id"])
         sets.append("email=?")
         args.append(f["email"])
         what.append("email %s → %s" % (u["email"], f["email"]))
     for key, col in (("userName", "scim_user_name"), ("displayName", "scim_display_name"),
                      ("externalId", "scim_external_id")):
         if key in f and (f[key] or None) != (u[col] or None):
-            if key == "externalId":
-                await _ext_free(f[key], u["id"])
             sets.append("%s=?" % col)
             args.append(f[key])
             what.append(key)
@@ -898,6 +979,20 @@ async def create_user(request: Request, p=Depends(require_scim)):
             r = await db.fetchone("SELECT * FROM users WHERE email=?", email)
             if r is not None:
                 cands[r["id"]] = r
+            if len(cands) > 1 and f.get("active") is False:
+                # SC-01 (audit 2026-10-17): the IdP deactivates a person whose externalId links
+                # one WebTerm account while the email now belongs to another. The deactivation
+                # must go through: the account to disable is the one the IDENTITY links (the
+                # row SCIM linked by externalId, else the one SSO linked by `sub`) — never the
+                # email-matched one, which is someone else's. The email is then an identity
+                # change the guard below refuses and drops (`_guard_identity_or_drop`), or, for
+                # an account SCIM did not create, the unlinked in-place disable
+                for sql in ("SELECT * FROM users WHERE scim_external_id=?",
+                            "SELECT * FROM users WHERE sso_subject=?"):
+                    r = await db.fetchone(sql, ext)
+                    if r is not None:
+                        cands = {r["id"]: r}
+                        break
             if len(cands) > 1:
                 raise ScimError(400, "the externalId and the email belong to different WebTerm "
                                      "accounts; fix the email in the identity provider or in "
@@ -913,13 +1008,31 @@ async def create_user(request: Request, p=Depends(require_scim)):
                     # then calls lower_case_keys on a list → AttributeError), and the uncaught
                     # error aborts the rest of the sync page. A 400 is a per-object warning;
                     # Authentik's discovery re-links an existing account by username/email.
+                    # Correction round (audit 2026-10-17, SC-01 residual): when that POST also
+                    # deactivates the person, the deactivation goes through FIRST — as a PUT on
+                    # the resource would do it (identity refusals dropped, audited + alerted) —
+                    # and only then the 400 that makes the IdP re-link. Nothing else of the body
+                    # is applied: that is the re-linked PUT's job.
+                    if f.get("active") is False and _listable(target):
+                        g = dict(f)
+                        dropped = await _guard_identity_or_drop(target, g)
+                        await _active_precheck(target["id"], False, p["ip"])
+                        if dropped is not None:
+                            await _identity_dropped(p, target, dropped, "POST", path)
+                        if not target["disabled"]:
+                            await _set_active(p, target["id"], False, path)
                     if _listable(target) and (target["scim_user_name"] or "").lower() \
                             == user_name.lower():
                         raise ScimError(400, "this user is already provisioned (id %s); "
-                                             "re-link it with the provider's discovery"
-                                        % target["scim_id"], "invalidValue")
+                                             "re-link it with the provider's discovery%s"
+                                        % (target["scim_id"], " (the account was deactivated "
+                                           "as requested)" if f.get("active") is False else ""),
+                                        "invalidValue")
                     raise ScimError(400, "this WebTerm account is already linked to another "
-                                         "identity-provider user", "invalidValue")
+                                         "identity-provider user%s"
+                                    % (" (the account was deactivated as requested)"
+                                       if f.get("active") is False and _listable(target) else ""),
+                                    "invalidValue")
                 # review 3.6.11 — taking over an account SCIM did not create:
                 #  * only with ITS email (an externalId equal to its OIDC `sub` is not enough: the
                 #    token holder would otherwise pick any SSO account and re-point its email);
@@ -946,14 +1059,14 @@ async def create_user(request: Request, p=Depends(require_scim)):
                     # (only an Owner re-enables it), 400 without a resource or an email
                     await _active_precheck(target["id"], False, p["ip"])
                     raise await _disable_unlinked(p, target, path)
+                # `_guard_identity` also checks that the email / externalId are not another
+                # account's (SC-01): a collision drops the identity change when deactivating
                 dropped = await _guard_identity_or_drop(target, f)
                 if dropped is not None:     # deactivating: adopt under the identity it has
                     email = f["email"] = target["email"]
                     ext = None
                 await _active_precheck(target["id"], f.get("active"), p["ip"])
                 sid = str(uuid.uuid4())
-                await _email_free(email, target["id"])
-                await _ext_free(ext, target["id"])
                 # local_password re-checked IN the write: a password set meanwhile wins
                 done = await db.execute_returning(
                     "UPDATE users SET scim_managed=1, scim_id=?,"

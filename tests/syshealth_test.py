@@ -33,7 +33,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rbac_util as U  # noqa: E402  (sets the env before `app` is imported)
 from app import (alert_history, api, audit, config, core, db, email_alerts, healthcmd,  # noqa: E402
-                 hoststatus, main as app_main, oidc, syshealth, updatecheck)
+                 hoststatus, main as app_main, oidc, security, syshealth, updatecheck)
 
 ok = 0
 total = 0
@@ -369,6 +369,21 @@ async def test_checks(owner_uid):
     r = await run_check("host.helper")
     check("helper never ran → info + the install command", r["severity"] == "info"
           and r["message_key"] == "helper_missing" and "host_health_install" in r["commands"], r)
+    # FL-12 (audit 2026-10-17): after an upgrade from < 3.6.9 in one jump the host kit is simply
+    # not there; once the gateway has been up for HELPER_GRACE this is a WARNING that says to run
+    # upgrade.sh a second time — not an info item nobody reads
+    started = syshealth._STARTED
+    syshealth._STARTED = time.time() - syshealth.HELPER_GRACE - 60
+    try:
+        r = await run_check("host.helper")
+        check("…never ran and the gateway has been up > 10 min → WARNING, same install command",
+              r["severity"] == "warning" and r["message_key"] == "helper_missing"
+              and "host_health_install" in r["commands"], r)
+        check("…the recommendation names the second upgrade.sh run (upgrade from < 3.6.9)",
+              r["recommendation_key"] == "helper_never_ran" and "second time" in syshealth.RECS["helper_never_ran"]
+              and "3.6.9" in syshealth.RECS["helper_never_ran"], r.get("recommendation_key"))
+    finally:
+        syshealth._STARTED = started
     write_status(hs, "host-health", status_doc("host-health", ts=int(time.time() - 3 * 3600)))
     r = await run_check("host.helper")
     check("helper stale (> 2 h) → warning", r["severity"] == "warning" and r["message_key"] == "helper_stale", r)
@@ -655,6 +670,63 @@ async def test_checks(owner_uid):
         syshealth.BY_ID["db.size"].fn = orig_fn
 
 
+async def test_roles_checks(owner_uid):
+    """RB-01 / FL-14 (audit 2026-10-17): is there a way to administer this instance tomorrow
+    (a PERMANENT Owner), and when the IdP is down (one WITH a local password)? Detected and
+    said, with `app.admin promote` in the recommendation — typed by a person, never run."""
+    print("── checks: permanent Owner / break-glass Owner")
+    r = await run_check("roles.permanent_owner")
+    check("one permanent Owner → ok, count 1", r["severity"] == "ok" and r["message_key"] == "permanent_owner_ok"
+          and '"count":1' in r["params"], r)
+    r = await run_check("roles.break_glass")
+    check("…with a local password → break-glass ok", r["severity"] == "ok" and r["message_key"] == "break_glass_ok", r)
+    bid = (await db.fetchone("SELECT b.id FROM role_bindings b JOIN roles r ON r.id=b.role_id"
+                             " WHERE b.user_id=? AND r.key='owner' AND b.scope_kind='all'", owner_uid))["id"]
+    try:
+        await db.execute("UPDATE role_bindings SET expires=? WHERE id=?", time.time() + 10 * 86400, bid)
+        r = await run_check("roles.permanent_owner")
+        check("only a time-bound Owner (10 days left) → WARNING no_permanent_owner with the days",
+              r["severity"] == "warning" and r["message_key"] == "no_permanent_owner" and '"days":9' in r["params"], r)
+        check("…recommendation: app.admin promote, typed not run (no command template → no button)",
+              r["recommendation_key"] == "promote_owner" and "app.admin promote" in syshealth.RECS["promote_owner"]
+              and "never runs it" in syshealth.RECS["promote_owner"] and r["commands"] in ("[]", "", None), r)
+        check("…doc link to the break-glass section", r["doc"] == "break_glass" and "ROLES.md" in syshealth.DOCS["break_glass"], r)
+        await db.execute("UPDATE role_bindings SET expires=? WHERE id=?", time.time() + 3 * 86400, bid)
+        r = await run_check("roles.permanent_owner")
+        check("…ends in 3 days (< 7) → CRITICAL permanent_owner_expiring", r["severity"] == "critical"
+              and r["message_key"] == "permanent_owner_expiring" and '"days":2' in r["params"], r)
+        r = await run_check("roles.break_glass")
+        check("a time-bound Owner is no break-glass account → warning no_break_glass", r["severity"] == "warning"
+              and r["message_key"] == "no_break_glass" and r["recommendation_key"] == "break_glass_password", r)
+        await db.execute("UPDATE role_bindings SET expires=? WHERE id=?", time.time() - 60, bid)
+        r = await run_check("roles.permanent_owner")
+        check("an expired last Owner → CRITICAL no_owner", r["severity"] == "critical" and r["message_key"] == "no_owner", r)
+        await db.execute("UPDATE role_bindings SET expires=NULL WHERE id=?", bid)
+        await db.execute("UPDATE users SET local_password=0 WHERE id=?", owner_uid)
+        r = await run_check("roles.permanent_owner")
+        check("permanent again → ok", r["severity"] == "ok", r)
+        r = await run_check("roles.break_glass")
+        check("…but SSO-only (no local password) → warning no_break_glass", r["severity"] == "warning"
+              and r["message_key"] == "no_break_glass", r)
+        check("…its recommendation names app.admin passwd / promote, typed not run",
+              "app.admin passwd" in syshealth.RECS["break_glass_password"]
+              and "app.admin promote" in syshealth.RECS["break_glass_password"]
+              and "never runs them" in syshealth.RECS["break_glass_password"])
+        await db.execute("UPDATE users SET disabled=1 WHERE id=?", owner_uid)
+        r = await run_check("roles.permanent_owner")
+        check("a disabled Owner does not count → critical no_owner", r["severity"] == "critical"
+              and r["message_key"] == "no_owner", r)
+    finally:
+        await db.execute("UPDATE role_bindings SET expires=NULL WHERE id=?", bid)
+        await db.execute("UPDATE users SET local_password=1, disabled=0 WHERE id=?", owner_uid)
+    r = await run_check("roles.break_glass")
+    check("restored → break-glass ok", r["severity"] == "ok", r)
+    check("the permanent-Owner check is declared critical-capable (Owner-only mute)",
+          syshealth.BY_ID["roles.permanent_owner"].critical is True)
+    check("the break-glass check never escalates past warning (not critical-capable)",
+          syshealth.BY_ID["roles.break_glass"].critical is False)
+
+
 async def test_alerting(owner_uid):
     print("── alerting: transitions, dedup, recovery, mute, restart")
     await db.execute("DELETE FROM alerts")
@@ -909,7 +981,7 @@ async def test_routes(owner_uid):
     check("…the declared set (host.backup via fail_sev, certs.* via _CERT_SEV)", {
         "host.backup", "host.cloudflare", "gateway.disk", "alerts.delivery", "signing.state", "oidc.sso",
         "config.forwards_http", "certs.main", "certs.forward", "certs.authentik", "clock.gateway",
-        "agents.python"} == flagged, flagged)
+        "agents.python", "roles.permanent_owner"} == flagged, flagged)
 
     print("── the health terminal")
     hid = await U.add_host(owner, "gw-host")
@@ -955,6 +1027,20 @@ async def test_routes(owner_uid):
         r = await owner.post(url, json={"check_id": "host.helper", "index": 0})
         check("no fresh factor → stepup.*, NOTHING created", r.status_code == 403 and U.code(r).startswith("stepup.")
               and not created, "%s %s" % (r.status_code, U.code(r)))
+        # OP-01 (audit 2026-10-17): a root command on the gateway host ALWAYS needs a real second
+        # factor — the host is not marked require_2fa, and the password alone used to open it
+        r = await owner.post(url, json=body)
+        check("the account password alone → 403 stepup.needsFactor, NOTHING created (host without 2FA)",
+              r.status_code == 403 and U.code(r) == "stepup.needsFactor" and not created,
+              "%s %s" % (r.status_code, U.code(r)))
+        check("…the message points to Settings → Sign-in & 2FA", "Sign-in & 2FA" in r.text, r.text[:200])
+        security._stepup_windows.clear()
+        r = await owner.post("/api/hosts/%d/stepup" % hid, json={"stepup_password": U.OWNER_PW})
+        check("…a window the password opened through /stepup (host without 2FA) is not accepted either",
+              r.status_code == 200 and r.json().get("opened") is True
+              and (await owner.post(url, json={"check_id": "host.helper", "index": 0})).status_code == 403
+              and not created, r.text[:200])
+        security.open_stepup_window(owner_uid, hid)          # what a passkey / SSO / TOTP ceremony leaves
         r = await owner.post(url, json=dict(body, command="rm -rf / #", template="bash", params={"x": "$(id)"}))
         check("Owner + host + check + fresh factor → the session", r.status_code == 200 and created, r.text[:200])
         want = "sudo -k /opt/webterm/scripts/host-health.sh --install"
@@ -1078,6 +1164,7 @@ async def amain():
     await owner.aclose()
     syshealth.reset_for_tests()
     await test_checks(owner_uid)
+    await test_roles_checks(owner_uid)
     await test_alerting(owner_uid)
     await test_routes(owner_uid)
     await db.close()

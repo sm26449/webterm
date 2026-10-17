@@ -1,4 +1,4 @@
-import { echoSettled, echoSettleMs } from './broadcastGuard'
+import { SUBMIT_RE, echoSettled, echoSettleMs, isSubmitKey, plainText } from './broadcastGuard'
 
 /** Ecoul tastelor trimise spre host (guardrail-ul de comenzi, 3.6.13).
 
@@ -39,8 +39,8 @@ interface Entry {
   /** trimisă cât NU era nicio linie citibilă (comandă în curs: typeahead) — ecoul ei apare abia după
       următorul prompt; o confirmă doar o linie citibilă care chiar o arată (review 3.6.13, LOW-1b) */
   blind?: boolean
-  /** Enter (CR / LF): ecoul lui e orice schimbare a liniei de după (rând nou, comanda rulează, prompt
-      nou) — se confirmă imediat, nu „la linişte". Altfel, un Enter rămas în aşteptare (C, D şi
+  /** Enter (CR / LF), Ctrl+O (`\x0f`) sau Alt+A (`ESC a`, zsh accept-and-hold) — SV-01: bash/zsh
+      execută linia cu ele: ecoul lui e orice schimbare a liniei de după (rând nou, comanda rulează, prompt nou) — se confirmă imediat, nu „la linişte". Altfel, un Enter rămas în aşteptare (C, D şi
       promptul nou sosite în acelaşi chunk, fără nicio clipă fără linie) bloca potrivirea textului
       tastat după el: >64 de taste → intrare comprimată fără text → „Încă nu pot verifica" la o
       comandă tastată normal (e2e 3.6.13) */
@@ -376,7 +376,29 @@ const REPORT_RE = new RegExp('^(?:' + REPORT_PARTS.join('|') + ')+$')
 const REPORT_CPR1_RE = new RegExp('^(?:' + [...REPORT_PARTS, '\\x1b\\[1;\\d+R'].join('|') + ')+$')
 
 export function isTerminalReport(d: string, cprRequested = false): boolean {
-  return d.length > 0 && !/[\r\n]/.test(d) && (cprRequested ? REPORT_CPR1_RE : REPORT_RE).test(d)
+  return d.length > 0 && !SUBMIT_RE.test(d) && (cprRequested ? REPORT_CPR1_RE : REPORT_RE).test(d)
+}
+
+/** Ce intră în `sent()` pentru un chunk trimis ca TASTĂ (SessionView.send): textul simplu (sau null),
+    dacă TRIMITE linia — Enter, Ctrl+O, `ESC a`, sau `a` / `A` imediat după un Escape trimis singur
+    (`prev` = chunk-ul de taste dinaintea lui; vezi metaAccept) — şi eticheta pentru diagnoză.
+    O tastă de trimitere nu e niciodată „text" (ecoul ei e orice schimbare a liniei), nici `a`-ul
+    care încheie un `ESC a` în două chunk-uri (re-review SV-01). */
+export function sentArgs(data: string | Uint8Array, prev: string | null): { text: string | null; submit: boolean; raw: string } {
+  if (typeof data !== 'string') return { text: null, submit: false, raw: `<${data.length} bytes>` }
+  const submit = isSubmitKey(data, prev)
+  return { text: plainText(data) && !submit ? data : null, submit, raw: data }
+}
+
+/** Un chunk binar (onBinary) conţine un terminator de linie: CR, LF, Ctrl+O sau `ESC a` / `ESC A`
+    (SV-01) — aceeaşi listă ca SUBMIT_RE, pe octeţi. */
+function bytesSubmitLine(d: Uint8Array): boolean {
+  for (let i = 0; i < d.length; i++) {
+    const b = d[i]
+    if (b === 0x0d || b === 0x0a || b === 0x0f) return true
+    if (b === 0x1b && (d[i + 1] === 0x61 || d[i + 1] === 0x41)) return true
+  }
+  return false
 }
 
 /** Câte cereri de poziţie a cursorului (`CSI 6 n` / `CSI ? 6 n`) conţine un chunk de output. */
@@ -398,9 +420,10 @@ export function countCprReplies(d: string): number {
 
 /** Input-ul e DOAR un raport de terminal (nu tastă)? `explicit` = venit pe o cale care emite numai
     rapoarte (onBinary = mouse X10); `pasting` = în timpul unui paste. Orice chunk care trimite o
-    linie (CR/LF) NU e raport — trece prin guardrail (review 3.6.13, HIGH-1); nici datele unui paste. */
+    linie (CR/LF, Ctrl+O `\x0f` sau `ESC a` — SV-01) NU e raport — trece prin guardrail (review 3.6.13,
+    HIGH-1); nici datele unui paste. */
 export function reportOnly(d: string | Uint8Array, explicit: boolean, pasting: boolean, cprRequested = false): boolean {
-  const submits = typeof d === 'string' ? /[\r\n]/.test(d) : d.includes(0x0d) || d.includes(0x0a)
+  const submits = typeof d === 'string' ? SUBMIT_RE.test(d) : bytesSubmitLine(d)
   if (submits || pasting) return false
   return explicit || (typeof d === 'string' && isTerminalReport(d, cprRequested))
 }

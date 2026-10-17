@@ -44,8 +44,9 @@ import { ArrowsLeftRightIcon, CloseIcon, CopyIcon, FullscreenIcon, LockIcon, Shi
 import { EmptyState } from './components/ui'
 import { loadPerms } from './lib/perms'
 import { ensureNotificationPermission, notify, notifyError, registerToast, upsertToast } from './lib/notify'
-import { forgetUploads, hideUploadOrphans, openFilesAt, restoreOrphans, setUploadUser } from './lib/uploads'
+import { forgetUploads, hideUploads, openFilesAt, restoreOrphans, setUploadUser } from './lib/uploads'
 import { forgetDownloads, hideInterruptedDownloads, restoreInterruptedDownloads, setDownloadUser } from './lib/downloads'
+import { dropCopyRows, setCopyUser } from './lib/copyjobs'
 import { clearAll as clearClipHistory } from './lib/cliphistory'
 import { askSecret, registerSecretPrompt, SecretAsk } from './lib/secretPrompt'
 import SecretPromptModal from './components/SecretPromptModal'
@@ -1117,17 +1118,20 @@ function MainApp() {
   // NB: HOOK — tot înainte de orice `return` timpuriu.
   // upload-uri rămase neterminate într-o sesiune anterioară (chei `wt_up_u<uid>_*`, cheiate pe cont
   // din 3.5.18): le arătăm în bara de transferuri ca „orfane" imediat ce ştim contul (Discard are
-  // nevoie de API). Expirarea sesiunii le ascunde; cheile rămân pentru acelaşi cont.
+  // nevoie de API). Orice ieşire din sesiune (expirare, 401, cont dezactivat — nu doar logout-ul
+  // explicit) uită TOATE rândurile din memorie, iar un alt cont pe acelaşi browser nu moşteneşte
+  // nimic (setUploadUser scoate rândurile altui proprietar); cheile rămân pentru acelaşi cont.
   useEffect(() => {
     if (appState?.authenticated && appState.user_id != null) {
       setUploadUser(appState.user_id)
       restoreOrphans(appState.user_id)
     } else if (appState?.authenticated === false) {
-      hideUploadOrphans()
+      hideUploads()
     }
   }, [appState?.authenticated, appState?.user_id])
   // download-uri File System Access întrerupte de un reload (IndexedDB, cheiate pe user id): rânduri
-  // „Întrerupt — Resume / Discard". Ieşirea din sesiune le ascunde şi opreşte persistarea.
+  // „Întrerupt — Resume / Discard". Ieşirea din sesiune uită toate rândurile de download din memorie
+  // (nu doar cele întrerupte) şi opreşte persistarea; alt cont nu moşteneşte nimic (FL-06).
   useEffect(() => {
     if (appState?.authenticated && appState.user_id != null) {
       setDownloadUser(appState.user_id)
@@ -1135,6 +1139,12 @@ function MainApp() {
     } else if (appState?.authenticated === false) {
       hideInterruptedDownloads()
     }
+  }, [appState?.authenticated, appState?.user_id])
+  // copieri host → host: rândurile (căi, hosturi, erori) sunt tot per cont — aceeaşi igienă (FL-06);
+  // job-ul de pe server îşi vede de treabă, doar rândul din memorie pleacă
+  useEffect(() => {
+    if (appState?.authenticated && appState.user_id != null) setCopyUser(appState.user_id)
+    else if (appState?.authenticated === false) dropCopyRows(null)
   }, [appState?.authenticated, appState?.user_id])
   // history-ul de clipboard (în memorie, poate ţine parole/tokenuri) moare odată cu sesiunea web:
   // logout explicit SAU expirare (401 / poll) — orice tranziţie spre neautentificat
@@ -2153,6 +2163,7 @@ function MainApp() {
             // să ţină logout-ul pe loc
             forgetUploads()
             await Promise.race([forgetDownloads(), new Promise((r) => setTimeout(r, 1500))])
+            dropCopyRows(null)
             await api('/api/logout', { method: 'POST' })
             setAppState({ ...appState, authenticated: false })
           }}

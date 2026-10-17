@@ -807,6 +807,63 @@ try {
   await page.locator('div:not([aria-hidden="true"]) > .wt-window').last().locator('.xterm-screen').click()
   await page.keyboard.type('echo DUPA_ISTORIC_$((40+2))\n')
   check('istoric: terminalul rămâne viu după replay-ul cu istoric', await waitScreen('DUPA_ISTORIC_42'))
+  // audit 2026-10-17 (SV-01): Ctrl+O (bash `operate-and-get-next`) EXECUTĂ linia, ca Enter — trece prin
+  // acelaşi guardrail: `rm -rf /…` (regula implicită `confirm`) deschide dialogul REGULII („Potentially
+  // dangerous command", nu „can't check"), nu rulează; Escape o şterge (Ctrl+U). Keydown-ul reţinut e
+  // anulat de noi (altfel Chrome ar deschide „Open file"): o dovedeşte `defaultPrevented` citit pe
+  // window, DUPĂ handlerul xterm de pe textarea (bubbling) — evenimentul `filechooser` al Playwright nu
+  // prinde dialogul nativ al browserului, deci nu putea dovedi nimic (re-review SV-01)
+  await page.keyboard.type(`rm -rf /tmp/wt_ctrlo_${RUN}_none`)
+  await page.waitForTimeout(800)                    // ecoul liniei
+  await page.evaluate(() => {
+    window.__wtCtrlO = null
+    window.addEventListener('keydown', (e) => { if (e.ctrlKey && e.key === 'o') window.__wtCtrlO = e.defaultPrevented })
+  })
+  await page.keyboard.press('Control+o')
+  const guardDlg = page.locator('[role=alertdialog][aria-labelledby="wt-guard-title"]')
+  const ctrlOGuarded = await visible(guardDlg, 5000)
+  const ctrlOTitle = ctrlOGuarded ? ((await guardDlg.locator('#wt-guard-title').textContent()) ?? '') : ''
+  const ctrlOText = ctrlOGuarded ? ((await guardDlg.textContent()) ?? '') : ''
+  const ctrlOPrevented = await page.evaluate(() => window.__wtCtrlO)
+  await page.keyboard.press('Escape')
+  const ctrlOClosed = await hidden(guardDlg, 3000)
+  await page.waitForTimeout(500)
+  // dialogul regulii şterge linia la Escape; un dialog „nu pot verifica" ar lăsa-o — Ctrl+U
+  // necondiţionat, ca `echo`-ul de mai jos să nu se lipească de un `rm -rf …` rămas (diag înşelător)
+  await page.keyboard.press('Control+u')
+  await page.waitForTimeout(300)
+  await page.keyboard.type('echo CTRLO_$((40+3))\n')
+  check('SV-01: Ctrl+O pe o linie `rm -rf /…` deschide dialogul regulii (ca Enter), keydown-ul reţinut e anulat (defaultPrevented), Escape o şterge, terminalul rămâne viu',
+    ctrlOGuarded && ctrlOTitle.includes('Potentially dangerous command') && ctrlOText.includes('wt_ctrlo_')
+      && ctrlOClosed && ctrlOPrevented === true && await waitScreen('CTRLO_43'),
+    `dialog=${ctrlOGuarded} title=${ctrlOTitle.trim()} closed=${ctrlOClosed} prevented=${ctrlOPrevented} text=${ctrlOText.slice(0, 80)}`)
+  // re-review SV-01 (MED): Escape şi apoi `a`, ca DOUĂ taste, e tot `ESC a` pentru shell (zsh:
+  // accept-and-hold EXECUTĂ linia; în bash `M-a` nu e legat — verificarea doar adaugă o citire). Dialogul
+  // regulii trebuie să apară pe `a`; „Cancel & clear" (Escape) goleşte linia deşi shell-ul e în prefix
+  // meta: trimite Ctrl+U de două ori (`ESC ^U` nu e legat în bash/zsh: primul doar stinge prefixul). Fără
+  // Ctrl+U de siguranţă aici: `echo`-ul rulează DOAR dacă linia chiar s-a golit (altfel se lipeşte de `rm`)
+  await page.keyboard.type(`rm -rf /tmp/wt_esca_${RUN}_none`)
+  await page.waitForTimeout(800)
+  await page.keyboard.press('Escape')
+  // un ESC singur n-are ecou (readline aşteaptă în prefixul meta, fără timeout): e „aşezat" abia după
+  // ECHO_SETTLE_MIN_MS (1 s) — sub 1 s verdictul ar fi „Can't check this line yet", nu regula
+  await page.waitForTimeout(1500)
+  await page.keyboard.press('a')
+  const escAGuarded = await visible(guardDlg, 5000)
+  const escATitle = escAGuarded ? ((await guardDlg.locator('#wt-guard-title').textContent()) ?? '') : ''
+  const escAText = escAGuarded ? ((await guardDlg.textContent()) ?? '') : ''
+  await page.keyboard.press('Escape')
+  const escAClosed = await hidden(guardDlg, 3000)
+  await page.waitForTimeout(500)
+  await page.keyboard.type('echo ESCA_$((40+4))\n')
+  const escALive = await waitScreen('ESCA_44')
+  check('SV-01: Escape apoi `a` (două taste = `ESC a`) pe o linie `rm -rf /…` deschide dialogul regulii, Escape goleşte linia şi cu shell-ul în prefix meta (Ctrl+U ×2), terminalul rămâne viu',
+    escAGuarded && escATitle.includes('Potentially dangerous command') && escAText.includes('wt_esca_') && escAClosed && escALive,
+    `dialog=${escAGuarded} title=${escATitle.trim()} closed=${escAClosed} live=${escALive} text=${escAText.slice(0, 80)}`)
+  if (!escALive) {   // un dialog rămas se închide întâi (pe cel al regulii Escape goleşte şi linia), apoi Ctrl+U de siguranţă
+    await page.keyboard.press('Escape'); await page.waitForTimeout(300)
+    await page.keyboard.press('Control+u'); await page.waitForTimeout(300)
+  }
   // Tab în fundal care ratează output → la revenire resync FULL → `term.reset()` în browser.
   // Resync-ul aduce şi el istoricul tmux; altfel scrollback-ul s-ar scurta la prima comutare de tab.
   const histSid = await page.evaluate(() => location.hash.replace('#/s/', ''))

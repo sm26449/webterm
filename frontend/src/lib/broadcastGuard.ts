@@ -337,19 +337,67 @@ export function plainText(d: string): boolean {
   return !/[\x00-\x1f\x7f-\x9f]/.test(d)
 }
 
-/** Liniile unui text care conţine Enter-uri (CR, LF sau CRLF — un paste „cmd\r" execută şi el). */
+/** Ctrl+O (`\x0f`): readline-ul din bash îl leagă implicit la `operate-and-get-next`, zsh la
+    `accept-line-and-down-history` — AMBELE execută linia curentă (apoi aduc următoarea din istoric
+    în buffer). E un Enter cu altă haină, deci trece prin exact aceleaşi verificări (audit 2026-10-17,
+    SV-01): keydown, onData / keybar, chunk-uri de paste, coada de taste reţinute, EchoTracker. */
+export const CTRL_O = '\x0f'
+
+/** Alt+A / Alt+Shift+A (`ESC a` / `ESC A` — aşa le emite xterm pe Linux/Windows şi pe Mac cu
+    macOptionIsMeta): keymap-ul emacs din zsh le leagă implicit la `accept-and-hold` — EXECUTĂ linia
+    şi o păstrează în buffer. Tot un Enter cu altă haină (re-review SV-01). În bash `M-a` nu e legat
+    (nu rulează nimic), deci acolo verificarea doar ADAUGĂ o citire: dialog numai când linia tastată
+    atinge o regulă. */
+export const ACCEPT_AND_HOLD: readonly string[] = ['\x1ba', '\x1bA']
+
+/** Ce TRIMITE o linie dintr-un chunk: CR, LF, Ctrl+O (`\x0f`) sau `ESC a` / `ESC A`. Un ESC urmat
+    direct de `a`/`A` nu apare în nicio secvenţă CSI / SS3 (`ESC [` / `ESC O`): săgeţile, bracketed
+    paste (`ESC [ 200 ~`) şi rapoartele terminalului nu se potrivesc. */
+export const SUBMIT_RE = /[\r\n\x0f]|\x1b[aA]/
+const LINE_SPLIT_RE = /\r\n|\r|\n|\x0f|\x1b[aA]/
+
+/** Liniile unui text care conţine Enter-uri (CR, LF sau CRLF — un paste „cmd\r" execută şi el);
+    un `\x0f` (Ctrl+O) sau un `ESC a` desparte şi el liniile: shell-ul execută ce e înaintea lui (SV-01). */
 export function splitLines(text: string): string[] {
-  return text.split(/\r\n|\r|\n/)
+  return text.split(LINE_SPLIT_RE)
 }
 
-/** Textul conţine un terminator de linie, adică ar EXECUTA ceva într-un shell fără bracketed paste. */
+/** Textul conţine un terminator de linie, adică ar EXECUTA ceva într-un shell fără bracketed paste
+    (CR, LF, Ctrl+O sau `ESC a` — SV-01). */
 export function submitsLine(text: string): boolean {
-  return /[\r\n]/.test(text)
+  return SUBMIT_RE.test(text)
 }
 
 /** Un Enter „gol" venit prin onData (IME mobil, keybar, Enter sintetizat), nu prin keydown. */
 export function isBareEnter(d: string): boolean {
   return d === '\r' || d === '\n' || d === '\r\n'
+}
+
+/** `a` / `A` tastat ca a DOUA tastă după un Escape trimis singur (`prev` = chunk-ul plecat înaintea
+    lui): zsh asamblează legătura `ESC a` tastă cu tastă şi fără timeout (`^[` singur nu e legat în
+    keymap-ul emacs), deci Esc apoi `a` e tot accept-and-hold — şi de pe keybar-ul mobil, care are Esc
+    (re-review SV-01). Orice alt chunk între ele (altă tastă, un raport de terminal) consumă prefixul.
+    Contează chunk-ul care se TERMINĂ cu un ESC singur (un text lipit / un snippet `ls⎋` lasă acelaşi
+    prefix): doar adaugă citiri — `ESC ESC` + `a` primeşte şi el o verificare în plus (critic P0). */
+export function metaAccept(prev: string | null | undefined, d: string): boolean {
+  return !!prev && prev.endsWith('\x1b') && (d === 'a' || d === 'A')
+}
+
+/** O singură tastă care TRIMITE linia tastată: Enter gol (CR / LF / CRLF), Ctrl+O (`\x0f`),
+    Alt+A (`ESC a` / `ESC A`, zsh accept-and-hold) sau `a` / `A` imediat după un Escape trimis singur
+    (`prev`, vezi metaAccept). Orice cale de input (keydown, onData, keybar, tasta reţinută în coadă
+    cât aştepta o verificare) o tratează ca pe Enter: aceeaşi verificare, acelaşi ecou aşteptat (SV-01). */
+export function isSubmitKey(d: string, prev: string | null = null): boolean {
+  return isBareEnter(d) || d === CTRL_O || ACCEPT_AND_HOLD.includes(d) || metaAccept(prev, d)
+}
+
+/** Textul conţine un accept-line ADEVĂRAT al shell-ului (CR, LF, Ctrl+O): fără C după el, rândurile
+    următoare sunt continuarea liniei (PS2) — vezi CommandTracker.noteSubmitSent. `ESC a` NU intră aici:
+    în bash `M-a` nu e legat (nu rulează nimic) şi a sări verificarea de contiguitate până la promptul
+    următor ar absorbi rânduri străine în linia judecată (re-review SV-01); în zsh, accept-and-hold pe o
+    linie incompletă cade pe „nu pot verifica" (fail-closed), nu pe o citire scurtată. */
+export function acceptsLine(text: string): boolean {
+  return /[\r\n\x0f]/.test(text)
 }
 
 /** Textul unui chunk de input fără marcajele bracketed paste — doar pentru VERIFICARE (ce se trimite

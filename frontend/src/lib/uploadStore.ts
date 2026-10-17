@@ -64,6 +64,11 @@ export interface UploadJob {
   /** download: fişierul s-a schimbat pe host de la începutul descărcării — rândul oferă „Start over"
       (de la zero, în acelaşi fişier) în loc să lipească octeţi noi peste cei vechi */
   restartable?: boolean
+  /** contul care a pornit transferul (upload, download sau copiere; audit 2026-10-17, FL-06). Un
+      rând fără controler (ex. `done`) trebuie să-şi ştie singur proprietarul, ca schimbarea contului
+      în acelaşi browser să-l scoată din memorie fără să-l arate contului următor. null = cont
+      necunoscut la pornire (se scoate la orice schimbare de cont). */
+  owner?: number | null
 }
 
 /** Stări în care transferul chiar se mişcă (sau încearcă) — ţin `beforeunload` şi apar în sumar.

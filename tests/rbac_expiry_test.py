@@ -140,6 +140,16 @@ async def main():
     authz.bump_epoch()
     r = await owner.post("/api/users/%d/bindings/%d/expiry" % (ana_id, sso_bid), json=xb(soon))
     check("legătură SSO → 409 authz.ssoBinding", r.status_code == 409 and U.code(r) == "authz.ssoBinding")
+    # RB-02 (audit 2026-10-17): nici ŞTEARSĂ — ssomap o re-adăuga la următorul login SSO, deci
+    # „revocarea" era falsă; ruta de delete refuză exact ca ruta de expiry
+    r = await owner.post("/api/users/%d/bindings/%d/delete" % (ana_id, sso_bid),
+                         json={"current_password": U.OWNER_PW})
+    check("ştergerea unei legături SSO → 409 authz.ssoBinding (schimbă maparea, nu legătura)",
+          r.status_code == 409 and U.code(r) == "authz.ssoBinding", "%s %s" % (r.status_code, r.text[:120]))
+    check("…legătura SSO e încă acolo, cu source='sso'",
+          (await db.fetchone("SELECT source FROM role_bindings WHERE id=?", sso_bid) or {"source": None})["source"] == "sso")
+    check("…fără audit „lost\" şi fără alertă pentru o revocare care n-a avut loc",
+          not await db.fetchone("SELECT 1 FROM audit_log WHERE detail LIKE 'role ana@x.co lost viewer @ tag web%'"))
     r = await owner.post("/api/users/%d/bindings" % ana_id, json=bb("viewer", "tag", "web", soon))
     check("temporară peste una SSO identică → 409 (n-o scurtăm tăcut)",
           r.status_code == 409 and U.code(r) == "authz.bindingExists", r.text[:120])

@@ -347,10 +347,10 @@ say "accessibility (axe-core)"
 curl -fsS -X POST "$BASE1/api/setup" -H 'Content-Type: application/json' \
   -d '{"email":"e2e@example.com","password":"parola-e2e-123456","setup_token":"ci-e2e-token"}' \
   >/dev/null 2>&1 && echo "  (cont creat pentru a11y)" || echo "  (contul exista deja)"
-# WT_AGENT=1 (implicit aici): containerul de smoke are agentul online, deci scanăm şi editorul
-# Monaco (ui_review.mjs îl sare VIZIBIL fără variabilă — în CI-ul GitHub încă nu e setată).
-# `WT_AGENT=0 ./scripts/ci-local.sh …` reproduce EXACT condiţiile din GitHub (fără Monaco,
-# 62 de scanări aşteptate în loc de 64) — util când pasul pică doar acolo.
+# WT_AGENT=1 (implicit aici): containerul de smoke are agentul online, deci editorul se scanează
+# pe un fişier real; nesetat/0 → listare mocată (UI-01: editorul se scanează ORICUM, aceleaşi
+# 136 de scanări). `WT_AGENT=0 ./scripts/ci-local.sh …` reproduce EXACT condiţiile din GitHub —
+# util când pasul pică doar acolo.
 pwrun tests/ui_review.mjs -e SCRIPT_ARGS="" -e BASE="$BASE1" -e A11Y_MAX_SERIOUS=0 \
   -e A11Y_EMAIL=e2e@example.com -e A11Y_PASSWORD=parola-e2e-123456 -e WT_AGENT="${WT_AGENT:-1}" \
   -e UI_REVIEW_OUT=/out/ui-review \

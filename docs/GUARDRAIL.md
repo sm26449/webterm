@@ -72,8 +72,10 @@ yes". Run on hosts sends it after asking you; a token caller sets it itself.
 
 **In a terminal, only with shell integration.** The gateway does not inspect the keystroke
 stream of a PTY. The check runs in the browser, when a key submits the line — **Enter**
-(also with Shift or Ctrl) or **Ctrl+J**: it reads the line you typed from the screen, from the end of the
-prompt (the OSC 133 `B` marker) to the cursor. Without
+(also with Shift or Ctrl), **Ctrl+J**, **Ctrl+O** (bash and zsh run the line on it too) or **Alt+A** (zsh `accept-and-hold`, also typed as Esc then A): it reads the line you typed from the screen, from the end of the
+prompt (the OSC 133 `B` marker) to the cursor. In vi editing mode (`set -o vi`, `bindkey -v`), Esc then `a` / `A`
+pressed within a second of the Esc on a non-empty line asks "Can't check this line yet" (a lone Esc has no echo to
+wait for); Run sends the key. Without
 [shell integration](SHELL-INTEGRATION.md) there is no prompt marker, so there is nothing to
 check and Enter passes straight through. Inside a full-screen program (vim, htop, less —
 the alternate screen) the check is skipped too.

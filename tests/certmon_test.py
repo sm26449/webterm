@@ -36,7 +36,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rbac_util as U  # noqa: E402  (sets the env before `app` is imported)
-from app import certmon, config, core, db  # noqa: E402
+from app import certmon, config, core, db, security  # noqa: E402
 
 ok = 0
 total = 0
@@ -523,7 +523,15 @@ async def test_routes():
               and U.code(r).startswith("stepup.") and not created, "%s %s" % (r.status_code, U.code(r)))
         r = await owner.post(url, json={"domain": "wt.example.com", "stepup_password": "wrong-password"})
         check("a wrong password → refused, nothing created", r.status_code in (401, 403) and not created, r.status_code)
+        # OP-01 (audit 2026-10-17): the gateway host is the crown jewel and the command runs as
+        # root — the password alone never opens this terminal, whatever the host's 2FA flag
         r = await owner.post(url, json={"domain": "*.wt.example.com", "stepup_password": U.OWNER_PW})
+        check("the RIGHT password alone (host without require_2fa) → 403 stepup.needsFactor, nothing created",
+              r.status_code == 403 and U.code(r) == "stepup.needsFactor" and not created,
+              "%s %s %s" % (r.status_code, U.code(r), r.text[:160]))
+        check("…with the way out (Settings → Sign-in & 2FA)", "Sign-in & 2FA" in r.text, r.text[:200])
+        security.open_stepup_window(owner_uid, hid)      # what a passkey / SSO / TOTP ceremony leaves
+        r = await owner.post(url, json={"domain": "*.wt.example.com"})
         check("Owner + picked host + monitored name + fresh factor → the session", r.status_code == 200
               and r.json()["id"] == "s-cert-1", r.text[:200])
         check("…returns the exact command", r.json().get("command")
@@ -536,7 +544,7 @@ async def test_routes():
         aud = await db.fetchone("SELECT detail FROM audit_log WHERE path=? ORDER BY id DESC LIMIT 1", url)
         check("…audited (command typed, not run)", aud and "typed, not run" in aud["detail"], aud and aud["detail"])
         # ── review F2: the fresh-factor window opened by /stepup on a host WITHOUT require_2fa ──
-        from app import security, totp as totp_mod
+        from app import totp as totp_mod
         security._stepup_windows.clear()
         n = len(created)
         r = await owner.post("/api/hosts/%d/stepup" % hid, json={})
@@ -546,8 +554,12 @@ async def test_routes():
         check("password-only account: /stepup with the password still opens the window", r.status_code == 200
               and r.json().get("opened") is True and r.json().get("window", 0) > 290, r.text[:200])
         r = await owner.post(url, json={"domain": "wt.example.com"})
-        check("…and the fresh-factor gate accepts it (unchanged behaviour)", r.status_code == 200
-              and len(created) == n + 1, r.text[:200])
+        check("OP-01: …but the renew terminal does NOT accept a window the password opened (403 needsFactor)",
+              r.status_code == 403 and U.code(r) == "stepup.needsFactor" and len(created) == n, r.text[:200])
+        security.open_stepup_window(owner_uid, hid)
+        r = await owner.post(url, json={"domain": "wt.example.com"})
+        check("…a window a real factor opened on the same host (newer than the password one) is accepted",
+              r.status_code == 200 and len(created) == n + 1, r.text[:200])
         secret = totp_mod.new_secret()
         await db.execute("UPDATE users SET totp_enabled=1, totp_secret_encrypted=?, totp_last_counter=0 WHERE id=?",
                          security.encrypt_secret(secret), owner_uid)
@@ -615,7 +627,8 @@ async def test_routes():
     try:
         sec._stepup_windows.clear()
         r = await owner.put("/api/certs/renew-host", json={"host_id": hid})
-        r = await owner.post(url, json={"domain": "wt.example.com", "stepup_password": U.OWNER_PW})
+        sec.open_stepup_window(owner_uid, hid)           # OP-01: a real factor, never the password
+        r = await owner.post(url, json={"domain": "wt.example.com"})
         check("real core.create_session: at the first SELECT the row is 'creating', owned by the Owner,"
               " origin=cert-renew", seen.get("state") == "creating" and seen.get("by") == owner_uid
               and seen.get("origin") == "cert-renew", "%s %s" % (seen, r.text[:200]))

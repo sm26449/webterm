@@ -408,12 +408,27 @@ closed (review of 3.6.12, `lib/broadcastGuard.ts`), when guardrail rules are act
   other panes;
 - panes whose keys don't reach the host at all (watch-only, ended, socket closed) are not targets.
 
-Every path that can submit a line goes through the same check: the keyboard Enter / `Ctrl+J`, a
-bare Enter that arrives without a keydown (mobile IME, keybar), any other input chunk that contains
-a line break (an IME commit such as `ls⏎`, `Alt+Enter`, a pasted text — each line checked, the
+Every path that can submit a line goes through the same check: the keyboard Enter / `Ctrl+J` /
+`Ctrl+O` (`\x0f` — bash `operate-and-get-next`, zsh `accept-line-and-down-history` run the line
+too; audit 2026-10-17 SV-01: it bypassed every check until then, local and broadcast) / `Alt+A`
+(`ESC a` / `ESC A` — zsh `accept-and-hold` runs the line and keeps it in the buffer; unbound in
+bash, where the check only adds a reading), a bare Enter, `Ctrl+O` or `ESC a` that arrives without
+a keydown (mobile IME, keybar, a key queued while a check was waiting), an `a` / `A` sent right
+after a **lone Escape** (keyboard or keybar Esc, then the letter: the shell assembles `ESC a` key by
+key and without a timeout, so it is the same binding — `SessionView` remembers the last chunk sent,
+`metaAccept` — the last chunk *ending* in a lone Escape counts, so a pasted text or snippet that ends in ESC leaves
+the same prefix; in vi editing mode Esc then `a` / `A` within a second of the Esc on a non-empty line gets
+"Can't check this line yet", because a lone Esc has no echo to settle on — Run sends the key; a terminal report or any other key in between consumes the prefix), any other input chunk that
+contains a line break, a `\x0f` or an `ESC a` (an IME commit such as `ls⏎`, `Alt+Enter`, a pasted text — each line checked, the
 first one appended to what is already typed in each pane; control characters and ESC sequences are
 stripped from the checked lines, so `Alt+Enter` (`\x1b\r`) is Enter on the typed line, not
-"line + ESC"; TAB / VT / FF become a space, so `rm\t-rf` still matches `rm\s+-rf`. A chunk that
+"line + ESC"; TAB / VT / FF become a space, so `rm\t-rf` still matches `rm\s+-rf`. A held submit
+key is remembered as such (`cmdConfirm.submit`): "Run" sends that very key (Ctrl+O still fetches
+the next history line; the `a` completes an `ESC a` whose Escape already went out — a `\r` after it
+would not run anything), while a block or "Cancel & clear" clears the typed line with `Ctrl+U` —
+sent **twice** when the last key out was a lone Escape, because `ESC ^U` is unbound in bash and in
+zsh's emacs keymap and only cancels the pending meta prefix (`ESC ESC` would not do: it is
+`complete` in bash). A chunk that
 also carries **readline editing keys** — any C0 / DEL / C1 character or ESC other than CR/LF,
 the bracketed-paste markers and the lone ESC of `Alt+Enter` (e.g. `Ctrl+U`, Backspace, `Ctrl+Y`,
 `Ctrl+V`, `ESC .`) — runs a line that differs from the text we could check, so it asks "Can't

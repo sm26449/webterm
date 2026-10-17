@@ -1045,17 +1045,23 @@ async def role_id(key: str) -> Optional[int]:
 
 
 async def owner_count(exclude_binding: Optional[int] = None,
-                      exclude_user: Optional[int] = None) -> int:
+                      exclude_user: Optional[int] = None,
+                      with_local_password: bool = False) -> int:
     """Accounts that hold a PERMANENT Owner @ all (the only Owner that can administer the
     instance). 3.6.10: a time-bound Owner binding does not count — "the last Owner cannot be
     removed" means the last one that will still be there tomorrow; otherwise removing the only
-    permanent Owner next to a 4-hour one would lock the instance out when the 4 hours end."""
+    permanent Owner next to a 4-hour one would lock the instance out when the 4 hours end.
+    `with_local_password`: only the BREAK-GLASS ones — permanent Owners that can still sign in
+    when the IdP is down (COALESCE(local_password, 1)=1, the same definition as
+    `admin sso-only`; audit 2026-10-17 RB-01)."""
     sql = ("SELECT COUNT(DISTINCT b.user_id) AS c FROM role_bindings b JOIN roles r ON r.id=b.role_id"
            " JOIN users u ON u.id=b.user_id"
            " WHERE r.key='owner' AND b.scope_kind='all' AND b.expires IS NULL"
            # 3.6.11: un Owner dezactivat nu poate administra nimic — nu e „încă un Owner"
            " AND COALESCE(u.disabled, 0)=0")
     args: list = []
+    if with_local_password:
+        sql += " AND COALESCE(u.local_password, 1)=1"
     if exclude_binding is not None:
         sql += " AND b.id<>?"
         args.append(exclude_binding)

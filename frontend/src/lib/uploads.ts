@@ -280,8 +280,34 @@ function newUid(): string {
 
 // ── contul curent ─────────────────────────────────────────────────────────────────────────
 let currentUser: number | null = null
-/** App-ul o setează din `/api/state.user_id` (acelaşi tipar ca setDownloadUser). */
-export function setUploadUser(id: number | null): void { currentUser = id }
+/** App-ul o setează din `/api/state.user_id` (acelaşi tipar ca setDownloadUser). Rândurile din
+    memorie ale ALTUI cont (err/done/paused rămase de la o sesiune expirată pe acelaşi browser) se
+    uită aici, nu doar la logout-ul explicit — altfel contul următor le vedea, cu `Retry` activ sub
+    cookie-ul lui (audit 2026-10-17, FL-06). Cheile lor din localStorage rămân (sunt per cont). */
+export function setUploadUser(id: number | null): void {
+  currentUser = id
+  dropRows(id)
+}
+
+/** Scoate din memorie (controlere + rânduri din store) upload-urile care NU sunt ale contului
+    `keep` (null = toate): feliile în zbor se taie, File-ul se eliberează. NU atinge localStorage
+    (cheile revin la login-ul proprietarului, ca orfani) şi NU cere ştergerea temp-urilor de pe host
+    (sesiunea proprietarului nu mai e; le ia GC-ul de pe server). Rândurile de download/copy sunt
+    ale altor module (downloads.ts, copyjobs.ts) şi rămân. */
+function dropRows(keep: number | null): void {
+  for (const [id, c] of ctls) {
+    if (keep != null && c.owner === keep) continue
+    c.cancelled = true
+    abortInflight(c, 'cancel')
+    ctls.delete(id)
+    uploadStore.remove(id)
+  }
+  for (const j of uploadStore.snapshot().values()) {
+    if (j.dir && j.dir !== 'up') continue
+    if (keep != null && j.owner === keep) continue
+    uploadStore.remove(j.id)
+  }
+}
 
 function writeMeta(c: Ctl, pos: number) {
   if (!c.lsKey || c.owner == null || c.owner !== currentUser) return
@@ -301,9 +327,15 @@ export function lingerDone(id: string): void {
 function publish(c: Ctl, p: Partial<UploadJob>) {
   const cur = uploadStore.get(c.id)
   if (cur) { uploadStore.patch(c.id, p); return }
+  // rândul lipseşte pentru că a fost SCOS (cancel / dropRows la schimbarea contului) cât un await
+  // fără XHR (sonda de status, commit-ul) era în zbor: nu-l re-creăm — ar rămâne o „fantomă" a
+  // contului A în faţa contului B. Pe calea `done` controlerul e încă în hartă, iar `cancelled`
+  // e fals, deci rândul final se publică normal.
+  if (c.cancelled || !ctls.has(c.id)) return
   uploadStore.set({
     id: c.id, hostId: c.hostId, hostName: c.hostName, dest: c.dest, name: c.name, size: c.size,
-    pos: 0, pct: 0, bytesPerSec: 0, etaSec: null, state: 'running', attempts: 1, then: c.then, sid: c.sid, ...p,
+    pos: 0, pct: 0, bytesPerSec: 0, etaSec: null, state: 'running', attempts: 1, then: c.then, sid: c.sid,
+    owner: c.owner, ...p,
   })
 }
 
@@ -315,6 +347,28 @@ export const DEFINITIVE_CODES = new Set([
 ])
 export const isDefinitiveError = (e: unknown): boolean =>
   e instanceof ApiError && e.status >= 400 && e.status < 500 && DEFINITIVE_CODES.has(e.code)
+/** Dintre refuzurile definitive, singurele după care pe host RĂMÂNE un temp parţial care merită
+    reluat (după ce se face loc): disc plin. La permisiuni / dosar lipsă / FS doar-citire nu s-a
+    scris nimic şi un re-drop ar primi acelaşi răspuns. */
+export const KEEP_TEMP_CODES = new Set(['files.noSpace', 'files.noSpaceAt'])
+export const keepsTempOnError = (e: unknown): boolean => e instanceof ApiError && KEEP_TEMP_CODES.has(e.code)
+
+/** Decizia DOAR pentru cheia din localStorage (FS-01): după eroarea `e` mai are rost să ţinem cheia
+    (= să înviem rândul după reload ca orfan, ca un re-drop să reia temp-ul)?
+    - refuz definitiv al hostului → nu (excepţie: disc plin, temp-ul parţial merită reluat);
+    - 403 / 404 cu un cod care NU e în lista definitivă (rolul a pierdut `files.write` pe host în
+      timpul sesiunii, hostul a dispărut): reîncercările rămân cum sunt, dar dacă NU a aterizat nimic
+      — nici în trecerea asta (`landed` = 0), nici într-una anterioară (pos-ul din cheie = 0) — nu
+      există temp de reluat şi cheia ar învia doar un „orfan 0 %". Un temp parţial din altă sesiune
+      (pos > 0 în cheie) rămâne reluabil chiar dacă sonda de status a picat şi am pornit de la 0.
+    401 (sesiune expirată), 409 (resync) şi 429 (backpressure) nu ajung aici ca refuz. */
+export function refusedForGood(e: unknown, landed: number, lsKey: string): boolean {
+  if (isDefinitiveError(e)) return !keepsTempOnError(e)
+  if (!(e instanceof ApiError) || !(e.status === 403 || e.status === 404)) return false
+  if (landed > 0) return false
+  const m = parseUploadMeta(lsGet(lsKey), lsKey)
+  return (m?.pos ?? 0) === 0
+}
 
 const isAuthErr = (e: unknown) => e instanceof AuthLost || (e instanceof ApiError && e.status === 401)
 
@@ -481,6 +535,9 @@ async function runLoop(c: Ctl): Promise<void> {
       if (isAuthErr(e)) throw e
       offset = 0
     }
+    // sonda poate sta pe un prompt de passkey: între timp rândul a putut fi scos (cancel, cont
+    // schimbat) — nu-l re-publicăm ca „running" pentru un controler care nu mai există
+    if (c.cancelled) return
     let doCrc = offset === 0 || resumeCrc !== undefined
     let crc = offset === 0 ? 0 : (resumeCrc ?? 0)
     let dispatchPos = offset
@@ -554,6 +611,9 @@ async function runLoop(c: Ctl): Promise<void> {
     const crcQ = doCrc ? `&crc32=${crc >>> 0}` : ''
     await withStepup(hid, () => api(`/api/hosts/${hid}/fs/upload/commit?${q}${crcQ}`, { method: 'POST' }))
     if (c.lsKey) lsRemove(c.lsKey)
+    // scos cât commit-ul era în zbor (sesiune pierdută / alt cont): fişierul e pe host, dar nu mai
+    // publicăm rândul şi nu tastăm calea într-un terminal al sesiunii vechi
+    if (c.cancelled) return
     // paste / drop pe terminal (3.6.16): calea NU se tastează aici — SessionView aşteaptă toate
     // upload-urile gestului şi le tastează în ordinea selecţiei, ca un paste, cât contextul e acelaşi
     // (lib/transfers.ts typePastedPaths). Un retry ulterior (contextul deja închis) şi orice alt upload
@@ -574,6 +634,14 @@ async function runLoop(c: Ctl): Promise<void> {
     }
     // temp-ul RĂMÂNE pe host, File-ul rămâne în controler → Retry reia de la offset-ul real
     c.authLost = isAuthErr(e)
+    // Refuz DEFINITIV al hostului (permisiuni, dosar lipsă, FS doar-citire…): nu există temp de
+    // reluat, iar cheia din localStorage — scrisă în startUpload ÎNAINTE de prima felie — ar învia
+    // rândul după reload ca „orfan 0 %" şi ar deschide singură widgetul de transferuri, pentru un
+    // fişier refuzat (sau deja instalat ca root prin fluxul 3.6.9). O ştergem (audit 2026-10-17,
+    // FS-01); rândul `err` rămâne, cu motivul, iar Retry/re-drop reiau din controler. Excepţia:
+    // disc plin — temp-ul parţial există şi merită reluat după ce se face loc. Acelaşi tratament
+    // pentru un 403/404 cu alt cod când n-a aterizat nimic (vezi refusedForGood).
+    if (c.lsKey && refusedForGood(e, landedMax, c.lsKey)) lsRemove(c.lsKey)
     publish(c, { pos: lastPos, state: 'err', error: errorText(e), bytesPerSec: 0, etaSec: null,
                  errorCode: e instanceof ApiError ? e.code : undefined,
                  errorVars: e instanceof ApiError ? e.vars : undefined })
@@ -604,7 +672,9 @@ export async function startUpload(o: StartUploadOpts): Promise<string> {
   const owner = currentUser
   const lsKey = owner == null ? null : upLsKey(owner, o.hostId, o.dest, o.file.size, o.file.lastModified)
   const meta = lsKey ? parseUploadMeta(lsGet(lsKey), lsKey) : null
-  const id = meta?.uid ?? newUid()
+  // fără cheie (refuz definitiv: cheia a fost ştearsă, FS-01) re-drop-ul aceluiaşi fişier regăseşte
+  // tot controlerul `err` existent, nu porneşte un al doilea rând pentru acelaşi transfer
+  const id = meta?.uid ?? findIdleCtl(owner, o)?.id ?? newUid()
   let c = ctls.get(id)
   if (c && c.running) return id
   if (!c) {
@@ -623,6 +693,15 @@ export async function startUpload(o: StartUploadOpts): Promise<string> {
   writeMeta(c, meta?.pos ?? 0)
   await runLoop(c)
   return id
+}
+
+/** controlerul NEpornit (err/orphan/paused) al aceluiaşi fişier spre aceeaşi ţintă, al aceluiaşi cont */
+function findIdleCtl(owner: number | null, o: StartUploadOpts): Ctl | undefined {
+  for (const c of ctls.values()) {
+    if (!c.running && c.owner === owner && c.hostId === o.hostId && c.dest === o.dest
+        && c.size === o.file.size && c.lastModified === o.file.lastModified) return c
+  }
+  return undefined
 }
 
 /** taie toate feliile în zbor ale unui ctl, cu un motiv (ca onabort să ştie de ce) */
@@ -678,7 +757,8 @@ export function cancelUpload(id: string): void {
   uploadStore.remove(id)
 }
 
-/** scoate rândul (done/err/cancelled). Pe `err` temp-ul şi cheia RĂMÂN: re-drop-ul reia. */
+/** scoate rândul (done/err/cancelled). Pe `err` temp-ul RĂMÂNE şi, dacă eroarea nu a fost un refuz
+    definitiv (FS-01), şi cheia: re-drop-ul reia. */
 export function dismissUpload(id: string): void {
   const c = ctls.get(id)
   if (c && !c.running) ctls.delete(id)
@@ -718,13 +798,14 @@ export function restoreOrphans(userId: number | null = currentUser): void {
   }
 }
 
-/** Sesiunea web s-a terminat (expirare): ascundem rândurile orfane (cheile rămân — revin la
-    următorul login al ACELUIAŞI cont) şi nu mai persistăm nimic. */
-export function hideUploadOrphans(): void {
+/** Sesiunea web s-a terminat FĂRĂ logout explicit (expirare, 401, cont dezactivat): uităm TOATE
+    rândurile din memorie — nu doar orfanii; un rând `err`/`done`/`paused` cu File-ul în controler
+    ar fi apărut contului următor pe acelaşi browser, cu `Retry` activ sub cookie-ul lui (audit
+    2026-10-17, FL-06). Cheile din localStorage rămân (revin la următorul login al ACELUIAŞI cont, ca
+    orfani: re-drop-ul reia de la offset-ul real) şi nu mai persistăm nimic. */
+export function hideUploads(): void {
   currentUser = null
-  for (const [id, c] of ctls) {
-    if (!c.running && !c.file && uploadStore.get(id)?.state === 'orphan') { ctls.delete(id); uploadStore.remove(id) }
-  }
+  dropRows(null)
 }
 
 /** Logout explicit: uită upload-urile neterminate ale contului — cheile din localStorage, rândurile

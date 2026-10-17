@@ -492,6 +492,64 @@ async def run_admin(email, force=False):
         return e.code
 
 
+async def test_break_glass_api():
+    """RB-01 (audit 2026-10-17): POST /api/account {remove_password} — the UI twin of
+    `admin sso-only` — now keeps the last PERMANENT Owner with a local password (a time-bound
+    Owner does not count), with 409 account.lastBreakGlass; otherwise an IdP outage locked every
+    Owner out after one click the UI itself recommended."""
+    print("── /api/account remove_password: the last break-glass Owner stays")
+    bg = await U.add_user("bg@x.co", bindings=[("owner", "all", "")])
+    await db.execute("UPDATE users SET sso_subject='sub-bg' WHERE id=?", bg)
+    c = await U.login("bg@x.co")
+    await db.execute("UPDATE web_sessions SET device_new=0 WHERE user_id=?", bg)
+    # every OTHER permanent Owner with a local password steps aside for the test (restored below)
+    others = [r["id"] for r in await db.fetchall(
+        "SELECT DISTINCT u.id FROM users u JOIN role_bindings b ON b.user_id=u.id JOIN roles r ON r.id=b.role_id"
+        " WHERE r.key='owner' AND b.scope_kind='all' AND b.expires IS NULL AND COALESCE(u.local_password, 1)=1"
+        " AND u.id<>?", bg)]
+    saved = {o: (await db.fetchone("SELECT local_password FROM users WHERE id=?", o))["local_password"] for o in others}
+    bg2 = None
+    try:
+        for o in others:
+            await db.execute("UPDATE users SET local_password=0 WHERE id=?", o)
+        r = await c.post("/api/account", json={"remove_password": True})
+        check("fără fereastră SSO → 403 account.ssoReauth (ca înainte)", r.status_code == 403
+              and U.code(r) == "account.ssoReauth", "%s %s" % (r.status_code, r.text[:120]))
+        security.open_stepup_window(bg, 0)
+        r = await c.post("/api/account", json={"remove_password": True})
+        check("ultimul Owner permanent cu parolă locală → 409 account.lastBreakGlass",
+              r.status_code == 409 and U.code(r) == "account.lastBreakGlass", "%s %s" % (r.status_code, r.text[:160]))
+        check("…mesajul spune ce să facă (alt Owner PERMANENT cu parolă locală)",
+              "PERMANENT Owner with a local password" in r.text, r.text[:200])
+        u = await db.fetchone("SELECT local_password, password_hash FROM users WHERE id=?", bg)
+        check("…parola locală rămâne, sesiunea rămâne", u["local_password"] != 0
+              and (await c.get("/api/me/permissions")).status_code == 200)
+        bg2 = await U.add_user("bg2@x.co", bindings=[("owner", "all", "")])
+        await db.execute("UPDATE role_bindings SET expires=? WHERE user_id=?", time.time() + 3600, bg2)
+        authz.bump_epoch()
+        r = await c.post("/api/account", json={"remove_password": True})
+        check("un al doilea Owner cu parolă, dar TEMPORAR, nu ţine locul → tot 409",
+              r.status_code == 409 and U.code(r) == "account.lastBreakGlass", "%s %s" % (r.status_code, r.text[:120]))
+        await db.execute("UPDATE users SET local_password=0 WHERE id=?", bg2)
+        await db.execute("UPDATE role_bindings SET expires=NULL WHERE user_id=?", bg2)
+        authz.bump_epoch()
+        r = await c.post("/api/account", json={"remove_password": True})
+        check("…permanent dar FĂRĂ parolă locală (SSO-only) → tot 409",
+              r.status_code == 409 and U.code(r) == "account.lastBreakGlass", "%s %s" % (r.status_code, r.text[:120]))
+        await db.execute("UPDATE users SET local_password=1 WHERE id=?", bg2)
+        r = await c.post("/api/account", json={"remove_password": True})
+        check("cu alt Owner PERMANENT cu parolă locală → 200, contul devine SSO-only",
+              r.status_code == 200 and (await db.fetchone("SELECT local_password FROM users WHERE id=?", bg))
+              ["local_password"] == 0, "%s %s" % (r.status_code, r.text[:120]))
+    finally:
+        for o, lp in saved.items():
+            await db.execute("UPDATE users SET local_password=? WHERE id=?", lp, o)
+        await U.unbind_all(bg)
+        if bg2 is not None:
+            await U.unbind_all(bg2)
+        await c.aclose()
+
+
 async def test_admin_cli():
     print("── python3 -m app.admin sso-only")
     owner_uid = await uid_of(U.OWNER_EMAIL)
@@ -571,6 +629,7 @@ async def main():
     await test_secreview(owner)
     await test_sso_only()
     await test_session_max()
+    await test_break_glass_api()
     await test_admin_cli()
     await test_migration()
     await owner.aclose()

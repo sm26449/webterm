@@ -176,6 +176,45 @@ describe('motorul: checkpoint, reload, reluare', () => {
     expect(store.map.size).toBe(1)                            // a contului 7 rămâne
   })
 
+  it('FL-06: alt cont se autentifică în acelaşi tab → descărcarea în mers a lui A dispare, conexiunea se taie, înregistrarea lui rămâne', async () => {
+    const a = await firstLife()
+    expect(a.store.get(ID)?.state).toBe('running')
+    const rec = [...store.map.values()][0] as DlRecord
+    a.dl.setDownloadUser(8)
+    expect(a.store.get(ID)).toBeUndefined()                   // ÎNAINTE: rândul lui 7 rămânea, cu Pause/Cancel
+    expect([...a.store.snapshot().values()].filter((j) => j.dir === 'down')).toEqual([])
+    await a.dl.restoreInterruptedDownloads()
+    expect(a.store.get(ID)).toBeUndefined()                   // 8 nu-l vede nici ca „Întrerupt"
+    expect(store.map.size).toBe(1)
+    expect((store.map.get(rec.key) as DlRecord).checkpoint).toBe(rec.checkpoint)
+    // A revine: îl regăseşte ca „Întrerupt", de la checkpoint
+    a.dl.setDownloadUser(7)
+    await a.dl.restoreInterruptedDownloads()
+    expect(a.store.get(ID)?.state).toBe('orphan')
+    expect(a.store.get(ID)?.pos).toBe(rec.checkpoint)
+  })
+
+  it('FL-06: rândurile paused/done ale lui A dispar la setDownloadUser(B) şi la pierderea sesiunii; B nu moşteneşte nimic', async () => {
+    const a = await firstLife()
+    a.dl.pauseDownload(ID)
+    await until(() => a.store.get(ID)?.state === 'paused')
+    const DONE = 'dl_1_/home/u/small.bin'
+    a.store.set({ id: DONE, dir: 'down', hostId: 1, hostName: 'nas', dest: '/home/u/small.bin', name: 'small.bin', size: 5,
+                  pos: 5, pct: 100, bytesPerSec: 0, etaSec: 0, state: 'done', attempts: 1, owner: 7 })
+    a.dl.setDownloadUser(8)
+    expect([...a.store.snapshot().values()].filter((j) => j.dir === 'down')).toEqual([])   // ÎNAINTE: ambele rămâneau
+    expect(store.map.size).toBe(1)
+    // sesiune pierdută (fără logout) cu un rând `err` al lui 7 în memorie
+    a.dl.setDownloadUser(7)
+    await a.dl.restoreInterruptedDownloads()
+    expect(a.store.get(ID)?.state).toBe('orphan')
+    a.store.set({ id: DONE, dir: 'down', hostId: 1, hostName: 'nas', dest: '/home/u/small.bin', name: 'small.bin', size: 5,
+                  pos: 0, pct: 0, bytesPerSec: 0, etaSec: null, state: 'err', attempts: 1, owner: 7 })
+    a.dl.hideInterruptedDownloads()
+    expect([...a.store.snapshot().values()].filter((j) => j.dir === 'down')).toEqual([])   // ÎNAINTE: doar `orphan` pleca
+    expect(store.map.size).toBe(1)
+  })
+
   it('fişierul s-a schimbat pe host → eroare + Start over (de la zero, în acelaşi fişier)', async () => {
     await firstLife()
     srv.hangAt = null

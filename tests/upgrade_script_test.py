@@ -165,7 +165,8 @@ def run(d, args=(), **extra):
     env = dict(os.environ, PATH=f"{d/'bin'}:{os.environ['PATH']}", CALLS=str(calls),
                ARGV_LOG=str(d / "argv.log"), KITSRC=str(d / "kit"), WANT_DIGEST=DIGEST,
                CURL_STDIN=str(d / "curl-stdin.log"),
-               WANT_TAG="v1.0.30", WEBTERM_SYSTEMD_DIR=str(d / "etc-systemd"), **extra)
+               WANT_TAG="v1.0.30", WEBTERM_SYSTEMD_DIR=str(d / "etc-systemd"))
+    env.update(extra)                     # a test may override any of the above (e.g. KITSRC)
     (d / "argv.log").write_bytes(b"")
     (d / "curl-stdin.log").write_text("")
     r = subprocess.run(["bash", str(d / "upgrade.sh"), *args], cwd=str(d), env=env,
@@ -526,6 +527,7 @@ def main():
               outc[-400:])
 
         reexec_checks(tmp)
+        old_style_checks(tmp)
 
     print(f"\n{ok}/{total} passed")
     return ok == total
@@ -584,6 +586,94 @@ def reexec_checks(tmp):
     out4 = r4.stdout + r4.stderr
     check("a release upgrade.sh that does not parse → not switched to, run continues",
           r4.returncode == 0 and "does not parse" in out4 and (d4 / "upgrade.sh").read_text() == real, out4[-400:])
+
+
+OLD_STYLE_BAK = ("#!/usr/bin/env bash\n# an upgrade.sh from before 3.6.9: no re-exec guard; it synced only\n"
+                 "# backup/restore/cert-check and replaced itself at the very end\n")
+
+
+def old_style_checks(tmp):
+    """FL-12 (audit 2026-10-17): a 3.5.x host runs ITS upgrade.sh, which replaces itself only at the
+    end — so after that run the gateway is 3.6.x but scripts/host-health.sh & co are absent and the
+    only trace is an upgrade.sh.bak without the re-exec guard. The new script cannot print anything
+    inside that run; what it can do is explain itself and complete the kit on the NEXT run, and
+    never end with a green banner while the kit the release ships is missing on disk."""
+    print("── the run after an upgrade made by an upgrade.sh older than 3.6.9")
+    d = sandbox(tempfile.mkdtemp(dir=tmp))
+    (d / "upgrade.sh.bak").write_text(OLD_STYLE_BAK)
+    (d / "kit" / "scripts" / "host-health.sh").write_text("#!/bin/sh\necho host-health \"$@\" >> \"$CALLS\"\n")
+    assert not (d / "scripts" / "host-health.sh").exists()
+    r, calls = run(d, ["-y"])
+    out = r.stdout + r.stderr
+    check("post-old-script: the run completes", r.returncode == 0, out[-600:])
+    check("post-old-script: it says the previous run was made by an older upgrade.sh and why the kit is missing",
+          "older than 3.6.9" in out and "was NOT installed by that run" in out, out[-1500:])
+    check("post-old-script: the explanation comes BEFORE the kit is installed",
+          "older than 3.6.9" in out and "installed: scripts/host-health.sh" in out
+          and out.index("older than 3.6.9") < out.index("installed: scripts/host-health.sh"), out[-1500:])
+    check("post-old-script: host-health.sh is installed and its timers set up (--install) in this run",
+          (d / "scripts" / "host-health.sh").exists() and "host-health --install" in calls, calls)
+    check("post-old-script: the to-do list confirms the kit and tells how to check the timers",
+          "host kit: installed in this run" in out and "systemctl list-timers 'webterm-*'" in out, out[-900:])
+    check("post-old-script: no HOST KIT NOT INSTALLED warning once the kit is on disk",
+          "HOST KIT NOT INSTALLED" not in out, out[-900:])
+
+    # the same host, run a third time: the kit is there → nothing to explain
+    r2, _ = run(d, ["-y"])
+    out2 = r2.stdout + r2.stderr
+    check("third run: kit present → the explanation is not repeated",
+          r2.returncode == 0 and "older than 3.6.9" not in out2 and "host kit: installed in this run" not in out2,
+          out2[-900:])
+
+    # a .bak left by a ≥3.6.9 script (it carries the re-exec guard) is not an old-style trace
+    d2 = sandbox(tempfile.mkdtemp(dir=tmp))
+    (d2 / "upgrade.sh.bak").write_text((ROOT / "upgrade.sh").read_text() + "\n# previous\n")
+    (d2 / "kit" / "scripts" / "host-health.sh").write_text("#!/bin/sh\necho host-health \"$@\" >> \"$CALLS\"\n")
+    r3, _ = run(d2, ["-y"])
+    out3 = r3.stdout + r3.stderr
+    check("a .bak from a ≥3.6.9 script → kit installed quietly, no 'older than 3.6.9' note",
+          r3.returncode == 0 and "older than 3.6.9" not in out3 and (d2 / "scripts" / "host-health.sh").exists(),
+          out3[-900:])
+
+    # the safety net: the release ships the kit script but the run ends WITHOUT it on disk (here: the
+    # image's kit has no compose file, so the sync step is skipped) → loud warning + a to-do, never
+    # "nothing — the system is fully up to date"
+    d3 = sandbox(tempfile.mkdtemp(dir=tmp))
+    (d3 / "kit" / "docker-compose.prod.yml").unlink()
+    (d3 / "kit" / "scripts" / "host-health.sh").write_text("#!/bin/sh\n")
+    (d3 / "kit" / "scripts" / "cert-renew.sh").write_text("#!/bin/sh\n")
+    r4, calls4 = run(d3, ["-y"])
+    out4 = r4.stdout + r4.stderr
+    check("kit shipped but not on disk at the end → HOST KIT NOT INSTALLED, naming the files",
+          "HOST KIT NOT INSTALLED" in out4 and "scripts/host-health.sh" in out4 and "scripts/cert-renew.sh" in out4,
+          out4[-1200:])
+    check("…and it says to run ./upgrade.sh once more and how to check",
+          "sudo ./upgrade.sh" in out4 and "systemctl list-timers 'webterm-*'" in out4, out4[-1200:])
+    check("…and the run is not reported as 'fully up to date'",
+          "nothing — the system is fully up to date" not in out4, out4[-1200:])
+    check("…the deploy itself still went through (the warning is a to-do, not a failure)",
+          r4.returncode == 0 and calls4.count("deploy.sh") == 1, out4[-400:])
+    # the only path that reaches this warning is the sync step not installing the files; it must
+    # not blame "an upgrade.sh older than 3.6.9" (that case is explained at the sync step itself)
+    check("…and it names the sync step as the cause, not an older upgrade.sh",
+          "sync step above did not" in out4 and "older than 3.6.9" not in out4, out4[-1200:])
+
+    # fail-closed when there is NO kit at all to compare against (docker run / tar failed → the
+    # kit dir is empty): host-health.sh is still absent, so the run may not end "fully up to date"
+    d4 = sandbox(tempfile.mkdtemp(dir=tmp))
+    empty = d4 / "empty-kit"
+    empty.mkdir()
+    r5, calls5 = run(d4, ["-y"], KITSRC=str(empty))
+    out5 = r5.stdout + r5.stderr
+    check("empty kit (extraction failed) → the sync step says so",
+          "the image has no deploy kit" in out5, out5[-1200:])
+    check("empty kit + host-health.sh absent → HOST KIT NOT INSTALLED is still raised (fail closed)",
+          "HOST KIT NOT INSTALLED" in out5 and "scripts/host-health.sh is missing" in out5
+          and "sudo ./upgrade.sh" in out5 and "systemctl list-timers 'webterm-*'" in out5, out5[-1200:])
+    check("empty kit: the run is not reported as 'fully up to date'",
+          "nothing — the system is fully up to date" not in out5, out5[-1200:])
+    check("empty kit: the deploy itself still went through",
+          r5.returncode == 0 and calls5.count("deploy.sh") == 1, out5[-400:])
 
 
 if __name__ == "__main__":

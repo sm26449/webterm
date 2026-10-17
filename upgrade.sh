@@ -340,6 +340,25 @@ if docker run --rm --entrypoint sh "$IMAGE" -c 'cd /srv/webterm/deploy-kit && ta
       exec bash ./upgrade.sh "$@" ${REEXEC_TAG:+"$REEXEC_TAG"}
     fi
   fi
+  # FL-12 (audit 2026-10-17): the run BEFORE this one may have been made by an upgrade.sh older
+  # than 3.6.9 — the one a 3.5.x install still has. That script synced only the files IT knew
+  # (backup/restore/cert-check) and put THIS file in place at its very end ("active from the next
+  # run"), so nothing from 3.6.8+ reached the host: no host-health.sh, cert-renew.sh,
+  # docker-cleanup.sh, authentik-upgrade.sh, no timers — and System health showed the host checks
+  # without data, under a green "✓". Nothing can be done from inside THAT run (the old file keeps
+  # executing after it replaces itself); this run is the one that completes it. Its trace: an
+  # upgrade.sh.bak without the re-exec guard, and the kit script missing while the release ships it.
+  # We say why the "installed:" lines below are there, instead of listing them as routine.
+  OLD_STYLE_PREV=0
+  if [ "${WEBTERM_UPGRADE_REEXEC:-0}" != 1 ] && [ -f upgrade.sh.bak ] \
+     && ! grep -q 'WEBTERM_UPGRADE_REEXEC' upgrade.sh.bak \
+     && [ -f "$KIT/scripts/host-health.sh" ] && [ ! -f scripts/host-health.sh ]; then
+    OLD_STYLE_PREV=1
+    warn "the previous upgrade was made by an upgrade.sh older than 3.6.9 (kept as upgrade.sh.bak)."
+    warn "  That script synced only backup/restore/cert-check and installed this file at its very end,"
+    warn "  so the host kit (host-health.sh, cert-renew.sh, docker-cleanup.sh, authentik-upgrade.sh"
+    warn "  and their timers) was NOT installed by that run. This run installs it — let it finish."
+  fi
   CHANGED=0
   KIT_DONE=""
   for f in docker-compose.prod.yml deploy.sh rollback.sh remove.sh \
@@ -368,6 +387,7 @@ if docker run --rm --entrypoint sh "$IMAGE" -c 'cd /srv/webterm/deploy-kit && ta
   [ "$CHANGED" = 0 ] && echo "  host files were already up to date"
 else
   warn "the image has no deploy kit (version < 2.0.0) — host files left as they are"
+  KIT_NONE=1         # FL-12: nothing to compare the host kit against — checked again at the end
 fi
 
 # ── 5b. unităţile systemd (backup + cert-check) ──────────────────────────────
@@ -575,6 +595,39 @@ if [ -x scripts/cert-renew.sh ]; then
   else
     warn "certificate report unavailable: $(printf '%s\n' "$CERT_REPORT" | tail -n1)"
   fi
+fi
+
+# FL-12: the host kit, verified on disk — not assumed from the sync above. A run made by an
+# upgrade.sh older than 3.6.9 ends with "✓" and without it; a run whose image had no (complete)
+# deploy kit too. Whatever path led here: when a 3.6.8+ host script is not on this host, say so
+# in a way that cannot be missed, and say what to do. Two readings: against `$KIT` (this run's
+# extracted kit) when there is one, and — when there was none to compare against (extraction
+# failed) — the bare fact that host-health.sh (shipped since 3.6.8) is absent. A kit that was read
+# and simply does not ship it (a deliberate downgrade below 3.6.8) is not a finding. Both readings
+# count as a to-do, so the run never ends with "fully up to date" while the host checks do not exist.
+KIT_MISSING=""
+for f in scripts/host-health.sh scripts/cert-renew.sh scripts/docker-cleanup.sh scripts/authentik-upgrade.sh; do
+  [ -f "$KIT/$f" ] && [ ! -f "$f" ] && KIT_MISSING="$KIT_MISSING $f"
+done
+if [ -n "$KIT_MISSING" ]; then
+  warn "HOST KIT NOT INSTALLED — the host-side scripts this release ships are missing on this host:"
+  warn "  $KIT_MISSING"
+  warn "  Without them there is no host health (disk, Docker, certificates) and no timers, while"
+  warn "  Settings → System health shows the host checks without data. The sync step above did not"
+  warn "  install them — see its warning (usually the image's deploy kit was incomplete or unreadable)."
+  warn "  Once that is fixed, run once more:  cd $ROOT && sudo ./upgrade.sh"
+  warn "  then check:     systemctl list-timers 'webterm-*'   (docs/INSTALL.md, \"Upgrading from a version before 3.6.9\")"
+  TODO=$((TODO + 1))
+elif [ "${KIT_NONE:-0}" = 1 ] && [ ! -x scripts/host-health.sh ]; then
+  warn "HOST KIT NOT INSTALLED — scripts/host-health.sh is missing and this run had no deploy kit to"
+  warn "  sync it from (see the warning under \"Syncing host files\"): no host health, no timers, while"
+  warn "  Settings → System health shows the host checks without data."
+  warn "  Once that is fixed, run once more:  cd $ROOT && sudo ./upgrade.sh"
+  warn "  then check:     systemctl list-timers 'webterm-*'   (docs/INSTALL.md, \"Upgrading from a version before 3.6.9\")"
+  TODO=$((TODO + 1))
+elif [ "${OLD_STYLE_PREV:-0}" = 1 ]; then
+  echo "  host kit: installed in this run (the previous upgrade, made by an upgrade.sh older than 3.6.9, had left it out)"
+  echo "    check: systemctl list-timers 'webterm-*'  — webterm-host-health and webterm-docker-cleanup should be listed"
 fi
 
 # System health (3.6.8): the SAME list as Settings → System health, read from the running gateway

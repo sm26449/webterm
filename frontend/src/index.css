@@ -1040,17 +1040,55 @@ textarea {
 :root[data-mode='light'] .wt-canvas .wt-hostlabel,
 :root:is([data-family='mac'], [data-family='win'], [data-family='gnome'], [data-family='kde']) .wt-canvas .wt-hostlabel { color: rgb(var(--tx-400)) !important; }
 
-/* editorul de fișiere: conținutul e pe fundal de terminal (întunecat fix),
-   deci tokenii de text trebuie să fie mereu varianta deschisă — pe Aurora,
-   fără override, text-slate-200 ar fi text închis pe fundal închis */
+/* editorul de fişiere (FileEditor): zonă forţat-întunecată, ca .wt-workspace / .wt-command /
+   .wt-transfers-widget — deci îşi re-declară AICI setul COMPLET de tokeni întunecaţi, nu doar
+   textul. Se deschide în DOUĂ contexte: din sesiune (în .wt-workspace, unde suprafaţa întunecată
+   era moştenită) şi din pagina hostului — tab-ul Files / AI tools — adică sub .wt-canvas, cu tokenii
+   variantei DESCHISE. Auditul 2026-10-17 (UI-01): cu doar textul redeclarat, cardul `.glass`
+   (color-mix pe --ink-900) ieşea alb sub .wt-canvas pe toate cele 5 variante deschise, cu textul
+   antetului la 1,2:1. Scara --ws-* e a familiei (navy / griuri neutre), deci editorul arată la fel
+   indiferent de unde e deschis. Verificat static în src/themeContrast.test.ts (ambele contexte). */
 .wt-editor {
+  --ink-950: var(--ws-950);
+  --ink-900: var(--ws-900);
+  --ink-800: var(--ws-800);
+  --ink-700: var(--ws-700);
+  --ink-600: var(--ws-600);
   --tx-100: 241 245 249;
   --tx-200: 226 232 240;
   --tx-300: 203 213 225;
   --tx-400: 156 170 190;
   --tx-500: 122 136 158;
   --tx-600: 128 141 160;
+  --link: 129 140 248;
+  /* conturul câmpurilor şi inelul de focus: valorile variantei ÎNTUNECATE (ale familiei, mai jos),
+     nu ale celei deschise — indigo-500 / Fluent #005fb8 cădeau sub 3:1 pe cardul întunecat */
+  --focus: 129 140 248;
+  --field-border: 101 115 140;
+  /* sticla cardului: pe o temă deschisă `--glass-bg` e alb 72–97 % şi, amestecată 18 % în
+     color-mix-ul din .glass, lumina suprafaţa până la ~3,2:1 pentru text-slate-500 (şi din
+     sesiune, nu doar de pe pagina hostului). Sticlă întunecată din aceeaşi scară a familiei. */
+  --glass-bg: rgb(var(--ws-900) / 0.82);
+  --glass-hairline: rgba(255, 255, 255, 0.06);
+  --scrollbar: rgba(148, 163, 184, 0.3);
+  /* stările semantice pe cromul întunecat: mereu varianta luminoasă (ca în .wt-workspace) —
+     altfel „Saved" / eroarea de salvare / bannerul de fişier mare luau verdele/roşul/amber-ul
+     închis al temei deschise pe cardul închis */
+  --ok: 52 211 153;
+  --warn: 251 191 36;
+  --danger: 248 113 113;
+  --info: 125 211 252;
+  --accent: 147 197 253;
+  /* culoarea de bază se re-fixează explicit, din acelaşi motiv ca la .wt-workspace: cea
+     moştenită de pe <body> / .wt-canvas e deja rezolvată (închisă pe tema deschisă) */
+  color: rgb(var(--tx-200));
 }
+/* inelul de focus al editorului urmează albastrul de sistem al familiei (valorile variantei
+   întunecate a fiecăreia: `:root[data-theme='*-dark'] --focus`), ca restul cromului OS-style */
+:root[data-family='mac'] .wt-editor { --focus: 10 132 255; }
+:root[data-family='win'] .wt-editor { --focus: 255 255 255; }
+:root[data-family='gnome'] .wt-editor { --focus: 120 174 237; }
+:root[data-family='kde'] .wt-editor { --focus: 61 174 233; }
 
 /* Regiunea live a lui Monaco (anunţuri pentru cititoare de ecran: „linia 12", rezultate de
    căutare…). Monaco o creează O SINGURĂ DATĂ pe pagină, direct în <body>, şi n-o scoate la dispose

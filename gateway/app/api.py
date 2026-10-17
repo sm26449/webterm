@@ -739,6 +739,24 @@ async def _verify_reauth_password(user, password: str) -> bool:
     return False
 
 
+async def _refuse_last_break_glass(user) -> None:
+    """RB-01 (audit 2026-10-17): `python3 -m app.admin sso-only` refuses to make the last Owner
+    with a local password SSO-only — the UI route (Your access → Remove local password) did not,
+    and the banner even recommends it. Same rule here, same definition: a PERMANENT Owner @ all
+    keeps its local password while no OTHER active permanent Owner has one (a time-bound Owner
+    does not count — it expires). Without that account an IdP outage locks every Owner out
+    (passkeys go with the password), and the only way back is a shell on the server."""
+    if not await db.fetchone(
+            "SELECT 1 FROM role_bindings b JOIN roles r ON r.id=b.role_id WHERE b.user_id=?"
+            " AND r.key='owner' AND b.scope_kind='all' AND b.expires IS NULL", user["id"]):
+        return
+    if await authz.owner_count(exclude_user=user["id"], with_local_password=True) < 1:
+        raise ApiError(409, "account.lastBreakGlass",
+                       "you are the last permanent Owner with a local password (the break-glass "
+                       "account): make another account a PERMANENT Owner with a local password "
+                       "first — a time-bound Owner does not count")
+
+
 @router.post("/api/account")
 async def update_account(body: AccountUpdate, request: Request, user=Depends(security.require_user)):
     """Change email and/or password. Requires the current password — plus, when the session
@@ -789,6 +807,7 @@ async def update_account(body: AccountUpdate, request: Request, user=Depends(sec
         if body.new_password:
             raise ApiError(400, "account.passwordRequired",
                            "set a new password or remove it, not both")
+        await _refuse_last_break_glass(user)     # RB-01: before the second factor, clear message
     if body.new_password or body.remove_password \
             or (body.email and body.email.strip().lower() != user["email"]):
         what = ("remove your local WebTerm password" if body.remove_password
@@ -816,10 +835,16 @@ async def update_account(body: AccountUpdate, request: Request, user=Depends(sec
     # revizuirea 3.6.11 (cursă): între verificarea `scim_managed` de sus şi scriere a trecut al
     # doilea factor — SCIM a putut adopta contul între timp. Re-verificat ÎN scriere (atomic).
     guarded = bool(body.new_password) or email != user["email"]
-    done = await db.execute_returning(
-        "UPDATE users SET email=?, password_hash=?, local_password=? WHERE id=?"
-        + (" AND COALESCE(scim_managed, 0)=0" if guarded else "") + " RETURNING id",
-        email, pw_hash, local_pw, user["id"])
+    async with authz._lock:
+        if body.remove_password:
+            # RB-01: the second factor above was a suspension point — the other break-glass
+            # Owner may have lost its password or its Owner role meanwhile; decided again under
+            # the lock that every binding change takes, right before the write
+            await _refuse_last_break_glass(user)
+        done = await db.execute_returning(
+            "UPDATE users SET email=?, password_hash=?, local_password=? WHERE id=?"
+            + (" AND COALESCE(scim_managed, 0)=0" if guarded else "") + " RETURNING id",
+            email, pw_hash, local_pw, user["id"])
     if done is None:
         raise ApiError(409, "account.scimManaged",
                        "this account is managed by your identity provider (SCIM): change it there")
@@ -1364,16 +1389,23 @@ async def add_binding(uid: int, body: BindingIn, request: Request,
 @router.post("/api/users/{uid}/bindings/{bid}/delete")
 async def remove_binding(uid: int, bid: int, body: ReauthOnly, request: Request,
                          user=Depends(authz.perm('users.manage'))):
-    """Scoate o legătură. POST cu corp (re-auth), ca ştergerea de cont. Ultimul Owner rămâne."""
+    """Scoate o legătură. POST cu corp (re-auth), ca ştergerea de cont. Ultimul Owner rămâne.
+    RB-02 (audit 2026-10-17): o legătură venită din SSO (`source='sso'`) NU se scoate de aici —
+    ssomap._apply_locked o re-adaugă la următorul login/step-up SSO sau push SCIM, deci
+    „revocarea" era o iluzie (audit „lost …", alertă, iar rolul revenea în câteva ore). Acelaşi
+    409 ca ruta soră de expiry: se schimbă maparea grupului (sau grupul din IdP)."""
     grants = authz.grants_of(request)
     if uid == user["id"]:
         raise ApiError(403, "authz.selfBinding", "you cannot change your own access")
     row = await db.fetchone(
-        "SELECT b.id, b.role_id, b.scope_kind, b.scope_value, r.key AS role_key,"
+        "SELECT b.id, b.role_id, b.scope_kind, b.scope_value, b.source, r.key AS role_key,"
         " r.name AS role_name, u.email FROM role_bindings b JOIN roles r ON r.id=b.role_id"
         " JOIN users u ON u.id=b.user_id WHERE b.id=? AND b.user_id=?", bid, uid)
     if not row:
         raise ApiError(404, "authz.bindingMissing", "no such role binding")
+    if (row["source"] or "") == "sso":
+        raise ApiError(409, "authz.ssoBinding",
+                       "this role comes from an SSO group; change the group mapping instead")
     if (row["role_key"] == "owner" or await authz.is_owner_user(uid)) and not grants.is_owner():
         raise ApiError(403, "authz.ownerOnly", "only an Owner can change an Owner's access")
     await authz.check_target(grants, uid)
@@ -1388,7 +1420,14 @@ async def remove_binding(uid: int, bid: int, body: ReauthOnly, request: Request,
         if (row["role_key"] == "owner" and row["scope_kind"] == "all"
                 and await authz.owner_count(exclude_binding=bid) < 1):
             raise ApiError(400, "authz.lastOwner", "you cannot remove the last Owner")
-        await db.execute("DELETE FROM role_bindings WHERE id=? AND user_id=?", bid, uid)
+        # RB-02: re-auth-ul a fost un punct de suspendare — o sincronizare SSO a putut adopta
+        # legătura între timp; ştergem DOAR ce nu e din SSO (fail closed: 0 rânduri = 409)
+        gone = await db.execute_returning(
+            "DELETE FROM role_bindings WHERE id=? AND user_id=? AND COALESCE(source, '')<>'sso'"
+            " RETURNING id", bid, uid)
+        if gone is None:
+            raise ApiError(409, "authz.ssoBinding",
+                           "this role comes from an SSO group; change the group mapping instead")
         await _after_access_change(uid)
     rlabel = row["role_key"] or row["role_name"]
     what = "%s lost %s @ %s" % (row["email"], rlabel,
@@ -4913,8 +4952,13 @@ async def _open_gateway_terminal(host_id: int, user, body, command: str, title: 
         raise ApiError(404, "host.missing", "no such host")
     if (row["connection_type"] or "agent") != "agent":
         raise ApiError(400, "certs.renewAgentOnly", "pick an agent host (the gateway host itself)")
+    # OP-01 (audit 2026-10-17): the gateway host is the crown jewel (database + vault) and the
+    # command typed here runs as root — a real second factor ALWAYS, whatever the host's
+    # `require_2fa` flag says, and never a window the password alone opened (/stepup on a host
+    # without 2FA). An account with no factor gets `stepup.needsFactor`, which the UI turns into
+    # the way to Settings → Sign-in & 2FA.
     await _require_fresh_factor(host_id, user, body.stepup_grant, body.stepup_password,
-                                body.stepup_totp)
+                                body.stepup_totp, real_factor=True)
     try:
         # creator + origin go into the INSERT itself (no separate stamp afterwards): the row is
         # never visible as "everyone's" or as a plain web session, not even while 'creating'
@@ -8803,6 +8847,10 @@ async def host_sessions(host_id: int, limit: int = 200, offset: int = 0,
 
 _NEEDS_FACTOR_MSG = ("set up a passkey or an authenticator code (TOTP) to access hosts "
                      "that require 2FA")
+# OP-01: the root terminal on the gateway host (certificate renewal, System health fix)
+_NEEDS_FACTOR_GATEWAY_MSG = ("a root command on the gateway host always needs a second factor: "
+                             "set up a passkey or an authenticator code (TOTP) in Settings → "
+                             "Sign-in & 2FA first — the account password alone is not accepted")
 
 
 async def _stepup_method(user) -> str:
@@ -8873,8 +8921,31 @@ async def _stepup_consume_factor(host_id: int, user, grant: str, password: str,
         raise ApiError(403, "stepup.needsFactor", _NEEDS_FACTOR_MSG)
     if password and await _verify_reauth_password(user, password):
         security.open_stepup_window(user["id"], host_id)
+        _mark_password_window(user["id"], host_id)
         return
     raise ApiError(403, "stepup.password", ("re-enter your account password" + what))
+
+
+# OP-01: which step-up windows the PASSWORD alone opened ((user_id, host_id) → opened_at of
+# that window). A window record (security._stepup_windows) does not say what opened it, and
+# the gateway root terminal must not accept one the password opened on a host without 2FA.
+# The mark is tied to the window's own `opened_at`: a later passkey / TOTP / SSO window on the
+# same host has a newer timestamp, so the mark no longer matches. Bounded by users × hosts;
+# entries whose window is gone are dropped at every mark.
+_password_windows: dict = {}
+
+
+def _mark_password_window(user_id: int, host_id: int) -> None:
+    rec = security._stepup_windows.get((user_id, host_id))
+    for k in [k for k in _password_windows if k not in security._stepup_windows]:
+        _password_windows.pop(k, None)
+    if rec:
+        _password_windows[(user_id, host_id)] = rec[0]
+
+
+def _window_opened_by_password(user_id: int, host_id: int) -> bool:
+    rec = security._stepup_windows.get((user_id, host_id))
+    return bool(rec) and _password_windows.get((user_id, host_id)) == rec[0]
 
 
 async def _require_host_stepup(host_id: int, user, grant: str = "", password: str = "",
@@ -9366,22 +9437,32 @@ def _dk_validate(pub: str) -> tuple[str, str]:
 
 
 async def _require_fresh_factor(host_id: int, user, grant: str = "", password: str = "",
-                                totp: str = "") -> None:
+                                totp: str = "", real_factor: bool = False) -> None:
     """Gate-ul „acordare de acces durabil" (H-3): spre deosebire de _require_host_stepup, se
     aplică şi pe hosturi FĂRĂ require_2fa şi NU se mulţumeşte cu o fereastră de step-up veche —
     factorul trebuie prezentat ACUM (grant nou, parolă în corp, sau fereastră deschisă ≤120s,
-    cum lasă ceremonia de step-up / callback-ul OIDC intent=stepup)."""
+    cum lasă ceremonia de step-up / callback-ul OIDC intent=stepup).
+    `real_factor=True` (OP-01, audit 2026-10-17 — terminalul root de pe hostul gateway): un al
+    doilea factor REAL indiferent de `require_2fa` al hostului, iar o fereastră proaspătă
+    deschisă de parola singură (/stepup pe un host fără 2FA) nu e primită."""
     if isinstance(user, dict) and user.get("is_token"):
         raise ApiError(403, "host.needs2faNoToken", "deploy keys are not reachable with an automation token")
     if grant and security.consume_stepup_grant(grant, user["id"], host_id):
         security.open_stepup_window(user["id"], host_id)
         return
-    if security.stepup_window_fresh(user["id"], host_id):
+    if security.stepup_window_fresh(user["id"], host_id) \
+            and not (real_factor and _window_opened_by_password(user["id"], host_id)):
         return
     # aceeaşi scară ca _require_host_stepup (passkey → SSO → TOTP → parolă), inclusiv ramura TOTP
     # (fix 3): un cont cu TOTP fără passkey nu mai acordă acces SSH durabil cu parola singură.
     # Pe o ţintă `require_2fa` (şi la deblocarea terminalului) parola singură e refuzată ca la
     # _require_host_stepup; pe o ţintă fără 2FA rămâne re-auth-ul de tip `sudo` (3.5.13).
+    if real_factor:
+        if not await _user_has_stepup_factor(user):
+            # said before any password is looked at (no oracle), with the way out
+            raise ApiError(403, "stepup.needsFactor", _NEEDS_FACTOR_GATEWAY_MSG)
+        await _stepup_consume_factor(host_id, user, grant, password, totp, host_2fa=True)
+        return
     hrow = await db.fetchone("SELECT require_2fa FROM hosts WHERE id=?", host_id)
     await _stepup_consume_factor(host_id, user, grant, password, totp, " to grant SSH access",
                                  host_2fa=bool(hrow and hrow["require_2fa"]))

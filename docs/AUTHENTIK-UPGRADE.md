@@ -268,14 +268,52 @@ It checks the checksums, asks for `yes`, stops server and worker, runs `DROP DAT
 WITH (FORCE)` and `CREATE DATABASE`, then `pg_restore --exit-on-error`. It puts back the compose
 file with the old tag, starts server and worker, and waits for healthy and the discovery
 documents. Anything changed in Authentik after the backup is lost: new users, new passkeys,
-password changes. Rehearsed: 41 s until healthy, 28 s of observed outage. By hand:
+password changes. Rehearsed: 41 s until healthy, 28 s of observed outage.
+
+**The backup directory is root input** (audit 2026-10-17, OP-03): whatever compose file it holds is
+what root will `docker compose up`. So, before it stops anything, `restore` refuses — with a
+`refusing:` line naming the path — a directory that is not under the backup root
+(`/var/backups/authentik-upgrade`, or the same `--backup-dir` the backup was made with; real
+paths, so a symlink or `..` into somewhere else does not help), one that is not owned by root or is
+group/world-writable, and one whose `authentik.dump`, `meta`, `SHA256SUMS` or compose file is not
+root's. A backup the script made itself passes (directory `0700`, files `0600` — the compose copy keeps its `0644` —, root). Never
+`restore` from a directory someone sent you or from `/tmp`: copy it into the backup root as root,
+check `stat -c '%U %a %n' <dir> <dir>/*`, and only then. `SHA256SUMS` sits in the same directory,
+so it proves the backup is self-consistent, not that it is yours. The compose file goes back as
+`root:root 0644` whatever the copy in the backup says (`cp -p` used to carry the backup file's
+owner onto the live file, which the next run would then refuse). If the live compose file is a
+symlink (`docker-compose.yml -> compose.yml`), `upgrade` and `restore` both write through it: the
+link stays, the target gets the tag.
+
+`--backup-dir` itself is checked **before** anything is created or `chmod`ed there: it must be a
+plain path — no symlink, `.` or `..` anywhere in it (`refusing: --backup-dir must be a plain path
+… -> <what it resolves to>`; type the resolved path instead) — and, as with the compose directory,
+it and every parent up to `/` must be root's and not group/world-writable. Only a directory the
+run creates itself gets `chmod 700`; a pre-existing one has already passed that test. (Before,
+`chmod 700` followed a planted symlink to its target first and the check then looked at the
+resolved, root-owned path — the user-owned link was never seen.)
+
+It also checks the Postgres major **before** stopping anything: `DROP DATABASE … WITH (FORCE)`
+exists from Postgres 13 (OP-10), so on an older server it says so and leaves the stack running
+(see [§6](#6-postgres-major-upgrades)). The version is read from the `postgres` maintenance
+database, not from `authentik`, so a re-run still works when the `authentik` database does not
+exist; if Postgres does not answer at all the message is `cannot read the Postgres version … is it
+running?` (nothing stopped), not a version complaint. If the `DROP`/`CREATE` step fails after the
+stop (the database is still intact at that point: the dump has not been loaded), it starts server
+and worker again on the current tag and tells you to fix the cause and re-run `restore`.
+
+These `restore` guards are exercised by `tests/host_health_script_test.py` against a fake `docker`;
+the block needs root (CI runs the suite as the runner user and prints `skipped: not root`), so
+after touching the script run `sudo .venv/bin/python tests/host_health_script_test.py` yourself.
+
+By hand (as root; the compose file goes back without preserving the backup file's ownership):
 
 ```bash
 cd /opt/authentik; B=/var/backups/authentik-upgrade/authentik-2026.8.2-<ts>
 docker compose stop server worker
 docker compose exec -T postgresql psql -U authentik -d postgres -c 'DROP DATABASE authentik WITH (FORCE)' -c 'CREATE DATABASE authentik OWNER authentik'
 docker compose exec -T postgresql pg_restore -U authentik -d authentik --no-owner --role=authentik --exit-on-error < $B/authentik.dump
-cp -p $B/docker-compose.yml docker-compose.yml          # old tag
+cp --no-preserve=all $B/docker-compose.yml docker-compose.yml && chown root:root docker-compose.yml && chmod 0644 docker-compose.yml   # old tag; root:root, through the link if it is one
 docker compose up -d --no-deps server worker
 ```
 

@@ -174,6 +174,24 @@ async def test_token_lifecycle(owner):
     check("revocare → neconfigurat", r.status_code == 200 and not r.json()["configured"])
     r = await c.get("/scim/v2/Users")
     check("…tokenul revocat → 401", is_scim_error(r, 401))
+    # corecţie (audit 2026-10-17, SC-04): FĂRĂ token configurat, o sondare a /scim/v2 nu scrie
+    # rânduri 401 şi, la blocare, NU alertează („rotiţi tokenul” — nu există niciunul)
+    scim.reset_limits()
+    n401 = (await db.fetchone("SELECT COUNT(*) AS c FROM audit_log WHERE status=401 AND via='scim'"))["c"]
+    nal = (await db.fetchone("SELECT COUNT(*) AS c FROM alerts WHERE msg_params LIKE '%scim_lockout%'"))["c"]
+    n429 = (await db.fetchone("SELECT COUNT(*) AS c FROM audit_log WHERE status=429 AND via='scim'"))["c"]
+    for _ in range(scim._FAIL_MAX):
+        await c.get("/scim/v2/Users")
+    r = await c.get("/scim/v2/Users")
+    await asyncio.sleep(0.3)
+    n = (await db.fetchone("SELECT COUNT(*) AS c FROM audit_log WHERE status=401 AND via='scim'"))["c"]
+    na = (await db.fetchone("SELECT COUNT(*) AS c FROM alerts WHERE msg_params LIKE '%scim_lockout%'"))["c"]
+    lock = (await db.fetchone("SELECT COUNT(*) AS c FROM audit_log WHERE status=429 AND via='scim'"))["c"]
+    check("fără token configurat: %d eşecuri → blocat (429) şi auditat, dar FĂRĂ rânduri 401 şi "
+          "FĂRĂ alertă scim_lockout" % scim._FAIL_MAX,
+          is_scim_error(r, 429) and lock - n429 == 1 and n == n401 and na == nal,
+          "%s 429rows=%d 401rows=%d alerts=%d" % (r.status_code, lock - n429, n - n401, na - nal))
+    scim.reset_limits()
     r = await owner.post("/api/settings/scim/enabled", json={"enabled": True, "current_password": PW})
     check("fără token, pornirea → 409 scim.noToken", r.status_code == 409 and U.code(r) == "scim.noToken")
     await c.aclose()
@@ -221,6 +239,18 @@ async def test_auth_matrix(owner, tok):
     # blocare per IP
     scim.reset_limits()
     w = sc("wtscim_wrong")
+    # audit 2026-10-17 SC-04: eşecurile SUB prag lasă o urmă în audit — un rând per (IP, oră)
+    n401 = (await db.fetchone("SELECT COUNT(*) AS c FROM audit_log WHERE status=401 AND via='scim'"))["c"]
+    for _ in range(3):
+        await w.get("/scim/v2/Users")
+    rows = await db.fetchall("SELECT actor, detail FROM audit_log WHERE status=401 AND via='scim'"
+                             " ORDER BY id DESC LIMIT ?", 3)
+    n = (await db.fetchone("SELECT COUNT(*) AS c FROM audit_log WHERE status=401 AND via='scim'"))["c"]
+    check("3 eşecuri sub prag de pe un IP → UN rând de audit 401 (per IP şi oră), actor `unauthenticated`",
+          n - n401 == 1 and rows[0]["actor"] == "unauthenticated"
+          and "failed authentication from" in rows[0]["detail"] and "wrong token" in rows[0]["detail"],
+          "%d %s" % (n - n401, rows[0]["detail"] if rows else ""))
+    n429 = (await db.fetchone("SELECT COUNT(*) AS c FROM audit_log WHERE status=429 AND via='scim'"))["c"]
     for _ in range(scim._FAIL_MAX):
         await w.get("/scim/v2/Users")
     good = sc(tok)
@@ -228,10 +258,21 @@ async def test_auth_matrix(owner, tok):
     check("după %d eşecuri de pe un IP → 429 chiar şi cu tokenul bun (Retry-After)" % scim._FAIL_MAX,
           is_scim_error(r, 429) and r.headers.get("retry-after"), "%s %s" % (r.status_code, r.text[:100]))
     lock = await db.fetchone("SELECT COUNT(*) AS c FROM audit_log WHERE status=429 AND via='scim'")
-    check("…blocarea e auditată o dată", lock["c"] == 1, str(lock["c"]))
-    row = await db.fetchone("SELECT actor FROM audit_log WHERE status=429 AND via='scim'")
+    check("…blocarea e auditată o dată", lock["c"] - n429 == 1, str(lock["c"] - n429))
+    row = await db.fetchone("SELECT actor FROM audit_log WHERE status=429 AND via='scim' ORDER BY id DESC LIMIT 1")
     check("…cu actorul `unauthenticated` (nimeni n-a dovedit că e IdP-ul), nu `scim`",
           row["actor"] == "unauthenticated", row["actor"])
+    n = (await db.fetchone("SELECT COUNT(*) AS c FROM audit_log WHERE status=401 AND via='scim'"))["c"]
+    check("…eşecurile următoare de pe acelaşi IP în aceeaşi oră nu mai scriu rânduri 401", n - n401 == 1, str(n - n401))
+    # SC-04: primul lockout pe oră → alertă (avertisment) pentru security.view
+    al = None
+    for _ in range(50):                   # alertele se scriu dintr-un task
+        al = await db.fetchone("SELECT severity, kind FROM alerts WHERE msg_params LIKE '%scim_lockout%'")
+        if al is not None:
+            break
+        await asyncio.sleep(0.02)
+    check("…blocarea e ALERTATĂ (scim_lockout, avertisment, pentru toată instanţa)",
+          al is not None and al["severity"] == "warning" and al["kind"] == "admin_change", str(al and dict(al)))
     # revizuirea 3.6.11: un spray din multe IP-uri nu inundă jurnalul de audit
     fn = getattr(scim, "_audit_lockout", None)
     check("plafon global pentru rândurile de audit ale blocărilor (există)", fn is not None)
@@ -240,14 +281,65 @@ async def test_auth_matrix(owner, tok):
         t0 = _t.time()
         n0 = (await db.fetchone("SELECT COUNT(*) AS c FROM audit_log WHERE status=429"))["c"]
         for i in range(30):
-            await fn(t0, "198.51.100.%d" % i, "/scim/v2/Users")
+            await fn(t0, "198.51.100.%d" % i, "/scim/v2/Users", True)
         n1 = (await db.fetchone("SELECT COUNT(*) AS c FROM audit_log WHERE status=429"))["c"]
         check("30 blocări din 30 de IP-uri → cel mult 20 de rânduri pe oră (total)",
               n1 - n0 == scim._LOCKOUT_AUDIT_MAX - 1, str(n1 - n0))
-        await fn(t0 + 3700, "198.51.100.99", "/scim/v2/Users")
+        await asyncio.sleep(0.3)
+        na = (await db.fetchone("SELECT COUNT(DISTINCT ts) AS c FROM alerts WHERE msg_params LIKE '%scim_lockout%'"))["c"]
+        check("…31 de blocări în aceeaşi oră → O SINGURĂ alertă (nu una per blocare)", na == 1, str(na))
+        await fn(t0 + 3700, "198.51.100.99", "/scim/v2/Users", True)
         last = await db.fetchone("SELECT detail FROM audit_log WHERE status=429 ORDER BY id DESC LIMIT 1")
         check("…după o oră, rândul următor spune câte n-au fost scrise",
               "11 earlier lockout(s) not recorded" in last["detail"], last["detail"])
+        await asyncio.sleep(0.3)
+        na = (await db.fetchone("SELECT COUNT(DISTINCT ts) AS c FROM alerts WHERE msg_params LIKE '%scim_lockout%'"))["c"]
+        check("…şi, după o oră, alerta se reînarmează (a doua)", na == 2, str(na))
+    # SC-04: plafon global şi pentru rândurile 401 (sub prag): 20 pe oră, restul numărate
+    fa = getattr(scim, "_audit_authfail", None)
+    check("audit pentru eşecurile sub prag (există)", fa is not None)
+    if fa is not None:
+        import time as _t
+        scim.reset_limits()
+        t0 = _t.time()
+        n0 = (await db.fetchone("SELECT COUNT(*) AS c FROM audit_log WHERE status=401 AND via='scim'"))["c"]
+        for i in range(30):
+            await fa(t0, "203.0.113.%d" % i, "/scim/v2/Users", "wrong token")
+        await fa(t0, "203.0.113.1", "/scim/v2/Users", "wrong token")
+        n1 = (await db.fetchone("SELECT COUNT(*) AS c FROM audit_log WHERE status=401 AND via='scim'"))["c"]
+        check("30 de IP-uri cu eşecuri sub prag → cel mult 20 de rânduri pe oră (total)",
+              n1 - n0 == scim._AUTHFAIL_AUDIT_MAX, str(n1 - n0))
+        await fa(t0 + 3700, "203.0.113.99", "/scim/v2/Users", "no bearer token")
+        last = await db.fetchone("SELECT detail FROM audit_log WHERE status=401 AND via='scim' ORDER BY id DESC LIMIT 1")
+        check("…după o oră, rândul următor spune câte adrese n-au fost scrise",
+              "10 earlier failure(s) from unrecorded address(es)" in last["detail"] and "no bearer token" in last["detail"],
+              last["detail"])
+        # corecţie (audit 2026-10-17): starea NEAUTENTIFICATĂ nu atinge tabela `_alerted` — un
+        # spray de pe 1000+ adrese nu reînarmează alerta de blocare (o dată pe oră) şi nici
+        # plafoanele orare ale căilor autentificate
+        scim.reset_limits()
+        t1 = t0 + 7400
+        check("cheie autentificată memorată înainte de spray", scim._first_this_hour("identity", 424242))
+        nb = (await db.fetchone("SELECT COUNT(DISTINCT ts) AS c FROM alerts WHERE msg_params LIKE '%scim_lockout%'"))["c"]
+        await fn(t1, "198.51.100.200", "/scim/v2/Users", True)
+        await asyncio.sleep(0.3)
+        n1 = (await db.fetchone("SELECT COUNT(DISTINCT ts) AS c FROM alerts WHERE msg_params LIKE '%scim_lockout%'"))["c"]
+        check("prima blocare a orei → o alertă", n1 == nb + 1, "%d %d" % (nb, n1))
+        for i in range(scim._AUTHFAIL_SEEN_MAX + 100):
+            await fa(t1, "2001:db8::%x" % i, "/scim/v2/Users", "wrong token")
+        await fn(t1, "198.51.100.201", "/scim/v2/Users", True)
+        await asyncio.sleep(0.3)
+        n2 = (await db.fetchone("SELECT COUNT(DISTINCT ts) AS c FROM alerts WHERE msg_params LIKE '%scim_lockout%'"))["c"]
+        check("…%d adrese cu eşecuri sub prag, apoi o blocare → tot O alertă (nu se reînarmează)"
+              % (scim._AUTHFAIL_SEEN_MAX + 100), n2 == nb + 1, "%d %d" % (nb, n2))
+        check("…tabela `_alerted` a căilor autentificate e neatinsă (cheia e încă memorată)",
+              not scim._first_this_hour("identity", 424242))
+        check("…memoria adreselor e plafonată (%d), restul numărate ca neînregistrate"
+              % scim._AUTHFAIL_SEEN_MAX, len(scim._authfail_seen) == scim._AUTHFAIL_SEEN_MAX
+              and scim._authfail_suppressed >= 100, "%d %d" % (len(scim._authfail_seen), scim._authfail_suppressed))
+        await fa(t1, "198.51.100.1", "/scim/v2/Users", "no token configured")
+        check("…`no token configured` nu scrie şi nu memorează nimic",
+              "198.51.100.1" not in scim._authfail_seen)
     scim.reset_limits()
     check("după resetare, tokenul bun trece", (await good.get("/scim/v2/Users")).status_code == 200)
     # plafonul de cereri

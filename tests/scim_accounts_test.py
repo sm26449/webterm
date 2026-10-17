@@ -775,6 +775,137 @@ async def test_rereview2(owner, c):
     check("…revocate de Owner → check-ul revine la ok (sau n/a)", res is None or res.severity == "ok", str(res))
 
 
+async def test_audit_sc01(owner, c):
+    """Audit 2026-10-17, SC-01: o coliziune de UNICITATE (email / externalId deja al altui cont)
+    bloca dezactivarea — `_email_free` / `_ext_free` rulau în afara umbrelei
+    `_guard_identity_or_drop`, deci `{email luat, active:false}` dădea 400 şi persoana rămânea
+    ACTIVĂ (reprodus în docs/audit-2026-10-17/tools/scim_repro.py, 3 variante)."""
+    print("── audit 2026-10-17 SC-01: o coliziune de email/externalId nu blochează dezactivarea")
+    like_ign = "%%%s: ignored the identity change%%"
+    # 1. PUT {email deja al altui cont (local), active:false} pe un cont creat de SCIM
+    r = await c.post("/scim/v2/Users", json=ak_user("ana", "ana@x.co", ext="sub-ana"))
+    sid_ana, ana = r.json()["id"], await uid_of("ana@x.co")
+    bob = await U.add_user("bob@x.co")
+    r = await c.put("/scim/v2/Users/" + sid_ana, json=ak_user("ana", "bob@x.co", ext="sub-ana"))
+    row = await db.fetchone("SELECT email, COALESCE(disabled,0) AS d FROM users WHERE id=?", ana)
+    check("PUT {email luat} FĂRĂ active:false → tot 400 invalidValue, nimic schimbat",
+          r.status_code == 400 and r.json().get("scimType") == "invalidValue"
+          and row["email"] == "ana@x.co" and row["d"] == 0, "%s %s" % (r.status_code, r.text[:160]))
+    r = await c.put("/scim/v2/Users/" + sid_ana,
+                    json=ak_user("ana", "bob@x.co", ext="sub-ana", active=False))
+    row = await db.fetchone("SELECT email, COALESCE(disabled,0) AS d, disabled_by FROM users"
+                            " WHERE id=?", ana)
+    check("PUT {email luat de alt cont, active:false} → 200, DEZACTIVAT (scim), email neschimbat",
+          r.status_code == 200 and r.json().get("active") is False and row["d"] == 1
+          and row["disabled_by"] == "scim" and row["email"] == "ana@x.co",
+          "%s %s %s" % (r.status_code, r.text[:160], dict(row)))
+    check("…identitatea ignorată e auditată (o dată pe oră)", await audit_n(like_ign % "ana@x.co") == 1,
+          str(await audit_n(like_ign % "ana@x.co")))
+    check("…şi alertată (scim_identity_ignored, avertisment)",
+          await n_alerts("scim_identity_ignored", "ana@x.co") == 1)
+    b = await db.fetchone("SELECT email, COALESCE(disabled,0) AS d FROM users WHERE id=?", bob)
+    check("…contul care deţine emailul e neatins", b["email"] == "bob@x.co" and b["d"] == 0)
+    # 2. PATCH {emails[…].value = luat, active:false}
+    r = await c.post("/scim/v2/Users", json=ak_user("anb", "anb@x.co", ext="sub-anb"))
+    sid_anb, anb = r.json()["id"], await uid_of("anb@x.co")
+    r = await c.patch("/scim/v2/Users/" + sid_anb, json={"schemas": [scim.S_PATCH], "Operations": [
+        {"op": "replace", "path": 'emails[type eq "other"].value', "value": "bob@x.co"},
+        {"op": "replace", "path": "active", "value": False}]})
+    row = await db.fetchone("SELECT email, COALESCE(disabled,0) AS d FROM users WHERE id=?", anb)
+    check("PATCH {email luat + active:false} → 200, dezactivat, email neschimbat",
+          r.status_code == 200 and row["d"] == 1 and row["email"] == "anb@x.co",
+          "%s %s %s" % (r.status_code, r.text[:160], dict(row)))
+    check("…auditat", await audit_n(like_ign % "anb@x.co") == 1)
+    # 3. PUT {externalId deja al altui cont, active:false} pe un cont adoptat fără externalId
+    r = await c.post("/scim/v2/Users", json=ak_user("cat", "cat@x.co", ext="sub-cat"))
+    check("cont cat (sub-cat) → 201", r.status_code == 201)
+    dan = await db.execute("INSERT INTO users(email, password_hash, created, local_password)"
+                           " VALUES(?,?,?,0)", "dan@x.co", security.hash_password("x"), time.time())
+    r = await c.post("/scim/v2/Users", json=ak_user("dan", "dan@x.co"))
+    check("dan (SSO-only, fără externalId) adoptat → 201", r.status_code == 201, r.text[:160])
+    sid_dan = r.json()["id"]
+    r = await c.put("/scim/v2/Users/" + sid_dan, json=ak_user("dan", "dan@x.co", ext="sub-cat"))
+    check("PUT {externalId al lui cat} fără active:false → 400", r.status_code == 400, r.text[:160])
+    r = await c.put("/scim/v2/Users/" + sid_dan,
+                    json=ak_user("dan", "dan@x.co", ext="sub-cat", active=False))
+    row = await db.fetchone("SELECT scim_external_id, COALESCE(disabled,0) AS d FROM users"
+                            " WHERE id=?", dan)
+    check("PUT {externalId al altui cont, active:false} → 200, dezactivat, externalId rămâne NULL",
+          r.status_code == 200 and row["d"] == 1 and row["scim_external_id"] is None,
+          "%s %s %s" % (r.status_code, r.text[:160], dict(row)))
+    check("…auditat", await audit_n(like_ign % "dan@x.co") == 1)
+    cat = await db.fetchone("SELECT scim_external_id, COALESCE(disabled,0) AS d FROM users"
+                            " WHERE email='cat@x.co'")
+    check("…cat îşi păstrează externalId-ul şi rămâne activ",
+          cat["scim_external_id"] == "sub-cat" and cat["d"] == 0)
+    # 4. ramura de adopţie din create_user: re-provizionare (după DELETE + Re-enable de Owner) cu
+    #    {externalId al contului, email al ALTUI cont, active:false} — înainte: 400 „belong to
+    #    different WebTerm accounts”, contul rămânea activ
+    r = await c.post("/scim/v2/Users", json=ak_user("eli", "eli@x.co", ext="sub-eli"))
+    sid_eli, eli = r.json()["id"], await uid_of("eli@x.co")
+    await c.delete("/scim/v2/Users/" + sid_eli)
+    r = await owner.post("/api/users/%d/enable" % eli, json={"current_password": PW})
+    row = await db.fetchone("SELECT COALESCE(disabled,0) AS d, scim_id FROM users WHERE id=?", eli)
+    check("eli: DELETE apoi Re-enable de Owner → activ, nelegat de SCIM",
+          r.status_code == 200 and row["d"] == 0 and row["scim_id"] is None, "%s %s" % (r.status_code, dict(row)))
+    r = await c.post("/scim/v2/Users", json=ak_user("eli", "bob@x.co", ext="sub-eli"))
+    row = await db.fetchone("SELECT COALESCE(disabled,0) AS d, scim_id FROM users WHERE id=?", eli)
+    check("POST {externalId al lui eli, email al lui bob} FĂRĂ active:false → 400, nimic schimbat",
+          r.status_code == 400 and "different WebTerm accounts" in r.text and row["d"] == 0
+          and row["scim_id"] is None, "%s %s" % (r.status_code, r.text[:160]))
+    r = await c.post("/scim/v2/Users", json=ak_user("eli", "bob@x.co", ext="sub-eli", active=False))
+    row = await db.fetchone("SELECT email, COALESCE(disabled,0) AS d, disabled_by, scim_id,"
+                            " scim_external_id FROM users WHERE id=?", eli)
+    check("POST {externalId al lui eli, email al lui bob, active:false} → 201, eli DEZACTIVAT sub "
+          "emailul LUI, relegat", r.status_code == 201 and r.json().get("emails", [{}])[0].get("value")
+          == "eli@x.co" and row["d"] == 1 and row["disabled_by"] == "scim" and row["email"] == "eli@x.co"
+          and row["scim_id"] == r.json().get("id") and row["scim_external_id"] == "sub-eli",
+          "%s %s %s" % (r.status_code, r.text[:200], dict(row)))
+    check("…auditat ca identitate ignorată", await audit_n(like_ign % "eli@x.co") == 1)
+    b = await db.fetchone("SELECT email, COALESCE(disabled,0) AS d, scim_managed FROM users WHERE id=?", bob)
+    check("…bob (deţinătorul emailului) neatins: activ, nu e al SCIM",
+          b["email"] == "bob@x.co" and b["d"] == 0 and not b["scim_managed"])
+    # acelaşi POST pentru un cont care se potriveşte DOAR după `sub` (nu creat de SCIM): tot
+    # dezactivare în loc, fără resursă (400) — ramura `_disable_unlinked` nu s-a schimbat
+    await sso_login("sub-fay", "fay@x.co")
+    fay = await uid_of("fay@x.co")
+    r = await c.post("/scim/v2/Users", json=ak_user("fay", "bob@x.co", ext="sub-fay", active=False))
+    row = await db.fetchone("SELECT COALESCE(disabled,0) AS d, disabled_by, scim_managed FROM users"
+                            " WHERE id=?", fay)
+    check("POST {sub al lui fay, email al lui bob, active:false} → 400 fără email, fay dezactivat "
+          "în loc (scim-identity), nelegat", r.status_code == 400 and "fay@x.co" not in r.text
+          and row["d"] == 1 and row["disabled_by"] == "scim-identity" and not row["scim_managed"],
+          "%s %s %s" % (r.status_code, r.text[:160], dict(row)))
+    # 5. corecţie (rest SC-01): contul e ÎNCĂ provizionat (scim_id), dar IdP-ul şi-a pierdut
+    #    legătura şi re-POST-ează {externalId al lui, email al lui bob, active:false} — înainte:
+    #    400 „already provisioned” şi persoana rămânea activă
+    r = await c.post("/scim/v2/Users", json=ak_user("gus", "gus@x.co", ext="sub-gus"))
+    sid_gus, gus = r.json()["id"], await uid_of("gus@x.co")
+    r = await c.post("/scim/v2/Users", json=ak_user("gus", "bob@x.co", ext="sub-gus"))
+    row = await db.fetchone("SELECT email, COALESCE(disabled,0) AS d FROM users WHERE id=?", gus)
+    check("re-POST {externalId al lui gus (provizionat), email al lui bob} FĂRĂ active:false → 400 "
+          "(different WebTerm accounts), nimic schimbat", r.status_code == 400
+          and "different WebTerm accounts" in r.text
+          and row["d"] == 0 and row["email"] == "gus@x.co", "%s %s %s" % (r.status_code, r.text[:160], dict(row)))
+    r = await c.post("/scim/v2/Users", json=ak_user("gus", "gus@x.co", ext="sub-gus"))
+    check("re-POST cu emailul LUI, fără active:false → 400 already provisioned (se releagă prin discovery)",
+          r.status_code == 400 and "already provisioned" in r.text and "deactivated" not in r.text, r.text[:160])
+    r = await c.post("/scim/v2/Users", json=ak_user("gus", "bob@x.co", ext="sub-gus", active=False))
+    row = await db.fetchone("SELECT email, COALESCE(disabled,0) AS d, disabled_by, scim_id FROM users"
+                            " WHERE id=?", gus)
+    check("re-POST {…, active:false} → tot 400 already provisioned (IdP-ul se releagă), dar gus "
+          "DEZACTIVAT (scim), email neschimbat, scim_id păstrat",
+          r.status_code == 400 and "already provisioned" in r.text and "deactivated as requested" in r.text
+          and row["d"] == 1 and row["disabled_by"] == "scim" and row["email"] == "gus@x.co"
+          and row["scim_id"] == sid_gus, "%s %s %s" % (r.status_code, r.text[:200], dict(row)))
+    check("…identitatea ignorată e auditată", await audit_n(like_ign % "gus@x.co") == 1)
+    b = await db.fetchone("SELECT email, COALESCE(disabled,0) AS d FROM users WHERE id=?", bob)
+    check("…bob neatins", b["email"] == "bob@x.co" and b["d"] == 0)
+    r = await c.get("/scim/v2/Users/" + sid_gus)
+    check("…GET pe resursa lui gus: active=false", r.status_code == 200 and r.json().get("active") is False,
+          "%s %s" % (r.status_code, r.text[:120]))
+
+
 async def main():
     await U.boot()
     owner = await U.owner_client()
@@ -790,6 +921,7 @@ async def main():
     await test_review_tokens(owner, c)
     await test_rereview(owner, c)
     await test_rereview2(owner, c)
+    await test_audit_sc01(owner, c)
     await c.aclose()
     await owner.aclose()
     await db.close()

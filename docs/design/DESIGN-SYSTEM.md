@@ -266,7 +266,13 @@ matches it, the way Terminal.app looks in a light macOS window. The palette stay
 the hosts' identity colours are calibrated for a dark background. These zones re-declare the dark
 token set (`.wt-workspace`, `.wt-command`, `.wt-editor`, `.wt-transfers-widget`) from the
 family's `--ws-*` scale (navy for WebTerm, neutral greys for the others, matched step by step to
-WebTerm's luminance), so components inside them need nothing special. A themed page that lives
+WebTerm's luminance), so components inside them need nothing special. A zone that can also be
+mounted *outside* the workspace must carry the **full** dark set itself — surfaces (`--ink-*`),
+text, `--link`, the semantic states, `--focus`/`--field-border` and, when it uses `.glass`, a
+dark `--glass-bg`: the file editor opens from the host page's Files tab (under `.wt-canvas`) as
+well as from a session, and re-declaring only its text tokens left it a white card with light
+text on every light variant (audit 2026-10-17, UI-01; `src/themeContrast.test.ts` now checks the
+editor in both contexts, because axe cannot evaluate `color-mix()`). A themed page that lives
 inside the workspace opts back out with `.wt-canvas` (Dashboard, host page) — each variant's token
 block lists `.wt-workspace .wt-canvas` in its selector; a terminal preview on a themed page opts
 back in with `.wt-workspace`.

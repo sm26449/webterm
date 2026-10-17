@@ -284,7 +284,10 @@ function AccountDetails(props: {
               <Badge tone={b.role === 'owner' ? 'accent' : 'neutral'} size="md" title={sourceTitle(b)}>
                 {chip(b)}
                 {b.expires ? <span className="text-warn" data-binding-expiry>{' · ' + expiryText(b.expires)}</span> : null}
-                {!u.is_self && (props.isOwner || b.role !== 'owner') && (
+                {/* RB-02 (audit 2026-10-17): a binding an SSO group gave comes back at the next SSO
+                    sign-in — the server refuses to delete it (409 authz.ssoBinding, like the expiry
+                    route), so no × here; the chip's title says where to revoke it (the mapping) */}
+                {!u.is_self && b.source !== 'sso' && (props.isOwner || b.role !== 'owner') && (
                   <IconButton label={t('roles.bindings.remove', { binding: chip(b) })} touch={false}
                     onClick={() => removeBinding(b)}>
                     <CloseIcon size={10} />

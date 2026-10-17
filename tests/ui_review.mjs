@@ -11,15 +11,17 @@
    P3 (auditul 2026-10-04, §8): tag-urile includ `wcag22aa` (target-size) şi `best-practice`;
    pe lângă pragul serious/critical, ORICE `target-size` sau `color-contrast` blochează; +15
    suprafeţe pe temă (pagina hostului online/offline cu toate tab-urile, Toolbox, Settings × 7,
-   FleetRun, Add host × 3 formulare, `?`, paleta, ConfirmModal, toast de eroare, Monaco cu
-   WT_AGENT=1) — toate în AMBELE teme (`wt_theme`: `dark` = Midnight, `macos` = Aurora/light;
+   FleetRun, Add host × 3 formulare, `?`, paleta, ConfirmModal, toast de eroare, Monaco deschis
+   de pe pagina hostului — cu un fişier real dacă WT_AGENT=1, altfel cu listarea şi preview-ul
+   mock-uite în browser) — toate în AMBELE teme (`wt_theme`: `dark` = Midnight, `macos` = Aurora/light;
    theme.ts scrie valoarea în `data-theme`); plus teste de tastatură (ordinea Tab, Escape +
    restaurarea focusului, ciclul Tab în ConfirmModal, paleta cu săgeţi+Enter, reordonarea
    tab-urilor cu Alt+Shift+←/→).
 
    3.6.4: şi pe variantele familiilor de sistem (`wt_theme` = `mac|win|gnome|kde` : `light|dark`; kde din 3.6.11), un subset
    reprezentativ pe fiecare (login, dashboard, sesiune, Setări → Appearance, file browser, dialogul
-   Add host) + Escape/focus şi verificarea că `data-theme`/`theme-color` sunt aplicate. */
+   Add host; pe variantele deschise şi editorul de fişiere de pe pagina hostului — auditul
+   2026-10-17, UI-01) + Escape/focus şi verificarea că `data-theme`/`theme-color` sunt aplicate. */
 import { chromium, devices } from 'playwright'
 import { AxeBuilder } from '@axe-core/playwright'
 
@@ -37,8 +39,11 @@ const PASSWORD = process.env.A11Y_PASSWORD ?? 'parola-buna-123'
 // pagina de host fără agent şi pentru ConfirmModal-ul de ştergere.
 const HOST = process.env.A11Y_HOST ?? 'ci-local'
 const OFFLINE_HOST = 'a11y-offline'
-// Editorul Monaco cere un fişier real pe un agent online; CI-ul GitHub nu setează (încă)
-// variabila, deci pasul e sărit VIZIBIL (linie SKIP), nu tăcut.
+// Cu WT_AGENT=1 editorul Monaco se deschide pe un fişier REAL scris în sesiune; fără variabilă
+// (CI-ul GitHub n-o setează), listarea şi preview-ul sunt mock-uite în browser (mockEditorFile),
+// iar editorul — cel real — e scanat oricum. Înainte pasul era sărit fără agent, iar auditul
+// 2026-10-17 (UI-01) a găsit editorul ilizibil pe toate temele deschise exact pe suprafaţa pe
+// care poarta n-o deschidea niciodată în CI.
 const HAS_AGENT = process.env.WT_AGENT === '1'
 // capturile (ambele teme) — `ci-local.sh` le pune în $OUT/ui-review, ca să supravieţuiască containerului
 const OUT = process.env.UI_REVIEW_OUT || '/tmp/webterm-review'
@@ -60,11 +65,13 @@ const TAGS = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa', 'best-prac
 // + pagina PUBLICĂ de replay + dialogul „Copy to host" (3.5.18) + Settings → Users & roles (3.6)
 // + editorul de roluri custom ŞI maparea grupurilor SSO deschise (3.6.2) — din 3.6.6 pe sub-tab-uri
 // separate: un cont desfăcut (Accounts), editorul (Roles), maparea (SSO groups) + split view cu 3
-// panouri (3.6.12) = 40 (+ Monaco cu WT_AGENT=1).
+// panouri (3.6.12) + editorul Monaco deschis de pe pagina hostului (mereu: fişier real sau mock) = 41.
 // Mobil: sesiune dark + light.
-const PER_THEME = 40 + (HAS_AGENT ? 1 : 0)
+const PER_THEME = 41
 // 3.6.4: variantele noi (familie × mod), fiecare cu subsetul reprezentativ: login, dashboard,
-// sesiune, Setări → Appearance, file browser, dialogul Add host = 6 scanări pe variantă.
+// sesiune, Setări → Appearance, file browser, dialogul Add host = 6 scanări pe variantă;
+// pe variantele DESCHISE şi editorul de fişiere de pe pagina hostului (UI-01: sub `.wt-canvas`
+// cardul lua tokenii temei deschise — fiecare familie are glass-bg/ws-* proprii) = +1.
 const NEW_VARIANTS = [
   ['mac:light', 'mac-light'], ['mac:dark', 'mac-dark'],
   ['win:light', 'win-light'], ['win:dark', 'win-dark'],
@@ -72,7 +79,8 @@ const NEW_VARIANTS = [
   ['kde:light', 'kde-light'], ['kde:dark', 'kde-dark'],          // 3.6.11
 ]
 const PER_VARIANT = 6
-const EXPECTED_SCANS = 2 * PER_THEME + 2 + NEW_VARIANTS.length * PER_VARIANT
+const LIGHT_VARIANTS = NEW_VARIANTS.filter(([, v]) => v.endsWith('-light')).length
+const EXPECTED_SCANS = 2 * PER_THEME + 2 + NEW_VARIANTS.length * PER_VARIANT + LIGHT_VARIANTS
 
 /** Pas tolerant: dacă un selector a derapat, notăm şi mergem mai departe.
     Un instrument de recenzie care moare la primul buton mutat nu recenzează nimic. */
@@ -186,6 +194,65 @@ async function mockDocker(page) {
       { id: '3f2a1b4c5d6e', name: 'web-mock', cpu_pct: 95.2, mem_used: 805306368, mem_limit: 1073741824, mem_pct: 75,
         net_rx: 1200, net_tx: 0, block_read: 0, block_write: 0, pids: 3 },
     ] })))
+}
+/** Editorul de fişiere FĂRĂ agent: listarea (`/fs`) şi preview-ul (`/fs/preview`) mock-uite în
+    browser, ca mockDocker — un director cu un fişier text. Monaco, antetul, Close şi tokenii de
+    culoare sunt ale aplicaţiei; doar conţinutul fişierului e sintetic. Listarea mock-uită se ia
+    la (re)montarea FilePanel-ului, deci se apelează ÎNAINTE de a deschide tab-ul Files. */
+async function mockEditorFile(page) {
+  const json = (body) => ({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
+  const now = Math.floor(Date.now() / 1000)
+  await page.route((u) => /\/api\/hosts\/\d+\/fs$/.test(u.pathname), (route) => route.fulfill(json({
+    path: '/home/a11y', parent: '/home', truncated: false,
+    entries: [
+      { name: 'notes', dir: true, link: false, size: 4096, mtime: now, mode: 0o40755 },
+      { name: 'a11y-editor.txt', dir: false, link: false, size: 5, mtime: now, mode: 0o100644 },
+    ],
+  })))
+  await page.route((u) => /\/api\/hosts\/\d+\/fs\/preview$/.test(u.pathname), (route) => route.fulfill(json({
+    path: '/home/a11y/a11y-editor.txt', size: 5, mtime: now, editable: true, truncated: false, binary: false, text: 'a11y\n',
+  })))
+}
+/** Deschide primul fişier din listarea tab-ului Files (pagina hostului, sub `.wt-canvas`) în
+    Monaco, îl scanează şi măsoară contrastul antetului. axe NU evaluează `color-mix()` (raportează
+    „incomplete", nu violare) — iar cardul editorului e exact un color-mix — deci calea fişierului
+    (text-slate-400) pe card e calculată aici din stilurile rezolvate de browser (auditul
+    2026-10-17, UI-01: 1,2:1 pe toate temele deschise, nevăzut de nicio scanare). */
+async function scanEditorFromHostPage(page, label, shot) {
+  const row = page.locator('button[title="Edit"]').first()
+  await row.waitFor({ state: 'attached', timeout: 8000 })
+  await row.dispatchEvent('click')          // butonul e display:none până la hover (auditul 1.4)
+  await page.waitForSelector('.monaco-editor', { timeout: 15000 })
+  await page.waitForTimeout(1200)
+  await page.screenshot({ path: shot })
+  await scan(page, `${label} file editor (monaco, host page)`)
+  const c = await page.evaluate(() => {
+    // Chromium serializează culorile rezolvate ca `rgb()/rgba()` sau, pentru color-mix, `color(srgb …)`
+    const parse = (s) => {
+      let m = /^rgba?\(([^)]+)\)$/.exec(s)
+      if (m) { const p = m[1].split(/[\s,/]+/).filter(Boolean).map(Number); return [p[0], p[1], p[2], p[3] ?? 1] }
+      m = /^color\(srgb ([^)]+)\)$/.exec(s)
+      if (m) { const p = m[1].split(/[\s/]+/).filter(Boolean).map(Number); return [p[0] * 255, p[1] * 255, p[2] * 255, p[3] ?? 1] }
+      return null
+    }
+    const lin = (c) => { const x = c / 255; return x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4 }
+    const lum = (c) => 0.2126 * lin(c[0]) + 0.7152 * lin(c[1]) + 0.0722 * lin(c[2])
+    const dlg = document.querySelector('.wt-editor [role=dialog]')
+    const path = dlg?.querySelector('span.font-mono')
+    if (!dlg || !path) return { error: 'antetul editorului lipseşte' }
+    const bgRaw = getComputedStyle(dlg).backgroundColor
+    const fgRaw = getComputedStyle(path).color
+    const bg = parse(bgRaw); const fg = parse(fgRaw)
+    if (!bg || !fg) return { error: `culoare neparsabilă: bg=${bgRaw} fg=${fgRaw}` }
+    // cardul e uşor translucid: compus (conservator) peste scrim-ul negru 60 % pe pagină albă
+    const scrim = 255 * 0.4
+    const over = bg.map((v, i) => (i < 3 ? v * bg[3] + scrim * (1 - bg[3]) : 1))
+    const [a, b] = [lum(fg), lum(over)].sort((x, y) => y - x)
+    return { ratio: Math.round(((a + 0.05) / (b + 0.05)) * 100) / 100, bg: bgRaw, fg: fgRaw }
+  })
+  check(`${label}: editorul deschis de pe pagina hostului — calea fişierului pe card ≥ 4,5:1 (${JSON.stringify(c)})`,
+    !c.error && c.ratio >= 4.5)
+  await escapeRestores(page, null, 'editorul de fişiere')
 }
 async function openSettings(page) {
   await page.click('button[aria-label="Settings"]')
@@ -525,23 +592,17 @@ try {
       await scan(page, `${theme} toolbox: ssh keys`)
     }, page)
 
-    // ── editorul Monaco (doar cu agent declarat: WT_AGENT=1) ──
-    if (HAS_AGENT) {
-      await step('editor Monaco', async () => {
-        await hostTab(page, 'Files')
-        await page.waitForSelector('button[title="New file"]', { timeout: 8000 })
-        const row = page.locator('button[title="Edit"]').first()
-        await row.waitFor({ state: 'attached', timeout: 8000 })
-        await row.dispatchEvent('click')          // butonul e display:none până la hover (auditul 1.4)
-        await page.waitForSelector('.monaco-editor', { timeout: 15000 })
-        await page.waitForTimeout(1200)
-        await page.screenshot({ path: `${OUT}/${theme}-12-monaco.png` })
-        await scan(page, `${theme} file editor (monaco)`)
-        await escapeRestores(page, null, 'editorul de fişiere')
-      }, page)
-    } else {
-      console.log('  SKIP editor Monaco: cere un agent online — setează WT_AGENT=1 ca să fie scanat')
-    }
+    // ── editorul Monaco, deschis de pe PAGINA HOSTULUI (tab-ul Files, sub `.wt-canvas`) ──
+    // Cu WT_AGENT=1 pe fişierul real scris în sesiune (~/a11y-monaco.txt), altfel pe listarea
+    // mock-uită — în ambele cazuri editorul, cardul şi tokenii sunt cele reale. Tab-ul curent e
+    // Toolbox, deci clickul pe Files (re)montează panoul şi ia listarea (mock-uită sau nu).
+    await step('editor Monaco (pagina hostului)', async () => {
+      if (!HAS_AGENT) await mockEditorFile(page)
+      await hostTab(page, 'Files')
+      await page.waitForSelector('button[title="New file"]', { timeout: 8000 })
+      await scanEditorFromHostPage(page, theme, `${OUT}/${theme}-12-monaco.png`)
+      await page.unrouteAll({ behavior: 'ignoreErrors' })
+    }, page)
 
     // ── toast de eroare: cerere eşuată (POST /api/hosts/*/sessions → 500) ──
     await step('toast de eroare', async () => {
@@ -1015,6 +1076,21 @@ try {
       await page.waitForTimeout(500)
       await page.screenshot({ path: `${OUT}/${variant}-06-files.png` })
       await scan(page, `${variant} file browser`)
+      await page.evaluate(() => { window.location.hash = '' })
+      await page.waitForTimeout(300)
+    }, page)
+
+    // UI-01: editorul de fişiere de pe pagina hostului, pe fiecare variantă DESCHISĂ (sub
+    // `.wt-canvas` cardul moştenea tokenii temei deschise; fiecare familie are glass-bg/ws-* proprii).
+    // Listarea şi preview-ul mock-uite (CI-ul n-are WT_AGENT); mock-ul se pune ÎNAINTE de a
+    // deschide tab-ul Files, ca panoul să-l ia la montare.
+    if (variant.endsWith('-light')) await step(`${variant}: editorul de fişiere de pe pagina hostului`, async () => {
+      await mockEditorFile(page)
+      await openHostPage(page, HOST)
+      await hostTab(page, 'Files')
+      await page.waitForSelector('[role="group"][data-files-list]:not([data-path=""])', { timeout: 10000 })
+      await scanEditorFromHostPage(page, variant, `${OUT}/${variant}-06b-editor.png`)
+      await page.unrouteAll({ behavior: 'ignoreErrors' })
       await page.evaluate(() => { window.location.hash = '' })
       await page.waitForTimeout(300)
     }, page)

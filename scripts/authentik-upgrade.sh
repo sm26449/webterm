@@ -174,7 +174,9 @@ running_tag() { local c; c=$(cid "$SRV"); [ -n "$c" ] || return 0
   docker inspect -f '{{.Config.Image}}' "$c" | sed -n "s|^${IMAGE_REPO}:||p"; }
 file_tags() { grep -E "^[[:space:]]*image:[[:space:]]*\"?${IMAGE_REPO}:" "$CF" \
   | sed -E "s|.*${IMAGE_REPO}:([^\" ]+).*|\1|" | sort -u; }
-pg_major() { dc exec -T "$PG" psql -U authentik -d authentik -Atc 'show server_version' 2>/dev/null \
+# against the maintenance DB: `show server_version` is server-wide, and `restore` must be able to
+# ask it while the authentik database does not exist (after a DROP whose CREATE failed)
+pg_major() { dc exec -T "$PG" psql -U authentik -d postgres -Atc 'show server_version' 2>/dev/null \
   | cut -d. -f1 | tr -d '\r'; }
 # Python inside the server image (no curl/wget there): readiness + every discovery document.
 probe() {
@@ -306,7 +308,7 @@ do_upgrade() {
   ok "pulled"
 
   say "Switch tag in $FILE"
-  sed -i -E "s#(${IMAGE_REPO}:)${cur//./\\.}([\" ]|\$)#\1${target}\2#" "$CF"
+  sed -i --follow-symlinks -E "s#(${IMAGE_REPO}:)${cur//./\\.}([\" ]|\$)#\1${target}\2#" "$CF"
   [ "$(file_tags)" = "$target" ] || { cp -p "$BACKUP_OUT/$FILE" "$CF"; die "tag edit failed — compose file restored"; }
   ok "$(file_tags)"
 
@@ -335,30 +337,92 @@ do_upgrade() {
 }
 
 # --- restore: the ONLY way back once migrations have run --------------------------------------
+# audit 2026-10-17 (OP-03): the backup directory is the most dangerous input this script takes —
+# root runs `docker compose up` on the compose file inside it. So, before anything is stopped:
+# it must sit under $BACKUP_ROOT (real paths, so a symlink cannot point elsewhere), as root it and
+# every file read from it must pass the same root-owned test as the compose dir, and the compose
+# file goes back WITHOUT preserving ownership (`cp -p` as root kept the backup file's uid on $CF).
+# SHA256SUMS lives in the same directory, so it only proves the backup is self-consistent.
+BACKUP_FILES="authentik.dump meta SHA256SUMS"
+check_backup_dir() {   # sets B to the real path; dies on anything it does not like
+  local b=$1 rb rr f
+  [ -n "$b" ] && [ -d "$b" ] || die "not a backup directory: '$b'"
+  rb=$(readlink -f -- "$b") || die "not a backup directory: '$b'"
+  rr=$(readlink -f -- "$BACKUP_ROOT") || die "no backup root: $BACKUP_ROOT"
+  case "$rb" in
+    "$rr"/*) ;;
+    *) die "refusing: $b is not under $BACKUP_ROOT (backups made with --backup-dir need the same --backup-dir here)" ;;
+  esac
+  for f in $BACKUP_FILES "$FILE"; do
+    [ -f "$rb/$f" ] || die "not a backup directory: '$b' (no $f)"
+  done
+  [ -s "$rb/authentik.dump" ] || die "not a backup directory: '$b' (empty dump)"
+  if [ "${EUID:-$(id -u)}" = 0 ]; then
+    safe_chain "$rb"
+    for f in $BACKUP_FILES "$FILE"; do
+      safe_path "$rb/$f" || die "refusing: $rb/$f must be owned by root and not writable by group/others"
+    done
+  fi
+  (cd "$rb" && sha256sum -c --quiet SHA256SUMS) || die "backup checksums do not match"
+  B=$rb
+}
+
 do_restore() {
-  local b=${1:-} oldtag
-  [ -n "$b" ] && [ -s "$b/authentik.dump" ] && [ -f "$b/meta" ] || die "not a backup directory: '$b'"
-  (cd "$b" && sha256sum -c --quiet SHA256SUMS) || die "backup checksums do not match"
+  local b=${1:-} oldtag pgm
+  check_backup_dir "$b"; b=$B
   oldtag=$(sed -n 's/^tag=//p' "$b/meta")
-  [ -f "$b/$FILE" ] || die "backup has no $FILE"
+  # OP-10: `DROP DATABASE … WITH (FORCE)` exists from Postgres 13; on an older one the script used
+  # to stop server+worker first and then die on the DROP, leaving the IdP down. Check first.
+  pgm=$(pg_major || true)
+  [ -n "$pgm" ] || die "cannot read the Postgres version from $PG — is it running? nothing was stopped"
+  [ "$pgm" -ge 13 ] 2>/dev/null \
+    || die "Postgres $pgm has no 'DROP DATABASE … WITH (FORCE)' (13+) — nothing was stopped; upgrade Postgres first (runbook §PG)"
   say "Restore $b"
   echo "  This DROPS the current authentik database and replaces it with the dump, then runs"
   echo "  $SRV/$WRK on $oldtag again. Anything changed in Authentik since the backup is lost."
   confirm
   local t0; t0=$(date +%s)
+  # until pg_restore starts the database is intact: a DROP/CREATE that fails (or a Ctrl-C there,
+  # or a half-done stop) must not leave server+worker stopped with no hint (OP-10); the trap's
+  # `up -d` is idempotent, so it is armed before the stop
+  trap 'echo "  restore failed before the dump was loaded — starting $SRV/$WRK again on the current tag; fix the cause and re-run restore" >&2; dc up -d --no-deps "$SRV" "$WRK" >/dev/null 2>&1 || true' EXIT
   dc stop "$SRV" "$WRK"
   dc exec -T "$PG" psql -U authentik -d postgres -v ON_ERROR_STOP=1 \
     -c 'DROP DATABASE IF EXISTS authentik WITH (FORCE)' -c 'CREATE DATABASE authentik OWNER authentik'
+  trap - EXIT
   dc exec -T "$PG" pg_restore -U authentik -d authentik --exit-on-error --no-owner --role=authentik < "$b/authentik.dump"
   ok "database restored"
-  cp -p "$b/$FILE" "$CF"; ok "$FILE restored (tag $oldtag)"
+  # ownership NOT preserved (OP-03): $CF is root's 0644 whatever the backup file says. Written
+  # through the link when $CF is one (docker-compose.yml -> compose.yml): `install` would replace
+  # the symlink with a regular file and leave the real target on the new tag.
+  cp --no-preserve=all -- "$b/$FILE" "$CF"
+  chmod 0644 "$CF"
+  [ "${EUID:-$(id -u)}" != 0 ] || chown root:root "$CF"
+  ok "$FILE restored (tag $oldtag)"
   dc up -d --no-deps "$SRV" "$WRK"
   wait_healthy "$t0" || die "not healthy after restore — check: docker compose logs $SRV"
   ok "healthy on $(version_in_app) after $(( $(date +%s) - t0 ))s"
   discovery | sed 's/^/  /'
 }
 
-mkroot() { mkdir -p "$BACKUP_ROOT" && chmod 700 "$BACKUP_ROOT"; }
+# OP-03: a --backup-dir under a directory someone else owns is as bad as a foreign compose dir
+# (whoever can write a parent can swap the backup tree) — same root-owned chain. Checked BEFORE
+# anything is created or chmod'ed there (review: `chmod 700` followed a planted symlink to /usr
+# before the chain was looked at), and the path must be plain: no symlink, `.` or `..` anywhere
+# in it, so what is checked is what was typed. The default is canonical already.
+mkroot() {
+  local typed=$BACKUP_ROOT rr created=0
+  [[ "$typed" = /* ]] || typed=$PWD/$typed
+  while [ "${typed%/}" != "$typed" ] && [ "$typed" != / ]; do typed=${typed%/}; done
+  rr=$(readlink -m -- "$typed") || die "no backup root: $BACKUP_ROOT"
+  [ "$rr" = "$typed" ] || die "refusing: --backup-dir must be a plain path (no symlinks/..): $BACKUP_ROOT -> $rr"
+  if [ ! -e "$rr" ]; then mkdir -p "$rr"; created=1; fi
+  # re-resolved after mkdir: a link planted in between (sticky parents are allowed) would pass -d
+  [ -d "$rr" ] && [ ! -L "$rr" ] && [ "$(readlink -f -- "$rr")" = "$rr" ] || die "refusing: $rr is not a plain directory"
+  [ "${EUID:-$(id -u)}" != 0 ] || safe_chain "$rr"
+  [ "$created" = 0 ] || chmod 700 "$rr"   # a pre-existing one already passed the chain as root
+  BACKUP_ROOT=$rr
+}
 
 case "$CMD" in
   status) status ;;

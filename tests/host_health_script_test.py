@@ -23,7 +23,17 @@ What we check:
     when it is the WebTerm one;
   * docker-cleanup.sh: dangling prune, the WebTerm label filter on the -a prune, keep-N WebTerm
     versions plus the running image and the rollback target, build-cache prune, never a volume /
-    system / container command, --dry-run removes nothing, the status is recorded.
+    system / container command, --dry-run removes nothing, the status is recorded;
+  * authentik-upgrade.sh: the hop rule; as root, the script / compose dir / compose file / .env
+    must be root's; `restore` (audit 2026-10-17, OP-03/OP-10) refuses a backup outside the backup
+    root (real path), one not owned by root, one whose dump / meta / SHA256SUMS / compose file is
+    not root's, a --backup-dir under someone else's directory, and Postgres < 13 — all BEFORE
+    stopping anything; the compose file comes back root:root 0644 (through the link when the
+    live one is a symlink); a DROP that fails after the stop starts server+worker again; the
+    Postgres version is read from the maintenance DB (a re-run after a failed CREATE works) and
+    an unanswered one is "is it running?", not a version problem; a --backup-dir that is a
+    symlink is refused before anything is created or chmod'ed there. These checks need root
+    (CI runs the suite as the runner user and skips them: `sudo .venv/bin/python tests/host_health_script_test.py`).
 """
 import http.server
 import json
@@ -551,7 +561,7 @@ def main():
         print("── authentik-upgrade.sh: as root, everything it trusts must be root's")
         if IS_ROOT:
             # a root-owned tree under a private (0700) dir: bin/ for the script, ak/ for the stack
-            ak_base = tempfile.mkdtemp()
+            ak_base = os.path.realpath(tempfile.mkdtemp())
             os.chmod(ak_base, 0o700)
             for d in ("bin", "ak"):
                 os.mkdir(os.path.join(ak_base, d), 0o755)
@@ -599,6 +609,230 @@ def main():
             _r = os.path.realpath(ROOT)
             if not all(os.stat(d).st_uid == 0 for d in (_r, os.path.dirname(_r))):
                 check("run from a checkout a user owns → refused", rc != 0 and "refusing" in out, out[-300:])
+
+            print("── authentik-upgrade.sh restore: the backup dir is root input too (audit 2026-10-17, OP-03 / OP-10)")
+            # a fake docker that answers everything `restore` asks (compose services, cids, health,
+            # psql, pg_restore, the probes) and logs its argv; AK_FAKE/pg_major, drop_fails,
+            # no_authentik_db (any psql -d authentik fails: the state after DROP + failed CREATE)
+            # and pg_down (Postgres answers nothing) steer it. The real docker is never on PATH here.
+            ak_fake2 = os.path.join(ak_base, "fakebin2")
+            os.mkdir(ak_fake2, 0o755)
+            with open(os.path.join(ak_fake2, "docker"), "w") as f:
+                f.write(r"""#!/bin/sh
+echo "$*" >> "$AK_FAKE/calls"
+case "$*" in
+  *"config --services"*) printf 'server\nworker\npostgresql\n' ;;
+  *" ps -q "*) echo c0ffee ;;
+  *" stop "*|*" up -d "*) : ;;
+  *"server_version"*)
+    [ -e "$AK_FAKE/pg_down" ] && exit 2
+    case "$*" in *" -d authentik "*) [ -e "$AK_FAKE/no_authentik_db" ] && { echo 'psql: error: FATAL:  database "authentik" does not exist' >&2; exit 2; } ;; esac
+    cat "$AK_FAKE/pg_major" ;;
+  *"DROP DATABASE"*) [ -e "$AK_FAKE/drop_fails" ] && { echo "psql: FATAL fake" >&2; exit 1; }; : ;;
+  *"pg_restore"*) cat >/dev/null ;;
+  *"exec -T server python"*) cat >/dev/null; echo 2026.8.2 ;;
+  *"exec -T server ak shell"*) echo DISCOVERY_BAD=0 ;;
+  *"showmigrations"*) : ;;
+  inspect*Health*) echo healthy ;;
+  inspect*RestartCount*) echo 0 ;;
+  inspect*Config.Image*) echo ghcr.io/goauthentik/server:2026.8.3 ;;
+  inspect*) : ;;
+  *) echo "fake docker: unexpected $*" >&2; exit 9 ;;
+esac
+""")
+            os.chmod(os.path.join(ak_fake2, "docker"), 0o755)
+            ak_fake_dir = os.path.join(ak_base, "fake2")
+            os.mkdir(ak_fake_dir, 0o755)
+            os.chmod(ak_fake_dir, 0o1777)   # nobody writes here; the fake docker appends `calls` as root
+            open(os.path.join(ak_fake_dir, "pg_major"), "w").write("16.4\n")
+            bk_root = os.path.join(ak_base, "bk")
+            os.mkdir(bk_root, 0o700)
+            OLD_CF = "services:\n  server:\n    image: ghcr.io/goauthentik/server:2026.8.2\n"
+            NEW_CF = "services:\n  server:\n    image: ghcr.io/goauthentik/server:2026.8.3\n"
+
+            def make_backup(where, name="authentik-2026.8.2-20261017-120000"):
+                b = os.path.join(where, name)
+                os.mkdir(b, 0o700)
+                for fn, body in (("authentik.dump", "PGDMP fake\n"), ("meta", "date=x\ntag=2026.8.2\npg_major=16\n"),
+                                 ("docker-compose.yml", OLD_CF)):
+                    with open(os.path.join(b, fn), "w") as f:
+                        f.write(body)
+                    os.chmod(os.path.join(b, fn), 0o600)
+                sums = subprocess.run("sha256sum -- *", shell=True, cwd=b, capture_output=True, text=True, check=True).stdout
+                with open(os.path.join(b, "SHA256SUMS"), "w") as f:
+                    f.write(sums)
+                os.chmod(os.path.join(b, "SHA256SUMS"), 0o600)
+                return b
+
+            def restore(b, backup_root=bk_root):
+                calls = os.path.join(ak_fake_dir, "calls")
+                if os.path.exists(calls):
+                    os.unlink(calls)
+                with open(ak_cf, "w") as f:   # the live compose file: root's, on the NEW tag
+                    f.write(NEW_CF)
+                os.chown(ak_cf, 0, 0); os.chmod(ak_cf, 0o644)
+                p = subprocess.run(["bash", ak_script, "--dir", ak_dir, "--backup-dir", backup_root, "--yes", "restore", b],
+                                   stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120, cwd="/",
+                                   env={"PATH": ak_fake2 + ":/usr/sbin:/usr/bin:/sbin:/bin", "AK_FAKE": ak_fake_dir})
+                try:
+                    with open(calls) as f:
+                        c = f.read()
+                except OSError:
+                    c = ""
+                return p.returncode, p.stdout + p.stderr, c
+
+            def before(calls, a, b):   # both present and a first (never raises: a missing call is a FAIL)
+                return a in calls and b in calls and calls.index(a) < calls.rindex(b)
+
+            def untouched(calls):
+                # nothing stopped, nothing dropped, the live compose file still root's on the new tag
+                st = os.stat(ak_cf)
+                return (" stop " not in calls and "DROP DATABASE" not in calls and "pg_restore" not in calls
+                        and open(ak_cf).read() == NEW_CF and st.st_uid == 0)
+
+            # the good case first: a root-owned backup under --backup-dir, whose compose file carries a
+            # foreign group and 0640 (what `cp -p` would have copied onto the live file)
+            good = make_backup(bk_root)
+            os.chown(os.path.join(good, "docker-compose.yml"), 0, 1)
+            os.chmod(os.path.join(good, "docker-compose.yml"), 0o640)
+            rc, out, calls = restore(good)
+            check("a root-owned backup under the backup root restores (stop → drop → pg_restore → up)",
+                  rc == 0 and before(calls, " stop ", "DROP DATABASE") and before(calls, "DROP DATABASE", "pg_restore")
+                  and before(calls, "pg_restore", " up -d "), (rc, out[-400:], calls[-400:]))
+            st = os.stat(ak_cf)
+            check("…the compose file comes back root:root 0644 — the backup's owner/group/mode are not preserved",
+                  open(ak_cf).read() == OLD_CF and st.st_uid == 0 and st.st_gid == 0 and stat.S_IMODE(st.st_mode) == 0o644,
+                  "%s %s %o" % (st.st_uid, st.st_gid, stat.S_IMODE(st.st_mode)))
+            check("…Postgres major was checked before stopping anything",
+                  before(calls, "server_version", " stop "), calls[:300])
+
+            # a backup dir written by another user → refused before anything is stopped
+            foreign = make_backup(bk_root, "authentik-2026.8.2-foreign")
+            os.chown(foreign, 1, 0)
+            rc, out, calls = restore(foreign)
+            check("backup dir not owned by root → refused, nothing stopped",
+                  rc != 0 and "refusing: " + foreign in out and untouched(calls), (rc, out[-300:], calls))
+            os.chown(foreign, 0, 0)
+            os.chmod(foreign, 0o770)
+            rc, out, calls = restore(foreign)
+            check("backup dir group-writable → refused", rc != 0 and "refusing: " + foreign in out and untouched(calls), out[-300:])
+            os.chmod(foreign, 0o700)
+
+            # a backup outside --backup-dir, even a perfectly root-owned one, and a symlink into it
+            elsewhere = os.path.join(ak_base, "elsewhere")
+            os.mkdir(elsewhere, 0o700)
+            outside = make_backup(elsewhere)
+            rc, out, calls = restore(outside)
+            check("backup outside the backup root → refused, nothing stopped",
+                  rc != 0 and "not under " + bk_root in out and untouched(calls), (rc, out[-300:], calls))
+            link = os.path.join(bk_root, "authentik-2026.8.2-link")
+            os.symlink(outside, link)
+            rc, out, calls = restore(link)
+            check("a symlink under the backup root pointing outside → refused (real path)",
+                  rc != 0 and "not under " + bk_root in out and untouched(calls), (rc, out[-300:], calls))
+            os.unlink(link)
+            rc, out, calls = restore(os.path.join(bk_root, "..", "elsewhere", os.path.basename(outside)))
+            check("…and `..` does not help", rc != 0 and "not under " + bk_root in out and untouched(calls), out[-300:])
+
+            # every file read from the backup must be root's: the compose file (what `up` will run)…
+            b2 = make_backup(bk_root, "authentik-2026.8.2-badcf")
+            os.chown(os.path.join(b2, "docker-compose.yml"), 1, 0)
+            rc, out, calls = restore(b2)
+            check("a compose file in the backup owned by another user → refused, live compose file untouched and root's",
+                  rc != 0 and "refusing: " + os.path.join(b2, "docker-compose.yml") in out and untouched(calls),
+                  (rc, out[-300:], calls))
+            os.chown(os.path.join(b2, "docker-compose.yml"), 0, 0)
+            # …the dump, meta and the checksum file (self-consistent by construction: it is in the same dir)
+            for fn in ("authentik.dump", "meta", "SHA256SUMS"):
+                os.chmod(os.path.join(b2, fn), 0o620)
+                rc, out, calls = restore(b2)
+                check("%s in the backup group-writable → refused" % fn,
+                      rc != 0 and "refusing: " + os.path.join(b2, fn) in out and untouched(calls), out[-300:])
+                os.chmod(os.path.join(b2, fn), 0o600)
+            os.unlink(os.path.join(b2, "meta"))
+            rc, out, calls = restore(b2)
+            check("a backup without meta → not a backup directory", rc != 0 and "not a backup directory" in out and untouched(calls), out[-300:])
+
+            # --backup-dir itself: under a directory another user owns → refused (chain up to /)
+            user_root = os.path.join(ak_base, "userbk")
+            os.mkdir(user_root, 0o755)
+            os.chown(user_root, 1, 0)
+            os.mkdir(os.path.join(user_root, "ak"), 0o700)
+            b3 = make_backup(os.path.join(user_root, "ak"))
+            rc, out, calls = restore(b3, backup_root=os.path.join(user_root, "ak"))
+            check("--backup-dir under a dir owned by another user → refused (parent chain), nothing stopped",
+                  rc != 0 and "refusing: parent " + user_root in out and untouched(calls), (rc, out[-300:], calls))
+
+            # OP-10: Postgres < 13 has no `DROP DATABASE … WITH (FORCE)`: refuse BEFORE stopping
+            open(os.path.join(ak_fake_dir, "pg_major"), "w").write("12.3\n")
+            rc, out, calls = restore(good)
+            check("Postgres 12 → refused before stop (OP-10)", rc != 0 and "13+" in out and "nothing was stopped" in out
+                  and untouched(calls), (rc, out[-300:], calls))
+            open(os.path.join(ak_fake_dir, "pg_major"), "w").write("16.4\n")
+            # …and a DROP that fails after the stop brings server+worker back
+            open(os.path.join(ak_fake_dir, "drop_fails"), "w").close()
+            rc, out, calls = restore(good)
+            check("DROP fails after stop → server+worker started again, dump never loaded (OP-10)",
+                  rc != 0 and "pg_restore" not in calls and before(calls, " stop ", " up -d --no-deps server worker")
+                  and "re-run restore" in out and open(ak_cf).read() == NEW_CF, (rc, out[-300:], calls[-400:]))
+            os.unlink(os.path.join(ak_fake_dir, "drop_fails"))
+
+            # review (MED): the version is read from the maintenance DB — a re-run after a DROP
+            # whose CREATE failed (no `authentik` database) must still restore…
+            open(os.path.join(ak_fake_dir, "no_authentik_db"), "w").close()
+            rc, out, calls = restore(good)
+            check("no authentik database (re-run after a failed CREATE) → restore still proceeds",
+                  rc == 0 and before(calls, " stop ", "DROP DATABASE") and before(calls, "DROP DATABASE", "pg_restore")
+                  and before(calls, "pg_restore", " up -d ") and " -d authentik " not in calls.split("server_version")[0],
+                  (rc, out[-300:], calls[:300]))
+            os.unlink(os.path.join(ak_fake_dir, "no_authentik_db"))
+            # …and no answer at all is "is it running?", not a version problem, with nothing stopped
+            open(os.path.join(ak_fake_dir, "pg_down"), "w").close()
+            rc, out, calls = restore(good)
+            check("Postgres not answering → 'is it running?' before stop, not a version complaint",
+                  rc != 0 and "cannot read the Postgres version" in out and "13+" not in out and untouched(calls),
+                  (rc, out[-300:], calls))
+            os.unlink(os.path.join(ak_fake_dir, "pg_down"))
+
+            # review (MED): --backup-dir is checked BEFORE it is created or chmod'ed, and must be a
+            # plain path: a symlink owned by uid 1 in uid 1's directory, pointing at a root-owned
+            # 0755 directory (the old code chmod'ed the target first, then checked the resolved
+            # path — the user-owned link was never seen)
+            target = os.path.join(ak_base, "target")
+            os.mkdir(target, 0o755)
+            lnk = os.path.join(user_root, "bk")
+            os.symlink(target, lnk)
+            os.lchown(lnk, 1, 0)
+            rc, out, calls = restore(good, backup_root=lnk)
+            check("--backup-dir is a user's symlink to a root dir → refused (plain path), target untouched, no .lock, nothing stopped",
+                  rc != 0 and "refusing: --backup-dir must be a plain path" in out
+                  and stat.S_IMODE(os.stat(target).st_mode) == 0o755 and not os.path.exists(os.path.join(target, ".lock"))
+                  and untouched(calls), (rc, out[-300:], calls, "%o" % stat.S_IMODE(os.stat(target).st_mode)))
+            rc, out, calls = restore(good, backup_root=os.path.join(bk_root, "..", "bk"))
+            check("--backup-dir with `..` → refused (plain path)", rc != 0 and "plain path" in out and untouched(calls), out[-300:])
+            # legit spellings still work: a trailing slash, and a root that does not exist yet
+            # (created 0700, under a root-owned parent)
+            rc, out, calls = restore(good, backup_root=bk_root + "/")
+            check("--backup-dir with a trailing slash → fine", rc == 0 and "refusing" not in out, (rc, out[-300:]))
+            new_root = os.path.join(ak_base, "bk-new")
+            good2 = os.path.join(new_root, os.path.basename(good))
+            rc, out, calls = restore(good2, backup_root=new_root)
+            check("a --backup-dir that does not exist yet is created 0700 root (then the backup is simply not in it)",
+                  os.path.isdir(new_root) and stat.S_IMODE(os.stat(new_root).st_mode) == 0o700 and os.stat(new_root).st_uid == 0
+                  and rc != 0 and "not a backup directory" in out and untouched(calls), (rc, out[-300:]))
+
+            # review (LOW): a symlinked compose file (docker-compose.yml -> compose.yml) is written
+            # THROUGH — `install` replaced the link with a regular file and left the target on the new tag
+            real_cf = os.path.join(ak_dir, "compose.yml")
+            os.rename(ak_cf, real_cf)
+            os.symlink("compose.yml", ak_cf)
+            rc, out, calls = restore(good)
+            st = os.stat(real_cf)
+            check("live compose file is a symlink → restored through the link: link kept, target on the old tag, root:root 0644",
+                  rc == 0 and os.path.islink(ak_cf) and open(real_cf).read() == OLD_CF and st.st_uid == 0 and st.st_gid == 0
+                  and stat.S_IMODE(st.st_mode) == 0o644, (rc, out[-300:], os.path.islink(ak_cf), open(real_cf).read()[-40:]))
+            os.unlink(ak_cf)
+            os.rename(real_cf, ak_cf)
             shutil.rmtree(ak_base, ignore_errors=True)
         else:
             print("  (skipped: not root)")
