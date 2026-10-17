@@ -834,7 +834,9 @@ export default function SessionView(props: {
     const tr = trackerRef.current
     if (!term || !tr || !tr.atPrompt()) return null
     const b = term.buffer.active
-    const line = tr.pendingCommand() ?? ''
+    // EXACT ce e pe ecran, cu spaţiul de la capăt: un spaţiu tastat la capăt de rafală trebuie să schimbe
+    // linia, altfel ecoul se desincronizează până la următorul Enter (hotfix 3.6.17; vezi typedLine)
+    const line = tr.typedLine() ?? ''
     const row = b.baseY + b.cursorY
     return { k: `${b.type}\u0000${row}\u0000${b.cursorX}\u0000${line}`, line }
   })

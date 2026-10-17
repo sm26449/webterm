@@ -497,8 +497,10 @@ export class CommandTracker {
     return { row: b.baseY + b.cursorY, col: b.cursorX }
   }
 
-  /** Textul comenzii = ce s-a tastat între B (sfârșit de prompt) și C (execuție). */
-  private readCommand(): string {
+  /** Textul comenzii = ce s-a tastat între B (sfârșit de prompt) și C (execuție). `trim` = fără
+      spaţiile de la capete (comanda judecată / înregistrată); false = EXACT ce e pe ecran până la cursor
+      (cheia de ecou — vezi typedLine). */
+  private readCommand(trim = true): string {
     const b = this.term.buffer.active
     const end = this.absCursor()
     if (this.promptRow == null) return ''
@@ -517,7 +519,22 @@ export class CommandTracker {
       // exactă, nu mai ignoră spaţiile)
       if (row !== end.row && !b.getLine(row + 1)?.isWrapped && !reachesLastCell(line, this.term.cols)) out += ' '
     }
-    return out.trim()
+    return trim ? out.trim() : out
+  }
+
+  /** Linia tastată EXACT cum e pe ecran, de la B la cursor, cu spaţiile de la capăt (hotfix 3.6.17):
+      cheia de ecou (SessionView.lineKeyRef → EchoTracker) compară referinţa + textul trimis cu linia
+      de acum, caracter cu caracter. Citită cu trim, un spaţiu tastat la capătul unei rafale de output
+      („rm -rf ␣" sub tmux, host lent) nu schimba linia: spaţiul devenea tastă-candidat, confirmat la
+      linişte cu referinţa TRUNCHIATĂ, iar de la caracterul următor („/": referinţă „rm -rf" + „/" ≠
+      „rm -rf /") niciun text nu se mai potrivea — zeci de taste „fără ecou" până la următorul Enter
+      reuşit şi „Încă nu pot verifica" la orice Enter cu o tastă de editare în coadă (CI 3.6.17, SV-01).
+      null = nicio linie de shell citibilă (ca pendingCommand). Doar pentru ecou: comanda JUDECATĂ
+      rămâne pendingCommand (cu trim). */
+  typedLine(): string | null {
+    if (this.promptRow == null) return null
+    if (this.term.buffer.active.type === 'alternate') return null
+    return this.readCommand(false)
   }
 
   /** Varianta „cu spaţiu" a liniei, când un rând plin până la ultima celulă e urmat de unul care NU e

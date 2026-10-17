@@ -931,3 +931,35 @@ describe('CommandTracker.pendingBelow: textul de sub linia cursorului (verificar
     expect(at(['% ls', '', '', '']).pendingBelow()).toEqual([])
   })
 })
+
+// hotfix 3.6.17: cheia de ecou citeşte linia EXACT (cu spaţiul de la capăt); comanda judecată rămâne cu trim
+describe('CommandTracker.typedLine: linia exactă, cu spaţiul de la capăt', () => {
+  function termWith(text: string) {
+    const buffer = {
+      type: 'normal', baseY: 0, cursorY: 0, cursorX: text.length,
+      getLine: (r: number) => (r === 0
+        ? { length: 80, isWrapped: false, translateToString: (_t: boolean, from = 0, to?: number) => text.slice(from, to) }
+        : undefined),
+    }
+    return { term: { cols: 80, buffer: { active: buffer }, registerMarker: () => ({ line: 0, isDisposed: false, dispose() {} }) } as unknown as Terminal, buffer }
+  }
+  it('„rm -rf ␣": typedLine păstrează spaţiul, pendingCommand nu', () => {
+    const { term, buffer } = termWith('$ ')
+    const tr = new CommandTracker(term)
+    tr.handle('B')                                           // B la coloana 2
+    const t2 = termWith('$ rm -rf ')
+    ;(term as unknown as { buffer: { active: unknown } }).buffer.active = t2.buffer
+    expect(tr.typedLine()).toBe('rm -rf ')
+    expect(tr.pendingCommand()).toBe('rm -rf')
+    void buffer
+  })
+  it('fără prompt / pe ecranul alternativ: null, ca pendingCommand', () => {
+    const { term } = termWith('$ ')
+    const tr = new CommandTracker(term)
+    expect(tr.typedLine()).toBeNull()
+    tr.handle('B')
+    ;(term.buffer.active as unknown as { type: string }).type = 'alternate'
+    expect(tr.typedLine()).toBeNull()
+    expect(tr.pendingCommand()).toBeNull()
+  })
+})

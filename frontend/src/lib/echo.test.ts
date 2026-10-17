@@ -631,3 +631,46 @@ describe('SV-01: Ctrl+O închide tot ce era înaintea lui, ca Enter', () => {
     expect(reportOnly(new Uint8Array([0x1b, 0x5b, 0x4d, 0x20, 0x21, 0x21]), true, false)).toBe(true)
   })
 })
+
+// hotfix 3.6.17 (CI roşu pe SV-01): o rafală de output care se termină exact după un spaţiu tastat
+// („rm -rf ␣"), apoi linişte, apoi restul liniei. Cu cheia de ecou citită EXACT (typedLine) spaţiul
+// schimbă linia şi tot ce urmează se confirmă; cu linia citită cu trim (pendingCommand) spaţiul nu
+// schimba nimic, devenea tastă-candidat confirmată la linişte cu referinţa trunchiată, iar de la „/"
+// niciun text nu se mai potrivea — zeci de taste rămâneau „fără ecou" (dialog „Încă nu pot verifica").
+describe('hotfix 3.6.17: spaţiu la capăt de rafală, apoi linişte, apoi text', () => {
+  function paneWithKey(trimKey: boolean) {
+    let line = ''
+    const shown = () => (trimKey ? line.trim() : line)
+    const key = (): LineKey => ({ k: `n\u00000\u0000${line.length}\u0000${shown()}`, line: shown() })
+    const echo = new EchoTracker()
+    const inFlight: string[] = []
+    let t = 0
+    const send = (d: string) => {
+      const { seq, needBase } = echo.sent(d, t)
+      if (needBase) echo.setBase(seq, key())
+      inFlight.push(d)
+    }
+    const arrive = (n: number) => {
+      const tag = echo.inputSeq
+      for (const d of inFlight.splice(0, n)) line += d
+      echo.output(tag, key, t, null)
+    }
+    const type = (s: string) => { for (const c of s) send(c) }
+    return { echo, send, arrive, type, key: () => key(), tick: (ms: number) => { t += ms }, now: () => t }
+  }
+  const scenario = (p: ReturnType<typeof paneWithKey>) => {
+    p.type('rm -rf'); p.arrive(6); p.tick(5)
+    p.type(' '); p.arrive(1)              // rafala se termină exact după spaţiu
+    p.tick(100)                           // linişte (> echoQuietMs): tasta-candidat s-ar confirma acum
+    p.type('/tmp/x'); p.arrive(6); p.tick(100)
+    p.echo.echoed(false, p.now(), null, p.key())   // ca SessionView.echoedNow: încearcă quiet()
+    return p.echo.unechoed()
+  }
+  it('cheia EXACTĂ (typedLine): spaţiul schimbă linia, tot textul se confirmă', () => {
+    expect(scenario(paneWithKey(false))).toEqual([])
+  })
+  it('cheia cu trim (bug-ul): după spaţiu nimic nu se mai potriveşte — de asta cheia nu mai e pendingCommand', () => {
+    const left = scenario(paneWithKey(true))
+    expect(left.length).toBeGreaterThan(0)   // (aproape) tot „/tmp/x" rămâne fără ecou, deşi e pe ecran
+  })
+})

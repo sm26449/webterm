@@ -828,10 +828,17 @@ try {
   await page.keyboard.press('Escape')
   const ctrlOClosed = await hidden(guardDlg, 3000)
   await page.waitForTimeout(500)
-  // dialogul regulii şterge linia la Escape; un dialog „nu pot verifica" ar lăsa-o — Ctrl+U
-  // necondiţionat, ca `echo`-ul de mai jos să nu se lipească de un `rm -rf …` rămas (diag înşelător)
-  await page.keyboard.press('Control+u')
-  await page.waitForTimeout(300)
+  // dialogul regulii şterge linia la Escape; un dialog „nu pot verifica" ar lăsa-o — Ctrl+U de siguranţă,
+  // ca `echo`-ul de mai jos să nu se lipească de un `rm -rf …` rămas (diag înşelător). DOAR dacă linia nu
+  // e goală: un Ctrl+U pe linia goală n-are ecou şi rămâne o tastă „fără ecou" în coada guardrail-ului,
+  // iar pe un host lent (rtt > 150 ms, runner CI) Enter-ul următor cade pe „Încă nu pot verifica" (3.6.17)
+  const ctrlOLineLeft = await page.evaluate(() => {
+    const t = window.__wtTerms?.get(location.hash.replace('#/s/', ''))
+    if (!t) return false
+    const b = t.buffer.active
+    return !/[$#%>❯]\s*$/.test(b.getLine(b.baseY + b.cursorY)?.translateToString(true) ?? '')
+  })
+  if (ctrlOLineLeft) { await page.keyboard.press('Control+u'); await page.waitForTimeout(300) }
   await page.keyboard.type('echo CTRLO_$((40+3))\n')
   check('SV-01: Ctrl+O pe o linie `rm -rf /…` deschide dialogul regulii (ca Enter), keydown-ul reţinut e anulat (defaultPrevented), Escape o şterge, terminalul rămâne viu',
     ctrlOGuarded && ctrlOTitle.includes('Potentially dangerous command') && ctrlOText.includes('wt_ctrlo_')
@@ -1969,7 +1976,17 @@ try {
   const mine = async () => (await splitsApi()).find((v) => v.name === SPLIT)
   // WS-urile de sesiune deschise de aici încolo: un swap / o intrare în split NU trebuie să reconecteze
   let sessWs = 0
-  page.on('websocket', (w) => { if (w.url().includes('/ws/sessions/')) sessWs++ })
+  // diagnoză (3.6.17): CARE sesiune a deschis un socket nou şi de ce s-a închis cel vechi — un panou din
+  // stiva keep-alive care se reconectează sub încărcare nu e o remontare, dar pică acelaşi contor
+  const wsEvents = []
+  page.on('websocket', (w) => {
+    if (!w.url().includes('/ws/sessions/')) return
+    sessWs++
+    const sid = w.url().replace(/.*\/ws\/sessions\/([^?]+).*/, '$1').slice(0, 8)
+    wsEvents.push(`open ${sid} @${Date.now() % 100000}`)
+    w.on('close', () => wsEvents.push(`close ${sid} @${Date.now() % 100000}`))
+    w.on('socketerror', (e) => wsEvents.push(`error ${sid} ${String(e).slice(0, 60)}`))
+  })
 
   // navigare liberă: click pe un tab de sesiune IESE din split, dar chip-ul RĂMÂNE (revii oricând).
   // Alegem un tab care NU e în split — exact scenariul bug-ului de mai sus.
@@ -2032,7 +2049,7 @@ try {
     pBefore.length === 2 && pAfter[0] === pBefore[1] && pAfter[1] === pBefore[0])
   const swapSame = await sameTerms()
   check('split: swap fără remontare / reconectare (aceleaşi terminale, niciun WS nou)',
-    swapSame && sessWs === ws0, JSON.stringify({ sameTerms: swapSame, newWs: sessWs - ws0 }))
+    swapSame && sessWs === ws0, JSON.stringify({ sameTerms: swapSame, newWs: sessWs - ws0, ws: wsEvents.slice(-6) }))
 
   // ieşire (tab al unui panou) + reintrare din chip: panourile stau în stiva keep-alive → aceleaşi terminale
   await page.locator(`button[data-tab="${pBefore[0]}"]`).evaluate((el) => el.click())
@@ -2041,7 +2058,7 @@ try {
   await page.waitForTimeout(900)
   const reSame = await sameTerms()
   check('split: ieşirea + reintrarea în split nu remontează / reconectează panourile',
-    reSame && sessWs === ws0, JSON.stringify({ sameTerms: reSame, newWs: sessWs - ws0 }))
+    reSame && sessWs === ws0, JSON.stringify({ sameTerms: reSame, newWs: sessWs - ws0, ws: wsEvents.slice(-6) }))
 
   // 3 panouri: Edit → încă o sesiune → implicit „1 mare stânga + 2 dreapta"; apoi picker-ul de aranjare
   await page.locator(`div.wt-tab:has-text("${SPLIT}") button[aria-label="Edit split view"]`).click()
