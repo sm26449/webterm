@@ -9,6 +9,8 @@ back.
 
 ## [Unreleased]
 
+## [3.6.16] — 2026-10-17 · agent (58)
+
 Frontend only — no agent change (agent stays 58), no new gateway route.
 
 ### Changed
