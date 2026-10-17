@@ -62,3 +62,9 @@ export function notifyToast(message: string, kind: 'info' | 'warn' = 'info', key
 export function notifyError(title: string, body: string, key?: string) {
   toastHost?.(`${title} — ${body}`, 'error', key)
 }
+
+// Hook pentru e2e (acelaşi tipar ca `window.__wtTransfers`): un toast de eroare ridicat cât un dialog
+// modal e deschis trebuie să rămână vizibil (3.6.16, N1). Funcţia e exact cea din UI.
+if (typeof window !== 'undefined') {
+  ;(window as unknown as { __wtNotify?: object }).__wtNotify = { notifyError }
+}

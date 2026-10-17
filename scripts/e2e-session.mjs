@@ -581,6 +581,38 @@ try {
   // De la 3.1.0 confirmarea e un ConfirmModal în aplicaţie (`role="alertdialog"`), nu
   // `window.confirm` — apăsăm butonul de confirmare (ultimul; Anulează stă primul).
   await cmdPanel.locator('button:has-text("Enable shell integration")').click()
+  // 3.6.16 (N1): un toast de EROARE ridicat cât un dialog modal e deschis (Shares, Fleet run, Services…
+  // îşi raportează rezultatul doar prin toast) trebuie să fie vizibil, deasupra dialogului, fără să-i
+  // acopere butoanele — pe desktop (colţul de jos) şi pe telefon (sus). Hook-ul e notifyError din UI.
+  await page.locator('[role="alertdialog"]').last().waitFor({ state: 'visible', timeout: 5000 }).catch(() => {})
+  await page.evaluate(() => window.__wtNotify?.notifyError('E2E modal toast', 'raised while a dialog is open'))
+  const modalToast = () => page.evaluate(() => {
+    const t = [...document.querySelectorAll('.wt-toast')].find((e) => (e.textContent || '').includes('E2E modal toast'))
+    if (!t) return { found: false }
+    const r = t.getBoundingClientRect()
+    const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
+    const btns = [...document.querySelectorAll('[role="alertdialog"] button')]
+    const btnsFree = btns.length > 0 && btns.every((b) => {
+      const q = b.getBoundingClientRect()
+      return b.contains(document.elementFromPoint(q.left + q.width / 2, q.top + q.height / 2))
+    })
+    return { found: true, onTop: !!top && t.contains(top), vis: getComputedStyle(t).visibility,
+      inView: r.top >= 0 && r.bottom <= innerHeight && r.left >= 0 && r.right <= innerWidth, btnsFree }
+  })
+  await page.waitForTimeout(400)
+  const mtDesk = await modalToast()
+  await page.screenshot({ path: '/out/modal-toast-desktop.png' }).catch(() => {})
+  const vpM = page.viewportSize()
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.waitForTimeout(500)
+  const mtPhone = await modalToast()
+  await page.screenshot({ path: '/out/modal-toast-phone.png' }).catch(() => {})
+  if (vpM) await page.setViewportSize(vpM)
+  await page.waitForTimeout(400)
+  const mtOk = (m) => m.found && m.onTop && m.vis === 'visible' && m.inView && m.btnsFree
+  check('toast de eroare ridicat dintr-un dialog modal: vizibil peste dialog, butoanele dialogului libere (desktop + telefon)',
+    mtOk(mtDesk) && mtOk(mtPhone), JSON.stringify({ mtDesk, mtPhone }))
+  await page.locator('.wt-toast', { hasText: 'E2E modal toast' }).locator('button').click({ timeout: 3000 }).catch(() => {})
   await page.locator('[role="alertdialog"]').last().locator('button').last().click({ timeout: 5000 })
   await page.waitForTimeout(3000)   // curl + source
   // tastele de mai jos trebuie să ajungă în SHELL: dăm click în terminal ca un om, nu ne bazăm

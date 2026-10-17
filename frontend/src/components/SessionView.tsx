@@ -109,6 +109,9 @@ export interface PaneHandle {
   state: () => PeerState
 }
 
+/** cheia toastului unui paste/drop: unică şi după o remontare (review N2) — contor de modul + timp */
+let pasteToastSeq = 0
+
 export default function SessionView(props: {
   session: Session
   host?: Host
@@ -469,10 +472,25 @@ export default function SessionView(props: {
     } catch (e) { notifyError(t('transfers.uploadFailedTitle'), errText(e, t) || t('files.genericErr'), tkey) }
     return true
   }
-  const pasteSeqRef = useRef(0)
   /** 3.6.16: căile unui paste/drop, tastate ca un paste în ORDINEA selecţiei (ids = ordinea fişierelor),
       fiecare re-verificată (lib/transfers.ts typePastedPaths). Upload-urile amânate (uploads.ts) n-au
       încă rezultat; aici îl scriem în rând — 'notPrompt' aduce „Type into terminal" + motivul. */
+  /** Finalul unui gest (review N3): dacă fluxul a aruncat ÎNAINTE de typePasted, upload-urile deja
+      terminate ale gestului au rămas fără rezultat (amânate în uploads.ts) — le dăm unul ('refused':
+      nimic tastat, rândul oferă Copy path / Insert path) şi le lăsăm să expire ca orice upload gata.
+      Apoi contextul se închide: un retry ulterior urmează regulile vechi. */
+  const closePaste = (ctx: PasteContext | undefined) => {
+    if (!ctx) return
+    if (!ctx.closed) {
+      for (const j of uploadStore.snapshot().values()) {
+        if (j.sid === session.id && j.then === 'insert-path' && j.state === 'done' && j.insertOutcome === undefined) {
+          uploadStore.patch(j.id, { inserted: false, insertOutcome: 'refused' })
+          lingerDone(j.id)
+        }
+      }
+    }
+    ctx.closed = true
+  }
   const typePasted = (ids: string[], ctx: PasteContext | undefined) => {
     if (!ctx) return
     const jobs = ids.map((id) => uploadStore.get(id))
@@ -489,7 +507,7 @@ export default function SessionView(props: {
     // contextul gestului, ÎNAINTE de orice await (3.6.16): calea se tastează ca un paste doar cât
     // terminalul, panoul activ şi inputul rămân cele de acum (lib/transfers.ts typeIntoPasted)
     const ctx = capturePasteContext(session.id)
-    const tkey = `paste-${session.id}-${++pasteSeqRef.current}`   // un gest = un toast, actualizat pe loc
+    const tkey = `paste-${session.id}-${Date.now()}-${++pasteToastSeq}`   // un gest = un toast, actualizat pe loc
     const subj = pasteSubject(files)
     const subject = pasteSubjectText(subj, t)
     // feedback IMEDIAT (înainte de orice await): tragerea fişierelor trebuie să se simtă confirmată
@@ -502,14 +520,14 @@ export default function SessionView(props: {
       if (await offerRootMove(ids, dir, items, tkey)) return
       finishPaste(ids, 'cwd', subject, subj.kind, tkey)
     } catch (e) { notifyError(t('transfers.uploadFailedTitle'), errText(e, t) || t('files.genericErr'), tkey) }
-    finally { if (ctx) ctx.closed = true }   // un retry ulterior nu mai e „paste": regulile vechi
+    finally { closePaste(ctx) }   // un retry ulterior nu mai e „paste": regulile vechi
   }
   // Paste de imagine/fişier: un CLI cu AI rulat aici NU vede clipboardul browserului — îi dăm
   // fişierul pe host (inbox-ul `~/.webterm/inbox`, sau cwd-ul, după preferinţă) şi calea la
   // prompt. Numele: timestamp + extensie din MIME; fişierele cu nume îl păstrează, prefixat.
   const pasteFiles = async (files: File[]) => {
     const ctx = capturePasteContext(session.id)      // vezi onTermDrop: înainte de orice await
-    const tkey = `paste-${session.id}-${++pasteSeqRef.current}`
+    const tkey = `paste-${session.id}-${Date.now()}-${++pasteToastSeq}`
     const host = props.host!
     const dest: PasteDest = pasteDest()
     const toInbox = dest === 'inbox'
@@ -528,7 +546,7 @@ export default function SessionView(props: {
       if (!toInbox && await offerRootMove(ids, dir, items, tkey)) return
       finishPaste(ids, dest, subject, subj.kind, tkey)
     } catch (e) { notifyError(t('transfers.uploadFailedTitle'), errText(e, t) || t('files.genericErr'), tkey) }
-    finally { if (ctx) ctx.closed = true }   // un retry ulterior nu mai e „paste": regulile vechi
+    finally { closePaste(ctx) }   // un retry ulterior nu mai e „paste": regulile vechi
   }
   const pasteFilesRef = useRef(pasteFiles)
   pasteFilesRef.current = pasteFiles

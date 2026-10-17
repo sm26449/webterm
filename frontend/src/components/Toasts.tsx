@@ -73,8 +73,8 @@ export default function Toasts(props: {
       // deasupra widgetului de transferuri (acelaşi colţ): --wt-transfers-top = înălţimea lui de la
       // marginea de jos a ecranului, publicată de TransfersWidget; fără widget, 1rem ca înainte. Plafon
       // --wt-toast-cap (45vh; 30vh pe telefon, index.css): peste un card înalt toast-ul nu iese din ecran
-      // şi nu urcă peste jumătatea ecranului. z-[45]: SUB dialoguri (z-50+), peste widget (z-40); cât un
-      // dialog modal e deschis, stiva se ascunde (index.css .wt-toast-stack) — review L5
+      // şi nu urcă peste jumătatea ecranului. z-[45]: peste widget (z-40); cât un dialog modal e deschis,
+      // stiva coboară la loc şi trece PESTE dialog (pe telefon: sus) — index.css .wt-toast-stack (L5, N1)
       className="wt-toast-stack pointer-events-none fixed right-4 z-[45] flex max-w-sm flex-col gap-2 pb-[env(safe-area-inset-bottom)]"
       style={{ bottom: 'min(calc(var(--wt-transfers-top, 0px) + 1rem), var(--wt-toast-cap, 45vh))' }}
       onMouseEnter={() => setHeld(true)}

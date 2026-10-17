@@ -46,8 +46,11 @@ Frontend only — no agent change (agent stays 58), no new gateway route.
   row — on a phone it covered half the screen. Toasts now take an optional key and a toast with the
   same key replaces the previous one in place (`lib/notify.ts` `upsertToast`); the paste's result
   replaces its "Uploading…" toast, and "not typed" is one line ("Saved screenshot — path not typed
-  (see Transfers)"), with the full reason only in the row. Toasts now sit below dialogs (z-45), hide
-  while a modal dialog is open, and rise at most 30vh above the widget on phones.
+  (see Transfers)"), with the full reason only in the row. While a modal dialog is open, toasts are
+  no longer lifted above the widget: they drop back to their low corner position (on phones: the
+  top of the screen, away from a bottom sheet's buttons) and are drawn above the dialog, so a result
+  reported only by toast (a failed share revoke, a fleet run error) stays readable and the dialog's
+  buttons stay usable. Otherwise they rise at most 30vh above the widget on phones.
 
 ### Security
 - **Typed text refuses every invisible format character.** Why: the "safe to type" check (paths,

@@ -1137,15 +1137,25 @@ body > .monaco-aria-container {
 .wt-toast {
   animation: wt-toast-in 140ms ease-out;
 }
-/* 3.6.16 (review L5): ridicată deasupra widgetului de transferuri, stiva de toast-uri putea acoperi un
-   dialog modal (confirmarea guardrail-ului, step-up, parola) — pe telefon mai ales. Cât un dialog modal
-   VIZIBIL e deschis (nu unul dintr-un panou ascuns al stivei keep-alive), toast-urile se ascund; pe
-   ecrane înguste plafonul de ridicare e mai jos. */
+/* 3.6.16 (review L5 + N1): ridicată deasupra widgetului de transferuri, stiva de toast-uri putea
+   acoperi un dialog modal (confirmarea guardrail-ului, step-up, parola) — pe telefon mai ales. Dar
+   multe dialoguri (Shares, Fleet run, Services…) îşi raportează rezultatul DOAR prin toast: ascunderea
+   lor făcea ca o revocare eşuată să pară reuşită. Deci cât un dialog modal VIZIBIL e deschis (nu unul
+   dintr-un panou ascuns al stivei keep-alive): fără ridicare (poziţia joasă de dinainte, în colţ, care
+   nu atinge un dialog centrat) şi PESTE dialog (z 80 > 50/60/70), ca toastul să rămână citibil. Pe
+   telefon dialogul ocupă lăţimea şi are butoanele jos (foaie) — acolo toast-urile urcă SUS. Pe ecrane
+   înguste plafonul de ridicare deasupra widgetului e mai jos. */
 body:has([aria-modal="true"]:not([aria-hidden="true"] [aria-modal="true"])) .wt-toast-stack {
-  visibility: hidden;
+  bottom: 1rem !important;
+  z-index: 80;
 }
 @media (max-width: 767px) {
   :root { --wt-toast-cap: 30vh; }
+  body:has([aria-modal="true"]:not([aria-hidden="true"] [aria-modal="true"])) .wt-toast-stack {
+    top: calc(env(safe-area-inset-top, 0px) + 0.5rem);
+    bottom: auto !important;
+    left: 1rem;
+  }
 }
 @media (prefers-reduced-motion: reduce) {
   .wt-toast {
