@@ -9,6 +9,8 @@ back.
 
 ## [Unreleased]
 
+## [3.6.18] — 2026-10-18 · agent (58)
+
 Audit 2026-10-17 (`docs/audit-2026-10-17/`), tranche P1 — the visible bugs. Frontend + gateway + host
 scripts — no agent change (agent stays 58).
 
