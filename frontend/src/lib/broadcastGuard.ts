@@ -406,3 +406,71 @@ export function acceptsLine(text: string): boolean {
 export function unbracket(d: string): string {
   return d.replace(/\x1b\[20[01]~/g, '')
 }
+
+// ── Ce pleacă din panoul de ORIGINE către celelalte (audit 2026-10-17, SV-02 / SV-05) ────────
+
+/** Starea panoului de origine în momentul în care ar difuza un chunk de input. */
+export interface OriginState {
+  /** ataşare doar-vizualizare (`session.watch`, sesiunea altcuiva): tastatura e inertă şi local */
+  readOnly: boolean
+  /** replay de istoric în curs (mute): nici local nu pleacă nimic */
+  muted: boolean
+  /** sesiunea a primit exit/lost */
+  exited: boolean
+  /** socketul panoului e deschis (altfel: în (re)conectare) */
+  socketOpen: boolean
+}
+
+/** `broadcast` = pleacă în celelalte panouri; `report` = raport de terminal (mouse, focus, CPR, DA…),
+    NICIODATĂ difuzat; `silent` = originea nu trimite nici local şi nici nu anunţă (doar-vizualizare,
+    replay — comportamentul de dinainte, review 3.6.12 L7); `held-*` = originea nu poate trimite
+    (socket închis / sesiune încheiată): nimic nu pleacă în celelalte panouri şi utilizatorul e
+    anunţat că NIMIC n-a plecat — fail-closed, simetric cu mute. */
+export type BroadcastDecision = 'broadcast' | 'report' | 'silent' | 'held-reconnecting' | 'held-ended'
+
+/** Decizia de difuzare a unui chunk din panoul de origine (SV-02, SV-05).
+    • Rapoartele terminalului sunt răspunsurile ACESTUI terminal la programele LUI (click-ul în tmux-ul
+      din A nu e un click în vim-ul din B; un CPR tastat la promptul lui B e gunoi): nu se difuzează,
+      oricare ar fi starea originii. Clasificarea e a originii (userInput), nu se reface aici.
+    • O origine care nu poate trimite local nu difuzează nimic: altfel tastele „numărate ca netrimise"
+      rulau în B, C, D, iar retastarea după reconectare le rula a doua oară acolo. */
+export function broadcastDecision(kind: 'key' | 'report', o: OriginState): BroadcastDecision {
+  if (kind === 'report') return 'report'
+  if (o.readOnly || o.muted) return 'silent'
+  if (o.exited) return 'held-ended'
+  if (!o.socketOpen) return 'held-reconnecting'
+  return 'broadcast'
+}
+
+// ── Escape-ul dialogului guardrail (audit 2026-10-17, SV-04) ────────────────────────────────
+
+/** Minimul de DOM de care are nevoie `escapeScope` (testabil fără jsdom). */
+export interface NodeLike { contains(other: NodeLike | null): boolean }
+
+/** Unde era focusul când s-a apăsat Escape, raportat la ACEST panou: în dialogul lui, altundeva în
+    panou (bara de unelte), sau în alt panou / altă zonă a aplicaţiei (`none` = nu e Escape-ul nostru). */
+export type EscapeScope = 'dialog' | 'pane' | 'none'
+
+/** Dialogul guardrail-ului stă ÎN panou (absolute inset-0), iar celelalte panouri ale split-ului rămân
+    interactive. Escape-ul e ascultat pe document (în captură), deci fără filtru un Escape apăsat în vim-ul
+    din B închidea dialogul lui A şi trimitea Ctrl+U peste tot; două dialoguri deschise se închideau
+    amândouă. Regula: Escape-ul e al nostru doar dacă focusul e în dialog sau în panou. Focus PIERDUT
+    (null / `<body>` — butonul focalizat s-a demontat) → doar panoul-ţintă al acţiunilor îl ia, ca să nu
+    rămână un dialog care nu se mai închide de la tastatură; şi atunci cel mult unul (un singur panou e
+    ţintă). */
+export function escapeScope(active: NodeLike | null, body: NodeLike | null, dialog: NodeLike | null,
+  pane: NodeLike | null, isTarget: boolean): EscapeScope {
+  if (active && active !== body) {
+    if (dialog && (dialog === active || dialog.contains(active))) return 'dialog'
+    if (pane && (pane === active || pane.contains(active))) return 'pane'
+    return 'none'
+  }
+  return isTarget ? 'pane' : 'none'
+}
+
+/** Escape = „Cancel & clear" (Ctrl+U pe linia tastată) doar când focusul era ÎN dialog. Un Escape venit
+    din altă parte a panoului închide un dialog de broadcast FĂRĂ să golească linia în celelalte panouri
+    (omul nu se uita la ele); un dialog fără broadcast goleşte doar linia lui, ca butonul. */
+export function escapeClears(scope: EscapeScope, broadcast: boolean): boolean {
+  return scope === 'dialog' || (scope === 'pane' && !broadcast)
+}

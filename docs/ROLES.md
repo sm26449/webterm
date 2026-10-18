@@ -238,9 +238,17 @@ An account the identity provider deactivates or deletes through [SCIM](SSO.md#sc
 **no permission at all** and cannot sign in (password, passkey or SSO). Disabling it ends its web
 sessions, closes its open terminals and forwards, **revokes its automation tokens** and its live
 shares and replay links. Accounts shows it as **Disabled**; an **Owner** can **Re-enable** it
-(password + second factor) and it gets back the roles it had — or the IdP reactivates it. The
-**last permanent Owner** can never be disabled, and a disabled Owner does not count as one.
-Accounts with a local password are never touched by SCIM.
+(password + second factor) and it gets back the roles it had — or the IdP reactivates it. A SCIM
+**delete** leaves the account in the same state as a deactivation (disabled, bindings and SCIM
+group memberships kept, only the SCIM link is dropped), so a Re-enable after either brings back
+the roles the account had when it was deactivated; after a delete the IdP can no longer name
+that account in a group, so its group roles are pruned again only at the next group-level change
+the IdP pushes for that group (a replaced member list, a rename or a delete). The
+**last permanent Owner** can never be disabled, and a disabled Owner does not count as one; nor
+can the last permanent Owner **with a local password** (the [break-glass
+account](#break-glass-promote-from-the-server)): the IdP gets `400 mutability`, the refusal is
+audited and alerted as critical — an identity provider must never be able to lock everyone out.
+Accounts with a local password are never touched by SCIM anyway; this is the fail-closed backstop.
 
 ## Custom roles
 
@@ -467,11 +475,21 @@ Automation tokens keep their `read` / `run` scopes and are additionally capped:
 
 The break-glass account is a **permanent Owner with a local password**: the one that still
 signs in when the identity provider is down (an SSO-only Owner is locked out with it, and a
-time-bound Owner expires). WebTerm keeps one around: the last such account cannot remove its
-local password — neither from Your access → Remove local password (`409 account.lastBreakGlass`)
-nor with `python3 -m app.admin sso-only` (without `--force`) — and System health warns
-(**Break-glass Owner**, **Permanent Owner**) when none exists, with the command below printed,
-never run.
+time-bound Owner expires). WebTerm keeps one around: the last such account cannot be taken out
+by the account routes — it cannot remove its local password (Your access → Remove local
+password, or `python3 -m app.admin sso-only` without `--force`; `409 account.lastBreakGlass`),
+it cannot be deleted, and its Owner · all hosts binding cannot be removed or made time-bound in
+Users & roles (`409 account.lastBreakGlassTarget` — the message names the account, not the
+Owner doing it); the IdP cannot deactivate or delete it through SCIM (`400 mutability`,
+audited, critical alert — at most one alert an hour per account, every refusal in the audit
+log). Setting a new local password — Your access → Change password, or
+`python3 -m app.admin passwd` — on an account whose Owner binding came from an SSO group
+normally removes that binding with every other group role; it is kept while the account is the
+last permanent Owner, or the last permanent Owner with a local password (the other permanent
+Owners being SSO-only), so a routine password change never leaves the instance with Owners
+only the identity provider can sign in. Another permanent Owner **with a local password** lifts
+the rule; an SSO-only or a time-bound Owner does not. System health warns (**Break-glass Owner**, **Permanent Owner**) when none
+exists, with the command below printed, never run.
 
 If no Owner is left (for example after a partial restore), make an account Owner from the server:
 

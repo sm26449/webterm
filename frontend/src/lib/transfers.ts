@@ -186,6 +186,10 @@ export interface InsertTarget {
   activeEpoch?: () => number
   /** 3.6.16: tastatura e a terminalului (textarea xterm) sau a nimănui (body) — NU un câmp al paginii */
   keyboardHere?: () => boolean
+  /** audit 2026-10-17 FS-03: shell integration (OSC 133) a fost VĂZUTĂ în acest panou
+      (CommandTracker.integrated) — atunci `atPrompt`/`commandRunning` sunt citiri reale şi sub tmux.
+      Lipsă / false / aruncă → sub tmux citirile de mod sunt oarbe (vezi pasteContextStale). */
+  shellIntegration?: () => boolean
 }
 const targets = new Map<string, InsertTarget>()
 /** fluxul ţintei trece prin tmux? (excepţie → da) */
@@ -313,7 +317,16 @@ export function typeIntoConfirmed(sid: string | undefined, text: string): TypeOu
 // Mai multe fişiere dintr-un paste se tastează în ORDINEA selecţiei (L3): SessionView aşteaptă toate
 // upload-urile gestului şi apelează typePastedPaths o dată; fiecare cale e re-verificată.
 export const PASTE_CONTEXT_MS = 30_000
-export type PasteStale = 'target' | 'inactive' | 'focus' | 'timeout' | 'input' | 'mode'
+/** FS-03 (audit 2026-10-17): sub tmux FĂRĂ shell integration citirile de mod sunt OARBE — `alt` e
+    mereu false (tmux ţine comutarea pentru el), `bracketed` e lipicios (?2004h o dată, la attach),
+    `running`/`prompt` sunt mereu false fără OSC 133. Deci „acelaşi program în faţă" nu se poate
+    constata: un program pornit SINGUR în fereastră (`sleep 20 && vim`, un script care se termină
+    într-un pager, o comandă din alt client tmux) ar primi calea. Nu putem adăuga o citire pe care
+    agentul nu o dă încă (`pane_current_command`, v59), aşa că scurtăm fereastra: o captură urcă în
+    câteva secunde; peste atât, regulile vechi. „Only add readings": fereastra scurtă e o restricţie
+    în plus, niciodată una în minus — cu shell integration sau fără tmux rămâne cea de 30 s. */
+export const PASTE_CONTEXT_BLIND_MS = 10_000
+export type PasteStale = 'target' | 'inactive' | 'focus' | 'timeout' | 'input' | 'mode' | 'blind'
 interface ModeSnap { alt: boolean; running: boolean; prompt: boolean; bracketed: boolean }
 export interface PasteContext {
   sid: string
@@ -357,7 +370,13 @@ export function pasteContextStale(ctx: PasteContext, now = Date.now()): PasteSta
   const m = modesOf(t)
   if (m.alt !== ctx.modes.alt || m.running !== ctx.modes.running || m.prompt !== ctx.modes.prompt
     || m.bracketed !== ctx.modes.bracketed) return 'mode'
+  if (now - ctx.at > PASTE_CONTEXT_BLIND_MS && modesBlind(t, ctx)) return 'blind'
   return null
+}
+/** citirile de mod nu spun nimic (FS-03): flux prin tmux, fără shell integration văzută, şi nici
+    un marcaj OSC 133 real la paste (un prompt / o comandă văzută atunci dovedeşte integrarea) */
+export function modesBlind(t: InsertTarget, ctx: Pick<PasteContext, 'modes'>): boolean {
+  return viaTmux(t) && !call(t.shellIntegration) && !ctx.modes.prompt && !ctx.modes.running
 }
 export interface PastedResult { outcome: TypeOutcome; stale: PasteStale | null }
 /** Tastează `text` ca un PASTE dacă contextul gestului e acelaşi, altfel regulile vechi

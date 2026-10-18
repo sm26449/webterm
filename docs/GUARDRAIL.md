@@ -93,6 +93,12 @@ heuristic, so it is easy to step around, deliberately or not:
 - a host without shell integration is not covered at all;
 - anyone signed in can switch the guardrail off in Settings.
 
+**The dialog belongs to its pane.** In a split view the confirmation dialog is drawn inside the
+pane that asked, and the other panes keep working. Escape closes it only when the focus is in that
+dialog (or elsewhere in that pane); "Cancel & clear" sends its `Ctrl+U` only from inside the dialog,
+so an Escape pressed in vim in another pane neither closes the dialog nor clears lines there (audit
+2026-10-17, SV-04; details in [SPLIT-VIEWS.md](design/SPLIT-VIEWS.md) → Broadcast).
+
 Read-only panel calls (git status/diff, Docker lists and stats, the services list) are not
 checked: they change nothing, and they run on every refresh. The same goes for the **Logs**
 buttons in the Docker and Services panels: they open a terminal tab that runs `docker logs -f` /

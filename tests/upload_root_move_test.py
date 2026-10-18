@@ -119,6 +119,11 @@ def pure_checks():
           'sudo -u "$u" -- head -c "$z" -- "$s"' in rootmove.MOVE_SCRIPT
           and '[ "${x%% *}" = "$h" ]' in rootmove.MOVE_SCRIPT and "mv -f -T --" in rootmove.MOVE_SCRIPT
           and "trap c EXIT" in rootmove.MOVE_SCRIPT and "sudo install" not in rootmove.MOVE_SCRIPT)
+    check("FS-02: the symlink refusal explains merged-usr and names pwd -P (audit 2026-10-17)",
+          "is not the physical path of that folder" in rootmove.MOVE_SCRIPT
+          and "/bin -> /usr/bin" in rootmove.MOVE_SCRIPT and "pwd -P in your terminal" in rootmove.MOVE_SCRIPT
+          and "open the physical path" in rootmove.MOVE_SCRIPT
+          and "is not that folder any more" not in rootmove.MOVE_SCRIPT)
     check("L2: messages via printf \"%s\", no echo with an argument (dash's echo reads escapes)",
           'printf "webterm: %s" "$1"' in rootmove.MOVE_SCRIPT
           and not any(w.startswith('"') or w.startswith("$") for w in
@@ -330,6 +335,22 @@ def shell_checks():
               r.stdout.splitlines() == want_out, r.stdout[-300:])
         for n in NASTY:
             os.unlink(os.path.join(target, n))
+
+        # FS-02 (audit 2026-10-17): the target reached through a symlink (merged-usr `/lib` → `/usr/lib`,
+        # here `base/lib` → `base/srv`): still refused (the strict check stays), but the message says
+        # why and what to do, and nothing lands or is left behind.
+        link = os.path.join(base, "lib")
+        os.symlink(os.path.dirname(target), link)
+        it = stage(["fw.bin"], [b"firmware\n"])
+        r = run(it, folder=os.path.join(link, os.path.basename(target)))
+        check("FS-02: a symlinked folder is refused with the merged-usr explanation and `pwd -P`, nothing lands",
+              r.returncode != 0 and "NOT installed" in r.stderr and "physical path" in r.stderr
+              and "pwd -P" in r.stderr and "/bin -> /usr/bin" in r.stderr
+              and not os.path.exists(os.path.join(target, "fw.bin")) and temps() == [],
+              (r.returncode, r.stderr[-300:]))
+        for n in os.listdir(inbox):
+            os.unlink(os.path.join(inbox, n))
+        os.unlink(link)
 
         # a setgid target folder (shared web/project folders): mktemp -d inherits g+s there
         sg = os.path.join(base, "srv", "setgid")

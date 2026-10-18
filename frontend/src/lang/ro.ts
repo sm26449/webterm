@@ -4048,6 +4048,47 @@ const ro: Lang = {
     'settings.backup.verified': "{name} verificat: se despachetează, baza de date trece verificarea de integritate și cheia seifului e înăuntru. Nu s-a restaurat nimic.",
     'settings.backup.lastVerified': "Ultimul backup verificat: {when}",
     'settings.backup.neverVerified': "Niciun backup nu a fost verificat încă — „Verifică” testează unul fără să-l restaureze.",
+    // audit P1 health
+    'health.msg.no_permanent_owner.one': "Niciun cont activ nu are un rol Owner PERMANENT pe toate hosturile; ultimul Owner temporar se încheie în {days} zi",
+    'health.msg.no_permanent_owner.few': "Niciun cont activ nu are un rol Owner PERMANENT pe toate hosturile; ultimul Owner temporar se încheie în {days} zile",
+    'health.msg.no_permanent_owner.other': "Niciun cont activ nu are un rol Owner PERMANENT pe toate hosturile; ultimul Owner temporar se încheie în {days} de zile",
+    'health.msg.permanent_owner_expiring.one': "Ultimul Owner pe toate hosturile e temporar și se încheie în {days} zi; nimeni nu are un rol Owner permanent",
+    'health.msg.permanent_owner_expiring.few': "Ultimul Owner pe toate hosturile e temporar și se încheie în {days} zile; nimeni nu are un rol Owner permanent",
+    'health.msg.permanent_owner_expiring.other': "Ultimul Owner pe toate hosturile e temporar și se încheie în {days} de zile; nimeni nu are un rol Owner permanent",
+    // audit P1 walkthrough (UI-06 / FL-11): paşi pentru conturi fără hosts.create / fără host
+    'walkthrough.stepHosts.title': "Hosturile vin de la administrator",
+    'walkthrough.stepHosts.body': "Un Owner sau Admin adaugă hosturi și îți dă un rol pe ele — tu nu instalezi nimic. Toate hosturile pe care le poți folosi sunt în bara laterală, iar cele noi apar acolo imediat ce primești acces.",
+    'walkthrough.stepNoHosts.title': "Hosturile tale vor apărea aici",
+    'walkthrough.stepNoHosts.body': "Nu ai încă acces la niciun host. Administratorul adaugă hosturi și îți dă un rol; le vei vedea aici imediat ce se întâmplă asta. Poți redeschide turul oricând din Setări → Preferințe.",
+    // audit P1 scim-rbac
+    'alertmsg.what.scim_last_break_glass_refused': "furnizorul de identitate a încercat să dezactiveze ultimul Owner cu parolă locală ({account}), contul de rezervă (break-glass); refuzat",
+    // audit P1 split-guardrail
+    'session.broadcastHeldReconnecting': "Netrimis — acest panou se reconectează; nimic nu a plecat nici în celelalte panouri.",
+    'session.broadcastHeldEnded': "Netrimis — această sesiune s-a încheiat; nimic nu a plecat nici în celelalte panouri.",
+    // audit P1 files-uploads
+    'files.needsWrite': "Rolul tău poate citi fișierele de pe acest host, dar nu le poate modifica — aici e nevoie de files.write.",
+    'files.needsDelete': "Rolul tău nu poate șterge fișiere pe acest host — aici e nevoie de files.delete.",
+    'files.subtreeRefused.one': "{count} fișier de sub {dir} nu a fost urcat: utilizatorul agentului nu poate crea acel dosar aici (vezi opțiunile de mai sus).",
+    'files.subtreeRefused.few': "{count} fișiere de sub {dir} nu au fost urcate: utilizatorul agentului nu poate crea acel dosar aici (vezi opțiunile de mai sus).",
+    'files.subtreeRefused.other': "{count} de fișiere de sub {dir} nu au fost urcate: utilizatorul agentului nu poate crea acel dosar aici (vezi opțiunile de mai sus).",
+    'files.denied.symlinkHint': "Dacă dosarul e atins printr-un symlink (de ex. /bin → /usr/bin), comanda de mutare ca root îl refuză: deschide calea fizică — `pwd -P` în terminal, probabil {real} — și urcă acolo.",
+    'transfers.pasteStale.blind': "Netastat automat: sub tmux fără shell integration WebTerm nu poate vedea ce program e în față, așa că o cale lipită se tastează doar în 10 secunde de la lipire.",
+    // audit P1 rbac-sso-login (RB-03 re-auth pentru conturi SSO · FL-07 IdP inaccesibil pe pagina de login)
+    'access.reauth.title': "Confirmă-ți identitatea",
+    'access.reauth.viaPasskey': "Contul tău intră prin SSO, deci nu ai o parolă de tastat aici: confirmă cu passkey-ul tău.",
+    'access.reauth.viaSso': "Contul tău intră prin SSO, deci nu ai o parolă de tastat aici. Dacă e nevoie de o autentificare proaspătă, vei fi trimis la furnizorul de identitate, iar la întoarcere Setările se redeschid la acest panou; apoi reia acțiunea.",
+    'access.reauth.noPassword': "Contul tău intră prin SSO: confirmi cu passkey-ul sau autentificându-te din nou la furnizorul de identitate, nu cu o parolă.",
+    'access.reauth.addAccount': "Creezi contul {email}?\n\nConfirmă cu parola TA:",
+    'access.reauth.addToken': "Creezi tokenul de automatizare {name}?\n\nConfirmă cu parola TA:",
+    'login.ssoUnavailable': "Furnizorul de identitate nu a putut fi contactat. Dacă nu ai parolă, un administrator cu acces la shell pe server poate restabili autentificarea — vezi docs/SSO.md → Break-glass.",
+    'login.ssoUnreachable': "momentan inaccesibil",
+    // audit P1 rbac-sso-login (correction round)
+    'access.reauth.removeLocalPw': "Îți scoți parola locală?\n\nConfirmă cu parola TA:",
+    'access.reauth.tokenNeedsLocalPw': "Crearea unui token de automatizare cere încă o parolă locală. Contul tău intră prin SSO și nu are una, așa că formularul nu poate fi trimis din contul tău deocamdată.",
+    // audit P1 scim-rbac (correction round): formularea pentru contul-ţintă la refuzurile break-glass
+    'err.account.lastBreakGlassTarget': "Acest cont este ultimul Owner permanent cu parolă locală — contul de rezervă (break-glass) care mai poate intra când furnizorul de identitate e căzut. Fă mai întâi alt cont Owner permanent cu parolă locală (un Owner temporar nu contează).",
+    // audit P1 orchestrator (RB-03: întoarcerea din IdP redeschide Setările)
+    'access.reauth.backRepeat': "Te-ai autentificat din nou — pornește încă o dată aceeași acțiune ca s-o închei.",
   },
 }
 

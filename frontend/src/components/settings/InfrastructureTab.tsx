@@ -5,7 +5,7 @@ import { errText, api, CommandGuard, DeployKeyPolicy, Host, withSecondFactor as 
 import { useI18n } from '../../lib/i18n'
 import { roleBody, roleLabel, ROLE_KEYS, RolesCatalogue, roleValue, ScopeKind, scopeLabel, useSectionVisible } from '../../lib/perms'
 import { tokenCap, type TokenRow } from '../../lib/usersAdmin'
-import { ScopePicker, scopeOk } from './users/shared'
+import { RETURN_INFRA, ScopePicker, scopeOk, useAccessReauth, useSelfRow } from './users/shared'
 import { useConfirm } from '../../lib/confirm'
 import { fmtTs } from '../../lib/tz'
 import { ArrowRightIcon, CloseIcon } from '../Icons'
@@ -101,6 +101,11 @@ export default function InfrastructureTab(props: { onAccountChanged: () => void 
   const [tokPlain, setTokPlain] = useState('')     // valoarea în clar, arătată O SINGURĂ dată
   const [tokCopied, setTokCopied] = useState(false)
   const [tokErr, setTokErr] = useState('')
+  // RB-03 (3.6.18): /api/tokens trece prin aceeaşi poartă ca o schimbare de acces (parola contului
+  // sau, pentru un cont SSO fără parolă, grant passkey / fereastra SSO account-scope), deci planul
+  // vine din rândul propriu: câmpul de parolă apare doar când e de folos
+  const tokMe = useSelfRow()
+  const { plan: tokPlan, reauth: tokReauth } = useAccessReauth(tokMe, { returnTo: RETURN_INFRA })
   // U04: „niciun token" pe un fetch picat ar ascunde exact credenţiala pe care o cauţi
   const [tokState, setTokState] = useState<LoadState>({ status: 'loading' })
   const loadTokens = () => {
@@ -119,13 +124,15 @@ export default function InfrastructureTab(props: { onAccountChanged: () => void 
       const scopes = [newTok.read && 'read', newTok.run && 'run'].filter(Boolean) as string[]
       // second_gate: un token e o credenţială persistentă → dacă serverul cere al doilea factor,
       // withSecondFactor cere codul şi reîncearcă (ca la înrolarea unui passkey).
-      const r = await withSecondFactor((extra) => api<{ token: string; tokens: TokenRow[] }>('/api/tokens', {
-        method: 'POST',
-        body: JSON.stringify({ name: newTok.name, scopes, days: newTok.days,
-                               ...(newTok.role ? { ...roleBody(newTok.role), scope_kind: newTok.scope_kind,
-                                 scope_value: newTok.scope_kind === 'all' ? '' : newTok.scope_value.trim() } : {}),
-                               current_password: newTok.current_password, ...extra }),
-      }))
+      const r = await tokReauth(t('access.reauth.addToken', { name: newTok.name }),
+        (cred) => withSecondFactor((extra) => api<{ token: string; tokens: TokenRow[] }>('/api/tokens', {
+          method: 'POST',
+          body: JSON.stringify({ name: newTok.name, scopes, days: newTok.days,
+                                 ...(newTok.role ? { ...roleBody(newTok.role), scope_kind: newTok.scope_kind,
+                                   scope_value: newTok.scope_kind === 'all' ? '' : newTok.scope_value.trim() } : {}),
+                                 ...cred, ...extra }),
+        })), newTok.current_password)
+      if (r === null) { setBusy(false); return }
       setTokens(r.tokens); setTokPlain(r.token)
       setNewTok(emptyTok)
     } catch (e) {
@@ -499,12 +506,14 @@ export default function InfrastructureTab(props: { onAccountChanged: () => void 
           {newTok.run && !roleRuns(newTok.role) && (
             <p className="text-xs text-warn" data-token-run-warning>{t('settings.tokens.runNeedsRole')}</p>
           )}
-          <input type="password" value={newTok.current_password} autoComplete="current-password"
-            onChange={(e) => setNewTok({ ...newTok, current_password: e.target.value })}
-            placeholder={t('settings.currentPasswordConfirm')} aria-label={t('settings.currentPassword')} className={field} />
+          {tokPlan === 'password' && (
+            <input type="password" value={newTok.current_password} autoComplete="current-password"
+              onChange={(e) => setNewTok({ ...newTok, current_password: e.target.value })}
+              placeholder={t('settings.currentPasswordConfirm')} aria-label={t('settings.currentPassword')} className={field} />
+          )}
           <div className="flex items-center gap-3">
             <Button variant="primary" type="submit"
-              disabled={busy || !newTok.current_password || !newTok.name || (!!newTok.role && !scopeOk(newTok.scope_kind, newTok.scope_value))}>
+              disabled={busy || (tokPlan === 'password' && !newTok.current_password) || !newTok.name || (!!newTok.role && !scopeOk(newTok.scope_kind, newTok.scope_value))}>
               {t('settings.tokens.create')}
             </Button>
             {tokErr && <span className="text-sm wt-danger">{tokErr}</span>}

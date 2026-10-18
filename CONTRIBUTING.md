@@ -56,7 +56,8 @@ by `frontend/src/themeContrast.test.ts` (vitest). It fails on any serious/critic
 `target-size` or `color-contrast` hit regardless of impact, on a skipped/errored scan or a
 scan count below the expected total, and on a failed keyboard check (Tab order, Escape +
 focus restore, ConfirmModal trap, palette arrows+Enter). Moderate/minor counts are printed
-as a trend only. `scripts/mobile-audit.mjs` additionally blocks on interaction targets
+as a trend only. `scripts/mobile-audit.mjs` additionally blocks on any visible text control under 16 px
+(iOS focus zoom; one info note on fine-pointer devices), on interaction targets
 smaller than 24 px and on horizontal overflow at 320 px (reflow). Statically,
 `eslint-plugin-jsx-a11y` (recommended) runs in `npx eslint .`: rules that were clean when
 introduced are errors; the four with pre-existing hits are warnings until the sweep, and

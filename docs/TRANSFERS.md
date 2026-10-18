@@ -164,6 +164,13 @@ account in the same browser does not see them), removed on completion, Cancel, D
 expire after **7 days** without activity, and are cleared on **sign-out**. A session that merely
 expires hides the rows; they come back when the same account signs in again.
 
+If the signed-in account changes under an open tab (the 5-minute state poll sees another user id
+without a 401 — a login in another tab, an SSO re-adoption), WebTerm treats it as a sign-out
+followed by a sign-in: every in-memory Transfers row (uploads, interrupted downloads, host → host
+copies) and the clipboard history of the previous account are dropped, and the new account's
+orphans are restored; localStorage keys stay per account as before. Open terminal tabs of the
+previous account are not closed by this path.
+
 **Not resumable after a reload:** Blob downloads (Firefox, Safari, and small files in any browser —
 there is no file handle, the bytes live in the tab's memory; they still resume **within** the
 session), folder `.tgz` archives (generated on the fly, no stable validator), files reached through
@@ -427,13 +434,25 @@ happens, and on commit the quoted path plus a space is typed as a paste — neve
    particular). If you are typing in another field of the page — terminal search, the Files filter,
    a rename box, the command palette — your keys do not reach the terminal, and a path typed into
    the program (plus focus moved into the terminal) would send your next Enter to it.
-3. **Quick** — the upload finished within **30 seconds** of the paste (screenshots are small).
+3. **Quick** — the upload finished within **30 seconds** of the paste (screenshots are small) —
+   or within **10 seconds** when rule 5 is blind (see *Known limit* below).
 4. **Nothing else typed** — no key, snippet, inserted text or broadcast input was sent to that
    terminal since the paste. Terminal reports (focus, mouse, cursor position) do not count. If you
    kept typing, the path would land in the middle of something else.
 5. **Same program in front** — the alternate screen, the running command and the prompt (shell
    integration) and the bracketed-paste mode are what they were at the paste; a different program
    taking over the terminal meanwhile (started by you, another client or a script) changes the context.
+   **Known limit (3.6.18):** under tmux — the agent's tmux backend, SSH sessions, any unknown
+   backend — *without* shell integration this rule is blind: tmux keeps the alternate-screen switch
+   to itself, sends the bracketed-paste mode once at attach and never follows the pane, and without
+   OSC 133 there is no "running command" or "prompt" to compare. A program that starts *by itself*
+   inside the window (`sleep 20 && vim notes`, a script ending in a pager, a command from another
+   tmux client) cannot be detected there; the text would go in as a bracketed paste (tmux strips the
+   markers when the program did not ask for them). So in that case the window of rule 3 is 10 seconds
+   instead of 30 — a screenshot uploads in a few seconds — and the row says so ("under tmux without
+   shell integration…"). With shell integration (a prompt or command marker seen in that pane) or
+   without tmux (`pty` backend, telnet) the readings are real and the 30 seconds stay. The agent will
+   report `pane_current_command` with its next bump (v59), which closes this limit.
 6. **Guardrail not holding input** (an Enter waiting for its echo, or a guardrail dialog open) —
    refused, as for every typed text.
 7. **Safe text** — no control, bidi, zero-width or other invisible format characters (Unicode `Cf`,

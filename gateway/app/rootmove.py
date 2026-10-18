@@ -217,13 +217,19 @@ def staged_paths(inbox: str, names: list, now: float | None = None) -> list:
 # folder named (re-review L4) — a symlink anywhere in it, now or swapped in after staging, is
 # refused. From there on every path in the folder is relative to that working directory (the
 # inode we checked), so swapping a folder above it during the loop changes nothing.
+# The refusal names the common, innocent case (audit 2026-10-17, FS-02): Files shows the LOGICAL
+# path (OSC 7 / abspath in the agent), and on merged-usr systems /bin, /sbin, /lib* are symlinks
+# into /usr (and /var/run → /run), so `pwd -P` differs although nothing is gone or tampered with.
+# Until the agent reports the physical path itself (v59), the person is told to open it.
 MOVE_SCRIPT = (
     'u=$1 d=$2; shift 2; t=; '
     'm() { printf "webterm: %s" "$1"; echo; }; '
     'c() { [ -z "$t" ] || rmdir -- "$t" 2>/dev/null; t=; }; '
     'trap c EXIT; trap "exit 130" HUP INT TERM; '
-    'cd -P -- "$d" && [ "$(pwd -P)" = "$d" ] || { m "NOT installed: $d is not that folder any more '
-    '(a symlink in its path, or it is gone); nothing was moved" >&2; exit 1; }; '
+    'cd -P -- "$d" && [ "$(pwd -P)" = "$d" ] || { m "NOT installed: $d is not the physical path of '
+    'that folder (a symlink in its path, or it is gone); nothing was moved. If the folder is reached '
+    'through a symlink (e.g. /bin -> /usr/bin on merged-usr systems), open the physical path - '
+    'pwd -P in your terminal - in Files and upload there" >&2; exit 1; }; '
     'while [ $# -ge 4 ]; do '
     's=$1 z=$2 h=$3 f=$4; shift 4; n=${f##*/}; '
     't=$(mktemp -d -- ./.webterm-move.XXXXXX) || exit 1; '

@@ -1,8 +1,12 @@
 /* Navigarea din panoul de fişiere (3.6.14) — logica PURĂ, fără React, testată în filesNav.test.ts:
    firimiturile căii, istoricul înapoi/înainte al unui panou, „tastează ca să sari" (type-to-jump),
    completarea cu Tab a ultimului segment din câmpul de cale şi comanda `cd` tastată în terminal.
+   Din audit 2026-10-17 P1 şi: gating-ul cosmetic pe permisiuni (FL-09), clasificarea unui `mkdir`
+   refuzat la upload de folder (FS-04) şi indiciul de cale fizică pentru merged-usr (FS-02).
    Panoul doar ţine starea şi o redă. */
 import { isSafeToType } from './transfers'
+import { anyHost, canOn, type MyPerms } from './perms'
+import { errIsWriteDenied } from './rootmove'
 
 // ── firimituri ───────────────────────────────────────────────────────────────────────────────
 export interface Crumb { label: string; path: string }
@@ -172,4 +176,74 @@ export function cdCommand(path: string): string | null {
   if (!path || !isSafeToType(path)) return null
   const q = `'${path.replace(/['\\]/g, (ch) => (ch === "'" ? `'\\''` : `'\\\\'`))}'`
   return `cd -- ${q}`
+}
+
+// ── gating cosmetic pe permisiuni (FL-09, audit 2026-10-17) ───────────────────────────────────
+/** `ok` = acţiunea e oferită; `disabled` = contul are permisiunea pe ALT host, nu pe ăsta → buton
+    dezactivat cu motivul în tooltip; `hidden` = n-o are nicăieri → controlul nu se arată deloc
+    (docs/design/DESIGN-SYSTEM.md „Hide vs disable"). Permisiuni necunoscute încă (`null`) = `ok` —
+    serverul refuză oricum (lib/perms.ts). */
+export type GateState = 'ok' | 'disabled' | 'hidden'
+export interface FilesGate { write: GateState; del: GateState }
+export function filesGate(p: MyPerms | null, hostId: number): FilesGate {
+  const one = (perm: string): GateState => (canOn(p, hostId, perm) ? 'ok' : anyHost(p, perm) ? 'disabled' : 'hidden')
+  return { write: one('files.write'), del: one('files.delete') }
+}
+/** cheile din meniul contextual / foaie care cer `files.write`, respectiv `files.delete` */
+export const WRITE_ACTIONS: ReadonlySet<string> = new Set(['newfile', 'newfolder', 'upload', 'rename', 'duplicate'])
+export const DELETE_ACTIONS: ReadonlySet<string> = new Set(['delete'])
+/** Aplică gating-ul pe itemele unui meniu: cele `hidden` dispar (separatorul lor trece pe itemul
+    următor), cele `disabled` rămân vizibile, dezactivate, cu motivul; restul neatinse. */
+export function gateMenuItems<T extends { key: string; disabled?: boolean; reason?: string; sep?: boolean }>(
+  items: readonly T[], gate: FilesGate, reason: { write: string; del: string }): T[] {
+  const out: T[] = []
+  let carrySep = false
+  for (const it of items) {
+    const isWrite = WRITE_ACTIONS.has(it.key), isDel = DELETE_ACTIONS.has(it.key)
+    const g: GateState = isWrite ? gate.write : isDel ? gate.del : 'ok'
+    if (g === 'hidden') { carrySep ||= !!it.sep; continue }
+    // niciun separator deasupra primului item vizibil (ar fi o linie goală în capul meniului)
+    const sep = (carrySep || !!it.sep) && out.length > 0
+    const base = sep !== !!it.sep ? { ...it, sep } : it
+    carrySep = false
+    out.push(g === 'ok' ? base : { ...base, disabled: true, reason: isWrite ? reason.write : reason.del })
+  }
+  return out
+}
+
+// ── upload de folder: un `mkdir` refuzat (FS-04, audit 2026-10-17) ────────────────────────────
+/** O creare de subdosar refuzată pentru că userul agentului NU poate scrie acolo. Întoarce de unde
+    în jos nu mai merită încercat nimic (altfel fiecare fişier ar primi „the folder does not exist",
+    adevărat literal şi fals ca explicaţie) şi dosarul absolut de arătat în banner:
+    - prima componentă a căii relative NU exista în listarea lui `base` → `base` însuşi nu e scriibil:
+      `prefix: ''` = tot ce e imbricat (fişierele simple se încearcă totuşi: ele intră în oferta
+      „move as root");
+    - exista deja → acea componentă e cea nescriibilă: `prefix: <ea>`.
+    Orice altă eroare (dosarul există deja, agent vechi) → null: comportamentul vechi. */
+export interface MkdirRefusal { prefix: string; at: string }
+export function mkdirRefusal(e: unknown, base: string, rel: string, existing: ReadonlySet<string>): MkdirRefusal | null {
+  if (!errIsWriteDenied(e)) return null
+  const first = rel.split('/')[0]
+  if (!first) return null
+  const b = base.replace(/\/$/, '')
+  return existing.has(first) ? { prefix: first, at: `${b}/${first}` } : { prefix: '', at: base }
+}
+/** `rel` cade sub un prefix refuzat? (`''` = orice cale imbricată) */
+export const underRefused = (rel: string, prefixes: readonly string[]): boolean =>
+  prefixes.some((p) => (p === '' ? rel.includes('/') : rel === p || rel.startsWith(p + '/')))
+
+// ── merged-usr: calea fizică a unui dosar atins printr-un symlink (FS-02, audit 2026-10-17) ───
+/** Comanda „move as root" intră cu `cd -P` şi cere ca `pwd -P` să fie exact dosarul numit; sub
+    merged-usr (`/bin → /usr/bin` pe Debian ≥ 12, Ubuntu ≥ 21.10, Fedora, Arch) şi `/var/run → /run`
+    calea LOGICĂ din Files (OSC 7 / abspath în agent) pică acea verificare. Până când agentul (v59)
+    va raporta realpath-ul, ghicim calea fizică doar pentru prefixele ştiute; altfel null. */
+const MERGED_USR: readonly (readonly [string, string])[] = [
+  ['/bin', '/usr/bin'], ['/sbin', '/usr/sbin'], ['/lib', '/usr/lib'], ['/lib32', '/usr/lib32'],
+  ['/lib64', '/usr/lib64'], ['/libx32', '/usr/libx32'], ['/var/run', '/run'], ['/var/lock', '/run/lock'],
+]
+export function physicalPathHint(dir: string): string | null {
+  for (const [logical, physical] of MERGED_USR) {
+    if (dir === logical || dir.startsWith(logical + '/')) return physical + dir.slice(logical.length)
+  }
+  return null
 }

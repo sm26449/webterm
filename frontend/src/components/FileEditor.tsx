@@ -5,7 +5,6 @@ import { errText, api, ensureStepup } from '../lib/api'
 import { detectLanguage } from '../lib/editorLang'
 import { useI18n } from '../lib/i18n'
 import { useFocusTrap } from '../lib/useFocusTrap'
-import { isLight, useTheme } from '../lib/theme'
 import { fmtBytes } from '../lib/uploads'
 import { notifyToast } from '../lib/notify'
 import ConfirmModal from './ConfirmModal'
@@ -22,10 +21,12 @@ interface Preview {
   text: string
 }
 
-/** Editor de fișiere cu Monaco (motorul VS Code): highlight după tip, temă după tema aplicației
-    (vs / vs-dark), fișiere mari doar în citire (primii 256KB), salvare atomică cu verificare de
+/** Editor de fișiere cu Monaco (motorul VS Code): highlight după tip, mereu întunecat (`vs-dark`:
+    cardul `.wt-editor` e o zonă forţat-întunecată, ca terminalul), fișiere mari doar în citire (primii 256KB), salvare atomică cu verificare de
     conflict (mtime), gardă „modificări nesalvate" la închidere. Lazy-loaded din FilePanel → nici
     Monaco, nici workerele nu intră în bundle-ul principal. */
+const MONACO_THEME = 'vs-dark'
+
 export default function FileEditor(props: {
   hostId: number
   path: string
@@ -34,7 +35,6 @@ export default function FileEditor(props: {
   onSaved: () => void
 }) {
   const { t } = useI18n()
-  const [, theme] = useTheme()
   const host = useRef<HTMLDivElement>(null)
   const dialogRef = useRef<HTMLDivElement>(null)
   const editor = useRef<monaco.editor.IStandaloneCodeEditor>()
@@ -77,13 +77,10 @@ export default function FileEditor(props: {
     return () => window.removeEventListener('beforeunload', onUnload)
   }, [dirty])
 
-  // Tema Monaco urmează tema aplicației (orice variantă deschisă → 'vs', vezi isLight). setTheme e global pentru
-  // toate instanțele, deci schimbarea din Settings se vede imediat, fără a re-crea editorul
-  // (re-crearea ar pierde textul nesalvat) — de aceea tema inițială vine dintr-un ref.
-  const monacoTheme = isLight(theme) ? 'vs' : 'vs-dark'
-  const themeRef = useRef(monacoTheme)
-  themeRef.current = monacoTheme
-  useEffect(() => { monaco.editor.setTheme(monacoTheme) }, [monacoTheme])
+  // Tema Monaco: MEREU `vs-dark`, independent de tema aplicaţiei. Cardul editorului (`.wt-editor`) e o
+  // zonă forţat-întunecată din 3.6.17 (audit 2026-10-17, UI-01) — până atunci urma isLight(), iar după
+  // P0 un editor `vs` (alb) rămăsese într-un card închis pe cele 5 variante deschise (rest P0). Dacă
+  // vreodată cardul redevine tematic, tema vine iar din useTheme()/isLight(), nu dintr-o comparaţie de id.
 
   // Stefan: utilizatorul trebuie NOTIFICAT activ când un fişier e prea mare ca să fie randat întreg,
   // nu doar printr-un badge discret. Toast-ul (o dată per deschidere) e dublat de bannerul din antet.
@@ -112,7 +109,7 @@ export default function FileEditor(props: {
     const ed = monaco.editor.create(host.current, {
       value: pv.text,
       language: detectLanguage(props.path, firstLine),
-      theme: themeRef.current,        // vs / vs-dark după tema aplicației
+      theme: MONACO_THEME,            // mereu întunecat, ca suprafaţa .wt-editor
       readOnly: !pv.editable,
       automaticLayout: true,          // se redimensionează cu dialogul
       minimap: { enabled: true },

@@ -1,5 +1,5 @@
 import { lsGet, lsSet } from '../lib/storage'
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { errText, api, Host } from '../lib/api'
 import { copyText, readText } from '../lib/clipboard'
 import { getCwd } from '../lib/cwd'
@@ -25,9 +25,11 @@ import { startCopy } from '../lib/copyjobs'
 import { notifyToast } from '../lib/notify'
 import { fmt, matchFilesShortcut } from '../lib/shortcuts'
 import {
-  EMPTY_HISTORY, NavHistory, TYPE_JUMP_MS, baseName, canBack, canForward, cdCommand, completePath, crumbs, histPush,
-  histStep, parentOf, splitForCompletion, targetPath, typeJump,
+  EMPTY_HISTORY, NavHistory, TYPE_JUMP_MS, baseName, canBack, canForward, cdCommand, completePath, crumbs, filesGate,
+  gateMenuItems, histPush, histStep, mkdirRefusal, parentOf, physicalPathHint, splitForCompletion, targetPath, typeJump,
+  underRefused,
 } from '../lib/filesNav'
+import { usePerms } from '../lib/perms'
 import { Button, IconButton } from './ui'
 
 // CodeMirror e greu → lazy: intră doar când deschizi un fișier
@@ -140,6 +142,22 @@ export default function FilePanel(props: {
   const { t } = useI18n()
   const isAgent = !props.host.connection_type || props.host.connection_type === 'agent'
   const asideRef = useRef<HTMLElement>(null)
+  // FL-09 (audit 2026-10-17): gating COSMETIC pe permisiuni — serverul refuză oricum (403
+  // authz.denied), dar un Viewer nu trebuie să afle ABIA după gest. Dezactivat cu motivul când are
+  // permisiunea pe alt host, ascuns când n-o are nicăieri (docs/design/DESIGN-SYSTEM.md „Hide vs
+  // disable"); drop-ul, foaia de pe telefon şi tastele (Ctrl+U, F2, F7, Alt+N, Delete) trec prin
+  // ACELEAŞI porţi: refuz cu toast, înainte de orice cerere.
+  const perms = usePerms()
+  const gate = useMemo(() => filesGate(perms, props.host.id), [perms, props.host.id])
+  const mayWrite = gate.write === 'ok', mayDelete = gate.del === 'ok'
+  const needsWrite = t('files.needsWrite'), needsDelete = t('files.needsDelete')
+  // id-uri per instanţă: două panouri pe aceeaşi pagină (host + sesiune, split) nu au voie să-şi
+  // dubleze id-urile pentru aria-describedby (axe duplicate-id-aria)
+  const reasonId = useId()
+  const needsWriteId = `${reasonId}-needs-write`, needsDeleteId = `${reasonId}-needs-delete`
+  /** poarta unei acţiuni de scriere / ştergere: false + toast dacă rolul n-o permite pe hostul ăsta */
+  const writeAllowed = () => { if (mayWrite) return true; notifyToast(needsWrite, 'warn'); return false }
+  const deleteAllowed = () => { if (mayDelete) return true; notifyToast(needsDelete, 'warn'); return false }
   // Back-ul de Android în foaie (3.6.14): întâi înapoi prin directoarele vizitate, abia la capăt
   // închide panoul. Prin ref: funcţia vede istoricul curent, iar useDrawer o cheamă din popstate.
   const backRef = useRef<() => boolean>(() => false)
@@ -532,27 +550,27 @@ export default function FilePanel(props: {
     if (e.dir) navigate(join(dir, e.name)); else edit(e, dir)
   }
   function startRename(name: string, dir = listing?.path ?? '') {
-    if (!stillHere(dir)) return
+    if (!writeAllowed() || !stillHere(dir)) return
     renameAtRef.current = dir
     setNewFolder(null); setNewFile(null); setConfirmDel(null); setRenaming(name)
   }
   function startNewFolder() {
-    if (!listing) return
+    if (!listing || !writeAllowed()) return
     setNewFile(null); setNewFileErr(''); setRenaming(null); setConfirmDel(null); setNewFolder('')
   }
   function startNewFile() {
-    if (!listing) return
+    if (!listing || !writeAllowed()) return
     setNewFileErr(''); setNewFolder(null); setRenaming(null); setConfirmDel(null); setNewFile('')
   }
   function pickUpload() {
-    if (!listing || busy) return
+    if (!listing || busy || !writeAllowed()) return
     fileInput.current?.click()
   }
   /** Duplicat pe ACELAŞI host, în acelaşi director: `/api/fs/copy` cu src == dst (permis explicit pe
       server) şi `on_conflict: rename` → „nume (1).ext" / folder „nume (1)", primul liber (fscopy.py).
       Copierea rulează pe gateway (rând în Transferuri); la final: toast + re-listare. */
   async function duplicate(e: Entry, dir = listing?.path ?? '') {
-    if (!listing || !stillHere(dir)) return
+    if (!listing || !writeAllowed() || !stillHere(dir)) return
     try {
       const rowId = await startCopy({ srcHost: props.host.id, srcName: props.host.name, dstHost: props.host.id,
         dstName: props.host.name, paths: [join(dir, e.name)], dstDir: dir, onConflict: 'rename' })
@@ -614,6 +632,9 @@ export default function FilePanel(props: {
     refocus(m?.kind === 'row' ? m.entry.name : undefined)
   }
   function menuItems(m: MenuState): MenuItem[] {
+    return gateMenuItems(rawMenuItems(m), gate, { write: needsWrite, del: needsDelete })
+  }
+  function rawMenuItems(m: MenuState): MenuItem[] {
     const dirItems = (): MenuItem[] => [
       { key: 'newfile', label: t('files.newFile'), icon: <FilePlusIcon />, onSelect: startNewFile, hint: fmt('Alt+N') },
       { key: 'newfolder', label: t('files.newDir'), icon: <PlusIcon />, onSelect: startNewFolder, hint: 'F7' },
@@ -646,7 +667,7 @@ export default function FilePanel(props: {
       ...(sessionPanel ? [{ key: 'cd', label: t('files.cdHere'), icon: <TerminalPromptIcon />,
         onSelect: () => cdHere(e.dir ? join(dir, e.name) : dir), sep: true }] : []),
       { key: 'delete', label: t('files.delete'), icon: <TrashIcon />, danger: true, sep: !sessionPanel,
-        onSelect: () => { if (!stillHere(dir)) return; setConfirmBulk(null); setConfirmDel({ ...e, at: dir }) }, hint: 'Del' },
+        onSelect: () => { if (!deleteAllowed() || !stillHere(dir)) return; setConfirmBulk(null); setConfirmDel({ ...e, at: dir }) }, hint: 'Del' },
     ]
   }
 
@@ -733,6 +754,8 @@ export default function FilePanel(props: {
   // putem vedea coliziunile, deci urcăm direct (motorul suprascrie atomic la commit).
   function startUpload(items: UpItem[], baseDir?: string) {
     if (!listing) return
+    // fără files.write pe host: refuz cu motiv ÎNAINTE de orice cerere (drop, selector, drop pe rând)
+    if (!writeAllowed()) return
     const base = baseDir ?? listing.path
     // re-drop-ul unui fişier DEJA în zbor pornea un al doilea uploadOne pe acelaşi upload_id:
     // cele două bucle îşi suprascriau reciproc ctl-ul (cancel-ul rămânea mort) şi îşi
@@ -757,12 +780,30 @@ export default function FilePanel(props: {
       const slash = it.rel.lastIndexOf('/')
       if (slash > 0) dirs.add(it.rel.slice(0, slash))
     }
+    // FS-04 (audit 2026-10-17): un mkdir REFUZAT (userul agentului nu poate scrie acolo) nu mai trece
+    // drept „există deja": tot subarborele lui e refuzat dintr-o dată — altfel fiecare fişier ar cere
+    // `fs_write` într-un dosar inexistent şi ar raporta „the folder does not exist" (adevărat literal,
+    // fals ca explicaţie), fără banner, fără lacăt, fără oferta „move as root". Listarea curentă spune
+    // dacă prima componentă exista (atunci EA e nescriibilă) sau nu (atunci dosarul listat).
+    const existing = new Set(base === listing.path ? listing.entries.map((e) => e.name) : [])
+    const refusedPrefixes: string[] = []
+    let refusedDir: { dir: string; message: string } | null = null
     for (const d of [...dirs].sort()) {
-      try { await api(`/api/hosts/${props.host.id}/fs/mkdir`, { method: 'POST', body: JSON.stringify({ path: join(base, d), parents: true }) }) } catch { /* există deja */ }
+      if (underRefused(d, refusedPrefixes)) continue
+      try { await api(`/api/hosts/${props.host.id}/fs/mkdir`, { method: 'POST', body: JSON.stringify({ path: join(base, d), parents: true }) }) }
+      catch (e) {
+        const r = mkdirRefusal(e, base, d, existing)
+        if (!r) continue                              // există deja (altă eroare: o va spune upload-ul)
+        refusedPrefixes.push(r.prefix)
+        refusedDir ??= { dir: r.at, message: errText(e, t) }
+        if (r.prefix === '') break                    // dosarul listat nu e scriibil: niciun subdosar nu va merge
+      }
     }
     const refused: PendingFile[] = []
-    let refusedMsg = '', otherErr = '', anyOk = false
+    let refusedMsg = '', otherErr = '', anyOk = false, skipped = 0
     for (const it of items) {
+      // sub un dosar refuzat nu mai încercăm fişierele unul câte unul (fiecare ar primi „dirMissing")
+      if (underRefused(it.rel, refusedPrefixes)) { skipped++; continue }
       const id = await uploadOne(join(base, it.rel), it.rel, it.file)
       const j = uploadStore.get(id)
       if (j?.state === 'done') anyOk = true
@@ -773,13 +814,17 @@ export default function FilePanel(props: {
     }
 
     setBusy(false)
-    if (refused.length) {
-      markDenied(props.host.id, base)
-      setDenied({ dir: base, message: refusedMsg, pending: refused })
+    if (refused.length || refusedDir) {
+      // fişiere simple refuzate → dosarul listat (ele intră în oferta „move as root"); doar un
+      // subdosar refuzat → dosarul nescriibil (lacăt + banner acolo; aici linia de eroare de mai jos)
+      const dir = refused.length ? base : refusedDir!.dir
+      markDenied(props.host.id, dir)
+      setDenied({ dir, message: refusedMsg || refusedDir?.message || '', pending: refused })
     } else if (anyOk) clearDenied(props.host.id, base)
     await load(listing.path)
     // 3.6.9: eroarea unui upload apărea DOAR în widgetul de transferuri; o arătăm şi aici — DUPĂ
     // re-listare, care goleşte linia de eroare
+    if (skipped) otherErr = t('files.subtreeRefused', { count: skipped, dir: refusedDir?.dir ?? base }) + (otherErr ? ' ' + otherErr : '')
     if (otherErr) setError(otherErr)
   }
 
@@ -982,6 +1027,8 @@ export default function FilePanel(props: {
         return
       }
       case 'filesDelete':
+        // fără files.delete pe host: toast cu motivul, nimic deschis (aceeaşi poartă ca butoanele)
+        if (!deleteAllowed()) { ev.preventDefault(); return }
         // cu o selecţie: ştergerea în bloc (o singură confirmare); altfel rândul curent
         if (picked.length) { ev.preventDefault(); setConfirmDel(null); setConfirmBulk(picked); return }
         if (cur) { ev.preventDefault(); setConfirmDel(tgt(cur)) }
@@ -1259,13 +1306,23 @@ export default function FilePanel(props: {
             data-testid="wt-files-reload"><RefreshIcon /></IconButton>
           {/* deschiderea unuia închide restul: toolbar-ul rămâne interactiv deasupra modalului,
               iar un input montat SUB overlay i-ar fura focusul (tastezi într-un câmp invizibil) */}
-          <IconButton onClick={startNewFile} disabled={!listing} label={t('files.newFile')}
-            aria-keyshortcuts="Alt+N" className="[@media(hover:none)]:hidden"><FilePlusIcon /></IconButton>
-          <IconButton onClick={startNewFolder} disabled={!listing} label={t('files.newDir')}
-            aria-keyshortcuts="F7" className="[@media(hover:none)]:hidden"><PlusIcon /></IconButton>
-          <IconButton onClick={pickUpload} disabled={busy || !listing} label={t('files.uploadHere')}
-            title={deniedHere ? t('files.denied.uploadHint', { user: props.host.agent_user || '?' }) : undefined} aria-keyshortcuts="Control+U"
-            variant="link" className="[@media(hover:none)]:hidden"><UploadIcon /></IconButton>
+          {/* motivele dezactivării (FL-09), referite prin aria-describedby de butoanele gri */}
+          <span id={needsWriteId} className="sr-only">{needsWrite}</span>
+          <span id={needsDeleteId} className="sr-only">{needsDelete}</span>
+          {gate.write !== 'hidden' && (
+            <>
+              <IconButton onClick={startNewFile} disabled={!listing || !mayWrite} label={t('files.newFile')}
+                title={mayWrite ? undefined : needsWrite} aria-describedby={mayWrite ? undefined : needsWriteId}
+                aria-keyshortcuts="Alt+N" className="[@media(hover:none)]:hidden"><FilePlusIcon /></IconButton>
+              <IconButton onClick={startNewFolder} disabled={!listing || !mayWrite} label={t('files.newDir')}
+                title={mayWrite ? undefined : needsWrite} aria-describedby={mayWrite ? undefined : needsWriteId}
+                aria-keyshortcuts="F7" className="[@media(hover:none)]:hidden"><PlusIcon /></IconButton>
+              <IconButton onClick={pickUpload} disabled={busy || !listing || !mayWrite} label={t('files.uploadHere')}
+                title={!mayWrite ? needsWrite : deniedHere ? t('files.denied.uploadHint', { user: props.host.agent_user || '?' }) : undefined}
+                aria-describedby={mayWrite ? undefined : needsWriteId} aria-keyshortcuts="Control+U"
+                variant="link" className="[@media(hover:none)]:hidden"><UploadIcon /></IconButton>
+            </>
+          )}
           <input ref={fileInput} type="file" multiple className="hidden" onChange={(e) => { if (e.target.files) pickFiles(e.target.files); e.target.value = ''; refocus() }} />
         </div>
         {/* sortare: ţinte de ≥24px (erau text de 10px fără padding) + direcţia anunţată, nu doar ▲/▼ */}
@@ -1289,12 +1346,22 @@ export default function FilePanel(props: {
         </div>
 
         {deniedView && (
-          <WriteDeniedBanner host={props.host} dir={deniedView.dir} message={deniedView.message}
-            sessionId={props.sessionId} pending={deniedView.pending}
-            onUploadHome={(fs) => void uploadHome(fs)}
-            onDismiss={() => { clearDenied(props.host.id, deniedView.dir); setDenied(null) }}
-            onMoved={() => uploads.filter((u) => u.state === 'err' && isWriteDenied(u.errorCode)
-              && u.dest.slice(0, u.dest.lastIndexOf('/')) === deniedView.dir).forEach((u) => dismissUpload(u.id))} />
+          <>
+            <WriteDeniedBanner host={props.host} dir={deniedView.dir} message={deniedView.message}
+              sessionId={props.sessionId} pending={deniedView.pending}
+              onUploadHome={(fs) => void uploadHome(fs)}
+              onDismiss={() => { clearDenied(props.host.id, deniedView.dir); setDenied(null) }}
+              onMoved={() => uploads.filter((u) => u.state === 'err' && isWriteDenied(u.errorCode)
+                && u.dest.slice(0, u.dest.lastIndexOf('/')) === deniedView.dir).forEach((u) => dismissUpload(u.id))} />
+            {/* FS-02 (audit 2026-10-17): sub merged-usr calea LOGICĂ (/lib/firmware) pică verificarea
+                `pwd -P` a comenzii de mutare ca root („is not the physical path of that folder"); până
+                la realpath prin agent (v59), spunem calea fizică probabilă */}
+            {physicalPathHint(deniedView.dir) && (
+              <div className="border-b border-ink-800 bg-amber-950/30 px-3 py-1.5 text-2xs wt-warn" data-testid="wt-files-symlink-hint">
+                {t('files.denied.symlinkHint', { real: physicalPathHint(deniedView.dir)! })}
+              </div>
+            )}
+          </>
         )}
         {error && <div role="alert" className="border-b border-ink-800 bg-ink-800 px-3 py-1.5 text-2xs wt-danger">{error}
           {failedPath !== null && <button type="button" onClick={() => load(failedPath)} className="wt-link ml-2 min-h-6 hover:underline">{t('common.retry')}</button>}</div>}
@@ -1493,8 +1560,17 @@ export default function FilePanel(props: {
                   <button onClick={() => downloadArchive(e)} className="grid h-6 w-6 place-items-center rounded-md text-slate-500 hover:bg-ink-700 hover:text-slate-200"
                     title={t('files.downloadArchive')} aria-label={t('files.downloadArchiveAria', { name: e.name })}><DownloadIcon /></button>
                 )}
-                <IconButton touch={false} onClick={() => startRename(e.name)} title={t('files.rename')} label={t('files.renameAria', { name: e.name })}><RenameIcon /></IconButton>
-                <IconButton touch={false} variant="danger" onClick={() => { if (listing) setConfirmDel({ ...e, at: listing.path }) }} title={t('files.delete')} label={`${t('files.delete')} ${e.name}`}><TrashIcon /></IconButton>
+                {gate.write !== 'hidden' && (
+                  <IconButton touch={false} onClick={() => startRename(e.name)} disabled={!mayWrite}
+                    title={mayWrite ? t('files.rename') : needsWrite} aria-describedby={mayWrite ? undefined : needsWriteId}
+                    label={t('files.renameAria', { name: e.name })}><RenameIcon /></IconButton>
+                )}
+                {gate.del !== 'hidden' && (
+                  <IconButton touch={false} variant="danger" disabled={!mayDelete}
+                    onClick={() => { if (listing && deleteAllowed()) setConfirmDel({ ...e, at: listing.path }) }}
+                    title={mayDelete ? t('files.delete') : needsDelete} aria-describedby={mayDelete ? undefined : needsDeleteId}
+                    label={`${t('files.delete')} ${e.name}`}><TrashIcon /></IconButton>
+                )}
                 <IconButton touch={false} aria-haspopup="menu" data-testid="wt-files-more"
                   onClick={(ev) => { const r = (ev.currentTarget as HTMLElement).getBoundingClientRect(); setSel(i); openRowMenu(e, r.right - 224, r.bottom, false) }}
                   title={t('files.moreActions')} label={t('files.more', { name: e.name })}><MoreIcon size={14} /></IconButton>
@@ -1524,7 +1600,7 @@ export default function FilePanel(props: {
           <div className="hidden h-16 [@media(hover:none)]:block" aria-hidden="true" />
         </div>
         {/* „+" flotant (touch): fişier nou / dosar nou / încarcă — înlocuieşte cele trei pictograme din bară */}
-        {listing && !picked.length && (
+        {listing && !picked.length && gate.write !== 'hidden' && (
           <button type="button" aria-haspopup="menu" aria-label={t('files.fabAria')} data-testid="wt-files-fab"
             onClick={(ev) => { const r = (ev.currentTarget as HTMLElement).getBoundingClientRect(); if (listing) setMenu({ kind: 'new', dir: listing.path, x: r.left, y: r.top, sheet: true }) }}
             className="absolute bottom-3 right-3 z-10 hidden h-12 w-12 place-items-center rounded-full bg-sky-600 text-white shadow-xl hover:bg-sky-500 [@media(hover:none)]:grid">
@@ -1541,9 +1617,12 @@ export default function FilePanel(props: {
             <span className="mr-1 font-medium text-slate-200" aria-live="polite">{t('files.selCount', { count: picked.length })}</span>
             <Button variant="ghost" size="sm" onClick={bulkDownload} className="wt-touch">
               <DownloadIcon />{t('files.download')}</Button>
-            <Button variant="ghost" size="sm" onClick={() => { setConfirmDel(null); setConfirmBulk(picked) }} disabled={busy}
-              className="wt-touch">
-              <TrashIcon />{t('files.delete')}</Button>
+            {gate.del !== 'hidden' && (
+              <Button variant="ghost" size="sm" onClick={() => { if (deleteAllowed()) { setConfirmDel(null); setConfirmBulk(picked) } }}
+                disabled={busy || !mayDelete} title={mayDelete ? undefined : needsDelete}
+                aria-describedby={mayDelete ? undefined : needsDeleteId} className="wt-touch">
+                <TrashIcon />{t('files.delete')}</Button>
+            )}
             <Button variant="ghost" size="sm" onClick={openCopy} title={t('copy.open')} className="wt-touch">
               <CopyIcon />{t('copy.open')}</Button>
             <Button variant="ghost" size="sm" onClick={() => setSelection(EMPTY_SELECTION)} className="wt-touch ml-auto">

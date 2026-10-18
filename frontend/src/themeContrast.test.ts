@@ -11,7 +11,10 @@
        textul cromului pe tab strip / suprafaţa ridicată / fundalul terminalului;
      - editorul de fişiere (`.wt-editor`): textul şi UI-ul lui pe cardul `.glass` şi pe ink-800,
        în AMBELE contexte — din sesiune (.wt-workspace) şi de pe pagina hostului (.wt-canvas),
-       unde axe nu vede `color-mix()` (audit 2026-10-17, UI-01).
+       unde axe nu vede `color-mix()` (audit 2026-10-17, UI-01);
+     - inelul de focus şi conturul de câmp EFECTIVE în zonele forţat-întunecate (.wt-workspace,
+       .wt-command, .wt-transfers-widget, .wt-editor) pe tab strip / ws-950 / paleta de comenzi, şi
+       înapoi pe canvas-ul deschis al fiecărei variante (audit 2026-10-17, UI-02).
    Raport complet: VITE_CONTRAST_REPORT=1 npx vitest run src/themeContrast.test.ts */
 import { describe, expect, it } from 'vitest'
 import { FAMILIES, VARIANTS, type ThemeFamily, type ThemeVariant } from './lib/themeModel'
@@ -95,6 +98,17 @@ for (const f of FAMILIES.map((x) => x.id)) {
 // 5 variante deschise. axe nu prinde cazul (`color-mix()` → „incomplete"), de aceea e verificat aici:
 // tokenul EFECTIV = declaraţia zonei (cu `var(--ws-*)` rezolvat din familie), altfel moştenirea.
 const editorZone = tokens((s) => s === '.wt-editor')
+// Zonele forţat-întunecate îşi iau `--focus` / `--field-border` (+ color-scheme) dintr-o regulă COMUNĂ
+// (`.wt-workspace, .wt-command, .wt-transfers-widget, .wt-editor`) şi din una per familie
+// (`:root[data-family=…] :is(…)`): audit 2026-10-17, UI-02. Parserul le găseşte după lista de selectori.
+const ZONES = ['.wt-workspace', '.wt-command', '.wt-transfers-widget', '.wt-editor']
+const selList = (s: string) => s.split(',').map((x) => x.trim())
+const zoneShared = tokens((s) => ZONES.every((z) => selList(s).includes(z)))
+const zoneFamily = (f: ThemeFamily): Tokens =>
+  f === 'webterm' ? {} : tokens((s) => s.startsWith(`:root[data-family='${f}']`) && ZONES.every((z) => s.includes(z)))
+// blocul care readuce tokenii variantei pe canvas (dashboard / pagina hostului) — pentru Midnight nu există
+const canvasTokens = (v: ThemeVariant): Tokens =>
+  tokens((s) => selList(s).includes(`:root[data-theme='${v}'] .wt-workspace .wt-canvas`))
 const resolveToken = (name: string, chain: Tokens[]): string => {
   for (const t of chain) {
     if (name in t) return t[name].replace(/var\(--([\w-]+)\)/g, (_, n: string) => resolveToken(n, chain))
@@ -105,10 +119,10 @@ const editorPairs: Pair[] = []
 for (const v of Object.keys(VARIANTS) as ThemeVariant[]) {
   const vt = variantTokens(v)
   const ft = familyTokens(VARIANTS[v].family)
-  const editorFamily = tokens((s) => s === `:root[data-family='${VARIANTS[v].family}'] .wt-editor`)
+  const editorFamily = zoneFamily(VARIANTS[v].family)
   const contexts: Record<string, Tokens[]> = {
-    'host page (canvas)': [editorFamily, editorZone, vt, ft],
-    'session (workspace)': [editorFamily, editorZone, ws, vt, ft],
+    'host page (canvas)': [editorFamily, editorZone, zoneShared, canvasTokens(v), vt, ft],
+    'session (workspace)': [editorFamily, editorZone, zoneShared, ws, vt, ft],
   }
   for (const [ctx, chain] of Object.entries(contexts)) {
     const where = `editor/${v}/${ctx}`
@@ -126,6 +140,34 @@ for (const v of Object.keys(VARIANTS) as ThemeVariant[]) {
   }
 }
 
+// Inelul de focus şi conturul de câmp în zonele forţat-întunecate (audit 2026-10-17, UI-02): până la
+// 3.6.18 zonele redeclarau textul şi suprafeţele, dar `--focus` / `--field-border` rămâneau cele moştenite
+// de pe :root — ale variantei DESCHISE — şi pe „Windows 11 · Light" albastrul Fluent dădea 2,92:1 pe tab
+// strip (chrome-bg) şi ~2,9:1 pe paleta de comenzi. Perechile de aici erau verificate doar pe ink-* ale
+// variantei. Verificăm tokenul EFECTIV: (1) în zonă — chrome-bg / chrome-elev / ws-950 / command-bg;
+// (2) înapoi pe canvas-ul variantei, unde Aurora trebuie să-şi ia înapoi indigo-500 (indigo-400 pe alb
+// ar da 2,98:1). Garda e `.wt-canvas` scris în lista de selectori a blocului variantei.
+const zonePairs: Pair[] = []
+for (const v of Object.keys(VARIANTS) as ThemeVariant[]) {
+  const f = VARIANTS[v].family
+  const vt = variantTokens(v)
+  const ft = familyTokens(f)
+  const zone = [zoneFamily(f), zoneShared, ws, vt, ft]
+  const effZone = (k: string) => rgb(resolveToken(k, zone))
+  for (const sn of ['chrome-bg', 'chrome-elev', 'ws-950', 'command-bg']) {
+    zonePairs.push({ where: `zone/${v}`, what: `focus on ${sn}`, r: ratio(effZone('focus'), rgb(ft[sn])), min: 3 })
+  }
+  zonePairs.push({ where: `zone/${v}`, what: 'field-border on ws-800', r: ratio(effZone('field-border'), rgb(ft['ws-800'])), min: 3 })
+  // canvas-ul (în .wt-workspace): declaraţiile blocului variantei pe .wt-canvas, altfel moştenirea din zonă
+  const canvas = [canvasTokens(v), ...zone]
+  const effCanvas = (k: string) => rgb(resolveToken(k, canvas))
+  for (const sn of ['ink-950', 'ink-900', 'ink-800']) {
+    for (const k of ['focus', 'field-border']) {
+      zonePairs.push({ where: `canvas/${v}`, what: `${k} on ${sn}`, r: ratio(effCanvas(k), effCanvas(sn)), min: 3 })
+    }
+  }
+}
+
 // Numele hostului pe tab-ul activ e scris în culoarea hostului (paleta pastel din lib/host.ts) peste
 // `color-mix(culoare 18%, --chrome-elev)` (TabBar). Paleta e calibrată pe cromul navy WebTerm, deci
 // o familie nouă nu are voie să coboare sub cel mai slab contrast al WebTerm (prins de axe în gate).
@@ -136,6 +178,29 @@ const tabWorst = (f: ThemeFamily) => {
   const elev = rgb(familyTokens(f)['chrome-elev'])
   return Math.min(...HOST_PALETTE.map((c) => ratio(c, [0, 1, 2].map((i) => c[i]! * 0.18 + elev[i]! * 0.82) as RGB)))
 }
+
+describe('audit 2026-10-17 — reguli globale din index.css (UI-03 / UI-04)', () => {
+  it("UI-03: color-scheme urmează data-mode, zonele întunecate sunt `dark`, canvas-ul deschis `light`; scrollbar-ul din token", () => {
+    expect(css).toMatch(/:root\[data-mode='dark'\]\s*\{[^}]*color-scheme:\s*dark/)
+    expect(css).toMatch(/:root\[data-mode='light'\]\s*\{[^}]*color-scheme:\s*light/)
+    const zoneRule = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].find((m) => ZONES.every((z) => selList(m[1].split(';').pop()!).includes(z)))
+    expect(zoneRule?.[2]).toMatch(/color-scheme:\s*dark/)
+    expect(zoneRule?.[2]).toMatch(/scrollbar-color:\s*var\(--scrollbar\)/)
+    // tokenul stă lângă proprietate: paleta de comenzi şi widgetul Transfers sunt în afara
+    // .wt-workspace şi altfel ar lua de pe :root thumb-ul închis al variantei deschise (review MED)
+    expect(zoneRule?.[2]).toMatch(/--scrollbar:\s*rgba\(148, 163, 184/)
+    expect(css).toMatch(/:root\[data-mode='light'\]\s*\.wt-canvas\s*\{[^}]*color-scheme:\s*light/)
+    expect(css).toMatch(/\bhtml\s*\{[^}]*scrollbar-color:\s*var\(--scrollbar\)/)
+  })
+  it('UI-04: pe pointer grosier controalele de text au ≥ 16 px (max(16px, 1em)), fără checkbox/radio/range şi fără textarea-ul xterm', () => {
+    const m = /@media \(pointer: coarse\)\s*\{\s*:is\(([\s\S]*?)\)\s*\{\s*font-size:\s*max\(16px, 1em\);/.exec(css)
+    expect(m).not.toBeNull()
+    const sel = m![1]
+    for (const t of ['checkbox', 'radio', 'range', 'button', 'submit', 'file', 'hidden']) expect(sel).toContain(`:not([type='${t}'])`)
+    expect(sel).toMatch(/textarea:not\(\.xterm-helper-textarea\)/)
+    expect(sel).toMatch(/\bselect\b/)
+  })
+})
 
 describe('contrastul variantelor de temă (tokeni din index.css)', () => {
   it('culorile de host pe tab-ul activ: nicio familie sub WebTerm', () => {
@@ -159,6 +224,14 @@ describe('contrastul variantelor de temă (tokeni din index.css)', () => {
   })
   it('text ≥ 4,5:1, UI şi grafice ≥ 3:1, pe toate variantele şi în workspace', () => {
     const bad = pairs.filter((p) => p.r + 1e-9 < p.min).map((p) => `${p.where}: ${p.what} = ${p.r.toFixed(2)}:1 < ${p.min}:1`)
+    expect(bad).toEqual([])
+  })
+  it('zonele forţat-întunecate: focus ≥ 3:1 pe tab strip / ws-950 / paleta de comenzi, şi înapoi pe canvas (UI-02)', () => {
+    // regula comună există şi declară ambii tokeni (altfel lanţul ar cădea tăcut pe tokenii variantei)
+    expect(Object.keys(zoneShared)).toEqual(expect.arrayContaining(['focus', 'field-border', 'scrollbar']))
+    for (const f of ['mac', 'win', 'gnome', 'kde'] as ThemeFamily[]) expect(Object.keys(zoneFamily(f))).toContain('focus')
+    expect(zonePairs.length).toBe(Object.keys(VARIANTS).length * (4 + 1 + 3 * 2))
+    const bad = zonePairs.filter((p) => p.r + 1e-9 < p.min).map((p) => `${p.where}: ${p.what} = ${p.r.toFixed(2)}:1 < ${p.min}:1`)
     expect(bad).toEqual([])
   })
   it('editorul de fişiere: text ≥ 4,5:1 şi UI ≥ 3:1 pe cardul lui, din sesiune ŞI din pagina hostului (UI-01)', () => {

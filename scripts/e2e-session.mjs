@@ -139,6 +139,25 @@ if (setupRes.ok) {
 }
 if (!cookie) fail('nici setup, nici login n-au întors un cookie de sesiune')
 
+// Re-rulare (retry după un flake) pe aceeaşi bază: hostul `ci-local` al încercării anterioare e
+// OFFLINE (agentul lui e oprit înainte să pornească cel nou — lock de instanţă unică) şi ar rămâne
+// cu acelaşi nume lângă cel nou. Paşii de după e2e (ui_review.mjs, mobile-audit.mjs) îşi aleg
+// hostul după NUME şi nimereau exact în cel offline → „deschide sesiune" expira în toate temele
+// (3.6.18). Îl ştergem; dacă nu se poate (sesiuni vii → 409), îl redenumim cu un nume care NU mai
+// conţine „ci-local" (auditurile caută după text şi iau ultimul rezultat).
+{
+  const hdr = { 'Content-Type': 'application/json', Cookie: cookie, Origin: BASE }
+  const prior = await fetch(`${BASE}/api/hosts`, { headers: hdr }).then((r) => (r.ok ? r.json() : [])).catch(() => [])
+  for (const h of Array.isArray(prior) ? prior : []) {
+    if (h.name !== 'ci-local') continue
+    const del = await fetch(`${BASE}/api/hosts/${h.id}`, { method: 'DELETE', headers: hdr }).catch(() => null)
+    if (del?.ok) { console.log(`  [diag] host ci-local vechi (id ${h.id}) şters înainte de re-rulare`); continue }
+    const ren = await fetch(`${BASE}/api/hosts/${h.id}`, { method: 'PATCH', headers: hdr,
+      body: JSON.stringify({ name: `stale-e2e-host-${h.id}` }) }).catch(() => null)
+    console.log(`  [diag] host ci-local vechi (id ${h.id}): delete ${del?.status ?? 'err'}, redenumit ${ren?.ok ? 'da' : 'NU'}`)
+  }
+}
+
 const hostRes = await fetch(`${BASE}/api/hosts`, {
   method: 'POST',
   headers: { 'Content-Type': 'application/json', Cookie: cookie, Origin: BASE },
@@ -206,6 +225,20 @@ try {
   // violări CSP (worker blocat, script/stil refuzat) — apar doar în consolă, nu ca pageerror.
   // Le citeşte verificarea editorului Monaco (workerul trebuie să pornească sub CSP-ul real).
   const cspErrors = []
+  // socketurile de sesiune ale paginii, de la început: CARE sesiune (re)deschide un socket şi când s-a
+  // închis cel vechi — verificările split-ului numără doar panourile lor, iar un „open" fără „close" în
+  // fereastră înseamnă un socket închis MAI DEVREME, reconectat cu backoff (3.6.17/3.6.18 diag)
+  let sessWs = 0
+  const wsEvents = []
+  const t0ws = Date.now()
+  page.on('websocket', (w) => {
+    if (!w.url().includes('/ws/sessions/')) return
+    sessWs++
+    const sid = w.url().replace(/.*\/ws\/sessions\/([^?]+).*/, '$1').slice(0, 8)
+    wsEvents.push(`open ${sid} +${((Date.now() - t0ws) / 1000).toFixed(1)}s`)
+    w.on('close', () => wsEvents.push(`close ${sid} +${((Date.now() - t0ws) / 1000).toFixed(1)}s`))
+    w.on('socketerror', (e) => wsEvents.push(`error ${sid} ${String(e).slice(0, 60)}`))
+  })
   page.on('console', (m) => {
     // diagnoza guardrail-ului: de ce o linie tastată n-a fost confirmată (lib/echo.ts debug())
     if (m.text().startsWith('[wt-echo]')) console.log('     [diag] ' + m.text().slice(0, 900))
@@ -1032,22 +1065,27 @@ try {
   // Ctrl+U = dialogul de upload (nu view-source), Ctrl+R = re-listarea (nu reload-ul paginii) — DOAR cu focusul în listă
   await page.evaluate(() => { window.__wtNoReload = 1 })
   const pagesBefore = page.context().pages().length
-  // lăsăm re-listarea de după Backspace să se aşeze (focus + randare), apoi Ctrl+U; o a doua apăsare
-  // doar dacă prima a căzut într-o re-randare (pe runnerul încărcat), cu diagnostic
-  await page.waitForTimeout(400)
-  let chooser = null
-  for (let i = 0; i < 2 && !chooser; i++) {
-    await fpList.focus()
-    const chooserP = page.waitForEvent('filechooser', { timeout: 4000 }).catch(() => null)
-    await page.keyboard.press('Control+u')
-    chooser = await chooserP
-    if (!chooser) console.log('  [diag] Ctrl+U fără file chooser, încercarea', i + 1, '· focus în listă =', await listFocused())
-  }
+  /* Re-listarea de după Backspace s-a aşezat când directorul listat e KD (`viaUp`, mai sus) ŞI lista
+     are focusul înapoi (roving focus, 3.6.14) — condiţii OBSERVABILE, nu un somn fix. Până la auditul
+     2026-10-17 (FL-T01) aici era `waitForTimeout(400)` + o A DOUA apăsare dacă prima nu deschidea
+     chooser-ul: un focus pierdut la re-randare (exact simptomul raportat) trecea testul la a doua
+     apăsare, iar regresia rămânea un rând `[diag]` în log. Acum focusul de după re-listare e o
+     verificare proprie, iar Ctrl+U se apasă O SINGURĂ dată — prima apăsare pierdută = FAIL. */
+  const upFocused = await pollValue(listFocused, (v) => v === true, 5000)
+  check('3.6.14: după Backspace (re-listare) focusul rămâne pe listă (roving focus)', upFocused === true,
+    upFocused ? '' : await page.evaluate(() => {
+      const a = document.activeElement
+      return a ? `${a.tagName}.${String(a.className).slice(0, 60)} ${a.getAttribute('aria-label') ?? ''}` : 'null'
+    }))
+  if (!upFocused) await fpList.focus()       // verificarea de mai jos măsoară DOAR Ctrl+U, nu şi focusul
+  const chooserP = page.waitForEvent('filechooser', { timeout: 5000 }).catch(() => null)
+  await page.keyboard.press('Control+u')
+  const chooser = await chooserP
   await fpList.focus()
   await page.keyboard.press('Control+r')
   await page.waitForTimeout(800)
   const notReloaded = await page.evaluate(() => window.__wtNoReload === 1).catch(() => false)
-  check('3.6.14: Ctrl+U în listă deschide alegerea de fişiere (nu view-source), Ctrl+R re-listează (nu reîncarcă pagina)',
+  check('3.6.14: Ctrl+U în listă deschide alegerea de fişiere la PRIMA apăsare (nu view-source), Ctrl+R re-listează (nu reîncarcă pagina)',
     !!chooser && notReloaded && page.context().pages().length === pagesBefore,
     `chooser=${!!chooser} noReload=${notReloaded} pages=${pagesBefore}→${page.context().pages().length}`)
   // „cd here in the terminal" (meniul rândului): tastează `cd -- '<cale>'` la prompt, FĂRĂ Enter
@@ -1975,18 +2013,6 @@ try {
   const splitsApi = () => page.evaluate(async () => (await (await fetch('/api/split-views', { credentials: 'same-origin' })).json()).split_views)
   const mine = async () => (await splitsApi()).find((v) => v.name === SPLIT)
   // WS-urile de sesiune deschise de aici încolo: un swap / o intrare în split NU trebuie să reconecteze
-  let sessWs = 0
-  // diagnoză (3.6.17): CARE sesiune a deschis un socket nou şi de ce s-a închis cel vechi — un panou din
-  // stiva keep-alive care se reconectează sub încărcare nu e o remontare, dar pică acelaşi contor
-  const wsEvents = []
-  page.on('websocket', (w) => {
-    if (!w.url().includes('/ws/sessions/')) return
-    sessWs++
-    const sid = w.url().replace(/.*\/ws\/sessions\/([^?]+).*/, '$1').slice(0, 8)
-    wsEvents.push(`open ${sid} @${Date.now() % 100000}`)
-    w.on('close', () => wsEvents.push(`close ${sid} @${Date.now() % 100000}`))
-    w.on('socketerror', (e) => wsEvents.push(`error ${sid} ${String(e).slice(0, 60)}`))
-  })
 
   // navigare liberă: click pe un tab de sesiune IESE din split, dar chip-ul RĂMÂNE (revii oricând).
   // Alegem un tab care NU e în split — exact scenariul bug-ului de mai sus.
@@ -2047,9 +2073,14 @@ try {
     && sids.every((s) => window.__wtTerms?.get(s) && window.__wtTerms.get(s) === window.__e2eTerms?.get(s)), pBefore)
   check('split: „Move to…" schimbă panourile între ele (salvat pe server)',
     pBefore.length === 2 && pAfter[0] === pBefore[1] && pAfter[1] === pBefore[0])
+  // „niciun WS nou" = al PANOURILOR din split (pBefore): o altă sesiune a paginii care se reconectează
+  // în fereastra asta (retry cu backoff după testul „host offline", sub încărcare) nu e o remontare
+  const paneEvents = () => wsEvents.filter((e) => pBefore.some((s) => e.includes(' ' + s.slice(0, 8) + ' ')))
+  const paneWs = () => paneEvents().filter((e) => e.startsWith('open ')).length
+  const paneWs0 = paneWs()
   const swapSame = await sameTerms()
   check('split: swap fără remontare / reconectare (aceleaşi terminale, niciun WS nou)',
-    swapSame && sessWs === ws0, JSON.stringify({ sameTerms: swapSame, newWs: sessWs - ws0, ws: wsEvents.slice(-6) }))
+    swapSame && paneWs() === paneWs0, JSON.stringify({ sameTerms: swapSame, newWs: sessWs - ws0, paneWs: paneWs() - paneWs0, ws: paneEvents().slice(-8) }))
 
   // ieşire (tab al unui panou) + reintrare din chip: panourile stau în stiva keep-alive → aceleaşi terminale
   await page.locator(`button[data-tab="${pBefore[0]}"]`).evaluate((el) => el.click())
@@ -2058,7 +2089,7 @@ try {
   await page.waitForTimeout(900)
   const reSame = await sameTerms()
   check('split: ieşirea + reintrarea în split nu remontează / reconectează panourile',
-    reSame && sessWs === ws0, JSON.stringify({ sameTerms: reSame, newWs: sessWs - ws0, ws: wsEvents.slice(-6) }))
+    reSame && paneWs() === paneWs0, JSON.stringify({ sameTerms: reSame, newWs: sessWs - ws0, paneWs: paneWs() - paneWs0, ws: paneEvents().slice(-8) }))
 
   // 3 panouri: Edit → încă o sesiune → implicit „1 mare stânga + 2 dreapta"; apoi picker-ul de aranjare
   await page.locator(`div.wt-tab:has-text("${SPLIT}") button[aria-label="Edit split view"]`).click()
@@ -2460,7 +2491,10 @@ try {
   // DOAR calea manuală + persistenţa bifei „nu mai arăta". Ştergem întâi cheia ca verificarea
   // finală să fie reală (bifa chiar o re-scrie), nu doar să reconfirme presetarea.
   await goHome()
-  await page.evaluate(() => { try { localStorage.removeItem('wt_walkthrough_done') } catch { /**/ } })
+  // 3.6.18 (UI-06): bifa e per cont (`wt_walkthrough_done:<user_id>`); presetarea veche e migrată la login
+  const meUid = await page.evaluate(async () =>
+    (await (await fetch('/api/state', { credentials: 'same-origin' })).json()).user_id)
+  await page.evaluate((uid) => { try { localStorage.removeItem('wt_walkthrough_done'); localStorage.removeItem('wt_walkthrough_done:' + uid) } catch { /**/ } }, meUid)
   // focus pe un buton (nu în terminal/câmp): „?" nu se declanşează dintr-un câmp sau din terminal
   await page.focus('button[aria-label="Settings"]')
   await page.keyboard.press('?')
@@ -2481,16 +2515,14 @@ try {
   await walk.locator('input[type=checkbox]').check()
   await walk.locator('button:has-text("Skip for now")').click()
   check('walkthrough: turul se închide după Skip', await hidden(walk))
-  check('walkthrough: „nu mai arăta" + închidere persistă wt_walkthrough_done=1',
-    (await page.evaluate(() => localStorage.getItem('wt_walkthrough_done'))) === '1')
+  check('walkthrough: „nu mai arăta" + închidere persistă wt_walkthrough_done:<uid>=1',
+    (await page.evaluate((uid) => localStorage.getItem('wt_walkthrough_done:' + uid), meUid)) === '1')
 
   // ── 3.5.13: download File System Access întrerupt de un reload → „Interrupted — Resume / Discard" ──
   // Punem în IndexedDB DOAR metadatele (exact ce rămâne după un tab închis la mijlocul unui download),
   // fără handle: în contextul off-the-record al Playwright citirea unui FileSystemFileHandle din IDB
   // OPREŞTE browserul — motivul pentru care lista de la pornire nu atinge handle-urile. Resume (care
   // îl citeşte) e acoperit de vitest (downloads.resume.test.ts) şi de o sondă cu profil persistent.
-  const meUid = await page.evaluate(async () =>
-    (await (await fetch('/api/state', { credentials: 'same-origin' })).json()).user_id)
   await page.evaluate(async (uid) => {
     await new Promise((res, rej) => {
       const rq = indexedDB.open('webterm-transfers', 1)

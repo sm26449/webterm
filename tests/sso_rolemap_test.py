@@ -536,6 +536,28 @@ async def test_break_glass_api():
         r = await c.post("/api/account", json={"remove_password": True})
         check("…permanent dar FĂRĂ parolă locală (SSO-only) → tot 409",
               r.status_code == 409 and U.code(r) == "account.lastBreakGlass", "%s %s" % (r.status_code, r.text[:120]))
+        # RB-06 (revizuirea P1): o schimbare DE RUTINĂ a parolei pe contul break-glass îi ştergea
+        # legătura Owner venită din SSO de îndată ce exista alt Owner permanent — chiar SSO-only
+        # (bg2 acum) — şi instanţa rămânea doar cu Owneri pe care IdP-ul îi poate lăsa afară
+        oid = await authz.role_id("owner")
+        await db.execute("UPDATE role_bindings SET source='sso' WHERE user_id=? AND role_id=?", bg, oid)
+        authz.bump_epoch()
+        security.open_stepup_window(bg, 0)
+        r = await c.post("/api/account", json={"new_password": "Parola-noua-123"})
+        check("schimbare de parolă pe contul break-glass, celălalt Owner permanent fiind SSO-only → 200 şi "
+              "legătura Owner (sso) RĂMÂNE", r.status_code == 200
+              and ("owner", "all", "", "sso") in await bindings("bg@x.co"),
+              "%s %s %s" % (r.status_code, r.text[:120], await bindings("bg@x.co")))
+        check("…bg e în continuare contul break-glass", await authz.last_break_glass(bg))
+        await db.execute("UPDATE users SET local_password=1 WHERE id=?", bg2)
+        security.open_stepup_window(bg, 0)
+        r = await c.post("/api/account", json={"new_password": "Parola-noua-124"})
+        check("…cu alt Owner PERMANENT cu parolă locală: legătura Owner (sso) pleacă la schimbarea parolei",
+              r.status_code == 200 and ("owner", "all", "", "sso") not in await bindings("bg@x.co"),
+              "%s %s %s" % (r.status_code, r.text[:120], await bindings("bg@x.co")))
+        await db.execute("UPDATE users SET local_password=0 WHERE id=?", bg2)
+        await U.bind(bg, "owner", "all", "")          # Owner manual din nou, pentru paşii de mai jos
+        security.open_stepup_window(bg, 0)
         await db.execute("UPDATE users SET local_password=1 WHERE id=?", bg2)
         r = await c.post("/api/account", json={"remove_password": True})
         check("cu alt Owner PERMANENT cu parolă locală → 200, contul devine SSO-only",
@@ -548,6 +570,52 @@ async def test_break_glass_api():
         if bg2 is not None:
             await U.unbind_all(bg2)
         await c.aclose()
+
+
+async def test_break_glass_sync():
+    """RB-06 (revizuirea P1, MED): IdP-ul nu trebuie să poată lua legătura Owner @ all (sso) a
+    contului break-glass NICI la propriul login SSO al omului (sincronizarea remove_only a unui
+    cont cu parolă locală, ssomap.sync_user) cât timp ceilalţi Owneri permanenţi sunt SSO-only —
+    altfel rămân doar Owneri pe care o pană a IdP-ului îi lasă afară. Regula e cea din
+    `authz.last_break_glass`, aplicată în ramura „kept" din ssomap._apply_locked."""
+    print("── sincronizarea SSO: legătura Owner (sso) a contului break-glass rămâne")
+    oid = await authz.role_id("owner")
+    bgs = await U.add_user("bgs@x.co")
+    await db.execute("UPDATE users SET sso_subject='sub-bgs', local_password=1 WHERE id=?", bgs)
+    await db.execute("INSERT INTO role_bindings(user_id, role_id, scope_kind, scope_value, source,"
+                     " created) VALUES(?,?,'all','','sso',?)", bgs, oid, time.time())
+    osso = await U.add_user("osso@x.co", bindings=[("owner", "all", "")])
+    await db.execute("UPDATE users SET local_password=0, sso_subject='sub-osso' WHERE id=?", osso)
+    others = [r["id"] for r in await db.fetchall(
+        "SELECT DISTINCT u.id FROM users u JOIN role_bindings b ON b.user_id=u.id JOIN roles r ON r.id=b.role_id"
+        " WHERE r.key='owner' AND b.scope_kind='all' AND b.expires IS NULL AND COALESCE(u.local_password, 1)=1"
+        " AND u.id<>?", bgs)]
+    saved = {o: (await db.fetchone("SELECT local_password FROM users WHERE id=?", o))["local_password"] for o in others}
+    try:
+        for o in others:                   # ceilalţi Owneri permanenţi devin SSO-only (restauraţi mai jos)
+            await db.execute("UPDATE users SET local_password=0 WHERE id=?", o)
+        authz.bump_epoch()
+        check("pregătire: bgs e contul break-glass, dar NU singurul Owner permanent",
+              await authz.last_break_glass(bgs) and await authz.owner_count(exclude_user=bgs) >= 1,
+              "%d %d" % (await authz.owner_count(with_local_password=True), await authz.owner_count()))
+        await sso_login("sub-bgs", "bgs@x.co", ["nothing"])
+        check("login SSO cu grupuri care nu mai dau Owner: legătura Owner (sso) a contului break-glass RĂMÂNE",
+              ("owner", "all", "", "sso") in await bindings("bgs@x.co"), str(await bindings("bgs@x.co")))
+        au = await db.fetchone("SELECT detail FROM audit_log WHERE actor_id=? AND detail LIKE 'SSO roles synced%'"
+                               " ORDER BY ts DESC, rowid DESC LIMIT 1", bgs)
+        check("…rândul de audit „SSO roles synced” spune că a fost PĂSTRATĂ (KEPT break-glass Owner)",
+              au is not None and "KEPT break-glass Owner" in au["detail"], str(au and dict(au)))
+        check("…instanţa are în continuare un cont break-glass", await authz.owner_count(with_local_password=True) == 1)
+        await db.execute("UPDATE users SET local_password=1 WHERE id=?", osso)
+        authz.bump_epoch()
+        await sso_login("sub-bgs", "bgs@x.co", ["nothing"])
+        check("…cu alt Owner permanent CU parolă locală: legătura (sso) pleacă la sincronizare",
+              ("owner", "all", "", "sso") not in await bindings("bgs@x.co"), str(await bindings("bgs@x.co")))
+    finally:
+        for o, lp in saved.items():
+            await db.execute("UPDATE users SET local_password=? WHERE id=?", lp, o)
+        await U.unbind_all(bgs)
+        await U.unbind_all(osso)
 
 
 async def test_admin_cli():
@@ -630,6 +698,7 @@ async def main():
     await test_sso_only()
     await test_session_max()
     await test_break_glass_api()
+    await test_break_glass_sync()
     await test_admin_cli()
     await test_migration()
     await owner.aclose()

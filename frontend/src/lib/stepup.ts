@@ -60,7 +60,12 @@ export function lockTextKeys(reason: string | undefined | null): { title: string
 /** Redirect de pagină întreagă la IdP pentru un step-up SSO (acelaşi ca în api() la
     `host.needs2faSso`); întoarcerea restaurează hash-ul curent. */
 export function ssoStepupRedirect(hostId: number): void {
-  try { sessionStorage.setItem('wt_stepup_return', window.location.hash) } catch { /* */ }
+  try {
+    sessionStorage.setItem('wt_stepup_return', window.location.hash)
+    // un step-up de HOST nu redeschide Setările: ţinta lăsată de o schimbare de acces abandonată
+    // (lib/api.ts withAccessReauth, cheia `wt_settings_return`) ar fi consumată la întoarcere (RB-03 review)
+    if (hostId !== 0) sessionStorage.removeItem('wt_settings_return')
+  } catch { /* */ }
   window.location.href = '/api/oidc/login?intent=stepup&host_id=' + hostId
 }
 

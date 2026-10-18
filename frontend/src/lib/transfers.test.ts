@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import {
   RETENTION_BATCH, extFromMime, focusedTerminalRunsProgram, inboxName, registerInsertTarget, isGenericName, pasteSubject, pasteSubjectText,
   pasteToastKey, selectExpired, shellQuote, stampFor,
-  PASTE_CONTEXT_MS, capturePasteContext, insertPathOutcome, insertPathPasted, isSafeToType, pasteContextStale, pasteStaleKey,
+  PASTE_CONTEXT_BLIND_MS, PASTE_CONTEXT_MS, capturePasteContext, insertPathOutcome, insertPathPasted, isSafeToType, pasteContextStale, pasteStaleKey,
   typeIntoPasted, typePastedPaths, typingElsewhere,
 } from './transfers'
 
@@ -218,10 +218,11 @@ describe('paste context (capturePasteContext / pasteContextStale / typeIntoPaste
   interface Fake {
     sent: string[]; seq: number; active: boolean; epoch: number; kbd: boolean
     bracketed: boolean; tmux: boolean; atPrompt: boolean; alt: boolean; running: boolean; refuse: boolean
+    integrated: boolean
   }
   const mk = (o: Partial<Fake> = {}) => {
     const f: Fake = { sent: [], seq: 0, active: true, epoch: 0, kbd: true, bracketed: false, tmux: true,
-      atPrompt: false, alt: false, running: true, refuse: false, ...o }
+      atPrompt: false, alt: false, running: true, refuse: false, integrated: true, ...o }
     const target = {
       // ca SessionView: o trimitere reuşită creşte contorul de input; garda reţinută → false
       send: (x: string) => { if (f.refuse) return false; f.sent.push(x); f.seq++; return true },
@@ -234,6 +235,7 @@ describe('paste context (capturePasteContext / pasteContextStale / typeIntoPaste
       isActive: () => f.active,
       activeEpoch: () => f.epoch,
       keyboardHere: () => f.kbd,
+      shellIntegration: () => f.integrated,
     }
     return { f, target }
   }
@@ -380,6 +382,50 @@ describe('paste context (capturePasteContext / pasteContextStale / typeIntoPaste
   it('pasteStaleKey: cheie i18n per motiv', () => {
     expect(pasteStaleKey('input')).toBe('transfers.pasteStale.input')
     expect(pasteStaleKey('focus')).toBe('transfers.pasteStale.focus')
+    expect(pasteStaleKey('blind')).toBe('transfers.pasteStale.blind')
+  })
+
+  describe('FS-03 (audit 2026-10-17): sub tmux fără shell integration citirile de mod sunt oarbe → fereastra scade la 10 s', () => {
+    // panou tmux fără OSC 133: nici prompt, nici comandă văzută — exact starea în care `mode` nu poate deveni stale
+    const blind = { tmux: true, integrated: false, running: false, atPrompt: false }
+    it('orb: în 10 s tastează; la 10 s + 1 ms → stale `blind` (nu `timeout`), regulile vechi, nimic tastat fără prompt', () => {
+      const { f, ctx } = setup('b1', blind)
+      expect(insertPathPasted(ctx, '/x/a.png', T0 + PASTE_CONTEXT_BLIND_MS)).toEqual({ outcome: 'typed', stale: null })
+      expect(f.sent).toHaveLength(1)
+      const { f: f2, ctx: c2 } = setup('b2', blind)
+      expect(pasteContextStale(c2, T0 + PASTE_CONTEXT_BLIND_MS + 1)).toBe('blind')      // ÎNAINTE: null → tasta până la 30 s
+      expect(insertPathPasted(c2, '/x/a.png', T0 + PASTE_CONTEXT_BLIND_MS + 1)).toEqual({ outcome: 'notPrompt', stale: 'blind' })
+      expect(f2.sent).toEqual([])
+      // peste 30 s motivul rămâne cel general
+      expect(pasteContextStale(c2, T0 + PASTE_CONTEXT_MS + 1)).toBe('timeout')
+    })
+    it('cu shell integration văzută (tracker.integrated) sub tmux: fereastra de 30 s rămâne', () => {
+      const { ctx } = setup('b3', { tmux: true, integrated: true, running: false, atPrompt: false })
+      expect(pasteContextStale(ctx, T0 + PASTE_CONTEXT_MS)).toBeNull()
+    })
+    it('fără citirea nouă, dar cu un marcaj OSC 133 real la paste (prompt / comandă) → integrarea e dovedită: 30 s', () => {
+      const a = setup('b4', { tmux: true, integrated: false, running: true })
+      expect(pasteContextStale(a.ctx, T0 + PASTE_CONTEXT_MS)).toBeNull()
+      const b = setup('b5', { tmux: true, integrated: false, running: false, atPrompt: true })
+      expect(pasteContextStale(b.ctx, T0 + PASTE_CONTEXT_MS)).toBeNull()
+    })
+    it('fără tmux (pty / telnet) citirile sunt reale: 30 s chiar fără integration', () => {
+      const { ctx } = setup('b6', { tmux: false, integrated: false, running: false, atPrompt: false })
+      expect(pasteContextStale(ctx, T0 + PASTE_CONTEXT_MS)).toBeNull()
+    })
+    it('ţintă fără `shellIntegration` (SessionView vechi) sub tmux = oarbă (fail-closed)', () => {
+      const sent: string[] = []
+      reg('b7', { send: (x: string) => { sent.push(x); return true }, bracketedPaste: () => false, viaTmux: () => true,
+                  inputSeq: () => 0, isActive: () => true, activeEpoch: () => 0, keyboardHere: () => true })
+      const ctx = capturePasteContext('b7', T0)!
+      expect(pasteContextStale(ctx, T0 + PASTE_CONTEXT_BLIND_MS)).toBeNull()
+      expect(pasteContextStale(ctx, T0 + PASTE_CONTEXT_BLIND_MS + 1)).toBe('blind')
+    })
+    it('o citire care aruncă = fără integration (fail-closed)', () => {
+      const { target, ctx } = setup('b8', { tmux: true, integrated: false, running: false })
+      target.shellIntegration = () => { throw new Error('x') }
+      expect(pasteContextStale(ctx, T0 + PASTE_CONTEXT_BLIND_MS + 1)).toBe('blind')
+    })
   })
 })
 

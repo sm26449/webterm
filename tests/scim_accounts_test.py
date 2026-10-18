@@ -32,7 +32,7 @@ os.environ.pop("WEBTERM_OIDC_ROLE_MAP", None)
 os.environ.pop("WEBTERM_OIDC_SSO_ONLY", None)
 
 import rbac_util as U  # noqa: E402
-from app import admin, api, authz, core, db, oidc, oidc_api, scim, security, webauthn_api  # noqa: E402
+from app import accounts, admin, api, authz, core, db, oidc, oidc_api, scim, security, webauthn_api  # noqa: E402
 from app.errors import ApiError  # noqa: E402
 
 check = U.Checker()
@@ -906,6 +906,317 @@ async def test_audit_sc01(owner, c):
           "%s %s" % (r.status_code, r.text[:120]))
 
 
+async def map_group(owner, group, role, kind="all", value=""):
+    r = await owner.post("/api/settings/oidc-roles", json={
+        "group": group, "role": role, "scope_kind": kind, "scope_value": value, "current_password": PW})
+    assert r.status_code == 200, r.text
+
+
+async def binding_tuples(uid):
+    return sorted((r["key"], r["scope_kind"], r["scope_value"], r["source"], r["expires"]) for r in await db.fetchall(
+        "SELECT r.key, b.scope_kind, b.scope_value, b.source, b.expires FROM role_bindings b"
+        " JOIN roles r ON r.id=b.role_id WHERE b.user_id=?", uid))
+
+
+async def offboard_state(uid):
+    """What SC-02 compares between `active:false` and DELETE: disabled, bindings, group memberships."""
+    row = await db.fetchone("SELECT COALESCE(disabled, 0) AS d FROM users WHERE id=?", uid)
+    groups = sorted(r["group_id"] for r in await db.fetchall(
+        "SELECT group_id FROM scim_group_members WHERE user_id=?", uid))
+    return row["d"], await binding_tuples(uid), groups
+
+
+async def test_sc02_delete_keeps_bindings(owner, c):
+    """SC-02 (audit 2026-10-17, decizia owner-ului): DELETE lasă contul EXACT ca active:false —
+    dezactivat, cu legăturile de rol ŞI apartenenţele la grupurile SCIM păstrate — ca Re-enable să
+    aducă înapoi fiecare rol, cum promit docs/UI. Înainte: DELETE scotea userul din grupuri şi
+    re-rula maparea → legăturile SSO dispăreau, persoana primea email „your access changed", iar
+    Owner-ul care dădea Re-enable primea un cont fără roluri."""
+    print("── SC-02: DELETE păstrează legăturile (ca active:false); Re-enable aduce rolurile înapoi")
+    await map_group(owner, "wt-db", "operator", "tag", "db")
+    dbhost = await U.add_host(owner, "dbbox", tags="db")
+    sids, uids = {}, {}
+    for n in ("eva", "evb"):
+        r = await c.post("/scim/v2/Users", json=ak_user(n, "%s@x.co" % n, ext="sub-" + n))
+        sids[n], uids[n] = r.json()["id"], await uid_of("%s@x.co" % n)
+        await U.bind(uids[n], "viewer", "all")              # o legătură dată de mână, pe lângă grup
+    r = await c.post("/scim/v2/Groups", json={"schemas": [scim.S_GROUP], "displayName": "wt-db",
+                                              "members": [{"value": sids["eva"]}, {"value": sids["evb"]}]})
+    check("pregătire: grupul wt-db cu eva şi evb → 201", r.status_code == 201, r.text[:160])
+    for n in ("eva", "evb"):
+        check("pregătire: %s are operator @ tag:db din grup + viewer manual" % n,
+              ("operator", "tag", "db", "sso", None) in await binding_tuples(uids[n])
+              and ("viewer", "all", "", "manual", None) in await binding_tuples(uids[n]),
+              str(await binding_tuples(uids[n])))
+    before = await binding_tuples(uids["eva"])
+    n_sync = await audit_n("%SSO roles synced%eva@x.co%")
+    n_al = await n_alerts("sso_access_changed", "eva@x.co")
+    r = await c.delete("/scim/v2/Users/" + sids["eva"])
+    check("DELETE eva → 204", r.status_code == 204, r.text[:120])
+    row = await db.fetchone("SELECT disabled, disabled_by, scim_id, scim_managed FROM users WHERE id=?", uids["eva"])
+    check("…dezactivat (scim-delete), dezlegat (scim_id NULL), încă scim_managed",
+          row["disabled"] == 1 and row["disabled_by"] == "scim-delete" and row["scim_id"] is None
+          and row["scim_managed"] == 1, str(dict(row)))
+    check("…legăturile de rol sunt NESCHIMBATE (before == after), inclusiv cea din grupul SCIM",
+          await binding_tuples(uids["eva"]) == before, "%s → %s" % (before, await binding_tuples(uids["eva"])))
+    check("…apartenenţa la grupul SCIM rămâne",
+          await db.fetchone("SELECT 1 FROM scim_group_members WHERE user_id=?", uids["eva"]) is not None)
+    check("…nicio re-sincronizare: fără rând „SSO roles synced … removed” pentru eva",
+          await audit_n("%SSO roles synced%eva@x.co%") == n_sync,
+          str(await db.fetchall("SELECT detail FROM audit_log WHERE detail LIKE '%SSO roles synced%eva@x.co%'")))
+    check("…şi fără emailul „your access changed” către un cont dezactivat",
+          await n_alerts("sso_access_changed", "eva@x.co") == n_al)
+    check("…drepturile sunt GOALE cât e dezactivat (legăturile nu se citesc)",
+          "session.open" not in await authz.perms_on(await authz.grants_for_user(uids["eva"]), dbhost))
+    # active:false pe evb lasă ACEEAŞI stare (în afară de scim_id, pe care doar DELETE îl goleşte)
+    r = await c.patch("/scim/v2/Users/" + sids["evb"], json=deactivate())
+    check("active:false pe evb → 200", r.status_code == 200 and r.json()["active"] is False, r.text[:120])
+    sa, sb = await offboard_state(uids["eva"]), await offboard_state(uids["evb"])
+    check("DELETE şi active:false lasă aceeaşi stare: dezactivat, aceleaşi legături, aceleaşi grupuri",
+          sa[0] == sb[0] == 1 and sa[1] == sb[1] and sa[2] == sb[2], "%s vs %s" % (sa, sb))
+    # Re-enable de Owner: rolurile sunt din nou EFECTIVE
+    r = await owner.post("/api/users/%d/enable" % uids["eva"], json={"current_password": PW})
+    check("Re-enable (Owner, Settings) → 200", r.status_code == 200, r.text[:160])
+    g = await authz.grants_for_user(uids["eva"])
+    check("…operator @ tag:db din grup e din nou efectiv pe hostul db",
+          "session.open" in await authz.perms_on(g, dbhost), str(await authz.perms_on(g, dbhost)))
+    check("…şi viewer manual @ all", "session.watch" in g.all_host_perms, str(g.all_host_perms))
+    # re-provizionarea de către IdP readoptă acelaşi cont, cu legăturile lui
+    r = await c.post("/scim/v2/Users", json=ak_user("eva", "eva@x.co", ext="sub-eva"))
+    check("re-crearea lui eva → acelaşi cont, aceleaşi legături", r.status_code == 201
+          and await uid_of("eva@x.co") == uids["eva"] and await binding_tuples(uids["eva"]) == before, r.text[:160])
+    # igienă: evb înapoi activ
+    await c.patch("/scim/v2/Users/" + sids["evb"], json=deactivate(True))
+
+
+async def test_rb06_scim_break_glass(owner, c):
+    """RB-06 (audit 2026-10-17): IdP-ul nu poate dezactiva ultimul Owner permanent CU PAROLĂ
+    LOCALĂ (contul break-glass) — nici prin active:false, nici prin DELETE. În practică SCIM nu
+    vede un cont cu parolă locală (`_user`, adopţia re-verificată în UPDATE); verificăm plasa
+    (accounts.disable / _active_precheck) direct şi că HTTP-ul nu ajunge la el (404)."""
+    print("── RB-06: SCIM nu poate dezactiva contul break-glass (plasă fail-closed, auditată, alertată)")
+    # stare reală: parolă locală pusă pe un Owner venit din SSO care era ultimul Owner — /api/account
+    # new_password PĂSTREAZĂ legătura Owner (source=sso), deci OwnerLevel nu se aplică
+    bg = await U.add_user("bg-scim@x.co", bindings=[("owner", "all", "")])
+    await db.execute("UPDATE role_bindings SET source='sso' WHERE user_id=?", bg)
+    others = [r["id"] for r in await db.fetchall(
+        "SELECT DISTINCT u.id FROM users u JOIN role_bindings b ON b.user_id=u.id JOIN roles r ON r.id=b.role_id"
+        " WHERE r.key='owner' AND b.scope_kind='all' AND b.expires IS NULL AND COALESCE(u.local_password, 1)=1"
+        " AND COALESCE(u.disabled, 0)=0 AND u.id<>?", bg)]
+    saved = {o: (await db.fetchone("SELECT local_password FROM users WHERE id=?", o))["local_password"] for o in others}
+    for o in others:
+        await db.execute("UPDATE users SET local_password=0 WHERE id=?", o)
+    authz.bump_epoch()
+    check("pregătire: bg-scim e singurul break-glass, dar nu singurul Owner permanent",
+          await authz.owner_count(with_local_password=True) == 1 and await authz.owner_count() >= 2)
+    n_au = await audit_n("%refused to disable bg-scim@x.co: the last permanent Owner with a local password%")
+    try:
+        try:
+            await accounts.disable(bg, by="scim", actor=scim.ACTOR, ip="203.0.113.7", reason="SCIM active=false")
+            got = None
+        except accounts.LastBreakGlass as e:
+            got = e
+        check("accounts.disable(by='scim') pe contul break-glass → LastBreakGlass", got is not None, repr(got))
+        check("…contul rămâne activ", (await db.fetchone("SELECT COALESCE(disabled,0) AS d FROM users WHERE id=?", bg))["d"] == 0)
+        check("…auditat (rând 400, via scim)", await audit_n("%refused to disable bg-scim@x.co: the last permanent Owner with a local password%") == n_au + 1
+              and await db.fetchone("SELECT 1 FROM audit_log WHERE status=400 AND via='scim' AND detail LIKE '%bg-scim@x.co%break-glass%'") is not None)
+        check("…alertă CRITICĂ scim_last_break_glass_refused", await alert_of("scim_last_break_glass_refused", "critical") is not None)
+        try:
+            await scim._active_precheck(bg, False, "203.0.113.7")
+            pe = None
+        except scim.ScimError as e:
+            pe = e
+        check("_active_precheck(active=false) → 400 SCIM, scimType mutability (nu 409: rulează şi în POST /Users)",
+              pe is not None and pe.status_code == 400 and pe.scim_type == "mutability"
+              and "break-glass" in pe.detail, repr(pe and (pe.status_code, pe.scim_type, pe.detail[:80])))
+        try:
+            await accounts.disable(bg, by="scim-delete", actor=scim.ACTOR, ip="203.0.113.7", reason="SCIM delete")
+            got = None
+        except accounts.LastBreakGlass as e:
+            got = e
+        check("…la fel pe calea DELETE (by='scim-delete')", got is not None)
+        # P1 review: fiecare refuz e auditat, dar alerta CRITICĂ pleacă o dată pe oră per cont —
+        # Authentik reia toată pagina de sincronizare periodic; un IdP configurat greşit nu
+        # trebuie să pagineze flota la fiecare interval pentru acelaşi refuz
+        check("…trei refuzuri = trei rânduri de audit, dar O singură alertă (throttle 1 h per cont)",
+              await audit_n("%refused to disable bg-scim@x.co: the last permanent Owner with a local password%") == n_au + 3
+              and await n_alerts("scim_last_break_glass_refused", "bg-scim@x.co") == 1,
+              "audit=%d alerts=%d" % (await audit_n("%refused to disable bg-scim@x.co%"),
+                                      await n_alerts("scim_last_break_glass_refused", "bg-scim@x.co")))
+        # HTTP: chiar legat forţat de SCIM (doar prin DB), un cont cu parolă locală e invizibil
+        await db.execute("UPDATE users SET scim_managed=1, scim_id='forced-bg' WHERE id=?", bg)
+        r = await c.patch("/scim/v2/Users/forced-bg", json=deactivate())
+        r2 = await c.delete("/scim/v2/Users/forced-bg")
+        check("PATCH active:false / DELETE pe el prin HTTP → 404 (SCIM nu vede conturile cu parolă), rămâne activ",
+              r.status_code == 404 and r2.status_code == 404
+              and (await db.fetchone("SELECT COALESCE(disabled,0) AS d FROM users WHERE id=?", bg))["d"] == 0,
+              "%s %s" % (r.status_code, r2.status_code))
+        await db.execute("UPDATE users SET scim_managed=0, scim_id=NULL WHERE id=?", bg)
+        # cu un al doilea Owner PERMANENT cu parolă locală: dezactivarea trece
+        oid = await uid_of(U.OWNER_EMAIL)
+        await db.execute("UPDATE users SET local_password=1 WHERE id=?", oid)
+        authz.bump_epoch()
+        res = await accounts.disable(bg, by="scim", actor=scim.ACTOR, ip="203.0.113.7", reason="SCIM active=false")
+        check("cu alt Owner permanent cu parolă: accounts.disable trece", res is not None
+              and (await db.fetchone("SELECT COALESCE(disabled,0) AS d FROM users WHERE id=?", bg))["d"] == 1, str(res))
+    finally:
+        for o, lp in saved.items():
+            await db.execute("UPDATE users SET local_password=? WHERE id=?", lp, o)
+        await db.execute("UPDATE users SET disabled=0, disabled_at=NULL, disabled_by=NULL WHERE id=?", bg)
+        await U.unbind_all(bg)
+
+
+async def test_flt03_passwd_detaches(owner, c):
+    """FL-T03 (2): `python3 -m app.admin passwd` pe un cont SCIM îl desprinde (CHANGELOG 3.6.11):
+    scim_id NULL, scim_managed 0, local_password 1, scos din grupurile SCIM, audit /admin/passwd."""
+    print("── FL-T03: admin passwd pe un cont SCIM → desprins, cu parolă locală, auditat")
+    r = await c.post("/scim/v2/Users", json=ak_user("pw", "pw@x.co", ext="sub-pw"))
+    sid, uid = r.json()["id"], await uid_of("pw@x.co")
+    r = await c.post("/scim/v2/Groups", json={"schemas": [scim.S_GROUP], "displayName": "wt-pw",
+                                              "members": [{"value": sid}]})
+    check("pregătire: cont SCIM, membru într-un grup SCIM", r.status_code == 201
+          and await db.fetchone("SELECT 1 FROM scim_group_members WHERE user_id=?", uid) is not None)
+    old_hash = (await db.fetchone("SELECT password_hash FROM users WHERE id=?", uid))["password_hash"]
+    real = admin._read_new_password
+    admin._read_new_password = lambda: "Parola-noua-123"
+    try:
+        await admin.cmd_passwd(argparse.Namespace(email="pw@x.co"))
+    finally:
+        admin._read_new_password = real
+    row = await db.fetchone("SELECT scim_id, scim_managed, local_password, password_hash FROM users WHERE id=?", uid)
+    check("scim_id IS NULL, scim_managed=0, local_password=1, hash schimbat",
+          row["scim_id"] is None and row["scim_managed"] == 0 and row["local_password"] == 1
+          and row["password_hash"] != old_hash, str(dict(row)))
+    check("…parola nouă chiar merge", security.verify_password("Parola-noua-123", row["password_hash"]))
+    check("…scos din grupurile SCIM", await db.fetchone("SELECT 1 FROM scim_group_members WHERE user_id=?", uid) is None)
+    au = await db.fetchone("SELECT actor, via, detail FROM audit_log WHERE path='/admin/passwd' AND actor_id=?", uid)
+    check("…rând de audit /admin/passwd „detached from SCIM”", au is not None and "detached from SCIM" in au["detail"]
+          and au["via"] == "cli", str(au and dict(au)))
+    check("…SCIM nu-l mai vede (GET → 404) şi nu-l mai poate dezactiva",
+          (await c.get("/scim/v2/Users/" + sid)).status_code == 404
+          and (await c.patch("/scim/v2/Users/" + sid, json=deactivate())).status_code == 404)
+    # RB-06 (rbac-sso.md, revizuirea P1): `admin passwd` pe un cont a cărui singură legătură Owner
+    # vine din SSO şi care e ULTIMUL Owner permanent nu lasă instanţa fără Owner — legătura
+    # Owner @ all rămâne (aceeaşi regulă ca în /api/account new_password); celelalte sso pleacă
+    pw2 = await U.add_user("pw2@x.co", bindings=[("owner", "all", ""), ("viewer", "all", "")])
+    await db.execute("UPDATE role_bindings SET source='sso' WHERE user_id=?", pw2)
+    await db.execute("UPDATE users SET local_password=0, sso_subject='sub-pw2' WHERE id=?", pw2)
+    parked = [r["id"] for r in await db.fetchall(
+        "SELECT b.id FROM role_bindings b JOIN roles r ON r.id=b.role_id WHERE r.key='owner'"
+        " AND b.scope_kind='all' AND b.expires IS NULL AND b.user_id<>?", pw2)]
+    for bid in parked:                     # every other permanent Owner becomes time-bound (restored below)
+        await db.execute("UPDATE role_bindings SET expires=? WHERE id=?", time.time() + 3600, bid)
+    authz.bump_epoch()
+    try:
+        check("pregătire: pw2 e singurul Owner permanent, cu legătura Owner din SSO",
+              await authz.owner_count(exclude_user=pw2) == 0 and await authz.owner_count() == 1)
+        admin._read_new_password = lambda: "Parola-noua-123"
+        try:
+            await admin.cmd_passwd(argparse.Namespace(email="pw2@x.co"))
+        finally:
+            admin._read_new_password = real
+        t = await binding_tuples(pw2)
+        check("admin passwd pe ULTIMUL Owner: legătura Owner @ all (sso) RĂMÂNE, viewer (sso) pleacă",
+              t == [("owner", "all", "", "sso", None)], str(t))
+        check("…acum e cont break-glass (Owner permanent cu parolă locală)",
+              await authz.owner_count(with_local_password=True) == 1 and await authz.last_break_glass(pw2))
+    finally:
+        for bid in parked:
+            await db.execute("UPDATE role_bindings SET expires=NULL WHERE id=?", bid)
+        authz.bump_epoch()
+    # RB-06 (revizuirea P1): şi ultimul Owner permanent CU PAROLĂ LOCALĂ îşi păstrează legătura
+    # Owner (sso) la `admin passwd` când ceilalţi Owneri permanenţi sunt SSO-only — altfel
+    # instanţa rămâne doar cu Owneri pe care o pană a IdP-ului îi lasă afară
+    pw4 = await U.add_user("pw4@x.co", bindings=[("owner", "all", ""), ("viewer", "all", "")])
+    await db.execute("UPDATE role_bindings SET source='sso' WHERE user_id=?", pw4)
+    await db.execute("UPDATE users SET local_password=0, sso_subject='sub-pw4' WHERE id=?", pw4)
+    bg_others = [r["id"] for r in await db.fetchall(
+        "SELECT DISTINCT u.id FROM users u JOIN role_bindings b ON b.user_id=u.id JOIN roles r ON r.id=b.role_id"
+        " WHERE r.key='owner' AND b.scope_kind='all' AND b.expires IS NULL AND COALESCE(u.local_password, 1)=1"
+        " AND u.id<>?", pw4)]
+    saved_lp = {o: (await db.fetchone("SELECT local_password FROM users WHERE id=?", o))["local_password"]
+                for o in bg_others}
+    try:
+        for o in bg_others:                # ceilalţi Owneri permanenţi devin SSO-only (restauraţi mai jos)
+            await db.execute("UPDATE users SET local_password=0 WHERE id=?", o)
+        authz.bump_epoch()
+        check("pregătire: alţi Owneri permanenţi există, dar toţi SSO-only",
+              await authz.owner_count(exclude_user=pw4) >= 1 and await authz.owner_count(with_local_password=True) == 0,
+              "%d %d" % (await authz.owner_count(exclude_user=pw4), await authz.owner_count(with_local_password=True)))
+        admin._read_new_password = lambda: "Parola-noua-123"
+        try:
+            await admin.cmd_passwd(argparse.Namespace(email="pw4@x.co"))
+        finally:
+            admin._read_new_password = real
+        t = await binding_tuples(pw4)
+        check("admin passwd pe ultimul Owner permanent CU PAROLĂ (ceilalţi SSO-only): legătura Owner (sso) RĂMÂNE, viewer pleacă",
+              t == [("owner", "all", "", "sso", None)], str(t))
+        check("…pw4 e acum contul break-glass", await authz.last_break_glass(pw4))
+    finally:
+        for o, lp in saved_lp.items():
+            await db.execute("UPDATE users SET local_password=? WHERE id=?", lp, o)
+        authz.bump_epoch()
+    await U.unbind_all(pw4)
+    # cu alt Owner permanent CU PAROLĂ prezent, legătura Owner din SSO pleacă ca oricare alta
+    pw3 = await U.add_user("pw3@x.co", bindings=[("owner", "all", "")])
+    await db.execute("UPDATE role_bindings SET source='sso' WHERE user_id=?", pw3)
+    await db.execute("UPDATE users SET local_password=0, sso_subject='sub-pw3' WHERE id=?", pw3)
+    authz.bump_epoch()
+    admin._read_new_password = lambda: "Parola-noua-123"
+    try:
+        await admin.cmd_passwd(argparse.Namespace(email="pw3@x.co"))
+    finally:
+        admin._read_new_password = real
+    check("…dar cu alt Owner permanent: legătura Owner (sso) e scoasă", await binding_tuples(pw3) == [],
+          str(await binding_tuples(pw3)))
+    await U.unbind_all(pw2)
+
+
+async def test_flt03_recreated_in_idp(owner, c):
+    """FL-T03 (3), CHANGELOG 3.6.11: „A person re-created in the IdP (new externalId) stays
+    disabled in WebTerm until an Owner deletes the old account — on purpose (fail closed); the
+    error now says so." Şi: emailul unui cont ADOPTAT nu se schimbă prin SCIM (text explicit)."""
+    print("── FL-T03: re-creat în IdP (externalId nou) → rămâne dezactivat până un Owner şterge contul vechi")
+    await sso_login("sub-old", "old@x.co")
+    old = await uid_of("old@x.co")
+    await U.bind(old, "viewer", "all")
+    r = await c.post("/scim/v2/Users", json=ak_user("old", "old@x.co", ext="sub-old"))
+    sid = r.json()["id"]
+    check("pregătire: contul SSO old e adoptat", r.status_code == 201 and await uid_of("old@x.co") == old)
+    r = await c.put("/scim/v2/Users/" + sid, json=ak_user("old", "old.renamed@x.co", ext="sub-old"))
+    check("PUT cu email nou pe cont ADOPTAT → 400 mutability, textul spune că se schimbă doar în WebTerm",
+          r.status_code == 400 and r.json().get("scimType") == "mutability"
+          and "existed before SCIM took it over" in r.json().get("detail", "")
+          and "only be changed in WebTerm" in r.json().get("detail", ""), r.text[:200])
+    check("…emailul vechi rămâne", await uid_of("old@x.co") == old and await uid_of("old.renamed@x.co") is None)
+    r = await c.put("/scim/v2/Users/" + sid, json=ak_user("old", "old@x.co", ext="sub-old-v2"))
+    check("PUT cu externalId NOU pe cont activ → 400 mutability", r.status_code == 400
+          and r.json().get("scimType") == "mutability", r.text[:160])
+    r = await c.delete("/scim/v2/Users/" + sid)
+    check("IdP-ul şterge persoana → 204, dezactivat", r.status_code == 204
+          and (await db.fetchone("SELECT disabled FROM users WHERE id=?", old))["disabled"] == 1)
+    n_users = (await db.fetchone("SELECT COUNT(*) AS c FROM users"))["c"]
+    r = await c.post("/scim/v2/Users", json=ak_user("old", "old@x.co", ext="sub-old-v2"))
+    d = r.json().get("detail", "")
+    check("re-creat în IdP cu externalId nou → 400 mutability", r.status_code == 400
+          and r.json().get("scimType") == "mutability", r.text[:160])
+    check("…eroarea spune ce e de făcut: „delete the old WebTerm account (Settings → Users & roles)”",
+          "delete the old WebTerm account" in d and "Settings" in d and "re-activation included" in d, d[:240])
+    row = await db.fetchone("SELECT disabled, scim_id, scim_external_id FROM users WHERE id=?", old)
+    check("…contul vechi rămâne dezactivat, nelegat, cu externalId-ul vechi; niciun cont nou (fail closed)",
+          row["disabled"] == 1 and row["scim_id"] is None and row["scim_external_id"] == "sub-old"
+          and (await db.fetchone("SELECT COUNT(*) AS c FROM users"))["c"] == n_users, str(dict(row)))
+    check("…şi persoana NU poate intra prin SSO cu identitatea veche",
+          "sso_error=disabled" in (await sso_login("sub-old", "old@x.co")).headers.get("location", ""))
+    r = await owner.post("/api/users/%d/delete" % old, json={"current_password": PW})
+    check("un Owner şterge contul vechi → 200", r.status_code == 200, r.text[:160])
+    r = await c.post("/scim/v2/Users", json=ak_user("old", "old@x.co", ext="sub-old-v2"))
+    new = await uid_of("old@x.co")
+    check("…acum re-provizionarea reuşeşte: 201, cont NOU (alt id), activ, fără rolurile celui vechi",
+          r.status_code == 201 and new is not None and new != old and r.json()["active"] is True
+          and await binding_tuples(new) == [], "%s %s" % (r.status_code, r.text[:160]))
+
+
 async def main():
     await U.boot()
     owner = await U.owner_client()
@@ -922,6 +1233,10 @@ async def main():
     await test_rereview(owner, c)
     await test_rereview2(owner, c)
     await test_audit_sc01(owner, c)
+    await test_sc02_delete_keeps_bindings(owner, c)
+    await test_rb06_scim_break_glass(owner, c)
+    await test_flt03_passwd_detaches(owner, c)
+    await test_flt03_recreated_in_idp(owner, c)
     await c.aclose()
     await owner.aclose()
     await db.close()

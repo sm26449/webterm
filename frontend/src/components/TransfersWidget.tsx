@@ -44,8 +44,22 @@ export default function TransfersWidget(props: { hosts: Host[]; insertSid?: stri
   const jobs = useMemo(() => [...snap.values()], [snap])
   // citit sincron la montare ca layout-ul să nu „sară" după primul render
   const [collapsed, setCollapsed] = useState(() => lsGet(MIN_KEY) !== '0')
+  // Focusul la comutare (audit 2026-10-17, UI-07): pilula şi butonul „–" se DEMONTEAZĂ reciproc, deci
+  // Enter pe oricare lăsa focusul pe <body> — utilizatorul de tastatură / SR îşi pierdea locul la fiecare
+  // comutare. După un toggle făcut DE USER mutăm focusul pe controlul-pereche (pilulă ↔ „–"), în
+  // requestAnimationFrame (contrapartea există abia după commit). Auto-extinderea la un job nou NU
+  // trece pe aici: nu-i furăm focusul omului care tastează — regiunea live anunţă singură.
+  const pillRef = useRef<HTMLButtonElement>(null)
+  const minimizeRef = useRef<HTMLButtonElement>(null)
+  const focusAfter = useRef(false)
+  useEffect(() => {
+    if (!focusAfter.current) return
+    focusAfter.current = false
+    const raf = requestAnimationFrame(() => (collapsed ? pillRef : minimizeRef).current?.focus({ preventScroll: true }))
+    return () => cancelAnimationFrame(raf)
+  }, [collapsed])
   // toggle-ul manual PERSISTĂ (e o preferinţă); auto-extinderea de mai jos NU persistă
-  const toggle = () => setCollapsed((c) => { lsSet(MIN_KEY, c ? '0' : '1'); return !c })
+  const toggle = () => { focusAfter.current = true; setCollapsed((c) => { lsSet(MIN_KEY, c ? '0' : '1'); return !c }) }
 
   // Anunţuri (aria-live) — doar tranziţiile care contează (→stalled/→err/→done); progresul nu se
   // anunţă (ar vorbi la fiecare procent). Cu tab-ul în fundal, done/err dau şi o notificare de
@@ -142,7 +156,7 @@ export default function TransfersWidget(props: { hosts: Host[]; insertSid?: stri
       {/* regiune live permanentă cât există widgetul (goală când nu e nimic de spus) */}
       <div aria-live="polite" className="sr-only">{announce}</div>
       {collapsed ? (
-        <button type="button" onClick={toggle} aria-expanded={false}
+        <button ref={pillRef} type="button" onClick={toggle} aria-expanded={false}
           // numele accesibil CONŢINE textul vizibil (WCAG 2.5.3) + ce face apăsarea
           aria-label={`${t('jobs.title')}: ${summary} — ${t('transfers.expand')}`}
           title={t('transfers.chipTitle')}
@@ -163,7 +177,7 @@ export default function TransfersWidget(props: { hosts: Host[]; insertSid?: stri
               <button type="button" onClick={clearFinished} className={`${BTN} ml-auto text-slate-300`}
                 aria-label={t('transfers.clearFinished')}>{t('transfers.clearFinished')}</button>
             )}
-            <IconButton type="button" variant="ghostRaised" onClick={toggle} label={t('transfers.minimize')}
+            <IconButton ref={minimizeRef} type="button" variant="ghostRaised" onClick={toggle} label={t('transfers.minimize')}
               className={canClear ? undefined : 'ml-auto'}>
               {/* „–" = minimizează la pilulă (aria-label poartă sensul) */}
               <MinusIcon />

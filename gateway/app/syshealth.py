@@ -118,8 +118,8 @@ MESSAGES = {
     "helper_ok": "The host helper reports regularly",
     # roles (audit 2026-10-17: RB-01, FL-14)
     "no_owner": "No active account holds the Owner role over all hosts",
-    "no_permanent_owner": "No active account holds a PERMANENT Owner role over all hosts; the last time-bound Owner ends in {days} days",
-    "permanent_owner_expiring": "The last Owner over all hosts is time-bound and ends in {days} days; nobody holds a permanent Owner role",
+    "no_permanent_owner": "No active account holds a PERMANENT Owner role over all hosts; the last time-bound Owner ends in {days} day(s)",
+    "permanent_owner_expiring": "The last Owner over all hosts is time-bound and ends in {days} day(s); nobody holds a permanent Owner role",
     "permanent_owner_ok": "{count} account(s) hold a permanent Owner role over all hosts",
     "no_break_glass": "No active permanent Owner has a local password (no break-glass account)",
     "break_glass_ok": "{count} permanent Owner(s) can sign in with a local password (break-glass)",
@@ -785,10 +785,13 @@ async def c_roles_permanent_owner() -> Optional[Result]:
     latest = float(row["latest"]) if row and row["latest"] else 0.0
     if not latest:
         return Result("critical", "no_owner", rec="promote_owner", doc="break_glass")
-    days = int((latest - now) // 86400)
+    # audit 2026-10-17 P1: rounded UP, never floored — 23 h left said "ends in 0 days" (a binding
+    # that is still valid for most of a day is "1 day", the last one); `count` repeats it so the UI
+    # picks the plural form (i18n chooses .one/.few/.other on `count`), it is not shown by itself
+    days = max(1, -int(-(latest - now) // 86400))
     sev = "critical" if latest - now < OWNER_EXPIRY_SOON else "warning"
     key = "permanent_owner_expiring" if sev == "critical" else "no_permanent_owner"
-    return Result(sev, key, {"days": days}, rec="promote_owner", doc="break_glass")
+    return Result(sev, key, {"days": days, "count": days}, rec="promote_owner", doc="break_glass")
 
 
 async def c_roles_break_glass() -> Optional[Result]:
@@ -1055,16 +1058,52 @@ BY_ID = {c.id: c for c in CHECKS}
 
 # ── state + persistence ──────────────────────────────────────────────────────────────────────
 _rows: dict = {}              # id → the persisted row (dict), mirror of health_checks
+_persisted_at: dict = {}      # id → when its row was last written to health_checks (OP-13 refresh)
 _lock = asyncio.Lock()
 _last_manual = 0.0
 _loaded = False
 
 
-def _sig(r: Result) -> str:
-    """Everything the result says — a changed command or action is persisted at once, and
-    "mute until it changes" lifts on any change."""
-    return json.dumps([r.severity, r.key, r.params, sorted(r.hosts), r.rec, r.commands, r.action,
+# Params that are MEASUREMENTS of the same situation, not a different situation: an age that
+# ticks every minute, a free-disk percentage with one decimal, a clock skew, a count, days left.
+# They stay in `params` (shown, persisted) but not in the signature: with them in it, "mute until
+# it changes" lifted itself at the next 30 s tick and every such row was UPSERTed every tick
+# (audit 2026-10-17, OP-02 + OP-13). A new situation always moves something else — the severity,
+# the key, the hosts, a recommendation or a command — and that still changes the signature.
+MEASUREMENT_PARAMS = frozenset((
+    "age", "next", "pct", "free", "total", "free_pct", "size", "skew", "count", "days",
+    "behind", "minutes",
+))
+
+
+def _sig(r: Result, measurements: bool = False) -> str:
+    """What the result says, WITHOUT its measurement params (above) — the signature `changed_at`
+    and "mute until it changes" are compared on; a changed command or action still shows at once.
+    `measurements=True` gives the full one (the pre-3.6.18 form, what a row or mute written by an
+    older gateway still carries — _stable_sig strips it the same way before _apply compares)."""
+    params = r.params if measurements else {k: v for k, v in r.params.items()
+                                            if k not in MEASUREMENT_PARAMS}
+    return json.dumps([r.severity, r.key, params, sorted(r.hosts), r.rec, r.commands, r.action,
                        r.doc], sort_keys=True, separators=(",", ":"))
+
+
+def _stable_sig(stored) -> Optional[str]:
+    """A signature read back from a row (`sig`, `muted_sig`) in the measurement-free form of
+    _sig(). A row or mute written before 3.6.18 carries the full form, with the age/pct/count of
+    THAT moment in it — the exact string almost never comes back for the very checks OP-02 is
+    about, so the stored one is stripped the same way before it is compared (a `changed_at`
+    bump and a lifted "until it changes" mute at the first tick after the upgrade would be the
+    old bug once more). Anything that is not a signature comes back as it is."""
+    if not isinstance(stored, str) or not stored.startswith("["):
+        return stored
+    try:
+        parts = json.loads(stored)
+    except ValueError:
+        return stored
+    if not isinstance(parts, list) or len(parts) != 8 or not isinstance(parts[2], dict):
+        return stored
+    parts[2] = {k: v for k, v in parts[2].items() if k not in MEASUREMENT_PARAMS}
+    return json.dumps(parts, sort_keys=True, separators=(",", ":"))
 
 
 async def _load() -> None:
@@ -1073,6 +1112,8 @@ async def _load() -> None:
         return
     for r in await db.fetchall("SELECT * FROM health_checks"):
         _rows[r["id"]] = dict(r)
+        # the DB copy is as fresh as its checked_at: the periodic refresh counts from there
+        _persisted_at[r["id"]] = float(r["checked_at"] or 0)
     _loaded = True
 
 
@@ -1086,6 +1127,7 @@ async def _persist(row: dict) -> None:
         % (",".join(cols), ",".join("?" * len(cols)),
            ",".join("%s=excluded.%s" % (c, c) for c in cols[1:])),
         *[row.get(c) for c in cols])
+    _persisted_at[row["id"]] = time.time()
 
 
 def _is_muted(row: dict, now: float) -> bool:
@@ -1104,6 +1146,7 @@ async def _apply(check: Check, res: Optional[Result], now: float) -> None:
     if res is None:
         if check.id in _rows:
             _rows.pop(check.id, None)
+            _persisted_at.pop(check.id, None)
             await db.execute("DELETE FROM health_checks WHERE id=?", check.id)
         return
     if res.severity not in RANK:
@@ -1137,18 +1180,29 @@ async def _apply(check: Check, res: Optional[Result], now: float) -> None:
         row["first_failed_at"] = now
     elif not bad:
         row["first_failed_at"] = None
-    changed = prev.get("sig") != sig
+    # a row written before 3.6.18 carries the full signature (measurements included, as they
+    # were then): compared in the stripped form, so the same situation is not "a change" and a
+    # mute on it is re-keyed, not lifted (see _stable_sig)
+    changed = _stable_sig(prev.get("sig")) != sig
     if changed:
         row["changed_at"] = now
-    # mute "until it changes": a different result lifts it
-    if float(row.get("muted_until") or 0) == -1 and row.get("muted_sig") != sig:
-        row.update(muted_until=0, muted_sig=None, muted_by=None)
+    # mute "until it changes": a different result lifts it; a measurement that moved does not
+    if float(row.get("muted_until") or 0) == -1:
+        if _stable_sig(row.get("muted_sig")) == sig:
+            row["muted_sig"] = sig
+        else:
+            row.update(muted_until=0, muted_sig=None, muted_by=None)
     elif float(row.get("muted_until") or 0) > 0 and float(row["muted_until"]) <= now:
         row.update(muted_until=0, muted_sig=None, muted_by=None)
     alerted = await _maybe_alert(check, res, row, now)
     _rows[check.id] = row
-    dirty = any(prev.get(k) != v for k, v in row.items() if k != "checked_at")
-    if dirty or alerted or not prev or now - float(prev.get("checked_at") or 0) > PERSIST_EVERY:
+    # `params` alone (a measurement moved, the signature did not) is not worth a write every
+    # tick: the UI reads the in-memory row, the DB copy (the admin CLI `health` reads it) is
+    # refreshed every PERSIST_EVERY (OP-13). Counted from the last WRITE (_persisted_at), not
+    # from prev["checked_at"]: that one is the in-memory row's and moves every tick, so the
+    # refresh would never fire for a fast-tier check (review of the P1 fix)
+    dirty = any(prev.get(k) != v for k, v in row.items() if k not in ("checked_at", "params"))
+    if dirty or alerted or not prev or now - _persisted_at.get(check.id, 0.0) > PERSIST_EVERY:
         await _persist(row)
 
 
@@ -1463,6 +1517,7 @@ def attention(rs: list, now: Optional[float] = None) -> dict:
 def reset_for_tests() -> None:
     global _loaded, _last_manual, _HOST
     _rows.clear()
+    _persisted_at.clear()
     _loaded = False
     _last_manual = 0.0
     _HOST = {}

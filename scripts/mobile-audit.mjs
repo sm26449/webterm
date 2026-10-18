@@ -67,6 +67,9 @@ const MEASURE = () => {
     smallTargets: [],   // 24–44 px: `ux`
     tinyTargets: [],    // < 24 px: `a11y`, blocant
     covered: [],
+    textControls: [],   // câmpuri de text VIZIBILE sub 16 px: zoom la focus pe iOS (UI-04)
+    textControlsMore: 0, // câte au depăşit lista de mai sus — raportate ca număr, nu tăcute
+    coarse: matchMedia('(pointer: coarse)').matches,
     term: null,
   }
   const label = (el) =>
@@ -114,6 +117,30 @@ const MEASURE = () => {
       out.tinyTargets.push({ el: label(el), w: Math.round(r.width), h: Math.round(r.height) })
     } else if (min < 44 && out.smallTargets.length < 15) {
       out.smallTargets.push({ el: label(el), w: Math.round(r.width), h: Math.round(r.height) })
+    }
+  }
+
+  // Controale de text sub 16 px (audit 2026-10-17, UI-04): Safari iOS măreşte pagina la focus pe orice
+  // câmp cu fontul mai mic, iar layout-ul fix al terminalului rămâne mărit. index.css le ridică pe toate
+  // printr-o regulă globală pe `(pointer: coarse)`; aici MĂSURĂM, pe fiecare ecran atins, că n-a scăpat
+  // niciunul (clasă ad-hoc cu specificitate mai mare, stil inline, !important). Până acum se verificau
+  // doar cele două câmpuri de login. Doar controalele reale şi vizibile: textarea-ul ascuns al xterm-ului
+  // (0×0) şi cel al lui Monaco (1×1, font inline egal cu al editorului) nu sunt câmpuri ale aplicaţiei.
+  if (out.coarse) {
+    const NOT_TEXT = new Set(['checkbox', 'radio', 'range', 'button', 'submit', 'reset', 'file', 'color', 'image', 'hidden'])
+    for (const el of document.querySelectorAll('input, select, textarea')) {
+      if (el.tagName === 'INPUT' && NOT_TEXT.has((el.getAttribute('type') || 'text').toLowerCase())) continue
+      if (el.classList.contains('xterm-helper-textarea') || el.closest('.monaco-editor')) continue
+      const r = el.getBoundingClientRect()
+      if (r.width < 2 || r.height < 2) continue
+      if (r.top > vh || r.bottom < 0) continue
+      const s = getComputedStyle(el)
+      if (s.visibility === 'hidden' || s.opacity === '0') continue
+      const px = parseFloat(s.fontSize)
+      if (px >= 16) continue
+      // lista e plafonată ca să nu umple log-ul, dar plafonul NU e tăcut: ce depăşeşte se numără
+      if (out.textControls.length < 20) out.textControls.push({ el: label(el), px })
+      else out.textControlsMore++
     }
   }
 
@@ -175,6 +202,7 @@ async function auditDevice(cfg) {
   if (cfg.theme) await page.addInitScript((th) => { try { localStorage.setItem('wt_theme', th) } catch { /**/ } }, cfg.theme)
   const errors = []
   const reached = new Set()
+  const madeSids = []        // sesiunile create de acest device (închise în `finally`)
   // telefon în portret (sub `sm`): aici foaia, lista de taburi şi keybar-ul pe 2 rânduri sunt
   // OBLIGATORII — o etapă sărită e bug, ca şi celelalte din REQUIRED
   const isPhone = (cfg.device.viewport?.width ?? 1024) < 640
@@ -183,9 +211,15 @@ async function auditDevice(cfg) {
   page.on('pageerror', (e) => errors.push(String(e).slice(0, 120)))
 
   const shot = (n) => page.screenshot({ path: `${OUT}/${cfg.name}-${n}.png`, fullPage: false })
+  let fineNoted = false   // „pointer fin" se spune o dată per device, nu la fiecare ecran
   const check = async (screen) => {
     const m = await page.evaluate(MEASURE)
     if (m.overflowX) note(cfg.name, screen, 'bug', `scroll orizontal (${m.docScrollW}px > ${m.vw}px)`)
+    // UI-04: orice câmp de text vizibil sub 16 px e bug (zoom la focus pe iOS); pe un pointer fin
+    // regula din index.css nu se aplică şi nici verificarea — spus explicit, nu trecut drept „ok"
+    for (const c of m.textControls) note(cfg.name, screen, 'bug', `câmp de text de ${c.px}px (< 16px → zoom la focus pe iOS, UI-04): ${c.el}`)
+    if (m.textControlsMore) note(cfg.name, screen, 'info', `încă ${m.textControlsMore} câmpuri sub 16px neafişate (lista e plafonată la 20)`)
+    if (!m.coarse && !fineNoted) { fineNoted = true; note(cfg.name, screen, 'info', 'pointer fin: verificarea „câmpuri ≥ 16px" nu se aplică pe acest device') }
     for (const o of m.offscreen) note(cfg.name, screen, 'bug', `element în afara ecranului: ${o.el}`, o)
     for (const c of m.covered) note(cfg.name, screen, 'bug', `buton acoperit: ${c.el} ← ${c.acoperit_de}`)
     // fără plafoane tăcute: spunem când o verificare a fost sărită, nu o trecem drept „ok"
@@ -430,6 +464,10 @@ async function auditDevice(cfg) {
       await newSession.click()
       await page.waitForSelector('.xterm-screen', { timeout: 20000 })
       await page.waitForTimeout(2500)
+      // sesiunea e a acestui device: o închidem la final (vezi `finally`), altfel 11 device-uri +
+      // e2e + a11y pe acelaşi host ating plafonul de sesiuni (core.MAX_SESSIONS_HINT = 32) şi
+      // ultimele device-uri nu mai pot deschide niciuna (3.6.18)
+      madeSids.push(await page.evaluate(() => location.hash.replace('#/s/', '')))
       const m = await check('session')
       reached.add('session')
       await shot('05-sesiune')
@@ -742,6 +780,15 @@ async function auditDevice(cfg) {
     if (missing) {
       note(cfg.name, missing, 'bug',
         `etapa "${missing}" nu s-a rulat, deci nu a fost auditată${blocker ? ` — ${blocker}` : ''}`)
+    }
+    // sesiunile deschise de acest device se închid (best-effort): hostul rămâne sub plafon
+    for (const sid of madeSids) {
+      if (!/^[A-Za-z0-9_-]{8,}$/.test(sid)) continue
+      // kill (sesiunea e vie; DELETE pe una vie răspunde 409 session.live), apoi ştergerea rândului
+      await page.evaluate(async (id) => {
+        try { await fetch('/api/sessions/' + id + '/kill', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: '{}' }) } catch { /**/ }
+        try { await fetch('/api/sessions/' + id, { method: 'DELETE', credentials: 'same-origin' }) } catch { /**/ }
+      }, sid).catch(() => {})
     }
     await browser.close()
   }

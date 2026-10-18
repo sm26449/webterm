@@ -155,9 +155,18 @@ async def review_regressions(owner, adm, a, b):
     await c.aclose()
     await sso_login("sub-ceo", "ceo@corp.co", ["wt-owners"])
     check("SSO-only: acum grupul îi dă Owner", ("owner", "all", "", "sso") in await sso_set("ceo@corp.co"))
-    # (b) setarea unei parole locale scoate IMEDIAT rolurile din grupuri
+    # audit P1 (RB-03): un token de automatizare trece prin ACEEAŞI poartă ca o schimbare de acces —
+    # înainte ruta verifica doar parola locală, deci un Owner SSO-only nu putea crea tokenuri deloc
     ceo = await sso_login("sub-ceo", "ceo@corp.co", ["wt-owners"])
+    await db.execute("UPDATE web_sessions SET device_new=0 WHERE user_id=?", uid_ceo)   # al doilea factor: dispozitiv cunoscut
+    r = await ceo.post("/api/tokens", json={"name": "ci", "scopes": ["read"], "days": 30})
+    check("RB-03: Owner SSO-only, POST /api/tokens fără fereastră SSO → 403 account.ssoReauth (nu 401 parolă)",
+          r.status_code == 403 and U.code(r) == "account.ssoReauth", "%s %s" % (r.status_code, r.text[:120]))
     await sso_stepup(ceo, "sub-ceo", "ceo@corp.co", ["wt-owners"])
+    r = await ceo.post("/api/tokens", json={"name": "ci", "scopes": ["read"], "days": 30})
+    check("RB-03: cu fereastra SSO account-scope creează tokenul (fără parolă)",
+          r.status_code in (200, 201) and "token" in r.json(), "%s %s" % (r.status_code, r.text[:120]))
+    # (b) setarea unei parole locale scoate IMEDIAT rolurile din grupuri
     ep = authz.epoch()
     r = await account_post(ceo, uid_ceo, {"new_password": "CeoNoua-12345!"})
     check("(b) parolă locală nouă: rolurile din grupuri pleacă imediat (+ epoch)",

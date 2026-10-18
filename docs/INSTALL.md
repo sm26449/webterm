@@ -300,7 +300,9 @@ host kit.
 
 Warnings and critical items alert once per transition (email/webhook and the in-app history,
 kind "System health"), and once more when they are resolved. Any item can be muted for 7 days,
-30 days, or until it changes. An item that is, or can become, critical can be muted only by an
+30 days, or until it changes (a measurement that merely moves — an age, a percentage, a count — is
+not a change; a different severity, message, host set or recommendation is). An item that is, or
+can become, critical can be muted only by an
 Owner (`certs.renew`); when anyone else mutes an item, everyone with `security.view` gets an in-app
 alert, and the list shows who muted it and until when.
 
@@ -312,7 +314,9 @@ The nightly cleanup never touches volumes or containers and keeps every image a 
 the tool image, the Authentik images and the WebTerm rollback images; it does remove **other**
 unused images created more than 14 days ago (`RETENTION` in `scripts/docker-cleanup.sh`; creation time, not
 pull time), so keep an image you need by running a container from it or by tagging it into a
-compose file.
+compose file. If the Docker daemon does not answer, the run records status `error` ("docker not
+reachable") and System health shows the cleanup as failed instead of "removed 0"; on an install it
+also refuses to run with an empty preserve set while images are listed.
 It writes small JSON status files into the data volume (`host-status/`) and nothing else; the
 gateway gets no new privilege and treats those files as untrusted (fixed names, size cap, schema
 check, never executed, never a source of commands). The Cloudflare token is checked against

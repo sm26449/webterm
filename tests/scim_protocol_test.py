@@ -311,9 +311,20 @@ async def test_auth_matrix(owner, tok):
               n1 - n0 == scim._AUTHFAIL_AUDIT_MAX, str(n1 - n0))
         await fa(t0 + 3700, "203.0.113.99", "/scim/v2/Users", "no bearer token")
         last = await db.fetchone("SELECT detail FROM audit_log WHERE status=401 AND via='scim' ORDER BY id DESC LIMIT 1")
-        check("…după o oră, rândul următor spune câte adrese n-au fost scrise",
-              "10 earlier failure(s) from unrecorded address(es)" in last["detail"] and "no bearer token" in last["detail"],
+        # P1 (critic P0): contorul numără CERERI reţinute, nu adrese (o adresă peste plafonul de
+        # 1000 nu e memorată, deci fiecare eşec al ei numără din nou) — textul nu mai pretinde
+        # „address(es)" şi numeşte ambele plafoane
+        check("…după o oră, rândul următor spune câte eşecuri n-au fost scrise (nu „adrese”) şi plafoanele",
+              "10 further failed authentication(s) since the last recorded one" in last["detail"]
+              and "this hour not recorded" not in last["detail"]
+              and "at most %d rows and %d addresses an hour" % (scim._AUTHFAIL_AUDIT_MAX, scim._AUTHFAIL_SEEN_MAX)
+              in last["detail"] and "address(es)" not in last["detail"] and "no bearer token" in last["detail"],
               last["detail"])
+        al = await db.fetchone("SELECT msg_params FROM alerts WHERE msg_params LIKE '%scim_lockout%' ORDER BY id DESC LIMIT 1")
+        check("alerta de blocare nu mai e „On account unauthenticated: SCIM: …”: numeşte endpoint-ul şi spune de ce",
+              al is not None and '"email":"SCIM (no account)"' in al["msg_params"]
+              and "Why this matters" in al["msg_params"] and "rotate the token" in al["msg_params"],
+              (al or {"msg_params": ""})["msg_params"][:300])
         # corecţie (audit 2026-10-17): starea NEAUTENTIFICATĂ nu atinge tabela `_alerted` — un
         # spray de pe 1000+ adrese nu reînarmează alerta de blocare (o dată pe oră) şi nici
         # plafoanele orare ale căilor autentificate

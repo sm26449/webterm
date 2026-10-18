@@ -4,6 +4,13 @@ import { errText, api, getBootVersion } from '../lib/api'
 import { useI18n } from '../lib/i18n'
 import { KeyIcon, ShieldIcon } from './Icons'
 
+/** cheia mesajului pentru `?sso_error=<reason>` (exportată pentru test) */
+export function ssoErrorKey(reason: string | null): string {
+  if (reason === 'disabled') return 'login.ssoDisabled'
+  if (reason === 'unavailable') return 'login.ssoUnavailable'
+  return 'login.ssoError'
+}
+
 export default function LoginPage(props: {
   setupRequired: boolean
   webauthnAvailable: boolean
@@ -17,7 +24,9 @@ export default function LoginPage(props: {
   const [totpRequired, setTotpRequired] = useState(false)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
-  const [sso, setSso] = useState<{ enabled: boolean; provider_name: string } | null>(null)
+  // FL-07: `degraded` = ultima sondă a gateway-ului (System health) n-a putut contacta IdP-ul —
+  // butonul SSO spune asta ÎNAINTE de click, nu după un redirect eşuat
+  const [sso, setSso] = useState<{ enabled: boolean; provider_name: string; degraded?: boolean } | null>(null)
   // La eşec, focusul merge pe PRIMUL câmp marcat invalid (WCAG 3.3.1): fără asta un utilizator
   // de cititor de ecran apasă Enter cu parola greşită şi rămâne pe buton, fără să audă nimic.
   const emailRef = useRef<HTMLInputElement>(null)
@@ -30,13 +39,15 @@ export default function LoginPage(props: {
   // SSO e opţional: aflăm din /api/oidc/status dacă afişăm butonul. Formularul de parolă
   // rămâne MEREU vizibil (break-glass), chiar când SSO e activ.
   useEffect(() => {
-    api<{ enabled: boolean; provider_name: string }>('/api/oidc/status')
+    api<{ enabled: boolean; provider_name: string; degraded?: boolean }>('/api/oidc/status')
       .then(setSso).catch(() => setSso(null))
     // eroare venită din redirect-ul de callback (?sso_error=...): o arătăm, nu o înghiţim
     const p = new URLSearchParams(window.location.search)
     if (p.get('sso_error') || p.get('sso') === 'disabled') {
-      // 3.6.11: contul e dezactivat (SCIM) — spus pe nume, altfel omul reîncearcă la nesfârşit
-      setError(t(p.get('sso_error') === 'disabled' ? 'login.ssoDisabled' : 'login.ssoError'))
+      // 3.6.11: contul e dezactivat (SCIM) — spus pe nume, altfel omul reîncearcă la nesfârşit.
+      // FL-07: IdP-ul nu a putut fi contactat (discovery / token endpoint) ≠ o eroare de callback:
+      // „încearcă din nou sau foloseşte parola" minţea un cont SSO-only; mesajul numeşte break-glass-ul
+      setError(t(ssoErrorKey(p.get('sso_error'))))
       window.history.replaceState(null, '', window.location.pathname)
     }
   }, [t])
@@ -220,6 +231,10 @@ export default function LoginPage(props: {
           // când ambele metode sunt prezente stau pe UN rând, cu etichete scurte; când e
           // una singură, butonul ocupă tot rândul şi primeşte eticheta completă.
           const both = passkeyOn && ssoOn
+          // FL-07: nota „IdP inaccesibil" stă lângă buton cât timp sonda zice degradat — şi după un
+          // click eşuat (altfel `aria-describedby` arăta spre un id inexistent); lipseşte doar când
+          // alerta de eroare de deasupra spune deja exact acelaşi text (?sso_error=unavailable)
+          const degradedNote = ssoOn && !!sso!.degraded && error !== t('login.ssoUnavailable')
           const btn =
             'flex flex-1 items-center justify-center gap-2 rounded-xl bg-ink-800/60 py-3 ' +
             'text-sm font-medium text-slate-300 ring-1 ring-ink-700 transition ' +
@@ -238,11 +253,22 @@ export default function LoginPage(props: {
                   </button>
                 )}
                 {ssoOn && (
-                  <a href="/api/oidc/login" className={btn}>
+                  // FL-07: degradat = sonda n-a ajuns la IdP; rămâne apăsabil (sonda poate fi veche de până la
+                  // o oră, iar un click o re-testează), dar spune starea în text — textul vizibil E numele
+                  // accesibil (fără aria-label: WCAG 2.5.3 label-in-name, axe 4.14 ca în 3.6.13), iar nota
+                  // completă de break-glass vine prin aria-describedby
+                  <a href="/api/oidc/login" className={btn + (sso!.degraded ? ' opacity-70' : '')}
+                    aria-describedby={degradedNote ? 'login-sso-degraded' : undefined} data-sso-degraded={sso!.degraded || undefined}>
                     <ShieldIcon /> {both ? sso!.provider_name : t('login.sso', { provider: sso!.provider_name })}
+                    {sso!.degraded && <span className="text-xs text-warn">({t('login.ssoUnreachable')})</span>}
                   </a>
                 )}
               </div>
+              {degradedNote && (
+                <p id="login-sso-degraded" role="status" className="mt-3 rounded-md bg-warn/10 px-3 py-2 text-xs leading-snug text-warn">
+                  {t('login.ssoUnavailable')}
+                </p>
+              )}
             </>
           )
         })()}

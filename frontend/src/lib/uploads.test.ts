@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   BACKOFF_CAP_MS, backoffMs, classifyUpKeys, crc32, dirName, etaSec, fmtBytes, fmtEta, forgetUploads,
-  hideUploads, isLegacyUpKey, nextChunkSize, parseUpLsKey, parseUploadMeta, pauseUpload, resolveResync,
+  hideUploads, isLegacyUpKey, nextChunkSize, parseUpLsKey, parseUploadMeta, pauseUpload, refusedForGood, resolveResync,
   restoreOrphans, setUploadUser, speedTracker, startUpload, UP_CHUNK, UP_CHUNK_MAX, UP_CHUNK_MIN, upLsKey,
 } from './uploads'
+import { ApiError } from './api'
 import { uploadStore } from './uploadStore'
 
 const UID = 'a'.repeat(32)
@@ -234,6 +235,49 @@ describe('refuz definitiv şi izolarea între conturi (FS-01 / FL-06, audit 2026
     setUploadUser(5)
     restoreOrphans(5)
     expect(rows().map((j) => [j.id, j.state])).toEqual([[id, 'orphan']])
+  })
+
+  it('FS-01 (P1): refuz definitiv DUPĂ felii aterizate → cheia RĂMÂNE (temp-ul de pe host merită reluat); fără nimic aterizat → dispare', async () => {
+    // sonda de status spune că 8 din 16 octeţi sunt deja pe host (sesiune anterioară / felie anterioară)
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response(JSON.stringify({ offset: 8 }), { status: 200 })))
+    for (const code of ['files.agentInternal', 'files.readOnlyAt', 'files.writeDenied']) {
+      reply = refusal(code)
+      setUploadUser(5)
+      const f = file(`${code}.bin`)
+      const k = upLsKey(5, 1, `/srv/${code}.bin`, f.size, f.lastModified)
+      const id = await startUpload({ hostId: 1, hostName: 'nas', dest: `/srv/${code}.bin`, file: f })
+      expect(uploadStore.get(id)).toMatchObject({ state: 'err', errorCode: code, pos: 8 })
+      expect(storage.getItem(k), code).not.toBeNull()          // ÎNAINTE: ştearsă indiferent de `landed`
+      hideUploads()
+      setUploadUser(5)
+      restoreOrphans(5)
+      expect(rows().map((j) => [j.id, j.state, j.pos])).toEqual([[id, 'orphan', 8]])
+      forgetUploads()
+    }
+    // acelaşi refuz cu NIMIC aterizat (offset 0) → cheia dispare, niciun orfan
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response(JSON.stringify({ offset: 0 }), { status: 200 })))
+    reply = refusal('files.agentInternal')
+    setUploadUser(5)
+    const f0 = file('zero.bin')
+    const k0 = upLsKey(5, 1, '/srv/zero.bin', f0.size, f0.lastModified)
+    const id0 = await startUpload({ hostId: 1, hostName: 'nas', dest: '/srv/zero.bin', file: f0 })
+    expect(uploadStore.get(id0)).toMatchObject({ state: 'err', errorCode: 'files.agentInternal', pos: 0 })
+    expect(storage.getItem(k0)).toBeNull()
+    hideUploads()
+    setUploadUser(5)
+    restoreOrphans(5)
+    expect(rows()).toEqual([])
+  })
+
+  it('refusedForGood: decizia pură — definitiv + landed 0 → şterge; definitiv + landed > 0 → păstrează; noSpace păstrează mereu', () => {
+    const k = upLsKey(5, 1, '/srv/p.bin', 16, 1)
+    const def = (code: string) => new ApiError(400, 'refused', code)
+    expect(refusedForGood(def('files.writeDenied'), 0, k)).toBe(true)
+    expect(refusedForGood(def('files.agentInternal'), 0, k)).toBe(true)
+    expect(refusedForGood(def('files.agentInternal'), 8, k)).toBe(false)   // ÎNAINTE: true (landed ignorat)
+    expect(refusedForGood(def('files.readOnlyAt'), 1, k)).toBe(false)
+    expect(refusedForGood(def('files.noSpaceAt'), 0, k)).toBe(false)
+    expect(refusedForGood(new Error('network'), 0, k)).toBe(false)
   })
 
   it('FL-06: rândurile err/done/paused ale lui A dispar la setUploadUser(B); cheile lui A rămân', async () => {

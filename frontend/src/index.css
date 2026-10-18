@@ -626,7 +626,6 @@ body {
   --tx-500: 122 136 158;
   --tx-600: 128 141 160;
   --link: 129 140 248;
-  --scrollbar: rgba(148, 163, 184, 0.3);
   /* stările semantice pe cromul întunecat: mereu varianta luminoasă (verdele închis al temei
      deschise cade sub AA aici) — înainte erau 5 reguli `.wt-workspace .wt-good {…}` separate */
   --ok: 52 211 153;
@@ -863,6 +862,28 @@ textarea {
   @apply outline-none;
 }
 
+/* Controalele de text pe pointer grosier (audit 2026-10-17, UI-04): Safari iOS măreşte pagina la
+   focus pe orice câmp cu fontul sub 16 px, iar layout-ul fix al terminalului rămâne mărit. Câmpurile
+   din Setări / login / sidebar erau deja `text-base` sub `sm`, dar 35 din 100 de câmpuri aveau clase
+   ad-hoc (text-xs / text-2xs: redenumire de fişier, căutare în transcript, nota sesiunii, watermark,
+   Forwards, Fleet, Snippets). O singură regulă, nu o migrare: `max(16px, 1em)` lasă neatins ce e
+   deja mai mare. Specificitatea: `:is()` ia specificitatea celui mai specific argument — lanţul de
+   `:not([type=…])` dă (0,10,1), peste orice utilitar Tailwind (0,1,0), fără !important; stilurile
+   inline (Monaco îşi pune fontul pe textarea-ul lui din `style`) nu sunt atinse. Excluse: controalele
+   care nu sunt text (checkbox / radio / range / butoane / fişier / culoare) şi textarea-ul ascuns al
+   xterm-ului (0×0, fontul terminalului e al xterm-ului) şi tot ce e în Monaco (widgetul lui de
+   căutare îşi dimensionează textarea-ul după un `.mirror` de 13 px — un font forţat l-ar tăia).
+   Măsurat pe fiecare ecran de scripts/mobile-audit.mjs (`textControls`). */
+@media (pointer: coarse) {
+  :is(
+    input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='button']):not([type='submit']):not([type='reset']):not([type='file']):not([type='color']):not([type='image']):not([type='hidden']):not(.monaco-editor *),
+    select:not(.monaco-editor *),
+    textarea:not(.xterm-helper-textarea):not(.monaco-editor *)
+  ) {
+    font-size: max(16px, 1em);
+  }
+}
+
 /* Keybar-ul tactil (MobileKeybar): după TIPUL de pointer, nu după lăţime. Cu `md:hidden` un
    iPad/tabletă fără tastatură fizică (≥768px) rămânea fără Esc/Ctrl/săgeţi, iar o fereastră
    îngustă de desktop primea taste de care n-are nevoie. Deget → vizibil; mouse → ascuns. */
@@ -1014,6 +1035,11 @@ textarea {
   --tx-500: 78 82 94;
   --tx-600: 96 100 114;
   --link: 79 70 229;
+  /* inelul de focus şi conturul de câmp ale variantei deschise: din 3.6.18 `.wt-workspace` le
+     declară pe cele întunecate (audit 2026-10-17, UI-02), iar canvas-ul deschis le ia înapoi —
+     altfel indigo-400 dădea 2,98:1 pe alb aici (verificat în src/themeContrast.test.ts) */
+  --focus: 99 102 241;
+  --field-border: 122 132 152;
   --scrollbar: rgba(20, 27, 45, 0.22);
   --ok: 6 95 70;
   --warn: 146 64 14;
@@ -1061,16 +1087,14 @@ textarea {
   --tx-500: 122 136 158;
   --tx-600: 128 141 160;
   --link: 129 140 248;
-  /* conturul câmpurilor şi inelul de focus: valorile variantei ÎNTUNECATE (ale familiei, mai jos),
-     nu ale celei deschise — indigo-500 / Fluent #005fb8 cădeau sub 3:1 pe cardul întunecat */
-  --focus: 129 140 248;
-  --field-border: 101 115 140;
+  /* conturul câmpurilor şi inelul de focus (`--focus` / `--field-border`): în regula comună a
+     zonelor întunecate, mai jos (aceleaşi valori pentru .wt-workspace / .wt-command / widget) */
   /* sticla cardului: pe o temă deschisă `--glass-bg` e alb 72–97 % şi, amestecată 18 % în
      color-mix-ul din .glass, lumina suprafaţa până la ~3,2:1 pentru text-slate-500 (şi din
      sesiune, nu doar de pe pagina hostului). Sticlă întunecată din aceeaşi scară a familiei. */
   --glass-bg: rgb(var(--ws-900) / 0.82);
   --glass-hairline: rgba(255, 255, 255, 0.06);
-  --scrollbar: rgba(148, 163, 184, 0.3);
+  /* (`--scrollbar` vine din regula comună a zonelor întunecate, mai jos) */
   /* stările semantice pe cromul întunecat: mereu varianta luminoasă (ca în .wt-workspace) —
      altfel „Saved" / eroarea de salvare / bannerul de fişier mare luau verdele/roşul/amber-ul
      închis al temei deschise pe cardul închis */
@@ -1083,12 +1107,57 @@ textarea {
      moştenită de pe <body> / .wt-canvas e deja rezolvată (închisă pe tema deschisă) */
   color: rgb(var(--tx-200));
 }
-/* inelul de focus al editorului urmează albastrul de sistem al familiei (valorile variantei
-   întunecate a fiecăreia: `:root[data-theme='*-dark'] --focus`), ca restul cromului OS-style */
-:root[data-family='mac'] .wt-editor { --focus: 10 132 255; }
-:root[data-family='win'] .wt-editor { --focus: 255 255 255; }
-:root[data-family='gnome'] .wt-editor { --focus: 120 174 237; }
-:root[data-family='kde'] .wt-editor { --focus: 61 174 233; }
+/* Zonele forţat-întunecate (audit 2026-10-17, UI-02 / UI-03). Fiecare îşi redeclară suprafeţele şi
+   textul mai sus, dar inelul de focus şi conturul de câmp rămâneau cele moştenite de pe :root — adică
+   ale variantei DESCHISE: pe „Windows 11 · Light" albastrul Fluent (0 95 184) dădea 2,92:1 pe tab strip
+   şi ~2,9:1 pe paleta de comenzi (WCAG 1.4.11 cere ≥3:1). Aici primesc valorile variantei ÎNTUNECATE a
+   familiei (aceleaşi ca `:root[data-theme='*-dark']`), iar `color-scheme: dark` spune browserului să
+   deseneze închis şi ce nu stilizăm noi: popup-ul <select>, pickerul datetime-local, scrollbar-urile,
+   accent-color. `.wt-canvas` (dashboard / pagina hostului) îşi ia înapoi tokenii şi schema variantei
+   (blocurile ei de mai sus + regula [data-mode='light'] de mai jos). `--scrollbar` se declară AICI, nu
+   doar în .wt-workspace / .wt-editor: paleta de comenzi (randată în App după ce se închide div-ul
+   workspace) şi widgetul Transfers (portal pe <body>) stau în afara workspace-ului şi ar fi moştenit
+   de pe :root thumb-ul ÎNCHIS al variantei deschise (Aurora rgba(20,27,45,.22), win-light
+   rgba(0,0,0,.3)) — `scrollbar-color` de mai jos l-ar fi desenat ~1,1:1 pe panoul lor întunecat.
+   Verificat static pe fiecare variantă în src/themeContrast.test.ts (focus pe chrome-bg / ws-950 /
+   command-bg ≥ 3:1; regula comună declară focus + field-border + scrollbar). */
+.wt-workspace,
+.wt-command,
+.wt-transfers-widget,
+.wt-editor {
+  --focus: 129 140 248;
+  --field-border: 101 115 140;
+  --scrollbar: rgba(148, 163, 184, 0.3);
+  color-scheme: dark;
+  scrollbar-color: var(--scrollbar) transparent;
+}
+:root[data-family='mac'] :is(.wt-workspace, .wt-command, .wt-transfers-widget, .wt-editor) { --focus: 10 132 255; --field-border: 124 124 132; }
+:root[data-family='win'] :is(.wt-workspace, .wt-command, .wt-transfers-widget, .wt-editor) { --focus: 255 255 255; --field-border: 135 135 135; }
+:root[data-family='gnome'] :is(.wt-workspace, .wt-command, .wt-transfers-widget, .wt-editor) { --focus: 120 174 237; --field-border: 138 138 145; }
+:root[data-family='kde'] :is(.wt-workspace, .wt-command, .wt-transfers-widget, .wt-editor) { --focus: 61 174 233; --field-border: 128 134 140; }
+/* canvas-ul din workspace e pe tokenii variantei → şi schema de culoare a ei (deschisă pe temele deschise) */
+:root[data-mode='light'] .wt-canvas {
+  color-scheme: light;
+}
+.wt-canvas {
+  scrollbar-color: var(--scrollbar) transparent;
+}
+
+/* `color-scheme` (audit 2026-10-17, UI-03): fără el, browserul desena controalele native (popup-ul
+   <select>, pickerul de dată/oră din expirarea legăturilor, scrollbar-urile din Setări / sidebar pe
+   Windows şi Linux) în stilul UA DESCHIS peste temele întunecate — şi invers, cu sistemul pe dark,
+   putea desena popup-ul select întunecat pe Aurora. `data-mode` e pus de theme.ts (paintTheme);
+   <meta name="color-scheme" content="dark light"> din index.html acoperă primul cadru, înainte de
+   JS. Scrollbar-urile iau culoarea din tokenul temei peste tot, nu doar în viewport-ul xterm. */
+:root[data-mode='dark'] {
+  color-scheme: dark;
+}
+:root[data-mode='light'] {
+  color-scheme: light;
+}
+html {
+  scrollbar-color: var(--scrollbar) transparent;
+}
 
 /* Regiunea live a lui Monaco (anunţuri pentru cititoare de ecran: „linia 12", rezultate de
    căutare…). Monaco o creează O SINGURĂ DATĂ pe pagină, direct în <body>, şi n-o scoate la dispose

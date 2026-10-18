@@ -68,11 +68,14 @@ def check(name, cond, detail=""):
 
 FAKE_DOCKER = r"""#!/bin/sh
 echo "$*" >> "$FAKE_DIR/calls"
+# OP-04: $FAKE_DIR/down = the daemon does not answer; $FAKE_DIR/ps_down = only `docker ps` fails
+[ -f "$FAKE_DIR/down" ] && { echo "Cannot connect to the Docker daemon at unix:///var/run/docker.sock" >&2; exit 1; }
 case "$1" in
+  info) echo "Server Version: fake" ;;
   ps)
     case "$*" in
       *service=app*) [ -f "$FAKE_DIR/app_cid" ] && cat "$FAKE_DIR/app_cid" ;;
-      *-aq*) [ -f "$FAKE_DIR/all_cids" ] && cat "$FAKE_DIR/all_cids" ;;
+      *-aq*) [ -f "$FAKE_DIR/ps_down" ] && exit 1; [ -f "$FAKE_DIR/all_cids" ] && cat "$FAKE_DIR/all_cids" ;;
       *compose.project=*) [ -f "$FAKE_DIR/ak_project" ] && cat "$FAKE_DIR/ak_project" ;;
       *Image*) [ -f "$FAKE_DIR/ak_ps" ] && cat "$FAKE_DIR/ak_ps" ;;
     esac ;;
@@ -525,6 +528,81 @@ def main():
             tool_refs[f] = m.group(0) if m else None
         check("the tool image digest docker-cleanup preserves is the one backup/restore/host-health run",
               len(set(tool_refs.values())) == 1 and None not in tool_refs.values(), tool_refs)
+        # audit 2026-10-17 OP-04: a daemon that does not answer must never read as "ok, removed 0"
+        print("── docker-cleanup.sh: the daemon does not answer (OP-04)")
+
+        def down_run(marker, label):
+            open(os.path.join(fake, marker), "w").write("")
+            give(base)
+            time.sleep(1.1)
+            prev = status(base, "docker-cleanup")
+            open(calls, "w").write("")
+            try:
+                rc, out = run(base, inst, fake, "docker-cleanup.sh")
+            finally:
+                os.remove(os.path.join(fake, marker))
+            st = status(base, "docker-cleanup")
+            c = open(calls).read()
+            check("%s → status error 'docker not reachable', nothing removed, exit code 1" % label,
+                  rc == 1 and st and st != prev and st["status"] == "error" and "docker not reachable" in st["message"]
+                  and "removed 0" not in st["message"] and st["data"]["images_removed"] == 0, (rc, st, out[-300:]))
+            check("…and no `image rm` / `builder prune` was attempted", " rm " not in c and "prune" not in c, c)
+
+        down_run("down", "the daemon is down (every docker call fails)")
+        down_run("ps_down", "only `docker ps -aq` fails (no preserve set)")
+        # a half-answering daemon: images listed, nothing to preserve → refused
+        os.rename(os.path.join(fake, "ids"), os.path.join(fake, "ids.off"))
+        os.rename(os.path.join(fake, "app_cid"), os.path.join(fake, "app_cid.off"))
+        os.rename(os.path.join(fake, "images"), os.path.join(fake, "images.off"))
+        open(os.path.join(fake, "images"), "w").write("sha256:junk|busybox|1.36|%s\nsha256:dang|<none>|<none>|%s\n" % (OLD, NOW))
+        open(os.path.join(fake, "all_cids"), "w").write("")
+        open(os.path.join(fake, "ak_ps"), "w").write("")
+        give(base)
+        time.sleep(1.1)
+        prev = status(base, "docker-cleanup")
+        open(calls, "w").write("")
+        rc, out = run(base, inst, fake, "docker-cleanup.sh")
+        st = status(base, "docker-cleanup")
+        c = open(calls).read()
+        check("images listed but an EMPTY preserve set → refused (status error), nothing removed",
+              rc == 1 and st and st != prev and st["status"] == "error" and "preserve set empty" in st["message"]
+              and " rm " not in c, (rc, st, out[-300:]))
+        check("…with its own wording: the daemon answered, the status does not say 'docker not reachable'",
+              st and "not reachable" not in st["message"] and "refusing" in st["message"], st)
+        # the same host outside a WebTerm install (no compose file next to the script): no container,
+        # no tool image = an empty preserve set is legitimate, the run goes on and prunes the others
+        compose = os.path.join(inst, "docker-compose.prod.yml")
+        os.rename(compose, compose + ".off")
+        give(base)
+        time.sleep(1.1)
+        prev = status(base, "docker-cleanup")
+        open(calls, "w").write("")
+        try:
+            rc, out = run(base, inst, fake, "docker-cleanup.sh")
+        finally:
+            os.rename(compose + ".off", compose)
+        st = status(base, "docker-cleanup")
+        c = open(calls).read()
+        # (no status there: host-health.sh --record only writes inside an install — System health is not on such a host)
+        check("…outside an install (INSTALL=0) an empty preserve set is not a refusal: exit 0, the old other image + the dangling one removed",
+              rc == 0 and st == prev and "refusing" not in out and "not reachable" not in out
+              and "not in a WebTerm install" in out and "image rm busybox:1.36" in c and "image rm sha256:dang" in c, (rc, st, out[-400:], c))
+        os.rename(os.path.join(fake, "ids.off"), os.path.join(fake, "ids"))
+        os.rename(os.path.join(fake, "app_cid.off"), os.path.join(fake, "app_cid"))
+        os.remove(os.path.join(fake, "images"))
+        os.rename(os.path.join(fake, "images.off"), os.path.join(fake, "images"))
+        open(os.path.join(fake, "all_cids"), "w").write("c1\nc2\n")
+        open(os.path.join(fake, "ak_ps"), "w").write(
+            "ghcr.io/goauthentik/server:2026.8.3|authentik|server|/opt/authentik\n"
+            "ghcr.io/goauthentik/server:2026.8.3|authentik|worker|/opt/authentik\n")
+        give(base)
+        time.sleep(1.1)
+        prev = status(base, "docker-cleanup")
+        open(calls, "w").write("")
+        rc, out = run(base, inst, fake, "docker-cleanup.sh")
+        st = status(base, "docker-cleanup")
+        check("…the daemon back → ok again (dk info is asked once per run)", rc == 0 and st and st["status"] == "ok"
+              and open(calls).read().count("info") == 1, (rc, st, out[-200:]))
         rc, out = run(base, inst, fake, "docker-cleanup.sh", extra_env={"RETENTION": "1d;rm"})
         check("a bad RETENTION is refused", rc == 2 and "RETENTION" in out, out[-200:])
         rc, out = run(base, inst, fake, "docker-cleanup.sh", test_mode=False)

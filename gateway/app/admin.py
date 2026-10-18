@@ -181,25 +181,57 @@ async def cmd_passwd(args) -> None:
         print("· %s is no longer managed by SCIM (it has a local password now)" % user["email"])
     # 3.6.2: cu o parolă locală, rolurile venite din grupuri SSO pleacă (cine ştie parola nu
     # trebuie să moştenească ce dau grupurile omului) — acelaşi lucru ca în /api/account
-    n = (await db.fetchone("SELECT COUNT(*) AS c FROM role_bindings WHERE user_id=? AND source='sso'",
-                           user["id"]))["c"]
+    # — cu două excepţii (RB-06, audit 2026-10-17, aceeaşi regulă ca în api.update_account):
+    # legătura Owner @ all venită din SSO rămâne când contul e ULTIMUL Owner permanent (altfel
+    # instanţa rămâne fără niciun Owner chiar după comanda care trebuia să-l creeze) şi când,
+    # cu parola tocmai scrisă, e ultimul Owner permanent CU PAROLĂ LOCALĂ (altfel rămân doar
+    # Owneri SSO-only şi o pană a IdP-ului nu mai lasă pe nimeni să intre — revizuirea P1).
+    # authz nu se importă aici (proces separat), deci regula e scrisă pe acelaşi SQL.
+    others = await _owner_ids(permanent=True) - {user["id"]}
+    others_bg = await _owner_ids(permanent=True, with_local_password=True) - {user["id"]}
+    n = 0
+    kept = None                            # "last-owner" | "break-glass"
+    for b in await db.fetchall(
+            "SELECT b.id, b.scope_kind, r.key FROM role_bindings b JOIN roles r ON r.id=b.role_id"
+            " WHERE b.user_id=? AND b.source='sso'", user["id"]):
+        if b["key"] == "owner" and b["scope_kind"] == "all" and not others:
+            kept = "last-owner"
+            continue
+        if b["key"] == "owner" and b["scope_kind"] == "all" and not others_bg:
+            kept = "break-glass"
+            continue
+        await db.execute("DELETE FROM role_bindings WHERE id=?", b["id"])
+        n += 1
     if n:
-        await db.execute("DELETE FROM role_bindings WHERE user_id=? AND source='sso'", user["id"])
         await _bump_authz_epoch()
         print("· %d SSO-derived role binding(s) removed (an account with a local password gets no "
               "roles from groups)" % n)
+    if kept == "last-owner":
+        print("! %s is the LAST permanent Owner: its SSO-derived Owner binding is KEPT (the "
+              "instance must keep an Owner — and, with this password, a break-glass account). "
+              "Make another account a permanent Owner before changing its groups." % user["email"],
+              file=sys.stderr)
+    elif kept == "break-glass":
+        print("! %s is the last permanent Owner WITH A LOCAL PASSWORD (the break-glass account): "
+              "its SSO-derived Owner binding is KEPT — the other permanent Owners sign in with SSO "
+              "only and would be locked out with the identity provider. Make another account a "
+              "permanent Owner with a local password before changing its groups." % user["email"],
+              file=sys.stderr)
     print("✓ password changed for %s" % user["email"])
     await _revoke_everything(user["id"], "password rotated")
 
 
-async def _owner_ids(permanent: bool = False) -> set:
+async def _owner_ids(permanent: bool = False, with_local_password: bool = False) -> set:
     """Owner @ all (încă valabil). `permanent=True`: doar cei care vor mai fi Owner şi mâine
-    (revizuirea 3.6.10: un Owner TEMPORAR nu e un cont break-glass — expiră)."""
+    (revizuirea 3.6.10: un Owner TEMPORAR nu e un cont break-glass — expiră).
+    `with_local_password=True`: doar cei care pot intra şi fără IdP (COALESCE(local_password,1)=1,
+    NULL = are parolă, ca `authz.owner_count(with_local_password=True)`)."""
     return {r["user_id"] for r in await db.fetchall(
         "SELECT DISTINCT b.user_id FROM role_bindings b JOIN roles r ON r.id=b.role_id"
         " JOIN users u ON u.id=b.user_id AND COALESCE(u.disabled, 0)=0"   # 3.6.11
         " WHERE r.key='owner' AND b.scope_kind='all' AND (b.expires IS NULL OR b.expires > ?)"
-        + (" AND b.expires IS NULL" if permanent else ""), time.time())}
+        + (" AND b.expires IS NULL" if permanent else "")
+        + (" AND COALESCE(u.local_password, 1)=1" if with_local_password else ""), time.time())}
 
 
 async def cmd_sso_only(args) -> None:

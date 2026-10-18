@@ -9,7 +9,8 @@ import { errText, api, CommandGuard, CommandRule, Host, Session, withStepup } fr
 import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
 import { Command, CommandTracker, cmdDuration, matchCommandRule, screenResetScan, splitAfterMarks } from '../lib/commands'
 import { EchoTracker, LineKey, countCprReplies, countCprRequests, reportOnly, sendIsReport, sentArgs } from '../lib/echo'
-import { ACCEPT_AND_HOLD, CTRL_O, ECHO_GRACE_MS, LocalVerdict, acceptsLine, localRunDecision, PeerState, PeerVerdict, RuleHit, guardActive, isSubmitKey, judgeLocal, judgePeers, metaAccept, opaqueInput, runDecision, splitLines, stripControls, submitsLine, unbracket } from '../lib/broadcastGuard'
+import { ACCEPT_AND_HOLD, CTRL_O, ECHO_GRACE_MS, LocalVerdict, acceptsLine, broadcastDecision, escapeClears, escapeScope, localRunDecision, PeerState, PeerVerdict, RuleHit, guardActive, isSubmitKey, judgeLocal, judgePeers, metaAccept, opaqueInput, runDecision, splitLines, stripControls, submitsLine, unbracket } from '../lib/broadcastGuard'
+import { anyHost, canOn, usePerms } from '../lib/perms'
 import { clearCwd, parseOsc7, setCwd } from '../lib/cwd'
 import { FONT_STORAGE_KEY, preferredFont, setPreferredFont } from '../lib/font'
 import { extractUrls } from '../lib/urls'
@@ -178,6 +179,11 @@ export default function SessionView(props: {
   const { session } = props
   const { t } = useI18n()
   const unreadAlerts = useUnreadAlerts()
+  // 3.6 roluri (audit 2026-10-17, FL-09): uneltele din bară urmează permisiunile de pe ACEST host —
+  // cosmetic (serverul refuză oricum cu 403), dar omul află ÎNAINTE de gest, nu după (docs/design/
+  // ROLES-AND-SSH.md §A.9 „hide vs disable": ascuns când n-ai permisiunea pe niciun host, dezactivat
+  // cu motivul în tooltip când o ai altundeva). Până la primul răspuns totul e permis (lib/perms).
+  const perms = usePerms()
   const containerRef = useRef<HTMLDivElement>(null)
   // lățimea REALĂ a pane-ului (nu a viewportului): sub prag, panourile laterale
   // devin drawer overlay ca să nu strivească terminalul (split pe iPad)
@@ -231,6 +237,14 @@ export default function SessionView(props: {
   const flashTimerRef = useRef<ReturnType<typeof setTimeout> | 0>(0)
   const [inputFlash, setInputFlash] = useState(false)
   const [inputNotice, setInputNotice] = useState<string | null>(null)
+  // un singur anunţ sub cortină la un moment dat: cel nou îl înlocuieşte pe cel vechi ŞI timerul lui
+  // (altfel timerul unui anunţ mai vechi îl stingea pe cel nou după o secundă)
+  const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | 0>(0)
+  const showInputNotice = useCallback((msg: string, ms = 8000) => {
+    clearTimeout(noticeTimerRef.current)
+    setInputNotice(msg)
+    noticeTimerRef.current = setTimeout(() => setInputNotice(null), ms)
+  }, [])
   // închidere cu cod terminal de la gateway (4401 auth / 4403 interzis): fără buclă de retry
   const [wsDenied, setWsDenied] = useState<'auth' | 'forbidden' | null>(null)
   const replayRef = useRef(false)   // scriem istoric, nu activitate live (vezi OSC 133)
@@ -359,6 +373,8 @@ export default function SessionView(props: {
   // xterm, unde Enter/Escape se duceau în SHELL — adică exact comanda pe care o verificam).
   // La închidere handlerele redau focusul terminalului.
   const cmdCancelBtnRef = useRef<HTMLButtonElement>(null)
+  // containerul dialogului: Escape-ul e al nostru doar cu focusul în el / în panou (SV-04)
+  const cmdDialogRef = useRef<HTMLDivElement>(null)
   useEffect(() => { if (cmdConfirm) cmdCancelBtnRef.current?.focus() }, [cmdConfirm])
   // comenzi (OSC 133) — apar doar cu shell integration activă pe host
   const trackerRef = useRef<CommandTracker>()
@@ -418,13 +434,17 @@ export default function SessionView(props: {
   const uploadFiles = useCallback((dir: string, files: { file: File; name: string }[], onDone?: (name: string) => void,
     pasteCtx?: PasteContext): Promise<string[]> => {
     const host = props.host!
+    // rolul nu poate scrie fişiere pe hostul ăsta: refuzăm înainte de orice cerere — apelanţii
+    // (drop / paste) îşi înlocuiesc toastul „Uploading…" cu eroarea, nu cu „Saved" (altfel toastul
+    // era urmat de 403) — serverul rămâne verificarea reală (audit P1, FL-09)
+    if (!canOn(perms, host.id, 'files.write')) return Promise.reject(new Error(t('files.needsWrite')))
     // întoarcem id-urile (rezolvate la finalul primei treceri): apelantul citeşte starea finală din
     // store ca să decidă toastul de „gata" vs eroare — un singur toast per paste, nu unul per fişier
     return Promise.all(files.map(({ file, name }) =>
       startUpload({ hostId: host.id, hostName: host.name, dest: `${dir.replace(/\/$/, '')}/${name}`, file,
                     then: 'insert-path', sid: session.id, pasteCtx })
         .then((id) => { if (onDone && uploadStore.get(id)?.state === 'done') onDone(name); return id })))
-  }, [props.host, session.id])
+  }, [props.host, session.id, perms, t])
   // Toast de final (sau de eroare) după ce toate fişierele unui paste/drop au trecut. Explică
   // SEMANTICA paste-ului (salvat unde + calea inserată la prompt), complementar cu widgetul de
   // transferuri (care arată job-ul). Un singur toast, indiferent câte fişiere.
@@ -900,11 +920,26 @@ export default function SessionView(props: {
   const broadcastingRef = useRef(!!props.broadcasting)
   broadcastingRef.current = !!props.broadcasting
   /** difuzarea către CELELALTE panouri (App o ignoră fără broadcast). Un panou doar-vizualizare
-      (sau în replay) nu trimite nimic nici local — deci nici în panourile vecine (review 3.6.12, L7). */
+      (sau în replay) nu trimite nimic nici local — deci nici în panourile vecine (review 3.6.12, L7).
+      Audit 2026-10-17: rapoartele terminalului (mouse, focus, CPR, DA, X10) nu pleacă niciodată în
+      celelalte panouri — sunt răspunsurile ACESTUI terminal (SV-02); iar o origine care nu poate
+      trimite local (socket în reconectare, sesiune încheiată) nu difuzează nimic şi o spune — altfel
+      tastele „netrimise" rulau în celelalte panouri, iar retastarea le rula a doua oară (SV-05). */
+  const bcastHeldAtRef = useRef(-Infinity)
   const broadcastOut = useCallback((d: string | Uint8Array, kind: 'key' | 'report' = 'key') => {
-    if (readOnlyRef.current || muteRef.current) return
-    onUserDataRef.current?.(session.id, d, kind)
-  }, [session.id])
+    const dec = broadcastDecision(kind, {
+      readOnly: readOnlyRef.current, muted: muteRef.current, exited: exitedRef.current,
+      socketOpen: wsRef.current?.readyState === WebSocket.OPEN,
+    })
+    if (dec === 'broadcast') { onUserDataRef.current?.(session.id, d, 'key'); return }
+    if ((dec === 'held-reconnecting' || dec === 'held-ended') && broadcastingRef.current) {
+      // anunţul: o dată la câteva secunde, nu la fiecare tastă (cortina clipeşte oricum la fiecare)
+      const now = performance.now()
+      if (now - bcastHeldAtRef.current < 3000) return
+      bcastHeldAtRef.current = now
+      showInputNotice(tRef.current(dec === 'held-ended' ? 'session.broadcastHeldEnded' : 'session.broadcastHeldReconnecting'))
+    }
+  }, [session.id, showInputNotice])
   /** trimite LOCAL + (cu broadcast activ) către celelalte panouri — rezultatul guardrail-ului
       (golirea liniei / rularea confirmată) trebuie să ajungă în TOATE panourile-ţintă */
   const sendAll = useCallback((d: string) => {
@@ -1011,8 +1046,7 @@ export default function SessionView(props: {
   /** tastele de după Enter, reţinute cât aşteptam, nu mai pleacă orbeşte — dar nici în tăcere */
   const noticeQueued = (queued: (string | Uint8Array)[]) => {
     if (!queued.length) return
-    setInputNotice(tRef.current('session.queuedNotSent', { count: queued.length }))
-    window.setTimeout(() => setInputNotice(null), 8000)
+    showInputNotice(tRef.current('session.queuedNotSent', { count: queued.length }))
   }
   /** Enter / chunk FĂRĂ broadcast, cu guardrail activ (3.6.13): aceeaşi aşteptare a ecoului ca la
       broadcast — Ctrl+P / ↑ + Enter rapid nu mai trimite o linie nevăzută (vezi judgeLocal).
@@ -1165,18 +1199,42 @@ export default function SessionView(props: {
   // Guardrail, Escape = anulează (şterge linia), prins la nivel de document în CAPTURE: nu ajunge
   // nici la xterm, nici la scurtăturile globale. Enter nu poate scăpa — focusul e pe buton (vezi
   // cmdCancelBtnRef), nu în textarea. Stă DUPĂ `send` (const → TDZ în lista de dependenţe).
+  // Audit 2026-10-17 (SV-04): dialogul stă ÎN panou, iar celelalte panouri ale split-ului rămân
+  // interactive — deci Escape-ul e al nostru DOAR cu focusul în dialog sau în panoul ăsta (escapeScope);
+  // un Escape din vim-ul din B nu mai închide dialogul lui A şi nu mai trimite Ctrl+U peste tot, iar cu
+  // două dialoguri deschise se închide doar cel cu focusul. Ctrl+U („Cancel & clear") pleacă doar când
+  // focusul era în dialog (escapeClears): dintr-un alt loc al panoului un dialog de broadcast se
+  // închide fără să golească linii pe care omul nu le privea.
+  // aria-modal e onorat ÎN panou: Tab / Shift+Tab circulă doar între butoanele dialogului (capcana
+  // globală useFocusTrap ar trage focusul şi din celelalte panouri şi ar asculta Escape pe tot
+  // documentul — exact ce corectăm aici). `actionTargetRef` = panoul-ţintă al acţiunilor (3.6.16).
   useEffect(() => {
     if (!cmdConfirm) return
-    const onEsc = (e: KeyboardEvent) => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Tab') {
+        const el = cmdDialogRef.current
+        if (!el || !el.contains(document.activeElement)) return
+        const f = Array.from(el.querySelectorAll<HTMLElement>('button:not([disabled])'))
+        if (f.length === 0) { e.preventDefault(); return }
+        const first = f[0]
+        const last = f[f.length - 1]
+        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus() }
+        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus() }
+        return
+      }
       if (e.key !== 'Escape') return
+      const scope = escapeScope(document.activeElement, document.body, cmdDialogRef.current, rootRef.current, !!actionTargetRef.current)
+      if (scope === 'none') return
       e.preventDefault(); e.stopPropagation()
       // „nu pot verifica" / snippet reţinut: linia rămâne de editat; regulă pe linia tastată: o golim
       // (doar local dacă dialogul s-a deschis fără broadcast — F2)
-      if (!cmdConfirm.unknown && !cmdConfirm.run && !cmdConfirm.below) (cmdConfirm.recheck ? sendAll : send)(clearLineSeq())
+      if (!cmdConfirm.unknown && !cmdConfirm.run && !cmdConfirm.below && escapeClears(scope, !!cmdConfirm.recheck)) {
+        (cmdConfirm.recheck ? sendAll : send)(clearLineSeq())
+      }
       setCmdConfirm(null); termRef.current?.focus()
     }
-    document.addEventListener('keydown', onEsc, true)
-    return () => document.removeEventListener('keydown', onEsc, true)
+    document.addEventListener('keydown', onKey, true)
+    return () => document.removeEventListener('keydown', onKey, true)
   }, [cmdConfirm, sendAll, send, clearLineSeq])
 
   // broadcast: înregistrează `send`-ul acestui panou în harta din App (sid → send), ca tastele
@@ -1451,6 +1509,9 @@ export default function SessionView(props: {
       hasFocus: () => !!term.textarea && document.activeElement === term.textarea,
       altScreen: () => term.buffer.active.type === 'alternate',
       commandRunning: () => trackerRef.current?.running === true,
+      // shell integration văzută (OSC 133): sub tmux e singura citire care dovedeşte „acelaşi prompt";
+      // fără ea fereastra de paste e cea scurtă (audit P1, FS-03 — lib/transfers.ts modesBlind)
+      shellIntegration: () => trackerRef.current?.integrated === true,
       // contextul unui paste/drop de fişiere (3.6.16, lib/transfers.ts typeIntoPasted)
       inputSeq: () => inputSeqRef.current,
       isActive: () => actionTargetRef.current !== false && !replayRef.current,
@@ -1892,8 +1953,7 @@ export default function SessionView(props: {
       if (droppedRef.current > 0) {
         const n = droppedRef.current
         droppedRef.current = 0
-        setInputNotice(tRef.current('session.inputDropped', { count: n }))
-        window.setTimeout(() => setInputNotice(null), 8000)
+        showInputNotice(tRef.current('session.inputDropped', { count: n }))
       }
       // sesiune moartă: NU trece pe 'open' (rămâne 'ended') — altfel gardul din onclose
       // se anulează și fetch-ul one-shot de istoric devine o buclă infinită de reconnect
@@ -2258,6 +2318,7 @@ export default function SessionView(props: {
   const uploadHere = async (files: File[]) => {
     const host = props.host
     if (!host || !files.length) return
+    if (!canOn(perms, host.id, 'files.write')) { notifyToast(t('files.needsWrite'), 'warn'); return }   // FL-09
     const dir = (await filesAnchorDir()).replace(/\/+$/, '')
     const ids = await Promise.all(files.map((f) =>
       startUpload({ hostId: host.id, hostName: host.name, dest: `${dir}/${f.name}`, file: f }).catch(() => null)))
@@ -2445,6 +2506,16 @@ export default function SessionView(props: {
   // regulă pentru butoanele din bară şi pentru itemii din meniul ⋯
   const agentHost = !props.host?.connection_type || props.host.connection_type === 'agent'
   const reach = props.host ? reachState(props.host) : 'offline'
+  // FL-09: Git (rulează prin `run`), Docker (`docker.view`), Servicii (`services.view`) — aceleaşi
+  // permisiuni pe care le cere serverul (api.py host_git / docker / services). `show` = o ai pe măcar
+  // un host (altfel unealta nu apare deloc); `disabled` + motiv = n-o ai pe ACEST host.
+  const toolGate = (perm: string) => {
+    const may = canOn(perms, props.host?.id, perm)
+    return { show: anyHost(perms, perm), disabled: !may, reason: may ? undefined : t('authz.notHere', { perm }) }
+  }
+  const gitGate = toolGate('run')
+  const dockerGate = toolGate('docker.view')
+  const servicesGate = toolGate('services.view')
 
   return (
     <div ref={rootRef} className={`wt-window flex h-full flex-col ${
@@ -2595,11 +2666,13 @@ export default function SessionView(props: {
             </ToolButton>
           </span>
           {/* git: status/diff/stage/commit pe repo-ul din cwd-ul terminalului */}
-          <span className={roomy ? 'contents' : 'hidden'}>
-            <ToolButton title={t('session.gitTooltip')} active={showGit} toggle onClick={toggleGit}>
-              <GitBranchIcon />
-            </ToolButton>
-          </span>
+          {gitGate.show && (
+            <span className={roomy ? 'contents' : 'hidden'}>
+              <ToolButton title={gitGate.reason ?? t('session.gitTooltip')} name={t('session.gitTooltip')} active={showGit} toggle disabled={gitGate.disabled} onClick={toggleGit}>
+                <GitBranchIcon />
+              </ToolButton>
+            </span>
+          )}
           {/* port forwards: expune servicii web de pe host prin browser */}
           <span className={roomy ? 'contents' : 'hidden'}>
             <ToolButton title={t('session.forwardsTooltip')} active={showForwards} toggle onClick={toggleForwards}>
@@ -2608,18 +2681,18 @@ export default function SessionView(props: {
           </span>
           {/* docker: containere/imagini/volume/reţele + shell în container. Doar host-uri de
               agent (docker CLI e local pe host; SSH/telnet n-au op-ul `run`). */}
-          {agentHost && (
+          {agentHost && dockerGate.show && (
             <span className={roomy ? 'contents' : 'hidden'}>
-              <ToolButton title={t('session.dockerTooltip')} active={showDocker} toggle onClick={toggleDocker}>
+              <ToolButton title={dockerGate.reason ?? t('session.dockerTooltip')} name={t('session.dockerTooltip')} active={showDocker} toggle disabled={dockerGate.disabled} onClick={toggleDocker}>
                 <DockerIcon />
               </ToolButton>
             </span>
           )}
           {/* servicii systemd: listă + start/stop/restart. Doar host-uri de agent (systemctl e
               local pe host, prin op-ul `run` — ca Docker). */}
-          {agentHost && (
+          {agentHost && servicesGate.show && (
             <span className={roomy ? 'contents' : 'hidden'}>
-              <ToolButton title={t('session.servicesTooltip')} active={showServices} toggle onClick={toggleServices}>
+              <ToolButton title={servicesGate.reason ?? t('session.servicesTooltip')} name={t('session.servicesTooltip')} active={showServices} toggle disabled={servicesGate.disabled} onClick={toggleServices}>
                 <ServicesIcon />
               </ToolButton>
             </span>
@@ -2691,19 +2764,21 @@ export default function SessionView(props: {
                     <MoreItem onClick={() => { if (!showFiles) toggleFiles(); setMoreOpen(false) }}>
                       <FilesIcon /> {t('session.files')}
                     </MoreItem>
-                    <MoreItem onClick={() => { if (!showGit) toggleGit(); setMoreOpen(false) }}>
-                      <GitBranchIcon /> Git
-                    </MoreItem>
+                    {gitGate.show && (
+                      <MoreItem onClick={() => { if (!showGit) toggleGit(); setMoreOpen(false) }} disabled={gitGate.disabled} title={gitGate.reason}>
+                        <GitBranchIcon /> Git
+                      </MoreItem>
+                    )}
                     <MoreItem onClick={() => { if (!showForwards) toggleForwards(); setMoreOpen(false) }}>
                       <ForwardIcon /> {t('session.portForwards')}
                     </MoreItem>
-                    {agentHost && (
-                      <MoreItem onClick={() => { if (!showDocker) toggleDocker(); setMoreOpen(false) }}>
+                    {agentHost && dockerGate.show && (
+                      <MoreItem onClick={() => { if (!showDocker) toggleDocker(); setMoreOpen(false) }} disabled={dockerGate.disabled} title={dockerGate.reason}>
                         <DockerIcon /> {t('docker.title')}
                       </MoreItem>
                     )}
-                    {agentHost && (
-                      <MoreItem onClick={() => { if (!showServices) toggleServices(); setMoreOpen(false) }}>
+                    {agentHost && servicesGate.show && (
+                      <MoreItem onClick={() => { if (!showServices) toggleServices(); setMoreOpen(false) }} disabled={servicesGate.disabled} title={servicesGate.reason}>
                         <ServicesIcon /> {t('services.title')}
                       </MoreItem>
                     )}
@@ -3075,8 +3150,12 @@ export default function SessionView(props: {
 
         {/* Guardrail: confirmare comandă periculoasă */}
         {cmdConfirm && (
-          <div role="alertdialog" aria-modal="true" aria-labelledby="wt-guard-title" aria-describedby="wt-guard-desc"
-            className="absolute inset-0 z-30 grid place-items-center bg-ink-950/80 p-6 backdrop-blur-sm">
+          <div ref={cmdDialogRef} tabIndex={-1}
+            role="alertdialog" aria-modal="true" aria-labelledby="wt-guard-title" aria-describedby="wt-guard-desc"
+            // tabIndex=-1: un click pe fundal / pe text focalizează dialogul, nu <body> — altfel Escape-ul
+            // următor ar fi „al panoului" şi „Cancel & clear" n-ar mai goli linia; selecţia textului
+            // comenzii rămâne posibilă (audit P1, SV-04 review)
+            className="absolute inset-0 z-30 grid place-items-center bg-ink-950/80 p-6 backdrop-blur-sm outline-none">
             <div className="w-full max-w-md rounded-xl bg-ink-900 p-4 ring-1 ring-ink-700 shadow-2xl">
               <div id="wt-guard-title" className="wt-warn flex items-center gap-2 text-sm font-semibold"><ShieldIcon />
                 {' '}{cmdConfirm.opaque ? t('session.inputUnknownTitle') : cmdConfirm.echo ? t('session.echoUnknownTitle') : cmdConfirm.unknown ? t('session.peerUnknownTitle') : t('session.dangerousCommand')}</div>
@@ -3438,10 +3517,12 @@ const ToolButton = forwardRef<HTMLButtonElement, {
   active?: boolean
   /** comutator (panou deschis/închis): `aria-pressed` = `active` */
   toggle?: boolean
+  /** permisiune lipsă pe ACEST host (FL-09): dezactivat, cu motivul în `title` */
+  disabled?: boolean
   onClick: () => void
   children: React.ReactNode
 } & Pick<React.ButtonHTMLAttributes<HTMLButtonElement>, 'aria-expanded' | 'aria-controls' | 'aria-haspopup'>>(
-  function ToolButton({ title, name, active, toggle, onClick, children, ...aria }, ref) {
+  function ToolButton({ title, name, active, toggle, disabled, onClick, children, ...aria }, ref) {
     // IconButton-ul design system-ului (label = aria-label + title); starea „activ" = varianta
     // `active` a primitivei (3.6.3, U24), nu clase de culoare suprapuse peste ghost
     return (
@@ -3452,6 +3533,7 @@ const ToolButton = forwardRef<HTMLButtonElement, {
         title={title}
         active={!!active}
         aria-pressed={toggle ? !!active : undefined}
+        disabled={disabled}
         {...aria}
         onMouseDown={(e) => e.preventDefault()} // păstrează focusul (și selecția) în terminal
         onClick={onClick}
@@ -3465,13 +3547,14 @@ const ToolButton = forwardRef<HTMLButtonElement, {
     disclosure (trigger cu aria-expanded/aria-controls, Tab între butoane, Escape închide şi întoarce
     focusul pe trigger), deci n-are voie să promită comportamentul de meniu ARIA (săgeţi, roving).
     `wt-touch`: 44px sub pointer grosier — pe telefon panoul e o foaie cu acţiuni etichetate. */
-function MoreItem(props: { onClick: () => void; disabled?: boolean; children: React.ReactNode }) {
+function MoreItem(props: { onClick: () => void; disabled?: boolean; title?: string; children: React.ReactNode }) {
   return (
     <button
       type="button"
       onMouseDown={(e) => e.preventDefault()}
       onClick={props.onClick}
       disabled={props.disabled}
+      title={props.title}
       className="wt-touch flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-slate-300 hover:bg-ink-800 disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent"
     >
       {props.children}

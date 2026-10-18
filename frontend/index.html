@@ -13,6 +13,9 @@
          rămân vizibile deasupra ei; iOS e tratat din main.tsx (visualViewport) -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
     <meta name="theme-color" content="#0b0e14" />
+    <!-- color-scheme (audit 2026-10-17, UI-03): primul cadru, înainte ca theme.ts să pună
+         data-mode pe <html>; index.css îl fixează apoi pe dark/light după varianta aleasă -->
+    <meta name="color-scheme" content="dark light" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <!-- iOS acceptă doar PNG pentru apple-touch-icon; cu SVG, PWA instalată
          pe iPhone primea o iconiță generică (screenshot) -->

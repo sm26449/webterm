@@ -32,9 +32,9 @@ import TransfersWidget from './components/TransfersWidget'
 import Toasts, { ToastItem } from './components/Toasts'
 import CopyToast from './components/CopyToast'
 import { initialFleet, settleFleet, type FleetState, type FleetStatus } from './lib/fleetLoad'
-import { errText, api, ApiError, AppState, Host, isSessionLive, Session, Snippet, SplitView, setStepupHandler, withStepup } from './lib/api'
+import { errText, api, ApiError, AppState, Host, isSessionLive, SETTINGS_RETURN_KEY, Session, Snippet, SplitView, setStepupHandler, withStepup } from './lib/api'
 import { hostAt, hostColor } from './lib/host'
-import type { SettingsTarget } from './lib/settingsIndex'
+import { SETTINGS_CATS, type SettingsTarget } from './lib/settingsIndex'
 import { stepupPrompt, stepupSucceeded, totpCred, type StepupCred, type StepupResult } from './lib/stepup'
 import { useI18n } from './lib/i18n'
 import { useConfirm } from './lib/confirm'
@@ -42,8 +42,9 @@ import { useFocusTrap } from './lib/useFocusTrap'
 import { copyText } from './lib/clipboard'
 import { ArrowsLeftRightIcon, CloseIcon, CopyIcon, FullscreenIcon, LockIcon, ShieldIcon } from './components/Icons'
 import { EmptyState } from './components/ui'
-import { loadPerms } from './lib/perms'
-import { ensureNotificationPermission, notify, notifyError, registerToast, upsertToast } from './lib/notify'
+import { loadPerms, setPerms } from './lib/perms'
+import { ensureNotificationPermission, notify, notifyError, notifyToast, registerToast, upsertToast } from './lib/notify'
+import { forgetSelfRow } from './components/settings/users/shared'
 import { forgetUploads, hideUploads, openFilesAt, restoreOrphans, setUploadUser } from './lib/uploads'
 import { forgetDownloads, hideInterruptedDownloads, restoreInterruptedDownloads, setDownloadUser } from './lib/downloads'
 import { dropCopyRows, setCopyUser } from './lib/copyjobs'
@@ -56,7 +57,7 @@ import { matchShortcut, shortcutFor, ShortcutId } from './lib/shortcuts'
 import { focusedTerminalRunsProgram } from './lib/transfers'
 import { menuNav } from './lib/tablist'
 import { createPortal } from 'react-dom'
-import { shouldAutoOpen } from './lib/walkthrough'
+import { setWalkthroughUser, shouldAutoOpen } from './lib/walkthrough'
 import { fmtTs, getTimezone } from './lib/tz'
 import { acceptDrop, beginDrag, endDrag, ownDragKind } from './lib/dragState'
 import type { PeerState } from './lib/broadcastGuard'
@@ -368,7 +369,12 @@ function MainApp() {
   // o tastă dintr-un panou → difuzată către CELELALTE (originea a trimis deja local)
   const handleUserData = useCallback((sid: string, d: string | Uint8Array, kind: 'key' | 'report' = 'key') => {
     if (!broadcastRef.current) return
-    // clasificarea originii (tastă / raport de terminal) merge cu datele (review 3.6.13, L-a)
+    // rapoartele terminalului (mouse SGR/X10, focus in/out, CPR, DA…) sunt răspunsurile terminalului de
+    // ORIGINE la programele lui — nu taste: un click în tmux-ul din A nu e un click în vim-ul din B
+    // (audit 2026-10-17, SV-02). Originea le-a clasificat deja (lib/broadcastGuard.broadcastDecision);
+    // aici e plasa a doua, ca niciun apelant viitor să nu le difuzeze.
+    if (kind === 'report') return
+    // clasificarea originii (tastă) merge cu datele (review 3.6.13, L-a)
     paneHandles.current.forEach((h, osid) => { if (osid !== sid) h.send(d, kind) })
   }, [])
   // starea fiecărui panou-ţintă (linia tastată + dacă o putem crede: flux viu, ecou primit) —
@@ -498,11 +504,33 @@ function MainApp() {
   // 3.6.8: contorul System health de pe rotiţă se reîmprospătează la 5 min (verificările rulează
   // pe server la 30 s; /api/state îl citeşte din memorie, deci e ieftin). Doar câmpul ăsta.
   const authed = !!appState?.authenticated
+  const appStateRef = useRef(appState)
+  appStateRef.current = appState
   useEffect(() => {
     if (!authed) return
     const id = window.setInterval(() => {
-      api<AppState>('/api/state').then((s) => setAppState((prev) => (prev && s.authenticated
-        ? { ...prev, health_attention: s.health_attention ?? null } : prev))).catch(() => {})
+      api<AppState>('/api/state').then((s) => {
+        const prev = appStateRef.current
+        if (!prev?.authenticated || !s.authenticated) return
+        // Audit 2026-10-17 (P0 critic, FL-06): cookie-ul aparţine acum ALTUI cont, fără niciun 401 între
+        // timp (login în alt tab al aceluiaşi browser, cont re-adoptat prin SSO). Starea din memorie a
+        // contului vechi (rânduri Transfers, descărcări, copieri, istoricul clipboard-ului) nu are voie să
+        // supravieţuiască: tratăm exact ca o ieşire + o intrare cu contul nou — aceeaşi curăţare ca la
+        // `authenticated=false`, apoi starea nouă întreagă, iar efectele pe `user_id` adoptă contul nou
+        // (setUploadUser / setDownloadUser / setCopyUser). Fără reload, fără buclă: la următorul poll
+        // id-urile coincid.
+        if (prev.user_id != null && s.user_id != null && s.user_id !== prev.user_id) {
+          clearClipHistory()
+          hideUploads()
+          hideInterruptedDownloads()
+          dropCopyRows(null)
+          walkAutoRef.current = false; setPerms(null); forgetSelfRow()   // contul adoptat: turul, permisiunile şi rândul propriu (UI-06, RB-03)
+          setAppState(s)
+          return
+        }
+        // altfel doar contorul System health (verificările rulează pe server; /api/state e ieftin)
+        setAppState((p) => (p ? { ...p, health_attention: s.health_attention ?? null } : p))
+      }).catch(() => {})
     }, 5 * 60_000)
     return () => window.clearInterval(id)
   }, [authed])
@@ -577,6 +605,20 @@ function MainApp() {
     try { back = sessionStorage.getItem('wt_stepup_return') || ''; sessionStorage.removeItem('wt_stepup_return') } catch { /* */ }
     window.history.replaceState(null, '', window.location.pathname + (back || ''))
     if (back) window.location.hash = back
+    // audit P1 (RB-03): o schimbare de acces pornită din Setări de un cont SSO fără parolă a trecut pe la
+    // IdP — redeschidem acelaşi panou (lib/api.ts withAccessReauth a notat ţinta) şi spunem să reia acţiunea
+    try {
+      const raw = sessionStorage.getItem(SETTINGS_RETURN_KEY)
+      if (raw) {
+        sessionStorage.removeItem(SETTINGS_RETURN_KEY)
+        const target = JSON.parse(raw) as SettingsTarget
+        if (target && SETTINGS_CATS.some((c) => c.id === target.cat)) {
+          setSettingsCat(target); setSettingsSignal((n) => n + 1)
+          notifyToast(t('access.reauth.backRepeat'), 'info')
+        }
+      }
+    } catch { /* sessionStorage indisponibil sau JSON stricat: nimic de redeschis */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const refresh = useCallback(async () => {
@@ -1143,8 +1185,13 @@ function MainApp() {
   // copieri host → host: rândurile (căi, hosturi, erori) sunt tot per cont — aceeaşi igienă (FL-06);
   // job-ul de pe server îşi vede de treabă, doar rândul din memorie pleacă
   useEffect(() => {
-    if (appState?.authenticated && appState.user_id != null) setCopyUser(appState.user_id)
-    else if (appState?.authenticated === false) dropCopyRows(null)
+    if (appState?.authenticated && appState.user_id != null) { setCopyUser(appState.user_id); setWalkthroughUser(appState.user_id) }
+    else if (appState?.authenticated === false) {
+      dropCopyRows(null)
+      // audit P1 (UI-06): turul e per cont — contul următor din acelaşi tab îşi primeşte turul lui, iar
+      // permisiunile contului vechi nu-i colorează primul ecran (gating-ul cosmetic porneşte de la „necunoscut")
+      setWalkthroughUser(null); walkAutoRef.current = false; setPerms(null)
+    }
   }, [appState?.authenticated, appState?.user_id])
   // history-ul de clipboard (în memorie, poate ţine parole/tokenuri) moare odată cu sesiunea web:
   // logout explicit SAU expirare (401 / poll) — orice tranziţie spre neautentificat
@@ -1153,14 +1200,15 @@ function MainApp() {
   }, [appState?.authenticated])
 
   // Auto-deschiderea walkthrough-ului la PRIMA rulare: doar după autentificare (nu pe login) şi
-  // doar dacă `wt_walkthrough_done` lipseşte. `walkAutoRef` ne apără de poll-ul de 5s (authenticated
+  // doar dacă cheia per cont `wt_walkthrough_done:<user_id>` lipseşte (contul e înregistrat de efectul
+  // de lângă setCopyUser, declarat înainte). `walkAutoRef` ne apără de poll-ul de 5s (authenticated
   // rămâne true, dar nu vrem să-l redeschidem). E2e-urile presetează cheia → shouldAutoOpen=false,
   // deci fluxul de login nu e atins. NB: HOOK — înainte de orice `return` timpuriu.
   useEffect(() => {
     if (!appState?.authenticated || walkAutoRef.current) return
     walkAutoRef.current = true
     if (shouldAutoOpen(true)) setWalkthrough({ auto: true })
-  }, [appState?.authenticated])
+  }, [appState?.authenticated, appState?.user_id])
 
   // Redeschiderea manuală: Setări → Preferinţe cere turul printr-un eveniment (componenta e
   // adâncă în SettingsModal), iar „?" îl cere prin prop. Ambele îl deschid în mod `auto:false`.
@@ -2164,6 +2212,7 @@ function MainApp() {
             forgetUploads()
             await Promise.race([forgetDownloads(), new Promise((r) => setTimeout(r, 1500))])
             dropCopyRows(null)
+            forgetSelfRow()     // rândul propriu din Settings (parolă locală / passkey) e al contului care pleacă (RB-03)
             await api('/api/logout', { method: 'POST' })
             setAppState({ ...appState, authenticated: false })
           }}

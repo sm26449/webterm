@@ -62,6 +62,9 @@ class FakeWS:
         self.inbox: asyncio.Queue = asyncio.Queue()
         self.texts = []
         self.binary = []
+        # ordinea REALĂ a cadrelor (text şi binar întreţesute): `texts`/`binary` separate nu pot spune
+        # dacă `osc133` a plecat înainte sau după `locked` (FL-T03)
+        self.seq = []
         self.closed = None
         self.accepted = False
 
@@ -74,9 +77,14 @@ class FakeWS:
 
     async def send_text(self, t):
         self.texts.append(t)
+        try:
+            self.seq.append(json.loads(t).get("type"))
+        except ValueError:
+            self.seq.append("text")
 
     async def send_bytes(self, b):
         self.binary.append(b)
+        self.seq.append("bytes")
 
     async def receive(self):
         return await self.inbox.get()
@@ -280,7 +288,54 @@ async def main():
         check("ataşare fără fereastră → locked reason=stepup",
               any(m.get("reason") == "stepup" for m in w3.json_msgs("locked")), w3.texts[-3:])
 
-        for ws_, t_ in ((owner, t_owner), (guest, t_guest), (owner2, t_owner2), (p, t_p), (w3, t3)):
+        # ── 14. (audit 2026-10-17, FL-T03) starea OSC 133 nu pleacă NICIODATĂ înaintea deciziei de
+        #    step-up / blocare (3.5.13; review 3.6.13 L7): `init` o precede, iar `osc133` vine doar
+        #    după un replay trimis (deblocat) sau în resync-ul de după unlock. Hub PRE-EXISTENT, cu
+        #    starea sincronizată (B în transcriptul flush-uit) — exact cazul în care o reordonare în
+        #    attach ar trimite-o unui client care încă n-a prezentat factorul.
+        sid4 = "f" * 32
+        await new_session(hid, sid4)
+        row4 = await db.fetchone("SELECT * FROM sessions WHERE id=?", sid4)
+        hub4 = core.get_or_create_hub(row4)
+        await hub4._process_output(b"\x1b]133;A\x07$ \x1b]133;B\x07")
+        hub4._flush()
+        span4 = {"end": hub4.out_f.tell(), "limit": 4096, "gen": hub4.out_gen}
+        check("precondiţie: hub-ul are starea OSC 133 sincronizată (B în transcript)",
+              hub4.osc133_state(span4) == {"integrated": True, "last": "B", "synced": True},
+              hub4.osc133_state(span4))
+        security._stepup_windows.clear()
+        w4 = FakeWS(tok)
+        t4 = asyncio.create_task(api.browser_ws(w4, sid4))
+        await settle(lambda: bool(w4.json_msgs("locked")))
+        await asyncio.sleep(0.3)                           # un osc133 întârziat ar avea timp să apară
+        k4 = list(w4.seq)
+        i_lock = k4.index("locked") if "locked" in k4 else -1
+        check("ataşare fără fereastră pe hub cu OSC 133 sincronizat: niciun `osc133` înainte de `locked`",
+              i_lock >= 0 and "osc133" not in k4[:i_lock], k4)
+        check("… şi nici după, cât e blocat: niciun `osc133`, niciun octet (starea vine doar cu replay-ul)",
+              "osc133" not in k4 and "bytes" not in k4, k4)
+        init4 = w4.json_msgs("init")
+        check("… `init` precede decizia şi NU poartă starea OSC 133 (review 3.6.13 L7)",
+              len(init4) == 1 and "osc133" not in init4[0] and k4.index("init") < i_lock, init4)
+        # unlock cu factor proaspăt: ordinea 3.6.13 ţine şi aici — locked → unlocked → resync → tail →
+        # osc133 (sincronizat, B), niciun octet înaintea `resync`
+        await db.execute("UPDATE users SET totp_last_counter=NULL WHERE id=?", uid)   # anti-replay TOTP
+        w4.push({"type": "unlock", "totp": totp_mod.generate(secret)})
+        # aşteptăm un osc133 NOU (resync-ul de unlock), nu unul scurs înaintea deciziei — altfel, în
+        # cazul de regresie, verificările de mai jos ar citi secvenţa de dinainte de unlock
+        n0 = len(w4.json_msgs("osc133"))
+        await settle(lambda: len(w4.json_msgs("osc133")) > n0)
+        k4 = list(w4.seq)
+        pos = {k: (k4.index(k) if k in k4 else -1) for k in ("locked", "unlocked", "resync", "bytes", "osc133")}
+        check("după unlock: locked → unlocked → resync → tail → osc133 (ordinea 3.6.13 ţine)",
+              0 <= pos["locked"] < pos["unlocked"] < pos["resync"] < pos["bytes"] < pos["osc133"], k4)
+        check("… niciun octet şi niciun osc133 înaintea `resync`-ului de deblocare",
+              "bytes" not in k4[:pos["resync"]] and "osc133" not in k4[:pos["resync"]], k4)
+        osc4 = w4.json_msgs("osc133")
+        check("… starea trimisă după tail e cea sincronizată (last=B, synced)",
+              len(osc4) == 1 and osc4[0].get("last") == "B" and osc4[0].get("synced") is True, osc4)
+
+        for ws_, t_ in ((owner, t_owner), (guest, t_guest), (owner2, t_owner2), (p, t_p), (w3, t3), (w4, t4)):
             await ws_.inbox.put({"type": "websocket.disconnect"})
             try:
                 await asyncio.wait_for(t_, 5)

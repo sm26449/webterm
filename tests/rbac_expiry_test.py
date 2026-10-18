@@ -350,6 +350,70 @@ async def main():
     row = await db.fetchone("SELECT expires FROM role_bindings WHERE id=?", o2_bid)
     check("admin promote: Owner-ul temporar devine permanent", row["expires"] is None, str(dict(row)))
 
+    # ── RB-06 (audit 2026-10-17): contul break-glass nu iese pe NICIO rută ─────────────
+    # break-glass = Owner PERMANENT @ all CU PAROLĂ LOCALĂ (COALESCE(local_password,1)=1); P0 a
+    # apărat doar „Remove local password" — ştergerea contului, scoaterea legăturii Owner şi
+    # transformarea ei în temporară lăsau instanţa fără nimeni care să intre la o pană a IdP-ului
+    await db.execute("UPDATE role_bindings SET expires=NULL WHERE id=?", own_bid)
+    bg_id = await U.add_user("bg@x.co", bindings=[("owner", "all", "")])
+    bg_bid = (await bindings(bg_id))[0]["id"]
+    others = [r["id"] for r in await db.fetchall(
+        "SELECT DISTINCT u.id FROM users u JOIN role_bindings b ON b.user_id=u.id JOIN roles r ON r.id=b.role_id"
+        " WHERE r.key='owner' AND b.scope_kind='all' AND b.expires IS NULL AND COALESCE(u.local_password, 1)=1"
+        " AND u.id<>?", bg_id)]
+    saved_lp = {o: (await db.fetchone("SELECT local_password FROM users WHERE id=?", o))["local_password"]
+                for o in others}
+    for o in others:                      # ceilalţi Owneri permanenţi devin SSO-only (fără parolă)
+        await db.execute("UPDATE users SET local_password=0 WHERE id=?", o)
+    authz.bump_epoch()
+    check("pregătire RB-06: bg e singurul Owner permanent cu parolă locală, dar NU singurul Owner permanent",
+          await authz.owner_count(with_local_password=True) == 1 and await authz.owner_count() >= 2,
+          "%d %d" % (await authz.owner_count(with_local_password=True), await authz.owner_count()))
+    r = await owner.post("/api/users/%d/delete" % bg_id, json={"current_password": U.OWNER_PW})
+    # codul e `account.lastBreakGlassTarget` (nu `…lastBreakGlass`, al rutei „Remove local password"):
+    # UI-ul arată err.<cod>, iar textul la persoana I („Eşti ultimul Owner…") ar fi greşit aici
+    check("ştergerea contului break-glass → 409 account.lastBreakGlassTarget (nu 400 lastOwner: mai sunt Owneri permanenţi)",
+          r.status_code == 409 and U.code(r) == "account.lastBreakGlassTarget", "%s %s" % (r.status_code, r.text[:160]))
+    check("…contul rămâne", await db.fetchone("SELECT 1 FROM users WHERE id=?", bg_id) is not None)
+    check("…mesajul spune ce să faci", "PERMANENT Owner with a local password" in r.text, r.text[:200])
+    r = await owner.post("/api/users/%d/bindings/%d/delete" % (bg_id, bg_bid), json={"current_password": U.OWNER_PW})
+    check("scoaterea legăturii Owner @ all a contului break-glass → 409 account.lastBreakGlassTarget",
+          r.status_code == 409 and U.code(r) == "account.lastBreakGlassTarget", "%s %s" % (r.status_code, r.text[:160]))
+    check("…legătura rămâne", await db.fetchone("SELECT 1 FROM role_bindings WHERE id=?", bg_bid) is not None)
+    r = await owner.post("/api/users/%d/bindings/%d/expiry" % (bg_id, bg_bid), json=xb(soon))
+    check("legătura Owner a contului break-glass făcută TEMPORARĂ → 409 account.lastBreakGlassTarget",
+          r.status_code == 409 and U.code(r) == "account.lastBreakGlassTarget", "%s %s" % (r.status_code, r.text[:160]))
+    check("…rămâne permanentă",
+          (await db.fetchone("SELECT expires FROM role_bindings WHERE id=?", bg_bid))["expires"] is None)
+    # un Owner TEMPORAR cu parolă nu ţine locul
+    tb_id = await U.add_user("tb-bg@x.co", bindings=[("owner", "all", "")])
+    await db.execute("UPDATE role_bindings SET expires=? WHERE user_id=?", time.time() + 3600, tb_id)
+    authz.bump_epoch()
+    r = await owner.post("/api/users/%d/delete" % bg_id, json={"current_password": U.OWNER_PW})
+    check("…un al doilea Owner cu parolă dar TEMPORAR nu ţine locul → tot 409",
+          r.status_code == 409 and U.code(r) == "account.lastBreakGlassTarget", "%s %s" % (r.status_code, r.text[:120]))
+    # o legătură care NU e Owner @ all a aceluiaşi cont se scoate liber (nu atinge invariantul)
+    extra_bid = await U.bind(bg_id, "viewer", "folder", "prod")
+    r = await owner.post("/api/users/%d/bindings/%d/delete" % (bg_id, extra_bid), json={"current_password": U.OWNER_PW})
+    check("…dar o legătură non-Owner a aceluiaşi cont se scoate (200)", r.status_code == 200, r.text[:120])
+    # cu un al doilea Owner PERMANENT cu parolă locală, toate trec
+    await db.execute("UPDATE users SET local_password=1 WHERE id=?", o2_id)
+    authz.bump_epoch()
+    r = await owner.post("/api/users/%d/bindings/%d/expiry" % (bg_id, bg_bid), json=xb(soon))
+    check("cu alt Owner PERMANENT cu parolă: legătura poate deveni temporară (200)", r.status_code == 200, r.text[:120])
+    await db.execute("UPDATE role_bindings SET expires=NULL WHERE id=?", bg_bid)
+    authz.bump_epoch()
+    r = await owner.post("/api/users/%d/bindings/%d/delete" % (bg_id, bg_bid), json={"current_password": U.OWNER_PW})
+    check("…legătura Owner se poate scoate (200)", r.status_code == 200
+          and await db.fetchone("SELECT 1 FROM role_bindings WHERE id=?", bg_bid) is None, r.text[:120])
+    await U.bind(bg_id, "owner", "all", "")
+    r = await owner.post("/api/users/%d/delete" % bg_id, json={"current_password": U.OWNER_PW})
+    check("…şi contul se poate şterge (200)", r.status_code == 200
+          and await db.fetchone("SELECT 1 FROM users WHERE id=?", bg_id) is None, r.text[:120])
+    for o, lp in saved_lp.items():
+        await db.execute("UPDATE users SET local_password=? WHERE id=?", lp, o)
+    await U.unbind_all(tb_id)
+
     for c in (owner, ana, o2, adm):
         await c.aclose()
     await db.close()

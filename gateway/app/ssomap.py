@@ -142,7 +142,7 @@ async def _apply_locked(uid: int, desired: set, *, remove_only: bool,
              for r in rows if (r["source"] or "") != "sso"}
     names = await _role_names()
     owner_rid = next((rid for rid, (k, _n) in names.items() if k == "owner"), None)
-    added, removed, kept = [], [], []
+    added, removed, kept, kept_bg = [], [], [], []
     now = time.time()
     held_back = []
     if not remove_only:
@@ -160,6 +160,12 @@ async def _apply_locked(uid: int, desired: set, *, remove_only: bool,
         if t[0] == owner_rid and t[1] == "all" and await authz.owner_count(exclude_binding=bid) < 1:
             kept.append(t)                 # never lock the instance out (docs/ROLES.md)
             continue
+        # RB-06 (re-review P1): nor the Owner @ all binding of the break-glass account — the last
+        # permanent Owner with a local password — while every other permanent Owner is SSO-only
+        # (the caller holds authz._lock; same rule as api.update_account / admin passwd)
+        if t[0] == owner_rid and t[1] == "all" and await authz.last_break_glass(uid, exclude_binding=bid):
+            kept_bg.append(t)
+            continue
         await db.execute("DELETE FROM role_bindings WHERE id=? AND user_id=? AND source='sso'",
                          bid, uid)
         removed.append(t)
@@ -176,6 +182,8 @@ async def _apply_locked(uid: int, desired: set, *, remove_only: bool,
         return _label(names.get(t[0], ("", "?"))[1], t[1], t[2])
     out = {"added": [lab(t) for t in added], "removed": [lab(t) for t in removed],
            "kept_last_owner": [lab(t) for t in kept], "skipped": False}
+    if kept_bg:
+        out["kept_last_break_glass"] = [lab(t) for t in kept_bg]
     if held_back:
         out["held_back"] = [lab(t) for t in held_back]
     return out
@@ -249,12 +257,14 @@ async def sync_user(uid: int, email: str, groups, *, ip: str, via: str,
                            ("sso.sync.skippedLocalPassword (%s): not added %s" % (via, labs))[:480],
                            actor_id=uid)
     _report(uid, email, ip, via, res)
-    if res["added"] or res["removed"] or res["kept_last_owner"]:
+    if res["added"] or res["removed"] or res["kept_last_owner"] or res.get("kept_last_break_glass"):
         await audit.record(time.time(), email, ip, "SCIM" if scim else "GET", path, 200,
-                           ("SSO roles synced (%s): +%s -%s%s" % (
+                           ("SSO roles synced (%s): +%s -%s%s%s" % (
                                via, res["added"] or "[]", res["removed"] or "[]",
                                (" KEPT last Owner %s" % res["kept_last_owner"])
-                               if res["kept_last_owner"] else ""))[:480], actor_id=uid,
+                               if res["kept_last_owner"] else "",
+                               (" KEPT break-glass Owner %s" % res["kept_last_break_glass"])
+                               if res.get("kept_last_break_glass") else ""))[:480], actor_id=uid,
                            via="scim" if scim else "")
     return res
 
@@ -293,7 +303,7 @@ async def prune_locked() -> list:
     for u in await _sso_users():
         desired, _m = await _desired(_stored(u))
         res = await _apply_locked(u["id"], desired, remove_only=True)
-        if res["removed"] or res["kept_last_owner"]:
+        if res["removed"] or res["kept_last_owner"] or res.get("kept_last_break_glass"):
             out.append((u["id"], u["email"], res))
     return out
 
@@ -314,6 +324,17 @@ def _report(uid: int, email: str, ip: str, via: str, res: dict) -> None:
                                             what_params=params)
     if res["kept_last_owner"]:
         report_last_owner(uid, email, ip, res["kept_last_owner"])
+    if res.get("kept_last_break_glass"):
+        report_last_break_glass(email, via, res["kept_last_break_glass"])
+
+
+def report_last_break_glass(email: str, via: str, kept: list) -> None:
+    """RB-06: the mapping (or the IdP's groups) would take the Owner @ all binding of the only
+    permanent Owner with a local password; it was kept so the instance stays openable without the
+    IdP. Log only (the sign-in audit row already says KEPT): nothing was granted, nothing removed."""
+    log.warning("SSO: kept the Owner binding of the break-glass account %s (%s) — every other "
+                "permanent Owner is SSO-only; give another permanent Owner a local password before "
+                "removing this one (%s)", email, ", ".join(kept), via)
 
 
 def report_last_owner(uid: int, email: str, ip: str, kept: list) -> None:
@@ -603,3 +624,5 @@ async def _report_config(out: dict, changed: list) -> None:
                 what_params={"account": email, "added": "—", "removed": ", ".join(res["removed"])})
         if res["kept_last_owner"]:
             report_last_owner(uid, email, "-", res["kept_last_owner"])
+        if res.get("kept_last_break_glass"):
+            report_last_break_glass(email, "config", res["kept_last_break_glass"])

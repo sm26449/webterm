@@ -745,16 +745,13 @@ async def _refuse_last_break_glass(user) -> None:
     and the banner even recommends it. Same rule here, same definition: a PERMANENT Owner @ all
     keeps its local password while no OTHER active permanent Owner has one (a time-bound Owner
     does not count — it expires). Without that account an IdP outage locks every Owner out
-    (passkeys go with the password), and the only way back is a shell on the server."""
-    if not await db.fetchone(
-            "SELECT 1 FROM role_bindings b JOIN roles r ON r.id=b.role_id WHERE b.user_id=?"
-            " AND r.key='owner' AND b.scope_kind='all' AND b.expires IS NULL", user["id"]):
-        return
-    if await authz.owner_count(exclude_user=user["id"], with_local_password=True) < 1:
-        raise ApiError(409, "account.lastBreakGlass",
-                       "you are the last permanent Owner with a local password (the break-glass "
-                       "account): make another account a PERMANENT Owner with a local password "
-                       "first — a time-bound Owner does not count")
+    (passkeys go with the password), and the only way back is a shell on the server.
+    RB-06: the decision is `authz.last_break_glass` — shared with delete_user, remove_binding,
+    the expiry route and accounts.disable (SCIM); nothing to protect when the account has no
+    local password already (COALESCE(local_password, 1)=0: an SSO-only account is not the
+    break-glass one, whatever the count)."""
+    if await authz.last_break_glass(user["id"]):
+        raise ApiError(409, "account.lastBreakGlass", authz.LAST_BREAK_GLASS_DETAIL % "you are")
 
 
 @router.post("/api/account")
@@ -856,12 +853,22 @@ async def update_account(body: AccountUpdate, request: Request, user=Depends(sec
             for b in await db.fetchall(
                     "SELECT b.id, b.scope_kind, r.key FROM role_bindings b JOIN roles r"
                     " ON r.id=b.role_id WHERE b.user_id=? AND b.source='sso'", user["id"]):
-                if (b["key"] == "owner" and b["scope_kind"] == "all"
-                        and await authz.owner_count(exclude_binding=b["id"]) < 1):
-                    # ultimul Owner: instanţa nu se blochează (aceeaşi regulă ca la sincronizare)
-                    log.error("local password set on %s, the LAST Owner: its SSO Owner binding "
-                              "is kept", user["email"])
-                    continue
+                if b["key"] == "owner" and b["scope_kind"] == "all":
+                    if await authz.owner_count(exclude_binding=b["id"]) < 1:
+                        # ultimul Owner: instanţa nu se blochează (aceeaşi regulă ca la sincronizare)
+                        log.error("local password set on %s, the LAST Owner: its SSO Owner "
+                                  "binding is kept", user["email"])
+                        continue
+                    # RB-06 (revizuirea P1): nici ultimul Owner permanent CU PAROLĂ LOCALĂ nu-şi
+                    # pierde legătura Owner la o schimbare de rutină a parolei — altfel rămân
+                    # doar Owneri SSO-only (contul break-glass dispare la prima rotire a parolei,
+                    # iar o pană a IdP-ului nu mai lasă pe nimeni să intre). local_password e deja
+                    # 1 (scris mai sus), deci regula vede contul ca break-glass dacă e cazul.
+                    if await authz.last_break_glass(user["id"], exclude_binding=b["id"]):
+                        log.error("local password set on %s, the last permanent Owner with a "
+                                  "local password (break-glass): its SSO Owner binding is kept",
+                                  user["email"])
+                        continue
                 await db.execute("DELETE FROM role_bindings WHERE id=?", b["id"])
                 n += 1
             if n:
@@ -1262,6 +1269,11 @@ async def delete_user(uid: int, body: ReauthOnly, request: Request,
         if (await authz.grants_for_user(uid)).is_owner() \
                 and await authz.owner_count(exclude_user=uid) < 1:
             raise ApiError(400, "authz.lastOwner", "you cannot remove the last Owner")
+        # RB-06: nici ultimul Owner permanent CU PAROLĂ LOCALĂ (contul break-glass) — altfel o
+        # pană a IdP-ului nu mai lasă pe nimeni să intre; aceeaşi regulă ca la remove_password
+        if await authz.last_break_glass(uid):
+            raise ApiError(409, "account.lastBreakGlassTarget",
+                           authz.LAST_BREAK_GLASS_DETAIL % "this account is")
         # tot ce ţinea de el moare odată cu el: sesiuni web, passkey-uri, coduri de recuperare,
         # IP-uri cunoscute, legături de rol. Altfel un cookie al contului şters ar rămâne valid.
         for sql in ("DELETE FROM web_sessions WHERE user_id=?",
@@ -1271,6 +1283,7 @@ async def delete_user(uid: int, body: ReauthOnly, request: Request,
                     "DELETE FROM alerts WHERE user_id=?",          # istoricul de alerte (3.5.11)
                     "DELETE FROM alert_prefs WHERE user_id=?",
                     "DELETE FROM role_bindings WHERE user_id=?",   # 3.6
+                    "DELETE FROM scim_group_members WHERE user_id=?",   # 3.6.18: fără FK/cascade (SC-02)
                     "DELETE FROM split_views WHERE user_id=?",
                     "DELETE FROM pending_ssh_keys WHERE user_id=?",
                     "DELETE FROM users WHERE id=?"):
@@ -1420,6 +1433,11 @@ async def remove_binding(uid: int, bid: int, body: ReauthOnly, request: Request,
         if (row["role_key"] == "owner" and row["scope_kind"] == "all"
                 and await authz.owner_count(exclude_binding=bid) < 1):
             raise ApiError(400, "authz.lastOwner", "you cannot remove the last Owner")
+        # RB-06: legătura Owner @ all a ultimului Owner permanent cu parolă locală rămâne (contul
+        # break-glass) — un alt Owner permanent fără parolă nu ţine locul la o pană a IdP-ului
+        if await authz.last_break_glass(uid, exclude_binding=bid):
+            raise ApiError(409, "account.lastBreakGlassTarget",
+                           authz.LAST_BREAK_GLASS_DETAIL % "this account is")
         # RB-02: re-auth-ul a fost un punct de suspendare — o sincronizare SSO a putut adopta
         # legătura între timp; ştergem DOAR ce nu e din SSO (fail closed: 0 rânduri = 409)
         gone = await db.execute_returning(
@@ -2121,6 +2139,7 @@ class TokenIn(BaseModel):
     scopes: list[str] = ["read"]
     days: int = 90
     current_password: str = ""
+    stepup_grant: str = ""         # conturi SSO fără parolă: grant passkey / fereastră SSO account-scope (RB-03)
     totp_code: str = ""            # al doilea factor (second_gate): un token e o credenţială persistentă
     email_code: str = ""
     # 3.6: plafon opţional de rol + scope. Efectivul tokenului = scopes ∩ rol ∩ ce poate
@@ -2287,12 +2306,12 @@ async def create_token(body: TokenIn, request: Request, user=Depends(authz.perm(
         if (await authz.host_ref(tvalue) is None
                 or "host.view" not in await authz.perms_on(grants, tvalue)):
             raise authz.not_found("host_id")
-    if not await _verify_reauth_password(user, body.current_password):
-        raise ApiError(401, "auth.wrongPassword", "wrong password")
     # Un token de automatizare e o credenţială persistentă (scope `run` = shell pe flotă) — la fel
-    # ca înrolarea unui passkey. Trece prin acelaşi al doilea factor: cine ştie doar parola nu-şi
-    # poate lăsa singur o cheie de durată pe cont.
-    await webauthn_api.second_gate(user, request, body, "create an automation token")
+    # ca înrolarea unui passkey. Aceeaşi poartă ca la o schimbare de acces: parola contului (401 dacă
+    # e greşită) sau, pentru un cont SSO fără parolă, grant-ul passkey / fereastra SSO account-scope
+    # (403 account.ssoReauth altfel), apoi al doilea factor (audit P1, RB-03 — înainte doar parola,
+    # deci un Owner SSO-only nu putea crea tokenuri din UI)
+    await _reauth_for_access_change(user, request, body, "create an automation token")
     name = body.name.strip()[:60]
     if not name:
         raise ApiError(400, "token.nameRequired", "give it a name (so you know what you are revoking)")

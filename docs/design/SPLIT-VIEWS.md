@@ -406,7 +406,30 @@ closed (review of 3.6.12, `lib/broadcastGuard.ts`), when guardrail rules are act
   A dialog opened **without** broadcast stays local: its "Run" (or "Cancel & clear") reaches only
   its own pane even if broadcast was turned on while it was open — its line was never judged in the
   other panes;
-- panes whose keys don't reach the host at all (watch-only, ended, socket closed) are not targets.
+- panes whose keys don't reach the host at all (watch-only, ended, socket closed) are not targets;
+- the **dialog lives inside its pane** and the other panes stay interactive, so **Escape** closes it
+  only when the focus is in that dialog or elsewhere in that pane (`escapeScope`, audit 2026-10-17
+  SV-04); an Escape pressed in another pane (vim, tmux copy-mode) is that pane's key, and with two
+  dialogs open one Escape closes only the focused one. "Cancel & clear" (`Ctrl+U` to every target)
+  is sent only when the focus was **in the dialog**; from elsewhere in the pane a broadcast dialog
+  closes without clearing lines nobody was looking at (a local dialog still clears its own line).
+  Tab / Shift+Tab cycle between the dialog's buttons; when the focus was lost (the focused button
+  unmounted), only the pane that is the action target takes the Escape.
+
+**What leaves the origin pane** (`lib/broadcastGuard.ts` `broadcastDecision`, audit 2026-10-17):
+
+- **terminal reports are never broadcast** (SV-02): mouse (SGR, urxvt, X10 via `onBinary`), focus
+  in/out, CPR, DA, DSR, colour replies… are the origin terminal's answers to *its* programs — a
+  click in the tmux of pane A is not a click in the vim of pane B, and a CPR typed at B's prompt is
+  garbage. The origin classifies (`userInput`), `broadcastOut` drops reports, and
+  `App.handleUserData` drops `kind === 'report'` again as a second net;
+- an origin that **cannot send locally** sends nothing to the other panes either (SV-05): while its
+  socket is reconnecting, or after the session ended, every key is counted as "not sent" *and* held
+  back from the peers, with a notice ("Not sent — this pane is reconnecting; nothing was sent to the
+  other panes either"). Before, the keys reached B, C, D and an Enter ran there with the origin
+  excluded from the targets, so the natural retype after the reconnect ran the command a second
+  time in the peers. Watch-only and replay (mute) stay silent as before — they never sent locally.
+  Every state that makes a pane `inert` as a target also stops it broadcasting as an origin.
 
 Every path that can submit a line goes through the same check: the keyboard Enter / `Ctrl+J` /
 `Ctrl+O` (`\x0f` — bash `operate-and-get-next`, zsh `accept-line-and-down-history` run the line

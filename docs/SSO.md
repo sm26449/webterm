@@ -456,6 +456,36 @@ Authentik asserts this by default; if your IdP omits the `email_verified` claim,
 (a brand-new SSO account for a non-colliding email is still created). Newly created SSO users get a
 locked local password, so they can only ever sign in through the IdP.
 
+### Locked out: the IdP is down and nobody has a password
+
+With `WEBTERM_OIDC_SSO_ONLY=1` (or when every Owner comes from a group mapping) there may be no
+account that can use the password form. The login page then says *"The identity provider could not
+be reached … see docs/SSO.md → Break-glass"* — the SSO button shows **currently unreachable** as
+soon as the gateway's own IdP probe fails (System health runs it hourly, and re-probes within
+minutes — at most once per 5 minutes — when it sees unconfirmed SSO failures; a failed `/api/oidc/login`
+by itself does not re-probe, so the badge can lag behind a fresh outage), and a failed redirect comes
+back with the same message instead of "use your password".
+The way back in is a shell on the server, never the browser:
+
+```bash
+# what is wrong, without logging in (the same list as Settings → System health)
+docker exec -it webterm-app-1 python3 -m app.admin health
+
+# give one account a local password (prompts; never on the command line).
+# This makes it a break-glass account: SCIM stops managing it and its SSO-group roles are
+# removed (an account with a local password gets no roles from groups) — so promote it next.
+docker exec -it webterm-app-1 python3 -m app.admin passwd you@example.com
+
+# make that account Owner over all hosts (permanent, audited)
+docker exec -it webterm-app-1 python3 -m app.admin promote you@example.com
+```
+
+Then sign in with the password form (2FA still applies if the account has TOTP; `app.admin
+disable-2fa <email>` if the phone is gone). Once the IdP is back, the account can give itself up to
+SSO again with *Remove local password* (Settings → Users & roles → Your access) — but keep **one**
+permanent Owner with a local password: that is the rule `app.admin sso-only` enforces, for exactly
+this day.
+
 ## 2FA hosts (step-up) under SSO
 
 For a host marked `require_2fa`, sensitive actions need a fresh second factor. An SSO user has
@@ -469,6 +499,15 @@ configure the IdP to include the claim. `WEBTERM_OIDC_REQUIRE_AUTH_TIME=0` resto
 lenient behaviour (accepted on `prompt=login` alone, with a warning) for an IdP that cannot emit
 it. Then you land back in the app and repeat the action. The **local break-glass admin** still
 uses WebTerm's own passkey/TOTP step-up (the account password alone is not a step-up).
+
+**Access changes** (granting or revoking a role, deleting or re-enabling an account, editing a
+custom role, mapping an SSO group, removing a local password) use the same idea for an SSO
+account: WebTerm never asks it for a password. With a WebAuthn passkey enrolled and no TOTP, the
+confirmation is that passkey; otherwise the action is sent and, when the server asks for a fresh
+sign-in, you are taken to the IdP and back — reopen Settings and repeat the action (the
+account-scope window is open then). One exception today: **creating an automation token** still
+verifies a local password only, so an SSO account without one cannot create tokens from the UI
+(the form says so); an SSO account that kept a local password types it as before.
 
 ## Logging & audit
 

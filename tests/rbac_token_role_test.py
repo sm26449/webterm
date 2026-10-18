@@ -74,6 +74,9 @@ async def main():
     t_custom = r.json()["token"]
     r = await owner.post("/api/tokens", json=tb("vw", role="viewer"))
     t_vw = r.json()["token"]
+    r = await owner.post("/api/tokens", json=tb("gresit", pw="nu-e-parola"))
+    check("cont local cu parola greşită → 401 auth.wrongPassword (poarta comună, RB-03)",
+          r.status_code == 401 and U.code(r) == "auth.wrongPassword", "%s %s" % (r.status_code, r.text[:100]))
     r = await owner.post("/api/tokens", json=tb("legacy"))
     t_legacy = r.json()["token"]
     row = next(x for x in r.json()["tokens"] if x["name"] == "legacy")

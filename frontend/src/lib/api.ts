@@ -1,4 +1,5 @@
 import { askSecret } from './secretPrompt'
+import { ssoStepupRedirect } from './stepup'
 
 export interface WatermarkConfig {
   enabled: boolean
@@ -487,6 +488,155 @@ export async function withStepup<T>(hostId: number, fn: () => Promise<T>): Promi
     // trecem codul refuzului (`stepup.totp` vs `stepup.password`) ca handler-ul să ştie ce să ceară
     const code = e instanceof ApiError ? e.code : ''
     if (isStepupError(e) && (await ensureStepup(hostId, code))) return fn()
+    throw e
+  }
+}
+
+/* RB-03 (audit 2026-10-17): re-autentificarea la o SCHIMBARE DE ACCES — grant/revocare/expirare de
+   legătură, ştergere/reactivare de cont, rol custom, mapare SSO, parola locală a contului. Serverul
+   (`_reauth_for_access_change`, `/api/account`) cere:
+     · cont local → parola contului (+ al doilea factor, prin withSecondFactor);
+     · cont SSO (sso_subject) → un grant passkey ACCOUNT-SCOPE (host_id=0) SAU fereastra SSO
+       account-scope deschisă de callback-ul `intent=stepup` fără host. Parola NU e verificată
+       niciodată pentru el (hash aleator) → 403 `account.ssoReauth`.
+   Înainte, fiecare panou cerea o parolă (askSecret) şi arăta 403-ul ca text: un Admin SSO-only
+   (modelul recomandat de 3.6.2/3.6.5) nu avea nicio cale din UI. Decizia stă acum într-un singur
+   loc (`accessReauthPlan`, din rândul propriu de la /api/users: `sso`, `passkeys`):
+     'password' → askSecret, ca înainte (sau parola deja tastată inline, `opts.password`);
+     'passkey'  → ceremonia passkey account-scope → `stepup_grant` (single-use);
+     'sso'      → fără prompt: trimitem direct — după întoarcerea de la IdP fereastra e deschisă;
+                  altfel serverul refuză cu 403 şi plecăm la IdP (`ssoStepupRedirect(0)`), ca la
+                  hosturi (`?stepup=ok` readuce tab-ul; acţiunea se reia fără alt prompt).
+   Pe orice plan, 403 `account.ssoReauth` ⇒ redirect SSO: poarta rămâne pe server (fail closed);
+   aici doar nu mai cerem un secret pe care omul nu-l are. `null` = omul a renunţat.
+   Limite cunoscute (corecţia RB-03):
+     · pe planul 'passkey' serverul CONSUMĂ grantul single-use înainte de `second_gate`
+       (api.py `_reauth_for_access_change`): dacă acesta cere al doilea factor, reîncercarea lui
+       withSecondFactor pleacă cu grantul deja ars → 403 → redirect SSO. Cu TOTP activ `second_gate`
+       cere codul ÎNTOTDEAUNA la prima cerere, deci pentru un cont SSO cu TOTP planul 'passkey' ar
+       eşua determinist: de aceea `me.totp` → 'sso' (trimitem direct → 403 → IdP → fereastra
+       deschisă → TOTP → reuşeşte). Rămâne cazul dispozitivului nou fără TOTP (ceremonie irosită,
+       fail closed); remediul e pe server (second_gate înaintea consumului) — follow-up.
+     · `passwordGate`: pentru o rută care ar verifica DOAR parola (niciuna azi — din 3.6.18 şi
+       POST /api/tokens trece prin `_reauth_for_access_change`): planul e 'password' pentru oricine,
+       ca să nu promitem un passkey/SSO pe care ruta nu l-ar accepta. Păstrat pentru o rută viitoare.
+     · „adus înapoi să reiei acţiunea": `?stepup=ok` restaurează doar hash-ul (tab-ul); modalul
+       Settings e stare React. Înainte de redirect salvăm ţinta Settings (`opts.returnTo`) sub
+       `SETTINGS_RETURN_KEY`, ca App să poată redeschide panoul la întoarcere (vezi App.tsx,
+       efectul `?stepup=ok`); până atunci textul spune că Settings trebuie redeschis. */
+export type ReauthMe = {
+  sso?: boolean; local_password?: boolean; passkeys?: number
+  /** TOTP activ: `second_gate` cere codul la prima cerere, deci grantul passkey s-ar arde (vezi nota) */
+  totp?: boolean
+} | null | undefined
+export type ReauthPlan = 'password' | 'passkey' | 'sso'
+
+/** cheia din sessionStorage cu ţinta Settings de redeschis după `?stepup=ok` (JSON: `{ cat, section? }`) */
+export const SETTINGS_RETURN_KEY = 'wt_settings_return'
+export type SettingsReturn = { cat: string; section?: string }
+
+export function accessReauthPlan(me: ReauthMe, webauthn: boolean, passwordGate = false): ReauthPlan {
+  // fără rând (listă neîncărcată, gateway vechi) sau cont local → parola; 403-ul rămâne plasa
+  if (!me || !me.sso) return 'password'
+  // rută doar-cu-parolă: serverul nu acceptă nici grant, nici fereastra SSO → cerem parola
+  // (un cont SSO-only nu are ce tasta; formularul arată motivul, nu o cale care nu există)
+  if (passwordGate) return 'password'
+  // TOTP activ: grantul single-use ar fi consumat înainte ca second_gate să ceară codul → SSO
+  if (me.totp) return 'sso'
+  return (me.passkeys ?? 0) > 0 && webauthn ? 'passkey' : 'sso'
+}
+
+/** Reţine ţinta Settings înainte de un redirect de step-up, ca App s-o redeschidă la `?stepup=ok`.
+    Fără sessionStorage (teste, mod privat) nu face nimic — e o comoditate, nu o poartă. */
+export function rememberSettingsReturn(target: SettingsReturn | undefined): void {
+  try {
+    if (typeof sessionStorage === 'undefined') return
+    if (target) sessionStorage.setItem(SETTINGS_RETURN_KEY, JSON.stringify(target))
+    else sessionStorage.removeItem(SETTINGS_RETURN_KEY)
+  } catch { /* */ }
+}
+
+/** Întrebarea dintr-un prompt de confirmare existent („Scoţi X de la Y?\n\nConfirmă cu parola TA:"):
+    fără ultimul paragraf când acela e instrucţiunea de parolă (se termină cu `:`). */
+export function reauthQuestion(prompt: string): string {
+  const i = prompt.lastIndexOf('\n\n')
+  if (i < 0) return prompt
+  return prompt.slice(i + 2).trim().endsWith(':') ? prompt.slice(0, i).trim() : prompt
+}
+
+export type AccessReauthOpts = {
+  me?: ReauthMe
+  /** WebAuthn utilizabil în acest browser (implicit `window.PublicKeyCredential`) */
+  webauthn?: boolean
+  /** parola deja tastată într-un câmp inline (formularele Add account / token): fără askSecret */
+  password?: string
+  /** ruta verifică doar parola (vezi nota de mai sus): planul e 'password' pentru oricine */
+  passwordGate?: boolean
+  /** panoul Settings de redeschis după întoarcerea de la IdP (salvat înainte de redirect) */
+  returnTo?: SettingsReturn
+  /** confirmarea acţiunii pe planurile fără parolă (promptul de parolă ERA confirmarea) */
+  confirm?: (question: string) => Promise<boolean>
+  /** ceremonia passkey account-scope → grant; null = anulată de om; '' = nu a mers (serverul decide) */
+  passkey?: () => Promise<string | null>
+  redirect?: () => void
+}
+
+/** Grant passkey account-scope (host_id=0): aceeaşi ceremonie ca pe un host 2FA (App.stepupCredential),
+    dar pentru contul însuşi. `null` = omul a închis dialogul; `''` = ceremonia nu a reuşit (passkey-ul
+    e pe alt dispozitiv etc.) — atunci cererea pleacă fără grant şi serverul decide (403 → SSO). */
+export async function accountPasskeyGrant(): Promise<string | null> {
+  try {
+    const { startAuthentication } = await import('@simplewebauthn/browser')
+    const options = await api<Record<string, unknown>>('/api/webauthn/stepup/options', {
+      method: 'POST', body: JSON.stringify({ host_id: 0 }),
+    })
+    const credential = await startAuthentication({ optionsJSON: options as never })
+    const r = await api<{ grant: string }>('/api/webauthn/stepup/verify', {
+      method: 'POST', body: JSON.stringify({ host_id: 0, credential }),
+    })
+    return r.grant || ''
+  } catch (e) {
+    return e instanceof Error && e.name === 'NotAllowedError' ? null : ''
+  }
+}
+
+export async function withAccessReauth<T>(t: (k: string, v?: Record<string, string | number>) => string,
+                                          prompt: string,
+                                          send: (cred: object) => Promise<T>,
+                                          opts: AccessReauthOpts = {}): Promise<T | null> {
+  const webauthn = opts.webauthn ?? (typeof window !== 'undefined' && !!window.PublicKeyCredential)
+  const plan = accessReauthPlan(opts.me, webauthn, !!opts.passwordGate)
+  let cred: Record<string, string> = {}
+  if (plan === 'password') {
+    const pw = opts.password ?? await askSecret(prompt)
+    if (!pw) return null
+    cred = { current_password: pw }
+  } else {
+    if (opts.confirm && !(await opts.confirm(
+      reauthQuestion(prompt) + '\n\n' + t(plan === 'passkey' ? 'access.reauth.viaPasskey' : 'access.reauth.viaSso')))) return null
+    if (plan === 'passkey') {
+      const grant = await (opts.passkey ?? accountPasskeyGrant)()
+      if (grant === null) return null
+      if (grant) cred = { stepup_grant: grant }
+    }
+  }
+  try {
+    return await send(cred)
+  } catch (e) {
+    if (!(e instanceof ApiError)) throw e
+    if (e.code === 'account.ssoReauth') {
+      rememberSettingsReturn(opts.returnTo)
+      ;(opts.redirect ?? (() => ssoStepupRedirect(0)))()
+      return null
+    }
+    // serverul a verificat totuşi o parolă (SSO oprit între timp; o rută încă pe poarta de parolă,
+    // ex. /api/tokens): o cerem o singură dată, ca înainte
+    if (plan !== 'password' && e.status === 401
+        && (e.code === 'auth.wrongPassword' || e.code === 'auth.wrongCurrentPassword')) {
+      const pw = await askSecret(prompt)
+      if (!pw) return null
+      return await send({ current_password: pw })
+    }
     throw e
   }
 }

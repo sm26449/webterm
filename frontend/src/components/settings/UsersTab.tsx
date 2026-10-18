@@ -1,7 +1,6 @@
 import { useEffect, useId, useState } from 'react'
-import { api, ApiError, errText, Host, withSecondFactor as withSecondFactorT } from '../../lib/api'
+import { api, errText, Host, withAccessReauth, withSecondFactor as withSecondFactorT } from '../../lib/api'
 import { useConfirm } from '../../lib/confirm'
-import { ssoStepupRedirect } from '../../lib/stepup'
 import { useI18n } from '../../lib/i18n'
 import { Binding, loadPerms, ROLE_KEYS, roleLabel, RolesCatalogue, scopeLabel, SHELL_ROLES, usePerms, can } from '../../lib/perms'
 import { effectiveSubTab, hasNoRole, loadSubTab, saveSubTab, subTabOfSection, visibleSubTabs,
@@ -16,7 +15,7 @@ import AccountsPanel from './users/AccountsPanel'
 import RolesPanel from './users/RolesPanel'
 import SsoPanel from './users/SsoPanel'
 import ScimPanel from './users/ScimPanel'
-import { ActionStatus } from './users/shared'
+import { ActionStatus, RETURN_USERS, selfOf } from './users/shared'
 import ExplainAccess from './users/ExplainAccess'
 
 /* Settings → Users & roles (3.6). Conturile şi LEGĂTURILE lor de rol (rol @ scope — docs/ROLES.md),
@@ -94,23 +93,29 @@ export default function UsersTab(props: { jump?: { id: string; n: number } | nul
   const reloadRoles = async () => { await Promise.all([loadCatalogue(), manage ? loadUsers() : Promise.resolve()]) }
   const reloadSso = async () => { await Promise.all([loadSso(), loadCatalogue(), loadUsers()]) }
 
+  const self = users.find((u) => u.is_self)
+
   // 3.6.2 (revizuirea de securitate): un cont SSO cu parolă locală nu primeşte roluri din
-  // grupuri. Omul îşi scoate singur parola (cu re-auth SSO); scoaterea revocă şi passkey-urile.
+  // grupuri. Omul îşi scoate singur parola; scoaterea revocă şi passkey-urile. Re-auth-ul (RB-03):
+  // passkey account-scope dacă are, altfel step-up SSO (redirect; la întoarcere fereastra e deschisă)
+  // — serverul ignoră parola unui cont SSO. Confirmarea e dialogul de aici, nu încă unul.
   async function removeLocalPassword() {
     if (!(await confirm({ title: t('roles.localPw.confirmTitle'), message: t('roles.localPw.confirmBody'),
       confirmLabel: t('roles.localPw.remove'), danger: true }))) return
     try {
-      await withSecondFactor((extra) => api('/api/account',
-        { method: 'POST', body: JSON.stringify({ remove_password: true, ...extra }) }))
+      // promptul poartă şi linia de parolă (ca toate celelalte): pe planul cu parolă (rând propriu
+      // necunoscut, gateway vechi) askSecret arată întrebarea completă, nu doar titlul dialogului
+      const r = await withAccessReauth(t, t('access.reauth.removeLocalPw'),
+        (cred) => withSecondFactor((extra) => api('/api/account',
+          { method: 'POST', body: JSON.stringify({ remove_password: true, ...cred, ...extra }) })),
+        { me: self, returnTo: RETURN_USERS })
+      if (r === null) return
       await loadUsers()
       doneAt('self')(t('roles.localPw.removed'))
     } catch (x) {
-      if (x instanceof ApiError && x.code === 'account.ssoReauth') { ssoStepupRedirect(0); return }
       failAt('self')(x)
     }
   }
-
-  const self = users.find((u) => u.is_self)
   const mine = perms?.bindings ?? self?.bindings ?? []
   const sourceTitle = (b: Binding) => (b.source === 'migration' ? t('roles.sourceMigration')
     : b.source === 'sso' ? t('roles.sourceSso') : undefined)
@@ -203,7 +208,7 @@ export default function UsersTab(props: { jump?: { id: string; n: number } | nul
           <div {...panel('roles')} data-setting-id="roles">
             {tabs.includes('roles') && (
               <>
-                <RolesPanel catalogue={catalogue} canEdit={rolesManage}
+                <RolesPanel catalogue={catalogue} canEdit={rolesManage} me={usersOk ? selfOf(users) : undefined}
                   users={manage && usersOk ? users : null} mappings={manage ? sso?.mappings ?? [] : null}
                   reload={reloadRoles} done={doneAt('roles')} fail={failAt('roles')} />
                 {status('roles')}
@@ -222,7 +227,7 @@ export default function UsersTab(props: { jump?: { id: string; n: number } | nul
                 )}
                 {sso?.enabled && (
                   <SsoPanel catalogue={catalogue} hosts={hosts} isOwner={isOwner} mappings={sso.mappings}
-                    localPwAccounts={sso.local_password_accounts ?? 0}
+                    localPwAccounts={sso.local_password_accounts ?? 0} me={usersOk ? selfOf(users) : undefined}
                     reload={reloadSso} done={doneAt('sso')} fail={failAt('sso')} />
                 )}
                 {/* 3.6.11: SCIM — starea pentru users.manage, acţiunile doar pentru un Owner */}

@@ -355,7 +355,10 @@ export const keepsTempOnError = (e: unknown): boolean => e instanceof ApiError &
 
 /** Decizia DOAR pentru cheia din localStorage (FS-01): după eroarea `e` mai are rost să ţinem cheia
     (= să înviem rândul după reload ca orfan, ca un re-drop să reia temp-ul)?
-    - refuz definitiv al hostului → nu (excepţie: disc plin, temp-ul parţial merită reluat);
+    - refuz definitiv al hostului FĂRĂ nimic aterizat (`landed` = 0) → nu (excepţie: disc plin,
+      temp-ul parţial merită reluat). Dacă au aterizat deja felii (`landed` > 0) şi refuzul a venit
+      după ele — `files.agentInternal` la o felie târzie, `files.readOnlyAt` după un remount —, pe
+      host EXISTĂ un temp care merită reluat: cheia rămâne (audit 2026-10-17 P1, critica FS-01);
     - 403 / 404 cu un cod care NU e în lista definitivă (rolul a pierdut `files.write` pe host în
       timpul sesiunii, hostul a dispărut): reîncercările rămân cum sunt, dar dacă NU a aterizat nimic
       — nici în trecerea asta (`landed` = 0), nici într-una anterioară (pos-ul din cheie = 0) — nu
@@ -363,7 +366,7 @@ export const keepsTempOnError = (e: unknown): boolean => e instanceof ApiError &
       (pos > 0 în cheie) rămâne reluabil chiar dacă sonda de status a picat şi am pornit de la 0.
     401 (sesiune expirată), 409 (resync) şi 429 (backpressure) nu ajung aici ca refuz. */
 export function refusedForGood(e: unknown, landed: number, lsKey: string): boolean {
-  if (isDefinitiveError(e)) return !keepsTempOnError(e)
+  if (isDefinitiveError(e)) return !keepsTempOnError(e) && landed === 0
   if (!(e instanceof ApiError) || !(e.status === 403 || e.status === 404)) return false
   if (landed > 0) return false
   const m = parseUploadMeta(lsGet(lsKey), lsKey)
@@ -638,10 +641,15 @@ async function runLoop(c: Ctl): Promise<void> {
     // reluat, iar cheia din localStorage — scrisă în startUpload ÎNAINTE de prima felie — ar învia
     // rândul după reload ca „orfan 0 %" şi ar deschide singură widgetul de transferuri, pentru un
     // fişier refuzat (sau deja instalat ca root prin fluxul 3.6.9). O ştergem (audit 2026-10-17,
-    // FS-01); rândul `err` rămâne, cu motivul, iar Retry/re-drop reiau din controler. Excepţia:
-    // disc plin — temp-ul parţial există şi merită reluat după ce se face loc. Acelaşi tratament
-    // pentru un 403/404 cu alt cod când n-a aterizat nimic (vezi refusedForGood).
+    // FS-01); rândul `err` rămâne, cu motivul, iar Retry/re-drop reiau din controler. Excepţiile:
+    // disc plin — temp-ul parţial există şi merită reluat după ce se face loc — şi orice refuz venit
+    // DUPĂ felii aterizate (`landedMax` > 0): temp-ul de pe host e real. Acelaşi tratament pentru un
+    // 403/404 cu alt cod când n-a aterizat nimic (vezi refusedForGood).
     if (c.lsKey && refusedForGood(e, landedMax, c.lsKey)) lsRemove(c.lsKey)
+    // cheia rămâne şi au aterizat felii: notăm offset-ul real, ca orfanul de după reload să arate
+    // progresul adevărat (nu „0 %"); fără nimic aterizat lăsăm pos-ul din cheie (temp dintr-o
+    // sesiune anterioară) neatins
+    else if (c.lsKey && landedMax > 0) writeMeta(c, landedMax)
     publish(c, { pos: lastPos, state: 'err', error: errorText(e), bytesPerSec: 0, etaSec: null,
                  errorCode: e instanceof ApiError ? e.code : undefined,
                  errorVars: e instanceof ApiError ? e.vars : undefined })

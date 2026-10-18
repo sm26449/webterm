@@ -3971,6 +3971,44 @@ const en: Lang = {
     'settings.backup.verified': "{name} verified: it unpacks, its database passes the integrity check and the vault key is inside. Nothing was restored.",
     'settings.backup.lastVerified': "Last verified backup: {when}",
     'settings.backup.neverVerified': "No backup has been verified yet — “Verify” checks one without restoring it.",
+    // audit P1 health
+    'health.msg.no_permanent_owner.one': "No active account holds a PERMANENT Owner role over all hosts; the last time-bound Owner ends in {days} day",
+    'health.msg.no_permanent_owner.other': "No active account holds a PERMANENT Owner role over all hosts; the last time-bound Owner ends in {days} days",
+    'health.msg.permanent_owner_expiring.one': "The last Owner over all hosts is time-bound and ends in {days} day; nobody holds a permanent Owner role",
+    'health.msg.permanent_owner_expiring.other': "The last Owner over all hosts is time-bound and ends in {days} days; nobody holds a permanent Owner role",
+    // audit P1 walkthrough (UI-06 / FL-11): paşi pentru conturi fără hosts.create / fără host
+    'walkthrough.stepHosts.title': "Hosts come from your administrator",
+    'walkthrough.stepHosts.body': "An Owner or Admin adds hosts and gives you a role on them — nothing to install on your side. Every host you can use is listed in the sidebar, and new ones appear there as soon as access is granted.",
+    'walkthrough.stepNoHosts.title': "Your hosts will show up here",
+    'walkthrough.stepNoHosts.body': "You don't have access to any host yet. Your administrator adds hosts and gives you a role; you will see them here as soon as that happens. Re-open this tour any time from Settings → Preferences.",
+    // audit P1 scim-rbac
+    'alertmsg.what.scim_last_break_glass_refused': "the identity provider tried to disable the last Owner with a local password ({account}), the break-glass account; refused",
+    // audit P1 split-guardrail
+    'session.broadcastHeldReconnecting': "Not sent — this pane is reconnecting; nothing was sent to the other panes either.",
+    'session.broadcastHeldEnded': "Not sent — this session has ended; nothing was sent to the other panes either.",
+    // audit P1 files-uploads
+    'files.needsWrite': "Your role can read files on this host but not change them — this needs files.write here.",
+    'files.needsDelete': "Your role cannot delete files on this host — this needs files.delete here.",
+    'files.subtreeRefused.one': "{count} file under {dir} was not uploaded: the agent's user cannot create that folder here (see the options above).",
+    'files.subtreeRefused.other': "{count} files under {dir} were not uploaded: the agent's user cannot create that folder here (see the options above).",
+    'files.denied.symlinkHint': "If this folder is reached through a symlink (e.g. /bin → /usr/bin), the move-as-root command refuses it: open the physical path — `pwd -P` in your terminal, probably {real} — and upload there.",
+    'transfers.pasteStale.blind': "Not typed automatically: under tmux without shell integration WebTerm cannot see which program is in front, so a pasted path is typed only within 10 seconds of the paste.",
+    // audit P1 rbac-sso-login (RB-03 re-auth for SSO accounts · FL-07 IdP unreachable on the login page)
+    'access.reauth.title': "Confirm your identity",
+    'access.reauth.viaPasskey': "Your account signs in through SSO, so there is no password to type here: confirm with your passkey.",
+    'access.reauth.viaSso': "Your account signs in through SSO, so there is no password to type here. If a fresh sign-in is needed, you will be sent to your identity provider and brought back to this Settings panel; then repeat the action.",
+    'access.reauth.noPassword': "Your account signs in through SSO: you confirm with your passkey or by signing in again at the identity provider, not with a password.",
+    'access.reauth.addAccount': "Create the account {email}?\n\nConfirm with YOUR password:",
+    'access.reauth.addToken': "Create the automation token {name}?\n\nConfirm with YOUR password:",
+    'login.ssoUnavailable': "The identity provider could not be reached. If you have no password, an administrator with shell access on the server can restore sign-in — see docs/SSO.md → Break-glass.",
+    'login.ssoUnreachable': "currently unreachable",
+    // audit P1 rbac-sso-login (correction round)
+    'access.reauth.removeLocalPw': "Remove your local password?\n\nConfirm with YOUR password:",
+    'access.reauth.tokenNeedsLocalPw': "Creating an automation token still requires a local password. Your account signs in through SSO and has none, so this form cannot be submitted from your account yet.",
+    // audit P1 scim-rbac (correction round): target-account wording for the break-glass refusals
+    'err.account.lastBreakGlassTarget': "This account is the last permanent Owner with a local password — the break-glass account that still signs in when the identity provider is down. Make another account a permanent Owner with a local password first (a time-bound Owner does not count).",
+    // audit P1 orchestrator (RB-03: întoarcerea din IdP redeschide Setările)
+    'access.reauth.backRepeat': "Signed in again — open the same action once more to finish it.",
   },
 }
 

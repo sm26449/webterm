@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { CommandGuard } from './api'
 import type { Terminal } from '@xterm/xterm'
 import { CommandTracker } from './commands'
-import { ACCEPT_AND_HOLD, CTRL_O, SUBMIT_RE, acceptsLine, echoSettled, echoSettleMs, hitsKey, isBareEnter, isSubmitKey, judgeLocal, judgePeers, LocalState, mergeTyped, metaAccept, opaqueInput, PeerState, plainText, runDecision, splitLines, stripControls, submitsLine, unbracket } from './broadcastGuard'
+import { ACCEPT_AND_HOLD, CTRL_O, SUBMIT_RE, acceptsLine, broadcastDecision, echoSettled, echoSettleMs, escapeClears, escapeScope, hitsKey, isBareEnter, isSubmitKey, judgeLocal, judgePeers, LocalState, mergeTyped, metaAccept, opaqueInput, PeerState, plainText, runDecision, splitLines, stripControls, submitsLine, unbracket } from './broadcastGuard'
 
 // review independent 3.6.12 (M1): un Enter difuzat verifică linia din FIECARE panou-ţintă, iar un
 // panou a cărui linie nu poate fi crezută (pauză / fără ecou încă) cere confirmare — fail-closed.
@@ -722,5 +722,104 @@ describe('SV-01: Ctrl+O (\\x0f) e un Enter cu altă haină', () => {
     for (const d of ['\x1ba', '\x1bA', 'a', '\x1b', 'ls -la', 'rm -rf /\x1ba']) expect(acceptsLine(d), JSON.stringify(d)).toBe(false)
     // submitsLine rămâne mai larg: un chunk cu ESC a se judecă pe linii
     expect(submitsLine('rm -rf /\x1ba')).toBe(true)
+  })
+})
+
+// audit 2026-10-17 (P1): ce pleacă din panoul de origine către celelalte panouri
+describe('SV-02 / SV-05: broadcastDecision — matricea trimite / difuzează', () => {
+  const ok = { readOnly: false, muted: false, exited: false, socketOpen: true }
+
+  it('origine sănătoasă: o tastă se difuzează', () => {
+    expect(broadcastDecision('key', ok)).toBe('broadcast')
+  })
+
+  it('SV-02: un raport de terminal (mouse, focus, CPR, DA, X10) nu pleacă NICIODATĂ în celelalte panouri', () => {
+    expect(broadcastDecision('report', ok)).toBe('report')
+    // nici când originea nu poate trimite — clasificarea bate orice altă stare
+    expect(broadcastDecision('report', { ...ok, socketOpen: false })).toBe('report')
+    expect(broadcastDecision('report', { ...ok, readOnly: true })).toBe('report')
+  })
+
+  it('doar-vizualizare / replay: nimic local, nimic difuzat, fără anunţ (ca înainte, review 3.6.12 L7)', () => {
+    expect(broadcastDecision('key', { ...ok, readOnly: true })).toBe('silent')
+    expect(broadcastDecision('key', { ...ok, muted: true })).toBe('silent')
+    // mute are prioritate şi peste un socket închis: n-anunţăm „reconectare" într-un replay
+    expect(broadcastDecision('key', { ...ok, muted: true, socketOpen: false })).toBe('silent')
+  })
+
+  it('SV-05: origine în reconectare → nimic nu pleacă în celelalte panouri, cu anunţ (fail-closed)', () => {
+    expect(broadcastDecision('key', { ...ok, socketOpen: false })).toBe('held-reconnecting')
+  })
+
+  it('SV-05: sesiune încheiată → la fel, cu anunţul ei', () => {
+    expect(broadcastDecision('key', { ...ok, exited: true })).toBe('held-ended')
+    expect(broadcastDecision('key', { ...ok, exited: true, socketOpen: false })).toBe('held-ended')
+  })
+
+  it('fiecare stare care face originea inertă (PeerState.inert) opreşte şi difuzarea — simetric', () => {
+    const inertStates = [{ readOnly: true }, { muted: true }, { exited: true }, { socketOpen: false }]
+    for (const s of inertStates) expect(broadcastDecision('key', { ...ok, ...s }), JSON.stringify(s)).not.toBe('broadcast')
+  })
+})
+
+describe('SV-04: Escape-ul dialogului guardrail e al panoului cu focusul', () => {
+  // arbore minimal: body ⊃ paneA ⊃ dialogA ⊃ btnA; body ⊃ paneB ⊃ (vim) textareaB
+  const node = (children: object[] = []) => {
+    const self = {
+      kids: children,
+      contains(o: object | null): boolean {
+        if (!o) return false
+        if (o === self) return true
+        return self.kids.some((k) => (k as { contains(x: object | null): boolean }).contains(o))
+      },
+    }
+    return self
+  }
+  const btnA = node()
+  const dialogA = node([btnA])
+  const toolbarA = node()
+  const paneA = node([dialogA, toolbarA])
+  const textareaB = node()
+  const paneB = node([textareaB])
+  const body = node([paneA, paneB])
+
+  it('focus pe butonul dialogului → dialog; pe bara panoului → pane', () => {
+    expect(escapeScope(btnA, body, dialogA, paneA, true)).toBe('dialog')
+    expect(escapeScope(dialogA, body, dialogA, paneA, false)).toBe('dialog')
+    expect(escapeScope(toolbarA, body, dialogA, paneA, false)).toBe('pane')
+  })
+
+  it('focus în ALT panou (vim din B) → nu e Escape-ul lui A, chiar dacă A e panoul-ţintă', () => {
+    expect(escapeScope(textareaB, body, dialogA, paneA, true)).toBe('none')
+    expect(escapeScope(paneB, body, dialogA, paneA, true)).toBe('none')
+  })
+
+  it('două dialoguri deschise: un Escape e al unuia singur', () => {
+    const btnB = node()
+    const dialogB = node([btnB])
+    const pane2 = node([dialogB])
+    const doc = node([paneA, pane2])
+    // focusul în dialogul lui B
+    expect(escapeScope(btnB, doc, dialogA, paneA, true)).toBe('none')
+    expect(escapeScope(btnB, doc, dialogB, pane2, false)).toBe('dialog')
+    // focusul în dialogul lui A
+    expect(escapeScope(btnA, doc, dialogA, paneA, false)).toBe('dialog')
+    expect(escapeScope(btnA, doc, dialogB, pane2, true)).toBe('none')
+  })
+
+  it('focus pierdut (null / body): doar panoul-ţintă al acţiunilor îl ia', () => {
+    expect(escapeScope(null, body, dialogA, paneA, true)).toBe('pane')
+    expect(escapeScope(body, body, dialogA, paneA, true)).toBe('pane')
+    expect(escapeScope(null, body, dialogA, paneA, false)).toBe('none')
+    expect(escapeScope(body, body, dialogA, paneA, false)).toBe('none')
+  })
+
+  it('escapeClears: Ctrl+U doar din dialog; din panou doar fără broadcast; niciodată din alt panou', () => {
+    expect(escapeClears('dialog', true)).toBe(true)
+    expect(escapeClears('dialog', false)).toBe(true)
+    expect(escapeClears('pane', true)).toBe(false)
+    expect(escapeClears('pane', false)).toBe(true)
+    expect(escapeClears('none', true)).toBe(false)
+    expect(escapeClears('none', false)).toBe(false)
   })
 })

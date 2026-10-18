@@ -1,6 +1,5 @@
 import { FormEvent, useId, useMemo, useRef, useState } from 'react'
-import { api, Host, withSecondFactor as withSecondFactorT } from '../../../lib/api'
-import { askSecret } from '../../../lib/secretPrompt'
+import { api, Host, withSecondFactor as withSecondFactorT, type ReauthMe } from '../../../lib/api'
 import { useConfirm } from '../../../lib/confirm'
 import { crownDialog, withCrownConfirm } from '../../../lib/crown'
 import { useI18n } from '../../../lib/i18n'
@@ -12,12 +11,13 @@ import { field, heading } from '../ui'
 import { Badge, Button, IconButton } from '../../ui'
 import { CloseIcon, SearchIcon } from '../../Icons'
 import HelpTip from '../../HelpTip'
-import { defaultScope, RoleOptions, ScopePicker, shellOf, useRoleName } from './shared'
+import { defaultScope, RETURN_USERS, RoleOptions, ScopePicker, shellOf, useAccessReauth, useRoleName } from './shared'
 
 /* Sub-tab-ul „SSO groups" (3.6.2 „Maparea grupurilor SSO"; reorganizat în 3.6.6). Mapările sunt
    grupate pe numele grupului; cele din WEBTERM_OIDC_ROLE_MAP (.env) poartă „from configuration" şi
    n-au buton de ştergere (serverul le refuză oricum: 409 ssoMap.fromConfig). Adăugarea/ştergerea:
-   aceleaşi rute, aceeaşi parolă (askSecret) + al doilea factor, aceeaşi regulă „doar un Owner
+   aceleaşi rute, aceeaşi re-autentificare (parola — sau passkey / step-up SSO pentru un cont SSO,
+   `useAccessReauth`, RB-03) + al doilea factor, aceeaşi regulă „doar un Owner
    atinge o mapare la Owner" (afişată; serverul o aplică). */
 
 const SSO_DOC = 'docs/SSO.md#groups-out-of-the-box-365'
@@ -27,6 +27,8 @@ const FILTER_FROM = 6
 export default function SsoPanel(props: {
   catalogue: RolesCatalogue | null; hosts: Host[]; isOwner: boolean
   mappings: SsoMapping[]; localPwAccounts: number; reload: () => Promise<void>
+  /** rândul propriu de la /api/users (RB-03: cum te re-autentifici) */
+  me: ReauthMe
   done: (text: string) => void; fail: (e: unknown) => void
 }) {
   const { t } = useI18n()
@@ -38,6 +40,7 @@ export default function SsoPanel(props: {
   const formId = useId()
   const withSecondFactor = <T,>(send: (extra: object) => Promise<T>) => withSecondFactorT(t, send)
   const { confirm } = useConfirm()
+  const { reauth } = useAccessReauth(props.me, { returnTo: RETURN_USERS })
   const hostName = (id: number) => props.hosts.find((h) => h.id === id)?.name
   const roleName = useRoleName(props.catalogue)
   const label = (m: SsoMapping) => t('roles.chip', {
@@ -60,17 +63,16 @@ export default function SsoPanel(props: {
     const group = form.group.trim()
     const binding = t('roles.chip', { role: roleName(form.role),
       scope: scopeLabel({ scope_kind: form.scope_kind, scope_value: form.scope_value.trim() }, hostName, t) })
-    const pw = await askSecret(t('roles.sso.addConfirm', { group, binding }))
-    if (!pw) return
     setBusy(true)
     try {
       // 3.6.10: ⚑ peste un host crown-jewel → serverul cere confirmare explicită (409)
-      const r = await withCrownConfirm((crown) => withSecondFactor((extra) => api('/api/settings/oidc-roles', {
-        method: 'POST',
-        body: JSON.stringify({ group, ...roleBody(form.role), scope_kind: form.scope_kind,
-          scope_value: form.scope_kind === 'all' ? '' : form.scope_value.trim(), current_password: pw,
-          ...crown, ...extra }),
-      })), (e) => confirm(crownDialog(e, t)))
+      const r = await reauth(t('roles.sso.addConfirm', { group, binding }),
+        (cred) => withCrownConfirm((crown) => withSecondFactor((extra) => api('/api/settings/oidc-roles', {
+          method: 'POST',
+          body: JSON.stringify({ group, ...roleBody(form.role), scope_kind: form.scope_kind,
+            scope_value: form.scope_kind === 'all' ? '' : form.scope_value.trim(), ...cred,
+            ...crown, ...extra }),
+        })), (e) => confirm(crownDialog(e, t))))
       if (r === null) { setBusy(false); return }
       await props.reload()
       setForm({ ...form, group: '' })
@@ -81,11 +83,11 @@ export default function SsoPanel(props: {
   }
 
   async function remove(m: SsoMapping) {
-    const pw = await askSecret(t('roles.sso.removeConfirm', { group: m.group, binding: label(m) }))
-    if (!pw) return
     try {
-      await withSecondFactor((extra) => api(`/api/settings/oidc-roles/${m.id}/delete`,
-        { method: 'POST', body: JSON.stringify({ current_password: pw, ...extra }) }))
+      const r = await reauth(t('roles.sso.removeConfirm', { group: m.group, binding: label(m) }),
+        (cred) => withSecondFactor((extra) => api(`/api/settings/oidc-roles/${m.id}/delete`,
+          { method: 'POST', body: JSON.stringify({ ...cred, ...extra }) })))
+      if (r === null) return
       await props.reload()
       props.done(t('roles.sso.removed'))
     } catch (x) { props.fail(x) }

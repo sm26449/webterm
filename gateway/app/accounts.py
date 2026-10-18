@@ -17,7 +17,9 @@ can bring it back as it was. While disabled the account can do nothing:
   * an account holding an Owner-level role given in WebTerm (not by an SSO group) is never
     disabled by the IdP (`OwnerLevel`): only an Owner takes an Owner out (§A.5);
   * the last PERMANENT Owner can never be disabled (a disabled Owner does not count as one): the
-    instance must not lock itself out because an IdP said so.
+    instance must not lock itself out because an IdP said so — nor the last permanent Owner
+    WITH A LOCAL PASSWORD (`LastBreakGlass`, RB-06): without it an IdP outage locks every
+    Owner out.
 
 Every change is audited and alerted to the fleet (security.view holders see it in the in-app
 history, and it goes out by email/webhook like any account change).
@@ -41,6 +43,10 @@ class OwnerLevel(Exception):
     """The account holds an Owner-level role given in WebTerm: the IdP cannot disable it."""
 
 
+class LastBreakGlass(Exception):
+    """Disabling this account would leave no permanent Owner WITH A LOCAL PASSWORD (RB-06)."""
+
+
 async def is_permanent_owner(uid: int) -> bool:
     row = await db.fetchone(
         "SELECT 1 FROM role_bindings b JOIN roles r ON r.id=b.role_id WHERE b.user_id=?"
@@ -56,6 +62,32 @@ async def report_last_owner_refused(email: str, *, actor: str, ip: str, reason: 
     email_alerts.notify_security_change(
         "the identity provider tried to disable the last Owner (%s); refused" % email,
         ip, actor, fleet=True, severity="critical", what_key="scim_last_owner_refused",
+        what_params={"account": email})
+
+
+async def report_last_break_glass_refused(uid: int, email: str, *, actor: str, ip: str,
+                                          reason: str) -> None:
+    """RB-06 (audit 2026-10-17): the IdP asked to disable the last permanent Owner with a local
+    password. Refused, audited and alerted as critical: an identity provider must never be
+    able to lock everyone out (with that account gone, an IdP outage leaves no way in but a
+    shell on the server). In practice SCIM cannot even see a local-password account
+    (`_user`, adoption re-checked in the UPDATE) — this is the fail-closed backstop.
+    Every refusal is audited; the CRITICAL alert goes out at most once an hour per account
+    (P1 review): Authentik retries the whole sync page periodically, and a misconfigured IdP
+    must not page the fleet every sync interval for the same refusal.
+    Method/path/via are SCIM's: `disable` has only SCIM callers (`by` = scim*) — a future
+    manual-disable route must pass its own actor and path instead."""
+    log.error("%s: refused to disable %s — it is the last permanent Owner with a local password "
+              "(%s)", actor, email, reason)
+    await audit.record(time.time(), actor, ip, "SCIM", "/scim/v2/Users", 400,
+                       "refused to disable %s: the last permanent Owner with a local password, "
+                       "the break-glass account (%s)" % (email, reason), actor_id=None, via="scim")
+    if not email_alerts._throttled("bg:%d" % uid, 3600):
+        return
+    email_alerts.notify_security_change(
+        "the identity provider tried to disable the last Owner with a local password (%s), "
+        "the break-glass account; refused" % email,
+        ip, actor, fleet=True, severity="critical", what_key="scim_last_break_glass_refused",
         what_params={"account": email})
 
 
@@ -102,6 +134,11 @@ async def disable(uid: int, *, by: str, actor: str, ip: str, reason: str) -> Opt
         if await is_permanent_owner(uid) and await authz.owner_count(exclude_user=uid) < 1:
             await report_last_owner_refused(row["email"], actor=actor, ip=ip, reason=reason)
             raise LastOwner(row["email"])
+        # RB-06: nor the last permanent Owner WITH A LOCAL PASSWORD — a disabled account does
+        # not count as break-glass (owner_count skips it), so this is the same lock-out
+        if await authz.last_break_glass(uid):
+            await report_last_break_glass_refused(uid, row["email"], actor=actor, ip=ip, reason=reason)
+            raise LastBreakGlass(row["email"])
         now = time.time()
         await db.execute("UPDATE users SET disabled=1, disabled_at=?, disabled_by=? WHERE id=?",
                          now, by, uid)

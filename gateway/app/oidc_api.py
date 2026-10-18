@@ -42,8 +42,15 @@ def _clear_state_cookie(resp) -> None:
 
 @router.get("/status")
 async def status():
-    """Public: doar dacă SSO e activ + eticheta butonului. Nu scurge issuer/client_id."""
-    return {"enabled": config.OIDC_ENABLED, "provider_name": config.OIDC_PROVIDER_NAME}
+    """Public: doar dacă SSO e activ + eticheta butonului. Nu scurge issuer/client_id.
+
+    FL-07 (audit 2026-10-17): `degraded` = ultima sondă a IdP-ului (oidc.probe, rulată de System
+    health; NU re-sondăm aici — ruta e publică şi nelimitată) a eşuat: discovery/JWKS inaccesibile.
+    Pagina de login arată starea pe buton ÎNAINTE de click şi numeşte calea de break-glass. Nu
+    scurge nimic nou: oricine poate afla că IdP-ul e căzut apăsând butonul."""
+    probe = oidc.probe_status() if config.OIDC_ENABLED else {}
+    return {"enabled": config.OIDC_ENABLED, "provider_name": config.OIDC_PROVIDER_NAME,
+            "degraded": probe.get("ok") is False}
 
 
 @router.get("/login")

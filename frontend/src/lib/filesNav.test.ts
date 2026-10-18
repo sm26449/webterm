@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
   EMPTY_HISTORY, HISTORY_MAX, baseName, canBack, canForward, cdCommand, commonPrefix, completePath, crumbs,
-  histPush, histStep, parentOf, splitForCompletion, targetPath, typeJump,
+  filesGate, gateMenuItems, histPush, histStep, mkdirRefusal, parentOf, physicalPathHint, splitForCompletion,
+  targetPath, typeJump, underRefused,
 } from './filesNav'
+import { ApiError } from './api'
+import type { MyPerms } from './perms'
 
 describe('targetPath (ţinte vechi după schimbarea directorului, review M2)', () => {
   it('acelaşi director → calea completă', () => {
@@ -235,5 +238,105 @@ describe('scurtăturile listei de fişiere (registrul `files`)', () => {
     expect(matchShortcut(ev('F7', 'F7'))).toBeNull()
     expect(matchShortcut(ev('u', 'KeyU', { ctrlKey: true }))).toBeNull()
     expect(matchShortcut(ev('e', 'KeyE', { altKey: true }))).toBe('toggleFiles')
+  })
+})
+
+describe('redenumirea rămâne legată de dosarul în care a pornit (CHANGELOG 3.6.15; FL-T03 #5, audit 2026-10-17)', () => {
+  it('acelaşi dosar: sursa şi ţinta se construiesc în el', () => {
+    expect(targetPath('/srv/a', '/srv/a', 'old.txt')).toBe('/srv/a/old.txt')
+    expect(targetPath('/srv/a', '/srv/a', 'new.txt')).toBe('/srv/a/new.txt')
+  })
+  it('panoul a plecat (follow cwd / „deschide aici") înainte de Enter: NICI sursa, NICI ţinta nu se refac în dosarul nou — refuz, nu /nou/<acelaşi nume>', () => {
+    // redenumire pornită în /srv/a, listarea e acum /srv/b, unde există alt `old.txt`
+    expect(targetPath('/srv/a', '/srv/b', 'old.txt')).toBeNull()
+    expect(targetPath('/srv/a', '/srv/b', 'new.txt')).toBeNull()
+    // şi nici măcar un dosar cu acelaşi prefix nu trece drept acelaşi
+    expect(targetPath('/srv/a', '/srv/a2', 'old.txt')).toBeNull()
+    expect(targetPath('/srv/a', '/srv/a/', 'old.txt')).toBeNull()
+  })
+})
+
+describe('gating pe permisiuni în Files (FL-09, audit 2026-10-17)', () => {
+  const perms = (o: Partial<MyPerms>): MyPerms =>
+    ({ global: [], all_hosts: [], hosts: {}, bindings: [], owner: false, epoch: 1, has_admins: true, ...o })
+  it('permisiuni necunoscute (null) → totul ok (serverul decide)', () => {
+    expect(filesGate(null, 7)).toEqual({ write: 'ok', del: 'ok' })
+  })
+  it('are files.write pe toate hosturile / pe acest host → ok', () => {
+    expect(filesGate(perms({ all_hosts: ['files.read', 'files.write'] }), 7).write).toBe('ok')
+    expect(filesGate(perms({ hosts: { '7': ['files.write', 'files.delete'] } }), 7)).toEqual({ write: 'ok', del: 'ok' })
+  })
+  it('o are pe ALT host, nu pe ăsta → disabled (cu motiv); pe niciunul → hidden', () => {
+    const p = perms({ hosts: { '3': ['files.write'] }, all_hosts: ['files.read'] })
+    expect(filesGate(p, 7)).toEqual({ write: 'disabled', del: 'hidden' })
+    expect(filesGate(p, 3)).toEqual({ write: 'ok', del: 'hidden' })
+  })
+  it('gateMenuItems: write/delete dezactivate cu motiv, restul neatinse; hidden dispare şi separatorul trece mai departe', () => {
+    const items: { key: string; label: string; sep?: boolean; disabled?: boolean; reason?: string }[] = [
+      { key: 'open', label: 'o' }, { key: 'rename', label: 'r', sep: true }, { key: 'duplicate', label: 'd' },
+      { key: 'copyname', label: 'c', sep: true }, { key: 'delete', label: 'x', sep: true },
+    ]
+    const ok = gateMenuItems(items, { write: 'ok', del: 'ok' }, { write: 'W', del: 'D' })
+    expect(ok).toEqual(items)
+    const dis = gateMenuItems(items, { write: 'disabled', del: 'disabled' }, { write: 'W', del: 'D' })
+    expect(dis.map((i) => [i.key, i.disabled ?? false, i.reason])).toEqual([
+      ['open', false, undefined], ['rename', true, 'W'], ['duplicate', true, 'W'], ['copyname', false, undefined], ['delete', true, 'D'],
+    ])
+    const hid = gateMenuItems(items, { write: 'hidden', del: 'hidden' }, { write: 'W', del: 'D' })
+    expect(hid.map((i) => [i.key, !!i.sep])).toEqual([['open', false], ['copyname', true]])
+    // meniul directorului: new file / new folder / upload ascunse → „Reload" (cu sep) ajunge primul, fără linie deasupra
+    const dirMenu = gateMenuItems([{ key: 'newfile', label: 'n' }, { key: 'upload', label: 'u' }, { key: 'reload', label: 'r', sep: true }, { key: 'copypath', label: 'c' }],
+      { write: 'hidden', del: 'ok' }, { write: 'W', del: 'D' })
+    expect(dirMenu.map((i) => [i.key, !!i.sep])).toEqual([['reload', false], ['copypath', false]])
+    // doar upload-ul (fără dosar nou): `new` din foaia telefonului
+    const sheet = gateMenuItems([{ key: 'newfile', label: 'n' }, { key: 'newfolder', label: 'f' }, { key: 'upload', label: 'u' }],
+      { write: 'hidden', del: 'ok' }, { write: 'W', del: 'D' })
+    expect(sheet).toEqual([])
+  })
+})
+
+describe('upload de folder într-un dosar nescriibil: mkdir refuzat (FS-04, audit 2026-10-17)', () => {
+  const denied = new ApiError(400, 'the agent runs as webterm and cannot write in /srv/www', 'files.writeDenied', { user: 'webterm', dir: '/srv/www' })
+  const existing = new Set(['site', 'README'])
+  it('prima componentă nu exista → dosarul listat nu e scriibil: tot ce e imbricat e refuzat, bannerul pe el', () => {
+    expect(mkdirRefusal(denied, '/srv/www', 'new/css', existing)).toEqual({ prefix: '', at: '/srv/www' })
+    expect(mkdirRefusal(denied, '/srv/www/', 'new', existing)).toEqual({ prefix: '', at: '/srv/www/' })
+  })
+  it('prima componentă exista deja → EA e nescriibilă: doar subarborele ei e refuzat', () => {
+    expect(mkdirRefusal(denied, '/srv/www', 'site/assets/img', existing)).toEqual({ prefix: 'site', at: '/srv/www/site' })
+    expect(mkdirRefusal(denied, '/srv/www/', 'site', existing)).toEqual({ prefix: 'site', at: '/srv/www/site' })
+  })
+  it('altă eroare (există deja / dosar lipsă / agent vechi / network) → null = comportamentul vechi', () => {
+    expect(mkdirRefusal(new ApiError(400, 'exists', 'files.exists'), '/srv', 'a', existing)).toBeNull()
+    expect(mkdirRefusal(new ApiError(400, 'missing', 'files.dirMissing'), '/srv', 'a', existing)).toBeNull()
+    expect(mkdirRefusal(new Error('network'), '/srv', 'a', existing)).toBeNull()
+    expect(mkdirRefusal(denied, '/srv', '', existing)).toBeNull()
+  })
+  it('underRefused: prefixul gol = orice cale imbricată; un prefix numit = el şi tot ce e sub el', () => {
+    expect(underRefused('site/index.html', [''])).toBe(true)
+    expect(underRefused('index.html', [''])).toBe(false)            // fişierele simple se încearcă (oferta root-move)
+    expect(underRefused('site/index.html', ['site'])).toBe(true)
+    expect(underRefused('site', ['site'])).toBe(true)
+    expect(underRefused('sitemap/x', ['site'])).toBe(false)
+    expect(underRefused('other/x', ['site'])).toBe(false)
+    expect(underRefused('other/x', [])).toBe(false)
+  })
+})
+
+describe('calea fizică sub merged-usr (FS-02, audit 2026-10-17)', () => {
+  it('/bin, /sbin, /lib*, /var/run, /var/lock → /usr/…, /run…', () => {
+    expect(physicalPathHint('/lib/firmware')).toBe('/usr/lib/firmware')
+    expect(physicalPathHint('/bin')).toBe('/usr/bin')
+    expect(physicalPathHint('/sbin/x')).toBe('/usr/sbin/x')
+    expect(physicalPathHint('/lib64')).toBe('/usr/lib64')
+    expect(physicalPathHint('/var/run/app')).toBe('/run/app')
+    expect(physicalPathHint('/var/lock')).toBe('/run/lock')
+  })
+  it('prefixele doar asemănătoare şi căile deja fizice → null', () => {
+    expect(physicalPathHint('/binary/x')).toBeNull()
+    expect(physicalPathHint('/library')).toBeNull()
+    expect(physicalPathHint('/usr/bin')).toBeNull()
+    expect(physicalPathHint('/srv/www')).toBeNull()
+    expect(physicalPathHint('/')).toBeNull()
   })
 })

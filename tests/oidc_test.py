@@ -293,12 +293,44 @@ async def main():
             # status endpoint
             st = (await c.get("/api/oidc/status")).json()
             check("/api/oidc/status: enabled", st["enabled"] is True)
+            check("/api/oidc/status: fără sondă rulată → degraded False", st.get("degraded") is False, st)
+
+            # FL-07: starea sondei IdP (System health) e expusă public ca `degraded`, fără re-sondare
+            saved_probe = oidc.probe_status()
+            try:
+                oidc._probe.update(ts=time.time(), ok=False, kind="discovery", error="connection refused")
+                st = (await c.get("/api/oidc/status")).json()
+                check("sondă eşuată → status.degraded True", st.get("degraded") is True, st)
+                check("status nu scurge detaliile sondei (kind/error/issuer)",
+                      not ({"kind", "error", "issuer", "client_id"} & set(st)), st)
+                oidc._probe.update(ts=time.time(), ok=True, kind="", error="")
+                st = (await c.get("/api/oidc/status")).json()
+                check("sondă reuşită → status.degraded False", st.get("degraded") is False, st)
+                # /login cu discovery inaccesibil → ?sso_error=unavailable (mesajul separat din LoginPage)
+                saved_issuer, saved_disco = config.OIDC_ISSUER, oidc._disco
+                config.OIDC_ISSUER, oidc._disco = "http://127.0.0.1:1", None   # discovery necache-uit → eşuează
+                try:
+                    r = await c.get("/api/oidc/login", follow_redirects=False)
+                    check("IdP inaccesibil la /login → 303 ?sso_error=unavailable (nu `denied`)",
+                          r.status_code == 303 and "sso_error=unavailable" in r.headers.get("location", ""),
+                          (r.status_code, r.headers.get("location")))
+                finally:
+                    config.OIDC_ISSUER, oidc._disco = saved_issuer, saved_disco
+            finally:
+                oidc._probe.clear()
+                oidc._probe.update(saved_probe)
 
         # ---- 9. status când SSO e dezactivat ----
         config.OIDC_ENABLED = False
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
             st = (await c.get("/api/oidc/status")).json()
             check("SSO dezactivat → status.enabled False", st["enabled"] is False)
+            saved_probe = oidc.probe_status()
+            oidc._probe.update(ts=time.time(), ok=False, kind="discovery", error="x")
+            st = (await c.get("/api/oidc/status")).json()
+            check("SSO dezactivat → degraded False chiar cu sonda eşuată", st.get("degraded") is False, st)
+            oidc._probe.clear()
+            oidc._probe.update(saved_probe)
         config.OIDC_ENABLED = True
     finally:
         srv.shutdown()

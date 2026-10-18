@@ -53,7 +53,7 @@ export interface UploadJob {
   insertOutcome?: 'typed' | 'noTarget' | 'unsafe' | 'notPrompt' | 'refused'
   /** 3.6.16: upload pornit de un paste/drop pe terminal a cărui cale NU s-a tastat automat fiindcă
       s-a schimbat contextul gestului (transfers.ts pasteContextStale) — rândul spune de ce */
-  pasteStale?: 'target' | 'inactive' | 'focus' | 'timeout' | 'input' | 'mode'
+  pasteStale?: 'target' | 'inactive' | 'focus' | 'timeout' | 'input' | 'mode' | 'blind'
   /** `archive` = folder descărcat ca .tgz făcut pe host (3.5.5): mărimea e NECUNOSCUTĂ dinainte
       (`size` 0 → rândul arată octeţii primiţi, nu un %), iar o arhivă generată din mers nu se
       poate relua — fără pauză; Retry o reporneşte de la zero. */

@@ -1,11 +1,16 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useI18n } from '../lib/i18n'
+import { usePerms } from '../lib/perms'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import {
-  TOTAL_STEPS,
+  PERMS_WAIT_MS,
+  type WalkStep,
+  buildSteps,
   clampStep,
   markWalkthroughDone,
   shouldMarkDoneOnClose,
+  stepOnArrow,
+  waitForPerms,
 } from '../lib/walkthrough'
 import { Button } from './ui'
 
@@ -13,7 +18,9 @@ import { Button } from './ui'
    „Don't show again") cu titlu, descriere şi o ilustraţie SVG inline pe pas. Se deschide o
    dată la prima rulare (vezi shouldAutoOpen în lib/walkthrough.ts) şi se poate redeschide
    oricând din „?" sau din Setări. Modal real: role=dialog aria-modal, focus-trap, Escape.
-   Vizual urmează ConfirmModal/KeyboardHelp (glass, scrim, rounded-2xl). */
+   Vizual urmează ConfirmModal/KeyboardHelp (glass, scrim, rounded-2xl).
+   Paşii vin din permisiunile contului (buildSteps, audit 2026-10-17 UI-06/FL-11): un Viewer nu
+   mai primeşte „Add a host" şi uneltele unui terminal pe care nu-l poate deschide. */
 
 // Ilustraţiile sunt LINE-ART inline, nu bitmap/screenshot: scalează curat, se adaptează
 // la temă prin `currentColor` (moştenit din culoarea textului) + tokenul de accent `.wt-accent`,
@@ -60,6 +67,23 @@ const AddHostIllus = () => (
     <g className="wt-accent">
       <circle cx="178" cy="78" r="22" />
       <path d="M178 68v20M168 78h20" />
+    </g>
+  </Illus>
+)
+
+// 2b. Hosturile vin de la administrator — aceleaşi carduri de server, fără „+": un ecuson de
+// persoană (Owner/Admin) care le „trimite" spre listă. Folosită şi la finalul turului scurt
+// al unui cont fără niciun host.
+const HostsByAdminIllus = () => (
+  <Illus>
+    <rect x="96" y="44" width="110" height="30" rx="5" />
+    <rect x="96" y="82" width="110" height="30" rx="5" />
+    <path d="M110 59h.01M110 97h.01" />
+    <path d="M132 59h44M132 97h44" strokeOpacity="0.5" />
+    <g className="wt-accent">
+      <circle cx="50" cy="62" r="10" />
+      <path d="M32 96c0-10 8-18 18-18s18 8 18 18" />
+      <path d="M72 78h16m0 0-6-6m6 6-6 6" />
     </g>
   </Illus>
 )
@@ -127,25 +151,56 @@ const DoneIllus = () => (
   </Illus>
 )
 
-const STEPS = [
-  WelcomeIllus,
-  AddHostIllus,
-  SessionsIllus,
-  PasteIllus,
-  ToolboxIllus,
-  SecurityIllus,
-  DoneIllus,
-] as const
+// ilustraţia fiecărui pas, după IDENTITATE (nu poziţie): lista e filtrată după permisiuni
+const ILLUS: Record<WalkStep['id'], React.ComponentType> = {
+  welcome: WelcomeIllus,
+  addHost: AddHostIllus,
+  hostsByAdmin: HostsByAdminIllus,
+  sessions: SessionsIllus,
+  paste: PasteIllus,
+  tools: ToolboxIllus,
+  security: SecurityIllus,
+  done: DoneIllus,
+  noHosts: HostsByAdminIllus,
+}
 
-export default function Walkthrough(props: { auto: boolean; onClose: () => void }) {
+type Props = { auto: boolean; onClose: () => void }
+
+/** Poarta de permisiuni (waitForPerms, lib): la AUTO-deschidere dialogul NU se montează până nu
+    sosesc permisiunile sau expiră PERMS_WAIT_MS — altfel un Viewer vedea „Step 1 of 7" o clipă,
+    apoi lista se scurta. E o componentă separată pentru că focus-trap-ul şi focusul iniţial se
+    leagă la MONTAREA dialogului (useFocusTrap citeşte ref-ul o singură dată): un `return null`
+    din interiorul dialogului le-ar fi lăsat fără nod. Redeschiderea manuală (auto=false) nu
+    aşteaptă nimic — permisiunile sunt demult în memorie. */
+export default function Walkthrough(props: Props) {
+  const perms = usePerms()
+  const [timedOut, setTimedOut] = useState(false)
+  const waiting = waitForPerms(props.auto, perms, timedOut)
+  useEffect(() => {
+    if (!waiting) return
+    const id = window.setTimeout(() => setTimedOut(true), PERMS_WAIT_MS)
+    return () => window.clearTimeout(id)
+  }, [waiting])
+  if (waiting) return null
+  return <WalkthroughDialog auto={props.auto} onClose={props.onClose} />
+}
+
+function WalkthroughDialog(props: Props) {
   const { t } = useI18n()
   const [step, setStep] = useState(0)
   const [dontShow, setDontShow] = useState(false)
   const dialogRef = useRef<HTMLDivElement>(null)
   const nextRef = useRef<HTMLButtonElement>(null)
 
-  const total = TOTAL_STEPS
-  const isLast = step === total - 1
+  // Paşii contului: `null` (fetch eşuat / expirat după PERMS_WAIT_MS) = tur complet; dacă sosesc
+  // după montare, lista se recalculează iar indexul e ţinut în interval de clampStep.
+  const perms = usePerms()
+  const steps = useMemo(() => buildSteps(perms), [perms])
+  const total = steps.length
+  // `idx` = indexul AFIŞAT, mereu în interval chiar dacă `step` a rămas dintr-o listă mai lungă
+  const idx = clampStep(step, total)
+  const cur = steps[idx]
+  const isLast = idx === total - 1
   const titleId = 'wt-walk-title'
 
   // Închiderea decide marcajul „gata" printr-o regulă pură (lib/walkthrough.ts), ca să fie
@@ -164,9 +219,17 @@ export default function Walkthrough(props: { auto: boolean; onClose: () => void 
 
   const go = (to: number) => setStep(clampStep(to, total))
 
+  // Starea şi afişajul nu diverg: dacă lista s-a scurtat sub `step` (permisiunile au sosit după
+  // ce ai avansat), readucem starea la indexul afişat — altfel tastele ar porni de la un index
+  // fantomă (vezi stepOnArrow). Nu re-randează decât în acest caz rar.
+  useEffect(() => {
+    if (step !== idx) setStep(idx)
+  }, [step, idx])
+
   // Refs citite din handlerul de taste montat o singură dată: aşa deps-urile efectului rămân
-  // stabile (fără re-ataşări la fiecare pas) şi fără warning de exhaustive-deps.
-  const stepRef = useRef(step); stepRef.current = step
+  // stabile (fără re-ataşări la fiecare pas) şi fără warning de exhaustive-deps. Ref-ul ţine
+  // indexul AFIŞAT (clamp-uit), nu starea brută.
+  const stepRef = useRef(idx); stepRef.current = idx
   const closeRef = useRef(close); closeRef.current = close
 
   // Focus iniţial pe butonul primar (Next/Gata): rulează DUPĂ efectul focus-trap-ului (ordinea
@@ -178,22 +241,21 @@ export default function Walkthrough(props: { auto: boolean; onClose: () => void 
 
   // ←/→ navighează. Enter e lăsat activării butonului primar focusat (nu-l dublăm). Ascultătorul
   // e la nivel de document (nu pe div-ul cu rol non-interactiv): focusul e oricum capturat în modal.
+  // Mutarea e calculată de stepOnArrow (lib, testată): clamp întâi, apoi ±1, ca butoanele.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'ArrowRight') {
-        e.preventDefault()
-        if (stepRef.current >= total - 1) closeRef.current('finish')
-        else setStep((s) => clampStep(s + 1, total))
-      } else if (e.key === 'ArrowLeft') {
-        e.preventDefault()
-        setStep((s) => clampStep(s - 1, total))
-      }
+      const dir = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0
+      if (dir === 0) return
+      e.preventDefault()
+      const next = stepOnArrow(stepRef.current, total, dir)
+      if (next === 'finish') closeRef.current('finish')
+      else setStep(next)
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
   }, [total])
 
-  const Illustration = STEPS[clampStep(step, total)]
+  const Illustration = ILLUS[cur.id]
 
   // scrim: `role="presentation"` + închidere DOAR la clic pe el însuşi (nu pe card) — acelaşi tipar
   // ca wizard-ul de split din App, care evită avertismentele jsx-a11y fără onClick pe dialog.
@@ -214,29 +276,29 @@ export default function Walkthrough(props: { auto: boolean; onClose: () => void 
         className="glass wt-step-anim flex max-h-[calc(100dvh-2rem)] w-full max-w-md flex-col overflow-y-auto rounded-2xl p-5 sm:p-6"
       >
         {/* anunţ pentru cititoare de ecran: titlul pasului curent, la fiecare schimbare */}
-        <div aria-live="polite" className="sr-only">{t(`walkthrough.step${step + 1}.title`)}</div>
+        <div aria-live="polite" className="sr-only">{t(`${cur.key}.title`)}</div>
 
         {/* ilustraţia: decorativă, înălţime constantă ca înălţimea cardului să nu salte între paşi */}
-        <div key={step} className="wt-step-anim flex h-[168px] items-center justify-center">
+        <div key={cur.id} className="wt-step-anim flex h-[168px] items-center justify-center">
           <Illustration />
         </div>
 
         <h2 id={titleId} className="mt-2 text-lg font-semibold leading-tight">
-          {t(`walkthrough.step${step + 1}.title`)}
+          {t(`${cur.key}.title`)}
         </h2>
         <p className="mt-2 min-h-[3.5rem] text-sm leading-relaxed text-slate-300">
-          {t(`walkthrough.step${step + 1}.body`)}
+          {t(`${cur.key}.body`)}
         </p>
 
         {/* progres: „Pasul 2 din 7" + o bară decorativă (U12). Erau 7 butoane-punct de 44px pe
             telefon — 308px de ţinte care nu încăpeau la 320px; navigarea rămâne Înapoi/Înainte şi ←/→. */}
         <div className="mt-4 flex items-center gap-3">
           <span data-testid="walkthrough-step" className="shrink-0 text-xs font-medium text-slate-400">
-            {t('walkthrough.dotLabel', { k: step + 1, n: total })}
+            {t('walkthrough.dotLabel', { k: idx + 1, n: total })}
           </span>
           <div aria-hidden="true" className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-ink-700">
             <div className="h-full rounded-full bg-sky-500 transition-[width]"
-              style={{ width: `${((step + 1) / total) * 100}%` }} />
+              style={{ width: `${((idx + 1) / total) * 100}%` }} />
           </div>
         </div>
 
@@ -263,8 +325,8 @@ export default function Walkthrough(props: { auto: boolean; onClose: () => void 
           <div className="flex items-center gap-2 [&>*]:flex-1 sm:[&>*]:flex-none">
             <button
               type="button"
-              onClick={() => go(step - 1)}
-              disabled={step === 0}
+              onClick={() => go(idx - 1)}
+              disabled={idx === 0}
               className="wt-touch rounded-md px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800 disabled:opacity-40"
             >
               {t('walkthrough.back')}
@@ -272,7 +334,7 @@ export default function Walkthrough(props: { auto: boolean; onClose: () => void 
             <Button variant="primary"
               ref={nextRef}
               type="button"
-              onClick={() => (isLast ? close('finish') : go(step + 1))} className="wt-touch">
+              onClick={() => (isLast ? close('finish') : go(idx + 1))} className="wt-touch">
               {isLast ? t('walkthrough.getStarted') : t('walkthrough.next')}
             </Button>
           </div>

@@ -19,6 +19,10 @@ export interface MenuItem {
   onSelect: () => void
   danger?: boolean
   disabled?: boolean
+  /** de ce e dezactivat (FL-09, audit 2026-10-17: „needs files.write on this host") — arătat SUB
+      etichetă (un item dezactivat nu primeşte hover pe touch, deci tooltip-ul nu ajunge) şi ca
+      descriere accesibilă */
+  reason?: string
   /** linie de separare ÎNAINTEA itemului */
   sep?: boolean
   hint?: string
@@ -97,18 +101,26 @@ export default function FileMenu(props: {
     if (e.key === 'Enter' || e.key === ' ') e.stopPropagation()
   }
 
-  const item = (it: MenuItem) => (
+  const item = (it: MenuItem) => {
+    const reasonId = it.disabled && it.reason ? `wt-files-menu-${it.key}-why` : undefined
+    return (
     <button key={it.key} type="button" role="menuitem" disabled={it.disabled}
       data-testid={`wt-files-menu-${it.key}`}
+      title={reasonId ? it.reason : undefined} aria-describedby={reasonId}
       onClick={() => { if (it.disabled) return; props.onClose(); it.onSelect() }}
-      className={`flex w-full items-center gap-2.5 rounded-md px-2.5 text-left disabled:cursor-default disabled:opacity-40 ${
+      className={`flex w-full items-center gap-2.5 rounded-md px-2.5 text-left disabled:cursor-default ${reasonId ? 'disabled:opacity-60' : 'disabled:opacity-40'} ${
         props.sheet ? 'min-h-11 py-2 text-sm' : 'min-h-[28px] py-1 text-xs'} ${
         it.danger ? 'wt-danger hover:bg-rose-500/10 focus:bg-rose-500/10' : 'text-slate-300 hover:bg-ink-800 focus:bg-ink-800'} outline-none`}>
       <span className="grid h-4 w-4 shrink-0 place-items-center" aria-hidden="true">{it.icon}</span>
-      <span className="min-w-0 flex-1 truncate">{it.label}</span>
+      <span className="flex min-w-0 flex-1 flex-col">
+        <span className="truncate">{it.label}</span>
+        {/* motivul dezactivării, vizibil fără hover (telefon) — nu „un buton gri fără explicaţie" */}
+        {reasonId && <span id={reasonId} className="whitespace-normal text-2xs font-normal text-slate-500">{it.reason}</span>}
+      </span>
       {it.hint && !props.sheet && <span className="ml-3 shrink-0 font-mono text-2xs text-slate-500" aria-hidden="true">{it.hint}</span>}
     </button>
-  )
+    )
+  }
 
   const body = props.items.map((it) => (
     it.sep ? [<div key={`${it.key}-sep`} role="separator" className="my-1 border-t border-ink-800" />, item(it)] : item(it)

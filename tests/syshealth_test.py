@@ -685,8 +685,10 @@ async def test_roles_checks(owner_uid):
     try:
         await db.execute("UPDATE role_bindings SET expires=? WHERE id=?", time.time() + 10 * 86400, bid)
         r = await run_check("roles.permanent_owner")
-        check("only a time-bound Owner (10 days left) → WARNING no_permanent_owner with the days",
-              r["severity"] == "warning" and r["message_key"] == "no_permanent_owner" and '"days":9' in r["params"], r)
+        check("only a time-bound Owner (10 days left) → WARNING no_permanent_owner with the days, rounded up",
+              r["severity"] == "warning" and r["message_key"] == "no_permanent_owner" and '"days":10' in r["params"], r)
+        check("…`count` repeats the days so the UI picks the plural form (.one/.few/.other)",
+              json.loads(r["params"]).get("count") == 10, r["params"])
         check("…recommendation: app.admin promote, typed not run (no command template → no button)",
               r["recommendation_key"] == "promote_owner" and "app.admin promote" in syshealth.RECS["promote_owner"]
               and "never runs it" in syshealth.RECS["promote_owner"] and r["commands"] in ("[]", "", None), r)
@@ -694,7 +696,11 @@ async def test_roles_checks(owner_uid):
         await db.execute("UPDATE role_bindings SET expires=? WHERE id=?", time.time() + 3 * 86400, bid)
         r = await run_check("roles.permanent_owner")
         check("…ends in 3 days (< 7) → CRITICAL permanent_owner_expiring", r["severity"] == "critical"
-              and r["message_key"] == "permanent_owner_expiring" and '"days":2' in r["params"], r)
+              and r["message_key"] == "permanent_owner_expiring" and '"days":3' in r["params"], r)
+        await db.execute("UPDATE role_bindings SET expires=? WHERE id=?", time.time() + 23 * 3600, bid)
+        r = await run_check("roles.permanent_owner")
+        check("…23 h left → '1 day', never '0 days' (P0 leftover: the floor)", r["severity"] == "critical"
+              and '"days":1' in r["params"] and "0 day" not in syshealth.render_text(r["message_key"], json.loads(r["params"])), r)
         r = await run_check("roles.break_glass")
         check("a time-bound Owner is no break-glass account → warning no_break_glass", r["severity"] == "warning"
               and r["message_key"] == "no_break_glass" and r["recommendation_key"] == "break_glass_password", r)
@@ -781,6 +787,101 @@ async def test_alerting(owner_uid):
     row = syshealth._rows["host.backup"]
     check("a different result lifts the mute (and alerts)", float(row.get("muted_until") or 0) == 0
           and len(await _alerts("health")) == n + 1, (row.get("muted_until"), n))
+    # OP-02 (audit 2026-10-17): a measurement that moved (the age, a percentage, a count) is the
+    # same situation — it must not lift "until it changes" at the next tick
+    write_status(hs, "backup", status_doc("backup", ts=int(time.time() - 3 * 86400)))      # stale, "3 days"
+    await run_check("host.backup")
+    await syshealth.mute("host.backup", "change", "owner@x.co", owner=True)
+    syshealth._rows["host.backup"].update(alerted_severity=None, alerted_at=0)
+    n = len(await _alerts("health"))
+    write_status(hs, "backup", status_doc("backup", ts=int(time.time() - 5 * 86400)))      # still stale, "5 days"
+    await run_check("host.backup")
+    row = syshealth._rows["host.backup"]
+    check("OP-02: only {age} moved → the 'until it changes' mute stays (no alert, not in the badge)",
+          float(row.get("muted_until") or 0) == -1 and syshealth._is_muted(row, time.time())
+          and len(await _alerts("health")) == n, (row.get("muted_until"), row.get("params")))
+    check("…while the shown params are the new measurement", '"age":"5 days"' in row["params"], row["params"])
+    write_status(hs, "backup", status_doc("backup", status="error", message="boom"))
+    await run_check("host.backup")
+    row = syshealth._rows["host.backup"]
+    check("…a different severity/key lifts it", float(row.get("muted_until") or 0) == 0, row.get("muted_until"))
+    R = syshealth.Result
+    same = syshealth._sig(R("warning", "disk_low", {"pct": "18.2", "free": "9.1 GB", "total": "50.0 GB"}, hosts=[1]))
+    check("_sig: pct/free/age/count/days/skew are measurements — not in the signature",
+          same == syshealth._sig(R("warning", "disk_low", {"pct": "17.9", "free": "8.9 GB", "total": "50.0 GB"}, hosts=[1]))
+          and syshealth._sig(R("warning", "x", {"age": "1 min", "count": 1, "days": 3, "skew": 40}))
+          == syshealth._sig(R("warning", "x", {"age": "2 h", "count": 2, "days": 2, "skew": 90})))
+    check("…severity, key, hosts, rec, commands, action, doc and the other params still change it",
+          len({syshealth._sig(R("warning", "disk_low", {}, hosts=[1])), syshealth._sig(R("critical", "disk_low", {}, hosts=[1])),
+               syshealth._sig(R("warning", "disk_ok", {}, hosts=[1])), syshealth._sig(R("warning", "disk_low", {}, hosts=[2])),
+               syshealth._sig(R("warning", "disk_low", {}, hosts=[1], rec="free_disk")),
+               syshealth._sig(R("warning", "disk_low", {}, hosts=[1], commands=[{"t": "unit_start", "p": {}}])),
+               syshealth._sig(R("warning", "disk_low", {}, hosts=[1], action="settings:backup")),
+               syshealth._sig(R("warning", "disk_low", {}, hosts=[1], doc="break_glass")),
+               syshealth._sig(R("warning", "disk_low", {"message": "boom"}, hosts=[1]))}) == 9)
+    check("…the full form (measurements=True) is the pre-3.6.18 signature a stored mute may carry",
+          syshealth._sig(R("warning", "x", {"age": "1 h"}), measurements=True)
+          == json.dumps(["warning", "x", {"age": "1 h"}, [], "", [], "", ""], sort_keys=True, separators=(",", ":")))
+    # a row from before 3.6.18 (full signature stored, mute keyed on it) — with the measurement of
+    # THAT moment in it ("2 days" when the age is "3 days" by now): recognised, re-keyed, not lifted
+    write_status(hs, "backup", status_doc("backup", ts=int(time.time() - 3 * 86400)))
+    await run_check("host.backup")
+    row = syshealth._rows["host.backup"]
+    old_params = dict(json.loads(row["params"]), age="2 days")
+    full = json.dumps([row["severity"], row["message_key"], old_params, json.loads(row["hosts"]),
+                       row["recommendation_key"], json.loads(row["commands"]), row["action"], row["doc"]],
+                      sort_keys=True, separators=(",", ":"))
+    check("…the legacy test is real: the stored full signature differs from the current one in its {age}",
+          '"age":"3 days"' in row["params"] and '"age":"2 days"' in full and full != row["sig"], (row["params"], full))
+    row.update(sig=full, muted_until=-1, muted_sig=full, muted_by="owner@x.co", changed_at=1.0)
+    await run_check("host.backup")
+    row = syshealth._rows["host.backup"]
+    check("a legacy full-signature mute (its {age} since moved) survives the upgrade and is re-keyed; changed_at not bumped",
+          float(row.get("muted_until") or 0) == -1 and row.get("muted_sig") == row.get("sig")
+          and row["sig"] != full and row.get("changed_at") == 1.0, (row.get("muted_until"), row.get("changed_at")))
+    check("_stable_sig: strips the measurements of a stored signature, leaves anything else alone",
+          syshealth._stable_sig(full) == row["sig"] and syshealth._stable_sig(None) is None
+          and syshealth._stable_sig("not json [") == "not json [" and syshealth._stable_sig("[1,2]") == "[1,2]")
+    await syshealth.mute("host.backup", "off", "owner@x.co", owner=True)
+    # OP-13: a measurement that moved is not UPSERTed every 30 s — the DB copy catches up within PERSIST_EVERY
+    write_status(hs, "backup", status_doc("backup", status="error", message="boom"))
+    await run_check("host.backup")
+    write_status(hs, "backup", status_doc("backup", ts=int(time.time() - 5 * 86400)))      # error → stale: written
+    await run_check("host.backup")
+    row = syshealth._rows["host.backup"]
+    db_row = await db.fetchone("SELECT params, checked_at FROM health_checks WHERE id='host.backup'")
+    check("OP-13 setup: the row was written (the signature changed)", db_row and db_row["params"] == row["params"], db_row)
+    write_status(hs, "backup", status_doc("backup", ts=int(time.time() - 6 * 86400)))      # "6 days": only {age} moved
+    await run_check("host.backup")
+    row = syshealth._rows["host.backup"]
+    db_row = await db.fetchone("SELECT params, checked_at FROM health_checks WHERE id='host.backup'")
+    check("OP-13: only {age} moved → no write (in memory '6 days', the DB still '5 days')",
+          '"age":"6 days"' in row["params"] and '"age":"5 days"' in db_row["params"], (row["params"], db_row["params"]))
+    check("…the refresh clock is the last WRITE, not the in-memory checked_at (that one moves every tick)",
+          abs(syshealth._persisted_at["host.backup"] - db_row["checked_at"]) < 5
+          and row["checked_at"] > db_row["checked_at"], (syshealth._persisted_at.get("host.backup"), db_row["checked_at"], row["checked_at"]))
+    # production state: the in-memory row was ticked 30 s ago (fresh checked_at) but the last write
+    # is older than PERSIST_EVERY — the refresh must fire from that alone
+    syshealth._persisted_at["host.backup"] = time.time() - syshealth.PERSIST_EVERY - 1
+    await run_check("host.backup")
+    db_row = await db.fetchone("SELECT params FROM health_checks WHERE id='host.backup'")
+    check("…and the periodic refresh (PERSIST_EVERY since the last write) writes the current measurement",
+          '"age":"6 days"' in db_row["params"] and time.time() - syshealth._persisted_at["host.backup"] < 5, db_row)
+    write_status(hs, "backup", status_doc("backup", ts=int(time.time() - 7 * 86400)))      # "7 days": only {age} again
+    await run_check("host.backup")
+    db_row = await db.fetchone("SELECT params FROM health_checks WHERE id='host.backup'")
+    check("…the write reset the clock: the next tick with only {age} moved does not write again",
+          '"age":"7 days"' in syshealth._rows["host.backup"]["params"] and '"age":"6 days"' in db_row["params"], db_row)
+    # a restart: the clock is seeded from the DB copy's checked_at, not from zero
+    syshealth._rows.clear(); syshealth._persisted_at.clear(); syshealth._loaded = False
+    await syshealth._load()
+    db_ca = (await db.fetchone("SELECT checked_at FROM health_checks WHERE id='host.backup'"))["checked_at"]
+    check("…after a restart the refresh clock is the DB copy's checked_at",
+          db_ca and abs(syshealth._persisted_at.get("host.backup", 0) - db_ca) < 5,
+          (syshealth._persisted_at.get("host.backup"), db_ca))
+    write_status(hs, "backup", status_doc("backup", status="error", message="boom"))
+    await run_check("host.backup")
+    syshealth._rows["host.backup"].update(alerted_severity=None, alerted_at=0)
     await syshealth.mute("host.backup", "7d", "owner@x.co", owner=True)
     row = syshealth._rows["host.backup"]
     check("mute 7 d → muted_until about a week ahead", 6.9 * 86400 < float(row["muted_until"]) - time.time() < 7.1 * 86400)

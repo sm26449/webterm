@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api, ApiError, ensureStepup, errText, isStepupError } from '../../lib/api'
 import { useI18n } from '../../lib/i18n'
 import { useSectionVisible } from '../../lib/perms'
+import { useMediaQuery } from '../../lib/sheet'
 import { fmtTs, getTimezone } from '../../lib/tz'
 import { copyText } from '../../lib/clipboard'
 import { askSecret } from '../../lib/secretPrompt'
@@ -11,6 +12,8 @@ import {
 } from '../../lib/health'
 import { heading } from './ui'
 import { Badge, Button } from '../ui'
+import { ChevronDownIcon } from '../Icons'
+import FileMenu, { type MenuItem } from '../FileMenu'
 import type { LoadState } from '../../lib/loadable'
 import NotLoaded from './NotLoaded'
 
@@ -30,6 +33,39 @@ export default function HealthTab(props: { onJump?: (cat: string, section?: stri
   const [opening, setOpening] = useState('')
   const [showOk, setShowOk] = useState(false)
   const [hostBusy, setHostBusy] = useState(0)
+  // The mute menu (audit 2026-10-17, UI-05). It used to be a `<select value="">` acting on `change`:
+  // picking an option muted at once (WCAG 3.2.2 On Input), and on Firefox/Windows or with a screen
+  // reader the arrow keys on a CLOSED select change the value without opening the list — a keyboard
+  // user could silence a check (even one that can turn critical) just by exploring the options. Now a
+  // "Mute…" button (aria-haspopup="menu", ArrowDown opens too) + the FileMenu pattern: role=menu, items
+  // are buttons (Enter/Space activate, ↑/↓/Home/End move, Escape/Tab close), a bottom sheet on touch.
+  // Focus returns to the button when the menu closes, whichever way it closed — and to the check
+  // row (tabIndex -1) when the button is gone: an Admin on a `mute_owner_only` check sees the button
+  // only while the check is muted, so "Unmute" unmounts it once the reply lands; without the
+  // fallback focus fell to <body> on exactly the path UI-05 fixed. `preventScroll`: FileMenu closes
+  // itself on any scroll of the panel, and the return focus must not yank the panel back.
+  const [muteMenu, setMuteMenu] = useState<{ id: string; at: { x: number; y: number } } | null>(null)
+  const muteBtns = useRef(new Map<string, HTMLButtonElement>())
+  const rows = useRef(new Map<string, HTMLLIElement>())
+  const focusNear = (id: string) => (muteBtns.current.get(id) ?? rows.current.get(id))?.focus({ preventScroll: true })
+  const coarse = useMediaQuery('(pointer: coarse)')
+  const openMute = (c: HealthCheck, el: HTMLButtonElement) => {
+    const r = el.getBoundingClientRect()
+    setMuteMenu({ id: c.id, at: { x: r.left, y: r.bottom + 4 } })
+  }
+  const closeMute = () => {
+    const id = muteMenu?.id
+    setMuteMenu(null)
+    if (id) requestAnimationFrame(() => focusNear(id))
+  }
+  const muteItems = (c: HealthCheck): MenuItem[] => {
+    const can = !!st && canMute(c, st)
+    const items: MenuItem[] = can
+      ? MUTE_MODES.map((m) => ({ key: m, label: t('health.mute.' + m), onSelect: () => { void mute(c, m) } }))
+      : []
+    if (c.muted) items.push({ key: 'off', label: t('health.mute.off'), sep: can, onSelect: () => { void mute(c, 'off') } })
+    return items
+  }
 
   const reload = () => {
     setLoad({ status: 'loading' })
@@ -54,6 +90,8 @@ export default function HealthTab(props: { onJump?: (cat: string, section?: stri
         method: 'POST', body: JSON.stringify({ mode }),
       }))
       setMsg(mode === 'off' ? t('health.unmuted') : t('health.mutedMsg'))
+      // the reply may have unmounted the button that held focus (see the comment at `rows`)
+      requestAnimationFrame(() => { if (!muteBtns.current.get(c.id) && document.activeElement === document.body) focusNear(c.id) })
     } catch (e) { setErr(errText(e, t)) }
   }
 
@@ -109,6 +147,10 @@ export default function HealthTab(props: { onJump?: (cat: string, section?: stri
   }
 
   const { open, passing } = st ? splitChecks(st.checks) : { open: [], passing: [] }
+  const muteCheck = muteMenu ? st?.checks.find((c) => c.id === muteMenu.id) : undefined
+  // verificarea meniului deschis a dispărut (recheck / eroare): meniul se demontează fără onClose,
+  // iar starea ar rămâne „deschis" (aria-expanded orfan, ArrowDown blocat pe celelalte butoane)
+  useEffect(() => { if (muteMenu && !muteCheck) setMuteMenu(null) }, [muteMenu, muteCheck])
   const mode = st ? fixMode(st) : 'copy'
   const attention = st ? st.checks.filter(needsAttention).length : 0
 
@@ -120,7 +162,8 @@ export default function HealthTab(props: { onJump?: (cat: string, section?: stri
     const doc = docUrl(c.doc)
     const hostButtons = (c.action === 'agent_update' || c.action === 'autostart') && st?.can_manage
     return (
-      <li key={c.id} data-health={c.id} data-severity={c.severity}
+      <li key={c.id} data-health={c.id} data-severity={c.severity} tabIndex={-1}
+        ref={(el) => { if (el) rows.current.set(c.id, el); else rows.current.delete(c.id) }}
         className="rounded-md border border-ink-700 bg-ink-800/40 p-3 text-xs">
         <div className="flex flex-wrap items-start gap-2">
           <Badge tone={tone} size="md">{t('health.sev.' + c.severity)}</Badge>
@@ -190,13 +233,15 @@ export default function HealthTab(props: { onJump?: (cat: string, section?: stri
               </a>
             )}
             {st?.can_manage && c.severity !== 'ok' && (canMute(c, st) || c.muted) && (
-              <select aria-label={t('health.muteLabel')} value=""
-                onChange={(e) => { const v = e.target.value as MuteMode; if (v) void mute(c, v) }}
-                className="rounded-md bg-ink-800 px-2 py-1 text-xs text-slate-200 ring-1 ring-[rgb(var(--field-border))] focus:ring-sky-500">
-                <option value="">{c.muted ? t('health.mutedShort') : t('health.mute')}</option>
-                {canMute(c, st) && MUTE_MODES.map((m) => <option key={m} value={m}>{t('health.mute.' + m)}</option>)}
-                {c.muted && <option value="off">{t('health.mute.off')}</option>}
-              </select>
+              // visible text = accessible name ("Mute…" / "Muted…"); the menu itself carries health.muteLabel
+              <Button variant="secondary" size="sm" type="button" aria-haspopup="menu"
+                aria-expanded={muteMenu?.id === c.id} data-testid={`health-mute-${c.id}`}
+                ref={(el) => { if (el) muteBtns.current.set(c.id, el); else muteBtns.current.delete(c.id) }}
+                onClick={(e) => openMute(c, e.currentTarget)}
+                onKeyDown={(e) => { if (e.key === 'ArrowDown' && !muteMenu) { e.preventDefault(); openMute(c, e.currentTarget) } }}>
+                {c.muted ? t('health.mutedShort') : t('health.mute')}
+                <ChevronDownIcon />
+              </Button>
             )}
             {st?.can_manage && c.severity !== 'ok' && !canMute(c, st) && (
               <span className="text-2xs text-slate-500">{t('health.muteOwnerOnly')}</span>
@@ -238,6 +283,11 @@ export default function HealthTab(props: { onJump?: (cat: string, section?: stri
             </div>
           )}
         </div>
+      )}
+      {muteMenu && muteCheck && (
+        <FileMenu items={muteItems(muteCheck)} at={muteMenu.at} sheet={coarse}
+          title={coarse ? checkText(muteCheck, t) : undefined} label={t('health.muteLabel')}
+          anchor={muteBtns.current.get(muteCheck.id)} onClose={closeMute} />
       )}
     </section>
   )

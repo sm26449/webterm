@@ -1,6 +1,5 @@
 import { FormEvent, useEffect, useId, useMemo, useRef, useState } from 'react'
-import { api, Host, withSecondFactor as withSecondFactorT } from '../../../lib/api'
-import { askSecret } from '../../../lib/secretPrompt'
+import { api, Host, withSecondFactor as withSecondFactorT, type ReauthMe } from '../../../lib/api'
 import { useI18n } from '../../../lib/i18n'
 import { Binding, roleBody, roleLabel, RolesCatalogue, roleValue, ROLE_KEYS, ScopeKind, scopeLabel } from '../../../lib/perms'
 import { fmtTs } from '../../../lib/tz'
@@ -11,7 +10,7 @@ import { useConfirm } from '../../../lib/confirm'
 import { field } from '../ui'
 import { Badge, Button, IconButton } from '../../ui'
 import { ChevronIcon, CloseIcon, SearchIcon, WarningIcon } from '../../Icons'
-import { defaultScope, ExpiryPicker, RoleOptions, ScopePicker, scopeOk, shellOf, useExpiryText, useRoleName } from './shared'
+import { defaultScope, ExpiryPicker, RETURN_USERS, RoleOptions, ScopePicker, scopeOk, selfOf, shellOf, useAccessReauth, useExpiryText, useRoleName } from './shared'
 import ExplainAccess from './ExplainAccess'
 
 /** 3.6.10: textul ultimei autentificări (lung în detalii, scurt în rând); '' = nu e de arătat */
@@ -42,7 +41,8 @@ function useCrownAsk() {
    capăt. Acum: căutare + filtre (logica pură în lib/usersAdmin.ts), rânduri compacte care se
    desfac (acolo stau legăturile şi acţiunile), „Add account" deschide formularul la cerere.
 
-   Acţiunile sunt EXACT cele de dinainte: aceleaşi rute, aceeaşi parolă (askSecret, mascată) + al
+   Acţiunile sunt EXACT cele de dinainte: aceleaşi rute, aceeaşi re-autentificare (parola, mascată —
+   sau, pentru un cont SSO, passkey account-scope / step-up SSO: `useAccessReauth`, RB-03) + al
    doilea factor (withSecondFactor), aceleaşi condiţii de afişare (nu-ţi atingi singur accesul, doar
    un Owner atinge legăturile Owner, ultimul cont nu se şterge). Serverul le re-verifică pe toate. */
 
@@ -63,7 +63,7 @@ function SignInBadge(props: { u: UserRow }) {
 }
 
 function AddAccountForm(props: {
-  id: string; catalogue: RolesCatalogue | null; hosts: Host[]; isOwner: boolean
+  id: string; catalogue: RolesCatalogue | null; hosts: Host[]; isOwner: boolean; me: ReauthMe
   onDone: (users: UserRow[]) => void; onCancel: () => void; fail: (e: unknown) => void
 }) {
   const { t } = useI18n()
@@ -72,6 +72,9 @@ function AddAccountForm(props: {
     role: '', scope_kind: 'folder' as ScopeKind, scope_value: '', expiry: 'permanent' as ExpiryChoice, custom: '' })
   const withSecondFactor = <T,>(send: (extra: object) => Promise<T>) => withSecondFactorT(t, send)
   const crownAsk = useCrownAsk()
+  // RB-03: parola inline e re-auth-ul doar pentru un cont local; un cont SSO confirmă altfel
+  const { plan, reauth } = useAccessReauth(props.me, { returnTo: RETURN_USERS })
+  const needsPw = plan === 'password'
 
   async function addUser(e: FormEvent) {
     e.preventDefault()
@@ -80,11 +83,13 @@ function AddAccountForm(props: {
     if (until === 'invalid') { props.fail(new Error(t('roles.expiry.invalid'))); return }
     setBusy(true)
     try {
-      const { role, expiry: _e, custom: _c, ...rest } = newUser
+      const { role, expiry: _e, custom: _c, current_password, ...rest } = newUser
       const body = { ...rest, ...(role ? roleBody(role) : {}), scope_value: role ? newUser.scope_value.trim() : '',
         expires: until }
-      const users = await withCrownConfirm((crown) => withSecondFactor((extra) => api<UserRow[]>('/api/users',
-        { method: 'POST', body: JSON.stringify({ ...body, ...crown, ...extra }) })), crownAsk)
+      const users = await reauth(t('access.reauth.addAccount', { email: newUser.email.trim() }),
+        (cred) => withCrownConfirm((crown) => withSecondFactor((extra) => api<UserRow[]>('/api/users',
+          { method: 'POST', body: JSON.stringify({ ...body, ...cred, ...crown, ...extra }) })), crownAsk),
+        current_password)
       if (!users) { setBusy(false); return }
       setNewUser({ email: '', password: '', current_password: '', role: '', scope_kind: 'folder', scope_value: '',
         expiry: 'permanent', custom: '' })
@@ -122,12 +127,16 @@ function AddAccountForm(props: {
         <ExpiryPicker idPrefix="newuser" choice={newUser.expiry} custom={newUser.custom}
           onChange={(expiry, custom) => setNewUser({ ...newUser, expiry, custom })} />
       )}
-      <input type="password" value={newUser.current_password} autoComplete="current-password"
-        onChange={(e) => setNewUser({ ...newUser, current_password: e.target.value })}
-        placeholder={t('settings.currentPasswordConfirm')} aria-label={t('settings.currentPassword')} className={field} />
+      {needsPw ? (
+        <input type="password" value={newUser.current_password} autoComplete="current-password"
+          onChange={(e) => setNewUser({ ...newUser, current_password: e.target.value })}
+          placeholder={t('settings.currentPasswordConfirm')} aria-label={t('settings.currentPassword')} className={field} />
+      ) : (
+        <p className="text-xs text-slate-500" data-reauth-hint>{t('access.reauth.noPassword')}</p>
+      )}
       <div className="flex flex-wrap items-center gap-2">
         <Button variant="primary" type="submit" loading={busy}
-          disabled={!newUser.current_password || (!!newUser.role && (!scopeOk(newUser.scope_kind, newUser.scope_value)
+          disabled={(needsPw && !newUser.current_password) || (!!newUser.role && (!scopeOk(newUser.scope_kind, newUser.scope_value)
             || expiryFrom(newUser.expiry, newUser.custom, Date.now()) === 'invalid'))}>
           {t('settings.users.add')}
         </Button>
@@ -140,7 +149,7 @@ function AddAccountForm(props: {
 /** Partea desfăcută a unui rând: detalii, legăturile (cu ×), „dă un rol", ştergerea contului. */
 function AccountDetails(props: {
   u: UserRow; id: string; labelledBy: string; canDelete: boolean
-  catalogue: RolesCatalogue | null; hosts: Host[]; isOwner: boolean
+  catalogue: RolesCatalogue | null; hosts: Host[]; isOwner: boolean; me: ReauthMe
   reload: () => Promise<void>; setUsers: (u: UserRow[]) => void
   done: (text: string) => void; fail: (e: unknown) => void
 }) {
@@ -154,6 +163,7 @@ function AccountDetails(props: {
   const [explain, setExplain] = useState(false)
   const withSecondFactor = <T,>(send: (extra: object) => Promise<T>) => withSecondFactorT(t, send)
   const crownAsk = useCrownAsk()
+  const { reauth } = useAccessReauth(props.me, { returnTo: RETURN_USERS })   // RB-03
   const expiryText = useExpiryText()
   const signIn = useLastSignIn()
   const sourceTitle = (b: Binding) => (b.source === 'migration' ? t('roles.sourceMigration')
@@ -166,18 +176,17 @@ function AccountDetails(props: {
     if (until === 'invalid') { props.fail(new Error(t('roles.expiry.invalid'))); return }
     const label = t('roles.chip', { role: roleName(grant.role),
       scope: scopeLabel({ scope_kind: grant.scope_kind, scope_value: grant.scope_value.trim() }, hostName, t) })
-    const pw = await askSecret(until
+    const prompt = until
       ? t('roles.bindings.addConfirmUntil', { email: u.email, binding: label, date: fmtTs(until, 'datetime') })
-      : t('roles.bindings.addConfirm', { email: u.email, binding: label }))
-    if (!pw) return
+      : t('roles.bindings.addConfirm', { email: u.email, binding: label })
     setBusy(true)
     try {
-      const r = await withCrownConfirm((crown) => withSecondFactor((extra) => api(`/api/users/${u.id}/bindings`, {
+      const r = await reauth(prompt, (cred) => withCrownConfirm((crown) => withSecondFactor((extra) => api(`/api/users/${u.id}/bindings`, {
         method: 'POST',
         body: JSON.stringify({ ...roleBody(grant.role), scope_kind: grant.scope_kind,
           scope_value: grant.scope_kind === 'all' ? '' : grant.scope_value.trim(), expires: until,
-          current_password: pw, ...crown, ...extra }),
-      })), crownAsk)
+          ...cred, ...crown, ...extra }),
+      })), crownAsk))
       if (r !== null) {
         await props.reload()
         props.done(t('roles.bindings.added'))
@@ -189,11 +198,10 @@ function AccountDetails(props: {
   // 3.6.10: o legătură temporară devine permanentă (serverul aplică regulile de acordare — inclusiv
   // confirmarea blocantă pentru ⚑ peste un host crown-jewel, ca la o legătură nouă)
   async function makePermanent(b: Binding) {
-    const pw = await askSecret(t('roles.expiry.permanentConfirm', { email: u.email, binding: chip(b) }))
-    if (!pw) return
     try {
-      const r = await withCrownConfirm((crown) => withSecondFactor((extra) => api(`/api/users/${u.id}/bindings/${b.id}/expiry`,
-        { method: 'POST', body: JSON.stringify({ expires: null, current_password: pw, ...crown, ...extra }) })), crownAsk)
+      const r = await reauth(t('roles.expiry.permanentConfirm', { email: u.email, binding: chip(b) }),
+        (cred) => withCrownConfirm((crown) => withSecondFactor((extra) => api(`/api/users/${u.id}/bindings/${b.id}/expiry`,
+          { method: 'POST', body: JSON.stringify({ expires: null, ...cred, ...crown, ...extra }) })), crownAsk))
       if (r === null) return
       await props.reload()
       props.done(t('roles.expiry.madePermanent'))
@@ -201,11 +209,11 @@ function AccountDetails(props: {
   }
 
   async function removeBinding(b: Binding) {
-    const pw = await askSecret(t('roles.bindings.removeConfirm', { email: u.email, binding: chip(b) }))
-    if (!pw) return
     try {
-      await withSecondFactor((extra) => api(`/api/users/${u.id}/bindings/${b.id}/delete`,
-        { method: 'POST', body: JSON.stringify({ current_password: pw, ...extra }) }))
+      const r = await reauth(t('roles.bindings.removeConfirm', { email: u.email, binding: chip(b) }),
+        (cred) => withSecondFactor((extra) => api(`/api/users/${u.id}/bindings/${b.id}/delete`,
+          { method: 'POST', body: JSON.stringify({ ...cred, ...extra }) })))
+      if (r === null) return
       await props.reload()
       props.done(t('roles.bindings.removed'))
     } catch (x) { props.fail(x) }
@@ -213,22 +221,24 @@ function AccountDetails(props: {
 
   // 3.6.11: un cont dezactivat (SCIM) — doar un Owner îl reactivează (îşi recapătă TOATE rolurile)
   async function reenable() {
-    const pw = await askSecret(t('settings.users.reenableConfirm', { email: u.email }))
-    if (!pw) return
     try {
-      props.setUsers(await withSecondFactor((extra) => api<UserRow[]>(`/api/users/${u.id}/enable`,
-        { method: 'POST', body: JSON.stringify({ current_password: pw, ...extra }) })))
+      const users = await reauth(t('settings.users.reenableConfirm', { email: u.email }),
+        (cred) => withSecondFactor((extra) => api<UserRow[]>(`/api/users/${u.id}/enable`,
+          { method: 'POST', body: JSON.stringify({ ...cred, ...extra }) })))
+      if (users === null) return
+      props.setUsers(users)
       props.done(t('settings.users.reenabled'))
     } catch (x) { props.fail(x) }
   }
 
   async function removeUser() {
-    // askSecret, nu window.prompt: aici se tastează parola TA — mascată, ca peste tot
-    const pw = await askSecret(t('settings.users.deleteConfirm', { email: u.email }))
-    if (!pw) return
+    // re-auth prin useAccessReauth: parola TA (askSecret, mascată) sau, pentru un cont SSO, passkey / SSO
     try {
-      props.setUsers(await withSecondFactor((extra) => api<UserRow[]>(`/api/users/${u.id}/delete`,
-        { method: 'POST', body: JSON.stringify({ current_password: pw, ...extra }) })))
+      const users = await reauth(t('settings.users.deleteConfirm', { email: u.email }),
+        (cred) => withSecondFactor((extra) => api<UserRow[]>(`/api/users/${u.id}/delete`,
+          { method: 'POST', body: JSON.stringify({ ...cred, ...extra }) })))
+      if (users === null) return
+      props.setUsers(users)
       props.done(t('settings.users.deleted'))
     } catch (x) { props.fail(x) }
   }
@@ -398,7 +408,7 @@ export default function AccountsPanel(props: {
 
       {adding && (
         <AddAccountForm id={formId} catalogue={props.catalogue} hosts={props.hosts} isOwner={props.isOwner}
-          fail={props.fail} onCancel={closeAdd}
+          me={selfOf(props.users)} fail={props.fail} onCancel={closeAdd}
           onDone={(users) => { props.setUsers(users); props.done(t('settings.users.added')); closeAdd() }} />
       )}
 
@@ -497,7 +507,7 @@ export default function AccountsPanel(props: {
                 {open && (
                   <AccountDetails u={u} id={detailsId} labelledBy={headId}
                     canDelete={!u.is_self && props.users.length > 1}
-                    catalogue={props.catalogue} hosts={props.hosts} isOwner={props.isOwner}
+                    catalogue={props.catalogue} hosts={props.hosts} isOwner={props.isOwner} me={selfOf(props.users)}
                     reload={props.reload} setUsers={props.setUsers} done={props.done} fail={props.fail} />
                 )}
               </li>

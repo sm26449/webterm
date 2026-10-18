@@ -1,17 +1,18 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react'
-import { api, withSecondFactor as withSecondFactorT } from '../../../lib/api'
-import { askSecret } from '../../../lib/secretPrompt'
+import { api, withSecondFactor as withSecondFactorT, type ReauthMe } from '../../../lib/api'
 import { useI18n } from '../../../lib/i18n'
 import { groupPerms, heldEverywhere, ROLE_PRESETS, RoleRow, RolesCatalogue, roleValue, usePerms } from '../../../lib/perms'
 import { roleUsage, type SsoMapping, type UserRow } from '../../../lib/usersAdmin'
 import { field, heading } from '../ui'
 import { Badge, Button } from '../../ui'
 import HelpTip from '../../HelpTip'
+import { RETURN_USERS, useAccessReauth } from './shared'
 
 /* Sub-tab-ul „Roles" (3.6.6). Rolurile predefinite (doar citire: ce înseamnă, câte permisiuni, unde
    sunt folosite) şi rolurile custom (3.6.2) cu editorul lor. Editarea cere `roles.manage`, ca
    înainte; cine are doar `users.manage` vede lista (o foloseşte oricum când acordă roluri), fără
-   butoane. Fiecare salvare/ştergere: aceeaşi parolă (askSecret) + al doilea factor, aceleaşi rute. */
+   butoane. Fiecare salvare/ştergere: aceeaşi re-autentificare (parola — sau passkey / step-up SSO pentru
+   un cont SSO, `useAccessReauth`, RB-03) + al doilea factor, aceleaşi rute. */
 
 type Draft = { id: number | null; name: string; description: string; perms: Set<string> }
 
@@ -121,6 +122,8 @@ export default function RolesPanel(props: {
       `null` = nu le avem (fără `users.manage`) — atunci nu afirmăm nimic despre folosire */
   users: UserRow[] | null
   mappings: SsoMapping[] | null
+  /** rândul propriu de la /api/users (RB-03: cum te re-autentifici) */
+  me: ReauthMe
   reload: () => Promise<void>
   done: (text: string) => void; fail: (e: unknown) => void
 }) {
@@ -131,6 +134,7 @@ export default function RolesPanel(props: {
   const [busy, setBusy] = useState(false)
   const newBtnRef = useRef<HTMLButtonElement>(null)
   const withSecondFactor = <T,>(send: (extra: object) => Promise<T>) => withSecondFactorT(t, send)
+  const { reauth } = useAccessReauth(props.me, { returnTo: RETURN_USERS })
   const cat = props.catalogue
 
   const close = () => {
@@ -142,14 +146,14 @@ export default function RolesPanel(props: {
     e.preventDefault()
     if (!draft) return
     const name = draft.name.trim()
-    const pw = await askSecret(t(draft.id == null ? 'roles.custom.createConfirm' : 'roles.custom.saveConfirm', { name }))
-    if (!pw) return
     setBusy(true)
     try {
-      const body = { name, description: draft.description.trim(), perms: [...draft.perms].sort(), current_password: pw }
-      await withSecondFactor((extra) => api(draft.id == null ? '/api/roles' : `/api/roles/${draft.id}`, {
-        method: draft.id == null ? 'POST' : 'PATCH', body: JSON.stringify({ ...body, ...extra }),
-      }))
+      const body = { name, description: draft.description.trim(), perms: [...draft.perms].sort() }
+      const r = await reauth(t(draft.id == null ? 'roles.custom.createConfirm' : 'roles.custom.saveConfirm', { name }),
+        (cred) => withSecondFactor((extra) => api(draft.id == null ? '/api/roles' : `/api/roles/${draft.id}`, {
+          method: draft.id == null ? 'POST' : 'PATCH', body: JSON.stringify({ ...body, ...cred, ...extra }),
+        })))
+      if (r === null) { setBusy(false); return }
       await props.reload()
       props.done(t(draft.id == null ? 'roles.custom.created' : 'roles.custom.saved'))
       close()
@@ -158,11 +162,11 @@ export default function RolesPanel(props: {
   }
 
   async function remove(r: RoleRow) {
-    const pw = await askSecret(t('roles.custom.deleteConfirm', { name: r.name }))
-    if (!pw) return
     try {
-      await withSecondFactor((extra) => api(`/api/roles/${r.id}/delete`,
-        { method: 'POST', body: JSON.stringify({ current_password: pw, ...extra }) }))
+      const res = await reauth(t('roles.custom.deleteConfirm', { name: r.name }),
+        (cred) => withSecondFactor((extra) => api(`/api/roles/${r.id}/delete`,
+          { method: 'POST', body: JSON.stringify({ ...cred, ...extra }) })))
+      if (res === null) return
       await props.reload()
       props.done(t('roles.custom.deleted'))
     } catch (x) { props.fail(x) }

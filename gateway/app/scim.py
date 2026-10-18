@@ -303,12 +303,17 @@ async def _audit_lockout(now: float, ip: str, path: str, configured: bool) -> No
     global _lockout_suppressed, _lockout_alert_at
     if configured and now - _lockout_alert_at >= 3600:
         _lockout_alert_at = now
+        # the alert frame reads "On account <email>: <what>" — nobody authenticated here, so
+        # the "account" is named for what it is and the text says why it matters and what to do
+        # (P0 critic, audit 2026-10-17: "On account unauthenticated: SCIM: …" read badly)
         email_alerts.notify_security_change(
-            "SCIM: %d failed authentications from %s in 15 min; the address is locked out for "
-            "15 min. A wrong, stale or leaked SCIM token is being tried — if the identity "
-            "provider is not syncing, re-paste the token there; otherwise rotate it"
-            % (_FAIL_MAX, ip), ip, "unauthenticated", fleet=True, severity="warning",
-            what_key="scim_lockout", what_params={"ip": ip, "fails": _FAIL_MAX})
+            "the SCIM endpoint locked out %s for 15 min after %d failed authentications in 15 min. "
+            "Why this matters: someone is trying a wrong, stale or leaked SCIM token — that "
+            "token is worth an Admin's password. If the identity provider stopped syncing, "
+            "re-paste the current token there (Settings → Users & roles → SSO groups); if it "
+            "syncs fine, rotate the token" % (ip, _FAIL_MAX), ip, "SCIM (no account)",
+            fleet=True, severity="warning", what_key="scim_lockout",
+            what_params={"ip": ip, "fails": _FAIL_MAX})
     if not _hour_cap(_lockout_rows, _LOCKOUT_AUDIT_MAX, now):
         _lockout_suppressed += 1
         return
@@ -346,8 +351,15 @@ async def _audit_authfail(now: float, ip: str, path: str, why: str) -> None:
     if not _hour_cap(_authfail_rows, _AUTHFAIL_AUDIT_MAX, now):   # count per address an hour
         _authfail_suppressed += 1
         return
-    extra = (" (%d earlier failure(s) from unrecorded address(es): more than %d an hour)"
-             % (_authfail_suppressed, _AUTHFAIL_AUDIT_MAX)) if _authfail_suppressed else ""
+    # `_authfail_suppressed` counts REQUESTS whose first-of-the-hour row was held back — by the
+    # row cap or by the address cap (an address past the cap is not remembered, so each of its
+    # failures counts again): it is not a number of addresses (P0 critic, audit 2026-10-17)
+    # — and it is reset only when a row IS written, not on the hour boundary: the ones it
+    # counts are "since the last recorded failure", not "this hour" (P1 review)
+    extra = (" (%d further failed authentication(s) since the last recorded one, held back by "
+             "the caps: at most %d rows and %d addresses an hour)"
+             % (_authfail_suppressed, _AUTHFAIL_AUDIT_MAX, _AUTHFAIL_SEEN_MAX)) \
+        if _authfail_suppressed else ""
     _authfail_suppressed = 0
     await audit.record(now, "unauthenticated", ip, "SCIM", path, 401,
                        ("SCIM: failed authentication from %s (%s); further failures from this "
@@ -813,8 +825,24 @@ async def _active_precheck(uid: int, active, ip: str = "-") -> None:
                                                      reason="SCIM active=false")
             raise ScimError(403, "this account is the last permanent Owner of WebTerm and cannot "
                                  "be disabled; make another account a permanent Owner first")
+        if await authz.last_break_glass(uid):
+            await accounts.report_last_break_glass_refused(uid, row["email"], actor=ACTOR, ip=ip,
+                                                           reason="SCIM active=false")
+            raise _last_break_glass_error()
     if active is True and row["d"]:
         await _enable_check(uid, ip)
+
+
+def _last_break_glass_error() -> ScimError:
+    """RB-06 (audit 2026-10-17): the IdP may not disable the last permanent Owner with a local
+    password — the break-glass account that still signs in when the IdP is down. 400
+    `mutability` (`active` cannot change on this account), not 409: the same precheck runs
+    inside POST /Users, where a 409 aborts Authentik's sync page ("never 409 on user create").
+    The refusal is audited and alerted (critical) by `accounts.report_last_break_glass_refused`."""
+    return ScimError(400, "this account is the last permanent Owner of WebTerm with a local "
+                          "password (the break-glass account) and cannot be disabled by the "
+                          "identity provider; make another account a permanent Owner with a local "
+                          "password first", "mutability")
 
 
 async def _enable_check(uid: int, ip: str) -> None:
@@ -843,6 +871,8 @@ async def _set_active(p: dict, uid: int, active: bool, path: str) -> None:
     except accounts.LastOwner:
         raise ScimError(403, "this account is the last permanent Owner of WebTerm and cannot be "
                              "disabled; make another account a permanent Owner first")
+    except accounts.LastBreakGlass:
+        raise _last_break_glass_error()
     except accounts.OwnerLevel:
         raise await _owner_level_refused(uid, "disable", p["ip"])
 
@@ -931,6 +961,8 @@ async def _disable_unlinked(p: dict, target, path: str) -> ScimError:
     except accounts.LastOwner:
         raise ScimError(403, "this account is the last permanent Owner of WebTerm and cannot be "
                              "disabled; make another account a permanent Owner first")
+    except accounts.LastBreakGlass:
+        raise _last_break_glass_error()
     except accounts.OwnerLevel:
         raise await _owner_level_refused(target["id"], "disable", p["ip"])
     log.warning("SCIM: disabled %s in place (active=false matched by externalId only, email "
@@ -1299,7 +1331,18 @@ async def patch_user(scim_id: str, request: Request, p=Depends(require_scim)):
 @router.delete("/Users/{scim_id}")
 async def delete_user(scim_id: str, p=Depends(require_scim)):
     """DELETE = disable + unlink (the account and its audit history stay; an Owner can re-enable
-    it, and the IdP re-provisioning the same person adopts it again)."""
+    it, and the IdP re-provisioning the same person adopts it again).
+    SC-02 (audit 2026-10-17, product decision): a DELETE leaves the account in the SAME state
+    as `active:false` — disabled, with its role bindings AND its SCIM group memberships kept.
+    It used to drop the memberships and re-run the mapping, which removed every SSO-group role
+    of an account that is already disabled (its grants are empty, the bindings are not read):
+    no access was reduced, but an Owner's Re-enable brought back an account with no roles
+    although the confirmation promises "every role it had", and the person got a "your access
+    changed" email on top of the disable alert. Note what "kept" means after a DELETE: scim_id
+    is NULL from here on, so the IdP can never name this account in a group again — a Re-enable
+    brings back the roles the account had WHEN IT WAS DEACTIVATED, and its group roles are
+    pruned again only when the IdP next REPLACES that group's member list (PUT /Groups with
+    `members`; a PATCH never touches the orphaned membership rows)."""
     path = PREFIX + "/Users/" + scim_id
     try:
         async with _lock:
@@ -1313,19 +1356,16 @@ async def delete_user(scim_id: str, p=Depends(require_scim)):
                 raise ScimError(403, "this account is the last permanent Owner of WebTerm and "
                                      "cannot be removed; make another account a permanent Owner "
                                      "first")
+            except accounts.LastBreakGlass:
+                raise _last_break_glass_error()
             except accounts.OwnerLevel:
                 raise await _owner_level_refused(u["id"], "delete", p["ip"])
-            gids = [r["group_id"] for r in await db.fetchall(
-                "SELECT group_id FROM scim_group_members WHERE user_id=?", u["id"])]
-            await db.execute("DELETE FROM scim_group_members WHERE user_id=?", u["id"])
             # `disabled_by` was set (or moved from 'scim') by accounts.disable — never over a
             # disable done in WebTerm (re-review 3.6.11)
             await db.execute("UPDATE users SET scim_id=NULL, scim_updated=? WHERE id=?",
                              time.time(), u["id"])
             await _audit(p, "DELETE", path, 204, "SCIM deleted %s: account disabled and unlinked "
-                         "(kept for its history)" % u["email"], actor_id=u["id"])
-            if gids:
-                await _resync({u["id"]}, p["ip"])
+                         "(kept for its history, roles included)" % u["email"], actor_id=u["id"])
     except ScimError as e:
         if e.status_code != 404:
             await _refuse(p, "DELETE", path, e)

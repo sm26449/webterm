@@ -21,7 +21,7 @@ so these are the only `text-<size>` classes that generate CSS.
 | `text-xs` | 12 / 16px | secondary text, small buttons, toolbars |
 | `text-compact` | 13 / 20px | dense lists, modal prose, monospace command lines, settings section titles |
 | `text-sm` | 14 / 20px | body text, buttons; inputs from `sm` up |
-| `text-base` | 16 / 24px | prominent body (login); **every text input below `sm`** (`text-base sm:text-sm`) so iOS does not zoom on focus |
+| `text-base` | 16 / 24px | prominent body (login); **every text input below `sm`** (`text-base sm:text-sm`) so iOS does not zoom on focus — and, as a safety net, `index.css` raises every text control to `max(16px, 1em)` under `(pointer: coarse)`, measured per screen by `scripts/mobile-audit.mjs` (audit 2026-10-17, UI-04) |
 | `text-lg` | 18 / 28px | page and dialog titles (`h1` on the host page, empty states) |
 | `text-xl` | 20 / 28px | Dashboard title, the host status line |
 | `text-display` | 22 / 28px | the login wordmark |
@@ -233,7 +233,8 @@ replaced by the resolved theme on the first reload). The PWA `theme-color` meta 
 is the same bundle, so all of them honour the theme.
 
 **In code**, ask `isLight(variant)` — never compare with `'macos'` or `'dark'` (the guard fails on
-it). Monaco (`vs` / `vs-dark`), the watermark ink and the command-palette toggle use it.
+it). The watermark ink and the command-palette toggle use it. Monaco does not: the editor card
+(`.wt-editor`) is a forced-dark zone, so the editor is always `vs-dark` (audit 2026-10-17).
 
 **Fonts are system stacks only**: `-apple-system`/`system-ui` (SF on a Mac), `'Segoe UI Variable'`
 / `'Segoe UI'`, `'Adwaita Sans'` / Cantarell / Ubuntu, `'Noto Sans'` (Plasma's default). No OS font, logo, icon or wallpaper is
@@ -268,14 +269,22 @@ token set (`.wt-workspace`, `.wt-command`, `.wt-editor`, `.wt-transfers-widget`)
 family's `--ws-*` scale (navy for WebTerm, neutral greys for the others, matched step by step to
 WebTerm's luminance), so components inside them need nothing special. A zone that can also be
 mounted *outside* the workspace must carry the **full** dark set itself — surfaces (`--ink-*`),
-text, `--link`, the semantic states, `--focus`/`--field-border` and, when it uses `.glass`, a
-dark `--glass-bg`: the file editor opens from the host page's Files tab (under `.wt-canvas`) as
+text, `--link`, the semantic states and, when it uses `.glass`, a dark `--glass-bg`: the file editor opens from the host page's Files tab (under `.wt-canvas`) as
 well as from a session, and re-declaring only its text tokens left it a white card with light
 text on every light variant (audit 2026-10-17, UI-01; `src/themeContrast.test.ts` now checks the
 editor in both contexts, because axe cannot evaluate `color-mix()`). A themed page that lives
 inside the workspace opts back out with `.wt-canvas` (Dashboard, host page) — each variant's token
 block lists `.wt-workspace .wt-canvas` in its selector; a terminal preview on a themed page opts
 back in with `.wt-workspace`.
+
+The focus ring, the field border and the browser's own colour scheme are **shared** by the four
+zones in one rule (`.wt-workspace, .wt-command, .wt-transfers-widget, .wt-editor { --focus;
+--field-border; color-scheme: dark }` plus one line per family): on a light variant the zones used
+to inherit the light ring, which fell to 2.92:1 on the Windows 11 tab strip (audit 2026-10-17,
+UI-02). `color-scheme` follows `data-mode` on `<html>` (`<meta name="color-scheme" content="dark
+light">` covers the first frame), so native popups, date pickers and scrollbars are drawn dark on
+dark themes; `.wt-canvas` switches back to `light` on light variants (UI-03). Scrollbars take
+`scrollbar-color` from the theme token everywhere, not only in the terminal viewport.
 
 ### Contrast
 

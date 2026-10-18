@@ -107,6 +107,7 @@ free_pct() { df -P / 2>/dev/null | awk 'NR==2 { gsub("%","",$5); printf "%.1f", 
 REMOVED=0
 OTHER_REMOVED=0
 FAILED=""
+REFUSED=""
 # shellcheck disable=SC2317,SC2329  # invoked through the EXIT trap below (2317: shellcheck ≤0.9, 2329: ≥0.10)
 record_status() {
   local rc=$? st=ok msg pct
@@ -114,15 +115,33 @@ record_status() {
   # df can fail (or print nothing): never write `"disk_free_pct":,` — invalid JSON is refused and
   # the run would look as if it never reported (security review 3.6.8, L5)
   pct=$(free_pct); [ -n "$pct" ] || pct=0
-  msg="removed $REMOVED WebTerm image(s) and $OTHER_REMOVED other(s); disk / ${pct}% free"
-  if [ -n "$FAILED" ]; then st=warn; msg="$FAILED failed; $msg"; fi
-  [ "$rc" = 0 ] || { st=error; msg="exit code $rc; $msg"; }
+  if [ -n "$REFUSED" ]; then
+    # audit 2026-10-17 OP-04: the daemon did not answer (or its answers do not add up) — say so,
+    # never "ok, removed 0"
+    st=error; msg="$REFUSED; nothing removed; disk / ${pct}% free"
+  else
+    msg="removed $REMOVED WebTerm image(s) and $OTHER_REMOVED other(s); disk / ${pct}% free"
+    if [ -n "$FAILED" ]; then st=warn; msg="$FAILED failed; $msg"; fi
+    [ "$rc" = 0 ] || { st=error; msg="exit code $rc; $msg"; }
+  fi
   if [ -x "$SCRIPT_DIR/host-health.sh" ]; then
     "$SCRIPT_DIR/host-health.sh" --record docker-cleanup "$st" "$msg" \
       "{\"disk_free_pct\":$pct,\"images_removed\":$((REMOVED + OTHER_REMOVED))}" >/dev/null 2>&1 || true
   fi
 }
 trap record_status EXIT
+# Every `dk` call below tolerates its own failure (|| true): one image docker cannot inspect must
+# not stop the run. But a daemon that does not answer at all (stopped, socket blocked, `timeout`
+# hit, docker not on PATH) left every list empty and the run reported `ok` with "removed 0" while
+# the disk filled up (audit 2026-10-17, OP-04 — the disk-full incident of 2026-10-09). So the
+# calls whose empty answer would mean "nothing to preserve" / "nothing on disk" are checked, and a
+# daemon that does not answer ends the run with status `error` (exit 1: the unit fails too).
+refuse_run() {
+  REFUSED="$1"; FAILED="$FAILED docker"
+  log "$1: nothing removed"
+  exit 1
+}
+docker_down() { refuse_run "docker not reachable ($1)"; }
 
 log "── start (retention=$RETENTION, build cache=$BUILD_RETENTION, keep $KEEP WebTerm versions$([ "$DRY" = 1 ] && echo ', DRY RUN')) — disk / $(free_pct)% free"
 
@@ -144,7 +163,9 @@ envval() { sed -n "s/^$1=//p" "$ROOT/.env" 2>/dev/null | tail -n1 | tr -d '"'"'"
 keep_ref "$TOOL_IMAGE"
 [ "$INSTALL" = 1 ] && keep_ref "$(envval WEBTERM_TOOL_IMAGE)"
 # the image of every container, running or stopped (`image rm` refuses those anyway)
-for c in $(dk ps -aq --no-trunc 2>/dev/null || true); do
+# (`docker ps` failing = no preserve set at all: an empty one with images listed must never proceed)
+cids=$(dk ps -aq --no-trunc 2>/dev/null) || docker_down "docker ps failed"
+for c in $cids; do
   keep_id "$(dk inspect --format '{{.Image}}' "$c" 2>/dev/null || true)"
 done
 # every image this install's compose files name (the pinned Authentik, Postgres, Redis, Traefik…)
@@ -167,7 +188,8 @@ for p in $(printf '%s\n' "$ak_ps" | cut -d'|' -f2 | sort -u); do
     keep_ref "$ref"
   done
 done
-ALL=$(dk images --no-trunc --format '{{.ID}}|{{.Repository}}|{{.Tag}}|{{.CreatedAt}}' 2>/dev/null || true)
+ALL=$(dk images --no-trunc --format '{{.ID}}|{{.Repository}}|{{.Tag}}|{{.CreatedAt}}' 2>/dev/null) || docker_down "docker images failed"
+dk info >/dev/null 2>&1 || docker_down "docker info failed"
 ak_inuse=$(printf '%s\n' "$ak_ps" | cut -d'|' -f1 | sed -n 's/.*goauthentik\/server:\([^@]*\).*/\1/p' \
              | grep -E "$VER_RE" | sort -V | head -n1 || true)
 ak_local=$(printf '%s\n' "$ALL" | awk -F'|' '$2 ~ /(^|\/)goauthentik\/server$/ { print $3 "|" $1 }' \
@@ -193,7 +215,17 @@ if [ "$INSTALL" = 1 ]; then
   cur_id=$([ -n "$cur" ] && dk image inspect --format '{{.Id}}' "$cur" 2>/dev/null || true)
   keep_id "$running_id"; keep_id "$prev_id"; keep_id "$cur_id"
 fi
-log "preserved: $(printf '%s' "$PRESERVE" | grep -c . || true) image(s)"
+n_preserved=$(printf '%s' "$PRESERVE" | grep -c . || true)
+log "preserved: $n_preserved image(s)"
+# images on disk but nothing to preserve: not a state a WebTerm install can be in (its own app
+# container, the tool image and the compose-pinned images are always there) — a daemon whose
+# answers do not add up (`ps`/`inspect` empty while `images` lists), so refuse rather than remove
+# with an empty preserve set. Its own wording: the daemon DID answer, "not reachable" would
+# mislead whoever reads System health. Outside an install (INSTALL=0: no containers, the tool
+# image never pulled) an empty set is legitimate and the run goes on.
+if [ "$INSTALL" = 1 ] && [ "${n_preserved:-0}" = 0 ] && printf '%s' "$ALL" | grep -q .; then
+  refuse_run "refusing: preserve set empty while images are listed (stack not running or tool image not pulled yet?)"
+fi
 
 # 1+2) dangling images, and other unused images older than RETENTION — one by one, never one in
 # the preserve set, never a WebTerm image (step 3 below applies upgrade.sh's keep-N rule to those)

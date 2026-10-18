@@ -1,8 +1,9 @@
-import { useMemo } from 'react'
-import type { Host } from '../../../lib/api'
+import { useEffect, useMemo, useState } from 'react'
+import { accessReauthPlan, api, withAccessReauth, type Host, type ReauthMe, type ReauthPlan, type SettingsReturn } from '../../../lib/api'
+import { useConfirm } from '../../../lib/confirm'
 import { useI18n } from '../../../lib/i18n'
 import { ROLE_KEYS, RolesCatalogue, roleValue, ScopeKind, SCOPE_KINDS, SHELL_ROLES } from '../../../lib/perms'
-import { EXPIRY_CHOICES, expiresIn, expiryFrom, type ExpiryChoice } from '../../../lib/usersAdmin'
+import { EXPIRY_CHOICES, expiresIn, expiryFrom, type ExpiryChoice, type UserRow } from '../../../lib/usersAdmin'
 import { field } from '../ui'
 
 /* Piese comune sub-tab-urilor din Users & roles (3.6.6; mutate din UsersTab.tsx fără schimbări de
@@ -110,6 +111,63 @@ export function useRoleName(catalogue: RolesCatalogue | null) {
   return (v: string) => (v.startsWith('id:')
     ? catalogue?.custom.find((r) => roleValue(r) === v)?.name ?? v
     : t('roles.role.' + v))
+}
+
+/** RB-03 (audit 2026-10-17): re-autentificarea la o schimbare de acces, pentru TOATE acţiunile din
+    Accounts / Roles / SSO groups / tokenuri / parola locală (lib/api.ts `withAccessReauth`). `me` =
+    rândul propriu de la /api/users (`selfOf` / `useSelfRow`): un cont SSO nu mai primeşte un prompt de
+    parolă pe care n-o are — confirmă (dialogul obişnuit) şi face passkey account-scope sau step-up SSO.
+    `plan` lasă formularele cu parolă inline (Add account, token) să ascundă câmpul când nu e de folos.
+    `passwordGate` = o rută care verifică doar parola (niciuna azi, 3.6.18): planul e 'password' pentru oricine
+    (altfel am promite „fără parolă" şi serverul ar răspunde 401). `returnTo` = panoul Settings de
+    redeschis după un redirect la IdP (salvat în sessionStorage înainte de plecare). */
+export const RETURN_USERS: SettingsReturn = { cat: 'utilizatori' }
+export const RETURN_INFRA: SettingsReturn = { cat: 'infrastructura' }
+export function useAccessReauth(me: ReauthMe, opts: { passwordGate?: boolean; returnTo?: SettingsReturn } = {}) {
+  const { t } = useI18n()
+  const { confirm } = useConfirm()
+  const passwordGate = !!opts.passwordGate
+  const returnTo = opts.returnTo
+  const plan: ReauthPlan = accessReauthPlan(me, typeof window !== 'undefined' && !!window.PublicKeyCredential, passwordGate)
+  const reauth = <T,>(prompt: string, send: (cred: object) => Promise<T>, password?: string) =>
+    withAccessReauth(t, prompt, send, {
+      me, password, passwordGate, returnTo,
+      confirm: (q) => confirm({ title: t('access.reauth.title'), message: q, confirmLabel: t('common.confirm') }),
+    })
+  return { plan, reauth }
+}
+
+/** rândul propriu dintr-o listă deja încărcată (`undefined` = încă nu ştim) */
+export const selfOf = (users: UserRow[] | null | undefined): ReauthMe =>
+  users ? users.find((u) => u.is_self) ?? null : undefined
+
+/** rândul propriu de la /api/users, pentru panourile care nu au lista (orice cont îl primeşte, §A.6.3);
+    un fetch picat lasă `null` → planul cu parolă, iar 403-ul serverului rămâne plasa de siguranţă.
+    Lista e scumpă pentru users.manage (legăturile fiecărui cont, RB-07) şi tab-ul se remontează la
+    fiecare schimbare de sub-tab: răspunsul e ţinut un minut la nivel de modul. Un rând vechi nu
+    slăbeşte nimic — planul greşit sfârşeşte în 403 → step-up SSO, iar un fetch picat nu e reţinut.
+    Cache-ul e uitat la `wt-unauth` (sesiune expirată / ieşire): pagina de login vine fără reload,
+    deci alt cont intrat în acelaşi minut nu trebuie să moştenească rândul precedentului. */
+const SELF_ROW_TTL = 60_000
+let selfRowCache: { at: number; p: Promise<ReauthMe> } | null = null
+export function forgetSelfRow(): void { selfRowCache = null }
+if (typeof window !== 'undefined') window.addEventListener('wt-unauth', forgetSelfRow)
+export function fetchSelfRow(now = Date.now()): Promise<ReauthMe> {
+  if (!selfRowCache || now - selfRowCache.at > SELF_ROW_TTL) {
+    const p = api<UserRow[]>('/api/users').then((rows) => selfOf(rows))
+    p.catch(() => { if (selfRowCache?.p === p) selfRowCache = null })
+    selfRowCache = { at: now, p }
+  }
+  return selfRowCache.p
+}
+export function useSelfRow(): ReauthMe {
+  const [me, setMe] = useState<ReauthMe>(undefined)
+  useEffect(() => {
+    let live = true
+    fetchSelfRow().then((row) => { if (live) setMe(row) }).catch(() => { if (live) setMe(null) })
+    return () => { live = false }
+  }, [])
+  return me
 }
 
 /** Mesajul unei acţiuni, lângă panoul care l-a produs. Regiunile stau montate mereu (design
