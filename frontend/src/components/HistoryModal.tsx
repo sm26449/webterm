@@ -69,7 +69,7 @@ export default function HistoryModal(props: { hosts: Host[]; onClose: () => void
     try {
       const r = await withAccessReauth(t, t('history.clearPassword'), (cred) => withSecondFactor(t, (extra) => api('/api/history', {
         method: 'DELETE', body: JSON.stringify({ ...cred, ...extra }),
-      })), { me: await fetchSelfRow() })
+      })), { me: await fetchSelfRow().catch(() => null) })
       if (r === null) return
       setItems([])
     } catch (e) { notifyError(t('history.clearAll'), errText(e, t)) }

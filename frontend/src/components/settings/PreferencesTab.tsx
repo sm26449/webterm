@@ -186,8 +186,8 @@ export default function PreferencesTab() {
             <option value="canvas">{t('settings.renderer.canvas')}</option>
             <option value="dom">{t('settings.renderer.dom')}</option>
           </select>
-          <span id="wt-renderer-hint" className="mt-0.5 block text-xs text-slate-500">{t('settings.rendererHint')}</span>
         </label>
+        <p id="wt-renderer-hint" className="mt-0.5 text-xs text-slate-500">{t('settings.rendererHint')}</p>
       </section>
 
       <section data-setting-id="transfers">

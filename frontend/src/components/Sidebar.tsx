@@ -300,7 +300,7 @@ export default function Sidebar(props: {
           (cred) => withSecondFactor(t, (extra) => api(`/api/hosts/${host.id}/crown-jewel`, {
             method: 'POST', body: JSON.stringify({ enabled: false, ...cred, ...extra }),
           })),
-          { me: await fetchSelfRow(), confirm: (q) => confirm({ title: t('access.reauth.title'), message: q, confirmLabel: t('common.confirm') }) })
+          { me: await fetchSelfRow().catch(() => null), confirm: (q) => confirm({ title: t('access.reauth.title'), message: q, confirmLabel: t('common.confirm') }) })
         if (r === null) return
         notify(t('crown.unmarked', { name: host.name }), '', 'info')
       } else {

@@ -86,6 +86,12 @@ export function shortAgent(ua?: string): string {
 // keepalive, ~25s pe idle) în acest interval, tratăm conexiunea ca moartă și reconectăm.
 const WATCHDOG_MS = 60_000
 
+/** Setări → Preferinţe → Terminal → „Randarea terminalului" (3.6.19): 'webgl' (implicit) | 'canvas' | 'dom',
+    per browser; citită la fiecare (re)încărcare a renderer-ului. */
+function readRendererPref(): string {
+  try { const v = localStorage.getItem('wt_renderer'); return v === 'canvas' || v === 'dom' ? v : 'webgl' } catch { return 'webgl' }
+}
+
 /* Scrollback adaptiv: 10k linii ≈ 10-15 MB per terminal cu buffer plin.
 
    Al doilea consumator al aceluiaşi semnal ca `KEEP_ALIVE` din App.tsx, şi avea acelaşi
@@ -207,6 +213,9 @@ export default function SessionView(props: {
   // nici clearTextureAtlas nu repară — un addon nou la noua dimensiune e curat.
   const rendererRef = useRef<{ dispose(): void }>()
   const reloadRendererRef = useRef<() => void>()
+  /** preferinţa de renderer aplicată ultima dată (Setări → Terminal): un panou ascuns (stiva keep-alive,
+      split neactiv) nu primeşte evenimentul cât e ascuns — la reactivare compară şi reîncarcă dacă s-a schimbat */
+  const appliedRendererRef = useRef<string>('webgl')
   const rendererGenRef = useRef(0)   // apăsări rapide A−/A+: doar ultima încărcare rămâne
   const wsRef = useRef<WebSocket | null>(null)
   const retryRef = useRef({ delay: 1000, timer: 0 as ReturnType<typeof setTimeout> | 0 })
@@ -1300,6 +1309,8 @@ export default function SessionView(props: {
   useEffect(() => {
     if (paneVisible === false) return
     const activate = () => refit(paneFocused)  // focalizat: devenim dispozitivul activ → reclamăm dimensiunea
+    // preferinţa de renderer s-a schimbat cât panoul era ascuns: o aplicăm acum (nu creăm WebGL în display:none)
+    if (readRendererPref() !== appliedRendererRef.current) reloadRendererRef.current?.()
     activate()                                // la (re)activarea pane-ului
     // Tab revenit vizibil: recreează rendererul WebGL. Browserul poate elibera contextul GPU
     // al unui tab din fundal (fără a emite mereu `contextlost`) → la revenire ecranul e ALB deşi
@@ -1757,8 +1768,8 @@ export default function SessionView(props: {
       // (Chrome/Edge pe Windows, rapoarte cu nano sub tmux: rânduri suprapuse la derularea linie
       // cu linie) poate strica randarea fără ca bufferul să fie greşit — omul poate trece pe Canvas
       // sau pe DOM fără să aştepte un fix; valoarea e per browser (localStorage), ca fontul
-      let pref: string | null = null
-      try { pref = localStorage.getItem('wt_renderer') } catch { /* fără localStorage */ }
+      const pref = readRendererPref()
+      appliedRendererRef.current = pref
       if (pref === 'dom') return         // renderer-ul DOM implicit al xterm
       if (pref !== 'canvas') try {
         const { WebglAddon } = await import('@xterm/addon-webgl')
@@ -1851,7 +1862,10 @@ export default function SessionView(props: {
     // 'storage' e canalul ÎNTRE ferestre (popout-uri, alt tab de browser): 'wt-font'
     // nu trece de fereastra curentă, iar fără sync un A± în popout ar calcula din
     // state vechi și ar trage preferința comună înapoi (18 → 15, observat în audit)
-    const onStorage = (e: StorageEvent) => { if (e.key === FONT_STORAGE_KEY) sync() }
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === FONT_STORAGE_KEY) sync()
+      if (e.key === 'wt_renderer') reloadRendererRef.current?.()   // popout-urile nu primesc Event('wt-renderer')
+    }
     window.addEventListener('wt-font', sync)
     window.addEventListener('resize', sync)
     window.addEventListener('storage', onStorage)

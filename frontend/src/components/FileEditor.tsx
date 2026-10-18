@@ -154,6 +154,9 @@ export default function FileEditor(props: {
     }
   }, [pv, props.path])
 
+  // permisiunile sosesc după ce editorul s-a creat (perms necunoscute = permis): readOnly urmează
+  useEffect(() => { editor.current?.updateOptions({ readOnly: !pv?.editable || roleBlocked }) }, [roleBlocked, pv])
+
   async function save(force = false) {
     if (!pv || !editor.current || pv.binary || !pv.editable || roleBlocked) return
     // nimic de salvat când e curat (Save e și dezactivat); „suprascrie oricum" trece mereu

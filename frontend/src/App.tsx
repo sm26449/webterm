@@ -528,7 +528,7 @@ function MainApp() {
           // taburile şi split-ul deschis sunt ale contului vechi: le lăsăm jos (socketurile lor se închid la
           // demontare), iar ruta revine pe dashboard — ca la o ieşire urmată de o intrare (3.6.19)
           setOpenTabs([]); setMru([]); setActiveSplitId(null)
-          try { if (window.location.hash) window.history.replaceState(null, '', window.location.pathname) } catch { /* */ }
+          replaceRoute(null)   // şi selectedSid (ruta): altfel panoul rutei rămânea montat şi re-adăugat în taburi
           setAppState(s)
           return
         }
