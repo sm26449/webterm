@@ -4089,6 +4089,12 @@ const ro: Lang = {
     'err.account.lastBreakGlassTarget': "Acest cont este ultimul Owner permanent cu parolă locală — contul de rezervă (break-glass) care mai poate intra când furnizorul de identitate e căzut. Fă mai întâi alt cont Owner permanent cu parolă locală (un Owner temporar nu contează).",
     // audit P1 orchestrator (RB-03: întoarcerea din IdP redeschide Setările)
     'access.reauth.backRepeat': "Te-ai autentificat din nou — pornește încă o dată aceeași acțiune ca s-o închei.",
+    // 3.6.19: alegerea renderer-ului terminalului (Setări → Preferinţe → Terminal)
+    'settings.renderer': "Randarea terminalului",
+    'settings.renderer.webgl': "GPU (WebGL) — implicit, cel mai rapid",
+    'settings.renderer.canvas': "Canvas — fără calea de shadere GPU",
+    'settings.renderer.dom': "DOM — cel mai lent, cel mai compatibil",
+    'settings.rendererHint': "Se aplică pe loc terminalelor deschise, doar în acest browser. Dacă rândurile de text se suprapun sau se mânjesc (unele drivere GPU pe Windows în Chrome/Edge, văzut cu nano sub tmux), încearcă Canvas; dacă persistă, DOM.",
   },
 }
 

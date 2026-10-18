@@ -4009,6 +4009,12 @@ const en: Lang = {
     'err.account.lastBreakGlassTarget': "This account is the last permanent Owner with a local password — the break-glass account that still signs in when the identity provider is down. Make another account a permanent Owner with a local password first (a time-bound Owner does not count).",
     // audit P1 orchestrator (RB-03: întoarcerea din IdP redeschide Setările)
     'access.reauth.backRepeat': "Signed in again — open the same action once more to finish it.",
+    // 3.6.19: alegerea renderer-ului terminalului (Setări → Preferinţe → Terminal)
+    'settings.renderer': "Terminal renderer",
+    'settings.renderer.webgl': "GPU (WebGL) — default, fastest",
+    'settings.renderer.canvas': "Canvas — no GPU shader path",
+    'settings.renderer.dom': "DOM — slowest, most compatible",
+    'settings.rendererHint': "Applies to open terminals right away, in this browser only. If text rows overlap or smear (some Windows GPU drivers in Chrome/Edge, seen with nano under tmux), try Canvas; if it persists, DOM.",
   },
 }
 

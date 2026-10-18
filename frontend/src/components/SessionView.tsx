@@ -1306,12 +1306,16 @@ export default function SessionView(props: {
     // bufferul xterm are tot textul; `refresh()` nu ajută (contextul GL e mort). Reload-ul îl
     // recreează şi repaintează din buffer — cauza „b" din analiza de resync (renderer, nu date).
     const onVis = () => { if (!document.hidden) { reloadRendererRef.current?.(); activate() } }
+    // Preferinţa de renderer schimbată din Setări: reîncărcăm pe loc (dispose + addon-ul ales)
+    const onRenderer = () => reloadRendererRef.current?.()
+    window.addEventListener('wt-renderer', onRenderer)
     const onFocus = () => { if (paneFocused) activate() }
     window.addEventListener('focus', onFocus)
     document.addEventListener('visibilitychange', onVis)
     return () => {
       window.removeEventListener('focus', onFocus)
       document.removeEventListener('visibilitychange', onVis)
+      window.removeEventListener('wt-renderer', onRenderer)
     }
   }, [paneVisible, paneFocused, refit])
 
@@ -1749,7 +1753,14 @@ export default function SessionView(props: {
       rendererRef.current?.dispose()   // la recreare (font change): scoate addon-ul vechi
       rendererRef.current = undefined
       if (termRef.current !== term) return
-      try {
+      // Setări → Preferinţe → „Terminal renderer" (3.6.19): WebGL e implicit, dar un driver GPU
+      // (Chrome/Edge pe Windows, rapoarte cu nano sub tmux: rânduri suprapuse la derularea linie
+      // cu linie) poate strica randarea fără ca bufferul să fie greşit — omul poate trece pe Canvas
+      // sau pe DOM fără să aştepte un fix; valoarea e per browser (localStorage), ca fontul
+      let pref: string | null = null
+      try { pref = localStorage.getItem('wt_renderer') } catch { /* fără localStorage */ }
+      if (pref === 'dom') return         // renderer-ul DOM implicit al xterm
+      if (pref !== 'canvas') try {
         const { WebglAddon } = await import('@xterm/addon-webgl')
         if (termRef.current !== term || gen !== rendererGenRef.current) return
         const webgl = new WebglAddon()

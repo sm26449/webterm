@@ -33,6 +33,8 @@ export default function PreferencesTab() {
   // confirmare după „arată din nou sfaturile": sfaturile reapar pe măsură ce ajungi la UI-ul lor
   const [tipsReset, setTipsReset] = useState(false)
   const [unicode11, setUnicode11] = useState(() => lsGet('wt_unicode11') === '1')
+  // renderer-ul terminalului (3.6.19): webgl (implicit) | canvas | dom — per browser, aplicat pe loc
+  const [renderer, setRenderer] = useState(() => { const v = lsGet('wt_renderer'); return v === 'canvas' || v === 'dom' ? v : 'webgl' })
   const [upd, setUpd] = useState<UpdateInfo | null>(null)
   const [updBusy, setUpdBusy] = useState(false)
   // transferuri: unde ajung fişierele lipite în terminal + retenţia inbox-ului (lib/transfers.ts)
@@ -170,6 +172,22 @@ export default function PreferencesTab() {
           </span>
         </label>
         <p className="mt-2 text-xs text-slate-500">{t('settings.termReloadHint')}</p>
+        <label className="mt-3 block text-sm text-slate-300">
+          <span>{t('settings.renderer')}</span>
+          <select value={renderer} aria-describedby="wt-renderer-hint"
+            onChange={(e) => {
+              const v = e.target.value
+              setRenderer(v)
+              lsSet('wt_renderer', v)
+              window.dispatchEvent(new Event('wt-renderer'))   // terminalele deschise se reîncarcă pe loc
+            }}
+            className={`${field} mt-1 max-w-xs`}>
+            <option value="webgl">{t('settings.renderer.webgl')}</option>
+            <option value="canvas">{t('settings.renderer.canvas')}</option>
+            <option value="dom">{t('settings.renderer.dom')}</option>
+          </select>
+          <span id="wt-renderer-hint" className="mt-0.5 block text-xs text-slate-500">{t('settings.rendererHint')}</span>
+        </label>
       </section>
 
       <section data-setting-id="transfers">
