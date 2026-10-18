@@ -231,7 +231,7 @@ export default function UsersTab(props: { jump?: { id: string; n: number } | nul
                     reload={reloadSso} done={doneAt('sso')} fail={failAt('sso')} />
                 )}
                 {/* 3.6.11: SCIM — starea pentru users.manage, acţiunile doar pentru un Owner */}
-                {sso?.enabled && <ScimPanel isOwner={isOwner} done={(x) => { doneAt('sso')(x); void loadUsers() }} fail={failAt('sso')} />}
+                {sso?.enabled && <ScimPanel isOwner={isOwner} me={usersOk ? selfOf(users) : undefined} done={(x) => { doneAt('sso')(x); void loadUsers() }} fail={failAt('sso')} />}
                 {status('sso')}
               </>
             )}

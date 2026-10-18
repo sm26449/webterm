@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { api, errText, Host, withSecondFactor } from '../lib/api'
-import { askSecret } from '../lib/secretPrompt'
+import { api, errText, Host, withAccessReauth, withSecondFactor } from '../lib/api'
+import { fetchSelfRow } from './settings/users/shared'
 import { notifyError } from '../lib/notify'
 import LoadFailed from './LoadFailed'
 import { useFocusTrap } from '../lib/useFocusTrap'
@@ -64,13 +64,13 @@ export default function HistoryModal(props: { hosts: Host[]; onClose: () => void
   async function clearAll() {
     setConfirmClear(false)
     // golim lista doar dacă serverul chiar a şters — altfel arătam „gol" peste un istoric intact
-    // ştergere globală, ireversibilă → re-auth cu parola CONTULUI (ca „Revocă tot"; 3.5.13)
-    const pw = await askSecret(t('history.clearPassword'))
-    if (pw === null) return
+    // ştergere globală, ireversibilă → re-auth cu CONTUL (ca „Revocă tot"; 3.5.13): parolă, passkey
+    // sau drumul SSO pentru un cont SSO-only (RB-03, 3.6.19 — serverul răspunde history.ssoReauth)
     try {
-      await withSecondFactor(t, (extra) => api('/api/history', {
-        method: 'DELETE', body: JSON.stringify({ current_password: pw, ...extra }),
-      }))
+      const r = await withAccessReauth(t, t('history.clearPassword'), (cred) => withSecondFactor(t, (extra) => api('/api/history', {
+        method: 'DELETE', body: JSON.stringify({ ...cred, ...extra }),
+      })), { me: await fetchSelfRow() })
+      if (r === null) return
       setItems([])
     } catch (e) { notifyError(t('history.clearAll'), errText(e, t)) }
   }

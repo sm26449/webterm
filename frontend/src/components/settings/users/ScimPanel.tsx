@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react'
-import { api, errText, withSecondFactor as withSecondFactorT } from '../../../lib/api'
-import { askSecret } from '../../../lib/secretPrompt'
+import { api, errText, withSecondFactor as withSecondFactorT, type ReauthMe } from '../../../lib/api'
 import { copyText } from '../../../lib/clipboard'
 import { useConfirm } from '../../../lib/confirm'
 import { useI18n } from '../../../lib/i18n'
@@ -8,6 +7,7 @@ import { docsUrl } from '../../../lib/help'
 import { fmtTs } from '../../../lib/tz'
 import { scimState, type ScimStatus } from '../../../lib/usersAdmin'
 import { heading } from '../ui'
+import { RETURN_USERS, useAccessReauth } from './shared'
 import { Badge, Button, ErrorState } from '../../ui'
 import HelpTip from '../../HelpTip'
 import type { BadgeTone } from '../../ui'
@@ -21,9 +21,12 @@ import type { BadgeTone } from '../../ui'
 const SCIM_DOC = 'docs/SSO.md#scim-provisioning-3611'
 const TONE: Record<ReturnType<typeof scimState>, BadgeTone> = { off: 'neutral', paused: 'warn', noSso: 'danger', on: 'ok' }
 
-export default function ScimPanel(props: { isOwner: boolean; done: (text: string) => void; fail: (e: unknown) => void }) {
+/** `me` = rândul propriu din lista de conturi (UsersTab o are): decide planul de re-autentificare —
+    parolă, passkey sau drumul SSO — pentru un Owner SSO-only, care n-are parolă de tastat (RB-03, 3.6.19) */
+export default function ScimPanel(props: { isOwner: boolean; me?: ReauthMe; done: (text: string) => void; fail: (e: unknown) => void }) {
   const { t } = useI18n()
   const { confirm } = useConfirm()
+  const { reauth } = useAccessReauth(props.me, { returnTo: RETURN_USERS })
   const [st, setSt] = useState<ScimStatus | null>(null)
   const [err, setErr] = useState('')
   const [fresh, setFresh] = useState('')          // tokenul abia creat — arătat o dată
@@ -44,12 +47,12 @@ export default function ScimPanel(props: { isOwner: boolean; done: (text: string
     const rotating = !!st?.configured
     if (rotating && !(await confirm({ title: t('scim.rotateTitle'), message: t('scim.rotateBody'),
       confirmLabel: t('scim.rotate'), danger: true }))) return
-    const pw = await askSecret(t(rotating ? 'scim.rotateConfirm' : 'scim.createConfirm'))
-    if (!pw) return
     setBusy(true)
     try {
-      const r = await withSecondFactor((extra) => api<ScimStatus>('/api/settings/scim/token',
-        { method: 'POST', body: JSON.stringify({ current_password: pw, ...extra }) }))
+      const r = await reauth(t(rotating ? 'scim.rotateConfirm' : 'scim.createConfirm'),
+        (cred) => withSecondFactor((extra) => api<ScimStatus>('/api/settings/scim/token',
+          { method: 'POST', body: JSON.stringify({ ...cred, ...extra }) })))
+      if (r === null) { setBusy(false); return }       // anulat, sau plecat la IdP (revine în Setări)
       setFresh(r.token || '')
       const { token: _tok, ...rest } = r
       setSt(rest)
@@ -61,12 +64,13 @@ export default function ScimPanel(props: { isOwner: boolean; done: (text: string
   async function revoke() {
     if (!(await confirm({ title: t('scim.revokeTitle'), message: t('scim.revokeBody'),
       confirmLabel: t('scim.revoke'), danger: true }))) return
-    const pw = await askSecret(t('scim.revokeConfirm'))
-    if (!pw) return
     setBusy(true)
     try {
-      setSt(await withSecondFactor((extra) => api<ScimStatus>('/api/settings/scim/revoke',
-        { method: 'POST', body: JSON.stringify({ current_password: pw, ...extra }) })))
+      const r = await reauth(t('scim.revokeConfirm'),
+        (cred) => withSecondFactor((extra) => api<ScimStatus>('/api/settings/scim/revoke',
+          { method: 'POST', body: JSON.stringify({ ...cred, ...extra }) })))
+      if (r === null) { setBusy(false); return }
+      setSt(r)
       setFresh('')
       props.done(t('scim.revoked'))
     } catch (x) { props.fail(x) }
@@ -77,11 +81,12 @@ export default function ScimPanel(props: { isOwner: boolean; done: (text: string
     setBusy(true)
     try {
       if (on) {
-        // pornirea cere parola (+ al doilea factor); oprirea doar reduce accesul — fără
-        const pw = await askSecret(t('scim.enableConfirm'))
-        if (!pw) { setBusy(false); return }
-        setSt(await withSecondFactor((extra) => api<ScimStatus>('/api/settings/scim/enabled',
-          { method: 'POST', body: JSON.stringify({ enabled: true, current_password: pw, ...extra }) })))
+        // pornirea cere re-autentificare (+ al doilea factor); oprirea doar reduce accesul — fără
+        const r = await reauth(t('scim.enableConfirm'),
+          (cred) => withSecondFactor((extra) => api<ScimStatus>('/api/settings/scim/enabled',
+            { method: 'POST', body: JSON.stringify({ enabled: true, ...cred, ...extra }) })))
+        if (r === null) { setBusy(false); return }
+        setSt(r)
       } else {
         setSt(await api<ScimStatus>('/api/settings/scim/enabled',
           { method: 'POST', body: JSON.stringify({ enabled: false }) }))

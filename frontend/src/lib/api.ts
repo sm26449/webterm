@@ -624,7 +624,7 @@ export async function withAccessReauth<T>(t: (k: string, v?: Record<string, stri
     return await send(cred)
   } catch (e) {
     if (!(e instanceof ApiError)) throw e
-    if (e.code === 'account.ssoReauth') {
+    if (e.code === 'account.ssoReauth' || e.code === 'history.ssoReauth') {   // DELETE /api/history are codul lui (3.5.13)
       rememberSettingsReturn(opts.returnTo)
       ;(opts.redirect ?? (() => ssoStepupRedirect(0)))()
       return null

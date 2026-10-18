@@ -525,6 +525,10 @@ function MainApp() {
           hideInterruptedDownloads()
           dropCopyRows(null)
           walkAutoRef.current = false; setPerms(null); forgetSelfRow()   // contul adoptat: turul, permisiunile şi rândul propriu (UI-06, RB-03)
+          // taburile şi split-ul deschis sunt ale contului vechi: le lăsăm jos (socketurile lor se închid la
+          // demontare), iar ruta revine pe dashboard — ca la o ieşire urmată de o intrare (3.6.19)
+          setOpenTabs([]); setMru([]); setActiveSplitId(null)
+          try { if (window.location.hash) window.history.replaceState(null, '', window.location.pathname) } catch { /* */ }
           setAppState(s)
           return
         }

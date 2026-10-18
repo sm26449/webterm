@@ -1,7 +1,7 @@
 import { Fragment, lazy, Suspense, useEffect, useRef, useState, PointerEvent as ReactPointerEvent } from 'react'
 import { lsGet } from '../lib/storage'
-import { errText, isSessionLive, api, ApiError, getBootVersion, Host, SearchHit, Session, timeAgo, withSecondFactor, withStepup } from '../lib/api'
-import { askSecret } from '../lib/secretPrompt'
+import { errText, isSessionLive, api, ApiError, getBootVersion, Host, SearchHit, Session, timeAgo, withAccessReauth, withSecondFactor, withStepup } from '../lib/api'
+import { fetchSelfRow } from './settings/users/shared'
 import { crownDialog, withCrownConfirm } from '../lib/crown'
 import { notify, notifyError } from '../lib/notify'
 import { fmtTs } from '../lib/tz'
@@ -294,11 +294,14 @@ export default function Sidebar(props: {
   async function toggleCrown(host: Host) {
     try {
       if (host.crown_jewel) {
-        const pw = await askSecret(t('crown.unmarkConfirm', { name: host.name }))
-        if (!pw) return
-        await withSecondFactor(t, (extra) => api(`/api/hosts/${host.id}/crown-jewel`, {
-          method: 'POST', body: JSON.stringify({ enabled: false, current_password: pw, ...extra }),
-        }))
+        // aceeaşi poartă ca o schimbare de acces: parolă, passkey sau drumul SSO pentru un Owner
+        // SSO-only (RB-03, 3.6.19) — înainte i se cerea o parolă pe care n-o are
+        const r = await withAccessReauth(t, t('crown.unmarkConfirm', { name: host.name }),
+          (cred) => withSecondFactor(t, (extra) => api(`/api/hosts/${host.id}/crown-jewel`, {
+            method: 'POST', body: JSON.stringify({ enabled: false, ...cred, ...extra }),
+          })),
+          { me: await fetchSelfRow(), confirm: (q) => confirm({ title: t('access.reauth.title'), message: q, confirmLabel: t('common.confirm') }) })
+        if (r === null) return
         notify(t('crown.unmarked', { name: host.name }), '', 'info')
       } else {
         const r = await api<{ exposure: { who: string; role: string }[] }>(`/api/hosts/${host.id}/crown-jewel`, {

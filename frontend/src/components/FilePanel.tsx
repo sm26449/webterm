@@ -1738,6 +1738,7 @@ export default function FilePanel(props: {
             hostId={props.host.id}
             path={editing.path}
             name={editing.name}
+            canWrite={mayWrite}
             onClose={() => {
               // la închidere focusul revine pe LISTĂ, cu rândul fişierului selectat (roving focus) —
               // înainte cădea pe butonul „Edit" al rândului, ascuns fără hover, deci pe <body>

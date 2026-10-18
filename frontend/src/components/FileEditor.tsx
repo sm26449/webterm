@@ -31,9 +31,13 @@ export default function FileEditor(props: {
   hostId: number
   path: string
   name: string
+  /** rolul poate scrie fişiere pe host (lib/perms `files.write`); false = doar citire, cu motivul pe
+      butonul Save — serverul rămâne verificarea reală (FL-09, 3.6.19). Lipsă = necunoscut = permis. */
+  canWrite?: boolean
   onClose: () => void
   onSaved: () => void
 }) {
+  const roleBlocked = props.canWrite === false
   const { t } = useI18n()
   const host = useRef<HTMLDivElement>(null)
   const dialogRef = useRef<HTMLDivElement>(null)
@@ -110,7 +114,7 @@ export default function FileEditor(props: {
       value: pv.text,
       language: detectLanguage(props.path, firstLine),
       theme: MONACO_THEME,            // mereu întunecat, ca suprafaţa .wt-editor
-      readOnly: !pv.editable,
+      readOnly: !pv.editable || roleBlocked,
       automaticLayout: true,          // se redimensionează cu dialogul
       minimap: { enabled: true },
       fontFamily: 'JetBrains Mono, monospace',
@@ -151,7 +155,7 @@ export default function FileEditor(props: {
   }, [pv, props.path])
 
   async function save(force = false) {
-    if (!pv || !editor.current || pv.binary || !pv.editable) return
+    if (!pv || !editor.current || pv.binary || !pv.editable || roleBlocked) return
     // nimic de salvat când e curat (Save e și dezactivat); „suprascrie oricum" trece mereu
     if (!force && !dirtyRef.current) return
     // gardă de reintrare: Ctrl+S ținut apăsat / dublu-click pe Save nu trimit două POST-uri
@@ -234,7 +238,8 @@ export default function FileEditor(props: {
           )}
           <div className="ml-auto flex shrink-0 gap-2">
             {pv && !pv.binary && pv.editable && (
-              <Button variant="primary" size="sm" onClick={() => save(false)} disabled={saving || !dirty}>
+              <Button variant="primary" size="sm" onClick={() => save(false)} disabled={saving || !dirty || roleBlocked}
+                title={roleBlocked ? t('files.needsWrite') : undefined}>
                 {saving ? t('files.saving') : t('files.save')}
               </Button>
             )}

@@ -9,6 +9,15 @@ back.
 
 ## [Unreleased]
 
+### Changed
+- **Settings → Preferences → Terminal: choose the renderer (GPU/WebGL, Canvas, DOM).** Why: a report of overlapping rows in nano under tmux when scrolling line by line on Chrome/Edge for Windows; the terminal buffer is correct in a headless reproduction, so the defect sits in the GPU rendering path of that driver. The choice is per browser, applies to open terminals at once (the renderer addon is swapped live), and gives a way out — Canvas, then DOM — while the driver issue is pinned down.
+
+### Fixed
+- **Every remaining password prompt follows the account's real sign-in method.** Why: 3.6.18 taught the access-change forms to decide from the account's own row, but the SCIM token (create / rotate / revoke / enable), "unmark crown jewel" and "clear command history" still asked an SSO-only Owner for a password it never had. They go through the same helper now (password, account-scope passkey, or the SSO round trip; the history route's own `history.ssoReauth` code is honoured). (RB-03)
+- **The file editor respects the role.** Why: a role without `files.write` could open a file from Files or from a session and press Save, learning from the 403 afterwards. Files and the session pass their permission gate down; the editor opens read-only with the reason on Save. The server stays the real check. (FL-09)
+- **An account switch under an open tab also drops the previous account's tabs and split.** Why: 3.6.18 purged transfers, clipboard and permissions on a poll-detected switch but left the old account's terminal tabs mounted with their sockets; they are closed now and the route returns to the dashboard, like a sign-out followed by a sign-in. (FL-06)
+- **The SCIM lockout alert says what to do, in the app and in the email.** Why: the in-app text still read "SCIM: N failed authentications…" without the endpoint, the why or the next step, and the email framed an instance-level event as "On account SCIM (no account): … the account is probably compromised". The alert names `/scim/v2`, tells re-paste vs rotate, and instance-level security changes get their own frame. (SC-04)
+
 ## [3.6.18] — 2026-10-18 · agent (58)
 
 Audit 2026-10-17 (`docs/audit-2026-10-17/`), tranche P1 — the visible bugs. Frontend + gateway + host

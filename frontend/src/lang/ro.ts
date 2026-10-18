@@ -1407,7 +1407,7 @@ const ro: Lang = {
     'alertmsg.what.scim_local_refused': "furnizorul de identitate a încercat să preia {account}, un cont cu parolă locală (break-glass); refuzat",
     'alertmsg.what.scim_disabled_unlinked': "furnizorul de identitate a dezactivat un utilizator a cărui identitate SSO se potrivește cu {account}, dar cu alt email; WebTerm a dezactivat contul fără să-l lase în grija SCIM — doar un Owner îl poate reactiva",
     'alertmsg.what.scim_identity_ignored': "furnizorul de identitate a dezactivat {account} și a cerut o schimbare de identitate pe care WebTerm o refuză; contul a fost dezactivat, schimbarea ignorată",
-    'alertmsg.what.scim_lockout': "SCIM: {fails} autentificări eșuate de la {ip} în 15 min; adresa este blocată 15 min — se încearcă un token SCIM greșit, vechi sau scurs",
+    'alertmsg.what.scim_lockout': "SCIM: {fails} autentificări eșuate de la {ip} în 15 minute pe /scim/v2; adresa este blocată 15 minute. Se încearcă un token SCIM greșit, vechi sau scurs — dacă furnizorul de identitate nu mai sincronizează, lipește din nou tokenul curent în el; dacă nu recunoști adresa, rotește tokenul (Setări → Utilizatori și roluri → Grupuri SSO).",
     'alertmsg.what.account_reenabled': "contul {account} a fost reactivat ({how})",
     'alertmsg.what.scim_token_created': "token de provizionare SCIM creat",
     'alertmsg.what.scim_token_rotated': "token de provizionare SCIM rotit (cel vechi nu mai funcționează)",

@@ -1385,7 +1385,7 @@ const en: Lang = {
     'alertmsg.what.scim_local_refused': "the identity provider tried to take over {account}, an account with a local password (break-glass); refused",
     'alertmsg.what.scim_disabled_unlinked': "the identity provider deactivated a user whose SSO identity matches {account} but whose email differs; WebTerm disabled the account without letting SCIM manage it — only an Owner can re-enable it",
     'alertmsg.what.scim_identity_ignored': "the identity provider deactivated {account} and asked for an identity change WebTerm refuses; the account was deactivated, the change ignored",
-    'alertmsg.what.scim_lockout': "SCIM: {fails} failed authentications from {ip} in 15 min; the address is locked out for 15 min — a wrong, stale or leaked SCIM token is being tried",
+    'alertmsg.what.scim_lockout': "SCIM: {fails} failed authentications from {ip} in 15 minutes on /scim/v2; the address is locked out for 15 minutes. A wrong, stale or leaked SCIM token is being tried — if your identity provider stopped syncing, paste the current token into it again; if you do not recognise the address, rotate the token (Settings → Users & roles → SSO groups).",
     'alertmsg.what.account_reenabled': "account {account} re-enabled ({how})",
     'alertmsg.what.scim_token_created': "SCIM provisioning token created",
     'alertmsg.what.scim_token_rotated': "SCIM provisioning token rotated (the old one stopped working)",

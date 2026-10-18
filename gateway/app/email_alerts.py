@@ -359,9 +359,14 @@ def notify_security_change(what: str, ip: str, email: str, fleet: bool = False,
     params.update({"what": what, "email": email, "ip": ip})
     if what_key:
         params["what_key"] = what_key
+    # cadrul: o schimbare a instanţei fără cont în spate (SCIM lockout — „SCIM (no account)") nu e
+    # „On account …", iar „the account is probably compromised" n-ar avea sens acolo (3.6.19)
+    no_account = not email or "(no account)" in email
+    frame = f"On this instance: {what}." if no_account else f"On account {email}: {what}."
+    tail = ("If this was not expected, rotate the token and check who holds the old one."
+            if no_account else "If this was not you, the account is probably compromised.")
     _fire(f"Security change: {what}",
-          f"On account {email}: {what}.\nIP: {ip}\n\n"
-          f"If this was not you, the account is probably compromised.",
+          f"{frame}\nIP: {ip}\n\n{tail}",
           kind="admin_change" if fleet else "account_change", severity=severity,
           host_id=host_id, user_id=None if fleet else user_id, user_email=None if fleet else email,
           key="security_change", params=params)

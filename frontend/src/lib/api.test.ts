@@ -107,6 +107,14 @@ describe('withAccessReauth', () => {
     expect(redirect).toHaveBeenCalledTimes(1)
     expect(asked).toEqual([])
   })
+  it('history.ssoReauth (DELETE /api/history are codul lui) → acelaşi drum SSO (RB-03, 3.6.19)', async () => {
+    const redirect = vi.fn()
+    const send = vi.fn(async () => { throw new ApiError(403, 're-authenticate with SSO or a passkey to clear the command history', 'history.ssoReauth') })
+    const r = await withAccessReauth(t, PROMPT, send, { me: { sso: true, passkeys: 0 }, webauthn: true, redirect })
+    expect(r).toBeNull()
+    expect(redirect).toHaveBeenCalledTimes(1)
+  })
+
   it('refuzul confirmării opreşte totul (nici cerere, nici redirect)', async () => {
     const send = vi.fn()
     const redirect = vi.fn()

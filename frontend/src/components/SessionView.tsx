@@ -3468,6 +3468,7 @@ export default function SessionView(props: {
       {editorFile && props.host && (
         <Suspense fallback={null}>
           <FileEditor hostId={props.host.id} path={editorFile.path} name={editorFile.name}
+            canWrite={canOn(perms, props.host.id, 'files.write')}
             onClose={() => setEditorFile(null)} onSaved={() => { /* fişier salvat pe host; nimic de reîmprospătat aici */ }} />
         </Suspense>
       )}
