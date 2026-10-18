@@ -9,6 +9,8 @@ back.
 
 ## [Unreleased]
 
+## [3.6.19] — 2026-10-18 · agent (58)
+
 ### Changed
 - **Settings → Preferences → Terminal: choose the renderer (GPU/WebGL, Canvas, DOM).** Why: a report of overlapping rows in nano under tmux when scrolling line by line on Chrome/Edge for Windows; the terminal buffer is correct in a headless reproduction, so the defect sits in the GPU rendering path of that driver. The choice is per browser, applies to open terminals at once (the renderer addon is swapped live), and gives a way out — Canvas, then DOM — while the driver issue is pinned down.
 
