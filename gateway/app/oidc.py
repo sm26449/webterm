@@ -208,21 +208,44 @@ def reset_failures() -> None:
     _last_success = 0.0
 
 
-def probe() -> dict:
+def probe(retries: int = 2, deadline: float = 6.0) -> dict:
     """Blocking (run in a thread): fetch discovery FRESH (not the cache) and the JWKS. Hourly
-    from syshealth, so an IdP that went away is noticed before the next person tries to log in."""
+    from syshealth, so an IdP that went away is noticed before the next person tries to log in.
+
+    3.6.20: a SINGLE transient blip (a DNS hiccup — `[Errno -3] Temporary failure in name
+    resolution` — or a 5xx) used to flip SSO to „degraded" on the login page for up to an hour.
+    We retry such transient kinds a couple of times with a short backoff before recording the
+    failure, so one blip no longer marks the IdP down. A TRUSTED kind (one only the IdP's own
+    answer can produce) is a real config error — it fails fast, no point retrying.
+
+    The retry budget is bounded by `deadline` (wall-clock from the first attempt): a FAST transient
+    — DNS/connection-refused returns at once — gets all its retries for ~1.5 s, while a SLOW hang
+    (a real outage, each urlopen can block up to 10 s) is reported after one attempt instead of
+    multiplying the wait. This keeps the worst case within syshealth's probe timeout and avoids a
+    cancelled `to_thread` leaving an orphan that overwrites `_probe` later."""
     global _jwks_client
     out = {"ts": time.time(), "ok": False, "kind": "", "error": ""}
-    try:
-        doc = _fetch_discovery()
-        jwks = _http_json(str(doc.get("jwks_uri") or ""))
-        if not isinstance(jwks, dict) or not isinstance(jwks.get("keys"), list) or not jwks["keys"]:
-            raise OidcError("the JWKS has no keys", kind="discovery")
-        out["ok"] = True
-    except OidcError as e:
-        out.update(kind=e.kind, error=str(e)[:200])
-    except Exception as e:                          # noqa: BLE001 — jwks_uri unreachable etc.
-        out.update(kind="discovery", error=(str(e)[:200] or e.__class__.__name__))
+    start = time.monotonic()
+    for attempt in range(retries + 1):
+        out["ts"] = time.time()
+        try:
+            doc = _fetch_discovery()
+            jwks = _http_json(str(doc.get("jwks_uri") or ""))
+            if not isinstance(jwks, dict) or not isinstance(jwks.get("keys"), list) or not jwks["keys"]:
+                raise OidcError("the JWKS has no keys", kind="discovery")
+            out.update(ok=True, kind="", error="")
+            break
+        except OidcError as e:
+            out.update(ok=False, kind=e.kind, error=str(e)[:200])
+        except Exception as e:                      # noqa: BLE001 — jwks_uri unreachable etc.
+            out.update(ok=False, kind="discovery", error=(str(e)[:200] or e.__class__.__name__))
+        # retry only a transient failure (network / 5xx), never a real config error, and only
+        # while still inside the budget — a slow/hung attempt already spent it, so stop and report.
+        if (attempt < retries and out["kind"] not in TRUSTED_KINDS
+                and time.monotonic() - start < deadline):
+            time.sleep(0.5 * (attempt + 1))
+        else:
+            break
     _probe.clear()
     _probe.update(out)
     return dict(out)

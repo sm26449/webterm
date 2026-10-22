@@ -34,7 +34,6 @@ const ro: Lang = {
     'about.aria': 'Despre WebTerm',
     'about.description': 'Terminal & bastion self-hosted, peste web. Sesiunile tale rămân active permanent — te reatașezi de oriunde, de pe orice device.',
     'about.tagline': '„Fiindcă terminalele ar trebui să fie conversații care nu se pierd niciodată."',
-    'about.author': 'Autor',
     'about.dev': 'Dezvoltare',
     'about.devValue': 'cu asistență de la Claude (Anthropic)',
     'about.license': 'Licență',

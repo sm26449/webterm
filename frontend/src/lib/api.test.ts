@@ -3,7 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { accessReauthPlan, ApiError, reauthQuestion, SETTINGS_RETURN_KEY, withAccessReauth } from './api'
 import { registerSecretPrompt } from './secretPrompt'
-import { ssoErrorKey } from '../components/LoginPage'
+import { ssoErrorKey, ssoFallback } from '../components/LoginPage'
 import en from '../lang/en'
 import ro from '../lang/ro'
 
@@ -222,5 +222,24 @@ describe('FL-07: pagina de login la un IdP căzut', () => {
       expect(dict['access.reauth.viaSso']).toMatch(/Settings|Setările/)
       expect(dict['login.ssoUnreachable']).toBeTruthy()
     }
+  })
+})
+
+describe('3.6.20: /api/oidc/status eşuat nu face butonul SSO să dispară', () => {
+  it('known-good „SSO activ" → butonul rămâne, în stare degradată (inaccesibil)', () => {
+    const s = ssoFallback(JSON.stringify({ enabled: true, provider_name: 'Authentik' }))
+    expect(s).toEqual({ enabled: true, provider_name: 'Authentik', degraded: true })
+  })
+  it('known-good „SSO inactiv" → fără buton (null)', () => {
+    expect(ssoFallback(JSON.stringify({ enabled: false, provider_name: 'Authentik' }))).toBeNull()
+  })
+  it('fără cache / JSON invalid → fără buton (necunoscut, parola rămâne break-glass)', () => {
+    expect(ssoFallback(null)).toBeNull()
+    expect(ssoFallback('')).toBeNull()
+    expect(ssoFallback('{nu-i json')).toBeNull()
+    expect(ssoFallback('null')).toBeNull()
+  })
+  it('provider_name lipsă în cache nu aruncă, cade pe şir gol', () => {
+    expect(ssoFallback(JSON.stringify({ enabled: true }))).toEqual({ enabled: true, provider_name: '', degraded: true })
   })
 })

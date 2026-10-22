@@ -332,6 +332,41 @@ async def main():
             oidc._probe.clear()
             oidc._probe.update(saved_probe)
         config.OIDC_ENABLED = True
+
+        # ---- 10. probe(): un blip tranzitoriu nu marchează IdP-ul căzut (3.6.20) ----
+        saved_probe = oidc.probe_status()
+        saved_fetch, saved_http = oidc._fetch_discovery, oidc._http_json
+        try:
+            calls = {"fetch": 0}
+
+            def flaky_fetch():
+                calls["fetch"] += 1
+                if calls["fetch"] == 1:                       # primul apel = blip de reţea
+                    raise oidc.OidcError("discovery unreachable: [Errno -3] Temporary failure "
+                                         "in name resolution", kind="discovery")
+                return {"jwks_uri": "http://idp/jwks"}
+
+            oidc._fetch_discovery = flaky_fetch
+            oidc._http_json = lambda url, data=None, headers=None: _JWKS
+            out = oidc.probe(retries=2)
+            check("probe reîncearcă un blip de DNS → ok True la a doua încercare",
+                  out["ok"] is True and calls["fetch"] == 2, (out, calls))
+
+            calls["fetch"] = 0
+
+            def hard_config_error():
+                calls["fetch"] += 1
+                raise oidc.OidcError("the IdP rejected our client", kind="invalid_client")
+
+            oidc._fetch_discovery = hard_config_error
+            out = oidc.probe(retries=2)
+            check("probe NU reîncearcă o eroare de config (invalid_client) → eşec rapid, un apel",
+                  out["ok"] is False and out["kind"] == "invalid_client" and calls["fetch"] == 1,
+                  (out, calls))
+        finally:
+            oidc._fetch_discovery, oidc._http_json = saved_fetch, saved_http
+            oidc._probe.clear()
+            oidc._probe.update(saved_probe)
     finally:
         srv.shutdown()
         await db.close()

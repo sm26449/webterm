@@ -11,6 +11,25 @@ export function ssoErrorKey(reason: string | null): string {
   return 'login.ssoError'
 }
 
+export type SsoStatus = { enabled: boolean; provider_name: string; degraded?: boolean }
+
+/** localStorage: ultima stare „SSO activ" confirmată. Un blip de reţea la /api/oidc/status nu
+ *  trebuie să facă opţiunea SSO să DISPARĂ din login (3.6.20: un singur eşec al cererii ascundea
+ *  complet butonul şi omul credea că SSO e stricat, deşi backendul era sănătos). */
+export const SSO_KNOWN_KEY = 'wt_sso_known'
+
+/** Decizia când TOATE încercările către /api/oidc/status eşuează. Endpoint-ul e PUBLIC şi reflectă
+ *  o configuraţie STATICĂ — un eşec tranzitoriu nu e dovadă că SSO lipseşte. Dacă am văzut vreodată
+ *  SSO activ (known-good), arătăm butonul în stare „inaccesibil"; altfel rămâne necunoscut (null =
+ *  fără buton, dar formularul de parolă e mereu acolo ca break-glass). Pur, deci testabil. */
+export function ssoFallback(cachedRaw: string | null): SsoStatus | null {
+  try {
+    const kg = JSON.parse(cachedRaw || 'null')
+    if (kg && kg.enabled) return { enabled: true, provider_name: String(kg.provider_name || ''), degraded: true }
+  } catch { /* JSON invalid / localStorage indisponibil */ }
+  return null
+}
+
 export default function LoginPage(props: {
   setupRequired: boolean
   webauthnAvailable: boolean
@@ -26,7 +45,7 @@ export default function LoginPage(props: {
   const [busy, setBusy] = useState(false)
   // FL-07: `degraded` = ultima sondă a gateway-ului (System health) n-a putut contacta IdP-ul —
   // butonul SSO spune asta ÎNAINTE de click, nu după un redirect eşuat
-  const [sso, setSso] = useState<{ enabled: boolean; provider_name: string; degraded?: boolean } | null>(null)
+  const [sso, setSso] = useState<SsoStatus | null>(null)
   // La eşec, focusul merge pe PRIMUL câmp marcat invalid (WCAG 3.3.1): fără asta un utilizator
   // de cititor de ecran apasă Enter cu parola greşită şi rămâne pe buton, fără să audă nimic.
   const emailRef = useRef<HTMLInputElement>(null)
@@ -39,8 +58,30 @@ export default function LoginPage(props: {
   // SSO e opţional: aflăm din /api/oidc/status dacă afişăm butonul. Formularul de parolă
   // rămâne MEREU vizibil (break-glass), chiar când SSO e activ.
   useEffect(() => {
-    api<{ enabled: boolean; provider_name: string; degraded?: boolean }>('/api/oidc/status')
-      .then(setSso).catch(() => setSso(null))
+    let alive = true
+    // 3.6.20: reîncercăm de câteva ori şi păstrăm un known-good. Înainte, un SINGUR eşec al cererii
+    // (ex. un blip de DNS în container) făcea `setSso(null)` → butonul SSO dispărea complet până la
+    // un reload reuşit. Un endpoint public, cu config statică, nu trebuie să evaporeze opţiunea SSO.
+    async function loadSso() {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const s = await api<SsoStatus>('/api/oidc/status')
+          if (!alive) return
+          setSso(s)
+          try {
+            localStorage.setItem(SSO_KNOWN_KEY, JSON.stringify({ enabled: s.enabled, provider_name: s.provider_name }))
+          } catch { /* localStorage indisponibil */ }
+          return
+        } catch {
+          if (attempt < 2) await new Promise((r) => setTimeout(r, 300 * (attempt + 1)))
+        }
+      }
+      if (!alive) return
+      let cached: string | null = null
+      try { cached = localStorage.getItem(SSO_KNOWN_KEY) } catch { /* localStorage indisponibil */ }
+      setSso(ssoFallback(cached))
+    }
+    loadSso()
     // eroare venită din redirect-ul de callback (?sso_error=...): o arătăm, nu o înghiţim
     const p = new URLSearchParams(window.location.search)
     if (p.get('sso_error') || p.get('sso') === 'disabled') {
@@ -50,6 +91,7 @@ export default function LoginPage(props: {
       setError(t(ssoErrorKey(p.get('sso_error'))))
       window.history.replaceState(null, '', window.location.pathname)
     }
+    return () => { alive = false }
   }, [t])
 
   async function passkeyLogin() {
@@ -253,8 +295,9 @@ export default function LoginPage(props: {
                   </button>
                 )}
                 {ssoOn && (
-                  // FL-07: degradat = sonda n-a ajuns la IdP; rămâne apăsabil (sonda poate fi veche de până la
-                  // o oră, iar un click o re-testează), dar spune starea în text — textul vizibil E numele
+                  // FL-07: degradat = sonda n-a ajuns la IdP; rămâne apăsabil (sonda se re-rulează
+                  // singură în ≤5 min după un eşec — 3.6.20 — iar un click o re-testează pe loc), dar
+                  // spune starea în text — textul vizibil E numele
                   // accesibil (fără aria-label: WCAG 2.5.3 label-in-name, axe 4.14 ca în 3.6.13), iar nota
                   // completă de break-glass vine prin aria-describedby
                   <a href="/api/oidc/login" className={btn + (sso!.degraded ? ' opacity-70' : '')}
@@ -280,7 +323,7 @@ export default function LoginPage(props: {
           <a href="https://github.com/sm26449/webterm" target="_blank" rel="noopener noreferrer" className="inline-block py-1.5 hover:text-slate-400 hover:underline">
             {t('login.footer.license')}
           </a>
-          <span> · © {new Date().getFullYear()} Stefan Maldaianu</span>
+          <span> · © {new Date().getFullYear()} WebTerm</span>
         </footer>
       </div>
     </div>

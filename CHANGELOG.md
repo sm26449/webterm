@@ -9,6 +9,15 @@ back.
 
 ## [Unreleased]
 
+## [3.6.20] — 2026-10-22 · agent (58)
+
+### Fixed
+- **A transient DNS blip no longer makes the SSO button vanish from the login page.** Why: the login page asked `/api/oidc/status` once and, on *any* failure of that request, set the state to `null` — which hides the Authentik button entirely. When the container had a short name-resolution hiccup (`[Errno -3] Temporary failure in name resolution`, the same failure that was dropping email alerts), a page load during the blip showed no SSO option at all, reading as "SSO is broken" even though the backend was healthy. The page now retries the status call a few times and keeps a last-known-good flag, so a passing hiccup never erases the SSO login path; the password form stays the break-glass. (FL-07)
+- **A single probe blip no longer flags SSO "degraded" for up to an hour.** Why: `oidc.probe()` recorded the IdP as unreachable on the first failed discovery/JWKS fetch, and the System-health check that reads it only re-ran hourly and — unlike the `failure_stats` path — did not ask for an early re-probe. One transient network error stuck the "degraded" note on the login button long after the network recovered. The probe now retries transient (network/5xx) failures with a short backoff before recording them (a real config error — a kind only the IdP can produce — still fails fast), and a failed probe schedules a re-check within five minutes so the flag self-heals.
+
+### Changed
+- The maintainer's name is removed from the UI (login footer, the About dialog's author row and copyright) and from the README acknowledgment; the copyright reads "© {year} WebTerm".
+
 ## [3.6.19] — 2026-10-18 · agent (58)
 
 ### Changed

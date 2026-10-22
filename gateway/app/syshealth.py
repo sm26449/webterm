@@ -51,6 +51,10 @@ HOURLY = 3600.0
 DAILY = 86400.0
 CHECK_TIMEOUT = 10.0             # per check (the network ones bound themselves tighter)
 NETWORK_TIMEOUT = 20.0
+# the IdP probe may retry a transient blip (oidc.probe, 3.6.20): one slow attempt (discovery +
+# JWKS, up to ~20 s) plus a bounded retry budget. Give it headroom over NETWORK_TIMEOUT so a
+# legitimate retry sequence is not cancelled mid-flight (which would orphan the to_thread probe).
+PROBE_TIMEOUT = 35.0
 MANUAL_MIN_INTERVAL = 30.0       # "Re-check now": at most once per 30 s, instance-wide
 REMIND_CRITICAL = 24 * 3600.0    # a critical that stays critical is re-sent once a day
 MIN_REALERT = 600.0              # a flapping check does not alert more than every 10 min
@@ -682,6 +686,13 @@ async def c_sso() -> Optional[Result]:
     sev = "critical" if config.OIDC_SSO_ONLY else "warning"
     probe = oidc.probe_status()
     if probe.get("ok") is False:
+        # 3.6.20: self-heal. A failed probe used to stick until the next HOURLY run — a transient
+        # DNS/network blip kept SSO flagged „degraded" on the login page long after it recovered.
+        # Re-probe soon (bounded to PROBE_KICK_MIN), like the failure_stats path already does, so
+        # the flag clears within minutes once the IdP is reachable again. Clock skew is local, not
+        # a reachability blip, so re-probing it would only spin — skip the kick there.
+        if probe.get("kind") != "clock_skew":
+            _kick_probe()
         return Result(sev, "sso_probe_failed", {"kind": probe.get("kind") or "discovery",
                                                 "error": probe.get("error") or "?",
                                                 "sso_only": config.OIDC_SSO_ONLY},
@@ -1309,7 +1320,7 @@ async def jobs_hourly() -> None:
     from . import oidc
     if config.OIDC_ENABLED:
         try:
-            await asyncio.wait_for(asyncio.to_thread(oidc.probe), timeout=NETWORK_TIMEOUT)
+            await asyncio.wait_for(asyncio.to_thread(oidc.probe), timeout=PROBE_TIMEOUT)
         except Exception as e:              # noqa: BLE001 — the probe result says what failed
             oidc._probe.update(ts=time.time(), ok=False, kind="discovery",
                                error=(str(e) or e.__class__.__name__)[:200])

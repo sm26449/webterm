@@ -52,10 +52,6 @@ export default function AboutModal(props: { onClose: () => void }) {
 
         <dl className="mt-5 space-y-2 border-t border-ink-800 pt-4 text-compact">
           <div className="flex justify-between gap-3">
-            <dt className="shrink-0 text-slate-500">{t('about.author')}</dt>
-            <dd className="text-right text-slate-300">Stefan Maldaianu</dd>
-          </div>
-          <div className="flex justify-between gap-3">
             <dt className="shrink-0 text-slate-500">{t('about.dev')}</dt>
             <dd className="text-right text-slate-300">{t('about.devValue')}</dd>
           </div>
@@ -86,7 +82,7 @@ export default function AboutModal(props: { onClose: () => void }) {
           </span>
         </a>
 
-        <p className="mt-4 text-center text-2xs text-slate-400">© 2026 Stefan Maldaianu</p>
+        <p className="mt-4 text-center text-2xs text-slate-400">© {new Date().getFullYear()} WebTerm</p>
       </div>
       {showChangelog && (
         <Suspense fallback={null}>

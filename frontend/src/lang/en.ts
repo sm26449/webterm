@@ -34,7 +34,6 @@ const en: Lang = {
     'about.aria': 'About WebTerm',
     'about.description': 'A self-hosted web terminal & bastion. Your sessions stay alive permanently — reattach from anywhere, on any device.',
     'about.tagline': '"Because terminals should be conversations that never get lost."',
-    'about.author': 'Author',
     'about.dev': 'Development',
     'about.devValue': 'with assistance from Claude (Anthropic)',
     'about.license': 'License',
