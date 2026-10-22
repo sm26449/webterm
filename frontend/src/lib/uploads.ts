@@ -16,6 +16,7 @@
    `online`/`visibilitychange`, metadate în localStorage ca un reload să arate job-ul ca „orfan"
    (re-tragi fişierul şi continuă), şi o bară globală (JobsBar) vizibilă pe orice ecran. */
 import { api, ApiError, apiErrorFrom, errText, withStepup } from './api'
+import { crc32 } from './crc'
 import { tStatic } from './i18n'
 import { lsGet, lsRemove, lsSet } from './storage'
 import { insertPathOutcome, type PasteContext } from './transfers'
@@ -75,22 +76,57 @@ class PausedSignal extends Error { constructor() { super('paused') } }
 class AuthLost extends Error { constructor() { super('unauth') } }
 
 // ── CRC-32 ────────────────────────────────────────────────────────────────────────────────
-// CRC-32 (IEEE), incremental — IDENTIC cu `zlib.crc32(bytes, prev)` din agent (poly reflectat
-// 0xEDB88320, init/xor 0xFFFFFFFF). Verificare de integritate la commit: prinde coruperea
-// accidentală (disc, trunchiere, offset). `prev` începe de la 0.
-const CRC_TABLE = (() => {
-  const t = new Uint32Array(256)
-  for (let n = 0; n < 256; n++) {
-    let c = n
-    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1)
-    t[n] = c >>> 0
+// CRC-32 (IEEE), incremental — IDENTIC cu `zlib.crc32(bytes, prev)` din agent. Trăieşte în
+// ./crc.ts ca să-l poată importa şi crcWorker.ts fără tot motorul; re-exportat aici fiindcă
+// uploads.test.ts (şi alţi importatori) îl iau din `./uploads`.
+export { crc32 }
+
+// FS-09: CRC-ul feliei (2–16 MiB, buclă byte-cu-byte) se mută de pe firul principal într-un Web
+// Worker. Worker-ul e fără stare — CRC-ul cumulativ rămâne aici şi se dă ca `prev`, deci ordinea
+// feliilor e păstrată de apelant (aşteaptă fiecare răspuns). Buffer-ul e TRANSFERAT dus-întors
+// (zero-copy): după CRC se întoarce ca să poată fi trimis la upload. Un singur worker, leneş,
+// reutilizat; dacă Worker lipseşte (vitest/node, browser fără suport) sau crearea eşuează, cădem
+// pe CRC sincron pe firul principal — corectitudinea e aceeaşi peste tot.
+let crcWorker: Worker | null = null
+let crcWorkerDead = false
+let crcSeq = 0
+const crcPending = new Map<number, (crc: { crc: number; buf: ArrayBuffer }) => void>()
+
+function ensureCrcWorker(): Worker | null {
+  if (crcWorker || crcWorkerDead) return crcWorker
+  if (typeof Worker === 'undefined') { crcWorkerDead = true; return null }
+  try {
+    const w = new Worker(new URL('./crcWorker.ts', import.meta.url), { type: 'module' })
+    w.onmessage = (e: MessageEvent<{ id: number; crc: number; buf: ArrayBuffer }>) => {
+      const cb = crcPending.get(e.data.id)
+      if (cb) { crcPending.delete(e.data.id); cb({ crc: e.data.crc, buf: e.data.buf }) }
+    }
+    w.onerror = () => {            // worker rupt (CSP, build) → sincron de aici înainte
+      crcWorkerDead = true
+      try { w.terminate() } catch { /* ignore */ }
+      crcWorker = null
+    }
+    crcWorker = w
+    return w
+  } catch { crcWorkerDead = true; return null }
+}
+
+/** CRC-ul cumulativ după felia `buf`, calculat în worker când se poate; întoarce ŞI buffer-ul
+    (transferat înapoi) ca apelantul să-l trimită mai departe la upload. */
+async function crcChunk(prev: number, buf: ArrayBuffer): Promise<{ crc: number; buf: ArrayBuffer }> {
+  const w = ensureCrcWorker()
+  if (!w) return { crc: crc32(prev, new Uint8Array(buf)), buf }
+  const id = ++crcSeq
+  try {
+    return await new Promise<{ crc: number; buf: ArrayBuffer }>((resolve, reject) => {
+      crcPending.set(id, resolve)
+      try { w.postMessage({ id, prev, buf }, [buf]) }
+      catch (e) { crcPending.delete(id); reject(e) }
+    })
+  } catch {                       // transfer/worker eşuat: buffer-ul e încă al nostru → sincron
+    crcWorkerDead = true
+    return { crc: crc32(prev, new Uint8Array(buf)), buf }
   }
-  return t
-})()
-export function crc32(prev: number, bytes: Uint8Array): number {
-  let c = (prev ^ 0xFFFFFFFF) >>> 0
-  for (let i = 0; i < bytes.length; i++) c = (CRC_TABLE[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8)) >>> 0
-  return (c ^ 0xFFFFFFFF) >>> 0
 }
 
 // ── funcţii pure (testate în uploads.test.ts) ─────────────────────────────────────────────
@@ -563,8 +599,10 @@ async function runLoop(c: Ctl): Promise<void> {
       for (let k = 0; k < UP_WINDOW && dispatchPos < file.size; k++) {
         const start = dispatchPos
         const end = Math.min(start + chunkSize, file.size)
-        const buf = await file.slice(start, end).arrayBuffer()
-        if (doCrc) crc = crc32(crc, new Uint8Array(buf))   // ordinea fişierului, o singură dată per felie
+        let buf = await file.slice(start, end).arrayBuffer()
+        // ordinea fişierului, o singură dată per felie; CRC-ul pleacă în worker (FS-09), care dă
+        // buffer-ul înapoi ca să-l putem trimite la upload
+        if (doCrc) { const r = await crcChunk(crc, buf); crc = r.crc; buf = r.buf }
         dispatchPos = end
         burst.push({ start, end, buf })
         if (c.paused || c.cancelled) break      // pauză în timp ce citeam: nu mai construim rafala
