@@ -1480,29 +1480,55 @@ async def _name_free(name: str, gid: Optional[str]) -> None:
         raise ScimError(400, "another group is already named %s" % name[:80], "invalidValue")
 
 
+async def _group_names_by_uid(uids) -> dict:
+    """{uid: {group display_name, …}} for all `uids` in ONE query per 500 (PF-03: this was an
+    N+1 — `_resync` read each account's groups with its own SELECT)."""
+    out: dict = {}
+    ids = sorted(uids)
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        rows = await db.fetchall(
+            "SELECT m.user_id AS uid, g.display_name AS name FROM scim_group_members m"
+            " JOIN scim_groups g ON g.id=m.group_id WHERE m.user_id IN (%s)"
+            % ",".join("?" * len(chunk)), *chunk)
+        for r in rows:
+            out.setdefault(r["uid"], set()).add(r["name"])
+    return out
+
+
 async def _resync(uids: set, ip: str, extra_known=()) -> None:
     """Re-run the SSO group → role mapping for these accounts with their groups as SCIM now
     says. SCIM is authoritative only for the groups it manages: groups recorded at the last SSO
     sign-in that SCIM does not push are kept. `extra_known` = names that just stopped being SCIM
-    groups (renamed / deleted), so their membership is dropped too."""
+    groups (renamed / deleted), so their membership is dropped too.
+
+    SC-03/PF-03: a push touching N accounts used to make N `authz.bump_epoch()` calls (every
+    account's permission cache cleared and every socket woken N times) and N per-account group
+    reads. The group reads are now one batched query, and each `sync_user` runs with
+    `defer_bump=True` — a SINGLE `bump_epoch()` fires at the end, only if something changed. The
+    per-account work (forward epoch, revoking derived sessions) still runs inside each sync_user."""
     if not uids:
         return
     known = {r["display_name"] for r in await db.fetchall("SELECT display_name FROM scim_groups")}
     known |= set(extra_known)
+    groups_by_uid = await _group_names_by_uid(uids)
+    changed = False
     for uid in sorted(uids):
         u = await db.fetchone("SELECT id, email, sso_groups, COALESCE(scim_managed, 0) AS sm"
                               " FROM users WHERE id=?", uid)
         if u is None or not u["sm"]:
             continue
-        mine = {r["display_name"] for r in await db.fetchall(
-            "SELECT g.display_name FROM scim_group_members m JOIN scim_groups g ON g.id=m.group_id"
-            " WHERE m.user_id=?", uid)}
+        mine = groups_by_uid.get(uid, set())
         eff = (ssomap._stored(u) - known) | mine
         try:
-            await ssomap.sync_user(uid, u["email"], sorted(eff), ip=ip, via="scim",
-                                   path=PREFIX + "/Groups", scim=True)
+            res = await ssomap.sync_user(uid, u["email"], sorted(eff), ip=ip, via="scim",
+                                         path=PREFIX + "/Groups", scim=True, defer_bump=True)
+            if res.get("added") or res.get("removed"):
+                changed = True
         except Exception:                   # noqa: BLE001 — one account must not stop the rest
             log.exception("SCIM: re-syncing the roles of %s failed", u["email"])
+    if changed:
+        authz.bump_epoch()                  # ONE for the whole push (SC-03)
 
 
 async def _set_members(gid: str, want: set) -> tuple[set, set]:

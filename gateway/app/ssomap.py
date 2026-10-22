@@ -128,11 +128,16 @@ async def _role_names() -> dict:
 
 async def _apply_locked(uid: int, desired: set, *, remove_only: bool,
                         store_groups: Optional[set] = None,
-                        add_roles: Optional[set] = None) -> dict:
+                        add_roles: Optional[set] = None,
+                        defer_bump: bool = False) -> dict:
     """Make the user's sso bindings equal `desired` (or only remove, `remove_only`). Caller
     holds authz._lock. Manual/migration bindings are read only to avoid duplicates.
     `add_roles` (3.6.11, SCIM): only these role ids may be ADDED; the rest of `desired` is still
-    kept (never removed), just not granted from here."""
+    kept (never removed), just not granted from here.
+    `defer_bump` (3.6.x, SC-03): skip the GLOBAL `authz.bump_epoch()` here and let a batch caller
+    (`scim._resync`) do ONE at the end — a group push touching N accounts used to bump the epoch N
+    times, clearing every account's permission cache and waking every socket N times. The
+    per-account work (forward epoch + revoking now-unauthorized derived sessions) still runs here."""
     rows = await db.fetchall(
         "SELECT id, role_id, scope_kind, scope_value, source FROM role_bindings WHERE user_id=?",
         uid)
@@ -173,7 +178,8 @@ async def _apply_locked(uid: int, desired: set, *, remove_only: bool,
         await db.execute("UPDATE users SET sso_groups=?, sso_synced=? WHERE id=?",
                          json.dumps(sorted(store_groups)), now, uid)
     if added or removed:
-        authz.bump_epoch()
+        if not defer_bump:
+            authz.bump_epoch()
         security.bump_forward_epoch(uid)
         from . import api                  # late: api imports this module's callers
         await api._revoke_unauthorized_derived(uid)
@@ -209,7 +215,7 @@ async def scim_grantable_roles() -> set:
 
 async def sync_user(uid: int, email: str, groups, *, ip: str, via: str,
                     readable: bool = True, path: str = "/api/oidc/callback",
-                    scim: bool = False) -> dict:
+                    scim: bool = False, defer_bump: bool = False) -> dict:
     """Re-sync one account at an SSO login / step-up. `groups=None` = the claim was ABSENT.
     `readable=False` = the claim was there but not a list of strings (treated as no groups).
     `scim=True` (3.6.11): the groups come from a SCIM push — same rules, except that nothing
@@ -238,7 +244,7 @@ async def sync_user(uid: int, email: str, groups, *, ip: str, via: str,
                 "SELECT role_id, scope_kind, scope_value FROM role_bindings WHERE user_id=?", uid)}
             skipped = desired - have
         res = await _apply_locked(uid, desired, remove_only=local_pw, store_groups=matched,
-                                  add_roles=add_roles)
+                                  add_roles=add_roles, defer_bump=defer_bump)
     if res.get("held_back"):
         log.warning("SCIM: %s is in a group mapped to an Owner-level role (%s); a SCIM push never "
                     "grants it — it is added at the person's next SSO sign-in",

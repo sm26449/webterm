@@ -743,6 +743,11 @@ async def test_groups(owner, tok):
     check("PUT cu members le ÎNLOCUIEŞTE (gina pierde, hugo câştigă)",
           ("operator", "tag", "db", "sso") not in await bindings("gina@x.co")
           and ("operator", "tag", "db", "sso") in await bindings("hugo@x.co"))
+    # SC-03/PF-03: acest PUT a schimbat DOUĂ conturi (gina scoasă, hugo adăugat) dar e UN singur
+    # push → o SINGURĂ bump_epoch, nu una per cont (altfel un push de mii de membri golea cache-ul
+    # de permisiuni şi trezea toate socketurile de N ori). Codul vechi bumpa +2 aici.
+    check("SC-03: push care atinge 2 conturi → epoca creşte cu EXACT 1 (nu per cont)",
+          authz.epoch() == epoch + 1, "delta=%d (furtună de epoch?)" % (authz.epoch() - epoch))
     r = await c.patch("/scim/v2/Groups/" + gdb, json={"Operations": [
         {"op": "replace", "value": {"displayName": "wt-db2"}}]})
     check("redenumire → numele vechi nu mai mapează: hugo pierde rolul",

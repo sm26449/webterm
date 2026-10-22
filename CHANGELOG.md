@@ -9,6 +9,9 @@ back.
 
 ## [Unreleased]
 
+### Performance
+- **A SCIM group push bumps the permission epoch once, not once per member.** Why: `_resync` ran the group→role mapping per account and each change called `authz.bump_epoch()`, which clears every account's permission cache and wakes every live socket. A push of a large group (or a group rename, which touches every member) did that N times in one request — on an instance with thousands of users and hundreds of open terminals, hundreds of thousands of queries under the SCIM lock, past Authentik's request timeout (→ retry → doubling). Now each per-account sync runs with `defer_bump=True` (its forward-epoch and derived-session revoke still run) and a single `bump_epoch()` fires at the end only if something changed, and the per-account group read is one batched query instead of N. (SC-03, PF-03)
+
 ### Fixed
 - **The app container resolves external names through explicit upstream DNS.** Why: it forwarded external lookups (the IdP for SSO, the SMTP relay, GitHub for the update check) through the host's `systemd-resolved` stub, which intermittently failed with `[Errno -3] Temporary failure in name resolution` — dropping email alerts and flagging SSO "degraded" on the login page. The `app` service now sets `dns:` (default 8.8.8.8 / 1.1.1.1, overridable via `WEBTERM_DNS1`/`WEBTERM_DNS2`); Docker's embedded resolver still does service discovery for `traefik`/`dockerproxy`, so only the flaky external hop is removed.
 
