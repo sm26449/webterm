@@ -595,10 +595,11 @@ _USER_COLS = ("id, email, created, disabled, scim_id, scim_external_id, scim_use
               " scim_created")
 
 
-async def _user_json(u) -> dict:
-    groups = await db.fetchall(
-        "SELECT g.id, g.display_name FROM scim_group_members m JOIN scim_groups g ON g.id=m.group_id"
-        " WHERE m.user_id=? ORDER BY g.display_name", u["id"])
+async def _user_json(u, groups=None) -> dict:
+    if groups is None:                      # single-user GET: its own one query (list → batched)
+        groups = await db.fetchall(
+            "SELECT g.id, g.display_name FROM scim_group_members m JOIN scim_groups g"
+            " ON g.id=m.group_id WHERE m.user_id=? ORDER BY g.display_name", u["id"])
     out = {"schemas": [S_USER], "id": u["scim_id"], "userName": u["scim_user_name"] or u["email"],
            "active": not u["disabled"],
            "emails": [{"value": u["email"], "primary": True, "type": "work"}],
@@ -647,7 +648,10 @@ async def list_users(request: Request, _p=Depends(require_scim)):
     total = (await db.fetchone("SELECT COUNT(*) AS c FROM users" + where, *args))["c"]
     rows = await db.fetchall("SELECT " + _USER_COLS + " FROM users" + where
                              + " ORDER BY id LIMIT ? OFFSET ?", *args, count, start - 1)
-    return _json(_list([await _user_json(u) for u in rows], total, start))
+    # PF-01/SC-14: the groups of every user on the page in ONE query, not a SELECT per user
+    groups_by_uid = await _group_rows_by_uid([u["id"] for u in rows])
+    resources = [await _user_json(u, groups_by_uid.get(u["id"], [])) for u in rows]
+    return _json(_list(resources, total, start))
 
 
 @router.get("/Users/{scim_id}")
@@ -1493,6 +1497,24 @@ async def _group_names_by_uid(uids) -> dict:
             % ",".join("?" * len(chunk)), *chunk)
         for r in rows:
             out.setdefault(r["uid"], set()).add(r["name"])
+    return out
+
+
+async def _group_rows_by_uid(uids) -> dict:
+    """{uid: [{id, display_name}, … ordered by display_name]} for all `uids` in ONE query per
+    500 — the group rows GET /Users puts in each resource, without a SELECT per account
+    (PF-01/SC-14: the list used to call `_user_json` → one group query per user)."""
+    out: dict = {}
+    ids = sorted(set(uids))
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        rows = await db.fetchall(
+            "SELECT m.user_id AS uid, g.id AS id, g.display_name AS display_name"
+            " FROM scim_group_members m JOIN scim_groups g ON g.id=m.group_id"
+            " WHERE m.user_id IN (%s) ORDER BY g.display_name" % ",".join("?" * len(chunk)),
+            *chunk)
+        for r in rows:
+            out.setdefault(r["uid"], []).append(r)
     return out
 
 

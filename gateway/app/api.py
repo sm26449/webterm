@@ -1052,17 +1052,18 @@ async def _users_json(user, grants) -> list:
             since = float(s["value"]) if s else None
         except (TypeError, ValueError):
             since = None
+    shown = [r for r in rows if manage or r["id"] == user["id"]]   # fără users.manage: doar propriul rând (§A.6.3)
+    # PF-01/SC-14: legăturile tuturor conturilor afişate într-O interogare, nu una pe cont
+    bindings_by_uid = await authz.load_bindings_for([r["id"] for r in shown])
     out = []
-    for r in rows:
-        if not manage and r["id"] != user["id"]:
-            continue                   # fără users.manage: doar propriul rând (§A.6.3)
+    for r in shown:
         row = {"id": r["id"], "email": r["email"], "created": r["created"],
                "totp": bool(r["totp_enabled"]), "passkeys": r["passkeys"],
                "sso": bool(r["sso_subject"]),
                # 3.6.2: cu parolă locală, grupurile SSO nu-i dau roluri (ssomap)
                "local_password": r["local_password"] is None or bool(r["local_password"]),
                "is_self": r["id"] == user["id"],
-               "bindings": await _user_bindings(r["id"]),
+               "bindings": [authz.binding_json(b) for b in bindings_by_uid.get(r["id"], [])],
                # 3.6.11: dezactivat (SCIM) + administrat de IdP prin SCIM
                "disabled": bool(r["disabled"]),
                "disabled_at": r["disabled_at"] if r["disabled"] else None,

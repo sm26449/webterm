@@ -629,6 +629,12 @@ MIGRATIONS = [
     # însumează 1 — vezi api._SPLIT_LAYOUTS). `ratio` rămâne pentru clienţii vechi (= sizes[0] la cols2).
     "ALTER TABLE split_views ADD COLUMN layout TEXT DEFAULT ''",
     "ALTER TABLE split_views ADD COLUMN sizes TEXT DEFAULT ''",
+    # 3.6.21 (PF-01/SC-14) — SCIM `GET /Users?filter=userName|emails eq "…"` caută fără a ţine
+    # cont de litere mari/mici (`lower(col)=lower(?)`); indexul UNIQUE de pe `email` e binar, iar
+    # `scim_user_name` n-avea niciun index. Indecşi pe expresia exactă din WHERE, ca IdP-ul să nu
+    # scaneze toată tabela la fiecare resolve (zeci de mii de conturi în scenariul de scalare).
+    "CREATE INDEX IF NOT EXISTS idx_users_scim_user_name_lower ON users(lower(scim_user_name))",
+    "CREATE INDEX IF NOT EXISTS idx_users_email_lower ON users(lower(email))",
 ]
 
 # tabele adăugate ulterior (executeScript de mai sus le creează pe DB-uri noi;

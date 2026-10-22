@@ -318,28 +318,54 @@ class TokenGrants(Grants):
         return p in self.ceiling and self.creator is not None and self.creator.any_host_perm(p)
 
 
+_BINDING_COLS = ("b.id, b.scope_kind, b.scope_value, b.source, b.expires, b.role_id,"
+                 " r.key AS role_key, r.name AS role_name, r.perms AS role_perms, r.builtin")
+
+
+def _binding_from_row(r, now: float) -> Optional[Binding]:
+    """One `role_bindings ⋈ roles` row → a Binding, or None if it must not count (expired
+    time-bound grant / unknown scope). Shared by the single and the batched loaders."""
+    if r["expires"] is not None and r["expires"] <= now:
+        return None                        # time-bound grants (3.6.2): expired = absent
+    if r["scope_kind"] not in SCOPE_KINDS:
+        return None
+    if r["builtin"] and r["role_key"] in BUILTIN_ROLES:
+        perms = BUILTIN_ROLES[r["role_key"]]["perms"]   # code is the source of truth
+    else:
+        try:
+            perms = frozenset(p for p in json.loads(r["role_perms"] or "[]") if p in PERMS)
+        except (TypeError, ValueError):
+            perms = frozenset()            # unreadable custom role = no permissions
+    return Binding(r["id"], r["role_key"] or "", r["role_name"] or "", perms,
+                   r["scope_kind"], r["scope_value"] or "", r["source"] or "manual",
+                   r["expires"], r["role_id"])
+
+
 async def _load_bindings(user_id: int) -> list:
     now = time.time()
     rows = await db.fetchall(
-        "SELECT b.id, b.scope_kind, b.scope_value, b.source, b.expires, b.role_id,"
-        " r.key AS role_key, r.name AS role_name, r.perms AS role_perms, r.builtin"
-        " FROM role_bindings b JOIN roles r ON r.id = b.role_id WHERE b.user_id=?", user_id)
-    out = []
-    for r in rows:
-        if r["expires"] is not None and r["expires"] <= now:
-            continue                       # time-bound grants (3.6.2): expired = absent
-        if r["scope_kind"] not in SCOPE_KINDS:
-            continue
-        if r["builtin"] and r["role_key"] in BUILTIN_ROLES:
-            perms = BUILTIN_ROLES[r["role_key"]]["perms"]   # code is the source of truth
-        else:
-            try:
-                perms = frozenset(p for p in json.loads(r["role_perms"] or "[]") if p in PERMS)
-            except (TypeError, ValueError):
-                perms = frozenset()        # unreadable custom role = no permissions
-        out.append(Binding(r["id"], r["role_key"] or "", r["role_name"] or "", perms,
-                           r["scope_kind"], r["scope_value"] or "", r["source"] or "manual",
-                           r["expires"], r["role_id"]))
+        "SELECT " + _BINDING_COLS
+        + " FROM role_bindings b JOIN roles r ON r.id = b.role_id WHERE b.user_id=?", user_id)
+    return [b for b in (_binding_from_row(r, now) for r in rows) if b is not None]
+
+
+async def load_bindings_for(user_ids) -> dict:
+    """{uid: [Binding, …]} for all `user_ids` in ONE query per 500 — the per-account
+    `_load_bindings` SELECT, batched, so the Accounts list is one query, not one per account
+    (PF-01/SC-14). Every requested uid gets an entry (empty list if it has no bindings)."""
+    now = time.time()
+    ids = sorted({int(u) for u in user_ids})
+    out: dict = {u: [] for u in ids}
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        rows = await db.fetchall(
+            "SELECT b.user_id, " + _BINDING_COLS
+            + " FROM role_bindings b JOIN roles r ON r.id = b.role_id WHERE b.user_id IN (%s)"
+            % ",".join("?" * len(chunk)), *chunk)
+        for r in rows:
+            b = _binding_from_row(r, now)
+            if b is not None:
+                out[r["user_id"]].append(b)
     return out
 
 

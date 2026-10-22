@@ -330,6 +330,33 @@ async def main():
     finally:
         api._reauth_for_access_change = orig
 
+    # ── PF-01/SC-14: GET /api/users citeşte legăturile TUTUROR conturilor într-o interogare
+    # batch (`b.user_id IN (…)`), nu una per cont. Dovada: numărul de SELECT-uri pe role_bindings
+    # NU creşte când adăugăm conturi — era un N+1 (o interogare per rând din listă).
+    async def binding_selects_for_list():
+        real = authz.db.fetchall
+        n = [0]
+
+        async def counting(sql, *a):
+            if "role_bindings" in sql:
+                n[0] += 1
+            return await real(sql, *a)
+        authz._cache.clear()               # grantul cererii se reîncarcă identic de fiecare dată
+        authz.db.fetchall = counting
+        try:
+            r = await owner.get("/api/users")
+        finally:
+            authz.db.fetchall = real
+        return n[0], r
+    before, r = await binding_selects_for_list()
+    n_users = len(r.json())
+    for i in range(6):
+        await U.add_user("bulk%d@x.co" % i, bindings=[("viewer", "all", "")])
+    after, r2 = await binding_selects_for_list()
+    check("GET /api/users: legăturile într-o interogare batch, CONSTANT la 6 conturi în plus (nu N+1)",
+          before == after and len(r2.json()) == n_users + 6,
+          "before=%d(%d conturi) after=%d(%d conturi)" % (before, n_users, after, len(r2.json())))
+
     for c in (owner, adm, op, sadm, rm, sh):
         await c.aclose()
     await db.close()

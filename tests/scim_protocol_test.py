@@ -775,10 +775,11 @@ async def test_groups(owner, tok):
     check("excludedAttributes=members", r.status_code == 200 and "members" not in r.json())
     # nume exact: spaţiul final contează
     r = await c.post("/scim/v2/Groups", json={"displayName": "wt-net ", "members": [{"value": users["gina"]}]})
+    spc = r.json()["id"]
     check("„wt-net ” (cu spaţiu) e alt grup: acceptat exact, NU mapează la wt-net",
           r.status_code == 201 and r.json()["displayName"] == "wt-net "
           and ("viewer", "all", "", "sso") not in await bindings("gina@x.co"))
-    r = await c.patch("/scim/v2/Groups/" + r.json()["id"], json={"Operations": [
+    r = await c.patch("/scim/v2/Groups/" + spc, json={"Operations": [
         {"op": "replace", "path": "displayName", "value": "wt-db"}]})
     check("redenumire pe numele altui grup → 400 invalidValue (nu 409: Authentik ar abandona pagina)",
           is_scim_error(r, 400) and r.json().get("scimType") == "invalidValue", r.text[:160])
@@ -812,6 +813,28 @@ async def test_groups(owner, tok):
           and {g["display"] for g in r.json()["groups"]} == {"wt-net "}, r.text[:300])
     r = await c.get("/scim/v2/Groups", params={"startIndex": 1, "count": 1})
     check("Groups: paginare", r.json()["itemsPerPage"] == 1 and r.json()["totalResults"] >= 2)
+    # PF-01/SC-14: GET /Users citeşte grupurile TUTUROR conturilor de pe pagină într-O singură
+    # interogare pe scim_group_members (nu una per cont — era un N+1 prin _user_json → un push
+    # de zeci de mii de conturi ar fi scanat tabela o dată de cont).
+    await c.patch("/scim/v2/Groups/" + spc, json={"Operations": [
+        {"op": "add", "path": "members", "value": [{"value": users["hugo"]}]}]})
+    real_fetchall = scim.db.fetchall
+    n_grp = [0]
+
+    async def counting(sql, *a):
+        if "scim_group_members" in sql:
+            n_grp[0] += 1
+        return await real_fetchall(sql, *a)
+    scim.db.fetchall = counting
+    try:
+        r = await c.get("/scim/v2/Users", params={"count": 200})
+    finally:
+        scim.db.fetchall = real_fetchall
+    res = {u["userName"]: {g["display"] for g in u.get("groups", [])} for u in r.json()["Resources"]}
+    check("lista: grupurile corecte per cont, O SINGURĂ interogare de membri (nu N+1 per cont)",
+          r.status_code == 200 and n_grp[0] == 1 and len(res) >= 7
+          and res.get("gina") == {"wt-net "} and res.get("hugo") == {"wt-net "},
+          "queries=%d gina=%s hugo=%s" % (n_grp[0], res.get("gina"), res.get("hugo")))
     await c.aclose()
 
 
