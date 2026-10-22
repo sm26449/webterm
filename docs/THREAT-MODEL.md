@@ -250,8 +250,11 @@ See [design/ARCHITECTURE.md](design/ARCHITECTURE.md) for the agent's resilience
    until its next SSO sign-in or step-up (remove the mapping or the binding to revoke at once).
    Since 3.6.5, `WEBTERM_OIDC_SSO_ONLY=1` refuses the passkey as first factor for SSO-only
    accounts and `WEBTERM_OIDC_SESSION_MAX_HOURS` bounds a session's absolute age, so the groups
-   are re-read at least that often; automation tokens and already-open forward tickets are not
-   bound by either (revoke them by hand; SCIM push de-provisioning is future work).
+   are re-read at least that often. Automation tokens are not bound by either (revoke them by
+   hand); a **forward ticket** issued after `WEBTERM_OIDC_SESSION_MAX_HOURS` took effect is capped
+   to the issuing session's remaining age, so it dies with the session rather than outliving it;
+   and **SCIM (3.6.11)** lets the IdP push a deactivation that takes hold at once — an account the
+   IdP disables (or deletes) can no longer authenticate and loses every right immediately.
    **`WEBTERM_OIDC_ROLE_MAP`** (3.6.5) maps groups to roles from `.env`: whoever can write the
    server's `.env` already holds the database and the vault key, so it is trusted like the server
    admin — but **Owner is never granted from it** (nor a custom role with Owner-only
@@ -268,30 +271,46 @@ See [design/ARCHITECTURE.md](design/ARCHITECTURE.md) for the agent's resilience
 
 ## Outbound connections the gateway makes on its own
 
-Exactly one that you did not ask for, and it is switchable off: a
-`GET https://api.github.com/repos/<repo>/tags`
-to answer "is there a newer version?", at most **once a day** (plus the explicit
-"check now" button in Settings). It carries no information about the instance — no
-identifier, no host list, no counters — and a failure is cached for an hour so a poll
-loop cannot burn GitHub's unauthenticated rate limit.
+There is **no telemetry**: nothing the gateway sends carries an identifier, a host list, or
+counters about your instance. But "exactly one you did not ask for" stopped being true as
+3.6.7–3.6.9 added self-checks, so here is the full list of connections the gateway can make on
+its own, each with its schedule and its off switch:
 
-Turn it off with `WEBTERM_UPDATE_CHECK=0` (env wins) or the toggle in Settings →
-Preferences.
+- **Update check** — `GET https://api.github.com/repos/<repo>/tags`, at most **once a day** (plus
+  the explicit "check now" button), to answer "is there a newer version?". A failure is cached
+  for an hour so a poll loop cannot burn GitHub's unauthenticated rate limit. Off with
+  `WEBTERM_UPDATE_CHECK=0` (env wins) or the toggle in Settings → Preferences.
+- **IdP discovery probe** — only when SSO is configured: an **hourly** fetch of the OIDC discovery
+  document and JWKS from your configured issuer, so System health can flag the IdP as unreachable
+  before a login does. Goes only to the issuer you set. No SSO configured → never.
+- **TLS certificate check** — a **daily** TLS handshake to read the certificate each monitored
+  name is actually serving. It goes to **Traefik inside the compose network**; the public name is
+  used only as a fallback for the main domain. Off with `WEBTERM_CERT_CHECK=0`.
+- **Forward-domain DNS probe** — when a forward domain is configured, a **daily** check that
+  `wtcheck.<your forward domain>` resolves, so a broken wildcard is caught before a forwarded app
+  fails. (Before 3.6.8 this ran only while the port-forwarding panel was open; it is now a daily
+  background check.) It targets your own domain and carries nothing.
+- **Portable Python** — the first time you add a host whose own Python is too old, the gateway
+  downloads a `python-build-standalone` build from GitHub **on demand** and caches it in its
+  volume (so later hosts reuse it). Triggered by an install you initiate, not scheduled.
+- **Heartbeat (dead-man switch)** — **opt-in only**: with `WEBTERM_HEARTBEAT_URL` set, a periodic
+  GET to that URL while the gateway is healthy, so an external monitor notices if it goes silent.
+  Unset → never.
 
-One more, triggered by you rather than scheduled: opening the port-forwarding panel makes
-the gateway resolve and complete a TLS handshake against `wtcheck.<your forward domain>`,
-to tell you whether the wildcard DNS and certificate are actually in place. It goes to your
-own domain, carries nothing, and only happens while you are looking at that panel.
+External name resolution for all of the above (the IdP, the SMTP relay, GitHub) uses the DNS
+servers in the `app` service's `dns:` setting — **8.8.8.8 / 1.1.1.1 by default**, overridable with
+`WEBTERM_DNS1`/`WEBTERM_DNS2` to a resolver you control. Docker's embedded resolver still does
+service discovery for `traefik`/`dockerproxy`; only the external hop uses these.
 
-The **installer** (not the gateway) makes one more, once: `GET https://api.ipify.org`, to
-compare the machine's public IP with what your domain resolves to and warn you before you
-discover the mismatch through a failed certificate. It sends nothing about you beyond the
-request itself, it is skipped if it fails, and it never runs again after installation.
+The **installer** (not the gateway) makes one more, once: `GET https://api.ipify.org`, to compare
+the machine's public IP with what your domain resolves to and warn you before you discover the
+mismatch through a failed certificate. It sends nothing about you beyond the request itself, it is
+skipped if it fails, and it never runs again after installation.
 
-With the update check off and that panel closed, the gateway initiates no outbound
-connection you did not configure. The other outbound paths exist only because you set them up: SMTP alerts,
-the alert webhook, cloud backup (Google Drive / Dropbox), and the SSH/telnet hosts you
-added. Unconfigured, none of them make a connection.
+Every other outbound path exists only because you set it up: SMTP alerts, the alert webhook, cloud
+backup (Google Drive / Dropbox), and the SSH/telnet hosts you added. Unconfigured, none of them
+make a connection. For an air-gapped or egress-filtered install, the switches above (and leaving
+SSO/heartbeat/backup unset) leave only the daily internal cert handshake.
 
 On a public repo the check needs no credentials. `WEBTERM_UPDATE_CHECK_TOKEN` exists
 only for private repos and is deliberately optional: a GitHub token inside the gateway

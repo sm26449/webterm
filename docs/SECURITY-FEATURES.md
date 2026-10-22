@@ -52,9 +52,11 @@ account. Email is deliberately not accepted in place of the phone: it would make
 exactly as much as access to the mailbox.
 
 **And a way back in, from the server.** `docker exec -it webterm-app-1 python3 -m app.admin`
-(`list`, `passwd`, `disable-2fa`, `logout-all`) recovers the account over SSH. Every gate above
-is another way to lock yourself out; the product can be strict in the browser because this
-exists, and shell on the server is a far higher bar than a mailbox. See RUNBOOK §5.
+recovers access over SSH: `list`, `passwd`, `disable-2fa`, `logout-all`, and the break-glass
+`promote` (make an account Owner over all hosts), `enable` (re-enable an account the IdP disabled
+through SCIM), `sso-only`, `roles`, `health` and `vacuum`. Every gate above is another way to lock
+yourself out; the product can be strict in the browser because this exists, and shell on the
+server is a far higher bar than a mailbox. See RUNBOOK §5 and [ROLES.md → break-glass](ROLES.md#break-glass-promote-from-the-server).
 
 **Signed-in devices (Settings → Sign-in & 2FA).** The account lists every browser currently signed
 in — device label, when it was last seen, which one is *this* device, and a badge on any
@@ -67,10 +69,13 @@ to skip step-up, the idle lock, or 2FA: an IP and a user-agent both travel with 
 cookie, so a "trusted device" exemption would be waved through by exactly the attacker it looks
 like it stops.
 
-**Security model:** whoever gets past login has access to the files and shell of
-the agent's user (like SSH). That's why: run it with a **domain + passkeys** (not
-just IP/password), install agents as a **dedicated, non-root user** where you can,
-and complete setup immediately after deploy. `tests/security_test.py` covers the
+**Security model:** since **roles** (3.6.0) an account reaches only the hosts its bindings allow,
+and gets a shell there only if the role grants it — a Viewer, or an account with no binding yet,
+has no shell at all. Where an account *does* get a shell, it has the files and shell of the agent's
+user (like SSH), and finer limits inside that host are guardrails, not boundaries. That's why: run
+it with a **domain + passkeys** (not just IP/password), install agents as a **dedicated, non-root
+user** where you can, give each person the narrowest role that works, and complete setup
+immediately after deploy. `tests/security_test.py` and the `tests/rbac_*` suites cover the
 protections.
 
 **Off-host backup, from the UI (Settings → Backup).** Connect Google Drive or Dropbox with
@@ -95,15 +100,23 @@ signs in with their own password, passkeys and 2FA, and the audit log records *w
 are **roles** (3.6.0, [ROLES.md](ROLES.md)): Owner / Admin / Operator / Viewer bound to all
 hosts, a folder, a tag or one host. They enforce which hosts an account can reach and whether it
 gets a shell there; finer limits inside a host where it has a shell are guardrails, not
-boundaries.
+boundaries. Roles also bring **time-bound** bindings (access that expires to the second), **crown-jewel** hosts (a grant over one needs explicit confirmation and alerts), and an **Explain access** view — see [ROLES.md](ROLES.md).
+
+**More, since 3.6:**
+- **SSO hardening (3.6.5):** `WEBTERM_OIDC_SSO_ONLY` refuses a passkey as the first factor for SSO-only accounts (every sign-in re-reads their groups), and `WEBTERM_OIDC_SESSION_MAX_HOURS` bounds a session's absolute age. See [SSO.md](SSO.md).
+- **Certificate monitoring + Owner-only renewal (3.6.7):** TLS expiry is watched and alerted; renewing from a terminal needs `certs.renew` (Owner-only) and a fresh second factor. See [TLS certificates](INSTALL.md#tls-certificates-monitoring-and-renewal).
+- **System health (3.6.8):** standing checks for silent failures (SSO reachability, signing key, break-glass Owner, backups, disk, certs, clock) that detect, notify and recommend without taking any new privilege. Muting a check that can turn critical is Owner-only. See [System health](INSTALL.md#system-health).
+- **SCIM provisioning (3.6.11):** the IdP can create, update and **disable/delete** accounts over SCIM; a disabled account can no longer authenticate and loses every right at once. The SCIM bearer token is Owner-only and separate from automation tokens. See [SSO.md → SCIM](SSO.md).
 
 **Automation tokens (Settings → Infrastructure & tokens).** For cron, CI or monitoring: a bearer token
 with an explicit scope (`read` for `/api/status`, `/api/hosts` and `/api/sessions`; `run` for
 `POST /api/hosts/{id}/run`), mandatory expiry, hashed at rest, revocable in one click, and recorded in the audit log as
-`token:<name>`. It is deliberately narrow — no accounts, no signing key, no backups, and
-**hosts marked 2FA refuse tokens** because step-up needs a human with a passkey. The audit
-log is **not** reachable with a token, on purpose: it holds full command text, operator emails
-and IPs, so `/api/audit` stays browser-session only.
+`token:<name>`. Since 3.6.10 a token also carries a **role + scope ceiling**: it can never do more
+than its creator can *now* (if the creator is demoted or disabled, the token narrows or dies with
+them), and a set of actions is **never** reachable by any token — accounts, the signing key,
+backups, the audit log. **Hosts marked 2FA refuse tokens** because step-up needs a human with a
+passkey. The audit log stays browser-session only, on purpose: it holds full command text,
+operator emails and IPs. See [AUTOMATION-TOKENS.md](AUTOMATION-TOKENS.md).
 
 ```sh
 curl -H "Authorization: Bearer wt_…" https://your-domain/api/status

@@ -131,7 +131,7 @@ Groups are read at each **SSO** sign-in and step-up. Two settings make sure that
 
 | Variable | Effect |
 |---|---|
-| `WEBTERM_OIDC_SSO_ONLY=1` | SSO-only accounts (no local password) can sign in **only through SSO**: a passkey is refused as the *first* factor (`auth.ssoOnly`), so every sign-in re-reads the groups. Passkeys still work as a second factor / step-up. Local accounts (the break-glass Owner) are not affected. A value that is neither 0 nor 1 counts as **on**. |
+| `WEBTERM_OIDC_SSO_ONLY=1` | SSO-only accounts (no local password) can sign in **only through SSO**: a passkey is refused as the *first* factor (`auth.ssoOnly`), so every sign-in re-reads the groups. Passkeys still work as a second factor / step-up. Local accounts (the break-glass Owner) are not affected. Parsed **fail-closed**: off for empty/`0`/`false`/`no`/`off`, on for `1`/`true`/`yes`/`on`; any other value is treated as **on** and logged. |
 | `WEBTERM_OIDC_SESSION_MAX_HOURS=12` | A web session of an account linked to SSO ends after this many hours, however active, forcing a fresh SSO sign-in (→ group re-sync). Open terminals of that session follow the usual session-expiry behaviour (they close at the next check). Applies to sessions already open when you set it. Forwarded-app tickets issued from such a session expire with it. Empty/0 = off; an invalid value means 12. |
 
 To cut someone off **immediately**, without waiting for either: remove them from the group in

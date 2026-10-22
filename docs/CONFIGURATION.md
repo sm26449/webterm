@@ -54,7 +54,7 @@ mapped group starts with no access. Since 3.6.5 three optional variables add to 
 | Variable | Role |
 |---|---|
 | `WEBTERM_OIDC_ROLE_MAP` | group → role mappings, `group=role@scope` separated by commas or newlines (scope `all`, `folder:<name>`, `tag:<name>`, `host:<name>`; role `admin`/`operator`/`viewer` or a custom role's name). Applied **at startup only**; shown in the UI as "from configuration" and not removable there. `owner` and `*` are refused; bad entries are skipped (logged + audited), never granted |
-| `WEBTERM_OIDC_SSO_ONLY` | `1` = accounts without a local password sign in only through SSO (a passkey is refused as the first factor), so every sign-in re-reads their groups. Anything other than empty/`0`/`no`/`false` counts as on |
+| `WEBTERM_OIDC_SSO_ONLY` | `1` = accounts without a local password sign in only through SSO (a passkey is refused as the first factor), so every sign-in re-reads their groups. Parsed **fail-closed**: off for empty/`0`/`false`/`no`/`off`, on for `1`/`true`/`yes`/`on`; any other value is treated as **on** and logged (a mistyped security switch must not leave the instance more open than intended) |
 | `WEBTERM_OIDC_SESSION_MAX_HOURS` | absolute maximum age of a web session of an SSO-linked account, in hours (e.g. `12`); empty/`0` = off; an invalid value means 12 |
 
 <a id="security-and-sessions"></a>
@@ -93,11 +93,34 @@ configure for the history itself: last 500 alerts per account, 30 days.
 |---|---|
 | `FORWARD_DOMAIN` | the parent domain for forward subdomains (`<slug>.<domain>`); defaults to `WEBTERM_DOMAIN`. Also changeable in Settings — see [PORT-FORWARDING.md](PORT-FORWARDING.md) |
 
+<a id="system-health"></a>
+### System health & networking (3.6.8 / 3.6.21)
+
+System health ([INSTALL.md → System health](INSTALL.md#system-health)) runs with sensible defaults;
+these tune it. All are read by the gateway from `.env` except `WEBTERM_DNS1`/`WEBTERM_DNS2`, which
+`docker-compose.prod.yml` consumes to set the container's resolver.
+
+| Variable | Role |
+|---|---|
+| `WEBTERM_DISK_WARN_PCT` / `WEBTERM_DISK_CRIT_PCT` | the gateway free-disk thresholds, as **percent free** (defaults 20 / 10): below warn → warning, below crit → critical |
+| `WEBTERM_AGENT_OUTDATED_DAYS` | how many days behind the current agent an online agent may be before "agents outdated" warns (default 7) |
+| `WEBTERM_CERT_CHECK` | `0` turns off the daily TLS certificate check entirely (default on) |
+| `WEBTERM_HEARTBEAT_URL` | opt-in dead-man switch: while the gateway is healthy it GETs this URL every few minutes, so an external monitor notices if it goes silent. Unset = off. Better kept as a file (`_FILE`, below) |
+| `WEBTERM_HEARTBEAT_MINUTES` | heartbeat interval in minutes (default 5, clamped to 1–60) |
+| `WEBTERM_DNS1` / `WEBTERM_DNS2` | upstream DNS the `app` container uses for **external** names (the IdP, the SMTP relay, GitHub). Defaults `8.8.8.8` / `1.1.1.1`; point them at a resolver you control for an air-gapped or policy-restricted network. Docker's embedded resolver still does service discovery for `traefik`/`dockerproxy` — only the external hop uses these (3.6.21) |
+
+**Derived, do not set.** `docker-compose.prod.yml` passes a few variables into the gateway from the
+ones you *do* set — `WEBTERM_AUTHENTIK_DOMAIN` (from `AUTHENTIK_DOMAIN`), `WEBTERM_FORWARD_DOMAIN`
+(from `FORWARD_DOMAIN`), `WEBTERM_COMPOSE_PROFILES` (from `COMPOSE_PROFILES`) and
+`WEBTERM_IMAGE_REF` (the running image tag). They are internal plumbing; set the source variable,
+not these.
+
 <a id="secrets-as-files"></a>
 ## Secrets as files
 
 `WEBTERM_SETUP_TOKEN`, `WEBTERM_OIDC_CLIENT_SECRET`, `WEBTERM_SMTP_PASSWORD`,
-`WEBTERM_ALERT_WEBHOOK` and `WEBTERM_UPDATE_CHECK_TOKEN` can also be read from a file named by the
+`WEBTERM_ALERT_WEBHOOK`, `WEBTERM_UPDATE_CHECK_TOKEN` and `WEBTERM_HEARTBEAT_URL` can also be read
+from a file named by the
 same variable with a `_FILE` suffix (e.g. `WEBTERM_SETUP_TOKEN_FILE=/run/secrets/webterm_setup_token`),
 so they stay out of the container's environment. A non-empty value in the environment wins; a missing
 or empty file means "not set". `docker-compose.prod.yml` uses this for the setup token, the OIDC
@@ -115,6 +138,9 @@ container's environment. `deploy.sh` moves any secret it still finds in `.env` i
 | `WEBTERM_INSTANCE_ID` | overrides the per-machine id the agent derives from `/etc/machine-id` (the gateway fences each host token to that id) — set it on cloned VMs or containers that share a machine-id |
 | `WEBTERM_NO_SHELL_INTEGRATION` | `1` before the install one-liner: don't append the shell-integration line to `~/.bashrc` / `~/.zshrc` ([SHELL-INTEGRATION.md](SHELL-INTEGRATION.md)) |
 | `WEBTERM_UPDATES_CHECK_SECS` | how often the agent counts pending OS updates (default 21600 = 6 h; `0` turns the badge off) |
+| `WEBTERM_PYTHON` | path to the interpreter the agent runs under (must be 3.6+); set it at install time when the host's own `python3` is too old. See [INSTALL.md → Supported hosts](INSTALL.md#supported-hosts) for the root-ownership rule |
+| `WEBTERM_PORTABLE_PYTHON` | `1` at install time: always use the downloaded portable Python, even when the host `python3` is new enough (equivalent to `sh -s -- --portable-python`) |
+| `WEBTERM_ALLOW_OLD_PYTHON` | `1` at install time: when no portable build fits the arch/glibc, keep the old `python3` anyway — terminals work, Files does not |
 | `WEBTERM_SESSION` | set **by** the agent in every session it starts (the session id), so scripts can tell they run inside WebTerm |
 
 <a id="backup-script"></a>

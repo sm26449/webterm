@@ -6,8 +6,9 @@ refuse them outright. It is there for the tired-operator moment: the wrong tab, 
 host, a pasted line that was meant for a scratch VM. Use it to protect against your own
 typos, and against scripts and automation tokens that call the `run` endpoint.
 
-It is **a safety net, not a barrier**. Anyone who is past login can turn it off, and a
-terminal session can always run a command the guardrail would have stopped (see
+It is **a safety net, not a barrier**. Turning it off needs the `settings.manage` permission
+(Admin or Owner, since roles landed in 3.6.0) — an Operator or Viewer cannot — but a terminal
+session can always run a command the guardrail would have stopped (see
 [Where it applies](#where-it-applies)). Do not treat it as an access-control layer.
 
 ## What it is for
@@ -72,13 +73,30 @@ yes". Run on hosts sends it after asking you; a token caller sets it itself.
 
 **In a terminal, only with shell integration.** The gateway does not inspect the keystroke
 stream of a PTY. The check runs in the browser, when a key submits the line — **Enter**
-(also with Shift or Ctrl), **Ctrl+J**, **Ctrl+O** (bash and zsh run the line on it too) or **Alt+A** (zsh `accept-and-hold`, also typed as Esc then A): it reads the line you typed from the screen, from the end of the
-prompt (the OSC 133 `B` marker) to the cursor. In vi editing mode (`set -o vi`, `bindkey -v`), Esc then `a` / `A`
+(also with Shift or Ctrl), **Ctrl+J**, **Ctrl+O** (bash and zsh run the line on it too) or **Alt+A** (zsh `accept-and-hold`, also typed as Esc then A): it reads the line you typed from the screen, from the shell's own
+prompt mark (the OSC 133 `B` marker) to the **end of the line**. It reads the whole line, not just
+up to the cursor (3.6.13), and when a rule could match on either reading it judges the conservative
+one — so moving the cursor back and inserting text cannot hide part of the line from it. In vi editing mode (`set -o vi`, `bindkey -v`), Esc then `a` / `A`
 pressed within a second of the Esc on a non-empty line asks "Can't check this line yet" (a lone Esc has no echo to
 wait for); Run sends the key. Without
 [shell integration](SHELL-INTEGRATION.md) there is no prompt marker, so there is nothing to
 check and Enter passes straight through. Inside a full-screen program (vim, htop, less —
 the alternate screen) the check is skipped too.
+
+The gateway does not read the keystroke stream, but the session hub **does** scan the terminal's
+**output** for the shell-integration markers (OSC 133) and tells the browser where the prompt is,
+so the client can find the line to check. That is how the prompt mark reaches a browser that
+reconnected to a running session.
+
+**Broadcast and the echo wait (3.6.12–3.6.13).** With [split views](FEATURES.md) you can type into
+several panes at once (broadcast). The guardrail cannot see every pane's prompt, so when broadcast
+is on it can only honestly say **"Can't check every pane"** — it asks before sending to all of
+them rather than pretending it vetted each. Even in a single pane, a submit key is held briefly
+until the typed line has **echoed back** from the host (about 150 ms): until the characters are on
+screen the client cannot read the line, so it shows **"Can't check this line yet"** and Run sends
+the key. **TAB** is treated as opaque — completion can rewrite the line, so a line that ends in a
+pending completion is not judged as final. None of this is a barrier: it is the client being
+honest about what it can and cannot see before a key reaches the host.
 
 **Why it's a safety net, not a barrier.** In the terminal the check is client-side and
 heuristic, so it is easy to step around, deliberately or not:
@@ -87,11 +105,11 @@ heuristic, so it is easy to step around, deliberately or not:
   held back (paste the lines one at a time, so Enter checks each); "paste and run" from the
   clipboard history pastes without the Enter in that case. Single-line pastes are checked
   when you press Enter, like typing;
-- the line is read from the screen up to the cursor, so text to the right of the cursor,
-  aliases, variables and scripts are invisible to it (`rm -rf "$DIR"` with `DIR=/` is not
-  `rm -rf /`);
+- the line is read from the screen as the text on it, so aliases, variables and scripts are
+  invisible to it (`rm -rf "$DIR"` with `DIR=/` is not `rm -rf /`) — but the **whole** line is
+  read (both sides of the cursor, since 3.6.13), so the cursor cannot be used to hide part of it;
 - a host without shell integration is not covered at all;
-- anyone signed in can switch the guardrail off in Settings.
+- only an account with `settings.manage` (Admin or Owner) can switch the guardrail off in Settings.
 
 **The dialog belongs to its pane.** In a split view the confirmation dialog is drawn inside the
 pane that asked, and the other panes keep working. Escape closes it only when the focus is in that
@@ -180,6 +198,9 @@ Empty patterns are dropped silently. Patterns are trimmed and cut to 300 charact
   `service_action`), `GET`/`POST /api/settings/command-guard`;
   the time-budgeted matcher is `security.regex_search_budget` (`REGEX_BUDGET = 0.25`) in
   `gateway/app/security.py`. Stored in the `command_guard` setting as JSON.
+- Output scan: `gateway/app/osc133.py` scans the PTY output for the OSC 133 prompt markers and
+  emits the `osc133` message the client uses to locate the line.
 - Frontend: `matchCommandRule` and `pendingCommand` in `frontend/src/lib/commands.ts`; the
+  per-pane broadcast logic and the echo wait in `frontend/src/lib/broadcastGuard.ts`; the
   Enter handler and the confirm dialog in `components/SessionView.tsx`; the Run on hosts check in
   `components/FleetRunModal.tsx`; the editor in `components/settings/InfrastructureTab.tsx`.

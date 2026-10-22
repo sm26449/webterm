@@ -84,6 +84,14 @@ check_hop() {
   [ "$cur" != "$target" ] || { echo "already on $target"; return 1; }
   cm=$(minor "$cur"); tm=$(minor "$target"); ci=$(idx "$cm"); ti=$(idx "$tm")
   last=$(( $(echo "$KNOWN_MINORS" | wc -w) - 1 ))
+  # From any 2026.5.x, 2026.8.0/8.1/8.2 crash-loop (reproduced — see AUTHENTIK-UPGRADE.md): the
+  # "next minor" rule below would otherwise wave it through. Go straight to 2026.8.3 or later.
+  if [ "$cm" = "2026.5" ]; then
+    case "$target" in
+      2026.8.0|2026.8.1|2026.8.2)
+        echo "upgrading from any 2026.5.x to $target crash-loops — go directly to 2026.8.3 or later (see AUTHENTIK-UPGRADE.md)"; return 1 ;;
+    esac
+  fi
   if [ "$cm" = "$tm" ]; then
     [ "$(patch "$target")" -gt "$(patch "$cur")" ] || { echo "$target is older than $cur — Authentik has no downgrade; use 'restore'"; return 1; }
     echo "patch upgrade inside $cm"

@@ -7,6 +7,11 @@ update carrying a lower one, so it only ever moves forward.
 Entries say **why** a change exists, not only what changed. A fix without its cause tends to come
 back.
 
+## [Unreleased]
+
+### Docs
+- **The security and reference docs are caught up with 3.6.x and the DNS change.** The audit found several docs that pre-dated roles (3.6.0), the broadcast guardrail (3.6.12–3.6.13), System health (3.6.8) and SCIM (3.6.11), so they described a weaker or different product than ships. Updated: GUARDRAIL.md (disabling it needs `settings.manage`, not "anyone signed in"; the guard reads the whole line not just to the cursor; OSC-133 output scan, broadcast "can't check every pane", the echo wait; maintenance notes now name `osc133.py` and `broadcastGuard.ts`) · THREAT-MODEL.md (forward tickets are capped to the SSO session and SCIM pushes deactivation — both were wrongly called "not bound"/"future work"; the "exactly one outbound" claim is now the real list — update check, IdP probe, cert handshake, forward-DNS, portable-Python, heartbeat — plus the `WEBTERM_DNS1/2` resolver note) · CONFIGURATION.md (a "System health & networking" section with the 3.6.8 variables and `WEBTERM_DNS1/2`, the agent-side Python install switches, the fail-closed `SSO_ONLY` parse, `WEBTERM_HEARTBEAT_URL` as a secret file, a "derived, do not set" note) · ALERTS.md (the roles/SSO, SCIM and System-health events added since 3.6.0) · SECURITY-FEATURES.md (the roles-based model, the full admin CLI, the token role+scope ceiling, and a "since 3.6" summary) · ROLES.md (the `enable`/`sso-only` break-glass paths) · AUTHENTIK-UPGRADE.md + `authentik-upgrade.sh` (the script now refuses the 2026.5.x → 2026.8.0–2 jump the doc already warned about). (FL-D01…FL-D06, FL-D09, FL-D10)
+
 ## [3.6.21] — 2026-10-22 · agent (58)
 
 Audit 2026-10-17 (`docs/audit-2026-10-17/`), tranche P2 — scaling and bundle size. No behaviour or

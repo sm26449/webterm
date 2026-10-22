@@ -238,7 +238,9 @@ An account the identity provider deactivates or deletes through [SCIM](SSO.md#sc
 **no permission at all** and cannot sign in (password, passkey or SSO). Disabling it ends its web
 sessions, closes its open terminals and forwards, **revokes its automation tokens** and its live
 shares and replay links. Accounts shows it as **Disabled**; an **Owner** can **Re-enable** it
-(password + second factor) and it gets back the roles it had — or the IdP reactivates it. A SCIM
+(password + second factor) and it gets back the roles it had — or the IdP reactivates it. If no
+Owner can sign in (the IdP is down, or the only Owner is the disabled account), re-enable it from
+the server with `python3 -m app.admin enable <email>` — see [Break-glass](#break-glass-promote-from-the-server). A SCIM
 **delete** leaves the account in the same state as a deactivation (disabled, bindings and SCIM
 group memberships kept, only the SCIM link is dropped), so a Re-enable after either brings back
 the roles the account had when it was deactivated; after a delete the IdP can no longer name
@@ -494,10 +496,17 @@ exists, with the command below printed, never run.
 If no Owner is left (for example after a partial restore), make an account Owner from the server:
 
 ```sh
-docker exec -it webterm-app-1 python3 -m app.admin promote you@example.com
-docker exec -it webterm-app-1 python3 -m app.admin roles you@example.com
+docker exec -it webterm-app-1 python3 -m app.admin promote you@example.com   # Owner over all hosts
+docker exec -it webterm-app-1 python3 -m app.admin enable  you@example.com   # undo a SCIM disable
+docker exec -it webterm-app-1 python3 -m app.admin sso-only you@example.com  # drop local pw/passkeys/2FA (SSO-only)
+docker exec -it webterm-app-1 python3 -m app.admin roles    you@example.com
 docker exec -it webterm-app-1 python3 -m app.admin list
 ```
+
+`enable` undoes a SCIM deactivation when no Owner can sign in to do it from the UI; `sso-only`
+strips an account's local password, passkeys and 2FA so it signs in only through the IdP (the
+reverse of keeping a break-glass password — use it deliberately). `logout-all` kills every web
+session and share link of an account.
 
 Anyone with a shell on the server already has the database and the vault key, so this grants
 nothing new. The running gateway picks up the change within about a minute; the action is

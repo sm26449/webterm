@@ -31,7 +31,8 @@ as of 2026-10-13.
 `InconsistentMigrationHistory: Migration authentik_core.0064_user_… is applied before its
 dependency …`. 2026.5.7 carries a backported migration that 2026.8.2 orders differently. 2026.8.3
 fixes it ("core: fix migrations (version-2026.8)"), and 2026.5.7 → 2026.8.3 passed. So from any
-2026.5.x, go **directly to 2026.8.3 or later**, never to 2026.8.0–2026.8.2.
+2026.5.x, go **directly to 2026.8.3 or later**, never to 2026.8.0–2026.8.2. `authentik-upgrade.sh`
+now refuses that jump with this message, so you can't walk into it by taking "the next minor".
 
 ## 2. Which install do you have?
 
