@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { api, errText, WatermarkConfig } from '../../lib/api'
 import { useI18n } from '../../lib/i18n'
 import { useSectionVisible } from '../../lib/perms'
-import { LANGS, LANG_ORDER } from '../../lang'
+import { LANG_META, LANG_ORDER } from '../../lang'
 import { useTheme } from '../../lib/theme'
 import { FAMILIES, VARIANTS, type Swatch, type ThemeMode } from '../../lib/themeModel'
 import {
@@ -99,7 +99,7 @@ export default function AppearanceTab(props: { onAccountChanged: () => void }) {
                 lang === code
                   ? 'wt-chip-accent ring-sky-500/40'
                   : 'bg-ink-800 text-slate-300 ring-ink-700 hover:bg-ink-700'}`}>
-              <span className="text-base leading-none">{LANGS[code].meta.flag}</span> {LANGS[code].meta.name}
+              <span className="text-base leading-none">{LANG_META[code].flag}</span> {LANG_META[code].name}
             </button>
           ))}
         </div>

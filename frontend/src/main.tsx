@@ -9,7 +9,7 @@ import TooltipLayer from './components/TooltipLayer'
 import './index.css'
 import { initTheme } from './lib/theme'
 import { showFailsafe } from './lib/failsafe'
-import { I18nProvider } from './lib/i18n'
+import { I18nProvider, preloadLang } from './lib/i18n'
 import { ConfirmProvider } from './lib/confirm'
 
 // xterm 5.x teardown race: when a terminal is disposed mid-transition (split↔tab), a DEFERRED
@@ -86,18 +86,23 @@ class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { fai
   }
 }
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode>
-    <ErrorBoundary>
-      <I18nProvider>
-        <ConfirmProvider>
-          <App />
-          <TooltipLayer />
-        </ConfirmProvider>
-      </I18nProvider>
-    </ErrorBoundary>
-  </React.StrictMode>,
-)
+// PF-11: cataloagele de limbă se încarcă leneș; aducem limba salvată/detectată ÎNAINTE de primul
+// render, ca un utilizator pe română să nu vadă o clipire de engleză (`en` se rezolvă imediat).
+// Best-effort — dacă pică, I18nProvider o reîncearcă după montare (cu fallback pe `en` până atunci).
+void preloadLang().finally(() => {
+  ReactDOM.createRoot(document.getElementById('root')!).render(
+    <React.StrictMode>
+      <ErrorBoundary>
+        <I18nProvider>
+          <ConfirmProvider>
+            <App />
+            <TooltipLayer />
+          </ConfirmProvider>
+        </I18nProvider>
+      </ErrorBoundary>
+    </React.StrictMode>,
+  )
+})
 
 // PWA: înregistrăm service worker-ul (public/sw.js) DOAR în producţie — în dev, Vite serveşte
 // modulele live şi un SW ar cache-ui şi ar încurca hot-reload-ul. SW-ul e network-first, deci nu

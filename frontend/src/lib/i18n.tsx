@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useState, ReactNode } from 'react'
-import { LANGS, FALLBACK_LANG } from '../lang'
+import { LANG_META, FALLBACK_LANG, loadLang, loaded, isLoaded } from '../lang'
 
 // i18n minimalist, fără librărie externă (se potrivește cu „totul inline"). Un catalog
 // cheie→valoare per limbă (vezi src/lang/), un hook `useI18n().t('cheie', {var})`, fallback
@@ -14,7 +14,7 @@ const STORAGE_KEY = 'wt_lang'
 export function detectLang(): string {
   try {
     const saved = localStorage.getItem(STORAGE_KEY)
-    if (saved && LANGS[saved]) return saved
+    if (saved && LANG_META[saved]) return saved
   } catch { /* localStorage indisponibil */ }
   // `navigator.languages`, nu doar `navigator.language`: al doilea e DOAR prima preferinţă,
   // deci un browser setat `de-DE, ro;q=0.9` — germană preferată, română acceptată — primea
@@ -24,11 +24,17 @@ export function detectLang(): string {
     ? navigator.languages
     : [navigator.language || '']).map((l) => (l || '').toLowerCase())
   for (const nav of prefs) {
-    for (const code of Object.keys(LANGS)) {
+    for (const code of Object.keys(LANG_META)) {
       if (nav === code || nav.startsWith(code + '-')) return code
     }
   }
   return FALLBACK_LANG
+}
+
+/** PF-11: încarcă leneș catalogul limbii detectate ÎNAINTE de primul render (main.tsx), ca un
+    utilizator pe română să nu vadă o clipire de engleză. `en` se rezolvă imediat. Best-effort. */
+export async function preloadLang(): Promise<void> {
+  await loadLang(detectLang())
 }
 
 interface I18nCtx {
@@ -45,11 +51,13 @@ const Ctx = createContext<I18nCtx | null>(null)
    diverge de ea. */
 export function tStatic(key: string): string {
   const lang = detectLang()
-  return LANGS[lang]?.strings[key] ?? LANGS[FALLBACK_LANG]?.strings[key] ?? key
+  return loaded(lang)?.strings[key] ?? loaded(FALLBACK_LANG)?.strings[key] ?? key
 }
 
 export function I18nProvider({ children }: { children: ReactNode }) {
   const [lang, setLangState] = useState<string>(detectLang)
+  // PF-11: forţează un re-render când catalogul limbii active termină de încărcat (lazy)
+  const [, bumpLoaded] = useState(0)
 
   // `<html lang>` se seta DOAR în `setLang`, adică doar dacă schimbai limba manual. Cine
   // deschidea UI-ul în engleză (detectat din browser sau din localStorage) rămânea pe
@@ -59,15 +67,29 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     document.documentElement.lang = lang
   }, [lang])
 
+  // PF-11: dacă limba activă încă nu e în memorie (preload-ul din main.tsx a fost sărit sau a
+  // eşuat), o încarcă acum şi re-randează — până atunci `t` cade pe `en`. No-op dacă e deja acolo.
+  useEffect(() => {
+    if (isLoaded(lang)) return
+    let live = true
+    void loadLang(lang).then(() => { if (live) bumpLoaded((n) => n + 1) })
+    return () => { live = false }
+  }, [lang])
+
   const setLang = useCallback((code: string) => {
-    if (!LANGS[code]) return
+    if (!LANG_META[code]) return
     try { localStorage.setItem(STORAGE_KEY, code) } catch { /* ignoră */ }
-    document.documentElement.lang = code
-    setLangState(code)
+    // încarcă catalogul ÎNAINTE de a comuta starea, ca interfaţa să nu clipească prin engleză la
+    // schimbarea manuală; `en` şi o limbă deja încărcată se rezolvă imediat. La eşec comutăm oricum
+    // (cade pe `en`), ca UI-ul să nu rămână blocat.
+    void loadLang(code).finally(() => {
+      document.documentElement.lang = code
+      setLangState(code)
+    })
   }, [])
 
   const t = useCallback((key: string, vars?: Record<string, string | number>) => {
-    const pick = (k: string) => LANGS[lang]?.strings[k] ?? LANGS[FALLBACK_LANG]?.strings[k]
+    const pick = (k: string) => loaded(lang)?.strings[k] ?? loaded(FALLBACK_LANG)?.strings[k]
     let s: string | undefined
     // Plural. Codul folosea `n === 1 ? singular : plural`, ceea ce e corect în engleză şi
     // greşit în română, care are TREI forme: 1 / 2–19 / 20+ cu „de" — deci ieşea „20 host-uri"
