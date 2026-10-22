@@ -83,49 +83,58 @@ export { crc32 }
 
 // FS-09: CRC-ul feliei (2–16 MiB, buclă byte-cu-byte) se mută de pe firul principal într-un Web
 // Worker. Worker-ul e fără stare — CRC-ul cumulativ rămâne aici şi se dă ca `prev`, deci ordinea
-// feliilor e păstrată de apelant (aşteaptă fiecare răspuns). Buffer-ul e TRANSFERAT dus-întors
-// (zero-copy): după CRC se întoarce ca să poată fi trimis la upload. Un singur worker, leneş,
-// reutilizat; dacă Worker lipseşte (vitest/node, browser fără suport) sau crearea eşuează, cădem
-// pe CRC sincron pe firul principal — corectitudinea e aceeaşi peste tot.
+// feliilor e păstrată de apelant (aşteaptă fiecare răspuns). Buffer-ul se trimite prin COPIE (nu
+// transfer): copia (un memcpy, ~ms) e mult mai ieftină decât bucla CRC de pe firul principal, iar
+// buffer-ul RĂMÂNE al nostru — intact pentru upload ŞI pentru fallback-ul sincron dacă worker-ul
+// moare (review 3.6.21: cu transfer, o moarte a worker-ului cât un mesaj era în zbor lăsa
+// upload-ul blocat pe veci, cu buffer-ul detaşat). Un singur worker, leneş, reutilizat; fără
+// Worker (vitest/node, browser fără suport) sau la orice eşec cădem pe CRC sincron — valoare identică.
 let crcWorker: Worker | null = null
 let crcWorkerDead = false
 let crcSeq = 0
-const crcPending = new Map<number, (crc: { crc: number; buf: ArrayBuffer }) => void>()
+const crcPending = new Map<number, { resolve: (crc: number) => void; reject: (e: unknown) => void }>()
+
+function killCrcWorker(): void {
+  crcWorkerDead = true
+  const w = crcWorker
+  crcWorker = null
+  if (w) { try { w.terminate() } catch { /* ignore */ } }
+  // nu lăsa nicio promisiune în aşteptare atârnată: fiecare crcChunk în zbor trebuie să cadă pe sincron
+  for (const p of crcPending.values()) p.reject(new Error('crc worker died'))
+  crcPending.clear()
+}
 
 function ensureCrcWorker(): Worker | null {
   if (crcWorker || crcWorkerDead) return crcWorker
   if (typeof Worker === 'undefined') { crcWorkerDead = true; return null }
   try {
     const w = new Worker(new URL('./crcWorker.ts', import.meta.url), { type: 'module' })
-    w.onmessage = (e: MessageEvent<{ id: number; crc: number; buf: ArrayBuffer }>) => {
-      const cb = crcPending.get(e.data.id)
-      if (cb) { crcPending.delete(e.data.id); cb({ crc: e.data.crc, buf: e.data.buf }) }
+    w.onmessage = (e: MessageEvent<{ id: number; crc: number }>) => {
+      const p = crcPending.get(e.data.id)
+      if (p) { crcPending.delete(e.data.id); p.resolve(e.data.crc) }
     }
-    w.onerror = () => {            // worker rupt (CSP, build) → sincron de aici înainte
-      crcWorkerDead = true
-      try { w.terminate() } catch { /* ignore */ }
-      crcWorker = null
-    }
+    w.onerror = killCrcWorker               // worker rupt (CSP, build, OOM) → trezeşte aşteptătorii
+    w.onmessageerror = killCrcWorker        // mesaj ne-deserializabil → la fel
     crcWorker = w
     return w
   } catch { crcWorkerDead = true; return null }
 }
 
-/** CRC-ul cumulativ după felia `buf`, calculat în worker când se poate; întoarce ŞI buffer-ul
-    (transferat înapoi) ca apelantul să-l trimită mai departe la upload. */
-async function crcChunk(prev: number, buf: ArrayBuffer): Promise<{ crc: number; buf: ArrayBuffer }> {
+/** CRC-ul cumulativ după felia `buf`, în worker când se poate, altfel sincron. `buf` NU e
+    transferat, deci rămâne valid pentru apelant (upload) orice-ar fi. */
+async function crcChunk(prev: number, buf: ArrayBuffer): Promise<number> {
   const w = ensureCrcWorker()
-  if (!w) return { crc: crc32(prev, new Uint8Array(buf)), buf }
+  if (!w) return crc32(prev, new Uint8Array(buf))
   const id = ++crcSeq
   try {
-    return await new Promise<{ crc: number; buf: ArrayBuffer }>((resolve, reject) => {
-      crcPending.set(id, resolve)
-      try { w.postMessage({ id, prev, buf }, [buf]) }
+    return await new Promise<number>((resolve, reject) => {
+      crcPending.set(id, { resolve, reject })
+      try { w.postMessage({ id, prev, buf }) }   // copie: buffer-ul rămâne al nostru
       catch (e) { crcPending.delete(id); reject(e) }
     })
-  } catch {                       // transfer/worker eşuat: buffer-ul e încă al nostru → sincron
+  } catch {                       // worker mort / postMessage eşuat: buffer-ul e intact → sincron
     crcWorkerDead = true
-    return { crc: crc32(prev, new Uint8Array(buf)), buf }
+    return crc32(prev, new Uint8Array(buf))
   }
 }
 
@@ -599,10 +608,10 @@ async function runLoop(c: Ctl): Promise<void> {
       for (let k = 0; k < UP_WINDOW && dispatchPos < file.size; k++) {
         const start = dispatchPos
         const end = Math.min(start + chunkSize, file.size)
-        let buf = await file.slice(start, end).arrayBuffer()
-        // ordinea fişierului, o singură dată per felie; CRC-ul pleacă în worker (FS-09), care dă
-        // buffer-ul înapoi ca să-l putem trimite la upload
-        if (doCrc) { const r = await crcChunk(crc, buf); crc = r.crc; buf = r.buf }
+        const buf = await file.slice(start, end).arrayBuffer()
+        // ordinea fişierului, o singură dată per felie; CRC-ul se calculează în worker (FS-09),
+        // pe o copie — `buf` rămâne al nostru pentru upload
+        if (doCrc) crc = await crcChunk(crc, buf)
         dispatchPos = end
         burst.push({ start, end, buf })
         if (c.paused || c.cancelled) break      // pauză în timp ce citeam: nu mai construim rafala

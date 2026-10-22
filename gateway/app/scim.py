@@ -1548,6 +1548,11 @@ async def _resync(uids: set, ip: str, extra_known=()) -> None:
             if res.get("added") or res.get("removed"):
                 changed = True
         except Exception:                   # noqa: BLE001 — one account must not stop the rest
+            # fail-closed (review 3.6.21): sync_user commits the binding change BEFORE its audit
+            # writes, so a failure here may mean a role change already landed with defer_bump — we
+            # can't tell. Force the single bump so a just-removed role can't keep passing checks
+            # (until the 30 s cache TTL) because an unrelated audit write threw.
+            changed = True
             log.exception("SCIM: re-syncing the roles of %s failed", u["email"])
     if changed:
         authz.bump_epoch()                  # ONE for the whole push (SC-03)
