@@ -1258,12 +1258,59 @@ def test_catalog():
     check("ro: comma-below ș/ț only (no cedilla) in the health strings", not ro_bad, ro_bad[:5])
 
 
+async def test_cadence():
+    print("── PF-02: the config tier runs at startup/hourly/manual, not every fast tick")
+    syshealth.reset_for_tests()
+    cfg = {c.id for c in syshealth.CHECKS if c.tier == "config"}
+    check("config tier = the admin-config checks (roles/backup/sso-ungated/enrol)",
+          {"roles.permanent_owner", "roles.break_glass", "config.sso_ungated",
+           "tokens.enroll_orphans", "backup.coverage", "backup.offhost", "backup.restore",
+           "backup.inapp"} == cfg, cfg)
+    # spy on which checks each run actually EXECUTES (not _rows, which _load() hydrates from DB)
+    ran: list = []
+    orig = syshealth._run_one
+
+    async def spy(c, now):
+        ran.append(c.id)
+        return await orig(c, now)
+    syshealth._run_one = spy
+    try:
+        ran.clear()
+        await syshealth.run(("fast",))
+        check("a fast tick executes NO config check (the 30 s loop skips them)",
+              not (cfg & set(ran)) and "gateway.disk" in ran, {"config_ran": cfg & set(ran)})
+        ran.clear()
+        await syshealth.run(("config",))
+        check("the config tier executes exactly the config checks",
+              cfg <= set(ran) and "gateway.disk" not in ran, sorted(set(ran)))
+    finally:
+        syshealth._run_one = orig
+
+    # K_LAST_RUN: in memory every fast run; the DB copy is NOT rewritten every tick (PF-02)
+    syshealth.reset_for_tests()
+    await syshealth.run(("fast",))
+    v1 = await syshealth._get(syshealth.K_LAST_RUN, "")
+    check("last_run() advances in memory on a fast run", syshealth.last_run() > 0 and v1 not in ("", "0"))
+    await asyncio.sleep(0.02)
+    await syshealth.run(("fast",))
+    v2 = await syshealth._get(syshealth.K_LAST_RUN, "")
+    check("a second fast tick within PERSIST_EVERY does not rewrite the DB copy",
+          v2 == v1 and syshealth.last_run() > float(v1), (v1, v2, syshealth.last_run()))
+    # a manual full run force-persists it (the out-of-process admin CLI reads the DB)
+    await syshealth.run_all()
+    v3 = await syshealth._get(syshealth.K_LAST_RUN, "0")
+    check("run_all() force-persists K_LAST_RUN (for `webterm health --wait`)",
+          float(v3) > float(v1), (v1, v3))
+    syshealth.reset_for_tests()
+
+
 async def amain():
     await U.boot()
     owner = await U.owner_client()
     owner_uid = (await db.fetchone("SELECT id FROM users WHERE email=?", U.OWNER_EMAIL))["id"]
     await owner.aclose()
     syshealth.reset_for_tests()
+    await test_cadence()
     await test_checks(owner_uid)
     await test_roles_checks(owner_uid)
     await test_alerting(owner_uid)

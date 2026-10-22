@@ -5032,10 +5032,7 @@ async def _health_json(request: Request) -> dict:
             row = await db.fetchone("SELECT id, name FROM hosts WHERE id=?", hid)
             if row:
                 host = {"id": row["id"], "name": row["name"]}
-    try:
-        last = float(await _get_setting(syshealth.K_LAST_RUN, "0") or 0)
-    except ValueError:
-        last = 0.0
+    last = syshealth.last_run()   # PF-02: in-memory, not a DB read (the DB copy lags ≤10 min)
     return {"checks": checks, "attention": syshealth.attention(rows, now),
             "checked_at": last or None, "can_manage": can_manage, "can_terminal": can_terminal,
             "can_mute_critical": can_manage and can_terminal, "terminal_host": host, "retry_after": syshealth.manual_retry_after()}

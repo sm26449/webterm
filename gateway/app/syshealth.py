@@ -99,7 +99,11 @@ ACTIONS = ("settings:notifications", "settings:backup", "settings:signing", "set
 @dataclass
 class Check:
     id: str
-    tier: str                     # fast | hourly | daily
+    # fast   = re-evaluated every FAST_TICK (dynamic: disk, sessions, agents, the SSO probe…)
+    # config = only changes on an admin action or at boot (roles, backup schedule, enrol tokens):
+    #          run at startup + hourly + on a manual "Re-check now", not every 30 s. (PF-02)
+    # hourly / daily = their own cadence.
+    tier: str                     # fast | config | hourly | daily
     fn: Callable[[], Awaitable[Optional[Result]]]
     source: str = "gateway"       # gateway | host_helper
     alert: str = "transition"     # transition | none | inapp | version
@@ -1045,17 +1049,21 @@ CHECKS: list = [
     Check("sessions.cap", "fast", c_sessions_cap),
     Check("signing.state", "fast", c_signing, alert="none", critical=True),  # signing_locked alerts
     Check("oidc.sso", "fast", c_sso, critical=True),
-    Check("roles.permanent_owner", "fast", c_roles_permanent_owner, critical=True),
-    Check("roles.break_glass", "fast", c_roles_break_glass),
+    # config tier (PF-02): results change only on an admin action, so run at startup + hourly +
+    # on a manual "Re-check now", not every 30 s. The immediate security alert for these events
+    # (a new account, an Owner grant) already fires separately via email_alerts; this is the
+    # standing posture indicator in the panel.
+    Check("roles.permanent_owner", "config", c_roles_permanent_owner, critical=True),
+    Check("roles.break_glass", "config", c_roles_break_glass),
     Check("config.forwards_http", "fast", c_forwards_http, critical=True),
-    Check("config.sso_ungated", "fast", c_sso_ungated),
-    Check("tokens.enroll_orphans", "fast", c_enroll_orphans),
+    Check("config.sso_ungated", "config", c_sso_ungated),
+    Check("tokens.enroll_orphans", "config", c_enroll_orphans),
     Check("janitor", "fast", c_janitor),
     Check("db.size", "hourly", c_db_size, alert="none"),
-    Check("backup.coverage", "fast", c_backup_coverage),
-    Check("backup.offhost", "fast", c_backup_offhost),
-    Check("backup.restore", "fast", c_backup_restore, alert="none"),
-    Check("backup.inapp", "fast", c_backup_inapp, alert="none"),               # backup_failed alerts
+    Check("backup.coverage", "config", c_backup_coverage),
+    Check("backup.offhost", "config", c_backup_offhost),
+    Check("backup.restore", "config", c_backup_restore, alert="none"),
+    Check("backup.inapp", "config", c_backup_inapp, alert="none"),             # backup_failed alerts
     Check("certs.main", "fast", _cert_check("main"), alert="none", critical=True),  # certmon alerts
     Check("certs.forward", "fast", _cert_check("forward"), alert="none", critical=True),
     Check("certs.authentik", "fast", _cert_check("authentik"), alert="none", critical=True),
@@ -1072,6 +1080,8 @@ _rows: dict = {}              # id → the persisted row (dict), mirror of healt
 _persisted_at: dict = {}      # id → when its row was last written to health_checks (OP-13 refresh)
 _lock = asyncio.Lock()
 _last_manual = 0.0
+_last_run = 0.0               # PF-02: when the fast tier last ran (in memory; UI reads this)
+_last_run_persisted = 0.0     # when K_LAST_RUN was last written to the DB (PERSIST_EVERY)
 _loaded = False
 
 
@@ -1299,20 +1309,34 @@ async def _run_one(check: Check, now: float) -> None:
     await _apply(check, res, now)
 
 
-async def run(tiers=("fast",)) -> None:
+async def run(tiers=("fast",), force_persist_last: bool = False) -> None:
     """Run the checks of the given tiers (serialised; a second caller waits for the first)."""
     if not db.connected():
         return
+    global _last_run, _last_run_persisted
     async with _lock:
         await _load()
         now = time.time()
-        if "fast" in tiers:
+        # both the fast tier and the config tier read host-helper status (_HOST); refresh it for
+        # either (a standalone config re-run would otherwise read the last fast tick's snapshot).
+        if "fast" in tiers or "config" in tiers:
             _host_snapshot()
         for c in CHECKS:
             if c.tier in tiers:
                 await _run_one(c, now)
         if "fast" in tiers:
-            await _set(K_LAST_RUN, str(now))
+            # PF-02: "last run" lives in memory and the UI reads it from there (_health_json →
+            # last_run()); the DB copy, for the out-of-process admin CLI, is refreshed only every
+            # PERSIST_EVERY — not a guaranteed write every FAST_TICK — or at once on a manual run.
+            _last_run = now
+            if force_persist_last or now - _last_run_persisted >= PERSIST_EVERY:
+                await _set(K_LAST_RUN, str(now))
+                _last_run_persisted = now
+
+
+def last_run() -> float:
+    """When the fast tier last ran, in memory (0.0 if never). Authoritative in-process."""
+    return _last_run
 
 
 async def jobs_hourly() -> None:
@@ -1339,14 +1363,14 @@ def mark_manual(now: Optional[float] = None) -> None:
 
 async def run_all() -> None:
     await jobs_hourly()
-    await run(("fast", "hourly", "daily"))
+    await run(("fast", "config", "hourly", "daily"), force_persist_last=True)
 
 
 STARTUP_DELAY = 20.0
 
 
 async def loop() -> None:
-    """Background task: fast tier every 30 s, hourly and daily tiers on their cadence."""
+    """Background task: fast tier every 30 s, config + hourly + daily on their cadence."""
     await asyncio.sleep(STARTUP_DELAY)
     next_hourly = next_daily = 0.0
     while True:
@@ -1355,7 +1379,9 @@ async def loop() -> None:
             tiers = ["fast"]
             if now >= next_hourly:
                 await jobs_hourly()
-                tiers.append("hourly")
+                # config tier runs at startup (next_hourly = 0) and hourly thereafter — its
+                # results change only on an admin action, so not every FAST_TICK. (PF-02)
+                tiers += ["config", "hourly"]
                 next_hourly = now + HOURLY
             if now >= next_daily:
                 tiers.append("daily")
@@ -1526,11 +1552,13 @@ def attention(rs: list, now: Optional[float] = None) -> dict:
 
 
 def reset_for_tests() -> None:
-    global _loaded, _last_manual, _HOST
+    global _loaded, _last_manual, _HOST, _last_run, _last_run_persisted
     _rows.clear()
     _persisted_at.clear()
     _loaded = False
     _last_manual = 0.0
+    _last_run = 0.0
+    _last_run_persisted = 0.0
     _HOST = {}
     _hb.update(last_ok=0.0, last_error="", last_try=0.0)
     _probe_kick.update(at=0.0, task=None)
