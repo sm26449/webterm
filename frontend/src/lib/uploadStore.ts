@@ -87,6 +87,19 @@ const state = new Map<string, UploadJob>()
 const subs = new Set<() => void>()
 let snap: ReadonlyMap<string, UploadJob> = new Map()
 
+/** FS-05: a signature of a host's jobs by IDENTITY + STATE only — deliberately NOT pct / pos /
+    speed / ETA. `useSyncExternalStore(subscribe, () => hostJobSig(id))` on it re-renders the
+    subscriber only when a job of that host appears, disappears or changes state, not on every
+    progress tick (`setPos` publishes up to ~10×/s). The live progress bar subscribes to the full
+    snapshot instead; the file list (up to FS_MAX_LIST rows) does not, so it no longer reconciles
+    ~10×/s during a transfer. */
+export function hostJobSig(hostId: number): string {
+  let s = ''
+  for (const j of state.values())
+    if (j.hostId === hostId && j.state !== 'orphan') s += j.id + ':' + j.state + '|'
+  return s
+}
+
 function emit() {
   snap = new Map(state)              // snapshot imuabil: useSyncExternalStore compară referinţe
   subs.forEach((f) => f())

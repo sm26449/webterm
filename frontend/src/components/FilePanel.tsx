@@ -9,7 +9,7 @@ import { useDrawer } from '../lib/useDrawer'
 import SheetBar from './SheetBar'
 import { cancelUpload, dismissUpload, isUploadBusy, startUpload as engineStart, takeFilesDir } from '../lib/uploads'
 import { BulkItem, startArchiveDownload, startDownload, startDownloads } from '../lib/downloads'
-import { isActive, sizeKnown, uploadStore } from '../lib/uploadStore'
+import { hostJobSig, isActive, sizeKnown, uploadStore } from '../lib/uploadStore'
 import { fmtBytes } from '../lib/uploads'
 import { uiLocale } from '../lib/tz'
 import {
@@ -129,6 +129,51 @@ async function readEntry(entry: any, prefix: string, out: UpItem[]): Promise<voi
   }
 }
 
+/** FS-05: the live transfer bar at the foot of the panel. It subscribes to the upload store on
+    its OWN — so a progress tick (~10×/s) re-renders just this small subtree, never the parent
+    FilePanel or its up-to-FS_MAX_LIST file rows. Shows this host's non-orphan jobs. */
+function PanelUploads({ hostId }: { hostId: number }) {
+  const { t } = useI18n()
+  const all = useSyncExternalStore(uploadStore.subscribe, uploadStore.snapshot)
+  const jobs = useMemo(
+    () => [...all.values()].filter((j) => j.hostId === hostId && j.state !== 'orphan'),
+    [all, hostId])
+  if (!jobs.length) return null
+  return (
+    <div className="max-h-28 overflow-y-auto border-t border-ink-800 px-3 py-1 text-2xs">
+      {jobs.map((u) => {
+        const live = isActive(u)
+        const label = live ? t('files.cancelUpload') : t('files.dismissUpload')
+        return (
+          <div key={u.id} className="py-1">
+            <div className="flex items-center gap-2">
+              <span className="truncate text-slate-400" title={u.dest}>{u.name}</span>
+              <span className={`ml-auto tabular-nums ${u.state === 'done' ? 'wt-good' : u.state === 'err' ? 'wt-danger'
+                : u.state === 'stalled' || u.state === 'retrying' ? 'wt-warn' : 'wt-link'}`}>
+                {u.state === 'done' ? <CheckIcon size={12} /> : u.state === 'err' ? <CloseIcon size={12} />
+                  : u.state === 'stalled' ? t('jobs.stateStalled')
+                  : u.state === 'retrying' ? t('jobs.stateRetrying', { n: u.attempts, max: 8 })
+                  : sizeKnown(u) ? `${u.pct}%` : fmtBytes(u.pos)}
+              </span>
+              <IconButton touch={false} variant="danger" onClick={() => { if (live) cancelUpload(u.id); else dismissUpload(u.id) }}
+                title={label} label={`${label} ${u.name}`}><CloseIcon size={14} /></IconButton>
+            </div>
+            {/* bară de progres: se umple pe octeți (XHR onprogress), colorată după stare */}
+            <div className="mt-0.5 h-1 w-full overflow-hidden rounded-full bg-ink-800">
+              <div
+                className={`h-full rounded-full transition-[width] duration-200 ease-out motion-reduce:transition-none ${
+                  u.state === 'err' ? 'bg-rose-500' : u.state === 'done' ? 'bg-emerald-500'
+                  : u.state === 'stalled' || u.state === 'retrying' ? 'bg-amber-500' : 'bg-sky-500'}`}
+                style={{ width: `${u.state === 'err' ? 100 : u.pct}%` }}
+              />
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 export default function FilePanel(props: {
   host: Host; sessionId: string; onClose: () => void; overlay?: boolean; embed?: boolean
   /** cale la care panoul navighează la MONTARE, oprind follow-ul (din meniul contextual al
@@ -185,11 +230,16 @@ export default function FilePanel(props: {
   const [busy, setBusy] = useState(false)
   // starea upload-urilor stă în uploadStore (nivel de modul), NU în componentă: transferul
   // supravieţuieşte închiderii panoului, iar redeschiderea îl arată în mers, cu cancel funcţional
-  const uploadsAll = useSyncExternalStore(uploadStore.subscribe, uploadStore.snapshot)
-  // doar job-urile acestui host; orfanii (după reload, fără File) trăiesc numai în bara globală
+  // FS-05: abonament pe SEMNĂTURA de stare a job-urilor acestui host (id:state), NU pe snapshot-ul
+  // întreg — progresul (pct/viteză la ~10×/s) NU mai re-randează panoul (deci nici lista de până la
+  // FS_MAX_LIST rânduri); doar apariţia/dispariţia/schimbarea de stare a unui job o face. Bara de
+  // progres live (PanelUploads) se abonează separat la snapshot.
+  const uploadsSig = useSyncExternalStore(uploadStore.subscribe, () => hostJobSig(props.host.id))
+  // doar job-urile acestui host; orfanii (după reload, fără File) trăiesc numai în bara globală.
+  // Stabil între tick-urile de progres (recalculat doar când se schimbă `uploadsSig`).
   const uploads = useMemo(
-    () => [...uploadsAll.values()].filter((j) => j.hostId === props.host.id && j.state !== 'orphan'),
-    [uploadsAll, props.host.id])
+    () => [...uploadStore.snapshot().values()].filter((j) => j.hostId === props.host.id && j.state !== 'orphan'),
+    [uploadsSig, props.host.id])
   const [overwrite, setOverwrite] = useState<{ items: UpItem[]; count: number } | null>(null)
   // 3.6.9: o scriere refuzată (userul agentului nu poate scrie aici) → bannerul cu cele trei ieşiri
   const [denied, setDenied] = useState<{ dir: string; message: string; pending: PendingFile[] } | null>(null)
@@ -601,7 +651,7 @@ export default function FilePanel(props: {
   // duplicatele terminate: toast + re-listare (dacă suntem încă în acel director); eşecul → linia roşie
   useEffect(() => {
     for (const [id, d] of [...dupRef.current]) {
-      const j = uploadsAll.get(id)
+      const j = uploadStore.get(id)
       if (!j) { dupRef.current.delete(id); continue }
       if (j.state === 'done') {
         dupRef.current.delete(id)
@@ -612,7 +662,7 @@ export default function FilePanel(props: {
         if (j.error) setError(`${d.name}: ${j.error}`)
       }
     }
-  }, [uploadsAll, load, t])
+  }, [uploadsSig, load, t])
 
   // ── meniul ──
   function openRowMenu(e: Entry, x: number, y: number, sheet = touchUI) {
@@ -727,12 +777,6 @@ export default function FilePanel(props: {
   // ulterior (din bara globală) nu mai trece pe aici.
   const uploadOne = (dest: string, rel: string, file: File) =>
     engineStart({ hostId: props.host.id, hostName: props.host.name, dest, name: rel, file })
-
-  // ✕ pe rând: cât transferul e viu îl anulează (temp-ul de pe host dispare, nu mai e resumabil);
-  // pe ✓/✗ doar curăţă rândul din listă (store-ul e global, altfel erorile ar rămâne pe ecran)
-  function cancelOrDismiss(id: string, live: boolean) {
-    if (live) cancelUpload(id); else dismissUpload(id)
-  }
 
   // fişierele dintr-un drop (foldere incluse). webkitGetAsEntry TREBUIE apelat sincron —
   // `items` se golesc după handler — de aceea întâi culegem intrările, apoi le parcurgem.
@@ -1684,39 +1728,9 @@ export default function FilePanel(props: {
           </div>
         )}
 
-        {uploads.length > 0 && (
-          <div className="max-h-28 overflow-y-auto border-t border-ink-800 px-3 py-1 text-2xs">
-            {uploads.map((u) => {
-              const live = isActive(u)
-              const label = live ? t('files.cancelUpload') : t('files.dismissUpload')
-              return (
-                <div key={u.id} className="py-1">
-                  <div className="flex items-center gap-2">
-                    <span className="truncate text-slate-400" title={u.dest}>{u.name}</span>
-                    <span className={`ml-auto tabular-nums ${u.state === 'done' ? 'wt-good' : u.state === 'err' ? 'wt-danger'
-                      : u.state === 'stalled' || u.state === 'retrying' ? 'wt-warn' : 'wt-link'}`}>
-                      {u.state === 'done' ? <CheckIcon size={12} /> : u.state === 'err' ? <CloseIcon size={12} />
-                        : u.state === 'stalled' ? t('jobs.stateStalled')
-                        : u.state === 'retrying' ? t('jobs.stateRetrying', { n: u.attempts, max: 8 })
-                        : sizeKnown(u) ? `${u.pct}%` : fmtBytes(u.pos)}
-                    </span>
-                    <IconButton touch={false} variant="danger" onClick={() => cancelOrDismiss(u.id, live)}
-                      title={label} label={`${label} ${u.name}`}><CloseIcon size={14} /></IconButton>
-                  </div>
-                  {/* bară de progres: se umple pe octeți (XHR onprogress), colorată după stare */}
-                  <div className="mt-0.5 h-1 w-full overflow-hidden rounded-full bg-ink-800">
-                    <div
-                      className={`h-full rounded-full transition-[width] duration-200 ease-out motion-reduce:transition-none ${
-                        u.state === 'err' ? 'bg-rose-500' : u.state === 'done' ? 'bg-emerald-500'
-                        : u.state === 'stalled' || u.state === 'retrying' ? 'bg-amber-500' : 'bg-sky-500'}`}
-                      style={{ width: `${u.state === 'err' ? 100 : u.pct}%` }}
-                    />
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-        )}
+        {/* FS-05: bara de progres live are PROPRIUL abonament la snapshot (se re-randează la fiecare
+            tick), ca restul panoului — şi lista — să nu se re-randeze pe progres. */}
+        <PanelUploads hostId={props.host.id} />
       </aside>
 
       {menu && (

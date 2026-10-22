@@ -5,7 +5,8 @@ import {
   restoreOrphans, setUploadUser, speedTracker, startUpload, UP_CHUNK, UP_CHUNK_MAX, UP_CHUNK_MIN, upLsKey,
 } from './uploads'
 import { ApiError } from './api'
-import { uploadStore } from './uploadStore'
+import { hostJobSig, uploadStore } from './uploadStore'
+import type { UploadJob } from './uploadStore'
 
 const UID = 'a'.repeat(32)
 
@@ -474,5 +475,41 @@ describe('crc32 (IEEE, identic cu zlib.crc32 din agent)', () => {
     const bytes = new TextEncoder().encode('123456789')
     expect(crc32(0, bytes)).toBe(0xCBF43926)
     expect(crc32(crc32(0, bytes.slice(0, 4)), bytes.slice(4))).toBe(0xCBF43926)
+  })
+})
+
+describe('hostJobSig (FS-05): re-render on state change, not on progress ticks', () => {
+  const job = (id: string, hostId: number, state: UploadJob['state'], pct = 0): UploadJob =>
+    ({ id, hostId, hostName: 'nas', dest: '/srv/' + id, name: id, size: 100,
+       pos: pct, pct, bytesPerSec: 0, etaSec: null, state, attempts: 1 })
+  beforeEach(() => { for (const k of [...uploadStore.snapshot().keys()]) uploadStore.remove(k) })
+  afterEach(() => { for (const k of [...uploadStore.snapshot().keys()]) uploadStore.remove(k) })
+
+  it('is stable when only progress (pct/pos/speed/eta) changes', () => {
+    uploadStore.set(job('a', 1, 'running', 10))
+    const s0 = hostJobSig(1)
+    uploadStore.patch('a', { pct: 55, pos: 55, bytesPerSec: 1e6, etaSec: 3 })
+    expect(hostJobSig(1)).toBe(s0)              // a progress tick must NOT change the signature
+  })
+
+  it('changes when a job changes state, is added, or is removed', () => {
+    uploadStore.set(job('a', 1, 'running', 10))
+    const s0 = hostJobSig(1)
+    uploadStore.patch('a', { state: 'done' })
+    const s1 = hostJobSig(1)
+    expect(s1).not.toBe(s0)
+    uploadStore.set(job('b', 1, 'running'))
+    expect(hostJobSig(1)).not.toBe(s1)          // a new job
+    uploadStore.remove('b')
+    expect(hostJobSig(1)).toBe(s1)              // back to just `a:done`
+  })
+
+  it('is scoped to the host and excludes orphans', () => {
+    uploadStore.set(job('a', 1, 'running'))
+    const s0 = hostJobSig(1)
+    uploadStore.set(job('other', 2, 'running'))  // another host
+    expect(hostJobSig(1)).toBe(s0)               // does not affect host 1's signature
+    uploadStore.patch('a', { state: 'orphan' })  // orphan jobs live only in the global bar
+    expect(hostJobSig(1)).toBe('')
   })
 })
