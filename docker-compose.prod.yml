@@ -140,6 +140,16 @@ services:
     image: ${WEBTERM_IMAGE:-ghcr.io/sm26449/webterm:v3.6.20}
     restart: unless-stopped
     logging: *default-logging
+    # Resolve external names (the IdP for SSO, the SMTP relay, GitHub for the update check) through
+    # the configured upstreams directly. Docker's embedded resolver (127.0.0.11) still does service
+    # discovery for `traefik`/`dockerproxy`; `dns:` only replaces the UPSTREAM it forwards external
+    # queries to. Default was the host's systemd-resolved stub (127.0.0.53), which blipped with
+    # `[Errno -3] Temporary failure in name resolution` — dropping email alerts and flagging SSO
+    # "degraded" on the login page (2026-10-22). The host itself just forwards to these, so this
+    # only removes the flaky hop. Override with WEBTERM_DNS1/2 if your network needs a local resolver.
+    dns:
+      - ${WEBTERM_DNS1:-8.8.8.8}
+      - ${WEBTERM_DNS2:-1.1.1.1}
     security_opt:
       - no-new-privileges:true
     cap_drop:

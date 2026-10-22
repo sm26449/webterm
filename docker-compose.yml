@@ -12,6 +12,13 @@ services:
     build: .
     restart: unless-stopped
     logging: *default-logging
+    # Resolve external names through these upstreams directly instead of the host's resolver stub,
+    # which can blip with `[Errno -3] Temporary failure in name resolution` (drops email alerts and
+    # flags SSO degraded). Docker's embedded resolver (127.0.0.11) still handles service discovery;
+    # `dns:` only replaces the upstream it forwards external queries to. Override via WEBTERM_DNS1/2.
+    dns:
+      - ${WEBTERM_DNS1:-8.8.8.8}
+      - ${WEBTERM_DNS2:-1.1.1.1}
     # hardening: no privilege escalation; drop all caps except the minimum the
     # entrypoint needs (chown /data, then gosu-drop to the unprivileged user)
     security_opt:

@@ -9,6 +9,9 @@ back.
 
 ## [Unreleased]
 
+### Fixed
+- **The app container resolves external names through explicit upstream DNS.** Why: it forwarded external lookups (the IdP for SSO, the SMTP relay, GitHub for the update check) through the host's `systemd-resolved` stub, which intermittently failed with `[Errno -3] Temporary failure in name resolution` — dropping email alerts and flagging SSO "degraded" on the login page. The `app` service now sets `dns:` (default 8.8.8.8 / 1.1.1.1, overridable via `WEBTERM_DNS1`/`WEBTERM_DNS2`); Docker's embedded resolver still does service discovery for `traefik`/`dockerproxy`, so only the flaky external hop is removed.
+
 ## [3.6.20] — 2026-10-22 · agent (58)
 
 ### Fixed
