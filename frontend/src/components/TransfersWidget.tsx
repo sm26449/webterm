@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'reac
 import { createPortal } from 'react-dom'
 import type { Host } from '../lib/api'
 import { useI18n } from '../lib/i18n'
+import HelpTip from './HelpTip'
 import { notify } from '../lib/notify'
 import { lsGet, lsSet } from '../lib/storage'
 import { dismissUpload, fmtBytes } from '../lib/uploads'
@@ -171,6 +172,7 @@ export default function TransfersWidget(props: { hosts: Host[]; insertSid?: stri
           <div className="flex h-9 shrink-0 items-center gap-2 border-b border-ink-700 px-2">
             <span aria-hidden="true" className={`shrink-0 ${tone}`}>{icon}</span>
             <span className="font-semibold text-slate-200">{t('jobs.title')}</span>
+            <HelpTip id="transfers" />
             <span className="min-w-0 truncate font-mono tabular-nums text-slate-400">{countLabel}</span>
             {/* „Curăţă terminate" apare doar când totul s-a oprit şi chiar e ceva de curăţat */}
             {canClear && (

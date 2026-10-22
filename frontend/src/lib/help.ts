@@ -41,6 +41,13 @@ export const HELP = {
   customRoles: { doc: 'docs/ROLES.md#custom-roles' },
   ssoMapping: { doc: 'docs/ROLES.md#sso-group-mapping' },
   scim: { doc: 'docs/SSO.md#scim-provisioning-3611' },
+  timeBound: { doc: 'docs/ROLES.md#time-bound-roles' },
+  crownJewel: { doc: 'docs/ROLES.md#crown-jewel-hosts' },
+  certificates: { doc: 'docs/INSTALL.md#tls-certificates-monitoring-and-renewal' },
+  health: { doc: 'docs/INSTALL.md#system-health' },
+  transfers: { doc: 'docs/TRANSFERS.md#a-paste-is-a-paste-3616' },
+  rootMove: { doc: 'docs/TRANSFERS.md#why-cant-i-upload-into-a-root-owned-folder-369' },
+  splitViews: { doc: 'docs/SPLIT-VIEWS.md#split-views' },
 } satisfies Record<string, { doc: string; example?: (origin: string) => string }>
 
 export type HelpId = keyof typeof HELP

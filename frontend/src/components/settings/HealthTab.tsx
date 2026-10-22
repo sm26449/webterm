@@ -11,6 +11,7 @@ import {
   type HealthCheck, type HealthStatus, type MuteMode,
 } from '../../lib/health'
 import { heading } from './ui'
+import HelpTip from '../HelpTip'
 import { Badge, Button } from '../ui'
 import { ChevronDownIcon } from '../Icons'
 import FileMenu, { type MenuItem } from '../FileMenu'
@@ -254,7 +255,7 @@ export default function HealthTab(props: { onJump?: (cat: string, section?: stri
 
   return (
     <section data-setting-id="systemHealth" hidden={!vis('systemHealth')}>
-      <h3 className={heading}>{t('health.title')}</h3>
+      <h3 className={heading + ' flex items-center gap-2'}>{t('health.title')}<HelpTip id="health" /></h3>
       <p className="mt-1 text-xs text-slate-500">{t('health.hint')}</p>
       <NotLoaded state={load} onRetry={() => { void reload() }} />
       {st && (

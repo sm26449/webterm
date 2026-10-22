@@ -7,6 +7,7 @@ import { copyText } from '../../lib/clipboard'
 import { askSecret } from '../../lib/secretPrompt'
 import { certStateText, certTone, renewMode, sortCerts, type CertItem, type CertStatus } from '../../lib/certs'
 import { field, heading } from './ui'
+import HelpTip from '../HelpTip'
 import { Badge, Button } from '../ui'
 import type { LoadState } from '../../lib/loadable'
 import NotLoaded from './NotLoaded'
@@ -106,7 +107,7 @@ export default function CertificatesSection() {
   const items = st ? sortCerts(st.items) : []
   return (
     <>
-      <h3 className={heading}>{t('settings.certs.title')}</h3>
+      <h3 className={heading + ' flex items-center gap-2'}>{t('settings.certs.title')}<HelpTip id="certificates" /></h3>
       <p className="mt-1 text-xs text-slate-500">{t('settings.certs.hint', { warn: st?.warn_days ?? 14, crit: st?.crit_days ?? 3 })}</p>
       <NotLoaded state={load} onRetry={() => { void reload() }} />
       {st && (
