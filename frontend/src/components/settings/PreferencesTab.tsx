@@ -7,13 +7,14 @@ import UpdateCommand from '../UpdateCommand'
 import { lsGet, lsSet } from '../../lib/storage'
 import { ensureNotificationPermission } from '../../lib/notify'
 import { setTaskNotifyEnabled, setTaskNotifySeconds, taskNotifyEnabled, taskNotifySeconds } from '../../lib/taskNotify'
+import { pushStatus, pushSupported, setPushPrefs, subscribeThisDevice, testPush, thisDeviceSubscribed, unsubscribeThisDevice, type PushStatus } from '../../lib/push'
 import { isWalkthroughDone, markWalkthroughDone, resetWalkthrough } from '../../lib/walkthrough'
 import { resetAllTips } from '../../lib/coachtips'
 import { INBOX_REL, PasteDest, inboxDays, pasteDest, setInboxDays, setPasteDest } from '../../lib/transfers'
 import { UpdatesMode, setUpdatesMode, unmuteAllHosts, useUpdatesPref } from '../../lib/updatesPref'
 import { field, heading } from './ui'
 import HelpTip from '../HelpTip'
-import { ErrorState } from '../ui'
+import { Button, ErrorState } from '../ui'
 
 // Preferinţe: fus orar, accesibilitate (mod screen-reader), verificarea de versiune. Extras din
 // SettingsModal ca tab de sine stătător (îşi ţine starea, se încarcă la montare).
@@ -24,7 +25,7 @@ type UpdateInfo = {
 }
 
 export default function PreferencesTab() {
-  const { t } = useI18n()
+  const { t, lang } = useI18n()
   const vis = useSectionVisible()   // 3.6: secţiunile fără permisiunea globală nu apar
   const [tz, setTz] = useState(getTimezone())
   const [clock, setClock] = useState(timeInZone(getTimezone()))
@@ -40,6 +41,37 @@ export default function PreferencesTab() {
   // notificări de task (Faza 1): preferinţă per-browser (ca rendererul). Toggle + prag în secunde.
   const [taskNotif, setTaskNotif] = useState(() => taskNotifyEnabled())
   const [taskSec, setTaskSec] = useState(() => String(taskNotifySeconds()))
+  // push pe acest dispozitiv (Faza 2): telefon cu aplicația închisă. `pushSt` = starea contului +
+  // disponibilitatea server-side; `pushHere` = e abonat DISPOZITIVUL ăsta.
+  const [pushSt, setPushSt] = useState<PushStatus | null>(null)
+  const [pushHere, setPushHere] = useState(false)
+  const [pushBusy, setPushBusy] = useState(false)
+  const [pushErr, setPushErr] = useState('')
+  const [pushMsg, setPushMsg] = useState('')
+  useEffect(() => {
+    if (!pushSupported()) return
+    pushStatus().then(setPushSt).catch(() => { /* push nedisponibil pe server */ })
+    thisDeviceSubscribed().then(setPushHere)
+  }, [])
+  async function togglePush(on: boolean) {
+    setPushErr(''); setPushMsg(''); setPushBusy(true)
+    try {
+      if (on) {
+        const st = await subscribeThisDevice(lang)
+        await setPushPrefs(true, taskNotifySeconds())   // o singură valoare de prag (cea de deasupra)
+        setPushSt(st); setPushHere(true)
+      } else {
+        setPushSt(await unsubscribeThisDevice()); setPushHere(false)
+      }
+    } catch (e) {
+      setPushErr(e instanceof Error && e.message === 'denied' ? t('push.denied') : (errText(e, t) || t('push.failed')))
+      setPushHere(await thisDeviceSubscribed())
+    } finally { setPushBusy(false) }
+  }
+  async function doPushTest() {
+    setPushErr(''); setPushMsg('')
+    try { const r = await testPush(); setPushMsg(t('push.testSent', { n: r.sent })) } catch (e) { setPushErr(errText(e, t) || t('push.failed')) }
+  }
   const [upd, setUpd] = useState<UpdateInfo | null>(null)
   const [updBusy, setUpdBusy] = useState(false)
   // transferuri: unde ajung fişierele lipite în terminal + retenţia inbox-ului (lib/transfers.ts)
@@ -224,6 +256,30 @@ export default function PreferencesTab() {
             className={field + ' max-w-[8rem]'} />
           <span className="mt-0.5 block text-xs text-slate-500">{t('settings.taskNotifySecondsHint')}</span>
         </label>
+        {/* Faza 2 — push pe acest dispozitiv (telefon cu aplicația închisă); apare doar dacă e
+            suportat de browser ȘI configurat pe server (cheie VAPID). */}
+        {pushSupported() && pushSt?.available && (
+          <div className="mt-3 border-t border-ink-800 pt-3">
+            <label className="flex cursor-pointer items-start gap-2.5 text-sm text-slate-300">
+              <input type="checkbox" checked={pushHere} disabled={pushBusy}
+                onChange={(e) => { void togglePush(e.target.checked) }}
+                className="mt-0.5 h-4 w-4 rounded-md accent-sky-600" />
+              <span>
+                {t('settings.pushEnable')}
+                <span className="mt-0.5 block text-xs text-slate-500">{t('settings.pushEnableHint')}</span>
+              </span>
+            </label>
+            {pushHere && (
+              <div className="mt-2">
+                <Button variant="secondary" disabled={pushBusy} onClick={() => { void doPushTest() }}>
+                  {t('push.test')}
+                </Button>
+              </div>
+            )}
+            <span role="status" className={pushMsg ? 'mt-1 block text-xs wt-good' : 'sr-only'}>{pushMsg}</span>
+            <span role="alert" className={pushErr ? 'mt-1 block text-xs wt-danger' : 'sr-only'}>{pushErr}</span>
+          </div>
+        )}
       </section>
 
       <section data-setting-id="transfers">

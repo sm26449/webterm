@@ -39,3 +39,31 @@ self.addEventListener('fetch', (e) => {
       .catch(() => caches.match(req).then((hit) => hit || caches.match('/'))),
   )
 })
+
+/* Web Push (Faza 2): notificare pe telefon chiar cu aplicaţia ÎNCHISĂ. Payload-ul e JSON GENERIC
+   trimis de gateway (push.py) — niciodată text de terminal (trece prin serviciul vendorului). iOS
+   cere o notificare VIZIBILĂ la fiecare push (nu există push silenţios), deci afişăm mereu una. */
+self.addEventListener('push', (e) => {
+  let d = {}
+  try { d = e.data ? e.data.json() : {} } catch { d = {} }
+  e.waitUntil(self.registration.showNotification(d.title || 'WebTerm', {
+    body: d.body || '',
+    tag: d.tag || undefined,          // dedup: un tag nou înlocuieşte notificarea veche cu acelaşi tag
+    icon: '/favicon.svg',
+    badge: '/favicon.svg',
+    data: { url: d.url || '/' },
+  }))
+})
+
+/* Click pe notificare: adu în faţă o fereastră a aplicaţiei (sau deschide una). */
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close()
+  const url = (e.notification.data && e.notification.data.url) || '/'
+  e.waitUntil((async () => {
+    const all = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
+    for (const c of all) {
+      if ('focus' in c) { try { await c.focus(); return } catch { /* fereastra s-a închis între timp */ } }
+    }
+    if (self.clients.openWindow) await self.clients.openWindow(url)
+  })())
+})

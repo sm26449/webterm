@@ -34,8 +34,8 @@ from .errors import ApiError
 from . import webauthn_api
 from . import fscopy
 from . import (accounts, alert_history, audit, authz, backup, certmon, cloudbackup, config, core,
-               db, email_alerts, health, healthcmd, pyruntime, replay, rootmove, scim, security,
-               signing, ssomap,
+               db, email_alerts, health, healthcmd, push, pyruntime, replay, rootmove, scim,
+               security, signing, ssomap,
                syshealth, totp, updatecheck)
 
 log = logging.getLogger("webterm")
@@ -1287,6 +1287,7 @@ async def delete_user(uid: int, body: ReauthOnly, request: Request,
                     "DELETE FROM scim_group_members WHERE user_id=?",   # 3.6.18: fără FK/cascade (SC-02)
                     "DELETE FROM split_views WHERE user_id=?",
                     "DELETE FROM pending_ssh_keys WHERE user_id=?",
+                    "DELETE FROM push_subscriptions WHERE user_id=?",   # abonamentele de push
                     "DELETE FROM users WHERE id=?"):
             await db.execute(sql, uid)
         # 3.6: id-ul nu se mai refoloseşte (prag monoton), iar urmele lui primesc id-ul NEGAT —
@@ -2929,6 +2930,126 @@ async def save_alert_prefs(body: AlertPrefsIn, request: Request, user=Depends(se
     if off:
         audit.detail(request, "alert email off for: %s" % ",".join(sorted(off))[:300])
     return {"prefs": prefs}
+
+
+# ---------------------------------------------------------------------------
+# Web Push — notificări pe telefon cu aplicaţia ÎNCHISĂ (Faza 2). Detecţia e server-side
+# (core.SessionHub._detect_task_event); aici doar abonamentul + preferinţele contului. Payload-ul
+# e GENERIC (push.py) — fără text de terminal, fiindcă trece prin serviciul vendorului.
+# ---------------------------------------------------------------------------
+class PushSubIn(BaseModel):
+    endpoint: str
+    p256dh: str
+    auth: str
+
+
+class PushSubscribeIn(BaseModel):
+    subscription: PushSubIn
+    lang: str = "en"
+
+
+class PushPrefsIn(BaseModel):
+    enabled: bool
+    minSeconds: int = 30
+
+
+def _clamp_push_seconds(n) -> int:
+    try:
+        return max(1, min(3600, int(n)))
+    except (TypeError, ValueError):
+        return 30
+
+
+MAX_PUSH_SUBS = 20                 # plafon de dispozitive/cont (anti-DoS + limitează amplificarea)
+_push_test_at: dict = {}           # user_id → ultimul /api/push/test (rate-limit în memorie)
+
+
+@router.get("/api/push/status")
+async def push_status(user=Depends(security.require_user)):
+    """Starea push a contului + cheia publică VAPID (pentru pushManager.subscribe). `available` =
+    push-ul e configurat server-side (cheia VAPID există); fără ea, UI-ul ascunde opţiunea."""
+    urow = await db.fetchone(
+        "SELECT push_task_enabled, push_task_min_seconds FROM users WHERE id=?", user["id"])
+    cnt = (await db.fetchone(
+        "SELECT COUNT(*) AS c FROM push_subscriptions WHERE user_id=?", user["id"]))["c"]
+    return {
+        "available": push.enabled(),
+        "publicKey": push.public_key_b64(),
+        "enabled": bool(urow and urow["push_task_enabled"]),
+        "minSeconds": (urow["push_task_min_seconds"] if urow else 30) or 30,
+        "devices": cnt,
+    }
+
+
+@router.post("/api/push/subscribe")
+async def push_subscribe(body: PushSubscribeIn, request: Request, user=Depends(security.require_user)):
+    """Înregistrează abonamentul acestui dispozitiv şi porneşte push-ul pentru cont. `endpoint` e
+    unic global: la re-abonare actualizăm cheile (ON CONFLICT)."""
+    if not push.enabled():
+        raise ApiError(503, "push.unavailable", "web push is not configured on this server")
+    s = body.subscription
+    if not push.endpoint_allowed(s.endpoint):     # SSRF: doar servicii de push cunoscute, https
+        raise ApiError(400, "push.badEndpoint", "not a recognised web-push endpoint")
+    existing = await db.fetchone(
+        "SELECT 1 FROM push_subscriptions WHERE user_id=? AND endpoint=?", user["id"], s.endpoint)
+    if not existing:
+        n = (await db.fetchone(
+            "SELECT COUNT(*) AS c FROM push_subscriptions WHERE user_id=?", user["id"]))["c"]
+        if n >= MAX_PUSH_SUBS:
+            raise ApiError(400, "push.tooMany", "too many devices subscribed on this account",
+                           vars={"max": MAX_PUSH_SUBS})
+    ua = (request.headers.get("user-agent") or "")[:200]
+    lang = body.lang if body.lang in ("en", "ro") else "en"
+    await db.execute(
+        "INSERT INTO push_subscriptions(user_id, endpoint, p256dh, auth, ua, created)"
+        " VALUES(?,?,?,?,?,?)"
+        " ON CONFLICT(endpoint) DO UPDATE SET user_id=excluded.user_id, p256dh=excluded.p256dh,"
+        " auth=excluded.auth, ua=excluded.ua, fail_count=0",
+        user["id"], s.endpoint, s.p256dh, s.auth, ua, time.time())
+    await db.execute("UPDATE users SET push_task_enabled=1, push_lang=? WHERE id=?", lang, user["id"])
+    cnt = (await db.fetchone(
+        "SELECT COUNT(*) AS c FROM push_subscriptions WHERE user_id=?", user["id"]))["c"]
+    audit.detail(request, "push subscribed (%d device(s))" % cnt)
+    return {"ok": True, "devices": cnt}
+
+
+@router.post("/api/push/unsubscribe")
+async def push_unsubscribe(body: PushSubIn, user=Depends(security.require_user)):
+    """Scoate abonamentul acestui dispozitiv (doar al contului curent)."""
+    await db.execute("DELETE FROM push_subscriptions WHERE user_id=? AND endpoint=?",
+                     user["id"], body.endpoint)
+    cnt = (await db.fetchone(
+        "SELECT COUNT(*) AS c FROM push_subscriptions WHERE user_id=?", user["id"]))["c"]
+    return {"ok": True, "devices": cnt}
+
+
+@router.post("/api/push/prefs")
+async def push_prefs(body: PushPrefsIn, user=Depends(security.require_user)):
+    """Pornit/oprit + pragul (secunde). NU şterge abonamentele — oprit = pur şi simplu nu trimitem."""
+    await db.execute("UPDATE users SET push_task_enabled=?, push_task_min_seconds=? WHERE id=?",
+                     1 if body.enabled else 0, _clamp_push_seconds(body.minSeconds), user["id"])
+    return {"ok": True}
+
+
+@router.post("/api/push/test")
+async def push_test(user=Depends(security.require_user)):
+    """Push de test către dispozitivele contului — ca butonul de test SMTP/webhook."""
+    now = time.time()
+    if now - _push_test_at.get(user["id"], 0) < 30:   # rate-limit: nu transforma /test în scanner
+        raise ApiError(429, "push.testRate", "wait a few seconds before testing again")
+    _push_test_at[user["id"]] = now
+    subs = await db.fetchall(
+        "SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE user_id=?", user["id"])
+    if not subs:
+        raise ApiError(400, "push.noDevices", "no device is subscribed on this account")
+    urow = await db.fetchone("SELECT push_lang FROM users WHERE id=?", user["id"])
+    st = push.strings(urow["push_lang"] if urow else "en")
+    gone = await asyncio.to_thread(
+        push.send, [(s["endpoint"], s["p256dh"], s["auth"]) for s in subs],
+        st["test_title"], st["test_body"], "push-test")
+    for ep in gone:
+        await db.execute("DELETE FROM push_subscriptions WHERE endpoint=?", ep)
+    return {"ok": True, "sent": len(subs) - len(gone), "gone": len(gone)}
 
 
 # ---------------------------------------------------------------------------

@@ -29,7 +29,7 @@ from typing import Dict, Optional, Set
 import asyncssh
 import telnetlib3
 
-from . import config, db, email_alerts, osc133, security, signing, telnet
+from . import config, db, email_alerts, osc133, push, security, signing, telnet
 
 log = logging.getLogger("webterm")
 
@@ -1141,6 +1141,13 @@ class SessionHub:
         # `out_pos` = offsetul logic de scriere (= out_f.tell(), ţinut fără syscall pe calea fierbinte)
         self.osc = osc133.Osc133Scanner()
         self.out_pos = self.out_f.tell()
+        # Notificări de task pe telefon cu aplicaţia ÎNCHISĂ (Faza 2, Web Push): detectăm server-side
+        # C→D (comandă terminată) din scanner şi, la exit≠0, trimitem un push către PROPRIETARUL sesiunii
+        # (cine a deschis-o; NULL = pre-3.6). `_last_push_at` = rate-limit anti-flood (vezi _detect_task_event).
+        self._owner_id: Optional[int] = row["created_by_id"] if "created_by_id" in row.keys() else None
+        self._prev_osc_last: Optional[str] = None
+        self._task_started_at: Optional[float] = None
+        self._last_push_at = 0.0
         if is_new:
             header = {"version": 2, "width": self.cols, "height": self.rows,
                       "timestamp": int(self.created)}
@@ -1504,12 +1511,72 @@ class SessionHub:
         except Exception:                     # noqa: BLE001 — un bug de parser nu rupe fluxul
             log.exception("osc133 scan %s failed", self.sid)
             self.osc.gap()                    # fail-closed: starea devine „necunoscută"
+        try:
+            self._detect_task_event()
+        except Exception:                     # noqa: BLE001 — notificarea nu rupe NICIODATĂ relay-ul
+            log.exception("task-event detect %s", self.sid)
         self.out_pos += len(data)
         self.out_f.write(data)
         self._cast_event("o", data)
         for client in self.clients:
             client.push(data)
         await self._checkpoint()
+
+    def _detect_task_event(self) -> None:
+        """Tranziţia OSC 133 C→D = o comandă s-a terminat. La exit≠0 programăm un push către
+        proprietar (Faza 2), cât browserul poate fi închis. Durata e C→D măsurat server-side.
+        Rate-limit per hub (10 s): un flux ostil de „133;D;1" fals nu programează un potop de
+        task-uri. Pragul real (secunde) + „push pornit?" se verifică în _push_task_failed (per cont)."""
+        cur = self.osc.last
+        prev = self._prev_osc_last
+        if cur == prev:
+            return
+        self._prev_osc_last = cur
+        if cur == "C":
+            self._task_started_at = time.monotonic()
+            return
+        if cur != "D" or self._task_started_at is None:
+            return
+        duration = time.monotonic() - self._task_started_at
+        exit_code = self.osc.last_exit
+        self._task_started_at = None
+        if exit_code in (None, 0) or self._owner_id is None:
+            return                            # succes / exit necunoscut / sesiune fără proprietar
+        now = time.monotonic()
+        if now - self._last_push_at < 10:     # anti-flood
+            return
+        self._last_push_at = now
+        asyncio.create_task(self._push_task_failed(int(exit_code), duration))
+
+    async def _push_task_failed(self, exit_code: int, duration: float) -> None:
+        """Trimite un push „task eșuat" proprietarului, dacă are push pornit, abonamente, și comanda
+        a rulat peste pragul lui. Payload GENERIC (trece prin vendor): doar exit + host, fără text de
+        comandă. Best-effort: orice eroare e logată, nu rupe sesiunea."""
+        try:
+            if not push.enabled():
+                return
+            urow = await db.fetchone(
+                "SELECT push_task_enabled, push_task_min_seconds, push_lang, disabled FROM users WHERE id=?",
+                self._owner_id)
+            if not urow or urow["disabled"] or not urow["push_task_enabled"]:
+                return                        # cont dezactivat NU primeşte push (fail-closed)
+            if duration < (urow["push_task_min_seconds"] or 30):
+                return
+            subs = await db.fetchall(
+                "SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE user_id=?", self._owner_id)
+            if not subs:
+                return
+            hrow = await db.fetchone("SELECT name FROM hosts WHERE id=?", self.host_id)
+            host = (hrow["name"] if hrow else "") or "host"
+            st = push.strings(urow["push_lang"] or "en")
+            body = st["failed_body"].format(code=exit_code, host=host)
+            gone = await asyncio.to_thread(
+                push.send, [(s["endpoint"], s["p256dh"], s["auth"]) for s in subs],
+                st["failed_title"], body, "taskfail-%s" % self.sid)
+            for ep in gone:
+                await db.execute("DELETE FROM push_subscriptions WHERE endpoint=?", ep)
+        except Exception:                     # noqa: BLE001 — notificarea e best-effort
+            log.exception("push task-failed %s", self.sid)
 
     async def on_exit(self, status, sig) -> None:
         if self.closed:

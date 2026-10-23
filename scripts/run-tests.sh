@@ -65,7 +65,7 @@ CI_TESTS="agent_hardening agent_reliability agent_tmux_hygiene ed25519_kat
           rbac_roles rbac_oidc sso_rolemap authentik_provision certmon cert_renew_script
           syshealth host_health_script upload_root_move pyruntime
           last_login rbac_explain rbac_expiry rbac_crown rbac_token_role
-          scim_protocol scim_accounts"
+          scim_protocol scim_accounts push"
 
 # security_test e ultimul: îşi porneşte singur un uvicorn efemer şi verifică auth obligatoriu
 # pe fs, CSWSH, lockout 429, headere, traversare, gating enroll/share — regresii pe care

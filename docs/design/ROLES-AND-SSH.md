@@ -1690,6 +1690,11 @@ middleware plus ASGI WS middleware in `main.py`) and the SPA/asset catch-all. Li
 | `/api/alerts` (1582) | DELETE | — | S | |
 | `/api/alerts/prefs` (1589) | GET | — | S | |
 | `/api/alerts/prefs` (1594) | POST | — | S | |
+| `/api/push/status` (2964) | GET | — | S | own push state + server VAPID public key |
+| `/api/push/subscribe` (2981) | POST | — | S | own device subscription |
+| `/api/push/unsubscribe` (3003) | POST | — | S | own device subscription |
+| `/api/push/prefs` (3013) | POST | — | S | own push preferences |
+| `/api/push/test` (3021) | POST | — | S | test push to own devices |
 | `/api/version` (2057) | GET | — | S | |
 | `/api/changelog` (3611) | GET | — | S | |
 | `/api/split-views` (4476) | GET | — | S | panes without access show "no access" |

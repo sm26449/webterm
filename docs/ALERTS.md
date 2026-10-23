@@ -297,18 +297,35 @@ and register it in `~/.claude/settings.json`:
 The `Notification` hook (Claude is waiting on a permission prompt) can use the same script with a
 different body, so you're pinged when approval is pending while you're away.
 
-### What it does and doesn't reach
+### Two layers: in-app, and to a closed phone
 
-These use the **browser's Notification API**, so they arrive while the WebTerm tab or the installed
-PWA is open — **including in the background**, but not when the phone is locked or the app is fully
-swiped away. Delivery to a closed app (**Web Push**: a VAPID key, a service-worker push handler and a
-send path in the gateway) is a separate, larger step; because a push payload travels through
-Apple/Google, it would never carry terminal output — only "a task finished on host X". The payload
-here, being local to your own browser, may include a short command snippet.
+The toggle above (**while the app is open**) uses the **browser's Notification API**: it arrives while
+the WebTerm tab or installed PWA is open, **including in the background**, but not when the phone is
+locked or the app is swiped away. It is a **per-browser** preference and its payload, being local to
+your own browser, may include a short command snippet.
 
-Frontend: `frontend/src/lib/taskNotify.ts` (pure logic + per-browser preference), wired in
-`frontend/src/components/SessionView.tsx` (OSC 133 completion + the OSC 777 handler) with the toggle in
-`frontend/src/components/settings/PreferencesTab.tsx`.
+Under it, **"Also push to this device (even when the app is closed)"** turns on **Web Push**. This one
+is driven by the **server**: the gateway's session hub scans the stream even with no browser attached
+(`core.SessionHub._detect_task_event`, OSC 133 `C`→`D`), so when a command fails after your threshold
+it sends a push that reaches a **locked phone / closed app**. On iPhone this works **only** when WebTerm
+is added to the Home Screen (iOS 16.4+), and the permission must be granted from a tap — which is why
+the toggle subscribes on click.
+
+Because a Web Push payload travels through the vendor's service (Apple/Google/Mozilla), it is always
+**generic** — `Task failed · exit N · host` — and **never** carries command text or terminal output;
+the detail stays in-app. The server signs with a **VAPID** key kept at `DATA_DIR/vapid.key` (generated
+once, `0600`, like the agent signing key); if it is missing or unreadable, Web Push is simply disabled
+and the toggle does not appear (fail-closed). Subscriptions are per account and per device; they are
+deleted when the account is disabled or deleted, and a dead endpoint (HTTP 410/404) is pruned on the
+next send. Only failed commands (`exit ≠ 0`) are pushed — an interactive agent's explicit OSC 777
+notification is in-app only (it has no exit code, and "only on failure" is the chosen filter).
+
+Code. Frontend: `frontend/src/lib/taskNotify.ts` (in-app logic + per-browser preference) wired in
+`frontend/src/components/SessionView.tsx`; `frontend/src/lib/push.ts` (Web Push subscribe/prefs/test)
+with both toggles in `frontend/src/components/settings/PreferencesTab.tsx`; the `push`/`notificationclick`
+handlers in `frontend/public/sw.js`. Backend: `gateway/app/push.py` (VAPID + aes128gcm via `http_ece`
++ `urllib` send), detection in `gateway/app/core.py` + the exit-code reading in `gateway/app/osc133.py`,
+endpoints `/api/push/{status,subscribe,unsubscribe,prefs,test}` in `gateway/app/api.py`.
 
 ## Maintenance notes
 

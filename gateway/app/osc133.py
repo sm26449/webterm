@@ -94,6 +94,19 @@ _STRIPPED_MODES = (b"47", b"1047", b"1048", b"1049")     # exact ce scoate read_
 _HIGH = re.compile(rb"[\x80-\xff]")
 
 
+def _exit_from(tail: bytes) -> Optional[int]:
+    """Numărul din payload-ul de după felul marcajului („0" din „D;0"); None dacă nu sunt cifre.
+    ADITIV (Faza 2): nu influenţează deloc decizia guardrail-ului, care priveşte doar felul."""
+    if not tail:
+        return None
+    end = tail.find(b";")
+    num = tail if end < 0 else tail[:end]
+    try:
+        return int(num) if num.isdigit() else None
+    except ValueError:        # număr absurd de lung
+        return None
+
+
 class Osc133Scanner:
     """`integrated` = s-a văzut un B (sfârşit de prompt), ca `CommandTracker.integrated`.
     `last` = felul ultimului marcaj 133 ('A'|'B'|'C'|'D') sau None (necunoscut: niciun marcaj de la
@@ -101,12 +114,16 @@ class Osc133Scanner:
     lui (None = nu se ştie). `last_alt` = emis pe ecranul alternativ. `strip_end` = capătul ultimei
     secvenţe pe care read_tail o scoate din replay."""
 
-    __slots__ = ("integrated", "last", "last_start", "last_alt", "strip_end", "alt",
+    __slots__ = ("integrated", "last", "last_exit", "last_start", "last_alt", "strip_end", "alt",
                  "_phase", "alt_unknown", "_in_osc", "_start", "_head", "_size", "_taint", "_carry", "_carry_pos")
 
     def __init__(self) -> None:
         self.integrated = False
         self.last: Optional[str] = None
+        # exit code-ul ultimului marcaj „D" (int) sau None. ADITIV pentru notificările de task
+        # (Faza 2): guardrail-ul nu-l citeşte — foloseşte doar `last`/`integrated`. „Doar adaug
+        # citiri, nu scurtez" (regula din 3.6.13).
+        self.last_exit: Optional[int] = None
         self.last_start: Optional[int] = None
         self.last_alt = False
         self.strip_end: Optional[int] = None
@@ -125,6 +142,7 @@ class Osc133Scanner:
 
     def _unknown(self) -> None:
         self.last = None
+        self.last_exit = None
         self.last_start = None
         self.last_alt = False
         self._phase = None
@@ -213,6 +231,7 @@ class Osc133Scanner:
         if taint or not clean_ident or size > PAYLOAD_LIMIT or (sep < 0 and len(head) >= HEAD_MAX):
             self._unknown()
             return
+        exit_code = None
         if sep < 0:
             kind = b""
         else:
@@ -222,10 +241,14 @@ class Osc133Scanner:
                 self._unknown()                # felul poate continua dincolo de fereastră
                 return
             kind = payload if end < 0 else payload[:end]
-        self._mark(kind.decode("latin-1"), sep >= 0 and len(head[sep + 1:]) > 2, start, osc_end)
+            if kind == b"D" and end >= 0:
+                exit_code = _exit_from(payload[end + 1:])
+        self._mark(kind.decode("latin-1"), sep >= 0 and len(head[sep + 1:]) > 2, start, osc_end, exit_code)
 
-    def _mark(self, k: str, has_text: bool, start: Optional[int], osc_end: int) -> None:
-        """Un marcaj 133 citit sigur: `k` = felul, `has_text` = payload „X;<ceva>" (pentru E)."""
+    def _mark(self, k: str, has_text: bool, start: Optional[int], osc_end: int,
+              exit_code: Optional[int] = None) -> None:
+        """Un marcaj 133 citit sigur: `k` = felul, `has_text` = payload „X;<ceva>" (pentru E),
+        `exit_code` = numărul din „D;<cod>" (doar pentru D; ADITIV, pentru notificările de task)."""
         if k == "B":
             self.integrated = True
         if k == "C":
@@ -243,6 +266,7 @@ class Osc133Scanner:
         elif k == "E":
             self._phase = "BE" if self._phase == "B" and has_text else None
             self.last = None                   # E nu e o stare în sine; C-ul care urmează decide
+            self.last_exit = None
             self.last_start = None
             self.last_alt = False
             return
@@ -252,6 +276,7 @@ class Osc133Scanner:
             self._unknown()
             return
         self.last = k
+        self.last_exit = exit_code if k == "D" else None
         self.last_start = start
         self.last_alt = self.alt or self.alt_unknown
 
@@ -309,8 +334,9 @@ class Osc133Scanner:
                     if f is not None:
                         kind = f.group(1) or b""
                         rest = f.group(2)
+                        exit_code = _exit_from(rest[1:]) if (kind == b"D" and rest) else None
                         self._mark(kind.decode("ascii"), rest is not None and len(rest) > 1,
-                                   pos + j, pos + f.end())
+                                   pos + j, pos + f.end(), exit_code)
                         i = f.end()
                         continue
                 self._osc_begin(pos + j, False)

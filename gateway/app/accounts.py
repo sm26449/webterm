@@ -143,6 +143,7 @@ async def disable(uid: int, *, by: str, actor: str, ip: str, reason: str) -> Opt
         await db.execute("UPDATE users SET disabled=1, disabled_at=?, disabled_by=? WHERE id=?",
                          now, by, uid)
         await db.execute("DELETE FROM web_sessions WHERE user_id=?", uid)
+        await db.execute("DELETE FROM push_subscriptions WHERE user_id=?", uid)  # oprește push-ul pe dispozitive
         authz.bump_epoch()                  # live sockets re-check NOW (session gone → 4401)
     email = row["email"]
     security.clear_stepup_for(uid)

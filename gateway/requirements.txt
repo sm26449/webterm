@@ -11,3 +11,8 @@ telnetlib3==4.0.5
 # SSO/OIDC: validarea id_token (RS256 via JWKS). PyJWT e standardul de-facto pentru JWT în
 # Python; `[crypto]` trage cryptography (deja pinuit mai sus). Vezi gateway/app/oidc.py.
 PyJWT[crypto]==2.15.1
+# Web Push (notificări pe telefon cu aplicația închisă): criptarea payload-ului aes128gcm
+# (RFC 8188). Depinde DOAR de cryptography (deja pinuit). JWT-ul VAPID (ES256) îl facem cu
+# PyJWT de mai sus, POST-ul cu urllib (stdlib) — deci NU tragem pywebpush/requests/aiohttp.
+# Vezi gateway/app/push.py. Suprafață minimă, deliberat (ethos: puține dependințe).
+http-ece==1.2.1

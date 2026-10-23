@@ -4121,6 +4121,18 @@ const ro: Lang = {
     'tasknotify.failedBody': "{cmd} — exit {code}",
     'tasknotify.program': "{name}",
     'tasknotify.terminal': "terminal",
+    // Faza 2 — push pe acest dispozitiv (telefon cu aplicaţia închisă)
+    'settings.pushEnable': "Trimite și pe acest dispozitiv (chiar cu aplicația închisă)",
+    'settings.pushEnableHint': "Trimite aceeași alertă „task eșuat” către acest dispozitiv prin sistem, ca să ajungă la tine cu browserul sau PWA-ul complet închis — pe iPhone doar dacă WebTerm e adăugat pe ecranul principal. Folosește pragul de mai sus.",
+    'push.test': "Trimite un push de test",
+    'push.testSent': "Push de test trimis către {n} dispozitiv(e).",
+    'push.denied': "Notificările sunt blocate pentru acest site — permite-le din setările browserului.",
+    'push.failed': "Nu am putut activa push-ul pe acest dispozitiv.",
+    'err.push.unavailable': "Web push nu e configurat pe acest server.",
+    'err.push.noDevices': "Niciun dispozitiv abonat pe acest cont.",
+    'err.push.badEndpoint': "Acela nu e un serviciu de push recunoscut — încearcă să reactivezi notificările.",
+    'err.push.tooMany': "Prea multe dispozitive abonate pe acest cont (maxim {max}).",
+    'err.push.testRate': "Așteaptă câteva secunde înainte de alt test.",
   },
 }
 

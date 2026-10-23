@@ -438,6 +438,22 @@ CREATE TABLE IF NOT EXISTS health_checks (
     muted_sig TEXT,
     muted_by TEXT
 );
+-- Web Push: abonamentele browserului (per cont, per dispozitiv). `endpoint` e URL-ul serviciului
+-- de push (Apple/Google/Mozilla) — unic. `p256dh`/`auth` sunt cheile clientului pentru criptarea
+-- payload-ului (aes128gcm). Fără FK formal (ca restul schemei); ștergerea contului le curăță în cod.
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    endpoint TEXT UNIQUE NOT NULL,
+    p256dh TEXT NOT NULL,
+    auth TEXT NOT NULL,
+    ua TEXT DEFAULT '',
+    created REAL NOT NULL,
+    last_ok REAL,
+    last_fail REAL,
+    fail_count INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_push_subs_user ON push_subscriptions(user_id);
 """
 
 # additive migrations for DBs created by an older version
@@ -635,6 +651,15 @@ MIGRATIONS = [
     # scaneze toată tabela la fiecare resolve (zeci de mii de conturi în scenariul de scalare).
     "CREATE INDEX IF NOT EXISTS idx_users_scim_user_name_lower ON users(lower(scim_user_name))",
     "CREATE INDEX IF NOT EXISTS idx_users_email_lower ON users(lower(email))",
+    # 3.6.x — Web Push (notificări pe telefon cu aplicația închisă): preferință PER-CONT, fiindcă
+    # push-ul e condus de SERVER (hub-ul detectează task-ul terminat cu browserul închis), deci nu
+    # poate sta în localStorage ca preferința locală din Faza 1. Oprit implicit (opt-in, cere
+    # permisiune din gestul utilizatorului). Pragul în secunde, ca la Faza 1.
+    "ALTER TABLE users ADD COLUMN push_task_enabled INTEGER DEFAULT 0",
+    "ALTER TABLE users ADD COLUMN push_task_min_seconds INTEGER DEFAULT 30",
+    # limba aleasă la abonare — textul push-ului e generat server-side (app închisă), deci nu poate
+    # folosi catalogul din browser; vezi push._STRINGS (en/ro).
+    "ALTER TABLE users ADD COLUMN push_lang TEXT DEFAULT 'en'",
 ]
 
 # tabele adăugate ulterior (executeScript de mai sus le creează pe DB-uri noi;

@@ -4041,6 +4041,18 @@ const en: Lang = {
     'tasknotify.failedBody': "{cmd} — exit {code}",
     'tasknotify.program': "{name}",
     'tasknotify.terminal': "terminal",
+    // Faza 2 — push pe acest dispozitiv (telefon cu aplicaţia închisă)
+    'settings.pushEnable': "Also push to this device (even when the app is closed)",
+    'settings.pushEnableHint': "Sends the same \"task failed\" alert to this device through the system, so it reaches you with the browser or PWA fully closed — on iPhone only when WebTerm is added to the Home Screen. Uses the threshold above.",
+    'push.test': "Send a test push",
+    'push.testSent': "Test push sent to {n} device(s).",
+    'push.denied': "Notifications are blocked for this site — allow them in the browser settings.",
+    'push.failed': "Couldn't set up push on this device.",
+    'err.push.unavailable': "Web push isn't set up on this server.",
+    'err.push.noDevices': "No device is subscribed on this account.",
+    'err.push.badEndpoint': "That isn't a recognized push service — try re-enabling notifications.",
+    'err.push.tooMany': "Too many devices are subscribed on this account (max {max}).",
+    'err.push.testRate': "Wait a few seconds before sending another test.",
   },
 }
 
