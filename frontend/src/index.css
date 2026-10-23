@@ -884,6 +884,21 @@ textarea {
   }
 }
 
+/* iOS Safari „zoom la focus": orice input FOCALIZAT cu font < 16px face browserul să mărească
+   vizual pagina la focus — chiar dacă e ascuns/0×0. Textarea-ul ajutător al xterm-ului (unde
+   ajunge tastarea) moştenea fontul terminalului (~14px), deci atingerea terminalului pe iPhone
+   zoom-a pagina; zoom-ul micşorează `visualViewport.height`, pe care main.tsx îl confundă cu
+   tastatura şi strânge `--app-height` → terminalul se re-potriveşte greşit şi RÂNDURILE SE
+   SUPRAPUN (raportat pe iPhone PWA, 3.6.22; reproductibil pe WebGL/Canvas/DOM fiindcă e o cascadă
+   de layout/zoom, nu de randare). 16px suprimă DOAR auto-zoom-ul la focus (pinch-zoom rămâne).
+   Textarea e opacity 0 peste cursor, deci fontul nu schimbă nimic vizibil. De aceea e EXCLUS din
+   regula de mai sus (fontul terminalului), dar tot trebuie ≥16px — aici, explicit. */
+@media (pointer: coarse) {
+  .xterm-helper-textarea {
+    font-size: 16px;
+  }
+}
+
 /* Keybar-ul tactil (MobileKeybar): după TIPUL de pointer, nu după lăţime. Cu `md:hidden` un
    iPad/tabletă fără tastatură fizică (≥768px) rămânea fără Esc/Ctrl/săgeţi, iar o fereastră
    îngustă de desktop primea taste de care n-are nevoie. Deget → vizibil; mouse → ascuns. */

@@ -51,7 +51,11 @@ window.addEventListener('vite:preloadError', () => {
 const vv = window.visualViewport
 if (vv) {
   const applyViewport = () => {
-    if (window.innerHeight - vv.height > 80) {
+    // DOAR tastatura, nu zoom-ul: un pinch (sau auto-zoom-ul iOS la focus pe un input < 16px)
+    // micşorează şi el vv.height, dar atunci `scale > 1`. Dacă am strânge --app-height la un
+    // zoom, terminalul s-ar re-potrivi greşit şi rândurile s-ar suprapune (vezi .xterm-helper-
+    // textarea în index.css). Cât e zoom activ lăsăm pagina la înălţime plină (pan/zoom normal).
+    if (vv.scale <= 1.01 && window.innerHeight - vv.height > 80) {
       document.documentElement.style.setProperty('--app-height', `${Math.round(vv.height)}px`)
     } else {
       document.documentElement.style.removeProperty('--app-height')
