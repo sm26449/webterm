@@ -42,8 +42,8 @@ import HostOfflineOverlay from './HostOfflineOverlay'
 import { copyText, readText } from '../lib/clipboard'
 import { clearAll as clearClipHistory, copySession, history as clipHistory, remove as removeClip, setLabel as setClipLabel, type ClipEntry } from '../lib/cliphistory'
 import PastePicker from './PastePicker'
-import { notify, notifyError, notifyToast } from '../lib/notify'
-import { parseOscNotify, sanitizeOscText, shouldNotifyCommand, taskNotifyEnabled, taskNotifySeconds } from '../lib/taskNotify'
+import { notify, notifyError, notifyOs, notifyToast } from '../lib/notify'
+import { parseOscNotify, sanitizeOscText, shouldNotifyCommand, shouldNotifyDone, taskNotifyEnabled, taskNotifySeconds } from '../lib/taskNotify'
 import { useConfirm } from '../lib/confirm'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { dismissUpload, lingerDone, startUpload } from '../lib/uploads'
@@ -1453,19 +1453,38 @@ export default function SessionView(props: {
           exit_code: cmd.exitCode ?? null, cwd: cwdRef.current ?? '',
         }),
       }).catch(() => {})
-      // Notificare „task eșuat" (Faza 1): o comandă care s-a întors cu exit≠0 după ce a rulat peste
-      // pragul tău, DOAR cât nu te uiți la panou (tab în fundal sau alt panou focalizat). Succesul
-      // nu sună — ar fi spam la fiecare comandă (alegerea „doar la eșec"). onCommand e deja gated pe
-      // live (NU se cheamă pe istoric rejucat), deci nu sună la schimbarea tab-ului.
-      if (shouldNotifyCommand(cmd.exitCode, (cmd.endedAt ?? cmd.startedAt) - cmd.startedAt, {
+      // Notificare de finalizare (3.6.24): o comandă TERMINATĂ (orice exit) după ce a rulat peste
+      // pragul tău, DOAR cât nu te uiți la panou (tab în fundal sau alt panou focalizat). onCommand
+      // e deja gated pe live (NU se cheamă pe istoric rejucat), deci nu sună la schimbarea tab-ului.
+      const dur = (cmd.endedAt ?? cmd.startedAt) - cmd.startedAt
+      const gate = {
         enabled: taskNotifyEnabled(),
         minSeconds: taskNotifySeconds(),
         inactive: document.hidden || paneActiveRef.current === false,
-      })) {
+      }
+      if (shouldNotifyDone(cmd.exitCode, dur, gate)) {
         const where = props.host?.name ?? t('tasknotify.terminal')
-        notify(t('tasknotify.failed', { name: where }),
-          t('tasknotify.failedBody', { cmd: sanitizeOscText(cmd.text, 80), code: cmd.exitCode ?? 0 }),
-          'warn', `taskfail-${session.id}-${cmd.id}`)
+        const failed = (cmd.exitCode ?? 0) !== 0
+        const cmdText = sanitizeOscText(cmd.text, 48)
+        // Toast ÎN pagină, clickabil → focus pe terminalul X (dispatch `wt-open-session`, tratat în
+        // App). Verde (info) pe succes, chihlimbar (warn) pe eșec. Cheia per-sesiune înlocuieşte
+        // toast-ul anterior al aceluiaşi terminal (nu stivuim un morman dintr-un terminal ocupat).
+        notifyToast(
+          failed
+            ? t('tasknotify.doneFail', { name: where, cmd: cmdText, code: cmd.exitCode ?? 0 })
+            : t('tasknotify.doneOk', { name: where, cmd: cmdText }),
+          failed ? 'warn' : 'info',
+          `taskdone-${session.id}`,
+          () => window.dispatchEvent(new CustomEvent('wt-open-session', { detail: { sid: session.id } })),
+        )
+        // Eșec cât tabul e în FUNDAL: și un ping la nivel de OS. Push-ul server-side acoperă telefonul
+        // închis, dar nu toți au push activ, iar toast-ul nu se vede sub un tab ascuns. Doar eșecul
+        // (ca înainte), fără fallback pe toast (deja am ridicat unul mai sus) → fără dublură.
+        if (failed && document.hidden && shouldNotifyCommand(cmd.exitCode, dur, gate)) {
+          notifyOs(t('tasknotify.failed', { name: where }),
+            t('tasknotify.failedBody', { cmd: cmdText, code: cmd.exitCode ?? 0 }),
+            `taskfail-${session.id}-${cmd.id}`)
+        }
       }
     }
     term.parser.registerOscHandler(133, (data) => {
@@ -1527,7 +1546,13 @@ export default function SessionView(props: {
       const n = parseOscNotify(777, data)
       if (n) {
         const where = props.host?.name ?? t('tasknotify.terminal')
-        notify(n.title || t('tasknotify.program', { name: where }), n.body || where, 'info', `taskosc-${session.id}`)
+        const title = n.title || t('tasknotify.program', { name: where })
+        const body = n.body || where
+        // Toast ÎN pagină, clickabil → focus pe terminalul X (ca la finalizarea unei comenzi).
+        notifyToast(body && body !== title ? `${title} — ${body}` : title, 'info', `taskosc-${session.id}`,
+          () => window.dispatchEvent(new CustomEvent('wt-open-session', { detail: { sid: session.id } })))
+        // tab în fundal: și un ping la nivel de OS (toast-ul nu se vede sub un tab ascuns), fără dublură.
+        if (document.hidden) notifyOs(title, body, `taskosc-${session.id}`)
       }
       return true
     })

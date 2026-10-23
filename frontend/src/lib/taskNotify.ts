@@ -2,8 +2,10 @@ import { lsGet, lsSet } from './storage'
 
 /* Notificări de task (Faza 1, LOCAL — fără backend): anunță când un task s-a TERMINAT cât NU te
    uiți la el (tab în fundal sau alt panou). Două surse:
-   - comenzi de shell EȘUATE (OSC 133 „D;<exit≠0>") care au rulat peste un prag — ca să nu sune la
-     fiecare `ls`; pragul e per-browser;
+   - comenzi de shell terminate (OSC 133 „D;<exit>") care au rulat peste un prag — ca să nu sune la
+     fiecare `ls`; pragul e per-browser. 3.6.24: un TOAST clickabil („terminalul X a terminat") apare
+     la ORICE finalizare (succes verde / eșec chihlimbar) şi, la click, te duce în panoul X; la nivel
+     de OS (tab în fundal) rămâne doar eşecul, ca înainte (`shouldNotifyCommand`);
    - notificări EXPLICITE emise de un program (OSC 777 „notify;titlu;corp", formatul clar titlu+corp
      folosit de rxvt/WezTerm/Ghostty) — ex. un hook `Stop` de Claude Code care spune „am terminat";
      astea sună mereu (programul a cerut-o explicit), tot doar cât ești plecat.
@@ -36,8 +38,8 @@ export function setTaskNotifySeconds(n: number): void {
 }
 
 /** Decizia PURĂ pentru o comandă terminată (OSC 133): doar la EȘEC (exit≠0), peste prag, cât ești
-    plecat. `inactive` = tab în fundal SAU panoul nefocalizat (nu te uiți la el acum). Succesul nu
-    sună (ar fi spam la fiecare comandă) — vezi alegerea „doar la eșec". */
+    plecat. `inactive` = tab în fundal SAU panoul nefocalizat (nu te uiți la el acum). Folosită în
+    3.6.24 DOAR pentru ping-ul la nivel de OS (toast-ul în pagină acoperă deja orice finalizare). */
 export function shouldNotifyCommand(
   exitCode: number | undefined,
   durationMs: number,
@@ -45,6 +47,20 @@ export function shouldNotifyCommand(
 ): boolean {
   if (!o.enabled || !o.inactive) return false
   if (exitCode == null || exitCode === 0) return false
+  return durationMs >= o.minSeconds * 1000
+}
+
+/** 3.6.24 — decizia PURĂ pentru toast-ul „terminalul X a terminat": la ORICE finalizare (succes SAU
+    eșec), peste prag, cât ești plecat de pe panou/tab. Diferă de `shouldNotifyCommand` prin faptul că
+    succesul (exit 0) sună şi el — omul a cerut „la orice finalizare". `exitCode == null` (comandă fără
+    marcaj de sfârşit) nu e o finalizare → nu sună. Culoarea (verde/chihlimbar) o alege apelantul. */
+export function shouldNotifyDone(
+  exitCode: number | undefined,
+  durationMs: number,
+  o: { enabled: boolean; minSeconds: number; inactive: boolean },
+): boolean {
+  if (!o.enabled || !o.inactive) return false
+  if (exitCode == null) return false
   return durationMs >= o.minSeconds * 1000
 }
 

@@ -9,6 +9,11 @@ back.
 
 ## [Unreleased]
 
+## [3.6.24] — 2026-10-23 · agent (58)
+
+### Added
+- **A toast tells you which terminal just finished — and clicking it takes you there.** Task notifications now raise an in-app toast whenever a command *finishes* in a terminal you're not watching (the tab is backgrounded or another pane is focused), past the same duration threshold — green on success, amber on failure — so "the update in web1 is done" or "the build in web3 failed" reaches you while you work in another pane. Clicking the toast jumps straight to that terminal. It covers ordinary commands through shell integration (OSC 133) and interactive agents through an explicit "done" (OSC 777, e.g. a Claude Code `Stop` hook). This widens the existing feature, which only fired on *failure*: failures still also raise an OS notification while the tab is in the background, and Web Push to a closed phone is unchanged. Turn it on in Settings → Preferences → *Task notifications*.
+
 ## [3.6.23] — 2026-10-23 · agent (58)
 
 ### Fixed

@@ -577,9 +577,9 @@ function MainApp() {
     }
   }, [])
   useEffect(() => {
-    registerToast((message, kind, key) => {
+    registerToast((message, kind, key, onClick) => {
       const id = `${Date.now()}-${Math.random()}`
-      setToasts((t) => upsertToast(t, { id, message, kind, key }))
+      setToasts((t) => upsertToast(t, { id, message, kind, key, onClick }))
       // erorile stau mai mult (12s) — ai nevoie de timp să citeşti motivul; info/warn 6s
       setTimeout(() => expireToast(id), kind === 'error' ? 12000 : 6000)
     })

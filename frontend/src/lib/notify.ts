@@ -4,8 +4,10 @@
 export type ToastKind = 'info' | 'warn' | 'error'
 
 /** `key` (3.6.16): un toast nou cu aceeaşi cheie îl ÎNLOCUIEŞTE pe loc pe cel vechi (acelaşi loc în
-    stivă, temporizator nou) — un paste = un singur toast („Se încarcă…" → rezultatul), nu două stivuite */
-type ToastHost = (msg: string, kind: ToastKind, key?: string) => void
+    stivă, temporizator nou) — un paste = un singur toast („Se încarcă…" → rezultatul), nu două stivuite.
+    `onClick` (3.6.24): un toast poate fi acţionabil — ex. „terminalul X a terminat" care, la click, te
+    duce în panoul X (dispatch `wt-open-session`). Opţional; absenţa lui = toast pur informativ. */
+type ToastHost = (msg: string, kind: ToastKind, key?: string, onClick?: () => void) => void
 let toastHost: ToastHost | null = null
 
 export function registerToast(fn: ToastHost) {
@@ -48,12 +50,28 @@ export function notify(title: string, body: string, kind: 'info' | 'warn' = 'inf
   toastHost?.(`${title} — ${body}`, kind)
 }
 
+/** Notificare la nivel de OS (Notification API), FĂRĂ fallback pe toast — pentru cazul în care
+    un toast ÎN pagină a fost deja ridicat şi n-ar trebui dublat (3.6.24: finalizarea unui task
+    arată un toast clickabil mereu, iar OS-ul se foloseşte doar în plus cât tabul e în fundal, unde
+    toast-ul oricum nu se vede). Întoarce true dacă notificarea a fost afişată. */
+export function notifyOs(title: string, body: string, tag?: string): boolean {
+  if ('Notification' in window && Notification.permission === 'granted') {
+    try {
+      new Notification(title, { body, tag: tag ?? `${title}|${body}`, icon: '/icon.svg' })
+      return true
+    } catch {
+      /* indisponibil */
+    }
+  }
+  return false
+}
+
 /** Toast informativ ÎN PAGINĂ, pe o singură linie (fără titlu), care NU foloseşte Notification
     API a OS-ului. De ce nu `notify()`: confirmările de acţiune (paste/drop → „salvat, calea
     inserată") se întâmplă fix când tabul e în faţă şi omul se uită la ecran — un pop-up de
     sistem ar fi spam şi redundant. Mesajul se anunţă oricum prin regiunea live a stivei. */
-export function notifyToast(message: string, kind: 'info' | 'warn' = 'info', key?: string) {
-  toastHost?.(message, kind, key)
+export function notifyToast(message: string, kind: 'info' | 'warn' = 'info', key?: string, onClick?: () => void) {
+  toastHost?.(message, kind, key, onClick)
 }
 
 /** Eroare acţionabilă (ex. „nu m-am putut conecta: port greşit"): MEREU un toast ÎN PAGINĂ,

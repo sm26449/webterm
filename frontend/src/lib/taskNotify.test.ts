@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   DEFAULT_SEC, parseOscNotify, sanitizeOscText, setTaskNotifyEnabled, setTaskNotifySeconds,
-  shouldNotifyCommand, taskNotifyEnabled, taskNotifySeconds,
+  shouldNotifyCommand, shouldNotifyDone, taskNotifyEnabled, taskNotifySeconds,
 } from './taskNotify'
 
 // Mediul de test e `node` (fără jsdom): lib/storage.ts atinge `window.localStorage`, deci îl stubuim.
@@ -51,6 +51,29 @@ describe('shouldNotifyCommand', () => {
   it('NU sună dacă e oprit sau dacă te uiți la panou', () => {
     expect(shouldNotifyCommand(1, 60_000, { ...on, enabled: false })).toBe(false)
     expect(shouldNotifyCommand(1, 60_000, { ...on, inactive: false })).toBe(false)
+  })
+})
+
+describe('shouldNotifyDone (toast la orice finalizare, 3.6.24)', () => {
+  const on = { enabled: true, minSeconds: 30, inactive: true }
+  it('sună la SUCCES peste prag (diferenţa faţă de shouldNotifyCommand)', () => {
+    expect(shouldNotifyDone(0, 60_000, on)).toBe(true)
+    expect(shouldNotifyDone(0, 30_000, on)).toBe(true)        // fix pe prag
+  })
+  it('sună şi la eşec peste prag', () => {
+    expect(shouldNotifyDone(1, 60_000, on)).toBe(true)
+    expect(shouldNotifyDone(127, 30_000, on)).toBe(true)
+  })
+  it('NU sună sub prag (nici succes, nici eşec)', () => {
+    expect(shouldNotifyDone(0, 29_999, on)).toBe(false)
+    expect(shouldNotifyDone(1, 29_999, on)).toBe(false)
+  })
+  it('NU sună fără exit code (comandă fără marcaj de sfârşit)', () => {
+    expect(shouldNotifyDone(undefined, 999_999, on)).toBe(false)
+  })
+  it('NU sună dacă e oprit sau dacă te uiţi la panou', () => {
+    expect(shouldNotifyDone(0, 60_000, { ...on, enabled: false })).toBe(false)
+    expect(shouldNotifyDone(0, 60_000, { ...on, inactive: false })).toBe(false)
   })
 })
 

@@ -71,9 +71,9 @@ export default function PopoutView(props: { sid: string }) {
   // toast-uri: fără gazdă, erorile acţiunilor (kill, redenumire, revocare) se pierdeau în tăcere
   const [toasts, setToasts] = useState<ToastItem[]>([])
   useEffect(() => {
-    registerToast((message, kind, key) => {
+    registerToast((message, kind, key, onClick) => {
       const id = `${Date.now()}-${Math.random()}`
-      setToasts((ts) => upsertToast(ts, { id, message, kind, key }))
+      setToasts((ts) => upsertToast(ts, { id, message, kind, key, onClick }))
       setTimeout(() => setToasts((ts) => ts.filter((x) => x.id !== id)), kind === 'error' ? 12000 : 6000)
     })
   }, [])
