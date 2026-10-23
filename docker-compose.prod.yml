@@ -394,7 +394,7 @@ services:
   # de configurare (valoarea se citeşte din fişier la pornire). `${X:-file://…}`: dacă .env încă
   # are valoarea (instalare veche, deploy.sh nerulat), ea câştigă; altfel fişierul.
   authentik-server:
-    image: ghcr.io/goauthentik/server:2026.8.3
+    image: ghcr.io/goauthentik/server:2026.8.5
     profiles: [authentik]
     restart: unless-stopped
     logging: *default-logging
@@ -427,7 +427,7 @@ services:
       - traefik.http.services.authentik.loadbalancer.server.port=9000
 
   authentik-worker:
-    image: ghcr.io/goauthentik/server:2026.8.3
+    image: ghcr.io/goauthentik/server:2026.8.5
     profiles: [authentik]
     restart: unless-stopped
     logging: *default-logging
