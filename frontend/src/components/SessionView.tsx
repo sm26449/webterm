@@ -1754,6 +1754,33 @@ export default function SessionView(props: {
     })
     observer.observe(containerRef.current!)
 
+    // iOS: tastatura virtuală schimbă DOAR visual viewport-ul, nu cutia layout-ului, iar
+    // ResizeObserver-ul de pe container poate să NU se declanșeze (sau să măsoare mijlocul
+    // animației) → terminalul rămâne cu mai multe rânduri decât înălțimea reală de deasupra
+    // tastaturii, iar rândul tastat (wrap peste 2 rânduri) ajunge SUB ea (raportat pe iPhone PWA,
+    // 2026-10; scroll-ul nu-l aduce, deci NU e viewport nescrolat, ci `rows` greșit). Legăm re-fit-ul
+    // DIRECT de visualViewport (doar pointer grosier) + un fit la FINALUL animației (~450 ms, fiindcă
+    // 'resize'-urile vin progresiv), și lipim viewport-ul de jos ca rândul cu cursorul să rămână vizibil.
+    const vv = window.visualViewport
+    const coarsePointer = typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches
+    let vvTimer: ReturnType<typeof setTimeout> | 0 = 0
+    let vvTrail: ReturnType<typeof setTimeout> | 0 = 0
+    const refitViewport = () => {
+      if (paneActiveRef.current === false) return   // doar panoul activ reclamă dimensiunea PTY-ului
+      refit(true)
+      try { termRef.current?.scrollToBottom() } catch { /* teardown */ }
+    }
+    const onViewport = () => {
+      if (vvTimer) clearTimeout(vvTimer)
+      vvTimer = setTimeout(() => { vvTimer = 0; refitViewport() }, 120)
+      if (vvTrail) clearTimeout(vvTrail)
+      vvTrail = setTimeout(() => { vvTrail = 0; refitViewport() }, 450)
+    }
+    if (vv && coarsePointer) {
+      vv.addEventListener('resize', onViewport)
+      vv.addEventListener('scroll', onViewport)
+    }
+
     // Renderer + image addon (ambele lazy, chunk-uri separate), apoi conectăm.
     //  - WebGL: rapid și FĂRĂ drop-ul de rânduri al renderer-ului DOM sub TUI-uri
     //    grele ca Claude Code (chenarul input-ului dispărea). Fallback: Canvas → DOM.
@@ -1812,6 +1839,9 @@ export default function SessionView(props: {
     return () => {
       observer.disconnect()
       if (roTimer) clearTimeout(roTimer)
+      if (vv && coarsePointer) { vv.removeEventListener('resize', onViewport); vv.removeEventListener('scroll', onViewport) }
+      if (vvTimer) clearTimeout(vvTimer)
+      if (vvTrail) clearTimeout(vvTrail)
       // dispune rendererul WebGL/Canvas ÎNAINTE de term.dispose(): altfel bucla lui de randare
       // (requestAnimationFrame) mai poate trage un cadru pe terminalul demontat (split→tab), iar
       // `_renderService` deja nul → „undefined (reading 'dimensions')". Oprim bucla întâi.
