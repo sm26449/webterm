@@ -43,6 +43,7 @@ import { copyText, readText } from '../lib/clipboard'
 import { clearAll as clearClipHistory, copySession, history as clipHistory, remove as removeClip, setLabel as setClipLabel, type ClipEntry } from '../lib/cliphistory'
 import PastePicker from './PastePicker'
 import { notify, notifyError, notifyToast } from '../lib/notify'
+import { parseOscNotify, sanitizeOscText, shouldNotifyCommand, taskNotifyEnabled, taskNotifySeconds } from '../lib/taskNotify'
 import { useConfirm } from '../lib/confirm'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { dismissUpload, lingerDone, startUpload } from '../lib/uploads'
@@ -1445,6 +1446,20 @@ export default function SessionView(props: {
           exit_code: cmd.exitCode ?? null, cwd: cwdRef.current ?? '',
         }),
       }).catch(() => {})
+      // Notificare „task eșuat" (Faza 1): o comandă care s-a întors cu exit≠0 după ce a rulat peste
+      // pragul tău, DOAR cât nu te uiți la panou (tab în fundal sau alt panou focalizat). Succesul
+      // nu sună — ar fi spam la fiecare comandă (alegerea „doar la eșec"). onCommand e deja gated pe
+      // live (NU se cheamă pe istoric rejucat), deci nu sună la schimbarea tab-ului.
+      if (shouldNotifyCommand(cmd.exitCode, (cmd.endedAt ?? cmd.startedAt) - cmd.startedAt, {
+        enabled: taskNotifyEnabled(),
+        minSeconds: taskNotifySeconds(),
+        inactive: document.hidden || paneActiveRef.current === false,
+      })) {
+        const where = props.host?.name ?? t('tasknotify.terminal')
+        notify(t('tasknotify.failed', { name: where }),
+          t('tasknotify.failedBody', { cmd: sanitizeOscText(cmd.text, 80), code: cmd.exitCode ?? 0 }),
+          'warn', `taskfail-${session.id}-${cmd.id}`)
+      }
     }
     term.parser.registerOscHandler(133, (data) => {
       // istoricul rejucat nu e activitate live — dar dovedeşte shell integration: după replay,
@@ -1490,6 +1505,22 @@ export default function SessionView(props: {
         copySession(session.id, new TextDecoder().decode(bytes))
       } catch {
         /* base64 invalid: ignoră */
+      }
+      return true
+    })
+    // Notificare EXPLICITĂ de program (OSC 777 „notify;titlu;corp"): un task care spune „am terminat"
+    // — ex. un hook `Stop` de Claude Code (vezi docs/ALERTS.md#task-notifications). Formatul clar
+    // titlu+corp (rxvt/WezTerm/Ghostty). Input NEÎNCREDERE (host remote): sanitizat + plafonat în
+    // parseOscNotify. Sună mereu (programul a cerut-o), dar tot DOAR cât ești plecat și doar dacă
+    // feature-ul e pornit; istoricul rejucat NU sună (ca OSC 52/133). OSC 9/99 le lăsăm pe viitor:
+    // 9 se suprapune cu progresul ConEmu „9;4" și cwd-ul iTerm2 „9;9", 99 (kitty) e chunked/encoded.
+    term.parser.registerOscHandler(777, (data) => {
+      if (replayRef.current) return true
+      if (!taskNotifyEnabled() || !(document.hidden || paneActiveRef.current === false)) return true
+      const n = parseOscNotify(777, data)
+      if (n) {
+        const where = props.host?.name ?? t('tasknotify.terminal')
+        notify(n.title || t('tasknotify.program', { name: where }), n.body || where, 'info', `taskosc-${session.id}`)
       }
       return true
     })

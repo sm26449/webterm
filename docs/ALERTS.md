@@ -252,6 +252,64 @@ secret mount) yourself, or set the webhook in the UI.
 So clearing a field in the UI does not necessarily disable it — if the same variable is set
 in `.env`, the environment value comes back. Remove it from `.env` (and redeploy) too.
 
+## Task notifications
+
+Separate from the admin alerts above, **task notifications** are a **per-browser** convenience
+(Settings → Preferences → *Task notifications*, like the terminal renderer or theme). They tell you a
+long task finished **while you weren't watching** — the tab is in the background, or another split
+pane is focused. Nothing is sent when you are looking at the pane.
+
+Two triggers:
+
+- **A failed command.** When a shell command returns a **non-zero exit code** after running longer
+  than your threshold (default 30 s), you get a notification. Success is deliberately silent — otherwise
+  every `ls` would ping you — which is why the threshold and the exit-code filter exist. This needs
+  shell integration on the host (OSC 133; it is enabled automatically, see
+  [GUARDRAIL.md](GUARDRAIL.md)). A one-shot agent run (`claude -p …`) that exits non-zero counts here
+  too.
+- **An explicit notification from a program.** Any program can raise a titled notification with the
+  **OSC 777** escape (`notify;<title>;<body>`, the format rxvt/WezTerm/Ghostty use). These always fire
+  (the program asked for it), still only while you're away. This is how an **interactive agent** —
+  which stays in a REPL and never returns an exit code per turn — signals "done".
+
+### Getting an agent to notify you (Claude Code Stop hook)
+
+Add a `Stop` hook that prints OSC 777 to the terminal. Create `~/.claude/hooks/notify-webterm.sh`:
+
+```bash
+#!/usr/bin/env bash
+# WebTerm task-done notification via OSC 777 (writes straight to the terminal).
+body="${1:-task finished}"
+if [ -n "$TMUX" ]; then
+  # tmux: wrap in DCS passthrough with ESC doubled (WebTerm panes allow passthrough)
+  printf '\033Ptmux;\033\033]%s\007\033\\' "777;notify;Claude Code;${body}" > /dev/tty
+else
+  printf '\033]%s\007' "777;notify;Claude Code;${body}" > /dev/tty
+fi
+```
+
+and register it in `~/.claude/settings.json`:
+
+```json
+{ "hooks": { "Stop": [ { "hooks": [ { "type": "command", "command": "~/.claude/hooks/notify-webterm.sh" } ] } ] } }
+```
+
+The `Notification` hook (Claude is waiting on a permission prompt) can use the same script with a
+different body, so you're pinged when approval is pending while you're away.
+
+### What it does and doesn't reach
+
+These use the **browser's Notification API**, so they arrive while the WebTerm tab or the installed
+PWA is open — **including in the background**, but not when the phone is locked or the app is fully
+swiped away. Delivery to a closed app (**Web Push**: a VAPID key, a service-worker push handler and a
+send path in the gateway) is a separate, larger step; because a push payload travels through
+Apple/Google, it would never carry terminal output — only "a task finished on host X". The payload
+here, being local to your own browser, may include a short command snippet.
+
+Frontend: `frontend/src/lib/taskNotify.ts` (pure logic + per-browser preference), wired in
+`frontend/src/components/SessionView.tsx` (OSC 133 completion + the OSC 777 handler) with the toggle in
+`frontend/src/components/settings/PreferencesTab.tsx`.
+
 ## Maintenance notes
 
 - Backend: `gateway/app/email_alerts.py` (all `notify_*`, `_post_webhook`, `check_metrics`),

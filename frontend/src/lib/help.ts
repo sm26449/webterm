@@ -21,6 +21,7 @@ export const HELP = {
   webhook: { doc: 'docs/ALERTS.md#channels-email-and-webhook' },
   resourceAlerts: { doc: 'docs/ALERTS.md#resource-thresholds' },
   alertPrefs: { doc: 'docs/ALERTS.md#in-app-history-and-per-event-preferences' },
+  taskNotify: { doc: 'docs/ALERTS.md#task-notifications' },
   forwardDomain: { doc: 'docs/PORT-FORWARDING.md#configurable-domain-settings' },
   directBackup: { doc: 'docs/RUNBOOK.md#backuprestore-from-the-application-v1061-no-shell-on-the-server' },
   updatesBadge: { doc: 'docs/HOSTS.md#os-updates-badge' },

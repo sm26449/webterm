@@ -5,6 +5,8 @@ import { useSectionVisible } from '../../lib/perms'
 import { allTimezones, browserTimezone, getTimezone, setTimezone, timeInZone } from '../../lib/tz'
 import UpdateCommand from '../UpdateCommand'
 import { lsGet, lsSet } from '../../lib/storage'
+import { ensureNotificationPermission } from '../../lib/notify'
+import { setTaskNotifyEnabled, setTaskNotifySeconds, taskNotifyEnabled, taskNotifySeconds } from '../../lib/taskNotify'
 import { isWalkthroughDone, markWalkthroughDone, resetWalkthrough } from '../../lib/walkthrough'
 import { resetAllTips } from '../../lib/coachtips'
 import { INBOX_REL, PasteDest, inboxDays, pasteDest, setInboxDays, setPasteDest } from '../../lib/transfers'
@@ -35,6 +37,9 @@ export default function PreferencesTab() {
   const [unicode11, setUnicode11] = useState(() => lsGet('wt_unicode11') === '1')
   // renderer-ul terminalului (3.6.19): webgl (implicit) | canvas | dom — per browser, aplicat pe loc
   const [renderer, setRenderer] = useState(() => { const v = lsGet('wt_renderer'); return v === 'canvas' || v === 'dom' ? v : 'webgl' })
+  // notificări de task (Faza 1): preferinţă per-browser (ca rendererul). Toggle + prag în secunde.
+  const [taskNotif, setTaskNotif] = useState(() => taskNotifyEnabled())
+  const [taskSec, setTaskSec] = useState(() => String(taskNotifySeconds()))
   const [upd, setUpd] = useState<UpdateInfo | null>(null)
   const [updBusy, setUpdBusy] = useState(false)
   // transferuri: unde ajung fişierele lipite în terminal + retenţia inbox-ului (lib/transfers.ts)
@@ -188,6 +193,37 @@ export default function PreferencesTab() {
           </select>
         </label>
         <p id="wt-renderer-hint" className="mt-0.5 text-xs text-slate-500">{t('settings.rendererHint')}</p>
+      </section>
+
+      <section data-setting-id="taskNotify">
+        {/* ── Notificări de task (Faza 1, local) ── */}
+        <h3 className={heading + ' flex items-center gap-2'}>{t('settings.taskNotify')}<HelpTip id="taskNotify" /></h3>
+        <p className="mt-1 text-xs text-slate-500">{t('settings.taskNotifyHint')}</p>
+        <label className="mt-2 flex cursor-pointer items-start gap-2.5 text-sm text-slate-300">
+          <input
+            type="checkbox"
+            checked={taskNotif}
+            onChange={(e) => {
+              const on = e.target.checked
+              setTaskNotif(on)
+              setTaskNotifyEnabled(on)
+              if (on) void ensureNotificationPermission()   // cere permisiunea DIN gestul de utilizator (cerut pe iOS)
+            }}
+            className="mt-0.5 h-4 w-4 rounded-md accent-sky-600"
+          />
+          <span>
+            {t('settings.taskNotifyEnable')}
+            <span className="mt-0.5 block text-xs text-slate-500">{t('settings.taskNotifyEnableHint')}</span>
+          </span>
+        </label>
+        <label className="mt-3 block text-sm text-slate-300">
+          <span className="mb-1 block text-xs text-slate-400">{t('settings.taskNotifySeconds')}</span>
+          <input type="number" min={1} max={3600} step={1} value={taskSec} disabled={!taskNotif}
+            onChange={(e) => { setTaskSec(e.target.value); const n = Number(e.target.value); if (Number.isFinite(n)) setTaskNotifySeconds(n) }}
+            onBlur={() => setTaskSec(String(taskNotifySeconds()))}
+            className={field + ' max-w-[8rem]'} />
+          <span className="mt-0.5 block text-xs text-slate-500">{t('settings.taskNotifySecondsHint')}</span>
+        </label>
       </section>
 
       <section data-setting-id="transfers">

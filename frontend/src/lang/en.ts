@@ -4028,6 +4028,19 @@ const en: Lang = {
     'settings.renderer.canvas': "Canvas — no GPU shader path",
     'settings.renderer.dom': "DOM — slowest, most compatible",
     'settings.rendererHint': "Applies to open terminals right away, in this browser only. If text rows overlap or smear (some Windows GPU drivers in Chrome/Edge, seen with nano under tmux), try Canvas; if it persists, DOM.",
+    // Notificări de task (Faza 1): preferinţă per-browser
+    'settings.taskNotify': "Task notifications",
+    'settings.taskNotifyHint': "Get a notification when a long task finishes while you're not watching — the tab is in the background or another pane is focused. In this browser only.",
+    'settings.taskNotifyEnable': "Notify me when a task finishes while I'm away",
+    'settings.taskNotifyEnableHint': "Fires on a command that failed after running past the threshold below, and on an explicit \"done\" from a program (e.g. a Claude Code Stop hook). Works while the app or installed PWA is open, even in the background; delivery to a locked phone with the app closed comes later.",
+    'settings.taskNotifySeconds': "Only for commands longer than (seconds)",
+    'settings.taskNotifySecondsHint': "A failed command shorter than this stays quiet, so a quick typo doesn't notify. Explicit program notifications ignore this.",
+    'help.taskNotify.title': "Task notifications",
+    'help.taskNotify.body': "A notification when a task finishes while you're not watching (tab in the background or another pane focused). It fires on a shell command that failed (non-zero exit) after running past your threshold, and on an explicit notification a program emits via OSC 777 — for an interactive agent, add a Claude Code Stop hook that prints it. This uses the browser's notifications and works while the app or installed PWA is open; reaching a locked phone with the app fully closed needs web push, which is a separate step.",
+    'tasknotify.failed': "Task failed on {name}",
+    'tasknotify.failedBody': "{cmd} — exit {code}",
+    'tasknotify.program': "{name}",
+    'tasknotify.terminal': "terminal",
   },
 }
 

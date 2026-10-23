@@ -142,6 +142,8 @@ export const SETTINGS_INDEX: readonly SettingSection[] = [
     keywords: 'tips hints reset sfaturi indicii' },
   { id: 'terminal', cat: 'preferinte', titleKey: 'settings.terminal',
     keywords: 'terminal unicode emoji wide characters xterm caractere late' },
+  { id: 'taskNotify', cat: 'preferinte', titleKey: 'settings.taskNotify', hintKey: 'settings.taskNotifyHint',
+    keywords: 'notifications task done finished failed command agent push notificari task terminat esuat comanda agent' },
   { id: 'transfers', cat: 'preferinte', titleKey: 'transfers.settingsTitle', hintKey: 'transfers.pasteDestHint',
     keywords: 'transfers upload paste inbox images files transferuri incarcare lipire fisiere' },
   { id: 'updatesBadge', cat: 'preferinte', titleKey: 'updates.prefTitle', hintKey: 'updates.prefDesc',

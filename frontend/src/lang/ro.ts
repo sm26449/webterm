@@ -4108,6 +4108,19 @@ const ro: Lang = {
     'settings.renderer.canvas': "Canvas — fără calea de shadere GPU",
     'settings.renderer.dom': "DOM — cel mai lent, cel mai compatibil",
     'settings.rendererHint': "Se aplică pe loc terminalelor deschise, doar în acest browser. Dacă rândurile de text se suprapun sau se mânjesc (unele drivere GPU pe Windows în Chrome/Edge, văzut cu nano sub tmux), încearcă Canvas; dacă persistă, DOM.",
+    // Notificări de task (Faza 1): preferinţă per-browser
+    'settings.taskNotify': "Notificări de task",
+    'settings.taskNotifyHint': "Primești o notificare când un task lung se termină cât nu te uiți — tabul e în fundal sau alt panou e focalizat. Doar în acest browser.",
+    'settings.taskNotifyEnable': "Anunță-mă când un task se termină cât sunt plecat",
+    'settings.taskNotifyEnableHint': "Sună la o comandă care a eșuat după ce a rulat peste pragul de mai jos și la un „am terminat” explicit din partea unui program (ex. un hook Stop de Claude Code). Merge cât aplicația sau PWA-ul instalat e deschis, chiar în fundal; livrarea pe un telefon blocat, cu aplicația închisă, vine mai târziu.",
+    'settings.taskNotifySeconds': "Doar pentru comenzi mai lungi de (secunde)",
+    'settings.taskNotifySecondsHint': "O comandă eșuată mai scurtă de atât rămâne tăcută, ca o greșeală rapidă de tastare să nu te notifice. Notificările explicite din programe ignoră pragul.",
+    'help.taskNotify.title': "Notificări de task",
+    'help.taskNotify.body': "O notificare când un task se termină cât nu te uiți (tab în fundal sau alt panou focalizat). Sună la o comandă de shell eșuată (exit≠0) după ce a rulat peste pragul tău și la o notificare explicită emisă de un program prin OSC 777 — pentru un agent interactiv, adaugă un hook Stop de Claude Code care o emite. Folosește notificările browserului și merge cât aplicația sau PWA-ul instalat e deschis; ca să ajungă pe un telefon blocat cu aplicația închisă complet e nevoie de web push, care e un pas separat.",
+    'tasknotify.failed': "Task eșuat pe {name}",
+    'tasknotify.failedBody': "{cmd} — exit {code}",
+    'tasknotify.program': "{name}",
+    'tasknotify.terminal': "terminal",
   },
 }
 
