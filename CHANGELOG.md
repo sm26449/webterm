@@ -9,6 +9,11 @@ back.
 
 ## [Unreleased]
 
+## [3.6.23] — 2026-10-23 · agent (58)
+
+### Fixed
+- **On a phone, typing with the on-screen keyboard open no longer makes the terminal rows paint over each other.** The real cause of the wrap/overlap reported on iPhone was iOS Safari's *zoom-on-focus*: it visually magnifies the page whenever a focused input has a font smaller than 16px — and that includes xterm's hidden input sink (`.xterm-helper-textarea`), which inherited the ~14px terminal font. Tapping the terminal therefore zoomed the page; the zoom shrank the visual viewport, which the app mistook for the keyboard and used to clamp the terminal's height, so it re-fit to the wrong box and consecutive rows overlapped. That is why it looked identical on WebGL, Canvas and DOM (it is a layout/zoom cascade, not a renderer bug) and why the 3.6.22 re-fit change didn't resolve it. The hidden textarea now carries a 16px font on touch devices — it sits at opacity 0 over the cursor, so nothing changes visually and pinch-zoom still works; only the involuntary zoom-on-focus is suppressed. As a second guard, the app now treats a shrinking visual viewport as the keyboard only when the page is not zoomed (`scale ≈ 1`), so a zoom can never again be mistaken for the keyboard. (follows the 3.6.22 iOS keyboard fix)
+
 ## [3.6.22] — 2026-10-23 · agent (58)
 
 ### Added
