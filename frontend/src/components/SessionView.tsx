@@ -1157,6 +1157,12 @@ export default function SessionView(props: {
       broadcastOut(d, 'report')   // panourile-ţintă primesc clasificarea originii (review 3.6.13, L-a)
       return
     }
+    // Ai tastat ceva cât erai în scrollback → sari la prompt (ca orice terminal). xterm face asta
+    // pentru tastele care trec prin handler-ul LUI (scrollOnUserInput), DAR input-ul de pe keybar-ul
+    // tactil, Enter-ul trimis direct şi inserările merg prin userInput şi-l ocolesc — pe mobil/scrollback
+    // rămâneai sus şi părea că „nu scrie". Doar la input GENUIN (rapoartele de mouse/CPR au ieşit mai
+    // sus), deci cititul scrollback-ului cât curge output NU te mai smuceşte — doar tastarea.
+    try { termRef.current?.scrollToBottom() } catch { /* teardown */ }
     if (submitWaitRef.current) { submitWaitRef.current.push(d); return }
     if (typeof d === 'string' && isSubmitKey(d, prevKeyRef.current)) {
       const checked = performance.now() - enterOkAtRef.current < 250
@@ -1199,6 +1205,7 @@ export default function SessionView(props: {
         if (!checkLocal(body, lineOf, lines.slice(1))) return
       } else if (!checkPeers(lineOf, () => sendAll(body), cur + lines[0], body, lines.slice(1), opaque)) return
     }
+    try { termRef.current?.scrollToBottom() } catch { /* teardown */ }   // text inserat → sari la prompt
     send(body)
     broadcastOut(body)
   }
