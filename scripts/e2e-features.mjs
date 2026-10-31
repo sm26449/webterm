@@ -38,6 +38,22 @@ try {
   await page.waitForSelector('button[aria-label="Settings"]', { timeout: 15000 })
   check('login în UI', true)
 
+  // ── Regresie 3.6.25: fundătura la pliere pe dashboard-ul GOL ──────────────────
+  // Un install nou aterizează pe dashboard (fără hosturi); dacă pliezi lista de hosturi,
+  // trebuie să rămână o cale de întoarcere pe desktop (butonul „Open host list") — altfel
+  // sidebarul se ascunde definitiv (fără bară de taburi din care apare ☰-ul de redeschidere).
+  {
+    const hideBtn = page.locator('button[aria-label="Hide the host list"]')
+    const openBtn = page.getByRole('button', { name: 'Open host list' })
+    await hideBtn.first().click()
+    await page.waitForTimeout(300)
+    check('3.6.25: pliat pe dashboard gol → „Open host list" vizibil pe desktop (nicio fundătură)',
+      await openBtn.first().isVisible())
+    await openBtn.first().click()
+    await page.waitForTimeout(300)
+    check('3.6.25: „Open host list" redeschide lista de hosturi', await hideBtn.first().isVisible())
+  }
+
   // ── Token de înrolare DE GRUP: în fluxul de onboarding (+ host → „Many machines") ──
   await page.getByRole('button', { name: 'Add a host' }).first().click()
   await page.getByRole('button', { name: 'Many machines', exact: true }).click()

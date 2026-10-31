@@ -2144,7 +2144,8 @@ function MainApp() {
             onNewSession={connectHost}
             onAddHost={() => setAddHostSignal((n) => n + 1)}
             onOpenPalette={() => setPaletteOpen(true)}
-            onOpenSidebar={() => setSidebarOpen(true)}
+            onMenu={() => { setSidebarCollapsed(false); lsSet('wt-sidebar-collapsed', '0'); setSidebarOpen(true) }}
+            sidebarCollapsed={sidebarCollapsed}
             onOpenSettings={(cat) => { setSettingsCat(cat); setSettingsSignal((n) => n + 1) }}
             onOpenStatus={() => setStatusSignal((n) => n + 1)}
           />

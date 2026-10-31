@@ -39,7 +39,10 @@ export default function Dashboard(props: {
   onNewSession: (host: Host) => void
   onAddHost: () => void
   onOpenPalette: () => void
-  onOpenSidebar: () => void
+  /** redeschide lista de hosturi ŞI anulează plierea (sidebarCollapsed) — altfel,
+      pliat de pe dashboard (fără bară de taburi) rămâi fără cale de întoarcere */
+  onMenu: () => void
+  sidebarCollapsed?: boolean
   /** cardul Securitate duce la locul unde se repară: Setări pe tab-ul potrivit / Status */
   onOpenSettings: (target: SettingsTarget) => void
   onOpenStatus: () => void
@@ -94,9 +97,22 @@ export default function Dashboard(props: {
   // invităm la un „Adaugă host" care ar da 403
   // eroare ≠ gol (audit funcţional 3.6.3, #1): până la PRIMA listă de hosturi reuşită nu spunem
   // niciodată „nu ai niciun host" — fie se încarcă, fie a picat (cu motivul şi Reîncearcă)
+  // ☰ „Lista de hosturi": pe mobil mereu (sidebarul e overlay), pe desktop DOAR când e
+  // pliat. `onMenu` redeschide + anulează plierea → nicio pagină nu e o fundătură (dashboard-ul
+  // nu are bara de taburi din care SessionView/HostOverview oferă acelaşi ☰).
+  const openHostsBtn = (
+    <Button variant="secondary" size="lg" onClick={props.onMenu}
+      className={`wt-touch gap-2 ${props.sidebarCollapsed ? '' : 'md:hidden'}`}
+      aria-label={menuLabel(t('dashboard.openHostList'), unreadAlerts, t)}>
+      <MenuIcon /> {t('dashboard.openHostList')}
+      <MenuUnreadBadge n={unreadAlerts} inline />
+    </Button>
+  )
+
   if (props.fleet && !props.fleet.hostsLoaded) {
     return (
-      <div data-testid="dashboard-loading" className="wt-canvas flex h-full items-center justify-center p-6">
+      <div data-testid="dashboard-loading" className="wt-canvas relative flex h-full items-center justify-center p-6">
+        <div className="absolute left-4 top-4">{openHostsBtn}</div>
         {props.fleet.hostsErr
           ? <ErrorState title={t('dashboard.hostsLoadFailed')} message={props.fleet.hostsErr} onRetry={props.onRetryFleet} />
           : <p role="status" className="flex items-center gap-2 text-sm text-slate-400"><Spinner /> {t('dashboard.loadingHosts')}</p>}
@@ -106,26 +122,32 @@ export default function Dashboard(props: {
 
   if (hosts.length === 0 && !can(perms, 'hosts.create')) {
     return (
-      <EmptyState size="page" titleAs="h1" className="wt-canvas h-full" tone="neutral"
-        icon={<LockIcon />}
-        title={t('noaccess.title')}
-        body={t('noaccess.bodyNoNames')}
-      />
+      <div className="wt-canvas relative h-full">
+        <div className="absolute left-4 top-4 z-10">{openHostsBtn}</div>
+        <EmptyState size="page" titleAs="h1" className="h-full" tone="neutral"
+          icon={<LockIcon />}
+          title={t('noaccess.title')}
+          body={t('noaccess.bodyNoNames')}
+        />
+      </div>
     )
   }
 
   if (hosts.length === 0) {
     return (
-      <EmptyState size="page" titleAs="h1" className="wt-canvas h-full"
-        icon={<ServerIcon />}
-        title={t('dashboard.noHostsYet')}
-        body={t('dashboard.addFirstHost')}
-        action={(
-          <Button variant="primary" size="lg" onClick={props.onAddHost} className="gap-2">
-            <PlusIcon /> {t('dashboard.addHost')}
-          </Button>
-        )}
-      />
+      <div className="wt-canvas relative h-full">
+        <div className="absolute left-4 top-4 z-10">{openHostsBtn}</div>
+        <EmptyState size="page" titleAs="h1" className="h-full"
+          icon={<ServerIcon />}
+          title={t('dashboard.noHostsYet')}
+          body={t('dashboard.addFirstHost')}
+          action={(
+            <Button variant="primary" size="lg" onClick={props.onAddHost} className="gap-2">
+              <PlusIcon /> {t('dashboard.addHost')}
+            </Button>
+          )}
+        />
+      </div>
     )
   }
 
@@ -133,11 +155,7 @@ export default function Dashboard(props: {
     // `wt-canvas`: dashboard-ul urmează tema aleasă (index.css) — e „acasă", nu terminal
     <div data-testid="dashboard" className="wt-canvas h-full overflow-y-auto">
       <div className="mx-auto max-w-7xl px-4 py-6 sm:px-8 sm:py-8">
-        <Button variant="secondary" size="lg" onClick={props.onOpenSidebar} className="wt-touch mb-4 md:hidden"
-          aria-label={menuLabel(t('dashboard.openHostList'), unreadAlerts, t)}>
-          <MenuIcon /> {t('dashboard.openHostList')}
-          <MenuUnreadBadge n={unreadAlerts} inline />
-        </Button>
+        <div className="mb-4">{openHostsBtn}</div>
         {/* antet + sumar flotă + comenzi */}
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
