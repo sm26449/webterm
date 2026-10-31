@@ -9,6 +9,15 @@ back.
 
 ## [Unreleased]
 
+## [3.6.25] — 2026-10-31 · agent (58)
+
+### Fixed
+- **Hiding the host list on a brand-new install no longer leaves you with no way to bring it back.** The "Hide the host list" button collapses the sidebar completely, and the only control that reopens it (the ☰ in the top bar, which also un-collapses) lived in the terminal and host-overview views. But a fresh install has no hosts, so you land on the dashboard — which has no tab bar (it only appears once a terminal is open) and showed no ☰ on desktop; the mobile "Open host list" button only opened the drawer overlay without clearing the collapsed state. So collapsing the list on the empty dashboard hid it for good, and the state persisted in local storage across reloads. The dashboard now carries the same reopen control as the other views — an "Open host list" button present in every state (including the empty "No hosts yet", no-access and loading screens): always on mobile, and on desktop whenever the list is collapsed — so there is never a dead end. A regression test in the onboarding E2E suite guards it.
+
+### Security
+- **pyasn1 bumped 0.6.4 → 0.6.5 to clear four CVEs (CVE-2026-119194/195/196/197).** A transitive dependency (via `pyasn1-modules` → `webauthn`, used for passkeys); the fix is a patch-level version bump with updated hashes in `requirements.lock`, no code change. Caught by the blocking pip-audit release gate.
+
+
 ## [3.6.24] — 2026-10-23 · agent (58)
 
 ### Added
